@@ -378,15 +378,18 @@ class DeliveryClaimTest {
         }
     }
 
-    @Test void rejectedCleanupExecutorRecordsFailureWithoutArchiving() throws Exception {
+    @Test void rejectedRequestWorkerRecoversWithoutAnotherStopSubmission() throws Exception {
         try (var f = new Fixture()) {
             assertTrue(f.owner.tryStartSend(f.claim));
-            f.owner.runtime.deliveryCleanupExecutor.shutdown();
-            f.owner.cancel(41L, 0L, CancelReason.SHUTDOWN);
+            SchedulerTestSupport.requestWorkers(f.owner.runtime).shutdown();
+            f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
             f.owner.onDeliveryEvidence(f.claim, new ContextResult.TransportResult(f.claim, DeliveryResult.delivered(), System.currentTimeMillis()));
             assertFalse(f.settlement().isDone(), "executor failure is not remote cleanup proof");
             assertTrue(f.owner.requests.isCurrent(f.context));
-            org.junit.jupiter.api.Assertions.assertNotNull(SchedulerTestSupport.failure(f.owner));
+            verify(f.channel, timeout(2000)).cancelAsync(any(), anyInt(), any(), anyLong());
+            f.cancel.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
+            f.assertArchivedAfterCleanup();
+            assertNull(SchedulerTestSupport.failure(f.owner));
         }
     }
 
@@ -396,7 +399,7 @@ class DeliveryClaimTest {
             f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
             f.owner.onDeliveryEvidence(f.claim, new ContextResult.TransportResult(f.claim, DeliveryResult.delivered(), System.currentTimeMillis()));
 
-            assertThrows(java.util.concurrent.ExecutionException.class, () -> f.driver().get(6, TimeUnit.SECONDS));
+            assertEquals(DeliveryCleanup.Result.UNRESOLVED, f.driver().get(6, TimeUnit.SECONDS));
             SchedulerTestSupport.awaitRequestWork(f.owner.runtime);
 
             assertAll(
@@ -525,7 +528,7 @@ class DeliveryClaimTest {
             f.owner.onDeliveryEvidence(f.claim, new ContextResult.TransportResult(f.claim, DeliveryResult.delivered(), System.currentTimeMillis()));
             Response selected = f.context.data().getFuture().get(2, TimeUnit.SECONDS);
 
-            assertThrows(java.util.concurrent.ExecutionException.class, () -> f.driver().get(6, TimeUnit.SECONDS));
+            assertEquals(DeliveryCleanup.Result.UNRESOLVED, f.driver().get(6, TimeUnit.SECONDS));
             f.cancel.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
             f.assertArchivedAfterCleanup();
             assertSame(selected, f.context.data().getFuture().join(), "cleanup cannot replace the selected response");
@@ -556,7 +559,7 @@ class DeliveryClaimTest {
             f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
             f.owner.onDeliveryEvidence(f.claim, new ContextResult.TransportResult(f.claim, DeliveryResult.delivered(), System.currentTimeMillis()));
 
-            assertThrows(java.util.concurrent.ExecutionException.class, () -> f.driver().get(6, TimeUnit.SECONDS));
+            assertEquals(DeliveryCleanup.Result.UNRESOLVED, f.driver().get(6, TimeUnit.SECONDS));
             f.retirePrefill();
             f.retireDecode();
             SchedulerTestSupport.awaitRequestWork(f.owner.runtime);
@@ -573,7 +576,7 @@ class DeliveryClaimTest {
             f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
             f.owner.onDeliveryEvidence(f.claim, new ContextResult.TransportResult(f.claim, DeliveryResult.delivered(), System.currentTimeMillis()));
 
-            assertThrows(java.util.concurrent.ExecutionException.class, () -> f.driver().get(6, TimeUnit.SECONDS));
+            assertEquals(DeliveryCleanup.Result.UNRESOLVED, f.driver().get(6, TimeUnit.SECONDS));
             f.cancel.complete(EngineGrpcClient.CancelReply.REQUEST_FENCED);
             f.owner.onEngineEvidence(f.context, new ContextResult.EngineEvidence((f.context.snapshot().route() != null && f.context.snapshot().route().decodeEp() == RequestProtocolTestSupport.decodeEndpoint() ? f.context.snapshot().route() : null), DecodeResources.DecodeRequestStatus.terminal(f.reservation, 0L).reservation(), org.flexlb.dao.route.RoleType.DECODE, (DecodeResources.DecodeRequestStatus.terminal(f.reservation, 0L).kind() == DecodeResources.DecodeRequestStatus.Kind.ACTIVE ? ContextResult.EngineKind.ACTIVE : DecodeResources.DecodeRequestStatus.terminal(f.reservation, 0L).errorCode() == 0L ? ContextResult.EngineKind.COMPLETED : ContextResult.EngineKind.FAILED), DecodeResources.DecodeRequestStatus.terminal(f.reservation, 0L).errorCode(), null, System.currentTimeMillis()));
             f.owner.onEngineEvidence(f.context, new ContextResult.EngineEvidence((f.context.snapshot().route() != null && f.context.snapshot().route().decodeEp() == f.decode ? f.context.snapshot().route() : null), DecodeResources.DecodeRequestStatus.terminal(
@@ -596,7 +599,7 @@ class DeliveryClaimTest {
             assertTrue(f.owner.tryStartSend(f.claim));
             f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
 
-            assertThrows(java.util.concurrent.ExecutionException.class, () -> f.driver().get(6, TimeUnit.SECONDS));
+            assertEquals(DeliveryCleanup.Result.UNRESOLVED, f.driver().get(6, TimeUnit.SECONDS));
             f.cancel.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
             SchedulerTestSupport.awaitRequestWork(f.owner.runtime);
             assertFalse(f.settlement().isDone(), "remote cleanup cannot settle an active sender");
@@ -761,7 +764,7 @@ class DeliveryClaimTest {
         try (var f = new Fixture()) {
             var calls = new java.util.concurrent.atomic.AtomicInteger();
             when(f.channel.cancelAsync(any(), anyInt(), any(), anyLong())).thenAnswer(call -> {
-                assertTrue(Thread.currentThread().isVirtual());
+                assertTrue(Thread.currentThread().getName().startsWith("delivery-stop-"));
                 assertFalse(Thread.holdsLock(f.context));
                 return CompletableFuture.completedFuture(calls.incrementAndGet() == successfulAttempt
                         ? EngineGrpcClient.CancelReply.REQUEST_CLEANED : EngineGrpcClient.CancelReply.NOT_FOUND);
@@ -779,18 +782,18 @@ class DeliveryClaimTest {
     @EnumSource(value = EngineGrpcClient.CancelReply.class,
             names = {"REQUEST_CLEANED", "UNSUPPORTED"})
     @org.junit.jupiter.api.Timeout(15)
-    void receivedAckDoesNotRetryWhileRequestWorkIsQueued(EngineGrpcClient.CancelReply ack) throws Exception {
+    void receivedAckDoesNotRetryWhileStopWorkIsQueued(EngineGrpcClient.CancelReply ack) throws Exception {
         try (var f = new Fixture()) {
             assertTrue(f.owner.tryStartSend(f.claim));
             f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
             f.owner.onDeliveryEvidence(f.claim, new ContextResult.TransportResult(f.claim, DeliveryResult.uncertain(new IllegalStateException("reply lost")), System.currentTimeMillis()));
             SchedulerTestSupport.awaitRequestWork(f.owner.runtime);
-            var original = SchedulerTestSupport.requestWorkers(f.owner.runtime);
+            var original = (java.util.concurrent.ExecutorService) ReflectionTestUtils.getField(f.owner.runtime, "stopWorkers");
             var queued = new java.util.concurrent.LinkedBlockingQueue<Runnable>();
             var held = mock(java.util.concurrent.ExecutorService.class);
             doAnswer(call -> { queued.add(call.getArgument(0)); return null; }).when(held).execute(any());
-            ReflectionTestUtils.setField(f.owner.runtime, "requestWorkers", held);
-            CompletableFuture<Void> driver;
+            ReflectionTestUtils.setField(f.owner.runtime, "stopWorkers", held);
+            CompletableFuture<DeliveryCleanup.Result> driver;
             try {
                 driver = f.driver();
                 f.cancel.complete(ack);
@@ -800,7 +803,7 @@ class DeliveryClaimTest {
                 assertFalse(f.settlement().isDone(), "queued ACK has not supplied release proof yet");
                 assertEquals(1, queued.size(), "one received ACK must enqueue one proof application");
             } finally {
-                ReflectionTestUtils.setField(f.owner.runtime, "requestWorkers", original);
+                ReflectionTestUtils.setField(f.owner.runtime, "stopWorkers", original);
                 Runnable task;
                 while ((task = queued.poll()) != null) { task.run(); }
             }
@@ -838,7 +841,7 @@ class DeliveryClaimTest {
             f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
             f.owner.onDeliveryEvidence(f.claim, new ContextResult.TransportResult(f.claim, DeliveryResult.uncertain(new IllegalStateException("reply lost")), System.currentTimeMillis()));
             var driver = f.driver();
-            assertThrows(java.util.concurrent.ExecutionException.class, () -> driver.get(6, TimeUnit.SECONDS));
+            assertEquals(DeliveryCleanup.Result.UNRESOLVED, driver.get(6, TimeUnit.SECONDS));
             int count = mockingDetails(f.channel).getInvocations().size();
             assertSame(driver, f.driver(), "a stopped driver must not restart the same unsettled claim");
             assertTrue(count <= 8);
@@ -856,7 +859,7 @@ class DeliveryClaimTest {
             assertTrue(f.owner.tryStartSend(f.claim));
             f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
             f.owner.onDeliveryEvidence(f.claim, new ContextResult.TransportResult(f.claim, DeliveryResult.uncertain(new IllegalStateException("reply lost")), System.currentTimeMillis()));
-            assertThrows(java.util.concurrent.ExecutionException.class, () -> f.driver().get(6, TimeUnit.SECONDS));
+            assertEquals(DeliveryCleanup.Result.UNRESOLVED, f.driver().get(6, TimeUnit.SECONDS));
             assertEquals(8, calls.get());
             assertFalse(f.settlement().isDone());
             first.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
@@ -874,7 +877,7 @@ class DeliveryClaimTest {
             assertTrue(f.owner.tryStartSend(f.claim));
             f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
             f.owner.onDeliveryEvidence(f.claim, new ContextResult.TransportResult(f.claim, DeliveryResult.uncertain(new IllegalStateException("reply lost")), System.currentTimeMillis()));
-            assertThrows(java.util.concurrent.ExecutionException.class, () -> f.driver().get(6, TimeUnit.SECONDS));
+            assertEquals(DeliveryCleanup.Result.UNRESOLVED, f.driver().get(6, TimeUnit.SECONDS));
             verify(f.channel, times(8)).cancelAsync(any(), anyInt(), argThat(request -> request.getRequestId() == 41L), anyLong());
             assertTrue(f.owner.requests.isCurrent(f.context));
             assertEquals(ContextResult.ClaimKind.BLOCKED, f.context.beginSettlement().kind());
@@ -885,7 +888,7 @@ class DeliveryClaimTest {
 
     @ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
-    void unsupportedCancelStopsRetriesWithoutChangingCleanupTimeout(boolean timeout) throws Exception {
+    void unsupportedCancelStopsTransportWithoutProvingRelease(boolean timeout) throws Exception {
         try (var logs = new CleanupLogs(); var f = new Fixture()) {
             assertTrue(f.owner.tryStartSend(f.claim));
             f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
@@ -893,10 +896,8 @@ class DeliveryClaimTest {
             var driver = f.driver();
             f.cancel.complete(EngineGrpcClient.CancelReply.UNSUPPORTED);
             verify(f.channel, timeout(2_000)).cancelAsync(any(), anyInt(), argThat(request -> request.getRequestId() == 41L), anyLong());
-            if (timeout) {
-                assertThrows(java.util.concurrent.ExecutionException.class, () -> driver.get(6, TimeUnit.SECONDS));
-                assertNotNull(SchedulerTestSupport.failure(f.owner));
-            }
+            assertEquals(DeliveryCleanup.Result.UNSUPPORTED, driver.get(2, TimeUnit.SECONDS));
+            assertNull(SchedulerTestSupport.failure(f.owner));
             assertFalse(f.settlement().isDone());
             assertTrue(f.prefillOwned.get());
             assertTrue(f.decodeOwned.get());
@@ -905,8 +906,7 @@ class DeliveryClaimTest {
             if (!timeout) { driver.get(2, TimeUnit.SECONDS); }
             verify(f.channel, times(1)).cancelAsync(any(), anyInt(), argThat(request -> request.getRequestId() == 41L), anyLong());
             assertEquals(1, logs.count(ch.qos.logback.classic.Level.WARN));
-            if (timeout) { assertThrows(IllegalStateException.class, f.owner.runtime::shutdown); }
-            else { assertDoesNotThrow(f.owner.runtime::shutdown); }
+            assertDoesNotThrow(f.owner.runtime::shutdown);
         }
     }
 
@@ -954,6 +954,232 @@ class DeliveryClaimTest {
             f.assertArchivedAfterCleanup();
             driver.get(2, TimeUnit.SECONDS);
             verify(f.channel, times(2)).cancelAsync(any(), anyInt(), argThat(request -> request.getRequestId() == 41L), anyLong());
+        }
+    }
+
+    @Test void unsentStopTimeoutRetainsResponsibilityUntilSenderExits() throws Exception {
+        try (var f = new Fixture()) {
+            f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
+            assertEquals(DeliveryCleanup.Result.UNRESOLVED, f.driver().get(6, TimeUnit.SECONDS));
+            SchedulerTestSupport.dispatcher(f.owner.runtime).awaitStops(f.owner.runtime);
+            assertFalse(f.settlement().isDone());
+            verifyNoInteractions(f.channel);
+            f.owner.onDeliveryEvidence(f.claim, new ContextResult.TransportResult(f.claim,
+                    DeliveryResult.notSent(new IllegalStateException("cancelled before send")), System.currentTimeMillis()));
+            f.settlement().get(2, TimeUnit.SECONDS);
+            f.awaitArchive();
+            assertFalse(f.prefillOwned.get());
+            assertFalse(f.decodeOwned.get());
+        }
+    }
+
+    @Test void unsentVictimCancellationClosesPreemptionAfterLocalRelease() throws Exception {
+        try (var f = new Fixture()) {
+            var claim = f.context.beginPreemption(f.reservation, 92L,
+                    new org.flexlb.balance.preemption.CancelTarget("127.0.0.1", 9000));
+            var registration = ((ContextResult.Granted<PreemptionRegistration>) claim).value();
+            f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
+            f.owner.onDeliveryEvidence(f.claim, new ContextResult.TransportResult(f.claim,
+                    DeliveryResult.notSent(new IllegalStateException("cancelled before send")), System.currentTimeMillis()));
+            f.settlement().get(2, TimeUnit.SECONDS);
+            f.awaitArchive();
+            assertNotNull(f.owner.runtime.signals().resolved(registration));
+            verifyNoInteractions(f.channel);
+        }
+    }
+
+    @Test void senderCompletionAdvancesTheSameStopRecordAfterItsInitialWaitExpires() throws Exception {
+        try (var f = new Fixture()) {
+            when(f.channel.cancelAsync(any(), anyInt(), any(), anyLong())).thenReturn(
+                    CompletableFuture.completedFuture(EngineGrpcClient.CancelReply.NOT_FOUND),
+                    CompletableFuture.completedFuture(EngineGrpcClient.CancelReply.REQUEST_CLEANED));
+            assertTrue(f.owner.tryStartSend(f.claim));
+            f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
+            var record = f.stopRecord();
+            assertEquals(DeliveryCleanup.Result.UNRESOLVED, f.driver().get(6, TimeUnit.SECONDS));
+            assertSame(record, f.stopRecord());
+            assertFalse(f.settlement().isDone());
+            var dispatcher = SchedulerTestSupport.dispatcher(f.owner.runtime);
+            ReflectionTestUtils.invokeMethod(dispatcher, "report", 51L, java.util.List.of(f.claim),
+                    java.util.List.of(DeliveryResult.delivered()));
+            f.assertArchivedAfterCleanup();
+            verify(f.channel, times(2)).cancelAsync(any(), anyInt(), any(), anyLong());
+            assertFalse(f.context.data().getFuture().join().isSuccess());
+        }
+    }
+
+    @Test void ordinaryCancellationSharesTheOutstandingPreemptionRpc() throws Exception {
+        try (var f = new Fixture()) {
+            assertTrue(f.owner.tryStartSend(f.claim));
+            var granted = f.context.beginPreemption(f.reservation, 91L,
+                    new org.flexlb.balance.preemption.CancelTarget("127.0.0.1", 9000));
+            var registration = ((ContextResult.Granted<PreemptionRegistration>) granted).value();
+            var preemptionReply = SchedulerTestSupport.dispatcher(f.owner.runtime).preempt(registration, 500L);
+            verify(f.channel, timeout(2000)).cancelAsync(any(), anyInt(), any(), anyLong());
+            f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
+            f.owner.onDeliveryEvidence(f.claim, new ContextResult.TransportResult(f.claim,
+                    DeliveryResult.delivered(), System.currentTimeMillis()));
+            f.cancel.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
+            assertEquals(EngineGrpcClient.CancelReply.REQUEST_CLEANED, preemptionReply.get(2, TimeUnit.SECONDS));
+            f.assertArchivedAfterCleanup();
+            verify(f.channel, times(1)).cancelAsync(any(), anyInt(), any(), anyLong());
+        }
+    }
+
+    @Test void cancellationQueuedBehindPreemptionInitializesItsOwnDeadlineBeforeAdvancing() throws Exception {
+        try (var f = new Fixture()) {
+            assertTrue(f.owner.tryStartSend(f.claim));
+            var original = (java.util.concurrent.ExecutorService) ReflectionTestUtils.getField(f.owner.runtime, "stopWorkers");
+            var queued = new java.util.concurrent.ConcurrentLinkedQueue<Runnable>();
+            var paused = mock(java.util.concurrent.ExecutorService.class);
+            doAnswer(call -> { queued.add(call.getArgument(0)); return null; }).when(paused).execute(any(Runnable.class));
+            ReflectionTestUtils.setField(f.owner.runtime, "stopWorkers", paused);
+            try {
+                var registration = new PreemptionRegistration(f.context, 91L, f.reservation,
+                        new org.flexlb.balance.preemption.CancelTarget("127.0.0.1", 9000));
+                var dispatcher = SchedulerTestSupport.dispatcher(f.owner.runtime);
+                dispatcher.preempt(registration, 500L);
+                var record = f.stopRecord();
+                f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
+                var stopping = f.driver();
+                Runnable task;
+                while ((task = queued.poll()) != null) { task.run(); }
+                assertFalse(stopping.isDone(), "queued cancellation must not see an uninitialized deadline");
+                assertNull(SchedulerTestSupport.failure(f.owner));
+                assertSame(record, f.stopRecord());
+            } finally {
+                ReflectionTestUtils.setField(f.owner.runtime, "stopWorkers", original);
+                Runnable task;
+                while ((task = queued.poll()) != null) { task.run(); }
+            }
+            f.owner.onDeliveryEvidence(f.claim, new ContextResult.TransportResult(f.claim,
+                    DeliveryResult.delivered(), System.currentTimeMillis()));
+            f.cancel.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
+            f.assertArchivedAfterCleanup();
+            verify(f.channel, times(1)).cancelAsync(any(), anyInt(), any(), anyLong());
+        }
+    }
+
+    @Test void nextPreemptionDoesNotReuseAnEarlierNotFoundDuringCallbackExit() throws Exception {
+        try (var f = new Fixture()) {
+            assertTrue(f.owner.tryStartSend(f.claim));
+            var target = new org.flexlb.balance.preemption.CancelTarget("127.0.0.1", 9000);
+            var first = new PreemptionRegistration(f.context, 91L, f.reservation, target);
+            var next = new PreemptionRegistration(f.context, 92L, f.reservation, target);
+            when(f.channel.cancelAsync(any(), anyInt(), any(), anyLong())).thenReturn(f.cancel,
+                    CompletableFuture.completedFuture(EngineGrpcClient.CancelReply.REQUEST_CLEANED));
+            var dispatcher = SchedulerTestSupport.dispatcher(f.owner.runtime);
+            var result = dispatcher.preempt(first, 500L).thenCompose(reply -> dispatcher.preempt(next, 500L));
+            var record = f.stopRecord();
+            f.cancel.complete(EngineGrpcClient.CancelReply.NOT_FOUND);
+            assertEquals(EngineGrpcClient.CancelReply.REQUEST_CLEANED, result.get(2, TimeUnit.SECONDS));
+            assertSame(record, f.stopRecord(), "a new preemption advances the existing delivery record");
+            verify(f.channel, times(2)).cancelAsync(any(), anyInt(), any(), anyLong());
+            f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
+            f.owner.onDeliveryEvidence(f.claim, new ContextResult.TransportResult(f.claim,
+                    DeliveryResult.delivered(), System.currentTimeMillis()));
+            f.assertArchivedAfterCleanup();
+        }
+    }
+
+    @Test void failedFactApplicationRetriesTheFactWithoutRepeatingTheRpc() throws Exception {
+        try (var f = new Fixture()) {
+            doThrow(new IllegalStateException("temporary publication failure")).doCallRealMethod()
+                    .when(f.owner).onDeliveryEvidence(eq(f.claim), isA(ContextResult.CleanupAcknowledgement.class));
+            assertTrue(f.owner.tryStartSend(f.claim));
+            f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
+            f.owner.onDeliveryEvidence(f.claim, new ContextResult.TransportResult(f.claim,
+                    DeliveryResult.delivered(), System.currentTimeMillis()));
+            f.cancel.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
+            f.assertArchivedAfterCleanup();
+            verify(f.channel, times(1)).cancelAsync(any(), anyInt(), any(), anyLong());
+            assertNull(SchedulerTestSupport.failure(f.owner));
+        }
+    }
+
+    @Test void concurrentStopEventsAreSerializedWithoutHoldingTheContextLock() throws Exception {
+        try (var f = new Fixture()) {
+            assertTrue(f.owner.tryStartSend(f.claim));
+            f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
+            var record = f.stopRecord();
+            var active = new java.util.concurrent.atomic.AtomicInteger();
+            var maximum = new java.util.concurrent.atomic.AtomicInteger();
+            var done = new java.util.concurrent.CountDownLatch(1_000);
+            try (var producers = java.util.concurrent.Executors.newFixedThreadPool(8)) {
+                for (int i = 0; i < 1_000; i++) {
+                    producers.submit(() -> ReflectionTestUtils.invokeMethod(record, "post", (Runnable) () -> {
+                        maximum.accumulateAndGet(active.incrementAndGet(), Math::max);
+                        assertFalse(Thread.holdsLock(f.context));
+                        Thread.yield();
+                        active.decrementAndGet();
+                        done.countDown();
+                    }));
+                }
+            }
+            assertTrue(done.await(3, TimeUnit.SECONDS));
+            assertEquals(1, maximum.get());
+            assertSame(record, f.stopRecord());
+            verify(f.channel, times(1)).cancelAsync(any(), anyInt(), any(), anyLong());
+            f.owner.onDeliveryEvidence(f.claim, new ContextResult.TransportResult(f.claim,
+                    DeliveryResult.delivered(), System.currentTimeMillis()));
+            f.cancel.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
+            f.assertArchivedAfterCleanup();
+        }
+    }
+
+    @ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void rejectedTimerRetainsTheSameRecordAndAcceptsLateProof(boolean permanent) throws Exception {
+        try (var f = new Fixture()) {
+            var original = (java.util.concurrent.ScheduledThreadPoolExecutor)
+                    ReflectionTestUtils.getField(f.owner.runtime, "cleanupExecutor");
+            var rejecting = mock(java.util.concurrent.ScheduledThreadPoolExecutor.class);
+            var submissions = new java.util.concurrent.atomic.AtomicInteger();
+            doAnswer(call -> {
+                if (submissions.incrementAndGet() <= 2 || permanent) {
+                    throw new java.util.concurrent.RejectedExecutionException("timer unavailable");
+                }
+                return original.schedule(call.getArgument(0, Runnable.class), call.getArgument(1, Long.class),
+                        call.getArgument(2, TimeUnit.class));
+            }).when(rejecting).schedule(any(Runnable.class), anyLong(), any(TimeUnit.class));
+            ReflectionTestUtils.setField(f.owner.runtime, "cleanupExecutor", rejecting);
+            try {
+                assertTrue(f.owner.tryStartSend(f.claim));
+                f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
+                var record = f.stopRecord();
+                SchedulerTestSupport.awaitRequestWork(f.owner.runtime);
+                assertEquals(3, submissions.get());
+                assertEquals(permanent, f.driver().isCompletedExceptionally());
+                assertFalse(f.settlement().isDone());
+                assertSame(record, f.stopRecord());
+                ReflectionTestUtils.setField(f.owner.runtime, "cleanupExecutor", original);
+                f.owner.onDeliveryEvidence(f.claim, new ContextResult.TransportResult(f.claim,
+                        DeliveryResult.delivered(), System.currentTimeMillis()));
+                f.cancel.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
+                f.assertArchivedAfterCleanup();
+                verify(f.channel, times(1)).cancelAsync(any(), anyInt(), any(), anyLong());
+            } finally { ReflectionTestUtils.setField(f.owner.runtime, "cleanupExecutor", original); }
+        }
+    }
+
+    @Test void immediateRpcReplyAndSettlementReentryDoNotHoldStopRecordMonitor() throws Exception {
+        try (var f = new Fixture()) {
+            when(f.channel.cancelAsync(any(), anyInt(), any(), anyLong())).thenReturn(
+                    CompletableFuture.completedFuture(EngineGrpcClient.CancelReply.REQUEST_CLEANED));
+            assertTrue(f.owner.tryStartSend(f.claim));
+            var callbacks = new java.util.concurrent.atomic.AtomicInteger();
+            doAnswer(call -> {
+                assertFalse(Thread.holdsLock(f.context));
+                assertFalse(Thread.holdsLock(f.stopRecord()));
+                callbacks.incrementAndGet();
+                return call.callRealMethod();
+            }).when(f.owner).onDeliveryEvidence(eq(f.claim), isA(ContextResult.CleanupAcknowledgement.class));
+            f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
+            f.owner.onDeliveryEvidence(f.claim, new ContextResult.TransportResult(f.claim,
+                    DeliveryResult.delivered(), System.currentTimeMillis()));
+            f.assertArchivedAfterCleanup();
+            assertEquals(1, callbacks.get());
+            verify(f.channel, times(1)).cancelAsync(any(), anyInt(), any(), anyLong());
         }
     }
 
@@ -1083,8 +1309,14 @@ class DeliveryClaimTest {
                     .release(reservation, DecodeResources.ReleaseReason.REMOTE_CLEANUP);
         }
 
-        CompletableFuture<Void> driver() {
-            return SchedulerTestSupport.dispatcher(owner.runtime).cleanupDelivery(claim, channel, owner.runtime);
+        CompletableFuture<DeliveryCleanup.Result> driver() {
+            return SchedulerTestSupport.dispatcher(owner.runtime).stop(claim);
+        }
+
+        Object stopRecord() {
+            var cleanup = ReflectionTestUtils.getField(SchedulerTestSupport.dispatcher(owner.runtime), "cleanup");
+            var records = (java.util.Map<?, ?>) ReflectionTestUtils.getField(cleanup, "sessions");
+            return java.util.Objects.requireNonNull(records.get(claim));
         }
 
         void assertArchivedAfterCleanup() throws Exception {
@@ -1102,6 +1334,17 @@ class DeliveryClaimTest {
             assertDecodeOwnershipReleasedOnce();
         }
         public void close() {
+            // End fake RPCs / Worker generations after assertions so accepted callbacks can drain.
+            cancel.complete(EngineGrpcClient.CancelReply.FAILED);
+            if (owner.requests.isCurrent(context)) {
+                var send = context.snapshot().delivery().send();
+                if (send == ContextResult.SendState.NOT_STARTED || send == ContextResult.SendState.SENDING) {
+                    owner.onDeliveryEvidence(claim, new ContextResult.TransportResult(claim,
+                            DeliveryResult.notSent(new IllegalStateException("fixture sender exited")), System.currentTimeMillis()));
+                }
+                retirePrefill();
+                retireDecode();
+            }
             SchedulerTestSupport.runtime(owner).requests().stopAccepting();
             ((QueuedRequestScheduler)owner).close();
             SchedulerTestSupport.timer(owner.runtime).close();

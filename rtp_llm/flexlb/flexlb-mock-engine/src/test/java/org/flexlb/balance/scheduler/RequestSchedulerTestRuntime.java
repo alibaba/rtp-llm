@@ -10,7 +10,6 @@ import org.flexlb.balance.eviction.DecodeCapacityAcquirer;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
 import org.flexlb.balance.strategy.VitWorkerSelector;
-import org.flexlb.balance.strategy.WorkerAssignment;
 import org.flexlb.cache.monitor.CacheMetricsReporter;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ModelMetaConfig;
@@ -24,7 +23,6 @@ import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 
@@ -76,7 +74,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
             Runnable remove = (Runnable) invocation.callRealMethod();
             return (Runnable) () -> { deliveryListeners.remove(wake); remove.run(); };
         }).when(facilities).watchDeliveryCapacity(org.mockito.ArgumentMatchers.any());
-        this.decodeCapacity = new DecodeCapacityAcquirer(engineClient, requests, runtime, requestReporter, configService, capacity);
+        this.decodeCapacity = new DecodeCapacityAcquirer(delivery, requests, runtime, requestReporter, configService, capacity);
         this.scheduler = PlacementConfiguration.create(runtime, configService.loadBalanceConfig(),
                 router, deliveryReporter, decodeCapacity, placementAvailability, capacity, new org.flexlb.service.RecentCacheKeyTraceReporter());
         runtime.registerScheduler(scheduler);
@@ -115,31 +113,22 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                     "successful fixture route has no worker metadata");
         }
 
-        List<WorkerAssignment> selections = new ArrayList<>();
+        RequestRoute route = new RequestRoute(context);
         try {
             for (ServerStatus status : response.getServerStatus()) {
-                if (status == null) {
-                    continue;
-                }
+                if (status == null) { continue; }
                 String address = status.getServerIp() + ":" + status.getHttpPort();
-                WorkerEndpoint.GenerationPin pin = registry.capture(
-                        status.getRole(), address);
-                if (pin == null) {
-                    throw new IllegalStateException(
-                            "fixture route references an unpublished endpoint: "
-                                    + status.getRole() + " " + address);
-                }
-                WorkerAssignment selected = select(pin, status);
-                selections.add(selected);
+                var pin = registry.capture(status.getRole(), address);
+                if (pin == null) { throw new IllegalStateException("fixture route references an unpublished endpoint: " + address); }
+                long version = pin.endpoint() instanceof PrefillEndpoint prefill
+                        ? prefill.ownership.progress().ownershipVersion()
+                        : pin.endpoint() instanceof DecodeEndpoint decode ? decode.placementVersion() : 0L;
+                route.add(pin, status, status.getRole().supportsPrefill() ? Math.max(0L, status.getPrefillTime()) : -1L, version);
             }
-            var result = PlacementResult.<RequestRoute, PlacementKey>success(
-                    RequestRoute.prepare(context, selections));
-            selections.clear();
-            return result;
-        } finally {
-            for (WorkerAssignment selection : selections) {
-                selection.close();
-            }
+            return PlacementResult.success(route.prepare());
+        } catch (RuntimeException | Error failure) {
+            org.flexlb.util.Failures.append(failure, org.flexlb.util.Failures.close(route));
+            throw failure;
         }
     }
 
@@ -183,24 +172,6 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
         endpoint.publishStatus(projection);
     }
 
-    private static WorkerAssignment select(
-            WorkerEndpoint.GenerationPin pin, ServerStatus status) {
-        try {
-            return switch (status.getRole()) {
-                case PREFILL, PDFUSION -> WorkerAssignment.prefill(
-                        pin, status, Math.max(0L, status.getPrefillTime()),
-                        ((PrefillEndpoint) pin.endpoint()).ownership.progress().ownershipVersion());
-                case DECODE -> WorkerAssignment.decode(
-                        pin, status, ((DecodeEndpoint) pin.endpoint()).placementVersion());
-                case VIT -> WorkerAssignment.stateless(pin, status);
-                case FRONTEND -> throw new IllegalArgumentException(
-                        "FRONTEND cannot be a worker route");
-            };
-        } catch (RuntimeException | Error failure) {
-            pin.close();
-            throw failure;
-        }
-    }
 
     @Override
     public void close() {

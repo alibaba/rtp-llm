@@ -32,7 +32,7 @@ class RoutePublicationTest {
             assertNull(f.process(List.of(first, failed), OptionalLong.empty()));
             assertEquals(List.of(first), f.committedItems);
             verify(f.owner).onDeliveryEvidence(isNull(), argThat(e -> e instanceof PreparationFailure evidence
-                    && evidence.route() == failed && evidence.cause() == failure));
+                    && evidence.route() == failed && evidence.detail().equals(failure.getMessage())));
             verify(f.owner).onDeliveryEvidence(eq(f.claims.getFirst()), argThat(e -> e instanceof RouteDelivered delivered
                     && f.duration(delivered.predictedAtMs(), delivered.nowMs()) == 10L));
             verify(f.prefill, times(1)).signal(org.flexlb.balance.endpoint.PrefillEndpoint.Signal.PLACEMENT);

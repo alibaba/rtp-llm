@@ -409,7 +409,7 @@ class RequestResourceAccountingTest {
             when(channel.cancelAsync(any(), anyInt(), any(), anyLong())).thenReturn(cleanup);
             org.springframework.test.util.ReflectionTestUtils.setField(requests.runtime, "engineClient", channel);
             var projector = requests;
-            var endpoints = new EndpointRegistry(service, SchedulerTestSupport.repository(projector), reporter, DeliveryTestSupport.route(reporter, SchedulingTestConfig.capacity(SchedulingTestConfig.newConfig())), new PlacementAvailability());
+            var endpoints = new EndpointRegistry(service, SchedulerTestSupport.repository(projector), reporter, DeliveryTestSupport.route(reporter), new PlacementAvailability());
             runtime = requests.runtime;
             org.springframework.test.util.ReflectionTestUtils.setField(runtime, "endpoints", endpoints);
             var worker = WorkerStatus.createDiscovered(RoleType.PREFILL, "g", "127.0.0.1", 8080, 8081, "test");

@@ -54,7 +54,7 @@ class PrefillCompletionProjectionTest {
         var requests = SchedulerTestSupport.create(service, reporter, requestReporter,
                 mock(RecentCacheKeyTraceReporter.class));
         var projector = requests;
-        var endpoints = new EndpointRegistry(service, SchedulerTestSupport.repository(projector), reporter, DeliveryTestSupport.route(reporter, SchedulingTestConfig.capacity(SchedulingTestConfig.newConfig())), new PlacementAvailability());
+        var endpoints = new EndpointRegistry(service, SchedulerTestSupport.repository(projector), reporter, DeliveryTestSupport.route(reporter), new PlacementAvailability());
         var runtime = new SchedulerRuntime(SchedulerTestSupport.repository(requests), endpoints, reporter, requestReporter, org.mockito.Mockito.mock(DeliveryDispatcher.class), service, org.mockito.Mockito.mock(EngineGrpcClient.class));
         try {
             WorkerStatus worker = WorkerStatus.createDiscovered(

@@ -1,6 +1,5 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.preemption.CancelTarget;
 import org.flexlb.balance.preemption.PreemptionCancelPhase;
@@ -20,10 +19,10 @@ public final class RequestContext {
     private static final long HANDOFF_GRACE_MS = 10_000L;
     private final RequestData data;
     private Identity key;
-    private static final Snapshot EMPTY = new Snapshot(null, 0L, Phase.OPEN, null, null, null,
+    private static final SnapshotFacts EMPTY = new SnapshotFacts(null, 0L, Phase.OPEN, null, null, null,
             new EngineFacts(false, 0L, false, 0L, false, 0L), null, null, null, null, null,
             new CloseFacts(null, null, true, true, false, false, false, false),
-            new ExpirationTimer.Plan(0L, null, null, null), null, 0L, 0L, true, false, true, true, 0L);
+            new ExpirationTimer.Plan(0L, null, null, null), null, true, false, true, true);
     private Phase phase = Phase.OPEN;
     private RequestRoute route;
     private PlacementFacts placement;
@@ -48,7 +47,7 @@ public final class RequestContext {
 
     public RequestContext(FlexlbConfig config) {
         data = new RequestData(Objects.requireNonNull(config));
-        state = new Snapshot(EMPTY.facts(), 0L, 0L, 0L);
+        state = new Snapshot(EMPTY, 0L, 0L, 0L);
     }
 
     public RequestData data() { return data; }
@@ -373,7 +372,6 @@ public final class RequestContext {
         if (phase != Phase.OPEN) { return new Rejected<>(before, before, Rejection.CLOSED); }
         CancelKind currentKind = placement != null ? CancelKind.WAIT_PLACEMENT
                 : delivery != null && delivery.transferred() ? CancelKind.REMOTE
-                : preemption != null && !preemption.finished() ? CancelKind.WAIT_PREEMPTION
                 : route == null ? CancelKind.GLOBAL_QUEUE : CancelKind.WORKER_QUEUE;
         if (cancellation != null && (cancellation.reason() != request.reason()
                 || cancellation.operation() != null && cancellation.operation().kind() == currentKind)) {
@@ -702,8 +700,9 @@ public final class RequestContext {
         close = new CloseFacts(notification && notified ? null : close.endOperation(), notification ? close.releaseOperation() : null,
                 close.prefillSettled() || progress.prefillSettled(), close.decodeSettled() || progress.decodeSettled(),
                 notified, close.timersDone() || progress.timersDone(), close.expired(), close.notificationsAttempted() || notification);
-        if (preemption != null && close.decodeSettled() && (close.expired()
-                || delivery != null && delivery.abandonment() != null && delivery.prefillProof() && delivery.decodeProof())) {
+        if (preemption != null && close.decodeSettled() && (close.expired() || delivery == null
+                || delivery.send() == SendState.NOT_SENT
+                || delivery.abandonment() != null && delivery.prefillProof() && delivery.decodeProof())) {
             preemption = new PreemptionFacts(preemption.identity(), preemption.phase(), preemption.cancelAcknowledged(),
                     true, preemption.pendingTerminal(), preemption.confirmationPending(), preemption.restorationObserved(), preemption.reconciliation());
         }

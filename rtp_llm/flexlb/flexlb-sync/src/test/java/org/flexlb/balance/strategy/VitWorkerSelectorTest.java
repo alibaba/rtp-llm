@@ -1,5 +1,7 @@
 package org.flexlb.balance.strategy;
 
+import org.flexlb.balance.scheduler.RequestRoute;
+
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
@@ -40,35 +42,33 @@ class VitWorkerSelectorTest {
     @Test
     void rejectsNonVitSelection() {
         assertThrows(IllegalArgumentException.class,
-                () -> strategy.select(1L, RoleType.PREFILL, null));
+                () -> StrategyTestSupport.select(strategy, 1L, RoleType.PREFILL, null));
     }
 
     @Test
     void returnsNullWithoutVitWorkers() {
-        assertNull(strategy.select(2L, RoleType.VIT, null));
+        assertNull(StrategyTestSupport.select(strategy, 2L, RoleType.VIT, null));
     }
 
     @Test
     void returnsPinnedVitMetadata() {
         registerVit("127.0.0.3", 8080, "group-a");
 
-        try (WorkerAssignment selected = strategy.select(
-                3L, RoleType.VIT, "group-a")) {
+        try (RequestRoute selected = StrategyTestSupport.select(strategy, 3L, RoleType.VIT, "group-a")) {
             assertNotNull(selected);
-            assertEquals(RoleType.VIT, selected.serverStatus().getRole());
-            assertEquals(3L, selected.serverStatus().getRequestId());
-            assertEquals("127.0.0.3", selected.serverStatus().getServerIp());
-            assertEquals(8080, selected.serverStatus().getHttpPort());
-            assertEquals(8081, selected.serverStatus().getGrpcPort());
-            assertEquals("group-a", selected.serverStatus().getGroup());
+            assertEquals(RoleType.VIT, StrategyTestSupport.vit(selected).getRole());
+            assertEquals(3L, StrategyTestSupport.vit(selected).getRequestId());
+            assertEquals("127.0.0.3", StrategyTestSupport.vit(selected).getServerIp());
+            assertEquals(8080, StrategyTestSupport.vit(selected).getHttpPort());
+            assertEquals(8081, StrategyTestSupport.vit(selected).getGrpcPort());
+            assertEquals("group-a", StrategyTestSupport.vit(selected).getGroup());
         }
     }
 
     @Test
     void skipsOtherGroups() {
         registerVit("127.0.0.4", 8080, "group-a");
-        assertNull(strategy.select(
-                4L, RoleType.VIT, "group-b"));
+        assertNull(StrategyTestSupport.select(strategy, 4L, RoleType.VIT, "group-b"));
     }
 
     @Test
@@ -79,11 +79,10 @@ class VitWorkerSelectorTest {
         Map<String, Integer> counts = new HashMap<>();
 
         for (int request = 0; request < 3_000; request++) {
-            try (WorkerAssignment selected = strategy.select(
-                    10_000L + request, RoleType.VIT, null)) {
+            try (RequestRoute selected = StrategyTestSupport.select(strategy, 10_000L + request, RoleType.VIT, null)) {
                 assertNotNull(selected);
                 counts.merge(
-                        selected.serverStatus().getServerIp(), 1, Integer::sum);
+                        StrategyTestSupport.vit(selected).getServerIp(), 1, Integer::sum);
             }
         }
 
@@ -106,10 +105,10 @@ class VitWorkerSelectorTest {
         VitWorkerSelector grouped = new VitWorkerSelector(directory);
         Map<String, Integer> counts = new HashMap<>();
         for (int request = 0; request < 4_000; request++) {
-            try (WorkerAssignment selected = grouped.select(request, RoleType.VIT, "target")) {
+            try (RequestRoute selected = StrategyTestSupport.select(grouped, request, RoleType.VIT, "target")) {
                 assertNotNull(selected);
-                assertEquals("target", selected.serverStatus().getGroup());
-                counts.merge(selected.serverStatus().getServerIp(), 1, Integer::sum);
+                assertEquals("target", StrategyTestSupport.vit(selected).getGroup());
+                counts.merge(StrategyTestSupport.vit(selected).getServerIp(), 1, Integer::sum);
             }
         }
         assertEquals(2, counts.size());

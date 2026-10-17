@@ -43,7 +43,7 @@ class RejectedDeliveryWithdrawalRaceTest {
         var owner = SchedulerTestSupport.create(service, reporter, mock(RequestSchedulerReporter.class),
                 mock(RecentCacheKeyTraceReporter.class));
         var grpc = mock(EngineGrpcClient.class);
-        var dispatcher = new DeliveryDispatcher(grpc, service, null, reporter, null);
+        var dispatcher = new DeliveryDispatcher(grpc, service, reporter);
         ReflectionTestUtils.setField(owner.runtime, "dispatcher", dispatcher);
         var execution = org.mockito.Mockito.spy(owner.runtime.deliveries());
         ReflectionTestUtils.setField(owner.runtime, "deliveries", execution);

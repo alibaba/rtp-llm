@@ -43,7 +43,7 @@ public final class SchedulerRuntime implements RequestTaskScheduler {
     private final EndpointRegistry endpoints;
     private final DeliveryMetricsReporter deliveryReporter;
     private final RequestSchedulerReporter requestReporter;
-    private final DeliveryDispatcher dispatcher;
+    final DeliveryDispatcher dispatcher;
     private final ConfigService config;
     private final LongSupplier clock;
 
@@ -58,9 +58,7 @@ public final class SchedulerRuntime implements RequestTaskScheduler {
         deliveries.configureBatchIds(environment);
     }
 
-    private final EngineGrpcClient engineClient;
-    final ExecutorService deliveryCleanupExecutor = Executors.newThreadPerTaskExecutor(
-            Thread.ofVirtual().name("flexlb-delivery-cleanup-", 1).factory());
+    final EngineGrpcClient engineClient;
     private final ScheduledThreadPoolExecutor cleanupExecutor =
             new ScheduledThreadPoolExecutor(2,
                     Thread.ofPlatform().daemon().name("flexlb-request-cleanup-", 1).factory());
@@ -72,13 +70,12 @@ public final class SchedulerRuntime implements RequestTaskScheduler {
         return () -> scheduled.cancel(false);
     }
 
-    void startDeliveryCleanup(DeliveryClaim claim) {
-        dispatcher.cleanupDelivery(claim, engineClient, this);
-    }
-
     private final ExecutorService requestWorkers = Executors.newFixedThreadPool(
             Math.clamp(Runtime.getRuntime().availableProcessors(), 2, 8),
             Thread.ofPlatform().daemon().name("request-work-", 1).factory());
+    private final ExecutorService stopWorkers = Executors.newFixedThreadPool(
+            Math.clamp(Runtime.getRuntime().availableProcessors(), 2, 8),
+            Thread.ofPlatform().daemon().name("delivery-stop-", 1).factory());
     private final ExecutorService requestRecovery = Executors.newSingleThreadExecutor(
             Thread.ofPlatform().daemon().name("request-work-recovery-", 1).factory());
     // Never run request code while holding this monitor. Context -> workLifecycle is the only edge.
@@ -128,6 +125,15 @@ public final class SchedulerRuntime implements RequestTaskScheduler {
         try (var registration = registerRequestWork(context)) { registration.submit(work); }
     }
 
+    /** Isolates stop events while retaining the same ownership and shutdown accounting. */
+    void executeStopWork(RequestContext context, Runnable work) {
+        Objects.requireNonNull(work, "work");
+        try (var registration = registerRequestWork(context)) {
+            registration.executor = stopWorkers;
+            registration.submit(work);
+        }
+    }
+
     /** Register before publishing state that obliges a later effect or local cleanup. */
     WorkRegistration registerRequestWork(RequestContext context) {
         WorkRegistration registration = tryRegisterRequestWork(context);
@@ -147,6 +153,7 @@ public final class SchedulerRuntime implements RequestTaskScheduler {
     /** Counts both the submitting source and its optional task, including the handoff between them. */
     final class WorkRegistration implements AutoCloseable {
         private final RequestContext context;
+        private ExecutorService executor = requestWorkers;
         private int owners = 1;
         private boolean submitted;
         private boolean sourceClosed;
@@ -167,7 +174,7 @@ public final class SchedulerRuntime implements RequestTaskScheduler {
         }
 
         private void dispatch(Runnable task) {
-            try { requestWorkers.execute(task); }
+            try { executor.execute(task); }
             catch (RuntimeException | Error rejected) {
                 if (rejected instanceof Error) { recordFailure(rejected); }
                 try { requestRecovery.execute(task); }
@@ -258,14 +265,14 @@ public final class SchedulerRuntime implements RequestTaskScheduler {
         synchronized (workLifecycle) { acceptingWork = false; }
         // A running owner can still hand off its exact request through executingRequest.
         awaitRequestWork();
-        requestWorkers.shutdown();
-        requestRecovery.shutdown();
+        var executors = java.util.List.of(stopWorkers, requestWorkers, requestRecovery);
+        executors.forEach(ExecutorService::shutdown);
         boolean interrupted = false;
-        while (!requestWorkers.isTerminated() || !requestRecovery.isTerminated()) {
-            try {
-                requestWorkers.awaitTermination(1, TimeUnit.DAYS);
-                requestRecovery.awaitTermination(1, TimeUnit.DAYS);
-            } catch (InterruptedException ignored) { interrupted = true; }
+        for (var executor : executors) {
+            while (!executor.isTerminated()) {
+                try { executor.awaitTermination(1, TimeUnit.DAYS); }
+                catch (InterruptedException ignored) { interrupted = true; }
+            }
         }
         if (interrupted) { Thread.currentThread().interrupt(); }
     }
@@ -416,8 +423,8 @@ public final class SchedulerRuntime implements RequestTaskScheduler {
     private void closeRequestExecutors() {
         Throwable failure = null;
         awaitRequestWork();
-        deliveryCleanupExecutor.close();
-        try { closeRequestWork(); } catch (Throwable cause) { failure = cause; }
+        try { dispatcher.awaitStops(this); } catch (Throwable cause) { failure = cause; }
+        try { closeRequestWork(); } catch (Throwable cause) { failure = Failures.append(failure, cause); }
         try { responseCompletions.close(); } catch (Throwable cause) { failure = Failures.append(failure, cause); }
         cleanupExecutor.shutdown();
         boolean interrupted = false;

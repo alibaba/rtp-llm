@@ -1,5 +1,7 @@
 package org.flexlb.balance.strategy;
 
+import org.flexlb.balance.scheduler.RequestRoute;
+
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.WorkerStatus;
@@ -27,8 +29,8 @@ public final class VitWorkerSelector {
         this.endpointRegistry = endpointRegistry;
     }
 
-    public WorkerAssignment select(
-            long requestId, RoleType role, String group) {
+    public ServerStatus select(
+            long requestId, RoleType role, String group, RequestRoute route) {
         checkArgument(role == RoleType.VIT, "RANDOM endpoint selection is supported only for VIT");
         List<String> addresses =
                 endpointRegistry.endpointAddressSnapshot(RoleType.VIT);
@@ -37,7 +39,7 @@ public final class VitWorkerSelector {
         }
 
         int start = ThreadLocalRandom.current().nextInt(addresses.size());
-        WorkerAssignment selected = capture(addresses.get(start), group, requestId);
+        ServerStatus selected = capture(addresses.get(start), group, requestId, route);
         if (selected != null) {
             return selected;
         }
@@ -46,7 +48,7 @@ public final class VitWorkerSelector {
         remaining.remove(start);
         Collections.shuffle(remaining, ThreadLocalRandom.current());
         for (String address : remaining) {
-            selected = capture(address, group, requestId);
+            selected = capture(address, group, requestId, route);
             if (selected != null) {
                 return selected;
             }
@@ -57,7 +59,7 @@ public final class VitWorkerSelector {
         return null;
     }
 
-    private WorkerAssignment capture(String address, String group, long requestId) {
+    private ServerStatus capture(String address, String group, long requestId, RequestRoute route) {
         WorkerEndpoint.GenerationPin pin = endpointRegistry.capture(RoleType.VIT, address);
         if (pin == null) {
             return null;
@@ -69,11 +71,11 @@ public final class VitWorkerSelector {
                 return null;
             }
             WorkerStatus.EngineObservation engine = status.committedEngineObservation();
-            ServerStatus result = WorkerAssignment.workerMetadata(RoleType.VIT, requestId, topology, engine);
+            ServerStatus result = ServerStatus.forWorker(RoleType.VIT, requestId, topology, engine);
 
-            WorkerAssignment selected = WorkerAssignment.stateless(pin, result);
+            WorkerEndpoint.GenerationPin selectedPin = pin;
             pin = null;
-            return selected;
+            return route.add(selectedPin, result, -1L, 0L);
         } finally {
             if (pin != null) {
                 pin.close();

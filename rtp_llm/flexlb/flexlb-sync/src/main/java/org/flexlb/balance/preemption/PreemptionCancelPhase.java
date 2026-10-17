@@ -31,12 +31,6 @@ public enum PreemptionCancelPhase {
         return this == CLAIMED || this == CANCEL_IN_FLIGHT;
     }
 
-    public boolean acceptsRequestFenced() {
-        return this == CANCEL_IN_FLIGHT
-                || this == NOT_FOUND_STALE
-                || this == CANCEL_UNKNOWN;
-    }
-
     public boolean acceptsPriorityTerminal() {
         return this == CANCEL_IN_FLIGHT
                 || this == CANCEL_REQUESTED

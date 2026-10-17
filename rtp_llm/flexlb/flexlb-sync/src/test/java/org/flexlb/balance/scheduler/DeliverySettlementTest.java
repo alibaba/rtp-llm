@@ -86,6 +86,10 @@ class DeliverySettlementTest {
 
     @AfterEach
     void close() {
+        // Mock RPCs have no network deadline; finish them before draining accepted callbacks.
+        org.mockito.Mockito.doReturn(java.util.concurrent.CompletableFuture.completedFuture(EngineGrpcClient.CancelReply.FAILED))
+                .when(SchedulerTestSupport.engineClient(registry)).cancelAsync(any(), anyInt(), any(), anyLong());
+        cancellations.values().forEach(reply -> reply.complete(EngineGrpcClient.CancelReply.FAILED));
         if (RequestProtocolTestSupport.closeAdmissionAndAwaitMutations(registry)) {
             registry.closeOutstandingAndTerminalize();
             SchedulerTestSupport.timer(SchedulerTestSupport.runtime(registry)).close();

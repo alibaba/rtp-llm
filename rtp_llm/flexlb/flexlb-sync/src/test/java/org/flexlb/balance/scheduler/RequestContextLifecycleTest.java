@@ -1,16 +1,15 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.config.ConfigTestSupport;
-
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.scheduler.AdmissionHandle;
-import org.flexlb.balance.scheduler.SchedulerTestSupport.Stage;
 import org.flexlb.balance.scheduler.RequestProtocolTestSupport.Registered;
+import org.flexlb.balance.scheduler.SchedulerTestSupport.Stage;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Response;
@@ -1200,9 +1199,9 @@ class RequestContextLifecycleTest {
         assertTrue(lifecycle.tryClaim(new DecodeResources.ReservationHandle(1L, 709L, 2L), 23L, "stale").isEmpty());
         PreemptionRegistration claim = lifecycle.tryClaim(new DecodeResources.ReservationHandle(1L, 709L, 1L), 24L, "victim").orElseThrow();
         assertEquals(new org.flexlb.balance.preemption.CancelTarget("127.0.0.1", 8090), claim.cancelTarget());
-        registered.item().prefill().setServerIp("changed-after-claim");
+        SchedulingTestConfig.prefillTemplate(registered.item()).setServerIp("changed-after-claim");
         assertEquals("127.0.0.1", claim.cancelTarget().prefillIp());
-        registered.item().prefill().setGrpcPort(0);
+        SchedulingTestConfig.prefillTemplate(registered.item()).setGrpcPort(0);
         assertTrue(lifecycle.tryClaim(new DecodeResources.ReservationHandle(1L, 709L, 1L), 26L, "already claimed").isEmpty());
         lifecycle.onPreemption(claim, new AbstractRequestScheduler.PreemptionEvent(null, true, null, null, null));
     }
@@ -1210,7 +1209,7 @@ class RequestContextLifecycleTest {
     @Test
     void exactPreemptionRouteWithUnroutableCancelTargetIsAControlFailureAndDoesNotInstallClaim() {
         Registered registered = registerItem(710L);
-        registered.item().prefill().setGrpcPort(0);
+        SchedulingTestConfig.prefillTemplate(registered.item()).setGrpcPort(0);
         assertEquals(PlacementResult.Status.SUCCESS, commitRoute(lifecycle, registered));
         assertThrows(IllegalArgumentException.class, () -> lifecycle.tryClaim(new DecodeResources.ReservationHandle(1L, 710L, 1L), 25L, "victim"));
         assertNull(SchedulerTestSupport.preemption(registered.item().ctx()));

@@ -1,6 +1,5 @@
 package org.flexlb.balance.scheduler;
 
-import io.micrometer.core.instrument.MeterRegistry;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
@@ -22,7 +21,6 @@ import org.flexlb.telemetry.FlexlbTrace;
 import org.flexlb.util.Failures;
 import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.core.env.Environment;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -47,7 +45,7 @@ public class DeliveryDispatcher {
 
     @Autowired
     public DeliveryDispatcher(EngineGrpcClient grpcClient, ConfigService configService,
-            @Autowired(required = false) MeterRegistry registry, DeliveryMetricsReporter telemetry, Environment environment) {
+            DeliveryMetricsReporter telemetry) {
         this.grpcClient = grpcClient;
         this.configService = Objects.requireNonNull(configService);
         this.mode = configService.loadBalanceConfig().getDispatcher().getType();
@@ -159,8 +157,7 @@ public class DeliveryDispatcher {
                 if (claim != null) { claims.add(claim); }
             } catch (Throwable failure) {
                 try { member.route().ctx().data().getScheduler().onDeliveryEvidence(null,
-                        new ContextResult.PreparationFailure(null, member.route(), failure,
-                                String.valueOf(failure.getMessage()), System.currentTimeMillis())); }
+                        new ContextResult.PreparationFailure(null, member.route(), String.valueOf(failure.getMessage()), System.currentTimeMillis())); }
                 catch (Throwable ownerFailure) {
                     member.route().ctx().data().getScheduler().runtime.recordFailure(ownerFailure);
                     logFailure("Claim failure notification", batch.batchId(), ownerFailure);
@@ -215,7 +212,7 @@ public class DeliveryDispatcher {
         }
     }
 
-    private static void report(long batchId, List<DeliveryClaim> claims, List<DeliveryResult> results) {
+    private void report(long batchId, List<DeliveryClaim> claims, List<DeliveryResult> results) {
         long responseNanos = System.nanoTime();
         for (int i = 0; i < claims.size(); i++) {
             var claim = claims.get(i);
@@ -225,11 +222,18 @@ public class DeliveryDispatcher {
                         claim.owner().data().getBatchDispatchedNanos(), responseNanos); }
                 catch (Throwable failure) { logFailure("Response trace", batchId, failure); }
             }
-            try { claim.owner().data().getScheduler().onDeliveryEvidence(claim,
+            try { DeliveryCleanup.publish(claim,
                     new ContextResult.TransportResult(claim, result, System.currentTimeMillis())); }
             catch (Throwable failure) {
                 claim.owner().data().getScheduler().runtime.recordFailure(failure);
                 logFailure("Delivery completion request_id=" + claim.item().requestId(), batchId, failure);
+            } finally {
+                var state = claim.owner().snapshot();
+                if (state.phase() != ContextResult.Phase.CLOSED && state.delivery() != null
+                        && state.delivery().identity() == claim && state.delivery().abandonment() != null) {
+                    stop(claim);
+                    cleanup.sent(claim);
+                }
             }
         }
     }
@@ -240,8 +244,7 @@ public class DeliveryDispatcher {
             for (Member member : batch.members()) {
                 if (claims.stream().anyMatch(value -> value.item() == member.route())) { continue; }
                 try { member.route().ctx().data().getScheduler().onDeliveryEvidence(null,
-                        new ContextResult.PreparationFailure(null, member.route(), failure,
-                                String.valueOf(failure.getMessage()), System.currentTimeMillis())); }
+                        new ContextResult.PreparationFailure(null, member.route(), String.valueOf(failure.getMessage()), System.currentTimeMillis())); }
                 catch (Throwable ownerFailure) {
                     member.route().ctx().data().getScheduler().runtime.recordFailure(ownerFailure);
                     logFailure("Preparation failure notification", batch.batchId(), ownerFailure);
@@ -267,10 +270,18 @@ public class DeliveryDispatcher {
         catch (Throwable ignored) { }
     }
 
-    /** Deduplication ends only at physical settlement, independently of the bounded transport session. */
-    CompletableFuture<Void> cleanupDelivery(DeliveryClaim claim, EngineGrpcClient client, SchedulerRuntime runtime) {
-        return cleanup.start(claim, client, runtime);
+    /** Accept the entire stop operation; callers do not drive retries or sender completion. */
+    CompletableFuture<DeliveryCleanup.Result> stop(DeliveryClaim claim) {
+        var runtime = claim.owner().data().getScheduler().runtime;
+        return cleanup.start(claim, runtime.engineClient, runtime);
     }
+
+    public CompletableFuture<EngineGrpcClient.CancelReply> preempt(PreemptionRegistration registration, long timeoutMs) {
+        var runtime = registration.owner().data().getScheduler().runtime;
+        return cleanup.preempt(registration, runtime.engineClient, runtime, timeoutMs);
+    }
+
+    void awaitStops(SchedulerRuntime runtime) { cleanup.await(runtime); }
 
     private void logDispatch(long batchId, List<RequestRoute> items,
                              PrefillEndpoint prefillEp, long predMs, String reason) {

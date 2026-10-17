@@ -339,7 +339,7 @@ class WorkerBatcherSchedulingTest {
             if (expired) { verify(events).onQueueEvent(request, AbstractRequestScheduler.QueueKind.EXPIRED, null, null); }
             else { verify(events).onDeliveryEvidence(org.mockito.ArgumentMatchers.isNull(),
                     org.mockito.ArgumentMatchers.argThat(e -> e instanceof ContextResult.PreparationFailure failed
-                            && failed.route() == request && failed.cause() == admissionFailure)); }
+                            && failed.route() == request && failed.detail().equals(admissionFailure.getMessage()))); }
             assertEquals(0, state.progress().queueDepth());
             assertTrue(state.retireGenerationOwnership().ownedItems().isEmpty());
         } finally {
@@ -373,7 +373,7 @@ class WorkerBatcherSchedulingTest {
             org.springframework.test.util.ReflectionTestUtils.invokeMethod(runtime, "processQueue");
             verify(events).onDeliveryEvidence(org.mockito.ArgumentMatchers.isNull(),
                     org.mockito.ArgumentMatchers.argThat(e -> e instanceof ContextResult.PreparationFailure failed
-                            && failed.route() == request && failed.cause() == failure));
+                            && failed.route() == request && failed.detail().equals(failure.getMessage())));
             verify(endpoint, times(1)).signal(PrefillEndpoint.Signal.PLACEMENT);
             assertEquals(0, state.progress().queueDepth());
         } finally {

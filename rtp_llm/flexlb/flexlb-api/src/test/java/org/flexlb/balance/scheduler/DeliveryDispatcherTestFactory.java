@@ -36,7 +36,7 @@ public final class DeliveryDispatcherTestFactory {
 
         private RuntimeSizedDispatcher(EngineGrpcClient client, ConfigService config,
                                        DeliveryMetricsReporter reporter) {
-            super(client, config, null, reporter, null);
+            super(client, config, reporter);
             this.config = config;
         }
     }

@@ -72,7 +72,7 @@ class DecodeCapacityAcquirerTest {
         engineClient = mock(EngineGrpcClient.class);
         requests = mock(AbstractRequestScheduler.class);
         blockedEndpoint = mock(WorkerEndpoint.class);
-        acquirer = new DecodeCapacityAcquirer(engineClient, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(requests), mock(org.flexlb.balance.scheduler.SchedulerRuntime.class), reporter, SchedulingTestConfig.configService(SchedulingTestConfig.newConfig()), SchedulingTestConfig.capacity(SchedulingTestConfig.newConfig()));
+        acquirer = new DecodeCapacityAcquirer(mock(org.flexlb.balance.scheduler.DeliveryDispatcher.class), org.flexlb.balance.scheduler.SchedulerTestSupport.repository(requests), mock(org.flexlb.balance.scheduler.SchedulerRuntime.class), reporter, SchedulingTestConfig.configService(SchedulingTestConfig.newConfig()), SchedulingTestConfig.capacity(SchedulingTestConfig.newConfig()));
         acquirer = org.mockito.Mockito.spy(acquirer);
     }
 
@@ -125,7 +125,7 @@ class DecodeCapacityAcquirerTest {
         org.springframework.test.util.ReflectionTestUtils.invokeMethod(context.data(), "register", requests, future);
         org.flexlb.balance.scheduler.SchedulerTestSupport.bindOwner(context, requests);
         var frozenRequest = context.data().getRequest();
-        acquirer = org.mockito.Mockito.spy(new DecodeCapacityAcquirer(engineClient,
+        acquirer = org.mockito.Mockito.spy(new DecodeCapacityAcquirer(mock(org.flexlb.balance.scheduler.DeliveryDispatcher.class),
                 org.flexlb.balance.scheduler.SchedulerTestSupport.repository(requests), mock(org.flexlb.balance.scheduler.SchedulerRuntime.class),
                 reporter, SchedulingTestConfig.configService(config), SchedulingTestConfig.capacity(config)));
         org.mockito.Mockito.doReturn(completion).when(acquirer).preempt(any(), any());
@@ -178,7 +178,7 @@ class DecodeCapacityAcquirerTest {
         config.getRouter().getRoles().getDecode().getAvailability()
                 .setMaxEngineRequests(capacityBlocked ? 1L : 4L);
         when(context.data().getConfig()).thenReturn(config);
-        acquirer = org.mockito.Mockito.spy(new DecodeCapacityAcquirer(engineClient,
+        acquirer = org.mockito.Mockito.spy(new DecodeCapacityAcquirer(mock(org.flexlb.balance.scheduler.DeliveryDispatcher.class),
                 org.flexlb.balance.scheduler.SchedulerTestSupport.repository(requests),
                 mock(org.flexlb.balance.scheduler.SchedulerRuntime.class), reporter,
                 SchedulingTestConfig.configService(config), SchedulingTestConfig.capacity(config)));

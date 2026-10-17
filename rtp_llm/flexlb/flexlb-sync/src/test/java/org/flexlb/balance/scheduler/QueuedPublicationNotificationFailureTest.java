@@ -5,7 +5,6 @@ import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.EndpointTestSupport;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.strategy.WorkerAssignment;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.VictimStage;
@@ -212,9 +211,11 @@ class QueuedPublicationNotificationFailureTest {
         RequestRoute select(RequestContext context) {
             var p = metadata(context, RoleType.PREFILL, prefill);
             var d = metadata(context, RoleType.DECODE, decode);
-            return RequestRoute.prepare(context, List.of(
-                    WorkerAssignment.prefill(prefill.tryPinGeneration(), p, 1L, prefill.ownership.progress().ownershipVersion()),
-                    WorkerAssignment.decode(decode.tryPinGeneration(), d, decode.placementVersion())));
+            return SchedulingTestConfig.prepareRoute(context, route -> {
+                route.add(prefill.tryPinGeneration(), p, 1L, prefill.ownership.progress().ownershipVersion());
+                route.add(decode.tryPinGeneration(), d, -1L, decode.placementVersion());
+                return org.flexlb.balance.PlacementResult.success(route);
+            }).value();
         }
 
         RequestRoute publish(RequestContext context) {

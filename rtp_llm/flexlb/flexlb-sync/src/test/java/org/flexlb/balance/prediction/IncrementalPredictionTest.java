@@ -1,13 +1,10 @@
 package org.flexlb.balance.prediction;
 
-import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.projection.QueueSnapshot;
 import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.scheduler.RouteProjectionTestSupport;
-import org.flexlb.balance.scheduler.SchedulingTestConfig;
-import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
@@ -84,7 +81,7 @@ class IncrementalPredictionTest {
     @Test
     void projectionMatchesFullEvaluationAcrossExpiryPriorityAndProbePositions() throws Exception {
         var model = new FormulaPredictor(formula());
-        var policy = org.flexlb.balance.projection.RouteProjection.forDelivery(org.flexlb.balance.scheduler.DeliveryTestSupport.batch(() -> CapacityBoundary.Attempt.rejected(CapacityBoundary.OWNERSHIP_LOST), () -> 1L, mock(DeliveryMetricsReporter.class), SchedulingTestConfig.capacity(SchedulingTestConfig.newConfig()), 2).mode());
+        var policy = org.flexlb.balance.projection.RouteProjection.forDelivery(org.flexlb.config.DispatcherConfig.Type.BATCH);
         var full = new PrefillTimePredictor.Evaluator() {
             public long estimateMs(long t, long h) { return model.estimateMs(t, h); }
             public double predictBatchMs(PrefillBatchFeatures f) { return model.predictBatchMs(f); }
@@ -142,7 +139,7 @@ class IncrementalPredictionTest {
                 return (t, h) -> ++count[0] * 250.25;
             }
         };
-        var strategy = org.flexlb.balance.scheduler.DeliveryTestSupport.batch(() -> CapacityBoundary.Attempt.rejected(CapacityBoundary.OWNERSHIP_LOST), () -> 1L, mock(DeliveryMetricsReporter.class), SchedulingTestConfig.capacity(SchedulingTestConfig.newConfig()), 2);
+        var mode = org.flexlb.config.DispatcherConfig.Type.BATCH;
         var items = new ArrayList<org.flexlb.balance.scheduler.RequestRoute>();
         for (int i = 0; i < 4; i++) {
             var request = mock(org.flexlb.balance.scheduler.RequestRoute.class);
@@ -152,7 +149,7 @@ class IncrementalPredictionTest {
         }
         var selected = GroupPlanner.selectWithPrediction(items,
                 new GroupPlanner.Constraints(64, 100_000, 100_000, 700, 700),
-                org.flexlb.balance.projection.RouteProjection.newGroupPredictor(strategy.mode(), evaluator));
+                org.flexlb.balance.projection.RouteProjection.newGroupPredictor(mode, evaluator));
         assertEquals(items.subList(0, 2), selected.items());
         assertEquals(500.5, selected.selectedPredictionMs().orElseThrow());
         assertEquals(501L, PrefillPredictionBoundary.committedDecisionGroupMs(
@@ -161,12 +158,12 @@ class IncrementalPredictionTest {
         // A second snapshot must receive fresh accumulation state.
         assertEquals(selected, GroupPlanner.selectWithPrediction(items,
                 new GroupPlanner.Constraints(64, 100_000, 100_000, 700, 700),
-                org.flexlb.balance.projection.RouteProjection.newGroupPredictor(strategy.mode(), evaluator)));
+                org.flexlb.balance.projection.RouteProjection.newGroupPredictor(mode, evaluator)));
     }
 
     @Test
     void serviceReusesOnlyEvaluatedPrefixesFromItsOwnPlanningCursor() {
-        var strategy = org.flexlb.balance.scheduler.DeliveryTestSupport.batch(() -> CapacityBoundary.Attempt.rejected(CapacityBoundary.OWNERSHIP_LOST), () -> 1L, mock(DeliveryMetricsReporter.class), SchedulingTestConfig.capacity(SchedulingTestConfig.newConfig()), 2);
+        var mode = org.flexlb.config.DispatcherConfig.Type.BATCH;
         int[] fullCalls = {0};
         var predictions = new RouteProjection.Predictions() {
             public long itemDurationMs(GroupPlanner.Item i) { return 100; }
@@ -182,7 +179,7 @@ class IncrementalPredictionTest {
             }
         };
         var items = List.of(item(1, 100, 0, 100_000), item(2, 100, 0, 100_000), item(3, 100, 0, 100_000));
-        var policy = org.flexlb.balance.projection.RouteProjection.forDelivery(strategy.mode());
+        var policy = org.flexlb.balance.projection.RouteProjection.forDelivery(mode);
         var cursor = policy.planning(predictions);
         assertEquals(200.5, cursor.durationMs(items, 1)); // only through probe, not suffix
         assertEquals(201, policy.completionOffsetMs(items, 1, predictions, cursor));
@@ -195,7 +192,7 @@ class IncrementalPredictionTest {
 
     @Test
     void appendCursorKeepsLatestAndOvershootPredecessorAndRecomputesOlderPrefixes() {
-        var policy = org.flexlb.balance.projection.RouteProjection.forDelivery(org.flexlb.balance.scheduler.DeliveryTestSupport.batch(() -> CapacityBoundary.Attempt.rejected(CapacityBoundary.OWNERSHIP_LOST), () -> 1L, mock(DeliveryMetricsReporter.class), SchedulingTestConfig.capacity(SchedulingTestConfig.newConfig()), 2).mode());
+        var policy = org.flexlb.balance.projection.RouteProjection.forDelivery(org.flexlb.config.DispatcherConfig.Type.BATCH);
         int[] appended = {0};
         int[] recomputed = {0};
         var predictions = new RouteProjection.Predictions() {

@@ -1,20 +1,17 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.QueueSnapshot;
 import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.balance.projection.RouteTimelineProjector;
 import org.flexlb.balance.projection.WorkSnapshot;
-import org.flexlb.service.monitor.DeliveryMetricsReporter;
 
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 
 import static com.google.common.base.Preconditions.checkArgument;
-import static org.mockito.Mockito.mock;
 
 /**
  * Frozen-value builders shared by canonical route-projection tests.
@@ -33,9 +30,9 @@ public final class RouteProjectionTestSupport {
                     .thenComparingLong(GroupPlanner.Item::enqueueSeq)
                     .thenComparingLong(GroupPlanner.Item::requestId);
 
-    static final RouteProjection.DeliveryProjection ROUTE = org.flexlb.balance.projection.RouteProjection.forDelivery(DeliveryTestSupport.route(mock(DeliveryMetricsReporter.class), SchedulingTestConfig.capacity(SchedulingTestConfig.newConfig())).mode());
+    static final RouteProjection.DeliveryProjection ROUTE = org.flexlb.balance.projection.RouteProjection.forDelivery(org.flexlb.config.DispatcherConfig.Type.NON_BATCH);
 
-    static final RouteProjection.DeliveryProjection BATCH = org.flexlb.balance.projection.RouteProjection.forDelivery(DeliveryTestSupport.batch(() -> CapacityBoundary.Attempt.rejected(CapacityBoundary.OWNERSHIP_LOST), () -> 1L, mock(DeliveryMetricsReporter.class), SchedulingTestConfig.capacity(SchedulingTestConfig.newConfig()), 2).mode());
+    static final RouteProjection.DeliveryProjection BATCH = org.flexlb.balance.projection.RouteProjection.forDelivery(org.flexlb.config.DispatcherConfig.Type.BATCH);
 
     static final PrefillTimePredictor.Evaluator TOKEN_EVALUATOR = new PrefillTimePredictor.Evaluator() {
 

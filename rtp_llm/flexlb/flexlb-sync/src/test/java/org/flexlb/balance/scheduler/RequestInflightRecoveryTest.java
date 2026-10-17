@@ -164,7 +164,7 @@ class RequestInflightRecoveryTest {
                 var state = (org.flexlb.balance.endpoint.PrefillState) ReflectionTestUtils.getField(f.prefill, "ownership");
                 ReflectionTestUtils.setField(f.owner.runtime.deliveries(), "decodeDeliveryCapacity", f.capacity);
                 var worker = new WorkerBatcher("ordered-prefix", f.prefill, QueueExecutionSettings.capture(f.config),
-                        new DeliveryDispatcher(null, DeliveryTestSupport.service(f.config), null, new DeliveryMetricsReporter(null), null), state);
+                        new DeliveryDispatcher(null, DeliveryTestSupport.service(f.config), new DeliveryMetricsReporter(null)), state);
                 var boundary = worker.processSelection(List.of(f.route, behindHead), "ordered-prefix",
                         mock(PrefillTimePredictor.Evaluator.class), java.util.OptionalLong.empty());
                 assertNotNull(boundary, "The ordered prefix cannot skip its blocked head");
@@ -212,7 +212,7 @@ class RequestInflightRecoveryTest {
             owner = SchedulerTestSupport.create(service, reporter, mock(RequestSchedulerReporter.class),
                     mock(RecentCacheKeyTraceReporter.class));
             endpoints = new EndpointRegistry(service, owner.requests, reporter,
-                    DeliveryTestSupport.route(reporter, SchedulingTestConfig.capacity(config)),
+                    DeliveryTestSupport.route(reporter),
                     new PlacementAvailability());
             ReflectionTestUtils.setField(owner.runtime, "endpoints", endpoints);
             when(SchedulerTestSupport.engineClient(owner).cancelAsync(any(), anyInt(), any(), anyLong()))

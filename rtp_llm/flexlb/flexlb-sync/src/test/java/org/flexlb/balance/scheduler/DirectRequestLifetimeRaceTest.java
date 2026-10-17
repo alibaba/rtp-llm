@@ -10,7 +10,6 @@ import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
 import org.flexlb.balance.strategy.VitWorkerSelector;
-import org.flexlb.balance.strategy.WorkerAssignment;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.config.SchedulerConfig;
@@ -63,19 +62,9 @@ class DirectRequestLifetimeRaceTest {
             metadata.setServerIp("127.0.0.1");
             metadata.setHttpPort(8080);
             metadata.setGrpcPort(8081);
-            var selection = mock(WorkerAssignment.class);
-            when(selection.serverStatus()).thenReturn(metadata);
-            when(selection.requestId()).thenReturn(metadata.getRequestId());
-            when(selection.role()).thenReturn(metadata.getRole());
-            when(selection.group()).thenReturn(metadata.getGroup());
-            when(selection.prefillWorkMs()).thenReturn(30_000L);
-            when(selection.generationPin()).thenReturn(pin);
-            when(selection.endpoint()).thenReturn(prefill);
-            var selectionOpen = new java.util.concurrent.atomic.AtomicBoolean(true);
-            org.mockito.Mockito.doAnswer(call -> {
-                if (selectionOpen.compareAndSet(true, false)) { pin.close(); }
-                return null;
-            }).when(selection).close();
+            when(pin.isOpen()).thenReturn(true);
+            when(prefill.getIp()).thenReturn(metadata.getServerIp());
+            when(prefill.getHttpPort()).thenReturn(metadata.getHttpPort());
             var reservation = mock(PrefillState.RouteReservation.class);
             when(prefill.reserveUnqueuedRoute(eq(pin), any(), eq(30_000L)))
                     .thenReturn(new PrefillState.ReservationResult<>(PrefillState.CapacityStatus.ACQUIRED, reservation));
@@ -85,8 +74,8 @@ class DirectRequestLifetimeRaceTest {
             when(handoff.precedingWork()).thenReturn(capture);
             when(prefill.commit(any(PrefillState.CommitPlan.class))).thenReturn(handoff);
             var prefillSelector = mock(CostBasedPrefillStrategy.class);
-            when(prefillSelector.select(context.data().getRequest(), context.data().getSchedulingMetadata(), RoleType.PDFUSION, null))
-                    .thenReturn(PlacementResult.success(selection));
+            when(prefillSelector.select(org.mockito.ArgumentMatchers.eq(context.data().getRequest()), org.mockito.ArgumentMatchers.eq(context.data().getSchedulingMetadata()), org.mockito.ArgumentMatchers.eq(RoleType.PDFUSION), org.mockito.ArgumentMatchers.eq(null), org.mockito.ArgumentMatchers.any(RequestRoute.class)))
+                    .thenAnswer(call -> PlacementResult.success(call.getArgument(4, RequestRoute.class).add(pin, metadata, 30_000L, 0L)));
             var model = mock(ModelMetaConfig.class);
             when(model.requiredRoles()).thenReturn(List.of(RoleType.PDFUSION));
             var router = new RequestWorkerSelector(prefillSelector, mock(DecodeSelector.class),

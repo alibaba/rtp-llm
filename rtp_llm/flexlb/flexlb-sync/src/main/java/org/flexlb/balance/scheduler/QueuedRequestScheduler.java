@@ -1,5 +1,7 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.dao.route.RoleType;
+
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources;
@@ -686,7 +688,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
                     : routing.decodeEp().tryReserveQueuedRequest(routing.decodePin(), routing.requestId(),
                             request.getHardKvTokens(), request.getExpectedKvTokens(), routing.priority(), decodeAdmissionCapacity).handle();
             if (routing.decodeEp() != null && plan.pendingDecodeRollback == null) {
-                return PlacementResult.blocked(routing.decodePlacementKey());
+                return PlacementResult.blocked(routing.placementKey(RoleType.DECODE));
             }
         }
         RequestRoute route = RequestRoute.create(context, routing, plan.pendingDecodeRollback);
@@ -696,7 +698,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
         context.data().setRouteSubmittedNanos(System.nanoTime());
         PlacementResult<RequestRoute, PlacementKey> result = switch (this.commitRoute(route, new QueuePublication(plan, route))) {
             case SUCCESS -> PlacementResult.success(route);
-            case BLOCKED -> PlacementResult.blocked(routing.prefillPlacementKey());
+            case BLOCKED -> PlacementResult.blocked(routing.placementKey(RoleType.PREFILL));
             case CLOSED -> PlacementResult.closed();
             case REJECTED -> throw new IllegalStateException("route commit cannot reject with a response");
         };

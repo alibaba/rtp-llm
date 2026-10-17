@@ -96,6 +96,7 @@ class RequestInactivityTest {
 
     @AfterEach
     void tearDown() {
+        cleanup.complete(EngineGrpcClient.CancelReply.FAILED); // Finish the mock RPC before draining its accepted callback.
         if (registry != null && RequestProtocolTestSupport.closeAdmissionAndAwaitMutations(registry)) {
             registry.closeOutstandingAndTerminalize();
             SchedulerTestSupport.timer(org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry)).close();

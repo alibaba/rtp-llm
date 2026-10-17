@@ -3,10 +3,7 @@ package org.flexlb.balance.delivery;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.RouteProjection;
-import org.flexlb.balance.scheduler.AbstractRequestScheduler;
-import org.flexlb.balance.scheduler.DeliveryDispatcher;
-import org.flexlb.balance.scheduler.SchedulingTestConfig;
-import org.flexlb.service.monitor.DeliveryMetricsReporter;
+import org.flexlb.config.DispatcherConfig;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -19,12 +16,9 @@ import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.mockito.Mockito.mock;
 
 /**
- * Exact-value behavior contracts for the frozen
- * {@link RouteProjection.DeliveryProjection} SPI as implemented by
- * {@link DeliveryDispatcher} and {@link DeliveryDispatcher}.
+ * Exact-value behavior contracts for batch and non-batch delivery projections.
  *
  * <p>Each selected group asks once for either the probe prefix or the complete
  * group. Completion may reuse the exact prefix evaluated by the planning cursor.
@@ -40,12 +34,7 @@ class RouteDeliveryProjectionTest {
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void growingPlanningPrefixReusesOnlyEvaluatedWorkAndResetsForNextQueue(boolean batch) {
-        var requests = mock(AbstractRequestScheduler.class);
-        var metrics = mock(DeliveryMetricsReporter.class);
-        RouteProjection.DeliveryProjection projection = batch
-                ? org.flexlb.balance.projection.RouteProjection.forDelivery(org.flexlb.balance.scheduler.DeliveryTestSupport.batch(() -> CapacityBoundary.Attempt.rejected(
-                        CapacityBoundary.OWNERSHIP_LOST), () -> 1L, metrics, SchedulingTestConfig.capacity(SchedulingTestConfig.newConfig()), 2).mode())
-                : org.flexlb.balance.projection.RouteProjection.forDelivery(org.flexlb.balance.scheduler.DeliveryTestSupport.route(metrics, SchedulingTestConfig.capacity(SchedulingTestConfig.newConfig())).mode());
+        var projection = projection(batch);
         var predictions = new CountingPredictions();
         var first = item(1L, 100L);
         var second = item(2L, 200L);
@@ -187,12 +176,7 @@ class RouteDeliveryProjectionTest {
     }
 
     private static RouteProjection.DeliveryProjection projection(boolean batch) {
-        var requests = mock(AbstractRequestScheduler.class);
-        var metrics = mock(DeliveryMetricsReporter.class);
-        return batch
-                ? org.flexlb.balance.projection.RouteProjection.forDelivery(org.flexlb.balance.scheduler.DeliveryTestSupport.batch(() -> CapacityBoundary.Attempt.rejected(
-                        CapacityBoundary.OWNERSHIP_LOST), () -> 1L, metrics, SchedulingTestConfig.capacity(SchedulingTestConfig.newConfig()), 2).mode())
-                : org.flexlb.balance.projection.RouteProjection.forDelivery(org.flexlb.balance.scheduler.DeliveryTestSupport.route(metrics, SchedulingTestConfig.capacity(SchedulingTestConfig.newConfig())).mode());
+        return RouteProjection.forDelivery(batch ? DispatcherConfig.Type.BATCH : DispatcherConfig.Type.NON_BATCH);
     }
 
     private static final class CountingPredictions

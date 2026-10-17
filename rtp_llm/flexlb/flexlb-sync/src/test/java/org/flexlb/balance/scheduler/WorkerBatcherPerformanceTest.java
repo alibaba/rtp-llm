@@ -226,7 +226,7 @@ class WorkerBatcherPerformanceTest {
         WorkerStatus status = WorkerStatus.createDiscovered(RoleType.PREFILL,
                 "perf", "127.0.0.1", 8080, 8090, "perf-site");
         config.getDispatcher().setType(org.flexlb.config.DispatcherConfig.Type.BATCH);
-        DeliveryDispatcher delivery = new DeliveryDispatcher(null, DeliveryTestSupport.service(config), null, new org.flexlb.service.monitor.DeliveryMetricsReporter(null), null);
+        DeliveryDispatcher delivery = new DeliveryDispatcher(null, DeliveryTestSupport.service(config), new org.flexlb.service.monitor.DeliveryMetricsReporter(null));
         AbstractRequestScheduler scheduler = mock(AbstractRequestScheduler.class);
         var facilities = mock(SchedulerRuntime.class);
         var boundary = CapacityBoundary.unavailable(CapacityBoundary.Resource.DISPATCH_EXECUTOR,
