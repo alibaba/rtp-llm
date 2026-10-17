@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.config.ConfigService;
@@ -42,7 +43,7 @@ class QueuedDecodeWithdrawalTest {
         queue = mock(GlobalQueueCoordinator.class);
         when(queue.requeue(any())).thenReturn(true);
         registry.attachGlobalQueue(queue);
-        decode = new DecodeEndpoint(org.flexlb.balance.endpoint.WorkerStatusTestFixtures.readyForScheduling(WorkerStatus.createDiscovered(RoleType.DECODE, null,
+        decode = new DecodeEndpoint(WorkerStatusTestFixtures.readyForScheduling(WorkerStatus.createDiscovered(RoleType.DECODE, null,
                 "127.0.0.1", 8000, 8001, null)), mock(EndpointEventProjector.class));
     }
 

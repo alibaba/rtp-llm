@@ -99,10 +99,8 @@ class EndpointCleanupDeadlockTest {
 
         private static void verifyTimerClose() throws Exception {
             var config = SchedulingTestConfig.batchConfig();
-            ConfigService service = mock(ConfigService.class);
-            when(service.loadBalanceConfig()).thenReturn(config);
             RequestRegistry registry = mock(RequestRegistry.class);
-            ExpirationTimer timer = new ExpirationTimer(registry, service);
+            ExpirationTimer timer = new ExpirationTimer(registry);
             RequestSlot slot = new RequestSlot(mock(RequestCompletionPublisher.class), RequestLifecycleTestSupport.context(config, 992L),
                     timer, new RequestTerminalCleanup(timer), () -> { });
             CountDownLatch slotHeld = new CountDownLatch(1);

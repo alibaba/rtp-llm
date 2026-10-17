@@ -63,6 +63,40 @@ class KvCacheManagerRetirementTest {
         assertEquals(Set.of(1L), local.getEngineCacheBlocks(ADDRESS));
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void interruptedAdditionRecoversAgainstChangedSnapshot(boolean localFailure) throws Exception {
+        var local = spy(new EngineLocalView());
+        inject(local, "cacheMetricsReporter", mock(CacheMetricsReporter.class));
+        inject(local, "dynamicIntervalManager", mock(org.flexlb.cache.service.DynamicCacheIntervalService.class));
+        var global = spy(new GlobalCacheIndex());
+        var manager = manager(local, global);
+        // The first snapshot has several changes; failure occurs at an arbitrary key.
+        if (localFailure) {
+            doThrow(new IllegalStateException("before local insertion")).doCallRealMethod()
+                    .when(local).addOrUpdateCacheBlock(ADDRESS, 2L);
+        } else {
+            doThrow(new IllegalStateException("before global insertion")).doCallRealMethod()
+                    .when(global).addCacheBlock(2L, ADDRESS, null);
+        }
+        assertThrows(IllegalStateException.class,
+                () -> manager.updateEngineCache(ADDRESS, "PREFILL", Set.of(1L, 2L, 3L), null));
+
+        // The failed key is already gone from the next engine snapshot.
+        manager.updateEngineCache(ADDRESS, "PREFILL", Set.of(3L, 4L), null);
+        assertEquals(Set.of(3L, 4L), local.getEngineCacheBlocks(ADDRESS));
+        assertEquals(2L, global.totalMappings());
+        for (long key : List.of(1L, 2L)) {
+            assertTrue(global.batchCalculatePrefixMatchLength(List.of(ADDRESS), List.of(key)).isEmpty());
+        }
+        for (long key : List.of(3L, 4L)) {
+            assertEquals(java.util.Map.of(ADDRESS, 1),
+                    global.batchCalculatePrefixMatchLength(List.of(ADDRESS), List.of(key)));
+        }
+        manager.removeEngineCache(ADDRESS, null);
+        assertEquals(0L, global.totalMappings());
+    }
+
     @Test
     void partialCleanupFailureRetainsKeysForIdempotentRetryAndPreservesOtherOwners() throws Exception {
         var local = new EngineLocalView();

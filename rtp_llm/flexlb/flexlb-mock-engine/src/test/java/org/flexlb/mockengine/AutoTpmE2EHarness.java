@@ -1,5 +1,6 @@
 package org.flexlb.mockengine;
 
+import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import com.google.protobuf.ByteString;
 import io.grpc.stub.StreamObserver;
 import org.flexlb.balance.PlacementResult;
@@ -31,9 +32,9 @@ import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
-import org.flexlb.dao.master.TaskInfo;
+import org.flexlb.testfixture.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.master.WorkerStatusResponse;
+import org.flexlb.testfixture.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
@@ -334,8 +335,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
         WorkerStatusResponse initial = statusResponse(role, workerStatus(svc, 0L));
         status.lock.lock();
         try {
-            WorkerStatus.PreparedStatus prepared = status.prepareNewStatus(
-                    status.freezeStatusResponse(initial), null);
+            WorkerStatus.PreparedStatus prepared = WorkerStatusTestFixtures.prepare(status, WorkerStatusTestFixtures.observation(status, initial));
             endpointRegistry.publishPreparedEndpoint(
                     status.getIpPort(), status, prepared);
         } finally {

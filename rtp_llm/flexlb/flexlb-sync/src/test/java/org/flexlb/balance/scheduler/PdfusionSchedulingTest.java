@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.delivery.DeliveryResult;
@@ -17,9 +18,9 @@ import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.config.SchedulerConfig;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
-import org.flexlb.dao.master.TaskInfo;
+import org.flexlb.testfixture.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.master.WorkerStatusResponse;
+import org.flexlb.testfixture.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskPhase;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
@@ -86,7 +87,7 @@ class PdfusionSchedulingTest {
                 : new RouteDeliveryStrategy(lifecycle, new DeliveryMetrics(reporter));
         EndpointRegistry endpoints = new EndpointRegistry(service, new EndpointEventProjector(lifecycle), reporter,
                 delivery, availability);
-        WorkerStatus worker = org.flexlb.balance.endpoint.WorkerStatusTestFixtures.readyForScheduling(WorkerStatus.createDiscovered(RoleType.PDFUSION, "g1", "127.0.0.1", 8080, 8081, "test"));
+        WorkerStatus worker = WorkerStatusTestFixtures.readyForScheduling(WorkerStatus.createDiscovered(RoleType.PDFUSION, "g1", "127.0.0.1", 8080, 8081, "test"));
         WorkerStatusResponse status = new WorkerStatusResponse();
         status.setRole(RoleType.PDFUSION);
         status.setAlive(true);
@@ -99,7 +100,7 @@ class PdfusionSchedulingTest {
         worker.lock.lock();
         try {
             endpoints.publishPreparedEndpoint(worker.getIpPort(), worker,
-                    worker.prepareNewStatus(worker.freezeStatusResponse(status), null));
+                    WorkerStatusTestFixtures.prepare(worker, WorkerStatusTestFixtures.observation(worker, status)));
         } finally {
             worker.lock.unlock();
         }
@@ -140,7 +141,7 @@ class PdfusionSchedulingTest {
             worker.lock.lock();
             try {
                 projection = endpoint.applyPreparedStatus(worker,
-                        worker.prepareNewStatus(worker.freezeStatusResponse(status), null));
+                        WorkerStatusTestFixtures.prepare(worker, WorkerStatusTestFixtures.observation(worker, status)));
             } finally {
                 worker.lock.unlock();
             }

@@ -1,5 +1,6 @@
 package org.flexlb.balance.strategy;
 
+import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.delivery.DeliveryStrategy;
@@ -15,9 +16,8 @@ import org.flexlb.balance.scheduler.RouteDeliveryStrategy;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.master.WorkerStatusResponse;
+import org.flexlb.testfixture.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.mockito.Mockito;
@@ -87,10 +87,8 @@ final class StrategyTestSupport {
             WorkerStatus status, WorkerStatusResponse response) {
         status.lock.lock();
         try {
-            WorkerStatus.PreparedStatus prepared = status.prepareNewStatus(
-                    status.freezeStatusResponse(response), null);
+            WorkerStatus.PreparedStatus prepared = WorkerStatusTestFixtures.prepare(status, WorkerStatusTestFixtures.observation(status, response));
             status.publishPreparedStatus(prepared);
-            status.recordSuccessfulPoll(response.isAlive(), null);
         } finally {
             status.lock.unlock();
         }
@@ -118,11 +116,9 @@ final class StrategyTestSupport {
         status.lock.lock();
         try {
             WorkerStatus.PreparedStatus prepared =
-                    status.prepareNewStatus(observation, null);
-            WorkerEndpoint endpoint = registry.publishPreparedEndpoint(
+                    WorkerStatusTestFixtures.prepare(status, observation);
+            return registry.publishPreparedEndpoint(
                     address, status, prepared).endpoint();
-            status.recordSuccessfulPoll(true, null);
-            return endpoint;
         } finally {
             status.lock.unlock();
         }
@@ -157,22 +153,6 @@ final class StrategyTestSupport {
                      result.reservation()) {
             return reservation.commit(items, predictedMs);
         }
-    }
-
-    static void setCacheStatus(
-            WorkerStatus status,
-            long blockSize,
-            long availableKv) {
-        CacheStatus cache = new CacheStatus();
-        cache.setBlockSize(blockSize);
-        cache.setAvailableKvCache(availableKv);
-        WorkerStatusResponse response = response(
-                status.getRole(), status.pollHealth().reportedAlive(),
-                status.getAvailableKvCacheTokens(),
-                status.getTotalKvCacheTokens(),
-                Math.max(1L, status.appliedStatusCursor().statusVersion() + 1L));
-        response.setCacheStatus(cache);
-        publish(status, response);
     }
 
     private static final class TestRequestRuntime {

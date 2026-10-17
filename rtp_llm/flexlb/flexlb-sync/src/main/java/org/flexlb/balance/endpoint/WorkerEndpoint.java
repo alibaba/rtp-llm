@@ -128,10 +128,11 @@ public class WorkerEndpoint {
      * the point of the pin: a capture which linearized before registry detach
      * may finish its already accepted handoff. The owner must close the pin on
      * every selected, rejected, and exceptional path.</p>
+     *
+     * <p>New scheduling admissions require an available worker generation.</p>
      */
-    /** New scheduling admissions require a fresh applied snapshot. */
     public final GenerationPin tryPinSchedulingGeneration() {
-        return hasFreshSchedulingStatus() ? tryPinGeneration() : null;
+        return hasAvailableSchedulingStatus() ? tryPinGeneration() : null;
     }
 
     public final GenerationPin tryPinGeneration() {
@@ -145,8 +146,8 @@ public class WorkerEndpoint {
                         permit);
     }
 
-    protected final boolean hasFreshSchedulingStatus() {
-        return status.isSchedulingStatusFresh(System.nanoTime()/1000);
+    protected final boolean hasAvailableSchedulingStatus() {
+        return status.isAvailableForScheduling();
     }
 
     /** Validate an exact, still-open pin before consuming its admission right. */

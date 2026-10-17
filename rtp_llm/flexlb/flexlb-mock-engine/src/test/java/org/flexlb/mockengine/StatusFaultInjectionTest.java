@@ -1,5 +1,7 @@
 package org.flexlb.mockengine;
 
+import org.flexlb.testfixture.TaskInfo;
+
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.grpc.stub.StreamObserver;

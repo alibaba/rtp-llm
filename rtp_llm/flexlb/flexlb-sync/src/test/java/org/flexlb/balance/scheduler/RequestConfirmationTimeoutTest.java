@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
@@ -14,7 +15,7 @@ import org.flexlb.config.SchedulerConfig;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.master.WorkerStatusResponse;
+import org.flexlb.testfixture.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
@@ -64,8 +65,7 @@ class RequestConfirmationTimeoutTest {
             prefillWorker.lock.lock();
             try {
                 prefill = (PrefillEndpoint) endpoints.publishPreparedEndpoint(prefillWorker.getIpPort(),
-                        prefillWorker, prefillWorker.prepareNewStatus(
-                                prefillWorker.freezeStatusResponse(status(RoleType.PREFILL)), null)).endpoint();
+                        prefillWorker, WorkerStatusTestFixtures.prepare(prefillWorker, WorkerStatusTestFixtures.observation(prefillWorker, status(RoleType.PREFILL)))).endpoint();
             } finally {
                 prefillWorker.lock.unlock();
             }
@@ -174,7 +174,7 @@ class RequestConfirmationTimeoutTest {
     }
 
     private static WorkerStatus worker(RoleType role, String ip) {
-        return org.flexlb.balance.endpoint.WorkerStatusTestFixtures.readyForScheduling(WorkerStatus.createDiscovered(role, "g1", ip, 8080, 8081, "test"));
+        return WorkerStatusTestFixtures.readyForScheduling(WorkerStatus.createDiscovered(role, "g1", ip, 8080, 8081, "test"));
     }
 
     private static WorkerStatusResponse status(RoleType role) {
@@ -197,7 +197,7 @@ class RequestConfirmationTimeoutTest {
         worker.lock.lock();
         try {
             projection = endpoint.applyPreparedStatus(worker,
-                    worker.prepareNewStatus(worker.freezeStatusResponse(response), null));
+                    WorkerStatusTestFixtures.prepare(worker, WorkerStatusTestFixtures.observation(worker, response)));
         } finally {
             worker.lock.unlock();
         }
