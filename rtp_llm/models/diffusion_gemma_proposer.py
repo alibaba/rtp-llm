@@ -92,6 +92,7 @@ class DiffusionGemmaProposerWeightInfo(ModelDeployWeightInfo):
         tiny.cache_type = KVCacheSpecType.MultiHeadAttention
         tiny.mha_kv_head_num = 1
         tiny.mha_size_per_head = 64
+        tiny.dtype = DataType.TYPE_BF16
         layer_weights = [[]]
         return ModelWeightInfo(layer_weights=layer_weights, weights=weights)
 
@@ -162,6 +163,7 @@ class DiffusionGemmaProposer(BaseModel):
         tiny.cache_type = KVCacheSpecType.MultiHeadAttention
         tiny.mha_kv_head_num = 1
         tiny.mha_size_per_head = 64
+        tiny.dtype = DataType.TYPE_BF16
         config.kv_cache_spec_descs = [[tiny]]
         return config
 

@@ -74,6 +74,7 @@ def build_diffusion_gemma_kv_spec_descs(config: "DiffusionGemmaConfig") -> list:
             swa.tag = "swa_kv"
             swa.cache_type = KVCacheSpecType.MultiHeadAttention
             swa.group_type = CacheGroupType.SWA
+            swa.dtype = DataType.TYPE_BF16
             descs.append([swa])
         else:
             g = KVCacheSpecDesc()
@@ -81,6 +82,7 @@ def build_diffusion_gemma_kv_spec_descs(config: "DiffusionGemmaConfig") -> list:
             g.cache_type = KVCacheSpecType.MultiHeadAttention
             g.mha_kv_head_num = int(config.dgm_global_kv_head_num)
             g.mha_size_per_head = int(config.dgm_global_head_dim)
+            g.dtype = DataType.TYPE_BF16
             descs.append([g])
     return descs
 
@@ -106,7 +108,7 @@ class DiffusionGemma(BaseModel):
         config.attn_config.is_causal = True
         config.attn_config.sliding_window = int(text["sliding_window"])
         config.attn_config.rope_config.style = 1  # RopeStyle.Base
-        config.attn_config.dtype = DataType.TYPE_BF16
+        config.attn_config.dtype = torch.bfloat16
         config.num_layers = int(text["num_hidden_layers"])
         config.hidden_size = int(text["hidden_size"])
         config.vocab_size = int(text["vocab_size"])
