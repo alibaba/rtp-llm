@@ -23,6 +23,17 @@ IMAGE_TOKEN = "<|image|>"
 
 
 class DiffusionGemmaRenderer(BasicRenderer):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # BasicRenderer adds every tokenizer additional_special_token as a
+        # stop word. DiffusionGemma responses legitimately begin with the
+        # <|think|>/<|channel|> marker (id 100) and use other template tokens
+        # inside the answer, so the blanket stop list truncates every
+        # generation to one empty token. Reset it to the model's real EOS ids
+        # (generation_config eos_token_id: 1 and 106).
+        self.extra_stop_words = []
+        self.extra_stop_word_ids_list = [[1], [106]]
+
     def _collect_mm_inputs(
         self, request: ChatCompletionRequest
     ) -> Tuple[List[str], List[MMUrlType], List[MMPreprocessConfig]]:
