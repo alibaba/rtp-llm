@@ -37,3 +37,16 @@ py_test(
     ],
     exec_properties = {"gpu": "H20_CU13"},
 )
+
+py_test(
+    name = "trtllm_mla_block_table_scatter_test",
+    srcs = ["trtllm_mla_block_table_scatter_test.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+    tags = [
+        "SM103_CU13",
+        "manual",
+    ],
+    exec_properties = {"gpu": "SM103_CU13"},
+)
