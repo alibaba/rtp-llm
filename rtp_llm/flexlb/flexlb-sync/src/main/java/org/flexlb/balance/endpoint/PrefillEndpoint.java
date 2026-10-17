@@ -1,5 +1,6 @@
 package org.flexlb.balance.endpoint;
 
+import lombok.Getter;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.prediction.FormulaPredictor;
@@ -70,8 +71,9 @@ public class PrefillEndpoint extends WorkerEndpoint {
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
     private static final PrefillTimePredictor.Evaluator DEFAULT_BATCH_PREDICTOR = new FormulaPredictor(
             new RoutingConfig.ExecutionTimeEstimatorConfig().getExpression());
+    @Getter
     private final PrefillTimePredictor predictor;
-    private final long inflightRequestLimit;
+    private final Supplier<FlexlbConfig> configSupplier;
     private final WorkerBatcher runtime;
     private final PrefillState prefillState;
     private final EndpointEventProjector endpointEvents;
@@ -104,17 +106,15 @@ public class PrefillEndpoint extends WorkerEndpoint {
                     BatchSchedulerReporter reporter,
                     PlacementAvailability placementAvailability) {
         super(status);
-        FlexlbConfig config = configSupplier.get();
+        this.configSupplier = configSupplier;
         this.reporter = java.util.Objects.requireNonNull(reporter, "reporter");
         this.endpointEvents = java.util.Objects.requireNonNull(
                 endpointEvents, "endpointEvents");
         this.placementAvailability = java.util.Objects.requireNonNull(
                 placementAvailability, "placementAvailability");
-        this.predictor = createPredictor(config);
-        this.inflightRequestLimit = config.getDispatcher().getType() == DispatcherConfig.Type.NON_BATCH
-                ? config.getDispatcher().getMaxInflightPerPrefillWorker() : 0L;
+        this.predictor = createPredictor(configSupplier.get());
         this.runtime = new WorkerBatcher(
-                status.getLogicalIpPort(), this, configSupplier,
+                status.getLogicalIpPort(), this, configSupplier.get(),
                 deliveryStrategy, endpointEvents);
         this.prefillState = runtime.ownedState();
     }
@@ -305,16 +305,16 @@ public class PrefillEndpoint extends WorkerEndpoint {
     }
 
     /** Explain a failed admission using the current owner-priority summary. */
-    public AdmissionRejectReason admissionRejectReason(int priority) {
+    public AdmissionRejectReason admissionRejectReason(int priority, long inflightRequestLimit) {
         return prefillState.admissionRejectReason(priority, inflightRequestLimit);
     }
 
     /** Advisory capacity; publication repeats the count check under the ownership lock. */
-    public boolean canAcceptRequest() {
+    public boolean canAcceptRequest(long inflightRequestLimit) {
         return inflightRequestLimit == 0L || prefillState.canAcceptRequest(inflightRequestLimit);
     }
 
-    public boolean canPreemptQueuedRequest(int priority) {
+    public boolean canPreemptQueuedRequest(int priority, long inflightRequestLimit) {
         return prefillState.canPreemptQueuedRequest(priority, inflightRequestLimit);
     }
 
@@ -325,12 +325,14 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
     /**
      * Admit on the selected generation using its current canonical occupancy
-     * and bound dispatcher policy. The pin preserves generation identity while
+     * and the request's dispatcher policy. The pin preserves generation identity while
      * PrefillState checks and occupies capacity under its ownership lock.
      */
-    public PrefillState.ReservationResult<PrefillState.RouteReservation> reserveUnqueuedRoute(
-            GenerationPin pin, ScheduledRequest item, long predictedMs) {
+    public PrefillState.ReservationResult<PrefillState.RouteReservation> reserveUnqueuedRoute(GenerationPin pin,
+                                                                                               ScheduledRequest item,
+                                                                                               long predictedMs) {
         requirePinnedGeneration(pin);
+        long inflightRequestLimit = item.ctx().getConfig().getDispatcher().getMaxInflightPerPrefillWorker();
         return prefillState.reserveUnqueuedRoute(item, predictedMs, inflightRequestLimit);
     }
 
@@ -525,10 +527,6 @@ public class PrefillEndpoint extends WorkerEndpoint {
                 .totalRemainingWorkMs();
     }
 
-    public PrefillTimePredictor getPredictor() {
-        return predictor;
-    }
-
     // ==================== Metrics ====================
 
     /**
@@ -552,7 +550,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
         }
         PrefillState.Stats stats = prefillState.stats();
         reporter.reportInflightBatchCount(role, engineIp, stats.batchCount());
-        if (inflightRequestLimit > 0L) {
+        if (configSupplier.get().getDispatcher().getType() == DispatcherConfig.Type.NON_BATCH) {
             reporter.reportInflightRequestCount(role, engineIp, stats.inflightRequests());
             reporter.reportWorkerStatusUnconfirmedRequestCount(role, engineIp, stats.workerStatusUnconfirmedRequests());
         } else {

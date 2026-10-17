@@ -10,6 +10,7 @@ import org.flexlb.cache.domain.CacheMatchQuery;
 import org.flexlb.cache.domain.CacheMatchResult;
 import org.flexlb.cache.domain.CacheMatchSource;
 import org.flexlb.cache.match.CacheAwareService;
+import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.RoutingConfig;
 import org.flexlb.config.VictimStage;
@@ -57,22 +58,23 @@ public class CostBasedPrefillStrategy {
         this.engineHealthReporter = engineHealthReporter;
     }
 
-    public PlacementResult<SelectedRole, RoleType> select(
-            BalanceContext balanceContext,
-            RoleType roleType,
-            String group) {
+    public PlacementResult<SelectedRole, RoleType> select(BalanceContext balanceContext,
+                                                          RoleType roleType,
+                                                          String group) {
         balanceContext.beginRoutingAttempt(roleType);
         String requestId = balanceContext.getRequestId();
         long seqLen = balanceContext.getRequest().getSeqLen();
         FlexlbConfig config = balanceContext.getConfig();
+        long inflightRequestLimit = config.getDispatcher().getType() == DispatcherConfig.Type.NON_BATCH
+                ? config.getDispatcher().getMaxInflightPerPrefillWorker() : 0L;
 
-        EndpointDiscovery discovery = discoverAvailableEndpoints(balanceContext, roleType, group);
+        EndpointDiscovery discovery = discoverAvailableEndpoints(balanceContext, roleType, group, inflightRequestLimit);
         if (discovery.candidates().isEmpty()) {
             Logger.debug("Prefill select failed: no admission capacity, request_id={}",
                     requestId);
             balanceContext.recordSelectionReason(roleType, "NO_ADMISSION_CAPACITY");
             return classifyAdmissionFailure(
-                    discovery.directory(), balanceContext.getPriority(), roleType, group);
+                    discovery, balanceContext.getPriority(), roleType, group, inflightRequestLimit);
         }
         CacheMatchResult cacheMatchResult =
                 getCacheMatchResult(balanceContext, roleType, group);
@@ -259,20 +261,22 @@ public class CostBasedPrefillStrategy {
                 candidates.ownershipVersion(index));
     }
 
-    private static PlacementResult<SelectedRole, RoleType> classifyAdmissionFailure(
-            List<EndpointRegistry.PrefillRoutingEntry> directory,
-            int priority, RoleType role, String group) {
+    private static PlacementResult<SelectedRole, RoleType> classifyAdmissionFailure(EndpointDiscovery discovery,
+                                                                                    int priority,
+                                                                                    RoleType role,
+                                                                                    String group,
+                                                                                    long inflightRequestLimit) {
         AdmissionRejectReason reason = null;
         int workerCount = 0;
         long observedRequestCount = 0;
-        for (var entry : directory) {
+        for (var entry : discovery.directory()) {
             PrefillEndpoint endpoint = entry.endpoint();
             if (group != null && !group.equals(endpoint.getStatus().topologySnapshot().group())) {
                 continue;
             }
             workerCount++;
             observedRequestCount += endpoint.observedRequestCount();
-            AdmissionRejectReason workerReason = endpoint.admissionRejectReason(priority);
+            AdmissionRejectReason workerReason = endpoint.admissionRejectReason(priority, inflightRequestLimit);
             if (reason == null) {
                 reason = workerReason;
             } else if (reason == AdmissionRejectReason.UNSPECIFIED
@@ -556,10 +560,10 @@ public class CostBasedPrefillStrategy {
         return null;
     }
 
-    private EndpointDiscovery discoverAvailableEndpoints(
-            BalanceContext context,
-            RoleType roleType,
-            String group) {
+    private EndpointDiscovery discoverAvailableEndpoints(BalanceContext context,
+                                                         RoleType roleType,
+                                                         String group,
+                                                         long inflightRequestLimit) {
         List<EndpointRegistry.PrefillRoutingEntry> directory =
                 workerDirectory.prefillRoutingSnapshot(roleType);
         List<EndpointRegistry.PrefillRoutingEntry> matching = new ArrayList<>();
@@ -571,8 +575,8 @@ public class CostBasedPrefillStrategy {
                 continue;
             }
             registered++;
-            if (endpoint.canAcceptRequest()
-                    || preemptQueued && endpoint.canPreemptQueuedRequest(context.getPriority())) {
+            if (endpoint.canAcceptRequest(inflightRequestLimit)
+                    || preemptQueued && endpoint.canPreemptQueuedRequest(context.getPriority(), inflightRequestLimit)) {
                 matching.add(entry);
             }
         }

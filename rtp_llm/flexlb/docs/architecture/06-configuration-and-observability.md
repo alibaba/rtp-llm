@@ -75,6 +75,12 @@ UniConfig 和 Nacos 的内容直接使用同一种配置 JSON，不增加包装�
 请求数上限、KV 百分比预算和请求 KV 需求保持到预留与派发；已派发的请求继续执行。
 环境变量来源只在启动时读取配置。
 
+`dispatcher.maxInflightPerPrefillWorker` 由请求进入 Master 时的配置快照确定。
+NON_BATCH 的候选筛选、排队和最终占位，以及 DIRECT 的候选筛选与占位，
+都使用该请求的上限；BATCH 的批次占位也使用该请求的上限。
+更新后进入的请求使用新值，已进入调度流程的请求保留原有快照。
+降低上限时，已有占位继续保持，直到完成或清理后才按新上限接收请求。
+
 旧的字段级行为变量 `BLOCK_HASH_STRATEGY`、`FLEXLB_LOG_LEVEL`、
 `ENABLE_STDOUT_LOG`、`ENABLE_FALLBACK` 不再覆盖 JSON。行为配置只认
 所选来源的 `FLEXLB_CONFIG` 文档，避免嵌套字段到环境变量名的隐式转换。

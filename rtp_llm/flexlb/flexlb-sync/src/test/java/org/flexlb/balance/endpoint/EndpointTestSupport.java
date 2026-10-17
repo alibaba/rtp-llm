@@ -10,6 +10,8 @@ import org.flexlb.balance.scheduler.RequestRegistry;
 import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
 import org.flexlb.balance.scheduler.RouteDeliveryStrategy;
 import org.flexlb.balance.scheduler.ScheduledRequest;
+import org.flexlb.config.FlexlbConfig;
+import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
@@ -222,6 +224,7 @@ public final class EndpointTestSupport {
     static void commitUnqueued(PrefillEndpoint endpoint, long requestId, long predictedMs) {
         ScheduledRequest item = org.mockito.Mockito.mock(ScheduledRequest.class);
         org.mockito.Mockito.when(item.requestId()).thenReturn(Long.toString(requestId));
+        org.mockito.Mockito.when(item.ctx()).thenReturn(new BalanceContext(new FlexlbConfig()));
         try (var reservation = reserveUnqueued(endpoint, item, predictedMs);
              var commit = endpoint.tryBeginRouteCommitAdmission();
              var handoff = commit.commit(List.of(item), List.of(reservation))) {

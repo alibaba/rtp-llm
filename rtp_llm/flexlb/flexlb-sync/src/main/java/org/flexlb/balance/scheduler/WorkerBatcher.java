@@ -241,8 +241,6 @@ public final class WorkerBatcher {
     private final EndpointEventProjector endpointEvents;
     private final FlexlbConfig config;
     private final Supplier<FlexlbConfig> configSupplier;
-    /** Zero disables request counting for BATCH; fixed for this endpoint generation. */
-    private final long maxOutstandingRequests;
     private final DecisionPolicyConfig fixedWindowDecision;
     private final boolean singleDecision;
     private final boolean queueScheduling;
@@ -312,20 +310,17 @@ public final class WorkerBatcher {
         this(key, prefillEp, () -> config, deliveryStrategy, endpointEvents);
     }
 
-    public WorkerBatcher(
-            String key,
-            PrefillEndpoint prefillEp,
-            Supplier<FlexlbConfig> configSupplier,
-            DeliveryStrategy deliveryStrategy,
-            EndpointEventProjector endpointEvents) {
+    public WorkerBatcher(String key,
+                         PrefillEndpoint prefillEp,
+                         Supplier<FlexlbConfig> configSupplier,
+                         DeliveryStrategy deliveryStrategy,
+                         EndpointEventProjector endpointEvents) {
         this.configSupplier = Objects.requireNonNull(configSupplier, "configSupplier");
         FlexlbConfig config = Objects.requireNonNull(
                 configSupplier.get(), "loadBalanceConfig");
         this.key = key;
         this.prefillEndpoint = prefillEp;
         this.config = config;
-        this.maxOutstandingRequests = config.getDispatcher().getType() == DispatcherConfig.Type.BATCH
-                ? 0L : config.getDispatcher().getMaxInflightPerPrefillWorker();
         this.queueScheduling = config.isQueue();
         this.singleDecision = config.isSingleDecision();
         DecisionPolicyConfig resolvedDecision = queueScheduling
@@ -415,6 +410,7 @@ public final class WorkerBatcher {
             attempt = enqueueUnderLock(item);
             if (!attempt.accepted() && attempt.failure() == null && !stopped
                     && config.allowsPreemption(VictimStage.PREFILL_QUEUED)) {
+                long maxOutstandingRequests = maxOutstandingRequests(item);
                 victims = prefillState.queuedPreemptionVictimsUnderLock(item.priority(), maxOutstandingRequests);
                 if (!victims.isEmpty()) {
                     attempt = replaceQueuedRequestsUnderLock(item, victims);
@@ -442,7 +438,8 @@ public final class WorkerBatcher {
         return attempt.accepted();
     }
 
-    private EnqueueAttempt replaceQueuedRequestsUnderLock(ScheduledRequest incoming, List<ScheduledRequest> victims) {
+    private EnqueueAttempt replaceQueuedRequestsUnderLock(ScheduledRequest incoming,
+                                                          List<ScheduledRequest> victims) {
         List<PrefillState.RouteReservation> reservations = new ArrayList<>(victims.size());
         PrefillState.RouteReservation replacement = null;
         try {
@@ -451,6 +448,7 @@ public final class WorkerBatcher {
                 if (reservation == null) { return new EnqueueAttempt(false, null, null); }
                 reservations.add(reservation);
             }
+            long maxOutstandingRequests = maxOutstandingRequests(incoming);
             replacement = prefillState.replaceQueuedRoutesUnderLock(victims, reservations, incoming, maxOutstandingRequests);
             if (replacement == null) { return new EnqueueAttempt(false, null, null); }
             if (!incoming.bindPublishedRouteReservation(replacement)) {
@@ -469,8 +467,7 @@ public final class WorkerBatcher {
     }
 
     /** Caller holds {@link #queueLock}. */
-    private EnqueueAttempt enqueueUnderLock(
-            ScheduledRequest item) {
+    private EnqueueAttempt enqueueUnderLock(ScheduledRequest item) {
         if (stopped) {
             return new EnqueueAttempt(false, null, null);
         }
@@ -928,11 +925,18 @@ public final class WorkerBatcher {
 
     /** Caller holds {@link #queueLock}. */
     private boolean publishActiveIndexUnderLock(ScheduledRequest item) {
+        long maxOutstandingRequests = maxOutstandingRequests(item);
         boolean published = prefillState.enqueueActiveUnderLock(item, maxOutstandingRequests);
         if (published) {
             queueVersion.incrementAndGet();
         }
         return published;
+    }
+
+    private static long maxOutstandingRequests(ScheduledRequest item) {
+        DispatcherConfig dispatcher = item.ctx().getConfig().getDispatcher();
+        return dispatcher.getType() == DispatcherConfig.Type.BATCH
+                ? 0L : dispatcher.getMaxInflightPerPrefillWorker();
     }
 
     /** Caller holds {@link #queueLock}. */

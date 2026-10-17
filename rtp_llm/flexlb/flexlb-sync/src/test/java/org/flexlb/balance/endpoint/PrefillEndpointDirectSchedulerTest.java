@@ -14,6 +14,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -42,7 +43,7 @@ class PrefillEndpointDirectSchedulerTest {
                 long requestId = id;
                 futures.add(executor.submit(() -> {
                     try (var pin = endpoint.tryPinGeneration()) {
-                        return endpoint.reserveUnqueuedRoute(pin, item(requestId), 10L);
+                        return endpoint.reserveUnqueuedRoute(pin, item(requestId, config), 10L);
                     }
                 }));
             }
@@ -58,14 +59,14 @@ class PrefillEndpointDirectSchedulerTest {
             assertEquals(4, owned.size());
             assertEquals(4, endpoint.observedRequestCount());
             try (var pin = endpoint.tryPinGeneration()) {
-                var full = endpoint.reserveUnqueuedRoute(pin, item(100L), 10L);
+                var full = endpoint.reserveUnqueuedRoute(pin, item(100L, config), 10L);
                 assertEquals(PrefillState.CapacityStatus.CAPACITY_FULL, full.status(),
                         "four exact owners already consume the four-request limit");
             }
             owned.forEach(PrefillState.RouteReservation::close);
             assertEquals(0, endpoint.observedRequestCount());
             try (var pin = endpoint.tryPinGeneration()) {
-                var result = endpoint.reserveUnqueuedRoute(pin, item(65L), 10L);
+                var result = endpoint.reserveUnqueuedRoute(pin, item(65L, config), 10L);
                 assertEquals(PrefillState.CapacityStatus.ACQUIRED, result.status());
                 result.reservation().close();
                 result.reservation().close();
@@ -98,10 +99,50 @@ class PrefillEndpointDirectSchedulerTest {
         endpoint.close();
     }
 
-    private static org.flexlb.balance.scheduler.ScheduledRequest item(long requestId) {
+    @Test
+    void directLimitFollowsRequestSnapshotAfterConfigUpdate() {
+        FlexlbConfig initial = org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig();
+        initial.setScheduler(SchedulerConfig.direct());
+        initial.setDispatcher(DispatcherConfig.nonBatch());
+        initial.getDispatcher().setMaxInflightPerPrefillWorker(1);
+        AtomicReference<FlexlbConfig> current = new AtomicReference<>(initial);
+        var runtime = EndpointTestSupport.requestRuntime();
+        PrefillEndpoint endpoint = new PrefillEndpoint(workerStatus(), current::get,
+                EndpointTestSupport.routeStrategy(runtime), runtime.events(),
+                mock(BatchSchedulerReporter.class), new org.flexlb.balance.scheduler.PlacementAvailability());
+        endpoint.startGeneration();
+        try {
+            var first = reserve(endpoint, item(1L, initial));
+            assertEquals(PrefillState.CapacityStatus.ACQUIRED, first.status());
+            assertEquals(PrefillState.CapacityStatus.CAPACITY_FULL, reserve(endpoint, item(2L, initial)).status());
+
+            FlexlbConfig increased = org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig();
+            increased.setScheduler(SchedulerConfig.direct());
+            increased.setDispatcher(DispatcherConfig.nonBatch());
+            increased.getDispatcher().setMaxInflightPerPrefillWorker(2);
+            current.set(increased);
+            var second = reserve(endpoint, item(3L, increased));
+            assertEquals(PrefillState.CapacityStatus.ACQUIRED, second.status());
+            assertEquals(PrefillState.CapacityStatus.CAPACITY_FULL, reserve(endpoint, item(4L, increased)).status());
+            first.reservation().close();
+            second.reservation().close();
+        } finally {
+            endpoint.close();
+        }
+    }
+
+    private static PrefillState.ReservationResult<PrefillState.RouteReservation> reserve(PrefillEndpoint endpoint,
+                                                                                         org.flexlb.balance.scheduler.ScheduledRequest item) {
+        try (var pin = endpoint.tryPinGeneration()) {
+            return endpoint.reserveUnqueuedRoute(pin, item, 10L);
+        }
+    }
+
+    private static org.flexlb.balance.scheduler.ScheduledRequest item(long requestId, FlexlbConfig config) {
         var item = mock(org.flexlb.balance.scheduler.ScheduledRequest.class);
         org.mockito.Mockito.when(item.requestId()).thenReturn(Long.toString(requestId));
         org.mockito.Mockito.when(item.seqLen()).thenReturn(128L);
+        org.mockito.Mockito.when(item.ctx()).thenReturn(new org.flexlb.dao.BalanceContext(config));
         return item;
     }
 

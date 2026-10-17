@@ -20,6 +20,7 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -61,7 +62,7 @@ class CostBasedPrefillStrategyBlockerTest {
                     assertEquals(expectedCode, failure.getCode(), role + " " + first + " " + second);
                     assertEquals(2, result.diagnostics().get("workers"));
                     verify(directory).prefillRoutingSnapshot(role);
-                    verify(outside, never()).admissionRejectReason(anyInt());
+                    verify(outside, never()).admissionRejectReason(anyInt(), anyLong());
                     verifyNoInteractions(cache);
                 }
             }
@@ -72,7 +73,7 @@ class CostBasedPrefillStrategyBlockerTest {
         var endpoint = mock(PrefillEndpoint.class);
         when(endpoint.getStatus()).thenReturn(
                 WorkerStatus.createDiscovered(role, group, "worker", 8080, 8090, "test"));
-        when(endpoint.admissionRejectReason(50)).thenReturn(reason);
+        when(endpoint.admissionRejectReason(50, 0L)).thenReturn(reason);
         return endpoint;
     }
 

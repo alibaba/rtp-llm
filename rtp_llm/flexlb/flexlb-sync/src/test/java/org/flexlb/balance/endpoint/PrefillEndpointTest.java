@@ -1263,7 +1263,8 @@ class PrefillEndpointTest {
                     .tags("role", "PREFILL", "engineIp", "127.0.0.4:8080").gauge().value());
             assertEquals(0.0, registry.get("flexlb.app.flexlb.worker.status.unconfirmed.request.count")
                     .tags("role", "PREFILL", "engineIp", "127.0.0.4:8080").gauge().value());
-            assertFalse(metricsEndpoint.canAcceptRequest());
+            assertFalse(metricsEndpoint.canAcceptRequest(
+                    requestConfig.getDispatcher().getMaxInflightPerPrefillWorker()));
         } finally {
             registry.close();
             metricsEndpoint.close();

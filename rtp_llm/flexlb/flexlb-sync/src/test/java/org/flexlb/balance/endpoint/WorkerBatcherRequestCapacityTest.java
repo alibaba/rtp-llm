@@ -1,6 +1,7 @@
 package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.delivery.DeliveryStrategy;
+import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.config.DecisionPolicyConfig;
 import org.flexlb.config.DispatcherConfig;
@@ -26,6 +27,8 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -93,7 +96,7 @@ class WorkerBatcherRequestCapacityTest {
             try (var reservation = EndpointTestSupport.reserveUnqueued(fixture.endpoint, committed, 100L);
                  var commit = fixture.endpoint.tryBeginRouteCommitAdmission();
                  var handoff = commit.commit(List.of(committed), List.of(reservation))) {
-                assertFalse(fixture.endpoint.canPreemptQueuedRequest(90));
+                assertFalse(fixture.endpoint.canPreemptQueuedRequest(90, 1L));
                 assertFalse(EndpointTestSupport.offer(fixture.endpoint, item(config, fixture.endpoint, 2L, 90)));
                 assertEquals(1L, fixture.endpoint.observedRequestCount());
                 assertTrue(fixture.endpoint.captureQueueSnapshot().items().isEmpty());
@@ -196,6 +199,37 @@ class WorkerBatcherRequestCapacityTest {
     }
 
     @Test
+    void nonBatchLimitFollowsEachRequestConfigWithoutRecreatingTheWorker() {
+        FlexlbConfig initial = preemptionConfig();
+        initial.getDispatcher().setMaxInflightPerPrefillWorker(1);
+        AtomicReference<FlexlbConfig> current = new AtomicReference<>(initial);
+        try (Fixture fixture = fixture(current::get)) {
+            ScheduledRequest first = item(initial, fixture.endpoint, 1L);
+            ScheduledRequest oldSnapshot = item(initial, fixture.endpoint, 2L);
+            assertTrue(EndpointTestSupport.offer(fixture.endpoint, first));
+            assertFalse(EndpointTestSupport.offer(fixture.endpoint, item(initial, fixture.endpoint, 2L)));
+
+            FlexlbConfig increased = preemptionConfig();
+            increased.getDispatcher().setMaxInflightPerPrefillWorker(2);
+            current.set(increased);
+            assertTrue(fixture.endpoint.canAcceptRequest(2L));
+            assertFalse(EndpointTestSupport.offer(fixture.endpoint, oldSnapshot));
+            ScheduledRequest second = item(increased, fixture.endpoint, 3L);
+            assertTrue(EndpointTestSupport.offer(fixture.endpoint, second));
+            assertFalse(fixture.endpoint.canAcceptRequest(2L));
+
+            FlexlbConfig decreased = preemptionConfig();
+            decreased.getDispatcher().setMaxInflightPerPrefillWorker(1);
+            current.set(decreased);
+            assertFalse(EndpointTestSupport.offer(fixture.endpoint, item(decreased, fixture.endpoint, 4L)));
+            assertTrue(fixture.endpoint.removeQueued(first, "complete"));
+            assertFalse(EndpointTestSupport.offer(fixture.endpoint, item(decreased, fixture.endpoint, 5L)));
+            assertTrue(fixture.endpoint.removeQueued(second, "complete"));
+            assertTrue(EndpointTestSupport.offer(fixture.endpoint, item(decreased, fixture.endpoint, 6L)));
+        }
+    }
+
+    @Test
     @Timeout(10)
     void configuredBatchGroupSizeIsIndependentOfConcurrentBatchLimit() throws Exception {
         FlexlbConfig config = productionConfig();
@@ -276,6 +310,10 @@ class WorkerBatcherRequestCapacityTest {
     }
 
     private static Fixture fixture(FlexlbConfig config) {
+        return fixture(() -> config);
+    }
+
+    private static Fixture fixture(Supplier<FlexlbConfig> configSupplier) {
         WorkerStatus status = WorkerStatus.createDiscovered(RoleType.PREFILL, "test", "127.0.0.1", 8080, 9090, "test");
         WorkerStatusResponse response = new WorkerStatusResponse();
         response.setRole(RoleType.PREFILL);
@@ -284,8 +322,8 @@ class WorkerBatcherRequestCapacityTest {
         var runtime = EndpointTestSupport.requestRuntime();
         DeliveryStrategy parked = EndpointTestSupport.routeStrategy(runtime);
         DeliveryStrategy delivery = mock(DeliveryStrategy.class, delegatesTo(parked));
-        PrefillEndpoint endpoint = new PrefillEndpoint(status, config, delivery,
-                runtime.events(), mock(BatchSchedulerReporter.class));
+        PrefillEndpoint endpoint = new PrefillEndpoint(status, configSupplier, delivery, runtime.events(),
+                mock(BatchSchedulerReporter.class), new PlacementAvailability());
         endpoint.startGeneration();
         return new Fixture(endpoint, delivery, parked, runtime);
     }
