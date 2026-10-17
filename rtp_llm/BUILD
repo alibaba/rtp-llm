@@ -77,6 +77,7 @@ arch_dep = select({
 arch_with_version_dep = select({
     "@//:using_arm": [],
     "@//:using_cuda12_arm": [],
+    "@//:using_cuda13_arm": [],
     "//conditions:default": ["decord==0.6.0", "av==16.1.0"],
 })
 
