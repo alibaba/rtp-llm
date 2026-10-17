@@ -72,14 +72,14 @@ def build_diffusion_gemma_kv_spec_descs(config: "DiffusionGemmaConfig") -> list:
         if layer_type == "sliding_attention":
             swa = KVCacheSpecDesc()
             swa.tag = "swa_kv"
-            swa.cache_type = KVCacheSpecType.MultiHeadAttention
+            swa.cache_type = KVCacheSpecType.MHA
             swa.group_type = CacheGroupType.SWA
             swa.dtype = DataType.TYPE_BF16
             descs.append([swa])
         else:
             g = KVCacheSpecDesc()
             g.tag = "global_kv"
-            g.cache_type = KVCacheSpecType.MultiHeadAttention
+            g.cache_type = KVCacheSpecType.MHA
             g.mha_kv_head_num = int(config.dgm_global_kv_head_num)
             g.mha_size_per_head = int(config.dgm_global_head_dim)
             g.dtype = DataType.TYPE_BF16

@@ -89,7 +89,7 @@ class DiffusionGemmaProposerWeightInfo(ModelDeployWeightInfo):
         # near zero; canvas attention never touches it.
         tiny = KVCacheSpecDesc()
         tiny.tag = "swa_kv"
-        tiny.cache_type = KVCacheSpecType.MultiHeadAttention
+        tiny.cache_type = KVCacheSpecType.MHA
         tiny.mha_kv_head_num = 1
         tiny.mha_size_per_head = 64
         tiny.dtype = DataType.TYPE_BF16
@@ -160,7 +160,7 @@ class DiffusionGemmaProposer(BaseModel):
 
         tiny = KVCacheSpecDesc()
         tiny.tag = "swa_kv"
-        tiny.cache_type = KVCacheSpecType.MultiHeadAttention
+        tiny.cache_type = KVCacheSpecType.MHA
         tiny.mha_kv_head_num = 1
         tiny.mha_size_per_head = 64
         tiny.dtype = DataType.TYPE_BF16
