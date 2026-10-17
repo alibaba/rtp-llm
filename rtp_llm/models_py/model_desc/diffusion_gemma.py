@@ -270,11 +270,13 @@ class DiffusionGemmaAttnOp:
             key = torch.cat(keys, dim=0)
             value = torch.cat(values, dim=0)
             score = torch.einsum("qhd,khd->hqk", q[q_lo:q_hi], key) * self.sm_scale
-            q_pos = torch.arange(q_hi - q_lo)
+            q_pos = torch.arange(q_hi - q_lo, device=q.device)
             k_pos = torch.cat(
-                [torch.arange(plen), torch.arange(q_hi - q_lo) + plen]
+                [torch.arange(plen, device=q.device), torch.arange(q_hi - q_lo, device=q.device) + plen]
             )
-            allowed = torch.ones(q_hi - q_lo, key.shape[0], dtype=torch.bool)
+            allowed = torch.ones(
+                q_hi - q_lo, key.shape[0], dtype=torch.bool, device=q.device
+            )
             if causal:
                 allowed &= (
                     k_pos.unsqueeze(0) <= (q_pos + plen).unsqueeze(1)
