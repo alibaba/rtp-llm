@@ -851,7 +851,14 @@ def silu_and_mul_masked_post_quant_packed_fwd(
     if expert_num < 4:
         BLOCK_NUM_PER_EXPERT = 64
     else:
-        BLOCK_NUM_PER_EXPERT = 32
+        # Real routing is heavily skewed at prefill scale (measured max/avg
+        # ~10x on Xing4.0 4096-token prefill: max 5248 vs avg ~512 rows per
+        # expert). With a fixed 32 token-axis programs the wall time is the
+        # heaviest expert's serial tail (~164 grid-stride iterations), not
+        # the total work. Scale the token-axis grid with the padded capacity
+        # so heavy experts get enough workers; light experts' extra programs
+        # exit on the masked_m check. Decode-sized launches keep 32.
+        BLOCK_NUM_PER_EXPERT = max(32, min(256, input.shape[1] // 32))
 
     BLOCK_N = quant_group_size
     num_warps = 1
