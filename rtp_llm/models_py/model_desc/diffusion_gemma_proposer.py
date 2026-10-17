@@ -61,7 +61,19 @@ class EntropyBoundDenoiser:
         self.generator = generator
 
     def temperature(self, step: int) -> float:
-        return self.t_min + (self.t_max - self.t_min) * (step / max(1, self.max_denoising_steps))
+        # The reference schedules by steps REMAINING
+        # (reversed(range(1, max_denoising_steps + 1))): the temperature
+        # starts at t_max (flat/exploratory) and decays to t_min (sharp) as
+        # the canvas converges. Our loop counts ELAPSED steps from 0, so the
+        # remaining count is max_denoising_steps - step; mapping it through
+        # the reference formula t = t_min + (t_max - t_min) * (remaining /
+        # max_steps) reproduces the schedule exactly (first step t_max, last
+        # step ~t_min). The inverted schedule (sharp first, flat later)
+        # collapses the canvas by accepting wrong tokens at step 0.
+        remaining = self.max_denoising_steps - step
+        return self.t_min + (self.t_max - self.t_min) * (
+            remaining / max(1, self.max_denoising_steps)
+        )
 
     def initialize_canvas(self, batch: int, device: torch.device) -> torch.Tensor:
         return torch.randint(
