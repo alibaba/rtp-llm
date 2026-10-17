@@ -662,12 +662,15 @@ class DiffusionGemmaRouter(nn.Module):
     ):
         super().__init__()
         self.pre_norm = _NoScaleRMSNorm(config.layernorm_eps)
-        self.scale = weights[W.dgm_router_scale]
+        # AtomicWeight implicitly unsqueezes 1-D checkpoint weights whose
+        # name contains "scale" to [N, 1] (quant per-channel convention,
+        # weight_module._load_raw_tensor); normalize back to 1-D here.
+        self.scale = weights[W.dgm_router_scale].reshape(-1)
         self.scalar_root_size = config.hidden_size ** -0.5
         self.proj = LinearFactory.create_linear_from_weights(
             weights, W.moe_gate, None, None, hw_kernel_config=hw_kernel_config
         )
-        self.per_expert_scale = weights[W.dgm_router_per_expert_scale]
+        self.per_expert_scale = weights[W.dgm_router_per_expert_scale].reshape(-1)
         self.top_k = config.moe_k
         self.num_experts = config.expert_num
 
