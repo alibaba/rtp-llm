@@ -105,7 +105,7 @@ class DiffusionGemma(BaseModel):
         config.attn_config.size_per_head = int(text["head_dim"])
         config.attn_config.is_causal = True
         config.attn_config.sliding_window = int(text["sliding_window"])
-        config.attn_config.rope_config.style = "default"
+        config.attn_config.rope_config.style = 1  # RopeStyle.Base
         config.attn_config.dtype = DataType.TYPE_BF16
         config.num_layers = int(text["num_hidden_layers"])
         config.hidden_size = int(text["hidden_size"])
