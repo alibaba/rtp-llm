@@ -1875,11 +1875,17 @@ void CudaGraphRunner::initCapture() {
                                     max_bs_,
                                     generation_prefill_cuda_graph_max_requests_);
             inputs.attention_inputs.input_lengths.zero_();
-            inputs.attention_inputs.input_lengths[generation_prefill_cuda_graph_max_requests_] = max_num_token_;
+            // Canonical capture layout: request slot 0 carries the full token
+            // capacity, phantom slots stay empty. This must stay byte-identical
+            // to what prepareGenerationPrefillCudaGraphReplayMetadata writes at
+            // replay: the fa2 ragged kernel freezes its CTA->(batch,tile)
+            // schedule and split-KV completion counts at capture, so replaying
+            // under different cu_seqlens leaves live rows uncomputed.
+            inputs.attention_inputs.input_lengths[0] = max_num_token_;
             inputs.attention_inputs.input_lengths_device.copy_(inputs.attention_inputs.input_lengths, false);
             inputs.attention_inputs.prefix_lengths.zero_();
             inputs.attention_inputs.prefix_lengths_device.zero_();
-            inputs.attention_inputs.padding_offset.fill_(generation_prefill_cuda_graph_max_requests_ * max_num_token_);
+            inputs.attention_inputs.padding_offset.zero_();
             inputs.attention_inputs.context_total_kv_length = max_num_token_;
 
             auto install_dummy_rows = [](PyAttentionInputs& attn_inputs) {

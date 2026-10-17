@@ -89,9 +89,13 @@ inline bool supportsGenerationPrefillCudaGraphCacheTopology(const std::vector<Gr
 // The retained CUDA 12.9 compat open-source image currently packages DeepGEMM 2.1.1. Its
 // masked grouped GEMM dispatch has an SM90 recipe, but no SM12x recipe. Keep
 // the first-version capability check explicit and fail closed until each new
-// architecture passes the masked-MoE graph replay test.
+// architecture passes the masked-MoE graph replay test. SM90 passed at first
+// enablement; SM10x (Blackwell) passed with the replay-metadata canonical-form
+// fix (capture and replay must write byte-identical cu_seqlens, otherwise the
+// frozen fa2 CTA schedule leaves live rows uncomputed and the split-KV merge
+// deadlocks) validated by the Xing4.0-29B golden smoke at padding 490/512.
 inline bool supportsGenerationPrefillCudaGraphMaskedMoeBackend(int cuda_compute_capability_major) {
-    return cuda_compute_capability_major == 9;
+    return cuda_compute_capability_major == 9 || cuda_compute_capability_major == 10;
 }
 
 // Generation-prefill graph support for MoE is intentionally narrower than

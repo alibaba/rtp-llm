@@ -34,22 +34,27 @@ inline bool prepareGenerationPrefillCudaGraphReplayMetadata(int32_t* input_lengt
         return false;
     }
 
-    for (int slot = real_request_count; slot < max_request_count; ++slot) {
+    // Canonical replay layout, byte-identical to the capture-time layout:
+    // request slot 0 carries the full token capacity and every phantom slot is
+    // empty. The fa2 ragged kernel's CTA->(batch, tile) schedule and its
+    // split-KV completion counts are frozen at capture time; replaying with
+    // different cu_seqlens content leaves live rows uncomputed (stale capture
+    // output) and deadlocks the split-KV merge kernel. Padding rows therefore
+    // participate as ordinary rows of request 0: their outputs are dropped by
+    // the real-token-count slice and their KV writes route to reserved block 0.
+    for (int slot = 0; slot < max_request_count; ++slot) {
         input_lengths[slot] = 0;
     }
-    input_lengths[max_request_count] = token_capacity - real_token_count;
+    input_lengths[0]                     = token_capacity;
+    input_lengths[max_request_count]     = 0;
 
     int packed_offset = 0;
     cu_seqlens[0]     = 0;
     for (int slot = 0; slot <= max_request_count; ++slot) {
-        const int length       = input_lengths[slot];
-        const int fixed_offset = slot * token_capacity - packed_offset;
-        for (int token = 0; token < length; ++token) {
-            padding_offset[packed_offset + token] = fixed_offset;
-        }
-        packed_offset += length;
+        packed_offset += input_lengths[slot];
         cu_seqlens[slot + 1] = packed_offset;
     }
+    std::fill_n(padding_offset, token_capacity, 0);
     return true;
 }
 

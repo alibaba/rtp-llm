@@ -497,9 +497,15 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
 #endif
             const bool supported_moe_config = supportsGenerationPrefillCudaGraphMoe(
                 description_, params.parallelism_config, description_.moe_runtime_config, masked_moe_backend_supported);
+            // use_mla is deliberately not excluded here: the python attention
+            // factory's GENERATION_PREFILL mode is the authoritative
+            // fail-closed impl-capability gate, and MlaFlashInferPrefillImpl
+            // declares the mode. The blanket exclusion predates that gate and
+            // would keep the (now fixed) ragged-prefill replay contract from
+            // every MLA model whose impl opts in.
             const bool model_supported = params.sp_config.type == SP_TYPE_NONE
                                          && description_.data_type == DataType::TYPE_BF16
-                                         && !description_.attention_conf.use_mla && supported_moe_config
+                                         && supported_moe_config
                                          && params.device_resource_config.enable_layer_micro_batch == 0;
             if (!model_supported) {
                 generation_prefill_cuda_graph_init_status_ =
