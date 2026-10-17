@@ -154,6 +154,22 @@ class DiffusionGemma(BaseModel):
         config.dgm_final_logit_softcapping = float(text.get("final_logit_softcapping", 30.0))
 
         config.kv_cache_spec_descs = build_diffusion_gemma_kv_spec_descs(config)
+
+        # Multimodal: vision tower + embed_vision live in the same checkpoint
+        # (model.encoder.vision_tower.* / model.encoder.embed_vision.*) and are
+        # consumed by the diffusion_gemma multimodal mixin.
+        if "vision_config" in config_json:
+            config.mm_model_config.is_multimodal = True
+            config.mm_model_config.mm_sep_tokens = [
+                [
+                    int(config_json.get("boi_token_id", 255999)),
+                    int(config_json.get("eoi_token_id", 258882)),
+                ]
+            ]
+            config.mm_related_params.special_tokens.update(
+                {"default_mm_token": "<|image>"}
+            )
+            config.mm_related_params.config["ckpt_path"] = ckpt_path
         return config
 
     @staticmethod
