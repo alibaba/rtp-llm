@@ -32,6 +32,8 @@ _CUDA13_ARM_DEFERRED = [
     # consumers spell the name with underscores; pip normalizes both ways
     "xfastertransformer_devel",
     "xfastertransformer_devel_icx",
+    "decord",
+    "av",
 ]
 
 # xgrammar's wheel metadata pulls apache-tvm-ffi (and triton on x86), which only
