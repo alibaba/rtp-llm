@@ -1,10 +1,11 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.master.WorkerStatusResponse;
+import org.flexlb.testfixture.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.junit.jupiter.api.Test;
 
@@ -46,10 +47,11 @@ class WorkerBatcherStatusSnapshotTest {
                 700L, 600L, 1_000L, 1L);
         WorkerStatusResponse second = statusResponse(
                 3L, 5L, 10L, 2L);
-        WorkerStatus status = spy(WorkerStatus.createDiscovered(
+        WorkerStatus owner = WorkerStatus.createDiscovered(
                 RoleType.PREFILL, "group-a", "10.0.0.1",
-                8080, 9090, "site-a"));
-        publish(status, first);
+                8080, 9090, "site-a");
+        publish(owner, first);
+        WorkerStatus status = spy(owner);
 
         AtomicBoolean publishedSecond = new AtomicBoolean();
         doAnswer(invocation -> {
@@ -57,7 +59,7 @@ class WorkerBatcherStatusSnapshotTest {
                     (WorkerStatus.EngineObservation)
                             invocation.callRealMethod();
             if (publishedSecond.compareAndSet(false, true)) {
-                publish(status, second);
+                publish(owner, second);
             }
             return captured;
         }).when(status).committedEngineObservation();
@@ -85,8 +87,7 @@ class WorkerBatcherStatusSnapshotTest {
             WorkerStatus status, WorkerStatusResponse response) {
         status.lock.lock();
         try {
-            status.publishPreparedStatus(status.prepareNewStatus(
-                    status.freezeStatusResponse(response), null));
+            status.publishPreparedStatus(WorkerStatusTestFixtures.prepare(status, WorkerStatusTestFixtures.observation(status, response)));
         } finally {
             status.lock.unlock();
         }

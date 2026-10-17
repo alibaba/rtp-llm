@@ -70,9 +70,8 @@ public class RequestRegistry {
                             RequestSchedulerReporter requestReporter) {
         this.reporter = Objects.requireNonNull(reporter, "reporter");
         this.requestReporter = Objects.requireNonNull(requestReporter);
-        this.expirationTimer = new ExpirationTimer(
-                this,
-                Objects.requireNonNull(configService, "configService"));
+        Objects.requireNonNull(configService, "configService");
+        this.expirationTimer = new ExpirationTimer(this);
         this.completionPublisher = new RequestCompletionPublisher(
                 completionPublisherWorkers(configService), reporter);
         this.terminalCleanup = new RequestTerminalCleanup(expirationTimer);
@@ -446,32 +445,6 @@ public class RequestRegistry {
         requestReporter.reportVictim(victim.priority(), incoming.priority(),
                 "prefill_queued", "prefill_inflight_requests");
         requestReporter.reportPriorityPreempt("prefill_queued");
-    }
-
-    public void finishYieldedReservation(
-            long requestId, long reservationToken, String detail) {
-        if (reservationToken <= 0L) {
-            throw new IllegalArgumentException("reservationToken must be positive");
-        }
-        RequestSlot entry = requestSlots.get(requestId);
-        ScheduledRequest victim = null;
-        if (entry != null) {
-            synchronized (entry) {
-                victim = entry.activeItemForReservation(reservationToken);
-            }
-        }
-        if (victim != null) {
-            finishYielded(victim, detail);
-            return;
-        }
-        Logger.debug("finishYieldedReservation miss: request_id={} token={} detail={}",
-                requestId, reservationToken, detail);
-        try {
-            requestReporter.reportInflightSettleMiss("yielded");
-        } catch (RuntimeException metricFailure) {
-            Logger.warn("Failed to report yielded settle miss: request_id={}",
-                    requestId, metricFailure);
-        }
     }
 
     private void finishVictim(ScheduledRequest item, StrategyErrorType error, String detail) {

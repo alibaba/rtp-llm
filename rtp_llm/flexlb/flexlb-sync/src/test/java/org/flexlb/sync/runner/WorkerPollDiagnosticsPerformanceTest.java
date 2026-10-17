@@ -12,30 +12,11 @@ import java.lang.management.ManagementFactory;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** Measures diagnostic writes, excluding lease construction, RPC payloads and business reducers. */
+/** Measures diagnostic state and writes, excluding RPC payloads and business reducers. */
 @Tag("performance-regression")
 class WorkerPollDiagnosticsPerformanceTest {
     private static final int WARMUP = 10_000;
     private static final int ITERATIONS = 20_000;
-
-    @Test
-    void syncPhaseRecordingDoesNotAllocatePerCycle() {
-        var bean = allocationBean();
-        long threadId = Thread.currentThread().threadId();
-        var trace = new EndpointTrace.Poll("SYNC", 1L);
-        for (int i = 0; i < WARMUP; i++) {
-            recordSyncPhases(trace);
-        }
-        long before = bean.getThreadAllocatedBytes(threadId);
-        for (int i = 0; i < ITERATIONS; i++) {
-            recordSyncPhases(trace);
-        }
-        double bytesPerCycle = (double) (bean.getThreadAllocatedBytes(threadId) - before) / ITERATIONS;
-        System.out.printf("Sync phase trace: bytes_per_cycle=%.2f%n", bytesPerCycle);
-        assertTrue(bytesPerCycle <= 8.0,
-                "sync phase recording must use fixed fields without per-worker events or snapshots");
-        assertEquals(Stage.RUNNER_ENDED.name(), trace.snapshot().stage());
-    }
 
     @Test
     void recordDoesNotAllocatePerScalarEvent() {
@@ -54,7 +35,7 @@ class WorkerPollDiagnosticsPerformanceTest {
         double bytesPerEvent = (double) (bean.getThreadAllocatedBytes(threadId) - before) / ITERATIONS;
         System.out.printf("Trace recorder: bytes_per_event=%.2f%n", bytesPerEvent);
         assertTrue(bytesPerEvent <= 8.0, "recording must update fixed fields without per-event allocation");
-        assertEquals(1, trace.snapshot().poll().syncCycleId());
+        assertEquals(1, trace.snapshot().statusPoll().syncCycleId());
     }
 
     @Test
@@ -129,10 +110,64 @@ class WorkerPollDiagnosticsPerformanceTest {
                     "busy skips must aggregate without per-tick strings, maps or snapshots");
 
             var snapshot = worker.trace().snapshot();
-            assertEquals(WARMUP + ITERATIONS, snapshot.poll().skippedBusy());
-            assertEquals("CALLBACK_READY", snapshot.poll().stage());
+            assertEquals(WARMUP + ITERATIONS, snapshot.statusPoll().skippedBusy());
+            assertEquals("CALLBACK_READY", snapshot.statusPoll().stage());
         } finally {
             held.close();
+        }
+    }
+
+    @Test
+    void fleetHeartbeatsKeepOneApplicationPerWorker() {
+        // Exercise the new coordination at 750P/750D; excludes transport payload allocation.
+        int workersPerRole = 750;
+        int warmupRounds = 20;
+        int measuredRounds = 100;
+        WorkerStatus[] workers = new WorkerStatus[2 * workersPerRole];
+        WorkerStatus.PollLease[] applications = new WorkerStatus.PollLease[workers.length];
+        for (int i = 0; i < workers.length; i++) {
+            workers[i] = WorkerStatus.createDiscovered(i < workersPerRole ? RoleType.PREFILL : RoleType.DECODE,
+                    "test", "127.0.0.1", 10000 + i, 20000 + i, "test");
+            applications[i] = workers[i].tryBeginStatusPoll(0L);
+            assertTrue(workers[i].tryBeginStatusApplication(applications[i]));
+            applications[i].close();
+        }
+        var bean = allocationBean();
+        long threadId = Thread.currentThread().threadId();
+        long started = 0L;
+        long allocated = 0L;
+        try {
+            for (int round = 0; round < warmupRounds + measuredRounds; round++) {
+                if (round == warmupRounds) {
+                    started = System.nanoTime();
+                    allocated = bean.getThreadAllocatedBytes(threadId);
+                }
+                for (WorkerStatus worker : workers) {
+                    try (var lease = worker.tryBeginStatusPoll(round + 1L)) {
+                        if (lease == null) { throw new AssertionError("application must not block RPC"); }
+                        worker.recordStatusRpcResult(lease, true, true, null);
+                        if (worker.tryBeginStatusApplication(lease)) {
+                            throw new AssertionError("a second application must not be retained");
+                        }
+                    }
+                }
+            }
+            long polls = (long) measuredRounds * workers.length;
+            double bytesPerPoll = (double) (bean.getThreadAllocatedBytes(threadId) - allocated) / polls;
+            double nsPerPoll = (double) (System.nanoTime() - started) / polls;
+            System.out.printf("750P/750D blocked application bookkeeping: polls=%d bytes_per_poll=%.2f ns_per_poll=%.2f%n",
+                    polls, bytesPerPoll, nsPerPoll);
+            assertTrue(bytesPerPoll <= 2048, "continuing heartbeats must retain only bounded poll state");
+        } finally {
+            for (int i = 0; i < workers.length; i++) {
+                workers[i].finishStatusApplication(applications[i]);
+            }
+        }
+        for (WorkerStatus worker : workers) {
+            try (var lease = worker.tryBeginStatusPoll(warmupRounds + measuredRounds + 1L)) {
+                assertTrue(worker.tryBeginStatusApplication(lease), "application ownership must be reusable");
+                worker.finishStatusApplication(lease);
+            }
         }
     }
 
@@ -150,10 +185,10 @@ class WorkerPollDiagnosticsPerformanceTest {
                 held.pollTrace().record(Stage.STATUS_LOCK_ACQUIRED);
             }
             var second = worker.trace().snapshot();
-            assertEquals(first.poll().pollId(), second.poll().pollId());
-            assertEquals("RPC_COMPLETED", second.poll().failureStage());
-            assertTrue(second.poll().error().contains("worker unavailable"));
-            assertEquals(1, second.poll().syncCycleId());
+            assertEquals(first.statusPoll().pollId(), second.statusPoll().pollId());
+            assertEquals("RPC_COMPLETED", second.statusPoll().failureStage());
+            assertTrue(second.statusPoll().error().contains("worker unavailable"));
+            assertEquals(1, second.statusPoll().syncCycleId());
         } finally {
             held.close();
         }
@@ -164,26 +199,17 @@ class WorkerPollDiagnosticsPerformanceTest {
         pollTrace.record(Stage.RUNNER_STARTED);
         pollTrace.record(Stage.RPC_STARTED);
         pollTrace.record(Stage.RPC_COMPLETED);
-        pollTrace.record(Stage.CONVERSION_STARTED);
+        pollTrace.record(Stage.STATUS_HEALTH_UPDATED);
         pollTrace.record(Stage.CALLBACK_READY);
         pollTrace.record(Stage.CALLBACK_STARTED);
+        pollTrace.record(Stage.CONVERSION_STARTED);
+        pollTrace.record(Stage.CONVERSION_COMPLETED);
         pollTrace.record(Stage.STATUS_LOCK_ATTEMPT);
         pollTrace.record(Stage.STATUS_LOCK_ACQUIRED);
-        pollTrace.record(Stage.STATUS_HEALTH_UPDATED);
         pollTrace.record(Stage.STATUS_COMMITTED);
         pollTrace.record(Stage.STATUS_APPLIED);
         pollTrace.record(Stage.STATUS_LOCK_RELEASED);
         pollTrace.record(Stage.CALLBACK_ENDED);
-    }
-
-    private static void recordSyncPhases(EndpointTrace.Poll trace) {
-        trace.record(Stage.RUNNER_SUBMITTED);
-        trace.record(Stage.RUNNER_STARTED);
-        trace.record(Stage.SYNC_DISCOVERY);
-        trace.record(Stage.SYNC_RETIREMENT);
-        trace.record(Stage.SYNC_DISPATCH);
-        trace.record(Stage.SYNC_REPORT);
-        trace.record(Stage.RUNNER_ENDED);
     }
 
     private static WorkerStatus worker() {

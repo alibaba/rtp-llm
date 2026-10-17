@@ -39,9 +39,10 @@ public class KvCacheManager {
     @Autowired
     private CacheMetricsReporter cacheMetricsReporter;
 
-    // Only failed updates retain a diff. Callers serialize each address through
-    // its generation's cache lock; retries replay idempotently before new diffs.
-    private final Map<String, DiffResult> pendingUpdates = new ConcurrentHashMap<>();
+    // An interrupted add may have reached only the local view. Retain just that
+    // key for replay; the next diff recovers the remaining changes from the views.
+    // Callers serialize each address through its generation's cache lock.
+    private final Map<String, Long> pendingAdditions = new ConcurrentHashMap<>();
 
     @PostConstruct
     public void init() {
@@ -87,10 +88,10 @@ public class KvCacheManager {
             return;
         }
 
-        DiffResult pending = pendingUpdates.get(engineIPort);
+        Long pending = pendingAdditions.get(engineIPort);
         if (pending != null) {
-            applyDiff(engineIPort, pending, pollTrace);
-            pendingUpdates.remove(engineIPort, pending);
+            addCacheBlock(engineIPort, pending, pollTrace);
+            pendingAdditions.remove(engineIPort);
         }
 
         // Calculate diff
@@ -99,11 +100,13 @@ public class KvCacheManager {
             return;
         }
 
-        try {
-            applyDiff(engineIPort, diffResult, pollTrace);
-        } catch (RuntimeException | Error failure) {
-            pendingUpdates.put(engineIPort, diffResult);
-            throw failure;
+        for (Long key : diffResult.getAddedBlocks()) {
+            addCacheBlock(engineIPort, key, pollTrace);
+        }
+        for (Long key : diffResult.getRemovedBlocks()) {
+            // Retain ownership until global removal succeeds for cleanup/replay.
+            globalCacheIndex.removeCacheBlock(engineIPort, key, pollTrace);
+            engineLocalView.removeCacheBlock(engineIPort, key);
         }
 
         // Report metrics
@@ -113,16 +116,14 @@ public class KvCacheManager {
         cacheMetricsReporter.reportEngineViewsMapSize(engineLocalView.getEngineViewsMapSize());
     }
 
-    private void applyDiff(String address, DiffResult diff, EndpointTrace.Poll pollTrace) {
-        for (Long key : diff.getAddedBlocks()) {
+    private void addCacheBlock(String address, Long key, EndpointTrace.Poll pollTrace) {
+        try {
             // Track ownership first, including a global write that fails midway.
             engineLocalView.addOrUpdateCacheBlock(address, key);
             globalCacheIndex.addCacheBlock(key, address, pollTrace);
-        }
-        for (Long key : diff.getRemovedBlocks()) {
-            // Retain ownership until global removal succeeds for cleanup/replay.
-            globalCacheIndex.removeCacheBlock(address, key, pollTrace);
-            engineLocalView.removeCacheBlock(address, key);
+        } catch (RuntimeException | Error failure) {
+            pendingAdditions.put(address, key);
+            throw failure;
         }
     }
 
@@ -136,7 +137,7 @@ public class KvCacheManager {
         Set<Long> removedBlocks = engineLocalView.getEngineCacheBlocks(engineIpPort);
         globalCacheIndex.removeAllCacheBlockOfEngine(engineIpPort, removedBlocks, trace);
         engineLocalView.removeAllCacheBlockOfEngine(engineIpPort);
-        pendingUpdates.remove(engineIpPort);
+        pendingAdditions.remove(engineIpPort);
         cacheMetricsReporter.reportGlobalCacheMetrics(
                 globalCacheIndex.totalBlocks(),
                 globalCacheIndex.totalMappings());
@@ -149,7 +150,7 @@ public class KvCacheManager {
 
         globalCacheIndex.clear();
         engineLocalView.clear();
-        pendingUpdates.clear();
+        pendingAdditions.clear();
 
         // Report
         cacheMetricsReporter.reportGlobalCacheMetrics(globalCacheIndex.totalBlocks(), globalCacheIndex.totalMappings());

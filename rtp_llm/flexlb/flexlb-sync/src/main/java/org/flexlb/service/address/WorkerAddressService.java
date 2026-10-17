@@ -55,7 +55,8 @@ public class WorkerAddressService {
                 60L,
                 TimeUnit.SECONDS, new LinkedBlockingQueue<>(1000),
                 new NamedThreadFactory("service-discovery-executor"),
-                new ThreadPoolExecutor.CallerRunsPolicy()
+                // Never run discovery inline: submit would bypass the timeout below.
+                new ThreadPoolExecutor.AbortPolicy()
         );
     }
 
@@ -99,12 +100,16 @@ public class WorkerAddressService {
     }
 
     private List<WorkerHost> getServiceHosts(String modelName, String address) {
-        Future<List<WorkerHost>> future = serviceDiscoveryExecutor.submit(
-                () -> queryServiceHosts(modelName, address));
+        Future<List<WorkerHost>> future = null;
         try {
+            future = serviceDiscoveryExecutor.submit(() -> serviceDiscovery.getHosts(address));
             // Set timeout to prevent blocking threads when service discovery has no machines and takes long to return
             return future.get(500, TimeUnit.MILLISECONDS);
         } catch (Exception e) {
+            if (future != null) { future.cancel(true); }
+            if (e instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+            }
             if (e instanceof TimeoutException) {
                 logger.error("query service discovery timeout, model={}, address={}, msg:{}", modelName, address, "timeout");
                 engineHealthReporter.reportStatusCheckerFail(
@@ -114,8 +119,7 @@ public class WorkerAddressService {
                 engineHealthReporter.reportStatusCheckerFail(
                         modelName, BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, null);
             }
-            future.cancel(true);
-            return new ArrayList<>();
+            throw new IllegalStateException("Service discovery failed for " + address, e);
         }
     }
 
@@ -132,19 +136,4 @@ public class WorkerAddressService {
         return workerHosts;
     }
 
-    private List<WorkerHost> queryServiceHosts(
-            String modelName, String address) {
-        long startNanos = System.nanoTime();
-        try {
-            return serviceDiscovery.getHosts(address);
-        } catch (Throwable failure) {
-            logger.error("query service discovery exception, cost={}ms, model={}, address={}, msg:{}",
-                    TimeUnit.NANOSECONDS.toMillis(
-                            System.nanoTime() - startNanos),
-                    modelName, address, failure.getMessage());
-            engineHealthReporter.reportStatusCheckerFail(
-                    modelName, BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, null);
-            return new ArrayList<>();
-        }
-    }
 }

@@ -4,6 +4,8 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.DispatcherConfig;
+import org.flexlb.config.SchedulerConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
@@ -30,7 +32,7 @@ import static org.mockito.Mockito.when;
 class CostBasedPrefillStrategyBlockerTest {
 
     @Test
-    void failureUsesOneScopedFleetAndAggregatesReasonsIndependentlyOfOrder() {
+    void directFailureUsesOneScopedFleetAndAggregatesReasonsIndependentlyOfOrder() {
         for (RoleType role : List.of(RoleType.PREFILL, RoleType.PDFUSION)) {
             for (AdmissionRejectReason first : AdmissionRejectReason.values()) {
                 for (AdmissionRejectReason second : AdmissionRejectReason.values()) {
@@ -44,7 +46,10 @@ class CostBasedPrefillStrategyBlockerTest {
                             new EndpointRegistry.PrefillRoutingEntry("first", firstEndpoint),
                             new EndpointRegistry.PrefillRoutingEntry("outside", outside),
                             new EndpointRegistry.PrefillRoutingEntry("second", secondEndpoint)));
-                    var context = new BalanceContext(new FlexlbConfig());
+                    var config = new FlexlbConfig();
+                    config.getScheduler().setType(SchedulerConfig.Type.DIRECT);
+                    config.setDispatcher(DispatcherConfig.nonBatch());
+                    var context = new BalanceContext(config);
                     var request = new Request();
                     request.setRequestId(1L);
                     request.setSeqLen(100L);

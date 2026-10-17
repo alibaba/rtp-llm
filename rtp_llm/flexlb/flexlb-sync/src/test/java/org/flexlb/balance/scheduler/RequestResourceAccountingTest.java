@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
@@ -11,9 +12,9 @@ import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.SchedulerConfig;
 import org.flexlb.dao.loadbalance.Response;
-import org.flexlb.dao.master.TaskInfo;
+import org.flexlb.testfixture.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.master.WorkerStatusResponse;
+import org.flexlb.testfixture.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskPhase;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
@@ -265,13 +266,13 @@ class RequestResourceAccountingTest {
             var endpoints = new EndpointRegistry(service, projector, reporter,
                     new RouteDeliveryStrategy(requests, new DeliveryMetrics(reporter)), new PlacementAvailability());
             runtime = new SchedulerRuntime(requests, endpoints, reporter, requestReporter);
-            var worker = org.flexlb.balance.endpoint.WorkerStatusTestFixtures.readyForScheduling(WorkerStatus.createDiscovered(RoleType.PREFILL, "g", "127.0.0.1", 8080, 8081, "test"));
+            var worker = WorkerStatusTestFixtures.readyForScheduling(WorkerStatus.createDiscovered(RoleType.PREFILL, "g", "127.0.0.1", 8080, 8081, "test"));
             worker.lock.lock();
             try {
                 prefill = (PrefillEndpoint) endpoints.publishPreparedEndpoint(worker.getIpPort(), worker,
-                        worker.prepareNewStatus(worker.freezeStatusResponse(status(RoleType.PREFILL, 1, Map.of(), Map.of(), TOTAL_KV)), null)).endpoint();
+                        WorkerStatusTestFixtures.prepare(worker, WorkerStatusTestFixtures.observation(worker, status(RoleType.PREFILL, 1, Map.of(), Map.of(), TOTAL_KV)))).endpoint();
             } finally { worker.lock.unlock(); }
-            decode = new DecodeEndpoint(org.flexlb.balance.endpoint.WorkerStatusTestFixtures.readyForScheduling(WorkerStatus.createDiscovered(RoleType.DECODE, "g", "127.0.0.2", 8080, 8081, "test")), projector);
+            decode = new DecodeEndpoint(WorkerStatusTestFixtures.readyForScheduling(WorkerStatus.createDiscovered(RoleType.DECODE, "g", "127.0.0.2", 8080, 8081, "test")), projector);
             decodeStatus(Map.of(), Map.of(), TOTAL_KV);
             try (var pin = decode.tryPinGeneration()) {
                 reservation = decode.reserve(pin, ID, HARD_KV, EXPECTED_KV, 50);
@@ -409,7 +410,7 @@ class RequestResourceAccountingTest {
         var worker = endpoint.getStatus();
         Runnable projection;
         worker.lock.lock();
-        try { projection = endpoint.applyPreparedStatus(worker, worker.prepareNewStatus(worker.freezeStatusResponse(response), null)); }
+        try { projection = endpoint.applyPreparedStatus(worker, WorkerStatusTestFixtures.prepare(worker, WorkerStatusTestFixtures.observation(worker, response))); }
         finally { worker.lock.unlock(); }
         projection.run();
     }
