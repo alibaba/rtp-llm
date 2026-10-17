@@ -2435,6 +2435,94 @@ TEST_F(NormalBatchStreamProcessorTest, testPartiallyReusedMultimodalFeatureIsNor
     EXPECT_TRUE(torch::equal(stream2->multimodalFeatures()[1], feature));
 }
 
+TEST_F(NormalBatchStreamProcessorTest, testMultimodalGatherUsesTheGrantedWindowForEverySequence) {
+    ModelConfig model_config;
+    model_config.max_seq_len                   = 2048;
+    model_config.vocab_size                    = 2048;
+    model_config.num_layers                    = 2;
+    model_config.mm_model_config.is_multimodal = true;
+    CacheConfig cache_config;
+    initFullCacheConfig(cache_config, model_config.num_layers);
+    NormalBatchStreamProcessor processor(
+        model_config, PDSepConfig{}, ProfilingDebugLoggingConfig{}, cache_config, false);
+
+    auto                        first        = torch::arange(12, torch::kFloat32).reshape({6, 2});
+    auto                        second       = torch::arange(6, torch::kFloat32).reshape({3, 2}) + 100;
+    auto                        first_stack  = torch::arange(24, torch::kFloat32).reshape({2, 6, 2});
+    auto                        second_stack = torch::arange(12, torch::kFloat32).reshape({2, 3, 2}) + 100;
+    const vector<int>           mask{1, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 1, 1, 1};
+    const vector<int>           feature_locations{1, 10};
+    const vector<torch::Tensor> features{first, second};
+    const vector<torch::Tensor> stacks{first_stack, second_stack};
+
+    // Exercise both image edges, a future image exactly at the window end,
+    // a partially reused image, and a text-only tail. Fanout repeats each
+    // window in the model batch without repeating future image rows.
+    for (const auto& window : vector<pair<int, int>>{{0, 4}, {2, 4}, {6, 4}, {10, 4}, {14, 2}}) {
+        const auto [start, length] = window;
+        SCOPED_TRACE("start=" + std::to_string(start));
+        auto query             = make_shared<GenerateInput>();
+        query->input_ids       = hostIntBuffer({1, -1, -1, -1, -1, -1, -1, 1, 1, 1, -1, -1, -1, 1, 1, 1});
+        query->generate_config = make_shared<GenerateConfig>();
+        query->generate_config->num_return_sequences = 3;
+        query->mm_locs                               = hostIntBuffer(feature_locations);
+        query->text_tokens_mask                      = hostIntBuffer(mask);
+        query->multimodal_features                   = features;
+        query->mm_extra_input = vector<torch::Tensor>{first_stack.flatten(), second_stack.flatten()};
+        auto stream =
+            make_shared<NormalGenerateStream>(query, model_config, RuntimeConfig{}, ResourceContext{}, nullptr);
+        stream->generate_status_->status = StreamState::RUNNING;
+        stream->setReuseLength(start);
+        stream->setChunkSize(length);
+
+        // Fail before gathering on the old code: it would copy the remaining
+        // prompt mask past the current chunk's allocated host buffer.
+        ASSERT_EQ(stream->textTokensMask().size(), length);
+        StreamGroups groups(std::list<GenerateStreamPtr>{stream});
+        TensorHolder holder;
+        auto         result = processor.gatherModelInput(groups, holder);
+        ASSERT_TRUE(result.ok());
+        const auto& input = result.value();
+        ASSERT_EQ(input.combo_tokens.numel(), 3 * length);
+        EXPECT_EQ(toVec<int>(input.input_lengths), (vector<int>{length, length, length}));
+        vector<int> expected_mask;
+        for (int row = 0; row < 3; ++row) {
+            expected_mask.insert(expected_mask.end(), mask.begin() + start, mask.begin() + start + length);
+        }
+        EXPECT_EQ(toVec<int>(input.text_tokens_mask), expected_mask);
+
+        vector<int> expected_locations;
+        vector<int64_t> expected_spans;
+        size_t      feature_index = 0;
+        for (int row = 0; row < 3; ++row) {
+            for (size_t i = 0; i < features.size(); ++i) {
+                const int begin = std::max(start, feature_locations[i]);
+                const int end = std::min(start + length, feature_locations[i] + static_cast<int>(features[i].size(0)));
+                if (begin >= end) {
+                    continue;
+                }
+                const int offset = begin - feature_locations[i];
+                expected_locations.push_back(row * length + begin - start);
+                expected_spans.insert(expected_spans.end(), {row, begin, end});
+                ASSERT_TRUE(input.multimodal_features.has_value());
+                ASSERT_LT(feature_index, input.multimodal_features->size());
+                EXPECT_TRUE(torch::equal(input.multimodal_features->at(feature_index).cpu(),
+                                         features[i].slice(0, offset, offset + end - begin)));
+                ASSERT_TRUE(input.mm_extra_input.has_value());
+                EXPECT_TRUE(torch::equal(input.mm_extra_input->at(feature_index).cpu(),
+                                         stacks[i].slice(1, offset, offset + end - begin).contiguous().flatten()));
+                EXPECT_LE(expected_locations.back() + end - begin, (row + 1) * length);
+                ++feature_index;
+            }
+        }
+        EXPECT_EQ(toVec<int>(input.mm_features_locs), expected_locations);
+        EXPECT_EQ(toVec<int64_t>(input.mm_features_spans), expected_spans);
+        EXPECT_EQ(input.multimodal_features.has_value() ? input.multimodal_features->size() : 0, feature_index);
+        EXPECT_TRUE(torch::equal(stream->multimodalFeatures()[0], first));
+        EXPECT_TRUE(torch::equal(stream->multimodalFeatures()[1], second));
+    }
+}
+
 TEST_F(NormalBatchStreamProcessorTest, testMisalignedMultimodalExtraInputIsRejected) {
     ResourceContext resource_context;
     ModelConfig     model_config;
@@ -2515,111 +2603,114 @@ TEST_F(ChunkedPrefillBatchStreamProcessorTest, testAllAttentionChunkInputsPreser
         {"hca_state", std::make_shared<FixedStateCacheSpec>("hca_state", 128, 128, 1), CacheGroupType::SWA, true},
     };
     for (const auto& attention : cases) {
-        for (const bool reuse : {false, true}) {
-            SCOPED_TRACE(std::string(attention.tag) + " reuse=" + std::to_string(reuse));
-            CacheConfig cache_config;
-            cache_config.layer_num          = 1;
-            cache_config.seq_size_per_block = 128;
-            cache_config.fromGroupedSpecs({attention.spec}, {{0}}, {attention.type}, {attention.tag});
-            auto group                       = cache_config.groups().front();
-            group.block_num                  = 256;
-            group.policy.shared_chunk_state  = attention.shared;
-            group.policy.enable_prefix_reuse = !attention.shared;
-            group.policy.active_tail_blocks  = 1;
-            group.policy.sliding_window_size = attention.type == CacheGroupType::SWA ? 128 : 0;
-            cache_config.setTopology({group}, {{0, {attention.tag}}});
-            ResourceContext context;
-            context.cache_manager = std::make_shared<KVCacheManager>(cache_config);
-            context.reuse_cache   = reuse;
-            RuntimeConfig runtime;
-            runtime.fifo_scheduler_config.prefill_chunk_size = 256;
-            NormalBatchStreamProcessor processor(
-                model_config_, PDSepConfig{}, ProfilingDebugLoggingConfig{}, cache_config, false);
-            const bool                   cyclic = !reuse && attention.type != CacheGroupType::FULL && !attention.shared;
-            const BlockIndicesType       owning = attention.shared ? BlockIndicesType{-1, -1, -1, 41} :
-                                                  cyclic           ? BlockIndicesType{-1, 11, 23, 37} :
-                                                                     BlockIndicesType{11, 23, 37, 41};
-            std::list<GenerateStreamPtr> streams;
-            for (int row = 0; row < 2; ++row) {
-                std::vector<int32_t> tokens(401);
-                std::iota(tokens.begin(), tokens.end(), 1 + row * 1000);
-                auto input                   = std::make_shared<GenerateInput>();
-                input->request_id            = row + 1;
-                input->input_ids             = hostIntBuffer(tokens);
-                input->generate_config       = std::make_shared<GenerateConfig>();
-                input->need_release_resource = false;  // This test owns IDs, not pool allocations.
-                auto stream = std::make_shared<NormalGenerateStream>(input, model_config_, runtime, context, nullptr);
-                stream->generate_status_->status = StreamState::RUNNING;
-                auto row_owning                  = owning;
-                for (auto& block : row_owning) {
-                    if (block > 0) {
-                        block += row * 100;
-                    }
-                }
-                stream->kvCachePtr()->mutableBlockIds(0, attention.tag).assign(row_owning);
-                streams.push_back(stream);
-            }
-            for (int round = 0; round < 3; ++round) {
-                const std::vector<int32_t> prefixes =
-                    round == 0 ? std::vector<int32_t>{0, 128} : std::vector<int32_t>(2, round == 1 ? 256 : 384);
-                const std::vector<int32_t> lengths =
-                    round == 0 ? std::vector<int32_t>{256, 128} : std::vector<int32_t>(2, round == 1 ? 128 : 17);
-                std::vector<int32_t> tokens, positions;
-                int                  row = 0;
-                for (const auto& stream : streams) {
-                    if (round == 0) {
-                        stream->setReuseLength(prefixes[row]);
-                        stream->setInitialReuseLength(prefixes[row]);
-                    }
-                    EXPECT_EQ(stream->prefixLength(), prefixes[row]);
-                    stream->setChunkSize(lengths[row]);
-                    for (int pos = prefixes[row]; pos < prefixes[row] + lengths[row]; ++pos) {
-                        tokens.push_back(pos + 1 + row * 1000);
-                        positions.push_back(pos);
-                    }
-                    ++row;
-                }
-                StreamGroups groups(streams);
-                TensorHolder holder;
-                auto         result = processor.gatherModelInput(groups, holder);
-                ASSERT_TRUE(result.ok()) << result.status().ToString();
-                const auto& inputs = result.value();
-                EXPECT_EQ(toVec<int32_t>(inputs.combo_tokens), tokens);
-                EXPECT_EQ(toVec<int32_t>(inputs.combo_position_ids), positions);
-                EXPECT_EQ(toVec<int32_t>(inputs.input_lengths), lengths);
-                EXPECT_EQ(toVec<int32_t>(inputs.prefix_lengths), prefixes);
-                EXPECT_EQ(toVec<int64_t>(inputs.request_id), (std::vector<int64_t>{1, 2}));
-                EXPECT_EQ(toVec<int32_t>(inputs.cache_store_publish_start_tokens),
-                          round == 0 ? std::vector<int32_t>({0, 0}) : prefixes);
-                EXPECT_EQ(inputs.sequence_lengths.numel(), 0);
-                auto standalone = processor.gatherKvCacheKernelBlockId(groups, {attention.tag}, holder);
-                ASSERT_TRUE(standalone.ok()) << standalone.status().ToString();
-                row = 0;
-                for (const auto& stream : streams) {
-                    auto expected   = cyclic ? BlockIndicesType{37, 11, 23, 37} : owning;
-                    auto row_owning = owning;
-                    for (auto* ids : {&expected, &row_owning}) {
-                        for (auto& block : *ids) {
-                            if (block > 0) {
-                                block += row * 100;
-                            }
+        for (const bool prefix_reuse : {false, true}) {
+            for (const bool reuse : {false, true}) {
+                SCOPED_TRACE(std::string(attention.tag) + " prefix_reuse=" + std::to_string(prefix_reuse)
+                             + " context_reuse=" + std::to_string(reuse));
+                CacheConfig cache_config;
+                cache_config.layer_num          = 1;
+                cache_config.seq_size_per_block = 128;
+                cache_config.fromGroupedSpecs({attention.spec}, {{0}}, {attention.type}, {attention.tag});
+                auto group                       = cache_config.groups().front();
+                group.block_num                  = 256;
+                group.policy.shared_chunk_state  = attention.shared;
+                group.policy.enable_prefix_reuse = prefix_reuse && !attention.shared;
+                group.policy.active_tail_blocks  = 1;
+                group.policy.sliding_window_size = attention.type == CacheGroupType::SWA ? 128 : 0;
+                cache_config.setTopology({group}, {{0, {attention.tag}}});
+                ResourceContext context;
+                context.cache_manager = std::make_shared<KVCacheManager>(cache_config);
+                context.reuse_cache   = reuse;
+                RuntimeConfig runtime;
+                runtime.fifo_scheduler_config.prefill_chunk_size = 256;
+                NormalBatchStreamProcessor processor(
+                    model_config_, PDSepConfig{}, ProfilingDebugLoggingConfig{}, cache_config, false);
+                const bool cyclic = !prefix_reuse && attention.type != CacheGroupType::FULL && !attention.shared;
+                const BlockIndicesType owning = attention.shared ? BlockIndicesType{-1, -1, -1, 41} :
+                                                cyclic           ? BlockIndicesType{-1, 11, 23, 37} :
+                                                                   BlockIndicesType{11, 23, 37, 41};
+                std::list<GenerateStreamPtr> streams;
+                for (int row = 0; row < 2; ++row) {
+                    std::vector<int32_t> tokens(401);
+                    std::iota(tokens.begin(), tokens.end(), 1 + row * 1000);
+                    auto input                   = std::make_shared<GenerateInput>();
+                    input->request_id            = row + 1;
+                    input->input_ids             = hostIntBuffer(tokens);
+                    input->generate_config       = std::make_shared<GenerateConfig>();
+                    input->need_release_resource = false;  // This test owns IDs, not pool allocations.
+                    auto stream = std::make_shared<NormalGenerateStream>(input, model_config_, runtime, context, nullptr);
+                    stream->generate_status_->status = StreamState::RUNNING;
+                    auto row_owning                  = owning;
+                    for (auto& block : row_owning) {
+                        if (block > 0) {
+                            block += row * 100;
                         }
                     }
-                    if (attention.shared) {
-                        expected.assign(4, NULL_BLOCK_IDX);
-                        expected[(prefixes[row] + lengths[row] - 1) / 128] = 41 + row * 100;
+                    stream->kvCachePtr()->mutableBlockIds(0, attention.tag).assign(row_owning);
+                    streams.push_back(stream);
+                }
+                for (int round = 0; round < 3; ++round) {
+                    const std::vector<int32_t> prefixes =
+                        round == 0 ? std::vector<int32_t>{0, 128} : std::vector<int32_t>(2, round == 1 ? 256 : 384);
+                    const std::vector<int32_t> lengths =
+                        round == 0 ? std::vector<int32_t>{256, 128} : std::vector<int32_t>(2, round == 1 ? 128 : 17);
+                    std::vector<int32_t> tokens, positions;
+                    int                  row = 0;
+                    for (const auto& stream : streams) {
+                        if (round == 0) {
+                            stream->setReuseLength(prefixes[row]);
+                            stream->setInitialReuseLength(prefixes[row]);
+                        }
+                        EXPECT_EQ(stream->prefixLength(), prefixes[row]);
+                        stream->setChunkSize(lengths[row]);
+                        for (int pos = prefixes[row]; pos < prefixes[row] + lengths[row]; ++pos) {
+                            tokens.push_back(pos + 1 + row * 1000);
+                            positions.push_back(pos);
+                        }
+                        ++row;
                     }
-                    EXPECT_EQ(toVec<int32_t>(inputs.kv_cache_kernel_block_id[0][row]), expected);
-                    EXPECT_EQ(toVec<int32_t>(standalone.value()[0][row]), expected);
-                    EXPECT_EQ(toVec<int32_t>(inputs.kv_cache_block_id[0][row]),
-                              (attention.shared || cyclic) && round < 2 ? BlockIndicesType(4, NULL_BLOCK_IDX) :
-                                                                          row_owning);
-                    EXPECT_EQ(stream->kvCachePtr()->blocks(0, attention.tag), row_owning);
-                    EXPECT_EQ(stream->initialReuseLength(), row * 128);
-                    if (stream->isMiddleChunk()) {
-                        stream->advanceChunk();
+                    StreamGroups groups(streams);
+                    TensorHolder holder;
+                    auto         result = processor.gatherModelInput(groups, holder);
+                    ASSERT_TRUE(result.ok()) << result.status().ToString();
+                    const auto& inputs = result.value();
+                    EXPECT_EQ(toVec<int32_t>(inputs.combo_tokens), tokens);
+                    EXPECT_EQ(toVec<int32_t>(inputs.combo_position_ids), positions);
+                    EXPECT_EQ(toVec<int32_t>(inputs.input_lengths), lengths);
+                    EXPECT_EQ(toVec<int32_t>(inputs.prefix_lengths), prefixes);
+                    EXPECT_EQ(toVec<int64_t>(inputs.request_id), (std::vector<int64_t>{1, 2}));
+                    EXPECT_EQ(toVec<int32_t>(inputs.cache_store_publish_start_tokens),
+                              round == 0 ? std::vector<int32_t>({0, 0}) : prefixes);
+                    EXPECT_EQ(inputs.sequence_lengths.numel(), 0);
+                    auto standalone = processor.gatherKvCacheKernelBlockId(groups, {attention.tag}, holder);
+                    ASSERT_TRUE(standalone.ok()) << standalone.status().ToString();
+                    row = 0;
+                    for (const auto& stream : streams) {
+                        auto expected   = cyclic ? BlockIndicesType{37, 11, 23, 37} : owning;
+                        auto row_owning = owning;
+                        for (auto* ids : {&expected, &row_owning}) {
+                            for (auto& block : *ids) {
+                                if (block > 0) {
+                                    block += row * 100;
+                                }
+                            }
+                        }
+                        if (attention.shared) {
+                            expected.assign(4, NULL_BLOCK_IDX);
+                            expected[(prefixes[row] + lengths[row] - 1) / 128] = 41 + row * 100;
+                        }
+                        EXPECT_EQ(toVec<int32_t>(inputs.kv_cache_kernel_block_id[0][row]), expected);
+                        EXPECT_EQ(toVec<int32_t>(standalone.value()[0][row]), expected);
+                        EXPECT_EQ(toVec<int32_t>(inputs.kv_cache_block_id[0][row]),
+                                  (attention.shared || cyclic) && round < 2 ? BlockIndicesType(4, NULL_BLOCK_IDX) :
+                                                                              row_owning);
+                        EXPECT_EQ(stream->kvCachePtr()->blocks(0, attention.tag), row_owning);
+                        EXPECT_EQ(stream->initialReuseLength(), row * 128);
+                        if (stream->isMiddleChunk()) {
+                            stream->advanceChunk();
+                        }
+                        ++row;
                     }
-                    ++row;
                 }
             }
         }
