@@ -36,6 +36,18 @@ _CUDA13_ARM_DEFERRED = [
     "av",
     "torch",
     "torchvision",
+] + [
+    # remaining names absent from the aarch64 torch lock (rocm-only, x86-only
+    # internal wheels, or pure-python extras): every consumer resolves them
+    # from a lane-specific repo, never from cpu/arm
+    "pyrsmi",
+    "amdsmi",
+    "fast-safetensors",
+    "fastsafetensors",
+    "aiter",
+    "pybind11_stubgen",
+    "xgrammar",
+    "utils",
 ]
 
 # xgrammar's wheel metadata pulls apache-tvm-ffi (and triton on x86), which only
