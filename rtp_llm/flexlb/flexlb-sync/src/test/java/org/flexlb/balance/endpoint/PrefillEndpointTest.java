@@ -1,5 +1,6 @@
 package org.flexlb.balance.endpoint;
 
+import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
@@ -14,9 +15,9 @@ import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.DebugInfo;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
-import org.flexlb.dao.master.TaskInfo;
+import org.flexlb.testfixture.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.master.WorkerStatusResponse;
+import org.flexlb.testfixture.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.PriorityPreemptionProgress;
 import org.flexlb.enums.TaskPhase;
@@ -1414,7 +1415,7 @@ class PrefillEndpointTest {
         status.lock.lock();
         try {
             response.setStatusVersion(status.appliedStatusCursor().statusVersion());
-            projection = endpoint.observeStatusHeartbeat(status, status.freezeStatusResponse(response));
+            projection = endpoint.observeStatusHeartbeat(status, WorkerStatusTestFixtures.observation(status, response));
         } finally {
             status.lock.unlock();
         }

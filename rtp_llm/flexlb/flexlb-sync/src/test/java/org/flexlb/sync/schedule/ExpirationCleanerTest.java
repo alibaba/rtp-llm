@@ -37,40 +37,34 @@ import static org.mockito.Mockito.when;
 class ExpirationCleanerTest {
 
     @Test
-    void pendingValidHeartbeatPreventsExpiryButFailureDoesNot() {
+    void onlyConsecutiveRpcFailuresTriggerRetirement() {
         EndpointRegistry registry = mock(EndpointRegistry.class);
         CacheAwareService cache = mock(CacheAwareService.class);
         WorkerStatus status = status("127.0.0.1", 8080);
         WorkerDirectory directory = new WorkerDirectory(registry, Runnable::run);
         directory.currentOrDiscover(RoleType.PREFILL, status.getIpPort(), () -> status);
-        ConfigService service = mock(ConfigService.class);
-        FlexlbConfig config = org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig();
-        config.getWorkerRegistry().getHealth().setStatusStaleAfterMs(0L);
-        when(service.loadBalanceConfig()).thenReturn(config);
-        ExpirationCleaner cleaner = new ExpirationCleaner(service, cache, directory);
-        WorkerStatus.PollLease lease = status.tryBeginStatusPoll(1L);
-        lease.statusRpcStarted(5000);
-        cleaner.cleanExpiredWorkers();
+        ExpirationCleaner cleaner = new ExpirationCleaner(cache, directory);
+        cleaner.retireUnavailableWorkers();
         assertTrue(status.isActiveGeneration());
-        lease.statusRpcCompleted(true);
-        cleaner.cleanExpiredWorkers();
-        assertTrue(status.isActiveGeneration());
-        lease.statusRpcCompleted(false);
-        cleaner.cleanExpiredWorkers();
-        assertFalse(status.isActiveGeneration());
+        for (int failures = 1; failures <= 3; failures++) {
+            WorkerStatus.PollLease lease = status.tryBeginStatusPoll(failures);
+            status.recordStatusRpcResult(lease, false, false, new IllegalStateException("RPC failed"));
+            lease.close();
+            cleaner.retireUnavailableWorkers();
+            assertEquals(failures < 3, status.isActiveGeneration());
+        }
         verify(cache).removeEngineBlockCache(status, status.trace());
+        assertEquals(-1L, status.trace().snapshot().lastSuccessAgeUs(),
+                "a worker that never replied must not report discovery time as a successful RPC");
     }
 
     @Test
     @Timeout(10)
-    void logsCountsBeforeWaitingForWorkerLock() throws Exception {
+    void logsCountsWithoutWaitingForWorkerLock() throws Exception {
         var directory = new WorkerDirectory(mock(EndpointRegistry.class));
         WorkerStatus worker = status("127.0.0.1", 8080);
         directory.currentOrDiscover(RoleType.PREFILL, worker.getIpPort(), () -> worker);
-        ConfigService configService = mock(ConfigService.class);
-        when(configService.loadBalanceConfig())
-                .thenReturn(org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
-        var cleaner = new ExpirationCleaner(configService, mock(CacheAwareService.class), directory);
+        var cleaner = new ExpirationCleaner(mock(CacheAwareService.class), directory);
         var emitted = new CountDownLatch(1);
         var line = new AtomicReference<String>();
         var appender = new AppenderBase<ILoggingEvent>() {
@@ -91,15 +85,14 @@ class ExpirationCleanerTest {
             Future<?> cleaning;
             worker.lock.lock();
             try {
-                cleaning = executor.submit(cleaner::cleanExpiredWorkers);
+                cleaning = executor.submit(cleaner::retireUnavailableWorkers);
                 assertTrue(emitted.await(2, TimeUnit.SECONDS));
-                assertFalse(cleaning.isDone());
+                cleaning.get(5, TimeUnit.SECONDS);
                 assertTrue(line.get().contains("prefill_discovered=1 prefill_published=0"));
                 assertTrue(line.get().contains("decode_discovered=0 decode_published=0"));
             } finally {
                 worker.lock.unlock();
             }
-            cleaning.get(5, TimeUnit.SECONDS);
         } finally {
             logger.detachAppender(appender);
             appender.stop();
@@ -127,17 +120,21 @@ class ExpirationCleanerTest {
             assertEquals(1, tasks.size());
             FixedRateTask task = assertInstanceOf(FixedRateTask.class, tasks.iterator().next().getTask());
             assertEquals(1250L, task.getInterval());
-            assertEquals(10000L, config.getWorkerRegistry().getHealth().getStatusStaleAfterMs());
         }
     }
 
     @Test
-    void detachesEveryExpiredWorkerBeforeAwaitingAnyRetirement()
+    void detachesEveryUnavailableWorkerBeforeAwaitingAnyRetirement()
             throws Exception {
         EndpointRegistry registry = mock(EndpointRegistry.class);
         CacheAwareService cache = mock(CacheAwareService.class);
         WorkerStatus first = status("127.0.0.1", 8080);
         WorkerStatus second = status("127.0.0.2", 8080);
+        for (WorkerStatus status : new WorkerStatus[]{first, second}) {
+            WorkerStatus.PollLease lease = status.tryBeginStatusPoll(1L);
+            status.recordStatusRpcResult(lease, true, false, null);
+            lease.close();
+        }
         WorkerDirectory directory = new WorkerDirectory(registry);
         directory.currentOrDiscover(
                 RoleType.PREFILL, first.getIpPort(), () -> first);
@@ -163,16 +160,11 @@ class ExpirationCleanerTest {
             return null;
         }).when(firstDetached).retireAndAwait();
 
-        ConfigService configService = mock(ConfigService.class);
-        FlexlbConfig config = org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig();
-        config.getWorkerRegistry().getHealth().setStatusStaleAfterMs(0L);
-        when(configService.loadBalanceConfig()).thenReturn(config);
-        ExpirationCleaner cleaner = new ExpirationCleaner(
-                configService, cache, directory);
+        ExpirationCleaner cleaner = new ExpirationCleaner(cache, directory);
         ExecutorService executor = Executors.newSingleThreadExecutor();
         try {
             Future<?> cleaning = executor.submit(
-                    cleaner::cleanExpiredWorkers);
+                    cleaner::retireUnavailableWorkers);
 
             assertTrue(firstAwaitEntered.await(2, TimeUnit.SECONDS));
             assertFalse(first.isActiveGeneration());

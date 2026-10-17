@@ -12,30 +12,11 @@ import java.lang.management.ManagementFactory;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** Measures diagnostic writes, excluding lease construction, RPC payloads and business reducers. */
+/** Measures diagnostic state and writes, excluding RPC payloads and business reducers. */
 @Tag("performance-regression")
 class WorkerPollDiagnosticsPerformanceTest {
     private static final int WARMUP = 10_000;
     private static final int ITERATIONS = 20_000;
-
-    @Test
-    void syncPhaseRecordingDoesNotAllocatePerCycle() {
-        var bean = allocationBean();
-        long threadId = Thread.currentThread().threadId();
-        var trace = new EndpointTrace.Poll("SYNC", 1L);
-        for (int i = 0; i < WARMUP; i++) {
-            recordSyncPhases(trace);
-        }
-        long before = bean.getThreadAllocatedBytes(threadId);
-        for (int i = 0; i < ITERATIONS; i++) {
-            recordSyncPhases(trace);
-        }
-        double bytesPerCycle = (double) (bean.getThreadAllocatedBytes(threadId) - before) / ITERATIONS;
-        System.out.printf("Sync phase trace: bytes_per_cycle=%.2f%n", bytesPerCycle);
-        assertTrue(bytesPerCycle <= 8.0,
-                "sync phase recording must use fixed fields without per-worker events or snapshots");
-        assertEquals(Stage.RUNNER_ENDED.name(), trace.snapshot().stage());
-    }
 
     @Test
     void recordDoesNotAllocatePerScalarEvent() {
@@ -54,7 +35,7 @@ class WorkerPollDiagnosticsPerformanceTest {
         double bytesPerEvent = (double) (bean.getThreadAllocatedBytes(threadId) - before) / ITERATIONS;
         System.out.printf("Trace recorder: bytes_per_event=%.2f%n", bytesPerEvent);
         assertTrue(bytesPerEvent <= 8.0, "recording must update fixed fields without per-event allocation");
-        assertEquals(1, trace.snapshot().poll().syncCycleId());
+        assertEquals(1, trace.snapshot().statusPoll().syncCycleId());
     }
 
     @Test
@@ -129,8 +110,8 @@ class WorkerPollDiagnosticsPerformanceTest {
                     "busy skips must aggregate without per-tick strings, maps or snapshots");
 
             var snapshot = worker.trace().snapshot();
-            assertEquals(WARMUP + ITERATIONS, snapshot.poll().skippedBusy());
-            assertEquals("CALLBACK_READY", snapshot.poll().stage());
+            assertEquals(WARMUP + ITERATIONS, snapshot.statusPoll().skippedBusy());
+            assertEquals("CALLBACK_READY", snapshot.statusPoll().stage());
         } finally {
             held.close();
         }
@@ -150,10 +131,10 @@ class WorkerPollDiagnosticsPerformanceTest {
                 held.pollTrace().record(Stage.STATUS_LOCK_ACQUIRED);
             }
             var second = worker.trace().snapshot();
-            assertEquals(first.poll().pollId(), second.poll().pollId());
-            assertEquals("RPC_COMPLETED", second.poll().failureStage());
-            assertTrue(second.poll().error().contains("worker unavailable"));
-            assertEquals(1, second.poll().syncCycleId());
+            assertEquals(first.statusPoll().pollId(), second.statusPoll().pollId());
+            assertEquals("RPC_COMPLETED", second.statusPoll().failureStage());
+            assertTrue(second.statusPoll().error().contains("worker unavailable"));
+            assertEquals(1, second.statusPoll().syncCycleId());
         } finally {
             held.close();
         }
@@ -164,26 +145,17 @@ class WorkerPollDiagnosticsPerformanceTest {
         pollTrace.record(Stage.RUNNER_STARTED);
         pollTrace.record(Stage.RPC_STARTED);
         pollTrace.record(Stage.RPC_COMPLETED);
-        pollTrace.record(Stage.CONVERSION_STARTED);
+        pollTrace.record(Stage.STATUS_HEALTH_UPDATED);
         pollTrace.record(Stage.CALLBACK_READY);
         pollTrace.record(Stage.CALLBACK_STARTED);
+        pollTrace.record(Stage.CONVERSION_STARTED);
+        pollTrace.record(Stage.CONVERSION_COMPLETED);
         pollTrace.record(Stage.STATUS_LOCK_ATTEMPT);
         pollTrace.record(Stage.STATUS_LOCK_ACQUIRED);
-        pollTrace.record(Stage.STATUS_HEALTH_UPDATED);
         pollTrace.record(Stage.STATUS_COMMITTED);
         pollTrace.record(Stage.STATUS_APPLIED);
         pollTrace.record(Stage.STATUS_LOCK_RELEASED);
         pollTrace.record(Stage.CALLBACK_ENDED);
-    }
-
-    private static void recordSyncPhases(EndpointTrace.Poll trace) {
-        trace.record(Stage.RUNNER_SUBMITTED);
-        trace.record(Stage.RUNNER_STARTED);
-        trace.record(Stage.SYNC_DISCOVERY);
-        trace.record(Stage.SYNC_RETIREMENT);
-        trace.record(Stage.SYNC_DISPATCH);
-        trace.record(Stage.SYNC_REPORT);
-        trace.record(Stage.RUNNER_ENDED);
     }
 
     private static WorkerStatus worker() {

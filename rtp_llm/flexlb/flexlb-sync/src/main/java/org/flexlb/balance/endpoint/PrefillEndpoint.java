@@ -241,7 +241,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
             ScheduledRequest exactHead,
             long batchId,
             int maximumInflightBatches) {
-        if (!hasFreshSchedulingStatus()) {
+        if (!hasAvailableSchedulingStatus()) {
             return new PrefillState.ReservationResult<>(PrefillState.CapacityStatus.CAPACITY_FULL, null);
         }
         EndpointGenerationLifecycle.HandoffPermit handoffPermit =
@@ -275,7 +275,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
             reserveRouteOwnership(
             ScheduledRequest exactItem,
             long predictedMs) {
-        if (!hasFreshSchedulingStatus()) {
+        if (!hasAvailableSchedulingStatus()) {
             return new PrefillState.ReservationResult<>(PrefillState.CapacityStatus.CAPACITY_FULL, null);
         }
         if (isGenerationRetiringOrRetired()) {
@@ -288,7 +288,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
     /** Acquire the generation capability only for the final route commit. */
     public RouteCommitAdmission tryBeginRouteCommitAdmission() {
-        if (!hasFreshSchedulingStatus()) { return null; }
+        if (!hasAvailableSchedulingStatus()) { return null; }
         EndpointGenerationLifecycle.HandoffPermit handoffPermit =
                 tryAcquireGenerationHandoff();
         return handoffPermit == null
@@ -298,7 +298,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
     /** Exact wake source for this generation's batch admission capacity. */
     public CapacityBoundary.Availability batchAdmissionAvailability(
             int maximumInflightBatches) {
-        return prefillState.batchAvailability(maximumInflightBatches);
+        return prefillState.batchAvailability(maximumInflightBatches, getStatus());
     }
 
     /** Explain a failed admission using the current owner-priority summary. */

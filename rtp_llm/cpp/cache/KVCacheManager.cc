@@ -734,9 +734,7 @@ KVCacheInfo KVCacheManager::buildKVCacheInfo(int64_t latest_version, bool need_c
     if (need_cache_keys && block_tree_cache_) {
         BlockTreeKeySnapshot snapshot = block_tree_cache_->getKeySnapshot(latest_version);
         info.version                  = snapshot.version;
-        if (latest_version < 0 || latest_version != snapshot.version) {
-            info.cached_keys = std::move(snapshot.keys);
-        }
+        info.cached_keys              = std::move(snapshot.keys);
     }
 
     const size_t block_size_tokens = cp_slot_mapper_ && cp_slot_mapper_->isSharded() ?

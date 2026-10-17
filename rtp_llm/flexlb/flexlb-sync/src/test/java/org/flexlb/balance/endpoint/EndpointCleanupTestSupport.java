@@ -1,8 +1,9 @@
 package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.scheduler.ScheduledRequest;
-import org.flexlb.dao.master.TaskInfo;
-import org.flexlb.dao.master.WorkerStatusResponse;
+import org.flexlb.testfixture.TaskInfo;
+import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.testfixture.WorkerStatusResponse;
 import org.flexlb.enums.TaskPhase;
 
 import java.util.Comparator;
@@ -33,6 +34,7 @@ public final class EndpointCleanupTestSupport {
 
     public static final class PrefillLedger {
         private final boolean batch;
+        private final WorkerStatus schedulingWorker = mock(WorkerStatus.class);
         private final AtomicLong clock = new AtomicLong(100);
         private final ReentrantLock lock = new ReentrantLock();
         private final PrefillState state = new PrefillState(lock,
@@ -42,6 +44,7 @@ public final class EndpointCleanupTestSupport {
 
         public PrefillLedger(boolean batch) {
             this.batch = batch;
+            when(schedulingWorker.isAvailableForScheduling()).thenReturn(true);
         }
 
         public record Owner(ScheduledRequest item, PrefillState.Reservation reservation) { }
@@ -100,8 +103,8 @@ public final class EndpointCleanupTestSupport {
                 assertEquals(((PrefillState.BatchReservation) owner.reservation()).batchId(),
                         work.batches().getFirst().batchId());
                 // Check the actual admission gate, not just the derived batch count.
-                assertFalse(state.batchAvailability(1).isAvailable());
-                assertTrue(state.batchAvailability(2).isAvailable());
+                assertFalse(state.batchAvailability(1, schedulingWorker).isAvailable());
+                assertTrue(state.batchAvailability(2, schedulingWorker).isAvailable());
             } else {
                 assertTrue(work.batches().isEmpty());
                 assertEquals(List.of(owner.item().requestId()), work.requests().stream()
@@ -121,7 +124,7 @@ public final class EndpointCleanupTestSupport {
             assertTrue(state.committedSnapshot().requests().isEmpty());
             assertTrue(state.committedSnapshot().batches().isEmpty());
             assertEquals(0L, state.committedSnapshot().totalRemainingWorkMs().orElseThrow());
-            assertTrue(state.batchAvailability(1).isAvailable());
+            assertTrue(state.batchAvailability(1, schedulingWorker).isAvailable());
         }
     }
 }

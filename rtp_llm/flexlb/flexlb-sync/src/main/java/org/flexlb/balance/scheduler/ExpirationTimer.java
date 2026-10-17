@@ -1,6 +1,5 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.config.ConfigService;
 import org.flexlb.util.Logger;
 
 import java.util.List;
@@ -28,6 +27,8 @@ import java.util.function.LongSupplier;
  * Engine cancellation acknowledgements or terminal status delivery.
  */
 final class ExpirationTimer implements AutoCloseable {
+    /** Terminal request records and endpoint orphans; unrelated to worker RPC health. */
+    private static final long TERMINAL_RETENTION_MS = TimeUnit.SECONDS.toMillis(10);
 
     private enum DeadlineState {
         PREPARED,
@@ -184,7 +185,6 @@ final class ExpirationTimer implements AutoCloseable {
     }
 
     private final RequestRegistry lifecycle;
-    private final ConfigService config;
     private final LongSupplier clock;
     private final ScheduledThreadPoolExecutor executor;
     private final Object registrationMonitor = new Object();
@@ -192,18 +192,14 @@ final class ExpirationTimer implements AutoCloseable {
     private int inflightRegistrations;
     private Throwable closeFailure;
 
-    ExpirationTimer(
-            RequestRegistry lifecycle,
-            ConfigService config) {
-        this(lifecycle, config, System::currentTimeMillis);
+    ExpirationTimer(RequestRegistry lifecycle) {
+        this(lifecycle, System::currentTimeMillis);
     }
 
     ExpirationTimer(
             RequestRegistry lifecycle,
-            ConfigService config,
             LongSupplier clock) {
         this.lifecycle = Objects.requireNonNull(lifecycle, "lifecycle");
-        this.config = Objects.requireNonNull(config, "config");
         this.clock = Objects.requireNonNull(clock, "clock");
         this.executor = new ScheduledThreadPoolExecutor(1, runnable -> {
             Thread thread = new Thread(
@@ -468,13 +464,12 @@ final class ExpirationTimer implements AutoCloseable {
 
     // ── 保留期维护：先清终态目录，再扫描 Endpoint 孤儿 ──
 
-    /** Run one complete maintenance pass using one dynamic policy snapshot. */
+    /** Remove retained terminal records before sweeping unowned endpoint state. */
     void maintain(
             BiConsumer<Long, LongPredicate> exactSweeper) {
         if (lifecycle.isShuttingDown()) {
             return;
         }
-        long ttlMs = config.loadBalanceConfig().getWorkerRegistry().getHealth().getStatusStaleAfterMs();
         long nowMs = clock.getAsLong();
         List<RequestSlot> exactSlots = List.of();
         Throwable failure = null;
@@ -484,7 +479,7 @@ final class ExpirationTimer implements AutoCloseable {
             failure = snapshotFailure;
         }
 
-        long terminalRecordCutoff = subtractSaturated(nowMs, ttlMs);
+        long terminalRecordCutoff = subtractSaturated(nowMs, TERMINAL_RETENTION_MS);
         for (RequestSlot exactSlot : exactSlots) {
             try {
                 lifecycle.removeExactTerminalRecord(exactSlot, terminalRecordCutoff);
@@ -494,7 +489,7 @@ final class ExpirationTimer implements AutoCloseable {
         }
 
         try {
-            exactSweeper.accept(ttlMs, lifecycle::retainForSchedulerCleanup);
+            exactSweeper.accept(TERMINAL_RETENTION_MS, lifecycle::retainForSchedulerCleanup);
         } catch (RuntimeException | Error sweepFailure) {
             failure = append(failure, sweepFailure);
         }

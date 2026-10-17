@@ -92,7 +92,6 @@ print(json.dumps({
         "health": {
             "statusPollIntervalMs": 20,
             "statusRpcTimeoutMs": status_rpc_ms,
-            "statusStaleAfterMs": max(10000, status_rpc_ms * 2),
         },
     },
 }, separators=(",", ":")))
