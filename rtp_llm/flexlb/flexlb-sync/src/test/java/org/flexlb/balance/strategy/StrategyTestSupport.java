@@ -117,9 +117,8 @@ final class StrategyTestSupport {
         try {
             WorkerStatus.PreparedStatus prepared =
                     WorkerStatusTestFixtures.prepare(status, observation);
-            WorkerEndpoint endpoint = registry.publishPreparedEndpoint(
+            return registry.publishPreparedEndpoint(
                     address, status, prepared).endpoint();
-            return endpoint;
         } finally {
             status.lock.unlock();
         }

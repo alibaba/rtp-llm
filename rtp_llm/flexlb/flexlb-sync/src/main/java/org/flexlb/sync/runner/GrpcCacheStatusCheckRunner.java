@@ -45,8 +45,6 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
     private final long startTime = System.nanoTime() / 1000;
     private final boolean debug;
     private final long requestTimeoutMs;
-    private final long syncCycleId;
-    private final Long syncEngineStatusInterval;
     private final Executor callbackExecutor;
 
     public GrpcCacheStatusCheckRunner(String modelName, String ipPort, String site, RoleType roleType,
@@ -58,8 +56,6 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                                       CacheAwareService cacheAwareService,
                                       DynamicCacheIntervalService cacheIntervalService,
                                       long requestTimeoutMs,
-                                      long syncCycleId,
-                                      Long syncEngineStatusInterval,
                                       boolean fullSnapshotDebugMode,
                                       Executor callbackExecutor) {
 
@@ -80,12 +76,9 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
         this.engineHealthReporter = engineHealthReporter;
         this.engineGrpcService = engineGrpcService;
         this.cacheAwareService = cacheAwareService;
-        this.cacheIntervalService = Objects.requireNonNull(
-                cacheIntervalService, "cacheIntervalService");
+        this.cacheIntervalService = Objects.requireNonNull(cacheIntervalService, "cacheIntervalService");
         this.debug = fullSnapshotDebugMode;
         this.requestTimeoutMs = requestTimeoutMs;
-        this.syncCycleId = syncCycleId;
-        this.syncEngineStatusInterval = syncEngineStatusInterval;
         this.callbackExecutor = callbackExecutor;
     }
 
@@ -96,21 +89,6 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
         try {
             pollTrace.record(Stage.RUNNER_STARTED);
             logger.debug("GrpcCacheStatusCheckRunner run for {}", ipPort);
-            long prefillCacheStatusCheckInterval =
-                    cacheIntervalService.getCurrentIntervalMs();
-            long roundInterval = prefillCacheStatusCheckInterval / syncEngineStatusInterval;
-            roundInterval = Math.max(roundInterval, 1);
-
-            // EngineSyncRunner is invoked on the status-poll cadence. Prefill
-            // cache polling uses an integer number of those ticks so a changing
-            // interval does not require a second scheduler or timer.
-            if (roleType.requiresCacheKeys()
-                        && syncCycleId % roundInterval != 0) {
-                logger.debug("Skip prefill cache status check for {} because not in {}ms interval", ipPort, prefillCacheStatusCheckInterval);
-                pollTrace.record(Stage.POLL_SKIPPED, "CACHE_INTERVAL");
-                return; // finally releases the poll lease
-            }
-
             long startTime = System.nanoTime() / 1000;
             long currentCacheVersion = getCurrentCacheVersion();
 
@@ -124,8 +102,10 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                 pollTrace.record(Stage.RPC_INITIATION_FAILED, failure);
                 throw failure;
             }
-            rpc.whenComplete((response, failure) -> pollTrace.record(Stage.RPC_COMPLETED, failure))
-                    .whenComplete((response, failure) -> pollTrace.record(Stage.CALLBACK_READY, failure))
+            rpc.whenComplete((response, failure) -> {
+                        pollTrace.record(Stage.RPC_COMPLETED, failure);
+                        pollTrace.record(Stage.CALLBACK_READY, failure);
+                    })
                     .handleAsync((response, failure) -> {
                         pollTrace.record(Stage.CALLBACK_STARTED);
                         try {
@@ -172,20 +152,21 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
         try {
             WorkerStatus.CacheIndexSnapshot current = workerStatus.cacheIndexSnapshot();
             CacheStatus previous = current.cacheStatus();
+            CacheStatus converted;
             // Check before copying protobuf keys. Empty keys on an unchanged version
             // mean "keep the indexed snapshot", not "clear this worker's cache".
             if (!debug && current.indexInitialized() && previous != null
                     && current.indexedVersion() == response.getVersion()
                     && previous.getVersion() == response.getVersion()) {
-                return EngineStatusConverter.convertToCacheStatus(response, previous.getCachedKeys());
+                converted = EngineStatusConverter.convertToCacheStatus(response, previous.getCachedKeys());
+            } else {
+                converted = EngineStatusConverter.convertToCacheStatus(response);
             }
-            return EngineStatusConverter.convertToCacheStatus(response);
-
+            trace.record(Stage.CONVERSION_COMPLETED);
+            return converted;
         } catch (RuntimeException | Error localFailure) {
             trace.record(Stage.CONVERSION_FAILED, localFailure);
             throw localFailure;
-        } finally {
-            trace.record(Stage.CONVERSION_COMPLETED);
         }
     }
 

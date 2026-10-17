@@ -54,6 +54,8 @@ class ExpirationCleanerTest {
             assertEquals(failures < 3, status.isActiveGeneration());
         }
         verify(cache).removeEngineBlockCache(status, status.trace());
+        assertEquals(-1L, status.trace().snapshot().lastSuccessAgeUs(),
+                "a worker that never replied must not report discovery time as a successful RPC");
     }
 
     @Test

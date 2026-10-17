@@ -2292,9 +2292,7 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_UsesSnapshotForCacheKeysWhenEnabled) {
 
     auto unchanged = kv_cache_manager->getKVCacheInfo(first.version, /*need_cache_keys=*/true);
     EXPECT_EQ(unchanged.version, first.version);
-    auto unchanged_keys = unchanged.cached_keys;
-    std::sort(unchanged_keys.begin(), unchanged_keys.end());
-    EXPECT_TRUE(unchanged_keys.empty());
+    EXPECT_TRUE(unchanged.cached_keys.empty());
 
     auto stale = kv_cache_manager->getKVCacheInfo(first.version - 1, /*need_cache_keys=*/true);
     EXPECT_EQ(stale.version, first.version);
@@ -2315,9 +2313,7 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_UsesSnapshotForCacheKeysWhenEnabled) {
 
     auto current = kv_cache_manager->getKVCacheInfo(updated.version, /*need_cache_keys=*/true);
     EXPECT_EQ(current.version, updated.version);
-    auto current_keys = current.cached_keys;
-    std::sort(current_keys.begin(), current_keys.end());
-    EXPECT_TRUE(current_keys.empty());
+    EXPECT_TRUE(current.cached_keys.empty());
 
     kv_cache_manager->free(FreeInfo{resource, tokens});
     BlockTreeCacheTestPeer::reclaimBlocksForTest(*kv_cache_manager->blockTreeCache(), /*num_blocks=*/100, Tier::DEVICE);

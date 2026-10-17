@@ -553,9 +553,8 @@ public abstract class FlexLBMockTestBase {
         status.lock.lock();
         try {
             WorkerStatus.PreparedStatus prepared = WorkerStatusTestFixtures.prepare(status, WorkerStatusTestFixtures.observation(status, initial));
-            WorkerEndpoint endpoint = endpointRegistry.publishPreparedEndpoint(
+            return endpointRegistry.publishPreparedEndpoint(
                     status.getIpPort(), status, prepared).endpoint();
-            return endpoint;
         } finally {
             status.lock.unlock();
         }

@@ -48,7 +48,6 @@ public final class EndpointTrace {
         FINALIZE_FAILED(true),
         GENERATION_RETIRING(true),
         LEASE_RELEASED,
-        POLL_SKIPPED,
         RESPONSE_DISCARDED,
         RETIREMENT_CLEANUP_BEGIN(true),
         RETIREMENT_CLEANUP_END(true),
@@ -253,7 +252,8 @@ public final class EndpointTrace {
     public void recordUnavailable(String reason, long lastSuccessUs, long failures) {
         unavailableReason = bounded(reason, MAX_REASON_CHARS);
         decidedAtMs = System.currentTimeMillis();
-        lastSuccessAgeUs = TimeUnit.NANOSECONDS.toMicros(System.nanoTime()) - lastSuccessUs;
+        lastSuccessAgeUs = lastSuccessUs == 0L ? -1L
+                : TimeUnit.NANOSECONDS.toMicros(System.nanoTime()) - lastSuccessUs;
         consecutiveFailures = failures;
         record(Stage.UNAVAILABLE_DECISION);
     }
@@ -337,17 +337,10 @@ public final class EndpointTrace {
                 }
                 case CONVERSION_STARTED -> conversionStartedNanos = now;
                 case CONVERSION_COMPLETED, CONVERSION_FAILED -> conversionEndedNanos = now;
-                case CALLBACK_READY -> {
-                    callbackReadyNanos = now;
-                    if (conversionStartedNanos != 0L) {conversionEndedNanos = now;}
-                }
+                case CALLBACK_READY -> callbackReadyNanos = now;
                 case CALLBACK_STARTED -> callbackStartedNanos = now;
                 case CALLBACK_ENDED -> callbackEndedNanos = now;
-                case STATUS_LOCK_ATTEMPT -> {
-                    workerLockAcquiredNanos = 0L;
-                    workerLockReleasedNanos = 0L;
-                    workerLockAttemptNanos = now;
-                }
+                case STATUS_LOCK_ATTEMPT -> workerLockAttemptNanos = now;
                 case STATUS_LOCK_ACQUIRED -> workerLockAcquiredNanos = now;
                 case STATUS_LOCK_RELEASED -> workerLockReleasedNanos = now;
                 case STATUS_HEALTH_UPDATED -> healthUpdatedNanos = now;

@@ -36,7 +36,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -285,11 +284,9 @@ class PrefillEndpointTest {
     void repackNormalizesInvalidFeatures(long seqLen, long hitCache, long expectedMs) {
         ScheduledRequest survivor = org.mockito.Mockito.spy(createScheduledRequest(1L, 500L, 200L));
         ScheduledRequest finished = createScheduledRequest(2L, 300L, 100L);
-        AtomicBoolean invalidFeatures = new AtomicBoolean();
-        org.mockito.Mockito.doAnswer(ignored -> invalidFeatures.get() ? seqLen : 500L).when(survivor).seqLen();
-        org.mockito.Mockito.doAnswer(ignored -> invalidFeatures.get() ? hitCache : 200L).when(survivor).hitCache();
         registerBatch(endpoint, 1L, 100L, List.of(survivor, finished));
-        invalidFeatures.set(true);
+        org.mockito.Mockito.doReturn(seqLen).when(survivor).seqLen();
+        org.mockito.Mockito.doReturn(hitCache).when(survivor).hitCache();
 
         assertDoesNotThrow(() -> reportRejectedBatchMember(endpoint, 1L, 2L));
         assertEquals(expectedMs, endpoint.captureRouteProjectionInputs().work().totalRemainingWorkMs().orElseThrow());

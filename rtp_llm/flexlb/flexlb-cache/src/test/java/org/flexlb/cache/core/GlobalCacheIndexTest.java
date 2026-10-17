@@ -40,10 +40,11 @@ class GlobalCacheIndexTest {
             if (key % 2 == 0) globalCacheIndex.addCacheBlock(key, "survivor", null);
         }
         globalCacheIndex.addCacheBlock(2000L, "survivor", null);
-        Set<Long> detached = local.removeAllCacheBlockOfEngine("retired");
+        Set<Long> detached = local.getEngineCacheBlocks("retired");
         assertEquals(1025, detached.size());
-        assertEquals(0, local.size("retired"));
         globalCacheIndex.removeAllCacheBlockOfEngine("retired", detached, null);
+        local.removeAllCacheBlockOfEngine("retired");
+        assertEquals(0, local.size("retired"));
         assertEquals(514L, globalCacheIndex.totalBlocks());
         assertEquals(514L, globalCacheIndex.totalMappings());
         assertEquals(Map.of("survivor", 1), globalCacheIndex.batchCalculatePrefixMatchLength(

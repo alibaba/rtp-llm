@@ -147,6 +147,10 @@ public class EngineSyncRunner implements Runnable {
             }
 
             logger.debug("Submitting status check tasks for {} workers", latestEngineWorkerList.size());
+            // Check cadence before allocating a cache poll or submitting a task.
+            boolean pollCacheThisCycle = !roleType.requiresCacheKeys()
+                    || syncCycleId % Math.max(cacheIntervalService.getCurrentIntervalMs()
+                            / syncEngineStatusInterval, 1L) == 0L;
             for (WorkerHost host : latestEngineWorkerList) {
                 String workerIpPort = host.getIpPort();
                 String site = host.getSite();
@@ -191,6 +195,7 @@ public class EngineSyncRunner implements Runnable {
                     logger.debug("Skip status check for worker: {}, previous request in progress", workerIpPort);
                 }
 
+                if (!pollCacheThisCycle) { continue; }
                 WorkerStatus.PollLease cachePollLease =
                         workerStatus.tryBeginCachePoll(syncCycleId);
                 if (cachePollLease != null) {
@@ -201,8 +206,7 @@ public class EngineSyncRunner implements Runnable {
                                 = new GrpcCacheStatusCheckRunner(modelName, workerIpPort, site, roleType,
                                 workerStatus, cachePollLease, workerDirectory,
                                 engineHealthReporter, engineGrpcService,
-                                cacheAwareService, cacheIntervalService,
-                                syncRequestTimeoutMs, syncCycleId, syncEngineStatusInterval,
+                                cacheAwareService, cacheIntervalService, syncRequestTimeoutMs,
                                 cacheFullSnapshotDebugMode, cacheStatusExecutor);
                         cachePollLease.pollTrace().record(Stage.RUNNER_SUBMITTED);
                         cacheStatusExecutor.submit(grpcCacheStatusCheckRunner);

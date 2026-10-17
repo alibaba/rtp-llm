@@ -12,7 +12,7 @@ import java.lang.management.ManagementFactory;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** Measures diagnostic writes, excluding lease construction, RPC payloads and business reducers. */
+/** Measures diagnostic state and writes, excluding RPC payloads and business reducers. */
 @Tag("performance-regression")
 class WorkerPollDiagnosticsPerformanceTest {
     private static final int WARMUP = 10_000;
@@ -145,12 +145,13 @@ class WorkerPollDiagnosticsPerformanceTest {
         pollTrace.record(Stage.RUNNER_STARTED);
         pollTrace.record(Stage.RPC_STARTED);
         pollTrace.record(Stage.RPC_COMPLETED);
-        pollTrace.record(Stage.CONVERSION_STARTED);
+        pollTrace.record(Stage.STATUS_HEALTH_UPDATED);
         pollTrace.record(Stage.CALLBACK_READY);
         pollTrace.record(Stage.CALLBACK_STARTED);
+        pollTrace.record(Stage.CONVERSION_STARTED);
+        pollTrace.record(Stage.CONVERSION_COMPLETED);
         pollTrace.record(Stage.STATUS_LOCK_ATTEMPT);
         pollTrace.record(Stage.STATUS_LOCK_ACQUIRED);
-        pollTrace.record(Stage.STATUS_HEALTH_UPDATED);
         pollTrace.record(Stage.STATUS_COMMITTED);
         pollTrace.record(Stage.STATUS_APPLIED);
         pollTrace.record(Stage.STATUS_LOCK_RELEASED);

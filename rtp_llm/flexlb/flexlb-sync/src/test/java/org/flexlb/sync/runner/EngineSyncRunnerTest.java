@@ -173,12 +173,12 @@ class EngineSyncRunnerTest {
         runner.run();
 
         WorkerStatus discovered = workerDirectory.statusSnapshot(RoleType.VIT).get(ipPort);
-        assertEquals(WorkerStatus.StatusContact.UNKNOWN, discovered.pollHealth().contact());
+        assertFalse(discovered.pollHealth().reportedAlive());
         assertTrue(discovered.isActiveGeneration());
     }
 
     @Test
-    void queuedRunnerKeepsDispatchCycleAndCacheCadence() {
+    void skippedCacheCycleSubmitsNoTaskAndKeepsLastRealPoll() {
         LongAdder cycles = new LongAdder();
         cycles.add(7L);
         EngineSyncRunner runner = new EngineSyncRunner(
@@ -187,22 +187,31 @@ class EngineSyncRunnerTest {
                 cacheIntervalService, syncRequestTimeoutMs, cycles.longValue(),
                 syncEngineStatusInterval, false);
         cycles.increment();
+        when(cacheIntervalService.getCurrentIntervalMs()).thenReturn(40L);
+        WorkerHost host = WorkerHost.of("127.0.0.1", 8080);
         when(workerAddressService.getEngineWorkerList(modelName, roleType))
-                .thenReturn(List.of(WorkerHost.of("127.0.0.1", 8080)));
+                .thenReturn(List.of(host));
         List<Runnable> submitted = new ArrayList<>();
         when(statusCheckExecutor.submit(any(Runnable.class))).thenAnswer(invocation -> {
             submitted.add(invocation.getArgument(0));
             return CompletableFuture.completedFuture(null);
         });
 
+        WorkerStatus status = RunnerTestSupport.discovered(roleType, host.getGroup(), "127.0.0.1",
+                8080, host.getGrpcPort(), host.getSite());
+        discover(workerDirectory, status);
+        try (var previous = status.tryBeginCachePoll(6L)) {
+            assertNotNull(previous);
+        }
+        var previousPoll = status.trace().snapshot().cachePoll();
+
         runner.run();
 
-        WorkerStatus status = workerDirectory.statusSnapshot(roleType).get("127.0.0.1:8080");
-        var snapshot = status.trace().snapshot();
-        assertEquals(7L, snapshot.cachePoll().syncCycleId());
-        when(cacheIntervalService.getCurrentIntervalMs()).thenReturn(40L);
-        submitted.get(1).run();
-        assertEquals("POLL_SKIPPED:CACHE_INTERVAL", status.trace().snapshot().cachePoll().outcome());
+        assertEquals(1, submitted.size());
+        assertTrue(submitted.getFirst() instanceof GrpcWorkerStatusRunner);
+        assertEquals(7L, status.trace().snapshot().statusPoll().syncCycleId());
+        assertEquals(previousPoll.pollId(), status.trace().snapshot().cachePoll().pollId());
+        assertEquals(6L, status.trace().snapshot().cachePoll().syncCycleId());
         verify(engineGrpcService, never()).getCacheStatusAsync(
                 any(), Mockito.anyInt(), any(), Mockito.anyLong(), Mockito.anyLong(), any());
     }

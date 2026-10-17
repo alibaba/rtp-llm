@@ -39,9 +39,13 @@ class WorkerStatusHealthTest {
     @Test
     void discoveryStartsUnknownWithoutInventingAWorkerFailure() {
         var worker = worker();
-        assertEquals(WorkerStatus.StatusContact.UNKNOWN, worker.pollHealth().contact());
+        assertFalse(worker.pollHealth().reportedAlive());
         assertFalse(worker.isAvailableForScheduling());
         assertNull(worker.retirementReason());
+        assertEquals(0L, worker.pollHealth().lastSuccessfulPollUs());
+        WorkerStatusTestFixtures.receive(worker, true, null);
+        assertTrue(worker.pollHealth().lastSuccessfulPollUs() > 0L);
+        assertEquals(0L, worker.pollHealth().successfulPollIntervalUs(), "the first success has no prior interval");
     }
 
     @Test
@@ -98,7 +102,7 @@ class WorkerStatusHealthTest {
         var lease = worker.tryBeginStatusPoll(2L);
         worker.recordStatusRpcResult(lease, true, false, null);
         var deadHealth = worker.pollHealth();
-        assertEquals(WorkerStatus.StatusContact.DEAD, deadHealth.contact());
+        assertFalse(deadHealth.reportedAlive());
         assertFalse(worker.isAvailableForScheduling());
         assertEquals(WorkerStatus.RetirementReason.WORKER_REPORTED_NOT_ALIVE,
                 worker.retirementReason());
@@ -119,7 +123,7 @@ class WorkerStatusHealthTest {
             try {
                 CompletableFuture.runAsync(() -> worker.recordStatusRpcResult(lease, true, true, null))
                         .get(1, TimeUnit.SECONDS);
-                assertEquals(WorkerStatus.StatusContact.ALIVE, worker.pollHealth().contact());
+                assertTrue(worker.pollHealth().reportedAlive());
                 assertSame(committed, worker.committedWorkerStatus());
             } finally { worker.lock.unlock(); }
         }

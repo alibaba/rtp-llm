@@ -129,22 +129,18 @@ public class WorkerStatus {
             AppliedStatusCursor cursor) {
     }
 
-    public enum StatusContact { UNKNOWN, ALIVE, DEAD }
-
     /**
      * Status-poll transport health, updated independently of local status application.
      * Successful timestamps are used for diagnostics, never worker expiration.
+     * A zero timestamp means no RPC has succeeded in this generation.
      */
     public record PollHealth(
             long lastSuccessfulPollUs,
             long successfulPollIntervalUs,
             long consecutiveTransportFailures,
-            StatusContact contact) {
-
-        public boolean reportedAlive() { return contact == StatusContact.ALIVE; }
+            boolean reportedAlive) {
 
         public PollHealth {
-            Objects.requireNonNull(contact, "contact");
             if (lastSuccessfulPollUs < 0L
                     || successfulPollIntervalUs < 0L
                     || consecutiveTransportFailures < 0L) {
@@ -267,7 +263,7 @@ public class WorkerStatus {
     /** Only short state transitions use this monitor; never hold it while waiting for Worker locks. */
     private final class WorkerHealth {
         private volatile PollHealth health =
-                new PollHealth(System.nanoTime() / 1000, 0L, 0L, StatusContact.UNKNOWN);
+                new PollHealth(0L, 0L, 0L, false);
         private volatile RetirementReason unavailableReason;
         private volatile boolean retiring;
 
@@ -282,16 +278,18 @@ public class WorkerStatus {
             if (failure != null) {
                 long failures = health.consecutiveTransportFailures() + 1L;
                 health = new PollHealth(health.lastSuccessfulPollUs(), health.successfulPollIntervalUs(),
-                        failures, health.contact());
+                        failures, health.reportedAlive());
                 if (failures >= MAX_CONSECUTIVE_STATUS_FAILURES) {
                     unavailableReason = RetirementReason.CONSECUTIVE_STATUS_FAILURES;
                 }
                 return Stage.TRANSPORT_FAILURE_RECORDED;
             }
             long nowUs = System.nanoTime() / 1000;
-            StatusContact contact = valid ? (alive ? StatusContact.ALIVE : StatusContact.DEAD) : health.contact();
-            health = new PollHealth(nowUs, Math.max(0L, nowUs - health.lastSuccessfulPollUs()), 0L, contact);
-            if (contact == StatusContact.DEAD) {
+            boolean reportedAlive = valid ? alive : health.reportedAlive();
+            long intervalUs = health.lastSuccessfulPollUs() == 0L
+                    ? 0L : Math.max(0L, nowUs - health.lastSuccessfulPollUs());
+            health = new PollHealth(nowUs, intervalUs, 0L, reportedAlive);
+            if (valid && !alive) {
                 unavailableReason = RetirementReason.WORKER_REPORTED_NOT_ALIVE;
             }
             return Stage.STATUS_HEALTH_UPDATED;

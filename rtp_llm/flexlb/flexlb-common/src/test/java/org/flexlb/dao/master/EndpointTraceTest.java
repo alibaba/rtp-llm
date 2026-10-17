@@ -143,14 +143,15 @@ class EndpointTraceTest {
     }
 
     @Test
-    void skippedCachePollsCannotHideTheInFlightStatusPoll() {
+    void completedCachePollsCannotHideTheInFlightStatusPoll() {
         var trace = new EndpointTrace();
         var status = trace.beginPoll("STATUS", 7);
         assertEquals("NOT_STARTED", trace.snapshot().statusPoll().rpcResult());
         status.recordRpcStarted(1000L);
         for (int cycle = 8; cycle < 1008; cycle++) {
             var cache = trace.beginPoll("CACHE", cycle);
-            cache.record(Stage.POLL_SKIPPED, "CACHE_INTERVAL");
+            cache.record(Stage.RPC_COMPLETED);
+            cache.record(Stage.CACHE_VERSION_UNCHANGED);
             cache.record(Stage.LEASE_RELEASED);
         }
         var snapshot = trace.snapshot();
@@ -158,8 +159,7 @@ class EndpointTraceTest {
         assertEquals("PENDING", snapshot.statusPoll().rpcResult());
         assertEquals("RPC_STARTED", snapshot.statusPoll().stage());
         assertFalse(snapshot.statusPoll().leaseReleased());
-        assertEquals("NOT_STARTED", snapshot.cachePoll().rpcResult());
-        assertEquals("POLL_SKIPPED:CACHE_INTERVAL", snapshot.cachePoll().outcome());
+        assertEquals("OK", snapshot.cachePoll().rpcResult());
         assertTrue(snapshot.cachePoll().leaseReleased());
         assertTrue(snapshot.compact().contains("statusPoll={id:STATUS-1,cycle:7"));
         assertTrue(snapshot.compact().contains("cachePoll={id:CACHE-1001,cycle:1007"));
@@ -205,21 +205,6 @@ class EndpointTraceTest {
     }
 
     @Test
-    void secondWorkerLockWaitDoesNotReuseTheFirstAcquisitionOrRelease() {
-        var trace = new EndpointTrace();
-        var poll = trace.beginPoll("STATUS", 1L);
-        poll.record(Stage.STATUS_LOCK_ATTEMPT);
-        poll.record(Stage.STATUS_LOCK_ACQUIRED);
-        poll.record(Stage.STATUS_LOCK_RELEASED);
-        poll.record(Stage.STATUS_LOCK_ATTEMPT);
-        var waiting = trace.snapshot().statusPoll();
-        assertEquals("STATUS_LOCK_ATTEMPT", waiting.stage());
-        assertTrue(waiting.times().workerAttemptMs() >= 0L);
-        assertEquals(-1L, waiting.times().workerAcquiredMs());
-        assertEquals(-1L, waiting.times().workerReleasedMs());
-    }
-
-    @Test
     void snapshotRecordsCacheLockContentionAndRetirementTiming() {
         var trace = new EndpointTrace();
         var poll = trace.beginPoll("CACHE", 1L);
@@ -240,7 +225,7 @@ class EndpointTraceTest {
     }
 
     @Test
-    void cacheCleanupLockIntervalsAccumulateAcrossChunksAndFreezeBetweenThem() throws Exception {
+    void cacheCleanupLockIntervalsAccumulateAcrossRetriesAndFreezeBetweenThem() throws Exception {
         var trace = new EndpointTrace();
         trace.record(Stage.GENERATION_RETIRING);
         long completedWait = -1L;
