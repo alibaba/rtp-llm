@@ -40,10 +40,11 @@ class GlobalCacheIndexTest {
             if (key % 2 == 0) globalCacheIndex.addCacheBlock(key, "survivor", null);
         }
         globalCacheIndex.addCacheBlock(2000L, "survivor", null);
-        Set<Long> detached = local.removeAllCacheBlockOfEngine("retired");
+        Set<Long> detached = local.getEngineCacheBlocks("retired");
         assertEquals(1025, detached.size());
-        assertEquals(0, local.size("retired"));
         globalCacheIndex.removeAllCacheBlockOfEngine("retired", detached, null);
+        local.removeAllCacheBlockOfEngine("retired");
+        assertEquals(0, local.size("retired"));
         assertEquals(514L, globalCacheIndex.totalBlocks());
         assertEquals(514L, globalCacheIndex.totalMappings());
         assertEquals(Map.of("survivor", 1), globalCacheIndex.batchCalculatePrefixMatchLength(
@@ -64,7 +65,7 @@ class GlobalCacheIndexTest {
         globalCacheIndex.addCacheBlock(1L, "worker", pollTrace);
         globalCacheIndex.removeCacheBlock("worker", 1L, pollTrace);
 
-        var snapshot = trace.snapshot().poll();
+        var snapshot = trace.snapshot().cachePoll();
         assertEquals(0L, snapshot.indexWait().count());
         assertEquals("LEASE_ACQUIRED", snapshot.stage());
     }
@@ -144,7 +145,7 @@ class GlobalCacheIndexTest {
             }
             assertEquals(Thread.State.WAITING, waiting.getState());
             var snapshot = waiterHistory.snapshot();
-            var indexWait = snapshot.poll().indexWait();
+            var indexWait = snapshot.cachePoll().indexWait();
             assertEquals("CACHE_INDEX_LOCK_ACQUIRED", cleanupHistory.snapshot().phase());
             assertEquals(1L, indexWait.count());
             assertTrue(indexWait.ageUs() > 0L);
@@ -157,7 +158,7 @@ class GlobalCacheIndexTest {
         assertFalse(cleaning.isAlive());
         assertFalse(waiting.isAlive());
         assertEquals(null, failure.get());
-        var waited = waiterHistory.snapshot().poll().indexWait();
+        var waited = waiterHistory.snapshot().cachePoll().indexWait();
         assertEquals(0L, waited.ageUs());
         assertTrue(waited.totalWaitUs() > 0L);
         assertEquals(remove ? Map.of() : Map.of("worker-B", 1), globalCacheIndex.batchCalculatePrefixMatchLength(

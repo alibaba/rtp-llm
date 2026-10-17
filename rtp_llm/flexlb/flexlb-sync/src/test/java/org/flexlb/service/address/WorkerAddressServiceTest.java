@@ -1,9 +1,17 @@
 package org.flexlb.service.address;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
 import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
+
 import org.apache.commons.lang3.tuple.Pair;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.config.ConfigService;
@@ -28,13 +36,6 @@ import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
-
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.Mockito.doReturn;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
 class WorkerAddressServiceTest {
@@ -292,7 +293,8 @@ class WorkerAddressServiceTest {
             assertEquals(
                     2L,
                     events.list.stream().filter(event -> event.getLevel() == Level.WARN).count(),
-                    "recovering another endpoint must not reset an empty endpoint's warning deadline");
+                    "recovering another endpoint must not reset an empty endpoint's warning"
+                        + " deadline");
             assertEquals(
                     List.of("group-b"),
                     events.list.stream()

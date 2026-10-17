@@ -20,13 +20,14 @@ import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.SchedulerConfig;
 import org.flexlb.dao.loadbalance.Response;
-import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskPhase;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
+import org.flexlb.testfixture.TaskInfo;
+import org.flexlb.testfixture.WorkerStatusResponse;
+import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
@@ -320,7 +321,7 @@ class RequestResourceAccountingTest {
                             new PlacementAvailability());
             runtime = new SchedulerRuntime(requests, endpoints, reporter, requestReporter);
             var worker =
-                    org.flexlb.balance.endpoint.WorkerStatusTestFixtures.readyForScheduling(
+                    WorkerStatusTestFixtures.readyForScheduling(
                             WorkerStatus.createDiscovered(
                                     RoleType.PREFILL, "g", "127.0.0.1", 8080, 8081, "test"));
             worker.lock.lock();
@@ -331,22 +332,23 @@ class RequestResourceAccountingTest {
                                         .publishPreparedEndpoint(
                                                 worker.getIpPort(),
                                                 worker,
-                                                worker.prepareNewStatus(
-                                                        worker.freezeStatusResponse(
+                                                WorkerStatusTestFixtures.prepare(
+                                                        worker,
+                                                        WorkerStatusTestFixtures.observation(
+                                                                worker,
                                                                 status(
                                                                         RoleType.PREFILL,
                                                                         1,
                                                                         Map.of(),
                                                                         Map.of(),
-                                                                        TOTAL_KV)),
-                                                        null))
+                                                                        TOTAL_KV))))
                                         .endpoint();
             } finally {
                 worker.lock.unlock();
             }
             decode =
                     new DecodeEndpoint(
-                            org.flexlb.balance.endpoint.WorkerStatusTestFixtures.readyForScheduling(
+                            WorkerStatusTestFixtures.readyForScheduling(
                                     WorkerStatus.createDiscovered(
                                             RoleType.DECODE, "g", "127.0.0.2", 8080, 8081, "test")),
                             projector);
@@ -536,7 +538,9 @@ class RequestResourceAccountingTest {
             projection =
                     endpoint.applyPreparedStatus(
                             worker,
-                            worker.prepareNewStatus(worker.freezeStatusResponse(response), null));
+                            WorkerStatusTestFixtures.prepare(
+                                    worker,
+                                    WorkerStatusTestFixtures.observation(worker, response)));
         } finally {
             worker.lock.unlock();
         }

@@ -1,25 +1,26 @@
 package org.flexlb.balance.endpoint;
 
-import io.micrometer.core.instrument.Gauge;
-import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
-import org.flexlb.dao.master.TaskInfo;
-import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.master.WorkerStatusResponse;
-import org.flexlb.dao.route.RoleType;
-import org.flexlb.enums.TaskPhase;
-import org.flexlb.metric.MicrometerFlexMonitor;
-import org.flexlb.service.monitor.BatchSchedulerReporter;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-
-import java.util.HashMap;
-import java.util.Map;
-
 import static org.flexlb.balance.endpoint.DecodeEndpoint.EngineDispatchPermitTransferStatus.TRANSFERRED;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import io.micrometer.core.instrument.Gauge;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+
+import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.route.RoleType;
+import org.flexlb.enums.TaskPhase;
+import org.flexlb.metric.MicrometerFlexMonitor;
+import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.testfixture.TaskInfo;
+import org.flexlb.testfixture.WorkerStatusResponse;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import java.util.HashMap;
+import java.util.Map;
 
 class DecodeEndpointTest {
 

@@ -9,8 +9,6 @@ import org.flexlb.cache.match.localsync.DynamicCacheIntervalService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.ModelMetaConfig;
-import org.flexlb.dao.master.EndpointTrace;
-import org.flexlb.dao.master.EndpointTrace.Stage;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.address.WorkerAddressService;
 import org.flexlb.service.grpc.EngineGrpcService;
@@ -22,9 +20,8 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.RejectedExecutionHandler;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
@@ -39,6 +36,7 @@ import javax.annotation.PreDestroy;
 public final class MasterEngineSynchronizer {
 
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
+    private static final int EXECUTOR_QUEUE_CAPACITY = 15_000;
 
     private final String modelName;
     private final List<RoleType> requiredRoles;
@@ -51,15 +49,12 @@ public final class MasterEngineSynchronizer {
     private final DynamicCacheIntervalService cacheIntervalService;
     private final long syncRequestTimeoutMs;
     private final AtomicLong syncCount = new AtomicLong();
-    private final Long syncEngineStatusInterval;
-    private final long statusStaleAfterUs;
+    private final long syncEngineStatusInterval;
     private final ScheduledThreadPoolExecutor scheduler;
     private final ThreadPoolExecutor statusCheckExecutor;
-    private final ThreadPoolExecutor cacheStatusExecutor;
     private final ThreadPoolExecutor statusApplicationExecutor;
+    private final ThreadPoolExecutor cacheStatusExecutor;
     private final ThreadPoolExecutor engineSyncExecutor;
-    // Retain only operations that currently occupy an executor thread or a caller thread.
-    private final Map<EndpointTrace.Poll, RoleType> activeSyncs = new ConcurrentHashMap<>();
 
     public MasterEngineSynchronizer(
             WorkerAddressService workerAddressService,
@@ -85,31 +80,29 @@ public final class MasterEngineSynchronizer {
                 flexlbConfig.getWorkerRegistry().getHealth().getStatusPollIntervalMs();
         this.syncRequestTimeoutMs =
                 flexlbConfig.getWorkerRegistry().getHealth().getStatusRpcTimeoutMs();
-        this.statusStaleAfterUs =
-                flexlbConfig.getWorkerRegistry().getHealth().getStatusStaleAfterMs() * 1000L;
         int engineThreads = flexlbConfig.getInternalRuntime().getEngineSyncExecutorThreads();
-        engineSyncExecutor = executor(engineThreads, "engine-sync-executor");
+        engineSyncExecutor =
+                newExecutor(
+                        engineThreads,
+                        "engine-sync-executor",
+                        new ThreadPoolExecutor.CallerRunsPolicy());
         int statusThreads = flexlbConfig.getInternalRuntime().getStatusCheckExecutorThreads();
-        statusCheckExecutor = executor(statusThreads, "status-checker-executor");
-        statusApplicationExecutor =
-                new ThreadPoolExecutor(
+        // Poll callbacks must not run on the gRPC completion thread when a pool is full.
+        statusCheckExecutor =
+                newExecutor(
                         statusThreads,
-                        statusThreads,
-                        60L,
-                        TimeUnit.SECONDS,
-                        new LinkedBlockingQueue<>(15_000),
-                        new NamedThreadFactory("status-application-executor"),
+                        "status-checker-executor",
                         new ThreadPoolExecutor.AbortPolicy());
-        // Cache overload must not run cache work on a health/discovery caller.
+        statusApplicationExecutor =
+                newExecutor(
+                        statusThreads,
+                        "status-application-executor",
+                        new ThreadPoolExecutor.AbortPolicy());
         int cacheThreads = flexlbConfig.getInternalRuntime().getCacheStatusExecutorThreads();
         cacheStatusExecutor =
-                new ThreadPoolExecutor(
+                newExecutor(
                         cacheThreads,
-                        cacheThreads,
-                        60L,
-                        TimeUnit.SECONDS,
-                        new LinkedBlockingQueue<>(15_000),
-                        new NamedThreadFactory("cache-status-executor"),
+                        "cache-status-executor",
                         new ThreadPoolExecutor.AbortPolicy());
         this.scheduler =
                 new ScheduledThreadPoolExecutor(
@@ -121,15 +114,16 @@ public final class MasterEngineSynchronizer {
         this.scheduler.scheduleAtFixedRate(this::reportExecutorMetrics, 2, 2, TimeUnit.SECONDS);
     }
 
-    private static ThreadPoolExecutor executor(int threads, String name) {
+    private static ThreadPoolExecutor newExecutor(
+            int threads, String name, RejectedExecutionHandler rejectionHandler) {
         return new ThreadPoolExecutor(
                 threads,
                 threads,
                 60L,
                 TimeUnit.SECONDS,
-                new LinkedBlockingQueue<>(15_000),
+                new LinkedBlockingQueue<>(EXECUTOR_QUEUE_CAPACITY),
                 new NamedThreadFactory(name),
-                new ThreadPoolExecutor.CallerRunsPolicy());
+                rejectionHandler);
     }
 
     private void reportExecutorMetrics() {
@@ -147,54 +141,6 @@ public final class MasterEngineSynchronizer {
         } catch (Throwable failure) {
             logger.warn("Failed to report worker sync executor metrics", failure);
         }
-        reportSlowTraces();
-    }
-
-    /** Read active operations on the existing reporting tick; no per-cycle history or queue tracking. */
-    void reportSlowTraces() {
-        try {
-            if (!logger.isWarnEnabled()) {
-                return;
-            }
-            long slowAfterUs = Math.max(syncEngineStatusInterval * 1000L, statusStaleAfterUs / 2L);
-            String enginePool = null;
-            String statusPool = null;
-            for (var active : activeSyncs.entrySet()) {
-                var snapshot = active.getKey().snapshot();
-                if (snapshot.thread() == null
-                        || Stage.RUNNER_ENDED.name().equals(snapshot.stage())
-                        || (snapshot.runUs() < slowAfterUs && snapshot.queueUs() < slowAfterUs)) {
-                    continue;
-                }
-                if (enginePool == null) {
-                    enginePool = poolSnapshot(engineSyncExecutor);
-                    statusPool = poolSnapshot(statusCheckExecutor);
-                }
-                logger.warn(
-                        "event=worker_sync_trace model={} role={} tasksPerCycle={} engine={}"
-                                + " status={} {}",
-                        modelName,
-                        active.getValue(),
-                        requiredRoles.size(),
-                        enginePool,
-                        statusPool,
-                        snapshot.compact());
-            }
-        } catch (RuntimeException | LinkageError failure) {
-            logger.warn("Failed to report worker sync traces", failure);
-        }
-    }
-
-    private static String poolSnapshot(ThreadPoolExecutor executor) {
-        return "{active:"
-                + executor.getActiveCount()
-                + ",size:"
-                + executor.getPoolSize()
-                + ",queued:"
-                + executor.getQueue().size()
-                + ",completed:"
-                + executor.getCompletedTaskCount()
-                + "}";
     }
 
     public void syncEngineStatus() {
@@ -222,22 +168,8 @@ public final class MasterEngineSynchronizer {
                                 flexlbConfig
                                         .getWorkerRegistry()
                                         .getCacheStatus()
-                                        .isFullSnapshotDebugMode(),
-                                statusStaleAfterUs,
-                                flexlbConfig
-                                                .getWorkerRegistry()
-                                                .getHealth()
-                                                .getStatusCommitGraceMs()
-                                        * 1000L);
-                engineSyncExecutor.submit(
-                        () -> {
-                            activeSyncs.put(runner.trace(), roleType);
-                            try {
-                                runner.run();
-                            } finally {
-                                activeSyncs.remove(runner.trace());
-                            }
-                        });
+                                        .isFullSnapshotDebugMode());
+                engineSyncExecutor.submit(runner);
             }
         } catch (Exception e) {
             logger.error("sync engine prefill status error", e);
@@ -255,6 +187,5 @@ public final class MasterEngineSynchronizer {
         statusCheckExecutor.shutdown();
         statusApplicationExecutor.shutdown();
         cacheStatusExecutor.shutdown();
-        activeSyncs.clear();
     }
 }

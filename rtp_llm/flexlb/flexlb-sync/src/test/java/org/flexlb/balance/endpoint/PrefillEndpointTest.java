@@ -1,5 +1,18 @@
 package org.flexlb.balance.endpoint;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
@@ -14,13 +27,14 @@ import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.DebugInfo;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
-import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.PriorityPreemptionProgress;
 import org.flexlb.enums.TaskPhase;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.testfixture.TaskInfo;
+import org.flexlb.testfixture.WorkerStatusResponse;
+import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -38,19 +52,6 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
-
-import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotSame;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertSame;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.Mockito.doThrow;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.verify;
 
 class PrefillEndpointTest {
 
@@ -561,7 +562,8 @@ class PrefillEndpointTest {
         assertEquals(1, endpoint.getInflightBatchCount());
         assertFalse(
                 endpoint.batchAdmissionAvailability(1).isAvailable(),
-                "a short member finishing must not reopen maxInflight=1 while its long sibling runs");
+                "a short member finishing must not reopen maxInflight=1 while its long sibling"
+                    + " runs");
 
         calibrate(Map.of("102", taskInfo(102L, 700L, null, 0, 1_900)), Map.of());
 
@@ -1087,7 +1089,8 @@ class PrefillEndpointTest {
         assertEquals(
                 5,
                 endpoint.observedRequestCount(),
-                "scalar active count must cover a partial detail list without double-counting local tasks");
+                "scalar active count must cover a partial detail list without double-counting local"
+                    + " tasks");
     }
 
     @Test
@@ -1492,7 +1495,8 @@ class PrefillEndpointTest {
         try {
             response.setStatusVersion(status.appliedStatusCursor().statusVersion());
             projection =
-                    endpoint.observeStatusHeartbeat(status, status.freezeStatusResponse(response));
+                    endpoint.observeStatusHeartbeat(
+                            status, WorkerStatusTestFixtures.observation(status, response));
         } finally {
             status.lock.unlock();
         }

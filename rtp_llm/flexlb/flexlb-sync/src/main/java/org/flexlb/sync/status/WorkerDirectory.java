@@ -185,19 +185,18 @@ public final class WorkerDirectory implements WorkerStatusProvider {
      * The caller must hold the matching {@link WorkerStatus#lock}.
      */
     public EndpointRegistry.DetachedGeneration beginRetirement(
-            RoleType role, String address, WorkerStatus status, String reason, long timeoutUs) {
+            RoleType role, String address, WorkerStatus status, String reason) {
         Objects.requireNonNull(status, "status");
         Objects.requireNonNull(role, "role");
         Objects.requireNonNull(address, "address");
-        status.requireGenerationLock();
         status.requireActiveGeneration();
 
+        WorkerStatus.PollHealth health = status.pollHealth();
         status.trace()
                 .recordUnavailable(
                         reason,
-                        status.pollHealth().lastSuccessfulPollUs(),
-                        timeoutUs,
-                        status.pollHealth().consecutiveTransportFailures());
+                        health.lastSuccessfulPollUs(),
+                        health.consecutiveTransportFailures());
 
         WorkerEndpoint expected = endpointRegistry.get(role, address, status);
         EndpointRegistry.DetachedGeneration detached =
@@ -421,20 +420,6 @@ public final class WorkerDirectory implements WorkerStatusProvider {
             closePins(captured);
             closePins(matching);
             throw failure;
-        }
-    }
-
-    /** Non-owning monitoring projection; no live endpoint map escapes. */
-    public List<String> endpointAddresses(RoleType role, String group) {
-        List<WorkerEndpoint.GenerationPin> captured = captureEndpoints(role, group);
-        try {
-            List<String> addresses = new ArrayList<>(captured.size());
-            for (WorkerEndpoint.GenerationPin pin : captured) {
-                addresses.add(pin.endpoint().ipPort());
-            }
-            return addresses;
-        } finally {
-            closePins(captured);
         }
     }
 

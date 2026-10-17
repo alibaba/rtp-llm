@@ -1,9 +1,20 @@
 package org.flexlb.balance.strategy;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
+
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.cache.match.CacheAwareService;
+import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.SchedulerConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
@@ -17,20 +28,11 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 import java.util.Map;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.mockito.ArgumentMatchers.anyInt;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.verifyNoInteractions;
-import static org.mockito.Mockito.when;
-
 /** Regression contracts for Decode capacity projected through Prefill. */
 class CostBasedPrefillStrategyBlockerTest {
 
     @Test
-    void failureUsesOneScopedFleetAndAggregatesReasonsIndependentlyOfOrder() {
+    void directFailureUsesOneScopedFleetAndAggregatesReasonsIndependentlyOfOrder() {
         for (RoleType role : List.of(RoleType.PREFILL, RoleType.PDFUSION)) {
             for (AdmissionRejectReason first : AdmissionRejectReason.values()) {
                 for (AdmissionRejectReason second : AdmissionRejectReason.values()) {
@@ -52,7 +54,10 @@ class CostBasedPrefillStrategyBlockerTest {
                                                     "outside", outside),
                                             new EndpointRegistry.PrefillRoutingEntry(
                                                     "second", secondEndpoint)));
-                    var context = new BalanceContext(new FlexlbConfig());
+                    var config = new FlexlbConfig();
+                    config.getScheduler().setType(SchedulerConfig.Type.DIRECT);
+                    config.setDispatcher(DispatcherConfig.nonBatch());
+                    var context = new BalanceContext(config);
                     var request = new Request();
                     request.setRequestId("1");
                     request.setSeqLen(100L);

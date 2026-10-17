@@ -38,9 +38,7 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
-import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskPhase;
 import org.flexlb.metric.NoOpFlexMonitor;
@@ -48,6 +46,9 @@ import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.flexlb.sync.status.WorkerDirectory;
+import org.flexlb.testfixture.TaskInfo;
+import org.flexlb.testfixture.WorkerStatusResponse;
+import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -654,7 +655,7 @@ class TransientCapacityQueueContractTest {
                     fixture.prefillEndpoint.captureRouteProjectionInputs().queue().admissionBlock()
                             != null,
                     "the third group must observe both batch credits in use before more requests"
-                        + " arrive");
+                            + " arrive");
             assertEquals(2, fixture.prefillEndpoint.getInflightBatchCount());
             waiting.addAll(
                     LongStream.rangeClosed(407L, 464L)
@@ -679,7 +680,7 @@ class TransientCapacityQueueContractTest {
                     fixture.decodeEndpoint.resourceSnapshot().reserved().size(),
                     () ->
                             "batch credits must not become an extra worker request-count limit:"
-                                + " prefill="
+                                    + " prefill="
                                     + fixture.prefillEndpoint.observedRequestCount()
                                     + ", queued="
                                     + fixture.runtime.scheduler().getQueuedRequestCount()
@@ -702,7 +703,7 @@ class TransientCapacityQueueContractTest {
                     fixture.runtime.scheduler().getQueuedRequestCount()
                             - fixture.prefillEndpoint.queuedRequestCount(),
                     "worker waiting requests are retained without a synthetic batch-times-size"
-                        + " queue cap");
+                            + " queue cap");
         }
     }
 
@@ -802,7 +803,7 @@ class TransientCapacityQueueContractTest {
                     2,
                     completedResponses(responses),
                     "the configured request limit must hold the remaining requests in the global"
-                        + " queue");
+                            + " queue");
 
             List<Long> delivered =
                     LongStream.range(0, responses.size())
@@ -829,7 +830,7 @@ class TransientCapacityQueueContractTest {
                     3,
                     completedResponses(responses),
                     "an available request slot permits delivery even when preceding work has no"
-                        + " time estimate");
+                            + " time estimate");
             fixture.runtime.applyStatus(
                     fixture.prefillStatus,
                     prefillStatusWithFinishedAndUnknownRunning(4L, List.of(), 0));
@@ -913,7 +914,7 @@ class TransientCapacityQueueContractTest {
                     2,
                     completedResponses(waiting),
                     "a same-version status clearing unknown work must wake the request-count"
-                        + " prefix");
+                            + " prefix");
         }
     }
 
@@ -1387,11 +1388,11 @@ class TransientCapacityQueueContractTest {
         status.lock.lock();
         try {
             WorkerStatus.PreparedStatus prepared =
-                    status.prepareNewStatus(status.freezeStatusResponse(response), null);
+                    WorkerStatusTestFixtures.prepare(
+                            status, WorkerStatusTestFixtures.observation(status, response));
             WorkerEndpoint endpoint =
                     registry.publishPreparedEndpoint(status.getLogicalIpPort(), status, prepared)
                             .endpoint();
-            status.recordSuccessfulPoll(true, null);
             return endpoint;
         } finally {
             status.lock.unlock();

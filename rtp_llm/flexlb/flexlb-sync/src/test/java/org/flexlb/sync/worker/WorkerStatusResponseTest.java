@@ -1,19 +1,18 @@
 package org.flexlb.sync.worker;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+
 import com.fasterxml.jackson.core.type.TypeReference;
+
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatus.StatusObservation;
-import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.enums.PriorityPreemptionProgress;
 import org.flexlb.service.grpc.EngineStatusConverter;
-import org.flexlb.util.JsonUtils;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
-
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class WorkerStatusResponseTest {
 

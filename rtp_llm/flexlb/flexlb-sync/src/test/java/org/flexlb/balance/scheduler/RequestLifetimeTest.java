@@ -1,5 +1,21 @@
 package org.flexlb.balance.scheduler;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.timeout;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
@@ -26,23 +42,27 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertSame;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyLong;
-import static org.mockito.Mockito.doAnswer;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.timeout;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
-
 class RequestLifetimeTest {
+    @Test
+    void maintenanceKeepsTheFixedTerminalRetentionSeparateFromWorkerHealth() {
+        RequestRegistry registry = mock(RequestRegistry.class);
+        RequestSlot terminal = mock(RequestSlot.class);
+        when(registry.snapshotSlots()).thenReturn(List.of(terminal));
+        when(terminal.detachDeadlinesForTimerClose())
+                .thenReturn(new ExpirationTimer.DetachedDeadlines(null, null, null));
+        AtomicLong now = new AtomicLong(20_000L);
+        AtomicLong orphanRetention = new AtomicLong();
+        try (var timer = new ExpirationTimer(registry, now::get)) {
+            timer.maintain((ttlMs, retained) -> orphanRetention.set(ttlMs));
+            verify(registry).removeExactTerminalRecord(terminal, 10_000L);
+            assertEquals(10_000L, orphanRetention.get());
+            now.set(25_000L);
+            timer.maintain((ttlMs, retained) -> orphanRetention.set(ttlMs));
+            verify(registry).removeExactTerminalRecord(terminal, 15_000L);
+            assertEquals(10_000L, orphanRetention.get());
+        }
+    }
+
     @Test
     void deadlineUsesTheActualDeliveryClockAndPreservesZeroAndSaturation() {
         WorkSnapshot preceding = emptyWork(1_000L);
@@ -530,8 +550,6 @@ class RequestLifetimeTest {
     void timerChecksInactivityAfterThePublicFutureHasCompleted() throws Exception {
         Fixture fixture = fixture(true, true);
         RequestRegistry registry = mock(RequestRegistry.class);
-        ConfigService config = mock(ConfigService.class);
-        when(config.loadBalanceConfig()).thenReturn(fixture.config);
         when(registry.isCurrentSlot(fixture.slot)).thenReturn(true);
         when(registry.snapshotSlots()).thenReturn(List.of(fixture.slot));
         doAnswer(
@@ -557,7 +575,7 @@ class RequestLifetimeTest {
                         })
                 .when(fixture.slot)
                 .onInactivityDeadline(any(ExpirationTimer.InactivityDeadline.class), anyLong());
-        try (var timer = new ExpirationTimer(registry, config)) {
+        try (var timer = new ExpirationTimer(registry)) {
             synchronized (fixture.slot) {
                 RequestLifecycleTestSupport.startRouteDelivery(fixture.slot);
                 RequestLifecycleTestSupport.markAcknowledged(fixture.slot);
@@ -577,8 +595,6 @@ class RequestLifetimeTest {
     void renewedActivityRearmsTheTimerUntilTheNewInactivityDeadline() throws Exception {
         Fixture fixture = fixture(true, true);
         RequestRegistry registry = mock(RequestRegistry.class);
-        ConfigService config = mock(ConfigService.class);
-        when(config.loadBalanceConfig()).thenReturn(fixture.config);
         when(registry.isCurrentSlot(fixture.slot)).thenReturn(true);
         when(registry.snapshotSlots()).thenReturn(List.of(fixture.slot));
         long start = fixture.slot.createdAtMs();
@@ -629,7 +645,7 @@ class RequestLifetimeTest {
                         })
                 .when(fixture.slot)
                 .onInactivityDeadline(any(ExpirationTimer.InactivityDeadline.class), anyLong());
-        try (var timer = new ExpirationTimer(registry, config, now::get)) {
+        try (var timer = new ExpirationTimer(registry, now::get)) {
             synchronized (fixture.slot) {
                 fixture.slot.configureInactivityTimeout(100L);
                 RequestLifecycleTestSupport.startRouteDelivery(fixture.slot);

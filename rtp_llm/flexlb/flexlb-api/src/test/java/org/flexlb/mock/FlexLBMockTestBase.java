@@ -29,7 +29,6 @@ import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.engine.grpc.RequestId;
@@ -41,6 +40,8 @@ import org.flexlb.metric.NoOpFlexMonitor;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.flexlb.sync.status.WorkerDirectory;
+import org.flexlb.testfixture.WorkerStatusResponse;
+import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.slf4j.Logger;
@@ -618,13 +619,11 @@ public abstract class FlexLBMockTestBase {
         status.lock.lock();
         try {
             WorkerStatus.PreparedStatus prepared =
-                    status.prepareNewStatus(status.freezeStatusResponse(initial), null);
-            WorkerEndpoint endpoint =
-                    endpointRegistry
-                            .publishPreparedEndpoint(status.getLogicalIpPort(), status, prepared)
-                            .endpoint();
-            status.recordSuccessfulPoll(initial.isAlive(), null);
-            return endpoint;
+                    WorkerStatusTestFixtures.prepare(
+                            status, WorkerStatusTestFixtures.observation(status, initial));
+            return endpointRegistry
+                    .publishPreparedEndpoint(status.getLogicalIpPort(), status, prepared)
+                    .endpoint();
         } finally {
             status.lock.unlock();
         }

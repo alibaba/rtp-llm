@@ -1,5 +1,15 @@
 package org.flexlb.balance.scheduler;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.when;
+
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillCleanupDeadlockFixture;
 import org.flexlb.config.ConfigService;
@@ -17,16 +27,6 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Predicate;
-
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.Mockito.doAnswer;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.spy;
-import static org.mockito.Mockito.when;
 
 /**
  * Cleanup must finish while a business operation holds the Slot monitor and needs
@@ -106,10 +106,8 @@ class EndpointCleanupDeadlockTest {
 
         private static void verifyTimerClose() throws Exception {
             var config = SchedulingTestConfig.batchConfig();
-            ConfigService service = mock(ConfigService.class);
-            when(service.loadBalanceConfig()).thenReturn(config);
             RequestRegistry registry = mock(RequestRegistry.class);
-            ExpirationTimer timer = new ExpirationTimer(registry, service);
+            ExpirationTimer timer = new ExpirationTimer(registry);
             RequestSlot slot =
                     new RequestSlot(
                             mock(RequestCompletionPublisher.class),
@@ -249,7 +247,8 @@ class EndpointCleanupDeadlockTest {
                                     invocation -> {
                                         assertFalse(
                                                 Thread.holdsLock(slot),
-                                                "reservation release must not hold the Slot monitor");
+                                                "reservation release must not hold the Slot"
+                                                    + " monitor");
                                         slotHeld.countDown();
                                         assertTrue(endpointHeld.await(5, TimeUnit.SECONDS));
                                         return invocation.callRealMethod();

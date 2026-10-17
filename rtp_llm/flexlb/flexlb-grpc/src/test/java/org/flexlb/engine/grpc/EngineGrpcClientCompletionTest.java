@@ -76,6 +76,27 @@ class EngineGrpcClientCompletionTest {
         }
     }
 
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void metricsErrorCannotStrandAnAcceptedResponse(boolean retry) throws Exception {
+        var response = new java.util.concurrent.CompletableFuture<StreamObserver<EngineRpcService.WorkerStatusPB>>();
+        var calls = new AtomicInteger();
+        startServer(observer -> {
+            if (retry && calls.incrementAndGet() == 1) {
+                observer.onError(Status.UNAVAILABLE.withDescription("Connection reset").asRuntimeException());
+            } else {
+                response.complete(observer);
+            }
+        });
+        doThrow(new LinkageError("metrics implementation unavailable"))
+                .when(reporter).reportCallMetrics(anyString(), anyLong(), anyInt(), anyBoolean());
+
+        var result = client.getWorkerStatusAsync("127.0.0.1", 8081, request(), 5000);
+        succeed(response.get(5, TimeUnit.SECONDS));
+
+        assertEquals(EngineRpcService.WorkerStatusPB.getDefaultInstance(), result.get(5, TimeUnit.SECONDS));
+    }
+
     @Test
     void unreadableMetricFailureDoesNotStrandFuture() throws Exception {
         startServer(EngineGrpcClientCompletionTest::succeed);

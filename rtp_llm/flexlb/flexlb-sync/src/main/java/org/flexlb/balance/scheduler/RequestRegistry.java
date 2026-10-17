@@ -1,5 +1,7 @@
 package org.flexlb.balance.scheduler;
 
+import static org.flexlb.dao.loadbalance.Response.buildErrorResponse;
+
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
@@ -38,8 +40,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BiConsumer;
 import java.util.function.BooleanSupplier;
 import java.util.function.Predicate;
-
-import static org.flexlb.dao.loadbalance.Response.buildErrorResponse;
 
 /**
  * Canonical request directory and global admission barrier.
@@ -81,8 +81,8 @@ public class RequestRegistry {
             RequestSchedulerReporter requestReporter) {
         this.reporter = Objects.requireNonNull(reporter, "reporter");
         this.requestReporter = Objects.requireNonNull(requestReporter);
-        this.expirationTimer =
-                new ExpirationTimer(this, Objects.requireNonNull(configService, "configService"));
+        Objects.requireNonNull(configService, "configService");
+        this.expirationTimer = new ExpirationTimer(this);
         this.completionPublisher =
                 new RequestCompletionPublisher(completionPublisherWorkers(configService), reporter);
         this.terminalCleanup = new RequestTerminalCleanup(expirationTimer, requestReporter);

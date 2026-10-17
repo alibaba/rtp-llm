@@ -14,7 +14,6 @@ import org.flexlb.util.PriorityNormalizer;
 /** Cross-field validation for the public configuration contract. */
 public final class FlexlbConfigValidator {
 
-    private static final int MIN_STALE_TIMEOUT_TO_RPC_TIMEOUT_RATIO = 2;
 
     public static void validateDocumentShape(JsonNode document) {
         validateDocumentShape(document, document);
@@ -350,17 +349,8 @@ public final class FlexlbConfigValidator {
                 workers.getHealth().getStatusRpcTimeoutMs(),
                 "workerRegistry.health.statusRpcTimeoutMs");
         positive(
-                workers.getHealth().getStatusCommitGraceMs(),
-                "workerRegistry.health.statusCommitGraceMs");
-        positive(
                 workers.getHealth().getCleanupIntervalMs(),
                 "workerRegistry.health.cleanupIntervalMs");
-        require(
-                workers.getHealth().getStatusRpcTimeoutMs()
-                        <= workers.getHealth().getStatusStaleAfterMs()
-                                / MIN_STALE_TIMEOUT_TO_RPC_TIMEOUT_RATIO,
-                "workerRegistry.health.statusStaleAfterMs",
-                "must be at least twice statusRpcTimeoutMs");
         require(workers.getCacheStatus() != null, "workerRegistry.cacheStatus", "is required");
         positive(
                 workers.getCacheStatus().getTargetDiffSize(),

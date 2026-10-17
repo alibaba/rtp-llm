@@ -62,11 +62,6 @@ public class EngineSyncRunner implements Runnable {
 
     private final boolean cacheFullSnapshotDebugMode;
 
-    private final long statusStaleAfterUs;
-    private final long statusCommitGraceUs;
-
-    private final EndpointTrace.Poll trace;
-
     public EngineSyncRunner(
             String modelName,
             WorkerDirectory workerDirectory,
@@ -82,9 +77,7 @@ public class EngineSyncRunner implements Runnable {
             long syncRequestTimeoutMs,
             long syncCycleId,
             Long syncEngineStatusInterval,
-            boolean cacheFullSnapshotDebugMode,
-            long statusStaleAfterUs,
-            long statusCommitGraceUs) {
+            boolean cacheFullSnapshotDebugMode) {
         this(
                 modelName,
                 workerDirectory,
@@ -99,9 +92,7 @@ public class EngineSyncRunner implements Runnable {
                 syncCount,
                 syncEngineStatusInterval,
                 false,
-                cacheFullSnapshotDebugMode,
-                statusStaleAfterUs,
-                statusCommitGraceUs);
+                cacheFullSnapshotDebugMode);
     }
 
     public EngineSyncRunner(
@@ -118,9 +109,7 @@ public class EngineSyncRunner implements Runnable {
             LongAdder syncCount,
             Long syncEngineStatusInterval,
             boolean kvcmEnabled,
-            boolean cacheFullSnapshotDebugMode,
-            long statusStaleAfterUs,
-            long statusCommitGraceUs) {
+            boolean cacheFullSnapshotDebugMode) {
 
         this.modelName = modelName;
         this.workerAddressService = workerAddressService;
@@ -138,58 +127,67 @@ public class EngineSyncRunner implements Runnable {
                 Objects.requireNonNull(cacheIntervalService, "cacheIntervalService");
         this.syncRequestTimeoutMs = syncRequestTimeoutMs;
         this.syncCycleId = syncCycleId;
-        this.trace = new EndpointTrace.Poll("SYNC", syncCycleId);
-        this.trace.record(Stage.RUNNER_SUBMITTED);
         this.syncEngineStatusInterval = syncEngineStatusInterval;
         this.kvcmEnabled = kvcmEnabled;
         this.cacheFullSnapshotDebugMode = cacheFullSnapshotDebugMode;
-        if (statusStaleAfterUs <= 0L) {
-            throw new IllegalArgumentException("statusStaleAfterUs must be positive");
-        }
-        this.statusStaleAfterUs = statusStaleAfterUs;
-        if (statusCommitGraceUs <= 0L) {
-            throw new IllegalArgumentException("statusCommitGraceUs must be positive");
-        }
-        this.statusCommitGraceUs = statusCommitGraceUs;
-    }
-
-    public EndpointTrace.Poll trace() {
-        return trace;
     }
 
     @Override
     public void run() {
-        trace.record(Stage.RUNNER_STARTED);
-        trace.record(Stage.SYNC_DISCOVERY);
-        try {
-            syncAndReport();
-        } finally {
-            trace.record(Stage.RUNNER_ENDED);
-        }
-    }
-
-    private void syncAndReport() {
         logger.debug(
                 "EngineSyncRunner start for model: {}, role: {}", modelName, roleType.toString());
         try {
             long startTimeInUs = System.nanoTime() / 1000;
-            List<WorkerHost> latestEngineWorkerList =
-                    workerAddressService.getEngineWorkerList(modelName, roleType);
+            Map<String, WorkerStatus> cachedWorkerStatuses =
+                    workerDirectory.statusSnapshot(roleType);
+            List<WorkerHost> latestEngineWorkerList;
+            boolean discoverySucceeded = true;
+            try {
+                latestEngineWorkerList =
+                        workerAddressService.getEngineWorkerList(modelName, roleType);
+            } catch (RuntimeException failure) {
+                discoverySucceeded = false;
+                latestEngineWorkerList =
+                        cachedWorkerStatuses.values().stream()
+                                .map(
+                                        status -> {
+                                            WorkerStatus.TopologySnapshot topology =
+                                                    status.topologySnapshot();
+                                            return new WorkerHost(
+                                                    topology.ip(),
+                                                    topology.port(),
+                                                    topology.grpcPort(),
+                                                    topology.port() + 5,
+                                                    topology.site(),
+                                                    topology.group());
+                                        })
+                                .toList();
+                logger.warn(
+                        "Service discovery failed; polling cached workers, model={}, role={},"
+                            + " workers={}, error={}",
+                        modelName,
+                        roleType,
+                        latestEngineWorkerList.size(),
+                        failure.getMessage());
+            }
             logger.debug(
                     "workerAddressService getEngineWorkerList, model: {}, role: {}, size: {}",
                     modelName,
                     roleType,
                     latestEngineWorkerList.size());
+            if (discoverySucceeded) {
+                engineHealthReporter.reportServiceDiscoveryResult(
+                        modelName, latestEngineWorkerList.size(), roleType.toString());
+            }
             if (CollectionUtils.isEmpty(latestEngineWorkerList)) {
                 logger.debug(
                         "get engine worker list is empty, cost={}μs, model={}",
                         System.nanoTime() / 1000 - startTimeInUs,
                         modelName);
             }
-            Map<String, WorkerStatus> cachedWorkerStatuses =
-                    workerDirectory.statusSnapshot(roleType);
             // Log if latest worker count differs from cached worker count
-            if (cachedWorkerStatuses.size() != latestEngineWorkerList.size()) {
+            if (discoverySucceeded
+                    && cachedWorkerStatuses.size() != latestEngineWorkerList.size()) {
                 logger.info(
                         "[update] engine ip changes, model={}, role={}, before={}, after={}",
                         modelName,
@@ -198,7 +196,6 @@ public class EngineSyncRunner implements Runnable {
                         latestEngineWorkerList.size());
             }
 
-            trace.record(Stage.SYNC_RETIREMENT);
             // Remove if not in latest engine list
             Set<String> latestValidIpPorts =
                     latestEngineWorkerList.stream()
@@ -211,8 +208,8 @@ public class EngineSyncRunner implements Runnable {
             for (Map.Entry<String, WorkerStatus> entry : cachedWorkerStatuses.entrySet()) {
                 WorkerStatus workerStatus = entry.getValue();
                 String ipPort = entry.getKey();
-                if (!latestValidIpPorts.contains(ipPort)) {
-                    retireMissingGenerationIfExpired(ipPort, workerStatus);
+                if (discoverySucceeded && !latestValidIpPorts.contains(ipPort)) {
+                    retireMissingGeneration(ipPort, workerStatus);
                 }
             }
             if (latestEngineWorkerList.isEmpty()) {
@@ -225,15 +222,23 @@ public class EngineSyncRunner implements Runnable {
                         latestEngineWorkerList.size());
             }
 
-            trace.record(Stage.SYNC_DISPATCH);
             logger.debug(
                     "Submitting status check tasks for {} workers", latestEngineWorkerList.size());
+            // Check cadence before allocating a cache poll or submitting a task.
+            boolean pollCacheThisCycle =
+                    !roleType.requiresCacheKeys()
+                            || syncCycleId
+                                            % Math.max(
+                                                    cacheIntervalService.getCurrentIntervalMs()
+                                                            / syncEngineStatusInterval,
+                                                    1L)
+                                    == 0L;
             for (WorkerHost host : latestEngineWorkerList) {
                 String workerIpPort = host.getLogicalIpPort();
                 String site = host.getSite();
 
                 WorkerStatus workerStatus =
-                        getOrCreateWorkerStatus(
+                        discoverySucceeded ? getOrCreateWorkerStatus(
                                 workerIpPort,
                                 site,
                                 host.getGroup(),
@@ -242,7 +247,7 @@ public class EngineSyncRunner implements Runnable {
                                 host.getHttpPort(),
                                 host.getGrpcPort(),
                                 host.getEngineIndex(),
-                                host.getMultiEngineNum());
+                                host.getMultiEngineNum()) : cachedWorkerStatuses.get(workerIpPort);
 
                 if (workerStatus == null) {
                     continue;
@@ -272,7 +277,6 @@ public class EngineSyncRunner implements Runnable {
                                         host.getWorkerStatusPort(),
                                         site,
                                         roleType,
-                                        host.getGroup(),
                                         workerStatus,
                                         statusPollLease,
                                         workerDirectory,
@@ -300,6 +304,7 @@ public class EngineSyncRunner implements Runnable {
                             workerIpPort);
                 }
 
+                if (!pollCacheThisCycle) { continue; }
                 WorkerStatus.PollLease cachePollLease =
                         kvcmEnabled ? null : workerStatus.tryBeginCachePoll(syncCycleId);
                 if (cachePollLease != null) {
@@ -324,8 +329,6 @@ public class EngineSyncRunner implements Runnable {
                                         cacheAwareService,
                                         cacheIntervalService,
                                         syncRequestTimeoutMs,
-                                        syncCycleId,
-                                        syncEngineStatusInterval,
                                         cacheFullSnapshotDebugMode,
                                         cacheStatusExecutor);
                         cachePollLease.pollTrace().record(Stage.RUNNER_SUBMITTED);
@@ -358,7 +361,6 @@ public class EngineSyncRunner implements Runnable {
                     e);
             engineHealthReporter.reportStatusCheckerFail(BalanceStatusEnum.UNKNOWN_ERROR, null);
         } finally {
-            trace.record(Stage.SYNC_REPORT);
             logger.debug("Entering finally block for model: {}", modelName);
             Map<String, WorkerStatus> currentStatuses = workerDirectory.statusSnapshot(roleType);
             logger.debug("Worker status map size: {}", currentStatuses.size());
@@ -500,8 +502,7 @@ public class EngineSyncRunner implements Runnable {
                                 generationRole,
                                 workerIpPort,
                                 workerStatus,
-                                "DISCOVERY_TOPOLOGY_CHANGED",
-                                -1L);
+                                "DISCOVERY_TOPOLOGY_CHANGED");
                 retirementStarted = true;
             } finally {
                 workerStatus.lock.unlock();
@@ -551,7 +552,7 @@ public class EngineSyncRunner implements Runnable {
                         site,
                         deploymentName,
                         engineIndex,
-                        multiEngineNum, statusStaleAfterUs);
+                        multiEngineNum);
         logger.info(
                 "Created WorkerStatus generation {} for worker: {}",
                 discovered.getGenerationId(),
@@ -559,10 +560,14 @@ public class EngineSyncRunner implements Runnable {
         return discovered;
     }
 
-    private void retireMissingGenerationIfExpired(String workerIpPort, WorkerStatus workerStatus) {
+    private void retireMissingGeneration(String workerIpPort, WorkerStatus workerStatus) {
         EndpointRegistry.DetachedGeneration endpointToRetire = null;
         RoleType generationRole = null;
         boolean retirementStarted = false;
+        if (!workerDirectory.isCurrentStatus(roleType, workerIpPort, workerStatus)) {
+            return;
+        }
+        workerStatus.markRemovedFromDiscovery();
         if (!workerStatus.lock.tryLock()) {
             return;
         }
@@ -573,24 +578,13 @@ public class EngineSyncRunner implements Runnable {
             if (!workerStatus.isActiveGeneration()) {
                 return;
             }
-            WorkerStatus.PollHealth health = workerStatus.pollHealth();
-            if (System.nanoTime() / 1000 - health.lastSuccessfulPollUs() <= statusStaleAfterUs
-                    || workerStatus.isStatusPollProtected(
-                            System.nanoTime() / 1000, statusCommitGraceUs)) {
-                return;
-            }
-
-            if (!workerStatus.tryClaimHealthRetirement(health)) {
-                return;
-            }
             generationRole = workerStatus.getRole();
             endpointToRetire =
                     workerDirectory.beginRetirement(
                             generationRole,
                             workerIpPort,
                             workerStatus,
-                            "DISCOVERY_MISSING_AND_STATUS_EXPIRED",
-                            statusStaleAfterUs);
+                            workerStatus.retirementReason().name());
             retirementStarted = true;
         } finally {
             workerStatus.lock.unlock();

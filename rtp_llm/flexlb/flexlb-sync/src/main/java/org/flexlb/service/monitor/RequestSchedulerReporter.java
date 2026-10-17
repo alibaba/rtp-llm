@@ -1,17 +1,5 @@
 package org.flexlb.service.monitor;
 
-import lombok.extern.slf4j.Slf4j;
-import org.flexlb.enums.FlexMetricType;
-import org.flexlb.enums.FlexPriorityType;
-import org.flexlb.metric.FlexMetricTags;
-import org.flexlb.metric.FlexMonitor;
-import org.flexlb.util.PriorityNormalizer;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.scheduling.annotation.Scheduled;
-import org.springframework.stereotype.Component;
-
-import javax.annotation.PostConstruct;
-
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_CANCEL_CONFIRM_COUNT;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_CANCEL_QPS;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_CANCEL_REQUEST_COUNT;
@@ -32,6 +20,19 @@ import static org.flexlb.constant.MetricConstant.AUTO_TPM_TTFT_MS;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_VICTIM_COUNT;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_VICTIM_KV_TOKENS;
 import static org.flexlb.constant.MetricConstant.REQUEST_LIFECYCLE_FAILURES_TOTAL;
+
+import lombok.extern.slf4j.Slf4j;
+
+import org.flexlb.enums.FlexMetricType;
+import org.flexlb.enums.FlexPriorityType;
+import org.flexlb.metric.FlexMetricTags;
+import org.flexlb.metric.FlexMonitor;
+import org.flexlb.util.PriorityNormalizer;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.stereotype.Component;
+
+import javax.annotation.PostConstruct;
 
 /**
  * Auto-TPM priority scheduling metrics reporter.

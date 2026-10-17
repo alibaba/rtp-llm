@@ -9,11 +9,12 @@ import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
-import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.testfixture.TaskInfo;
+import org.flexlb.testfixture.WorkerStatusResponse;
+import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -233,7 +234,9 @@ class WorkerEndpointTest {
         WorkerStatus.PreparedStatus prepared;
         status.lock.lock();
         try {
-            prepared = status.prepareNewStatus(status.freezeStatusResponse(resp), null);
+            prepared =
+                    WorkerStatusTestFixtures.prepare(
+                            status, WorkerStatusTestFixtures.observation(status, resp));
         } finally {
             status.lock.unlock();
         }
@@ -245,7 +248,6 @@ class WorkerEndpointTest {
         status.lock.lock();
         try {
             status.publishPreparedStatus(prepared);
-            status.recordSuccessfulPoll(true, null);
         } finally {
             status.lock.unlock();
         }
@@ -267,7 +269,11 @@ class WorkerEndpointTest {
     @Test
     void nullStatusResponseIsRejectedBeforeMutation() {
         WorkerStatus.CommittedWorkerStatus before = status.committedWorkerStatus();
-        assertThrows(NullPointerException.class, () -> status.freezeStatusResponse(null));
+        assertThrows(
+                NullPointerException.class,
+                () ->
+                        org.flexlb.service.grpc.EngineStatusConverter.convertToStatusObservation(
+                                status, null));
         assertSame(before, status.committedWorkerStatus());
     }
 
@@ -277,6 +283,7 @@ class WorkerEndpointTest {
     void foreignStatusGenerationCannotRebindEndpoint() {
         WorkerStatusResponse resp = new WorkerStatusResponse();
         resp.setRole(RoleType.PREFILL);
+        resp.setAlive(true);
         resp.setStatusVersion(1L);
         resp.setLatestFinishedVersion(0L);
         WorkerStatus newStatus =
@@ -285,7 +292,8 @@ class WorkerEndpointTest {
         newStatus.lock.lock();
         try {
             WorkerStatus.PreparedStatus prepared =
-                    newStatus.prepareNewStatus(newStatus.freezeStatusResponse(resp), null);
+                    WorkerStatusTestFixtures.prepare(
+                            newStatus, WorkerStatusTestFixtures.observation(newStatus, resp));
             assertThrows(
                     IllegalArgumentException.class,
                     () -> endpoint.applyPreparedStatus(newStatus, prepared));

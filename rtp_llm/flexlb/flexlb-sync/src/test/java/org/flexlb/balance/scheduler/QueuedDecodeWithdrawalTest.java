@@ -31,6 +31,7 @@ import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskPhase;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
+import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -66,7 +67,7 @@ class QueuedDecodeWithdrawalTest {
         registry.attachGlobalQueue(queue);
         decode =
                 new DecodeEndpoint(
-                        org.flexlb.balance.endpoint.WorkerStatusTestFixtures.readyForScheduling(
+                        WorkerStatusTestFixtures.readyForScheduling(
                                 WorkerStatus.createDiscovered(
                                         RoleType.DECODE, null, "127.0.0.1", 8000, 8001, null)),
                         mock(EndpointEventProjector.class));
@@ -265,7 +266,7 @@ class QueuedDecodeWithdrawalTest {
                             assertFalse(
                                     RequestLifecycleTestSupport.prepareMember(registry, item),
                                     "withdrawal must fence batch preparation before releasing the"
-                                        + " old route");
+                                            + " old route");
                             registry.cancelRequest("4", 0, reason);
                             return true;
                         })
