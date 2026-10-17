@@ -8,10 +8,10 @@ from flashinfer import fp4_quantize
 
 from rtp_llm.config.quant_config import init_quant_config
 from rtp_llm.device.device_impl import CudaImpl
+from rtp_llm.models_py.kernels.cuda.fp4_kernel import nvfp4_available
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp4_linear import (
     CudaFp4GEMMLinear,
 )
-from rtp_llm.models_py.utils.arch import get_sm
 from rtp_llm.test.utils.numeric_util import calc_diff
 
 
@@ -22,8 +22,8 @@ class CudaFp4GEMMLinearTest(unittest.TestCase):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         if self.device == "cpu":
             self.skipTest("FP4 tests require CUDA")
-        if get_sm()[0] < 10:
-            self.skipTest("FP4 GEMM requires an sm100+ device")
+        if not nvfp4_available:
+            self.skipTest("NVFP4 kernels are unavailable in this environment")
 
         logging.getLogger(
             "rtp_llm.models_py.modules.factory.linear.impl.cuda.fp4_linear"
