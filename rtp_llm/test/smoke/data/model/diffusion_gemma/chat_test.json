@@ -7,22 +7,31 @@
       "result": {
         "id": "chat-",
         "object": "chat.completion",
-        "created": 0,
+        "created": 1792274125,
         "model": "",
         "choices": [
           {
             "index": 0,
             "message": {
               "role": "assistant",
-              "content": ""
+              "content": "<|channel><|channel>thought\n<channel|>The capital of France is **Paris**.",
+              "name": null,
+              "reasoning_content": null,
+              "function_call": null,
+              "tool_calls": null,
+              "partial": false,
+              "tool_call_id": null
             },
-            "finish_reason": "stop"
+            "finish_reason": "length",
+            "logprobs": null
           }
         ],
         "usage": {
-          "prompt_tokens": 0,
-          "completion_tokens": 0,
-          "total_tokens": 0
+          "prompt_tokens": 14,
+          "total_tokens": 270,
+          "completion_tokens": 256,
+          "completion_tokens_details": null,
+          "prompt_tokens_details": null
         }
       },
       "endpoint": "/v1/chat/completions",
