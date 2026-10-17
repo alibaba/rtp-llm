@@ -736,6 +736,18 @@ class MlaFlashInferDecodeOp(object):
         k_weight = self.weights[layer_id].get(W.mla_kc, None)
         v_weight = self.weights[layer_id].get(W.mla_vc, None)
 
+        # The FP8 MLA cache packs 656 bytes per token (512B fp8 latent +
+        # 16B group scales + 128B bf16 rope, MLAKVCacheSpec.h) instead of the
+        # 576-element bf16 latent this view consumes; detect the layout by
+        # divisibility and fail with the actionable message until the fp8
+        # decode path (upconvert or the trtllm native-fp8 contract) lands.
+        _latent_elems = self.token_per_block * (self.kv_lora_rank + self.qk_rope_head_dim)
+        if kv_cache.kv_cache_base.numel() % _latent_elems != 0:
+            raise NotImplementedError(
+                "MlaFlashInferDecodeOp does not support FP8 KV cache yet "
+                "(bf16 latent layout required); set kv_cache_dtype=bf16"
+            )
+
         compressed_kv = kv_cache.kv_cache_base.view(
             -1, self.token_per_block, self.kv_lora_rank + self.qk_rope_head_dim
         )
@@ -833,6 +845,15 @@ class MlaFlashInferDecodeOp(object):
             num_warps=4,
         )
 
+        # Same layout mismatch as the plain decode path: detect the 656-byte
+        # fp8 packing by divisibility and fail with the actionable message
+        # until the trtllm native-fp8 contract is wired.
+        _latent_elems = self.token_per_block * (self.kv_lora_rank + self.qk_rope_head_dim)
+        if kv_cache.kv_cache_base.numel() % _latent_elems != 0:
+            raise NotImplementedError(
+                "MlaFlashInferDecodeOp does not support FP8 KV cache yet "
+                "(bf16 latent layout required); set kv_cache_dtype=bf16"
+            )
         full_kv = kv_cache.kv_cache_base.view(
             -1, self.token_per_block, self.kv_lora_rank + self.qk_rope_head_dim
         )
