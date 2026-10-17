@@ -17,7 +17,17 @@ def copy_all_so():
     copy_so("@rtp_llm//:rtp_compute_ops")
 
 _CUDA13_X86_DEFERRED = ["flash-attn-3"]
-_CUDA13_ARM_DEFERRED = ["flash_attn", "flash-attn-3"]
+# CUDA-linked wheel family: absent from the ARM/cpu torch locks, so any
+# pip requirement lookup for these names against the cpu or arm repos raises
+# at BUILD expansion on those lanes. Consumers already exclude them there.
+_CUDA13_ARM_DEFERRED = [
+    "flash_attn",
+    "flash-attn-3",
+    "triton",
+    "triton-kernels",
+    "fast-hadamard-transform",
+    "nvidia-cutlass-dsl",
+]
 
 # xgrammar's wheel metadata pulls apache-tvm-ffi (and triton on x86), which only
 # the cuda12_9/cuda13 locks carry; dash_sc imports it optionally and degrades
