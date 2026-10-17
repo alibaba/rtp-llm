@@ -17,6 +17,7 @@
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerUtils.h"
 #include "rtp_llm/cpp/engine_base/schedulers/PDFusionRatioScheduler.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
+#include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
 #include "rtp_llm/cpp/cache/test/mock/MockCoordinatorCacheManager.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
@@ -258,6 +259,7 @@ struct ChunkSchedulerTestConfig {
     int         seq_size_per_block    = 4;
     int         max_batch_tokens_size = 1024;
     int         prefill_chunk_size    = 16;
+    int         max_seq_len           = 128;
     std::string decode_prefill_ratio;
 };
 
@@ -265,14 +267,24 @@ template<typename SchedulerType>
 class ChunkSchedulerTestEnv {
 public:
     explicit ChunkSchedulerTestEnv(const ChunkSchedulerTestConfig& config):
-        cache_manager(std::make_shared<KVCacheManager>(
-            rtp_llm::test::makeSimpleMhaCacheConfig(
-                1, config.block_num, config.seq_size_per_block, rtp_llm::DataType::TYPE_FP16, 1, 4))) {
-        resource_context.cache_manager = cache_manager;
-        resource_context.role_type     = config.role_type;
+        ChunkSchedulerTestEnv(config,
+                              rtp_llm::test::makeSimpleMhaCacheConfig(
+                                  1, config.block_num, config.seq_size_per_block, rtp_llm::DataType::TYPE_FP16, 1, 4)) {
+    }
 
-        model_config.max_seq_len = 128;
-        model_config.vocab_size  = 2048;
+    ChunkSchedulerTestEnv(const ChunkSchedulerTestConfig& config,
+                          const CacheConfig&              cache_config,
+                          const ParallelismConfig&        parallelism = ParallelismConfig{}):
+        cache_manager(std::make_shared<KVCacheManager>(cache_config, false, nullptr, KVCacheConfig{}, parallelism)),
+        parallelism_config(parallelism) {
+        resource_context.cache_manager       = cache_manager;
+        resource_context.role_type           = config.role_type;
+        resource_context.reuse_cache         = true;
+        resource_context.enable_device_cache = false;
+
+        model_config.max_seq_len                 = config.max_seq_len;
+        model_config.vocab_size                  = 2048;
+        model_config.attn_config.tokens_per_block = cache_config.seq_size_per_block;
 
         runtime_config.max_generate_batch_size                     = 16;
         runtime_config.fifo_scheduler_config.max_batch_tokens_size = config.max_batch_tokens_size;
@@ -313,6 +325,60 @@ private:
     ModelSpecificConfig            model_specific_config;
     std::unique_ptr<SchedulerType> scheduler_;
 };
+
+static CacheConfig makeChunkedCpHybridCache(int linear_step = 8, const std::vector<int>& linear_spans = {2048}) {
+    CacheConfig config;
+    config.dtype                             = DataType::TYPE_FP16;
+    config.seq_size_per_block                = 2048;
+    config.linear_step                       = linear_step;
+    config.layer_num                         = linear_spans.size() + 1;
+    config.local_kv_cache_sharded = true;
+    std::vector<KVCacheSpecPtr>   specs      = {test::makeMhaSpec("full", 2048, config.dtype, 1, 1)};
+    std::vector<std::vector<int>> layers     = {{0}};
+    std::vector<CacheGroupType>   types      = {CacheGroupType::FULL};
+    std::vector<std::string>      tags       = {"full"};
+    for (size_t i = 0; i < linear_spans.size(); ++i) {
+        tags.push_back("linear" + std::to_string(i));
+        specs.push_back(test::makeLinearSpec(tags.back(), linear_spans[i], config.dtype, 1, 1));
+        layers.push_back({static_cast<int>(i + 1)});
+        types.push_back(CacheGroupType::LINEAR);
+    }
+    config.fromGroupedSpecs(specs, layers, types, tags);
+    config.finalizeBlockNums(256, RuntimeConfig{});
+    return config;
+}
+
+static ParallelismConfig makeChunkedCpParallelism() {
+    ParallelismConfig parallelism;
+    parallelism.tp_size                            = 8;
+    parallelism.world_size                         = 8;
+    parallelism.role_type                          = RoleType::PREFILL;
+    parallelism.prefill_cp_config.kv_cache_sharded = true;
+    parallelism.prefill_cp_config.prefill_cp_size  = 8;
+    // Exercise native PageRR ownership without enabling Query CP execution.
+    parallelism.prefill_cp_config.method = CPRotateMethod::DISABLED;
+    return parallelism;
+}
+
+static testing::AssertionResult expectChunkPrefixState(const GenerateStreamPtr& stream, const CacheConfig& config) {
+    if (stream->prefixLength() <= 0) {
+        return testing::AssertionSuccess();
+    }
+    for (const auto& group : config.groups()) {
+        if (group.policy.group_type != CacheGroupType::LINEAR) {
+            continue;
+        }
+        const size_t position = static_cast<size_t>(stream->prefixLength() - 1) / group.seqSizePerBlock();
+        for (int row = 0; row < stream->currentBatchSize(); ++row) {
+            const auto& table = stream->kvCachePtr()->kernelBlocks(row, group.tag);
+            if (position >= table.size() || table[position] <= 0) {
+                return testing::AssertionFailure() << "missing prefix " << stream->prefixLength() << " in group "
+                                                   << group.tag << ", row " << row << ", position " << position;
+            }
+        }
+    }
+    return testing::AssertionSuccess();
+}
 
 TEST_F(FIFOSchedulerTest, testSimple) {
     CacheConfig                     cache_config  = makeMhaCacheConfig(1, 4, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
@@ -5779,6 +5845,140 @@ TEST_F(FIFOSchedulerTest, testGlobalChunkBudgetFIFOFourRoundPrefix) {
 
 TEST_F(FIFOSchedulerTest, testGlobalChunkBudgetPDFusionFourRoundPrefix) {
     verifyGlobalChunkBudgetFourRoundPrefix<PDFusionRatioScheduler>(RoleType::PDFUSION, "1/100");
+}
+
+TEST_F(FIFOSchedulerTest, testChunkedPrefillRejectsInvalidConfigAtConstruction) {
+    for (const int budget : {0, 8192, 16384}) {
+        ChunkSchedulerTestConfig config;
+        config.prefill_chunk_size = budget;
+        ChunkSchedulerTestEnv<FIFOScheduler> env(config, makeChunkedCpHybridCache(), makeChunkedCpParallelism());
+        if (budget == 8192) {
+            EXPECT_ANY_THROW(env.init());
+        } else {
+            ASSERT_TRUE(env.init());
+            EXPECT_EQ(env.scheduler().prefill_chunk_alignment_, 16384);
+        }
+    }
+}
+
+TEST_F(FIFOSchedulerTest, testChunkedPrefillCpBudgetPreservesLinearCheckpoint) {
+    // Reproduce the budget geometry, without treating these synthetic prompts as an online request fixture.
+    ChunkSchedulerTestConfig config;
+    config.max_seq_len                                = 1 << 20;
+    config.max_batch_tokens_size                      = 1 << 20;
+    config.prefill_chunk_size                         = 65536;
+    const auto                           cache_config = makeChunkedCpHybridCache();
+    ChunkSchedulerTestEnv<FIFOScheduler> env(config, cache_config, makeChunkedCpParallelism());
+    ASSERT_TRUE(env.init());
+    ASSERT_NE(env.cache_manager->cpSlotMapper(), nullptr);
+    ASSERT_EQ(env.cache_manager->cpSlotMapper()->cpSize(), 8);
+    ASSERT_EQ(env.scheduler().prefill_chunk_alignment_, 16384);
+
+    auto short_stream = env.makeStream(std::vector<int>(2048, 1), 1);
+    auto long_stream  = env.makeStream(std::vector<int>(131072, 2), 1);
+    ASSERT_TRUE(env.scheduler().enqueue(short_stream).ok());
+    ASSERT_TRUE(env.scheduler().enqueue(long_stream).ok());
+    // 65536 - 2048 = 63488 used to end inside a LINEAR checkpoint interval.
+    ASSERT_TRUE(expectPrefillBatch(env.scheduler().schedule(), {short_stream, long_stream}, {2048, 49152}));
+    short_stream->reportEvent(StreamEvents::GenerateDone);
+    long_stream->update(makeSingleTokenUpdate(3));
+    ASSERT_EQ(long_stream->prefixLength(), 49152);
+    ASSERT_TRUE(expectPrefillBatch(env.scheduler().schedule(), {long_stream}, {65536}));
+    ASSERT_TRUE(expectChunkPrefixState(long_stream, cache_config));
+    long_stream->update(makeSingleTokenUpdate(3));
+    ASSERT_EQ(long_stream->prefixLength(), 114688);
+    ASSERT_TRUE(expectPrefillBatch(env.scheduler().schedule(), {long_stream}, {16384}));
+    ASSERT_TRUE(expectChunkPrefixState(long_stream, cache_config));
+}
+
+TEST_F(FIFOSchedulerTest, testChunkedPrefillCpBudgetAccountsForFanoutRows) {
+    ChunkSchedulerTestConfig config;
+    config.max_seq_len           = 1 << 20;
+    config.max_batch_tokens_size = 1 << 20;
+    config.prefill_chunk_size    = 65536;
+    ChunkSchedulerTestEnv<FIFOScheduler> env(config, makeChunkedCpHybridCache(), makeChunkedCpParallelism());
+    ASSERT_TRUE(env.init());
+    auto short_stream = env.makeStream(std::vector<int>(2048, 1), 1);
+    auto long_stream  = env.makeStream(std::vector<int>(131072, 2), 1, 2);
+    ASSERT_TRUE(env.scheduler().enqueue(short_stream).ok());
+    ASSERT_TRUE(env.scheduler().enqueue(long_stream).ok());
+    ASSERT_TRUE(expectPrefillBatch(env.scheduler().schedule(), {short_stream, long_stream}, {2048, 16384}));
+    ASSERT_EQ(long_stream->currentBatchSize(), 2);
+}
+
+TEST_F(FIFOSchedulerTest, testChunkedPrefillParksUntilCheckpointFitsRemainingBudget) {
+    ChunkSchedulerTestConfig config;
+    config.max_seq_len           = 1 << 20;
+    config.max_batch_tokens_size = 1 << 20;
+    config.prefill_chunk_size    = 16384;
+    ChunkSchedulerTestEnv<FIFOScheduler> env(config, makeChunkedCpHybridCache(), makeChunkedCpParallelism());
+    ASSERT_TRUE(env.init());
+    auto short_stream = env.makeStream(std::vector<int>(2048, 1), 1);
+    auto long_stream  = env.makeStream(std::vector<int>(131072, 2), 1);
+    ASSERT_TRUE(env.scheduler().enqueue(short_stream).ok());
+    ASSERT_TRUE(env.scheduler().enqueue(long_stream).ok());
+    ASSERT_TRUE(expectPrefillBatch(env.scheduler().schedule(), {short_stream}, {2048}));
+    ASSERT_FALSE(long_stream->hasError());
+    short_stream->reportEvent(StreamEvents::GenerateDone);
+    ASSERT_TRUE(expectPrefillBatch(env.scheduler().schedule(), {long_stream}, {16384}));
+}
+
+TEST_F(FIFOSchedulerTest, testChunkedPrefillAlignsAbsoluteEndAfterBaseAlignedReuse) {
+    ChunkSchedulerTestConfig config;
+    config.max_seq_len           = 1 << 20;
+    config.max_batch_tokens_size = 1 << 20;
+    config.prefill_chunk_size    = 65536;
+    ChunkSchedulerTestEnv<FIFOScheduler> env(config, makeChunkedCpHybridCache(), makeChunkedCpParallelism());
+    ASSERT_TRUE(env.init());
+    auto stream = env.makeStream(std::vector<int>(131072, 1), 1);
+    ASSERT_TRUE(stream->initKVBlock().ok());
+    stream->reportEvent(StreamEvents::LoadInitiated);
+    // Inject a completed load result to test admission/alignment, independently of cache lookup policy.
+    stream->setReuseLength(2048);
+    ASSERT_TRUE(env.scheduler().enqueue(stream).ok());
+    ASSERT_TRUE(expectPrefillBatch(env.scheduler().schedule(), {stream}, {63488}));
+    ASSERT_FALSE(stream->hasError());
+    ASSERT_EQ(stream->prefixLength() + stream->currentChunkLen(), 65536);
+}
+
+TEST_F(FIFOSchedulerTest, testChunkedPrefillUsesAllLinearGroupCheckpointPeriods) {
+    ChunkSchedulerTestConfig config;
+    config.max_seq_len           = 1 << 20;
+    config.max_batch_tokens_size = 1 << 20;
+    config.prefill_chunk_size    = 98304;
+    auto cache_config = makeChunkedCpHybridCache(/*linear_step=*/12, /*linear_spans=*/{2048, 4096});
+    auto groups = cache_config.groups();
+    // Execution must align every LINEAR checkpoint. Keep the second group
+    // request-local: BlockTree reuse groups require identical token coordinates.
+    groups[cache_config.topology().groupIdForTag("linear1")].policy.enable_prefix_reuse = false;
+    cache_config.setTopology(std::move(groups), cache_config.topology().layers());
+    ChunkSchedulerTestEnv<FIFOScheduler> env(config, cache_config, makeChunkedCpParallelism());
+    ASSERT_TRUE(env.init());
+    // LCM(PageRR=16384, LINEAR0=24576, LINEAR1=49152), with step12 > CP8.
+    ASSERT_EQ(env.scheduler().prefill_chunk_alignment_, 49152);
+    auto short_stream = env.makeStream(std::vector<int>(2048, 1), 1);
+    auto long_stream  = env.makeStream(std::vector<int>(196608, 2), 1);
+    ASSERT_TRUE(env.scheduler().enqueue(short_stream).ok());
+    ASSERT_TRUE(env.scheduler().enqueue(long_stream).ok());
+    ASSERT_TRUE(expectPrefillBatch(env.scheduler().schedule(), {short_stream, long_stream}, {2048, 49152}));
+    short_stream->reportEvent(StreamEvents::GenerateDone);
+    long_stream->update(makeSingleTokenUpdate(3));
+    ASSERT_TRUE(expectPrefillBatch(env.scheduler().schedule(), {long_stream}, {98304}));
+    ASSERT_TRUE(expectChunkPrefixState(long_stream, cache_config));
+}
+
+TEST_F(FIFOSchedulerTest, testChunkedPrefillRejectsDisabledReuse) {
+    for (bool global_reuse : {false, true}) {
+        ChunkSchedulerTestEnv<FIFOScheduler> env(ChunkSchedulerTestConfig{});
+        env.resource_context.reuse_cache = global_reuse;
+        ASSERT_TRUE(env.init());
+        auto stream = env.makeStream(std::vector<int>(32, 1));
+        stream->generateConfig()->reuse_cache = !global_reuse;
+        const auto free_before = env.cache_manager->freeBlocksNum();
+        EXPECT_FALSE(env.scheduler().enqueue(stream).ok());
+        EXPECT_EQ(stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+        EXPECT_EQ(env.cache_manager->freeBlocksNum(), free_before);
+    }
 }
 
 TEST_F(FIFOSchedulerTest, testGlobalChunkBudgetDefersFanoutProgressCheckUntilReuseIsKnown) {
