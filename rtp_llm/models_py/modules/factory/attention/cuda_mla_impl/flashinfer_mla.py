@@ -222,6 +222,27 @@ def _use_trtllm_gen_decode() -> bool:
     return os.environ.get("XING4_MLA_TRTLLM_GEN_DECODE", "0") == "1"
 
 
+def trtllm_mla_decode_domain_admitted(qo_indptr_h: torch.Tensor, qo_bs: int, kv_bs: int, tokens: int) -> bool:
+    """Domain gate for the trtllm-gen MLA decode branch.
+
+    Admits plain decode (tokens == requests) and MTP verify (tokens ==
+    requests * (1 + gen)) — both have uniform q rows per request. Rejects
+    the ragged absorb-prefill batch (prefix > 0, chunked continuation or
+    reuse cache) whose per-request input_lengths differ: a mere
+    tokens % qo_bs == 0 check would admit an uneven-but-divisible batch and
+    the downstream reshape would cut request boundaries at the wrong rows
+    (silently wrong attention). Also rejects the one-beat kv_bs lag where
+    the kv length tensor still records the previous request count.
+    """
+    if qo_bs <= 0 or qo_bs != kv_bs:
+        return False
+    q_lens = qo_indptr_h[1 : qo_bs + 1] - qo_indptr_h[:qo_bs]
+    q_len = int(q_lens[0])
+    if not bool((q_lens == q_len).all()):
+        return False
+    return tokens == qo_bs * q_len
+
+
 class MlaFlashInferPrefillOp(object):
     _triton_compat_warned = False  # Class variable to track warning status
     _trtllm_gen_workspace = None  # class-level lazy workspace (uint8, 128 MiB)
@@ -730,28 +751,19 @@ class MlaFlashInferDecodeOp(object):
         )
 
         if _use_trtllm_gen_decode():
-            # Plain decode (tokens == requests) or the MTP verify
-            # (tokens == requests * (1+gen)) — both have UNIFORM q rows per
-            # request. This op is also the short-sequence absorb branch for
-            # ragged prefill batches (prefix>0, chunked-prefill continuation
-            # or reuse cache), whose per-request input_lengths differ; a
-            # mere tokens % qo_bs == 0 check would admit those and the
-            # reshape below would cut request boundaries at the wrong rows
-            # (silently wrong attention). The host indptr carries the true
-            # per-request boundaries and reads without a device sync.
-            # The captured plan tensors are only touched under this gate:
-            # plan() fills them under the same env gate, so the default
+            # The domain gate and its reasoning live in
+            # trtllm_mla_decode_domain_admitted (unit-tested there). The
+            # captured plan tensors are only touched under this env gate:
+            # plan() fills them under the same gate, so the default
             # (env-off) path leaves them None and must not read them
             # (reading them unconditionally crashed the first default-env
             # decode forward with AttributeError).
             qo_bs = int(self._t_qo_indptr_d.size(0)) - 1
             kv_bs = int(self._t_kvlen_d.size(0))
             tokens = q_nope.shape[0]
-            q_lens = self._t_qo_indptr_h[1 : qo_bs + 1] - self._t_qo_indptr_h[:qo_bs]
-            q_len = int(q_lens[0]) if qo_bs > 0 else 0
-            uniform = bool((q_lens == q_len).all().item()) if qo_bs > 0 else False
-            if qo_bs == kv_bs and uniform and tokens == qo_bs * q_len:
-                attn_output = self._trtllm_decode_run(q_nope, q_pe, kv_cache, q_len)
+            if trtllm_mla_decode_domain_admitted(self._t_qo_indptr_h, qo_bs, kv_bs, tokens):
+                q_lens = self._t_qo_indptr_h[1 : qo_bs + 1] - self._t_qo_indptr_h[:qo_bs]
+                attn_output = self._trtllm_decode_run(q_nope, q_pe, kv_cache, int(q_lens[0]))
             else:
                 attn_output = torch.empty_like(q_nope)
                 self.mla_wrapper.run(q_nope, q_pe, compressed_kv, k_pe, attn_output)

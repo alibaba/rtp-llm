@@ -50,3 +50,16 @@ py_test(
     ],
     exec_properties = {"gpu": "SM103_CU13"},
 )
+
+py_test(
+    name = "trtllm_mla_decode_domain_gate_test",
+    srcs = ["trtllm_mla_decode_domain_gate_test.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+    tags = [
+        "SM103_CU13",
+        "manual",
+    ],
+    exec_properties = {"gpu": "SM103_CU13"},
+)
