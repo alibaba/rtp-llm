@@ -93,7 +93,9 @@ inline bool supportsGenerationPrefillCudaGraphCacheTopology(const std::vector<Gr
 // enablement; SM10x (Blackwell) passed with the replay-metadata canonical-form
 // fix (capture and replay must write byte-identical cu_seqlens, otherwise the
 // frozen fa2 CTA schedule leaves live rows uncomputed and the split-KV merge
-// deadlocks) validated by the Xing4.0-29B golden smoke at padding 490/512.
+// deadlocks) validated by the Xing4.0-29B golden smoke at padding 490/512 on
+// SM103 x86 (deep-gemm 2.8.0). The SM100 ARM lane pins deep-gemm 2.8.1 and
+// has no genprefill smoke yet; run one there before relying on that lane.
 inline bool supportsGenerationPrefillCudaGraphMaskedMoeBackend(int cuda_compute_capability_major) {
     return cuda_compute_capability_major == 9 || cuda_compute_capability_major == 10;
 }
