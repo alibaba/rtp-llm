@@ -4,7 +4,6 @@ import json
 import logging
 import os
 import shutil
-import sys
 from typing import Any, Dict, List, Type, Union
 
 logging.basicConfig(
@@ -29,42 +28,6 @@ from smoke.task_info import TaskInfo
 from smoke.utils import resolve_prompt_refs
 
 from rtp_llm.utils.util import str_to_bool
-
-
-def _skip_nvfp4_case_on_unsupported_hardware(task_info: TaskInfo) -> None:
-    """Skip NVFP4 checkpoints where the kernel was never built for the device.
-
-    The ARM smoke lane is tagged for SM100 workers but the remote executor can
-    place a case on an sm89 (L20A) worker. A Blackwell worker without the
-    kernel is a packaging problem and must keep failing.
-    """
-    if "nvfp4" not in task_info.model_path.lower():
-        return
-
-    try:
-        from rtp_llm.models_py.kernels.cuda.fp4_kernel import nvfp4_available
-    except ImportError:
-        # The case will fail on its own if the kernel package is truly absent.
-        return
-
-    if nvfp4_available:
-        return
-    try:
-        import torch
-
-        device = torch.cuda.get_device_name(torch.cuda.current_device())
-    except Exception:
-        device = "unknown"
-    blackwell_markers = ("B100", "B200", "B300", "GB200", "GB300")
-    if any(marker in device.upper() for marker in blackwell_markers):
-        return
-    logging.warning(
-        "SMOKE SKIPPED: %s needs NVFP4 kernels, but rtp_kernel.nvfp4 is "
-        "unavailable on %s",
-        task_info.taskinfo_rel_path or task_info.model_path,
-        device,
-    )
-    sys.exit(0)
 
 
 def get_runner_type(
@@ -138,7 +101,6 @@ if __name__ == "__main__":
         task_info = TaskInfo(
             **x, taskinfo_rel_path=os.path.join(REL_PATH, args.task_info)
         )
-    _skip_nvfp4_case_on_unsupported_hardware(task_info)
 
     env_args = json.loads(args.envs)
     smoke_args = args.smoke_args

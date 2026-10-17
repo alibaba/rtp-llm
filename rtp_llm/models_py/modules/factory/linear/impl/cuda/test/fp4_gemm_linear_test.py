@@ -8,7 +8,6 @@ from flashinfer import fp4_quantize
 
 from rtp_llm.config.quant_config import init_quant_config
 from rtp_llm.device.device_impl import CudaImpl
-from rtp_llm.models_py.kernels.cuda.fp4_kernel import nvfp4_available
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp4_linear import (
     CudaFp4GEMMLinear,
 )
@@ -22,8 +21,6 @@ class CudaFp4GEMMLinearTest(unittest.TestCase):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         if self.device == "cpu":
             self.skipTest("FP4 tests require CUDA")
-        if not nvfp4_available:
-            self.skipTest("NVFP4 kernels are unavailable in this environment")
 
         logging.getLogger(
             "rtp_llm.models_py.modules.factory.linear.impl.cuda.fp4_linear"
