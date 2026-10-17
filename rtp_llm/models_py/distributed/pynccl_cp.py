@@ -205,11 +205,13 @@ _COMMS: Dict[Tuple[Any, int], Tuple["_NCCLLib", Any]] = {}
 _OVERLAP_COMMS: Dict[Tuple[Any, int], Tuple["_NCCLLib", Any]] = {}
 _OVERLAP_STREAMS: Dict[Tuple[Any, int], torch.cuda.Stream] = {}
 _WORLD_SIZES: Dict[Any, int] = {}
+_OVERLAP_BUFFERS: Dict[Tuple[Any, ...], Any] = {}
+_INDEXER_BUFFERS: Dict[Tuple[Any, ...], Tuple[Any, Any]] = {}
 
-# Symmetric-memory state is process-persistent. Each role gets a distinct
-# buffer because MLA cKV and kPE must coexist until their common restore has
-# consumed both outputs. Packed Indexer FP8 K+scale intentionally stays on
-# ordinary pynccl and therefore does not reserve a symmetric window.
+# Legacy output-window state is process-persistent. MLA cKV and kPE need
+# distinct buffers until their common restore has consumed both outputs.
+# Packed Indexer FP8 K+scale is excluded here; its opt-in registration uses
+# both endpoints in _INDEXER_BUFFERS instead.
 _SYMM_INIT_BUDGET_NBYTES = 1024 * 1024 * 1024
 _SYMM_POOLS: Dict[Tuple[Any, int], Any] = {}
 _SYMM_POOL_FAILED: set[Tuple[Any, int]] = set()
@@ -298,10 +300,151 @@ def warmup_kv_overlap(group: Any) -> torch.cuda.Stream:
     process_group = _resolve_process_group(group)
     device = torch.device("cuda", torch.cuda.current_device())
     _get_comm(process_group, device, independent=True)
+    if os.environ.get("RTP_LLM_CP_INDEXER_REGISTERED", "0") == "1":
+        _get_comm(process_group, device)
     key = _comm_key(process_group, device)
     if key not in _OVERLAP_STREAMS:
         _OVERLAP_STREAMS[key] = torch.cuda.Stream(device=device)
     return _OVERLAP_STREAMS[key]
+
+
+class _RegisteredKvBuffers:
+    """Reusable rank-symmetric endpoints; both window offsets are zero."""
+
+    def __init__(self, process_group, device, rows, width, dtype, lib, comm):
+        self.lib, self.comm = lib, comm
+        # Small increases in request lengths must not repeatedly tear down
+        # registered VMM windows. Geometric growth bounds capacity below twice
+        # the high-water mark and amortizes registration/pool-release costs.
+        rows = 1 << (rows - 1).bit_length()
+        self.rows = rows
+        # Suballocations can lose the VMM address alignment required by NCCL.
+        self.pool = torch.cuda.MemPool(
+            process_group._get_backend(device).mem_allocator, no_split=True
+        )
+        self.local = self.gathered = None
+        self.windows = []
+        try:
+            with torch.cuda.use_mem_pool(self.pool):
+                self.local = torch.empty((rows, width), dtype=dtype, device=device)
+                self.gathered = torch.empty(
+                    (_world_size(process_group) * rows, width),
+                    dtype=dtype,
+                    device=device,
+                )
+            for ptr, nbytes in (
+                (self.local.data_ptr(), self.local.nbytes),
+                (self.gathered.data_ptr(), self.gathered.nbytes),
+            ):
+                self.windows.append(lib.window_register(comm, ptr, nbytes))
+        except BaseException:
+            self.close()
+            raise
+
+    def close(self):
+        for window in self.windows:
+            self.lib.window_deregister(self.comm, window)
+        self.windows.clear()
+        # Release tensors BEFORE the pool. Otherwise its destructor sees live
+        # blocks and leaves their cache behind after every capacity increase.
+        self.local = self.gathered = None
+        self.pool = None
+
+
+def registered_kv_overlap_buffers(rows, width, dtype, device, group):
+    """Reuse rank-symmetric history buffers without capping NCCL's bandwidth.
+
+    Call once per eager forward with rank-uniform padded rows. Registration
+    lets NCCL select its low-CTA symmetric kernel. The buffers are private to
+    the persistent history stream. Crossing a power-of-two capacity boundary
+    synchronizes the owner and releases its old pool; steady reuse does neither.
+    """
+    if os.environ.get("RTP_LLM_CP_KV_REGISTERED", "0") != "1" or rows == 0:
+        return None
+    process_group = _resolve_process_group(group)
+    comm_key = _comm_key(process_group, device)
+    lib, comm = _OVERLAP_COMMS[comm_key]
+    if not lib._has_symm or not lib._has_window_deregister:
+        return None
+    if torch.cuda.is_current_stream_capturing():
+        raise RuntimeError("history KV windows must be prepared outside graph capture")
+    key = (*comm_key, width, dtype)
+    buffers = _OVERLAP_BUFFERS.get(key)
+    if buffers is not None and buffers.rows < rows:
+        # Join the sole user before deregistration. Fused consumer slots are
+        # separate; pool cleanup and registration occur only on capacity growth.
+        _OVERLAP_STREAMS[comm_key].synchronize()
+        buffers.close()
+        del _OVERLAP_BUFFERS[key]
+        buffers = None
+    if buffers is None:
+        buffers = _RegisteredKvBuffers(
+            process_group, device, rows, width, dtype, lib, comm
+        )
+        _OVERLAP_BUFFERS[key] = buffers
+    return buffers.local[:rows], buffers.gathered[: rows * _world_size(process_group)]
+
+
+def _registered_indexer_all_gather(input, group, role):
+    """Reuse both registered endpoints for eager FP8 Indexer communication.
+
+    Its consumers copy/assemble the result on the same stream before the next
+    layer overwrites it. Other streams and graph capture keep their normal
+    allocation path. The direct communicator is warmed with layered prefill.
+    """
+    if (
+        os.environ.get("RTP_LLM_CP_INDEXER_REGISTERED", "0") != "1"
+        or role not in ("indexer_k_quant", "indexer_k_packed")
+        or input.numel() == 0
+        or torch.cuda.is_current_stream_capturing()
+    ):
+        return None
+    process_group = _resolve_process_group(group)
+    comm_key = _comm_key(process_group, input.device)
+    entry = _COMMS.get(comm_key)
+    if entry is None:
+        return None
+    lib, comm = entry
+    if not lib._has_symm or not lib._has_window_deregister:
+        return None
+    if input.dim() != 2 or not input.is_contiguous() or input.element_size() != 1:
+        return None
+    stream = torch.cuda.current_stream(input.device)
+    key = (*comm_key, role, input.size(1), input.dtype)
+    cached = _INDEXER_BUFFERS.get(key)
+    buffers = None
+    if cached is not None:
+        owner, buffers = cached
+        if owner.cuda_stream != stream.cuda_stream:
+            return None
+        if buffers.rows < input.size(0):
+            owner.synchronize()
+            buffers.close()
+            del _INDEXER_BUFFERS[key]
+            buffers = None
+    if buffers is None:
+        buffers = _RegisteredKvBuffers(
+            process_group,
+            input.device,
+            input.size(0),
+            input.size(1),
+            input.dtype,
+            lib,
+            comm,
+        )
+        _INDEXER_BUFFERS[key] = (stream, buffers)
+    local = buffers.local[: input.size(0)]
+    output = buffers.gathered[: input.size(0) * _world_size(process_group)]
+    local.copy_(input)
+    lib.all_gather(
+        local.data_ptr(),
+        output.data_ptr(),
+        input.numel(),
+        input.dtype,
+        comm,
+        stream.cuda_stream,
+    )
+    return output
 
 
 def all_gather_kv_overlap(
@@ -346,6 +489,14 @@ def destroy() -> None:
     """Release symmetric windows and direct communicators before PG teardown."""
     global _LIB
 
+    for stream, buffers in _INDEXER_BUFFERS.values():
+        stream.synchronize()
+        buffers.close()
+
+    for key, buffers in _OVERLAP_BUFFERS.items():
+        _OVERLAP_STREAMS[key[:2]].synchronize()
+        buffers.close()
+
     for window_key, window in list(_SYMM_WINDOWS.items()):
         comm_entry = _COMMS.get(window_key[:2])
         if comm_entry is None:
@@ -377,6 +528,8 @@ def destroy() -> None:
     _COMMS.clear()
     _OVERLAP_COMMS.clear()
     _OVERLAP_STREAMS.clear()
+    _OVERLAP_BUFFERS.clear()
+    _INDEXER_BUFFERS.clear()
     _WORLD_SIZES.clear()
     _LIB = None
 
@@ -662,6 +815,9 @@ def all_gather(
     role: str | None = None,
 ) -> torch.Tensor:
     """GLM5 dispatcher: symmetric window, ordinary pynccl, then C10D."""
+    registered = _registered_indexer_all_gather(input, group, role)
+    if registered is not None:
+        return registered
     if not enabled():
         return _torch_all_gather(input, group=group)
     if input.dim() == 0:

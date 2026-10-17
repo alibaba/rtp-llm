@@ -56,6 +56,8 @@ class PrefillCacheDiagnostics:
         self.row["kv_cross_layer"] = (
             getattr(fmha, "_cross_layer_prefetch", None) is not None
         )
+        pipeline = getattr(fmha, "_cross_layer_prefetch", None)
+        self.row["kv_registered"] = bool(getattr(pipeline, "registered", False))
         self.row["kv_index_opt"] = os.environ.get("RTP_LLM_CP_KV_INDEX_OPT", "0") == "1"
         self.row["async_prepare_cache"] = (
             os.environ.get("RTP_LLM_ASYNC_PREPARE_CACHE", "0") == "1"
@@ -105,6 +107,9 @@ class PrefillCacheDiagnostics:
         self.active = False
         self.row["end_us"] = time.time_ns() // 1000
         self.row["failed"] = failed
+        from rtp_llm.models_py.distributed.pynccl_cp import _INDEXER_BUFFERS
+
+        self.row["indexer_registered"] = bool(_INDEXER_BUFFERS)
         self.row["indexer_capture"] = self.capture
         stats = torch.cuda.memory_stats()
         self.row["cuda_allocator"] = {
