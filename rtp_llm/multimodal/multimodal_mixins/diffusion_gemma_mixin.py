@@ -34,6 +34,9 @@ from rtp_llm.multimodal.multimodal_mixins.base_multimodal_mixin import (
     BaseVitWeights,
     VitParameters,
 )
+from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
+    MultiModalEmbeddingInterface,
+)
 from rtp_llm.multimodal.multimodal_mixins.diffusion_gemma import (
     DiffusionGemmaImageProcessor,
     DiffusionGemmaMultimodalEmbedder,
@@ -55,7 +58,7 @@ if not hasattr(tl, "wrap_triton"):
     tl.wrap_triton = wrap_triton
 
 
-class DiffusionGemmaImageEmbedding:
+class DiffusionGemmaImageEmbedding(MultiModalEmbeddingInterface):
     def __init__(self, mm_related_params: VitParameters):
         ckpt_path = mm_related_params.config["ckpt_path"]
         config_path = os.path.join(ckpt_path, "config.json")
