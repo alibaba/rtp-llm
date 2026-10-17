@@ -4,26 +4,33 @@
   "query_result": [
     {
       "case_name": "chat_basic",
-      "query": {
-        "prompt": "The capital of France is",
-        "generate_config": {
-          "max_new_tokens": 256,
-          "num_return_sequences": 0,
-          "top_p": 1.0,
-          "top_k": 1,
-          "temperature": 0.0,
-          "min_new_tokens": 0,
-          "random_seed": null,
-          "repetition_penalty": 1.0,
-          "frequency_penalty": 0.0,
-          "presence_penalty": 0.0,
-          "stop_words_list": []
-        },
-        "enable_thinking": false
-      },
       "result": {
-        "response": "",
-        "goldens": []
+        "id": "chat-",
+        "object": "chat.completion",
+        "created": 0,
+        "model": "",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": ""
+            },
+            "finish_reason": "stop"
+          }
+        ]
+      },
+      "endpoint": "/v1/chat/completions",
+      "query": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "The capital of France is"
+          }
+        ],
+        "max_tokens": 256,
+        "temperature": 0.0,
+        "top_p": 0.01
       }
     }
   ]
