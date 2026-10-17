@@ -179,7 +179,7 @@ class DiffusionGemmaAttnOp:
             )
 
             self.g_workspace_buffer = get_py_flashinfer_workspace_buffer()
-            from flashinfer import (
+            from flashinfer.prefill import (
                 BatchPrefillWithPagedKVCacheWrapper,
                 BatchPrefillWithRaggedKVCacheWrapper,
             )
@@ -366,9 +366,6 @@ class DiffusionGemmaAttnOp:
         vd = v
         new_out, new_lse = self.ragged_wrapper.run(
             qd, kd, vd,
-            causal=causal,
-            window_left=self._window_left(),
-            sm_scale=self.sm_scale,
             return_lse=True,
         )
         if write_kv and kv_cache is not None:
@@ -377,9 +374,6 @@ class DiffusionGemmaAttnOp:
             paged = self._reshape_paged(kv_cache.kv_cache_base)
             prefix_out, prefix_lse = self.paged_wrapper.run(
                 qd, paged,
-                causal=False,
-                window_left=self._window_left(),
-                sm_scale=self.sm_scale,
                 return_lse=True,
             )
             self.merge_state_in_place(new_out, new_lse, prefix_out, prefix_lse)
@@ -402,6 +396,7 @@ class DiffusionGemmaAttnOp:
             self.head_dim,
             causal=causal,
             window_left=self._window_left(),
+            sm_scale=self.sm_scale,
             q_data_type=self.dtype,
             kv_data_type=self.kv_dtype,
             o_data_type=self.dtype,
