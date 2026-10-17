@@ -215,8 +215,9 @@ void gatherMultimodalInputsForContextBatch(const GenerateStreamPtr&    stream,
                             mm_features.size(),
                             stream->streamId());
 
-    auto*     mm_locs_data = mm_locs.data_ptr<int32_t>();
-    const int reuse_length = stream->reuseLength();
+    auto*         mm_locs_data = mm_locs.data_ptr<int32_t>();
+    const int64_t window_start = stream->reuseLength();
+    const int64_t window_end   = window_start + stream->contextLength();
     if (mm_locs.numel() > 1) {
         RTP_LLM_CHECK_WITH_INFO(std::is_sorted(mm_locs_data, mm_locs_data + mm_locs.numel()),
                                 "mm_locs must be sorted in ascending order for reuse handling");
@@ -226,16 +227,16 @@ void gatherMultimodalInputsForContextBatch(const GenerateStreamPtr&    stream,
         const int64_t feature_len = mm_feature.size(0);
         const int64_t feature_loc = mm_locs_data[i];
         const int64_t feature_end = feature_loc + feature_len;
-        if (reuse_length >= feature_end) {
+        if (feature_end <= window_start || feature_loc >= window_end) {
             continue;
         }
 
-        // ViT still runs on and caches the complete image. Only the rows already
-        // represented by the reused KV prefix are omitted from this model input.
-        // This gatherer owns prefix slicing; downstream injectors receive sliced
-        // features with non-negative local locations only.
-        const int64_t token_offset    = std::max<int64_t>(reuse_length - feature_loc, 0);
-        auto          current_feature = mm_feature.slice(0, token_offset, feature_len).contiguous();
+        // ViT retains the complete image. Publish only the intersection with
+        // this execution window, including when a scheduler grant ends inside
+        // an image. Future image rows belong to a later prefill chunk.
+        const int64_t token_offset    = std::max<int64_t>(window_start - feature_loc, 0);
+        const int64_t token_end       = std::min<int64_t>(window_end - feature_loc, feature_len);
+        auto          current_feature = mm_feature.slice(0, token_offset, token_end).contiguous();
         if (!current_feature.is_cuda()) {
             host_holder.hold_host(current_feature);
             gathered_mm_features.emplace_back(current_feature.to(torch::kCUDA, /*non_blocking=*/true));
@@ -244,12 +245,12 @@ void gatherMultimodalInputsForContextBatch(const GenerateStreamPtr&    stream,
         }
 
         ctx.mm_features_locs[ctx.mm_feature_index] =
-            ctx.token_idx + static_cast<int>(std::max<int64_t>(feature_loc - reuse_length, 0));
+            ctx.token_idx + static_cast<int>(std::max<int64_t>(feature_loc - window_start, 0));
         ctx.mm_feature_index++;
 
         if (!mm_extra_input.empty()) {
             auto current_extra_input =
-                sliceMultimodalExtraInput(mm_extra_input[i], mm_feature, token_offset, feature_len);
+                sliceMultimodalExtraInput(mm_extra_input[i], mm_feature, token_offset, token_end);
             if (!current_extra_input.is_cuda()) {
                 host_holder.hold_host(current_extra_input);
                 gathered_mm_extra_input.emplace_back(current_extra_input.to(torch::kCUDA, /*non_blocking=*/true));
@@ -259,6 +260,9 @@ void gatherMultimodalInputsForContextBatch(const GenerateStreamPtr&    stream,
         }
     }
     auto text_token_mask = stream->textTokensMask();
+    RTP_LLM_CHECK_WITH_INFO(text_token_mask.size() == static_cast<size_t>(stream->contextLength()),
+                            "text mask must match the context window for stream %ld",
+                            stream->streamId());
     memcpy(ctx.merged_text_mask + ctx.token_idx, text_token_mask.data(), text_token_mask.size() * sizeof(int));
 }
 

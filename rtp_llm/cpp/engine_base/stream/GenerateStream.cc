@@ -699,10 +699,18 @@ vector<int> GenerateStream::textTokensMask() const {
     if (!generate_input_->text_tokens_mask) {
         return {};
     }
-    auto& mask  = generate_input_->text_tokens_mask.value();
-    auto* data  = mask.data_ptr<int>();
-    int   start = reuseLength() > 0 ? reuseLength() : 0;
-    return vector<int>(data + start, data + mask.numel());
+    const auto&   mask  = generate_input_->text_tokens_mask.value();
+    const auto*   data  = mask.data_ptr<int>();
+    const int64_t start = std::max(reuseLength(), 0);
+    const int64_t end   = isContextStream() ? start + contextLength() : std::max(start, mask.numel());
+    RTP_LLM_CHECK_WITH_INFO(end >= start, "invalid text mask window [%ld, %ld)", start, end);
+    // Recompute may include generated text beyond the original prompt mask.
+    // Those rows are text; never read past the stored prompt mask.
+    vector<int> result(end - start, 1);
+    if (start < mask.numel()) {
+        std::copy(data + start, data + std::min(end, mask.numel()), result.begin());
+    }
+    return result;
 }
 
 torch::Tensor GenerateStream::generateContextPositionIds() {
