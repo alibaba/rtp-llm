@@ -22,8 +22,18 @@
 
 namespace rtp_llm {
 namespace {
+int32_t mtpTailTextMask(const GenerateStreamPtr& stream) {
+    const auto& mask     = stream->generateInput()->text_tokens_mask;
+    const int   boundary = stream->prefixLength() + stream->contextLength();
+    return stream->isMiddleChunk() && mask && boundary < mask->numel() ? mask->data_ptr<int32_t>()[boundary] : 1;
+}
+
 torch::Tensor
-shiftedMtpTokenField(const torch::Tensor& field, const torch::Tensor& input_lengths_cpu, int32_t append_value) {
+shiftedMtpTokenField(const torch::Tensor& field,
+                     const torch::Tensor& input_lengths_cpu,
+                     int32_t              append_value,
+                     TensorHolder&        host_holder,
+                     const StreamGroups*  stream_groups = nullptr) {
     if (!field.defined() || field.numel() == 0) {
         return field;
     }
@@ -48,6 +58,12 @@ shiftedMtpTokenField(const torch::Tensor& field, const torch::Tensor& input_leng
                             total_tokens,
                             length_sum);
 
+    std::vector<int32_t> tail_masks;
+    if (stream_groups) {
+        for (const auto& stream : stream_groups->allStreams()) {
+            tail_masks.insert(tail_masks.end(), stream->nextBatchSize(), mtpTailTextMask(stream));
+        }
+    }
     auto output =
         torch::empty({total_tokens}, torch::TensorOptions(torch::kInt32).device(torch::kCPU).pinned_memory(true));
     const auto* src    = source.data_ptr<int32_t>();
@@ -58,37 +74,44 @@ shiftedMtpTokenField(const torch::Tensor& field, const torch::Tensor& input_leng
         if (length > 1) {
             std::memcpy(dst + offset, src + offset + 1, static_cast<size_t>(length - 1) * sizeof(int32_t));
         }
-        dst[offset + length - 1] = append_value;
+        dst[offset + length - 1] = stream_groups ? tail_masks.at(request) : append_value;
         offset += length;
     }
+    host_holder.hold_host(output);
     return field.is_cuda() ? output.to(field.device(), /*non_blocking=*/true) : output;
 }
 
-void shiftMtpMultimodalLocations(GptModelInputs& model_input, const torch::Tensor& input_lengths_cpu) {
+void shiftMtpMultimodalLocations(GptModelInputs&      model_input,
+                                 const torch::Tensor& input_lengths_cpu,
+                                 const StreamGroups&  stream_groups,
+                                 TensorHolder&        host_holder) {
     const bool has_features = model_input.multimodal_features.has_value() && !model_input.multimodal_features->empty();
     const bool has_locs     = model_input.mm_features_locs.defined() && model_input.mm_features_locs.numel() > 0;
-    if (!has_features && !has_locs) {
-        return;
-    }
-    RTP_LLM_CHECK_WITH_INFO(has_features && has_locs,
+    RTP_LLM_CHECK_WITH_INFO(has_features == has_locs,
                             "MTP multimodal features and mm_features_locs must be provided together");
     RTP_LLM_CHECK_WITH_INFO(input_lengths_cpu.device().is_cpu() && input_lengths_cpu.scalar_type() == torch::kInt32
                                 && input_lengths_cpu.dim() == 1,
                             "MTP input_lengths must be a CPU 1-D int32 tensor");
 
-    auto locs =
-        model_input.mm_features_locs.is_cuda() ? model_input.mm_features_locs.cpu() : model_input.mm_features_locs;
+    auto locs = has_locs ? model_input.mm_features_locs.cpu() : torch::empty({0}, torch::kInt32);
     locs = locs.contiguous();
     RTP_LLM_CHECK_WITH_INFO(locs.scalar_type() == torch::kInt32 && locs.dim() == 1,
                             "MTP mm_features_locs must be a 1-D int32 tensor");
-    const auto& features = model_input.multimodal_features.value();
+    const auto features = model_input.multimodal_features.value_or(std::vector<torch::Tensor>{});
     RTP_LLM_CHECK_WITH_INFO(locs.numel() == static_cast<int64_t>(features.size()),
                             "MTP multimodal feature/location count mismatch: features=%zu locs=%ld",
                             features.size(),
                             locs.numel());
-    const bool  has_extra_input = model_input.mm_extra_input.has_value() && !model_input.mm_extra_input->empty();
-    const auto* extra_input     = has_extra_input ? &model_input.mm_extra_input.value() : nullptr;
-    RTP_LLM_CHECK_WITH_INFO(!has_extra_input || extra_input->size() == features.size(),
+    std::vector<GenerateStreamPtr> row_streams;
+    bool has_extra_input = model_input.mm_extra_input.has_value() && !model_input.mm_extra_input->empty();
+    for (const auto& stream : stream_groups.allStreams()) {
+        row_streams.insert(row_streams.end(), stream->nextBatchSize(), stream);
+        has_extra_input |= mtpTailTextMask(stream) == 0 && stream->hasMultimodalExtraInput();
+    }
+    RTP_LLM_CHECK_WITH_INFO(row_streams.size() == static_cast<size_t>(input_lengths_cpu.numel()),
+                            "MTP stream rows must match input lengths");
+    const auto* extra_input = model_input.mm_extra_input ? &model_input.mm_extra_input.value() : nullptr;
+    RTP_LLM_CHECK_WITH_INFO(!has_extra_input || features.empty() || (extra_input && extra_input->size() == features.size()),
                             "MTP mm_extra_input count mismatch: extra_input=%zu features=%zu",
                             extra_input ? extra_input->size() : 0,
                             features.size());
@@ -106,10 +129,11 @@ void shiftMtpMultimodalLocations(GptModelInputs& model_input, const torch::Tenso
     std::vector<torch::Tensor> shifted_features;
     std::vector<torch::Tensor> shifted_extra_input;
     std::vector<int32_t>       shifted_locs;
+    std::vector<int64_t>       shifted_spans;
     shifted_features.reserve(features.size());
     shifted_locs.reserve(features.size());
     if (has_extra_input) {
-        shifted_extra_input.reserve(extra_input->size());
+        shifted_extra_input.reserve(features.size());
     }
 
     const auto* src_locs = locs.data_ptr<int32_t>();
@@ -147,8 +171,7 @@ void shiftMtpMultimodalLocations(GptModelInputs& model_input, const torch::Tenso
                                 request_starts[owner],
                                 request_starts[owner + 1]);
 
-        // MTP removes the first token of every request and writes the sampled
-        // token into that request's last slot. A feature that starts at the
+        // MTP removes the first token of every request. A feature that starts at the
         // request boundary therefore loses its first row as well; all other
         // features simply move left by one packed position. The request owner
         // is used only to detect this boundary and must not be subtracted from
@@ -162,10 +185,51 @@ void shiftMtpMultimodalLocations(GptModelInputs& model_input, const torch::Tenso
 
         shifted_features.emplace_back(feature.slice(0, feature_offset, feature_len).contiguous());
         shifted_locs.emplace_back(static_cast<int32_t>(starts_at_request ? feature_start : feature_start - 1));
+        const int64_t start = row_streams[owner]->prefixLength() + feature_start - request_starts[owner] + feature_offset;
+        shifted_spans.insert(shifted_spans.end(), {owner, start, start + shifted_len});
         if (has_extra_input) {
             shifted_extra_input.emplace_back(
                 sliceMultimodalExtraInput((*extra_input)[feature_idx], feature, feature_offset, feature_len));
         }
+    }
+
+    // The next prompt token can be inside an image, including one not present
+    // in the target window. Insert its feature/deepstack row in packed order.
+    for (size_t row = 0; row < row_streams.size(); ++row) {
+        const auto& stream = row_streams[row];
+        if (mtpTailTextMask(stream) != 0) {
+            continue;
+        }
+        const int64_t boundary     = stream->prefixLength() + stream->contextLength();
+        const auto    raw_features = stream->multimodalFeatures();
+        const auto    raw_extra    = stream->multimodalExtraInput();
+        const auto    raw_locs     = stream->multimodalLocations();
+        RTP_LLM_CHECK_WITH_INFO(raw_locs.defined() && raw_locs.numel() == static_cast<int64_t>(raw_features.size())
+                                    && (!has_extra_input || raw_extra.size() == raw_features.size()),
+                                "MTP boundary image metadata is incomplete");
+        bool found = false;
+        for (size_t i = 0; i < raw_features.size(); ++i) {
+            const int64_t offset = boundary - raw_locs.data_ptr<int32_t>()[i];
+            if (offset < 0 || offset >= raw_features[i].size(0)) {
+                continue;
+            }
+            const int32_t loc = request_starts[row + 1] - 1;
+            const auto index = std::lower_bound(shifted_locs.begin(), shifted_locs.end(), loc) - shifted_locs.begin();
+            auto feature = raw_features[i].narrow(0, offset, 1).contiguous();
+            host_holder.hold_host(feature);
+            shifted_features.insert(shifted_features.begin() + index, feature.to(torch::kCUDA, /*non_blocking=*/true));
+            shifted_locs.insert(shifted_locs.begin() + index, loc);
+            shifted_spans.insert(shifted_spans.begin() + index * 3, {static_cast<int64_t>(row), boundary, boundary + 1});
+            if (has_extra_input) {
+                auto extra = sliceMultimodalExtraInput(raw_extra[i], raw_features[i], offset, offset + 1);
+                host_holder.hold_host(extra);
+                shifted_extra_input.insert(shifted_extra_input.begin() + index,
+                                           extra.to(torch::kCUDA, /*non_blocking=*/true));
+            }
+            found = true;
+            break;
+        }
+        RTP_LLM_CHECK_WITH_INFO(found, "MTP image boundary at %ld has no feature row", boundary);
     }
 
     auto shifted_locs_cpu = torch::empty({static_cast<int64_t>(shifted_locs.size())},
@@ -177,8 +241,13 @@ void shiftMtpMultimodalLocations(GptModelInputs& model_input, const torch::Tenso
     if (has_extra_input) {
         model_input.mm_extra_input = std::move(shifted_extra_input);
     }
+    auto spans_cpu = torch::tensor(shifted_spans, torch::kInt64).reshape({-1, 3}).pin_memory();
+    host_holder.hold_host(spans_cpu);
+    host_holder.hold_host(shifted_locs_cpu);
+    model_input.mm_features_spans = model_input.mm_features_spans.defined() && model_input.mm_features_spans.is_cuda() ?
+        spans_cpu.to(model_input.mm_features_spans.device(), /*non_blocking=*/true) : spans_cpu;
     model_input.mm_features_locs =
-        model_input.mm_features_locs.is_cuda() ?
+        model_input.mm_features_locs.defined() && model_input.mm_features_locs.is_cuda() ?
             shifted_locs_cpu.to(model_input.mm_features_locs.device(), /*non_blocking=*/true) :
             shifted_locs_cpu;
 }
@@ -1496,8 +1565,10 @@ void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(const StreamGroup
     model_input.last_hidden_states = model_output.all_hidden_states;
     const auto& new_all_token_ids  = sampler_output.token_ids;
 
+    const auto all_streams = stream_groups.allStreams();
     const bool has_multimodal =
-        model_input.multimodal_features.has_value() && !model_input.multimodal_features->empty();
+        (model_input.multimodal_features.has_value() && !model_input.multimodal_features->empty())
+        || std::any_of(all_streams.begin(), all_streams.end(), [](const auto& s) { return mtpTailTextMask(s) == 0; });
     // The default one-dimensional position policy reuses the final input
     // position for the sampled token. Other styles keep the stream policy below.
     const bool shift_default_positions =
@@ -1505,7 +1576,7 @@ void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(const StreamGroup
         && model_input_gatherer_config_.mm_position_ids_style == PositionIdsStyle::DEFAULT
         && model_input_gatherer_config_.position_id_len_factor == 1;
 #if USING_CUDA
-    if (!has_multimodal
+    if (!has_multimodal && !model_input.combo_tokens_type_ids.defined()
         && (!model_input.combo_position_ids.defined() || shift_default_positions || preserve_prefill_positions_)) {
         const int64_t token_stride = new_all_token_ids.size(1);
         RTP_LLM_CHECK_WITH_INFO(token_stride > 0 && token_stride <= std::numeric_limits<int32_t>::max(),
@@ -1606,18 +1677,20 @@ void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(const StreamGroup
         model_input.combo_tokens.is_cuda() ? model_input.combo_tokens.cpu().pin_memory() : model_input.combo_tokens;
 
     if (has_multimodal) {
-        model_input.text_tokens_mask = shiftedMtpTokenField(model_input.text_tokens_mask, input_lengths_cpu, 1);
-        model_input.combo_tokens_type_ids =
-            shiftedMtpTokenField(model_input.combo_tokens_type_ids, input_lengths_cpu, 0);
-        shiftMtpMultimodalLocations(model_input, input_lengths_cpu);
+        RTP_LLM_CHECK_WITH_INFO(model_input.text_tokens_mask.defined(), "MTP multimodal prefill requires a text mask");
+        model_input.text_tokens_mask =
+            shiftedMtpTokenField(model_input.text_tokens_mask, input_lengths_cpu, 1, host_holder, &stream_groups);
+        shiftMtpMultimodalLocations(model_input, input_lengths_cpu, stream_groups, host_holder);
     }
+    model_input.combo_tokens_type_ids =
+        shiftedMtpTokenField(model_input.combo_tokens_type_ids, input_lengths_cpu, 0, host_holder);
     const int* sampled_tokens = new_all_token_ids_cpu.data_ptr<int>();
     int*       input_lengths  = input_lengths_cpu.data_ptr<int>();
     int*       combo_tokens   = combo_tokens_cpu.data_ptr<int>();
-    int* combo_position_ids =
-        model_input.combo_position_ids.defined() ? model_input.combo_position_ids.data_ptr<int>() : nullptr;
+    const bool shift_positions = model_input.combo_position_ids.defined() && !preserve_prefill_positions_;
+    auto positions_cpu       = shift_positions ? model_input.combo_position_ids.cpu().pin_memory() : torch::Tensor();
+    int* combo_position_ids   = shift_positions ? positions_cpu.data_ptr<int>() : nullptr;
     const size_t position_id_len_factor = model_input_gatherer_config_.position_id_len_factor;
-    auto         all_streams            = stream_groups.allStreams();
     const size_t stream_row_count = std::accumulate(
         all_streams.begin(), all_streams.end(), size_t{0}, [](size_t count, const GenerateStreamPtr& stream) {
             return count + static_cast<size_t>(stream->nextBatchSize());
@@ -1664,6 +1737,11 @@ void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(const StreamGroup
 
     model_input.input_lengths = toCudaInt32(input_lengths_cpu, host_holder);
     model_input.combo_tokens  = toCudaInt32(combo_tokens_cpu, host_holder);
+    if (shift_positions) {
+        host_holder.hold_host(positions_cpu);
+        model_input.combo_position_ids = model_input.combo_position_ids.is_cuda() ?
+            positions_cpu.to(model_input.combo_position_ids.device(), /*non_blocking=*/true) : positions_cpu;
+    }
 }
 
 torch::Tensor MtpBatchStreamProcessor::compactAcceptedPositionIds(const torch::Tensor&    combo_position_ids,

@@ -158,7 +158,7 @@ int StreamCacheResource::estimatePeakNeedBlocks(
                                                                    common_seq_len,
                                                                    remaining_tokens,
                                                                    reserve_step,
-                                                                   reuseCache(),
+                                                                   retainChunkCheckpoints(),
                                                                    target_batch_size);
 }
 
@@ -196,7 +196,7 @@ absl::Status StreamCacheResource::initKVBlock() {
         malloc_info.reuse_cache         = false;
         malloc_info.enable_cache_lookup = false;
     } else {
-        malloc_info.reuse_cache         = reuseCache();
+        malloc_info.reuse_cache         = retainChunkCheckpoints();
         malloc_info.enable_cache_lookup = enableCacheLookup();
     }
     malloc_info.enable_remove_skipped_blocks = false;
@@ -395,7 +395,7 @@ absl::Status StreamCacheResource::incrKVBlock(int seq_len_override) {
     malloc_info.complete_token_ids           = stream_->completeTokenIdsPtr();
     malloc_info.request_id                   = stream_->streamId();
     malloc_info.verbose                      = malloc_failed_times_ >= 10 ? malloc_failed_times_ % 100 == 0 : true;
-    malloc_info.reuse_cache                  = reuseCache();
+    malloc_info.reuse_cache                  = retainChunkCheckpoints();
     malloc_info.enable_cache_lookup          = enableCacheLookup();
     malloc_info.enable_remove_skipped_blocks = true;
     malloc_info.incr_seq_len_override        = seq_len_override;
@@ -568,6 +568,11 @@ bool StreamCacheResource::reuseCache() const {
     // Per-request field flows frontend → FlexLB → engine via protobuf.
     return !stream_->generateConfig()->isPrefillOnly() && resource_context_.reuse_cache
            && (resource_context_.ignore_request_cache_switches || stream_->reuseCache());
+}
+
+bool StreamCacheResource::retainChunkCheckpoints() const {
+    // Chunk continuation needs request-local checkpoints even when prefix lookup and publication are disabled.
+    return reuseCache() || stream_->chunkedPrefillEnabled();
 }
 
 bool StreamCacheResource::enableMemoryCache() const {

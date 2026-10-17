@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <exception>
 #include <functional>
+#include <future>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -1413,6 +1414,141 @@ TEST_F(MtpExecutorTest, LinearReplayAsyncDispatchPreservesAcceptedWindowAndPageT
         EXPECT_TRUE(torch::equal(state.next_kv_cache_kernel_block_id_gpu.cpu(), table.cpu()));
     }
 }
+
+#if USING_CUDA
+TEST_F(MtpExecutorTest, LinearReplayTargetAnchorReadyBeforeAttentionPrepareCompletes) {
+    auto  components = createMtpExecutorComponents(MtpExecutorTestConfig{});
+    auto* executor   = components.executor.get();
+    if (!executor->useAsyncPrepare() || (!executor->useStreamAsync() && !executor->useAsyncDeviceState())) {
+        GTEST_SKIP() << "Run with the mtp_linear_replay_async_test environment";
+    }
+    const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    auto       stream =
+        createContextStream(components.model_config, components.runtime_config, components.resource_context, {0, 1});
+    GenerateStream::MtpAsyncDeviceState state;
+    state.accept_tokens_gpu = torch::tensor({11, 23, 37, 41, 0}, cuda_i32).reshape({1, 5});
+    state.accept_len_gpu    = torch::tensor({3}, cuda_i32);
+    stream->setMtpAsyncDeviceState(state);
+
+    GptModelInputs input;
+    input.combo_tokens     = torch::ones({1}, cuda_i32);
+    input.input_lengths    = torch::ones({1}, cuda_i32);
+    input.sequence_lengths = torch::full({1}, 3, cuda_i32);
+    auto release_prepare   = std::make_shared<std::promise<void>>();
+    auto prepare_gate      = release_prepare->get_future().share();
+    auto prepare_entered   = std::make_shared<std::promise<void>>();
+    auto entered           = prepare_entered->get_future();
+    components.fake_target_model->setInputObserver([prepare_entered, prepare_gate](const GptModelInputs&) {
+        prepare_entered->set_value();
+        prepare_gate.wait();
+    });
+    executor->setTargetModel(std::move(components.fake_target_model));
+    // Always unblock the worker, including when an assertion aborts this test.
+    auto release_guard = std::shared_ptr<void>(nullptr, [release_prepare](void*) { release_prepare->set_value(); });
+    auto future        = executor->launchTargetVerifyPrepareAsync(input, 1, {stream});
+    ASSERT_TRUE(future.valid());
+    ASSERT_EQ(future.wait_for(std::chrono::seconds(10)), std::future_status::ready);
+    ASSERT_EQ(entered.wait_for(std::chrono::seconds(10)), std::future_status::ready);
+    auto [tokens, ready] = future.get();
+    ASSERT_TRUE(tokens.defined());
+    ASSERT_NE(ready, nullptr);
+    ready->block(cuda_graph::graphGetCurrentStream());
+    tokens.record_stream(cuda_graph::graphGetCurrentStream());
+    auto actual = tokens.clone();
+    // Sampler-owned accepted lengths may be reused only after the anchor read.
+    state.accept_len_gpu.fill_(1);
+    EXPECT_EQ(toVec<int32_t>(actual), (std::vector<int32_t>{37}));
+    release_guard.reset();
+    executor->target_verify_prepare_runner_.sync(cuda_graph::graphGetCurrentStream());
+}
+
+TEST_F(MtpExecutorTest, LinearReplayTargetAnchorMissingDeviceStateUsesHostFallback) {
+    MtpExecutorTestConfig config;
+    config.gen_num_per_cycle = 2;
+    auto  components         = createMtpExecutorComponents(config);
+    auto* executor           = components.executor.get();
+    if (!executor->useAsyncPrepare() || (!executor->useStreamAsync() && !executor->useAsyncDeviceState())) {
+        GTEST_SKIP() << "Run with the mtp_linear_replay_async_test environment";
+    }
+    const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    auto       stream =
+        createContextStream(components.model_config, components.runtime_config, components.resource_context, {0, 1});
+    auto sp_output    = std::make_shared<SpeculativeExecutorStreamOutput>();
+    sp_output->tokens = torch::tensor({37, 1}, torch::kInt32).reshape({1, 2});
+    stream->setSPOutputBuffer(sp_output);
+    GptModelInputs input;
+    input.combo_tokens      = torch::ones({1}, cuda_i32);
+    input.input_lengths     = torch::ones({1}, cuda_i32);
+    input.sequence_lengths  = torch::full({1}, 3, cuda_i32);
+    input.lm_output_indexes = torch::zeros({1}, cuda_i32);
+    executor->setTargetModel(std::move(components.fake_target_model));
+    auto missing = executor->launchTargetVerifyPrepareAsync(input, 1, {stream});
+    ASSERT_TRUE(missing.valid());
+    ASSERT_EQ(missing.wait_for(std::chrono::seconds(10)), std::future_status::ready);
+    EXPECT_FALSE(missing.get().first.defined());
+    executor->target_verify_prepare_runner_.sync(cuda_graph::graphGetCurrentStream());
+
+    auto output = createRandomGptModelOutputs(1, 4, 2);
+    components.fake_draft_model->setSkipInputCheck(true);
+    components.fake_draft_model->setOutputs({output});
+    spec::FastTopKSamplerOutput sampled;
+    sampled.token_ids = torch::tensor({2}, cuda_i32).reshape({1, 1});
+    sampled.all_probs = torch::ones({1, 4}, cuda_i32.dtype(torch::kFloat32));
+    components.fake_fast_topk_sampler->setInputs({output.logits});
+    components.fake_fast_topk_sampler->setOutputs({sampled});
+    executor->setDraftModel(std::move(components.fake_draft_model));
+    executor->setFastTopKSampler(std::move(components.fake_fast_topk_sampler));
+    auto                       prepared = executor->launchTargetVerifyPrepareAsync(input, 1, {stream});
+    std::vector<torch::Tensor> probabilities;
+    torch::Tensor              tokens;
+    int64_t                    forward_us = 0;
+    executor->draftModelDecode(input, StreamGroups({stream}), probabilities, tokens, forward_us, std::move(prepared));
+    EXPECT_EQ(toVec<int32_t>(input.combo_tokens), (std::vector<int32_t>{37, 1, 2}));
+    executor->target_verify_prepare_runner_.sync(cuda_graph::graphGetCurrentStream());
+}
+
+TEST_F(MtpExecutorTest, LinearReplayTargetAnchorExceptionReachesFutureAndRunner) {
+    auto  components = createMtpExecutorComponents(MtpExecutorTestConfig{});
+    auto* executor   = components.executor.get();
+    if (!executor->useAsyncPrepare() || (!executor->useStreamAsync() && !executor->useAsyncDeviceState())) {
+        GTEST_SKIP() << "Run with the mtp_linear_replay_async_test environment";
+    }
+    const auto                   cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    std::list<GenerateStreamPtr> streams;
+    // Different row widths fail cat's host shape validation, before any unsafe GPU read.
+    for (int width : {4, 5}) {
+        auto stream = createContextStream(
+            components.model_config, components.runtime_config, components.resource_context, {0, 1});
+        GenerateStream::MtpAsyncDeviceState state;
+        state.accept_tokens_gpu = torch::zeros({1, width}, cuda_i32);
+        state.accept_len_gpu    = torch::ones({1}, cuda_i32);
+        stream->setMtpAsyncDeviceState(std::move(state));
+        streams.push_back(std::move(stream));
+    }
+    GptModelInputs input;
+    input.combo_tokens     = torch::ones({2}, cuda_i32);
+    input.input_lengths    = torch::ones({2}, cuda_i32);
+    input.sequence_lengths = torch::full({2}, 3, cuda_i32);
+    executor->setTargetModel(std::move(components.fake_target_model));
+    auto future = executor->launchTargetVerifyPrepareAsync(input, 2, streams);
+    ASSERT_TRUE(future.valid());
+    ASSERT_EQ(future.wait_for(std::chrono::seconds(10)), std::future_status::ready);
+    std::string original_error;
+    try {
+        (void)future.get();
+        FAIL() << "Mismatched anchor rows must fail";
+    } catch (const c10::Error& error) {
+        original_error = error.what_without_backtrace();
+        EXPECT_NE(original_error.find("Sizes of tensors"), std::string::npos);
+    }
+    try {
+        executor->target_verify_prepare_runner_.sync(cuda_graph::graphGetCurrentStream());
+        FAIL() << "The runner must retain the original anchor failure";
+    } catch (const c10::Error& error) {
+        EXPECT_EQ(original_error, error.what_without_backtrace());
+    }
+}
+#endif
 
 class MtpCacheStrideTest: public MtpExecutorTest, public ::testing::WithParamInterface<int> {};
 

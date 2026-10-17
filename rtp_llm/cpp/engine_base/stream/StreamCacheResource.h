@@ -121,6 +121,7 @@ public:
     }
 
     bool reuseCache() const;
+    bool retainChunkCheckpoints() const;
     bool enableMemoryCache() const;
     bool enableDeviceCache() const;
     bool enableDiskCache() const;
