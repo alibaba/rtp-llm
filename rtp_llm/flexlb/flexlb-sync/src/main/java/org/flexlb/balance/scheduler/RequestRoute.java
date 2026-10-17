@@ -123,6 +123,7 @@ public final class RequestRoute implements GroupPlanner.Input, AutoCloseable {
         return Response.buildSuccessResponse(routeResponse, enqueuedByMaster);
     }
     public ServerStatus prefill() { return prefill.serverStatus(); }
+    long prefillDpRank() { return prefill.dpRank(); }
     public ServerStatus decode() { return decode == null ? null : decode.serverStatus(); }
     public PrefillEndpoint prefillEp() { return (PrefillEndpoint) prefill.endpoint(); }
     public DecodeEndpoint decodeEp() { return decode == null ? null : (DecodeEndpoint) decode.endpoint(); }

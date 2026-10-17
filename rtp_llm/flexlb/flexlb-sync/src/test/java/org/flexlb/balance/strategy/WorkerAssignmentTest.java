@@ -82,22 +82,28 @@ class WorkerAssignmentTest {
         metadata.setHttpPort(endpoint.getHttpPort());
         metadata.setRequestId(42L);
         metadata.setGroup("original");
+        metadata.setDpRank(3L);
         var debug = new org.flexlb.dao.loadbalance.DebugInfo();
         debug.setHitCacheLen(17L);
         metadata.setDebugInfo(debug);
         try (var assignment = WorkerAssignment.stateless(endpoint.tryPinGeneration(), metadata)) {
             metadata.setRequestId(99L);
             metadata.setGroup("changed");
+            metadata.setDpRank(9L);
             debug.setHitCacheLen(999L);
             var exported = assignment.serverStatus();
             exported.setGroup("response mutation");
+            exported.setDpRank(7L);
             exported.getDebugInfo().setHitCacheLen(1L);
             assertEquals(42L, assignment.requestId());
             assertEquals("original", assignment.group());
+            assertEquals(3L, assignment.dpRank());
             assertEquals(17L, assignment.hitCache());
             assertEquals("original", assignment.serverStatus().getGroup());
+            assertEquals(3L, assignment.serverStatus().getDpRank());
             assignment.close();
             assertEquals(42L, assignment.requestId());
+            assertEquals(3L, assignment.dpRank());
             assertEquals(17L, assignment.hitCache());
         } finally {
             endpoint.close();

@@ -141,6 +141,7 @@ public final class WorkerAssignment implements AutoCloseable {
     public long requestId() { return serverStatus.getRequestId(); }
     public RoleType role() { return serverStatus.getRole(); }
     public String group() { return serverStatus.getGroup(); }
+    public long dpRank() { return serverStatus.getDpRank(); }
     public long hitCache() {
         return serverStatus.getDebugInfo() == null ? 0L : serverStatus.getDebugInfo().getHitCacheLen();
     }
