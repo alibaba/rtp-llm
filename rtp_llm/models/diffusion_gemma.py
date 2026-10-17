@@ -129,7 +129,7 @@ class DiffusionGemma(BaseModel):
         config.n_shared_experts = 1
         config.moe_style = 2  # shared expert without sigmoid gate
         config.has_moe_norm = True  # router renormalizes top-k weights
-        config.moe_layers_index = list(range(config.num_layers))
+        config.moe_layer_index = list(range(config.num_layers))
         config.gen_num_per_cycle = int(config_json.get("canvas_length", 256))
 
         # DiffusionGemma python-only fields.
