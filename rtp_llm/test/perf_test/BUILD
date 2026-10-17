@@ -1,3 +1,5 @@
+load("//rtp_llm/test/perf_test:deepseek_v41_sm90_tests.bzl", "deepseek_v41_sm90_role_test")
+
 package(default_visibility = ["//visibility:public"])
 
 # Manual adapter: external engines keep their official benchmark and lifecycle.
@@ -999,4 +1001,24 @@ test_suite(
         ":v4_flash_dp4_decode_64k_mtp_grid_perf",
     ],
     tags = ["manual"],
+)
+
+exports_files(["deepseek_v41_sm90_role_test.py"])
+
+deepseek_v41_sm90_role_test(
+    name = "deepseek_v41_flash_prefill_cp8_ep8_sm90_perf",
+    role = "prefill",
+    mode = "perf",
+)
+
+deepseek_v41_sm90_role_test(
+    name = "deepseek_v41_flash_decode_dp8_ep8_sm90_perf",
+    role = "decode",
+    mode = "perf",
+)
+
+py_test(
+    name = "deepseek_v41_sm90_role_test_test",
+    srcs = ["deepseek_v41_sm90_role_test_test.py", "deepseek_v41_sm90_role_test.py"],
+    main = "deepseek_v41_sm90_role_test_test.py",
 )

@@ -1,3 +1,5 @@
+load("//rtp_llm/test/perf_test:deepseek_v41_sm90_tests.bzl", "deepseek_v41_sm90_role_test")
+
 load(":defs.bzl", "custom_smoke_test", "smoke_test")
 package(default_visibility = ["//visibility:public"])
 
@@ -282,4 +284,16 @@ custom_smoke_test(
     gpu_type = ["SM100_ARM_CU13"],
     tags = ["dsv41_cuda13", "model_contract", "dspark_contract"],
     data = ["//rtp_llm:sdk", "deepseek_v41_contract_test.py"],
+)
+
+deepseek_v41_sm90_role_test(
+    name = "deepseek_v41_flash_prefill_cp8_ep8_sm90_smoke",
+    role = "prefill",
+    mode = "smoke",
+)
+
+deepseek_v41_sm90_role_test(
+    name = "deepseek_v41_flash_decode_dp8_ep8_sm90_smoke",
+    role = "decode",
+    mode = "smoke",
 )
