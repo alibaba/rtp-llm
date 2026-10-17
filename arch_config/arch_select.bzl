@@ -29,6 +29,9 @@ _CUDA13_ARM_DEFERRED = [
     "nvidia-cutlass-dsl",
     "xfastertransformer-devel",
     "xfastertransformer-devel-icx",
+    # consumers spell the name with underscores; pip normalizes both ways
+    "xfastertransformer_devel",
+    "xfastertransformer_devel_icx",
 ]
 
 # xgrammar's wheel metadata pulls apache-tvm-ffi (and triton on x86), which only
