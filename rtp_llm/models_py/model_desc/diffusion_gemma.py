@@ -18,6 +18,7 @@ these layers with is_causal=False attention and decoder layer scalars.
 
 import logging
 import math
+import os
 from typing import Any, Dict, Optional, Tuple
 
 import torch
@@ -206,6 +207,9 @@ class DiffusionGemmaAttnOp:
             self.use_flashinfer = True
         except Exception as error:  # CPU-only environments
             logger.info("DiffusionGemma attention falls back to torch: %s", error)
+        # DIAGNOSTIC (A/B, to revert): force every layer onto the torch path
+        # on GPU to split flashinfer-attention bugs from geometry bugs.
+        self.use_flashinfer = False
         if self.use_flashinfer and self.head_dim > 256:
             # flashinfer 0.6.9 ragged prefill rejects the global layers'
             # GQA config (head_dim 512, kv 2: "Invalid configuration
