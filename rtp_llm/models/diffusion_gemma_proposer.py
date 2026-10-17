@@ -18,7 +18,7 @@ import torch
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.base_model import BaseModel
-from rtp_llm.ops import CacheGroupType, KVCacheSpecDesc, KVCacheSpecType
+from rtp_llm.ops import CacheGroupType, DataType, KVCacheSpecDesc, KVCacheSpecType
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
     W,
