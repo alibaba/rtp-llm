@@ -15,12 +15,12 @@
 
 namespace rtp_llm {
 
-class PriorityCancelExecutor;
+class RequestCancelExecutor;
 
 struct DeferredPrefillContext {
     struct StartOperationResult {
         bool started{false};
-        bool priority_finalizer_claimed{false};
+        bool cancel_finalizer_claimed{false};
     };
 
     AtomicGuardPtr                   request_guard;
@@ -42,13 +42,13 @@ struct DeferredPrefillContext {
     // finalization owner.
     bool finishOperation();
     StartOperationResult tryStartOperation();
-    bool requestPriorityFinalization();
+    bool requestCancellationFinalization();
 
 private:
     std::mutex operation_mu_;
     bool       operation_active_{true};
-    bool       priority_finalize_requested_{false};
-    bool       priority_finalize_claimed_{false};
+    bool       cancel_finalize_requested_{false};
+    bool       cancel_finalize_claimed_{false};
     bool       logical_finalize_claimed_{false};
     std::mutex trace_mu_;
     bool       trace_finished_{false};
@@ -63,39 +63,41 @@ public:
     armTtl(int64_t request_id, const std::shared_ptr<DeferredPrefillContext>& context, std::chrono::milliseconds ttl);
     grpc::Status                            take(int64_t request_id, std::shared_ptr<DeferredPrefillContext>& context);
     std::shared_ptr<DeferredPrefillContext> remove(int64_t request_id, const DeferredPrefillContext* expected);
-    PriorityCancelResult cancelByPriorityPreemption(int64_t                                 request_id,
-                                                     std::shared_ptr<DeferredPrefillContext>& context,
-                                                     bool* newly_installed = nullptr);
-    PriorityCancelResult cancelByPriorityPreemption(int64_t request_id) {
-        std::shared_ptr<DeferredPrefillContext> ignored;
-        return cancelByPriorityPreemption(request_id, ignored);
-    }
-    void publishPriorityPreemptionCanceled(int64_t request_id, const DeferredPrefillContext* expected);
+    RequestCancelResult cancelRequest(int64_t request_id,
+                                      std::shared_ptr<DeferredPrefillContext>& context,
+                                      bool* newly_installed = nullptr,
+                                      RequestCancelReasonPB reason = REQUEST_CANCEL_REASON_UNSPECIFIED);
+    void publishCancellationFinished(int64_t request_id, const DeferredPrefillContext* expected,
+                                     bool decode_cleanup_complete = false);
+    bool isDecodeCleanupComplete(int64_t request_id) const;
     void finish(int64_t request_id, const DeferredPrefillContext* expected);
     void                                    stopAccepting();
     void                                    cancelAll(const grpc::Status& status);
     size_t                                  size() const;
 
 private:
-    enum class PriorityPreemptionTombstoneKind : uint8_t {
+    enum class CancellationTombstoneKind : uint8_t {
         ABSENT_FENCE,
         ACTIVE_CANCEL,
     };
 
-    struct PriorityPreemptionTombstone {
-        int64_t                          expires_at_ms;
-        PriorityPreemptionTombstoneKind kind;
+    struct CancellationTombstone {
+        int64_t                  expires_at_ms;
+        CancellationTombstoneKind kind;
+        ErrorInfo                error;
+        bool decode_cleanup_complete{false};
     };
 
     void expire(int64_t request_id, const DeferredPrefillContext* expected);
-    void sweepPriorityPreemptionTombstones(int64_t now_ms);
+    void sweepCancellationTombstones(int64_t now_ms);
     void rememberRecentlySeenRequest(int64_t request_id, int64_t now_ms);
     void sweepRecentlySeenRequests(int64_t now_ms);
     // mu_ must be held. A single helper keeps missing-active and
     // active-cancel tombstones on the same lifetime/expiry path.
-    void installPriorityPreemptionTombstone(int64_t request_id,
-                                            int64_t now_ms,
-                                            PriorityPreemptionTombstoneKind kind);
+    void installCancellationTombstone(int64_t request_id,
+                                      int64_t now_ms,
+                                      CancellationTombstoneKind kind,
+                                      ErrorInfo error);
 
     mutable std::mutex                                                   mu_;
     std::unordered_map<int64_t, std::shared_ptr<DeferredPrefillContext>> contexts_;
@@ -103,8 +105,8 @@ private:
     // Request-id reuse is explicitly out of scope. A latched tombstone keeps
     // duplicate Cancel and a future FetchResponse idempotent after the active
     // context has moved to asynchronous cleanup.
-    std::unordered_map<int64_t, PriorityPreemptionTombstone>             priority_preemption_tombstones_;
-    std::deque<std::pair<int64_t, int64_t>>                              priority_preemption_tombstone_expiries_;
+    std::unordered_map<int64_t, CancellationTombstone>             cancellation_tombstones_;
+    std::deque<std::pair<int64_t, int64_t>>                              cancellation_tombstone_expiries_;
     // Distinguishes a truly never-registered request from one whose active
     // context has already completed. Without this bounded history, a late
     // Cancel could install an ABSENT_FENCE for completed work and falsely
@@ -145,8 +147,11 @@ public:
     void beginShutdown();
 
 private:
-    PriorityCancelResult onCancelRequest(int64_t request_id) override;
-    void finalizePriorityPreemption(int64_t request_id, std::shared_ptr<DeferredPrefillContext> deferred);
+    RequestCancelResult onCancelRequest(int64_t request_id, RequestCancelReasonPB reason) override;
+    bool isDecodeCleanupComplete(int64_t request_id) const override {
+        return deferred_contexts_->isDecodeCleanupComplete(request_id);
+    }
+    void finalizeCancellation(int64_t request_id, std::shared_ptr<DeferredPrefillContext> deferred);
     void finishSlotOperation(int64_t request_id, const std::shared_ptr<DeferredPrefillContext>& deferred);
 
     // One accepted request inside a group; carried across the EnqueueGroup phase methods.
@@ -190,13 +195,13 @@ private:
 
     // ---- Batch infrastructure ----
     void initThreadPools();
-    void schedulePriorityFinalization(int64_t request_id, std::shared_ptr<DeferredPrefillContext> deferred);
+    void scheduleCancellationFinalization(int64_t request_id, std::shared_ptr<DeferredPrefillContext> deferred);
 
 private:
     std::shared_ptr<DeferredPrefillContextMap> deferred_contexts_ = std::make_shared<DeferredPrefillContextMap>();
     std::atomic<bool>                          stopping_{false};
     autil::ThreadPoolBasePtr                   prepare_resource_worker_pool_;
-    std::unique_ptr<PriorityCancelExecutor>    priority_cancel_executor_;
+    std::unique_ptr<RequestCancelExecutor>     cancel_executor_;
 };
 
 }  // namespace rtp_llm

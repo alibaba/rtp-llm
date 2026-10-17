@@ -83,12 +83,12 @@ class MatrixSweepTest {
 
             assertEquals(0, totalErrors, "enqueue errors");
             long completedCount = services.values().stream()
-                    .mapToLong(JavaMockEngineCluster.FastRpcService::getCompletedCount)
+                    .mapToLong(MockEngineTestSupport::getCompletedCount)
                     .sum();
             assertEquals(concurrency, completedCount, "completed requests");
             for (JavaMockEngineCluster.FastRpcService service : services.values()) {
                 assertEquals(0, service.getInflightCount(), "inflight requests");
-                assertFalse(service.isLeakDetected(), "leak detected");
+                assertFalse(MockEngineTestSupport.isLeakDetected(service), "leak detected");
             }
         }
     }

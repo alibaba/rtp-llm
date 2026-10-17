@@ -5,6 +5,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/schedulers/EngineScheduleInfo.h"
 
@@ -18,6 +19,7 @@ struct TaskIdentity {
 struct RunningEntry {
     EngineScheduleInfo::TaskInfo task_info;
     GenerateStreamPtr            stream;
+    bool                         dequeue_requested = false;
 };
 
 class RpcServerRuntimeMeta {
@@ -39,40 +41,58 @@ public:
     }
 
     EngineScheduleInfo getEngineScheduleInfo(int64_t latest_finished_version) {
-        std::shared_lock<std::shared_mutex> lock(read_write_lock_);
-        EngineScheduleInfo                  info;
-        std::unordered_set<int64_t>         emitted_preemption_overlays;
-        for (auto& [id, entry] : running_streams_) {
-            auto task_info  = entry.task_info;
-            task_info.phase = derivePhase(entry.stream);
-            auto overlay    = priority_preemption_overlays_.find(id);
-            if (overlay != priority_preemption_overlays_.end()) {
-                task_info.priority_preemption_progress = PriorityPreemptionProgress::CANCELING;
-                emitted_preemption_overlays.insert(id);
-            }
-            info.running_task_info_list.push_back(std::move(task_info));
-        }
-        // A Prefill request remains the priority-cancel control record even
-        // when it has no local stream yet (Stage 2), or its local stream has
-        // already been dequeued while Decode is generating (Stage 4). Emit an
-        // overlay-only TaskInfo without inserting a synthetic engine runtime
-        // entry; it therefore does not change scheduler/load accounting.
-        for (const auto& [request_id, overlay] : priority_preemption_overlays_) {
-            if (emitted_preemption_overlays.find(request_id) == emitted_preemption_overlays.end()) {
-                info.running_task_info_list.push_back(overlay);
-            }
-        }
-        int64_t version = latest_finished_version;
-        for (auto& iter : finished_streams_) {
-            if (iter.first > latest_finished_version) {
-                info.finished_task_info_list.push_back(iter.second);
-                if (iter.first > version) {
-                    version = iter.first;
+        // RPC teardown never waits for the engine. Keep its exact stream visible
+        // until scheduler completion and worker bookkeeping permit resource release.
+        // Rebuild only when this poll actually retires an entry.
+        for (bool reconcile = true;; reconcile = false) {
+            std::vector<std::pair<int64_t, GenerateStreamPtr>> ready_to_dequeue;
+            EngineScheduleInfo info;
+            {
+                std::shared_lock<std::shared_mutex> lock(read_write_lock_);
+                std::unordered_set<int64_t>         emitted_preemption_overlays;
+                for (auto& [id, entry] : running_streams_) {
+                    if (reconcile && entry.dequeue_requested && entry.stream->getStatus() == StreamState::FINISHED
+                        && !entry.stream->hasPendingAsyncBookkeeping()) {
+                        ready_to_dequeue.emplace_back(id, entry.stream);
+                    }
+                    auto task_info  = entry.task_info;
+                    task_info.phase = derivePhase(entry.stream);
+                    auto overlay    = priority_preemption_overlays_.find(id);
+                    if (overlay != priority_preemption_overlays_.end()) {
+                        task_info.priority_preemption_progress = PriorityPreemptionProgress::CANCELING;
+                        emitted_preemption_overlays.insert(id);
+                    }
+                    info.running_task_info_list.push_back(std::move(task_info));
                 }
+                // A Prefill request remains the priority-cancel control record even
+                // when it has no local stream yet (Stage 2), or its local stream has
+                // already been dequeued while Decode is generating (Stage 4). Emit an
+                // overlay-only TaskInfo without inserting a synthetic engine runtime
+                // entry; it therefore does not change scheduler/load accounting.
+                for (const auto& [request_id, overlay] : priority_preemption_overlays_) {
+                    if (emitted_preemption_overlays.find(request_id) == emitted_preemption_overlays.end()) {
+                        info.running_task_info_list.push_back(overlay);
+                    }
+                }
+                int64_t version = latest_finished_version;
+                for (auto& iter : finished_streams_) {
+                    if (iter.first > latest_finished_version) {
+                        info.finished_task_info_list.push_back(iter.second);
+                        if (iter.first > version) {
+                            version = iter.first;
+                        }
+                    }
+                }
+                info.latest_finished_version = version;
+            }
+            bool retired = false;
+            for (const auto& [id, stream] : ready_to_dequeue) {
+                retired = tryDequeueFinishedStream(id, stream) || retired;
+            }
+            if (!retired) {
+                return info;
             }
         }
-        info.latest_finished_version = version;
-        return info;
     }
 
     void enqueue(int64_t request_id, const GenerateStreamPtr& stream) {
@@ -95,7 +115,7 @@ public:
     // WorkerStatus control overlay for the original Prefill. This does not
     // mutate running_streams_, so accepting Cancel cannot inflate engine load
     // or resource accounting.
-    void markPriorityPreemptionCanceling(const TaskIdentity& identity) {
+    void markRequestCanceling(const TaskIdentity& identity) {
         std::unique_lock<std::shared_mutex> lock(read_write_lock_);
         const auto                          request_id = identity.request_id;
         if (priority_preemption_overlays_.find(request_id) != priority_preemption_overlays_.end()) {
@@ -123,11 +143,12 @@ public:
         priority_preemption_overlays_.emplace(request_id, std::move(task_info));
     }
 
-    // Publish the single authoritative completion delta for priority Cancel.
+    // Publish the single authoritative completion delta for Prefill Cancel.
     // The caller must invoke this only after the Prefill request execution has
-    // quiesced and its local/downstream cleanup path has returned. `stream`
+    // quiesced and its local cleanup and downstream cancellation path have returned.
+    // This Prefill report does not replace Decode resource-release evidence. `stream`
     // must be the registered stream, or null when no local stream was enqueued.
-    bool markPriorityPreemptionCanceled(int64_t                  request_id,
+    bool markRequestCanceled(int64_t                  request_id,
                                         int64_t                  error_code,
                                         const std::string&       error_message,
                                         const GenerateStreamPtr& stream) {
@@ -178,14 +199,14 @@ public:
             return;
         }
         {
-            std::shared_lock<std::shared_mutex> lock(read_write_lock_);
+            std::unique_lock<std::shared_mutex> lock(read_write_lock_);
             const auto                          running = running_streams_.find(request_id);
             if (running == running_streams_.end() || running->second.stream != stream) {
                 return;
             }
+            running->second.dequeue_requested = true;
         }
-        const auto stream_snapshot = captureStreamRuntimeSnapshot(stream);
-        commitDequeueSnapshot(request_id, stream, stream_snapshot);
+        tryDequeueFinishedStream(request_id, stream);
     }
 
     void finishTask(int64_t            request_id,
@@ -222,6 +243,17 @@ public:
     }
 
 protected:
+    bool tryDequeueFinishedStream(int64_t request_id, const GenerateStreamPtr& stream) {
+        if (stream->getStatus() != StreamState::FINISHED || stream->hasPendingAsyncBookkeeping()) {
+            return false;
+        }
+        // Neither stream work nor its locks may run under the metadata mutex.
+        // FINISHED prevents new scheduler captures; outstanding captures are
+        // checked above and releaseResource retains its own bookkeeping barrier.
+        stream->releaseResource();
+        return commitDequeueSnapshot(request_id, stream, captureStreamRuntimeSnapshot(stream));
+    }
+
     struct StreamRuntimeSnapshot {
         int64_t   end_time_ms     = -1;
         int64_t   begin_time_us   = 0;
@@ -260,13 +292,13 @@ protected:
             computeExecutionTimeMs(snapshot.end_time_ms, snapshot.begin_time_us, snapshot.waiting_time_ms);
     }
 
-    void commitDequeueSnapshot(int64_t                      request_id,
+    bool commitDequeueSnapshot(int64_t                      request_id,
                                const GenerateStreamPtr&     stream,
                                const StreamRuntimeSnapshot& stream_snapshot) {
         std::unique_lock<std::shared_mutex> lock(read_write_lock_);
         auto                                ptr = running_streams_.find(request_id);
         if (ptr == running_streams_.end() || ptr->second.stream != stream) {
-            return;
+            return false;
         }
         auto& task_info = ptr->second.task_info;
         applyStreamRuntimeSnapshot(task_info, stream_snapshot);
@@ -283,7 +315,7 @@ protected:
             overlay->second.error_message.clear();
             overlay->second.priority_preemption_progress = PriorityPreemptionProgress::CANCELING;
             running_streams_.erase(ptr);
-            return;
+            return true;
         }
 
         if (finished_streams_.size() >= finished_capacity_) {
@@ -297,6 +329,7 @@ protected:
         int64_t version = version_.fetch_add(1, std::memory_order_relaxed);
         finished_streams_.push_back(std::make_pair(version, task_info));
         running_streams_.erase(ptr);
+        return true;
     }
 
     static int64_t resolveBatchId(const TaskIdentity& identity, int64_t stream_batch_id) {

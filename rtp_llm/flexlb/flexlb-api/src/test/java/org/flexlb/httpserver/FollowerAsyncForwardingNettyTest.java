@@ -1,5 +1,6 @@
 package org.flexlb.httpserver;
 
+import org.flexlb.config.FlexlbConfig;
 import ch.qos.logback.classic.Level;
 import io.grpc.ManagedChannel;
 import io.grpc.Server;
@@ -9,11 +10,12 @@ import io.grpc.stub.StreamObserver;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import org.flexlb.config.ConfigService;
-import org.flexlb.consistency.LBStatusConsistencyService;
+import org.flexlb.consistency.MasterStatusService;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
-import org.flexlb.service.RouteService;
-import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.balance.scheduler.AbstractRequestScheduler;
+import org.flexlb.balance.scheduler.RequestScheduler;
+import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
@@ -134,7 +136,7 @@ class FollowerAsyncForwardingNettyTest {
                 assertEquals(0, follower.rejections.get(),
                         "async forwarding must not reject follower request tasks");
                 master.assertExactlyOnceAndOneHop();
-                verify(follower.routeService, never()).route(any());
+                verify(follower.requestScheduler, never()).submit(any());
             } finally {
                 master.releaseResponses();
             }
@@ -223,7 +225,7 @@ class FollowerAsyncForwardingNettyTest {
             assertTrue(executorDrained, "follower request executor did not drain");
             assertTrue(callbackExecutorDrained,
                     "forward callback executor did not drain");
-            verify(follower.routeService, never()).route(any());
+            verify(follower.requestScheduler, never()).submit(any());
         }
     }
 
@@ -484,7 +486,8 @@ class FollowerAsyncForwardingNettyTest {
     private static final class Follower implements AutoCloseable {
         private final AtomicInteger rejections = new AtomicInteger();
         private final AtomicInteger channelRejections = new AtomicInteger();
-        private final RouteService routeService = mock(RouteService.class);
+        private final RequestScheduler requestScheduler = mock(RequestScheduler.class);
+        private final AbstractRequestScheduler requestState = mock(AbstractRequestScheduler.class);
         private final int requestQueueCapacity;
         private final ThreadPoolExecutor requestExecutor;
         private final ThreadPoolExecutor channelExecutor;
@@ -494,7 +497,7 @@ class FollowerAsyncForwardingNettyTest {
 
         private Follower(String masterHttpAddress, int requestQueueCapacity) throws Exception {
             this.requestQueueCapacity = requestQueueCapacity;
-            LBStatusConsistencyService consistency = mock(LBStatusConsistencyService.class);
+            MasterStatusService consistency = mock(MasterStatusService.class);
             when(consistency.isNeedConsistency()).thenReturn(true);
             when(consistency.isMaster()).thenReturn(false);
             when(consistency.getMasterHostIpPort()).thenReturn(masterHttpAddress);
@@ -526,15 +529,7 @@ class FollowerAsyncForwardingNettyTest {
                     channelEventLoop,
                     channelExecutor);
 
-            FlexlbServiceImpl service = new FlexlbServiceImpl(
-                    routeService,
-                    consistency,
-                    healthReporter,
-                    forwarder,
-                    configService,
-                    mock(BatchSchedulerReporter.class),
-                    mock(ServerScheduleLatencyRecorder.class),
-                    mock(RequestSchedulerReporter.class));
+            FlexlbServiceImpl service = FlexlbServiceTestSupport.create(requestScheduler, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(requestState), consistency, healthReporter, forwarder, configService, mock(DeliveryMetricsReporter.class), mock(ServerScheduleLatencyRecorder.class), mock(RequestSchedulerReporter.class));
 
             requestExecutor = new ThreadPoolExecutor(
                     EXECUTOR_CORE_SIZE,

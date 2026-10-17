@@ -74,7 +74,6 @@ class FlexlbTraceTest {
             Context context = Context.root().with(owner);
             assertNull(FlexlbTrace.startServer("server", context));
             assertNull(FlexlbTrace.startClient("client", context));
-            assertNull(FlexlbTrace.startInternal("internal", context));
             assertEquals(context, FlexlbTrace.withSpan(Span.getInvalid(), context));
             FlexlbTrace.setRequestAttributes(owner, 42L);
             FlexlbTrace.setScheduleAttribute(context, AttributeKey.stringKey("mode"), "BATCH");

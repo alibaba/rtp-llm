@@ -22,12 +22,6 @@ public final class SchedulerConfig {
     /** How queued requests form decision groups. */
     private DecisionPolicyConfig decision = new DecisionPolicyConfig();
 
-    public static SchedulerConfig direct() {
-        SchedulerConfig config = new SchedulerConfig();
-        config.type = Type.DIRECT;
-        return config;
-    }
-
     public long resolveExpiresAtMs(long admissionTimeMs) {
         return admissionTimeMs > Long.MAX_VALUE - queueTimeoutMs
                 ? Long.MAX_VALUE

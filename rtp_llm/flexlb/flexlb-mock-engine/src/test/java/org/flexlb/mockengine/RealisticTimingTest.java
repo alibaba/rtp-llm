@@ -97,7 +97,7 @@ class RealisticTimingTest {
 
             // ── Verify all completed ──
             long totalCompleted = services.values().stream()
-                    .mapToLong(JavaMockEngineCluster.FastRpcService::getCompletedCount)
+                    .mapToLong(MockEngineTestSupport::getCompletedCount)
                     .sum();
             assertEquals(nRequests, totalCompleted,
                     "all requests should be completed");
@@ -107,7 +107,7 @@ class RealisticTimingTest {
                 assertEquals(0, service.getInflightCount(),
                         "engine port " + service.getGrpcPort()
                                 + " has inflight=" + service.getInflightCount() + " (expected 0)");
-                assertFalse(service.isLeakDetected(),
+                assertFalse(MockEngineTestSupport.isLeakDetected(service),
                         "engine port " + service.getGrpcPort() + " has leak detected");
             }
 

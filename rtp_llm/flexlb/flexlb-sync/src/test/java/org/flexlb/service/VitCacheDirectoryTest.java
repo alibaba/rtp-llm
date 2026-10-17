@@ -16,12 +16,12 @@ import org.flexlb.engine.grpc.nameresolver.CustomNameResolver;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.consistency.LBStatusConsistencyService;
-import org.flexlb.dao.BalanceContext;
+import org.flexlb.consistency.MasterStatusService;
+import org.flexlb.balance.scheduler.RequestContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.sync.status.WorkerDirectory;
+import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -57,7 +57,7 @@ class VitCacheDirectoryTest {
     private WorkerStatus a;
     private WorkerStatus b;
     private EngineGrpcClient grpc;
-    private LBStatusConsistencyService consistency;
+    private MasterStatusService consistency;
 
     @BeforeEach
     void setUp() {
@@ -65,15 +65,15 @@ class VitCacheDirectoryTest {
         b = worker("10.0.0.2", "two");
         live.put(a.getIpPort(), a);
         live.put(b.getIpPort(), b);
-        var workers = mock(WorkerDirectory.class);
+        var workers = mock(EndpointRegistry.class);
         when(workers.statusSnapshot(RoleType.VIT)).thenAnswer(call -> Map.copyOf(live));
         when(workers.endpointAddressSnapshot(RoleType.VIT)).thenAnswer(call -> new java.util.ArrayList<>(live.keySet()));
-        when(workers.captureEndpoint(eq(RoleType.VIT), any())).thenAnswer(call -> {
+        when(workers.capture(eq(RoleType.VIT), any())).thenAnswer(call -> {
             WorkerStatus status = live.get(call.getArgument(1));
             return status == null ? null : new WorkerEndpoint(status).tryPinGeneration();
         });
         grpc = mock(EngineGrpcClient.class);
-        consistency = mock(LBStatusConsistencyService.class);
+        consistency = mock(MasterStatusService.class);
         directory = new VitCacheDirectory(workers, grpc, consistency);
         selector = new VitCacheSelector(directory, workers);
     }
@@ -87,13 +87,11 @@ class VitCacheDirectoryTest {
         return WorkerStatus.createDiscovered(RoleType.VIT, group, ip, 8000, 8001, "");
     }
 
-    private BalanceContext context(String... keys) {
-        Request request = new Request();
-        request.setRequestId(123);
-        request.setCacheAffinityKeys(List.of(keys));
-        request.setGenerateTimeout(30000);
-        BalanceContext context = new BalanceContext(new FlexlbConfig());
-        context.setRequest(request);
+    private RequestContext context(String... keys) {
+        Request request = Request.builder().requestId(123L).cacheAffinityKeys(List.of(keys))
+                .generateTimeout(30000L).build();
+        RequestContext context = new RequestContext(new FlexlbConfig());
+        context.data().setRequest(request);
         return context;
     }
 
@@ -331,7 +329,7 @@ class VitCacheDirectoryTest {
         assertEquals(b.getIp(), selector.select(context("image"), null).getServerIp());
         var ctx = context("image");
         var selected = selector.select(ctx, "two");
-        ctx.getRequest().setSelectedVit(selected);
+        ctx.data().setRequest(ctx.data().getRequest().toBuilder().selectedVit(selected).build());
         assertTrue(selector.validate(ctx, "two").isSuccess());
         assertFalse(selector.validate(ctx, "one").isSuccess());
         live.remove(b.getIpPort());
@@ -370,17 +368,21 @@ class VitCacheDirectoryTest {
         copied = mapper.readValue(mapper.writeValueAsBytes(copied),
                 org.flexlb.dao.loadbalance.ServerStatus.class);
         assertEquals(a.getGenerationId(), copied.getWorkerGeneration());
-        ctx.getRequest().setSelectedVit(copied);
         copied.setWorkerGeneration(0);
+        ctx.data().setRequest(ctx.data().getRequest().toBuilder().selectedVit(copied).build());
         assertFalse(selector.validate(ctx, "one").isSuccess());
         copied.setWorkerGeneration(a.getGenerationId());
-        try (var pinned = selector.selectPinned(ctx, "one")) {
+        ctx.data().setRequest(ctx.data().getRequest().toBuilder().selectedVit(copied).build());
+        try (var scope = new org.flexlb.balance.scheduler.RequestRoute(ctx)) {
+            var pinned = selector.selectPinned(ctx, "one", scope);
             org.junit.jupiter.api.Assertions.assertNotNull(pinned);
-            assertEquals(a.getGenerationId(), pinned.serverStatus().getWorkerGeneration());
+            assertEquals(a.getGenerationId(), pinned.getWorkerGeneration());
         }
         live.put(a.getIpPort(), worker(a.getIp(), "one"));
         assertFalse(selector.validate(ctx, "one").isSuccess());
-        org.junit.jupiter.api.Assertions.assertNull(selector.selectPinned(ctx, "one"));
+        try (var scope = new org.flexlb.balance.scheduler.RequestRoute(ctx)) {
+            org.junit.jupiter.api.Assertions.assertNull(selector.selectPinned(ctx, "one", scope));
+        }
     }
 
 }

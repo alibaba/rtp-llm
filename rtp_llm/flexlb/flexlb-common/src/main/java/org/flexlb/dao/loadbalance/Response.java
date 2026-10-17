@@ -9,6 +9,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+import static com.google.common.base.Preconditions.checkArgument;
+
 @JsonIgnoreProperties(ignoreUnknown = true)
 @Data
 public class Response {
@@ -101,10 +103,8 @@ public class Response {
         if (admissionRejectReason == null) {
             admissionRejectReason = AdmissionRejectReason.UNSPECIFIED;
         }
-        if (!strategyErrorType.acceptsAdmissionRejectReason(admissionRejectReason)) {
-            throw new IllegalArgumentException("invalid schedule error code/reason: "
-                    + strategyErrorType + "/" + admissionRejectReason);
-        }
+        checkArgument(strategyErrorType.acceptsAdmissionRejectReason(admissionRejectReason),
+                "invalid schedule error code/reason: %s/%s", strategyErrorType, admissionRejectReason);
         Response result = new Response();
         result.setSuccess(false);
         result.setCode(strategyErrorType.getErrorCode());

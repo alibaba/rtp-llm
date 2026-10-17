@@ -17,6 +17,8 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
+import static com.google.common.base.Preconditions.checkArgument;
+
 /**
  * @author zjw
  * description:
@@ -184,11 +186,8 @@ public abstract class AbstractGrpcClient implements CustomNameResolver.Listener 
 
     protected static String[] parseServiceKey(String serviceKey) {
         String[] parts = serviceKey.split(":");
-        if (parts.length == 3) {
-            return new String[]{parts[0], parts[1], parts[2]};
-        }
-
-        throw new IllegalArgumentException("Invalid service key format: " + serviceKey);
+        checkArgument(parts.length == 3, "Invalid service key format: %s", serviceKey);
+        return new String[]{parts[0], parts[1], parts[2]};
     }
 
     /**
@@ -226,28 +225,22 @@ public abstract class AbstractGrpcClient implements CustomNameResolver.Listener 
         private final String channelKey;
         private final ManagedChannel channel;
         private final long createTime;
-        private volatile long lastUsedTime;
         private volatile long expireTime;
 
         public Invoker(String channelKey, ManagedChannel channel) {
             this.channelKey = channelKey;
             this.channel = channel;
-            long currentTime = System.nanoTime() / 1000;
+            long currentTime = TimeUnit.NANOSECONDS.toMicros(System.nanoTime());
             this.createTime = currentTime;
-            this.lastUsedTime = currentTime;
             this.expireTime = 0;
         }
 
-        public void updateLastUsedTime() {
-            this.lastUsedTime = System.nanoTime() / 1000;
-        }
-
         public void markExpired() {
-            this.expireTime = System.nanoTime() / 1000;
+            this.expireTime = TimeUnit.NANOSECONDS.toMicros(System.nanoTime());
         }
 
         public long getConnectionDuration() {
-            return expireTime > 0 ? expireTime - createTime : System.nanoTime() / 1000 - createTime;
+            return expireTime > 0 ? expireTime - createTime : TimeUnit.NANOSECONDS.toMicros(System.nanoTime()) - createTime;
         }
 
         public void shutdown() {

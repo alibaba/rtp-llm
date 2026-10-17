@@ -1,0 +1,254 @@
+{
+  "date": "2026-10-06",
+  "baselineCommit": "8f79fab1151ec1abc7c7ac080b7aaf4af63447fc",
+  "implementation": "Scheduler-owned ACK protocol; request-agnostic ResponseCompletionExecutor",
+  "reviews": {
+    "count": 3,
+    "initialFinding": "ACK selection was moved ahead of response queue; corrected before final tests",
+    "finalBlockingFindings": 0
+  },
+  "performance": {
+    "host": "luoli.hn@11.163.39.110",
+    "directory": "/home/luoli.hn/work/rtp_llm_4/github-opensource",
+    "container": "luoli_gpu",
+    "heap": "-Xms64g -Xmx64g",
+    "warmupMs": 10000,
+    "measureMs": 10000,
+    "minQpsRatio": 0.98,
+    "maxMasterP99Ms": 50,
+    "maxClientP99Ms": 50,
+    "rows": [
+      {
+        "delivery": "BATCH",
+        "decision": "FIXED_WINDOW",
+        "prefill": "750",
+        "decode": "750",
+        "target_qps": "3000",
+        "client_qps": "2996.8",
+        "master_qps": "3000.9",
+        "master_p99": "12ms",
+        "client_p99": "30.345ms",
+        "version": "baseline"
+      },
+      {
+        "delivery": "BATCH",
+        "decision": "FIXED_WINDOW",
+        "prefill": "750",
+        "decode": "750",
+        "target_qps": "10000",
+        "client_qps": "9989.3",
+        "master_qps": "10009.3",
+        "master_p99": "21ms",
+        "client_p99": "45.884ms",
+        "version": "baseline"
+      },
+      {
+        "delivery": "NON_BATCH",
+        "decision": "SINGLE",
+        "prefill": "750",
+        "decode": "750",
+        "target_qps": "3000",
+        "client_qps": "2999.6",
+        "master_qps": "3000.4",
+        "master_p99": "<1ms",
+        "client_p99": "1.123ms",
+        "version": "baseline"
+      },
+      {
+        "delivery": "NON_BATCH",
+        "decision": "SINGLE",
+        "prefill": "750",
+        "decode": "750",
+        "target_qps": "10000",
+        "client_qps": "9994.5",
+        "master_qps": "10000.6",
+        "master_p99": "9ms",
+        "client_p99": "36.941ms",
+        "version": "baseline"
+      },
+      {
+        "delivery": "BATCH",
+        "decision": "FIXED_WINDOW",
+        "prefill": "750",
+        "decode": "750",
+        "target_qps": "3000",
+        "client_qps": "2996.8",
+        "master_qps": "3001.3",
+        "master_p99": "12ms",
+        "client_p99": "30.285ms",
+        "version": "candidate"
+      },
+      {
+        "delivery": "BATCH",
+        "decision": "FIXED_WINDOW",
+        "prefill": "750",
+        "decode": "750",
+        "target_qps": "10000",
+        "client_qps": "9989.1",
+        "master_qps": "10014.6",
+        "master_p99": "22ms",
+        "client_p99": "44.445ms",
+        "version": "candidate"
+      },
+      {
+        "delivery": "NON_BATCH",
+        "decision": "SINGLE",
+        "prefill": "750",
+        "decode": "750",
+        "target_qps": "3000",
+        "client_qps": "2999.7",
+        "master_qps": "3000.3",
+        "master_p99": "<1ms",
+        "client_p99": "3.804ms",
+        "version": "candidate"
+      },
+      {
+        "delivery": "NON_BATCH",
+        "decision": "SINGLE",
+        "prefill": "750",
+        "decode": "750",
+        "target_qps": "10000",
+        "client_qps": "9995.0",
+        "master_qps": "10002.7",
+        "master_p99": "3ms",
+        "client_p99": "28.074ms",
+        "version": "candidate"
+      }
+    ],
+    "candidateCasesPassed": 4,
+    "baselineCasesPassed": 4,
+    "limitation": "One run per version and mode on a shared host; does not establish stable latency improvement."
+  },
+  "sourceAudit": {
+    "changedInputs": [
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/ResponseCompletionExecutor.java",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/SchedulerRuntime.java",
+      "rtp_llm/flexlb/flexlb-sync/src/test/java/org/flexlb/balance/scheduler/RequestCompletionPublicationRaceTest.java",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/AbstractRequestScheduler.java",
+      "rtp_llm/flexlb/flexlb-sync/src/test/java/org/flexlb/balance/scheduler/RequestTerminalSettlementTest.java",
+      "rtp_llm/flexlb/flexlb-sync/src/test/java/org/flexlb/balance/scheduler/RequestProtocolTestSupport.java"
+    ],
+    "differences": "imports and whitespace only; Java bodies match remote snapshot"
+  },
+  "remoteRestore": [
+    {
+      "restoredInputs": 522,
+      "differences": []
+    },
+    {
+      "restoredInputs": 526,
+      "differences": []
+    }
+  ],
+  "artifacts": "/tmp/flexlb-response-executor-20261006",
+  "unitTests": {
+    "fullReactorLocal": {
+      "tests": 2484,
+      "passed": 2482,
+      "failures": 1,
+      "errors": 0,
+      "skipped": 1,
+      "build": "failure",
+      "modules": {
+        "flexlb-common": {
+          "tests": 226,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        "flexlb-cache": {
+          "tests": 37,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        "flexlb-grpc": {
+          "tests": 15,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        "flexlb-sync": {
+          "tests": 1631,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        "flexlb-api": {
+          "tests": 175,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 1
+        },
+        "flexlb-mock-engine": {
+          "tests": 400,
+          "failures": 1,
+          "errors": 0,
+          "skipped": 0
+        }
+      },
+      "failure": "ProductionCaliberDecodeTest.lowBatchDrainRateMatchesProductionAnchor: local 395 tok/s, expected 519 +/-15%; test and Mock production unchanged"
+    },
+    "focusedOwnershipAndLifecycle": {
+      "tests": 70,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    "remoteRerun": {
+      "class": "ProductionCaliberDecodeTest",
+      "tests": 8,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "heap": "-Xms64g -Xmx64g",
+      "container": "luoli_gpu",
+      "note": "Remote rerun passed; local full-reactor failure remains recorded."
+    }
+  },
+  "checks": {
+    "changedJavaSpotless": "passed",
+    "gitDiffCheck": "passed",
+    "newRaceTest": "terminalInvalidatesAcknowledgementQueuedBehindAnotherRequestsCallback"
+  },
+  "snapshots": {
+    "baseline": "1d1e6dde73f161f2b95b66933bcfdffc4bb9a25f9f7dca922c26e1bc8b66875b",
+    "candidate": "07c774e9c1e8340a9ecca8bc7d819b000595eabfcfe7f31c2b436f7554a29a44"
+  },
+  "finalProductionSources": {
+    "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/SchedulerRuntime.java": "540a7a4636a633eaf3630d1859add24fbfa4f62083271e968c7361ca0ecd9c25",
+    "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/BalanceContext.java": "111281de12d02a7eb05d7f40ea645e6ae6e2415dc2fc056eeb4c99daecfa7f4f",
+    "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/ResponseCompletionExecutor.java": "bcf35db09c435c7bdcbc96b31436452a0d0dec7096928f9394ceb9ec39f5476f",
+    "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/AbstractRequestScheduler.java": "085adc8cf63940daf500f3a57845e67b71d2286e1648a23c0bbd00dbb5ee181d"
+  },
+  "qualityReviewFollowup": {
+    "reviewedCommit": "a99eeb0241",
+    "responsibilities": "Scheduler owns response protocol and lock checks; Context owns response selection; executor owns task registration and lifecycle.",
+    "fixes": [
+      "Distinguish async worker execution and synchronous caller execution in documentation.",
+      "Name completionWorkers, rejectedTaskWorker, owner, insideCompletion, closeResult and operation explicitly.",
+      "Name permit consumption consumeForSelection/abandonIfUnused; consuming does not select a response winner.",
+      "Remove test-only null-permit branch; executor-only tests exercise Future completion directly.",
+      "Return registration when async submission lock precondition fails; synchronous precondition runs inside executor finally.",
+      "Attempt both worker shutdowns even when the first fails."
+    ],
+    "verification": {
+      "syncTests": 1633,
+      "upstreamTests": 278,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "focusedTests": 72,
+      "spotless": "passed",
+      "independentReviewer": "no remaining required fixes"
+    },
+    "performance": "Not rerun for this quality followup; performance rows above cover initial refactor, queue timing and normal response protocol unchanged.",
+    "artifactDirectory": "/tmp/flexlb-response-quality-20261006",
+    "productionSources": {
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/SchedulerRuntime.java": "540a7a4636a633eaf3630d1859add24fbfa4f62083271e968c7361ca0ecd9c25",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/BalanceContext.java": "62c23a351ffd587b2bbd81f7c4f57811a749cf25c9c82d9dc36c8937f82d094e",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/ResponseCompletionExecutor.java": "8145c51e3d6656d3131e6527bbd7e55cda3664a52c5db284565ece07bd8f8c7f",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/AbstractRequestScheduler.java": "bbbb34b4e78c1f22c1f42f746202570deb39b68886de0624b26f5d277914655d"
+    }
+  }
+}

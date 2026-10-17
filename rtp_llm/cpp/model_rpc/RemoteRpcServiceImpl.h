@@ -15,6 +15,16 @@ public:
                       std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
                       py::object                                             mm_process_engine) override;
 
+    grpc::Status GetWorkerStatus(grpc::ServerContext* context,
+                                 const StatusVersionPB* request,
+                                 WorkerStatusPB* response) override {
+        auto status = LocalRpcServiceImpl::GetWorkerStatus(context, request, response);
+        if (status.ok()) {
+            response->set_supports_request_cleanup(prefill_server_ != nullptr);
+        }
+        return status;
+    }
+
     grpc::Status GenerateStreamCall(grpc::ServerContext*                   context,
                                     const GenerateInputPB*                 request,
                                     grpc::ServerWriter<GenerateOutputsPB>* writer) override {
@@ -69,7 +79,7 @@ public:
         return prefill_server_->FetchResponse(context, request, writer);
     }
 
-    // AutoTPM Cancel: Prefill role only; Decode role
+    // Request Cancel: Prefill role only; Decode role
     // returns gRPC UNIMPLEMENTED.
     grpc::Status
     Cancel(grpc::ServerContext* context, const CancelRequestPB* request, CancelResponsePB* response) override {

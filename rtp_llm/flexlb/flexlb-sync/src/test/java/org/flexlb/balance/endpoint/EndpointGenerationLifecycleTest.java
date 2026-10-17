@@ -40,11 +40,13 @@ class EndpointGenerationLifecycleTest {
         lifecycleRef.set(lifecycle);
         EndpointGenerationLifecycle.HandoffPermit accepted =
                 lifecycle.tryAcquireHandoff();
+        EndpointGenerationLifecycle.HandoffPermit second =
+                lifecycle.tryAcquireHandoff();
         assertNotNull(accepted);
+        assertNotNull(second);
         lifecycle.beginRetirement();
-        assertTrue(lifecycle.tryClaimCleanup());
-        assertTrue(lifecycle.armDrainContinuation());
-        assertFalse(lifecycle.tryClaimCleanup());
+        assertFalse(lifecycle.tryStartCleanup());
+        assertFalse(lifecycle.tryStartCleanup());
 
         ExecutorService executor = Executors.newSingleThreadExecutor();
         try {
@@ -60,6 +62,9 @@ class EndpointGenerationLifecycleTest {
             assertFalse(concurrentClose.isDone());
 
             accepted.close();
+            assertEquals(0, actionRuns.get());
+            assertFalse(concurrentClose.isDone());
+            second.close();
             assertTrue(actionRan.await(1, TimeUnit.SECONDS));
             concurrentClose.get(1, TimeUnit.SECONDS);
             assertEquals(1, actionRuns.get());
@@ -74,11 +79,33 @@ class EndpointGenerationLifecycleTest {
     }
 
     @Test
+    void handoffsDrainedBeforeCleanupClaimLeaveCleanupToTheCaller() {
+        AtomicInteger continuations = new AtomicInteger();
+        EndpointGenerationLifecycle lifecycle =
+                new EndpointGenerationLifecycle(continuations::incrementAndGet);
+        var accepted = lifecycle.tryAcquireHandoff();
+        assertNotNull(accepted);
+        lifecycle.beginRetirement();
+        accepted.close();
+
+        assertTrue(lifecycle.tryStartCleanup());
+        assertFalse(lifecycle.tryStartCleanup());
+        assertEquals(0, continuations.get());
+        assertThrows(IllegalStateException.class, () -> lifecycle.completeRetirement(null));
+        lifecycle.beginCleanup();
+        assertThrows(IllegalStateException.class, lifecycle::beginCleanup);
+        assertThrows(IllegalStateException.class, lifecycle::awaitRetirement);
+        lifecycle.completeRetirement(null);
+        lifecycle.awaitRetirement();
+        assertFalse(lifecycle.tryStartCleanup());
+    }
+
+    @Test
     void emptyHandoffSetDoesNotMeanRetirementIsComplete() throws Exception {
         EndpointGenerationLifecycle lifecycle =
                 new EndpointGenerationLifecycle(() -> { });
         lifecycle.beginRetirement();
-        assertTrue(lifecycle.tryClaimCleanup());
+        assertTrue(lifecycle.tryStartCleanup());
 
         ExecutorService executor = Executors.newSingleThreadExecutor();
         try {
@@ -110,15 +137,20 @@ class EndpointGenerationLifecycleTest {
                 lifecycle.tryAcquireHandoff();
         assertNotNull(accepted);
         lifecycle.beginRetirement();
-        assertTrue(lifecycle.tryClaimCleanup());
+        assertFalse(lifecycle.tryStartCleanup());
         IllegalStateException failure = new IllegalStateException("retirement failed");
 
         CountDownLatch waiterStarted = new CountDownLatch(1);
         ExecutorService executor = Executors.newSingleThreadExecutor();
         try {
             Future<?> concurrentClose = executor.submit(() -> {
+                Thread.currentThread().interrupt();
                 waiterStarted.countDown();
-                lifecycle.awaitRetirement();
+                try {
+                    lifecycle.awaitRetirement();
+                } finally {
+                    assertTrue(Thread.interrupted(), "retirement failure must restore interruption");
+                }
             });
             assertTrue(waiterStarted.await(1, TimeUnit.SECONDS));
             assertFalse(concurrentClose.isDone(),
@@ -148,14 +180,18 @@ class EndpointGenerationLifecycleTest {
                 lifecycle.tryAcquireHandoff();
         assertNotNull(leaked);
         lifecycle.beginRetirement();
-        assertTrue(lifecycle.tryClaimCleanup());
-        assertTrue(lifecycle.armDrainContinuation());
+        assertFalse(lifecycle.tryStartCleanup());
 
-        IllegalStateException timeout = assertThrows(
-                IllegalStateException.class,
-                () -> lifecycle.awaitRetirement(25L));
-
-        assertTrue(timeout.getMessage().contains("activeHandoffs=1"));
-        leaked.close();
+        Thread.currentThread().interrupt();
+        try {
+            IllegalStateException timeout = assertThrows(
+                    IllegalStateException.class,
+                    () -> lifecycle.awaitRetirement(25L));
+            assertTrue(timeout.getMessage().contains("activeHandoffs=1"));
+            assertTrue(Thread.currentThread().isInterrupted(), "timeout must restore interruption");
+        } finally {
+            Thread.interrupted();
+            leaked.close();
+        }
     }
 }

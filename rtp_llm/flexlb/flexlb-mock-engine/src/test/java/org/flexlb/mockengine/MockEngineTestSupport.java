@@ -22,6 +22,10 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicBoolean;
+import org.springframework.test.util.ReflectionTestUtils;
+import com.google.common.base.Preconditions;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 
@@ -32,6 +36,12 @@ final class MockEngineTestSupport {
     private static final HttpClient HTTP_CLIENT = HttpClient.newHttpClient();
 
     private MockEngineTestSupport() {
+    }
+
+    static boolean isReserved(org.flexlb.balance.endpoint.DecodeResources.ResourceSnapshot snapshot,
+                              long requestId) {
+        var request = snapshot.requests().get(requestId);
+        return request != null && !request.phase().isEngineConfirmed();
     }
 
     static EngineRpcService.GenerateInputPB input(long requestId, int inputTokens) {
@@ -280,7 +290,7 @@ final class MockEngineTestSupport {
                 "engine did not quiesce: inflight=" + service.getInflightCount()
                         + " running=" + service.getRunningCount()
                         + " activeDecode=" + activeDecodeRequests(service)
-                        + " kv=" + service.getActiveKvTokens());
+                        + " kv=" + getActiveKvTokens(service));
     }
 
     static AtomicInteger activeDecodeRequestsRef(
@@ -355,5 +365,137 @@ final class MockEngineTestSupport {
             throw new AssertionError("unary response missing");
         }
         return response.get();
+    }
+
+    @SuppressWarnings("unchecked")
+    private static <T> T field(Object owner, String name) {
+        return (T) ReflectionTestUtils.getField(owner, name);
+    }
+
+    static int getDownstreamOwnershipCount(JavaMockEngineCluster.FastRpcService service) {
+        return ((java.util.Map<?, ?>) field(service, "downstreamDecodeOwners")).size();
+    }
+
+    static int getUpstreamOwnershipCount(JavaMockEngineCluster.FastRpcService service) {
+        return ((java.util.Map<?, ?>) field(service, "upstreamPrefillOwners")).size();
+    }
+
+    static boolean hasDownstreamOwnership(JavaMockEngineCluster.FastRpcService service, long requestId) {
+        return ((java.util.Map<?, ?>) field(service, "downstreamDecodeOwners")).containsKey(requestId);
+    }
+
+    static boolean hasUpstreamOwnership(JavaMockEngineCluster.FastRpcService service, long requestId) {
+        return ((java.util.Map<?, ?>) field(service, "upstreamPrefillOwners")).containsKey(requestId);
+    }
+
+    static long getTotalKvTokens(JavaMockEngineCluster.FastRpcService service) {
+        return (Long) field(service, "totalKvTokens");
+    }
+
+    static int getMaxPrefillConcurrency(JavaMockEngineCluster.FastRpcService service) {
+        return (Integer) field(service, "maxPrefillConcurrency");
+    }
+
+    static int getActivePrefillRequestCount(JavaMockEngineCluster.FastRpcService service) {
+        return ((AtomicInteger) field(service, "activePrefillRequests")).get();
+    }
+
+    static long getAcceptedCount(JavaMockEngineCluster.FastRpcService service) {
+        return ((AtomicLong) field(service, "acceptedCount")).get();
+    }
+
+    static long getCompletedCount(JavaMockEngineCluster.FastRpcService service) {
+        return ((AtomicLong) field(service, "completedCount")).get();
+    }
+
+    static long getCancelledCount(JavaMockEngineCluster.FastRpcService service) {
+        return ((AtomicLong) field(service, "cancelledCount")).get();
+    }
+
+    static long getActiveKvTokens(JavaMockEngineCluster.FastRpcService service) {
+        return invoke(service, "usedKvTokens");
+    }
+
+    static long getOccupiedKvTokens(JavaMockEngineCluster.FastRpcService service) {
+        return invoke(service, "occupiedKvTokens");
+    }
+
+    static int getCacheBlocks(JavaMockEngineCluster.FastRpcService service) {
+        return ((MockLruBlockCache) field(service, "cache")).totalBlocks();
+    }
+
+    static int getSeqSizePerBlock(JavaMockEngineCluster.FastRpcService service) {
+        return (Integer) field(service, "seqSizePerBlock");
+    }
+
+    static boolean isLeakDetected(JavaMockEngineCluster.FastRpcService service) {
+        return ((AtomicBoolean) field(service, "leakDetected")).get();
+    }
+
+    static int getActiveDecodeCount(JavaMockEngineCluster.FastRpcService service) {
+        return ((AtomicInteger) field(service, "activeDecodeRequests")).get();
+    }
+
+    static int getActivePrefillBatchCount(JavaMockEngineCluster.FastRpcService service) {
+        return ((AtomicInteger) field(service, "activePrefillBatches")).get();
+    }
+
+    static int getPrefillPendingQueueDepth(JavaMockEngineCluster.FastRpcService service) {
+        return invoke(service, "prefillPendingQueueSize");
+    }
+
+    static Map<Long, String> getRequestStates(JavaMockEngineCluster.FastRpcService service) {
+        return field(service, "requestStates");
+    }
+
+    static void setCompletionRetainWindow(JavaMockEngineCluster.FastRpcService service, int window) {
+        Preconditions.checkArgument(window >= 0, "completion retain window must be >= 0");
+        ReflectionTestUtils.setField(service, "completionRetainWindow", window);
+    }
+
+    static int lruKeyBlocks(MockLruBlockCache cache) {
+        synchronized (cache) {
+            return ((Map<?, ?>) field(cache, "blocks")).size();
+        }
+    }
+
+    static int controlPort(MockControlServer server) {
+        return ((com.sun.net.httpserver.HttpServer) field(server, "httpServer")).getAddress().getPort();
+    }
+
+    static long decodeMs(MockPerformanceModel model, int outputLen, int batchSize) {
+        double stepMs = invoke(model, "stepMs", batchSize);
+        double scale = invoke(model, "effectiveDecodeScale");
+        return invoke(model, "scaledMs", model.decodeSteps(outputLen) * stepMs * scale);
+    }
+
+    private static <T> T invoke(Object owner, String name, Object... args) {
+        return ReflectionTestUtils.invokeMethod(owner, name, args);
+    }
+
+    static boolean seedCache(MockLruBlockCache cache, List<Long> keys) {
+        synchronized (cache) {
+            Map<Long, Integer> blocks = field(cache, "blocks");
+            if (cache.totalBlocks() == 0 || keys.isEmpty()) {
+                return false;
+            }
+            boolean changed = false;
+            for (Long key : keys) {
+                // containsKey guard: never clobber a live reference count — a key
+                // currently pinned by an in-flight request only gets its LRU order
+                // refreshed, exactly like the lease-based admit path.
+                if (!blocks.containsKey(key)) {
+                    blocks.put(key, 0);
+                    changed = true;
+                }
+            }
+            while (blocks.size() > cache.totalBlocks() && MockEngineTestSupport.<Boolean>invoke(cache, "evictOne")) {
+                // evictOne already counted the eviction
+            }
+            return changed;
+        }
+    }
+    static boolean isShuttingDown(JavaMockEngineCluster.FastRpcService service) {
+        return (Boolean) field(service, "shuttingDown");
     }
 }

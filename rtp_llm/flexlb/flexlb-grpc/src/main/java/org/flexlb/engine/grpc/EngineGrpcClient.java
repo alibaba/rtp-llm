@@ -4,6 +4,7 @@ import com.google.common.util.concurrent.FutureCallback;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.protobuf.MessageLite;
+import io.grpc.Context;
 import io.grpc.ManagedChannel;
 import io.grpc.StatusRuntimeException;
 import io.grpc.internal.GrpcUtil;
@@ -28,8 +29,10 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 
+import static com.google.common.base.Preconditions.checkArgument;
+
 /**
- * Engine gRPC client for worker status queries
+ * Worker RPC boundary for status, cache, delivery and cancellation
  */
 @Component
 public class EngineGrpcClient extends AbstractGrpcClient {
@@ -68,26 +71,13 @@ public class EngineGrpcClient extends AbstractGrpcClient {
                                     + DEFAULT_ENQUEUE_TIMEOUT_MILLIS + "}")
                             long enqueueTimeoutMillis) {
         super(grpcReporter);
-        if (enqueueTimeoutMillis <= 0L) {
-            throw new IllegalArgumentException("enqueueTimeoutMillis must be positive");
-        }
+        checkArgument(enqueueTimeoutMillis > 0L, "enqueueTimeoutMillis must be positive");
         this.enqueueTimeoutMillis = enqueueTimeoutMillis;
-        if (connectTimeoutMillis <= 0) {
-            throw new IllegalArgumentException(
-                    "connectTimeoutMillis must be positive");
-        }
+        checkArgument(connectTimeoutMillis > 0, "connectTimeoutMillis must be positive");
         this.executor = executor;
         this.eventLoopGroup = eventLoopGroup;
         this.connectTimeoutMillis = connectTimeoutMillis;
         nameResolver.start(this);
-    }
-
-    private <R> CompletableFuture<R> executeGrpcCallAsync(String ip, int port,
-                                                           Function<GrpcFutureStubWrapper, ListenableFuture<R>> grpcCall,
-                                                           long requestTimeoutMs,
-                                                           ServiceType serviceType) {
-        return executeGrpcCallAsync(ip, port, grpcCall, requestTimeoutMs, serviceType,
-                retriesBrokenConnections(serviceType));
     }
 
     static boolean retriesBrokenConnections(ServiceType serviceType) {
@@ -98,8 +88,8 @@ public class EngineGrpcClient extends AbstractGrpcClient {
     private <R> CompletableFuture<R> executeGrpcCallAsync(String ip, int port,
                                                            Function<GrpcFutureStubWrapper, ListenableFuture<R>> grpcCall,
                                                            long requestTimeoutMs,
-                                                           ServiceType serviceType,
-                                                           boolean retryOnBrokenConnection) {
+                                                           ServiceType serviceType) {
+        boolean retryOnBrokenConnection = retriesBrokenConnections(serviceType);
         CompletableFuture<R> resultFuture = new CompletableFuture<>();
         long startTime = System.nanoTime();
 
@@ -117,7 +107,6 @@ public class EngineGrpcClient extends AbstractGrpcClient {
                 invoker = replaceInvoker(channelKey, invoker, newChannel);
             }
 
-            invoker.updateLastUsedTime();
             final Invoker finalInvoker = invoker;
             GrpcFutureStubWrapper stubWrapper = new GrpcFutureStubWrapper(
                     RpcServiceGrpc.newFutureStub(finalInvoker.getChannel()),
@@ -259,31 +248,71 @@ public class EngineGrpcClient extends AbstractGrpcClient {
      */
     public CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> batchEnqueueAsync(
             String ip, int port, EngineRpcService.EnqueueBatchRequestPB request) {
-        return batchEnqueueAsync(ip, port, request, enqueueTimeoutMillis);
-    }
-
-    public CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> batchEnqueueAsync(String ip, int port, EngineRpcService.EnqueueBatchRequestPB request, long requestTimeoutMs) {
         // EnqueueBatch is not safe to replay after an ambiguous connection
         // failure: the Engine may have accepted the first invocation even
         // though its ACK was lost. Reconciliation is owned by the scheduler's
         // request-id cancel fence, so this client must expose the ambiguity
         // instead of issuing a second EnqueueBatch automatically.
         return executeGrpcCallAsync(ip, port, stub -> stub.getRpcServiceFutureStub().enqueueBatch(request),
-                requestTimeoutMs, ServiceType.BATCH_ENQUEUE);
+                enqueueTimeoutMillis, ServiceType.BATCH_ENQUEUE);
+    }
+
+    /** Protocol evidence only; the scheduler decides when request resources can be released. */
+    public enum CancelReply {
+        ACCEPTED,       // Cancel intent accepted; execution may still be running.
+        NOT_FOUND,      // Request absent, without a fence against a racing Enqueue.
+        REQUEST_FENCED, // Prefill rejects any later Enqueue for this request id.
+        REQUEST_CLEANED, // Fence plus explicit downstream cleanup proof.
+        UNSUPPORTED,   // Engine does not advertise ordinary request cleanup.
+        FAILED         // Unspecified or unrecognized protocol response; outcome is unknown.
     }
 
     /**
-     * AutoTPM priority-preemption Cancel to the victim's original Prefill.
-     * No transport retry (channel is built with disableRetry); idempotency
-     * rides on request_id.
+     * One cancellation attempt against the original Prefill. Ordinary cleanup first checks
+     * capability; priority preemption remains compatible with the original Cancel protocol.
+     * Transport failures complete exceptionally. Retry and settlement belong to the caller.
      */
-    public CompletableFuture<EngineRpcService.CancelResponsePB> cancelAsync(String ip, int port, EngineRpcService.CancelRequestPB request, long requestTimeoutMs) {
-        // Do not retry Cancel after an ambiguous connection failure: the first
-        // attempt may already have been ACCEPTED and completed, in which case a
-        // retry could return NOT_FOUND and turn a successful cancel into a false
-        // negative at the Master.
-        return executeGrpcCallAsync(ip, port, stub -> stub.getRpcServiceFutureStub().cancel(request),
-                requestTimeoutMs, ServiceType.ENGINE_CANCEL);
+    public CompletableFuture<CancelReply> cancelAsync(String ip, int port,
+            EngineRpcService.CancelRequestPB request, long requestTimeoutMs) {
+        try {
+            checkArgument(ip != null && !ip.isBlank() && port > 0, "Cancel requires a routable Prefill");
+            checkArgument(request != null, "Cancel request is required");
+            long timeoutMs = Math.max(1, requestTimeoutMs);
+            Context detached = Context.current().fork();
+            Context previous = detached.attach();
+            try {
+                if (request.getReason() == EngineRpcService.RequestCancelReasonPB.REQUEST_CANCEL_REASON_PRIORITY_PREEMPTED) {
+                    return sendCancel(ip, port, request, timeoutMs, detached);
+                }
+                return getWorkerStatusAsync(ip, port, EngineRpcService.StatusVersionPB.getDefaultInstance(), timeoutMs)
+                        .thenCompose(status -> status.getSupportsRequestCleanup()
+                                ? sendCancel(ip, port, request, timeoutMs, detached)
+                                : CompletableFuture.completedFuture(CancelReply.UNSUPPORTED));
+            } finally {
+                detached.detach(previous);
+            }
+        } catch (RuntimeException | Error failure) {
+            return CompletableFuture.failedFuture(failure);
+        }
+    }
+
+    private CompletableFuture<CancelReply> sendCancel(String ip, int port,
+            EngineRpcService.CancelRequestPB request, long timeoutMs, Context detached) {
+        // The capability response may arrive after the frontend call has ended.
+        Context previous = detached.attach();
+        try {
+            // Never replay Cancel after an ambiguous failure: a later NOT_FOUND is not a negative ACK.
+            return executeGrpcCallAsync(ip, port, stub -> stub.getRpcServiceFutureStub().cancel(request),
+                    timeoutMs, ServiceType.ENGINE_CANCEL).thenApply(response -> switch (response.getStatus()) {
+                        case CANCEL_STATUS_ACCEPTED -> CancelReply.ACCEPTED;
+                        case CANCEL_STATUS_NOT_FOUND -> CancelReply.NOT_FOUND;
+                        case CANCEL_STATUS_TOMBSTONED -> response.getDecodeCleanupComplete()
+                                ? CancelReply.REQUEST_CLEANED : CancelReply.REQUEST_FENCED;
+                        case CANCEL_STATUS_UNSPECIFIED, UNRECOGNIZED -> CancelReply.FAILED;
+                    });
+        } finally {
+            detached.detach(previous);
+        }
     }
 
     @Override

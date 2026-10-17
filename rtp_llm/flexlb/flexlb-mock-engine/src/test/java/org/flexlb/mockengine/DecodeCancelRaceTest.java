@@ -132,14 +132,14 @@ class DecodeCancelRaceTest {
 
         assertEquals(0, activeDecodeRequests(decode),
                 "activeDecodeRequests must settle at 0 (no permanent slot leak)");
-        assertEquals(0, decode.getActiveKvTokens(),
+        assertEquals(0, MockEngineTestSupport.getActiveKvTokens(decode),
                 "activeKvTokens must settle at 0 (no permanent KV leak)");
         assertEquals(0, decode.getInflightCount(),
                 "pendingRequests must settle at 0");
         assertEquals(0, decode.getRunningCount(),
                 "runningTasks must be empty");
         decode.checkLeakDrain(0L);
-        assertFalse(decode.isLeakDetected(),
+        assertFalse(MockEngineTestSupport.isLeakDetected(decode),
                 "checkLeakDrain must not flag a LEAK after the cancel storm");
     }
 
@@ -213,14 +213,14 @@ class DecodeCancelRaceTest {
                         + " — observed max " + maxObserved.get());
         assertEquals(0, activeDecodeRequests(decode),
                 "activeDecodeRequests must settle at 0");
-        assertEquals(0, decode.getActiveKvTokens(),
+        assertEquals(0, MockEngineTestSupport.getActiveKvTokens(decode),
                 "activeKvTokens must settle at 0");
         assertEquals(0, decode.getInflightCount(),
                 "pendingRequests must settle at 0");
         assertEquals(0, decode.getRunningCount(),
                 "runningTasks must be empty");
         decode.checkLeakDrain(0L);
-        assertFalse(decode.isLeakDetected(),
+        assertFalse(MockEngineTestSupport.isLeakDetected(decode),
                 "checkLeakDrain must not flag a LEAK after the cancel storm");
     }
 

@@ -9,6 +9,8 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
+import static com.google.common.base.Preconditions.checkArgument;
+
 /**
  * Prefill-time predictor with linear regression and online Adam-optimizer learning.
  *
@@ -43,20 +45,20 @@ public class LearningPredictor implements PrefillTimePredictor {
         @Override
         public long estimateMs(long totalTokens, long hitTokens) {
             long seq = Math.max(0L, totalTokens);
-            long hit = Math.max(0L, Math.min(hitTokens, seq));
-            double thisReuse = hit / TOKENS_PER_FEATURE_UNIT;
-            double thisCompute = (seq - hit) / TOKENS_PER_FEATURE_UNIT;
-            double[] inputs = new double[weights.length];
-            inputs[0] = 1.0;
-            inputs[1] = 1.0;
-            inputs[2] = thisReuse;
-            inputs[3] = thisCompute;
-            inputs[4] = thisCompute * thisCompute;
-            inputs[5] = thisReuse * thisCompute;
-            double linear = calcLinear(inputs, weights);
-            double[] values = new double[5];
-            calcNonLinear(weights, linear, values);
-            return (long) values[0];
+            long hit = Math.clamp(hitTokens, 0L, seq);
+            double[] inputs = new double[LINEAR_PARAM_COUNT];
+            appendInput(inputs, seq, hit);
+            return (long) predict(inputs);
+        }
+
+        @Override
+        public BatchPrediction newBatchPrediction() {
+            double[] inputs = new double[LINEAR_PARAM_COUNT];
+            return (seqLen, hitCache) -> {
+                checkArgument(seqLen >= 0 && hitCache >= 0 && hitCache <= seqLen, "Invalid request token counts");
+                appendInput(inputs, seqLen, hitCache);
+                return predict(inputs);
+            };
         }
 
         @Override
@@ -68,7 +70,10 @@ public class LearningPredictor implements PrefillTimePredictor {
             if (features.items().isEmpty()) {
                 return 0;
             }
-            double[] inputs = collectInput(features);
+            return predict(collectInput(features));
+        }
+
+        private double predict(double[] inputs) {
             double linear = calcLinear(inputs, weights);
             double[] values = new double[5];
             calcNonLinear(weights, linear, values);
@@ -154,28 +159,24 @@ public class LearningPredictor implements PrefillTimePredictor {
     }
 
     private static double[] collectInput(PrefillBatchFeatures features) {
-        double reuse = 0.0;
-        double compute = 0.0;
-        double compute_square = 0.0;
-        double reuse_mul_compute = 0.0;
-        for (PrefillBatchFeatures.Item item : features.items()) {
-            long seq = Math.max(0L, item.seqLen());
-            long hit = Math.max(0L, Math.min(item.hitCache(), seq));
-            double thisReuse = hit / TOKENS_PER_FEATURE_UNIT;
-            double thisCompute = (seq - hit) / TOKENS_PER_FEATURE_UNIT;
-            reuse += thisReuse;
-            compute += thisCompute;
-            compute_square += thisCompute * thisCompute;
-            reuse_mul_compute += thisReuse * thisCompute;
-        }
         double[] inputs = new double[LINEAR_PARAM_COUNT];
         inputs[0] = 1.0;
-        inputs[1] = (double) features.batchSize();
-        inputs[2] = reuse;
-        inputs[3] = compute;
-        inputs[4] = compute_square;
-        inputs[5] = reuse_mul_compute;
+        for (PrefillBatchFeatures.Item item : features.items()) {
+            appendInput(inputs, item.seqLen(), item.hitCache());
+        }
         return inputs;
+    }
+
+    /** Append in request order so every prefix retains the full evaluation's rounding. */
+    private static void appendInput(double[] inputs, long seqLen, long hitCache) {
+        double reuse = hitCache / TOKENS_PER_FEATURE_UNIT;
+        double compute = (seqLen - hitCache) / TOKENS_PER_FEATURE_UNIT;
+        inputs[0] = 1.0;
+        inputs[1]++;
+        inputs[2] += reuse;
+        inputs[3] += compute;
+        inputs[4] += compute * compute;
+        inputs[5] += reuse * compute;
     }
 
     @Override
@@ -189,26 +190,17 @@ public class LearningPredictor implements PrefillTimePredictor {
         double[] oldWeights = oldModel.weightsCopy();
         double[] gradient = new double[oldWeights.length];
         for (BatchUpdateItem batchItem : this.itemBatch) {
-            double[] thisGradient = new double[oldWeights.length];
             double[] inputs = collectInput(batchItem.features());
             double linear = calcLinear(inputs, oldWeights);
             double[] nonLinearOutput = new double[5];
             calcNonLinear(oldWeights, linear, nonLinearOutput);
-            double predict = nonLinearOutput[0];
-            double nonLinearGrad = nonLinearOutput[1];
-            double nonLinearP6Grad = nonLinearOutput[2];
-            double nonLinearP7Grad = nonLinearOutput[3];
-            double nonLinearP8Grad = nonLinearOutput[4];
-            thisGradient[LINEAR_PARAM_COUNT] = nonLinearP6Grad;
-            thisGradient[LINEAR_PARAM_COUNT + 1] = nonLinearP7Grad;
-            thisGradient[LINEAR_PARAM_COUNT + 2] = nonLinearP8Grad;
-            double linearGrad = nonLinearGrad / COFF3;
+            double diff = nonLinearOutput[0] - batchItem.actualMs();
+            double linearGrad = nonLinearOutput[1] / COFF3;
             for (int i = 0; i < inputs.length; i++) {
-                thisGradient[i] = linearGrad * inputs[i];
+                gradient[i] += diff * (linearGrad * inputs[i]);
             }
-            double diff = predict - batchItem.actualMs();
-            for (int i = 0; i < oldWeights.length; i++) {
-                gradient[i] += diff * thisGradient[i];
+            for (int i = LINEAR_PARAM_COUNT; i < oldWeights.length; i++) {
+                gradient[i] += diff * nonLinearOutput[i - LINEAR_PARAM_COUNT + 2];
             }
         }
         for (int i = 0; i < oldWeights.length; i++) {

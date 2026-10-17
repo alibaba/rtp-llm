@@ -59,7 +59,7 @@ class TelemetryEmissionSurfaceTest {
         try {
             HttpResponse<String> response = HttpClient.newHttpClient().send(
                     HttpRequest.newBuilder()
-                            .uri(URI.create("http://127.0.0.1:" + controlServer.getPort() + "/snapshot"))
+                            .uri(URI.create("http://127.0.0.1:" + MockEngineTestSupport.controlPort(controlServer) + "/snapshot"))
                             .GET()
                             .build(),
                     HttpResponse.BodyHandlers.ofString());

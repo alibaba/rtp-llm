@@ -1,13 +1,13 @@
 package org.flexlb.service;
 
 import org.apache.commons.lang3.StringUtils;
-import org.flexlb.consistency.LBStatusConsistencyService;
+import org.flexlb.consistency.MasterStatusService;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService.CacheVersionPB;
 import org.flexlb.engine.grpc.EngineRpcService.MultimodalCacheStatusPB;
-import org.flexlb.sync.status.WorkerDirectory;
+import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Flux;
@@ -30,9 +30,9 @@ import java.util.concurrent.TimeUnit;
 public class VitCacheDirectory {
     // Cache residency changes after each image; ten-minute snapshots lose affinity.
     static final long SYNC_INTERVAL_MS = 30_000;
-    private final WorkerDirectory workers;
+    private final EndpointRegistry workers;
     private final EngineGrpcClient grpc;
-    private final LBStatusConsistencyService consistency;
+    private final MasterStatusService consistency;
     private final Map<String, Snapshot> snapshots = new HashMap<>();
     private final Map<String, Set<String>> owners = new HashMap<>();
     private final Map<String, Long> attempts = new HashMap<>();
@@ -48,8 +48,8 @@ public class VitCacheDirectory {
     public record Candidate(WorkerStatus worker, String instance, Set<String> hashKeys,
                             int hashHits, int embeddingHits, int gpuHits) {}
 
-    public VitCacheDirectory(WorkerDirectory workers, EngineGrpcClient grpc,
-                             LBStatusConsistencyService consistency) {
+    public VitCacheDirectory(EndpointRegistry workers, EngineGrpcClient grpc,
+                             MasterStatusService consistency) {
         this.workers = workers;
         this.grpc = grpc;
         this.consistency = consistency;
@@ -174,7 +174,7 @@ public class VitCacheDirectory {
 
     private boolean isRoutable(WorkerStatus worker) {
         if (worker == null) { return false; }
-        try (var pin = workers.captureEndpoint(RoleType.VIT, worker.getIpPort())) {
+        try (var pin = workers.capture(RoleType.VIT, worker.getIpPort())) {
             return pin != null && pin.endpoint().getStatus() == worker;
         }
     }

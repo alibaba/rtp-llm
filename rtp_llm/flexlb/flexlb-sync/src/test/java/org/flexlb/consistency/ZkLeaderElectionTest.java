@@ -16,6 +16,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.api.Timeout;
 import org.springframework.core.env.Environment;
+import org.springframework.test.util.ReflectionTestUtils;
 import reactor.core.publisher.Mono;
 
 import java.io.IOException;
@@ -43,14 +44,12 @@ import static org.mockito.Mockito.when;
  * {@link TestingServer}) drives the production
  * {@link ZookeeperMasterElectService} election code.
  *
- * <p>Construction note: {@code ZookeeperMasterElectService}'s constructor runs
- * {@code init()}, which reads {@code FLEXLB_SYNC_CONSISTENCY_CONFIG} from the
- * environment. In the plain test JVM that variable is unset, so the default
- * {@code LBConsistencyConfig} (needConsistency=false) makes {@code init()}
+ * <p>Construction note: {@code ZookeeperMasterElectService}'s constructor reads
+ * {@code FLEXLB_SYNC_CONSISTENCY_CONFIG} from the environment. In the plain test
+ * JVM that variable is unset, so the default
+ * {@code LBConsistencyConfig} (needConsistency=false) makes construction
  * return before touching {@code HIPPO_ROLE} or ZooKeeper. The test then uses
- * the production {@code @Setter} hooks (including the package-private
- * {@code setClient}/{@code setLeaderSelector} reachable from this same
- * package) to bind a real Curator client and a real {@link LeaderSelector}
+ * reflection in its fixture to bind a real Curator client and a real {@link LeaderSelector}
  * fighting over the production lock path
  * {@code /master_lb_leader/{roleId}} under the production
  * {@code whale-master} namespace.</p>
@@ -121,9 +120,9 @@ class ZkLeaderElectionTest {
             // Leader identity: the leader sees itself; the follower sees the
             // leader after one view refresh (production refreshes every 5s).
             follower.service().updateLatestMaster();
-            assertEquals(master.localIp(), master.service().getMasterHostIp(false),
+            assertEquals(master.localIp(), master.service().getMasterHostIp(),
                     "leader must answer getMasterHostIp with its own identity");
-            assertEquals(master.localIp(), follower.service().getMasterHostIp(false),
+            assertEquals(master.localIp(), follower.service().getMasterHostIp(),
                     "follower must answer getMasterHostIp with the leader's identity");
 
             sampler.assertNeverSplitBrain();
@@ -194,7 +193,7 @@ class ZkLeaderElectionTest {
 
             // The restarted follower resolves the current leader's identity.
             rejoined.service().updateLatestMaster();
-            assertEquals(survivor.localIp(), rejoined.service().getMasterHostIp(false));
+            assertEquals(survivor.localIp(), rejoined.service().getMasterHostIp());
 
             sampler.assertNeverSplitBrain();
         }
@@ -222,7 +221,7 @@ class ZkLeaderElectionTest {
 
     /**
      * Builds the production service with mocked auxiliary dependencies. The
-     * constructor's {@code init()} no-ops because the test JVM has no
+     * constructor leaves election disabled because the test JVM has no
      * {@code FLEXLB_SYNC_CONSISTENCY_CONFIG} env var (needConsistency=false).
      */
     private ZookeeperMasterElectService newElectService(String localIp) {
@@ -234,9 +233,9 @@ class ZkLeaderElectionTest {
 
         ZookeeperMasterElectService service =
                 new ZookeeperMasterElectService(httpService, healthReporter, environment);
-        service.setRoleId(ROLE_ID);
-        service.setLocalIp(localIp);
-        service.setPort(18_080);
+        ReflectionTestUtils.setField(service, "localNode",
+                new ZookeeperMasterElectService.LocalNodeIdentity(localIp, "18080", ROLE_ID));
+        ReflectionTestUtils.setField(service, "notificationPort", 18_080);
         return service;
     }
 
@@ -257,8 +256,8 @@ class ZkLeaderElectionTest {
         selector.setId(localIp);
         // Production calls autoRequeue: losers re-enter the queue automatically.
         selector.autoRequeue();
-        service.setClient(client);
-        service.setLeaderSelector(selector);
+        ReflectionTestUtils.setField(service, "client", client);
+        ReflectionTestUtils.setField(service, "leaderSelector", selector);
 
         BoundElector bound = new BoundElector(service, client, selector, localIp);
         perTestResources.add(bound);

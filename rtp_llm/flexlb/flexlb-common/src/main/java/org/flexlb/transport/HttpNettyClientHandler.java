@@ -6,7 +6,6 @@ import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.SimpleChannelInboundHandler;
-import io.netty.channel.socket.SocketChannel;
 import io.netty.handler.codec.http.HttpObject;
 import io.netty.util.AttributeKey;
 import lombok.extern.slf4j.Slf4j;
@@ -81,17 +80,6 @@ public class HttpNettyClientHandler extends SimpleChannelInboundHandler<HttpObje
             }
         } catch (Throwable t) {
             log.error("exceptionCaught: ", t);
-        }
-    }
-
-    public void channelEnhance(SocketChannel channel) {
-        try {
-            HttpNettyChannelContext nettyCtx = getNettyChannelContext(channel);
-            if (nettyCtx != null && nettyCtx.getChannelEnhanceCallback() != null) {
-                nettyCtx.getChannelEnhanceCallback().accept(nettyCtx);
-            }
-        } catch (Throwable t) {
-            log.error("enhanceChannelPipeline exceptionCaught", t);
         }
     }
 }

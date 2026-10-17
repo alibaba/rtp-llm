@@ -9,7 +9,6 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Set;
 
 @JsonIgnoreProperties(ignoreUnknown = true)
@@ -47,15 +46,6 @@ public class ServiceRoute {
             allEndpoints.addAll(endpointList);
         }
         return allEndpoints;
-    }
-
-    public List<Endpoint> getRoleEndpoints(RoleType roleType) {
-        List<Endpoint> returnRoleEndpoints = new ArrayList<>();
-        roleEndpoints.stream()
-                .map(groupRoleEndPoint -> groupRoleEndPoint.getRoleEndpoint(roleType))
-                .filter(Objects::nonNull)
-                .forEach(returnRoleEndpoints::add);
-        return returnRoleEndpoints;
     }
 
     public List<RoleType> getAllRoleTypes() {

@@ -385,7 +385,7 @@ class StatusFaultInjectionTest {
 
         // Let the (10ms) prefill finish internally.
         Thread.sleep(150);
-        assertEquals(1, prefill.getCompletedCount(),
+        assertEquals(1, MockEngineTestSupport.getCompletedCount(prefill),
                 "the request DID complete internally");
 
         // The report keeps it RUNNING forever and never publishes finished.
@@ -549,7 +549,7 @@ class StatusFaultInjectionTest {
 
         // Prefill-only cluster: survivors take the completed branch, the
         // failed member does NOT count as completed.
-        assertEquals(2, prefill.getCompletedCount(),
+        assertEquals(2, MockEngineTestSupport.getCompletedCount(prefill),
                 "the failed member is not a completed request");
 
         // k=2 with a custom code: the first TWO members of a fresh batch fail.
@@ -563,7 +563,7 @@ class StatusFaultInjectionTest {
         assertTrue(findByRid(done2, 105).hasErrorInfo());
         assertFalse(findByRid(done2, 106).hasErrorInfo(),
                 "k=2: only the first two members fail");
-        assertEquals(3, prefill.getCompletedCount(), "2 + 1 survivors are completed");
+        assertEquals(3, MockEngineTestSupport.getCompletedCount(prefill), "2 + 1 survivors are completed");
 
         // Cumulative counter: 1 + 2 failed members exported via /snapshot.
         assertEquals(3L, snapshotCounter("prefill", "prefill_async_partial_fails"),
@@ -628,14 +628,14 @@ class StatusFaultInjectionTest {
         EngineRpcService.WorkerStatusPB cleanDone = awaitFinished(prefill, 0, 2, 5_000);
         assertFalse(findByRid(cleanDone, 301).hasErrorInfo());
         assertFalse(findByRid(cleanDone, 302).hasErrorInfo());
-        assertEquals(2, prefill.getCompletedCount());
+        assertEquals(2, MockEngineTestSupport.getCompletedCount(prefill));
 
         // Explicit k=0 is equally inert.
         inject(basePort, "prefill_async_partial_fail", "\"k\":0");
         enqueue(prefill, batch(7302, slot(0, input(303, 10))));
         EngineRpcService.WorkerStatusPB k0Done = awaitFinished(prefill, 2, 1, 5_000);
         assertFalse(findByRid(k0Done, 303).hasErrorInfo(), "k=0 must inject nothing");
-        assertEquals(3, prefill.getCompletedCount());
+        assertEquals(3, MockEngineTestSupport.getCompletedCount(prefill));
 
         // Armed (k=1, custom code) → exactly one typed failure.
         inject(basePort, "prefill_async_partial_fail", "\"k\":1,\"code\":9001");
@@ -652,7 +652,7 @@ class StatusFaultInjectionTest {
         assertFalse(findByRid(disarmedDone, 306).hasErrorInfo(),
                 "disabled injection must not fail members");
         assertFalse(findByRid(disarmedDone, 307).hasErrorInfo());
-        assertEquals(6, prefill.getCompletedCount(), "2+1+1+2 completed requests");
+        assertEquals(6, MockEngineTestSupport.getCompletedCount(prefill), "2+1+1+2 completed requests");
     }
 
     @Test
@@ -788,18 +788,18 @@ class StatusFaultInjectionTest {
     }
 
     private void inject(int enginePort, String type, String extra) throws Exception {
-        httpPost(controlServer.getPort(), "/inject",
+        httpPost(MockEngineTestSupport.controlPort(controlServer), "/inject",
                 "{\"port\":" + enginePort + ",\"type\":\"" + type + "\",\"enabled\":true"
                         + (extra == null ? "" : "," + extra) + "}");
     }
 
     private void disable(int enginePort, String type) throws Exception {
-        httpPost(controlServer.getPort(), "/inject",
+        httpPost(MockEngineTestSupport.controlPort(controlServer), "/inject",
                 "{\"port\":" + enginePort + ",\"type\":\"" + type + "\",\"enabled\":false}");
     }
 
     private void clearInject(int enginePort) throws Exception {
-        httpPost(controlServer.getPort(), "/clear_inject",
+        httpPost(MockEngineTestSupport.controlPort(controlServer), "/clear_inject",
                 "{\"port\":" + enginePort + "}");
     }
 
@@ -835,7 +835,7 @@ class StatusFaultInjectionTest {
      *  as "&lt;role&gt;-&lt;port&gt;", so a name match would never hit. */
     private long snapshotCounter(String role, String field) throws Exception {
         JsonNode snapshot = new ObjectMapper()
-                .readTree(httpGet(controlServer.getPort(), "/snapshot"));
+                .readTree(httpGet(MockEngineTestSupport.controlPort(controlServer), "/snapshot"));
         for (JsonNode engine : snapshot.path("engines")) {
             if (role.equals(engine.path("role").asText())) {
                 return engine.path(field).asLong(-1);

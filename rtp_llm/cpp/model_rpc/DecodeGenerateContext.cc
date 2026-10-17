@@ -44,8 +44,22 @@ void DecodeStatInfo::finishStage() {
 }
 
 DecodeGenerateContext::~DecodeGenerateContext() {
+    finishUnscheduledStream();
     stat_info.finishStage();
     reportTime();
+}
+
+void DecodeGenerateContext::finishUnscheduledStream() {
+    auto& stream = getStream();
+    if (!stream || stream_enqueued || stream->getStatus() == StreamState::FINISHED) {
+        return;
+    }
+    // Before enqueue the RPC handler owns the terminal transition. No engine loop can finish it for us.
+    if (!stream->hasError()) {
+        stream->reportError(error_info.hasError() ? error_info.code() : ErrorCode::CANCELLED,
+                            error_info.hasError() ? error_info.ToString() : "decode RPC ended before enqueue");
+    }
+    stream->moveToNext();
 }
 
 void DecodeGenerateContext::TimeInfo::updateRequestBegineTime() {

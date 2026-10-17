@@ -1,5 +1,7 @@
 package org.flexlb.dao.master;
 
+import org.flexlb.dao.master.WorkerStatusTestSupport;
+
 import org.flexlb.dao.route.RoleType;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
@@ -53,7 +55,7 @@ class WorkerStatusTest {
         status.lock.lock();
         try {
             WorkerStatus.StatusObservation observation =
-                    status.freezeStatusResponse(response);
+                    WorkerStatusTestSupport.freezeStatusResponse(status, response);
             WorkerStatus.PreparedStatus prepared =
                     status.prepareNewStatus(observation);
             status.publishPreparedStatus(prepared);
@@ -197,7 +199,7 @@ class WorkerStatusTest {
             status.lock.lock();
             try {
                 WorkerStatus.StatusObservation observation =
-                        status.freezeStatusResponse(stale);
+                        WorkerStatusTestSupport.freezeStatusResponse(status, stale);
                 assertThrows(IllegalArgumentException.class,
                         () -> status.prepareNewStatus(observation));
             } finally {
@@ -210,7 +212,7 @@ class WorkerStatusTest {
         void prepareRequiresGenerationLock() {
             WorkerStatus status = discovered();
             WorkerStatus.StatusObservation observation =
-                    status.freezeStatusResponse(responseWithMarker(1L));
+                    WorkerStatusTestSupport.freezeStatusResponse(status, responseWithMarker(1L));
             assertThrows(IllegalStateException.class,
                     () -> status.prepareNewStatus(observation));
         }
@@ -223,7 +225,7 @@ class WorkerStatusTest {
             status.lock.lock();
             try {
                 prepared = status.prepareNewStatus(
-                        status.freezeStatusResponse(responseWithMarker(1L)));
+                        WorkerStatusTestSupport.freezeStatusResponse(status, responseWithMarker(1L)));
             } finally {
                 status.lock.unlock();
             }
@@ -244,9 +246,9 @@ class WorkerStatusTest {
             status.lock.lock();
             try {
                 first = status.prepareNewStatus(
-                        status.freezeStatusResponse(responseWithMarker(2L)));
+                        WorkerStatusTestSupport.freezeStatusResponse(status, responseWithMarker(2L)));
                 second = status.prepareNewStatus(
-                        status.freezeStatusResponse(responseWithMarker(3L)));
+                        WorkerStatusTestSupport.freezeStatusResponse(status, responseWithMarker(3L)));
             } finally {
                 status.lock.unlock();
             }
@@ -273,7 +275,7 @@ class WorkerStatusTest {
                 assertTrue(status
                         .beginRetirementAfterEndpointGateClosed());
                 WorkerStatus.StatusObservation observation =
-                        status.freezeStatusResponse(responseWithMarker(2L));
+                        WorkerStatusTestSupport.freezeStatusResponse(status, responseWithMarker(2L));
                 assertThrows(IllegalStateException.class,
                         () -> status.prepareNewStatus(observation));
             } finally {
@@ -322,7 +324,7 @@ class WorkerStatusTest {
                         try {
                             long next = version.getAndIncrement();
                             WorkerStatus.StatusObservation observation =
-                                    status.freezeStatusResponse(
+                                    WorkerStatusTestSupport.freezeStatusResponse(status,
                                             responseWithMarker(next));
                             status.publishPreparedStatus(
                                     status.prepareNewStatus(observation));

@@ -174,7 +174,7 @@ class ConcurrentDoubleSchedulingTest {
         for (JavaMockEngineCluster.FastRpcService service : services.values()) {
             assertEquals(0, service.getRunningCount(),
                     "runningTasks should be empty for engine on port " + service.getGrpcPort());
-            assertFalse(service.isLeakDetected(),
+            assertFalse(MockEngineTestSupport.isLeakDetected(service),
                     "no leak should be detected on engine on port " + service.getGrpcPort());
         }
 
@@ -230,7 +230,7 @@ class ConcurrentDoubleSchedulingTest {
         for (JavaMockEngineCluster.FastRpcService service : services.values()) {
             assertEquals(0, service.getRunningCount(),
                     "runningTasks should be empty for engine on port " + service.getGrpcPort());
-            assertFalse(service.isLeakDetected(),
+            assertFalse(MockEngineTestSupport.isLeakDetected(service),
                     "no leak should be detected on engine on port " + service.getGrpcPort());
         }
 
