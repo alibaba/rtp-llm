@@ -1454,6 +1454,14 @@ bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state,
             return fallback("request_capacity_exceeded",
                             GenerationPrefillCudaGraphStatus::REQUEST_COUNT_EXCEED_CAPTURE_LIMIT);
         }
+        // The canonical replay metadata merges the whole bucket into request
+        // slot 0 as one causal sequence; per-request boundaries are not
+        // expressible in that layout. Fail closed to the eager path until
+        // per-request replay semantics exist.
+        if (real_requests_i64 != 1) {
+            return fallback("multi_request_not_supported",
+                            GenerationPrefillCudaGraphStatus::MULTI_REQUEST_NOT_SUPPORTED);
+        }
         const int  real_requests   = static_cast<int>(real_requests_i64);
         const auto host_i32_vector = [](const torch::Tensor& tensor, int64_t expected_numel) {
             return tensor.defined() && !tensor.is_cuda() && tensor.scalar_type() == torch::kInt32

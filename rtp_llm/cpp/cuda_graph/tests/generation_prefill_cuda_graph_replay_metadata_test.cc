@@ -8,8 +8,8 @@
 namespace rtp_llm {
 namespace {
 
-TEST(GenerationPrefillCudaGraphReplayMetadataTest, BuildsDynamicSentinelLayout) {
-    std::vector<int32_t> input_lengths{24, 32, -1, -1, -1};
+TEST(GenerationPrefillCudaGraphReplayMetadataTest, BuildsCanonicalLayout) {
+    std::vector<int32_t> input_lengths{56, -1, -1, -1, -1};
     std::vector<int32_t> cu_seqlens(6, -1);
     std::vector<int32_t> padding_offset(64, -1);
 
@@ -19,22 +19,17 @@ TEST(GenerationPrefillCudaGraphReplayMetadataTest, BuildsDynamicSentinelLayout) 
                                                                 cu_seqlens.size(),
                                                                 padding_offset.data(),
                                                                 padding_offset.size(),
-                                                                2,
+                                                                1,
                                                                 4,
                                                                 56,
                                                                 64));
-    EXPECT_EQ(input_lengths, (std::vector<int32_t>{24, 32, 0, 0, 8}));
-    EXPECT_EQ(cu_seqlens, (std::vector<int32_t>{0, 24, 56, 56, 56, 64}));
-    EXPECT_TRUE(
-        std::all_of(padding_offset.begin(), padding_offset.begin() + 24, [](int32_t value) { return value == 0; }));
-    EXPECT_TRUE(std::all_of(
-        padding_offset.begin() + 24, padding_offset.begin() + 56, [](int32_t value) { return value == 40; }));
-    EXPECT_TRUE(
-        std::all_of(padding_offset.begin() + 56, padding_offset.end(), [](int32_t value) { return value == 200; }));
+    EXPECT_EQ(input_lengths, (std::vector<int32_t>{64, 0, 0, 0, 0}));
+    EXPECT_EQ(cu_seqlens, (std::vector<int32_t>{0, 64, 64, 64, 64, 64}));
+    EXPECT_TRUE(std::all_of(padding_offset.begin(), padding_offset.end(), [](int32_t value) { return value == 0; }));
 }
 
-TEST(GenerationPrefillCudaGraphReplayMetadataTest, AllowsZeroLengthSentinelAtExactTokenCapacity) {
-    std::vector<int32_t> input_lengths{16, 48, -1};
+TEST(GenerationPrefillCudaGraphReplayMetadataTest, BuildsCanonicalLayoutAtExactTokenCapacity) {
+    std::vector<int32_t> input_lengths{64, -1, -1};
     std::vector<int32_t> cu_seqlens(4, -1);
     std::vector<int32_t> padding_offset(64, -1);
 
@@ -44,16 +39,33 @@ TEST(GenerationPrefillCudaGraphReplayMetadataTest, AllowsZeroLengthSentinelAtExa
                                                                 cu_seqlens.size(),
                                                                 padding_offset.data(),
                                                                 padding_offset.size(),
-                                                                2,
+                                                                1,
                                                                 2,
                                                                 64,
                                                                 64));
-    EXPECT_EQ(input_lengths, (std::vector<int32_t>{16, 48, 0}));
-    EXPECT_EQ(cu_seqlens, (std::vector<int32_t>{0, 16, 64, 64}));
+    EXPECT_EQ(input_lengths, (std::vector<int32_t>{64, 0, 0}));
+    EXPECT_EQ(cu_seqlens, (std::vector<int32_t>{0, 64, 64, 64}));
+}
+
+TEST(GenerationPrefillCudaGraphReplayMetadataTest, RejectsMultiRequestUntilPerRequestSemanticsExist) {
+    std::vector<int32_t> input_lengths{24, 32, -1, -1};
+    std::vector<int32_t> cu_seqlens(5, -1);
+    std::vector<int32_t> padding_offset(64, -1);
+
+    EXPECT_FALSE(prepareGenerationPrefillCudaGraphReplayMetadata(input_lengths.data(),
+                                                                 input_lengths.size(),
+                                                                 cu_seqlens.data(),
+                                                                 cu_seqlens.size(),
+                                                                 padding_offset.data(),
+                                                                 padding_offset.size(),
+                                                                 2,
+                                                                 4,
+                                                                 56,
+                                                                 64));
 }
 
 TEST(GenerationPrefillCudaGraphReplayMetadataTest, RejectsInvalidMetadata) {
-    std::vector<int32_t> input_lengths{24, 32, -1};
+    std::vector<int32_t> input_lengths{56, -1};
     std::vector<int32_t> cu_seqlens(4, -1);
     std::vector<int32_t> padding_offset(64, -1);
 
@@ -71,22 +83,22 @@ TEST(GenerationPrefillCudaGraphReplayMetadataTest, RejectsInvalidMetadata) {
     };
     EXPECT_FALSE(prepare(0, 2, 56));
     EXPECT_FALSE(prepare(3, 2, 56));
-    EXPECT_FALSE(prepare(2, 2, 55));
+    EXPECT_FALSE(prepare(1, 2, 55));
 
-    input_lengths = {24, 0, -1};
-    EXPECT_FALSE(prepare(2, 2, 24));
+    input_lengths = {0, -1};
+    EXPECT_FALSE(prepare(1, 2, 0));
 
     // Reject invalid lengths at the metadata owner, before copy kernels run.
-    input_lengths = {-1, 32, -1};
-    EXPECT_FALSE(prepare(2, 2, 31));
-    input_lengths = {65, 1, -1};
-    EXPECT_FALSE(prepare(2, 2, 64));
-    input_lengths = {40, 32, -1};
-    EXPECT_FALSE(prepare(2, 2, 64));
+    input_lengths = {-1, -1};
+    EXPECT_FALSE(prepare(1, 2, 55));
+    input_lengths = {65, -1};
+    EXPECT_FALSE(prepare(1, 2, 64));
+    input_lengths = {56, -1};
+    EXPECT_FALSE(prepare(1, 2, 57));
 }
 
 TEST(GenerationPrefillCudaGraphReplayMetadataTest, RejectsInsufficientCapacity) {
-    std::vector<int32_t> input_lengths{24, 32, -1};
+    std::vector<int32_t> input_lengths{56, -1};
     std::vector<int32_t> cu_seqlens(4, -1);
     std::vector<int32_t> padding_offset(64, -1);
 
@@ -97,7 +109,7 @@ TEST(GenerationPrefillCudaGraphReplayMetadataTest, RejectsInsufficientCapacity) 
                                                                cu_capacity,
                                                                padding_offset.data(),
                                                                padding_capacity,
-                                                               2,
+                                                               1,
                                                                2,
                                                                56,
                                                                64);

@@ -23,6 +23,15 @@ inline bool prepareGenerationPrefillCudaGraphReplayMetadata(int32_t* input_lengt
         return false;
     }
 
+    // The canonical layout below merges the whole bucket into request slot 0
+    // as one causal sequence; per-request boundaries are not expressible.
+    // Multi-request batches must fail closed (the runner falls back to the
+    // eager path before reaching this function; this check is defense in
+    // depth for any future caller).
+    if (real_request_count != 1) {
+        return false;
+    }
+
     int computed_real_tokens = 0;
     for (int slot = 0; slot < real_request_count; ++slot) {
         if (input_lengths[slot] <= 0 || input_lengths[slot] > token_capacity - computed_real_tokens) {

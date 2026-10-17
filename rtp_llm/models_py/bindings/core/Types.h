@@ -28,6 +28,7 @@ enum class GenerationPrefillCudaGraphStatus : std::uint8_t {
     MIXED_PREFILL_DECODE_NOT_SUPPORTED,
     INPUT_METADATA_INVALID,
     REQUEST_COUNT_EXCEED_CAPTURE_LIMIT,
+    MULTI_REQUEST_NOT_SUPPORTED,
     PREFIX_CACHE_NOT_SUPPORTED,
     REQUEST_NOT_SUPPORTED,
     PD_CACHE_STORE_NOT_SUPPORTED,
@@ -55,6 +56,8 @@ inline const char* generationPrefillCudaGraphStatusString(GenerationPrefillCudaG
             return "input_metadata_invalid";
         case GenerationPrefillCudaGraphStatus::REQUEST_COUNT_EXCEED_CAPTURE_LIMIT:
             return "request_count_exceed_capture_limit";
+        case GenerationPrefillCudaGraphStatus::MULTI_REQUEST_NOT_SUPPORTED:
+            return "multi_request_not_supported";
         case GenerationPrefillCudaGraphStatus::PREFIX_CACHE_NOT_SUPPORTED:
             return "prefix_cache_not_supported";
         case GenerationPrefillCudaGraphStatus::REQUEST_NOT_SUPPORTED:

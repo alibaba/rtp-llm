@@ -18,21 +18,28 @@ void CudaGraphRunner::capturePrefill() {
         // we will transfer a `batch size tensor(int)` for `copy kernel`.
         // Prepare common inputs using shared function
         prepareCaptureInputs(inputs, max_bs_, seq_len);
-        // Generation prefill uses Bmax real slots plus one fixed sentinel slot.
-        // Capture the conservative layout [0, ..., 0, Tg] so FMHA/RoPE fix
-        // batch size and max_q_len at their profile capacity. All sentinel KV
-        // writes alias allocator-reserved block 0; its output is discarded.
+        // Generation prefill captures the canonical layout: request slot 0
+        // carries the full bucket and phantom slots stay empty. This must be
+        // byte-identical to prepareGenerationPrefillCudaGraphReplayMetadata:
+        // the fa2 ragged kernel freezes its CTA->(batch,tile) schedule and
+        // split-KV completion counts at capture, so replaying under different
+        // cu_seqlens leaves live rows uncomputed. Padding rows participate as
+        // ordinary rows of request 0; their outputs are dropped by the
+        // real-token-count slice and their KV writes alias allocator-reserved
+        // block 0.
         if (isGenerationPrefillCudaGraph()) {
             RTP_LLM_CHECK_WITH_INFO(max_bs_ == static_cast<size_t>(generation_prefill_cuda_graph_max_requests_ + 1),
                                     "generation prefill CUDA graph backend capacity mismatch: max_bs=%zu Bmax=%d",
                                     max_bs_,
                                     generation_prefill_cuda_graph_max_requests_);
             inputs.attention_inputs.input_lengths.zero_();
-            inputs.attention_inputs.input_lengths[generation_prefill_cuda_graph_max_requests_] = seq_len;
+            inputs.attention_inputs.input_lengths[0] = seq_len;
             inputs.attention_inputs.prefix_lengths.zero_();
             inputs.attention_inputs.cu_seqlens.zero_();
-            inputs.attention_inputs.cu_seqlens[max_bs_] = seq_len;
-            inputs.attention_inputs.padding_offset.fill_(generation_prefill_cuda_graph_max_requests_ * seq_len);
+            for (size_t row = 1; row <= max_bs_; ++row) {
+                inputs.attention_inputs.cu_seqlens[row] = seq_len;
+            }
+            inputs.attention_inputs.padding_offset.zero_();
             inputs.attention_inputs.input_lengths_device.copy_(inputs.attention_inputs.input_lengths, false);
             inputs.attention_inputs.prefix_lengths_device.zero_();
             inputs.attention_inputs.cu_seqlens_device.copy_(inputs.attention_inputs.cu_seqlens, false);
