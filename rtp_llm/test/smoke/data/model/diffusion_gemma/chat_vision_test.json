@@ -1,0 +1,101 @@
+[
+  {
+    "model_type": "diffusion_gemma",
+    "model_path": "/mnt/fuse/smoke-test/hf/google--diffusiongemma-26B-A4B-it--f7f5b7f5fa82ffc52addd066915886d497f5517b",
+    "query_result": [
+      {
+        "endpoint": "/v1/chat/completions",
+        "case_name": "vision_basic",
+        "query": {
+          "messages": [
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "image_url",
+                  "image_url": {
+                    "url": "data/model/qwen_vl/1.jpeg"
+                  }
+                },
+                {
+                  "type": "text",
+                  "text": "Describe this image in one sentence."
+                }
+              ]
+            }
+          ],
+          "max_tokens": 256,
+          "temperature": 0.0,
+          "top_p": 0.01
+        },
+        "expected_result": {
+          "goldens": []
+        }
+      },
+      {
+        "endpoint": "/v1/chat/completions",
+        "case_name": "vision_cache_reuse",
+        "query": {
+          "messages": [
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "image_url",
+                  "image_url": {
+                    "url": "data/model/qwen_vl/1.jpeg"
+                  }
+                },
+                {
+                  "type": "text",
+                  "text": "What colors dominate this picture?"
+                }
+              ]
+            }
+          ],
+          "max_tokens": 256,
+          "temperature": 0.0,
+          "top_p": 0.01
+        },
+        "expected_result": {
+          "goldens": []
+        }
+      },
+      {
+        "endpoint": "/v1/chat/completions",
+        "case_name": "vision_two_images",
+        "query": {
+          "messages": [
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Compare the following two images."
+                },
+                {
+                  "type": "image_url",
+                  "image_url": {
+                    "url": "data/model/qwen_vl/1.jpeg"
+                  }
+                },
+                {
+                  "type": "image_url",
+                  "image_url": {
+                    "url": "data/model/qwen_vl/1.jpeg"
+                  }
+                }
+              ]
+            }
+          ],
+          "max_tokens": 256,
+          "temperature": 0.0,
+          "top_p": 0.01
+        },
+        "expected_result": {
+          "goldens": []
+        }
+      }
+    ]
+  }
+]
