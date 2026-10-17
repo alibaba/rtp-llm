@@ -175,7 +175,7 @@ class CompressorFP8CPMergedGatherTest(unittest.TestCase):
             launch_args["meta"] = actual_meta
             launch_args["seq_start"] = seq_start
 
-        def fake_linear(local_2d, weight):
+        def fake_linear(local_2d, weight, *, linear_op):
             del weight
             return torch.zeros(local_2d.shape[0], 2 * out_dim, dtype=torch.bfloat16)
 

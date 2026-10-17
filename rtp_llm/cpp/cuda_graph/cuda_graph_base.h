@@ -90,6 +90,9 @@ public:
                                   CudaGraphState&      state,
                                   CudaGraphCheckMode   mode = CudaGraphCheckMode::FORWARD) = 0;
     virtual bool           captureSessionMayBeDirty() const                              = 0;
+    // True only after every captured attention implementation promises that
+    // replay preparation consumes device metadata and no mutable host mirrors.
+    virtual bool supportsDeviceOnlyPreparation() const { return false; }
     virtual void           prepareAttentionInputs(const PyModelInputs& inputs,
                                                   CudaGraphState&      state,
                                                   bool                 skip_forward_event_sync = false)  = 0;

@@ -56,6 +56,11 @@ class DeepseekV41Renderer(DeepseekV4Renderer):
     # Rendering downloads and preprocesses images using only request-local state.
     render_chat_in_thread = True
 
+    def default_thinking_budget(self, max_new_tokens: int):
+        # Keep the historical 32K budget for the mainline V4.1 recipe; only the
+        # Flash renderer opts into a max_tokens-sized thinking allowance.
+        return None
+
     def _load_encoding_module(self, ckpt_path: str):
         script = os.path.join(ckpt_path, "encoding", "encoding.py")
         if not os.path.isfile(script):

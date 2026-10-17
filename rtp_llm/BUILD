@@ -5,10 +5,27 @@ exports_files([
     "ops/librtp_compute_ops/__init__.pyi",
 ])
 
+# Deferred model adapters and registry primitives are also available without
+# the model/kernel dependency closure. Runtime clients provide those dependencies.
+py_library(
+    name = "module_dispatch_support",
+    srcs = [
+        "__init__.py",
+        "model_factory_register.py",
+        "models/__init__.py",
+        "device/__init__.py",
+        "device/device_type.py",
+        "device/runtime.py",
+        "config/module_dispatch_config.py",
+        "utils/import_util.py",
+        "utils/backend_registry.py",
+    ] + glob(["models/dsv4/*.py"]),
+)
+
 load("@rules_python//python:packaging.bzl", "py_package", "py_wheel")
 # make different torch for different device when in compiling
 load("//bazel:defs.bzl", "upload_pkg", "copy_target_to", "upload_wheel", "rename_wheel", "rename_wheel_aarch64")
-load("@arch_config//:arch_select.bzl", "requirement", "whl_deps", "internal_deps", "jit_deps", "platform_deps", "triton_deps")
+load("@arch_config//:arch_select.bzl", "requirement", "whl_deps", "ml_pin_reqs", "internal_deps", "jit_deps", "platform_deps", "triton_deps")
 load("//bazel:bundle.bzl", "bundle_files", "bundle_tar")
 
 load("@release_version//:defs.bzl", "RELEASE_VERSION")
@@ -156,6 +173,7 @@ _JIT_CACHE_ENV_SRCS = ["utils/jit_cache_env.py"]
 
 py_library(
     name = "utils",
+    data = ["//rtp_llm/platforms:platform_sources"],
     srcs = glob([
         "utils/**/*.py",
     ], exclude = _JIT_CACHE_SRCS + _JIT_CACHE_ENV_SRCS + [
@@ -644,18 +662,19 @@ py_package(
     }),
 )
 
+grpcio_tools_req = ["grpcio-tools==1.57.0"]
+
+setuptools_req = ["setuptools==60.5.0"]
+
 whl_reqs = [
     "filelock>=3.20.0",
     "jinja2",
     "sympy",
     "typing-extensions",
     "importlib_metadata",
-    "transformers==5.2.0",
     "sentencepiece==0.2.0",
     "fastapi==0.115.6",
-    "grpcio-tools==1.57.0",
     "uvicorn==0.30.0",
-    "setuptools==60.5.0",
     "dacite",
     "pynvml",
     "thrift",
@@ -664,7 +683,6 @@ whl_reqs = [
     "tiktoken==0.7.0",
     "lru-dict",
     "py-spy",
-    "pyarrow==14.0.0",
     "safetensors",
     "cpm_kernels",
     "Pillow",
@@ -676,7 +694,6 @@ whl_reqs = [
     "pydantic",
     "timm==0.9.12",
     "onnx",
-    "sentence-transformers==5.2.0",
     # "xfastertransformer_devel==1.8.1.1",
     # "xfastertransformer_devel_icx==1.8.1.1",
     "grpcio==1.62.0",
@@ -701,11 +718,10 @@ whl_reqs = [
     "portalocker",
     "concurrent_log_handler",
     "apache-tvm-ffi",
-    "xgrammar==0.2.5",
     # OTel trace runtime; keep the pinned protobuf compatibility constraint.
     "opentelemetry-sdk==1.44.0",
     "opentelemetry-exporter-otlp-proto-http==1.15.0",
-] + whl_deps() + platform_deps() + xft_dep
+] + grpcio_tools_req + setuptools_req + whl_deps() + platform_deps() + xft_dep + ml_pin_reqs()
 
 # Frontend-only requirement set: the frontend lane is CPU serving (HTTP + gRPC
 # client + tokenizer), so the engine's platform CUDA tree (whl_deps: torch-cuda,
@@ -722,7 +738,6 @@ whl_reqs_frontend = [
     "sympy",
     "typing-extensions",
     "importlib_metadata",
-    "transformers==5.2.0",
     "sentencepiece==0.2.0",
     "fastapi==0.115.6",
     "uvicorn==0.30.0",
@@ -756,11 +771,15 @@ whl_reqs_frontend = [
     "portalocker",
     "concurrent_log_handler",
     "apache-tvm-ffi",
-    "xgrammar==0.2.5",
     # OTel trace runtime; keep the pinned protobuf compatibility constraint.
     "opentelemetry-sdk==1.44.0",
     "opentelemetry-exporter-otlp-proto-http==1.15.0",
-]
+] + select({
+    # The PPU vendor lock pins the transformers 4.57.1 family and carries no
+    # xgrammar; mirror it so the frontend wheel metadata matches its lock.
+    "@//:using_ppu": ["transformers==4.57.1"],
+    "//conditions:default": ["transformers==5.2.0", "xgrammar==0.2.5"],
+})
 
 py_wheel(
     name = "rtp_llm_frontend_whl",

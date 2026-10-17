@@ -1,6 +1,22 @@
 load("@arch_config//:arch_select.bzl", "requirement")
 
 py_library(
+    name = "pluggable",
+    srcs = glob(["pluggable/*.py"], exclude = ["pluggable/lifecycle.py"]),
+    deps = [":model_lifecycle", "//rtp_llm:module_dispatch_support"],
+    data = ["//rtp_llm/platforms:platform_sources"],
+    visibility = ["//visibility:public"],
+)
+
+# Embedded Python legacy models need only the initialization boundary. The
+# descriptor runtime is provided by pluggable when an adapter is selected.
+py_library(
+    name = "model_lifecycle",
+    srcs = ["pluggable/lifecycle.py"],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
     name = "utils",
     srcs = glob([
         "utils/*.py",
@@ -108,8 +124,10 @@ py_library(
         ":cutlass_moe_config",
         ":dsv41_jit_sources",
         ":rocm_fp8_ptpc_hipb_solutions",
+        "//rtp_llm/platforms:platform_sources",
     ],
     deps = [
+        ":pluggable",
         ":utils",
         ":kernels",
         ":tile_kernels_mhc",
@@ -208,6 +226,7 @@ py_library(
         "speculative/*.py",
     ]),
     deps = [
+        ":pluggable",
         ":utils",
         ":modules",
         ":kernels",
@@ -233,5 +252,22 @@ py_library(
         "@//:using_cuda12_9_x86": ["//rtp_llm:tilelang"],
         "//conditions:default": [],
     }),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "dsv4_rich_attention_contract_sources",
+    srcs = [
+        "modules/dsv4/fp8/decode/decode_attn_metadata.py",
+        "modules/dsv4/fp8/decode/attention_kernels.py",
+        "modules/dsv4/fp8/decode/fp8_sparse_attn_decode_op.py",
+        "utils/flash_mla_legacy.py",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "dsv4_indexer_source",
+    srcs = ["modules/dsv4/fp8/indexer.py"],
     visibility = ["//visibility:public"],
 )

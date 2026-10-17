@@ -15,6 +15,7 @@ py_library(
     ]),
     deps = [
         ":request_headers",
+        "//rtp_llm/models_py:pluggable",
         "//rtp_llm:telemetry",
         "//rtp_llm:warmup",
         "//rtp_llm:vipserver",

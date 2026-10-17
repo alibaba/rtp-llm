@@ -374,7 +374,7 @@ absl::Status StreamCacheResource::waitForAllocatorLoad() {
     return finalizeAllocatorLoad();
 }
 
-absl::Status StreamCacheResource::incrKVBlock(int seq_len_override) {
+absl::Status StreamCacheResource::incrKVBlock(int seq_len_override, int prefill_chunk_start) {
     RTP_LLM_PROFILE_FUNCTION();
     // TODO(xinfei.sxf) add reserver_blocks
     if (fake_inited_) {
@@ -388,8 +388,12 @@ absl::Status StreamCacheResource::incrKVBlock(int seq_len_override) {
     malloc_info.verbose                      = malloc_failed_times_ >= 10 ? malloc_failed_times_ % 100 == 0 : true;
     malloc_info.reuse_cache                  = reuseCache();
     malloc_info.enable_cache_lookup          = enableCacheLookup();
-    malloc_info.enable_remove_skipped_blocks = true;
+    // The page table covers the whole prompt. During chunk prefill, prune old
+    // linear states relative to the committed prefix, not the prompt's tail.
+    malloc_info.enable_remove_skipped_blocks = !stream_->useChunkWindow();
     malloc_info.incr_seq_len_override        = seq_len_override;
+    malloc_info.prefill_chunk_start           = prefill_chunk_start;
+    malloc_info.computed_prefix_len          = stream_->useChunkWindow() ? stream_->reuseLength() : -1;
 
     auto result = resource_context_.cache_manager->malloc(malloc_info);
     if (!result.success) {

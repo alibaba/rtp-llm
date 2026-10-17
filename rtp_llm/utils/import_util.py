@@ -24,25 +24,35 @@ def load_module(module_path: str):
 
 
 @lru_cache(maxsize=None)
+def load_optional_internal_source_module(relative_module: str):
+    """Import and return an internal_source extension entrypoint module.
+
+    Returns None when the module (or the internal_source tree) is absent.
+    Open-source modules should depend only on stable entrypoint names here,
+    not on internal model/tokenizer/renderer names or implementation modules.
+    """
+    if not has_internal_source():
+        return None
+
+    module_name = f"internal_source.rtp_llm.{relative_module}"
+    try:
+        return importlib.import_module(module_name)
+    except ModuleNotFoundError as e:
+        if e.name is not None and module_name.startswith(f"{e.name}."):
+            return None
+        if e.name == module_name:
+            return None
+        raise
+
+
+@lru_cache(maxsize=None)
 def import_optional_internal_source_entrypoint(relative_module: str) -> bool:
     """Import an internal_source extension entrypoint when it is present.
 
     Open-source modules should depend only on stable entrypoint names here,
     not on internal model/tokenizer/renderer names or implementation modules.
     """
-    if not has_internal_source():
-        return False
-
-    module_name = f"internal_source.rtp_llm.{relative_module}"
-    try:
-        importlib.import_module(module_name)
-        return True
-    except ModuleNotFoundError as e:
-        if e.name is not None and module_name.startswith(f"{e.name}."):
-            return False
-        if e.name == module_name:
-            return False
-        raise
+    return load_optional_internal_source_module(relative_module) is not None
 
 
 class LazyModuleRegistry:

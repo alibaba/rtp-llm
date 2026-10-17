@@ -102,6 +102,7 @@ def _make_meta(device: torch.device, *, T: int) -> _IndexerFP8PrefillMeta:
         block_table_i32=torch.ones(1, 1, dtype=torch.int32, device=device),
         cu_kv_seqlens=torch.tensor([0, 0], dtype=torch.int32, device=device),
         cu_kv_per_token=torch.tensor([0, 0], dtype=torch.int32, device=device),
+        request_score_slices=None,
         compressor_meta=SimpleNamespace(),
         indexer_cp_plan=None,
         indexer_cp_local_cu=None,

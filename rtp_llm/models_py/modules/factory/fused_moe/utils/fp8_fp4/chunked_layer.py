@@ -154,6 +154,7 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
         moe_w1_layout: str = "up_gate",
         has_shared_expert_gate: bool = False,
         observer_factory: Optional[ObserverFactory] = None,
+        gate_factory=None,
         record_function_scope: Callable[[], ContextManager] = nullcontext,
     ) -> None:
         super().__init__()
@@ -190,6 +191,7 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
             moe_w1_layout=moe_w1_layout,
             has_shared_expert_gate=has_shared_expert_gate,
             physical_expert_num=n_physical_experts,
+            gate_factory=gate_factory,
         )
         self.strategy_name = self._moe.strategy_name
 

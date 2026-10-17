@@ -85,7 +85,20 @@ def _tensors(weight, scale_divisor=1):
 def _database(tensors, safetensors=True):
     with tempfile.TemporaryDirectory() as tmp:
         path = os.path.join(tmp, "model.safetensors" if safetensors else "model.bin")
-        (save_file if safetensors else torch.save)(tensors, path)
+        serialized = tensors
+        if safetensors:
+            # The CUDA 12 test image exposes UE8M0 in torch 2.8, but its
+            # safetensors writer predates that dtype. Preserve values and let
+            # the loader convert them back to the declared weight dtype.
+            serialized = {
+                name: (
+                    tensor.to(torch.float8_e4m3fn)
+                    if tensor.dtype == torch.float8_e8m0fnu
+                    else tensor
+                )
+                for name, tensor in tensors.items()
+            }
+        (save_file if safetensors else torch.save)(serialized, path)
         database = CkptDatabase(tmp)
         try:
             yield database
@@ -247,7 +260,6 @@ class PureTpPreshardTest(unittest.TestCase):
                     rank=1,
                     preshard=False,
                 )
-
 
 class Fp4PureTpPreshardTest(unittest.TestCase):
     wrappers = (PerGroupFp4Weight, MixedFp4Weight)

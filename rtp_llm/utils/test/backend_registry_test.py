@@ -2,7 +2,6 @@ import unittest
 from unittest.mock import patch
 
 import rtp_llm.utils.backend_registry as backend_registry
-
 from rtp_llm.utils.backend_registry import (
     register_backend_hook,
     reset_backend_registrations,
@@ -18,8 +17,11 @@ class BackendRegistryTest(unittest.TestCase):
             return_value=False,
         )
         self._entrypoint_patcher.start()
+        self._builtin_patcher = patch("rtp_llm.platforms.register_backend_hooks")
+        self._builtin_patcher.start()
 
     def tearDown(self):
+        self._builtin_patcher.stop()
         self._entrypoint_patcher.stop()
         reset_backend_registrations()
 

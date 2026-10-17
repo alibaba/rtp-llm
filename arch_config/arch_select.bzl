@@ -1,5 +1,4 @@
 load("@pip_arm_torch//:requirements.bzl", requirement_arm = "requirement")
-
 # to wrapper target relate with different system config
 load("@pip_cpu_torch//:requirements.bzl", requirement_cpu = "requirement")
 load("@pip_cuda13_arm_torch//:requirements.bzl", requirement_cuda13_arm = "requirement")
@@ -138,6 +137,20 @@ def whl_deps():
         "//conditions:default": ["torch==2.1.2"],
     })
 
+def ml_pin_reqs():
+    """Wheel pins that may diverge between a platform vendor lock and the CUDA locks.
+
+    Keep wheel metadata (transformers family, sentence-transformers, pyarrow,
+    xgrammar) aligned with the lock of the environment the wheel is installed
+    into.
+    """
+    return [
+        "transformers==5.2.0",
+        "sentence-transformers==5.2.0",
+        "pyarrow==14.0.0",
+        "xgrammar==0.2.5",
+    ]
+
 def platform_deps():
     return select({
         "@rtp_llm//:using_arm": [],
@@ -205,9 +218,7 @@ def cuda_register():
     )
 
 def triton_deps(names):
-    return select({
-        "//conditions:default": [],
-    })
+    return []
 
 def internal_deps():
     return []

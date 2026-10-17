@@ -20,9 +20,12 @@ if is_cuda():
 
     major, minor = get_sm()
     if major >= 10:
-        from .fp4_linear import CudaFp4GEMMLinear
+        from rtp_llm.models_py.kernels.cuda.fp4_kernel import nvfp4_available
 
-        LinearFactory.register(CudaFp4GEMMLinear)
+        if nvfp4_available:
+            from .fp4_linear import CudaFp4GEMMLinear
+
+            LinearFactory.register(CudaFp4GEMMLinear)
 
     LinearFactory.register(CudaFp8PerTensorLinear)
     LinearFactory.register(CudaFp8GEMMLinear)

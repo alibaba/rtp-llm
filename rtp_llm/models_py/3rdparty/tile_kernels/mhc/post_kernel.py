@@ -1,4 +1,5 @@
 import math
+import os
 
 import tilelang
 import torch
@@ -13,7 +14,7 @@ from tilelang import language as T
     },
 )
 def _mhc_post_fwd(
-    mhc: int, hidden: int, n_thr: int = 128, h_blk: int = 1024
+    mhc: int, hidden: int, n_thr: int = 128, h_blk: int = 1024, enable_pdl: bool = True
 ) -> tilelang.JITKernel:
     n = T.dynamic("num_tokens")
     h = hidden
@@ -41,7 +42,11 @@ def _mhc_post_fwd(
             c_local = T.alloc_fragment(mhc, T.float32)
             T.copy(a[pid_n, 0, 0], a_local)
             T.copy(c[pid_n, 0], c_local)
-            T.pdl_sync()
+            # M890P's TileLang lowering rejects kernels containing explicit
+            # PDL. Keep the upstream behavior by default and allow the PPU
+            # serving path to disable only this optional launch hint.
+            if enable_pdl:
+                T.pdl_sync()
 
             for i0_h in T.Pipelined(T.ceildiv(h, h_blk), num_stages=2):
                 T.copy(b[pid_n, 0, i0_h * h_blk], b_shared, disable_tma=True)
@@ -162,6 +167,8 @@ def mhc_post_fwd(
     post_layer_mix: torch.Tensor,
     comb_res_mix: torch.Tensor,
     out: torch.Tensor | None = None,
+    *,
+    enable_pdl: bool | None = None,
 ) -> torch.Tensor:
     num_seqs, num_tokens, mhc, hidden = residual.shape
 
@@ -190,7 +197,9 @@ def mhc_post_fwd(
 
     if out is None:
         out = torch.empty_like(residual)
-    kernel = _mhc_post_fwd(mhc, hidden)
+    if enable_pdl is None:
+        enable_pdl = os.environ.get("DSV4_MHC_POST_PDL", "1") != "0"
+    kernel = _mhc_post_fwd(mhc, hidden, enable_pdl=enable_pdl)
     kernel(
         comb_res_mix.flatten(0, 1),
         residual.flatten(0, 1),

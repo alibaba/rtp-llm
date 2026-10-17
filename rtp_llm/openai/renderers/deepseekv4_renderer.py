@@ -241,6 +241,11 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
             return "max"
         return effort
 
+    def default_thinking_budget(self, max_new_tokens: int) -> Optional[int]:
+        # DSv4 thinking shares the output allowance unless the caller gives a
+        # separate budget. Do not force </think> at the generic 32K default.
+        return max(GenerateConfig.model_fields["max_thinking_tokens"].default, max_new_tokens)
+
     def _normalize_tool_arguments(self, arguments: Any) -> str:
         if arguments is None:
             return "{}"
@@ -256,6 +261,12 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
         if tool_choice == "required":
             return True
         return self._tool_choice_name(request) is not None
+
+    def _tool_call_stop_after_first(self, request: ChatCompletionRequest) -> bool:
+        return (
+            self._tool_choice_name(request) is not None
+            or getattr(request, "parallel_tool_calls", None) is False
+        )
 
     def _active_tools_for_request(self, request: ChatCompletionRequest):
         tools = request.tools or []
@@ -318,7 +329,7 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
         detector = DeepSeekV4Detector()
         return detector.tool_call_structural_tag(
             rtp_tools_to_sglang_tools(active_tools),
-            stop_after_first=self._tool_choice_name(request) is not None,
+            stop_after_first=self._tool_call_stop_after_first(request),
         )
 
     def apply_chat_completion_constraints(
@@ -415,11 +426,11 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
         thinking_mode = "thinking" if self.in_think_mode(request) else "chat"
 
         # Configure encoding
-        # drop_thinking=True: Remove reasoning_content from historical assistant messages
+        # Preserve historical reasoning only when explicitly requested.
         # add_default_bos_token=True: Always add BOS token since we encode full messages
         encode_config = {
             "thinking_mode": thinking_mode,
-            "drop_thinking": True,
+            "drop_thinking": request.preserve_thinking is not True,
             "add_default_bos_token": True,
             "reasoning_effort": self._normalize_reasoning_effort(
                 request.reasoning_effort
@@ -668,14 +679,24 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
         output: GenerateOutput,
         is_streaming: bool,
     ) -> Optional[OutputDelta]:
+        parsed_delta = None
         if not is_streaming:
             parsed_delta = await self._parse_full_dsv4_completion(status, output)
-            if parsed_delta is not None:
-                return parsed_delta
-
-        return await super()._process_reasoning_and_tool_calls(
-            status, output, is_streaming
-        )
+        if parsed_delta is None:
+            parsed_delta = await super()._process_reasoning_and_tool_calls(
+                status, output, is_streaming
+            )
+        if (
+            parsed_delta is not None
+            and status.request.parallel_tool_calls is False
+            and parsed_delta.output_str.tool_calls
+        ):
+            # Auto mode must still permit plain text. Apply the same limit to
+            # full responses and every streaming fragment, including arguments.
+            parsed_delta.output_str.tool_calls = [
+                call for call in parsed_delta.output_str.tool_calls if call.index == 0
+            ] or None
+        return parsed_delta
 
     def _extract_streaming_reasoning_content(
         self,

@@ -31,6 +31,7 @@ public:
 struct FastTopKSamplerOutput {
     torch::Tensor all_probs;
     torch::Tensor token_ids;
+    bool token_ids_are_point_mass = false;
 };
 
 class FastTopKSampler {
@@ -49,7 +50,8 @@ private:
 
 class SpeculativeSampler {
 public:
-    SpeculativeSampler(torch::Tensor d2t_map, size_t propose_step): d2t_map_(d2t_map), propose_step_(propose_step) {}
+    SpeculativeSampler(torch::Tensor d2t_map, size_t propose_step, bool skip_greedy_rng = false):
+        d2t_map_(d2t_map), propose_step_(propose_step), skip_greedy_rng_(skip_greedy_rng) {}
 
     virtual SpeculativeSamplerOutput forward(const std::list<GenerateStreamPtr>& streams,
                                              SamplerOutput&                      draft_sampler_output,
@@ -76,6 +78,7 @@ private:
 protected:
     torch::Tensor        d2t_map_;
     size_t               propose_step_;
+    bool                 skip_greedy_rng_ = false;
     mutable TensorHolder buffer_holder_;
 
     // Reusable buffer for draft_probs vocab-padding when draft/target vocab sizes differ.

@@ -348,6 +348,7 @@ class OnlineFp8LoaderTestBase(CudaFp8GEMMLinearTestBase):
                         bit=8,
                         compute_dtype=torch.bfloat16,
                         merge_lora=False,
+                        weight_preparation=None,
                         exported_device=SimpleNamespace(
                             maybe_rewrite_weight_by_key=lambda _, t, **kw: t
                         ),

@@ -118,13 +118,17 @@ class DeepSeekV41(DeepSeekV4):
         return config
 
     @classmethod
-    def _apply_kv_cache_config(cls, model_config, kv_cache_config):
-        cls._build_dsv4_kv_cache_config(model_config, kv_cache_config)
+    def _apply_kv_cache_config(cls, model_config, kv_cache_config, *, indexer_cache_mode=None):
+        cls._build_dsv4_kv_cache_config(
+            model_config, kv_cache_config, indexer_cache_mode=indexer_cache_mode
+        )
 
     @classmethod
-    def _build_dsv4_kv_cache_config(cls, model_config, kv_cache_config):
+    def _build_dsv4_kv_cache_config(cls, model_config, kv_cache_config, *, indexer_cache_mode=None):
         from rtp_llm.models.dsv41_kv_cache import configure_v41_kv_cache
 
+        # V4.1 Flash has no indexer KV pool; accept the adapter kwarg for
+        # interface compatibility and let configure_v41_kv_cache decide.
         configure_v41_kv_cache(model_config, kv_cache_config)
 
     def _create_python_model(self):

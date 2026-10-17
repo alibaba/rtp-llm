@@ -242,6 +242,14 @@ py_runtime(
     visibility = ["//visibility:public"],
 )
 
+py_runtime(
+    name = "python312",
+    interpreter_path = "/usr/local/bin/python3",
+    python_version = "PY3",
+    stub_shebang = "#!/usr/local/bin/python3",
+    visibility = ["//visibility:public"],
+)
+
 refresh_compile_commands(
     name = "refresh_compdb",
     targets = {

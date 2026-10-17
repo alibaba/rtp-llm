@@ -306,14 +306,10 @@ def build_megakernel(
             )
             global_chunk_idx = token_offset // bt_i32 + chunk_idx_i32
             next_global_chunk = global_chunk_idx + one_i32
-            chunk_gt_zero = arith.cmpi(
-                arith.CmpIPredicate.sgt, global_chunk_idx, zero_i32
-            )
             boundary_rem = (next_global_chunk * bt_i32) % seq_size_per_block
             on_block_boundary = arith.cmpi(
                 arith.CmpIPredicate.eq, boundary_rem, zero_i32
             )
-            is_middle_store = arith.andi(chunk_gt_zero, on_block_boundary)
             prefix = buffer_ops.buffer_load(rsrc_prefix, i_b, vec_width=1, dtype=T.i32)
             last_dest = (prefix + global_input_len - one_i32) // seq_size_per_block
             middle_dest = (
@@ -325,7 +321,7 @@ def build_megakernel(
                 store_h_to_ssm_block(h_vals, last_dest)
                 scf.YieldOp([])
             with ir.InsertionPoint(last_if.else_block):
-                middle_if = scf.IfOp(is_middle_store, [], has_else=True)
+                middle_if = scf.IfOp(on_block_boundary, [], has_else=True)
                 with ir.InsertionPoint(middle_if.then_block):
                     store_h_to_ssm_block(h_vals, middle_dest)
                     scf.YieldOp([])

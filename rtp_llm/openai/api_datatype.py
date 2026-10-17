@@ -174,6 +174,7 @@ class ChatCompletionRequest(BaseModel):
     functions: Optional[List[GPTFunctionDefinition]] = None
     tools: Optional[List[GPTToolDefinition]] = None
     tool_choice: Optional[ToolChoice] = None
+    parallel_tool_calls: Optional[bool] = None
     reasoning_effort: Optional[Union[StrictInt, StrictStr]] = None
     thinking: Optional[ThinkingConfig] = None
     temperature: Optional[float] = 0.7
@@ -214,6 +215,7 @@ class ChatCompletionRequest(BaseModel):
     master_info: Optional[Dict[str, Any]] = None
     chat_template_kwargs: Optional[Dict[str, Any]] = None
     enable_thinking: Optional[bool] = None
+    preserve_thinking: Optional[bool] = None
 
     @model_validator(mode="before")
     @classmethod
