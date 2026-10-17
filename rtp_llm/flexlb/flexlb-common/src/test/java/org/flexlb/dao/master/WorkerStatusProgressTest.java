@@ -28,6 +28,48 @@ class WorkerStatusProgressTest {
     }
 
     @Test
+    void unknownContactExpiresOnlyAfterTimeoutAndClaimCannotRepeat() {
+        var worker = worker();
+        long lastContact = worker.pollHealth().lastSuccessfulPollUs();
+        worker.lock.lock();
+        try {
+            assertNull(worker.tryClaimHealthRetirement(lastContact + 10_000L, 10_000L, 60_000L));
+            assertEquals(WorkerStatus.HealthRetirementReason.STATUS_EXPIRED,
+                    worker.tryClaimHealthRetirement(lastContact + 10_001L, 10_000L, 60_000L));
+            assertNull(worker.tryClaimHealthRetirement(lastContact + 10_002L, 10_000L, 60_000L));
+        } finally { worker.lock.unlock(); }
+    }
+
+    @Test
+    void rpcProtectionDefersExpiryButDoesNotHideReportedDeath() {
+        var worker = worker();
+        try (var lease = worker.tryBeginStatusPoll(1L)) {
+            lease.statusRpcStarted(5000L);
+            worker.lock.lock();
+            try {
+                assertNull(worker.tryClaimHealthRetirement(System.nanoTime()/1000, 0L, 60_000L));
+                worker.recordStatusRpcResult(lease, true, false, null);
+                assertEquals(WorkerStatus.HealthRetirementReason.WORKER_REPORTED_NOT_ALIVE,
+                        worker.tryClaimHealthRetirement(System.nanoTime()/1000, Long.MAX_VALUE/2, 60_000L));
+            } finally { worker.lock.unlock(); }
+        }
+    }
+
+    @Test
+    void threeTransportFailuresClaimRetirementBeforeTimeout() {
+        var worker = worker();
+        worker.lock.lock();
+        try {
+            worker.recordTransportFailure();
+            worker.recordTransportFailure();
+            assertNull(worker.tryClaimHealthRetirement(System.nanoTime()/1000, Long.MAX_VALUE/2, 60_000L));
+            worker.recordTransportFailure();
+            assertEquals(WorkerStatus.HealthRetirementReason.CONSECUTIVE_STATUS_FAILURES,
+                    worker.tryClaimHealthRetirement(System.nanoTime()/1000, Long.MAX_VALUE/2, 60_000L));
+        } finally { worker.lock.unlock(); }
+    }
+
+    @Test
     void discoveryIsUnknownAndCannotScheduleUntilAResponseIsApplied() {
         var worker = worker();
         assertEquals(WorkerStatus.StatusContact.UNKNOWN, worker.pollHealth().contact());
