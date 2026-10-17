@@ -1063,7 +1063,10 @@ class DiffusionGemmaModel(GptModelBase):
             capture.capture_layer(i, hidden_states)
         if capture_aux_hidden:
             self.finish_aux_hidden_capture()
-        outputs = capture.finalize(self.norm(hidden_states))
+        # finalize's canonical-final hook already applies self.norm once;
+        # passing the normed hidden here would norm it twice (decoder.norm
+        # weights reach |gamma|~588, so the double norm explodes the output).
+        outputs = capture.finalize(hidden_states)
         if capture_aux_hidden:
             outputs.mtp_target_hidden_states = self._mtp_target_hidden_states
         return outputs
