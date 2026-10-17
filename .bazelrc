@@ -183,6 +183,13 @@ build:cuda13 --copt=-Wno-missing-field-initializers
 build:cuda13 --copt=-Wno-error=missing-field-initializers
 build:cuda13 --host_copt=-Wno-missing-field-initializers
 build:cuda13_arm --host_copt=-Wno-error=missing-field-initializers
+# cuda13_sm120: x86 CUDA 13 build for RTX PRO / consumer Blackwell (sm_120)
+# only.  Enables the SM120-only kernels selected on using_cuda13_sm120.
+build:cuda13_sm120 --config=cuda13
+build:cuda13_sm120 --define=using_cuda13_sm120=true
+build:cuda13_sm120 --repo_env=TF_CUDA_COMPUTE_CAPABILITIES=12.0
+build:cuda13_sm120 --action_env TF_CUDA_COMPUTE_CAPABILITIES="12.0"
+build:cuda13_sm120 --host_action_env TF_CUDA_COMPUTE_CAPABILITIES="12.0"
 
 # Triton 3.6.0 (shipped with cuda13 lock) supports CUDA 13.x ptxas natively;
 # the ptxas wrapper that triton 3.4 needed is no longer required.  The wrapper
@@ -253,6 +260,13 @@ test:cuda13 --test_env=PATH=/opt/rh/gcc-toolset-12/root/usr/bin:/opt/conda310/bi
 test:cuda13 --test_env=LD_LIBRARY_PATH=/opt/rh/gcc-toolset-12/root/usr/lib64:/usr/local/cuda/lib64:/opt/conda310/lib:/usr/local/nvidia/lib64:/usr/local/nvidia/lib:/usr/lib64:/opt/conda310/lib/python3.10/site-packages/torch/lib
 test:cuda13 --test_env=RAYON_NUM_THREADS=8
 test:cuda13 --test_env=TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas
+# SM120 tests run either inside the CUDA 13 image (gcc-toolset-12 leads PATH
+# above) or on hosts that expose their compiler only through /usr/bin, so
+# resolve the host compiler through PATH instead of the absolute toolset path.
+test:cuda13_sm120 --test_env=CC=gcc
+test:cuda13_sm120 --test_env=CXX=g++
+test:cuda13_sm120 --test_env=CUDAHOSTCXX=g++
+test:cuda13_sm120 --test_env=NVCC_PREPEND_FLAGS=-ccbin=g++
 
 test:cuda12_9 --test_env=DG_JIT_CPP_STANDARD=20
 test:cuda12_9 --test_env=CC=/opt/rh/gcc-toolset-12/root/usr/bin/gcc

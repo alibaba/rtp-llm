@@ -29,6 +29,7 @@ class ExecutionCount:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--cuda-devices", type=int, default=0)
+    parser.add_argument("--cuda-major", type=int, default=10)
     parser.add_argument("test_file")
     options, pytest_args = parser.parse_known_args()
 
@@ -53,8 +54,12 @@ def main():
                 f"found {torch.cuda.device_count()}"
             )
         for index in range(options.cuda_devices):
-            if torch.cuda.get_device_capability(index)[0] != 10:
-                raise RuntimeError("DSV4 CUDA13 tests require Blackwell devices")
+            capability = torch.cuda.get_device_capability(index)
+            if capability[0] != options.cuda_major:
+                raise RuntimeError(
+                    f"DSV4 CUDA13 tests require SM{options.cuda_major}x devices, "
+                    f"found SM{capability[0]}{capability[1]} on device {index}"
+                )
 
     # Machine-installed plugins must not change test collection or dependencies.
     os.environ["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"

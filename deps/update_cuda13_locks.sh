@@ -2,7 +2,7 @@
 set -euo pipefail
 
 usage() {
-    echo "Usage: $0 <x86|arm> [--check|--print-command]" >&2
+    echo "Usage: $0 <x86|arm|sm120|sm120-internal> [--check|--print-command]" >&2
     exit 2
 }
 
@@ -14,11 +14,20 @@ workspace=${BUILD_WORKSPACE_DIRECTORY:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 
 overrides="$workspace/deps/requirements_cuda13_overrides.txt"
 
 case "$platform" in
-    x86)
+    x86|sm120|sm120-internal)
         input="$workspace/deps/requirements_torch_gpu_cuda13.txt"
         output="$workspace/deps/requirements_lock_torch_gpu_cuda13.txt"
         python_platform=x86_64-manylinux_2_28
         target=requirements_torch_gpu_cuda13.update
+        if [[ "$platform" == sm120* ]]; then
+            input="$workspace/deps/requirements_torch_gpu_cuda13_sm120.txt"
+            output="$workspace/deps/requirements_lock_torch_gpu_cuda13_sm120.txt"
+            target=requirements_torch_gpu_cuda13_sm120.update
+        fi
+        if [[ "$platform" == sm120-internal ]]; then
+            input="$workspace/internal_source/deps/requirements_torch_gpu_cuda13_sm120.txt"
+            output="$workspace/internal_source/deps/requirements_lock_torch_gpu_cuda13_sm120.txt"
+        fi
         # The x86 lock resolves by-name packages from public PyPI (with the
         # aliyun mirror fallback) while the arm lock uses the internal artlab
         # index set, which carries the aarch64+cu13 artifacts; keep each lock
@@ -44,6 +53,10 @@ case "$platform" in
     *) usage ;;
 esac
 
+compile_label="//deps:$target"
+if [[ "$platform" == sm120-internal ]]; then
+    compile_label="//internal_source/deps:$target"
+fi
 command=(
     "${UV_BIN:-uv}" --no-config pip compile "$input"
     --overrides "$overrides"
@@ -54,7 +67,7 @@ command=(
     "${indexes[@]}"
     --index-strategy unsafe-best-match
     --emit-index-url
-    --custom-compile-command "bazelisk run //deps:$target"
+    --custom-compile-command "bazelisk run $compile_label"
 )
 
 if [[ "$mode" == --print-command ]]; then

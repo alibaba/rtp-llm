@@ -190,6 +190,9 @@ cc_library(
         "@//:using_cuda12_9": [
             "//rtp_llm/models_py/bindings/cuda/kernels:scaled_fp4_quant",
         ],
+        # The generic CUDA13 setting also matches the stricter SM120 config.
+        # Exclude the SM100-only FP4 quantization chain from that image.
+        "@//:using_cuda13_sm120": [],
         "@//:using_cuda13_x86": [
             "//rtp_llm/models_py/bindings/cuda/kernels:scaled_fp4_quant",
         ],
@@ -234,12 +237,24 @@ cc_library(
         "RegisterCudaOps.cc",
     ],
     copts = copts() + ["-fno-strict-aliasing"],
+    local_defines = select({
+        "@//:using_cuda13_sm120": [
+            "ENABLE_FP8_SM120=1",
+            "RTP_LLM_DISABLE_LEGACY_FP4_BINDINGS=1",
+        ],
+        "//conditions:default": [],
+    }),
     deps = [
         "//rtp_llm/models_py/bindings:register_ops_hdr",
         ":bf16_gemm_op",
         ":cuda_bindings_base",
         ":cuda_attn_bindings_base",
-    ],
+    ] + select({
+        "@//:using_cuda13_sm120": [
+            "//rtp_llm/models_py/bindings/cuda/cutlass:fp8_blockwise_sm120_cu",
+        ],
+        "//conditions:default": [],
+    }),
     visibility = ["//visibility:public"],
     alwayslink = 1,
 )

@@ -68,6 +68,18 @@ compile_pip_requirements(
 )
 
 sh_binary(
+    name = "requirements_torch_gpu_cuda13_sm120.update",
+    srcs = ["update_cuda13_locks.sh"],
+    args = ["sm120"],
+    data = [
+        "requirements_base.txt",
+        "requirements_cuda13_overrides.txt",
+        "requirements_torch_gpu_cuda13_sm120.txt",
+    ],
+    tags = ["manual"],
+)
+
+sh_binary(
     name = "requirements_torch_gpu_cuda13.update",
     srcs = ["update_cuda13_locks.sh"],
     args = ["x86"],
