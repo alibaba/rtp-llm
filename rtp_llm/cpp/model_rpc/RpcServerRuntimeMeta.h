@@ -13,6 +13,7 @@ namespace rtp_llm {
 struct TaskIdentity {
     const int64_t request_id;
     const int64_t batch_id;
+    const int32_t priority = 0;
 };
 
 struct RunningEntry {
@@ -76,14 +77,15 @@ public:
     }
 
     void enqueue(int64_t request_id, const GenerateStreamPtr& stream) {
-        enqueue(TaskIdentity{request_id, stream->generateInput()->group_id}, stream);
+        enqueue(TaskIdentity{request_id, stream->generateInput()->group_id, stream->priority()}, stream);
     }
 
     void enqueue(const TaskIdentity& identity, const GenerateStreamPtr& stream) {
         const auto time_info       = stream->getTimeInfo();
         const auto stream_batch_id = stream->generateInput()->group_id;
         const auto batch_id        = resolveBatchId(identity, stream_batch_id);
-        auto       new_task        = makeTaskInfo(TaskIdentity{identity.request_id, batch_id},
+        const auto priority        = identity.priority != 0 ? identity.priority : stream->priority();
+        auto       new_task        = makeTaskInfo(TaskIdentity{identity.request_id, batch_id, priority},
                                      stream->prefixLength(),
                                      stream->inputLength(),
                                      time_info.wait_time_us / 1000);
@@ -192,7 +194,8 @@ public:
                     int64_t            input_length  = 0,
                     int64_t            prefix_length = 0,
                     int64_t            error_code    = 0,
-                    const std::string& error_message = "") {
+                    const std::string& error_message = "",
+                    int32_t            priority      = 0) {
         std::unique_lock<std::shared_mutex> lock(read_write_lock_);
         EngineScheduleInfo::TaskInfo        task_info{request_id,
                                                prefix_length,
@@ -200,6 +203,7 @@ public:
                                                /*waiting_time_ms=*/0,
                                                /*iterate_count=*/0,
                                                /*end_time_ms=*/-1};
+        task_info.priority = priority;
         auto                                ptr = running_streams_.find(request_id);
         if (ptr != running_streams_.end()) {
             task_info = ptr->second.task_info;
@@ -317,6 +321,7 @@ protected:
     makeTaskInfo(const TaskIdentity& identity, int64_t prefix_length, int64_t input_length, int64_t waiting_time_ms) {
         EngineScheduleInfo::TaskInfo task_info{identity.request_id, prefix_length, input_length, waiting_time_ms};
         task_info.batch_id = identity.batch_id;
+        task_info.priority = identity.priority;
         return task_info;
     }
 

@@ -64,6 +64,14 @@ def pip_deps():
         extra_pip_args = PIP_EXTRA_ARGS,
         timeout = 3600,
         quiet = False,
+        # Regenerate optional wheel repositories in pre-warmed CI hubs created
+        # before these dependencies entered the lock. Existing unrelated wheels
+        # stay cached.
+        annotations = {
+            "watchdog": package_annotation(),
+            "xgrammar": package_annotation(),
+            "zstandard": package_annotation(),
+        },
     )
 
     pip_parse(
@@ -101,4 +109,11 @@ def pip_deps():
         python_interpreter = "/opt/conda310/bin/python3",
         extra_pip_args = PIP_EXTRA_ARGS,
         timeout = 12000,
+        # PR #1334 updated both packages, but pre-warmed CI hubs can retain the
+        # previous repositories and expose source code to an older AITER API.
+        # Version these package repositories so the ROCm hub is regenerated.
+        annotations = {
+            "aiter": package_annotation(),
+            "flydsl": package_annotation(),
+        },
     )

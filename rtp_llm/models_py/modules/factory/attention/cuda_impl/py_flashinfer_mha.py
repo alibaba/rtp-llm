@@ -7,7 +7,6 @@ from flashinfer.prefill import (
     BatchPrefillWithPagedKVCacheWrapper,
     BatchPrefillWithRaggedKVCacheWrapper,
 )
-
 from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.flashinfer_rotary_emb import (
     MhaRotaryEmbeddingOp,
@@ -291,6 +290,14 @@ class PyFlashinferPrefillPagedAttnOp(object):
         block_id_host = attn_inputs.kv_cache_kernel_block_id
         if block_id_host is None or block_id_host.numel() == 0:
             block_id_host = attn_inputs.kv_cache_kernel_block_id_device
+        graph_copy_params = (
+            self.prefill_cuda_graph_copy_params
+            if self.prefill_cuda_graph_copy_params is not None
+            else attn_inputs.prefill_cuda_graph_copy_params
+        )
+        planned_batch_size = (
+            graph_copy_params.max_batch_size if graph_copy_params is not None else -1
+        )
         # Keep the same fill path for capture and replay: the host fill sizes
         # buffers exactly while the device fill sizes for the worst case, so
         # switching paths between capture and replay forces a (forbidden)
@@ -308,6 +315,8 @@ class PyFlashinferPrefillPagedAttnOp(object):
                 ),
                 self.page_size,
                 forbid_realloc,
+                planned_batch_size,
+                input_token_count=attn_inputs.total_tokens,
             )
         else:
             self.fmha_params.fill_params(
@@ -317,6 +326,7 @@ class PyFlashinferPrefillPagedAttnOp(object):
                 _host_i32(block_id_host),
                 self.page_size,
                 forbid_realloc,
+                planned_batch_size,
             )
         # Store CUDA graph copy parameters
         # Define qo_indptr early for CUDA graph initialization
@@ -1359,6 +1369,7 @@ class PyFlashinferDecodeAttnOp(object):
                 ),
                 self.seq_size_per_block,
                 forbid_realloc=forbid_realloc,
+                input_token_count=attn_inputs.input_lengths.numel(),
             )
         else:
             block_id_host = attn_inputs.kv_cache_kernel_block_id
@@ -1420,27 +1431,61 @@ class PyFlashinferDecodeAttnOp(object):
                 _host_i32(block_id_host),
                 self.seq_size_per_block,
                 forbid_realloc=True,
+                planned_batch_size=self.decode_wrapper._fixed_batch_size,
             )
             if self._cuda_graph_replay_needs_replan():
                 self._plan_decode_wrapper(attn_inputs)
             return
 
-        # Device-metadata compatibility path inherited from the base
-        # implementation. CudaGraphRunner routes graph replay through the
-        # pinned host mirrors above.
-        seq_plus_1 = attn_inputs.sequence_lengths_plus_1_device
-        if seq_plus_1 is None or not seq_plus_1.is_cuda:
-            seq_plus_1 = (attn_inputs.sequence_lengths.to(torch.int32) + 1).cuda()
-        block_id = _device_or(
-            attn_inputs.kv_cache_kernel_block_id_device,
-            attn_inputs.kv_cache_kernel_block_id,
+        if self.enable_cuda_graph:
+            # Both graph backends plan from host mirrors. Device-state
+            # callers must refresh those mirrors too: tensor-core always
+            # replans, while CUDA-core replans only when page topology changes.
+            self.fmha_params.fill_params(
+                _host_i32(
+                    _device_or(
+                        attn_inputs.prefix_lengths_device,
+                        attn_inputs.prefix_lengths,
+                    )
+                ),
+                _host_i32(attn_inputs.sequence_lengths),
+                _host_i32(
+                    _device_or(
+                        attn_inputs.input_lengths_device,
+                        attn_inputs.input_lengths,
+                    )
+                ),
+                _host_i32(
+                    _device_or(
+                        attn_inputs.kv_cache_kernel_block_id_device,
+                        attn_inputs.kv_cache_kernel_block_id,
+                    )
+                ),
+                self.seq_size_per_block,
+                forbid_realloc=True,
+                planned_batch_size=self.decode_wrapper._fixed_batch_size,
+            )
+            if self._cuda_graph_replay_needs_replan():
+                self._plan_decode_wrapper(attn_inputs)
+            return
+
+        # Match initial planning's active-slot predicate. Sequence lengths and
+        # block rows may retain capture-time values after a slot goes inactive.
+        input_lengths = _device_or(
+            attn_inputs.input_lengths_device, attn_inputs.input_lengths
         )
-        if block_id is not None and not block_id.is_cuda:
-            block_id = block_id.cuda()
-        self.fmha_params.fill_decode_cuda_graph_params(
-            seq_plus_1,
-            block_id,
+        self.fmha_params.fill_params_mha_device(
+            _device_or(attn_inputs.prefix_lengths_device, attn_inputs.prefix_lengths),
+            attn_inputs.sequence_lengths,
+            input_lengths,
+            _device_or(
+                attn_inputs.kv_cache_kernel_block_id_device,
+                attn_inputs.kv_cache_kernel_block_id,
+            ),
             self.seq_size_per_block,
+            forbid_realloc=True,
+            planned_batch_size=self.decode_wrapper._fixed_batch_size,
+            input_token_count=input_lengths.numel(),
         )
 
     def support(self, attn_inputs: PyAttentionInputs) -> bool:

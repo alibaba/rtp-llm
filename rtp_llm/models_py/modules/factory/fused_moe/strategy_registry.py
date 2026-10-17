@@ -132,9 +132,9 @@ class StrategyRegistry:
             ]
             logger.error(
                 "No suitable MOE strategy found. Config details: "
-                "quant_config=%r, ep_size=%r, world_size=%r, tp_size=%r, "
+                "effective_quant_config=%r, ep_size=%r, world_size=%r, tp_size=%r, "
                 "use_deepep_low_latency=%r, skipped_for_missing_deps=%r",
-                quant_config,
+                getattr(config, "quant_config", quant_config),
                 getattr(config, "ep_size", None),
                 getattr(config, "world_size", None),
                 getattr(config, "tp_size", None),
