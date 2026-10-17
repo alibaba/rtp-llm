@@ -459,6 +459,10 @@ class DiffusionGemmaAttnOp:
     ) -> None:
         if getattr(self, "fmha_params", None) is not None:
             self.write_op.set_params(self.fmha_params)
+        # SWA group layer caches arrive as the raw 2-D pool buffer
+        # (makeLayerCache only expands FULL groups to 5-D); KVCacheWriteOp
+        # indexes [:, 0, :, :, :], so reshape the per-call view first.
+        kv_cache.kv_cache_base = self._reshape_paged(kv_cache.kv_cache_base)
         self.write_op.forward(k, v, kv_cache)
 
     def _write_cache_torch(
