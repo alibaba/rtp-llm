@@ -5,7 +5,11 @@ import os
 import torch
 
 from rtp_llm.models_py.distributed.collective_torch import Group
-from rtp_llm.models_py.distributed.pynccl_cp import all_gather, all_gather_kv_overlap
+from rtp_llm.models_py.distributed.pynccl_cp import (
+    all_gather,
+    all_gather_kv_overlap,
+    registered_kv_overlap_buffers,
+)
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 
@@ -90,7 +94,17 @@ class CrossLayerKvPrefetch:
         self.buffers = [self.op._allocate_fused_kv() for _ in range(2)]
         width = self.buffers[0].size(1)
         options = dict(dtype=torch.bfloat16, device=self.device)
-        self.local = torch.empty((plan["history_padded"], width), **options)
+        pair = registered_kv_overlap_buffers(
+            plan["history_padded"], width, torch.bfloat16, self.device, Group.TP
+        )
+        self.registered = pair is not None
+        if pair is None:
+            self.local = torch.empty((plan["history_padded"], width), **options)
+            self.gathered = torch.empty(
+                (fmha._cp_size * plan["history_padded"], width), **options
+            )
+        else:
+            self.local, self.gathered = pair
         # Each request's actual count is <= its padded count. Equal totals
         # therefore prove a dense identity layout without a GPU-side check.
         self.history_is_dense = (
@@ -101,9 +115,6 @@ class CrossLayerKvPrefetch:
             self.local
             if self.history_is_dense
             else torch.empty((plan["history_actual"], width), **options)
-        )
-        self.gathered = torch.empty(
-            (fmha._cp_size * plan["history_padded"], width), **options
         )
         self.new_slots = {}
         for location, slots in (("hbm", cache.original_slots), ("host", cache.slots)):

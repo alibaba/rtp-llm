@@ -144,6 +144,9 @@ def run_case(rank, prefixes, lengths, producer):
     )
     cache.begin_forward(fmha)
     pipeline = cache.kv_prefetch
+    assert pipeline.registered == (
+        os.environ.get("RTP_LLM_CP_KV_REGISTERED", "0") == "1"
+    )
     fmha._cross_layer_prefetch = pipeline
     compute = torch.cuda.current_stream()
     results, timing = [], []
@@ -202,7 +205,212 @@ def run_case(rank, prefixes, lengths, producer):
         "layers": layers,
         "zero_owned_new": not bool(len(fresh_owned)),
         "bit_exact": True,
+        "registered": pipeline.registered,
     }
+
+
+def check_registered_buffer_growth(rank, producer):
+    from rtp_llm.models_py.distributed import pynccl_cp
+
+    before = torch.cuda.memory_reserved()
+    # Several small capacity increases must not retain all old private pools.
+    # This reproduces the long-pressure failure without loading model weights.
+    previous_capacity = 0
+    previous_ptr = None
+    for rows in range(8192, 65537, 8192):
+        stats = torch.cuda.memory_stats()
+        pair = pynccl_cp.registered_kv_overlap_buffers(
+            rows, 576, torch.bfloat16, torch.device("cuda", rank), dist.group.WORLD
+        )
+        with torch.cuda.stream(producer):
+            pair[0].zero_()
+            pair[1].zero_()
+        producer.synchronize()
+        capacity = pynccl_cp._OVERLAP_BUFFERS[
+            (
+                *pynccl_cp._comm_key(dist.group.WORLD, pair[0].device),
+                576,
+                torch.bfloat16,
+            )
+        ].rows
+        assert rows <= capacity < 2 * rows
+        if rows <= previous_capacity:
+            assert pair[0].data_ptr() == previous_ptr
+            for counter in (
+                "num_device_alloc",
+                "num_device_free",
+                "num_sync_all_streams",
+            ):
+                assert torch.cuda.memory_stats()[counter] == stats[counter], counter
+        previous_capacity, previous_ptr = capacity, pair[0].data_ptr()
+        del pair
+    after = torch.cuda.memory_reserved()
+    active_bytes = 65536 * 576 * 2 * 9
+    assert after <= before + active_bytes + 16 * 1024**2, (
+        "old registered history pools retained memory after growth",
+        before,
+        after,
+        active_bytes,
+    )
+    Path(os.environ["TEST_UNDECLARED_OUTPUTS_DIR"]).joinpath(
+        f"registered_growth_rank{rank}.json"
+    ).write_text(
+        json.dumps(dict(before=before, after=after, active_bytes=active_bytes))
+    )
+
+
+def _indexer_reference(input, group):
+    output = torch.empty(
+        (dist.get_world_size(group) * input.size(0), input.size(1)),
+        dtype=torch.uint8,
+        device=input.device,
+    )
+    dist.all_gather_into_tensor(output, input.view(torch.uint8), group=group)
+    return output.view(input.dtype)
+
+
+def check_registered_indexer(rank, producer):
+    from rtp_llm.models_py.distributed import pynccl_cp
+
+    compute = torch.cuda.current_stream()
+    hlocal, houtput = pynccl_cp.registered_kv_overlap_buffers(
+        8192, 576, torch.bfloat16, torch.device("cuda", rank), dist.group.WORLD
+    )
+    results = []
+    for role, width, dtype in (
+        ("indexer_k_quant", 128, torch.float8_e4m3fn),
+        ("indexer_k_quant", 128, torch.float8_e5m2),
+        ("indexer_k_packed", 129, torch.uint8),
+    ):
+        for iteration, rows in enumerate((1, 257, 8192, 32768, 1025, 65536, 4096)):
+            data = torch.randint(
+                0, 256, (rows, width), dtype=torch.uint8, device="cuda"
+            ).view(dtype)
+            with torch.cuda.stream(producer):
+                hlocal.fill_(rank + iteration)
+                pynccl_cp.all_gather_kv_overlap(
+                    hlocal, dist.group.WORLD, output=houtput
+                )
+            actual = pynccl_cp.all_gather(data, group=dist.group.WORLD, role=role)
+            key = (
+                *pynccl_cp._comm_key(dist.group.WORLD, data.device),
+                role,
+                width,
+                dtype,
+            )
+            assert (
+                actual.data_ptr()
+                == pynccl_cp._INDEXER_BUFFERS[key][1].gathered.data_ptr()
+            )
+            reference = _indexer_reference(data, dist.group.WORLD)
+            assert torch.equal(actual.view(torch.uint8), reference.view(torch.uint8))
+            snapshot = actual.clone()
+            pynccl_cp.all_gather(
+                torch.zeros_like(data), group=dist.group.WORLD, role=role
+            )
+            assert torch.equal(snapshot.view(torch.uint8), reference.view(torch.uint8))
+            compute.wait_stream(producer)
+            for peer in range(8):
+                assert bool(
+                    (houtput[peer * 8192 : (peer + 1) * 8192] == peer + iteration).all()
+                )
+            results.append(dict(role=role, rows=rows, dtype=str(dtype), bitexact=True))
+            del actual, reference, snapshot, data
+    # A caller on a different stream must not overwrite the persistent slot.
+    data = torch.full((257, 129), rank, dtype=torch.uint8, device="cuda")
+    other = torch.cuda.Stream()
+    other.wait_stream(compute)
+    with torch.cuda.stream(other):
+        assert (
+            pynccl_cp._registered_indexer_all_gather(
+                data, dist.group.WORLD, "indexer_k_packed"
+            )
+            is None
+        )
+        actual = pynccl_cp.all_gather(
+            data, group=dist.group.WORLD, role="indexer_k_packed"
+        )
+    compute.wait_stream(other)
+    reference = _indexer_reference(data, dist.group.WORLD)
+    assert torch.equal(actual, reference)
+    del actual, reference, data
+    # Preallocate input to isolate private-pool capacity changes from inputs.
+    data = torch.zeros((131072, 128), dtype=torch.uint8, device="cuda")
+    torch.cuda.synchronize()
+    before = torch.cuda.memory_reserved()
+    previous_capacity = 0
+    previous_ptr = None
+    for rows in range(8192, 131073, 8192):
+        stats = torch.cuda.memory_stats()
+        actual = pynccl_cp.all_gather(
+            data[:rows], group=dist.group.WORLD, role="indexer_k_quant"
+        )
+        compute.synchronize()
+        key = (
+            *pynccl_cp._comm_key(dist.group.WORLD, data.device),
+            "indexer_k_quant",
+            128,
+            torch.uint8,
+        )
+        capacity = pynccl_cp._INDEXER_BUFFERS[key][1].rows
+        assert rows <= capacity < 2 * rows
+        if rows <= previous_capacity:
+            assert actual.data_ptr() == previous_ptr
+            for counter in (
+                "num_device_alloc",
+                "num_device_free",
+                "num_sync_all_streams",
+            ):
+                assert torch.cuda.memory_stats()[counter] == stats[counter], counter
+        previous_capacity, previous_ptr = capacity, actual.data_ptr()
+        del actual
+    after = torch.cuda.memory_reserved()
+    assert after <= before + 131072 * 128 * 9 + 16 * 1024**2, (before, after)
+    Path(os.environ["TEST_UNDECLARED_OUTPUTS_DIR"]).joinpath(
+        f"indexer_rank{rank}.json"
+    ).write_text(
+        json.dumps(
+            dict(
+                cases=results,
+                stream_fallback=True,
+                memory=dict(before=before, after=after),
+            ),
+            indent=2,
+        )
+    )
+    del hlocal, houtput, data
+
+
+def check_registered_failure_cleanup(rank):
+    from rtp_llm.models_py.distributed import pynccl_cp
+
+    device = torch.device("cuda", rank)
+    lib, comm = pynccl_cp._COMMS[pynccl_cp._comm_key(dist.group.WORLD, device)]
+    register = lib.window_register
+    calls = 0
+
+    def fail_second(*args):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("injected window registration failure")
+        return register(*args)
+
+    before = torch.cuda.memory_reserved()
+    with patch.object(lib, "window_register", side_effect=fail_second):
+        try:
+            pynccl_cp._RegisteredKvBuffers(
+                dist.group.WORLD, device, 1, 129, torch.uint8, lib, comm
+            )
+        except RuntimeError as error:
+            assert str(error) == "injected window registration failure"
+        else:
+            raise AssertionError("registration failure was not propagated")
+    after = torch.cuda.memory_reserved()
+    assert after == before, (before, after)
+    Path(os.environ["TEST_UNDECLARED_OUTPUTS_DIR"]).joinpath(
+        f"registered_cleanup_rank{rank}.json"
+    ).write_text(json.dumps(dict(before=before, after=after, register_calls=calls)))
 
 
 def worker(rank, port):
@@ -251,6 +459,11 @@ def worker(rank, port):
     Path(os.environ["TEST_UNDECLARED_OUTPUTS_DIR"]).joinpath(
         f"prefetch_rank{rank}.json"
     ).write_text(json.dumps(results, indent=2))
+    if os.environ.get("RTP_LLM_CP_KV_REGISTERED", "0") == "1":
+        check_registered_buffer_growth(rank, producer)
+    if os.environ.get("RTP_LLM_CP_INDEXER_REGISTERED", "0") == "1":
+        check_registered_indexer(rank, producer)
+        check_registered_failure_cleanup(rank)
     dist.barrier()
     pynccl_cp.destroy()
     dist.destroy_process_group()
