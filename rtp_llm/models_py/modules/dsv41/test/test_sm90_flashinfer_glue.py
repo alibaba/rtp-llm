@@ -241,3 +241,57 @@ def test_explicit_layout_dtype_shape_and_expert_contract():
     ):
         with pytest.raises((TypeError, ValueError)):
             finish(bad_out, bad_live, output_dtype=dtype)
+
+
+@pytest.mark.parametrize("count_dtype", [torch.int32, torch.int64])
+@torch.no_grad()
+def test_recv_count_masks_poisoned_tail_on_changing_graph_replay(count_dtype):
+    prepare, finish = _api()
+    x, weights, ids, out = _inputs(8, 8, 129, phase=2)
+    # Unused receive slots may contain valid IDs and NaNs from previous calls.
+    x[1:].view(torch.int16).fill_(0x7FC5)
+    weights[1:].view(torch.int32).fill_(0x7FC05678)
+    ids[1:].fill_(47)
+    original = [t.clone() for t in (x, weights, ids, out)]
+    count = torch.tensor(1, device="cuda", dtype=count_dtype)
+
+    def call():
+        prepared = prepare(x, weights, ids, 48, recv_count=count)
+        return (*prepared, finish(out, prepared[3]))
+
+    side = torch.cuda.Stream()
+    side.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(side):
+        for _ in range(3):
+            call()
+    torch.cuda.current_stream().wait_stream(side)
+    torch.cuda.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = call()
+    for rows in (0, 1, 8, 3, 0, 7, 8, 1):
+        count.fill_(rows)
+        active = torch.arange(8, device="cuda")[:, None] < count
+        masked_ids = torch.where(active, ids, -1)
+        expected = _reference(x, weights, masked_ids, out, 48, torch.float32)
+        eager = call()
+        graph.replay()
+        torch.cuda.synchronize()
+        for actual, direct, ref in zip(captured, eager, expected):
+            _bits(actual, ref)
+            _bits(actual, direct)
+        for actual, saved in zip((x, weights, ids, out), original):
+            _bits(actual, saved)
+
+
+@torch.no_grad()
+def test_recv_count_requires_one_device_integer():
+    prepare, _ = _api()
+    x, weights, ids, _ = _inputs(8, 8, 129)
+    for count in (
+        torch.tensor(1, dtype=torch.int32),
+        torch.tensor(1.0, device="cuda"),
+        torch.ones(2, device="cuda", dtype=torch.int64),
+    ):
+        with pytest.raises(ValueError):
+            prepare(x, weights, ids, 48, recv_count=count)

@@ -254,6 +254,7 @@ class Sm90FlashInferLocalExperts(nn.Module):
         output_dtype: torch.dtype = torch.float32,
         *,
         workspace: Optional[torch.Tensor] = None,
+        recv_count: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if not self._ready:
             raise RuntimeError("setup_weights must precede forward_local")
@@ -307,7 +308,7 @@ class Sm90FlashInferLocalExperts(nn.Module):
         # Nonlocal expert sentinel E is recognized by the upstream routing
         # kernels. Zero invalid weights explicitly: 0 * NaN is not masking.
         safe_x, safe_weights, safe_indices, live_rows = prepare_flashinfer_inputs(
-            x, weights, indices, self.num_experts
+            x, weights, indices, self.num_experts, recv_count=recv_count
         )
         out = torch.empty_like(x)
         self._op(

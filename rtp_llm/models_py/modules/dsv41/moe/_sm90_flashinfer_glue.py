@@ -20,6 +20,8 @@ def _prepare_kernel(
     safe_weights,
     safe_indices,
     live_rows,
+    recv_count,
+    HAS_RECV_COUNT: tl.constexpr,
     K: tl.constexpr,
     TOPK: tl.constexpr,
     EXPERTS: tl.constexpr,
@@ -29,7 +31,10 @@ def _prepare_kernel(
     row = tl.program_id(0)
     tile = tl.program_id(1)
     slot = tl.arange(0, ROUTE_BLOCK)
-    ids = tl.load(indices + row * TOPK + slot, slot < TOPK, other=-1)
+    in_receive = True
+    if HAS_RECV_COUNT:
+        in_receive = row < tl.load(recv_count)
+    ids = tl.load(indices + row * TOPK + slot, in_receive & (slot < TOPK), other=-1)
     # Compare in the original INT64 domain: narrowing first could wrap a large
     # invalid ID into a real expert. Zero route weights do not make IDs invalid.
     valid = (slot < TOPK) & (ids >= 0) & (ids < EXPERTS)
@@ -102,13 +107,14 @@ def _check_cuda_contiguous(tensor, dtype, device):
         raise ValueError("FlashInfer glue requires contiguous tensors")
 
 
-def prepare_flashinfer_inputs(x, weights, indices, num_experts):
+def prepare_flashinfer_inputs(x, weights, indices, num_experts, *, recv_count=None):
     """Return fresh (BF16 x, FP32 weights, INT32 IDs, BOOL [M,1] live).
 
     Inputs are contiguous CUDA BF16 [M,K], FP32 [M,T], INT64 [M,T].
     T is 1..8, K is positive, M may be zero. Invalid IDs become sentinel E;
     their weights become +0. All-invalid input rows become +0. Valid payloads
-    are copied bitwise, including NaNs and signed zero. No host route inspection.
+    are copied bitwise, including NaNs and signed zero. Optional device
+    recv_count masks unused V2 capacity before any input load, without host sync.
     """
     if (
         not isinstance(num_experts, int)
@@ -131,6 +137,15 @@ def prepare_flashinfer_inputs(x, weights, indices, num_experts):
         (indices, torch.int64),
     ):
         _check_cuda_contiguous(tensor, dtype, x.device)
+    if recv_count is not None and (
+        recv_count.device != x.device
+        or recv_count.dtype not in (torch.int32, torch.int64)
+        or recv_count.numel() != 1
+        or not recv_count.is_contiguous()
+    ):
+        raise ValueError(
+            "recv_count must be one CUDA INT32/INT64 value on input device"
+        )
     rows, k = x.shape
     topk = indices.shape[1]
     safe_x = torch.empty(x.shape, device=x.device, dtype=torch.bfloat16)
@@ -146,6 +161,8 @@ def prepare_flashinfer_inputs(x, weights, indices, num_experts):
             safe_weights,
             safe_indices,
             live_rows,
+            recv_count,
+            recv_count is not None,
             k,
             topk,
             num_experts,

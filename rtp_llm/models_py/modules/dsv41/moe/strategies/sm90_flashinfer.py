@@ -1,7 +1,7 @@
-"""Explicit SM90 FlashInfer W4A8 candidate over the existing normal DeepEP.
+"""SM90 FlashInfer W4A8 with DeepEP V2 for prefill and decode.
 
 Select with DSV4_MOE_STRATEGY=sm90_flashinfer. This does not change the default
-Humming backend, attention parallelism, shared experts, dispatch, or combine.
+Humming backend, attention parallelism, or shared experts.
 The upstream numerical ordering differs from Humming (see local adapter).
 """
 
@@ -13,11 +13,51 @@ import torch
 
 from .._sm90_flashinfer_moe import Sm90FlashInferLocalExperts
 from .base import MoeCfg, RoutedExpertsStrategy, register_strategy
-from .deepep import DeepEPStrategy
+
+_PREFILL_LOCAL_CHUNK_ROWS = 32768
+
+
+def _forward_prefill_local(local, x, weights, indices):
+    """BF16 local P output; input expert IDs are already rank-local.
+
+    Slice only received rows, after dispatch and before combine. This bounds
+    FI scratch without adding collectives or requiring equal rank loop counts.
+    """
+    if x.shape[0] <= _PREFILL_LOCAL_CHUNK_ROWS:
+        return local._forward_into_buf(
+            x.contiguous(),
+            weights.contiguous(),
+            indices.to(torch.int64).contiguous(),
+            0,
+            local.num_experts,
+        ).to(x.dtype)
+    output = torch.empty(x.shape, device=x.device, dtype=torch.bfloat16)
+    for start in range(0, x.shape[0], _PREFILL_LOCAL_CHUNK_ROWS):
+        end = min(start + _PREFILL_LOCAL_CHUNK_ROWS, x.shape[0])
+        partial = local._forward_into_buf(
+            x[start:end].contiguous(),
+            weights[start:end].contiguous(),
+            indices[start:end].to(torch.int64).contiguous(),
+            0,
+            local.num_experts,
+        )
+        # Preserve the existing FP32-to-BF16 boundary without allocating a
+        # full-receive FP32 output and another full-receive conversion copy.
+        output[start:end].copy_(partial)
+        del partial
+    return output
 
 
 def _forward_flashinfer_local(
-    local, x, weights, indices, local_start, local_end, *, output_dtype=torch.float32
+    local,
+    x,
+    weights,
+    indices,
+    local_start,
+    local_end,
+    *,
+    output_dtype=torch.float32,
+    recv_count=None
 ):
     """Backend-neutral local-compute callback for static normal DeepEP."""
     if local_start != 0 or local_end != local.num_experts:
@@ -25,7 +65,11 @@ def _forward_flashinfer_local(
     if not torch.cuda.is_current_stream_capturing():
         local.prepare(x.shape[0], indices.shape[1])
     return local.forward_local(
-        x, weights, indices.to(torch.int64).contiguous(), output_dtype=output_dtype
+        x,
+        weights,
+        indices.to(torch.int64).contiguous(),
+        output_dtype=output_dtype,
+        recv_count=recv_count,
     )
 
 
@@ -59,10 +103,23 @@ class SM90FlashInferStrategy(RoutedExpertsStrategy):
         )
         if self._decode_graph_max_rows <= 0:
             raise ValueError("SM90 decode graph max rows must be positive")
-        self._dispatch = None
-        if cfg.ep_size > 1:
-            self._dispatch = DeepEPStrategy(cfg)
-            self._dispatch._local = self._local
+        if self._decode_graph and not cfg.is_decode_role:
+            raise ValueError("SM90 static MoE graph is only supported for decode")
+        # Keep a stale experimental AG/legacy setting from silently selecting
+        # a different transport. P and D use the same V2 implementation.
+        if os.environ.get("DSV41_SM90_MOE_COMM", "v2") != "v2":
+            raise ValueError(
+                "SM90 FlashInfer uses DeepEP V2; remove legacy/AG override"
+            )
+        self._v2_num_sms = int(os.environ.get("DSV41_SM90_V2_NUM_SMS", "0"))
+        self._max_tokens_per_rank = (
+            self._decode_graph_max_rows
+            if self._decode_graph
+            else cfg.max_tokens_per_rank
+        )
+        if self._max_tokens_per_rank <= 0:
+            raise ValueError("SM90 V2 token capacity must be positive")
+        self._comm_buffer = None
 
     def setup_weights(self, layer_weights: Dict) -> None:
         self._local.setup_weights(layer_weights)
@@ -83,13 +140,66 @@ class SM90FlashInferStrategy(RoutedExpertsStrategy):
 
             wrapper = DeepEPWrapper._instance
             if wrapper is None or wrapper.mode != DeepEPMode.NORMAL:
-                raise RuntimeError("SM90 FlashInfer requires DeepEP normal mode")
+                raise RuntimeError(
+                    "SM90 FlashInfer requires initialized DeepEP normal mode"
+                )
             if wrapper.config.ep_size != self.cfg.ep_size:
                 raise RuntimeError("DeepEP and model EP sizes differ")
-            if self._decode_graph and wrapper.config.use_deepep_internode:
+            if wrapper.config.use_deepep_internode or self.cfg.ep_size != 8:
                 raise RuntimeError(
-                    "SM90 FlashInfer decode graph requires intranode DeepEP"
+                    "SM90 FlashInfer V2 currently requires intranode EP8"
                 )
+            group = wrapper.buffer.group
+            if (
+                group.size() != self.cfg.ep_size
+                or group.rank() != self.cfg.ep_rank
+                or self.cfg.local_expert_start
+                != self.cfg.ep_rank * self.cfg.n_local_experts
+                or self.cfg.local_expert_end
+                != self.cfg.local_expert_start + self.cfg.n_local_experts
+            ):
+                raise ValueError("SM90 V2 requires aligned EP group and expert ranks")
+            sm_count = torch.cuda.get_device_properties(
+                torch.cuda.current_device()
+            ).multi_processor_count
+            if self._v2_num_sms and (
+                self._v2_num_sms < 4
+                or self._v2_num_sms % 2
+                or self._v2_num_sms > sm_count
+            ):
+                raise ValueError(
+                    "V2 SM count must be zero or a valid even device SM count"
+                )
+            from deep_ep import ElasticBuffer
+
+            key = (
+                self._max_tokens_per_rank,
+                self.cfg.dim,
+                8,
+                self.cfg.n_routed_experts,
+                self.cfg.ep_rank,
+                torch.cuda.current_device(),
+                id(group),
+            )
+            existing = getattr(wrapper, "_dsv41_elastic", None)
+            if existing is None:
+                buffer = ElasticBuffer(
+                    group,
+                    num_max_tokens_per_rank=key[0],
+                    hidden=key[1],
+                    num_topk=key[2],
+                )
+                wrapper._dsv41_elastic = (key, buffer)
+                logging.info(
+                    "SM90 DeepEP V2: role=%s capacity_per_rank=%d buffer_bytes=%d SMs=%d",
+                    "decode" if self.cfg.is_decode_role else "prefill",
+                    key[0],
+                    buffer.num_bytes,
+                    self._v2_num_sms,
+                )
+            elif existing[0] != key:
+                raise ValueError("Incompatible SM90 ElasticBuffer capacity")
+            self._comm_buffer = wrapper._dsv41_elastic[1]
         if self._decode_graph:
             if self.cfg.ep_size > 1:
                 rows = self._decode_graph_max_rows * self.cfg.ep_size
@@ -101,20 +211,52 @@ class SM90FlashInferStrategy(RoutedExpertsStrategy):
             self._local.prepare(rows, topk, tune=True)
 
     def forward(self, x, weights, indices):
-        if self._decode_graph and x.shape[0] <= self._decode_graph_max_rows:
-            if self._dispatch is not None:
-                from .._sm90_humming_graph import forward_normal_static
+        if self._comm_buffer is not None:
+            if x.shape[0] > self._max_tokens_per_rank:
+                raise ValueError("Input exceeds configured SM90 V2 token capacity")
+            if self._decode_graph:
+                from .._sm90_humming_graph import forward_elastic_static
 
-                return forward_normal_static(
-                    self,
-                    x,
-                    weights,
-                    indices,
-                    self._decode_graph_max_rows,
-                    local_forward=_forward_flashinfer_local,
+                return forward_elastic_static(
+                    self, x, weights, indices, local_forward=_forward_flashinfer_local
                 )
-            # EP1 also captures smaller batches than the setup maximum.
-            # Warm up their graph-owned scratch, separate from eager prefill.
+            if torch.cuda.is_current_stream_capturing():
+                raise RuntimeError(
+                    "Dynamic SM90 V2 receive counts require eager execution"
+                )
+            from .._sm90_dispatch_pad import pad_deepep_routes
+
+            indices_p, weights_p = pad_deepep_routes(indices, weights, pad_to=8)
+            recv_x, recv_idx, recv_weights, handle, _ = self._comm_buffer.dispatch(
+                x,
+                topk_idx=indices_p,
+                topk_weights=weights_p,
+                num_experts=self.cfg.n_routed_experts,
+                num_max_tokens_per_rank=self._max_tokens_per_rank,
+                expert_alignment=1,
+                num_sms=self._v2_num_sms,
+                do_cpu_sync=True,
+                do_expand=False,
+            )
+            # P uses actual receive rows and the single reusable eager scratch.
+            # V2 expert IDs are already local; FI applies the weights once.
+            if self.cfg.is_decode_role:
+                local_output = self._local._forward_into_buf(
+                    recv_x.contiguous(),
+                    recv_weights.contiguous(),
+                    recv_idx.to(torch.int64).contiguous(),
+                    0,
+                    self.cfg.n_local_experts,
+                )
+            else:
+                local_output = _forward_prefill_local(
+                    self._local, recv_x, recv_weights, recv_idx
+                )
+            combined, _, _ = self._comm_buffer.combine(local_output.to(x.dtype), handle)
+            return combined.float()
+        if self.cfg.ep_size > 1:
+            raise RuntimeError("SM90 V2 runtime has not been initialized")
+        if self._decode_graph and x.shape[0] <= self._decode_graph_max_rows:
             return _forward_flashinfer_local(
                 self._local,
                 x,
@@ -128,8 +270,6 @@ class SM90FlashInferStrategy(RoutedExpertsStrategy):
                 "SM90 FlashInfer capture requires DSV41_SM90_DECODE_GRAPH=1 "
                 "and rows within DSV41_SM90_DECODE_GRAPH_MAX_ROWS"
             )
-        if self._dispatch is not None:
-            return self._dispatch(x, weights, indices)
         return self._local._forward_into_buf(
             x,
             weights,
