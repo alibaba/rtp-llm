@@ -42,6 +42,24 @@ import torch
 _PREFILL_WS_ALIGN_BYTES = 1 << 30
 
 
+def resolve_prefill_workspace_rows(
+    configured_q_rows: int,
+    configured_full_rows: int,
+    live_q_rows: int,
+    cp_size: int,
+    *,
+    allow_dynamic_growth: bool,
+) -> tuple[int, int]:
+    q_rows = int(configured_q_rows)
+    full_rows = int(configured_full_rows)
+    if not allow_dynamic_growth:
+        return q_rows, full_rows
+    q_rows = max(q_rows, int(live_q_rows))
+    if full_rows > 0:
+        full_rows = max(full_rows, q_rows * max(int(cp_size), 1))
+    return q_rows, full_rows
+
+
 def _dtype_size(dtype: torch.dtype) -> int:
     return torch.empty((), dtype=dtype).element_size()
 
@@ -122,6 +140,50 @@ class PrefillWorkspace:
         union_bytes = max(self._q_bytes, cp_region_bytes)
         union_bytes = ((union_bytes + align - 1) // align) * align
         self._union = torch.empty(union_bytes, dtype=torch.uint8, device=device)
+        # SM120 can consume framework paged caches directly in the ordinary
+        # path.  CP byte-sliced/remote-pool fallback still needs a repacked
+        # local cache; keep those buffers on the per-forward workspace so they
+        # are allocated once and reused by every layer instead of rebuilt in
+        # the layer hot path.
+        self._sm120_packed: dict[str, torch.Tensor] = {}
+        self._sm120_slots: dict[str, torch.Tensor] = {}
+
+    def sm120_packed_cache(
+        self,
+        role: str,
+        *,
+        num_tokens: int,
+        page_size: int,
+        entry_bytes: int = 584,
+    ) -> torch.Tensor:
+        num_tokens = int(num_tokens)
+        page_size = int(page_size)
+        entry_bytes = int(entry_bytes)
+        assert num_tokens >= 0 and page_size > 0 and entry_bytes > 0
+        blocks = max((num_tokens + page_size - 1) // page_size, 1)
+        cache = self._sm120_packed.get(role)
+        if (
+            cache is None
+            or int(cache.shape[0]) < blocks
+            or int(cache.shape[1]) != page_size
+            or int(cache.shape[2]) != entry_bytes
+        ):
+            cache = torch.empty(
+                (blocks, page_size, entry_bytes),
+                dtype=torch.uint8,
+                device=self._device,
+            )
+            self._sm120_packed[role] = cache
+        return cache[:blocks]
+
+    def sm120_linear_slots(self, role: str, num_tokens: int) -> torch.Tensor:
+        num_tokens = int(num_tokens)
+        assert num_tokens >= 0
+        slots = self._sm120_slots.get(role)
+        if slots is None or int(slots.numel()) < num_tokens:
+            slots = torch.arange(num_tokens, dtype=torch.int64, device=self._device)
+            self._sm120_slots[role] = slots
+        return slots[:num_tokens]
 
     def prefill_q(self, num_tokens: int) -> torch.Tensor:
         """``[num_tokens, q_dim]`` bf16 view at the front of the union buffer."""

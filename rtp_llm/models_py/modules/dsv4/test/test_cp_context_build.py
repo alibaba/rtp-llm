@@ -47,6 +47,16 @@ def _load_cp_module():
     profiler_module = types.ModuleType("rtp_llm.models_py.modules.dsv4._profiler")
     profiler_module.record_function_range = torch.profiler.record_function
     sys.modules["rtp_llm.models_py.modules.dsv4._profiler"] = profiler_module
+    # cp.py imports its diagnostics sibling; stub it like _profiler so the
+    # standalone loader keeps working without the full package chain.
+    diagnostics_module = types.ModuleType(
+        "rtp_llm.models_py.modules.dsv4._cp_diagnostics"
+    )
+    diagnostics_module._CP_GATHER_STATS = False
+    diagnostics_module._cp_gather_kind = lambda profile_name: profile_name
+    diagnostics_module._cp_gather_record = lambda *a, **k: None
+    diagnostics_module._cp_gather_stats_drain = lambda *a, **k: None
+    sys.modules["rtp_llm.models_py.modules.dsv4._cp_diagnostics"] = diagnostics_module
 
     here = os.path.dirname(os.path.abspath(__file__))
     cp_path = os.path.normpath(os.path.join(here, os.pardir, "cp.py"))

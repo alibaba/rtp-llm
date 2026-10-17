@@ -12,17 +12,57 @@ from __future__ import annotations
 
 import os
 from abc import ABC, abstractmethod
+from enum import Enum
 from typing import Optional
 
 import torch
+
+from rtp_llm.models_py.utils.arch import is_sm120
 
 _FAST_TOPK_VALUES = (2048,)
 _PERSISTENT_TOPK_VALUES = (512, 1024, 2048)
 _ENV_CANONICALIZE = "DSV4_INDEXER_TOPK_CANONICALIZE"
 
 
-def _backend_name() -> str:
-    return os.environ.get("DSV4_INDEXER_TOPK_BACKEND", "auto").strip().lower()
+class IndexerTopKBackendName(str, Enum):
+    AUTO = "auto"
+    TORCH = "torch"
+    FAST = "fast"
+    PERSISTENT = "persistent"
+    HISA = "hisa"
+
+
+def parse_indexer_topk_backend_name(
+    value: Optional[str] = None,
+) -> IndexerTopKBackendName:
+    """Parse the shared DSV4 Top-K selector for every execution phase.
+
+    ``cuda`` was accepted by FP8 prefill before the shared selector existed.
+    Preserve it as an alias for ``auto``: both request an exact CUDA backend
+    when the current shape supports one and retain an exact fallback otherwise.
+    """
+    normalized = (
+        (
+            os.environ.get("DSV4_INDEXER_TOPK_BACKEND", "auto")
+            if value is None
+            else value
+        )
+        .strip()
+        .lower()
+    )
+    if normalized == "cuda":
+        normalized = IndexerTopKBackendName.AUTO.value
+    try:
+        return IndexerTopKBackendName(normalized)
+    except ValueError as exc:
+        choices = "|".join(item.value for item in IndexerTopKBackendName)
+        raise ValueError(
+            f"invalid DSV4_INDEXER_TOPK_BACKEND={normalized!r}; expected {choices}"
+        ) from exc
+
+
+def _backend_name() -> IndexerTopKBackendName:
+    return parse_indexer_topk_backend_name()
 
 
 def _canonicalize_enabled() -> bool:
@@ -230,12 +270,14 @@ class PersistentIndexerTopKBackend(IndexerTopKBackend):
 
         from rtp_llm.ops.compute_ops import rtp_llm_ops
 
-        persistent_topk = getattr(rtp_llm_ops, "persistent_topk")
+        persistent_topk = getattr(rtp_llm_ops, "dsv4_persistent_topk")
         out = torch.empty(
             (flat.shape[0], int(topk)), dtype=torch.int32, device=flat.device
         )
         workspace = torch.empty((1 << 20,), dtype=torch.uint8, device=flat.device)
-        persistent_topk(flat, lengths_i32, out, workspace, int(topk), int(flat.shape[1]))
+        persistent_topk(
+            flat, lengths_i32, out, workspace, int(topk), int(flat.shape[1])
+        )
         out = _apply_offset(out, offset)
         if _canonicalize_enabled():
             out = _sort_valid_indices(out)
@@ -285,6 +327,18 @@ class AutoIndexerTopKBackend(IndexerTopKBackend):
     ) -> torch.Tensor:
         if int(topk) <= 0 or score.shape[-1] == 0:
             return self._torch.select(score, topk, lengths=lengths, offset=offset)
+        if (
+            score.is_cuda
+            and score.dtype == torch.float32
+            and is_sm120(score.device)
+            and int(topk) in _PERSISTENT_TOPK_VALUES
+        ):
+            try:
+                return self._persistent.select(
+                    score, topk, lengths=lengths, offset=offset
+                )
+            except (ImportError, AttributeError):
+                pass
         # The fused TopK kernels are only used for full-row selection. Decode
         # can request topk=512 while only a short compressed prefix is valid;
         # keep that masked case on the exact torch path.
@@ -305,7 +359,9 @@ class AutoIndexerTopKBackend(IndexerTopKBackend):
             and int(topk) in _PERSISTENT_TOPK_VALUES
         ):
             try:
-                return self._persistent.select(score, topk, lengths=lengths, offset=offset)
+                return self._persistent.select(
+                    score, topk, lengths=lengths, offset=offset
+                )
             except (ImportError, AttributeError):
                 pass
         return self._torch.select(score, topk, lengths=lengths, offset=offset)
@@ -313,19 +369,14 @@ class AutoIndexerTopKBackend(IndexerTopKBackend):
 
 def get_indexer_topk_backend() -> IndexerTopKBackend:
     name = _backend_name()
-    if name == "torch":
+    if name is IndexerTopKBackendName.TORCH:
         return TorchIndexerTopKBackend()
-    if name == "fast":
+    if name is IndexerTopKBackendName.FAST:
         return FastIndexerTopKBackend()
-    if name == "persistent":
+    if name is IndexerTopKBackendName.PERSISTENT:
         return PersistentIndexerTopKBackend()
-    if name == "hisa":
+    if name is IndexerTopKBackendName.HISA:
         return HisaIndexerTopKBackend()
-    if name != "auto":
-        raise ValueError(
-            "invalid DSV4_INDEXER_TOPK_BACKEND="
-            f"{name!r}; expected auto|torch|fast|persistent|hisa"
-        )
     return AutoIndexerTopKBackend()
 
 

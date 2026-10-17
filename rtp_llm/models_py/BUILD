@@ -98,6 +98,34 @@ filegroup(
     visibility = ["//visibility:public"],
 )
 
+# Source-level policy tests deliberately do not import GPU modules.
+filegroup(
+    name = "prefill_policy_source_data",
+    srcs = [
+        "modules/dsv4/dsv4_kernel_jit_warmup.py",
+        "modules/dsv4/fp8/attention.py",
+        "modules/dsv4/utils.py",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "prefill_optimization_source_data",
+    srcs = glob([
+        "modules/dsv4/**/*.py",
+        "modules/dsv4/*.py",
+        # Prenorm tests load the kernel dispatch source directly.
+        "3rdparty/tile_kernels/modeling/mhc/**/*.py",
+        # Include the shared backend resolver and wrapper for CPU tests.
+        "utils/arch.py",
+        "kernels/cuda/deepgemm_wrapper.py",
+        "kernels/cuda/sm120_fp8_blockwise.py",
+        # dsv4/_profiler.py wraps the generic fused-MoE profiler.
+        "modules/factory/fused_moe/utils/profiler.py",
+    ]),
+    visibility = ["//visibility:public"],
+)
+
 py_library(
     name = "modules",
     srcs = glob([

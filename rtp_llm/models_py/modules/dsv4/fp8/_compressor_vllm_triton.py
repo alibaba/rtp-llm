@@ -58,7 +58,7 @@ from typing import Optional, Tuple
 import torch
 import triton
 import triton.language as tl
-
+from rtp_llm.models_py.modules.dsv4.fp4.quantization import store_rotated_key
 from rtp_llm.models_py.modules.dsv4.fp8._trap_utils import (
     invalid_kv_access_validation_enabled,
     trap_invalid_kv_access_enabled,
@@ -103,6 +103,7 @@ def _save_partial_states_kernel(
     STATE_WIDTH: tl.constexpr,
     COMPRESS_RATIO: tl.constexpr,
     TRAP_INVALID_KV_ACCESS: tl.constexpr,
+    RAW_SCORES: tl.constexpr = False,
 ):
     token_idx = tl.program_id(0).to(tl.int64)
     slot_id = tl.load(slot_mapping_ptr + token_idx)
@@ -132,7 +133,10 @@ def _save_partial_states_kernel(
     ape_row = position % COMPRESS_RATIO
     ape = tl.load(ape_ptr + ape_row * ape_stride + block, mask=mask)
     score = tl.load(score_ptr + token_idx * score_stride + block, mask=mask)
-    tl.store(base_ptr + STATE_WIDTH + block, score + ape, mask=mask)
+    if RAW_SCORES:
+        tl.store(base_ptr + STATE_WIDTH + block, score, mask=mask)
+    else:
+        tl.store(base_ptr + STATE_WIDTH + block, score + ape, mask=mask)
 
 
 # =============================================================================
@@ -479,6 +483,7 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
     BATCHED: tl.constexpr,
     TRAP_INVALID_KV_ACCESS: tl.constexpr,
     STATE_RING_ENTRIES: tl.constexpr,
+    FP4_INDEXER: tl.constexpr = False,
 ):
     token_idx = tl.program_id(0).to(tl.int64)
 
@@ -583,6 +588,17 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
         other=0.0,
     )
 
+    if FP4_INDEXER:
+        cache_ape = tl.load(
+            ape_ptr
+            + (pos % COMPRESS_RATIO)[:, None] * ape_stride
+            + head_offset[:, None]
+            + block[None, :],
+            mask=cache_mask,
+            other=0.0,
+        )
+        score_from_cache += cache_ape
+
     # ── Combine: pick raw or cache per position ──
     kv = tl.where(use_raw[:, None], kv_from_raw, kv_from_cache)
     score = tl.where(use_raw[:, None], score_from_raw, score_from_cache)
@@ -645,6 +661,16 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
     new_even = even * cos_v - odd * sin_v
     new_odd = odd * cos_v + even * sin_v
     result = tl.interleave(new_even, new_odd)
+
+    if FP4_INDEXER:
+        store_rotated_key(
+            result,
+            k_cache_ptr,
+            kv_block_idx.to(tl.int64) * KV_BLOCK_STRIDE.to(tl.int64),
+            kv_pos_in_block,
+            kv_cache_block_size,
+        )
+        return
 
     tl.static_assert(
         TRITON_BLOCK_SIZE == QUANT_BLOCK,
@@ -770,6 +796,7 @@ def run_save_partial_states(
     state_cache: torch.Tensor,  # [num_blocks, block_size, 2*coff*head_dim] fp32
     slot_mapping: torch.Tensor,  # [N] int64; -1 = skip
     compress_ratio: int,
+    raw_scores: bool = False,
 ) -> None:
     """Per-token write of (kv | score+ape) into the fp32 state cache."""
     N = int(slot_mapping.shape[0])
@@ -804,6 +831,7 @@ def run_save_partial_states(
         STATE_WIDTH=state_width,
         COMPRESS_RATIO=compress_ratio,
         TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
+        RAW_SCORES=raw_scores,
     )
 
 
@@ -842,6 +870,7 @@ def run_fused_compress_kv_write(
     seq_start_per_req: Optional[torch.Tensor] = None,  # [B] int64
     cu_seq_per_req: Optional[torch.Tensor] = None,  # [B+1] int64
     state_tokens_per_block: int,
+    fp4_indexer: bool = False,
 ) -> None:
     """Boundary-token compress→norm→rope→fp8 quant→KV-pool store.
 
@@ -914,6 +943,14 @@ def run_fused_compress_kv_write(
     else:
         kernel = _fused_kv_compress_norm_rope_insert_indexer_attn
 
+    extra = {}
+    if head_dim == 128:
+        extra["FP4_INDEXER"] = fp4_indexer
+    elif fp4_indexer:
+        raise ValueError(
+            "FP4 packing is only supported for the 128-dimensional indexer"
+        )
+
     kernel[(N,)](
         state_cache,
         state_cache.stride(0),
@@ -959,6 +996,7 @@ def run_fused_compress_kv_write(
         TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
         STATE_RING_ENTRIES=state_ring_entries,
         num_warps=_fused_num_warps(head_dim, compress_ratio, cfg),
+        **extra,
     )
 
 

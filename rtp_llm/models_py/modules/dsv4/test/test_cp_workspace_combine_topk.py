@@ -50,6 +50,15 @@ def _load_cp_module():
     profiler.record_function_range = lambda _: contextlib.nullcontext()
     sys.modules["rtp_llm.models_py.modules.dsv4._profiler"] = profiler
 
+    diag_name = "rtp_llm.models_py.modules.dsv4._cp_diagnostics"
+    if diag_name not in sys.modules:
+        diag = types.ModuleType(diag_name)
+        diag._CP_GATHER_STATS = False
+        diag._cp_gather_kind = lambda profile_name: profile_name
+        diag._cp_gather_record = lambda *a, **k: None
+        diag._cp_gather_stats_drain = lambda *a, **k: None
+        sys.modules[diag_name] = diag
+
     here = os.path.dirname(os.path.abspath(__file__))
     cp_path = os.path.normpath(os.path.join(here, os.pardir, "cp.py"))
     spec = importlib.util.spec_from_file_location(

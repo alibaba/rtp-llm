@@ -848,9 +848,9 @@ def _gather_k_cache_packed_to_flat_kernel(
 
     batch_offsets = tl.arange(0, BATCH_BLOCK)
     batch_mask = batch_offsets < batch_size
-    padded_lens = tl.load(
-        padded_lens_ptr + batch_offsets, mask=batch_mask, other=0
-    ).to(tl.int64)
+    padded_lens = tl.load(padded_lens_ptr + batch_offsets, mask=batch_mask, other=0).to(
+        tl.int64
+    )
     padded_ends = tl.cumsum(padded_lens, axis=0)
     batch_idx = tl.sum((token_idx >= padded_ends).to(tl.int32), axis=0)
     padded_start = tl.sum(
@@ -1009,6 +1009,274 @@ def try_gather_k_cache_packed_to_flat(
     return True
 
 
+# 576B token data is 72 x uint64; 8B scale is 1 x uint64. Both footer
+# offsets (pos * 576, page * 576 + pos * 8) are 8-byte aligned.
+_PACK_SLOTS_DATA_U64 = TOKEN_DATA_SIZE // 8  # 72
+
+
+@triton.jit
+def _pack_slots_copy_u64(
+    src_data,
+    dst_data,
+    valid,
+    n_data_u64: tl.constexpr,
+):
+    """Copy 72 uint64 without a 128-wide masked load."""
+    off0 = tl.arange(0, 64)
+    data0 = tl.load(src_data + off0, mask=valid, other=0)
+    tl.store(dst_data + off0, data0, mask=valid)
+    off1 = 64 + tl.arange(0, 16)
+    tail = (off1 < n_data_u64) & valid
+    data1 = tl.load(src_data + off1, mask=tail, other=0)
+    tl.store(dst_data + off1, data1, mask=tail)
+
+
+@triton.jit
+def _pack_slots_zero_u64(dst_data, n_data_u64: tl.constexpr):
+    off0 = tl.arange(0, 64)
+    tl.store(dst_data + off0, tl.zeros((64,), dtype=tl.uint64))
+    off1 = 64 + tl.arange(0, 16)
+    tl.store(
+        dst_data + off1,
+        tl.zeros((16,), dtype=tl.uint64),
+        mask=off1 < n_data_u64,
+    )
+
+
+@triton.jit
+def _pack_slots_to_paged_kernel(
+    src_ptr,
+    dst_ptr,
+    slots_ptr,
+    remap_ptr,
+    lens_ptr,
+    n_slots,
+    n_dst,
+    width,
+    src_page: tl.constexpr,
+    dst_page: tl.constexpr,
+    src_stride,
+    dst_stride,
+    token_data_size: tl.constexpr,
+    n_data_u64: tl.constexpr,
+    HAS_LENS: tl.constexpr,
+):
+    """Gather selected footer-layout slots into a compact paged cache.
+
+    Grid-stride over dest slots so CUDA-graph launch size stays bounded
+    when capture pads HCA width to 8K. ``HAS_LENS`` skips those tail
+    columns without shrinking the captured dest tensor.
+    """
+    pid = tl.program_id(0).to(tl.int64)
+    n_prog = tl.num_programs(0).to(tl.int64)
+    row = pid
+    while row < n_dst:
+        dst_block = row // dst_page
+        dst_pos = row - dst_block * dst_page
+        dst_block_ptr = dst_ptr + dst_block * dst_stride.to(tl.int64)
+        in_slots = row < n_slots
+        skip = False
+        if HAS_LENS and in_slots:
+            col = row - (row // width) * width
+            limit = tl.load(lens_ptr + (row // width))
+            skip = col >= limit
+        if skip:
+            tl.store(remap_ptr + row, tl.zeros((), dtype=tl.int32))
+            if row == 0:
+                # Masked sparse-attention lanes still load slot zero. Keep
+                # its data and scales finite when the first query is empty.
+                dst_data = dst_block_ptr.to(tl.pointer_type(tl.uint64))
+                dst_scale = (dst_block_ptr + dst_page * token_data_size).to(
+                    tl.pointer_type(tl.uint64)
+                )
+                _pack_slots_zero_u64(dst_data, n_data_u64)
+                tl.store(dst_scale, tl.zeros((), dtype=tl.uint64))
+        else:
+            slot = tl.load(slots_ptr + row, mask=in_slots, other=-1).to(tl.int64)
+            valid = in_slots & (slot >= 0)
+            safe_slot = tl.where(valid, slot, tl.zeros_like(slot))
+            src_block = safe_slot // src_page
+            src_pos = safe_slot - src_block * src_page
+            src_block_ptr = src_ptr + src_block * src_stride.to(tl.int64)
+
+            src_data = (src_block_ptr + src_pos * token_data_size).to(
+                tl.pointer_type(tl.uint64)
+            )
+            dst_data = (dst_block_ptr + dst_pos * token_data_size).to(
+                tl.pointer_type(tl.uint64)
+            )
+            src_scale = (src_block_ptr + src_page * token_data_size + src_pos * 8).to(
+                tl.pointer_type(tl.uint64)
+            )
+            dst_scale = (dst_block_ptr + dst_page * token_data_size + dst_pos * 8).to(
+                tl.pointer_type(tl.uint64)
+            )
+
+            if valid:
+                _pack_slots_copy_u64(src_data, dst_data, valid, n_data_u64)
+                tl.store(dst_scale, tl.load(src_scale))
+            else:
+                _pack_slots_zero_u64(dst_data, n_data_u64)
+                tl.store(dst_scale, tl.zeros((), dtype=tl.uint64))
+            if in_slots:
+                remapped = tl.where(
+                    valid, row.to(tl.int32), tl.zeros((), dtype=tl.int32)
+                )
+                tl.store(remap_ptr + row, remapped)
+        row += n_prog
+
+
+def pack_slots_to_paged(
+    k_cache: torch.Tensor,
+    slot_indices: torch.Tensor,
+    page_size: int,
+    row_lens: Optional[torch.Tensor] = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """One-launch gather of selected slots into a page-aligned footer cache.
+
+    ``k_cache`` is ``[num_blocks, src_page, 584]`` uint8 (TMA-padded stride
+    allowed). ``slot_indices`` are global slot ids; ``-1`` is invalid.
+    ``row_lens`` is optional ``[rows]`` — columns ``>= lens[row]`` skip the
+    584B copy (CUDA-graph dest size stays the capture width).
+    Returns ``(paged, remapped)`` where ``paged`` is
+    ``[dst_pages, page_size, 584]`` and ``remapped`` matches
+    ``slot_indices`` shape, with invalid slots forced to 0.
+    """
+    assert k_cache.dim() == 3 and k_cache.shape[-1] == ENTRY_BYTES
+    assert k_cache.dtype == torch.uint8
+    assert k_cache.stride(2) == 1
+    assert page_size > 0
+    slots = slot_indices.reshape(-1)
+    if slots.dtype != torch.int32:
+        slots = slots.to(torch.int32)
+    if not slots.is_contiguous():
+        slots = slots.contiguous()
+    slot_count = int(slots.numel())
+    width = int(slot_indices.shape[-1]) if slot_indices.numel() else 1
+    dst_pages = max((slot_count + page_size - 1) // page_size, 1)
+    packed = torch.empty(
+        (dst_pages, page_size, ENTRY_BYTES),
+        dtype=torch.uint8,
+        device=k_cache.device,
+    )
+    remapped = torch.empty((slot_count,), dtype=torch.int32, device=k_cache.device)
+    n_dst = dst_pages * page_size
+    has_lens = row_lens is not None
+    if has_lens:
+        n_rows = max(slot_count // max(width, 1), 1)
+        lens = row_lens.reshape(-1).to(dtype=torch.int32)
+        if not lens.is_contiguous():
+            lens = lens.contiguous()
+        if int(lens.numel()) != n_rows:
+            raise ValueError(
+                f"row_lens has {int(lens.numel())} rows; expected {n_rows}"
+            )
+    else:
+        lens = slots
+    # Bound the captured grid. Decode graphs pin n_dst to the capture
+    # width (HCA 8K); launching one CTA per dest slot spends more time
+    # on empty tail CTAs than on the real 584B gathers.
+    n_prog = n_dst if n_dst <= 4096 else 4096
+    _pack_slots_to_paged_kernel[(n_prog,)](
+        k_cache,
+        packed,
+        slots,
+        remapped,
+        lens,
+        slot_count,
+        n_dst,
+        width,
+        src_page=int(k_cache.shape[1]),
+        dst_page=int(page_size),
+        src_stride=int(k_cache.stride(0)),
+        dst_stride=int(packed.stride(0)),
+        token_data_size=TOKEN_DATA_SIZE,
+        n_data_u64=_PACK_SLOTS_DATA_U64,
+        HAS_LENS=has_lens,
+        num_warps=2,
+        num_stages=3,
+    )
+    return packed, remapped.view(slot_indices.shape)
+
+
+@triton.jit
+def _gather_k_cache_slots_packed_kernel(
+    out_ptr,
+    pool_ptr,
+    slots_ptr,
+    n_slots,
+    num_pool_slots,
+    cache_block_size: tl.constexpr,
+    block_stride,
+    token_data_size: tl.constexpr,
+    scale_dim: tl.constexpr,
+):
+    row = tl.program_id(0)
+    if row >= n_slots:
+        return
+    slot = tl.load(slots_ptr + row).to(tl.int64)
+    valid = (slot >= 0) & (slot < num_pool_slots)
+    safe_slot = tl.where(valid, slot, 0)
+    block = safe_slot // cache_block_size
+    pos = safe_slot - block * cache_block_size
+    block_ptr = pool_ptr + block * block_stride
+    out_row = out_ptr + row * (token_data_size + scale_dim)
+    data_off = tl.arange(0, 1024)
+    data_mask = data_off < token_data_size
+    data = tl.load(
+        block_ptr + pos * token_data_size + data_off,
+        mask=data_mask & valid,
+        other=0,
+    )
+    tl.store(out_row + data_off, data, mask=data_mask)
+    scale_off = tl.arange(0, 8)
+    scale_mask = scale_off < scale_dim
+    scales = tl.load(
+        block_ptr + cache_block_size * token_data_size + pos * scale_dim + scale_off,
+        mask=scale_mask & valid,
+        other=0,
+    )
+    tl.store(out_row + token_data_size + scale_off, scales, mask=scale_mask)
+
+
+def gather_k_cache_slots_packed(
+    k_cache: torch.Tensor,
+    slot_indices: torch.Tensor,
+    *,
+    out: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    assert k_cache.dim() == 3 and k_cache.shape[-1] == ENTRY_BYTES
+    assert k_cache.dtype == torch.uint8
+    assert k_cache.stride(2) == 1 and k_cache.stride(1) == ENTRY_BYTES
+    slots = (
+        slot_indices.reshape(-1)
+        .to(device=k_cache.device, dtype=torch.int64)
+        .contiguous()
+    )
+    if out is None:
+        out = torch.empty(
+            (slots.numel(), ENTRY_BYTES), dtype=torch.uint8, device=k_cache.device
+        )
+    else:
+        assert out.shape == (slots.numel(), ENTRY_BYTES)
+        assert out.dtype == torch.uint8 and out.device == k_cache.device
+        assert out.is_contiguous()
+    if slots.numel() == 0:
+        return out
+    _gather_k_cache_slots_packed_kernel[(slots.numel(),)](
+        out,
+        k_cache,
+        slots,
+        slots.numel(),
+        int(k_cache.shape[0] * k_cache.shape[1]),
+        cache_block_size=int(k_cache.shape[1]),
+        block_stride=int(k_cache.stride(0)),
+        token_data_size=TOKEN_DATA_SIZE,
+        scale_dim=SCALE_BYTES_PER_TOKEN,
+    )
+    return out
+
+
 @triton.jit
 def _dequantize_packed_k_cache_flat_kernel(
     out_ptr,
@@ -1106,9 +1374,7 @@ def _restore_dequantize_scatter_packed_k_cache_flat_kernel(
     seq_ends = tl.cumsum(seq_lens, axis=0)
     batch_idx = tl.sum((token_idx >= seq_ends).to(tl.int32), axis=0)
     valid_batch = token_valid & (batch_idx >= 0) & (batch_idx < batch_size)
-    selected_seq_len = tl.sum(
-        tl.where(batch_offsets == batch_idx, seq_lens, 0), axis=0
-    )
+    selected_seq_len = tl.sum(tl.where(batch_offsets == batch_idx, seq_lens, 0), axis=0)
     seq_start = tl.sum(
         tl.where(batch_offsets == batch_idx, seq_ends - seq_lens, 0), axis=0
     )
@@ -1127,9 +1393,7 @@ def _restore_dequantize_scatter_packed_k_cache_flat_kernel(
     restored_idx = tl.load(
         restore_indices_ptr + token_idx, mask=token_valid, other=-1
     ).to(tl.int64)
-    valid_restore = (
-        token_valid & (restored_idx >= 0) & (restored_idx < gathered_rows)
-    )
+    valid_restore = token_valid & (restored_idx >= 0) & (restored_idx < gathered_rows)
     valid_row = valid_destination & valid_restore
     safe_restored_idx = tl.where(valid_restore, restored_idx, 0)
     token_ptr = gathered_ptr + safe_restored_idx * entry_bytes
@@ -1170,9 +1434,7 @@ def _restore_dequantize_scatter_packed_k_cache_flat_kernel(
     bf16_cache_ptr = token_bf16_ptr.to(tl.pointer_type(tl.bfloat16))
     for j in tl.static_range(bf16_dim // 16):
         chunk_offsets = j * 16 + tl.arange(0, 16)
-        bf16_vals = tl.load(
-            bf16_cache_ptr + chunk_offsets, mask=valid_row, other=0
-        )
+        bf16_vals = tl.load(bf16_cache_ptr + chunk_offsets, mask=valid_row, other=0)
         tl.store(
             output_row_ptr + bf16_output_offset + chunk_offsets,
             bf16_vals,
@@ -1695,8 +1957,9 @@ def prepare_dequantize_and_gather_k_cache_slots_cp_byte_sliced(
         with record_function_range("dsv4.cp.all_gather.swa_prefix.wait_host"):
             _wait_swa_prefix_work_once(pending)
         try:
-            if cp_swa_direct_dequant_scatter_enabled() and direct_triton_fast_path_supported(
-                out.device
+            if (
+                cp_swa_direct_dequant_scatter_enabled()
+                and direct_triton_fast_path_supported(out.device)
             ):
                 _launch_dequantize_and_gather_k_slots_cp_rank_major_unchecked(
                     out,

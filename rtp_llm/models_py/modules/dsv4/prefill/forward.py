@@ -95,12 +95,12 @@ Padding-token slots are nulled via ``cp_info.prefill_qkv_padding_mask``.
 from __future__ import annotations
 
 import os
+import time
 from collections.abc import Mapping
 from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Tuple
 
 import torch
-
 from rtp_llm.models_py.modules.dsv4 import _forward_tensor_debug as _fwd_dbg
 from rtp_llm.models_py.modules.dsv4 import _profiler
 from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
@@ -111,12 +111,16 @@ from rtp_llm.models_py.modules.dsv4.cp import (
 from rtp_llm.models_py.modules.dsv4.fp8.prefill_meta import (
     build_and_propagate_prefill_meta_fp8,
     clear_prefill_meta_shared_fp8,
+    propagate_prebuilt_prefill_meta_fp8,
 )
 from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
     build_block_tables_batched,
     primary_attention_inputs,
 )
-from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
+from rtp_llm.models_py.modules.dsv4.prefill_workspace import (
+    PrefillWorkspace,
+    resolve_prefill_workspace_rows,
+)
 from rtp_llm.models_py.modules.factory.attention.common import (
     create_write_cache_store_impl,
 )
@@ -146,6 +150,20 @@ _PrefillFastLayerCall = Callable[..., torch.Tensor]
 
 def _env_flag(name: str, default: str = "0") -> bool:
     return os.environ.get(name, default).strip().lower() in _TRUE_ENV_VALUES
+
+
+from ._diagnostics import (
+    _FWD_GPU,
+    _FWD_PROFILE,
+    _FWD_PROFILE_CT,
+    _FWD_PROFILE_IDX,
+    _FWD_STATS,
+    _fwd_profile_dump,
+    _fwd_profile_rank_ok,
+    _fwd_profile_start,
+    _fwd_stats_report_row,
+    _fwd_stats_snap,
+)
 
 
 def _prefill_fast_path_layer_calls(
@@ -297,6 +315,21 @@ def _last_hidden_by_request(
     return flat[-1:].contiguous()
 
 
+def _maybe_kick_async_head(
+    v4, kv_cache, block_tables_by_type, cp_ctx, input_ids
+) -> None:
+    """Async-head kick point (end of ``forward_layers``): hand the builder thread the
+    predicted next chunk's head build. Never raises; fully gated inside
+    ``_head_prebuild.maybe_kick_async_head`` (flag off ⇒ no-op)."""
+    if cp_ctx is None or cp_ctx.cp_size <= 1:
+        return
+    from rtp_llm.models_py.modules.dsv4.fp8 import _head_prebuild
+
+    _head_prebuild.maybe_kick_async_head(
+        v4, kv_cache, block_tables_by_type, cp_ctx, input_ids.device
+    )
+
+
 def set_cp_info(
     v4: V4Transformer,
     parallelism_config: Optional[ParallelismConfig],
@@ -381,26 +414,80 @@ def forward_layers(
             and int(getattr(v4, "_cp_size", 1)) > 1
             and int(v4._prefill_ws_full_rows) > 0
         )
+        # Opt-in SM120 growth beyond the startup-sized capacity.
+        q_rows, full_rows = resolve_prefill_workspace_rows(
+            v4._prefill_ws_q_rows,
+            v4._prefill_ws_full_rows,
+            int(input_ids.numel()),
+            int(getattr(v4, "_cp_size", 1)),
+            allow_dynamic_growth=os.environ.get(
+                "DSV4_SM120_DYNAMIC_PREFILL_WORKSPACE", "0"
+            )
+            == "1",
+        )
         ws = PrefillWorkspace(
             input_ids.device,
-            q_rows=v4._prefill_ws_q_rows,
+            q_rows=q_rows,
             q_dim=v4._prefill_ws_q_dim,
             reserve_cp=reserve_cp,
-            cp_rows=v4._prefill_ws_full_rows,
+            cp_rows=full_rows,
             main_w=v4._prefill_ws_main_w,
             idx_w=v4._prefill_ws_idx_w,
         )
-
+    _fs_marks: Optional[Dict[str, float]] = None
+    _fs_mem0 = None
+    _fs_ev0 = None
+    if _FWD_STATS:
+        _fs_marks = {"entry": time.perf_counter()}
+        _fs_mem0 = _fwd_stats_snap()
+    if _FWD_GPU:
+        _fs_ev0 = torch.cuda.Event(enable_timing=True)
+        _fs_ev0.record()
+    _fs_prof = None
+    if _FWD_PROFILE and _fwd_profile_rank_ok() and int(input_ids.size(0)) >= 1024:
+        _FWD_PROFILE_CT[0] += 1
+        if _FWD_PROFILE_CT[0] == _FWD_PROFILE_IDX:
+            _fs_prof = _fwd_profile_start()
     # Build + propagate CP context once per prefill step. Under CP the
     # caller hands us a per-rank chunk slice (T_local = chunk_length),
     # and each attn / compressor / indexer reads ``cp_ctx`` off the
     # module to compute its own per-token positions. Without CP we pass
     # None to clear any stale context from a prior forward (warmup).
+    _ec_mode = os.environ.get("DSV4_EMPTY_CACHE_MODE", "all")  # off | entry | all
+    if (
+        os.environ.get("DSV4_MOE_STRATEGY") == "sm120_decode"
+        and int(input_ids.size(0)) > 8192
+        and _ec_mode in ("entry", "all")
+    ):
+        # Big prefills start from a clean arena: the previous request's freed
+        # transients sit in the allocator cache as fragmented blocks and made
+        # even 128 MiB contiguous allocations fail at layer-0 attention while
+        # 600+ MiB sat reserved-but-unallocated. One unmap pass, ~ms cost.
+        torch.cuda.empty_cache()
     cp_info = getattr(v4, "_cp_info", None)
     cp_size = getattr(v4, "_cp_size", 1)
     cp_rank = getattr(v4, "_cp_rank", 0)
     cp_ctx = None
-    if cp_info is not None and cp_size > 1:
+    # ``DSV4_PREFILL_ASYNC_HEAD`` (default on): consume the previous
+    # chunk's builder-thread prebuild (context + metadata) when it validates
+    # against this chunk's real inputs; miss ⇒ the legacy eager build below
+    # runs byte-identically. The bundle's block-table-dependent fields are
+    # rebuilt against the real table at the propagate call further down.
+    _async_head_bundle = None
+    from rtp_llm.models_py.modules.dsv4.fp8 import _head_prebuild
+
+    _async_head_bundle = _head_prebuild.consume_async_head(
+        cp_info,
+        getattr(attn_inputs, "prefix_lengths", None),
+        input_ids.device,
+        cp_size,
+        cp_rank,
+        int(input_ids.size(0)),
+        owner=v4,
+    )
+    if _async_head_bundle is not None:
+        cp_ctx = _async_head_bundle.cp_ctx
+    if cp_ctx is None and cp_info is not None and cp_size > 1:
         cp_ctx = build_cp_context_for_forward(
             cp_info,
             cp_size,
@@ -413,6 +500,36 @@ def forward_layers(
             kv_cache_sharded=bool(getattr(v4, "_kv_cache_sharded", False)),
         )
     v4._propagate_cp_ctx(cp_ctx)
+    if _fs_marks is not None:
+        _fs_marks["cpctx"] = time.perf_counter()
+    if os.environ.get("DSV4_CP_PROBE"):
+        # Probe distinct large chunks; tiny startup requests legitimately bypass CP.
+        _seen = getattr(forward_layers, "_cp_probe_seen", None)
+        if _seen is None:
+            _seen = forward_layers._cp_probe_seen = set()
+        _T = int(input_ids.size(0))
+        if _T >= 1024 and len(_seen) < 4 and _T not in _seen:
+            _seen.add(_T)
+            import sys as _sys
+
+            _il = getattr(attn_inputs, "input_lengths", None)
+            _pl = getattr(attn_inputs, "prefix_lengths", None)
+            print(
+                "[CPPROBE] T={T} cp_info={ci} cp_size={cs} cp_rank={cr} cp_ctx={cc} "
+                "chunk_len={cl} seq_len_full={sf} input_lengths={il} prefix_lengths={pl}".format(
+                    T=_T,
+                    ci=cp_info is not None,
+                    cs=cp_size,
+                    cr=cp_rank,
+                    cc="None(CP CLEARED)" if cp_ctx is None else "set",
+                    cl=getattr(cp_ctx, "chunk_length", None),
+                    sf=getattr(cp_ctx, "seq_len_full", None),
+                    il=_il.flatten()[:4].tolist() if _il is not None else None,
+                    pl=_pl.flatten()[:4].tolist() if _pl is not None else None,
+                ),
+                file=_sys.stderr,
+                flush=True,
+            )
     if cp_ctx is not None:
         # The framework's fallback position_ids are rank-local contiguous
         # after ZigZagProcessor rewrites input_lengths to CP chunk lengths.
@@ -424,6 +541,8 @@ def forward_layers(
     positions = positions.reshape(-1).contiguous()
     if cu_seqlens is not None:
         cu_seqlens = cu_seqlens.reshape(-1).contiguous()
+    if _fs_marks is not None:
+        _fs_marks["pos"] = time.perf_counter()
 
     # MOEDBG hook (mirrors V4Transformer.forward standalone path so the
     # smoke / production prefill path produces the same per-layer dump
@@ -455,7 +574,7 @@ def forward_layers(
             )
 
     if prepare_hidden_fn is None:
-        h = v4.embed(input_ids)  # [T_total, dim]
+        h = v4.embed_full(input_ids)  # [T_total, dim]
         if _rt_on:
             _rt.record("prefill_embed_out", h)
         h = h.unsqueeze(-2).repeat(1, v4.hc_mult, 1)  # [T_total, hc, dim]
@@ -466,6 +585,8 @@ def forward_layers(
 
     capture_ids = frozenset(v4.capture_aux_hidden_layer_ids)
     capture_aux = bool(capture_ids)
+    if _fs_marks is not None:
+        _fs_marks["embed"] = time.perf_counter()
 
     prefill_fast_layer_calls = _prefill_fast_path_layer_calls(v4)
     use_prefill_fast_path = _prefill_fast_path_enabled(
@@ -484,138 +605,163 @@ def forward_layers(
     # own forward.
     with record_range_ctx():
         if v4.fp8_kv_cache and h.size(0) > 0:
-            input_lengths: Optional[torch.Tensor] = None
-            prefix_lengths: Optional[torch.Tensor] = None
-            host_input_lengths: Optional[torch.Tensor] = None
-            host_prefix_lengths: Optional[torch.Tensor] = None
             any_cont_for_meta: Optional[bool] = None
-            if attn_inputs is not None:
-                host_input_lengths = attn_inputs.input_lengths
-                host_prefix_lengths = attn_inputs.prefix_lengths
-                input_lengths_device = attn_inputs.input_lengths_device
-                prefix_lengths_device = attn_inputs.prefix_lengths_device
-                input_lengths_source = (
-                    input_lengths_device
-                    if input_lengths_device is not None
-                    and input_lengths_device.numel() > 0
-                    else host_input_lengths
-                )
-                prefix_lengths_source = (
-                    prefix_lengths_device
-                    if prefix_lengths_device is not None
-                    and prefix_lengths_device.numel() > 0
-                    else host_prefix_lengths
-                )
-                if (
-                    input_lengths_source is not None
-                    and input_lengths_source.numel() > 0
-                ):
-                    input_lengths = input_lengths_source.to(
-                        device=positions.device, dtype=torch.int32
-                    ).contiguous()
-                if (
-                    prefix_lengths_source is not None
-                    and prefix_lengths_source.numel() > 0
-                ):
-                    prefix_lengths = prefix_lengths_source.to(
-                        device=positions.device, dtype=torch.int32
-                    ).contiguous()
-
-            # Scalar metadata must come from the host mirror. Reading a CUDA
-            # tensor with item() here synchronizes and invalidates graph capture.
-            if (
-                host_prefix_lengths is not None
-                and host_prefix_lengths.device.type == "cpu"
-                and host_prefix_lengths.numel() > 0
-            ):
-                sp_int_for_meta = int(host_prefix_lengths.reshape(-1)[0].item())
-                any_cont_for_meta = bool((host_prefix_lengths > 0).any().item())
-            elif (
-                positions.device.type == "cpu"
-                or not torch.cuda.is_current_stream_capturing()
-            ):
-                sp_int_for_meta = int(positions[0].item())
+            if _async_head_bundle is not None:
+                # The bundle's meta args were built and validated for exactly
+                # this chunk's geometry/prefix; skip the eager preparation.
+                sp_int_for_meta = _async_head_bundle.sp_int
+                _ma = _async_head_bundle.meta_args
+                sp_per_req = _ma["sp_per_req"]
+                req_id_per_token = _ma["req_id_per_token"]
+                batch_size = _ma["batch_size"]
+                input_lengths = _ma["input_lengths"]
+                prefix_lengths = _ma["prefix_lengths"]
+                max_seqlen_q = _ma["max_seqlen_q"]
             else:
-                raise RuntimeError(
-                    "DSV4 CUDA Graph prefill requires host prefix_lengths metadata"
-                )
+                input_lengths: Optional[torch.Tensor] = None
+                prefix_lengths: Optional[torch.Tensor] = None
+                host_input_lengths: Optional[torch.Tensor] = None
+                host_prefix_lengths: Optional[torch.Tensor] = None
+                if attn_inputs is not None:
+                    host_input_lengths = attn_inputs.input_lengths
+                    host_prefix_lengths = attn_inputs.prefix_lengths
+                    input_lengths_device = attn_inputs.input_lengths_device
+                    prefix_lengths_device = attn_inputs.prefix_lengths_device
+                    input_lengths_source = (
+                        input_lengths_device
+                        if input_lengths_device is not None
+                        and input_lengths_device.numel() > 0
+                        else host_input_lengths
+                    )
+                    prefix_lengths_source = (
+                        prefix_lengths_device
+                        if prefix_lengths_device is not None
+                        and prefix_lengths_device.numel() > 0
+                        else host_prefix_lengths
+                    )
+                    if (
+                        input_lengths_source is not None
+                        and input_lengths_source.numel() > 0
+                    ):
+                        input_lengths = input_lengths_source.to(
+                            device=positions.device, dtype=torch.int32
+                        ).contiguous()
+                    if (
+                        prefix_lengths_source is not None
+                        and prefix_lengths_source.numel() > 0
+                    ):
+                        prefix_lengths = prefix_lengths_source.to(
+                            device=positions.device, dtype=torch.int32
+                        ).contiguous()
 
-            sp_per_req: Optional[torch.Tensor] = None
-            req_id_per_token: Optional[torch.Tensor] = None
-            if cp_ctx is not None:
-                # Under CP, rank-local token order is zigzagged. The first token of
-                # each rank-local request chunk is therefore not necessarily the
-                # request's absolute start position. Use CP metadata instead of
-                # deriving request ids from rank-local cu_seqlens.
-                sp_per_req = cp_ctx.prefix_lengths.to(
-                    device=positions.device, dtype=torch.int64
-                ).contiguous()
-                req_id_per_token = cp_ctx.req_id_per_token.to(
-                    device=positions.device, dtype=torch.int32
-                ).contiguous()
-            elif cu_seqlens is not None and cu_seqlens.numel() >= 2:
-                if prefix_lengths is not None:
-                    sp_per_req = prefix_lengths.to(torch.int64).contiguous()
+                # Scalar metadata must come from the host mirror. Reading a CUDA
+                # tensor with item() here synchronizes and invalidates graph capture.
+                if (
+                    host_prefix_lengths is not None
+                    and host_prefix_lengths.device.type == "cpu"
+                    and host_prefix_lengths.numel() > 0
+                ):
+                    sp_int_for_meta = int(host_prefix_lengths.reshape(-1)[0].item())
+                    any_cont_for_meta = bool((host_prefix_lengths > 0).any().item())
+                elif (
+                    positions.device.type == "cpu"
+                    or not torch.cuda.is_current_stream_capturing()
+                ):
+                    sp_int_for_meta = int(positions[0].item())
                 else:
-                    starts = cu_seqlens[:-1].to(
+                    raise RuntimeError(
+                        "DSV4 CUDA Graph prefill requires host prefix_lengths metadata"
+                    )
+
+                sp_per_req: Optional[torch.Tensor] = None
+                req_id_per_token: Optional[torch.Tensor] = None
+                if cp_ctx is not None:
+                    # Under CP, rank-local token order is zigzagged. The first token of
+                    # each rank-local request chunk is therefore not necessarily the
+                    # request's absolute start position. Use CP metadata instead of
+                    # deriving request ids from rank-local cu_seqlens.
+                    sp_per_req = cp_ctx.prefix_lengths.to(
                         device=positions.device, dtype=torch.int64
-                    )
-                    valid_starts = starts < positions.numel()
-                    safe_starts = starts.clamp(max=max(positions.numel() - 1, 0))
-                    selected_starts = positions.index_select(0, safe_starts).to(
-                        torch.int64
-                    )
-                    sp_per_req = torch.where(
-                        valid_starts, selected_starts, torch.zeros_like(selected_starts)
                     ).contiguous()
-                req_id_per_token = (
-                    torch.searchsorted(
-                        cu_seqlens.to(device=positions.device, dtype=torch.int64),
-                        torch.arange(
-                            int(h.size(0)),
-                            device=positions.device,
-                            dtype=torch.int64,
-                        ),
-                        right=True,
+                    req_id_per_token = cp_ctx.req_id_per_token.to(
+                        device=positions.device, dtype=torch.int32
+                    ).contiguous()
+                elif cu_seqlens is not None and cu_seqlens.numel() >= 2:
+                    if prefix_lengths is not None:
+                        sp_per_req = prefix_lengths.to(torch.int64).contiguous()
+                    else:
+                        starts = cu_seqlens[:-1].to(
+                            device=positions.device, dtype=torch.int64
+                        )
+                        valid_starts = starts < positions.numel()
+                        safe_starts = starts.clamp(max=max(positions.numel() - 1, 0))
+                        selected_starts = positions.index_select(0, safe_starts).to(
+                            torch.int64
+                        )
+                        sp_per_req = torch.where(
+                            valid_starts,
+                            selected_starts,
+                            torch.zeros_like(selected_starts),
+                        ).contiguous()
+                    req_id_per_token = (
+                        torch.searchsorted(
+                            cu_seqlens.to(device=positions.device, dtype=torch.int64),
+                            torch.arange(
+                                int(h.size(0)),
+                                device=positions.device,
+                                dtype=torch.int64,
+                            ),
+                            right=True,
+                        )
+                        .sub_(1)
+                        .to(torch.int32)
+                        .contiguous()
                     )
-                    .sub_(1)
-                    .to(torch.int32)
-                    .contiguous()
-                )
-            batch_size = 1
-            if cu_seqlens is not None and cu_seqlens.numel() >= 2:
-                batch_size = int(cu_seqlens.numel() - 1)
-            max_seqlen_q = int(h.size(0))
-            if (
-                host_input_lengths is not None
-                and host_input_lengths.device.type == "cpu"
-                and host_input_lengths.numel() > 0
-            ):
-                max_seqlen_q = int(host_input_lengths.max().item())
+                batch_size = 1
+                if cu_seqlens is not None and cu_seqlens.numel() >= 2:
+                    batch_size = int(cu_seqlens.numel() - 1)
+                max_seqlen_q = int(h.size(0))
+                if (
+                    host_input_lengths is not None
+                    and host_input_lengths.device.type == "cpu"
+                    and host_input_lengths.numel() > 0
+                ):
+                    max_seqlen_q = int(host_input_lengths.max().item())
             # The max-sized workspace was allocated before CP setup and
             # embedding so a cached embedding allocation cannot fragment it.
             assert ws is not None
             try:
-                build_and_propagate_prefill_meta_fp8(
-                    v4,
-                    h,
-                    sp_int_for_meta,
-                    kv_cache,
-                    block_tables_by_type,
-                    sp_per_req=sp_per_req,
-                    cu_seqlens=cu_seqlens,
-                    batch_size=batch_size,
-                    input_lengths=input_lengths,
-                    prefix_lengths=prefix_lengths,
-                    position_ids=positions,
-                    req_id_per_token=req_id_per_token,
-                    max_seqlen_q=max_seqlen_q,
-                    any_cont=any_cont_for_meta,
-                    workspace=ws,
-                )
+                if (
+                    _async_head_bundle is not None
+                    and propagate_prebuilt_prefill_meta_fp8(
+                        v4, _async_head_bundle, kv_cache, block_tables_by_type, ws
+                    )
+                ):
+                    pass  # Patched prebuilt metadata has been propagated.
+                else:
+                    build_and_propagate_prefill_meta_fp8(
+                        v4,
+                        h,
+                        sp_int_for_meta,
+                        kv_cache,
+                        block_tables_by_type,
+                        sp_per_req=sp_per_req,
+                        cu_seqlens=cu_seqlens,
+                        batch_size=batch_size,
+                        input_lengths=input_lengths,
+                        prefix_lengths=prefix_lengths,
+                        position_ids=positions,
+                        req_id_per_token=req_id_per_token,
+                        max_seqlen_q=max_seqlen_q,
+                        any_cont=any_cont_for_meta,
+                        workspace=ws,
+                    )
             except Exception:
                 clear_prefill_meta_shared_fp8(v4)
                 raise
+
+    if _fs_marks is not None:
+        _fs_marks["meta"] = time.perf_counter()
 
     layer_forward_range = _profiler.make_layer_forward_range()
     try:
@@ -709,6 +855,15 @@ def forward_layers(
         # on a near-full card. ``clear`` is idempotent (sets None per layer).
         if v4.fp8_kv_cache:
             clear_prefill_meta_shared_fp8(v4)
+        if _fs_prof is not None:
+            # __exit__ synchronises, so every kernel the loop launched is
+            # captured even though the launches themselves are async.
+            _fs_prof.__exit__(None, None, None)
+            _fwd_profile_dump(_fs_prof, _FWD_PROFILE_CT[0])
+            _fs_prof = None
+
+    if _fs_marks is not None:
+        _fs_marks["loop"] = time.perf_counter()
 
     if v4._mtp_hidden_buffer is not None:
         if capture_aux:
@@ -806,6 +961,17 @@ def forward_layers(
     # forward (which runs right after the main model on a near-full card) can
     # borrow it. No explicit reset needed — the per-layer ``common.workspace``
     # references were cleared by ``clear_prefill_meta_shared_fp8`` above.
+    if _fs_marks is not None:
+        _fs_marks["tail"] = time.perf_counter()
+        _fwd_stats_report_row(
+            n_tokens=int(input_ids.size(0)),
+            cp_size=int(cp_ctx.cp_size) if cp_ctx is not None else 1,
+            marks=_fs_marks,
+            mem_before=_fs_mem0,
+            mem_after=_fwd_stats_snap(),
+            ev0=_fs_ev0,
+        )
+    _maybe_kick_async_head(v4, kv_cache, block_tables_by_type, cp_ctx, input_ids)
     if capture_context is not None and capture_context.enabled:
         return capture_context.finalize(h).hidden_states
     return h  # [T, dim]

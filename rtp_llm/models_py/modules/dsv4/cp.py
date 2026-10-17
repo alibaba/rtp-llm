@@ -27,10 +27,13 @@ stashed on each module via ``_cp_ctx`` before ``forward`` runs.  A
 single-rank path unchanged.
 """
 
+import os
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Optional, Tuple, Union
 
 import torch
+import triton
+import triton.language as tl
 
 from rtp_llm.models_py.distributed import collective_torch
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
@@ -124,6 +127,28 @@ class CPContext:
     _full_prefill_positions_cache: Optional[
         Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
     ] = field(default=None, init=False, repr=False, compare=False)
+    # Set only by the validated per-forward builder under the default-off flag.
+    compact_geometry_verified: bool = False
+    # Host-known absolute position of local token 0, derived from the same
+    # host mirrors (prefix lengths / real lengths / zigzag chunk lengths) that
+    # built ``global_positions`` — identical value to ``global_positions[0]``
+    # without a blocking D2H.  None when not host-derivable; callers must
+    # fall back to reading the device tensor.
+    first_global_position: Optional[int] = None
+    # Host mirror of the FULL (unsliced) per-request prefix lengths when the
+    # framework source tensor was host-visible (pinned CPU).  Values are
+    # identical to the device ``prefix_lengths`` arg forwarded to the prefill
+    # metadata builders; used to keep scalar reductions off the GPU hot path.
+    prefix_lengths_full_host: Optional[Tuple[int, ...]] = None
+    # Host mirror of the FULL (unsliced) per-request real input lengths — the
+    # values ``input_lengths_global`` was built from
+    # (``prefill_actual_input_lengths_cpu``).  Lets the metadata builders read
+    # per-request lengths without a device readback.
+    input_lengths_full_host: Optional[Tuple[int, ...]] = None
+    # Deferred compact-CP geometry verdict (device-resident mask/restore):
+    # a ``_PendingVerify`` resolver owned by ``_compact_cp_runtime``.  None
+    # means the verdict was eager (or the compact path is off).
+    _compact_geometry_pending: Optional[Any] = None
 
 
 @dataclass
@@ -288,9 +313,22 @@ class CudaAsyncCPGatherImpl:
                 f"CudaAsyncCPGatherImpl.wait expected CPCudaAsyncGatherHandle, got {type(handle)!r}"
             )
         current_stream = torch.cuda.current_stream(handle.gathered.device)
-        with record_function_range(f"{handle.profile_name}.wait_host"):
-            current_stream.wait_event(handle.completion_event)
-            handle.work.wait()
+        if _CP_GATHER_STATS:
+            # GPU events include the exposed gather stall; host timers cannot measure
+            # Work.wait(), which only enqueues a stream dependency.
+            _cp_gather_stats_drain()
+            ev0 = torch.cuda.Event(enable_timing=True)
+            ev1 = torch.cuda.Event(enable_timing=True)
+            ev2 = torch.cuda.Event(enable_timing=True)
+            ev0.record(current_stream)
+            with record_function_range(f"{handle.profile_name}.wait_host"):
+                current_stream.wait_event(handle.completion_event)
+                handle.work.wait()
+            ev1.record(current_stream)
+        else:
+            with record_function_range(f"{handle.profile_name}.wait_host"):
+                current_stream.wait_event(handle.completion_event)
+                handle.work.wait()
         # Restore destination: the per-forward workspace restore scratch
         # (non-prefix path) instead of a fresh per-layer ``index_select``
         # output. The prefix fast-path returns a view of ``gathered`` and
@@ -309,6 +347,16 @@ class CudaAsyncCPGatherImpl:
             full = _cp_restore_gathered_full_2d(
                 handle.gathered, handle.cp_ctx, out=out_buf
             )
+        if _CP_GATHER_STATS:
+            ev2.record(current_stream)
+            nbytes = handle.gathered.numel() * handle.gathered.element_size()
+            _cp_gather_record(
+                _cp_gather_kind(f"{handle.profile_name}.async_wait"),
+                ev0,
+                ev1,
+                ev2,
+                nbytes,
+            )
         # Compressor gather/restore buffers come from the per-forward
         # ``PrefillWorkspace`` union — they are reused across layers (never
         # freed mid-forward) and cross-layer reuse is serialized by the
@@ -319,6 +367,158 @@ class CudaAsyncCPGatherImpl:
         # ``handle.gathered`` on the prefix-restore path) to avoid piling
         # stream-use events on long-lived blocks.
         return full
+
+
+# ---------------------------------------------------------------------------
+# Pinned HtoD staging (host run-ahead)
+# ---------------------------------------------------------------------------
+#
+# ``Tensor.to(device)`` / ``torch.tensor(..., device=cuda)`` from a host tensor
+# with ``non_blocking=False`` is ``memcpy_and_sync``: it synchronizes the
+# CURRENT stream, i.e. the host waits until every kernel queued so far
+# (including the previous chunk's tail) has executed.  At one such transfer
+# per metadata tensor per chunk-forward, the host can never run ahead across
+# chunk boundaries.  Staging through a pinned buffer with
+# ``non_blocking=True`` keeps the copy stream-ordered for consumers (same
+# stream, same bytes, same dtype) while the host never blocks.
+
+_PINNED_STAGE_FLAG = "DSV4_CP_PINNED_STAGE"
+_PINNED_STAGE_SLOTS = 4
+_PINNED_STAGE_RINGS: dict = {}
+
+
+def _pinned_stage_enabled() -> bool:
+    value = os.environ.get(_PINNED_STAGE_FLAG, "1")
+    if value not in ("0", "1"):
+        raise ValueError(f"{_PINNED_STAGE_FLAG} must be 0 or 1, got {value!r}")
+    return value == "1"
+
+
+class _PinnedH2DRing:
+    """Ring of pinned staging buffers for one (device, dtype, shape) key.
+
+    A slot whose previous HtoD is still in flight is never overwritten:
+    checkout first looks for a never-used or completed slot (``event.query()``
+    is host-non-blocking), grows the ring up to ``slots``, and only then
+    synchronizes the least-recently-handed-out slot (correctness fence; with
+    ``slots`` deeper than the host run-ahead this never fires on the hot
+    path).  ``event_factory`` is injectable so the ring logic is testable
+    without CUDA.
+    """
+
+    def __init__(
+        self,
+        shape,
+        dtype,
+        slots: int = _PINNED_STAGE_SLOTS,
+        event_factory=None,
+        buffer_factory=None,
+    ):
+        if slots <= 0:
+            raise ValueError("pinned staging ring needs at least one slot")
+        self._shape = tuple(shape)
+        self._dtype = dtype
+        self._slots = int(slots)
+        self._event_factory = event_factory
+        self._buffer_factory = buffer_factory
+        self._entries: list = []  # each entry: [pinned buffer, event, pending]
+        self._next = 0
+
+    def _make_event(self):
+        factory = self._event_factory or torch.cuda.Event
+        return factory()
+
+    def _grow(self) -> list:
+        buffers = self._buffer_factory or (
+            lambda: torch.empty(self._shape, dtype=self._dtype, pin_memory=True)
+        )
+        entry = [buffers(), self._make_event(), False]
+        self._entries.append(entry)
+        return entry
+
+    def checkout(self) -> list:
+        n = len(self._entries)
+        for i in range(n):
+            entry = self._entries[(self._next + i) % n]
+            if not entry[2] or entry[1].query():
+                self._next = (self._next + i + 1) % n
+                return entry
+        if n < self._slots:
+            return self._grow()
+        oldest = self._entries[self._next]
+        oldest[1].synchronize()
+        self._next = (self._next + 1) % n
+        return oldest
+
+    def commit(self, entry: list) -> None:
+        """Record that the buffer's HtoD is in flight on the current stream."""
+        entry[1].record()
+        entry[2] = True
+
+
+def stage_host_to_device(
+    src: torch.Tensor, device: torch.device, dtype: Optional[torch.dtype] = None
+) -> torch.Tensor:
+    """Host→device transfer that never stream-syncs the current stream.
+
+    Byte-faithful: identical values/dtype to ``src.to(device=device,
+    dtype=dtype)``; the staged copy is enqueued on the current stream, so all
+    later work on that stream observes the data exactly as with the legacy
+    blocking copy.  Falls back to the legacy blocking copy for non-CUDA
+    targets, CUDA sources, non-contiguous sources, or when
+    ``DSV4_CP_PINNED_STAGE=0``.
+
+    Every async read is from this module's own ring buffers (never freed,
+    event-fenced): an async copy must never read a caller-owned host tensor
+    whose free is not stream-ordered.
+    """
+    if device.type != "cuda" or src.device.type != "cpu" or not _pinned_stage_enabled():
+        return src.to(device=device, dtype=dtype)
+    if not src.is_contiguous():
+        return src.to(device=device, dtype=dtype)
+    key = (device.index, src.dtype, tuple(src.shape))
+    ring = _PINNED_STAGE_RINGS.get(key)
+    try:
+        if ring is None:
+            ring = _PinnedH2DRing(src.shape, src.dtype)
+            _PINNED_STAGE_RINGS[key] = ring
+        entry = ring.checkout()
+    except RuntimeError:
+        # Pinned-pool pressure: the legacy blocking copy keeps bytes identical.
+        return src.to(device=device, dtype=dtype)
+    entry[0].copy_(src)  # host→host memcpy; no GPU interaction at all
+    out = entry[0].to(device=device, dtype=dtype, non_blocking=True)
+    ring.commit(entry)
+    return out
+
+
+def first_position_for_meta(
+    cp_ctx: Optional[CPContext], positions: torch.Tensor
+) -> int:
+    """Host-known first absolute position under CP; legacy sync fallback otherwise.
+
+    Under CP the metadata ``positions`` IS ``cp_ctx.global_positions`` (same
+    device values), whose first element equals the host-derived
+    ``first_global_position`` — so the blocking ``positions[0].item()``
+    readback is skipped whenever the mirror exists.
+    """
+    first = (
+        getattr(cp_ctx, "first_global_position", None) if cp_ctx is not None else None
+    )
+    if first is not None:
+        return int(first)
+    flat = positions.reshape(-1)
+    if flat.numel() == 0:
+        # A prefill forward with zero rank-local tokens is never a valid
+        # request shape.  Fail closed with a descriptive error instead of an
+        # opaque ``IndexError``; the non-empty path is byte-identical to the
+        # legacy readback.
+        raise RuntimeError(
+            "first_position_for_meta: empty positions tensor and no "
+            "CPContext.first_global_position host mirror — the model received a "
+            "zero-token CP prefill forward (empty context batch)."
+        )
+    return int(flat[0].item())
 
 
 def build_cp_context_for_forward(
@@ -341,8 +541,18 @@ def build_cp_context_for_forward(
     global position, so the rule lives in exactly one place.
     """
     position_offset: Union[int, torch.Tensor] = 0
+    position_offset_full_host: Optional[Tuple[int, ...]] = None
     if prefix_lengths is not None and int(prefix_lengths.numel()) > 0:
         position_offset = prefix_lengths
+        host_source = (
+            prefix_lengths_host
+            if prefix_lengths_host is not None and int(prefix_lengths_host.numel()) > 0
+            else prefix_lengths
+        )
+        if host_source.device.type == "cpu":
+            # Full (unsliced) host mirror of the same source tensor the prefill
+            # metadata builders receive; identical integer values.
+            position_offset_full_host = tuple(int(v) for v in host_source.tolist())
     return build_cp_context(
         cp_info,
         cp_size,
@@ -352,6 +562,7 @@ def build_cp_context_for_forward(
         position_offset=position_offset,
         position_offset_host=prefix_lengths_host,
         chunk_lengths_device=chunk_lengths_device,
+        position_offset_full_host=position_offset_full_host,
         kv_cache_sharded=kv_cache_sharded,
     )
 
@@ -372,11 +583,39 @@ def build_cp_context(
     position_offset: Union[int, torch.Tensor] = 0,
     position_offset_host: Optional[torch.Tensor] = None,
     chunk_lengths_device: Optional[torch.Tensor] = None,
+    position_offset_full_host: Optional[Tuple[int, ...]] = None,
     kv_cache_sharded: bool = False,
 ) -> CPContext:
     """Compute the per-forward derived CPContext from framework metadata."""
     padding_mask = cp_info.prefill_qkv_padding_mask
     restore_indices = cp_info.prefill_qkv_restore_indice
+    # Keep the pre-transfer host sources: they carry the same values as the
+    # device copies and let downstream host-side validation skip a D2H.
+    padding_mask_host = padding_mask if padding_mask.device.type == "cpu" else None
+    restore_indices_host = (
+        restore_indices if restore_indices.device.type == "cpu" else None
+    )
+
+    def _finish(context: CPContext) -> CPContext:
+        _attach_cp_host_mirrors(context, chunk_lengths, position_offset_full_host)
+        if os.environ.get("DSV4_CP_COMPACT_COMPRESSOR", "0") == "1":
+            from rtp_llm.models_py.modules.dsv4.fp8._compact_cp_runtime import (
+                verified_geometry,
+            )
+
+            # The pre-transfer host sources carry the same values as the device
+            # copies; validating on them avoids blocking D2H syncs per chunk.
+            context.compact_geometry_verified = verified_geometry(
+                context,
+                padding_mask_host if padding_mask_host is not None else padding_mask,
+                (
+                    restore_indices_host
+                    if restore_indices_host is not None
+                    else restore_indices
+                ),
+            )
+        return context
+
     if padding_mask.device != device:
         padding_mask = padding_mask.to(device)
     if restore_indices.device != device:
@@ -528,7 +767,7 @@ def build_cp_context(
             ),
             default=0,
         )
-        return CPContext(
+        context = CPContext(
             cp_size=int(cp_size),
             cp_rank=int(cp_rank),
             chunk_length=int(chunk_length),
@@ -551,6 +790,7 @@ def build_cp_context(
             input_lengths_global_host=input_lengths_global_host,
             prefix_lengths_host=prefix_lengths_host,
         )
+        return _finish(context)
 
     prefix_lengths = prefix_lengths.to(device=device, dtype=torch.long).contiguous()
     if input_lengths_global is not None:
@@ -643,7 +883,7 @@ def build_cp_context(
     else:
         seq_len_total = prefix_length + seq_len_full
 
-    return CPContext(
+    context = CPContext(
         cp_size=int(cp_size),
         cp_rank=int(cp_rank),
         chunk_length=int(chunk_length),
@@ -666,6 +906,26 @@ def build_cp_context(
         input_lengths_global_host=input_lengths_global_host,
         prefix_lengths_host=prefix_lengths_host,
     )
+    return _finish(context)
+
+
+def _attach_cp_host_mirrors(
+    context: CPContext,
+    chunk_lengths,
+    prefix_lengths_full_host: Optional[Tuple[int, ...]],
+) -> None:
+    """Attach host mirrors derived from the same host plan as the device tensors."""
+    prefix_host = context.prefix_lengths_host
+    lengths_host = context.input_lengths_global_host
+    # Host mirror of global_positions[0]: token 0 belongs to request 0, so its
+    # position is prefix[0] + clamp(cp_rank * pair0, max=real[0] - 1).
+    if prefix_host and len(chunk_lengths) > 0 and chunk_lengths[0] > 0:
+        first_local = int(context.cp_rank) * (int(chunk_lengths[0]) // 2)
+        if lengths_host:
+            first_local = min(first_local, max(int(lengths_host[0]) - 1, 0))
+        context.first_global_position = int(prefix_host[0]) + first_local
+    context.prefix_lengths_full_host = prefix_lengths_full_host
+    context.input_lengths_full_host = lengths_host
 
 
 def _cp_gather_2d(
@@ -766,6 +1026,21 @@ def cp_all_gather_full(
     """
     profile_name = profile_name or f"{_DEFAULT_CP_PROFILE_NAME}.sync"
     local_2d = _cp_gather_2d(local_2d, cp_ctx)
+    if _CP_GATHER_STATS:
+        _cp_gather_stats_drain()
+        kind = _cp_gather_kind(profile_name)
+        nbytes = local_2d.numel() * local_2d.element_size() * cp_ctx.cp_size
+        ev0 = torch.cuda.Event(enable_timing=True)
+        ev2 = torch.cuda.Event(enable_timing=True)
+        ev0.record()
+        with record_function_range(f"{profile_name}.launch"):
+            gathered = all_gather(local_2d, group=Group.TP)
+        # gathered: [cp_size * chunk_length, H]
+        with record_function_range(f"{profile_name}.restore"):
+            full = _cp_restore_gathered_full_2d(gathered, cp_ctx)
+        ev2.record()
+        _cp_gather_record(kind, ev0, None, ev2, nbytes)
+        return full
     with record_function_range(f"{profile_name}.launch"):
         gathered = all_gather(local_2d, group=Group.TP)
     # gathered: [cp_size * chunk_length, H]
@@ -833,6 +1108,14 @@ def _cp_all_gather_into_empty(tensor: torch.Tensor, group: Group) -> torch.Tenso
     return gathered
 
 
+from ._cp_diagnostics import (
+    _CP_GATHER_STATS,
+    _cp_gather_kind,
+    _cp_gather_record,
+    _cp_gather_stats_drain,
+)
+
+
 def cp_all_gather_full_varlen(
     local_flat: torch.Tensor,
     cp_ctx: CPContext,
@@ -860,11 +1143,236 @@ def cp_all_gather_full_varlen(
     ), f"local_flat.size(0)={local_flat.size(0)} != chunk_length={cp_ctx.chunk_length}"
     trailing = local_flat.shape[1:]
     local_2d = local_flat.reshape(cp_ctx.chunk_length, -1).contiguous()
+    if _CP_GATHER_STATS:
+        _cp_gather_stats_drain()
+        kind = _cp_gather_kind(profile_name)
+        nbytes = local_2d.numel() * local_2d.element_size() * cp_ctx.cp_size
+        ev0 = torch.cuda.Event(enable_timing=True)
+        ev1 = torch.cuda.Event(enable_timing=True)
+        ev2 = torch.cuda.Event(enable_timing=True)
+        ev0.record()
+        with record_function_range(f"{profile_name}.launch"):
+            gathered = _cp_all_gather_into_empty(local_2d, group=Group.TP)
+        ev1.record()
+        with record_function_range(f"{profile_name}.restore"):
+            full = _cp_restore_gathered_full_2d(gathered, cp_ctx)
+        ev2.record()
+        _cp_gather_record(kind, ev0, ev1, ev2, nbytes)
+        return full.view((cp_ctx.seq_len_full,) + trailing)
     with record_function_range(f"{profile_name}.launch"):
         gathered = _cp_all_gather_into_empty(local_2d, group=Group.TP)
     with record_function_range(f"{profile_name}.restore"):
         full = _cp_restore_gathered_full_2d(gathered, cp_ctx)
     return full.view((cp_ctx.seq_len_full,) + trailing)
+
+
+@dataclass
+class CPVarlenGatherHandle:
+    """In-flight varlen CP all-gather from :func:`cp_all_gather_full_varlen_async`."""
+
+    cp_ctx: CPContext
+    gathered: torch.Tensor
+    work: Any
+    stream: Any
+    completion_event: Any
+    local_2d: torch.Tensor
+    trailing: tuple
+    profile_name: str
+
+
+def cp_all_gather_full_varlen_async(
+    local_flat: torch.Tensor,
+    cp_ctx: CPContext,
+    *,
+    stream: Optional[Any] = None,
+    profile_name: Optional[str] = None,
+) -> CPVarlenGatherHandle:
+    """Start the gather on stream; consumers must drain cp_wait_gather_full_varlen.
+
+    The fresh result must not alias the workspace used for Q materialization."""
+    profile_name = profile_name or f"{_DEFAULT_CP_PROFILE_NAME}.varlen_async"
+    assert local_flat.dim() >= 1
+    assert (
+        local_flat.size(0) == cp_ctx.chunk_length
+    ), f"local_flat.size(0)={local_flat.size(0)} != chunk_length={cp_ctx.chunk_length}"
+    trailing = local_flat.shape[1:]
+    local_2d = local_flat.reshape(cp_ctx.chunk_length, -1).contiguous()
+    if not local_2d.is_cuda:
+        raise RuntimeError("cp_all_gather_full_varlen_async requires a CUDA tensor")
+    if not torch.distributed.is_initialized():
+        raise RuntimeError(
+            "cp_all_gather_full_varlen_async requires initialized torch.distributed"
+        )
+    process_group = collective_torch._get_group(Group.TP)
+    world_size = torch.distributed.get_world_size(process_group)
+    if world_size != cp_ctx.cp_size:
+        raise RuntimeError(
+            f"CP varlen gather world_size({world_size}) != cp_ctx.cp_size({cp_ctx.cp_size})"
+        )
+
+    current_stream = torch.cuda.current_stream(local_2d.device)
+    gather_stream = stream if stream is not None else current_stream
+    if stream is not None:
+        gather_stream.wait_stream(current_stream)
+    # Both tensors are allocated on ``current_stream`` but written by the NCCL
+    # kernel on ``gather_stream``: the ``wait_stream`` edge above orders the
+    # access, ``record_stream`` is what stops the caching allocator recycling
+    # either storage before NCCL finishes.
+    local_2d.record_stream(gather_stream)
+    gathered = torch.empty(
+        [world_size * local_2d.size(0)] + list(local_2d.shape[1:]),
+        device=local_2d.device,
+        dtype=local_2d.dtype,
+    )
+    gathered.record_stream(gather_stream)
+    with torch.cuda.stream(gather_stream):
+        with record_function_range(f"{profile_name}.launch"):
+            work = torch.distributed.all_gather_into_tensor(
+                gathered,
+                local_2d,
+                group=process_group,
+                async_op=True,
+            )
+            completion_event = torch.cuda.Event()
+            completion_event.record(gather_stream)
+    return CPVarlenGatherHandle(
+        cp_ctx=cp_ctx,
+        gathered=gathered,
+        work=work,
+        stream=gather_stream,
+        completion_event=completion_event,
+        local_2d=local_2d,
+        trailing=trailing,
+        profile_name=profile_name,
+    )
+
+
+def cp_wait_gather_full_varlen(handle: CPVarlenGatherHandle) -> torch.Tensor:
+    """Drain :func:`cp_all_gather_full_varlen_async` -> ``[seq_len_full, *F]``."""
+    if not isinstance(handle, CPVarlenGatherHandle):
+        raise TypeError(
+            f"cp_wait_gather_full_varlen expected CPVarlenGatherHandle, got {type(handle)!r}"
+        )
+    cp_ctx = handle.cp_ctx
+    current_stream = torch.cuda.current_stream(handle.gathered.device)
+    if _CP_GATHER_STATS:
+        # Events on the CURRENT stream bracket wait + restore, which is exactly
+        # the stall this gather exposes to compute (Work.wait() only enqueues a
+        # stream dependency, so host timers cannot see it).
+        _cp_gather_stats_drain()
+        ev0 = torch.cuda.Event(enable_timing=True)
+        ev1 = torch.cuda.Event(enable_timing=True)
+        ev2 = torch.cuda.Event(enable_timing=True)
+        ev0.record(current_stream)
+        with record_function_range(f"{handle.profile_name}.wait_host"):
+            current_stream.wait_event(handle.completion_event)
+            handle.work.wait()
+        ev1.record(current_stream)
+    else:
+        with record_function_range(f"{handle.profile_name}.wait_host"):
+            current_stream.wait_event(handle.completion_event)
+            handle.work.wait()
+    with record_function_range(f"{handle.profile_name}.restore"):
+        full = _cp_restore_gathered_full_2d(handle.gathered, cp_ctx)
+    if _CP_GATHER_STATS:
+        ev2.record(current_stream)
+        nbytes = handle.gathered.numel() * handle.gathered.element_size()
+        _cp_gather_record(
+            _cp_gather_kind(f"{handle.profile_name}.async_wait"), ev0, ev1, ev2, nbytes
+        )
+    return full.view((cp_ctx.seq_len_full,) + handle.trailing)
+
+
+# Optional E4M3 row transport with FP32 scales; dequantize into fresh workspace.
+# Persistent KV writes remain rank-local and precede the exchange.
+_FP8_GATHER_BLOCK: tl.constexpr = (
+    1024  # noqa: E501 (module-level block size for both kernels)
+)
+
+
+def _fp8_gather_enabled(kind: str) -> bool:
+    """Master switch + per-site subswitches (review: 拆 costs a reboot, not a
+    rebuild). kind is 'q' or 'kv'."""
+    import os
+
+    if os.environ.get("DSV4_FP8_GATHER", "0") != "1":
+        return False
+    return os.environ.get(f"DSV4_FP8_GATHER_{kind.upper()}", "1") != "0"
+
+
+@triton.jit
+def _fp8_row_quant_kernel(x_ptr, q_ptr, s_ptr, F, BLOCK: tl.constexpr):
+    # One program per row: two passes (amax, then quantize). Rows are up to
+    # ~8K elements — L2-cached second pass, cheaper than register staging.
+    row = tl.program_id(0).to(tl.int64)
+    base = row * F
+    amax = 0.0
+    for start in range(0, F, BLOCK):
+        offs = start + tl.arange(0, BLOCK)
+        v = tl.load(x_ptr + base + offs, mask=offs < F, other=0.0).to(tl.float32)
+        amax = tl.maximum(amax, tl.max(tl.abs(v)))
+    scale = amax / 448.0  # e4m3 finite max
+    scale = tl.where(scale == 0.0, 1.0, scale)
+    tl.store(s_ptr + row, scale)
+    inv = 1.0 / scale
+    for start in range(0, F, BLOCK):
+        offs = start + tl.arange(0, BLOCK)
+        m = offs < F
+        v = tl.load(x_ptr + base + offs, mask=m, other=0.0).to(tl.float32)
+        tl.store(q_ptr + base + offs, (v * inv).to(tl.float8e4nv), mask=m)
+
+
+@triton.jit
+def _fp8_row_dequant_kernel(q_ptr, s_ptr, y_ptr, F, BLOCK: tl.constexpr):
+    row = tl.program_id(0).to(tl.int64)
+    base = row * F
+    scale = tl.load(s_ptr + row)
+    for start in range(0, F, BLOCK):
+        offs = start + tl.arange(0, BLOCK)
+        m = offs < F
+        q = tl.load(q_ptr + base + offs, mask=m, other=0.0).to(tl.float32)
+        tl.store(y_ptr + base + offs, (q * scale).to(tl.bfloat16), mask=m)
+
+
+def cp_all_gather_full_varlen_fp8(
+    local_flat: torch.Tensor,
+    cp_ctx: CPContext,
+    *,
+    kind: str,
+    profile_name: Optional[str] = None,
+) -> torch.Tensor:
+    """Use FP8 transport when enabled and eligible; otherwise retain the BF16 gather."""
+    if (
+        not _fp8_gather_enabled(kind)
+        or local_flat.dtype != torch.bfloat16
+        or local_flat.size(0) == 0
+    ):
+        return cp_all_gather_full_varlen(local_flat, cp_ctx, profile_name=profile_name)
+    tag = profile_name or f"{_DEFAULT_CP_PROFILE_NAME}.fp8.{kind}.varlen"
+    trailing = local_flat.shape[1:]
+    R = cp_ctx.chunk_length
+    x2d = local_flat.reshape(R, -1).contiguous()
+    F = x2d.size(1)
+    q = torch.empty((R, F), dtype=torch.float8_e4m3fn, device=x2d.device)
+    scale = torch.empty((R,), dtype=torch.float32, device=x2d.device)
+    with record_function_range(f"{tag}.quant"):
+        _fp8_row_quant_kernel[(R,)](x2d, q, scale, F, BLOCK=1024)
+    # Payload: F bytes of fp8 + 4 bytes of fp32 scale per row (-49.97% vs bf16).
+    payload = torch.cat(
+        (q.view(torch.uint8), scale.view(torch.uint8).reshape(R, 4)), dim=1
+    )
+    del q, scale, x2d
+    gathered = cp_all_gather_full_varlen(payload, cp_ctx, profile_name=tag)
+    # gathered: [seq_len_full, F+4] uint8 (row stride may exceed F+4 on the
+    # prefix-restore view path — force contiguous slices before dtype views).
+    full_rows = gathered.size(0)
+    qf = gathered[:, :F].contiguous().view(torch.float8_e4m3fn)
+    sf = gathered[:, F:].contiguous().view(torch.float32).reshape(full_rows)
+    del gathered
+    y = torch.empty((full_rows, F), dtype=torch.bfloat16, device=qf.device)
+    with record_function_range(f"{tag}.dequant"):
+        _fp8_row_dequant_kernel[(full_rows,)](qf, sf, y, F, BLOCK=1024)
+    return y.view((cp_ctx.seq_len_full,) + trailing)
 
 
 def cp_gather_last_by_request(
@@ -1155,6 +1663,32 @@ def build_cp_full_prefill_positions(
     )
     cp_ctx._full_prefill_positions_cache = result
     return result
+
+
+def build_cp_full_prefill_positions_shared(
+    cp_ctx: CPContext,
+    device: torch.device,
+    shared: Optional[dict] = None,
+) -> "tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]":
+    """Per-forward memo of :func:`build_cp_full_prefill_positions`.
+
+    The 3-bucket meta build calls the positions builder 3x per forward (CSA
+    compressor meta, HCA compressor meta, CSA nested indexer compressor meta)
+    with the same per-forward ``cp_ctx`` — identical outputs.  When ``shared``
+    (the per-forward memo dict from ``build_and_propagate_prefill_meta_fp8``)
+    is provided, the first build is reused; ``shared=None`` is exactly the
+    legacy per-call build.  Consumers treat the returned tensors as read-only
+    (they always were: kernel inputs to ``prepare_metadata``).
+    """
+    if shared is None:
+        return build_cp_full_prefill_positions(cp_ctx, device)
+    probe = (id(cp_ctx), str(device))
+    ent = shared.get("cp_full_pos")
+    if ent is not None and ent[0] == probe:
+        return ent[1]
+    out = build_cp_full_prefill_positions(cp_ctx, device)
+    shared["cp_full_pos"] = (probe, out)
+    return out
 
 
 def combine_topk_swa_indices_cp_b1(
@@ -1610,6 +2144,30 @@ def cp_actual_owned_kv_lens(
         (n_owned - 1) * block_size + last_blk_size,
         torch.zeros_like(T),
     )
+
+
+def cp_actual_owned_kv_len_scalar(
+    total_kv_len: int, cp_size: int, block_size: int, cp_rank: int
+) -> int:
+    """Monotone scalar owned-length rule: max(f(lengths)) equals f(max(lengths))."""
+    if cp_size <= 0:
+        raise ValueError(f"cp_size must be positive, got {cp_size}")
+    if block_size <= 0:
+        raise ValueError(f"block_size must be positive, got {block_size}")
+    if cp_rank < 0 or cp_rank >= cp_size:
+        raise ValueError(f"cp_rank({cp_rank}) out of range [0, {cp_size})")
+
+    T = int(total_kv_len)
+    if T <= 0:
+        return 0
+    total_blocks = (T + block_size - 1) // block_size
+    raw = total_blocks - cp_rank
+    if raw <= 0:
+        return 0
+    n_owned = (raw + cp_size - 1) // cp_size
+    last_blk_idx = (n_owned - 1) * cp_size + cp_rank
+    last_blk_size = min(block_size, max(T - last_blk_idx * block_size, 0))
+    return (n_owned - 1) * block_size + last_blk_size
 
 
 def cp_should_gather(cp_ctx: Optional[CPContext], start_pos: int) -> bool:

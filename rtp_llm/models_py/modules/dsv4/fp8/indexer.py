@@ -23,18 +23,19 @@ from __future__ import annotations
 
 import logging
 import os
+from functools import partial
 from typing import Any, Callable, Dict, NamedTuple, Optional
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv4.chunk_env import dsv4_chunk_tokens_from_env
 from rtp_llm.models_py.modules.dsv4.cp import (
     _CP_ROLE_INDEXER,
     CPContext,
     build_cp_full_prefill_positions,
+    build_cp_full_prefill_positions_shared,
 )
 from rtp_llm.models_py.modules.dsv4.fp8._indexer_cp_gather_triton import (
     try_gather_indexer_k_to_padded,
@@ -59,7 +60,12 @@ from rtp_llm.models_py.modules.dsv4.fp8.compressor import (
     CompressorMeta,
     _CompressorPending,
 )
+from rtp_llm.models_py.modules.dsv4.indexer_topk import (
+    IndexerTopKBackendName,
+    parse_indexer_topk_backend_name,
+)
 from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
+from rtp_llm.models_py.utils.arch import is_sm120
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 
@@ -73,6 +79,110 @@ def _as_bf16_contig(t: torch.Tensor) -> torch.Tensor:
 
 def _flat_1d(t: torch.Tensor) -> torch.Tensor:
     return t.reshape(-1).contiguous()
+
+
+def _project_decode_weights(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    if not (x.is_cuda and x.dtype == torch.bfloat16 and is_sm120(x.device)):
+        return F.linear(x, weight)
+    from rtp_llm.models_py.modules.dsv4.fp8._indexer_weight_projection_triton import (
+        project_weights_if_supported,
+    )
+
+    projected = project_weights_if_supported(x, weight)
+    if projected is not None:
+        return projected
+    flat = x.reshape(-1, x.shape[-1])
+    if flat.shape[0] == 0:
+        return F.linear(x, weight)
+    # SM120 small-M cuBLAS paths round these BF16 scores differently. Keep
+    # reduction geometry fixed so speculative rows cannot change TopK membership.
+    tiles = []
+    for start in range(0, flat.shape[0], 8):
+        tile = flat[start : start + 8]
+        rows = tile.shape[0]
+        if rows < 8:
+            tile = F.pad(tile, (0, 0, 0, 8 - rows))
+        # FP32 output avoids cuBLAS's intermediate BF16 reduction truncation;
+        # retain the existing BF16 rounding boundary before quantization.
+        projected = torch.mm(tile, weight.t(), out_dtype=torch.float32)
+        tiles.append(projected[:rows].to(x.dtype))
+    result = tiles[0] if len(tiles) == 1 else torch.cat(tiles, dim=0)
+    return result.reshape(*x.shape[:-1], weight.shape[0])
+
+
+# Run the prefill indexer score+topk tail on a dedicated side stream so it
+# overlaps the same layer's main-stream attention prep (main compressor write,
+# Q materialize, workspace gathers). The tail is pure local kernels (no NCCL);
+# the prefix (incl. the nested compressor's CP gather) stays on the caller's
+# stream in the same program order as the serialized path. Default ON,
+# fail-closed parse; capture-active falls back to the serialized call.
+_INDEXER_TAIL_STREAM_FLAG = "DSV4_FP8_INDEXER_TAIL_STREAM"
+
+
+def _indexer_tail_stream_enabled() -> bool:
+    value = os.environ.get(_INDEXER_TAIL_STREAM_FLAG, "1")
+    if value not in ("0", "1"):
+        raise ValueError(f"{_INDEXER_TAIL_STREAM_FLAG} must be 0 or 1, got {value!r}")
+    return value == "1"
+
+
+# One process-local side stream per device. The tail stream only ever runs
+# ``fp8_mqa_indexer_score`` + the topk kernels reading prefix products that
+# are fenced in by event; consecutive CSA layers serialize on it in program
+# order, which reproduces the serialized path's tail ordering exactly.
+_INDEXER_TAIL_STREAMS: Dict[Any, Any] = {}
+
+
+def _get_indexer_tail_stream(device: torch.device):
+    dev = torch.device(device)
+    stream = _INDEXER_TAIL_STREAMS.get(dev)
+    if stream is None:
+        stream = torch.cuda.Stream(device=dev)
+        _INDEXER_TAIL_STREAMS[dev] = stream
+    return stream
+
+
+class _IndexerScoreState(NamedTuple):
+    """Prefix products consumed by the score+topk tail.
+
+    ``forward_prefill_tail_on_stream`` returns these by (payload) reference to
+    the pending handle, so the caching allocator cannot recycle their storage
+    while the tail stream is still reading them (the resolve join orders the
+    main stream after the tail before any ref drops).
+    """
+
+    q_fp8: torch.Tensor
+    w_fold: torch.Tensor
+    k_quant_flat: torch.Tensor
+    k_scale_buf: torch.Tensor
+    out_shape: tuple
+    q_scales: Optional[torch.Tensor] = None
+
+
+class _PendingIndexerTopk(NamedTuple):
+    """Indexer topk running on the tail side stream.
+
+    ``resolve(consumer_stream)`` establishes the happens-before edge
+    (consumer waits the tail-completion event) and pins the allocation against
+    reuse on the consumer stream, then returns the plain
+    ``[T_total, K] int32`` tensor — the exact object the serialized path
+    hands to ``combine_topk_swa_indices*``.
+    """
+
+    out_buf: torch.Tensor
+    done_event: Any
+    tail_stream: Any
+    state: _IndexerScoreState
+
+    def resolve(self, consumer_stream: Any) -> torch.Tensor:
+        consumer_stream.wait_event(self.done_event)
+        # The buffer was allocated on the tail stream; record the consumer's
+        # use so the allocator cannot reuse its storage for a later tail
+        # before this stream's readers complete. (CPU tensors — the CPU test
+        # path — do not participate in stream-ordered allocation.)
+        if self.out_buf.is_cuda:
+            self.out_buf.record_stream(consumer_stream)
+        return self.out_buf
 
 
 # Exact SGLang radix-select TopK used by the shared DeepSeek V4 Flash/Pro FP8
@@ -90,8 +200,10 @@ def _topk_v3_enabled() -> bool:
     return os.environ.get("DSV4_TOPK_V3", "1") != "0"
 
 
-def _fp8_prefill_fast_topk_enabled() -> bool:
+def _fp8_prefill_fast_topk_enabled(logits: torch.Tensor | None = None) -> bool:
     if not _FAST_PREFILL_TOPK_OK:
+        return False
+    if logits is not None and logits.is_cuda and is_sm120(logits.device):
         return False
     return os.environ.get("DSV4_PREFILL_FAST_TOPK", "1") != "0"
 
@@ -100,9 +212,15 @@ def _fp8_prefill_topk_force_radix_sort() -> bool:
     return os.environ.get("DSV4_PREFILL_TOPK_FORCE_RADIX", "1") != "0"
 
 
-def _fp8_prefill_topk_use_torch() -> bool:
-    return (
-        os.environ.get("DSV4_INDEXER_TOPK_BACKEND", "auto").strip().lower() == "torch"
+def _fp8_prefill_topk_use_torch(logits: torch.Tensor | None = None) -> bool:
+    backend = parse_indexer_topk_backend_name()
+    # Persistent decode Top-K and experimental HISA do not implement the
+    # variable-row prefill ABI.  They remain valid global selections, but this
+    # phase deliberately falls back to the exact torch implementation.
+    return backend in (
+        IndexerTopKBackendName.TORCH,
+        IndexerTopKBackendName.PERSISTENT,
+        IndexerTopKBackendName.HISA,
     )
 
 
@@ -113,6 +231,83 @@ def _fp8_prefill_topk_canonicalize() -> bool:
         "yes",
         "on",
     )
+
+
+def _compressed_k_scalars_host(
+    cp_ctx,
+    prefix_lengths: torch.Tensor,
+    eff_input_lengths: torch.Tensor,
+    ratio: int,
+):
+    """``(T, end_pos)`` from the CP host mirrors; ``None`` when unprovable.
+
+    ``T`` is ``sum((prefix_b + len_b) // ratio)`` and ``end_pos`` is
+    ``prefix_0 + len_0`` — the exact integers the legacy path reads back with
+    two device syncs (``cu_kv_seqlens[-1].item()`` /
+    ``seq_total_per_req[0].item()``).  The mirrors are host copies of the same
+    framework CPU sources that built the device args; they are trusted only
+    when their domains match the device args' element counts exactly
+    (otherwise the legacy sync runs).  Non-negative floor division on Python
+    ints equals the int32/int64 device computation at these magnitudes.
+    """
+    if cp_ctx is None:
+        return None
+    prefix_host = getattr(cp_ctx, "prefix_lengths_full_host", None)
+    lengths_host = getattr(cp_ctx, "input_lengths_full_host", None)
+    if prefix_host is None or lengths_host is None:
+        return None
+    if prefix_lengths is None or eff_input_lengths is None:
+        return None
+    if int(prefix_lengths.numel()) != len(prefix_host):
+        return None
+    if int(eff_input_lengths.numel()) != len(lengths_host):
+        return None
+    if len(prefix_host) != len(lengths_host) or not prefix_host:
+        return None
+    totals = [
+        (int(p) + int(l)) // int(ratio) for p, l in zip(prefix_host, lengths_host)
+    ]
+    return sum(totals), int(prefix_host[0]) + int(lengths_host[0])
+
+
+def _canonicalize_prefill_topk_out(out: torch.Tensor) -> None:
+    sentinel = torch.iinfo(torch.int32).max
+    sortable = torch.where(out >= 0, out, torch.full_like(out, sentinel))
+    sorted_idx = torch.sort(sortable, dim=-1).values
+    out.copy_(
+        torch.where(sorted_idx == sentinel, torch.full_like(sorted_idx, -1), sorted_idx)
+    )
+
+
+def _canonicalize_fp8_topk(logits, out, row_ends, row_starts=None) -> None:
+    if not (logits.is_cuda and is_sm120(logits.device)):
+        _canonicalize_prefill_topk_out(out)
+        return
+    from rtp_llm.models_py.modules.dsv4.fp8._topk_canonical_triton import (
+        canonicalize_topk_if_supported,
+    )
+
+    if canonicalize_topk_if_supported(logits, out, row_ends, row_starts):
+        return
+    # Large or unsupported layouts retain the same deterministic tie policy.
+    col = torch.arange(logits.shape[1], device=logits.device).unsqueeze(0)
+    starts = torch.zeros_like(row_ends) if row_starts is None else row_starts
+    lengths = row_ends - starts
+    # Put valid entries before padding so stable sort also handles -inf ties.
+    absolute = col + starts[:, None]
+    window = logits.gather(1, absolute.clamp(max=logits.shape[1] - 1).long())
+    masked = torch.where(
+        col < lengths[:, None], window, torch.full_like(window, float("-inf"))
+    )
+    count = min(out.shape[1], logits.shape[1])
+    selected = torch.argsort(masked, dim=-1, descending=True, stable=True)[:, :count]
+    selected = selected.to(torch.int32)
+    selected.masked_fill_(
+        torch.arange(count, device=out.device)[None, :] >= lengths[:, None], -1
+    )
+    out.fill_(-1)
+    out[:, :count].copy_(selected)
+    _canonicalize_prefill_topk_out(out)
 
 
 def _run_prefill_topk_torch(
@@ -134,16 +329,9 @@ def _run_prefill_topk_torch(
     indices = indices.to(torch.int32) - row_starts.unsqueeze(1)
     lengths = (row_ends - row_starts).unsqueeze(1)
     indices = torch.where(indices < lengths, indices, torch.full_like(indices, -1))
-    if _fp8_prefill_topk_canonicalize():
-        sentinel = torch.iinfo(torch.int32).max
-        sortable = torch.where(
-            indices >= 0, indices, torch.full_like(indices, sentinel)
-        )
-        sorted_idx = torch.sort(sortable, dim=-1).values
-        indices = torch.where(
-            sorted_idx == sentinel, torch.full_like(sorted_idx, -1), sorted_idx
-        )
     out[:, :k_eff].copy_(indices)
+    if _fp8_prefill_topk_canonicalize():
+        _canonicalize_fp8_topk(logits, out, row_ends, row_starts)
 
 
 def _run_prefill_topk(
@@ -154,7 +342,7 @@ def _run_prefill_topk(
     topk: int,
     compress_ratio: int,
 ) -> None:
-    if _fp8_prefill_topk_use_torch():
+    if _fp8_prefill_topk_use_torch(logits):
         _run_prefill_topk_torch(logits, row_starts, row_ends, out, topk)
         return
 
@@ -162,7 +350,7 @@ def _run_prefill_topk(
     # length so the 16k policy matches the user-visible prefill length.
     estimated_input_tokens = int(logits.size(1)) * int(compress_ratio)
     if (
-        _fp8_prefill_fast_topk_enabled()
+        _fp8_prefill_fast_topk_enabled(logits)
         and int(topk) in (512, 1024, 2048)
         and estimated_input_tokens <= _FAST_PREFILL_TOPK_MAX_INPUT_TOKENS
     ):
@@ -170,6 +358,8 @@ def _run_prefill_topk(
         rtp_llm_ops.fast_topk_v2_variable(
             logits, out, lengths, row_starts.contiguous(), int(topk)
         )
+        if _fp8_prefill_topk_canonicalize():
+            _canonicalize_fp8_topk(logits, out, row_ends, row_starts)
         return
 
     rtp_llm_ops.dsv4_top_k_per_row_prefill(
@@ -183,6 +373,8 @@ def _run_prefill_topk(
         int(topk),
         _fp8_prefill_topk_force_radix_sort(),
     )
+    if _fp8_prefill_topk_canonicalize():
+        _canonicalize_fp8_topk(logits, out, row_ends, row_starts)
 
 
 def _fp8_prefill_score_chunk_rows() -> int:
@@ -224,6 +416,10 @@ def _run_topk_v3(
         k,
         max_seq_len,
     )
+    # Atomic selection emits an unordered set. Keep the requested attention
+    # reduction order stable in decode and target verification as in prefill.
+    if _fp8_prefill_topk_canonicalize():
+        _canonicalize_fp8_topk(logits, output, lengths)
     return True
 
 
@@ -292,8 +488,11 @@ class _IndexerFP8PrefillMeta(NamedTuple):
 
 
 class IndexerFP8(PoolBackedModule):
-    """FP8 lightning indexer. DeepGEMM-only score; nested
-    ``CompressorFP8(head_dim=128)`` writes the 132B pool."""
+    """FP8 lightning indexer with architecture-specific score backends.
+
+    DeepGEMM handles supported datacenter GPUs; SM120 uses the bounded torch
+    fallback. ``CompressorFP8(head_dim=128)`` writes the shared 132B pool.
+    """
 
     def __init__(
         self,
@@ -320,8 +519,8 @@ class IndexerFP8(PoolBackedModule):
             f"(matches CompressorFP8 132B layout); got {index_head_dim}"
         )
         assert has_fp8_paged_mqa_logits(), (
-            "deep_gemm.fp8_paged_mqa_logits not available — IndexerFP8 cannot "
-            "operate without DeepGEMM. Use IndexerBF16 (or install deep_gemm)."
+            "FP8 paged indexer scoring is unavailable on this device. "
+            "Use IndexerBF16 or install the supported score backend."
         )
         assert layer_weights is not None, (
             "IndexerFP8 requires layer_weights — meta-tensor / stand-alone "
@@ -335,6 +534,43 @@ class IndexerFP8(PoolBackedModule):
         self.q_lora_rank = q_lora_rank
         self.softmax_scale = self.head_dim**-0.5
         self.compress_ratio = compress_ratio
+        from rtp_llm.models.dsv4_indexer_cache import fp4_indexer_enabled
+
+        self._fp4_indexer = fp4_indexer_enabled()
+        self._fp4_native_paged = False
+        self._cache_payload_dim = 64 if self._fp4_indexer else INDEXER_HEAD_DIM
+        self._cache_payload_dtype = (
+            torch.uint8 if self._fp4_indexer else torch.float8_e4m3fn
+        )
+        self._quantize_q = indexer_q_rope_fp8_quant_fold
+        self._score_paged = fp8_paged_indexer_score
+        self._score_prefill = fp8_mqa_indexer_score
+        self._gather_cache = rtp_llm_ops.cp_gather_indexer_k_quant_cache
+        if self._fp4_indexer:
+            from rtp_llm.models_py.modules.dsv4.fp4.native import (
+                prefill_score,
+                provider,
+            )
+            from rtp_llm.models_py.modules.dsv4.fp4.quantization import quantize_q_rope
+            from rtp_llm.models_py.modules.dsv4.fp4.score import (
+                gather_cache,
+                paged_score,
+            )
+
+            provider()
+            paged_backend = os.environ.get("DSV4_FP4_PAGED_BACKEND", "triton")
+            if paged_backend not in ("triton", "native"):
+                raise ValueError("DSV4_FP4_PAGED_BACKEND must be triton or native")
+            self._fp4_native_paged = paged_backend == "native"
+            if self._fp4_native_paged:
+                from rtp_llm.models_py.modules.dsv4.fp4.native import paged_score
+
+            self._quantize_q = partial(
+                quantize_q_rope, weight_scale=self.softmax_scale * self.n_heads**-0.5
+            )
+            self._score_paged = paged_score
+            self._score_prefill = prefill_score
+            self._gather_cache = gather_cache
 
         from rtp_llm.models_py.modules.dsv4.fp8.attention import _v4_fp8_linear
         from rtp_llm.utils.model_weight import W
@@ -351,6 +587,14 @@ class IndexerFP8(PoolBackedModule):
         self.weights_proj = (
             layer_weights[W.v4_indexer_weights_proj_w] * _wp_scale
         ).contiguous()
+        if self._fp4_indexer:
+            if self.weights_proj.device.type != "meta" and (
+                not self.weights_proj.is_cuda
+                or torch.cuda.get_device_capability(self.weights_proj.device) != (12, 0)
+            ):
+                raise ValueError("Experimental FP4 indexer requires SM120")
+            # FP4 folds the scale after the BF16 projection, in FP32.
+            self.weights_proj = layer_weights[W.v4_indexer_weights_proj_w].contiguous()
 
         # Nested compressor: 132B layout (head_dim=128).
         inner_cmp_weights = {
@@ -447,7 +691,7 @@ class IndexerFP8(PoolBackedModule):
             and cp_ctx.cp_size > 1
         )
         if not kv_cache_sharded:
-            rtp_llm_ops.cp_gather_indexer_k_quant_cache(
+            self._gather_cache(
                 self._kv_pool_view,
                 k_quant_flat,
                 k_scale_buf,
@@ -495,7 +739,7 @@ class IndexerFP8(PoolBackedModule):
                     dtype=k_scale_buf.dtype,
                     device=k_scale_buf.device,
                 )
-                rtp_llm_ops.cp_gather_indexer_k_quant_cache(
+                self._gather_cache(
                     self._kv_pool_view,
                     actual_q,
                     actual_s,
@@ -650,7 +894,7 @@ class IndexerFP8(PoolBackedModule):
                     bsz, q_len, 1
                 )
             # ``softmax_scale * n_heads^-0.5`` is pre-folded into weights_proj at __init__.
-            weights = F.linear(x, self.weights_proj)
+            weights = _project_decode_weights(x, self.weights_proj)
 
             # Always use DeepGEMM (FP8 path). Decode uses a static score
             # width from the cache/block-table upper bound; replay updates
@@ -662,12 +906,18 @@ class IndexerFP8(PoolBackedModule):
             T_static = self._kv_cache_t if self._kv_cache_t > 0 else T_cache
             T_max = max(32, min(T_cache, T_static))
 
-            q_fp8, w_fold = indexer_q_rope_fp8_quant_fold(
-                _as_bf16_contig(q),
-                _as_bf16_contig(weights),
-                freqs,
-                self.rope_head_dim,
-            )
+            if self._fp4_native_paged:
+                payload, w_fold, scales = self._quantize_query_with_scales(
+                    _as_bf16_contig(q), _as_bf16_contig(weights), freqs
+                )
+                q_fp8 = (payload, scales)
+            else:
+                q_fp8, w_fold = self._quantize_q(
+                    _as_bf16_contig(q),
+                    _as_bf16_contig(weights),
+                    freqs,
+                    self.rope_head_dim,
+                )
             ctx_lens_2d = compressed_len.view(bsz, q_len)
             bt_i32 = self._kv_block_table[:bsz].to(torch.int32).contiguous()
             # ``_kv_pool_view`` is 3D ``[num_blocks, eb, 132]`` from production
@@ -679,7 +929,7 @@ class IndexerFP8(PoolBackedModule):
                 if self._kv_pool_view.dim() == 3
                 else self._kv_pool_view
             )
-            logits = fp8_paged_indexer_score(
+            logits = self._score_paged(
                 q_fp8,
                 w_fold.view(bsz * q_len, self.n_heads),
                 pool_2d,
@@ -711,6 +961,8 @@ class IndexerFP8(PoolBackedModule):
                     out_topk_2d[:, :K_eff].copy_(topk_idxs)
                     k_arange = torch.arange(K, device=out_topk_buffer.device).view(1, K)
                     out_topk_2d.masked_fill_(k_arange >= lengths_i32.view(-1, 1), -1)
+                if _fp8_prefill_topk_canonicalize():
+                    _canonicalize_fp8_topk(score_2d, out_topk_2d, lengths_i32)
             return out_topk_buffer
         finally:
             self._clear_nested_pool()
@@ -736,6 +988,7 @@ class IndexerFP8(PoolBackedModule):
         req_id_per_token: Optional[torch.Tensor] = None,
         max_seqlen_q: int = 0,
         has_prefix: bool,
+        shared: Optional[Any] = None,
     ) -> _IndexerFP8PrefillMeta:
         """Build per-call FP8 prefill metadata.
 
@@ -751,6 +1004,11 @@ class IndexerFP8(PoolBackedModule):
         pass ``kv_block_table=None`` / ``kv_eb=0`` and the per-row
         ``block_table_i32`` is emitted empty (matches the warmup short-
         circuit in :meth:`forward`).
+
+        ``shared`` (optional): the per-forward cross-bucket memo dict
+        from ``build_and_propagate_prefill_meta_fp8``; the CP full-positions
+        build is shared through it (byte-identical values).  ``None`` keeps
+        the legacy per-call build.
 
         Today's caller still hands us a single-request layout (``bsz==1``
         with the full request flattened into ``seqlen``), so the
@@ -790,6 +1048,7 @@ class IndexerFP8(PoolBackedModule):
         if cp_active and cp_ctx.input_lengths_global is not None:
             eff_input_lengths = cp_ctx.input_lengths_global
         host_seq_total_per_req: Optional[tuple[int, ...]] = None
+        host_scalars: Optional[tuple[int, int]] = None
         if use_varlen:
             assert cu_seqlens is not None
             assert eff_input_lengths is not None
@@ -816,6 +1075,12 @@ class IndexerFP8(PoolBackedModule):
             ), f"prefix_lengths must be [B={batch_size}], got {prefix_lengths.shape}"
             # Per-request compressed-K count: T_b = (sp_b + S_b) // ratio.
             with record_function_range("dsv4.fp8.indexer.prepare.varlen_lengths"):
+                # Host mirrors of the framework length/prefix sources carry the
+                # same integers; read T/end_pos from them when the domains match
+                # so the two device readbacks below stay off the chunk head.
+                host_scalars = _compressed_k_scalars_host(
+                    cp_ctx, prefix_lengths, eff_input_lengths, ratio
+                )
                 seq_total_per_req = prefix_lengths.to(
                     device=device, dtype=torch.int64
                 ) + eff_input_lengths.to(
@@ -834,6 +1099,8 @@ class IndexerFP8(PoolBackedModule):
                 host_prefix_lengths = getattr(cp_ctx, "prefix_lengths_host", None)
                 if capturing:
                     T = self._kv_cache_t * batch_size
+                elif host_scalars is not None:
+                    T = host_scalars[0]
                 elif (
                     cp_active
                     and host_input_lengths is not None
@@ -916,6 +1183,8 @@ class IndexerFP8(PoolBackedModule):
             # capture uses an unused sentinel without synchronizing the device.
             if capturing:
                 end_pos = 0
+            elif host_scalars is not None:
+                end_pos = host_scalars[1]
             elif host_seq_total_per_req is not None:
                 end_pos = host_seq_total_per_req[0]
             else:
@@ -1037,7 +1306,9 @@ class IndexerFP8(PoolBackedModule):
                                 cp_b_idx,
                                 cp_seq_start_per_req,
                                 cp_cu_seq_per_req,
-                            ) = build_cp_full_prefill_positions(cp_ctx, device)
+                            ) = build_cp_full_prefill_positions_shared(
+                                cp_ctx, device, shared
+                            )
                             compressor_meta = compressor.prepare_metadata(
                                 cp_positions,
                                 cp_b_idx,
@@ -1112,7 +1383,96 @@ class IndexerFP8(PoolBackedModule):
         cp_gather_stream: Optional[Any] = None,
         post_gather_stream: Optional[Any] = None,
     ) -> torch.Tensor:
-        M = attention_inputs.M
+        state = self._prefill_score_prefix(
+            x,
+            qr,
+            attention_inputs,
+            workspace=workspace,
+            cp_gather_stream=cp_gather_stream,
+            post_gather_stream=post_gather_stream,
+        )
+        if isinstance(state, torch.Tensor):
+            return state
+        return self._prefill_score_tail(state, attention_inputs)
+
+    def forward_prefill_tail_on_stream(
+        self,
+        x: torch.Tensor,
+        qr: torch.Tensor,
+        attention_inputs: _IndexerFP8PrefillMeta,
+        *,
+        workspace: "PrefillWorkspace",
+        tail_stream: Any,
+        cp_gather_stream: Optional[Any] = None,
+        post_gather_stream: Optional[Any] = None,
+    ) -> Any:
+        """``forward`` with the score+topk tail issued on ``tail_stream``.
+
+        The prefix (compute_q → nested compressor → weights → quant →
+        gather_k) runs on the CALLER's stream in the same program order as
+        :meth:`forward` — every NCCL collective keeps its stream and issue
+        order. Only the tail (``fp8_mqa_indexer_score`` + per-row topk —
+        local kernels reading prefix products) is fenced onto the side
+        stream. The returned :class:`_PendingIndexerTopk` must be resolved
+        (``consumer_stream.wait_event``) before any consumer reads the topk.
+
+        Byte-identical to :meth:`forward`: same kernels, same inputs, same
+        intra-chain order — only the tail's stream placement moves. Early
+        exits (warmup / T==0) return the same plain tensor as ``forward``.
+        """
+        state = self._prefill_score_prefix(
+            x,
+            qr,
+            attention_inputs,
+            workspace=workspace,
+            cp_gather_stream=cp_gather_stream,
+            post_gather_stream=post_gather_stream,
+        )
+        if isinstance(state, torch.Tensor):
+            return state
+        current_stream = torch.cuda.current_stream(x.device)
+        in_event = torch.cuda.Event()
+        in_event.record(current_stream)
+        tail_stream.wait_event(in_event)
+        with torch.cuda.stream(tail_stream):
+            out_buf = self._prefill_score_tail(state, attention_inputs)
+            done_event = torch.cuda.Event()
+            done_event.record(tail_stream)
+        return _PendingIndexerTopk(out_buf, done_event, tail_stream, state)
+
+    def _quantize_query_with_scales(self, q, weights, freqs):
+        if self._fp4_indexer:
+            from rtp_llm.models_py.modules.dsv4.fp4.quantization import (
+                quantize_q_rope_packed,
+            )
+
+            return quantize_q_rope_packed(
+                q,
+                weights,
+                freqs,
+                self.rope_head_dim,
+                weight_scale=self.softmax_scale * self.n_heads**-0.5,
+            )
+        quantized, folded = self._quantize_q(q, weights, freqs, self.rope_head_dim)
+        return quantized, folded, None
+
+    def _prefill_score_prefix(
+        self,
+        x: torch.Tensor,
+        qr: torch.Tensor,
+        attention_inputs: _IndexerFP8PrefillMeta,
+        *,
+        workspace: "PrefillWorkspace",
+        cp_gather_stream: Optional[Any] = None,
+        post_gather_stream: Optional[Any] = None,
+    ) -> Any:
+        """Everything ``forward`` does up through the K-cache gather.
+
+        Returns a plain tensor for the early exits (warmup / T==0), else an
+        :class:`_IndexerScoreState` with the tail's inputs. Runs entirely on
+        the caller's stream; the pool clear + pending-gather drain happen
+        here so the tail never touches the nested pool context.
+        """
         T = attention_inputs.T
         sp = attention_inputs.sp_int
         K = self.index_topk
@@ -1154,17 +1514,16 @@ class IndexerFP8(PoolBackedModule):
             q_for_quant = q if q.dim() == 4 else q.unsqueeze(0)
             w_for_quant = weights if weights.dim() == 3 else weights.unsqueeze(0)
             with record_function_range("dsv4.fp8.indexer.prefill.quant_q_rope"):
-                q_fp8, w_fold = indexer_q_rope_fp8_quant_fold(
+                q_fp8, w_fold, q_scales = self._quantize_query_with_scales(
                     _as_bf16_contig(q_for_quant),
                     _as_bf16_contig(w_for_quant),
                     attention_inputs.freqs_cis_slice,
-                    self.rope_head_dim,
                 )
             del q, weights, q_for_quant, w_for_quant
 
-            assert (
-                has_fp8_mqa_logits()
-            ), "deep_gemm.fp8_mqa_logits required for IndexerFP8 prefill"
+            assert has_fp8_mqa_logits(
+                x.device
+            ), "FP8 MQA indexer scoring is unavailable for IndexerFP8 prefill"
             assert self._kv_pool_view.dim() == 3, (
                 "IndexerFP8 expects 3D ``_kv_pool_view`` "
                 "[num_blocks, eb, 132]; got dim="
@@ -1180,8 +1539,8 @@ class IndexerFP8(PoolBackedModule):
             # via (block_table, cu_kv_seqlens). No host-side slot mapping.
             with record_function_range("dsv4.fp8.indexer.prefill.gather_k_cache"):
                 k_quant_flat = torch.empty(
-                    (T, INDEXER_HEAD_DIM),
-                    dtype=torch.float8_e4m3fn,
+                    (T, self._cache_payload_dim),
+                    dtype=self._cache_payload_dtype,
                     device=x.device,
                 )
                 # quant_block_size = head_dim*4/dst_scale.size(1) = 128*4/4 = 128.
@@ -1200,50 +1559,85 @@ class IndexerFP8(PoolBackedModule):
                 ):
                     self._wait_prefill_k_cache_gather(indexer_k_pending)
                 indexer_k_pending = None
-            # ``deep_gemm.fp8_mqa_logits`` expects k_scale as 1D fp32 contig:
-            # view uint8 [T, 4] → fp32 [T, 1] → squeeze [T].
-            k_scale_flat = k_scale_buf.view(torch.float32).squeeze(-1)
-
-            q_score = q_fp8.view(M, self.n_heads, INDEXER_HEAD_DIM)
-            w_score = w_fold.view(M, self.n_heads)
-            score_chunk_rows = _fp8_prefill_score_chunk_rows()
-            chunked_score = score_chunk_rows > 0 and M > score_chunk_rows
-            if not chunked_score:
-                score_chunk_rows = M
-            out_buf = torch.empty((M, K), dtype=torch.int32, device=x.device)
-
-            # Vendored CUDA per-row TopK over [ks[r], ke[r]). Causal mask is
-            # implicit via ke = (q_pos+1)//ratio clamped to T; padding past
-            # per-row valid count is ``-1`` from the kernel. For long prefill,
-            # score in row chunks because DeepGEMM returns dense [rows, T].
-            for row_start in range(0, M, score_chunk_rows):
-                row_end = min(M, row_start + score_chunk_rows)
-                with record_function_range("dsv4.fp8.indexer.prefill.score"):
-                    logits = fp8_mqa_indexer_score(
-                        q_score[row_start:row_end],
-                        w_score[row_start:row_end],
-                        k_quant_flat,
-                        k_scale_flat,
-                        attention_inputs.ks[row_start:row_end],
-                        attention_inputs.ke[row_start:row_end],
-                        clean_logits=False,
-                    )  # [chunk_rows, T] fp32
-
-                with record_function_range("dsv4.fp8.indexer.prefill.topk"):
-                    _run_prefill_topk(
-                        logits,
-                        attention_inputs.ks[row_start:row_end],
-                        attention_inputs.ke[row_start:row_end],
-                        out_buf[row_start:row_end],
-                        K,
-                        self.compress_ratio,
-                    )
-                del logits
-
-            return out_buf.view(out_shape)
+            return _IndexerScoreState(
+                q_fp8=q_fp8,
+                w_fold=w_fold,
+                k_quant_flat=k_quant_flat,
+                k_scale_buf=k_scale_buf,
+                out_shape=out_shape,
+                q_scales=q_scales,
+            )
         finally:
             self._discard_prefill_k_cache_gather(indexer_k_pending)
             self._clear_nested_pool()
+
+    def _prefill_score_tail(
+        self,
+        state: _IndexerScoreState,
+        attention_inputs: _IndexerFP8PrefillMeta,
+    ) -> torch.Tensor:
+        """The score+topk loop — a pure function of the prefix products.
+
+        Runs on the caller's current stream (the serialized ``forward``) or
+        the dedicated tail stream (``forward_prefill_tail_on_stream``); the
+        kernel sequence and inputs are identical either way.
+        """
+        M = attention_inputs.M
+        K = self.index_topk
+        # ``deep_gemm.fp8_mqa_logits`` expects k_scale as 1D fp32 contig:
+        # view uint8 [T, 4] → fp32 [T, 1] → squeeze [T].
+        k_scale_flat = (
+            state.k_scale_buf
+            if self._fp4_indexer
+            else state.k_scale_buf.view(torch.float32).squeeze(-1)
+        )
+
+        q_score = state.q_fp8.view(M, self.n_heads, state.q_fp8.shape[-1])
+        q_scales = (
+            state.q_scales.view(M, self.n_heads, 4)
+            if state.q_scales is not None
+            else None
+        )
+        w_score = state.w_fold.view(M, self.n_heads)
+        score_chunk_rows = _fp8_prefill_score_chunk_rows()
+        chunked_score = score_chunk_rows > 0 and M > score_chunk_rows
+        if not chunked_score:
+            score_chunk_rows = M
+        out_buf = torch.empty((M, K), dtype=torch.int32, device=state.q_fp8.device)
+
+        # Vendored CUDA per-row TopK over [ks[r], ke[r]). Causal mask is
+        # implicit via ke = (q_pos+1)//ratio clamped to T; padding past
+        # per-row valid count is ``-1`` from the kernel. For long prefill,
+        # score in row chunks because DeepGEMM returns dense [rows, T].
+        for row_start in range(0, M, score_chunk_rows):
+            row_end = min(M, row_start + score_chunk_rows)
+            with record_function_range("dsv4.fp8.indexer.prefill.score"):
+                logits = self._score_prefill(
+                    (
+                        (q_score[row_start:row_end], q_scales[row_start:row_end])
+                        if q_scales is not None
+                        else q_score[row_start:row_end]
+                    ),
+                    w_score[row_start:row_end],
+                    state.k_quant_flat,
+                    k_scale_flat,
+                    attention_inputs.ks[row_start:row_end],
+                    attention_inputs.ke[row_start:row_end],
+                    clean_logits=False,
+                )  # [chunk_rows, T] fp32
+
+            with record_function_range("dsv4.fp8.indexer.prefill.topk"):
+                _run_prefill_topk(
+                    logits,
+                    attention_inputs.ks[row_start:row_end],
+                    attention_inputs.ke[row_start:row_end],
+                    out_buf[row_start:row_end],
+                    K,
+                    self.compress_ratio,
+                )
+            del logits
+
+        return out_buf.view(state.out_shape)
 
     # --------------------------------------------------------------
     # Overlap orchestration entry points
@@ -1369,17 +1763,16 @@ class IndexerFP8(PoolBackedModule):
             q_for_quant = q if q.dim() == 4 else q.unsqueeze(0)
             w_for_quant = weights if weights.dim() == 3 else weights.unsqueeze(0)
             with record_function_range("dsv4.fp8.indexer.prefill.quant_q_rope"):
-                q_fp8, w_fold = indexer_q_rope_fp8_quant_fold(
+                q_fp8, w_fold, q_scales = self._quantize_query_with_scales(
                     _as_bf16_contig(q_for_quant),
                     _as_bf16_contig(w_for_quant),
                     attention_inputs.freqs_cis_slice,
-                    self.rope_head_dim,
                 )
             del q, weights, q_for_quant, w_for_quant
 
-            assert (
-                has_fp8_mqa_logits()
-            ), "deep_gemm.fp8_mqa_logits required for IndexerFP8 prefill"
+            assert has_fp8_mqa_logits(
+                x.device
+            ), "FP8 MQA indexer scoring is unavailable for IndexerFP8 prefill"
             assert self._kv_pool_view.dim() == 3, (
                 "IndexerFP8 expects 3D ``_kv_pool_view`` "
                 "[num_blocks, eb, 132]; got dim="
@@ -1395,8 +1788,8 @@ class IndexerFP8(PoolBackedModule):
 
             with record_function_range("dsv4.fp8.indexer.prefill.gather_k_cache"):
                 k_quant_flat = torch.empty(
-                    (T, INDEXER_HEAD_DIM),
-                    dtype=torch.float8_e4m3fn,
+                    (T, self._cache_payload_dim),
+                    dtype=self._cache_payload_dtype,
                     device=x.device,
                 )
                 k_scale_buf = torch.empty((T, 4), dtype=torch.uint8, device=x.device)
@@ -1414,9 +1807,15 @@ class IndexerFP8(PoolBackedModule):
                 ):
                     self._wait_prefill_k_cache_gather(indexer_k_pending)
                 indexer_k_pending = None
-            k_scale_flat = k_scale_buf.view(torch.float32).squeeze(-1)
+            k_scale_flat = (
+                k_scale_buf
+                if self._fp4_indexer
+                else k_scale_buf.view(torch.float32).squeeze(-1)
+            )
 
-            q_score = q_fp8.view(M, self.n_heads, INDEXER_HEAD_DIM)
+            q_score = q_fp8.view(M, self.n_heads, q_fp8.shape[-1])
+            if q_scales is not None:
+                q_scales = q_scales.view(M, self.n_heads, 4)
             w_score = w_fold.view(M, self.n_heads)
             score_chunk_rows = _fp8_prefill_score_chunk_rows()
             chunked_score = score_chunk_rows > 0 and M > score_chunk_rows
@@ -1427,8 +1826,12 @@ class IndexerFP8(PoolBackedModule):
             for row_start in range(0, M, score_chunk_rows):
                 row_end = min(M, row_start + score_chunk_rows)
                 with record_function_range("dsv4.fp8.indexer.prefill.score"):
-                    logits = fp8_mqa_indexer_score(
-                        q_score[row_start:row_end],
+                    logits = self._score_prefill(
+                        (
+                            (q_score[row_start:row_end], q_scales[row_start:row_end])
+                            if q_scales is not None
+                            else q_score[row_start:row_end]
+                        ),
                         w_score[row_start:row_end],
                         k_quant_flat,
                         k_scale_flat,

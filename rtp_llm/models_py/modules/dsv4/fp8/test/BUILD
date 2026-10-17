@@ -1,7 +1,12 @@
-load("//rtp_llm/models_py/modules/dsv4/test:defs.bzl", "dsv4_py_test", "dsv4_sm100_py_test")
+load("//rtp_llm/models_py/modules/dsv4/test:defs.bzl", "dsv4_py_test", "dsv4_sm100_py_test", "dsv4_sm120_py_test")
 load("//rtp_llm/test/utils:cuda13_sm100_test.bzl", "cuda13_sm100_py_test")
 
 package(default_visibility = ["//visibility:public"])
+_DSV4_SM120_ONLY = select({
+    "@//:using_cuda13_sm120": [],
+    "//conditions:default": ["@platforms//:incompatible"],
+})
+
 
 _DSV4_FP8_TEST_DEPS = [
     "//rtp_llm/models_py/standalone:py_standalone_testlib",
@@ -35,6 +40,7 @@ _GPU_TESTS = [
     "test_indexer_q_fp8_quant",
     "test_swa_combine_topk",
     "test_swa_cp_packed_gather_triton",
+    "test_pack_slots_to_paged",
     "test_swa_dequant_large_stride",
     "test_swa_fp8_kv_roundtrip",
     "test_swa_prefill_gather_lens",
@@ -67,6 +73,8 @@ _CONTRACT_TESTS = [
     "test_prefill_mixed_layer_cache_store",
     "test_fp8_sparse_attn_decode_op",
     "test_compressor_cp_merged_gather",
+    "test_sm120_prefill_indices",
+    "test_sm120_sparse_mla",
 ]
 
 [
@@ -83,6 +91,19 @@ _CONTRACT_TESTS = [
         deps = _DSV4_FP8_TEST_DEPS,
     )
     for name in _GPU_TESTS + _CONTRACT_TESTS
+]
+
+[
+    dsv4_sm120_py_test(
+        name = name + "_sm120",
+        src = name + ".py",
+        deps = _DSV4_FP8_TEST_DEPS,
+    )
+    for name in [
+        "test_indexer_forward_with_pending_nested",
+        "test_sm120_prefill_indices",
+        "test_sm120_sparse_mla",
+    ]
 ]
 
 dsv4_py_test(
@@ -108,6 +129,90 @@ dsv4_py_test(
         "test_varlen_prefill_oracle",
     ]
 ]
+
+py_test(
+    name = "test_sm120_cp_compressor_projection",
+    srcs = ["test_sm120_cp_compressor_projection.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["RTX_5000_PRO_CU13"],
+    exec_properties = {
+        "gpu": "RTX_5000_PRO_CU13",
+        "gpu_count": "1",
+    },
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
+    name = "test_sm120_sparse_mla_hardware",
+    srcs = ["test_sm120_sparse_mla_hardware.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["RTX_5000_PRO_CU13"],
+    exec_properties = {
+        "gpu": "RTX_5000_PRO_CU13",
+        "gpu_count": "1",
+    },
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
+    name = "test_sm120_indexer_hardware",
+    srcs = ["test_sm120_indexer_hardware.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["RTX_5000_PRO_CU13"],
+    exec_properties = {
+        "gpu": "RTX_5000_PRO_CU13",
+        "gpu_count": "1",
+    },
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
+    name = "test_sm120_prefill_indices_hardware",
+    srcs = ["test_sm120_prefill_indices_hardware.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["RTX_5000_PRO_CU13"],
+    exec_properties = {
+        "gpu": "RTX_5000_PRO_CU13",
+        "gpu_count": "1",
+    },
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
+    name = "test_sm120_fused_indexer_gather",
+    srcs = ["test_sm120_fused_indexer_gather.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["RTX_5000_PRO_CU13"],
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "1"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
+    name = "test_sm120_prefill_indices_producer_matrix",
+    srcs = ["test_sm120_prefill_indices_producer_matrix.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["RTX_5000_PRO_CU13"],
+    exec_properties = {
+        "gpu": "RTX_5000_PRO_CU13",
+        "gpu_count": "1",
+    },
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+# Keep the broad H20 target above, and run the same architecture-agnostic
+# kernel contract on real SM120 hardware as part of the positive-tag gate.
+py_test(
+    name = "test_dsv4_persistent_topk_sm120",
+    srcs = ["test_dsv4_persistent_topk.py"],
+    main = "test_dsv4_persistent_topk.py",
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["RTX_5000_PRO_CU13"],
+    exec_properties = {
+        "gpu": "RTX_5000_PRO_CU13",
+        "gpu_count": "1",
+    },
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
 
 # Compares locally constructed F.linear/cat expressions, not CompressorFP8.
 dsv4_py_test(
@@ -203,3 +308,28 @@ dsv4_sm100_py_test(
     )
     for name in ["test_mega_csa_adapter", "test_mega_hca_adapter"]
 ]
+
+[
+    py_test(
+        name = name,
+        srcs = [name + ".py"],
+        data = [
+            "//rtp_llm:dsv4_kv_cache_source",
+            "//rtp_llm/models_py:prefill_optimization_source_data",
+            "//rtp_llm/models_py/modules/dsv4/test:cpu_test_support",
+        ],
+        deps = ["//rtp_llm:torch"],
+        env = {"CUDA_VISIBLE_DEVICES": ""},
+    )
+    for name in ["test_compact_cp_contract_cpu", "test_compact_cp_runtime_cpu", "test_compact_cp_assert_fusion_cpu", "test_attention_prefix_host_mirror_cpu", "test_compact_cp_plan_cache_cpu", "test_indexer_tail_stream_cpu"]
+]
+
+
+py_test(
+    name = "test_sm120_prefill_split",
+    srcs = ["test_sm120_prefill_split.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["RTX_5000_PRO_CU13"],
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "1"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+)

@@ -3,7 +3,13 @@ import os
 
 import torch
 
-from ....mhc.norm_fn_kernel import _mhc_pre_norm_fn_fwd_mul, round_to_tf32
+from rtp_llm.models_py.utils.arch import is_sm120, mhc_pre_gemm_backend
+
+from ....mhc.norm_fn_kernel import (
+    _mhc_pre_norm_fn_fwd_mul,
+    _mhc_pre_norm_fn_sm120_columns,
+    round_to_tf32,
+)
 from ....mhc.pre_big_fuse_kernel import _mhc_pre_big_fuse
 
 
@@ -21,19 +27,22 @@ def _compute_num_split(block_k: int, k: int, grid_size: int) -> int:
     return max(split_k, 1)
 
 
-def _requested_backend() -> str:
-    requested = os.environ.get("DSV4_MHC_PRE_GEMM_BACKEND", "").strip().lower()
-    if requested in ("", "auto"):
-        # Experiment branch: enable DeepGEMM by default to validate DSV4
-        # greedy/golden semantics under the full SM100 smoke suite. This is
-        # intentionally hard: DeepGEMM/JIT failures must surface directly.
-        return "deepgemm"
-    aliases = {
-        "dg": "deepgemm",
-        "tilelang": "tilelang_single",
-        "single": "tilelang_single",
-    }
-    return aliases.get(requested, requested)
+def _sm120_column_tiles_supported(
+    residual: torch.Tensor, fn: torch.Tensor, mhc_mult3: int, mhc_hidden_size: int
+) -> bool:
+    return (
+        os.environ.get("DSV4_SM120_MHC_COLUMN_TILES", "0") == "1"
+        and mhc_mult3 == 24
+        and mhc_hidden_size == 16384
+        and 0 < residual.numel() // mhc_hidden_size <= 32
+        and residual.dtype == torch.bfloat16
+        and fn.dtype == torch.float32
+        and tuple(fn.shape) == (24, 16384)
+        and residual.is_contiguous()
+        and fn.is_contiguous()
+        and residual.device == fn.device
+        and is_sm120(residual.device)
+    )
 
 
 def _run_tilelang_single_gemm(
@@ -45,7 +54,10 @@ def _run_tilelang_single_gemm(
     mhc_hidden_size: int,
 ) -> int:
     fn = round_to_tf32(fn)
-    fwd_mul_kernel = _mhc_pre_norm_fn_fwd_mul(mhc_mult3, 1, mhc_hidden_size)
+    if _sm120_column_tiles_supported(residual_flat, fn, mhc_mult3, mhc_hidden_size):
+        fwd_mul_kernel = _mhc_pre_norm_fn_sm120_columns()
+    else:
+        fwd_mul_kernel = _mhc_pre_norm_fn_fwd_mul(mhc_mult3, 1, mhc_hidden_size)
     fwd_mul_kernel(
         residual_flat.view(-1, mhc_hidden_size),
         fn,
@@ -107,7 +119,9 @@ def mhc_pre_big_fuse(
     num_tokens = residual_flat.shape[0]
     fn_flat = fn
 
-    backend = _requested_backend()
+    # JIT warmup and runtime dispatch share this single resolver so aliases,
+    # explicit overrides, and architecture defaults cannot drift.
+    backend = mhc_pre_gemm_backend(residual.device)
     block_k = 64
     block_m = 64
     n_splits = (
