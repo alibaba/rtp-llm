@@ -206,6 +206,17 @@ class DiffusionGemmaAttnOp:
             self.use_flashinfer = True
         except Exception as error:  # CPU-only environments
             logger.info("DiffusionGemma attention falls back to torch: %s", error)
+        if self.use_flashinfer and self.head_dim > 256:
+            # flashinfer 0.6.9 ragged prefill rejects the global layers'
+            # GQA config (head_dim 512, kv 2: "Invalid configuration
+            # NUM_MMA_D_QK=32 ..."); run them on the verified torch path.
+            # TODO(step-5): evaluate flashinfer fa2/trtllm-gen backends for
+            # this shape before the zero-native-torch gate.
+            logger.info(
+                "DiffusionGemma attention (head_dim=%d) uses the torch path",
+                self.head_dim,
+            )
+            self.use_flashinfer = False
 
     def __del__(self):
         if self.use_flashinfer:
