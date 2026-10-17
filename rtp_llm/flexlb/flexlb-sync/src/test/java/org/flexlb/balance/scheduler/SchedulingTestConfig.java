@@ -95,6 +95,7 @@ public final class SchedulingTestConfig {
                             case "endpoint" -> endpoint;
                             case "serverStatus" -> metadata;
                             case "requestId" -> metadata == null ? 0L : metadata.getRequestId();
+                            case "dpRank" -> metadata == null ? 0L : metadata.getDpRank();
                             case "role" -> metadata == null ? null : metadata.getRole();
                             case "group" -> metadata == null ? null : metadata.getGroup();
                             case "hitCache" ->

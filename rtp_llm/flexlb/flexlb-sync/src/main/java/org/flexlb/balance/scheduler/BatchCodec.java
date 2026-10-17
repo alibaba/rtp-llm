@@ -33,13 +33,13 @@ final class BatchCodec {
                                             .getDispatcher()
                                             .getFetchAttachTimeoutMs());
             var addresses = new RoleAddresses();
-            long firstRank = claims.getFirst().item().prefill().getDpRank();
+            long firstRank = claims.getFirst().item().prefillDpRank();
             var firstSlot =
                     EngineRpcService.EnqueueBatchDpSlotPB.newBuilder().setDpRank((int) firstRank);
             Map<Long, EngineRpcService.EnqueueBatchDpSlotPB.Builder> slots = null;
             for (DeliveryClaim claim : claims) {
                 var item = claim.item();
-                long rank = item.prefill().getDpRank();
+                long rank = item.prefillDpRank();
                 var slot = firstSlot;
                 if (rank != firstRank) {
                     if (slots == null) {
@@ -221,12 +221,14 @@ final class BatchCodec {
             }
         }
         var config = input.getGenerateConfigBuilder().clearRoleAddrs();
-        if (item.prefill() != null) {
-            addresses.prefill = role(item.prefill(), addresses.prefill);
+        var prefill = item.prefill();
+        var decode = item.decode();
+        if (prefill != null) {
+            addresses.prefill = role(prefill, addresses.prefill);
             config.addRoleAddrs(addresses.prefill);
         }
-        if (item.decode() != null) {
-            addresses.decode = role(item.decode(), addresses.decode);
+        if (decode != null) {
+            addresses.decode = role(decode, addresses.decode);
             config.addRoleAddrs(addresses.decode);
         }
         return input.setPriority(item.priority()).build();

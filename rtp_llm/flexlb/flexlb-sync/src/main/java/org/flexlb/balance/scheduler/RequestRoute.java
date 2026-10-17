@@ -171,6 +171,10 @@ public final class RequestRoute implements GroupPlanner.Input, AutoCloseable {
         return prefill.serverStatus();
     }
 
+    long prefillDpRank() {
+        return prefill.dpRank();
+    }
+
     public ServerStatus decode() {
         return decode == null ? null : decode.serverStatus();
     }
