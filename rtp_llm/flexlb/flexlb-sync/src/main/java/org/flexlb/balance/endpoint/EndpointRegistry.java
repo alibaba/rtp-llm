@@ -375,8 +375,7 @@ public class EndpointRegistry {
             WorkerEndpoint candidate = null;
             EndpointPublication publication;
             try {
-                candidate = createEndpoint(
-                        status, role, observation.engine());
+                candidate = createEndpoint(status, role);
                 Runnable projection = candidate.initializeFromPreparedStatus(
                         status, observation);
                 publication = new EndpointPublication(
@@ -736,18 +735,9 @@ public class EndpointRegistry {
     }
 
     private WorkerEndpoint createEndpoint(WorkerStatus status,
-                                          RoleType role,
-                                          WorkerStatus.EngineObservation engineStatus) {
+                                          RoleType role) {
         if (role == RoleType.FRONTEND) {
             throw new IllegalArgumentException("Unsupported role: " + role);
-        }
-        boolean prefill = role == RoleType.PREFILL
-                || role == RoleType.PDFUSION;
-        if (prefill && engineStatus.dpSize() > 1) {
-            throw new UnsupportedOperationException(
-                    role + " DP group endpoint not yet supported: ipPort="
-                            + status.getIpPort() + ", dp_size="
-                            + engineStatus.dpSize());
         }
         prepareEndpointMetrics(role, status);
         return switch (role) {

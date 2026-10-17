@@ -92,6 +92,24 @@ class EndpointRegistryRoleTest {
     }
 
     @Test
+    void should_register_multi_dp_prefill_roles() {
+        for (RoleType role : List.of(RoleType.PREFILL, RoleType.PDFUSION)) {
+            int port = role == RoleType.PREFILL ? 8090 : 8092;
+            String address = "127.0.0.1:" + port;
+            WorkerStatusResponse response = new WorkerStatusResponse();
+            response.setDpSize(2);
+            response.setDpRank(1);
+
+            WorkerEndpoint endpoint = EndpointTestSupport.publishEndpoint(
+                    registry, role, address, status(role, port), response);
+
+            assertInstanceOf(PrefillEndpoint.class, endpoint);
+            assertSame(endpoint, registry.get(role, address));
+            assertEquals(1L, endpoint.getStatus().getDpRank());
+        }
+    }
+
+    @Test
     void decode_routing_view_refreshes_discovery_topology_without_status_commit() {
         String address = "decode-route-alias";
         WorkerStatus status = EndpointTestSupport.workerStatus(
