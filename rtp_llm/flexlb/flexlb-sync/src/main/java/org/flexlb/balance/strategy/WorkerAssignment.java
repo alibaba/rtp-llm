@@ -155,6 +155,10 @@ public final class WorkerAssignment implements AutoCloseable {
         return serverStatus.getGroup();
     }
 
+    public long dpRank() {
+        return serverStatus.getDpRank();
+    }
+
     public long hitCache() {
         return serverStatus.getDebugInfo() == null
                 ? 0L
