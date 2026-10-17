@@ -11,14 +11,12 @@ public:
     ~TcpServer();
 
 public:
-    bool init(uint32_t io_thread_count,
-              uint32_t worker_thread_count,
-              bool     enable_metric,
-              uint32_t worker_queue_size = 100);
+    bool
+    init(uint32_t io_thread_count, uint32_t worker_thread_count, bool enable_metric, uint32_t worker_queue_size = 100);
     bool registerService(RPCService* rpc_service);
     bool start(uint32_t listen_port);
-
-private:
+    // Quiesce the RPC server/transport (and the ANet metric reporter) at
+    // controlled shutdown; idempotent, and the destructor remains the backstop.
     void stop();
 
 private:

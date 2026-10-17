@@ -22,6 +22,9 @@ public:
     using TokenCountsByPriority = std::map<int32_t, TokenCounts>;
 
     StreamGroups(const std::list<GenerateStreamPtr>& streams) {
+        // A padded batch still has real work unless all streams are fake.
+        // Marking a mixed batch as fake would suppress its real token commits.
+        size_t fake_count = 0;
         for (auto& stream : streams) {
             // A cache snapshot is published only for an established decode
             // stream. Avoid reading is_context_stream_ while the prior worker
@@ -42,7 +45,7 @@ public:
             const auto cur_batch_size  = use_mtp_snapshot ? 1 : stream->currentBatchSize();
             const auto next_batch_size = use_mtp_snapshot ? 1 : stream->nextBatchSize();
             if (stream->isFakeStream()) {
-                is_fake_stream_ = true;
+                ++fake_count;
             }
             if (is_context) {
                 context_streams_.push_back(stream);
@@ -100,15 +103,15 @@ public:
                 }
             }
             const int    snapshot_seq_len = mtp_state.next_seq_len_upper_bound;
-            const size_t seq_len          = use_mtp_snapshot && snapshot_seq_len > 0 ?
-                                                static_cast<size_t>(snapshot_seq_len) :
-                                                static_cast<size_t>(stream->seqLength());
-            max_seq_len_                  = std::max(max_seq_len_, seq_len);
+            const size_t seq_len = use_mtp_snapshot && snapshot_seq_len > 0 ? static_cast<size_t>(snapshot_seq_len) :
+                                                                              static_cast<size_t>(stream->seqLength());
+            max_seq_len_         = std::max(max_seq_len_, seq_len);
             total_score_batch_size_ += stream->scoreLen();
             adapter_names.push_back(stream->adapterName());
-            gen_timeline_ |= use_mtp_snapshot ? stream->genTimelineAtSeqLength(static_cast<int>(seq_len)) :
-                                                stream->genTimeline();
+            gen_timeline_ |=
+                use_mtp_snapshot ? stream->genTimelineAtSeqLength(static_cast<int>(seq_len)) : stream->genTimeline();
         }
+        is_fake_stream_ = !streams.empty() && fake_count == streams.size();
     }
 
     size_t totalDecodeBatchSize() const {

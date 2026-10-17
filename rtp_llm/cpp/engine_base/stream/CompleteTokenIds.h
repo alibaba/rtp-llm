@@ -23,8 +23,8 @@ public:
     int maxBatchSize();
     int batchSize();
 
-    bool matchEosToken(int batch_id, int token_id);
-    bool matchStopWordsList(int batch_id, const std::vector<int>& stop_words);
+    bool matchEosToken(int batch_id, int token_id, int min_seq_length = 0);
+    bool matchStopWordsList(int batch_id, const std::vector<int>& stop_words, int min_seq_length = 0);
 
     bool update(const torch::Tensor& new_tokens,
                 int64_t              begin_time_us,

@@ -37,6 +37,15 @@ def init_parallel_group_args(
         help="设置数据并行（Data Parallelism）的副本数量或组大小。",
     )
     parallel_group.add_argument(
+        "--pp_size",
+        env_name="PP_SIZE",
+        bind_to=(parallelism_config, "pp_size"),
+        type=int,
+        default=1,
+        help="流水线并行（Pipeline Parallelism）段数。当前版本不支持流水线并行，只接受 1；"
+        "大于 1 时启动直接报错。",
+    )
+    parallel_group.add_argument(
         "--world_size",
         env_name="WORLD_SIZE",
         bind_to=(parallelism_config, "world_size"),

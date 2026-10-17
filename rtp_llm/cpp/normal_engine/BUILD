@@ -2,6 +2,17 @@ load("//:def.bzl", "copts")
 load("@arch_config//:arch_select.bzl", "torch_deps")
 
 cc_library(
+    name = "dsv4_dp_prefill_policy",
+    hdrs = ["Dsv4DpPrefillPolicy.h"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/config:role_types",
+        "//rtp_llm/cpp/model_utils:dsv4_moe_strategy",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "normal_engine",
     hdrs = glob([
         "*.h",
@@ -12,6 +23,7 @@ cc_library(
         "speculative/*.cc",
     ]),
     deps = [
+        ":dsv4_dp_prefill_policy",
         "//rtp_llm/cpp/config:role_types",
         "//rtp_llm/cpp/models:models",
         "//rtp_llm/cpp/models:logits_processor",

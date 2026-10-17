@@ -42,6 +42,16 @@ def init_misc_group_args(parser, misc_config):
     )
 
     misc_group.add_argument(
+        "--dsv4_startup_real_warmup",
+        env_name="DSV4_STARTUP_REAL_WARMUP",
+        bind_to=(misc_config, "dsv4_startup_real_warmup"),
+        type=str,
+        default="true",
+        help="Run the real-request DeepSeek-V4 startup warmup. The value is "
+        "validated only by a DeepSeek-V4 PREFILL worker.",
+    )
+
+    misc_group.add_argument(
         "--oss_endpoint",
         env_name="OSS_ENDPOINT",
         bind_to=(misc_config, "oss_endpoint"),

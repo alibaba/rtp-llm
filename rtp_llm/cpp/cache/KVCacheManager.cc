@@ -258,7 +258,13 @@ KVCacheManager::~KVCacheManager() {
 }
 
 void KVCacheManager::stopMetricsReporter() {
-    stop_.store(true, std::memory_order_release);
+    // Serialize joins: the engine and the destructor may both initiate shutdown.
+    std::lock_guard<std::mutex> stop_lock(metrics_stop_mutex_);
+    {
+        std::lock_guard<std::mutex> wait_lock(metrics_wait_mutex_);
+        stop_.store(true, std::memory_order_release);
+    }
+    metrics_wait_cv_.notify_all();
     if (metrics_reporter_thread_.joinable()) {
         metrics_reporter_thread_.join();
     }
@@ -332,7 +338,8 @@ bool KVCacheManager::init() {
     initCacheEventPublisher();
 
     if (metrics_reporter_) {
-        stop_.store(false, std::memory_order_relaxed);
+        std::lock_guard<std::mutex> stop_lock(metrics_stop_mutex_);
+        RTP_LLM_CHECK_WITH_INFO(!stop_.load(std::memory_order_acquire), "cannot start cache metrics after shutdown");
         metrics_reporter_thread_ = std::thread(&KVCacheManager::reportMetricsLoop, this);
     }
 
@@ -925,11 +932,16 @@ bool KVCacheManager::collectCacheHitRates(std::chrono::steady_clock::time_point 
 void KVCacheManager::reportMetricsLoop() {
     RTP_LLM_PROFILE_FUNCTION();
     kmonitor::MetricsTags tags;
-    constexpr auto        kLogInterval  = std::chrono::minutes(1);
-    auto                  last_log_time = std::chrono::steady_clock::now() - kLogInterval;
+    constexpr auto        kLogInterval         = std::chrono::minutes(1);
+    auto                  last_log_time        = std::chrono::steady_clock::now() - kLogInterval;
+    const auto            wait_for_next_report = [this]() {
+        std::unique_lock<std::mutex> lock(metrics_wait_mutex_);
+        metrics_wait_cv_.wait_for(
+            lock, std::chrono::seconds(1), [this]() { return stop_.load(std::memory_order_acquire); });
+    };
     while (!stop_.load(std::memory_order_acquire)) {
         if (!metrics_reporter_ || !coordinator_manager_) {
-            std::this_thread::sleep_for(std::chrono::seconds(1));
+            wait_for_next_report();
             continue;
         }
 
@@ -958,7 +970,7 @@ void KVCacheManager::reportMetricsLoop() {
             reportPoolCacheMetrics(metrics_reporter_, report_snapshot, should_log);
         }
 
-        std::this_thread::sleep_for(std::chrono::seconds(1));  // 1s
+        wait_for_next_report();
     }
 }
 

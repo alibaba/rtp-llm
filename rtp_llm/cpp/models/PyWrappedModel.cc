@@ -1104,6 +1104,13 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         }
         const bool can_run_graph = !capture_hidden_states && enable_cuda_graph_ && graph_runner != nullptr
                                    && graph_runner->canRun(py_model_inputs, graph_state);
+        if (!inputs.warmup && !capture_hidden_states && enable_cuda_graph_ && graph_runner != nullptr && !can_run_graph
+            && (!py_model_inputs.attention_inputs.is_prefill || py_model_inputs.attention_inputs.is_target_verify)
+            && sm120_decode_requires_graph_replay_) {
+            RTP_LLM_FAIL("sm120_decode requires decode CUDA graph replay on every rank (graph_bs=%d); "
+                         "extend decode_capture_batch_sizes; rank-local eager fallback is unsupported",
+                         graph_state.current_batch_size);
+        }
         if (!capture_hidden_states && is_generation_prefill_runner && !can_run_graph) {
             generation_prefill_cuda_graph_status =
                 graph_state.generation_prefill_status == GenerationPrefillCudaGraphStatus::NOT_REQUESTED ?

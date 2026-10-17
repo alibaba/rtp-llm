@@ -695,6 +695,8 @@ TEST_F(PrefillCompletionRpcTest, SettlesWithoutDecodeAndPreservesProtocolFailure
                                    "eof",
                                    "wrong_request",
                                    "wrong_client",
+                                   "generate_wrong_request",
+                                   "generate_wrong_client",
                                    "wrong_stage",
                                    "expired",
                                    "stream_error",
@@ -721,11 +723,12 @@ TEST_F(PrefillCompletionRpcTest, SettlesWithoutDecodeAndPreservesProtocolFailure
         if (mode != "eof") {
             GenerateRequestPB request;
             request.set_stage(mode == "wrong_stage" ? RemoteStage::LOAD :
-                              mode == "prefill_only_generate" || mode == "bare_zero_generate" ?
+                              mode == "prefill_only_generate" || mode == "bare_zero_generate"
+                                      || mode == "generate_wrong_request" || mode == "generate_wrong_client" ?
                                                       RemoteStage::GENERATE :
                                                       RemoteStage::PREFILL_COMPLETE);
-            request.set_request_id(mode == "wrong_request" ? 43 : 42);
-            request.set_client_id(mode == "wrong_client" ? "other" : "prefill");
+            request.set_request_id(mode == "wrong_request" || mode == "generate_wrong_request" ? 43 : 42);
+            request.set_client_id(mode == "wrong_client" || mode == "generate_wrong_client" ? "other" : "prefill");
             EXPECT_TRUE(rpc->Write(request));
         }
         rpc->WritesDone();
@@ -753,7 +756,8 @@ TEST_F(PrefillCompletionRpcTest, SettlesWithoutDecodeAndPreservesProtocolFailure
                 ASSERT_TRUE(details.ParseFromString(status.error_details()));
                 EXPECT_EQ(details.error_code(), static_cast<int>(ErrorCode::INVALID_PARAMS));
                 EXPECT_NE(details.error_message().find("prefill-only"), std::string::npos);
-            } else if (mode == "wrong_request" || mode == "wrong_client") {
+            } else if (mode == "wrong_request" || mode == "wrong_client" || mode == "generate_wrong_request"
+                       || mode == "generate_wrong_client") {
                 EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
             } else if (mode == "expired") {
                 EXPECT_EQ(status.error_code(), grpc::StatusCode::DEADLINE_EXCEEDED);

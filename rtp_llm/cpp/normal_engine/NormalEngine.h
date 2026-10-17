@@ -50,7 +50,7 @@ private:
     void                            initScheduler();
     std::shared_ptr<GenerateStream> createStream(const std::shared_ptr<GenerateInput>& input);
     bool                            validateStreamForScheduling(const GenerateStreamPtr& stream) const;
-    std::shared_ptr<GenerateStream> createMinFakeStream(int32_t max_new_tokens);
+    std::shared_ptr<GenerateStream> createMinFakeStream(int32_t max_new_tokens, bool prefill_only = false);
     WarmUpResult                    warmUp(const EngineInitParams& params);
     WarmUpResult                    prefillWarmUp(const EngineInitParams& params);
     WarmUpResult                    decodeWarmUp(const EngineInitParams& params);
@@ -98,7 +98,9 @@ private:
     kmonitor::MetricsReporterPtr                  metrics_reporter_;
     std::unique_ptr<ProposeModelEngineInitParams> propose_params_;
     StepWindowProfiler                            step_profiler_;
-    int                                           reserve_step_ = 0;
+    int                                           reserve_step_          = 0;
+    bool                                          dp_prefill_phase_sync_ = false;
+    bool                                          dp_decode_batch_sync_  = false;
 };
 
 }  // namespace rtp_llm

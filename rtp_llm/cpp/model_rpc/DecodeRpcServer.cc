@@ -595,12 +595,12 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
                             static_cast<int>(decode_context.error_status.error_code()));
         return;
     }
+    GRPC_RET_IF_ERROR(decode_context,
+                      generate_request.request_id() == decode_context.request_id
+                          && generate_request.client_id() == decode_context.allocate_request.client_id(),
+                      grpc::StatusCode::INVALID_ARGUMENT,
+                      "generate request identity mismatch");
     if (generate_request.stage() == RemoteStage::PREFILL_COMPLETE) {
-        GRPC_RET_IF_ERROR(decode_context,
-                          generate_request.request_id() == decode_context.request_id
-                              && generate_request.client_id() == decode_context.allocate_request.client_id(),
-                          grpc::StatusCode::INVALID_ARGUMENT,
-                          "prefill completion request identity mismatch");
         GRPC_RET_IF_ERROR(
             decode_context, !decode_context.isRequestCancelled(), grpc::StatusCode::CANCELLED, "request is cancelled");
         GRPC_RET_IF_ERROR(decode_context,
@@ -626,6 +626,18 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
         decode_context.error_status =
             serializeErrorMsg(decode_context.request_key, decode_context.request_info, decode_context.error_info);
         return;
+    }
+    if (propose_maga_init_params_) {
+        const bool dspark = engine_->isDSpark();
+        GRPC_RET_IF_ERROR(decode_context,
+                          dspark ? generate_request.propose_token_ids_size() == 0 :
+                                   generate_request.propose_token_ids_size() >= 2,
+                          grpc::StatusCode::INVALID_ARGUMENT,
+                          "invalid speculative handoff proposal count");
+        GRPC_RET_IF_ERROR(decode_context,
+                          dspark || (generate_request.has_propose_probs() && generate_request.has_propose_hidden()),
+                          grpc::StatusCode::INVALID_ARGUMENT,
+                          "speculative handoff requires proposal probabilities and hidden states");
     }
     decode_context.time_info.updateGenerateBeginTime();
     generate_stream->setIsContextStream(false);

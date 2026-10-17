@@ -18,13 +18,11 @@ constexpr int    kDevicePinRetryBackoffMs         = 1000;
 }  // namespace
 
 NormalCacheStore::~NormalCacheStore() {
-    if (thread_pool_) {
-        thread_pool_close_ = true;
-        thread_pool_->stop();
-        thread_pool_.reset();
+    stopTransport();
+    thread_pool_.reset();
+    if (request_block_buffer_store_) {
+        request_block_buffer_store_->stop();
     }
-
-    request_block_buffer_store_->stop();
     messager_.reset();
     request_block_buffer_store_.reset();
     RTP_LLM_LOG_INFO("destory cache store done");
@@ -115,12 +113,15 @@ bool NormalCacheStore::init(const CacheStoreInitParams& params) {
                 }
             }
             std::unique_lock<std::shared_mutex> lock(store_tasks_mutex_);
+            if (thread_pool_close_) {
+                break;
+            }
             for (auto it = this->store_tasks_.begin(); it != this->store_tasks_.end();) {
                 auto& [buffer, item]   = *it;
                 auto& [callback, task] = item;
                 auto event             = buffer->getEvent();
                 if ((event && event->query()) || event == nullptr) {
-                    if (this->thread_pool_->pushTask(task) != autil::ThreadPoolBase::ERROR_NONE) {
+                    if (this->thread_pool_->pushTask(task, /*isBlocked=*/false) != autil::ThreadPoolBase::ERROR_NONE) {
                         RTP_LLM_LOG_WARNING("normal cache store push store task to thread pool failed");
                         callback(false, CacheStoreErrorCode::PushWorkerItemFailed);
                     }
@@ -174,6 +175,11 @@ void NormalCacheStore::store(const std::shared_ptr<RequestBlockBuffer>& request_
     };
 
     std::unique_lock<std::shared_mutex> lock(store_tasks_mutex_);
+    if (thread_pool_close_) {
+        lock.unlock();
+        queue_failure_callback(false, CacheStoreErrorCode::PushWorkerItemFailed);
+        return;
+    }
     store_tasks_[request_block_buffer] = {queue_failure_callback, task};
 }
 
@@ -190,6 +196,38 @@ NormalCacheStore::storeBuffers(const std::vector<std::shared_ptr<RequestBlockBuf
 
 void NormalCacheStore::debugInfo() {
     request_block_buffer_store_->debugInfo();
+}
+
+void NormalCacheStore::stopTransport() {
+    std::call_once(transport_stop_once_, [this]() {
+        {
+            std::unique_lock<std::shared_mutex> lock(store_tasks_mutex_);
+            thread_pool_close_ = true;
+        }
+        if (thread_pool_) {
+            // A cancelled load context can leave a queued worker that still
+            // opens a channel. Keep the transport alive until workers exit.
+            // LockFreeThreadPool::stop ignores its mode and drops queued work.
+            thread_pool_->waitFinish();
+            thread_pool_->stop();
+        }
+        decltype(store_tasks_) pending;
+        {
+            std::unique_lock<std::shared_mutex> lock(store_tasks_mutex_);
+            pending.swap(store_tasks_);
+        }
+        for (auto& entry : pending) {
+            entry.second.first(false, CacheStoreErrorCode::PushWorkerItemFailed);
+        }
+        {
+            // An in-flight submission can synchronously trigger a transfer
+            // watch callback without using the worker pool.
+            std::unique_lock<std::shared_mutex> lock(remote_store_tasks_mutex_);
+        }
+        if (messager_) {
+            messager_->stop();
+        }
+    });
 }
 
 void NormalCacheStore::runStoreTask(const std::shared_ptr<RequestBlockBuffer>&              request_block_buffer,
@@ -257,7 +295,13 @@ void NormalCacheStore::load(const std::shared_ptr<RequestBlockBuffer>& request_b
             request_block_buffer, callback, ip, port, rdma_port, timeout_ms, collector, partition_count, partition_id);
     };
 
-    if (thread_pool_->pushTask(task) != autil::ThreadPoolBase::ERROR_NONE) {
+    bool submitted = false;
+    {
+        std::shared_lock<std::shared_mutex> lock(store_tasks_mutex_);
+        submitted = !thread_pool_close_
+                    && thread_pool_->pushTask(task, /*isBlocked=*/false) == autil::ThreadPoolBase::ERROR_NONE;
+    }
+    if (!submitted) {
         RTP_LLM_LOG_WARNING("normal cache store push load task for request id [%s] to thread pool failed",
                             request_block_buffer->getRequestId().c_str());
         collector->markEnd(false);
@@ -306,6 +350,9 @@ NormalCacheStore::submitRemoteStoreTask(const std::shared_ptr<RemoteStoreRequest
                                         RemoteStoreTask::CheckCancelFunc check_cancel_func) {
     auto task = std::make_shared<RemoteStoreTaskImpl>(request, collector, check_cancel_func);
     std::unique_lock<std::shared_mutex> lock(remote_store_tasks_mutex_);
+    if (thread_pool_close_) {
+        return nullptr;
+    }
     auto&                               tasks = remote_store_tasks_[request->request_id];
     tasks.push_back(task);
 

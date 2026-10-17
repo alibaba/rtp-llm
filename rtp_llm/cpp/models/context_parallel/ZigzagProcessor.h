@@ -18,8 +18,9 @@ namespace rtp_llm {
 class ZigZagProcessor: public IContextParallelProcessor {
 public:
     explicit ZigZagProcessor(const ParallelismConfig& parallelism_config,
-                             bool                     prefer_local_hidden_states = false):
-        IContextParallelProcessor(parallelism_config, prefer_local_hidden_states) {}
+                             bool                     prefer_local_hidden_states = false,
+                             bool                     uses_default_position_ids  = false):
+        IContextParallelProcessor(parallelism_config, prefer_local_hidden_states, uses_default_position_ids) {}
     ~ZigZagProcessor() override = default;
 
     size_t handleOutputs(torch::Tensor&                            hidden_states,

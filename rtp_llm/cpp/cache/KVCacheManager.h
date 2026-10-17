@@ -185,8 +185,11 @@ private:
     int64_t                               cache_hit_host_tokens_   = 0;
     int64_t                               cache_hit_disk_tokens_   = 0;
 
-    std::atomic<bool> stop_{false};
-    std::thread       metrics_reporter_thread_;
+    std::atomic<bool>       stop_{false};
+    std::thread             metrics_reporter_thread_;
+    std::mutex              metrics_stop_mutex_;
+    std::mutex              metrics_wait_mutex_;
+    std::condition_variable metrics_wait_cv_;
 
     BlockTreeCachePtr                           block_tree_cache_;
     std::shared_ptr<KVCacheAllocationWaitState> allocation_wait_state_;

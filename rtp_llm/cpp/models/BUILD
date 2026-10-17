@@ -187,6 +187,7 @@ cc_library(
         "//rtp_llm/cpp/cuda_graph:cuda_graph_base",
         "//rtp_llm/cpp/cuda_graph:cuda_graph_hdrs_lib",
         "//rtp_llm/cpp/cuda_graph:prepared_attention_inputs_guard",
+        "//rtp_llm/cpp/model_utils:dsv4_moe_strategy",
         "//rtp_llm/models_py/bindings/common:fuse_copy_op",
         "//rtp_llm/cpp/multimodal_processor:multimodal_types",
     ] + select({

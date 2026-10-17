@@ -6,7 +6,6 @@ import subprocess
 from typing import Optional
 
 import torch
-
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.model_factory_register import ModelDict
 from rtp_llm.ops import (
@@ -19,6 +18,64 @@ from rtp_llm.ops import (
 from rtp_llm.utils.fuser import fetch_remote_file_to_local
 
 RUN_AFFINITY_TIMEOUT_SEC = 10
+
+
+def _auto_deepep_supported_on_visible_devices(local_world_size: int = 0) -> bool:
+    """Whether automatic DeepEP selection is valid for participating devices.
+
+    Consumer Blackwell SM120 uses the generic SM120 collective strategy;
+    DeepEP does not ship compatible kernels there.  Other SM12x revisions are
+    also ineligible for automatic DeepEP selection, but this generic startup
+    stage must not reject dense models.  If an MoE model has no compatible
+    fallback, its concrete backend selector reports that error later.  Devices
+    outside the local world do not participate and must not affect selection.
+    """
+    if not torch.cuda.is_available():
+        # Preserve CPU-only config parsing and unit-test behavior.  Runtime
+        # hardware validation occurs later when CUDA is initialized.
+        return True
+    device_count = torch.cuda.device_count()
+    participating_device_count = min(
+        device_count,
+        local_world_size if local_world_size > 0 else device_count,
+    )
+    capabilities = [
+        torch.cuda.get_device_capability(device_index)
+        for device_index in range(participating_device_count)
+    ]
+    return all(capability[0] != 12 for capability in capabilities)
+
+
+def _resolve_and_validate_ep_size(parallelism_config: ParallelismConfig) -> int:
+    """Resolve the public ``ep_size=0`` default before topology decisions.
+
+    ``set_parallelism_config`` historically performed this normalization, but
+    device-only startup paths call :func:`auto_configure_deepep` first.  Keep a
+    single normalization rule so every entry point observes the same topology.
+    """
+    tp_size = parallelism_config.tp_size
+    dp_size = parallelism_config.dp_size
+    ep_size = parallelism_config.ep_size
+    if ep_size == 1:
+        assert tp_size >= 1, (
+            "Pure TP mode (ep_size=1) requires tp_size >= 1, " f"got tp_size={tp_size}"
+        )
+        assert dp_size == 1, (
+            "Pure TP mode (ep_size=1) requires dp_size == 1, " f"got dp_size={dp_size}"
+        )
+    elif ep_size == 0:
+        ep_size = tp_size * dp_size
+        parallelism_config.ep_size = ep_size
+        logging.info(
+            "parallelism_config.ep_size == 0, auto set to tp_size * dp_size = %d",
+            ep_size,
+        )
+    else:
+        assert ep_size == tp_size * dp_size, (
+            "ep_size must be equal to 1 or tp_size * dp_size, "
+            f"got ep_size={ep_size}, tp_size={tp_size}, dp_size={dp_size}"
+        )
+    return ep_size
 
 
 def auto_configure_deepep(
@@ -60,7 +117,7 @@ def auto_configure_deepep(
     # returns 1 when CP is enabled, which would incorrectly disable
     # use_all_gather for ep_size == tp_size configurations.
     tp_size = parallelism_config.tp_size
-    ep_size = parallelism_config.ep_size
+    ep_size = _resolve_and_validate_ep_size(parallelism_config)
     dp_size = parallelism_config.dp_size
     moe_config.ll_num_max_token = ll_num_max_token
 
@@ -128,12 +185,36 @@ def auto_configure_deepep(
         and deep_ep_config.use_mori_ep is None
     ):
         # All are None, use auto configuration
-        _apply_auto_deepep_config(
-            moe_config=moe_config,
-            world_size=parallelism_config.world_size,
-            local_world_size=parallelism_config.local_world_size,
-            role_type=role_type,
-        )
+        auto_selection_relevant = ep_size > 1 and role_type in {
+            RoleType.PREFILL,
+            RoleType.DECODE,
+            RoleType.PDFUSION,
+        }
+        if not auto_selection_relevant:
+            # DeepEP is an MoE expert-parallel backend.  Dense/single-EP
+            # engines and control-plane roles must not fail startup merely
+            # because an unrelated visible GPU has an unsupported revision.
+            moe_config.use_deepep_moe = False
+            moe_config.use_deepep_low_latency = False
+            moe_config.use_deepep_internode = False
+        elif _auto_deepep_supported_on_visible_devices(
+            parallelism_config.local_world_size
+        ):
+            _apply_auto_deepep_config(
+                moe_config=moe_config,
+                world_size=parallelism_config.world_size,
+                local_world_size=parallelism_config.local_world_size,
+                role_type=role_type,
+            )
+        else:
+            moe_config.use_deepep_moe = False
+            moe_config.use_deepep_low_latency = False
+            moe_config.use_deepep_internode = False
+            logging.info(
+                "Automatic DeepEP selection is disabled on the participating "
+                "GPU architecture; a concrete MoE backend will validate any "
+                "required fallback after the model configuration is loaded"
+            )
     else:
         # User has set at least one value, copy them to moe_config
         if deep_ep_config.use_deepep_moe is not None:
@@ -246,6 +327,17 @@ def _apply_auto_deepep_config(
     )
 
 
+def _reject_pipeline_parallelism(parallelism_config: ParallelismConfig) -> None:
+    """Fail startup on ``pp_size > 1``: this tree has no pipeline executor, so a
+    pipeline layout would otherwise run as an inconsistent single-stage world."""
+    pp_size = int(parallelism_config.pp_size)
+    if pp_size != 1:
+        raise ValueError(
+            f"pipeline parallelism is not supported: pp_size must be 1, got {pp_size}. "
+            "Unset PP_SIZE / --pp_size."
+        )
+
+
 def set_parallelism_config(
     parallelism_config: ParallelismConfig,
     world_rank: Optional[int] = None,
@@ -262,6 +354,7 @@ def set_parallelism_config(
         world_rank: World rank to apply (local_rank = world_rank % local_world_size, etc.). Default 0.
         py_ffn_disaggregate_config: Optional FFN disaggregate config to apply when enabled.
     """
+    _reject_pipeline_parallelism(parallelism_config)
     world_size = parallelism_config.world_size
     need_local = world_size > 1 and parallelism_config.local_world_size == 1
     if need_local:
@@ -271,29 +364,9 @@ def set_parallelism_config(
             n = world_size
         parallelism_config.local_world_size = max(n, 1)
 
-    # Resolve and validate parallelism configuration.
-    # ep_size default is 0, which triggers automatic derivation.
-    # Three supported modes:
-    # 1. Single GPU: tp_size == 1, dp_size == 1, ep_size == 0 (default) → ep_size set to 1
-    # 2. Pure TP:    ep_size explicitly set to 1, tp_size > 1, dp_size == 1
-    # 3. EP mode:    ep_size == 0 (default), ep_size auto-derived as tp_size * dp_size
-    if parallelism_config.ep_size == 1:
-        assert (
-            parallelism_config.tp_size >= 1
-        ), f"Pure TP mode (ep_size=1) requires tp_size >= 1, got tp_size={parallelism_config.tp_size}"
-        assert (
-            parallelism_config.dp_size == 1
-        ), f"Pure TP mode (ep_size=1) requires dp_size == 1, got dp_size={parallelism_config.dp_size}"
-    elif parallelism_config.ep_size == 0:
-        logging.info("parallelism_config.ep_size == 0, auto set to world size")
-        parallelism_config.ep_size = (
-            parallelism_config.tp_size * parallelism_config.dp_size
-        )
-    else:
-        assert (
-            parallelism_config.ep_size
-            == parallelism_config.tp_size * parallelism_config.dp_size
-        ), f"ep_size must be equal to 1 or tp_size * dp_size, got ep_size={parallelism_config.ep_size}, tp_size={parallelism_config.tp_size}, dp_size={parallelism_config.dp_size}"
+    # Resolve and validate parallelism configuration.  This helper is also
+    # called by auto_configure_deepep because that entry point may run first.
+    _resolve_and_validate_ep_size(parallelism_config)
 
     ffn_tp_size = parallelism_config.tp_size // parallelism_config.ffn_sp_size
     parallelism_config.ffn_tp_size = ffn_tp_size
@@ -384,6 +457,87 @@ def _infer_model_type(ckpt_path: str) -> Optional[str]:
         return None
 
 
+def _configure_nccl_p2p_disable(py_env_configs: PyEnvConfigs) -> None:
+    """Apply the NCCL P2P workaround without disabling healthy GPU pairs."""
+    if (
+        py_env_configs.role_config.role_type == RoleType.FRONTEND
+        or "NCCL_P2P_DISABLE" in os.environ
+        or os.path.exists("/dev/kfd")
+        or not torch.cuda.is_available()
+    ):
+        return
+
+    device_count = torch.cuda.device_count()
+    if device_count <= 0:
+        return
+
+    local_world_size = py_env_configs.parallelism_config.local_world_size
+    participating_device_count = min(
+        device_count,
+        local_world_size if local_world_size > 0 else device_count,
+    )
+    device_ids = list(range(participating_device_count))
+
+    try:
+        device_names = [
+            torch.cuda.get_device_name(device_id) for device_id in device_ids
+        ]
+    except Exception as exc:
+        logging.warning(
+            "unable to identify CUDA devices for NCCL P2P setup; "
+            "leaving NCCL_P2P_DISABLE unset: %s",
+            exc,
+        )
+        return
+
+    model_requires_disable = any("RTX" in name.upper() for name in device_names)
+    unsupported_pairs: list[tuple[int, int]] = []
+    supported_pair_found = False
+    try:
+        for src in device_ids:
+            for dst in device_ids:
+                if src == dst:
+                    continue
+                if torch.cuda.can_device_access_peer(src, dst):
+                    supported_pair_found = True
+                else:
+                    unsupported_pairs.append((src, dst))
+    except Exception as exc:
+        if not model_requires_disable:
+            logging.warning(
+                "unable to probe CUDA P2P access for devices %s; "
+                "leaving NCCL_P2P_DISABLE unset: %s",
+                device_ids,
+                exc,
+            )
+            return
+        logging.warning(
+            "unable to probe CUDA P2P access for RTX devices %s; "
+            "retaining the RTX NCCL workaround: %s",
+            device_ids,
+            exc,
+        )
+
+    no_pair_supports_p2p = len(device_ids) > 1 and not supported_pair_found
+    if model_requires_disable or no_pair_supports_p2p:
+        os.environ["NCCL_P2P_DISABLE"] = "1"
+        logging.warning(
+            "set NCCL_P2P_DISABLE=1 for devices %s: model_workaround=%s, "
+            "no_pair_supports_p2p=%s, unsupported_pairs=%s",
+            device_ids,
+            model_requires_disable,
+            no_pair_supports_p2p,
+            unsupported_pairs,
+        )
+    elif unsupported_pairs:
+        logging.warning(
+            "CUDA P2P is unavailable for device pairs %s within participating "
+            "devices %s; keeping NCCL P2P enabled so NCCL can degrade per pair",
+            unsupported_pairs,
+            device_ids,
+        )
+
+
 def setup_default_args(py_env_configs):
     set_parallelism_config(
         py_env_configs.parallelism_config,
@@ -431,16 +585,7 @@ def setup_default_args(py_env_configs):
     if py_env_configs.kv_cache_config.seq_size_per_block == 0:
         py_env_configs.kv_cache_config.seq_size_per_block = 64
 
-    # Set NCCL_P2P_DISABLE for RTX GPUs or when CUDA is not available
-    # Frontend doesn't need this setting
-    if py_env_configs.role_config.role_type != RoleType.FRONTEND:
-        if torch.cuda.is_available():
-            if (
-                "NCCL_P2P_DISABLE" not in os.environ
-                and "RTX" in torch.cuda.get_device_name(0)
-            ):
-                os.environ["NCCL_P2P_DISABLE"] = "1"
-                logging.info("set NCCL_P2P_DISABLE to 1")
+    _configure_nccl_p2p_disable(py_env_configs)
 
     if (
         py_env_configs.role_config.role_type == RoleType.PREFILL
@@ -683,3 +828,19 @@ def setup_and_configure_server(py_env_configs: PyEnvConfigs):
     # Set local ip if not already set (e.g. for world_info / distributed_server)
     if not py_env_configs.server_config.ip:
         py_env_configs.server_config.ip = socket.gethostbyname(socket.gethostname())
+
+    # Validate after all defaults resolve, before spawning model processes.
+    from rtp_llm.models.dsv4_indexer_cache import validate_fp4_indexer_config
+
+    validate_fp4_indexer_config(
+        model_type=py_env_configs.model_args.model_type,
+        speculative_type=py_env_configs.sp_config.type,
+        generation_slots=(
+            0
+            if sp_type == SpeculativeType.NONE
+            else py_env_configs.sp_config.gen_num_per_cycle
+        ),
+        reuse_cache=py_env_configs.kv_cache_config.reuse_cache,
+        tokens_per_block=py_env_configs.kv_cache_config.seq_size_per_block,
+        kernel_tokens_per_block=py_env_configs.kv_cache_config.kernel_seq_size_per_block,
+    )
