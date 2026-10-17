@@ -64,7 +64,7 @@ class GlobalCacheIndexTest {
         globalCacheIndex.addCacheBlock(1L, "worker", pollTrace);
         globalCacheIndex.removeCacheBlock("worker", 1L, pollTrace);
 
-        var snapshot = trace.snapshot().poll();
+        var snapshot = trace.snapshot().cachePoll();
         assertEquals(0L, snapshot.indexWait().count());
         assertEquals("LEASE_ACQUIRED", snapshot.stage());
     }
@@ -144,7 +144,7 @@ class GlobalCacheIndexTest {
             }
             assertEquals(Thread.State.WAITING, waiting.getState());
             var snapshot = waiterHistory.snapshot();
-            var indexWait = snapshot.poll().indexWait();
+            var indexWait = snapshot.cachePoll().indexWait();
             assertEquals("CACHE_INDEX_LOCK_ACQUIRED", cleanupHistory.snapshot().phase());
             assertEquals(1L, indexWait.count());
             assertTrue(indexWait.ageUs() > 0L);
@@ -157,7 +157,7 @@ class GlobalCacheIndexTest {
         assertFalse(cleaning.isAlive());
         assertFalse(waiting.isAlive());
         assertEquals(null, failure.get());
-        var waited = waiterHistory.snapshot().poll().indexWait();
+        var waited = waiterHistory.snapshot().cachePoll().indexWait();
         assertEquals(0L, waited.ageUs());
         assertTrue(waited.totalWaitUs() > 0L);
         assertEquals(remove ? Map.of() : Map.of("worker-B", 1), globalCacheIndex.batchCalculatePrefixMatchLength(

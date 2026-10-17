@@ -29,7 +29,6 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -41,11 +40,8 @@ class EngineSyncRunnerTraceTest {
         var statusExecutor = mock(ExecutorService.class);
         var cacheExecutor = mock(ExecutorService.class);
         var cache = mock(CacheAwareService.class);
-        WorkerStatus retiring = spy(RunnerTestSupport.discovered(
-                RoleType.PREFILL, null, "127.0.0.1", 8080, 8081, null));
-        Object progress = org.springframework.test.util.ReflectionTestUtils.getField(retiring, "statusProgress");
-        org.springframework.test.util.ReflectionTestUtils.setField(progress, "health", new WorkerStatus.PollHealth(
-                System.nanoTime() / 1000L - 20_000_000L, 20_000L, 0L, true));
+        WorkerStatus retiring = RunnerTestSupport.discovered(
+                RoleType.PREFILL, null, "127.0.0.1", 8080, 8081, null);
         WorkerStatus healthy = RunnerTestSupport.alive(
                 RoleType.PREFILL, "", "127.0.0.2", 8080, 8081, null);
         directory.currentOrDiscover(RoleType.PREFILL, retiring.getIpPort(), () -> retiring);
@@ -102,9 +98,8 @@ class EngineSyncRunnerTraceTest {
     private static EngineSyncRunner runner(WorkerDirectory directory, WorkerAddressService addresses,
                                            ExecutorService statusExecutor, ExecutorService cacheExecutor,
                                            CacheAwareService cache, long cycle) {
-        return new EngineSyncRunner("model", directory, addresses, statusExecutor, cacheExecutor, statusExecutor,
+        return new EngineSyncRunner("model", directory, addresses, statusExecutor, cacheExecutor,
                 mock(EngineHealthReporter.class), mock(EngineGrpcService.class), RoleType.PREFILL,
-                cache, mock(DynamicCacheIntervalService.class), 5_000L, cycle, 20L, false,
-                10_000_000L, 60_000_000L);
+                cache, mock(DynamicCacheIntervalService.class), 5_000L, cycle, 20L, false);
     }
 }

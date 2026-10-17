@@ -57,7 +57,7 @@ class WorkerDirectoryTest {
                 directory.currentOrDiscover(RoleType.PREFILL, status.getIpPort(), () -> status);
                 status.lock.lock();
                 try {
-                    directory.beginRetirement(RoleType.PREFILL, status.getIpPort(), status, "TEST", -1L);
+                    directory.beginRetirement(RoleType.PREFILL, status.getIpPort(), status, "TEST");
                 } finally {
                     status.lock.unlock();
                 }
@@ -74,7 +74,7 @@ class WorkerDirectoryTest {
                             org.flexlb.engine.grpc.EngineRpcService.WorkerStatusPB.newBuilder()
                                     .setAlive(true).setRole("DECODE").setStatusVersion(1L).build()));
             health.submit(() -> new org.flexlb.sync.runner.GrpcWorkerStatusRunner("model", survivor.getIpPort(),
-                    "test", RoleType.DECODE, null, survivor, survivor.tryBeginStatusPoll(1L), directory,
+                    "test", RoleType.DECODE, survivor, survivor.tryBeginStatusPoll(1L), directory,
                     Mockito.mock(org.flexlb.service.monitor.EngineHealthReporter.class), grpc, 1000L,
                     cache, Runnable::run).run()).get(1, java.util.concurrent.TimeUnit.SECONDS);
             assertEquals(1L, survivor.appliedStatusCursor().statusVersion());
@@ -111,7 +111,7 @@ class WorkerDirectoryTest {
             EndpointRegistry.DetachedGeneration detached;
             try {
                 detached = workerDirectory.beginRetirement(RoleType.PREFILL, status.getIpPort(), status,
-                        "STATUS_EXPIRED", 10_000_000L);
+                        "DISCOVERY_REMOVED");
             } finally {
                 status.lock.unlock();
             }
@@ -122,7 +122,7 @@ class WorkerDirectoryTest {
                     && line.contains("result=ERROR")), "cache cleanup failure must not be reported as successful retirement");
             var snapshot = status.trace().snapshot();
             assertEquals("RETIREMENT_CLEANUP_END", snapshot.phase());
-            assertEquals("RPC_COMPLETED", snapshot.poll().failureStage());
+            assertEquals("RPC_COMPLETED", snapshot.statusPoll().failureStage());
             assertTrue(snapshot.error().contains("cache cleanup failed"));
             assertTrue(snapshot.gateClosedAtMs() >= snapshot.decidedAtMs());
             assertSame(status, workerDirectory.statusSnapshot(RoleType.PREFILL).get(status.getIpPort()),
@@ -154,7 +154,7 @@ class WorkerDirectoryTest {
         }).when(cache).removeEngineBlockCache(status, status.trace());
         status.lock.lock();
         try {
-            workerDirectory.beginRetirement(RoleType.PREFILL, status.getIpPort(), status, "TEST", -1L);
+            workerDirectory.beginRetirement(RoleType.PREFILL, status.getIpPort(), status, "TEST");
         } finally {
             status.lock.unlock();
         }
@@ -278,7 +278,7 @@ class WorkerDirectoryTest {
 
         assertTrue(result.isEmpty());
         assertEquals(List.of(status.getIpPort()),
-                workerDirectory.endpointAddresses(
+                capturedAddresses(
                         RoleType.VIT, null));
     }
 
@@ -291,7 +291,7 @@ class WorkerDirectoryTest {
         RunnerTestSupport.publishEndpoint(registry,
                 RoleType.DECODE, ungrouped.getIpPort(), ungrouped);
 
-        List<String> result = workerDirectory.endpointAddresses(
+        List<String> result = capturedAddresses(
                 RoleType.DECODE, "groupA");
 
         assertEquals(List.of(matching.getIpPort()), result);
@@ -307,7 +307,7 @@ class WorkerDirectoryTest {
         RunnerTestSupport.publishEndpoint(registry,
                 RoleType.DECODE, ungrouped.getIpPort(), ungrouped);
 
-        List<String> result = workerDirectory.endpointAddresses(
+        List<String> result = capturedAddresses(
                 RoleType.DECODE, null);
 
         assertEquals(2, result.size());
@@ -327,7 +327,7 @@ class WorkerDirectoryTest {
                 RoleType.DECODE, filtered.getIpPort(), filtered);
 
         assertEquals(List.of(matching.getIpPort()),
-                workerDirectory.endpointAddresses(
+                capturedAddresses(
                         RoleType.DECODE, "group1"));
         assertEquals(2,
                 workerDirectory.routingCapacity(RoleType.DECODE));
@@ -337,6 +337,15 @@ class WorkerDirectoryTest {
     void should_capture_pd_fusion_and_vit_from_role_specific_registries() {
         assertRoleEndpoint(RoleType.PDFUSION, 8101);
         assertRoleEndpoint(RoleType.VIT, 8102);
+    }
+
+    private List<String> capturedAddresses(RoleType role, String group) {
+        List<WorkerEndpoint.GenerationPin> pins = workerDirectory.captureEndpoints(role, group);
+        try {
+            return pins.stream().map(pin -> pin.endpoint().ipPort()).toList();
+        } finally {
+            pins.forEach(WorkerEndpoint.GenerationPin::close);
+        }
     }
 
     private void assertRoleEndpoint(RoleType role, int port) {

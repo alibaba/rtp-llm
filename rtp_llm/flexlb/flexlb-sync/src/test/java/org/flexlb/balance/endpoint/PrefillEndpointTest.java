@@ -1,5 +1,6 @@
 package org.flexlb.balance.endpoint;
 
+import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
@@ -14,9 +15,9 @@ import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.DebugInfo;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
-import org.flexlb.dao.master.TaskInfo;
+import org.flexlb.testfixture.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.master.WorkerStatusResponse;
+import org.flexlb.testfixture.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.PriorityPreemptionProgress;
 import org.flexlb.enums.TaskPhase;
@@ -35,6 +36,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -283,9 +285,11 @@ class PrefillEndpointTest {
     void repackNormalizesInvalidFeatures(long seqLen, long hitCache, long expectedMs) {
         ScheduledRequest survivor = org.mockito.Mockito.spy(createScheduledRequest(1L, 500L, 200L));
         ScheduledRequest finished = createScheduledRequest(2L, 300L, 100L);
+        AtomicBoolean invalidFeatures = new AtomicBoolean();
+        org.mockito.Mockito.doAnswer(ignored -> invalidFeatures.get() ? seqLen : 500L).when(survivor).seqLen();
+        org.mockito.Mockito.doAnswer(ignored -> invalidFeatures.get() ? hitCache : 200L).when(survivor).hitCache();
         registerBatch(endpoint, 1L, 100L, List.of(survivor, finished));
-        org.mockito.Mockito.doReturn(seqLen).when(survivor).seqLen();
-        org.mockito.Mockito.doReturn(hitCache).when(survivor).hitCache();
+        invalidFeatures.set(true);
 
         assertDoesNotThrow(() -> reportRejectedBatchMember(endpoint, 1L, 2L));
         assertEquals(expectedMs, endpoint.captureRouteProjectionInputs().work().totalRemainingWorkMs().orElseThrow());
@@ -1414,7 +1418,7 @@ class PrefillEndpointTest {
         status.lock.lock();
         try {
             response.setStatusVersion(status.appliedStatusCursor().statusVersion());
-            projection = endpoint.observeStatusHeartbeat(status, status.freezeStatusResponse(response));
+            projection = endpoint.observeStatusHeartbeat(status, WorkerStatusTestFixtures.observation(status, response));
         } finally {
             status.lock.unlock();
         }

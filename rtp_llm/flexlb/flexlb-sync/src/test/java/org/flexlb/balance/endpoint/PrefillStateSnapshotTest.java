@@ -1,9 +1,10 @@
 package org.flexlb.balance.endpoint;
 
+import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.scheduler.ScheduledRequest;
-import org.flexlb.dao.master.TaskInfo;
-import org.flexlb.dao.master.WorkerStatusResponse;
+import org.flexlb.testfixture.TaskInfo;
+import org.flexlb.testfixture.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskPhase;
 import org.junit.jupiter.api.Test;
@@ -352,8 +353,7 @@ class PrefillStateSnapshotTest {
         response.setRole(RoleType.PREFILL);
         response.setFinishedTaskInfo(finished);
         response.setRunningTaskInfo(active);
-        var observation = EndpointTestSupport.workerStatus(RoleType.PREFILL, "127.0.0.1", 8080, 8090)
-                .freezeStatusResponse(response);
+        var observation = WorkerStatusTestFixtures.observation(EndpointTestSupport.workerStatus(RoleType.PREFILL, "127.0.0.1", 8080, 8090), response);
         var outcome = state.reconcileWorkerStatus(observation,
                 repredictor, () -> { }, () -> { });
         assertNull(outcome.publicationFailure());

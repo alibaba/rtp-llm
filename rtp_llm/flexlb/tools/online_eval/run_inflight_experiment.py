@@ -100,7 +100,6 @@ DEFAULT_FLEXLB_CONFIG = json.dumps(
             "health": {
                 "statusPollIntervalMs": 50,
                 "statusRpcTimeoutMs": 5000,
-                "statusStaleAfterMs": 10000,
             },
         },
     }

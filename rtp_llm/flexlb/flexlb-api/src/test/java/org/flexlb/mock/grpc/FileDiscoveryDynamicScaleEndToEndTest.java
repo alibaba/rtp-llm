@@ -87,18 +87,6 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
     /** Master SYNC_STATUS_INTERVAL default — the production re-pull cadence. */
     private static final long SYNC_INTERVAL_MS = 20L;
     private static final long CONVERGENCE_CAP_MS = 10_000L;
-    /**
-     * Upstream's schedule refactor made disappearance eviction
-     * staleness-gated (retireMissingGenerationIfExpired): a worker dropped
-     * from discovery is retired only once its last successful status poll
-     * is older than this threshold — the 15-arg constructor defaults to
-     * 10 s, which would land exactly on Phase 3's 10 s convergence cap.
-     * The 16-arg constructor exists to inject a short staleness so this
-     * test verifies the eviction mechanism without waiting out the
-     * production TTL.
-     */
-    private static final long STATUS_STALE_AFTER_US = 500_000L;
-
     @TempDir
     Path tempDir;
 
@@ -169,7 +157,7 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
                 // republishes the exact generations used by routing.
                 engineWorkerStatus,
                 workerAddressService,
-                statusCheckExecutor, statusCheckExecutor, statusCheckExecutor,
+                statusCheckExecutor, statusCheckExecutor,
                 healthReporter,
                 engineGrpcService,
                 RoleType.PREFILL,
@@ -178,13 +166,12 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
                 5_000L,
                 0L,
                 1L,
-                false,
-                STATUS_STALE_AFTER_US, 60_000_000L);
+                false);
 
         EngineSyncRunner decodeSyncRunner = new EngineSyncRunner(
-                MODEL_NAME, engineWorkerStatus, workerAddressService, statusCheckExecutor, statusCheckExecutor, statusCheckExecutor,
+                MODEL_NAME, engineWorkerStatus, workerAddressService, statusCheckExecutor, statusCheckExecutor,
                 healthReporter, engineGrpcService, RoleType.DECODE, cacheAwareService,
-                cacheIntervalService, 5_000L, 0L, 1L, false, STATUS_STALE_AFTER_US, 60_000_000L);
+                cacheIntervalService, 5_000L, 0L, 1L, false);
 
         syncScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread thread = new Thread(r, "e2e-engine-sync");

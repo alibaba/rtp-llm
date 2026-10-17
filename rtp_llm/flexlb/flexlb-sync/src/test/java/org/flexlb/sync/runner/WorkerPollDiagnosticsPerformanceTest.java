@@ -54,7 +54,7 @@ class WorkerPollDiagnosticsPerformanceTest {
         double bytesPerEvent = (double) (bean.getThreadAllocatedBytes(threadId) - before) / ITERATIONS;
         System.out.printf("Trace recorder: bytes_per_event=%.2f%n", bytesPerEvent);
         assertTrue(bytesPerEvent <= 8.0, "recording must update fixed fields without per-event allocation");
-        assertEquals(1, trace.snapshot().poll().syncCycleId());
+        assertEquals(1, trace.snapshot().statusPoll().syncCycleId());
     }
 
     @Test
@@ -129,8 +129,8 @@ class WorkerPollDiagnosticsPerformanceTest {
                     "busy skips must aggregate without per-tick strings, maps or snapshots");
 
             var snapshot = worker.trace().snapshot();
-            assertEquals(WARMUP + ITERATIONS, snapshot.poll().skippedBusy());
-            assertEquals("CALLBACK_READY", snapshot.poll().stage());
+            assertEquals(WARMUP + ITERATIONS, snapshot.statusPoll().skippedBusy());
+            assertEquals("CALLBACK_READY", snapshot.statusPoll().stage());
         } finally {
             held.close();
         }
@@ -150,10 +150,10 @@ class WorkerPollDiagnosticsPerformanceTest {
                 held.pollTrace().record(Stage.STATUS_LOCK_ACQUIRED);
             }
             var second = worker.trace().snapshot();
-            assertEquals(first.poll().pollId(), second.poll().pollId());
-            assertEquals("RPC_COMPLETED", second.poll().failureStage());
-            assertTrue(second.poll().error().contains("worker unavailable"));
-            assertEquals(1, second.poll().syncCycleId());
+            assertEquals(first.statusPoll().pollId(), second.statusPoll().pollId());
+            assertEquals("RPC_COMPLETED", second.statusPoll().failureStage());
+            assertTrue(second.statusPoll().error().contains("worker unavailable"));
+            assertEquals(1, second.statusPoll().syncCycleId());
         } finally {
             held.close();
         }

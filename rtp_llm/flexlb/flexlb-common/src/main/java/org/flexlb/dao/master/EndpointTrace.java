@@ -23,15 +23,9 @@ public final class EndpointTrace {
         CACHE_INDEX_UPDATE_BEGIN,
         CACHE_INDEX_UPDATE_END,
         CACHE_INDEX_UPDATE_FAILED,
-        CACHE_LEASE_LOCK_ACQUIRED,
-        CACHE_LEASE_LOCK_ATTEMPT,
-        CACHE_LOCK_ACQUIRED,
-        CACHE_LOCK_ATTEMPT,
-        CACHE_LOCK_RELEASED,
         CACHE_MUTATION_LOCK_ACQUIRED,
         CACHE_MUTATION_LOCK_ATTEMPT,
         CACHE_MUTATION_LOCK_RELEASED,
-        CACHE_POLL_SKIPPED,
         CACHE_RESPONSE_FAILED,
         CACHE_VERSION_UNCHANGED,
         CALLBACK_ENDED,
@@ -52,16 +46,10 @@ public final class EndpointTrace {
         ENDPOINT_GATE_CLOSED(true),
         ENDPOINT_PUBLISHED(true),
         ENDPOINT_WITHDRAWN(true),
-        EXPIRATION_LOCK_ACQUIRED,
-        EXPIRATION_LOCK_ATTEMPT,
-        EXPIRATION_LOCK_RELEASED,
-        FAILURE_LOCK_ACQUIRED,
-        FAILURE_LOCK_ATTEMPT,
-        FAILURE_LOCK_RELEASED,
+        RETIREMENT_CHECK_LOCK_ACQUIRED,
+        RETIREMENT_CHECK_LOCK_ATTEMPT,
+        RETIREMENT_CHECK_LOCK_RELEASED,
         FINALIZE_FAILED(true),
-        FINALIZE_LOCK_ACQUIRED(true),
-        FINALIZE_LOCK_ATTEMPT(true),
-        FINALIZE_LOCK_RELEASED(true),
         GENERATION_RETIRING(true),
         LEASE_RELEASED,
         POLL_SKIPPED,
@@ -82,12 +70,9 @@ public final class EndpointTrace {
         STATUS_APPLIED,
         STATUS_COMMITTED,
         STATUS_HEALTH_UPDATED,
-        STATUS_LEASE_LOCK_ACQUIRED,
-        STATUS_LEASE_LOCK_ATTEMPT,
         STATUS_LOCK_ACQUIRED,
         STATUS_LOCK_ATTEMPT,
         STATUS_LOCK_RELEASED,
-        STATUS_POLL_SKIPPED,
         STATUS_PROJECTION_FAILED,
         STATUS_RECONCILIATION_FAILED,
         STATUS_REMOVED(true),
@@ -171,25 +156,17 @@ public final class EndpointTrace {
 
     public record Snapshot(long capturedAtMs, boolean retiring, String phase,
                            String unavailableReason, long decidedAtMs, long lastSuccessAgeUs,
-                           long thresholdUs, long consecutiveFailures, long gateClosedAtMs,
-                           long cleanupWaitUs, long cleanupHoldUs, long finalizeWaitUs, long finalizeHoldUs,
+                           long consecutiveFailures, long gateClosedAtMs,
+                           long cleanupWaitUs, long cleanupHoldUs,
                            long scannedKeys, long removedMappings,
                            String error, PollSnapshot statusPoll, PollSnapshot cachePoll) {
-        /** Compatibility view of the newest poll; diagnostic output preserves both kinds. */
-        public PollSnapshot poll() {
-            if (statusPoll == null) {return cachePoll;}
-            if (cachePoll == null) {return statusPoll;}
-            return statusPoll.sequence() > cachePoll.sequence() ? statusPoll : cachePoll;
-        }
-
         public String compact() {
             var text = new StringBuilder().append("phase=").append(phase);
             if (retiring) {
                 text.append(" reason=").append(unavailableReason).append(" decisionMs=").append(decidedAtMs)
-                    .append(" staleUs=").append(lastSuccessAgeUs).append(" limitUs=").append(thresholdUs)
+                    .append(" lastSuccessAgeUs=").append(lastSuccessAgeUs)
                     .append(" failures=").append(consecutiveFailures).append(" gateMs=").append(gateClosedAtMs)
                     .append(" cleanupWaitUs=").append(cleanupWaitUs).append(" cleanupHoldUs=").append(cleanupHoldUs)
-                    .append(" finalizeWaitUs=").append(finalizeWaitUs).append(" finalizeHoldUs=").append(finalizeHoldUs)
                     .append(" scanned=").append(scannedKeys).append(" removed=").append(removedMappings);
             }
             if (error != null) {text.append(" error=").append(error);}
@@ -224,7 +201,7 @@ public final class EndpointTrace {
 
     private volatile Poll latestStatusPoll;
     private volatile Poll latestCachePoll;
-    // WorkerStatus creates polls while holding its generation lock.
+    // WorkerStatus serializes poll creation with its health monitor.
     private long nextPollId;
     private final AtomicBoolean endpointPublished = new AtomicBoolean();
     private final AtomicLong gateClosedAtMs = new AtomicLong();
@@ -236,16 +213,11 @@ public final class EndpointTrace {
     private volatile String unavailableReason = "UNKNOWN";
     private volatile long decidedAtMs;
     private volatile long lastSuccessAgeUs = -1L;
-    private volatile long thresholdUs = -1L;
     private volatile long consecutiveFailures = -1L;
     private volatile long cleanupAttemptNanos;
     private volatile long cleanupAcquiredNanos;
     private volatile long cleanupWaitUs = -1L;
     private volatile long cleanupHoldUs = -1L;
-    private volatile long finalizeAttemptNanos;
-    private volatile long finalizeAcquiredNanos;
-    private volatile long finalizeWaitUs = -1L;
-    private volatile long finalizeHoldUs = -1L;
     private volatile long scannedKeys;
     private volatile long removedMappings;
 
@@ -272,20 +244,6 @@ public final class EndpointTrace {
                 cleanupAcquiredNanos = 0L;
                 cleanupHoldUs = Math.max(0L, cleanupHoldUs) + elapsedUs(started, now);
             }
-            case FINALIZE_LOCK_ATTEMPT -> finalizeAttemptNanos = System.nanoTime();
-            case FINALIZE_LOCK_ACQUIRED -> {
-                long now = System.nanoTime();
-                long started = finalizeAttemptNanos;
-                finalizeAttemptNanos = 0L;
-                finalizeWaitUs = Math.max(0L, finalizeWaitUs) + elapsedUs(started, now);
-                finalizeAcquiredNanos = now;
-            }
-            case FINALIZE_LOCK_RELEASED -> {
-                long now = System.nanoTime();
-                long started = finalizeAcquiredNanos;
-                finalizeAcquiredNanos = 0L;
-                finalizeHoldUs = Math.max(0L, finalizeHoldUs) + elapsedUs(started, now);
-            }
             default -> { }
         }
         phase = stage.name();
@@ -304,11 +262,10 @@ public final class EndpointTrace {
         record(stage);
     }
 
-    public void recordUnavailable(String reason, long lastSuccessUs, long limitUs, long failures) {
+    public void recordUnavailable(String reason, long lastSuccessUs, long failures) {
         unavailableReason = bounded(reason, MAX_REASON_CHARS);
         decidedAtMs = System.currentTimeMillis();
         lastSuccessAgeUs = TimeUnit.NANOSECONDS.toMicros(System.nanoTime()) - lastSuccessUs;
-        thresholdUs = limitUs;
         consecutiveFailures = failures;
         record(Stage.UNAVAILABLE_DECISION);
     }
@@ -318,7 +275,7 @@ public final class EndpointTrace {
         removedMappings = removed;
     }
 
-    /** Called under WorkerStatus.lock; callbacks keep their own Poll even after the next one starts. */
+    /** WorkerStatus holds its health monitor so only an admitted poll replaces the latest snapshot. */
     public Poll beginPoll(String kind, long cycle) {
         Poll pollTrace = new Poll(kind, ++nextPollId, cycle);
         switch (kind) {
@@ -407,13 +364,13 @@ public final class EndpointTrace {
                 }
                 case CALLBACK_STARTED -> callbackStartedNanos = now;
                 case CALLBACK_ENDED -> callbackEndedNanos = now;
-                case STATUS_LOCK_ATTEMPT, CACHE_LOCK_ATTEMPT, FAILURE_LOCK_ATTEMPT -> {
+                case STATUS_LOCK_ATTEMPT -> {
                     workerLockAcquiredNanos = 0L;
                     workerLockReleasedNanos = 0L;
                     workerLockAttemptNanos = now;
                 }
-                case STATUS_LOCK_ACQUIRED, CACHE_LOCK_ACQUIRED, FAILURE_LOCK_ACQUIRED -> workerLockAcquiredNanos = now;
-                case STATUS_LOCK_RELEASED, CACHE_LOCK_RELEASED, FAILURE_LOCK_RELEASED -> workerLockReleasedNanos = now;
+                case STATUS_LOCK_ACQUIRED -> workerLockAcquiredNanos = now;
+                case STATUS_LOCK_RELEASED -> workerLockReleasedNanos = now;
                 case STATUS_HEALTH_UPDATED -> healthUpdatedNanos = now;
                 case STATUS_COMMITTED, CACHE_INDEX_UPDATE_END -> statusCommittedNanos = now;
                 case LEASE_RELEASED -> leaseReleasedNanos = now;
@@ -490,11 +447,10 @@ public final class EndpointTrace {
         long now = System.nanoTime();
         // Read totals before active starts, matching record's clear-before-accumulate order.
         return new Snapshot(System.currentTimeMillis(), isRetiring, isRetiring ? retirementPhase : phase,
-                unavailableReason, decidedAtMs, lastSuccessAgeUs, thresholdUs, consecutiveFailures,
+                unavailableReason, decidedAtMs, lastSuccessAgeUs, consecutiveFailures,
                 gateClosedAtMs.get(), ongoingTotalUs(cleanupWaitUs, cleanupAttemptNanos, now),
                 ongoingTotalUs(cleanupHoldUs, cleanupAcquiredNanos, now),
-                ongoingTotalUs(finalizeWaitUs, finalizeAttemptNanos, now),
-                ongoingTotalUs(finalizeHoldUs, finalizeAcquiredNanos, now), scannedKeys, removedMappings,
+                scannedKeys, removedMappings,
                 error.get(), statusPoll == null ? null : statusPoll.snapshot(now),
                 cachePoll == null ? null : cachePoll.snapshot(now));
     }

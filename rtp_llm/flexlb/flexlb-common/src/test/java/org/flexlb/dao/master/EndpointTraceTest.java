@@ -86,20 +86,20 @@ class EndpointTraceTest {
                 }
                 assertEquals(Thread.State.BLOCKED, recorder.getState());
                 assertEquals(pollFailure ? "RPC_COMPLETED" : "CACHE_CLEANUP_FAILED",
-                        pollFailure ? trace.snapshot().poll().stage() : trace.snapshot().phase());
+                        pollFailure ? trace.snapshot().statusPoll().stage() : trace.snapshot().phase());
                 if (pollFailure) {
                     poll.record(Stage.CALLBACK_FAILED, new RejectedExecutionException("later failure"));
-                    assertEquals("RPC_COMPLETED", trace.snapshot().poll().failureStage());
-                    assertEquals("DETAILS_PENDING", trace.snapshot().poll().error());
+                    assertEquals("RPC_COMPLETED", trace.snapshot().statusPoll().failureStage());
+                    assertEquals("DETAILS_PENDING", trace.snapshot().statusPoll().error());
                 }
                 poll.record(Stage.LEASE_RELEASED);
-                assertTrue(trace.snapshot().poll().leaseReleased());
+                assertTrue(trace.snapshot().statusPoll().leaseReleased());
             }
         } finally {
             recording.get(3, TimeUnit.SECONDS);
         }
         var snapshot = trace.snapshot();
-        assertEquals("IllegalStateException:timeout", pollFailure ? snapshot.poll().error() : snapshot.error());
+        assertEquals("IllegalStateException:timeout", pollFailure ? snapshot.statusPoll().error() : snapshot.error());
     }
 
     @Test
@@ -113,8 +113,8 @@ class EndpointTraceTest {
         poll.record(Stage.RPC_COMPLETED, failure);
         poll.record(EndpointTrace.Stage.CALLBACK_STARTED);
         poll.record(Stage.LEASE_RELEASED);
-        assertEquals("LEASE_RELEASED", trace.snapshot().poll().stage());
-        assertTrue(trace.snapshot().poll().leaseReleased());
+        assertEquals("LEASE_RELEASED", trace.snapshot().statusPoll().stage());
+        assertTrue(trace.snapshot().statusPoll().leaseReleased());
     }
 
     @Test
@@ -129,20 +129,20 @@ class EndpointTraceTest {
             .handleAsync((response, error) -> {
             poll.record(Stage.CALLBACK_STARTED);
             poll.record(EndpointTrace.Stage.STATUS_LOCK_ATTEMPT);
-            var waiting = trace.snapshot().poll();
+            var waiting = trace.snapshot().statusPoll();
             assertEquals("STATUS_LOCK_ATTEMPT", waiting.stage());
             assertTrue(waiting.times().callbackStartMs() >= 0);
             assertEquals(-1, waiting.times().workerAcquiredMs());
             poll.record(Stage.CALLBACK_ENDED);
             return response;
         }, queue::add);
-        var queued = trace.snapshot().poll();
+        var queued = trace.snapshot().statusPoll();
         assertEquals("CALLBACK_READY", queued.stage());
         assertEquals("OK", queued.rpcResult());
         assertTrue(queued.times().rpcResultMs() >= 0);
         assertEquals(-1, queued.times().callbackStartMs());
         queue.remove().run();
-        assertEquals("CALLBACK_ENDED", trace.snapshot().poll().stage());
+        assertEquals("CALLBACK_ENDED", trace.snapshot().statusPoll().stage());
     }
 
     @Test
@@ -154,13 +154,13 @@ class EndpointTraceTest {
         var frozen = trace.snapshot();
         trace.beginPoll("STATUS", 2).record(EndpointTrace.Stage.RPC_STARTED);
         var current = trace.snapshot();
-        assertNotNull(frozen.poll());
-        assertTrue(frozen.poll().leaseReleased());
-        assertEquals("RPC_COMPLETED", frozen.poll().failureStage());
-        assertNotEquals(frozen.poll().pollId(), current.poll().pollId());
+        assertNotNull(frozen.statusPoll());
+        assertTrue(frozen.statusPoll().leaseReleased());
+        assertEquals("RPC_COMPLETED", frozen.statusPoll().failureStage());
+        assertNotEquals(frozen.statusPoll().pollId(), current.statusPoll().pollId());
         poll.record(EndpointTrace.Stage.RPC_COMPLETED);
-        assertEquals(2, trace.snapshot().poll().syncCycleId());
-        assertEquals("RPC_STARTED", trace.snapshot().poll().stage());
+        assertEquals(2, trace.snapshot().statusPoll().syncCycleId());
+        assertEquals("RPC_STARTED", trace.snapshot().statusPoll().stage());
     }
 
     @Test
@@ -175,7 +175,6 @@ class EndpointTraceTest {
         var snapshot = trace.snapshot();
         assertEquals("STATUS-20001", snapshot.statusPoll().pollId());
         assertEquals("CACHE-20002", snapshot.cachePoll().pollId());
-        assertEquals(snapshot.cachePoll(), snapshot.poll());
         assertEquals(10_000, snapshot.statusPoll().syncCycleId());
         assertEquals(10_000, snapshot.cachePoll().syncCycleId());
     }
@@ -207,7 +206,7 @@ class EndpointTraceTest {
         assertEquals("PENDING", snapshot.statusPoll().rpcResult());
         trace.beginPoll("STATUS", 1008);
         status.record(Stage.LEASE_RELEASED);
-        assertEquals("STATUS-1002", trace.snapshot().poll().pollId());
+        assertEquals("STATUS-1002", trace.snapshot().statusPoll().pollId());
         assertFalse(trace.snapshot().statusPoll().leaseReleased());
     }
 
@@ -218,7 +217,7 @@ class EndpointTraceTest {
         try (var lease = worker.tryBeginStatusPoll(7)) {
             lease.pollTrace().record(EndpointTrace.Stage.RPC_STARTED);
             for (int i = 0; i < 1000; i++) { assertNull(worker.tryBeginStatusPoll(8)); }
-            var poll = worker.trace().snapshot().poll();
+            var poll = worker.trace().snapshot().statusPoll();
             assertEquals(7, poll.syncCycleId());
             assertEquals("RPC_STARTED", poll.stage());
             assertEquals(1000, poll.skippedBusy());
@@ -235,23 +234,23 @@ class EndpointTraceTest {
         poll.record(Stage.CALLBACK_FAILED, new RejectedExecutionException("pool full"));
         poll.record(Stage.LEASE_RELEASED);
         var snapshot = trace.snapshot();
-        assertEquals("RPC_COMPLETED", snapshot.poll().failureStage());
-        assertEquals("IllegalStateException:deadline exceeded", snapshot.poll().error());
-        assertEquals("ERROR", snapshot.poll().rpcResult());
-        assertEquals(-1, snapshot.poll().times().convertEndMs());
+        assertEquals("RPC_COMPLETED", snapshot.statusPoll().failureStage());
+        assertEquals("IllegalStateException:deadline exceeded", snapshot.statusPoll().error());
+        assertEquals("ERROR", snapshot.statusPoll().rpcResult());
+        assertEquals(-1, snapshot.statusPoll().times().convertEndMs());
         assertFalse(snapshot.compact().contains("\n"));
     }
 
     @Test
     void secondWorkerLockWaitDoesNotReuseTheFirstAcquisitionOrRelease() {
         var trace = new EndpointTrace();
-        var poll = trace.beginPoll("CACHE", 1L);
-        poll.record(Stage.CACHE_LOCK_ATTEMPT);
-        poll.record(Stage.CACHE_LOCK_ACQUIRED);
-        poll.record(Stage.CACHE_LOCK_RELEASED);
-        poll.record(Stage.CACHE_LOCK_ATTEMPT);
-        var waiting = trace.snapshot().poll();
-        assertEquals("CACHE_LOCK_ATTEMPT", waiting.stage());
+        var poll = trace.beginPoll("STATUS", 1L);
+        poll.record(Stage.STATUS_LOCK_ATTEMPT);
+        poll.record(Stage.STATUS_LOCK_ACQUIRED);
+        poll.record(Stage.STATUS_LOCK_RELEASED);
+        poll.record(Stage.STATUS_LOCK_ATTEMPT);
+        var waiting = trace.snapshot().statusPoll();
+        assertEquals("STATUS_LOCK_ATTEMPT", waiting.stage());
         assertTrue(waiting.times().workerAttemptMs() >= 0L);
         assertEquals(-1L, waiting.times().workerAcquiredMs());
         assertEquals(-1L, waiting.times().workerReleasedMs());
@@ -262,60 +261,59 @@ class EndpointTraceTest {
         var trace = new EndpointTrace();
         var poll = trace.beginPoll("CACHE", 1L);
         poll.record(Stage.CACHE_INDEX_LOCK_ATTEMPT);
-        assertEquals(1, trace.snapshot().poll().indexWait().count());
+        assertEquals(1, trace.snapshot().cachePoll().indexWait().count());
         poll.record(Stage.CACHE_INDEX_LOCK_ACQUIRED);
         poll.record(Stage.CACHE_INDEX_LOCK_RELEASED);
         trace.record(Stage.GENERATION_RETIRING);
-        trace.recordUnavailable("STATUS_EXPIRED", System.nanoTime() / 1000 - 11_000_000L, 10_000_000L, 0L);
+        trace.recordUnavailable("CONSECUTIVE_STATUS_FAILURES", System.nanoTime() / 1000, 3L);
         trace.record(EndpointTrace.Stage.ENDPOINT_GATE_CLOSED);
         var snapshot = trace.snapshot();
-        assertTrue(snapshot.poll().indexWait().totalWaitUs() >= 0);
-        assertTrue(snapshot.poll().indexWait().contendedHoldUs() >= 0);
-        assertEquals("STATUS_EXPIRED", snapshot.unavailableReason());
+        assertTrue(snapshot.cachePoll().indexWait().totalWaitUs() >= 0);
+        assertTrue(snapshot.cachePoll().indexWait().contendedHoldUs() >= 0);
+        assertEquals("CONSECUTIVE_STATUS_FAILURES", snapshot.unavailableReason());
         assertTrue(snapshot.gateClosedAtMs() >= snapshot.decidedAtMs());
-        assertEquals(10_000_000, snapshot.thresholdUs());
+        assertEquals(3L, snapshot.consecutiveFailures());
         assertTrue(snapshot.compact().contains("gTotalUs:"));
     }
 
-    @ParameterizedTest
-    @ValueSource(booleans = {true, false})
-    void retirementLockIntervalsAccumulateAcrossChunksAndFreezeBetweenThem(boolean finalizeLock) throws Exception {
+    @Test
+    void cacheCleanupLockIntervalsAccumulateAcrossChunksAndFreezeBetweenThem() throws Exception {
         var trace = new EndpointTrace();
         trace.record(Stage.GENERATION_RETIRING);
         long completedWait = -1L;
         long completedHold = -1L;
         for (int interval = 0; interval < 2; interval++) {
-            trace.record(finalizeLock ? Stage.FINALIZE_LOCK_ATTEMPT : Stage.CACHE_INDEX_LOCK_ATTEMPT);
+            trace.record(Stage.CACHE_INDEX_LOCK_ATTEMPT);
             var waiting = trace.snapshot();
-            long initialWait = finalizeLock ? waiting.finalizeWaitUs() : waiting.cleanupWaitUs();
+            long initialWait = waiting.cleanupWaitUs();
             assertTrue(initialWait >= Math.max(0L, completedWait));
-            assertEquals(completedHold, finalizeLock ? waiting.finalizeHoldUs() : waiting.cleanupHoldUs());
+            assertEquals(completedHold, waiting.cleanupHoldUs());
             Thread.sleep(2);
             var stillWaiting = trace.snapshot();
-            assertTrue((finalizeLock ? stillWaiting.finalizeWaitUs() : stillWaiting.cleanupWaitUs()) > initialWait);
+            assertTrue(stillWaiting.cleanupWaitUs() > initialWait);
 
-            trace.record(finalizeLock ? Stage.FINALIZE_LOCK_ACQUIRED : Stage.CACHE_INDEX_LOCK_ACQUIRED);
+            trace.record(Stage.CACHE_INDEX_LOCK_ACQUIRED);
             var acquired = trace.snapshot();
-            completedWait = finalizeLock ? acquired.finalizeWaitUs() : acquired.cleanupWaitUs();
-            long initialHold = finalizeLock ? acquired.finalizeHoldUs() : acquired.cleanupHoldUs();
+            completedWait = acquired.cleanupWaitUs();
+            long initialHold = acquired.cleanupHoldUs();
             assertTrue(initialHold >= Math.max(0L, completedHold));
             Thread.sleep(2);
             var holding = trace.snapshot();
-            assertEquals(completedWait, finalizeLock ? holding.finalizeWaitUs() : holding.cleanupWaitUs());
-            assertTrue((finalizeLock ? holding.finalizeHoldUs() : holding.cleanupHoldUs()) > initialHold);
+            assertEquals(completedWait, holding.cleanupWaitUs());
+            assertTrue(holding.cleanupHoldUs() > initialHold);
 
-            trace.record(finalizeLock ? Stage.FINALIZE_LOCK_RELEASED : Stage.CACHE_INDEX_LOCK_RELEASED);
+            trace.record(Stage.CACHE_INDEX_LOCK_RELEASED);
             var released = trace.snapshot();
-            completedHold = finalizeLock ? released.finalizeHoldUs() : released.cleanupHoldUs();
+            completedHold = released.cleanupHoldUs();
             Thread.sleep(2);
             var later = trace.snapshot();
-            assertEquals(completedWait, finalizeLock ? later.finalizeWaitUs() : later.cleanupWaitUs());
-            assertEquals(completedHold, finalizeLock ? later.finalizeHoldUs() : later.cleanupHoldUs());
+            assertEquals(completedWait, later.cleanupWaitUs());
+            assertEquals(completedHold, later.cleanupHoldUs());
         }
     }
 
     @Test
-    void snapshotsRemainReadableWhileGenerationLockIsHeldAndOtherCallersWait() throws Exception {
+    void snapshotsRemainReadableWhileCacheMutationLockIsHeldAndOtherCallersWait() throws Exception {
         var worker = WorkerStatus.createDiscovered(org.flexlb.dao.route.RoleType.PREFILL,
                 "group", "127.0.0.1", 80, 81, "site");
         var trace = worker.trace();
@@ -323,33 +321,30 @@ class EndpointTraceTest {
         var cacheLease = worker.tryBeginCachePoll(1L);
         var waiting = new CountDownLatch(1);
         try (var executor = Executors.newFixedThreadPool(2)) {
-            worker.lock.lock();
+            worker.cacheMutationLock.lock();
             try {
                 trace.record(Stage.GENERATION_RETIRING);
-                trace.record(Stage.FINALIZE_LOCK_ATTEMPT);
-                trace.record(Stage.FINALIZE_LOCK_ACQUIRED);
                 trace.record(Stage.CACHE_INDEX_LOCK_ATTEMPT);
                 trace.record(Stage.CACHE_INDEX_LOCK_ACQUIRED);
                 var waiter = executor.submit(() -> {
-                    trace.record(Stage.EXPIRATION_LOCK_ATTEMPT);
+                    cacheLease.pollTrace().record(Stage.CACHE_MUTATION_LOCK_ATTEMPT);
                     waiting.countDown();
-                    worker.lock.lock();
+                    worker.cacheMutationLock.lock();
                     try {
-                        trace.record(Stage.EXPIRATION_LOCK_ACQUIRED);
+                        cacheLease.pollTrace().record(Stage.CACHE_MUTATION_LOCK_ACQUIRED);
                     } finally {
-                        worker.lock.unlock();
+                        worker.cacheMutationLock.unlock();
                     }
                 });
                 assertTrue(waiting.await(3, TimeUnit.SECONDS));
                 var captured = executor.submit(trace::snapshot).get(3, TimeUnit.SECONDS);
                 assertEquals("CACHE_INDEX_LOCK_ACQUIRED", captured.phase());
                 assertTrue(captured.cleanupHoldUs() >= 0L);
-                assertTrue(captured.finalizeHoldUs() >= 0L);
                 assertEquals(1L, captured.statusPoll().syncCycleId());
                 assertEquals(1L, captured.cachePoll().syncCycleId());
                 assertFalse(waiter.isDone());
             } finally {
-                worker.lock.unlock();
+                worker.cacheMutationLock.unlock();
                 statusLease.close();
                 cacheLease.close();
             }
@@ -374,11 +369,11 @@ class EndpointTraceTest {
                     })).toList();
             start.countDown();
             for (int i = 0; i < 1000; i++) {
-                assertEquals(9, trace.snapshot().poll().syncCycleId());
+                assertEquals(9, trace.snapshot().statusPoll().syncCycleId());
             }
             for (var writer : writers) {writer.get(5, TimeUnit.SECONDS);}
         }
-        var captured = trace.snapshot().poll();
+        var captured = trace.snapshot().statusPoll();
         assertEquals(40_000, captured.skippedBusy());
         assertTrue(captured.times().runnerStartMs() >= 0L);
         assertTrue(captured.times().rpcResultMs() >= 0L);
@@ -393,7 +388,7 @@ class EndpointTraceTest {
         trace.record(Stage.ENDPOINT_GATE_CLOSED);
         long gateClosedAtMs = trace.snapshot().gateClosedAtMs();
         trace.record(Stage.CACHE_INDEX_LOCK_ATTEMPT);
-        trace.record(Stage.STATUS_LEASE_LOCK_ATTEMPT);
+        trace.record(Stage.RETIREMENT_CHECK_LOCK_ATTEMPT);
         assertEquals("CACHE_INDEX_LOCK_ATTEMPT", trace.snapshot().phase());
         trace.record(Stage.RETIREMENT_CLEANUP_END);
         trace.record(Stage.ENDPOINT_GATE_CLOSED);

@@ -2,57 +2,91 @@ package org.flexlb.dao.master;
 
 import org.flexlb.dao.route.RoleType;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.LockSupport;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class WorkerStatusPollLeaseTest {
 
     @Test
-    void transportProgressInvalidatesStaleRetirementAndClaimFencesLateSuccess() {
-        WorkerStatus status = workerStatus();
-        var lease = status.tryBeginStatusPoll(1L);
-        var beforeStart = status.pollHealth();
-        lease.statusRpcStarted(5000L);
-        status.lock.lock();
-        try {
-            org.junit.jupiter.api.Assertions.assertFalse(status.tryClaimHealthRetirement(beforeStart));
-            var beforeSuccess = status.pollHealth();
-            status.recordStatusRpcResult(lease, true, true, null);
-            org.junit.jupiter.api.Assertions.assertFalse(status.tryClaimHealthRetirement(beforeSuccess));
-            var current = status.pollHealth();
-            org.junit.jupiter.api.Assertions.assertTrue(status.tryClaimHealthRetirement(current));
-            status.recordStatusRpcResult(lease, true, true, null);
-            org.junit.jupiter.api.Assertions.assertSame(current, status.pollHealth());
-        } finally { status.lock.unlock(); lease.close(); }
-        assertNull(status.tryBeginStatusPoll(2L));
+    @Timeout(20)
+    void competingPollsCannotReplaceTheAdmittedPollsDiagnostics() throws Exception {
+        try (var executor = Executors.newFixedThreadPool(8)) {
+            for (int round = 0; round < 100; round++) {
+                WorkerStatus status = workerStatus();
+                var start = new CountDownLatch(1);
+                var calls = new ArrayList<Future<WorkerStatus.PollLease>>();
+                for (long cycle = 1L; cycle <= 8L; cycle++) {
+                    long syncCycle = cycle;
+                    calls.add(executor.submit(() -> {
+                        start.await();
+                        return syncCycle % 2 == 0
+                                ? status.tryBeginStatusPoll(syncCycle)
+                                : status.tryBeginCachePoll(syncCycle);
+                    }));
+                }
+                start.countDown();
+                var admitted = new HashMap<String, WorkerStatus.PollLease>();
+                for (var call : calls) {
+                    var lease = call.get(3, TimeUnit.SECONDS);
+                    if (lease != null) {
+                        assertNull(admitted.put(lease.pollTrace().snapshot().kind(), lease));
+                    }
+                }
+                try {
+                    assertEquals(2, admitted.size(), "one status poll and one cache poll may be active");
+                    var snapshot = status.trace().snapshot();
+                    assertEquals(admitted.get("STATUS").pollTrace().snapshot().syncCycleId(),
+                            snapshot.statusPoll().syncCycleId());
+                    assertEquals(admitted.get("CACHE").pollTrace().snapshot().syncCycleId(),
+                            snapshot.cachePoll().syncCycleId());
+                    assertNotEquals(snapshot.statusPoll().sequence(), snapshot.cachePoll().sequence());
+                } finally {
+                    admitted.values().forEach(WorkerStatus.PollLease::close);
+                }
+            }
+        }
     }
 
     @Test
-    void rpcAndCommitProtectionAreBoundedAndLeaseFenced() {
+    void retiredGenerationIgnoresLateWireSuccess() {
+        WorkerStatus status = workerStatus();
+        var lease = status.tryBeginStatusPoll(1L);
+        var health = status.pollHealth();
+        status.lock.lock();
+        try {
+            assertTrue(status.beginRetirementAfterEndpointGateClosed());
+        } finally { status.lock.unlock(); }
+        status.recordStatusRpcResult(lease, true, true, null);
+        org.junit.jupiter.api.Assertions.assertSame(health, status.pollHealth());
+        lease.close();
+        assertNull(status.tryBeginStatusPoll(2L));
+        assertNull(status.tryBeginCachePoll(2L));
+    }
+
+    @Test
+    void oldCompletionCannotUpdateTheNextStatusPollHealth() {
         WorkerStatus status = workerStatus();
         WorkerStatus.PollLease first = status.tryBeginStatusPoll(1L);
-        assertTrue(!status.isStatusPollProtected(System.nanoTime() / 1000, 60_000_000L),
-                "queued polls do not prove transport health");
-        first.statusRpcStarted(5000);
-        long now = System.nanoTime() / 1000;
-        assertTrue(status.isStatusPollProtected(now, 60_000_000L));
-        assertTrue(!status.isStatusPollProtected(now + 5_001_000L, 60_000_000L));
-        first.statusRpcCompleted(true);
-        now = System.nanoTime() / 1000;
-        assertTrue(status.isStatusPollProtected(now, 60_000_000L));
-        assertTrue(!status.isStatusPollProtected(now + 60_001_000L, 60_000_000L));
-        first.statusRpcCompleted(false);
-        assertTrue(!status.isStatusPollProtected(now, 60_000_000L));
         first.close();
-        WorkerStatus.PollLease second = status.tryBeginStatusPoll(1L);
-        first.statusRpcCompleted(true);
-        assertTrue(!status.isStatusPollProtected(System.nanoTime() / 1000, 60_000_000L),
-                "late old completions cannot protect the next poll");
+        WorkerStatus.PollLease second = status.tryBeginStatusPoll(2L);
+        var health = status.pollHealth();
+        status.recordStatusRpcResult(first, true, true, null);
+        org.junit.jupiter.api.Assertions.assertSame(health, status.pollHealth());
+        status.recordStatusRpcResult(second, true, true, null);
+        assertTrue(status.pollHealth().reportedAlive());
         second.close();
     }
 

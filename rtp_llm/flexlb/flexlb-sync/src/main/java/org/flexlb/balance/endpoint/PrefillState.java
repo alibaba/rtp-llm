@@ -983,9 +983,9 @@ public final class PrefillState {
         }
     }
 
-    public CapacityBoundary.Availability batchAvailability(int maximum) {
+    public CapacityBoundary.Availability batchAvailability(int maximum, WorkerStatus workerStatus) {
         requirePositiveBatchLimit(maximum);
-        return new CapacityAvailability(maximum);
+        return new CapacityAvailability(maximum, workerStatus);
     }
 
     private static void requirePositiveBatchLimit(int maximum) {
@@ -998,15 +998,17 @@ public final class PrefillState {
     private final class CapacityAvailability
             implements CapacityBoundary.Availability {
         private final int maximum;
+        private final WorkerStatus workerStatus;
         private Runnable subscribed;
 
-        private CapacityAvailability(int maximum) {
+        private CapacityAvailability(int maximum, WorkerStatus workerStatus) {
             this.maximum = maximum;
+            this.workerStatus = Objects.requireNonNull(workerStatus, "workerStatus");
         }
 
         @Override
         public boolean isAvailable() {
-            return batchCapacityAvailable(maximum);
+            return workerStatus.isAvailableForScheduling() && batchCapacityAvailable(maximum);
         }
 
         @Override

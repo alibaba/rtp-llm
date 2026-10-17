@@ -37,7 +37,7 @@ class MasterEngineSynchronizerTest {
     void reportsEachSlowRunningCycleWithThreadOccupancyAndPoolState() throws Exception {
         var config = SchedulingTestConfig.newConfig();
         config.getWorkerRegistry().getHealth().setStatusPollIntervalMs(1L);
-        config.getWorkerRegistry().getHealth().setStatusStaleAfterMs(200L);
+        config.getWorkerRegistry().getHealth().setStatusRpcTimeoutMs(100L);
         var configService = mock(ConfigService.class);
         when(configService.loadBalanceConfig()).thenReturn(config);
         var model = mock(ModelMetaConfig.class);
