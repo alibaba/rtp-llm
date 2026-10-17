@@ -2108,6 +2108,91 @@ TEST_F(NormalBatchStreamProcessorTest, testPartiallyReusedMultimodalFeatureIsNor
     EXPECT_TRUE(torch::equal(stream2->multimodalFeatures()[1], feature));
 }
 
+TEST_F(NormalBatchStreamProcessorTest, testMultimodalGatherUsesTheGrantedWindowForEverySequence) {
+    ModelConfig model_config;
+    model_config.max_seq_len                   = 2048;
+    model_config.vocab_size                    = 2048;
+    model_config.num_layers                    = 2;
+    model_config.mm_model_config.is_multimodal = true;
+    CacheConfig cache_config;
+    initFullCacheConfig(cache_config, model_config.num_layers);
+    NormalBatchStreamProcessor processor(
+        model_config, PDSepConfig{}, ProfilingDebugLoggingConfig{}, cache_config, false);
+
+    auto                        first        = torch::arange(12, torch::kFloat32).reshape({6, 2});
+    auto                        second       = torch::arange(6, torch::kFloat32).reshape({3, 2}) + 100;
+    auto                        first_stack  = torch::arange(24, torch::kFloat32).reshape({2, 6, 2});
+    auto                        second_stack = torch::arange(12, torch::kFloat32).reshape({2, 3, 2}) + 100;
+    const vector<int>           mask{1, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 1, 1, 1};
+    const vector<int>           feature_locations{1, 10};
+    const vector<torch::Tensor> features{first, second};
+    const vector<torch::Tensor> stacks{first_stack, second_stack};
+
+    // Exercise both image edges, a future image exactly at the window end,
+    // a partially reused image, and a text-only tail. Fanout repeats each
+    // window in the model batch without repeating future image rows.
+    for (const auto& window : vector<pair<int, int>>{{0, 4}, {2, 4}, {6, 4}, {10, 4}, {14, 2}}) {
+        const auto [start, length] = window;
+        SCOPED_TRACE("start=" + std::to_string(start));
+        auto query             = make_shared<GenerateInput>();
+        query->input_ids       = hostIntBuffer({1, -1, -1, -1, -1, -1, -1, 1, 1, 1, -1, -1, -1, 1, 1, 1});
+        query->generate_config = make_shared<GenerateConfig>();
+        query->generate_config->num_return_sequences = 3;
+        query->mm_locs                               = hostIntBuffer(feature_locations);
+        query->text_tokens_mask                      = hostIntBuffer(mask);
+        query->multimodal_features                   = features;
+        query->mm_extra_input = vector<torch::Tensor>{first_stack.flatten(), second_stack.flatten()};
+        auto stream =
+            make_shared<NormalGenerateStream>(query, model_config, RuntimeConfig{}, ResourceContext{}, nullptr);
+        stream->generate_status_->status = StreamState::RUNNING;
+        stream->setReuseLength(start);
+        stream->setChunkSize(length);
+
+        // Fail before gathering on the old code: it would copy the remaining
+        // prompt mask past the current chunk's allocated host buffer.
+        ASSERT_EQ(stream->textTokensMask().size(), length);
+        StreamGroups groups(std::list<GenerateStreamPtr>{stream});
+        TensorHolder holder;
+        auto         result = processor.gatherModelInput(groups, holder);
+        ASSERT_TRUE(result.ok());
+        const auto& input = result.value();
+        ASSERT_EQ(input.combo_tokens.numel(), 3 * length);
+        EXPECT_EQ(toVec<int>(input.input_lengths), (vector<int>{length, length, length}));
+        vector<int> expected_mask;
+        for (int row = 0; row < 3; ++row) {
+            expected_mask.insert(expected_mask.end(), mask.begin() + start, mask.begin() + start + length);
+        }
+        EXPECT_EQ(toVec<int>(input.text_tokens_mask), expected_mask);
+
+        vector<int> expected_locations;
+        size_t      feature_index = 0;
+        for (int row = 0; row < 3; ++row) {
+            for (size_t i = 0; i < features.size(); ++i) {
+                const int begin = std::max(start, feature_locations[i]);
+                const int end = std::min(start + length, feature_locations[i] + static_cast<int>(features[i].size(0)));
+                if (begin >= end) {
+                    continue;
+                }
+                const int offset = begin - feature_locations[i];
+                expected_locations.push_back(row * length + begin - start);
+                ASSERT_TRUE(input.multimodal_features.has_value());
+                ASSERT_LT(feature_index, input.multimodal_features->size());
+                EXPECT_TRUE(torch::equal(input.multimodal_features->at(feature_index).cpu(),
+                                         features[i].slice(0, offset, offset + end - begin)));
+                ASSERT_TRUE(input.mm_extra_input.has_value());
+                EXPECT_TRUE(torch::equal(input.mm_extra_input->at(feature_index).cpu(),
+                                         stacks[i].slice(1, offset, offset + end - begin).contiguous().flatten()));
+                EXPECT_LE(expected_locations.back() + end - begin, (row + 1) * length);
+                ++feature_index;
+            }
+        }
+        EXPECT_EQ(toVec<int>(input.mm_features_locs), expected_locations);
+        EXPECT_EQ(input.multimodal_features.has_value() ? input.multimodal_features->size() : 0, feature_index);
+        EXPECT_TRUE(torch::equal(stream->multimodalFeatures()[0], first));
+        EXPECT_TRUE(torch::equal(stream->multimodalFeatures()[1], second));
+    }
+}
+
 TEST_F(NormalBatchStreamProcessorTest, testMisalignedMultimodalExtraInputIsRejected) {
     ResourceContext resource_context;
     ModelConfig     model_config;
