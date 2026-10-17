@@ -1205,5 +1205,18 @@ class DeepseekV4StreamResponseTest(TestCase):
         )
 
 
+class DefaultThinkingBudgetTest(TestCase):
+    def test_v4_uses_max_new_tokens_as_default_budget(self):
+        renderer = DeepseekV4Renderer.__new__(DeepseekV4Renderer)
+        self.assertEqual(renderer.default_thinking_budget(64000), 64000)
+        self.assertEqual(renderer.default_thinking_budget(8000), 32000)
+
+    def test_v41_keeps_the_historical_default_budget(self):
+        from rtp_llm.openai.renderers.deepseekv41_renderer import DeepseekV41Renderer
+
+        renderer = DeepseekV41Renderer.__new__(DeepseekV41Renderer)
+        self.assertIsNone(renderer.default_thinking_budget(64000))
+
+
 if __name__ == "__main__":
     main()
