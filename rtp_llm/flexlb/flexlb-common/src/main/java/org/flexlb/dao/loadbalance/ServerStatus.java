@@ -11,14 +11,12 @@ import lombok.Getter;
 import lombok.Setter;
 import lombok.ToString;
 import org.flexlb.dao.master.WorkerIdentity;
+import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.util.CommonUtils;
 
 import java.util.List;
 
-/**
- * Describes one selected worker and preserves logical engine identity independently of its physical
- * address.
- */
 @JsonIgnoreProperties(ignoreUnknown = true)
 @Data
 public class ServerStatus {
@@ -41,6 +39,10 @@ public class ServerStatus {
 
     @JsonProperty("preempt_request_ids")
     private List<String> preemptRequestIds = List.of();
+
+    public void setPreemptRequestIds(List<String> preemptRequestIds) {
+        this.preemptRequestIds = preemptRequestIds == null ? List.of() : preemptRequestIds;
+    }
 
     @JsonProperty("dp_rank")
     private long dpRank;
@@ -95,8 +97,21 @@ public class ServerStatus {
     @JsonProperty("message")
     private String message;
 
-    public void setPreemptRequestIds(List<String> preemptRequestIds) {
-        this.preemptRequestIds = preemptRequestIds == null ? List.of() : preemptRequestIds;
+    public static ServerStatus forWorker(
+            RoleType role,
+            long requestId,
+            WorkerStatus.TopologySnapshot topology,
+            WorkerStatus.EngineObservation observation) {
+        ServerStatus result = new ServerStatus();
+        result.setSuccess(true);
+        result.setRole(role);
+        result.setRequestId(requestId);
+        result.setGroup(topology.group());
+        result.setServerIp(topology.ip());
+        result.setHttpPort(topology.port());
+        result.setGrpcPort(CommonUtils.toGrpcPort(topology.port()));
+        result.setDpRank(observation.dpRank());
+        return result;
     }
 
     /**

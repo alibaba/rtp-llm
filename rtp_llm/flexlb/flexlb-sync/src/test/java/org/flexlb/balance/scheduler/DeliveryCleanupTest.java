@@ -9,16 +9,18 @@ import org.junit.jupiter.api.Test;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.after;
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
 
 class DeliveryCleanupTest {
     @Test
@@ -27,7 +29,9 @@ class DeliveryCleanupTest {
         try {
             var claim = claim();
             runtime.signals().completeDelivery(claim);
-            runtime.deliveryCleanupExecutor.shutdown();
+            stopWorkers(runtime).shutdown();
+            when(claim.owner().snapshot().delivery().send())
+                    .thenReturn(ContextResult.SendState.NOT_SENT);
             var cleanup = new DeliveryCleanup();
             assertDoesNotThrow(
                     () -> cleanup.start(claim, mock(EngineGrpcClient.class), runtime).join());
@@ -41,7 +45,7 @@ class DeliveryCleanupTest {
     @Test
     void physicalSettlementWinningExecutorRejectionDoesNotRecordFalseFailure() {
         var runtime = runtime();
-        var original = runtime.deliveryCleanupExecutor;
+        var original = stopWorkers(runtime);
         try {
             var claim = claim();
             var rejecting = mock(java.util.concurrent.ExecutorService.class);
@@ -54,7 +58,7 @@ class DeliveryCleanupTest {
                     .when(rejecting)
                     .execute(any(Runnable.class));
             org.springframework.test.util.ReflectionTestUtils.setField(
-                    runtime, "deliveryCleanupExecutor", rejecting);
+                    runtime, "stopWorkers", rejecting);
             assertDoesNotThrow(
                     () ->
                             new DeliveryCleanup()
@@ -63,7 +67,7 @@ class DeliveryCleanupTest {
             assertTrue(runtime.signals().delivery(claim).toCompletableFuture().isDone());
         } finally {
             org.springframework.test.util.ReflectionTestUtils.setField(
-                    runtime, "deliveryCleanupExecutor", original);
+                    runtime, "stopWorkers", original);
             // Real shutdown rethrows any recorded facility failure, so this checks the entire
             // lifecycle.
             assertDoesNotThrow(runtime::shutdown);
@@ -89,10 +93,12 @@ class DeliveryCleanupTest {
             var separate = cleanup.start(equalValue, channel, runtime);
             assertNotSame(
                     first, separate, "same record value does not identify the same operation");
-            assertFalse(first.isDone());
+            assertFalse(runtime.signals().delivery(claim).toCompletableFuture().isDone());
             runtime.signals().completeDelivery(claim);
             first.get(2, TimeUnit.SECONDS);
-            assertFalse(separate.isDone(), "physical settlement belongs only to the exact claim");
+            assertFalse(
+                    runtime.signals().delivery(equalValue).toCompletableFuture().isDone(),
+                    "physical settlement belongs only to the exact claim");
             runtime.signals().completeDelivery(equalValue);
             separate.get(2, TimeUnit.SECONDS);
             verifyNoInteractions(channel);
@@ -102,14 +108,16 @@ class DeliveryCleanupTest {
     }
 
     @Test
-    void failedStartupKeepsDedupAndDoesNotInventPhysicalSettlement() {
+    void rejectedStartupUsesAcceptedWorkAndDoesNotInventPhysicalSettlement() throws Exception {
         var runtime = runtime();
         var claim = claim();
         try {
-            runtime.deliveryCleanupExecutor.shutdown();
+            stopWorkers(runtime).shutdown();
+            when(claim.owner().snapshot().delivery().send())
+                    .thenReturn(ContextResult.SendState.NOT_SENT);
             var cleanup = new DeliveryCleanup();
             var first = cleanup.start(claim, mock(EngineGrpcClient.class), runtime);
-            assertTrue(first.isCompletedExceptionally());
+            assertEquals(DeliveryCleanup.Result.NOT_SENT, first.get(2, TimeUnit.SECONDS));
             assertSame(first, cleanup.start(claim, mock(EngineGrpcClient.class), runtime));
             assertFalse(runtime.signals().delivery(claim).toCompletableFuture().isDone());
             runtime.signals().completeDelivery(claim);
@@ -117,17 +125,64 @@ class DeliveryCleanupTest {
             assertNotSame(first, after);
             assertDoesNotThrow(after::join);
         } finally {
-            assertThrows(RuntimeException.class, runtime::shutdown);
+            assertDoesNotThrow(runtime::shutdown);
         }
     }
 
+    @Test
+    void settlementBeforeQueuedPreemptionDoesNotLeaveItsCallerWaiting() throws Exception {
+        var runtime = runtime();
+        var original = stopWorkers(runtime);
+        var queued = new java.util.concurrent.ConcurrentLinkedQueue<Runnable>();
+        var paused = mock(java.util.concurrent.ExecutorService.class);
+        doAnswer(
+                        call -> {
+                            queued.add(call.getArgument(0));
+                            return null;
+                        })
+                .when(paused)
+                .execute(any(Runnable.class));
+        org.springframework.test.util.ReflectionTestUtils.setField(runtime, "stopWorkers", paused);
+        try {
+            var claim = claim();
+            var client = mock(EngineGrpcClient.class);
+            var cleanup = new DeliveryCleanup();
+            cleanup.start(claim, client, runtime);
+            runtime.signals().completeDelivery(claim);
+            var registration =
+                    new PreemptionRegistration(
+                            claim.owner(),
+                            1L,
+                            new org.flexlb.balance.endpoint.DecodeResources.ReservationHandle(
+                                    1L, 41L, 1L),
+                            new org.flexlb.balance.preemption.CancelTarget("127.0.0.1", 9000));
+            var answer = cleanup.preempt(registration, client, runtime, 500L);
+            Runnable task;
+            while ((task = queued.poll()) != null) {
+                task.run();
+            }
+            assertEquals(EngineGrpcClient.CancelReply.FAILED, answer.get(1, TimeUnit.SECONDS));
+            verifyNoInteractions(client);
+        } finally {
+            org.springframework.test.util.ReflectionTestUtils.setField(
+                    runtime, "stopWorkers", original);
+            runtime.shutdown();
+        }
+    }
+
+    private static java.util.concurrent.ExecutorService stopWorkers(SchedulerRuntime runtime) {
+        return (java.util.concurrent.ExecutorService)
+                org.springframework.test.util.ReflectionTestUtils.getField(runtime, "stopWorkers");
+    }
+
     private static DeliveryClaim claim() {
-        return new DeliveryClaim(
-                new RequestContext(SchedulingTestConfig.batchConfig()),
-                1,
-                mock(RequestRoute.class),
-                DeliveryClaimKind.BATCH_ENQUEUE,
-                17);
+        var context = mock(RequestContext.class, RETURNS_DEEP_STUBS);
+        var claim =
+                new DeliveryClaim(
+                        context, 1, mock(RequestRoute.class), DeliveryClaimKind.BATCH_ENQUEUE, 17);
+        when(context.snapshot().delivery().identity()).thenReturn(claim);
+        when(context.snapshot().delivery().send()).thenReturn(ContextResult.SendState.NOT_STARTED);
+        return claim;
     }
 
     private static SchedulerRuntime runtime() {
@@ -137,7 +192,7 @@ class DeliveryCleanupTest {
                 mock(EndpointRegistry.class),
                 mock(DeliveryMetricsReporter.class),
                 mock(RequestSchedulerReporter.class),
-                new DeliveryDispatcher(null, config, null, new DeliveryMetricsReporter(null), null),
+                new DeliveryDispatcher(null, config, new DeliveryMetricsReporter(null)),
                 config,
                 mock(EngineGrpcClient.class));
     }

@@ -244,9 +244,7 @@ class RequestInflightRecoveryTest {
                                 new DeliveryDispatcher(
                                         null,
                                         DeliveryTestSupport.service(f.config),
-                                        null,
-                                        new DeliveryMetricsReporter(null),
-                                        null),
+                                        new DeliveryMetricsReporter(null)),
                                 state);
                 var boundary =
                         worker.processSelection(
@@ -316,8 +314,7 @@ class RequestInflightRecoveryTest {
                             service,
                             owner.requests,
                             reporter,
-                            DeliveryTestSupport.route(
-                                    reporter, SchedulingTestConfig.capacity(config)),
+                            DeliveryTestSupport.route(reporter),
                             new PlacementAvailability());
             ReflectionTestUtils.setField(owner.runtime, "endpoints", endpoints);
             when(SchedulerTestSupport.engineClient(owner)

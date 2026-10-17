@@ -94,7 +94,7 @@ class QueuedBatchDeliveryTest {
                             sent.add(call.getArgument(2));
                             return reply;
                         });
-        dispatcher = new DeliveryDispatcher(grpc, service, null, reporter, null);
+        dispatcher = new DeliveryDispatcher(grpc, service, reporter);
         var execution = org.mockito.Mockito.spy(registry.runtime.deliveries());
         ReflectionTestUtils.setField(registry.runtime, "deliveries", execution);
         org.mockito.Mockito.doReturn(201L).when(execution).nextBatchId();
@@ -423,7 +423,7 @@ class QueuedBatchDeliveryTest {
                                 e ->
                                         e instanceof ContextResult.PreparationFailure failed
                                                 && failed.route() == item
-                                                && failed.cause() == failure));
+                                                && failed.detail().equals(failure.getMessage())));
         assertFalse(item.future().get(5, TimeUnit.SECONDS).isSuccess());
         SchedulerTestSupport.awaitRequestWork(registry.runtime);
         assertOccupancy(0, 0);

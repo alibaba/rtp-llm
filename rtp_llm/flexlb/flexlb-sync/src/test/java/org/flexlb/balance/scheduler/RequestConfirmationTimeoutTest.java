@@ -71,9 +71,7 @@ class RequestConfirmationTimeoutTest {
                         service,
                         SchedulerTestSupport.repository(projector),
                         reporter,
-                        DeliveryTestSupport.route(
-                                reporter,
-                                SchedulingTestConfig.capacity(SchedulingTestConfig.newConfig())),
+                        DeliveryTestSupport.route(reporter),
                         new PlacementAvailability());
         var runtime =
                 new SchedulerRuntime(

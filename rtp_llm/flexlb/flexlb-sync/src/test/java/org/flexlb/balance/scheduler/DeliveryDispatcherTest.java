@@ -662,14 +662,15 @@ class DeliveryDispatcherTest {
         RequestRoute second = createRequestRoute(2L, 500, 200, prefillEp);
         when(prefillEp.getIp())
                 .thenThrow(new IllegalStateException("endpoint unavailable before send"));
-        CountDownLatch attempted = new CountDownLatch(2);
-        AtomicInteger failures = new AtomicInteger();
+        // Three bounded attempts for the throwing observer, then the unaffected request.
+        CountDownLatch attempted = new CountDownLatch(4);
+        var failures = new java.util.concurrent.ConcurrentHashMap<Long, Integer>();
         AtomicInteger uncertain = new AtomicInteger();
         BiConsumer<RequestRoute, DeliveryResult> throwingCallback =
                 (exactItem, completion) -> {
                     RequestRoute item = assertInstanceOf(RequestRoute.class, exactItem);
                     if (completion.status() == DeliveryResult.Status.NOT_SENT) {
-                        failures.incrementAndGet();
+                        failures.merge(item.requestId(), 1, Integer::sum);
                         attempted.countDown();
                         if (item.requestId() == 1L) {
                             throw new IllegalStateException("first callback failed");
@@ -682,7 +683,8 @@ class DeliveryDispatcherTest {
         submit(List.of(first, second), 2L, 100, "pre_send_failure", throwingCallback);
 
         assertTrue(attempted.await(5, TimeUnit.SECONDS));
-        assertEquals(2, failures.get());
+        runtime.deliveries().awaitDeliveries();
+        assertEquals(java.util.Map.of(1L, 3, 2L, 1), failures);
         assertEquals(0, uncertain.get());
         verify(grpcClient, never()).batchEnqueueAsync(anyString(), anyInt(), any());
     }
@@ -694,16 +696,17 @@ class DeliveryDispatcherTest {
         RequestRoute second = createRequestRoute(2L, 500, 200, prefillEp);
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any()))
                 .thenThrow(new IllegalStateException("client threw after invocation began"));
-        CountDownLatch attempted = new CountDownLatch(2);
+        // Three bounded attempts for the throwing observer, then the unaffected request.
+        CountDownLatch attempted = new CountDownLatch(4);
         AtomicInteger failures = new AtomicInteger();
-        AtomicInteger uncertain = new AtomicInteger();
+        var uncertain = new java.util.concurrent.ConcurrentHashMap<Long, Integer>();
         BiConsumer<RequestRoute, DeliveryResult> throwingCallback =
                 (exactItem, completion) -> {
                     RequestRoute item = assertInstanceOf(RequestRoute.class, exactItem);
                     if (completion.status() == DeliveryResult.Status.NOT_SENT) {
                         failures.incrementAndGet();
                     } else if (completion.status() == DeliveryResult.Status.UNCERTAIN) {
-                        uncertain.incrementAndGet();
+                        uncertain.merge(item.requestId(), 1, Integer::sum);
                         attempted.countDown();
                         if (item.requestId() == 1L) {
                             throw new IllegalStateException("first callback failed");
@@ -714,8 +717,9 @@ class DeliveryDispatcherTest {
         submit(List.of(first, second), 3L, 100, "post_boundary_throw", throwingCallback);
 
         assertTrue(attempted.await(5, TimeUnit.SECONDS));
+        runtime.deliveries().awaitDeliveries();
         assertEquals(0, failures.get());
-        assertEquals(2, uncertain.get());
+        assertEquals(java.util.Map.of(1L, 3, 2L, 1), uncertain);
     }
 
     @Test
@@ -924,7 +928,7 @@ class DeliveryDispatcherTest {
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any()))
                 .thenReturn(CompletableFuture.completedFuture(response));
 
-        CountDownLatch callbacksAttempted = new CountDownLatch(2);
+        CountDownLatch callbacksAttempted = new CountDownLatch(4);
         AtomicInteger successes = new AtomicInteger();
         AtomicInteger failures = new AtomicInteger();
         AtomicInteger uncertain = new AtomicInteger();
@@ -945,8 +949,12 @@ class DeliveryDispatcherTest {
         submit(List.of(succeeded, rejected), 91L, 100, "callback_isolation", throwingCallback);
 
         assertTrue(callbacksAttempted.await(5, TimeUnit.SECONDS));
+        runtime.deliveries().awaitDeliveries();
         assertEquals(1, successes.get());
-        assertEquals(1, failures.get());
+        assertEquals(
+                3,
+                failures.get(),
+                "the throwing observer is retried within the existing publication budget");
         assertEquals(0, uncertain.get(), "a later callback exception must not reclassify any item");
     }
 
@@ -1475,9 +1483,7 @@ class DeliveryDispatcherTest {
                 new DeliveryDispatcher(
                         grpcClient,
                         configService,
-                        null,
-                        new org.flexlb.service.monitor.DeliveryMetricsReporter(null),
-                        null);
+                        new org.flexlb.service.monitor.DeliveryMetricsReporter(null));
         runtime =
                 new SchedulerRuntime(
                         new RequestRepository(),
@@ -1542,7 +1548,10 @@ class DeliveryDispatcherTest {
             org.mockito.Mockito.doAnswer(
                             call -> {
                                 var failed = (PreparationFailure) call.getArgument(1);
-                                observer.accept(item, DeliveryResult.notSent(failed.cause()));
+                                observer.accept(
+                                        item,
+                                        DeliveryResult.notSent(
+                                                new IllegalStateException(failed.detail())));
                                 return null;
                             })
                     .when(item.ctx().data().getScheduler())

@@ -2137,9 +2137,9 @@ class RequestContextLifecycleTest {
         assertEquals(
                 new org.flexlb.balance.preemption.CancelTarget("127.0.0.1", 8090),
                 claim.cancelTarget());
-        registered.item().prefill().setServerIp("changed-after-claim");
+        SchedulingTestConfig.prefillTemplate(registered.item()).setServerIp("changed-after-claim");
         assertEquals("127.0.0.1", claim.cancelTarget().prefillIp());
-        registered.item().prefill().setGrpcPort(0);
+        SchedulingTestConfig.prefillTemplate(registered.item()).setGrpcPort(0);
         assertTrue(
                 lifecycle
                         .tryClaim(
@@ -2154,7 +2154,7 @@ class RequestContextLifecycleTest {
     @Test
     void exactPreemptionRouteWithUnroutableCancelTargetIsAControlFailureAndDoesNotInstallClaim() {
         Registered registered = registerItem(710L);
-        registered.item().prefill().setGrpcPort(0);
+        SchedulingTestConfig.prefillTemplate(registered.item()).setGrpcPort(0);
         assertEquals(PlacementResult.Status.SUCCESS, commitRoute(lifecycle, registered));
         assertThrows(
                 IllegalArgumentException.class,
