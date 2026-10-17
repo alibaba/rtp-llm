@@ -720,11 +720,13 @@ whl_reqs = [
     "portalocker",
     "concurrent_log_handler",
     "apache-tvm-ffi",
-    "xgrammar==0.2.5",
     # OTel trace runtime; keep the pinned protobuf compatibility constraint.
     "opentelemetry-sdk==1.44.0",
     "opentelemetry-exporter-otlp-proto-http==1.15.0",
-] + whl_deps() + platform_deps() + xft_dep
+] + select({
+    "//:using_cuda13_sm120": ["xgrammar==0.2.8"],
+    "//conditions:default": ["xgrammar==0.2.5"],
+}) + whl_deps() + platform_deps() + xft_dep
 
 # Frontend-only requirement set: the frontend lane is CPU serving (HTTP + gRPC
 # client + tokenizer), so the engine's platform CUDA tree (whl_deps: torch-cuda,
