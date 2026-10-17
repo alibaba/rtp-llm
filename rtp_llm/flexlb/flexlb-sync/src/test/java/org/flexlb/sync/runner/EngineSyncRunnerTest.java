@@ -53,7 +53,7 @@ class EngineSyncRunnerTest {
         when(cache.submit(any(Runnable.class))).thenThrow(new RejectedExecutionException("cache full"));
         EngineSyncRunner runner = new EngineSyncRunner(modelName, directory, workerAddressService,
                 health, cache, health, engineHealthReporter, engineGrpcService, RoleType.PREFILL,
-                localKvCacheAwareManager, cacheIntervalService, syncRequestTimeoutMs, syncCount.longValue(),
+                localKvCacheAwareManager, syncRequestTimeoutMs, syncCount.longValue(),
                 syncEngineStatusInterval, false, STATUS_STALE_AFTER_US, 60_000_000L);
         runner.run();
         verify(health).submit(any(GrpcWorkerStatusRunner.class));

@@ -5,7 +5,6 @@ import ch.qos.logback.core.AppenderBase;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.cache.service.CacheAwareService;
-import org.flexlb.cache.service.DynamicCacheIntervalService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.master.EndpointTrace;
@@ -47,7 +46,7 @@ class MasterEngineSynchronizerTest {
         var synchronizer = new MasterEngineSynchronizer(mock(WorkerAddressService.class),
                 mock(EngineHealthReporter.class), directory,
                 mock(EngineGrpcService.class), model, mock(CacheAwareService.class),
-                mock(DynamicCacheIntervalService.class), configService);
+                configService);
         // Exercise the reporting method without live scheduling changing the active set.
         synchronizer.destroy();
         Map<EndpointTrace.Poll, RoleType> traces = (Map<EndpointTrace.Poll, RoleType>)

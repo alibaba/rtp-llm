@@ -2,7 +2,6 @@ package org.flexlb.sync.runner;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.cache.service.CacheAwareService;
-import org.flexlb.cache.service.DynamicCacheIntervalService;
 import org.flexlb.dao.master.EndpointTrace.Stage;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.master.WorkerStatus;
@@ -104,7 +103,7 @@ class EngineSyncRunnerTraceTest {
                                            CacheAwareService cache, long cycle) {
         return new EngineSyncRunner("model", directory, addresses, statusExecutor, cacheExecutor, statusExecutor,
                 mock(EngineHealthReporter.class), mock(EngineGrpcService.class), RoleType.PREFILL,
-                cache, mock(DynamicCacheIntervalService.class), 5_000L, cycle, 20L, false,
+                cache, 5_000L, cycle, 20L, false,
                 10_000_000L, 60_000_000L);
     }
 }
