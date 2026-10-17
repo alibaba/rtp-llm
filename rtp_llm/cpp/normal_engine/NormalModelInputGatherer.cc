@@ -49,8 +49,8 @@ size_t blockTableWidth(const StreamGroups& stream_groups, const std::vector<std:
         const auto& resource = *stream->kvCachePtr();
         for (int batch = 0; batch < stream->currentBatchSize(); ++batch) {
             for (const auto& tag : tags) {
-                const auto& ids = kernel ? resource.kernelBlocks(batch, tag) : resource.blocks(batch, tag);
-                width           = std::max(width, ids.size());
+                const auto& ids = resource.cacheResource(batch).blockIds(tag);
+                width = std::max(width, ids.blocksNum() * (kernel ? ids.kernelBlocksPerKvBlock() : 1));
             }
         }
     };
@@ -171,16 +171,20 @@ void copyKvCacheBlocksToModelInput(GptModelInputs&          model_input,
     int32_t* store_dst_base  = model_input.kv_cache_block_id.data_ptr<int32_t>();
 
     for (size_t row = 0; row < model_input.kv_cache_group_tags.size(); ++row) {
-        const auto& tag           = model_input.kv_cache_group_tags[row];
-        const auto& kernel_blocks = kv_cache.kernelBlocks(stream_batch_idx, tag);
-        RTP_LLM_CHECK_WITH_INFO(kernel_blocks.size()
+        const auto& tag       = model_input.kv_cache_group_tags[row];
+        const auto& block_ids = kv_cache.cacheResource(stream_batch_idx).blockIds(tag);
+        RTP_LLM_CHECK_WITH_INFO(block_ids.blocksNum() * block_ids.kernelBlocksPerKvBlock()
                                     <= static_cast<size_t>(model_input.kv_cache_kernel_block_id.size(2)),
                                 "kernel block ids exceed destination row for tag=%s",
                                 tag.c_str());
         int32_t* kernel_dst =
             kernel_dst_base
             + (row * batch + static_cast<size_t>(model_batch_idx)) * model_input.kv_cache_kernel_block_id.size(2);
-        std::memcpy(kernel_dst, kernel_blocks.data(), kernel_blocks.size() * sizeof(int32_t));
+        const bool borrowed = stream->streamCacheResource().copyChunkKernelBlocks(stream_batch_idx, tag, kernel_dst);
+        if (!borrowed) {
+            const auto& kernel_blocks = block_ids.kernelBlocks();
+            std::memcpy(kernel_dst, kernel_blocks.data(), kernel_blocks.size() * sizeof(int32_t));
+        }
 
         const auto& physical_blocks = kv_cache.blocks(stream_batch_idx, tag);
         RTP_LLM_CHECK_WITH_INFO(physical_blocks.size() <= static_cast<size_t>(model_input.kv_cache_block_id.size(2)),
@@ -189,7 +193,12 @@ void copyKvCacheBlocksToModelInput(GptModelInputs&          model_input,
         int32_t* store_dst =
             store_dst_base
             + (row * batch + static_cast<size_t>(model_batch_idx)) * model_input.kv_cache_block_id.size(2);
-        std::memcpy(store_dst, physical_blocks.data(), physical_blocks.size() * sizeof(int32_t));
+        if (borrowed && stream->isMiddleChunk()) {
+            // Cyclic banks will be overwritten; publish them only after the final chunk.
+            std::fill_n(store_dst, physical_blocks.size(), NULL_BLOCK_IDX);
+        } else {
+            std::memcpy(store_dst, physical_blocks.data(), physical_blocks.size() * sizeof(int32_t));
+        }
     }
 }
 
@@ -406,6 +415,8 @@ GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamG
     model_input.input_lengths    = torch::empty({(int64_t)total_batch_size}, pinned_i32);
     model_input.sequence_lengths = torch::empty({(int64_t)total_decode_batch_size}, pinned_i32);
     model_input.prefix_lengths   = torch::empty({(int64_t)total_context_batch_size}, pinned_i32);
+    model_input.cache_store_publish_start_tokens =
+        torch::empty({(int64_t)total_context_batch_size}, pinned_i32);
     if (needs_custom_output_indexes) {
         model_input.custom_output_indexes = torch::empty({(int64_t)total_context_batch_size}, pinned_i64);
     }
@@ -671,15 +682,18 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
 
             ctx.input_lengths[ctx.batch_idx]           = input_tokens.size();
             ctx.prefix_lengths_host[prefill_batch_idx] = stream->prefixLength();
+            model_input.cache_store_publish_start_tokens.data_ptr<int32_t>()[prefill_batch_idx] =
+                stream->cacheStorePublishStartToken();
             gatherMultimodalInputsForContextBatch(
                 stream, ctx, gathered_mm_features, gathered_mm_extra_input, host_holder);
 
             if (ctx.need_cal_position_id) {
                 auto context_pos_ids = stream->generateContextPositionIds();
-                int  reuse_offset    = stream->reuseLength() * config_.position_id_len_factor;
+                int begin_off = stream->prefixLength() * config_.position_id_len_factor;
+                int copy_len  = stream->contextLength() * config_.position_id_len_factor;
                 memcpy(ctx.combo_position_ids + ctx.token_idx * config_.position_id_len_factor,
-                       context_pos_ids.data_ptr<int>() + reuse_offset,
-                       (context_pos_ids.numel() - reuse_offset) * sizeof(int));
+                       context_pos_ids.data_ptr<int>() + begin_off,
+                       copy_len * sizeof(int));
             }
 
             copyKvCacheBlocksToModelInput(model_input, stream, i, ctx.batch_idx);
@@ -775,12 +789,15 @@ absl::StatusOr<torch::Tensor> NormalModelInputGatherer::gatherKvCacheKernelBlock
                                 "kernel block table group or batch exceeds destination");
         for (int i = 0; i < current_batch_size; ++i) {
             for (size_t row = 0; row < group_tags.size(); ++row) {
-                const auto& kernel_blocks = kv_cache.kernelBlocks(i, group_tags[row]);
-                RTP_LLM_CHECK_WITH_INFO(kernel_blocks.size() <= per_batch_stride,
+                const auto& block_ids = kv_cache.cacheResource(i).blockIds(group_tags[row]);
+                RTP_LLM_CHECK_WITH_INFO(block_ids.blocksNum() * block_ids.kernelBlocksPerKvBlock() <= per_batch_stride,
                                         "kernel block ids exceed destination row for tag=%s",
                                         group_tags[row].c_str());
                 int32_t* dst = dst_base + (row * total_batch_size + static_cast<size_t>(batch_idx)) * per_batch_stride;
-                std::memcpy(dst, kernel_blocks.data(), kernel_blocks.size() * sizeof(int32_t));
+                if (!stream->streamCacheResource().copyChunkKernelBlocks(i, group_tags[row], dst)) {
+                    const auto& kernel_blocks = block_ids.kernelBlocks();
+                    std::memcpy(dst, kernel_blocks.data(), kernel_blocks.size() * sizeof(int32_t));
+                }
             }
             batch_idx += 1;
         }

@@ -51,6 +51,22 @@ inline int cpEffectiveSeqLenForReserve(const std::shared_ptr<CPSlotMapper>& mapp
     return (mapper && mapper->isSharded()) ? mapper->effectiveSeqLenForAlloc(config, tag, seq_len) : seq_len;
 }
 
+RequiredPositions chunkCachePositions(const MallocInfo& malloc_info, const GroupBase& group) {
+    RequiredPositions positions;
+    const int         seq_len = malloc_info.incrSeqLen();
+    const auto        count   = group.chunkCacheBlockCount(seq_len,
+                                                  malloc_info.max_chunk_tokens,
+                                                  malloc_info.reuse_cache,
+                                                  malloc_info.complete_token_ids->getReserveStep());
+    if (count > 0) {
+        const size_t slots = (static_cast<size_t>(seq_len) + group.seqSizePerBlock() - 1) / group.seqSizePerBlock();
+        for (size_t pos = slots - count; pos < slots; ++pos) {
+            positions.insert(pos);
+        }
+    }
+    return positions;
+}
+
 void appendPoolSummary(std::ostringstream&          os,
                        bool&                        has_any,
                        int                          group_id,
@@ -687,8 +703,13 @@ MallocResult CoordinatorCacheManager::incrMalloc(const MallocInfo& malloc_info) 
             auto&       block_ids        = kv_resource->mutableBlockIds(b, tag);
             const int   group_seq_len    = cpEffectiveSeqLenForGroup(cp_mapper, config_, tag, raw_seq_len);
             auto&       filled_positions = backfilled_positions[static_cast<size_t>(b)][static_cast<size_t>(group_id)];
-            if (!kv_cache_groups_[static_cast<size_t>(group_id)]->malloc(
-                    block_ids, group_seq_len, malloc_info.reuse_cache, reserve_step, &filled_positions)) {
+            const auto  required_positions = chunkCachePositions(malloc_info, config_.group(tag));
+            if (!kv_cache_groups_[static_cast<size_t>(group_id)]->malloc(block_ids,
+                                                                         group_seq_len,
+                                                                         malloc_info.reuse_cache,
+                                                                         reserve_step,
+                                                                         &filled_positions,
+                                                                         required_positions)) {
                 all_success  = false;
                 failed_batch = b;
                 failed_group = group_id;
@@ -1360,8 +1381,9 @@ int CoordinatorCacheManager::getNeedBlocks(const MallocInfo& malloc_info) const 
         const auto  group            = kv_cache_groups_[static_cast<size_t>(group_id)];
         const int   group_common_seq = cpEffectiveSeqLenForGroup(cp_mapper, config_, tag, raw_common_seq_len);
         const int   group_seq_len    = cpEffectiveSeqLenForGroup(cp_mapper, config_, tag, raw_seq_len);
-        const auto  need             = kv_cache_groups_[static_cast<size_t>(group_id)]->getNeedBlocks(
-            group_common_seq, group_seq_len, reserve_step, reuse_blocks_len, reuse_enabled);
+        const auto  required_positions = chunkCachePositions(malloc_info, config_.group(tag));
+        const auto  need               = kv_cache_groups_[static_cast<size_t>(group_id)]->getNeedBlocks(
+            group_common_seq, group_seq_len, reserve_step, reuse_blocks_len, reuse_enabled, required_positions);
         common_blocks_total += need.common_blocks;
         extra_blocks_total += need.extra_blocks;
     }
@@ -1968,8 +1990,10 @@ CoordinatorCacheManager::evaluateInitCapacityImpl(const MallocInfo&             
         const int    group_common_seq       = cpEffectiveSeqLenForReserve(cp_mapper, config_, tag, raw_common_seq_len);
         const int    group_seq_len          = cpEffectiveSeqLenForReserve(cp_mapper, config_, tag, raw_seq_len);
         const int    group_reuse_blocks_len = malloc_info.batch_kv_cache_resource->blocksNum(0, tag);
-        const auto&  group_required_positions =
+        auto         group_required_positions =
             required_positions == nullptr ? no_required_positions : (*required_positions)[group_index];
+        const auto chunk_positions = chunkCachePositions(malloc_info, topology_groups[group_index]);
+        group_required_positions.insert(chunk_positions.begin(), chunk_positions.end());
         const auto   need           = kv_cache_groups_[group_index]->getNeedBlocks(group_common_seq,
                                                                        group_seq_len,
                                                                        reserve_step,
