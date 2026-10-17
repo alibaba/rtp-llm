@@ -205,8 +205,16 @@ def _scatter_block_table_kernel(
 
 
 def _use_trtllm_gen_prefill() -> bool:
-    """Env gate for the trtllm-gen ragged prefill (default off, A/B form)."""
-    return os.environ.get("XING4_MLA_TRTLLM_GEN_PREFILL", "0") == "1"
+    """Env gate for the trtllm-gen ragged prefill (default on).
+
+    Default flipped on after the generation-prefill CUDA graph landed: the
+    graph capture removes the ~380us/call python/FFI host overhead that made
+    this branch net-negative at 4096-lens in eager mode, and the kernel is
+    2.9x faster than the fa2 ragged path (fa2 19.9ms vs trtllm 6.8ms at
+    4096 tokens, 40 layers). Set XING4_MLA_TRTLLM_GEN_PREFILL=0 to fall back
+    to the fa2 wrapper.
+    """
+    return os.environ.get("XING4_MLA_TRTLLM_GEN_PREFILL", "1") == "1"
 
 
 def _use_trtllm_gen_decode() -> bool:
