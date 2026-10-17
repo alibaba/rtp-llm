@@ -29,6 +29,90 @@ namespace {
 constexpr int64_t kRpcOutputWaitTimeoutMs        = 500;
 constexpr size_t  kAllocatorDumpReplayHistoryMax = 1024;
 
+std::string batchTraceMetadata(const grpc::ServerContext* context, const char* key, size_t max_size) {
+    if (context == nullptr) {
+        return {};
+    }
+    const auto& metadata = context->client_metadata();
+    const auto  it       = metadata.find(key);
+    if (it == metadata.end() || it->second.size() > max_size) {
+        return {};
+    }
+    return std::string(it->second.data(), it->second.size());
+}
+
+class BatchItemTraceCarrier: public opentelemetry::context::propagation::TextMapCarrier {
+public:
+    explicit BatchItemTraceCarrier(const TraceContextPB& context): context_(context) {}
+    opentelemetry::nostd::string_view Get(opentelemetry::nostd::string_view key) const noexcept override {
+        if (key == "traceparent" && context_.traceparent().size() <= 256) {
+            return context_.traceparent();
+        }
+        if (key == "tracestate" && context_.tracestate().size() <= 512) {
+            return context_.tracestate();
+        }
+        return "";
+    }
+    void Set(opentelemetry::nostd::string_view, opentelemetry::nostd::string_view) noexcept override {}
+
+private:
+    const TraceContextPB& context_;
+};
+
+opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>
+startBatchItemSpan(const GenerateInputPB&                                              input,
+                   const opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>& rpc_span) {
+    if (!telemetry::TelemetryRuntime::isActive()) {
+        return {};
+    }
+    try {
+        opentelemetry::trace::StartSpanOptions options;
+        options.kind = opentelemetry::trace::SpanKind::kInternal;
+        if (rpc_span) {
+            options.parent = rpc_span->GetContext();
+        }
+        if (input.request_info().has_trace_context()) {
+            BatchItemTraceCarrier carrier(input.request_info().trace_context());
+            auto propagator = opentelemetry::context::propagation::GlobalTextMapPropagator::GetGlobalPropagator();
+            opentelemetry::context::Context empty_context;
+            auto                            parent = propagator->Extract(carrier, empty_context);
+            if (opentelemetry::trace::GetSpan(parent)->GetContext().IsValid()) {
+                options.parent = parent;
+            }
+        }
+        return telemetry::TelemetryRuntime::tracer()->StartSpan("rtp_llm.batch_generate_request", options);
+    } catch (...) {
+        return {};
+    }
+}
+
+void recordBatchItemCompletion(telemetry::GrpcStatusSpanGuard&        guard,
+                               const std::shared_ptr<GenerateStream>& stream,
+                               bool                                   request_ok) {
+    if (!guard.valid()) {
+        return;
+    }
+    const auto             time_info = stream->getTimeInfo();
+    telemetry::PhaseTiming timing;
+    timing.begin_time_us           = time_info.begin_time_us;
+    timing.running_started         = time_info.running_started;
+    timing.running_started_time_us = time_info.running_started_time_us;
+    timing.first_token_committed   = time_info.first_token_committed;
+    timing.first_token_time_us     = time_info.first_token_time_us;
+    timing.generation_done         = time_info.generation_done;
+    timing.generation_done_time_us = time_info.generation_done_time_us;
+    timing.synthesis_end_time_us   = currentTimeUs();
+    timing.request_id              = stream->streamId();
+    timing.error_type              = request_ok ? nullptr : "BusinessError";
+    if (request_ok && time_info.generation_done) {
+        const auto sequence_count =
+            stream->hasNumBeams() ? std::max(stream->numReturnSequences(), 1) : stream->currentBatchSize();
+        telemetry::setUsageTokenAttributes(
+            guard, (int64_t)stream->inputLength(), (int64_t)(stream->outputTokenLen() * sequence_count));
+    }
+    telemetry::synthesizePhaseSpans(guard.sharedSpan(), timing, telemetry::PhaseRole::Fusion, request_ok);
+}
+
 std::string endpointHost(std::string endpoint) {
     const auto scheme_separator = endpoint.find(':');
     if (endpoint.compare(0, scheme_separator, "ipv4") == 0 || endpoint.compare(0, scheme_separator, "ipv6") == 0) {
@@ -499,6 +583,52 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
 grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        context,
                                                const BatchGenerateInputPB* request,
                                                BatchGenerateOutputsPB*     response) {
+    grpc::Status rpc_status = grpc::Status::OK;
+    auto         rpc_span =
+        telemetry::startRpcServerSpan("rtp_llm.batch_generate_call", context, false, "RpcService/BatchGenerateCall");
+    telemetry::GrpcStatusSpanGuard rpc_guard(rpc_span, &rpc_status);
+    const int                      trace_batch_size = request ? request->inputs_size() : 0;
+    rpc_guard.setAttribute("rtp_llm.batch.size", (int64_t)trace_batch_size);
+    std::string external_request_id;
+    if (rpc_guard.valid()) {
+        try {
+            const auto batch_id = batchTraceMetadata(context, "x-rtp-llm-batch-request-id", 38);
+            if (batch_id.size() == 38 && batch_id.compare(0, 6, "batch-") == 0
+                && std::all_of(batch_id.begin() + 6, batch_id.end(), [](char c) {
+                       return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+                   })) {
+                rpc_guard.setAttribute(telemetry::kAttrRequestId, batch_id);
+            }
+            external_request_id = batchTraceMetadata(context, "x-rtp-llm-external-request-id", 128);
+            if (!external_request_id.empty()) {
+                rpc_guard.setAttribute(telemetry::kAttrExternalRequestId, external_request_id);
+            }
+        } catch (...) {
+            // Observation metadata must never change the batch result.
+        }
+    }
+    std::vector<grpc::Status>                                    item_statuses(trace_batch_size, grpc::Status::OK);
+    std::vector<std::unique_ptr<telemetry::GrpcStatusSpanGuard>> item_guards;
+    item_guards.reserve(trace_batch_size);
+    for (int i = 0; i < trace_batch_size; ++i) {
+        auto guard = std::make_unique<telemetry::GrpcStatusSpanGuard>(startBatchItemSpan(request->inputs(i), rpc_span),
+                                                                      &item_statuses[i],
+                                                                      telemetry::SpanStatusSemantics::Logical);
+        guard->setAttribute(telemetry::kAttrRequestId, std::to_string(request->inputs(i).request_id()));
+        if (!external_request_id.empty()) {
+            guard->setAttribute(telemetry::kAttrExternalRequestId, external_request_id);
+        }
+        guard->setAttribute("rtp_llm.batch.index", (int64_t)i);
+        guard->setAttribute("gen_ai.span.kind", "LLM");
+        guard->setAttribute(telemetry::kAttrRtpLlmPdSep, false);
+        item_guards.push_back(std::move(guard));
+    }
+    auto mark_item_error = [&](int index, ErrorCode code, const char* description, const char* error_type) {
+        item_statuses[index] = grpc::Status(
+            code == ErrorCode::CANCELLED ? grpc::StatusCode::CANCELLED : grpc::StatusCode::INTERNAL, description);
+        item_guards[index]->setLogicalErrorType(error_type);
+        item_guards[index]->setAttribute(telemetry::kAttrRtpLlmErrorCode, (int64_t)code);
+    };
     std::vector<GenerateStreamPtr> streams;
     BatchStreamCleanupGuard        stream_cleanup_guard(streams);
 
@@ -507,9 +637,9 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
         c10::InferenceMode inference_guard(true);
         AtomicGuard        request_guard(onflight_requests_);
         if (request == nullptr || response == nullptr) {
-            return serializeErrorMsg(
-                "unknown",
-                ErrorInfo(ErrorCode::INVALID_PARAMS, "batch generate request and response must not be null"));
+            return rpc_status = serializeErrorMsg(
+                       "unknown",
+                       ErrorInfo(ErrorCode::INVALID_PARAMS, "batch generate request and response must not be null"));
         }
         const int batch_size = request->inputs_size();
         RTP_LLM_LOG_INFO("receive batch generate request, batch_size=%d", batch_size);
@@ -522,11 +652,13 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
         inputs.reserve(batch_size);
         for (int i = 0; i < batch_size; i++) {
             std::shared_ptr<GenerateInput> input;
-            auto                           err = prepareInput(request->inputs(i), input, {}, context);
+            auto err = prepareInput(request->inputs(i), input, item_guards[i]->sharedSpan(), context);
             if (!err.ok()) {
                 // Fill error results for all requests (0..batch_size-1) to maintain 1:1 mapping.
                 const bool invalid_params = err.code() == ErrorCode::INVALID_PARAMS;
                 for (int j = 0; j < batch_size; j++) {
+                    mark_item_error(
+                        j, err.code(), "Batch input preparation failed", j == i ? "BusinessError" : "BatchAborted");
                     auto* result = response->add_results();
                     auto* err_pb = result->mutable_error_info();
                     // Internal ErrorCode values and RPC enum values are independent wire contracts.
@@ -549,6 +681,7 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
 
         if (!engine_) {
             for (int i = 0; i < batch_size; ++i) {
+                mark_item_error(i, ErrorCode::EXECUTION_EXCEPTION, "Batch engine is unavailable", "BusinessError");
                 auto* error_info = response->add_results()->mutable_error_info();
                 error_info->set_error_code(transErrorCodeToRPC(ErrorCode::EXECUTION_EXCEPTION));
                 error_info->set_error_message("LocalRpcServer engine is not initialized");
@@ -574,6 +707,9 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
             }
             auto* result = response->add_results();
             if (!enqueue_successes[i]) {
+                const auto code =
+                    streams[i]->hasError() ? streams[i]->statusInfo().code() : ErrorCode::EXECUTION_EXCEPTION;
+                mark_item_error(i, code, "Batch enqueue was rejected", "BusinessError");
                 auto* error_info = result->mutable_error_info();
                 if (streams[i]->hasError()) {
                     const auto stream_error = streams[i]->statusInfo();
@@ -584,6 +720,7 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
                     error_info->set_error_message("enqueueMultiple rejected input at index " + std::to_string(i));
                 }
                 stream_cleanup_guard.markHandled(static_cast<size_t>(i));
+                recordBatchItemCompletion(*item_guards[i], streams[i], false);
                 continue;
             }
 
@@ -591,6 +728,10 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
             auto            err = collectStreamOutput(context, streams[i], inputs[i], last_outputs);
             stream_cleanup_guard.markHandled(static_cast<size_t>(i));
             if (!err.ok()) {
+                mark_item_error(i,
+                                err.code(),
+                                "Batch request failed",
+                                err.code() == ErrorCode::CANCELLED ? "Cancelled" : "BusinessError");
                 auto* err_pb = result->mutable_error_info();
                 err_pb->set_error_code(transErrorCodeToRPC(err.code()));
                 err_pb->set_error_message(err.ToString());
@@ -602,6 +743,7 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
                                               maga_init_params_.misc_config.aux_string,
                                               streams[i]->specialTokens().eos_token_id);
             }
+            recordBatchItemCompletion(*item_guards[i], streams[i], err.ok());
         }
 
         stream_cleanup_guard.dismiss();
@@ -612,10 +754,11 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
         const int         batch_size    = request ? request->inputs_size() : 0;
         RTP_LLM_LOG_ERROR("%s, batch_size=%d", error_message.c_str(), batch_size);
         if (response == nullptr) {
-            return serializeErrorMsg("unknown", ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error_message));
+            return rpc_status = serializeErrorMsg("unknown", ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error_message));
         }
         response->clear_results();
         for (int i = 0; i < batch_size; ++i) {
+            mark_item_error(i, ErrorCode::EXECUTION_EXCEPTION, "Batch handler failed", "BusinessError");
             auto* error_info = response->add_results()->mutable_error_info();
             error_info->set_error_code(transErrorCodeToRPC(ErrorCode::EXECUTION_EXCEPTION));
             error_info->set_error_message(error_message);
@@ -626,10 +769,11 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
         const int         batch_size    = request ? request->inputs_size() : 0;
         RTP_LLM_LOG_ERROR("%s, batch_size=%d", error_message.c_str(), batch_size);
         if (response == nullptr) {
-            return serializeErrorMsg("unknown", ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error_message));
+            return rpc_status = serializeErrorMsg("unknown", ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error_message));
         }
         response->clear_results();
         for (int i = 0; i < batch_size; ++i) {
+            mark_item_error(i, ErrorCode::EXECUTION_EXCEPTION, "Batch handler failed", "BusinessError");
             auto* error_info = response->add_results()->mutable_error_info();
             error_info->set_error_code(transErrorCodeToRPC(ErrorCode::EXECUTION_EXCEPTION));
             error_info->set_error_message(error_message);
