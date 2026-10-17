@@ -94,7 +94,7 @@ class ShellFlexlbConfigTest(unittest.TestCase):
         self.assert_v3(config)
         self.assertEqual(12345, config["requestLifecycle"]["request"]["timeoutMs"])
         self.assertEqual(7, config["dispatcher"]["maxInflightPerPrefillWorker"])
-        self.assertEqual(12000, config["workerRegistry"]["health"]["statusStaleAfterMs"])
+        self.assertEqual(6000, config["workerRegistry"]["health"]["statusRpcTimeoutMs"])
 
     def test_inflight_experiment_uses_v3_and_retains_its_prefill_formula(self):
         module = runpy.run_path(str(SCRIPT_DIR / "run_inflight_experiment.py"))

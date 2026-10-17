@@ -131,7 +131,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
             ReservationHandle reservation, AdmissionCapacity capacity) {
         java.util.Objects.requireNonNull(reservation, "reservation");
         java.util.Objects.requireNonNull(capacity, "capacity");
-        if (!hasFreshSchedulingStatus() && !isRetired()) {
+        if (!hasAvailableSchedulingStatus() && !isRetired()) {
             return new EngineDispatchPermitAcquisition(EngineDispatchPermitAcquireStatus.CAPACITY_FULL, null);
         }
         GenerationPin pin = tryPinGeneration();
@@ -168,9 +168,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
     }
 
-    /** Lock-free waiter hint, including retirement or lost ownership. Acquisition still rechecks capacity. */
+    /** Retry available capacity, or finish waiting after retirement or lost ownership. */
     public boolean shouldRetryDispatch(long requestId, AdmissionCapacity capacity) {
-        return isRetired() || state.shouldRetryDispatch(requestId, capacity);
+        return isRetired() || state.shouldRetryDispatch(requestId, capacity, hasAvailableSchedulingStatus());
     }
 
     public static final class EngineDispatchPermit {
@@ -516,7 +516,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
         public long realKvUsed() { return placementUsage.expectedKvUsed(); }
         public long realKvAvailable() { return placementUsage.hardKvAvailable(); }
         public long engineFacingKvUsed() { return dispatchUsage.expectedKvUsed(); }
-        public long engineFacingKvAvailable() { return dispatchUsage.hardKvAvailable(); }
         public long totalKv() { return placementUsage.totalKvTokens(); }
 
         public DecodeRoutingView {

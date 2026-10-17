@@ -1,5 +1,6 @@
 package org.flexlb.sync.runner;
 
+import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.cache.domain.WorkerCacheUpdateResult;
 import org.flexlb.cache.service.CacheAwareService;
@@ -56,9 +57,9 @@ class GrpcCacheStatusCheckRunnerTest {
                 org.junit.jupiter.api.Assertions.assertNotNull(lease);
                 new GrpcCacheStatusCheckRunner("model", status.getIpPort(), "test", RoleType.PREFILL,
                         status, lease, directory, engineHealthReporter, engineGrpcService,
-                        localKvCacheAwareManager, cacheIntervalService, 1000L, 0L, 50L, true, Runnable::run).run();
+                        localKvCacheAwareManager, cacheIntervalService, 1000L, true, Runnable::run).run();
             }).get(2, java.util.concurrent.TimeUnit.SECONDS);
-            assertEquals(1L, status.getCacheIndexedVersion());
+            assertEquals(1L, status.cacheIndexSnapshot().indexedVersion());
         } finally {
             status.lock.unlock();
             executor.shutdownNow();
@@ -75,11 +76,11 @@ class GrpcCacheStatusCheckRunnerTest {
                 .thenReturn(rpc);
         new GrpcCacheStatusCheckRunner("model", old.getIpPort(), "test", RoleType.PREFILL,
                 old, old.tryBeginCachePoll(1L), directory, engineHealthReporter, engineGrpcService,
-                localKvCacheAwareManager, cacheIntervalService, 1000L, 0L, 50L, true, Runnable::run).run();
+                localKvCacheAwareManager, cacheIntervalService, 1000L, true, Runnable::run).run();
         old.lock.lock();
         EndpointRegistry.DetachedGeneration detached;
         try {
-            detached = directory.beginRetirement(RoleType.PREFILL, old.getIpPort(), old, "TEST", -1L);
+            detached = directory.beginRetirement(RoleType.PREFILL, old.getIpPort(), old, "TEST");
         } finally {
             old.lock.unlock();
         }
@@ -91,7 +92,10 @@ class GrpcCacheStatusCheckRunnerTest {
         rpc.complete(EngineRpcService.CacheStatusPB.newBuilder().setVersion(2L).putCacheKeys(123L, true).build());
         verify(localKvCacheAwareManager, never()).updateEngineBlockCache(any(), any());
         org.junit.jupiter.api.Assertions.assertNull(replacement.getCacheStatus());
-        assertEquals(-1L, replacement.getCacheIndexedVersion());
+        assertEquals(-1L, replacement.cacheIndexSnapshot().indexedVersion());
+        var discarded = old.trace().snapshot().cachePoll();
+        assertEquals(-1L, discarded.times().convertStartMs(), "retired responses must not copy cache keys");
+        org.junit.jupiter.api.Assertions.assertTrue(discarded.leaseReleased());
         directory.close();
     }
 
@@ -105,14 +109,14 @@ class GrpcCacheStatusCheckRunnerTest {
         var queue = new java.util.ArrayList<Runnable>();
         new GrpcCacheStatusCheckRunner("model", status.getIpPort(), "test", RoleType.PREFILL,
                 status, lease, directory(status), engineHealthReporter, engineGrpcService,
-                localKvCacheAwareManager, cacheIntervalService, 1000L, 0L, 50L, true, queue::add).run();
+                localKvCacheAwareManager, cacheIntervalService, 1000L, true, queue::add).run();
         rpc.complete(EngineRpcService.CacheStatusPB.newBuilder().setVersion(1L).build());
         assertEquals(1, queue.size());
-        assertEquals(-1, status.trace().snapshot().poll().times().convertStartMs());
+        assertEquals(-1, status.trace().snapshot().cachePoll().times().convertStartMs());
         verifyNoInteractions(localKvCacheAwareManager);
         queue.removeFirst().run();
-        org.junit.jupiter.api.Assertions.assertTrue(status.trace().snapshot().poll().times().convertStartMs() >= 0);
-        org.junit.jupiter.api.Assertions.assertTrue(status.trace().snapshot().poll().leaseReleased());
+        org.junit.jupiter.api.Assertions.assertTrue(status.trace().snapshot().cachePoll().times().convertStartMs() >= 0);
+        org.junit.jupiter.api.Assertions.assertTrue(status.trace().snapshot().cachePoll().leaseReleased());
     }
 
     @Test
@@ -146,14 +150,14 @@ class GrpcCacheStatusCheckRunnerTest {
             java.util.concurrent.Future<?> update = threads.submit(() ->
                     new GrpcCacheStatusCheckRunner("test-model", status.getIpPort(), "test-site",
                             RoleType.PREFILL, status, status.tryBeginCachePoll(1L), directory,
-                            engineHealthReporter, engineGrpcService, localKvCacheAwareManager,
-                            cacheIntervalService, 5000, 1L, 20L, true, Runnable::run).run());
+                            engineHealthReporter, engineGrpcService, localKvCacheAwareManager, cacheIntervalService,
+                            5000, true, Runnable::run).run());
             org.junit.jupiter.api.Assertions.assertTrue(updating.await(2, java.util.concurrent.TimeUnit.SECONDS));
             org.junit.jupiter.api.Assertions.assertTrue(status.lock.tryLock(1, java.util.concurrent.TimeUnit.SECONDS));
             org.flexlb.balance.endpoint.EndpointRegistry.DetachedGeneration detached;
             try {
-                status.recordSuccessfulPoll(true, null);
-                detached = directory.beginRetirement(RoleType.PREFILL, status.getIpPort(), status, "TEST_RETIREMENT", -1L);
+                WorkerStatusTestFixtures.readyForScheduling(status);
+                detached = directory.beginRetirement(RoleType.PREFILL, status.getIpPort(), status, "TEST_RETIREMENT");
             } finally {
                 status.lock.unlock();
             }
@@ -179,7 +183,7 @@ class GrpcCacheStatusCheckRunnerTest {
             org.junit.jupiter.api.Assertions.assertFalse(cleanupHeldStatusLock.get(),
                     "index cleanup must not hold the health/lifecycle lock");
             org.junit.jupiter.api.Assertions.assertTrue(directory.statusSnapshot(RoleType.PREFILL).isEmpty());
-            org.junit.jupiter.api.Assertions.assertEquals(-1L, status.getCacheIndexedVersion(),
+            org.junit.jupiter.api.Assertions.assertEquals(-1L, status.cacheIndexSnapshot().indexedVersion(),
                     "retiring callback cannot commit its index version");
         } finally {
             release.countDown();
@@ -213,14 +217,14 @@ class GrpcCacheStatusCheckRunnerTest {
                 : Runnable::run;
         var runner = new GrpcCacheStatusCheckRunner("test-model", status.getIpPort(), "test", RoleType.PREFILL,
                 status, lease, directory(status), engineHealthReporter, engineGrpcService,
-                localKvCacheAwareManager, cacheIntervalService, 1000L, 0L, 50L, true, executor);
+                localKvCacheAwareManager, cacheIntervalService, 1000L, true, executor);
         if (failurePoint.equals("RPC_THROW")) {
             org.junit.jupiter.api.Assertions.assertSame(failure,
                     org.junit.jupiter.api.Assertions.assertThrows(IllegalStateException.class, runner::run));
         } else {
             runner.run();
         }
-        var snapshot = status.trace().snapshot().poll();
+        var snapshot = status.trace().snapshot().cachePoll();
         String expectedFailure = switch (failurePoint) {
             case "RPC_THROW" -> "RPC_INITIATION_FAILED";
             case "CONVERSION_FAILED" -> "CONVERSION_FAILED";
@@ -261,7 +265,7 @@ class GrpcCacheStatusCheckRunnerTest {
                 "test-model", status.getIpPort(), "test-site", RoleType.DECODE,
                 status, status.tryBeginCachePoll(1L), directory(status),
                 engineHealthReporter, engineGrpcService, localKvCacheAwareManager, cacheIntervalService,
-                20, 0L, 50L, true, Runnable::run).run();
+                20, true, Runnable::run).run();
 
         assertEquals(1000, status.getCacheStatus().getAvailableKvCache());
         assertEquals(2000, status.getCacheStatus().getTotalKvCache());
@@ -298,7 +302,7 @@ class GrpcCacheStatusCheckRunnerTest {
                 directory,
                 engineHealthReporter, engineGrpcService,
                 localKvCacheAwareManager, cacheIntervalService,
-                20, 0L, 50L, true, Runnable::run);
+                20, true, Runnable::run);
         runner.run();
 
         // Give some time for async execution
@@ -310,7 +314,7 @@ class GrpcCacheStatusCheckRunnerTest {
 
         // Assert
         verify(engineGrpcService).getCacheStatusAsync(eq("127.0.0.1"), eq(8081), any(WorkerStatus.class), eq(-1L), eq(20L), eq(RoleType.PREFILL));
-        assertEquals(1L, workerStatus.getCacheIndexedVersion());
+        assertEquals(1L, workerStatus.cacheIndexSnapshot().indexedVersion());
     }
 
     @Test
@@ -351,14 +355,14 @@ class GrpcCacheStatusCheckRunnerTest {
                                 .build());
 
         runCachePoll(ipPort, workerStatus, directory, false);
-        assertEquals(1L, workerStatus.getCacheIndexedVersion());
+        assertEquals(1L, workerStatus.cacheIndexSnapshot().indexedVersion());
 
         runCachePoll(ipPort, workerStatus, directory, false);
-        assertEquals(1L, workerStatus.getCacheIndexedVersion());
+        assertEquals(1L, workerStatus.cacheIndexSnapshot().indexedVersion());
         assertEquals(2L, workerStatus.getCacheStatus().getVersion());
 
         runCachePoll(ipPort, workerStatus, directory, false);
-        assertEquals(2L, workerStatus.getCacheIndexedVersion());
+        assertEquals(2L, workerStatus.cacheIndexSnapshot().indexedVersion());
         verify(engineGrpcService).getCacheStatusAsync(
                 eq("127.0.0.1"), eq(8081), any(WorkerStatus.class),
                 eq(-1L), eq(20L), eq(RoleType.PREFILL));
@@ -385,7 +389,7 @@ class GrpcCacheStatusCheckRunnerTest {
                 oldStatus, oldStatus.tryBeginCachePoll(1L), directory,
                 engineHealthReporter, engineGrpcService,
                 localKvCacheAwareManager, cacheIntervalService,
-                20, 0L, 50L, true, Runnable::run);
+                20, true, Runnable::run);
         runner.run();
 
         response.complete(EngineRpcService.CacheStatusPB.newBuilder()
@@ -427,7 +431,7 @@ class GrpcCacheStatusCheckRunnerTest {
         org.junit.jupiter.api.Assertions.assertSame(ownedKeys, status.getCacheStatus().getCachedKeys());
         assertEquals(java.util.Set.of(11L, 22L), status.getCacheStatus().getCachedKeys());
         assertEquals(80, status.getCacheStatus().getAvailableKvCache());
-        assertEquals(7, status.getCacheIndexedVersion());
+        assertEquals(7, status.cacheIndexSnapshot().indexedVersion());
         verify(localKvCacheAwareManager, times(1)).updateEngineBlockCache(eq(status), any(EndpointTrace.Poll.class));
     }
 
@@ -446,7 +450,7 @@ class GrpcCacheStatusCheckRunnerTest {
         runCachePoll(status.getIpPort(), status, directory, false);
         runCachePoll(status.getIpPort(), status, directory, false);
         org.junit.jupiter.api.Assertions.assertTrue(status.getCacheStatus().getCachedKeys().isEmpty());
-        assertEquals(8, status.getCacheIndexedVersion());
+        assertEquals(8, status.cacheIndexSnapshot().indexedVersion());
         verify(localKvCacheAwareManager, times(2)).updateEngineBlockCache(eq(status), any(EndpointTrace.Poll.class));
     }
 
@@ -460,7 +464,7 @@ class GrpcCacheStatusCheckRunnerTest {
                 workerStatus, workerStatus.tryBeginCachePoll(1L), directory,
                 engineHealthReporter, engineGrpcService,
                 localKvCacheAwareManager, cacheIntervalService,
-                20, 0L, 50L, debug, Runnable::run).run();
+                20, debug, Runnable::run).run();
     }
 
     private static WorkerStatus workerStatus() {

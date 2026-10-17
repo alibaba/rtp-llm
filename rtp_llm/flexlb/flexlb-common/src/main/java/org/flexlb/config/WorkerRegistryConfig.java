@@ -15,9 +15,6 @@ public final class WorkerRegistryConfig {
     public static final class HealthConfig {
         private long statusPollIntervalMs = 20;
         private long statusRpcTimeoutMs = 5000;
-        private long statusStaleAfterMs = 10_000;
-        /** Grace for an already received valid heartbeat waiting for local commit. */
-        private long statusCommitGraceMs = 60_000;
         private long cleanupIntervalMs = 3000;
     }
 
