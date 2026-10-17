@@ -117,19 +117,11 @@ public class ExpirationCleaner {
                 if (!workerStatus.isActiveGeneration()) {
                     continue;
                 }
-                WorkerStatus.PollHealth health = workerStatus.pollHealth();
-                long expirationTime = health.lastSuccessfulPollUs()
-                        + workerTimeoutUs;
-                long currentTime = System.nanoTime() / 1000;
-                boolean transportFailed = health.consecutiveTransportFailures() >= 3L;
-                boolean reportedDead = workerStatus.hasReceivedStatusRpc() && !health.reportedAlive();
-                if (transportFailed || reportedDead || (currentTime > expirationTime
-                        && !workerStatus.isStatusPollProtected(currentTime, statusCommitGraceUs))) {
-                    if (!workerStatus.tryClaimHealthRetirement(health)) { continue; }
+                WorkerStatus.HealthRetirementReason reason = workerStatus.tryClaimHealthRetirement(
+                        System.nanoTime() / 1000, workerTimeoutUs, statusCommitGraceUs);
+                if (reason != null) {
                     endpointToRetire = workerDirectory.beginRetirement(
-                            role, item.getKey(), workerStatus, transportFailed ? "CONSECUTIVE_STATUS_FAILURES"
-                                    : reportedDead ? "WORKER_REPORTED_NOT_ALIVE" : "STATUS_EXPIRED",
-                            workerTimeoutUs);
+                            role, item.getKey(), workerStatus, reason.name(), workerTimeoutUs);
                     retirementStarted = true;
                 }
             } finally {

@@ -384,6 +384,35 @@ public class WorkerStatus {
         }
     }
 
+    public enum HealthRetirementReason {
+        CONSECUTIVE_STATUS_FAILURES,
+        WORKER_REPORTED_NOT_ALIVE,
+        STATUS_EXPIRED
+    }
+
+    /**
+     * Claim health retirement and return its reason, or null while healthy,
+     * protected by an in-flight poll, or superseded by concurrent RPC progress.
+     * The caller must hold the generation lock.
+     */
+    public HealthRetirementReason tryClaimHealthRetirement(
+            long nowUs, long workerTimeoutUs, long statusCommitGraceUs) {
+        requireGenerationLock();
+        PollHealth health = pollHealth();
+        HealthRetirementReason reason;
+        if (health.consecutiveTransportFailures() >= 3L) {
+            reason = HealthRetirementReason.CONSECUTIVE_STATUS_FAILURES;
+        } else if (health.contact() == StatusContact.DEAD) {
+            reason = HealthRetirementReason.WORKER_REPORTED_NOT_ALIVE;
+        } else if (nowUs > health.lastSuccessfulPollUs() + workerTimeoutUs
+                && !isStatusPollProtected(nowUs, statusCommitGraceUs)) {
+            reason = HealthRetirementReason.STATUS_EXPIRED;
+        } else {
+            return null;
+        }
+        return statusProgress.claimRetirement(health) ? reason : null;
+    }
+
     /** Fence a stale-health decision against an RPC start/result which raced the scan. */
     public boolean tryClaimHealthRetirement(PollHealth expected) {
         requireGenerationLock();
