@@ -1153,6 +1153,9 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             if (py_model_outputs.mtp_target_hidden_states.defined()) {
                 outputs.mtp_target_hidden_states = py_model_outputs.mtp_target_hidden_states;
             }
+            if (py_model_outputs.diffusion_tokens.defined()) {
+                outputs.diffusion_tokens = py_model_outputs.diffusion_tokens;
+            }
             return outputs;
         };
         if (dspark_model_role_ != DSparkModelRole::NONE) {

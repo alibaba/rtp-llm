@@ -1068,6 +1068,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("checkpoint_path", &SpeculativeExecutionConfig::checkpoint_path)
         .def_readwrite("sp_dspark_mask_token_id", &SpeculativeExecutionConfig::sp_dspark_mask_token_id)
         .def_readwrite("sp_dspark_sample_from_anchor", &SpeculativeExecutionConfig::sp_dspark_sample_from_anchor)
+        .def_readwrite("sp_diffusion_canvas", &SpeculativeExecutionConfig::sp_diffusion_canvas)
         .def("to_string", [](const SpeculativeExecutionConfig& self) { return self.to_string(); })
         .def(py::pickle(
             [](const SpeculativeExecutionConfig& self) {
@@ -1082,10 +1083,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.quantization,
                                       self.checkpoint_path,
                                       self.sp_dspark_mask_token_id,
-                                      self.sp_dspark_sample_from_anchor);
+                                      self.sp_dspark_sample_from_anchor,
+                                      self.sp_diffusion_canvas);
             },
             [](py::tuple t) {
-                if (t.size() != 10 && t.size() != 11 && t.size() != 12)
+                if (t.size() != 10 && t.size() != 11 && t.size() != 12 && t.size() != 13)
                     throw std::runtime_error("Invalid state!");
                 SpeculativeExecutionConfig c;
                 try {
@@ -1105,6 +1107,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     if (t.size() == 12) {
                         c.sp_dspark_mask_token_id      = t[10].cast<int64_t>();
                         c.sp_dspark_sample_from_anchor = t[11].cast<bool>();
+                    }
+                    if (t.size() == 13) {
+                        c.sp_dspark_mask_token_id      = t[10].cast<int64_t>();
+                        c.sp_dspark_sample_from_anchor = t[11].cast<bool>();
+                        c.sp_diffusion_canvas          = t[12].cast<bool>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("SpeculativeExecutionConfig unpickle error: ") + e.what());
@@ -1992,6 +1999,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("memory", &KVCacheSpecDesc::memory)
         .def_readwrite("tail", &KVCacheSpecDesc::tail)
         .def_readwrite("cp", &KVCacheSpecDesc::cp)
+        .def_readwrite("mha_kv_head_num", &KVCacheSpecDesc::mha_kv_head_num)
+        .def_readwrite("mha_size_per_head", &KVCacheSpecDesc::mha_size_per_head)
         .def(py::pickle(
             [](const KVCacheSpecDesc& self) {
                 return py::make_tuple(self.tag,
@@ -2013,11 +2022,13 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.capacity,
                                       self.memory,
                                       self.tail,
-                                      self.cp);
+                                      self.cp,
+                                      self.mha_kv_head_num,
+                                      self.mha_size_per_head);
             },
             [](py::tuple t) {
                 KVCacheSpecDesc c;
-                if (t.size() != 20)
+                if (t.size() != 22)
                     throw std::runtime_error("Invalid KVCacheSpecDesc state!");
                 c.tag                                  = t[0].cast<std::string>();
                 c.cache_type                           = t[1].cast<KVCacheSpecType>();
@@ -2039,6 +2050,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 c.memory                               = t[17].cast<std::optional<CacheMemoryPolicyDesc>>();
                 c.tail                                 = t[18].cast<std::optional<CacheTailPolicyDesc>>();
                 c.cp                                   = t[19].cast<std::optional<CacheCpPolicyDesc>>();
+                c.mha_kv_head_num                      = t[20].cast<std::optional<int32_t>>();
+                c.mha_size_per_head                    = t[21].cast<std::optional<int32_t>>();
                 return c;
             }));
 

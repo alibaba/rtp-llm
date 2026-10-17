@@ -592,6 +592,12 @@ class ModelFactory:
         sp_config.sp_dspark_sample_from_anchor = bool(
             getattr(propose_model_config, "dspark_sample_from_anchor", True)
         )
+        # Block-diffusion canvas proposer (e.g. DiffusionGemma): the draft
+        # forward returns final tokens; the executor bypasses Markov sampling
+        # and rejection.
+        sp_config.sp_diffusion_canvas = bool(
+            getattr(propose_model_config, "dgm_diffusion_canvas", False)
+        )
         # Both models carry the capture ids: the target uses them to capture
         # and to size the shared MTP hidden buffer rows; the draft only needs
         # them for the same row-width derivation (it never captures).

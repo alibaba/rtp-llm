@@ -47,6 +47,77 @@ py_test(
 )
 
 py_test(
+    name = "diffusion_gemma_test",
+    srcs = ["diffusion_gemma_test.py"],
+    data = ["//:rtp_compute_ops"],
+    deps = [
+        "//rtp_llm:async_model",
+        "//rtp_llm:lora",
+        "//rtp_llm:models",
+        "//rtp_llm:sdk",
+        "//rtp_llm:testlib_lite",
+        "//rtp_llm/models_py:models",
+    ],
+    size = "small",
+)
+
+py_test(
+    name = "diffusion_gemma_realweight_test",
+    srcs = [
+        "diffusion_gemma_realweight_test.py",
+        "diffusion_gemma_test.py",
+    ],
+    data = ["//:rtp_compute_ops"],
+    deps = [
+        "//rtp_llm:async_model",
+        "//rtp_llm:lora",
+        "//rtp_llm:models",
+        "//rtp_llm:sdk",
+        "//rtp_llm:testlib_lite",
+        "//rtp_llm/models_py:models",
+    ],
+    size = "medium",
+    # Real-weights layer math check; runs only with DGM_REAL_CKPT set
+    # (skipped in CI). Use --spawn_strategy=standalone locally so the
+    # host-visible checkpoint path resolves.
+)
+
+
+py_test(
+    name = "diffusion_gemma_loader_test",
+    srcs = ["diffusion_gemma_loader_test.py"],
+    data = ["//:rtp_compute_ops"],
+    deps = [
+        "//rtp_llm:async_model",
+        "//rtp_llm:lora",
+        "//rtp_llm:models",
+        "//rtp_llm:sdk",
+        "//rtp_llm:testlib_lite",
+        "//rtp_llm/models_py:models",
+    ],
+    size = "small",
+)
+
+py_test(
+    name = "diffusion_gemma_proposer_test",
+    srcs = [
+        "diffusion_gemma_proposer_test.py",
+        "diffusion_gemma_test.py",
+    ],
+    main = "diffusion_gemma_proposer_test.py",
+    data = ["//:rtp_compute_ops"],
+    deps = [
+        "//rtp_llm:async_model",
+        "//rtp_llm:lora",
+        "//rtp_llm:models",
+        "//rtp_llm:sdk",
+        "//rtp_llm:testlib_lite",
+        "//rtp_llm/models_py:models",
+    ],
+    size = "small",
+)
+
+py_test(
     name = "hidden_state_capture_test",
     srcs = ["hidden_state_capture_test.py"],
     deps = py_test_deps + [

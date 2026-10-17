@@ -372,6 +372,11 @@ struct PyModelOutputs {
     // a first-class forward output because CUDA graph replay does not execute
     // Python and therefore cannot safely recover it from mutable model state.
     torch::Tensor mtp_target_hidden_states;
+    // Optional [B, gamma] int32 token ids produced by a diffusion-canvas
+    // proposer.  The DSpark executor consumes them verbatim instead of
+    // sampling the lm_head logits, so per-request entropy-bounded selections
+    // survive the C++ sampling path.
+    torch::Tensor diffusion_tokens;
 
     PyModelOutputs() = default;
 

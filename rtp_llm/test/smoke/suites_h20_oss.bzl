@@ -665,3 +665,28 @@ def h20_oss_suites():
         name = "smoke_h20_jit_remote_cache",
         tests = ["//rtp_llm/utils/test:jit_cache_deepseek_v2_lite"],
     )
+
+
+def diffusion_gemma_suites():
+    native.test_suite(
+        name = "smoke_h20_diffusion_gemma",
+        tests = [
+            smoke_test(
+                name = "dgm_chat_vision",
+                task_info = "data/model/diffusion_gemma/chat_vision_test.json",
+                # Vision bring-up: 3 cases (basic / cache-reuse / two-images),
+                # golden intentionally empty until first successful recording.
+                smoke_args = "--act_type BF16 --tp_size 1 --dp_size 1 --ep_size 1 --world_size 1 --max_seq_len 12800 --reserver_runtime_mem_mb 24000 --seq_size_per_block 64 --test_block_num 2000 --concurrency_limit 2 --max_context_batch_size 2 --reuse_cache 0 --sp_type dspark --sp_model_type diffusion_gemma_proposer --sp_checkpoint_path /mnt/fuse/smoke-test/hf/google--diffusiongemma-26B-A4B-it--f7f5b7f5fa82ffc52addd066915886d497f5517b --gen_num_per_cycle 256",
+                gpu_type = ["H20_CU13"],
+            ),
+            smoke_test(
+                name = "dgm_chat_basic",
+                task_info = "data/model/diffusion_gemma/chat_test.json",
+                # One canvas = 256 tokens; gen_num_per_cycle is the canvas
+                # width. sp_diffusion_canvas is derived from the proposer's
+                # model config (dgm_diffusion_canvas).
+                smoke_args = "--act_type BF16 --tp_size 1 --dp_size 1 --ep_size 1 --world_size 1 --max_seq_len 12800 --reserver_runtime_mem_mb 24000 --seq_size_per_block 64 --test_block_num 2000 --concurrency_limit 2 --max_context_batch_size 2 --reuse_cache 0 --sp_type dspark --sp_model_type diffusion_gemma_proposer --sp_checkpoint_path /mnt/fuse/smoke-test/hf/google--diffusiongemma-26B-A4B-it--f7f5b7f5fa82ffc52addd066915886d497f5517b --gen_num_per_cycle 256",
+                gpu_type = ["H20_CU13"],
+            ),
+        ],
+    )
