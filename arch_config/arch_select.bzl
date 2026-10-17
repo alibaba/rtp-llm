@@ -27,6 +27,8 @@ _CUDA13_ARM_DEFERRED = [
     "triton-kernels",
     "fast-hadamard-transform",
     "nvidia-cutlass-dsl",
+    "xfastertransformer-devel",
+    "xfastertransformer-devel-icx",
 ]
 
 # xgrammar's wheel metadata pulls apache-tvm-ffi (and triton on x86), which only
