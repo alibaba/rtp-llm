@@ -90,6 +90,9 @@ class DiffusionGemmaProposerWeightInfo(ModelDeployWeightInfo):
         tiny = KVCacheSpecDesc()
         tiny.tag = "swa_kv"
         tiny.cache_type = KVCacheSpecType.MHA
+        # mergeMTPModule requires samePolicy against the target swa_kv group:
+        # SWA type plus the target's sliding window.
+        tiny.group_type = CacheGroupType.SWA
         tiny.mha_kv_head_num = 1
         tiny.mha_size_per_head = 64
         tiny.dtype = DataType.TYPE_BF16
@@ -123,6 +126,9 @@ class DiffusionGemmaProposer(BaseModel):
         config.attn_config.kv_head_num = 1
         config.attn_config.size_per_head = 64
         config.attn_config.is_causal = False
+        # The swa_kv group policy derives sliding_window_size from this value;
+        # it must equal the main model's window for mergeMTPModule samePolicy.
+        config.attn_config.sliding_window = int(text["sliding_window"])
         config.hidden_size = int(text["hidden_size"])
         config.vocab_size = int(text["vocab_size"])
         config.max_seq_len = int(text["max_position_embeddings"])
@@ -161,6 +167,9 @@ class DiffusionGemmaProposer(BaseModel):
         tiny = KVCacheSpecDesc()
         tiny.tag = "swa_kv"
         tiny.cache_type = KVCacheSpecType.MHA
+        # mergeMTPModule requires samePolicy against the target swa_kv group:
+        # SWA type plus the target's sliding window.
+        tiny.group_type = CacheGroupType.SWA
         tiny.mha_kv_head_num = 1
         tiny.mha_size_per_head = 64
         tiny.dtype = DataType.TYPE_BF16
