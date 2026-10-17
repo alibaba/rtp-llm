@@ -1,6 +1,7 @@
 #pragma once
 
 #include <functional>
+#include <future>
 #include <list>
 #include <map>
 #include <memory>
@@ -142,8 +143,11 @@ protected:
     // owns a single phase (prepare, forward, broadcast, dispatch) and
     // preserves the original PROFILE_SCOPE labels.
     void            waitPreviousBookkeepingBeforeStreamPreparation(const std::list<GenerateStreamPtr>& streams);
-    void            launchTargetVerifyPrepareAsync(const GptModelInputs& model_input, size_t batch_size);
-    void            launchDraftPrefillPrepareAsync(const GptModelInputs& model_input);
+    using PreparedTargetToken = std::future<std::pair<torch::Tensor, std::shared_ptr<torch::Event>>>;
+    PreparedTargetToken launchTargetVerifyPrepareAsync(const GptModelInputs&        model_input,
+                                                       size_t                       batch_size,
+                                                       std::list<GenerateStreamPtr> streams = {});
+    void                launchDraftPrefillPrepareAsync(const GptModelInputs& model_input);
     GptModelOutputs runTargetVerifyForward(GptModelInputs& model_input, const StreamGroups& stream_groups);
     absl::Status    runDecodeAlignmentOnly(GptModelInputs& model_input);
     void            debugCheckLinearBlockMapAtKernelRead(const GptModelInputs& model_input,
@@ -185,7 +189,8 @@ protected:
                           const StreamGroups&         stream_groups,
                           std::vector<torch::Tensor>& draft_probs_list,
                           torch::Tensor&              draft_token_ids_t,
-                          int64_t&                    model_forward_us);
+                          int64_t&                    model_forward_us,
+                          PreparedTargetToken         prepared_target_token = {});
 
     bool useDeviceInput() const;
     bool checkDeviceInput() const;
