@@ -231,6 +231,9 @@ test_suite(
 test_suite(
     name = "dsv4_sm120_unit",
     tests = _SM120_CPU_CONTRACT_TESTS + [
+        "//rtp_llm/cpp/normal_engine/test:engine_stop_sync_sm120_test",
+        "//rtp_llm/cpp/normal_engine/test:engine_stop_async_sm120_test",
+        "//rtp_llm/cpp/normal_engine/test:dsv4_dp_prefill_policy_test",
         ":test_prefill_async_head_stream",
         ":test_sm120_small_batch_projections",
         ":test_sm120_mhc_columns",
@@ -256,6 +259,7 @@ test_suite(
         "//rtp_llm/models_py/modules/dsv4/fp8/test:test_indexer_tail_stream_cpu",
         "//rtp_llm/models_py/modules/factory/fused_moe/utils/test:fp8_fp4_layer_test",
         "//rtp_llm/models_py/modules/factory/fused_moe/utils/test:test_sm120_dispatch_quant_pack",
+        "//rtp_llm/models_py/modules/factory/fused_moe/utils/test:test_sm120_decode_combine",
     ],
     target_compatible_with = _DSV4_SM120_ONLY,
 )

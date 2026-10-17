@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <list>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -40,7 +41,9 @@ bool alignDsv4DpPrefillPhase(std::list<StreamPtr>& streams,
     const bool local_prefill =
         std::any_of(streams.begin(), streams.end(), [](const StreamPtr& stream) { return stream->isContextStream(); });
     // Empty and decode-only ranks must also participate in this decision.
-    if (!reduce_any_prefill(local_prefill)) {
+    // A cancelled step must not create fake work or mutate the scheduled batch.
+    const std::optional<bool> any_prefill = reduce_any_prefill(local_prefill);
+    if (!any_prefill.value_or(false)) {
         return false;
     }
     streams.remove_if([](const StreamPtr& stream) { return !stream->isContextStream(); });
@@ -77,11 +80,14 @@ void alignDsv4DpDecodeBatch(std::list<StreamPtr>& streams,
     for (const auto& stream : streams) {
         local_batch += batch_size(stream);
     }
-    const int64_t target = reduce_max_batch(std::max({int64_t{1}, local_batch, fixed_batch_size}));
-    if (target < local_batch || (fixed_batch_size > 0 && target > fixed_batch_size)) {
+    const std::optional<int64_t> target = reduce_max_batch(std::max({int64_t{1}, local_batch, fixed_batch_size}));
+    if (!target) {
+        return;
+    }
+    if (*target < local_batch || (fixed_batch_size > 0 && *target > fixed_batch_size)) {
         throw std::runtime_error("SM120 decode batch exceeds its synchronized batch capacity");
     }
-    while (local_batch < target) {
+    while (local_batch < *target) {
         auto fake = make_fake_decode();
         if (batch_size(fake) != 1) {
             throw std::runtime_error("SM120 decode padding requires a single-sequence fake stream");

@@ -97,6 +97,49 @@ TEST(Dsv4DpPrefillPolicyTest, RejectsOverflowOnEveryRankAfterReduction) {
     EXPECT_TRUE(idle.empty());
 }
 
+TEST(Dsv4DpPrefillPolicyTest, CancelledDecodeDoesNotPadOrCheckCapacity) {
+    for (int count : {0, 1, 8}) {
+        Streams streams;
+        for (int i = 0; i < count; ++i) {
+            streams.push_back(makeStream(i, false));
+        }
+        const auto original   = streams;
+        int        reductions = 0;
+        alignDsv4DpDecodeBatch(
+            streams,
+            [&](int64_t) -> std::optional<int64_t> {
+                ++reductions;
+                return std::nullopt;
+            },
+            [] {
+                ADD_FAILURE() << "a coordinated stop must not create fake decode work";
+                return makeStream(-1, false, true);
+            },
+            4);
+        EXPECT_EQ(reductions, 1);
+        EXPECT_EQ(streams, original);
+    }
+}
+
+TEST(Dsv4DpPrefillPolicyTest, CancelledPrefillPreservesMixedBatch) {
+    Streams    streams{makeStream(1, true), makeStream(2, false)};
+    const auto original   = streams;
+    int        reductions = 0;
+    EXPECT_FALSE(alignDsv4DpPrefillPhase(
+        streams,
+        [&](bool local_prefill) -> std::optional<bool> {
+            EXPECT_TRUE(local_prefill);
+            ++reductions;
+            return std::nullopt;
+        },
+        [] {
+            ADD_FAILURE() << "a coordinated stop must not create fake prefill work";
+            return makeStream(-1, true, true);
+        }));
+    EXPECT_EQ(reductions, 1);
+    EXPECT_EQ(streams, original);
+}
+
 TEST(Dsv4DpPrefillPolicyTest, SpeculativeAlignmentDoesNotReadWorkerOwnedHistory) {
     auto stream               = makeStream(0, false);
     stream->async_bookkeeping = true;

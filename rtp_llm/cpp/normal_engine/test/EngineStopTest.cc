@@ -112,6 +112,37 @@ TEST_P(EngineStopTest, StopWaitsForInFlightPrefillOnlyDispatch) {
     checkStopWaitsForDispatch(0);
 }
 
+TEST_P(EngineStopTest, StopWakesIdleSchedulerWhilePaused) {
+    CustomConfig config;
+    config.output_dispatcher_worker_count = GetParam();
+    auto engine                           = createMockEngine(config);
+    engine->pause();
+    auto stopped = std::async(std::launch::async, [&] { return engine->stop(); });
+    EXPECT_EQ(stopped.wait_for(std::chrono::seconds(10)), std::future_status::ready);
+    EXPECT_TRUE(stopped.get().ok());
+    EXPECT_FALSE(engine->running_.load());
+    EXPECT_EQ(engine->executor_, nullptr);
+    EXPECT_TRUE(engine->stop().ok());
+}
+
+TEST_P(EngineStopTest, OrdinaryDpAndFfnStopNeedNoWorldCollective) {
+    auto engine = createMockEngine(CustomConfig{});
+    ASSERT_TRUE(engine->stop().ok());
+    // No communication callbacks are registered in this fixture. Generic DP
+    // and FFN roles must never enter the SM120 WORLD scheduling protocol.
+    for (bool ffn : {false, true}) {
+        engine->ffn_disaggregate_config.enable_ffn_disaggregate = ffn;
+        for (int tp_size : {1, 2}) {
+            engine->parallelism_config.dp_size = 4;
+            engine->parallelism_config.tp_size = tp_size;
+            for (bool stop : {false, true}) {
+                engine->stop_requested_ = stop;
+                EXPECT_EQ(engine->synchronizeStopRequested(), stop);
+            }
+        }
+    }
+}
+
 INSTANTIATE_TEST_SUITE_P(SerialAndParallel, EngineStopTest, ::testing::Values(0, 2));
 
 }  // namespace

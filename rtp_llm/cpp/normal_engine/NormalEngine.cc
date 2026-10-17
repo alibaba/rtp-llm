@@ -183,6 +183,8 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
                                                            parallelism_config.prefill_cp_config.is_enabled(),
                                                            ffn_disaggregate_config.enable_ffn_disaggregate);
     dp_decode_batch_sync_  = params.hw_kernel_config.enable_cuda_graph && resolved_moe_strategy == "sm120_decode"
+                            && !ffn_disaggregate_config.enable_ffn_disaggregate
+                            && !parallelism_config.prefill_cp_config.is_enabled() && parallelism_config.pp_size == 1
                             && parallelism_config.tp_size == 1 && parallelism_config.dp_size > 1
                             && parallelism_config.ep_size == parallelism_config.dp_size
                             && parallelism_config.world_size == parallelism_config.dp_size
@@ -687,14 +689,15 @@ absl::Status NormalEngine::startLoop() {
         RTP_LLM_LOG_INFO("init system prompt done");
     }
     RTP_LLM_LOG_INFO("start normal engine loop");
-    running_     = true;
-    loop_thread_ = autil::Thread::createThread(std::bind(&NormalEngine::loop, this), "normal_engine_loop");
+    stop_requested_ = false;
+    running_        = true;
+    loop_thread_    = autil::Thread::createThread(std::bind(&NormalEngine::loop, this), "normal_engine_loop");
     return absl::OkStatus();
 }
 
 absl::Status NormalEngine::stop() {
     RTP_LLM_LOG_INFO("stop normal engine");
-    running_ = false;
+    stop_requested_ = true;
     RETURN_IF_STATUS_ERROR(scheduler_->stop());
     loop_thread_->join();
     // Join the async dispatch runner and release the dispatcher-owned worker pool.
@@ -723,6 +726,39 @@ void NormalEngine::loop() {
             THROW_IF_STATUS_ERROR(trySaveStepError());
         }
     }
+}
+
+bool NormalEngine::synchronizeStopRequested() {
+    const bool local_stop = stop_requested_.load();
+    // SM120 DP/EP coordinates stop in its existing scheduling reduction.
+    // Other DP topologies and FFN disaggregation retain their local protocol;
+    // a WORLD collective here would involve unrelated serving roles.
+    if (ffn_disaggregate_config.enable_ffn_disaggregate || parallelism_config.dp_size > 1) {
+        return local_stop;
+    }
+    if (parallelism_config.tp_size > 1) {
+        // Keep idle TP followers on the CPU transport while the root scheduler
+        // sleeps. The root owns admission and the final stop frame.
+        auto flag =
+            torch::full({1}, local_stop ? 1 : 0, torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
+        execBroadcastCpu({{flag}, 0});
+        return flag.item<int32_t>() != 0;
+    }
+    return local_stop;
+}
+
+std::optional<int64_t> NormalEngine::synchronizeDpStepState(int64_t local_value) {
+    // Only the admitted TP1/DP=EP=WORLD profile calls this. Carry shutdown in
+    // the existing scalar MAX: the terminal vote dominates any batch extent.
+    constexpr int64_t stop_vote = std::numeric_limits<int64_t>::max();
+    auto              state     = torch::full({1},
+                             running_ && stop_requested_ ? stop_vote : local_value,
+                             torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA));
+    const auto value = execAllReduce({state, ReduceOp::Max, false, ParallelMode::DP_AND_TP}).buffer.item<int64_t>();
+    if (value == stop_vote) {
+        return std::nullopt;
+    }
+    return value;
 }
 
 absl::Status NormalEngine::trySaveStepError() const {
@@ -856,7 +892,7 @@ NormalEngine::enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>&
 
 absl::Status NormalEngine::step() try {
     RTP_LLM_PROFILE_SCOPE("engine.normal.step_work");
-    while (pause_) {
+    while (pause_ && !stop_requested_) {
         // wait 50ms if system paused.
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
@@ -868,7 +904,21 @@ absl::Status NormalEngine::step() try {
             RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.schedule(reserve_step=%d)", reserve_step_);
             CHECK_AND_ASSIGN(streams, scheduler_->schedule());
         }
-        if (parallelism_config.dp_size > 1) {
+    }
+    // DP/EP must reach its existing scheduling collective even when the local
+    // stop request arrives before another rank's. Do not vote a second time.
+    const bool aligned_dp = dp_prefill_phase_sync_ || dp_decode_batch_sync_;
+    const bool stop       = aligned_dp ? mayAddFakeStream(streams) : (running_ && synchronizeStopRequested());
+    if (stop) {
+        stop_requested_ = true;
+        running_        = false;
+        // A peer may receive the shared stop before its own RPC drain begins.
+        // Wake its requests too, so shutdown cannot wait on an exited engine.
+        RETURN_IF_STATUS_ERROR(scheduler_->stop());
+        return absl::OkStatus();
+    }
+    if (parallelism_config.tp_rank == 0 && !ffn_disaggregate_config.is_ffn_service()) {
+        if (parallelism_config.dp_size > 1 && !aligned_dp) {
             RTP_LLM_PROFILE_SCOPE("engine.normal.may_add_fake_stream_work");
             mayAddFakeStream(streams);
         }
@@ -979,18 +1029,20 @@ static int decodeFixedBs() {
     return value;
 }
 
-void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
+bool NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
+    bool stopped = false;
     if (dp_prefill_phase_sync_) {
-        auto reduce_any_prefill = [](bool local_prefill) {
-            auto flag = torch::full(
-                {1}, local_prefill ? 1 : 0, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
-            // The admitted TP1/DP=EP profile spans WORLD, which the C++ comm
-            // bridge registers as DP_AND_TP; ParallelMode::EP is not registered.
-            return execAllReduce({flag, ReduceOp::Max, false, ParallelMode::DP_AND_TP}).buffer.item<int32_t>() != 0;
+        auto reduce_any_prefill = [this, &stopped](bool local_prefill) -> std::optional<bool> {
+            auto state = synchronizeDpStepState(local_prefill ? 1 : 0);
+            stopped    = !state;
+            return state ? std::optional<bool>(*state != 0) : std::nullopt;
         };
         if (alignDsv4DpPrefillPhase(streams, reduce_any_prefill, [this] { return createMinFakeStream(1, true); })) {
             RTP_LLM_LOG_DEBUG("DSV4 DP/EP: synchronized prefill phase, streams=%zu", streams.size());
-            return;
+            return false;
+        }
+        if (stopped) {
+            return true;
         }
     }
     if (dp_decode_batch_sync_) {
@@ -1002,10 +1054,10 @@ void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
             RTP_LLM_CHECK_WITH_INFO(normal_executor != nullptr, "SM120 beam alignment requires NormalExecutor");
             normal_executor->syncStreamState();
         }
-        auto reduce_max_batch = [](int64_t local_batch) {
-            auto extent =
-                torch::full({1}, local_batch, torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA));
-            return execAllReduce({extent, ReduceOp::Max, false, ParallelMode::DP_AND_TP}).buffer.item<int64_t>();
+        auto reduce_max_batch = [this, &stopped](int64_t local_batch) {
+            auto state = synchronizeDpStepState(local_batch);
+            stopped    = !state;
+            return state;
         };
         alignDsv4DpDecodeBatch(
             streams,
@@ -1024,7 +1076,7 @@ void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
             },
             decodeFixedBs(),
             isMTPEagle());
-        return;
+        return stopped;
     }
     if (isMTPEagle()) {
         int        propose_step   = sp_config.gen_num_per_cycle;
@@ -1082,6 +1134,7 @@ void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
             streams.emplace_back(createMinFakeStream(1));
         }
     }
+    return false;
 }
 
 }  // namespace rtp_llm
