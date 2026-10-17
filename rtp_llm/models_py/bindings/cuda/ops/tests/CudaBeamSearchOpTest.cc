@@ -12,3 +12,11 @@ TEST_F(CudaBeamSearchOpTest, simpleTest) {
 TEST_F(CudaBeamSearchOpTest, variableBeamWidthTest) {
     runVariableBeamWidthTests();
 }
+
+TEST_F(CudaBeamSearchOpTest, prunedVocabV2Test) {
+    runPrunedVocabV2Tests();
+}
+
+TEST_F(CudaBeamSearchOpTest, unsupportedBeamWidthTest) {
+    runUnsupportedBeamWidthTests();
+}

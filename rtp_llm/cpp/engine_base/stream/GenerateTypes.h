@@ -1,7 +1,9 @@
 #pragma once
 #include "rtp_llm/cpp/multimodal_processor/V41Input.h"
 #include <cstdint>
+#include <limits>
 #include <optional>
+#include <stdexcept>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -78,12 +80,44 @@ public:
     }
 
     void updatePrefix(const std::vector<int>& prefix_prompt) {
+        if (input_embeddings_locs) {
+            for (const auto loc : *input_embeddings_locs) {
+                if (loc < 0 || prefix_prompt.size() > static_cast<size_t>(std::numeric_limits<int32_t>::max() - loc)) {
+                    throw std::invalid_argument("input_embeddings location overflows after adding prefix");
+                }
+            }
+        }
         prefix_length = prefix_prompt.size();
         auto prefix_tensor =
             torch::from_blob(const_cast<int*>(prefix_prompt.data()), {(int64_t)prefix_prompt.size()}, torch::kInt32);
         input_ids = torch::cat({prefix_tensor, input_ids}, 0);
+        // Multimodal preprocessing precedes system-prompt insertion. Keep its
+        // mask and locations in the same token coordinate system as input_ids.
+        if (text_tokens_mask && text_tokens_mask->defined()) {
+            text_tokens_mask =
+                torch::cat({torch::ones({prefix_length}, text_tokens_mask->options()), *text_tokens_mask}, 0);
+        }
+        if (mm_locs && mm_locs->defined()) {
+            mm_locs = *mm_locs + prefix_length;
+        }
+        if (v41_inputs) {
+            auto shifted = std::make_shared<V41RequestInputs>(*v41_inputs);
+            shifted->token_types =
+                torch::cat({torch::full({prefix_length}, -1, shifted->token_types.options()), shifted->token_types}, 0);
+            shifted->image_mask =
+                torch::cat({torch::zeros({prefix_length}, shifted->image_mask.options()), shifted->image_mask}, 0);
+            for (auto& image : shifted->images) {
+                image.start += prefix_length;
+            }
+            v41_inputs = std::move(shifted);
+        }
         if (custom_output_token_position >= 0) {
             custom_output_token_position += prefix_length;
+        }
+        if (input_embeddings_locs) {
+            for (auto& loc : input_embeddings_locs.value()) {
+                loc += prefix_length;
+            }
         }
     }
 
@@ -103,6 +137,9 @@ public:
     std::optional<std::vector<torch::Tensor>>   mm_position_ids;
     std::optional<std::vector<torch::Tensor>>   mm_extra_input;
     std::optional<MultimodalTokenLayout>        multimodal_token_layout;
+
+    std::optional<std::vector<torch::Tensor>> input_embeddings;
+    std::optional<std::vector<int32_t>>       input_embeddings_locs;
 
     int     prefix_length        = 0;
     int64_t begin_time_us        = 0;
@@ -174,8 +211,10 @@ public:
     AuxInfo       aux_info;
     ErrorInfo     error_info;
 
-    std::optional<torch::Tensor>      hidden_states;
-    std::optional<torch::Tensor>      all_hidden_states;
+    std::optional<torch::Tensor> hidden_states;
+    std::optional<torch::Tensor> all_hidden_states;
+    // Internal metadata for the shared wire field; legacy states stay untouched.
+    int64_t                           shared_all_hidden_states_length = 0;
     std::optional<torch::Tensor>      logits;
     std::optional<torch::Tensor>      loss;
     std::optional<PromptLogitsOutput> prompt_logits;

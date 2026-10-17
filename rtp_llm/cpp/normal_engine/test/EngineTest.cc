@@ -257,6 +257,7 @@ TEST_F(NormalEngineTest, testDecodeWarmupUsesWarmupCacheTopology) {
     KVCacheConfig kv_cache_config;
     runtime_config.warm_up         = true;
     auto params                    = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
+    params.runtime_config.max_generate_batch_size = 3;
     params.pd_sep_config.role_type = RoleType::DECODE;
 
     bool saw_decode_warmup             = false;
@@ -269,8 +270,11 @@ TEST_F(NormalEngineTest, testDecodeWarmupUsesWarmupCacheTopology) {
             EXPECT_EQ(inputs.kv_cache_group_tags, (std::vector<std::string>{"full"}));
             ASSERT_TRUE(inputs.kv_cache_block_id.defined());
             ASSERT_TRUE(inputs.kv_cache_kernel_block_id.defined());
+            EXPECT_EQ(inputs.input_lengths.numel(), 3);
             EXPECT_EQ(inputs.kv_cache_block_id.size(0), 1);
             EXPECT_EQ(inputs.kv_cache_kernel_block_id.size(0), 1);
+            EXPECT_EQ(inputs.kv_cache_block_id.size(1), 3);
+            EXPECT_EQ(inputs.kv_cache_kernel_block_id.size(1), 3);
         });
     };
     struct FactoryResetGuard {
@@ -446,6 +450,103 @@ TEST_F(NormalEngineTest, testPrefillWarmUpUsesCachelessSingleInput) {
     auto engine = std::make_shared<NormalEngine>(params, nullptr);
 
     EXPECT_TRUE(saw_cacheless_warmup);
+}
+
+std::shared_ptr<GenerateInput> makeInputEmbeddingsPolicyInput(bool with_embeddings) {
+    auto input             = std::make_shared<GenerateInput>();
+    input->input_ids       = torch::tensor({1, 2, 3}, torch::kInt32);
+    input->generate_config = std::make_shared<GenerateConfig>();
+    if (with_embeddings) {
+        input->input_embeddings      = std::vector<torch::Tensor>{torch::ones({1, 128}, torch::kFloat32)};
+        input->input_embeddings_locs = std::vector<int32_t>{0};
+    }
+    return input;
+}
+
+void configureStoppedMtpPolicyEngine(const std::shared_ptr<NormalEngine>& engine) {
+    EXPECT_TRUE(engine->stop().ok());
+    engine->propose_params_          = std::make_unique<ProposeModelEngineInitParams>();
+    engine->propose_params_->sp_type = SP_TYPE_MTP;
+}
+
+TEST_F(NormalEngineTest, testMtpInputEmbeddingsRejectedByEveryDirectEnqueueEntry) {
+    CustomConfig config;
+    auto         engine = createMockEngine(config);
+    configureStoppedMtpPolicyEngine(engine);
+
+    auto stream = engine->makeStream(makeInputEmbeddingsPolicyInput(true));
+    engine->enqueue(stream);
+    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+
+    auto input_stream = engine->enqueue(makeInputEmbeddingsPolicyInput(true));
+    EXPECT_EQ(input_stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+
+    auto [accepted, batch_streams] =
+        engine->enqueueMultiple({makeInputEmbeddingsPolicyInput(true), makeInputEmbeddingsPolicyInput(false)});
+    EXPECT_EQ(accepted, std::vector<bool>({false, false}));
+    ASSERT_EQ(batch_streams.size(), 2);
+    EXPECT_EQ(batch_streams[0]->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+    EXPECT_EQ(batch_streams[1]->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+}
+
+TEST_F(NormalEngineTest, testMtpTokenOnlyRequestsReachEveryDirectEnqueueEntry) {
+    CustomConfig config;
+    auto         engine = createMockEngine(config);
+    configureStoppedMtpPolicyEngine(engine);
+
+    auto stream = engine->makeStream(makeInputEmbeddingsPolicyInput(false));
+    engine->enqueue(stream);
+    EXPECT_NE(stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+
+    auto input_stream = engine->enqueue(makeInputEmbeddingsPolicyInput(false));
+    EXPECT_NE(input_stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+
+    auto [accepted, batch_streams] =
+        engine->enqueueMultiple({makeInputEmbeddingsPolicyInput(false), makeInputEmbeddingsPolicyInput(false)});
+    EXPECT_EQ(accepted, std::vector<bool>({true, true}));
+    ASSERT_EQ(batch_streams.size(), 2);
+    EXPECT_NE(batch_streams[0]->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+    EXPECT_NE(batch_streams[1]->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+}
+
+TEST_F(NormalEngineTest, testInputEmbeddingRuntimePolicyProtectsDirectEnqueue) {
+    CustomConfig config;
+    auto         engine = createMockEngine(config);
+    ASSERT_TRUE(engine->stop().ok());
+    engine->model_config_.hidden_size        = 128;
+    engine->model_supports_input_embeddings_ = true;
+    auto bad_width                           = makeInputEmbeddingsPolicyInput(true);
+    bad_width->input_embeddings              = std::vector<torch::Tensor>{torch::ones({1, 129})};
+    auto stream                              = engine->enqueue(bad_width);
+    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+    engine->ffn_disaggregate_config.enable_ffn_disaggregate = true;
+    stream                                                  = engine->makeStream(makeInputEmbeddingsPolicyInput(true));
+    engine->enqueue(stream);
+    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+    auto [accepted, streams] =
+        engine->enqueueMultiple({makeInputEmbeddingsPolicyInput(true), makeInputEmbeddingsPolicyInput(false)});
+    EXPECT_EQ(accepted, std::vector<bool>({false, false}));
+    EXPECT_EQ(streams[1]->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+    engine->ffn_disaggregate_config.enable_ffn_disaggregate = false;
+    engine->model_supports_input_embeddings_                = false;
+    stream                                                  = engine->enqueue(makeInputEmbeddingsPolicyInput(true));
+    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+}
+
+TEST_F(NormalEngineTest, AllSpeculativeModesRejectInputEmbeddings) {
+    CustomConfig config;
+    auto         engine = createMockEngine(config);
+    ASSERT_TRUE(engine->stop().ok());
+    engine->model_config_.hidden_size        = 128;
+    engine->model_supports_input_embeddings_ = true;
+    for (auto type :
+         {SP_TYPE_MTP, SP_TYPE_EAGLE, SP_TYPE_EAGLE3, SP_TYPE_DSPARK, SP_TYPE_VANILLA, SP_TYPE_DETERMINISTIC}) {
+        SCOPED_TRACE(static_cast<int>(type));
+        engine->propose_params_          = std::make_unique<ProposeModelEngineInitParams>();
+        engine->propose_params_->sp_type = type;
+        auto stream                      = engine->makeStream(makeInputEmbeddingsPolicyInput(true));
+        EXPECT_EQ(stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+    }
 }
 
 TEST_F(NormalEngineTest, testFp8KVCache) {

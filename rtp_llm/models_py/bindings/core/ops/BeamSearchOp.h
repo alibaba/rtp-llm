@@ -1,4 +1,5 @@
 #pragma once
+#include <algorithm>
 #include <torch/torch.h>
 
 namespace rtp_llm {
@@ -73,8 +74,9 @@ struct BeamSearchOpImpl: torch::nn::Module {
         auto max_seq_len = input.token_ids.size(1);
 
         // first topk from log softmax logits
-        // log_probs: [beam_width_in, beam_width_out]
-        auto [log_probs, index] = input.logits.log_softmax(-1).topk(beam_width_out, -1);
+        // Each input beam contributes at most its vocabulary size.
+        const auto stage1_topk  = std::min<int64_t>(input.logits.size(-1), beam_width_out);
+        auto [log_probs, index] = input.logits.log_softmax(-1).topk(stage1_topk, -1);
 
         // add cum_log_probs
         log_probs = log_probs + input.cum_log_probs.reshape({-1, 1});
@@ -92,7 +94,7 @@ struct BeamSearchOpImpl: torch::nn::Module {
         auto new_token_ids                = torch::gather(index.flatten(0, -1), 0, beam_indices);
 
         // keep track of beam indices
-        auto beam_indices_in = torch::div(beam_indices, beam_width_out, "floor").squeeze();
+        auto beam_indices_in = torch::div(beam_indices, stage1_topk, "floor").squeeze();
         // in case only one beam is selected
         if (beam_indices_in.sizes().empty()) {
             beam_indices_in.unsqueeze_(0);

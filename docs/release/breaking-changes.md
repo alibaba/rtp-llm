@@ -68,5 +68,6 @@ exactly as much as you would trust it to execute code inside your container.
 
 1. Reconfigure discovery and firewall rules to the new layout (default `9`).
 2. Do not set `--worker_info_port_num 8` or `WORKER_INFO_PORT_NUM=8` for services with DashSc gRPC enabled; startup validation requires `worker_info_port_num >= 9`.
+3. PromptGenerator disables DashSc, but deployments that also start a backend still require `worker_info_port_num >= 8` to cover the backend listeners through offset `+7`. PromptGenerator-only frontend deployments do not need this backend port block.
 
 See also: [DashSc gRPC — listen ports](../backend/DashSc-gRPC.md).

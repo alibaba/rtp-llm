@@ -313,7 +313,12 @@ class AttentionInputRoutingTest(unittest.TestCase):
 
         outputs = model.forward(
             SimpleNamespace(
-                input_ids=torch.tensor([1, 2]), capture_hidden_states=False
+                input_ids=torch.tensor([1, 2]),
+                capture_hidden_states=False,
+                input_embeddings=None,
+                input_embeddings_locs=None,
+                cuda_graph_input_embedding_overrides=None,
+                cuda_graph_input_embedding_mask=None,
             ),
             fmha_impl,
         )
