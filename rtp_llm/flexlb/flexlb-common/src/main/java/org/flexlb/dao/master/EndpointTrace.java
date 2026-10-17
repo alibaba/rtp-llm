@@ -35,10 +35,6 @@ public final class EndpointTrace {
         CONVERSION_STARTED,
         CONVERSION_COMPLETED,
         CONVERSION_FAILED,
-        SYNC_DISCOVERY,
-        SYNC_RETIREMENT,
-        SYNC_DISPATCH,
-        SYNC_REPORT,
         DISCOVERY_POLL_SKIPPED,
         ENDPOINT_AWAIT_BEGIN(true),
         ENDPOINT_AWAIT_END(true),
@@ -62,7 +58,6 @@ public final class EndpointTrace {
         RPC_COMPLETED,
         RPC_INITIATION_FAILED,
         RPC_STARTED,
-        RUNNER_ENDED,
         RUNNER_FAILED,
         RUNNER_REJECTED,
         RUNNER_STARTED,
@@ -143,15 +138,8 @@ public final class EndpointTrace {
                                String stage, boolean leaseReleased,
                                String rpcResult, String failureStage, String error,
                                PollTimes times, IndexWait indexWait, long skippedBusy, long rpcTimeoutMs,
-                               String outcome, String thread, long queueUs, long runUs) {
+                               String outcome) {
         public String pollId() {return kind + "-" + sequence;}
-
-        public String compact() {
-            var text = new StringBuilder().append("thread=").append(thread)
-                    .append(" queueUs=").append(queueUs).append(" runUs=").append(runUs);
-            Snapshot.appendPoll(text, "poll", this);
-            return text.toString();
-        }
     }
 
     public record Snapshot(long capturedAtMs, boolean retiring, String phase,
@@ -296,14 +284,12 @@ public final class EndpointTrace {
         private final AtomicReference<Stage> firstFailureStage = new AtomicReference<>();
         private volatile String error = "DETAILS_PENDING";
         private volatile String stage = "LEASE_ACQUIRED";
-        private volatile String thread;
         private volatile String rpcResult = "NOT_STARTED";
         private volatile String outcome;
         private volatile long rpcTimeoutMs;
 
         private volatile long runnerSubmittedNanos;
         private volatile long runnerStartedNanos;
-        private volatile long runnerEndedNanos;
         private volatile long rpcStartedNanos;
         private volatile long rpcCompletedNanos;
         private volatile long conversionStartedNanos;
@@ -334,11 +320,6 @@ public final class EndpointTrace {
             this.syncCycleId = cycle;
         }
 
-        /** A standalone operation uses its cycle as identity; endpoint polls use a lease sequence. */
-        public Poll(String kind, long cycle) {this(kind, cycle, cycle);}
-
-        public PollSnapshot snapshot() {return snapshot(System.nanoTime());}
-
         public void record(Stage point) {record(point, (Throwable) null);}
 
         public void record(Stage point, Throwable failure) {
@@ -346,8 +327,6 @@ public final class EndpointTrace {
             switch (point) {
                 case RUNNER_SUBMITTED -> runnerSubmittedNanos = now;
                 case RUNNER_STARTED -> runnerStartedNanos = now;
-                case SYNC_DISCOVERY -> thread = Thread.currentThread().getName();
-                case RUNNER_ENDED -> runnerEndedNanos = now;
                 case RPC_STARTED -> {
                     rpcStartedNanos = now;
                     rpcResult = "PENDING";
@@ -428,9 +407,7 @@ public final class EndpointTrace {
             return new PollSnapshot(id, syncCycleId, kind, startedAtMs,
                     stage, times.leaseEndMs() >= 0L, rpcResult,
                     failureStage == null ? null : failureStage.name(), failureStage == null ? null : error,
-                    times, wait, skippedBusy.get(), rpcTimeoutMs, outcome, thread,
-                    ongoingUs(runnerSubmittedNanos, runnerStartedNanos, now),
-                    ongoingUs(runnerStartedNanos, runnerEndedNanos, now));
+                    times, wait, skippedBusy.get(), rpcTimeoutMs, outcome);
         }
 
         private long sinceStartMs(long atNanos) {
@@ -453,11 +430,6 @@ public final class EndpointTrace {
                 scannedKeys, removedMappings,
                 error.get(), statusPoll == null ? null : statusPoll.snapshot(now),
                 cachePoll == null ? null : cachePoll.snapshot(now));
-    }
-
-    /** Unfinished intervals grow until their matching release; missing starts remain unknown. */
-    private static long ongoingUs(long startNanos, long endNanos, long now) {
-        return elapsedUs(startNanos, endNanos == 0L ? now : endNanos);
     }
 
     private static long ongoingTotalUs(long completedUs, long startNanos, long now) {

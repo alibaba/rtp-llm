@@ -23,43 +23,6 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class EndpointTraceTest {
-    @Test
-    void syncPollTracksQueueAndCompletionWithoutOccupyingWorkerPollSlots() throws Exception {
-        var workerTrace = new EndpointTrace();
-        workerTrace.beginPoll("STATUS", 6L).recordRpcStarted(5000L);
-        workerTrace.beginPoll("CACHE", 6L).record(Stage.POLL_SKIPPED, "CACHE_INTERVAL");
-        var before = workerTrace.snapshot();
-        var sync = new EndpointTrace.Poll("SYNC", 7L);
-        sync.record(Stage.RUNNER_SUBMITTED);
-        Thread.sleep(2);
-        var queued = sync.snapshot();
-        assertEquals("SYNC-7", queued.pollId());
-        assertEquals("RUNNER_SUBMITTED", queued.stage());
-        assertEquals(-1L, queued.times().runnerStartMs());
-        assertTrue(queued.queueUs() > 0L);
-        assertNull(queued.thread());
-        assertEquals(-1L, queued.runUs());
-        sync.record(Stage.RUNNER_STARTED);
-        sync.record(Stage.SYNC_DISCOVERY);
-        sync.record(Stage.SYNC_RETIREMENT);
-        var blocked = sync.snapshot();
-        assertEquals(Thread.currentThread().getName(), blocked.thread());
-        Thread.sleep(2);
-        var later = sync.snapshot();
-        assertEquals(blocked.queueUs(), later.queueUs(), "queue duration stops growing once started");
-        assertTrue(later.runUs() > blocked.runUs());
-        assertEquals("NOT_STARTED", later.rpcResult());
-        assertFalse(later.leaseReleased(), "a sync cycle does not own a Worker poll lease");
-        sync.record(Stage.RUNNER_ENDED);
-        assertEquals("RUNNER_ENDED", sync.snapshot().stage());
-        long completedRunUs = sync.snapshot().runUs();
-        Thread.sleep(2);
-        assertEquals(completedRunUs, sync.snapshot().runUs(), "thread occupancy freezes when the runner ends");
-        assertEquals(before.statusPoll().pollId(), workerTrace.snapshot().statusPoll().pollId());
-        assertEquals(before.cachePoll().pollId(), workerTrace.snapshot().cachePoll().pollId());
-        assertEquals("PENDING", workerTrace.snapshot().statusPoll().rpcResult());
-    }
-
     @ParameterizedTest
     @ValueSource(booleans = {true, false})
     void readingExceptionDetailsDoesNotBlockProgress(boolean pollFailure) throws Exception {

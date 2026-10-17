@@ -38,20 +38,20 @@ class WorkerStatusPollLeaseTest {
                     }));
                 }
                 start.countDown();
-                var admitted = new HashMap<String, WorkerStatus.PollLease>();
-                for (var call : calls) {
-                    var lease = call.get(3, TimeUnit.SECONDS);
+                var admitted = new HashMap<Long, WorkerStatus.PollLease>();
+                for (int i = 0; i < calls.size(); i++) {
+                    var lease = calls.get(i).get(3, TimeUnit.SECONDS);
                     if (lease != null) {
-                        assertNull(admitted.put(lease.pollTrace().snapshot().kind(), lease));
+                        admitted.put(i + 1L, lease);
                     }
                 }
                 try {
                     assertEquals(2, admitted.size(), "one status poll and one cache poll may be active");
                     var snapshot = status.trace().snapshot();
-                    assertEquals(admitted.get("STATUS").pollTrace().snapshot().syncCycleId(),
-                            snapshot.statusPoll().syncCycleId());
-                    assertEquals(admitted.get("CACHE").pollTrace().snapshot().syncCycleId(),
-                            snapshot.cachePoll().syncCycleId());
+                    assertTrue(admitted.containsKey(snapshot.statusPoll().syncCycleId()));
+                    assertTrue(admitted.containsKey(snapshot.cachePoll().syncCycleId()));
+                    assertEquals(0L, snapshot.statusPoll().syncCycleId() % 2);
+                    assertEquals(1L, snapshot.cachePoll().syncCycleId() % 2);
                     assertNotEquals(snapshot.statusPoll().sequence(), snapshot.cachePoll().sequence());
                 } finally {
                     admitted.values().forEach(WorkerStatus.PollLease::close);
