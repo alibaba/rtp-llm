@@ -119,7 +119,7 @@ class DiffusionGemma(BaseModel):
         config.has_pre_decoder_layernorm = False
         config.has_post_decoder_layernorm = True
         config.qk_norm = True
-        config.activation_type = "Geglu"
+        config.activation_type = "gated-gelu"
 
         # MoE: shared expert MLP + routed experts.
         config.inter_size = int(text["intermediate_size"])
