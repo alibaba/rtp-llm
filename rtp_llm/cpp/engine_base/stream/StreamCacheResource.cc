@@ -158,7 +158,7 @@ int StreamCacheResource::estimatePeakNeedBlocks(
                                                                    common_seq_len,
                                                                    remaining_tokens,
                                                                    reserve_step,
-                                                                   reuseCache(),
+                                                                   retainChunkCheckpoints(),
                                                                    target_batch_size);
 }
 
@@ -196,7 +196,7 @@ absl::Status StreamCacheResource::initKVBlock() {
         malloc_info.reuse_cache         = false;
         malloc_info.enable_cache_lookup = false;
     } else {
-        malloc_info.reuse_cache         = reuseCache();
+        malloc_info.reuse_cache         = retainChunkCheckpoints();
         malloc_info.enable_cache_lookup = enableCacheLookup();
     }
     malloc_info.enable_remove_skipped_blocks = false;
@@ -395,7 +395,7 @@ absl::Status StreamCacheResource::incrKVBlock(int seq_len_override, bool preserv
     malloc_info.complete_token_ids           = stream_->completeTokenIdsPtr();
     malloc_info.request_id                   = stream_->streamId();
     malloc_info.verbose                      = malloc_failed_times_ >= 10 ? malloc_failed_times_ % 100 == 0 : true;
-    malloc_info.reuse_cache                  = reuseCache();
+    malloc_info.reuse_cache                  = retainChunkCheckpoints();
     malloc_info.enable_cache_lookup          = enableCacheLookup();
     malloc_info.preserve_inflight            = preserve_inflight;
     malloc_info.incr_seq_len_override        = seq_len_override;

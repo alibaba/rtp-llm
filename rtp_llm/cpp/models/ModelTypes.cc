@@ -320,9 +320,12 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     if (mm_features_num) {
         mm_features_shape_t   = torch::empty({mm_features_num}, torch::kInt64).pin_memory();
         mm_features_shape_ptr = mm_features_shape_t.data_ptr<int64_t>();
-        for (int64_t i = 0; i < mm_features_num; ++i) {
-            mm_features_shape_ptr[i] =
-                inputs.multimodal_features.has_value() ? inputs.multimodal_features.value()[i].size(0) : 0;
+        // Counts are from rank 0; non-root may still hold a shorter list from the target pass.
+        if (parallelism_config.tp_rank == 0) {
+            for (int64_t i = 0; i < mm_features_num; ++i) {
+                mm_features_shape_ptr[i] =
+                    inputs.multimodal_features.has_value() ? inputs.multimodal_features.value()[i].size(0) : 0;
+            }
         }
         // CPU broadcast (UDS path; fallback handles cudaSyncAndCheck).
         execBroadcastCpu({{mm_features_shape_t}, 0});
@@ -334,9 +337,11 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     if (mm_extra_input_num) {
         mm_extra_input_shape_t   = torch::empty({mm_extra_input_num}, torch::kInt64).pin_memory();
         mm_extra_input_shape_ptr = mm_extra_input_shape_t.data_ptr<int64_t>();
-        for (int64_t i = 0; i < mm_extra_input_num; ++i) {
-            mm_extra_input_shape_ptr[i] =
-                inputs.mm_extra_input.has_value() ? inputs.mm_extra_input.value()[i].numel() : 0;
+        if (parallelism_config.tp_rank == 0) {
+            for (int64_t i = 0; i < mm_extra_input_num; ++i) {
+                mm_extra_input_shape_ptr[i] =
+                    inputs.mm_extra_input.has_value() ? inputs.mm_extra_input.value()[i].numel() : 0;
+            }
         }
         execBroadcast({{mm_extra_input_shape_t}, 0});
         execSyncCommunication(false);

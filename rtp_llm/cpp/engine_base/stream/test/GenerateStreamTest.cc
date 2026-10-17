@@ -1683,7 +1683,7 @@ TEST_F(GenerateStreamTest, testChunkedPrefillSpecUpdateMiddleChunkDiscards) {
     expectChunkWindow(stream, /*prefix=*/8, /*length=*/2, /*is_last=*/true);
 }
 
-TEST_F(GenerateStreamTest, testShortMultimodalContextUsesNormalPrefill) {
+TEST_F(GenerateStreamTest, testMultimodalContextPrefillWindows) {
     GenerateStreamBuilder builder;
     for (const auto role : {RoleType::PREFILL, RoleType::PDFUSION}) {
         for (const int input_length : {7, 8, 9}) {
@@ -1693,18 +1693,21 @@ TEST_F(GenerateStreamTest, testShortMultimodalContextUsesNormalPrefill) {
                 makeInputIds(input_length), role, /*chunk_size=*/8, [](GenerateInput& input, GenerateConfig&) {
                     input.multimodal_features = std::vector<torch::Tensor>{torch::zeros({2, 4})};
                 });
-            EXPECT_FALSE(stream->chunkedPrefillEnabled());
-            EXPECT_EQ(stream->hasError(), input_length > 8);
+            EXPECT_EQ(stream->chunkedPrefillEnabled(), input_length > 8);
+            ASSERT_FALSE(stream->hasError());
+            markRunning(stream);
             if (input_length > 8) {
-                EXPECT_EQ(stream->stopReason(), "chunked prefill incompatible: multimodal");
+                expectChunkWindow(stream, /*prefix=*/0, /*length=*/8, /*is_last=*/false);
+                updateOneToken(stream, 101);
+                EXPECT_EQ(stream->seqLength(), input_length);
+                expectChunkWindow(stream, /*prefix=*/8, /*length=*/1, /*is_last=*/true);
             } else {
-                markRunning(stream);
                 EXPECT_FALSE(stream->useChunkWindow());
                 EXPECT_EQ(stream->contextLength(), input_length);
-                updateOneToken(stream, 101);
-                EXPECT_FALSE(stream->isContextStream());
-                EXPECT_EQ(stream->seqLength(), input_length + 1);
             }
+            updateOneToken(stream, 101);
+            EXPECT_FALSE(stream->isContextStream());
+            EXPECT_EQ(stream->seqLength(), input_length + 1);
         }
     }
 }
@@ -1749,10 +1752,6 @@ TEST_F(GenerateStreamTest, testChunkedPrefillActivationGates) {
          [](GenerateInput&, GenerateConfig& config) { config.return_all_probs = ReturnAllProbsMode::DEFAULT; }},
         {"custom_output",
          [](GenerateInput& input, GenerateConfig&) { input.custom_output_token_position = 3; }},
-        {"multimodal",
-         [](GenerateInput& input, GenerateConfig&) {
-             input.multimodal_features = std::vector<torch::Tensor>{torch::Tensor()};
-         }},
     };
     for (const auto& test_case : rejection_cases) {
         SCOPED_TRACE(test_case.name);
