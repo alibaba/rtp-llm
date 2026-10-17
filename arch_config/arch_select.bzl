@@ -34,6 +34,8 @@ _CUDA13_ARM_DEFERRED = [
     "xfastertransformer_devel_icx",
     "decord",
     "av",
+    "torch",
+    "torchvision",
 ]
 
 # xgrammar's wheel metadata pulls apache-tvm-ffi (and triton on x86), which only
