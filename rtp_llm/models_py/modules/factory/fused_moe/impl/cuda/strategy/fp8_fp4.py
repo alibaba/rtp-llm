@@ -125,3 +125,73 @@ class CudaLocalLoopStrategy(_CudaFp8Fp4Strategy):
         )
 
         return LocalLoopExecutor
+
+
+class _CudaSm120Fp8Fp4Strategy(_CudaFp8Fp4Strategy):
+    """SM120 executors take routed top-k from a pass-through router.
+
+    They own any EP communication themselves and do not consume the Mega
+    fused gate pack.
+    """
+
+    def get_attributes(self) -> StrategyAttributes:
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.fp8_fp4_router import (
+            Fp8Fp4Router,
+        )
+
+        return StrategyAttributes(
+            router_class=Fp8Fp4Router,
+            executor_class=self.get_executor_class(),
+            quant_config=FusedMoEQuantConfig(
+                quant_dtype="fp8_fp4",
+                block_shape=[128, 32],
+            ),
+        )
+
+
+class CudaSm120GroupedFp4Strategy(_CudaSm120Fp8Fp4Strategy):
+    """SM120 counterpart of ``grouped_fp4``; exclusive with the SM100 one."""
+
+    strategy_name = "grouped_fp4"
+    requires_ep = False
+
+    @classmethod
+    def get_executor_class(cls) -> Type:
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.sm120_grouped_fp4 import (
+            Sm120GroupedFp4Executor,
+        )
+
+        return Sm120GroupedFp4Executor
+
+
+class CudaSm120FusedMoeStrategy(_CudaSm120Fp8Fp4Strategy):
+    strategy_name = "sm120_fused_moe"
+    requires_ep = True
+
+    @classmethod
+    def get_executor_class(cls) -> Type:
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.sm120_fused_moe import (
+            Sm120FusedMoeExecutor,
+        )
+
+        return Sm120FusedMoeExecutor
+
+
+class CudaSm120DecodeStrategy(_CudaSm120Fp8Fp4Strategy):
+    """Explicit-only DP/EP decode transport; never chosen by ``auto``."""
+
+    strategy_name = "sm120_decode"
+    requires_ep = True
+
+    @classmethod
+    def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
+        super().check_conditions(checker, config)
+        checker.check(config.moe_strategy == cls.strategy_name)
+
+    @classmethod
+    def get_executor_class(cls) -> Type:
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.sm120_decode import (
+            Sm120DecodeExecutor,
+        )
+
+        return Sm120DecodeExecutor

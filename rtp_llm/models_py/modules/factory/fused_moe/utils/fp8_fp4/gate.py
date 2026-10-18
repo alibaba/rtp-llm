@@ -22,6 +22,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import ExpertGatePayload
+from rtp_llm.models_py.utils.arch import is_sm120
 
 # Single-Triton-kernel router-gate epilogue for
 # score_func='sqrtsoftplus'.  Replaces ~7 elementwise/reduce/topk launches
@@ -239,10 +240,18 @@ class Gate(nn.Module):
         # FP32-everywhere path that previously emitted SIMT sgemm 128x128
         # (127× × 1.15 ms = 145 ms in the 64k+CP=4 trace).  Score numerics
         # then run in FP32 through softplus/sqrt/topk, same as before.
+        rows = x.size(0)
+        # Use one GEMM shape for single-token and small speculative-verify
+        # batches: SM120 small-M algorithms otherwise round differently.
+        x_gemm = (
+            F.pad(x, (0, 0, 0, 8 - rows))
+            if rows < 8 and x.is_cuda and is_sm120(x.device)
+            else x
+        )
         if os.environ.get("MOE_GATE_FP32", "0") == "1":
-            scores = F.linear(x.float(), self.weight.float())
+            scores = F.linear(x_gemm.float(), self.weight.float())[:rows]
         else:
-            scores = self._bf16_scores(x)
+            scores = self._bf16_scores(x_gemm)[:rows]
             if (
                 self.hash
                 and self.fuse_hash_gate
