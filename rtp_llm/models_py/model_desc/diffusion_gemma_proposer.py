@@ -15,6 +15,7 @@ cache through the proposer's reference to the main model.
 
 import logging
 import math
+import os
 from typing import Any, Optional
 
 import torch
@@ -255,6 +256,7 @@ class DiffusionGemmaProposer(nn.Module):
                 inputs, canvas, flat_positions, self_conditioning_logits
             )
             last_hidden = hidden
+            self._last_step = step
             logits = torch.nn.functional.linear(
                 hidden.to(embed_weight.dtype), embed_weight
             ).to(torch.float32)
@@ -291,6 +293,20 @@ class DiffusionGemmaProposer(nn.Module):
                 break
 
         final_tokens = argmax_canvas
+        if bool(os.environ.get("DGM_FI_DIAG", "")):
+            # Reuse bring-up (run 40/41): cache-hit queries degenerate to a
+            # 1-token response while cold queries are healthy; the anchor
+            # logit is correct, so this dump pinpoints whether the propose
+            # canvas itself is garbage or the C++ verify side rejects it.
+            print(
+                f"[dgm-fi] propose: steps_used={self._last_step} "
+                f"finished={finished.tolist()} prefix={prefix.tolist()} "
+                f"canvas[:12]={final_tokens.reshape(-1)[:12].tolist()} "
+                f"canvas_min={int(final_tokens.min().item())} "
+                f"canvas_max={int(final_tokens.max().item())} "
+                f"hidden_absmax={float(last_hidden.abs().max().item()):.3f}",
+                flush=True,
+            )
         # hidden rows must match the C++ query block (B * canvas_length); the
         # diffusion executor consumes only diffusion_tokens, so reuse the last
         # denoising hidden instead of a third forward.
