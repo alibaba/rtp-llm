@@ -68,14 +68,6 @@ public final class EndpointEventProjector {
         scheduler.onQueuedItemExpired(exactItem);
     }
 
-    public void onQueuedItemPreempted(ScheduledRequest victim, ScheduledRequest incoming) {
-        try {
-            scheduler.onQueuedItemPreempted(victim, incoming);
-        } catch (Throwable failure) {
-            logErrorNoFail("Queued preemption projection failed: request_id={}", victim.requestId(), failure);
-        }
-    }
-
     public void onQueueOfferFailure(
             ScheduledRequest exactItem, Throwable cause) {
         scheduler.onQueueOfferFailure(exactItem, cause);

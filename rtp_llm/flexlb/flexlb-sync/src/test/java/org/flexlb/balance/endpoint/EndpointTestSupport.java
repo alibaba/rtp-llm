@@ -256,36 +256,22 @@ public final class EndpointTestSupport {
         List<ScheduledRequest> items = List.copyOf(exactItems);
         List<PrefillState.RouteReservation> reservations =
                 new ArrayList<>(items.size());
-        boolean committed = false;
-        try {
-            for (ScheduledRequest item : items) {
-                PrefillState.ReservationResult<PrefillState.RouteReservation> result =
-                        endpoint.reserveRouteOwnership(
-                                item, predictedMs);
-                if (result.status()
-                        != PrefillState.CapacityStatus.ACQUIRED) {
-                    throw new IllegalStateException(
-                            "route reservation rejected: " + result.status());
+        PrefillEndpoint.RouteCommitAdmission admission = endpoint.tryBeginRouteCommitAdmission();
+        if (admission == null) {
+            throw new IllegalStateException("route endpoint retired");
+        }
+        try (admission) {
+            try {
+                for (ScheduledRequest item : items) {
+                    var result = admission.reserve(item, predictedMs);
+                    if (result.status() != PrefillState.CapacityStatus.ACQUIRED) {
+                        throw new IllegalStateException("route reservation rejected: " + result.status());
+                    }
+                    reservations.add(result.reservation());
                 }
-                reservations.add(result.reservation());
-            }
-            PrefillEndpoint.RouteCommitAdmission admission =
-                    endpoint.tryBeginRouteCommitAdmission();
-            if (admission == null) {
-                throw new IllegalStateException("route endpoint retired");
-            }
-            PrefillState.CommittedHandoff handoff;
-            try (admission) {
-                handoff = admission.commit(items, reservations);
-            }
-            committed = true;
-            return List.of(handoff);
-        } finally {
-            if (!committed) {
-                for (int index = reservations.size() - 1;
-                     index >= 0; index--) {
-                    reservations.get(index).close();
-                }
+                return List.of(admission.commit(items, reservations));
+            } finally {
+                reservations.forEach(PrefillState.RouteReservation::close);
             }
         }
     }
