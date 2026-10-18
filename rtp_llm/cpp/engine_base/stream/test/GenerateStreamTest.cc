@@ -22,69 +22,25 @@ using namespace std;
 
 namespace rtp_llm {
 
-TEST(CompleteTokenIdsTest, ImageHashIdentityAndShiftedReuseBoundaries) {
-    auto input               = std::make_shared<GenerateInput>();
-    input->input_ids         = torch::arange(16, torch::kInt32);
-    input->generate_config   = std::make_shared<GenerateConfig>();
-    auto          multimodal = std::make_shared<V41RequestInputs>();
-    V41ImageInput image;
-    image.start              = 4;
-    image.types              = torch::zeros({8}, torch::kInt32);
-    image.n_vit_h            = 2;
-    image.n_vit_w            = 2;
-    image.content_sha256     = std::string(64, 'a');
-    image.processor_identity = std::string(64, 'b');
-    multimodal->images.push_back(image);
-    input->v41_inputs = multimodal;
+TEST(CompleteTokenIdsTest, RowHashIdentityPreservesCopiedReuseBoundaries) {
+    auto input             = std::make_shared<GenerateInput>();
+    input->input_ids       = torch::arange(16, torch::kInt32);
+    input->generate_config = std::make_shared<GenerateConfig>();
+    input->multimodal_cache_spans =
+        std::make_shared<MultimodalCacheSpans>(MultimodalCacheSpans{{4, {97, 98, 63, 112, 58, 229, 155, 190}}});
     CompleteTokenIds tokens(1, 1, 32, 4);
     tokens.init(input);
-    EXPECT_TRUE(tokens.imageCacheIdentity(0, 4).empty());
-    EXPECT_FALSE(tokens.imageCacheIdentity(4, 4).empty());
-    EXPECT_TRUE(tokens.isValidReuseLength(4));
-    EXPECT_FALSE(tokens.isValidReuseLength(8));
-    EXPECT_TRUE(tokens.isValidReuseLength(12));
+    EXPECT_TRUE(tokens.multimodalCacheIdentity(0, 4).empty());
+    EXPECT_EQ(tokens.multimodalCacheIdentity(4, 4), (std::vector<int32_t>{-42, 0, 8, 0, 4, 97, 98, 63, 112}));
+    EXPECT_EQ(tokens.multimodalCacheIdentity(8, 4), (std::vector<int32_t>{-42, 0, 8, 4, 4, 58, 229, 155, 190}));
+    EXPECT_TRUE(tokens.multimodalCacheIdentity(12, 4).empty());
+    // Row hashes allow safe reuse inside an image; the fresh-token floor still applies.
+    EXPECT_TRUE(tokens.isValidReuseLength(8));
     EXPECT_FALSE(tokens.isValidReuseLength(12, 8));
-    CompleteTokenIds shifted(tokens, true, 2);
-    EXPECT_FALSE(shifted.isValidReuseLength(6));
-    EXPECT_TRUE(shifted.isValidReuseLength(10));
-    EXPECT_EQ(shifted.imageCacheIdentity(2, 4)[1], 2);
-    multimodal->images[0].content_sha256.clear();
-    EXPECT_TRUE(tokens.isValidReuseLength(4));
-    EXPECT_FALSE(tokens.isValidReuseLength(12));
-    EXPECT_FALSE(tokens.isValidReuseLength(16));
-}
-
-TEST(CompleteTokenIdsTest, ImageHashIdentityUsesLengthDelimitedBytes) {
-    // Shared with server/test/cache_key_routing_test.py. Identity RPC strings
-    // are opaque UTF-8, not hexadecimal digests or a fixed-width word list.
-    auto input               = std::make_shared<GenerateInput>();
-    input->input_ids         = torch::arange(16, torch::kInt32);
-    input->generate_config   = std::make_shared<GenerateConfig>();
-    auto          multimodal = std::make_shared<V41RequestInputs>();
-    V41ImageInput image;
-    image.start              = 4;
-    image.types              = torch::zeros({8}, torch::kInt32);
-    image.n_vit_h            = 2;
-    image.n_vit_w            = 2;
-    image.content_sha256     = "ab?";
-    image.processor_identity = "p:\xe5\x9b\xbe";
-    multimodal->images.push_back(image);
-    input->v41_inputs = multimodal;
-    CompleteTokenIds tokens(1, 1, 32, 4);
-    tokens.init(input);
-    const std::vector<int32_t> expected = {-41, 4, 12, 2, 2, 3, 97, 98, 63, 5, 112, 58, 229, 155, 190};
-    EXPECT_TRUE(tokens.imageCacheIdentity(0, 4).empty());
-    EXPECT_EQ(tokens.imageCacheIdentity(4, 4), expected);
-    EXPECT_EQ(tokens.imageCacheIdentity(8, 4), expected);
-    EXPECT_TRUE(tokens.imageCacheIdentity(12, 4).empty());
-    auto complete = std::make_shared<CompleteTokenIds>(tokens, true, 0);
-    auto resource = std::make_shared<BatchKVCacheResource>();
-    resource->resetBatchSize(1);
-    initCacheKeys(resource, complete, 4, 41);
-    const CacheKeysType expected_keys = {
-        556723330460289837LL, 1094575162337917127LL, -8416381023089338704LL, 2888375575027288070LL};
-    EXPECT_EQ(resource->cacheKeys(0), expected_keys);
-    EXPECT_EQ(CPSlotMapper(0, 4, 4).canonicalCacheKeys(resource->cacheKeys(0)), (CacheKeysType{2888375575027288070LL}));
+    CompleteTokenIds copied(tokens, true);
+    EXPECT_EQ(copied.multimodalCacheIdentity(4, 4), tokens.multimodalCacheIdentity(4, 4));
+    EXPECT_TRUE(copied.isValidReuseLength(8));
+    EXPECT_FALSE(copied.isValidReuseLength(12, 8));
 }
 
 TEST(GenerateInputTest, PrefixPreservesCustomOutputTokenIdentity) {
@@ -94,6 +50,45 @@ TEST(GenerateInputTest, PrefixPreservesCustomOutputTokenIdentity) {
     input.updatePrefix({2, 3});
     EXPECT_EQ(input.custom_output_token_position, 2);
     EXPECT_EQ(input.input_ids[input.custom_output_token_position].item<int>(), 7);
+}
+
+TEST(GenerateInputTest, PrefixShiftsPdCacheOnlySidecarWithoutTextMask) {
+    GenerateInput input;
+    input.input_ids = torch::tensor({11, 129264, 129264, 14}, torch::kInt32);
+    auto spans      = std::make_shared<MultimodalCacheSpans>();
+    spans->push_back(MultimodalCacheSpan{1, {101, 102}});
+    input.multimodal_cache_spans = spans;
+
+    EXPECT_NO_THROW(input.updatePrefix({7, 8}));
+    EXPECT_EQ(input.prefix_length, 2);
+    EXPECT_TRUE(torch::equal(input.input_ids, torch::tensor({7, 8, 11, 129264, 129264, 14}, torch::kInt32)));
+    ASSERT_TRUE(input.multimodal_cache_spans);
+    ASSERT_EQ(input.multimodal_cache_spans->size(), 1u);
+    EXPECT_NE(input.multimodal_cache_spans.get(), spans.get());
+    EXPECT_EQ(input.multimodal_cache_spans->front().offset, 3);
+    EXPECT_EQ(input.multimodal_cache_spans->front().row_hashes, (std::vector<int32_t>{101, 102}));
+    EXPECT_EQ(spans->front().offset, 1);
+}
+
+TEST(GenerateInputTest, PrefixStillRejectsExecutableMultimodalInputWithoutTextMask) {
+    GenerateInput input;
+    input.input_ids           = torch::tensor({11, 129264, 14}, torch::kInt32);
+    input.mm_locs             = torch::tensor({1}, torch::kInt32);
+    input.multimodal_features = std::vector<torch::Tensor>{torch::ones({1, 4})};
+
+    EXPECT_THROW(input.updatePrefix({7}), std::invalid_argument);
+    EXPECT_TRUE(torch::equal(input.input_ids, torch::tensor({11, 129264, 14}, torch::kInt32)));
+    EXPECT_EQ(input.prefix_length, 0);
+}
+
+TEST(GenerateInputTest, PrefixStillRejectsRawMultimodalInputWithoutSidecarOrTextMask) {
+    GenerateInput input;
+    input.input_ids         = torch::tensor({11, 129264, 14}, torch::kInt32);
+    input.multimodal_inputs = std::vector<MultimodalInput>{MultimodalInput("image")};
+
+    EXPECT_THROW(input.updatePrefix({7}), std::invalid_argument);
+    EXPECT_TRUE(torch::equal(input.input_ids, torch::tensor({11, 129264, 14}, torch::kInt32)));
+    EXPECT_EQ(input.prefix_length, 0);
 }
 
 class GenerateStreamBuilder {
