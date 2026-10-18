@@ -30,22 +30,36 @@
       "result": {
         "id": "chat-",
         "object": "chat.completion",
-        "created": 0,
+        "created": 1792281581,
         "model": "",
         "choices": [
           {
             "index": 0,
             "message": {
               "role": "assistant",
-              "content": ""
+              "content": "<|channel><|channel>thought\n<channel|>A young woman sits on the beach, smiling as she gives her Labrador dog a treat during sunset.",
+              "name": null,
+              "reasoning_content": null,
+              "function_call": null,
+              "tool_calls": null,
+              "partial": false,
+              "tool_call_id": null
             },
-            "finish_reason": "stop"
+            "finish_reason": "length",
+            "logprobs": null
           }
         ],
         "usage": {
-          "prompt_tokens": 0,
-          "completion_tokens": 0,
-          "total_tokens": 0
+          "prompt_tokens": 278,
+          "total_tokens": 534,
+          "completion_tokens": 256,
+          "completion_tokens_details": null,
+          "prompt_tokens_details": {
+            "audio_tokens": null,
+            "cached_tokens": null,
+            "image_tokens": 260,
+            "video_tokens": null
+          }
         }
       }
     },
@@ -77,22 +91,36 @@
       "result": {
         "id": "chat-",
         "object": "chat.completion",
-        "created": 0,
+        "created": 1792281591,
         "model": "",
         "choices": [
           {
             "index": 0,
             "message": {
               "role": "assistant",
-              "content": ""
+              "content": "<|channel><|channel>thought\n<channel|>The dominant colors in this picture are:\n\n*   **Warm yellows and oranges:** These tones are prominent in the sunset light casting across the sky, sand, and the dog's fur.\n*   **Neutral tans and greys:** The sand on the beach is composed of soft, neutral beige and grey tones.\n*   **Muted blues and blacks:** The woman's checkered plaid shirt and jeans provide a darker contrast to the bright environment.\n*   **Soft whites:** The foam on the crashing waves and the brightest area of the sky near the sun add hints of light, airy white.",
+              "name": null,
+              "reasoning_content": null,
+              "function_call": null,
+              "tool_calls": null,
+              "partial": false,
+              "tool_call_id": null
             },
-            "finish_reason": "stop"
+            "finish_reason": "length",
+            "logprobs": null
           }
         ],
         "usage": {
-          "prompt_tokens": 0,
-          "completion_tokens": 0,
-          "total_tokens": 0
+          "prompt_tokens": 277,
+          "total_tokens": 533,
+          "completion_tokens": 256,
+          "completion_tokens_details": null,
+          "prompt_tokens_details": {
+            "audio_tokens": null,
+            "cached_tokens": null,
+            "image_tokens": 260,
+            "video_tokens": null
+          }
         }
       }
     },
@@ -130,22 +158,36 @@
       "result": {
         "id": "chat-",
         "object": "chat.completion",
-        "created": 0,
+        "created": 1792281596,
         "model": "",
         "choices": [
           {
             "index": 0,
             "message": {
               "role": "assistant",
-              "content": ""
+              "content": "<|channel><|channel>thought\n<channel|>The two images provided are identical. Both show a woman sitting on a beach at sunset, playing with a large Labrador retriever that is giving her a paw.",
+              "name": null,
+              "reasoning_content": null,
+              "function_call": null,
+              "tool_calls": null,
+              "partial": false,
+              "tool_call_id": null
             },
-            "finish_reason": "stop"
+            "finish_reason": "length",
+            "logprobs": null
           }
         ],
         "usage": {
-          "prompt_tokens": 0,
-          "completion_tokens": 0,
-          "total_tokens": 0
+          "prompt_tokens": 539,
+          "total_tokens": 795,
+          "completion_tokens": 256,
+          "completion_tokens_details": null,
+          "prompt_tokens_details": {
+            "audio_tokens": null,
+            "cached_tokens": null,
+            "image_tokens": 520,
+            "video_tokens": null
+          }
         }
       }
     }
