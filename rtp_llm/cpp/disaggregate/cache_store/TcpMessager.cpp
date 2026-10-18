@@ -93,4 +93,16 @@ bool TcpMessager::generateBlockInfo(BlockBufferInfo*                    block_in
     return true;
 }
 
+void TcpMessager::stop() {
+    // Idempotent: TcpServer::stop and TcpClient::stop are already guarded on
+    // their members; stopping quiesces the ANet metric reporter threads while
+    // the process-global kmonitor factory is still alive.
+    if (tcp_server_) {
+        tcp_server_->stop();
+    }
+    if (tcp_client_) {
+        tcp_client_->stop();
+    }
+}
+
 }  // namespace rtp_llm

@@ -15,9 +15,11 @@ public:
     bool                                  init(int io_thread_count);
     std::shared_ptr<arpc::RPCChannelBase> getChannel(const std::string& ip, uint32_t port);
     std::shared_ptr<TransferConnection>   getTransferConnection(const std::string& ip, uint32_t port, int device_id);
+    // Quiesce the channel manager/transport (and the ANet metric reporter) at
+    // controlled shutdown; idempotent, and the destructor remains the backstop.
+    void stop();
 
 private:
-    void                                  stop();
     std::shared_ptr<arpc::RPCChannelBase> openChannel(const std::string& spec);
 
 private:

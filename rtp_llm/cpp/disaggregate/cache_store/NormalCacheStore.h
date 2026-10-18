@@ -8,6 +8,8 @@
 #include "autil/ThreadPool.h"
 
 #include <memory>
+#include <atomic>
+#include <mutex>
 
 namespace rtp_llm {
 
@@ -46,15 +48,19 @@ public:
     storeBuffers(const std::vector<std::shared_ptr<RequestBlockBuffer>>& request_block_buffers,
                  int64_t                                                 timeout_ms) override;
 
-    std::shared_ptr<RemoteStoreTask> submitRemoteStoreTask(const std::shared_ptr<RemoteStoreRequest>& request,
-                                                           const std::shared_ptr<CacheStoreRemoteStoreMetricsCollector>& collector,
-                                                           RemoteStoreTask::CheckCancelFunc check_cancel_func) override;
-    void                             releaseRemoteStoreTask(const std::shared_ptr<RemoteStoreTask>& task) override;
+    std::shared_ptr<RemoteStoreTask>
+         submitRemoteStoreTask(const std::shared_ptr<RemoteStoreRequest>&                    request,
+                               const std::shared_ptr<CacheStoreRemoteStoreMetricsCollector>& collector,
+                               RemoteStoreTask::CheckCancelFunc                              check_cancel_func) override;
+    void releaseRemoteStoreTask(const std::shared_ptr<RemoteStoreTask>& task) override;
 
     bool                         regUserBuffers(const std::vector<std::shared_ptr<BlockBuffer>>& buffers) override;
     std::shared_ptr<BlockBuffer> findUserBuffer(const std::string& buffer_key) override;
 
     void markRequestEnd(const std::string& requestid);
+
+    // Drains local work before stopping the transport and its metric reporters.
+    void stopTransport() override;
 
     void debugInfo() override;
 
@@ -79,18 +85,21 @@ private:
     const std::shared_ptr<RequestBlockBufferStore>& getRequestBlockBufferStore() const;
 
 private:
-    bool                                                                             thread_pool_close_{false};
+    std::atomic<bool>                                                                thread_pool_close_{false};
+    std::once_flag                                                                   transport_stop_once_;
     int                                                                              device_id_{-1};
     CacheStoreInitParams                                                             params_;
     std::shared_ptr<MemoryUtil>                                                      memory_util_;
     std::shared_ptr<RequestBlockBufferStore>                                         request_block_buffer_store_;
     std::shared_ptr<Messager>                                                        messager_;
-    autil::ThreadPoolBasePtr                                                         thread_pool_;  // task executor
+    autil::ThreadPoolPtr                                                             thread_pool_;  // task executor
     kmonitor::MetricsReporterPtr                                                     metrics_reporter_;
     std::shared_mutex                                                                remote_store_tasks_mutex_;
     std::unordered_map<std::string, std::list<std::shared_ptr<RemoteStoreTaskImpl>>> remote_store_tasks_;
     std::shared_mutex                                                                store_tasks_mutex_;
-    std::unordered_map<std::shared_ptr<RequestBlockBuffer>, std::pair<CacheStoreStoreDoneCallback, std::function<void()>>> store_tasks_;
+    std::unordered_map<std::shared_ptr<RequestBlockBuffer>,
+                       std::pair<CacheStoreStoreDoneCallback, std::function<void()>>>
+        store_tasks_;
 };
 
 }  // namespace rtp_llm

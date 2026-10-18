@@ -2,6 +2,8 @@
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
+#include "rtp_llm/cpp/model_utils/Dsv4MoeStrategy.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
@@ -92,7 +94,7 @@ public:
         resource_context_.cache_manager = std::move(previous_cache_manager_);
     }
 
-    ScopedWarmUpCacheManagerBinding(const ScopedWarmUpCacheManagerBinding&) = delete;
+    ScopedWarmUpCacheManagerBinding(const ScopedWarmUpCacheManagerBinding&)            = delete;
     ScopedWarmUpCacheManagerBinding& operator=(const ScopedWarmUpCacheManagerBinding&) = delete;
 
 private:
@@ -162,6 +164,20 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
             "GENERATION_PREFILL_CAPTURE_CONFIG does not support speculative execution in the first version; "
             "remove the generation-prefill configuration when using speculative execution on PDFUSION (type=%s)",
             SpeculativeExecutionConfig::to_string(sp_config.type).c_str());
+    }
+    const auto resolved_moe_strategy = resolveModelMoeStrategy(
+        model_config_.model_type, params.moe_config.moe_strategy, std::getenv("DSV4_MOE_STRATEGY"));
+    if (resolved_moe_strategy == "sm120_decode") {
+        RTP_LLM_CHECK_WITH_INFO(!params.hw_kernel_config.enable_cuda_graph,
+                                "sm120_decode requires eager execution; disable CUDA graphs");
+        RTP_LLM_CHECK_WITH_INFO(pd_sep_config.role_type == RoleType::DECODE && parallelism_config.pp_size == 1
+                                    && parallelism_config.tp_size == 1 && parallelism_config.dp_size > 1
+                                    && parallelism_config.ep_size == parallelism_config.dp_size
+                                    && parallelism_config.world_size == parallelism_config.dp_size
+                                    && !parallelism_config.prefill_cp_config.is_enabled()
+                                    && !ffn_disaggregate_config.enable_ffn_disaggregate,
+                                "sm120_decode requires a separate DECODE role with PP1, TP1 and DP=EP=WORLD");
+        dp_stop_sync_ = true;
     }
     if (!model_config_.output_vocab_ids.empty()) {
         RTP_LLM_CHECK_WITH_INFO(sp_config.type == SP_TYPE_NONE && !propose_params_,
@@ -332,7 +348,7 @@ absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(const std::shared_ptr<Gen
                                                        preRunMode                            mode) {
     c10::InferenceMode inference_guard(true);
 
-    auto stream = std::make_shared<NormalGenerateStream>(generate_input,
+    auto       stream       = std::make_shared<NormalGenerateStream>(generate_input,
                                                          model_config_,
                                                          runtime_config,
                                                          resource_context_,
@@ -531,7 +547,7 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
         ScopedWarmUpCacheManagerBinding cache_binding(resource_context_, cache_manager);
         THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::decode_warm_up));
     }
-    const auto max_consumed         = getGpuExecStatus().device_memory_status.max_consumed_bytes;
+    const auto max_consumed = getGpuExecStatus().device_memory_status.max_consumed_bytes;
     rtp_llm::setTraceMemory(false);
     (void)executor_.reset(nullptr);
     cudaDeviceSynchronize();
@@ -662,19 +678,28 @@ absl::Status NormalEngine::startLoop() {
         RTP_LLM_LOG_INFO("init system prompt done");
     }
     RTP_LLM_LOG_INFO("start normal engine loop");
-    running_     = true;
-    loop_thread_ = autil::Thread::createThread(std::bind(&NormalEngine::loop, this), "normal_engine_loop");
+    stop_requested_ = false;
+    running_        = true;
+    loop_thread_    = autil::Thread::createThread(std::bind(&NormalEngine::loop, this), "normal_engine_loop");
     return absl::OkStatus();
 }
 
 absl::Status NormalEngine::stop() {
     RTP_LLM_LOG_INFO("stop normal engine");
-    running_ = false;
+    stop_requested_ = true;
     RETURN_IF_STATUS_ERROR(scheduler_->stop());
     loop_thread_->join();
     // Join the async dispatch runner and release the dispatcher-owned worker pool.
     executor_.reset();
+    // Python models, streams and RPC owners can retain the cache manager after
+    // engine stop, so its destructor is too late to quiesce reporting.
     resource_context_.cache_manager->stopMetricsReporter();
+    // The cache store's TCP transport runs ANet metric reporter threads into
+    // the process-global kmonitor; destructor-only teardown can run after the
+    // kmonitor factory shuts down. Cache buffers stay intact for their owners.
+    if (auto cache_store = resource_context_.cache_manager->getCacheStore()) {
+        cache_store->stopTransport();
+    }
     return absl::OkStatus();
 }
 
@@ -690,6 +715,30 @@ void NormalEngine::loop() {
             THROW_IF_STATUS_ERROR(trySaveStepError());
         }
     }
+}
+
+bool NormalEngine::synchronizeStopRequested() {
+    const bool local_stop = stop_requested_.load();
+    // Only the admitted TP1/DP=EP=WORLD decode role shares this vote.
+    // Idle peers must reach it before entering the next MoE collective round.
+    if (dp_stop_sync_) {
+        auto flag =
+            torch::full({1}, local_stop ? 1 : 0, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+        return execAllReduce({flag, ReduceOp::Max, false, ParallelMode::DP_AND_TP}).buffer.item<int32_t>() != 0;
+    }
+    // Other DP topologies and FFN disaggregation keep their local protocol.
+    if (ffn_disaggregate_config.enable_ffn_disaggregate || parallelism_config.dp_size > 1) {
+        return local_stop;
+    }
+    if (parallelism_config.tp_size > 1) {
+        // Keep idle TP followers on the CPU transport while the root scheduler
+        // sleeps. The root owns admission and the final stop frame.
+        auto flag =
+            torch::full({1}, local_stop ? 1 : 0, torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
+        execBroadcastCpu({{flag}, 0});
+        return flag.item<int32_t>() != 0;
+    }
+    return local_stop;
 }
 
 absl::Status NormalEngine::trySaveStepError() const {
@@ -823,7 +872,7 @@ NormalEngine::enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>&
 
 absl::Status NormalEngine::step() try {
     RTP_LLM_PROFILE_SCOPE("engine.normal.step_work");
-    while (pause_) {
+    while (pause_ && !stop_requested_) {
         // wait 50ms if system paused.
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
@@ -835,6 +884,17 @@ absl::Status NormalEngine::step() try {
             RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.schedule(reserve_step=%d)", reserve_step_);
             CHECK_AND_ASSIGN(streams, scheduler_->schedule());
         }
+    }
+    const bool stop = running_ && synchronizeStopRequested();
+    if (stop) {
+        stop_requested_ = true;
+        running_        = false;
+        // A peer may receive the shared stop before its own RPC drain begins.
+        // Wake its requests too, so shutdown cannot wait on an exited engine.
+        RETURN_IF_STATUS_ERROR(scheduler_->stop());
+        return absl::OkStatus();
+    }
+    if (parallelism_config.tp_rank == 0 && !ffn_disaggregate_config.is_ffn_service()) {
         if (parallelism_config.dp_size > 1) {
             RTP_LLM_PROFILE_SCOPE("engine.normal.may_add_fake_stream_work");
             mayAddFakeStream(streams);

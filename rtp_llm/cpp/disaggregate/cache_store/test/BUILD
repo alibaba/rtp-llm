@@ -43,7 +43,7 @@ cc_library(
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ],
-    visibility=['//visibility:public'],
+    visibility=["//visibility:public"],
 )
 
 cc_test(

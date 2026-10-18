@@ -57,6 +57,7 @@ private:
     void                            initLoadBalance();
     absl::Status                    trySaveStepError() const;
     void                            loop();
+    bool                            synchronizeStopRequested();
     void                            normalizeSystemPromptCacheConfig();
     void                            initCacheManager(std::optional<WarmUpResult> warm_up_result);
     static void                     initializeAndPublishCacheManager(ResourceContext&                            resource_context,
@@ -82,6 +83,7 @@ private:
 private:
     autil::ThreadPtr                              loop_thread_;
     std::atomic<bool>                             running_{false};
+    std::atomic<bool>                             stop_requested_{false};
     std::unique_ptr<Executor>                     executor_;
     ModelConfig                                   model_config_;
     py::object                                    custom_output_selector_;
@@ -99,6 +101,7 @@ private:
     std::unique_ptr<ProposeModelEngineInitParams> propose_params_;
     StepWindowProfiler                            step_profiler_;
     int                                           reserve_step_ = 0;
+    bool                                          dp_stop_sync_ = false;
 };
 
 }  // namespace rtp_llm

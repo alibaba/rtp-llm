@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/config/EplbConfig.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
+#include "rtp_llm/cpp/model_utils/Dsv4MoeStrategy.h"
 #include <cstdint>
 #include <memory>
 #include <cstdlib>
@@ -65,6 +66,9 @@ public:
             act_qscheme = rtp_llm::QScheme::Qint8PerToken;
         }
 
+        auto resolved_moe_config = moe_config;
+        resolved_moe_config.moe_strategy =
+            resolveModelMoeStrategy(model_config.model_type, moe_config.moe_strategy, std::getenv("DSV4_MOE_STRATEGY"));
         return {attention_config,
                 ffn_config,
                 model_config.norm_type,
@@ -79,7 +83,9 @@ public:
                 model_config.input_embedding_scalar,
                 model_config.residual_scalar,
                 model_config.reverse_e_h_norm,
-                moe_config};
+                resolved_moe_config,
+                !model_config.has_positional_encoding && !model_config.mm_model_config.is_multimodal
+                    && model_config.mm_model_config.mm_position_ids_style == 0};
     }
 
     virtual ~Executor() {};

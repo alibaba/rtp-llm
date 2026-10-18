@@ -627,8 +627,11 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         // Row count identifies global versus rank-local hidden input. The
         // model capability only resolves the small-input case where those
         // counts happen to be equal.
-        context_parallel_processor_ = ContextParallelProcessorFactory::create(
-            ProcessorType::ZIG_ZAG, params.parallelism_config, has_mtp_hidden_buffer_);
+        context_parallel_processor_ =
+            ContextParallelProcessorFactory::create(ProcessorType::ZIG_ZAG,
+                                                    params.parallelism_config,
+                                                    has_mtp_hidden_buffer_,
+                                                    params.description.uses_default_position_ids);
         RTP_LLM_LOG_INFO("Context parallel processor initialized with ZIG_ZAG strategy, prefer_local_hidden_states=%d.",
                          static_cast<int>(has_mtp_hidden_buffer_));
     }
