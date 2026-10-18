@@ -911,8 +911,7 @@ public class DefaultBatchDispatcher {
             throw new IllegalArgumentException("generateInputPb is missing for request " + item.requestId());
         }
         EngineRpcService.GenerateInputPB.Builder input =
-                EngineRpcService.GenerateInputPB.newBuilder();
-        input.mergeFrom(generateInput);
+                GenerateInputPayload.parse(generateInput).toWireBuilder();
         if (input.getRequestId() != item.requestId()) {
             throw new IllegalArgumentException("request_id mismatch between schedule request and GenerateInputPB");
         }
