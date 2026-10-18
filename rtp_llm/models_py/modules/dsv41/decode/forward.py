@@ -19,6 +19,7 @@ decode impl.
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from typing import Any, Dict, Optional, Tuple
 
 import torch
@@ -118,6 +119,8 @@ def build_paged_pool_specs(
     saved_kv: Dict[int, Any] = {}
     present_tags = set(map(str, getattr(kv_cache, "group_tags", ())))
     has_decoder_swa = DECODER_SWA_KV in present_tags
+    owned_groups = getattr(kv_cache, "get_layer_cache_groups", None)
+    layer_tags: Dict[int, set[str]] = {}
     try:
         # #50: STATE pool block tables must also flow through metadata so
         # compressor/indexer can gather their fp32 state on each decode
@@ -137,6 +140,18 @@ def build_paged_pool_specs(
                 continue
             for layer in v4.layers:
                 attn = layer.attn
+                # Query declared ownership before probing a pool. A native
+                # missing-tag probe logs an assertion and constructs a full
+                # C++ backtrace even when _pool_entries_per_block catches it.
+                # Keep this map forward-local: cache replacement or topology
+                # changes on a later step must be observed immediately.
+                if callable(owned_groups):
+                    if attn.layer_id not in layer_tags:
+                        layer_tags[attn.layer_id] = {
+                            str(cache.tag) for cache in owned_groups(attn.layer_id)
+                        }
+                    if attn_type not in layer_tags[attn.layer_id]:
+                        continue
                 if id(attn) not in saved_kv:
                     saved_kv[id(attn)] = (
                         attn,
@@ -145,7 +160,15 @@ def build_paged_pool_specs(
                     )
                     attn._kv_cache = kv_cache
                 if has_decoder_swa and attn_type in (SWA_KV, DECODER_SWA_KV):
-                    if swa_region_for_layer(kv_cache, attn.layer_id) != attn_type:
+                    if callable(owned_groups):
+                        swa_region = (
+                            DECODER_SWA_KV
+                            if DECODER_SWA_KV in layer_tags[attn.layer_id]
+                            else SWA_KV
+                        )
+                    else:
+                        swa_region = swa_region_for_layer(kv_cache, attn.layer_id)
+                    if swa_region != attn_type:
                         continue
                     attn._swa_cache_region = attn_type
                     entries_per_block = attn._pool_entries_per_block(SWA_KV)
@@ -437,17 +460,31 @@ def forward_decode(
     if isinstance(fmha_impl, _graph_impl_types):
         meta = fmha_impl.metadata
     else:
-        paged_specs = build_paged_pool_specs(
-            kv_cache, v4, max_seq_len=int(v4_args.max_seq_len)
+        profile_prep = (
+            _profiler.record_function_ranges_enabled()
+            and _profiler._torch_profiler_enabled()
         )
-        meta = build_metadata_eager(
-            v4_args,
-            attn,
-            param_dev,
-            paged_specs,
-            kv_cache=kv_cache,
-            fp8_kv_cache=bool(getattr(v4, "fp8_kv_cache", False)),
-        )
+        with (
+            _profiler.record_function_range("dsv41.decode.pool_specs")
+            if profile_prep
+            else nullcontext()
+        ):
+            paged_specs = build_paged_pool_specs(
+                kv_cache, v4, max_seq_len=int(v4_args.max_seq_len)
+            )
+        with (
+            _profiler.record_function_range("dsv41.decode.metadata")
+            if profile_prep
+            else nullcontext()
+        ):
+            meta = build_metadata_eager(
+                v4_args,
+                attn,
+                param_dev,
+                paged_specs,
+                kv_cache=kv_cache,
+                fp8_kv_cache=bool(getattr(v4, "fp8_kv_cache", False)),
+            )
         if meta is None:
             # Empty batch (B == 0) — short-circuit with zero-row hidden.
             return PyModelOutputs(

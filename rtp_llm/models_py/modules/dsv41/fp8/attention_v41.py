@@ -14,6 +14,7 @@ from bisect import bisect_left
 import torch
 import torch.nn.functional as F
 
+from rtp_llm.device.device_type import is_cuda
 from rtp_llm.models_py.modules.dsv4.fp8._cp_slot_mapping import (
     cp_kv_slot_mapping,
     cp_state_slot_mapping,
@@ -658,22 +659,47 @@ class AttentionV41FP8(AttentionFP8):
             )
             self.index_weights = w[W.v4_indexer_weights_proj_w]
         self._pool_spec[CSA_STATE] = (torch.float32, 2 * self.head_dim)
-        self._pool_spec[SWA_KV] = (torch.uint8, swa_codec.ENTRY_BYTES)
-        # V4.1-Flash FP4 pools: GLOBAL regions 288B/entry, INDEX_K 68B/entry
-        # (fixed layouts; see _v41_fp4_triton and DSV4CacheConfigHelper).
-        self._pool_spec[CSA_KV] = (torch.uint8, FP4_GLOBAL_ENTRY_BYTES)
-        self._pool_spec[HCA_KV] = (torch.uint8, FP4_GLOBAL_ENTRY_BYTES)
+        from rtp_llm.models_py.modules.dsv41.kv_cache_layout import use_v4_kv_cache
+
+        self._use_v4_kv_cache = use_v4_kv_cache(self.wo_a_w.device)
+        self._swa_codec = swa_codec
+        if self._use_v4_kv_cache:
+            from . import _v41_sm90_v4_cache
+
+            self._swa_codec = _v41_sm90_v4_cache
+        self._pool_spec[SWA_KV] = (torch.uint8, self._swa_codec.ENTRY_BYTES)
+        # Hopper uses V4 planar FP8 pools for native paged decode. Blackwell
+        # retains the compact V4.1 records. INDEX_K remains FP4 on both.
+        global_bytes = 584 if self._use_v4_kv_cache else FP4_GLOBAL_ENTRY_BYTES
+        self._pool_spec[CSA_KV] = (torch.uint8, global_bytes)
+        self._pool_spec[HCA_KV] = (torch.uint8, global_bytes)
         self._pool_spec[INDEXER_KV] = (torch.uint8, FP4_INDEXER_ENTRY_BYTES)
         self._wo_a_groups_v41 = torch.nn.ModuleList()
-        scale_block = self.wo_a_w.shape[1] // self.wo_a_s.shape[1]
-        for group in range(self.n_groups):
-            begin, end = group * self.o_lora_rank, (group + 1) * self.o_lora_rank
-            self._wo_a_groups_v41.append(
-                _v4_fp8_linear(
-                    self.wo_a_w[begin:end].contiguous(),
-                    self.wo_a_s[begin // scale_block : end // scale_block].contiguous(),
-                )
+        self._sm90_wo_a = None
+        if (
+            is_cuda()
+            and self.wo_a_w.is_cuda
+            and torch.cuda.get_device_capability(self.wo_a_w.device) == (9, 0)
+        ):
+            from ._v41_sm90_output_projection import Sm90GroupedOutputProjection
+
+            # One prepared weight set for every group and both phases. Do not
+            # also construct eight independent transformed Humming weights.
+            self._sm90_wo_a = Sm90GroupedOutputProjection(
+                self._wo_a_stk_w, self._wo_a_stk_s
             )
+        else:
+            scale_block = self.wo_a_w.shape[1] // self.wo_a_s.shape[1]
+            for group in range(self.n_groups):
+                begin, end = group * self.o_lora_rank, (group + 1) * self.o_lora_rank
+                self._wo_a_groups_v41.append(
+                    _v4_fp8_linear(
+                        self.wo_a_w[begin:end].contiguous(),
+                        self.wo_a_s[
+                            begin // scale_block : end // scale_block
+                        ].contiguous(),
+                    )
+                )
 
         # Construction may run under torch.device("meta"). Prepare derived
         # weights only after the authoritative device/RoPE initialization.
@@ -757,6 +783,11 @@ class AttentionV41FP8(AttentionFP8):
 
         if o.ndim != 3 or o.shape[1:] != (self.n_heads, self.head_dim):
             o = o.reshape(-1, self.n_heads, self.head_dim)
+        sm90_wo_a = getattr(self, "_sm90_wo_a", None)
+        if sm90_wo_a is not None:
+            with record_function_range("dsv41.wo_a.sm90_grouped_w8a8"):
+                projected = sm90_wo_a(o, freqs)
+            return self.wo_b(projected, out=out)
         if _v41_output_projection.is_supported(
             o, freqs, self._wo_a_stk_w, self._wo_a_stk_s
         ):
@@ -805,14 +836,18 @@ class AttentionV41FP8(AttentionFP8):
         if self._swa_cp_byte_sliced():
             raw = self._pool_raw_u8(SWA_KV)
             if raw is not None:
-                return raw.shape[1] * self._cp_ctx.cp_size // swa_codec.ENTRY_BYTES
+                return (
+                    raw.shape[1]
+                    * self._cp_ctx.cp_size
+                    // getattr(self, "_swa_codec", swa_codec).ENTRY_BYTES
+                )
         return self._pool_entries_per_block(SWA_KV)
 
     def _decode_write_swa_fp8(self, kv, bsz, q_len, attn_metadata):
         slots = attn_metadata.pool_write_slot_mappings.get(SWA_KV)
         pool = self._pool_view_3d_fp8(SWA_KV)
         if slots is not None and pool is not None:
-            swa_codec.quantize_and_insert_swa_k_cache(
+            getattr(self, "_swa_codec", swa_codec).quantize_and_insert_swa_k_cache(
                 kv.reshape(-1, self.head_dim), pool, slots[: bsz * q_len]
             )
 
@@ -867,7 +902,9 @@ class AttentionV41FP8(AttentionFP8):
         if self._swa_cp_byte_sliced():
             raw = self._pool_raw_u8(SWA_KV)
             if raw is not None:
-                swa_codec.quantize_and_insert_k_cache_cp_byte_sliced(
+                getattr(
+                    self, "_swa_codec", swa_codec
+                ).quantize_and_insert_k_cache_cp_byte_sliced(
                     kv,
                     raw,
                     slots,
@@ -881,7 +918,9 @@ class AttentionV41FP8(AttentionFP8):
         else:
             pool = self._pool_view_3d_fp8(SWA_KV)
             if pool is not None:
-                swa_codec.quantize_and_insert_swa_k_cache(kv, pool, slots)
+                getattr(self, "_swa_codec", swa_codec).quantize_and_insert_swa_k_cache(
+                    kv, pool, slots
+                )
 
     def _v41_prefill_meta_cache_key(self, ratio: int, args, kwargs):
         """Per-forward cache key for the broadcast V4.1 prefill meta build.
@@ -1694,9 +1733,12 @@ class AttentionV41FP8(AttentionFP8):
                 )
 
                 if not main_stored:
-                    quantize_and_insert_k_cache_fp4(
-                        global_keys.contiguous(), main_pool, main_slots
+                    writer = (
+                        self._swa_codec.quantize_and_insert_k_cache
+                        if getattr(self, "_use_v4_kv_cache", False)
+                        else quantize_and_insert_k_cache_fp4
                     )
+                    writer(global_keys.contiguous(), main_pool, main_slots)
                 if not index_stored:
                     quantize_indexer_k_fp4(
                         index_keys.contiguous(), index_slots, index_pool
@@ -1824,11 +1866,17 @@ class AttentionV41FP8(AttentionFP8):
                         gather_k_cache_bytes_fp4,
                     )
 
-                    # Byte-first transport: all-reduce the raw 288B FP4 pool
+                    if getattr(self, "_use_v4_kv_cache", False):
+                        gather_k_cache_bytes_fp4 = self._swa_codec.gather_k_cache_bytes
+                        dequantize_k_cache_bytes_fp4 = (
+                            self._swa_codec.dequantize_k_cache_bytes
+                        )
+
+                    # Byte-first transport: all-reduce the selected packed pool
                     # bytes (each byte has exactly one owner, so the SUM
                     # reassembles them bit-exactly) and dequantize on the
-                    # receiving side — 288B per entry on the wire instead of
-                    # the 1024B dequantized rows.
+                    # receiving side: 288B (V41) / 584B (Hopper V4) per entry
+                    # on the wire instead of the 1024B dequantized rows.
                     raw_global = gather_k_cache_bytes_fp4(
                         main_pool, self._slots(self._global_region(), pos, req)
                     )
@@ -2024,6 +2072,26 @@ class AttentionV41FP8(AttentionFP8):
                         self.index_topk,
                     )
                 )
+                logical_candidates = (
+                    fused_indexer
+                    and candidates is not None
+                    and candidate_source >= 0
+                    and self.layer_id > candidate_source
+                    and self.index_topk == 512
+                    # Keep short contexts on the existing dense scorer.
+                    and candidates.shape[1] * candidate_size < key_count
+                    and sparse_prefill_indexer.is_supported(
+                        q_fp4[probe],
+                        q_sf[probe],
+                        keys,
+                        weights[probe],
+                        candidates[probe],
+                        positions[probe],
+                        candidate_size,
+                        self.index_topk,
+                        logical_output=True,
+                    )
+                )
                 chunk_rows = (
                     sparse_prefill_indexer.MAX_CHUNK_ROWS
                     if sparse_request
@@ -2107,7 +2175,34 @@ class AttentionV41FP8(AttentionFP8):
                             if not contiguous:
                                 out[output_rows] = mapped
                         continue
-                    if fused_indexer:
+                    if logical_candidates:
+                        with record_function_range(
+                            "dsv41.prefill.indexer.candidate_logits"
+                        ):
+                            plan = _prefill_sparse_plan(
+                                shared,
+                                (
+                                    "logical",
+                                    b,
+                                    chunk_index,
+                                    stop - start,
+                                    key_count,
+                                    self.compress_ratio,
+                                    candidate_size,
+                                ),
+                                candidates[output_rows],
+                                visible,
+                                key_count,
+                                candidate_size,
+                            )
+                            logits = sparse_prefill_indexer.score_logical(
+                                q_fp4[output_rows],
+                                q_sf[output_rows],
+                                keys,
+                                weights[output_rows],
+                                plan,
+                            )
+                    elif fused_indexer:
                         with record_function_range(
                             "dsv41.prefill.indexer.fused_logits"
                         ):
@@ -2129,7 +2224,7 @@ class AttentionV41FP8(AttentionFP8):
                         ids = torch.arange(key_count, device=x.device)
                         logits.masked_fill_(ids[None] >= visible[:, None], -torch.inf)
                     candidates = shared.get("candidates")
-                    if candidates is not None:
+                    if candidates is not None and not logical_candidates:
                         if publish_candidates or (
                             candidate_source >= 0 and self.layer_id > candidate_source
                         ):
@@ -2204,7 +2299,7 @@ class AttentionV41FP8(AttentionFP8):
             or not self._swa_cp_byte_sliced()
         ):
             return False
-        return swa_codec.is_supported_fresh_store(
+        return getattr(self, "_swa_codec", swa_codec).is_supported_fresh_store(
             qkv.kv_full,
             self._pool_raw_u8(SWA_KV),
             meta.slot_mapping,
@@ -2260,14 +2355,16 @@ class AttentionV41FP8(AttentionFP8):
         ], [int(p) - t for p, t in zip(prefixes_host, tails)]
 
     def _swa_prefill_concat(self, qkv, common, *, fuse_cache_write=False):
-        """Read the 528B prefix before a new chunk overwrites the SWA ring."""
+        """Read the selected cache format before a new chunk overwrites the ring."""
         meta = common.swa_meta
         B, D = common.batch_size, self.head_dim
         allocate = torch.empty if fuse_cache_write else torch.zeros
         buf = allocate(B, meta.M, D, dtype=torch.bfloat16, device=qkv.kv_full.device)
         if meta.prefix_len_max > 0:
             if self._swa_cp_byte_sliced():
-                swa_codec.dequantize_and_gather_k_cache_slots_cp_byte_sliced(
+                getattr(
+                    self, "_swa_codec", swa_codec
+                ).dequantize_and_gather_k_cache_slots_cp_byte_sliced(
                     out=buf,
                     k_cache_raw=self._pool_raw_u8(SWA_KV),
                     slot_mapping=meta.cache_slot_mapping,
@@ -2279,7 +2376,9 @@ class AttentionV41FP8(AttentionFP8):
                     compaction=meta.cache_compaction,
                 )
             else:
-                swa_codec.dequantize_and_gather_k_cache_slots(
+                getattr(
+                    self, "_swa_codec", swa_codec
+                ).dequantize_and_gather_k_cache_slots(
                     out=buf,
                     k_cache=self._pool_view_3d_fp8(SWA_KV),
                     slot_mapping=meta.cache_slot_mapping,
@@ -2773,7 +2872,12 @@ class AttentionV41FP8(AttentionFP8):
                 freqs,
                 self.rope_head_dim,
             )
-            quantize_and_insert_k_cache_fp4(
+            writer = (
+                self._swa_codec.quantize_and_insert_k_cache
+                if getattr(self, "_use_v4_kv_cache", False)
+                else quantize_and_insert_k_cache_fp4
+            )
+            writer(
                 global_keys.contiguous(),
                 self._source_pool(self._global_region()),
                 self._slots(self._global_region(), positions, req_ids),
@@ -2902,6 +3006,18 @@ class AttentionV41FP8(AttentionFP8):
                 shared["topk"] = {self.layer_id: output}
                 return output
         if paged:
+            # Candidate consumers may avoid noncandidate dot products while
+            # retaining logical-width logits and the original exact TopK.
+            score_candidate_source = int(
+                self.v41_config.get("candidate_source_layer_id", -1)
+            )
+            score_candidates = (
+                shared.get("candidates")
+                if score_candidate_source >= 0
+                and self.layer_id > score_candidate_source
+                and int(self.v41_config.get("candidate_block_size", 0)) == 8
+                else None
+            )
             all_logits = decode_indexer.score_decode_indexer(
                 q.view(B, S, self.index_n_heads, self.index_head_dim),
                 weights.view(B, S, self.index_n_heads),
@@ -2915,6 +3031,7 @@ class AttentionV41FP8(AttentionFP8):
                 positions=positions.reshape(T),
                 preserve_score_dtype=True,
                 pad_invisible=False,
+                candidate_blocks=score_candidates,
             )
         else:
             weights = (

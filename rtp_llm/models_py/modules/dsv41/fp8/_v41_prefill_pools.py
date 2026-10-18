@@ -127,7 +127,10 @@ def try_gather_prefill_pools(
     if (
         main_pool.device.type != "cuda"
         or torch.cuda.get_device_capability(main_pool.device)[0] != 10
+        or main_pool.shape[-1] != 288
     ):
+        # This byte transport is explicitly FP4; 584B SM90 pools use the
+        # caller's format-aware codec path, never an FP4 reinterpretation.
         return None
 
     from rtp_llm.models_py.modules.dsv41.fp8 import _v41_joint_pool

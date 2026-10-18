@@ -12,6 +12,8 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.device.device_type import is_cuda
+
 
 @lru_cache(maxsize=1)
 def _has_prenorm_gemm() -> bool:
@@ -27,7 +29,8 @@ def _has_prenorm_gemm() -> bool:
 def is_supported(residual: torch.Tensor, fn: torch.Tensor) -> bool:
     """Static inference gate; large prefills retain the existing implementation."""
     if (
-        residual.device.type != "cuda"
+        not is_cuda()
+        or residual.device.type != "cuda"
         or residual.dtype != torch.bfloat16
         or residual.ndim not in (3, 4)
         or residual.shape[-2:] != (4, 5120)
@@ -41,7 +44,7 @@ def is_supported(residual: torch.Tensor, fn: torch.Tensor) -> bool:
     ):
         return False
     return (
-        torch.cuda.get_device_capability(residual.device)[0] == 10
+        torch.cuda.get_device_capability(residual.device)[0] in (9, 10)
         and _has_prenorm_gemm()
     )
 

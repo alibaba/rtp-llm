@@ -249,17 +249,21 @@ def warmup_v41_hc_jit(v4, *, max_m, device):
     device = torch.device(device)
     if not common._is_cuda_device(device) or int(max_m) <= 0:
         return
-    if (
-        torch.version.hip is not None
-        or torch.cuda.get_device_capability(device)[0] != 10
-    ):
+    if torch.version.hip is not None:
+        return
+    arch_major = torch.cuda.get_device_capability(device)[0]
+    if arch_major not in (9, 10):
         return
     common._assert_not_capturing()
     units, pairs = _collect_v41_hc_configs(v4)
     if not units:
         return
     small_enabled = v41_prenorm._has_prenorm_gemm()
-    mega_enabled = bool(pairs) and v41_mega_mhc._get_mega_mhc() is not None
+    # The installed DG exports mega_mhc on Hopper too, but its kernel is SM100
+    # only. Hopper supports the separate small-token prenorm primitive.
+    mega_enabled = (
+        arch_major == 10 and bool(pairs) and v41_mega_mhc._get_mega_mhc() is not None
+    )
     num_sms = common._get_deep_gemm_num_sms(device) if mega_enabled else 0
     small_ms = _small_prenorm_ms(max_m) if small_enabled else ()
     mega_ms = _mega_representative_ms(int(max_m), num_sms) if mega_enabled else ()

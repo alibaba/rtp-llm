@@ -212,7 +212,12 @@ def can_batch_groups(attention, x, cp):
                 return False
             pool = attention._source_pool(region)
             table = attention._block_tables_by_type.get(region)
-            if not legacy._pool(pool, device, width) or not (
+            pool_valid = (
+                legacy._pool(pool, device, width)
+                if region == INDEXER_KV
+                else legacy._main_pool(pool, device)
+            )
+            if not pool_valid or not (
                 isinstance(table, torch.Tensor)
                 and table.ndim == 2
                 and table.shape[0] == len(lengths)
@@ -417,6 +422,7 @@ def _compress_kernel(
     POOL_STRIDE,
     BLOCKS,
     TRAP: tl.constexpr,
+    V4_CACHE: tl.constexpr = False,
 ):
     width = tl.load(widths + tl.program_id(0))
     # The callee sees the same compact row program_id. Only its reduction
@@ -449,6 +455,7 @@ def _compress_kernel(
                 BLOCKS,
                 TRAP,
                 128 >> i,
+                V4_CACHE,
             )
 
 
@@ -486,7 +493,7 @@ def compress_main(
         and legacy._vector(prepared.widths, count, device, (torch.int32,))
         and legacy._vector(main_slots, count, device)
         and legacy._frequencies(freqs, device)
-        and legacy._pool(main_pool, device, 288)
+        and legacy._main_pool(main_pool, device)
     ):
         return None
     if ratio == 2 and not (
@@ -522,6 +529,7 @@ def compress_main(
             main_pool.stride(0),
             main_pool.shape[0],
             legacy.trap_invalid_kv_access_enabled(),
+            V4_CACHE=main_pool.shape[-1] == 584,
             num_warps=4,
             enable_fp_fusion=False,
         )
