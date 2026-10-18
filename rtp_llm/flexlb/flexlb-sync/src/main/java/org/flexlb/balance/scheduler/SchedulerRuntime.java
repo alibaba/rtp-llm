@@ -3,6 +3,8 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.config.ConfigService;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
@@ -25,14 +27,19 @@ final class SchedulerRuntime {
     private final EndpointRegistry endpoints;
     private final BatchSchedulerReporter reporter;
     private final RequestSchedulerReporter admissionReporter;
+    private final ConfigService configService;
+    private final QueueCapacity queueCapacity;
     private final Runnable closePlacement;
 
     SchedulerRuntime(
             RequestRegistry requests,
             EndpointRegistry endpoints,
             BatchSchedulerReporter reporter,
-            RequestSchedulerReporter admissionReporter) {
-        this(requests, endpoints, reporter, admissionReporter, () -> { });
+            RequestSchedulerReporter admissionReporter,
+            ConfigService configService,
+            QueueCapacity queueCapacity) {
+        this(requests, endpoints, reporter, admissionReporter,
+                configService, queueCapacity, () -> { });
     }
 
     @Autowired
@@ -41,8 +48,10 @@ final class SchedulerRuntime {
             EndpointRegistry endpoints,
             BatchSchedulerReporter reporter,
             RequestSchedulerReporter admissionReporter,
-            RequestScheduler scheduler) {
-        this(requests, endpoints, reporter, admissionReporter,
+            RequestScheduler scheduler,
+            ConfigService configService,
+            QueueCapacity queueCapacity) {
+        this(requests, endpoints, reporter, admissionReporter, configService, queueCapacity,
                 scheduler::closePlacement);
     }
 
@@ -51,12 +60,16 @@ final class SchedulerRuntime {
             EndpointRegistry endpoints,
             BatchSchedulerReporter reporter,
             RequestSchedulerReporter admissionReporter,
+            ConfigService configService,
+            QueueCapacity queueCapacity,
             Runnable closePlacement) {
         this.requests = Objects.requireNonNull(requests, "requests");
         this.endpoints = Objects.requireNonNull(endpoints, "endpoints");
         this.reporter = Objects.requireNonNull(reporter, "reporter");
         this.admissionReporter = Objects.requireNonNull(
                 admissionReporter, "admissionReporter");
+        this.configService = Objects.requireNonNull(configService, "configService");
+        this.queueCapacity = Objects.requireNonNull(queueCapacity, "queueCapacity");
         this.closePlacement = Objects.requireNonNull(
                 closePlacement, "closePlacement");
     }
@@ -73,7 +86,8 @@ final class SchedulerRuntime {
         }
         reportSchedulerInflight();
         reportGlobalQueue();
-        reportPrefillEndpoints();
+        reportSharedQueueCapacity();
+        reportPrefillAndPdFusionEndpoints();
         reportDecodeEndpoints();
     }
 
@@ -99,6 +113,7 @@ final class SchedulerRuntime {
             RequestRegistry.GlobalQueueStats stats = requests.globalQueueStats();
             if (stats != null) {
                 reporter.reportGlobalQueue(stats.depth(), stats.maxQueuedRequests());
+                reporter.reportGlobalQueueOldestWaitMs(stats.oldestWaitMs());
             }
         } catch (RuntimeException failure) {
             warnIsolated(
@@ -106,33 +121,67 @@ final class SchedulerRuntime {
         }
     }
 
-    private void reportPrefillEndpoints() {
-        final Map<String, PrefillEndpoint> endpoints;
+    private void reportSharedQueueCapacity() {
+        FlexlbConfig config;
         try {
-            endpoints = this.endpoints.snapshotPrefillEndpoints();
+            config = configService.loadBalanceConfig();
+        } catch (RuntimeException failure) {
+            warnIsolated("Failed to read shared queue configuration for metrics", failure);
+            return;
+        }
+        if (config == null || !QueueCapacity.isEngineSubQueueMode(config)) {
+            return;
+        }
+        try {
+            reporter.reportTotalQueueWaiting(queueCapacity.globalQueueAndEngineSubQueueCount());
+        } catch (RuntimeException failure) {
+            warnIsolated("Failed to report total queued requests", failure);
+        }
+        for (RoleType role : new RoleType[]{RoleType.PREFILL, RoleType.PDFUSION}) {
+            try {
+                int logicalEndpointCount = endpoints.getEndpointCount(role);
+                reporter.reportSharedSubQueue(role.name(), queueCapacity.engineSubQueueWaiting(role),
+                        queueCapacity.engineSubQueueLimit(config, logicalEndpointCount), logicalEndpointCount);
+            } catch (RuntimeException failure) {
+                warnIsolated("Failed to report shared queue capacity for " + role, failure);
+            }
+        }
+    }
+
+    private void reportPrefillAndPdFusionEndpoints() {
+        reportRoutingEndpoints(RoleType.PREFILL);
+        reportRoutingEndpoints(RoleType.PDFUSION);
+    }
+
+    private void reportRoutingEndpoints(RoleType role) {
+        final Map<String, PrefillEndpoint> routingEndpoints;
+        try {
+            routingEndpoints = role == RoleType.PREFILL
+                    ? endpoints.snapshotPrefillEndpoints() : endpoints.snapshotPdFusionEndpoints();
         } catch (RuntimeException failure) {
             warnIsolated(
-                    "Failed to snapshot Prefill endpoints for metrics",
+                    "Failed to snapshot " + role + " endpoints for metrics",
                     failure);
             return;
         }
-        for (Map.Entry<String, PrefillEndpoint> entry : endpoints.entrySet()) {
+        for (Map.Entry<String, PrefillEndpoint> entry : routingEndpoints.entrySet()) {
             try {
                 entry.getValue().reportBatchMetrics(reporter);
             } catch (RuntimeException failure) {
                 warnIsolated(
-                        "Failed to report Prefill endpoint metrics: endpoint="
+                        "Failed to report " + role + " endpoint metrics: endpoint="
                                 + entry.getKey(),
                         failure);
             }
-            try {
-                admissionReporter.reportPrefillQueueDepth(
-                        entry.getKey(), entry.getValue().queuedRequestCount());
-            } catch (RuntimeException failure) {
-                warnIsolated(
-                        "Failed to report Prefill admission metrics: endpoint="
-                                + entry.getKey(),
-                        failure);
+            if (role == RoleType.PREFILL) {
+                try {
+                    admissionReporter.reportPrefillQueueDepth(
+                            entry.getKey(), entry.getValue().queuedRequestCount());
+                } catch (RuntimeException failure) {
+                    warnIsolated(
+                            "Failed to report Prefill admission metrics: endpoint="
+                                    + entry.getKey(), failure);
+                }
             }
         }
     }

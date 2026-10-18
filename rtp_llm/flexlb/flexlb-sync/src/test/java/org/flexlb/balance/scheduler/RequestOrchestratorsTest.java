@@ -3,6 +3,8 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.config.ConfigService;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
@@ -11,6 +13,7 @@ import org.mockito.InOrder;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -125,7 +128,8 @@ class RequestOrchestratorsTest {
         when(lifecycle.isShuttingDown()).thenReturn(true);
 
         new SchedulerRuntime(
-                lifecycle, registry, reporter, admissionReporter).report();
+                lifecycle, registry, reporter, admissionReporter,
+                mock(ConfigService.class), new QueueCapacity()).report();
 
         verify(lifecycle, never()).trackedRequestStats();
         verify(registry, never()).snapshotPrefillEndpoints();
@@ -142,18 +146,21 @@ class RequestOrchestratorsTest {
                 mock(RequestSchedulerReporter.class);
         PrefillEndpoint failingPrefill = mock(PrefillEndpoint.class);
         PrefillEndpoint healthyPrefill = mock(PrefillEndpoint.class);
+        PrefillEndpoint pdFusion = mock(PrefillEndpoint.class);
         DecodeEndpoint decode = mock(DecodeEndpoint.class);
         Map<String, PrefillEndpoint> prefill = new LinkedHashMap<>();
         prefill.put("p1", failingPrefill);
         prefill.put("p2", healthyPrefill);
         when(lifecycle.trackedRequestStats()).thenReturn(new RequestRegistry.TrackedRequestStats(7, 2, 300L));
         when(registry.snapshotPrefillEndpoints()).thenReturn(prefill);
+        when(registry.snapshotPdFusionEndpoints()).thenReturn(Map.of("f1", pdFusion));
         when(registry.snapshotDecodeEndpoints()).thenReturn(Map.of("d1", decode));
         doThrow(new RuntimeException("metrics unavailable"))
                 .when(failingPrefill).reportBatchMetrics(reporter);
 
         new SchedulerRuntime(
-                lifecycle, registry, reporter, admissionReporter).report();
+                lifecycle, registry, reporter, admissionReporter,
+                mock(ConfigService.class), new QueueCapacity()).report();
 
         verify(lifecycle).trackedRequestStats();
         verify(reporter).reportSchedulerInflightMaxAgeMs(300L);
@@ -161,9 +168,11 @@ class RequestOrchestratorsTest {
         verify(reporter).reportTrackedRequestCount(RoleType.ENCODER, 2);
         verify(failingPrefill).reportBatchMetrics(reporter);
         verify(healthyPrefill).reportBatchMetrics(reporter);
+        verify(pdFusion).reportBatchMetrics(reporter);
         verify(decode).reportBatchMetrics(reporter);
         verify(admissionReporter).reportPrefillQueueDepth("p1", 0);
         verify(admissionReporter).reportPrefillQueueDepth("p2", 0);
+        verify(admissionReporter, never()).reportPrefillQueueDepth("f1", 0);
         verify(decode).reportAdmissionMetrics(admissionReporter);
     }
 
@@ -173,11 +182,40 @@ class RequestOrchestratorsTest {
         EndpointRegistry registry = mock(EndpointRegistry.class);
         BatchSchedulerReporter reporter = mock(BatchSchedulerReporter.class);
         when(lifecycle.trackedRequestStats()).thenReturn(new RequestRegistry.TrackedRequestStats(0, 0, 0L));
-        when(lifecycle.globalQueueStats()).thenReturn(new RequestRegistry.GlobalQueueStats(12, 256));
+        when(lifecycle.globalQueueStats()).thenReturn(new RequestRegistry.GlobalQueueStats(12, 256, 75L));
 
-        new SchedulerRuntime(lifecycle, registry, reporter, mock(RequestSchedulerReporter.class)).report();
+        new SchedulerRuntime(lifecycle, registry, reporter, mock(RequestSchedulerReporter.class),
+                mock(ConfigService.class), new QueueCapacity()).report();
 
         verify(reporter).reportGlobalQueue(12, 256);
+        verify(reporter).reportGlobalQueueOldestWaitMs(75L);
+    }
+
+    @Test
+    void sharedQueueReportsTotalAndSeparateRoleLimits() {
+        FlexlbConfig config = SchedulingTestConfig.newConfig();
+        SchedulingTestConfig.useFifoQueue(config);
+        SchedulingTestConfig.useNonBatchDispatcher(config);
+        config.getScheduler().setMaxQueuedRequests(20);
+        config.getDispatcher().setMaxInflightPerPrefillWorker(2);
+        ConfigService service = mock(ConfigService.class);
+        when(service.loadBalanceConfig()).thenReturn(config);
+        EndpointRegistry registry = mock(EndpointRegistry.class);
+        when(registry.getEndpointCount(RoleType.PREFILL)).thenReturn(2);
+        when(registry.getEndpointCount(RoleType.PDFUSION)).thenReturn(3);
+        QueueCapacity capacity = new QueueCapacity();
+        capacity.increaseTotalQueueCount(new CompletableFuture<>());
+        capacity.tryReserveEngineSubQueueSlot(config, RoleType.PREFILL, 2);
+        capacity.tryReserveEngineSubQueueSlot(config, RoleType.PDFUSION, 3);
+        BatchSchedulerReporter reporter = mock(BatchSchedulerReporter.class);
+        RequestRegistry requests = mock(RequestRegistry.class);
+
+        new SchedulerRuntime(requests, registry, reporter, mock(RequestSchedulerReporter.class),
+                service, capacity).report();
+
+        verify(reporter).reportTotalQueueWaiting(1L);
+        verify(reporter).reportSharedSubQueue("PREFILL", 1, 16L, 2);
+        verify(reporter).reportSharedSubQueue("PDFUSION", 1, 20L, 3);
     }
 
     @Test
@@ -188,7 +226,8 @@ class RequestOrchestratorsTest {
         when(lifecycle.trackedRequestStats()).thenReturn(new RequestRegistry.TrackedRequestStats(0, 0, 0L));
         when(lifecycle.globalQueueStats()).thenReturn(null);
 
-        new SchedulerRuntime(lifecycle, registry, reporter, mock(RequestSchedulerReporter.class)).report();
+        new SchedulerRuntime(lifecycle, registry, reporter, mock(RequestSchedulerReporter.class),
+                mock(ConfigService.class), new QueueCapacity()).report();
 
         verify(reporter, never()).reportGlobalQueue(anyInt(), anyInt());
     }
@@ -199,6 +238,8 @@ class RequestOrchestratorsTest {
                 requests,
                 endpoints,
                 mock(BatchSchedulerReporter.class),
-                mock(RequestSchedulerReporter.class));
+                mock(RequestSchedulerReporter.class),
+                mock(ConfigService.class),
+                new QueueCapacity());
     }
 }

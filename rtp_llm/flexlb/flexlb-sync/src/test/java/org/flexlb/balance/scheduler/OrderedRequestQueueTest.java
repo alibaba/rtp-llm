@@ -46,6 +46,30 @@ class OrderedRequestQueueTest {
     }
 
     @Test
+    void oldestWaitUsesCurrentVisitInsteadOfOriginalQueueOrder() {
+        for (boolean priority : new boolean[]{false, true}) {
+            OrderedRequestQueue queue = new OrderedRequestQueue(priority);
+            GlobalQueueEntry first = entry(50);
+            GlobalQueueEntry second = entry(80);
+            first.enteredQueueAtNanos = 10L;
+            second.enteredQueueAtNanos = 20L;
+            queue.add(first);
+            queue.add(second);
+            assertEquals(10L, queue.oldestEnteredAtNanos());
+
+            queue.remove(first);
+            first.enteredQueueAtNanos = 30L;
+            queue.restore(first);
+            assertEquals(20L, queue.oldestEnteredAtNanos());
+
+            queue.remove(second);
+            assertEquals(30L, queue.oldestEnteredAtNanos());
+            queue.remove(first);
+            assertEquals(0L, queue.oldestEnteredAtNanos());
+        }
+    }
+
+    @Test
     void fifoUnlinksCompletedSuffixWithoutScanningFromHead() {
         OrderedRequestQueue queue = new OrderedRequestQueue(false);
         GlobalQueueEntry first = entry(50);

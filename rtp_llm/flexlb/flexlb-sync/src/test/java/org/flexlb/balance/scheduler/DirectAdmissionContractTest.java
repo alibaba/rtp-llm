@@ -255,7 +255,8 @@ class DirectAdmissionContractTest {
                     mock(EncoderStrategy.class), service, model);
             scheduler = new RequestScheduler(service, router, endpoints, reporter, mock(EvictionManager.class),
                     requests, placement, queueCapacity);
-            runtime = new SchedulerRuntime(requests, endpoints, reporter, requestReporter, scheduler);
+            runtime = new SchedulerRuntime(requests, endpoints, reporter, requestReporter,
+                    scheduler, service, queueCapacity);
         }
 
         private BalanceContext context(long requestId) {

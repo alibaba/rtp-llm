@@ -40,8 +40,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.AdditionalAnswers.delegatesTo;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -203,6 +207,60 @@ class WorkerBatcherRequestCapacityTest {
             }
             assertEquals(2L, fixture.endpoint.observedRequestCount());
             assertFalse(EndpointTestSupport.offer(fixture.endpoint, item(config, fixture.endpoint, 3L)));
+            verify(fixture.reporter, times(1)).reportSharedSubQueueBlocked("PREFILL", "127.0.0.1:8080");
+        }
+    }
+
+    @Test
+    void monitoringFailureDoesNotChangeTheSharedSubQueueAdmissionDecision() {
+        FlexlbConfig config = productionConfig();
+        config.setDispatcher(DispatcherConfig.nonBatch());
+        config.getDispatcher().setPrefillSubqueueLimitMultiplier(1);
+        config.getScheduler().setDecision(DecisionPolicyConfig.single());
+        try (Fixture fixture = fixture(config)) {
+            assertTrue(EndpointTestSupport.offer(fixture.endpoint, item(config, fixture.endpoint, 1L)));
+            assertTrue(EndpointTestSupport.offer(fixture.endpoint, item(config, fixture.endpoint, 2L)));
+            doThrow(new IllegalStateException("monitor unavailable"))
+                    .when(fixture.reporter).reportSharedSubQueueBlocked("PREFILL", "127.0.0.1:8080");
+
+            assertFalse(EndpointTestSupport.offer(fixture.endpoint, item(config, fixture.endpoint, 3L)));
+            assertEquals(2, fixture.endpoint.queuedRequestCount());
+        }
+    }
+
+    @Test
+    void endpointQueueVisitIsRecordedWhenAWaitingRequestIsRemoved() {
+        FlexlbConfig config = productionConfig();
+        config.setDispatcher(DispatcherConfig.nonBatch());
+        config.getDispatcher().setMaxInflightPerPrefillWorker(1);
+        config.getDispatcher().setPrefillSubqueueLimitMultiplier(1);
+        config.getScheduler().getDecision().setMaxCollectionWaitMs(60_000L);
+        try (Fixture fixture = fixture(config)) {
+            ScheduledRequest waiting = item(config, fixture.endpoint, 1L);
+            assertTrue(EndpointTestSupport.offer(fixture.endpoint, waiting));
+            assertEquals(1, fixture.endpoint.queuedRequestCount());
+            assertTrue(fixture.endpoint.removeQueued(waiting, "cancel waiting request"));
+
+            assertEquals(0, fixture.endpoint.queuedRequestCount());
+            verify(fixture.reporter, times(1)).reportEngineSubQueueResidenceMs(
+                    eq("PREFILL"), eq("127.0.0.1:8080"), anyLong());
+        }
+    }
+
+    @Test
+    void failingResidenceMetricDoesNotPreventQueuedRequestRemoval() {
+        FlexlbConfig config = productionConfig();
+        config.setDispatcher(DispatcherConfig.nonBatch());
+        config.getScheduler().getDecision().setMaxCollectionWaitMs(60_000L);
+        try (Fixture fixture = fixture(config)) {
+            ScheduledRequest waiting = item(config, fixture.endpoint, 1L);
+            assertTrue(EndpointTestSupport.offer(fixture.endpoint, waiting));
+            doThrow(new IllegalStateException("monitor unavailable"))
+                    .when(fixture.reporter).reportEngineSubQueueResidenceMs(
+                            eq("PREFILL"), eq("127.0.0.1:8080"), anyLong());
+
+            assertTrue(fixture.endpoint.removeQueued(waiting, "cancel while monitoring unavailable"));
+            assertEquals(0, fixture.endpoint.queuedRequestCount());
         }
     }
 
@@ -262,6 +320,8 @@ class WorkerBatcherRequestCapacityTest {
             assertTrue(EndpointTestSupport.offer(fixture.endpoint, delivered));
             assertTrue(deliveryCompleted.await(5, TimeUnit.SECONDS));
             assertEquals(0, fixture.endpoint.queuedRequestCount());
+            verify(fixture.reporter, times(1)).reportEngineSubQueueResidenceMs(
+                    eq("PREFILL"), eq("127.0.0.1:8080"), anyLong());
             assertEquals(0L, fixture.queueCapacity.globalQueueAndEngineSubQueueCount());
             assertFalse(delivered.future().isDone());
             assertTrue(EndpointTestSupport.offer(fixture.endpoint,
@@ -341,6 +401,7 @@ class WorkerBatcherRequestCapacityTest {
             assertTrue(EndpointTestSupport.offer(fixture.endpoint, high));
             assertEquals(List.of(high), fixture.endpoint.captureQueueSnapshot().items());
             verify(fixture.runtime.events()).onQueuedItemPreempted(low, high);
+            verify(fixture.reporter, never()).reportSharedSubQueueBlocked(any(), any());
         }
     }
 
@@ -476,6 +537,21 @@ class WorkerBatcherRequestCapacityTest {
         }
     }
 
+    @Test
+    void batchModeDoesNotReportTwoLevelQueueResidenceOrOldestWait() {
+        FlexlbConfig config = productionConfig();
+        config.getScheduler().getDecision().setMaxCollectionWaitMs(60_000L);
+        try (Fixture fixture = fixture(config)) {
+            ScheduledRequest waiting = item(config, fixture.endpoint, 1L);
+            assertTrue(EndpointTestSupport.offer(fixture.endpoint, waiting));
+            fixture.endpoint.reportBatchMetrics(fixture.reporter);
+            assertTrue(fixture.endpoint.removeQueued(waiting, "cancel waiting batch request"));
+
+            verify(fixture.reporter, never()).reportEngineSubQueueOldestWaitMs(any(), any(), anyLong());
+            verify(fixture.reporter, never()).reportEngineSubQueueResidenceMs(any(), any(), anyLong());
+        }
+    }
+
     private static FlexlbConfig productionConfig() {
         FlexlbConfig config = new FlexlbConfig();
         config.getRequestLifecycle().getRequest().setTimeoutMs(60_000L);
@@ -538,14 +614,16 @@ class WorkerBatcherRequestCapacityTest {
         EndpointTestSupport.publishStatus(status, response);
         DeliveryStrategy parked = EndpointTestSupport.routeStrategy(runtime);
         DeliveryStrategy delivery = mock(DeliveryStrategy.class, delegatesTo(parked));
+        BatchSchedulerReporter reporter = mock(BatchSchedulerReporter.class);
         PrefillEndpoint endpoint = new PrefillEndpoint(status, configSupplier, delivery, runtime.events(),
-                mock(BatchSchedulerReporter.class), availability, registry, queueCapacity);
+                reporter, availability, registry, queueCapacity);
         endpoint.startGeneration();
-        return new Fixture(endpoint, delivery, parked, runtime, queueCapacity);
+        return new Fixture(endpoint, delivery, parked, runtime, queueCapacity, reporter);
     }
 
     private record Fixture(PrefillEndpoint endpoint, DeliveryStrategy delivery, DeliveryStrategy parked,
-                            EndpointTestSupport.TestRequestRuntime runtime, QueueCapacity queueCapacity)
+                            EndpointTestSupport.TestRequestRuntime runtime, QueueCapacity queueCapacity,
+                            BatchSchedulerReporter reporter)
             implements AutoCloseable {
         public void close() { endpoint.close(); endpoint.awaitRetirement(); }
     }

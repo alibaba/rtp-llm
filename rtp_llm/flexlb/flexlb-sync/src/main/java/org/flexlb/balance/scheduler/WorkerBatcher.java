@@ -462,6 +462,7 @@ public final class WorkerBatcher {
         }
         if (attempt.accepted()) {
             for (ScheduledRequest victim : victims) {
+                prefillEndpoint.reportSubQueueResidence(victim);
                 endpointEvents.onQueuedItemPreempted(victim, item);
             }
         }
@@ -469,6 +470,7 @@ public final class WorkerBatcher {
             return PrefillQueueEnqueueResult.ACCEPTED;
         }
         if (!subQueueCountAdded) {
+            prefillEndpoint.reportSharedSubQueueBlocked();
             return PrefillQueueEnqueueResult.ENGINE_SUBQUEUE_LIMIT_REACHED;
         }
         return PrefillQueueEnqueueResult.REJECTED;
@@ -493,6 +495,7 @@ public final class WorkerBatcher {
             if (!incoming.bindPublishedRouteReservation(replacement)) {
                 throw new IllegalStateException("replacement request already owns a Prefill reservation: " + incoming.requestId());
             }
+            incoming.markSubQueueEntry();
             queueVersion.incrementAndGet();
             stateChanged.signal();
             return new EnqueueAttempt(true, null, null);
@@ -514,6 +517,7 @@ public final class WorkerBatcher {
             return new EnqueueAttempt(false, null, null);
         }
         if (!item.requiresRouteReservation()) {
+            item.markSubQueueEntry();
             stateChanged.signal();
             return new EnqueueAttempt(true, null, null);
         }
@@ -545,6 +549,7 @@ public final class WorkerBatcher {
                             "ACTIVE request already owns a route reservation: request_id="
                                     + item.requestId()));
         }
+        item.markSubQueueEntry();
         stateChanged.signal();
         return new EnqueueAttempt(true, null, null);
     }
@@ -569,6 +574,23 @@ public final class WorkerBatcher {
         queueLock.lock();
         try {
             return activeIndex.size();
+        } finally {
+            queueLock.unlock();
+        }
+    }
+
+    public long oldestSubQueueWaitMs() {
+        queueLock.lock();
+        try {
+            long oldest = Long.MAX_VALUE;
+            for (ScheduledRequest item : activeIndex) {
+                long enteredAt = item.subQueueEnteredAtNanos();
+                if (enteredAt != 0L) {
+                    oldest = Math.min(oldest, enteredAt);
+                }
+            }
+            return oldest == Long.MAX_VALUE ? 0L
+                    : TimeUnit.NANOSECONDS.toMillis(Math.max(0L, System.nanoTime() - oldest));
         } finally {
             queueLock.unlock();
         }
@@ -822,6 +844,9 @@ public final class WorkerBatcher {
         } finally {
             queueLock.unlock();
         }
+        if (item != null) {
+            prefillEndpoint.reportSubQueueResidence(item);
+        }
         if (item != null && prefillEndpoint.isEngineSubQueueMode()) {
             signalCapacityAvailable();
         }
@@ -1003,6 +1028,7 @@ public final class WorkerBatcher {
             }
         }
         if (removed) {
+            prefillEndpoint.reportSubQueueResidence(item);
             queueCapacity.releaseEngineSubQueueSlot(prefillEndpoint.getStatus().getRole());
         }
         return removed;
@@ -1349,6 +1375,7 @@ public final class WorkerBatcher {
             // Committed requests no longer count toward either waiting limit.
             var routingRole = prefillEndpoint.getStatus().getRole();
             for (ScheduledRequest item : items) {
+                prefillEndpoint.reportSubQueueResidence(item);
                 queueCapacity.releaseEngineSubQueueSlot(routingRole);
                 queueCapacity.decreaseTotalQueueCount(item.future());
             }

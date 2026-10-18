@@ -118,8 +118,9 @@ class PdfusionSchedulingTest {
         RequestScheduler scheduler = new RequestScheduler(service, router, endpoints, reporter,
                 mock(EvictionManager.class), lifecycle, availability, queueCapacity);
         SchedulerRuntime runtime = direct
-                ? new SchedulerRuntime(lifecycle, endpoints, reporter, requestReporter)
-                : new SchedulerRuntime(lifecycle, endpoints, reporter, requestReporter, scheduler);
+                ? new SchedulerRuntime(lifecycle, endpoints, reporter, requestReporter, service, queueCapacity)
+                : new SchedulerRuntime(lifecycle, endpoints, reporter, requestReporter,
+                        scheduler, service, queueCapacity);
         try {
             long requestId = 920001L;
             var context = RequestLifecycleTestSupport.context(config, requestId);

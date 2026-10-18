@@ -211,6 +211,43 @@ public class MetricConstant {
     public static final String BATCHER_QUEUE_SIZE = "app.flexlb.batcher.queue.size";
 
     /**
+     * Total Generation requests waiting in GlobalQueue or an endpoint subqueue.
+     */
+    public static final String TOTAL_QUEUE_WAITING = "app.flexlb.queue.total.waiting";
+    /**
+     * Waiting requests across all endpoint subqueues of one routing role.
+     */
+    public static final String SHARED_SUBQUEUE_WAITING = "app.flexlb.queue.subqueue.waiting";
+    /**
+     * Shared endpoint-subqueue admission limit for one routing role.
+     */
+    public static final String SHARED_SUBQUEUE_LIMIT = "app.flexlb.queue.subqueue.limit";
+    /**
+     * Number of registered logical endpoints used to calculate one role's shared limit.
+     */
+    public static final String SHARED_SUBQUEUE_ENDPOINT_COUNT = "app.flexlb.queue.subqueue.endpoint.count";
+    /**
+     * One failed attempt to enter a role's full shared endpoint subqueue.
+     */
+    public static final String SHARED_SUBQUEUE_BLOCKED = "app.flexlb.queue.subqueue.blocked";
+    /**
+     * Duration of one visit to the Generation GlobalQueue.
+     */
+    public static final String GLOBAL_QUEUE_RESIDENCE_MS = "app.flexlb.queue.global.residence.ms";
+    /**
+     * Duration of one visit to a concrete endpoint subqueue.
+     */
+    public static final String ENGINE_SUBQUEUE_RESIDENCE_MS = "app.flexlb.queue.subqueue.residence.ms";
+    /**
+     * Age of the oldest request currently in the Generation GlobalQueue.
+     */
+    public static final String GLOBAL_QUEUE_OLDEST_WAIT_MS = "app.flexlb.queue.global.oldest.wait.ms";
+    /**
+     * Age of the oldest request currently waiting on an endpoint.
+     */
+    public static final String ENGINE_SUBQUEUE_OLDEST_WAIT_MS = "app.flexlb.queue.subqueue.oldest.wait.ms";
+
+    /**
      * Engine finished task list size
      */
     public static final String ENGINE_FINISHED_TASK_LIST_SIZE = "app.engine.health.check.finished.task.list.size";

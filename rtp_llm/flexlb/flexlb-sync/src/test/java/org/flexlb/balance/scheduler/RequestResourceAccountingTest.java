@@ -262,10 +262,12 @@ class RequestResourceAccountingTest {
             var requestReporter = mock(RequestSchedulerReporter.class);
             requests = new RequestRegistry(service, reporter, requestReporter);
             var projector = new EndpointEventProjector(requests);
+            var queueCapacity = new QueueCapacity();
             var endpoints = new EndpointRegistry(service, projector, reporter,
                     new RouteDeliveryStrategy(requests, new DeliveryMetrics(reporter)),
-                    new PlacementAvailability(), new QueueCapacity());
-            runtime = new SchedulerRuntime(requests, endpoints, reporter, requestReporter);
+                    new PlacementAvailability(), queueCapacity);
+            runtime = new SchedulerRuntime(requests, endpoints, reporter, requestReporter,
+                    service, queueCapacity);
             var worker = WorkerStatus.createDiscovered(RoleType.PREFILL, "g", "127.0.0.1", 8080, 8081, "test");
             worker.lock.lock();
             try {

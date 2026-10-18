@@ -185,6 +185,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
                 queueCapacity.decreaseTotalQueueCount(victim.future);
             }
             queueCapacity.increaseTotalQueueCount(future);
+            entry.enteredQueueAtNanos = System.nanoTime();
             orderedQueue.add(entry);
             registered.put(future, entry);
             // Completion removes this exact request from the ordering and wait
@@ -210,6 +211,17 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         }
     }
 
+    long oldestWaitingAgeMs() {
+        lock.lock();
+        try {
+            long enteredAtNanos = orderedQueue.oldestEnteredAtNanos();
+            return enteredAtNanos == 0L ? 0L
+                    : TimeUnit.NANOSECONDS.toMillis(Math.max(0L, System.nanoTime() - enteredAtNanos));
+        } finally {
+            lock.unlock();
+        }
+    }
+
     int maxQueuedRequests() {
         return configService.loadBalanceConfig().queueScheduler().getMaxQueuedRequests();
     }
@@ -226,6 +238,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
             entry.context.setPlanCost(0L);
             entry.context.setVictimCount(0);
             orderedQueue.restore(entry);
+            entry.enteredQueueAtNanos = System.nanoTime();
             changed.signal();
             return true;
         } finally {
@@ -556,6 +569,24 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         if (orderedQueue.remove(entry)) {
             waitingRequests.remove(entry);
             changed.signal();
+            reportGlobalQueueResidence(entry);
+        }
+    }
+
+    private void reportGlobalQueueResidence(GlobalQueueEntry entry) {
+        if (entry.enteredQueueAtNanos == 0L) {
+            return;
+        }
+        long durationMs = TimeUnit.NANOSECONDS.toMillis(
+                Math.max(0L, System.nanoTime() - entry.enteredQueueAtNanos));
+        try {
+            reporter.reportGlobalQueueResidenceMs(durationMs);
+        } catch (Throwable failure) {
+            try {
+                Logger.warn("Failed to report GlobalQueue residence time", failure);
+            } catch (Throwable ignoredLoggingFailure) {
+                // A monitoring failure must not prevent the request from leaving the queue.
+            }
         }
     }
 
@@ -638,6 +669,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         }
         completed.forEach(GlobalQueueCoordinator::closePlan);
         for (GlobalQueueEntry entry : abandoned) {
+            reportGlobalQueueResidence(entry);
             queueCapacity.decreaseTotalQueueCount(entry.future);
             completeDecisionResponse(entry, error(
                     StrategyErrorType.DISPATCH_FAILED,

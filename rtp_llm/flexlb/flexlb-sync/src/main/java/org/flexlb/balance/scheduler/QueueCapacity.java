@@ -30,6 +30,10 @@ public final class QueueCapacity {
         return globalQueueAndEngineSubQueueCount.get();
     }
 
+    public int engineSubQueueWaiting(RoleType role) {
+        return engineSubQueueCount(role).get();
+    }
+
     public boolean isGlobalQueueEntryLimitReached(FlexlbConfig config, int globalQueueSize) {
         long queuedRequests = isEngineSubQueueMode(config)
                 ? globalQueueAndEngineSubQueueCount.get()

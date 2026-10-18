@@ -368,6 +368,30 @@ Top5 展示 `shortestTtftDecisions` 的 token-work 估计。预测耗时与 Engi
 - 线程池、graceful lifecycle；
 - request payload、optimizer trace 与 PV decision 数据。
 
+QUEUE + NON_BATCH 的两层排队监控复用 `app.routing.queue.length{type=mainQueue}` 展示
+GlobalQueue 深度，`app.routing.queue.max.length{type=mainQueue}` 展示总排队上限 M。
+`app.flexlb.batcher.queue.size{role,engineIp}` 展示每个 PREFILL/PDFUSION 逻辑端点尚未交付的
+子队列深度；多 Engine 的 `engineIp` 包含 `@engineIndex`。每 2 秒另报
+`app.flexlb.queue.total.waiting`（实际用于 M 限流的 GlobalQueue 与所有子队列总计数）、
+`app.flexlb.queue.subqueue.waiting{role}` 和 `app.flexlb.queue.subqueue.limit{role}`
+（同形态共享的实时占用与按当前端点数/配置计算的 C），以及用于解释 C 变化的
+`app.flexlb.queue.subqueue.endpoint.count{role}`。总使用率由监控计算 `total.waiting / M`，
+子队列使用率按 PREFILL/PDFUSION 分别计算 `subqueue.waiting / subqueue.limit`，
+不将单机深度除以共享 C，也不把超过 100% 的结果截断；端点数为 0、C 为 0 时使用率留空。
+M/C 是当前配置下新请求的上限，已排队请求可能沿用旧快照。BATCH 不使用共享 C 限流，
+上述新总量与共享容量序列仅在 QUEUE + NON_BATCH 下上报。
+
+`app.flexlb.queue.subqueue.blocked{role,engineIp,reason=SHARED_SUBQUEUE_FULL}` 是入所选
+子队列失败的尝试 QPS：共享 C 满且本机低优等待项也未替换成功时记录一次；同一请求
+多次重试可产生多次样本，不表示最终客户端失败。`app.flexlb.queue.global.residence.ms`
+和 `app.flexlb.queue.subqueue.residence.ms{role,engineIp}` 在请求实际离开各队列时记录
+本次入队到出队的单调时钟时长，包含交付、取消、抢占、停机等出口；监控按 Timer
+样本计算平均值和分位数。撤回后重入按新的一次停留计时，旧的
+`routing.queue.wait.time.ms` 保持兼容口径。仍在等待的请求不产生 Timer 样本，
+使用 `app.flexlb.queue.global.oldest.wait.ms` 和
+`app.flexlb.queue.subqueue.oldest.wait.ms{role,engineIp}` 查看最老等待年龄，空队列报 0。
+队列深度与容量计数来自不同并发点，采样时允许短暂不一致；只有持续偏差才值得排查漏账。
+
 `app.engine.health.check.engine.worker.number.service.discovery.result{model,role}` 统计所有已配置 endpoint
 成功返回的原始 Host 数量；空返回上报 0，即使健康检查继续沿用缓存。某 endpoint 查询失败时
 不以缓存或 0 伪装完整的发现结果，本轮跳过总数上报，失败由 discovery error/timeout 指标记录。

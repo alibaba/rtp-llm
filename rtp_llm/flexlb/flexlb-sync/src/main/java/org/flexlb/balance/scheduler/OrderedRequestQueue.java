@@ -68,6 +68,20 @@ final class OrderedRequestQueue {
         return size;
     }
 
+    long oldestEnteredAtNanos() {
+        long oldest = Long.MAX_VALUE;
+        if (priorityOrdering) {
+            for (Bucket bucket : priorityBuckets) {
+                if (bucket != null) {
+                    oldest = Math.min(oldest, bucket.oldestEnteredAtNanos());
+                }
+            }
+        } else {
+            oldest = fifo.oldestEnteredAtNanos();
+        }
+        return oldest == Long.MAX_VALUE ? 0L : oldest;
+    }
+
     /**
      * Find a lower-priority request to preempt without removing it.
      * Check lower priority levels first; within a level, choose the newest request
@@ -231,6 +245,14 @@ final class OrderedRequestQueue {
         private GlobalQueueEntry nextToScan;
         private final NavigableSet<GlobalQueueEntry> readyRetries =
                 new TreeSet<>(SEQUENCE_ORDER);
+
+        long oldestEnteredAtNanos() {
+            long oldest = Long.MAX_VALUE;
+            for (GlobalQueueEntry entry = head; entry != null; entry = entry.next) {
+                oldest = Math.min(oldest, entry.enteredQueueAtNanos);
+            }
+            return oldest;
+        }
 
         boolean hasPendingRequests() {
             return nextToScan != null || !readyRetries.isEmpty();

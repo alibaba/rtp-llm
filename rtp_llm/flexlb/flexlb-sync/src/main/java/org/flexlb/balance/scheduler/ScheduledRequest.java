@@ -39,6 +39,10 @@ public final class ScheduledRequest implements Prioritized {
     private final PrefillEndpoint prefillEp;
     private final DecodeBinding decodeBinding;
     private final long enqueuedAtMs;
+    /**
+     * Monotonic entry time for the current endpoint queue visit, not the first route attempt.
+     */
+    private long subQueueEnteredAtNanos;
     private final long enqueueSequence;
     private final long expiresAtMs;
     private final long hitCache;
@@ -113,6 +117,24 @@ public final class ScheduledRequest implements Prioritized {
         return decodeBinding;
     }
     public long enqueuedAtMs() { return enqueuedAtMs; }
+
+    void markSubQueueEntry() {
+        subQueueEnteredAtNanos = System.nanoTime();
+    }
+
+    long subQueueEnteredAtNanos() {
+        return subQueueEnteredAtNanos;
+    }
+
+    public long finishSubQueueVisitMs() {
+        long enteredAt = subQueueEnteredAtNanos;
+        if (enteredAt == 0L) {
+            return -1L;
+        }
+        subQueueEnteredAtNanos = 0L;
+        return java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(
+                Math.max(0L, System.nanoTime() - enteredAt));
+    }
     public long expiresAtMs() { return expiresAtMs; }
     public boolean requestExpired(long nowMs) {
         return expiresAtMs <= 0L || nowMs >= expiresAtMs;

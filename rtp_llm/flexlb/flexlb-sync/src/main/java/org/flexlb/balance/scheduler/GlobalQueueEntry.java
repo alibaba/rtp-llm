@@ -12,6 +12,10 @@ final class GlobalQueueEntry {
     final CompletableFuture<Response> future;
     final int priority;
     final String routingGroup;
+    /**
+     * Monotonic entry time for this visit; reset when a withdrawn route returns.
+     */
+    long enteredQueueAtNanos;
     long sequence;
     volatile boolean removed;
     GlobalQueueEntry previous;

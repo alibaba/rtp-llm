@@ -87,7 +87,8 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                 placementAvailability,
                 queueCapacity);
         this.runtime = new SchedulerRuntime(
-                lifecycle, registry, batchReporter, requestReporter, scheduler);
+                lifecycle, registry, batchReporter, requestReporter, scheduler,
+                configService, queueCapacity);
     }
 
     public RequestRegistry requestRegistry() {

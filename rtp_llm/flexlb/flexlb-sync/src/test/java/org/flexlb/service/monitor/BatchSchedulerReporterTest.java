@@ -19,12 +19,21 @@ import static org.flexlb.constant.MetricConstant.DECODE_INPUT_KV_RESERVED_TOKENS
 import static org.flexlb.constant.MetricConstant.DISPATCH_ACK_TIME_MS;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_DISPATCH_REASON;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_SELECT_DETAIL;
+import static org.flexlb.constant.MetricConstant.ENGINE_SUBQUEUE_OLDEST_WAIT_MS;
+import static org.flexlb.constant.MetricConstant.ENGINE_SUBQUEUE_RESIDENCE_MS;
+import static org.flexlb.constant.MetricConstant.GLOBAL_QUEUE_OLDEST_WAIT_MS;
+import static org.flexlb.constant.MetricConstant.GLOBAL_QUEUE_RESIDENCE_MS;
 import static org.flexlb.constant.MetricConstant.INFLIGHT_MAX_AGE_MS;
 import static org.flexlb.constant.MetricConstant.INFLIGHT_TTL_EXPIRED_QPS;
 import static org.flexlb.constant.MetricConstant.ROUTE_SUBMIT_TIME_MS;
 import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_LENGTH;
 import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_MAX_LENGTH;
 import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_WAIT_TIME_MS;
+import static org.flexlb.constant.MetricConstant.SHARED_SUBQUEUE_BLOCKED;
+import static org.flexlb.constant.MetricConstant.SHARED_SUBQUEUE_ENDPOINT_COUNT;
+import static org.flexlb.constant.MetricConstant.SHARED_SUBQUEUE_LIMIT;
+import static org.flexlb.constant.MetricConstant.SHARED_SUBQUEUE_WAITING;
+import static org.flexlb.constant.MetricConstant.TOTAL_QUEUE_WAITING;
 import static org.flexlb.constant.MetricConstant.TRACKED_REQUEST_COUNT;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyDouble;
@@ -102,6 +111,42 @@ class BatchSchedulerReporterTest {
         reporter.init();
 
         verify(monitor).register(ROUTING_QUEUE_MAX_LENGTH, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+    }
+
+    @Test
+    void reportsSharedQueueCapacityAndAdmissionFailuresByRole() {
+        reporter.init();
+        reporter.reportTotalQueueWaiting(7L);
+        reporter.reportSharedSubQueue("PDFUSION", 3, 12L, 2);
+        reporter.reportSharedSubQueueBlocked("PDFUSION", "10.0.0.2:8080");
+
+        verify(monitor).register(SHARED_SUBQUEUE_WAITING, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        verify(monitor).register(SHARED_SUBQUEUE_LIMIT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        verify(monitor).register(SHARED_SUBQUEUE_BLOCKED, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        verify(monitor).report(TOTAL_QUEUE_WAITING, FlexMetricTags.of(), 7.0);
+        verify(monitor).report(SHARED_SUBQUEUE_WAITING, FlexMetricTags.of("role", "PDFUSION"), 3.0);
+        verify(monitor).report(SHARED_SUBQUEUE_LIMIT, FlexMetricTags.of("role", "PDFUSION"), 12.0);
+        verify(monitor).report(SHARED_SUBQUEUE_ENDPOINT_COUNT, FlexMetricTags.of("role", "PDFUSION"), 2.0);
+        verify(monitor).report(SHARED_SUBQUEUE_BLOCKED,
+                FlexMetricTags.ofEngine("10.0.0.2:8080", "role", "PDFUSION",
+                        "reason", "SHARED_SUBQUEUE_FULL"), 1.0);
+    }
+
+    @Test
+    void queueVisitTimesAndOldestWaitingAgesUseSeparateMetrics() {
+        reporter.init();
+        reporter.reportGlobalQueueResidenceMs(24L);
+        reporter.reportEngineSubQueueResidenceMs("PREFILL", "10.0.0.1:8080", 13L);
+        reporter.reportGlobalQueueOldestWaitMs(30L);
+        reporter.reportEngineSubQueueOldestWaitMs("PREFILL", "10.0.0.1:8080", 17L);
+
+        FlexMetricTags worker = FlexMetricTags.ofEngine("10.0.0.1:8080", "role", "PREFILL");
+        verify(monitor).register(GLOBAL_QUEUE_RESIDENCE_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
+        verify(monitor).register(ENGINE_SUBQUEUE_RESIDENCE_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
+        verify(monitor).report(GLOBAL_QUEUE_RESIDENCE_MS, FlexMetricTags.of(), 24.0);
+        verify(monitor).report(ENGINE_SUBQUEUE_RESIDENCE_MS, worker, 13.0);
+        verify(monitor).report(GLOBAL_QUEUE_OLDEST_WAIT_MS, FlexMetricTags.of(), 30.0);
+        verify(monitor).report(ENGINE_SUBQUEUE_OLDEST_WAIT_MS, worker, 17.0);
     }
 
     @Test

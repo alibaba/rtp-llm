@@ -43,6 +43,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.nullable;
 import static org.mockito.Mockito.mock;
@@ -215,6 +216,25 @@ class GlobalQueueProgressTest {
             awaitCondition(() -> f.queueCapacity.globalQueueAndEngineSubQueueCount() == 1L);
             f.submit(4L, "b");
             awaitCondition(() -> f.admitted.contains(4L));
+        }
+    }
+
+    @Test
+    void globalQueueWaitIsRecordedOnlyWhenTheRequestLeavesTheQueue() throws Exception {
+        try (Fixture f = new Fixture(RoleType.PREFILL)) {
+            f.submit(1L, "a");
+            awaitCondition(() -> f.scheduler.getBlockedRequestCount() == 1);
+            GlobalQueueCoordinator queue = (GlobalQueueCoordinator) ReflectionTestUtils.getField(
+                    f.scheduler, "globalQueue");
+            assertTrue(queue.oldestWaitingAgeMs() >= 0L);
+            org.mockito.Mockito.verify(f.reporter, org.mockito.Mockito.never())
+                    .reportGlobalQueueResidenceMs(anyLong());
+
+            f.aSlots.set(1);
+            f.release("a");
+            awaitCondition(() -> f.admitted.contains(1L));
+            verify(f.reporter, timeout(5_000)).reportGlobalQueueResidenceMs(anyLong());
+            assertEquals(0L, queue.oldestWaitingAgeMs());
         }
     }
 
@@ -756,6 +776,7 @@ class GlobalQueueProgressTest {
         private final AtomicReference<FlexlbConfig> currentConfig = new AtomicReference<>(config);
         private final PlacementAvailability availability;
         private final QueueCapacity queueCapacity;
+        private final BatchSchedulerReporter reporter = mock(BatchSchedulerReporter.class);
         private final AtomicInteger prefillEndpointCount = new AtomicInteger();
         private final AtomicInteger fusionEndpointCount = new AtomicInteger();
         private final AtomicInteger aSlots = new AtomicInteger();
@@ -850,7 +871,7 @@ class GlobalQueueProgressTest {
                 });
                 return PlacementResult.success(route);
             });
-            scheduler = new RequestScheduler(service, router, endpoints, mock(BatchSchedulerReporter.class),
+            scheduler = new RequestScheduler(service, router, endpoints, reporter,
                     mock(EvictionManager.class), lifecycle, availability, queueCapacity);
         }
 

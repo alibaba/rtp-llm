@@ -24,6 +24,10 @@ import static org.flexlb.constant.MetricConstant.DISPATCH_ACK_TIME_MS;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_BATCH_SIZE;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_BATCH_TOTAL_TOKENS;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_DISPATCH_REASON;
+import static org.flexlb.constant.MetricConstant.ENGINE_SUBQUEUE_OLDEST_WAIT_MS;
+import static org.flexlb.constant.MetricConstant.ENGINE_SUBQUEUE_RESIDENCE_MS;
+import static org.flexlb.constant.MetricConstant.GLOBAL_QUEUE_OLDEST_WAIT_MS;
+import static org.flexlb.constant.MetricConstant.GLOBAL_QUEUE_RESIDENCE_MS;
 import static org.flexlb.constant.MetricConstant.INFLIGHT_BATCH_COUNT;
 import static org.flexlb.constant.MetricConstant.INFLIGHT_MAX_AGE_MS;
 import static org.flexlb.constant.MetricConstant.INFLIGHT_REQUEST_COUNT;
@@ -32,6 +36,11 @@ import static org.flexlb.constant.MetricConstant.ROUTE_SUBMIT_TIME_MS;
 import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_LENGTH;
 import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_MAX_LENGTH;
 import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_WAIT_TIME_MS;
+import static org.flexlb.constant.MetricConstant.SHARED_SUBQUEUE_BLOCKED;
+import static org.flexlb.constant.MetricConstant.SHARED_SUBQUEUE_ENDPOINT_COUNT;
+import static org.flexlb.constant.MetricConstant.SHARED_SUBQUEUE_LIMIT;
+import static org.flexlb.constant.MetricConstant.SHARED_SUBQUEUE_WAITING;
+import static org.flexlb.constant.MetricConstant.TOTAL_QUEUE_WAITING;
 import static org.flexlb.constant.MetricConstant.TRACKED_REQUEST_COUNT;
 import static org.flexlb.constant.MetricConstant.WORKER_STATUS_UNCONFIRMED_REQUEST_COUNT;
 
@@ -93,6 +102,15 @@ public class BatchSchedulerReporter {
 
         // Batcher queue size — per-engine pending batch request count (FlexLB batcher queue depth)
         monitor.register(BATCHER_QUEUE_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        monitor.register(TOTAL_QUEUE_WAITING, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        monitor.register(SHARED_SUBQUEUE_WAITING, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        monitor.register(SHARED_SUBQUEUE_LIMIT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        monitor.register(SHARED_SUBQUEUE_ENDPOINT_COUNT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        monitor.register(SHARED_SUBQUEUE_BLOCKED, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        monitor.register(GLOBAL_QUEUE_RESIDENCE_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
+        monitor.register(ENGINE_SUBQUEUE_RESIDENCE_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
+        monitor.register(GLOBAL_QUEUE_OLDEST_WAIT_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        monitor.register(ENGINE_SUBQUEUE_OLDEST_WAIT_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
 
         // Decode total load and inflight KV reserved — per decode worker (FlexLB scheduler view)
         monitor.register(DECODE_TOTAL_LOAD, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
@@ -117,7 +135,7 @@ public class BatchSchedulerReporter {
         // ACK-to-response time — from engine ACK to schedule response sent to client (timer for distribution)
         monitor.register(ACK_TO_RESPONSE_TIME_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
 
-        log.info("BatchSchedulerReporter initialized (22 metrics)");
+        log.info("BatchSchedulerReporter initialized (31 metrics)");
     }
 
     // ==================== Queue metrics ====================
@@ -130,6 +148,41 @@ public class BatchSchedulerReporter {
         FlexMetricTags tags = FlexMetricTags.of("type", GLOBAL_QUEUE_TYPE);
         monitor.report(ROUTING_QUEUE_LENGTH, tags, depth);
         monitor.report(ROUTING_QUEUE_MAX_LENGTH, tags, maxQueuedRequests);
+    }
+
+    public void reportTotalQueueWaiting(long depth) {
+        monitor.report(TOTAL_QUEUE_WAITING, FlexMetricTags.of(), depth);
+    }
+
+    public void reportSharedSubQueue(String role, int depth, long limit, int logicalEndpointCount) {
+        FlexMetricTags tags = FlexMetricTags.of("role", role);
+        monitor.report(SHARED_SUBQUEUE_WAITING, tags, depth);
+        monitor.report(SHARED_SUBQUEUE_LIMIT, tags, limit);
+        monitor.report(SHARED_SUBQUEUE_ENDPOINT_COUNT, tags, logicalEndpointCount);
+    }
+
+    public void reportSharedSubQueueBlocked(String role, String engineIp) {
+        monitor.report(SHARED_SUBQUEUE_BLOCKED,
+                FlexMetricTags.ofEngine(engineIp, "role", role,
+                        "reason", "SHARED_SUBQUEUE_FULL"), 1.0);
+    }
+
+    public void reportGlobalQueueResidenceMs(long durationMs) {
+        monitor.report(GLOBAL_QUEUE_RESIDENCE_MS, FlexMetricTags.of(), durationMs);
+    }
+
+    public void reportGlobalQueueOldestWaitMs(long ageMs) {
+        monitor.report(GLOBAL_QUEUE_OLDEST_WAIT_MS, FlexMetricTags.of(), ageMs);
+    }
+
+    public void reportEngineSubQueueResidenceMs(String role, String engineIp, long durationMs) {
+        monitor.report(ENGINE_SUBQUEUE_RESIDENCE_MS,
+                FlexMetricTags.ofEngine(engineIp, "role", role), durationMs);
+    }
+
+    public void reportEngineSubQueueOldestWaitMs(String role, String engineIp, long ageMs) {
+        monitor.report(ENGINE_SUBQUEUE_OLDEST_WAIT_MS,
+                FlexMetricTags.ofEngine(engineIp, "role", role), ageMs);
     }
 
     /**

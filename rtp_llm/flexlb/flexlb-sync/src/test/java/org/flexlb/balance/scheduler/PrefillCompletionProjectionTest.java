@@ -46,10 +46,12 @@ class PrefillCompletionProjectionTest {
         var requestReporter = mock(RequestSchedulerReporter.class);
         var requests = new RequestRegistry(service, reporter, requestReporter);
         var projector = new EndpointEventProjector(requests);
+        var queueCapacity = new QueueCapacity();
         var endpoints = new EndpointRegistry(service, projector, reporter,
                 new RouteDeliveryStrategy(requests, new DeliveryMetrics(reporter)),
-                new PlacementAvailability(), new QueueCapacity());
-        var runtime = new SchedulerRuntime(requests, endpoints, reporter, requestReporter);
+                new PlacementAvailability(), queueCapacity);
+        var runtime = new SchedulerRuntime(requests, endpoints, reporter, requestReporter,
+                service, queueCapacity);
         try {
             WorkerStatus worker = WorkerStatus.createDiscovered(
                     RoleType.PREFILL, "g1", "127.0.0.1", 8080, 8081, "test");

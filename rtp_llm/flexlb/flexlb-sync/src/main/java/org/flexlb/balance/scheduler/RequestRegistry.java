@@ -623,13 +623,16 @@ public class RequestRegistry {
 
     public record TrackedRequestStats(int generationRequests, int encoderRequests, long oldestAgeMs) { }
 
-    /** Global Generation queue depth and its configured bound, or null when QUEUE mode is not active. */
+    /**
+     * Global Generation queue depth, age and configured bound, or null outside QUEUE mode.
+     */
     public GlobalQueueStats globalQueueStats() {
         GlobalQueueCoordinator queue = globalQueue;
-        return queue == null ? null : new GlobalQueueStats(queue.size(), queue.maxQueuedRequests());
+        return queue == null ? null : new GlobalQueueStats(
+                queue.size(), queue.maxQueuedRequests(), queue.oldestWaitingAgeMs());
     }
 
-    public record GlobalQueueStats(int depth, int maxQueuedRequests) { }
+    public record GlobalQueueStats(int depth, int maxQueuedRequests, long oldestWaitMs) { }
 
     public long oldestLiveSlotAgeMs() {
         long oldest = Long.MAX_VALUE;

@@ -956,6 +956,15 @@ public class EndpointRegistry {
                 Map.copyOf(endpoints(RoleType.PREFILL));
     }
 
+    /**
+     * Immutable point-in-time view of PDFUSION endpoint queues.
+     */
+    @SuppressWarnings("unchecked")
+    public Map<String, PrefillEndpoint> snapshotPdFusionEndpoints() {
+        return (Map<String, PrefillEndpoint>) (Map<?, ?>)
+                Map.copyOf(endpoints(RoleType.PDFUSION));
+    }
+
     /** Immutable point-in-time view; publication remains owned by this registry. */
     @SuppressWarnings("unchecked")
     public Map<String, DecodeEndpoint> snapshotDecodeEndpoints() {

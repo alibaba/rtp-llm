@@ -54,10 +54,12 @@ class RequestConfirmationTimeoutTest {
         var requestReporter = mock(RequestSchedulerReporter.class);
         var requests = new RequestRegistry(service, reporter, requestReporter);
         var projector = new EndpointEventProjector(requests);
+        var queueCapacity = new QueueCapacity();
         var endpoints = new EndpointRegistry(service, projector, reporter,
                 new RouteDeliveryStrategy(requests, new DeliveryMetrics(reporter)),
-                new PlacementAvailability(), new QueueCapacity());
-        var runtime = new SchedulerRuntime(requests, endpoints, reporter, requestReporter);
+                new PlacementAvailability(), queueCapacity);
+        var runtime = new SchedulerRuntime(requests, endpoints, reporter, requestReporter,
+                service, queueCapacity);
         DecodeEndpoint decode = null;
         try {
             WorkerStatus prefillWorker = worker(RoleType.PREFILL, "127.0.0.1");

@@ -571,6 +571,41 @@ public class PrefillEndpoint extends WorkerEndpoint {
                 role,
                 engineIp,
                 stats.maxObservedAgeMs());
+        if (engineSubQueueMode) {
+            reportQueueMetricSafely("oldest endpoint queue wait", () ->
+                    reporter.reportEngineSubQueueOldestWaitMs(role, engineIp, runtime.oldestSubQueueWaitMs()));
+        }
+    }
+
+    public void reportSubQueueResidence(ScheduledRequest item) {
+        if (!engineSubQueueMode) {
+            return;
+        }
+        long durationMs = item.finishSubQueueVisitMs();
+        if (durationMs < 0L) {
+            return;
+        }
+        reportQueueMetricSafely("endpoint queue residence time", () ->
+            reporter.reportEngineSubQueueResidenceMs(
+                    getStatus().getRole().name(), getStatus().getMetricIpPort(), durationMs));
+    }
+
+    public void reportSharedSubQueueBlocked() {
+        reportQueueMetricSafely("shared endpoint queue admission block", () ->
+                reporter.reportSharedSubQueueBlocked(
+                        getStatus().getRole().name(), getStatus().getMetricIpPort()));
+    }
+
+    private void reportQueueMetricSafely(String metricName, Runnable report) {
+        try {
+            report.run();
+        } catch (Throwable failure) {
+            try {
+                logger.warn("Failed to report {}", metricName, failure);
+            } catch (Throwable ignoredLoggingFailure) {
+                // Metrics must not affect queue admission or delivery.
+            }
+        }
     }
 
     /**
