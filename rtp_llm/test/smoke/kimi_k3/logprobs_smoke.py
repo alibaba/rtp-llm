@@ -3,11 +3,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 
-from request_smoke import (
-    require,
-    validate_answer,
-    validate_probabilities,
-)
+from request_smoke import require, validate_answer, validate_probabilities
 
 COPY_TEXT = "a0 b1 c2 d3 e4 f5 g6 h7 i8 j9 k0 l1 m2 n3 o4 p5"
 
