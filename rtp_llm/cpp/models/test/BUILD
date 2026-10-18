@@ -19,6 +19,17 @@ cuda13_torch_link_deps = select({
     "//conditions:default": [],
 })
 
+cc_test(
+    name = "prefill_forward_evidence_test",
+    srcs = ["PrefillForwardEvidenceTest.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/models:prefill_forward_evidence",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps() + cuda13_torch_link_deps,
+)
+
 test_deps = [
     "//rtp_llm/cpp/testing:device_test_utils",
     "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",

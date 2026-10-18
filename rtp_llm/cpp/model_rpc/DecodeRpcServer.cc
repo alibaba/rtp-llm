@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/utils/SmokeEvidence.h"
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
@@ -1354,6 +1355,12 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
             legacy_partition_it != legacy_partitions.end() ? &legacy_partition_it->second : nullptr;
         using SourcePartition = std::pair<int, int>;
         std::map<SourcePartition, std::vector<std::shared_ptr<RequestBlockBuffer>>> load_batches;
+        size_t                                                                      full_pages        = 0;
+        size_t                                                                      linear_blocks     = 0;
+        size_t                                                                      draft_blocks      = 0;
+        size_t                                                                      submitted_batches = 0;
+        size_t first_full_page = std::numeric_limits<size_t>::max();
+        size_t last_full_page  = 0;
         RTP_LLM_LOG_DEBUG("load context request id is %d", load_context.request_id);
 
         for (size_t layer_id = 0; layer_id < layer_num; layer_id++) {
@@ -1396,6 +1403,15 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                     auto block_id = block_ids[block_pos];
                     if (isNullBlockIdx(block_id)) {
                         continue;
+                    }
+                    if (smokeEvidenceEnabled()) {
+                        if (group_type == CacheGroupType::FULL) {
+                            ++full_pages;
+                            first_full_page = std::min(first_full_page, cache_key_index);
+                            last_full_page  = std::max(last_full_page, cache_key_index);
+                        } else if (linear_spec != nullptr) {
+                            ++linear_blocks;
+                        }
                     }
                     auto cache_key =
                         makeCacheKey(model_id, std::to_string(load_context.cache_keys[cache_key_index]), layer_id, tag);
@@ -1551,6 +1567,9 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                                 if (isNullBlockIdx(block_id)) {
                                     continue;
                                 }
+                                if (smokeEvidenceEnabled()) {
+                                    ++draft_blocks;
+                                }
                                 auto cache_key = makeCacheKey(
                                     model_id, std::to_string(load_context.cache_keys[cache_key_index]), layer_id, tag);
                                 const bool mtp_use_mla = mtp_cache_cfg.use_mla;
@@ -1666,6 +1685,41 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                 return {ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "load kv cache failed"), 0};
             }
             load_contexts.emplace_back(peer_addr, layer_cache_load_context);
+            if (smokeEvidenceEnabled()) {
+                ++submitted_batches;
+            }
+        }
+        if (smokeEvidenceEnabled() && is_page_level_rr) {
+            // Observe the actual selected LINEAR transfer context. A peer may
+            // submit FULL pages without owning any LINEAR head slice.
+            const int source_partitions      = head_partition ? head_partition->remote_partition_count : 0;
+            const int source_partition       = head_partition ? head_partition->remote_partition_id : 0;
+            const int destination_partitions = head_partition ? head_partition->local_partition_count : 0;
+            const int destination_partition  = head_partition ? head_partition->local_partition_id : 0;
+            RTP_LLM_LOG_INFO(
+                "[RTP_SMOKE_EVENT] {\"event\":\"pd_transfer_submitted\",\"request_id\":%ld,"
+                "\"dp_rank\":%d,\"attn_tp_rank\":%d,\"source_tp_rank\":%d,\"source_tp\":%d,"
+                "\"destination_tp\":%d,\"full_pages\":%zu,\"first_full_page\":%zu,"
+                "\"last_full_page\":%zu,\"linear_blocks\":%zu,\"draft_blocks\":%zu,\"submitted_batches\":%zu,"
+                "\"linear_source_partitions\":%d,\"linear_source_partition\":%d,"
+                "\"linear_destination_partitions\":%d,\"linear_destination_partition\":%d,\"time_ns\":%ld}",
+                static_cast<long>(load_context.request_id),
+                static_cast<int>(maga_init_params_.parallelism_config.dp_rank),
+                decode_attention_rank,
+                i,
+                peer_cnt,
+                decode_attention_tp,
+                full_pages,
+                first_full_page == std::numeric_limits<size_t>::max() ? 0 : first_full_page,
+                last_full_page,
+                linear_blocks,
+                draft_blocks,
+                submitted_batches,
+                source_partitions,
+                source_partition,
+                destination_partitions,
+                destination_partition,
+                static_cast<long>(smokeEvidenceTimeNs()));
         }
     }
 
@@ -1733,6 +1787,18 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
     response->mutable_error_info()->set_error_message(load_result.error_info.ToString());
     response->set_loaded_cache_block_count(static_cast<int64_t>(load_result.loaded_cache_block_count));
     response->set_done_time_us(currentTimeUs());
+    if (smokeEvidenceEnabled() && load_result.error_info.ok()) {
+        RTP_LLM_LOG_INFO("[RTP_SMOKE_EVENT] {\"event\":\"pd_cache_loaded\",\"request_id\":%ld,"
+                         "\"dp_rank\":%d,\"attn_tp_rank\":%d,\"partition_id\":%d,"
+                         "\"partition_count\":%d,\"loaded_blocks\":%ld,\"time_ns\":%ld}",
+                         static_cast<long>(request->request_id()),
+                         static_cast<int>(maga_init_params_.parallelism_config.dp_rank),
+                         static_cast<int>(maga_init_params_.parallelism_config.get_attn_tp_rank()),
+                         request->partition_id(),
+                         request->partition_count(),
+                         static_cast<long>(load_result.loaded_cache_block_count),
+                         static_cast<long>(smokeEvidenceTimeNs()));
+    }
     RTP_LLM_LOG_DEBUG("request: %s, remote load cache grpc done", request->request_key().c_str());
     return grpc::Status::OK;
 }

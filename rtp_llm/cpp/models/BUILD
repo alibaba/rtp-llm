@@ -158,15 +158,24 @@ cc_library(
 )
 
 cc_library(
+    name = "prefill_forward_evidence",
+    hdrs = ["PrefillForwardEvidence.h"],
+    deps = ["//rtp_llm/models_py/bindings/core:op_data"] + torch_deps(),
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "models",
     hdrs = glob([
         "*.h",
-    ], exclude = ["ModelInputsLogger.h"]),
+    ], exclude = ["ModelInputsLogger.h", "PrefillForwardEvidence.h"]),
     srcs = glob([
         "*.cc",
     ], exclude = ["ModelInputsLogger.cc"]),
     deps = [
         ":model_inputs_logger",
+        ":prefill_forward_evidence",
         ":sample_infos",
         ":logits_processor",
         ":dfa_utils",

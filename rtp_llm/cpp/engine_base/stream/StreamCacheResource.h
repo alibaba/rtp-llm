@@ -57,6 +57,9 @@ public:
     void                        releaseResource();
     bool                        asyncLoadCache();
     bool                        loadCacheDone();
+    // HOST reuse planned by the current pending load; published reuse remains
+    // zero until the asynchronous transfer has successfully completed.
+    size_t pendingHostReuseTokens() const;
 
     // swap all linear groups rhs and lhs
     void swapLinearBlocks(int32_t batch_id, size_t rhs, size_t lhs);

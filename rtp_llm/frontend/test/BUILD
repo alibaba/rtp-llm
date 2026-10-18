@@ -93,3 +93,9 @@ py_test(
         "//rtp_llm:testlib",
     ],
 )
+
+py_test(
+    name = "smoke_trace_test",
+    srcs = ["smoke_trace_test.py"],
+    data = ["//rtp_llm:frontend/smoke_trace.py"],
+)

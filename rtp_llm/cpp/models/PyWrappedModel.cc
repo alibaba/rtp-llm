@@ -1,4 +1,6 @@
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
+#include "rtp_llm/cpp/models/PrefillForwardEvidence.h"
+#include "rtp_llm/cpp/utils/SmokeEvidence.h"
 #if USING_CUDA
 #include "rtp_llm/models_py/bindings/cuda/kernels/cuda_graph_prepare.h"
 #endif
@@ -35,6 +37,29 @@ namespace rtp_llm {
 
 namespace {
 
+void emitPrefillForwardEvidence(const GptModelInputs& logical_inputs,
+                                const PyModelOutputs& outputs,
+                                int64_t               model_id,
+                                int64_t               tp_rank,
+                                int64_t               tp_size,
+                                bool                  sequence_parallel) {
+    // Full-forward outputs still have their physical rows here: SP unpadding
+    // and CP output restoration happen below this boundary. Reading shape is
+    // host metadata and does not wait for the GPU. An SP model returns gathered
+    // rows, so only that explicit model contract divides rows by TP size.
+    const int64_t physical_tokens =
+        outputs.hidden_states.defined() && outputs.hidden_states.dim() > 0 ? outputs.hidden_states.size(0) : 0;
+    const auto event =
+        collectPrefillForwardEvidence(logical_inputs, physical_tokens, model_id, tp_rank, tp_size, sequence_parallel);
+    if (event.has_value()) {
+        const auto payload = prefillForwardEvidenceJson(*event, smokeEvidenceTimeNs());
+        if (event->error.empty()) {
+            RTP_LLM_LOG_INFO("[RTP_SMOKE_EVENT] %s", payload.c_str());
+        } else {
+            RTP_LLM_LOG_ERROR("[RTP_SMOKE_EVENT] %s", payload.c_str());
+        }
+    }
+}
 
 // Pairs init() with a full drain on exceptional exits. DSpark's normal path
 // finishes only writer submissions here and leaves actual publication for the
@@ -956,6 +981,19 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
                             "py_model_outputs.size:%d != micro_batch_inputs.size:%d",
                             py_model_outputs.size(),
                             input_list.size());
+    if (smokeEvidenceEnabled()) {
+        for (size_t index = 0; index < split_inputs.size(); ++index) {
+            // A disabled micro-batch plan appends a fake lane aliasing lane 0.
+            if (split_inputs[index].kv_cache_kernel_block_id.defined()) {
+                emitPrefillForwardEvidence(split_inputs[index],
+                                           py_model_outputs[index],
+                                           model_id_,
+                                           device_props_.tp_rank,
+                                           device_props_.tp_size,
+                                           sequence_parallel_padding_enabled_);
+            }
+        }
+    }
 
     cache_store_write_cycle.finish();
 
@@ -1345,6 +1383,16 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& raw_inputs) {
             held_attn_pyobj_ = py_model_.attr("prepare_fmha_impl")(py_model_inputs, false);
             auto outputs     = py_forward_method_(py_model_inputs, held_attn_pyobj_);
             py_model_outputs = outputs.cast<PyModelOutputs>();
+        }
+        // This proves a successful Python/graph forward return, not completion
+        // of asynchronously enqueued GPU work. The observer adds no CUDA sync.
+        if (smokeEvidenceEnabled()) {
+            emitPrefillForwardEvidence(post_inputs,
+                                       py_model_outputs,
+                                       model_id_,
+                                       device_props_.tp_rank,
+                                       device_props_.tp_size,
+                                       sequence_parallel_padding_enabled_);
         }
 
         if (capture_hidden_states) {
