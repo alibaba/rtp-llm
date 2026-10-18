@@ -685,9 +685,20 @@ def diffusion_gemma_suites():
                 # model synchronize and label every flashinfer stage so the
                 # CI log names the kernel that poisons the context.
                 envs = ["DGM_FI_DIAG=1"],
-                # Vision bring-up: 3 cases (basic / cache-reuse / two-images),
-                # golden intentionally empty until first successful recording.
-                smoke_args = "--act_type BF16 --tp_size 1 --dp_size 1 --ep_size 1 --world_size 1 --max_seq_len 12800 --reserver_runtime_mem_mb 24000 --seq_size_per_block 64 --test_block_num 2000 --concurrency_limit 2 --max_context_batch_size 2 --reuse_cache 0 --sp_type dspark --sp_model_type diffusion_gemma_proposer --sp_checkpoint_path /mnt/fuse/smoke-test/hf/google--diffusiongemma-26B-A4B-it--f7f5b7f5fa82ffc52addd066915886d497f5517b --gen_num_per_cycle 256",
+                # Consolidated multimodal case with KV-reuse coverage (hy_v3
+                # pattern): 6 queries in one session, --reuse_cache 1.
+                # Reuse scenarios (2026-10-14 decree): ① same-prefix
+                # different-suffix (vision_cache_reuse over vision_basic's
+                # image prefix + reuse_full_repeat exact repeat +
+                # reuse_continuation turn-2 chat) ② multimodal partial match
+                # (vision_two_images: first image block hits, second misses)
+                # ③ mixed hit/miss (reuse_full_repeat hit then
+                # reuse_mixed_fresh_miss fresh text prompt in the same
+                # session). Golden asserts each query's
+                # usage.prompt_tokens_details.cached_tokens; cached-prefill
+                # output must stay identical to the no-cache baseline
+                # (greedy + seeded propose make generation deterministic).
+                smoke_args = "--act_type BF16 --tp_size 1 --dp_size 1 --ep_size 1 --world_size 1 --max_seq_len 12800 --reserver_runtime_mem_mb 24000 --seq_size_per_block 64 --test_block_num 2000 --concurrency_limit 2 --max_context_batch_size 2 --reuse_cache 1 --sp_type dspark --sp_model_type diffusion_gemma_proposer --sp_checkpoint_path /mnt/fuse/smoke-test/hf/google--diffusiongemma-26B-A4B-it--f7f5b7f5fa82ffc52addd066915886d497f5517b --gen_num_per_cycle 256",
                 gpu_type = ["H20_CU13"],
             ),
             smoke_test(

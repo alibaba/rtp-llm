@@ -18,7 +18,13 @@ import torch
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.base_model import BaseModel
-from rtp_llm.ops import CacheGroupType, DataType, KVCacheSpecDesc, KVCacheSpecType
+from rtp_llm.ops import (
+    CacheGroupType,
+    CacheTailPolicyDesc,
+    DataType,
+    KVCacheSpecDesc,
+    KVCacheSpecType,
+)
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
     W,
@@ -91,13 +97,31 @@ class DiffusionGemmaProposerWeightInfo(ModelDeployWeightInfo):
         tiny.tag = "swa_kv"
         tiny.cache_type = KVCacheSpecType.MHA
         # mergeMTPModule requires samePolicy against the target swa_kv group:
-        # SWA type plus the target's sliding window.
+        # SWA type, the target's sliding window, and the same active-tail
+        # policy (the target's swa_kv desc materializes the full window so
+        # SWACacheManager leaves no NULL_BLOCK_IDX slots that position->page
+        # mappings would index; run 37).
         tiny.group_type = CacheGroupType.SWA
+        tail = CacheTailPolicyDesc()
+        tail.active_tail_blocks = self._swa_active_tail_blocks()
+        tiny.tail = tail
         tiny.mha_kv_head_num = 1
         tiny.mha_size_per_head = 64
         tiny.dtype = DataType.TYPE_BF16
         layer_weights = [[]]
         return ModelWeightInfo(layer_weights=layer_weights, weights=weights)
+
+    def _swa_active_tail_blocks(self) -> int:
+        # ceil(window / kernel_page) + 1: materialize the full sliding window
+        # so SWACacheManager leaves no NULL slots (run 37); the fallback chain
+        # covers weight-info builds that run before config finalization.
+        window = int(self.model_config.dgm_sliding_window)
+        page = (
+            int(self.model_config.attn_config.kernel_tokens_per_block)
+            or int(self.model_config.attn_config.tokens_per_block)
+            or 64
+        )
+        return (window + page - 1) // page + 1
 
 
 class DiffusionGemmaProposer(BaseModel):

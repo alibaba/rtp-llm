@@ -19,7 +19,13 @@ from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.diffusion_gemma_weight import DiffusionGemmaWeightInfo
-from rtp_llm.ops import CacheGroupType, DataType, KVCacheSpecDesc, KVCacheSpecType
+from rtp_llm.ops import (
+    CacheGroupType,
+    CacheTailPolicyDesc,
+    DataType,
+    KVCacheSpecDesc,
+    KVCacheSpecType,
+)
 from rtp_llm.utils.util import get_config_from_path
 
 # Python-only ModelConfig fields for DiffusionGemma.
@@ -75,6 +81,27 @@ def build_diffusion_gemma_kv_spec_descs(config: "DiffusionGemmaConfig") -> list:
             swa.cache_type = KVCacheSpecType.MHA
             swa.group_type = CacheGroupType.SWA
             swa.dtype = DataType.TYPE_BF16
+            # SWACacheManager materializes only the active tail plus the
+            # reserve region and fills the remaining table slots with
+            # NULL_BLOCK_IDX (-1). Without this policy the effective tail is
+            # ~2 blocks, so a 278-token prefill's block table arrives as
+            # [-1, -1, -1, 1, 2, ...] and every position->page mapping (KV
+            # write, paged prefix read) indexes block -1 -> illegal memory
+            # access (run 37 write-geometry dump). Materialize the full
+            # window: ceil(window / kernel_page) + 1, matching the engine's
+            # own kernel-block-table width for this group. Descs are built
+            # before config finalization fills the block sizes, so fall back
+            # to the project's 64-token page.
+            page = (
+                int(config.attn_config.kernel_tokens_per_block)
+                or int(config.attn_config.tokens_per_block)
+                or 64
+            )
+            tail = CacheTailPolicyDesc()
+            tail.active_tail_blocks = (
+                int(config.dgm_sliding_window) + page - 1
+            ) // page + 1
+            swa.tail = tail
             descs.append([swa])
         else:
             g = KVCacheSpecDesc()

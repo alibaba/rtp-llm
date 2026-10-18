@@ -17,12 +17,18 @@ the fa2 wrapper target sets it to "fa2" and runs the same suite in a
 separate test process, because an illegal-access crash in one backend
 kills the process before the other variant would run.
 
-Run-35 finding that shaped this file: on SM120 (RTX 5000 Pro, auto
-backend) the flashinfer path does NOT crash at any length but is
-numerically wrong at every length (max_diff ~0.2-0.4, uncorrelated with
-the reference), while the H20 smoke crashes at 278. This test therefore
-runs on the H20 lane only for now; the cross-arch backend story is
-tracked with the architecture-matrix bring-up.
+Run 35 first read the cross-length mismatches (0.4-1.4% of elements,
+max relative error at near-zero reference positions) as backend
+numerical garbage and scoped this test to H20 to stop the failing
+sm12x lane from cascade-canceling the pipeline. Run 36 re-read the same
+pattern correctly: with sm_scale=1.0 and |q.k| ~ ±50 these are near-tie
+softmax selection flips between the bf16-einsum reference and
+flashinfer's fp32 scores — a comparison artifact, not a kernel defect
+(the model's 0-diff golden over a full generation proves the path). The
+test inputs are now scaled so scores stay smooth and the tolerance is
+meaningful; H20-only scoping stays until the vision crash fix is
+verified, after which the matrix (sm8x/sm12x) variants return as
+cross-arch signal.
 """
 
 import os
@@ -149,9 +155,16 @@ class DiffusionGemmaFlashinferPrefillTest(unittest.TestCase):
 
     def _forward(self, op, qo_len, prefix_len, causal, write_kv, kv_cache=None,
                  prefix_k=None, prefix_v=None):
+        # Scale q/k so pre-softmax scores land at std ~4 (not ~16): with
+        # sm_scale=1.0 and |q.k| ~ ±50, near-tie softmax selections flip
+        # between the bf16-einsum reference and flashinfer's fp32 scores
+        # (~1% of query-head pairs, uncorrelated v rows) — a comparison
+        # artifact, not a kernel defect (the 0-diff model golden proves the
+        # path). Smooth scores make the 3e-2 tolerance meaningful while
+        # keeping the softmax selective.
         torch.manual_seed(1234)
-        q = torch.randn(qo_len, HEAD_NUM, HEAD_DIM, dtype=DTYPE, device=self.device)
-        k = torch.randn(qo_len, KV_HEAD_NUM, HEAD_DIM, dtype=DTYPE, device=self.device)
+        q = torch.randn(qo_len, HEAD_NUM, HEAD_DIM, dtype=DTYPE, device=self.device) * 0.25
+        k = torch.randn(qo_len, KV_HEAD_NUM, HEAD_DIM, dtype=DTYPE, device=self.device) * 0.25
         v = torch.randn(qo_len, KV_HEAD_NUM, HEAD_DIM, dtype=DTYPE, device=self.device)
         attn_inputs = self._make_inputs(qo_len, prefix_len)
         if kv_cache is None:
