@@ -8,6 +8,34 @@ import triton.language as tl
 
 
 @triton.jit
+def _sort_and_write_topk_kernel(
+    X,
+    OFF,
+    OUT,
+    W: tl.constexpr,
+    RS: tl.constexpr,
+    CS: tl.constexpr,
+    OS: tl.constexpr,
+    ORS: tl.constexpr,
+    SENTINEL: tl.constexpr,
+    WIDE: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    row = tl.program_id(0).to(tl.int64)
+    col = tl.arange(0, BLOCK).to(tl.int64)
+    x = tl.load(X + row * RS + col * CS, col < W, other=-1)
+    # Sort values only: the original Torch permutation is never consumed.
+    x = tl.sort(tl.where(x >= 0, x, SENTINEL), descending=False)
+    x = tl.where(x == SENTINEL, -1, x)
+    off = tl.load(OFF + row * OS)
+    if WIDE:
+        value = x.to(tl.int64) + off.to(tl.int64)
+    else:
+        value = x.to(tl.int32) + off.to(tl.int32)
+    tl.store(OUT + row * ORS + col, tl.where(x >= 0, value, x), col < W)
+
+
+@triton.jit
 def _sentinel_kernel(
     X,
     Y,
@@ -85,6 +113,23 @@ def try_write_topk(
     if not indices.numel():
         return True
     sentinel = torch.iinfo(indices.dtype).max
+    if canonicalize and indices.shape[1] <= 2048:
+        _sort_and_write_topk_kernel[(indices.shape[0],)](
+            indices,
+            offsets,
+            out,
+            indices.shape[1],
+            indices.stride(0),
+            indices.stride(1),
+            offsets.stride(0),
+            out.stride(0),
+            sentinel,
+            indices.dtype == torch.int64 or offsets.dtype == torch.int64,
+            BLOCK=triton.next_power_of_2(indices.shape[1]),
+            # Wide sorting networks need more lanes to limit per-thread work.
+            num_warps=16 if indices.shape[1] >= 1024 else 4,
+        )
+        return True
     if canonicalize:
         sortable = torch.empty(
             indices.shape, device=indices.device, dtype=indices.dtype
