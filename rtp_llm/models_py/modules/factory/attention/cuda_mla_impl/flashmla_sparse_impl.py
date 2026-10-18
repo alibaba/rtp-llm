@@ -30,6 +30,7 @@ try:
 except (ImportError, AttributeError, ValueError) as _e:
     logging.warning(f"flash_mla not available: {_e}. Requires CUDA >= 12.9")
 
+from rtp_llm.models_py.modules.base.cuda.paged_mqa import paged_mqa_context_lens
 from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_kv_cache_write_op import (
     MlaKVCacheWriteOp,
@@ -55,7 +56,12 @@ from rtp_llm.ops import (
     KvCacheDataType,
     ParallelismConfig,
 )
-from rtp_llm.ops.compute_ops import KVCache, LayerKVCache, PyAttentionInputs, rtp_llm_ops
+from rtp_llm.ops.compute_ops import (
+    KVCache,
+    LayerKVCache,
+    PyAttentionInputs,
+    rtp_llm_ops,
+)
 from rtp_llm.utils.model_weight import W
 
 from .rope_emb_new import NewMlaRotaryEmbeddingOp
@@ -168,6 +174,12 @@ class SparseMlaOp(object):
         topk_2d = _topk_2d(topk_indices)
         topk = topk_2d.shape[1]
         assert topk == self.top_k, f"topk {topk} != top_k {self.top_k}"
+        wide_tile = (
+            topk_2d.shape[0] >= 128
+            and topk % 512 == 0
+            and os.environ.get("RTP_LLM_DSA_WIDE_INDEX_MAP", "1") != "0"
+            and torch.cuda.get_device_capability(topk_2d.device)[0] == 10
+        )
         global_2d = triton_convert_req_index_to_global_index(
             req_id=self.mla_params.batch_indice_d,
             block_table=self.block_table,
@@ -180,7 +192,7 @@ class SparseMlaOp(object):
             TOKENS_PER_BLOCK_FOR_BLOCK_TABLE=self.token_per_block,
             ENTRIES_PER_BLOCK=self.token_per_block,
             NUM_TOPK_TOKENS=topk,
-            BLOCK_N=min(128, topk),
+            BLOCK_N=min(512 if wide_tile else 128, topk),
             HAS_PREFILL_WORKSPACE=False,
         )
         return global_2d.unsqueeze(1)
@@ -250,7 +262,8 @@ class SparseMlaOp(object):
         q, attn_sink, actual_heads = self._pad_query_and_sink(q, attn_sink)
         global_indices = (
             self._convert_topk_indices_to_global(topk_indices)
-            if physical_indices is None else physical_indices
+            if physical_indices is None
+            else physical_indices
         )
         sink_kwargs = {} if attn_sink is None else {"attn_sink": attn_sink}
         out, _, _ = flash_mla_sparse_fwd(
@@ -502,9 +515,14 @@ class SparseMlaFp8Op(SparseMlaOp):
 
         # Indices: [T, 1, topk] → [1, T, topk] (kernel expects batched layout)
         global_indices = (
-            self._convert_topk_indices_to_global(topk_indices)
-            if physical_indices is None else physical_indices
-        ).squeeze(1).unsqueeze(0)
+            (
+                self._convert_topk_indices_to_global(topk_indices)
+                if physical_indices is None
+                else physical_indices
+            )
+            .squeeze(1)
+            .unsqueeze(0)
+        )
 
         sink_kwargs = {} if attn_sink is None else {"attn_sink": attn_sink}
         attn_out, _ = flash_mla_with_kvcache(
@@ -658,7 +676,7 @@ class SparseMlaImpl(MlaImplBase):
             lengths = self.fmha_params.kvlen_d
         if not isinstance(lengths, torch.Tensor) or lengths.numel() == 0:
             return
-        lengths_2d = lengths.reshape(-1, 1)
+        lengths_2d = paged_mqa_context_lens(attn_inputs, self.fmha_params)
         new_schedule = deep_gemm.get_paged_mqa_logits_metadata(
             lengths_2d, self.seq_size_per_block, deep_gemm.get_num_sms()
         )
@@ -895,7 +913,8 @@ class SparseMlaImpl(MlaImplBase):
             cache_target = LayerKVCache()
             cache_target.kv_cache_base = torch.empty(
                 (q.shape[0], 1, kv_cache.kv_cache_base.shape[-1]),
-                dtype=kv_cache.kv_cache_base.dtype, device=q.device,
+                dtype=kv_cache.kv_cache_base.dtype,
+                device=q.device,
             )
             write_slots = torch.arange(q.shape[0], dtype=torch.int64, device=q.device)
 
@@ -932,15 +951,21 @@ class SparseMlaImpl(MlaImplBase):
         else:
             self.rope_impl.forward(q_pe, k_pe, self.rope_params)
             self.kv_cache_write_op.forward(
-                compressed_kv, k_pe, cache_target, self.rope_params,
+                compressed_kv,
+                k_pe,
+                cache_target,
+                self.rope_params,
                 slot_mapping_override=write_slots,
             )
 
         if working_entry is not None:
             # Q projection overlaps admission and H2D before joining prefetch.
             q_transformed = self._apply_input_bmm(q, layer_id)
-            working.write(group_layer, self.rope_params.slot_mapping,
-                          cache_target.kv_cache_base.flatten(0, 1))
+            working.write(
+                group_layer,
+                self.rope_params.slot_mapping,
+                cache_target.kv_cache_base.flatten(0, 1),
+            )
         common.apply_write_cache_store(
             self.write_cache_store_impl, self.attn_inputs, kv_cache
         )
@@ -949,8 +974,11 @@ class SparseMlaImpl(MlaImplBase):
                              if prepared_query is None else prepared_query)
 
         # 3. Sparse attention. FP8 op consumes paged shape; BF16 op wants flat.
-        kv_input = (working.resident[group_layer] if working_entry is not None
-                    else kv_cache.kv_cache_base)
+        kv_input = (
+            working.resident[group_layer]
+            if working_entry is not None
+            else kv_cache.kv_cache_base
+        )
         if not self.fmha_impl.expects_paged_kv:
             kv_input = kv_input.view(-1, 1, kv_input.size(-1))
         attention_kwargs = {}
