@@ -386,11 +386,6 @@ public class MetricConstant {
     public static final String GRPC_CALL_DURATION = "app.grpc.call.duration";
 
     /**
-     * gRPC response body size in bytes
-     */
-    public static final String GRPC_RESPONSE_SIZE = "app.grpc.response.size";
-
-    /**
      * gRPC call count
      */
     public static final String GRPC_CALL_COUNT = "app.grpc.call.count";
