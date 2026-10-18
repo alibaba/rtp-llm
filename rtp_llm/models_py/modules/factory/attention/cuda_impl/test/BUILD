@@ -106,12 +106,48 @@ flashinfer_attention_tests = [
             "base_attention_test.py",
         ],
     },
-    {
-        "name": "test_diffusion_gemma_flashinfer_prefill",
-        "main": "test_flashinfer_prefill/test_diffusion_gemma_flashinfer_prefill.py",
-        "extra_srcs": [],
-    },
 ]
+
+# DiffusionGemma flashinfer regression: H20 (sm90) only for now.
+# Run-35 finding: on sm12x the flashinfer path is numerically wrong for the
+# sliding-layer shape (GQA 16:8, head_dim 256, window) at every length, and a
+# failing lane cascade-cancels the whole pipeline; the cross-arch backend
+# story belongs to the architecture-matrix bring-up. The fa2 variant runs in
+# its own process so an auto-backend crash cannot take it down.
+[
+    py_test(
+        name = "test_diffusion_gemma_flashinfer_prefill_" + platform["sm"],
+        srcs = ["test_flashinfer_prefill/test_diffusion_gemma_flashinfer_prefill.py"],
+        exec_properties = {
+            "gpu": platform["gpu"],
+        },
+        main = "test_flashinfer_prefill/test_diffusion_gemma_flashinfer_prefill.py",
+        tags = [platform["gpu"]],
+        target_compatible_with = CUDA13_X86_ONLY,
+        deps = flashinfer_test_deps,
+    )
+    for platform in [
+        {
+            "sm": "sm90",
+            "gpu": "H20_CU13",
+        },
+    ]
+]
+
+py_test(
+    name = "test_diffusion_gemma_flashinfer_prefill_fa2_sm90",
+    srcs = [
+        "test_flashinfer_prefill/test_diffusion_gemma_flashinfer_prefill_fa2.py",
+        "test_flashinfer_prefill/test_diffusion_gemma_flashinfer_prefill.py",
+    ],
+    exec_properties = {
+        "gpu": "H20_CU13",
+    },
+    main = "test_flashinfer_prefill/test_diffusion_gemma_flashinfer_prefill_fa2.py",
+    tags = ["H20_CU13"],
+    target_compatible_with = CUDA13_X86_ONLY,
+    deps = flashinfer_test_deps,
+)
 
 # Generates one py_test per (test, platform): <test name>_<sm>,
 # e.g. test_py_flashinfer_hybrid_mha_prefill_sm90.

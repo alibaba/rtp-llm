@@ -11,8 +11,21 @@ Each stage (ragged run / paged KV write / paged prefix run / merge) is
 followed by a torch.cuda.synchronize() with a labeled log line so a CI log
 pinpoints which kernel poisons the context. The output is compared against
 the op's own torch reference for every length.
+
+The backend under test comes from DGM_FI_TEST_BACKEND (default "auto");
+the fa2 wrapper target sets it to "fa2" and runs the same suite in a
+separate test process, because an illegal-access crash in one backend
+kills the process before the other variant would run.
+
+Run-35 finding that shaped this file: on SM120 (RTX 5000 Pro, auto
+backend) the flashinfer path does NOT crash at any length but is
+numerically wrong at every length (max_diff ~0.2-0.4, uncorrelated with
+the reference), while the H20 smoke crashes at 278. This test therefore
+runs on the H20 lane only for now; the cross-arch backend story is
+tracked with the architecture-matrix bring-up.
 """
 
+import os
 import unittest
 from types import SimpleNamespace
 
@@ -31,6 +44,7 @@ PAGE = 64
 POOL_BLOCKS = 64
 BLOCK_TABLE_WIDTH = 64
 DTYPE = torch.bfloat16
+TEST_BACKEND = os.environ.get("DGM_FI_TEST_BACKEND", "auto")
 
 
 class DiffusionGemmaFlashinferPrefillTest(unittest.TestCase):
@@ -45,7 +59,8 @@ class DiffusionGemmaFlashinferPrefillTest(unittest.TestCase):
             f"[dgm-fi-diag] {stage} ok (qo_len={self._diag_qo_len})", flush=True
         )
 
-    def _make_op(self, backend: str = "auto") -> DiffusionGemmaAttnOp:
+    def _make_op(self) -> DiffusionGemmaAttnOp:
+        print(f"[dgm-fi-diag] constructing op backend={TEST_BACKEND}", flush=True)
         op = DiffusionGemmaAttnOp(
             LAYER_TYPE_SLIDING,
             HEAD_NUM,
@@ -55,7 +70,7 @@ class DiffusionGemmaFlashinferPrefillTest(unittest.TestCase):
             PAGE,
             DTYPE,
             None,
-            backend=backend,
+            backend=TEST_BACKEND,
         )
         self.assertTrue(
             op.use_flashinfer,
@@ -180,16 +195,7 @@ class DiffusionGemmaFlashinferPrefillTest(unittest.TestCase):
         """Causal first-prefill lengths: 24/256 pass in CI smoke, 278 fails."""
         op = self._make_op()
         for qo_len in (24, 64, 128, 200, 256, 257, 278, 320, 539, 1025):
-            with self.subTest(qo_len=qo_len):
-                self._forward(op, qo_len, prefix_len=0, causal=True, write_kv=True)
-
-    def test_prefill_causal_length_sweep_fa2(self):
-        """Same sweep on the explicit fa2 backend: if auto (fa3 on sm90)
-        fails and fa2 passes, the ragged kernel template is the culprit and
-        fa2 is the fix candidate."""
-        op = self._make_op(backend="fa2")
-        for qo_len in (24, 256, 278, 539):
-            with self.subTest(backend="fa2", qo_len=qo_len):
+            with self.subTest(backend=TEST_BACKEND, qo_len=qo_len):
                 self._forward(op, qo_len, prefix_len=0, causal=True, write_kv=True)
 
     def test_canvas_noncausal_with_prefix(self):
