@@ -53,6 +53,30 @@ SPECS = _load_specs()
 
 
 class CacheSpecsTest(unittest.TestCase):
+    def test_hopper_v4_layout_preserves_ownership_and_indexer_format(self):
+        descs = SPECS.build_v41_kv_cache_spec_descs(
+            5,
+            [0, 2, 2, 1, 1],
+            [1, 3],
+            512,
+            bounded_replay=True,
+            v4_kv_layout=True,
+        )
+        for layer in descs:
+            for desc in layer:
+                if desc.tag in (
+                    "swa_kv",
+                    "decoder_swa_kv",
+                    "global_kv_1",
+                    "global_kv_2",
+                ):
+                    self.assertEqual(desc.entry_elems, 584)
+                    self.assertEqual(desc.block_stride_bytes_alignment, 576)
+                elif desc.tag == "indexer_kv":
+                    self.assertEqual(desc.entry_elems, 68)
+        self.assertFalse(descs[4][0].reuse.enable_prefix_reuse)
+        self.assertEqual(len(descs[2]), 1)
+
     def test_only_producer_layers_allocate_global_and_indexer_storage(self):
         descs = SPECS.build_v41_kv_cache_spec_descs(5, [0, 2, 2, 1, 1], [1, 3], 512)
         self.assertEqual(

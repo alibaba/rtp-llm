@@ -113,8 +113,8 @@ class V41MHCPreNormCPUContractTest(unittest.TestCase):
 class V41MHCPreNormCudaTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        if torch.cuda.get_device_capability()[0] != 10:
-            raise unittest.SkipTest("V4.1 prenorm fast path requires SM100")
+        if torch.cuda.get_device_capability()[0] not in (9, 10):
+            raise unittest.SkipTest("V4.1 prenorm fast path requires SM90 or SM100")
 
     def setUp(self):
         torch.manual_seed(41)
@@ -293,7 +293,7 @@ class V41MHCPreNormCudaTest(unittest.TestCase):
             return_value=False,
         ):
             self.assertIsNone(prenorm(residual, fn, _EPS))
-        with patch("torch.cuda.get_device_capability", return_value=(9, 0)):
+        with patch("torch.cuda.get_device_capability", return_value=(8, 0)):
             self.assertFalse(is_supported(residual, fn))
         with torch.enable_grad():
             self.assertFalse(is_supported(residual, fn.clone().requires_grad_()))

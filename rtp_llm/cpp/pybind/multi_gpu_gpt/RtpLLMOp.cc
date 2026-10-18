@@ -75,28 +75,28 @@ prepareMTPEngineInitParams(size_t model_id, py::object propose_model, const Engi
         // it keeps the full checkpoint config instead of an MTP module plan.
         auto gpt_weight = convert.createGptWeights(py_layers_weights, py_global_weights);
         mtp_params->push_back(std::move(std::make_unique<EngineInitParams>(model_id,
-                                                                          model_config,
-                                                                          base_params.parallelism_config,
-                                                                          base_params.runtime_config,
-                                                                          base_params.pd_sep_config,
-                                                                          base_params.concurrency_config,
-                                                                          base_params.fmha_config,
-                                                                          base_params.kv_cache_config,
-                                                                          base_params.profiling_debug_logging_config,
-                                                                          base_params.hw_kernel_config,
-                                                                          base_params.device_resource_config,
-                                                                          base_params.moe_config,
-                                                                          base_params.model_specific_config,
-                                                                          base_params.sp_config,
-                                                                          base_params.cache_store_config,
-                                                                          base_params.misc_config,
-                                                                          base_params.arpc_config,
-                                                                          base_params.grpc_config,
-                                                                          base_params.ffn_disaggregate_config,
-                                                                          base_params.vit_config,
-                                                                          std::move(*gpt_weight),
-                                                                          py::none(),
-                                                                          py_eplb)));
+                                                                           model_config,
+                                                                           base_params.parallelism_config,
+                                                                           base_params.runtime_config,
+                                                                           base_params.pd_sep_config,
+                                                                           base_params.concurrency_config,
+                                                                           base_params.fmha_config,
+                                                                           base_params.kv_cache_config,
+                                                                           base_params.profiling_debug_logging_config,
+                                                                           base_params.hw_kernel_config,
+                                                                           base_params.device_resource_config,
+                                                                           base_params.moe_config,
+                                                                           base_params.model_specific_config,
+                                                                           base_params.sp_config,
+                                                                           base_params.cache_store_config,
+                                                                           base_params.misc_config,
+                                                                           base_params.arpc_config,
+                                                                           base_params.grpc_config,
+                                                                           base_params.ffn_disaggregate_config,
+                                                                           base_params.vit_config,
+                                                                           std::move(*gpt_weight),
+                                                                           py::none(),
+                                                                           py_eplb)));
         return std::move(
             std::make_unique<ProposeModelEngineInitParams>(sp_type, gen_num_per_cycle, std::move(mtp_params)));
     }
@@ -419,7 +419,16 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
                                               maga_init_params.parallelism_config.dp_rank,
                                               maga_init_params.parallelism_config.world_rank);
         }
-        if (role_type == RoleType::PREFILL || role_type == RoleType::DECODE) {
+        // The dedicated batch-decode benchmark allocates synthetic prompt KV
+        // locally and accepts ordinary GenerateStreamCall requests. Keep the
+        // engine's DECODE role (including decode-only model/graph setup), but
+        // do not require the production P/D handoff RPC for this test mode.
+        const bool synthetic_decode_benchmark =
+            role_type == RoleType::DECODE && maga_init_params.runtime_config.use_batch_decode_scheduler;
+        if (synthetic_decode_benchmark) {
+            RTP_LLM_LOG_INFO("Synthetic decode benchmark: local generation RPC, DECODE engine role; no P/D handoff");
+        }
+        if ((role_type == RoleType::PREFILL || role_type == RoleType::DECODE) && !synthetic_decode_benchmark) {
             model_rpc_service_.reset(new RemoteRpcServiceImpl());
         } else {
             model_rpc_service_.reset(new LocalRpcServiceImpl());

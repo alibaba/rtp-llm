@@ -237,6 +237,7 @@ class DelayedHCCudaGraphTest(unittest.TestCase):
             size_per_head=512,
             moe_pure_tp_mode=False,
             bit=8,
+            use_swizzleA=False,
             exported_device=CudaImpl.__new__(CudaImpl),
         )
         for descriptor_class, layer_id in (

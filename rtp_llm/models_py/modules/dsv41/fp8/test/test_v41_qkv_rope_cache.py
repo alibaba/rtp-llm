@@ -153,13 +153,15 @@ class V41QKVRopeCacheCudaTest(unittest.TestCase):
                         self.check_case(case, gathered)
 
     @torch.no_grad()
-    def test_layout_gate_584_and_invalid_metadata(self):
+    def test_layout_gate_invalid_width_and_metadata(self):
         case = make_case(1, 1, 8)
         before = case["q"].clone()
         variants = (
             {
                 **case,
-                "pool_3d": torch.empty(2, 134, 584, device="cuda", dtype=torch.uint8),
+                # 584B is now a supported SM90 V4 layout; 580B is neither
+                # V4 nor the native V4.1 528B layout.
+                "pool_3d": torch.empty(2, 134, 580, device="cuda", dtype=torch.uint8),
             },
             {**case, "q": case["q"].float()},
             {**case, "kv_norm": case["kv_norm"].float()},

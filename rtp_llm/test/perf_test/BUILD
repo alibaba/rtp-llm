@@ -1,4 +1,15 @@
+load("//rtp_llm/test/perf_test:deepseek_v41_sm90_tests.bzl", "deepseek_v41_sm90_role_test")
+
 package(default_visibility = ["//visibility:public"])
+
+# Manual adapter: external engines keep their official benchmark and lifecycle.
+# Supply a reviewed invocation script; the standard run_under GPU lock owns GPUs.
+sh_test(
+    name = "upstream_serving_perf_test",
+    srcs = ["upstream_serving_perf_test.sh"],
+    timeout = "eternal",
+    tags = ["manual", "local", "no-sandbox"],
+)
 
 # Exported so the perf_test() macro (defined in defs.bzl, instantiated by
 # internal_source/rtp_llm/test/perf_test/BUILD) can reference test_entry.py
@@ -990,4 +1001,24 @@ test_suite(
         ":v4_flash_dp4_decode_64k_mtp_grid_perf",
     ],
     tags = ["manual"],
+)
+
+exports_files(["deepseek_v41_sm90_role_test.py"])
+
+deepseek_v41_sm90_role_test(
+    name = "deepseek_v41_flash_prefill_cp8_ep8_sm90_perf",
+    role = "prefill",
+    mode = "perf",
+)
+
+deepseek_v41_sm90_role_test(
+    name = "deepseek_v41_flash_decode_dp8_ep8_sm90_perf",
+    role = "decode",
+    mode = "perf",
+)
+
+py_test(
+    name = "deepseek_v41_sm90_role_test_test",
+    srcs = ["deepseek_v41_sm90_role_test_test.py", "deepseek_v41_sm90_role_test.py"],
+    main = "deepseek_v41_sm90_role_test_test.py",
 )
