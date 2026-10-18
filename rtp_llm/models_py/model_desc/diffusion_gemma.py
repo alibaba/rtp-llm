@@ -430,12 +430,23 @@ class DiffusionGemmaAttnOp:
                     if reuse_pages:
                         first = paged[reuse_pages[0]]
                         k_head = first[0, 0, :4, :4].float()
+                        v_head = first[1, 0, :64, 0].float()
+                        k_row_std = float(
+                            first[0, 0].float().std(dim=0).mean().item()
+                        )
+                        v_row_std = float(
+                            first[1, 0].float().std(dim=0).mean().item()
+                        )
                         logger.info(
-                            "[dgm-fi] prefix read probe: pages=%s | first page K "
-                            "absmax=%.4f K[:1,:2]=%s | q_absmax=%.3f",
+                            "[dgm-fi] prefix read probe: pages=%s | K "
+                            "absmax=%.4f k_row_std=%.4f | V absmax=%.4f "
+                            "v_row_std=%.4f V[:8]=%s | q_absmax=%.3f",
                             reuse_pages[:8],
                             float(first[0].abs().max().item()),
-                            k_head[0].tolist(),
+                            k_row_std,
+                            float(first[1].abs().max().item()),
+                            v_row_std,
+                            v_head[:8].tolist(),
                             float(qd.abs().max().item()),
                         )
                 torch.cuda.synchronize()
@@ -447,17 +458,34 @@ class DiffusionGemmaAttnOp:
                 torch.cuda.synchronize()
                 self._fi_merge_diag_count = getattr(self, "_fi_merge_diag_count", 0) + 1
                 if self._fi_merge_diag_count % 100 == 1:
+                    new_row_std = float(
+                        new_out.reshape(-1, q.shape[0], new_out.shape[-1])
+                        .float()
+                        .std(dim=1)
+                        .mean()
+                        .item()
+                    )
+                    prefix_row_std = float(
+                        prefix_out.reshape(-1, q.shape[0], prefix_out.shape[-1])
+                        .float()
+                        .std(dim=1)
+                        .mean()
+                        .item()
+                    )
                     logger.info(
                         "[dgm-fi] merge probe #%d: qo=%d causal=%s | "
-                        "new_lse[0,:3]=%s new_out_absmax=%.4f | "
-                        "prefix_lse[0,:3]=%s prefix_out_absmax=%.4f",
+                        "new_lse[0,:3]=%s new_out_absmax=%.4f "
+                        "new_row_std=%.4f | prefix_lse[0,:3]=%s "
+                        "prefix_out_absmax=%.4f prefix_row_std=%.4f",
                         self._fi_merge_diag_count,
                         q.shape[0],
                         causal,
                         new_lse[0, :3].tolist(),
                         float(new_out.abs().max().item()),
+                        new_row_std,
                         prefix_lse[0, :3].tolist(),
                         float(prefix_out.abs().max().item()),
+                        prefix_row_std,
                     )
                 logger.info("[dgm-fi] paged prefix run ok qo=%d", q.shape[0])
             self.merge_state_in_place(new_out, new_lse, prefix_out, prefix_lse)
