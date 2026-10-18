@@ -1106,6 +1106,7 @@ class AttentionV41FP8(AttentionFP8):
             self._shared_attention["candidates"] = None
             self._shared_attention.pop("candidate_mask", None)
             self._shared_attention.pop("decode_sparse_plan", None)
+            self._shared_attention.pop("decode_indexer_metadata", None)
             self._shared_attention.pop("prefill_candidate_mask", None)
             self._shared_attention.pop("prefill_sparse_candidates", None)
             self._shared_attention.pop("prefill_sparse_plans", None)
@@ -2975,7 +2976,25 @@ class AttentionV41FP8(AttentionFP8):
                 self, x, qr, positions, qr_quantized, index_q
             )
         q, weights, prepared = prepared_query
-        visible_per_token = (positions + 1) // self.compress_ratio
+        indexer_metadata = None
+        if (
+            paged
+            and self.layer_id == self.kv_source_layer_id
+            and (self.index_n_heads, self.index_head_dim) == (32, 128)
+        ):
+            indexer_metadata = decode_indexer.get_decode_metadata(
+                shared,
+                keys,
+                positions,
+                batch_size=B,
+                query_len=S,
+                compress_ratio=self.compress_ratio,
+            )
+        visible_per_token = (
+            indexer_metadata.lengths
+            if indexer_metadata is not None
+            else (positions + 1) // self.compress_ratio
+        )
         config = self.v41_config
         candidate_source = int(config.get("candidate_source_layer_id", -1))
         candidate_blocks = int(config.get("candidate_topk_blocks", 0))
@@ -3046,6 +3065,7 @@ class AttentionV41FP8(AttentionFP8):
                 preserve_score_dtype=True,
                 pad_invisible=False,
                 prepared_query=prepared,
+                metadata=indexer_metadata,
             )
         else:
             weights = (

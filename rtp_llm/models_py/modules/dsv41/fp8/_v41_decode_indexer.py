@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """V4.1 decode index scoring directly from the source layer's packed FP4 cache.
 
 The cache has grouped storage within each block: all 64-byte FP4 payload
@@ -9,11 +11,16 @@ reads the fused bytes directly.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import torch
 import triton
 import triton.language as tl
+
+if TYPE_CHECKING:
+    from ._indexer_score import PagedMQAMetadata
 
 
 @dataclass(frozen=True)
@@ -24,6 +31,157 @@ class DecodeIndexerKeys:
     block_table: torch.Tensor
     capacity: int
     logical_entries_per_block: int
+
+
+@dataclass(frozen=True)
+class DecodeIndexerMetadata:
+    lengths: torch.Tensor
+    safe_table: torch.Tensor
+    paged: PagedMQAMetadata
+
+
+# Adapted from vLLM's v1/attention/ops/metadata.py (Apache-2.0): fixed-span
+# request mapping, with RTP's sentinel pages and logical/physical page geometry.
+@triton.jit
+def _fused_decode_metadata_kernel(
+    positions,
+    table,
+    lengths,
+    physical_lengths,
+    safe_table,
+    expanded_table,
+    requests,
+    QUERY_LEN: tl.constexpr,
+    RATIO: tl.constexpr,
+    LOGICAL: tl.constexpr,
+    PHYSICAL: tl.constexpr,
+    COLS: tl.constexpr,
+    STRIDE0: tl.constexpr,
+    STRIDE1: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    token = tl.program_id(0).to(tl.int64)
+    request = token // QUERY_LEN
+    length = ((tl.load(positions + token).to(tl.int64) + 1) // RATIO).to(tl.int32)
+    last = tl.maximum(length - 1, 0)
+    extent = (last // LOGICAL) * PHYSICAL + last % LOGICAL + 1
+    tl.store(lengths + token, length)
+    tl.store(physical_lengths + token, tl.where(length > 0, extent, 0))
+    tl.store(requests + token, request)
+    columns = tl.arange(0, BLOCK)
+    blocks = tl.load(
+        table + request * STRIDE0 + columns * STRIDE1, columns < COLS, other=0
+    )
+    blocks = tl.maximum(blocks, 0)
+    tl.store(expanded_table + token * COLS + columns, blocks, columns < COLS)
+    if token % QUERY_LEN == 0:
+        tl.store(safe_table + request * COLS + columns, blocks, columns < COLS)
+
+
+def get_decode_metadata(
+    shared: dict,
+    keys: DecodeIndexerKeys,
+    positions: torch.Tensor,
+    *,
+    batch_size: int,
+    query_len: int,
+    compress_ratio: int,
+) -> DecodeIndexerMetadata | None:
+    """Share within one forward; captured producers rerun on every graph replay.
+
+    The first model layer clears ``decode_indexer_metadata`` before capture/eager
+    forwards. Graph replay reruns the captured producers on live device inputs.
+    Input references prevent allocator reuse from aliasing a cached key. Pools
+    are deliberately not cached: different owners may share the same page table.
+    Without RoPE position reuse, retain the uncached fallback instead of pinning
+    duplicate metadata for each source layer's fresh position conversion.
+    """
+    table, pool = keys.block_table, keys.pool
+    rows = batch_size * query_len
+    if (
+        os.environ.get("DSV41_FUSE_INDEXER_METADATA", "1") != "1"
+        or os.environ.get("DSV41_REUSE_DECODE_ROPE", "1") != "1"
+        or batch_size <= 0
+        or query_len <= 0
+        or compress_ratio not in (1, 2)
+        or not positions.is_cuda
+        or positions.shape != (rows,)
+        or positions.dtype not in (torch.int32, torch.int64)
+        or not positions.is_contiguous()
+        or table.device != positions.device
+        or table.ndim != 2
+        or table.shape[0] != batch_size
+        or table.shape[1] <= 0
+        or table.dtype not in (torch.int32, torch.int64)
+        or pool.device != positions.device
+        or pool.dtype != torch.uint8
+        or pool.ndim != 3
+        or pool.shape[2] != 68
+        or not pool.is_contiguous()
+        or keys.logical_entries_per_block not in (64, 128)
+        or keys.logical_entries_per_block > pool.shape[1]
+        or not 0 < keys.capacity <= table.shape[1] * keys.logical_entries_per_block
+        or not is_supported(positions.device, pool.shape[1])
+    ):
+        return None
+    from ._indexer_score import PagedMQAMetadata, _deep_gemm, _get_num_sms
+
+    num_sms = _get_num_sms(positions.device)
+    key = (
+        positions.data_ptr(),
+        positions.shape,
+        positions.stride(),
+        positions.dtype,
+        positions.device,
+        table.data_ptr(),
+        table.shape,
+        table.stride(),
+        table.dtype,
+        query_len,
+        compress_ratio,
+        keys.logical_entries_per_block,
+        pool.shape[1],
+        keys.capacity,
+        num_sms,
+    )
+    cache = shared.setdefault("decode_indexer_metadata", {})
+    cached = cache.get(key)
+    if cached is not None:
+        return cached[2]
+    options = dict(device=positions.device, dtype=torch.int32)
+    lengths = torch.empty(rows, **options)
+    physical_lengths = torch.empty((rows, 1), **options)
+    safe_table = torch.empty(table.shape, **options)
+    expanded_table = torch.empty((rows, table.shape[1]), **options)
+    requests = torch.empty(rows, **options)
+    _fused_decode_metadata_kernel[(rows,)](
+        positions,
+        table,
+        lengths,
+        physical_lengths,
+        safe_table,
+        expanded_table,
+        requests,
+        query_len,
+        compress_ratio,
+        keys.logical_entries_per_block,
+        pool.shape[1],
+        table.shape[1],
+        table.stride(0),
+        table.stride(1),
+        triton.next_power_of_2(table.shape[1]),
+        num_warps=4,
+    )
+    schedule = _deep_gemm.get_paged_mqa_logits_metadata(
+        physical_lengths, pool.shape[1], num_sms, indices=requests
+    )
+    result = DecodeIndexerMetadata(
+        lengths,
+        safe_table,
+        PagedMQAMetadata(physical_lengths, expanded_table, requests, schedule),
+    )
+    cache[key] = (positions, table, result)
+    return result
 
 
 @triton.jit
@@ -251,6 +409,7 @@ def score_decode_indexer(
     preserve_score_dtype: bool = False,
     pad_invisible: bool = True,
     prepared_query: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+    metadata: DecodeIndexerMetadata | None = None,
 ) -> torch.Tensor | None:
     """Return [B*S,max_ctx_len], or None for an unsupported fast path.
 
@@ -293,6 +452,10 @@ def score_decode_indexer(
     With positions, weights are the unscaled projection and freqs_cis is the
     full frequency table, enabling fused Q preparation. Without positions,
     preserve the original scaled-FP32-weights/gathered-frequencies contract.
+
+    ``metadata`` must be prepared from the same live positions and block table
+    for this forward. It owns both logical lengths for selection/compaction and
+    physical lengths for the unchanged DG scheduler/scorer.
     """
     if prepared_query is None:
         b, s, h, d = q.shape
@@ -322,25 +485,30 @@ def score_decode_indexer(
             rope_head_dim,
             weights_out_dtype=torch.bfloat16,
         )
-    lengths = context_lens.to(torch.int32).contiguous()
-    physical_lengths = torch.empty_like(lengths)
-    safe_table = torch.empty(block_table.shape, dtype=torch.int32, device=device)
-    _prepare_paged_metadata_kernel[
-        (triton.cdiv(max(b * s, block_table.numel()), 128),)
-    ](
-        lengths,
-        physical_lengths,
-        block_table,
-        safe_table,
-        b * s,
-        b,
-        block_table.shape[1],
-        block_table.stride(0),
-        block_table.stride(1),
-        logical_entries,
-        block_size,
-        128,
-    )
+    if metadata is None:
+        lengths = context_lens.to(torch.int32).contiguous()
+        physical_lengths = torch.empty_like(lengths)
+        safe_table = torch.empty(block_table.shape, dtype=torch.int32, device=device)
+        _prepare_paged_metadata_kernel[
+            (triton.cdiv(max(b * s, block_table.numel()), 128),)
+        ](
+            lengths,
+            physical_lengths,
+            block_table,
+            safe_table,
+            b * s,
+            b,
+            block_table.shape[1],
+            block_table.stride(0),
+            block_table.stride(1),
+            logical_entries,
+            block_size,
+            128,
+        )
+    else:
+        lengths = metadata.lengths
+        physical_lengths = metadata.paged.lengths.view(b, s)
+        safe_table = metadata.safe_table
     physical_capacity = (
         max_ctx_len
         if logical_entries == block_size
@@ -356,6 +524,7 @@ def score_decode_indexer(
         block_size,
         physical_capacity,
         return_bf16=True,
+        metadata=None if metadata is None else metadata.paged,
     )
     compact = torch.empty(
         b * s,
