@@ -19,6 +19,8 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.device.device_type import is_h20
+
 from ._v41_fp4_triton import _e2m1_to_float, _ue8m0_to_float
 
 
@@ -198,16 +200,21 @@ def _score(
     scoring_width = (
         capacity if candidate_plan is None else candidate_plan.sparse_columns
     )
-    # Validated dense-producer launch only. Keep paged decode, candidate
-    # scatter, H64 and small shapes on their original geometry/rounding.
+    # BK128 preserves the reduction tree while amortizing query unpacking.
+    # H20-only tuning; other SM90 cards retain their original paged tile.
+    # Small paged grids lose occupancy; sparse single-row decode also loses
+    # to BK64. Keep those shapes and the dense candidate scatter unchanged.
+    wide_paged = (
+        paged
+        and is_h20(q.device)
+        and (
+            (candidate_plan is None and capacity >= 16384)
+            or (rows >= 8 and scoring_width >= 1024)
+        )
+    )
+    wide_dense = not paged and candidate_plan is None and rows >= 512
     block = (
-        128
-        if not paged
-        and candidate_plan is None
-        and heads == 32
-        and rows >= 512
-        and capacity >= 1024
-        else 64
+        128 if heads == 32 and capacity >= 1024 and (wide_paged or wide_dense) else 64
     )
     _score_kernel[(rows, triton.cdiv(scoring_width, block))](
         q.contiguous(),

@@ -236,14 +236,19 @@ class SM90DecodeCandidateTest(unittest.TestCase):
                 )
 
     def test_graph_changes_all_live_inputs_and_metadata(self):
-        case, raw_q = make_case(b=2, s=3, ratio=2)
-        positions = torch.full((6,), 4000, device="cuda", dtype=torch.int64)
+        for sequence in (3, 4):
+            with self.subTest(sequence=sequence):
+                self._check_graph_changes_all_live_inputs_and_metadata(sequence)
+
+    def _check_graph_changes_all_live_inputs_and_metadata(self, sequence):
+        case, raw_q = make_case(b=2, s=sequence, ratio=2)
+        positions = torch.full((2 * sequence,), 4000, device="cuda", dtype=torch.int64)
 
         def run():
             q, sf = quantize_rows_fp4(raw_q)
             current = case | {
-                "q": q.view(2, 3, 32, 64),
-                "q_scale": sf.view(2, 3, 32),
+                "q": q.view(2, sequence, 32, 64),
+                "q_scale": sf.view(2, sequence, 32),
                 "lengths": ((positions + 1) // 2).int(),
             }
             logits = candidate.try_score(**current)
@@ -266,7 +271,10 @@ class SM90DecodeCandidateTest(unittest.TestCase):
             physical = case["pool"].shape[1]
             case["pool"].view(-1, physical * 68)[:, : physical * 64].bitwise_xor_(17)
             positions.copy_(
-                torch.tensor([0, 1021, 1023, 1025, 3001, 4105], device="cuda")
+                torch.tensor(
+                    [0, 1021, 1023, 1025, 3001, 4105, 511, 4097][: 2 * sequence],
+                    device="cuda",
+                )
                 + iteration
             )
             case["candidates"].copy_(
@@ -287,8 +295,8 @@ class SM90DecodeCandidateTest(unittest.TestCase):
             torch.testing.assert_close(captured_indices, eager_indices, rtol=0, atol=0)
             q, sf = quantize_rows_fp4(raw_q)
             current = case | {
-                "q": q.view(2, 3, 32, 64),
-                "q_scale": sf.view(2, 3, 32),
+                "q": q.view(2, sequence, 32, 64),
+                "q_scale": sf.view(2, sequence, 32),
                 "lengths": ((positions + 1) // 2).int(),
             }
             self.check(current)

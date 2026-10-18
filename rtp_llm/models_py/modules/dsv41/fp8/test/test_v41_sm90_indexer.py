@@ -390,11 +390,24 @@ class SM90IndexerTest(unittest.TestCase):
         torch.testing.assert_close(actual, expected, rtol=0.01, atol=0.001)
 
     def test_paged_half_pages_zero_sentinel_and_graph(self):
+        for capacity in (137, 1025, 16385):
+            with self.subTest(capacity=capacity):
+                self._check_paged_half_pages_zero_sentinel_and_graph(capacity)
+
+    def _check_paged_half_pages_zero_sentinel_and_graph(self, capacity):
         torch.manual_seed(4193)
-        batch, sequence, heads, capacity = 2, 2, 32, 137
+        batch, sequence, heads = 2, 2, 32
         physical, logical = 128, 64
-        table = torch.tensor([[3, 1, 5], [2, 0, 4]], device="cuda", dtype=torch.int32)
-        pool = torch.full((6, physical, 68), 255, device="cuda", dtype=torch.uint8)
+        pages_per_request = (capacity + logical - 1) // logical
+        page_count = 1 + batch * pages_per_request
+        table = torch.arange(1, page_count, device="cuda", dtype=torch.int32).reshape(
+            batch, pages_per_request
+        )
+        table[0] = table[0].flip(0)
+        table[1, 1] = 0
+        pool = torch.full(
+            (page_count, physical, 68), 255, device="cuda", dtype=torch.uint8
+        )
         keys = (
             torch.randn(batch, capacity, 128, device="cuda", dtype=torch.bfloat16) * 0.2
         )
@@ -403,8 +416,8 @@ class SM90IndexerTest(unittest.TestCase):
         pages = table[:, columns // logical].long()
         offsets = columns.remainder(logical).expand(batch, -1)
         live = pages > 0
-        raw = pool.view(6, physical * 68)
-        payload = raw[:, : physical * 64].view(6, physical, 64)
+        raw = pool.view(page_count, physical * 68)
+        payload = raw[:, : physical * 64].view(page_count, physical, 64)
         scales = raw[:, physical * 64 :].view(torch.int32)
         payload[pages[live], offsets[live]] = kp.view(batch, capacity, 64)[live].view(
             torch.uint8
@@ -421,7 +434,9 @@ class SM90IndexerTest(unittest.TestCase):
         qp, qs, qr = _fp4_rows_torch(q)
         qp, qs = qp.view(batch, sequence, heads, 64), qs.view(batch, sequence, heads)
         weights = torch.randn(batch, sequence, heads, device="cuda") / 64
-        lengths = torch.tensor([[0, 73], [129, 137]], device="cuda", dtype=torch.int32)
+        lengths = torch.tensor(
+            [[0, 73], [129, capacity]], device="cuda", dtype=torch.int32
+        )
 
         def run():
             return paged_score(qp, qs, pool, weights, table, lengths, capacity, logical)
@@ -445,7 +460,7 @@ class SM90IndexerTest(unittest.TestCase):
         with torch.cuda.graph(graph):
             captured = run()
         lengths.copy_(
-            torch.tensor([[137, 27], [0, 81]], device="cuda", dtype=torch.int32)
+            torch.tensor([[capacity, 27], [0, 81]], device="cuda", dtype=torch.int32)
         )
         table[1, 1] = -1  # Negative and zero page sentinels both represent zero K.
         graph.replay()
