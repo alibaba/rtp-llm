@@ -8,6 +8,9 @@ V4.1 retains its private strategy implementation during the main migration.
 
 Strategies (priority high→low for ``forced=None``):
 
+    NVIDIA SM90: FlashInfer W4A8; DeepEP V2 for EP>1.
+    Other devices retain the existing selection below:
+
     ep_size  env / kernel                 → strategy
     --------------------------------------------------------
     >1       DSV4_USE_MEGA_MOE_SE!=0       MegaMoEStrategySE (strict; default)
@@ -33,6 +36,8 @@ from typing import ClassVar, Dict, Optional, Type
 
 import torch
 import torch.nn as nn
+
+from rtp_llm.device.device_type import is_cuda
 
 
 @dataclass(frozen=True)
@@ -91,7 +96,7 @@ class RoutedExpertsStrategy(nn.Module):
     """
 
     # Registered names currently include mega, mega_se, mega_fused,
-    # grouped_fp4, local_loop, and deepep.
+    # grouped_fp4, local_loop, deepep, and sm90_flashinfer.
     name: ClassVar[str]
 
     # True when ``forward`` already returns ``routed + shared`` (the strategy
@@ -259,6 +264,23 @@ def select_strategy(
     """
     explicit_env = os.environ.get("DSV4_MOE_STRATEGY", "").strip()
     explicit_env = bool(explicit_env and explicit_env != "auto")
+
+    # V4.1 Hopper cannot consume Mega / grouped FP4's SM100 instructions.
+    # Select its native packed-weight adapter before the SM100-only EP policy.
+    # Explicit requests for another strategy still fail rather than silently
+    # overriding an operator's backend selection.
+    if is_cuda() and torch.cuda.get_device_capability() == (9, 0):
+        from .sm90_flashinfer import SM90FlashInferStrategy
+
+        if forced is None or forced == "sm90_flashinfer" or not strict:
+            if SM90FlashInferStrategy.can_handle(cfg):
+                return SM90FlashInferStrategy
+            raise RuntimeError(
+                "SM90 FlashInfer cannot handle the V4.1 MoE shape/topology"
+            )
+        raise RuntimeError(
+            "V4.1 SM90 requires sm90_flashinfer; " f"requested strategy {forced!r}"
+        )
 
     # Latest upstream Mega's shared path uses block-128 FP8 weights. V4.1
     # checkpoint weights have block-32 MXFP8 scales: run the exact private

@@ -113,7 +113,10 @@ def try_gather_prefill_pools(attn, main_pool, index_pool, ends, seq_ends):
     if (
         main_pool.device.type != "cuda"
         or torch.cuda.get_device_capability(main_pool.device)[0] != 10
+        or main_pool.shape[-1] != 288
     ):
+        # This byte transport is explicitly FP4; 584B SM90 pools use the
+        # caller's format-aware codec path, never an FP4 reinterpretation.
         return None
 
     # Joint CP4 is qualified at batch >=32; smaller batches stay on this path.

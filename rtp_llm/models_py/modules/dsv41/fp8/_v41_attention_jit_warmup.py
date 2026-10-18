@@ -24,6 +24,7 @@ class PoolLayout:
     tokens_per_block: int
     owner_tokens_per_block: int
     ratio: int
+    entry_width: int = 0
 
 
 def _attention_key(attn):
@@ -40,6 +41,7 @@ def _attention_key(attn):
         int(attn.freqs_cis.shape[0]),
         str(getattr(getattr(attn, "global_norm", None), "dtype", None)),
         str(getattr(getattr(attn, "index_k_norm", None), "dtype", None)),
+        bool(getattr(attn, "_use_v4_kv_cache", False)),
     )
 
 
@@ -120,7 +122,7 @@ def _collect_pool_layouts(attentions, kv_cache, cp_size, kv_cache_sharded):
                 if kv_cache_sharded
                 else tpb
             )
-            layout = PoolLayout(region, entries, stride, tpb, owner, ratio)
+            layout = PoolLayout(region, entries, stride, tpb, owner, ratio, int(width))
             layouts[(layout, _attention_key(attn))] = attn
     return layouts
 
@@ -1084,6 +1086,51 @@ def _warm_q_norm_rope(attn, device):
     )
 
 
+def _warm_sm90_v4_pool(layout, cp_size, cp_rank, device):
+    """Warm the selected V4 codec without entering SM100-only index kernels.
+
+    Uses private storage only. Decode producer and paged attention variants
+    are warmed by the normal decode/CUDA-graph warmup, not sparse prefill.
+    """
+    import torch
+
+    from rtp_llm.models_py.modules.dsv41.attn_type import SWA_KV
+
+    from . import _v41_sm90_v4_cache as codec
+    from ._swa_cp_byte_sliced import CPByteSlicedSlotCompaction
+
+    if layout.entry_width != codec.ENTRY_BYTES:
+        return
+    pool = _private_pool(layout, codec.ENTRY_BYTES, device)
+    rows = min(16, 2 * layout.entries)
+    keys = torch.zeros((rows, 512), dtype=torch.bfloat16, device=device)
+    slots = _private_slots(rows, layout.entries, device)
+    out = torch.empty((1, rows + 1, 512), dtype=torch.bfloat16, device=device)
+    for dtype in (torch.int32, torch.int64):
+        typed_slots = slots.to(dtype)
+        if layout.region == SWA_KV:
+            codec.quantize_and_insert_swa_k_cache(keys, pool, typed_slots)
+        else:
+            codec.quantize_and_insert_k_cache(keys, pool, typed_slots)
+        codec.dequantize_swa_k_cache(pool, typed_slots)
+        raw = codec.gather_k_cache_bytes(pool, typed_slots)
+        codec.dequantize_k_cache_bytes(raw)
+        for lengths in (None, torch.full((1,), rows, dtype=torch.int32, device=device)):
+            codec.dequantize_and_gather_k_cache_slots(
+                out, pool, typed_slots[None], lengths, 1
+            )
+    if layout.region == SWA_KV and cp_size > 1:
+        # Warm only the local writer: startup must not issue a CP collective.
+        local = torch.zeros(
+            (2, layout.stride_bytes // cp_size), dtype=torch.uint8, device=device
+        )
+        blocks = torch.arange(2, dtype=torch.int64, device=device)
+        compaction = CPByteSlicedSlotCompaction(blocks, slots)
+        codec.quantize_and_insert_k_cache_cp_byte_sliced(
+            keys, local, slots, layout.entries, cp_rank, cp_size, compaction
+        )
+
+
 def warmup_v41_attention_jit(
     v4,
     *,
@@ -1108,10 +1155,18 @@ def warmup_v41_attention_jit(
     from rtp_llm.utils.warmup import model_warm_up_enabled
 
     device = torch.device(device)
-    if not model_warm_up_enabled() or device.type != "cuda" or max_m <= 0:
+    from rtp_llm.device.device_type import is_cuda
+
+    if (
+        not is_cuda()
+        or not model_warm_up_enabled()
+        or device.type != "cuda"
+        or max_m <= 0
+    ):
         return
     _assert_not_capturing()
-    if torch.cuda.get_device_capability(device)[0] != 10:
+    capability = torch.cuda.get_device_capability(device)[0]
+    if capability not in (9, 10):
         return
     attentions = _collect_attentions(v4)
     stream = torch.cuda.current_stream(device)
@@ -1143,6 +1198,21 @@ def warmup_v41_attention_jit(
         _WARMED.add(key)
 
     with torch.inference_mode(), torch.cuda.device(device):
+        if capability == 9:
+            # The other warmup routines include SM100-only DeepGEMM/indexer
+            # specializations. Warm only the actual SM90 V4 pool codecs here.
+            layouts = _collect_pool_layouts(
+                attentions, kv_cache, cp_size, kv_cache_sharded
+            )
+            size = cp_size if kv_cache_sharded else 1
+            rank = cp_rank if kv_cache_sharded else 0
+            for layout, attn_key in layouts:
+                if layout.entry_width == 584:
+                    run(
+                        ("sm90_v4_pool", layout, attn_key, size, rank),
+                        partial(_warm_sm90_v4_pool, layout, size, rank, device),
+                    )
+            return
         for key, attn in attentions.items():
             run(("flash_mla", key), partial(_warm_flash_mla, attn, device))
             run(("q_norm_rope", key), partial(_warm_q_norm_rope, attn, device))

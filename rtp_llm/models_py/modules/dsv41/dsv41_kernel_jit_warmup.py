@@ -15,6 +15,7 @@ from functools import partial
 
 import torch
 
+from rtp_llm.device.device_type import is_cuda
 from rtp_llm.models_py.modules.dsv41 import dsv4_kernel_jit_warmup as common
 from rtp_llm.utils.warmup import model_warm_up_enabled
 
@@ -61,19 +62,100 @@ def _dense_m_grid(max_m, n, k, num_sms, groups=1):
     return tuple(sorted(grid))
 
 
+def _sm90_dense_m_grid(max_m, k):
+    """Exercise RTP quantization specializations, not SM100 GEMM heuristics.
+
+    Humming 0.1.16's prepare_kernels compiles every configured M interval on
+    the first call. The actual wrapper launches below additionally cover RTP's
+    packed-scale alignment, quantizer dispatch boundary and runtime row bound.
+    """
+    threshold = (4 * 1024 * 1024 + k - 1) // k
+    return tuple(
+        sorted(
+            m
+            for m in {
+                1,
+                2,
+                3,
+                4,
+                16,
+                17,
+                511,
+                512,
+                threshold - 1,
+                threshold,
+                int(max_m),
+            }
+            if 0 < m <= max_m
+        )
+    )
+
+
+def _run_sm90_dense_warmup_serialized(launch):
+    """Bound concurrent Humming compiler load without importing DeepGEMM."""
+    import fcntl
+
+    path = os.path.join("/tmp", f"rtp_llm_dsv41_humming_warmup_{os.getuid()}.lock")
+    with open(path, "a", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            launch()
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
 @torch.inference_mode()
 def warmup_v41_dense_jit(model, *, max_m, device):
-    if not model_warm_up_enabled() or not common._is_cuda_device(device):
+    if not model_warm_up_enabled() or not common._is_cuda_device(device) or max_m <= 0:
         return
     common._assert_not_capturing()
     linears, outputs = collect_v41_dense_shapes(model)
-    sms = common._get_deep_gemm_num_sms(device)
+    sm90 = is_cuda() and torch.cuda.get_device_capability(device) == (9, 0)
+    if sm90:
+        # SM90 uses a grouped Humming WO_A, never SM100's stacked DeepGEMM
+        # kernel. Retain validation for older per-group owners/fixtures.
+        for (groups, n, k), (name, attn) in outputs.items():
+            if getattr(attn, "_sm90_wo_a", None) is not None:
+                continue
+            fallback = getattr(attn, "_wo_a_groups_v41", ())
+            if len(fallback) != groups or any(
+                getattr(linear, "_sm90_linear", None) is None for linear in fallback
+            ):
+                raise RuntimeError(
+                    f"SM90 output projection has no Humming fallback: {name}"
+                )
+        for _, (name, module) in linears.items():
+            if getattr(module, "_sm90_linear", None) is None:
+                raise RuntimeError(
+                    f"SM90 V41 dense projection has no Humming adapter: {name}"
+                )
+    sms = 0 if sm90 else common._get_deep_gemm_num_sms(device)
     key = (
         str(device),
         max_m,
         tuple(sorted(linears)),
         tuple(sorted(outputs)),
         sms,
+        "humming_sm90" if sm90 else "deepgemm",
+        # Equal shapes do not imply equal JIT kernels after an opt-in SM90
+        # backend switch in the same process. Key by instantiated adapters,
+        # not the current environment (which may have changed since loading).
+        (
+            tuple(
+                (shape, type(module._sm90_linear).__name__)
+                for shape, (_, module) in sorted(linears.items())
+            )
+            if sm90
+            else ()
+        ),
+        (
+            tuple(
+                (shape, type(getattr(attn, "_sm90_wo_a", None)).__name__)
+                for shape, (_, attn) in sorted(outputs.items())
+            )
+            if sm90
+            else ()
+        ),
         os.environ.get("DSV4_FP8_QUANT_KERNEL", "auto"),
     )
     if key in _DENSE_WARMED:
@@ -81,13 +163,27 @@ def warmup_v41_dense_jit(model, *, max_m, device):
 
     def launch():
         for (n, k), (name, module) in linears.items():
-            grid = _dense_m_grid(max_m, n, k, sms)
+            grid = (
+                _sm90_dense_m_grid(max_m, k)
+                if sm90
+                else _dense_m_grid(max_m, n, k, sms)
+            )
             logging.info(
-                "[DSV41 DenseGEMM] %s N=%d K=%d M=%s recipe=32", name, n, k, grid
+                "[DSV41 DenseGEMM] %s N=%d K=%d M=%s recipe=32 backend=%s",
+                name,
+                n,
+                k,
+                grid,
+                "humming_sm90" if sm90 else "deepgemm",
+            )
+            launch_with_retry = (
+                common._run_triton_warmup_launch_with_retry
+                if sm90
+                else common._run_deepgemm_warmup_launch_with_retry
             )
             for m in grid:
                 x = torch.zeros((m, k), dtype=torch.bfloat16, device=device)
-                common._run_deepgemm_warmup_launch_with_retry(
+                launch_with_retry(
                     "DSV41 DenseGEMM",
                     f"{name} M={m}",
                     partial(module, x),
@@ -96,6 +192,42 @@ def warmup_v41_dense_jit(model, *, max_m, device):
                 del x
             common._sync_cuda(device)
             common._release_cuda_cache(device)
+        if sm90:
+            for (groups, n, k), (name, attn) in outputs.items():
+                grouped = getattr(attn, "_sm90_wo_a", None)
+                if grouped is None:
+                    continue  # Legacy per-group modules were warmed above.
+                grid = _sm90_dense_m_grid(max_m, k)
+                logging.info(
+                    "[DSV41 GroupedWOA] %s G=%d N=%d K=%d M=%s backend=humming_sm90",
+                    name,
+                    groups,
+                    n,
+                    k,
+                    grid,
+                )
+                for m in grid:
+                    x = torch.zeros(
+                        (m, attn.n_heads, attn.head_dim),
+                        dtype=torch.bfloat16,
+                        device=device,
+                    )
+                    freqs = torch.ones(
+                        (m, attn.rope_head_dim // 2),
+                        dtype=torch.complex64,
+                        device=device,
+                    )
+                    common._run_triton_warmup_launch_with_retry(
+                        "DSV41 GroupedWOA",
+                        f"{name} M={m}",
+                        partial(grouped, x, freqs),
+                        device=device,
+                    )
+                    del x, freqs
+                common._sync_cuda(device)
+                common._release_cuda_cache(device)
+            # Do not prepare the unused SM100 output-quant epilogue.
+            return
         from rtp_llm.models_py.modules.dsv41.fp8 import _v41_output_projection
 
         for (groups, n, k), (name, attn) in outputs.items():
@@ -132,7 +264,10 @@ def warmup_v41_dense_jit(model, *, max_m, device):
             common._sync_cuda(device)
             common._release_cuda_cache(device)
 
-    common._run_deepgemm_warmup_launches_serialized("DSV41 DenseGEMM", launch)
+    if sm90:
+        _run_sm90_dense_warmup_serialized(launch)
+    else:
+        common._run_deepgemm_warmup_launches_serialized("DSV41 DenseGEMM", launch)
     _DENSE_WARMED.add(key)
 
 
@@ -155,8 +290,10 @@ def _shared_expert_signatures(model):
         ):
             raise ValueError(f"invalid V41 shared-expert geometry: {name}")
         strategy = moe._strategy
-        # Mega returns its BF16 buffer; the other standalone strategies return
-        # contiguous FP32 accumulators. Do not call forward/setup_runtime here:
+        # Mega returns its BF16 buffer; other standalone strategies return
+        # contiguous FP32 tensors. FlashInfer widens its native BF16 result;
+        # the storage contract here does not imply FP32 accumulation accuracy.
+        # Do not call forward/setup_runtime here:
         # those mutate shared runtime buffers and can enter EP collectives.
         routed = getattr(strategy, "_mega_y", None)
         if isinstance(routed, torch.Tensor):
@@ -165,7 +302,12 @@ def _shared_expert_signatures(model):
             routed_dtype, routed_stride = routed.dtype, tuple(routed.stride())
         elif strategy.name == "mega":
             routed_dtype, routed_stride = torch.bfloat16, (dim, 1)
-        elif strategy.name in ("local_loop", "grouped_fp4", "deepep"):
+        elif strategy.name in (
+            "local_loop",
+            "grouped_fp4",
+            "deepep",
+            "sm90_flashinfer",
+        ):
             routed_dtype, routed_stride = torch.float32, (dim, 1)
         else:
             raise ValueError(f"unknown V41 routed output contract: {strategy.name}")
@@ -520,9 +662,15 @@ def warmup_v41_prefill_jit(model, *, device):
     # Shared experts can retain V4's FP8/FP4 linears even though attention
     # and Engram use MXFP8. MegaMoE's symmetric-memory kernels already warm
     # themselves in strategy.setup_runtime(), outside this local lock.
-    common.warmup_dense_gemm_jit(
-        common._collect_dsv4_dense_gemm_shapes(model), max_m=max_m, device=device
-    )
+    legacy_dense = common._collect_dsv4_dense_gemm_shapes(model)
+    if is_cuda() and torch.cuda.get_device_capability(device) == (9, 0):
+        if legacy_dense:
+            raise RuntimeError(
+                "SM90 V4.1 still contains legacy DeepGEMM dense/FP4 projections: "
+                f"{tuple(legacy_dense)}; adapt their production backend before warmup"
+            )
+    else:
+        common.warmup_dense_gemm_jit(legacy_dense, max_m=max_m, device=device)
     warmup_v41_dense_jit(model, max_m=max_m, device=device)
     warmup_v41_shared_expert_jit(model, max_m=max_m, device=device)
     warmup_v41_hc_jit(model.v4, max_m=max_m, device=device)

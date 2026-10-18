@@ -31,13 +31,17 @@ from rtp_llm.models_py.modules.dsv41.fp8._v41_fp4_triton import (
     _round_e2m1,
     _round_power_of_two_scale,
 )
+from rtp_llm.models_py.modules.dsv41.fp8._v41_sm90_v4_cache import (
+    _fake_quantize_global_fp4_values,
+    _store_v4_row,
+)
 
 
 def _enabled(tensor):
     return (
         tensor.is_cuda
         and torch.version.hip is None
-        and torch.cuda.get_device_capability(tensor.device)[0] == 10
+        and torch.cuda.get_device_capability(tensor.device)[0] in (9, 10)
         and not invalid_kv_access_validation_enabled()
     )
 
@@ -89,6 +93,10 @@ def _frequencies(freqs, device):
         and freqs.shape[1] == 32
         and freqs.is_contiguous()
     )
+
+
+def _main_pool(pool, device):
+    return _pool(pool, device, 288) or _pool(pool, device, 584)
 
 
 @triton.jit
@@ -199,6 +207,7 @@ def _prefill_compress_main_kernel(
     BLOCKS,
     TRAP: tl.constexpr,
     REDUCE_WIDTH: tl.constexpr,
+    V4_CACHE: tl.constexpr = False,
 ):
     row = tl.program_id(0).to(tl.int64)
     token = tl.load(boundary_indices + row).to(tl.int64)
@@ -240,6 +249,15 @@ def _prefill_compress_main_kernel(
             if slot >= BLOCKS * ENTRIES:
                 _trap()
         rotated = _rope_bf16(latent, frequencies, position // RATIO * RATIO, 512)
+        if V4_CACHE:
+            _store_v4_row(
+                _fake_quantize_global_fp4_values(rotated),
+                pool,
+                slot,
+                POOL_STRIDE,
+                ENTRIES,
+            )
+            return
         grouped = rotated.to(tl.float32).reshape((32, 16))
         maxima = tl.maximum(tl.max(tl.abs(grouped), 1), 6.0 * (2.0**-9))
         sf = tl.div_rn(maxima, 6.0).to(tl.float8e4nv, fp_downcast_rounding="rtne")
@@ -381,7 +399,7 @@ def compress_main(
         and _vector(boundary_indices, count, device)
         and _vector(main_slots, count, device)
         and _frequencies(freqs, device)
-        and _pool(main_pool, device, 288)
+        and _main_pool(main_pool, device)
     ):
         return None
     if ratio == 2 and not (
@@ -427,6 +445,7 @@ def compress_main(
         main_pool.shape[0],
         trap_invalid_kv_access_enabled(),
         min(128, 512 // min(1 << (count.bit_length() - 1), 16)),
+        V4_CACHE=main_pool.shape[-1] == 584,
         num_warps=4,
         enable_fp_fusion=False,
     )

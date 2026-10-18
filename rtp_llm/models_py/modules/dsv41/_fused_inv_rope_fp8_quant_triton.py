@@ -72,6 +72,7 @@ def _fused_inv_rope_fp8_quant_per_head(
     HALF_ROPE: tl.constexpr,  # rope_head_dim // 2
     ROUND_ROPE_TO_INPUT_DTYPE: tl.constexpr,
     SCALE_MIN: tl.constexpr,
+    IMAGINARY_FMA_FIRST: tl.constexpr,
 ):
     # int64: stride multiply overflows int32 past num_tokens=32768 (IMA).
     pid_token = tl.program_id(0).to(tl.int64)
@@ -130,7 +131,10 @@ def _fused_inv_rope_fp8_quant_per_head(
         # Match eager complex multiplication before its BF16 rounding.
         # Negate sine before multiplying to preserve signed zero.
         x_add = tl.fma(x, cos_v, x_partner * sin_v)
-        x_sub = tl.fma(x, cos_v, x_partner * (-sin_v))
+        if IMAGINARY_FMA_FIRST:
+            x_sub = tl.fma(x_partner, -sin_v, x * cos_v)
+        else:
+            x_sub = tl.fma(x, cos_v, x_partner * (-sin_v))
     else:
         x_add = x * cos_v + x_partner * sin_v
         x_sub = x * cos_v - x_partner * sin_v
@@ -225,6 +229,7 @@ def _fused_inv_rope_fp8_quant_group_heads(
     HEADS_PER_CTA: tl.constexpr,
     ROUND_ROPE_TO_INPUT_DTYPE: tl.constexpr,
     SCALE_MIN: tl.constexpr,
+    IMAGINARY_FMA_FIRST: tl.constexpr,
 ):
     pid_token = tl.program_id(0).to(tl.int64)
     g = tl.program_id(1).to(tl.int64)
@@ -271,7 +276,10 @@ def _fused_inv_rope_fp8_quant_group_heads(
             if ROUND_ROPE_TO_INPUT_DTYPE:
                 # Match eager FMA order, including the sign of zero.
                 x_add = tl.fma(x, cos_v, x_partner * sin_v)
-                x_sub = tl.fma(x, cos_v, x_partner * (-sin_v))
+                if IMAGINARY_FMA_FIRST:
+                    x_sub = tl.fma(x_partner, -sin_v, x * cos_v)
+                else:
+                    x_sub = tl.fma(x, cos_v, x_partner * (-sin_v))
             else:
                 x_add = x * cos_v + x_partner * sin_v
                 x_sub = x * cos_v - x_partner * sin_v
@@ -372,6 +380,7 @@ def fused_inv_rope_fp8_quant(
     heads_per_cta: int | None = None,
     round_rope_to_input_dtype: bool = False,
     scale_min: float = 0.0,
+    imaginary_fma_first: bool = False,
 ):
     """Fused inverse-RoPE + block-scaled FP8 quant for wo_a input.
 
@@ -390,6 +399,10 @@ def fused_inv_rope_fp8_quant(
            before computing absmax and quantizing (used by V4.1).
         scale_min: Clamp scale before UE8M0 rounding; V4.1 legacy CUDA quant
            uses 1e-10, while v2 has no independent scale clamp.
+        imaginary_fma_first: Select ``fma(a, -sin, b*cos)`` for the imaginary
+           inverse-RoPE coordinate instead of ``fma(b, cos, a*(-sin))``.
+           These can straddle a BF16 midpoint. The default preserves existing
+           callers; a backend may opt in after matching its eager complex mul.
         heads_per_cta: Optimized Triton path head grouping.  Valid values are
            1, 2, 4, and 8; ``None`` reads ``DSV4_INV_ROPE_HEADS_PER_CTA``.
            ``DSV4_INV_ROPE_NUM_WARPS`` is an experimental tuning override for
@@ -466,6 +479,7 @@ def fused_inv_rope_fp8_quant(
             HALF_ROPE=rope_head_dim // 2,
             ROUND_ROPE_TO_INPUT_DTYPE=round_rope_to_input_dtype,
             SCALE_MIN=scale_min,
+            IMAGINARY_FMA_FIRST=imaginary_fma_first,
             enable_fp_fusion=not round_rope_to_input_dtype,
             num_warps=1,
             num_stages=1,
@@ -507,6 +521,7 @@ def fused_inv_rope_fp8_quant(
             HEADS_PER_CTA=selected_heads_per_cta,
             ROUND_ROPE_TO_INPUT_DTYPE=round_rope_to_input_dtype,
             SCALE_MIN=scale_min,
+            IMAGINARY_FMA_FIRST=imaginary_fma_first,
             enable_fp_fusion=not round_rope_to_input_dtype,
             num_warps=selected_num_warps,
             num_stages=1,

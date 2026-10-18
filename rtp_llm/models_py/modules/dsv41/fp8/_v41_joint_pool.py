@@ -340,6 +340,9 @@ def warmup(main_layout, index_layout, *, cp_size, cp_rank, device):
 
 def try_gather(attn, main, index, ends, seq_ends, *, groups):
     """Choose the schedule from common host geometry and prepared pool layouts."""
+    if main.ndim != 3 or main.shape[-1] != 288:
+        # The precompiled joint reader owns the FP4 layout only.
+        return None
     if not _MIN_BATCH <= len(ends) <= 128:
         return None
     cp, cache = getattr(attn, "_cp_ctx", None), getattr(attn, "_kv_cache", None)
