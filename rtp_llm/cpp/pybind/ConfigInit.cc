@@ -2124,6 +2124,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("has_moe_norm", &ModelConfig::has_moe_norm)
         .def_readwrite("prefix_projection", &ModelConfig::prefix_projection)
         .def_readwrite("reverse_e_h_norm", &ModelConfig::reverse_e_h_norm)
+        .def_readwrite("mtp_preserve_prefill_positions", &ModelConfig::mtp_preserve_prefill_positions)
         // Properties with enum getter and string setter for type conversion
         .def_property(
             "data_type",

@@ -1358,10 +1358,15 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& raw_inputs) {
 
         if (sequence_parallel_padding_enabled_) {
             hidden_states = hidden_states.narrow(0, 0, raw_inputs.combo_tokens.numel());
-            if (py_model_outputs.mtp_target_hidden_states.defined()) {
-                py_model_outputs.mtp_target_hidden_states = py_model_outputs.mtp_target_hidden_states
-                    .narrow(0, 0, raw_inputs.combo_tokens.numel()).clone();
+        }
+        if (py_model_outputs.mtp_target_hidden_states.defined()) {
+            auto& mtp_hidden = py_model_outputs.mtp_target_hidden_states;
+            if (sequence_parallel_padding_enabled_) {
+                mtp_hidden = mtp_hidden.narrow(0, 0, raw_inputs.combo_tokens.numel());
             }
+            // Graph replay reuses its output storage. Each forward result owns
+            // the recurrent features consumed by the speculative executor.
+            mtp_hidden = mtp_hidden.clone();
         }
         finalizeLinearReplay(post_inputs);
         cache_store_write_cycle.finish();

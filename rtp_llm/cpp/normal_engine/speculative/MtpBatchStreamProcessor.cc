@@ -1572,12 +1572,12 @@ void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(const StreamGroup
     // The default one-dimensional position policy reuses the final input
     // position for the sampled token. Other styles keep the stream policy below.
     const bool shift_default_positions =
-        model_input.combo_position_ids.defined()
+        !preserve_prefill_positions_ && model_input.combo_position_ids.defined()
         && model_input_gatherer_config_.mm_position_ids_style == PositionIdsStyle::DEFAULT
         && model_input_gatherer_config_.position_id_len_factor == 1;
 #if USING_CUDA
     if (!has_multimodal && !model_input.combo_tokens_type_ids.defined()
-        && (!model_input.combo_position_ids.defined() || shift_default_positions)) {
+        && (!model_input.combo_position_ids.defined() || shift_default_positions || preserve_prefill_positions_)) {
         const int64_t token_stride = new_all_token_ids.size(1);
         RTP_LLM_CHECK_WITH_INFO(token_stride > 0 && token_stride <= std::numeric_limits<int32_t>::max(),
                                 "invalid MTP Prefill sample stride: %ld",
@@ -1687,7 +1687,7 @@ void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(const StreamGroup
     const int* sampled_tokens = new_all_token_ids_cpu.data_ptr<int>();
     int*       input_lengths  = input_lengths_cpu.data_ptr<int>();
     int*       combo_tokens   = combo_tokens_cpu.data_ptr<int>();
-    const bool shift_positions = model_input.combo_position_ids.defined();
+    const bool shift_positions = model_input.combo_position_ids.defined() && !preserve_prefill_positions_;
     auto positions_cpu       = shift_positions ? model_input.combo_position_ids.cpu().pin_memory() : torch::Tensor();
     int* combo_position_ids   = shift_positions ? positions_cpu.data_ptr<int>() : nullptr;
     const size_t position_id_len_factor = model_input_gatherer_config_.position_id_len_factor;
@@ -1714,7 +1714,7 @@ void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(const StreamGroup
                                                   sampled_tokens[row_idx * token_stride + token_stride - 1];
             combo_tokens[offset + input_length - 1] = tail_token;
 
-            if (combo_position_ids != nullptr) {
+            if (combo_position_ids != nullptr && !preserve_prefill_positions_) {
                 int* stream_position_ids = combo_position_ids + offset * position_id_len_factor;
                 std::memmove(stream_position_ids,
                              stream_position_ids + position_id_len_factor,

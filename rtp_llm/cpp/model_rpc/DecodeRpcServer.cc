@@ -1314,11 +1314,15 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
             // into the destination offset declared by the spec.
             return groupUsesCpSlice(cfg, tag) || peer_idx == 0;
         };
-    auto shouldLoadBlockFromPeer = [&](CacheGroupType group_type, size_t logical_page, int peer_idx) {
+    auto shouldLoadBlockFromPeer = [&](CacheGroupType group_type,
+                                       size_t         endpoint_key_index,
+                                       size_t         cache_keys_per_physical_block,
+                                       int            peer_idx) {
         if (!is_page_level_rr || group_type != CacheGroupType::FULL) {
             return true;
         }
-        return logical_page % static_cast<size_t>(peer_cnt) == static_cast<size_t>(peer_idx);
+        return fullBlockSourcePeer(endpoint_key_index, cache_keys_per_physical_block, static_cast<size_t>(peer_cnt))
+               == static_cast<size_t>(peer_idx);
     };
     auto sliceCpDestinationForPeer = [&](std::vector<BlockInfo> parts,
                                          const CacheConfig&     cfg,
@@ -1388,7 +1392,7 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                 for (const auto& plan_pair : load_plan) {
                     const size_t block_pos       = static_cast<size_t>(plan_pair.offset_index);
                     const size_t cache_key_index = static_cast<size_t>(plan_pair.key_index);
-                    if (!shouldLoadBlockFromPeer(group_type, cache_key_index, i)) {
+                    if (!shouldLoadBlockFromPeer(group_type, cache_key_index, cache_keys_per_physical_block, i)) {
                         continue;
                     }
                     markCacheKeyRange(
@@ -1542,7 +1546,8 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                             for (const auto& plan_pair : load_plan) {
                                 const size_t block_pos       = static_cast<size_t>(plan_pair.offset_index);
                                 const size_t cache_key_index = static_cast<size_t>(plan_pair.key_index);
-                                if (!shouldLoadBlockFromPeer(group_type, cache_key_index, i)) {
+                                if (!shouldLoadBlockFromPeer(
+                                        group_type, cache_key_index, cache_keys_per_physical_block, i)) {
                                     continue;
                                 }
                                 markCacheKeyRange(

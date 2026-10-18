@@ -17,10 +17,12 @@ public:
                             const ProfilingDebugLoggingConfig& profiling_debug_logging_config,
                             const CacheConfig&                 cache_config,
                             const SpeculativeExecutionConfig&  sp_config,
-                            bool                               warm_up):
+                            bool                               warm_up,
+                            bool                               preserve_prefill_positions = false):
         NormalBatchStreamProcessor(model_config, pd_sep_config, profiling_debug_logging_config, cache_config, warm_up),
         propose_step_(sp_config.gen_num_per_cycle),
         vocab_size_(model_config.vocab_size),
+        preserve_prefill_positions_(preserve_prefill_positions),
         is_dspark_(sp_config.type == SP_TYPE_DSPARK),
         dspark_mask_token_id_(static_cast<int32_t>(sp_config.sp_dspark_mask_token_id)),
         dspark_sample_from_anchor_(sp_config.sp_dspark_sample_from_anchor) {}
@@ -211,6 +213,7 @@ protected:
 
     int     propose_step_;
     size_t  vocab_size_                = 0;
+    bool    preserve_prefill_positions_ = false;
     bool    is_dspark_                 = false;
     int32_t dspark_mask_token_id_      = -1;
     bool    dspark_sample_from_anchor_ = true;

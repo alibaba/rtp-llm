@@ -81,11 +81,17 @@ class KimiK3MtpLocalProjectionTest(unittest.TestCase):
         self.assertIsNone(model._fp8_collective)
 
     def test_local_projection_matches_full_projection_slice(self):
+        for rank in range(4):
+            with self.subTest(tp_rank=rank):
+                self._assert_local_projection_matches_full_projection_slice(rank)
+
+    def _assert_local_projection_matches_full_projection_slice(self, rank):
         torch.manual_seed(20260928)
         model = object.__new__(KimiK3MtpModel)
         nn.Module.__init__(model)
         model.tp_size = 4
-        model.tp_rank = 2
+        model.tp_rank = rank
+        model.kv_cache = None
         full_embedding = nn.Embedding(128, 16)
         local_width = full_embedding.weight.shape[1] // model.tp_size
         local_weight = full_embedding.weight.detach().narrow(
@@ -104,13 +110,14 @@ class KimiK3MtpLocalProjectionTest(unittest.TestCase):
             combo_position_ids=torch.arange(32),
             input_hiddens=torch.randn(32, 16),
             multimodal_inputs=SimpleNamespace(multimodal_features=[]),
+            attention_inputs={"default": SimpleNamespace(valid_token_mask=None)},
         )
         embedding = full_embedding(inputs.input_ids)
         full = model.eh_proj(torch.cat((
             model.enorm(embedding * (inputs.combo_position_ids[:, None] != 0)),
             model.hnorm(inputs.input_hiddens),
         ), dim=-1))
-        expected = full.narrow(0, 16, 8)
+        expected = full.narrow(0, rank * 8, 8)
         projected_rows = []
         hook = model.eh_proj.register_forward_pre_hook(
             lambda _module, args: projected_rows.append(args[0].shape[0])

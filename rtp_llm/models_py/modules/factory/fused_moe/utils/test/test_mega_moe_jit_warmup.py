@@ -68,6 +68,8 @@ class MegaMoeJitWarmupTest(unittest.TestCase):
             max_tokens_per_rank=4096,
             moe_strategy="mega_moe",
         )
+        executor._activation = "swiglu"
+        executor._activation_kwargs = {}
         executor._input_packer = FusedMegaMoEInputPacker()
         executor.warmup_jit = mock.Mock(side_effect=RuntimeError("compile failed"))
         fake_deep_gemm = types.SimpleNamespace(get_num_sms=lambda: 148)
@@ -90,6 +92,7 @@ class MegaMoeJitWarmupTest(unittest.TestCase):
             self.addCleanup(_MEGA_MOE_JIT_WARMED_KEYS.clear)
             with self.assertRaisesRegex(RuntimeError, "compile failed"):
                 executor._maybe_warmup_jit_once()
+            executor.warmup_jit.assert_called_once()
             self.assertFalse(_MEGA_MOE_JIT_WARMED_KEYS)
             self.assertEqual(os.environ["TMPDIR"], "/old/tmp")
             self.assertTrue(

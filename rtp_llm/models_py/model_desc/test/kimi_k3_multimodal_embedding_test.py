@@ -292,7 +292,7 @@ class KimiK3MultimodalEmbeddingCpuTest(unittest.TestCase):
                     lookup_ids = [0, 1, 2, 2, 2, 3, 2, 0]
                     full = torch.tensor(
                         [
-                            [0.0, 1.0, 4.0, -2.0],
+                            [0.0, 0.0, 0.0, 0.0],
                             [3.0, -1.0, 2.0, 5.0],
                             [-4.0, 2.0, 7.0, 1.0],
                             [-4.0, 2.0, 7.0, 1.0],
@@ -305,6 +305,10 @@ class KimiK3MultimodalEmbeddingCpuTest(unittest.TestCase):
                 else:
                     lookup_ids = [0, 1, 2, 3, 0, 1, 2, 3]
                     full = self._expected_embedding(images=False)
+                    full[0].zero_()  # Position zero has no previous token.
+                if packed:
+                    full[0].zero_()
+                    full[3].zero_()
                 expected_local = full[rank * 4 : rank * 4 + 4]
                 torch.testing.assert_close(
                     enorm_inputs[0], expected_local, rtol=0, atol=0
@@ -322,6 +326,66 @@ class KimiK3MultimodalEmbeddingCpuTest(unittest.TestCase):
                 torch.testing.assert_close(
                     inputs.input_ids, original_ids, rtol=0, atol=0
                 )
+
+    def _run_nope_projection(self, *, prefill, reuse=False):
+        # Source windows have lengths 3 and 5. The IDs are already shifted;
+        # the independent oracle names exactly which source rows are zero.
+        for rank in range(2):
+            with self.subTest(prefill=prefill, reuse=reuse, tp_rank=rank):
+                inputs = self._inputs(images=False)
+                inputs.combo_position_ids = torch.empty(0, dtype=torch.int32)
+                if prefill:
+                    zero_rows = [3] if reuse else [0, 3]
+                    attn = SimpleNamespace(
+                        is_prefill=True, is_target_verify=False,
+                        is_mtp_draft_update=False,
+                        cu_seqlens_device=torch.tensor([0, 3, 8], dtype=torch.int32),
+                        prefix_lengths_device=torch.tensor([5 if reuse else 0, 0], dtype=torch.int32),
+                        # Capture-time host/scratch data must not drive positions.
+                        sequence_lengths=torch.full((2,), 99, dtype=torch.int32),
+                        valid_token_mask=None,
+                    )
+                else:
+                    zero_rows = [0, 3]
+                    attn = SimpleNamespace(
+                        is_prefill=False, is_target_verify=False,
+                        is_mtp_draft_update=False,
+                        sequence_lengths_plus_1_device=torch.tensor(
+                            [1, 8, 4, 1, 9, 6, 2, 3], dtype=torch.int32
+                        ),
+                        input_lengths=torch.full((8,), 100, dtype=torch.int32),
+                        valid_token_mask=None,
+                    )
+                inputs.attention_inputs = {"default": attn}
+                model, boundary = self._model(KimiK3MtpModel, rank)
+                expected_embedding = self._expected_embedding(images=False)
+                expected_embedding[zero_rows] = 0
+                expected_embedding = expected_embedding[rank * 4 : rank * 4 + 4]
+                expected = F.layer_norm(expected_embedding, (4,)) + 1.0
+                with patch.object(embedding_module.rtp_llm_ops, "embedding", new=boundary.lookup):
+                    actual = model._project_local_mtp_input(inputs)
+                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+                self.assertEqual(boundary.gather_count, 1)
+
+    def test_nope_prefill_uses_each_request_source_position(self):
+        self._run_nope_projection(prefill=True)
+
+    def test_nope_prefix_reuse_preserves_nonzero_first_source_position(self):
+        self._run_nope_projection(prefill=True, reuse=True)
+
+    def test_nope_decode_uses_device_cache_lengths_not_input_lengths(self):
+        self._run_nope_projection(prefill=False)
+
+    def test_nope_missing_metadata_fails_instead_of_inventing_positions(self):
+        inputs = self._inputs(images=False)
+        inputs.combo_position_ids = torch.empty(0, dtype=torch.int32)
+        attn = inputs.attention_inputs["default"]
+        attn.is_prefill = True
+        attn.cu_seqlens_device = None
+        attn.prefix_lengths_device = None
+        model, _ = self._model(KimiK3MtpModel, 0)
+        with self.assertRaisesRegex(ValueError, "device query offsets"):
+            model._local_mtp_embedding_mask(inputs, 0, 4)
 
     def test_target_injects_images_before_sequence_parallel_slicing(self):
         self._run_target(images=True)
@@ -539,6 +603,7 @@ class KimiK3MultimodalEmbeddingCudaTest(unittest.TestCase):
             [11, 11, 4, 5, 6, 11, 11, 7], device="cuda", dtype=torch.int32
         )
         full = self.expected(restored_ids, [], [], tp=2)
+        full = full * (inputs.combo_position_ids[:, None] != 0)
         for rank in (0, 1):
             model = self.make_model(KimiK3MtpModel, tp=2, rank=rank)
             layer = nn.Module()
@@ -578,6 +643,65 @@ class KimiK3MultimodalEmbeddingCudaTest(unittest.TestCase):
                 actual, full.narrow(0, rank * 4, 4), rtol=0, atol=0
             )
         torch.testing.assert_close(inputs.input_ids, original_ids, rtol=0, atol=0)
+
+    def test_nope_mtp_graph_replay_refreshes_positions_and_padding_for_sp(self):
+        model = self.make_model(KimiK3MtpModel, tp=2, rank=1)
+        layer = nn.Module()
+        layer.attention = SimpleNamespace(
+            _mtp_bf16_collectives=SimpleNamespace(all_gather_modeling_boundary=self.peer_gather)
+        )
+        model.layers = nn.ModuleList([layer])
+        model.enorm = nn.Identity()
+        model.hnorm = nn.Identity()
+        model.eh_proj = nn.Linear(32, 16, bias=False, device="cuda", dtype=torch.bfloat16)
+        with torch.no_grad():
+            model.eh_proj.weight.zero_()
+            model.eh_proj.weight[:, :16].copy_(torch.eye(16, device="cuda", dtype=torch.bfloat16))
+        inputs = self.inputs([1, 2, 3, 4, 5, 6, 0, 0], None, [], [])
+        inputs.combo_position_ids = torch.empty(0, device="cuda", dtype=torch.int32)
+        inputs.input_hiddens = torch.zeros((8, 16), device="cuda", dtype=torch.bfloat16)
+        # This exercises the Python projection's device-metadata replay contract,
+        # not C++ PyAttentionInputs construction (device prefixes are read-only).
+        attn = SimpleNamespace(
+            is_prefill=True,
+            is_target_verify=False,
+            is_mtp_draft_update=True,
+            prefix_lengths_device=torch.tensor(
+                [0, 0, 0], device="cuda", dtype=torch.int32
+            ),
+            cu_seqlens_device=torch.tensor(
+                [0, 4, 6, 6], device="cuda", dtype=torch.int32
+            ),
+            valid_token_mask=torch.tensor(
+                [1, 1, 1, 1, 1, 1, 0, 0], device="cuda", dtype=torch.bool
+            ),
+            # Deliberately stale Python counts cannot be captured as row validity.
+            logical_token_count=8,
+        )
+        inputs.attention_inputs = {"default": attn}
+        full = self.expected(inputs.input_ids, [], [], tp=2)
+        expected_first = full.clone()
+        expected_first[[0, 4, 6, 7]] = 0
+        warmup = torch.cuda.Stream()
+        warmup.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(warmup):
+            for _ in range(3):
+                model._project_local_mtp_input(inputs)
+        torch.cuda.current_stream().wait_stream(warmup)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            actual = model._project_local_mtp_input(inputs)
+        graph.replay()
+        torch.testing.assert_close(actual, expected_first[4:8], rtol=0, atol=0)
+        # Same addresses, different packed request lengths, prefix reuse and
+        # fewer valid rows. Replay must read new device metadata without Python.
+        attn.prefix_lengths_device.copy_(torch.tensor([3, 9, 0], device="cuda", dtype=torch.int32))
+        attn.cu_seqlens_device.copy_(torch.tensor([0, 3, 5, 5], device="cuda", dtype=torch.int32))
+        attn.valid_token_mask.copy_(torch.tensor([1, 1, 1, 1, 1, 0, 0, 0], device="cuda", dtype=torch.bool))
+        expected_second = full.clone()
+        expected_second[5:8] = 0
+        graph.replay()
+        torch.testing.assert_close(actual, expected_second[4:8], rtol=0, atol=0)
 
     def test_text_embedding_keeps_graph_capture_without_multimodal_work(self):
         for cls in (KimiK3Model, KimiK3MtpModel):

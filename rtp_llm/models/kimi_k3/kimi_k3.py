@@ -576,6 +576,7 @@ class KimiK3Mtp(KimiK3):
         config.tokenizer_path = ckpt_path
         config.model_type = "kimi_k3_mtp"
         config.is_mtp = True
+        config.mtp_preserve_prefill_positions = True
         cls._parse_basic_config(config_json, text, config)
         cls._parse_attention_config(text, config)
         cls._parse_moe_config(text, config)
