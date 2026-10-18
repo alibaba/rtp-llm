@@ -113,9 +113,11 @@ class DiffusionGemmaProposerWeightInfo(ModelDeployWeightInfo):
 
     def _swa_active_tail_blocks(self) -> int:
         # ceil(window / kernel_page) + 1: materialize the full sliding window
-        # so SWACacheManager leaves no NULL slots (run 37); the fallback chain
-        # covers weight-info builds that run before config finalization.
-        window = int(self.model_config.dgm_sliding_window)
+        # so SWACacheManager leaves no NULL slots (run 37). attn_config.
+        # sliding_window is the field the C++ CacheConfigCreator reads for
+        # sliding_window_size; the fallback chain covers weight-info builds
+        # that run before config finalization.
+        window = int(self.model_config.attn_config.sliding_window)
         page = (
             int(self.model_config.attn_config.kernel_tokens_per_block)
             or int(self.model_config.attn_config.tokens_per_block)

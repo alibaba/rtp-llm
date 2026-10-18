@@ -99,7 +99,7 @@ def build_diffusion_gemma_kv_spec_descs(config: "DiffusionGemmaConfig") -> list:
             )
             tail = CacheTailPolicyDesc()
             tail.active_tail_blocks = (
-                int(config.dgm_sliding_window) + page - 1
+                int(config.attn_config.sliding_window) + page - 1
             ) // page + 1
             swa.tail = tail
             descs.append([swa])
