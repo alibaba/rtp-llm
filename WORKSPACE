@@ -64,6 +64,17 @@ load("@rtp_deps//:pip.bzl", "pip_deps")
 
 pip_deps()
 
+# Temporary SM90 MoE sidecar while the internal FlashInfer upgrade is pending.
+# Its import/operator/cache namespaces are distinct from the existing wheel.
+local_repository(
+    name = "flashinfer_opensource_rules",
+    path = "deps/flashinfer_opensource",
+)
+
+load("@flashinfer_opensource_rules//:repositories.bzl", "flashinfer_opensource_repository")
+
+flashinfer_opensource_repository(name = "flashinfer_opensource_sidecar")
+
 load("@rules_python//python:pip.bzl", "pip_parse")
 
 # Test-only, platform-independent pytest closure; do not alter runtime locks.
