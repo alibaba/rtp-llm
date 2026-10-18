@@ -445,12 +445,13 @@ class DiffusionGemmaAttnOp:
             )
             if self._fi_diag:
                 torch.cuda.synchronize()
-                if getattr(self, "_fi_merge_diag_first", True):
-                    self._fi_merge_diag_first = False
+                self._fi_merge_diag_count = getattr(self, "_fi_merge_diag_count", 0) + 1
+                if self._fi_merge_diag_count % 100 == 1:
                     logger.info(
-                        "[dgm-fi] merge probe: qo=%d causal=%s | "
+                        "[dgm-fi] merge probe #%d: qo=%d causal=%s | "
                         "new_lse[0,:3]=%s new_out_absmax=%.4f | "
                         "prefix_lse[0,:3]=%s prefix_out_absmax=%.4f",
+                        self._fi_merge_diag_count,
                         q.shape[0],
                         causal,
                         new_lse[0, :3].tolist(),
