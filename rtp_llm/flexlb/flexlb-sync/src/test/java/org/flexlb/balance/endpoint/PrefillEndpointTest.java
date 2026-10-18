@@ -1227,16 +1227,7 @@ class PrefillEndpointTest {
             assertTrue(callbackFailure.get() == null,
                     () -> String.valueOf(callbackFailure.get()));
 
-            assertEquals(
-                    PrefillState.CapacityStatus.ENDPOINT_RETIRED,
-                    retirementEndpoint.reserveRouteOwnership(
-                            createScheduledRequest(
-                                    retirementEndpoint,
-                                    retirementConfig,
-                                    8_102L,
-                                    128,
-                                    0),
-                            0L).status());
+            assertNull(retirementEndpoint.tryBeginRouteCommitAdmission());
         } finally {
             retirementEndpoint.close();
             executor.shutdownNow();

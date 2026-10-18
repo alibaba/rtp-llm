@@ -101,9 +101,9 @@ class CostBasedPrefillSelectionMetricTest {
     }
 
     @ParameterizedTest
-    @CsvSource({"5,1,false,BLOCKED", "50,1,false,BLOCKED", "5,2,false,SUCCESS",
-            "50,1,true,SUCCESS", "10,1,true,BLOCKED", "5,1,true,BLOCKED"})
-    void fullRequestCapacityIsSelectableOnlyWithEligibleQueuedPreemption(
+    @CsvSource({"5,1,false,SUCCESS", "50,1,false,SUCCESS", "5,2,false,SUCCESS",
+            "50,1,true,SUCCESS", "10,1,true,SUCCESS", "5,1,true,SUCCESS"})
+    void queuedNonBatchRemainsSelectableRegardlessOfDispatchLimitOrPreemption(
             int incomingPriority, int requestLimit, boolean preemptQueued, PlacementResult.Status expectedStatus) {
         registry.close();
         config.queueScheduler().getDecision().setMaxRequests(2);
@@ -192,6 +192,40 @@ class CostBasedPrefillSelectionMetricTest {
             assertEquals("10.0.0.2", selected.serverStatus().getServerIp());
             verify(reporter).reportCacheAffinityDecision(
                     RoleType.PREFILL, "10.0.0.2", "CACHE_LEADER");
+        }
+    }
+
+    @Test
+    void cacheLeaderWithAllDispatchSlotsOccupiedStillWins() {
+        configureAffinity(600L, 5.0);
+        PrefillEndpoint endpoint = (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0.2:8080");
+        var reservations = new java.util.ArrayList<org.flexlb.balance.endpoint.PrefillState.RouteReservation>();
+        var occupants = new java.util.ArrayList<ScheduledRequest>();
+        try {
+            for (long id = 31_001L; id <= 31_002L; id++) {
+                Request request = new Request();
+                request.setRequestId(id);
+                request.setSeqLen(10L);
+                BalanceContext ctx = new BalanceContext(config);
+                ctx.setRequest(request);
+                ScheduledRequest item = new ScheduledRequest(ctx, new CompletableFuture<>(),
+                        null, null, null, endpoint, null, null, System.currentTimeMillis());
+                try (var pin = endpoint.tryPinGeneration()) {
+                    var result = endpoint.reserveUnqueuedRoute(pin, item, 10L);
+                    assertEquals(org.flexlb.balance.endpoint.PrefillState.CapacityStatus.ACQUIRED, result.status());
+                    reservations.add(result.reservation());
+                    occupants.add(item);
+                }
+            }
+            try (var commit = endpoint.tryBeginRouteCommitAdmission();
+                 var handoff = commit.commit(occupants, reservations)) { }
+            org.junit.jupiter.api.Assertions.assertFalse(endpoint.routeAdmissionAvailability().isAvailable());
+            try (SelectedRole selected = select()) {
+                assertEquals("10.0.0.2", selected.serverStatus().getServerIp());
+            }
+        } finally {
+            occupants.forEach(endpoint::releaseCommittedItem);
+            reservations.forEach(org.flexlb.balance.endpoint.PrefillState.RouteReservation::close);
         }
     }
 

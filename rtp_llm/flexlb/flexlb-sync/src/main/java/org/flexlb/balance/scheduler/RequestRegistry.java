@@ -440,13 +440,6 @@ public class RequestRegistry {
                 detail);
     }
 
-    void onQueuedItemPreempted(ScheduledRequest victim, ScheduledRequest incoming) {
-        finishYielded(victim, "preempted by higher-priority request " + incoming.requestId());
-        requestReporter.reportVictim(victim.priority(), incoming.priority(),
-                "prefill_queued", "prefill_inflight_requests");
-        requestReporter.reportPriorityPreempt("prefill_queued");
-    }
-
     private void finishVictim(ScheduledRequest item, StrategyErrorType error, String detail) {
         RequestSlot slot = entryFor(item);
         if (slot != null) { slot.recordSchedulingFailure(error, detail); }

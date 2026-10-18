@@ -157,15 +157,15 @@ class RequestAdmissionResourceLeakTest {
     }
 
     @Test
-    void queuedPrefillPreemptionReturnsPreemptedAndReleasesDecodeOnce() throws Exception {
+    void yieldedVictimReturnsPreemptedAndReleasesDecodeOnce() throws Exception {
         Registered victim = registerItem(61L);
         Registered incoming = registerItem(62L);
         RequestLifecycleTestSupport.bindRoute(lifecycle, victim);
-        lifecycle.onQueuedItemPreempted(victim.item(), incoming.item());
+        lifecycle.finishYielded(victim.item(), "preempted by higher-priority request 62");
         Response response = victim.future().get(5, TimeUnit.SECONDS);
         assertEquals(StrategyErrorType.PRIORITY_PREEMPTED.getErrorCode(), response.getCode());
         assertEquals("preempted by higher-priority request 62", response.getErrorMessage());
-        lifecycle.onQueuedItemPreempted(victim.item(), incoming.item());
+        lifecycle.finishYielded(victim.item(), "preempted by higher-priority request 62");
         lifecycle.cancelRequest(61L, 0L, CancelReason.CLIENT_CANCELLED);
         verify(victim.item().decodeEp(), times(1)).release(
                 victim.item().decodeReservation(),
