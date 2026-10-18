@@ -595,12 +595,12 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
                             static_cast<int>(decode_context.error_status.error_code()));
         return;
     }
+    GRPC_RET_IF_ERROR(decode_context,
+                      generate_request.request_id() == decode_context.request_id
+                          && generate_request.client_id() == decode_context.allocate_request.client_id(),
+                      grpc::StatusCode::INVALID_ARGUMENT,
+                      "generate request identity mismatch");
     if (generate_request.stage() == RemoteStage::PREFILL_COMPLETE) {
-        GRPC_RET_IF_ERROR(decode_context,
-                          generate_request.request_id() == decode_context.request_id
-                              && generate_request.client_id() == decode_context.allocate_request.client_id(),
-                          grpc::StatusCode::INVALID_ARGUMENT,
-                          "prefill completion request identity mismatch");
         GRPC_RET_IF_ERROR(
             decode_context, !decode_context.isRequestCancelled(), grpc::StatusCode::CANCELLED, "request is cancelled");
         GRPC_RET_IF_ERROR(decode_context,
@@ -626,6 +626,18 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
         decode_context.error_status =
             serializeErrorMsg(decode_context.request_key, decode_context.request_info, decode_context.error_info);
         return;
+    }
+    if (propose_maga_init_params_) {
+        const bool dspark = engine_->isDSpark();
+        GRPC_RET_IF_ERROR(decode_context,
+                          dspark ? generate_request.propose_token_ids_size() == 0 :
+                                   generate_request.propose_token_ids_size() >= 2,
+                          grpc::StatusCode::INVALID_ARGUMENT,
+                          "invalid speculative handoff proposal count");
+        GRPC_RET_IF_ERROR(decode_context,
+                          dspark || (generate_request.has_propose_probs() && generate_request.has_propose_hidden()),
+                          grpc::StatusCode::INVALID_ARGUMENT,
+                          "speculative handoff requires proposal probabilities and hidden states");
     }
     decode_context.time_info.updateGenerateBeginTime();
     generate_stream->setIsContextStream(false);
@@ -845,10 +857,10 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVC
 
 DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_context) {
     RTP_LLM_PROFILE_FUNCTION();
-    auto*                              generate_stream = decode_context.getStream().get();
-    auto&                              cache_keys      = generate_stream->cacheKeys(0);
-    const auto&                        cache_resource  = generate_stream->kvCachePtr()->cacheResource(0);
-    auto                               group_block_ids = cache_resource.groupBlockIds();
+    auto*       generate_stream = decode_context.getStream().get();
+    auto&       cache_keys      = generate_stream->cacheKeys(0);
+    const auto& cache_resource  = generate_stream->kvCachePtr()->cacheResource(0);
+    auto        group_block_ids = cache_resource.groupBlockIds();
 
     const auto topology_error = validateRemoteLoadTopology(resource_.workers.size(), decode_context.peer_addrs.size());
     if (!topology_error.ok()) {
@@ -1506,9 +1518,9 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
     }
 
     std::vector<CacheKeyType> cache_keys(request->cache_keys().begin(), request->cache_keys().end());
-    const auto&               cache_config     = engine_->resourceContext().cache_manager->cacheConfig();
-    const auto&               topology         = cache_config.topology();
-    auto                      group_block_ids  = decodeGroupBlockIds(*request, topology);
+    const auto&               cache_config    = engine_->resourceContext().cache_manager->cacheConfig();
+    const auto&               topology        = cache_config.topology();
+    auto                      group_block_ids = decodeGroupBlockIds(*request, topology);
 
     std::vector<std::string> peer_addrs(request->peer_addrs().begin(), request->peer_addrs().end());
 
@@ -1680,7 +1692,7 @@ grpc::Status DecodeRpcServer::RemoteGenerate(grpc::ServerContext* server_context
             // scheduler releases its inflight entry without waiting for TTL eviction.
             auto& stream     = decode_context.getStream();
             auto  error_code = static_cast<int64_t>(stream && stream->hasError() ? stream->statusInfo().code() :
-                                                                                   ErrorCode::MALLOC_FAILED);
+                                                                                  ErrorCode::MALLOC_FAILED);
             reportEarlyFinishTask(decode_context,
                                   error_code,
                                   "decode allocate resource failed: " + decode_context.error_status.error_message());

@@ -301,11 +301,11 @@ TEST(DecodeRpcServerTest, CPShardedLoadRequestReadsFromEveryPrefillPeer) {
     DecodeRpcServer server;
     server.resource_.workers = {"decode-0", "decode-1"};
 
-    const std::string                                   request_key = "request";
-    const std::vector<std::string>                      peer_addrs  = {"prefill-0", "prefill-1"};
-    const std::vector<CacheKeyType>                     cache_keys  = {101, 102};
-    GroupBlockIds                                       group_block_ids;
-    const auto                                          load_context = makeLoadContext(request_key,
+    const std::string               request_key = "request";
+    const std::vector<std::string>  peer_addrs  = {"prefill-0", "prefill-1"};
+    const std::vector<CacheKeyType> cache_keys  = {101, 102};
+    GroupBlockIds                   group_block_ids;
+    const auto                      load_context = makeLoadContext(request_key,
                                               peer_addrs,
                                               cache_keys,
                                               std::move(group_block_ids),
@@ -330,11 +330,11 @@ TEST(DecodeRpcServerTest, CPShardedMlaLoadRequestReadsFromEveryPrefillPeer) {
     DecodeRpcServer server;
     server.resource_.workers = {"decode-0", "decode-1"};
 
-    const std::string                                   request_key = "request";
-    const std::vector<std::string>                      peer_addrs  = {"prefill-0", "prefill-1"};
-    const std::vector<CacheKeyType>                     cache_keys  = {101};
-    GroupBlockIds                                       group_block_ids;
-    const auto                                          load_context = makeLoadContext(request_key,
+    const std::string               request_key = "request";
+    const std::vector<std::string>  peer_addrs  = {"prefill-0", "prefill-1"};
+    const std::vector<CacheKeyType> cache_keys  = {101};
+    GroupBlockIds                   group_block_ids;
+    const auto                      load_context = makeLoadContext(request_key,
                                               peer_addrs,
                                               cache_keys,
                                               std::move(group_block_ids),
@@ -661,8 +661,8 @@ TEST_F(PrefillCompletionRpcTest, SettlesWithoutDecodeAndPreservesProtocolFailure
             resource_released       = stream->stream_cache_resource_->isResourceReleased();
             blocks_after_completion = stream->stream_cache_resource_->curBlocksNum();
             EXPECT_EQ(stream->outputTokenLen(), 0);
-            const auto timing       = stream->getTimeInfo();
-            executed                = timing.running_started || timing.first_token_committed || timing.generation_done;
+            const auto timing = stream->getTimeInfo();
+            executed          = timing.running_started || timing.first_token_committed || timing.generation_done;
             RpcMetricsCollector metrics;
             context.collectBasicMetrics(metrics);
             error_qps = metrics.error_qps;
@@ -695,6 +695,8 @@ TEST_F(PrefillCompletionRpcTest, SettlesWithoutDecodeAndPreservesProtocolFailure
                                    "eof",
                                    "wrong_request",
                                    "wrong_client",
+                                   "generate_wrong_request",
+                                   "generate_wrong_client",
                                    "wrong_stage",
                                    "expired",
                                    "stream_error",
@@ -721,11 +723,12 @@ TEST_F(PrefillCompletionRpcTest, SettlesWithoutDecodeAndPreservesProtocolFailure
         if (mode != "eof") {
             GenerateRequestPB request;
             request.set_stage(mode == "wrong_stage" ? RemoteStage::LOAD :
-                              mode == "prefill_only_generate" || mode == "bare_zero_generate" ?
+                              mode == "prefill_only_generate" || mode == "bare_zero_generate"
+                                      || mode == "generate_wrong_request" || mode == "generate_wrong_client" ?
                                                       RemoteStage::GENERATE :
                                                       RemoteStage::PREFILL_COMPLETE);
-            request.set_request_id(mode == "wrong_request" ? 43 : 42);
-            request.set_client_id(mode == "wrong_client" ? "other" : "prefill");
+            request.set_request_id(mode == "wrong_request" || mode == "generate_wrong_request" ? 43 : 42);
+            request.set_client_id(mode == "wrong_client" || mode == "generate_wrong_client" ? "other" : "prefill");
             EXPECT_TRUE(rpc->Write(request));
         }
         rpc->WritesDone();
@@ -753,7 +756,8 @@ TEST_F(PrefillCompletionRpcTest, SettlesWithoutDecodeAndPreservesProtocolFailure
                 ASSERT_TRUE(details.ParseFromString(status.error_details()));
                 EXPECT_EQ(details.error_code(), static_cast<int>(ErrorCode::INVALID_PARAMS));
                 EXPECT_NE(details.error_message().find("prefill-only"), std::string::npos);
-            } else if (mode == "wrong_request" || mode == "wrong_client") {
+            } else if (mode == "wrong_request" || mode == "wrong_client" || mode == "generate_wrong_request"
+                       || mode == "generate_wrong_client") {
                 EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
             } else if (mode == "expired") {
                 EXPECT_EQ(status.error_code(), grpc::StatusCode::DEADLINE_EXCEEDED);

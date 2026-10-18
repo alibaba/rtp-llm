@@ -108,3 +108,15 @@ cc_test(
     exec_properties = {"gpu": "L20_CU13"},
     tags = ["L20_CU13"],
 )
+
+# Real stream/token-history finish policy; CPU tensors, no device fixture.
+cc_test(
+    name = "speculative_stop_boundary_test",
+    srcs = ["SpeculativeStopBoundaryTest.cc"],
+    copts = test_copts,
+    deps = test_deps + [
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+    env = {"CUDA_VISIBLE_DEVICES": "", "GPU_COUNT": "0"},
+)
