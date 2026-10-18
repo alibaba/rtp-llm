@@ -415,6 +415,9 @@ public class RequestRegistry {
                                     StrategyErrorType.DISPATCH_FAILED,
                                     "request scheduler is shutting down"));
                 }
+                if (!context.getConfig().getDispatcher().requiresGenerateInput()) {
+                    context.setGenerateInputPb(null);
+                }
                 boolean queueScheduling = context.getConfig().isQueue();
                 slot =
                         new RequestSlot(

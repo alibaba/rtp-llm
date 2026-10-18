@@ -1,5 +1,11 @@
 package org.flexlb.balance.scheduler;
 
+import static org.flexlb.balance.scheduler.RequestTerminalCleanup.appendFailure;
+import static org.flexlb.balance.scheduler.RequestTerminalCleanup.rethrowCleanup;
+import static org.flexlb.balance.scheduler.RequestTerminalCleanup.runStep;
+import static org.flexlb.dao.loadbalance.Response.buildErrorResponse;
+import static org.flexlb.dao.loadbalance.Response.buildSuccessResponse;
+
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryResult;
@@ -30,12 +36,6 @@ import java.util.OptionalLong;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BooleanSupplier;
-
-import static org.flexlb.balance.scheduler.RequestTerminalCleanup.appendFailure;
-import static org.flexlb.balance.scheduler.RequestTerminalCleanup.rethrowCleanup;
-import static org.flexlb.balance.scheduler.RequestTerminalCleanup.runStep;
-import static org.flexlb.dao.loadbalance.Response.buildErrorResponse;
-import static org.flexlb.dao.loadbalance.Response.buildSuccessResponse;
 
 /**
  * One request's response decision and resource-tracking lifetime.
@@ -726,7 +726,8 @@ public final class RequestSlot {
             return RequestEffect.terminal(
                     decideRequestEndLocked(
                             DeferredTerminal.inactivityExpired(
-                                    "REQUEST_INACTIVE: no matching Engine request status before inactivity timeout")),
+                                    "REQUEST_INACTIVE: no matching Engine request status before"
+                                        + " inactivity timeout")),
                     null);
         }
 
@@ -2406,6 +2407,7 @@ public final class RequestSlot {
                             TerminalOutcome.fail("terminal projection did not terminate"));
         }
 
+        context.setGenerateInputPb(null);
         if (encoderEndpoint != null) {
             encoderEndpoint.forgetRequest(requestId);
             encoderEndpoint = null;

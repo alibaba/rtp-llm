@@ -2,7 +2,9 @@ package org.flexlb.balance.scheduler;
 
 import com.google.protobuf.ByteString;
 import com.google.protobuf.InvalidProtocolBufferException;
+
 import io.micrometer.core.instrument.util.NamedThreadFactory;
+
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
@@ -27,7 +29,6 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
-import javax.annotation.PreDestroy;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -49,6 +50,8 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.BiConsumer;
+
+import javax.annotation.PreDestroy;
 
 /**
  * Default batch-submission execution adapter.
@@ -166,7 +169,9 @@ public class DefaultBatchDispatcher {
         this.maxInflightBytes = Math.max(1L, maxInflightBytes);
         this.inflightPayloadBytes = new AtomicLong(0L);
         Logger.info(
-                "FlexLB dispatch executor config: poolSize={}, logicalAdmissionCapacity={}, maxInflightBytes={}, threadFactory=flexlb-dispatch-executor, rejectionPolicy=AbortPolicy",
+                "FlexLB dispatch executor config: poolSize={}, logicalAdmissionCapacity={},"
+                    + " maxInflightBytes={}, threadFactory=flexlb-dispatch-executor,"
+                    + " rejectionPolicy=AbortPolicy",
                 poolSize,
                 admissionCapacity,
                 this.maxInflightBytes);
@@ -353,7 +358,9 @@ public class DefaultBatchDispatcher {
                                             long bytes = wireSizeUpperBound(items);
                                             if (!tryChargeBytes(bytes)) {
                                                 Logger.warn(
-                                                        "EnqueueBatch byte budget exhausted; failing batch {} ({}B > budget {}B, in-flight {}B) as NOT_SENT",
+                                                        "EnqueueBatch byte budget exhausted;"
+                                                            + " failing batch {} ({}B > budget {}B,"
+                                                            + " in-flight {}B) as NOT_SENT",
                                                         batchId,
                                                         bytes,
                                                         maxInflightBytes,
@@ -652,7 +659,8 @@ public class DefaultBatchDispatcher {
                                     if (ex != null) {
                                         Throwable cause = unwrapCompletionFailure(ex);
                                         Logger.debug(
-                                                "EnqueueBatch failed batchId: {}, entrypoint: {}:{}, err: {}",
+                                                "EnqueueBatch failed batchId: {}, entrypoint:"
+                                                    + " {}:{}, err: {}",
                                                 batchId,
                                                 prefillIp,
                                                 prefillGrpcPort,
@@ -931,8 +939,7 @@ public class DefaultBatchDispatcher {
                     "generateInputPb is missing for request " + item.requestId());
         }
         EngineRpcService.GenerateInputPB.Builder input =
-                EngineRpcService.GenerateInputPB.newBuilder();
-        input.mergeFrom(generateInput);
+                GenerateInputPayload.parse(generateInput).toWireBuilder();
         if (!Objects.equals(RequestId.parse(input), item.requestId())) {
             throw new IllegalArgumentException(
                     "request_id mismatch between schedule request and GenerateInputPB");
