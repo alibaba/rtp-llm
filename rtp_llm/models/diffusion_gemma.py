@@ -21,7 +21,6 @@ from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.diffusion_gemma_weight import DiffusionGemmaWeightInfo
 from rtp_llm.ops import (
     CacheGroupType,
-    CacheReusePolicyDesc,
     CacheTailPolicyDesc,
     DataType,
     KVCacheSpecDesc,
@@ -103,19 +102,6 @@ def build_diffusion_gemma_kv_spec_descs(config: "DiffusionGemmaConfig") -> list:
                 int(config.attn_config.sliding_window) + page - 1
             ) // page + 1
             swa.tail = tail
-            # defaultCacheGroupPolicy leaves SWA groups with
-            # enable_prefix_reuse=false: a cache-hit request then gets FRESH
-            # EMPTY blocks for the matched prefix (only the FULL global group
-            # reuses), the sliding layers read zero K/V, the canvas attention
-            # collapses to uniform, and the EB denoiser returns an all-EOS
-            # canvas after one step (run 40/41: cached_tokens=256 queries
-            # degenerate to 1-token responses). With the full window
-            # materialized above, the SWA chain is complete and prefix reuse
-            # is sound: the matcher caps it at the window
-            # (reuseBlockCount = min(matched, window/page + 1)).
-            reuse = CacheReusePolicyDesc()
-            reuse.enable_prefix_reuse = True
-            swa.reuse = reuse
             descs.append([swa])
         else:
             g = KVCacheSpecDesc()
