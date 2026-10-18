@@ -215,15 +215,6 @@ class DiffusionGemmaProposer(nn.Module):
             )
             return out
 
-        import sys as _sys
-
-        print(
-            f"[DGMDBG] propose: prefix_lengths={prefix_lengths.tolist()} "
-            f"input_lengths={primary.input_lengths.tolist() if primary.input_lengths is not None else None} "
-            f"cu={primary.cu_seqlens.tolist() if primary.cu_seqlens is not None else None} "
-            f"bt_sample={primary.kv_cache_kernel_block_id.flatten()[:6].tolist() if primary.kv_cache_kernel_block_id is not None else None}",
-            file=_sys.stderr, flush=True,
-        )
         batch = int(prefix_lengths.numel())
         prefix = prefix_lengths.to(device=device, dtype=torch.long)
         # Positions per request: [L, L + canvas) — matches the C++ dspark
@@ -298,13 +289,7 @@ class DiffusionGemmaProposer(nn.Module):
             self_conditioning_logits = processed.to(embed_weight.dtype)
             if bool(finished.all().item()):
                 break
-        self._last_steps = step + 1
 
-        print(
-            f"[DGMDBG] propose out: steps_used={getattr(self, '_last_steps', -1)} "
-            f"tokens[:12]={argmax_canvas[0, :12].tolist()}",
-            file=_sys.stderr, flush=True,
-        )
         final_tokens = argmax_canvas
         # hidden rows must match the C++ query block (B * canvas_length); the
         # diffusion executor consumes only diffusion_tokens, so reuse the last
