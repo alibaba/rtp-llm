@@ -563,7 +563,7 @@ class PrefillEndpointTest {
         assertFalse(
                 endpoint.batchAdmissionAvailability(1).isAvailable(),
                 "a short member finishing must not reopen maxInflight=1 while its long sibling"
-                    + " runs");
+                        + " runs");
 
         calibrate(Map.of("102", taskInfo(102L, 700L, null, 0, 1_900)), Map.of());
 
@@ -1090,7 +1090,7 @@ class PrefillEndpointTest {
                 5,
                 endpoint.observedRequestCount(),
                 "scalar active count must cover a partial detail list without double-counting local"
-                    + " tasks");
+                        + " tasks");
     }
 
     @Test
@@ -1275,14 +1275,7 @@ class PrefillEndpointTest {
                     "retirement-owner reentry must return instead of waiting on itself");
             assertTrue(callbackFailure.get() == null, () -> String.valueOf(callbackFailure.get()));
 
-            assertEquals(
-                    PrefillState.CapacityStatus.ENDPOINT_RETIRED,
-                    retirementEndpoint
-                            .reserveRouteOwnership(
-                                    createScheduledRequest(
-                                            retirementEndpoint, retirementConfig, 8_102L, 128, 0),
-                                    0L)
-                            .status());
+            assertNull(retirementEndpoint.tryBeginRouteCommitAdmission());
         } finally {
             retirementEndpoint.close();
             executor.shutdownNow();

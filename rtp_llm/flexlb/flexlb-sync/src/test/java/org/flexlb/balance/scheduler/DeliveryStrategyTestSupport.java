@@ -180,6 +180,13 @@ public final class DeliveryStrategyTestSupport {
             CapacityBoundary.Availability unavailable = unavailable().availability();
             Mockito.when(prefill.batchAdmissionAvailability(Mockito.anyInt()))
                     .thenReturn(unavailable);
+            Mockito.when(routeCommit.reserve(Mockito.any(), Mockito.anyLong()))
+                    .thenAnswer(
+                            invocation ->
+                                    new PrefillState.ReservationResult<>(
+                                            PrefillState.CapacityStatus.ACQUIRED,
+                                            routeReservations.get(invocation.getArgument(0))));
+            Mockito.when(prefill.routeAdmissionAvailability()).thenReturn(unavailable);
             Mockito.when(prefill.tryBeginRouteCommitAdmission()).thenReturn(routeCommit);
             Mockito.when(routeCommit.commit(Mockito.anyList(), Mockito.anyList()))
                     .thenAnswer(invocation -> committedHandoffs(1).getFirst());
@@ -205,9 +212,6 @@ public final class DeliveryStrategyTestSupport {
                         Mockito.mock(PrefillState.RouteReservation.class);
                 routeReservations.put(item, routeReservation);
                 Mockito.when(item.prefillEp()).thenReturn(prefill);
-                Mockito.when(item.requiresRouteReservation()).thenReturn(true);
-                Mockito.when(item.publishedRouteReservation()).thenReturn(routeReservation);
-                Mockito.when(item.takePublishedRouteReservation(routeReservation)).thenReturn(true);
                 ScheduledRequest.DecodeBinding binding =
                         new ScheduledRequest.DecodeBinding(
                                 null,
