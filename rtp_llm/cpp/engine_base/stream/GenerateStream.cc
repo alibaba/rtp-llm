@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/utils/SmokeEvidence.h"
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
@@ -910,6 +911,16 @@ bool GenerateStream::finishOrCancel(int64_t wait_timeout_ms, const std::string& 
     const bool successful_completion_pending =
         hasEventWithoutLock(StreamEvents::GenerateDone) && !hasErrorWithoutLock();
     if (!successful_completion_pending) {
+        const size_t pending_host_tokens = smokeEvidenceEnabled() && getStatus() == StreamState::LOADING_CACHE ?
+                                               streamCacheResource().pendingHostReuseTokens() :
+                                               0;
+        if (pending_host_tokens > 0) {
+            RTP_LLM_LOG_INFO("[RTP_SMOKE_EVENT] {\"event\":\"host_cache_cancelled_during_load\","
+                             "\"request_id\":%ld,\"host_reuse_len\":%zu,\"time_ns\":%ld}",
+                             static_cast<long>(streamId()),
+                             pending_host_tokens,
+                             static_cast<long>(smokeEvidenceTimeNs()));
+        }
         reportEventWithoutLock(StreamEvents::Error, ErrorCode::CANCELLED, cancel_reason);
     }
 

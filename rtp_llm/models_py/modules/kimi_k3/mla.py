@@ -21,6 +21,7 @@ from rtp_llm.models_py.modules.factory.attention.mla_prefill_plan import plan_pr
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_page_rr_cache_gather import MlaPageRRCacheGather
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.f16_linear import CudaF16Linear
 from rtp_llm.utils.model_weight import W
+from rtp_llm.utils.smoke_evidence import emit_smoke_event, smoke_evidence_enabled
 from rtp_llm.ops import KvCacheDataType, RoleType, compute_ops
 from rtp_llm.models_py.distributed.collective_torch import get_mla_dcp
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.page_rr_mla_metadata import (
@@ -68,6 +69,7 @@ class KimiK3MlaImpl(MlaImplBase):
         fmha_config=None, quant_config=None, max_seq_len=0,
         is_cuda_graph=False, parallelism_config=None,
     ):
+        self.graph_mode = is_cuda_graph
         self._paged = self._uses_paged_attention(inputs)
         if is_cuda_graph and not self._paged:
             raise ValueError("K3 ordinary prefill requires eager planning")
@@ -236,6 +238,47 @@ class KimiK3MlaImpl(MlaImplBase):
             raise ValueError("K3 MLA replay requires the captured physical shape")
         self.attn_inputs = inputs
         self.page_rr_metadata.prepare_decode(inputs, forbid_realloc)
+        if smoke_evidence_enabled():
+            phase = (
+                "target_verify"
+                if inputs.is_target_verify
+                else (
+                    "mtp_update" if inputs.is_mtp_draft_update else "proposal_or_decode"
+                )
+            )
+            logical_batch = inputs.logical_request_count or self.batch
+            operand_dtype = torch.float8_e4m3fn if self.fp8_compute else torch.bfloat16
+            workspace = self._paged_workspace.data_ptr()
+            contract = (
+                phase,
+                self.graph_mode,
+                logical_batch,
+                self.batch,
+                self.tokens,
+                operand_dtype,
+                workspace,
+            )
+            logged = getattr(self, "_smoke_paged_contracts", None)
+            if logged is None:
+                logged = self._smoke_paged_contracts = set()
+            if contract not in logged:
+                logged.add(contract)
+                rectangular = self.tokens % self.batch == 0
+                emit_smoke_event(
+                    "mla_paged_input_contract",
+                    kind="mla_paged_input_contract",
+                    phase=phase,
+                    graph=int(self.graph_mode),
+                    logical_batch=logical_batch,
+                    physical_batch=self.batch,
+                    q=self.tokens // self.batch if rectangular else 0,
+                    physical_tokens=self.tokens,
+                    query_layout="rectangular" if rectangular else "ragged",
+                    operand_dtype=str(operand_dtype),
+                    projection_dtype="bf16",
+                    backend="tokenspeed_page_rr",
+                    workspace=hex(workspace),
+                )
 
     def _plan_prefill(self, mla_params):
         self.qo_indptr = mla_params.qo_indptr_d
@@ -393,6 +436,18 @@ class KimiK3MlaImpl(MlaImplBase):
                 qo_indptr=q_indptr, kv_indptr=kv_indptr,
                 max_q=q_len, max_k=segment.length, causal=False,
             )
+            if smoke_evidence_enabled():
+                emit_smoke_event(
+                    "mla_prefix_executed",
+                    kind="mla_prefix_executed",
+                    backend="fp8_tokenspeed",
+                    layer_id=layer_id,
+                    rank=self.page_rr_metadata.cp_rank,
+                    owner=owner,
+                    start=segment.start,
+                    length=segment.length,
+                    query_tokens=q_len,
+                )
             merge_attention_states_in_place(
                 output.narrow(0, q_start, q_len),
                 output_lse.narrow(0, q_start, q_len),

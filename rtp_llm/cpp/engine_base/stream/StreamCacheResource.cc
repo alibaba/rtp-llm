@@ -470,6 +470,14 @@ std::shared_ptr<LinearReplayBlockHold> StreamCacheResource::holdLinearReplayBloc
     return resource_context_.cache_manager->holdLinearReplayBlocks(batch_kv_cache_resource_, position);
 }
 
+size_t StreamCacheResource::pendingHostReuseTokens() const {
+    const auto context = std::dynamic_pointer_cast<LoadAsyncContext>(allocator_load_context_);
+    if (!context || context->done()) {
+        return 0;
+    }
+    return context->matchedBlocks(Tier::HOST) * static_cast<size_t>(reuseBlockTokens());
+}
+
 bool StreamCacheResource::asyncLoadCache() {
     RTP_LLM_PROFILE_FUNCTION();
     return allocator_load_context_ != nullptr;

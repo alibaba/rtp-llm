@@ -30,6 +30,7 @@ cc_library(
     hdrs = [
         "AssertUtils.h",
         "Logger.h",
+        "SmokeEvidence.h",
         "StringUtil.h",
         "StatusUtil.h",
         "Exception.h",

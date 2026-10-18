@@ -1285,6 +1285,64 @@ TEST_F(StreamCacheResourceTest, testAllocatorLoadContextGatesReadinessUntilDone)
     EXPECT_FALSE(stream_->hasError());
 }
 
+TEST_F(StreamCacheResourceTest, testPendingHostReuseUsesActualLoadTierMatches) {
+    prepareResource(/*reuse_cache=*/true, RoleType::PREFILL);
+    auto& resource = stream_->streamCacheResource();
+    EXPECT_EQ(resource.pendingHostReuseTokens(), 0u);
+    // DEVICE and DISK matches do not count as a HOST transfer. Published
+    // HOST reuse remains zero while the real LoadAsyncContext is pending.
+    auto context                     = makeAllocatorLoadContext(3, {Tier::DEVICE, Tier::HOST, Tier::DISK});
+    resource.allocator_load_context_ = context;
+    ASSERT_FALSE(context->done());
+    EXPECT_EQ(stream_->hostReuseLength(), 0);
+    EXPECT_EQ(resource.pendingHostReuseTokens(), static_cast<size_t>(resource.reuseBlockTokens()));
+    ASSERT_TRUE(context->completeTransfers(2, true));
+    ASSERT_TRUE(context->done());
+    EXPECT_EQ(resource.pendingHostReuseTokens(), 0u);
+    ASSERT_TRUE(resource.loadCacheDone());
+    EXPECT_EQ(stream_->hostReuseLength(), resource.reuseBlockTokens());
+    EXPECT_EQ(resource.pendingHostReuseTokens(), 0u);
+}
+
+TEST_F(StreamCacheResourceTest, testCancelledUncommittedHostLoadIsNoLongerPendingReuse) {
+    prepareResource(/*reuse_cache=*/true, RoleType::PREFILL);
+    auto& resource = stream_->streamCacheResource();
+    // Only an allocator load that still owns its pending coordinator ticket
+    // can be cancelled. commit() retires that ticket before transfer begins.
+    auto context                     = makeAllocatorLoadContext(2, {Tier::HOST, Tier::HOST}, /*commit=*/false);
+    resource.allocator_load_context_ = context;
+    ASSERT_FALSE(context->done());
+    EXPECT_EQ(resource.pendingHostReuseTokens(), 2u * resource.reuseBlockTokens());
+    ASSERT_TRUE(context->abortPending());
+    ASSERT_TRUE(context->done());
+    EXPECT_FALSE(context->success());
+    EXPECT_EQ(resource.pendingHostReuseTokens(), 0u);
+    ASSERT_TRUE(resource.loadCacheDone());
+    EXPECT_EQ(stream_->hostReuseLength(), 0);
+    EXPECT_EQ(resource.pendingHostReuseTokens(), 0u);
+}
+
+TEST_F(StreamCacheResourceTest, testCommittedHostLoadCannotAbortBeforeTransfersComplete) {
+    prepareResource(/*reuse_cache=*/true, RoleType::PREFILL);
+    auto& resource                   = stream_->streamCacheResource();
+    auto  context                    = makeAllocatorLoadContext(2, {Tier::HOST, Tier::HOST});
+    resource.allocator_load_context_ = context;
+    ASSERT_FALSE(context->done());
+    ASSERT_FALSE(context->abortPending());
+    EXPECT_FALSE(context->done());
+    EXPECT_EQ(resource.pendingHostReuseTokens(), 2u * resource.reuseBlockTokens());
+    EXPECT_EQ(stream_->hostReuseLength(), 0);
+    EXPECT_FALSE(resource.loadCacheDone());
+    // A rejected abort does not cancel submitted DMA or erase its matches.
+    ASSERT_TRUE(context->completeTransfers(2, true));
+    ASSERT_TRUE(context->done());
+    ASSERT_TRUE(context->success());
+    EXPECT_EQ(resource.pendingHostReuseTokens(), 0u);
+    ASSERT_TRUE(resource.loadCacheDone());
+    EXPECT_EQ(stream_->hostReuseLength(), 2u * resource.reuseBlockTokens());
+    EXPECT_EQ(resource.pendingHostReuseTokens(), 0u);
+}
+
 TEST_F(StreamCacheResourceTest, testAllocatorLoadSuccessCommitsCompleteReuse) {
     prepareResource(/*reuse_cache=*/true, RoleType::PREFILL);
     auto& resource = stream_->streamCacheResource();

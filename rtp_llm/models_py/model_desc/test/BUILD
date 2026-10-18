@@ -182,3 +182,16 @@ py_test(
     exec_properties = {"gpu": "L20_CU13", "gpu_count": "1"},
     tags = ["L20_CU13"],
 )
+
+py_test(
+    name = "kimi_k3_smoke_evidence_test",
+    srcs = ["kimi_k3_smoke_evidence_test.py"],
+    deps = py_test_deps + [
+        "//rtp_llm:config",
+        "//rtp_llm:models",
+        "//rtp_llm/models_py:models",
+    ],
+    env = {"GPU_COUNT": "1"},
+    tags = ["L20_CU13"],
+    exec_properties = {"gpu": "L20_CU13", "gpu_count": "1"},
+)

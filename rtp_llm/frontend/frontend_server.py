@@ -19,6 +19,8 @@ from rtp_llm.config.model_config import (
 )
 from rtp_llm.frontend.frontend_worker import FrontendWorker, TokenizerEncodeResponse
 from rtp_llm.frontend.request_id_generator import generate_request_id
+from rtp_llm.frontend.smoke_trace import frontend_request_fields
+from rtp_llm.utils.smoke_evidence import emit_smoke_event, smoke_evidence_enabled
 from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.openai.api_datatype import ChatCompletionRequest
@@ -431,6 +433,11 @@ class FrontendServer(object):
             self.server_id,
             sequence,
         )
+
+        if smoke_evidence_enabled():
+            fields = frontend_request_fields(raw_request.headers, request_id)
+            if fields is not None:
+                emit_smoke_event("frontend_request", **fields)
 
         # Trace entry point: only chat completions get an HTTP SERVER span.
         # Returns None when telemetry is disabled; all calls below are no-ops then.

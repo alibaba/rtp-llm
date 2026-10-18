@@ -17,6 +17,32 @@ filegroup(
 )
 
 py_test(
+    name = "smoke_evidence_test",
+    srcs = ["smoke_evidence_test.py"],
+    args = ["SmokeEventTest"],
+    data = ["//rtp_llm:utils/smoke_evidence.py"],
+)
+
+py_test(
+    name = "smoke_evidence_cuda_test",
+    srcs = ["smoke_evidence_test.py"],
+    main = "smoke_evidence_test.py",
+    args = ["SmokeTensorCudaTest"],
+    data = ["//rtp_llm:utils/smoke_evidence.py"],
+    deps = ["//rtp_llm:torch"],
+    target_compatible_with = select({
+        "@//:using_cuda13_x86": [],
+        "@//:using_cuda13_arm": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    exec_properties = select({
+        "@//:using_cuda13_x86": {"gpu": "L20_CU13", "gpu_count": "1"},
+        "@//:using_cuda13_arm": {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
+        "//conditions:default": {"gpu": "L20_CU13", "gpu_count": "1"},
+    }),
+)
+
+py_test(
     name = "swizzle_utils_test",
     srcs = [
         "swizzle_utils_test.py",

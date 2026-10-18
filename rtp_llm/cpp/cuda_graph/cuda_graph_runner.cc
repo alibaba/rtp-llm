@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/utils/SmokeEvidence.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
 #include "rtp_llm/cpp/cache/CacheTopology.h"
 #include "rtp_llm/cpp/cuda_graph/combo_position_ids_validation.h"
@@ -1235,6 +1236,17 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
             RTP_LLM_PROFILE_SCOPE("cuda_graph.forward(replayPrefill)");
             replayPrefill(state.current_real_graph_seq_len);
         }
+        if (smokeEvidenceEnabled()) {
+            RTP_LLM_LOG_INFO("[RTP_SMOKE_EVENT] {\"event\":\"cuda_graph_replay\",\"role\":%d,"
+                             "\"real_batch\":%d,\"bucket\":%d,\"real_tokens\":%d,"
+                             "\"padding_rows\":%d,\"time_ns\":%ld}",
+                             static_cast<int>(role_),
+                             state.current_batch_size,
+                             state.current_real_graph_seq_len,
+                             state.current_seq_len,
+                             state.current_real_graph_seq_len - state.current_seq_len,
+                             static_cast<long>(smokeEvidenceTimeNs()));
+        }
         if (isGenerationPrefillCudaGraph()) {
             const uint64_t replay_count =
                 generation_prefill_cuda_graph_replay_log_count_.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -1257,6 +1269,17 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
         {
             RTP_LLM_PROFILE_SCOPE("cuda_graph.forward(replayDecode)");
             replayDecode(state.current_real_graph_bs);
+        }
+        if (smokeEvidenceEnabled()) {
+            RTP_LLM_LOG_INFO("[RTP_SMOKE_EVENT] {\"event\":\"cuda_graph_replay\",\"role\":%d,"
+                             "\"real_batch\":%d,\"bucket\":%d,\"padding_rows\":%d,"
+                             "\"token_rows\":%d,\"time_ns\":%ld}",
+                             static_cast<int>(role_),
+                             state.current_batch_size,
+                             state.current_real_graph_bs,
+                             state.current_real_graph_bs - state.current_batch_size,
+                             state.seq_len_sum,
+                             static_cast<long>(smokeEvidenceTimeNs()));
         }
         outputs.hidden_states =
             graph_instances_[state.current_real_graph_bs].mem_hold_.decoder_layer_hidden_states_.slice(

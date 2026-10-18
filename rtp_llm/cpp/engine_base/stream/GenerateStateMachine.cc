@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/utils/SmokeEvidence.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStateMachine.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamCacheResource.h"
@@ -82,6 +83,15 @@ void GenerateStateMachine::handleWaiting() {
         if (ret) {
             if (stream != nullptr) {
                 stream->recordLoadingCacheStartTime();
+                const size_t pending_host_tokens =
+                    smokeEvidenceEnabled() ? stream_cache_resource_->pendingHostReuseTokens() : 0;
+                if (pending_host_tokens > 0) {
+                    RTP_LLM_LOG_INFO("[RTP_SMOKE_EVENT] {\"event\":\"host_cache_load_started\","
+                                     "\"request_id\":%ld,\"host_reuse_len\":%zu,\"time_ns\":%ld}",
+                                     static_cast<long>(stream->streamId()),
+                                     pending_host_tokens,
+                                     static_cast<long>(smokeEvidenceTimeNs()));
+                }
             }
             status.store(StreamState::LOADING_CACHE, std::memory_order_release);
         } else if (stream_cache_resource_->resourceContext().role_type != RoleType::DECODE) {
@@ -120,6 +130,13 @@ void GenerateStateMachine::handleLoading() {
         auto stream = stream_cache_resource_->stream();
         if (stream != nullptr) {
             stream->recordLoadingCacheDoneTime();
+            if (smokeEvidenceEnabled() && stream->hostReuseLength() > 0) {
+                RTP_LLM_LOG_INFO("[RTP_SMOKE_EVENT] {\"event\":\"host_cache_load_done\","
+                                 "\"request_id\":%ld,\"host_reuse_len\":%d,\"time_ns\":%ld}",
+                                 static_cast<long>(stream->streamId()),
+                                 stream->hostReuseLength(),
+                                 static_cast<long>(smokeEvidenceTimeNs()));
+            }
         }
         status.store(StreamState::WAITING, std::memory_order_release);
     }

@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/utils/SmokeEvidence.h"
 #include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
 #include "rtp_llm/cpp/normal_engine/HiddenStateCapturePolicy.h"
@@ -2259,6 +2260,14 @@ GptModelOutputs MtpExecutor::runTargetVerifyForward(GptModelInputs& model_input,
         debugCheckLinearBlockMapAtKernelRead(model_input, stream_groups);
     }
 
+    if (smokeEvidenceEnabled()) {
+        RTP_LLM_LOG_INFO("[RTP_SMOKE_EVENT] {\"event\":\"mtp_target_verify_forward\","
+                         "\"input_rows\":%ld,\"stream_count\":%zu,\"token_rows\":%ld,\"time_ns\":%ld}",
+                         static_cast<long>(model_input.input_lengths.size(0)),
+                         stream_groups.allStreams().size(),
+                         static_cast<long>(model_input.combo_tokens.numel()),
+                         static_cast<long>(smokeEvidenceTimeNs()));
+    }
     ensureModelInputsOnCuda(model_input, "decode.target_verify_forward");
     GptModelOutputs model_output = forwardModel(model_.get(), model_input, ModelInputsModelRole::TARGET);
     RTP_LLM_LOG_DEBUG("[MTP decode] target model verify forward end");
@@ -2826,6 +2835,14 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
 
     // update TP > 0 batch_size
     size_t     batch_size       = model_input.combo_tokens.size(0);
+    if (smokeEvidenceEnabled()) {
+        RTP_LLM_LOG_INFO("[RTP_SMOKE_EVENT] {\"event\":\"mtp_draft_decode_forward\","
+                         "\"input_rows\":%zu,\"stream_count\":%zu,\"propose_step\":%zu,\"time_ns\":%ld}",
+                         batch_size,
+                         stream_groups.allStreams().size(),
+                         propose_step_,
+                         static_cast<long>(smokeEvidenceTimeNs()));
+    }
     const auto cuda_i32         = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
     auto       to_cuda_i32_flat = [this, batch_size](const torch::Tensor& tensor) -> torch::Tensor {
         auto tensor_d = toCudaInt32WithHostHold(tensor, buffer_holder_);
@@ -3050,11 +3067,10 @@ void MtpExecutor::recordLinearReplayLastUse(const std::vector<GenerateStream::Li
     }
 }
 
-void MtpExecutor::publishLinearReplayWindows(
-    const StreamGroups& stream_groups,
-    const LinearReplayInputs& replay,
-    const std::vector<GenerateStream::LinearReplayRound>& rounds,
-    const torch::Tensor& accept_lengths) {
+void MtpExecutor::publishLinearReplayWindows(const StreamGroups&                                   stream_groups,
+                                             const LinearReplayInputs&                             replay,
+                                             const std::vector<GenerateStream::LinearReplayRound>& rounds,
+                                             const torch::Tensor&                                  accept_lengths) {
     const auto streams = stream_groups.allStreams();
     RTP_LLM_CHECK_WITH_INFO(rounds.size() == streams.size(), "LINEAR replay round batch mismatch");
     auto anchors = replay.active_block_ids.clone();
@@ -3075,6 +3091,17 @@ void MtpExecutor::publishLinearReplayWindows(
             window->state_block_hold = round.state_block_hold;
             window->device_ready = ready;
             stream->publishLinearReplayWindow(std::move(window));
+            if (smokeEvidenceEnabled()) {
+                RTP_LLM_LOG_INFO("[RTP_SMOKE_EVENT] {\"event\":\"linear_replay_commit\","
+                                 "\"request_id\":%ld,\"slot\":%d,\"generation\":%ld,\"verify_epoch\":%ld,"
+                                 "\"produced_steps\":%zu,\"time_ns\":%ld}",
+                                 stream->streamId(),
+                                 round.lease->slot_id,
+                                 round.lease->generation,
+                                 round.verify_epoch,
+                                 propose_step_ + 1,
+                                 static_cast<long>(smokeEvidenceTimeNs()));
+            }
         }
         ++row;
     }
