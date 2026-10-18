@@ -102,9 +102,11 @@ public class FlexlbGrpcServer {
         int port = httpPort + FLEXLB_GRPC_PORT_OFFSET;
 
         FlexlbConfig.GrpcServerConfig executorConfig = configService.loadBalanceConfig().getGrpcServer();
-        Logger.info("FlexLB gRPC executor config: coreSize={}, maxSize={}, queueSize={}",
+        Logger.info("FlexLB gRPC executor config: coreSize={}, maxSize={}, queueSize={}, "
+                        + "permitKeepAliveTimeMs={}, permitKeepAliveWithoutCalls={}",
                 executorConfig.getExecutorCoreSize(), executorConfig.getExecutorMaxSize(),
-                executorConfig.getExecutorQueueSize());
+                executorConfig.getExecutorQueueSize(), executorConfig.getPermitKeepAliveTimeMs(),
+                executorConfig.isPermitKeepAliveWithoutCalls());
 
         GrpcReceivingBudget.Limits receiving = GrpcReceivingBudget.resolve(executorConfig,
                 io.netty.util.internal.PlatformDependent.maxDirectMemory());
@@ -153,6 +155,8 @@ public class FlexlbGrpcServer {
                         new GrpcTraceInterceptor(), grpcServerTimingInterceptor, grpcQosHeaderInterceptor))
                 .maxInboundMessageSize(org.flexlb.constant.GrpcConstants.MAX_MESSAGE_SIZE)
                 .flowControlWindow(4 * 1024 * 1024)
+                .permitKeepAliveTime(executorConfig.getPermitKeepAliveTimeMs(), TimeUnit.MILLISECONDS)
+                .permitKeepAliveWithoutCalls(executorConfig.isPermitKeepAliveWithoutCalls())
                 .build()
                 .start();
 
