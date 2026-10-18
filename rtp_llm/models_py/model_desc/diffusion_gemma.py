@@ -514,6 +514,30 @@ class DiffusionGemmaAttnOp:
     ) -> None:
         if getattr(self, "fmha_params", None) is not None:
             self.write_op.set_params(self.fmha_params)
+        if self._fi_diag and getattr(self, "_fi_write_diag_first", True):
+            self._fi_write_diag_first = False
+            base = kv_cache.kv_cache_base
+            params = self.fmha_params
+            block_table = attn_inputs.kv_cache_kernel_block_id
+            if block_table is None or block_table.numel() == 0:
+                block_table = attn_inputs.kv_cache_kernel_block_id_device
+            logger.info(
+                "[dgm-fi] write geometry: raw=%s stride=%s dtype=%s | "
+                "reshaped=%s | bt=%s | page_indice=%s indptr=%s lpl=%s | "
+                "batch_ind=%s positions[:6]=%s pos_max=%s | k=%s",
+                tuple(base.shape),
+                tuple(base.stride()),
+                base.dtype,
+                tuple(self._reshape_paged(base).shape),
+                block_table.tolist() if block_table is not None else None,
+                params.page_indice_d.tolist() if params is not None else None,
+                params.decode_page_indptr_d.tolist() if params is not None else None,
+                params.paged_kv_last_page_len_d.tolist() if params is not None else None,
+                tuple(params.batch_indice_d.shape) if params is not None else None,
+                params.positions_d[:6].tolist() if params is not None else None,
+                int(params.positions_d.max().item()) if params is not None else None,
+                (tuple(k.shape), str(k.dtype), tuple(k.stride())),
+            )
         # SWA group layer caches arrive as the raw 2-D pool buffer
         # (makeLayerCache only expands FULL groups to 5-D); KVCacheWriteOp
         # indexes [:, 0, :, :, :], so reshape the per-call view first.
