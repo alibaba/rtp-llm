@@ -3,7 +3,6 @@ package org.flexlb.engine.grpc;
 import com.google.common.util.concurrent.FutureCallback;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
-import com.google.protobuf.MessageLite;
 import io.grpc.ManagedChannel;
 import io.grpc.StatusRuntimeException;
 import io.grpc.internal.GrpcUtil;
@@ -57,7 +56,7 @@ public class EngineGrpcClient extends AbstractGrpcClient {
     private final int connectTimeoutMillis;
     private final long enqueueTimeoutMillis;
 
-    private enum MetricOperation { RESPONSE_SIZE, CALL_METRICS, CONNECTION_DURATION }
+    private enum MetricOperation { CALL_METRICS, CONNECTION_DURATION }
     private static final int MAX_METRICS_ERROR_MESSAGE_CHARS = 256;
     private static final long METRICS_WARNING_INTERVAL_NANOS = TimeUnit.SECONDS.toNanos(30);
     private final AtomicLongArray lastMetricsWarningNanos = new AtomicLongArray(MetricOperation.values().length);
@@ -136,7 +135,7 @@ public class EngineGrpcClient extends AbstractGrpcClient {
                 @Override
                 public void onSuccess(R response) {
                     try {
-                        reportSuccessfulCall(response, serviceType, startTime, false, ip, port);
+                        reportSuccessfulCall(serviceType, startTime, false, ip, port);
                     } finally {
                         resultFuture.complete(response);
                     }
@@ -194,7 +193,7 @@ public class EngineGrpcClient extends AbstractGrpcClient {
                 @Override
                 public void onSuccess(R response) {
                     try {
-                        reportSuccessfulCall(response, serviceType, originalStartTime, true, ip, port);
+                        reportSuccessfulCall(serviceType, originalStartTime, true, ip, port);
                     } finally {
                         resultFuture.complete(response);
                     }
@@ -213,17 +212,14 @@ public class EngineGrpcClient extends AbstractGrpcClient {
         }
     }
 
-    private <R> void reportSuccessfulCall(R response, ServiceType serviceType,
-                                         long originalStartTime, boolean retry, String ip, int port) {
-        MetricOperation operation = MetricOperation.RESPONSE_SIZE;
+    private void reportSuccessfulCall(ServiceType serviceType,
+                                      long originalStartTime, boolean retry, String ip, int port) {
         try {
             long duration = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - originalStartTime);
-            int responseSize = response instanceof MessageLite message ? message.getSerializedSize() : 0;
-            operation = MetricOperation.CALL_METRICS;
-            grpcReporter.reportCallMetrics(serviceType.getOperationName(), duration, responseSize, retry);
+            grpcReporter.reportCallMetrics(serviceType.getOperationName(), duration, retry);
         } catch (RuntimeException failure) {
             // Metrics cannot change the response or prevent Future completion.
-            logMetricsFailure(operation, serviceType, ip, port, failure);
+            logMetricsFailure(MetricOperation.CALL_METRICS, serviceType, ip, port, failure);
         }
     }
 
