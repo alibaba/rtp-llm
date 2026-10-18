@@ -1926,6 +1926,7 @@ public final class RequestSlot {
             terminal = commitTerminalStateLocked(TerminalOutcome.fail("terminal projection did not terminate"));
         }
 
+        context.setGenerateInputPb(null);
         item = null;
         context = null;
         cleanupProgress = null;
