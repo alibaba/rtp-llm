@@ -3,11 +3,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 
-from request_smoke import (
-    require,
-    strict_json,
-    validate_answer,
-)
+from request_smoke import require, strict_json, validate_answer
 
 
 def check_json_answer(body):
