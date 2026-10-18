@@ -3,7 +3,6 @@ package org.flexlb.engine.grpc;
 import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.AppenderBase;
-import com.google.protobuf.MessageLite;
 import io.grpc.ManagedChannel;
 import io.grpc.Server;
 import io.grpc.Status;
@@ -16,7 +15,6 @@ import org.flexlb.engine.grpc.nameresolver.CustomNameResolver;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
-import java.util.List;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -29,13 +27,14 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyBoolean;
-import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.verifyNoInteractions;
-import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.verify;
 
 class EngineGrpcClientCompletionTest {
     private final ThreadPoolExecutor executor = new ThreadPoolExecutor(
@@ -60,7 +59,7 @@ class EngineGrpcClientCompletionTest {
     void metricsFailureDoesNotReplaceSuccessOrStrandFuture() throws Exception {
         startServer(EngineGrpcClientCompletionTest::succeed);
         doThrow(new IllegalStateException("metrics backend unavailable"))
-                .when(reporter).reportCallMetrics(anyString(), anyLong(), anyInt(), anyBoolean());
+                .when(reporter).reportCallMetrics(anyString(), anyLong(), anyBoolean());
 
         try (var logs = new MetricWarnings()) {
             for (int i = 0; i < 3; i++) {
@@ -84,34 +83,56 @@ class EngineGrpcClientCompletionTest {
             public String getMessage() {
                 throw new IllegalStateException("exception details unavailable");
             }
-        }).when(reporter).reportCallMetrics(anyString(), anyLong(), anyInt(), anyBoolean());
+        }).when(reporter).reportCallMetrics(anyString(), anyLong(), anyBoolean());
 
         assertEquals(EngineRpcService.WorkerStatusPB.getDefaultInstance(), client.getWorkerStatusAsync(
                 "127.0.0.1", 8081, request(), 1000).get(5, TimeUnit.SECONDS));
     }
 
     @Test
-    void responseSizeFailureIsRecordedWithoutReportingAnInventedZeroSize() throws Exception {
+    void metricsFailureWarningIsBoundedAndSingleLine() throws Exception {
         startServer(EngineGrpcClientCompletionTest::succeed);
-        MessageLite response = mock(MessageLite.class);
-        when(response.getSerializedSize()).thenThrow(new IllegalStateException("bad\nsize\r" + "x".repeat(1000)));
-        doThrow(new IllegalStateException("metrics unavailable"))
-                .when(reporter).reportCallMetrics(anyString(), anyLong(), anyInt(), anyBoolean());
+        doThrow(new IllegalStateException("bad\nmetrics\r" + "x".repeat(1000)))
+                .when(reporter).reportCallMetrics(anyString(), anyLong(), anyBoolean());
         try (var logs = new MetricWarnings()) {
-            org.springframework.test.util.ReflectionTestUtils.invokeMethod(client, "reportSuccessfulCall",
-                    response, AbstractGrpcClient.ServiceType.WORKER_STATUS, System.nanoTime(), false, "127.0.0.1", 8081);
-            verifyNoInteractions(reporter);
+            client.getWorkerStatusAsync("127.0.0.1", 8081, request(), 1000).get(5, TimeUnit.SECONDS);
+            assertEquals(1, logs.messages.size());
             String warning = logs.messages.element();
-            assertTrue(warning.contains("stage=RESPONSE_SIZE"));
-            assertTrue(warning.contains("error=bad size "));
+            assertTrue(warning.contains("stage=CALL_METRICS"));
+            assertTrue(warning.contains("error=bad metrics "));
             assertTrue(warning.length() < 500);
             assertTrue(!warning.contains("\n") && !warning.contains("\r"));
-
-            // A response-size warning must not suppress a different failure stage.
-            client.getWorkerStatusAsync("127.0.0.1", 8081, request(), 1000).get(5, TimeUnit.SECONDS);
-            assertEquals(2, logs.messages.size());
-            assertTrue(List.copyOf(logs.messages).get(1).contains("stage=CALL_METRICS"));
         }
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void cacheResponseMetricsDoNotCalculateSerializedSize(boolean retry) throws Exception {
+        var response = spy(EngineRpcService.CacheStatusPB.newBuilder()
+                .putCacheKeys(1L, true).build());
+        var calls = new AtomicInteger();
+        String name = InProcessServerBuilder.generateName();
+        server = InProcessServerBuilder.forName(name).directExecutor().addService(
+                new RpcServiceGrpc.RpcServiceImplBase() {
+                    @Override
+                    public void getCacheStatus(EngineRpcService.CacheVersionPB request,
+                                               StreamObserver<EngineRpcService.CacheStatusPB> observer) {
+                        if (retry && calls.incrementAndGet() == 1) {
+                            observer.onError(Status.UNAVAILABLE.withDescription("Connection reset").asRuntimeException());
+                        } else {
+                            observer.onNext(response);
+                            observer.onCompleted();
+                        }
+                    }
+                }).build().start();
+        client = new TestClient(name, executor, reporter);
+
+        assertEquals(response, client.getCacheStatusAsync("127.0.0.1", 8081,
+                EngineRpcService.CacheVersionPB.getDefaultInstance(), 5000).get(5, TimeUnit.SECONDS));
+        verify(response, never()).getSerializedSize();
+        verify(reporter).reportCallMetrics(
+                eq(AbstractGrpcClient.ServiceType.CACHE_STATUS.getOperationName()),
+                anyLong(), eq(retry));
     }
 
     @Test
