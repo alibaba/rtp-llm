@@ -46,7 +46,8 @@ class GrpcWorkerStatusRunnerTest {
             var version = new java.util.concurrent.atomic.AtomicLong();
             when(grpc.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(), any()))
                     .thenAnswer(call -> CompletableFuture.completedFuture(EngineRpcService.WorkerStatusPB.newBuilder()
-                            .setRole("DECODE").setStatusVersion(version.incrementAndGet()).setAlive(true).build()));
+                            .setRole("DECODE").setStatusVersion(version.incrementAndGet()).setAlive(true)
+                            .setLatestFinishedVersion(10L * version.get()).build()));
             var queue = new java.util.ArrayList<Runnable>();
             java.util.function.Consumer<java.util.concurrent.Executor> poll = executor ->
                     new GrpcWorkerStatusRunner("model", status.getIpPort(), "test", RoleType.DECODE, null,
@@ -63,6 +64,7 @@ class GrpcWorkerStatusRunnerTest {
             org.junit.jupiter.api.Assertions.assertEquals(1, queue.size(), "at most one retained protobuf response");
             assertTrue(status.pollHealth().lastSuccessfulPollUs() > contact);
             org.junit.jupiter.api.Assertions.assertEquals(applied, status.appliedSnapshotReceivedUs());
+            org.junit.jupiter.api.Assertions.assertEquals(10L, status.appliedStatusCursor().latestFinishedTaskVersion());
             assertTrue(status.isActiveGeneration());
             assertNull(endpoint.tryPinSchedulingGeneration(), "fresh RPC contact must not make old state schedulable");
             try (var cleanup = endpoint.tryPinGeneration()) {
@@ -73,7 +75,48 @@ class GrpcWorkerStatusRunnerTest {
             poll.accept(Runnable::run);
             try (var pin = endpoint.tryPinSchedulingGeneration()) { assertNotNull(pin, "fresh applied state restores the same generation"); }
             org.junit.jupiter.api.Assertions.assertEquals(0L, status.pollHealth().consecutiveTransportFailures());
+            ArgumentCaptor<Long> acknowledged = ArgumentCaptor.forClass(Long.class);
+            verify(grpc, org.mockito.Mockito.times(8)).getWorkerStatusAsync(anyString(), anyInt(),
+                    acknowledged.capture(), anyLong(), any());
+            org.junit.jupiter.api.Assertions.assertEquals(java.util.List.of(-1L, 10L, 10L, 10L, 10L, 10L, 10L, 20L),
+                    acknowledged.getAllValues(), "discarded responses must not advance the finished-task ACK");
         } finally { registry.close(); }
+    }
+
+    @Test
+    void rpcFailuresAreReportedWhileAnApplicationIsQueued() {
+        var status = RunnerTestSupport.discovered(RoleType.DECODE, null, "127.0.0.1", 8080, 8081, "test");
+        var directory = directory(mock(EndpointRegistry.class), status);
+        var grpc = mock(EngineGrpcService.class);
+        var reporter = mock(EngineHealthReporter.class);
+        var applications = new java.util.ArrayList<Runnable>();
+        when(grpc.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(), any()))
+                .thenReturn(CompletableFuture.completedFuture(EngineRpcService.WorkerStatusPB.newBuilder()
+                        .setRole("DECODE").setStatusVersion(1L).setAlive(true).build()));
+        var firstLease = status.tryBeginStatusPoll(1L);
+        new GrpcWorkerStatusRunner("model", status.getIpPort(), "test", RoleType.DECODE, null,
+                status, firstLease, directory, reporter, grpc, 1000L,
+                mock(CacheAwareService.class), applications::add).run();
+        try {
+            when(grpc.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(), any()))
+                    .thenReturn(CompletableFuture.failedFuture(io.grpc.Status.DEADLINE_EXCEEDED.asRuntimeException()));
+            for (int cycle = 2; cycle <= 4; cycle++) {
+                var lease = status.tryBeginStatusPoll(cycle);
+                assertNotNull(lease, "queued application must not prevent the next RPC");
+                new GrpcWorkerStatusRunner("model", status.getIpPort(), "test", RoleType.DECODE, null,
+                        status, lease, directory, reporter, grpc, 1000L,
+                        mock(CacheAwareService.class), applications::add).run();
+            }
+            org.junit.jupiter.api.Assertions.assertEquals(1, applications.size());
+            org.junit.jupiter.api.Assertions.assertEquals(3L, status.pollHealth().consecutiveTransportFailures());
+            verify(reporter, org.mockito.Mockito.times(3)).reportStatusCheckerFail(
+                    "model", org.flexlb.enums.BalanceStatusEnum.WORKER_STATUS_GRPC_TIMEOUT, RoleType.DECODE);
+            org.junit.jupiter.api.Assertions.assertEquals(-1L, status.appliedStatusCursor().latestFinishedTaskVersion());
+            try (var lease = status.tryBeginStatusPoll(5L)) { assertNotNull(lease); }
+        } finally {
+            status.finishStatusApplication(firstLease);
+            applications.clear();
+        }
     }
 
     @org.junit.jupiter.params.ParameterizedTest
@@ -190,6 +233,9 @@ class GrpcWorkerStatusRunnerTest {
         }
         try (var next = status.tryBeginStatusPoll(1L)) {
             assertNotNull(next, "a failed poll must not prevent future polling");
+            assertTrue(status.tryBeginStatusApplication(next, System.nanoTime() / 1000),
+                    "failed processing must release its application ownership");
+            status.finishStatusApplication(next);
         }
     }
 

@@ -104,26 +104,30 @@ public class GrpcWorkerStatusRunner implements Runnable {
                 throw failure;
             }
             rpc.whenComplete((response, failure) -> {
-                pollTrace.record(Stage.RPC_COMPLETED, failure);
-                long receivedUs = System.nanoTime()/1000;
                 Throwable cause = EndpointTrace.unwrap(failure);
-                boolean valid = failure == null && validStatusResponse(response);
-                workerStatus.recordStatusRpcResult(pollLease, valid, valid && response.getAlive(), cause);
-                pollTrace.record(Stage.CALLBACK_READY, failure);
-                // Reserve before releasing transport ownership, so a later RPC cannot
-                // overtake this response in local reduction. No protobuf queue grows.
-                boolean apply = workerStatus.tryBeginStatusApplication(pollLease, receivedUs);
-                pollLease.close();
-                if (!apply) {
-                    pollTrace.record(Stage.RESPONSE_DISCARDED, "STATUS_APPLICATION_BUSY");
-                    return;
+                try {
+                    pollTrace.record(Stage.RPC_COMPLETED, failure);
+                    long receivedUs = System.nanoTime() / 1000;
+                    boolean valid = cause == null && validStatusResponse(response);
+                    workerStatus.recordStatusRpcResult(pollLease, valid, valid && response.getAlive(), cause);
+                    if (cause != null) {
+                        handleException(cause);
+                    }
+                    pollTrace.record(Stage.CALLBACK_READY, failure);
+                    // Reserve before releasing transport ownership; retain only one local application.
+                    if (!workerStatus.tryBeginStatusApplication(pollLease, receivedUs)) {
+                        pollTrace.record(Stage.RESPONSE_DISCARDED, "STATUS_APPLICATION_BUSY");
+                        return;
+                    }
+                } finally {
+                    // A reporting failure must not strand the heartbeat slot.
+                    pollLease.close();
                 }
                 try {
                     callbackExecutor.execute(() -> {
                         pollTrace.record(Stage.CALLBACK_STARTED);
                         try {
                             if (cause != null) {
-                                handleException(cause);
                                 recordStatusCheckFailure(cause);
                             } else {
                                 handleStatusResponse(convertStatusResponse(response), startTime);
@@ -136,7 +140,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
                             pollTrace.record(Stage.CALLBACK_ENDED);
                         }
                     });
-                } catch (RuntimeException rejected) {
+                } catch (RuntimeException | Error rejected) {
                     workerStatus.finishStatusApplication(pollLease);
                     pollTrace.record(Stage.CALLBACK_FAILED, rejected);
                     logger.error("Worker status application rejected for {}", ipPort, rejected);
