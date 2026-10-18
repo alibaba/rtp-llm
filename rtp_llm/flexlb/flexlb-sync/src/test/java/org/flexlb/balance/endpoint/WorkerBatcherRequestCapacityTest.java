@@ -1,7 +1,11 @@
 package org.flexlb.balance.endpoint;
 
+import org.flexlb.balance.delivery.CapacityBoundary;
+import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.scheduler.PlacementAvailability;
+import org.flexlb.balance.scheduler.QueueCapacity;
+import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.config.DecisionPolicyConfig;
 import org.flexlb.config.DispatcherConfig;
@@ -40,6 +44,7 @@ import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 /** The configured limit, real worker publication lock and canonical request ledger together. */
 class WorkerBatcherRequestCapacityTest {
@@ -97,9 +102,9 @@ class WorkerBatcherRequestCapacityTest {
                  var commit = fixture.endpoint.tryBeginRouteCommitAdmission();
                  var handoff = commit.commit(List.of(committed), List.of(reservation))) {
                 assertFalse(fixture.endpoint.canPreemptQueuedRequest(90, 1L));
-                assertFalse(EndpointTestSupport.offer(fixture.endpoint, item(config, fixture.endpoint, 2L, 90)));
-                assertEquals(1L, fixture.endpoint.observedRequestCount());
-                assertTrue(fixture.endpoint.captureQueueSnapshot().items().isEmpty());
+                assertTrue(EndpointTestSupport.offer(fixture.endpoint, item(config, fixture.endpoint, 2L, 90)));
+                assertEquals(2L, fixture.endpoint.observedRequestCount());
+                assertEquals(1, fixture.endpoint.queuedRequestCount());
                 verify(fixture.runtime.events(), times(0)).onQueuedItemPreempted(any(), any());
             }
         }
@@ -150,6 +155,7 @@ class WorkerBatcherRequestCapacityTest {
     private static FlexlbConfig preemptionConfig() {
         FlexlbConfig config = productionConfig();
         config.setDispatcher(DispatcherConfig.nonBatch());
+        config.getDispatcher().setPrefillSubqueueLimitMultiplier(1);
         config.getScheduler().setOrdering(QueueOrderingConfig.priority());
         return config;
     }
@@ -160,6 +166,7 @@ class WorkerBatcherRequestCapacityTest {
         FlexlbConfig config = productionConfig();
         config.setDispatcher(DispatcherConfig.nonBatch());
         config.getDispatcher().setMaxInflightPerPrefillWorker(4);
+        config.getDispatcher().setPrefillSubqueueLimitMultiplier(1);
         config.getScheduler().getDecision().setMaxRequests(1);
         try (Fixture fixture = fixture(config);
              var writers = Executors.newFixedThreadPool(8)) {
@@ -185,9 +192,10 @@ class WorkerBatcherRequestCapacityTest {
     }
 
     @Test
-    void singleDecisionUsesTheDefaultTwoRequestLimit() {
+    void singleDecisionUsesTheConfiguredSharedWaitingLimit() {
         FlexlbConfig config = productionConfig();
         config.setDispatcher(DispatcherConfig.nonBatch());
+        config.getDispatcher().setPrefillSubqueueLimitMultiplier(1);
         config.getScheduler().setDecision(DecisionPolicyConfig.single());
         try (Fixture fixture = fixture(config)) {
             for (long requestId = 1L; requestId <= 2L; requestId++) {
@@ -195,6 +203,187 @@ class WorkerBatcherRequestCapacityTest {
             }
             assertEquals(2L, fixture.endpoint.observedRequestCount());
             assertFalse(EndpointTestSupport.offer(fixture.endpoint, item(config, fixture.endpoint, 3L)));
+        }
+    }
+
+    @Test
+    void queuedRoutesDoNotUseDeliverySeatsAndRespectSharedBound() {
+        FlexlbConfig config = productionConfig();
+        config.setDispatcher(DispatcherConfig.nonBatch());
+        config.getDispatcher().setMaxInflightPerPrefillWorker(1);
+        config.getDispatcher().setPrefillSubqueueLimitMultiplier(3);
+        config.getScheduler().getDecision().setMaxRequests(8);
+        config.getScheduler().getDecision().setMaxCollectionWaitMs(60_000L);
+        try (Fixture fixture = fixture(config)) {
+            ScheduledRequest delivered = item(config, fixture.endpoint, 1L);
+            try (var reservation = EndpointTestSupport.reserveUnqueued(fixture.endpoint, delivered, 100L);
+                    var commit = fixture.endpoint.tryBeginRouteCommitAdmission();
+                    var handoff = commit.commit(List.of(delivered), List.of(reservation))) {
+                assertFalse(fixture.endpoint.canDeliver(1L, 1));
+                for (long id = 2L; id <= 4L; id++) {
+                    assertTrue(EndpointTestSupport.offer(fixture.endpoint,
+                            item(config, fixture.endpoint, id)));
+                }
+                assertEquals(3, fixture.endpoint.queuedRequestCount());
+                assertEquals(4L, fixture.endpoint.observedRequestCount());
+                assertEquals(1, fixture.endpoint.getLocallyOwnedRequestCount());
+                assertFalse(EndpointTestSupport.offer(fixture.endpoint,
+                        item(config, fixture.endpoint, 5L)));
+                assertTrue(fixture.endpoint.releaseCommittedItem(delivered));
+                assertTrue(fixture.endpoint.canDeliver(1L, 1));
+                assertFalse(fixture.endpoint.canDeliver(1L, 2));
+            }
+        }
+    }
+
+    @Test
+    @Timeout(10)
+    void deliveryFreesBothQueueSeatsBeforeTheClientRequestCompletes() throws Exception {
+        FlexlbConfig config = productionConfig();
+        config.setDispatcher(DispatcherConfig.nonBatch());
+        config.getDispatcher().setMaxInflightPerPrefillWorker(1);
+        config.getDispatcher().setPrefillSubqueueLimitMultiplier(1);
+        config.getScheduler().setDecision(DecisionPolicyConfig.single());
+        PlacementAvailability availability = new PlacementAvailability();
+        CountDownLatch deliveryCompleted = new CountDownLatch(1);
+        EndpointTestSupport.TestRequestRuntime runtime = new EndpointTestSupport.TestRequestRuntime() {
+            @Override
+            void onCompleted(DeliveryClaim claim, DeliveryResult result) {
+                deliveryCompleted.countDown();
+            }
+        };
+        try (Fixture fixture = fixture(() -> config, availability, "127.0.0.1", runtime)) {
+            DeliveryStrategy live = EndpointTestSupport.liveRouteStrategy(fixture.runtime);
+            doAnswer(invocation -> live.prepare(invocation.getArgument(0),
+                    invocation.getArgument(1), invocation.getArgument(2)))
+                    .when(fixture.delivery).prepare(anyList(), any(), any());
+            ScheduledRequest delivered = item(config, fixture.endpoint, 1L);
+            fixture.queueCapacity.increaseTotalQueueCount(delivered.future());
+            assertTrue(EndpointTestSupport.offer(fixture.endpoint, delivered));
+            assertTrue(deliveryCompleted.await(5, TimeUnit.SECONDS));
+            assertEquals(0, fixture.endpoint.queuedRequestCount());
+            assertEquals(0L, fixture.queueCapacity.globalQueueAndEngineSubQueueCount());
+            assertFalse(delivered.future().isDone());
+            assertTrue(EndpointTestSupport.offer(fixture.endpoint,
+                    item(config, fixture.endpoint, 2L)));
+        }
+    }
+
+    @Test
+    @Timeout(10)
+    void failedDeliveryPreparationReleasesTheSharedQueueSlot() throws Exception {
+        FlexlbConfig config = productionConfig();
+        config.setDispatcher(DispatcherConfig.nonBatch());
+        config.getDispatcher().setMaxInflightPerPrefillWorker(1);
+        config.getDispatcher().setPrefillSubqueueLimitMultiplier(1);
+        config.getScheduler().setDecision(DecisionPolicyConfig.single());
+        try (Fixture fixture = fixture(config)) {
+            CountDownLatch failed = new CountDownLatch(1);
+            doAnswer(invocation -> {
+                List<ScheduledRequest> candidates = invocation.getArgument(0);
+                DeliveryStrategy.Transaction transaction = mock(DeliveryStrategy.Transaction.class);
+                when(transaction.items()).thenReturn(List.of());
+                when(transaction.blockedItem()).thenReturn(candidates.getFirst());
+                when(transaction.blockedResult()).thenReturn(
+                        CapacityBoundary.failed(new IllegalStateException("delivery preparation failed")));
+                return transaction;
+            }).when(fixture.delivery).prepare(anyList(), any(), any());
+            doAnswer(invocation -> {
+                failed.countDown();
+                return null;
+            }).when(fixture.runtime.events()).onPreparedDeliveryFailure(any(), any());
+
+            assertTrue(EndpointTestSupport.offer(fixture.endpoint, item(config, fixture.endpoint, 1L)));
+            assertTrue(failed.await(5, TimeUnit.SECONDS));
+            assertEquals(0, fixture.endpoint.queuedRequestCount());
+            assertTrue(EndpointTestSupport.offer(fixture.endpoint, item(config, fixture.endpoint, 2L)));
+        }
+    }
+
+    @Test
+    void busyWorkerCanUseTheSharedQueueCapacityOfOtherWorkers() {
+        FlexlbConfig config = productionConfig();
+        config.setDispatcher(DispatcherConfig.nonBatch());
+        config.getDispatcher().setMaxInflightPerPrefillWorker(1);
+        config.getDispatcher().setPrefillSubqueueLimitMultiplier(2);
+        config.getScheduler().getDecision().setMaxRequests(8);
+        config.getScheduler().getDecision().setMaxCollectionWaitMs(60_000L);
+        PlacementAvailability availability = new PlacementAvailability();
+        QueueCapacity queueCapacity = new QueueCapacity();
+        EndpointRegistry registry = mock(EndpointRegistry.class);
+        when(registry.getEndpointCount(RoleType.PREFILL)).thenReturn(2);
+        try (Fixture a = fixture(() -> config, availability, "127.0.0.1", registry, queueCapacity);
+                Fixture b = fixture(() -> config, availability, "127.0.0.2", registry, queueCapacity)) {
+            assertEquals(4L, queueCapacity.engineSubQueueLimit(config, 2));
+            ScheduledRequest first = item(config, a.endpoint, 1L);
+            assertTrue(EndpointTestSupport.offer(a.endpoint, first));
+            for (long id = 2L; id <= 4L; id++) {
+                assertTrue(EndpointTestSupport.offer(a.endpoint, item(config, a.endpoint, id)));
+            }
+            assertFalse(EndpointTestSupport.offer(b.endpoint, item(config, b.endpoint, 5L)));
+            assertTrue(a.endpoint.removeQueued(first, "release shared queue seat"));
+            assertTrue(EndpointTestSupport.offer(b.endpoint, item(config, b.endpoint, 5L)));
+            assertEquals(3, a.endpoint.queuedRequestCount());
+            assertEquals(1, b.endpoint.queuedRequestCount());
+        }
+    }
+
+    @Test
+    void priorityOfferCanReplaceOnlyItsSelectedWorkersQueuedSeatWhenSharedPoolIsFull() {
+        FlexlbConfig config = preemptionConfig();
+        config.getDispatcher().setMaxInflightPerPrefillWorker(1);
+        config.getDispatcher().setPrefillSubqueueLimitMultiplier(1);
+        config.getScheduler().getDecision().setMaxCollectionWaitMs(60_000L);
+        try (Fixture fixture = fixture(config)) {
+            ScheduledRequest low = item(config, fixture.endpoint, 1L, 20);
+            ScheduledRequest high = item(config, fixture.endpoint, 2L, 90);
+            assertTrue(EndpointTestSupport.offer(fixture.endpoint, low));
+            assertTrue(EndpointTestSupport.offer(fixture.endpoint, high));
+            assertEquals(List.of(high), fixture.endpoint.captureQueueSnapshot().items());
+            verify(fixture.runtime.events()).onQueuedItemPreempted(low, high);
+        }
+    }
+
+    @Test
+    void sharedPoolFullReplacesOnlyOneOfSeveralLowerPriorityQueuedRequests() {
+        FlexlbConfig config = preemptionConfig();
+        config.getDispatcher().setMaxInflightPerPrefillWorker(1);
+        config.getDispatcher().setPrefillSubqueueLimitMultiplier(3);
+        config.getScheduler().getDecision().setMaxCollectionWaitMs(60_000L);
+        try (Fixture fixture = fixture(config)) {
+            ScheduledRequest first = item(config, fixture.endpoint, 1L, 20);
+            ScheduledRequest second = item(config, fixture.endpoint, 2L, 10);
+            ScheduledRequest third = item(config, fixture.endpoint, 3L, 10);
+            ScheduledRequest incoming = item(config, fixture.endpoint, 4L, 90);
+            assertTrue(EndpointTestSupport.offer(fixture.endpoint, first));
+            assertTrue(EndpointTestSupport.offer(fixture.endpoint, second));
+            assertTrue(EndpointTestSupport.offer(fixture.endpoint, third));
+
+            assertTrue(EndpointTestSupport.offer(fixture.endpoint, incoming));
+            assertEquals(List.of(incoming, first, second), fixture.endpoint.captureQueueSnapshot().items());
+            verify(fixture.runtime.events()).onQueuedItemPreempted(third, incoming);
+        }
+    }
+
+    @Test
+    void sharedPoolDoesNotPreemptAnotherWorkersQueuedRequest() {
+        FlexlbConfig config = preemptionConfig();
+        config.getDispatcher().setMaxInflightPerPrefillWorker(1);
+        config.getScheduler().getDecision().setMaxCollectionWaitMs(60_000L);
+        PlacementAvailability availability = new PlacementAvailability();
+        QueueCapacity queueCapacity = new QueueCapacity();
+        EndpointRegistry registry = mock(EndpointRegistry.class);
+        when(registry.getEndpointCount(RoleType.PREFILL)).thenReturn(2);
+        try (Fixture firstWorker = fixture(() -> config, availability, "127.0.0.1", registry, queueCapacity);
+                Fixture selectedWorker = fixture(() -> config, availability, "127.0.0.2", registry, queueCapacity)) {
+            ScheduledRequest first = item(config, firstWorker.endpoint, 1L, 20);
+            ScheduledRequest second = item(config, firstWorker.endpoint, 2L, 20);
+            ScheduledRequest incoming = item(config, selectedWorker.endpoint, 3L, 90);
+            assertTrue(EndpointTestSupport.offer(firstWorker.endpoint, first));
+            assertTrue(EndpointTestSupport.offer(firstWorker.endpoint, second));
+            assertFalse(EndpointTestSupport.offer(selectedWorker.endpoint, incoming));
+            assertEquals(List.of(first, second), firstWorker.endpoint.captureQueueSnapshot().items());
+            verify(firstWorker.runtime.events(), times(0)).onQueuedItemPreempted(any(), any());
         }
     }
 
@@ -314,22 +503,49 @@ class WorkerBatcherRequestCapacityTest {
     }
 
     private static Fixture fixture(Supplier<FlexlbConfig> configSupplier) {
-        WorkerStatus status = WorkerStatus.createDiscovered(RoleType.PREFILL, "test", "127.0.0.1", 8080, 9090, "test");
+        return fixture(configSupplier, new PlacementAvailability(), "127.0.0.1");
+    }
+
+    private static Fixture fixture(Supplier<FlexlbConfig> configSupplier,
+                                   PlacementAvailability availability, String ip) {
+        return fixture(configSupplier, availability, ip, EndpointTestSupport.requestRuntime());
+    }
+
+    private static Fixture fixture(Supplier<FlexlbConfig> configSupplier,
+                                   PlacementAvailability availability, String ip,
+                                   EndpointRegistry registry, QueueCapacity queueCapacity) {
+        return fixture(configSupplier, availability, ip,
+                EndpointTestSupport.requestRuntime(), registry, queueCapacity);
+    }
+
+    private static Fixture fixture(Supplier<FlexlbConfig> configSupplier,
+                                    PlacementAvailability availability, String ip,
+                                    EndpointTestSupport.TestRequestRuntime runtime) {
+        EndpointRegistry registry = mock(EndpointRegistry.class);
+        when(registry.getEndpointCount(RoleType.PREFILL)).thenReturn(1);
+        return fixture(configSupplier, availability, ip, runtime, registry,
+                new QueueCapacity());
+    }
+
+    private static Fixture fixture(Supplier<FlexlbConfig> configSupplier,
+                                   PlacementAvailability availability, String ip,
+                                   EndpointTestSupport.TestRequestRuntime runtime,
+                                   EndpointRegistry registry, QueueCapacity queueCapacity) {
+        WorkerStatus status = WorkerStatus.createDiscovered(RoleType.PREFILL, "test", ip, 8080, 9090, "test");
         WorkerStatusResponse response = new WorkerStatusResponse();
         response.setRole(RoleType.PREFILL);
         response.setAlive(true);
         EndpointTestSupport.publishStatus(status, response);
-        var runtime = EndpointTestSupport.requestRuntime();
         DeliveryStrategy parked = EndpointTestSupport.routeStrategy(runtime);
         DeliveryStrategy delivery = mock(DeliveryStrategy.class, delegatesTo(parked));
         PrefillEndpoint endpoint = new PrefillEndpoint(status, configSupplier, delivery, runtime.events(),
-                mock(BatchSchedulerReporter.class), new PlacementAvailability());
+                mock(BatchSchedulerReporter.class), availability, registry, queueCapacity);
         endpoint.startGeneration();
-        return new Fixture(endpoint, delivery, parked, runtime);
+        return new Fixture(endpoint, delivery, parked, runtime, queueCapacity);
     }
 
     private record Fixture(PrefillEndpoint endpoint, DeliveryStrategy delivery, DeliveryStrategy parked,
-                           EndpointTestSupport.TestRequestRuntime runtime)
+                            EndpointTestSupport.TestRequestRuntime runtime, QueueCapacity queueCapacity)
             implements AutoCloseable {
         public void close() { endpoint.close(); endpoint.awaitRetirement(); }
     }

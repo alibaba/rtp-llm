@@ -140,6 +140,18 @@ class PlacementWaitQueueTest {
     }
 
     @Test
+    void pdfusionQueueReleaseDoesNotWakePrefillQueueWaiters() {
+        GlobalQueueEntry prefillWaiting = entry(50);
+        GlobalQueueEntry fusionWaiting = entry(50);
+        queue.park(prefillWaiting, PlacementKey.anyGroup(RoleType.PREFILL), 0);
+        queue.park(fusionWaiting, PlacementKey.anyGroup(RoleType.PDFUSION), 0);
+
+        queue.capacityChanged(PlacementKey.exact(RoleType.PDFUSION, "g", "fusion:8000"));
+        assertEquals(List.of(fusionWaiting), drain(2));
+        assertTrue(queue.isWaiting(prefillWaiting));
+    }
+
+    @Test
     void cancellationNeitherWakesPeersNorLosesAlreadyReadyPeers() {
         var first = entry(50);
         var second = entry(50);

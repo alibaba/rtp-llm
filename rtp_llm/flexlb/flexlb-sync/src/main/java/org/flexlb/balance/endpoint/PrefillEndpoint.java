@@ -11,6 +11,7 @@ import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.balance.scheduler.EndpointEventProjector;
 import org.flexlb.balance.scheduler.PlacementAvailability;
+import org.flexlb.balance.scheduler.QueueCapacity;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.balance.scheduler.WorkerBatcher;
 import org.flexlb.config.DispatcherConfig;
@@ -18,6 +19,8 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.RoutingConfig;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.route.RoleType;
+import org.flexlb.enums.PrefillQueueEnqueueResult;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -74,37 +77,24 @@ public class PrefillEndpoint extends WorkerEndpoint {
     @Getter
     private final PrefillTimePredictor predictor;
     private final Supplier<FlexlbConfig> configSupplier;
+    @Getter
+    private final boolean engineSubQueueMode;
     private final WorkerBatcher runtime;
     private final PrefillState prefillState;
     private final EndpointEventProjector endpointEvents;
     private final BatchSchedulerReporter reporter;
     private final PlacementAvailability placementAvailability;
-
-    PrefillEndpoint(WorkerStatus status,
-                    FlexlbConfig config,
-                    DeliveryStrategy deliveryStrategy,
-                    EndpointEventProjector endpointEvents,
-                    BatchSchedulerReporter reporter) {
-        this(status, () -> config, deliveryStrategy, endpointEvents, reporter,
-                new PlacementAvailability());
-    }
-
-    PrefillEndpoint(WorkerStatus status,
-                    FlexlbConfig config,
-                    DeliveryStrategy deliveryStrategy,
-                    EndpointEventProjector endpointEvents,
-                    BatchSchedulerReporter reporter,
-                    PlacementAvailability placementAvailability) {
-        this(status, () -> config, deliveryStrategy, endpointEvents, reporter,
-                placementAvailability);
-    }
+    private final EndpointRegistry endpointRegistry;
+    private final QueueCapacity queueCapacity;
 
     PrefillEndpoint(WorkerStatus status,
                     Supplier<FlexlbConfig> configSupplier,
                     DeliveryStrategy deliveryStrategy,
                     EndpointEventProjector endpointEvents,
                     BatchSchedulerReporter reporter,
-                    PlacementAvailability placementAvailability) {
+                    PlacementAvailability placementAvailability,
+                    EndpointRegistry endpointRegistry,
+                    QueueCapacity queueCapacity) {
         super(status);
         this.configSupplier = configSupplier;
         this.reporter = java.util.Objects.requireNonNull(reporter, "reporter");
@@ -112,10 +102,14 @@ public class PrefillEndpoint extends WorkerEndpoint {
                 endpointEvents, "endpointEvents");
         this.placementAvailability = java.util.Objects.requireNonNull(
                 placementAvailability, "placementAvailability");
-        this.predictor = createPredictor(configSupplier.get());
+        this.endpointRegistry = java.util.Objects.requireNonNull(endpointRegistry, "endpointRegistry");
+        this.queueCapacity = java.util.Objects.requireNonNull(queueCapacity, "queueCapacity");
+        FlexlbConfig startupConfig = configSupplier.get();
+        this.engineSubQueueMode = QueueCapacity.isEngineSubQueueMode(startupConfig);
+        this.predictor = createPredictor(startupConfig);
         this.runtime = new WorkerBatcher(
                 status.getLogicalIpPort(), this, configSupplier.get(),
-                deliveryStrategy, endpointEvents);
+                deliveryStrategy, endpointEvents, queueCapacity);
         this.prefillState = runtime.ownedState();
     }
 
@@ -135,11 +129,9 @@ public class PrefillEndpoint extends WorkerEndpoint {
     }
 
     /** Publish one exact route after validating its generation pin. */
-    public boolean offerPinned(
-            GenerationPin exactPin,
-            ScheduledRequest exactItem) {
+    public PrefillQueueEnqueueResult offerPinnedResult(GenerationPin exactPin, ScheduledRequest exactItem) {
         requirePinnedGeneration(exactPin);
-        return runtime.offer(exactItem);
+        return runtime.offerWithResult(exactItem);
     }
 
     /** Publish a role/group-scoped edge after real queue or status progress. */
@@ -312,6 +304,24 @@ public class PrefillEndpoint extends WorkerEndpoint {
     /** Advisory capacity; publication repeats the count check under the ownership lock. */
     public boolean canAcceptRequest(long inflightRequestLimit) {
         return inflightRequestLimit == 0L || prefillState.canAcceptRequest(inflightRequestLimit);
+    }
+
+    public boolean tryReserveEngineSubQueueSlot(FlexlbConfig config) {
+        RoleType role = getStatus().getRole();
+        int logicalEndpointCount = endpointRegistry.getEndpointCount(role);
+        return queueCapacity.tryReserveEngineSubQueueSlot(config, role, logicalEndpointCount);
+    }
+
+    public void increaseEngineSubQueueCount() {
+        queueCapacity.increaseEngineSubQueueCount(getStatus().getRole());
+    }
+
+    public boolean canDeliver(long maxDispatchLimit, int newReqNum) {
+        return prefillState.canDeliver(maxDispatchLimit, newReqNum);
+    }
+
+    public CapacityBoundary.Availability routeAdmissionAvailability(long limit) {
+        return prefillState.routeAvailability(limit);
     }
 
     public boolean canPreemptQueuedRequest(int priority, long inflightRequestLimit) {
@@ -551,7 +561,8 @@ public class PrefillEndpoint extends WorkerEndpoint {
         PrefillState.Stats stats = prefillState.stats();
         reporter.reportInflightBatchCount(role, engineIp, stats.batchCount());
         if (configSupplier.get().getDispatcher().getType() == DispatcherConfig.Type.NON_BATCH) {
-            reporter.reportInflightRequestCount(role, engineIp, stats.inflightRequests());
+            reporter.reportInflightRequestCount(role, engineIp, engineSubQueueMode
+                    ? prefillState.dispatchedRequestCount() : stats.inflightRequests());
             reporter.reportWorkerStatusUnconfirmedRequestCount(role, engineIp, stats.workerStatusUnconfirmedRequests());
         } else {
             reporter.reportInflightRequestCount(role, engineIp, stats.workerStatusUnconfirmedRequests());

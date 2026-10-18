@@ -16,6 +16,7 @@ import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.enums.PrefillQueueEnqueueResult;
 import org.flexlb.util.Logger;
 
 import java.util.List;
@@ -159,17 +160,30 @@ public final class RouteAdmission implements AutoCloseable {
         }
         ScheduledRequest item = createScheduledRequest(context, future, System.currentTimeMillis());
         context.setRouteSubmittedNanos(System.nanoTime());
-        PlacementResult.Status result = lifecycle.commitRoute(item,
-                () -> prefillEndpoint().offerPinned(prefillPin(), item));
-        return switch (result) {
+        // commitRoute takes a boolean, but a blocked request also needs the reason from the Prefill queue.
+        PrefillQueueEnqueueResult[] prefillQueueEnqueueResult = new PrefillQueueEnqueueResult[1];
+        PlacementResult.Status routeCommitStatus = lifecycle.commitRoute(item, () -> {
+            PrefillQueueEnqueueResult queueResult = prefillEndpoint().offerPinnedResult(prefillPin(), item);
+            prefillQueueEnqueueResult[0] = queueResult;
+            return queueResult == PrefillQueueEnqueueResult.ACCEPTED;
+        });
+        return switch (routeCommitStatus) {
             case SUCCESS -> {
                 markCommitted();
                 yield PlacementResult.success(item);
             }
             case BLOCKED -> {
-                blockedEndpoint = prefillEndpoint();
-                yield PlacementResult.blocked(PlacementKey.exact(prefillStatus().getRole(),
-                        prefillStatus().getGroup(), prefillEndpoint().ipPort()));
+                PrefillEndpoint selectedPrefillEndpoint = prefillEndpoint();
+                ServerStatus selectedPrefillStatus = prefillStatus();
+                blockedEndpoint = selectedPrefillEndpoint;
+                boolean sharedEngineSubQueueIsFull = prefillQueueEnqueueResult[0]
+                        == PrefillQueueEnqueueResult.ENGINE_SUBQUEUE_LIMIT_REACHED;
+                // Shared capacity can open on any endpoint of this role; other failures need this endpoint.
+                PlacementKey capacityWaitKey = sharedEngineSubQueueIsFull
+                        ? PlacementKey.anyGroup(selectedPrefillStatus.getRole())
+                        : PlacementKey.exact(selectedPrefillStatus.getRole(),
+                                selectedPrefillStatus.getGroup(), selectedPrefillEndpoint.ipPort());
+                yield PlacementResult.blocked(capacityWaitKey);
             }
             case CLOSED -> PlacementResult.closed();
             case REJECTED -> throw new IllegalStateException("route commit cannot reject with a response");
@@ -178,8 +192,11 @@ public final class RouteAdmission implements AutoCloseable {
 
     public boolean commitQueuedRequest(RequestRegistry lifecycle, ScheduledRequest item) {
         requireProvisional();
-        if (lifecycle.commitRoute(item, () -> prefillEndpoint().offerPinned(prefillPin(), item))
-                != PlacementResult.Status.SUCCESS) { return false; }
+        PlacementResult.Status commitStatus = lifecycle.commitRoute(item,
+                () -> prefillEndpoint().offerPinnedResult(prefillPin(), item) == PrefillQueueEnqueueResult.ACCEPTED);
+        if (commitStatus != PlacementResult.Status.SUCCESS) {
+            return false;
+        }
         markCommitted();
         return true;
     }

@@ -53,6 +53,192 @@ import static org.mockito.Mockito.when;
 
 class GlobalQueueProgressTest {
     @Test
+    void countingTheSameFutureTwiceDoesNotChangeTheTotalTwice() {
+        QueueCapacity capacity = new QueueCapacity();
+        CompletableFuture<Response> future = new CompletableFuture<>();
+
+        capacity.increaseTotalQueueCount(future);
+        capacity.increaseTotalQueueCount(future);
+        assertEquals(1L, capacity.globalQueueAndEngineSubQueueCount());
+        capacity.decreaseTotalQueueCount(future);
+        capacity.decreaseTotalQueueCount(future);
+        assertEquals(0L, capacity.globalQueueAndEngineSubQueueCount());
+    }
+
+    @Test
+    void globalQueueEntryUsesTheTotalCountOnlyForNonBatchDispatch() {
+        FlexlbConfig config = SchedulingTestConfig.batchConfig();
+        SchedulingTestConfig.useFifoQueue(config);
+        config.getScheduler().setMaxQueuedRequests(1);
+        QueueCapacity capacity = new QueueCapacity();
+
+        assertFalse(capacity.isGlobalQueueEntryLimitReached(config, 0));
+        assertTrue(capacity.isGlobalQueueEntryLimitReached(config, 1));
+
+        CompletableFuture<Response> batchRequest = new CompletableFuture<>();
+        capacity.increaseTotalQueueCount(batchRequest);
+        assertEquals(1L, capacity.globalQueueAndEngineSubQueueCount());
+        assertFalse(capacity.isGlobalQueueEntryLimitReached(config, 0));
+        capacity.decreaseTotalQueueCount(batchRequest);
+
+        SchedulingTestConfig.useNonBatchDispatcher(config);
+        CompletableFuture<Response> transferredRequest = new CompletableFuture<>();
+        capacity.increaseTotalQueueCount(transferredRequest);
+        assertTrue(capacity.isGlobalQueueEntryLimitReached(config, 0));
+        capacity.decreaseTotalQueueCount(transferredRequest);
+        assertFalse(capacity.isGlobalQueueEntryLimitReached(config, 0));
+    }
+
+    @Test
+    void globalQueueTotalLimitDoesNotIncreaseWhenEndpointsGrow() throws Exception {
+        try (Fixture f = new Fixture(RoleType.PDFUSION)) {
+            f.config.getScheduler().setMaxQueuedRequests(1);
+            f.config.getDispatcher().setPrefillSubqueueLimitMultiplier(1);
+            f.prefillEndpointCount.set(1);
+            f.decodeBlocked.add(1L);
+            f.submit(1L, "b");
+            awaitCondition(() -> f.scheduler.getBlockedRequestCount() == 1);
+
+            f.submit(2L, "b");
+            assertEquals(StrategyErrorType.QUEUE_FULL.getErrorCode(),
+                    f.requests.get(2L).get(5, TimeUnit.SECONDS).getCode());
+
+            f.fusionEndpointCount.set(1);
+            f.submit(3L, "b");
+            assertEquals(StrategyErrorType.QUEUE_FULL.getErrorCode(),
+                    f.requests.get(3L).get(5, TimeUnit.SECONDS).getCode());
+            f.requests.get(1L).complete(new Response());
+            awaitCondition(() -> f.queueCapacity.globalQueueAndEngineSubQueueCount() == 0L);
+            f.submit(4L, "b");
+            awaitCondition(() -> f.admitted.contains(4L));
+        }
+    }
+
+    @Test
+    void queueBudgetUsesCurrentEndpointCountForEachRoutingShape() {
+        FlexlbConfig config = SchedulingTestConfig.batchConfig();
+        config.getDispatcher().setMaxInflightPerPrefillWorker(2);
+        config.getDispatcher().setPrefillSubqueueLimitMultiplier(3);
+        QueueCapacity capacity = new QueueCapacity();
+        AtomicInteger prefillEndpoints = new AtomicInteger(1);
+        AtomicInteger fusionEndpoints = new AtomicInteger();
+        assertEquals(6L, capacity.engineSubQueueLimit(config, prefillEndpoints.get()));
+        prefillEndpoints.set(2);
+        assertEquals(12L, capacity.engineSubQueueLimit(config, prefillEndpoints.get()));
+        prefillEndpoints.set(1);
+        assertEquals(6L, capacity.engineSubQueueLimit(config, prefillEndpoints.get()));
+
+        fusionEndpoints.set(1);
+        assertEquals(6L, capacity.engineSubQueueLimit(config, fusionEndpoints.get()));
+        assertEquals(6L, capacity.engineSubQueueLimit(config, prefillEndpoints.get()));
+        fusionEndpoints.set(2);
+        assertEquals(12L, capacity.engineSubQueueLimit(config, fusionEndpoints.get()));
+        assertEquals(6L, capacity.engineSubQueueLimit(config, prefillEndpoints.get()));
+        config.getScheduler().setMaxQueuedRequests(10);
+        assertEquals(10L, capacity.engineSubQueueLimit(config, fusionEndpoints.get()));
+        assertEquals(6L, capacity.engineSubQueueLimit(config, prefillEndpoints.get()));
+    }
+
+    @Test
+    void engineSubQueueReservationsNeverExceedTheConfiguredTotalQueueLimit() {
+        FlexlbConfig config = SchedulingTestConfig.batchConfig();
+        SchedulingTestConfig.useFifoQueue(config);
+        SchedulingTestConfig.useNonBatchDispatcher(config);
+        config.getScheduler().setMaxQueuedRequests(3);
+        config.getDispatcher().setMaxInflightPerPrefillWorker(2);
+        config.getDispatcher().setPrefillSubqueueLimitMultiplier(4);
+        QueueCapacity capacity = new QueueCapacity();
+
+        assertEquals(3L, capacity.engineSubQueueLimit(config, 100));
+        for (int i = 0; i < 3; i++) {
+            assertTrue(capacity.tryReserveEngineSubQueueSlot(config, RoleType.PREFILL, 100));
+        }
+        assertFalse(capacity.tryReserveEngineSubQueueSlot(config, RoleType.PREFILL, 100));
+        assertTrue(capacity.tryReserveEngineSubQueueSlot(config, RoleType.PDFUSION, 100));
+        capacity.releaseEngineSubQueueSlot(RoleType.PREFILL);
+        assertTrue(capacity.tryReserveEngineSubQueueSlot(config, RoleType.PREFILL, 100));
+    }
+
+    @Test
+    void batchDispatcherCountsEngineQueueRequestsWithoutApplyingTheSubQueueLimit() {
+        FlexlbConfig config = SchedulingTestConfig.batchConfig();
+        config.getScheduler().setMaxQueuedRequests(1);
+        QueueCapacity capacity = new QueueCapacity();
+
+        capacity.increaseEngineSubQueueCount(RoleType.PREFILL);
+        capacity.increaseEngineSubQueueCount(RoleType.PREFILL);
+        SchedulingTestConfig.useFifoQueue(config);
+        SchedulingTestConfig.useNonBatchDispatcher(config);
+        assertFalse(capacity.tryReserveEngineSubQueueSlot(config, RoleType.PREFILL, 1));
+        capacity.releaseEngineSubQueueSlot(RoleType.PREFILL);
+        assertFalse(capacity.tryReserveEngineSubQueueSlot(config, RoleType.PREFILL, 1));
+        capacity.releaseEngineSubQueueSlot(RoleType.PREFILL);
+        assertTrue(capacity.tryReserveEngineSubQueueSlot(config, RoleType.PREFILL, 1));
+        capacity.releaseEngineSubQueueSlot(RoleType.PREFILL);
+    }
+
+    @Test
+    void releasingAnEmptyEngineSubQueueDoesNotCreateExtraCapacity() {
+        FlexlbConfig config = SchedulingTestConfig.batchConfig();
+        SchedulingTestConfig.useFifoQueue(config);
+        SchedulingTestConfig.useNonBatchDispatcher(config);
+        config.getScheduler().setMaxQueuedRequests(1);
+        config.getDispatcher().setMaxInflightPerPrefillWorker(1);
+        config.getDispatcher().setPrefillSubqueueLimitMultiplier(1);
+        QueueCapacity capacity = new QueueCapacity();
+
+        capacity.releaseEngineSubQueueSlot(RoleType.PREFILL);
+        assertTrue(capacity.tryReserveEngineSubQueueSlot(config, RoleType.PREFILL, 1));
+        capacity.releaseEngineSubQueueSlot(RoleType.PREFILL, false);
+        assertFalse(capacity.tryReserveEngineSubQueueSlot(config, RoleType.PREFILL, 1));
+        capacity.releaseEngineSubQueueSlot(RoleType.PREFILL, true);
+        capacity.releaseEngineSubQueueSlot(RoleType.PREFILL);
+        assertTrue(capacity.tryReserveEngineSubQueueSlot(config, RoleType.PREFILL, 1));
+        assertFalse(capacity.tryReserveEngineSubQueueSlot(config, RoleType.PREFILL, 1));
+    }
+
+    @Test
+    void transferredRequestRetainsTotalQueueSeatUntilItsRouteCompletes() throws Exception {
+        try (Fixture f = new Fixture(RoleType.PREFILL)) {
+            f.config.getScheduler().setMaxQueuedRequests(2);
+            f.config.getDispatcher().setPrefillSubqueueLimitMultiplier(1);
+            f.submit(1L, "b");
+            f.submit(2L, "b");
+            awaitCondition(() -> f.admitted.containsAll(List.of(1L, 2L)));
+            assertEquals(0, f.scheduler.getQueuedRequestCount());
+            assertEquals(2L, f.queueCapacity.globalQueueAndEngineSubQueueCount());
+
+            f.submit(3L, "b");
+            assertEquals(StrategyErrorType.QUEUE_FULL.getErrorCode(),
+                    f.requests.get(3L).get(5, TimeUnit.SECONDS).getCode());
+            f.requests.get(1L).complete(new Response());
+            awaitCondition(() -> f.queueCapacity.globalQueueAndEngineSubQueueCount() == 1L);
+            f.submit(4L, "b");
+            awaitCondition(() -> f.admitted.contains(4L));
+        }
+    }
+
+    @Test
+    void globalPreemptionUsesTheTotalQueueLimit() throws Exception {
+        try (Fixture f = new Fixture(RoleType.PREFILL, true)) {
+            f.config.getScheduler().setMaxQueuedRequests(2);
+            f.config.getDispatcher().setPrefillSubqueueLimitMultiplier(1);
+            f.decodeBlocked.addAll(Set.of(1L, 2L));
+            f.submit(1L, "a", 20);
+            awaitCondition(() -> f.scheduler.getBlockedRequestCount() == 1);
+            f.submit(2L, "a", 20);
+            awaitCondition(() -> f.scheduler.getBlockedRequestCount() == 2);
+            assertFalse(f.requests.get(1L).isDone());
+            assertFalse(f.requests.get(2L).isDone());
+
+            f.submit(3L, "a", 90);
+            awaitCondition(() -> f.requests.get(2L).isDone());
+            assertEquals(8435, f.requests.get(2L).join().getCode());
+            assertFalse(f.requests.get(1L).isDone());
+        }
+    }
+
+    @Test
     void completedArrivalDoesNotDisplaceWaitingRequest() throws Exception {
         try (Fixture f = new Fixture(RoleType.PREFILL, true)) {
             f.config.getScheduler().setMaxQueuedRequests(1);
@@ -568,7 +754,10 @@ class GlobalQueueProgressTest {
     private static final class Fixture implements AutoCloseable {
         private final FlexlbConfig config = twoPlannerConfig();
         private final AtomicReference<FlexlbConfig> currentConfig = new AtomicReference<>(config);
-        private final PlacementAvailability availability = new PlacementAvailability();
+        private final PlacementAvailability availability;
+        private final QueueCapacity queueCapacity;
+        private final AtomicInteger prefillEndpointCount = new AtomicInteger();
+        private final AtomicInteger fusionEndpointCount = new AtomicInteger();
         private final AtomicInteger aSlots = new AtomicInteger();
         private final Map<Long, RouteAdmission> routes = new ConcurrentHashMap<>();
         private final Map<Long, AdmissionHandle> mutations = new ConcurrentHashMap<>();
@@ -598,6 +787,8 @@ class GlobalQueueProgressTest {
 
         private Fixture(RoleType role, boolean preempt) {
             this.role = role;
+            availability = new PlacementAvailability();
+            queueCapacity = new QueueCapacity();
             SchedulingTestConfig.useFifoQueue(config);
             if (preempt) {
                 SchedulingTestConfig.usePriorityQueue(config);
@@ -609,6 +800,10 @@ class GlobalQueueProgressTest {
             DefaultRouter router = mock(DefaultRouter.class);
             when(router.resolvePolicyGroup(any())).thenAnswer(i -> groups.get(((BalanceContext) i.getArgument(0)).getRequestId()));
             EndpointRegistry endpoints = mock(EndpointRegistry.class);
+            when(endpoints.getEndpointCount(RoleType.PREFILL))
+                    .thenAnswer(ignored -> prefillEndpointCount.get());
+            when(endpoints.getEndpointCount(RoleType.PDFUSION))
+                    .thenAnswer(ignored -> fusionEndpointCount.get());
             PrefillRoutingEntry a = endpoint("a");
             RequestRegistry lifecycle = mock(RequestRegistry.class);
             when(lifecycle.publishDecisionResponseAsync(anyString(), any(), any())).thenAnswer(call -> {
@@ -656,7 +851,7 @@ class GlobalQueueProgressTest {
                 return PlacementResult.success(route);
             });
             scheduler = new RequestScheduler(service, router, endpoints, mock(BatchSchedulerReporter.class),
-                    mock(EvictionManager.class), lifecycle, availability);
+                    mock(EvictionManager.class), lifecycle, availability, queueCapacity);
         }
 
         private void submit(long id, String group) {

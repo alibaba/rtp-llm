@@ -95,7 +95,8 @@ class DirectRequestLifetimeRaceTest {
 
             var scheduler = new RequestScheduler(service, router,
                     mock(org.flexlb.balance.endpoint.EndpointRegistry.class), mock(BatchSchedulerReporter.class),
-                    mock(org.flexlb.balance.eviction.EvictionManager.class), requests, new PlacementAvailability());
+                    mock(org.flexlb.balance.eviction.EvictionManager.class), requests,
+                    new PlacementAvailability(), new QueueCapacity());
             var returned = scheduler.submit(context);
             assertSame(context.getFuture(), returned);
             var response = returned.get(2L, TimeUnit.SECONDS);

@@ -792,7 +792,7 @@ class DefaultRouterTest {
                 mock(org.flexlb.balance.endpoint.EndpointRegistry.class),
                 mock(org.flexlb.service.monitor.BatchSchedulerReporter.class),
                 mock(org.flexlb.balance.eviction.EvictionManager.class), requests,
-                new PlacementAvailability());
+                new PlacementAvailability(), new QueueCapacity());
     }
 
     private DefaultRouter router() {

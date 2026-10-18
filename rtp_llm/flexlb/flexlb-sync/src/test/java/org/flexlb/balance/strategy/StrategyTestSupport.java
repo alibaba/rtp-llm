@@ -10,6 +10,7 @@ import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.balance.scheduler.EndpointEventProjector;
 import org.flexlb.balance.scheduler.PlacementAvailability;
+import org.flexlb.balance.scheduler.QueueCapacity;
 import org.flexlb.balance.scheduler.RequestRegistry;
 import org.flexlb.balance.scheduler.RouteDeliveryStrategy;
 import org.flexlb.balance.scheduler.ScheduledRequest;
@@ -19,6 +20,7 @@ import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.enums.PrefillQueueEnqueueResult;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.mockito.Mockito;
 
@@ -46,7 +48,8 @@ final class StrategyTestSupport {
                 runtime.events(),
                 Mockito.mock(BatchSchedulerReporter.class),
                 delivery,
-                new PlacementAvailability());
+                new PlacementAvailability(),
+                new QueueCapacity());
     }
 
     static WorkerStatus workerStatus(
@@ -135,7 +138,7 @@ final class StrategyTestSupport {
             PrefillEndpoint endpoint, ScheduledRequest exactItem) {
         try (WorkerEndpoint.GenerationPin pin =
                      endpoint.tryPinGeneration()) {
-            return pin != null && endpoint.offerPinned(pin, exactItem);
+            return pin != null && endpoint.offerPinnedResult(pin, exactItem) == PrefillQueueEnqueueResult.ACCEPTED;
         }
     }
 

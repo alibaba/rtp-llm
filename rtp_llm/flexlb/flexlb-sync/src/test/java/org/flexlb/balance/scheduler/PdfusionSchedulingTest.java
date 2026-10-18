@@ -74,7 +74,10 @@ class PdfusionSchedulingTest {
         BatchSchedulerReporter reporter = mock(BatchSchedulerReporter.class);
         RequestSchedulerReporter requestReporter = mock(RequestSchedulerReporter.class);
         RequestRegistry lifecycle = new RequestRegistry(service, reporter, requestReporter);
+        ModelMetaConfig model = mock(ModelMetaConfig.class);
+        when(model.requiredRoles()).thenReturn(List.of(RoleType.PDFUSION));
         PlacementAvailability availability = new PlacementAvailability();
+        QueueCapacity queueCapacity = new QueueCapacity();
         DeliveryStrategy delivery = batch
                 ? new BatchDeliveryStrategy(() -> CapacityBoundary.Attempt.accepted(
                         new BatchDeliveryStrategy.PreparedSubmission() {
@@ -87,7 +90,7 @@ class PdfusionSchedulingTest {
                         lifecycle, new DeliveryMetrics(reporter))
                 : new RouteDeliveryStrategy(lifecycle, new DeliveryMetrics(reporter));
         EndpointRegistry endpoints = new EndpointRegistry(service, new EndpointEventProjector(lifecycle), reporter,
-                delivery, availability);
+                delivery, availability, queueCapacity);
         WorkerStatus worker = WorkerStatus.createDiscovered(RoleType.PDFUSION, "g1", "127.0.0.1", 8080, 8081, "test");
         WorkerStatusResponse status = new WorkerStatusResponse();
         status.setRole(RoleType.PDFUSION);
@@ -110,12 +113,10 @@ class PdfusionSchedulingTest {
         CacheAwareService cache = mock(CacheAwareService.class);
         when(cache.findMatchingEngines(any()))
                 .thenReturn(CacheMatchResult.empty(CacheMatchSource.LOCAL_SYNC));
-        ModelMetaConfig model = mock(ModelMetaConfig.class);
-        when(model.requiredRoles()).thenReturn(List.of(RoleType.PDFUSION));
         DefaultRouter router = new DefaultRouter(new CostBasedPrefillStrategy(directory, cache, mock(EngineHealthReporter.class)),
                 new DecodeSelector(directory), new RandomStrategy(directory), mock(EncoderStrategy.class), service, model);
         RequestScheduler scheduler = new RequestScheduler(service, router, endpoints, reporter,
-                mock(EvictionManager.class), lifecycle, availability);
+                mock(EvictionManager.class), lifecycle, availability, queueCapacity);
         SchedulerRuntime runtime = direct
                 ? new SchedulerRuntime(lifecycle, endpoints, reporter, requestReporter)
                 : new SchedulerRuntime(lifecycle, endpoints, reporter, requestReporter, scheduler);

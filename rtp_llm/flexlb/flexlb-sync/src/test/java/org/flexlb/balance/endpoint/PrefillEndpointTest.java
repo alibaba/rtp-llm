@@ -73,7 +73,7 @@ class PrefillEndpointTest {
 
         endpointReporter = mock(BatchSchedulerReporter.class);
         requestRuntime = EndpointTestSupport.requestRuntime();
-        endpoint = new PrefillEndpoint(
+        endpoint = EndpointTestSupport.standalonePrefillEndpoint(
                 status,
                 config,
                 EndpointTestSupport.routeStrategy(requestRuntime),
@@ -110,7 +110,7 @@ class PrefillEndpointTest {
     }
 
     private PrefillEndpoint routeEndpoint(FlexlbConfig routeConfig, String ip) {
-        PrefillEndpoint routeEndpoint = new PrefillEndpoint(
+        PrefillEndpoint routeEndpoint = EndpointTestSupport.standalonePrefillEndpoint(
                 EndpointTestSupport.workerStatus(
                         RoleType.PREFILL, ip, 8080, 8090),
                 routeConfig,
@@ -1244,7 +1244,7 @@ class PrefillEndpointTest {
     }
 
     @Test
-    void nonBatchQueueGaugeCountsQueuedRequestsAndEngineOnlyWork() {
+    void nonBatchQueueGaugeSeparatesQueuedRequestsFromEngineOnlyWork() {
         FlexlbConfig requestConfig = org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig();
         requestConfig.setDispatcher(DispatcherConfig.nonBatch());
         PrefillEndpoint metricsEndpoint = routeEndpoint(requestConfig, "127.0.0.4");
@@ -1259,8 +1259,9 @@ class PrefillEndpointTest {
             EndpointTestSupport.applyStatus(metricsEndpoint, response);
             metricsEndpoint.reportBatchMetrics(reporter);
 
-            assertEquals(2.0, registry.get("flexlb.app.flexlb.inflight.request.count")
+            assertEquals(1.0, registry.get("flexlb.app.flexlb.inflight.request.count")
                     .tags("role", "PREFILL", "engineIp", "127.0.0.4:8080").gauge().value());
+            assertEquals(1, metricsEndpoint.queuedRequestCount());
             assertEquals(0.0, registry.get("flexlb.app.flexlb.worker.status.unconfirmed.request.count")
                     .tags("role", "PREFILL", "engineIp", "127.0.0.4:8080").gauge().value());
             assertFalse(metricsEndpoint.canAcceptRequest(
@@ -1283,9 +1284,9 @@ class PrefillEndpointTest {
         FlexlbConfig requestConfig = org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig();
         requestConfig.setDispatcher(DispatcherConfig.nonBatch());
         requestConfig.setScheduler(SchedulerConfig.direct());
-        PrefillEndpoint first = new PrefillEndpoint(firstStatus, requestConfig,
+        PrefillEndpoint first = EndpointTestSupport.standalonePrefillEndpoint(firstStatus, requestConfig,
                 EndpointTestSupport.routeStrategy(requestRuntime), requestRuntime.events(), endpointReporter);
-        PrefillEndpoint sibling = new PrefillEndpoint(siblingStatus, requestConfig,
+        PrefillEndpoint sibling = EndpointTestSupport.standalonePrefillEndpoint(siblingStatus, requestConfig,
                 EndpointTestSupport.routeStrategy(requestRuntime), requestRuntime.events(), endpointReporter);
         try {
             BatchSchedulerReporter reporter = new BatchSchedulerReporter(new MicrometerFlexMonitor(registry));
@@ -1356,7 +1357,7 @@ class PrefillEndpointTest {
     @EnumSource(value = RoleType.class, names = {"PREFILL", "PDFUSION"})
     void reportsQueueAndInflightMetricsWithTheWorkerRole(RoleType role) {
         WorkerStatus status = EndpointTestSupport.workerStatus(role, "127.0.0.1", 8080, 8090);
-        PrefillEndpoint metricsEndpoint = new PrefillEndpoint(
+        PrefillEndpoint metricsEndpoint = EndpointTestSupport.standalonePrefillEndpoint(
                 status, config, EndpointTestSupport.routeStrategy(requestRuntime),
                 requestRuntime.events(), endpointReporter);
         try {
@@ -1417,7 +1418,7 @@ class PrefillEndpointTest {
                 }
             }
         };
-        PrefillEndpoint retirementEndpoint = new PrefillEndpoint(
+        PrefillEndpoint retirementEndpoint = EndpointTestSupport.standalonePrefillEndpoint(
                 status,
                 retirementConfig,
                 EndpointTestSupport.routeStrategy(runtime),
@@ -1484,7 +1485,7 @@ class PrefillEndpointTest {
                 }
             }
         };
-        PrefillEndpoint retirementEndpoint = new PrefillEndpoint(
+        PrefillEndpoint retirementEndpoint = EndpointTestSupport.standalonePrefillEndpoint(
                 status,
                 retirementConfig,
                 EndpointTestSupport.liveRouteStrategy(runtime),
@@ -1549,7 +1550,7 @@ class PrefillEndpointTest {
             return transaction;
         }).when(strategy).prepare(org.mockito.Mockito.anyList(),
                 org.mockito.Mockito.any(), org.mockito.Mockito.any());
-        PrefillEndpoint routeEndpoint = new PrefillEndpoint(
+        PrefillEndpoint routeEndpoint = EndpointTestSupport.standalonePrefillEndpoint(
                 EndpointTestSupport.workerStatus(RoleType.PREFILL, "127.0.0.10", 8080, 8090),
                 routeConfig, strategy, runtime.events(), endpointReporter);
         routeEndpoint.startGeneration();
@@ -1591,7 +1592,7 @@ class PrefillEndpointTest {
             return transaction;
         }).when(strategy).prepare(org.mockito.Mockito.anyList(),
                 org.mockito.Mockito.any(), org.mockito.Mockito.any());
-        PrefillEndpoint routeEndpoint = new PrefillEndpoint(
+        PrefillEndpoint routeEndpoint = EndpointTestSupport.standalonePrefillEndpoint(
                 EndpointTestSupport.workerStatus(RoleType.PREFILL, "127.0.0.11", 8080, 8090),
                 routeConfig, strategy, runtime.events(), endpointReporter);
         routeEndpoint.startGeneration();
@@ -1702,7 +1703,7 @@ class PrefillEndpointTest {
         configureBatch(slowConfig, 100, fixedWaitMs, null);
         EndpointTestSupport.TestRequestRuntime runtime =
                 EndpointTestSupport.requestRuntime();
-        PrefillEndpoint created = new PrefillEndpoint(
+        PrefillEndpoint created = EndpointTestSupport.standalonePrefillEndpoint(
                 status,
                 slowConfig,
                 EndpointTestSupport.routeStrategy(runtime),
@@ -1725,7 +1726,7 @@ class PrefillEndpointTest {
         setFormula(endpointConfig, expression);
         EndpointTestSupport.TestRequestRuntime runtime =
                 EndpointTestSupport.requestRuntime();
-        PrefillEndpoint created = new PrefillEndpoint(
+        PrefillEndpoint created = EndpointTestSupport.standalonePrefillEndpoint(
                 status,
                 endpointConfig,
                 EndpointTestSupport.routeStrategy(runtime),
@@ -1794,7 +1795,7 @@ class PrefillEndpointTest {
                 .setType(RoutingConfig.EstimatorType.LEARNING);
         EndpointTestSupport.TestRequestRuntime runtime =
                 EndpointTestSupport.requestRuntime();
-        PrefillEndpoint created = new PrefillEndpoint(
+        PrefillEndpoint created = EndpointTestSupport.standalonePrefillEndpoint(
                 status,
                 learningConfig,
                 EndpointTestSupport.routeStrategy(runtime),

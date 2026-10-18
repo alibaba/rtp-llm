@@ -37,17 +37,24 @@ QUEUE 模式下，`ordering.type` 和 `dispatcher.type` 是两个正交维度：
 `BalanceContext`，再按 scheduler 类型分流。QUEUE 路径的关键边界是：
 
 1. `request_id` 是请求代际标识；活跃或已终态的重复 ID 会被拒绝。
-2. `scheduler.maxQueuedRequests`（默认 100000）限制 Generation 全局队列中的请求数，
-   包括等待放置、正在规划和等待资源的请求。`GlobalQueueCoordinator.offer` 在队列锁下检查
-   当前深度。队列满时，PRIORITY 模式下低于 `scheduler.ordering.highPriorityThreshold`（默认 50）的
+2. `scheduler.maxQueuedRequests`（默认 100000）在 QUEUE + NON_BATCH 下是 Generation 的总排队上限，
+   包括 GlobalQueue 和所有 EngineSubQueue 中尚未交付的请求；其他 QUEUE 模式仍只限制 GlobalQueue 的深度。
+   QUEUE + NON_BATCH 下，
+   同一形态的 EngineSubQueue 合计等待上限是
+   `min(scheduler.maxQueuedRequests, 当前形态的逻辑端点数 × dispatcher.maxInflightPerPrefillWorker × dispatcher.prefillSubqueueLimitMultiplier)`
+   （倍数默认 4）。端点数直接读取 `EndpointRegistry.getEndpointCount(当前形态)`，
+   不逐台遍历；全局入口按总排队请求数判断是否达到配置的总上限；
+   从全局队列进入 Prefill 子队列不重复占总名额。队列满时，PRIORITY 模式下低于
+   `scheduler.ordering.highPriorityThreshold`（默认 50）的
    新请求直接返回 `QUEUE_FULL_LOW_PRIORITY_REJECTED`（8433）。
-   达到阈值的新请求从队列中选择优先级严格低于自己的可抢占请求，先选择优先级最低的
+   达到阈值的新请求只从全局队列中选择优先级严格低于自己的可抢占请求，先选择优先级最低的
    一档；如果这一档有多个请求，就抢占最晚入队的一个，保留更早入队的请求。
    被挤出队列的请求返回 `QUEUED_REQUEST_PREEMPTED`（8435）。没有可抢占请求时，高优新请求返回
    `QUEUE_FULL_HIGH_PRIORITY_REJECTED`（8434）；FIFO 模式满队列时返回 `QUEUE_FULL`（8502）。
    调度器已选中、正在选 worker
    或处理选路结果的请求仍占队列名额，处理结束前不参与队列抢占；因资源不足继续排队的
-   请求可以参与。成功路由或请求结束后释放队列位置；容量与阈值配置快照更新后对后续
+   请求可以参与。请求移交 Prefill 后退出全局队列，但保留总排队名额直到路由交付；
+   请求取消或失败时也释放名额。容量与阈值配置快照更新后对后续
    入队生效。
    Encoder 使用独立队列。
 3. 调度器在可能向引擎或调用方发布前装配唯一的绝对过期事件。
@@ -62,8 +69,20 @@ QUEUE 模式下，`ordering.type` 和 `dispatcher.type` 是两个正交维度：
 
 `WorkerBatcher` 是每个 Prefill endpoint 的决策组组织者。BATCH dispatcher 使用
 `FixedWindowBatcherAlgorithm`，按 `maxRequests`、`maxCollectionWaitMs`、预测执行时间
-与 endpoint 容量触发发送；NON_BATCH dispatcher 使用
-`ImmediateNonBatchAlgorithm`，一个决策组只包含一个请求。
+与 endpoint 容量触发发送；NON_BATCH dispatcher 按 `scheduler.decision.type` 使用
+`SINGLE` 或 `FIXED_WINDOW` 组织决策组，逐请求返回路由结果。
+QUEUE + NON_BATCH 先从完整的 Prefill 候选池选路，不按
+`dispatcher.maxInflightPerPrefillWorker` 排除已满机器。选中的请求进入该机器子队列；
+本地等待项不占路由交付名额；交付准备时按请求上限检查已提交请求与引擎报告的
+额外活动请求。满额时子队列等待本机容量释放，不因其他机器释放容量而迁移。
+若准备后 WorkerStatus 突然报告此前未知的活动请求，本轮可能短暂超过单机在途上限。
+同一形态的 Prefill 子队列共享上述等待预算；PREFILL 与 PDFUSION 是互相独立的路由形态，
+端点数、待交付名额和容量唤醒分别计算。共享名额满导致入队失败时请求留在全局队列，
+等待任一子队列释放名额后重新从完整候选池选路。优先级模式下可先尝试替换
+选中 Prefill 本机尚未交付的低优请求，不跨 Prefill 查找受害者。
+总排队上限和共享子队列上限是两个独立边界：同一高优请求可能先在全局入口抢占，
+再在选中 Prefill 的子队列抢占另一个低优请求。
+DIRECT 的请求上限及 BATCH 的批次上限仍按各自原有的选路与入队规则执行。
 Prefill 待交付队列中的请求被高优新请求替换时，也返回 `QUEUED_REQUEST_PREEMPTED`（8435）。
 
 在任何模式下，调度器都在对外可见前提交 endpoint 账本和

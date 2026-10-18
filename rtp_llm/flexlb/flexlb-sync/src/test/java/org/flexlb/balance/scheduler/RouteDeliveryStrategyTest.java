@@ -7,6 +7,9 @@ import org.flexlb.balance.scheduler.DeliveryStrategyTestSupport.TestContext;
 import org.flexlb.balance.scheduler.DeliveryStrategyTestSupport.TestEndpointCapabilities;
 import org.flexlb.balance.scheduler.DeliveryStrategyTestSupport.TestRequestRegistry;
 import org.flexlb.balance.scheduler.DeliveryStrategyTestSupport.TestTelemetry;
+import org.flexlb.config.DispatcherConfig;
+import org.flexlb.config.FlexlbConfig;
+import org.flexlb.dao.BalanceContext;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -22,9 +25,35 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 /** Exact ordered-prefix and per-request completion contract for route delivery. */
 class RouteDeliveryStrategyTest {
+
+    @Test
+    void fullPrefillRouteLimitWaitsWithoutTakingDecodeDispatchPermit() {
+        Fixture fixture = new Fixture();
+        ScheduledRequest head = fixture.item(1L);
+        FlexlbConfig config = new FlexlbConfig();
+        config.setDispatcher(DispatcherConfig.nonBatch());
+        config.getDispatcher().setMaxInflightPerPrefillWorker(1);
+        BalanceContext request = org.mockito.Mockito.mock(BalanceContext.class);
+        when(request.getConfig()).thenReturn(config);
+        when(head.ctx()).thenReturn(request);
+        when(fixture.capabilities.prefill().isEngineSubQueueMode()).thenReturn(true);
+        when(fixture.capabilities.prefill().canDeliver(1L, 1)).thenReturn(false);
+        CapacityBoundary.Availability availability = org.mockito.Mockito.mock(CapacityBoundary.Availability.class);
+        when(fixture.capabilities.prefill().routeAdmissionAvailability(1L)).thenReturn(availability);
+
+        String result = fixture.context.deliver(fixture.strategy, List.of(head),
+                "waiting-for-prefill", 0, OptionalLong.empty());
+
+        assertEquals("BOUNDARY", result);
+        assertSame(head, fixture.context.emptyBoundary().item());
+        assertSame(availability, fixture.context.emptyBoundary().result().availability());
+        assertTrue(fixture.slots.prepared().isEmpty());
+        verify(fixture.capabilities.prefill(), never()).tryBeginRouteCommitAdmission();
+    }
 
     @Test
     void removedMemberDoesNotContributeToLaterRouteCompletionTime() {

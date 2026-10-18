@@ -6,6 +6,8 @@ import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.balance.scheduler.EndpointEventProjector;
+import org.flexlb.balance.scheduler.PlacementAvailability;
+import org.flexlb.balance.scheduler.QueueCapacity;
 import org.flexlb.balance.scheduler.RequestRegistry;
 import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
 import org.flexlb.balance.scheduler.RouteDeliveryStrategy;
@@ -15,15 +17,36 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.enums.PrefillQueueEnqueueResult;
+import org.flexlb.service.monitor.BatchSchedulerReporter;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.function.Supplier;
 
 /** Shared fixtures which exercise only the frozen endpoint-facing ports. */
 public final class EndpointTestSupport {
 
     private EndpointTestSupport() {
+    }
+
+    static PrefillEndpoint standalonePrefillEndpoint(
+            WorkerStatus status, FlexlbConfig config, DeliveryStrategy deliveryStrategy,
+            EndpointEventProjector endpointEvents, BatchSchedulerReporter reporter) {
+        return standalonePrefillEndpoint(status, () -> config, deliveryStrategy,
+                endpointEvents, reporter, new PlacementAvailability());
+    }
+
+    static PrefillEndpoint standalonePrefillEndpoint(
+            WorkerStatus status, Supplier<FlexlbConfig> configSupplier, DeliveryStrategy deliveryStrategy,
+            EndpointEventProjector endpointEvents, BatchSchedulerReporter reporter,
+            PlacementAvailability availability) {
+        EndpointRegistry registry = org.mockito.Mockito.mock(EndpointRegistry.class);
+        org.mockito.Mockito.when(registry.getEndpointCount(status.getRole())).thenReturn(1);
+        return new PrefillEndpoint(status, configSupplier, deliveryStrategy,
+                endpointEvents, reporter, availability, registry,
+                new QueueCapacity());
     }
 
     static EndpointEventProjector noopEventSink() {
@@ -207,7 +230,7 @@ public final class EndpointTestSupport {
             if (pin == null) {
                 return false;
             }
-            return endpoint.offerPinned(pin, item);
+            return endpoint.offerPinnedResult(pin, item) == PrefillQueueEnqueueResult.ACCEPTED;
         }
     }
 

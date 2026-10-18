@@ -33,6 +33,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static org.flexlb.enums.PrefillQueueEnqueueResult.ACCEPTED;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -67,7 +68,7 @@ class WorkerBatcherSchedulingTest {
         ScheduledRequest head = item(
                 config, endpoint, 1L, 50, System.currentTimeMillis());
 
-        assertTrue(runtime.offer(head));
+        assertEquals(ACCEPTED, runtime.offerWithResult(head));
         await(delivery.firstAttempt);
         await(delivery.firstCapacity.subscribed);
 
@@ -78,7 +79,7 @@ class WorkerBatcherSchedulingTest {
                 () -> firstWait.put("cause", "modified"));
         Map<?, ?> firstCounts = (Map<?, ?>) firstWait.get("priorityCounts");
         assertThrows(UnsupportedOperationException.class, firstCounts::clear);
-        assertTrue(runtime.offer(item(config, endpoint, 2L, 30, System.currentTimeMillis())));
+        assertEquals(ACCEPTED, runtime.offerWithResult(item(config, endpoint, 2L, 30, System.currentTimeMillis())));
 
         TimeUnit.MILLISECONDS.sleep(100L);
         assertEquals(1, delivery.attempts.get(),
@@ -109,7 +110,7 @@ class WorkerBatcherSchedulingTest {
         PrefillEndpoint endpoint = stableEndpoint(stableStatus());
         EventDrivenBlock delivery = new EventDrivenBlock();
         WorkerBatcher runtime = runningRuntime(config, endpoint, delivery);
-        assertTrue(runtime.offer(item(
+        assertEquals(ACCEPTED, runtime.offerWithResult(item(
                 config, endpoint, 12L, 50, System.currentTimeMillis())));
         await(delivery.firstCapacity.subscribed);
         delivery.firstCapacity.removeFailure =
@@ -135,7 +136,7 @@ class WorkerBatcherSchedulingTest {
                 config, endpoint, 11L, 50, System.currentTimeMillis());
 
         try {
-            assertTrue(runtime.offer(head));
+            assertEquals(ACCEPTED, runtime.offerWithResult(head));
             await(delivery.firstPrepareEntered);
             assertNull(runtime.captureRouteProjectionInputs()
                     .queue().admissionBlock(),
@@ -168,7 +169,7 @@ class WorkerBatcherSchedulingTest {
         long now = System.currentTimeMillis();
         ScheduledRequest head = item(config, endpoint, 21L, 50, now);
 
-        assertTrue(runtime.offer(head));
+        assertEquals(ACCEPTED, runtime.offerWithResult(head));
         await(delivery.firstCapacity.subscribed);
         RouteProjection.Inputs inputs = runtime.captureRouteProjectionInputs();
         assertNotNull(inputs.queue().admissionBlock());
@@ -185,7 +186,7 @@ class WorkerBatcherSchedulingTest {
                 "a delivery-only wait must leave incoming backlog selectable");
 
         ScheduledRequest backlog = item(config, endpoint, 22L, 50, now + 1L);
-        assertTrue(runtime.offer(backlog));
+        assertEquals(ACCEPTED, runtime.offerWithResult(backlog));
         TimeUnit.MILLISECONDS.sleep(100L);
         assertEquals(1, delivery.attempts.get(),
                 "publishing backlog must not retry the capacity-blocked head");
@@ -211,7 +212,7 @@ class WorkerBatcherSchedulingTest {
         }).when(head).seqLen();
         try (var readers = java.util.concurrent.Executors.newFixedThreadPool(
                 16, Thread.ofPlatform().name("projection-reader-", 0).factory())) {
-            assertTrue(runtime.offer(head));
+            assertEquals(ACCEPTED, runtime.offerWithResult(head));
             await(delivery.firstPrepareEntered);
             var first = readers.submit(runtime::captureRouteProjectionInputs);
             await(materializing);
@@ -259,7 +260,7 @@ class WorkerBatcherSchedulingTest {
         }).when(head).seqLen();
 
         try {
-            assertTrue(runtime.offer(head));
+            assertEquals(ACCEPTED, runtime.offerWithResult(head));
             await(delivery.firstPrepareEntered);
             CompletableFuture<RouteProjection.Inputs> oldCapture =
                     CompletableFuture.supplyAsync(() -> {
@@ -298,9 +299,9 @@ class WorkerBatcherSchedulingTest {
         ScheduledRequest revoked = item(config, endpoint, 2L, 50, now + 1L);
 
         try {
-            assertTrue(runtime.offer(first));
+            assertEquals(ACCEPTED, runtime.offerWithResult(first));
             await(firstStatusRead);
-            assertTrue(runtime.offer(revoked));
+            assertEquals(ACCEPTED, runtime.offerWithResult(revoked));
             allowFirstStatusRead.countDown();
             await(delivery.groupPredictionEntered);
 
@@ -375,7 +376,7 @@ class WorkerBatcherSchedulingTest {
         for (int i = 0; i < count; i++) {
             ScheduledRequest request = item(config, endpoint, 100L + i, 50, System.currentTimeMillis());
             requests.add(request);
-            assertTrue(runtime.offer(request));
+            assertEquals(ACCEPTED, runtime.offerWithResult(request));
         }
         for (ScheduledRequest request : requests) {
             request.future().get(5, TimeUnit.SECONDS);
@@ -400,7 +401,7 @@ class WorkerBatcherSchedulingTest {
         initial.decisionPolicy().setMaxCollectionWaitMs(100L);
         AtomicReference<FlexlbConfig> current = new AtomicReference<>(initial);
         WorkerBatcher runtime = new WorkerBatcher("hot-window-projection", stableEndpoint(stableStatus()),
-                current::get, mock(DeliveryStrategy.class), mock(EndpointEventProjector.class));
+                current::get, mock(DeliveryStrategy.class), mock(EndpointEventProjector.class), new QueueCapacity());
         runtimes.add(runtime);
         runtime.start();
 
@@ -431,7 +432,7 @@ class WorkerBatcherSchedulingTest {
         PrefillEndpoint endpoint = stableEndpoint(stableStatus());
         EventDrivenBlock delivery = new EventDrivenBlock();
         WorkerBatcher runtime = new WorkerBatcher("hot-window-delivery", endpoint, current::get, delivery,
-                mock(EndpointEventProjector.class));
+                mock(EndpointEventProjector.class), new QueueCapacity());
         runtimes.add(runtime);
         runtime.start();
 
@@ -441,7 +442,8 @@ class WorkerBatcherSchedulingTest {
         current.set(updated);
         assertEquals(increaseWindow ? 60_000L : 0L,
                 runtime.captureRouteProjectionInputs().queue().constraints().collectionWindowMs());
-        assertTrue(runtime.offer(item(initial, endpoint, 77L, 50, System.currentTimeMillis())));
+        assertEquals(ACCEPTED, runtime.offerWithResult(
+                item(initial, endpoint, 77L, 50, System.currentTimeMillis())));
         if (increaseWindow) {
             current.set(initial);
             assertEquals(0L, runtime.captureRouteProjectionInputs().queue().constraints().collectionWindowMs());
@@ -453,7 +455,7 @@ class WorkerBatcherSchedulingTest {
     private WorkerBatcher runningRuntime(FlexlbConfig config, PrefillEndpoint endpoint, DeliveryStrategy delivery) {
         WorkerBatcher runtime = new WorkerBatcher(
                 "scheduling-test", endpoint, () -> config, delivery,
-                mock(EndpointEventProjector.class));
+                mock(EndpointEventProjector.class), new QueueCapacity());
         runtimes.add(runtime);
         runtime.start();
         return runtime;
@@ -511,6 +513,7 @@ class WorkerBatcherSchedulingTest {
                 .thenReturn(mock(PrefillTimePredictor.Evaluator.class));
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
         when(endpoint.getStatus()).thenReturn(status);
+        when(status.getRole()).thenReturn(RoleType.PREFILL);
         when(endpoint.getPredictor()).thenReturn(predictor);
         return endpoint;
     }

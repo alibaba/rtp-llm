@@ -37,7 +37,8 @@ public final class FlexlbConfigValidator {
         JsonNode dispatcher = document.path("dispatcher");
         if (dispatcher.isObject()) {
             rejectFieldsExcept(dispatcher, "dispatcher", "type", "maxInflightPerPrefillWorker",
-                    "maxInflightPerEncoderWorker", "fetchAttachTimeoutMs");
+                    "maxInflightPerEncoderWorker", "fetchAttachTimeoutMs",
+                    "prefillSubqueueLimitMultiplier");
         }
 
         JsonNode decodeCostEstimator = document.path("router").path("roles")

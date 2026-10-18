@@ -22,6 +22,7 @@ import java.util.OptionalLong;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import static org.flexlb.enums.PrefillQueueEnqueueResult.ACCEPTED;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -60,8 +61,8 @@ class WorkerBatcherQueueTest {
         WorkerBatcher runtime = runningRuntime();
         ScheduledRequest low = item(901L, 10, Long.MAX_VALUE, 1, 128);
         ScheduledRequest high = item(902L, 90, Long.MAX_VALUE, 2, 128);
-        assertTrue(runtime.offer(low));
-        assertTrue(runtime.offer(high));
+        assertEquals(ACCEPTED, runtime.offerWithResult(low));
+        assertEquals(ACCEPTED, runtime.offerWithResult(high));
         assertEquals(List.of(high, low), runtime.captureQueueSnapshot().items());
     }
 
@@ -70,10 +71,10 @@ class WorkerBatcherQueueTest {
         WorkerBatcher runtime = runningRuntime();
         long now = System.currentTimeMillis();
 
-        assertTrue(runtime.offer(item(1, 50, now + 5_000, now, 128)));
-        assertTrue(runtime.offer(item(2, 70, now + 9_000, now + 100, 128)));
-        assertTrue(runtime.offer(item(3, 50, now + 1_000, now + 200, 128)));
-        assertTrue(runtime.offer(item(4, 50, now + 5_000, now - 100, 128)));
+        assertEquals(ACCEPTED, runtime.offerWithResult(item(1, 50, now + 5_000, now, 128)));
+        assertEquals(ACCEPTED, runtime.offerWithResult(item(2, 70, now + 9_000, now + 100, 128)));
+        assertEquals(ACCEPTED, runtime.offerWithResult(item(3, 50, now + 1_000, now + 200, 128)));
+        assertEquals(ACCEPTED, runtime.offerWithResult(item(4, 50, now + 5_000, now - 100, 128)));
 
         WorkerBatcher.QueueSnapshot snapshot =
                 runtime.captureQueueSnapshot();
@@ -87,10 +88,10 @@ class WorkerBatcherQueueTest {
         WorkerBatcher runtime = runningRuntime();
         long now = System.currentTimeMillis();
 
-        assertTrue(runtime.offer(item(1, 50, now + 9_000, now, 128)));
-        assertTrue(runtime.offer(item(2, 50, now + 1_000, now, 128)));
-        assertTrue(runtime.offer(item(4, 50, now + 9_000, now, 128)));
-        assertTrue(runtime.offer(item(3, 50, now + 9_000, now, 128)));
+        assertEquals(ACCEPTED, runtime.offerWithResult(item(1, 50, now + 9_000, now, 128)));
+        assertEquals(ACCEPTED, runtime.offerWithResult(item(2, 50, now + 1_000, now, 128)));
+        assertEquals(ACCEPTED, runtime.offerWithResult(item(4, 50, now + 9_000, now, 128)));
+        assertEquals(ACCEPTED, runtime.offerWithResult(item(3, 50, now + 9_000, now, 128)));
 
         assertEquals(List.of("1", "2", "4", "3"), requestIds(
                 runtime.captureQueueSnapshot().items()));
@@ -102,9 +103,9 @@ class WorkerBatcherQueueTest {
         WorkerBatcher runtime = runningRuntime();
         long now = System.currentTimeMillis();
 
-        assertTrue(runtime.offer(item(1, 30, now + 1_000, now, 128)));
-        assertTrue(runtime.offer(item(2, 50, now + 500, now + 100, 128)));
-        assertTrue(runtime.offer(item(3, 70, now + 100, now + 200, 128)));
+        assertEquals(ACCEPTED, runtime.offerWithResult(item(1, 30, now + 1_000, now, 128)));
+        assertEquals(ACCEPTED, runtime.offerWithResult(item(2, 50, now + 500, now + 100, 128)));
+        assertEquals(ACCEPTED, runtime.offerWithResult(item(3, 70, now + 100, now + 200, 128)));
 
         assertEquals(List.of("1", "2", "3"), requestIds(
                 runtime.captureQueueSnapshot().items()));
@@ -118,8 +119,8 @@ class WorkerBatcherQueueTest {
 
         WorkerBatcher.QueueSnapshot empty =
                 runtime.captureQueueSnapshot();
-        assertTrue(runtime.offer(first));
-        assertTrue(runtime.offer(second));
+        assertEquals(ACCEPTED, runtime.offerWithResult(first));
+        assertEquals(ACCEPTED, runtime.offerWithResult(second));
         WorkerBatcher.QueueSnapshot offered =
                 runtime.captureQueueSnapshot();
 
@@ -142,7 +143,7 @@ class WorkerBatcherQueueTest {
         WorkerBatcher runtime = runningRuntime();
         ScheduledRequest canonical = item(21, 50, Long.MAX_VALUE, 1, 128);
         ScheduledRequest lookalike = item(21, 50, Long.MAX_VALUE, 1, 128);
-        assertTrue(runtime.offer(canonical));
+        assertEquals(ACCEPTED, runtime.offerWithResult(canonical));
 
         assertFalse(runtime.removeQueued(lookalike, "stale identity"));
         assertEquals(List.of(canonical),
@@ -155,7 +156,7 @@ class WorkerBatcherQueueTest {
         WorkerBatcher runtime = runningRuntime();
         var before = runtime.captureRouteProjectionInputs();
         ScheduledRequest queued = item(905L, 50, Long.MAX_VALUE, 1L, 128L);
-        assertTrue(runtime.offer(queued));
+        assertEquals(ACCEPTED, runtime.offerWithResult(queued));
         var after = runtime.captureRouteProjectionInputs();
         assertTrue(after.ownershipVersion() > before.ownershipVersion());
         assertSame(before.work(), after.work());
@@ -169,7 +170,7 @@ class WorkerBatcherQueueTest {
                 prefillEndpoint,
                 () -> config,
                 deliveryStrategy,
-                mock(EndpointEventProjector.class));
+                mock(EndpointEventProjector.class), new QueueCapacity());
         runtimes.add(runtime);
         runtime.start();
         return runtime;

@@ -1,6 +1,7 @@
 package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.scheduler.PlacementAvailability;
+import org.flexlb.balance.scheduler.QueueCapacity;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.WorkerStatus;
@@ -34,7 +35,8 @@ class EndpointRetirementLinearizationTest {
                 requestRuntime.events(),
                 mock(BatchSchedulerReporter.class),
                 EndpointTestSupport.routeStrategy(requestRuntime),
-                new PlacementAvailability());
+                new PlacementAvailability(),
+                new QueueCapacity());
         String prefillAddress = "127.0.0.1:8100";
         String decodeAddress = "127.0.0.1:8200";
         WorkerStatus prefillStatus = status(RoleType.PREFILL, 8100);

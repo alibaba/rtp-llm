@@ -33,7 +33,7 @@ class WorkerBatcherStatusSnapshotTest {
         WorkerBatcher runtime = new WorkerBatcher(
                 "snapshot-test", endpoint, config,
                 mock(DeliveryStrategy.class),
-                mock(EndpointEventProjector.class));
+                mock(EndpointEventProjector.class), new QueueCapacity());
 
         assertEquals(2_097_152L, runtime.captureRouteProjectionInputs()
                 .queue().constraints().batchTokenCapacity());
@@ -54,7 +54,7 @@ class WorkerBatcherStatusSnapshotTest {
         WorkerBatcher runtime = new WorkerBatcher(
                 "snapshot-test", endpoint, org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig(),
                 mock(DeliveryStrategy.class),
-                mock(EndpointEventProjector.class));
+                mock(EndpointEventProjector.class), new QueueCapacity());
 
         assertEquals(150L, runtime.captureRouteProjectionInputs()
                 .queue().constraints().batchTokenCapacity());
@@ -89,7 +89,7 @@ class WorkerBatcherStatusSnapshotTest {
                 endpoint,
                 org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig(),
                 mock(DeliveryStrategy.class),
-                mock(EndpointEventProjector.class));
+                mock(EndpointEventProjector.class), new QueueCapacity());
 
         GroupPlanner.Constraints capacity = runtime
                 .captureRouteProjectionInputs().queue().constraints();

@@ -73,7 +73,7 @@ class EncoderSchedulingIntegrationTest {
                 configService, model);
         scheduler = new RequestScheduler(configService, router, mock(EndpointRegistry.class),
                 mock(BatchSchedulerReporter.class), mock(EvictionManager.class), requests,
-                new PlacementAvailability());
+                new PlacementAvailability(), new QueueCapacity());
     }
 
     @AfterEach
@@ -248,7 +248,7 @@ class EncoderSchedulingIntegrationTest {
                 configService, model);
         scheduler = new RequestScheduler(configService, router, mock(EndpointRegistry.class),
                 mock(BatchSchedulerReporter.class), mock(EvictionManager.class), requests,
-                new PlacementAvailability());
+                new PlacementAvailability(), new QueueCapacity());
 
         assertNull(ReflectionTestUtils.getField(scheduler, "encoderQueue"));
         BalanceContext encoderRequest = context(6, 100, 0L);
@@ -272,7 +272,7 @@ class EncoderSchedulingIntegrationTest {
                 configService, model);
         scheduler = new RequestScheduler(configService, router, mock(EndpointRegistry.class),
                 mock(BatchSchedulerReporter.class), mock(EvictionManager.class), requests,
-                new PlacementAvailability());
+                new PlacementAvailability(), new QueueCapacity());
     }
 
     @Test

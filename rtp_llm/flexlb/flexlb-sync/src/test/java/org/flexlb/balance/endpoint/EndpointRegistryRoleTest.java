@@ -1,6 +1,7 @@
 package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.scheduler.PlacementAvailability;
+import org.flexlb.balance.scheduler.QueueCapacity;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
@@ -40,7 +41,8 @@ class EndpointRegistryRoleTest {
                 requestRuntime.events(),
                 Mockito.mock(BatchSchedulerReporter.class),
                 EndpointTestSupport.routeStrategy(requestRuntime),
-                new PlacementAvailability());
+                new PlacementAvailability(),
+                new QueueCapacity());
     }
 
     @AfterEach

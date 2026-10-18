@@ -26,6 +26,7 @@ import java.util.OptionalLong;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
+import static org.flexlb.enums.PrefillQueueEnqueueResult.ACCEPTED;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
@@ -222,7 +223,7 @@ class WorkerBatcherPerformanceTest {
                 endpoint,
                 config,
                 delivery,
-                mock(EndpointEventProjector.class));
+                mock(EndpointEventProjector.class), new QueueCapacity());
         runtime.start();
         long now = System.currentTimeMillis();
         List<ScheduledRequest> items = new ArrayList<>(depth);
@@ -236,7 +237,7 @@ class WorkerBatcherPerformanceTest {
                     256L + (index % 32)));
         }
         for (ScheduledRequest item : items) {
-            assertTrue(runtime.offer(item));
+            assertEquals(ACCEPTED, runtime.offerWithResult(item));
         }
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
         while (runtime.queueSize() != depth && System.nanoTime() < deadline) {

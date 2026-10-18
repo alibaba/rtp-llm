@@ -69,6 +69,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
     private final EvictionManager evictionManager;
     private final RequestRegistry lifecycle;
     private final PlacementAvailability availability;
+    private final QueueCapacity queueCapacity;
     private final boolean priorityOrdering;
     private final int plannerCount;
     private final double scanBudgetMultiplier;
@@ -98,7 +99,8 @@ final class GlobalQueueCoordinator implements AutoCloseable {
             BatchSchedulerReporter reporter,
             EvictionManager evictionManager,
             RequestRegistry lifecycle,
-            PlacementAvailability availability) {
+            PlacementAvailability availability,
+            QueueCapacity queueCapacity) {
         ConfigService checkedConfig = Objects.requireNonNull(
                 configService, "configService");
         this.configService = checkedConfig;
@@ -108,6 +110,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
                 evictionManager, "evictionManager");
         this.lifecycle = Objects.requireNonNull(lifecycle, "lifecycle");
         this.availability = Objects.requireNonNull(availability, "availability");
+        this.queueCapacity = Objects.requireNonNull(queueCapacity, "queueCapacity");
         this.priorityOrdering = resolvePriorityOrdering(checkedConfig);
         this.orderedQueue = new OrderedRequestQueue(priorityOrdering);
         this.waitingRequests = new PlacementWaitQueue(priorityOrdering, availability);
@@ -167,8 +170,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
                 return OfferResult.COMPLETED;
             }
             FlexlbConfig config = configService.loadBalanceConfig();
-            int maxQueuedRequests = config.queueScheduler().getMaxQueuedRequests();
-            if (orderedQueue.size() >= maxQueuedRequests) {
+            if (queueCapacity.isGlobalQueueEntryLimitReached(config, orderedQueue.size())) {
                 if (!priorityOrdering) {
                     return OfferResult.QUEUE_FULL;
                 }
@@ -180,7 +182,9 @@ final class GlobalQueueCoordinator implements AutoCloseable {
                     return OfferResult.QUEUE_FULL_HIGH_PRIORITY_REJECTED;
                 }
                 removeRequestUnderLock(victim);
+                queueCapacity.decreaseTotalQueueCount(victim.future);
             }
+            queueCapacity.increaseTotalQueueCount(future);
             orderedQueue.add(entry);
             registered.put(future, entry);
             // Completion removes this exact request from the ordering and wait
@@ -230,6 +234,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
     }
 
     private void completeRequest(GlobalQueueEntry entry) {
+        queueCapacity.decreaseTotalQueueCount(entry.future);
         lock.lock();
         try {
             registered.remove(entry.future, entry);
@@ -339,6 +344,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
             }
         } catch (Throwable failure) {
             removeRequest(plan.entry);
+            queueCapacity.decreaseTotalQueueCount(plan.entry.future);
             completeDecisionResponse(plan.entry, error(
                     StrategyErrorType.DISPATCH_FAILED,
                     "Placement failed: " + failure.getMessage()));
@@ -428,6 +434,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         }
         if (plan.failure != null) {
             removeRequest(entry);
+            queueCapacity.decreaseTotalQueueCount(entry.future);
             completeDecisionResponse(entry, error(
                     StrategyErrorType.DISPATCH_FAILED,
                     "Placement failed: " + plan.failure.getMessage()));
@@ -436,6 +443,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         PlacementResult<RouteAdmission, PlacementKey> result = plan.result;
         if (result.status() == PlacementResult.Status.REJECTED) {
             removeRequest(entry);
+            queueCapacity.decreaseTotalQueueCount(entry.future);
             completeDecisionResponse(entry, result.failure());
             return Outcome.DONE;
         }
@@ -444,6 +452,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         }
         if (result.status() == PlacementResult.Status.CLOSED) {
             removeRequest(entry);
+            queueCapacity.decreaseTotalQueueCount(entry.future);
             return Outcome.DONE;
         }
         RouteAdmission admission = plan.admission();
@@ -458,6 +467,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
             if (publication.status() == PlacementResult.Status.REJECTED
                     || publication.status() == PlacementResult.Status.CLOSED) {
                 removeRequest(entry);
+                queueCapacity.decreaseTotalQueueCount(entry.future);
                 return Outcome.DONE;
             }
             plan.blockedOn(publication.blocker());
@@ -628,6 +638,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         }
         completed.forEach(GlobalQueueCoordinator::closePlan);
         for (GlobalQueueEntry entry : abandoned) {
+            queueCapacity.decreaseTotalQueueCount(entry.future);
             completeDecisionResponse(entry, error(
                     StrategyErrorType.DISPATCH_FAILED,
                     "request scheduler is shutting down"));

@@ -2,7 +2,8 @@
 
 容量约束分为三层：
 
-1. `GlobalQueueCoordinator` 用 `scheduler.maxQueuedRequests` 限制 Generation 全局队列深度；
+1. `GlobalQueueCoordinator` 用 `scheduler.maxQueuedRequests` 限制 Generation 排队总量；
+   QUEUE + NON_BATCH 下包括 GlobalQueue 和 EngineSubQueue，其他模式下只计 GlobalQueue。
    PRIORITY 模式中，达到 `scheduler.ordering.highPriorityThreshold` 的请求可在队列满时
    抢占当前未在规划、优先级严格低于自己的排队请求。容量与阈值配置更新后对后续入队生效。
 2. `ResourceMeasure` 在路由时判断单个 worker 是否可选。

@@ -55,7 +55,8 @@ class RequestConfirmationTimeoutTest {
         var requests = new RequestRegistry(service, reporter, requestReporter);
         var projector = new EndpointEventProjector(requests);
         var endpoints = new EndpointRegistry(service, projector, reporter,
-                new RouteDeliveryStrategy(requests, new DeliveryMetrics(reporter)), new PlacementAvailability());
+                new RouteDeliveryStrategy(requests, new DeliveryMetrics(reporter)),
+                new PlacementAvailability(), new QueueCapacity());
         var runtime = new SchedulerRuntime(requests, endpoints, reporter, requestReporter);
         DecodeEndpoint decode = null;
         try {

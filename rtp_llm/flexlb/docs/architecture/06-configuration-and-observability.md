@@ -76,8 +76,15 @@ UniConfig 和 Nacos 的内容直接使用同一种配置 JSON，不增加包装�
 环境变量来源只在启动时读取配置。
 
 `dispatcher.maxInflightPerPrefillWorker` 由请求进入 Master 时的配置快照确定。
-NON_BATCH 的候选筛选、排队和最终占位，以及 DIRECT 的候选筛选与占位，
-都使用该请求的上限；BATCH 的批次占位也使用该请求的上限。
+QUEUE + NON_BATCH 选路不按该上限剔除 Prefill，子队列等待项不占该上限；交付路由前按请求快照检查占位。
+`dispatcher.prefillSubqueueLimitMultiplier` 默认 4；当前路由形态的 Prefill 子队列共享
+`min(scheduler.maxQueuedRequests, 当前形态的逻辑端点数 × maxInflightPerPrefillWorker × 倍数)` 个待交付名额。
+PREFILL 与 PDFUSION 的端点和待交付名额不合并计算。
+共享名额满时请求留在全局队列等待重新选路。QUEUE + NON_BATCH 下，`scheduler.maxQueuedRequests` 是
+GlobalQueue 和 EngineSubQueue 合计的总排队上限；其他 QUEUE 模式仍只按 GlobalQueue 深度判满。
+高优新请求仍只从 GlobalQueue 寻找低优受害者。
+DIRECT 的候选筛选与占位、BATCH 的批次占位仍使用请求的上限。
+端点创建时固定其工作模式，正常切换调度模式需重启 Master。
 更新后进入的请求使用新值，已进入调度流程的请求保留原有快照。
 降低上限时，已有占位继续保持，直到完成或清理后才按新上限接收请求。
 
@@ -436,9 +443,9 @@ WorkerStatus 成功轮询上报 `app.flexlb.encoder.pending.request.count` 和
 `app.flexlb.tracked.request.count` 按
 `role=PREFILL`（Generation）和 `role=ENCODER`（Encoder）分别上报，
 `engineIp=scheduler`；Prefill 序列只统计 Generation。节点侧使用 `app.flexlb.inflight.request.count`，按真实 `engineIp` 和
-role 分开展示。NON_BATCH（包括 DIRECT）的 `role=PREFILL/PDFUSION`
-表示本地排队、已提交未确认、已确认但仍占用容量的请求，
-加上引擎报告的额外活动请求。同一请求按 ID 去重；WorkerStatus 仅提供 running/waiting 数量、
+role 分开展示。QUEUE + NON_BATCH 默认模式的 `role=PREFILL/PDFUSION`
+表示已提交未确认、已确认但仍占用容量的请求，加上引擎报告的额外活动请求；
+本地待交付请求由子队列深度指标统计。使用 DIRECT 时， 该指标还包含本地排队请求。同一请求按 ID 去重；WorkerStatus 仅提供 running/waiting 数量、
 缺少请求明细时，对无法确认重合的请求保守计数。该指标不是引擎 GPU 当前执行请求数。
 NON_BATCH（包括 DIRECT）的 Prefill 序列与 `dispatcher.maxInflightPerPrefillWorker` 的请求限流计数一致：
 设为 4 时，已确认请求仍占用名额，完成或本地清理后才释放。若引擎有其它来源的请求，或本地超时清理后

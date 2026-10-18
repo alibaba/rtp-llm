@@ -42,7 +42,7 @@ class WorkerEndpointTest {
                 .setExpression("sum(computeTokens)");
         EndpointTestSupport.TestRequestRuntime requestRuntime =
                 EndpointTestSupport.requestRuntime();
-        endpoint = new PrefillEndpoint(
+        endpoint = EndpointTestSupport.standalonePrefillEndpoint(
                 status,
                 () -> config,
                 EndpointTestSupport.routeStrategy(requestRuntime),

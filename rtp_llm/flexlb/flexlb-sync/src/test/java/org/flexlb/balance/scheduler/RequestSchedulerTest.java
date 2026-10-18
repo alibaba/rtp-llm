@@ -88,7 +88,9 @@ class RequestSchedulerTest {
         when(router.select(healthy, healthyGroup)).thenReturn(PlacementResult.success(healthyRoute));
         when(healthyRoute.tryEnqueue(healthy, second, lifecycle))
                 .thenReturn(PlacementResult.success(mock(ScheduledRequest.class)));
-        RequestScheduler scheduler = new RequestScheduler(service, router, endpoints, mock(BatchSchedulerReporter.class), mock(EvictionManager.class), lifecycle, new PlacementAvailability());
+        RequestScheduler scheduler = new RequestScheduler(service, router, endpoints, mock(BatchSchedulerReporter.class),
+                mock(EvictionManager.class), lifecycle, new PlacementAvailability(),
+                new QueueCapacity());
         try {
             scheduler.submit(unavailable);
             verify(router, timeout(500)).select(unavailable, "unavailable-group");
@@ -142,7 +144,7 @@ class RequestSchedulerTest {
                 mock(BatchSchedulerReporter.class),
                 eviction,
                 lifecycle,
-                availability);
+                availability, new QueueCapacity());
         try {
             scheduler.submit(context);
 
@@ -189,7 +191,8 @@ class RequestSchedulerTest {
         when(eviction.tryAdmit(incoming, incomingFuture, selectedRoute, selectedEndpoint)).thenReturn(true);
 
         RequestScheduler scheduler = new RequestScheduler(configService, router, mock(EndpointRegistry.class),
-                mock(BatchSchedulerReporter.class), eviction, lifecycle, availability);
+                mock(BatchSchedulerReporter.class), eviction, lifecycle, availability,
+                new QueueCapacity());
         try {
             scheduler.submit(queued);
             RequestLifecycleTestSupport.awaitGlobalCapacityWaiters(scheduler, 1);
@@ -244,7 +247,7 @@ class RequestSchedulerTest {
                 mock(BatchSchedulerReporter.class),
                 mock(EvictionManager.class),
                 lifecycle,
-                availability);
+                availability, new QueueCapacity());
         try {
             scheduler.submit(context);
             verify(route, timeout(1_000)).tryEnqueue(context, future, lifecycle);
@@ -288,7 +291,7 @@ class RequestSchedulerTest {
                 mock(BatchSchedulerReporter.class),
                 mock(EvictionManager.class),
                 lifecycle,
-                new PlacementAvailability());
+                new PlacementAvailability(), new QueueCapacity());
         scheduler.submit(context);
 
         verify(router, timeout(1_000)).select(context, null);
@@ -351,7 +354,7 @@ class RequestSchedulerTest {
                 reporter,
                 mock(EvictionManager.class),
                 lifecycle,
-                availability);
+                availability, new QueueCapacity());
         try {
             scheduler.submit(gate);
             assertTrue(gatePlanningStarted.await(5, TimeUnit.SECONDS));
@@ -402,7 +405,7 @@ class RequestSchedulerTest {
                 mock(BatchSchedulerReporter.class),
                 evictionManager,
                 lifecycle,
-                new PlacementAvailability());
+                new PlacementAvailability(), new QueueCapacity());
         try {
             scheduler.submit(lowPriority);
             verify(router, timeout(1_000)).select(lowPriority, null);
@@ -452,7 +455,7 @@ class RequestSchedulerTest {
                 mock(BatchSchedulerReporter.class),
                 mock(EvictionManager.class),
                 lifecycle,
-                availability);
+                availability, new QueueCapacity());
         scheduler.submit(expired);
         scheduler.submit(follower);
 
@@ -528,7 +531,7 @@ class RequestSchedulerTest {
                 mock(BatchSchedulerReporter.class),
                 mock(EvictionManager.class),
                 lifecycle,
-                availability);
+                availability, new QueueCapacity());
         try {
             scheduler.submit(blocked);
             scheduler.submit(independent);
@@ -770,7 +773,7 @@ class RequestSchedulerTest {
                 mock(BatchSchedulerReporter.class),
                 mock(EvictionManager.class),
                 lifecycle,
-                availability);
+                availability, new QueueCapacity());
         try {
             scheduler.submit(context);
 
@@ -1028,7 +1031,7 @@ class RequestSchedulerTest {
                     reporter,
                     mock(EvictionManager.class),
                     lifecycle,
-                    availability);
+                    availability, new QueueCapacity());
         }
 
         private CapacityRequest createRequest(long requestId, PrefillEndpoint target) {
@@ -1170,7 +1173,7 @@ class RequestSchedulerTest {
                     mock(BatchSchedulerReporter.class),
                     evictionManager,
                     lifecycle,
-                    availability);
+                    availability, new QueueCapacity());
         }
     }
 }

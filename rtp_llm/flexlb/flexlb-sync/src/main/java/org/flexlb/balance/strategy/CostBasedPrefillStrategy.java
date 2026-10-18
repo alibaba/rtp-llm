@@ -575,7 +575,7 @@ public class CostBasedPrefillStrategy {
                 continue;
             }
             registered++;
-            if (endpoint.canAcceptRequest(inflightRequestLimit)
+            if (endpoint.isEngineSubQueueMode() || endpoint.canAcceptRequest(inflightRequestLimit)
                     || preemptQueued && endpoint.canPreemptQueuedRequest(context.getPriority(), inflightRequestLimit)) {
                 matching.add(entry);
             }

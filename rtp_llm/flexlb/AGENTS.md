@@ -31,6 +31,7 @@ This file provides guidance to agents when working with code in this repository.
 - **审核时逐项检查可读性。** 对新增或修改的名称、状态和方法，检查读者能否仅根据命名及
   附近代码准确判断用途和影响。需要反复追问“这个变量是干什么的”或“这个方法到底清掉什么”
   才能理解时，应调整命名或结构后再提交审核。规则适用于当前改动，不要求顺带重构无关代码。
+- **不要为测试保留多余的生产入口。** 若生产方法没有生产调用，增加生产代码。
 
 ## Project Overview
 
@@ -147,6 +148,14 @@ Types: `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `chore`
 - 测试类结构镜像源码结构（如 `DefaultRouterTest` 对应 `DefaultRouter`）。
 - Mock 外部依赖（gRPC 客户端、cache manager、config service）。
 - 重点覆盖：路由逻辑、策略选择、错误处理、回滚行为。
+
+## 审核与暂存约定
+
+- 默认将本次修改的测试文件放入暂存区，方便用户先审核生产逻辑。
+- 默认将已有生产文件中新增、删除或调整的 `import` 单独放入暂存区；同一文件中的业务逻辑
+  改动保持未暂存，不因 `import` 改动而暂存整份生产文件。新增的生产文件仍整体留在未暂存区，
+  不为单独暂存 `import` 而制造不完整的暂存文件。
+- 只处理本次任务涉及的改动；保留用户已有的暂存状态。用户另有明确要求时以用户要求为准。
 
 ## Important Reminders
 

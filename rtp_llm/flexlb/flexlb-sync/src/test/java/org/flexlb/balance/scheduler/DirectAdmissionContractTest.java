@@ -219,8 +219,11 @@ class DirectAdmissionContractTest {
             requests = spy(new RequestRegistry(service, reporter, requestReporter));
             var projector = new EndpointEventProjector(requests);
             var placement = new PlacementAvailability();
+            var model = mock(ModelMetaConfig.class);
+            when(model.requiredRoles()).thenReturn(List.of(RoleType.PREFILL, RoleType.DECODE));
+            var queueCapacity = new QueueCapacity();
             queuedDelivery = spy(new RouteDeliveryStrategy(requests, new DeliveryMetrics(reporter)));
-            endpoints = new EndpointRegistry(service, projector, reporter, queuedDelivery, placement);
+            endpoints = new EndpointRegistry(service, projector, reporter, queuedDelivery, placement, queueCapacity);
             WorkerStatus worker = worker(RoleType.PREFILL, "127.0.0.1");
             worker.lock.lock();
             try {
@@ -248,12 +251,10 @@ class DirectAdmissionContractTest {
                 return PlacementResult.success(SelectedRole.decode(pin,
                         metadata(decode, request.requestId()), decode.placementVersion()));
             });
-            var model = mock(ModelMetaConfig.class);
-            when(model.requiredRoles()).thenReturn(List.of(RoleType.PREFILL, RoleType.DECODE));
             var router = new DefaultRouter(prefillSelector, decodeSelector, mock(RandomStrategy.class),
                     mock(EncoderStrategy.class), service, model);
             scheduler = new RequestScheduler(service, router, endpoints, reporter, mock(EvictionManager.class),
-                    requests, placement);
+                    requests, placement, queueCapacity);
             runtime = new SchedulerRuntime(requests, endpoints, reporter, requestReporter, scheduler);
         }
 

@@ -55,11 +55,10 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
         return prepareTransaction(candidates, evaluator);
     }
 
-    private RouteTransaction prepareTransaction(
-            List<ScheduledRequest> candidates,
-            PrefillTimePredictor.Evaluator evaluator) {
+    private RouteTransaction prepareTransaction(List<ScheduledRequest> candidates,
+                                                PrefillTimePredictor.Evaluator evaluator) {
         ScheduledRequest head = candidates.get(0);
-        List<ScheduledRequest> admitted = new ArrayList<>(candidates.size());
+        List<ScheduledRequest> requestsPreparedForDelivery = new ArrayList<>(candidates.size());
         PrefillEndpoint prefill = head.prefillEp();
         if (prefill == null) {
             return RouteTransaction.blocked(
@@ -72,6 +71,15 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
         CapacityBoundary blockedResult = null;
         try {
             for (ScheduledRequest item : candidates) {
+                if (prefill.isEngineSubQueueMode()) {
+                    long maxDispatchLimit = item.ctx().getConfig().getDispatcher().getMaxInflightPerPrefillWorker();
+                    if (!prefill.canDeliver(maxDispatchLimit, requestsPreparedForDelivery.size() + 1)) {
+                        blockedItem = item;
+                        blockedResult = CapacityBoundary.deliveryUnavailable(
+                                prefill.routeAdmissionAvailability(maxDispatchLimit));
+                        break;
+                    }
+                }
                 CapacityBoundary.Attempt<ScheduledRequest> attempt =
                         requests.prepareRouteMember(item, transaction, evaluator);
                 if (!attempt.accepted()) {
@@ -79,9 +87,9 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
                     blockedResult = attempt.boundary();
                     break;
                 }
-                admitted.add(item);
+                requestsPreparedForDelivery.add(item);
             }
-            if (admitted.isEmpty()) {
+            if (requestsPreparedForDelivery.isEmpty()) {
                 Throwable cleanup = close(transaction);
                 if (cleanup != null) {
                     throw cleanup;
@@ -89,7 +97,7 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
                 return RouteTransaction.blocked(
                         this, blockedItem, blockedResult);
             }
-            transaction.select(admitted, blockedItem, blockedResult);
+            transaction.select(requestsPreparedForDelivery, blockedItem, blockedResult);
             return transaction;
         } catch (Throwable failure) {
             Throwable cleanup = close(transaction);

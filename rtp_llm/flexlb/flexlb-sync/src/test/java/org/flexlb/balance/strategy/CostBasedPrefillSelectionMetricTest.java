@@ -177,10 +177,10 @@ class CostBasedPrefillSelectionMetricTest {
     }
 
     @ParameterizedTest
-    @CsvSource({"5,1,false,BLOCKED", "50,1,false,BLOCKED", "5,2,false,SUCCESS",
-            "50,1,true,SUCCESS", "10,1,true,BLOCKED", "5,1,true,BLOCKED"})
-    void fullRequestCapacityIsSelectableOnlyWithEligibleQueuedPreemption(
-            int incomingPriority, int requestLimit, boolean preemptQueued, PlacementResult.Status expectedStatus) {
+    @CsvSource({"5,1,false", "50,1,false", "5,2,false",
+            "50,1,true", "10,1,true", "5,1,true"})
+    void queueNonBatchCanSelectBusyPrefillRegardlessOfQueuedPreemption(
+            int incomingPriority, int requestLimit, boolean preemptQueued) {
         registry.close();
         config.queueScheduler().getDecision().setMaxRequests(2);
         config.getDispatcher().setMaxInflightPerPrefillWorker(requestLimit);
@@ -215,10 +215,7 @@ class CostBasedPrefillSelectionMetricTest {
 
         PlacementResult<SelectedRole, RoleType> result = strategy.select(context, RoleType.PREFILL, null);
 
-        assertEquals(expectedStatus, result.status());
-        if (expectedStatus == PlacementResult.Status.BLOCKED) {
-            verify(cache, Mockito.never()).findMatchingEngines(any());
-        }
+        assertEquals(PlacementResult.Status.SUCCESS, result.status());
         if (result.status() == PlacementResult.Status.SUCCESS) {
             try (SelectedRole selected = result.value()) {
                 assertEquals("10.0.0.1", selected.serverStatus().getServerIp());
@@ -227,6 +224,36 @@ class CostBasedPrefillSelectionMetricTest {
         }
         assertEquals(1, endpoint.captureRouteProjectionInputs().queue().activeItems().size(),
                 "selection must not evict a lower-priority queued request");
+    }
+
+    @Test
+    void fullRequestCapacityDoesNotHidePrefillWhenQueuedRoutingIsEnabled() {
+        registry.close();
+        config.getDispatcher().setMaxInflightPerPrefillWorker(1);
+        config.queueScheduler().getDecision().setMaxRequests(2);
+        config.queueScheduler().getDecision().setMaxCollectionWaitMs(60_000L);
+        ConfigService service = mock(ConfigService.class);
+        when(service.loadBalanceConfig()).thenReturn(config);
+        registry = StrategyTestSupport.endpointRegistry(service);
+        publish("10.0.0.1", 8080);
+        strategy = new CostBasedPrefillStrategy(new WorkerDirectory(registry), cache, reporter);
+        PrefillEndpoint endpoint = (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0.1:8080@0");
+        Request queuedRequest = new Request();
+        queuedRequest.setRequestId("9001");
+        queuedRequest.setSeqLen(1_000L);
+        BalanceContext queuedContext = new BalanceContext(config);
+        queuedContext.setRequest(queuedRequest);
+        queuedContext.setSchedulingMetadata(SchedulingMetadata.explicit(
+                50, System.currentTimeMillis() + 120_000L));
+        ScheduledRequest queued = new ScheduledRequest(queuedContext, new CompletableFuture<>(),
+                null, null, null, endpoint, null, null, System.currentTimeMillis());
+        assertTrue(StrategyTestSupport.offer(endpoint, queued));
+        assertEquals(1L, endpoint.observedRequestCount());
+
+        try (SelectedRole selected = select()) {
+            assertEquals("10.0.0.1", selected.serverStatus().getServerIp());
+        }
+        verify(cache).findMatchingEngines(any());
     }
 
     @ParameterizedTest

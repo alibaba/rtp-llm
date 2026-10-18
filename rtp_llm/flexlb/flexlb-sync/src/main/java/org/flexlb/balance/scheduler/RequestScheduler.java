@@ -46,7 +46,8 @@ public final class RequestScheduler {
             BatchSchedulerReporter reporter,
             EvictionManager evictionManager,
             RequestRegistry requestRegistry,
-            PlacementAvailability placementAvailability) {
+            PlacementAvailability placementAvailability,
+            QueueCapacity queueCapacity) {
         Objects.requireNonNull(configService, "configService");
         this.router = Objects.requireNonNull(router, "router");
         this.endpointRegistry = Objects.requireNonNull(
@@ -61,7 +62,8 @@ public final class RequestScheduler {
                         Objects.requireNonNull(evictionManager, "evictionManager"),
                         this.requestRegistry,
                         Objects.requireNonNull(
-                                placementAvailability, "placementAvailability"))
+                                placementAvailability, "placementAvailability"),
+                        Objects.requireNonNull(queueCapacity, "queueCapacity"))
                 : null;
         this.encoderQueue = startupConfig != null && startupConfig.isQueue() && router.hasEncoderRole()
                 ? new EncoderQueueCoordinator(router, requestRegistry, startupConfig.isPriorityOrdering())

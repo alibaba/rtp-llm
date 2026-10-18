@@ -38,6 +38,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
     private final EndpointEventProjector endpointEvents;
     private final PlacementAvailability placementAvailability =
             new PlacementAvailability();
+    private final QueueCapacity queueCapacity = new QueueCapacity();
     private final BindingRouter router;
     private final EndpointRegistry registry;
     private final EvictionManager evictionManager;
@@ -67,7 +68,8 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                 endpointEvents,
                 batchReporter,
                 delivery,
-                placementAvailability);
+                placementAvailability,
+                queueCapacity);
         this.evictionManager = new EvictionManager(
                 requestReporter,
                 cancelChannel,
@@ -82,7 +84,8 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                 batchReporter,
                 evictionManager,
                 lifecycle,
-                placementAvailability);
+                placementAvailability,
+                queueCapacity);
         this.runtime = new SchedulerRuntime(
                 lifecycle, registry, batchReporter, requestReporter, scheduler);
     }

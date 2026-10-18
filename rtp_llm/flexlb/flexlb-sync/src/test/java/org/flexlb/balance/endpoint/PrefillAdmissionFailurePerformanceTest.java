@@ -46,7 +46,7 @@ class PrefillAdmissionFailurePerformanceTest {
             List<EndpointRegistry.PrefillRoutingEntry> directory = new ArrayList<>();
             for (int i = 0; i < workerCount; i++) {
                 var status = EndpointTestSupport.workerStatus(RoleType.PREFILL, "worker-" + i, 8080, 8090);
-                var endpoint = new PrefillEndpoint(status, config, delivery, events, reporter);
+                var endpoint = EndpointTestSupport.standalonePrefillEndpoint(status, config, delivery, events, reporter);
                 var observation = new WorkerStatusResponse();
                 observation.setAlive(true);
                 observation.setRunningQueryLen(1L);

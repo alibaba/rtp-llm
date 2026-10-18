@@ -97,6 +97,7 @@ class FlexlbConfigSchedulingModeTest {
                 """);
         assertTrue(nonBatchDefault.isFixedWindowDecision(),
                 "dispatcher type must not choose the decision policy");
+        assertEquals(4, nonBatchDefault.getDispatcher().getPrefillSubqueueLimitMultiplier());
 
         FlexlbConfig nonBatchSingle = ConfigTestFixtures.parse("""
                 {
@@ -110,6 +111,21 @@ class FlexlbConfigSchedulingModeTest {
                 nonBatchSingle.decisionPolicy().getType());
         DispatcherConfig dispatcher = nonBatchSingle.getDispatcher();
         assertEquals(2, dispatcher.getMaxInflightPerPrefillWorker());
+    }
+
+    @Test
+    void non_batch_route_queue_capacity_is_configurable_without_a_mode_switch() {
+        FlexlbConfig config = ConfigTestFixtures.parse("""
+                {"scheduler":{"type":"QUEUE"},"dispatcher":{"type":"NON_BATCH",
+                 "prefillSubqueueLimitMultiplier":8}}
+                """);
+        assertEquals(8, config.getDispatcher().getPrefillSubqueueLimitMultiplier());
+        assertThrows(ConfigValidationException.class, () -> ConfigTestFixtures.parse("""
+                {"dispatcher":{"prefillInflightLimitAtDelivery":false}}
+                """));
+        assertThrows(ConfigValidationException.class, () -> ConfigTestFixtures.parse("""
+                {"dispatcher":{"prefillSubqueueLimitMultiplier":0}}
+                """));
     }
 
     @Test

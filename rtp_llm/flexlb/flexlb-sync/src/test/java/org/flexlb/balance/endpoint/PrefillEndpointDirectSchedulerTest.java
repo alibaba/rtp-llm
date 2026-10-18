@@ -30,7 +30,7 @@ class PrefillEndpointDirectSchedulerTest {
         config.setDispatcher(DispatcherConfig.nonBatch());
         config.getDispatcher().setMaxInflightPerPrefillWorker(4);
         var runtime = EndpointTestSupport.requestRuntime();
-        PrefillEndpoint endpoint = new PrefillEndpoint(
+        PrefillEndpoint endpoint = EndpointTestSupport.standalonePrefillEndpoint(
                 EndpointTestSupport.workerStatus(role, "127.0.0.82", 8082, 9082),
                 () -> config, EndpointTestSupport.routeStrategy(runtime), runtime.events(),
                 mock(BatchSchedulerReporter.class),
@@ -86,7 +86,7 @@ class PrefillEndpointDirectSchedulerTest {
         EndpointTestSupport.TestRequestRuntime requestRuntime =
                 EndpointTestSupport.requestRuntime();
         PrefillEndpoint endpoint = assertDoesNotThrow(() -> {
-            PrefillEndpoint created = new PrefillEndpoint(
+            PrefillEndpoint created = EndpointTestSupport.standalonePrefillEndpoint(
                     workerStatus(),
                     () -> config,
                     EndpointTestSupport.routeStrategy(requestRuntime),
@@ -107,7 +107,7 @@ class PrefillEndpointDirectSchedulerTest {
         initial.getDispatcher().setMaxInflightPerPrefillWorker(1);
         AtomicReference<FlexlbConfig> current = new AtomicReference<>(initial);
         var runtime = EndpointTestSupport.requestRuntime();
-        PrefillEndpoint endpoint = new PrefillEndpoint(workerStatus(), current::get,
+        PrefillEndpoint endpoint = EndpointTestSupport.standalonePrefillEndpoint(workerStatus(), current::get,
                 EndpointTestSupport.routeStrategy(runtime), runtime.events(),
                 mock(BatchSchedulerReporter.class), new org.flexlb.balance.scheduler.PlacementAvailability());
         endpoint.startGeneration();

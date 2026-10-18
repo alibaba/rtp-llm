@@ -3,6 +3,7 @@ package org.flexlb.balance.endpoint;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.scheduler.EndpointEventProjector;
 import org.flexlb.balance.scheduler.PlacementAvailability;
+import org.flexlb.balance.scheduler.QueueCapacity;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
@@ -129,6 +130,7 @@ public class EndpointRegistry {
     private final BatchSchedulerReporter reporter;
     private final DeliveryStrategy deliveryStrategy;
     private final PlacementAvailability placementAvailability;
+    private final QueueCapacity queueCapacity;
     private final Object lifecycleGate = new Object();
     private RegistryPhase registryPhase = RegistryPhase.OPEN;
     private int inflightPublications;
@@ -157,9 +159,10 @@ public class EndpointRegistry {
     @Autowired
     public EndpointRegistry(ConfigService configService,
                             EndpointEventProjector endpointEvents,
-                            BatchSchedulerReporter reporter,
-                            DeliveryStrategy deliveryStrategy,
-                            PlacementAvailability placementAvailability) {
+                             BatchSchedulerReporter reporter,
+                             DeliveryStrategy deliveryStrategy,
+                             PlacementAvailability placementAvailability,
+                             QueueCapacity queueCapacity) {
         this.configService = java.util.Objects.requireNonNull(
                 configService, "configService");
         this.endpointEvents = java.util.Objects.requireNonNull(
@@ -169,6 +172,7 @@ public class EndpointRegistry {
                 deliveryStrategy, "deliveryStrategy");
         this.placementAvailability = java.util.Objects.requireNonNull(
                 placementAvailability, "placementAvailability");
+            this.queueCapacity = java.util.Objects.requireNonNull(queueCapacity, "queueCapacity");
     }
 
     public WorkerEndpoint get(RoleType roleType, String ipPort) {
@@ -747,7 +751,9 @@ public class EndpointRegistry {
                     deliveryStrategy,
                     endpointEvents,
                     reporter,
-                    placementAvailability);
+                    placementAvailability,
+                    this,
+                    queueCapacity);
             case DECODE -> new DecodeEndpoint(
                     status, endpointEvents, placementAvailability);
             case ENCODER -> new EncoderEndpoint(status, endpointEvents);

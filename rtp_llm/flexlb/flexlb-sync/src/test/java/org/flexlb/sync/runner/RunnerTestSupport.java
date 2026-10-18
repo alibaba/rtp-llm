@@ -5,6 +5,7 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.scheduler.EndpointEventProjector;
 import org.flexlb.balance.scheduler.PlacementAvailability;
+import org.flexlb.balance.scheduler.QueueCapacity;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
@@ -35,7 +36,8 @@ public final class RunnerTestSupport {
                 NOOP_EVENT_SINK,
                 Mockito.mock(BatchSchedulerReporter.class),
                 delivery,
-                new PlacementAvailability());
+                new PlacementAvailability(),
+                new QueueCapacity());
     }
 
     public static WorkerStatus discovered(

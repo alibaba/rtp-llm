@@ -263,7 +263,8 @@ class RequestResourceAccountingTest {
             requests = new RequestRegistry(service, reporter, requestReporter);
             var projector = new EndpointEventProjector(requests);
             var endpoints = new EndpointRegistry(service, projector, reporter,
-                    new RouteDeliveryStrategy(requests, new DeliveryMetrics(reporter)), new PlacementAvailability());
+                    new RouteDeliveryStrategy(requests, new DeliveryMetrics(reporter)),
+                    new PlacementAvailability(), new QueueCapacity());
             runtime = new SchedulerRuntime(requests, endpoints, reporter, requestReporter);
             var worker = WorkerStatus.createDiscovered(RoleType.PREFILL, "g", "127.0.0.1", 8080, 8081, "test");
             worker.lock.lock();

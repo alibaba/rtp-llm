@@ -603,6 +603,8 @@ public final class PrefillState {
     private volatile long mutationVersion;
     /** Published at ownership mutation boundaries; admission still checks under the lock. */
     private volatile long outstandingRequestCount;
+    /** Committed routes and unrecognized Engine work; ACTIVE queue items do not occupy delivery seats. */
+    private volatile long dispatchedRequestCount;
     private long requestCountsVersion = -1;
     private long[] requestCountsByPriority;
     /** Derived immutable work; ACTIVE queue mutations leave committed work unchanged. */
@@ -622,6 +624,8 @@ public final class PrefillState {
         if (outstandingRequestCount != count) {
             outstandingRequestCount = count;
         }
+        dispatchedRequestCount = saturatedAdd(
+                requests.size() - activeIndex.size(), unknownEngineRequestCount);
     }
 
     public PrefillState(ReentrantLock lock, PrefillActiveIndex activeIndex,
@@ -757,21 +761,37 @@ public final class PrefillState {
         }
     }
 
-    /** Select only uncommitted requests; Engine work cannot release a local queue seat. */
+    /**
+     * Select only uncommitted requests; Engine work cannot release a local queue seat.
+     */
     public List<ScheduledRequest> queuedPreemptionVictimsUnderLock(int priority, long requestLimit) {
         requireLock();
-        long required = requestSlotsToReleaseUnderLock(requestLimit);
-        if (!PriorityNormalizer.hasPriority(priority) || required == 0L || required > activeIndex.size()) {
+        return findQueuedPreemptionVictimsUnderLock(priority, requestSlotsToReleaseUnderLock(requestLimit));
+    }
+
+    public ScheduledRequest oneQueuedPreemptionVictimUnderLock(int priority) {
+        requireLock();
+        List<ScheduledRequest> victims = findQueuedPreemptionVictimsUnderLock(priority, 1L);
+        return victims.isEmpty() ? null : victims.getFirst();
+    }
+
+    private List<ScheduledRequest> findQueuedPreemptionVictimsUnderLock(int priority, long victimsNeeded) {
+        requireLock();
+        if (!PriorityNormalizer.hasPriority(priority) || victimsNeeded == 0L || victimsNeeded > activeIndex.size()) {
             return List.of();
         }
         List<ScheduledRequest> candidates = new ArrayList<>();
         for (ScheduledRequest item : activeIndex) {
-            if (isQueuedPreemptionCandidate(item, priority)) { candidates.add(item); }
+            if (isQueuedPreemptionCandidate(item, priority)) {
+                candidates.add(item);
+            }
         }
-        if (candidates.size() < required) { return List.of(); }
+        if (candidates.size() < victimsNeeded) {
+            return List.of();
+        }
         candidates.sort(Comparator.comparingInt(ScheduledRequest::priority)
                 .thenComparing(Comparator.comparingLong(ScheduledRequest::enqueueSeq).reversed()));
-        return candidates.subList(0, (int) required);
+        return candidates.subList(0, (int) victimsNeeded);
     }
 
     private boolean isQueuedPreemptionCandidate(ScheduledRequest item, int priority) {
@@ -788,13 +808,14 @@ public final class PrefillState {
                 : Math.max(0L, saturatedAdd(requests.size(), unknownEngineRequestCount) - requestLimit + 1L);
     }
 
-    /** Transfer exact queued request seats and OPEN route reservations in one ownership transaction. */
-    public RouteReservation replaceQueuedRoutesUnderLock(
-            List<ScheduledRequest> victims, List<RouteReservation> reservations,
-            ScheduledRequest incoming, long requestLimit) {
+    /**
+     * Replace the selected waiting requests and their route reservations in one transaction.
+     */
+    public RouteReservation replaceQueuedRoutesUnderLock(List<ScheduledRequest> victims,
+                                                         List<RouteReservation> reservations,
+                                                         ScheduledRequest incoming) {
         requireLock();
         if (victims.isEmpty() || victims.size() != reservations.size()
-                || victims.size() != requestSlotsToReleaseUnderLock(requestLimit)
                 || requests.containsKey(incoming.requestId())) {
             return null;
         }
@@ -989,6 +1010,19 @@ public final class PrefillState {
     public CapacityBoundary.Availability batchAvailability(int maximum) {
         requirePositiveBatchLimit(maximum);
         return new CapacityAvailability(maximum);
+    }
+
+    public boolean canDeliver(long maxDispatchLimit, int newReqNum) {
+        return dispatchedRequestCount < maxDispatchLimit
+                && newReqNum <= maxDispatchLimit - dispatchedRequestCount;
+    }
+
+    public long dispatchedRequestCount() {
+        return dispatchedRequestCount;
+    }
+
+    public CapacityBoundary.Availability routeAvailability(long maximum) {
+        return new DeliveryAvailability(this, maximum);
     }
 
     private static void requirePositiveBatchLimit(int maximum) {

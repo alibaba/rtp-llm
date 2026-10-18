@@ -18,6 +18,7 @@ import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.VictimStage;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.enums.PrefillQueueEnqueueResult;
 import org.flexlb.util.Logger;
 import org.flexlb.util.PriorityNormalizer;
 import org.flexlb.util.PriorityOrdering;
@@ -166,7 +167,7 @@ public final class WorkerBatcher {
                     Objects.requireNonNull(item, "item"),
                     Objects.requireNonNull(unavailable, "unavailable"),
                     0L, 0L, 0L, unavailable.projectionSemantics() == null
-                            ? "Prefill batch capacity exhausted" : unavailable.projectionSemantics().blockedDetail());
+                            ? "Prefill delivery capacity exhausted" : unavailable.projectionSemantics().blockedDetail());
         }
 
         private static BatcherCycleResult awaitingSchedulingChange(
@@ -238,6 +239,7 @@ public final class WorkerBatcher {
 
     private final String key;
     private final PrefillEndpoint prefillEndpoint;
+    private final QueueCapacity queueCapacity;
     private final EndpointEventProjector endpointEvents;
     private final FlexlbConfig config;
     private final Supplier<FlexlbConfig> configSupplier;
@@ -306,20 +308,23 @@ public final class WorkerBatcher {
             PrefillEndpoint prefillEp,
             FlexlbConfig config,
             DeliveryStrategy deliveryStrategy,
-            EndpointEventProjector endpointEvents) {
-        this(key, prefillEp, () -> config, deliveryStrategy, endpointEvents);
+            EndpointEventProjector endpointEvents,
+            QueueCapacity queueCapacity) {
+        this(key, prefillEp, () -> config, deliveryStrategy, endpointEvents, queueCapacity);
     }
 
     public WorkerBatcher(String key,
-                         PrefillEndpoint prefillEp,
-                         Supplier<FlexlbConfig> configSupplier,
-                         DeliveryStrategy deliveryStrategy,
-                         EndpointEventProjector endpointEvents) {
+                          PrefillEndpoint prefillEp,
+                          Supplier<FlexlbConfig> configSupplier,
+                          DeliveryStrategy deliveryStrategy,
+                          EndpointEventProjector endpointEvents,
+                          QueueCapacity queueCapacity) {
         this.configSupplier = Objects.requireNonNull(configSupplier, "configSupplier");
         FlexlbConfig config = Objects.requireNonNull(
                 configSupplier.get(), "loadBalanceConfig");
         this.key = key;
         this.prefillEndpoint = prefillEp;
+        this.queueCapacity = Objects.requireNonNull(queueCapacity, "queueCapacity");
         this.config = config;
         this.queueScheduling = config.isQueue();
         this.singleDecision = config.isSingleDecision();
@@ -389,7 +394,7 @@ public final class WorkerBatcher {
         }
     }
 
-    public boolean offer(ScheduledRequest exactItem) {
+    public PrefillQueueEnqueueResult offerWithResult(ScheduledRequest exactItem) {
         if (!queueScheduling) {
             throw new IllegalStateException(
                     "DIRECT Prefill generation cannot accept queued work");
@@ -397,25 +402,50 @@ public final class WorkerBatcher {
         ScheduledRequest item = exactItem;
         requireExactEndpoint(item, "incoming item");
         if (runtimeState != RuntimeState.RUNNING || stopped) {
-            return false;
+            return PrefillQueueEnqueueResult.REJECTED;
         }
         return enqueue(item);
     }
 
-    private boolean enqueue(ScheduledRequest item) {
+    private PrefillQueueEnqueueResult enqueue(ScheduledRequest item) {
         EnqueueAttempt attempt;
         List<ScheduledRequest> victims = List.of();
+        boolean subQueueCountAdded = false;
         queueLock.lock();
         try {
-            attempt = enqueueUnderLock(item);
-            if (!attempt.accepted() && attempt.failure() == null && !stopped
-                    && config.allowsPreemption(VictimStage.PREFILL_QUEUED)) {
-                long maxOutstandingRequests = maxOutstandingRequests(item);
-                victims = prefillState.queuedPreemptionVictimsUnderLock(item.priority(), maxOutstandingRequests);
-                if (!victims.isEmpty()) {
-                    attempt = replaceQueuedRequestsUnderLock(item, victims);
+            if (prefillEndpoint.isEngineSubQueueMode()) {
+                subQueueCountAdded = prefillEndpoint.tryReserveEngineSubQueueSlot(item.ctx().getConfig());
+                if (subQueueCountAdded) {
+                    attempt = enqueueUnderLock(item);
+                } else {
+                    // Shared queue full: replace only a waiting request on this endpoint.
+                    attempt = new EnqueueAttempt(false, null, null);
+                    if (!stopped && config.allowsPreemption(VictimStage.PREFILL_QUEUED)) {
+                        ScheduledRequest victim = prefillState.oneQueuedPreemptionVictimUnderLock(item.priority());
+                        if (victim != null) {
+                            victims = List.of(victim);
+                            attempt = replaceQueuedRequestsUnderLock(item, victims);
+                        }
+                    }
+                }
+            } else {
+                // BATCH counts waiting requests but does not apply the shared limit.
+                prefillEndpoint.increaseEngineSubQueueCount();
+                subQueueCountAdded = true;
+                attempt = enqueueUnderLock(item);
+                if (!attempt.accepted() && attempt.failure() == null && !stopped
+                        && config.allowsPreemption(VictimStage.PREFILL_QUEUED)) {
+                    long maxOutstandingRequests = maxOutstandingRequests(item);
+                    victims = prefillState.queuedPreemptionVictimsUnderLock(item.priority(), maxOutstandingRequests);
+                    if (!victims.isEmpty()) {
+                        attempt = replaceQueuedRequestsUnderLock(item, victims);
+                    }
                 }
             }
+            queueCapacity.releaseEngineSubQueueSlot(prefillEndpoint.getStatus().getRole(), subQueueCountAdded && !attempt.accepted());
+        } catch (RuntimeException | Error failure) {
+            queueCapacity.releaseEngineSubQueueSlot(prefillEndpoint.getStatus().getRole(), subQueueCountAdded);
+            throw failure;
         } finally {
             queueLock.unlock();
         }
@@ -435,7 +465,13 @@ public final class WorkerBatcher {
                 endpointEvents.onQueuedItemPreempted(victim, item);
             }
         }
-        return attempt.accepted();
+        if (attempt.accepted()) {
+            return PrefillQueueEnqueueResult.ACCEPTED;
+        }
+        if (!subQueueCountAdded) {
+            return PrefillQueueEnqueueResult.ENGINE_SUBQUEUE_LIMIT_REACHED;
+        }
+        return PrefillQueueEnqueueResult.REJECTED;
     }
 
     private EnqueueAttempt replaceQueuedRequestsUnderLock(ScheduledRequest incoming,
@@ -445,12 +481,15 @@ public final class WorkerBatcher {
         try {
             for (ScheduledRequest victim : victims) {
                 PrefillState.RouteReservation reservation = victim.takePublishedRouteReservation();
-                if (reservation == null) { return new EnqueueAttempt(false, null, null); }
+                if (reservation == null) {
+                    return new EnqueueAttempt(false, null, null);
+                }
                 reservations.add(reservation);
             }
-            long maxOutstandingRequests = maxOutstandingRequests(incoming);
-            replacement = prefillState.replaceQueuedRoutesUnderLock(victims, reservations, incoming, maxOutstandingRequests);
-            if (replacement == null) { return new EnqueueAttempt(false, null, null); }
+            replacement = prefillState.replaceQueuedRoutesUnderLock(victims, reservations, incoming);
+            if (replacement == null) {
+                return new EnqueueAttempt(false, null, null);
+            }
             if (!incoming.bindPublishedRouteReservation(replacement)) {
                 throw new IllegalStateException("replacement request already owns a Prefill reservation: " + incoming.requestId());
             }
@@ -783,6 +822,9 @@ public final class WorkerBatcher {
         } finally {
             queueLock.unlock();
         }
+        if (item != null && prefillEndpoint.isEngineSubQueueMode()) {
+            signalCapacityAvailable();
+        }
         return item;
     }
 
@@ -925,8 +967,7 @@ public final class WorkerBatcher {
 
     /** Caller holds {@link #queueLock}. */
     private boolean publishActiveIndexUnderLock(ScheduledRequest item) {
-        long maxOutstandingRequests = maxOutstandingRequests(item);
-        boolean published = prefillState.enqueueActiveUnderLock(item, maxOutstandingRequests);
+        boolean published = prefillState.enqueueActiveUnderLock(item, 0L);
         if (published) {
             queueVersion.incrementAndGet();
         }
@@ -941,24 +982,28 @@ public final class WorkerBatcher {
 
     /** Caller holds {@link #queueLock}. */
     private boolean removeTerminalActiveUnderLock(ScheduledRequest item) {
-        if (!item.requiresRouteReservation()) {
-            return prefillState.terminalizeActiveUnderLock(item);
-        }
-        PrefillState.RouteReservation reservation =
-                item.takePublishedRouteReservation();
-        if (reservation == null) {
-            return false;
-        }
         boolean removed;
-        try {
-            removed = prefillState.terminalizeActiveRouteUnderLock(
-                    item, reservation);
-        } catch (Throwable failure) {
-            restoreRouteReservation(item, reservation);
-            throw failure;
+        if (!item.requiresRouteReservation()) {
+            removed = prefillState.terminalizeActiveUnderLock(item);
+        } else {
+            PrefillState.RouteReservation reservation =
+                    item.takePublishedRouteReservation();
+            if (reservation == null) {
+                return false;
+            }
+            try {
+                removed = prefillState.terminalizeActiveRouteUnderLock(
+                        item, reservation);
+            } catch (Throwable failure) {
+                restoreRouteReservation(item, reservation);
+                throw failure;
+            }
+            if (!removed) {
+                restoreRouteReservation(item, reservation);
+            }
         }
-        if (!removed) {
-            restoreRouteReservation(item, reservation);
+        if (removed) {
+            queueCapacity.releaseEngineSubQueueSlot(prefillEndpoint.getStatus().getRole());
         }
         return removed;
     }
@@ -987,6 +1032,7 @@ public final class WorkerBatcher {
         ScheduledRequest item =
                 prefillState.detachNextActiveForStopUnderLock();
         if (item != null) {
+            queueCapacity.releaseEngineSubQueueSlot(prefillEndpoint.getStatus().getRole());
             queueVersion.incrementAndGet();
         }
         return item;
@@ -1300,6 +1346,12 @@ public final class WorkerBatcher {
                 }
             }
             precedingWork = transaction.commitUnderLock();
+            // Committed requests no longer count toward either waiting limit.
+            var routingRole = prefillEndpoint.getStatus().getRole();
+            for (ScheduledRequest item : items) {
+                queueCapacity.releaseEngineSubQueueSlot(routingRole);
+                queueCapacity.decreaseTotalQueueCount(item.future());
+            }
             try {
                 removedTerminalBoundary = removeSelectionBoundaryUnderLock(
                         transaction.blockedItem(),

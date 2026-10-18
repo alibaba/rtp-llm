@@ -44,6 +44,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
     private final EndpointEventProjector endpointEvents;
     private final PlacementAvailability placementAvailability =
             new PlacementAvailability();
+    private final QueueCapacity queueCapacity = new QueueCapacity();
     private final EndpointRegistry registry;
     private final RequestScheduler scheduler;
     private final SchedulerRuntime runtime;
@@ -83,7 +84,8 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                 endpointEvents,
                 batchReporter,
                 deliveryStrategy,
-                placementAvailability);
+                placementAvailability,
+                queueCapacity);
         this.router = new BindingRouter(new org.flexlb.sync.status.WorkerDirectory(registry), configService, lifecycle);
         var cancelChannel = org.mockito.Mockito.mock(org.flexlb.balance.eviction.EngineCancelChannel.class);
         var preemption = new org.flexlb.balance.eviction.DecodePreemptionCoordinator(cancelChannel, lifecycle, requestReporter);
@@ -94,7 +96,8 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                 batchReporter,
                 new EvictionManager(requestReporter, cancelChannel, preemption, lifecycle, batchReporter),
                 lifecycle,
-                placementAvailability);
+                placementAvailability,
+                queueCapacity);
         this.runtime = new SchedulerRuntime(
                 lifecycle, registry, batchReporter, requestReporter, scheduler);
     }
