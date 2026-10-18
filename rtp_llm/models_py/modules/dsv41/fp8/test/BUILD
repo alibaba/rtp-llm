@@ -2,6 +2,175 @@ load("@pip_dsv4_test//:requirements.bzl", test_requirement = "requirement")
 
 package(default_visibility = ["//visibility:public"])
 
+py_test(
+    name = "test_v41_sm90_prepare_meta",
+    srcs = ["test_v41_sm90_prepare_meta.py", "//rtp_llm/test/pytest:pytest_main.py"],
+    main = "//rtp_llm/test/pytest:pytest_main.py",
+    args = ["--cuda-devices", "1", "--cuda-major", "9", "$(location :test_v41_sm90_prepare_meta.py)"],
+    deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:modules", "//rtp_llm:jit_cache_env", test_requirement("pytest")],
+    tags = ["manual", "dsv41_cuda13", "H20_CU13"],
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+    target_compatible_with = select({"@//:using_cuda13_x86": [], "//conditions:default": ["@platforms//:incompatible"]}),
+    legacy_create_init = 0,
+)
+
+py_test(
+    name = "test_v41_sm90_decode_candidate",
+    srcs = ["test_v41_sm90_decode_candidate.py", "//rtp_llm/test/pytest:pytest_main.py"],
+    main = "//rtp_llm/test/pytest:pytest_main.py",
+    args = ["--cuda-devices", "1", "--cuda-major", "9", "$(location :test_v41_sm90_decode_candidate.py)"],
+    deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:modules", "//rtp_llm:jit_cache_env", test_requirement("pytest")],
+    tags = ["manual", "dsv41_cuda13", "H20_CU13"],
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+    target_compatible_with = select({"@//:using_cuda13_x86": [], "//conditions:default": ["@platforms//:incompatible"]}),
+    legacy_create_init = 0,
+)
+
+py_test(
+    name = "test_v41_sm90_indexer_q",
+    srcs = ["test_v41_sm90_indexer_q.py", "//rtp_llm/test/pytest:pytest_main.py"],
+    main = "//rtp_llm/test/pytest:pytest_main.py",
+    args = ["--cuda-devices", "1", "--cuda-major", "9", "$(location :test_v41_sm90_indexer_q.py)"],
+    deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:modules", "//rtp_llm:jit_cache_env", test_requirement("pytest")],
+    tags = ["manual", "dsv41_cuda13", "H20_CU13"],
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+    target_compatible_with = select({"@//:using_cuda13_x86": [], "//conditions:default": ["@platforms//:incompatible"]}),
+    legacy_create_init = 0,
+)
+
+py_test(
+    name = "test_v41_sm90_topk",
+    srcs = ["test_v41_sm90_topk.py", "//rtp_llm/test/pytest:pytest_main.py"],
+    main = "//rtp_llm/test/pytest:pytest_main.py",
+    args = ["--cuda-devices", "1", "--cuda-major", "9", "$(location :test_v41_sm90_topk.py)"],
+    deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:modules", "//rtp_llm:jit_cache_env", test_requirement("pytest")],
+    tags = ["manual", "dsv41_cuda13", "H20_CU13"],
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+    target_compatible_with = select({"@//:using_cuda13_x86": [], "//conditions:default": ["@platforms//:incompatible"]}),
+    legacy_create_init = 0,
+)
+
+py_test(
+    name = "test_v41_sm90_output_projection",
+    srcs = ["test_v41_sm90_output_projection.py", "//rtp_llm/test/pytest:pytest_main.py"],
+    main = "//rtp_llm/test/pytest:pytest_main.py",
+    args = ["--cuda-devices", "1", "--cuda-major", "9", "$(location :test_v41_sm90_output_projection.py)"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:jit_cache_env",
+        test_requirement("pytest"),
+    ],
+    tags = ["manual", "dsv41_cuda13", "H20_CU13"],
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+    target_compatible_with = select({
+        "@//:using_cuda13_x86": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    legacy_create_init = 0,
+)
+
+py_test(
+    name = "test_v41_sm90_v4_cache",
+    srcs = glob(["*.py"]) + ["//rtp_llm/test/pytest:pytest_main.py"],
+    main = "//rtp_llm/test/pytest:pytest_main.py",
+    args = ["--cuda-devices", "1", "--cuda-major", "9", "$(location :test_v41_sm90_v4_cache.py)"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm/models_py:dsv41_sm90_attention_reference",
+        "//rtp_llm:jit_cache_env",
+        test_requirement("pytest"),
+    ],
+    tags = ["manual", "dsv41_cuda13", "H20_CU13"],
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+    target_compatible_with = select({
+        "@//:using_cuda13_x86": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    legacy_create_init = 0,
+)
+
+py_test(
+    name = "test_v41_sm90_paged_decode",
+    srcs = ["test_v41_sm90_paged_decode.py", "test_v41_flash_mla_cache_format.py", "//rtp_llm/test/pytest:pytest_main.py"],
+    main = "//rtp_llm/test/pytest:pytest_main.py",
+    args = ["--cuda-devices", "1", "--cuda-major", "9", "$(location :test_v41_sm90_paged_decode.py)"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm/models_py:dsv41_sm90_attention_reference",
+        "//rtp_llm:jit_cache_env",
+        test_requirement("pytest"),
+    ],
+    tags = ["manual", "dsv41_cuda13", "H20_CU13"],
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+    target_compatible_with = select({
+        "@//:using_cuda13_x86": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    legacy_create_init = 0,
+)
+
+py_test(
+    name = "test_v41_sm90_attention",
+    srcs = ["test_v41_sm90_attention.py", "test_v41_flash_mla_cache_format.py", "//rtp_llm/test/pytest:pytest_main.py"],
+    main = "//rtp_llm/test/pytest:pytest_main.py",
+    args = ["--cuda-devices", "1", "--cuda-major", "9", "$(location :test_v41_sm90_attention.py)"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm/models_py:dsv41_sm90_attention_reference",
+        "//rtp_llm:jit_cache_env",
+        test_requirement("pytest"),
+    ],
+    tags = ["dsv41_cuda13", "H20_CU13"],
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+    target_compatible_with = select({
+        "@//:using_cuda13_x86": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    legacy_create_init = 0,
+)
+
+# Reuse the existing exact TopK contract on Hopper, including tie overflow,
+# candidate-mask holes and repeat/graph determinism. Legacy backend benchmarks
+# in that file remain in the existing SM100 target.
+py_test(
+    name = "test_v41_sm90_topk_contract",
+    srcs = ["test_v41_prefill_topk.py", "//rtp_llm/test/pytest:pytest_main.py"],
+    main = "//rtp_llm/test/pytest:pytest_main.py",
+    args = [
+        "--cuda-devices", "1", "--cuda-major", "9",
+        "$(location :test_v41_prefill_topk.py)::V41PrefillTopKCUDA::test_mixed_exact_boundary_matches_oracle_in_all_dispatch_paths",
+        "$(location :test_v41_prefill_topk.py)::V41PrefillTopKCUDA::test_strided_short_long_and_clamped_bounds",
+        "$(location :test_v41_prefill_topk.py)::V41PrefillTopKCUDA::test_nan_inf_ties_and_all_masked_rows",
+        "$(location :test_v41_prefill_topk.py)::V41PrefillTopKCUDA::test_repeated_selection_is_bitwise_stable",
+    ],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:jit_cache_env",
+        test_requirement("pytest"),
+    ],
+    tags = ["dsv41_cuda13", "H20_CU13"],
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+    target_compatible_with = select({
+        "@//:using_cuda13_x86": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    legacy_create_init = 0,
+)
+
 _TESTS = [
     "test_v41_attention_pool_warmup",
     "test_attention_v41",
@@ -49,6 +218,69 @@ _TESTS = [
     "test_v41_wo_a_quant",
 ]
 
+py_test(
+    name = "test_v41_sm90_indexer_multiquery",
+    srcs = ["test_v41_sm90_indexer_multiquery.py", "test_v41_sm90_indexer_tuning.py", "//rtp_llm/test/pytest:pytest_main.py"],
+    main = "//rtp_llm/test/pytest:pytest_main.py",
+    args = ["--cuda-devices", "1", "--cuda-major", "9", "$(location :test_v41_sm90_indexer_multiquery.py)"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:jit_cache_env",
+        test_requirement("pytest"),
+    ],
+    tags = ["manual", "dsv41_cuda13", "H20_CU13"],
+    env = {"GPU_COUNT": "1", "PYTHONNOUSERSITE": "1"},
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+    target_compatible_with = select({
+        "@//:using_cuda13_x86": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    legacy_create_init = 0,
+)
+
+py_test(
+    name = "test_v41_sm90_indexer_tuning",
+    srcs = ["test_v41_sm90_indexer_tuning.py", "//rtp_llm/test/pytest:pytest_main.py"],
+    main = "//rtp_llm/test/pytest:pytest_main.py",
+    args = ["--cuda-devices", "1", "--cuda-major", "9", "$(location :test_v41_sm90_indexer_tuning.py)"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:jit_cache_env",
+        test_requirement("pytest"),
+    ],
+    tags = ["manual", "dsv41_cuda13", "H20_CU13"],
+    env = {"GPU_COUNT": "1", "PYTHONNOUSERSITE": "1"},
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+    target_compatible_with = select({
+        "@//:using_cuda13_x86": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    legacy_create_init = 0,
+)
+
+py_test(
+    name = "test_v41_sm90_indexer",
+    srcs = ["test_v41_sm90_indexer.py", "//rtp_llm/test/pytest:pytest_main.py"],
+    main = "//rtp_llm/test/pytest:pytest_main.py",
+    args = ["--cuda-devices", "1", "--cuda-major", "9", "$(location :test_v41_sm90_indexer.py)"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:jit_cache_env",
+        test_requirement("pytest"),
+    ],
+    tags = ["dsv41_cuda13", "H20_CU13"],
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+    target_compatible_with = select({
+        "@//:using_cuda13_x86": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    legacy_create_init = 0,
+)
+
 [
     py_test(
         name = name,
@@ -71,4 +303,32 @@ _TESTS = [
         legacy_create_init = 0,
     )
     for name in _TESTS
+]
+
+# CPU dispatch contracts compiled against the CUDA13 x86 module closure.
+[
+    py_test(
+        name = name + "_sm90",
+        srcs = [name + ".py", "//rtp_llm/test/pytest:pytest_main.py"],
+        main = "//rtp_llm/test/pytest:pytest_main.py",
+        args = ["--cuda-devices", "0", "$(location :" + name + ".py)::" + case],
+        deps = [
+            "//rtp_llm:testlib",
+            "//rtp_llm/models_py:modules",
+            "//rtp_llm:jit_cache_env",
+            test_requirement("pytest"),
+        ],
+        tags = ["dsv41_cuda13", "H20_CU13"],
+        env = {"GPU_COUNT": "0", "PYTHONNOUSERSITE": "1"},
+        target_compatible_with = select({
+            "@//:using_cuda13_x86": [],
+            "//conditions:default": ["@platforms//:incompatible"],
+        }),
+        legacy_create_init = 0,
+    )
+    for name, case in [
+        ("test_attention_v41_sparse_selection", "SparseSelectionIntegrationCPU"),
+        ("test_v41_prefill_indexer", "V41PrefillIndexerCPU"),
+        ("test_v41_decode_global", "V41DecodeGlobalCPU"),
+    ]
 ]

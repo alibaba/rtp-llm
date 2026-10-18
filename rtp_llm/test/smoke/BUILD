@@ -1,3 +1,5 @@
+load("//rtp_llm/test/perf_test:deepseek_v41_sm90_tests.bzl", "deepseek_v41_sm90_role_test")
+
 load(":defs.bzl", "custom_smoke_test", "smoke_test")
 package(default_visibility = ["//visibility:public"])
 
@@ -187,6 +189,50 @@ custom_smoke_test(
     data = ["//rtp_llm:sdk"],
 )
 
+
+
+
+custom_smoke_test(
+    name = "deepseek_v41_flash_ced_bounded_pd_cp4_dp4_sm90",
+    main = "deepseek_v41_sm90_pd_contract_test.py",
+    target_compatible_with = select({
+        "@//:using_cuda13_x86": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    # Eight reserved cards, split into two independent four-card replicas.
+    # Explicit small KV budget is for the short correctness contract only.
+    smoke_args = "--tp_size 4 --ep_size 4 --dp_size 1 --world_size 8 --act_type BF16 --fp8_kv_cache 1 --seq_size_per_block 256 --kernel_seq_size_per_block 128 --max_seq_len 4096 --max_context_batch_size 1 --concurrency_limit 1 --reuse_cache 1 --load_method scratch --reserver_runtime_mem_mb 8192 --kv_cache_mem_mb 1024 --cache_store_rdma_mode 0 --use_local 1 --load_cache_timeout_ms 120000 --prefill_cp_kv_cache_sharded 1 --prefill_cp_size 4 --use_deepep_moe 1 --use_all_gather 0 --use_deepep_low_latency 0 --use_deepep_internode 0",
+    gpu_type = ["H20_CU13"],
+    tags = ["manual", "dsv41_cuda13", "model_contract", "pd_contract"],
+    data = [
+        "//rtp_llm:sdk",
+        "deepseek_v41_contract_test.py",
+        "deepseek_v41_pd_contract_test.py",
+    ],
+)
+
+# Reduced-layer determinism fixture; full-model CED coverage stays separate.
+custom_smoke_test(
+    name = "deepseek_v41_flash_pd_cp4_dp4_24layer_sm90_golden",
+    main = "deepseek_v41_sm90_pd_24layer_golden_test.py",
+    target_compatible_with = select({
+        "@//:using_cuda13_x86": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    # Eight reserved cards, split into two independent four-card replicas.
+    # Explicit small KV budget is for the short correctness contract only.
+    smoke_args = "--tp_size 4 --ep_size 4 --dp_size 1 --world_size 8 --act_type BF16 --fp8_kv_cache 1 --seq_size_per_block 256 --kernel_seq_size_per_block 128 --max_seq_len 4096 --max_context_batch_size 1 --concurrency_limit 1 --reuse_cache 1 --load_method scratch --reserver_runtime_mem_mb 8192 --kv_cache_mem_mb 1024 --cache_store_rdma_mode 0 --use_local 1 --load_cache_timeout_ms 120000 --prefill_cp_kv_cache_sharded 1 --prefill_cp_size 4 --use_deepep_moe 1 --use_all_gather 0 --use_deepep_low_latency 0 --use_deepep_internode 0",
+    gpu_type = ["H20_CU13"],
+    tags = ["manual", "dsv41_cuda13", "model_contract", "pd_contract"],
+    data = [
+        "//rtp_llm:sdk",
+        "deepseek_v41_contract_test.py",
+        "deepseek_v41_pd_contract_test.py",
+        "deepseek_v41_sm90_pd_contract_test.py",
+        "deepseek_v41_sm90_pd_24layer_golden.json",
+    ],
+)
+
 custom_smoke_test(
     name = "deepseek_v41_flash_ced_bounded_pd_cp2_tp2_sm100_arm",
     main = "deepseek_v41_pd_contract_test.py",
@@ -203,4 +249,16 @@ custom_smoke_test(
     gpu_type = ["SM100_ARM_CU13"],
     tags = ["dsv41_cuda13", "model_contract", "dspark_contract"],
     data = ["//rtp_llm:sdk", "deepseek_v41_contract_test.py"],
+)
+
+deepseek_v41_sm90_role_test(
+    name = "deepseek_v41_flash_prefill_cp8_ep8_sm90_smoke",
+    role = "prefill",
+    mode = "smoke",
+)
+
+deepseek_v41_sm90_role_test(
+    name = "deepseek_v41_flash_decode_dp8_ep8_sm90_smoke",
+    role = "decode",
+    mode = "smoke",
 )

@@ -496,6 +496,10 @@ def _run_test_command():
 
 
 def main():
+    from jit_sys_path_setup import setup_nvidia_wheel_library_path
+
+    setup_nvidia_wheel_library_path()
+
     # CPU-only targets must not initialize CUDA or acquire GPU locks.
     if os.environ.get("GPU_COUNT") == "0":
         os.environ["CUDA_VISIBLE_DEVICES"] = ""

@@ -319,6 +319,45 @@ def _set_starts(case, starts):
 
 
 class V41DecodeGlobalCPU(unittest.TestCase):
+    def test_non_nvidia_gates_do_not_probe_cuda_or_touch_cache(self):
+        # HIP tensors also report device.type == "cuda". Reject by backend
+        # before touching CUDA capabilities or attention/cache metadata.
+        x = SimpleNamespace(device=SimpleNamespace(type="cuda"))
+        indexer = importlib.import_module(
+            "rtp_llm.models_py.modules.dsv41.fp8._v41_indexer_q_triton"
+        )
+        prenorm = importlib.import_module(
+            "rtp_llm.models_py.modules.dsv41.hc.v41_prenorm"
+        )
+        for module, args in (
+            (_fused(), (None, x, None, None, None)),
+            (indexer, (x, None, None, None)),
+            (prenorm, (x, None)),
+        ):
+            with self.subTest(module=module.__name__), patch.object(
+                module, "is_cuda", return_value=False
+            ), patch.object(torch.cuda, "get_device_capability") as capability:
+                self.assertFalse(module.is_supported(*args))
+                capability.assert_not_called()
+
+    def test_non_nvidia_attention_warmup_does_not_probe_cuda(self):
+        from rtp_llm.models_py.modules.dsv41.fp8 import _v41_attention_jit_warmup
+
+        with patch(
+            "rtp_llm.device.device_type.is_cuda", return_value=False
+        ), patch.object(torch.cuda, "get_device_capability") as capability:
+            _v41_attention_jit_warmup.warmup_v41_attention_jit(
+                None,
+                max_seq_len=1,
+                max_m=1,
+                max_batch_size=1,
+                cp_size=1,
+                cp_rank=0,
+                kv_cache_sharded=False,
+                device="cuda:0",
+            )
+        capability.assert_not_called()
+
     def test_slot_contract_separates_uniform_indexer_and_compressed_main(self):
         for ratio in (1, 2):
             owner = _layout_owner("cpu", ratio, 2)

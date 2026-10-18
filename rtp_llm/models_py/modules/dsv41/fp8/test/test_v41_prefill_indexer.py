@@ -48,7 +48,10 @@ class V41PrefillIndexerCPU(unittest.TestCase):
         ):
             self.assertFalse(indexer._use_clean_logits_only(torch.device("cpu")))
 
-    def test_clean_logits_only_preserves_backend_tensor_without_dense_mask(self):
+    @patch.object(indexer, "is_cuda", return_value=False)
+    def test_clean_logits_only_preserves_backend_tensor_without_dense_mask(
+        self, _is_cuda
+    ):
         clean = torch.tensor(
             [[-torch.inf, -torch.inf, -torch.inf], [2.0, 1.0, -torch.inf]]
         )
@@ -91,7 +94,8 @@ class V41PrefillIndexerCPU(unittest.TestCase):
                 self.assertEqual(actual.shape, (rows, keys))
                 self.assertEqual(actual.dtype, torch.float32)
 
-    def test_default_enable_and_supported_device_contract(self):
+    @patch.object(indexer, "is_cuda", return_value=True)
+    def test_default_enable_and_supported_device_contract(self, _is_cuda):
         with patch.object(
             score_backend, "has_fp8_fp4_mqa_logits", return_value=True
         ), patch.object(torch.cuda, "get_device_capability", return_value=(10, 3)):
@@ -108,7 +112,8 @@ class V41PrefillIndexerCPU(unittest.TestCase):
                             major in (9, 10) and heads in (32, 64) and dim == 128,
                         )
 
-    def test_missing_deepgemm_api_falls_back(self):
+    @patch.object(indexer, "is_cuda", return_value=True)
+    def test_missing_deepgemm_api_falls_back(self, _is_cuda):
         with patch.object(
             score_backend, "has_fp8_fp4_mqa_logits", return_value=False
         ), patch.object(torch.cuda, "get_device_capability", return_value=(10, 3)):
@@ -166,7 +171,8 @@ class V41PrefillIndexerCPU(unittest.TestCase):
                 else:
                     self.assertEqual(rows, 1)
 
-    def test_score_clamps_bounds_and_masks_zero_visible_rows(self):
+    @patch.object(indexer, "is_cuda", return_value=False)
+    def test_score_clamps_bounds_and_masks_zero_visible_rows(self, _is_cuda):
         q_payload = torch.zeros(3, 32, 64, dtype=torch.int8)
         q_sf = torch.ones(3, 32, dtype=torch.int32)
         k_payload = torch.zeros(5, 64, dtype=torch.int8)
@@ -189,7 +195,8 @@ class V41PrefillIndexerCPU(unittest.TestCase):
         )
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
-    def test_kernel_failure_is_not_silently_replaced_by_reference(self):
+    @patch.object(indexer, "is_cuda", return_value=False)
+    def test_kernel_failure_is_not_silently_replaced_by_reference(self, _is_cuda):
         with patch.object(
             score_backend,
             "fp8_fp4_mqa_indexer_score",

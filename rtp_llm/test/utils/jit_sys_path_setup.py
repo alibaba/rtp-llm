@@ -24,6 +24,30 @@ from filelock import FileLock, Timeout
 from rtp_llm.utils import jit_cache_env as cache_env
 
 
+def setup_nvidia_wheel_library_path():
+    """Keep wheel libraries visible when gpu_lock is the explicit run_under.
+
+    An explicit GPU-lock wrapper replaces the default nvidia_wheel_env shell
+    wrapper. Resolve the same runfiles libraries before spawning the CUDA
+    probe and test; do not replace the caller's compat/native driver ordering.
+    This only changes child-process loader paths, not an initialized runtime.
+    """
+    root = os.environ.get("RUNFILES_DIR") or os.environ.get("TEST_SRCDIR")
+    if not root:
+        return
+    root = Path(root)
+    libraries = sorted(root.glob("pip_*_torch_nvidia_*/site-packages/nvidia/*/lib"))
+    if not libraries:
+        return
+    torch_libs = sorted(root.glob("pip_*_torch_torch/site-packages/torch/lib"))
+    prefix = [str(path) for path in torch_libs + libraries if path.is_dir()]
+    toolset = "/opt/rh/gcc-toolset-12/root/usr/lib64"
+    if Path(toolset).is_dir():
+        prefix.append(toolset)
+    paths = prefix + os.environ.get("LD_LIBRARY_PATH", "").split(":")
+    os.environ["LD_LIBRARY_PATH"] = ":".join(dict.fromkeys(p for p in paths if p))
+
+
 def get_package_info(package_name):
     """Get package version and installation path"""
     try:
