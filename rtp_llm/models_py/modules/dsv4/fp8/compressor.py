@@ -39,9 +39,11 @@ from typing import Any, Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
+from rtp_llm.models_py.utils.arch import is_sm120
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 _CUBLAS_GEMM_BF16_BF16_FP32 = getattr(rtp_llm_ops, "cublas_gemm_bf16_bf16_fp32", None)
@@ -58,8 +60,13 @@ def _linear_bf16_bf16_fp32(x: torch.Tensor, weight: torch.Tensor) -> torch.Tenso
     ), "cublas_gemm_bf16_bf16_fp32 op is not built"
     leading_shape = x.shape[:-1]
     x_2d = x.reshape(-1, x.shape[-1])
+    rows = x_2d.shape[0]
+    # Decode and speculative verification must project identical token rows
+    # identically before FP8 KV quantization amplifies small rounding changes.
+    if x.ndim == 3 and 0 < rows < 8 and is_sm120(x.device):
+        x_2d = F.pad(x_2d, (0, 0, 0, 8 - rows))
     out_2d = _CUBLAS_GEMM_BF16_BF16_FP32(x_2d, weight)
-    return out_2d.reshape(*leading_shape, weight.shape[0])
+    return out_2d[:rows].reshape(*leading_shape, weight.shape[0])
 
 
 from rtp_llm.models_py.modules.dsv4.cp import (
@@ -492,7 +499,6 @@ class CompressorFP8(PoolBackedModule):
         self._pool_entry_bytes = (
             KV_ENTRY_BYTES if head_dim == KV_HEAD_DIM else INDEXER_ENTRY_BYTES
         )
-
         # ape stays FP32. wkv/wgate are stored as BF16, while the fused
         # projection below uses BF16 operands with FP32 accumulation/output.
         # Register ape as a non-trainable Parameter so .to(device) follows the
@@ -904,6 +910,9 @@ class CompressorFP8(PoolBackedModule):
                     )
                 )
 
+        # Compact transport keeps the full original state-write grid but
+        # executes only owned compression boundaries. The original fused
+        # kernel's late invalid-slot check cannot guard unstaged raw reads.
         with record_function_range("dsv4.fp8.compressor.launch.compress_kv_write"):
             run_fused_compress_kv_write(
                 state_cache_for_read,
@@ -952,6 +961,29 @@ class CompressorFP8(PoolBackedModule):
     #     (e.g. CSA: nested indexer + main) is required for FIFO ordering
     #     of NCCL collectives within the ProcessGroup.
     # ----------------------------------------------------------------------
+    def _project_prefill(self, x: torch.Tensor) -> torch.Tensor:
+        from rtp_llm.models_py.utils.arch import is_sm120
+
+        lengths = getattr(self._cp_ctx, "chunk_lengths_per_req", None)
+        if (
+            x.ndim == 2
+            and lengths is not None
+            and len(lengths) > 1
+            and is_sm120(x.device)
+        ):
+            if any(length < 0 for length in lengths) or sum(lengths) != x.shape[0]:
+                raise ValueError("CP request chunks must cover compressor input rows")
+            # SM120 cuBLAS changes FP32 accumulation order with the batch M.
+            # Preserve each request's standalone projection before FP8 packing.
+            return torch.cat(
+                [
+                    _linear_bf16_bf16_fp32(part, self._wkv_wgate_fused)
+                    for part in x.split(lengths, dim=0)
+                ],
+                dim=0,
+            )
+        return _linear_bf16_bf16_fp32(x, self._wkv_wgate_fused)
+
     def start_prefill(
         self,
         x: torch.Tensor,
@@ -1001,7 +1033,7 @@ class CompressorFP8(PoolBackedModule):
 
         out_dim = (1 + self.overlap) * self.head_dim
         with record_function_range("dsv4.fp8.compressor.prefill.fused_linear"):
-            fused_out = _linear_bf16_bf16_fp32(x, self._wkv_wgate_fused)
+            fused_out = self._project_prefill(x)
             N = bsz * seqlen
             fused_flat = fused_out.reshape(N, -1)
 
@@ -1164,7 +1196,7 @@ class CompressorFP8(PoolBackedModule):
         device = x.device
         out_dim = (1 + self.overlap) * self.head_dim
         with record_function_range("dsv4.fp8.compressor.prefill.fused_linear"):
-            fused_out = _linear_bf16_bf16_fp32(x, self._wkv_wgate_fused)
+            fused_out = self._project_prefill(x)
             N = bsz * seqlen
             fused_flat = fused_out.reshape(N, -1)
 

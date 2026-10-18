@@ -4,9 +4,21 @@ import torch
 from deep_gemm.utils.layout import get_mn_major_tma_aligned_packed_ue8m0_tensor
 
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
+from rtp_llm.models_py.kernels.cuda.sm120_fp8_blockwise import (
+    sm120_blockwise_fp8_available,
+)
 from rtp_llm.models_py.modules.factory.linear import LinearFactory
 
 _V4_FP8_BLOCK_CFG = Fp8BlockWiseQuantConfig()
+
+
+def _needs_deepgemm_scale_repack(scale: torch.Tensor) -> bool:
+    """UE8M0 checkpoint scales feed DeepGEMM as packed int32 unless the SM120
+    CUTLASS blockwise backend (``cuda13_sm120`` build on exact SM120) owns
+    FP8_PER_BLOCK; that backend consumes the compact scale directly."""
+    return scale.dtype == torch.float8_e8m0fnu and not sm120_blockwise_fp8_available(
+        scale.device
+    )
 
 
 def _repack_v4_fp8_scale_to_int32(scale: torch.Tensor) -> torch.Tensor:
@@ -22,9 +34,9 @@ def _repack_v4_fp8_scale_to_int32(scale: torch.Tensor) -> torch.Tensor:
 
 
 def _v4_fp8_linear(w: torch.Tensor, s: torch.Tensor):
-    """Build a CudaFp8DeepGEMMLinear from raw V4 FP8 weight + scale tensors."""
+    """Build an FP8 PER_BLOCK linear from raw V4 FP8 weight + scale tensors."""
     assert s is not None, "expected non-null FP8 scale"
-    if s.dtype == torch.float8_e8m0fnu:
+    if _needs_deepgemm_scale_repack(s):
         s = _repack_v4_fp8_scale_to_int32(s)
     local = {"_w": w, "_s": s}
     return LinearFactory.create_linear_from_weights(
@@ -39,7 +51,7 @@ def _v4_fp8_linear_from_dict(weights: dict, weight_key: str, scale_key: str):
     """Backwards-compat bridge over ``_v4_fp8_linear`` for flat dict callers."""
     w = weights[weight_key]
     s = weights[scale_key]
-    if s.dtype == torch.float8_e8m0fnu:
+    if _needs_deepgemm_scale_repack(s):
         s = _repack_v4_fp8_scale_to_int32(s)
         weights[scale_key] = s
     return _v4_fp8_linear(w, s)

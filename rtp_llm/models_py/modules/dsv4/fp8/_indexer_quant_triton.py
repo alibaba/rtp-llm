@@ -52,6 +52,83 @@ FP8_E4M3_MAX = 448.0
 
 
 @triton.jit
+def _gather_indexer_k_fp32_kernel(
+    pool_ptr,
+    table_ptr,
+    keys_ptr,
+    valid_ptr,
+    START: tl.constexpr,
+    COUNT: tl.constexpr,
+    TABLE_STRIDE: tl.constexpr,
+    TABLE_COLUMN_STRIDE: tl.constexpr,
+    CACHE_BLOCK: tl.constexpr,
+    NUM_BLOCKS: tl.constexpr,
+    TILE: tl.constexpr,
+):
+    row = tl.program_id(1)
+    offsets = tl.program_id(0) * TILE + tl.arange(0, TILE)
+    positions = START + offsets
+    block_ids = tl.load(
+        table_ptr + row * TABLE_STRIDE + positions // CACHE_BLOCK * TABLE_COLUMN_STRIDE,
+        mask=offsets < COUNT,
+        other=0,
+    )
+    valid = (block_ids >= 0) & (block_ids < NUM_BLOCKS)
+    block_ids = tl.minimum(tl.maximum(block_ids, 0), NUM_BLOCKS - 1).to(tl.int64)
+    base = block_ids * (CACHE_BLOCK * 132)
+    token = positions % CACHE_BLOCK
+    dims = tl.arange(0, 128)
+    raw = tl.load(
+        pool_ptr + base[:, None] + token[:, None] * 128 + dims[None, :],
+        mask=offsets[:, None] < COUNT,
+        other=0,
+    )
+    scale = tl.load(
+        (pool_ptr + base + CACHE_BLOCK * 128 + token * 4).to(
+            tl.pointer_type(tl.float32)
+        ),
+        mask=offsets < COUNT,
+        other=0.0,
+    )
+    keys = raw.to(tl.float8e4nv, bitcast=True).to(tl.float32) * scale[:, None]
+    tl.store(
+        keys_ptr + (row * COUNT + offsets[:, None]) * 128 + dims[None, :],
+        keys,
+        mask=offsets[:, None] < COUNT,
+    )
+    tl.store(valid_ptr + row * COUNT + offsets, valid, mask=offsets < COUNT)
+
+
+def gather_indexer_k_fp32(
+    pool: torch.Tensor,
+    block_table_rows: torch.Tensor,
+    start: int,
+    count: int,
+    block_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Gather one bounded chunk with the torch fallback's FP32 dequantization."""
+    rows = block_table_rows.shape[0]
+    keys = torch.empty((rows, count, 128), device=pool.device, dtype=torch.float32)
+    valid = torch.empty((rows, count), device=pool.device, dtype=torch.bool)
+    _gather_indexer_k_fp32_kernel[(triton.cdiv(count, 16), rows)](
+        pool,
+        block_table_rows,
+        keys,
+        valid,
+        START=start,
+        COUNT=count,
+        TABLE_STRIDE=block_table_rows.stride(0),
+        TABLE_COLUMN_STRIDE=block_table_rows.stride(1),
+        CACHE_BLOCK=block_size,
+        NUM_BLOCKS=pool.numel() // (block_size * INDEXER_ENTRY_BYTES),
+        TILE=16,
+        num_warps=4,
+        enable_fp_fusion=False,
+    )
+    return keys, valid
+
+
+@triton.jit
 def _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS: tl.constexpr) -> None:
     if TRAP_INVALID_KV_ACCESS:
         tl.inline_asm_elementwise(

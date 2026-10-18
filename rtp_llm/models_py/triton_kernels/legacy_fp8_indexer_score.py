@@ -160,7 +160,7 @@ def legacy_fp8_mqa_logits(
 
 
 def legacy_fp8_paged_mqa_logits(
-    q, kv_cache, weights, context_lens, block_table, max_context_len
+    q, kv_cache, weights, context_lens, block_table, max_context_len, clean_logits=False
 ):
     """Paged score preserving 132-byte slots and full FP32 per-head weights."""
     if q.dim() != 4 or q.shape[-1] != 128:
@@ -195,7 +195,7 @@ def legacy_fp8_paged_mqa_logits(
             ids = torch.arange(length, device=q.device)
             # Same validity contract as the kernel: keep only entries whose
             # logical page fits the block table and whose physical page lies
-            # in [0, pool); everything else scores 0. Filtering (never
+            # in [0, pool); mask everything else according to clean_logits. Filtering (never
             # clamping) also handles negative table entries and zero-width
             # tables/pools, where clamped indices would silently read the
             # last row of the pool.
@@ -211,7 +211,7 @@ def legacy_fp8_paged_mqa_logits(
                 valid[page_idx_ok] = pages_ok
                 pages = pages[pages_ok]
             ids = ids[valid]
-            output[row].fill_(0.0)
+            output[row].fill_(float("-inf") if clean_logits else 0.0)
             if not ids.numel():
                 continue
             offs = ids % page_size
@@ -263,7 +263,7 @@ def legacy_fp8_paged_mqa_logits(
         kv_cache.shape[0],
         next_n,
         True,
-        False,
+        clean_logits,
         max(16, triton.next_power_of_2(heads)),
         64,
         num_warps=4,

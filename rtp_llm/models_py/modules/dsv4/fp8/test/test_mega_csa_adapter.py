@@ -417,6 +417,9 @@ class MegaCSARoutingTest(unittest.TestCase):
             def __init__(self) -> None:
                 self.embed = torch.nn.Embedding(8, 4)
 
+            def embed_full(self, input_ids):
+                return self.embed(input_ids)
+
             def begin_decode(self, _metadata) -> None:
                 events.append("begin")
 

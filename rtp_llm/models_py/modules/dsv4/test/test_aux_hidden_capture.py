@@ -3,7 +3,7 @@ import unittest
 import torch
 import torch.nn as nn
 
-from rtp_llm.models_py.modules.dsv4.transformer import V4Transformer
+from rtp_llm.models_py.modules.dsv4.transformer import V4Args, V4Transformer
 
 
 def _capture_harness(
@@ -13,6 +13,7 @@ def _capture_harness(
 ) -> V4Transformer:
     transformer = V4Transformer.__new__(V4Transformer)
     nn.Module.__init__(transformer)
+    transformer.args = V4Args(n_layers=num_layers)
     transformer.layers = nn.ModuleList([nn.Identity() for _ in range(num_layers)])
     transformer.capture_aux_hidden_layer_ids = ()
     if row_width > 0:
@@ -74,7 +75,7 @@ class AuxHiddenCaptureTest(unittest.TestCase):
         transformer = _capture_harness(token_capacity=2, row_width=3)
         transformer.set_aux_hidden_capture_layer_ids((1,))
 
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(RuntimeError, "capacity exceeded"):
             transformer.capture_aux_hidden(1, torch.ones(4, 4, 3, dtype=torch.float32))
         with self.assertRaises(AssertionError):
             transformer._note_aux_hidden_rows(4, is_cuda_graph=False)

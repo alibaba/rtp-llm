@@ -45,6 +45,7 @@ from rtp_llm.models_py.modules.dsv4.fp8._swa_dequant_triton import (
     dequantize_packed_k_cache_flat,
     discard_dequantize_and_gather_k_cache_slots_cp_byte_sliced,
     gather_k_cache_packed,
+    gather_packed_k_cache_slots_cp_byte_sliced,
     prepare_dequantize_and_gather_k_cache_slots_cp_byte_sliced,
     start_dequantize_and_gather_k_cache_slots_cp_byte_sliced,
 )
@@ -863,7 +864,7 @@ class SwaFp8KvRoundtripTest(unittest.TestCase):
                 self._assert_nope_within_ue8m0_bound(expected, recovered)
         self.assertTrue(torch.all(out[1, 3:] == -7))
 
-    def test_cp_byte_sliced_direct_scatter_matches_fallback_bitwise(self):
+    def test_cp_byte_sliced_scatter_respects_architecture_gate(self):
         cases = (
             # CP2 exercises chunks that cross a rank boundary and an empty row.
             (2, 16, [2, 3], 9, [9, 0, 4], 800),
@@ -924,11 +925,9 @@ class SwaFp8KvRoundtripTest(unittest.TestCase):
                 linear = torch.arange(batch * width, device=self.device).view(
                     batch, width
                 )
-                read_slots = (
-                    block_ids[linear.remainder(block_ids.numel())]
-                    * entries_per_block
-                    + (linear * 17 + 3).remainder(entries_per_block)
-                )
+                read_slots = block_ids[
+                    linear.remainder(block_ids.numel())
+                ] * entries_per_block + (linear * 17 + 3).remainder(entries_per_block)
                 gather_lens = torch.tensor(lens, dtype=torch.int32, device=self.device)
                 for batch_idx, gather_len in enumerate(lens):
                     if gather_len:
@@ -991,10 +990,28 @@ class SwaFp8KvRoundtripTest(unittest.TestCase):
                 fallback, fallback_calls = run(False)
                 direct, direct_fallback_calls = run(True)
                 self.assertEqual(fallback_calls, 1)
-                self.assertEqual(direct_fallback_calls, 0)
+                fast_path_supported = (
+                    _swa_dequant_triton.direct_triton_fast_path_supported(self.device)
+                )
+                self.assertEqual(direct_fallback_calls, 0 if fast_path_supported else 1)
                 self.assertTrue(
                     torch.equal(direct.view(torch.int16), fallback.view(torch.int16))
                 )
+                values_by_slot = dict(zip(write_slots.tolist(), values))
+                for batch_idx, length in enumerate(lens):
+                    self.assertTrue(torch.all(direct[batch_idx, :3] == marker))
+                    self.assertTrue(
+                        torch.all(direct[batch_idx, 3 + length :] == marker)
+                    )
+                    for index in range(length):
+                        slot = int(read_slots[batch_idx, index].item())
+                        recovered = direct[batch_idx, 3 + index].unsqueeze(0)
+                        if slot < 0:
+                            self.assertTrue(torch.all(recovered == 0))
+                        else:
+                            expected = values_by_slot[slot].unsqueeze(0)
+                            self._assert_rope_exact(expected, recovered)
+                            self._assert_nope_within_ue8m0_bound(expected, recovered)
 
     def test_cp_byte_sliced_runtime_requires_compaction(self):
         cp_size = 2
@@ -1034,6 +1051,182 @@ class SwaFp8KvRoundtripTest(unittest.TestCase):
                 cp_rank=0,
                 cp_size=cp_size,
                 compaction=None,
+            )
+
+
+class PackedPrefixWorkspaceTest(unittest.TestCase):
+    def setUp(self):
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA not available")
+        torch.manual_seed(37)
+
+    @staticmethod
+    def _cache(count, page):
+        stride = ((page * HEAD_BYTES + 575) // 576) * 576
+        blocks = (count + page - 1) // page
+        storage = torch.full((blocks * stride,), 173, dtype=torch.uint8, device="cuda")
+        return (
+            storage.as_strided((blocks, page, HEAD_BYTES), (stride, HEAD_BYTES, 1)),
+            storage,
+        )
+
+    def test_packed_prefix_and_fresh_rows(self):
+        for batch in (1, 3):
+            for width in (257, 4223):
+                for source_page in (64, 256):
+                    for destination_page in (64, 256):
+                        with self.subTest(
+                            batch=batch,
+                            width=width,
+                            source_page=source_page,
+                            destination_page=destination_page,
+                        ):
+                            self._check(batch, width, source_page, destination_page)
+
+    def test_byte_sliced_prefix_and_fresh_rows(self):
+        for cp_size in (2, 4, 8):
+            for destination_page in (64, 256):
+                with self.subTest(cp_size=cp_size, destination_page=destination_page):
+                    self._check(3, 257, 128, destination_page, cp_size=cp_size)
+        self._check(3, 257, 128, 64, cp_size=8, all_invalid=True)
+
+    def _check(
+        self,
+        batch,
+        width,
+        source_page,
+        destination_page,
+        cp_size=None,
+        all_invalid=False,
+    ):
+        count = batch * width
+        source, source_storage = self._cache(2048, source_page)
+        quantize_and_insert_k_cache(
+            torch.randn(2048, HEAD_DIM, device="cuda", dtype=torch.bfloat16),
+            source,
+            torch.arange(2048, device="cuda"),
+        )
+        original_source = source_storage.clone()
+        slots = torch.randint(0, 2048, (batch, 127), device="cuda")
+        if cp_size == 4:
+            slots = slots % source_page + (slots % 3) * (3 * source_page)
+        slots[:, 3] = -1
+        if all_invalid:
+            slots.fill_(-1)
+        lens = torch.tensor(
+            [127] if batch == 1 else [0, 63, 127], device="cuda", dtype=torch.int32
+        )
+        values = torch.randn(count, HEAD_DIM, device="cuda", dtype=torch.bfloat16)
+        expected, expected_storage = self._cache(count, destination_page)
+        actual, actual_storage = self._cache(count, destination_page)
+        destination = torch.arange(count, device="cuda")
+        quantize_and_insert_k_cache(values, expected, destination)
+
+        # Independent byte-layout oracle, including missing slots and padding.
+        prefix_destinations = (
+            torch.arange(127, device="cuda")[None, :]
+            + torch.arange(batch, device="cuda")[:, None] * width
+        )
+        valid_prefix = torch.arange(127, device="cuda")[None, :] < lens[:, None]
+        source_slots = slots[valid_prefix]
+        target_slots = prefix_destinations[valid_prefix]
+        safe_source = source_slots.clamp_min(0)
+        for region, size in ((0, 576), (1, 8)):
+            offsets = torch.arange(size, device="cuda")[None, :]
+            source_offsets = (
+                (safe_source // source_page) * source.stride(0)
+                + region * source_page * 576
+                + (safe_source % source_page) * size
+            )[:, None] + offsets
+            target_offsets = (
+                (target_slots // destination_page) * expected.stride(0)
+                + region * destination_page * 576
+                + (target_slots % destination_page) * size
+            )[:, None] + offsets
+            expected_storage[target_offsets] = torch.where(
+                (source_slots >= 0)[:, None],
+                source_storage[source_offsets],
+                0,
+            )
+        # Serving does not initialize the BF16 rows whose packed bytes are copied.
+        values[target_slots] = float("nan")
+        prefix_cache, prefix_slots = source, slots
+        if cp_size is not None:
+            compaction = build_cp_byte_sliced_slot_compaction(
+                slots,
+                full_entries_per_block=source_page,
+                num_blocks=source.shape[0],
+                validation_site="test.packed_prefix.cp",
+                negative_mode="skip_minus_one",
+                gather_lens=lens,
+            )
+            stride = source.stride(0)
+            self.assertEqual(stride % cp_size, 0)
+            rank_bytes = stride // cp_size
+            full_blocks = source_storage.view(source.shape[0], stride)
+            shards = [
+                full_blocks[:, rank * rank_bytes : (rank + 1) * rank_bytes].contiguous()
+                for rank in range(cp_size)
+            ]
+
+            def all_gather(local, group):
+                del group
+                expected_local = shards[0].index_select(0, compaction.unique_blocks)
+                self.assertTrue(torch.equal(local, expected_local))
+                return torch.cat(
+                    [
+                        shard.index_select(0, compaction.unique_blocks)
+                        for shard in shards
+                    ]
+                )
+
+            with mock.patch(
+                "rtp_llm.models_py.distributed.collective_torch.all_gather",
+                side_effect=all_gather,
+            ):
+                prefix_cache, prefix_slots = gather_packed_k_cache_slots_cp_byte_sliced(
+                    k_cache_raw=shards[0],
+                    slot_mapping=slots,
+                    gather_lens=lens,
+                    full_entries_per_block=source_page,
+                    cp_rank=0,
+                    cp_size=cp_size,
+                    compaction=compaction,
+                )
+
+        def launch():
+            quantize_and_insert_k_cache(
+                values,
+                actual,
+                destination,
+                prefix_cache=prefix_cache,
+                prefix_slot_mapping=prefix_slots,
+                prefix_gather_lens=lens,
+            )
+
+        for _ in range(3):
+            launch()
+        self.assertTrue(torch.equal(actual_storage, expected_storage))
+        self.assertTrue(torch.equal(source_storage, original_source))
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            launch()
+        actual_storage.fill_(173)
+        graph.replay()
+        torch.cuda.synchronize()
+        self.assertTrue(torch.equal(actual_storage, expected_storage))
+        self.assertTrue(torch.equal(source_storage, original_source))
+
+    def test_prefix_source_must_not_alias_destination(self):
+        cache, _ = self._cache(256, 64)
+        with self.assertRaisesRegex(AssertionError, "must not alias"):
+            quantize_and_insert_k_cache(
+                torch.zeros(256, HEAD_DIM, device="cuda", dtype=torch.bfloat16),
+                cache,
+                torch.arange(256, device="cuda"),
+                prefix_cache=cache,
+                prefix_slot_mapping=torch.arange(127, device="cuda")[None, :],
+                prefix_gather_lens=torch.tensor([127], device="cuda"),
             )
 
 

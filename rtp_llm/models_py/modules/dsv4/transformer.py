@@ -112,6 +112,13 @@ class V4Args:
     dp_rank: int = 0
     world_size: int = 1
     world_rank: int = 0
+    # Physical MoE topology. CP repurposes the TP group for sequence
+    # parallelism, so ``tp_size`` above is attention-facing (1 under CP) while
+    # executors that own their communication need the physical group.
+    moe_tp_size: int = 1
+    moe_tp_rank: int = 0
+    moe_cp_enabled: bool = False
+    moe_cp_size: int = 1
     is_decode_role: bool = False
     # Dedicated DSpARK prefill workers only project target features into the
     # draft SWA pools; they do not construct proposal, FFN, or mHC modules.
@@ -124,6 +131,22 @@ class V4Args:
     # the default reflects that; the BF16 path remains supported for
     # debugging by callers that pass ``fp8_kv_cache=False`` explicitly.
     fp8_kv_cache: bool = True
+
+
+def _positions_from_start_pos(start_pos, S: int, device) -> torch.Tensor:
+    """``start_pos + arange(S)`` without a host readback for tensor start_pos.
+
+    A 0-dim integer tensor broadcasts into the arange with the same values and
+    the same int64 result dtype as ``int(start_pos...item()) + arange`` — the
+    scalar stays on device instead of draining the queue this forward just
+    filled.  Non-integer dtypes keep the legacy truncating ``int()`` path.
+    """
+    if isinstance(start_pos, int):
+        return start_pos + torch.arange(S, device=device, dtype=torch.int64)
+    scalar = start_pos.view(-1)[0]
+    if scalar.is_floating_point() or scalar.is_complex():
+        return int(scalar.item()) + torch.arange(S, device=device, dtype=torch.int64)
+    return scalar + torch.arange(S, device=device, dtype=torch.int64)
 
 
 def _block_kwargs(
@@ -181,6 +204,10 @@ def _block_kwargs(
         ep_rank=args.ep_rank,
         world_size=args.world_size,
         world_rank=args.world_rank,
+        moe_tp_size=args.moe_tp_size,
+        moe_tp_rank=args.moe_tp_rank,
+        moe_cp_enabled=args.moe_cp_enabled,
+        moe_cp_size=args.moe_cp_size,
         max_tokens_per_rank=args.max_tokens_per_rank,
         is_decode_role=args.is_decode_role,
         fp8_kv_cache=args.fp8_kv_cache,
@@ -342,6 +369,29 @@ class V4Transformer(nn.Module):
         # the no-auxiliary-tensor default for ordinary inference and MTP.
         self.capture_aux_hidden_layer_ids: tuple[int, ...] = ()
 
+    def embed_full(self, input_ids: torch.Tensor) -> torch.Tensor:
+        h = self.embed(input_ids)
+        if h.size(-1) == self.args.dim:
+            return h
+        if self.args.dim % h.size(-1) != 0:
+            raise ValueError(
+                "DSV4 TP embedding shard has incompatible hidden size: "
+                f"local={h.size(-1)} dim={self.args.dim}"
+            )
+        shard_count = self.args.dim // h.size(-1)
+        from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
+
+        leading = h.shape[:-1]
+        local_dim = h.size(-1)
+        flat = h.reshape(-1, local_dim).contiguous()
+        gathered = all_gather(flat, group=Group.TP)
+        return (
+            gathered.view(shard_count, flat.size(0), local_dim)
+            .transpose(0, 1)
+            .contiguous()
+            .view(*leading, self.args.dim)
+        )
+
     def set_aux_hidden_capture_layer_ids(self, layer_ids: Sequence[int]) -> None:
         """Configure target residual-stream layers exported to DSpARK.
 
@@ -366,6 +416,18 @@ class V4Transformer(nn.Module):
                 f"invalid={invalid_ids}, num_layers={len(self.layers)}"
             )
         self.capture_aux_hidden_layer_ids = capture_ids
+
+    def _ensure_mtp_hidden_capacity(self, rows: int) -> None:
+        buf = self._mtp_hidden_buffer
+        if buf is None or int(rows) <= int(buf.size(0)):
+            return
+        # Target, draft and captured graphs share the allocation bound at init.
+        # Dynamic prefill scratch space must not replace this persistent buffer.
+        raise RuntimeError(
+            f"MTP hidden buffer capacity exceeded: rows={rows}, capacity={buf.size(0)}. "
+            "Increase the configured token capacity before model initialization; "
+            "shared runtime buffers cannot grow after binding."
+        )
 
     def capture_aux_hidden(self, layer_id: int, hidden: torch.Tensor) -> None:
         """Write one selected layer's mean-pooled hidden into the shared
@@ -394,6 +456,8 @@ class V4Transformer(nn.Module):
         pooled = hidden.mean(dim=-2)
         flat = pooled.reshape(-1, pooled.size(-1))
         rows, dim = flat.shape
+        self._ensure_mtp_hidden_capacity(rows)
+        buf = self._mtp_hidden_buffer
         assert (segment + 1) * dim <= buf.size(1), (
             f"aux segment overflow: segment={segment} dim={dim} "
             f"row_width={buf.size(1)}"
@@ -554,7 +618,7 @@ class V4Transformer(nn.Module):
             input_ids_2d = input_ids.view(B, q_len)
         else:
             input_ids_2d = input_ids
-        h = self.embed(input_ids_2d)  # [B, q_len, dim]
+        h = self.embed_full(input_ids_2d)  # [B, q_len, dim]
         h = h.unsqueeze(2).repeat(1, 1, self.hc_mult, 1)  # [B, q_len, hc, dim]
         begin_decode = getattr(self, "begin_decode", None)
         if begin_decode is not None:
@@ -650,7 +714,7 @@ class V4Transformer(nn.Module):
             # begin() may suppress this forward (MOEDBG_MAX_SEQ); honour it.
             if _rt._get_buf() is None:
                 _rt_on = False
-        h = self.embed(input_ids)  # [B, S, d]
+        h = self.embed_full(input_ids)  # [B, S, d]
         if _rt_on:
             _rt.record("embed_out", h)
         h = h.unsqueeze(2).repeat(1, 1, self.hc_mult, 1)  # [B, S, hc, d]
@@ -668,14 +732,7 @@ class V4Transformer(nn.Module):
         )
         h_flat = h.squeeze(0)  # [S, hc, d]
         input_ids_flat = input_ids.squeeze(0)  # [S]
-        _start_pos_int = (
-            int(start_pos)
-            if isinstance(start_pos, int)
-            else int(start_pos.view(-1)[0].item())
-        )
-        positions = _start_pos_int + torch.arange(
-            S, device=input_ids.device, dtype=torch.int64
-        )  # [S]
+        positions = _positions_from_start_pos(start_pos, S, input_ids.device)  # [S]
         cu_seqlens = torch.tensor(
             [0, S], dtype=torch.int64, device=input_ids.device
         )  # [2]

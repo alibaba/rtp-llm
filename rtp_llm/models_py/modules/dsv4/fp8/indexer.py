@@ -59,7 +59,12 @@ from rtp_llm.models_py.modules.dsv4.fp8.compressor import (
     CompressorMeta,
     _CompressorPending,
 )
+from rtp_llm.models_py.modules.dsv4.indexer_topk import (
+    IndexerTopKBackendName,
+    parse_indexer_topk_backend_name,
+)
 from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
+from rtp_llm.models_py.utils.arch import is_sm120
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 
@@ -73,6 +78,35 @@ def _as_bf16_contig(t: torch.Tensor) -> torch.Tensor:
 
 def _flat_1d(t: torch.Tensor) -> torch.Tensor:
     return t.reshape(-1).contiguous()
+
+
+def _project_decode_weights(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    if not (x.is_cuda and x.dtype == torch.bfloat16 and is_sm120(x.device)):
+        return F.linear(x, weight)
+    from rtp_llm.models_py.modules.dsv4.fp8._indexer_weight_projection_triton import (
+        project_weights_if_supported,
+    )
+
+    projected = project_weights_if_supported(x, weight)
+    if projected is not None:
+        return projected
+    flat = x.reshape(-1, x.shape[-1])
+    if flat.shape[0] == 0:
+        return F.linear(x, weight)
+    # SM120 small-M cuBLAS paths round these BF16 scores differently. Keep
+    # reduction geometry fixed so speculative rows cannot change TopK membership.
+    tiles = []
+    for start in range(0, flat.shape[0], 8):
+        tile = flat[start : start + 8]
+        rows = tile.shape[0]
+        if rows < 8:
+            tile = F.pad(tile, (0, 0, 0, 8 - rows))
+        # FP32 output avoids cuBLAS's intermediate BF16 reduction truncation;
+        # retain the existing BF16 rounding boundary before quantization.
+        projected = torch.mm(tile, weight.t(), out_dtype=torch.float32)
+        tiles.append(projected[:rows].to(x.dtype))
+    result = tiles[0] if len(tiles) == 1 else torch.cat(tiles, dim=0)
+    return result.reshape(*x.shape[:-1], weight.shape[0])
 
 
 # Exact SGLang radix-select TopK used by the shared DeepSeek V4 Flash/Pro FP8
@@ -90,8 +124,10 @@ def _topk_v3_enabled() -> bool:
     return os.environ.get("DSV4_TOPK_V3", "1") != "0"
 
 
-def _fp8_prefill_fast_topk_enabled() -> bool:
+def _fp8_prefill_fast_topk_enabled(logits: torch.Tensor | None = None) -> bool:
     if not _FAST_PREFILL_TOPK_OK:
+        return False
+    if logits is not None and logits.is_cuda and is_sm120(logits.device):
         return False
     return os.environ.get("DSV4_PREFILL_FAST_TOPK", "1") != "0"
 
@@ -100,19 +136,107 @@ def _fp8_prefill_topk_force_radix_sort() -> bool:
     return os.environ.get("DSV4_PREFILL_TOPK_FORCE_RADIX", "1") != "0"
 
 
-def _fp8_prefill_topk_use_torch() -> bool:
-    return (
-        os.environ.get("DSV4_INDEXER_TOPK_BACKEND", "auto").strip().lower() == "torch"
+def _fp8_prefill_topk_use_torch(logits: torch.Tensor | None = None) -> bool:
+    backend = parse_indexer_topk_backend_name()
+    # Persistent decode Top-K and experimental HISA do not implement the
+    # variable-row prefill ABI.  They remain valid global selections, but this
+    # phase deliberately falls back to the exact torch implementation.
+    return backend in (
+        IndexerTopKBackendName.TORCH,
+        IndexerTopKBackendName.PERSISTENT,
+        IndexerTopKBackendName.HISA,
     )
 
 
-def _fp8_prefill_topk_canonicalize() -> bool:
-    return os.environ.get("DSV4_INDEXER_TOPK_CANONICALIZE", "").strip().lower() in (
+def _fp8_prefill_topk_canonicalize(logits: torch.Tensor) -> bool:
+    configured = os.environ.get("DSV4_INDEXER_TOPK_CANONICALIZE")
+    if configured is None:
+        # Atomic Top-K selection returns an unordered set. SM120 sparse
+        # attention rounds partial reductions, so key order affects logits.
+        return logits.is_cuda and is_sm120(logits.device)
+    return configured.strip().lower() in (
         "1",
         "true",
         "yes",
         "on",
     )
+
+
+def _compressed_k_scalars_host(
+    cp_ctx,
+    prefix_lengths: torch.Tensor,
+    eff_input_lengths: torch.Tensor,
+    ratio: int,
+):
+    """``(T, end_pos)`` from the CP host mirrors; ``None`` when unprovable.
+
+    ``T`` is ``sum((prefix_b + len_b) // ratio)`` and ``end_pos`` is
+    ``prefix_0 + len_0`` — the exact integers the legacy path reads back with
+    two device syncs (``cu_kv_seqlens[-1].item()`` /
+    ``seq_total_per_req[0].item()``).  The mirrors are host copies of the same
+    framework CPU sources that built the device args; they are trusted only
+    when their domains match the device args' element counts exactly
+    (otherwise the legacy sync runs).  Non-negative floor division on Python
+    ints equals the int32/int64 device computation at these magnitudes.
+    """
+    if cp_ctx is None:
+        return None
+    prefix_host = getattr(cp_ctx, "prefix_lengths_full_host", None)
+    lengths_host = getattr(cp_ctx, "input_lengths_full_host", None)
+    if prefix_host is None or lengths_host is None:
+        return None
+    if prefix_lengths is None or eff_input_lengths is None:
+        return None
+    if int(prefix_lengths.numel()) != len(prefix_host):
+        return None
+    if int(eff_input_lengths.numel()) != len(lengths_host):
+        return None
+    if len(prefix_host) != len(lengths_host) or not prefix_host:
+        return None
+    totals = [
+        (int(p) + int(l)) // int(ratio) for p, l in zip(prefix_host, lengths_host)
+    ]
+    return sum(totals), int(prefix_host[0]) + int(lengths_host[0])
+
+
+def _canonicalize_prefill_topk_out(out: torch.Tensor) -> None:
+    sentinel = torch.iinfo(torch.int32).max
+    sortable = torch.where(out >= 0, out, torch.full_like(out, sentinel))
+    sorted_idx = torch.sort(sortable, dim=-1).values
+    out.copy_(
+        torch.where(sorted_idx == sentinel, torch.full_like(sorted_idx, -1), sorted_idx)
+    )
+
+
+def _canonicalize_fp8_topk(logits, out, row_ends, row_starts=None) -> None:
+    if not (logits.is_cuda and is_sm120(logits.device)):
+        _canonicalize_prefill_topk_out(out)
+        return
+    from rtp_llm.models_py.modules.dsv4.fp8._topk_canonical_triton import (
+        canonicalize_topk_if_supported,
+    )
+
+    if canonicalize_topk_if_supported(logits, out, row_ends, row_starts):
+        return
+    # Large or unsupported layouts retain the same deterministic tie policy.
+    col = torch.arange(logits.shape[1], device=logits.device).unsqueeze(0)
+    starts = torch.zeros_like(row_ends) if row_starts is None else row_starts
+    lengths = row_ends - starts
+    # Put valid entries before padding so stable sort also handles -inf ties.
+    absolute = col + starts[:, None]
+    window = logits.gather(1, absolute.clamp(max=logits.shape[1] - 1).long())
+    masked = torch.where(
+        col < lengths[:, None], window, torch.full_like(window, float("-inf"))
+    )
+    count = min(out.shape[1], logits.shape[1])
+    selected = torch.argsort(masked, dim=-1, descending=True, stable=True)[:, :count]
+    selected = selected.to(torch.int32)
+    selected.masked_fill_(
+        torch.arange(count, device=out.device)[None, :] >= lengths[:, None], -1
+    )
+    out.fill_(-1)
+    out[:, :count].copy_(selected)
+    _canonicalize_prefill_topk_out(out)
 
 
 def _run_prefill_topk_torch(
@@ -134,16 +258,9 @@ def _run_prefill_topk_torch(
     indices = indices.to(torch.int32) - row_starts.unsqueeze(1)
     lengths = (row_ends - row_starts).unsqueeze(1)
     indices = torch.where(indices < lengths, indices, torch.full_like(indices, -1))
-    if _fp8_prefill_topk_canonicalize():
-        sentinel = torch.iinfo(torch.int32).max
-        sortable = torch.where(
-            indices >= 0, indices, torch.full_like(indices, sentinel)
-        )
-        sorted_idx = torch.sort(sortable, dim=-1).values
-        indices = torch.where(
-            sorted_idx == sentinel, torch.full_like(sorted_idx, -1), sorted_idx
-        )
     out[:, :k_eff].copy_(indices)
+    if _fp8_prefill_topk_canonicalize(logits):
+        _canonicalize_fp8_topk(logits, out, row_ends, row_starts)
 
 
 def _run_prefill_topk(
@@ -154,7 +271,7 @@ def _run_prefill_topk(
     topk: int,
     compress_ratio: int,
 ) -> None:
-    if _fp8_prefill_topk_use_torch():
+    if _fp8_prefill_topk_use_torch(logits):
         _run_prefill_topk_torch(logits, row_starts, row_ends, out, topk)
         return
 
@@ -162,7 +279,7 @@ def _run_prefill_topk(
     # length so the 16k policy matches the user-visible prefill length.
     estimated_input_tokens = int(logits.size(1)) * int(compress_ratio)
     if (
-        _fp8_prefill_fast_topk_enabled()
+        _fp8_prefill_fast_topk_enabled(logits)
         and int(topk) in (512, 1024, 2048)
         and estimated_input_tokens <= _FAST_PREFILL_TOPK_MAX_INPUT_TOKENS
     ):
@@ -170,6 +287,8 @@ def _run_prefill_topk(
         rtp_llm_ops.fast_topk_v2_variable(
             logits, out, lengths, row_starts.contiguous(), int(topk)
         )
+        if _fp8_prefill_topk_canonicalize(logits):
+            _canonicalize_fp8_topk(logits, out, row_ends, row_starts)
         return
 
     rtp_llm_ops.dsv4_top_k_per_row_prefill(
@@ -183,6 +302,8 @@ def _run_prefill_topk(
         int(topk),
         _fp8_prefill_topk_force_radix_sort(),
     )
+    if _fp8_prefill_topk_canonicalize(logits):
+        _canonicalize_fp8_topk(logits, out, row_ends, row_starts)
 
 
 def _fp8_prefill_score_chunk_rows() -> int:
@@ -224,6 +345,10 @@ def _run_topk_v3(
         k,
         max_seq_len,
     )
+    # Atomic selection emits an unordered set. Keep the requested attention
+    # reduction order stable in decode and target verification as in prefill.
+    if _fp8_prefill_topk_canonicalize(logits):
+        _canonicalize_fp8_topk(logits, output, lengths)
     return True
 
 
@@ -292,8 +417,11 @@ class _IndexerFP8PrefillMeta(NamedTuple):
 
 
 class IndexerFP8(PoolBackedModule):
-    """FP8 lightning indexer. DeepGEMM-only score; nested
-    ``CompressorFP8(head_dim=128)`` writes the 132B pool."""
+    """FP8 lightning indexer with architecture-specific score backends.
+
+    DeepGEMM handles supported datacenter GPUs; SM120 uses the bounded torch
+    fallback. ``CompressorFP8(head_dim=128)`` writes the shared 132B pool.
+    """
 
     def __init__(
         self,
@@ -320,8 +448,8 @@ class IndexerFP8(PoolBackedModule):
             f"(matches CompressorFP8 132B layout); got {index_head_dim}"
         )
         assert has_fp8_paged_mqa_logits(), (
-            "deep_gemm.fp8_paged_mqa_logits not available — IndexerFP8 cannot "
-            "operate without DeepGEMM. Use IndexerBF16 (or install deep_gemm)."
+            "FP8 paged indexer scoring is unavailable on this device. "
+            "Use IndexerBF16 or install the supported score backend."
         )
         assert layer_weights is not None, (
             "IndexerFP8 requires layer_weights — meta-tensor / stand-alone "
@@ -335,7 +463,6 @@ class IndexerFP8(PoolBackedModule):
         self.q_lora_rank = q_lora_rank
         self.softmax_scale = self.head_dim**-0.5
         self.compress_ratio = compress_ratio
-
         from rtp_llm.models_py.modules.dsv4.fp8.attention import _v4_fp8_linear
         from rtp_llm.utils.model_weight import W
 
@@ -650,7 +777,7 @@ class IndexerFP8(PoolBackedModule):
                     bsz, q_len, 1
                 )
             # ``softmax_scale * n_heads^-0.5`` is pre-folded into weights_proj at __init__.
-            weights = F.linear(x, self.weights_proj)
+            weights = _project_decode_weights(x, self.weights_proj)
 
             # Always use DeepGEMM (FP8 path). Decode uses a static score
             # width from the cache/block-table upper bound; replay updates
@@ -711,6 +838,8 @@ class IndexerFP8(PoolBackedModule):
                     out_topk_2d[:, :K_eff].copy_(topk_idxs)
                     k_arange = torch.arange(K, device=out_topk_buffer.device).view(1, K)
                     out_topk_2d.masked_fill_(k_arange >= lengths_i32.view(-1, 1), -1)
+                if _fp8_prefill_topk_canonicalize(score_2d):
+                    _canonicalize_fp8_topk(score_2d, out_topk_2d, lengths_i32)
             return out_topk_buffer
         finally:
             self._clear_nested_pool()
@@ -752,11 +881,6 @@ class IndexerFP8(PoolBackedModule):
         ``block_table_i32`` is emitted empty (matches the warmup short-
         circuit in :meth:`forward`).
 
-        Today's caller still hands us a single-request layout (``bsz==1``
-        with the full request flattened into ``seqlen``), so the
-        ``cu_kv_seqlens`` we emit is ``[0, T]``. This method is otherwise
-        layout-agnostic — once the caller starts feeding per-request
-        ``cu_seqlens`` we'll fan that out here.
         """
         assert self.freqs_cis is not None, "IndexerFP8.prepare needs freqs_cis bound"
         ratio = self.compress_ratio
@@ -790,6 +914,7 @@ class IndexerFP8(PoolBackedModule):
         if cp_active and cp_ctx.input_lengths_global is not None:
             eff_input_lengths = cp_ctx.input_lengths_global
         host_seq_total_per_req: Optional[tuple[int, ...]] = None
+        host_scalars: Optional[tuple[int, int]] = None
         if use_varlen:
             assert cu_seqlens is not None
             assert eff_input_lengths is not None
@@ -816,6 +941,12 @@ class IndexerFP8(PoolBackedModule):
             ), f"prefix_lengths must be [B={batch_size}], got {prefix_lengths.shape}"
             # Per-request compressed-K count: T_b = (sp_b + S_b) // ratio.
             with record_function_range("dsv4.fp8.indexer.prepare.varlen_lengths"):
+                # Host mirrors of the framework length/prefix sources carry the
+                # same integers; read T/end_pos from them when the domains match
+                # so the two device readbacks below stay off the chunk head.
+                host_scalars = _compressed_k_scalars_host(
+                    cp_ctx, prefix_lengths, eff_input_lengths, ratio
+                )
                 seq_total_per_req = prefix_lengths.to(
                     device=device, dtype=torch.int64
                 ) + eff_input_lengths.to(
@@ -834,6 +965,8 @@ class IndexerFP8(PoolBackedModule):
                 host_prefix_lengths = getattr(cp_ctx, "prefix_lengths_host", None)
                 if capturing:
                     T = self._kv_cache_t * batch_size
+                elif host_scalars is not None:
+                    T = host_scalars[0]
                 elif (
                     cp_active
                     and host_input_lengths is not None
@@ -916,6 +1049,8 @@ class IndexerFP8(PoolBackedModule):
             # capture uses an unused sentinel without synchronizing the device.
             if capturing:
                 end_pos = 0
+            elif host_scalars is not None:
+                end_pos = host_scalars[1]
             elif host_seq_total_per_req is not None:
                 end_pos = host_seq_total_per_req[0]
             else:
@@ -1162,9 +1297,9 @@ class IndexerFP8(PoolBackedModule):
                 )
             del q, weights, q_for_quant, w_for_quant
 
-            assert (
-                has_fp8_mqa_logits()
-            ), "deep_gemm.fp8_mqa_logits required for IndexerFP8 prefill"
+            assert has_fp8_mqa_logits(
+                x.device
+            ), "FP8 MQA indexer scoring is unavailable for IndexerFP8 prefill"
             assert self._kv_pool_view.dim() == 3, (
                 "IndexerFP8 expects 3D ``_kv_pool_view`` "
                 "[num_blocks, eb, 132]; got dim="
@@ -1377,9 +1512,9 @@ class IndexerFP8(PoolBackedModule):
                 )
             del q, weights, q_for_quant, w_for_quant
 
-            assert (
-                has_fp8_mqa_logits()
-            ), "deep_gemm.fp8_mqa_logits required for IndexerFP8 prefill"
+            assert has_fp8_mqa_logits(
+                x.device
+            ), "FP8 MQA indexer scoring is unavailable for IndexerFP8 prefill"
             assert self._kv_pool_view.dim() == 3, (
                 "IndexerFP8 expects 3D ``_kv_pool_view`` "
                 "[num_blocks, eb, 132]; got dim="

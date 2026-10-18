@@ -60,6 +60,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer imp
     cp_padded_tokens_per_rank_bound,
     resolve_moe_max_tokens_per_rank,
 )
+from rtp_llm.models_py.utils.arch import is_sm12x, is_sm120
 from rtp_llm.ops import RoleType
 from rtp_llm.utils.warmup import model_warm_up_enabled
 
@@ -229,12 +230,40 @@ class Dsv4SharedRuntimeBufferStore:
             module._bind_runtime_buffers(mtp_hidden_buffer)
 
 
+_DSV4_MOE_STRATEGY_ALIASES = frozenset({"sm120_decode", "sm120_fused_moe"})
+
+
 def _resolve_dsv4_moe_strategy(moe_config) -> str:
-    """Forward the public MoE strategy to the generic strategy registry."""
-    if moe_config is None:
-        return "auto"
-    requested = str(moe_config.moe_strategy or "auto").strip()
-    return requested or "auto"
+    """Forward the public MoE strategy to the generic strategy registry.
+
+    While ``--moe_strategy`` is ``auto``, ``DSV4_MOE_STRATEGY`` may select an
+    SM120 factory strategy (e.g. ``sm120_decode`` on a decode server). Other
+    values belong to the V4.1 module-local selector and are ignored here.
+    """
+    requested = "auto"
+    if moe_config is not None:
+        requested = str(moe_config.moe_strategy or "auto").strip() or "auto"
+    if requested == "auto":
+        alias = os.environ.get("DSV4_MOE_STRATEGY", "").strip()
+        if alias in _DSV4_MOE_STRATEGY_ALIASES:
+            return alias
+    return requested
+
+
+def _validate_sm120_dp_moe_strategy(parallelism_config, strategy: str) -> None:
+    if (
+        int(getattr(parallelism_config, "dp_size", 1)) > 1
+        and int(getattr(parallelism_config, "ep_size", 1)) > 1
+        and strategy in ("auto", "sm120_fused_moe")
+        and is_sm120()
+    ):
+        # Only the explicit decode strategy enables the engine's WORLD stop vote.
+        raise ValueError(
+            "SM120 DP/EP requires a dedicated DECODE role with "
+            "--moe_strategy=sm120_decode for coordinated shutdown; "
+            "use CP+EP with DP1 for PREFILL. auto and sm120_fused_moe "
+            "are not supported with DP>1 and EP>1"
+        )
 
 
 def _resolve_dsv4_moe_inter_dim(model_config: ModelConfig) -> int:
@@ -374,6 +403,21 @@ class DeepSeekV4Model(GptModelBase):
             max_generate_batch_size,
             moe_config=moe_config,
         )
+        _validate_sm120_dp_moe_strategy(parallelism_config, args.moe_strategy)
+        role_type = getattr(parallelism_config, "role_type", None)
+        is_prefill_only = role_type == RoleType.PREFILL or (
+            str(role_type).upper().rsplit(".", 1)[-1] == "PREFILL"
+        )
+        if args.fp8_kv_cache and not is_prefill_only and torch.cuda.is_available():
+            from rtp_llm.models_py.modules.dsv4.fp8.sm120_sparse_mla import (
+                validate_sm120_swa_topk_width,
+            )
+
+            if is_sm120():
+                validate_sm120_swa_topk_width(
+                    args.window_size,
+                    context="DeepSeek-V4 decode",
+                )
         self._max_generate_batch_size = int(max_generate_batch_size)
         assert self._max_generate_batch_size > 0, (
             "max_generate_batch_size must be positive, "
@@ -652,7 +696,13 @@ class DeepSeekV4Model(GptModelBase):
         # lifetime. CP gather/restore region is sized only when CP is active.
         cp_size = int(self._prefill_cp_size)
         q_rows = int(self._resolve_prefill_q_token_capacity())
-        q_dim = int(self._v4_args.n_heads) * int(self._v4_args.head_dim)
+        tp_size = max(int(self._v4_args.tp_size), 1)
+        n_heads = int(self._v4_args.n_heads)
+        if n_heads % tp_size:
+            raise ValueError(
+                f"n_heads ({n_heads}) must be divisible by tp_size ({tp_size})"
+            )
+        q_dim = (n_heads // tp_size) * int(self._v4_args.head_dim)
         if cp_size > 1:
             full_rows = q_rows * cp_size
             main_w, idx_w = self._resolve_prefill_ws_gather_widths()
@@ -692,6 +742,17 @@ class DeepSeekV4Model(GptModelBase):
         self._is_decode_role = bool(init_resource.is_decode_role)
         self._max_context_batch_size = init_resource.max_context_batch_size
         self._v4_args.is_decode_role = self._is_decode_role
+
+        # CP repurposes the physical TP group for sequence parallelism, so
+        # ``V4Args.tp_size`` is attention-facing (1 under CP) while MoE
+        # executors that own their communication need the physical topology.
+        physical_tp_size = int(getattr(self.parallelism_config, "tp_size", 1) or 1)
+        physical_tp_rank = int(getattr(self.parallelism_config, "tp_rank", 0) or 0)
+        moe_cp_enabled = self._prefill_cp_size > 1 and not self._is_decode_role
+        self._v4_args.moe_tp_size = physical_tp_size
+        self._v4_args.moe_tp_rank = physical_tp_rank
+        self._v4_args.moe_cp_enabled = moe_cp_enabled
+        self._v4_args.moe_cp_size = physical_tp_size if moe_cp_enabled else 1
         runtime_resolved_max_tokens_per_rank = resolve_moe_max_tokens_per_rank(
             max_seq_len=int(self._v4_args.max_seq_len),
             current_max_tokens_per_rank=int(self._v4_args.max_tokens_per_rank),
@@ -860,50 +921,58 @@ class DeepSeekV4Model(GptModelBase):
                 )
 
             try:
-                from rtp_llm.models_py.utils.flash_mla_legacy import (
-                    flash_mla_sparse_fwd as _flash_mla_sparse_fwd,
-                )
+                if is_sm12x(device_str):
+                    logging.info(
+                        "[DeepSeekV4Model] skip flash_mla SWA kv_full prewarm on SM12x"
+                    )
+                else:
+                    # Keep the import inside the backend branch.  The SM120
+                    # service uses FlashInfer and its CUDA 13 image need not
+                    # contain a loadable FlashMLA wheel.
+                    from rtp_llm.models_py.utils.flash_mla_legacy import (
+                        flash_mla_sparse_fwd as _flash_mla_sparse_fwd,
+                    )
 
-                _swa_attn = self.v4.layers[0].attn
-                _H_swa = int(_swa_attn.n_heads)
-                _D_swa = int(_swa_attn.head_dim)
-                _W_swa = int(_swa_attn.window_size)
-                _q_swa = _torch.zeros(
-                    (2, _H_swa, _D_swa), dtype=_torch.bfloat16, device=device_str
-                )
-                _kv_swa = _torch.zeros(
-                    (5, 1, _D_swa), dtype=_torch.bfloat16, device=device_str
-                )
-                _idx_swa = _torch.full(
-                    (2, 1, _W_swa), -1, dtype=_torch.int32, device=device_str
-                )
-                _cp_rank_swa = 0
-                try:
-                    import torch.distributed as _dist
-
-                    if _dist.is_available() and _dist.is_initialized():
-                        _cp_rank_swa = int(_dist.get_rank())
-                except Exception:
+                    _swa_attn = self.v4.layers[0].attn
+                    _H_swa = int(_swa_attn.n_heads)
+                    _D_swa = int(_swa_attn.head_dim)
+                    _W_swa = int(_swa_attn.window_size)
+                    _q_swa = _torch.zeros(
+                        (2, _H_swa, _D_swa), dtype=_torch.bfloat16, device=device_str
+                    )
+                    _kv_swa = _torch.zeros(
+                        (5, 1, _D_swa), dtype=_torch.bfloat16, device=device_str
+                    )
+                    _idx_swa = _torch.full(
+                        (2, 1, _W_swa), -1, dtype=_torch.int32, device=device_str
+                    )
                     _cp_rank_swa = 0
-                _first_topk_len_swa = min(_cp_rank_swa + 1, 5, _W_swa)
-                _idx_swa[0, 0, :_first_topk_len_swa] = _torch.arange(
-                    _first_topk_len_swa, dtype=_torch.int32, device=device_str
-                )
-                _idx_swa[1, 0, :5] = _torch.arange(
-                    5, dtype=_torch.int32, device=device_str
-                )
-                _topk_len_swa = _torch.tensor(
-                    [_first_topk_len_swa, 5], dtype=_torch.int32, device=device_str
-                )
-                _flash_mla_sparse_fwd(
-                    q=_q_swa,
-                    kv=_kv_swa,
-                    indices=_idx_swa,
-                    sm_scale=float(_swa_attn.softmax_scale),
-                    attn_sink=_swa_attn.attn_sink,
-                    topk_length=_topk_len_swa,
-                )
-                logging.info("[DeepSeekV4Model] flash_mla SWA kv_full prewarm done")
+                    try:
+                        import torch.distributed as _dist
+
+                        if _dist.is_available() and _dist.is_initialized():
+                            _cp_rank_swa = int(_dist.get_rank())
+                    except Exception:
+                        _cp_rank_swa = 0
+                    _first_topk_len_swa = min(_cp_rank_swa + 1, 5, _W_swa)
+                    _idx_swa[0, 0, :_first_topk_len_swa] = _torch.arange(
+                        _first_topk_len_swa, dtype=_torch.int32, device=device_str
+                    )
+                    _idx_swa[1, 0, :5] = _torch.arange(
+                        5, dtype=_torch.int32, device=device_str
+                    )
+                    _topk_len_swa = _torch.tensor(
+                        [_first_topk_len_swa, 5], dtype=_torch.int32, device=device_str
+                    )
+                    _flash_mla_sparse_fwd(
+                        q=_q_swa,
+                        kv=_kv_swa,
+                        indices=_idx_swa,
+                        sm_scale=float(_swa_attn.softmax_scale),
+                        attn_sink=_swa_attn.attn_sink,
+                        topk_length=_topk_len_swa,
+                    )
+                    logging.info("[DeepSeekV4Model] flash_mla SWA kv_full prewarm done")
             except Exception:
                 logging.exception(
                     "[DeepSeekV4Model] flash_mla SWA kv_full prewarm failed"
@@ -1157,7 +1226,7 @@ class DeepSeekV4Model(GptModelBase):
         overrides with the e_proj/h_proj fusion stage."""
         B = meta.batch_size
         q_len = meta.q_len_per_req
-        h = self.v4.embed(input_ids).view(B, q_len, -1)
+        h = self.v4.embed_full(input_ids).view(B, q_len, -1)
         return h.unsqueeze(2).repeat(1, 1, self.v4.hc_mult, 1)
 
     def _prepare_prefill_hidden(
@@ -1167,7 +1236,7 @@ class DeepSeekV4Model(GptModelBase):
     ) -> torch.Tensor:
         """Build the flat ``[T_total, hc, dim]`` hidden tensor that feeds
         the layer loop on the prefill path.  Default = embed+repeat."""
-        h = self.v4.embed(input_ids)
+        h = self.v4.embed_full(input_ids)
         return h.unsqueeze(-2).repeat(1, self.v4.hc_mult, 1)
 
     def prepare_fmha_impl(

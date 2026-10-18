@@ -848,9 +848,9 @@ def _gather_k_cache_packed_to_flat_kernel(
 
     batch_offsets = tl.arange(0, BATCH_BLOCK)
     batch_mask = batch_offsets < batch_size
-    padded_lens = tl.load(
-        padded_lens_ptr + batch_offsets, mask=batch_mask, other=0
-    ).to(tl.int64)
+    padded_lens = tl.load(padded_lens_ptr + batch_offsets, mask=batch_mask, other=0).to(
+        tl.int64
+    )
     padded_ends = tl.cumsum(padded_lens, axis=0)
     batch_idx = tl.sum((token_idx >= padded_ends).to(tl.int32), axis=0)
     padded_start = tl.sum(
@@ -1010,6 +1010,137 @@ def try_gather_k_cache_packed_to_flat(
 
 
 @triton.jit
+def _gather_k_cache_slots_packed_kernel(
+    out_ptr,
+    pool_ptr,
+    slots_ptr,
+    n_slots,
+    num_pool_slots,
+    cache_block_size: tl.constexpr,
+    block_stride,
+    out_page_size: tl.constexpr,
+    remap_ptr,
+    token_data_size: tl.constexpr,
+    scale_dim: tl.constexpr,
+):
+    row = tl.program_id(0).to(tl.int64)
+    slot = tl.load(slots_ptr + row, mask=row < n_slots, other=-1).to(tl.int64)
+    valid = (slot >= 0) & (slot < num_pool_slots)
+    safe_slot = tl.where(valid, slot, 0)
+    block = safe_slot // cache_block_size
+    pos = safe_slot - block * cache_block_size
+    block_ptr = pool_ptr + block * block_stride
+    out_block = out_ptr + (row // out_page_size) * out_page_size * (
+        token_data_size + scale_dim
+    )
+    out_pos = row % out_page_size
+    out_row = out_block + out_pos * token_data_size
+    data_off = tl.arange(0, 1024)
+    data_mask = data_off < token_data_size
+    data = tl.load(
+        block_ptr + pos * token_data_size + data_off,
+        mask=data_mask & valid,
+        other=0,
+    )
+    tl.store(out_row + data_off, data, mask=data_mask)
+    scale_off = tl.arange(0, 8)
+    scale_mask = scale_off < scale_dim
+    scales = tl.load(
+        block_ptr + cache_block_size * token_data_size + pos * scale_dim + scale_off,
+        mask=scale_mask & valid,
+        other=0,
+    )
+    tl.store(
+        out_block + out_page_size * token_data_size + out_pos * scale_dim + scale_off,
+        scales,
+        mask=scale_mask,
+    )
+    if remap_ptr is not None:
+        tl.store(remap_ptr + row, tl.where(valid, row, -1), mask=row < n_slots)
+
+
+def pack_slots_to_paged(
+    k_cache: torch.Tensor,
+    slot_indices: torch.Tensor,
+    page_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Copy selected packed FP8 slots and footer scales into a new page layout.
+
+    Invalid slots and page padding are zeroed; invalid remapped indices stay
+    -1. No dequantization or requantization is performed. The source may have
+    padding between pages, but its token data and scales use the DSv4 layout.
+    """
+    assert k_cache.dim() == 3 and k_cache.shape[-1] == ENTRY_BYTES
+    assert k_cache.dtype == torch.uint8
+    assert k_cache.shape[1] > 0 and page_size > 0
+    assert k_cache.stride(2) == 1 and k_cache.stride(1) == ENTRY_BYTES
+    slots = (
+        slot_indices.reshape(-1)
+        .to(device=k_cache.device, dtype=torch.int64)
+        .contiguous()
+    )
+    pages = max(triton.cdiv(slots.numel(), page_size), 1)
+    packed = torch.empty(
+        (pages, page_size, ENTRY_BYTES), dtype=torch.uint8, device=k_cache.device
+    )
+    remapped = torch.empty(slots.shape, dtype=torch.int32, device=k_cache.device)
+    _gather_k_cache_slots_packed_kernel[(pages * page_size,)](
+        packed,
+        k_cache,
+        slots,
+        slots.numel(),
+        int(k_cache.shape[0] * k_cache.shape[1]),
+        cache_block_size=int(k_cache.shape[1]),
+        block_stride=int(k_cache.stride(0)),
+        out_page_size=int(page_size),
+        remap_ptr=remapped,
+        token_data_size=TOKEN_DATA_SIZE,
+        scale_dim=SCALE_BYTES_PER_TOKEN,
+    )
+    return packed, remapped.view(slot_indices.shape)
+
+
+def gather_k_cache_slots_packed(
+    k_cache: torch.Tensor,
+    slot_indices: torch.Tensor,
+    *,
+    out: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    assert k_cache.dim() == 3 and k_cache.shape[-1] == ENTRY_BYTES
+    assert k_cache.dtype == torch.uint8
+    assert k_cache.stride(2) == 1 and k_cache.stride(1) == ENTRY_BYTES
+    slots = (
+        slot_indices.reshape(-1)
+        .to(device=k_cache.device, dtype=torch.int64)
+        .contiguous()
+    )
+    if out is None:
+        out = torch.empty(
+            (slots.numel(), ENTRY_BYTES), dtype=torch.uint8, device=k_cache.device
+        )
+    else:
+        assert out.shape == (slots.numel(), ENTRY_BYTES)
+        assert out.dtype == torch.uint8 and out.device == k_cache.device
+        assert out.is_contiguous()
+    if slots.numel() == 0:
+        return out
+    _gather_k_cache_slots_packed_kernel[(slots.numel(),)](
+        out,
+        k_cache,
+        slots,
+        slots.numel(),
+        int(k_cache.shape[0] * k_cache.shape[1]),
+        cache_block_size=int(k_cache.shape[1]),
+        block_stride=int(k_cache.stride(0)),
+        out_page_size=1,
+        remap_ptr=None,
+        token_data_size=TOKEN_DATA_SIZE,
+        scale_dim=SCALE_BYTES_PER_TOKEN,
+    )
+    return out
+
+
+@triton.jit
 def _dequantize_packed_k_cache_flat_kernel(
     out_ptr,
     out_stride0,
@@ -1106,9 +1237,7 @@ def _restore_dequantize_scatter_packed_k_cache_flat_kernel(
     seq_ends = tl.cumsum(seq_lens, axis=0)
     batch_idx = tl.sum((token_idx >= seq_ends).to(tl.int32), axis=0)
     valid_batch = token_valid & (batch_idx >= 0) & (batch_idx < batch_size)
-    selected_seq_len = tl.sum(
-        tl.where(batch_offsets == batch_idx, seq_lens, 0), axis=0
-    )
+    selected_seq_len = tl.sum(tl.where(batch_offsets == batch_idx, seq_lens, 0), axis=0)
     seq_start = tl.sum(
         tl.where(batch_offsets == batch_idx, seq_ends - seq_lens, 0), axis=0
     )
@@ -1127,9 +1256,7 @@ def _restore_dequantize_scatter_packed_k_cache_flat_kernel(
     restored_idx = tl.load(
         restore_indices_ptr + token_idx, mask=token_valid, other=-1
     ).to(tl.int64)
-    valid_restore = (
-        token_valid & (restored_idx >= 0) & (restored_idx < gathered_rows)
-    )
+    valid_restore = token_valid & (restored_idx >= 0) & (restored_idx < gathered_rows)
     valid_row = valid_destination & valid_restore
     safe_restored_idx = tl.where(valid_restore, restored_idx, 0)
     token_ptr = gathered_ptr + safe_restored_idx * entry_bytes
@@ -1170,9 +1297,7 @@ def _restore_dequantize_scatter_packed_k_cache_flat_kernel(
     bf16_cache_ptr = token_bf16_ptr.to(tl.pointer_type(tl.bfloat16))
     for j in tl.static_range(bf16_dim // 16):
         chunk_offsets = j * 16 + tl.arange(0, 16)
-        bf16_vals = tl.load(
-            bf16_cache_ptr + chunk_offsets, mask=valid_row, other=0
-        )
+        bf16_vals = tl.load(bf16_cache_ptr + chunk_offsets, mask=valid_row, other=0)
         tl.store(
             output_row_ptr + bf16_output_offset + chunk_offsets,
             bf16_vals,
@@ -1695,8 +1820,9 @@ def prepare_dequantize_and_gather_k_cache_slots_cp_byte_sliced(
         with record_function_range("dsv4.cp.all_gather.swa_prefix.wait_host"):
             _wait_swa_prefix_work_once(pending)
         try:
-            if cp_swa_direct_dequant_scatter_enabled() and direct_triton_fast_path_supported(
-                out.device
+            if (
+                cp_swa_direct_dequant_scatter_enabled()
+                and direct_triton_fast_path_supported(out.device)
             ):
                 _launch_dequantize_and_gather_k_slots_cp_rank_major_unchecked(
                     out,
@@ -1797,6 +1923,65 @@ def _wait_swa_prefix_work_once(pending: CPByteSlicedSwaPrefixPending) -> None:
         pending.work_waited = True
 
 
+def _gather_cp_byte_sliced_blocks(
+    k_cache_raw: torch.Tensor, compaction: CPByteSlicedSlotCompaction
+) -> torch.Tensor:
+    from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
+
+    unique_blocks = compaction.unique_blocks
+    if compaction.contiguous_block_start >= 0 and k_cache_raw.is_contiguous():
+        local_slices = k_cache_raw.narrow(
+            0, compaction.contiguous_block_start, int(unique_blocks.numel())
+        )
+    else:
+        local_slices = k_cache_raw.index_select(0, unique_blocks).contiguous()
+    with record_function_range("dsv4.cp.all_gather.swa_prefix.sync.launch"):
+        return all_gather(local_slices, group=Group.TP)
+
+
+def gather_packed_k_cache_slots_cp_byte_sliced(
+    k_cache_raw: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    gather_lens: Optional[torch.Tensor],
+    full_entries_per_block: int,
+    cp_rank: int,
+    cp_size: int,
+    compaction: CPByteSlicedSlotCompaction,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Gather original packed blocks and return their compact slot mapping."""
+    assert k_cache_raw.ndim == 2 and k_cache_raw.dtype == torch.uint8
+    assert slot_mapping.ndim == 2
+    assert full_entries_per_block > 0 and cp_size > 1 and 0 <= cp_rank < cp_size
+    assert compaction is not None
+    _validate_runtime_gather_lens(
+        gather_lens,
+        compaction,
+        batch_size=int(slot_mapping.shape[0]),
+        max_gather_len=int(slot_mapping.shape[1]),
+    )
+    num_blocks = int(compaction.unique_blocks.numel())
+    block_bytes = cp_size * int(k_cache_raw.shape[1])
+    assert block_bytes >= full_entries_per_block * ENTRY_BYTES
+    if num_blocks == 0:
+        return (
+            k_cache_raw.new_empty((0, full_entries_per_block, ENTRY_BYTES)),
+            compaction.compact_slots,
+        )
+    gathered = _gather_cp_byte_sliced_blocks(k_cache_raw, compaction)
+    full_raw = (
+        gathered.view(cp_size, num_blocks, int(k_cache_raw.shape[1]))
+        .permute(1, 0, 2)
+        .reshape(num_blocks, block_bytes)
+        .contiguous()
+    )
+    # Keep block padding and the striped payload/scale layout byte-for-byte.
+    full_view = full_raw.as_strided(
+        (num_blocks, full_entries_per_block, ENTRY_BYTES),
+        (block_bytes, ENTRY_BYTES, 1),
+    )
+    return full_view, compaction.compact_slots
+
+
 def dequantize_and_gather_k_cache_slots_cp_byte_sliced(
     out: torch.Tensor,
     k_cache_raw: torch.Tensor,
@@ -1860,20 +2045,7 @@ def dequantize_and_gather_k_cache_slots_cp_byte_sliced(
         out[:, offset : offset + W, :].zero_()
         return
 
-    from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
-
-    if compaction.contiguous_block_start >= 0 and k_cache_raw.is_contiguous():
-        local_slices = k_cache_raw.narrow(
-            0,
-            compaction.contiguous_block_start,
-            int(unique_blocks.numel()),
-        )
-    else:
-        local_slices = k_cache_raw.index_select(
-            0, unique_blocks
-        ).contiguous()  # [num_unique_blocks, local_slice_bytes]
-    with record_function_range("dsv4.cp.all_gather.swa_prefix.sync.launch"):
-        gathered = all_gather(local_slices, group=Group.TP)
+    gathered = _gather_cp_byte_sliced_blocks(k_cache_raw, compaction)
     gather_lens_i32 = _device_gather_lens(
         saved_gather_lens,
         batch_size=B,

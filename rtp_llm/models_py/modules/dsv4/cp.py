@@ -124,6 +124,22 @@ class CPContext:
     _full_prefill_positions_cache: Optional[
         Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
     ] = field(default=None, init=False, repr=False, compare=False)
+    # Host-known absolute position of local token 0, derived from the same
+    # host mirrors (prefix lengths / real lengths / zigzag chunk lengths) that
+    # built ``global_positions`` — identical value to ``global_positions[0]``
+    # without a blocking D2H.  None when not host-derivable; callers must
+    # fall back to reading the device tensor.
+    first_global_position: Optional[int] = None
+    # Host mirror of the FULL (unsliced) per-request prefix lengths when the
+    # framework source tensor was host-visible (pinned CPU).  Values are
+    # identical to the device ``prefix_lengths`` arg forwarded to the prefill
+    # metadata builders; used to keep scalar reductions off the GPU hot path.
+    prefix_lengths_full_host: Optional[Tuple[int, ...]] = None
+    # Host mirror of the FULL (unsliced) per-request real input lengths — the
+    # values ``input_lengths_global`` was built from
+    # (``prefill_actual_input_lengths_cpu``).  Lets the metadata builders read
+    # per-request lengths without a device readback.
+    input_lengths_full_host: Optional[Tuple[int, ...]] = None
 
 
 @dataclass
@@ -321,6 +337,35 @@ class CudaAsyncCPGatherImpl:
         return full
 
 
+def first_position_for_meta(
+    cp_ctx: Optional[CPContext], positions: torch.Tensor
+) -> int:
+    """Host-known first absolute position under CP; legacy sync fallback otherwise.
+
+    Under CP the metadata ``positions`` IS ``cp_ctx.global_positions`` (same
+    device values), whose first element equals the host-derived
+    ``first_global_position`` — so the blocking ``positions[0].item()``
+    readback is skipped whenever the mirror exists.
+    """
+    first = (
+        getattr(cp_ctx, "first_global_position", None) if cp_ctx is not None else None
+    )
+    if first is not None:
+        return int(first)
+    flat = positions.reshape(-1)
+    if flat.numel() == 0:
+        # A prefill forward with zero rank-local tokens is never a valid
+        # request shape.  Fail closed with a descriptive error instead of an
+        # opaque ``IndexError``; the non-empty path is byte-identical to the
+        # legacy readback.
+        raise RuntimeError(
+            "first_position_for_meta: empty positions tensor and no "
+            "CPContext.first_global_position host mirror — the model received a "
+            "zero-token CP prefill forward (empty context batch)."
+        )
+    return int(flat[0].item())
+
+
 def build_cp_context_for_forward(
     cp_info,
     cp_size: int,
@@ -341,8 +386,18 @@ def build_cp_context_for_forward(
     global position, so the rule lives in exactly one place.
     """
     position_offset: Union[int, torch.Tensor] = 0
+    position_offset_full_host: Optional[Tuple[int, ...]] = None
     if prefix_lengths is not None and int(prefix_lengths.numel()) > 0:
         position_offset = prefix_lengths
+        host_source = (
+            prefix_lengths_host
+            if prefix_lengths_host is not None and int(prefix_lengths_host.numel()) > 0
+            else prefix_lengths
+        )
+        if host_source.device.type == "cpu":
+            # Full (unsliced) host mirror of the same source tensor the prefill
+            # metadata builders receive; identical integer values.
+            position_offset_full_host = tuple(int(v) for v in host_source.tolist())
     return build_cp_context(
         cp_info,
         cp_size,
@@ -352,6 +407,7 @@ def build_cp_context_for_forward(
         position_offset=position_offset,
         position_offset_host=prefix_lengths_host,
         chunk_lengths_device=chunk_lengths_device,
+        position_offset_full_host=position_offset_full_host,
         kv_cache_sharded=kv_cache_sharded,
     )
 
@@ -372,11 +428,17 @@ def build_cp_context(
     position_offset: Union[int, torch.Tensor] = 0,
     position_offset_host: Optional[torch.Tensor] = None,
     chunk_lengths_device: Optional[torch.Tensor] = None,
+    position_offset_full_host: Optional[Tuple[int, ...]] = None,
     kv_cache_sharded: bool = False,
 ) -> CPContext:
     """Compute the per-forward derived CPContext from framework metadata."""
     padding_mask = cp_info.prefill_qkv_padding_mask
     restore_indices = cp_info.prefill_qkv_restore_indice
+
+    def _finish(context: CPContext) -> CPContext:
+        _attach_cp_host_mirrors(context, chunk_lengths, position_offset_full_host)
+        return context
+
     if padding_mask.device != device:
         padding_mask = padding_mask.to(device)
     if restore_indices.device != device:
@@ -528,7 +590,7 @@ def build_cp_context(
             ),
             default=0,
         )
-        return CPContext(
+        context = CPContext(
             cp_size=int(cp_size),
             cp_rank=int(cp_rank),
             chunk_length=int(chunk_length),
@@ -551,6 +613,7 @@ def build_cp_context(
             input_lengths_global_host=input_lengths_global_host,
             prefix_lengths_host=prefix_lengths_host,
         )
+        return _finish(context)
 
     prefix_lengths = prefix_lengths.to(device=device, dtype=torch.long).contiguous()
     if input_lengths_global is not None:
@@ -643,7 +706,7 @@ def build_cp_context(
     else:
         seq_len_total = prefix_length + seq_len_full
 
-    return CPContext(
+    context = CPContext(
         cp_size=int(cp_size),
         cp_rank=int(cp_rank),
         chunk_length=int(chunk_length),
@@ -666,6 +729,26 @@ def build_cp_context(
         input_lengths_global_host=input_lengths_global_host,
         prefix_lengths_host=prefix_lengths_host,
     )
+    return _finish(context)
+
+
+def _attach_cp_host_mirrors(
+    context: CPContext,
+    chunk_lengths,
+    prefix_lengths_full_host: Optional[Tuple[int, ...]],
+) -> None:
+    """Attach host mirrors derived from the same host plan as the device tensors."""
+    prefix_host = context.prefix_lengths_host
+    lengths_host = context.input_lengths_global_host
+    # Host mirror of global_positions[0]: token 0 belongs to request 0, so its
+    # position is prefix[0] + clamp(cp_rank * pair0, max=real[0] - 1).
+    if prefix_host and len(chunk_lengths) > 0 and chunk_lengths[0] > 0:
+        first_local = int(context.cp_rank) * (int(chunk_lengths[0]) // 2)
+        if lengths_host:
+            first_local = min(first_local, max(int(lengths_host[0]) - 1, 0))
+        context.first_global_position = int(prefix_host[0]) + first_local
+    context.prefix_lengths_full_host = prefix_lengths_full_host
+    context.input_lengths_full_host = lengths_host
 
 
 def _cp_gather_2d(
@@ -1610,6 +1693,30 @@ def cp_actual_owned_kv_lens(
         (n_owned - 1) * block_size + last_blk_size,
         torch.zeros_like(T),
     )
+
+
+def cp_actual_owned_kv_len_scalar(
+    total_kv_len: int, cp_size: int, block_size: int, cp_rank: int
+) -> int:
+    """Monotone scalar owned-length rule: max(f(lengths)) equals f(max(lengths))."""
+    if cp_size <= 0:
+        raise ValueError(f"cp_size must be positive, got {cp_size}")
+    if block_size <= 0:
+        raise ValueError(f"block_size must be positive, got {block_size}")
+    if cp_rank < 0 or cp_rank >= cp_size:
+        raise ValueError(f"cp_rank({cp_rank}) out of range [0, {cp_size})")
+
+    T = int(total_kv_len)
+    if T <= 0:
+        return 0
+    total_blocks = (T + block_size - 1) // block_size
+    raw = total_blocks - cp_rank
+    if raw <= 0:
+        return 0
+    n_owned = (raw + cp_size - 1) // cp_size
+    last_blk_idx = (n_owned - 1) * cp_size + cp_rank
+    last_blk_size = min(block_size, max(T - last_blk_idx * block_size, 0))
+    return (n_owned - 1) * block_size + last_blk_size
 
 
 def cp_should_gather(cp_ctx: Optional[CPContext], start_pos: int) -> bool:

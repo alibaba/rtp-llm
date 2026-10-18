@@ -133,6 +133,9 @@ class _FakeV4:
     def embed(self, input_ids):
         return torch.stack((input_ids.float(), input_ids.float() + 0.5), dim=-1)
 
+    def embed_full(self, input_ids):
+        return self.embed(input_ids)
+
     def _hc_head_reduce(self, h):
         self.calls.append(("head_reduce", h.clone()))
         return h.squeeze(-2)
@@ -353,6 +356,47 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
                     torch.testing.assert_close(
                         resolved, torch.tensor(expected, dtype=torch.int32)
                     )
+
+    def test_embed_full_reassembles_sharded_embedding(self):
+        class ShardedEmbedding:
+            args = SimpleNamespace(dim=4)
+
+            @staticmethod
+            def embed(input_ids):
+                values = input_ids.to(torch.float32).reshape(-1, 1)
+                return torch.cat((values, values + 1), dim=-1).view(*input_ids.shape, 2)
+
+        def fake_all_gather(local, group):
+            self.assertEqual(group.name, "TP")
+            return torch.cat((local, local + 100), dim=0)
+
+        input_ids = torch.tensor([[3, 4], [5, 6]], dtype=torch.long)
+        with patch(
+            "rtp_llm.models_py.distributed.collective_torch.all_gather",
+            side_effect=fake_all_gather,
+        ):
+            out = V4Transformer.embed_full(ShardedEmbedding(), input_ids)
+
+        torch.testing.assert_close(
+            out,
+            torch.tensor(
+                [
+                    [[3.0, 4.0, 103.0, 104.0], [4.0, 5.0, 104.0, 105.0]],
+                    [[5.0, 6.0, 105.0, 106.0], [6.0, 7.0, 106.0, 107.0]],
+                ]
+            ),
+        )
+
+    def test_embed_full_rejects_incompatible_shard_width(self):
+        class BadEmbedding:
+            args = SimpleNamespace(dim=5)
+
+            @staticmethod
+            def embed(input_ids):
+                return torch.zeros(*input_ids.shape, 2)
+
+        with self.assertRaisesRegex(ValueError, "incompatible hidden size"):
+            V4Transformer.embed_full(BadEmbedding(), torch.tensor([1, 2]))
 
     def test_disable_record_function_ranges_is_scoped(self):
         calls = []
@@ -685,12 +729,16 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
         lengths = torch.tensor([2, 0, 3], dtype=torch.int32)
         for placeholder in (None, torch.empty(0, dtype=torch.int32), torch.tensor([0])):
             for device_lengths in (None, torch.empty(0, dtype=torch.int32), lengths):
-                with self.subTest(placeholder=placeholder, device_lengths=device_lengths):
+                with self.subTest(
+                    placeholder=placeholder, device_lengths=device_lengths
+                ):
                     attn = SimpleNamespace(
                         cu_seqlens=placeholder,
                         cu_seqlens_device=placeholder,
                         combo_position_ids=torch.arange(5),
-                        input_lengths=lengths if device_lengths is not lengths else None,
+                        input_lengths=(
+                            lengths if device_lengths is not lengths else None
+                        ),
                         input_lengths_device=device_lengths,
                     )
 
@@ -856,7 +904,9 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
                 prefill_forward.os.environ, {}, clear=True
             ), patch.object(prefill_forward._rt, "ENABLED", False), patch.object(
                 prefill_forward._fwd_dbg, "enabled", lambda: False
-            ), patch.object(v4, "norm", wraps=v4.norm) as norm:
+            ), patch.object(
+                v4, "norm", wraps=v4.norm
+            ) as norm:
                 out = prefill_forward.forward_layers(
                     v4,
                     kv_cache=None,
@@ -868,7 +918,9 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
                     capture_context=capture_context.for_forward(enabled),
                 )
                 norm.assert_called_once()
-                torch.testing.assert_close(out, expected if enabled else expected[:, -2:])
+                torch.testing.assert_close(
+                    out, expected if enabled else expected[:, -2:]
+                )
                 self.assertIs(v4._mtp_hidden_buffer, aux_buffer)
                 torch.testing.assert_close(aux_buffer[:2], expected[:, 2:4])
                 self.assertTrue(torch.isnan(aux_buffer[2:]).all())

@@ -99,6 +99,10 @@ class Block(nn.Module):
         ep_rank: int = 0,
         world_size: Optional[int] = None,
         world_rank: Optional[int] = None,
+        moe_tp_size: int = 1,
+        moe_tp_rank: int = 0,
+        moe_cp_enabled: bool = False,
+        moe_cp_size: int = 1,
         max_tokens_per_rank: int = 8192,
         is_decode_role: bool = False,
         moe_strategy: str = "auto",
@@ -138,6 +142,7 @@ class Block(nn.Module):
             tp_size=tp_size,
             tp_rank=tp_rank,
         )
+        self.attn.moe_strategy = moe_strategy
         self._cp_sync_after_attn_done = False
         if commit_only:
             self.ffn = None
@@ -179,6 +184,11 @@ class Block(nn.Module):
             moe_w1_layout="gate_up",
             observer_factory=self._moe_observer,
             record_function_scope=_profiler.moe_record_function_scope,
+            moe_cp_enabled=moe_cp_enabled,
+            moe_cp_size=moe_cp_size,
+            moe_tp_size=moe_tp_size,
+            moe_tp_rank=moe_tp_rank,
+            attn_tp_size=tp_size,
         )
         # Framework loader already casts norms to bf16 (compute_dtype) and
         # hc_* tensors to fp32 (descriptor data_type); pass refs straight

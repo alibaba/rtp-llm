@@ -32,6 +32,7 @@ mutate the Python list first, then assign it once.
 
 from typing import Optional, Sequence
 
+from rtp_llm.models.dsv4_indexer_cache import indexer_entry_bytes
 from rtp_llm.ops import (
     CacheCapacityPolicyDesc,
     CacheCpPolicyDesc,
@@ -244,9 +245,7 @@ def build_dsv4_kv_cache_spec_descs(
         raise ValueError(f"dsv4 kv cache descs require layer_num > 0, got {layer_num}")
 
     kv_entry_elems = DSV4_FP8_KV_ENTRY_BYTES if fp8_kv else head_dim * 2
-    indexer_entry_elems = (
-        DSV4_FP8_INDEXER_ENTRY_BYTES if fp8_kv else indexer_head_dim * 2
-    )
+    indexer_entry_elems = indexer_entry_bytes() if fp8_kv else indexer_head_dim * 2
 
     csa_kv = _make_dsv4_desc(
         CSA_KV_TAG,

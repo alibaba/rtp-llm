@@ -1,6 +1,6 @@
 """DSV4 SWA FP8 KV insert — vLLM-aligned Triton kernel.
 
-Vendored verbatim (signature + math) from vLLM
+Adapted from vLLM
 ``vllm/v1/attention/ops/deepseek_v4_ops/cache_utils.py``
 (``quantize_and_insert_k_kernel`` / ``quantize_and_insert_k_cache``).
 
@@ -52,6 +52,11 @@ def _quantize_and_insert_k_kernel(
     slot_mapping_ptr,  # [num_tokens] int64; -1 = skip
     # Output (in-place)
     k_cache_ptr,  # [num_blocks, block_size, 584] uint8 (3D)
+    prefix_cache_ptr,
+    prefix_slots_ptr,
+    prefix_lens_ptr,
+    prefix_block_stride,
+    prefix_num_blocks,
     # Dimensions / constexprs
     num_tokens,
     input_dim: tl.constexpr,  # 512
@@ -66,6 +71,10 @@ def _quantize_and_insert_k_kernel(
     fp8_max: tl.constexpr,  # 448.0
     n_quant_blocks: tl.constexpr,  # 8 (7 real + 1 padding tile-loop iter)
     TRAP_INVALID_KV_ACCESS: tl.constexpr,
+    COPY_PREFIX: tl.constexpr,
+    prefix_block_size: tl.constexpr,
+    prefix_width: tl.constexpr,
+    tokens_per_request: tl.constexpr,
 ):
     """One program per token. Block layout per pool block:
     [0, cache_block_size * 576)             — token data (NoPE+RoPE interleaved)
@@ -98,6 +107,46 @@ def _quantize_and_insert_k_kernel(
     token_scale_ptr = (
         cache_block_ptr + cache_block_size * token_data_size + pos_in_block * scale_dim
     )
+
+    if COPY_PREFIX:
+        request = pid // tokens_per_request
+        position = pid % tokens_per_request
+        prefix_len = tl.load(prefix_lens_ptr + request)
+        if position < prefix_len:
+            source_slot = tl.load(
+                prefix_slots_ptr + request * prefix_width + position,
+                mask=position < prefix_width,
+                other=-1,
+            ).to(tl.int64)
+            valid = (source_slot >= 0) & (
+                source_slot < prefix_num_blocks * prefix_block_size
+            )
+            if (source_slot != -1) & ~valid:
+                _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS)
+            source_block = tl.maximum(source_slot, 0) // prefix_block_size
+            source_position = tl.maximum(source_slot, 0) % prefix_block_size
+            source_ptr = prefix_cache_ptr + source_block * prefix_block_stride.to(
+                tl.int64
+            )
+            data_offsets = tl.arange(0, 1024)
+            data_mask = data_offsets < token_data_size
+            data = tl.load(
+                source_ptr + source_position * token_data_size + data_offsets,
+                mask=data_mask & valid,
+                other=0,
+            )
+            tl.store(token_data_ptr + data_offsets, data, mask=data_mask)
+            scale_offsets = tl.arange(0, 8)
+            scales = tl.load(
+                source_ptr
+                + prefix_block_size * token_data_size
+                + source_position * scale_dim
+                + scale_offsets,
+                mask=valid,
+                other=0,
+            )
+            tl.store(token_scale_ptr + scale_offsets, scales)
+            return
 
     token_fp8_ptr = token_data_ptr
     token_bf16_ptr = token_data_ptr + fp8_dim
@@ -159,6 +208,10 @@ def quantize_and_insert_k_cache(
     k: torch.Tensor,  # [num_tokens, 512] bf16
     k_cache: torch.Tensor,  # [num_blocks, block_size, 584] uint8
     slot_mapping: torch.Tensor,  # [num_tokens] int64; -1 = skip
+    *,
+    prefix_cache: torch.Tensor | None = None,
+    prefix_slot_mapping: torch.Tensor | None = None,
+    prefix_gather_lens: torch.Tensor | None = None,
 ) -> None:
     """One-launch quantize-and-write into the FP8 SWA pool.
 
@@ -171,6 +224,11 @@ def quantize_and_insert_k_cache(
     Slots with value ``-1`` are skipped. The caller decides which logical
     blocks are writable by passing a per-token slot mapping; sparse positive
     block-table entries are written just like contiguous tail entries.
+
+    Prefix tables describe B requests in a flattened [B, M, 512] workspace.
+    Copy their packed bytes unchanged: dequantizing and requantizing can
+    change the encoding and native attention rounding even when decoded
+    values match. Only fresh rows are quantized. The caches must not alias.
     """
     assert (
         k.dim() == 2 and k.shape[1] == _INPUT_DIM
@@ -191,6 +249,36 @@ def quantize_and_insert_k_cache(
 
     block_size = int(k_cache.shape[1])
     block_stride = int(k_cache.stride(0))  # bytes per block (TMA-padded)
+    copy_prefix = prefix_cache is not None
+    prefix_block_size = prefix_width = tokens_per_request = 1
+    prefix_block_stride = prefix_num_blocks = 0
+    if copy_prefix:
+        assert prefix_slot_mapping is not None and prefix_gather_lens is not None
+        assert prefix_cache.ndim == 3 and prefix_cache.shape[-1] == 584
+        assert prefix_cache.dtype == torch.uint8 and prefix_cache.device == k.device
+        assert prefix_cache.stride(1) == 584 and prefix_cache.stride(2) == 1
+        assert (
+            prefix_cache.untyped_storage().data_ptr()
+            != k_cache.untyped_storage().data_ptr()
+        ), "prefix source and destination must not alias"
+        assert prefix_slot_mapping.ndim == 2 and prefix_slot_mapping.is_contiguous()
+        batch, prefix_width = prefix_slot_mapping.shape
+        assert batch > 0 and num_tokens % batch == 0
+        assert (
+            prefix_gather_lens.shape == (batch,) and prefix_gather_lens.is_contiguous()
+        )
+        for table in (prefix_slot_mapping, prefix_gather_lens):
+            assert table.device == k.device and table.dtype in (
+                torch.int32,
+                torch.int64,
+            )
+        tokens_per_request = num_tokens // batch
+        assert prefix_width <= tokens_per_request
+        prefix_block_size = int(prefix_cache.shape[1])
+        prefix_block_stride = int(prefix_cache.stride(0))
+        prefix_num_blocks = int(prefix_cache.shape[0])
+    else:
+        assert prefix_slot_mapping is None and prefix_gather_lens is None
     validate_slot_mapping(
         "swa.quantize_and_insert.slot_mapping",
         slot_mapping,
@@ -204,6 +292,11 @@ def quantize_and_insert_k_cache(
         k,
         slot_mapping,
         k_cache,
+        prefix_cache,
+        prefix_slot_mapping,
+        prefix_gather_lens,
+        prefix_block_stride,
+        prefix_num_blocks,
         num_tokens,
         input_dim=_INPUT_DIM,
         fp8_dim=_TOKEN_FP8_DIM,
@@ -217,6 +310,10 @@ def quantize_and_insert_k_cache(
         fp8_max=_FP8_MAX,
         n_quant_blocks=8,
         TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
+        COPY_PREFIX=copy_prefix,
+        prefix_block_size=prefix_block_size,
+        prefix_width=prefix_width,
+        tokens_per_request=tokens_per_request,
     )
 
 

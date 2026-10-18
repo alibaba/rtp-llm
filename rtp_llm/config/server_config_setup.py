@@ -21,6 +21,32 @@ from rtp_llm.utils.fuser import fetch_remote_file_to_local
 RUN_AFFINITY_TIMEOUT_SEC = 10
 
 
+def _auto_deepep_supported_on_visible_devices(local_world_size: int = 0) -> bool:
+    """Whether automatic DeepEP selection is valid for participating devices.
+
+    Consumer Blackwell SM120 uses the generic SM120 collective strategy;
+    DeepEP does not ship compatible kernels there.  Other SM12x revisions are
+    also ineligible for automatic DeepEP selection, but this generic startup
+    stage must not reject dense models.  If an MoE model has no compatible
+    fallback, its concrete backend selector reports that error later.  Devices
+    outside the local world do not participate and must not affect selection.
+    """
+    if not torch.cuda.is_available():
+        # Preserve CPU-only config parsing and unit-test behavior.  Runtime
+        # hardware validation occurs later when CUDA is initialized.
+        return True
+    device_count = torch.cuda.device_count()
+    participating_device_count = min(
+        device_count,
+        local_world_size if local_world_size > 0 else device_count,
+    )
+    capabilities = [
+        torch.cuda.get_device_capability(device_index)
+        for device_index in range(participating_device_count)
+    ]
+    return all(capability[0] != 12 for capability in capabilities)
+
+
 def auto_configure_deepep(
     moe_config,
     deep_ep_config,
@@ -128,12 +154,36 @@ def auto_configure_deepep(
         and deep_ep_config.use_mori_ep is None
     ):
         # All are None, use auto configuration
-        _apply_auto_deepep_config(
-            moe_config=moe_config,
-            world_size=parallelism_config.world_size,
-            local_world_size=parallelism_config.local_world_size,
-            role_type=role_type,
-        )
+        auto_selection_relevant = ep_size > 1 and role_type in {
+            RoleType.PREFILL,
+            RoleType.DECODE,
+            RoleType.PDFUSION,
+        }
+        if not auto_selection_relevant:
+            # DeepEP is an MoE expert-parallel backend.  Dense/single-EP
+            # engines and control-plane roles must not fail startup merely
+            # because an unrelated visible GPU has an unsupported revision.
+            moe_config.use_deepep_moe = False
+            moe_config.use_deepep_low_latency = False
+            moe_config.use_deepep_internode = False
+        elif _auto_deepep_supported_on_visible_devices(
+            parallelism_config.local_world_size
+        ):
+            _apply_auto_deepep_config(
+                moe_config=moe_config,
+                world_size=parallelism_config.world_size,
+                local_world_size=parallelism_config.local_world_size,
+                role_type=role_type,
+            )
+        else:
+            moe_config.use_deepep_moe = False
+            moe_config.use_deepep_low_latency = False
+            moe_config.use_deepep_internode = False
+            logging.info(
+                "Automatic DeepEP selection is disabled on the participating "
+                "GPU architecture; a concrete MoE backend will validate any "
+                "required fallback after the model configuration is loaded"
+            )
     else:
         # User has set at least one value, copy them to moe_config
         if deep_ep_config.use_deepep_moe is not None:
@@ -683,3 +733,8 @@ def setup_and_configure_server(py_env_configs: PyEnvConfigs):
     # Set local ip if not already set (e.g. for world_info / distributed_server)
     if not py_env_configs.server_config.ip:
         py_env_configs.server_config.ip = socket.gethostbyname(socket.gethostname())
+
+    if py_env_configs.model_args.model_type == "deepseek_v4":
+        from rtp_llm.models.dsv4_indexer_cache import validate_indexer_cache_mode
+
+        validate_indexer_cache_mode()

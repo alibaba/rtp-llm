@@ -47,7 +47,6 @@ def _load_cp_module():
     profiler_module = types.ModuleType("rtp_llm.models_py.modules.dsv4._profiler")
     profiler_module.record_function_range = torch.profiler.record_function
     sys.modules["rtp_llm.models_py.modules.dsv4._profiler"] = profiler_module
-
     here = os.path.dirname(os.path.abspath(__file__))
     cp_path = os.path.normpath(os.path.join(here, os.pardir, "cp.py"))
     spec = importlib.util.spec_from_file_location(
