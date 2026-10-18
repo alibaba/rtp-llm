@@ -11,6 +11,7 @@ import logging
 import math
 import os
 import re
+import subprocess
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -96,7 +97,7 @@ def recipe(role, mode, checkpoint, tokenizer):
         "DSV41_SM90_DECODE_GRAPH": str(int(decode)),
         "DSV41_SM90_DECODE_GRAPH_MAX_ROWS": str(max(local_batches)),
         "DSV41_SM90_MULTIQUERY_INDEXER": "1",
-        "DSV41_ENGRAM_PREFETCH": "1",
+        "DSV41_ENGRAM_PREFETCH": os.environ.get("DSV41_ENGRAM_PREFETCH", "1"),
         "DSV41_ENGRAM_REGISTER_CHUNK_MB": "256",
         "DSV4_MOE_CHUNK_PREFILL": "0",
         "ROLE_TYPE": role.upper(),
@@ -104,6 +105,8 @@ def recipe(role, mode, checkpoint, tokenizer):
         "FT_SERVER_TEST": "1",
         "LOG_LEVEL": "INFO",
     }
+    if env["DSV41_ENGRAM_PREFETCH"] not in ("0", "1"):
+        raise ValueError("DSV41_ENGRAM_PREFETCH must be 0 or 1")
     return options, env, local_batches, output_len
 
 
@@ -277,6 +280,24 @@ def main():
     }
     evidence_path = output / "sm90_role_results.json"
     evidence_path.write_text(json.dumps(evidence, indent=2))
+    memory_log = (output / "gpu_memory.csv").open("w")
+    memory_sampler = subprocess.Popen(
+        [
+            "nvidia-smi",
+            "--query-gpu=timestamp,index,uuid,memory.used",
+            "--format=csv,noheader,nounits",
+            "--loop-ms=500",
+        ],
+        stdout=memory_log,
+        stderr=subprocess.STDOUT,
+    )
+    evidence["gpu_memory"] = "gpu_memory.csv: whole-device MiB sampled every 500ms"
+    profiling = os.environ.get("DSV41_PERF_PROFILE", "0") == "1"
+    evidence["profile_after_measurements"] = profiling
+    if profiling:
+        # The control RPC broadcasts within TP, not across independent DP ranks.
+        evidence["profile_scope"] = "rank0 (TP1)" if decode else "TP group"
+        os.environ["PERF_PREARM_PROFILE"] = "1"
     try:
         queries = create_query(tokenizer, list(LENGTHS))
         server.start(max_seq_len=66560, max_concurrency=max(batches))
@@ -286,6 +307,14 @@ def main():
         validate_startup(
             Path(server.log_file_path).read_text(errors="replace"), args.role
         )
+
+        startup = Path(server.log_file_path).read_text(errors="replace")
+        enabled = env["DSV41_ENGRAM_PREFETCH"] == "1"
+        if ("SM90 Engram UVA prefetch enabled" in startup) != enabled:
+            raise AssertionError(
+                "Engram prefetch startup does not match requested switch"
+            )
+        evidence["server_ready_unix_s"] = time.time()
 
         class CheckedBatch(BatchPerfImpl):
             def _curl_server_responses(self, profile=False):
@@ -314,51 +343,72 @@ def main():
                 validate_responses(
                     responses, self.batch_size, self.expected_input, output_len
                 )
-                self.round_seconds.append(time.monotonic() - started)
+                if not profile:
+                    self.round_seconds.append(time.monotonic() - started)
+                    self.round_responses.append([vars(r).copy() for r in responses])
                 return responses
 
-        for local_batch in batches:
-            for length in LENGTHS:
-                impl = CheckedBatch(
-                    server.port,
-                    dp,
-                    local_batch * dp,
-                    queries[length],
-                    decode,
-                    wait_time=600,
-                    decode_test_length=output_len,
-                    profile=False,
-                    generate_config={
-                        "reuse_cache": False,
-                        "top_k": 1,
-                        "top_p": 1.0,
-                        "random_seed": 42,
-                        "force_sp_accept": False,
-                        "can_use_pd_separation": False,
-                    },
-                    profile_trace_name=f"{args.role}_bs{local_batch}_seq{length}",
-                    warmup_runs=1,
-                    measure_runs=1 if args.mode == "smoke" else 5,
-                    profile_runs=0,
-                )
-                impl.expected_input = length
-                impl.round_seconds = []
-                try:
-                    metrics = impl.run()
-                finally:
-                    impl.executor.shutdown(wait=True)
-                row = {
-                    "input_len": length,
-                    "output_len": output_len,
-                    "batch_per_rank": local_batch,
-                    "global_batch": local_batch * dp,
-                    "warmup_round_seconds": impl.round_seconds[0],
-                    "formal_round_seconds": impl.round_seconds[1:],
-                    "metrics": asdict(metrics),
-                }
-                evidence["rows"].append(row)
-                evidence_path.write_text(json.dumps(evidence, indent=2))
-                logging.info("SM90_ROLE_RESULT %s", json.dumps(row))
+        # Finish every formal case before initializing the profiler.
+        for profile in (False, True) if profiling else (False,):
+            if profile:
+                evidence["profile_started_unix_s"] = time.time()
+            for local_batch in batches:
+                for length in LENGTHS:
+                    impl = CheckedBatch(
+                        server.port,
+                        dp,
+                        local_batch * dp,
+                        queries[length],
+                        decode,
+                        wait_time=600,
+                        decode_test_length=output_len,
+                        profile=profile,
+                        generate_config={
+                            "reuse_cache": False,
+                            "top_k": 1,
+                            "top_p": 1.0,
+                            "random_seed": 42,
+                            "force_sp_accept": False,
+                            "can_use_pd_separation": False,
+                        },
+                        profile_trace_name=f"{args.role}_bs{local_batch}_seq{length}",
+                        warmup_runs=0 if profile else 1,
+                        measure_runs=1 if profile or args.mode == "smoke" else 5,
+                        profile_runs=int(profile),
+                        log_path=server.log_file_path,
+                        log_flush_offset=Path(server.log_file_path).stat().st_size,
+                    )
+                    impl.expected_input = length
+                    impl.round_seconds = []
+                    impl.round_responses = []
+                    started_unix_s = time.time()
+                    try:
+                        metrics = impl.run()
+                    finally:
+                        impl.executor.shutdown(wait=True)
+                    if profile:
+                        continue
+                    row = {
+                        "started_unix_s": started_unix_s,
+                        "finished_unix_s": time.time(),
+                        "input_len": length,
+                        "output_len": output_len,
+                        "batch_per_rank": local_batch,
+                        "global_batch": local_batch * dp,
+                        "warmup_round_seconds": impl.round_seconds[0],
+                        "formal_round_seconds": impl.round_seconds[1:],
+                        "metrics": asdict(metrics),
+                        "formal_responses": impl.round_responses[1:],
+                        "profile_runs": 0,
+                    }
+                    evidence["rows"].append(row)
+                    evidence_path.write_text(json.dumps(evidence, indent=2))
+                    logging.info(
+                        "SM90_ROLE_RESULT %s",
+                        json.dumps(
+                            {k: v for k, v in row.items() if k != "formal_responses"}
+                        ),
+                    )
         evidence["status"] = "PASS"
     except BaseException as error:
         evidence["status"] = "FAIL"
@@ -366,7 +416,12 @@ def main():
         raise
     finally:
         evidence_path.write_text(json.dumps(evidence, indent=2))
-        server.stop()
+        try:
+            server.stop()
+        finally:
+            memory_sampler.terminate()
+            memory_sampler.wait(timeout=10)
+            memory_log.close()
 
 
 if __name__ == "__main__":
