@@ -666,10 +666,6 @@ class OpenaiEndpoint(object):
             rendered_input.rendered_prompt += prepopulate_str
             added_ids = self.tokenizer.encode(prepopulate_str)
             rendered_input.input_ids += added_ids
-            if rendered_input.v41_inputs is not None:
-                rendered_input.v41_inputs = rendered_input.v41_inputs.append_text(
-                    prepopulate_str, added_ids
-                )
         return rendered_input
 
     async def render_chat_async(self, chat_request: ChatCompletionRequest):
@@ -715,13 +711,7 @@ class OpenaiEndpoint(object):
 
         mm_inputs = rendered_input.multimodal_inputs
 
-        if generate_config.return_prompt_logits and (
-            mm_inputs
-            or (
-                rendered_input.v41_inputs is not None
-                and rendered_input.v41_inputs.images
-            )
-        ):
+        if generate_config.return_prompt_logits and mm_inputs:
             raise FtRuntimeException(
                 ExceptionType.ERROR_INPUT_FORMAT_ERROR,
                 "prompt scoring does not support multimodal inputs",
@@ -757,11 +747,6 @@ class OpenaiEndpoint(object):
             self.backend_rpc_server_visitor,
             chat_request,
             headers=request_headers,
-            **(
-                {"v41_inputs": rendered_input.v41_inputs}
-                if rendered_input.v41_inputs is not None
-                else {}
-            ),
         )
 
         return self._complete_stream_response(
@@ -781,13 +766,7 @@ class OpenaiEndpoint(object):
             chat_request, rendered_input.input_ids, renderer
         )
 
-        if generate_config.return_prompt_logits and (
-            rendered_input.multimodal_inputs
-            or (
-                rendered_input.v41_inputs is not None
-                and rendered_input.v41_inputs.images
-            )
-        ):
+        if generate_config.return_prompt_logits and rendered_input.multimodal_inputs:
             raise FtRuntimeException(
                 ExceptionType.ERROR_INPUT_FORMAT_ERROR,
                 "prompt scoring does not support multimodal inputs",
@@ -803,7 +782,6 @@ class OpenaiEndpoint(object):
             request_id=request_id,
             token_ids=input_id_tensor,
             mm_inputs=rendered_input.multimodal_inputs,
-            v41_inputs=rendered_input.v41_inputs,
             generate_config=generate_config,
             tokenizer=self.tokenizer,
         )

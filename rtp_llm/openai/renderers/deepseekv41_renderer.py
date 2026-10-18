@@ -1,17 +1,14 @@
 """V4.1 recipe protocol with canonical checkpoint image metadata."""
 
+import base64
 import importlib.util
 import os
 import sys
 import uuid
+from collections.abc import Mapping
 
 from rtp_llm.config.dsv41_config import V41Config
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
-from rtp_llm.multimodal.greennet_hook import greennet_enabled
-from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_processor import (
-    V41ImageProcessorConfig,
-    prepare_vl_inputs,
-)
 from rtp_llm.openai.api_datatype import (
     DeltaMessage,
     FinisheReason,
@@ -35,6 +32,50 @@ from rtp_llm.openai.renderers.v41_recipe import (
     resolve_thinking,
 )
 from rtp_llm.openai.renderers.v41_stream import V41StreamParser
+from rtp_llm.utils.base_model_datatypes import MMUrlType
+
+IMAGE_PLACEHOLDER = "<\uff5cdeepseek_image\uff5c>"
+
+
+def _image_records_to_urls(prompt_tokens, images, image_token_id):
+    """Map recipe media records to the generic MultimodalInput URL contract.
+
+    This frontend helper only validates placeholder cardinality and preserves
+    media bytes/URLs. Decode, resize, grid planning and token-span construction
+    stay inside the ViT backend.
+    """
+    if sum(token == image_token_id for token in prompt_tokens) != len(images):
+        raise ValueError(
+            "image placeholder count does not match the supplied image records"
+        )
+    urls = []
+    for record in images:
+        if not isinstance(record, Mapping):
+            raise ValueError("V4.1 image records must be mappings")
+        source = record.get("source")
+        source = source if isinstance(source, Mapping) else {}
+        inline = record.get("data")
+        if inline is None:
+            inline = source.get("data")
+        url = source.get("url") or record.get("url")
+        if inline is None and isinstance(url, str) and url.startswith("data:"):
+            header, separator, inline = url.partition(",")
+            if not separator or not header.endswith(";base64"):
+                raise ValueError("image data URLs require base64 encoding")
+        if inline is not None:
+            if isinstance(inline, str):
+                inline = base64.b64decode(inline, validate=True)
+            if not isinstance(inline, bytes):
+                raise ValueError("V4.1 inline image must be bytes or base64 text")
+            urls.append(
+                "data:application/octet-stream;base64,"
+                + base64.b64encode(inline).decode("ascii")
+            )
+            continue
+        if not isinstance(url, str) or not url:
+            raise ValueError("image record has no supported data or URL source")
+        urls.append(url)
+    return urls
 
 
 class V41StreamStatus(StreamStatus):
@@ -54,7 +95,8 @@ class DeepseekV41Renderer(DeepseekV4Renderer):
     detector_class = DeepSeekV41Detector
     dsml_tool_calls_marker = "<\uff5cDSML\uff5c calls>"
     parses_user_stop_sequences = True
-    # Rendering downloads and preprocesses images using only request-local state.
+    # Recipe rendering/tokenization is CPU-only. Image decode/preprocessing is
+    # owned by the normal multimodal engine, not by this frontend thread.
     render_chat_in_thread = True
 
     def _load_encoding_module(self, ckpt_path: str):
@@ -69,9 +111,7 @@ class DeepseekV41Renderer(DeepseekV4Renderer):
         module = importlib.util.module_from_spec(spec)
         sys.modules[spec.name] = module
         spec.loader.exec_module(module)
-        self.image_processor_config = V41ImageProcessorConfig.from_model_config(
-            V41Config.from_path(ckpt_path)
-        )
+        self.image_token_id = V41Config.from_path(ckpt_path).image_token_id
         return module
 
     def _create_detector(self, request):
@@ -128,38 +168,22 @@ class DeepseekV41Renderer(DeepseekV4Renderer):
     def _build_prompt(self, request):
         return self._encode_request(request)[0]
 
-    def prepare_v41_inputs(self, request, *, url_loader=None, output_budget=None):
-        """Prepare request-owned canonical IDs, masks, images and content hashes.
-
-        The backend must transport this metadata through its typed V4.1 input
-        contract. It must not discard it via the generic RenderedInputs path.
-        """
+    def render_chat(self, request):
         prompt, media = self._encode_request(request)
-        if output_budget is None:
-            output_budget = request.max_completion_tokens
-            if output_budget is None:
-                output_budget = request.max_tokens or 0
         try:
-            return prepare_vl_inputs(
-                prompt,
-                media["images"],
-                self.tokenizer,
-                self.image_processor_config,
-                url_loader=url_loader,
-                output_budget=output_budget,
-                retain_source_bytes=greennet_enabled(),
+            input_ids = list(self.tokenizer.encode(prompt))
+            urls = _image_records_to_urls(
+                input_ids, media["images"], self.image_token_id
             )
         except (TypeError, ValueError) as error:
             raise FtRuntimeException(
                 ExceptionType.INVALID_PARAMS, str(error)
             ) from error
-
-    def render_chat(self, request):
-        prepared = self.prepare_v41_inputs(request)
         return RenderedInputs(
-            input_ids=list(prepared.token_ids),
-            rendered_prompt=prepared.prompt,
-            v41_inputs=prepared,
+            input_ids=input_ids,
+            rendered_prompt=prompt,
+            input_urls=urls,
+            input_urls_type=[MMUrlType.IMAGE] * len(urls),
         )
 
     def _build_tool_call_structural_tag(self, request):

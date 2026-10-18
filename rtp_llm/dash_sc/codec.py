@@ -31,11 +31,14 @@ from rtp_llm.dash_sc.structural_tag import (
     validate_structural_tag_shape,
 )
 from rtp_llm.server.request_headers import extract_request_headers
-from rtp_llm.utils.base_model_datatypes import GenerateOutput, GenerateOutputs
+from rtp_llm.utils.base_model_datatypes import (
+    GenerateOutput,
+    GenerateOutputs,
+    MMUrlType,
+)
 
 if TYPE_CHECKING:
     from rtp_llm.config.generate_config import GenerateConfig
-    from rtp_llm.utils.base_model_datatypes import MMUrlType
 
 _INT32_MIN = -2_147_483_648
 _DEFAULT_MAX_NEW_TOKENS = 32000
@@ -1144,8 +1147,6 @@ def parse_dash_sc_grpc_request(
 def _multimodal_type_maps() -> (
     tuple[dict[str, tuple[str, MMUrlType]], dict[str, MMUrlType]]
 ):
-    from rtp_llm.utils.base_model_datatypes import MMUrlType
-
     return (
         {
             "image_url": ("image_url", MMUrlType.IMAGE),
@@ -1605,6 +1606,7 @@ class StreamResponseBuilder:
         "_dash_sc_request_id",
         "_model_name",
         "_image_tokens",
+        "_image_tokens_from_backend",
         "_prompt_token_fallback",
         "_request_log_tag",
         "_request_input_ids",
@@ -1641,11 +1643,17 @@ class StreamResponseBuilder:
         max_token_id: int | None = None,
         log_input_output: bool = True,
         image_tokens: int | None = None,
+        image_tokens_from_backend: bool = False,
         prompt_token_fallback: int | None = None,
     ) -> None:
         self._dash_sc_request_id = dash_sc_request_id
         self._model_name = model_name
         self._image_tokens = image_tokens
+        # Generic multimodal requests obtain the actual media lengths from the
+        # backend after ViT expansion; text-only requests provide an explicit 0.
+        self._image_tokens_from_backend = (
+            image_tokens_from_backend and image_tokens is None
+        )
         self._prompt_token_fallback = (
             len(request_input_ids or [])
             if prompt_token_fallback is None
@@ -1695,6 +1703,14 @@ class StreamResponseBuilder:
             else LLMFinishReason.STOP if finished else LLMFinishReason.STREAMING
         )
         aux_info = getattr(out_py, "aux_info", None)
+        if self._image_tokens_from_backend:
+            lengths = getattr(aux_info, "multimodal_lengths", None)
+            if isinstance(lengths, dict):
+                count = lengths.get(int(MMUrlType.IMAGE))
+                if type(count) is int and count >= 0:
+                    self._image_tokens = count
+            # No metadata means unknown, not zero. A later sparse frame can
+            # retain the last value actually reported for this request.
         prompt_tokens = (
             int(aux_info.input_len)
             if aux_info is not None
@@ -1762,6 +1778,10 @@ class StreamResponseBuilder:
         response = predict_v2_pb2.ModelStreamInferResponse()
         response.CopyFrom(self._template)
         infer = response.infer_response
+        if self._image_tokens is not None:
+            # A first frame may precede media accounting. Patch the cloned
+            # response too, without mutating previously emitted frames.
+            infer.parameters["image_tokens"].int64_param = self._image_tokens
 
         generated_raw = (
             struct.pack("<%di" % len(generated_ids), *generated_ids)
@@ -1876,37 +1896,3 @@ def build_dash_error_response(
     infer.parameters["status_name"].string_param = error_spec.status_name
     infer.parameters["status_message"].string_param = status_message
     return resp
-
-
-def parse_v41_image_request(request) -> list[dict[str, str]]:
-    """Extract ordered images from Spectrum's media-only payload."""
-    raw = _parse_optional_parameter_string(request, "payload")
-    try:
-        payload = json.loads(raw) if raw is not None else None
-    except ValueError as error:
-        raise DashScParameterError("invalid V4.1 payload JSON") from error
-    if not isinstance(payload, dict):
-        raise DashScParameterError("V4.1 payload must be a JSON object")
-    input_value = payload.get("input")
-    messages = input_value.get("messages") if isinstance(input_value, dict) else None
-    if not isinstance(messages, list):
-        raise DashScParameterError("V4.1 payload.input.messages must be an array")
-    images = []
-    for message in messages:
-        content = message.get("content") if isinstance(message, dict) else None
-        if not isinstance(content, list):
-            raise DashScParameterError("V4.1 media content must be an array")
-        for item in content:
-            if not isinstance(item, dict):
-                raise DashScParameterError("V4.1 media item must be an object")
-            if "image" in item:
-                url = item["image"]
-            elif item.get("type") == "image_url":
-                source = item.get("image_url")
-                url = source.get("url") if isinstance(source, dict) else None
-            else:
-                raise DashScParameterError("V4.1 payload supports images only")
-            if not isinstance(url, str) or not url:
-                raise DashScParameterError("V4.1 image URL must be non-empty")
-            images.append({"url": url})
-    return images

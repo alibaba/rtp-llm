@@ -3,6 +3,7 @@
 #include <memory>
 #include <grpcpp/server_context.h>
 
+#include <utility>
 #include <vector>
 #include <torch/python.h>
 #include "kmonitor/client/MetricsReporter.h"
@@ -23,15 +24,21 @@ class ServerContext;
 namespace rtp_llm {
 
 struct ExpandedOutput {
-    torch::Tensor expanded_ids;
-    torch::Tensor token_type_ids;
-    torch::Tensor text_tokens_mask;
-    torch::Tensor locs;
-    ExpandedOutput(torch::Tensor expanded_ids     = {},
-                   torch::Tensor token_type_ids   = {},
-                   torch::Tensor text_tokens_mask = {},
-                   torch::Tensor locs             = {}):
-        expanded_ids(expanded_ids), token_type_ids(token_type_ids), text_tokens_mask(text_tokens_mask), locs(locs) {}
+    torch::Tensor                               expanded_ids;
+    torch::Tensor                               token_type_ids;
+    torch::Tensor                               text_tokens_mask;
+    torch::Tensor                               locs;
+    std::shared_ptr<const MultimodalCacheSpans> cache_spans;
+    ExpandedOutput(torch::Tensor                               expanded_ids     = {},
+                   torch::Tensor                               token_type_ids   = {},
+                   torch::Tensor                               text_tokens_mask = {},
+                   torch::Tensor                               locs             = {},
+                   std::shared_ptr<const MultimodalCacheSpans> cache_spans      = {}):
+        expanded_ids(expanded_ids),
+        token_type_ids(token_type_ids),
+        text_tokens_mask(text_tokens_mask),
+        locs(locs),
+        cache_spans(std::move(cache_spans)) {}
 };
 
 class MultimodalProcessor {
@@ -44,6 +51,7 @@ public:
         metrics_reporter_(metrics_reporter),
         sep_token_ids_(mm_model_config.mm_sep_tokens),
         include_sep_tokens_(mm_model_config.include_sep_tokens),
+        semantic_mm_token_id_(mm_model_config.semantic_mm_token_id),
         max_seq_len_(max_seq_len) {}
 
 protected:
@@ -62,15 +70,8 @@ protected:
 private:
     std::vector<std::vector<int64_t>> sep_token_ids_;
     bool                              include_sep_tokens_;
+    int64_t                           semantic_mm_token_id_;
     int64_t                           max_seq_len_;
-
-    virtual ErrorResult<MultimodalOutput> V41MultimodalEmbedding(const V41RequestInputs& inputs,
-                                                                 const std::string&      ip_port,
-                                                                 int64_t                 timeout_ms,
-                                                                 int64_t                 request_id,
-                                                                 grpc::ServerContext*    server_context);
-
-    ErrorInfo getFeatureHash(int32_t* token_ids, const torch::Tensor& mm_emb);
 
     virtual ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs,
                                                               std::string                                 ip_port = "",
@@ -80,17 +81,12 @@ private:
     ErrorResult<ExpandedOutput>
     expandTokenIds(const std::vector<torch::Tensor>&                mm_embedding,
                    const torch::Tensor&                             token_ids,
-                   const std::vector<rtp_llm::MultimodalInput>      mm_inputs,
                    torch::Tensor                                    token_type_ids = {},
                    const std::optional<std::vector<torch::Tensor>>& feature_hashes = std::nullopt);
 
     ErrorResult<std::vector<std::pair<int32_t, int32_t>>> getMultimodalTags(const torch::Tensor& token_ids);
 
     ErrorInfo checkExpandLength(const ExpandedOutput& expand_output);
-
-    ErrorResult<ExpandedOutput> useExpandedTokenLayout(const GenerateInput&                             input,
-                                                       const std::vector<torch::Tensor>&                features,
-                                                       const std::optional<std::vector<torch::Tensor>>& feature_hashes);
 
 public:
     ErrorInfo updateMultimodalFeatures(std::shared_ptr<rtp_llm::GenerateInput>& input,
