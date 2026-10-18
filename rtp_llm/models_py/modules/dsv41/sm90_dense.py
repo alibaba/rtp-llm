@@ -9,6 +9,8 @@ import json
 
 import torch
 
+from rtp_llm.device.device_type import is_h20
+
 
 def expand_block32_scales(scales: torch.Tensor, rows: int, cols: int) -> torch.Tensor:
     """Expand checkpoint blocks to per-row g32 without converting E8M0 values."""
@@ -143,7 +145,14 @@ class Sm90MXFP8Linear:
                 f"Expected packed group32 UE8M0 int32 scales {expected_scales}, "
                 f"got {x_s.dtype} {x_s.shape}"
             )
-        return self._forward_with_scales(x_q, unpack_ue8m0_input_scales(x_s), out)
+        if rows <= 256 and is_h20(x_q.device):
+            from ._sm90_quant_scale_fused import unpack_ue8m0_to_fp32
+
+            # Read strided packed bytes directly instead of copying and casting.
+            scales = unpack_ue8m0_to_fp32(x_s)
+        else:
+            scales = unpack_ue8m0_input_scales(x_s)
+        return self._forward_with_scales(x_q, scales, out)
 
     def forward_bf16(self, x: torch.Tensor, out=None):
         """Small-M BF16 producer: exact G32 quantization directly to FP32 scales."""

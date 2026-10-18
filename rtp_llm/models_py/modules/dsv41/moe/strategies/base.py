@@ -84,6 +84,10 @@ class RoutedExpertsStrategy(nn.Module):
       - producing ``[N, D] fp32`` per-token routed-sum from
         ``(x: [N, D] BF16, weights: [N, topk] FP32, indices: [N, topk] int64)``
 
+    H20 static decode may retain DeepEP's BF16 output until the shared-expert
+    epilogue, which promotes both inputs to FP32 before adding. Debug recording
+    keeps the materialized FP32 output.
+
     A strategy MUST handle cuda-graph capture state internally (e.g.
     ``LocalLoopStrategy.forward`` checks ``torch.cuda.is_current_stream_capturing()``
     and dispatches to a graph-safe variant). The MoE layer does NOT switch

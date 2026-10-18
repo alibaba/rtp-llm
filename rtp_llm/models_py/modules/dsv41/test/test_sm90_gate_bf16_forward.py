@@ -167,6 +167,7 @@ def test_real_forward_sm90_small_m_uses_bf16_kernel_input(monkeypatch, rows, dim
         "softmax",
         "sigmoid",
         "large_m",
+        "h20_large_m",
         "grad",
         "otherarch",
         "cpu",
@@ -174,7 +175,15 @@ def test_real_forward_sm90_small_m_uses_bf16_kernel_input(monkeypatch, rows, dim
     ],
 )
 def test_real_forward_ineligible_paths_keep_original_contract(monkeypatch, mode):
-    rows = 33 if mode == "large_m" else 0 if mode == "empty" else 4
+    if mode == "large_m":
+        monkeypatch.setattr(gate_module, "is_h20", lambda device: False)
+    if mode == "h20_large_m":
+        monkeypatch.setattr(gate_module, "is_h20", lambda device: True)
+    rows = (
+        257
+        if mode == "h20_large_m"
+        else 33 if mode == "large_m" else 0 if mode == "empty" else 4
+    )
     gate, x, ids = _make_case(
         rows,
         hashed=mode in ("hash", "hash_visual"),
@@ -242,8 +251,10 @@ def _capture(fn):
 
 
 @torch.no_grad()
-def test_real_forward_graph_changes_input_router_weight_and_bias(monkeypatch):
-    gate, x, ids = _make_case(4)
+@pytest.mark.parametrize("rows", [4, 33, 64, 128, 256])
+def test_real_forward_graph_changes_input_router_weight_and_bias(monkeypatch, rows):
+    monkeypatch.setattr(gate_module, "is_h20", lambda device: True)
+    gate, x, ids = _make_case(rows)
     old_graph, old_output = _capture(lambda: _old_reference(gate, x, ids))
     observed = _observe_kernel(monkeypatch)
     graph, output = _capture(lambda: gate(x, ids))
