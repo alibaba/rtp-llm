@@ -18,7 +18,6 @@ py_package(
     ],
 )
 
-
 py_package(
     name = "extension_package_frontend",
     deps = [
@@ -64,6 +63,18 @@ compile_pip_requirements(
     extra_args = PIP_EXTRA_ARGS,
     extra_data = ["//:requirements_base.txt"],
     requirements_txt = "requirements_lock_torch_gpu_cuda12_9.txt",
+    tags = ["manual"],
+)
+
+sh_binary(
+    name = "requirements_torch_gpu_cuda13_sm120.update",
+    srcs = ["update_cuda13_locks.sh"],
+    args = ["sm120"],
+    data = [
+        "requirements_base.txt",
+        "requirements_cuda13_overrides.txt",
+        "requirements_torch_gpu_cuda13_sm120.txt",
+    ],
     tags = ["manual"],
 )
 

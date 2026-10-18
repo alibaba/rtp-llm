@@ -5,7 +5,10 @@ cc_test = cc_test_wrapper
 
 cc_import(
     name = "cuda13_torch_nvshmem",
-    shared_library = "@pip_gpu_cuda13_torch_torch//:site-packages/torch/lib/libtorch_nvshmem.so",
+    shared_library = select({
+        "@//:using_cuda13_sm120": "@pip_gpu_cuda13_sm120_torch_torch//:site-packages/torch/lib/libtorch_nvshmem.so",
+        "//conditions:default": "@pip_gpu_cuda13_torch_torch//:site-packages/torch/lib/libtorch_nvshmem.so",
+    }),
 )
 
 cuda13_torch_link_deps = select({

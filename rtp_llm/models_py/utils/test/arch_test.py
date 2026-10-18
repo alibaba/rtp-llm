@@ -55,6 +55,29 @@ class ArchTest(TestCase):
             self.assertFalse(arch.is_blackwell(2))
             self.assertEqual(queried_devices, [1, 0, 2])
 
+    def test_mhc_backend_resolver_canonicalizes_overrides(self):
+        for value, expected in (
+            ("dg", "deepgemm"),
+            ("tilelang", "tilelang_single"),
+            ("single", "tilelang_single"),
+            ("tilelang_splitk", "tilelang_splitk"),
+        ):
+            with (
+                self.subTest(value=value),
+                patch.dict("os.environ", {"DSV4_MHC_PRE_GEMM_BACKEND": value}),
+            ):
+                self.assertEqual(
+                    arch.mhc_pre_gemm_backend(torch.device("cpu")), expected
+                )
+
+    def test_mhc_backend_auto_uses_architecture(self):
+        with (
+            patch.dict("os.environ", {}, clear=True),
+            patch.object(arch, "is_sm12x", side_effect=lambda device=None: device == 1),
+        ):
+            self.assertEqual(arch.mhc_pre_gemm_backend(1), "tilelang_single")
+            self.assertEqual(arch.mhc_pre_gemm_backend(0), "deepgemm")
+
 
 if __name__ == "__main__":
     main()

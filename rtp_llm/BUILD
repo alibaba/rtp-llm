@@ -21,7 +21,6 @@ load(
 
 if_rocm = _if_rocm
 
-
 flashinfer = [
     "apache-tvm-ffi",
     "flashinfer-python",
@@ -146,7 +145,6 @@ requirement([
     "xgrammar",
 ] + deep + flashinfer_with_cache + flashmla + rtp_kernel + flashattn)
 
-
 _JIT_CACHE_SRCS = [
     "utils/jit_cache_manager.py",
     "utils/jit_cache_store.py",
@@ -242,6 +240,7 @@ py_library(
     ]),
 )
 
+
 py_library(
     name = "device",
     srcs = glob([
@@ -314,8 +313,19 @@ py_library(
     }) + select({
         # cuda13 tests use the matching cubins from the pip lock.
         # The jit-cache wheel is installed through Requires-Dist in runtime images.
-        "@//:using_cuda13_x86": flashinfer + ["flashinfer-cubin", "nvidia-cutlass-dsl", "flash-mla", "fast-hadamard-transform", "tilelang"],
-        "@//:using_cuda13_arm": flashinfer + ["nvidia-cutlass-dsl", "flash-mla", "flash-mla-legacy", "tilelang"],
+        "@//:using_cuda13_x86": flashinfer + [
+            "flashinfer-cubin",
+            "nvidia-cutlass-dsl",
+            "flash-mla",
+            "fast-hadamard-transform",
+            "tilelang",
+        ],
+        "@//:using_cuda13_arm": flashinfer + [
+            "nvidia-cutlass-dsl",
+            "flash-mla",
+            "flash-mla-legacy",
+            "tilelang",
+        ],
         "@//:using_cuda12_9_x86": flashinfer_with_cache + flashmla,
         "@//:using_cuda12_arm": flashinfer_with_cache + ["flash-mla", "fast-hadamard-transform"],
         "@//:cuda_pre_12_9": flashinfer,
@@ -366,6 +376,7 @@ filegroup(
     srcs = ["config/alog.conf"],
     visibility = ["//visibility:public"],
 )
+
 
 py_library(
     name = "release_version",
@@ -701,11 +712,13 @@ whl_reqs = [
     "portalocker",
     "concurrent_log_handler",
     "apache-tvm-ffi",
-    "xgrammar==0.2.5",
     # OTel trace runtime; keep the pinned protobuf compatibility constraint.
     "opentelemetry-sdk==1.44.0",
     "opentelemetry-exporter-otlp-proto-http==1.15.0",
-] + whl_deps() + platform_deps() + xft_dep
+] + select({
+    "//:using_cuda13_sm120": ["xgrammar==0.2.8"],
+    "//conditions:default": ["xgrammar==0.2.5"],
+}) + whl_deps() + platform_deps() + xft_dep
 
 # Frontend-only requirement set: the frontend lane is CPU serving (HTTP + gRPC
 # client + tokenizer), so the engine's platform CUDA tree (whl_deps: torch-cuda,
@@ -917,6 +930,7 @@ py_library(
         ":aiohttp",
     ]
 )
+
 
 # CPU-clean variant of :testlib for tests that never load CUDA artifacts at
 # runtime. It keeps the pure-py rtp_llm subset and the minimal runtime config
