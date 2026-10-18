@@ -531,15 +531,6 @@ class Pipeline(object):
     ) -> AsyncGenerator[GenerateResponse, None]:
         token_type_ids = []
         request_headers = normalize_request_headers(kwargs.pop("headers", None))
-
-        prepared = kwargs.pop("v41_inputs", None)
-        if prepared is not None:
-            if mm_inputs:
-                raise FtRuntimeException(
-                    ExceptionType.INVALID_PARAMS,
-                    "typed V4.1 inputs cannot be combined with generic images",
-                )
-            token_ids = list(prepared.token_ids)
         token_ids = torch.tensor(token_ids, dtype=torch.int)
 
         input = GenerateInput(
@@ -549,7 +540,6 @@ class Pipeline(object):
             generate_config=generate_config,
             tokenizer=self.tokenizer,
             token_type_ids=token_type_ids,
-            v41_inputs=prepared,
             group_size=kwargs.get("group_size", 1),
             group_id=kwargs.get("group_id", -1),
             headers=request_headers,

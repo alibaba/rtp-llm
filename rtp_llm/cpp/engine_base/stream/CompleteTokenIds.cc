@@ -12,7 +12,7 @@ CompleteTokenIds::CompleteTokenIds(int batch_size, int max_batch_size, int max_s
     max_seq_len_(max_seq_len),
     seq_size_per_block_(seq_size_per_block) {}
 
-CompleteTokenIds::CompleteTokenIds(const CompleteTokenIds& other, bool share, int shift_token_num):
+CompleteTokenIds::CompleteTokenIds(const CompleteTokenIds& other, bool share):
     batch_size_(other.batch_size_),
     max_batch_size_(other.max_batch_size_),
     max_seq_len_(other.max_seq_len_),
@@ -22,17 +22,9 @@ CompleteTokenIds::CompleteTokenIds(const CompleteTokenIds& other, bool share, in
     start_check_seq_length_(other.start_check_seq_length_),
     first_token_time_us_(other.first_token_time_us_),
     first_token_latency_us_(other.first_token_latency_us_) {
-    v41_inputs_       = other.v41_inputs_;
-    canonical_offset_ = other.canonical_offset_ + shift_token_num;
+    multimodal_cache_spans_ = other.multimodal_cache_spans_;
     if (share) {
-        if (shift_token_num == 0) {
-            complete_token_ids_ = other.complete_token_ids_;
-        } else {
-            RTP_LLM_CHECK(batch_size_ == 1);
-            // Create a narrowed view (shares storage with other)
-            complete_token_ids_ = other.complete_token_ids_.narrow(
-                1, shift_token_num, other.complete_token_ids_.size(1) - shift_token_num);
-        }
+        complete_token_ids_ = other.complete_token_ids_;
     } else {
         complete_token_ids_ =
             torch::empty({other.complete_token_ids_.size(0), other.complete_token_ids_.size(1)}, torch::kInt32);
@@ -46,10 +38,8 @@ CompleteTokenIds::CompleteTokenIds(const CompleteTokenIds& other, bool share, in
 
 void CompleteTokenIds::init(const std::shared_ptr<GenerateInput>& generate_input, size_t extra_reserve_token_num) {
     RTP_LLM_CHECK(generate_input != nullptr);
-
-    v41_inputs_       = generate_input->v41_inputs;
-    canonical_offset_ = 0;
-    seq_length_       = generate_input->inputLength();
+    multimodal_cache_spans_ = generate_input->multimodal_cache_spans;
+    seq_length_             = generate_input->inputLength();
     RTP_LLM_CHECK_WITH_INFO(
         (seq_length_ <= max_seq_len_), "seq_length[%d] must be less than max_seq_len[%d]", seq_length_, max_seq_len_);
 
@@ -69,27 +59,34 @@ void CompleteTokenIds::init(const std::shared_ptr<GenerateInput>& generate_input
     RTP_LLM_LOG_DEBUG("complete tokenids init done, %s", showStatus(0).c_str());
 }
 
-std::vector<int32_t> CompleteTokenIds::imageCacheIdentity(int begin, int count) const {
+std::vector<int32_t> CompleteTokenIds::multimodalCacheIdentity(int begin, int count) const {
     std::vector<int32_t> result;
-    if (!v41_inputs_) {
+    if (!multimodal_cache_spans_ || count <= 0) {
         return result;
     }
-    for (const auto& image : v41_inputs_->images) {
-        const int64_t start = image.start - canonical_offset_;
-        const int64_t end   = start + image.types.numel();
-        if (end <= begin || start >= static_cast<int64_t>(begin) + count) {
+    const int64_t block_begin = begin;
+    const int64_t block_end   = block_begin + count;
+    for (const auto& span : *multimodal_cache_spans_) {
+        const int64_t span_begin    = span.offset;
+        const int64_t span_end      = span_begin + span.row_hashes.size();
+        const int64_t overlap_begin = std::max(block_begin, span_begin);
+        const int64_t overlap_end   = std::min(block_end, span_end);
+        if (overlap_begin >= overlap_end) {
             continue;
         }
-        // Domain-separate image content from ordinary canonical token words.
+        // Domain-separate cache-only row identity from ordinary model tokens.
+        // Keep coordinates relative to this cache block/span. This makes the
+        // identity stable when a system prefix shifts both the span and query,
+        // while still preventing different span boundaries from aliasing.
         result.insert(result.end(),
-                      {-41, static_cast<int32_t>(start), static_cast<int32_t>(end), image.n_vit_h, image.n_vit_w});
-        for (const auto* digest : {&image.content_sha256, &image.processor_identity}) {
-            // Hash the complete, length-delimited identity without parsing RPC strings.
-            result.push_back(static_cast<int32_t>(digest->size()));
-            for (unsigned char byte : *digest) {
-                result.push_back(byte);
-            }
-        }
+                      {-42,
+                       static_cast<int32_t>(overlap_begin - block_begin),
+                       static_cast<int32_t>(span.row_hashes.size()),
+                       static_cast<int32_t>(overlap_begin - span_begin),
+                       static_cast<int32_t>(overlap_end - overlap_begin)});
+        result.insert(result.end(),
+                      span.row_hashes.begin() + (overlap_begin - span_begin),
+                      span.row_hashes.begin() + (overlap_end - span_begin));
     }
     return result;
 }
@@ -97,21 +94,6 @@ std::vector<int32_t> CompleteTokenIds::imageCacheIdentity(int begin, int count) 
 bool CompleteTokenIds::isValidReuseLength(int reuse_length, int min_fresh_tokens) const {
     if (min_fresh_tokens > 0 && reuse_length > std::max(0, seqLength() - min_fresh_tokens)) {
         return false;
-    }
-    if (!v41_inputs_) {
-        return true;
-    }
-    for (const auto& image : v41_inputs_->images) {
-        const int64_t start = image.start - canonical_offset_;
-        const int64_t end   = start + image.types.numel();
-        // Without both content and preprocessing identity no later prefix is
-        // trustworthy, even when its endpoint lies beyond the image.
-        if (reuse_length > start && (image.content_sha256.empty() || image.processor_identity.empty())) {
-            return false;
-        }
-        if (reuse_length > start && reuse_length < end) {
-            return false;
-        }
     }
     return true;
 }

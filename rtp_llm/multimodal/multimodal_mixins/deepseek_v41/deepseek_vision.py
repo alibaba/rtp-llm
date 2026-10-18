@@ -4,6 +4,7 @@ Extracted from ca840ddb38a7fafdb6781151ae11465454895de8; image-token layout
 belongs to each model adapter.
 """
 
+import os
 from functools import lru_cache
 
 import torch
@@ -35,8 +36,17 @@ class RMSNorm(nn.Module):
         super().__init__()
         self.eps = eps
         self.weight = nn.Parameter(torch.ones(dim, dtype=torch.float32))
+        self._fused_rmsnorm = os.environ.get("V41_VISION_RMSNORM_FUSED", "0") == "1"
 
     def forward(self, x: torch.Tensor):
+        if self._fused_rmsnorm:
+            from rtp_llm.models_py.modules.dsv41.vision_rmsnorm_fused import (
+                apply_vision_rmsnorm,
+            )
+
+            output = apply_vision_rmsnorm(x, self.weight, self.eps)
+            if output is not None:
+                return output
         dtype = x.dtype
         x = x.float()
         x = x * torch.rsqrt(x.square().mean(-1, keepdim=True) + self.eps)
@@ -93,9 +103,18 @@ class MLP(nn.Module):
         dim, inter = config["vision_dim"], config["vision_inter_dim"]
         self.w1 = nn.Linear(dim, 2 * inter, bias=False)
         self.w2 = nn.Linear(inter, dim, bias=False)
+        self._fused_silu_mul = os.environ.get("V41_VISION_SILU_MUL_FUSED", "0") == "1"
 
     def forward(self, x):
         gate, up = self.w1(x).chunk(2, dim=-1)
+        if self._fused_silu_mul:
+            from rtp_llm.models_py.modules.dsv41.vision_silu_mul_fused import (
+                apply_vision_silu_mul,
+            )
+
+            intermediate = apply_vision_silu_mul(gate, up)
+            if intermediate is not None:
+                return self.w2(intermediate)
         return self.w2(F.silu(gate) * up)
 
 

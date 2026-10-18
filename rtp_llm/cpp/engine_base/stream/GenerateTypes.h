@@ -1,6 +1,7 @@
 #pragma once
-#include "rtp_llm/cpp/multimodal_processor/V41Input.h"
 #include <cstdint>
+#include <limits>
+#include <stdexcept>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -27,10 +28,6 @@ struct RequestInfo {
     }
 };
 
-struct MultimodalTokenLayout {
-    std::vector<std::pair<int32_t, int32_t>> spans;
-};
-
 class GenerateInput {
 public:
     int inputLength() {
@@ -44,12 +41,6 @@ public:
 
     std::map<int, int> multimodalLengths() const {
         std::map<int, int> lengths;
-        if (v41_inputs && multimodal_features) {
-            for (const auto& feature : *multimodal_features) {
-                lengths[1] += feature.size(0);  // MMUrlType::IMAGE
-            }
-            return lengths;
-        }
         if (!multimodal_inputs.has_value() || !multimodal_features.has_value()) {
             return {};
         } else {
@@ -78,10 +69,84 @@ public:
     }
 
     void updatePrefix(const std::vector<int>& prefix_prompt) {
-        prefix_length = prefix_prompt.size();
-        auto prefix_tensor =
-            torch::from_blob(const_cast<int*>(prefix_prompt.data()), {(int64_t)prefix_prompt.size()}, torch::kInt32);
-        input_ids = torch::cat({prefix_tensor, input_ids}, 0);
+        // Stage replacements first so malformed backend metadata cannot
+        // partially shift a request.
+        auto       next_mask        = text_tokens_mask;
+        auto       next_locs        = mm_locs;
+        auto       next_cache_spans = multimodal_cache_spans;
+        const auto added            = static_cast<int64_t>(prefix_prompt.size());
+        if (added > 0) {
+            const auto token_count = input_ids.numel();
+            if (added > std::numeric_limits<int32_t>::max() - token_count) {
+                throw std::invalid_argument("system prefix exceeds int32 multimodal coordinates");
+            }
+            // A P->D ALLOCATE request carries expanded token IDs and the
+            // cache-identity sidecar, but intentionally does not carry ViT
+            // features, locations or the execution-time text mask.  Decode
+            // still has to prepend the same resident system prompt and shift
+            // the sidecar.  Raw media without that sidecar is not a cache-only
+            // request and must remain fail-closed when its mask is missing.
+            const bool has_raw_inputs       = multimodal_inputs && !multimodal_inputs->empty();
+            const bool has_cache_spans      = multimodal_cache_spans && !multimodal_cache_spans->empty();
+            const bool needs_execution_mask = (multimodal_features && !multimodal_features->empty())
+                                              || (mm_locs && mm_locs->numel() != 0)
+                                              || (has_raw_inputs && !has_cache_spans);
+            if (!text_tokens_mask && needs_execution_mask) {
+                throw std::invalid_argument("multimodal system prefix requires a text token mask");
+            }
+            if (text_tokens_mask) {
+                const auto& mask = *text_tokens_mask;
+                if (!mask.defined() || !mask.device().is_cpu() || mask.scalar_type() != torch::kInt32 || mask.dim() != 1
+                    || mask.numel() != token_count) {
+                    throw std::invalid_argument("system prefix text mask does not match the input");
+                }
+                auto        stable_mask = mask.contiguous();
+                const auto* values      = stable_mask.data_ptr<int32_t>();
+                for (int64_t pos = 0; pos < token_count; ++pos) {
+                    if (values[pos] != 0 && values[pos] != 1) {
+                        throw std::invalid_argument("system prefix text mask must be binary");
+                    }
+                }
+                next_mask = torch::cat({torch::ones({added}, mask.options()), mask}, 0);
+            }
+            if (mm_locs) {
+                const auto& locs = *mm_locs;
+                if (!locs.defined() || !locs.device().is_cpu() || locs.scalar_type() != torch::kInt32
+                    || locs.dim() != 1) {
+                    throw std::invalid_argument("system prefix locations must be CPU int32");
+                }
+                auto        stable_locs = locs.contiguous();
+                const auto* values      = stable_locs.data_ptr<int32_t>();
+                for (int64_t index = 0; index < locs.numel(); ++index) {
+                    if (values[index] < 0 || values[index] >= token_count) {
+                        throw std::invalid_argument("system prefix image location is outside the input");
+                    }
+                }
+                next_locs = locs + added;
+            }
+            if (multimodal_cache_spans) {
+                auto    shifted      = std::make_shared<MultimodalCacheSpans>(*multimodal_cache_spans);
+                int64_t previous_end = 0;
+                for (auto& span : *shifted) {
+                    const int64_t end = static_cast<int64_t>(span.offset) + span.row_hashes.size();
+                    if (span.offset < previous_end || span.row_hashes.empty() || end > token_count) {
+                        throw std::invalid_argument("multimodal cache span is invalid");
+                    }
+                    span.offset += static_cast<int32_t>(added);
+                    previous_end = end;
+                }
+                next_cache_spans = std::move(shifted);
+            }
+            // mm_position_ids and mm_extra_input are per-image local coordinates/
+            // values, not request token offsets; their contents must not shift.
+        }
+        auto prefix_tensor     = torch::from_blob(const_cast<int*>(prefix_prompt.data()), {added}, torch::kInt32);
+        auto next_ids          = torch::cat({prefix_tensor, input_ids}, 0);
+        input_ids              = std::move(next_ids);
+        text_tokens_mask       = std::move(next_mask);
+        mm_locs                = std::move(next_locs);
+        multimodal_cache_spans = std::move(next_cache_spans);
+        prefix_length          = prefix_prompt.size();
         if (custom_output_token_position >= 0) {
             custom_output_token_position += prefix_length;
         }
@@ -96,13 +161,12 @@ public:
     bool                            fake_query            = false;
     // For multi-modality models
     std::optional<std::vector<MultimodalInput>> multimodal_inputs;
-    std::shared_ptr<const V41RequestInputs>     v41_inputs;
     std::optional<std::vector<torch::Tensor>>   multimodal_features;
     std::optional<torch::Tensor>                text_tokens_mask;  // text part for 1 and multimodal part for 0
     std::optional<torch::Tensor>                mm_locs;           // multimodal input locations
     std::optional<std::vector<torch::Tensor>>   mm_position_ids;
     std::optional<std::vector<torch::Tensor>>   mm_extra_input;
-    std::optional<MultimodalTokenLayout>        multimodal_token_layout;
+    std::shared_ptr<const MultimodalCacheSpans> multimodal_cache_spans;
 
     int     prefix_length        = 0;
     int64_t begin_time_us        = 0;

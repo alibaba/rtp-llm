@@ -369,6 +369,9 @@ class VitConfig:
         self.igraph_table_name: str = ""
         self.default_key: Optional[str] = None
         self.mm_preprocess_max_workers: int = 4
+        # CPU worker intra-op threads, independent of the GPU owner's setting.
+        # Zero preserves the inherited runtime default; never changes the parent.
+        self.mm_preprocess_num_threads: int = 0
         self.vit_concurrency: int = 64
         self.vit_max_queue_size: int = 64
         self.biencoder_preprocess: bool = False
@@ -387,6 +390,8 @@ class VitConfig:
         self.gpu_batch_wait_ms: int = 10
         self.gpu_max_batch_size: int = 1
         self.gpu_max_batch_images: int = 200
+        # Opt-in, bounded one-batch collect/upload lookahead (not GPU forwards).
+        self.gpu_prefetch_batches: int = 0
         # Bound on the mm embedding scheduler's waiting queue. Caps memory when a
         # forward stalls and requests pile up; over capacity, submit fails fast
         # with an overload error instead of growing unbounded. Scheduler-level
@@ -414,9 +419,11 @@ class VitConfig:
             raise ValueError(
                 f"gpu_batch_wait_ms must be >= 0, got {self.gpu_batch_wait_ms}"
             )
+        if self.gpu_prefetch_batches not in (0, 1):
+            raise ValueError("gpu_prefetch_batches must be 0 or 1")
 
         is_serial = self.gpu_max_batch_size == 1
-        return {
+        result = {
             # Serial ignores the collect window: a single-request forward never
             # waits, so the configured gpu_batch_wait_ms has no effect.
             "batch_wait_ms": 0 if is_serial else self.gpu_batch_wait_ms,
@@ -426,12 +433,17 @@ class VitConfig:
             ),
             "max_queue_size": self.mm_max_queue_size,
         }
+        if self.gpu_prefetch_batches:
+            result["prefetch_batches"] = self.gpu_prefetch_batches
+        return result
 
     def to_string(self):
         transport = self.output_transport
         control = transport.control
         rdma = transport.rdma
         return (
+            f"mm_preprocess_num_threads: {self.mm_preprocess_num_threads}\n"
+            f"gpu_prefetch_batches: {self.gpu_prefetch_batches}\n"
             f"vit_separation: {self.vit_separation}\n"
             f"vit_trt: {self.vit_trt}\n"
             f"trt_cache_enabled: {self.trt_cache_enabled}\n"

@@ -18,7 +18,7 @@ import asyncio
 import inspect
 import logging
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -28,11 +28,8 @@ from typing import (
     Optional,
     Protocol,
 )
-from urllib.parse import urlsplit
 
-import requests
 import torch
-from urllib3.exceptions import ProtocolError, ReadTimeoutError
 
 from rtp_llm.config.exceptions import (
     AdmissionRejectReason,
@@ -84,7 +81,6 @@ from rtp_llm.dash_sc.codec import (
     parse_dash_sc_grpc_request,
     parse_ds_header_attributes,
     parse_multimodal_parts_from_request,
-    parse_v41_image_request,
     prepend_to_generated_ids_tensor,
 )
 from rtp_llm.dash_sc.grpc_metrics import (
@@ -674,153 +670,18 @@ def _build_empty_think_phase2_input_ids(
     return base + list(empty_think_tokens)
 
 
-_V41_DOWNLOAD_TIMEOUT_SECONDS = 60
+def _validate_v41_standard_input_ids(input_ids, mm_inputs, image_token_id: int):
+    from rtp_llm.utils.base_model_datatypes import MMUrlType
 
-
-def _image_download_chunks(response, deadline):
-    raw = getattr(response, "raw", None)
-    read1 = getattr(raw, "read1", None)
-    if callable(read1):
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise requests.Timeout("image download deadline exceeded")
-            connection = getattr(raw, "connection", None)
-            sock = getattr(connection, "sock", None)
-            if sock is not None:
-                sock.settimeout(min(20, remaining))
-            # read1 returns currently available data; read/iter_content can
-            # wait for a whole chunk indefinitely on a slow-drip response.
-            chunk = read1(64 * 1024, decode_content=True)
-            if not chunk:
-                break
-            yield chunk
-    else:
-        # Older urllib3 does not have read1. A byte-sized read still permits
-        # deadline checks between arrivals instead of waiting for 64 KiB.
-        yield from response.iter_content(chunk_size=1)
-
-
-def _prepare_v41_image_request(request, input_ids, processor_config, images=None):
-    from rtp_llm.multimodal.greennet_hook import greennet_enabled
-    from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_processor import (
-        prepare_vl_inputs_from_token_ids,
-    )
-    from rtp_llm.multimodal.multimodal_util import (
-        _get_http_heads,
-        _record_download_time,
-        request_get,
-    )
-
-    # Cache bytes only for this request; a URL may change between requests.
-    downloaded = {}
-    download_deadline = time.monotonic() + _V41_DOWNLOAD_TIMEOUT_SECONDS
-
-    def load_url(url):
-        if not url.startswith(("http://", "https://")):
-            raise ValueError("unsupported V4.1 image URL scheme")
-        if url not in downloaded:
-            for attempt in range(3):
-                remaining = download_deadline - time.monotonic()
-                if remaining <= 0:
-                    raise FtRuntimeException(
-                        ExceptionType.CONNECT_TIMEOUT,
-                        "Multimodal download deadline exceeded",
-                    )
-                started = time.monotonic()
-                status = None
-                try:
-                    try:
-                        with request_get(
-                            url,
-                            _get_http_heads(),
-                            timeout=(min(5, remaining), min(20, remaining)),
-                        ) as response:
-                            status = response.status_code
-                            if status in (408, 429, 500, 502, 503, 504):
-                                raise requests.ConnectionError(
-                                    "temporary image download failure"
-                                )
-                            if status != 200:
-                                raise ValueError("image download failed")
-                            chunks = []
-                            size = 0
-                            for chunk in _image_download_chunks(
-                                response, download_deadline
-                            ):
-                                if time.monotonic() >= download_deadline:
-                                    raise requests.Timeout(
-                                        "image download deadline exceeded"
-                                    )
-                                size += len(chunk)
-                                if size > 10 * 1024 * 1024:
-                                    raise ValueError(
-                                        "Multimodal file size is too large"
-                                    )
-                                chunks.append(chunk)
-                            downloaded[url] = b"".join(chunks)
-                    finally:
-                        _record_download_time(started)
-                    break
-                except Exception as error:
-                    # Exception strings and URL query parameters can contain credentials.
-                    logging.warning(
-                        "V4.1 image download request_id=%s host=%s attempt=%d status=%s "
-                        "error_type=%s elapsed_ms=%.1f",
-                        request.id,
-                        urlsplit(url).hostname,
-                        attempt + 1,
-                        status,
-                        type(error).__name__,
-                        (time.monotonic() - started) * 1000,
-                    )
-                    transient = isinstance(
-                        error,
-                        (
-                            requests.Timeout,
-                            requests.ConnectionError,
-                            requests.exceptions.ChunkedEncodingError,
-                            ReadTimeoutError,
-                            ProtocolError,
-                        ),
-                    )
-                    if (
-                        isinstance(error, ValueError)
-                        and str(error) == "Multimodal file size is too large"
-                    ):
-                        raise
-                    if not transient:
-                        raise ValueError(
-                            "Failed to download multimodal content"
-                        ) from error
-                    remaining = download_deadline - time.monotonic()
-                    if attempt == 2 or remaining <= 0:
-                        code = (
-                            ExceptionType.CONNECT_TIMEOUT
-                            if isinstance(error, (requests.Timeout, ReadTimeoutError))
-                            else ExceptionType.MM_DOWNLOAD_FAILED
-                        )
-                        raise FtRuntimeException(
-                            code, "Temporary multimodal download failure"
-                        ) from error
-                    time.sleep(min(0.2 * 2**attempt, remaining))
-        return downloaded[url]
-
-    try:
-        if images is None:
-            images = parse_v41_image_request(request)
-        if not images:
-            return None
-        return prepare_vl_inputs_from_token_ids(
-            input_ids,
-            images,
-            processor_config,
-            url_loader=load_url,
-            max_image_bytes=10 * 1024 * 1024,
-            retain_source_bytes=greennet_enabled(),
+    if any(media.mm_type != MMUrlType.IMAGE for media in mm_inputs):
+        raise FtRuntimeException(
+            ExceptionType.INVALID_PARAMS, "V4.1 supports IMAGE inputs only"
         )
-    except (TypeError, ValueError) as error:
-        raise FtRuntimeException(ExceptionType.INVALID_PARAMS, str(error)) from error
+    if sum(token == image_token_id for token in input_ids) != len(mm_inputs):
+        raise FtRuntimeException(
+            ExceptionType.INVALID_PARAMS,
+            "image placeholder count does not match the supplied image records",
+        )
 
 
 def _make_generate_input(
@@ -832,7 +693,6 @@ def _make_generate_input(
     request_headers: Optional[dict[str, str]] = None,
     mm_inputs: Optional[list] = None,
     input_ids_tensor: Optional[torch.Tensor] = None,
-    v41_inputs=None,
 ) -> GenerateInput:
     headers = dict(request_headers or {})
     headers.update(_headers_from_invocation_metadata(invocation_metadata))
@@ -848,7 +708,6 @@ def _make_generate_input(
     return GenerateInput(
         request_id=request_id,
         token_ids=token_ids,
-        v41_inputs=v41_inputs,
         mm_inputs=list(mm_inputs) if mm_inputs else [],
         generate_config=generate_config,
         headers=headers,
@@ -1003,9 +862,7 @@ async def iter_real_model_stream_infer(
     yield_access_stats: bool = False,
     mm_inputs: Optional[list] = None,
     input_ids_tensor: Optional[torch.Tensor] = None,
-    v41_inputs=None,
-    v41_processor_config=None,
-    max_seq_len: Optional[int] = None,
+    v41_image_token_id: Optional[int] = None,
 ) -> AsyncIterator[predict_v2_pb2.ModelStreamInferResponse]:
     """Run enqueue on ``backend_visitor`` and yield one proto per chunk as the backend streams.
 
@@ -1052,30 +909,14 @@ async def iter_real_model_stream_infer(
     stream: object | None = None
     phase2_stream: object | None = None
     try:
-        if (
-            v41_inputs is None
-            and v41_processor_config is not None
-            and "payload" in request.parameters
-        ):
-            v41_inputs = await asyncio.to_thread(
-                _prepare_v41_image_request,
-                request,
-                input_ids_list,
-                v41_processor_config,
+        if v41_image_token_id is not None:
+            _validate_v41_standard_input_ids(
+                input_ids_list, mm_inputs or [], v41_image_token_id
             )
-        image_tokens = None
+        # Text-only V4.1 requests have a known zero media count. Image requests
+        # obtain their token lengths from the backend's actual ViT features.
+        image_tokens = 0 if v41_image_token_id is not None and not mm_inputs else None
         prompt_length = len(input_ids_list)
-        if v41_inputs is not None:
-            prompt_length = len(v41_inputs.token_ids)
-            if max_seq_len is not None and prompt_length >= max_seq_len:
-                raise FtRuntimeException(
-                    ExceptionType.LONG_PROMPT_ERROR,
-                    f"expanded image input length {prompt_length} must be less than {max_seq_len}",
-                )
-            input_ids_tensor = torch.tensor(
-                v41_inputs.token_ids, dtype=torch.int32, device="cpu"
-            )
-            image_tokens = sum(image.length for image in v41_inputs.images)
         generate_config = sampling.to_generate_config(request_controls=request_controls)
         generate_config.trace_id = trace_str
         default_thinking_mode = (
@@ -1177,7 +1018,6 @@ async def iter_real_model_stream_infer(
             request_headers=request_controls.request_headers,
             mm_inputs=mm_inputs,
             input_ids_tensor=input_ids_tensor,
-            v41_inputs=v41_inputs,
         )
         is_streaming = bool(generate_config.is_streaming)
         logging.debug(
@@ -1201,6 +1041,7 @@ async def iter_real_model_stream_infer(
             max_token_id=max_id,
             prompt_token_fallback=prompt_length,
             image_tokens=image_tokens,
+            image_tokens_from_backend=v41_image_token_id is not None,
         )
         chunk_idx = 0
         phase2_needed = False
@@ -1464,33 +1305,21 @@ async def iter_real_model_stream_infer(
             phase2_input_ids = _build_empty_think_phase2_input_ids(
                 input_ids_list, matched_think_bos_ids, list(runtime.empty_tokens)
             )
-            phase2_v41_inputs = None
-            if v41_inputs is not None:
-                from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_processor import (
-                    TEXT,
-                )
-
-                phase2_input_ids = _build_empty_think_phase2_input_ids(
-                    v41_inputs.token_ids,
-                    matched_think_bos_ids,
-                    list(runtime.empty_tokens),
-                )
+            if v41_image_token_id is not None:
+                # Keep raw single-image markers and the original ordered media
+                # across phase 2. Never trim a marker with a thinking suffix or
+                # create one from generated/empty-thinking text.
                 prefix_length = len(phase2_input_ids) - len(runtime.empty_tokens)
-                if any(kind != TEXT for kind in v41_inputs.token_types[prefix_length:]):
+                if (
+                    v41_image_token_id in input_ids_list[prefix_length:]
+                    or v41_image_token_id in runtime.empty_tokens
+                ):
                     raise FtRuntimeException(
                         ExceptionType.INVALID_PARAMS,
-                        "phase-2 thinking prefix overlaps an image span",
+                        "phase-2 thinking tokens overlap an image placeholder",
                     )
-                if max_seq_len is not None and len(phase2_input_ids) >= max_seq_len:
-                    raise FtRuntimeException(
-                        ExceptionType.LONG_PROMPT_ERROR,
-                        "expanded phase-2 image input exceeds max_seq_len",
-                    )
-                phase2_v41_inputs = replace(
-                    v41_inputs,
-                    token_ids=tuple(phase2_input_ids),
-                    token_types=v41_inputs.token_types[:prefix_length]
-                    + (TEXT,) * len(runtime.empty_tokens),
+                _validate_v41_standard_input_ids(
+                    phase2_input_ids, mm_inputs or [], v41_image_token_id
                 )
             phase2_request_id = (
                 phase2_request_id_factory()
@@ -1507,7 +1336,6 @@ async def iter_real_model_stream_infer(
                 invocation_metadata=invocation_metadata,
                 request_headers=request_controls.request_headers,
                 mm_inputs=mm_inputs,
-                v41_inputs=phase2_v41_inputs,
             )
             logging.debug(
                 "[DashScGrpc] [%s] phase-2 generate_input: %s",
@@ -1527,6 +1355,7 @@ async def iter_real_model_stream_infer(
                 eos_token_id=eos_id,
                 max_token_id=max_id,
                 image_tokens=image_tokens,
+                image_tokens_from_backend=v41_image_token_id is not None,
             )
             phase2_cumulative_sent_ids: list[int] = []
 
@@ -1682,8 +1511,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         rank_id: Optional[int] = None,
         repetition_monitor_config: Optional[RequestRepetitionMonitorConfig] = None,
         grammar_validator: Optional[GrammarValidator] = None,
-        v41_processor_config=None,
-        max_seq_len: Optional[int] = None,
+        v41_image_token_id: Optional[int] = None,
     ):
         if backend_visitor is None:
             raise ValueError("backend_visitor is required for DashScInferenceServicer")
@@ -1724,8 +1552,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         # Optional admission-time grammar check. ``None`` keeps the legacy behaviour
         # (invalid grammars surface as an engine-side error mid-stream).
         self._grammar_validator = grammar_validator
-        self._v41_processor_config = v41_processor_config
-        self._max_seq_len = max_seq_len
+        self._v41_image_token_id = v41_image_token_id
 
     async def _validate_request_grammar(
         self, sampling: SamplingParams, request_id: str
@@ -1930,16 +1757,12 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                             invocation_metadata=invocation_metadata or (),
                             model_type=(
                                 "deepseek_v41"
-                                if self._v41_processor_config is not None
+                                if self._v41_image_token_id is not None
                                 else None
                             ),
                         )
                     )
-                    mm_inputs = (
-                        []
-                        if self._v41_processor_config is not None
-                        else _build_mm_inputs_from_request(request)
-                    )
+                    mm_inputs = _build_mm_inputs_from_request(request)
                     traceparent_new = _lookup_ds_request_control(
                         parse_ds_header_attributes(request), "traceparent_new"
                     )
@@ -2087,8 +1910,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                     phase2_request_id_factory=self._next_rtp_llm_request_id,
                     access_agg=record,
                     input_ids_tensor=parsed_input_ids.tensor,
-                    v41_processor_config=self._v41_processor_config,
-                    max_seq_len=self._max_seq_len,
+                    v41_image_token_id=self._v41_image_token_id,
                     yield_access_stats=True,
                     mm_inputs=mm_inputs,
                 )

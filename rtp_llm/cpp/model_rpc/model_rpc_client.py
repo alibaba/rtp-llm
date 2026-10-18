@@ -50,12 +50,7 @@ from rtp_llm.utils.base_model_datatypes import (
     RoleAddr,
 )
 from rtp_llm.utils.grpc_host_channel_pool import GrpcHostChannelPool
-from rtp_llm.utils.grpc_util import (
-    trans_from_tensor,
-    trans_option,
-    trans_option_cast,
-    trans_tensor,
-)
+from rtp_llm.utils.grpc_util import trans_option, trans_option_cast, trans_tensor
 
 MAX_GRPC_TIMEOUT_SECONDS = 3600
 RPC_CLEANUP_TIMEOUT_SECONDS = 0.1
@@ -528,32 +523,10 @@ def _trans_jsonable_options(
 def trans_input(input_py: GenerateInput):
     input_pb = GenerateInputPB()
     input_pb.request_id = input_py.request_id
-    expansion = input_py.mm_token_expansion
-    if expansion is not None:
-        input_pb.token_ids.extend(expansion.token_ids)
-        input_pb.multimodal_token_layout.SetInParent()
-        for offset, length in expansion.spans:
-            input_pb.multimodal_token_layout.spans.add(offset=offset, length=length)
-    else:
-        input_pb.token_ids.extend(input_py.token_ids.reshape(-1).tolist())
-    prepared = getattr(input_py, "v41_inputs", None)
-    if prepared is not None:
-        typed = input_pb.v41_inputs
-        typed.schema_version = 1
-        typed.token_types.extend(prepared.token_types)
-        typed.image_mask.extend(prepared.image_mask.tolist())
-        for image in prepared.images:
-            target = typed.images.add()
-            target.start, target.n_vit_h, target.n_vit_w = (
-                image.start,
-                image.n_vit_h,
-                image.n_vit_w,
-            )
-            target.types.extend(image.types.tolist())
-            target.patches.CopyFrom(trans_from_tensor(image.patches))
-            target.content_sha256 = image.content_sha256
-            target.processor_identity = image.processor_identity
-            target.source_bytes = image.source_bytes
+    # The frontend forwards only the tokenizer output and generic media
+    # descriptors. ViT output shape and model-specific token expansion are
+    # backend responsibilities and must never cross this RPC boundary.
+    input_pb.token_ids.extend(input_py.token_ids.reshape(-1).tolist())
     input_pb.start_time = int(time.time() * 1_000_000)
     input_pb.group_size = input_py.group_size
     if hasattr(input_py, "group_id") and input_py.group_id != -1:
