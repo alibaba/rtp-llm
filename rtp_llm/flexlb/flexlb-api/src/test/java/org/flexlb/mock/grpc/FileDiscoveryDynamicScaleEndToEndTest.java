@@ -157,7 +157,7 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
                 // republishes the exact generations used by routing.
                 engineWorkerStatus,
                 workerAddressService,
-                statusCheckExecutor, statusCheckExecutor,
+                statusCheckExecutor, statusCheckExecutor, statusCheckExecutor,
                 healthReporter,
                 engineGrpcService,
                 RoleType.PREFILL,
@@ -169,7 +169,7 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
                 false);
 
         EngineSyncRunner decodeSyncRunner = new EngineSyncRunner(
-                MODEL_NAME, engineWorkerStatus, workerAddressService, statusCheckExecutor, statusCheckExecutor,
+                MODEL_NAME, engineWorkerStatus, workerAddressService, statusCheckExecutor, statusCheckExecutor, statusCheckExecutor,
                 healthReporter, engineGrpcService, RoleType.DECODE, cacheAwareService,
                 cacheIntervalService, 5_000L, 0L, 1L, false);
 

@@ -96,39 +96,46 @@ public class GrpcWorkerStatusRunner implements Runnable {
                 throw failure;
             }
             rpc.whenComplete((response, failure) -> {
-                pollTrace.record(Stage.RPC_COMPLETED, failure);
-                Throwable cause = EndpointTrace.unwrap(failure);
-                boolean valid = cause == null && validStatusResponse(response);
-                workerStatus.recordStatusRpcResult(pollLease, valid, valid && response.getAlive(), cause);
-                if (cause != null) {
-                    handleException(cause);
-                } else {
-                    pollTrace.record(Stage.CALLBACK_READY);
-                }
-            }).thenAcceptAsync(response -> {
-                pollTrace.record(Stage.CALLBACK_STARTED);
                 try {
-                    // A valid not-alive response is already latched at RPC completion.
-                    if (!workerDirectory.isCurrentStatus(roleType, ipPort, workerStatus)
-                            || !workerStatus.isActiveGeneration() || workerStatus.retirementReason() != null) {
-                        pollTrace.record(Stage.RESPONSE_DISCARDED, "GENERATION_UNAVAILABLE");
+                    pollTrace.record(Stage.RPC_COMPLETED, failure);
+                    Throwable cause = EndpointTrace.unwrap(failure);
+                    boolean valid = cause == null && validStatusResponse(response);
+                    workerStatus.recordStatusRpcResult(pollLease, valid, valid && response.getAlive(), cause);
+                    if (cause != null) {
+                        handleException(cause);
                         return;
                     }
-                    handleStatusResponse(convertStatusResponse(response), startTime);
-                } finally {
-                    pollTrace.record(Stage.CALLBACK_ENDED);
-                }
-            }, callbackExecutor).whenComplete((ignored, failure) -> {
-                try {
-                    if (failure != null && !rpc.isCompletedExceptionally()) {
-                        Throwable cause = EndpointTrace.unwrap(failure);
-                        pollTrace.record(Stage.CALLBACK_FAILED, cause);
-                        logger.error("Worker status local processing failed for {}", ipPort, cause);
+                    pollTrace.record(Stage.CALLBACK_READY);
+                    if (!workerStatus.tryBeginStatusApplication(pollLease)) {
+                        pollTrace.record(Stage.RESPONSE_DISCARDED, "APPLICATION_BUSY_OR_GENERATION_UNAVAILABLE");
+                        return;
                     }
                 } finally {
-                    // Keep backpressure through queueing, conversion and status application.
-                    // This also releases the slot when the callback executor rejects the task.
+                    // Heartbeats continue even while an earlier response waits for local application.
                     pollLease.close();
+                }
+                try {
+                    callbackExecutor.execute(() -> {
+                        try {
+                            pollTrace.record(Stage.CALLBACK_STARTED);
+                            if (!workerDirectory.isCurrentStatus(roleType, ipPort, workerStatus)
+                                    || !workerStatus.isActiveGeneration() || workerStatus.retirementReason() != null) {
+                                pollTrace.record(Stage.RESPONSE_DISCARDED, "GENERATION_UNAVAILABLE");
+                                return;
+                            }
+                            handleStatusResponse(convertStatusResponse(response), startTime);
+                        } catch (RuntimeException | Error localFailure) {
+                            pollTrace.record(Stage.CALLBACK_FAILED, localFailure);
+                            logger.error("Worker status local processing failed for {}", ipPort, localFailure);
+                        } finally {
+                            workerStatus.finishStatusApplication(pollLease);
+                            pollTrace.record(Stage.CALLBACK_ENDED);
+                        }
+                    });
+                } catch (RuntimeException | Error rejected) {
+                    workerStatus.finishStatusApplication(pollLease);
+                    pollTrace.record(Stage.CALLBACK_FAILED, rejected);
+                    logger.error("Worker status application rejected for {}", ipPort, rejected);
                 }
             });
         } catch (RuntimeException | Error failure) {

@@ -118,6 +118,60 @@ class WorkerPollDiagnosticsPerformanceTest {
     }
 
     @Test
+    void fleetHeartbeatsKeepOneApplicationPerWorker() {
+        // Exercise the new coordination at 750P/750D; excludes transport payload allocation.
+        int workersPerRole = 750;
+        int warmupRounds = 20;
+        int measuredRounds = 100;
+        WorkerStatus[] workers = new WorkerStatus[2 * workersPerRole];
+        WorkerStatus.PollLease[] applications = new WorkerStatus.PollLease[workers.length];
+        for (int i = 0; i < workers.length; i++) {
+            workers[i] = WorkerStatus.createDiscovered(i < workersPerRole ? RoleType.PREFILL : RoleType.DECODE,
+                    "test", "127.0.0.1", 10000 + i, 20000 + i, "test");
+            applications[i] = workers[i].tryBeginStatusPoll(0L);
+            assertTrue(workers[i].tryBeginStatusApplication(applications[i]));
+            applications[i].close();
+        }
+        var bean = allocationBean();
+        long threadId = Thread.currentThread().threadId();
+        long started = 0L;
+        long allocated = 0L;
+        try {
+            for (int round = 0; round < warmupRounds + measuredRounds; round++) {
+                if (round == warmupRounds) {
+                    started = System.nanoTime();
+                    allocated = bean.getThreadAllocatedBytes(threadId);
+                }
+                for (WorkerStatus worker : workers) {
+                    try (var lease = worker.tryBeginStatusPoll(round + 1L)) {
+                        if (lease == null) { throw new AssertionError("application must not block RPC"); }
+                        worker.recordStatusRpcResult(lease, true, true, null);
+                        if (worker.tryBeginStatusApplication(lease)) {
+                            throw new AssertionError("a second application must not be retained");
+                        }
+                    }
+                }
+            }
+            long polls = (long) measuredRounds * workers.length;
+            double bytesPerPoll = (double) (bean.getThreadAllocatedBytes(threadId) - allocated) / polls;
+            double nsPerPoll = (double) (System.nanoTime() - started) / polls;
+            System.out.printf("750P/750D blocked application bookkeeping: polls=%d bytes_per_poll=%.2f ns_per_poll=%.2f%n",
+                    polls, bytesPerPoll, nsPerPoll);
+            assertTrue(bytesPerPoll <= 2048, "continuing heartbeats must retain only bounded poll state");
+        } finally {
+            for (int i = 0; i < workers.length; i++) {
+                workers[i].finishStatusApplication(applications[i]);
+            }
+        }
+        for (WorkerStatus worker : workers) {
+            try (var lease = worker.tryBeginStatusPoll(warmupRounds + measuredRounds + 1L)) {
+                assertTrue(worker.tryBeginStatusApplication(lease), "application ownership must be reusable");
+                worker.finishStatusApplication(lease);
+            }
+        }
+    }
+
+    @Test
     void failureEpisodesKeepFixedPollStateWithoutEventHistory() {
         WorkerStatus worker = worker();
         WorkerStatus.PollLease held = worker.tryBeginStatusPoll(1L);

@@ -28,7 +28,15 @@ public final class WorkerStatusTestFixtures {
     public static WorkerStatus.PreparedStatus prepare(
             WorkerStatus worker, StatusObservation observation) {
         try (WorkerStatus.PollLease lease = beginStatusPoll(worker, observation.alive())) {
-            return worker.prepareNewStatus(observation, lease);
+            if (!worker.tryBeginStatusApplication(lease)) {
+                throw new IllegalStateException("test status application is busy or unavailable");
+            }
+            lease.close();
+            try {
+                return worker.prepareNewStatus(observation, lease);
+            } finally {
+                worker.finishStatusApplication(lease);
+            }
         }
     }
 

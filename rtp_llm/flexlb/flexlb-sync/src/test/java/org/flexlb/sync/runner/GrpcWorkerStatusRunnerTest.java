@@ -163,7 +163,7 @@ class GrpcWorkerStatusRunnerTest {
     }
 
     @Test
-    void queuedApplicationBlocksNewRpcsAndKeepsCommittedStateSchedulable() {
+    void queuedApplicationAllowsHeartbeatsWithoutAccumulatingResponses() {
         ConfigService config = mock(ConfigService.class);
         when(config.loadBalanceConfig()).thenReturn(org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
         EndpointRegistry registry = RunnerTestSupport.endpointRegistry(config);
@@ -183,7 +183,8 @@ class GrpcWorkerStatusRunnerTest {
             WorkerStatus.CommittedWorkerStatus committed = status.committedWorkerStatus();
             poll(status, directory, grpc, applications::add, 2L);
             for (int index = 3; index <= 7; index++) {
-                assertNull(status.tryBeginStatusPoll(index), "do not fetch another response while the callback waits");
+                poll(status, directory, grpc, applications::add, index);
+                assertEquals(1, applications.size(), "busy application must not queue another response");
             }
             assertEquals(1, applications.size(), "at most one response is retained for local application");
             assertSame(committed, status.committedWorkerStatus(), "RPC completion cannot overwrite committed resource state");
@@ -198,13 +199,13 @@ class GrpcWorkerStatusRunnerTest {
             try (var pin = endpoint.tryPinSchedulingGeneration()) { assertNotNull(pin); }
 
             poll(status, directory, grpc, Runnable::run, 8L);
-            assertEquals(3L, status.appliedStatusCursor().statusVersion());
-            assertEquals(30L, status.appliedStatusCursor().latestFinishedTaskVersion());
-            assertEquals(700L, status.committedEngineObservation().availableKvCacheTokens());
+            assertEquals(8L, status.appliedStatusCursor().statusVersion());
+            assertEquals(80L, status.appliedStatusCursor().latestFinishedTaskVersion());
+            assertEquals(200L, status.committedEngineObservation().availableKvCacheTokens());
             ArgumentCaptor<Long> requestedFinishedVersions = ArgumentCaptor.forClass(Long.class);
-            verify(grpc, org.mockito.Mockito.times(3)).getWorkerStatusAsync(anyString(), anyInt(),
+            verify(grpc, org.mockito.Mockito.times(8)).getWorkerStatusAsync(anyString(), anyInt(),
                     requestedFinishedVersions.capture(), anyLong(), any());
-            assertEquals(java.util.List.of(-1L, 10L, 20L),
+            assertEquals(java.util.List.of(-1L, 10L, 10L, 10L, 10L, 10L, 10L, 20L),
                     requestedFinishedVersions.getAllValues(), "each RPC starts from the previous committed cursor");
         } finally {
             registry.close();
@@ -269,8 +270,11 @@ class GrpcWorkerStatusRunnerTest {
                         : EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL)
                 .setStatusVersion(version).setAlive(alive).build());
         org.junit.jupiter.api.Assertions.assertEquals(reportedAlive, status.pollHealth().reportedAlive());
-        assertFalse(status.trace().snapshot().statusPoll().leaseReleased(), "the poll owns its slot until local application finishes");
-        assertNull(status.tryBeginStatusPoll(2L));
+        assertTrue(status.trace().snapshot().statusPoll().leaseReleased(), "RPC ownership ends before local application");
+        try (var next = status.tryBeginStatusPoll(2L)) {
+            if (alive) { assertNotNull(next, "RPC completion releases the wire slot"); }
+            else { assertNull(next, "a confirmed dead worker stays unavailable"); }
+        }
         // A successful contact does not commit local resource state.
         org.junit.jupiter.api.Assertions.assertEquals(-1L, status.appliedStatusCursor().statusVersion());
         queue.forEach(Runnable::run);
@@ -327,6 +331,8 @@ class GrpcWorkerStatusRunnerTest {
         }
         try (var next = status.tryBeginStatusPoll(1L)) {
             assertNotNull(next, "a failed poll must not prevent future polling");
+            assertTrue(status.tryBeginStatusApplication(next), "failures must release the application slot too");
+            status.finishStatusApplication(next);
         }
     }
 
@@ -482,10 +488,9 @@ class GrpcWorkerStatusRunnerTest {
                 .setStatusVersion(1).setAlive(true).build());
         var queuedPoll = status.trace().snapshot().statusPoll();
         assertTrue(queuedPoll.times().rpcResultMs() >= 0);
-        assertEquals("CALLBACK_READY", queuedPoll.stage());
-        assertFalse(queuedPoll.leaseReleased(), "backpressure includes callback queueing");
-        assertNull(status.tryBeginStatusPoll(2L));
-        assertEquals(-1L, queuedPoll.times().leaseEndMs());
+        assertEquals("LEASE_RELEASED", queuedPoll.stage());
+        assertTrue(queuedPoll.leaseReleased(), "RPC is complete while application waits");
+        assertTrue(queuedPoll.times().leaseEndMs() >= 0L);
         assertEquals(-1L, queuedPoll.times().callbackStartMs(), "the queued callback has not started");
         assertEquals(-1L, queuedPoll.times().workerAttemptMs(), "the queued callback has not attempted the Worker lock");
         assertEquals(1, queue.size());
@@ -502,8 +507,8 @@ class GrpcWorkerStatusRunnerTest {
             directory.completeRetirement(RoleType.DECODE, status.getIpPort(), status, detached, cache, logger);
             String json = logs.awaitFirst();
             assertTrue(json.contains("rpc:OK"));
-            assertTrue(json.contains("stage:CALLBACK_READY"));
-            assertTrue(json.contains("released:false"));
+            assertTrue(json.contains("stage:LEASE_RELEASED"));
+            assertTrue(json.contains("released:true"));
             assertTrue(json.contains("DISCOVERY_TOPOLOGY_CHANGED"));
             assertTrue(!json.contains("RPC_FAILED"), "a queued successful RPC must not be reported as a transport failure");
             queue.removeFirst().run();
@@ -544,7 +549,6 @@ class GrpcWorkerStatusRunnerTest {
                 Thread.sleep(1);
             }
             assertTrue(status.lock.hasQueuedThread(callback.get()));
-            assertNull(status.tryBeginStatusPoll(2L), "waiting for the Worker lock still owns this poll");
             var snapshot = status.trace().snapshot().statusPoll();
             org.junit.jupiter.api.Assertions.assertEquals("STATUS_LOCK_ATTEMPT", snapshot.stage());
             org.junit.jupiter.api.Assertions.assertEquals("OK", snapshot.rpcResult());
@@ -552,6 +556,11 @@ class GrpcWorkerStatusRunnerTest {
             assertTrue(snapshot.times().workerAttemptMs() >= 0);
             org.junit.jupiter.api.Assertions.assertEquals(-1, snapshot.times().workerAcquiredMs());
             org.junit.jupiter.api.Assertions.assertEquals(-1, snapshot.times().commitMs());
+            var before = status.pollHealth();
+            // Real Worker lock contention cannot prevent a later RPC or create another application.
+            poll(status, directory, grpc, task -> { throw new AssertionError("application already occupied"); }, 2L);
+            assertTrue(status.pollHealth() != before, "later RPC updated transport health while the lock was held");
+            assertEquals(-1L, status.appliedStatusCursor().statusVersion());
         } finally {
             status.lock.unlock();
             if (callback.get() != null) {callback.get().join(3000);}

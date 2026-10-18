@@ -286,6 +286,7 @@ class WorkerEndpointTest {
     void foreignStatusGenerationCannotRebindEndpoint() {
         WorkerStatusResponse resp = new WorkerStatusResponse();
         resp.setRole(RoleType.PREFILL);
+        resp.setAlive(true);
         resp.setStatusVersion(1L);
         resp.setLatestFinishedVersion(0L);
         WorkerStatus newStatus = EndpointTestSupport.workerStatus(

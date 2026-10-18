@@ -50,6 +50,7 @@ public final class MasterEngineSynchronizer {
     private final long syncEngineStatusInterval;
     private final ScheduledThreadPoolExecutor scheduler;
     private final ThreadPoolExecutor statusCheckExecutor;
+    private final ThreadPoolExecutor statusApplicationExecutor;
     private final ThreadPoolExecutor cacheStatusExecutor;
     private final ThreadPoolExecutor engineSyncExecutor;
 
@@ -85,6 +86,8 @@ public final class MasterEngineSynchronizer {
         // Poll callbacks must not run on the gRPC completion thread when a pool is full.
         statusCheckExecutor = newExecutor(
                 statusThreads, "status-checker-executor", new ThreadPoolExecutor.AbortPolicy());
+        statusApplicationExecutor = newExecutor(
+                statusThreads, "status-application-executor", new ThreadPoolExecutor.AbortPolicy());
         int cacheThreads = flexlbConfig.getInternalRuntime().getCacheStatusExecutorThreads();
         cacheStatusExecutor = newExecutor(
                 cacheThreads, "cache-status-executor", new ThreadPoolExecutor.AbortPolicy());
@@ -118,6 +121,9 @@ public final class MasterEngineSynchronizer {
                     "statusCheckExecutor", statusCheckExecutor);
             engineHealthReporter.reportThreadPoolInfo(
                     ENGINE_BALANCING_THREAD_POOL_INFO,
+                    "statusApplicationExecutor", statusApplicationExecutor);
+            engineHealthReporter.reportThreadPoolInfo(
+                    ENGINE_BALANCING_THREAD_POOL_INFO,
                     "cacheStatusExecutor", cacheStatusExecutor);
         } catch (Throwable failure) {
             logger.warn("Failed to report worker sync executor metrics", failure);
@@ -132,7 +138,7 @@ public final class MasterEngineSynchronizer {
             for (RoleType roleType : requiredRoles) {
                 EngineSyncRunner runner = new EngineSyncRunner(
                         modelName, workerDirectory,
-                        workerAddressService, statusCheckExecutor, cacheStatusExecutor, engineHealthReporter,
+                        workerAddressService, statusCheckExecutor, cacheStatusExecutor, statusApplicationExecutor, engineHealthReporter,
                         engineGrpcService, roleType, cacheAwareService,
                         cacheIntervalService,
                         syncRequestTimeoutMs, syncCycleId, syncEngineStatusInterval,
@@ -156,6 +162,7 @@ public final class MasterEngineSynchronizer {
         scheduler.shutdown();
         engineSyncExecutor.shutdown();
         statusCheckExecutor.shutdown();
+        statusApplicationExecutor.shutdown();
         cacheStatusExecutor.shutdown();
     }
 

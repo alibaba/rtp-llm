@@ -330,6 +330,7 @@ public class WorkerStatus {
 
     private final AtomicReference<PollLease> statusPollLease =
             new AtomicReference<>();
+    private final AtomicReference<PollLease> statusApplication = new AtomicReference<>();
     private final AtomicReference<PollLease> cachePollLease =
             new AtomicReference<>();
 
@@ -339,7 +340,7 @@ public class WorkerStatus {
     }
 
     /**
-     * Owns one generation-local poll from submission through response application. Closing is
+     * Owns one generation-local RPC slot (cache polls also include application). Closing is
      * token-fenced and idempotent: a delayed or duplicate close cannot release
      * a later poll which acquired the same logical slot.
      */
@@ -454,7 +455,9 @@ public class WorkerStatus {
     /** Carry poll correlation through the role reducer to the actual commit boundary. */
     public PreparedStatus prepareNewStatus(StatusObservation observation, PollLease lease) {
         requireActiveGeneration();
-        requireStatusPollLease(lease);
+        if (lease == null || statusApplication.get() != lease) {
+            throw new IllegalArgumentException("status application is not owned by this poll");
+        }
         if (observation.owner != this) {
             throw new IllegalArgumentException(
                     "status observation belongs to another worker generation");
@@ -665,7 +668,20 @@ public class WorkerStatus {
         return workerHealth.health;
     }
 
-    /** Acquire the status slot; response processing must finish before the next poll. */
+    /** Reserve at most one response for application before releasing its RPC slot. */
+    public boolean tryBeginStatusApplication(PollLease lease) {
+        synchronized (workerHealth) {
+            requireStatusPollLease(lease);
+            return !workerHealth.retiring && workerHealth.unavailableReason == null
+                    && statusApplication.compareAndSet(null, lease);
+        }
+    }
+
+    public void finishStatusApplication(PollLease lease) {
+        statusApplication.compareAndSet(lease, null);
+    }
+
+    /** Acquire the status RPC slot; local application has a separate owner. */
     public PollLease tryBeginStatusPoll(long syncCycleId) {
         return tryBeginPoll(PollKind.STATUS, statusPollLease, syncCycleId);
     }

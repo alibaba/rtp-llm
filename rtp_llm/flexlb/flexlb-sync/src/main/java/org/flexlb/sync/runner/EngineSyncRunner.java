@@ -40,6 +40,7 @@ public class EngineSyncRunner implements Runnable {
 
     private final ExecutorService statusCheckExecutor;
     private final ExecutorService cacheStatusExecutor;
+    private final ExecutorService statusApplicationExecutor;
 
     private final EngineHealthReporter engineHealthReporter;
 
@@ -64,6 +65,7 @@ public class EngineSyncRunner implements Runnable {
                             WorkerAddressService workerAddressService,
                             ExecutorService statusCheckExecutor,
                             ExecutorService cacheStatusExecutor,
+                            ExecutorService statusApplicationExecutor,
                             EngineHealthReporter engineHealthReporter,
                             EngineGrpcService engineGrpcService,
                             RoleType roleType,
@@ -79,6 +81,7 @@ public class EngineSyncRunner implements Runnable {
         this.workerDirectory = Objects.requireNonNull(
                 workerDirectory, "workerDirectory");
         this.statusCheckExecutor = statusCheckExecutor;
+        this.statusApplicationExecutor = Objects.requireNonNull(statusApplicationExecutor, "statusApplicationExecutor");
         this.cacheStatusExecutor = Objects.requireNonNull(cacheStatusExecutor, "cacheStatusExecutor");
         this.engineHealthReporter = engineHealthReporter;
         this.engineGrpcService = engineGrpcService;
@@ -179,7 +182,7 @@ public class EngineSyncRunner implements Runnable {
                                 workerStatus, statusPollLease, workerDirectory,
                                 engineHealthReporter, engineGrpcService,
                                 syncRequestTimeoutMs,
-                                cacheAwareService, statusCheckExecutor);
+                                cacheAwareService, statusApplicationExecutor);
                         statusPollLease.pollTrace().record(Stage.RUNNER_SUBMITTED);
                         statusCheckExecutor.submit(grpcWorkerStatusRunner);
                         handedOff = true;

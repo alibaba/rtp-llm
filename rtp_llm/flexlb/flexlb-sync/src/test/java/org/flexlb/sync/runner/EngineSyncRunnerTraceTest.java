@@ -82,7 +82,7 @@ class EngineSyncRunnerTraceTest {
     private static EngineSyncRunner runner(WorkerDirectory directory, WorkerAddressService addresses,
                                            ExecutorService statusExecutor, ExecutorService cacheExecutor,
                                            CacheAwareService cache, long cycle) {
-        return new EngineSyncRunner("model", directory, addresses, statusExecutor, cacheExecutor,
+        return new EngineSyncRunner("model", directory, addresses, statusExecutor, cacheExecutor, statusExecutor,
                 mock(EngineHealthReporter.class), mock(EngineGrpcService.class), RoleType.PREFILL,
                 cache, mock(DynamicCacheIntervalService.class), 5_000L, cycle, 20L, false);
     }

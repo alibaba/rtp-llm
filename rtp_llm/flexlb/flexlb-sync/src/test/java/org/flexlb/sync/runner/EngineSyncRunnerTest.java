@@ -56,7 +56,7 @@ class EngineSyncRunnerTest {
                 .thenReturn(List.of(WorkerHost.of("127.0.0.1", 8080)));
         when(cache.submit(any(Runnable.class))).thenThrow(new RejectedExecutionException("cache full"));
         EngineSyncRunner runner = new EngineSyncRunner(modelName, directory, workerAddressService,
-                health, cache, engineHealthReporter, engineGrpcService, RoleType.PREFILL,
+                health, cache, health, engineHealthReporter, engineGrpcService, RoleType.PREFILL,
                 localKvCacheAwareManager, cacheIntervalService, syncRequestTimeoutMs, syncCount.longValue(),
                 syncEngineStatusInterval, false);
         runner.run();
@@ -110,7 +110,7 @@ class EngineSyncRunnerTest {
                 modelName,
                 workerDirectory,
                 workerAddressService,
-                statusCheckExecutor, statusCheckExecutor,
+                statusCheckExecutor, statusCheckExecutor, statusCheckExecutor,
                 engineHealthReporter,
                 engineGrpcService,
                 roleType,
@@ -138,7 +138,7 @@ class EngineSyncRunnerTest {
                 modelName,
                 new WorkerDirectory(endpointRegistry),
                 workerAddressService,
-                statusCheckExecutor, statusCheckExecutor,
+                statusCheckExecutor, statusCheckExecutor, statusCheckExecutor,
                 engineHealthReporter,
                 engineGrpcService,
                 roleType,
@@ -163,7 +163,7 @@ class EngineSyncRunnerTest {
         Mockito.when(workerAddressService.getEngineWorkerList(modelName, RoleType.VIT))
                 .thenReturn(List.of(WorkerHost.of("127.0.0.1", 8080)));
         EngineSyncRunner runner = new EngineSyncRunner(
-                modelName, workerDirectory, workerAddressService, statusCheckExecutor, statusCheckExecutor,
+                modelName, workerDirectory, workerAddressService, statusCheckExecutor, statusCheckExecutor, statusCheckExecutor,
                 engineHealthReporter, engineGrpcService, RoleType.VIT,
                 localKvCacheAwareManager,
                 cacheIntervalService,
@@ -182,7 +182,7 @@ class EngineSyncRunnerTest {
         LongAdder cycles = new LongAdder();
         cycles.add(7L);
         EngineSyncRunner runner = new EngineSyncRunner(
-                modelName, workerDirectory, workerAddressService, statusCheckExecutor, statusCheckExecutor,
+                modelName, workerDirectory, workerAddressService, statusCheckExecutor, statusCheckExecutor, statusCheckExecutor,
                 engineHealthReporter, engineGrpcService, roleType, localKvCacheAwareManager,
                 cacheIntervalService, syncRequestTimeoutMs, cycles.longValue(),
                 syncEngineStatusInterval, false);
@@ -226,7 +226,7 @@ class EngineSyncRunnerTest {
                 .thenThrow(new RejectedExecutionException("full"));
         EngineSyncRunner runner = new EngineSyncRunner(
                 modelName, workerDirectory, workerAddressService,
-                statusCheckExecutor, statusCheckExecutor, engineHealthReporter, engineGrpcService,
+                statusCheckExecutor, statusCheckExecutor, statusCheckExecutor, engineHealthReporter, engineGrpcService,
                 RoleType.PREFILL, localKvCacheAwareManager,
                 cacheIntervalService, syncRequestTimeoutMs, syncCount.longValue(),
                 syncEngineStatusInterval, false);
@@ -262,7 +262,7 @@ class EngineSyncRunnerTest {
                 .thenReturn(List.of());
 
         EngineSyncRunner runner = new EngineSyncRunner(
-                modelName, directory, workerAddressService, statusCheckExecutor, statusCheckExecutor,
+                modelName, directory, workerAddressService, statusCheckExecutor, statusCheckExecutor, statusCheckExecutor,
                 engineHealthReporter, engineGrpcService, RoleType.PREFILL,
                 localKvCacheAwareManager,
                 cacheIntervalService,
@@ -294,7 +294,7 @@ class EngineSyncRunnerTest {
                     .thenThrow(new IllegalStateException("VIP unavailable"));
             EngineSyncRunner runner = new EngineSyncRunner(
                     modelName, directory, workerAddressService,
-                    statusCheckExecutor, statusCheckExecutor,
+                    statusCheckExecutor, statusCheckExecutor, statusCheckExecutor,
                     engineHealthReporter, engineGrpcService, RoleType.PREFILL,
                     localKvCacheAwareManager, cacheIntervalService, syncRequestTimeoutMs,
                     syncCount.longValue(), syncEngineStatusInterval, false);
@@ -327,7 +327,7 @@ class EngineSyncRunnerTest {
                     .thenReturn(List.of()).thenThrow(new IllegalStateException("VIP unavailable"));
             EngineSyncRunner runner = new EngineSyncRunner(
                     modelName, directory, workerAddressService,
-                    statusCheckExecutor, statusCheckExecutor,
+                    statusCheckExecutor, statusCheckExecutor, statusCheckExecutor,
                     engineHealthReporter, engineGrpcService, RoleType.PREFILL,
                     localKvCacheAwareManager, cacheIntervalService, syncRequestTimeoutMs,
                     syncCount.longValue(), syncEngineStatusInterval, false);
@@ -370,7 +370,7 @@ class EngineSyncRunnerTest {
                 modelName,
                 directory,
                 workerAddressService,
-                statusCheckExecutor, statusCheckExecutor,
+                statusCheckExecutor, statusCheckExecutor, statusCheckExecutor,
                 engineHealthReporter,
                 engineGrpcService,
                 RoleType.PREFILL,
@@ -473,7 +473,7 @@ class EngineSyncRunnerTest {
     private EngineSyncRunner varianceRunner(WorkerDirectory directory) {
         return new EngineSyncRunner(
                 modelName, directory, workerAddressService,
-                statusCheckExecutor, statusCheckExecutor, engineHealthReporter, engineGrpcService,
+                statusCheckExecutor, statusCheckExecutor, statusCheckExecutor, engineHealthReporter, engineGrpcService,
                 RoleType.PREFILL, localKvCacheAwareManager,
                 cacheIntervalService,
                 syncRequestTimeoutMs, syncCount.longValue(), syncEngineStatusInterval,
@@ -511,7 +511,7 @@ class EngineSyncRunnerTest {
                 modelName,
                 directory,
                 workerAddressService,
-                statusCheckExecutor, statusCheckExecutor,
+                statusCheckExecutor, statusCheckExecutor, statusCheckExecutor,
                 engineHealthReporter,
                 engineGrpcService,
                 RoleType.PREFILL,

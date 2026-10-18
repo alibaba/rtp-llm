@@ -21,10 +21,12 @@ class WorkerStatusHealthTest {
         response.setRole(RoleType.PREFILL);
         response.setAlive(true);
         response.setStatusVersion(version);
+        assertTrue(worker.tryBeginStatusApplication(lease));
+        lease.close();
         worker.lock.lock();
         try {
             worker.publishPreparedStatus(worker.prepareNewStatus(WorkerStatusTestFixtures.observation(worker, response), lease));
-        } finally { worker.lock.unlock(); }
+        } finally { worker.lock.unlock(); worker.finishStatusApplication(lease); }
     }
 
     private static WorkerStatus aliveWorker() {
@@ -54,15 +56,23 @@ class WorkerStatusHealthTest {
         var committed = worker.committedWorkerStatus();
         var applying = worker.tryBeginStatusPoll(2L);
         worker.recordStatusRpcResult(applying, true, true, null);
+        assertTrue(worker.tryBeginStatusApplication(applying));
+        applying.close();
         try {
             for (long cycle = 3L; cycle < 103L; cycle++) {
-                assertNull(worker.tryBeginStatusPoll(cycle), "pending application blocks the next RPC");
+                try (var next = worker.tryBeginStatusPoll(cycle)) {
+                    assertNotNull(next, "pending application must not block heartbeats");
+                    worker.recordStatusRpcResult(next, true, true, null);
+                    assertFalse(worker.tryBeginStatusApplication(next), "retain only one application");
+                    worker.finishStatusApplication(next);
+                    assertFalse(worker.tryBeginStatusApplication(next), "a different poll cannot release the owner");
+                }
             }
             assertSame(committed, worker.committedWorkerStatus());
             assertEquals(1L, worker.appliedStatusCursor().statusVersion());
             assertTrue(worker.isAvailableForScheduling(), "local backlog does not invalidate a live worker");
             assertNull(worker.retirementReason());
-        } finally { applying.close(); }
+        } finally { worker.finishStatusApplication(applying); }
     }
 
     @Test

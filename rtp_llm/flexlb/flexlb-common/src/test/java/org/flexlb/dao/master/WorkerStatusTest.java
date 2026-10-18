@@ -86,13 +86,15 @@ class WorkerStatusTest {
         for (long cycle = 1L; cycle <= 2L; cycle++) {
             var lease = status.tryBeginStatusPoll(cycle);
             status.recordStatusRpcResult(lease, true, true, null);
+            assertTrue(status.tryBeginStatusApplication(lease));
+            lease.close();
             status.lock.lock();
             try {
                 var observation = WorkerStatusTestFixtures.observation(status, responseWithMarker(cycle));
                 status.publishPreparedStatus(status.prepareNewStatus(observation, lease));
             } finally {
                 status.lock.unlock();
-                lease.close();
+                status.finishStatusApplication(lease);
             }
             var poll = status.trace().snapshot().statusPoll();
             assertEquals(cycle, poll.syncCycleId());
