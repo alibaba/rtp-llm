@@ -54,7 +54,6 @@ public class FlexlbGrpcServer {
     private final GrpcServerTimingInterceptor grpcServerTimingInterceptor;
     private final GrpcQosHeaderInterceptor grpcQosHeaderInterceptor;
 
-
     private Server server;
     private NioEventLoopGroup bossGroup;
     private volatile ThreadPoolExecutor grpcExecutor;
@@ -100,18 +99,21 @@ public class FlexlbGrpcServer {
         FlexlbConfig.GrpcServerConfig executorConfig =
                 configService.loadBalanceConfig().getGrpcServer();
         Logger.info(
-                "FlexLB gRPC executor config: coreSize={}, maxSize={}, queueSize={}",
+                "FlexLB gRPC executor config: coreSize={}, maxSize={}, queueSize={}, "
+                        + "permitKeepAliveTimeMs={}, permitKeepAliveWithoutCalls={}",
                 executorConfig.getExecutorCoreSize(),
                 executorConfig.getExecutorMaxSize(),
-                executorConfig.getExecutorQueueSize());
+                executorConfig.getExecutorQueueSize(),
+                executorConfig.getPermitKeepAliveTimeMs(),
+                executorConfig.isPermitKeepAliveWithoutCalls());
 
         GrpcReceivingBudget.Limits receiving =
                 GrpcReceivingBudget.resolve(
                         executorConfig, io.netty.util.internal.PlatformDependent.maxDirectMemory());
         Logger.info(
                 "FlexLB logical receiving wire budget (not pinned Direct): schedule={}, control={},"
-                    + " timeoutMs={}, totalBudgetBytes={}, scheduleBudgetBytes={},"
-                    + " controlBudgetBytes={}, initialReservationBytes={}, DirectFraction={}",
+                        + " timeoutMs={}, totalBudgetBytes={}, scheduleBudgetBytes={},"
+                        + " controlBudgetBytes={}, initialReservationBytes={}, DirectFraction={}",
                 receiving.scheduleCalls(),
                 receiving.controlCalls(),
                 receiving.timeoutMs(),
@@ -176,7 +178,8 @@ public class FlexlbGrpcServer {
                         .addStreamTracerFactory(receivingGuard)
                         .intercept(new GrpcOverloadInterceptor(grpcExecutor, grpcControlExecutor))
                         .intercept(receivingGuard)
-                        .addStreamTracerFactory(grpcServerTimingInterceptor.requestSizeTracerFactory())
+                        .addStreamTracerFactory(
+                                grpcServerTimingInterceptor.requestSizeTracerFactory())
                         .addService(
                                 ServerInterceptors.intercept(
                                         flexlbServiceImpl,
@@ -185,6 +188,9 @@ public class FlexlbGrpcServer {
                                         grpcQosHeaderInterceptor))
                         .maxInboundMessageSize(org.flexlb.constant.GrpcConstants.MAX_MESSAGE_SIZE)
                         .flowControlWindow(4 * 1024 * 1024)
+                        .permitKeepAliveTime(
+                                executorConfig.getPermitKeepAliveTimeMs(), TimeUnit.MILLISECONDS)
+                        .permitKeepAliveWithoutCalls(executorConfig.isPermitKeepAliveWithoutCalls())
                         .build()
                         .start();
 

@@ -14,7 +14,6 @@ import org.flexlb.util.PriorityNormalizer;
 /** Cross-field validation for the public configuration contract. */
 public final class FlexlbConfigValidator {
 
-
     public static void validateDocumentShape(JsonNode document) {
         validateDocumentShape(document, document);
     }
@@ -171,9 +170,11 @@ public final class FlexlbConfigValidator {
         positive(grpc.getExecutorQueueSize(), "grpcServer.executorQueueSize");
         nonNegative(grpc.getReceiveBudgetBytes(), "grpcServer.receiveBudgetBytes");
         nonNegative(grpc.getMaxReceivingRequests(), "grpcServer.maxReceivingRequests");
-        nonNegative(grpc.getMaxReceivingControlRequests(), "grpcServer.maxReceivingControlRequests");
+        nonNegative(
+                grpc.getMaxReceivingControlRequests(), "grpcServer.maxReceivingControlRequests");
         positive(grpc.getReceiveTimeoutMs(), "grpcServer.receiveTimeoutMs");
         positive(grpc.getShutdownQuietPeriodMs(), "grpcServer.shutdownQuietPeriodMs");
+        nonNegative(grpc.getPermitKeepAliveTimeMs(), "grpcServer.permitKeepAliveTimeMs");
         require(
                 grpc.getExecutorMaxSize() >= grpc.getExecutorCoreSize(),
                 "grpcServer.executorMaxSize",
@@ -187,10 +188,14 @@ public final class FlexlbConfigValidator {
         var capture = memory.getAutoCapture();
         require(capture != null, path + ".autoCapture", "is required");
         positive(capture.getThresholdBytes(), path + ".autoCapture.thresholdBytes");
-        require(capture.getCooldownMs() >= 1_000L,
-                path + ".autoCapture.cooldownMs", "must be at least 1000 ms");
-        require(!capture.isEnabled() || memory.isEnabled(),
-                path + ".autoCapture.enabled", "requires nettyMemoryReporter.enabled=true");
+        require(
+                capture.getCooldownMs() >= 1_000L,
+                path + ".autoCapture.cooldownMs",
+                "must be at least 1000 ms");
+        require(
+                !capture.isEnabled() || memory.isEnabled(),
+                path + ".autoCapture.enabled",
+                "requires nettyMemoryReporter.enabled=true");
     }
 
     private static void validateQueue(SchedulerConfig queue) {
