@@ -1427,19 +1427,18 @@ def _multi_block_attn_res_fp8_kernel(
 
         mixed /= denominator
     if apply_output_norm:
-        # Preserve both eager BF16 rounding points: the AttnRes output store
-        # and RMSNorm's normalized activation before the affine multiply.
-        mixed = mixed.to(prefix.dtype.element_ty).to(tl.float32)
+        # Match fused AttnRes + RMSNorm: keep the mixture and normalization
+        # in FP32, then round the affine output once before FP8 quantization.
         output_inverse_rms = tl.rsqrt(
             tl.sum(tl.where(hidden_mask, mixed * mixed, 0.0), axis=0)
             * (1.0 / hidden_size)
             + output_norm_eps
         )
-        normalized = (mixed * output_inverse_rms).to(prefix.dtype.element_ty)
+        normalized = mixed * output_inverse_rms
         gamma = tl.load(
             output_norm_weight + hidden_offsets, mask=hidden_mask, other=0.0
         ).to(tl.float32)
-        mixed = normalized.to(tl.float32) * gamma
+        mixed = normalized * gamma
     store_group128(
         mixed, output, output_scales, token, token_count, hidden_size, block_d
     )

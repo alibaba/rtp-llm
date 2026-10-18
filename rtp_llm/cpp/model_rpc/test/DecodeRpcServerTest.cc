@@ -1067,6 +1067,42 @@ TEST(DecodeRpcServerTest, HeterogeneousPartialBlockUsesLastAvailableKey) {
     EXPECT_EQ(keyOffsetPairs(decode_plan), keyOffsetPairs(producer_plan));
 }
 
+TEST(DecodeRpcServerTest, FullBlockSourcePeerMatchesProducerAcrossSpansAndShards) {
+    const auto policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    for (const size_t key_span : {1u, 2u, 3u}) {
+        for (const size_t key_count : {17u, 18u}) {
+            const size_t logical_blocks = (key_count + key_span - 1) / key_span;
+            for (const int prefill_cp : {2, 3, 4}) {
+                SCOPED_TRACE(::testing::Message() << "span=" << key_span << " keys=" << key_count
+                                                 << " prefill_cp=" << prefill_cp);
+                std::vector<int> published_by(key_count, -1);
+                for (int peer = 0; peer < prefill_cp; ++peer) {
+                    const auto published = buildCacheStorePlan(
+                        policy, logical_blocks, 0, true, peer, prefill_cp, key_span, key_count);
+                    for (const auto& pair : published) {
+                        ASSERT_EQ(published_by[pair.key_index], -1);
+                        published_by[pair.key_index] = peer;
+                    }
+                }
+                for (const int decode_cp : {1, 2, 4}) {
+                    const size_t local_blocks = (logical_blocks + decode_cp - 1) / decode_cp;
+                    for (int rank = 0; rank < decode_cp; ++rank) {
+                        const auto loaded = DecodeRpcServer::buildGroupLoadPlan(
+                            policy, local_blocks, key_count, 0, true,
+                            /*group_seq_size_per_block=*/4 * key_span,
+                            /*base_seq_size_per_block=*/4, rank, decode_cp);
+                        for (const auto& pair : loaded) {
+                            ASSERT_GE(published_by[pair.key_index], 0);
+                            EXPECT_EQ(DecodeRpcServer::fullBlockSourcePeer(pair.key_index, key_span, prefill_cp),
+                                      static_cast<size_t>(published_by[pair.key_index]));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 TEST(DecodeRpcServerTest, CompactStateGroupLoadsGlobalTailKeysIntoCanonicalSlots) {
     // 11 logical blocks under prefill CP=2 compact into a 6-slot state table:
     // slot j covers logical blocks [2j, 2j+1], so the two active tail slots 4 and

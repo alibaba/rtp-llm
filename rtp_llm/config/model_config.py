@@ -165,6 +165,7 @@ class ModelConfig(CppModelConfig):
         "input_vocab_size",
         "type_vocab_size",
         "gen_num_per_cycle",
+        "mtp_preserve_prefill_positions",
         "embedding_size",
         "moe_normalize_expert_scale",
         "scoring_func",

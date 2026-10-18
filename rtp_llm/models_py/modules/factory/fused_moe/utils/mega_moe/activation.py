@@ -22,25 +22,25 @@ def mega_moe_functions(backend, activation):
 
 
 def situ_kwargs(kernel, gate_beta, up_beta):
+    """Bind the independent gate/up tanh scales of the SiTU kernel API."""
     if gate_beta is None or not math.isfinite(gate_beta) or gate_beta <= 0:
         raise ValueError("SiTU requires a finite positive gate beta")
     if up_beta is not None and (not math.isfinite(up_beta) or up_beta <= 0):
         raise ValueError("SiTU up beta must be finite and positive, or None")
     parameters = inspect.signature(kernel).parameters
-    if {"activation_beta", "activation_linear_beta"}.issubset(parameters):
+    scale_names = ("activation_beta", "activation_linear_beta")
+    if all(
+        name in parameters
+        and parameters[name].kind
+        in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+        for name in scale_names
+    ):
+        # DeepGEMM's SiTU gate is beta*tanh(gate/beta)*sigmoid(gate).
+        # A None linear beta leaves up unsaturated; zero is not equivalent.
         return dict(activation_beta=gate_beta, activation_linear_beta=up_beta)
-    if {"situ_beta", "situ_linear_beta"}.issubset(parameters):
-        # main's kernel computes beta*tanh(gate/beta)*sigmoid(gate),
-        # multiplied by linear_beta*tanh(up/linear_beta).
-        if up_beta is None:
-            raise RuntimeError(
-                "This DeepGEMM SiTU backend requires a saturated up branch"
-            )
-        return dict(situ_beta=gate_beta, situ_linear_beta=up_beta)
-    if {"activation_alpha", "activation_beta"}.issubset(parameters):
-        # vllm-project/DeepGEMM a6bbb800, csrc/apis/mega_moe.hpp:190-193
-        # explicitly defines beta=0 as an unsaturated up branch. The optional
-        # native backend verifies that source/patch manifest before this call.
-        return dict(activation_alpha=gate_beta,
-                    activation_beta=0.0 if up_beta is None else up_beta)
-    raise RuntimeError("DeepGEMM lacks a verified SiTU gate/up beta interface")
+    # Older activation_alpha APIs have incompatible meanings, including a
+    # sigmoid slope. Parameter names alone do not establish SiTU support.
+    raise RuntimeError(
+        "DeepGEMM SiTU requires keyword parameters activation_beta and "
+        "activation_linear_beta; this kernel API is not supported"
+    )

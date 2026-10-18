@@ -1,3 +1,10 @@
+py_test(
+    name = "cutlass_import_test",
+    srcs = ["cutlass_import_test.py"],
+    deps = ["//rtp_llm/models_py:utils"],
+    tags = ["cpu"],
+)
+
 py_test (
     name = "arch_test",
     srcs = ["arch_test.py"],

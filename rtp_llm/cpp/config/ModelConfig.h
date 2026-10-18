@@ -90,6 +90,9 @@ public:
 
     int64_t max_seq_len       = 0;
     int64_t gen_num_per_cycle = 0;  // speculative decoding: tokens per cycle
+    // Draft capability: shift Prefill tokens while retaining the target's source positions.
+    // False preserves the existing position policy for other speculative models.
+    bool mtp_preserve_prefill_positions = false;
     int64_t vocab_size        = 0;
     // Output vocab pruning contract: empty means disabled; otherwise ids must be strictly
     // ascending and deduplicated, each in [0, vocab_size), and output_vocab_padded_size >= ids.size().
