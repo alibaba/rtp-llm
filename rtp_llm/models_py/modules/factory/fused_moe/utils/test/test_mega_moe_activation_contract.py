@@ -33,28 +33,26 @@ class MegaMoeActivationContractTest(unittest.TestCase):
     def test_incomplete_activation_signature_is_rejected(self):
         def unverified(*, activation_alpha):
             pass
-        with self.assertRaisesRegex(RuntimeError, "verified SiTU"):
+        with self.assertRaisesRegex(RuntimeError, "kernel API is not supported"):
             ACTIVATION.situ_kwargs(unverified, 4.0, None)
 
-    def test_verified_native_zero_sentinel_keeps_unsaturated_up(self):
-        def native(gate, up, *, activation_alpha, activation_beta):
-            bounded_up = up if activation_beta == 0 else (
-                activation_beta * math.tanh(up / activation_beta)
-            )
-            return activation_alpha * math.tanh(gate / activation_alpha) * bounded_up
+    def test_old_alpha_beta_api_is_rejected(self):
+        def native(*, activation_alpha, activation_beta):
+            raise AssertionError("unsupported kernel must not execute")
         for up_beta in (None, 25.0):
-            kwargs = ACTIVATION.situ_kwargs(native, 4.0, up_beta)
-            expected = 4.0 * math.tanh(3.0 / 4.0)
-            expected *= 30.0 if up_beta is None else 25.0 * math.tanh(30.0 / 25.0)
-            self.assertEqual(native(3.0, 30.0, **kwargs), expected)
+            with self.subTest(up_beta=up_beta), self.assertRaisesRegex(
+                RuntimeError, "kernel API is not supported"
+            ):
+                ACTIVATION.situ_kwargs(native, 4.0, up_beta)
 
-    def test_legacy_situ_names_keep_the_saturated_up_contract(self):
+    def test_legacy_situ_names_are_rejected(self):
         def legacy(*, situ_beta, situ_linear_beta):
-            pass
-        self.assertEqual(ACTIVATION.situ_kwargs(legacy, 4.0, 25.0),
-                         {"situ_beta": 4.0, "situ_linear_beta": 25.0})
-        with self.assertRaisesRegex(RuntimeError, "saturated up"):
-            ACTIVATION.situ_kwargs(legacy, 4.0, None)
+            raise AssertionError("unsupported kernel must not execute")
+        for up_beta in (None, 25.0):
+            with self.subTest(up_beta=up_beta), self.assertRaisesRegex(
+                RuntimeError, "kernel API is not supported"
+            ):
+                ACTIVATION.situ_kwargs(legacy, 4.0, up_beta)
 
     def test_invalid_betas_are_rejected(self):
         def kernel(*, activation_beta, activation_linear_beta):
