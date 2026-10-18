@@ -9,7 +9,7 @@ import unittest
 import torch
 
 from rtp_llm.models_py.modules.dsv41.engram import HostEngramEmbedding, NgramHashState
-from rtp_llm.models_py.modules.dsv41.sm90_engram import UvaEngramPrefetch
+from rtp_llm.models_py.modules.dsv41.engram_prefetch import UvaEngramPrefetch
 from rtp_llm.models_py.modules.dsv41.test import test_sm90_engram as fixture_module
 
 
