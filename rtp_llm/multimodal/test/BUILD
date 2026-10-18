@@ -127,6 +127,31 @@ py_test(
     deps = ["//rtp_llm:testlib"],
 )
 
+py_test(
+    name = "mm_batch_pipeline_test",
+    srcs = ["mm_batch_pipeline_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    tags = ["manual"],
+)
+
+py_test(
+    name = "deepseek_v41_packed_optimization_test",
+    srcs = ["deepseek_v41_packed_optimization_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    size = "enormous",
+    tags = ["manual", "local", "exclusive", "L20D_TEST"],
+    exec_properties = {"gpu": "L20D_TEST", "gpu_count": "1"},
+)
+
+py_test(
+    name = "deepseek_v41_pipeline_gpu_test",
+    srcs = ["deepseek_v41_pipeline_gpu_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    size = "enormous",
+    tags = ["manual", "local", "exclusive", "L20D_TEST"],
+    exec_properties = {"gpu": "L20D_TEST", "gpu_count": "1"},
+)
+
 py_library(
     name = "process_engine_test_helpers",
     testonly = True,
@@ -190,11 +215,46 @@ py_test(
 )
 
 py_test(
+    name = "deepseek_v41_backend_contract_test",
+    srcs = ["deepseek_v41_backend_contract_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    size = "small",
+    env = {
+        "CUDA_VISIBLE_DEVICES": "",
+        "GPU_COUNT": "0",
+    },
+)
+
+py_test(
     name = "deepseek_v41_vision_test",
     srcs = ["deepseek_v41_vision_test.py"],
     deps = ["//rtp_llm:testlib"],
     tags = ["SM100_ARM_CU13"],
     exec_properties = {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "deepseek_v41_packed_vision_test",
+    srcs = ["deepseek_v41_packed_vision_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    size = "small",
+    env = {"CUDA_VISIBLE_DEVICES": "", "GPU_COUNT": "0"},
+)
+
+py_test(
+    name = "deepseek_v41_gpu_preprocess_test",
+    srcs = ["deepseek_v41_gpu_preprocess_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    size = "large",
+    tags = ["L20D_TEST"],
+    exec_properties = {"gpu": "L20D_TEST", "gpu_count": "1"},
+)
+
+py_test(
+    name = "deepseek_v41_span_test",
+    srcs = ["deepseek_v41_span_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    env = {"CUDA_VISIBLE_DEVICES": "", "GPU_COUNT": "0"},
 )
 
 py_test(

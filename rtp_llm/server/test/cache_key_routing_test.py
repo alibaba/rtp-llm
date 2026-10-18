@@ -1,7 +1,4 @@
 import unittest
-from types import SimpleNamespace
-
-import torch
 
 from rtp_llm.ops import cpp_get_block_cache_keys
 from rtp_llm.server.cache_key_routing import (
@@ -24,29 +21,22 @@ def _hash_word(previous, value):
     )
 
 
-def _backend_full_keys(tokens, block_size, seed=0, identities=()):
+def _backend_full_keys(tokens, block_size, seed=0, spans=()):
     """Backend contract: tokens first, then overlapping image identities per page."""
     keys, rolling = [], seed
     for begin in range(0, len(tokens) - block_size + 1, block_size):
         for word in tokens[begin : begin + block_size]:
             rolling = _hash_word(rolling, word)
-        for start, end, words in identities:
-            if end > begin and start < begin + block_size:
+        for start, rows in spans:
+            first = max(start, begin)
+            last = min(start + len(rows), begin + block_size)
+            if first < last:
+                words = [-42, first - begin, len(rows), first - start, last - first]
+                words += rows[first - start : last - start]
                 for word in words:
                     rolling = _hash_word(rolling, word)
         keys.append(rolling)
     return keys
-
-
-def _image(start, count, content="ab?", processor="p:图"):
-    return SimpleNamespace(
-        start=start,
-        types=torch.zeros(count, dtype=torch.int32),
-        n_vit_h=2,
-        n_vit_w=2,
-        content_sha256=content,
-        processor_identity=processor,
-    )
 
 
 class CacheKeyRoutingTest(unittest.TestCase):
@@ -94,30 +84,26 @@ class CacheKeyRoutingTest(unittest.TestCase):
                             )
                             self.assertEqual(original, tokens[:length])
 
-    def test_image_identity_matches_complete_token_ids_cpp_fixture(self):
-        # Shared fixture with CompleteTokenIdsTest.ImageHashIdentityUsesLengthDelimitedBytes.
-        # Non-hex and UTF-8 also prevent treating arbitrary RPC identities as hex digests.
+    def test_row_identity_matches_complete_token_ids_cpp_fixture(self):
         tokens = list(range(16))
-        image = _image(4, 8)
-        words = [-41, 4, 12, 2, 2, 3, 97, 98, 63, 5, 112, 58, 229, 155, 190]
-        expected = _backend_full_keys(tokens, 4, seed=41, identities=[(4, 12, words)])
+        rows = [97, 98, 63, 112, 58, 229, 155, 190]
+        spans = [(4, rows)]
+        expected = _backend_full_keys(tokens, 4, seed=41, spans=spans)
         self.assertEqual(
-            expected,
-            [
-                556723330460289837,
-                1094575162337917127,
-                -8416381023089338704,
-                2888375575027288070,
-            ],
-        )
-        self.assertEqual(
-            get_block_cache_keys(tokens, 4, SimpleNamespace(images=[image]), 41),
+            get_block_cache_keys(
+                tokens, 4, cache_key_seed=41, multimodal_cache_spans=spans
+            ),
             expected,
         )
-        # Exercise the actual native hash implementation in addition to the independent oracle.
         self.assertEqual(
             cpp_get_block_cache_keys(
-                [tokens[:4], tokens[4:8] + words, tokens[8:12] + words, tokens[12:]], 41
+                [
+                    tokens[:4],
+                    tokens[4:8] + [-42, 0, 8, 0, 4] + rows[:4],
+                    tokens[8:12] + [-42, 0, 8, 4, 4] + rows[4:],
+                    tokens[12:],
+                ],
+                41,
             ),
             expected,
         )
@@ -125,41 +111,14 @@ class CacheKeyRoutingTest(unittest.TestCase):
     def test_images_cross_physical_and_cp_boundaries_in_original_order(self):
         tokens = [(i * 17) % 129280 for i in range(2201)]
         for block in (128, 256):
-            first = _image(block - 3, block + 9)
-            second = _image(3 * block + 1, 2 * block + 1, content="x", processor="v2")
-            images = [first, second]
-            identities = [
-                (
-                    block - 3,
-                    2 * block + 6,
-                    [
-                        -41,
-                        block - 3,
-                        2 * block + 6,
-                        2,
-                        2,
-                        3,
-                        97,
-                        98,
-                        63,
-                        5,
-                        112,
-                        58,
-                        229,
-                        155,
-                        190,
-                    ],
-                ),
-                (
-                    3 * block + 1,
-                    5 * block + 2,
-                    [-41, 3 * block + 1, 5 * block + 2, 2, 2, 1, 120, 2, 118, 50],
-                ),
+            spans = [
+                (block - 3, [i * 31 - 17 for i in range(block + 9)]),
+                (3 * block + 1, [i * 43 - 3 for i in range(2 * block + 1)]),
             ]
             full = get_block_cache_keys(
-                tokens, block, SimpleNamespace(images=images), 41
+                tokens, block, cache_key_seed=41, multimodal_cache_spans=spans
             )
-            expected = _backend_full_keys(tokens, block, 41, identities)
+            expected = _backend_full_keys(tokens, block, 41, spans)
             self.assertEqual(full, expected)
             for cp in (1, 2, 4):
                 for sharded in (False, True):
@@ -169,25 +128,16 @@ class CacheKeyRoutingTest(unittest.TestCase):
                             expected[cp - 1 :: cp] if sharded else expected,
                         )
 
-    def test_unknown_image_identity_only_routes_complete_safe_prefix(self):
-        tokens = list(range(1025))
-        for missing in ("content_sha256", "processor_identity"):
-            image = _image(513, 32)
-            setattr(image, missing, "")
-            full = get_block_cache_keys(
-                tokens, 128, SimpleNamespace(images=[image]), 41
-            )
-            self.assertEqual(full, _backend_full_keys(tokens[:513], 128, 41))
-            self.assertEqual(route_cache_keys_for_page_rr(full, True, 4), [full[3]])
-
-    def test_image_identity_changes_all_later_prefix_keys(self):
+    def test_changed_image_rows_change_all_later_prefix_keys(self):
         tokens = list(range(1024))
-        image = _image(128, 32)
+        rows = list(range(32))
         original = get_block_cache_keys(
-            tokens, 128, SimpleNamespace(images=[image]), 41
+            tokens, 128, cache_key_seed=41, multimodal_cache_spans=[(128, rows)]
         )
-        image.processor_identity += "!"
-        changed = get_block_cache_keys(tokens, 128, SimpleNamespace(images=[image]), 41)
+        rows[0] += 1
+        changed = get_block_cache_keys(
+            tokens, 128, cache_key_seed=41, multimodal_cache_spans=[(128, rows)]
+        )
         self.assertEqual(original[0], changed[0])
         self.assertTrue(all(a != b for a, b in zip(original[1:], changed[1:])))
         self.assertNotEqual(

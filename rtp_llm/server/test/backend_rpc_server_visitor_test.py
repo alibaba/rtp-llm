@@ -103,9 +103,6 @@ class _FakeRouteTokenIds:
 class _FakeRouteInput:
     request_id = 456
     token_ids = _FakeRouteTokenIds()
-    # The visitor routes v41 vision inputs through the master schedule path;
-    # non-vision requests carry no v41 payload.
-    v41_inputs = None
 
     def __init__(self):
         self.generate_config = _FakeGenerateConfig()

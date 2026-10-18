@@ -229,6 +229,40 @@ class MMCacheRoutingTest(unittest.TestCase):
             ([1], None),
         )
 
+    def test_semantic_tokens_use_backend_multimodal_block_identity(self):
+        from rtp_llm.ops import cpp_get_block_cache_keys
+        from rtp_llm.server.cache_key_routing import get_block_cache_keys
+
+        cache_spans = []
+        tokens, length = multimodal_routing_tokens(
+            [1, 99, 2],
+            [[99]],
+            False,
+            ["a"],
+            metadata(["a"], [[-10, 11]]),
+            100,
+            compact=True,
+            cache_spans=cache_spans,
+            semantic_mm_token_id=129264,
+        )
+        self.assertEqual(list(tokens), [1, 129264, 129264, 2])
+        self.assertEqual(length, 4)
+        self.assertEqual(cache_spans, [(1, [-10, 11])])
+
+        actual = get_block_cache_keys(
+            tokens, 2, cache_key_seed=7, multimodal_cache_spans=cache_spans
+        )
+        rolling = cpp_get_block_cache_keys(
+            [
+                [1, 129264],
+                [-42, 1, 2, 0, 1, -10],
+                [129264, 2],
+                [-42, 0, 2, 1, 1, 11],
+            ],
+            7,
+        )
+        self.assertEqual(actual, rolling[1::2])
+
     def test_compact_expansion_produces_identical_prefill_block_hashes(self):
         from array import array
 
@@ -321,12 +355,34 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls[1].kwargs["selected_vit"], status)
         self.assertEqual(request.generate_config.role_addrs, [prefill, vit])
         self.assertEqual(request.token_ids.tolist(), [1, 99, 2])
-        wire = GenerateInputPB.FromString(trans_input(request).SerializeToString())
-        self.assertEqual(list(wire.token_ids), [1, -10, 11, 2])
-        self.assertTrue(wire.HasField("multimodal_token_layout"))
+        route = calls[1].kwargs
+        from rtp_llm.ops import get_block_cache_keys
+
         self.assertEqual(
-            [(s.offset, s.length) for s in wire.multimodal_token_layout.spans], [(1, 2)]
+            route["block_cache_keys"],
+            get_block_cache_keys([1, -10, 11, 2], 2),
         )
+        wire = GenerateInputPB.FromString(route["input_pb"].SerializeToString())
+        self.assertEqual(list(wire.token_ids), [1, 99, 2])
+        self.assertEqual(len(wire.multimodal_inputs), 1)
+        self.assertEqual(
+            wire.multimodal_inputs[0].multimodal_url,
+            request.mm_inputs[0].url,
+        )
+
+    async def test_v41_route_keys_match_backend_canonical_tokens_and_identity(self):
+        from rtp_llm.server.cache_key_routing import get_block_cache_keys
+
+        self.visitor.mm_model_config.semantic_mm_token_id = 129264
+        await self.visitor.get_master_route_addrs(self.request)
+        route = self.visitor.master_client.get_backend_role_addrs.call_args.kwargs
+        expected = get_block_cache_keys(
+            [1, 129264, 129264, 2],
+            2,
+            multimodal_cache_spans=[(1, [-10, 11])],
+        )
+        self.assertEqual(route["block_cache_keys"], expected)
+        self.assertEqual(route["seq_len"], 4)
 
     async def test_missing_or_invalid_required_hashes_stop_before_prefill_routing(self):
         for data in ({"entries": [{}]},):
@@ -378,7 +434,10 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 list(route_calls[1].kwargs["input_pb"].token_ids), [1, 99, 2]
             )
-            self.assertIsNone(self.request.mm_token_expansion)
+            self.assertEqual(
+                route_calls[1].kwargs["input_pb"].multimodal_inputs[0].multimodal_url,
+                self.request.mm_inputs[0].url,
+            )
 
             wire = MultimodalInputsPB(request_id=self.request.request_id)
             wire.multimodal_inputs.add().CopyFrom(
@@ -459,9 +518,7 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(FtRuntimeException, "incomplete feature hashes"):
             await client.get_vit_cache_metadata(self.vit, keys, input=self.request)
 
-    async def test_frontend_drops_metadata_and_retains_only_compact_expansion(
-        self,
-    ):
+    async def test_frontend_drops_metadata_and_sends_only_generic_input(self):
         class TrackedMetadata(dict):
             pass
 
@@ -488,12 +545,13 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.visitor.master_client.get_vit_cache_metadata = get_metadata
         self.visitor.master_client.get_backend_role_addrs = route
         await self.visitor.get_master_route_addrs(self.request)
-        from array import array
-
-        expansion = self.request.mm_token_expansion
-        self.assertIsInstance(expansion.token_ids, array)
-        self.assertEqual(expansion.token_ids.itemsize, 4)
-        self.assertEqual(expansion.spans, [(1, 2)])
+        wire = trans_input(self.request)
+        self.assertEqual(list(wire.token_ids), [1, 99, 2])
+        self.assertEqual(len(wire.multimodal_inputs), 1)
+        self.assertEqual(
+            wire.multimodal_inputs[0].multimodal_url,
+            self.request.mm_inputs[0].url,
+        )
 
     async def test_evicted_embedding_still_supplies_prefill_cache_routing_hashes(self):
         from rtp_llm.multimodal.mm_embedding_cache import (
@@ -537,8 +595,8 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(hints), 2)
         self.assertEqual(hints, model_keys[:2])
         self.assertEqual(list(route["input_pb"].token_ids), original)
+        self.assertEqual(len(route["input_pb"].multimodal_inputs), 1)
         self.assertEqual(self.request.token_ids.tolist(), original)
-        self.assertIsNone(self.request.mm_token_expansion)
         self.visitor.master_client.get_vit_cache_metadata.assert_not_awaited()
 
     async def test_old_master_falls_back_to_ordinary_schedule(self):
@@ -554,7 +612,8 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("selected_vit", calls[1].kwargs)
         self.assertEqual(len(calls), 2)
         self.visitor.master_client.get_vit_cache_metadata.assert_not_awaited()
-        self.assertIsNone(self.request.mm_token_expansion)
+        self.assertEqual(list(calls[1].kwargs["input_pb"].token_ids), [1, 99, 2])
+        self.assertEqual(len(calls[1].kwargs["input_pb"].multimodal_inputs), 1)
         # Ordinary Schedule may already own/admit this request on main.
         # Do not issue a second admission after retrieving optional hashes.
 
@@ -568,12 +627,12 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(Exception, "changed the selected ViT"):
             await self.visitor.get_master_route_addrs(self.request)
         self.assertFalse(self.request.generate_config.role_addrs)
-        self.assertIsNone(self.request.mm_token_expansion)
+        self.assertEqual(self.request.token_ids.tolist(), [1, 99, 2])
+        self.assertEqual(len(self.request.mm_inputs), 1)
 
     async def test_stale_vit_reselection_acquires_new_hashes_before_prefill(self):
-        from rtp_llm.server.cache_key_routing import get_block_cache_keys
-
-        self.visitor.cache_key_seed = 41
+        self.visitor.cache_key_seed = 12345
+        self.visitor.mm_model_config.semantic_mm_token_id = 129264
         new_vit = self.vit.model_copy(update={"ip": "127.0.0.3"})
         new_status = {**self.status, "server_ip": new_vit.ip}
         self.visitor.master_client.get_backend_role_addrs.side_effect = [
@@ -598,10 +657,16 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("seq_len", retry.kwargs)
         last = self.visitor.master_client.get_backend_role_addrs.call_args.kwargs
         self.assertEqual(last["selected_vit"], new_status)
-        self.assertTrue(last["block_cache_keys"])
+        from rtp_llm.server.cache_key_routing import get_block_cache_keys
+
         self.assertEqual(
             last["block_cache_keys"],
-            get_block_cache_keys([1, 31, 32, 33, 34, 2], 2, cache_key_seed=41),
+            get_block_cache_keys(
+                [1, 129264, 129264, 129264, 129264, 2],
+                2,
+                cache_key_seed=12345,
+                multimodal_cache_spans=[(1, [31, 32, 33, 34])],
+            ),
         )
         self.assertEqual(last["seq_len"], 6)
         self.assertEqual(
@@ -611,22 +676,29 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
             self.request.generate_config.role_addrs, [self.prefill, new_vit]
         )
         self.assertEqual(self.request.token_ids.tolist(), [1, 99, 2])
-        wire = trans_input(self.request)
-        self.assertEqual(list(wire.token_ids), [1, 31, 32, 33, 34, 2])
+        wire = last["input_pb"]
+        self.assertEqual(list(wire.token_ids), [1, 99, 2])
+        self.assertEqual(len(wire.multimodal_inputs), 1)
         self.assertEqual(
-            [(s.offset, s.length) for s in wire.multimodal_token_layout.spans], [(1, 4)]
+            wire.multimodal_inputs[0].multimodal_url,
+            self.request.mm_inputs[0].url,
         )
 
-    async def test_failed_reroute_discards_previous_expansion(self):
+    async def test_failed_reroute_keeps_generic_request_unchanged(self):
         await self.visitor.get_master_route_addrs(self.request)
-        self.assertIsNotNone(self.request.mm_token_expansion)
         self.visitor.master_client.get_backend_role_addrs.side_effect = [
             FlexlbResponse.error_response(503)
         ]
         response = await self.visitor.get_master_route_addrs(self.request)
         self.assertEqual(response.error_code, 503)
-        self.assertIsNone(self.request.mm_token_expansion)
-        self.assertFalse(trans_input(self.request).HasField("multimodal_token_layout"))
+        self.assertEqual(self.request.token_ids.tolist(), [1, 99, 2])
+        wire = trans_input(self.request)
+        self.assertEqual(list(wire.token_ids), [1, 99, 2])
+        self.assertEqual(len(wire.multimodal_inputs), 1)
+        self.assertEqual(
+            wire.multimodal_inputs[0].multimodal_url,
+            self.request.mm_inputs[0].url,
+        )
 
     async def test_short_route_deadline_preserves_request_timeout(self):
         client = MasterClient(

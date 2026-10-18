@@ -41,6 +41,25 @@ cc_test(
     tags = ["L20_CU13"],
 )
 
+cc_test(
+    name = "canonical_multimodal_processor_test",
+    srcs = ["CanonicalMultimodalProcessorTest.cc"],
+    copts = test_copts,
+    deps = torch_deps() + [
+        "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/multimodal_processor",
+        "//rtp_llm/cpp/testing:device_test_utils",
+        "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+    env = {"TEST_USING_DEVICE": "CUDA"},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
 # Ingress ownership / processor-kind decision table. Depends on the lean mm_processor_config
 # target rather than the fat one, so it links no torch and needs no GPU node.
 cc_test(

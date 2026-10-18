@@ -176,6 +176,14 @@ TEST(DecodeRpcServerTest, invalidPrefillOnlyUsesInvalidArgumentWithDetails) {
 }
 
 TEST(ModelRpcProtoTest, GroupedCacheFieldsPreserveLegacyNumbers) {
+    const auto* generate_request = GenerateRequestPB::descriptor();
+    ASSERT_NE(generate_request, nullptr);
+    EXPECT_EQ(generate_request->FindFieldByName("multimodal_cache_spans")->number(), 12);
+    const auto* cache_span = MultimodalCacheSpanPB::descriptor();
+    ASSERT_NE(cache_span, nullptr);
+    EXPECT_EQ(cache_span->FindFieldByName("offset")->number(), 1);
+    EXPECT_EQ(cache_span->FindFieldByName("row_hashes")->number(), 2);
+
     const auto* broadcast = BroadcastLoadRequestPB::descriptor();
     ASSERT_NE(broadcast, nullptr);
     EXPECT_TRUE(broadcast->IsReservedNumber(5));
@@ -301,11 +309,11 @@ TEST(DecodeRpcServerTest, CPShardedLoadRequestReadsFromEveryPrefillPeer) {
     DecodeRpcServer server;
     server.resource_.workers = {"decode-0", "decode-1"};
 
-    const std::string                                   request_key = "request";
-    const std::vector<std::string>                      peer_addrs  = {"prefill-0", "prefill-1"};
-    const std::vector<CacheKeyType>                     cache_keys  = {101, 102};
-    GroupBlockIds                                       group_block_ids;
-    const auto                                          load_context = makeLoadContext(request_key,
+    const std::string               request_key = "request";
+    const std::vector<std::string>  peer_addrs  = {"prefill-0", "prefill-1"};
+    const std::vector<CacheKeyType> cache_keys  = {101, 102};
+    GroupBlockIds                   group_block_ids;
+    const auto                      load_context = makeLoadContext(request_key,
                                               peer_addrs,
                                               cache_keys,
                                               std::move(group_block_ids),
@@ -330,11 +338,11 @@ TEST(DecodeRpcServerTest, CPShardedMlaLoadRequestReadsFromEveryPrefillPeer) {
     DecodeRpcServer server;
     server.resource_.workers = {"decode-0", "decode-1"};
 
-    const std::string                                   request_key = "request";
-    const std::vector<std::string>                      peer_addrs  = {"prefill-0", "prefill-1"};
-    const std::vector<CacheKeyType>                     cache_keys  = {101};
-    GroupBlockIds                                       group_block_ids;
-    const auto                                          load_context = makeLoadContext(request_key,
+    const std::string               request_key = "request";
+    const std::vector<std::string>  peer_addrs  = {"prefill-0", "prefill-1"};
+    const std::vector<CacheKeyType> cache_keys  = {101};
+    GroupBlockIds                   group_block_ids;
+    const auto                      load_context = makeLoadContext(request_key,
                                               peer_addrs,
                                               cache_keys,
                                               std::move(group_block_ids),
@@ -661,8 +669,8 @@ TEST_F(PrefillCompletionRpcTest, SettlesWithoutDecodeAndPreservesProtocolFailure
             resource_released       = stream->stream_cache_resource_->isResourceReleased();
             blocks_after_completion = stream->stream_cache_resource_->curBlocksNum();
             EXPECT_EQ(stream->outputTokenLen(), 0);
-            const auto timing       = stream->getTimeInfo();
-            executed                = timing.running_started || timing.first_token_committed || timing.generation_done;
+            const auto timing = stream->getTimeInfo();
+            executed          = timing.running_started || timing.first_token_committed || timing.generation_done;
             RpcMetricsCollector metrics;
             context.collectBasicMetrics(metrics);
             error_qps = metrics.error_qps;

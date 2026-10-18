@@ -10,6 +10,7 @@ Covers:
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import struct
@@ -62,8 +63,8 @@ from rtp_llm.dash_sc.inference.servicer import (
     _dash_error_spec_for_ft_exception,
     _derive_max_token_id,
     _finish_server_trace,
-    _prepare_v41_image_request,
     _request_qos_level,
+    _validate_v41_standard_input_ids,
     build_think_runtime,
     iter_real_model_stream_infer,
 )
@@ -406,85 +407,6 @@ class BuildThinkRuntimeTest(unittest.TestCase):
         self.assertEqual(runtime.eos_token_id, 0)
 
 
-class V41ImageDownloadTimingTest(unittest.TestCase):
-    def run_loader(self, statuses, *, repeats=1):
-        from rtp_llm.multimodal.multimodal_util import collect_download_timing
-
-        servicer = "rtp_llm.dash_sc.inference.servicer"
-        processor = (
-            "rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_processor"
-        )
-        clock = [100.0]
-        status_iter = iter(statuses)
-
-        def get_response(*args, **kwargs):
-            clock[0] += 0.125
-            status = next(status_iter)
-            if isinstance(status, Exception):
-                raise status
-            response = MagicMock(status_code=status)
-            response.__enter__.return_value = response
-            return response
-
-        def prepare(*args, url_loader, **kwargs):
-            return [
-                url_loader("https://example.invalid/image.png") for _ in range(repeats)
-            ]
-
-        def sleep(seconds):
-            clock[0] += seconds
-
-        request = SimpleNamespace(id="download-timing-test")
-        with patch(servicer + ".time.monotonic", side_effect=lambda: clock[0]), patch(
-            servicer + ".time.sleep", side_effect=sleep
-        ), patch(
-            "rtp_llm.multimodal.multimodal_util.request_get", side_effect=get_response
-        ) as get, patch(
-            servicer + "._image_download_chunks", return_value=[b"image"]
-        ), patch(
-            processor + ".prepare_vl_inputs_from_token_ids", side_effect=prepare
-        ), patch(
-            "rtp_llm.multimodal.greennet_hook.greennet_enabled", return_value=False
-        ), collect_download_timing() as timing:
-            try:
-                result = _prepare_v41_image_request(request, [], object(), images=[{}])
-            except FtRuntimeException as error:
-                result = error
-        return result, timing.elapsed_ms, get.call_count
-
-    def test_actual_attempts_are_timed_without_retry_backoff_or_url_cache_hits(self):
-        result, elapsed_ms, requests = self.run_loader([503, 200], repeats=2)
-        self.assertEqual(result, [b"image", b"image"])
-        self.assertEqual(requests, 2)
-        self.assertEqual(elapsed_ms, 250.0)
-
-    def test_exhausted_attempts_are_timed_and_preserve_download_error(self):
-        result, elapsed_ms, requests = self.run_loader([503, 503, 503])
-        self.assertIsInstance(result, FtRuntimeException)
-        self.assertEqual(result.exception_type, ExceptionType.MM_DOWNLOAD_FAILED)
-        self.assertEqual(result.message, "Temporary multimodal download failure")
-        self.assertEqual(requests, 3)
-        self.assertEqual(elapsed_ms, 375.0)
-
-    def test_nonretryable_attempt_is_timed_and_preserves_invalid_params(self):
-        result, elapsed_ms, requests = self.run_loader([404])
-        self.assertIsInstance(result, FtRuntimeException)
-        self.assertEqual(result.exception_type, ExceptionType.INVALID_PARAMS)
-        self.assertEqual(result.message, "Failed to download multimodal content")
-        self.assertEqual(requests, 1)
-        self.assertEqual(elapsed_ms, 125.0)
-
-    def test_network_timeouts_keep_timeout_code_and_exclude_retry_backoff(self):
-        result, elapsed_ms, attempts = self.run_loader(
-            [requests.Timeout("download timeout") for _ in range(3)]
-        )
-        self.assertIsInstance(result, FtRuntimeException)
-        self.assertEqual(result.exception_type, ExceptionType.CONNECT_TIMEOUT)
-        self.assertEqual(result.message, "Temporary multimodal download failure")
-        self.assertEqual(attempts, 3)
-        self.assertEqual(elapsed_ms, 375.0)
-
-
 class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
     def _minimal_request(self) -> predict_v2_pb2.ModelInferRequest:
         req = predict_v2_pb2.ModelInferRequest()
@@ -579,84 +501,14 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(infer.parameters["prompt_token_num"].int64_param, 2)
         self.assertEqual(infer.parameters["prompt_cached_token_num"].int64_param, 0)
 
-    async def test_v41_canonical_ids_and_image_count_reach_backend_and_response(self):
-        from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_processor import (
-            V41ImageInput,
-            V41PreparedInputs,
-        )
-
-        image = V41ImageInput(
-            1,
-            torch.zeros(1, 3, 14, 14, dtype=torch.bfloat16),
-            1,
-            1,
-            torch.tensor([0, 1, 2, 3]),
-            "a" * 64,
-            "b" * 64,
-        )
-        prepared = V41PreparedInputs(
-            "", (7, 129264, 129264, 129264, 129264, 8), (-1, 0, 1, 2, 3, -1), (image,)
-        )
-        output = GenerateOutput(
-            output_ids=torch.tensor([9]),
-            finished=True,
-            aux_info=AuxInfo(input_len=6, reuse_len=0),
-        )
-        visitor = _FakeVisitor(
-            _FakeAsyncStream([GenerateOutputs(generate_outputs=[output])])
-        )
-        chunks = await _drain(
-            iter_real_model_stream_infer(
-                self._minimal_request(),
-                [7, 129264, 8],
-                SamplingParams(),
-                DashScRequestControls(),
-                visitor,
-                rtp_llm_request_id=1,
-                v41_inputs=prepared,
-                max_seq_len=32,
-            )
-        )
-        submitted = visitor.last_generate_input
-        self.assertIs(submitted.v41_inputs, prepared)
-        self.assertEqual(
-            submitted.token_ids.flatten().tolist(), list(prepared.token_ids)
-        )
-        self.assertEqual(
-            chunks[0].infer_response.parameters["image_tokens"].int64_param, 4
-        )
-        self.assertEqual(
-            chunks[0].infer_response.parameters["prompt_token_num"].int64_param, 6
-        )
-
-    async def test_v41_expansion_over_limit_rejects_before_enqueue(self):
-        from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_processor import (
-            V41PreparedInputs,
-        )
-
-        visitor = _FakeVisitor(_FakeAsyncStream([]))
-        prepared = V41PreparedInputs("", (1, 2, 3), (-1, -1, -1), ())
-        chunks = await _drain(
-            iter_real_model_stream_infer(
-                self._minimal_request(),
-                [1],
-                SamplingParams(),
-                DashScRequestControls(),
-                visitor,
-                rtp_llm_request_id=1,
-                v41_inputs=prepared,
-                max_seq_len=3,
-            )
-        )
-        self.assertEqual(visitor.enqueue_called, 0)
-        self.assertEqual(_finish_reason(chunks[0]), DASH_ERROR_TOO_LONG.finish_reason)
-
-    async def test_v41_download_failure_returns_protocol_error_before_enqueue(self):
+    async def test_v41_standard_input_failure_returns_protocol_error_before_enqueue(
+        self,
+    ):
         visitor = _FakeVisitor(_FakeAsyncStream([]))
         request = self._minimal_request()
         request.parameters["payload"].string_param = "{}"
         with patch(
-            "rtp_llm.dash_sc.inference.servicer._prepare_v41_image_request",
+            "rtp_llm.dash_sc.inference.servicer._validate_v41_standard_input_ids",
             side_effect=FtRuntimeException(
                 ExceptionType.INVALID_PARAMS, "invalid image payload"
             ),
@@ -669,12 +521,239 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                     DashScRequestControls(),
                     visitor,
                     rtp_llm_request_id=1,
-                    v41_processor_config=object(),
+                    v41_image_token_id=129264,
                 )
             )
         self.assertEqual(visitor.enqueue_called, 0)
         self.assertEqual(
             _finish_reason(chunks[0]), DASH_ERROR_BAD_REQUEST.finish_reason
+        )
+
+    async def test_v41_normal_request_preserves_raw_markers_and_generic_media(self):
+        from rtp_llm.utils.base_model_datatypes import MMUrlType
+
+        # Not an image: this stage only transports encoded bytes. Decoding and
+        # malformed-image rejection belong to preprocess_input in MMProcessEngine.
+        encoded = b"encoded bytes are not decoded by the frontend"
+        url = (
+            "data:application/octet-stream;base64," + base64.b64encode(encoded).decode()
+        )
+        request = self._minimal_request()
+        request.parameters["payload"].string_param = json.dumps(
+            {
+                "input": {
+                    "messages": [
+                        {"role": "user", "content": [{"image": url}]},
+                    ]
+                }
+            }
+        )
+        output = GenerateOutput(
+            output_ids=torch.tensor([9]),
+            finished=True,
+            aux_info=AuxInfo(input_len=6, reuse_len=0, multimodal_lengths={1: 4}),
+        )
+        visitor = _FakeVisitor(
+            _FakeAsyncStream([GenerateOutputs(generate_outputs=[output])])
+        )
+        media = _build_mm_inputs_from_request(request)
+        with patch(
+            "PIL.Image.open", side_effect=AssertionError("frontend decoded an image")
+        ):
+            chunks = await _drain(
+                iter_real_model_stream_infer(
+                    request,
+                    [7, 129264, 8],
+                    SamplingParams(),
+                    DashScRequestControls(),
+                    visitor,
+                    rtp_llm_request_id=1,
+                    mm_inputs=media,
+                    v41_image_token_id=129264,
+                )
+            )
+        self.assertFalse(chunks[0].error_message)
+        submitted = visitor.last_generate_input
+        self.assertEqual(submitted.token_ids.tolist(), [7, 129264, 8])
+        self.assertFalse(hasattr(submitted, "v41_inputs"))
+        self.assertEqual(len(submitted.mm_inputs), 1)
+        self.assertEqual(submitted.mm_inputs[0].mm_type, MMUrlType.IMAGE)
+        self.assertEqual(
+            base64.b64decode(submitted.mm_inputs[0].url.split(",", 1)[1]), encoded
+        )
+        self.assertEqual(
+            chunks[0].infer_response.parameters["prompt_token_num"].int64_param, 6
+        )
+        self.assertEqual(
+            chunks[0].infer_response.parameters["image_tokens"].int64_param, 4
+        )
+
+    def test_standard_builder_keeps_urls_without_download_or_pixel_preprocessing(self):
+        request = self._minimal_request()
+        source_urls = ["https://example.invalid/a.png", "https://example.invalid/b.png"]
+        request.parameters["payload"].string_param = json.dumps(
+            {
+                "input": {
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [{"image": url} for url in source_urls],
+                        },
+                    ]
+                }
+            }
+        )
+        with patch(
+            "PIL.Image.open", side_effect=AssertionError("frontend decoded an image")
+        ):
+            media = _build_mm_inputs_from_request(request)
+        self.assertEqual([item.url for item in media], source_urls)
+
+    def test_v41_validation_rejects_marker_count_before_backend_enqueue(self):
+        request = self._minimal_request()
+        request.parameters["payload"].string_param = json.dumps(
+            {
+                "input": {
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [{"image": "https://example.invalid/a.png"}],
+                        },
+                    ]
+                }
+            }
+        )
+        media = _build_mm_inputs_from_request(request)
+        with self.assertRaises(FtRuntimeException) as raised:
+            _validate_v41_standard_input_ids([7], media, 129264)
+        self.assertEqual(raised.exception.exception_type, ExceptionType.INVALID_PARAMS)
+
+    async def test_v41_phase2_keeps_standard_media_and_single_raw_placeholder(self):
+        request = self._minimal_request()
+        url = (
+            "data:application/octet-stream;base64,"
+            + base64.b64encode(b"encoded").decode()
+        )
+        request.parameters["payload"].string_param = json.dumps(
+            {
+                "input": {
+                    "messages": [
+                        {"role": "user", "content": [{"image": url}]},
+                    ]
+                }
+            }
+        )
+        phase1 = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([10, 1, 99], dtype=torch.int32),
+                    finished=False,
+                    aux_info=AuxInfo(input_len=8, reuse_len=0),
+                )
+            ]
+        )
+        phase2 = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([20], dtype=torch.int32),
+                    finished=True,
+                    aux_info=AuxInfo(input_len=10, reuse_len=0),
+                )
+            ]
+        )
+        visitor = _MultiStreamVisitor(
+            [_FakeAsyncStream([phase1]), _FakeAsyncStream([phase2])]
+        )
+        tokenizer, env = _dsv4_tokenizer(), _GenerateEnvCfg()
+        media = _build_mm_inputs_from_request(request)
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                request,
+                [7, 129264, 8, 128821],
+                SamplingParams(),
+                DashScRequestControls(enable_thinking=True),
+                visitor,
+                rtp_llm_request_id=100,
+                echo_prefix_ids=[128821, 198],
+                tokenizer=tokenizer,
+                generate_env_config=env,
+                think_runtime=build_think_runtime(tokenizer, env, "deepseek_v41"),
+                phase2_request_id_factory=lambda: 200,
+                mm_inputs=media,
+                v41_image_token_id=129264,
+            )
+        )
+        self.assertEqual(visitor.enqueue_called, 2)
+        first, second = visitor.generate_inputs
+        self.assertEqual(first.token_ids.tolist(), [7, 129264, 8, 128821])
+        self.assertEqual(
+            second.token_ids.tolist(), [7, 129264, 8, 128821, 271, 128822, 271]
+        )
+        self.assertEqual(first.token_ids.tolist().count(129264), 1)
+        self.assertEqual(second.token_ids.tolist().count(129264), 1)
+        self.assertEqual(first.mm_inputs, second.mm_inputs)
+        self.assertEqual(len(second.mm_inputs), 1)
+        self.assertFalse(hasattr(first, "v41_inputs"))
+        self.assertFalse(hasattr(second, "v41_inputs"))
+        self.assertTrue(any(chunk.infer_response.id.endswith("-2") for chunk in chunks))
+
+    async def test_v41_phase2_cannot_trim_an_image_marker_as_thinking_suffix(self):
+        request = self._minimal_request()
+        request.parameters["payload"].string_param = json.dumps(
+            {
+                "input": {
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "image": "data:application/octet-stream;base64,ZW5jb2RlZA=="
+                                }
+                            ],
+                        },
+                    ]
+                }
+            }
+        )
+        phase1 = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([10, 1, 99], dtype=torch.int32),
+                    finished=False,
+                    aux_info=AuxInfo(input_len=8, reuse_len=0),
+                )
+            ]
+        )
+        visitor = _MultiStreamVisitor([_FakeAsyncStream([phase1])])
+        tokenizer = _FakeTokenizer(
+            {
+                "<think>\n": [129264],
+                "</think>\n\n": [128822, 271],
+                "<think>\n\n</think>\n\n": [128821, 271, 128822, 271],
+                "</think>": [128822],
+            }
+        )
+        env = _GenerateEnvCfg()
+        media = _build_mm_inputs_from_request(request)
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                request,
+                [7, 129264],
+                SamplingParams(),
+                DashScRequestControls(enable_thinking=True),
+                visitor,
+                rtp_llm_request_id=100,
+                echo_prefix_ids=[129264],
+                tokenizer=tokenizer,
+                generate_env_config=env,
+                think_runtime=build_think_runtime(tokenizer, env, "deepseek_v41"),
+                mm_inputs=media,
+                v41_image_token_id=129264,
+            )
+        )
+        self.assertEqual(visitor.enqueue_called, 1)
+        self.assertEqual(
+            _finish_reason(chunks[-1]), DASH_ERROR_BAD_REQUEST.finish_reason
         )
 
     async def test_multimodal_inputs_reach_backend_generate_input(self) -> None:

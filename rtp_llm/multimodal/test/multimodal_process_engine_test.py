@@ -32,10 +32,7 @@ from rtp_llm.config.py_config_modules import (
     PyEnvConfigs,
     VitConfig,
 )
-from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
-    MultimodalInputPB,
-    MultimodalInputsPB,
-)
+from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import MultimodalInputsPB
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.multimodal.greennet_hook import (
     GreenNetHandle,
@@ -206,15 +203,16 @@ class MMProcessEngineTest(TestCase):
         self.assertEqual(res.embeddings, [torch.tensor(0)])
         self.assertEqual(res.position_ids, [])
 
-        mm_inputs = MultimodalInputsPB()
-        mm_input = MultimodalInputPB()
-        mm_input.multimodal_url = "./rtp_llm/multimodal/test/testdata/qwen2_vl/1.jpg"
-        mm_input.multimodal_type = MMUrlType.IMAGE
-        mm_input.mm_preprocess_config.mm_timeout_ms = 30000
-        mm_inputs.multimodal_inputs.append(mm_input)
-        res = self.mm_process_engine.mm_embedding_rpc(mm_inputs)
-        self.assertEqual(res.embeddings, [torch.tensor(0)])
-        self.assertEqual(res.position_ids, [])
+        mm_input = MultimodalInput(
+            "./rtp_llm/multimodal/test/testdata/qwen2_vl/1.jpg",
+            MMUrlType.IMAGE,
+            torch.empty(0),
+            MMPreprocessConfig(mm_timeout_ms=30000),
+        )
+        async_results = self.mm_process_engine.get_embedding_result([mm_input])
+        self.assertEqual(len(async_results), 1)
+        self.assertEqual(async_results[0].embeddings, [torch.tensor(0)])
+        self.assertEqual(async_results[0].position_ids, [])
 
     @patch("rtp_llm.multimodal.mm_process_engine.kmonitor.report")
     def test_embedding_length_metric_sums_a_request(self, report):
@@ -1899,6 +1897,7 @@ class _StubGreenNetProvider(GreenNetProvider):
         self.request_ids = []
         self.user_ids = []
         self.input_urls = []
+        self.cached_verdict_hints = []
 
     def is_enabled(self) -> bool:
         return True
@@ -1908,6 +1907,7 @@ class _StubGreenNetProvider(GreenNetProvider):
         self.request_ids.append(str(request.id))
         self.user_ids.append(request.user_id)
         self.input_urls.append([mi.url for mi in mm_inputs])
+        self.cached_verdict_hints.append(request.greennet_passed)
         if self._rewrite_suffix is not None:
             rewritten = [
                 MultimodalInput(
@@ -2100,7 +2100,7 @@ class MMProcessEngineGreenNetTest(TestCase):
         finally:
             engine.stop()
 
-    def _make_engine(self, mm_part=None, device="cuda:0"):
+    def _make_engine(self, mm_part=None, device="cpu"):
         model = FakeModel(mm_part or FakeMultiModalEmbeddingInterface())
         vit_config = VitConfig()
         vit_config.use_local_preprocess = True
@@ -2118,13 +2118,9 @@ class MMProcessEngineGreenNetTest(TestCase):
 
     def _make_v41_engine_and_request(self):
         from rtp_llm.config.dsv41_config import V41Config
-        from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_processor import (
-            image_token_types,
-        )
         from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_vision import (
             DeepSeekV41VisionEmbedding,
         )
-        from rtp_llm.utils.grpc_util import trans_from_tensor
 
         config = V41Config.from_dict(
             {
@@ -2157,22 +2153,25 @@ class MMProcessEngineGreenNetTest(TestCase):
             for parameter in adapter.parameters():
                 parameter.fill_(0.125)
         request = MultimodalInputsPB(request_id=101, timeout_ms=30000)
-        request.v41_inputs.schema_version = 1
         data = io.BytesIO()
         Image.new("RGB", (42, 42)).save(data, format="PNG")
-        image = request.v41_inputs.images.add(
-            start=0,
-            n_vit_h=3,
-            n_vit_w=3,
-            content_sha256="a" * 64,
-            processor_identity=adapter.processor_config.identity,
-            source_bytes=data.getvalue(),
-        )
-        image.types.extend(image_token_types(1, 1).tolist())
-        image.patches.CopyFrom(
-            trans_from_tensor(torch.zeros(9, 3, 14, 14, dtype=torch.bfloat16))
+        request.multimodal_inputs.add(
+            multimodal_url="data:image/png;base64,"
+            + base64.b64encode(data.getvalue()).decode(),
+            multimodal_type=int(MMUrlType.IMAGE),
         )
         return self._make_engine(adapter, device="cpu"), request
+
+    def _embed_v41_request(self, engine, request, **kwargs):
+        media = request.multimodal_inputs
+        return engine.mm_embedding_cpp(
+            [item.multimodal_url for item in media],
+            [item.multimodal_type for item in media],
+            [torch.empty(0) for _ in media],
+            [(-1, -1, -1, -1, -1, -1, -1, [], request.timeout_ms) for _ in media],
+            request_id=request.request_id,
+            **kwargs,
+        )
 
     def test_v41_cache_hits_still_inspect_source_for_each_uid(self):
         engine, request = self._make_v41_engine_and_request()
@@ -2181,10 +2180,10 @@ class MMProcessEngineGreenNetTest(TestCase):
         try:
             with patch.object(
                 engine.mm_part,
-                "_encode_image_compute",
-                wraps=engine.mm_part._encode_image_compute,
+                "encode_image",
+                wraps=engine.mm_part.encode_image,
             ) as encode:
-                result = engine.mm_embedding_rpc(request, user_id="uid-allow")
+                result = self._embed_v41_request(engine, request, user_id="uid-allow")
                 self.assertEqual(tuple(result.embeddings[0].shape), (4, 8))
                 for code, expected in (
                     (2, ExceptionType.UNSAFE_INPUT_CONTENT),
@@ -2195,7 +2194,7 @@ class MMProcessEngineGreenNetTest(TestCase):
                         passed=False, code=code, message="inspection refused"
                     )
                     with self.assertRaises(FtRuntimeException) as raised:
-                        engine.mm_embedding_rpc(request, user_id=f"uid-{code}")
+                        self._embed_v41_request(engine, request, user_id=f"uid-{code}")
                     self.assertEqual(raised.exception.exception_type, expected)
                 self.assertEqual(encode.call_count, 1)
             self.assertEqual(provider.user_ids, ["uid-allow", "uid-2", "uid-11"])
@@ -2203,20 +2202,105 @@ class MMProcessEngineGreenNetTest(TestCase):
             for urls in provider.input_urls:
                 self.assertEqual(
                     base64.b64decode(urls[0].split(",", 1)[1]),
-                    request.v41_inputs.images[0].source_bytes,
+                    base64.b64decode(
+                        request.multimodal_inputs[0].multimodal_url.split(",", 1)[1]
+                    ),
                 )
         finally:
             engine.stop()
 
-    def test_v41_disabled_inspection_needs_no_source_payload(self):
+    def test_v41_disabled_inspection_skips_inspection_hook(self):
         engine, request = self._make_v41_engine_and_request()
         engine._greennet_provider = GreenNetProvider()
-        request.v41_inputs.images[0].ClearField("source_bytes")
         try:
-            with patch.object(engine, "_begin_greennet") as inspect:
-                result = engine.mm_embedding_rpc(request)
+            with patch.object(engine.mm_part, "prepare_inspection_inputs") as inspect:
+                result = self._embed_v41_request(engine, request)
             inspect.assert_not_called()
             self.assertEqual(tuple(result.embeddings[0].shape), (4, 8))
+        finally:
+            engine.stop()
+
+    def test_v41_async_cache_and_hash_hits_require_current_caller_inspection(self):
+        for hashes_only in (False, True):
+            with self.subTest(hashes_only=hashes_only):
+                engine, request = self._make_v41_engine_and_request()
+                provider = _StubGreenNetProvider(GreenNetVerdict(passed=True))
+                engine._greennet_provider = provider
+                media = [self._make_input(request.multimodal_inputs[0].multimodal_url)]
+                try:
+                    with patch.object(
+                        engine.mm_part,
+                        "encode_image",
+                        wraps=engine.mm_part.encode_image,
+                    ) as encode:
+                        first = engine.get_embedding_result(
+                            media, request_id=101, user_id="allow"
+                        )
+                        provider._verdict = GreenNetVerdict(
+                            passed=False, code=2, message="blocked"
+                        )
+                        with self.assertRaises(FtRuntimeException) as raised:
+                            engine.get_embedding_result(
+                                media,
+                                request_id=102,
+                                user_id="deny",
+                                hashes_only=hashes_only,
+                            )
+                        self.assertEqual(
+                            raised.exception.exception_type,
+                            ExceptionType.UNSAFE_INPUT_CONTENT,
+                        )
+                        provider._verdict = GreenNetVerdict(
+                            passed=False, code=11, message="inspection failed"
+                        )
+                        verdict = engine.wait_greennet_verdict(
+                            media, request_id=103, user_id="error"
+                        )
+                        self.assertFalse(verdict.passed)
+                        self.assertEqual(verdict.code, 11)
+                        provider._verdict = GreenNetVerdict(passed=True)
+                        last = engine.get_embedding_result(
+                            media, request_id=104, user_id="allow-again"
+                        )
+                        torch.testing.assert_close(
+                            last[0].embeddings[0],
+                            first[0].embeddings[0],
+                            rtol=0,
+                            atol=0,
+                        )
+                        self.assertEqual(encode.call_count, 1)
+                    self.assertEqual(
+                        provider.user_ids, ["allow", "deny", "error", "allow-again"]
+                    )
+                    self.assertEqual(provider.cached_verdict_hints, [False] * 4)
+                finally:
+                    engine.stop()
+
+    def test_v41_inspection_preview_never_replaces_inference_bytes(self):
+        engine, request = self._make_v41_engine_and_request()
+        provider = _StubGreenNetProvider(
+            GreenNetVerdict(passed=True), rewrite_suffix=",not-an-inference-image"
+        )
+        engine._greennet_provider = provider
+        source = self._make_input(request.multimodal_inputs[0].multimodal_url)
+        try:
+            prepared = engine.mm_part.preprocess_input(
+                [source], engine.vit_config, **engine.mm_part.get_preprocess_params()
+            )
+            expected = engine.mm_part.embedding(prepared)[0]
+            result = self._embed_v41_request(engine, request, user_id="inspected")
+            torch.testing.assert_close(result.embeddings[0], expected, rtol=0, atol=0)
+            self.assertEqual(provider.calls, 1)
+            self.assertTrue(provider.last_handle.cancelled)
+            self.assertTrue(
+                provider.last_handle.rewritten_inputs[0].url.endswith(
+                    ",not-an-inference-image"
+                )
+            )
+            self.assertEqual(
+                base64.b64decode(provider.input_urls[0][0].split(",", 1)[1]),
+                base64.b64decode(source.url.split(",", 1)[1]),
+            )
         finally:
             engine.stop()
 
@@ -2230,7 +2314,7 @@ class MMProcessEngineGreenNetTest(TestCase):
                 try:
                     report.reset_mock()
                     for _ in range(2):
-                        result = engine.mm_embedding_rpc(request)
+                        result = self._embed_v41_request(engine, request)
                         self.assertEqual(tuple(result.embeddings[0].shape), (4, 8))
                     samples = report.call_args_list
                     for metric in (
@@ -2259,25 +2343,16 @@ class MMProcessEngineGreenNetTest(TestCase):
 
     @patch("rtp_llm.multimodal.mm_process_engine.kmonitor.report")
     def test_v41_rejection_reports_error_once_and_no_success(self, report):
-        for failure in (
-            "schema",
-            "mixed",
-            "tensor",
-            "invalid_input",
-            "unsafe",
-            "scheduler",
-        ):
+        for failure in ("unsupported_media", "invalid_input", "unsafe", "scheduler"):
             with self.subTest(failure=failure):
                 engine, request = self._make_v41_engine_and_request()
                 engine._greennet_provider = GreenNetProvider()
-                if failure == "schema":
-                    request.v41_inputs.schema_version = 2
-                elif failure == "mixed":
-                    request.multimodal_inputs.add()
-                elif failure == "tensor":
-                    request.v41_inputs.images[0].patches.Clear()
+                if failure == "unsupported_media":
+                    request.multimodal_inputs[0].multimodal_type = int(MMUrlType.VIDEO)
                 elif failure == "invalid_input":
-                    request.v41_inputs.images[0].processor_identity = "invalid"
+                    request.multimodal_inputs[0].multimodal_url = (
+                        "data:image/png;base64,bm90IGFuIGltYWdl"
+                    )
                 elif failure == "unsafe":
                     engine._greennet_provider = _StubGreenNetProvider(
                         GreenNetVerdict(passed=False, code=2, message="blocked")
@@ -2291,7 +2366,7 @@ class MMProcessEngineGreenNetTest(TestCase):
                     with self.assertRaises(
                         (ValueError, FtRuntimeException, RuntimeError)
                     ) as raised:
-                        engine.mm_embedding_rpc(request)
+                        self._embed_v41_request(engine, request)
                     if failure == "unsafe":
                         self.assertEqual(
                             raised.exception.exception_type,
@@ -2321,7 +2396,7 @@ class MMProcessEngineGreenNetTest(TestCase):
         engine._greennet_provider = GreenNetProvider()
         try:
             report.reset_mock()
-            result = engine.submit_v41([])
+            result = self._embed_v41_request(engine, MultimodalInputsPB())
             self.assertEqual(result.embeddings, [])
             for metric, value in (
                 (AccMetrics.VIT_QPS_METRIC, 1),
@@ -2335,11 +2410,11 @@ class MMProcessEngineGreenNetTest(TestCase):
                 )
             report.side_effect = RuntimeError("metrics unavailable")
             with self.assertLogs(level="ERROR"):
-                result = engine.submit_v41([])
+                result = self._embed_v41_request(engine, MultimodalInputsPB())
                 self.assertEqual(result.embeddings, [])
-                request.v41_inputs.schema_version = 2
-                with self.assertRaisesRegex(ValueError, "unsupported V4.1"):
-                    engine.mm_embedding_rpc(request)
+                request.multimodal_inputs[0].multimodal_type = int(MMUrlType.VIDEO)
+                with self.assertRaisesRegex(ValueError, "IMAGE"):
+                    self._embed_v41_request(engine, request)
             self.assertEqual(engine.get_query_num(), 0)
         finally:
             report.side_effect = None

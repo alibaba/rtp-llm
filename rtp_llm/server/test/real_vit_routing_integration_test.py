@@ -27,6 +27,7 @@ from rtp_llm.multimodal.mm_process_engine import MMProcessEngine
 from rtp_llm.multimodal.multimodal_mixins.qwen3_vl_mixin import Qwen3_VLMixin
 from rtp_llm.ops import MMPreprocessConfig, MultimodalInput, PDSepConfig, VitSeparation
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
+from rtp_llm.server.cache_key_routing import get_block_cache_keys
 from rtp_llm.server.master_client import FlexlbResponse, MasterClient
 from rtp_llm.server.vit_rpc_server import MultimodalRpcServer
 from rtp_llm.utils.base_model_datatypes import GenerateInput, MMUrlType, VitParameters
@@ -111,7 +112,9 @@ class RealVitRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
             addresses=[],
             vit_separation=VitSeparation.VIT_SEPARATION_REMOTE,
             mm_model_config=SimpleNamespace(
-                mm_sep_tokens=[[99]], include_sep_tokens=False
+                mm_sep_tokens=[[99]],
+                include_sep_tokens=False,
+                semantic_mm_token_id=99,
             ),
         )
         self.visitor.master_client = self.client
@@ -154,22 +157,32 @@ class RealVitRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(calls[0].kwargs["vit_only"])
         self.assertEqual(calls[1].kwargs["selected_vit"], self.status)
         wire = calls[1].kwargs["input_pb"]
-        ids = list(wire.token_ids)
-        self.assertEqual(ids[0], 1)
-        self.assertEqual(ids[-1], 2)
-        self.assertEqual(calls[1].kwargs["seq_len"], len(ids))
+        self.assertEqual(list(wire.token_ids), [1, 99, 2])
+        self.assertEqual(len(wire.multimodal_inputs), 1)
         self.assertEqual(
-            [(span.offset, span.length) for span in wire.multimodal_token_layout.spans],
-            [(1, len(ids) - 2)],
+            wire.multimodal_inputs[0].multimodal_url,
+            request.mm_inputs[0].url,
         )
-        self.assertEqual(list(trans_input(request).token_ids), ids)
+        self.assertEqual(list(trans_input(request).token_ids), [1, 99, 2])
         self.assertEqual(request.token_ids.tolist(), [1, 99, 2])
         self.assertEqual(
             request.generate_config.role_addrs, [self.prefill, self.address]
         )
-        return ids[1:-1]
+        cache = await self.client.get_vit_cache_metadata(self.address, keys, request)
+        self.assertTrue(cache["entries"][0]["hash_hit"])
+        hashes = list(cache["entries"][0]["feature_hashes"])
+        self.assertEqual(calls[1].kwargs["seq_len"], len(hashes) + 2)
+        self.assertEqual(
+            calls[1].kwargs["block_cache_keys"],
+            get_block_cache_keys(
+                [1, *([99] * len(hashes)), 2],
+                2,
+                multimodal_cache_spans=[(1, hashes)],
+            ),
+        )
+        return hashes
 
-    async def test_real_vit_hashes_match_frontend_tokens_and_rpc_embeddings(self):
+    async def test_real_vit_hashes_match_rpc_embeddings_with_generic_forwarding(self):
         cold_request = self.request(self.image_paths[0], 1001)
         cold_hashes = await self.route(cold_request)
         self.assertGreater(len(cold_hashes), 1)
