@@ -951,6 +951,9 @@ hf-xet==1.6.0 \
     --hash=sha256:f2f7278c05c22fd60cb436cda1269649b3e81db65ecdc8496e5e164aa4143e7b \
     --hash=sha256:fb4fadde1b2b70bf4c0c14a6dccbe7194b1c28947fefd5bbe3fed9d940676c3b
     # via huggingface-hub
+humming-kernels==0.1.16 \
+    --hash=sha256:683212692f5e1339961e4322aff1ba116523e2681b2aafeaf7c081bc4e1f5627
+    # via -r deps/requirements_torch_gpu_cuda13.txt
 httpcore==1.0.9 \
     --hash=sha256:2d400746a40668fc9dec9810239072b40b4484b640a8c38fd654a024c7a1bf55 \
     --hash=sha256:6e34463af53fd2ab5d807f399a9b45ea31c3dfa2276f15a2c3f00afff6e176e8

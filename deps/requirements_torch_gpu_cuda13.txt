@@ -16,6 +16,9 @@ nvidia-cuda-cccl==13.2.86
 # Triton 3.6.0 supports CUDA 13.x ptxas natively (no wrapper needed).
 triton==3.6.0
 
+# Hopper V4.1 MXFP8 dense; use the system CUDA 13 toolkit.
+humming-kernels==0.1.16
+
 # Use the CUDA 13.2 artifacts from the same RTP FlashInfer build.
 # Pinned to the RTP fork build (not upstream 0.6.9): upstream copies an
 # unpinned CPU scale during FMHA v2 CUDA graph capture; the fork build
