@@ -167,13 +167,13 @@ def _prepare_prefetch_kernel(kernel):
     return True
 
 
-def lookup_host_rows(weight_uva, scales_uva, indices, num_sms):
-    return _lookup_host_rows(weight_uva, scales_uva, indices, num_sms, 16, 4)
+def lookup_host_rows(weight_uva, scales_uva, indices, num_sms, out=None):
+    return _lookup_host_rows(weight_uva, scales_uva, indices, num_sms, 16, 4, out=out)
 
 
-def lookup_prefetch_rows(weight_uva, scales_uva, indices, num_sms):
+def lookup_prefetch_rows(weight_uva, scales_uva, indices, num_sms, out=None):
     return _lookup_host_rows(
-        weight_uva, scales_uva, indices, num_sms, *PREFETCH_LOOKUP_CONFIG
+        weight_uva, scales_uva, indices, num_sms, *PREFETCH_LOOKUP_CONFIG, out=out
     )
 
 
@@ -191,13 +191,32 @@ def warmup_lookup_prefetch_rows(weight_uva, scales_uva, indices, num_sms):
 
 
 def _lookup_host_rows(
-    weight_uva, scales_uva, indices, num_sms, block_rows, num_warps, *, prepare=False
+    weight_uva,
+    scales_uva,
+    indices,
+    num_sms,
+    block_rows,
+    num_warps,
+    *,
+    prepare=False,
+    out=None,
 ):
     tokens, heads = indices.shape
     dim = weight_uva.shape[1]
-    output = torch.empty(
-        (tokens, heads, dim), dtype=torch.bfloat16, device=indices.device
-    )
+    output = out
+    if output is None:
+        output = torch.empty(
+            (tokens, heads, dim), dtype=torch.bfloat16, device=indices.device
+        )
+    elif (
+        output.shape != (tokens, heads, dim)
+        or output.dtype != torch.bfloat16
+        or output.device != indices.device
+        or not output.is_contiguous()
+    ):
+        raise ValueError(
+            "Engram lookup output must be contiguous same-device BF16 [T,H,D]"
+        )
     rows = tokens * heads
     if not rows:
         return output
