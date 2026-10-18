@@ -1210,6 +1210,19 @@ class DiffusionGemmaModel(GptModelBase):
             zeros = torch.zeros_like(embeds)
             embeds = self.self_conditioning(embeds, zeros)
         hidden_states = embeds.reshape(-1, embeds.shape[-1])
+        if bool(os.environ.get("DGM_FI_DIAG", "")):
+            std = float(
+                hidden_states.detach()
+                .reshape(-1, 256, hidden_states.shape[-1])
+                .std(dim=1)
+                .mean()
+                .item()
+            )
+            print(
+                f"[dgm-fi] canvas entry: hidden_row_std={std:.4f} "
+                f"absmax={float(hidden_states.abs().max().item()):.3f}",
+                flush=True,
+            )
         attn = inputs.attention_inputs
         primary = next(iter(attn.values())) if isinstance(attn, dict) else attn
         for layer_type in self.ropes:
@@ -1231,6 +1244,27 @@ class DiffusionGemmaModel(GptModelBase):
                 write_kv=False,
                 decoder_mode=True,
             )
+            if bool(os.environ.get("DGM_FI_DIAG", "")) and i in (0, 1, 5, 29):
+                # Reuse bring-up: the op-level mixed-prefix canvas is
+                # verified correct (UT run 58), so the flat step-0 logits
+                # on cache-hit queries originate above or inside the layer
+                # stack. Track the per-position hidden std at the canvas
+                # entry and after key layers: flat-from-start points at the
+                # embedding/self-conditioning input, flat-after-L0 at the
+                # attention input (paged prefix content), gradual at MoE.
+                std = float(
+                    hidden_states.detach()
+                    .reshape(-1, 256, hidden_states.shape[-1])
+                    .std(dim=1)
+                    .mean()
+                    .item()
+                )
+                print(
+                    f"[dgm-fi] canvas layer {i} ({layer_type}): "
+                    f"hidden_row_std={std:.4f} "
+                    f"absmax={float(hidden_states.abs().max().item()):.3f}",
+                    flush=True,
+                )
         return self.norm(hidden_states)
 
 
