@@ -420,6 +420,24 @@ class DiffusionGemmaAttnOp:
         if has_prefix:
             paged = self._reshape_paged(kv_cache.kv_cache_base)
             if self._fi_diag:
+                if getattr(self, "_fi_read_diag_first", True):
+                    self._fi_read_diag_first = False
+                    reuse_pages = (
+                        self.fmha_params.reuse_cache_page_indice_d.tolist()
+                        if getattr(self, "fmha_params", None) is not None
+                        else []
+                    )
+                    if reuse_pages:
+                        first = paged[reuse_pages[0]]
+                        k_head = first[0, 0, :4, :4].float()
+                        logger.info(
+                            "[dgm-fi] prefix read probe: pages=%s | first page K "
+                            "absmax=%.4f K[:1,:2]=%s | q_absmax=%.3f",
+                            reuse_pages[:8],
+                            float(first[0].abs().max().item()),
+                            k_head[0].tolist(),
+                            float(qd.abs().max().item()),
+                        )
                 torch.cuda.synchronize()
             prefix_out, prefix_lse = self.paged_wrapper.run(
                 qd, paged,
