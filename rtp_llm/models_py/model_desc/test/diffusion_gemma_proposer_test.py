@@ -442,7 +442,7 @@ class DiffusionGemmaProposerTest(TestCase):
             logits = logits / softcap
             logits = torch.tanh(logits) * softcap
             logits = logits.view(1, CANVAS, -1)
-            t = 0.4 + 0.4 * (step / MAX_STEPS)
+            t = 0.4 + 0.4 * ((MAX_STEPS - step) / MAX_STEPS)
             processed = logits / t
             new_argmax = torch.argmax(processed, -1)
             if history is None:

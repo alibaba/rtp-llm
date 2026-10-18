@@ -477,10 +477,12 @@ class EntropyBoundDenoiserTest(TestCase):
         )
 
         denoiser = EntropyBoundDenoiser(4, 8, 48, 0.4, 0.8, 0.1, 0.005, 1)
-        # reference: t = t_min + (t_max - t_min) * step / max_steps
-        self.assertAlmostEqual(denoiser.temperature(0), 0.4, places=6)
+        # reference iterates steps REMAINING (reversed range): t = t_min +
+        # (t_max - t_min) * (remaining / max_steps); our loop counts elapsed
+        # steps, so temperature(0) = t_max and decays to ~t_min at the end.
+        self.assertAlmostEqual(denoiser.temperature(0), 0.8, places=6)
         self.assertAlmostEqual(denoiser.temperature(24), 0.4 + 0.4 * (24 / 48), places=6)
-        self.assertAlmostEqual(denoiser.temperature(48), 0.8, places=6)
+        self.assertAlmostEqual(denoiser.temperature(47), 0.4 + 0.4 * (1 / 48), places=6)
 
 
 if __name__ == "__main__":
