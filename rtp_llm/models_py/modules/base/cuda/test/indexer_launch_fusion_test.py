@@ -99,6 +99,28 @@ class IndexerLaunchFusionTest(TestCase):
         )
         self.assertFalse(try_write_topk(x.cpu(), offsets.cpu(), x.cpu(), True))
 
+    def test_sort_boundaries_strided_sources_and_invalid_rows(self) -> None:
+        for width in (1, 31, 33, 127, 1023, 2047, 2048, 2049):
+            for dtype in (torch.int32, torch.int64):
+                with self.subTest(width=width, dtype=dtype):
+                    x = torch.randint(
+                        -3, 100, (19, width * 2), device="cuda", dtype=dtype
+                    )[1::2, ::2]
+                    x[0].fill_(-7)
+                    x[1].fill_(torch.iinfo(dtype).max)
+                    x[2].fill_(17)
+                    offsets = torch.arange(27, device="cuda", dtype=dtype)[1::3]
+                    backing = torch.full(
+                        (11, width + 4), 123, device="cuda", dtype=dtype
+                    )
+                    out = backing[1:-1, 2:-2]
+                    expected = backing.clone()
+                    expected[1:-1, 2:-2] = reference_topk(x, offsets, True)
+
+                    self.assertTrue(try_write_topk(x, offsets, out, True))
+
+                    self.assertTrue(torch.equal(backing, expected))
+
     def test_graph_refreshes_topk_offsets(self) -> None:
         x = torch.randint(-7, 1000, (17, 33), device="cuda", dtype=torch.int32)
         offsets = torch.arange(17, device="cuda", dtype=torch.int64)
@@ -141,8 +163,8 @@ class IndexerLaunchFusionTest(TestCase):
             if event.device_type == torch.autograd.DeviceType.CUDA
         ]
         print("INDEXER_FUSION_GPU_EVENTS", kernels)
-        self.assertEqual(sum("_sentinel_kernel" in name for name in kernels), 1)
-        self.assertEqual(sum("_finish_topk_kernel" in name for name in kernels), 1)
+        self.assertEqual(len(kernels), 1)
+        self.assertIn("_sort_and_write_topk_kernel", kernels[0])
 
 
 if __name__ == "__main__":
