@@ -243,6 +243,33 @@ class DiffusionGemmaFlashinferPrefillTest(unittest.TestCase):
             kv_cache=cache, prefix_k=k_seed[:24], prefix_v=v_seed[:24],
         )
 
+    def test_reuse_partial_prefix_incremental_prefill(self):
+        """The cache-reuse shape from run 40: a 278-token prefill is written,
+        a follow-up request whose 4-block (256-token) prefix matches the
+        cached pages prefills only its 21 new tokens (causal, paged prefix
+        read + merge, write into the new page), then runs its 256-token
+        non-causal canvas over the same 256-token prefix.
+
+        Run 40's smoke: the cold queries produced healthy 256-token
+        generations while the reuse queries degenerated to a 1-token
+        response — this test reproduces the exact op-level call sequence to
+        isolate whether the paged prefix read over matched blocks is wrong.
+        """
+        op = self._make_op()
+        cache, _, k_seed, v_seed = self._forward(
+            op, 278, prefix_len=0, causal=True, write_kv=True
+        )
+        # incremental prefill: 21 new tokens over the 256-token matched prefix
+        self._forward(
+            op, 21, prefix_len=256, causal=True, write_kv=True,
+            kv_cache=cache, prefix_k=k_seed[:256], prefix_v=v_seed[:256],
+        )
+        # the propose canvas over the same prefix
+        self._forward(
+            op, 256, prefix_len=256, causal=False, write_kv=False,
+            kv_cache=cache, prefix_k=k_seed[:256], prefix_v=v_seed[:256],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

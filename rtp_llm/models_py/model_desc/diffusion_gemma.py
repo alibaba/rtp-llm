@@ -487,6 +487,24 @@ class DiffusionGemmaAttnOp:
         paged_kv_indptr[:-1].copy_(reuse_info[:, 2])
         paged_kv_indptr[-1] = self.fmha_params.reuse_cache_page_indice_h.numel()
         paged_kv_last_page_len = (prefix_lengths - 1) % self.page_size + 1
+        if self._fi_diag and int(prefix_lengths.max().item()) > 0:
+            block_table = attn_inputs.kv_cache_kernel_block_id
+            if block_table is None or block_table.numel() == 0:
+                block_table = attn_inputs.kv_cache_kernel_block_id_device
+            logger.info(
+                "[dgm-fi] paged plan: prefix=%s input=%s seq=%s | "
+                "reuse_pages=%s indptr=%s lpl=%s | qo_indptr=%s | bt=%s",
+                prefix_lengths.tolist(),
+                attn_inputs.input_lengths.tolist()
+                if attn_inputs.input_lengths is not None
+                else None,
+                seq_lens.tolist() if seq_lens is not None else None,
+                self.fmha_params.reuse_cache_page_indice_h.tolist(),
+                paged_kv_indptr.tolist(),
+                paged_kv_last_page_len.tolist(),
+                qo_indptr.tolist() if qo_indptr is not None else None,
+                block_table.tolist()[:20] if block_table is not None else None,
+            )
         self.paged_wrapper.plan(
             qo_indptr,
             paged_kv_indptr,
