@@ -10,8 +10,13 @@ py_test(
         "diffusion_gemma_test.py",
     ],
     main = "diffusion_gemma_realweight_test.py",
-    deps = py_test_deps + [
+    data = ["//:rtp_compute_ops"],
+    deps = [
+        "//rtp_llm:async_model",
+        "//rtp_llm:lora",
         "//rtp_llm:models",
+        "//rtp_llm:sdk",
+        "//rtp_llm:testlib_lite",
         "//rtp_llm/models_py:models",
     ],
     env = {
