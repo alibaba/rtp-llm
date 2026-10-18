@@ -97,33 +97,13 @@ class DiffusionGemmaProposerWeightInfo(ModelDeployWeightInfo):
         tiny.tag = "swa_kv"
         tiny.cache_type = KVCacheSpecType.MHA
         # mergeMTPModule requires samePolicy against the target swa_kv group:
-        # SWA type, the target's sliding window, and the same active-tail
-        # policy (the target's swa_kv desc materializes the full window so
-        # SWACacheManager leaves no NULL_BLOCK_IDX slots that position->page
-        # mappings would index; run 37).
+        # SWA type plus the target's sliding window.
         tiny.group_type = CacheGroupType.SWA
-        tail = CacheTailPolicyDesc()
-        tail.active_tail_blocks = self._swa_active_tail_blocks()
-        tiny.tail = tail
         tiny.mha_kv_head_num = 1
         tiny.mha_size_per_head = 64
         tiny.dtype = DataType.TYPE_BF16
         layer_weights = [[]]
         return ModelWeightInfo(layer_weights=layer_weights, weights=weights)
-
-    def _swa_active_tail_blocks(self) -> int:
-        # ceil(window / kernel_page) + 1: materialize the full sliding window
-        # so SWACacheManager leaves no NULL slots (run 37). attn_config.
-        # sliding_window is the field the C++ CacheConfigCreator reads for
-        # sliding_window_size; the fallback chain covers weight-info builds
-        # that run before config finalization.
-        window = int(self.model_config.attn_config.sliding_window)
-        page = (
-            int(self.model_config.attn_config.kernel_tokens_per_block)
-            or int(self.model_config.attn_config.tokens_per_block)
-            or 64
-        )
-        return (window + page - 1) // page + 1
 
 
 class DiffusionGemmaProposer(BaseModel):
@@ -194,8 +174,21 @@ class DiffusionGemmaProposer(BaseModel):
         tiny.tag = "swa_kv"
         tiny.cache_type = KVCacheSpecType.MHA
         # mergeMTPModule requires samePolicy against the target swa_kv group:
-        # SWA type plus the target's sliding window.
+        # SWA type, the target's sliding window, and the same active-tail
+        # policy (the target materializes the full window so the block table
+        # carries no NULL slots; run 37). Configs here are pre-finalization,
+        # so the page falls back to the 64-token default.
         tiny.group_type = CacheGroupType.SWA
+        tail = CacheTailPolicyDesc()
+        page = (
+            int(config.attn_config.kernel_tokens_per_block)
+            or int(config.attn_config.tokens_per_block)
+            or 64
+        )
+        tail.active_tail_blocks = (
+            int(config.attn_config.sliding_window) + page - 1
+        ) // page + 1
+        tiny.tail = tail
         tiny.mha_kv_head_num = 1
         tiny.mha_size_per_head = 64
         tiny.dtype = DataType.TYPE_BF16
