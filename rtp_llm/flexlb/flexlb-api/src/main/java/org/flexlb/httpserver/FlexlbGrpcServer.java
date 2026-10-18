@@ -88,9 +88,11 @@ public class FlexlbGrpcServer {
         int port = httpPort + FLEXLB_GRPC_PORT_OFFSET;
 
         FlexlbConfig.GrpcServerConfig executorConfig = configService.loadBalanceConfig().getGrpcServer();
-        Logger.info("FlexLB gRPC executor config: coreSize={}, maxSize={}, queueSize={}",
+        Logger.info("FlexLB gRPC executor config: coreSize={}, maxSize={}, queueSize={}, "
+                        + "permitKeepAliveTimeMs={}, permitKeepAliveWithoutCalls={}",
                 executorConfig.getExecutorCoreSize(), executorConfig.getExecutorMaxSize(),
-                executorConfig.getExecutorQueueSize());
+                executorConfig.getExecutorQueueSize(), executorConfig.getPermitKeepAliveTimeMs(),
+                executorConfig.isPermitKeepAliveWithoutCalls());
 
         this.bossGroup = new NioEventLoopGroup(1, new DefaultThreadFactory("flexlb-grpc-server-boss"));
         this.grpcExecutor = new ThreadPoolExecutor(
@@ -115,6 +117,8 @@ public class FlexlbGrpcServer {
                         new GrpcTraceInterceptor(), grpcServerTimingInterceptor, grpcQosHeaderInterceptor))
                 .maxInboundMessageSize(16 * 1024 * 1024)
                 .flowControlWindow(4 * 1024 * 1024)
+                .permitKeepAliveTime(executorConfig.getPermitKeepAliveTimeMs(), TimeUnit.MILLISECONDS)
+                .permitKeepAliveWithoutCalls(executorConfig.isPermitKeepAliveWithoutCalls())
                 .build()
                 .start();
 

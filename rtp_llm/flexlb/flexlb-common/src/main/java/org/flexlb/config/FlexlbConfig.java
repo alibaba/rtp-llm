@@ -132,6 +132,14 @@ public final class FlexlbConfig {
         private int executorQueueSize = 1000;
         /** 静默时间：下线后每次 Schedule 到达重新计时，期满后等待已接收 RPC 完成。 */
         private long shutdownQuietPeriodMs = 5_000L;
+        /**
+         * HTTP/2 keepalive: the shortest PING interval the server accepts from a client. grpc-java closes a
+         * connection with GOAWAY too_many_pings on the third PING that arrives sooner than this with no
+         * response written in between; its own default is 5 minutes.
+         */
+        private long permitKeepAliveTimeMs = 10_000L;
+        /** HTTP/2 keepalive: whether PINGs on a connection with no running call count as valid. */
+        private boolean permitKeepAliveWithoutCalls = true;
     }
 
 }

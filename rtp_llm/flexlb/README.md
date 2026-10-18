@@ -91,6 +91,7 @@ The online loader accepts schema 3 only. Duplicate keys, unknown or inactive fie
 | `scheduler.ordering.highPriorityThreshold` | PRIORITY ordering only, integer 1–100, default 50. When the global queue is full, an incoming request below this threshold receives code 429 with detail `低优先级限流`. A request at or above the threshold preempts the newest waiting request at the lowest strictly lower priority; the preempted request receives the same 429 response. When no eligible waiting request exists, the incoming request receives code 503 with detail `队列满`. Requests undergoing placement cannot be preempted. FIFO ordering returns 503 when full. Configuration updates apply to subsequent arrivals. |
 | `router.roles.decode.costEstimator.expression` | Default `kvcache_used_ratio`; smallest cost wins within the same availability tier. Using `max_running_size` requires a positive `availability.maxEngineRequests`. |
 | Transport timeout | `flexlb.engine-grpc.enqueue-timeout-ms`, default 5000; outside the scheduling JSON. |
+| Engine channel keepalive | `flexlb.engine-grpc.keep-alive-time-ms`, positive, default 2000 (grpc-java raises anything below 10000 to 10000); `flexlb.engine-grpc.keep-alive-without-calls`, default `true`. Outside the scheduling JSON. rtp-llm's gRPC server tolerates idle pings. An engine whose gRPC server keeps grpc's default keepalive rules (the dashllm worker-status server today) answers the third ping on a connection with no running call with `GOAWAY too_many_pings` and closes it, failing any call still running on that channel; set `keep-alive-without-calls=false` for such engines. |
 | `scheduler.ordering.preemption.timeoutMs` | Default 1000 ms, positive; Engine-owned Decode preemption only. Starts after the Cancel ACK phase and bounds the wait for the Engine terminal. ACK timeout stays internal, 50 ms. |
 | `scheduler.ordering.preemption.allowedVictimStages` | PRIORITY defaults to all three stages: `PREFILL_QUEUED`, `DECODE_RESERVED`, `DECODE_ENGINE_OWNED`, including when `preemption` is omitted. An explicit non-empty list replaces the defaults. |
 
@@ -216,14 +217,16 @@ command-line properties, such as `--server.port` and
 `--flexlb.engine-grpc.enqueue-timeout-ms`.
 HA currently retains `HIPPO_ROLE` as its existing election group identifier.
 
-The gRPC server executor and shutdown quiet period are configured in `FLEXLB_CONFIG`:
+The gRPC server executor, shutdown quiet period and HTTP/2 keepalive policy are configured in `FLEXLB_CONFIG`:
 
 ```json
 "grpcServer": {
   "executorCoreSize": 1000,
   "executorMaxSize": 1000,
   "executorQueueSize": 1000,
-  "shutdownQuietPeriodMs": 5000
+  "shutdownQuietPeriodMs": 5000,
+  "permitKeepAliveTimeMs": 10000,
+  "permitKeepAliveWithoutCalls": true
 }
 ```
 
@@ -233,6 +236,15 @@ must be positive, and maximum size must be at least core size.
 The quiet period starts when shutting down; each Schedule arrival restarts it.
 After it elapses, gRPC waits for accepted RPCs to finish before serving resources
 are destroyed. Normal idle serving does not start an exit timer.
+
+`permitKeepAliveTimeMs` is the shortest HTTP/2 PING interval the server accepts from a client
+(default 10000 ms, non-negative). grpc-java's own default is 5 minutes: a client that pings more often
+gets `GOAWAY too_many_pings` and its connection is closed on the third PING that arrives with no
+response written in between, which fails every in-flight Schedule on that connection at once
+(a stalled master, e.g. one with every prefill slot occupied, writes nothing for as long as it is stalled).
+`permitKeepAliveWithoutCalls` (default true) makes PINGs on a connection with no running call count as
+valid; when false each one is a strike. Keep `permitKeepAliveTimeMs` at or below the smallest PING
+interval any client uses (grpc-java clients never ping more often than every 10 s).
 
 ### Scheduler, ordering, decision, and dispatcher
 

@@ -30,25 +30,48 @@ import java.util.concurrent.TimeUnit;
 public class GrpcChannelFactory {
 
     public static final String CONNECT_TIMEOUT_PROPERTY = "flexlb.engine-grpc.connect-timeout-ms";
+    public static final String KEEP_ALIVE_TIME_PROPERTY = "flexlb.engine-grpc.keep-alive-time-ms";
+    public static final String KEEP_ALIVE_WITHOUT_CALLS_PROPERTY = "flexlb.engine-grpc.keep-alive-without-calls";
     private static final int DEFAULT_CONNECT_TIMEOUT_MILLIS = 20;
+    private static final long DEFAULT_KEEP_ALIVE_TIME_MILLIS = 2_000L;
+    private static final boolean DEFAULT_KEEP_ALIVE_WITHOUT_CALLS = true;
     private static final int DEFAULT_MAX_INBOUND_MESSAGE_BYTES = 16 * 1024 * 1024;
 
     private final ThreadPoolExecutor executor;
     private final EventLoopGroup eventLoopGroup;
     private final int connectTimeoutMillis;
+    private final long keepAliveTimeMillis;
+    private final boolean keepAliveWithoutCalls;
 
     @Autowired
     public GrpcChannelFactory(
             @Qualifier("managedChannelThreadPoolExecutor") ThreadPoolExecutor executor,
             @Qualifier("managedChannelEventLoopGroup") EventLoopGroup eventLoopGroup,
             @Value("${" + CONNECT_TIMEOUT_PROPERTY + ":"
-                    + DEFAULT_CONNECT_TIMEOUT_MILLIS + "}") int connectTimeoutMillis) {
+                    + DEFAULT_CONNECT_TIMEOUT_MILLIS + "}") int connectTimeoutMillis,
+            @Value("${" + KEEP_ALIVE_TIME_PROPERTY + ":"
+                    + DEFAULT_KEEP_ALIVE_TIME_MILLIS + "}") long keepAliveTimeMillis,
+            @Value("${" + KEEP_ALIVE_WITHOUT_CALLS_PROPERTY + ":"
+                    + DEFAULT_KEEP_ALIVE_WITHOUT_CALLS + "}") boolean keepAliveWithoutCalls) {
         if (connectTimeoutMillis <= 0) {
             throw new IllegalArgumentException("connectTimeoutMillis must be positive");
+        }
+        if (keepAliveTimeMillis <= 0) {
+            throw new IllegalArgumentException("keepAliveTimeMillis must be positive");
         }
         this.executor = executor;
         this.eventLoopGroup = eventLoopGroup;
         this.connectTimeoutMillis = connectTimeoutMillis;
+        this.keepAliveTimeMillis = keepAliveTimeMillis;
+        this.keepAliveWithoutCalls = keepAliveWithoutCalls;
+    }
+
+    public GrpcChannelFactory(
+            ThreadPoolExecutor executor,
+            EventLoopGroup eventLoopGroup,
+            int connectTimeoutMillis) {
+        this(executor, eventLoopGroup, connectTimeoutMillis,
+                DEFAULT_KEEP_ALIVE_TIME_MILLIS, DEFAULT_KEEP_ALIVE_WITHOUT_CALLS);
     }
 
     public GrpcChannelFactory(
@@ -75,12 +98,16 @@ public class GrpcChannelFactory {
                 .maxInboundMessageSize(DEFAULT_MAX_INBOUND_MESSAGE_BYTES)
                 // HTTP/2 initial flow control window: prevents transmission issues due to flow control
                 .initialFlowControlWindow(2 * 1024 * 1024)
-                // Send an HTTP/2 PING after this interval without read activity
-                .keepAliveTime(2, TimeUnit.SECONDS)
+                // Send an HTTP/2 PING after this interval without read activity (grpc-java raises
+                // any value below 10 seconds to 10 seconds)
+                .keepAliveTime(keepAliveTimeMillis, TimeUnit.MILLISECONDS)
                 // Close the connection if no read activity is observed within this timeout after a PING
                 .keepAliveTimeout(10, TimeUnit.SECONDS)
-                // Keep probing even when there are no active RPC calls
-                .keepAliveWithoutCalls(true)
+                // Whether to ping while no call is running. rtp-llm's gRPC server tolerates it. An engine
+                // gRPC server that keeps the default keepalive rules answers such pings with
+                // GOAWAY(too_many_pings) on the third one and closes the connection, which fails any call
+                // still running on it; set this to false for such engines.
+                .keepAliveWithoutCalls(keepAliveWithoutCalls)
                 .executor(executor)
                 .eventLoopGroup(eventLoopGroup)
                 .usePlaintext()

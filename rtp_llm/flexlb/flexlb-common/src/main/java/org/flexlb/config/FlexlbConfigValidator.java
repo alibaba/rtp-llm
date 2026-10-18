@@ -157,6 +157,7 @@ public final class FlexlbConfigValidator {
         positive(grpc.getExecutorMaxSize(), "grpcServer.executorMaxSize");
         positive(grpc.getExecutorQueueSize(), "grpcServer.executorQueueSize");
         positive(grpc.getShutdownQuietPeriodMs(), "grpcServer.shutdownQuietPeriodMs");
+        nonNegative(grpc.getPermitKeepAliveTimeMs(), "grpcServer.permitKeepAliveTimeMs");
         require(grpc.getExecutorMaxSize() >= grpc.getExecutorCoreSize(),
                 "grpcServer.executorMaxSize", "must be at least executorCoreSize");
     }

@@ -121,6 +121,30 @@ class ConfigServiceTest {
     }
 
     @Test
+    void grpcKeepAlivePermitDefaultsAndOverridesAreValidated() {
+        FlexlbConfig.GrpcServerConfig defaults = ConfigTestFixtures.parse("{}").getGrpcServer();
+        assertEquals(10_000L, defaults.getPermitKeepAliveTimeMs());
+        assertTrue(defaults.isPermitKeepAliveWithoutCalls());
+        FlexlbConfig.GrpcServerConfig grpc = ConfigTestFixtures.parse("""
+                {"grpcServer":{"permitKeepAliveTimeMs":30000,"permitKeepAliveWithoutCalls":false}}
+                """).getGrpcServer();
+        assertEquals(30_000L, grpc.getPermitKeepAliveTimeMs());
+        assertFalse(grpc.isPermitKeepAliveWithoutCalls());
+        assertEquals(0L, ConfigTestFixtures.parse("""
+                {"grpcServer":{"permitKeepAliveTimeMs":0}}
+                """).getGrpcServer().getPermitKeepAliveTimeMs());
+        for (String patch : new String[]{
+                "{\"grpcServer\":{\"permitKeepAliveTimeMs\":-1}}",
+                "{\"grpcServer\":{\"permitKeepAliveTimeMs\":null}}",
+                "{\"grpcServer\":{\"permitKeepAliveTimeMs\":\"30000\"}}",
+                "{\"grpcServer\":{\"permitKeepAliveTimeMs\":1.5}}",
+                "{\"grpcServer\":{\"permitKeepAliveWithoutCalls\":\"true\"}}",
+                "{\"grpcServer\":{\"permitKeepAliveWithoutCalls\":null}}"}) {
+            assertThrows(ConfigValidationException.class, () -> ConfigTestFixtures.parse(patch), patch);
+        }
+    }
+
+    @Test
     void requires_explicit_request_timeout_and_defaults_decision_lifetime() {
         assertThrows(ConfigValidationException.class, () -> new ConfigService((String) null));
         assertThrows(ConfigValidationException.class,
