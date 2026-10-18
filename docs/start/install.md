@@ -23,6 +23,29 @@ pip install "rtp_llm>=0.2.0"
 
 Note: the default `--config=cuda13` build targets SM80+; V100/T4 (SM70/SM75) need the retained `cuda12_*` compat configs.
 
+### SM120 with CUDA 13
+
+Linux x86-64 SM120 builds use `--config=cuda13_sm120` instead of
+`--config=cuda13`. This configuration selects the SM120 native operators and
+a separate Python dependency set for DeepSeek-V4 FP8 attention and MXFP4 MoE.
+This SM120 support profile uses PP1, eager decode and an FP8 indexer cache.
+
+The dependency inputs are
+[`requirements_torch_gpu_cuda13_sm120.txt`](../../deps/requirements_torch_gpu_cuda13_sm120.txt)
+and the generated
+[`requirements_lock_torch_gpu_cuda13_sm120.txt`](../../deps/requirements_lock_torch_gpu_cuda13_sm120.txt).
+Keep the Python packages and native operators from the same build configuration.
+Generic CUDA13 dependencies or an arbitrary FlashInfer version are not
+interchangeable with this set: the sparse-attention and grouped-MoE interfaces
+require the pinned providers. Check access to the referenced artifacts before
+building; the build configuration alone does not establish their availability
+from every network.
+
+See [server arguments](../backend/server_arguments.md#deepseek-v4-on-sm120)
+and [environment variables](../references/environment_variables.md) for
+runtime selection. Build and two-node numerical qualification are required
+before deployment; source configuration alone is not a performance guarantee.
+
 
 ```bash
 # Use the last release branch

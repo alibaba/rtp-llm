@@ -48,6 +48,7 @@ The core features include:
    :caption: Advanced Backend Configurations
 
    backend/server_arguments.md
+   references/environment_variables.md
    backend/sampling_params.md
    backend/attention_backend.md
    backend/backend_registration.md

@@ -22,6 +22,43 @@ This page lists server arguments used to configure the behavior and performance 
 | `--concurrency-with-block` | Controls blocking behavior for concurrent requests. | False |
 | `--concurrency-limit` | Maximum number of concurrent requests allowed by the system. | 32 |
 
+## DeepSeek-V4 on SM120
+
+| Argument | Environment variable | Default | Behavior |
+| --- | --- | --- | --- |
+| `--moe_strategy` | `MOE_STRATEGY` | `auto` | Selects a strategy subject to model, topology and backend capability checks. |
+| `--dsv4_startup_real_warmup` | `DSV4_STARTUP_REAL_WARMUP` | `true` | Runs real-request startup warmup for DeepSeek-V4 PREFILL when both `warm_up` and `model_warm_up` are enabled. Readiness remains gated until warmup completes. |
+
+Explicit command-line values take precedence over the corresponding environment
+defaults. Real-request warmup runs only on applicable DeepSeek-V4 PREFILL
+entry ranks; it does not enable warmup on other models or roles. The gated
+HTTP health endpoints return 503 until warmup completes; `/liveness` and
+`/frontend_health` are not held by this gate. Use
+`--dsv4_startup_real_warmup=false` to disable this additional warmup.
+
+On SM120, `grouped_fp4` provides rank-local MXFP4 experts for EP1, while
+`sm120_fused_moe` supports expert-parallel execution with EP greater than one.
+`sm120_decode` must be selected explicitly and requires eager execution
+(`--enable_cuda_graph=false`). Use a separate DECODE role with TP1, DP greater
+than one, EP equal to DP, world size equal to DP, and PP1, without local context
+parallelism or FFN disaggregation. The initial two-node topology is CP8+EP8
+prefill with `sm120_fused_moe` and DP8+EP8 decode with `sm120_decode`, using
+TCP KV transfer. SP0 and three-slot DSpark/MTP use the same eager transport.
+The indexer cache representation is FP8. CUDA-graph decode, pipeline
+parallelism, compact CP transport and FP4 indexer caches are outside this
+support baseline. Selecting `auto` does not select the decode specialization.
+On DeepSeek-V4, `auto` and `sm120_fused_moe` are rejected when both DP and EP
+exceed one, because that combination lacks coordinated engine shutdown.
+Use DP1 for CP+EP prefill and explicit `sm120_decode` for DP+EP decode.
+Capability checks also depend on the model and the pinned kernel providers;
+the strategy name alone does not make an unsupported topology valid.
+
+For DeepSeek-V4, `DSV4_MOE_STRATEGY` is a compatibility alias for the two
+SM120 strategies only when the public strategy remains `auto`. Prefer
+`--moe_strategy` for explicit startup configuration. Numerical and runtime
+controls are listed in the
+[environment reference](../references/environment_variables.md).
+
 ## [Attention Optimization](./attention_backend.md)
 
 | Arguments | Description | Defaults |
