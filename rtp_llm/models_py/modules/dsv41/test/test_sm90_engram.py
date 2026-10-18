@@ -41,7 +41,7 @@ class EngramPrefetchFactoryTest(unittest.TestCase):
             mock.patch.dict(
                 "sys.modules",
                 {
-                    "rtp_llm.models_py.modules.dsv41.sm90_engram": types.SimpleNamespace(
+                    "rtp_llm.models_py.modules.dsv41.engram_prefetch": types.SimpleNamespace(
                         UvaEngramPrefetch=constructor
                     ),
                 },
@@ -52,9 +52,9 @@ class EngramPrefetchFactoryTest(unittest.TestCase):
         self.assertEqual(max_rows, 64)
         constructor.assert_called_once_with(torch.device("cuda:0"), [1])
 
-    def test_sm100_and_hip_do_not_import_prefetch_or_parse_sm90_settings(self):
+    def test_unsupported_cuda_and_hip_do_not_import_prefetch(self):
         tables = [(1, types.SimpleNamespace(_uva=object()))]
-        for hip, capability in ((None, (10, 0)), ("6.3.mock", (9, 0))):
+        for hip, capability in ((None, (8, 0)), ("6.3.mock", (9, 0))):
             with (
                 self.subTest(hip=hip, capability=capability),
                 mock.patch("torch.cuda.is_available", return_value=True),
@@ -73,13 +73,48 @@ class EngramPrefetchFactoryTest(unittest.TestCase):
                 mock.patch.dict(
                     "sys.modules",
                     {
-                        "rtp_llm.models_py.modules.dsv41.sm90_engram": None,
+                        "rtp_llm.models_py.modules.dsv41.engram_prefetch": None,
                     },
                 ),
             ):
                 self.assertEqual(create_engram_prefetch("cuda:0", tables), (None, 0))
                 if hip is not None:
                     get_capability.assert_not_called()
+
+    def test_architecture_defaults_and_sm100_opt_in(self):
+        for capability, enabled, expected in (
+            ((9, 0), None, True),
+            ((10, 0), None, False),
+            ((10, 0), "0", False),
+            ((10, 0), "1", True),
+        ):
+            constructor = mock.Mock()
+            with (
+                self.subTest(capability=capability, enabled=enabled),
+                mock.patch("torch.cuda.is_available", return_value=True),
+                mock.patch("torch.version.hip", None),
+                mock.patch("torch.cuda.get_device_capability", return_value=capability),
+                mock.patch.dict(os.environ, {"PPU_HOME": ""}, clear=True),
+                mock.patch.dict(
+                    "sys.modules",
+                    {
+                        "rtp_llm.models_py.modules.dsv41.engram_prefetch": types.SimpleNamespace(
+                            UvaEngramPrefetch=constructor
+                        ),
+                    },
+                ),
+            ):
+                if enabled is not None:
+                    os.environ["DSV41_ENGRAM_PREFETCH"] = enabled
+                actual = create_engram_prefetch(
+                    "cuda:0", [(1, types.SimpleNamespace(_uva=object()))]
+                )
+                if expected:
+                    self.assertEqual(actual, (constructor.return_value, 256))
+                    constructor.assert_called_once_with(torch.device("cuda:0"), [1])
+                else:
+                    self.assertEqual(actual, (None, 0))
+                    constructor.assert_not_called()
 
     def test_disabled_or_unregistered_sm90_keeps_per_layer_lookup(self):
         for enabled, uva in (("0", object()), ("1", None)):
@@ -99,7 +134,7 @@ class EngramPrefetchFactoryTest(unittest.TestCase):
                 mock.patch.dict(
                     "sys.modules",
                     {
-                        "rtp_llm.models_py.modules.dsv41.sm90_engram": None,
+                        "rtp_llm.models_py.modules.dsv41.engram_prefetch": None,
                     },
                 ),
             ):

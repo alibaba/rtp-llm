@@ -576,16 +576,17 @@ class HostEngramEmbedding:
 def create_engram_prefetch(device, layer_embeddings):
     """Select an optional lookup prefetcher without exposing backend policy.
 
-    SM100 and other backends retain per-layer lookup on the calling stream.
-    Only NVIDIA SM90 with registered UVA tables enables the auxiliary stream.
+    SM90 keeps its existing default; SM100 is opt-in until measured there.
+    Both use the same registered-table lookup and stream scheduling.
     """
     device = torch.device(device)
-    if (
-        device.type != "cuda"
-        or not is_cuda()
-        or torch.cuda.get_device_capability(device) != (9, 0)
-        or os.environ.get("DSV41_ENGRAM_PREFETCH", "1") != "1"
-    ):
+    if device.type != "cuda" or not is_cuda():
+        return None, 0
+    capability = torch.cuda.get_device_capability(device)
+    if capability not in ((9, 0), (10, 0)):
+        return None, 0
+    default = "1" if capability == (9, 0) else "0"
+    if os.environ.get("DSV41_ENGRAM_PREFETCH", default) != "1":
         return None, 0
     layer_embeddings = tuple(layer_embeddings)
     if not layer_embeddings or any(
@@ -595,10 +596,14 @@ def create_engram_prefetch(device, layer_embeddings):
     max_rows = int(os.environ.get("DSV41_ENGRAM_PREFETCH_MAX_ROWS", "256"))
     if max_rows <= 0:
         raise ValueError("DSV41_ENGRAM_PREFETCH_MAX_ROWS must be positive")
-    from .sm90_engram import UvaEngramPrefetch
+    from .engram_prefetch import UvaEngramPrefetch
 
     prefetch = UvaEngramPrefetch(device, [i for i, _ in layer_embeddings])
-    logger.info("SM90 Engram UVA prefetch enabled: decode_only=1 max_rows=%d", max_rows)
+    logger.info(
+        "SM%d Engram UVA prefetch enabled: decode_only=1 max_rows=%d",
+        capability[0] * 10 + capability[1],
+        max_rows,
+    )
     return prefetch, max_rows
 
 
