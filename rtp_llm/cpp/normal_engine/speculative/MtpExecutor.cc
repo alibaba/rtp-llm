@@ -911,12 +911,22 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
         && std::any_of(cache_config.topology().groups().begin(),
                        cache_config.topology().groups().end(),
                        [](const GroupBase& group) { return group.policy.group_type == CacheGroupType::LINEAR; });
+    // The position contract belongs to the draft, not to the target whose
+    // configuration drives the shared input gatherer.
+    const bool preserve_prefill_positions =
+        propose_params->getEngineInitParams().model_config_.mtp_preserve_prefill_positions;
+    for (const auto& mtp_params : *propose_params->mtp_model_params_) {
+        RTP_LLM_CHECK_WITH_INFO(
+            mtp_params->model_config_.mtp_preserve_prefill_positions == preserve_prefill_positions,
+            "MTP modules must agree on their Prefill source-position contract");
+    }
     batch_stream_processor_.reset(new MtpBatchStreamProcessor(params.model_config_,
                                                               params.pd_sep_config,
                                                               params.profiling_debug_logging_config,
                                                               cache_config,
                                                               params.sp_config,
-                                                              warm_up_));
+                                                              warm_up_,
+                                                              preserve_prefill_positions));
 
     LogitsProcessorFactory::init(params.model_config_,
                                  params.grammar_config,

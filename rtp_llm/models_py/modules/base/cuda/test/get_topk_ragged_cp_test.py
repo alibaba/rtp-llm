@@ -15,8 +15,11 @@ from unittest.mock import patch
 
 import torch
 
+from rtp_llm.models_py.distributed import symm_mem
 from rtp_llm.models_py.distributed.collective_torch import (
+    Group,
     destroy_distributed_environment,
+    get_process_group,
     init_distributed_environment,
 )
 from rtp_llm.models_py.modules.base.cuda.indexer_op import IndexerOp
@@ -101,11 +104,11 @@ def _tp2_indexer_worker(rank: int, nccl_port: int) -> None:
 
         base_port = nccl_port + 11
         with patch.object(dist, "init_process_group", _init_process_group):
-            with patch(
-                "rtp_llm.models_py.distributed.collective_torch.init_symm_mem_communicator",
-                lambda *_args, **_kwargs: None,
-                create=True,
-            ):
+            # Isolate the actual lazy-imported module, not a removed local alias.
+            # Real NCCL process-group initialization and collectives still run.
+            with patch.object(
+                symm_mem, "init_symm_mem_communicator", return_value=None
+            ) as init_symm_mem:
                 init_distributed_environment(
                     parallelism,
                     NcclCommConfig(
@@ -119,6 +122,12 @@ def _tp2_indexer_worker(rank: int, nccl_port: int) -> None:
                     timeout=120,
                 )
         initialized = True
+        tp_group = get_process_group(Group.TP)
+        init_symm_mem.assert_called_once_with(
+            tp_group, disable_custom_all_reduce=None
+        )
+        assert dist.get_world_size(tp_group) == 2
+        assert dist.get_rank(tp_group) == rank
 
         index_n_heads = 32
         index_head_dim = 128

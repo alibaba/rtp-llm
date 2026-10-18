@@ -155,6 +155,13 @@ private:
     static size_t    keyBlocksPerLogicalBlock(const CacheGroupPolicy& policy,
                                               size_t                  group_seq_size_per_block,
                                               size_t                  base_seq_size_per_block);
+    static size_t fullBlockSourcePeer(size_t endpoint_key_index, size_t cache_keys_per_physical_block, size_t peer_count) {
+        // FULL blocks are published by logical block owner, including a clipped final endpoint key.
+        const size_t logical_block = cache_keys_per_physical_block == 1 ?
+                                         endpoint_key_index :
+                                         endpoint_key_index / cache_keys_per_physical_block;
+        return logical_block % peer_count;
+    }
     static void      markCacheKeyRange(std::vector<size_t>& cache_key_counts,
                                        size_t               endpoint_key_index,
                                        size_t               cache_keys_per_physical_block);

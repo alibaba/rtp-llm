@@ -5,6 +5,7 @@ from math import gcd
 import torch
 
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
+from rtp_llm.models_py.model_desc.block_map import get_primary_attention_inputs
 from rtp_llm.models_py.model_desc.kimi_k3 import KimiK3Model
 from rtp_llm.models_py.modules import RMSNorm
 from rtp_llm.models_py.modules.factory.linear import LinearFactory
@@ -89,6 +90,55 @@ class KimiK3MtpModel(KimiK3Model):
             ids = ids.masked_fill(text_mask == 0, self.media_token_id)
         return self.embed_tokens(ids, tp_gather=tp_gather)
 
+    def _local_mtp_embedding_mask(self, inputs, local_start, local_rows):
+        """K3 suppresses absolute source-position zero before embedding RMSNorm.
+
+        NoPE inputs omit explicit positions. Reconstruct their local rows from
+        graph-stable device metadata; never read device lengths on the host.
+        """
+        rows = inputs.input_ids.shape[0]
+        device = inputs.input_ids.device
+        attn = get_primary_attention_inputs(inputs, self.kv_cache)
+        positions = inputs.combo_position_ids
+        if positions is not None and positions.numel():
+            if positions.ndim != 1 or positions.numel() != rows or positions.device != device:
+                raise ValueError("K3 MTP requires one source position per physical token")
+            keep = positions.narrow(0, local_start, local_rows) != 0
+        elif attn.is_prefill or attn.is_target_verify or attn.is_mtp_draft_update:
+            offsets = attn.cu_seqlens_device
+            prefixes = attn.prefix_lengths_device
+            if (
+                offsets is None or prefixes is None
+                or offsets.ndim != 1 or prefixes.ndim != 1
+                or prefixes.numel() == 0 or offsets.numel() != prefixes.numel() + 1
+                or offsets.device != device or prefixes.device != device
+                or offsets.dtype not in (torch.int32, torch.int64)
+                or prefixes.dtype not in (torch.int32, torch.int64)
+            ):
+                raise ValueError("K3 NoPE MTP requires device query offsets and prefix lengths")
+            global_rows = torch.arange(local_start, local_start + local_rows, device=device)
+            # Graph buckets can have repeated offsets for empty request slots.
+            # Clamp only the gather index; validity remains a device-side mask.
+            requests = torch.searchsorted(offsets[1:], global_rows, right=True)
+            requests = requests.clamp(max=prefixes.numel() - 1)
+            positions = prefixes[requests] + global_rows - offsets[requests]
+            keep = (positions != 0) & (global_rows < offsets[-1])
+        else:
+            lengths = attn.sequence_lengths_plus_1_device
+            if (
+                lengths is None or lengths.ndim != 1 or lengths.numel() != rows
+                or lengths.device != device
+                or lengths.dtype not in (torch.int32, torch.int64)
+            ):
+                raise ValueError("K3 NoPE MTP Decode requires one device cache length per token")
+            keep = lengths.narrow(0, local_start, local_rows) != 1
+        valid = attn.valid_token_mask
+        if valid is not None:
+            if valid.ndim != 1 or valid.numel() != rows or valid.device != device or valid.dtype != torch.bool:
+                raise ValueError("K3 MTP requires one device validity entry per physical token")
+            keep = keep & valid.narrow(0, local_start, local_rows)
+        return keep
+
     def _project_local_mtp_input(self, inputs):
         physical_rows = inputs.input_ids.shape[0]
         if physical_rows % self.tp_size:
@@ -103,6 +153,8 @@ class KimiK3MtpModel(KimiK3Model):
         # rank's token rows after that gather, before entering the SP layer.
         embedded = self._embed_inputs(inputs, tp_gather=self._gather_modeling_boundary)
         embedded = embedded.narrow(0, local_start, local_rows).contiguous()
+        keep_embedding = self._local_mtp_embedding_mask(inputs, local_start, local_rows)
+        embedded = embedded.masked_fill(~keep_embedding[:, None], 0)
         previous_h = inputs.input_hiddens.narrow(0, local_start, local_rows)
         return self.eh_proj(
             torch.cat(

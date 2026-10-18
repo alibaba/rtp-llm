@@ -128,8 +128,7 @@ private:
 class TestEngineBase final: public EngineBase {
 public:
     explicit TestEngineBase(bool is_mtp_eagle): EngineBase(EngineInitParams()), is_mtp_eagle_(is_mtp_eagle) {
-        // Allocate publishes the engine's cache geometry even before the first
-        // request. Use a real topology instead of leaving the test resource null.
+        // Provide a real cache topology for engine-backed server tests.
         resource_context_.cache_manager = std::make_shared<KVCacheManager>(
             test::makeSimpleMhaCacheConfig(1, 8, 64, DataType::TYPE_FP16));
     }
@@ -1348,10 +1347,8 @@ TEST_F(PrefillRpcServerTest, allocateRequestKeepsOriginalIdsWithoutExpansion) {
     ASSERT_EQ(alloc_request.peer_addrs_size(), 2);
     EXPECT_EQ(alloc_request.peer_addrs(0), "a:1");
     EXPECT_EQ(alloc_request.peer_addrs(1), "b:2");
-    EXPECT_EQ(alloc_request.prefill_seq_size_per_block(), 64);
-    EXPECT_EQ(alloc_request.prefill_cache_dtype(), static_cast<int32_t>(DataType::TYPE_FP16));
-    EXPECT_EQ(alloc_request.prefill_attention_tp_size(), 1);
-    EXPECT_EQ(alloc_request.prefill_mla_fp8_format(), 0);
+    EXPECT_EQ(alloc_request.prefill_tp_size(), 1);
+    EXPECT_EQ(alloc_request.prefill_cp_size(), 0);
 }
 
 TEST_F(PrefillRpcServerTest, allocateRequestCarriesKvShardCountWithoutQueryCP) {
@@ -1366,6 +1363,7 @@ TEST_F(PrefillRpcServerTest, allocateRequestCarriesKvShardCountWithoutQueryCP) {
     auto alloc_request = server.buildAllocateRequest(*context);
 
     EXPECT_EQ(alloc_request.prefill_cp_size(), 2);
+    EXPECT_EQ(alloc_request.prefill_tp_size(), 2);
     EXPECT_EQ(alloc_request.peer_addrs_size(), 2);
 }
 
@@ -1383,7 +1381,7 @@ TEST_F(PrefillRpcServerTest, allocateRequestWithTpOneShardingKeepsLegacyPeerCont
     EXPECT_EQ(alloc_request.prefill_cp_size(), 0);
     ASSERT_EQ(alloc_request.peer_addrs_size(), 1);
     EXPECT_EQ(alloc_request.peer_addrs(0), "rank0:1");
-    EXPECT_EQ(alloc_request.prefill_seq_size_per_block(), 64);
+    EXPECT_EQ(alloc_request.prefill_tp_size(), 1);
 }
 
 }  // namespace rtp_llm

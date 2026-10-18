@@ -1642,6 +1642,58 @@ TEST_F(MtpBatchStreamProcessorTest, testCudaPrefillShiftUsesPromptTailOnlyForMid
     }
 }
 
+TEST_F(MtpBatchStreamProcessorTest, testDraftPrefillSourcePositionCapability) {
+    EXPECT_FALSE(ModelConfig{}.mtp_preserve_prefill_positions);
+    ModelConfig config;
+    config.max_seq_len = 64;
+    config.vocab_size = 64;
+    config.num_layers = 1;
+    config.attn_config.rope_config.index_factor = 1;
+    RuntimeConfig runtime;
+    ResourceContext resources;
+    auto stream1 = createContextStream(config, runtime, resources, {10, 11, 12}, 1);
+    auto stream2 = createContextStream(config, runtime, resources, {20, 21}, 2);
+    auto groups = StreamGroups({stream1, stream2});
+    SpeculativeExecutionConfig spec;
+    spec.gen_num_per_cycle = 1;
+    for (bool preserve_positions : {false, true}) {
+        for (bool multimodal : {false, true}) {
+            SCOPED_TRACE(testing::Message() << "preserve_positions=" << preserve_positions
+                                           << ", multimodal=" << multimodal);
+            MtpBatchStreamProcessor processor(config, PDSepConfig{}, ProfilingDebugLoggingConfig{},
+                                               makeProcessorCacheConfig(), spec, false, preserve_positions);
+            // The non-MM case exercises CUDA-resident explicit positions and
+            // tokens; the MM producer's existing full path uses host positions.
+            auto device = multimodal ? torch::kCPU : torch::kCUDA;
+            GptModelInputs input;
+            input.combo_tokens = torch::tensor({10, 11, 12, 20, 21}, torch::kInt32).to(device);
+            input.input_lengths = torch::tensor({3, 2}, torch::kInt32).to(device);
+            input.combo_position_ids = torch::tensor({0, 1, 2, 0, 1}, torch::kInt32).to(device);
+            if (multimodal) {
+                input.text_tokens_mask = torch::tensor({1, 0, 1, 1, 0}, torch::kInt32);
+                input.mm_features_locs = torch::tensor({1, 4}, torch::kInt32);
+                input.multimodal_features = std::vector<torch::Tensor>{
+                    torch::full({1, 4}, 100.0), torch::full({1, 4}, 200.0)};
+            }
+            GptModelOutputs output;
+            SamplerOutput sampled;
+            sampled.token_ids = torch::tensor({{30}, {40}}, torch::kInt32).to(device);
+            TensorHolder holder;
+            processor.updatePrefillPostDraftModelInput(groups, input, output, sampled, holder);
+            EXPECT_EQ((std::vector<int>{11, 12, 30, 21, 40}), toVec<int>(input.combo_tokens));
+            EXPECT_EQ((preserve_positions ? std::vector<int>{0, 1, 2, 0, 1} : std::vector<int>{1, 2, 2, 1, 1}),
+                      toVec<int>(input.combo_position_ids));
+            if (multimodal) {
+                EXPECT_EQ((std::vector<int>{0, 1, 1, 0, 1}), toVec<int>(input.text_tokens_mask));
+                EXPECT_EQ((std::vector<int>{0, 3}), toVec<int>(input.mm_features_locs));
+                ASSERT_EQ(input.multimodal_features->size(), 2);
+                EXPECT_TRUE(torch::equal(input.multimodal_features->at(0), torch::full({1, 4}, 100.0)));
+                EXPECT_TRUE(torch::equal(input.multimodal_features->at(1), torch::full({1, 4}, 200.0)));
+            }
+        }
+    }
+}
+
 TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInputShiftsComboPositionIds) {
     ModelConfig                 model_config;
     PDSepConfig                 pd_sep_config;
