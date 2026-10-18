@@ -1022,3 +1022,16 @@ py_test(
     srcs = ["deepseek_v41_sm90_role_test_test.py", "deepseek_v41_sm90_role_test.py"],
     main = "deepseek_v41_sm90_role_test_test.py",
 )
+
+# Full-layer manual deployment snapshot with measured prefix reuse.
+py_test(
+    name = "deepseek_v41_sm90_snapshot",
+    main = "deepseek_v41_sm90_snapshot.py",
+    srcs = ["deepseek_v41_sm90_snapshot.py", "deepseek_v41_sm90_role_test.py"],
+    deps = ["//rtp_llm:testlib", ":perf_test_lib"],
+    data = ["//rtp_llm:sdk"],
+    env = {"WORLD_SIZE": "8", "GPU_COUNT": "8", "PYTHONNOUSERSITE": "1"},
+    timeout = "eternal",
+    tags = ["manual", "dsv41_cuda13", "H20_CU13", "standalone_pd"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "8"},
+)
