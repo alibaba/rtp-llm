@@ -101,6 +101,25 @@ class RequestRegistryTest {
                 lifecycle.register(context(103L)).join().getCode());
     }
 
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void inputIsRetainedOnlyUntilBatchRequestTerminates(boolean batch) throws Exception {
+        config.getDispatcher().setType(batch ? org.flexlb.config.DispatcherConfig.Type.BATCH
+                : org.flexlb.config.DispatcherConfig.Type.NON_BATCH);
+        BalanceContext context = context(104L);
+        var bytes = com.google.protobuf.ByteString.copyFrom(new byte[1024 * 1024]);
+        context.setGenerateInputPb(bytes);
+        var future = lifecycle.register(context);
+        assertFalse(future.isDone());
+        if (batch) { assertSame(bytes, context.getGenerateInputPb()); }
+        else { assertNull(context.getGenerateInputPb()); }
+
+        lifecycle.cancelRequest(104L, 0L, CancelReason.CLIENT_CANCELLED);
+        future.get(5, TimeUnit.SECONDS);
+        assertNull(context.getGenerateInputPb(), "retained context must not pin terminal input");
+        assertEquals(RequestState.Phase.CANCELLED, lifecycle.requestSlot(104L).snapshot().state());
+    }
+
     @Test
     void globalWaitingRequestsHaveNoQuantityAdmissionLimit() {
         var low = context(1L);
