@@ -107,7 +107,7 @@ class PrefillStateSnapshotTest {
     void queuedAndImmediateRoutesUseOneCommitAndTerminalOwnership() {
         ScheduledRequest queued = item(1), immediate = item(2);
         enqueue(queued);
-        try (var queuedReservation = state.reserveRoute(queued, 30L).reservation();
+        try (var queuedReservation = state.reserveRoute(queued, 30L, Long.MAX_VALUE).reservation();
              var immediateReservation = state.reserveUnqueuedRoute(immediate, 40L, Long.MAX_VALUE).reservation()) {
             assertEquals(List.of(queued), waitingItems());
             assertEquals(1, state.committedSnapshot().requests().size());
@@ -144,18 +144,18 @@ class PrefillStateSnapshotTest {
     void leaseRollbackRetainsQueuedWorkButReleasesUnqueuedAdmission() {
         ScheduledRequest queued = item(1), immediate = item(2);
         enqueue(queued);
-        state.reserveRoute(queued, 30L).reservation().close();
+        state.reserveRoute(queued, 30L, Long.MAX_VALUE).reservation().close();
         state.reserveUnqueuedRoute(immediate, 40L, Long.MAX_VALUE).reservation().close();
         assertEquals(List.of(queued), waitingItems());
         assertTrue(state.committedSnapshot().requests().isEmpty());
-        assertTrue(state.reserveRoute(queued, 35L).reservation() != null);
+        assertTrue(state.reserveRoute(queued, 35L, Long.MAX_VALUE).reservation() != null);
     }
 
     @Test
     void routeCommitRejectsMissingQueueIndexBeforeCommittingAnyMember() {
         ScheduledRequest queued = item(1), immediate = item(2);
         enqueue(queued);
-        try (var queuedReservation = state.reserveRoute(queued, 30L).reservation();
+        try (var queuedReservation = state.reserveRoute(queued, 30L, Long.MAX_VALUE).reservation();
              var immediateReservation = state.reserveUnqueuedRoute(immediate, 40L, Long.MAX_VALUE).reservation()) {
             assertTrue(waiting.remove(queued));
             try (var handoff = generation.tryAcquireHandoff()) {
@@ -197,8 +197,8 @@ class PrefillStateSnapshotTest {
         var reservation = state.reserveUnqueuedRoute(immediate, 40L, Long.MAX_VALUE).reservation();
         lock.lock();
         try {
-            assertTrue(state.terminalizeActiveRouteUnderLock(immediate, reservation));
-            assertFalse(state.terminalizeActiveRouteUnderLock(immediate, reservation));
+            assertTrue(state.terminalizeActiveUnderLock(immediate));
+            assertFalse(state.terminalizeActiveUnderLock(immediate));
         } finally {
             lock.unlock();
         }

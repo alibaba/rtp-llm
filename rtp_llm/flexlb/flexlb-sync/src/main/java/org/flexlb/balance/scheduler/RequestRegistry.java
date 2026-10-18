@@ -441,13 +441,6 @@ public class RequestRegistry {
                 detail);
     }
 
-    void onQueuedItemPreempted(ScheduledRequest victim, ScheduledRequest incoming) {
-        finishYielded(victim, "preempted by higher-priority request " + incoming.requestId());
-        requestReporter.reportVictim(victim.priority(), incoming.priority(),
-                "prefill_queued", "prefill_inflight_requests");
-        requestReporter.reportPriorityPreempt("prefill_queued");
-    }
-
     public void finishYieldedReservation(
             long requestId, long reservationToken, String detail) {
         if (reservationToken <= 0L) {

@@ -2,7 +2,6 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.prediction.DecodeCostFormula;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
@@ -14,7 +13,6 @@ import org.flexlb.util.Prioritized;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * A single inference request queued for a priority scheduling decision.
@@ -43,15 +41,6 @@ public final class ScheduledRequest implements Prioritized {
     private final long expiresAtMs;
     private final long hitCache;
     private final int maxInflightBatchesPerPrefillWorker;
-    private final boolean routeDelivery;
-    /**
-     * Publish-time NON_BATCH ownership. It has exactly one downstream owner:
-     * this ACTIVE item until RouteDeliveryStrategy takes it, then the route
-     * transaction. ACTIVE terminal paths take and close the same capability.
-     */
-    private final AtomicReference<PrefillState.RouteReservation>
-            publishedRouteReservation = new AtomicReference<>();
-
     public ScheduledRequest(BalanceContext ctx,
                      CompletableFuture<Response> future,
                      Response routeResponse,
@@ -91,7 +80,7 @@ public final class ScheduledRequest implements Prioritized {
         this.hitCache = hitCacheOf(prefill);
         FlexlbConfig schedulingConfig = Objects.requireNonNull(
                 ctx.getConfig(), "request scheduling config");
-        this.routeDelivery = schedulingConfig.getDispatcher().getType() == DispatcherConfig.Type.NON_BATCH;
+        boolean routeDelivery = schedulingConfig.getDispatcher().getType() == DispatcherConfig.Type.NON_BATCH;
         this.maxInflightBatchesPerPrefillWorker = routeDelivery ? 0
                 : schedulingConfig.getDispatcher().getMaxInflightPerPrefillWorker();
     }
@@ -140,42 +129,6 @@ public final class ScheduledRequest implements Prioritized {
     }
     public int maxInflightBatchesPerPrefillWorker() {
         return maxInflightBatchesPerPrefillWorker;
-    }
-
-    /** Whether ACTIVE publication must atomically own one route reservation. */
-    public boolean requiresRouteReservation() {
-        return routeDelivery;
-    }
-
-    /** Bind the sole publish-time route reservation before ACTIVE becomes visible. */
-    boolean bindPublishedRouteReservation(
-            PrefillState.RouteReservation reservation) {
-        return publishedRouteReservation.compareAndSet(
-                null, Objects.requireNonNull(reservation, "reservation"));
-    }
-
-    /** Transfer the sole uncommitted route reservation to delivery or cleanup. */
-    PrefillState.RouteReservation takePublishedRouteReservation() {
-        return publishedRouteReservation.getAndSet(null);
-    }
-
-    /** Observe without transferring; optimistic preparation does not transfer ownership. */
-    PrefillState.RouteReservation publishedRouteReservation() {
-        return publishedRouteReservation.get();
-    }
-
-    /** Transfer only the reservation validated during optimistic preparation. */
-    boolean takePublishedRouteReservation(
-            PrefillState.RouteReservation expected) {
-        return publishedRouteReservation.compareAndSet(
-                Objects.requireNonNull(expected, "expected"), null);
-    }
-
-    /** Restore ownership after a pre-commit operation made no state change. */
-    boolean restorePublishedRouteReservation(
-            PrefillState.RouteReservation reservation) {
-        return publishedRouteReservation.compareAndSet(
-                null, Objects.requireNonNull(reservation, "reservation"));
     }
 
     /**
