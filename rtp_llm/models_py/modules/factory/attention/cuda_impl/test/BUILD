@@ -106,6 +106,11 @@ flashinfer_attention_tests = [
             "base_attention_test.py",
         ],
     },
+    {
+        "name": "test_diffusion_gemma_flashinfer_prefill",
+        "main": "test_flashinfer_prefill/test_diffusion_gemma_flashinfer_prefill.py",
+        "extra_srcs": [],
+    },
 ]
 
 # Generates one py_test per (test, platform): <test name>_<sm>,

@@ -18,6 +18,7 @@ these layers with is_causal=False attention and decoder layer scalars.
 
 import logging
 import math
+import os
 from typing import Any, Dict, Optional, Tuple
 
 import torch
@@ -217,6 +218,12 @@ class DiffusionGemmaAttnOp:
                 self.head_dim,
             )
             self.use_flashinfer = False
+        # Stage-level flashinfer diagnostics (bring-up): DGM_FI_DIAG=1
+        # synchronizes after every GPU stage and labels it, so an async
+        # illegal access surfaces at the kernel that caused it instead of
+        # the next cublas GEMM.
+        self._fi_diag = bool(os.environ.get("DGM_FI_DIAG", ""))
+        self._fi_diag_first = True
 
     def __del__(self):
         if self.use_flashinfer:
@@ -377,19 +384,54 @@ class DiffusionGemmaAttnOp:
         qd = q
         kd = k
         vd = v
+        if self._fi_diag and self._fi_diag_first:
+            self._fi_diag_first = False
+            block_table = attn_inputs.kv_cache_kernel_block_id
+            if block_table is None or block_table.numel() == 0:
+                block_table = attn_inputs.kv_cache_kernel_block_id_device
+            logger.info(
+                "[dgm-fi] first flashinfer call: q=%s k=%s cu=%s prefix=%s "
+                "input=%s causal=%s write=%s bt=%s",
+                tuple(q.shape),
+                tuple(k.shape),
+                qo_indptr.tolist(),
+                prefix_lens.tolist() if prefix_lens is not None else None,
+                attn_inputs.input_lengths.tolist()
+                if attn_inputs.input_lengths is not None
+                else None,
+                causal,
+                write_kv,
+                tuple(block_table.shape) if block_table is not None else None,
+            )
+        if self._fi_diag:
+            torch.cuda.synchronize()
         new_out, new_lse = self.ragged_wrapper.run(
             qd, kd, vd,
             return_lse=True,
         )
+        if self._fi_diag:
+            torch.cuda.synchronize()
+            logger.info("[dgm-fi] ragged run ok qo=%d causal=%s", q.shape[0], causal)
         if write_kv and kv_cache is not None:
             self._write_cache_flashinfer(kd, vd, kv_cache, attn_inputs, positions)
+            if self._fi_diag:
+                torch.cuda.synchronize()
+                logger.info("[dgm-fi] paged KV write ok qo=%d", q.shape[0])
         if has_prefix:
             paged = self._reshape_paged(kv_cache.kv_cache_base)
+            if self._fi_diag:
+                torch.cuda.synchronize()
             prefix_out, prefix_lse = self.paged_wrapper.run(
                 qd, paged,
                 return_lse=True,
             )
+            if self._fi_diag:
+                torch.cuda.synchronize()
+                logger.info("[dgm-fi] paged prefix run ok qo=%d", q.shape[0])
             self.merge_state_in_place(new_out, new_lse, prefix_out, prefix_lse)
+            if self._fi_diag:
+                torch.cuda.synchronize()
+                logger.info("[dgm-fi] merge_state ok qo=%d", q.shape[0])
         return new_out
 
     def plan(self, attn_inputs: Any, causal: bool) -> None:
