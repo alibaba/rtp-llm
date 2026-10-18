@@ -270,6 +270,33 @@ class DiffusionGemmaFlashinferPrefillTest(unittest.TestCase):
             kv_cache=cache, prefix_k=k_seed[:256], prefix_v=v_seed[:256],
         )
 
+    def test_reuse_mixed_partial_prefix_canvas(self):
+        """The exact run-55 in-vivo shape: a canvas over a 277-token prefix
+        made of four full shared pages plus one PARTIAL page holding the 21
+        new tokens (lpl=21, mixed shared/new block ids). Run 55: the smoke's
+        cache-hit queries produce flat EOS-topped step-0 logits while cold
+        queries are sharp — if this op-level shape reproduces the mismatch,
+        the breaker is the paged read's partial-page/mixed-block path."""
+        op = self._make_op()
+        cache, _, k_seed, v_seed = self._forward(
+            op, 278, prefix_len=0, causal=True, write_kv=True
+        )
+        # incremental prefill: 21 new tokens over the matched 256, writing
+        # into the fifth page (the mock table is [1, 2, 3, ...], so page 4
+        # of the table holds the new tokens)
+        cache, _, k_new, v_new = self._forward(
+            op, 21, prefix_len=256, causal=True, write_kv=True,
+            kv_cache=cache, prefix_k=k_seed[:256], prefix_v=v_seed[:256],
+        )
+        # the canvas over the full 277-token prefix: 4 full pages + the
+        # partial page (lpl=21) carrying the 21 new tokens' KV
+        prefix_k = torch.cat([k_seed[:256], k_new])
+        prefix_v = torch.cat([v_seed[:256], v_new])
+        self._forward(
+            op, 256, prefix_len=277, causal=False, write_kv=False,
+            kv_cache=cache, prefix_k=prefix_k, prefix_v=prefix_v,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
