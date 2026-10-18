@@ -9,6 +9,10 @@ from rtp_llm.models_py.triton_kernels.mla.page_rr import (
     _prepare_decode_metadata,
     _prepare_prefill_metadata,
 )
+from rtp_llm.utils.smoke_evidence import (
+    emit_smoke_tensor_event,
+    smoke_evidence_enabled,
+)
 
 
 class PageRRMlaMetadata:
@@ -116,6 +120,21 @@ class PageRRMlaMetadata:
                        self.prefill_ragged_kv_len_indptr_d, self.kv_lens_d,
                        table, padding, self.slot_mapping):
             tensor.record_stream(stream)
+        if smoke_evidence_enabled() and not torch.cuda.is_current_stream_capturing():
+            emit_smoke_tensor_event(
+                "mla_page_rr_prefill",
+                tensor_fields={
+                    "owned_token_rows": (self.slot_mapping[:logical] >= 0).sum(),
+                    "padding_owned_slots": (self.slot_mapping[logical:] >= 0).sum(),
+                },
+                kind="mla_page_rr_prefill",
+                rank=self.cp_rank,
+                shards=self.cp_size,
+                page_tokens=self.page_size,
+                logical_tokens=logical,
+                physical_tokens=int(inputs.physical_token_count),
+                padding_rows=max(0, int(inputs.physical_token_count) - logical),
+            )
 
     def prepare_decode(self, inputs, forbid_realloc: bool = False) -> None:
         multi = inputs.is_target_verify or inputs.is_mtp_draft_update

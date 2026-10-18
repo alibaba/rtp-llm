@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/utils/SmokeEvidence.h"
 #include "autil/TimeUtility.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
@@ -992,6 +993,12 @@ PrefillRpcServer::Cancel(grpc::ServerContext* /*context*/, const CancelRequestPB
     switch (result) {
         case PriorityCancelResult::ACCEPTED:
             response->set_status(CancelStatusPB::CANCEL_STATUS_ACCEPTED);
+            if (smokeEvidenceEnabled()) {
+                RTP_LLM_LOG_INFO("[RTP_SMOKE_EVENT] {\"event\":\"prefill_priority_cancel_accepted\","
+                                 "\"request_id\":%ld,\"time_ns\":%ld}",
+                                 static_cast<long>(request->request_id()),
+                                 static_cast<long>(smokeEvidenceTimeNs()));
+            }
             RTP_LLM_LOG_DEBUG("request [%ld] priority-preemption cancel accepted", request->request_id());
             break;
         case PriorityCancelResult::TOMBSTONED:
