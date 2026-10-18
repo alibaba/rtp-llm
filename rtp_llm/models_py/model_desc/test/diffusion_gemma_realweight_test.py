@@ -437,5 +437,165 @@ class DiffusionGemmaRealWeightPrefillTest(unittest.TestCase):
         )
 
 
+
+class DiffusionGemmaReuseABTest(unittest.TestCase):
+    """Fresh vs reuse prefill + canvas, real weights, GPU (flashinfer active).
+
+    Run 55/59 narrowed the smoke's cache-hit degeneration to the GPU
+    in-vivo path: the CPU torch-path A/B is bit-identical, and the
+    op-level flashinfer UT passes with the exact mixed-prefix shape —
+    but with SMOOTH synthetic scores. This test runs the model-level
+    A/B on GPU where the real |q.k| ~ ±90 regime applies: flow A
+    prefills 277 tokens at once, flow B prefills 256 then an
+    incremental 21 over the cached prefix; both run the same
+    forward_canvas and the hiddens are compared. A large divergence
+    (vs the CPU A/B's identity) indicts the flashinfer read/write
+    roundtrip in the sharp-score regime; a match moves the suspicion
+    to the C++-provided propose inputs.
+    """
+
+    def test_reuse_vs_fresh_canvas_hidden(self):
+        if not CKPT:
+            self.skipTest("DGM_REAL_CKPT not set")
+        import torch as _torch
+        from types import SimpleNamespace as _NS
+
+        if not _torch.cuda.is_available():
+            self.skipTest("CUDA device required")
+
+        layer_weights, global_weights = _load_all_weights_fp32()
+        from rtp_llm.model_loader.model_weight_info import ModelWeights
+
+        mw = ModelWeights(LAYERS, "cuda", _torch.bfloat16)
+        for i, lw in enumerate(layer_weights):
+            for name, tensor in lw.items():
+                mw.set_layer_weight(i, name, tensor.to(_torch.bfloat16))
+        for name, tensor in global_weights.items():
+            mw.set_global_weight(name, tensor.to(_torch.bfloat16))
+
+        with patch.object(dgm, "RMSNorm", _TorchRMSNorm):
+            model = dgm.DiffusionGemmaModel(
+                _make_real_config(), ParallelismConfig(), mw,
+                max_generate_batch_size=2,
+            )
+        model.eval()
+        embed_weight = model.embed_tokens.weight
+        model.embed_tokens = _CpuEmbedding(embed_weight)
+
+        device = _torch.device("cuda:0")
+        PAGE_BLOCKS = 64
+        table = _torch.arange(PAGE_BLOCKS, dtype=_torch.int32).view(1, -1)
+
+        def _caches():
+            swa = [
+                _NS(
+                    kv_cache_base=_torch.zeros(
+                        PAGE_BLOCKS, 2 * SLIDING_KV * PAGE * SLIDING_DIM,
+                        dtype=_torch.bfloat16, device=device,
+                    ),
+                    tag="swa_kv",
+                )
+                for _ in range(LAYERS)
+            ]
+            glb = [
+                _NS(
+                    kv_cache_base=_torch.zeros(
+                        PAGE_BLOCKS, 2, GLOBAL_KV, PAGE, GLOBAL_DIM,
+                        dtype=_torch.bfloat16, device=device,
+                    ),
+                    tag="global_kv",
+                )
+                for _ in range(LAYERS)
+            ]
+            return _NS(
+                get_layer_cache_groups=lambda i: [swa[i], glb[i]],
+                layer_count=LAYERS,
+            )
+
+        def _attn(prefix, count):
+            cu = _torch.tensor([0, count], dtype=_torch.int32, device=device)
+            return _NS(
+                prefix_lengths=_torch.tensor([prefix], dtype=_torch.int32, device=device),
+                input_lengths=_torch.tensor([count], dtype=_torch.int32, device=device),
+                cu_seqlens=cu,
+                cu_seqlens_device=cu,
+                kv_cache_kernel_block_id=table,
+                kv_cache_kernel_block_id_device=table,
+                combo_position_ids=_torch.arange(
+                    prefix, prefix + count, dtype=_torch.int64, device=device
+                ).unsqueeze(0),
+                sequence_lengths=None,
+                is_target_verify=False,
+            )
+
+        def _inputs(ids, attn):
+            return _NS(
+                input_ids=ids,
+                embedding_inputs=_NS(text_tokens_mask=None),
+                attention_inputs={"swa_kv": attn, "global_kv": attn},
+                capture_hidden_states=False,
+            )
+
+        _torch.manual_seed(7)
+        prefix_ids = _torch.randint(2, 200000, (256,), dtype=_torch.int32, device=device)
+        suffix_ids = _torch.randint(2, 200000, (21,), dtype=_torch.int32, device=device)
+        full_ids = _torch.cat([prefix_ids, suffix_ids])
+        CANVAS = 256
+
+        def _canvas_hidden(prefix_len):
+            canvas = _torch.randint(
+                2, 200000, (1, CANVAS), dtype=_torch.int32, device=device
+            )
+            positions = (
+                _torch.tensor([prefix_len], device=device).unsqueeze(1)
+                + _torch.arange(CANVAS, device=device).unsqueeze(0)
+            ).reshape(-1)
+            cu = _torch.tensor([0, CANVAS], dtype=_torch.int32, device=device)
+            ca = _NS(
+                prefix_lengths=_torch.tensor([prefix_len], dtype=_torch.int32, device=device),
+                input_lengths=_torch.tensor([CANVAS], dtype=_torch.int32, device=device),
+                cu_seqlens=cu,
+                cu_seqlens_device=cu,
+                kv_cache_kernel_block_id=table,
+                kv_cache_kernel_block_id_device=table,
+                combo_position_ids=None,
+                sequence_lengths=None,
+                is_target_verify=False,
+            )
+            ci = _NS(
+                input_ids=_torch.zeros(CANVAS, dtype=_torch.int32, device=device),
+                attention_inputs={"swa_kv": ca, "global_kv": ca},
+            )
+            with _torch.inference_mode():
+                return model.forward_canvas(ci, canvas, positions, None)
+
+        # flow A: fresh 277-token prefill
+        model.kv_cache = _caches()
+        with _torch.inference_mode():
+            model.forward(_inputs(full_ids, _attn(0, 277)))
+        hidden_a = _canvas_hidden(277)
+
+        # flow B: 256 prefill + 21 incremental over the cached prefix
+        model.kv_cache = _caches()
+        with _torch.inference_mode():
+            model.forward(_inputs(prefix_ids, _attn(0, 256)))
+            model.forward(_inputs(suffix_ids, _attn(256, 21)))
+        hidden_b = _canvas_hidden(277)
+
+        diff = (hidden_a.float() - hidden_b.float()).abs()
+        std_a = float(hidden_a.float().reshape(-1, CANVAS, hidden_a.shape[-1]).std(dim=1).mean())
+        std_b = float(hidden_b.float().reshape(-1, CANVAS, hidden_b.shape[-1]).std(dim=1).mean())
+        print(
+            f"GPU A/B: fresh_std={std_a:.4f} reuse_std={std_b:.4f} "
+            f"max_diff={diff.max().item():.4f} mean_diff={diff.mean().item():.4f} "
+            f"absmax={float(hidden_a.float().abs().max()):.1f}",
+            flush=True,
+        )
+        # The CPU torch-path A/B is bit-identical; on GPU the flashinfer
+        # roundtrip may add bf16-level noise but must not restructure the
+        # hidden (a flat/shifted reuse hidden is the degeneration).
+        self.assertLess(diff.max().item(), 0.05 * float(hidden_a.float().abs().max()))
+
+
 if __name__ == "__main__":
     unittest.main()
