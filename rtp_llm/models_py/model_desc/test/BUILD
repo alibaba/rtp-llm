@@ -10,7 +10,10 @@ py_test(
         "diffusion_gemma_test.py",
     ],
     main = "diffusion_gemma_realweight_test.py",
-    deps = py_test_deps,
+    deps = py_test_deps + [
+        "//rtp_llm:models",
+        "//rtp_llm/models_py:models",
+    ],
     env = {
         "DGM_REAL_CKPT": "/mnt/fuse/smoke-test/hf/google--diffusiongemma-26B-A4B-it--f7f5b7f5fa82ffc52addd066915886d497f5517b",
     },
