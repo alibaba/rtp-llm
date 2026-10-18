@@ -21,7 +21,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from rtp_llm.device.device_type import is_cuda
+from rtp_llm.device.device_type import is_cuda, is_h20
 
 # P2 (plan_0427.md): single-Triton-kernel router-gate epilogue for
 # score_func='sqrtsoftplus'.  Replaces ~7 elementwise/reduce/topk launches
@@ -231,7 +231,7 @@ class Gate(nn.Module):
                 use_fused
                 and scores.dtype == torch.bfloat16
                 and x.is_cuda
-                and x.size(0) <= 32
+                and (x.size(0) <= 32 or (x.size(0) <= 256 and is_h20(x.device)))
                 and not torch.is_grad_enabled()
                 and not _rt.ENABLED
                 and is_cuda()
