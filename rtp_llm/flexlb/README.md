@@ -217,14 +217,16 @@ command-line properties, such as `--server.port` and
 `--flexlb.engine-grpc.enqueue-timeout-ms`.
 HA currently retains `HIPPO_ROLE` as its existing election group identifier.
 
-The gRPC server executor and shutdown quiet period are configured in `FLEXLB_CONFIG`:
+The gRPC server executor, shutdown quiet period and HTTP/2 keepalive policy are configured in `FLEXLB_CONFIG`:
 
 ```json
 "grpcServer": {
   "executorCoreSize": 1000,
   "executorMaxSize": 1000,
   "executorQueueSize": 1000,
-  "shutdownQuietPeriodMs": 5000
+  "shutdownQuietPeriodMs": 5000,
+  "permitKeepAliveTimeMs": 10000,
+  "permitKeepAliveWithoutCalls": true
 }
 ```
 
@@ -234,6 +236,15 @@ must be positive, and maximum size must be at least core size.
 The quiet period starts when shutting down; each Schedule arrival restarts it.
 After it elapses, gRPC waits for accepted RPCs to finish before serving resources
 are destroyed. Normal idle serving does not start an exit timer.
+
+`permitKeepAliveTimeMs` is the shortest HTTP/2 PING interval the server accepts from a client
+(default 10000 ms, non-negative). grpc-java's own default is 5 minutes: a client that pings more often
+gets `GOAWAY too_many_pings` and its connection is closed on the third PING that arrives with no
+response written in between, which fails every in-flight Schedule on that connection at once
+(a stalled master, e.g. one with every prefill slot occupied, writes nothing for as long as it is stalled).
+`permitKeepAliveWithoutCalls` (default true) makes PINGs on a connection with no running call count as
+valid; when false each one is a strike. Keep `permitKeepAliveTimeMs` at or below the smallest PING
+interval any client uses (grpc-java clients never ping more often than every 10 s).
 
 ### Scheduler, ordering, decision, and dispatcher
 
