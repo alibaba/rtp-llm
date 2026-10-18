@@ -67,6 +67,16 @@ class FixedRoleTest(unittest.TestCase):
             self.assertEqual(env["ROLE_TYPE"], "DECODE")
             self.assertGreater(output, 1)
 
+    def test_prefetch_switch_is_not_overridden_by_recipe(self):
+        for enabled in ("0", "1"):
+            with mock.patch.dict(os.environ, {"DSV41_ENGRAM_PREFETCH": enabled}):
+                for role in ("prefill", "decode"):
+                    _, env, _, _ = recipe(role, "perf", "/model", "/tokenizer")
+                    self.assertEqual(env["DSV41_ENGRAM_PREFETCH"], enabled)
+        with mock.patch.dict(os.environ, {"DSV41_ENGRAM_PREFETCH": "invalid"}):
+            with self.assertRaisesRegex(ValueError, "must be 0 or 1"):
+                recipe("decode", "perf", "/model", "/tokenizer")
+
     def test_each_response_must_succeed_and_match_actual_lengths(self):
         def response(**changes):
             fields = dict(

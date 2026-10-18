@@ -27,7 +27,7 @@ class DeepSeekV41Sm90PDContractTest(pd_contract.DeepSeekV41PDContractTest):
         "MOE_STRATEGY": "auto",
         "DSV41_SM90_MOE_COMM": "v2",
         "DSV41_SM90_MULTIQUERY_INDEXER": "1",
-        "DSV41_ENGRAM_PREFETCH": "1",
+        "DSV41_ENGRAM_PREFETCH": os.environ.get("DSV41_ENGRAM_PREFETCH", "1"),
         "DSV41_SM90_DECODE_GRAPH": "1",
         "DSV41_SM90_DECODE_GRAPH_MAX_ROWS": "4",
         "DSV4_MOE_CHUNK_TOKENS": "4096",
@@ -48,7 +48,8 @@ class DeepSeekV41Sm90PDContractTest(pd_contract.DeepSeekV41PDContractTest):
             self.assertIn("opensource FlashInfer CUTLASS W4A8", startup)
             self.assertIn("SM90 DeepEP V2:", startup)
             self.assertNotIn("E8M0 decoded for BF16 MMA", startup)
-            self.assertIn("SM90 Engram UVA prefetch enabled", startup)
+            enabled = self.extra_server_env["DSV41_ENGRAM_PREFETCH"] == "1"
+            self.assertEqual("SM90 Engram UVA prefetch enabled" in startup, enabled)
             self.assertNotIn("Engram shared CPU lookup enabled", startup)
 
     def assert_decode_graph_replayed_and_record_coverage(self):
@@ -69,7 +70,7 @@ class DeepSeekV41Sm90PDContractTest(pd_contract.DeepSeekV41PDContractTest):
                     "decode_moe_chunking": False,
                     "ep_per_role": 4,
                     "execution": "decode_cuda_graph",
-                    "engram": "uva_prefetch",
+                    "engram_prefetch": self.extra_server_env["DSV41_ENGRAM_PREFETCH"],
                     "ced_bounded_compactions": compactions,
                     "moe_backend": self.moe_strategy,
                     "moe_communication": "deepep_v2",
