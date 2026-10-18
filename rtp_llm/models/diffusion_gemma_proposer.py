@@ -20,6 +20,7 @@ from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.ops import (
     CacheGroupType,
+    CacheReusePolicyDesc,
     CacheTailPolicyDesc,
     DataType,
     KVCacheSpecDesc,
@@ -189,6 +190,12 @@ class DiffusionGemmaProposer(BaseModel):
             int(config.attn_config.sliding_window) + page - 1
         ) // page + 1
         tiny.tail = tail
+        # mergeMTPModule samePolicy: the target swa_kv group enables prefix
+        # reuse (with the full window materialized, the SWA chain is complete
+        # and the matcher caps reuse at the window).
+        reuse = CacheReusePolicyDesc()
+        reuse.enable_prefix_reuse = True
+        tiny.reuse = reuse
         tiny.mha_kv_head_num = 1
         tiny.mha_size_per_head = 64
         tiny.dtype = DataType.TYPE_BF16
