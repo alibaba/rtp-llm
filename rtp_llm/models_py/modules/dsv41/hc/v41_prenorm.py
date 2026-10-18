@@ -1,4 +1,4 @@
-"""Small-token V4.1 mHC projection with split-K and FP32 RMS reduction.
+"""Decode V4.1 mHC projection with split-K and FP32 RMS reduction.
 
 Like vLLM's delayed mHC, use DeepGEMM's combined projection/square-sum
 primitive to distribute the long K dimension across SMs. Preserve RTP's
@@ -12,7 +12,7 @@ import torch
 import triton
 import triton.language as tl
 
-from rtp_llm.device.device_type import is_cuda
+from rtp_llm.device.device_type import is_cuda, is_h20
 
 
 @lru_cache(maxsize=1)
@@ -39,12 +39,15 @@ def is_supported(residual: torch.Tensor, fn: torch.Tensor) -> bool:
         or fn.dtype != torch.float32
         or fn.shape != (24, 20480)
         or not fn.is_contiguous()
-        or residual.numel() // 20480 > 64
+        or residual.numel() // 20480 > 256
         or (torch.is_grad_enabled() and (residual.requires_grad or fn.requires_grad))
     ):
         return False
+    major = torch.cuda.get_device_capability(residual.device)[0]
+    max_tokens = 256 if is_h20(residual.device) else 64
     return (
-        torch.cuda.get_device_capability(residual.device)[0] in (9, 10)
+        major in (9, 10)
+        and residual.numel() // 20480 <= max_tokens
         and _has_prenorm_gemm()
     )
 
@@ -117,8 +120,9 @@ def prenorm(
 
     from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import tf32_hc_prenorm_gemm
 
-    # vLLM bounds its small-token prenorm specialization to 16 K partitions.
-    splits = 16
+    # Shorter K reductions keep large-batch cancellation within the same
+    # FP64-oracle tolerance. Preserve the established <=64-token path.
+    splits = 32 if tokens > 64 else 16
     weight = prepare_tf32_weight(fn)
     partial = torch.empty(
         (splits, tokens, 24), dtype=torch.float32, device=residual.device

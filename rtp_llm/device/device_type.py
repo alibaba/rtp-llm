@@ -36,3 +36,12 @@ def is_hip() -> bool:
 
 def is_ppu() -> bool:
     return get_device_type() == DeviceType.Ppu
+
+
+def is_h20(device=None) -> bool:
+    """Identify H20 specifically; SM90 also includes H100/H800."""
+    return (
+        is_cuda()
+        and torch.cuda.get_device_capability(device) == (9, 0)
+        and "H20" in torch.cuda.get_device_name(device).upper().split()
+    )

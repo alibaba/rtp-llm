@@ -90,6 +90,8 @@ def main():
         prefix_key_stride=None,
         formal_before_profile=True,
         profile_scope="rank0" if decode else "TP8",
+        profile_start_step=8 if decode else 0,
+        profile_num_steps=20 if decode else 1,
         source_sha=os.environ.get("SNAPSHOT_SOURCE_SHA", "unknown"),
     )
 
@@ -243,8 +245,8 @@ def main():
                 json={
                     "gen_timeline": True,
                     "trace_name": name,
-                    "start_step": 0,
-                    "num_steps": 3 if decode else 1,
+                    "start_step": data["profile_start_step"],
+                    "num_steps": data["profile_num_steps"],
                     "enable_all_rank": True,
                 },
                 timeout=60,
