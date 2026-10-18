@@ -2,6 +2,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <exception>
+#include <limits>
 #include <mutex>
 #include <memory>
 #include <stdexcept>
@@ -20,6 +21,7 @@
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
+#include "rtp_llm/cpp/multimodal_processor/MultimodalTypes.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/telemetry/PhaseSpanSynthesizer.h"
@@ -63,6 +65,36 @@ string makeRequestKey(const string& client_id, size_t request_id) {
 namespace rtp_llm {
 
 namespace {
+
+std::shared_ptr<const MultimodalCacheSpans> parseMultimodalCacheSpans(const GenerateRequestPB& request,
+                                                                      int64_t                  token_count) {
+    if (request.multimodal_cache_spans().empty()) {
+        return nullptr;
+    }
+    if (token_count < 0 || token_count > std::numeric_limits<int32_t>::max()) {
+        throw std::invalid_argument("invalid token count for multimodal cache spans");
+    }
+
+    auto    spans        = std::make_shared<MultimodalCacheSpans>();
+    int64_t previous_end = 0;
+    spans->reserve(request.multimodal_cache_spans_size());
+    for (const auto& span_pb : request.multimodal_cache_spans()) {
+        const int64_t offset    = span_pb.offset();
+        const int64_t row_count = span_pb.row_hashes_size();
+        // Subtract only after proving offset is in range; this is also the
+        // overflow-safe end bound. Sorted/non-overlapping spans make the total
+        // sidecar bounded by token_count.
+        if (offset < previous_end || row_count <= 0 || offset > token_count || row_count > token_count - offset) {
+            throw std::invalid_argument("invalid Prefill-to-Decode multimodal cache span");
+        }
+        MultimodalCacheSpan span;
+        span.offset = static_cast<int32_t>(offset);
+        span.row_hashes.assign(span_pb.row_hashes().begin(), span_pb.row_hashes().end());
+        spans->push_back(std::move(span));
+        previous_end = offset + row_count;
+    }
+    return spans;
+}
 
 // gRPC delivers propose probs/hidden as pageable CPU tensors. Pinning them
 // before the H2D copy lets cudaMemcpyAsync run on the DMA engine instead of
@@ -382,7 +414,9 @@ void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_conte
 void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%s] start to allocate resource", decode_context.request_key.c_str());
-    auto input                  = QueryConverter::transQuery(&decode_context.allocate_request.input());
+    auto input = QueryConverter::transQuery(&decode_context.allocate_request.input());
+    input->multimodal_cache_spans =
+        parseMultimodalCacheSpans(decode_context.allocate_request, input->input_ids.numel());
     decode_context.request_info = input->request_info;
     auto generate_stream        = engine_->makeStream(input);
     decode_context.setRequestTimeoutMs(generate_stream->getTimeoutMs());
@@ -845,10 +879,10 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVC
 
 DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_context) {
     RTP_LLM_PROFILE_FUNCTION();
-    auto*                              generate_stream = decode_context.getStream().get();
-    auto&                              cache_keys      = generate_stream->cacheKeys(0);
-    const auto&                        cache_resource  = generate_stream->kvCachePtr()->cacheResource(0);
-    auto                               group_block_ids = cache_resource.groupBlockIds();
+    auto*       generate_stream = decode_context.getStream().get();
+    auto&       cache_keys      = generate_stream->cacheKeys(0);
+    const auto& cache_resource  = generate_stream->kvCachePtr()->cacheResource(0);
+    auto        group_block_ids = cache_resource.groupBlockIds();
 
     const auto topology_error = validateRemoteLoadTopology(resource_.workers.size(), decode_context.peer_addrs.size());
     if (!topology_error.ok()) {
@@ -1506,9 +1540,9 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
     }
 
     std::vector<CacheKeyType> cache_keys(request->cache_keys().begin(), request->cache_keys().end());
-    const auto&               cache_config     = engine_->resourceContext().cache_manager->cacheConfig();
-    const auto&               topology         = cache_config.topology();
-    auto                      group_block_ids  = decodeGroupBlockIds(*request, topology);
+    const auto&               cache_config    = engine_->resourceContext().cache_manager->cacheConfig();
+    const auto&               topology        = cache_config.topology();
+    auto                      group_block_ids = decodeGroupBlockIds(*request, topology);
 
     std::vector<std::string> peer_addrs(request->peer_addrs().begin(), request->peer_addrs().end());
 
@@ -1680,7 +1714,7 @@ grpc::Status DecodeRpcServer::RemoteGenerate(grpc::ServerContext* server_context
             // scheduler releases its inflight entry without waiting for TTL eviction.
             auto& stream     = decode_context.getStream();
             auto  error_code = static_cast<int64_t>(stream && stream->hasError() ? stream->statusInfo().code() :
-                                                                                   ErrorCode::MALLOC_FAILED);
+                                                                                  ErrorCode::MALLOC_FAILED);
             reportEarlyFinishTask(decode_context,
                                   error_code,
                                   "decode allocate resource failed: " + decode_context.error_status.error_message());

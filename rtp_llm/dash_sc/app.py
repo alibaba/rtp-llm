@@ -145,18 +145,15 @@ def _abort_bind_barrier(bind_barrier) -> None:
         logging.warning("[DashScApp] failed to abort gRPC bind barrier: %s", e)
 
 
-def _v41_image_processor_config(model_config):
+def _v41_image_token_id(model_config) -> Optional[int]:
     if model_config.model_type not in ("deepseek_v41", "deepseek_v41_dspark"):
         return None
     from rtp_llm.config.dsv41_config import V41Config
-    from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_processor import (
-        V41ImageProcessorConfig,
-    )
 
-    # deepseek_v41_config is the flattened text execution config. Vision
-    # preprocessing consumes the full checkpoint config owned by the MM mixin.
+    # The frontend needs only the raw image placeholder id. Decode, resize,
+    # grid planning and span assembly remain owned by the multimodal backend.
     raw = model_config.mm_related_params.config["v41_config"]
-    return V41ImageProcessorConfig.from_model_config(V41Config.from_dict(raw))
+    return int(V41Config.from_dict(raw).image_token_id)
 
 
 class DashScShutdownManager:
@@ -738,7 +735,7 @@ class DashScApp:
                             "[DashScApp] grammar admission validator disabled: %s", e
                         )
                         grammar_validator = None
-                v41_processor_config = _v41_image_processor_config(model_config)
+                v41_image_token_id = _v41_image_token_id(model_config)
                 servicer = DashScInferenceServicer(
                     backend_visitor=backend_visitor,
                     ip=self.server_config.ip,
@@ -752,8 +749,7 @@ class DashScApp:
                     rank_id=self.server_config.rank_id,
                     repetition_monitor_config=repetition_monitor_config,
                     grammar_validator=grammar_validator,
-                    v41_processor_config=v41_processor_config,
-                    max_seq_len=model_config.max_seq_len,
+                    v41_image_token_id=v41_image_token_id,
                 )
 
             loop = self._start_enqueue_loop()

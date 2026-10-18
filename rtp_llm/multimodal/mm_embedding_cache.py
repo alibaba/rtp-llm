@@ -969,6 +969,30 @@ class MMEmbeddingCache:
         self._report_access_metric(state)
         return state, entry
 
+    def try_acquire_lazy(
+        self, key_factory: Callable[[], str]
+    ) -> Tuple[str, str, MMEmbeddingCacheEntry]:
+        """Avoid constructing an unused input key when residency is disabled.
+
+        The disabled branch still creates a distinct, unregistered entry and
+        reports the same miss as try_acquire. Its empty key is never published
+        into the index, including if a concurrent resize enables the cache.
+        Async request identity must continue to use an eagerly computed key.
+        """
+        with self._lock:
+            disabled = not self.enabled
+            if disabled:
+                self._stats["miss"] += 1
+                entry = MMEmbeddingCacheEntry()
+        if disabled:
+            self._report_access_metric("miss")
+            return "", "miss", entry
+        # Do not serialize a potentially large URL hash under the cache lock.
+        # try_acquire rechecks capacity, preserving concurrent resize semantics.
+        key = key_factory()
+        state, entry = self.try_acquire(key)
+        return key, state, entry
+
     @staticmethod
     def _record_ready_events(result: Any) -> List[Any]:
         return _record_cuda_events(result)

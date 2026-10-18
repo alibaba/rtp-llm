@@ -96,6 +96,9 @@ public:
     std::string to_string() const {
         return url.substr(0, 256) + "_" + std::to_string(mm_type) + "_" + mm_preprocess_config.to_string();
     }
+    bool has_url() const {
+        return !url.empty();
+    }
     std::string cache_key() const {
         size_t url_hash = std::hash<std::string>{}(url);
         return std::to_string(url_hash) + "_" + std::to_string(mm_type) + "_" + mm_preprocess_config.cache_key_string();

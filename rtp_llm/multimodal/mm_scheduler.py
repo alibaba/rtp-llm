@@ -7,7 +7,8 @@ import sys
 import threading
 import time
 import traceback
-from concurrent.futures import Future, InvalidStateError
+from collections import Counter
+from concurrent.futures import Future, InvalidStateError, ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from contextlib import AbstractContextManager, nullcontext
 from typing import TYPE_CHECKING, Callable, List, Optional
@@ -18,6 +19,7 @@ import torch.profiler
 from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
+from rtp_llm.multimodal.mm_batch_pipeline import PrefetchedMMBatch
 from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
     MMWorkEstimate,
     MultiModalEmbeddingInterface,
@@ -82,13 +84,15 @@ class MMSchedulerRequestTooLargeError(MMSchedulerError, ValueError):
 def _run_embedding(
     mm_part: MultiModalEmbeddingInterface,
     items: List[MMWorkItem],
+    data_list=None,
 ) -> None:
     """Run one GPU forward over `items` and write results back.
 
     Does the batched forward, guards the output count, writes embedding_result
     onto each work item, and caches cacheable results. Errors propagate.
     """
-    data_list = [wi.preprocess_result for wi in items]
+    if data_list is None:
+        data_list = [wi.preprocess_result for wi in items]
     type_list = [wi.mm_type for wi in items]
 
     with Timer() as route_timer:
@@ -223,6 +227,8 @@ class MMScheduler:
         max_queue_size: int = 1024,
         device: Optional[str] = None,
         forward_profiler: Optional[Callable[[], AbstractContextManager]] = None,
+        prefetch_batches: int = 0,
+        prefetch_fill_batch: bool = False,
     ):
         if batch_wait_ms < 0:
             raise ValueError(f"batch_wait_ms must be >= 0, got {batch_wait_ms}")
@@ -234,6 +240,15 @@ class MMScheduler:
             raise ValueError(f"max_queue_size must be > 0, got {max_queue_size}")
 
         self._mm_part = mm_part
+        if prefetch_batches not in (0, 1):
+            raise ValueError("prefetch_batches must be 0 or 1")
+        self._prefetch_batches = prefetch_batches
+        if prefetch_fill_batch and not prefetch_batches:
+            raise ValueError("prefetch_fill_batch requires prefetch_batches=1")
+        self._prefetch_fill_batch = prefetch_fill_batch
+        self._collect_wakeup = threading.Event()
+        self._batch_stats = Counter()
+        self._batch_stats_lock = threading.Lock()
         self._batch_wait_ms = batch_wait_ms
         self._max_batch_size = max_batch_size
         self._max_batch_images = max_batch_images
@@ -312,7 +327,18 @@ class MMScheduler:
         chunk.enqueued_at = time.monotonic()
         chunk.queue_wait_reported = False
         self._waiting.put(chunk)
+        if self._prefetch_fill_batch:
+            self._collect_wakeup.set()
         self._report_queue_depth()
+
+    def batching_stats(self):
+        """Cumulative batch-level diagnostics; no request payloads are retained."""
+        with self._batch_stats_lock:
+            return dict(self._batch_stats)
+
+    def _record_batch_stats(self, **values):
+        with self._batch_stats_lock:
+            self._batch_stats.update(values)
 
     def _report_queue_wait(self, batch: List[_EmbeddingChunk]) -> List[float]:
         """Report each active chunk's wait before its first forward attempt."""
@@ -681,6 +707,9 @@ class MMScheduler:
         self._ready.set()
 
         try:
+            if self._prefetch_batches:
+                self._prefetched_loop()
+                return
             while not self._stopped.is_set():
                 batch = None
                 try:
@@ -731,6 +760,85 @@ class MMScheduler:
             # timed out on a long forward and close() already returned.
             self._fail_all_queued()
 
+    def _collect_and_prepare_batch(self, demanded=None):
+        # Sole queue consumer in prefetch mode. Exactly ONE outstanding Future:
+        # no unbounded executor task queue or a second GPU forward lane.
+        chunks = self._collect_batch(demanded)
+        if chunks is None:
+            return None
+        batch = PrefetchedMMBatch(chunks)
+        batch.collected_at = time.monotonic()
+        try:
+            if not self._stopped.is_set():
+                with torch.inference_mode(), torch.profiler.record_function(
+                    "mm_batch_upload"
+                ):
+                    batch.prepare(self._mm_part)
+        except Exception as error:
+            batch.failure = self._failure_details(error)
+            logging.exception("MMScheduler: batch input staging failed")
+            self._clear_exception_references(error)
+        return batch
+
+    def _prefetched_loop(self):
+        pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mm-upload")
+        demanded = threading.Event() if self._prefetch_fill_batch else None
+        pending = pool.submit(self._collect_and_prepare_batch, demanded)
+        current = None
+        try:
+            while not self._stopped.is_set():
+                # Flush a partial lookahead when the sole GPU consumer needs it.
+                # While the consumer is busy, collection may continue up to the
+                # unchanged media/work caps instead of sealing a small batch early.
+                if demanded is not None:
+                    demanded.set()
+                    self._collect_wakeup.set()
+                current = pending.result()
+                pending = None
+                if current is None:
+                    break
+                self._record_batch_stats(
+                    consumed_batches=1,
+                    seal_to_consume_ms=1000 * (time.monotonic() - current.collected_at),
+                    queued_chunks_at_consume=self._queue_depth(),
+                    underfull_with_backlog=int(
+                        sum(chunk.n_images for chunk in current.chunks)
+                        < self._max_batch_images
+                        and self._queue_depth() > 0
+                    ),
+                )
+                claimed = self._claim_batch(current.chunks)
+                if claimed is None:
+                    self._reject_batch(current.chunks)
+                    break
+                # Collection/H2D of B may overlap GPU compute/completion of A.
+                # The next collection cannot begin until B becomes current.
+                demanded = threading.Event() if self._prefetch_fill_batch else None
+                pending = pool.submit(self._collect_and_prepare_batch, demanded)
+                if current.failure is not None:
+                    for chunk in claimed:
+                        self._fail(chunk.request, *current.failure)
+                else:
+                    self._execute_batch(claimed, current)
+                current.close()
+                current = None
+                claimed = None
+        finally:
+            # Shutdown joins the sole collector before _fail_all_queued touches
+            # _pending. close(timeout) can return False while this drains, but
+            # must never free pinned memory still read by an in-flight copy.
+            self._stopped.set()
+            self._collect_wakeup.set()
+            pool.shutdown(wait=True)
+            if current is not None:
+                self._reject_batch(current.chunks)
+                current.close()
+            if pending is not None:
+                remaining = pending.result()
+                if remaining is not None:
+                    self._reject_batch(remaining.chunks)
+                    remaining.close()
+
     def _fail_all_queued(self) -> None:
         """Fail every request still queued (not yet started) with the close cause.
 
@@ -750,7 +858,7 @@ class MMScheduler:
             except InvalidStateError:
                 pass
 
-    def _collect_batch(self) -> Optional[List[_EmbeddingChunk]]:
+    def _collect_batch(self, demanded=None) -> Optional[List[_EmbeddingChunk]]:
         # Pick the first chunk, skipping any whose caller already timed out
         # (cancelled) so dead work neither anchors a batch nor spends its budget.
         # _pending (carried over from last round) goes first.
@@ -784,17 +892,39 @@ class MMScheduler:
         batch_work = first.work_estimate
 
         deadline = time.monotonic() + self._batch_wait_ms / 1000.0
+        reason = "capacity"
 
         while len(batch) < self._max_batch_size and n_images < self._max_batch_images:
             if self._stopped.is_set():
+                reason = "stopped"
                 break
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            try:
-                chunk = self._waiting.get(timeout=min(remaining, _STOP_POLL_INTERVAL_S))
-            except queue.Empty:
-                continue
+            if demanded is not None:
+                # Clear BEFORE checking the queue: arrivals and consumer demand
+                # after this point set the event, so no wakeup can be lost.
+                self._collect_wakeup.clear()
+                try:
+                    chunk = self._waiting.get_nowait()
+                except queue.Empty:
+                    remaining = deadline - time.monotonic()
+                    if demanded.is_set() and remaining <= 0:
+                        reason = "consumer_demand"
+                        break
+                    timeout = _STOP_POLL_INTERVAL_S
+                    if demanded.is_set():
+                        timeout = min(timeout, max(0, remaining))
+                    self._collect_wakeup.wait(timeout)
+                    continue
+            else:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    reason = "deadline"
+                    break
+                try:
+                    chunk = self._waiting.get(
+                        timeout=min(remaining, _STOP_POLL_INTERVAL_S)
+                    )
+                except queue.Empty:
+                    continue
             self._report_queue_depth()
             if chunk.request.cancelled.is_set():
                 chunk.request.chunks = []
@@ -806,6 +936,7 @@ class MMScheduler:
                 batch_work, chunk.work_estimate
             )
             if image_overflow or work_overflow:
+                reason = "budget"
                 self._pending = chunk
                 self._report_queue_depth()
                 break
@@ -816,6 +947,12 @@ class MMScheduler:
             else:
                 batch_work = batch_work + chunk.work_estimate
 
+        self._record_batch_stats(
+            collected_batches=1,
+            collected_images=n_images,
+            queued_chunks_at_seal=self._queue_depth(),
+            **{"seal_" + reason: 1},
+        )
         return batch
 
     def _claim_batch(
@@ -836,7 +973,7 @@ class MMScheduler:
                     claimed.append(chunk)
             return claimed
 
-    def _execute_batch(self, batch: List[_EmbeddingChunk]) -> None:
+    def _execute_batch(self, batch: List[_EmbeddingChunk], prepared=None) -> None:
         """Run the batched forward and write results back.
 
         All-or-nothing: if the forward raises, the whole batch is discarded and
@@ -872,7 +1009,10 @@ class MMScheduler:
                 with torch.profiler.record_function(
                     f"mm_forward(batch_size={batch_size})"
                 ):
-                    _run_embedding(self._mm_part, items)
+                    inputs = (
+                        prepared.inputs_for(items) if prepared is not None else None
+                    )
+                    _run_embedding(self._mm_part, items, inputs)
         except Exception as e:
             source_type, source_message, is_oom = self._failure_details(e)
             logging.error(
@@ -933,6 +1073,7 @@ class MMScheduler:
         # so close must not touch _pending / _waiting while it is alive.
         with self._lock:
             self._stopped.set()
+        self._collect_wakeup.set()
         self._executor.join(timeout=timeout)
         if self._executor.is_alive():
             # A forward is still stuck past the join timeout. The executor's finally

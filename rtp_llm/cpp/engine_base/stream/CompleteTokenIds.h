@@ -9,7 +9,7 @@ namespace rtp_llm {
 class CompleteTokenIds {
 public:
     CompleteTokenIds(int batch_size, int max_batch_size, int max_seq_len, int seq_size_per_block);
-    CompleteTokenIds(const CompleteTokenIds& other, bool share = false, int shift_token_num = 0);
+    CompleteTokenIds(const CompleteTokenIds& other, bool share = false);
 
 public:
     void init(const std::shared_ptr<GenerateInput>& generate_input, size_t extra_reserve_token_num = 0);
@@ -51,7 +51,7 @@ public:
 
     std::string toString(int batch_id) const;
 
-    std::vector<int32_t> imageCacheIdentity(int begin, int count) const;
+    std::vector<int32_t> multimodalCacheIdentity(int begin, int count) const;
     bool                 isValidReuseLength(int reuse_length, int min_fresh_tokens = 0) const;
 
     int32_t* data(int batch_id);
@@ -76,9 +76,8 @@ private:
     int64_t first_token_time_us_    = 0;
     int64_t first_token_latency_us_ = 0;
 
-    torch::Tensor                           complete_token_ids_;
-    std::shared_ptr<const V41RequestInputs> v41_inputs_;
-    int                                     canonical_offset_ = 0;
+    torch::Tensor                               complete_token_ids_;
+    std::shared_ptr<const MultimodalCacheSpans> multimodal_cache_spans_;
 };
 
 using CompleteTokenIdsPtr = std::shared_ptr<CompleteTokenIds>;

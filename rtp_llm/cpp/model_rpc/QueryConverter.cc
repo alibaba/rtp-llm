@@ -276,38 +276,6 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
     generate_input->input_ids =
         torch::from_blob(const_cast<int*>(input->token_ids().data()), {(int64_t)input->token_ids_size()}, torch::kInt32)
             .clone();
-    if (input->has_v41_inputs()) {
-        const auto& typed = input->v41_inputs();
-        if (typed.schema_version() != 1) {
-            throw std::invalid_argument("unsupported V4.1 input schema version: "
-                                        + std::to_string(typed.schema_version()));
-        }
-        auto prepared         = std::make_shared<V41RequestInputs>();
-        prepared->token_types = torch::from_blob(const_cast<int32_t*>(typed.token_types().data()),
-                                                 {typed.token_types_size()},
-                                                 torch::kInt32)
-                                    .clone();
-        prepared->image_mask = torch::empty({typed.image_mask_size()}, torch::kBool);
-        for (int index = 0; index < typed.image_mask_size(); ++index) {
-            prepared->image_mask.data_ptr<bool>()[index] = typed.image_mask(index);
-        }
-        for (const auto& source : typed.images()) {
-            V41ImageInput image;
-            image.start   = source.start();
-            image.n_vit_h = source.n_vit_h();
-            image.n_vit_w = source.n_vit_w();
-            image.patches = transTensor(source.patches());
-            image.types =
-                torch::from_blob(const_cast<int32_t*>(source.types().data()), {source.types_size()}, torch::kInt32)
-                    .clone();
-            image.content_sha256     = source.content_sha256();
-            image.processor_identity = source.processor_identity();
-            image.source_bytes       = source.source_bytes();
-            prepared->images.push_back(std::move(image));
-        }
-        generate_input->v41_inputs        = std::move(prepared);
-        generate_input->multimodal_inputs = std::vector<MultimodalInput>{};
-    }
     if (input->multimodal_inputs_size() > 0) {
         std::vector<MultimodalInput> mm_inputs;
         for (int i = 0; i < input->multimodal_inputs_size(); i++) {
@@ -333,13 +301,6 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
                 mm_preprocess_config->max_long_side_pixel() > 0 ? mm_preprocess_config->max_long_side_pixel() : -1);
         }
         generate_input->multimodal_inputs = std::move(mm_inputs);
-    }
-    if (input->has_multimodal_token_layout()) {
-        MultimodalTokenLayout layout;
-        for (const auto& span : input->multimodal_token_layout().spans()) {
-            layout.spans.emplace_back(span.offset(), span.length());
-        }
-        generate_input->multimodal_token_layout = std::move(layout);
     }
     generate_input->group_size = input->group_size() > 0 ? input->group_size() : 1;
     if (input->has_group_id()) {

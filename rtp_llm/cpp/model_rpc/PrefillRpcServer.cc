@@ -340,7 +340,7 @@ void PrefillRpcServer::multimodalProcess(PrefillGenerateContext& prefill_context
 
     auto& input = prefill_context.generate_input;
     RTP_LLM_CHECK_WITH_INFO(input != nullptr, "multimodal processing requires a prepared generate input");
-    if (!input->v41_inputs && (!input->multimodal_inputs || input->multimodal_inputs->empty())) {
+    if (!input->multimodal_inputs || input->multimodal_inputs->empty()) {
         prefill_context.markMultimodalProcessed(false);
         return;
     }
@@ -389,6 +389,26 @@ GenerateRequestPB PrefillRpcServer::buildAllocateRequest(PrefillGenerateContext&
         auto*       ids_ptr = input->input_ids.data_ptr<int32_t>();
         for (size_t i = 0; i < input->input_ids.numel(); ++i) {
             new_request->add_token_ids(ids_ptr[i]);
+        }
+        if (input->multimodal_cache_spans) {
+            const int64_t token_count  = input->input_ids.numel();
+            int64_t       previous_end = 0;
+            for (const auto& span : *input->multimodal_cache_spans) {
+                const int64_t offset    = span.offset;
+                const int64_t row_count = span.row_hashes.size();
+                RTP_LLM_CHECK_WITH_INFO(offset >= previous_end && row_count > 0 && offset <= token_count
+                                            && row_count <= token_count - offset,
+                                        "invalid multimodal cache span: offset=%ld rows=%ld token_count=%ld",
+                                        offset,
+                                        row_count,
+                                        token_count);
+                auto* span_pb = alloc_request.add_multimodal_cache_spans();
+                span_pb->set_offset(span.offset);
+                for (const auto row_hash : span.row_hashes) {
+                    span_pb->add_row_hashes(row_hash);
+                }
+                previous_end = offset + row_count;
+            }
         }
     }
     for (const auto& address : prefill_context.prefill_worker_cache_store_addrs) {

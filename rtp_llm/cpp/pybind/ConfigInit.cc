@@ -38,6 +38,7 @@ void registerMultimodal(py::module& m) {
         .def_readwrite("tensor", &MultimodalInput::tensor)
         .def_readwrite("mm_preprocess_config", &MultimodalInput::mm_preprocess_config)
         .def("to_string", &MultimodalInput::to_string)
+        .def("has_url", &MultimodalInput::has_url)
         .def("cache_key", &MultimodalInput::cache_key)
         .def(pybind11::pickle(
             [](const MultimodalInput& m) {  // __getstate__
@@ -1884,6 +1885,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("is_multimodal", &MMModelConfig::is_multimodal)
         .def_readwrite("mm_sep_tokens", &MMModelConfig::mm_sep_tokens)
         .def_readwrite("include_sep_tokens", &MMModelConfig::include_sep_tokens)
+        .def_readwrite("semantic_mm_token_id", &MMModelConfig::semantic_mm_token_id)
         .def_readwrite("mm_position_ids_style", &MMModelConfig::mm_position_ids_style);
 
     py::class_<CacheReusePolicyDesc>(m, "CacheReusePolicyDesc")

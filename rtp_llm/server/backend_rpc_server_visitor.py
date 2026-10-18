@@ -1,7 +1,6 @@
 import asyncio
 import logging
 import os
-import time
 from dataclasses import replace
 from typing import TYPE_CHECKING, AsyncGenerator, Callable, List, Optional, Set
 
@@ -41,7 +40,6 @@ from rtp_llm.telemetry import start_internal_span
 from rtp_llm.utils.base_model_datatypes import (
     GenerateInput,
     GenerateOutputs,
-    MultimodalTokenExpansion,
     RequestInfo,
 )
 from rtp_llm.utils.time_util import Timer
@@ -278,8 +276,9 @@ class BackendRPCServerVisitor:
         Returns None on success; on failure returns FlexlbResponse for routing decisions.
         request_id is frontend-generated and is not overwritten.
         """
-        input.mm_token_expansion = None
-        token_expansion = None
+        vit_metadata_complete = False
+        multimodal_cache_spans = []
+        semantic_mm_token_id = -1
         token_ids = (
             input.token_ids.tolist()[0]
             if len(input.token_ids.shape) == 2
@@ -287,37 +286,12 @@ class BackendRPCServerVisitor:
         )
         route_args = {}
         selected_vit = None
-        prepared = getattr(input, "v41_inputs", None)
-        if self.remote_vit and prepared is not None and prepared.images:
-            timeout_ms = (
-                input.generate_config.ttft_timeout_ms
-                or input.generate_config.timeout_ms
-                or self.master_client.master_config.master_default_timeout_ms
-            )
-            if timeout_ms <= 0:
-                timeout_ms = self.master_client.master_config.master_default_timeout_ms
-            deadline = time.monotonic() + timeout_ms / 1000.0
-            vit_result = await self.master_client.get_backend_role_addrs(
-                block_cache_keys=[],
-                cache_key_block_size=self._cache_key_block_size(),
-                input=input,
-                request_id=input.request_id,
-                vit_only=True,
-                timeout_s=timeout_ms / 1000.0,
-            )
-            if not vit_result.is_ok:
-                return vit_result
-            selected_vit = vit_result.role_addrs[0]
-            route_args["selected_vit"] = vit_result.result["server_status"][0]
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise FtRuntimeException(
-                    ExceptionType.DEADLINE_EXCEEDED, "ViT routing deadline exceeded"
-                )
-            route_args["timeout_s"] = remaining
         if getattr(self, "_mm_cache_routing", False) and getattr(
             input, "mm_inputs", None
         ):
+            semantic_mm_token_id = int(
+                getattr(self.mm_model_config, "semantic_mm_token_id", -1)
+            )
             keys = multimodal_cache_keys(input)
             metadata = None
             if keys and len(keys) <= 256 and all(len(key) <= 4096 for key in keys):
@@ -376,7 +350,6 @@ class BackendRPCServerVisitor:
                 ):
                     return vit_result
             try:
-                expanded_spans = []
                 token_ids, full_length = multimodal_routing_tokens(
                     token_ids,
                     self.mm_model_config.mm_sep_tokens,
@@ -385,16 +358,15 @@ class BackendRPCServerVisitor:
                     metadata,
                     self.max_seq_len,
                     compact=True,
-                    expanded_spans=expanded_spans,
+                    cache_spans=multimodal_cache_spans,
+                    semantic_mm_token_id=semantic_mm_token_id,
                 )
                 if selected_vit is not None and full_length is None:
                     raise ValueError(
                         "ViT did not return complete routing hashes within the sequence limit"
                     )
                 if full_length is not None:
-                    token_expansion = MultimodalTokenExpansion(
-                        token_ids, expanded_spans
-                    )
+                    vit_metadata_complete = True
                     route_args["seq_len"] = full_length - input.prefix_length
             except (
                 ValueError,
@@ -412,6 +384,7 @@ class BackendRPCServerVisitor:
                     "Invalid ViT routing metadata, request_id=%s", input.request_id
                 )
                 token_ids = []
+                multimodal_cache_spans.clear()
             # Retain only compact int32 ids and segment offsets for the model RPC.
             # Drop the much larger metadata representation before scheduling.
             metadata = None
@@ -424,8 +397,8 @@ class BackendRPCServerVisitor:
         full_block_cache_keys = get_block_cache_keys(
             token_ids,
             self.seq_size_per_block,
-            v41_inputs=input.v41_inputs,
             cache_key_seed=self.cache_key_seed,
+            multimodal_cache_spans=multimodal_cache_spans,
         )
         block_cache_keys = self._route_cache_keys(full_block_cache_keys)
         self._report_recent_cache_key_metrics(block_cache_keys)
@@ -433,7 +406,6 @@ class BackendRPCServerVisitor:
 
         try:
             retry_vit_route = False
-            input.mm_token_expansion = token_expansion
             route_result = await self.master_client.get_backend_role_addrs(
                 block_cache_keys=block_cache_keys,
                 cache_key_block_size=self._cache_key_block_size(),
@@ -444,7 +416,7 @@ class BackendRPCServerVisitor:
             )
             if (
                 selected_vit is not None
-                and token_expansion is not None
+                and vit_metadata_complete
                 and route_result.error_code == VIT_ROUTE_STALE_CODE
             ):
                 # Expanded length may select a different group; old hashes are
@@ -453,8 +425,7 @@ class BackendRPCServerVisitor:
                 route_args.pop("selected_vit")
                 route_args.pop("seq_len", None)
                 selected_vit = None
-                token_expansion = None
-                input.mm_token_expansion = None
+                vit_metadata_complete = False
                 route_result = await self.master_client.get_backend_role_addrs(
                     block_cache_keys=[],
                     cache_key_block_size=self._cache_key_block_size(),
@@ -494,7 +465,7 @@ class BackendRPCServerVisitor:
                     selected_vit, keys, input=input
                 )
                 original_tokens = input.token_ids.reshape(-1).tolist()
-                expanded_spans = []
+                multimodal_cache_spans = []
                 token_ids, full_length = multimodal_routing_tokens(
                     original_tokens,
                     self.mm_model_config.mm_sep_tokens,
@@ -503,7 +474,8 @@ class BackendRPCServerVisitor:
                     metadata,
                     self.max_seq_len,
                     compact=True,
-                    expanded_spans=expanded_spans,
+                    cache_spans=multimodal_cache_spans,
+                    semantic_mm_token_id=semantic_mm_token_id,
                 )
                 if full_length is None and metadata is not None:
                     raise FtRuntimeException(
@@ -514,21 +486,19 @@ class BackendRPCServerVisitor:
                     get_block_cache_keys(
                         token_ids,
                         self.seq_size_per_block,
-                        v41_inputs=input.v41_inputs,
                         cache_key_seed=self.cache_key_seed,
+                        multimodal_cache_spans=multimodal_cache_spans,
                     )
                 )
                 if full_length is None:
                     selected_vit = None
+                    vit_metadata_complete = False
                     route_args.pop("seq_len", None)
                 else:
-                    token_expansion = MultimodalTokenExpansion(
-                        token_ids, expanded_spans
-                    )
+                    vit_metadata_complete = True
                     route_args.update(
                         selected_vit=status, seq_len=full_length - input.prefix_length
                     )
-                    input.mm_token_expansion = token_expansion
                 del metadata, original_tokens, token_ids
                 route_result = await self.master_client.get_backend_role_addrs(
                     block_cache_keys=block_cache_keys,
@@ -539,7 +509,6 @@ class BackendRPCServerVisitor:
                     **route_args,
                 )
         except BaseException as e:
-            input.mm_token_expansion = None
             exception_json = format_exception(e)
             kmonitor.report(
                 AccMetrics.MASTER_ROUTE_ERROR_QPS_METRIC,
@@ -550,13 +519,11 @@ class BackendRPCServerVisitor:
 
         if route_result.is_ok:
             if selected_vit is not None and selected_vit not in route_result.role_addrs:
-                input.mm_token_expansion = None
                 raise FtRuntimeException(
                     ExceptionType.ROUTE_ERROR, "master changed the selected ViT route"
                 )
             input.generate_config.role_addrs = route_result.role_addrs
             input.enqueued_by_master = route_result.enqueued_by_master
-            input.mm_token_expansion = token_expansion
             route_logger.debug(
                 "master route success, request_id=%s, addrs=%s",
                 input.request_id,
@@ -572,7 +539,6 @@ class BackendRPCServerVisitor:
             route_result.error_code,
             route_result.error_message or "",
         )
-        input.mm_token_expansion = None
         return route_result
 
     def _report_recent_cache_key_metrics(self, block_cache_keys: List[int]) -> None:

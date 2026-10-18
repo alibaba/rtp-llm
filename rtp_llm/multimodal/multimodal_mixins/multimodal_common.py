@@ -127,7 +127,30 @@ class MMWorkEstimate:
         )
 
 
+class PreparedMMInputs:
+    """Owned, ordered inputs handed from an optional upload worker to forward.
+
+    Model implementations must wait for producer events on the consumer stream
+    and retain transfer buffers until safe to release. close() is idempotent and
+    also handles cancellation without wait()/forward. No request/cache state is
+    mutated. There is at most one lookahead batch, plus the executing batch.
+    """
+
+    def __init__(self, data_list: List[Any]):
+        self.data_list = data_list
+
+    def wait(self) -> None:
+        """Make inputs usable on the calling forward stream."""
+
+    def close(self) -> None:
+        self.data_list = []
+
+
 class MultiModalEmbeddingInterface:
+    # Embeddings may be shared even when inspection must be repeated per caller.
+    # Existing mixins retain their cache-owned inspection contract by default.
+    inspection_verdict_is_request_scoped = False
+
     @property
     def _data_type(self):
         raise NotImplementedError
@@ -146,6 +169,28 @@ class MultiModalEmbeddingInterface:
 
     def get_preprocess_params(self):
         return {}
+
+    def prepare_inspection_inputs(
+        self, mm_inputs, vit_config, *, deadline, cancellation_event
+    ):
+        """Optional original-byte inputs shared by inspection and inference.
+
+        Called only when inspection is enabled, on a CPU thread. Returning a
+        list pins the original media for both consumers: inspection may create
+        a lossy preview, but its rewritten preview must not replace model input.
+        Return None to retain the provider's existing rewrite behavior.
+        """
+        return None
+
+    def prepare_embedding_batch(
+        self, data_list: List[Any], mm_types: List[MMUrlType]
+    ) -> Optional[PreparedMMInputs]:
+        """Optional bounded H2D staging, NOT CPU decode or model computation.
+
+        Called only with scheduler prefetch enabled, on one dedicated thread.
+        Return None to use the ordinary batched_embedding path unchanged.
+        """
+        return None
 
     def validate_inputs(self, mm_inputs: List[MultimodalInput]) -> None:
         """Validate request-level constraints before preprocessing starts."""

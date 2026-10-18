@@ -193,9 +193,10 @@ message MultimodalInputsPB {
     bool support_rdma = 2;
     // Correlates frontend, ViT and content-inspection work.
     int64 request_id = 3;
-    V41RequestInputsPB v41_inputs = 5;
-    // Remaining request budget for typed prepared images (no URL configs).
+    // Remaining request budget for backend multimodal processing.
     int64 timeout_ms = 4;
+    reserved 5;
+    reserved "v41_inputs";
 }
 
 enum TensorDataTypePB {
@@ -269,36 +270,6 @@ message RequestInfoPB {
     TraceContextPB trace_context = 6;
 }
 
-message MultimodalTokenSpanPB {
-    int32 offset = 1;
-    int32 length = 2;
-}
-
-message MultimodalTokenLayoutPB {
-    reserved 1;
-    // In ViT output segment order, including all segments of a video.
-    repeated MultimodalTokenSpanPB spans = 2;
-}
-
-message V41ImageInputPB {
-    int32 start = 1;
-    int32 n_vit_h = 2;
-    int32 n_vit_w = 3;
-    TensorPB patches = 4;
-    repeated int32 types = 5;
-    string content_sha256 = 6;
-    string processor_identity = 7;
-    // Original image payload retained only when content inspection is enabled.
-    bytes source_bytes = 8;
-}
-
-message V41RequestInputsPB {
-    int32 schema_version = 1;
-    repeated sint32 token_types = 2;
-    repeated bool image_mask = 3;
-    repeated V41ImageInputPB images = 4;
-}
-
 message GenerateInputPB {
     int64 request_id = 1;
     repeated int32 token_ids = 2;
@@ -313,9 +284,8 @@ message GenerateInputPB {
     // priority). Used as a metrics tag on engine-side TPS
     // reporting; never affects engine scheduling.
     int32 priority = 10;
-    // token_ids are already expanded when this field is present.
-    MultimodalTokenLayoutPB multimodal_token_layout = 11;
-    V41RequestInputsPB v41_inputs = 12;
+    reserved 11, 12;
+    reserved "multimodal_token_layout", "v41_inputs";
 }
 
 message AuxInfoPB {
@@ -442,6 +412,15 @@ enum RemoteStage {
     PREFILL_COMPLETE = 3;
 }
 
+// Internal Prefill-to-Decode cache identity for one fully assembled
+// multimodal embedding segment. This deliberately lives on GenerateRequestPB,
+// not GenerateInputPB: model-specific image layout remains a backend concern
+// and cannot be supplied by a frontend request.
+message MultimodalCacheSpanPB {
+    int32 offset = 1;
+    repeated sint32 row_hashes = 2;
+}
+
 message GenerateRequestPB {
     RemoteStage stage = 1;
     int64 request_id = 2;
@@ -454,6 +433,7 @@ message GenerateRequestPB {
     repeated int32 position_ids = 9;
     TensorPB propose_probs = 10;
     TensorPB propose_hidden = 11;
+    repeated MultimodalCacheSpanPB multimodal_cache_spans = 12;
 }
 
 // In the TP case, the decode master broadcasts to decode workers.

@@ -222,7 +222,24 @@ def init_vit_group_args(parser, vit_config):
         bind_to=(vit_config, "mm_preprocess_max_workers"),
         type=int,
         default=4,
-        help="多模态预处理时最大线程数量",
+        help="多模态 CPU 预处理进程池的进程数量（不是 GPU forward 并发）",
+    )
+    vit_group.add_argument(
+        "--mm_preprocess_num_threads",
+        env_name="MM_PREPROCESS_NUM_THREADS",
+        bind_to=(vit_config, "mm_preprocess_num_threads"),
+        type=int,
+        default=0,
+        help="每个 CPU 预处理进程的 Torch intra-op 线程数；0 保留默认，不改变主进程",
+    )
+    vit_group.add_argument(
+        "--gpu_prefetch_batches",
+        env_name="GPU_PREFETCH_BATCHES",
+        bind_to=(vit_config, "gpu_prefetch_batches"),
+        type=int,
+        choices=[0, 1],
+        default=0,
+        help="提前收集/上传至多 1 个 batch；默认 0，不增加 GPU forward 并发",
     )
     vit_group.add_argument(
         "--biencoder_preprocess",

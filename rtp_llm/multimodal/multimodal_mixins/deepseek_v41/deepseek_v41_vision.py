@@ -1,23 +1,27 @@
 """V4.1 ViT/aligner adapter with row-major image spans and three delimiters."""
 
+import base64
 import json
-import logging
 import os
 import threading
+import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import torch
+from PIL import Image
 from torch import nn
 
-from rtp_llm.metrics import kmonitor
-from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
+from rtp_llm.metrics import GaugeMetrics
 from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_processor import (
-    IMAGE,
-    V41ImageInput,
+    _METRIC_TAGS,
     V41ImageProcessorConfig,
-    V41PreparedInputs,
-    image_token_types,
+    _preprocess_rgb_on_device,
+    _rgb_tensor,
+    load_image_source,
     num_image_tokens,
+    plan_image_grid,
+    preprocess_image,
 )
 from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_vision import (
     Aligner,
@@ -25,12 +29,40 @@ from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_vision import (
     RMSNorm,
     ViT,
 )
+from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.gpu_input_transfer import (
+    RGBBatchUploader,
+    UploadedImage,
+)
 from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
+    MMWorkEstimate,
     MultiModalEmbeddingInterface,
 )
+from rtp_llm.multimodal.vit_metrics import vit_preprocess_timer
+from rtp_llm.utils.base_model_datatypes import MMUrlType
+
+
+@dataclass(frozen=True)
+class _DecodedImage:
+    """CPU-only result of the generic media decoder inside the ViT backend."""
+
+    rgb: torch.Tensor
+
+
+@dataclass(frozen=True)
+class _RuntimeImage:
+    """Backend-only patches and grid consumed by V4.1 ViT/aligner."""
+
+    patches: torch.Tensor
+    n_vit_h: int
+    n_vit_w: int
 
 
 class V41VisionAttention(Attention):
+    def _apply_packed_rotary(self, q, k, cos, sin):
+        from .packed_rotary import apply_packed_vision_qk_rope
+
+        return apply_packed_vision_qk_rope(q, k, cos, sin)
+
     def _apply_rotary(self, q, k, cos, sin):
         if q.is_cuda and not torch.is_grad_enabled():
             from rtp_llm.models_py.modules.dsv41._vision_rope_triton import (
@@ -44,9 +76,34 @@ class V41VisionAttention(Attention):
 
 
 class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
+    inspection_verdict_is_request_scoped = True
+
     def __init__(self, config, *, device=None):
         super().__init__()
         self.processor_config = V41ImageProcessorConfig.from_model_config(config)
+        self._gpu_preprocess_enabled = os.environ.get("V41_GPU_PREPROCESS", "0") == "1"
+        self._rgb_uploader = None  # Created only by the opt-in staging hook.
+        # Opt-in until the real-weight byte and matched performance gates pass.
+        # Existing MMScheduler owns cross-request admission and cancellation.
+        self._packed_forward_enabled = os.environ.get("V41_PACKED_FORWARD", "0") == "1"
+        self._packed_max_images = int(os.environ.get("V41_PACKED_MAX_IMAGES", "8"))
+        self._packed_max_patches = int(
+            os.environ.get("V41_PACKED_MAX_PATCHES", "66368")
+        )
+        if min(self._packed_max_images, self._packed_max_patches) < 1:
+            raise ValueError("V4.1 packed image and patch budgets must be positive")
+        self._packed_stats_enabled = os.environ.get("V41_PACKED_STATS", "0") == "1"
+        self._packed_stats_lock = (
+            threading.Lock() if self._packed_stats_enabled else None
+        )
+        self._packed_batch_histogram = {} if self._packed_stats_enabled else None
+        self._packed_graph = None
+        if os.environ.get("V41_PACKED_CUDA_GRAPH", "0") == "1":
+            from .packed_graph import PackedVisionGraph
+
+            self._packed_graph = PackedVisionGraph(
+                self._packed_max_images, self._packed_max_patches
+            )
         self.vision = ViT(config.vision_parameters(), attention_cls=V41VisionAttention)
         self.aligner = Aligner(config.vision_parameters())
         hidden_size = config.text["hidden_size"]
@@ -57,19 +114,6 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
         for module in self.vision.modules():
             if isinstance(module, RMSNorm):
                 module.weight.data = module.weight.data.float()
-        # Image embeddings depend only on the frozen weights plus the content
-        # identity carried in every V41 request. Identical images (common in
-        # replayed conversations and cache-key-aligned bursts) collapse to one
-        # GPU forward instead of serially re-encoding under the v41 execution
-        # lock; see vit_rpc_server._v41_execution.
-        self._encode_cache = {}
-        self._encode_cache_order = []
-        self._encode_cache_lock = threading.Lock()
-        self._encode_cache_tokens = 0
-        self._encode_cache_bytes = 0
-        self._encode_cache_capacity = max(
-            0, int(os.environ.get("V41_IMAGE_ENCODE_CACHE_ITEMS", "16"))
-        )
 
     @property
     def _device(self):
@@ -115,189 +159,358 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
         return {"weight_tensors": len(required), "fp32_norm_tensors": len(norms)}
 
     @torch.inference_mode()
-    def encode_image(self, image: V41ImageInput) -> torch.Tensor:
-        cached = self._encode_image_cached(image)
-        if cached is not None:
-            return cached
-        return self._encode_image_compute(image)
-
-    def _encode_cache_key(self, image: V41ImageInput):
-        # A v41 image embedding is a pure function of the frozen weights and
-        # the image payload. content_sha256 identifies the exact patch bytes,
-        # processor_identity the preprocessing contract, and the grid fixes
-        # the token layout; no other request field reaches the forward pass.
-        # An EMPTY content_sha256 is not a trusted identity: RPC/prepared-input
-        # checks still admit it, and two different images with the same grid
-        # and processor would alias to one cached embedding. Bypass the cache
-        # entirely when the trusted content identity is absent.
-        if not image.content_sha256:
-            return None
-        return (
-            image.processor_identity,
-            image.content_sha256,
-            image.n_vit_h,
-            image.n_vit_w,
-        )
-
-    def _encode_image_cached(self, image: V41ImageInput):
-        key = self._encode_cache_key(image) if self._encode_cache_capacity > 0 else None
-        cached = None
-        with self._encode_cache_lock:
-            if key is not None and key in self._encode_cache:
-                self._encode_cache_order.remove(key)
-                self._encode_cache_order.append(key)
-                cached = self._encode_cache[key]
-            tokens = self._encode_cache_tokens
-            size_bytes = self._encode_cache_bytes
-        metric = (
-            (
-                AccMetrics.VIT_EMBEDDING_CACHE_HIT_QPS_METRIC
-                if cached is not None
-                else AccMetrics.VIT_EMBEDDING_CACHE_MISS_QPS_METRIC
-            )
-            if key is not None
-            else None
-        )
-        self._report_encode_cache_metrics(tokens, size_bytes, metric)
-        return cached
-
-    def _encode_image_store(self, key, result: torch.Tensor):
-        if key is None or self._encode_cache_capacity <= 0:
-            return
-        with self._encode_cache_lock:
-            if key in self._encode_cache:
-                return
-            self._encode_cache[key] = result
-            self._encode_cache_order.append(key)
-            self._encode_cache_tokens += result.shape[0]
-            self._encode_cache_bytes += result.numel() * result.element_size()
-            eviction_count = 0
-            while len(self._encode_cache_order) > self._encode_cache_capacity:
-                evicted = self._encode_cache_order.pop(0)
-                removed = self._encode_cache.pop(evicted)
-                self._encode_cache_tokens -= removed.shape[0]
-                self._encode_cache_bytes -= removed.numel() * removed.element_size()
-                eviction_count += 1
-            tokens = self._encode_cache_tokens
-            size_bytes = self._encode_cache_bytes
-        self._report_encode_cache_metrics(
-            tokens,
-            size_bytes,
-            (
-                AccMetrics.VIT_EMBEDDING_CACHE_EVICTION_QPS_METRIC
-                if eviction_count
-                else None
-            ),
-            eviction_count,
-        )
-
-    @staticmethod
-    def _report_encode_cache_metrics(
-        tokens: int, size_bytes: int, metric=None, count: int = 1
-    ):
-        tags = {"cache_type": "v41_encode"}
-        try:
-            if metric is not None:
-                kmonitor.report(metric, count, tags)
-            kmonitor.report(
-                GaugeMetrics.VIT_EMBEDDING_CACHE_TOKENS_METRIC, tokens, tags
-            )
-            kmonitor.report(
-                GaugeMetrics.VIT_EMBEDDING_CACHE_BYTES_METRIC, size_bytes, tags
-            )
-        except Exception:
-            logging.exception("Failed to report DeepSeek-V4.1 encode cache metrics")
-
-    @torch.inference_mode()
-    def _encode_image_compute(self, image: V41ImageInput) -> torch.Tensor:
+    def encode_image(self, image: _RuntimeImage) -> torch.Tensor:
         vit_h, vit_w = image.n_vit_h, image.n_vit_w
         patches = image.patches.to(device=self._device, dtype=self._data_type)
         aligned = self.aligner(self.vision(patches, vit_h, vit_w), vit_h, vit_w)
-        types = image.types.to(device=self._device)
-        delimiters = torch.stack(
-            (self.image_start, self.image_start, self.image_newline, self.image_end)
-        )
-        result = delimiters[types]
-        result[types == IMAGE] = aligned
-        result = result.contiguous()
-        self._encode_image_store(self._encode_cache_key(image), result)
+        return self._assemble_image_span(aligned, image)
+
+    def _assemble_image_span(self, aligned, image):
+        ratio = self.processor_config.vision_downsample_ratio
+        llm_h = (image.n_vit_h + ratio - 1) // ratio
+        llm_w = (image.n_vit_w + ratio - 1) // ratio
+        return self._assemble_canonical_span(aligned, llm_h, llm_w)
+
+    def _assemble_canonical_span(self, aligned, llm_h, llm_w):
+        hidden = self.image_start.numel()
+        # Static slices avoid CUDA nonzero and its device-to-host synchronization.
+        result = self.image_start.new_empty((num_image_tokens(llm_h, llm_w), hidden))
+        result[0].copy_(self.image_start)
+        result[-1].copy_(self.image_end)
+        rows = result[1:-1].view(llm_h, llm_w + 1, hidden)
+        rows[:, :llm_w].copy_(aligned.view(llm_h, llm_w, hidden))
+        rows[:, llm_w].copy_(self.image_newline)
         return result
 
-    @torch.inference_mode()
-    def validate_prepared_images(self, images) -> list[V41ImageInput]:
-        validated = []
-        previous_end = 0
-        processor = self.processor_config
-        for record in images:
-            height, width = record["n_vit_h"], record["n_vit_w"]
-            if (
-                type(height) is not int
-                or type(width) is not int
-                or min(height, width) <= 0
-            ):
-                raise ValueError("V4.1 image grid must contain positive integers")
-            ratio = processor.vision_downsample_ratio
-            llm_h, llm_w = (height + ratio - 1) // ratio, (width + ratio - 1) // ratio
-            if num_image_tokens(llm_h, llm_w) > processor.vision_max_n_token:
-                raise ValueError("V4.1 image exceeds the configured token limit")
-            patches = record["patches"]
-            patch_size = processor.vision_patch_size
-            if (
-                not isinstance(patches, torch.Tensor)
-                or patches.dtype != torch.bfloat16
-                or tuple(patches.shape) != (height * width, 3, patch_size, patch_size)
-                or record["processor_identity"] != processor.identity
-            ):
-                raise ValueError("Invalid V4.1 prepared patches or processor identity")
-            types = record["types"]
-            expected_types = image_token_types(llm_h, llm_w)
-            if (
-                not isinstance(types, torch.Tensor)
-                or types.device.type != "cpu"
-                or types.dtype not in (torch.int32, torch.int64)
-                or not torch.equal(types, expected_types)
-            ):
-                raise ValueError("Invalid V4.1 prepared image token types")
-            start = record["start"]
-            if type(start) is not int or start < previous_end:
-                raise ValueError(
-                    "V4.1 image spans must be nonnegative and non-overlapping"
+    def estimate_work(self, data, mm_type=None):
+        if not getattr(self, "_packed_forward_enabled", False):
+            return None
+        data = self._image_group(data)
+        grids = [self._vit_grid(image) for image in data]
+        sizes = [height * width for height, width in grids]
+        ratio = self.processor_config.vision_downsample_ratio
+        return MMWorkEstimate(
+            input_patches=sum(sizes),
+            output_tokens=sum(
+                num_image_tokens(
+                    (height + ratio - 1) // ratio,
+                    (width + ratio - 1) // ratio,
                 )
-            previous_end = start + expected_types.numel()
-            image = V41ImageInput(
-                start,
-                patches,
-                height,
-                width,
-                types.to(dtype=torch.int64),
-                record["content_sha256"],
-                record["processor_identity"],
-            )
-            validated.append(image)
-        # Validate the whole request before any image is copied to the GPU.
-        return validated
+                for height, width in grids
+            ),
+            max_attention_segment=max(sizes, default=0),
+            attention_work=sum(size * size for size in sizes),
+        )
 
-    def encode_prepared_images(self, images) -> list[torch.Tensor]:
-        return [
-            self.encode_image(image) for image in self.validate_prepared_images(images)
-        ]
+    def get_batch_work_budget(self, max_batch_media):
+        if not getattr(self, "_packed_forward_enabled", False):
+            return None
+        return MMWorkEstimate(input_patches=self._packed_max_patches)
+
+    def packed_forward_stats(self):
+        if not self._packed_stats_enabled:
+            return {
+                "enabled": self._packed_forward_enabled,
+                "stats_enabled": False,
+                "image_batch_histogram": {},
+            }
+        with self._packed_stats_lock:
+            return {
+                "enabled": self._packed_forward_enabled,
+                "stats_enabled": True,
+                "image_batch_histogram": dict(self._packed_batch_histogram),
+            }
+
+    def packed_graph_stats(self):
+        if self._packed_graph is None:
+            return {"enabled": False, "captures": 0, "replays": 0, "eager": 0}
+        return {"enabled": True, **self._packed_graph.stats()}
+
+    def input_transfer_stats(self):
+        if self._rgb_uploader is None:
+            return {"batches": 0, "bytes": 0, "budget_fallbacks": 0}
+        return self._rgb_uploader.stats()
+
+    def prepare_embedding_batch(self, data_list, mm_types):
+        if not self._gpu_preprocess_enabled or not self._packed_forward_enabled:
+            return None
+        if len(data_list) != len(mm_types) or any(
+            t != MMUrlType.IMAGE for t in mm_types
+        ):
+            raise ValueError("V4.1 staging requires matching IMAGE inputs")
+        groups = [self._image_group(data) for data in data_list]
+        if not all(
+            isinstance(image, _DecodedImage) for group in groups for image in group
+        ):
+            return None
+        if self._rgb_uploader is None:
+            self._rgb_uploader = RGBBatchUploader(
+                self._device,
+                int(os.environ.get("V41_GPU_PREFETCH_MAX_BYTES", str(1024**3))),
+            )
+        return self._rgb_uploader.upload(
+            [[image.rgb for image in group] for group in groups],
+            [isinstance(data, _DecodedImage) for data in data_list],
+        )
+
+    @torch.inference_mode()
+    def encode_images_packed(self, images) -> list[torch.Tensor]:
+        """Encode independent images together, preserving image and span order.
+
+        The caller owns stream dependencies for CUDA patches and completion.
+        Each bounded chunk uses the production packed ViT/aligner path and owns
+        independent assembled outputs for its callers.
+        """
+        from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.packed_vision import (
+            forward_packed,
+        )
+        from rtp_llm.utils.cuda_graph_gate import cuda_graph_gate
+
+        images = list(images)
+        # Keep the capacity guard: an image that cannot fit must not leave
+        # the chunking loop at the same offset forever.
+        if any(
+            image.n_vit_h * image.n_vit_w > self._packed_max_patches for image in images
+        ):
+            raise ValueError("V4.1 image exceeds packed patch budget")
+        outputs = []
+        offset = 0
+        while offset < len(images):
+            end, patch_count = offset, 0
+            while end < len(images) and end - offset < self._packed_max_images:
+                count = images[end].n_vit_h * images[end].n_vit_w
+                if patch_count + count > self._packed_max_patches:
+                    break
+                patch_count += count
+                end += 1
+            chunk = images[offset:end]
+            grids = [(image.n_vit_h, image.n_vit_w) for image in chunk]
+
+            def forward(patches, grids):
+                return forward_packed(self.vision, self.aligner, patches, grids)
+
+            def consume(aligned):
+                if len(aligned) != len(chunk):
+                    raise RuntimeError("Packed V4.1 aligner output count mismatch")
+                return [
+                    self._assemble_image_span(value, image)
+                    for value, image in zip(aligned, chunk)
+                ]
+
+            with cuda_graph_gate.operation():
+                patches = [
+                    image.patches.to(device=self._device, dtype=self._data_type)
+                    for image in chunk
+                ]
+                if self._packed_graph is None:
+                    outputs.extend(consume(forward(patches, grids)))
+            if self._packed_graph is not None:
+                outputs.extend(self._packed_graph.run(patches, grids, forward, consume))
+            if self._packed_stats_enabled:
+                with self._packed_stats_lock:
+                    count = len(chunk)
+                    self._packed_batch_histogram[count] = (
+                        self._packed_batch_histogram.get(count, 0) + 1
+                    )
+            offset = end
+        return outputs
 
     @staticmethod
-    def preprocess_input(mm_inputs, vit_config, **kwargs):
-        raise ValueError("V4.1 images require typed prepared-image inputs")
+    def preprocess_input(
+        mm_inputs, vit_config, *, processor_config, gpu_preprocess=False
+    ):
+        """Decode one bounded work item in MMProcessEngine's CPU executor.
 
-    def embedding(self, data, **kwargs):
-        return [self.encode_image(image) for image in data], [], []
+        GPU mode returns an owned CPU RGB tensor. Grid selection later uses
+        CPU shape metadata; H2D, resize, pad, normalization and patch folding
+        are submitted by the GPU-owning scheduler thread.
+        """
+        if not mm_inputs or any(
+            media.mm_type != MMUrlType.IMAGE for media in mm_inputs
+        ):
+            raise ValueError("V4.1 preprocessing requires non-empty IMAGE inputs")
+        # Validate the complete item before doing I/O; never publish a partial group.
+        for media in mm_inputs:
+            DeepSeekV41VisionEmbedding._validate_media_config(media)
+        results = []
+        deadline = time.monotonic() + 60
+        for media in mm_inputs:
+            with vit_preprocess_timer(
+                GaugeMetrics.VIT_IMAGE_FETCH_RT_US_METRIC, _METRIC_TAGS
+            ):
+                payload = load_image_source(
+                    media.url,
+                    vit_config.download_headers,
+                    max_file_size_kb=vit_config.mm_image_max_file_size_kb,
+                    deadline=deadline,
+                )
+            try:
+                with Image.open(payload) as image:
+                    if gpu_preprocess:
+                        results.append(_DecodedImage(_rgb_tensor(image)))
+                    else:
+                        patches, vit_h, vit_w, _, _ = preprocess_image(
+                            image, processor_config
+                        )
+                        results.append(_RuntimeImage(patches, vit_h, vit_w))
+            except OSError as error:
+                from rtp_llm.multimodal.mm_error_messages import MMErr
+
+                raise ValueError(MMErr.IMG_OPEN) from error
+        # Preserve the original scalar contract; existing embedding interfaces
+        # already accept ordered image groups for multi-media work items.
+        return results[0] if len(results) == 1 else results
+
+    def prepare_inspection_inputs(
+        self, mm_inputs, vit_config, *, deadline, cancellation_event
+    ):
+        from rtp_llm.ops import MultimodalInput
+
+        self.validate_inputs(mm_inputs)
+        sources = {}
+        result = []
+        for media in mm_inputs:
+            if media.url not in sources:
+                payload = load_image_source(
+                    media.url,
+                    vit_config.download_headers,
+                    max_file_size_kb=vit_config.mm_image_max_file_size_kb,
+                    deadline=deadline,
+                    cancellation_event=cancellation_event,
+                )
+                sources[media.url] = (
+                    "data:application/octet-stream;base64,"
+                    + base64.b64encode(payload.getvalue()).decode("ascii")
+                )
+            result.append(
+                MultimodalInput(
+                    sources[media.url],
+                    media.mm_type,
+                    torch.empty(0),
+                    media.mm_preprocess_config,
+                )
+            )
+        return result
+
+    def get_preprocess_params(self):
+        # Picklable CPU-only values: do not pass self or CUDA state to workers.
+        return {
+            "processor_config": self.processor_config,
+            "gpu_preprocess": self._gpu_preprocess_enabled,
+        }
+
+    def validate_inputs(self, mm_inputs):
+        for media in mm_inputs:
+            if media.mm_type != MMUrlType.IMAGE:
+                raise ValueError("V4.1 supports IMAGE inputs only")
+            self._validate_media_config(media)
+
+    @staticmethod
+    def _validate_media_config(media):
+        config = media.mm_preprocess_config
+        fields = (
+            "width",
+            "height",
+            "min_pixels",
+            "max_pixels",
+            "fps",
+            "min_frames",
+            "max_frames",
+            "max_long_side_pixel",
+        )
+        if (
+            any(getattr(config, name, -1) != -1 for name in fields)
+            or config.crop_positions
+        ):
+            raise ValueError("V4.1 image preprocessing is fixed by the model config")
+
+    @staticmethod
+    def _image_group(data):
+        if isinstance(data, (_DecodedImage, UploadedImage, _RuntimeImage)):
+            return [data]
+        return list(data)
+
+    def _vit_grid(self, image):
+        if not isinstance(image, (_DecodedImage, UploadedImage)):
+            return image.n_vit_h, image.n_vit_w
+        height, width = image.rgb.shape[:2]
+        _, _, target_h, target_w = plan_image_grid(width, height, self.processor_config)
+        patch = self.processor_config.vision_patch_size
+        return target_h // patch, target_w // patch
+
+    def _materialize_image(self, image):
+        if not isinstance(image, (_DecodedImage, UploadedImage)):
+            return image
+        n_vit_h, n_vit_w = self._vit_grid(image)
+        if (
+            getattr(self, "_packed_forward_enabled", False)
+            and n_vit_h * n_vit_w > self._packed_max_patches
+        ):
+            raise ValueError("V4.1 decoded image exceeds packed patch budget")
+        patch = self.processor_config.vision_patch_size
+        with torch.profiler.record_function("v41_gpu_preprocess"):
+            patches = _preprocess_rgb_on_device(
+                image.rgb,
+                (n_vit_h * patch, n_vit_w * patch),
+                patch,
+                self._device,
+            )
+        return _RuntimeImage(patches, n_vit_h, n_vit_w)
 
     @torch.inference_mode()
-    def inject_embeddings(
-        self, embeddings: torch.Tensor, prepared: V41PreparedInputs
-    ) -> torch.Tensor:
-        """Inject complete image spans before expanding the HC residual streams."""
-        for image in prepared.images:
-            end = image.start + image.length
-            embeddings[image.start : end].copy_(self.encode_image(image).to(embeddings))
-        return embeddings
+    def embedding(self, data, **kwargs):
+        images = self._image_group(data)
+        images = [self._materialize_image(image) for image in images]
+        if getattr(self, "_packed_forward_enabled", False):
+            outputs = self.encode_images_packed(images)
+        else:
+            outputs = [self.encode_image(image) for image in images]
+        return (
+            (
+                outputs[0]
+                if isinstance(data, (_DecodedImage, UploadedImage, _RuntimeImage))
+                else outputs
+            ),
+            [],
+            [],
+        )
+
+    @torch.inference_mode()
+    def batched_embedding(self, data_list, mm_types, **kwargs):
+        if len(data_list) != len(mm_types):
+            raise ValueError("V4.1 batch data/type counts differ")
+        if any(mm_type != MMUrlType.IMAGE for mm_type in mm_types):
+            raise ValueError("V4.1 supports IMAGE inputs only")
+        groups = [self._image_group(data) for data in data_list]
+        if not getattr(self, "_packed_forward_enabled", False):
+            return super().batched_embedding(data_list, mm_types, **kwargs)
+        groups = [
+            [self._materialize_image(image) for image in group] for group in groups
+        ]
+        outputs = self.encode_images_packed(
+            [image for group in groups for image in group]
+        )
+        if len(outputs) != sum(map(len, groups)):
+            raise RuntimeError("Packed V4.1 embedding output count mismatch")
+        results, offset = [], 0
+        for data, group in zip(data_list, groups):
+            end = offset + len(group)
+            values = outputs[offset:end]
+            results.append(
+                (
+                    (
+                        values[0]
+                        if isinstance(
+                            data, (_DecodedImage, UploadedImage, _RuntimeImage)
+                        )
+                        else values
+                    ),
+                    [],
+                    [],
+                )
+            )
+            offset = end
+        return results
 
 
 __all__ = ["DeepSeekV41VisionEmbedding", "V41VisionAttention"]

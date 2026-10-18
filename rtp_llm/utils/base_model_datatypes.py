@@ -72,13 +72,6 @@ class RequestInfo:
 
 
 @dataclass
-class MultimodalTokenExpansion:
-    token_ids: Sequence[int]
-    # (offset, length) in the expanded sequence, in ViT output segment order.
-    spans: List[Tuple[int, int]]
-
-
-@dataclass
 class GenerateInput:
     request_id: int
     token_ids: torch.Tensor
@@ -89,16 +82,12 @@ class GenerateInput:
     token_type_ids: List[int] = field(default_factory=list)
     group_size: int = 1
     group_id: int = -1  # Batch group ID for force batch grouping, -1 means not set
-    v41_inputs: Any = None
     enqueued_by_master: bool = False
     headers: Dict[str, str] = field(default_factory=dict, repr=False)
     request_info: RequestInfo = field(default_factory=RequestInfo, repr=False)
     # Internal receipt from ViT metadata, bound to the selected worker and media.
     # It is not accepted from request headers/config or sent to the model RPC.
     greennet_verified_vit: Optional[Tuple[str, int, Tuple[str, ...]]] = field(
-        default=None, init=False, repr=False
-    )
-    mm_token_expansion: Optional[MultimodalTokenExpansion] = field(
         default=None, init=False, repr=False
     )
 
@@ -114,7 +103,6 @@ class GenerateInput:
         return self.token_ids.shape[-1] - self.prefix_length
 
     def update_prefix(self, prefix_tokens: torch.Tensor):
-        self.mm_token_expansion = None
         self.token_ids = torch.concat([prefix_tokens, self.token_ids], dim=0)
         self.prefix_length = prefix_tokens.nelement()
 
