@@ -35,6 +35,8 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from rtp_llm.device.device_type import is_cuda
+
 logger = logging.getLogger(__name__)
 DEAD_ID = -1
 
@@ -427,36 +429,74 @@ class _PinnedSharedTable:
             self, _release_shared_table, str(data_path), str(lock_path), str(lease_path)
         )
         self.device = torch.device(device)
+        self.registered = False
         from cuda.bindings import runtime
 
         with torch.cuda.device(self.device):
-            (result,) = runtime.cudaHostRegister(
-                self.storage.data_ptr(), total_bytes, 3  # Portable | Mapped
-            )
-            if int(result) != 0:
+            try:
+                if is_cuda() and torch.cuda.get_device_capability(self.device) == (
+                    9,
+                    0,
+                ):
+                    from .sm90_engram import _register_shared_host_ranges
+
+                    chunk_mb = int(
+                        os.environ.get("DSV41_ENGRAM_REGISTER_CHUNK_MB", "256")
+                    )
+                    if chunk_mb < 0:
+                        raise ValueError(
+                            "DSV41_ENGRAM_REGISTER_CHUNK_MB must be nonnegative"
+                        )
+                    registered_ranges = _register_shared_host_ranges(
+                        runtime,
+                        self.storage.data_ptr(),
+                        total_bytes,
+                        chunk_mb * 1024**2,
+                    )
+                else:
+                    # Preserve the original non-Hopper single-registration path:
+                    # no inter-process registration lock or chunk policy.
+                    (result,) = runtime.cudaHostRegister(
+                        self.storage.data_ptr(), total_bytes, 3
+                    )
+                    if int(result) != 0:
+                        raise RuntimeError(f"Engram cudaHostRegister failed: {result}")
+                    registered_ranges = (self.storage.data_ptr(),)
+            except BaseException:
                 self._lease_finalizer()
-                raise RuntimeError(f"Engram cudaHostRegister failed: {result}")
+                raise
         self._registration_finalizer = weakref.finalize(
-            self, self._unregister, runtime, self.storage
+            self, self._unregister, runtime, self.storage, registered_ranges
         )
         if not self.storage.is_pinned():
             self._registration_finalizer()
             self._lease_finalizer()
             raise RuntimeError("CUDA did not recognize the Engram shared pinned pages")
         self.runtime = runtime
+        self.registered = True
         logger.info(
-            "Engram CUDA-registered %.2f GiB shared pinned host RAM on %s",
+            "Engram CUDA-registered %.2f GiB shared pinned host RAM on %s (%d ranges)",
             total_bytes / 1024**3,
             self.device,
+            len(registered_ranges),
         )
 
     @staticmethod
-    def _unregister(runtime, storage):
-        (result,) = runtime.cudaHostUnregister(storage.data_ptr())
-        if int(result) != 0:
-            logger.warning("Engram cudaHostUnregister failed: %s", result)
+    def _unregister(runtime, storage, registered_ranges):
+        # storage is intentionally retained by the finalizer until all ranges
+        # are unregistered, including when the owning module is collected.
+        for address in reversed(registered_ranges):
+            (result,) = runtime.cudaHostUnregister(address)
+            if int(result) != 0:
+                logger.warning(
+                    "Engram cudaHostUnregister failed: ptr=%#x error=%s",
+                    address,
+                    result,
+                )
 
     def cuda_view(self, tensor):
+        if not self.registered:
+            raise RuntimeError("Engram CPU lookup table has no registered CUDA view")
         with torch.cuda.device(self.device):
             result, pointer = self.runtime.cudaHostGetDevicePointer(
                 tensor.data_ptr(), 0
@@ -492,19 +532,32 @@ class HostEngramEmbedding:
         self._pinned = pinned
         self._uva = None
         if pinned is not None:
-            self._uva = (pinned.cuda_view(self.weight), pinned.cuda_view(self.scales))
+            # Startup warmup also uses the device geometry for CPU lookup.
             self._num_sms = torch.cuda.get_device_properties(
                 pinned.device
             ).multi_processor_count
+            if pinned.registered:
+                self._uva = (
+                    pinned.cuda_view(self.weight),
+                    pinned.cuda_view(self.scales),
+                )
 
-    def __call__(self, indices: torch.Tensor, device) -> torch.Tensor:
-        if indices.is_cuda:
+    def __call__(self, indices: torch.Tensor, device, *, out=None) -> torch.Tensor:
+        if indices.is_cuda and self._uva is not None:
             from rtp_llm.models_py.modules.dsv41 import _engram_triton
 
-            return _engram_triton.lookup_host_rows(*self._uva, indices, self._num_sms)
+            return _engram_triton.lookup_host_rows(
+                *self._uva, indices, self._num_sms, out=out
+            )
+        if out is not None:
+            raise RuntimeError("Preallocated Engram lookup requires the CUDA UVA path")
+        if indices.is_cuda and torch.cuda.is_current_stream_capturing():
+            raise RuntimeError(
+                "Engram CPU lookup requires eager execution, not CUDA Graph"
+            )
         indices = indices.detach().to(device="cpu", dtype=torch.int64)
-        valid = indices >= 0
-        flat = indices.clamp_min(0).flatten()
+        valid = (indices >= 0) & (indices < self.weight.shape[0])
+        flat = indices.masked_fill(~valid, 0).flatten()
         if self.weight.element_size() == 1:
             rows = (
                 self.weight.view(torch.uint8)
@@ -518,6 +571,35 @@ class HostEngramEmbedding:
         rows = rows.to(torch.bfloat16).view(*indices.shape, self.weight.shape[1])
         rows.masked_fill_(~valid[..., None], 0)
         return rows.to(device=device)
+
+
+def create_engram_prefetch(device, layer_embeddings):
+    """Select an optional lookup prefetcher without exposing backend policy.
+
+    SM100 and other backends retain per-layer lookup on the calling stream.
+    Only NVIDIA SM90 with registered UVA tables enables the auxiliary stream.
+    """
+    device = torch.device(device)
+    if (
+        device.type != "cuda"
+        or not is_cuda()
+        or torch.cuda.get_device_capability(device) != (9, 0)
+        or os.environ.get("DSV41_ENGRAM_PREFETCH", "1") != "1"
+    ):
+        return None, 0
+    layer_embeddings = tuple(layer_embeddings)
+    if not layer_embeddings or any(
+        embedding._uva is None for _, embedding in layer_embeddings
+    ):
+        return None, 0
+    max_rows = int(os.environ.get("DSV41_ENGRAM_PREFETCH_MAX_ROWS", "256"))
+    if max_rows <= 0:
+        raise ValueError("DSV41_ENGRAM_PREFETCH_MAX_ROWS must be positive")
+    from .sm90_engram import UvaEngramPrefetch
+
+    prefetch = UvaEngramPrefetch(device, [i for i, _ in layer_embeddings])
+    logger.info("SM90 Engram UVA prefetch enabled: decode_only=1 max_rows=%d", max_rows)
+    return prefetch, max_rows
 
 
 def dequantize_block_weight(
@@ -717,7 +799,17 @@ class Engram(nn.Module):
             float(_config_value(config, "rms_norm_eps")),
         )
 
-    def forward(self, hidden, hash_ids, token_mask=None):
+    def forward(self, hidden, hash_ids, token_mask=None, *, embedding_rows=None):
+        if embedding_rows is not None and (
+            embedding_rows.shape
+            != (hidden.shape[0], self.layout.n_hash_cols, self.layout.head_dim)
+            or embedding_rows.dtype != torch.bfloat16
+            or embedding_rows.device != hidden.device
+            or not embedding_rows.is_contiguous()
+        ):
+            raise ValueError(
+                "Prefetched Engram rows must be contiguous same-device BF16 [T,H,D]"
+            )
         if hidden.shape[0] == 0:
             return hidden
         # Engram is token-local after hashing. Bound lookup/projection/gate
@@ -739,14 +831,27 @@ class Engram(nn.Module):
                     hash_ids[begin:end],
                     None if token_mask is None else token_mask[begin:end],
                     out=output[begin:end],
+                    embedding_rows=(
+                        None if embedding_rows is None else embedding_rows[begin:end]
+                    ),
                 )
             return output
         return self._forward_rows(
-            hidden, hash_ids, token_mask, out=hidden if inplace else None
+            hidden,
+            hash_ids,
+            token_mask,
+            out=hidden if inplace else None,
+            embedding_rows=embedding_rows,
         )
 
-    def _forward_rows(self, hidden, hash_ids, token_mask, *, out=None):
-        rows = self.embed_tokens(hash_ids, hidden.device).flatten(-2)
+    def _forward_rows(
+        self, hidden, hash_ids, token_mask, *, out=None, embedding_rows=None
+    ):
+        rows = (
+            self.embed_tokens(hash_ids, hidden.device)
+            if embedding_rows is None
+            else embedding_rows
+        ).flatten(-2)
         kv = self.wkv(rows)
         return gated_engram_residual(
             hidden, kv, self.q_weight, self.k_weight, self.eps, token_mask, out=out

@@ -137,12 +137,23 @@ def _lookup_host_kernel(
         )
 
 
-def lookup_host_rows(weight_uva, scales_uva, indices, num_sms):
+def lookup_host_rows(weight_uva, scales_uva, indices, num_sms, out=None):
     tokens, heads = indices.shape
     dim = weight_uva.shape[1]
-    output = torch.empty(
-        (tokens, heads, dim), dtype=torch.bfloat16, device=indices.device
-    )
+    output = out
+    if output is None:
+        output = torch.empty(
+            (tokens, heads, dim), dtype=torch.bfloat16, device=indices.device
+        )
+    elif (
+        output.shape != (tokens, heads, dim)
+        or output.dtype != torch.bfloat16
+        or output.device != indices.device
+        or not output.is_contiguous()
+    ):
+        raise ValueError(
+            "Engram lookup output must be contiguous same-device BF16 [T,H,D]"
+        )
     rows = tokens * heads
     if not rows:
         return output

@@ -86,6 +86,7 @@ class Block(nn.Module):
         self.engram = None
         self.engram_hashes = None
         self.engram_token_mask = None
+        self.engram_prefetch = None
 
         attn_cls = CommitOnlyAttentionFP8 if commit_only else AttentionFP8
         attn_extra = {}
@@ -274,11 +275,17 @@ class Block(nn.Module):
         if self.engram is None:
             return hidden
         shape = hidden.shape
-        return self.engram(
+        args = (
             hidden.reshape(-1, shape[-2], shape[-1]),
             self.engram_hashes,
             self.engram_token_mask,
-        ).reshape(shape)
+        )
+        prefetch = getattr(self, "engram_prefetch", None)
+        if prefetch is None:
+            return self.engram(*args).reshape(shape)
+        return self.engram(*args, embedding_rows=prefetch.wait(self.layer_id)).reshape(
+            shape
+        )
 
     def _try_mega_mhc(self, attn_out, residual, post, comb, *, original_tokens=None):
         """Fuse the intra-layer delayed mHC seam and FFN RMSNorm."""
