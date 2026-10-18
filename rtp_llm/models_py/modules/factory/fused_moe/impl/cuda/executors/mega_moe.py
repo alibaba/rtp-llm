@@ -55,6 +55,7 @@ _PRE_KERNEL_BARRIER_LOGGED_KEYS: set[tuple[int, int]] = set()
 
 from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.activation import situ_kwargs
 
+
 def _mega_output_capacity(buf, requested_capacity: int) -> int:
     """Output rows must cover DeepGEMM's internally aligned token capacity."""
     capacity = max(int(requested_capacity), 1)
