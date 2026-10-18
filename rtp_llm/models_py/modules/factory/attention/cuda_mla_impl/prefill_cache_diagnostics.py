@@ -62,6 +62,12 @@ class PrefillCacheDiagnostics:
         self.row["async_prepare_cache"] = (
             os.environ.get("RTP_LLM_ASYNC_PREPARE_CACHE", "0") == "1"
         )
+        self.row["prefill_topk_backend"] = os.environ.get(
+            "GLM5_PREFILL_INDEXER_TOPK_BACKEND", "dsv4_per_row"
+        )
+        self.row["indexer_fused_topk"] = (
+            os.environ.get("RTP_INDEXER_FUSED_TOPK", "0") == "1"
+        )
         self.op = op
         self.capture = None
         control = self.root / "prefill_indexer_capture.json"
