@@ -10,6 +10,10 @@ from torch import nn
 from rtp_llm.models_py.distributed.collective_torch import Group, barrier
 from rtp_llm.models_py.distributed.pynccl_cp import all_gather
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
+from rtp_llm.models_py.modules.base.cuda.paged_mqa import paged_mqa_context_lens
+from rtp_llm.models_py.modules.base.cuda.paged_mqa import (
+    physical_block_table as _physical_block_table,
+)
 from rtp_llm.models_py.modules.dsv4.chunk_env import dsv4_chunk_tokens_from_env
 from rtp_llm.ops.compute_ops import KVCache, rtp_llm_ops
 
@@ -89,23 +93,6 @@ def _write_prefill_topk(
     if canonicalize:
         indices = _canonicalize_topk_indices(indices)
     out.copy_(torch.where(indices >= 0, indices + offsets.unsqueeze(1), indices))
-
-
-def _physical_block_table(attention_inputs: Any) -> torch.Tensor:
-    """Return the paged-cache block table for indexer KV reads.
-
-    Prefer ``kv_cache_kernel_block_id_device`` (published by the input gatherer
-    via publishInt32ToCuda — stable device pointer).  ``kv_cache_block_id_device``
-    is an ad-hoc per-step copy whose host counterpart can be reclaimed when
-    buffer_holder_ is released, leading to slot_mapping / page_indice
-    corruption.  When ``kernel_seq_size_per_block == seq_size_per_block`` the
-    two tables have identical shape and values, so preferring kernel_block_id
-    is safe; the legacy physical_block_id stays as fallback.
-    """
-    kernel = getattr(attention_inputs, "kv_cache_kernel_block_id_device", None)
-    if isinstance(kernel, torch.Tensor) and kernel.numel() > 0:
-        return kernel
-    return attention_inputs.kv_cache_block_id_device
 
 
 def _prefill_physical_block_table(attention_inputs: Any) -> torch.Tensor:
@@ -718,7 +705,7 @@ class IndexerOp(nn.Module):
             weights: Weights tensor [num_tokens, index_n_heads, 1]
             kv_cache: KV cache object
             fmha_params: FMHA parameters with expanded_seq_lens, etc.
-            attention_inputs: Attention inputs with decode_cu_seqlens_d, kv_cache_kernel_block_id_device
+            attention_inputs: Attention inputs with physical page tables and MTP phase flags
 
         Returns:
             TopK indices tensor
@@ -737,15 +724,15 @@ class IndexerOp(nn.Module):
         )
 
         block_table = _physical_block_table(attention_inputs)
-        cu_seqlens_q = attention_inputs.decode_cu_seqlens_d
         lengths = fmha_params.expanded_seq_lens
+        kvlen_2d = paged_mqa_context_lens(attention_inputs, fmha_params)
+
+        if q_fp8.shape[0] == 0:
+            return torch.empty(
+                (0, self.index_topk), dtype=torch.int32, device=q_fp8.device
+            )
 
         if is_multi_token_decode:
-            # Target verify and draft extend have multiple query tokens per
-            # request. Treat either phase as flattened decode: each token gets
-            # its own context length and the same block-table row as its parent
-            # request. This matches the paged DSA path used by SGLang/vLLM and
-            # avoids the ragged fp8_mqa_logits path under CUDA graph replay.
             num_tokens = q_fp8.shape[0]
             batch_size = block_table.shape[0]
             assert batch_size > 0
@@ -753,18 +740,14 @@ class IndexerOp(nn.Module):
                 num_tokens % batch_size == 0
             ), f"multi-token decode rows {num_tokens} not divisible by batch {batch_size}"
             tokens_per_batch = num_tokens // batch_size
-            block_table = block_table.repeat_interleave(
-                tokens_per_batch, dim=0, output_size=num_tokens
-            )
-            lengths = fmha_params.expanded_seq_lens
-            kvlen_2d = lengths.reshape(-1, 1)
-            cu_seqlens_q = torch.arange(
-                0, num_tokens + 1, 1, dtype=torch.int32, device=q_fp8.device
-            )
-        else:
-            # deep_gemm 2.5.0 expects context_lens as [batch_size, next_n].
-            # fmha_params.kvlen_d is 1D [B]; unsqueeze(1) -> [B, 1] for next_n=1.
-            kvlen_2d = fmha_params.kvlen_d.unsqueeze(1)
+            if kvlen_2d.shape[0] != batch_size:
+                block_table = block_table.repeat_interleave(
+                    tokens_per_batch, dim=0, output_size=num_tokens
+                )
+
+        # Native MTP shares the request's page table and KV reads across queries.
+        # Keep this layout identical to the scheduler's context_lens layout.
+        paged_q = q_fp8.view(*kvlen_2d.shape, self.index_n_heads, self.index_head_dim)
 
         max_seq_len = block_table.shape[1] * self.blocksize
         schedule_metadata = getattr(fmha_params, "schedule_metadata", None)
@@ -782,7 +765,7 @@ class IndexerOp(nn.Module):
             )
 
         logits = deep_gemm.fp8_paged_mqa_logits(
-            q_fp8.unsqueeze(1),
+            paged_q,
             kv_cache_fp8.view(dtype=torch.uint8),
             weights,
             kvlen_2d,
