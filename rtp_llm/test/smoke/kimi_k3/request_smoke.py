@@ -293,7 +293,6 @@ class SmokeRequests:
     def dash(self, name, payload, *, logprobs=False, top_count=0, error_field=None):
         import grpc
         from google.protobuf.json_format import MessageToDict
-
         from rtp_llm.dash_sc.client import (
             build_model_infer_request,
             dash_sc_grpc_client_channel_options,

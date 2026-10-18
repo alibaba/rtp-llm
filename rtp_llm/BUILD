@@ -614,6 +614,27 @@ py_library(
     ]
 )
 
+py_binary(
+    name = "rtp_llm_server",
+    srcs = ["start_server.py"],
+    main = "start_server.py",
+    data = [
+        ":alog_config",
+        "//:rtp_compute_ops",
+        "//:th_transformer",
+        "//:th_transformer_config",
+    ],
+    deps = [
+        ":rtp_llm_lib",
+        ":sdk",
+    ] + select({
+        # database.py imports these lazily for LOAD_METHOD=fastsafetensors.
+        "@//:using_cuda13_x86": [":fastsafetensors", ":fast-safetensors"],
+        "@//:using_cuda12_9_x86": [":fastsafetensors", ":fast-safetensors"],
+        "//conditions:default": [],
+    }),
+)
+
 py_library(
     name = "rtp_llm_package_libs",
     deps = [
