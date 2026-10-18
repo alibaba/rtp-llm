@@ -268,6 +268,31 @@ class DiffusionGemmaProposer(nn.Module):
             temperature = denoiser.temperature(step)
             processed = logits / temperature
             new_argmax = torch.argmax(processed, dim=-1)
+            if bool(os.environ.get("DGM_FI_DIAG", "")) and step == 0:
+                # Reuse bring-up fork: with the C++ reuse fix the matched
+                # blocks are shared and real (run-44 read probe), yet the
+                # canvas still degenerates to all-EOS. Decide between
+                # "canvas hidden ~constant (uniform attention)" and
+                # "healthy hidden, degenerate logits/sampler" with one line.
+                hidden_std = (
+                    hidden.reshape(batch, self.canvas_length, -1)
+                    .std(dim=1)
+                    .mean()
+                    .item()
+                )
+                top5 = (
+                    processed[0, :3].topk(3, dim=-1).indices.tolist()
+                )
+                entropy0 = torch.distributions.Categorical(
+                    logits=processed
+                ).entropy()[0, :3].tolist()
+                print(
+                    f"[dgm-fi] step0: prefix={prefix.tolist()} "
+                    f"hidden_row_std={hidden_std:.4f} "
+                    f"logits[0,:3]top3={top5} entropy[0,:3]="
+                    f"[{entropy0[0]:.3f}, {entropy0[1]:.3f}, {entropy0[2]:.3f}]",
+                    flush=True,
+                )
             if history is None:
                 history = torch.full(
                     (max(1, self.stability_threshold), batch, self.canvas_length),
