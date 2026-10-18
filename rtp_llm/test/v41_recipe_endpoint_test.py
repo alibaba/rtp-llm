@@ -1,7 +1,6 @@
 """Exercise the actual RTP response/config path with CPU token-source fixtures."""
 
 import asyncio
-import io
 import json
 import threading
 import unittest
@@ -9,7 +8,6 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
-from PIL import Image
 
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.py_config_modules import (
@@ -18,17 +16,15 @@ from rtp_llm.config.py_config_modules import (
     RenderConfig,
 )
 from rtp_llm.frontend.frontend_server import FrontendServer
-from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_processor import (
-    IMAGE_PLACEHOLDER,
-    V41ImageProcessorConfig,
-    preprocess_image,
-)
 from rtp_llm.openai.api_datatype import ChatCompletionRequest
 from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
 from rtp_llm.openai.renderers.basic_renderer import BasicRenderer
 from rtp_llm.openai.renderers.custom_renderer import RendererParams
 from rtp_llm.openai.renderers.deepseekv4_renderer import DeepseekV4Renderer
-from rtp_llm.openai.renderers.deepseekv41_renderer import DeepseekV41Renderer
+from rtp_llm.openai.renderers.deepseekv41_renderer import (
+    IMAGE_PLACEHOLDER,
+    DeepseekV41Renderer,
+)
 from rtp_llm.utils.base_model_datatypes import AuxInfo, GenerateOutput, GenerateOutputs
 
 
@@ -61,7 +57,7 @@ def make_renderer():
     renderer.extra_stop_words = []
     renderer.extra_stop_word_ids_list = []
     renderer.stop_words_id_list = []
-    renderer.image_processor_config = V41ImageProcessorConfig()
+    renderer.image_token_id = 129264
     return renderer
 
 
@@ -224,7 +220,7 @@ class EndpointAsyncPreparationTest(unittest.IsolatedAsyncioTestCase):
                 await asyncio.gather(task, return_exceptions=True)
             start_backend.assert_not_called()
 
-    async def test_slow_image_keeps_text_and_existing_sse_responsive(self):
+    async def test_slow_image_render_keeps_text_and_existing_sse_responsive(self):
         class ImageTokenizer(CharacterTokenizer):
             def encode(self, text, **kwargs):
                 tokens = []
@@ -260,24 +256,11 @@ class EndpointAsyncPreparationTest(unittest.IsolatedAsyncioTestCase):
         raw_request.is_disconnected = connected
         loop = asyncio.get_running_loop()
         loop_thread = threading.get_ident()
-        download_started = asyncio.Event()
-        release_download = threading.Event()
+        image_render_started = asyncio.Event()
+        release_image_render = threading.Event()
         continue_sse = asyncio.Event()
         received = []
         preparation_threads = []
-        image_bytes = io.BytesIO()
-        Image.new("RGB", (42, 84), color="red").save(image_bytes, format="PNG")
-
-        def slow_download(url):
-            preparation_threads.append(threading.get_ident())
-            loop.call_soon_threadsafe(download_started.set)
-            if not release_download.wait(10):
-                raise TimeoutError("test did not release image download")
-            return io.BytesIO(image_bytes.getvalue())
-
-        def prepare_image(*args, **kwargs):
-            preparation_threads.append(threading.get_ident())
-            return preprocess_image(*args, **kwargs)
 
         def check_loop():
             self.assertIs(asyncio.get_running_loop(), loop)
@@ -293,7 +276,8 @@ class EndpointAsyncPreparationTest(unittest.IsolatedAsyncioTestCase):
             async def enqueue(self, inputs):
                 check_loop()
                 received.append(inputs)
-                is_sse = "sse" in inputs.v41_inputs.prompt
+                prompt = renderer.tokenizer.decode(inputs.token_ids.flatten().tolist())
+                is_sse = "sse" in prompt
 
                 async def source():
                     chunks = ("first", " second") if is_sse else ("answer STOP hidden",)
@@ -339,15 +323,19 @@ class EndpointAsyncPreparationTest(unittest.IsolatedAsyncioTestCase):
             stop="STOP",
         )
         image_before = image_request.model_dump()
+        render_chat = renderer.render_chat
+
+        def slow_image_render(req):
+            if req is image_request:
+                preparation_threads.append(threading.get_ident())
+                loop.call_soon_threadsafe(image_render_started.set)
+                if not release_image_render.wait(10):
+                    raise TimeoutError("test did not release image rendering")
+            return render_chat(req)
+
         with patch.object(
             renderer, "generate_choice", side_effect=create_choices
-        ), patch(
-            "rtp_llm.multimodal.multimodal_util.get_bytes_io_from_url",
-            side_effect=slow_download,
-        ), patch(
-            "rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_processor.preprocess_image",
-            side_effect=prepare_image,
-        ):
+        ), patch.object(renderer, "render_chat", side_effect=slow_image_render):
             sse = await server.chat_completion(
                 request(messages=[{"role": "user", "content": "sse"}], stream=True),
                 raw_request,
@@ -357,7 +345,7 @@ class EndpointAsyncPreparationTest(unittest.IsolatedAsyncioTestCase):
                 server.chat_completion(image_request, raw_request)
             )
             try:
-                await asyncio.wait_for(download_started.wait(), timeout=5)
+                await asyncio.wait_for(image_render_started.wait(), timeout=5)
                 text = await asyncio.wait_for(
                     server.chat_completion(request(stop="STOP"), raw_request), timeout=5
                 )
@@ -382,9 +370,9 @@ class EndpointAsyncPreparationTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(content, "first second")
                 self.assertFalse(image_task.done())
                 self.assertEqual(len(received), 2)
-                self.assertTrue(all(not item.v41_inputs.images for item in received))
+                self.assertTrue(all(not item.mm_inputs for item in received))
             finally:
-                release_download.set()
+                release_image_render.set()
                 continue_sse.set()
                 image_response = await asyncio.wait_for(image_task, timeout=10)
                 await sse.body_iterator.aclose()
@@ -394,8 +382,12 @@ class EndpointAsyncPreparationTest(unittest.IsolatedAsyncioTestCase):
             json.loads(image_response.body)["choices"][0]["message"]["content"],
             "answer ",
         )
-        self.assertEqual(len(received[-1].v41_inputs.images), 1)
-        self.assertEqual(len(preparation_threads), 2)
+        self.assertEqual(received[-1].token_ids.flatten().tolist().count(129264), 1)
+        self.assertEqual(len(received[-1].mm_inputs), 1)
+        self.assertEqual(
+            received[-1].mm_inputs[0].url, "https://image.invalid/slow.png"
+        )
+        self.assertEqual(len(preparation_threads), 1)
         self.assertNotIn(loop_thread, preparation_threads)
         self.assertEqual(image_request.model_dump(), image_before)
         self.assertEqual(renderer.stop_words_id_list, [])
@@ -453,7 +445,7 @@ class EndpointStreamTest(unittest.IsolatedAsyncioTestCase):
                         "answer ",
                     )
                     self.assertIn("STOP", received[-1].generate_config.stop_words_str)
-                    self.assertIsNone(received[-1].v41_inputs)
+                    self.assertEqual(received[-1].mm_inputs, [])
 
     async def test_nonstream_entrypoint_stops_before_consuming_later_backend_chunks(
         self,

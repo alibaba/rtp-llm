@@ -1564,6 +1564,88 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
                             int(is_streaming),
                         )
 
+    def _image_accounting_builder(self, **options):
+        return StreamResponseBuilder(
+            dash_sc_request_id="v41-media",
+            model_name="v41",
+            request_log_tag="v41-media",
+            **options,
+        )
+
+    @staticmethod
+    def _image_accounting_output(lengths):
+        return GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([7]),
+                    finished=False,
+                    aux_info=AuxInfo(input_len=20, multimodal_lengths=lengths),
+                )
+            ]
+        )
+
+    def test_v41_opt_in_reports_backend_image_tokens_on_first_response(self):
+        builder = self._image_accounting_builder(image_tokens_from_backend=True)
+        frame = builder.build(
+            self._image_accounting_output(
+                {int(MMUrlType.IMAGE): 17, int(MMUrlType.VIDEO): 90}
+            )
+        )
+        self.assertEqual(
+            frame.infer_response.parameters["image_tokens"].int64_param, 17
+        )
+
+    def test_v41_unknown_image_tokens_not_fabricated_and_later_metadata_is_used(self):
+        builder = self._image_accounting_builder(image_tokens_from_backend=True)
+        first = builder.build(self._image_accounting_output({}))
+        self.assertNotIn("image_tokens", first.infer_response.parameters)
+        second = builder.build(
+            self._image_accounting_output({int(MMUrlType.IMAGE): 17})
+        )
+        third = builder.build(self._image_accounting_output({}))
+        self.assertEqual(
+            second.infer_response.parameters["image_tokens"].int64_param, 17
+        )
+        self.assertEqual(
+            third.infer_response.parameters["image_tokens"].int64_param, 17
+        )
+        self.assertNotIn("image_tokens", first.infer_response.parameters)
+
+    def test_backend_image_accounting_does_not_change_other_models_or_typed_values(
+        self,
+    ):
+        for options, expected in (
+            ({}, None),
+            ({"image_tokens": 4}, 4),
+            ({"image_tokens": 4, "image_tokens_from_backend": True}, 4),
+        ):
+            with self.subTest(options=options):
+                builder = self._image_accounting_builder(**options)
+                for _ in range(2):
+                    frame = builder.build(
+                        self._image_accounting_output({int(MMUrlType.IMAGE): 17})
+                    )
+                    if expected is None:
+                        self.assertNotIn(
+                            "image_tokens", frame.infer_response.parameters
+                        )
+                    else:
+                        self.assertEqual(
+                            frame.infer_response.parameters["image_tokens"].int64_param,
+                            expected,
+                        )
+
+    def test_unknown_backend_image_key_or_invalid_length_does_not_emit_zero(self):
+        for lengths in (
+            {int(MMUrlType.VIDEO): 20},
+            {"1": 20},
+            {int(MMUrlType.IMAGE): -1},
+        ):
+            with self.subTest(lengths=lengths):
+                builder = self._image_accounting_builder(image_tokens_from_backend=True)
+                frame = builder.build(self._image_accounting_output(lengths))
+                self.assertNotIn("image_tokens", frame.infer_response.parameters)
+
     def test_empty_generate_outputs_raises(self) -> None:
         go = GenerateOutputs(generate_outputs=[])
         builder = StreamResponseBuilder(

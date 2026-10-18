@@ -28,7 +28,13 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
 )
 from rtp_llm.multimodal.mm_embedding_cache import MMEmbeddingCache, MMHashKeyCache
 from rtp_llm.multimodal.mm_process_engine import MMEmbeddingRes
-from rtp_llm.ops import MMPreprocessConfig, MultimodalInput, PDSepConfig, VitSeparation
+from rtp_llm.ops import (
+    MMPreprocessConfig,
+    MultimodalInput,
+    PDSepConfig,
+    VitSeparation,
+    get_block_cache_keys,
+)
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
 from rtp_llm.server.master_client import FlexlbResponse, MasterClient
 from rtp_llm.server.mm_cache_metadata import metadata_from_proto
@@ -271,7 +277,7 @@ class MMHashRpcTest(unittest.IsolatedAsyncioTestCase):
         await asyncio.gather(*(probe() for _ in range(16)))
         self.engine.get_embedding_result.assert_not_called()
 
-    async def test_frontend_route_to_real_vit_rpc_expands_prefill_input(self):
+    async def test_frontend_route_uses_hashes_but_sends_generic_input(self):
         # The frontend routing method, MasterClient, gRPC transport, and ViT
         # handler are real. Only FlexLB's route choice and ViT compute are
         # controlled so this test does not need a GPU or model checkpoint.
@@ -317,14 +323,20 @@ class MMHashRpcTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(calls[0].kwargs["cache_affinity_keys"], self.keys)
             self.assertEqual(calls[1].kwargs["seq_len"], len(expected_tokens))
             self.assertEqual(calls[1].kwargs["selected_vit"], status)
-            self.assertTrue(calls[1].kwargs["block_cache_keys"])
-            wire = calls[1].kwargs["input_pb"]
-            self.assertEqual(list(wire.token_ids), expected_tokens)
             self.assertEqual(
-                [(s.offset, s.length) for s in wire.multimodal_token_layout.spans],
-                [(1, 4)],
+                calls[1].kwargs["block_cache_keys"],
+                get_block_cache_keys(expected_tokens, 2),
             )
-            self.assertEqual(list(trans_input(self.request).token_ids), expected_tokens)
+            wire = calls[1].kwargs["input_pb"]
+            self.assertEqual(list(wire.token_ids), [1, 99, 2])
+            self.assertEqual(len(wire.multimodal_inputs), 1)
+            self.assertEqual(
+                wire.multimodal_inputs[0].multimodal_url,
+                self.request.mm_inputs[0].url,
+            )
+            forwarded = trans_input(self.request)
+            self.assertEqual(list(forwarded.token_ids), [1, 99, 2])
+            self.assertEqual(len(forwarded.multimodal_inputs), 1)
             self.assertEqual(self.request.token_ids.tolist(), [1, 99, 2])
             self.assertEqual(
                 self.request.generate_config.role_addrs, [prefill, self.address]

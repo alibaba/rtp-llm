@@ -1034,17 +1034,17 @@ class VitProxyRpcServerForwardingTest(TestCase):
 
 
 class RuntimeExceptionStatusTest(TestCase):
-    def test_typed_worker_errors_are_reported_once_through_real_grpc_proxy(self):
-        class TypedFailingEngine:
+    def test_normal_worker_errors_are_reported_once_through_real_grpc_proxy(self):
+        class NormalFailingEngine:
             report_vit_error = MMProcessEngine.report_vit_error
 
-            def mm_embedding_rpc(self, request, **kwargs):
+            def get_embedding_result(self, *args, **kwargs):
                 error = self.error_type("embedding failed")
                 if self.report_before_raise:
                     self.report_vit_error(error)
                 raise error
 
-        engine = TypedFailingEngine()
+        engine = NormalFailingEngine()
         worker_server = grpc.server(futures.ThreadPoolExecutor(max_workers=1))
         add_MultimodalRpcServiceServicer_to_server(
             MultimodalRpcServer(engine), worker_server
@@ -1064,7 +1064,9 @@ class RuntimeExceptionStatusTest(TestCase):
         proxy_channel = grpc.insecure_channel(f"127.0.0.1:{proxy_port}")
         proxy_stub = MultimodalRpcServiceStub(proxy_channel)
         request = MultimodalInputsPB()
-        request.v41_inputs.schema_version = 1
+        request.multimodal_inputs.add(
+            multimodal_url="data:image/png;base64,iVBORwD/", multimodal_type=1
+        )
         cases = (
             (
                 MMSchedulerOverloadError,

@@ -1125,6 +1125,41 @@ TEST_F(PrefillRpcServerTest, textOnlyProcessIsRetainedAcrossRetryReset) {
     EXPECT_EQ(alloc_request.input().token_ids(1), 20);
 }
 
+TEST_F(PrefillRpcServerTest, AllocateCarriesCanonicalIdsAndCacheOnlyRowIdentity) {
+    GenerateInputPB request;
+    request.set_request_id(1);
+    request.add_token_ids(7);
+    request.add_token_ids(99);
+    request.add_token_ids(8);
+    request.mutable_generate_config();
+    auto context = makeContext(&request);
+
+    context->generate_input                  = std::make_shared<GenerateInput>();
+    context->generate_input->input_ids       = torch::tensor({7, 129264, 129264, 8}, torch::kInt32);
+    context->generate_input->generate_config = std::make_shared<GenerateConfig>();
+    auto spans                               = std::make_shared<MultimodalCacheSpans>();
+    spans->push_back(MultimodalCacheSpan{1, {101, 102}});
+    context->generate_input->multimodal_cache_spans = spans;
+    context->markMultimodalProcessed(/*token_ids_expanded=*/true);
+
+    PrefillRpcServer server;
+    auto             allocate = server.buildAllocateRequest(*context);
+
+    ASSERT_EQ(allocate.input().token_ids_size(), 4);
+    EXPECT_EQ(allocate.input().token_ids(0), 7);
+    EXPECT_EQ(allocate.input().token_ids(1), 129264);
+    EXPECT_EQ(allocate.input().token_ids(2), 129264);
+    EXPECT_EQ(allocate.input().token_ids(3), 8);
+    ASSERT_EQ(allocate.multimodal_cache_spans_size(), 1);
+    const auto& span = allocate.multimodal_cache_spans(0);
+    EXPECT_EQ(span.offset(), 1);
+    ASSERT_EQ(span.row_hashes_size(), 2);
+    EXPECT_EQ(span.row_hashes(0), 101);
+    EXPECT_EQ(span.row_hashes(1), 102);
+    // Cache identity is internal to the P->D envelope; GenerateInputPB has no
+    // model-specific layout field to carry it.
+}
+
 TEST_F(PrefillRpcServerTest, retryRebuildsPbInputBeforeMultimodalProcessing) {
     GenerateInputPB request;
     request.set_request_id(1);

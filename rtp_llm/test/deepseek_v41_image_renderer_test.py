@@ -1,23 +1,22 @@
 import base64
 import io
 import os
-from pathlib import Path
 import unittest
+from pathlib import Path
 from unittest import TestCase, main
+from unittest.mock import patch
 
 import torch
 from PIL import Image
 from tokenizers import Tokenizer
 
 from rtp_llm.config.dsv41_config import V41Config
-from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
+from rtp_llm.config.exceptions import FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.cpp.model_rpc.model_rpc_client import trans_input
-from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import GenerateInputPB
 from rtp_llm.openai.api_datatype import ChatCompletionRequest
 from rtp_llm.openai.renderers.deepseekv41_renderer import DeepseekV41Renderer
-from rtp_llm.utils.base_model_datatypes import GenerateInput
-from rtp_llm.utils.grpc_util import trans_tensor
+from rtp_llm.utils.base_model_datatypes import GenerateInput, MMUrlType
 
 
 def data_url(color):
@@ -121,47 +120,37 @@ class V41ImageRendererTest(TestCase):
             }
         )
         original = request.model_dump()
-        _, media = self.renderer._encode_request(request)
+        prompt, media = self.renderer._encode_request(request)
         self.assertEqual([image["url"] for image in media["images"]], [first, second])
-        prepared = self.renderer.prepare_v41_inputs(request)
-        self.assertEqual(len(prepared.images), 2)
-        self.assertLess(prepared.images[0].start, prepared.images[1].start)
-        self.assertEqual(
-            prepared.image_mask.sum().item(),
-            sum(image.length for image in prepared.images),
-        )
-        self.assertNotEqual(*prepared.image_content_hashes)
-        self.assertEqual(request.model_dump(), original)
         rendered = self.renderer.render_chat(request)
-        self.assertEqual(rendered.input_ids, list(prepared.token_ids))
-        self.assertEqual(rendered.multimodal_inputs, [])
+        self.assertEqual(rendered.rendered_prompt, prompt)
+        self.assertEqual(rendered.input_ids, self.renderer.tokenizer.encode(prompt))
+        self.assertEqual(rendered.input_ids.count(self.renderer.image_token_id), 2)
         self.assertEqual(
-            rendered.v41_inputs.image_content_hashes, prepared.image_content_hashes
+            [
+                base64.b64decode(item.url.split(",", 1)[1])
+                for item in rendered.multimodal_inputs
+            ],
+            [base64.b64decode(url.split(",", 1)[1]) for url in (first, second)],
         )
-        generate_input = GenerateInput(
+        self.assertEqual(
+            [item.mm_type for item in rendered.multimodal_inputs],
+            [MMUrlType.IMAGE] * 2,
+        )
+        self.assertEqual(request.model_dump(), original)
+        normal_input = GenerateInput(
             request_id=17,
             token_ids=torch.tensor(rendered.input_ids, dtype=torch.int32),
-            mm_inputs=[],
+            mm_inputs=rendered.multimodal_inputs,
             generate_config=GenerateConfig(max_new_tokens=256),
-            v41_inputs=rendered.v41_inputs,
         )
-        wire = trans_input(generate_input)
-        restored = GenerateInputPB.FromString(wire.SerializeToString())
-        self.assertEqual(restored.v41_inputs.schema_version, 1)
-        self.assertEqual(list(restored.token_ids), rendered.input_ids)
-        self.assertEqual(tuple(restored.v41_inputs.token_types), prepared.token_types)
+        normal_wire = trans_input(normal_input)
+        self.assertEqual(list(normal_wire.token_ids), rendered.input_ids)
+        self.assertEqual(len(normal_wire.multimodal_inputs), 2)
         self.assertEqual(
-            list(restored.v41_inputs.image_mask), prepared.image_mask.tolist()
+            [item.multimodal_url for item in normal_wire.multimodal_inputs],
+            [item.url for item in rendered.multimodal_inputs],
         )
-        self.assertEqual(len(restored.multimodal_inputs), 0)
-        for source, destination in zip(prepared.images, restored.v41_inputs.images):
-            self.assertEqual(destination.start, source.start)
-            self.assertEqual(destination.processor_identity, source.processor_identity)
-            self.assertEqual(destination.content_sha256, source.content_sha256)
-            self.assertEqual(list(destination.types), source.types.tolist())
-            self.assertTrue(
-                torch.equal(trans_tensor(destination.patches), source.patches)
-            )
 
     def test_text_remains_renderable_and_resize_override_fails(self):
         request = ChatCompletionRequest.model_validate(
@@ -172,19 +161,11 @@ class V41ImageRendererTest(TestCase):
             }
         )
         actual = self.renderer.render_chat(request)
-        prepared = self.renderer.prepare_v41_inputs(request)
-        self.assertEqual(actual.input_ids, list(prepared.token_ids))
-        self.assertEqual(prepared.images, ())
-        self.assertIsNotNone(actual.v41_inputs)
-        self.assertFalse(actual.v41_inputs.image_mask.any().item())
-        appended = prepared.append_text(" tail", [17, 18])
-        self.assertEqual(appended.token_types[-2:], (-1, -1))
-        # Appended generation text has no new image payload. As on CED,
-        # typed metadata distinguishes text from image rows, even for an ID
-        # that the prompt preprocessor otherwise treats as a placeholder.
-        literal_marker = prepared.append_text(" image", [129264])
-        self.assertEqual(literal_marker.token_types[-1], -1)
-        self.assertFalse(literal_marker.image_mask[-1])
+        self.assertEqual(
+            actual.input_ids, self.renderer.tokenizer.encode(actual.rendered_prompt)
+        )
+        self.assertEqual(actual.input_ids.count(self.renderer.image_token_id), 0)
+        self.assertEqual(actual.multimodal_inputs, [])
         request = ChatCompletionRequest.model_validate(
             {
                 "messages": [
@@ -202,9 +183,53 @@ class V41ImageRendererTest(TestCase):
             }
         )
         with self.assertRaisesRegex(FtRuntimeException, "fixed by the model config"):
-            self.renderer.prepare_v41_inputs(request)
+            self.renderer.render_chat(request)
 
-    def test_invalid_image_bytes_are_request_errors(self):
+    def test_normal_render_does_not_decode_pixels(self):
+        url = data_url((17, 23, 42))
+        request = ChatCompletionRequest.model_validate(
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "image_url", "image_url": {"url": url}},
+                        ],
+                    }
+                ],
+            }
+        )
+        with patch(
+            "PIL.Image.open", side_effect=AssertionError("frontend decoded pixels")
+        ):
+            result = self.renderer.render_chat(request)
+        self.assertEqual(result.input_ids.count(self.renderer.image_token_id), 1)
+        self.assertEqual(
+            base64.b64decode(result.multimodal_inputs[0].url.split(",", 1)[1]),
+            base64.b64decode(url.split(",", 1)[1]),
+        )
+
+    def test_normal_render_rejects_placeholder_mismatch_without_loading_image(self):
+        request = ChatCompletionRequest.model_validate(
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": data_url((1, 2, 3))},
+                            },
+                        ],
+                    }
+                ],
+            }
+        )
+        with patch.object(self.renderer.tokenizer, "encode", return_value=[17, 18]):
+            with self.assertRaisesRegex(FtRuntimeException, "placeholder count"):
+                self.renderer.render_chat(request)
+
+    def test_image_bytes_are_forwarded_without_frontend_validation(self):
         png = base64.b64decode(data_url((1, 2, 3)).split(",", 1)[1])
         for payload in (b"not an image", png[:40]):
             with self.subTest(payload=payload):
@@ -221,12 +246,16 @@ class V41ImageRendererTest(TestCase):
                         ]
                     }
                 )
-                with self.assertRaisesRegex(
-                    FtRuntimeException, "image payload"
-                ) as raised:
-                    self.renderer.prepare_v41_inputs(request)
+                with patch(
+                    "PIL.Image.open",
+                    side_effect=AssertionError("frontend decoded pixels"),
+                ):
+                    rendered = self.renderer.render_chat(request)
                 self.assertEqual(
-                    raised.exception.exception_type, ExceptionType.INVALID_PARAMS
+                    base64.b64decode(
+                        rendered.multimodal_inputs[0].url.split(",", 1)[1]
+                    ),
+                    payload,
                 )
 
 
