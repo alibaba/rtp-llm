@@ -18,6 +18,8 @@ class DeepSeekV41PDContractTest(contract.DeepSeekV41ContractTest):
     prefill_cp_size = 2
     decode_dp_size = 1
     decode_cuda_graph = True
+    decode_capture_config = "1,2,4"
+    prefill_concurrency_limit = None
     # Decode reuse includes the freshly transferred prefill cache. Only the
     # prefill's initial reuse measures a hit from an earlier request.
     reuse_field = "prefill_total_reuse_len"
@@ -79,10 +81,12 @@ class DeepSeekV41PDContractTest(contract.DeepSeekV41ContractTest):
                 decode_port,
                 prefill_port,
                 gpu_ids[role_size : 2 * role_size],
-                f"--role_type DECODE --enable_cuda_graph {int(self.decode_cuda_graph)} --decode_capture_config 1,2,4 --cp_rotate_method PREFILL_CP"
+                f"--role_type DECODE --enable_cuda_graph {int(self.decode_cuda_graph)} --decode_capture_config {self.decode_capture_config} --cp_rotate_method PREFILL_CP"
                 f" --tp_size {role_size // self.decode_dp_size} --dp_size {self.decode_dp_size}",
             ),
         ):
+            if role == "prefill" and self.prefill_concurrency_limit is not None:
+                args += f" --concurrency_limit {self.prefill_concurrency_limit}"
             manager = MagaServerManager(
                 env_args={
                     **common_env,
