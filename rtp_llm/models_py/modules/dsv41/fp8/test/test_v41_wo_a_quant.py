@@ -6,9 +6,11 @@ import hashlib
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from unittest import mock
@@ -59,6 +61,122 @@ def _metadata(m=33, *, row_major=False):
 
 
 class WoAQuantCPUContractTest(unittest.TestCase):
+    def test_candidate_wheel_rejects_wrong_hash(self):
+        validator = _load(
+            "candidate_validation",
+            Path(__file__).with_name("validate_wo_a_quant_wheel.py"),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            wheel = Path(directory) / "candidate.whl"
+            wheel.write_bytes(b"candidate wheel bytes")
+            with self.assertRaisesRegex(ValueError, "SHA256"):
+                validator.verify_wheel(wheel, "0" * 64)
+            expected = hashlib.sha256(wheel.read_bytes()).hexdigest()
+            self.assertEqual(validator.verify_wheel(wheel, expected), expected)
+
+    def test_candidate_report_requires_both_gpu_classes_without_skips(self):
+        validator = _load(
+            "candidate_validation",
+            Path(__file__).with_name("validate_wo_a_quant_wheel.py"),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            report = Path(directory) / "junit.xml"
+            cpu = '<testcase classname="quant.WoAQuantCPUContractTest" name="cpu"/>'
+            first = '<testcase classname="quant.WoAQuantCudaTest" name="gpu"/>'
+            second = '<testcase classname="quant.ExternalQuantCudaTest" name="gpu">{}</testcase>'
+            for cases, passed in (
+                (cpu, False),
+                (cpu + first, False),
+                (
+                    cpu + first + second.format('<skipped message="missing API"/>'),
+                    False,
+                ),
+                (
+                    cpu + first + second.format('<failure message="wrong output"/>'),
+                    False,
+                ),
+                (cpu + first + second.format(""), True),
+            ):
+                with self.subTest(cases=cases):
+                    report.write_text(
+                        "<testsuites><testsuite>" + cases + "</testsuite></testsuites>"
+                    )
+                    counts = validator.summarize_results(report)
+                    self.assertEqual(counts["accepted"], passed)
+                    self.assertEqual(counts["cpu_passed"], 1)
+                    if passed:
+                        self.assertEqual(counts["gpu_passed"], 2)
+                        self.assertEqual(counts["gpu_skipped"], 0)
+
+    def test_missing_external_features_keep_fallback(self):
+        for api in (
+            SimpleNamespace(epilogue=SimpleNamespace()),
+            SimpleNamespace(epilogue=SimpleNamespace(FP8Group32=object)),
+        ):
+            with mock.patch.dict(sys.modules, {"deep_gemm": api}):
+                self.assertIsNone(op._external_api())
+
+    def test_candidate_validation_requires_external_backend(self):
+        with mock.patch.object(op, "_external_api", return_value=None):
+            with mock.patch.dict(os.environ, {"RTP_V41_REQUIRE_EXTERNAL_QUANT": "0"}):
+                with self.assertRaises(unittest.SkipTest):
+                    _require_external_backend()
+            with mock.patch.dict(os.environ, {"RTP_V41_REQUIRE_EXTERNAL_QUANT": "1"}):
+                with self.assertRaises(AssertionError):
+                    _require_external_backend()
+
+    def test_prepared_signature_tracks_complete_external_configuration(self):
+        a, _ = _metadata()
+        api = SimpleNamespace(
+            get_num_sms=lambda: 148,
+            get_tc_util=lambda: 100,
+            get_pdl=lambda: True,
+            get_jit_config_fingerprint=mock.Mock(
+                return_value=(148, 100, True, False, 1, 1)
+            ),
+        )
+        before = op._signature(a, api)
+        for config in ((148, 100, True, True, 1, 1), (148, 100, True, False, 64, 64)):
+            api.get_jit_config_fingerprint.return_value = config
+            self.assertNotEqual(before, op._signature(a, api))
+
+    def test_ready_and_launch_enter_target_device_before_context_check(self):
+        a, w = _metadata()
+        for t in (*a, *w):
+            t.device = torch.device("cuda:1")
+        current = [0]
+
+        @contextmanager
+        def guard(device):
+            previous = current[0]
+            current[0] = device.index
+            try:
+                yield
+            finally:
+                current[0] = previous
+
+        entry = dict(context=101, api=object(), prepared=set())
+        out = (object(), object())
+        with mock.patch.dict(op._READY, {1: entry}, clear=True), mock.patch.object(
+            op, "_device_supported", return_value=True
+        ), mock.patch.object(
+            torch.cuda, "device", side_effect=guard
+        ), mock.patch.object(
+            op, "_context", side_effect=lambda: 100 + current[0]
+        ), mock.patch.object(
+            op, "_signature", return_value=(33,)
+        ), mock.patch.object(
+            torch.cuda, "is_current_stream_capturing", return_value=False
+        ), mock.patch.object(
+            op, "_check_output"
+        ), mock.patch.object(
+            op, "_launch"
+        ) as launch:
+            self.assertTrue(op.is_ready(*w))
+            self.assertIs(op.try_grouped_quant(a, w, out=out), out)
+            launch.assert_called_once()
+            self.assertEqual(current[0], 0)
+
     def setUp(self):
         op._device_geometry.cache_clear()
         self.addCleanup(op._device_geometry.cache_clear)
@@ -298,101 +416,27 @@ class WoAQuantCPUContractTest(unittest.TestCase):
         )
         return namespace[cls.name]
 
-    def test_disk_cache_reuses_host_architecture_but_separates_arm_and_x86(self):
-        def compile_fixture(command, **kwargs):
-            Path(command[command.index("-o") + 1]).write_bytes(b"compiled fixture")
-            return SimpleNamespace(returncode=0)
-
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            include = root / "include"
-            include.mkdir()
-            dependencies = (include, root, "nvcc", "c++")
-            with mock.patch.dict(
-                os.environ, {"DG_JIT_CACHE_DIR": directory}
-            ), mock.patch.object(
-                op.subprocess, "check_output", return_value=b"same compiler version"
-            ), mock.patch.object(
-                op.subprocess, "run", side_effect=compile_fixture
-            ) as compile_, mock.patch.object(
-                op.platform, "machine", return_value="aarch64"
-            ) as machine:
-                arm = op._build_library(152, dependencies)
-                self.assertEqual(compile_.call_count, 2)
-                self.assertEqual(op._build_library(152, dependencies), arm)
-                self.assertEqual(compile_.call_count, 2)
-                machine.return_value = "x86_64"
-                x86 = op._build_library(152, dependencies)
-                self.assertNotEqual(x86, arm)
-                self.assertEqual(compile_.call_count, 4)
-                machine.return_value = "aarch64"
-                self.assertEqual(op._build_library(152, dependencies), arm)
-                self.assertEqual(compile_.call_count, 4)
-
-    def test_vendor_contract_rejects_changed_or_missing_private_headers(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            package = root / "deep_gemm"
-            include = package / "include/deep_gemm"
-            expected = {}
-            for name in op._VENDOR_HASHES:
-                path = include / name
-                path.parent.mkdir(parents=True, exist_ok=True)
-                payload = ("verified fixture: " + name).encode()
-                path.write_bytes(payload)
-                expected[name] = hashlib.sha256(payload).hexdigest()
-            nvcc = root / "cuda/bin/nvcc"
-            nvcc.parent.mkdir(parents=True)
-            nvcc.touch()
-            deep_gemm = SimpleNamespace(__file__=str(package / "__init__.py"))
-            with mock.patch.dict(
-                sys.modules, {"deep_gemm": deep_gemm}
-            ), mock.patch.object(op, "_VENDOR_HASHES", expected), mock.patch.object(
-                op, "_nvcc_path", return_value=str(nvcc)
-            ), mock.patch.dict(
-                os.environ, {"CXX": "/fixture/g++"}
-            ), mock.patch.object(
-                op.subprocess,
-                "check_output",
-                return_value="Cuda compilation tools, release 13.2, V13.2.1",
-            ):
-                self.assertIsNotNone(op._dependencies())
-                for name in expected:
-                    with self.subTest(header=name):
-                        path = include / name
-                        payload = path.read_bytes()
-                        path.write_bytes(payload + b"\nchanged")
-                        self.assertIsNone(op._dependencies())
-                        path.unlink()
-                        self.assertIsNone(op._dependencies())
-                        path.write_bytes(payload)
-                self.assertIsNotNone(op._dependencies())
-
     def test_import_does_not_compile_load_or_initialize_cuda(self):
         with mock.patch.object(op.ctypes, "CDLL") as load, mock.patch.object(
-            op.subprocess, "run"
+            subprocess, "run"
         ) as compile_, mock.patch.object(torch.cuda, "_lazy_init") as init:
             fresh = _load("v41_wo_a_import_only", _ROOT / "_v41_wo_a_quant.py")
         load.assert_not_called()
         compile_.assert_not_called()
         init.assert_not_called()
         self.assertEqual(fresh._READY, {})
-        self.assertEqual(fresh._LIBRARIES, {})
 
-    def test_quant_knob_is_live_and_independent_of_flattened_size(self):
-        for mode, legacy in (
-            ("auto", True),
-            ("legacy", True),
-            ("v2", False),
-        ):
-            with self.subTest(mode=mode), mock.patch.dict(
-                os.environ, {"DSV4_FP8_QUANT_KERNEL": mode}
-            ):
-                # The former 4Mi-element boundary was M=512 at WO-B's K=8192.
-                for rows in (511, 512, 3072):
-                    self.assertEqual(op._legacy(rows, None), legacy)
-                    self.assertTrue(op._legacy(rows, "auto"))
-                    self.assertFalse(op._legacy(rows, "v2"))
+    def test_fused_launch_uses_fixed_legacy_without_mode_argument(self):
+        a, w = _metadata()
+        out = (mock.Mock(), mock.Mock())
+        api = mock.Mock()
+        for tensor in (*a, *w):
+            tensor.record_stream = mock.Mock()
+        with mock.patch.dict(
+            os.environ, {"DSV4_FP8_QUANT_KERNEL": "v2"}
+        ), mock.patch.object(torch.cuda, "current_stream", return_value=object()):
+            op._launch(dict(api=api), a, w, out)
+        api.epilogue.FP8Group32.assert_called_once_with(out[1])
 
     def test_supported_metadata_and_unprepared_fallback_never_load(self):
         a, w = _metadata()
@@ -400,7 +444,7 @@ class WoAQuantCPUContractTest(unittest.TestCase):
         with mock.patch.object(
             torch.cuda, "get_device_properties", return_value=prop
         ), mock.patch.dict(op._READY, {}, clear=True), mock.patch.object(
-            op, "_load"
+            op, "_external_api"
         ) as load:
             self.assertTrue(op.is_supported(a, w))
             self.assertIsNone(op.try_grouped_quant(a, w))
@@ -412,30 +456,11 @@ class WoAQuantCPUContractTest(unittest.TestCase):
         with mock.patch.object(
             torch.cuda, "get_device_properties", return_value=prop
         ), mock.patch.dict(op._READY, {}, clear=True), mock.patch.object(
-            op, "_load"
+            op, "_external_api"
         ) as load:
             self.assertTrue(op.is_supported(a, w))
             self.assertIsNone(op.try_grouped_quant(a, w))
         load.assert_not_called()
-
-    def test_nvcc_discovery_respects_explicit_toolchain_and_local_fallback(self):
-        with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(
-            op.shutil, "which", return_value=None
-        ), mock.patch.object(
-            op.Path,
-            "is_file",
-            autospec=True,
-            side_effect=lambda path: str(path) == "/usr/local/cuda/bin/nvcc",
-        ):
-            self.assertEqual(op._nvcc_path(), "/usr/local/cuda/bin/nvcc")
-            with mock.patch.dict(os.environ, {"CUDA_HOME": "/explicit/missing"}):
-                self.assertIsNone(op._nvcc_path())
-            with mock.patch.dict(os.environ, {"CUDA_PATH": "/usr/local/cuda"}):
-                self.assertEqual(op._nvcc_path(), "/usr/local/cuda/bin/nvcc")
-        with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(
-            op.shutil, "which", return_value="/chosen/bin/nvcc"
-        ):
-            self.assertEqual(op._nvcc_path(), "/chosen/bin/nvcc")
 
     def test_incompatible_layout_dtype_device_and_alignment_fall_back(self):
         changes = (
@@ -459,54 +484,6 @@ class WoAQuantCPUContractTest(unittest.TestCase):
                     a, w = _metadata()
                     setattr((*a, *w)[index], attr, value)
                     self.assertFalse(op.is_supported(a, w))
-
-    def test_token_major_metadata_and_runtime_tma_strides(self):
-        for m in (4, 24, 4096, 12288):
-            with self.subTest(m=m):
-                a, weight = _metadata(m, row_major=True)
-                output = (
-                    SimpleNamespace(data_ptr=lambda: 512),
-                    SimpleNamespace(data_ptr=lambda: 768),
-                )
-                for tensor in (*a, *weight, *output):
-                    tensor.record_stream = mock.Mock()
-                lib = SimpleNamespace(
-                    v41_wo_a_is_current=mock.Mock(return_value=1),
-                    v41_wo_a_launch=mock.Mock(return_value=0),
-                )
-                handle = object()
-                stream = SimpleNamespace(cuda_stream=123)
-                with mock.patch.dict(
-                    op._READY, {0: (lib, handle)}, clear=True
-                ), mock.patch.object(
-                    op, "_device_supported", return_value=True
-                ), mock.patch.object(
-                    torch.cuda, "device"
-                ), mock.patch.object(
-                    torch.cuda, "current_stream", return_value=stream
-                ), mock.patch.object(
-                    op, "_output"
-                ) as allocate:
-                    self.assertTrue(op.is_supported(a, weight))
-                    self.assertIs(
-                        op.try_grouped_quant(a, weight, out=output, quant_kernel="v2"),
-                        output,
-                    )
-                allocate.assert_not_called()
-                lib.v41_wo_a_launch.assert_called_once_with(
-                    handle,
-                    256,
-                    256,
-                    256,
-                    256,
-                    512,
-                    768,
-                    m,
-                    32768,
-                    4096,
-                    False,
-                    123,
-                )
 
     def test_blackwell_family_uses_actual_even_sms_and_caches_properties(self):
         for index, (minor, sms) in enumerate(
@@ -544,40 +521,6 @@ class WoAQuantCPUContractTest(unittest.TestCase):
                 ),
             ):
                 self.assertFalse(op.is_supported(*_metadata()))
-
-    def test_all_blackwell_devices_warm_both_schedules_and_prefill_rows(self):
-        _, weight = _metadata()
-        lib = SimpleNamespace(v41_wo_a_is_current=mock.Mock(return_value=1))
-        for minor, sms in ((0, 152), (3, 148), (1, 120)):
-            op._device_geometry.cache_clear()
-            with self.subTest(minor=minor, sms=sms), mock.patch.dict(
-                op._READY, {}, clear=True
-            ), mock.patch.object(torch.cuda, "device"), mock.patch.object(
-                torch.cuda,
-                "get_device_properties",
-                return_value=SimpleNamespace(
-                    major=10, minor=minor, multi_processor_count=sms
-                ),
-            ), mock.patch.object(
-                torch.cuda, "is_current_stream_capturing", return_value=False
-            ), mock.patch.object(
-                op, "_load", return_value=(lib, object())
-            ), mock.patch.object(
-                torch, "zeros"
-            ) as zeros, mock.patch.object(
-                torch, "full"
-            ), mock.patch.object(
-                torch.cuda, "current_stream"
-            ) as stream, mock.patch.object(
-                op, "try_grouped_quant"
-            ) as launch:
-                self.assertTrue(op.warmup(*weight))
-                self.assertEqual(
-                    [call.args[0][1] for call in zeros.call_args_list],
-                    [128, 256, 512, 4096, 12288],
-                )
-                self.assertEqual(launch.call_count, 5)
-                stream.return_value.synchronize.assert_called_once()
 
     def test_actual_attention_callsite_consumes_pair_and_retains_fallback(self):
         path = _ROOT / "attention_v41.py"
@@ -679,41 +622,6 @@ class WoAQuantCPUContractTest(unittest.TestCase):
         self.assertFalse(op.is_supported((x, torch.empty(0)), (x, torch.empty(0))))
         self.assertFalse(op._device_supported(torch.device("cpu")))
 
-    def test_supplied_output_preserves_launch_and_stream_lifetimes(self):
-        a, weight = _metadata()
-        output = (
-            SimpleNamespace(data_ptr=lambda: 512, shape=(33, 8192)),
-            SimpleNamespace(data_ptr=lambda: 768, shape=(33, 64)),
-        )
-        recorded = []
-        for index, tensor in enumerate((*a, *weight, *output)):
-            tensor.record_stream = lambda stream, i=index: recorded.append((i, stream))
-        lib = SimpleNamespace(
-            v41_wo_a_is_current=mock.Mock(return_value=1),
-            v41_wo_a_launch=mock.Mock(return_value=0),
-        )
-        handle = object()
-        stream = SimpleNamespace(cuda_stream=123)
-        with mock.patch.dict(
-            op._READY, {0: (lib, handle)}, clear=True
-        ), mock.patch.object(
-            op, "_device_supported", return_value=True
-        ), mock.patch.object(
-            torch.cuda, "device"
-        ), mock.patch.object(
-            torch.cuda, "current_stream", return_value=stream
-        ), mock.patch.object(
-            op, "_output"
-        ) as allocate:
-            self.assertIs(
-                op.try_grouped_quant(a, weight, out=output, quant_kernel="v2"), output
-            )
-        allocate.assert_not_called()
-        lib.v41_wo_a_launch.assert_called_once_with(
-            handle, 256, 256, 256, 256, 512, 768, 33, 4096, 33 * 4096, False, 123
-        )
-        self.assertEqual(recorded, [(i, stream) for i in range(6)])
-
     def test_warmup_cannot_load_inside_capture(self):
         _, w = _metadata()
         with mock.patch.object(
@@ -721,35 +629,20 @@ class WoAQuantCPUContractTest(unittest.TestCase):
         ), mock.patch.object(torch.cuda, "device"), mock.patch.object(
             torch.cuda, "is_current_stream_capturing", return_value=True
         ), mock.patch.object(
-            op, "_load"
+            op, "_external_api"
         ) as load, self.assertRaisesRegex(
             RuntimeError, "precede"
         ):
             op.warmup(*w)
         load.assert_not_called()
 
-    def test_context_mismatch_falls_back_without_load_or_output_allocation(self):
-        a, weight = _metadata()
-        lib = SimpleNamespace(v41_wo_a_is_current=mock.Mock(return_value=0))
-        entry = (lib, object())
-        with mock.patch.dict(op._READY, {0: entry}, clear=True), mock.patch.object(
-            op, "_device_supported", return_value=True
-        ), mock.patch.object(torch.cuda, "device"), mock.patch.object(
-            torch.cuda, "is_current_stream_capturing", return_value=False
-        ), mock.patch.object(
-            op, "_load"
-        ) as load, mock.patch.object(
-            op, "_output"
-        ) as output:
-            self.assertFalse(op.is_ready(*weight))
-            self.assertFalse(op.warmup(*weight))
-            self.assertIsNone(op.try_grouped_quant(a, weight))
-            self.assertIs(op._READY[0], entry)
-            lib.v41_wo_a_is_current.return_value = 1
-            self.assertTrue(op.is_ready(*weight))
-            self.assertTrue(op.warmup(*weight))
-        load.assert_not_called()
-        output.assert_not_called()
+
+def _require_external_backend():
+    if op._external_api() is None:
+        message = "Install the candidate DeepGEMM FP8Group32 wheel to run external quant GPU tests"
+        if os.environ.get("RTP_V41_REQUIRE_EXTERNAL_QUANT") == "1":
+            raise AssertionError(message)
+        raise unittest.SkipTest(message)
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
@@ -760,6 +653,7 @@ class WoAQuantCudaTest(unittest.TestCase):
             raise unittest.SkipTest(
                 "Blackwell SM10x with two-CTA cluster grid required"
             )
+        _require_external_backend()
         import deep_gemm
         from deep_gemm.utils.layout import get_mn_major_tma_aligned_packed_ue8m0_tensor
 
@@ -778,7 +672,9 @@ class WoAQuantCudaTest(unittest.TestCase):
         scales = torch.exp2(torch.randint(-3, 4, (8, 32, 128), device="cuda").float())
         cls.sw = cls.pack(scales.repeat_interleave(32, dim=1))
         if not op.warmup(cls.w, cls.sw):
-            raise AssertionError("Test runtime must support the pinned CUDA13 epilogue")
+            raise AssertionError(
+                "Test runtime must support the external DeepGEMM FP8Group32 epilogue"
+            )
 
     def pair(self, m, exponent=0):
         raw = torch.randn(8, m, 4096, device="cuda", dtype=torch.bfloat16)
@@ -792,10 +688,10 @@ class WoAQuantCudaTest(unittest.TestCase):
         )
         return q, self.pack(raw_s).transpose(0, 1)
 
-    def baseline(self, a, mode):
+    def baseline(self, a):
         d = torch.empty(a[0].shape[0], 8, 1024, device="cuda", dtype=torch.bfloat16)
         self.dg.fp8_einsum("bhr,hdr->bhd", a, (self.w, self.sw), d, recipe=(1, 1, 32))
-        with mock.patch.dict(os.environ, {"DSV4_FP8_QUANT_KERNEL": mode}):
+        with mock.patch.dict(os.environ, {"DSV4_FP8_QUANT_KERNEL": "legacy"}):
             return self.native_quant(
                 d.flatten(1),
                 group_size=32,
@@ -841,14 +737,13 @@ class WoAQuantCudaTest(unittest.TestCase):
         cases += [(33, e) for e in (-35, -110, -120, -126)]
         for m, exponent in cases:
             a = self.pair(m, exponent)
-            for mode in ("legacy", "v2", "auto"):
-                with self.subTest(m=m, exponent=exponent, mode=mode), mock.patch.dict(
-                    os.environ, {"DSV4_FP8_QUANT_KERNEL": mode}
-                ):
-                    self.assert_pair(
-                        op.try_grouped_quant(a, (self.w, self.sw)),
-                        self.baseline(a, mode),
-                    )
+            with self.subTest(m=m, exponent=exponent), mock.patch.dict(
+                os.environ, {"DSV4_FP8_QUANT_KERNEL": "legacy"}
+            ):
+                self.assert_pair(
+                    op.try_grouped_quant(a, (self.w, self.sw)),
+                    self.baseline(a),
+                )
 
     @torch.inference_mode()
     def test_token_major_mega_layout_is_bitexact_without_repacking(self):
@@ -857,18 +752,13 @@ class WoAQuantCudaTest(unittest.TestCase):
             token_major = (original[0].contiguous(), original[1])
             self.assertEqual(token_major[0].stride(), (32768, 4096, 1))
             self.assertTrue(op.is_supported(token_major, (self.w, self.sw)))
-            for mode in ("legacy", "v2", "auto"):
-                with self.subTest(m=m, mode=mode):
-                    actual = op.try_grouped_quant(
-                        token_major, (self.w, self.sw), quant_kernel=mode
-                    )
-                    self.assert_pair(
-                        actual,
-                        op.try_grouped_quant(
-                            original, (self.w, self.sw), quant_kernel=mode
-                        ),
-                    )
-                    self.assert_pair(actual, self.baseline(original, mode))
+            with self.subTest(m=m):
+                actual = op.try_grouped_quant(token_major, (self.w, self.sw))
+                self.assert_pair(
+                    actual,
+                    op.try_grouped_quant(original, (self.w, self.sw)),
+                )
+                self.assert_pair(actual, self.baseline(original))
             # Neither accepted ordering implies support for an overlapping
             # group layout or incorrectly packed scales.
             bad_layout = token_major[0].as_strided((m, 8, 4096), (32768, 0, 1))
@@ -890,14 +780,10 @@ class WoAQuantCudaTest(unittest.TestCase):
                 stream = torch.cuda.Stream()
                 stream.wait_stream(torch.cuda.current_stream())
                 with torch.cuda.stream(stream):
-                    self.assertIsNotNone(
-                        op.try_grouped_quant(pair, (self.w, self.sw), quant_kernel="v2")
-                    )
+                    self.assertIsNotNone(op.try_grouped_quant(pair, (self.w, self.sw)))
                     graph = torch.cuda.CUDAGraph()
                     with torch.cuda.graph(graph, stream=stream):
-                        captured = op.try_grouped_quant(
-                            pair, (self.w, self.sw), quant_kernel="v2"
-                        )
+                        captured = op.try_grouped_quant(pair, (self.w, self.sw))
                     self.assertIsNotNone(captured)
                     replacement = self.pair(m, exponent=-3)
                     pair[0].copy_(replacement[0])
@@ -908,7 +794,7 @@ class WoAQuantCudaTest(unittest.TestCase):
                     pair[0].transpose(0, 1).contiguous().transpose(0, 1),
                     pair[1],
                 )
-                self.assert_pair(captured, self.baseline(group_major, "v2"))
+                self.assert_pair(captured, self.baseline(group_major))
 
     @torch.inference_mode()
     def test_nondefault_stream_and_graph_replay(self):
@@ -917,13 +803,13 @@ class WoAQuantCudaTest(unittest.TestCase):
         stream = torch.cuda.Stream()
         stream.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(stream):
-            eager = op.try_grouped_quant(a, (self.w, self.sw), quant_kernel="v2")
+            eager = op.try_grouped_quant(a, (self.w, self.sw))
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph, stream=stream):
-                captured = op.try_grouped_quant(a, (self.w, self.sw), quant_kernel="v2")
+                captured = op.try_grouped_quant(a, (self.w, self.sw))
             graph.replay()
         torch.cuda.current_stream().wait_stream(stream)
-        self.assert_pair(eager, self.baseline(a, "v2"))
+        self.assert_pair(eager, self.baseline(a))
         self.assert_pair(captured, eager)
         self.assert_pair((a[0].contiguous(), a[1]), (saved[0].contiguous(), saved[1]))
 
@@ -932,7 +818,7 @@ class WoAQuantCudaTest(unittest.TestCase):
         a = self.pair(33)
         sentinel = torch.zeros(1, device="cuda")
         with mock.patch.dict(op._READY, {}, clear=True), mock.patch.object(
-            op, "_load"
+            op, "_external_api"
         ) as load:
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph):
@@ -970,7 +856,7 @@ class WoAQuantCudaTest(unittest.TestCase):
             self.assertNotEqual(current.value, original.value)
             # A-side tensors supply metadata only: a cold return must not touch
             # their storage, allocate outputs, query a stream, or launch in B.
-            with mock.patch.object(op, "_load") as load, mock.patch.object(
+            with mock.patch.object(op, "_external_api") as load, mock.patch.object(
                 op, "_output"
             ) as output, mock.patch.object(torch.cuda, "current_stream") as stream:
                 self.assertFalse(op.is_ready(self.w, self.sw))
@@ -989,8 +875,8 @@ class WoAQuantCudaTest(unittest.TestCase):
         self.assertTrue(op.is_ready(self.w, self.sw))
         self.assertTrue(op.warmup(self.w, self.sw))
         self.assert_pair(
-            op.try_grouped_quant(a, (self.w, self.sw), quant_kernel="v2"),
-            self.baseline(a, "v2"),
+            op.try_grouped_quant(a, (self.w, self.sw)),
+            self.baseline(a),
         )
 
     @torch.inference_mode()
@@ -1009,20 +895,19 @@ class WoAQuantCudaTest(unittest.TestCase):
                 original = x.clone()
                 angles = torch.randn(m, 32, device="cuda")
                 freqs = torch.polar(torch.ones_like(angles), angles)
-                for mode in ("legacy", "v2", "auto"):
-                    with self.subTest(m=m, mode=mode), mock.patch.dict(
-                        os.environ, {"DSV4_FP8_QUANT_KERNEL": mode}
-                    ):
-                        bf16 = projection.grouped_output_projection(
-                            x, freqs, self.w, self.sw
-                        )
-                        self.assertEqual(bf16.dtype, torch.bfloat16)
-                        pair = projection.try_grouped_output_quant(
-                            x, freqs, self.w, self.sw
-                        )
-                        expected = linear(bf16)
-                        actual = linear.forward_quantized(*pair)
-                        self.assertTrue(torch.equal(expected, actual))
+                with self.subTest(m=m), mock.patch.dict(
+                    os.environ, {"DSV4_FP8_QUANT_KERNEL": "legacy"}
+                ):
+                    bf16 = projection.grouped_output_projection(
+                        x, freqs, self.w, self.sw
+                    )
+                    self.assertEqual(bf16.dtype, torch.bfloat16)
+                    pair = projection.try_grouped_output_quant(
+                        x, freqs, self.w, self.sw
+                    )
+                    expected = linear(bf16)
+                    actual = linear.forward_quantized(*pair)
+                    self.assertTrue(torch.equal(expected, actual))
                 self.assertTrue(torch.equal(x, original))
             with mock.patch.dict(op._READY, {}, clear=True), mock.patch.object(
                 projection, "_quantize_projection_input"
@@ -1053,8 +938,254 @@ class WoAQuantCudaTest(unittest.TestCase):
             events = json.loads(path.read_text())["traceEvents"]
         kernels = [e for e in events if e.get("cat") == "kernel"]
         self.assertEqual(len(kernels), 4)
-        self.assertTrue(all("v41_wo_a_group32_epilogue" in e["name"] for e in kernels))
+        self.assertTrue(all("sm100_fp8_fp4_gemm" in e["name"] for e in kernels))
         self.assertFalse(any("cuModuleLoad" in e.get("name", "") for e in events))
+
+
+def reference_quant(x):
+    x = x.float().flatten(1).reshape(x.shape[0], -1, 32)
+    tiny = torch.finfo(torch.float32).tiny
+    raw = x.abs().amax(-1).clamp_min(tiny) * (1.0 / 448.0)
+    exponent = torch.ceil(torch.log2(raw.clamp_min(1e-10))).int() + 127
+    inv = ((254 - exponent) << 23).view(torch.float32)
+    x = torch.where(x.abs() < tiny, torch.copysign(torch.zeros_like(x), x), x)
+    y = x * inv.unsqueeze(-1)
+    y = torch.where(y.abs() < tiny, torch.copysign(torch.zeros_like(y), y), y)
+    q = y.clamp(-448, 448).to(torch.float8_e4m3fn).flatten(1)
+    packed = exponent.to(torch.uint8).contiguous().view(torch.int32)
+    sf = torch.empty_strided(
+        packed.shape, (1, (x.shape[0] + 3) // 4 * 4), device=x.device, dtype=torch.int32
+    )
+    sf.copy_(packed)
+    return q, sf
+
+
+@unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+class ExternalQuantCudaTest(unittest.TestCase):
+    def test_output_remains_legacy_with_v2_environment(self):
+        a = self.pair(33, exp=92)
+        expected = self.baseline(a)
+        with mock.patch.dict(os.environ, {"DSV4_FP8_QUANT_KERNEL": "v2"}):
+            actual = op.try_grouped_quant(a, (self.w, self.sw))
+            self.equal(actual, expected)
+            self.assertEqual(int(actual[1][0, 0].item()) & 255, 94)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                captured = op.try_grouped_quant(a, (self.w, self.sw))
+            graph.replay()
+            self.equal(captured, expected)
+
+    def test_changed_compile_configuration_is_cold_during_capture(self):
+        a = self.pair(33)
+        original = self.dg.get_jit_config_fingerprint()
+        for setter, changed, restored in (
+            (self.dg.set_ignore_compile_dims, not original[3], original[3]),
+            (self.dg.set_block_size_multiple_of, (64, 64), original[4:6]),
+        ):
+            self.assertIsNotNone(op.try_grouped_quant(a, (self.w, self.sw)))
+            try:
+                setter(changed)
+                graph = torch.cuda.CUDAGraph()
+                sentinel = torch.zeros(1, device=self.w.device)
+                with mock.patch.object(
+                    op, "_launch", side_effect=AssertionError("cold JIT launch")
+                ):
+                    with torch.cuda.graph(graph):
+                        self.assertIsNone(op.try_grouped_quant(a, (self.w, self.sw)))
+                        sentinel.add_(1)
+                graph.replay()
+                self.assertEqual(sentinel.item(), 1)
+                self.equal(
+                    op.try_grouped_quant(a, (self.w, self.sw)),
+                    self.baseline(a),
+                )
+                with torch.cuda.graph(torch.cuda.CUDAGraph()):
+                    self.assertIsNotNone(op.try_grouped_quant(a, (self.w, self.sw)))
+            finally:
+                setter(restored)
+
+    @unittest.skipUnless(torch.cuda.device_count() > 1, "Two CUDA devices required")
+    def test_warmed_noncurrent_device(self):
+        # DeepJIT in release_v2.8.2 binds its cached CUfunctions to the first
+        # backend device. Match one GPU per RTP worker, with a fresh process
+        # whose backend is initialized on GPU1 before switching current device.
+        script = r"""
+import importlib.util, sys, torch
+torch.cuda.set_device(1)
+spec = importlib.util.spec_from_file_location("wo_a_device_test", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+cls = module.ExternalQuantCudaTest
+cls.setUpClass()
+case = cls()
+a = case.pair(33)
+expected = case.baseline(a)
+out = module.op._output(33, cls.w.device)
+with torch.cuda.device(0):
+    assert module.op.is_ready(cls.w, cls.sw)
+    actual = module.op.try_grouped_quant(a, (cls.w, cls.sw), out=out)
+    case.equal(actual, expected)
+    assert torch.cuda.current_device() == 0
+print("Warmed GPU1 called from current GPU0: PASS")
+"""
+        subprocess.run(
+            [sys.executable, "-c", script, str(Path(__file__).resolve())],
+            check=True,
+            timeout=240,
+        )
+
+    @classmethod
+    def setUpClass(cls):
+        _require_external_backend()
+        import deep_gemm as dg
+
+        cls.dg = dg
+        if torch.cuda.get_device_capability()[0] != 10:
+            raise unittest.SkipTest("Blackwell required")
+        torch.manual_seed(20261019)
+        cls.w = (torch.randn(8, 1024, 4096, device="cuda") / 16).to(torch.float8_e4m3fn)
+        cls.w[:, :32] = 0
+        cls.sw = torch.full(
+            (8, 32, 1024), 0x7F7F7F7F, device="cuda", dtype=torch.int32
+        ).transpose(1, 2)
+        assert op.warmup(
+            cls.w, cls.sw
+        ), "Install DeepGEMM with the external FP8Group32 epilogue"
+
+    def pair(self, m, token=False, exp=127):
+        q = (
+            (torch.randn(8, m, 4096, device="cuda") / 4)
+            .to(torch.float8_e4m3fn)
+            .transpose(0, 1)
+        )
+        if token:
+            q = q.contiguous()
+        word = sum(exp << (8 * i) for i in range(4))
+        if word >= 2**31:
+            word -= 2**32
+        s = (
+            torch.full(
+                (8, 32, (m + 3) // 4 * 4), word, device="cuda", dtype=torch.int32
+            )
+            .transpose(1, 2)[:, :m]
+            .transpose(0, 1)
+        )
+        return q, s
+
+    def baseline(self, a):
+        z = torch.empty((a[0].shape[0], 8, 1024), device="cuda", dtype=torch.bfloat16)
+        self.dg.fp8_einsum("bhr,hdr->bhd", a, (self.w, self.sw), z, recipe=(1, 1, 32))
+        return reference_quant(z)
+
+    def equal(self, x, y):
+        self.assertIsNotNone(x)
+        self.assertTrue(torch.equal(x[0].view(torch.uint8), y[0].view(torch.uint8)))
+        self.assertTrue(torch.equal(x[1], y[1]))
+
+    def test_layouts_tails_zero_and_tiny(self):
+        for m, exp in [
+            (1, 127),
+            (5, 127),
+            (33, 127),
+            (192, 127),
+            (385, 127),
+            (512, 127),
+            (513, 127),
+            (33, 92),
+            (33, 17),
+            (33, 7),
+            (33, 1),
+        ]:
+            for token in (False, True):
+                a = self.pair(m, token, exp)
+                with self.subTest(m=m, exp=exp, token=token):
+                    self.equal(
+                        op.try_grouped_quant(a, (self.w, self.sw)),
+                        self.baseline(a),
+                    )
+
+    def test_reused_output_changed_graph_inputs_and_side_stream(self):
+        for token in (False, True):
+            a = self.pair(33, token)
+            out = op._output(33, self.w.device)
+            stream = torch.cuda.Stream()
+            stream.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(stream):
+                self.assertIs(
+                    op.try_grouped_quant(a, (self.w, self.sw), out=out),
+                    out,
+                )
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph, stream=stream):
+                    self.assertIs(
+                        op.try_grouped_quant(a, (self.w, self.sw), out=out),
+                        out,
+                    )
+                a[0].zero_()
+                a[1].fill_(0x01010101)
+                graph.replay()
+                self.equal(out, self.baseline(a))
+            torch.cuda.current_stream().wait_stream(stream)
+
+    def test_cold_capture_context_guard_and_invalid_output(self):
+        a = self.pair(517)
+        sentinel = torch.zeros(1, device="cuda")
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            self.assertIsNone(op.try_grouped_quant(a, (self.w, self.sw)))
+            sentinel.add_(1)
+        graph.replay()
+        self.assertEqual(sentinel.item(), 1)
+        entry = op._READY[self.w.device.index]
+        with mock.patch.object(op, "_context", return_value=-1):
+            self.assertFalse(op.is_ready(self.w, self.sw))
+            self.assertIsNone(op.try_grouped_quant(a, (self.w, self.sw)))
+        self.assertIs(op._READY[self.w.device.index], entry)
+        with mock.patch.dict(op._READY, {}, clear=True), mock.patch.object(
+            op, "_external_api", side_effect=AssertionError("cold load")
+        ):
+            self.assertIsNone(op.try_grouped_quant(a, (self.w, self.sw)))
+        out = op._output(517, self.w.device)
+        with self.assertRaises(ValueError):
+            op.try_grouped_quant(
+                a, (self.w, self.sw), out=(out[0], out[1].contiguous())
+            )
+        with self.assertRaises(ValueError):
+            op.try_grouped_quant(
+                a,
+                (self.w, self.sw),
+                out=(a[0].contiguous().view(517, -1)[:, :8192], out[1]),
+            )
+        # An eager call prepares the previously cold signature.
+        self.equal(op.try_grouped_quant(a, (self.w, self.sw)), self.baseline(a))
+
+    def test_actual_wo_b_forward_quantized_consumes_pair(self):
+        path = Path(__file__).resolve().parents[2] / "utils.py"
+        node = next(
+            n
+            for n in ast.parse(path.read_text()).body
+            if isinstance(n, ast.ClassDef) and n.name == "V41MXFP8Linear"
+        )
+        from deep_gemm.utils.layout import get_mn_major_tma_aligned_packed_ue8m0_tensor
+
+        namespace = dict(
+            torch=torch,
+            get_mn_major_tma_aligned_packed_ue8m0_tensor=get_mn_major_tma_aligned_packed_ue8m0_tensor,
+        )
+        exec(
+            compile(ast.Module(body=[node], type_ignores=[]), str(path), "exec"),
+            namespace,
+        )
+        linear = namespace[node.name](
+            (torch.randn(5120, 8192, device="cuda") / 64).to(torch.float8_e4m3fn),
+            torch.ones(160, 256, device="cuda"),
+        )
+        a = self.pair(33, True)
+        actual_pair = op.try_grouped_quant(a, (self.w, self.sw))
+        expected = linear.forward_quantized(*self.baseline(a))
+        out = torch.empty_like(expected)
+        self.assertIs(linear.forward_quantized(*actual_pair, out=out), out)
+        self.assertTrue(torch.equal(out, expected))
 
 
 if __name__ == "__main__":

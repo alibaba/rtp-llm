@@ -56,7 +56,6 @@ _TESTS = [
     "test_v41_sparse_decode",
     "test_v41_swa_codec",
     "test_v41_swa_fresh",
-    "test_v41_wo_a_quant",
 ]
 
 
@@ -129,6 +128,29 @@ cuda13_sm100_py_test(
         test_requirement("pytest"),
     ],
     env = {"RTP_V41_REQUIRE_SM10X": "1"},
+    tags = ["dsv41_cuda13"],
+    legacy_create_init = 0,
+)
+
+
+# This target retains fallback coverage with older dependency wheels. Candidate
+# acceptance uses validate_wo_a_quant_wheel.py with a wheel path and SHA256.
+cuda13_sm100_py_test(
+    name = "test_v41_wo_a_quant",
+    srcs = [
+        "test_v41_wo_a_quant.py",
+        "validate_wo_a_quant_wheel.py",
+        "//rtp_llm/test/pytest:pytest_main.py",
+    ],
+    main = "//rtp_llm/test/pytest:pytest_main.py",
+    args = ["--cuda-devices", "1", "$(location :test_v41_wo_a_quant.py)"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm/models_py:tile_kernels_mhc",
+        "//rtp_llm:jit_cache_env",
+        test_requirement("pytest"),
+    ],
     tags = ["dsv41_cuda13"],
     legacy_create_init = 0,
 )
