@@ -14,14 +14,16 @@ Covers ``AttentionV41FP8._build_shared_prefill_meta``'s
   like the fresh build.
 """
 
+import ast
 import os
 import sys
 import unittest
 import weakref
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from typing import NamedTuple
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import torch
 
@@ -38,6 +40,7 @@ from rtp_llm.models_py.modules.dsv41.fp8.attention_v41 import (  # noqa: E402
 from rtp_llm.models_py.modules.dsv41.fp8.prefill_meta import (
     _flat_optional,
     build_and_propagate_prefill_meta_fp8,
+    clear_prefill_meta_shared_fp8,
     release_v41_prefill_shared,
 )
 from rtp_llm.models_py.modules.dsv41.prefill_workspace import PrefillWorkspace
@@ -998,6 +1001,192 @@ class V41SwaWriteReuseDispatchTest(unittest.TestCase):
                 )
                 self.assertTrue(
                     all(a._prefill_meta_shared is not None for a in layers[21:])
+                )
+
+    def test_stop_layer_skips_only_tail_buckets_and_rebuilds_after_compaction(self):
+        for separate_decoder in (False, True):
+            for options in ({}, {"stop_layer": None}, {"stop_layer": 21}):
+                with self.subTest(decoder=separate_decoder, options=options):
+                    shared = {}
+                    layers = [
+                        _make_attn(0 if i == 0 else 1, i, shared) for i in range(40)
+                    ]
+                    mapping = [
+                        (
+                            {DECODER_SWA_KV: 1}
+                            if separate_decoder and i >= 21
+                            else {SWA_KV: 0}
+                        )
+                        for i in range(40)
+                    ]
+                    cache = _tagged_cache(
+                        group_tags=(SWA_KV, DECODER_SWA_KV),
+                        layer_region_to_group_id=mapping,
+                    )
+                    tables = {
+                        SWA_KV: torch.tensor([[1]]),
+                        DECODER_SWA_KV: torch.tensor([[2]]),
+                    }
+                    model = SimpleNamespace(
+                        layers=[SimpleNamespace(attn=a) for a in layers]
+                    )
+                    for attn in layers:
+                        attn._prefill_meta_shared = object()
+                    calls = []
+
+                    def parent(attn, *args, **kwargs):
+                        calls.append(attn.layer_id)
+                        return _FakeMeta()
+
+                    with patch.object(
+                        AttentionFP8, "_build_shared_prefill_meta", parent
+                    ), patch.object(AttentionFP8, "_ensure_freqs_cis_bound"):
+                        previous = build_and_propagate_prefill_meta_fp8(
+                            model,
+                            torch.zeros(8, 1),
+                            0,
+                            cache,
+                            tables,
+                            workspace=object(),
+                            **options,
+                            **_inputs(),
+                        )
+                        skipped = separate_decoder and options.get("stop_layer") == 21
+                        self.assertEqual(
+                            calls,
+                            [0, 1, 21] if separate_decoder and not skipped else [0, 1],
+                        )
+                        self.assertTrue(
+                            all(a._prefill_meta_shared is not None for a in layers[:21])
+                        )
+                        for attn in layers[21:]:
+                            self.assertEqual(attn._prefill_meta_shared is None, skipped)
+                            if not separate_decoder:
+                                self.assertIs(
+                                    attn._prefill_meta_shared,
+                                    layers[1]._prefill_meta_shared,
+                                )
+
+                        clear_prefill_meta_shared_fp8(model)
+                        calls.clear()
+                        build_and_propagate_prefill_meta_fp8(
+                            model,
+                            torch.zeros(4, 1),
+                            0,
+                            cache,
+                            tables,
+                            workspace=None,
+                            first_layer=21,
+                            reuse_write_by_region=previous,
+                            **_inputs(),
+                        )
+                    self.assertEqual(calls, [21])
+                    self.assertTrue(
+                        all(a._prefill_meta_shared is None for a in layers[:21])
+                    )
+                    self.assertTrue(
+                        all(a._prefill_meta_shared is not None for a in layers[21:])
+                    )
+
+
+class V41CedMetadataPrologueTest(unittest.TestCase):
+    @staticmethod
+    def _prologue():
+        path = Path(__file__).resolve().parents[2] / "prefill/forward.py"
+        tree = ast.parse(path.read_text())
+        forward = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "forward_layers"
+        )
+        assignments = {
+            node.targets[0].id: index
+            for index, node in enumerate(forward.body)
+            if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name)
+        }
+        body = forward.body[
+            assignments["ced_tail"] : assignments["layer_forward_range"]
+        ]
+        prefix = ast.parse("from __future__ import annotations").body
+        return compile(
+            ast.Module(body=prefix + body, type_ignores=[]), str(path), "exec"
+        )
+
+    @staticmethod
+    def _state(plan, *, allow_ced=True):
+        events = Mock()
+        events.create.return_value = plan
+        return dict(
+            torch=torch,
+            allow_ced=allow_ced,
+            _env_flag=lambda name: True,
+            shared_prefill={},
+            _rt_on=False,
+            _fwd_dbg=SimpleNamespace(enabled=lambda: False),
+            CEDPlan=SimpleNamespace(create=events.create),
+            v4=SimpleNamespace(fp8_kv_cache=True, swa_bounded_replay=True),
+            cp_ctx=SimpleNamespace(
+                first_position_host=0,
+                prefix_lengths=torch.tensor([0]),
+                req_id_per_token=torch.zeros(8, dtype=torch.int32),
+            ),
+            attn_inputs=None,
+            kv_cache=object(),
+            block_tables_by_type={},
+            prepare_hidden_fn=None,
+            record_range_ctx=nullcontext,
+            positions=torch.arange(8),
+            cu_seqlens=None,
+            h=torch.zeros(8, 1),
+            ws=object(),
+            host_block_tables=lambda *args: None,
+            build_and_propagate_prefill_meta_fp8=events.build,
+            clear_prefill_meta_shared_fp8=events.clear,
+            release_v41_prefill_shared=events.release,
+            events=events,
+        )
+
+    def test_plan_precedes_build_and_only_an_active_plan_limits_buckets(self):
+        code = self._prologue()
+        for allow_ced, plan in ((False, object()), (True, None), (True, object())):
+            with self.subTest(allow_ced=allow_ced, plan=plan):
+                state = self._state(plan, allow_ced=allow_ced)
+                exec(code, state)
+                events = state["events"]
+                self.assertEqual(
+                    [call[0] for call in events.mock_calls],
+                    ["create", "build"] if allow_ced else ["build"],
+                )
+                self.assertEqual(
+                    events.build.call_args.kwargs["stop_layer"],
+                    21 if allow_ced and plan is not None else None,
+                )
+
+    def test_plan_creation_failure_cleans_metadata_and_shared_state(self):
+        code = self._prologue()
+        for fp8_cache in (False, True):
+            with self.subTest(fp8_cache=fp8_cache):
+                state = self._state(None)
+                state["v4"].fp8_kv_cache = fp8_cache
+                events = state["events"]
+                error = RuntimeError("plan failed")
+                events.create.side_effect = error
+                with self.assertRaisesRegex(RuntimeError, "plan failed") as raised:
+                    exec(code, state)
+                self.assertIs(raised.exception, error)
+                events.build.assert_not_called()
+                if fp8_cache:
+                    events.clear.assert_called_once_with(state["v4"])
+                else:
+                    events.clear.assert_not_called()
+                events.release.assert_called_once_with(state["shared_prefill"])
+                self.assertEqual(
+                    [call[0] for call in events.mock_calls],
+                    (
+                        ["create", "clear", "release"]
+                        if fp8_cache
+                        else ["create", "release"]
+                    ),
                 )
 
 

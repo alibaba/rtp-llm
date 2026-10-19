@@ -142,6 +142,7 @@ def build_and_propagate_prefill_meta_fp8(
     first_layer: int = 0,
     reuse_write_by_region: Optional[Dict] = None,
     host_block_ids: Optional[torch.Tensor] = None,
+    stop_layer: Optional[int] = None,
 ) -> Dict:
     """Build the layer-invariant prefill meta once per ``compress_ratio``
     bucket and broadcast each bucket's meta to its layers'
@@ -158,6 +159,10 @@ def build_and_propagate_prefill_meta_fp8(
 
     Only remaining layers are rebuilt after CED changes the query domain.
     Returned write metadata is owned by this forward and is never a global cache.
+
+    ``stop_layer`` excludes buckets represented only at or beyond that layer.
+    Their metadata stays None until the CED compact point rebuilds it. Buckets
+    spanning the boundary still share their pre-boundary representative.
     """
     sp_per_req = _flat_optional(sp_per_req)
     cu_seqlens = _flat_optional(cu_seqlens)
@@ -168,14 +173,15 @@ def build_and_propagate_prefill_meta_fp8(
 
     representatives: Dict[tuple, Any] = {}
     layer_buckets = []
-    for layer in v4.layers[first_layer:]:
+    for index, layer in enumerate(v4.layers[first_layer:], start=first_layer):
         attn = getattr(layer, "attn", None)
         if attn is not None:
             key = (
                 int(attn.compress_ratio),
                 cached_swa_region(v4, kv_cache, attn.layer_id),
             )
-            representatives.setdefault(key, attn)
+            if stop_layer is None or index < stop_layer:
+                representatives.setdefault(key, attn)
             layer_buckets.append((attn, key))
 
     # SWA-only owns the superset metadata (common + SWA Group-1 + Group-2),

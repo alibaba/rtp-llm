@@ -497,6 +497,26 @@ def forward_layers(
         if use_prefill_fast_path and not _profiler._torch_profiler_enabled()
         else nullcontext
     )
+    # CED rebuilds tail metadata at L21; decide before constructing its buckets.
+    ced_tail = None
+    if allow_ced and _env_flag("DSV41_CED"):
+        if shared_prefill is not None and not _rt_on and not _fwd_dbg.enabled():
+            try:
+                ced_tail = CEDPlan.create(
+                    v4,
+                    cp_ctx,
+                    attn_inputs,
+                    kv_cache,
+                    prepare_hidden_fn=prepare_hidden_fn,
+                    bounded_replay=v4.swa_bounded_replay,
+                )
+            except BaseException:
+                # Creation now precedes the layer loop's cleanup scope.
+                if v4.fp8_kv_cache:
+                    clear_prefill_meta_shared_fp8(v4)
+                if shared_prefill is not None:
+                    release_v41_prefill_shared(shared_prefill)
+                raise
     # FP8 KV-cache: hoist host-side prefill metadata once per ratio bucket
     # and broadcast to every layer's ``AttentionFP8._prefill_meta_shared``.
     # BF16 path doesn't need this; ``Attention`` rebuilds meta inside its
@@ -582,11 +602,11 @@ def forward_layers(
                 req_id_per_token=req_id_per_token,
                 max_seqlen_q=max_seqlen_q,
                 workspace=ws,
+                stop_layer=21 if ced_tail is not None else None,
                 host_block_ids=host_block_tables(kv_cache, attn_inputs),
             )
 
     layer_forward_range = _profiler.make_layer_forward_range()
-    ced_tail = None
     original_cp_ctx = cp_ctx
     try:
         if shared_prefill is not None and _env_flag("RTP_V41_BATCHED_PRODUCER"):
@@ -600,16 +620,6 @@ def forward_layers(
                 shared_prefill["prefill_producer_host_tables"] = (
                     tuple(kv_cache.group_tags),
                     host_tables,
-                )
-        if allow_ced and _env_flag("DSV41_CED"):
-            if shared_prefill is not None and not _rt_on and not _fwd_dbg.enabled():
-                ced_tail = CEDPlan.create(
-                    v4,
-                    cp_ctx,
-                    attn_inputs,
-                    kv_cache,
-                    prepare_hidden_fn=prepare_hidden_fn,
-                    bounded_replay=v4.swa_bounded_replay,
                 )
         ced_in_l20 = ced_tail is not None and ced_tail.can_split_l20(v4)
         with record_range_ctx():
