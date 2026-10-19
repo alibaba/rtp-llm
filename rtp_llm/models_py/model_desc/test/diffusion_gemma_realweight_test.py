@@ -638,18 +638,42 @@ class DiffusionGemmaReuseABTest(unittest.TestCase):
             with _torch.inference_mode():
                 return model.forward_canvas(ci, canvas, positions, None)
 
+        # capture the first three layers' outputs in both flows to find the
+        # first layer where the split-attention path diverges beyond bf16
+        # rounding (~1e-2) — immediate divergence names a merge bug, gradual
+        # growth names numerical chaos amplification.
+        layer_outs = {}
+
+        def _wrap_layers(model, tag):
+            for idx in (0, 1, 2):
+                orig = model.layers[idx].forward
+
+                def make_wrapper(i, o):
+                    def wrapped(hidden, *a, **kw):
+                        out = o(hidden, *a, **kw)
+                        layer_outs.setdefault(tag, {})[i] = out.detach().clone()
+                        return out
+                    return wrapped
+                model.layers[idx].forward = make_wrapper(idx, orig)
+
         # flow A: fresh 277-token prefill
         model.kv_cache = _caches()
+        _wrap_layers(model, "A")
         with _torch.inference_mode():
             out_a = model.forward(_inputs(full_ids, _attn(0, 277)))
+        for idx in (0, 1, 2):
+            model.layers[idx].forward = None  # unwrapped below
         hidden_a = _canvas_hidden(277)
 
         # flow B: 256 prefill + 21 incremental over the cached prefix
         groups_a = {li: model.kv_cache.get_layer_cache_groups(li) for li in (0, 5)}
         model.kv_cache = _caches()
+        _wrap_layers(model, "B")
         with _torch.inference_mode():
             model.forward(_inputs(prefix_ids, _attn(0, 256)))
+            layer_outs["B256"] = dict(layer_outs.get("B", {}))
             out_b = model.forward(_inputs(suffix_ids, _attn(256, 21)))
+        hidden_b = _canvas_hidden(277)
         groups_b = {li: model.kv_cache.get_layer_cache_groups(li) for li in (0, 5)}
         hidden_b = _canvas_hidden(277)
 
@@ -657,6 +681,17 @@ class DiffusionGemmaReuseABTest(unittest.TestCase):
         # (split attention vs full attention), (2) the K rows they wrote to
         # the last page, (3) the canvas hidden. Whichever diverges first
         # names the breaker.
+        # layer divergence table: A vs B at the incremental prefill; note
+        # flow B's layers see a 256-token pass then a 21-token pass — compare
+        # the 21-token rows of A's layer outputs against B's.
+        for idx in (0, 1, 2):
+            la = layer_outs["A"][idx][-21:].float()
+            lb = layer_outs["B"][idx].float() if layer_outs["B"][idx].shape[0] == 21 else layer_outs["B"][idx][-21:].float()
+            print(
+                f"[dgm-fi] layer {idx} out (last 21 rows): max_diff={(la - lb).abs().max().item():.5f} "
+                f"mean_diff={(la - lb).abs().mean().item():.5f} absmax={float(la.abs().max()):.2f}",
+                flush=True,
+            )
         ha = out_a.hidden_states[-21:].float()
         hb = out_b.hidden_states[-21:].float()
         print(
