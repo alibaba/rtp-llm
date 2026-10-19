@@ -420,7 +420,19 @@ TEST_F(CopyBoundsTest, RejectsInvalidBatchDimensionsAndHostCapacity) {
     std::vector<uint8_t>       data(host_block_size_);
     HostBufferView             host{data.data(), data.size(), data.size()};
     auto                       descriptor = makeDescriptor(Tier::DEVICE, Tier::HOST, device_blocks_, 1);
-    EXPECT_THROW(executor.generatePlan({}, {}, {}), std::exception);
+    EXPECT_THROW(
+        {
+            try {
+                executor.generatePlan({}, {}, {});
+            } catch (const RTPException& error) {
+                const std::string message = error.what();
+                EXPECT_NE(message.find("invalid device-host batch dimensions"), std::string::npos);
+                EXPECT_NE(message.find("DeviceHostTransferExecutor.cc"), std::string::npos);
+                EXPECT_FALSE(error.getTrace().empty());
+                throw;
+            }
+        },
+        RTPException);
     host.capacity_bytes = host.payload_bytes - 1;
     EXPECT_EQ(executor.generatePlan({host}, {descriptor}, {group_set_.get()}).first, TransferStatus::INVALID_ARGS);
 }
