@@ -182,6 +182,7 @@ private:
     std::unique_ptr<IContextParallelProcessor> context_parallel_processor_{nullptr};
     std::shared_ptr<CacheStoreAsyncWriter>     cache_store_async_writer_;
     bool                                       custom_output_enabled_ = false;
+    bool                                       custom_output_prefill_only_ = false;
 
     // Accumulated H2D copies from tensorHoldHostAndToCuda(); flushed as one kernel per forward.
     FusedD2DCopyParams d2d_copies_;
@@ -636,6 +637,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     }
 
     if (!params.hidden_state_capture_layer_ids.empty()) {
+        RTP_LLM_CHECK_WITH_INFO(!custom_output_prefill_only_,
+                                "decision output cannot be combined with hidden-state capture");
         RTP_LLM_CHECK_WITH_INFO(
             !(int(device_props_.enable_layer_micro_batch) && device_props_.enable_prefill_cp),
             "hidden-state capture does not support context parallel combined with layer micro-batching");

@@ -56,9 +56,47 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups& stream_gro
     return output_dispatcher_->dispatch(stream_groups, merge_outputs);
 }
 
-absl::Status NormalBatchStreamProcessor::dispatchPrefillOnly(
-    const StreamGroups& stream_groups, GenerationPrefillCudaGraphStatus generation_prefill_cuda_graph_status) const {
+absl::Status
+NormalBatchStreamProcessor::dispatchPrefillOnly(const StreamGroups&              stream_groups,
+                                                GenerationPrefillCudaGraphStatus generation_prefill_cuda_graph_status,
+                                                const GptModelOutputs*           model_output) const {
+    const auto custom_output = model_output && model_output->custom_output.defined() ?
+                                   model_output->custom_output.to(torch::kCPU) :
+                                   torch::Tensor();
+    int        expected_rows = 0;
+    for (const auto& stream : stream_groups.contextStreams()) {
+        if (stream->generateInput()->custom_output_token_position >= stream->prefixLength()) {
+            expected_rows += stream->currentBatchSize();
+        }
+    }
+    std::string output_error = model_output ? model_output->custom_output_error : "";
+    if (expected_rows > 0 && output_error.empty()
+        && (!custom_output.defined() || custom_output.dim() != 2 || custom_output.size(0) != expected_rows)) {
+        output_error = "decision output row count does not match selected sequences";
+    }
+    int output_offset = 0;
     for (const auto& stream : stream_groups.allStreams()) {
+        const bool has_custom_output =
+            stream->isContextStream()
+            && stream->generateInput()->custom_output_token_position >= stream->prefixLength();
+        const int row_offset = output_offset;
+        if (has_custom_output) {
+            // Gather includes selected rows even if their requests fail or are
+            // cancelled during execution. Consume that row before skipping the
+            // response so later requests keep their original output positions.
+            output_offset += stream->currentBatchSize();
+        }
+        if (stream->hasError()) {
+            continue;
+        }
+        torch::Tensor row_output;
+        if (has_custom_output) {
+            if (!output_error.empty()) {
+                stream->reportError(ErrorCode::EXECUTION_EXCEPTION, output_error);
+                continue;
+            }
+            row_output = custom_output.narrow(0, row_offset, stream->currentBatchSize());
+        }
         auto empty_token_ids = torch::empty({stream->currentBatchSize(), 0}, torch::kInt32);
         stream->update({empty_token_ids,
                         /*num_new_tokens=*/0,
@@ -74,7 +112,8 @@ absl::Status NormalBatchStreamProcessor::dispatchPrefillOnly(
                         /*force_update_info=*/false,
                         /*prompt_logits=*/std::nullopt,
                         /*error_info=*/std::nullopt,
-                        generation_prefill_cuda_graph_status});
+                        generation_prefill_cuda_graph_status,
+                        row_output});
     }
     return absl::OkStatus();
 }

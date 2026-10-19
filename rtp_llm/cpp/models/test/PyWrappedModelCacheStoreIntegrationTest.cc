@@ -1461,17 +1461,20 @@ py::dict runGenerationPrefillCaptureScenario(py::object                         
 
 // Exercise input preparation, Python forward, graphs and custom output together.
 // Only decoder math is replaced; all routing and post-layers code is production.
-py::dict runCustomOutput(py::object py_model, py::object handler, torch::Tensor indexes, bool python_norm) {
+py::dict
+runCustomOutput(py::object py_model, py::object handler, torch::Tensor indexes, bool python_norm, bool prefill_only) {
     static std::once_flag runtime_once;
     std::call_once(runtime_once, []() { initRuntime(0, false, false, MlaOpsType::AUTO); });
     constexpr int     width             = 4;
     constexpr int64_t block_table_width = 2;
-    const bool        enable_graph      = python_norm;
+    const bool        enable_graph      = python_norm && !prefill_only;
     Weights           weights;
     weights.layers.resize(1);
     auto lm_head            = std::make_shared<DenseWeights>();
     lm_head->kernel         = torch::eye(width, torch::TensorOptions().device(torch::kCUDA).dtype(torch::kBFloat16));
-    weights.lm_head         = lm_head;
+    if (!prefill_only) {
+        weights.lm_head = lm_head;
+    }
     auto norm               = std::make_shared<LayerNormWeights>();
     norm->gamma             = torch::ones({width}, lm_head->kernel.options());
     weights.final_layernorm = norm;
@@ -1512,6 +1515,8 @@ py::dict runCustomOutput(py::object py_model, py::object handler, torch::Tensor 
     inputs.kv_cache_kernel_block_id = inputs.kv_cache_kernel_block_id.squeeze(0);
     inputs.custom_output_indexes    = std::move(indexes);
     inputs.need_all_logits          = !python_norm;
+    inputs.skip_lm_head             = prefill_only;
+    inputs.capture_hidden_states    = prefill_only;
     py::dict result;
     if (enable_graph) {
         model.prepareAttentionInputs(inputs);
@@ -1549,7 +1554,13 @@ py::dict runCustomOutput(py::object py_model, py::object handler, torch::Tensor 
 PYBIND11_MODULE(libth_pywrapped_model_cache_store_integration_test, m) {
     torch_ext::registerPyOpDefs(m);
     rtp_llm::registerExecCtxOps(m);
-    m.def("run_post_layers", &rtp_llm::test::runCustomOutput);
+    m.def("run_post_layers",
+          &rtp_llm::test::runCustomOutput,
+          py::arg("py_model"),
+          py::arg("handler"),
+          py::arg("indexes"),
+          py::arg("python_norm"),
+          py::arg("prefill_only") = false);
     m.def("flush_capture_publisher_without_close", &rtp_llm::test::flushCapturePublisherWithoutClose);
     m.def("close_capture_publisher_without_gil", &rtp_llm::test::closeCapturePublisherWithoutGil);
     m.def("initialize_capture_publisher_with_core_dump", &rtp_llm::test::initializeCapturePublisherWithCoreDump);

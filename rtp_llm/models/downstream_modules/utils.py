@@ -1,4 +1,5 @@
 import logging
+from pathlib import Path
 from typing import Optional
 
 from rtp_llm.config.model_config import ModelConfig
@@ -12,6 +13,12 @@ def create_custom_module(
     tokenizer: Optional[BaseTokenizer],
 ):
     task_type = config.task_type
+    if (Path(config.ckpt_path) / "kev_config.json").is_file():
+        if task_type != TaskType.LANGUAGE_MODEL:
+            raise ValueError("Kev checkpoints require the LANGUAGE_MODEL task type")
+        from rtp_llm.models.downstream_modules.kev import KevModule
+
+        return KevModule(config, tokenizer)
     # An absent provider is optional; a broken installed generation provider is not.
     if (
         task_type == TaskType.LANGUAGE_MODEL

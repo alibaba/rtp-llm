@@ -85,6 +85,7 @@ private:
     std::unique_ptr<Executor>                     executor_;
     ModelConfig                                   model_config_;
     py::object                                    custom_output_selector_;
+    bool                                          custom_output_prefill_only_ = false;
     ParallelismConfig                             parallelism_config;
     RuntimeConfig                                 runtime_config;
     EPLBConfig                                    eplb_config;

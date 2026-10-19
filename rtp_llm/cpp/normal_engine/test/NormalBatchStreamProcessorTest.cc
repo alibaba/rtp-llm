@@ -337,6 +337,186 @@ TEST_P(OutputDispatchTest, testExecutorUsesGatheredModeAndPreservesCaptureErrors
     }
 }
 
+TEST_P(OutputDispatchTest, testExecutorReturnsDecisionOutputWithoutSampling) {
+    class DecisionModel: public ModelBase {
+    public:
+        GptModelOutputs forward(const GptModelInputs& inputs) override {
+            EXPECT_TRUE(inputs.skip_lm_head);
+            EXPECT_TRUE(inputs.capture_hidden_states);
+            EXPECT_EQ(toVec<int>(inputs.input_lengths), (std::vector<int>{2, 3}));
+            EXPECT_EQ(toVec<int64_t>(inputs.custom_output_indexes), (std::vector<int64_t>{1, 4}));
+            GptModelOutputs outputs;
+            // Deliberately omit logits: the zero-token route must carry the head
+            // output to the response without ever entering the sampler.
+            outputs.custom_output = torch::tensor({{0.25f, 0.75f}, {0.875f, 0.125f}}, torch::kCUDA);
+            return outputs;
+        }
+    };
+    auto           params = makeExecutorParams(GetParam());
+    NormalExecutor executor(params, nullptr);
+    executor.setBatchProcessor(std::make_unique<NormalBatchStreamProcessor>(params.model_config_,
+                                                                            params.pd_sep_config,
+                                                                            params.profiling_debug_logging_config,
+                                                                            CacheConfig(),
+                                                                            true,
+                                                                            GetParam()));
+    executor.setModel(std::make_unique<DecisionModel>());
+    std::vector<GenerateStreamPtr> streams;
+    for (int length : {2, 3}) {
+        auto query                             = make_shared<GenerateInput>();
+        query->input_ids                       = torch::arange(length, torch::kInt32);
+        query->generate_config                 = make_shared<GenerateConfig>();
+        query->generate_config->max_new_tokens = 0;
+        query->custom_output_token_position    = length - 1;
+        auto stream                            = make_shared<NormalGenerateStream>(
+            query, params.model_config_, params.runtime_config, ResourceContext{}, nullptr);
+        stream->generate_status_->status = StreamState::RUNNING;
+        streams.push_back(stream);
+    }
+    ASSERT_TRUE(executor.process({streams[0], streams[1]}).ok());
+    const std::vector<std::vector<float>> expected{{0.25f, 0.75f}, {0.875f, 0.125f}};
+    for (size_t i = 0; i < streams.size(); ++i) {
+        auto result = streams[i]->nextOutput(100);
+        ASSERT_TRUE(result.ok()) << result.status().ToString();
+        ASSERT_EQ(result.value().generate_outputs.size(), 1);
+        const auto& output = result.value().generate_outputs[0];
+        EXPECT_TRUE(output.finished);
+        EXPECT_EQ(output.output_ids.sizes(), (torch::IntArrayRef{1, 0}));
+        ASSERT_TRUE(output.custom_output.has_value());
+        EXPECT_FALSE(output.custom_output->is_cuda());
+        EXPECT_EQ(toVec<float>(*output.custom_output), expected[i]);
+        EXPECT_EQ(streams[i]->outputTokenLen(), 0);
+        EXPECT_EQ(streams[i]->seqLength(), 2 + i);
+        EXPECT_FALSE(streams[i]->nextOutput(100).ok());
+    }
+}
+
+TEST_P(OutputDispatchTest, testPrefillDecisionDispatchKeepsRowsAndIsolatesErrors) {
+    const auto                 params = makeExecutorParams(GetParam());
+    NormalBatchStreamProcessor processor(params.model_config_, {}, {}, CacheConfig(), true, GetParam());
+    auto                       make_stream = [&](bool selected) {
+        auto query                             = make_shared<GenerateInput>();
+        query->input_ids                       = hostIntBuffer({1, 2});
+        query->generate_config                 = make_shared<GenerateConfig>();
+        query->generate_config->max_new_tokens = 0;
+        query->custom_output_token_position    = selected ? 1 : -1;
+        auto stream                            = make_shared<NormalGenerateStream>(
+            query, params.model_config_, params.runtime_config, ResourceContext{}, nullptr);
+        stream->generate_status_->status = StreamState::RUNNING;
+        return stream;
+    };
+    for (const std::string failure : {"", "head failure", "missing", "wrong row count", "wrong rank"}) {
+        for (bool reverse : {false, true}) {
+            SCOPED_TRACE(failure);
+            SCOPED_TRACE(reverse);
+            auto first  = make_stream(true);
+            auto second = make_stream(true);
+            auto plain  = make_stream(false);
+            auto failed = make_stream(true);
+            failed->reportError(ErrorCode::INVALID_PARAMS, "original input error");
+            const std::vector<GenerateStreamPtr> ordered =
+                reverse ? std::vector<GenerateStreamPtr>{second, first} : std::vector<GenerateStreamPtr>{first, second};
+            StreamGroups groups({ordered[0], plain, failed, ordered[1]});
+            TensorHolder holder;
+            auto         inputs = processor.gatherModelInput(groups, holder);
+            ASSERT_TRUE(inputs.ok());
+            // The errored request still occupies a selected row in the model
+            // batch. Dispatch must consume its output without publishing it.
+            EXPECT_EQ(toVec<int64_t>(inputs->custom_output_indexes), (std::vector<int64_t>{1, 5, 7}));
+            GptModelOutputs outputs;
+            if (failure != "missing") {
+                outputs.custom_output = torch::tensor({{0.25f, 0.75f}, {0.5f, 0.5f}, {0.875f, 0.125f}}, torch::kCUDA);
+            }
+            if (failure == "head failure") {
+                outputs.custom_output_error = "head failure";
+            } else if (failure == "wrong row count") {
+                outputs.custom_output = outputs.custom_output.narrow(0, 0, 1);
+            } else if (failure == "wrong rank") {
+                outputs.custom_output = outputs.custom_output.flatten();
+            }
+            ASSERT_TRUE(
+                processor.dispatchPrefillOnly(groups, GenerationPrefillCudaGraphStatus::NOT_REQUESTED, &outputs).ok());
+            EXPECT_EQ(failed->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+            EXPECT_EQ(failed->stopReason(), "original input error");
+            EXPECT_FALSE(failed->hasOutput());
+            auto plain_result = plain->nextOutput(100);
+            ASSERT_TRUE(plain_result.ok());
+            EXPECT_TRUE(plain_result.value().generate_outputs[0].finished);
+            EXPECT_FALSE(plain_result.value().generate_outputs[0].custom_output.has_value());
+            for (size_t i = 0; i < ordered.size(); ++i) {
+                auto result = ordered[i]->nextOutput(100);
+                if (!failure.empty()) {
+                    EXPECT_FALSE(result.ok());
+                    EXPECT_EQ(ordered[i]->statusInfo().code(), ErrorCode::EXECUTION_EXCEPTION);
+                    EXPECT_EQ(ordered[i]->stopReason(),
+                              failure == "head failure" ?
+                                  "head failure" :
+                                  "decision output row count does not match selected sequences");
+                    EXPECT_FALSE(ordered[i]->hasOutput());
+                    continue;
+                }
+                ASSERT_TRUE(result.ok());
+                ASSERT_EQ(result.value().generate_outputs.size(), 1);
+                const auto& output = result.value().generate_outputs[0];
+                EXPECT_TRUE(output.finished);
+                EXPECT_EQ(output.output_ids.sizes(), (torch::IntArrayRef{1, 0}));
+                ASSERT_TRUE(output.custom_output.has_value());
+                EXPECT_FALSE(output.custom_output->is_cuda());
+                EXPECT_EQ(toVec<float>(*output.custom_output),
+                          i == 0 ? (std::vector<float>{0.25f, 0.75f}) : (std::vector<float>{0.875f, 0.125f}));
+                EXPECT_EQ(ordered[i]->seqLength(), 2);
+                EXPECT_EQ(ordered[i]->outputTokenLen(), 0);
+            }
+        }
+    }
+}
+
+TEST_P(OutputDispatchTest, testPrefillDecisionDispatchPreservesRowsAfterCancellation) {
+    const auto                 params = makeExecutorParams(GetParam());
+    NormalBatchStreamProcessor processor(params.model_config_, {}, {}, CacheConfig(), true, GetParam());
+    auto                       make_stream = [&](int length) {
+        auto query                             = make_shared<GenerateInput>();
+        query->input_ids                       = torch::arange(length, torch::kInt32);
+        query->generate_config                 = make_shared<GenerateConfig>();
+        query->generate_config->max_new_tokens = 0;
+        query->custom_output_token_position    = length - 1;
+        auto stream                            = make_shared<NormalGenerateStream>(
+            query, params.model_config_, params.runtime_config, ResourceContext{}, nullptr);
+        stream->generate_status_->status = StreamState::RUNNING;
+        return stream;
+    };
+    auto         cancelled = make_stream(2);
+    auto         remaining = make_stream(3);
+    StreamGroups groups({cancelled, remaining});
+    TensorHolder holder;
+    auto         inputs = processor.gatherModelInput(groups, holder);
+    ASSERT_TRUE(inputs.ok());
+    EXPECT_EQ(toVec<int64_t>(inputs->custom_output_indexes), (std::vector<int64_t>{1, 4}));
+
+    // Cancellation races the model pass after the selected-row layout is fixed.
+    // Its tensor row remains present, but its response must never be published.
+    cancelled->reportError(ErrorCode::CANCELLED, "consumer disconnected");
+    GptModelOutputs outputs;
+    outputs.custom_output = torch::tensor({{0.25f, 0.75f}, {0.875f, 0.125f}}, torch::kCUDA);
+    ASSERT_TRUE(processor.dispatchPrefillOnly(groups, GenerationPrefillCudaGraphStatus::NOT_REQUESTED, &outputs).ok());
+    EXPECT_EQ(cancelled->statusInfo().code(), ErrorCode::CANCELLED);
+    EXPECT_EQ(cancelled->stopReason(), "consumer disconnected");
+    EXPECT_FALSE(cancelled->hasOutput());
+    EXPECT_FALSE(cancelled->nextOutput(100).ok());
+
+    auto result = remaining->nextOutput(100);
+    ASSERT_TRUE(result.ok()) << result.status().ToString();
+    ASSERT_EQ(result.value().generate_outputs.size(), 1);
+    const auto& output = result.value().generate_outputs[0];
+    EXPECT_TRUE(output.finished);
+    EXPECT_EQ(output.output_ids.sizes(), (torch::IntArrayRef{1, 0}));
+    ASSERT_TRUE(output.custom_output.has_value());
+    EXPECT_EQ(toVec<float>(*output.custom_output), (std::vector<float>{0.875f, 0.125f}));
+    EXPECT_EQ(remaining->seqLength(), 3);
+    EXPECT_EQ(remaining->outputTokenLen(), 0);
+    EXPECT_FALSE(remaining->hasError());
+}
+
 TEST_F(NormalBatchStreamProcessorTest, testZeroDispatchWorkerCount) {
     NormalOutputDispatcher default_dispatcher;
     EXPECT_EQ(default_dispatcher.thread_pool_, nullptr);
@@ -1260,7 +1440,7 @@ TEST_F(NormalBatchStreamProcessorTest, testAsyncMropeGatherUsesPublishedTokenAnd
     BatchKVCacheResource resource;
     resource.resetBatchSize(1);
     resource.initGroups(cache_config.topologyPtr());
-    resource.setBatchBlocks(0, 0, {1, 2, 3, 4});
+    resource.setBatchBlocks(0, "default", {1, 2, 3, 4});
     stream->setKVCache(resource);
     NormalBatchStreamProcessor processor(
         model_config, PDSepConfig{}, ProfilingDebugLoggingConfig{}, cache_config, false);

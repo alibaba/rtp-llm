@@ -208,8 +208,7 @@ class Qwen35Moe(Qwen3NextBase):
 
     @classmethod
     def _preprocess_config_json(cls, config_json: dict) -> dict:
-        config_json = config_json["text_config"]
-        return config_json
+        return config_json.get("text_config", config_json)
 
     @classmethod
     def _create_config(cls, ckpt_path: str) -> ModelConfig:
@@ -220,7 +219,7 @@ class Qwen35Moe(Qwen3NextBase):
         with open(config_path) as reader:
             config_json = json.loads(reader.read())
 
-        text_config_json = config_json["text_config"]
+        text_config_json = config_json.get("text_config", config_json)
 
         config = ModelConfig()
         config.ckpt_path = ckpt_path
@@ -260,6 +259,8 @@ class Qwen35Moe(Qwen3NextBase):
 
     @classmethod
     def _parse_mm_config(cls, config_json: dict, config: ModelConfig):
+        if config_json.get("model_type") in ("qwen3_5_text", "qwen3_5_moe_text"):
+            return
         language_model_only = config_json.get("language_model_only")
         if isinstance(language_model_only, str):
             normalized_language_model_only = language_model_only.lower()
@@ -332,4 +333,8 @@ class Qwen35Dense(Qwen35Moe):
 
 register_model("qwen3_next", Qwen3Next, ["Qwen3NextForCausalLM"])
 register_model("qwen35_moe", Qwen35Moe, ["Qwen3_5MoeForConditionalGeneration"])
-register_model("qwen35_dense", Qwen35Dense, ["Qwen3_5ForConditionalGeneration"])
+register_model(
+    "qwen35_dense",
+    Qwen35Dense,
+    ["Qwen3_5ForConditionalGeneration", "Qwen3_5ForCausalLM"],
+)

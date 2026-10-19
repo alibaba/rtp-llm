@@ -2,10 +2,12 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
+import rtp_llm.model_factory_register as model_registry
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.model_config import ModelConfig, resolve_ssm_state_dtype
-from rtp_llm.model_factory_register import _model_factory
+from rtp_llm.model_factory_register import ModelDict, _model_factory
 from rtp_llm.model_loader.ffn_weight import FfnWeight, MoeWeight
 from rtp_llm.models.qwen3_next.qwen3_next import Qwen3Next, Qwen35Dense, Qwen35Moe
 from rtp_llm.models.qwen3_next.qwen3_next_mtp import (
@@ -26,6 +28,120 @@ from rtp_llm.ops import (
 
 
 class Qwen35DenseMTPTest(unittest.TestCase):
+    def test_text_only_dense_export_matches_composite_backbone_config(self):
+        for tied_embeddings in (False, True):
+            with self.subTest(tied_embeddings=tied_embeddings):
+                composite_json = self._config()
+                composite_json["text_config"]["tie_word_embeddings"] = tied_embeddings
+                text_json = dict(composite_json["text_config"])
+                text_json.update(
+                    model_type="qwen3_5_text",
+                    architectures=["Qwen3_5ForCausalLM"],
+                )
+                # A saved HF text CausalLM has no composite or vision fields.
+                self.assertNotIn("text_config", text_json)
+                self.assertNotIn("vision_start_token_id", text_json)
+                with tempfile.TemporaryDirectory() as directory:
+                    text_path = Path(directory, "text")
+                    composite_path = Path(directory, "composite")
+                    text_path.mkdir()
+                    composite_path.mkdir()
+                    (text_path / "config.json").write_text(json.dumps(text_json))
+                    (composite_path / "config.json").write_text(
+                        json.dumps(composite_json)
+                    )
+                    text = Qwen35Dense.create_config(str(text_path))
+                    composite = Qwen35Dense.create_config(str(composite_path))
+
+                self.assertIsInstance(text, ModelConfig)
+                for field, expected in (
+                    ("num_layers", 64),
+                    ("hidden_size", 5120),
+                    ("vocab_size", 248320),
+                    ("max_seq_len", 262144),
+                    ("inter_size", 17408),
+                    ("moe_style", 0),
+                    ("tie_word_embeddings", tied_embeddings),
+                ):
+                    self.assertEqual(getattr(text, field), expected, field)
+                    self.assertEqual(
+                        getattr(text, field), getattr(composite, field), field
+                    )
+                for field, expected in (
+                    ("head_num", 24),
+                    ("kv_head_num", 4),
+                    ("size_per_head", 256),
+                ):
+                    self.assertEqual(getattr(text.attn_config, field), expected, field)
+                    self.assertEqual(
+                        getattr(text.attn_config, field),
+                        getattr(composite.attn_config, field),
+                        field,
+                    )
+                for field in (
+                    "linear_conv_kernel_dim",
+                    "linear_key_head_dim",
+                    "linear_num_key_heads",
+                    "linear_num_value_heads",
+                    "linear_value_head_dim",
+                    "supports_history_state_reclaim",
+                ):
+                    self.assertEqual(
+                        getattr(text.linear_attention_config, field),
+                        getattr(composite.linear_attention_config, field),
+                        field,
+                    )
+                expected_types = (
+                    [HybridAttentionType.LINEAR] * 3 + [HybridAttentionType.NONE]
+                ) * 16
+                self.assertTrue(text.hybrid_attention_config.enable_hybrid_attention)
+                self.assertEqual(
+                    list(text.hybrid_attention_config.hybrid_attention_types),
+                    expected_types,
+                )
+                self.assertEqual(
+                    list(composite.hybrid_attention_config.hybrid_attention_types),
+                    expected_types,
+                )
+                self.assertEqual(len(text.kv_cache_spec_descs), 64)
+                self.assertEqual(
+                    [
+                        [(spec.tag, spec.cache_type) for spec in layer]
+                        for layer in text.kv_cache_spec_descs
+                    ],
+                    [
+                        [(spec.tag, spec.cache_type) for spec in layer]
+                        for layer in composite.kv_cache_spec_descs
+                    ],
+                )
+                self.assertFalse(text.mm_model_config.is_multimodal)
+                self.assertTrue(composite.mm_model_config.is_multimodal)
+                self.assertEqual(
+                    [list(pair) for pair in composite.mm_model_config.mm_sep_tokens],
+                    [[248053, 248054]],
+                )
+
+    def test_text_only_dense_architecture_routes_without_eager_model_import(self):
+        # Recreate the cold architecture map; the model module imported by this
+        # test file must not hide a missing built-in lazy registration.
+        with (
+            mock.patch.dict(model_registry._hf_architecture_2_ft, {}, clear=True),
+            mock.patch.object(model_registry, "_load_internal_legacy_models"),
+        ):
+            model_registry._register_builtin_lazy_models()
+            for architecture in (
+                "Qwen3_5ForCausalLM",
+                "Qwen3_5ForConditionalGeneration",
+            ):
+                with self.subTest(architecture=architecture):
+                    self.assertEqual(
+                        ModelDict.get_ft_model_type_by_config(
+                            {"architectures": [architecture]}
+                        ),
+                        "qwen35_dense",
+                    )
+        self.assertIs(_model_factory["qwen35_dense"], Qwen35Dense)
+
     def test_history_state_reclaim_is_a_qwen35_target_capability(self):
         for model, expected in (
             (Qwen3Next, False),
@@ -132,9 +248,7 @@ class Qwen35DenseMTPTest(unittest.TestCase):
         self.assertIs(_model_factory["qwen35_dense_mtp"], Qwen35DenseMTP)
         self.assertEqual(config.num_layers, 1)
         self.assertTrue(config.is_mtp)
-        self.assertFalse(
-            config.linear_attention_config.supports_history_state_reclaim
-        )
+        self.assertFalse(config.linear_attention_config.supports_history_state_reclaim)
         self.assertEqual(config.moe_style, 0)
         self.assertEqual(list(config.moe_layer_index), [])
         self.assertEqual(

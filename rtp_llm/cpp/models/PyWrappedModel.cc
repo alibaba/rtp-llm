@@ -579,10 +579,19 @@ torch::Tensor PyWrappedModel::customOutputIndexes(const GptModelInputs& inputs) 
 
 void PyWrappedModel::initializeCustomOutput() {
     const auto handler = py_model_.attr("custom_output_handler");
-    TORCH_CHECK(py::cast<std::vector<std::string>>(handler.attr("extend_forward_args")())
-                    == std::vector<std::string>{"selected_hidden_states"},
-                "custom output handler must request selected_hidden_states");
-    TORCH_CHECK(weights_.lm_head, "custom output requires a model with lm_head");
+    custom_output_prefill_only_ = py::hasattr(handler, "prefill_only") && handler.attr("prefill_only").cast<bool>();
+    const auto expected_args    = custom_output_prefill_only_ ?
+                                      std::vector<std::string>{"hidden_states", "input_ids", "input_lengths"} :
+                                      std::vector<std::string>{"selected_hidden_states"};
+    TORCH_CHECK(py::cast<std::vector<std::string>>(handler.attr("extend_forward_args")()) == expected_args,
+                "custom output handler must request selected_hidden_states, or full-row arguments for prefill_only");
+    TORCH_CHECK(custom_output_prefill_only_ || weights_.lm_head,
+                "generation custom output requires a model with lm_head");
+    TORCH_CHECK(!custom_output_prefill_only_ || (!enable_cuda_graph_ && !owns_generation_prefill_cuda_graph_),
+                "decision output currently requires eager prefill");
+    TORCH_CHECK(!custom_output_prefill_only_
+                    || (device_props_.tp_size == 1 && !int(device_props_.enable_layer_micro_batch)),
+                "decision output currently requires TP1 without layer micro-batching");
     // CP does not retain arbitrary token rows for postprocessing.
     TORCH_CHECK(!device_props_.enable_prefill_cp, "custom output does not support context parallel yet");
     custom_output_enabled_ = true;
@@ -1333,7 +1342,35 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
     printTorchTensorData(hidden, "final_hidden");
 
     if (inputs.skip_lm_head) {
-        return {torch::Tensor(), torch::Tensor(), hidden};
+        GptModelOutputs outputs{torch::Tensor(), torch::Tensor(), hidden};
+        if (custom_output_prefill_only_ && inputs.custom_output_indexes.defined()
+            && inputs.custom_output_indexes.numel() > 0) {
+            try {
+                TORCH_CHECK(inputs.sequence_lengths.numel() == 0, "decision output requires a context-only batch");
+                TORCH_CHECK(inputs.custom_output_indexes.numel() == inputs.input_lengths.numel(),
+                            "decision output requires one complete selected row per sequence");
+                TORCH_CHECK(!inputs.prefix_lengths.defined() || inputs.prefix_lengths.numel() == 0
+                                || inputs.prefix_lengths.eq(0).all().item<bool>(),
+                            "decision output does not support cached or chunked rows");
+                py::gil_scoped_acquire gil;
+                auto                   result = py_model_.attr("custom_output_handler")
+                                  .attr("extend_forward")(py::arg("hidden_states") =
+                                                              hidden.to(dataTypeToTorchType(description_.data_type)),
+                                                          py::arg("input_ids")     = inputs.combo_tokens,
+                                                          py::arg("input_lengths") = inputs.input_lengths)
+                                  .cast<torch::Tensor>();
+                TORCH_CHECK(result.defined() && result.dim() == 2 && result.numel() > 0
+                                && result.size(0) == inputs.input_lengths.numel(),
+                            "decision output must be a nonempty [batch, width] tensor");
+                TORCH_CHECK(result.device() == hidden.device() && result.scalar_type() == torch::kFloat32,
+                            "decision output must be float32 on the model device");
+                outputs.custom_output = std::move(result);
+            } catch (const std::exception& error) {
+                outputs.custom_output_error = error.what();
+                RTP_LLM_LOG_ERROR("decision output processor failed: %s", outputs.custom_output_error.c_str());
+            }
+        }
+        return outputs;
     }
 
     const auto& lm_head = weights_.lm_head;

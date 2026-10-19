@@ -3125,6 +3125,32 @@ class Handler:
         return selected_hidden_states * 2
 
 
+class DecisionHandler:
+    prefill_only = True
+
+    def __init__(self):
+        self.calls = 0
+        self.observed = None
+
+    def extend_forward_args(self):
+        return ["hidden_states", "input_ids", "input_lengths"]
+
+    def extend_forward(self, hidden_states, input_ids, input_lengths):
+        self.calls += 1
+        self.observed = (
+            hidden_states.clone(),
+            input_ids.clone(),
+            input_lengths.clone(),
+        )
+        # Read both ends of each complete row, so a last-hidden-only shortcut
+        # cannot accidentally satisfy this handler's input contract.
+        ends = input_lengths.to(device=hidden_states.device, dtype=torch.long).cumsum(0)
+        starts = torch.cat((ends.new_zeros(1), ends[:-1]))
+        return torch.cat(
+            (hidden_states[starts], hidden_states[ends - 1]), dim=1
+        ).float()
+
+
 def rms_norm(hidden):
     fp32 = hidden.float()
     return (fp32 * torch.rsqrt(fp32.square().mean(-1, keepdim=True) + 1e-5)).to(
@@ -3205,6 +3231,74 @@ class CustomOutputPostLayersTest(unittest.TestCase):
                     selected_hidden_states
                 )
                 result = self.run_case(handler, python_norm=False)
+                self.assertIsNone(result["custom_output"])
+                self.assertIn(message, result["custom_output_error"])
+
+    def run_decision_case(self, handler, indexes=(2, 5), python_norm=True):
+        return _extension.run_post_layers(
+            ForwardModel(),
+            handler,
+            torch.tensor(indexes, dtype=torch.int64).pin_memory(),
+            python_norm,
+            True,
+        )
+
+    def test_decision_handler_receives_all_normalized_tokens_without_lm_head(self):
+        raw_hidden = (
+            torch.arange(24, device="cuda", dtype=torch.bfloat16).reshape(6, 4) + 1
+        )
+        expected_hidden = rms_norm(raw_hidden)
+        handler = DecisionHandler()
+        result = self.run_decision_case(handler)
+        self.assertEqual(result["custom_output_error"], "")
+        self.assertIsNone(result["logits"])
+        self.assertEqual(handler.calls, 1)
+        hidden, ids, lengths = handler.observed
+        self.assertEqual(hidden.dtype, torch.bfloat16)
+        self.assertTrue(hidden.is_cuda)
+        torch.testing.assert_close(hidden, expected_hidden)
+        torch.testing.assert_close(ids.cpu(), torch.arange(6, dtype=torch.int32))
+        torch.testing.assert_close(
+            lengths.cpu(), torch.tensor([3, 3], dtype=torch.int32)
+        )
+        expected = torch.cat(
+            (expected_hidden[[0, 3]], expected_hidden[[2, 5]]), dim=1
+        ).float()
+        torch.testing.assert_close(result["custom_output"], expected)
+
+    def test_decision_handler_rejects_layer_micro_batching(self):
+        with self.assertRaisesRegex(RuntimeError, "TP1 without layer micro-batching"):
+            self.run_decision_case(DecisionHandler(), python_norm=False)
+
+    def test_decision_handler_requires_complete_selected_rows(self):
+        handler = DecisionHandler()
+        result = self.run_decision_case(handler, indexes=(5,))
+        self.assertIsNone(result["custom_output"])
+        self.assertIn(
+            "one complete selected row per sequence", result["custom_output_error"]
+        )
+        self.assertEqual(handler.calls, 0)
+
+    def test_decision_handler_invalid_outputs_fail_explicitly(self):
+        def fail(rows):
+            raise ValueError("decision head failure")
+
+        for forward, message in (
+            (lambda rows: rows.bfloat16(), "float32 on the model device"),
+            (lambda rows: rows.cpu(), "float32 on the model device"),
+            (lambda rows: rows[:1], "nonempty [batch, width]"),
+            (lambda rows: rows[:0], "nonempty [batch, width]"),
+            (lambda rows: rows.flatten(), "nonempty [batch, width]"),
+            (fail, "decision head failure"),
+        ):
+            with self.subTest(message=message):
+                handler = DecisionHandler()
+                valid_forward = handler.extend_forward
+                handler.extend_forward = lambda **kwargs: forward(
+                    valid_forward(**kwargs)
+                )
+                result = self.run_decision_case(handler)
+                self.assertEqual(handler.calls, 1)
                 self.assertIsNone(result["custom_output"])
                 self.assertIn(message, result["custom_output_error"])
 

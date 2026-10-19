@@ -529,6 +529,18 @@ class FrontendServer(object):
         finally:
             self._global_controller.decrement()
 
+    async def decide(self, req: dict):
+        self._global_controller.increment()
+        try:
+            assert self._frontend_worker is not None
+            try:
+                result = await self._frontend_worker.decide(req)
+            except ValueError as error:
+                return ORJSONResponse({"error": str(error)}, status_code=400)
+            return ORJSONResponse(result)
+        finally:
+            self._global_controller.decrement()
+
     async def batch_infer(self, req: dict, raw_request: Request):
         from rtp_llm.frontend.frontend_worker import BatchPipelineResponse
 

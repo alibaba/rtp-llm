@@ -754,6 +754,62 @@ TEST_F(NormalEngineCustomOutputTest, testPrefillOnlySkipsCustomSelectorAndComple
     EXPECT_EQ(calls, 3);
 }
 
+TEST_F(NormalEngineCustomOutputTest, testDecisionHandlerSelectsPrefillRowsAndRejectsGeneration) {
+    auto engine = createMockEngine(CustomConfig{});
+    ASSERT_TRUE(engine->stop().ok());
+    engine->reserve_step_               = 4;
+    engine->custom_output_prefill_only_ = true;
+    int calls                           = 0;
+    engine->custom_output_selector_     = py::cpp_function([&](const torch::Tensor& ids, py::object mask) {
+        ++calls;
+        EXPECT_EQ(ids.numel(), 4);
+        EXPECT_TRUE(mask.is_none());
+        if (ids[0].item<int>() != 7) {
+            throw py::value_error("invalid decision row");
+        }
+        return 3;
+    });
+    py::gil_scoped_release release;
+
+    auto selected = engine->makeStream(makeQuery(0, 7));
+    ASSERT_FALSE(selected->hasError());
+    EXPECT_EQ(selected->generateInput()->custom_output_token_position, 3);
+    EXPECT_EQ(selected->reserveStep(), 0u);
+    engine->enqueue(selected);
+    EXPECT_EQ(calls, 1);  // Re-enqueueing the prepared stream must not re-run its selector.
+
+    auto generation = engine->enqueue(makeQuery(1, 7));
+    ASSERT_TRUE(generation->hasError());
+    EXPECT_EQ(generation->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+    EXPECT_EQ(generation->stopReason(), "this decision model requires max_new_tokens == 0");
+    EXPECT_EQ(calls, 1);  // Reject the incompatible execution mode before invoking Python.
+
+    const std::vector<std::shared_ptr<GenerateInput>> queries{
+        makeQuery(0, 7), makeQuery(1, 7), makeQuery(0), makeQuery(0, 7)};
+    auto [successes, streams] = engine->enqueueMultiple(queries);
+    EXPECT_EQ(successes, std::vector<bool>({true, false, false, true}));
+    ASSERT_EQ(streams.size(), queries.size());
+    EXPECT_EQ(calls, 4);
+    for (size_t i = 0; i < streams.size(); ++i) {
+        EXPECT_EQ(streams[i]->generateInput(), queries[i]);
+        if (i == 1 || i == 2) {
+            EXPECT_EQ(streams[i]->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+            EXPECT_FALSE(streams[i]->hasEvent(StreamEvents::CanRun));
+        } else {
+            EXPECT_FALSE(streams[i]->hasError());
+            EXPECT_EQ(streams[i]->generateInput()->custom_output_token_position, 3);
+            EXPECT_EQ(streams[i]->reserveStep(), 0u);
+        }
+    }
+    EXPECT_EQ(engine->getScheduler().onflightStreams(), 3);
+
+    auto fake        = makeQuery(1);
+    fake->fake_query = true;
+    EXPECT_FALSE(engine->makeStream(fake)->hasError());
+    EXPECT_EQ(fake->custom_output_token_position, -1);
+    EXPECT_EQ(calls, 4);
+}
+
 TEST_F(NormalEngineTest, testSimple) {
     CustomConfig config;
     auto         engine = createMockEngine(config);

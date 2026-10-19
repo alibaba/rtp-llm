@@ -162,7 +162,10 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     if (params.py_model && !params.py_model.is_none()) {
         py::gil_scoped_acquire gil;
         if (py::hasattr(params.py_model, "custom_output_handler")) {
-            custom_output_selector_ = params.py_model.attr("custom_output_handler").attr("select_token_position");
+            const auto handler      = params.py_model.attr("custom_output_handler");
+            custom_output_selector_ = handler.attr("select_token_position");
+            custom_output_prefill_only_ =
+                py::hasattr(handler, "prefill_only") && handler.attr("prefill_only").cast<bool>();
         }
     }
     // Reject an explicitly requested generation-prefill/speculative combination
@@ -739,8 +742,13 @@ std::shared_ptr<GenerateStream> NormalEngine::createStream(const std::shared_ptr
     }
 
     ErrorInfo selection_error;
-    // Target-only prefill does not request generation custom output or its prompt constraints.
-    if (custom_output_selector_ && !input->fake_query && !input->generate_config->isPrefillOnly()) {
+    // Existing generation handlers retain their target-prefill opt-out. Decision
+    // deployments explicitly opt into full-row prefill output and reject generation.
+    if (custom_output_prefill_only_ && !input->fake_query && !input->generate_config->isPrefillOnly()) {
+        selection_error = ErrorInfo(ErrorCode::INVALID_PARAMS, "this decision model requires max_new_tokens == 0");
+    }
+    if (custom_output_selector_ && !input->fake_query && !selection_error.hasError()
+        && (custom_output_prefill_only_ || !input->generate_config->isPrefillOnly())) {
         py::gil_scoped_acquire gil;
         try {
             // Select once in the model process, after RPC/multimodal expansion and before system-prefix insertion.

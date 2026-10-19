@@ -5,6 +5,7 @@ import os
 import pathlib
 import sys
 import traceback
+import uuid
 from functools import partial
 from typing import Any, AsyncGenerator, Dict, List, Optional, Set, Tuple, Union
 
@@ -123,6 +124,11 @@ class FrontendWorker:
         self.generate_env_config = py_env_configs.generate_env_config
         self.server_config = py_env_configs.server_config
 
+        from rtp_llm.models.downstream_modules.kev import load_kev_config
+
+        self.kev_config = load_kev_config(model_config.ckpt_path)
+        self.kev_max_row_tokens = model_config.max_seq_len
+
         logging.info("frontend worker start done.")
 
     async def close(self):
@@ -146,6 +152,85 @@ class FrontendWorker:
         token_ids = [int(id) for id in token_ids]
         tokens = [self.pipeline.decode(id) for id in token_ids]
         return token_ids, tokens
+
+    async def decide(self, request: dict) -> dict:
+        """Run independent Kev rows through the existing prefill-only batch RPC."""
+        import torch
+
+        from rtp_llm.models.downstream_modules.kev import encode_kev_rows
+        from rtp_llm.utils.base_model_datatypes import GenerateInput
+
+        if self.kev_config is None:
+            raise ValueError("/v1/decide requires an exported Kev checkpoint")
+        if not isinstance(request, dict) or set(request) != {"state", "questions"}:
+            raise ValueError("request must contain exactly state and questions")
+        questions = request["questions"]
+        if not isinstance(questions, list) or len(questions) > 64:
+            raise ValueError("questions must contain 1..64 entries")
+        rows = encode_kev_rows(
+            self.tokenizer,
+            request["state"],
+            questions,
+            max_state_tokens=self.kev_config["max_state_tokens"],
+            max_row_tokens=min(
+                self.kev_max_row_tokens, self.kev_config["max_row_tokens"]
+            ),
+            max_options=self.kev_config["max_options"],
+        )
+        results = []
+        # This is an RPC admission budget, not shared-prefix execution. A long
+        # row is admitted alone; every row still includes the complete state.
+        start = 0
+        while start < len(rows):
+            end, tokens = start, 0
+            while end < len(rows) and (
+                end == start or tokens + len(rows[end]) <= 16384
+            ):
+                tokens += len(rows[end])
+                end += 1
+            inputs = [
+                GenerateInput(
+                    # Each row needs a distinct int64 ID, including across
+                    # concurrently arriving multi-question requests.
+                    request_id=uuid.uuid4().int & ((1 << 63) - 1),
+                    token_ids=torch.tensor(row, dtype=torch.int32),
+                    mm_inputs=[],
+                    generate_config=GenerateConfig(
+                        max_new_tokens=0, is_streaming=False
+                    ),
+                    tokenizer=self.tokenizer,
+                )
+                for row in rows[start:end]
+            ]
+            outputs = await self.backend_rpc_server_visitor.batch_enqueue(inputs)
+            if len(outputs) != len(inputs):
+                raise RuntimeError("Kev backend returned an incorrect row count")
+            for index, output in enumerate(outputs, start):
+                if len(output.generate_outputs) != 1:
+                    raise RuntimeError("Kev backend must return one result per row")
+                result = output.generate_outputs[0]
+                probs = result.custom_output
+                if (
+                    not result.finished
+                    or probs is None
+                    or probs.shape != (1, self.kev_config["max_options"])
+                    or not torch.isfinite(probs).all().item()
+                ):
+                    raise RuntimeError("Kev backend returned an invalid decision")
+                count = len(questions[index]["options"])
+                probs = probs[0, :count]
+                if (probs < 0).any().item() or abs(probs.sum().item() - 1) > 1e-5:
+                    raise RuntimeError("Kev backend returned invalid probabilities")
+                choice = int(probs.argmax().item())
+                results.append(
+                    {
+                        "probabilities": probs.tolist(),
+                        "choice": choice,
+                        "option": questions[index]["options"][choice],
+                    }
+                )
+            start = end
+        return {"results": results}
 
     async def batch_infer(
         self, prompts: List[str], request_id: int, generate_config: dict

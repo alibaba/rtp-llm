@@ -33,7 +33,8 @@ public:
     virtual absl::Status dispatch(const StreamGroups& stream_groups, const MergedOutput& merge_outputs) const;
     virtual absl::Status dispatchPrefillOnly(const StreamGroups&              stream_groups,
                                              GenerationPrefillCudaGraphStatus generation_prefill_cuda_graph_status =
-                                                 GenerationPrefillCudaGraphStatus::NOT_REQUESTED) const;
+                                                 GenerationPrefillCudaGraphStatus::NOT_REQUESTED,
+                                             const GptModelOutputs* model_output = nullptr) const;
     virtual absl::StatusOr<GptModelInputs> gatherModelInput(const StreamGroups& stream_groups,
                                                             TensorHolder&       host_holder) const;
     virtual absl::StatusOr<SamplerInputs>  gatherSamplerInput(const StreamGroups&    stream_groups,

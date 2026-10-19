@@ -911,6 +911,13 @@ class FrontendApp(object):
 
             return await track_business_request(call)
 
+        @app.post("/v1/decide")
+        async def decide(req: Dict[str, Any]):
+            async def call():
+                return await self.frontend_server.decide(req)
+
+            return await track_business_request(call)
+
         @app.post("/batch_infer")
         async def batch_infer(req: Union[str, Dict[Any, Any]], raw_request: RawRequest):
             async def call():

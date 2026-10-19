@@ -271,7 +271,7 @@ def _register_builtin_lazy_models() -> None:
     register_lazy_model(
         "qwen35_dense",
         "rtp_llm.models.qwen3_next.qwen3_next",
-        ["Qwen3_5ForConditionalGeneration"],
+        ["Qwen3_5ForConditionalGeneration", "Qwen3_5ForCausalLM"],
     )
     register_lazy_model(
         "qwen3_next_mtp",
