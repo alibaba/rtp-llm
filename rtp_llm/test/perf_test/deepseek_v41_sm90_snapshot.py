@@ -113,6 +113,9 @@ def main():
         server.start(
             max_seq_len=33792 if decode else 264192,
             max_concurrency=max_local_batch if decode else 1,
+            server_start_timeout=int(
+                os.environ.get("DSV41_SERVER_START_TIMEOUT", "1600")
+            ),
         )
         routes, status = ready_routes(server.port, args.role)
         startup_log = Path(server.log_file_path).read_text(errors="replace")

@@ -300,7 +300,13 @@ def main():
         os.environ["PERF_PREARM_PROFILE"] = "1"
     try:
         queries = create_query(tokenizer, list(LENGTHS))
-        server.start(max_seq_len=66560, max_concurrency=max(batches))
+        server.start(
+            max_seq_len=66560,
+            max_concurrency=max(batches),
+            server_start_timeout=int(
+                os.environ.get("DSV41_SERVER_START_TIMEOUT", "1600")
+            ),
+        )
         routes, status = ready_routes(server.port, args.role)
         evidence["worker_status"] = status
         evidence["request_routes"] = routes
