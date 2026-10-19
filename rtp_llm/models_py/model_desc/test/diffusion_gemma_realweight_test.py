@@ -470,6 +470,7 @@ class DiffusionGemmaReuseABTest(unittest.TestCase):
         from rtp_llm.model_loader.model_weight_info import ModelWeights
         from safetensors.torch import load_file
 
+        device = _torch.device("cuda:0")
         mw = ModelWeights(LAYERS, "cuda", _torch.bfloat16)
         index = json.load(open(os.path.join(CKPT, "model.safetensors.index.json")))
         weight_map = index["weight_map"]
@@ -516,24 +517,24 @@ class DiffusionGemmaReuseABTest(unittest.TestCase):
         for i in range(LAYERS):
             lw = _model_weights(_hf(i))
             for name, tensor in lw.items():
-                mw.set_layer_weight(i, name, tensor.to(_torch.bfloat16))
-        device = _torch.device("cuda:0")
+                mw.set_layer_weight(i, name, tensor.to(_torch.bfloat16).to(device))
+
         embed = _get("model.decoder.embed_tokens.weight").to(_torch.bfloat16).to(device)
         mw.set_global_weight(W.embedding, embed)
         mw.set_global_weight(W.lm_head, embed)
-        mw.set_global_weight(W.final_ln_gamma, _get("model.decoder.norm.weight").to(_torch.bfloat16))
+        mw.set_global_weight(W.final_ln_gamma, _get("model.decoder.norm.weight").to(_torch.bfloat16).to(device))
         mw.set_global_weight(
             W.dgm_self_cond_pre_norm,
-            _get("model.decoder.self_conditioning.pre_norm.weight").to(_torch.bfloat16))
+            _get("model.decoder.self_conditioning.pre_norm.weight").to(_torch.bfloat16).to(device))
         mw.set_global_weight(
             W.dgm_self_cond_gate_w,
-            _get("model.decoder.self_conditioning.gate_proj.weight").T.contiguous().to(_torch.bfloat16))
+            _get("model.decoder.self_conditioning.gate_proj.weight").T.contiguous().to(_torch.bfloat16).to(device))
         mw.set_global_weight(
             W.dgm_self_cond_up_w,
-            _get("model.decoder.self_conditioning.up_proj.weight").T.contiguous().to(_torch.bfloat16))
+            _get("model.decoder.self_conditioning.up_proj.weight").T.contiguous().to(_torch.bfloat16).to(device))
         mw.set_global_weight(
             W.dgm_self_cond_down_w,
-            _get("model.decoder.self_conditioning.down_proj.weight").T.contiguous().to(_torch.bfloat16))
+            _get("model.decoder.self_conditioning.down_proj.weight").T.contiguous().to(_torch.bfloat16).to(device))
         _shards.clear()
 
         with patch.object(dgm, "RMSNorm", _TorchRMSNorm):
