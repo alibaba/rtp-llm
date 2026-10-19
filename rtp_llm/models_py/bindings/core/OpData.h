@@ -380,6 +380,28 @@ struct RejectionSamplingParams {
     bool draft_probs_point_mass = false;
 };
 
+// One DSpARK draft step's fused distribution build:
+//   q = softmax((logits + markov_bias) / temperature)
+// written to both the strided all-probabilities slice and a contiguous
+// sampling scratch. Replaces the eager cast/add/div_/softmax/copy_ chain.
+struct MarkovSoftmaxStepParams {
+    torch::Tensor logits;       // FP32 [B, V] row-strided view (proposal_logits.select(1, step))
+    torch::Tensor markov_bias;  // [B, V] contiguous FP32/BF16/FP16 torch::mm output (native weight dtype)
+    torch::Tensor temperature;  // FP32 [B] contiguous CUDA
+    torch::Tensor q_all_probs;  // FP32 [B, V] row-strided view (all_probabilities.select(1, step))
+    torch::Tensor q_contig;     // FP32 [B, V] contiguous sampling scratch
+};
+
+// One DSpARK draft step's fused softmax-free token for an all-greedy batch:
+//   token = first argmax of (logits + markov_bias) / temperature
+// Greedy verification accepts on exact target-token matches, so the caller
+// can publish deterministic proposals as a point mass (token_ids_are_point_mass).
+struct MarkovArgmaxStepParams {
+    torch::Tensor logits;       // FP32 [B, V] row-strided view (proposal_logits.select(1, step))
+    torch::Tensor markov_bias;  // [B, V] contiguous FP32/BF16/FP16 torch::mm output (native weight dtype)
+    torch::Tensor temperature;  // FP32 [B] contiguous CUDA
+};
+
 struct MappingDraft2TargetParams {
     torch::Tensor tokens;
     torch::Tensor d2t_map;

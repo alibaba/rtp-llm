@@ -83,6 +83,47 @@ protected:
     }
 };
 
+TEST_F(CudaSamplerTest, testMarkovSoftmaxRejectsBadOutputRank) {
+    const auto              options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+    MarkovSoftmaxStepParams params{torch::zeros({1, 4}, options),
+                                   torch::zeros({1, 4}, options),
+                                   torch::ones({1}, options),
+                                   torch::empty({1, 4}, options),
+                                   torch::empty({1, 4, 2}, options)};
+    EXPECT_ANY_THROW(execMarkovSoftmaxStep(params));
+    params.q_contig = torch::empty({1, 4}, options);
+    execMarkovSoftmaxStep(params);
+    EXPECT_TRUE(torch::equal(params.q_contig, torch::full({1, 4}, 0.25f, options)));
+    EXPECT_TRUE(torch::equal(params.q_all_probs, params.q_contig));
+}
+
+TEST_F(CudaSamplerTest, testMarkovWrappersRejectDifferentDevices) {
+    int device_count = 0;
+    ASSERT_EQ(cudaGetDeviceCount(&device_count), cudaSuccess);
+    if (device_count < 2) {
+        GTEST_SKIP() << "Requires two visible CUDA devices";
+    }
+    const auto options      = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+    auto       logits       = torch::empty({0, 4}, options);
+    const auto other_device = torch::Device(torch::kCUDA, (logits.get_device() + 1) % device_count);
+    // Empty batches keep the rejection check safe even if validation regresses.
+    for (int argument = 0; argument < 4; ++argument) {
+        SCOPED_TRACE(argument);
+        MarkovSoftmaxStepParams params{logits,
+                                       torch::empty_like(logits),
+                                       torch::empty({0}, options),
+                                       torch::empty_like(logits),
+                                       torch::empty_like(logits)};
+        torch::Tensor* inputs[] = {&params.markov_bias, &params.temperature, &params.q_all_probs, &params.q_contig};
+        *inputs[argument]       = inputs[argument]->to(other_device);
+        EXPECT_ANY_THROW(execMarkovSoftmaxStep(params));
+        if (argument < 2) {
+            MarkovArgmaxStepParams argmax_params{params.logits, params.markov_bias, params.temperature};
+            EXPECT_ANY_THROW(execMarkovArgmaxStep(argmax_params));
+        }
+    }
+}
+
 TEST_F(CudaSamplerTest, testCudaSamplingKernelTopK1) {
     size_t batch_size = 4;
     auto   logits_t   = cudaTensor(

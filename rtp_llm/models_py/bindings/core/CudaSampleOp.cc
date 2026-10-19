@@ -11,6 +11,7 @@
 #include "rtp_llm/models_py/bindings/common/kernels/banRepeatNgram.h"
 #include "rtp_llm/models_py/bindings/common/kernels/vocab_prune/mapping.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/speculative_sampling/sampling.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/speculative_sampling/markov_softmax.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/sampling/sampling.h"
 #include <cstddef>
@@ -517,6 +518,140 @@ void rejectionSampling(const RejectionSamplingParams& params) {
                                              params.draft_probs_point_mass));
 }
 
+void markovSoftmaxStep(const MarkovSoftmaxStepParams& params) {
+    RTP_LLM_CHECK_WITH_INFO(params.logits.defined() && params.logits.is_cuda()
+                                && params.logits.scalar_type() == torch::kFloat32 && params.logits.dim() == 2
+                                && params.logits.stride(1) == 1,
+                            "markovSoftmaxStep: logits must be a row-major 2-D CUDA FP32 [batch,vocab] view");
+    RTP_LLM_CHECK_WITH_INFO(params.markov_bias.defined() && params.markov_bias.is_cuda()
+                                && params.markov_bias.dim() == 2 && params.markov_bias.is_contiguous()
+                                && params.markov_bias.device() == params.logits.device(),
+                            "markovSoftmaxStep: markov_bias must be a contiguous 2-D CUDA [batch,vocab] tensor "
+                            "on the logits device");
+    RTP_LLM_CHECK_WITH_INFO(params.temperature.defined() && params.temperature.is_cuda()
+                                && params.temperature.scalar_type() == torch::kFloat32 && params.temperature.dim() == 1
+                                && params.temperature.is_contiguous()
+                                && params.temperature.device() == params.logits.device(),
+                            "markovSoftmaxStep: temperature must be a contiguous CUDA FP32 [batch] tensor "
+                            "on the logits device");
+    const auto batch_size = params.logits.size(0);
+    const auto vocab_size = params.logits.size(1);
+    RTP_LLM_CHECK_WITH_INFO(params.markov_bias.size(0) == batch_size && params.markov_bias.size(1) == vocab_size
+                                && params.temperature.numel() == batch_size,
+                            "markovSoftmaxStep: batch/vocab shape mismatch between logits, markov_bias, temperature");
+    RTP_LLM_CHECK_WITH_INFO(params.q_all_probs.defined() && params.q_all_probs.is_cuda()
+                                && params.q_all_probs.scalar_type() == torch::kFloat32 && params.q_all_probs.dim() == 2
+                                && params.q_all_probs.stride(1) == 1 && params.q_all_probs.size(0) == batch_size
+                                && params.q_all_probs.size(1) == vocab_size
+                                && params.q_all_probs.device() == params.logits.device(),
+                            "markovSoftmaxStep: q_all_probs must be a row-major [batch,vocab] FP32 view "
+                            "on the logits device");
+    RTP_LLM_CHECK_WITH_INFO(
+        params.q_contig.defined() && params.q_contig.is_cuda() && params.q_contig.scalar_type() == torch::kFloat32
+            && params.q_contig.is_contiguous() && params.q_contig.dim() == 2 && params.q_contig.size(0) == batch_size
+            && params.q_contig.size(1) == vocab_size && params.q_contig.device() == params.logits.device(),
+        "markovSoftmaxStep: q_contig must be a contiguous [batch,vocab] FP32 CUDA tensor "
+        "on the logits device");
+    if (batch_size == 0) {
+        return;
+    }
+
+    MarkovBiasDType bias_dtype;
+    switch (params.markov_bias.scalar_type()) {
+        case torch::kFloat32:
+            bias_dtype = MarkovBiasDType::kFloat32;
+            break;
+        case torch::kBFloat16:
+            bias_dtype = MarkovBiasDType::kBFloat16;
+            break;
+        case torch::kHalf:
+            bias_dtype = MarkovBiasDType::kFloat16;
+            break;
+        default:
+            RTP_LLM_CHECK_WITH_INFO(false,
+                                    "markovSoftmaxStep: markov_bias dtype must be FP32/BF16/FP16, got %s",
+                                    c10::toString(params.markov_bias.scalar_type()));
+    }
+
+    at::cuda::CUDAGuard device_guard(params.logits.device());
+    const int           splits   = markovSoftmaxStepSplits(static_cast<int>(batch_size), static_cast<int>(vocab_size));
+    auto                partials = torch::empty({2, batch_size, static_cast<int64_t>(splits)},
+                                 torch::TensorOptions().dtype(torch::kFloat32).device(params.logits.device()));
+    check_cuda_value(invokeMarkovSoftmaxStep(params.logits.data_ptr<float>(),
+                                             params.logits.stride(0),
+                                             params.markov_bias.data_ptr(),
+                                             bias_dtype,
+                                             params.temperature.data_ptr<float>(),
+                                             params.q_all_probs.data_ptr<float>(),
+                                             params.q_all_probs.stride(0),
+                                             params.q_contig.data_ptr<float>(),
+                                             static_cast<int>(batch_size),
+                                             static_cast<int>(vocab_size),
+                                             partials.data_ptr<float>(),
+                                             at::cuda::getCurrentCUDAStream().stream()));
+}
+
+torch::Tensor markovArgmaxStep(const MarkovArgmaxStepParams& params) {
+    RTP_LLM_CHECK_WITH_INFO(params.logits.defined() && params.logits.is_cuda()
+                                && params.logits.scalar_type() == torch::kFloat32 && params.logits.dim() == 2
+                                && params.logits.stride(1) == 1,
+                            "markovArgmaxStep: logits must be a row-major 2-D CUDA FP32 [batch,vocab] view");
+    RTP_LLM_CHECK_WITH_INFO(params.markov_bias.defined() && params.markov_bias.is_cuda()
+                                && params.markov_bias.dim() == 2 && params.markov_bias.is_contiguous()
+                                && params.markov_bias.device() == params.logits.device(),
+                            "markovArgmaxStep: markov_bias must be a contiguous 2-D CUDA [batch,vocab] tensor "
+                            "on the logits device");
+    RTP_LLM_CHECK_WITH_INFO(params.temperature.defined() && params.temperature.is_cuda()
+                                && params.temperature.scalar_type() == torch::kFloat32 && params.temperature.dim() == 1
+                                && params.temperature.is_contiguous()
+                                && params.temperature.device() == params.logits.device(),
+                            "markovArgmaxStep: temperature must be a contiguous CUDA FP32 [batch] tensor "
+                            "on the logits device");
+    const auto batch_size = params.logits.size(0);
+    const auto vocab_size = params.logits.size(1);
+    RTP_LLM_CHECK_WITH_INFO(params.markov_bias.size(0) == batch_size && params.markov_bias.size(1) == vocab_size
+                                && params.temperature.numel() == batch_size,
+                            "markovArgmaxStep: batch/vocab shape mismatch between logits, markov_bias, temperature");
+    auto tokens =
+        torch::empty({batch_size}, torch::TensorOptions().dtype(torch::kInt32).device(params.logits.device()));
+    if (batch_size == 0) {
+        return tokens;
+    }
+
+    MarkovBiasDType bias_dtype;
+    switch (params.markov_bias.scalar_type()) {
+        case torch::kFloat32:
+            bias_dtype = MarkovBiasDType::kFloat32;
+            break;
+        case torch::kBFloat16:
+            bias_dtype = MarkovBiasDType::kBFloat16;
+            break;
+        case torch::kHalf:
+            bias_dtype = MarkovBiasDType::kFloat16;
+            break;
+        default:
+            RTP_LLM_CHECK_WITH_INFO(false,
+                                    "markovArgmaxStep: markov_bias dtype must be FP32/BF16/FP16, got %s",
+                                    c10::toString(params.markov_bias.scalar_type()));
+    }
+
+    at::cuda::CUDAGuard device_guard(params.logits.device());
+    const int           splits   = markovSoftmaxStepSplits(static_cast<int>(batch_size), static_cast<int>(vocab_size));
+    auto                partials = torch::empty({2, batch_size, static_cast<int64_t>(splits)},
+                                 torch::TensorOptions().dtype(torch::kFloat32).device(params.logits.device()));
+    check_cuda_value(invokeMarkovArgmaxStep(params.logits.data_ptr<float>(),
+                                            params.logits.stride(0),
+                                            params.markov_bias.data_ptr(),
+                                            bias_dtype,
+                                            params.temperature.data_ptr<float>(),
+                                            tokens.data_ptr<int32_t>(),
+                                            static_cast<int>(batch_size),
+                                            static_cast<int>(vocab_size),
+                                            partials.data_ptr<float>(),
+                                            at::cuda::getCurrentCUDAStream().stream()));
+    return tokens;
+}
+
 void mappingDraft2Target(const MappingDraft2TargetParams& params) {
     if (!params.d2t_map.defined() || params.d2t_map.numel() == 0) {
         return;
@@ -934,6 +1069,26 @@ void rejectionSampling(const RejectionSamplingParams& params) {
     RTP_LLM_CHECK_WITH_INFO(err == hipSuccess, "invokeRejectionSampling failed: %s", hipGetErrorString(err));
 }
 
+void markovSoftmaxStep(const MarkovSoftmaxStepParams& params) {
+    // Torch reference chain, semantically identical to the pre-fusion eager
+    // path: FP32-cast the bias, add, in-place temperature divide, softmax,
+    // then materialize q into both outputs.
+    auto logits = params.logits + params.markov_bias.to(torch::kFloat32);
+    logits.div_(params.temperature.unsqueeze(1));
+    auto q = torch::softmax(logits, -1);
+    params.q_all_probs.copy_(q);
+    params.q_contig.copy_(q);
+}
+
+torch::Tensor markovArgmaxStep(const MarkovArgmaxStepParams& params) {
+    // Torch reference chain: FP32-cast the bias, add, in-place temperature
+    // divide, first-maximum argmax — the same token the fused CUDA kernels
+    // emit for an all-greedy batch.
+    auto logits = params.logits + params.markov_bias.to(torch::kFloat32);
+    logits.div_(params.temperature.unsqueeze(1));
+    return torch::argmax(logits, -1).to(torch::kInt32);
+}
+
 void mappingDraft2Target(const MappingDraft2TargetParams& params) {
     if (!params.d2t_map.defined() || params.d2t_map.numel() == 0) {
         return;
@@ -1205,6 +1360,26 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
 
 void rejectionSampling(const RejectionSamplingParams&) {
     RTP_LLM_CHECK_WITH_INFO(false, "rejection sampling is not supported on this device");
+}
+
+void markovSoftmaxStep(const MarkovSoftmaxStepParams& params) {
+    // Torch reference chain, semantically identical to the pre-fusion eager
+    // path: FP32-cast the bias, add, in-place temperature divide, softmax,
+    // then materialize q into both outputs.
+    auto logits = params.logits + params.markov_bias.to(torch::kFloat32);
+    logits.div_(params.temperature.unsqueeze(1));
+    auto q = torch::softmax(logits, -1);
+    params.q_all_probs.copy_(q);
+    params.q_contig.copy_(q);
+}
+
+torch::Tensor markovArgmaxStep(const MarkovArgmaxStepParams& params) {
+    // Torch reference chain: FP32-cast the bias, add, in-place temperature
+    // divide, first-maximum argmax — the same token the fused CUDA kernels
+    // emit for an all-greedy batch.
+    auto logits = params.logits + params.markov_bias.to(torch::kFloat32);
+    logits.div_(params.temperature.unsqueeze(1));
+    return torch::argmax(logits, -1).to(torch::kInt32);
 }
 
 void mappingDraft2Target(const MappingDraft2TargetParams& params) {

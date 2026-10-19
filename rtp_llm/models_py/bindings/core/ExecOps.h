@@ -30,7 +30,7 @@ namespace rtp_llm {
 class CacheConfig;
 class CacheStore;
 
-using CacheStoreCompletionCallback = std::function<void(std::exception_ptr)>;
+using CacheStoreCompletionCallback  = std::function<void(std::exception_ptr)>;
 using CacheStoreCompletionRegistrar = std::function<CacheStoreCompletionCallback(
     const std::vector<int64_t>&, const std::vector<int32_t>&, const std::string&)>;
 
@@ -105,7 +105,12 @@ GreedyOutput     execSampleGreedy(const GreedyParams& params);
 torch::Tensor    execSampleFromProbs(const torch::Tensor& probabilities);
 BeamSearchOutput execSampleBeamSearch(BeamSearchParams params);
 void             execRejectionSampling(const RejectionSamplingParams& params);
-void             execMappingDraft2Target(const MappingDraft2TargetParams& params);
+void             execMarkovSoftmaxStep(const MarkovSoftmaxStepParams& params);
+// Softmax-free DSpARK draft step for all-greedy batches: returns int32 [B]
+// first-argmax tokens of (logits + markov_bias) / temperature. The caller
+// publishes them as a point mass (token_ids_are_point_mass).
+torch::Tensor execMarkovArgmaxStep(const MarkovArgmaxStepParams& params);
+void          execMappingDraft2Target(const MappingDraft2TargetParams& params);
 
 // ===================================================================
 // Communication ops (backed by c10d ProcessGroup)
