@@ -62,10 +62,11 @@ public:
 
     bool return_original_all_probs = false;
 
-    // When true the logits buffer is private to this sampling round (discarded
-    // after sampling): the sampler may skip writing softmax probabilities back
-    // into it. Set only by the speculative (MTP) gather, which clones logits
-    // per round; every other path keeps the legacy in-place contract.
+    // When true no writer touches the logits buffer for the rest of this
+    // sampling round (it is either a private per-round clone or a read-only
+    // view whose owners provably never read it back): the sampler may skip
+    // writing softmax probabilities back into it. Set only by the speculative
+    // (MTP) gather; every other path keeps the legacy in-place contract.
     bool skip_logits_probs_restore = false;
 
     // When true every consumer of all_probs treats the renormalized
