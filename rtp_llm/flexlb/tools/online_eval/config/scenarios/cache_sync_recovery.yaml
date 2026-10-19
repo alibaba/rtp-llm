@@ -6,7 +6,7 @@ metadata:
   kind: workload
   description: 同一大缓存与业务背景下，验证稳态同步及部分 Worker 撤出恢复的健康隔离。
   category: status
-  tags: [cache, lifecycle, allocation]
+  tags: [cache, lifecycle]
 profiles: [single-nonbatch, batch-window]
 environment:
   backend: java_mock

@@ -18,18 +18,13 @@ def series(evidence):
                            if r.get("healthy_max_status_age_ms") is not None else None] for r in rows],
         "visible_workers": [[r["epoch_s"], total-r["missing_workers"]
                             if total and r.get("missing_workers") is not None else None] for r in rows],
-        "allocation_gib_s": [],
     }
-    for a, b in zip(rows, rows[1:]):
-        left, right = a.get("process_allocated_bytes"), b.get("process_allocated_bytes")
-        valid = left is not None and right is not None and right >= left and b["epoch_s"] > a["epoch_s"]
-        result["allocation_gib_s"].append([b["epoch_s"], (right-left)/(b["epoch_s"]-a["epoch_s"])/2**30 if valid else None])
     return result
 
 
 def metric_contract(producer, identity, calculation):
     if producer != "cache_stability" or calculation is not None or identity not in {
-            "cache_stability/"+key for key in ("full_gc_pause_ms", "allocation_gib_s", "healthy_age_s", "visible_workers")}:
+            "cache_stability/"+key for key in ("full_gc_pause_ms", "healthy_age_s", "visible_workers")}:
         raise ValueError("unknown cache stability measurement: " + identity)
     return dict(source_type="process_log" if identity.endswith("/full_gc_pause_ms") else "debug_api",
                 implementation=implementation_identity(series), measurement=implementation_measurement(

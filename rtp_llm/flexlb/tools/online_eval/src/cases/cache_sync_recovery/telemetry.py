@@ -1,10 +1,8 @@
-"""Bounded observation; key fingerprints are read only outside performance windows."""
+"""Projection of bounded Master observations and archived supporting metrics."""
 
 import math
 import datetime
 import re
-import urllib.request
-from diagnostics.process_resources import process_resources
 
 DIAGNOSTIC_METRICS = {
     'global_keys': ('master/cache_global_keys', {}),
@@ -16,12 +14,29 @@ DIAGNOSTIC_METRICS = {
 }
 
 
-def fetch(url, timeout):
-    with urllib.request.urlopen(url, timeout=timeout) as response:
-        raw = response.read(16_000_001)
-    if len(raw) > 16_000_000:
-        raise ValueError("observation exceeds byte budget")
-    return raw
+def worker_rows(capture):
+    """Project one complete P/D domain snapshot into the case's evidence fields."""
+    from adapters.debug_client import DebugUnavailable
+    required = {"poll_health", "applied_observation", "cache_progress"}
+    features = capture.payload["capabilities"]["workers"]["features"]
+    if not required <= set(features):
+        raise DebugUnavailable("Master lacks required Worker observations")
+    result = {}
+    for row in capture.component("workers")["rows"]:
+        address = row["address"]
+        if address in result:
+            raise DebugUnavailable("Worker address is ambiguous across roles")
+        projected = dict(role=row["role"], generation=row["generation"],
+                         reported_alive=row["last_reported_alive"],
+                         lifecycle_state=row["lifecycle_state"],
+                         status_age_ms=row["poll_response_age_ms"],
+                         applied_status_age_ms=row["applied_observation_age_ms"])
+        if row["role"] == "prefill":
+            projected.update(cache_indexed=row["index_initialized"], cache_key_size=row["cached_key_count"],
+                             cache_version=None if row["received_cache_version"] is None else int(row["received_cache_version"]),
+                             cache_indexed_version=None if row["indexed_cache_version"] is None else int(row["indexed_cache_version"]))
+        result[address] = projected
+    return result
 
 
 def archived_metrics(store, frames, *, epoch, maximum_gap_s):
@@ -42,22 +57,6 @@ def archived_metrics(store, frames, *, epoch, maximum_gap_s):
                         values.append(value)
             frame[field] = sum(values) if values else None
     return result
-
-
-def resource(proc):
-    return process_resources(proc.pid)
-
-
-def fingerprint_matches(expected, observed):
-    workers = {w["ip_port"]: w for w in observed["prefill_endpoints"]}
-    matched = len(workers) == len(expected)
-    for address, want in expected.items():
-        got = workers.get(address, {}).get("fingerprint", {})
-        matched = matched and all(got.get(k) == v for k, v in {
-            "indexed_keys": want["keys"], "status_keys": want["keys"], "sum": want["sum"],
-            "xor": want["xor"], "missing_status": 0, "missing_global": 0}.items())
-        matched = matched and workers.get(address, {}).get("cache_version") == want["version"]
-    return matched
 
 
 def interval_rates(before, after, seconds):

@@ -18,6 +18,7 @@ import org.mockito.ArgumentCaptor;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -125,6 +126,8 @@ class GrpcWorkerStatusRunnerTest {
                 mock(CacheAwareService.class), Runnable::run)
                 .run();
 
+        assertTrue(status.appliedObservation().observedAtUs() > 0);
+        assertEquals(1L, status.appliedObservation().statusVersion());
         assertTrue(publicationHeldLock.get(),
                 "publication must commit under the generation lock");
         assertTrue(projectionReleasedLock.get(),
@@ -182,6 +185,7 @@ class GrpcWorkerStatusRunnerTest {
         assertTrue(observation.getValue().runningTasks().values().stream()
                 .anyMatch(active -> active.requestId() == 123L));
         assertTrue(projected.get());
+        assertEquals(observation.getValue().observedAtUs(), status.appliedObservation().observedAtUs());
         WorkerStatus.PollLease nextPoll = status.tryBeginStatusPoll();
         assertNotNull(nextPoll, "the asynchronous owner must close the exact poll lease");
         nextPoll.close();
