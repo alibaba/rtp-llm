@@ -416,6 +416,166 @@ class DiffusionGemmaLayerTest(TestCase):
         torch.testing.assert_close(out, ref, rtol=1e-4, atol=1e-4)
 
 
+class DiffusionGemmaPagedWriteParityTest(TestCase):
+    """GPU parity for the torch-attention-path KV write/gather rewrite.
+
+    Global layers run attention on the torch path but now write KV through
+    the paged write op (flashinfer.page append) and read the committed
+    prefix through the vectorized gather. Both must reproduce the reference
+    loop bit-exactly: same rows, same slots, same batch-concatenated order.
+    """
+
+    def _gpu(self):
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA device required")
+        return torch.device("cuda:0")
+
+    # production global-layer geometry: flashinfer's append kernel requires
+    # head_dim in {64, 128, 256, 512}; 512 exercises the real global layers.
+    GQ, GKV, GD, GP = 8, 2, 512, 16
+
+    def _mk_op(self, layer_type, device, dtype, paged):
+        op = dgm.DiffusionGemmaAttnOp(
+            layer_type,
+            self.GQ,
+            self.GKV,
+            self.GD,
+            WINDOW,
+            self.GP,
+            dtype,
+            None,
+        )
+        # Force the production global-layer condition: torch attention with
+        # the paged write still enabled (head_dim>256 only disables the
+        # flashinfer attention wrappers, not the write op).
+        op.use_flashinfer = False
+        if not paged:
+            op.use_paged_write = False
+        return op
+
+    def _attn_inputs(self, device, prefix_lens, span, table, table_dev):
+        batch = prefix_lens.numel()
+        cu = torch.zeros(batch + 1, dtype=torch.int32, device=device)
+        cu[1:] = torch.cumsum(span, dim=0)
+        return SimpleNamespace(
+            prefix_lengths=prefix_lens,
+            input_lengths=span,
+            cu_seqlens=cu.cpu(),
+            cu_seqlens_device=cu,
+            kv_cache_kernel_block_id=table,
+            kv_cache_kernel_block_id_device=table_dev,
+            combo_position_ids=None,
+            sequence_lengths=None,
+            is_target_verify=False,
+        )
+
+    def test_paged_write_matches_torch_loop(self):
+        device = self._gpu()
+        torch.manual_seed(23)
+        P, Hkv, D = self.GP, self.GKV, self.GD
+        # two requests, unequal prefixes and spans, several pages per request
+        prefix = torch.tensor([9, 13], dtype=torch.int32, device=device)
+        span = torch.tensor([7, 5], dtype=torch.int32, device=device)
+        total = int(span.sum())
+        pages_needed = [int((prefix[b] + span[b] + P - 1) // P) for b in range(2)]
+        num_pages = sum(pages_needed)
+        # distinct pages per request; pad columns are never read
+        table = torch.zeros(2, max(pages_needed), dtype=torch.int32)
+        cur = 0
+        for b in range(2):
+            table[b, : pages_needed[b]] = torch.arange(cur, cur + pages_needed[b], dtype=torch.int32)
+            cur += pages_needed[b]
+        table_dev = table.to(device)
+        k = torch.randn(total, Hkv, D, device=device, dtype=torch.bfloat16)
+        v = torch.randn(total, Hkv, D, device=device, dtype=torch.bfloat16)
+        q = torch.randn(total, self.GQ, D, device=device, dtype=torch.bfloat16)
+        positions = torch.cat(
+            [
+                torch.arange(int(prefix[b]), int(prefix[b] + span[b]), device=device)
+                for b in range(2)
+            ]
+        )
+        caches = {}
+        for name, paged in (("paged", True), ("loop", False)):
+            op = self._mk_op("full_attention", device, torch.bfloat16, paged)
+            attn_inputs = self._attn_inputs(device, prefix, span, table, table_dev)
+            op.plan(attn_inputs, causal=True)
+            cache = SimpleNamespace(
+                kv_cache_base=torch.zeros(
+                    num_pages, 2, Hkv, P, D,
+                    dtype=torch.bfloat16, device=device,
+                ),
+                tag="global_kv",
+            )
+            out = op.forward(
+                q, k, v, cache, attn_inputs, positions, causal=True, write_kv=True
+            )
+            caches[name] = (cache, out)
+        base_p = caches["paged"][0].kv_cache_base.reshape(-1)
+        base_l = caches["loop"][0].kv_cache_base.reshape(-1)
+        self.assertTrue(torch.equal(base_p, base_l))
+        self.assertTrue(torch.equal(caches["paged"][1], caches["loop"][1]))
+        # the written rows must be exactly the k/v rows at the right slots
+        cache = caches["paged"][0].kv_cache_base.view(-1, 2, Hkv, P, D)
+        pos = 0
+        for b in range(2):
+            for r in range(int(span[b])):
+                gpos = int(prefix[b]) + r
+                page = int(table[b, gpos // P])
+                slot = gpos % P
+                self.assertTrue(torch.equal(cache[page, 0, :, slot, :], k[pos + r]))
+                self.assertTrue(torch.equal(cache[page, 1, :, slot, :], v[pos + r]))
+            pos += int(span[b])
+
+    def test_gather_prefix_matches_loop_reference(self):
+        device = self._gpu()
+        torch.manual_seed(29)
+        P, Hkv, D = self.GP, self.GKV, self.GD
+        prefix = torch.tensor([11, 0, 13], dtype=torch.int32, device=device)
+        batch = 3
+        pages_per = [int((int(p) + P - 1) // P) for p in prefix]
+        NB = sum(pages_per) + 4
+        table = torch.zeros(batch, max(pages_per) + 2, dtype=torch.int32)
+        cur = 0
+        for b in range(batch):
+            for pb in range(pages_per[b]):
+                table[b, pb] = cur
+                cur += 1
+        paged_cache = torch.randn(NB, 2, Hkv, P, D, device=device, dtype=torch.float32)
+        cache = SimpleNamespace(kv_cache_base=paged_cache, tag="global_kv")
+        attn_inputs = SimpleNamespace(
+            kv_cache_kernel_block_id=None,
+            kv_cache_kernel_block_id_device=table.to(device),
+        )
+        op = self._mk_op("full_attention", device, torch.float32, True)
+        got_k, got_v = op._gather_prefix(cache, attn_inputs, prefix, batch)
+
+        def ref_loop():
+            bt = table.to(device)
+            gathered_k = paged_cache[bt.to(torch.long), 0]
+            gathered_v = paged_cache[bt.to(torch.long), 1]
+            k_rows, v_rows = [], []
+            for b in range(batch):
+                plen = int(prefix[b])
+                if plen <= 0:
+                    k_rows.append(gathered_k.new_zeros(0, Hkv, D))
+                    v_rows.append(gathered_v.new_zeros(0, Hkv, D))
+                    continue
+                k_parts, v_parts = [], []
+                for pb in range((plen + P - 1) // P):
+                    take = min(plen - pb * P, P)
+                    k_parts.append(gathered_k[b, pb, :, :take, :])
+                    v_parts.append(gathered_v[b, pb, :, :take, :])
+                k_rows.append(torch.cat(k_parts, dim=1).transpose(0, 1))
+                v_rows.append(torch.cat(v_parts, dim=1).transpose(0, 1))
+            return torch.cat(k_rows, dim=0), torch.cat(v_rows, dim=0)
+
+        ref_k, ref_v = ref_loop()
+        self.assertEqual(got_k.shape, ref_k.shape)
+        self.assertTrue(torch.equal(got_k, ref_k))
+        self.assertTrue(torch.equal(got_v, ref_v))
+
+
 class DiffusionGemmaRopeTest(TestCase):
     def test_sliding_rope_matches_reference(self):
         rope = dgm.DiffusionGemmaRope(1e4, SLIDING_DIM, 1.0, 64, torch.device("cpu"), torch.float32)

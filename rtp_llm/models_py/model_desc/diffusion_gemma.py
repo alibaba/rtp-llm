@@ -186,6 +186,26 @@ class DiffusionGemmaAttnOp:
         self.kv_dtype = kv_dtype or dtype
         self.sm_scale = 1.0  # reference: self.scaling = 1.0 (no 1/sqrt(d))
         self.use_flashinfer = False
+        # The paged KV write op only needs the flashinfer.page import, so it
+        # is independent of the attention wrappers below: global layers
+        # (head_dim 512 -> attention stays on the torch path) can still write
+        # KV through the vectorized append kernel instead of the per-row
+        # python loop, as long as plan() fills the block-table metadata.
+        self.use_paged_write = False
+        self.fmha_params = None
+        try:
+            from rtp_llm.models_py.modules.factory.attention.cuda_impl.kv_cache_write_op import (
+                KVCacheWriteOp,
+            )
+
+            self.write_op = KVCacheWriteOp(
+                num_kv_heads=self.kv_head_num,
+                head_size=self.head_dim,
+                token_per_block=self.page_size,
+            )
+            self.use_paged_write = True
+        except Exception as error:  # CPU-only environments
+            logger.info("DiffusionGemma paged KV write falls back to torch: %s", error)
         try:
             from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
                 get_py_flashinfer_workspace_buffer,
@@ -213,16 +233,6 @@ class DiffusionGemmaAttnOp:
                 )
             self.merge_state_in_place = merge_state_in_place
             self._release_ws = release_py_flashinfer_workspace_buffer
-            from rtp_llm.models_py.modules.factory.attention.cuda_impl.kv_cache_write_op import (
-                KVCacheWriteOp,
-            )
-
-            self.write_op = KVCacheWriteOp(
-                num_kv_heads=self.kv_head_num,
-                head_size=self.head_dim,
-                token_per_block=self.page_size,
-            )
-            self.fmha_params = None
             self.use_flashinfer = True
         except Exception as error:  # CPU-only environments
             logger.info("DiffusionGemma attention falls back to torch: %s", error)
@@ -338,33 +348,35 @@ class DiffusionGemmaAttnOp:
     def _gather_prefix(
         self, kv_cache: LayerKVCache, attn_inputs: Any, prefix_lens: torch.Tensor, batch_size: int
     ):
+        """Concatenate each request's prefix rows [plen, H, D] in batch order.
+
+        Pure-torch vectorization of the former per-request python loop: one
+        advanced-indexing gather per channel over the (b, row) grid picks
+        paged[bt[b, row//P], ch, :, row%P, :], and a boolean mask keeps
+        rows < plen_b. Row order and values are identical to the loop
+        (verified bit-exact); max_plen needs the single .item() sync the
+        loop's first line already had."""
         paged = self._reshape_paged(kv_cache.kv_cache_base)
         block_table = attn_inputs.kv_cache_kernel_block_id
         if block_table is None or block_table.numel() == 0:
             block_table = attn_inputs.kv_cache_kernel_block_id_device
         if block_table is None or block_table.numel() == 0:
             return None, None
-        block_table = block_table.reshape(batch_size, -1)
-        pages = block_table[:, : (int(prefix_lens.max().item()) + self.page_size - 1) // self.page_size + 1]
-        gathered_k = paged[pages.to(torch.long), 0]  # [B, blocks, H, P, D]
-        gathered_v = paged[pages.to(torch.long), 1]
-        k_rows = []
-        v_rows = []
-        for b in range(batch_size):
-            plen = int(prefix_lens[b].item())
-            if plen <= 0:
-                k_rows.append(gathered_k.new_zeros(0, self.kv_head_num, self.head_dim))
-                v_rows.append(gathered_v.new_zeros(0, self.kv_head_num, self.head_dim))
-                continue
-            k_parts = []
-            v_parts = []
-            for pb in range((plen + self.page_size - 1) // self.page_size):
-                take = min(plen - pb * self.page_size, self.page_size)
-                k_parts.append(gathered_k[b, pb, :, :take, :])
-                v_parts.append(gathered_v[b, pb, :, :take, :])
-            k_rows.append(torch.cat(k_parts, dim=1).transpose(0, 1))
-            v_rows.append(torch.cat(v_parts, dim=1).transpose(0, 1))
-        return torch.cat(k_rows, dim=0), torch.cat(v_rows, dim=0)
+        # normalize devices: the block table / prefix lens can arrive on
+        # host while the paged cache is on device (the loop used per-row
+        # .item() reads and never compared them directly).
+        dev = paged.device
+        block_table = block_table.reshape(batch_size, -1).to(device=dev, dtype=torch.long)
+        max_plen = int(prefix_lens.max().item())
+        rows = torch.arange(max_plen, device=dev)
+        page_cols = rows // self.page_size  # [max_plen] column into block_table
+        slots = rows % self.page_size  # [max_plen] slot within the page
+        pages = block_table[:, page_cols]  # [B, max_plen]
+        k_rows = paged[pages, 0, :, slots, :]  # [B, max_plen, H, D]
+        v_rows = paged[pages, 1, :, slots, :]
+        plens = prefix_lens.reshape(-1, 1).to(device=dev, dtype=torch.long)
+        mask = rows.reshape(1, -1) < plens
+        return k_rows[mask], v_rows[mask]
 
     def forward(
         self,
@@ -413,8 +425,8 @@ class DiffusionGemmaAttnOp:
                 q, k, v, prefix_k, prefix_v, causal, prefix_lens, qo_indptr, prefix_cu
             )
             if write_kv and kv_cache is not None:
-                self._write_cache_torch(
-                    k, v, kv_cache, attn_inputs, prefix_lens, batch_size, qo_indptr
+                self._write_cache(
+                    k, v, kv_cache, attn_inputs, positions, prefix_lens, batch_size, qo_indptr
                 )
             return out
 
@@ -573,8 +585,18 @@ class DiffusionGemmaAttnOp:
         inference tensor outside InferenceMode". Run the planning (and the
         lazy wrapper construction) under inference_mode(False) so the
         buffers stay normal tensors for both calling contexts.
+
+        With use_paged_write, only the wrapper-free segment runs: the
+        FlashInferMlaAttnParams fill + write_op.set_params + block table
+        preparation, which the torch-attention layers need for the paged
+        KV write. fill_params queries the CUDA device count, so the
+        write-only plan requires a real device (CPU/stub-driver UTs keep
+        the early return and the per-row write fallback).
         """
-        if not self.use_flashinfer:
+        if not (
+            self.use_flashinfer
+            or (self.use_paged_write and torch.cuda.is_available())
+        ):
             return
         with torch.inference_mode(False):
             self._plan_locked(attn_inputs, causal)
@@ -585,7 +607,8 @@ class DiffusionGemmaAttnOp:
         if qo_indptr is None or qo_indptr.numel() == 0:
             qo_indptr = attn_inputs.cu_seqlens
         qo_indptr = qo_indptr[: batch_size + 1]
-        self.ragged_wrapper.plan(
+        if self.use_flashinfer:
+            self.ragged_wrapper.plan(
             qo_indptr,
             qo_indptr,
             self.head_num,
@@ -620,7 +643,8 @@ class DiffusionGemmaAttnOp:
             self.page_size,
             False,
         )
-        self.write_op.set_params(self.fmha_params)
+        if self.use_paged_write:
+            self.write_op.set_params(self.fmha_params)
         if int(prefix_lens.max().item()) <= 0:
             return
         reuse_info = self.fmha_params.batch_reuse_info_vec_h
@@ -647,6 +671,10 @@ class DiffusionGemmaAttnOp:
                 qo_indptr.tolist() if qo_indptr is not None else None,
                 block_table.tolist()[:20] if block_table is not None else None,
             )
+        if not self.use_flashinfer:
+            # write-only plan: the block-table/fill_params segment above is
+            # all the paged KV write needs; skip the paged attention plan.
+            return
         self.paged_wrapper.plan(
             qo_indptr,
             paged_kv_indptr,
@@ -672,7 +700,7 @@ class DiffusionGemmaAttnOp:
         attn_inputs: Any,
         positions: torch.Tensor,
     ) -> None:
-        if getattr(self, "fmha_params", None) is not None:
+        if self.use_paged_write and getattr(self, "fmha_params", None) is not None:
             self.write_op.set_params(self.fmha_params)
         if self._fi_diag and getattr(self, "_fi_write_diag_first", True):
             self._fi_write_diag_first = False
@@ -703,6 +731,39 @@ class DiffusionGemmaAttnOp:
         # indexes [:, 0, :, :, :], so reshape the per-call view first.
         kv_cache.kv_cache_base = self._reshape_paged(kv_cache.kv_cache_base)
         self.write_op.forward(k, v, kv_cache)
+
+    def _write_cache(
+        self,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        kv_cache: LayerKVCache,
+        attn_inputs: Any,
+        positions: torch.Tensor,
+        prefix_lens: torch.Tensor,
+        batch_size: int,
+        cu_seqlens: Optional[torch.Tensor] = None,
+    ) -> None:
+        """Dispatch the KV write on the torch-attention path: prefer the
+        paged write op (same kernel the flashinfer path uses — see
+        _write_cache_flashinfer), fall back to the reference per-row loop
+        when the plan() metadata is missing or dtypes would trip the op's
+        strict checks."""
+        if self.use_paged_write and k.is_cuda:
+            cache = self._reshape_paged(kv_cache.kv_cache_base)
+            if (
+                getattr(self, "fmha_params", None) is not None
+                and k.dtype == cache.dtype
+                and v.dtype == cache.dtype
+            ):
+                with torch.inference_mode(False):
+                    # 2-D SWA pool buffers need the 5-D view the op indexes
+                    # with [:, 0, :, :, :] (same as _write_cache_flashinfer).
+                    kv_cache.kv_cache_base = cache
+                    self.write_op.forward(k, v, kv_cache)
+                return
+        self._write_cache_torch(
+            k, v, kv_cache, attn_inputs, prefix_lens, batch_size, cu_seqlens
+        )
 
     def _write_cache_torch(
         self,
@@ -932,9 +993,16 @@ class DiffusionGemmaRouter(nn.Module):
 
 class DiffusionGemmaExperts(nn.Module):
     """Routed experts: packed 3D gate_up [E, 2I, H] / down [E, H, I] with
-    gelu_pytorch_tanh gating. v1 uses a gather-per-active-expert loop
-    (reference semantics); the fused MoE executor replaces it once GeGLU
-    activation lands in the shared executor (perf phase)."""
+    gelu_pytorch_tanh gating.
+
+    GPU bf16 forwards run the fused Triton MoE executor — the same
+    moe_align_block_size_torch + get_default_config + invoke_fused_moe_kernel
+    sequence as TritonFusedMoeExecutor.execute — with flashinfer's fused
+    gelu_tanh_and_mul replacing the separate _gelu_tanh/mul. The reference
+    gather-per-active-expert loop stays as the fallback for CPU / non-bf16
+    and for DGM_FUSED_MOE=0. The router softmax/top8/scale chain is
+    untouched; both paths consume identical top_k_weights/top_k_idx and
+    are value-equivalent modulo bf16 GEMM/accumulate rounding."""
 
     def __init__(self, config: ModelConfig, weights: Dict[str, torch.Tensor]):
         super().__init__()
@@ -942,6 +1010,36 @@ class DiffusionGemmaExperts(nn.Module):
         self.down_proj = weights[W.moe_w2]  # [E, H, I]
         self.num_experts = config.expert_num
         self.inter = config.moe_inter_size // 2 * 2
+        self.top_k = config.moe_k
+        self.fused_enabled = os.environ.get("DGM_FUSED_MOE", "1") != "0"
+        self._fused_ready = False
+        if self.fused_enabled:
+            try:
+                import triton.language as tl
+
+                from flashinfer.activation import gelu_tanh_and_mul
+
+                from rtp_llm.models_py.triton_kernels.moe.fused_moe_kernel import (
+                    get_default_config,
+                    invoke_fused_moe_kernel,
+                    moe_align_block_size_torch,
+                )
+
+                self._tl_bfloat16 = tl.bfloat16
+                self._gelu_tanh_and_mul = gelu_tanh_and_mul
+                self._get_default_config = get_default_config
+                self._invoke_fused_moe_kernel = invoke_fused_moe_kernel
+                self._moe_align_block_size = moe_align_block_size_torch
+                self._fused_ready = True
+            except Exception as error:  # CPU-only / missing kernels
+                logger.info("DiffusionGemma fused MoE unavailable, loop path: %s", error)
+
+    def _fused_usable(self, hidden_states: torch.Tensor) -> bool:
+        return (
+            self._fused_ready
+            and hidden_states.is_cuda
+            and hidden_states.dtype == torch.bfloat16
+        )
 
     def forward(
         self,
@@ -949,7 +1047,101 @@ class DiffusionGemmaExperts(nn.Module):
         top_k_weights: torch.Tensor,
         top_k_idx: torch.Tensor,
     ) -> torch.Tensor:
+        if self._fused_usable(hidden_states):
+            return self._forward_fused(hidden_states, top_k_weights, top_k_idx)
+        return self._forward_loop(hidden_states, top_k_weights, top_k_idx)
+
+    def _forward_fused(
+        self,
+        hidden_states: torch.Tensor,
+        top_k_weights: torch.Tensor,
+        top_k_idx: torch.Tensor,
+    ) -> torch.Tensor:
         # gate_up layout: [E, 2I, H] with gate first (loader orders it).
+        M, K = hidden_states.shape
+        if M == 0:
+            return torch.zeros_like(hidden_states)
+        top_k = top_k_idx.size(1)
+        E = self.num_experts
+        N = self.gate_up_proj.size(1)  # 2 * inter
+        inter = N // 2
+        device = hidden_states.device
+        dtype = hidden_states.dtype
+        compute_type = self._tl_bfloat16
+
+        # Config selection for both GEMMs
+        config1 = self._get_default_config(M, E, N, K, top_k)
+        config2 = self._get_default_config(M, E, self.down_proj.size(1), inter, top_k)
+
+        # Flat routing tensors for the kernel
+        flat_topk_weights = top_k_weights.reshape(-1)  # [M * top_k]
+        topk_ids = top_k_idx.to(torch.int32)
+        flat_topk_ids = topk_ids.reshape(-1)
+
+        # Token-expert alignment: compute once if block sizes match, else twice
+        block_m1 = config1["BLOCK_SIZE_M"]
+        block_m2 = config2["BLOCK_SIZE_M"]
+        sorted_token_ids, expert_ids, num_tokens_post_padded = (
+            self._moe_align_block_size(topk_ids, block_m1, E)
+        )
+        if block_m1 == block_m2:
+            sorted_token_ids2, expert_ids2, num_tokens_post_padded2 = (
+                sorted_token_ids,
+                expert_ids,
+                num_tokens_post_padded,
+            )
+        else:
+            sorted_token_ids2, expert_ids2, num_tokens_post_padded2 = (
+                self._moe_align_block_size(topk_ids, block_m2, E)
+            )
+
+        # GEMM1: hidden_states @ w1.T → intermediate1 [M*top_k, 2I]
+        intermediate1 = torch.empty(M * top_k, N, device=device, dtype=dtype)
+        self._invoke_fused_moe_kernel(
+            hidden_states,
+            self.gate_up_proj,
+            intermediate1,
+            flat_topk_weights,
+            flat_topk_ids,
+            sorted_token_ids,
+            expert_ids,
+            num_tokens_post_padded,
+            mul_routed_weight=False,
+            top_k=top_k,
+            config=config1,
+            compute_type=compute_type,
+        )
+
+        # Activation: gelu_tanh(gate) * up → intermediate2 [M*top_k, I]
+        intermediate2 = torch.empty(M * top_k, inter, device=device, dtype=dtype)
+        self._gelu_tanh_and_mul(intermediate1, out=intermediate2)
+
+        # GEMM2: intermediate2 @ w2.T → out [M*top_k, K]
+        out = torch.empty(M * top_k, K, device=device, dtype=dtype)
+        self._invoke_fused_moe_kernel(
+            intermediate2,
+            self.down_proj,
+            out,
+            flat_topk_weights,
+            flat_topk_ids,
+            sorted_token_ids2,
+            expert_ids2,
+            num_tokens_post_padded2,
+            mul_routed_weight=True,
+            top_k=1,
+            config=config2,
+            compute_type=compute_type,
+        )
+
+        # Sum reduce over top_k: out is [M*top_k, K], reshape and sum
+        return out.view(M, top_k, K).sum(dim=1)
+
+    def _forward_loop(
+        self,
+        hidden_states: torch.Tensor,
+        top_k_weights: torch.Tensor,
+        top_k_idx: torch.Tensor,
+    ) -> torch.Tensor:
         E = self.num_experts
         tokens, hidden = hidden_states.shape
         flat_h = hidden_states
