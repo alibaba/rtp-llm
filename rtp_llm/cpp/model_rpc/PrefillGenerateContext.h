@@ -84,7 +84,8 @@ public:
         task_identity_{rpc_context.requestID(),
                        rpc_context.request && rpc_context.request->has_group_id() ?
                            rpc_context.request->group_id().value() :
-                           -1},
+                           -1,
+                       rpc_context.request ? rpc_context.request->priority() : 0},
         resource(resource),
         rpc_context(rpc_context),
         cancel_state(std::make_shared<std::atomic<bool>>(false)),

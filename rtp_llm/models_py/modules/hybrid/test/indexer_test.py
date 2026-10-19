@@ -91,7 +91,9 @@ class PagedMqaContextLensCompatibilityTest(TestCase):
 
     def test_new_deep_gemm_uses_2d_context_lens(self):
         fake_deep_gemm = self._fake_deep_gemm(expected_dim=2)
-        with mock.patch.object(indexer_op_module, "deep_gemm", fake_deep_gemm):
+        with mock.patch.object(
+            indexer_op_module, "_resolve_deep_gemm", return_value=fake_deep_gemm
+        ):
             logits = self._run_compat()
 
         self.assertEqual(logits.tolist(), [2, 4096])
@@ -100,7 +102,9 @@ class PagedMqaContextLensCompatibilityTest(TestCase):
 
     def test_old_deep_gemm_falls_back_to_1d_and_caches_layout(self):
         fake_deep_gemm = self._fake_deep_gemm(expected_dim=1)
-        with mock.patch.object(indexer_op_module, "deep_gemm", fake_deep_gemm):
+        with mock.patch.object(
+            indexer_op_module, "_resolve_deep_gemm", return_value=fake_deep_gemm
+        ):
             first_logits = self._run_compat()
             second_logits = self._run_compat()
 
@@ -119,7 +123,9 @@ class PagedMqaContextLensCompatibilityTest(TestCase):
             return get_metadata(context_lens, block_kv, num_sms)
 
         fake_deep_gemm.get_paged_mqa_logits_metadata = get_metadata_with_cache_update
-        with mock.patch.object(indexer_op_module, "deep_gemm", fake_deep_gemm):
+        with mock.patch.object(
+            indexer_op_module, "_resolve_deep_gemm", return_value=fake_deep_gemm
+        ):
             logits = self._run_compat()
 
         self.assertEqual(logits.tolist(), [1, 4096])
@@ -130,7 +136,9 @@ class PagedMqaContextLensCompatibilityTest(TestCase):
     def test_cached_layout_error_is_propagated_without_probing(self):
         fake_deep_gemm = self._fake_deep_gemm(expected_dim=1)
         indexer_op_module._paged_mqa_context_lens_dim = 2
-        with mock.patch.object(indexer_op_module, "deep_gemm", fake_deep_gemm):
+        with mock.patch.object(
+            indexer_op_module, "_resolve_deep_gemm", return_value=fake_deep_gemm
+        ):
             with self.assertRaisesRegex(RuntimeError, "expected 1D context_lens"):
                 self._run_compat()
 
