@@ -46,6 +46,37 @@ cuda_deps = [
     "@local_config_cuda//cuda:cudart",
 ]
 
+genrule(
+    name = "v41_qb_device",
+    srcs = ["@pip_gpu_cuda13_torch_deep_gemm//:site-packages/deep_gemm/include/deep_gemm/impls/sm100_fp8_fp4_gemm_1d1d.cuh"],
+    tools = ["prepare_v41_qb_header.py"],
+    outs = ["v41_qb_device.cuh"],
+    # CUDA13 builds use the repository's locked conda310 runtime. Bazel's
+    # genrule PATH need not contain a system python3.
+    cmd = "/opt/conda310/bin/python3 $(location prepare_v41_qb_header.py) $(SRCS) $@",
+)
+
+cc_library(
+    name = "v41_qb_gemm",
+    srcs = ["v41_qb_gemm.cu"],
+    hdrs = ["v41_qb_gemm.h", "v41_qb_epilogue.cuh", ":v41_qb_device"],
+    copts = copts() + cuda_default_copts_without_arch() + [
+        "-std=c++20", "-O3",
+        "-nvcc_options=expt-relaxed-constexpr",
+        "-nvcc_options=expt-extended-lambda",
+        "-nvcc_options=ptxas-options=--register-usage-level=10",
+        "-nvcc_options=ftz=false",
+        "--cuda-gpu-arch=sm_103a",
+    ],
+    deps = [
+        "@pip_gpu_cuda13_torch_deep_gemm//:device_headers",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+        "@local_config_cuda//cuda:cuda_driver",
+    ],
+    visibility = ["//visibility:public"],
+)
+
 # Compile against the same patched, hash-locked wheel as the Python runtime.
 cc_library(
     name = "v41_front_gemm",

@@ -30,6 +30,61 @@ def flags(enabled):
 
 
 class DecodeQKVIntegrationCPU(unittest.TestCase):
+    def test_full_and_reindex_use_separate_projection_consumers(self):
+        from rtp_llm.models_py.modules.dsv41.fp8 import _v41_front_gemm as front
+
+        qr = torch.randn(1, 2, 128, dtype=torch.bfloat16)
+        kv = torch.randn(1, 2, 512, dtype=torch.bfloat16)
+        q = torch.randn(1, 2, 512, dtype=torch.bfloat16)
+        quantized = (torch.zeros_like(qr), torch.ones(2, 1, dtype=torch.int32))
+        head = torch.randn(2, 32, dtype=torch.bfloat16)
+        positions = torch.tensor([1, 3], dtype=torch.int32)
+        freqs = torch.ones(2, 32, dtype=torch.complex64)
+        shared_input = (object(), object())
+        index_q, prepared = object(), (object(), object(), object())
+        for is_source, pdl in ((True, False), (True, True), (False, False), (False, True)):
+            with self.subTest(is_source=is_source, pdl=pdl):
+                merged = SimpleNamespace(
+                    forward_quantized=Mock(return_value=(q, index_q)),
+                    try_forward_prepared=Mock(return_value=(q, prepared)),
+                )
+                attn = SimpleNamespace(
+                    is_index_source=True, is_kv_source=is_source,
+                    rope_head_dim=64, head_dim=512, n_heads=1,
+                    skip_post_q_norm=True, freqs_cis=freqs, wq_b=object(),
+                    kv_norm=torch.ones(512, dtype=torch.bfloat16), eps=1e-6,
+                    _lin=Mock(side_effect=AssertionError("unexpected projection")),
+                )
+                with patch.object(front, "project", return_value=(qr, kv, quantized, head)) as fused, \
+                     patch.object(_v41_query_quant, "try_project_quantized_qkv",
+                                  return_value=(qr, kv, quantized)) as original, \
+                     patch.object(compute_qkv, "fused_rmsnorm_rope", return_value=kv):
+                    result = compute_qkv.decode_compute_qkv(
+                        attn, qr, positions, freqs_cis=freqs,
+                        mega_attention=SimpleNamespace(merged_qb=merged),
+                        shared_input_quant=shared_input, qb_pdl=pdl,
+                    )
+                if is_source:
+                    fused.assert_not_called()
+                    original.assert_called_once_with(
+                        attn, qr, quantized_input=shared_input, pdl=pdl
+                    )
+                    self.assertIsNone(result.head_weights)
+                else:
+                    original.assert_not_called()
+                    fused.assert_called_once_with(
+                        attn, qr, quantized_input=shared_input, pdl=pdl
+                    )
+                    self.assertIs(result.head_weights, head)
+                if not is_source and not pdl:
+                    merged.try_forward_prepared.assert_called_once()
+                    merged.forward_quantized.assert_not_called()
+                    self.assertIs(result.index_prepared, prepared)
+                else:
+                    merged.try_forward_prepared.assert_not_called()
+                    merged.forward_quantized.assert_called_once_with(*quantized)
+                    self.assertIsNone(result.index_prepared)
+
     def test_quantized_projection_and_completed_write_are_forwarded(self):
         qr = torch.randn(1, 2, 128, dtype=torch.bfloat16)
         kv = torch.randn(1, 2, 512, dtype=torch.bfloat16)

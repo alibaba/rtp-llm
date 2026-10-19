@@ -1,9 +1,10 @@
-"""Default-on mixed-precision Q-A/KV + BF16 index-head projection on B300.
+"""Default-on Reindex Q-A/KV + BF16 index-head projection on B300.
 
 No JIT, weight duplication, pointer cache or forward-time validation kernels.
 Unsupported configurations use the original projections. Reload is performed
 at init_rope_cache with inference quiesced, like the other graph-owned weights.
 Set DSV41_FUSED_FRONT_PROJECTION=0 to retain the original projections.
+FULL/source layers retain their existing projection and overlap paths.
 """
 
 import os
@@ -13,6 +14,13 @@ import torch
 from rtp_llm.models_py.modules.dsv41._v41_fused_qkv import is_supported
 from rtp_llm.models_py.modules.dsv41._v41_query_quant import query_norm_quant
 from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
+
+
+def is_reindex(attn):
+    """An index producer reusing an earlier layer's KV, not a FULL source."""
+    return getattr(attn, "is_index_source", False) and not getattr(
+        attn, "is_kv_source", True
+    )
 
 
 def _weights(attn):
@@ -45,13 +53,13 @@ class FrontWeights:
 
 
 def prepare(attn):
+    if not is_reindex(attn):
+        return
     state = getattr(attn, "_front_weights", None)
     if state is not None:
         state.reload(attn)
         return
     if os.environ.get("DSV41_FUSED_FRONT_PROJECTION", "1") != "1":
-        return
-    if not getattr(attn, "is_index_source", False):
         return
     linear = getattr(attn, "wq_a_wkv", None)
     head = getattr(attn, "index_weights", None)
@@ -70,6 +78,8 @@ def prepare(attn):
 
 
 def project(attn, x, *, quantized_input=None, pdl=False):
+    if not is_reindex(attn):
+        return None
     state = getattr(attn, "_front_weights", None)
     if state is None or os.environ.get("DSV41_FUSED_FRONT_PROJECTION", "1") != "1":
         return None

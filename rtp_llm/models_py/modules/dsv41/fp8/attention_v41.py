@@ -2884,7 +2884,16 @@ class AttentionV41FP8(AttentionFP8):
         self._shared_attention["global"] = {self.layer_id: keys}
 
     def _prepare_indexer_query_decode(
-        self, x, qr, positions, qr_quantized=None, index_q=None, head_weights=None
+        self,
+        x,
+        qr,
+        positions,
+        qr_quantized=None,
+        index_q=None,
+        head_weights=None,
+        index_prepared=None,
+        *,
+        overlap=None,
     ):
         """Prepare query-only work before waiting for the current layer's keys."""
         if not self.is_index_source:
@@ -2902,7 +2911,19 @@ class AttentionV41FP8(AttentionFP8):
                 x.device, keys.pool.shape[1], self.index_n_heads, self.index_head_dim
             )
         )
-        if index_q is None and paged and self.rope_head_dim == 64:
+        if index_prepared is not None and paged:
+            # Our QB epilogue already produced RoPE/FP4 and scaled weights.
+            # Keep the upstream query contract without repeating those kernels.
+            if overlap is not None:
+                overlap.wait_indexer()
+                weights = overlap.weights
+            else:
+                weights = (
+                    F.linear(x.reshape(T, -1), self.index_weights)
+                    if head_weights is None else head_weights
+                )
+            return None, weights, index_prepared
+        if index_q is None and paged and self.rope_head_dim == 64 and overlap is None:
             from rtp_llm.models_py.modules.dsv41._v41_query_quant import (
                 try_project_indexer_q,
             )
@@ -2911,7 +2932,10 @@ class AttentionV41FP8(AttentionFP8):
                 self.index_wq, qr, self.freqs_cis, positions, qr_quantized
             )
             if pair is not None:
-                weights = F.linear(x.reshape(T, -1), self.index_weights) if head_weights is None else head_weights
+                weights = (
+                    F.linear(x.reshape(T, -1), self.index_weights)
+                    if head_weights is None else head_weights
+                )
                 scaled = torch.empty_like(weights, dtype=torch.bfloat16)
                 torch.mul(
                     weights,
@@ -2938,7 +2962,14 @@ class AttentionV41FP8(AttentionFP8):
                 else self._lin(self.index_wq, qr.reshape(T, -1))
             )
         q = index_q.view(T, self.index_n_heads, self.index_head_dim)
-        weights = F.linear(x.reshape(T, -1), self.index_weights) if head_weights is None else head_weights
+        if overlap is not None:
+            overlap.wait_indexer()
+            weights = overlap.weights
+        else:
+            weights = (
+                F.linear(x.reshape(T, -1), self.index_weights)
+                if head_weights is None else head_weights
+            )
         prepared = None
         if paged:
             prepared = decode_indexer.prepare_indexer_q_and_weights(
@@ -2959,6 +2990,7 @@ class AttentionV41FP8(AttentionFP8):
         qr_quantized=None,
         index_q=None,
         head_weights=None,
+        index_prepared=None,
         *,
         prepared_query=None,
         overlap=None,
@@ -2979,7 +3011,8 @@ class AttentionV41FP8(AttentionFP8):
         capacity = keys.capacity if paged else keys.shape[1]
         if prepared_query is None:
             prepared_query = AttentionV41FP8._prepare_indexer_query_decode(
-                self, x, qr, positions, qr_quantized, index_q, head_weights
+                self, x, qr, positions, qr_quantized, index_q, head_weights,
+                index_prepared, overlap=overlap,
             )
         q, weights, prepared = prepared_query
         if overlap is not None:
@@ -3083,7 +3116,7 @@ class AttentionV41FP8(AttentionFP8):
                 weights.float() * (self.index_head_dim * self.index_n_heads) ** -0.5
             )
             freqs = self.freqs_cis[positions]
-            q = fp4_roundtrip(rope_only(q, freqs, self.rope_head_dim))
+            q = fp4_roundtrip(rope_only(q.view(T, self.index_n_heads, self.index_head_dim), freqs, self.rope_head_dim))
         publish = (
             self.layer_id == candidate_source
             and candidate_blocks > 0
@@ -3345,6 +3378,7 @@ class AttentionV41FP8(AttentionFP8):
                     qkv.qr_quantized,
                     qkv.index_q,
                     head_weights=qkv.head_weights,
+                    index_prepared=qkv.index_prepared,
                     prepared_query=prepared_query,
                 )
                 slots = (

@@ -1,5 +1,7 @@
 """One resident GEMM for Mega Attention Q and Indexer Q, sharing FP8 storage."""
 
+import os
+
 import torch
 
 from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
@@ -46,6 +48,52 @@ class MergedQB(torch.nn.Module):
         )
         # Original, unpermuted Main Q stays intact for non-Mega execution.
         # Separate linears retain their own TMA-compatible scale strides.
+        self._postprocess_op = None
+        props = torch.cuda.get_device_properties(weight.device)
+        if (props.major, props.minor, props.multi_processor_count) == (10, 3, 148):
+            from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+            self._postprocess_op = getattr(rtp_llm_ops, "v41_qb_gemm", None)
+
+    def try_forward_prepared(self, data, scales, weights, frequencies, positions):
+        """Decode-only; retain resident weights/SF and the original fallback.
+
+        Returns Main Q and (FP4 payload, packed SF, scaled BF16 head weights).
+        No uninitialized BF16 Indexer view escapes this interface.
+        """
+        rows = data.numel() // self.K
+        if (
+            os.environ.get("DSV41_FUSED_QB_POSTPROCESS", "1") != "1"
+            or self._postprocess_op is None
+            or rows not in (256, 384, 512)
+            or (self.main_width, self.index_width, self.K) != (32768, 4096, 1280)
+            or weights is None
+            or weights.dtype != torch.bfloat16
+            or weights.numel() != rows * 32
+            or not weights.is_contiguous()
+            or not data.is_contiguous()
+            or data.dtype != torch.float8_e4m3fn
+            or scales.dtype != torch.int32
+            or scales.shape != (rows, 10)
+            or scales.stride() != (1, rows)
+            or frequencies.dtype != torch.complex64
+            or frequencies.ndim != 2
+            or frequencies.shape[1] != 32
+            or not frequencies.is_contiguous()
+            or positions.dtype not in (torch.int32, torch.int64)
+            or positions.numel() != rows
+            or not positions.is_contiguous()
+            or any(t.device != data.device for t in (scales, weights, frequencies, positions))
+        ):
+            return None
+        q, payload, sf, scaled = self._postprocess_op(
+            data.view(rows, self.K), scales, self.weight, self.weight_scales,
+            weights.view(rows, 32), frequencies, positions.view(rows),
+        )
+        shape = data.shape[:-1]
+        return q.view(*shape, self.main_width), (
+            payload.view(*shape, 32, 64), sf.view(*shape, 32), scaled.view(*shape, 32),
+        )
 
     @torch.no_grad()
     def reload(self, mega, index):

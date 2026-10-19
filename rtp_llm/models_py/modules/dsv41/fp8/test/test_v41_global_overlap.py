@@ -174,7 +174,8 @@ class GlobalOverlapCPUTest(unittest.TestCase):
                 calls = []
                 work = SimpleNamespace(finish=lambda: calls.append("join"))
                 qkv = SimpleNamespace(
-                    kv=x, qr=x, qr_quantized=None, index_q=None, swa_written=False
+                    kv=x, qr=x, qr_quantized=None, index_q=None, swa_written=False,
+                    head_weights=None, index_prepared=None,
                 )
 
                 def project(*args, **kwargs):

@@ -33,7 +33,7 @@ class FrontGemmTest(unittest.TestCase):
             wq_a_wkv=linear(1792, 5120), wq_b=linear(128, 1280),
             index_weights=torch.randn(32, 5120, device="cuda", dtype=torch.bfloat16) * 0.02,
             q_norm=torch.ones(1280, device="cuda", dtype=torch.bfloat16),
-            q_lora_rank=1280, eps=1e-6, is_index_source=True,
+            q_lora_rank=1280, eps=1e-6, is_index_source=True, is_kv_source=False,
         )
         front.prepare(attn)
         self.assertIsNotNone(getattr(attn, "_front_weights", None))

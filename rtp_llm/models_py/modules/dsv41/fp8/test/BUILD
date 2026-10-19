@@ -3,6 +3,21 @@ load("@pip_dsv4_test//:requirements.bzl", test_requirement = "requirement")
 
 package(default_visibility = ["//visibility:public"])
 
+py_test(
+    name = "test_v41_qb_epilogue",
+    srcs = glob(["*.py"]) + [
+        "//rtp_llm/models_py/modules/dsv41/test:test_v41_front_gemm.py",
+    ],
+    deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:modules"],
+    tags = ["dsv41_cuda13", "SM103_TEST"],
+    exec_properties = {"gpu": "SM103_TEST", "gpu_count": "1"},
+    target_compatible_with = select({
+        "@//:using_cuda13_x86": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    legacy_create_init = 0,
+)
+
 _TESTS = [
     "test_v41_attention_pool_warmup",
     "test_attention_v41",
