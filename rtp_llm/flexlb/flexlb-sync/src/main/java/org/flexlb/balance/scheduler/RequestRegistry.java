@@ -283,6 +283,9 @@ public class RequestRegistry {
                             StrategyErrorType.DISPATCH_FAILED,
                             "request scheduler is shutting down"));
                 }
+                if (!context.getConfig().getDispatcher().requiresGenerateInput()) {
+                    context.setGenerateInputPb(null);
+                }
                 slot = new RequestSlot(completionPublisher, context, expirationTimer, terminalCleanup, this::exitAdmissionHandleGate, context.getConfig().isQueue(), globalQueue);
                 context.setEnqueueTime(System.currentTimeMillis());
                 synchronized (slot) {

@@ -30,7 +30,7 @@ public class BalanceContext {
     private Response response;
 
     @ToString.Exclude
-    private ByteString generateInputPb;
+    private volatile ByteString generateInputPb;
 
     /** Captured at RPC entry and carried through asynchronous scheduling. */
     @ToString.Exclude
