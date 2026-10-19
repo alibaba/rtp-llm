@@ -181,15 +181,21 @@ class SM90FlashInferStrategy(RoutedExpertsStrategy):
                 torch.cuda.current_device(),
                 id(group),
             )
-            existing = getattr(wrapper, "_dsv41_elastic", None)
-            if existing is None:
+            # Target and draft may have different expert geometry/capacity.
+            # Keep each allocation alive for its captured graphs; identical
+            # layers still share the same buffer as in non-speculative decode.
+            buffers = getattr(wrapper, "_dsv41_elastic_buffers", None)
+            if buffers is None:
+                buffers = wrapper._dsv41_elastic_buffers = {}
+            buffer = buffers.get(key)
+            if buffer is None:
                 buffer = ElasticBuffer(
                     group,
                     num_max_tokens_per_rank=key[0],
                     hidden=key[1],
                     num_topk=key[2],
                 )
-                wrapper._dsv41_elastic = (key, buffer)
+                buffers[key] = buffer
                 logging.info(
                     "SM90 DeepEP V2: role=%s capacity_per_rank=%d buffer_bytes=%d SMs=%d",
                     "decode" if self.cfg.is_decode_role else "prefill",
@@ -197,9 +203,7 @@ class SM90FlashInferStrategy(RoutedExpertsStrategy):
                     buffer.num_bytes,
                     self._v2_num_sms,
                 )
-            elif existing[0] != key:
-                raise ValueError("Incompatible SM90 ElasticBuffer capacity")
-            self._comm_buffer = wrapper._dsv41_elastic[1]
+            self._comm_buffer = buffer
         if self._decode_graph:
             if self.cfg.ep_size > 1:
                 rows = self._decode_graph_max_rows * self.cfg.ep_size
