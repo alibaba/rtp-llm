@@ -90,6 +90,11 @@ QUEUE + BATCH 完成 Decode 排队预留和 Prefill 子队列入队后，按批�
 DIRECT 没有子队列，选中的 Prefill 和 Decode 在路由提交时检查容量，容量不足则返回错误。
 Prefill 待交付队列中的请求被高优新请求替换时，也返回 `QUEUED_REQUEST_PREEMPTED`（8435）。
 
+Worker 下线停止子队列时，尚未完成 dispatch 交接的请求释放旧 Prefill 路由预留和 Decode 预留，
+回到原 global 队列条目重新选路，保留请求 future、优先级、排队顺序和截止时间。
+若入队发布尚未结束，回队操作等待该次发布结束；期间发生取消或超时则按取消或超时结束请求。
+已完成 dispatch 交接的请求继续按交付结果和引擎状态清理。调度器整体关闭时结束待调度请求。
+
 在任何模式下，调度器都在对外可见前提交 endpoint 账本和
 `RequestLifecycle`。BATCH 路径记录引擎 ACK/执行状态；NON_BATCH 路径记录
 路由决策的交付与调用方确认。

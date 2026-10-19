@@ -768,6 +768,7 @@ public final class WorkerBatcher {
                 }
             }
 
+            boolean workerWasRemoved = terminalFailure == normalStopFailure;
             while (true) {
                 ScheduledRequest item;
                 try {
@@ -787,8 +788,11 @@ public final class WorkerBatcher {
                             cleanupFailure, reservationFailure);
                 }
                 try {
-                    endpointEvents.onQueueOfferFailure(
-                            item, terminalFailure);
+                    if (workerWasRemoved) {
+                        endpointEvents.onQueuedWorkerStopped(item);
+                    } else {
+                        endpointEvents.onQueueOfferFailure(item, terminalFailure);
+                    }
                 } catch (Throwable callbackFailure) {
                     try {
                         Logger.error("WorkerBatcher[{}] shutdown callback failed request_id={}",

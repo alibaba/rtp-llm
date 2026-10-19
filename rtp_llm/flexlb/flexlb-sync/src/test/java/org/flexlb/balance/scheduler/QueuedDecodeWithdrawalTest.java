@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
@@ -26,6 +27,7 @@ import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -71,6 +73,10 @@ class QueuedDecodeWithdrawalTest {
     }
 
     private ScheduledRequest queued(long id) {
+        return queued(id, item -> { });
+    }
+
+    private ScheduledRequest queued(long id, java.util.function.Consumer<ScheduledRequest> duringPublication) {
         var context = RequestLifecycleTestSupport.context(config, id);
         context.setSchedulingMetadata(SchedulingMetadata.explicit(30, System.currentTimeMillis() + 60_000L));
         var future = registry.register(context);
@@ -87,6 +93,7 @@ class QueuedDecodeWithdrawalTest {
         try (var admission = registry.claimAdmissionHandle(Long.toString(id), future)) {
             assertNotNull(admission);
             assertTrue(registry.commitItemForPublication(item, () -> true));
+            duringPublication.accept(item);
         }
         return item;
     }
@@ -142,6 +149,96 @@ class QueuedDecodeWithdrawalTest {
             status.lock.unlock();
         }
         projection.run();
+    }
+
+    @Test
+    void stoppedWorkerReleasesOldRouteBeforeRequeueAndIgnoresRepeatedNotification() {
+        var item = queued(20);
+        doAnswer(call -> {
+            assertNull(decode.reservationHandle("20"));
+            assertNull(registry.requestSlot("20").activeItem());
+            assertFalse(item.future().isDone());
+            return true;
+        }).when(queue).requeue(item);
+        registry.onQueuedWorkerStopped(item);
+        registry.onQueuedWorkerStopped(item);
+        verify(queue, org.mockito.Mockito.times(1)).requeue(item);
+        assertEquals(RequestState.Phase.QUEUED, registry.getRequestState("20", 0).state());
+        assertEquals(0, decode.routingView().totalLoad());
+    }
+
+    @Test
+    void stoppedWorkerDuringPublicationWaitsForAdmissionToClose() {
+        var item = queued(21, publishing -> {
+            registry.onQueuedWorkerStopped(publishing);
+            verify(queue, never()).requeue(any());
+            assertNotNull(decode.reservationHandle("21"));
+        });
+        verify(queue).requeue(item);
+        assertNull(registry.requestSlot("21").activeItem());
+        assertNull(decode.reservationHandle("21"));
+        assertFalse(item.future().isDone());
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = CancelReason.class, names = {"CLIENT_CANCELLED", "DEADLINE_EXCEEDED"})
+    void cancellationWinsOverDeferredWorkerRequeue(CancelReason reason) throws Exception {
+        var item = queued(22, publishing -> {
+            registry.onQueuedWorkerStopped(publishing);
+            registry.cancelRequest("22", 0, reason);
+        });
+        assertFalse(item.future().get(2, TimeUnit.SECONDS).isSuccess());
+        verify(queue, never()).requeue(any());
+        assertNull(decode.reservationHandle("22"));
+    }
+
+    @Test
+    void stoppedWorkerCannotRequeueAfterDispatchHandoff() {
+        var item = queued(23);
+        assertNotNull(registry.requestSlot("23").claimDelivery(item, DeliveryClaimKind.BATCH_ENQUEUE, 1L, () -> true));
+        registry.onQueuedWorkerStopped(item);
+        verify(queue, never()).requeue(any());
+        assertSame(item, registry.requestSlot("23").activeItem());
+        assertNotNull(decode.reservationHandle("23"));
+    }
+
+    @Test
+    void stoppedWorkerRequeueIntoClosedGlobalQueueTerminatesRequest() throws Exception {
+        var item = queued(24);
+        when(queue.requeue(item)).thenReturn(false);
+        registry.onQueuedWorkerStopped(item);
+        assertFalse(item.future().get(2, TimeUnit.SECONDS).isSuccess());
+        assertNull(decode.reservationHandle("24"));
+    }
+
+    @Test
+    void stoppedWorkerAfterDispatchPreparedButBeforeClaimRequeuesAndRejectsLateClaim() {
+        var item = queued(25);
+        var slot = registry.requestSlot("25");
+        var dispatchPrepared = new AtomicBoolean();
+        var prepared = slot.prepareDispatch(item, () -> {
+            dispatchPrepared.set(true);
+            return CapacityBoundary.Attempt.accepted(dispatchPrepared);
+        });
+        assertTrue(prepared.accepted());
+
+        registry.onQueuedWorkerStopped(item);
+
+        verify(queue, org.mockito.Mockito.times(1)).requeue(item);
+        assertNull(slot.activeItem());
+        assertNull(decode.reservationHandle("25"));
+        var handedToEndpoint = new AtomicBoolean();
+        assertNull(RequestLifecycleTestSupport.claimBatchWithoutPrediction(registry, item, 1L, () -> {
+            handedToEndpoint.set(true);
+            return true;
+        }));
+        assertNull(slot.claimDelivery(item, DeliveryClaimKind.BATCH_ENQUEUE, 1L, () -> {
+            handedToEndpoint.set(true);
+            return true;
+        }));
+        assertFalse(handedToEndpoint.get());
+        assertFalse(item.future().isDone());
+        assertEquals(RequestState.Phase.QUEUED, registry.getRequestState("25", 0).state());
     }
 
     private boolean replace(ScheduledRequest item) {

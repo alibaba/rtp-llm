@@ -140,6 +140,12 @@ public final class RequestSlot {
 
     /** Routing identity survives handoff and is used to reject late facts. */
     private ScheduledRequest item;
+    /**
+     * Set when the Prefill Worker stops while this request is still being enqueued to its subqueue (the admission
+     * handle is open). The global queue entry is only marked removed after enqueueing ends, so the requeue has to
+     * wait; finishAdmission requeues this item and clears the field.
+     */
+    private ScheduledRequest itemWhoseWorkerStoppedDuringEnqueue;
 
     /** Storage/cleanup ownership; distinct from the public request lifecycle. */
     private SlotPhase slotPhase = SlotPhase.ACTIVE;
@@ -516,6 +522,39 @@ public final class RequestSlot {
         }
     }
 
+    /**
+     * The Prefill Worker holding this request in its subqueue has stopped before dispatch. Give back the Decode
+     * reservation and put the request back into its original global queue entry so it is routed again.
+     */
+    void requeueStoppedWorker(ScheduledRequest itemFromStoppedWorker) {
+        synchronized (this) {
+            if (!ownsPreparedDeliveryLocked(itemFromStoppedWorker)) {
+                return;
+            }
+            if (admissionHandle != null) {
+                itemWhoseWorkerStoppedDuringEnqueue = itemFromStoppedWorker;
+                return;
+            }
+            item = null;
+            detail = "queued after Prefill worker stopped";
+            updatedAtMs = System.currentTimeMillis();
+        }
+        try {
+            DecodeEndpoint.ReservationHandle decodeReservation = itemFromStoppedWorker.decodeReservation();
+            if (decodeReservation != null) {
+                itemFromStoppedWorker.decodeEp().release(decodeReservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
+            }
+            if (isOpen() && !globalQueue.requeue(itemFromStoppedWorker)) {
+                terminateLocallyAndPublishResponse(buildErrorResponse(StrategyErrorType.DISPATCH_FAILED,
+                        "scheduler closed during worker requeue"));
+            }
+        } catch (RuntimeException | Error failure) {
+            terminateLocallyAndPublishResponse(buildErrorResponse(StrategyErrorType.DISPATCH_FAILED,
+                    "worker requeue failed: " + failure.getMessage()));
+            throw failure;
+        }
+    }
+
     PlacementResult.Status commitRoute(ScheduledRequest exact, BooleanSupplier publication) {
         synchronized (this) {
             if (!tryBindItemForPublicationLocked(exact)) { return PlacementResult.Status.CLOSED; }
@@ -576,8 +615,11 @@ public final class RequestSlot {
         try {
             RequestEffect effect = RequestEffect.STALE;
             boolean cleanupPending;
+            ScheduledRequest itemToRequeue = null;
             synchronized (this) {
                 if (admissionHandle == exact) {
+                    itemToRequeue = itemWhoseWorkerStoppedDuringEnqueue;
+                    itemWhoseWorkerStoppedDuringEnqueue = null;
                     admissionHandle = null;
                     withdrawingRoute = null;
                     effect = settleAdmissionLocked(failureResponse);
@@ -588,6 +630,9 @@ public final class RequestSlot {
                 resumeCleanup();
             } else {
                 execute(effect);
+            }
+            if (itemToRequeue != null) {
+                requeueStoppedWorker(itemToRequeue);
             }
         } catch (Throwable settlementFailure) {
             failure = settlementFailure;

@@ -1403,21 +1403,17 @@ class PrefillEndpointTest {
         CountDownLatch reentrantCloseReturned = new CountDownLatch(1);
         AtomicReference<Throwable> callbackFailure = new AtomicReference<>();
         AtomicReference<PrefillEndpoint> retirementEndpointRef = new AtomicReference<>();
-        EndpointTestSupport.TestRequestRuntime runtime =
-                new EndpointTestSupport.TestRequestRuntime() {
-            @Override
-            void onQueueOfferFailure(
-                    org.flexlb.balance.scheduler.ScheduledRequest item,
-                    Throwable error) {
-                reentrantCloseEntered.countDown();
-                try {
-                    retirementEndpointRef.get().close();
-                    reentrantCloseReturned.countDown();
-                } catch (Throwable failure) {
-                    callbackFailure.compareAndSet(null, failure);
-                }
+        EndpointTestSupport.TestRequestRuntime runtime = new EndpointTestSupport.TestRequestRuntime();
+        org.mockito.Mockito.doAnswer(invocation -> {
+            reentrantCloseEntered.countDown();
+            try {
+                retirementEndpointRef.get().close();
+                reentrantCloseReturned.countDown();
+            } catch (Throwable failure) {
+                callbackFailure.compareAndSet(null, failure);
             }
-        };
+            return null;
+        }).when(runtime.events()).onQueuedWorkerStopped(org.mockito.Mockito.any());
         PrefillEndpoint retirementEndpoint = EndpointTestSupport.standalonePrefillEndpoint(
                 status,
                 retirementConfig,

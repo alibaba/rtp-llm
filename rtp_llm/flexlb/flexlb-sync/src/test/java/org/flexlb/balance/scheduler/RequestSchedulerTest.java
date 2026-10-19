@@ -58,6 +58,59 @@ import static org.mockito.Mockito.when;
 
 class RequestSchedulerTest {
 
+    @Test
+    void stoppedWorkerDuringRoutePublicationIsPlannedAgainByGlobalQueue() throws Exception {
+        FlexlbConfig config = SchedulingTestConfig.batchConfig();
+        ConfigService service = mock(ConfigService.class);
+        when(service.loadBalanceConfig()).thenReturn(config);
+        RequestRegistry registry = new RequestRegistry(service, mock(BatchSchedulerReporter.class),
+                mock(org.flexlb.service.monitor.RequestSchedulerReporter.class));
+        DefaultRouter router = mockRouter();
+        RouteAdmission first = mock(RouteAdmission.class);
+        RouteAdmission second = mock(RouteAdmission.class);
+        BalanceContext context = context(config, 919L);
+        var initial = new java.util.concurrent.atomic.AtomicReference<ScheduledRequest>();
+        var rerouted = new java.util.concurrent.atomic.AtomicReference<ScheduledRequest>();
+        CountDownLatch republished = new CountDownLatch(1);
+        when(router.select(context, null)).thenReturn(PlacementResult.success(first), PlacementResult.success(second));
+        when(first.tryEnqueue(any(), any(), any())).thenAnswer(call -> {
+            var item = new ScheduledRequest(context, call.getArgument(1), new Response(), null, null,
+                    mockPrefillEndpoint("old-worker", 8001), null, null, System.currentTimeMillis());
+            assertTrue(registry.commitItemForPublication(item, () -> true));
+            initial.set(item);
+            registry.onQueuedWorkerStopped(item);
+            return PlacementResult.success(item);
+        });
+        when(second.tryEnqueue(any(), any(), any())).thenAnswer(call -> {
+            var item = new ScheduledRequest(context, call.getArgument(1), new Response(), null, null,
+                    mockPrefillEndpoint("new-worker", 8001), null, null, System.currentTimeMillis());
+            assertTrue(registry.commitItemForPublication(item, () -> true));
+            rerouted.set(item);
+            republished.countDown();
+            return PlacementResult.success(item);
+        });
+        RequestScheduler scheduler = new RequestScheduler(service, router, mock(EndpointRegistry.class),
+                mock(BatchSchedulerReporter.class), mock(EvictionManager.class), registry, new PlacementAvailability(),
+                new QueueCapacity());
+        try {
+            CompletableFuture<Response> future = scheduler.submit(context);
+            assertTrue(republished.await(5, TimeUnit.SECONDS));
+            assertFalse(future.isDone());
+            assertSame(future, rerouted.get().future());
+            assertEquals(initial.get().enqueueSeq(), rerouted.get().enqueueSeq());
+            assertEquals(initial.get().expiresAtMs(), rerouted.get().expiresAtMs());
+            assertEquals(initial.get().priority(), rerouted.get().priority());
+            assertSame(rerouted.get(), registry.requestSlot("919").activeItem());
+        } finally {
+            scheduler.closePlacement();
+            if (registry.closeAdmissionAndAwaitMutations()) {
+                registry.closeOutstandingAndTerminalize();
+            }
+            registry.closeExpiration();
+            registry.closePublisher();
+        }
+    }
+
     private static DefaultRouter mockRouter() {
         DefaultRouter router = mock(DefaultRouter.class);
         return router;

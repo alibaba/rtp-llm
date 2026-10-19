@@ -698,6 +698,13 @@ public class RequestRegistry {
         if (slot != null) { slot.cancelRequest(0L, CancelReason.DEADLINE_EXCEEDED); }
     }
 
+    public void onQueuedWorkerStopped(ScheduledRequest itemFromStoppedWorker) {
+        RequestSlot slot = entryFor(itemFromStoppedWorker);
+        if (slot != null) {
+            slot.requeueStoppedWorker(itemFromStoppedWorker);
+        }
+    }
+
     public void onQueueOfferFailure(ScheduledRequest exact, Throwable error) {
         RequestSlot slot = entryFor(exact);
         if (slot != null) { slot.recordSchedulingFailure(StrategyErrorType.DISPATCH_FAILED,

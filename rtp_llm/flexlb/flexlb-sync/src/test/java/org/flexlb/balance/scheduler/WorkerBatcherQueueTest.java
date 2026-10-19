@@ -164,6 +164,23 @@ class WorkerBatcherQueueTest {
         assertSame(before.work(), runtime.captureRouteProjectionInputs().work());
     }
 
+    @Test
+    void stoppingQueueProjectsUndispatchedItemsForRequeueExactlyOnce() {
+        EndpointEventProjector events = mock(EndpointEventProjector.class);
+        WorkerBatcher runtime = new WorkerBatcher("test-worker", prefillEndpoint, config, deliveryStrategy, events,
+                new QueueCapacity());
+        runtimes.add(runtime);
+        runtime.start();
+        ScheduledRequest request = item(906L, 50, Long.MAX_VALUE, 1L, 128L);
+        assertEquals(ACCEPTED, runtime.offerWithResult(request));
+        assertNull(runtime.stopAndAwait());
+        assertNull(runtime.stopAndAwait());
+        assertEquals(0, runtime.queueSize());
+        org.mockito.Mockito.verify(events).onQueuedWorkerStopped(request);
+        org.mockito.Mockito.verify(events, org.mockito.Mockito.never())
+                .onQueueOfferFailure(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any());
+    }
+
     private WorkerBatcher runningRuntime() {
         WorkerBatcher runtime = new WorkerBatcher(
                 "test-worker",

@@ -120,6 +120,10 @@ public final class EndpointEventProjector {
         }
     }
 
+    public void onQueuedWorkerStopped(ScheduledRequest itemFromStoppedWorker) {
+        scheduler.onQueuedWorkerStopped(itemFromStoppedWorker);
+    }
+
     public void onQueueOfferFailure(
             ScheduledRequest exactItem, Throwable cause) {
         scheduler.onQueueOfferFailure(exactItem, cause);
