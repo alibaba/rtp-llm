@@ -4,9 +4,11 @@ import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.config.DecisionPolicyConfig;
+import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
@@ -40,6 +42,8 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
@@ -157,6 +161,44 @@ class WorkerBatcherSchedulingTest {
             delivery.allowFirstPrepare.countDown();
             delivery.allowSecondPrepare.countDown();
         }
+    }
+
+    @Test
+    @Timeout(value = 10, unit = TimeUnit.SECONDS)
+    void nonBatchQueueKeepsPrefillVisibleWhileItsHeadWaitsForDelivery() {
+        FlexlbConfig config = singleConfig();
+        config.setDispatcher(DispatcherConfig.nonBatch());
+        PrefillEndpoint endpoint = stableEndpoint(stableStatus());
+        when(endpoint.isEngineSubQueueMode()).thenReturn(true);
+        when(endpoint.tryReserveEngineSubQueueSlot(any())).thenReturn(true);
+        when(endpoint.reserveRouteOwnership(any(), anyLong())).thenReturn(
+                new PrefillState.ReservationResult<>(PrefillState.CapacityStatus.ACQUIRED,
+                        mock(PrefillState.RouteReservation.class)));
+        EventDrivenBlock delivery = new EventDrivenBlock();
+        WorkerBatcher runtime = runningRuntime(config, endpoint, delivery);
+        long now = System.currentTimeMillis();
+
+        assertEquals(ACCEPTED, runtime.offerWithResult(item(config, endpoint, 31L, 50, now)));
+        await(delivery.firstCapacity.subscribed);
+
+        RouteProjection.Inputs inputs = runtime.captureRouteProjectionInputs();
+        assertEquals(1, inputs.queue().activeItems().size());
+        assertNotNull(inputs.queue().admissionBlock());
+        assertEquals(Long.MAX_VALUE, inputs.queue().constraints().batchKvCapacity());
+    }
+
+    @Test
+    void batchSelectionDoesNotUseCurrentPrefillKvAsACandidateLimit() {
+        FlexlbConfig config = singleConfig();
+        WorkerStatus status = stableStatus();
+        when(status.committedEngineObservation()).thenReturn(new WorkerStatus.EngineObservation(
+                RoleType.PREFILL, null, 0L, 100L, Map.of(), 0.0,
+                0L, 0L, 0L, 0L, 1_000_000L, 1_000_000L, 0L, 0L));
+        PrefillEndpoint endpoint = stableEndpoint(status);
+        WorkerBatcher runtime = runningRuntime(config, endpoint, new EventDrivenBlock());
+
+        assertEquals(Long.MAX_VALUE, runtime.captureRouteProjectionInputs()
+                .queue().constraints().batchKvCapacity());
     }
 
     @Test

@@ -133,6 +133,7 @@ class RequestSchedulerTest {
         when(selectedRoute.tryEnqueue(context, future, lifecycle))
                 .thenReturn(PlacementResult.blocked(blocker));
         when(selectedRoute.blockedEndpoint()).thenReturn(selectedEndpoint);
+        when(selectedRoute.decodeEndpoint()).thenReturn(selectedEndpoint);
         when(eviction.tryAdmit(
                 context, future, selectedRoute, selectedEndpoint))
                 .thenReturn(true);
@@ -188,6 +189,7 @@ class RequestSchedulerTest {
         when(selectedRoute.tryEnqueue(incoming, incomingFuture, lifecycle)).thenReturn(
                 PlacementResult.blocked(PlacementKey.exact(RoleType.DECODE, "g1", "selected-decode:8080")));
         when(selectedRoute.blockedEndpoint()).thenReturn(selectedEndpoint);
+        when(selectedRoute.decodeEndpoint()).thenReturn(selectedEndpoint);
         when(eviction.tryAdmit(incoming, incomingFuture, selectedRoute, selectedEndpoint)).thenReturn(true);
 
         RequestScheduler scheduler = new RequestScheduler(configService, router, mock(EndpointRegistry.class),

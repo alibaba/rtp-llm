@@ -61,7 +61,7 @@ class WorkerBatcherStatusSnapshotTest {
     }
 
     @Test
-    void capacityProjectionUsesOneCoherentEngineObservation() {
+    void batchTokenProjectionUsesOneCoherentEngineObservation() {
         WorkerStatusResponse first = statusResponse(
                 700L, 600L, 1_000L, 1L);
         WorkerStatusResponse second = statusResponse(
@@ -94,7 +94,7 @@ class WorkerBatcherStatusSnapshotTest {
         GroupPlanner.Constraints capacity = runtime
                 .captureRouteProjectionInputs().queue().constraints();
         assertEquals(700L, capacity.batchTokenCapacity());
-        assertEquals(600L, capacity.batchKvCapacity());
+        assertEquals(Long.MAX_VALUE, capacity.batchKvCapacity());
         assertTrue(publishedSecond.get());
         assertEquals(5L,
                 status.committedEngineObservation()

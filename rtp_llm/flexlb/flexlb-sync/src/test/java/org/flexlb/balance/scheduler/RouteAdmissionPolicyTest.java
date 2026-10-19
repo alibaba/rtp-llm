@@ -20,9 +20,30 @@ import static org.flexlb.balance.scheduler.RouteProjectionTestSupport.project;
 import static org.flexlb.balance.scheduler.RouteProjectionTestSupport.queue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Exact observed-head admission policy on top of the pure route timeline. */
 class RouteAdmissionPolicyTest {
+
+    @Test
+    void prefillSelectionScoresCacheHitsDespiteDecodeDeliveryWait() {
+        GroupPlanner.Item head = item(1L, 50, 1L, 100L);
+        QueueSnapshot waiting = blockedQueue(false, head, semantics(
+                RouteProjection.AfterProbeAdmission.UNAVAILABLE, RoleType.DECODE));
+        RouteProjection.Probe incoming = probe(99L, 50, 20L, 10L);
+        RouteProjection.Inputs inputs = new RouteProjection.Inputs(waiting, noCommittedWork());
+
+        RouteProjection.CandidateView selected = RouteProjection.session().projectViewForSelection(
+                inputs, incoming.requestId(), incoming.priority(), incoming.enqueuedAtMs(),
+                incoming.expiresAtMs(), incoming.seqLen(), incoming.hitCache(),
+                incoming.routingCacheMatchTokens(), TOKEN_EVALUATOR, ROUTE,
+                RouteProjectionTestSupport.NOW_MS);
+
+        assertTrue(selected.selectable());
+        assertEquals(10L, selected.cacheHitTokens());
+        assertEquals(RouteProjection.Candidate.State.BLOCKED,
+                project(waiting, noCommittedWork(), TOKEN_EVALUATOR, incoming, ROUTE).state());
+    }
 
     @Test
     void deliveryOnlyWaitPreservesTheQueueForecast() {
@@ -123,7 +144,7 @@ class RouteAdmissionPolicyTest {
     }
 
     @Test
-    void unknownEngineCursorCannotProveOvertakeOfBlockedHead() {
+    void ignoredUnknownWorkPreservesTheAfterProbeCapacityCheck() {
         GroupPlanner.Item head = item(1L, 50, 1L, 100L);
         WorkSnapshot unknownWork = RouteProjectionTestSupport.work(
                 List.of(), List.of(), 1L);
@@ -136,7 +157,7 @@ class RouteAdmissionPolicyTest {
                 ROUTE);
 
         assertEquals(RouteProjection.Candidate.State.BLOCKED, result.state());
-        assertEquals("HEAD_CAPACITY_BLOCKED", result.detail());
+        assertEquals("AFTER_PROBE_CAPACITY_UNKNOWN", result.detail());
     }
 
     @Test

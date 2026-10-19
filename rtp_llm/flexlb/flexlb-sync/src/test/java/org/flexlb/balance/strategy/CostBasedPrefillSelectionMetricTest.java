@@ -45,6 +45,7 @@ import java.util.concurrent.CompletableFuture;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyDouble;
@@ -123,6 +124,19 @@ class CostBasedPrefillSelectionMetricTest {
         assertEquals("10.0.0.1", context.getRoutingTelemetry().cacheSelections().get(RoleType.PREFILL).selectedIp());
         assertEquals(1, context.getRoutingTelemetry().routingDecisions().size());
         assertEquals(2, context.getRoutingTelemetry().routingDecisions().get(RoleType.PREFILL).routingAttempt());
+    }
+
+    @Test
+    void invalidPredictionCannotSilentlyRemoveARegisteredPrefill() {
+        config.getRouter().getRoles().getPrefill().getExecutionTimeEstimator()
+                .setExpression("-1");
+        publish("10.0.0.2", 8080);
+
+        IllegalStateException failure = assertThrows(IllegalStateException.class,
+                () -> strategy.select(context, RoleType.PREFILL, null));
+
+        assertTrue(failure.getMessage().contains("PREDICTOR_RETURNED_INVALID_VALUE"));
+        verify(cache).findMatchingEngines(any());
     }
 
     @Test
@@ -421,6 +435,23 @@ class CostBasedPrefillSelectionMetricTest {
     }
 
     @Test
+    void transientAndTotalPrefillKvShortageDoNotHideTheCacheLeaderFromQueueSelection() {
+        configureAffinity(600L, 5.0);
+        PrefillEndpoint cached = (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0.2:8080@0");
+        WorkerStatus worker = cached.getStatus();
+        StrategyTestSupport.publish(worker, StrategyTestSupport.response(
+                RoleType.PREFILL, true, 0L, 500L, worker.appliedStatusCursor().statusVersion() + 1L));
+
+        try (SelectedRole selected = select()) {
+            assertEquals("10.0.0.2", selected.serverStatus().getServerIp());
+            var decision = context.getRoutingTelemetry().routingDecisions().get(RoleType.PREFILL);
+            assertEquals(2, decision.totalWorkerCount());
+            assertEquals(2, decision.candidateWorkerCount());
+            assertEquals("CACHE_LEADER", decision.cacheAffinityDecision());
+        }
+    }
+
+    @Test
     void cacheLeaderAtEndOfFullFleetRemainsEligible() {
         configureAffinity(600L, 5.0);
         String cacheLeader = null;
@@ -567,6 +598,36 @@ class CostBasedPrefillSelectionMetricTest {
         assertEquals(PlacementResult.Status.SUCCESS, result.status());
         try (SelectedRole selected = result.value()) {
             assertEquals("10.0.0.1", selected.serverStatus().getServerIp());
+            assertEquals(1000L, context.getRoutingTelemetry().routingDecisions()
+                    .get(RoleType.PREFILL).candidates().getFirst().projectedTtftMs());
+        }
+    }
+
+    @Test
+    void unknownEngineWorkDoesNotExcludeTheCacheLeaderFromTtftComparison() {
+        configureAffinity(600L, 5.0);
+        var endpoint = (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0.2:8080@0");
+        var status = endpoint.getStatus();
+        var response = StrategyTestSupport.response(RoleType.PREFILL, true,
+                1_000_000L, 1_000_000L, status.appliedStatusCursor().statusVersion() + 1L);
+        var task = new TaskInfo();
+        task.setRequestId("4");
+        task.setPhase(TaskPhase.RUNNING);
+        task.setInputLength(100L);
+        response.setRunningTaskInfo(Map.of("4", task));
+        status.lock.lock();
+        try {
+            endpoint.applyPreparedStatus(status, status.prepareNewStatus(status.freezeStatusResponse(response))).run();
+        } finally {
+            status.lock.unlock();
+        }
+        assertTrue(endpoint.captureRouteProjectionInputs().work().hasUnknownWork());
+
+        try (SelectedRole selected = select()) {
+            assertEquals("10.0.0.2", selected.serverStatus().getServerIp());
+            var decision = context.getRoutingTelemetry().routingDecisions().get(RoleType.PREFILL);
+            assertEquals("CACHE_LEADER", decision.cacheAffinityDecision());
+            assertEquals(1500L, decision.candidates().getFirst().projectedTtftMs());
         }
     }
 

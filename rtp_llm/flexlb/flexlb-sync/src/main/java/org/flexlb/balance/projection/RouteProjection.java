@@ -335,25 +335,43 @@ public final class RouteProjection {
         private Session() {
         }
 
-        public CandidateView projectView(
-                Inputs inputs,
-                String requestId,
-                int priority,
-                long enqueuedAtMs,
-                long expiresAtMs,
-                long seqLen,
-                long hitCache,
-                long routingCacheMatchTokens,
-                PrefillTimePredictor.Evaluator evaluator,
-                DeliveryProjection deliveryProjection,
-                long planningAtMs) {
-            projector.reset(
-                    requestId, priority, enqueuedAtMs, expiresAtMs,
+        public CandidateView projectView(Inputs inputs,
+                                         String requestId,
+                                         int priority,
+                                         long enqueuedAtMs,
+                                         long expiresAtMs,
+                                         long seqLen,
+                                         long hitCache,
+                                         long routingCacheMatchTokens,
+                                         PrefillTimePredictor.Evaluator evaluator,
+                                         DeliveryProjection deliveryProjection,
+                                         long planningAtMs) {
+            CandidateView candidate = projectViewForSelection(
+                    inputs, requestId, priority, enqueuedAtMs, expiresAtMs,
+                    seqLen, hitCache, routingCacheMatchTokens,
+                    evaluator, deliveryProjection, planningAtMs);
+            return applyAdmissionPolicy(inputs.queue(), candidate);
+        }
+
+        /**
+         * Projects endpoint work while leaving observed capacity waits to the delivery step.
+         */
+        public CandidateView projectViewForSelection(Inputs inputs,
+                                                     String requestId,
+                                                     int priority,
+                                                     long enqueuedAtMs,
+                                                     long expiresAtMs,
+                                                     long seqLen,
+                                                     long hitCache,
+                                                     long routingCacheMatchTokens,
+                                                     PrefillTimePredictor.Evaluator evaluator,
+                                                     DeliveryProjection deliveryProjection,
+                                                     long planningAtMs) {
+            projector.reset(requestId, priority, enqueuedAtMs, expiresAtMs,
                     seqLen, hitCache, routingCacheMatchTokens);
-            CandidateView candidate = projector.project(
+            return projector.project(
                     inputs.queue(), inputs.work(), evaluator,
                     deliveryProjection, planningAtMs);
-            return applyAdmissionPolicy(inputs.queue(), candidate);
         }
     }
 

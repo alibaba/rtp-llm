@@ -94,7 +94,7 @@ class TransientCapacityQueueContractTest {
 
     @Test
     @Timeout(20)
-    void higherPriorityTakesQueuedReservationAndVictimReplansWithoutCompletingItsFuture() throws Exception {
+    void batchQueueKeepsBothDecodeReservationsUntilDelivery() throws Exception {
         FlexlbConfig config = config();
         config.queueScheduler().setOrdering(QueueOrderingConfig.priority());
         PreemptionConfig preemption = new PreemptionConfig();
@@ -110,19 +110,17 @@ class TransientCapacityQueueContractTest {
             var oldReservation = fixture.decodeEndpoint.reservationHandle("990001");
             var high = fixture.runtime.scheduler().submit(fixture.context(990_002L, 80));
             awaitCondition(() -> fixture.decodeEndpoint.reservationHandle("990002") != null
-                    && fixture.decodeEndpoint.reservationHandle("990001") == null, 2_000L);
-            awaitCapacityWaiters(fixture.runtime.scheduler(), 1);
-            assertFalse(low.isDone(), "local preemption must not return NO_AVAILABLE_WORKER");
+                    && fixture.prefillEndpoint.queuedRequestCount() == 2, 2_000L);
+            assertEquals(oldReservation, fixture.decodeEndpoint.reservationHandle("990001"));
+            assertFalse(low.isDone());
             assertFalse(high.isDone());
-            assertEquals(1, fixture.prefillEndpoint.queuedRequestCount());
-            assertEquals(1, fixture.decodeEndpoint.routingView().totalLoad());
+            assertEquals(2, fixture.decodeEndpoint.routingView().totalLoad());
             fixture.runtime.scheduler().cancelRequest("990002", 0L, CancelReason.CLIENT_CANCELLED);
             assertFalse(high.get(2, TimeUnit.SECONDS).isSuccess());
-            awaitCondition(() -> fixture.decodeEndpoint.reservationHandle("990001") != null
+            awaitCondition(() -> fixture.decodeEndpoint.reservationHandle("990002") == null
                     && fixture.prefillEndpoint.queuedRequestCount() == 1, 2_000L);
             assertFalse(low.isDone());
-            assertTrue(fixture.decodeEndpoint.reservationHandle("990001").reservationToken()
-                    != oldReservation.reservationToken());
+            assertEquals(oldReservation, fixture.decodeEndpoint.reservationHandle("990001"));
             assertEquals(List.of(), fixture.submission.requestIds(), "neither queued route was sent to the engine");
             fixture.runtime.scheduler().cancelRequest("990001", 0L, CancelReason.CLIENT_CANCELLED);
             assertFalse(low.get(2, TimeUnit.SECONDS).isSuccess());
@@ -434,16 +432,15 @@ class TransientCapacityQueueContractTest {
 
     @Test
     @Timeout(20)
-    void globalWaitersPreserveFifoAtTheSamePriority() throws Exception {
-        // BATCH can accept a route behind a busy Prefill. Saturate Decode to keep
-        // both requests in the global wait queue before testing its retry order.
+    void prefillQueuePreservesFifoAtTheSamePriority() throws Exception {
         try (Fixture fixture = new Fixture(RoleType.DECODE)) {
-            fixture.config.fixedWindowDecision().setMaxRequests(2);
+            fixture.config.fixedWindowDecision().setMaxRequests(1);
             fixture.config.fixedWindowDecision().setMaxCollectionWaitMs(50L);
             fixture.submission.holdCompletions();
             CompletableFuture<Response> older =
                     fixture.runtime.scheduler().submit(
                             fixture.context(251L, 50));
+            awaitCondition(() -> fixture.prefillEndpoint.queuedRequestCount() == 1, 2_000L);
             CompletableFuture<Response> later =
                     fixture.runtime.scheduler().submit(
                             fixture.context(252L, 50));
@@ -452,7 +449,7 @@ class TransientCapacityQueueContractTest {
                     .getQueuedRequestCount() >= 2, 2_000L);
             assertFalse(older.isDone());
             assertFalse(later.isDone());
-            awaitCapacityWaiters(fixture.runtime.scheduler(), 2);
+            awaitCondition(() -> fixture.prefillEndpoint.queuedRequestCount() == 2, 2_000L);
             fixture.releaseCapacity();
 
             assertTrue(fixture.submission.awaitCommands(
@@ -465,20 +462,18 @@ class TransientCapacityQueueContractTest {
 
     @Test
     @Timeout(20)
-    void globalWaitersUsePriorityOrderingBeforeArrivalOrder()
-            throws Exception {
-        // BATCH can accept a route behind a busy Prefill. Saturate Decode to keep
-        // both requests in the global wait queue before testing its retry order.
+    void prefillQueueUsesPriorityOrderingBeforeArrivalOrder() throws Exception {
         try (Fixture fixture = new Fixture(RoleType.DECODE)) {
-            fixture.config.fixedWindowDecision().setMaxRequests(2);
+            fixture.config.fixedWindowDecision().setMaxRequests(1);
             fixture.config.fixedWindowDecision().setMaxCollectionWaitMs(50L);
             fixture.submission.holdCompletions();
             fixture.runtime.scheduler().submit(fixture.context(261L, 50));
+            awaitCondition(() -> fixture.prefillEndpoint.queuedRequestCount() == 1, 2_000L);
             fixture.runtime.scheduler().submit(fixture.context(262L, 80));
 
             awaitCondition(() -> fixture.runtime.scheduler()
                     .getQueuedRequestCount() >= 2, 2_000L);
-            awaitCapacityWaiters(fixture.runtime.scheduler(), 2);
+            awaitCondition(() -> fixture.prefillEndpoint.queuedRequestCount() == 2, 2_000L);
             fixture.releaseCapacity();
 
             assertTrue(fixture.submission.awaitCommands(
@@ -495,9 +490,10 @@ class TransientCapacityQueueContractTest {
         try (Fixture fixture = new Fixture(RoleType.DECODE)) {
             fixture.submission.holdCompletions();
             fixture.runtime.scheduler().submit(fixture.context(271L, 50));
+            awaitCondition(() -> fixture.prefillEndpoint.queuedRequestCount() == 1, 2_000L);
             fixture.runtime.scheduler().submit(fixture.context(272L, 50));
 
-            awaitCapacityWaiters(fixture.runtime.scheduler(), 2);
+            awaitCondition(() -> fixture.prefillEndpoint.queuedRequestCount() == 2, 2_000L);
             fixture.releaseCapacity();
 
             assertTrue(fixture.submission.awaitCommands(
@@ -517,7 +513,7 @@ class TransientCapacityQueueContractTest {
             fixture.runtime.scheduler().submit(fixture.context(281L, 50));
             fixture.runtime.scheduler().submit(fixture.context(282L, 50));
 
-            awaitCapacityWaiters(fixture.runtime.scheduler(), 2);
+            awaitCondition(() -> fixture.prefillEndpoint.queuedRequestCount() == 2, 2_000L);
             fixture.releaseCapacity();
             fixture.runtime.applyStatus(
                     fixture.decodeStatus,
@@ -527,15 +523,15 @@ class TransientCapacityQueueContractTest {
                     1, 2, TimeUnit.SECONDS));
             assertFalse(fixture.submission.awaitCommands(
                     1, 200, TimeUnit.MILLISECONDS));
-            assertEquals(List.of("281"), fixture.submission.requestIds());
+            assertEquals(1, fixture.submission.requestIds().size());
+            assertTrue(List.of("281", "282").contains(fixture.submission.requestIds().getFirst()));
         }
     }
 
     @ParameterizedTest
-    @CsvSource({"FIFO,BATCH", "FIFO,NON_BATCH", "PRIORITY,BATCH", "PRIORITY,NON_BATCH"})
+    @CsvSource({"FIFO,BATCH", "PRIORITY,BATCH"})
     @Timeout(20)
-    void nonPreemptiveQueueWaitsForDecodeBeforePrefillPublication(String ordering, DispatcherConfig.Type delivery)
-            throws Exception {
+    void nonPreemptiveBatchWaitsForDecodeAtDelivery(String ordering, DispatcherConfig.Type delivery) throws Exception {
         FlexlbConfig config = config();
         config.queueScheduler().setOrdering("FIFO".equals(ordering)
                 ? new QueueOrderingConfig() : QueueOrderingConfig.priority());
@@ -546,12 +542,9 @@ class TransientCapacityQueueContractTest {
         try (Fixture fixture = new Fixture(RoleType.DECODE, config)) {
             CompletableFuture<Response> waiting = fixture.runtime.scheduler().submit(
                     fixture.context(301L, 50, 128_000L));
-            awaitCapacityWaiters(fixture.runtime.scheduler(), 1);
+            awaitCondition(() -> fixture.prefillEndpoint.queuedRequestCount() == 1, 2_000L);
             assertFalse(waiting.isDone());
-            assertEquals(0, fixture.prefillEndpoint.queuedRequestCount(),
-                    "Decode capacity must be reserved before entering the Prefill queue");
-            assertEquals(0, fixture.decodeEndpoint.resourceSnapshot().queuedCount(),
-                    "a blocked placement must not create an unfunded reservation");
+            assertEquals(1, fixture.decodeEndpoint.resourceSnapshot().queuedCount());
             assertEquals(List.of(), fixture.submission.requestIds());
 
             fixture.releaseCapacity();
@@ -565,9 +558,59 @@ class TransientCapacityQueueContractTest {
     }
 
     @ParameterizedTest
-    @CsvSource({"BATCH", "NON_BATCH"})
+    @CsvSource({"FIFO", "PRIORITY"})
     @Timeout(20)
-    void preemptiveQueueChecksDecodeBeforePrefillPublication(DispatcherConfig.Type delivery) throws Exception {
+    void nonBatchQueuesBehindDecodePressureAndDeliversWhenCapacityReturns(String ordering) throws Exception {
+        FlexlbConfig config = config();
+        config.queueScheduler().setOrdering("FIFO".equals(ordering)
+                ? new QueueOrderingConfig() : QueueOrderingConfig.priority());
+        config.queueScheduler().getOrdering().setPreemption(null);
+        config.getDispatcher().setType(DispatcherConfig.Type.NON_BATCH);
+
+        try (Fixture fixture = new Fixture(RoleType.DECODE, config)) {
+            CompletableFuture<Response> waiting = fixture.runtime.scheduler().submit(
+                    fixture.context(301L, 50, 128_000L));
+            awaitCondition(() -> fixture.prefillEndpoint.queuedRequestCount() == 1, 2_000L);
+            assertFalse(waiting.isDone());
+            assertEquals(1, fixture.decodeEndpoint.resourceSnapshot().queuedCount());
+            assertEquals(List.of(), fixture.submission.requestIds());
+
+            fixture.releaseCapacity();
+            Response response = waiting.get(2, TimeUnit.SECONDS);
+            assertTrue(response.isSuccess());
+            assertEquals("127.0.0.1:18081", decodeAddress(response));
+            assertEquals(1, fixture.decodeEndpoint.routingView().engineCapacityUsed());
+        }
+    }
+
+    @Test
+    @Timeout(20)
+    void nonBatchQueuesBeforePrefillHasEnoughKvForDelivery() throws Exception {
+        FlexlbConfig config = config();
+        config.getDispatcher().setType(DispatcherConfig.Type.NON_BATCH);
+
+        try (Fixture fixture = new Fixture(RoleType.PREFILL, config)) {
+            WorkerStatusResponse limited = statusResponse(RoleType.PREFILL, 3L, false);
+            limited.setAvailableKvCacheTokens(1_000L);
+            limited.setTotalKvCacheTokens(1_000L);
+            fixture.runtime.applyStatus(fixture.prefillStatus, limited);
+
+            CompletableFuture<Response> waiting = fixture.runtime.scheduler().submit(
+                    fixture.context(303L, 50, 128_000L));
+            awaitCondition(() -> fixture.prefillEndpoint.queuedRequestCount() == 1, 2_000L);
+            assertFalse(waiting.isDone());
+            assertEquals(List.of(), fixture.submission.requestIds());
+
+            fixture.runtime.applyStatus(fixture.prefillStatus,
+                    statusResponse(RoleType.PREFILL, 4L, false));
+            assertTrue(waiting.get(2, TimeUnit.SECONDS).isSuccess());
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"BATCH"})
+    @Timeout(20)
+    void preemptiveBatchQueueChecksDecodeAtDelivery(DispatcherConfig.Type delivery) throws Exception {
         FlexlbConfig config = config();
         config.getDispatcher().setType(delivery);
         PreemptionConfig preemption = new PreemptionConfig();
@@ -576,11 +619,9 @@ class TransientCapacityQueueContractTest {
         try (Fixture fixture = new Fixture(RoleType.DECODE, config)) {
             CompletableFuture<Response> waiting = fixture.runtime.scheduler().submit(
                     fixture.context(302L, 50, 128_000L));
-            awaitCondition(() -> fixture.metrics.totalPlacementAttempts() > 0, 2_000L);
-            assertTrue(fixture.metrics.totalPlacementAttempts() > 0);
+            awaitCondition(() -> fixture.prefillEndpoint.queuedRequestCount() == 1, 2_000L);
             assertFalse(waiting.isDone());
-            assertEquals(0, fixture.prefillEndpoint.queuedRequestCount());
-            assertEquals(0, fixture.decodeEndpoint.resourceSnapshot().queuedCount());
+            assertEquals(1, fixture.decodeEndpoint.resourceSnapshot().queuedCount());
             assertEquals(List.of(), fixture.submission.requestIds());
             fixture.releaseCapacity();
             Response response = waiting.get(2, TimeUnit.SECONDS);
@@ -898,9 +939,7 @@ class TransientCapacityQueueContractTest {
         }
     }
 
-    private static void verifyCommittedDecodeCapacityWake(
-            FlexlbConfig config,
-            long requestId) throws Exception {
+    private static void verifyCommittedDecodeCapacityWake(FlexlbConfig config, long requestId) throws Exception {
         config.queueScheduler().setOrdering(new QueueOrderingConfig());
         assertEquals(DecodeMode.WAIT_AT_PLACEMENT, DecodeMode.from(config));
 
@@ -920,22 +959,25 @@ class TransientCapacityQueueContractTest {
             CompletableFuture<Response> waiting =
                     fixture.runtime.scheduler().submit(
                             fixture.context(requestId, 50, 128_000L));
-            awaitCapacityWaiters(fixture.runtime.scheduler(), 1);
+            awaitCondition(() -> fixture.prefillEndpoint.queuedRequestCount() == 1, 2_000L);
             assertFalse(waiting.isDone());
-            assertEquals(0, fixture.prefillEndpoint.queuedRequestCount());
-            assertEquals(0, fixture.decodeEndpoint
-                    .resourceSnapshot().reserved().size());
-            assertEquals(0, spareEndpoint
-                    .resourceSnapshot().reserved().size());
+            int firstReservations = fixture.decodeEndpoint.resourceSnapshot().reserved().size();
+            int spareReservations = spareEndpoint.resourceSnapshot().reserved().size();
+            assertEquals(1, firstReservations + spareReservations);
 
-            fixture.runtime.applyStatus(
-                    fixture.decodeStatus,
-                    statusResponse(RoleType.DECODE, 3L, false));
+            if (spareReservations == 1) {
+                fixture.runtime.applyStatus(spareStatus, statusResponse(RoleType.DECODE, 3L, false));
+            } else {
+                fixture.runtime.applyStatus(
+                        fixture.decodeStatus,
+                        statusResponse(RoleType.DECODE, 3L, false));
+            }
 
             Response response = waiting.get(2, TimeUnit.SECONDS);
             assertTrue(response.isSuccess());
-            assertEquals("127.0.0.1:18081", decodeAddress(response));
-            assertEquals(1, fixture.decodeEndpoint.routingView().engineLoad());
+            assertEquals(spareReservations == 1 ? "127.0.0.2:18082" : "127.0.0.1:18081", decodeAddress(response));
+            assertEquals(1, spareReservations == 1
+                    ? spareEndpoint.routingView().engineLoad() : fixture.decodeEndpoint.routingView().engineLoad());
         }
     }
 

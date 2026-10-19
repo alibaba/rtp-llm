@@ -150,8 +150,9 @@ public final class RouteAdmission implements AutoCloseable {
                 && decodePlacementVersion() != decodeEndpoint().placementVersion();
     }
 
-    public PlacementResult<ScheduledRequest, PlacementKey> tryEnqueue(
-            BalanceContext context, CompletableFuture<Response> future, RequestRegistry lifecycle) {
+    public PlacementResult<ScheduledRequest, PlacementKey> tryEnqueue(BalanceContext context,
+                                                                      CompletableFuture<Response> future,
+                                                                      RequestRegistry lifecycle) {
         requireProvisional();
         blockedEndpoint = null;
         if (!reserveDecode()) {
@@ -218,25 +219,25 @@ public final class RouteAdmission implements AutoCloseable {
         decodeStatus().setPreemptRequestIds(List.copyOf(requestIds));
     }
 
+    /**
+     * Record the Decode request; engine capacity is checked when the request is delivered.
+     */
     boolean reserveDecode() {
         requireProvisional();
-        if (decodeEndpoint() == null || decodeBinding.reservation() != null) { return true; }
+        if (decodeEndpoint() == null || decodeBinding.reservation() != null) {
+            return true;
+        }
         DecodeEndpoint.ReservationHandle reservation = switch (decodeBinding.mode()) {
             case IMMEDIATE -> decodeEndpoint().reserve(
-                    decodePin(),
-                    requestId,
-                    decodeBinding.inputKvTokens(),
-                    decodeBinding.inputAndMaxOutputKvTokens(),
-                    decodeBinding.priority());
+                    decodePin(), requestId, decodeBinding.inputKvTokens(),
+                    decodeBinding.inputAndMaxOutputKvTokens(), decodeBinding.priority());
             case WAIT_AT_PLACEMENT, PREEMPT_AT_PLACEMENT -> decodeEndpoint().reserve(
-                    decodePin(),
-                    requestId,
-                    decodeBinding.inputKvTokens(),
-                    decodeBinding.inputAndMaxOutputKvTokens(),
-                    decodeBinding.priority(),
-                    decodeBinding.capacity());
+                    decodePin(), requestId, decodeBinding.inputKvTokens(),
+                    decodeBinding.inputAndMaxOutputKvTokens(), decodeBinding.priority(), null);
         };
-        if (reservation == null) { return false; }
+        if (reservation == null) {
+            return false;
+        }
         try {
             decodeBinding = decodeBinding.bind(decodeStatus(), decodeEndpoint(), reservation);
             return true;
@@ -286,8 +287,8 @@ public final class RouteAdmission implements AutoCloseable {
         }
     }
 
-    PlacementResult<RouteDelivery, PlacementKey> tryCommitDirectRoute(
-            BalanceContext context, RequestRegistry lifecycle) {
+    PlacementResult<RouteDelivery, PlacementKey> tryCommitDirectRoute(BalanceContext context,
+                                                                      RequestRegistry lifecycle) {
         requireProvisional();
         try (AdmissionHandle handle = lifecycle.claimAdmissionHandle(requestId, context.getFuture())) {
             if (handle == null) { return PlacementResult.closed(); }

@@ -35,11 +35,13 @@ final class PrefillCandidateSet {
         affinityDecision = null;
     }
 
-    void addCandidate(String address, PrefillEndpoint endpoint,
+    void addCandidate(String address,
+                      PrefillEndpoint endpoint,
                       RouteProjection.CandidateView candidate,
                       long ownershipVersion) {
         if (!candidate.selectable() && !candidate.engineWorkUnmodeled()) {
-            throw new IllegalArgumentException("candidate requires available capacity");
+            throw new IllegalStateException("Prefill projection cannot be scored: "
+                    + candidate.state() + " " + candidate.detail());
         }
         ensureCapacity(size + 1);
         endpointAddresses[size] = address;

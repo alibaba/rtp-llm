@@ -1204,7 +1204,7 @@ public final class WorkerBatcher {
                 version, ownership,
                 new GroupPlanner.Constraints(
                         maxDecisionRequests(), capacity.batchTokenCapacity(),
-                        capacity.batchKvCapacity(), predictedExecutionBudgetMs(),
+                        Long.MAX_VALUE, predictedExecutionBudgetMs(),
                         fixedWaitMs),
                 ownership.activeItems().isEmpty() ? null : admissionBlockUnderLock());
     }
@@ -1742,10 +1742,7 @@ public final class WorkerBatcher {
         long exactPredictThresholdMs = predictThresholdMs;
         long exactFixedWaitMs = fixedWaitMs;
         return runPredictionBound(head, () -> {
-            PrefillTimePredictor predictor =
-                    prefillEndpoint.getPredictor();
-            PrefillTimePredictor.Evaluator evaluator = predictor == null
-                    ? null : predictor.evaluator();
+            PrefillTimePredictor.Evaluator evaluator = prefillEndpoint.getPredictor().evaluator();
             PrefillTimePredictor.Evaluator planningEvaluator =
                     exactPredictThresholdMs > 0 ? evaluator : null;
             GroupPlanner.Constraints plannerConstraints =

@@ -320,27 +320,24 @@ class RouteProjectionTest {
     }
 
     @Test
-    void unknownRequestWorkIsExplicitlyUnmodeled() {
+    void unknownRequestWorkIsIgnoredWhileKnownAndQueuedWorkContributeToTtft() {
         RouteProjection.Candidate candidate = project(
-                queue(true, constraints(1, 0L), List.of()),
-                work(List.of(), List.of(), 1L),
+                queue(true, constraints(1, 0L), List.of(item(2L, 50, 1L, 40L))),
+                work(List.of(new WorkSnapshot.RequestWork(
+                        "1", WorkSnapshot.Phase.ENGINE_QUEUED, 30L)), List.of(), 1L),
                 TOKEN_EVALUATOR,
                 probe(99L, 50, 20L, 0L),
                 ROUTE);
 
-        assertEquals(RouteProjection.Candidate.State.UNMODELED_ENGINE_WORK,
-                candidate.state());
-        assertEquals("ENGINE_WORK_UNOBSERVABLE",
-                candidate.detail());
-        assertFalse(candidate.selectable());
-        assertTrue(candidate.engineWorkUnmodeled());
+        assertModeled(candidate, 90L);
         assertEquals(20L, candidate.incomingPrefillMs());
     }
 
     @Test
-    void unknownRepackedBatchWorkIsExplicitlyUnmodeled() {
+    void unknownBatchWorkIsIgnoredWhileKnownWorkContributesToTtft() {
         WorkSnapshot unknown = work(
-                List.of(),
+                List.of(new WorkSnapshot.RequestWork(
+                        "2", WorkSnapshot.Phase.ENGINE_QUEUED, 30L)),
                 List.of(new WorkSnapshot.BatchWork(
                         7L,
                         List.of("1"),
@@ -354,10 +351,7 @@ class RouteProjectionTest {
                 probe(99L, 50, 20L, 0L),
                 ROUTE);
 
-        assertEquals(RouteProjection.Candidate.State.UNMODELED_ENGINE_WORK,
-                result.state());
-        assertEquals("ENGINE_WORK_UNOBSERVABLE", result.detail());
-        assertFalse(result.selectable());
+        assertModeled(result, 50L);
     }
 
     @Test

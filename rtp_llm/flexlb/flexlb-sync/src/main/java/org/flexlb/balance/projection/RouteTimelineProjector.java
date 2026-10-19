@@ -55,16 +55,12 @@ final class RouteTimelineProjector {
      * and that cursor overlap via {@code max(cursor, readyAt)}. The snapshot's
      * frozen delivery projection defines each group's completion shape.
      */
-    RouteProjection.CandidateView project(
-            QueueSnapshot queue,
-            WorkSnapshot committed,
-            PrefillTimePredictor.Evaluator evaluator,
-            RouteProjection.DeliveryProjection deliveryProjection,
-            long planningAtMs) {
+    RouteProjection.CandidateView project(QueueSnapshot queue,
+                                          WorkSnapshot committed,
+                                          PrefillTimePredictor.Evaluator evaluator,
+                                          RouteProjection.DeliveryProjection deliveryProjection,
+                                          long planningAtMs) {
         long projectionAtMs = Math.max(queue.capturedAtMs(), planningAtMs);
-        if (evaluator == null) {
-            return unavailable("PREDICTOR_MISSING");
-        }
         if (expiresAtMs <= 0L || projectionAtMs >= expiresAtMs) {
             return unavailable("INCOMING_EXPIRED");
         }
@@ -98,21 +94,6 @@ final class RouteTimelineProjector {
         } catch (PredictionFailure predictionFailure) {
             return unavailable(
                     predictionFailure.detail("SINGLE_PREDICTION_FAILED"));
-        }
-
-        if (committed.hasUnknownWork()) {
-            if (containsActiveRequest(queue, requestId)) {
-                return unavailable("INCOMING_ALREADY_ACTIVE");
-            }
-            if (queue.queueScheduling()) {
-                if (seqLen > queue.constraints().batchKvCapacity()) {
-                    return blocked(
-                            incomingPrefillMs,
-                            RouteProjection.Candidate.InitialHeadDisposition.NONE,
-                            "PREFILL_KV_CAPACITY");
-                }
-            }
-            return unmodeledEngineWork(incomingPrefillMs);
         }
 
         long committedMs = knownRemainingWorkMsAt(committed, projectionAtMs);
@@ -287,16 +268,6 @@ final class RouteTimelineProjector {
     private static boolean containsCommittedRequest(
             WorkSnapshot committed, String requestId) {
         return committed.containsRequest(requestId);
-    }
-
-    private static boolean containsActiveRequest(
-            QueueSnapshot queue, String requestId) {
-        for (GroupPlanner.Item item : queue.activeItems()) {
-            if (item.requestId().equals(requestId)) {
-                return true;
-            }
-        }
-        return false;
     }
 
     /** Remaining committed work normalized to the projection's common clock. */
@@ -493,16 +464,6 @@ final class RouteTimelineProjector {
                 RouteProjection.Candidate.UNKNOWN,
                 0L,
                 RouteProjection.Candidate.InitialHeadDisposition.NONE, detail);
-    }
-
-    private RouteProjection.CandidateView unmodeledEngineWork(
-            long incomingPrefillMs) {
-        return candidate(
-                RouteProjection.Candidate.State.UNMODELED_ENGINE_WORK,
-                RouteProjection.Candidate.UNKNOWN,
-                incomingPrefillMs,
-                RouteProjection.Candidate.InitialHeadDisposition.NONE,
-                "ENGINE_WORK_UNOBSERVABLE");
     }
 
     private RouteProjection.CandidateView blocked(

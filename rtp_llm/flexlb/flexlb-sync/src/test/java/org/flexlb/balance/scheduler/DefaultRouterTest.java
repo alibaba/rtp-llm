@@ -53,6 +53,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -417,8 +418,7 @@ class DefaultRouterTest {
     @CsvSource({"32,16,32,48", "500,10000,500,10500",
             "9223372036854775806,100,9223372036854775806,9223372036854775807",
             "-1,100,0,100", "500,-1,500,500"})
-    void queuedRouteRetainsSelectedDemandLimitsAndCostFormulaAcrossLaterContextChanges(
-            long prompt, int output, long requiredKv, long kvBudget) {
+    void queuedRouteKeepsFrozenDecodeBinding(long prompt, int output, long requiredKv, long kvBudget) {
         var config = SchedulingTestConfig.newConfig();
         var context = RequestLifecycleTestSupport.context(config, 701L);
         context.getRequest().setSeqLen(prompt);
@@ -434,7 +434,7 @@ class DefaultRouterTest {
         var selectedDecode = selection(RoleType.DECODE, 701L, "10.0.0.2", 8080, "g1");
         var decode = (DecodeEndpoint) selectedDecode.endpoint();
         var reservation = new DecodeEndpoint.ReservationHandle(1L, "701", 1L);
-        when(decode.reserve(any(), anyString(), anyLong(), anyLong(), anyInt(), eq(frozen.capacity())))
+        when(decode.reserve(any(), anyString(), anyLong(), anyLong(), anyInt(), isNull()))
                 .thenReturn(reservation);
         when(decode.acquireDispatchPermit(reservation, frozen.capacity())).thenReturn(
                 new DecodeEndpoint.EngineDispatchPermitAcquisition(
@@ -471,7 +471,7 @@ class DefaultRouterTest {
             assertFalse(delivery.boundary().availability().isAvailable());
             verify(decode).shouldRetryDispatch("701", frozen.capacity());
             verify(decode).acquireDispatchPermit(reservation, frozen.capacity());
-            verify(decode).reserve(any(), eq("701"), eq(requiredKv), eq(kvBudget), eq(73), eq(frozen.capacity()));
+            verify(decode).reserve(any(), eq("701"), eq(requiredKv), eq(kvBudget), eq(73), isNull());
             verify(decode, never()).reserve(any(), anyString(), anyLong(), anyLong(), anyInt());
         }
         verify(decode).release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
