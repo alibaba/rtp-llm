@@ -89,6 +89,16 @@ py_test(
         "//rtp_llm/models_py:models",
     ],
     size = "small",
+    # Imports rtp_llm.ops (librtp_compute_ops links libcuda): needs a GPU
+    # worker. Untagged, the UT lanes schedule it on CPU-only workers where
+    # the import dies with libcuda.so.1 not found (r61 ut-sm8x).
+    tags = [
+        "H20_CU13",
+    ],
+    exec_properties = {
+        "gpu": "H20_CU13",
+        "gpu_count": "1",
+    },
 )
 
 py_test(
@@ -110,6 +120,16 @@ py_test(
     # Real-weights layer math check; runs only with DGM_REAL_CKPT set
     # (skipped in CI). Use --spawn_strategy=standalone locally so the
     # host-visible checkpoint path resolves.
+    # Imports rtp_llm.ops (librtp_compute_ops links libcuda): needs a GPU
+    # worker. Untagged, the UT lanes schedule it on CPU-only workers where
+    # the import dies with libcuda.so.1 not found (r61 ut-sm8x).
+    tags = [
+        "H20_CU13",
+    ],
+    exec_properties = {
+        "gpu": "H20_CU13",
+        "gpu_count": "1",
+    },
 )
 
 
@@ -145,6 +165,16 @@ py_test(
         "//rtp_llm/models_py:models",
     ],
     size = "small",
+    # Imports rtp_llm.ops (librtp_compute_ops links libcuda): needs a GPU
+    # worker. Untagged, the UT lanes schedule it on CPU-only workers where
+    # the import dies with libcuda.so.1 not found (r61 ut-sm8x).
+    tags = [
+        "H20_CU13",
+    ],
+    exec_properties = {
+        "gpu": "H20_CU13",
+        "gpu_count": "1",
+    },
 )
 
 py_test(

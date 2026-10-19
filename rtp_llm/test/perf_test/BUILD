@@ -1,4 +1,5 @@
 package(default_visibility = ["//visibility:public"])
+load("//rtp_llm/test/perf_test:defs.bzl", "perf_test")
 
 # Exported so the perf_test() macro (defined in defs.bzl, instantiated by
 # internal_source/rtp_llm/test/perf_test/BUILD) can reference test_entry.py
@@ -970,6 +971,42 @@ test_suite(
         ":v4_pro_dp8_decode_bs128_64k_perf",
     ],
     tags = ["manual"],
+)
+
+# DiffusionGemma 26B A4B (block-diffusion MoE, DSpark proposer) TPOT+TTFT grid.
+# Prefill phase measures single-request TTFT per input_len; decode phase binary-
+# searches the max concurrency meeting --target_tpot. Single H20, bf16, canvas
+# 256 via --gen_num_per_cycle. First run records the baseline through
+# --update_test_result / perf-golden-update; compare_test_result is added then.
+# max_seq_len is the model's 12800 (canvas-diffusion head limit), so the
+# 64K/128K long-context grid does not apply to this model.
+perf_test(
+    name = "dgm_grid_test",
+    model_type = "diffusion_gemma",
+    ckpt_path = "/mnt/fuse/smoke-test/hf/google--diffusiongemma-26B-A4B-it--f7f5b7f5fa82ffc52addd066915886d497f5517b",
+    gpu_type = "H20_CU13",
+    args = [
+        "--input_len", "128,1024,4096,12000",
+        "--partial", "1",
+        "--target_tpot", "20",
+        "--concurrency_limit", "8",
+        "--max_context_batch_size", "8",
+        "--decode_test_length", "30",
+        "--num_measures", "10",
+        "--reserver_runtime_mem_mb", "24000",
+        "--max_seq_len", "12800",
+        "--seq_size_per_block", "64",
+        "--kernel_seq_size_per_block", "64",
+        "--tp_size", "1",
+        "--dp_size", "1",
+        "--ep_size", "1",
+        "--world_size", "1",
+        "--act_type", "BF16",
+        "--sp_type", "dspark",
+        "--sp_model_type", "diffusion_gemma_proposer",
+        "--sp_checkpoint_path", "/mnt/fuse/smoke-test/hf/google--diffusiongemma-26B-A4B-it--f7f5b7f5fa82ffc52addd066915886d497f5517b",
+        "--gen_num_per_cycle", "256",
+    ],
 )
 
 # DeepSeek V4-Flash perf coverage on SM100/SM103 (GB200/GB300).
