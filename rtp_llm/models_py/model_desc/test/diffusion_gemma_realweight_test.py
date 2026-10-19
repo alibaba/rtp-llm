@@ -643,26 +643,32 @@ class DiffusionGemmaReuseABTest(unittest.TestCase):
         # rounding (~1e-2) — immediate divergence names a merge bug, gradual
         # growth names numerical chaos amplification.
         layer_outs = {}
+        _orig_layer_forwards = [None, None, None]
 
         def _wrap_layers(model, tag):
             for idx in (0, 1, 2):
-                orig = model.layers[idx].forward
+                if _orig_layer_forwards[idx] is None:
+                    _orig_layer_forwards[idx] = model.layers[idx].forward
 
-                def make_wrapper(i, o):
+                def make_wrapper(i):
                     def wrapped(hidden, *a, **kw):
-                        out = o(hidden, *a, **kw)
+                        out = _orig_layer_forwards[i](hidden, *a, **kw)
                         layer_outs.setdefault(tag, {})[i] = out.detach().clone()
                         return out
                     return wrapped
-                model.layers[idx].forward = make_wrapper(idx, orig)
+                model.layers[idx].forward = make_wrapper(idx)
+
+        def _unwrap_layers(model):
+            for idx in (0, 1, 2):
+                if _orig_layer_forwards[idx] is not None:
+                    model.layers[idx].forward = _orig_layer_forwards[idx]
 
         # flow A: fresh 277-token prefill
         model.kv_cache = _caches()
         _wrap_layers(model, "A")
         with _torch.inference_mode():
             out_a = model.forward(_inputs(full_ids, _attn(0, 277)))
-        for idx in (0, 1, 2):
-            model.layers[idx].forward = None  # unwrapped below
+        _unwrap_layers(model)
         hidden_a = _canvas_hidden(277)
 
         # flow B: 256 prefill + 21 incremental over the cached prefix
