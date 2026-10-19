@@ -386,7 +386,15 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
     prefill_context.supports_prefill_completion = false;
     CLIENT_GRPC_RET_IF_ERROR(
         prefill_context, client_stream->Read(&allocate_response), ErrorCode::REMOTE_ALLOCATE_RESOURCE_READ_FAILED);
-    if (allocate_response.pd_handoff_version() != PD_HANDOFF_V1) {
+    const auto peer_handoff_version = allocate_response.pd_handoff_version();
+    if (peer_handoff_version == 0) {
+        // Revert when peers support handoff v1: proto3 default 0 means the
+        // peer predates PD handoff negotiation; warn and proceed in legacy mode.
+        RTP_LLM_LOG_WARNING(
+            "legacy peer without PD handoff negotiation, proceed in compat mode, request_id=%ld decode_addr=%s",
+            prefill_context.request_id,
+            prefill_context.decode_addr.c_str());
+    } else if (peer_handoff_version != PD_HANDOFF_V1) {
         prefill_context.setRetryable(false);
         setContextError(prefill_context,
                         ErrorInfo(ErrorCode::INVALID_PARAMS, "PD handoff protocol mismatch; rebuild both peers"),
