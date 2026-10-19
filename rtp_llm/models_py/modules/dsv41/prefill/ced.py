@@ -733,6 +733,9 @@ class CEDPlan:
     _router_groups: Optional[Tuple] = field(default=None, init=False)
     _router_chunk_rows: Optional[int] = field(default=None, init=False)
     _router_gate_groups: Optional[Tuple] = field(default=None, init=False)
+    _router_groups_host: list[torch.Tensor] = field(
+        default_factory=list, init=False, repr=False
+    )
 
     @classmethod
     @torch.inference_mode()
@@ -1017,36 +1020,43 @@ class CEDPlan:
 
     def _router_chunk_groups(self, rows_per_chunk, *, gate_rows=0):
         device = self.context.global_positions.device
-        groups = []
+        chunk_length = self.original_context.chunk_length
+        arrays, spans = [], []
         for compact_rows, original_rows in self.exchange.projection_groups_host:
-            # Keep original owners separate even when their chunk-local row
-            # indices coincide. All grouping uses metadata retained on CPU.
-            chunks = {}
-            for dst, src in zip(compact_rows, original_rows):
-                outer_start = src // rows_per_chunk * rows_per_chunk
-                stop = min(
-                    outer_start + rows_per_chunk, self.original_context.chunk_length
-                )
-                start = outer_start
-                if gate_rows > 0:
-                    start += (src - outer_start) // gate_rows * gate_rows
-                    stop = min(stop, start + gate_rows)
-                destinations, sources = chunks.setdefault((start, stop), ([], []))
-                destinations.append(dst)
-                sources.append(src - start)
-            for (start, stop), (destinations, sources) in chunks.items():
-                groups.append(
-                    (
-                        torch.tensor(destinations, dtype=torch.long).to(
-                            device, non_blocking=True
-                        ),
-                        torch.tensor(sources, dtype=torch.long).to(
-                            device, non_blocking=True
-                        ),
-                        stop - start,
-                    )
-                )
-        return tuple(groups)
+            count = min(len(compact_rows), len(original_rows))
+            if not count:
+                continue
+            dst = np.asarray(compact_rows[:count], dtype=np.int64)
+            src = np.asarray(original_rows[:count], dtype=np.int64)
+            outer_start = src // rows_per_chunk * rows_per_chunk
+            stop = np.minimum(outer_start + rows_per_chunk, chunk_length)
+            start = outer_start
+            if gate_rows > 0:
+                start = start + (src - outer_start) // gate_rows * gate_rows
+                stop = np.minimum(stop, start + gate_rows)
+            key = start * np.int64(chunk_length + 1) + stop
+            unique_keys, first_seen, inverse = np.unique(
+                key, return_index=True, return_inverse=True
+            )
+            # Preserve first-appearance chunk order and pair order within each
+            # owner; equal chunk keys from different owners must stay separate.
+            for unique_slot in np.argsort(first_seen, kind="stable"):
+                members = np.flatnonzero(inverse == unique_slot)
+                unique_key = int(unique_keys[unique_slot])
+                start_c = unique_key // (chunk_length + 1)
+                stop_c = unique_key % (chunk_length + 1)
+                arrays.append(dst[members])
+                arrays.append(src[members] - start_c)
+                spans.append(stop_c - start_c)
+        if not arrays:
+            return ()
+        views, host = _upload_layout_arrays(arrays, device)
+        # MoE and gate maps can both upload; retain each pinned slab for the plan.
+        self._router_groups_host.append(host)
+        return tuple(
+            (views[index], views[index + 1], span)
+            for index, span in zip(range(0, len(views), 2), spans)
+        )
 
     def _project_router_weights(self, x, weight):
         # CED's gate callback precedes Gate's own chunk policy. Reproduce that
