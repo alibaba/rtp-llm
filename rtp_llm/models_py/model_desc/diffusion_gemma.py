@@ -179,19 +179,25 @@ class DiffusionGemmaAttnOp:
                 release_py_flashinfer_workspace_buffer,
             )
 
-            self.g_workspace_buffer = get_py_flashinfer_workspace_buffer()
-            from flashinfer.prefill import (
-                BatchPrefillWithPagedKVCacheWrapper,
-                BatchPrefillWithRaggedKVCacheWrapper,
-            )
-            from flashinfer.cascade import merge_state_in_place
+            # flashinfer wrappers + the shared workspace buffer must be
+            # normal tensors: the proposer builds its main model lazily
+            # inside @inference_mode, and buffers allocated there poison
+            # every later normal-mode plan/forward (inference tensors
+            # reject inplace updates outside InferenceMode).
+            with torch.inference_mode(False):
+                self.g_workspace_buffer = get_py_flashinfer_workspace_buffer()
+                from flashinfer.prefill import (
+                    BatchPrefillWithPagedKVCacheWrapper,
+                    BatchPrefillWithRaggedKVCacheWrapper,
+                )
+                from flashinfer.cascade import merge_state_in_place
 
-            self.ragged_wrapper = BatchPrefillWithRaggedKVCacheWrapper(
-                self.g_workspace_buffer, backend=backend
-            )
-            self.paged_wrapper = BatchPrefillWithPagedKVCacheWrapper(
-                self.g_workspace_buffer, "HND", backend=backend
-            )
+                self.ragged_wrapper = BatchPrefillWithRaggedKVCacheWrapper(
+                    self.g_workspace_buffer, backend=backend
+                )
+                self.paged_wrapper = BatchPrefillWithPagedKVCacheWrapper(
+                    self.g_workspace_buffer, "HND", backend=backend
+                )
             self.merge_state_in_place = merge_state_in_place
             self._release_ws = release_py_flashinfer_workspace_buffer
             from rtp_llm.models_py.modules.factory.attention.cuda_impl.kv_cache_write_op import (
@@ -399,6 +405,38 @@ class DiffusionGemmaAttnOp:
                 )
             return out
 
+        # The flashinfer wrappers inplace-update internal buffers in both
+        # plan() and run(); run everything under inference_mode(False) so
+        # buffers stay normal tensors regardless of the caller's mode
+        # (propose runs under @inference_mode, the reference/engine paths
+        # run under no_grad — a mode mix poisons the shared buffers).
+        with torch.inference_mode(False):
+            return self._forward_flashinfer(q, k, v, kv_cache, attn_inputs, positions, causal, write_kv)
+
+    def _forward_flashinfer(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        kv_cache: Optional[LayerKVCache],
+        attn_inputs: Any,
+        positions: torch.Tensor,
+        causal: bool,
+        write_kv: bool,
+    ) -> torch.Tensor:
+        prefix_lens = attn_inputs.prefix_lengths
+        if prefix_lens is None:
+            prefix_lens = torch.zeros(1, dtype=torch.int32, device=q.device)
+        cu_seqlens = attn_inputs.cu_seqlens_device
+        if cu_seqlens is None or cu_seqlens.numel() == 0:
+            cu_seqlens = attn_inputs.cu_seqlens
+        batch_size = int(prefix_lens.numel())
+        qo_indptr = cu_seqlens[: batch_size + 1]
+        has_prefix = (
+            kv_cache is not None
+            and int(prefix_lens.numel()) > 0
+            and int(prefix_lens.max().item()) > 0
+        )
         qd = q
         kd = k
         vd = v
@@ -513,9 +551,22 @@ class DiffusionGemmaAttnOp:
         return new_out
 
     def plan(self, attn_inputs: Any, causal: bool) -> None:
-        """Plan flashinfer wrappers for this step (ragged + paged prefix)."""
+        """Plan flashinfer wrappers for this step (ragged + paged prefix).
+
+        flashinfer's plan() inplace-updates internal wrapper buffers; if the
+        first call runs under torch.inference_mode (the proposer's
+        @inference_mode decorator), those buffers become inference tensors
+        and every later normal-mode plan dies with "Inplace update to
+        inference tensor outside InferenceMode". Run the planning (and the
+        lazy wrapper construction) under inference_mode(False) so the
+        buffers stay normal tensors for both calling contexts.
+        """
         if not self.use_flashinfer:
             return
+        with torch.inference_mode(False):
+            self._plan_locked(attn_inputs, causal)
+
+    def _plan_locked(self, attn_inputs: Any, causal: bool) -> None:
         batch_size = int(attn_inputs.input_lengths.numel())
         qo_indptr = attn_inputs.cu_seqlens_device
         if qo_indptr is None or qo_indptr.numel() == 0:

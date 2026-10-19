@@ -995,7 +995,42 @@ perf_test(
         # at 4 until the batch>4 canvas geometry is root-caused C++-side.
         "--concurrency_limit", "4",
         "--max_context_batch_size", "4",
-        "--decode_test_length", "30",
+        # --batch_size seeds the search candidates ([1, 4] here); without it
+        # batch_size_list defaults to [1] and the binary search never leaves
+        # bs=1. decode_test_length spans ~3 canvas cycles: block-diffusion
+        # emits 256-token bursts, so a single-cycle length only measures the
+        # stream-flush gaps between tokens of one burst.
+        "--batch_size", "4",
+        "--decode_test_length", "600",
+        "--num_measures", "10",
+        "--reserver_runtime_mem_mb", "24000",
+        "--max_seq_len", "12800",
+        "--seq_size_per_block", "64",
+        "--kernel_seq_size_per_block", "64",
+        "--tp_size", "1",
+        "--dp_size", "1",
+        "--ep_size", "1",
+        "--world_size", "1",
+        "--act_type", "BF16",
+        "--sp_type", "dspark",
+        "--sp_model_type", "diffusion_gemma_proposer",
+        "--sp_checkpoint_path", "/mnt/fuse/smoke-test/hf/google--diffusiongemma-26B-A4B-it--f7f5b7f5fa82ffc52addd066915886d497f5517b",
+        "--gen_num_per_cycle", "256",
+    ],
+)
+
+# DiffusionGemma prefill/TTFT grid: --partial 2 runs the prefill-only phase
+# (single request per input_len, first-token latency). Decode TPOT is covered
+# by dgm_grid_test above; the two targets share flags otherwise.
+perf_test(
+    name = "dgm_prefill_ttft_test",
+    model_type = "diffusion_gemma",
+    ckpt_path = "/mnt/fuse/smoke-test/hf/google--diffusiongemma-26B-A4B-it--f7f5b7f5fa82ffc52addd066915886d497f5517b",
+    gpu_type = "H20_CU13",
+    args = [
+        "--input_len", "128,1024,4096,12000",
+        "--partial", "2",
+        "--decode_test_length", "1",
         "--num_measures", "10",
         "--reserver_runtime_mem_mb", "24000",
         "--max_seq_len", "12800",
