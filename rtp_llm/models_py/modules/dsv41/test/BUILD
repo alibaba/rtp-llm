@@ -13,6 +13,7 @@ _TESTS = [
     "test_gate_routing_metadata",
     "test_mega_gate",
     "test_mega_input_pack",
+    "test_mega_se_input_pack",
     "test_mhc_lazy_backward",
     "test_prefill_workspace",
     "test_strategy_select",

@@ -32,29 +32,39 @@ if triton is not None:
         destination_stride_k,
         BLOCK_ROWS: tl.constexpr,
     ):
-        rows = tl.program_id(0).to(tl.int64) * BLOCK_ROWS + tl.arange(0, BLOCK_ROWS).to(
-            tl.int64
-        )
+        # One program per BLOCK_ROWS DESTINATION rows: each padded UTCCP row is
+        # mapped back to its source row, so the kernel writes every active row
+        # exactly once — real scales where a source row exists, zeros in the
+        # alignment padding — replacing the historical separate zero-fill
+        # launch (which also double-wrote the data rows). The inverse of
+        #   j = within // 128 * 128 + (within % 32) * 4 + (within % 128) // 32
+        # over [0, aligned_block_m) is
+        #   within = j // 128 * 128 + 32 * ((j % 128) % 4) + (j % 128) // 4
+        # because j % 128 = 4 * (within % 32) + (within % 128) // 32 is a
+        # bijection of [0, 128) (quotient selects the /32 bucket, remainder the
+        # %32 residue). Destination rows whose preimage falls outside
+        # [0, block_m) or beyond `tokens` are padding and store zero. The grid
+        # covers `active_rows` exactly (a multiple of aligned_block_m, hence of
+        # BLOCK_ROWS=128), so the store needs no bounds mask.
+        d_rows = tl.program_id(0).to(tl.int64) * BLOCK_ROWS + tl.arange(
+            0, BLOCK_ROWS
+        ).to(tl.int64)
         packed_k = tl.program_id(1).to(tl.int64)
-        mask = rows < tokens
-        within = rows % block_m
-        transformed = (
-            rows // block_m * aligned_block_m
-            + within // 128 * 128
-            + (within % 32) * 4
-            + (within % 128) // 32
-        )
+        block = d_rows // aligned_block_m
+        j = d_rows % aligned_block_m
+        within = j // 128 * 128 + 32 * ((j % 128) % 4) + (j % 128) // 4
+        rows = block * block_m + within
+        valid = (within < block_m) & (rows < tokens)
         values = tl.load(
             source_ptr + rows * source_stride_m + packed_k * source_stride_k,
-            mask=mask,
+            mask=valid,
             other=0,
         )
         tl.store(
             destination_ptr
-            + transformed * destination_stride_m
+            + d_rows * destination_stride_m
             + packed_k * destination_stride_k,
             values,
-            mask=mask,
         )
 
 
@@ -66,9 +76,10 @@ def stage_mega_moe_se_shared_l1_scales(
 ) -> None:
     """Stage row-major packed K32 scales into DeepGEMM's shared-L1 layout.
 
-    Active padding is zeroed first so reuse after a different token count or
-    ``BLOCK_M`` cannot expose stale scale bytes to TMA loads.  Both operations
-    run on the current PyTorch stream and are CUDA-graph safe.
+    A single fused kernel writes real scales into the transformed rows and
+    zeros into the alignment padding of the active region, so reuse after a
+    different token count or ``BLOCK_M`` cannot expose stale scale bytes to
+    TMA loads. Runs on the current PyTorch stream and is CUDA-graph safe.
     """
 
     tokens = int(tokens)
@@ -78,9 +89,8 @@ def stage_mega_moe_se_shared_l1_scales(
 
     aligned_block_m = ((block_m + 127) // 128) * 128
     active_rows = ((tokens + block_m - 1) // block_m) * aligned_block_m
-    destination[:active_rows].zero_()
     block_rows = 128
-    grid = (triton.cdiv(tokens, block_rows), source.size(1))
+    grid = (active_rows // block_rows, source.size(1))
     _stage_shared_l1_scales_kernel[grid](
         source,
         destination,
