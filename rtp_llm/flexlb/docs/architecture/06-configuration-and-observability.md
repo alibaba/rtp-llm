@@ -381,6 +381,10 @@ GlobalQueue 深度，`app.routing.queue.max.length{type=mainQueue}` 展示总排
 M/C 是当前配置下新请求的上限，已排队请求可能沿用旧快照。BATCH 不使用共享 C 限流，
 上述新总量与共享容量序列仅在 QUEUE + NON_BATCH 下上报。
 
+`app.flexlb.decode.reservation.blocked{role=DECODE,engineIp}` 是 GlobalQueue 向所选
+Decode 端点预留资源失败的尝试 QPS，在进入 Prefill 子队列前、尝试优先级抢占前记录。
+同一请求重试会重复计数，即使随后抢占成功也保留该次受阻计数；该指标不代表最终请求失败率。
+
 `app.flexlb.queue.subqueue.blocked{role,engineIp,reason=SHARED_SUBQUEUE_FULL}` 是入所选
 子队列失败的尝试 QPS：共享 C 满且本机低优等待项也未替换成功时记录一次；同一请求
 多次重试可产生多次样本，不表示最终客户端失败。`app.flexlb.queue.global.residence.ms`

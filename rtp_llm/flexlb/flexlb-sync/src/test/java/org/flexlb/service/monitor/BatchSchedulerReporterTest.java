@@ -55,6 +55,16 @@ class BatchSchedulerReporterTest {
     }
 
     @Test
+    void decodeReservationBlockedRegistersQpsAndReportsWorker() {
+        reporter.init();
+        reporter.reportDecodeReservationBlocked("decode:8001");
+        verify(monitor).register(org.flexlb.constant.MetricConstant.DECODE_RESERVATION_BLOCKED,
+                FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        verify(monitor).report(org.flexlb.constant.MetricConstant.DECODE_RESERVATION_BLOCKED,
+                FlexMetricTags.ofEngine("decode:8001", "role", "DECODE"), 1.0);
+    }
+
+    @Test
     void workerInflightUsesSeparateRolesAndWorkerScope() {
         reporter.reportInflightRequestCount("PREFILL", "prefill:8080", 3);
         reporter.reportInflightRequestCount("DECODE", "decode:8080", 2);

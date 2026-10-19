@@ -738,6 +738,18 @@ class GlobalQueueProgressTest {
     }
 
     @Test
+    void decodeReservationFailureReportsEachAttemptBeforePrefillEnqueue() throws Exception {
+        try (Fixture f = new Fixture(RoleType.PREFILL)) {
+            f.aSlots.set(1);
+            f.decodeReservationBlocked.add(1L);
+            f.submit(1, "a");
+            awaitCondition(() -> f.scheduler.getBlockedRequestCount() == 1);
+            verify(f.reporter, timeout(5_000)).reportDecodeReservationBlocked("decode:8001");
+            assertFalse(f.admitted.contains(1L));
+        }
+    }
+
+    @Test
     void requestSpecificDecodeFailureDoesNotBlockSmallerRequestsInTheSameGroup() throws Exception {
         try (Fixture f = new Fixture(RoleType.PREFILL)) {
             f.aSlots.set(1);
@@ -776,6 +788,7 @@ class GlobalQueueProgressTest {
         private final AtomicReference<FlexlbConfig> currentConfig = new AtomicReference<>(config);
         private final PlacementAvailability availability;
         private final QueueCapacity queueCapacity;
+        private final java.util.Set<Long> decodeReservationBlocked = ConcurrentHashMap.newKeySet();
         private final BatchSchedulerReporter reporter = mock(BatchSchedulerReporter.class);
         private final AtomicInteger prefillEndpointCount = new AtomicInteger();
         private final AtomicInteger fusionEndpointCount = new AtomicInteger();
@@ -862,6 +875,12 @@ class GlobalQueueProgressTest {
                 when(item.prefillEp()).thenReturn(a.endpoint());
                 when(route.tryEnqueue(any(), any(), any())).thenAnswer(commit -> {
                     onAdmission.accept(id);
+                    if (decodeReservationBlocked.contains(id)) {
+                        var decode = mock(org.flexlb.balance.endpoint.DecodeEndpoint.class);
+                        when(decode.ipPort()).thenReturn("decode:8001");
+                        when(route.decodeEndpoint()).thenReturn(decode);
+                        return PlacementResult.blocked(PlacementKey.exact(RoleType.DECODE, "a", "decode:8001"));
+                    }
                     if (admissionBlocked.contains(id)) {
                         return PlacementResult.blocked(PlacementKey.exact(role, "a", "a:8000"));
                     }

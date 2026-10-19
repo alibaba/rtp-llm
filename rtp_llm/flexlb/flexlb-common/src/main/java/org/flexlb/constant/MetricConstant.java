@@ -227,6 +227,11 @@ public class MetricConstant {
      */
     public static final String SHARED_SUBQUEUE_ENDPOINT_COUNT = "app.flexlb.queue.subqueue.endpoint.count";
     /**
+     * Failed Decode reservation attempts before entering the Prefill subqueue.
+     */
+    public static final String DECODE_RESERVATION_BLOCKED = "app.flexlb.decode.reservation.blocked";
+
+    /**
      * One failed attempt to enter a role's full shared endpoint subqueue.
      */
     public static final String SHARED_SUBQUEUE_BLOCKED = "app.flexlb.queue.subqueue.blocked";

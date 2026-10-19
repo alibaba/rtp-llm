@@ -9,6 +9,7 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.util.Logger;
 import org.flexlb.util.PriorityNormalizer;
@@ -482,6 +483,9 @@ final class GlobalQueueCoordinator implements AutoCloseable {
                 removeRequest(entry);
                 queueCapacity.decreaseTotalQueueCount(entry.future);
                 return Outcome.DONE;
+            }
+            if (publication.blocker().role() == RoleType.DECODE) {
+                reporter.reportDecodeReservationBlocked(admission.decodeEndpoint().ipPort());
             }
             plan.blockedOn(publication.blocker());
             boolean staleSelection = admission.blockedEndpointChanged();

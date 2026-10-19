@@ -19,6 +19,7 @@ import static org.flexlb.constant.MetricConstant.BATCH_PREDICT_GAP_MS;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_RATIO;
 import static org.flexlb.constant.MetricConstant.DECODE_INPUT_AND_MAX_OUTPUT_KV_RESERVED_TOKENS;
 import static org.flexlb.constant.MetricConstant.DECODE_INPUT_KV_RESERVED_TOKENS;
+import static org.flexlb.constant.MetricConstant.DECODE_RESERVATION_BLOCKED;
 import static org.flexlb.constant.MetricConstant.DECODE_TOTAL_LOAD;
 import static org.flexlb.constant.MetricConstant.DISPATCH_ACK_TIME_MS;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_BATCH_SIZE;
@@ -106,6 +107,7 @@ public class BatchSchedulerReporter {
         monitor.register(SHARED_SUBQUEUE_WAITING, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         monitor.register(SHARED_SUBQUEUE_LIMIT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         monitor.register(SHARED_SUBQUEUE_ENDPOINT_COUNT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        monitor.register(DECODE_RESERVATION_BLOCKED, FlexMetricType.QPS, FlexPriorityType.PRECISE);
         monitor.register(SHARED_SUBQUEUE_BLOCKED, FlexMetricType.QPS, FlexPriorityType.PRECISE);
         monitor.register(GLOBAL_QUEUE_RESIDENCE_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
         monitor.register(ENGINE_SUBQUEUE_RESIDENCE_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
@@ -159,6 +161,11 @@ public class BatchSchedulerReporter {
         monitor.report(SHARED_SUBQUEUE_WAITING, tags, depth);
         monitor.report(SHARED_SUBQUEUE_LIMIT, tags, limit);
         monitor.report(SHARED_SUBQUEUE_ENDPOINT_COUNT, tags, logicalEndpointCount);
+    }
+
+    public void reportDecodeReservationBlocked(String engineIp) {
+        monitor.report(DECODE_RESERVATION_BLOCKED,
+                FlexMetricTags.ofEngine(engineIp, "role", "DECODE"), 1.0);
     }
 
     public void reportSharedSubQueueBlocked(String role, String engineIp) {
