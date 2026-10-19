@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 #include <memory>
+#include <map>
+#include <tuple>
 #include <vector>
 #include <set>
 #include <torch/torch.h>
@@ -21,6 +23,7 @@
 #include "rtp_llm/cpp/cache/SingleConfigCreator.h"
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"
 #include "rtp_llm/cpp/config/StaticConfig.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
 
@@ -50,6 +53,96 @@ protected:
 };
 
 namespace {
+
+class RecordingMrMemoryUtil: public MemoryUtil {
+public:
+    using Registration = std::tuple<void*, uint64_t, bool, uint64_t>;
+
+    bool regUserMr(void* ptr, uint64_t size, bool gpu, uint64_t alignment) override {
+        // Match RDMA's rejection of empty or misaligned registrations.
+        if (!ptr || size == 0 || alignment == 0 || size % alignment != 0) {
+            return false;
+        }
+        if (!active_regions.emplace(ptr, gpu).second) {
+            return false;
+        }
+        registrations.emplace_back(ptr, size, gpu, alignment);
+        return true;
+    }
+
+    bool deregUserMr(void* ptr, bool gpu) override {
+        const auto it = active_regions.find(ptr);
+        if (it == active_regions.end() || it->second != gpu) {
+            return false;
+        }
+        deregistrations.emplace_back(ptr, gpu);
+        active_regions.erase(it);
+        return true;
+    }
+
+    bool isMemoryMr(void*, uint64_t, bool, bool) override {
+        return false;
+    }
+    bool findMemoryMr(void*, void*, uint64_t, bool, bool) override {
+        return false;
+    }
+    bool isRdmaMode() override {
+        return true;
+    }
+
+    std::vector<Registration>           registrations;
+    std::vector<std::pair<void*, bool>> deregistrations;
+    std::map<void*, bool>               active_regions;
+};
+
+class MrTestCacheStore: public CacheStore {
+public:
+    explicit MrTestCacheStore(std::shared_ptr<MemoryUtil> memory_util): memory_util_(std::move(memory_util)) {}
+
+    void store(const std::shared_ptr<RequestBlockBuffer>&, CacheStoreStoreDoneCallback) override {}
+    void load(const std::shared_ptr<RequestBlockBuffer>&,
+              CacheStoreLoadDoneCallback,
+              const std::string&,
+              uint32_t,
+              uint32_t,
+              uint32_t,
+              int,
+              int) override {}
+    std::shared_ptr<LoadContext> loadBuffers(const std::vector<std::shared_ptr<RequestBlockBuffer>>&,
+                                             const std::string&,
+                                             uint32_t,
+                                             uint32_t,
+                                             int64_t,
+                                             LoadContext::CheckCancelFunc,
+                                             int,
+                                             int) override {
+        return nullptr;
+    }
+    std::shared_ptr<StoreContext> storeBuffers(const std::vector<std::shared_ptr<RequestBlockBuffer>>&,
+                                               int64_t) override {
+        return nullptr;
+    }
+    std::shared_ptr<RemoteStoreTask>
+    submitRemoteStoreTask(const std::shared_ptr<RemoteStoreRequest>&,
+                          const std::shared_ptr<CacheStoreRemoteStoreMetricsCollector>&,
+                          RemoteStoreTask::CheckCancelFunc) override {
+        return nullptr;
+    }
+    void releaseRemoteStoreTask(const std::shared_ptr<RemoteStoreTask>&) override {}
+    bool regUserBuffers(const std::vector<std::shared_ptr<BlockBuffer>>&) override {
+        return false;
+    }
+    std::shared_ptr<BlockBuffer> findUserBuffer(const std::string&) override {
+        return nullptr;
+    }
+    const std::shared_ptr<MemoryUtil>& getMemoryUtil() const override {
+        return memory_util_;
+    }
+    void debugInfo() override {}
+
+private:
+    std::shared_ptr<MemoryUtil> memory_util_;
+};
 
 static rtp_llm::ModelConfig makeTestModelConfig(uint32_t num_layers) {
     rtp_llm::ModelConfig m;
@@ -571,6 +664,83 @@ static ModelConfig makeLayeredPrefillModel() {
     model.enable_glm52_shared_indexer_kv_cache = true;
     model.glm52_indexer_kv_slot_mapping        = {0, 0, 0, 0, 1, 1, 1, 1};
     return model;
+}
+
+TEST_F(BlockPoolTest, LayeredPrefillMrSkipsEmptyBuffers) {
+    autil::EnvGuard placement("RTP_LLM_DSA_PREFILL_LAYOUT", "1");
+    auto            model                          = makeLayeredPrefillModel();
+    auto            mtp_model                      = model;
+    mtp_model.num_layers                           = 1;
+    mtp_model.enable_glm52_shared_indexer_kv_cache = false;
+    mtp_model.glm52_indexer_kv_slot_mapping.clear();
+    KVCacheConfig options;
+    options.seq_size_per_block        = 64;
+    options.kernel_seq_size_per_block = 64;
+    options.test_block_num            = 16;
+    options.enable_memory_cache       = true;
+    options.memory_cache_size_mb      = 8;
+    RuntimeConfig runtime;
+    runtime.fifo_scheduler_config.max_batch_kv_len = 128;
+
+    for (int mtp_modules : {1, 3}) {
+        for (bool main_host_only : {false, true}) {
+            SCOPED_TRACE(::testing::Message() << "mtp_modules=" << mtp_modules << " main_host_only=" << main_host_only);
+            SpeculativeExecutionConfig speculative;
+            speculative.type              = SP_TYPE_MTP;
+            speculative.gen_num_per_cycle = mtp_modules;
+            auto cache_config             = CacheConfigCreator::createSpConfig(
+                model, mtp_model, ParallelismConfig{}, runtime, options, speculative, std::nullopt, true, false);
+            if (main_host_only) {
+                // Also exercise the symmetric case: a layout with no HBM KV.
+                cache_config.dsa_prefill_hbm_layers = 0;
+            }
+            const auto config = BlockPoolConfigHelper::createConfig(cache_config);
+            ASSERT_EQ(config.memory_layouts.size(), 1u + mtp_modules);
+            const auto& main = config.memory_layouts.front();
+            ASSERT_GT(main.kv_block_pool_size_bytes, 0u);
+            EXPECT_EQ(main.mla_hbm_size_bytes == 0, main_host_only);
+            block_pool_ = std::make_shared<BlockPool>(config);
+            ASSERT_TRUE(block_pool_->init());
+
+            auto       memory_util                                    = std::make_shared<RecordingMrMemoryUtil>();
+            auto       cache_store                                    = std::make_shared<MrTestCacheStore>(memory_util);
+            const auto hbm                                            = block_pool_->allLayerHbmCacheBase();
+            const auto indexer                                        = block_pool_->allLayerScaleCacheBase();
+            std::vector<RecordingMrMemoryUtil::Registration> expected = {
+                {block_pool_->getBaseAddress(), main.kv_block_pool_size_bytes, false, main.kv_block_stride_bytes}};
+            if (!main_host_only) {
+                expected.emplace_back(hbm[0].data_ptr(), main.mla_hbm_size_bytes, true, main.kv_block_stride_bytes);
+            }
+            expected.emplace_back(
+                indexer[0].data_ptr(), main.kv_scale_pool_size_bytes, true, main.kv_scale_stride_bytes);
+            for (int m = 0; m < mtp_modules; ++m) {
+                const auto& layout = config.memory_layouts[m + 1];
+                ASSERT_EQ(layout.kv_block_pool_size_bytes, 0u);
+                ASSERT_GT(layout.mla_hbm_size_bytes, 0u);
+                ASSERT_GT(layout.kv_scale_pool_size_bytes, 0u);
+                const auto layer = main.layer_num + m;
+                expected.emplace_back(
+                    hbm[layer].data_ptr(), layout.mla_hbm_size_bytes, true, layout.kv_block_stride_bytes);
+                expected.emplace_back(
+                    indexer[layer].data_ptr(), layout.kv_scale_pool_size_bytes, true, layout.kv_scale_stride_bytes);
+            }
+
+            ASSERT_NO_THROW(block_pool_->regUserMr(0, cache_store));
+            EXPECT_EQ(memory_util->registrations, expected);
+            ASSERT_NO_THROW(block_pool_->regUserMr(0));
+            EXPECT_EQ(memory_util->registrations, expected);
+
+            ASSERT_NO_THROW(block_pool_->deregUserMr());
+            std::vector<std::pair<void*, bool>> expected_deregistrations;
+            for (const auto& region : expected) {
+                expected_deregistrations.emplace_back(std::get<0>(region), std::get<2>(region));
+            }
+            EXPECT_EQ(memory_util->deregistrations, expected_deregistrations);
+            EXPECT_TRUE(memory_util->active_regions.empty());
+            ASSERT_NO_THROW(block_pool_->deregUserMr());
+            EXPECT_EQ(memory_util->deregistrations, expected_deregistrations);
+        }
+    }
 }
 
 TEST_F(BlockPoolTest, LayeredPrefillStoresEachLogicalBlockOnce) {
