@@ -299,10 +299,8 @@ void BlockTreeCacheMetricsReporter::reportEvictionFinished(const EvictionTransfe
     if (metrics_reporter_ == nullptr) {
         return;
     }
-    const int64_t finish_time_us = currentTimeUs();
     for (size_t desc_index = 0; desc_index < task.descriptors().size(); ++desc_index) {
-        reportEvictedDescriptor(
-            task.descriptors()[desc_index], task.timings[desc_index], group_sets, finish_time_us, true);
+        reportEvictedDescriptor(task.descriptors()[desc_index], task.timings[desc_index], group_sets, true);
     }
 }
 
@@ -311,26 +309,20 @@ void BlockTreeCacheMetricsReporter::reportEvictionFinished(const EvictionDropTas
     if (metrics_reporter_ == nullptr) {
         return;
     }
-    const int64_t finish_time_us = currentTimeUs();
-    reportEvictedDescriptor(task.primary_desc, task.primary_timing, group_sets, finish_time_us, true);
+    reportEvictedDescriptor(task.primary_desc, task.primary_timing, group_sets, true);
     for (size_t desc_index = 0; desc_index < task.dependent_prune_descs.size(); ++desc_index) {
-        reportEvictedDescriptor(task.dependent_prune_descs[desc_index],
-                                task.dependent_prune_timings[desc_index],
-                                group_sets,
-                                finish_time_us,
-                                false);
+        reportEvictedDescriptor(
+            task.dependent_prune_descs[desc_index], task.dependent_prune_timings[desc_index], group_sets, false);
     }
     for (size_t desc_index = 0; desc_index < task.cascade_descs.size(); ++desc_index) {
-        reportEvictedDescriptor(
-            task.cascade_descs[desc_index], task.cascade_timings[desc_index], group_sets, finish_time_us, false);
+        reportEvictedDescriptor(task.cascade_descs[desc_index], task.cascade_timings[desc_index], group_sets, false);
     }
 }
 
 void BlockTreeCacheMetricsReporter::reportEvictedDescriptor(const TransferDescriptor&       desc,
                                                             const EvictionTimingSnapshot&   timing,
                                                             const std::vector<GroupSetPtr>& group_sets,
-                                                            int64_t                         finish_time_us,
-                                                            bool report_candidate_times) const {
+                                                            bool report_block_idletime) const {
     const size_t group_set_id = desc.group_set_id;
     if (group_set_id >= group_sets.size()) {
         return;
@@ -341,17 +333,14 @@ void BlockTreeCacheMetricsReporter::reportEvictedDescriptor(const TransferDescri
     }
 
     RtpLLMCacheEvictionMetricsCollector collector;
-    collector.source_tier                = tierName(desc.source_tier);
-    collector.target_tier                = tierName(desc.target_tier);
-    collector.group_type                 = metricCacheGroupTypeName(group_set->groupType());
-    collector.report_eviction            = true;
-    collector.tier_residence_time_ms     = (finish_time_us - timing.tier_enter_time_us) / 1000;
-    collector.report_tier_residence_time = true;
-    if (report_candidate_times) {
-        collector.candidate_idle_time_ms     = (timing.selected_time_us - timing.last_access_time_us) / 1000;
-        collector.candidate_age_ms           = (timing.selected_time_us - timing.insert_time_us) / 1000;
-        collector.report_candidate_idle_time = true;
-        collector.report_candidate_age       = true;
+    collector.source_tier       = tierName(desc.source_tier);
+    collector.target_tier       = tierName(desc.target_tier);
+    collector.group_type        = metricCacheGroupTypeName(group_set->groupType());
+    collector.report_eviction   = true;
+    collector.block_lifetime_ms = std::max<int64_t>(0, (timing.selected_time_us - timing.tier_enter_time_us) / 1000);
+    if (report_block_idletime) {
+        collector.block_idletime_ms     = (timing.selected_time_us - timing.last_access_time_us) / 1000;
+        collector.report_block_idletime = true;
     }
     metrics_reporter_->report<RtpLLMCacheEvictionMetrics, RtpLLMCacheEvictionMetricsCollector>(nullptr, &collector);
 }
