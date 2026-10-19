@@ -590,6 +590,41 @@ size_t KVCacheManager::notInUseBlocksNum() const {
     return allocator_->notInUseBlocksNum();
 }
 
+void KVCacheManager::maintainLayeredPrefillFreeBlocks() {
+    // Host layers already back the same logical blocks. Reuse the tiered-cache
+    // watermark policy, but never copy these blocks to a second memory cache.
+    if (config_.dsa_prefill_hbm_layers < 0 || !kv_cache_config_.enable_tiered_memory_cache
+        || !kv_cache_config_.reuse_cache || !kv_cache_config_.enable_device_cache) {
+        return;
+    }
+    RTP_LLM_PROFILE_FUNCTION();
+    size_t target = 0;
+    if (kv_cache_config_.device_cache_min_free_blocks > 0) {
+        target = static_cast<size_t>(kv_cache_config_.device_cache_min_free_blocks);
+    } else {
+        const auto& scheduler = runtime_config_.fifo_scheduler_config;
+        if (scheduler.max_batch_tokens_size <= 0) {
+            return;
+        }
+        // The admission budget is global tokens; the pool holds local CP pages.
+        const size_t block_tokens = cp_slot_mapper_ && cp_slot_mapper_->isSharded() ?
+                                        cp_slot_mapper_->virtualBlockSize() :
+                                        config_.seq_size_per_block;
+        const size_t tokens       = static_cast<size_t>(scheduler.max_batch_tokens_size);
+        target                    = tokens / block_tokens + (tokens % block_tokens != 0);
+    }
+    target = std::min(target, availableBlocksNum());
+    // Connector-held blocks will become free without another eviction.
+    const size_t pending_free = notInUseBlocksNum();
+    if (pending_free >= target) {
+        return;
+    }
+    const auto evicted = popBlocksFromCache(target - pending_free);
+    if (evicted) {
+        blockCacheFree(evicted);
+    }
+}
+
 BatchKVCacheResourcePtr KVCacheManager::popBlocksFromCache(size_t min_blocks_to_free) {
     return allocator_->popBlocksFromCache(min_blocks_to_free);
 }
