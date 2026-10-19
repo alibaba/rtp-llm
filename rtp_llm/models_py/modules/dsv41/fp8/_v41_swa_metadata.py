@@ -1,5 +1,6 @@
 """Fixed-window V4.1 suffix slots, preserving physical block-table aliases."""
 
+import numpy as np
 import torch
 import triton
 import triton.language as tl
@@ -128,31 +129,33 @@ def _host_compact_table(
     host_table, prefixes, lengths, columns, span, read, *, pin_memory=True
 ):
     """Build alias IDs from CPU page intervals without per-request Torch ops."""
+    if not lengths:
+        return [], torch.empty((0, columns), dtype=torch.int32, pin_memory=pin_memory)
     host_rows = host_table.resolve_neg().numpy()
-    active = []
-    for req, (prefix, length) in enumerate(zip(prefixes, lengths)):
-        if not read and not length:
-            continue
-        start, end = (
-            (max(0, prefix - 127), prefix) if read else (prefix, prefix + length)
-        )
-        first = start // span
-        stop = min((end + span - 1) // span, columns)
-        for column, block in enumerate(host_rows[req, first:stop], first):
-            block = int(block)
-            if block > 0:
-                active.append((req, column, block))
-    unique = sorted({block for _, _, block in active})
-    indices = {block: i for i, block in enumerate(unique)}
+    prefix = np.asarray(prefixes)
+    length = np.asarray(lengths)
+    starts = np.maximum(prefix - 127, 0) if read else prefix
+    ends = prefix if read else prefix + length
+    first = starts // span
+    stop = np.minimum((ends + span - 1) // span, columns)
+    lo, hi = int(first.min()), min(int(stop.max()), host_rows.shape[1])
+    block_columns = np.arange(lo, hi)[None, :]
+    blocks = host_rows[:, lo:hi]
+    active = (
+        (block_columns >= first[:, None])
+        & (block_columns < stop[:, None])
+        & (blocks > 0)
+    )
+    if not read:
+        active &= length[:, None] > 0
+    unique, inverse = np.unique(blocks[active], return_inverse=True)
     mapping = torch.empty(
         (len(lengths), columns), dtype=torch.int32, pin_memory=pin_memory
     )
     host_mapping = mapping.numpy()
     host_mapping.fill(-1)
-    if active:
-        rows, selected_columns, blocks = zip(*active)
-        host_mapping[rows, selected_columns] = [indices[block] for block in blocks]
-    return unique, mapping
+    host_mapping[:, lo:hi][active] = inverse
+    return unique.tolist(), mapping
 
 
 def try_host_slot_metadata(

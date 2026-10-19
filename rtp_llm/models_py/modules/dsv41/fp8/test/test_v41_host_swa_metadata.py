@@ -62,6 +62,32 @@ class HostCompactTableTest(unittest.TestCase):
         for name in ("aten::select", "aten::slice", "aten::index_put_", "aten::item"):
             self.assertNotIn(name, names)
 
+    def test_one_million_token_table_with_short_active_window(self):
+        host = torch.zeros((2, 8192), dtype=torch.int32)
+        host[:, 8183] = 9
+        host[0, 8184:8192] = torch.arange(1, 9, dtype=torch.int32)
+        host[1, 8184:8192] = torch.arange(1, 9, dtype=torch.int32)
+        for read in (False, True):
+            unique, mapping = metadata._host_compact_table(
+                host,
+                (1047552, 1047552),
+                (1024, 1024),
+                8192,
+                128,
+                read,
+                pin_memory=False,
+            )
+            self.assertEqual(unique, list(range(1, 9)) if not read else [9])
+            self.assertTrue(torch.all(mapping[:, :8183] == -1))
+            if read:
+                self.assertTrue(torch.all(mapping[:, 8183] == 0))
+                self.assertTrue(torch.all(mapping[:, 8184:] == -1))
+            else:
+                self.assertTrue(torch.all(mapping[:, 8183] == -1))
+                self.assertTrue(
+                    torch.equal(mapping[:, 8184:8192], torch.arange(8).repeat(2, 1))
+                )
+
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class HostSwaMetadataTest(unittest.TestCase):
