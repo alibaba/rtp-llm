@@ -19,9 +19,9 @@ cc_library(
 genrule(
     name = "python_import_lib",
     outs = [
-        "%{PYTHON_IMPORT_LIB_NAME}",
+        "libpython3.10.so",
     ],
     cmd = """
-cp -f "%{PYTHON_IMPORT_LIB_PATH}" "$(@D)/%{PYTHON_IMPORT_LIB_NAME}"
+cp -f "/opt/conda310/lib/libpython3.10.so" "$(@D)/libpython3.10.so"
    """,
 )

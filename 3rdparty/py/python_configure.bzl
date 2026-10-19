@@ -250,36 +250,6 @@ def _get_python_import_lib_name(repository_ctx, python_bin):
                      "(See ./configure or " + _PYTHON_BIN_PATH + ".) "))
   return result.stdout.splitlines()[0]
 
-def _get_python_shared_library(repository_ctx, python_bin):
-  result = _execute(
-      repository_ctx,
-      [python_bin, "-c", """
-import glob
-import os
-import sys
-import sysconfig
-
-version = "%s.%s" % (sys.version_info[0], sys.version_info[1])
-libdir = sysconfig.get_config_var("LIBDIR")
-ldlibrary = sysconfig.get_config_var("LDLIBRARY")
-candidates = []
-if libdir:
-    for suffix in (".so", ".dylib"):
-        candidates.extend(sorted(glob.glob(os.path.join(libdir, "libpython%s%s*" % (version, suffix)))))
-    if ldlibrary:
-        candidates.append(os.path.join(libdir, ldlibrary))
-for path in candidates:
-    if path and os.path.isfile(path):
-        print(path)
-        break
-else:
-    raise SystemExit("could not find a Python shared library")
-"""] ,
-      error_msg = "Problem locating the Python shared library.",
-  )
-  path = result.stdout.splitlines()[0]
-  return path, path.rsplit("/", 1)[-1]
-
 
 def _create_local_python_repository(repository_ctx):
   """Creates the repository containing files set up to build with Python."""
@@ -297,17 +267,12 @@ def _create_local_python_repository(repository_ctx):
     python_include = _norm_path(python_include)
     python_import_lib_name = _get_python_import_lib_name(repository_ctx, python_bin)
     python_import_lib_src = python_include.rsplit('/', 1)[0] + "/libs/" + python_import_lib_name
-    python_import_lib_path = python_import_lib_src
     python_import_lib_genrule = _symlink_genrule_for_dir(
       repository_ctx, None, '', 'python_import_lib',
       [python_import_lib_src], [python_import_lib_name])
-  else:
-    python_import_lib_path, python_import_lib_name = _get_python_shared_library(repository_ctx, python_bin)
   _tpl(repository_ctx, "BUILD", {
       "%{PYTHON_INCLUDE_GENRULE}": python_include_rule,
       "%{PYTHON_IMPORT_LIB_GENRULE}": python_import_lib_genrule,
-      "%{PYTHON_IMPORT_LIB_PATH}": python_import_lib_path,
-      "%{PYTHON_IMPORT_LIB_NAME}": python_import_lib_name,
   })
 
 

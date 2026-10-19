@@ -105,14 +105,11 @@ try:
 except BaseException as e:
     logging.info(f"Exception: {e}, traceback: {traceback.format_exc()}")
 
-# The frontend extension links against the active interpreter's shared library.
-# Some conda builds report the static archive in LDLIBRARY even though ctypes
-# can only load a dynamic library.
+# frontend cannot load libpython3.10.so, so we need to load it manually
+import sysconfig
 from ctypes import cdll
 
-from rtp_llm.utils.python_shared_library import find_python_shared_library
-
-cdll.LoadLibrary(find_python_shared_library())
+cdll.LoadLibrary(sysconfig.get_config_var("LIBDIR") + "/libpython3.10.so")
 
 try:
     # Alias for backward compatibility
