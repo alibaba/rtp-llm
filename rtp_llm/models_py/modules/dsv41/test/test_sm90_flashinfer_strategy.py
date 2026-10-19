@@ -215,7 +215,7 @@ def test_v2_group_shared_buffer_and_prefill_decode_contracts(
         wrapper.buffer.group, num_max_tokens_per_rank=capacity, hidden=5120, num_topk=8
     )
     assert strategy._comm_buffer is another._comm_buffer is buf
-    assert wrapper._dsv41_elastic[1] is buf
+    assert list(wrapper._dsv41_elastic_buffers.values()) == [buf]
     assert strategy._local.prepare_calls == ([(ep_size, 8, True)] * 2 if graph else [])
     result = strategy(*_inputs())
     padding.assert_called_once()
@@ -273,19 +273,65 @@ def test_v2_guards_reject_before_dispatch(monkeypatch, graph):
     buf.dispatch.assert_not_called()
 
 
-def test_v2_rejects_incompatible_shared_capacity_and_group(monkeypatch):
+@pytest.mark.parametrize("graph", [False, True])
+@pytest.mark.parametrize("draft_first", [False, True])
+def test_v2_target_draft_buffers_are_isolated_and_reused(
+    monkeypatch, graph, draft_first
+):
+    target_cfg = dataclasses.replace(
+        _cfg(), max_tokens_per_rank=8192, is_decode_role=graph
+    )
+    draft_cfg = dataclasses.replace(
+        target_cfg,
+        n_routed_experts=128,
+        n_activated_experts=3,
+        n_local_experts=16,
+        local_expert_end=16,
+    )
+    wrapper, factory, _, _, _ = _install_v2(monkeypatch, target_cfg, graph=graph)
+    factory.side_effect = lambda *args, **kwargs: SimpleNamespace(num_bytes=1234)
+    configs = [draft_cfg, target_cfg] if draft_first else [target_cfg, draft_cfg]
+    first, second = [candidate.SM90FlashInferStrategy(cfg) for cfg in configs]
+    first.setup_runtime()
+    original = first._comm_buffer
+    second.setup_runtime()
+    assert first._comm_buffer is original
+    assert second._comm_buffer is not original
+    assert factory.call_count == 2
+    for cfg, expected in zip(configs, [first, second]):
+        another = candidate.SM90FlashInferStrategy(dataclasses.replace(cfg, layer_id=1))
+        another.setup_runtime()
+        expected.setup_runtime()
+        assert another._comm_buffer is expected._comm_buffer
+    assert factory.call_count == 2
+    assert len(wrapper._dsv41_elastic_buffers) == 2
+    if graph:
+        for strategy in [first, second]:
+            topk = 8 if strategy.cfg.n_routed_experts == 384 else 4
+            assert strategy._local.prepare_calls == [(8, topk, True)] * 2
+
+
+def test_v2_distinct_capacities_keep_existing_buffer_and_group_guard(monkeypatch):
     cfg = dataclasses.replace(_cfg(), max_tokens_per_rank=8192, is_decode_role=False)
     wrapper, factory, _, _, _ = _install_v2(monkeypatch, cfg, graph=False)
-    candidate.SM90FlashInferStrategy(cfg).setup_runtime()
-    with pytest.raises(ValueError, match="Incompatible SM90 ElasticBuffer capacity"):
-        candidate.SM90FlashInferStrategy(
-            dataclasses.replace(cfg, max_tokens_per_rank=4096)
-        ).setup_runtime()
-    assert factory.call_count == 1
+    factory.side_effect = lambda *args, **kwargs: SimpleNamespace(num_bytes=1234)
+    original = candidate.SM90FlashInferStrategy(cfg)
+    original.setup_runtime()
+    smaller = candidate.SM90FlashInferStrategy(
+        dataclasses.replace(cfg, max_tokens_per_rank=4096)
+    )
+    smaller.setup_runtime()
+    assert smaller._comm_buffer is not original._comm_buffer
+    assert factory.call_count == 2
+    assert [
+        call.kwargs["num_max_tokens_per_rank"] for call in factory.call_args_list
+    ] == [8192, 4096]
+    original.setup_runtime()
+    assert factory.call_count == 2
     wrapper.buffer.group.rank = lambda: 1
     with pytest.raises(ValueError, match="aligned EP group and expert ranks"):
         candidate.SM90FlashInferStrategy(cfg).setup_runtime()
-    assert factory.call_count == 1
+    assert factory.call_count == 2
 
 
 @pytest.mark.parametrize("graph", [False, True])
