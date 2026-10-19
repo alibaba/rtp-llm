@@ -213,6 +213,12 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
 
         cfg = self.cfg
         self._activation = getattr(cfg, "expert_activation", "swiglu")
+        if self._activation not in ("situ", "swiglu"):
+            raise ValueError(f"Unsupported MegaMoE activation {self._activation!r}")
+        if self._activation == "situ" and not callable(
+            getattr(deep_gemm, "fp8_fp4_mega_moe_k3", None)
+        ):
+            raise RuntimeError("K3 SiTU requires the dedicated DeepGEMM K3 API")
         from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.activation import (
             mega_moe_functions,
         )
@@ -226,8 +232,6 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
                 cfg.activation_beta,
                 cfg.activation_linear_beta,
             )
-        elif self._activation != "swiglu":
-            raise ValueError(f"Unsupported MegaMoE activation {self._activation!r}")
         E = cfg.n_local_experts
         D = cfg.dim
         inter = cfg.moe_inter_dim
@@ -478,8 +482,6 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
             )
 
     def _launch(self, y: torch.Tensor, tokens: int, device: torch.device) -> None:
-        import deep_gemm
-
         self._maybe_pre_kernel_barrier(tokens)
         sync_cuda_graph_warmup_ranks(
             f"moe.mega_moe.layer{self.cfg.layer_id}.before_deepgemm",
