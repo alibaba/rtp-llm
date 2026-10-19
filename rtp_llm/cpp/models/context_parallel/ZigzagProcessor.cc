@@ -48,8 +48,13 @@ bool ZigZagProcessor::plan(const std::vector<int>& total_input_tokens,
 }
 
 torch::Tensor ZigZagProcessor::generateQKVRestoreIndices(const torch::Tensor& prefill_cp_chunk_lengths, int cp_size) {
-    int           num_prefill_streams = prefill_cp_chunk_lengths.size(0);
-    int           total_token_size    = torch::sum(prefill_cp_chunk_lengths).item<int>();
+    int        num_prefill_streams = prefill_cp_chunk_lengths.size(0);
+    const bool direct_host_lengths =
+        num_prefill_streams > 0 && prefill_cp_chunk_lengths.dim() == 1 && prefill_cp_chunk_lengths.device().is_cpu()
+        && prefill_cp_chunk_lengths.scalar_type() == torch::kInt32 && prefill_cp_chunk_lengths.is_contiguous();
+    const int* chunk_lengths = direct_host_lengths ? prefill_cp_chunk_lengths.data_ptr<int>() : nullptr;
+    int total_token_size     = chunk_lengths ? std::accumulate(chunk_lengths, chunk_lengths + num_prefill_streams, 0) :
+                                               torch::sum(prefill_cp_chunk_lengths).item<int>();
     torch::Tensor qkv_restore_indices =
         torch::empty({cp_size, total_token_size}, torch::TensorOptions(torch::kInt32).device(torch::kCPU));
 
@@ -59,7 +64,7 @@ torch::Tensor ZigZagProcessor::generateQKVRestoreIndices(const torch::Tensor& pr
     int chunk_offset = 0;
     int seq_offset   = 0;
     for (int stream = 0; stream < num_prefill_streams; stream++) {
-        int chunk_length    = prefill_cp_chunk_lengths[stream].item<int>();
+        int chunk_length    = chunk_lengths ? chunk_lengths[stream] : prefill_cp_chunk_lengths[stream].item<int>();
         int prefill_qkv_len = chunk_length * cp_size;
         int pair_size       = chunk_length / 2;  // prefill_qkv_len / (cp_size * 2)
 
@@ -94,11 +99,25 @@ torch::Tensor ZigZagProcessor::generateQKVPaddingMask(const torch::Tensor& prefi
                                                       int                  cp_size) {
     int num_prefill_streams = prefill_cp_chunk_lengths.size(0);
 
-    // Calculate padded sequence lengths: chunk_length * cp_size
-    auto padded_seq_lengths = prefill_cp_chunk_lengths * cp_size;
-
-    // Calculate total mask size
-    int total_size = torch::sum(padded_seq_lengths).item<int>();
+    const bool direct_host_chunks =
+        num_prefill_streams > 0 && prefill_cp_chunk_lengths.dim() == 1 && prefill_cp_chunk_lengths.device().is_cpu()
+        && prefill_cp_chunk_lengths.scalar_type() == torch::kInt32 && prefill_cp_chunk_lengths.is_contiguous();
+    const bool direct_host_padding =
+        num_prefill_streams > 0 && prefill_cp_padding_lengths.dim() == 1
+        && prefill_cp_padding_lengths.size(0) == num_prefill_streams && prefill_cp_padding_lengths.device().is_cpu()
+        && prefill_cp_padding_lengths.scalar_type() == torch::kInt32 && prefill_cp_padding_lengths.is_contiguous();
+    const int*    chunk_lengths   = direct_host_chunks ? prefill_cp_chunk_lengths.data_ptr<int>() : nullptr;
+    const int*    padding_lengths = direct_host_padding ? prefill_cp_padding_lengths.data_ptr<int>() : nullptr;
+    torch::Tensor padded_seq_lengths;
+    int           total_size = 0;
+    if (chunk_lengths) {
+        for (int i = 0; i < num_prefill_streams; ++i) {
+            total_size += chunk_lengths[i] * cp_size;
+        }
+    } else {
+        padded_seq_lengths = prefill_cp_chunk_lengths * cp_size;
+        total_size         = torch::sum(padded_seq_lengths).item<int>();
+    }
 
     // Optimized: Initialize with 1s (valid tokens) first, then overwrite padding with 0s
     // This is faster than separate fill operations for large sequences
@@ -109,8 +128,8 @@ torch::Tensor ZigZagProcessor::generateQKVPaddingMask(const torch::Tensor& prefi
     // Only fill padding regions (typically smaller than valid regions)
     int offset = 0;
     for (int i = 0; i < num_prefill_streams; i++) {
-        int padded_length = padded_seq_lengths[i].item<int>();
-        int padding_count = prefill_cp_padding_lengths[i].item<int>();
+        int padded_length = chunk_lengths ? chunk_lengths[i] * cp_size : padded_seq_lengths[i].item<int>();
+        int padding_count = padding_lengths ? padding_lengths[i] : prefill_cp_padding_lengths[i].item<int>();
         int valid_count   = padded_length - padding_count;
 
         std::fill_n(mask_data + offset, valid_count, 1);
@@ -162,11 +181,11 @@ torch::Tensor ZigZagProcessor::computeLocalLastHidden(const torch::Tensor&      
     // on; searchsorted needs it on the padding mask's device.
     torch::Tensor lm_output_indexes = inputs.lm_output_indexes.to(
         cp_params.prefill_qkv_padding_mask.options().dtype(torch::kLong), /*non_blocking=*/true);
-    torch::Tensor valid_indices     = at::searchsorted(cp_params.prefill_qkv_padding_mask.cumsum(0),
+    torch::Tensor valid_indices = at::searchsorted(cp_params.prefill_qkv_padding_mask.cumsum(0),
                                                    lm_output_indexes + 1,
                                                    /*out_int32=*/false,
                                                    /*right=*/false);
-    torch::Tensor sel = cp_params.prefill_qkv_restore_indice.index_select(0, valid_indices).to(torch::kLong);
+    torch::Tensor sel           = cp_params.prefill_qkv_restore_indice.index_select(0, valid_indices).to(torch::kLong);
 
     // sel is non-negative kLong; floor-division and the residual recover (rank, offset).
     torch::Tensor owner     = sel.div(chunk_len, c10::string_view("floor"));
