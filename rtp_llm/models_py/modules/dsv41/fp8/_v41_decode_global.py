@@ -277,6 +277,11 @@ def _index_norm_store_state_kernel(
             )
 
 
+# Bound the token-parallel producer to the covered MTP verify shape (32 x 6).
+# Larger batches retain the existing fallback.
+_MAX_FUSED_TOKENS = 192
+
+
 def is_supported(attn, x, positions, req_ids, starts) -> bool:
     """Static decode gate; unsupported layouts retain the unmodified path."""
     if (
@@ -285,7 +290,7 @@ def is_supported(attn, x, positions, req_ids, starts) -> bool:
         or x.ndim != 3
         or x.shape[-1] != 5120
         or not x.is_contiguous()
-        or not 0 < x.shape[0] * x.shape[1] <= 64
+        or not 0 < x.shape[0] * x.shape[1] <= _MAX_FUSED_TOKENS
         or attn.compress_ratio not in (1, 2)
         or (attn.head_dim, attn.index_head_dim, attn.rope_head_dim) != (512, 128, 64)
         or attn._block_tables_by_type is None
