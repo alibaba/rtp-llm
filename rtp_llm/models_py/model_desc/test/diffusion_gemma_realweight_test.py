@@ -471,6 +471,8 @@ class DiffusionGemmaReuseABTest(unittest.TestCase):
         from safetensors.torch import load_file
 
         device = _torch.device("cuda:0")
+        cfg = _make_real_config()
+        cfg.attn_config.dtype = _torch.bfloat16
         mw = ModelWeights(LAYERS, "cuda", _torch.bfloat16)
         index = json.load(open(os.path.join(CKPT, "model.safetensors.index.json")))
         weight_map = index["weight_map"]
@@ -539,7 +541,7 @@ class DiffusionGemmaReuseABTest(unittest.TestCase):
 
         with patch.object(dgm, "RMSNorm", _TorchRMSNorm):
             model = dgm.DiffusionGemmaModel(
-                _make_real_config(), ParallelismConfig(), mw,
+                cfg, ParallelismConfig(), mw,
                 max_generate_batch_size=2,
             )
         model.eval()
