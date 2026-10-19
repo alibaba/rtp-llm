@@ -79,6 +79,7 @@ def decode_compute_qkv(
     swa_slots: torch.Tensor | None = None,
     mega_attention=None,
     shared_input_quant=None,
+    qb_pdl: bool = False,
 ) -> DecodeQKV:
     """Decode Q/KV path — RMSNorm + LoRA Q + KV linear + fused RMSNorm-RoPE.
 
@@ -107,6 +108,7 @@ def decode_compute_qkv(
             attn,
             x,
             quantized_input=shared_input_quant,
+            pdl=qb_pdl,
         )
     )
     qr_quantized = None if quantized_qkv is None else quantized_qkv[2]

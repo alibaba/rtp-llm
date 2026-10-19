@@ -53,19 +53,30 @@ class DecodeQKVIntegrationCPU(unittest.TestCase):
         )
         pool = torch.zeros(1, 8, 528, dtype=torch.uint8)
         slots = torch.tensor([2, 5])
+        shared_input_quant = (object(), object())
         completed = rope_cache.FusedQKVRopeCache(q.view(1, 2, 1, 512), kv, freqs)
         with patch.object(
             _v41_query_quant,
             "try_project_quantized_qkv",
             return_value=(qr, kv, quantized),
-        ), patch.object(
+        ) as project, patch.object(
             rope_cache, "try_fused_qkv_rope_cache", return_value=completed
         ) as fused, patch.object(
             compute_qkv, "fused_rmsnorm_rope"
         ) as old_norm:
             result = compute_qkv.decode_compute_qkv(
-                attn, qr, positions, freqs_cis=freqs, swa_pool=pool, swa_slots=slots
+                attn,
+                qr,
+                positions,
+                freqs_cis=freqs,
+                swa_pool=pool,
+                swa_slots=slots,
+                shared_input_quant=shared_input_quant,
+                qb_pdl=True,
             )
+        project.assert_called_once_with(
+            attn, qr, quantized_input=shared_input_quant, pdl=True
+        )
         self.assertTrue(result.swa_written)
         self.assertIs(result.qr_quantized, quantized)
         self.assertIs(result.qr, qr)

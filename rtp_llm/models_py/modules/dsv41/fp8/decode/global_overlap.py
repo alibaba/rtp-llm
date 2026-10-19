@@ -21,7 +21,15 @@ _GLOBAL_COMPUTE_STREAMS = threading.local()
 def is_supported(attn, x, positions, req_ids, starts) -> bool:
     if (
         os.environ.get("DSV41_OVERLAP_GLOBAL_QKV", "1") != "1"
-        or os.environ.get("MOEDBG", "0") != "0"
+    ):
+        return False
+    return supports_paged_global(attn, x, positions, req_ids, starts)
+
+
+def supports_paged_global(attn, x, positions, req_ids, starts) -> bool:
+    """Native producer/layout contract, independent of the scheduling policy."""
+    if (
+        os.environ.get("MOEDBG", "0") != "0"
         or not attn.is_kv_source
         or attn.compress_ratio not in (1, 2)
         or not x.is_cuda

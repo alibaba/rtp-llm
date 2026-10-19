@@ -32,6 +32,47 @@ def reference(x, weight):
 
 
 class QueryQuantGateTest(unittest.TestCase):
+    def test_shared_fp8_input_and_pdl_are_independent(self):
+        x = torch.empty(1, 2, 512, dtype=torch.bfloat16)
+        projected = torch.randn(1, 2, 640, dtype=torch.bfloat16)
+        norm = torch.empty(1, 2, 128, dtype=torch.bfloat16)
+        quant = (object(), object())
+        for shared in (None, (object(), object())):
+            for pdl in (False, True):
+                linear = Mock(return_value=projected, N=640)
+                linear.forward_quantized.return_value = projected.flatten(0, 1)
+                attn = SimpleNamespace(
+                    wq_b=Mock(spec=V41MXFP8Linear),
+                    wq_a_wkv=linear,
+                    q_norm=torch.ones(128, dtype=torch.bfloat16),
+                    q_lora_rank=128,
+                    eps=1e-6,
+                )
+                with self.subTest(shared=shared is not None, pdl=pdl), patch.dict(
+                    os.environ,
+                    {"DSV41_FUSED_QUERY_QUANT": "1", "DSV4_FP8_QUANT_KERNEL": "auto"},
+                ), patch(
+                    "rtp_llm.models_py.modules.dsv41._v41_query_quant.is_supported",
+                    return_value=True,
+                ), patch(
+                    "rtp_llm.models_py.modules.dsv41._v41_query_quant.query_norm_quant",
+                    return_value=(norm, quant),
+                ) as normalize:
+                    result = try_project_quantized_qkv(attn, x, shared, pdl=pdl)
+                if shared is None:
+                    linear.assert_called_once_with(x)
+                    linear.forward_quantized.assert_not_called()
+                else:
+                    linear.assert_not_called()
+                    linear.forward_quantized.assert_called_once_with(*shared)
+                self.assertEqual(normalize.call_args.kwargs, {"pdl": pdl})
+                torch.testing.assert_close(
+                    normalize.call_args.args[0], projected[..., :128]
+                )
+                self.assertIs(result[0], norm)
+                self.assertIs(result[2], quant)
+                torch.testing.assert_close(result[1], projected[..., 128:])
+
     def test_disabled_does_not_access_attention(self):
         with patch.dict(os.environ, {"DSV41_FUSED_QUERY_QUANT": "0"}):
             self.assertIsNone(try_project_quantized_qkv(None, None))

@@ -2,6 +2,7 @@
 
 import contextlib
 import os
+import sys
 import threading
 import unittest
 from types import MethodType, SimpleNamespace
@@ -10,6 +11,7 @@ from unittest.mock import Mock, patch
 import torch
 
 from rtp_llm.models_py.modules.dsv41.fp8.attention_v41 import AttentionV41FP8
+from rtp_llm.models_py.modules.dsv41.fp8.decode import full_overlap
 from rtp_llm.models_py.modules.dsv41.fp8.decode import global_overlap as overlap
 from rtp_llm.models_py.modules.dsv41.fp8.test.test_v41_decode_global import (
     _case,
@@ -159,6 +161,7 @@ class GlobalOverlapCPUTest(unittest.TestCase):
         from rtp_llm.models_py.modules.dsv41.attn_type import SWA_KV
 
         x = torch.empty(1, 1, 5120)
+        shared_input_quant = (object(), object())
         metadata = SimpleNamespace(
             position_ids=torch.zeros(1, dtype=torch.int32),
             req_id_per_token=torch.zeros(1, dtype=torch.int32),
@@ -175,6 +178,7 @@ class GlobalOverlapCPUTest(unittest.TestCase):
                 )
 
                 def project(*args, **kwargs):
+                    self.assertIs(kwargs["shared_input_quant"], shared_input_quant)
                     calls.append("qkv")
                     if fail_qkv:
                         raise RuntimeError("qkv stop")
@@ -212,14 +216,18 @@ class GlobalOverlapCPUTest(unittest.TestCase):
                     _select_indices_decode=select,
                     _produce_global_decode=Mock(),
                 )
-                with patch.object(
+                with patch.dict(
+                    os.environ, {"DSV41_FULL_DECODE_MULTISTREAM": "0"}
+                ), patch.object(
                     overlap, "start_global_decode", return_value=work
                 ), patch(
                     "rtp_llm.models_py.modules.dsv41.fp8.decode.compute_qkv.decode_compute_qkv",
                     side_effect=project,
                 ):
                     with self.assertRaisesRegex(RuntimeError, "qkv stop|indexer stop"):
-                        AttentionV41FP8._forward_decode_body(attn, x, metadata)
+                        AttentionV41FP8._forward_decode_body(
+                            attn, x, metadata, shared_input_quant=shared_input_quant
+                        )
                 self.assertEqual(
                     calls,
                     (
@@ -229,6 +237,242 @@ class GlobalOverlapCPUTest(unittest.TestCase):
                     ),
                 )
                 attn._produce_global_decode.assert_not_called()
+
+
+class FullOverlapCPUTest(unittest.TestCase):
+    def setUp(self):
+        env = patch.dict(os.environ)
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop("DSV41_FULL_DECODE_MULTISTREAM", None)
+        os.environ.pop("DSV41_FULL_DECODE_QB_PDL", None)
+
+    def test_default_multistream_preserves_native_eligibility(self):
+        attn = SimpleNamespace(
+            is_kv_source=True,
+            is_index_source=True,
+            layer_id=2,
+            kv_source_layer_id=2,
+            tp_size=1,
+            index_n_heads=32,
+            index_head_dim=128,
+            index_topk=512,
+        )
+        x = SimpleNamespace(is_cuda=True)
+        for supported in (False, True):
+            with self.subTest(supported=supported), patch.object(
+                full_overlap, "supports_paged_global", return_value=supported
+            ) as native:
+                self.assertEqual(
+                    full_overlap.is_supported(attn, x, None, None, None), supported
+                )
+                native.assert_called_once_with(attn, x, None, None, None)
+
+    def test_attention_body_preserves_shared_input_in_full_path(self):
+        from rtp_llm.models_py.modules.dsv41.attn_type import SWA_KV
+
+        x = torch.empty(1, 1, 5120)
+        metadata = SimpleNamespace(
+            position_ids=torch.zeros(1, dtype=torch.int32),
+            req_id_per_token=torch.zeros(1, dtype=torch.int32),
+            start_pos=torch.zeros(1, dtype=torch.int32),
+            swa_global_slots=torch.zeros(1, 128, dtype=torch.int32),
+            pool_write_slot_mappings={},
+        )
+        mega = SimpleNamespace(
+            supports_input=lambda _: True,
+            supports_decode=lambda *args: True,
+            supports_pool=lambda *args: True,
+            merged_qb=object(),
+        )
+        attn = SimpleNamespace(
+            _begin_forward=lambda: None,
+            _shared_attention={"global": {2: object()}},
+            freqs_cis=torch.ones(1, 32, dtype=torch.complex64),
+            compress_ratio=1,
+            is_kv_source=True,
+            is_index_source=True,
+            layer_id=2,
+            kv_source_layer_id=2,
+            tp_size=1,
+            index_topk=512,
+            index_weights=object(),
+            _mega_attention=mega,
+            _source_pool=lambda _: None,
+            _global_region=lambda: SWA_KV,
+            _pool_view_3d_fp8=lambda _: None,
+            _produce_global_decode=Mock(),
+        )
+        main, glob, aux = Mock(), Mock(), Mock()
+        glob.cuda_stream, aux.cuda_stream = 123, 456
+        glob.device = aux.device = torch.device("cuda", 0)
+        attn._full_decode_overlap_warmed = {(0, tuple(x.shape), 123, 456)}
+        with patch.dict(
+            sys.modules, {"deep_gemm": SimpleNamespace(get_pdl=lambda: True)}
+        ), patch.object(full_overlap, "is_supported", return_value=True), patch.object(
+            full_overlap, "_GLOBAL_COMPUTE_STREAMS", {0: glob}
+        ), patch.object(
+            full_overlap, "_INDEXER_STREAMS", {0: aux}
+        ), patch(
+            "rtp_llm.models_py.modules.dsv41.fp8.attention._cuda_device_index",
+            return_value=0,
+        ), patch(
+            "torch.cuda.current_stream", return_value=main
+        ), patch(
+            "torch.cuda.device", side_effect=lambda _: contextlib.nullcontext()
+        ), patch(
+            "torch.cuda.stream", side_effect=lambda _: contextlib.nullcontext()
+        ), patch.object(
+            full_overlap.F, "linear", return_value=Mock()
+        ), patch.object(
+            full_overlap._v41_decode_indexer, "get_decode_metadata", return_value=None
+        ):
+            for capturing in (False, True):
+                for quantized in (None, (object(), object())):
+                    with self.subTest(
+                        capturing=capturing, shared=quantized is not None
+                    ), patch(
+                        "torch.cuda.is_current_stream_capturing", return_value=capturing
+                    ), patch.object(
+                        full_overlap,
+                        "decode_compute_qkv",
+                        side_effect=RuntimeError("qkv stop"),
+                    ) as project:
+                        with self.assertRaisesRegex(RuntimeError, "qkv stop"):
+                            AttentionV41FP8._forward_decode_body(
+                                attn, x, metadata, shared_input_quant=quantized
+                            )
+                        self.assertIs(
+                            project.call_args.kwargs["shared_input_quant"], quantized
+                        )
+                        self.assertTrue(project.call_args.kwargs["qb_pdl"])
+
+    def test_qb_pdl_gate_does_not_change_deepgemm_policy(self):
+        dg = SimpleNamespace(get_pdl=Mock(return_value=True), set_pdl=Mock())
+        mega = SimpleNamespace(merged_qb=object())
+        with patch.dict(sys.modules, {"deep_gemm": dg}):
+            with patch.dict(os.environ, {"DSV41_FULL_DECODE_QB_PDL": "0"}):
+                self.assertFalse(full_overlap._qb_pdl_enabled(mega))
+            dg.get_pdl.assert_not_called()
+            for env in ({}, {"DSV41_FULL_DECODE_QB_PDL": "1"}):
+                with self.subTest(env=env), patch.dict(os.environ, env):
+                    dg.get_pdl.reset_mock()
+                    dg.get_pdl.return_value = True
+                    self.assertFalse(full_overlap._qb_pdl_enabled(None))
+                    self.assertFalse(full_overlap._qb_pdl_enabled(SimpleNamespace()))
+                    dg.get_pdl.assert_not_called()
+                    self.assertTrue(full_overlap._qb_pdl_enabled(mega))
+                    dg.get_pdl.return_value = False
+                    self.assertFalse(full_overlap._qb_pdl_enabled(mega))
+            dg.set_pdl.assert_not_called()
+        with patch.dict(sys.modules, {"deep_gemm": SimpleNamespace()}):
+            self.assertFalse(full_overlap._qb_pdl_enabled(mega))
+
+    def test_gate_rejects_cpu_reuse_tp_and_disabled_without_native_access(self):
+        attn = SimpleNamespace(
+            is_kv_source=True,
+            is_index_source=True,
+            layer_id=2,
+            kv_source_layer_id=2,
+            tp_size=1,
+            index_n_heads=32,
+            index_head_dim=128,
+            index_topk=512,
+        )
+        x = SimpleNamespace(is_cuda=True)
+        for attribute, value in (
+            ("is_kv_source", False),
+            ("is_index_source", False),
+            ("kv_source_layer_id", 1),
+            ("tp_size", 2),
+            ("index_topk", 128),
+        ):
+            with self.subTest(attribute=attribute), patch.dict(
+                os.environ, {"DSV41_FULL_DECODE_MULTISTREAM": "1"}
+            ), patch.object(attn, attribute, value), patch.object(
+                full_overlap, "supports_paged_global"
+            ) as native:
+                self.assertFalse(full_overlap.is_supported(attn, x, None, None, None))
+                native.assert_not_called()
+        with patch.dict(os.environ, {"DSV41_FULL_DECODE_MULTISTREAM": "0"}):
+            self.assertIsNone(
+                full_overlap.try_full_decode(None, None, None, None, None, None, None)
+            )
+        with patch.dict(os.environ, {"DSV41_FULL_DECODE_MULTISTREAM": "1"}):
+            self.assertFalse(
+                full_overlap.is_supported(attn, torch.empty(1), None, None, None)
+            )
+
+    def test_candidate_fork_and_exit_join_preserve_lifetimes(self):
+        main, glob, aux = Mock(), Mock(), Mock()
+        logits, lengths, candidates, flags = (Mock() for _ in range(4))
+        work = full_overlap.FullDecodeWork(main, glob, aux)
+        with patch(
+            "torch.cuda.stream", return_value=contextlib.nullcontext()
+        ), patch.object(
+            full_overlap._v41_decode_topk,
+            "select_candidates",
+            return_value=(candidates, flags),
+        ):
+            self.assertEqual(
+                work.select_candidates(logits, lengths, 8, 2048), (candidates, flags)
+            )
+        aux.wait_stream.assert_called_once_with(main)
+        main.wait_stream.assert_not_called()
+        self.assertEqual(work.inputs, [logits, lengths])
+        work.finish()
+        work.finish()
+        self.assertEqual(main.wait_stream.call_count, 2)
+        candidates.record_stream.assert_called_once_with(main)
+        flags.record_stream.assert_called_once_with(main)
+        self.assertEqual(work.inputs, [])
+
+    def test_cold_capture_and_failed_producer(self):
+        x = torch.empty(1, 1, 5120)
+        metadata = SimpleNamespace(
+            req_id_per_token=torch.zeros(1), start_pos=torch.zeros(1)
+        )
+        attn = SimpleNamespace(
+            is_kv_source=True,
+            is_index_source=True,
+            layer_id=2,
+            kv_source_layer_id=2,
+            tp_size=1,
+            _produce_global_decode=Mock(side_effect=RuntimeError("producer failed")),
+        )
+        main, glob, aux = Mock(), Mock(), Mock()
+        glob.cuda_stream, aux.cuda_stream = 123, 456
+        glob.device = aux.device = torch.device("cuda", 0)
+        with patch.dict(
+            os.environ, {"DSV41_FULL_DECODE_MULTISTREAM": "1"}
+        ), patch.object(full_overlap, "is_supported", return_value=True), patch.object(
+            full_overlap, "_GLOBAL_COMPUTE_STREAMS", {0: glob}
+        ), patch.object(
+            full_overlap, "_INDEXER_STREAMS", {0: aux}
+        ), patch(
+            "rtp_llm.models_py.modules.dsv41.fp8.attention._cuda_device_index",
+            return_value=0,
+        ), patch(
+            "torch.cuda.current_stream", return_value=main
+        ), patch(
+            "torch.cuda.device", side_effect=lambda _: contextlib.nullcontext()
+        ), patch(
+            "torch.cuda.stream", side_effect=lambda _: contextlib.nullcontext()
+        ):
+            with patch("torch.cuda.is_current_stream_capturing", return_value=True):
+                self.assertIsNone(
+                    full_overlap.try_full_decode(
+                        attn, x, metadata, None, None, None, None
+                    )
+                )
+            attn._produce_global_decode.assert_not_called()
+            with patch("torch.cuda.is_current_stream_capturing", return_value=False):
+                with self.assertRaisesRegex(RuntimeError, "producer failed"):
+                    full_overlap.try_full_decode(
+                        attn, x, metadata, None, None, None, None
+                    )
+            self.assertEqual(main.wait_stream.call_count, 2)
+            self.assertFalse(hasattr(attn, "_full_decode_overlap_warmed"))
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
@@ -394,6 +638,244 @@ class GlobalOverlapCudaTest(unittest.TestCase):
                         torch.testing.assert_close(
                             pool, expected_pools[key], rtol=0, atol=0
                         )
+
+
+def full_attention_case(ratio, batch, span, context):
+    """Real TP1 FULL projection sizes and paged caches, without model loading."""
+    from rtp_llm.models_py.modules.dsv41.attn_type import CSA_STATE, INDEXER_KV, SWA_KV
+    from rtp_llm.models_py.modules.dsv41.fp8 import _v41_mega_attention as mega
+    from rtp_llm.models_py.modules.dsv41.fp8._v41_merged_qb import MergedQB
+    from rtp_llm.models_py.modules.dsv41.fp8._v41_swa_triton import (
+        quantize_and_insert_swa_k_cache,
+    )
+    from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
+    from rtp_llm.utils.model_weight import W
+
+    torch.manual_seed(1919)
+    case = _case("cuda", ratio, batch, span)
+    attn = case.owner
+    pages = (context + 127) // 128
+    for region in (attn._global_region(), INDEXER_KV):
+        table = torch.arange(1, batch * pages + 1, device="cuda").view(batch, pages)
+        if region == INDEXER_KV:
+            table = table.flip(1)
+        attn._block_tables_by_type[region] = table.int().contiguous()
+        entries, width = (128, 68) if region == INDEXER_KV else (128 // ratio, 288)
+        pool = torch.randint(
+            0,
+            256,
+            (batch * pages + 1, entries, width),
+            dtype=torch.uint8,
+            device="cuda",
+        )
+        if region == INDEXER_KV:
+            pool.view(pool.shape[0], -1)[:, entries * 64 :].fill_(123)
+        else:
+            pool[..., 256:].fill_(40)
+        attn._test_pools[region] = pool
+    swa = torch.empty(batch + 1, 256, 528, device="cuda", dtype=torch.uint8)
+    quantize_and_insert_swa_k_cache(
+        torch.randn((batch + 1) * 256, 512, device="cuda", dtype=torch.bfloat16),
+        swa,
+        torch.arange((batch + 1) * 256, device="cuda"),
+    )
+    attn._test_pools[SWA_KV] = swa
+    attn._rope_max_seq_len = context
+    angles = torch.outer(
+        torch.arange(context + 128, device="cuda").float(),
+        torch.linspace(0.001, 0.1, 32, device="cuda"),
+    )
+    attn.freqs_cis = torch.polar(torch.ones_like(angles), angles)
+
+    def linear(n, k):
+        weight = torch.randint(-8, 9, (n, k), device="cuda").to(torch.float8_e4m3fn)
+        scale = torch.full((n // 32, k // 32), 2**-8, device="cuda").to(
+            torch.float8_e8m0fnu
+        )
+        return V41MXFP8Linear(weight, scale), scale
+
+    attn.dim, attn.n_heads, attn.n_groups, attn.o_lora_rank = 5120, 64, 8, 1024
+    attn.q_lora_rank, attn.index_topk, attn.tp_size, attn.window_size = (
+        1280,
+        512,
+        1,
+        128,
+    )
+    attn.skip_post_q_norm = attn.is_kv_source = attn.is_index_source = True
+    attn.decode_sparse_mqa = True
+    attn.v41_config = dict(
+        candidate_source_layer_id=20, candidate_topk_blocks=2048, candidate_block_size=8
+    )
+    attn.q_norm = torch.ones(1280, device="cuda", dtype=torch.bfloat16)
+    attn.kv_norm = torch.ones(512, device="cuda", dtype=torch.bfloat16)
+    attn.wq_a_wkv, _ = linear(1792, 5120)
+    attn.wq_b, _ = linear(32768, 1280)
+    attn.index_wq, index_scale = linear(4096, 1280)
+    attn.wo_b, _ = linear(5120, 8192)
+    attn.index_weights = (
+        torch.randn(32, 5120, device="cuda", dtype=torch.bfloat16) / 5120**0.5
+    )
+    attn._wo_a_stk_w = torch.randint(-8, 9, (8, 1024, 4096), device="cuda").to(
+        torch.float8_e4m3fn
+    )
+    attn._wo_a_stk_s = torch.full(
+        (8, 32, 1024), 0x77777777, dtype=torch.int32, device="cuda"
+    ).transpose(1, 2)
+    attn.attn_sink = torch.zeros(64, device="cuda")
+    attn.softmax_scale = 512**-0.5
+    attn._mega_attention = mega.prepare(attn)
+    if attn._mega_attention is None:
+        raise unittest.SkipTest("FlashMLA mega attention backend unavailable")
+    from rtp_llm.models_py.modules.dsv41.fp8._v41_output_projection import (
+        warmup_quantized_output,
+    )
+
+    case.wo_a_quant_ready = warmup_quantized_output(
+        attn._mega_attention.output_weight, attn._mega_attention.output_scale
+    )
+    attn._mega_attention.merged_qb = MergedQB.create(
+        attn,
+        attn._mega_attention,
+        {W.v4_indexer_wq_b_w: attn.index_wq.weight, W.v4_indexer_wq_b_s: index_scale},
+    )
+    assert attn._mega_attention.merged_qb is not None
+    attn._shared_attention["layers"] = {attn.layer_id: attn}
+    for method in (
+        "_begin_forward",
+        "_produce_global_decode",
+        "_select_indices_decode",
+        "_decode_global_slots",
+        "_mega_position_chunks",
+        "_forward_decode_body",
+    ):
+        setattr(attn, method, MethodType(getattr(AttentionV41FP8, method), attn))
+    attn._pool_view_3d_fp8 = attn._source_pool
+    attn._prefill_output_all_reduce = lambda _: None  # TP1 has no collective.
+    case.starts.fill_(context - span - 2)
+    case.positions.copy_(
+        (case.starts[:, None] + torch.arange(span, device="cuda")).flatten()
+    )
+    writes = (case.req_ids + 1) * 256 + case.positions % 256
+    swa_indices = (
+        (case.positions[:, None] - torch.arange(127, -1, -1, device="cuda")) % 256
+        + (case.req_ids[:, None] + 1) * 256
+    ).int()
+    case.metadata = SimpleNamespace(
+        req_id_per_token=case.req_ids.int(),
+        start_pos=case.starts,
+        position_ids=case.positions,
+        swa_global_slots=swa_indices,
+        pool_write_slot_mappings={SWA_KV: writes},
+    )
+    return case
+
+
+def run_full_attention(case, concurrent):
+    with patch.dict(
+        os.environ,
+        {
+            "DSV41_FULL_DECODE_MULTISTREAM": str(int(concurrent)),
+            "DSV41_OVERLAP_GLOBAL_QKV": "0",
+        },
+    ):
+        out = case.owner._forward_decode_body(case.x, case.metadata)
+    shared = case.owner._shared_attention
+    results = {"output": out, "tokens": shared["topk"][case.owner.layer_id]}
+    if shared.get("candidates") is not None:
+        results.update(
+            candidates=shared["candidates"], flags=shared["candidate_mask"][1]
+        )
+    return results
+
+
+def update_full_positions(case):
+    from rtp_llm.models_py.modules.dsv41.attn_type import SWA_KV
+
+    span = case.x.shape[1]
+    case.positions.copy_(
+        (case.starts[:, None] + torch.arange(span, device=case.x.device)).flatten()
+    )
+    case.metadata.pool_write_slot_mappings[SWA_KV].copy_(
+        (case.req_ids + 1) * 256 + case.positions % 256
+    )
+    case.metadata.swa_global_slots.copy_(
+        (case.positions[:, None] - torch.arange(127, -1, -1, device=case.x.device))
+        % 256
+        + (case.req_ids[:, None] + 1) * 256
+    )
+
+
+@unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+class FullOverlapCudaTest(unittest.TestCase):
+    def test_qb_pdl_dynamic_graph(self):
+        import deep_gemm
+
+        if not hasattr(deep_gemm, "get_pdl") or not deep_gemm.get_pdl():
+            self.skipTest("DeepGEMM PDL consumer must already be enabled")
+        with patch.dict(os.environ, {"DSV41_FULL_DECODE_QB_PDL": "1"}):
+            self.test_real_full_graph_replay_and_changed_inputs()
+
+    @torch.inference_mode()
+    def test_real_full_graph_replay_and_changed_inputs(self):
+        if torch.cuda.get_device_capability()[0] != 10:
+            self.skipTest("native global producer requires Blackwell")
+        for ratio, batch, span in (
+            (1, 3, 5),
+            (2, 3, 5),
+            (2, 1, 1),
+            (2, 7, 6),
+            (2, 1, 8),
+        ):
+            with self.subTest(ratio=ratio, batch=batch, span=span):
+                case = full_attention_case(ratio, batch, span, 32768)
+                initial = {k: v.clone() for k, v in case.owner._test_pools.items()}
+                stream = torch.cuda.Stream()
+                stream.wait_stream(torch.cuda.current_stream())
+                with torch.cuda.stream(stream):
+                    for _ in range(3):
+                        run_full_attention(case, True)
+                    self.assertTrue(case.owner._full_decode_overlap_warmed)
+                    graph = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(graph, stream=stream):
+                        actual = run_full_attention(case, True)
+                        observed = {
+                            k: v.clone() for k, v in case.owner._test_pools.items()
+                        }
+                torch.cuda.current_stream().wait_stream(stream)
+                for iteration in range(3):
+                    case.x.copy_(torch.randn_like(case.x))
+                    case.starts.sub_(1)
+                    update_full_positions(case)
+                    # Change physical page mappings without changing graph pointers.
+                    for table in case.owner._block_tables_by_type.values():
+                        table.copy_(table.roll(1, 1))
+                    for key, value in initial.items():
+                        case.owner._test_pools[key].copy_(value)
+                    expected = run_full_attention(case, False)
+                    expected_pools = {
+                        k: v.clone() for k, v in case.owner._test_pools.items()
+                    }
+                    for key, value in initial.items():
+                        case.owner._test_pools[key].copy_(value)
+                    graph.replay()
+                    for key in expected:
+                        self.assertTrue(torch.isfinite(actual[key]).all())
+                        # Both selectors permit tie ordering; comparing it exactly here
+                        # also catches timing-sensitive nondeterminism in this fixture.
+                        torch.testing.assert_close(
+                            actual[key], expected[key], rtol=0, atol=0, msg=key
+                        )
+                    for key in observed:
+                        torch.testing.assert_close(
+                            observed[key], expected_pools[key], rtol=0, atol=0
+                        )
+
+    def test_unfused_metadata_and_legacy_topk_graph(self):
+        with patch.dict(
+            os.environ,
+            {"DSV41_FUSE_INDEXER_METADATA": "0", "DSV41_DECODE_DEEPSELECT": "0"},
+        ):
+            self.test_real_full_graph_replay_and_changed_inputs()
 
 
 if __name__ == "__main__":
