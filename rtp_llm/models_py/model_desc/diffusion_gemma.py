@@ -105,6 +105,10 @@ class DiffusionGemmaRope(nn.Module):
         self._dtype = dtype
         self._cos: Optional[torch.Tensor] = None
         self._sin: Optional[torch.Tensor] = None
+        # rope apply() memo: the positions tensor seen last (object identity)
+        # and its host-side max — see apply().
+        self._pos_memo_ref: Optional[torch.Tensor] = None
+        self._pos_memo_max: int = 0
         self._build_cache(max(max_seq_len, 1))
 
     def _build_cache(self, seq_len: int) -> None:
@@ -123,7 +127,16 @@ class DiffusionGemmaRope(nn.Module):
         self, q: torch.Tensor, k: torch.Tensor, positions: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Rotate q/k (…, head_dim) in-place-safe with rotate-half layout."""
-        self._build_cache(int(positions.max().item()) + 1 if positions.numel() else 1)
+        # positions.max().item() is a per-layer device sync, but every layer
+        # in one forward receives the SAME positions tensor object — pay the
+        # sync once per distinct tensor (memo on object identity) and reuse
+        # the host-side max for the rest of the forward. Same values reach
+        # _build_cache, zero semantic change.
+        if positions is not self._pos_memo_ref:
+            self._pos_memo_ref = positions
+            self._pos_memo_max = int(positions.max().item()) if positions.numel() else 0
+        need = self._pos_memo_max + 1 if positions.numel() else 1
+        self._build_cache(need)
         cos = self._cos[positions.long()].to(q.dtype)
         sin = self._sin[positions.long()].to(q.dtype)
         while cos.dim() < q.dim():
@@ -951,9 +964,14 @@ class DiffusionGemmaExperts(nn.Module):
         boundaries = torch.searchsorted(
             sorted_idx, torch.arange(E + 1, device=sorted_idx.device)
         )
+        # One batched D2H instead of 256 per-slot .item() reads: the expert
+        # loop used to sync on boundaries[e]/[e+1] for every slot (including
+        # empty ones) — 860k .item() launches across a decode window, the
+        # measured #1 CPU-side bottleneck (workflow census cross-check).
+        bounds = boundaries.tolist()
         for e in range(E):
-            lo = int(boundaries[e].item())
-            hi = int(boundaries[e + 1].item())
+            lo = bounds[e]
+            hi = bounds[e + 1]
             if hi <= lo:
                 continue
             rows = sorted_h[lo:hi]
