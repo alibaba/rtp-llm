@@ -83,6 +83,66 @@ def _candidate_pool_kernel(
 
 
 @triton.jit
+def _candidate_pool_bounded_kernel(
+    logits,
+    lengths,
+    scores,
+    block_lengths,
+    WIDTH: tl.constexpr,
+    STRIDE: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    SCORE_STRIDE: tl.constexpr,
+    TILE: tl.constexpr,
+):
+    """Length-bounded candidate pooling: one CTA per row, dynamic loop over the
+    visible blocks only, no scores written beyond ``block_lengths[row]``.
+
+    The static ``_candidate_pool_kernel`` launches a capacity-wide grid
+    ``[rows, cdiv(nblocks, TILE)]``; at production decode shapes (width 524288,
+    block_size 8 => nblocks 65536, visible ~32.8k => ~4096 visible blocks) 93.75%
+    of the axis-1 programs load fully-masked ``-inf`` and store padding. Like the
+    round-14 compaction kernel, that grid is dispatch/wave-latency bound, not
+    store-bandwidth bound: measured 52.9 us static vs 6.6 us bounded (graph-replay
+    GPU timing, TILE=256/num_warps=8), an 8.1x removal of the only repo-side
+    indexer kernel >20 us left after round 14.
+
+    Blocks ``>= block_lengths[row]`` keep the allocator contents. This is safe
+    only for the topk_v3 selection path, whose readers all clamp by the same
+    per-row ``block_lengths``: topk_v3 scans ``seq_len = block_lengths[row]``
+    (topk_v3.cu:77, vector loads never straddle seq_len) and the store-flags
+    epilogue reads scores only at indices topk_v3 selected (< block_lengths).
+    The unbounded ``scores.topk`` fallback and the ``nblocks <= count`` dense
+    path read the full score row, so ``select_candidates`` retains the padded
+    static kernel for those. Visible-block scores and block_lengths are bitwise
+    identical to the static kernel (see test_v41_decode_topk).
+    """
+    row = tl.program_id(0).to(tl.int64)
+    visible = tl.minimum(tl.load(lengths + row), WIDTH)
+    nblocks_vis = tl.cdiv(visible, BLOCK_SIZE)
+    offsets = tl.arange(0, triton.next_power_of_2(BLOCK_SIZE))
+    load_base = logits + row * STRIDE
+    store_base = scores + row * SCORE_STRIDE
+    last_block = (visible - 1) // BLOCK_SIZE
+    for start in tl.range(0, nblocks_vis, TILE):
+        blocks = start + tl.arange(0, TILE)
+        columns = blocks[:, None] * BLOCK_SIZE + offsets[None, :]
+        # Full tiles gather unpredicated within the visible span; a single
+        # masked condition keeps the partial last block and the tile tail in
+        # bounds (columns < visible <= WIDTH, blocks < nblocks_vis).
+        values = tl.load(
+            load_base + columns,
+            (blocks[:, None] < nblocks_vis)
+            & (offsets[None, :] < BLOCK_SIZE)
+            & (columns < visible),
+            other=-float("inf"),
+        ).to(tl.float32)
+        pooled = tl.reduce(values, 1, _max_with_nan)
+        pooled = tl.where((visible > 0) & (blocks == last_block), float("inf"), pooled)
+        tl.store(store_base + blocks, pooled, blocks < nblocks_vis)
+    tl.store(block_lengths + row, nblocks_vis)
+
+
+@triton.jit
 def _candidate_store_flags_kernel(
     scores,
     candidates,
@@ -174,18 +234,38 @@ def select_candidates(
         (rows, score_stride), dtype=torch.float32, device=logits.device
     )[:, :nblocks]
     block_lengths = torch.empty((rows,), dtype=torch.int32, device=logits.device)
-    _candidate_pool_kernel[(rows, triton.cdiv(nblocks, 128))](
-        logits,
-        lengths,
-        scores,
-        block_lengths,
-        width,
-        logits.stride(0),
-        block_size,
-        nblocks,
-        score_stride,
-        128,
-    )
+    # The topk_v3 selection path clamps every score read by the per-row
+    # block_lengths, so pooling can skip the capacity-wide padding and the
+    # mostly-empty static grid (see _candidate_pool_bounded_kernel). The
+    # scores.topk fallback and the nblocks<=count dense epilogue read the full
+    # score row and keep the padded static kernel.
+    bounded_pool = nblocks > count and count in (512, 1024, 2048)
+    if bounded_pool:
+        _candidate_pool_bounded_kernel[(rows,)](
+            logits,
+            lengths,
+            scores,
+            block_lengths,
+            width,
+            logits.stride(0),
+            block_size,
+            score_stride,
+            256,
+            num_warps=8,
+        )
+    else:
+        _candidate_pool_kernel[(rows, triton.cdiv(nblocks, 128))](
+            logits,
+            lengths,
+            scores,
+            block_lengths,
+            width,
+            logits.stride(0),
+            block_size,
+            nblocks,
+            score_stride,
+            128,
+        )
     candidates = torch.empty((rows, count), dtype=torch.int32, device=logits.device)
     if nblocks > count:
         if count in (512, 1024, 2048):
