@@ -642,6 +642,51 @@ class DiffusionGemmaReuseABTest(unittest.TestCase):
         # first layer where the split-attention path diverges beyond bf16
         # rounding (~1e-2) — immediate divergence names a merge bug, gradual
         # growth names numerical chaos amplification.
+        # Ultimate probe: inside DiffusionGemmaAttnOp.forward, compute the
+        # torch fp32 reference from the SAME post-rope q/k/v and cached
+        # prefix, and print the flashinfer-vs-exact diff. Run 18: layer 0
+        # already diverges max 26 between the split and full paths — this
+        # names which side departs from exact math in the sharp regime.
+        _fi_calls = {"n": 0}
+
+        _orig_attn_forward = dgm.DiffusionGemmaAttnOp.forward
+
+        def _attn_op_forward_probe(self, q, k, v, kv_cache, attn_inputs,
+                                    positions, causal, write_kv):
+            out = _orig_attn_forward(self, q, k, v, kv_cache, attn_inputs,
+                                     positions, causal, write_kv)
+            if self.use_flashinfer and q.device.type == "cuda" and _fi_calls["n"] < 24:
+                _fi_calls["n"] += 1
+                import torch as _t
+                prefix_lens = attn_inputs.prefix_lengths
+                has_prefix = (
+                    kv_cache is not None and prefix_lens is not None
+                    and int(prefix_lens.max().item()) > 0
+                )
+                prefix_k = prefix_v = None
+                if has_prefix:
+                    prefix_k, prefix_v = self._gather_prefix(
+                        kv_cache, attn_inputs, prefix_lens, 1)
+                    plen = int(prefix_lens[0].item())
+                    # only rows of the prefix that precede the queries count;
+                    # the canvas/mixed case trims the tail below
+                    prefix_k = prefix_k[:plen]
+                    prefix_v = prefix_v[:plen]
+                ref = self._torch_attention(
+                    q, k, v, prefix_k, prefix_v, causal, prefix_lens,
+                    _t.tensor([0, q.shape[0]], dtype=_t.int32))
+                d = (out.float() - ref.float()).abs()
+                tag = f"qo={q.shape[0]} causal={causal} plen={int(prefix_lens[0].item()) if prefix_lens is not None else 0} hd={self.head_dim}"
+                print(
+                    f"[dgm-fi] ATTN EXACT-DIFF #{_fi_calls['n']} {tag}: "
+                    f"max={d.max().item():.4f} mean={d.mean().item():.4f} "
+                    f"absmax={float(out.float().abs().max()):.2f}",
+                    flush=True,
+                )
+            return out
+
+        dgm.DiffusionGemmaAttnOp.forward = _attn_op_forward_probe
+
         layer_outs = {}
         _orig_layer_forwards = [None, None, None]
 
@@ -728,6 +773,7 @@ class DiffusionGemmaReuseABTest(unittest.TestCase):
                 flush=True,
             )
 
+        dgm.DiffusionGemmaAttnOp.forward = _orig_attn_forward
         diff = (hidden_a.float() - hidden_b.float()).abs()
         std_a = float(hidden_a.float().reshape(-1, CANVAS, hidden_a.shape[-1]).std(dim=1).mean())
         std_b = float(hidden_b.float().reshape(-1, CANVAS, hidden_b.shape[-1]).std(dim=1).mean())
