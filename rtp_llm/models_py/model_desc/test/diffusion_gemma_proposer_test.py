@@ -389,6 +389,10 @@ class DiffusionGemmaProposerTest(TestCase):
             kv_cache_kernel_block_id=bt,
             kv_cache_kernel_block_id_device=bt,
             combo_position_ids=None,
+            # AttnOp.plan reads this attribute unconditionally; the real
+            # PyAttentionInputs always carries it (None allowed), the mock
+            # must too or the first GPU run dies with AttributeError.
+            sequence_lengths=None,
             is_target_verify=False,
         )
         inputs = SimpleNamespace(

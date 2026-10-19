@@ -304,6 +304,7 @@ def _attn_inputs(total, positions, batch=1, prefix_lens=None, block_table=None):
         kv_cache_kernel_block_id=block_table,
         kv_cache_kernel_block_id_device=block_table,
         combo_position_ids=positions.to(torch.int32),
+        sequence_lengths=None,
         is_target_verify=False,
     )
 
