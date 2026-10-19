@@ -374,6 +374,379 @@ TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_BatchSizeZero) {
     ASSERT_EQ(status, cudaSuccess);
 }
 
+namespace {
+
+torch::TensorOptions fxIntCuda() {
+    return torch::TensorOptions(torch::kInt32).device(torch::kCUDA);
+}
+torch::TensorOptions fxFloatCuda() {
+    return torch::TensorOptions(torch::kFloat32).device(torch::kCUDA);
+}
+torch::TensorOptions fxBoolCuda() {
+    return torch::TensorOptions(torch::kBool).device(torch::kCUDA);
+}
+
+// Mixed-outcome fixture for the folded finalization tests. Five rows cover
+// every kernel exit path and both force states:
+//   row 0: forced, greedy, rejects at position 1 (early-exit path, overridden)
+//   row 1: unforced, greedy, accepts all + bonus (early-exit path)
+//   row 2: forced, stochastic, accepts all (early-exit path, overridden)
+//   row 3: unforced, stochastic, rejects at position 1 -> residual sampling
+//          (residual exit path, -1 padding reset by the fold)
+//   row 4: unforced, greedy, rejects at position 0 (direct target fallback)
+// target_token_ids uses stride 3 with non-final columns filled with a decoy
+// value, pinning the production contract that only the last column is read.
+struct FinalizeFixture {
+    static constexpr int batch_size    = 5;
+    static constexpr int num_spec      = 3;
+    static constexpr int vocab_size    = 64;
+    static constexpr int target_stride = 3;
+    static constexpr int sentinel      = 0x5A5A5A5A;
+
+    torch::Tensor draft_probs;
+    torch::Tensor target_probs;
+    torch::Tensor draft_token_ids;
+    torch::Tensor target_token_ids;
+    torch::Tensor uniform_samples;
+    torch::Tensor do_sample;
+    torch::Tensor force_mask;  // device bool [batch]
+
+    static FinalizeFixture make() {
+        FinalizeFixture f;
+        const int       B = batch_size, S = num_spec, V = vocab_size, W = target_stride;
+        f.draft_token_ids = torch::empty({B, S}, fxIntCuda());
+        auto draft_h      = f.draft_token_ids.cpu();
+        for (int b = 0; b < B; ++b) {
+            for (int s = 0; s < S; ++s) {
+                // Distinct per row/position; token 0 avoided so the -1 -> 0
+                // reset is observable against real tokens.
+                draft_h[b][s] = 3 + b * S + s;
+            }
+        }
+        f.draft_token_ids = draft_h.to(fxIntCuda());
+
+        // Per (row, position) target argmax (last column):
+        //   rows 1, 2: match the draft everywhere (all accept).
+        //   row 0: match at 0, mismatch at 1 (greedy reject, forced).
+        //   row 3: match at 0, mismatch at 1 (stochastic reject -> residual).
+        //   row 4: mismatch at 0 (greedy reject).
+        // Mismatch values 2+s never collide with any draft token (3+3b+s).
+        auto target_argmax = torch::empty({B, S + 1}, torch::TensorOptions().dtype(torch::kInt32));
+        for (int b = 0; b < B; ++b) {
+            for (int s = 0; s < S; ++s) {
+                const bool matches  = (b == 1 || b == 2) || (b == 0 && s == 0) || (b == 3 && s == 0);
+                target_argmax[b][s] = matches ? draft_h[b][s].item<int>() : (2 + s);
+            }
+            target_argmax[b][S] = 40 + b;  // bonus token, distinct per row
+        }
+        f.target_token_ids = torch::full({B, S + 1, W}, 7777, fxIntCuda());  // decoy in non-final columns
+        auto ttid_h        = f.target_token_ids.cpu();
+        for (int b = 0; b < B; ++b) {
+            for (int s = 0; s <= S; ++s) {
+                ttid_h[b][s][W - 1] = target_argmax[b][s];
+            }
+        }
+        f.target_token_ids = ttid_h.to(fxIntCuda());
+
+        // One-hot materialized probs consistent with the argmax columns; p is
+        // one-hot on the draft token (p(draft) == 1), so stochastic rows accept
+        // when the target matches (q=1 > u) and reject when it does not (q=0).
+        f.draft_probs  = torch::zeros({B, S, V}, fxFloatCuda());
+        f.target_probs = torch::zeros({B, S + 1, V}, fxFloatCuda());
+        for (int b = 0; b < B; ++b) {
+            for (int s = 0; s < S; ++s) {
+                f.draft_probs.index_put_({b, s, draft_h[b][s].item<int>()}, 1.0f);
+                f.target_probs.index_put_({b, s, target_argmax[b][s].item<int>()}, 1.0f);
+            }
+            f.target_probs.index_put_({b, S, target_argmax[b][S].item<int>()}, 1.0f);
+        }
+
+        f.uniform_samples = torch::full({B, S + 1}, 0.5f, fxFloatCuda());
+        f.do_sample       = torch::tensor({false, false, true, true, false}, fxBoolCuda());
+        f.force_mask      = torch::tensor({true, false, true, false, false}, fxBoolCuda());
+        return f;
+    }
+
+    // The legacy eager finalization exactly as SpeculativeSampler::batchSample
+    // ran it before the fold: where(force, draft+bonus) then -1 -> 0 reset.
+    static std::pair<torch::Tensor, torch::Tensor> legacyChain(torch::Tensor        out_ids,
+                                                               torch::Tensor        acc_num,
+                                                               const torch::Tensor& draft_ids,
+                                                               const torch::Tensor& ttids,
+                                                               const torch::Tensor& force) {
+        if (force.defined() && force.any().item<bool>()) {
+            auto target_bonus_t = ttids.reshape({batch_size, num_spec + 1, target_stride});
+            auto target_bonus   = target_bonus_t.select(1, num_spec).select(1, target_stride - 1).unsqueeze(1);
+            auto forced_tokens  = torch::cat({draft_ids, target_bonus}, 1);
+            auto force_mask_2d  = force.unsqueeze(1).expand_as(out_ids);
+            out_ids             = torch::where(force_mask_2d, forced_tokens, out_ids);
+            acc_num             = torch::where(force, torch::full_like(acc_num, num_spec + 1), acc_num);
+        }
+        out_ids.index_put_({out_ids == -1}, 0);
+        return {out_ids, acc_num};
+    }
+};
+
+}  // namespace
+
+// The folded finalize phase must produce byte-identical outputs to the legacy
+// eager chain (where + full_like + index_put_) for a mixed force/do_sample /
+// accept-reject batch covering both kernel exit paths.
+TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_FinalizeMatchesLegacyForceWhereChain) {
+    auto f = FinalizeFixture::make();
+
+    // Legacy: kernel without finalize, zeros-init outputs, then eager chain.
+    auto legacy_ids = torch::zeros({FinalizeFixture::batch_size, FinalizeFixture::num_spec + 1}, intCuda());
+    auto legacy_acc = torch::zeros({FinalizeFixture::batch_size}, intCuda());
+    auto status     = rtp_llm::invokeRejectionSampling<float, int>(f.draft_probs.data_ptr<float>(),
+                                                               f.draft_token_ids.data_ptr<int>(),
+                                                               f.uniform_samples.data_ptr<float>(),
+                                                               f.target_probs.data_ptr<float>(),
+                                                               f.target_token_ids.data_ptr<int>(),
+                                                               FinalizeFixture::target_stride,
+                                                               legacy_ids.data_ptr<int>(),
+                                                               legacy_acc.data_ptr<int>(),
+                                                               f.do_sample.data_ptr<bool>(),
+                                                               FinalizeFixture::batch_size,
+                                                               FinalizeFixture::num_spec,
+                                                               FinalizeFixture::vocab_size,
+                                                               stream_);
+    ASSERT_EQ(status, cudaSuccess);
+    cudaStreamSynchronize(stream_);
+    auto [legacy_ids_ref, legacy_acc_ref] =
+        FinalizeFixture::legacyChain(legacy_ids, legacy_acc, f.draft_token_ids, f.target_token_ids, f.force_mask);
+
+    // Folded: sentinel-filled outputs (as if torch::empty garbage), finalize on.
+    auto folded_ids =
+        torch::full({FinalizeFixture::batch_size, FinalizeFixture::num_spec + 1}, FinalizeFixture::sentinel, intCuda());
+    auto folded_acc = torch::full({FinalizeFixture::batch_size}, FinalizeFixture::sentinel, intCuda());
+    auto status2    = rtp_llm::invokeRejectionSampling<float, int>(f.draft_probs.data_ptr<float>(),
+                                                                f.draft_token_ids.data_ptr<int>(),
+                                                                f.uniform_samples.data_ptr<float>(),
+                                                                f.target_probs.data_ptr<float>(),
+                                                                f.target_token_ids.data_ptr<int>(),
+                                                                FinalizeFixture::target_stride,
+                                                                folded_ids.data_ptr<int>(),
+                                                                folded_acc.data_ptr<int>(),
+                                                                f.do_sample.data_ptr<bool>(),
+                                                                FinalizeFixture::batch_size,
+                                                                FinalizeFixture::num_spec,
+                                                                FinalizeFixture::vocab_size,
+                                                                stream_,
+                                                                /*draft_probs_point_mass=*/false,
+                                                                /*target_probs_point_mass=*/false,
+                                                                f.force_mask.data_ptr<bool>(),
+                                                                /*finalize_outputs=*/true);
+    ASSERT_EQ(status2, cudaSuccess);
+    cudaStreamSynchronize(stream_);
+
+    EXPECT_TRUE(torch::equal(legacy_ids_ref.cpu(), folded_ids.cpu())) << "legacy:\n"
+                                                                      << legacy_ids_ref.cpu() << "\nfolded:\n"
+                                                                      << folded_ids.cpu();
+    EXPECT_TRUE(torch::equal(legacy_acc_ref.cpu(), folded_acc.cpu())) << "legacy:\n"
+                                                                      << legacy_acc_ref.cpu() << "\nfolded:\n"
+                                                                      << folded_acc.cpu();
+    // Forced rows: draft tokens + bonus, full accept count (explicit spot-check).
+    auto ids_h = folded_ids.cpu(), acc_h = folded_acc.cpu();
+    for (int b : {0, 2}) {
+        EXPECT_EQ(acc_h[b].item<int>(), FinalizeFixture::num_spec + 1);
+        for (int s = 0; s < FinalizeFixture::num_spec; ++s) {
+            EXPECT_EQ(ids_h[b][s].item<int>(), f.draft_token_ids.cpu()[b][s].item<int>());
+        }
+        EXPECT_EQ(ids_h[b][FinalizeFixture::num_spec].item<int>(), 40 + b);
+    }
+    // Unforced stochastic reject row 3 (residual exit path): accepted draft 12
+    // at position 0, residual-sampled the one-hot target 3 at position 1,
+    // padding reset to 0 by the fold.
+    EXPECT_EQ(ids_h[3][0].item<int>(), 12);
+    EXPECT_EQ(ids_h[3][1].item<int>(), 3);
+    EXPECT_EQ(ids_h[3][2].item<int>(), 0);
+    EXPECT_EQ(ids_h[3][3].item<int>(), 0);
+    EXPECT_EQ(acc_h[3].item<int>(), 2);
+    // Unforced greedy reject row 4: target fallback 2 at position 0, padding
+    // reset to 0.
+    EXPECT_EQ(ids_h[4][0].item<int>(), 2);
+    EXPECT_EQ(ids_h[4][1].item<int>(), 0);
+    EXPECT_EQ(acc_h[4].item<int>(), 1);
+}
+
+TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_FinalizeForcedResidualWithPointMassInputs) {
+    auto f = FinalizeFixture::make();
+    // Force every row, including the stochastic residual exit in row 3.
+    f.force_mask.fill_(true);
+    auto bonus = f.target_token_ids.select(1, FinalizeFixture::num_spec)
+                     .select(1, FinalizeFixture::target_stride - 1)
+                     .unsqueeze(1);
+    auto expected = torch::cat({f.draft_token_ids, bonus}, 1);
+    for (bool draft_point_mass : {false, true}) {
+        for (bool target_point_mass : {false, true}) {
+            SCOPED_TRACE(draft_point_mass);
+            SCOPED_TRACE(target_point_mass);
+            auto ids = torch::full_like(expected, FinalizeFixture::sentinel);
+            auto acc = torch::full({FinalizeFixture::batch_size}, FinalizeFixture::sentinel, intCuda());
+            ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+            auto status = rtp_llm::invokeRejectionSampling<float, int>(
+                draft_point_mass ? nullptr : f.draft_probs.data_ptr<float>(),
+                f.draft_token_ids.data_ptr<int>(),
+                f.uniform_samples.data_ptr<float>(),
+                target_point_mass ? nullptr : f.target_probs.data_ptr<float>(),
+                f.target_token_ids.data_ptr<int>(),
+                FinalizeFixture::target_stride,
+                ids.data_ptr<int>(),
+                acc.data_ptr<int>(),
+                f.do_sample.data_ptr<bool>(),
+                FinalizeFixture::batch_size,
+                FinalizeFixture::num_spec,
+                FinalizeFixture::vocab_size,
+                stream_,
+                draft_point_mass,
+                target_point_mass,
+                f.force_mask.data_ptr<bool>(),
+                true);
+            ASSERT_EQ(status, cudaSuccess);
+            ASSERT_EQ(cudaStreamSynchronize(stream_), cudaSuccess);
+            EXPECT_TRUE(torch::equal(ids, expected));
+            EXPECT_TRUE(acc.eq(FinalizeFixture::num_spec + 1).all().item<bool>());
+        }
+    }
+}
+
+// Without a force mask the folded finalize is exactly the -1 -> 0 reset:
+// byte-identical to the legacy kernel output + index_put_.
+TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_FinalizeResetParityNoForce) {
+    auto f = FinalizeFixture::make();
+
+    auto plain_ids = torch::zeros({FinalizeFixture::batch_size, FinalizeFixture::num_spec + 1}, intCuda());
+    auto plain_acc = torch::zeros({FinalizeFixture::batch_size}, intCuda());
+    auto status    = rtp_llm::invokeRejectionSampling<float, int>(f.draft_probs.data_ptr<float>(),
+                                                               f.draft_token_ids.data_ptr<int>(),
+                                                               f.uniform_samples.data_ptr<float>(),
+                                                               f.target_probs.data_ptr<float>(),
+                                                               f.target_token_ids.data_ptr<int>(),
+                                                               FinalizeFixture::target_stride,
+                                                               plain_ids.data_ptr<int>(),
+                                                               plain_acc.data_ptr<int>(),
+                                                               f.do_sample.data_ptr<bool>(),
+                                                               FinalizeFixture::batch_size,
+                                                               FinalizeFixture::num_spec,
+                                                               FinalizeFixture::vocab_size,
+                                                               stream_);
+    ASSERT_EQ(status, cudaSuccess);
+    cudaStreamSynchronize(stream_);
+    plain_ids.index_put_({plain_ids == -1}, 0);
+
+    auto reset_ids =
+        torch::full({FinalizeFixture::batch_size, FinalizeFixture::num_spec + 1}, FinalizeFixture::sentinel, intCuda());
+    auto reset_acc = torch::full({FinalizeFixture::batch_size}, FinalizeFixture::sentinel, intCuda());
+    auto status2   = rtp_llm::invokeRejectionSampling<float, int>(f.draft_probs.data_ptr<float>(),
+                                                                f.draft_token_ids.data_ptr<int>(),
+                                                                f.uniform_samples.data_ptr<float>(),
+                                                                f.target_probs.data_ptr<float>(),
+                                                                f.target_token_ids.data_ptr<int>(),
+                                                                FinalizeFixture::target_stride,
+                                                                reset_ids.data_ptr<int>(),
+                                                                reset_acc.data_ptr<int>(),
+                                                                f.do_sample.data_ptr<bool>(),
+                                                                FinalizeFixture::batch_size,
+                                                                FinalizeFixture::num_spec,
+                                                                FinalizeFixture::vocab_size,
+                                                                stream_,
+                                                                /*draft_probs_point_mass=*/false,
+                                                                /*target_probs_point_mass=*/false,
+                                                                /*force_mask=*/nullptr,
+                                                                /*finalize_outputs=*/true);
+    ASSERT_EQ(status2, cudaSuccess);
+    cudaStreamSynchronize(stream_);
+
+    EXPECT_TRUE(torch::equal(plain_ids.cpu(), reset_ids.cpu()));
+    EXPECT_TRUE(torch::equal(plain_acc.cpu(), reset_acc.cpu()));
+    // No row is forced: row 3 keeps its residual-sampled token at position 1
+    // and its -1 padding is reset to 0 by the fold.
+    EXPECT_EQ(reset_ids.cpu()[3][1].item<int>(), 3);
+    EXPECT_EQ(reset_ids.cpu()[3][2].item<int>(), 0);
+}
+
+// The finalize contract that licenses torch::empty output buffers in
+// batchSample: with finalize on, the kernel writes EVERY element of both
+// output buffers on every path — no sentinel may survive a mixed batch.
+TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_FinalizeWritesEveryOutputElement) {
+    auto f = FinalizeFixture::make();
+
+    auto ids =
+        torch::full({FinalizeFixture::batch_size, FinalizeFixture::num_spec + 1}, FinalizeFixture::sentinel, intCuda());
+    auto acc    = torch::full({FinalizeFixture::batch_size}, FinalizeFixture::sentinel, intCuda());
+    auto status = rtp_llm::invokeRejectionSampling<float, int>(f.draft_probs.data_ptr<float>(),
+                                                               f.draft_token_ids.data_ptr<int>(),
+                                                               f.uniform_samples.data_ptr<float>(),
+                                                               f.target_probs.data_ptr<float>(),
+                                                               f.target_token_ids.data_ptr<int>(),
+                                                               FinalizeFixture::target_stride,
+                                                               ids.data_ptr<int>(),
+                                                               acc.data_ptr<int>(),
+                                                               f.do_sample.data_ptr<bool>(),
+                                                               FinalizeFixture::batch_size,
+                                                               FinalizeFixture::num_spec,
+                                                               FinalizeFixture::vocab_size,
+                                                               stream_,
+                                                               /*draft_probs_point_mass=*/false,
+                                                               /*target_probs_point_mass=*/false,
+                                                               f.force_mask.data_ptr<bool>(),
+                                                               /*finalize_outputs=*/true);
+    ASSERT_EQ(status, cudaSuccess);
+    cudaStreamSynchronize(stream_);
+
+    EXPECT_EQ((ids.cpu() == FinalizeFixture::sentinel).sum().item<int64_t>(), 0);
+    EXPECT_EQ((acc.cpu() == FinalizeFixture::sentinel).sum().item<int64_t>(), 0);
+}
+
+// Default-off contract: with no finalize flag a provided force mask is inert
+// and -1 padding survives — every existing caller keeps the legacy bytes.
+TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_FinalizeDefaultsPreserveLegacy) {
+    auto f = FinalizeFixture::make();
+
+    auto ids = torch::zeros({FinalizeFixture::batch_size, FinalizeFixture::num_spec + 1}, intCuda());
+    auto acc = torch::zeros({FinalizeFixture::batch_size}, intCuda());
+    // force_mask non-null but finalize_outputs=false (the default): the mask
+    // must be ignored and the raw rejection output (with -1 padding) kept.
+    auto status = rtp_llm::invokeRejectionSampling<float, int>(f.draft_probs.data_ptr<float>(),
+                                                               f.draft_token_ids.data_ptr<int>(),
+                                                               f.uniform_samples.data_ptr<float>(),
+                                                               f.target_probs.data_ptr<float>(),
+                                                               f.target_token_ids.data_ptr<int>(),
+                                                               FinalizeFixture::target_stride,
+                                                               ids.data_ptr<int>(),
+                                                               acc.data_ptr<int>(),
+                                                               f.do_sample.data_ptr<bool>(),
+                                                               FinalizeFixture::batch_size,
+                                                               FinalizeFixture::num_spec,
+                                                               FinalizeFixture::vocab_size,
+                                                               stream_,
+                                                               /*draft_probs_point_mass=*/false,
+                                                               /*target_probs_point_mass=*/false,
+                                                               f.force_mask.data_ptr<bool>(),
+                                                               /*finalize_outputs=*/false);
+    ASSERT_EQ(status, cudaSuccess);
+    cudaStreamSynchronize(stream_);
+
+    auto ids_h = ids.cpu();
+    // Unforced greedy reject row 4 keeps -1 padding (no reset without finalize).
+    EXPECT_EQ(ids_h[4][0].item<int>(), 2);
+    EXPECT_EQ(ids_h[4][1].item<int>(), -1);
+    EXPECT_EQ(ids_h[4][2].item<int>(), -1);
+    EXPECT_EQ(ids_h[4][3].item<int>(), -1);
+    EXPECT_EQ(acc.cpu()[4].item<int>(), 1);
+    // Forced row 0 keeps its raw rejection result (accepted draft 3 at
+    // position 0, greedy target fallback 3 at position 1, -1 padding), not
+    // the draft+bonus override.
+    EXPECT_EQ(ids_h[0][0].item<int>(), 3);
+    EXPECT_EQ(ids_h[0][1].item<int>(), 3);
+    EXPECT_EQ(ids_h[0][2].item<int>(), -1);
+    EXPECT_EQ(ids_h[0][3].item<int>(), -1);
+    // Row 0: accepted at position 0 (draft==target), greedy-rejected at 1
+    // -> pos=1, accept count = pos+1 = 2.
+    EXPECT_EQ(acc.cpu()[0].item<int>(), 2);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // invokeMarkovSoftmaxStep tests
 // ─────────────────────────────────────────────────────────────────────────────
