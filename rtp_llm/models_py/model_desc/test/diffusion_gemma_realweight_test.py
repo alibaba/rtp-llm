@@ -655,6 +655,7 @@ class DiffusionGemmaReuseABTest(unittest.TestCase):
                                     positions, causal, write_kv):
             out = _orig_attn_forward(self, q, k, v, kv_cache, attn_inputs,
                                      positions, causal, write_kv)
+            prefix_lens = attn_inputs.prefix_lengths
             _split_call = (
                 q.shape[0] == 21
                 or (q.shape[0] == 256 and prefix_lens is not None
@@ -663,7 +664,6 @@ class DiffusionGemmaReuseABTest(unittest.TestCase):
             if self.use_flashinfer and q.device.type == "cuda" and _split_call and _fi_calls["n"] < 60:
                 _fi_calls["n"] += 1
                 import torch as _t
-                prefix_lens = attn_inputs.prefix_lengths
                 has_prefix = (
                     kv_cache is not None and prefix_lens is not None
                     and int(prefix_lens.max().item()) > 0
