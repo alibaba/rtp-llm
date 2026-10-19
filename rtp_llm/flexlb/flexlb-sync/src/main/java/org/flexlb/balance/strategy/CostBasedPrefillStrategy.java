@@ -125,6 +125,15 @@ public class CostBasedPrefillStrategy {
             return PlacementResult.blocked(roleType);
         }
 
+        if ("NO_CACHE_ANYWHERE".equals(survivors.affinityDecision())
+                && cacheMatchResult.source() == CacheMatchSource.KVCM
+                && cacheMatchResult.querySucceeded()
+                && seqLen < cacheMatchResult.blockSize()
+                && cacheMatchResult.hostMatches().values().stream()
+                        .allMatch(match -> match.globalMatchBlocks() == 0L)) {
+            survivors.recordAffinityDecision("NO_CACHE_ANYWHERE_BELOW_BLOCK_SIZE");
+        }
+
         PrefillEndpoint best = survivors.endpoint(selectedIndex);
         long bestCacheHit = survivors.cacheHit(selectedIndex);
         long selectedPrefillMs = survivors.prefillMs(selectedIndex);

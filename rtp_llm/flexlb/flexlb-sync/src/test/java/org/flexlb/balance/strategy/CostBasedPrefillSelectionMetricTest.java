@@ -182,6 +182,33 @@ class CostBasedPrefillSelectionMetricTest {
         }
     }
 
+    @ParameterizedTest
+    @CsvSource({
+            "1791, KVCM, true, -1, NO_CACHE_ANYWHERE_BELOW_BLOCK_SIZE",
+            "1791, KVCM, true, 0, NO_CACHE_ANYWHERE_BELOW_BLOCK_SIZE",
+            "1792, KVCM, true, 0, NO_CACHE_ANYWHERE",
+            "1793, KVCM, true, 0, NO_CACHE_ANYWHERE",
+            "1791, LOCAL_SYNC, true, 0, NO_CACHE_ANYWHERE",
+            "1791, KVCM, false, 0, NO_CACHE_ANYWHERE",
+            "1791, KVCM, true, 1, NO_CACHE_ANYWHERE"
+    })
+    void distinguishesShortKvcmMisses(long inputTokens, CacheMatchSource source, boolean querySucceeded,
+                                     long matchedBlocks, String expectedDecision) {
+        configureFocusedAffinity();
+        context.getRequest().setSeqLen(inputTokens);
+        when(cache.findMatchingEngines(any())).thenReturn(new CacheMatchResult(
+                matchedBlocks < 0 ? Map.of() : Map.of("10.0.0.1:8080@0", HostCacheMatch.local(matchedBlocks)),
+                source, 1L, 1792L, querySucceeded));
+
+        try (SelectedRole selected = select()) {
+            assertEquals(expectedDecision, context.getRoutingTelemetry().routingDecisions()
+                    .get(RoleType.PREFILL).cacheAffinityDecision());
+            verify(reporter, never()).reportCacheAffinityDecision(any(), anyString(), anyString());
+            commit(selected);
+            verify(reporter).reportCacheAffinityDecision(RoleType.PREFILL, "10.0.0.1:8080", expectedDecision);
+        }
+    }
+
     @Test
     void selectionDoesNotOwnTheRequestDeadline() {
         context.setSchedulingMetadata(SchedulingMetadata.explicit(
