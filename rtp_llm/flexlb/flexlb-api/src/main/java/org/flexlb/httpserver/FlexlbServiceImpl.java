@@ -892,7 +892,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             requestSchedulerReporter.reportRequest(schedulingMetadata.priority());
         }
 
-        if (!pb.getGenerateInput().isEmpty()) {
+        if (config.getDispatcher().requiresGenerateInput() && !pb.getGenerateInput().isEmpty()) {
             ctx.setGenerateInputPb(pb.getGenerateInput());
         }
 

@@ -112,6 +112,20 @@ class FlexlbServiceImplTest {
 
     @ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void contextStoresGenerateInputOnlyForBatchDelivery(boolean batch) {
+        var config = configService.loadBalanceConfig();
+        config.getDispatcher().setType(batch ? org.flexlb.config.DispatcherConfig.Type.BATCH
+                : org.flexlb.config.DispatcherConfig.Type.NON_BATCH);
+        var bytes = com.google.protobuf.ByteString.copyFrom(new byte[1024 * 1024]);
+        var request = FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                .setRequestId(99999L).setSeqLen(2048).setGenerateInput(bytes).build();
+        BalanceContext context = org.springframework.test.util.ReflectionTestUtils.invokeMethod(service, "buildContext", request);
+        if (batch) { assertSame(bytes, context.getGenerateInputPb()); }
+        else { org.junit.jupiter.api.Assertions.assertNull(context.getGenerateInputPb()); }
+    }
+
+    @ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
     void pendingCompletionDoesNotRetainReleasedInput(boolean batch) throws Exception {
         configService.loadBalanceConfig().getDispatcher().setType(batch
                 ? org.flexlb.config.DispatcherConfig.Type.BATCH
