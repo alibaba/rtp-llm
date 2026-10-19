@@ -44,6 +44,14 @@ from rtp_llm.utils.model_weight import W
 
 logger = logging.getLogger(__name__)
 
+# opt r4 lane A debug A/B gates (default off). When set, the fused routing
+# kernel and the flashinfer no-scale RMSNorm additionally compute the torch
+# reference and print per-call comparison stats ([dgm-routing-ab] /
+# [dgm-norm-ab]) so the existing GPU bazel lanes double as numerical A/B
+# harnesses without touching the test files (opt_r4_laneA logs).
+_ROUTING_AB_CHECK = os.environ.get("DGM_ROUTING_AB", "") not in ("", "0")
+_NORM_AB_CHECK = os.environ.get("DGM_NORM_AB", "") not in ("", "0")
+
 
 SWA_TAG = "swa_kv"
 GLOBAL_TAG = "global_kv"
@@ -909,15 +917,99 @@ class _QKNorm(nn.Module):
 
 
 class _NoScaleRMSNorm(nn.Module):
-    """RMSNorm without weight (reference v_norm / router pre-norm)."""
+    """RMSNorm without weight (reference v_norm / router pre-norm).
+
+    CUDA bf16 contiguous inputs run flashinfer.norm.rmsnorm with a ones
+    gamma (opt r4 lane A, contract #7): the same RMSNormKernel the
+    production RMSNorm modules use, with gamma=1 — one kernel instead of
+    the torch cast/pow/mean/rsqrt/mul chain. DGM_FI_NORM=0 forces the
+    torch reference; any flashinfer failure degrades to it with a logged
+    warning. Value contract: fp32 accumulation on both sides, agreement
+    within bf16 rounding noise (dsv4/dsv41 rmsnorm-replace precedent)."""
 
     def __init__(self, eps: float):
         super().__init__()
         self.eps = eps
+        self.fi_enabled = os.environ.get("DGM_FI_NORM", "1") != "0"
+        self._fi_norm = None
+        if self.fi_enabled:
+            try:
+                import flashinfer
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+                self._fi_norm = flashinfer.norm.rmsnorm
+            except Exception as error:  # CPU-only / no flashinfer
+                logger.info(
+                    "DiffusionGemma flashinfer no-scale RMSNorm unavailable, torch path: %s",
+                    error,
+                )
+        self._fi_warned = False
+        self._ones_cache: Dict[Tuple[int, str, int], torch.Tensor] = {}
+        self._ab_logged: set = set()
+
+    def _torch_forward(self, x: torch.Tensor) -> torch.Tensor:
         variance = x.to(torch.float32).pow(2).mean(-1, keepdim=True)
         return (x * torch.rsqrt(variance + self.eps)).to(x.dtype)
+
+    def _fi_usable(self, x: torch.Tensor) -> bool:
+        return (
+            self._fi_norm is not None
+            and x.is_cuda
+            and x.dim() >= 2
+            and x.numel() > 0
+            and x.dtype == torch.bfloat16
+            and x.is_contiguous()
+        )
+
+    def _ones_gamma(self, x: torch.Tensor) -> torch.Tensor:
+        key = (x.shape[-1], str(x.dtype), x.device.index)
+        ones = self._ones_cache.get(key)
+        if ones is None:
+            # Built outside inference mode: like the flashinfer workspace
+            # buffers (bring-up lesson), an inference-tensor gamma would
+            # leak inference-mode restrictions into later normal-mode reads.
+            with torch.inference_mode(False):
+                ones = torch.ones(x.shape[-1], dtype=x.dtype, device=x.device)
+            self._ones_cache[key] = ones
+        return ones
+
+    def _norm_ab(self, x: torch.Tensor, out: torch.Tensor) -> None:
+        """Debug A/B (DGM_NORM_AB=1): flashinfer vs torch reference, logged
+        once per (shape, dtype)."""
+        key = (tuple(x.shape), x.dtype)
+        if key in self._ab_logged:
+            return
+        self._ab_logged.add(key)
+        try:
+            ref = self._torch_forward(x)
+            diff = (out.to(torch.float32) - ref.to(torch.float32)).abs()
+            print(
+                f"[dgm-norm-ab] shape={tuple(x.shape)} dtype={x.dtype} "
+                f"max_diff={float(diff.max()):.3e} "
+                f"mean_diff={float(diff.mean()):.3e} "
+                f"ref_absmax={float(ref.to(torch.float32).abs().max()):.3f}",
+                flush=True,
+            )
+        except Exception as error:
+            logger.warning("DiffusionGemma norm A/B check failed: %s", error)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self._fi_usable(x):
+            try:
+                flat = x.view(-1, x.shape[-1])
+                out = self._fi_norm(flat, self._ones_gamma(x), eps=self.eps).view(x.shape)
+                if _NORM_AB_CHECK:
+                    self._norm_ab(x, out)
+                return out
+            except Exception as error:
+                # Degrade to the torch reference for the rest of the process.
+                if not self._fi_warned:
+                    logger.warning(
+                        "DiffusionGemma flashinfer no-scale RMSNorm failed (%s); "
+                        "torch path for this process",
+                        error,
+                    )
+                    self._fi_warned = True
+        return self._torch_forward(x)
 
 
 class DiffusionGemmaGateMLP(nn.Module):
@@ -953,9 +1045,111 @@ def _gelu_tanh(x: torch.Tensor) -> torch.Tensor:
     return torch.nn.functional.gelu(x, approximate="tanh")
 
 
+_ROUTING_TOPK_KERNEL = None
+_ROUTING_E_LIMIT = 4096  # single-block lane budget for the fused epilogue
+
+
+def _get_routing_topk_kernel():
+    """Lazily define and cache the fused router-epilogue Triton kernel.
+
+    The definition is deferred instead of a module-level ``@triton.jit`` so
+    CPU-only sandboxes without triton never pay the import (same lazy
+    discipline as DiffusionGemmaExperts' fused-MoE imports). The kernel
+    replaces the torch router epilogue chain
+
+      probs = softmax(scores.float())        # cast + softmax pass
+      topk(probs, k)                         # radixSort/sbtopk + gather
+      top_w / top_w.sum(-1)                  # reduce + div
+      top_w * per_expert_scale[top_idx]      # gather + mul
+      .to(bf16)                              # cast
+
+    with a single launch: fp32 softmax, iterative-argmax top-k (descending
+    order, lower-index tie-break — CUDA topk's gather order for exactly
+    equal values), renormalization over the top-k and the per-expert-scale
+    product, all in fp32 registers, cast to the output dtype only at the
+    store. The selected probs/ids stay in registers between the two phases
+    (no intermediate global round-trip), so the only rounding vs the torch
+    chain is the fp32 softmax/topk implementation noise. In-repo kernel
+    precedent: triton_kernels/moe/gate_fused.py (same per-row structure).
+    """
+    global _ROUTING_TOPK_KERNEL
+    if _ROUTING_TOPK_KERNEL is None:
+        import triton
+        import triton.language as tl
+
+        @triton.jit(do_not_specialize=["num_tokens"])
+        def _softmax_topk_renorm_scale_kernel(
+            scores_ptr,  # [M, E] router logits, row stride stride_scores_m
+            per_expert_scale_ptr,  # [E] per-expert scales
+            out_idx_ptr,  # [M, K] int64 (torch.topk index dtype)
+            out_w_ptr,  # [M, K] output dtype (hidden dtype)
+            num_tokens,
+            stride_scores_m,
+            E: tl.constexpr,
+            K: tl.constexpr,
+            BLOCK_E: tl.constexpr,  # >= E, power of two
+            BLOCK_K: tl.constexpr,  # >= K, power of two
+        ):
+            row = tl.program_id(axis=0).to(tl.int64)
+            if row >= num_tokens:
+                return
+            offs = tl.arange(0, BLOCK_E)
+            lane = offs < E
+            logits = tl.load(
+                scores_ptr + row * stride_scores_m + offs,
+                mask=lane,
+                other=float("-inf"),
+            ).to(tl.float32)
+            # fp32 softmax, centered like torch.softmax(scores.float(), -1)
+            row_max = tl.max(logits, axis=0)
+            e = tl.exp(logits - row_max)
+            e = tl.where(lane, e, 0.0)
+            probs = e / tl.sum(e, axis=0)
+
+            # Iterative argmax top-k: descending order, leftmost index on
+            # exact ties. The k selections accumulate in BLOCK_K registers.
+            k_offs = tl.arange(0, BLOCK_K)
+            k_lane = k_offs < K
+            top_p = tl.zeros([BLOCK_K], dtype=tl.float32)
+            top_id = tl.zeros([BLOCK_K], dtype=tl.int32)
+            cur = tl.where(lane, probs, -float("inf"))
+            for k in tl.static_range(K):
+                idx = tl.argmax(cur, axis=0)  # int32 scalar
+                sel = tl.sum(tl.where(offs == idx, probs, 0.0), axis=0)
+                top_p = tl.where(k_offs == k, sel, top_p)
+                top_id = tl.where(k_offs == k, idx, top_id)
+                cur = tl.where(offs == idx, -float("inf"), cur)
+
+            # Renormalize over the top-k, apply the per-expert scale, cast
+            # once at the store (identical algebra to the torch chain).
+            pes = tl.load(
+                per_expert_scale_ptr + top_id, mask=k_lane, other=0.0
+            ).to(tl.float32)
+            w = top_p / tl.sum(top_p, axis=0) * pes
+            tl.store(
+                out_w_ptr + row * K + k_offs,
+                w.to(out_w_ptr.dtype.element_ty),
+                mask=k_lane,
+            )
+            tl.store(out_idx_ptr + row * K + k_offs, top_id.to(tl.int64), mask=k_lane)
+
+        _ROUTING_TOPK_KERNEL = _softmax_topk_renorm_scale_kernel
+    return _ROUTING_TOPK_KERNEL
+
+
 class DiffusionGemmaRouter(nn.Module):
     """Raw-residual router: no-scale RMSNorm -> *scale*hidden^-0.5 -> proj ->
-    fp32 softmax -> top8 -> renormalize -> *per_expert_scale."""
+    fp32 softmax -> top8 -> renormalize -> *per_expert_scale.
+
+    The softmax -> top8 -> renormalize -> per_expert_scale epilogue runs as
+    one fused Triton kernel on CUDA (opt r4 lane A): the torch chain behind
+    it was the top-8 radixSort/sbtopk + gather + reduce cluster of the
+    residual native-time list. DGM_FUSED_ROUTING=0 forces the torch
+    reference path. Value contract: fp32 softmax and fp32 top-k
+    renormalization on both sides, so weights agree modulo fp32
+    implementation noise and top-8 selection flips only on near-ties
+    (bf16-noise class, the K122 ruling; tie-break is lower-index on both
+    paths)."""
 
     def __init__(
         self,
@@ -977,6 +1171,133 @@ class DiffusionGemmaRouter(nn.Module):
         self.per_expert_scale = weights[W.dgm_router_per_expert_scale].reshape(-1)
         self.top_k = config.moe_k
         self.num_experts = config.expert_num
+        self.fused_routing = os.environ.get("DGM_FUSED_ROUTING", "1") != "0"
+        self._routing_kernel = None
+        self._routing_warned = False
+        if self.fused_routing:
+            try:
+                self._routing_kernel = _get_routing_topk_kernel()
+            except Exception as error:  # CPU-only sandboxes without triton
+                logger.info(
+                    "DiffusionGemma fused routing unavailable, torch path: %s", error
+                )
+
+    def _fused_routing_usable(self, scores: torch.Tensor) -> bool:
+        if self._routing_kernel is None:
+            return False
+        if not (scores.is_cuda and scores.dim() == 2 and scores.numel() > 0):
+            return False
+        if scores.stride(-1) != 1 or self.per_expert_scale.stride(0) != 1:
+            return False
+        if self.per_expert_scale.device != scores.device:
+            return False
+        if not (0 < self.top_k <= self.num_experts <= _ROUTING_E_LIMIT):
+            return False
+        if scores.dtype not in (torch.bfloat16, torch.float16, torch.float32):
+            return False
+        if self.per_expert_scale.dtype not in (
+            torch.bfloat16,
+            torch.float16,
+            torch.float32,
+        ):
+            return False
+        return True
+
+    def _reference_route(
+        self, scores: torch.Tensor, out_dtype: torch.dtype
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Torch reference chain (pre-r4 router math, kept verbatim)."""
+        probs = torch.softmax(scores.to(torch.float32), dim=-1)
+        top_weights, top_idx = torch.topk(probs, self.top_k, dim=-1)
+        top_weights = top_weights / top_weights.sum(dim=-1, keepdim=True)
+        top_weights = top_weights * self.per_expert_scale[top_idx]
+        return top_weights.to(out_dtype), top_idx
+
+    def _forward_fused_routing(
+        self, scores: torch.Tensor, out_dtype: torch.dtype
+    ) -> Optional[Tuple[torch.Tensor, torch.Tensor]]:
+        try:
+            num_tokens = scores.shape[0]
+            top_idx = torch.empty(
+                num_tokens, self.top_k, device=scores.device, dtype=torch.int64
+            )
+            top_weights = torch.empty(
+                num_tokens, self.top_k, device=scores.device, dtype=out_dtype
+            )
+            self._routing_kernel[(num_tokens,)](
+                scores,
+                self.per_expert_scale,
+                top_idx,
+                top_weights,
+                num_tokens,
+                scores.stride(0),
+                E=self.num_experts,
+                K=self.top_k,
+                BLOCK_E=max(16, 1 << (self.num_experts - 1).bit_length()),
+                BLOCK_K=max(1, 1 << (self.top_k - 1).bit_length()),
+            )
+            return top_weights, top_idx
+        except Exception as error:
+            # Degrade to the torch reference for the rest of the process
+            # (same contract as the fused-entropy kernel in the proposer).
+            if not self._routing_warned:
+                logger.warning(
+                    "DiffusionGemma fused routing failed (%s); torch path for this process",
+                    error,
+                )
+                self._routing_warned = True
+            return None
+
+    def _routing_ab(
+        self,
+        scores: torch.Tensor,
+        fused: Tuple[torch.Tensor, torch.Tensor],
+        out_dtype: torch.dtype,
+    ) -> None:
+        """Debug A/B (DGM_ROUTING_AB=1): fused kernel vs torch reference on
+        the same logits. Reports top-8 order/set agreement, weight deltas
+        and the softmax boundary margin on mismatching rows — flips are
+        near-tie class when mismatches only occur where the k-th / (k+1)-th
+        probability gap is tiny."""
+        try:
+            ref_w, ref_i = self._reference_route(scores, out_dtype)
+            fus_w, fus_i = fused
+            rows = scores.shape[0]
+            order_eq = (fus_i == ref_i).all(dim=-1)
+            set_eq = (
+                fus_i.sort(dim=-1).values == ref_i.sort(dim=-1).values
+            ).all(dim=-1)
+            w_diff = (fus_w.to(torch.float32) - ref_w.to(torch.float32)).abs()
+            mismatch = ~(order_eq & set_eq)
+            slot_gap_str = "n/a"
+            margin_str = "n/a"
+            if bool(mismatch.any()):
+                probs = torch.softmax(scores.to(torch.float32), dim=-1)
+                slot_diff = fus_i != ref_i
+                r_idx, s_idx = slot_diff.nonzero(as_tuple=True)
+                # Probability gap between the two experts disagreeing on a
+                # slot: ~0 means the flip is an exact/near tie (bf16-logit
+                # collision), a large gap would be a ranking bug.
+                gaps = (
+                    probs[r_idx, fus_i[r_idx, s_idx]] - probs[r_idx, ref_i[r_idx, s_idx]]
+                ).abs()
+                slot_gap_str = f"{float(gaps.max()):.3e}"
+                if self.top_k < self.num_experts:
+                    sorted_p = probs.sort(dim=-1, descending=True).values
+                    boundary = sorted_p[:, self.top_k - 1] - sorted_p[:, self.top_k]
+                    margin_str = f"{float(boundary[mismatch].min()):.3e}"
+            print(
+                f"[dgm-routing-ab] M={rows} E={self.num_experts} K={self.top_k} "
+                f"exact_order={int(order_eq.sum())}/{rows} "
+                f"same_set={int(set_eq.sum())}/{rows} "
+                f"max_wdiff={float(w_diff.max()):.3e} "
+                f"mean_wdiff={float(w_diff.mean()):.3e} "
+                f"order_flip_max_prob_gap={slot_gap_str} "
+                f"min_boundary_margin_on_mismatch={margin_str}",
+                flush=True,
+            )
+        except Exception as error:
+            logger.warning("DiffusionGemma routing A/B check failed: %s", error)
 
     def forward(
         self, hidden_states: torch.Tensor
@@ -984,11 +1305,13 @@ class DiffusionGemmaRouter(nn.Module):
         h = self.pre_norm(hidden_states)
         h = h * self.scale * self.scalar_root_size
         scores = self.proj(h)
-        probs = torch.softmax(scores.to(torch.float32), dim=-1)
-        top_weights, top_idx = torch.topk(probs, self.top_k, dim=-1)
-        top_weights = top_weights / top_weights.sum(dim=-1, keepdim=True)
-        top_weights = top_weights * self.per_expert_scale[top_idx]
-        return top_weights.to(hidden_states.dtype), top_idx
+        if self._fused_routing_usable(scores):
+            fused = self._forward_fused_routing(scores, hidden_states.dtype)
+            if fused is not None:
+                if _ROUTING_AB_CHECK:
+                    self._routing_ab(scores, fused, hidden_states.dtype)
+                return fused
+        return self._reference_route(scores, hidden_states.dtype)
 
 
 class DiffusionGemmaExperts(nn.Module):
@@ -1000,9 +1323,10 @@ class DiffusionGemmaExperts(nn.Module):
     sequence as TritonFusedMoeExecutor.execute — with flashinfer's fused
     gelu_tanh_and_mul replacing the separate _gelu_tanh/mul. The reference
     gather-per-active-expert loop stays as the fallback for CPU / non-bf16
-    and for DGM_FUSED_MOE=0. The router softmax/top8/scale chain is
-    untouched; both paths consume identical top_k_weights/top_k_idx and
-    are value-equivalent modulo bf16 GEMM/accumulate rounding."""
+    and for DGM_FUSED_MOE=0. Both executors consume the same
+    top_k_weights/top_k_idx products (the router epilogue itself is fused
+    separately — see DiffusionGemmaRouter) and are value-equivalent modulo
+    bf16 GEMM/accumulate rounding."""
 
     def __init__(self, config: ModelConfig, weights: Dict[str, torch.Tensor]):
         super().__init__()
