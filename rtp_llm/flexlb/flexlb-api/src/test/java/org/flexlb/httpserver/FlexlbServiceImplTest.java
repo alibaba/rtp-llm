@@ -110,6 +110,52 @@ class FlexlbServiceImplTest {
         pvAppender.stop();
     }
 
+    @ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void pendingCompletionDoesNotRetainReleasedInput(boolean batch) throws Exception {
+        configService.loadBalanceConfig().getDispatcher().setType(batch
+                ? org.flexlb.config.DispatcherConfig.Type.BATCH
+                : org.flexlb.config.DispatcherConfig.Type.NON_BATCH);
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
+        CompletableFuture<Response> pending = new CompletableFuture<>();
+        when(routeService.route(any(BalanceContext.class))).thenReturn(pending);
+        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
+
+        try (var inbound = Context.current().withCancellation()) {
+            var inputReference = inbound.call(() -> scheduleWithReferencedInput(observer));
+            ArgumentCaptor<BalanceContext> captured = ArgumentCaptor.forClass(BalanceContext.class);
+            verify(routeService).route(captured.capture());
+            // Model the scheduler releasing delivery input before response publication runs.
+            captured.getValue().setGenerateInputPb(null);
+
+            for (int attempt = 0; attempt < 20 && !inputReference.refersTo(null); attempt++) {
+                System.gc();
+                Thread.sleep(50L);
+            }
+            assertTrue(inputReference.refersTo(null),
+                    "pending completion and cancellation callbacks must not retain input payload");
+            assertFalse(pending.isDone());
+            assertFalse(inbound.isCancelled());
+
+            Response response = new Response();
+            response.setSuccess(true);
+            response.setCode(200);
+            pending.complete(response);
+            verify(observer).onNext(any());
+            verify(observer).onCompleted();
+            inbound.cancel(null);
+            verify(routeService, never()).cancelRequest(anyLong(), anyLong(), any());
+        }
+    }
+
+    private java.lang.ref.WeakReference<com.google.protobuf.ByteString> scheduleWithReferencedInput(
+            StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer) {
+        var input = com.google.protobuf.ByteString.copyFrom(new byte[1024 * 1024]);
+        service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                .setRequestId(99998L).setSeqLen(2048).setGenerateInput(input).build(), observer);
+        return new java.lang.ref.WeakReference<>(input);
+    }
+
     @Test
     void vitRouteDoesNotOwnOrCancelGenerationLifecycle() {
         when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
