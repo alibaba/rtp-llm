@@ -164,6 +164,39 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
     buffer_holder_.hold_host(do_sample);
     auto do_sample_d = do_sample.to(target_device, true);
 
+    // Folded finalization capability (CUDA kernel): the rejection kernel
+    // applies the force-accept override and the -1 -> 0 padding reset itself
+    // and writes every output element on every path, so the output buffers
+    // need no zero init and the legacy eager post-rejection chain
+    // (full_like + cat + where x2 + eq + masked_fill) is skipped entirely.
+    // ROCm/generic return false and keep the legacy chain byte-for-byte.
+    const bool finalize_in_kernel = execRejectionSamplingSupportsFinalize();
+
+    // Keep the existing device mask construction. CUDA consumes it during
+    // rejection; other backends construct it in the post-rejection scope.
+    auto build_force_mask_device = [&]() -> torch::Tensor {
+        auto force_mask =
+            torch::zeros({(long)batch_size}, torch::TensorOptions().dtype(torch::kBool).device(target_device));
+        bool has_force = false;
+        int  idx       = 0;
+        for (const auto& stream : streams) {
+            if (stream->forceSpAccept()) {
+                force_mask[idx] = true;
+                has_force       = true;
+            }
+            idx++;
+        }
+        if (!has_force) {
+            return torch::Tensor();
+        }
+        return force_mask;
+    };
+
+    torch::Tensor force_mask_d;
+    if (finalize_in_kernel) {
+        force_mask_d = build_force_mask_device();
+    }
+
     auto          rand_options      = torch::TensorOptions().device(target_device).dtype(torch::kFloat);
     torch::Tensor uniform_samples_d = torch::rand({(long)batch_size, (long)propose_step_ + 1}, rand_options);
 
@@ -180,13 +213,17 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
         }
     }
 
-    auto          draft_token_probs_d_t  = draft_token_probs;
-    auto          target_token_probs_d_t = target_token_probs;
-    torch::Tensor output_token_ids_d =
-        torch::zeros({(long)batch_size, (long)propose_step_ + 1},
-                     torch::TensorOptions().device(target_device).dtype(torch::kInt32).requires_grad(false));
-    torch::Tensor output_accepted_token_num_d = torch::zeros(
-        {(long)batch_size}, torch::TensorOptions().device(target_device).dtype(torch::kInt32).requires_grad(false));
+    auto draft_token_probs_d_t  = draft_token_probs;
+    auto target_token_probs_d_t = target_token_probs;
+    // With the folded finalize the kernel writes every element of both output
+    // buffers on every path (forced rows included), so the zero inits are dead
+    // stores; without it the legacy kernels/ops keep their zero-init contract.
+    auto int_out_options = torch::TensorOptions().device(target_device).dtype(torch::kInt32).requires_grad(false);
+    torch::Tensor output_token_ids_d          = finalize_in_kernel ?
+                                                    torch::empty({(long)batch_size, (long)propose_step_ + 1}, int_out_options) :
+                                                    torch::zeros({(long)batch_size, (long)propose_step_ + 1}, int_out_options);
+    torch::Tensor output_accepted_token_num_d = finalize_in_kernel ? torch::empty({(long)batch_size}, int_out_options) :
+                                                                     torch::zeros({(long)batch_size}, int_out_options);
 
     RTP_LLM_CHECK_WITH_INFO(draft_probs_point_mass
                                 || (draft_token_probs_d_t.defined() && draft_token_probs_d_t.dim() == 3),
@@ -233,47 +270,47 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
             do_sample_d,
             draft_probs_point_mass,
             target_probs_point_mass,
+            force_mask_d,
+            finalize_in_kernel,
         });
     }
 
     RTP_LLM_PROFILE_SCOPE("speculative_sampler.batchSample.post_rejection_sampling");
 
-    // forceSpAccept: override rejection sampling results for streams that requested
-    // forced acceptance — accept all draft tokens plus the target bonus token.
-    {
-        bool has_force = false;
-        auto force_mask =
-            torch::zeros({(long)batch_size}, torch::TensorOptions().dtype(torch::kBool).device(target_device));
-        int idx = 0;
-        for (const auto& stream : streams) {
-            if (stream->forceSpAccept()) {
-                force_mask[idx] = true;
-                has_force       = true;
+    if (!finalize_in_kernel) {
+        // Legacy post-rejection finalization (ROCm/generic): force-accept
+        // override + -1 -> 0 padding reset, byte-for-byte the historical
+        // eager chain. The CUDA kernel folds this when finalize_in_kernel.
+
+        // forceSpAccept: override rejection sampling results for streams that
+        // requested forced acceptance — accept all draft tokens plus the
+        // target bonus token.
+        {
+            auto force_mask = build_force_mask_device();
+            if (force_mask.defined()) {
+                RTP_LLM_PROFILE_SCOPE("speculative_sampler.batchSample.post_rejection_sampling.forceSpAccept");
+                // target_token_ids_d_t layout: [batch_size * (propose_step+1), token_stride]
+                // Extract the bonus token at position propose_step for each batch item.
+                int64_t token_stride = target_token_ids_d_t.size(1);
+                auto    target_bonus_t =
+                    target_token_ids_d_t.reshape({(long)batch_size, (long)(propose_step_ + 1), token_stride});
+                auto target_bonus = target_bonus_t.select(1, propose_step_).select(1, token_stride - 1).unsqueeze(1);
+                // forced_tokens: draft tokens [0..propose_step-1] + target bonus
+                auto forced_tokens = torch::cat({draft_token_ids_d_t, target_bonus}, 1);
+                auto force_mask_2d = force_mask.unsqueeze(1).expand_as(output_token_ids_d);
+                output_token_ids_d = torch::where(force_mask_2d, forced_tokens, output_token_ids_d);
+                output_accepted_token_num_d =
+                    torch::where(force_mask,
+                                 torch::full_like(output_accepted_token_num_d, (int32_t)(propose_step_ + 1)),
+                                 output_accepted_token_num_d);
             }
-            idx++;
         }
-        if (has_force) {
-            RTP_LLM_PROFILE_SCOPE("speculative_sampler.batchSample.post_rejection_sampling.forceSpAccept");
-            // target_token_ids_d_t layout: [batch_size * (propose_step+1), token_stride]
-            // Extract the bonus token at position propose_step for each batch item.
-            int64_t token_stride = target_token_ids_d_t.size(1);
-            auto    target_bonus_t =
-                target_token_ids_d_t.reshape({(long)batch_size, (long)(propose_step_ + 1), token_stride});
-            auto target_bonus = target_bonus_t.select(1, propose_step_).select(1, token_stride - 1).unsqueeze(1);
-            // forced_tokens: draft tokens [0..propose_step-1] + target bonus
-            auto forced_tokens = torch::cat({draft_token_ids_d_t, target_bonus}, 1);
-            auto force_mask_2d = force_mask.unsqueeze(1).expand_as(output_token_ids_d);
-            output_token_ids_d = torch::where(force_mask_2d, forced_tokens, output_token_ids_d);
-            output_accepted_token_num_d =
-                torch::where(force_mask,
-                             torch::full_like(output_accepted_token_num_d, (int32_t)(propose_step_ + 1)),
-                             output_accepted_token_num_d);
-        }
+
+        // use async sample here, we assume accept all tokens
+        // so we need to reset -1 to 0 in output_token_ids_d
+        output_token_ids_d.index_put_({output_token_ids_d == -1}, 0);
     }
 
-    // use async sample here, we assume accept all tokens
-    // so we need to reset -1 to 0 in output_token_ids_d
-    output_token_ids_d.index_put_({output_token_ids_d == -1}, 0);
     sample_output.accept_tokens = output_token_ids_d;
     sample_output.accept_len    = output_accepted_token_num_d;
 

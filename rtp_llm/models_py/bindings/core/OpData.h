@@ -404,6 +404,21 @@ struct RejectionSamplingParams {
     // to the materialized matrix. target_probs_d must still be defined with
     // the [batch, num_speculative_tokens + 1, vocab] shape.
     bool target_probs_point_mass = false;
+    // Optional [batch] bool CUDA mask. A true row receives the force-accept
+    // override: all draft tokens + the target bonus token (last column of the
+    // row's final target_token_ids_d slot) with accept count
+    // num_speculative_tokens + 1 — the exact values the legacy eager
+    // torch::where chain wrote. Only honored when finalize_outputs is true;
+    // leave undefined when no stream forces acceptance.
+    torch::Tensor force_mask_d;
+    // True folds the caller's post-rejection finalization into the kernel:
+    // the per-row force override above plus the -1 -> 0 padding reset, in the
+    // legacy order. With this flag the kernel writes every element of
+    // output_token_ids_d and output_accepted_token_num_d on every path, so
+    // callers may pass uninitialized (torch::empty) buffers. CUDA backend
+    // only; query execRejectionSamplingSupportsFinalize() before setting —
+    // ROCm/generic reject the flag loudly and keep the legacy eager chain.
+    bool finalize_outputs = false;
 };
 
 // One DSpARK draft step's fused distribution build:

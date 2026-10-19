@@ -2560,6 +2560,34 @@ TEST_F(MtpExecutorTest, testDSparkDraftTiesStillUseNormalTargetVerification) {
     }
 }
 
+TEST_F(MtpExecutorTest, testSpeculativeSamplerForceAcceptMaskPreservesUnforcedRows) {
+    constexpr int32_t     gamma = 2, vocab_size = 4;
+    MtpExecutorTestConfig test_config;
+    test_config.vocab_size        = vocab_size;
+    test_config.gen_num_per_cycle = gamma;
+    auto components               = createMtpExecutorComponents(test_config);
+    auto forced =
+        createContextStream(components.model_config, components.runtime_config, components.resource_context, {0, 1});
+    auto normal =
+        createContextStream(components.model_config, components.runtime_config, components.resource_context, {0, 1});
+    forced->generateConfig()->do_sample       = false;
+    normal->generateConfig()->do_sample       = false;
+    forced->generateConfig()->force_sp_accept = true;
+    auto          cuda_int                    = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    SamplerOutput draft;
+    draft.token_ids                = torch::tensor({1, 3, 1, 3}, cuda_int).reshape({2, gamma});
+    draft.token_ids_are_point_mass = true;
+    SamplerOutput target;
+    target.token_ids = torch::full({2 * (gamma + 1), 2}, 99, cuda_int);
+    target.token_ids.select(1, 1).copy_(torch::tensor({2, 2, 0, 2, 2, 0}, cuda_int));
+    target.all_probs                = torch::empty({2, gamma + 1, vocab_size}, cuda_int.dtype(torch::kFloat32));
+    target.token_ids_are_point_mass = true;
+    spec::SpeculativeSampler verifier(torch::Tensor(), gamma);
+    auto                     output = verifier.forward({forced, normal}, draft, target);
+    EXPECT_TRUE(torch::equal(output.accept_len.cpu(), torch::tensor({3, 1}, torch::kInt32)));
+    EXPECT_TRUE(torch::equal(output.accept_tokens.cpu(), torch::tensor({{1, 3, 0}, {2, 0, 0}}, torch::kInt32)));
+}
+
 TEST_F(MtpExecutorTest, testDSparkDraftMixedBatchKeepsDenseQForStochasticRow) {
     constexpr int32_t gamma      = 3;
     constexpr int32_t vocab_size = 4;

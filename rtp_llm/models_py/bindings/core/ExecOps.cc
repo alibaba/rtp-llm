@@ -44,6 +44,7 @@ GreedyOutput     sampleGreedy(const GreedyParams& params);
 torch::Tensor    sampleFromProbs(const torch::Tensor& probabilities);
 BeamSearchOutput sampleBeamSearch(BeamSearchParams params);
 void             rejectionSampling(const RejectionSamplingParams& params);
+bool             rejectionSamplingSupportsFinalize();
 void             markovSoftmaxStep(const MarkovSoftmaxStepParams& params);
 torch::Tensor    markovArgmaxStep(const MarkovArgmaxStepParams& params);
 void             mappingDraft2Target(const MappingDraft2TargetParams& params);
@@ -646,6 +647,10 @@ BeamSearchOutput execSampleBeamSearch(BeamSearchParams params) {
 
 void execRejectionSampling(const RejectionSamplingParams& params) {
     rejectionSampling(params);
+}
+
+bool execRejectionSamplingSupportsFinalize() {
+    return rejectionSamplingSupportsFinalize();
 }
 
 void execMarkovSoftmaxStep(const MarkovSoftmaxStepParams& params) {
