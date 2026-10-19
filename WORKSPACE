@@ -75,6 +75,16 @@ load("@flashinfer_opensource_rules//:repositories.bzl", "flashinfer_opensource_r
 
 flashinfer_opensource_repository(name = "flashinfer_opensource_sidecar")
 
+local_repository(
+    name = "flash_mla_sm90_rules",
+    path = "deps/flash_mla_sm90",
+)
+
+load("@flash_mla_sm90_rules//:repositories.bzl", "flash_mla_sm90_repository")
+
+flash_mla_sm90_repository(name = "flash_mla_sm90_sidecar")
+
+
 load("@rules_python//python:pip.bzl", "pip_parse")
 
 # Test-only, platform-independent pytest closure; do not alter runtime locks.

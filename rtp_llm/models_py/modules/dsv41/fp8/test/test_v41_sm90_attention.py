@@ -13,7 +13,7 @@ class SM90AttentionTest(unittest.TestCase):
 
     def test_flashmla_hopper_bf16_head512_provider(self):
         """Do not mock the provider: missing Hopper kernels must fail here."""
-        from flash_mla import flash_mla_sparse_fwd
+        from flash_mla_sm90 import flash_mla_sparse_fwd
 
         torch.manual_seed(4190)
         q = torch.randn(2, 64, 512, device="cuda", dtype=torch.bfloat16) * 0.1
