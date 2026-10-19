@@ -95,6 +95,61 @@ def _compact_logits_kernel(
     )
 
 
+@triton.jit
+def _compact_logits_bounded_kernel(
+    physical_ptr,
+    logical_ptr,
+    lengths_ptr,
+    safe_table_ptr,
+    CAPACITY: tl.constexpr,
+    QUERY_LEN: tl.constexpr,
+    TABLE_COLS: tl.constexpr,
+    PHYSICAL_STRIDE: tl.constexpr,
+    LOGICAL: tl.constexpr,
+    PHYSICAL: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    """Length-bounded compaction: one CTA per row, dynamic loop over visible
+    columns, no stores beyond context_lens.
+
+    Columns >= length keep the allocator contents; every bounded decode
+    consumer (candidate pool, topk_v3, DeepSelect, finite epilogue) clamps its
+    reads by the same per-row lengths. A caller falling back to an unbounded
+    reader must restore the -inf padding first (see score_decode_indexer).
+
+    Versus the padded kernel this removes both the ~94%-of-capacity dead
+    stores and the capacity-wide grid of mostly-empty CTAs (the static-grid
+    form is dispatch/wave-latency bound, not store-bandwidth bound). The
+    full-tile gather is unpredicated: physical_col stays inside the scored
+    physical row for every col < CAPACITY, block-zero reads are safe by the
+    sentinel design, and the block<=0 zero restoration happens in registers.
+    """
+    row = tl.program_id(0)
+    length = tl.minimum(tl.load(lengths_ptr + row), CAPACITY)
+    table_base = safe_table_ptr + (row // QUERY_LEN) * TABLE_COLS
+    store_base = logical_ptr + row * CAPACITY
+    load_base = physical_ptr + row * PHYSICAL_STRIDE
+    n_full = (length // BLOCK) * BLOCK
+    for start in tl.range(0, n_full, BLOCK):
+        col = start + tl.arange(0, BLOCK)
+        physical_col = (col // LOGICAL) * PHYSICAL + col % LOGICAL
+        block = tl.load(table_base + col // LOGICAL, col < CAPACITY, other=0)
+        value = tl.load(load_base + physical_col)
+        tl.store(store_base + col, tl.where(block > 0, value, 0.0))
+    if n_full < length:
+        col = n_full + tl.arange(0, BLOCK)
+        physical_col = (col // LOGICAL) * PHYSICAL + col % LOGICAL
+        block = tl.load(table_base + col // LOGICAL, col < CAPACITY, other=0)
+        # Tail columns can pass CAPACITY; keep every access in bounds.
+        value = tl.load(load_base + physical_col, col < CAPACITY, other=0.0)
+        visible = col < length
+        tl.store(
+            store_base + col,
+            tl.where(visible & (block > 0), value, 0.0),
+            visible,
+        )
+
+
 def is_supported(
     device: torch.device,
     block_size: int,
@@ -194,11 +249,19 @@ def score_decode_indexer(
     logical_entries_per_block: int | None = None,
     positions: torch.Tensor | None = None,
     preserve_score_dtype: bool = False,
+    pad_invisible: bool = True,
 ) -> torch.Tensor | None:
     """Return [B*S,max_ctx_len], or None for an unsupported fast path.
 
     Default output is FP32. ``preserve_score_dtype`` retains DeepGEMM's native
     BF16/FP32 scores for decode selectors, with no additional rounding.
+
+    ``pad_invisible=False`` skips the -inf materialization of columns >=
+    context_lens, leaving them at the allocator contents (stable across CUDA
+    graph replays of one buffer). Only callers whose readers all clamp by the
+    same per-row lengths may use it; before handing the result to any
+    unbounded reader (e.g. a full-row torch.topk fallback) the caller must
+    restore the padding, as attention_v41 does with a masked_fill_.
 
     Pool and block table must come from the same KV source layer. Pool is the
     contiguous, unpadded uint8 [blocks,typed_entries_per_block,68] view over
@@ -213,12 +276,14 @@ def score_decode_indexer(
     Static max_ctx_len must fit the table coverage. No device scalar is read
     during capture/replay.
 
-    DeepGEMM leaves columns >= context_lens undefined. The output kernel sets
-    them to -inf and restores score zero for visible unallocated table entries
-    (block<=0), matching the old zero-K dequantization. Candidate selection,
-    short-context ordering and invalid-index semantics stay in the caller.
-    Returned logits are already causally masked; no repeated caller mask is
-    needed. The compaction kernel never reads DeepGEMM's unwritten columns.
+    DeepGEMM leaves columns >= context_lens undefined. With the default
+    pad_invisible=True the output kernel sets them to -inf and restores score
+    zero for visible unallocated table entries (block<=0), matching the old
+    zero-K dequantization. Candidate selection, short-context ordering and
+    invalid-index semantics stay in the caller. Returned logits are already
+    causally masked for every reader that clamps by context_lens; no repeated
+    caller mask is needed. The compaction kernel never reads DeepGEMM's
+    unwritten columns.
 
     With positions, weights are the unscaled projection and freqs_cis is the
     full frequency table, enabling fused Q preparation. Without positions,
@@ -285,17 +350,36 @@ def score_decode_indexer(
         dtype=logits.dtype if preserve_score_dtype else torch.float32,
         device=q.device,
     )
-    _compact_logits_kernel[(b * s, triton.cdiv(max_ctx_len, 1024))](
-        logits,
-        compact,
-        lengths,
-        safe_table,
-        max_ctx_len,
-        s,
-        block_table.shape[1],
-        logits.stride(0),
-        logical_entries,
-        block_size,
-        1024,
-    )
+    if pad_invisible:
+        _compact_logits_kernel[(b * s, triton.cdiv(max_ctx_len, 1024))](
+            logits,
+            compact,
+            lengths,
+            safe_table,
+            max_ctx_len,
+            s,
+            block_table.shape[1],
+            logits.stride(0),
+            logical_entries,
+            block_size,
+            1024,
+        )
+    else:
+        # 8192-column tiles benchmarked fastest at production decode shapes
+        # (T=192, 256k/512k capacity, 32k contexts): 3.5/5.3 us per call vs
+        # 30.8/59.7 us for the padded static grid (graph-replay GPU timing).
+        _compact_logits_bounded_kernel[(b * s,)](
+            logits,
+            compact,
+            lengths,
+            safe_table,
+            max_ctx_len,
+            s,
+            block_table.shape[1],
+            logits.stride(0),
+            logical_entries,
+            block_size,
+            8192,
+            num_warps=8,
+        )
     return compact

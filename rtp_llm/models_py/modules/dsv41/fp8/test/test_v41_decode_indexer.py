@@ -224,7 +224,146 @@ def _check_unallocated_table_rows(logical, ratio):
     assert torch.count_nonzero(output[6:, 2 * logical : 3 * logical]).item() == 0
 
 
+def _selector_or_skip():
+    from rtp_llm.models_py.modules.dsv41.fp8 import _v41_decode_topk as selector
+
+    if not selector._TOPK_V3_OK:
+        raise unittest.SkipTest("topk_v3 unavailable; bounded readers not testable")
+    return selector
+
+
+def _visible_mask(case, capacity):
+    lengths = case["context_lens"].flatten()
+    return torch.arange(capacity, device="cuda")[None] < lengths[:, None]
+
+
+def _check_elided_padding(logical, ratio, capacity, preserve, poison_table):
+    """pad_invisible=False keeps visible columns bitwise identical and every
+    bounded decode selector output-identical. The elision itself (padding left
+    untouched) is proven deterministically by the graph-replay staleness
+    check, not by allocator contents."""
+    if not torch.cuda.is_available() or not fused.is_supported(
+        torch.device("cuda"), 128
+    ):
+        raise unittest.SkipTest("paged FP8 indexer unsupported on this device")
+    selector = _selector_or_skip()
+    torch.backends.cuda.matmul.allow_tf32 = False
+    b, s = 2, 6
+    case, keys = make_case(b, s, capacity, 128, logical, ratio)
+    if poison_table:
+        case["block_table"][0, 0] = 0
+        case["block_table"][1, 2] = -7
+        keys[0, :logical] = 0
+        keys[1, 2 * logical : 3 * logical] = 0
+    kwargs = dict(case, preserve_score_dtype=preserve)
+    padded = fused.score_decode_indexer(**kwargs)
+    elided = fused.score_decode_indexer(**kwargs, pad_invisible=False)
+    visible = _visible_mask(case, capacity)
+    assert torch.equal(elided[visible], padded[visible])
+    assert torch.isneginf(padded[~visible]).all()
+    lengths = case["context_lens"].flatten().contiguous()
+    assert selector.is_supported(elided, lengths, 512)
+    assert torch.equal(
+        selector.select_tokens(elided, lengths, 512),
+        selector.select_tokens(padded, lengths, 512),
+    )
+    for block_size, blocks in ((8, 64), (16, 32)):
+        elided_c, elided_f = selector.select_candidates(
+            elided, lengths, block_size, blocks
+        )
+        padded_c, padded_f = selector.select_candidates(
+            padded, lengths, block_size, blocks
+        )
+        assert torch.equal(elided_c, padded_c)
+        assert torch.equal(elided_f, padded_f)
+    del padded, elided
+
+
+def _check_graph_replay_elided(logical, ratio):
+    """Replayed elided scoring with growing/shrinking/zero lengths keeps the
+    bounded selection identical to freshly padded scoring, while the padding
+    stays undefined (never -inf-filled) across replays."""
+    if not torch.cuda.is_available() or not fused.is_supported(
+        torch.device("cuda"), 128
+    ):
+        raise unittest.SkipTest("paged FP8 indexer unsupported on this device")
+    selector = _selector_or_skip()
+    torch.backends.cuda.matmul.allow_tf32 = False
+    case, _ = make_case(2, 6, 2053, 128, logical, ratio)
+    kwargs = dict(case, preserve_score_dtype=True)
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        for _ in range(3):
+            fused.score_decode_indexer(**kwargs, pad_invisible=False)
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        output = fused.score_decode_indexer(**kwargs, pad_invisible=False)
+    # Step 0 grows lengths, step 1 shrinks them (undefined padding),
+    # step 2 regrows with an unallocated table row, step 3 zeroes all rows.
+    starts_by_step = [(0, 901), (11, 40), (300, 1801), (0, 0)]
+    prev_lengths = None
+    checked_stale = 0
+    for step, starts in enumerate(starts_by_step):
+        updated, _ = make_case(2, 6, 2053, 128, logical, ratio, seed=71 + step)
+        if step == 2:
+            updated["block_table"][0, 0] = 0
+        for key in ("q", "weights", "freqs_cis", "pool", "block_table"):
+            case[key].copy_(updated[key])
+        positions = (
+            torch.tensor(starts, device="cuda")[:, None] * ratio
+            + torch.arange(6, device="cuda")[None]
+        )
+        case["context_lens"].copy_(((positions + 1) // ratio).int())
+        graph.replay()
+        lengths = case["context_lens"].flatten().contiguous()
+        if prev_lengths is not None:
+            # Elision proof: after a shrink, the columns that just became
+            # padding are NOT -inf-filled. Their contents are whatever the
+            # graph pool's overlapping capture-time intermediates leave
+            # behind (bounded readers must ignore them); only a regressed
+            # PAD_INVISIBLE=True kernel would write -inf there.
+            for row in range(lengths.numel()):
+                new_len = int(lengths[row])
+                if new_len < int(prev_lengths[row]):
+                    assert not torch.isneginf(output[row, new_len:]).all()
+                    checked_stale += 1
+        reference = fused.score_decode_indexer(**kwargs)
+        visible = _visible_mask(case, 2053)
+        assert torch.equal(output[visible], reference[visible])
+        assert torch.equal(
+            selector.select_tokens(output, lengths, 512),
+            selector.select_tokens(reference, lengths, 512),
+        )
+        prev_lengths = lengths.clone()
+    assert checked_stale > 0, "no shrinking row: elision proof never ran"
+    del output, graph
+
+
 class V41DecodeIndexerTest(unittest.TestCase):
+    def test_pad_invisible_elision_keeps_visible_columns_and_bounded_selectors(self):
+        for logical, ratio, capacity, preserve, poison in [
+            (64, 2, 2053, False, False),
+            (64, 2, 2053, True, False),
+            (64, 2, 2048, True, True),
+            (128, 1, 2053, True, False),
+            (128, 1, 2048, False, True),
+        ]:
+            with self.subTest(
+                logical=logical,
+                ratio=ratio,
+                capacity=capacity,
+                preserve=preserve,
+                poison=poison,
+            ):
+                _check_elided_padding(logical, ratio, capacity, preserve, poison)
+
+    def test_pad_invisible_elision_graph_replay_length_changes(self):
+        for logical, ratio in [(64, 2), (128, 1)]:
+            with self.subTest(logical=logical, ratio=ratio):
+                _check_graph_replay_elided(logical, ratio)
+
     def test_paged_owner_layout_and_speculative_lengths(self):
         for physical, logical, ratio, b, s in [
             (64, 64, 1, 1, 1),
