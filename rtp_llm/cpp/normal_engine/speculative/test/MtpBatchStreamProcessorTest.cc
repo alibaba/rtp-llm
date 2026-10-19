@@ -1122,7 +1122,8 @@ TEST_F(MtpBatchStreamProcessorTest, testPrefillDispatch) {
     MergedOutput target_output;
     target_output.model_output.all_hidden_states =
         torch::tensor({0.1f, 0.2f, 1.1f, 1.2f, 1.3f, 1.4f}, torch::kFloat32).reshape({3, 2});
-    target_output.sampler_output.token_ids = torch::tensor({2, -1, 1, 1, 2, 3}, torch::kInt32).reshape({2, 3});
+    target_output.sampler_output.token_ids =
+        torch::tensor({2, -1, 1, 1, 2, 3}, torch::kInt32).reshape({2, 3}).to(torch::kCUDA);
     target_output.sampler_output.all_probs = torch::tensor({0.1f, 0.9f, 0.2f, 0.8f}, torch::kFloat32).reshape({2, 2});
 
     MergedOutput draft_output;
