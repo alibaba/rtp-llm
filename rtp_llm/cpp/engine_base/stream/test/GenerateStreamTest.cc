@@ -30,6 +30,18 @@ TEST(GenerateInputTest, PrefixPreservesCustomOutputTokenIdentity) {
     EXPECT_EQ(input.input_ids[input.custom_output_token_position].item<int>(), 7);
 }
 
+TEST(GenerateInputTest, PrefixShiftsExplicitCustomOutputCacheLimit) {
+    GenerateInput input;
+    input.input_ids                   = torch::tensor({7, 8, 9, 10}, torch::kInt32);
+    input.custom_output_prefix_length = 4;
+    input.updatePrefix({2, 3});
+    EXPECT_EQ(input.custom_output_prefix_length, 6);
+
+    input.custom_output_prefix_length = -1;
+    input.updatePrefix({4});
+    EXPECT_EQ(input.custom_output_prefix_length, -1);
+}
+
 class GenerateStreamBuilder {
 public:
     GenerateStreamBuilder() {
@@ -363,7 +375,12 @@ TEST_F(GenerateStreamTest, testGenerateStreamReuseCacheMethod) {
     ASSERT_TRUE(stream->generate_input_->generate_config->reuse_cache);
     ASSERT_FALSE(stream->reuseCache());
 
+    // A non-negative backend-provided cap is the only prefill-only opt-in.
+    stream->generate_input_->custom_output_prefix_length = 9;
+    ASSERT_TRUE(stream->reuseCache());
+
     // the same config object restores effective reuse for positive generation
+    stream->generate_input_->custom_output_prefix_length     = -1;
     stream->generate_input_->generate_config->max_new_tokens = 1;
     ASSERT_TRUE(stream->reuseCache());
 }
@@ -480,6 +497,27 @@ TEST_F(GenerateStreamTest, finishOrCancelCancelsIncompleteStreamAndWaitsForCommi
 
     EXPECT_EQ(stream->moveToNext(), StreamState::FINISHED);
     EXPECT_TRUE(stop_result.get());
+    EXPECT_TRUE(stream->stream_cache_resource_->isResourceReleased());
+}
+
+TEST_F(GenerateStreamTest, cachePublicationWaitIncludesDeferredAsyncRelease) {
+    auto builder = GenerateStreamBuilder();
+    auto stream  = std::dynamic_pointer_cast<NormalGenerateStream>(builder.createComplexContextStream({1, 2, 3}));
+    stream->generateConfig()->max_new_tokens             = 0;
+    stream->generateInput()->custom_output_prefix_length = 2;
+    stream->setNeedReleaseResource(true);
+    stream->generate_status_->status.store(StreamState::RUNNING);
+    stream->reportEvent(StreamEvents::GenerateDone);
+    stream->incPendingAsyncBookkeeping();
+
+    ASSERT_EQ(stream->moveToNext(), StreamState::FINISHED);
+    EXPECT_FALSE(stream->stream_cache_resource_->isResourceReleased());
+
+    auto waiter = std::async(std::launch::async, [stream] { return stream->waitForCachePublication(1000); });
+    EXPECT_EQ(waiter.wait_for(std::chrono::milliseconds(10)), std::future_status::timeout);
+
+    stream->decPendingAsyncBookkeepingAndMaybeRelease();
+    EXPECT_TRUE(waiter.get());
     EXPECT_TRUE(stream->stream_cache_resource_->isResourceReleased());
 }
 

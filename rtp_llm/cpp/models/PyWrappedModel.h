@@ -183,6 +183,7 @@ private:
     std::shared_ptr<CacheStoreAsyncWriter>     cache_store_async_writer_;
     bool                                       custom_output_enabled_ = false;
     bool                                       custom_output_prefill_only_ = false;
+    bool                                       custom_output_prefix_cache_ = false;
 
     // Accumulated H2D copies from tensorHoldHostAndToCuda(); flushed as one kernel per forward.
     FusedD2DCopyParams d2d_copies_;

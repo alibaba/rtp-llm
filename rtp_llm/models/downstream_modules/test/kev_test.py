@@ -284,11 +284,12 @@ class KevHeadTest(unittest.TestCase):
             (sum(map(len, self.rows)), 4), generator=generator
         ).to(torch.bfloat16)
 
-    def run_rows(self, rows, hidden):
+    def run_rows(self, rows, hidden, prefix_lengths=None):
         return self.handler.extend_forward(
             hidden_states=hidden,
             input_ids=torch.tensor([token for row in rows for token in row]),
             input_lengths=torch.tensor(list(map(len, rows))),
+            prefix_lengths=prefix_lengths,
         )
 
     def test_biased_fp32_head_matches_scalar_reference(self):
@@ -346,6 +347,93 @@ class KevHeadTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "complete"):
             self.run_rows(self.rows, self.hidden[1:])
 
+    def test_cache_prefix_stops_before_question_and_requires_complete_cpu_row(self):
+        self.assertTrue(self.handler.supports_prefix_cache)
+        for row in self.rows:
+            tokens = torch.tensor(row)
+            self.assertEqual(
+                self.handler.cache_prefix_length(tokens), row.index(2)
+            )
+        for tokens in (
+            torch.tensor(self.rows[0][1:]),
+            torch.tensor(self.rows[0][:-1]),
+            torch.tensor(self.rows[0], dtype=torch.float32),
+            torch.tensor([self.rows[0]]),
+            torch.tensor([1, 2, 2, 3, 101, 4, 5]),
+        ):
+            with self.subTest(tokens=tokens), self.assertRaises(ValueError):
+                self.handler.cache_prefix_length(tokens)
+        with self.assertRaisesRegex(ValueError, "CPU"):
+            self.handler.cache_prefix_length(
+                torch.empty(len(self.rows[0]), device="meta", dtype=torch.int64)
+            )
+
+    def test_cached_state_tails_match_full_rows_and_batch_partition(self):
+        expected = self.run_rows(self.rows, self.hidden)
+        torch.testing.assert_close(
+            expected,
+            self.run_rows(
+                self.rows, self.hidden, torch.zeros(len(self.rows), dtype=torch.int32)
+            ),
+            rtol=0,
+            atol=0,
+        )
+        # Exercise a partial state tail, an empty tail, and an uncached row in
+        # the same pass, then cache every state's last token as well.
+        for prefixes in ([1, 2, 0], [2, 1, 1], [2, 2, 1]):
+            suffixes, hidden_suffixes = [], []
+            offset = 0
+            for row, prefix in zip(self.rows, prefixes):
+                suffixes.append(row[prefix:])
+                hidden_suffixes.append(self.hidden[offset + prefix : offset + len(row)])
+                offset += len(row)
+            actual = self.run_rows(
+                suffixes, torch.cat(hidden_suffixes), torch.tensor(prefixes)
+            )
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+            split = [
+                self.run_rows([row], hidden, torch.tensor([prefix]))
+                for row, hidden, prefix in zip(suffixes, hidden_suffixes, prefixes)
+            ]
+            torch.testing.assert_close(actual, torch.cat(split), rtol=1e-6, atol=1e-7)
+        for tensor in self.handler._weights.values():
+            self.assertEqual(tensor.dtype, torch.float32)
+
+    def test_prefix_lengths_rejects_invalid_vectors(self):
+        invalid = (
+            torch.tensor([-1, 0, 0]),
+            torch.tensor([0, 0]),
+            torch.tensor([], dtype=torch.int64),
+            torch.tensor([[0, 0, 0]]),
+            torch.tensor([0.0, 0.0, 0.0]),
+            torch.tensor([False, False, False]),
+            [0, 0, 0],
+        )
+        for prefixes in invalid:
+            with (
+                self.subTest(prefixes=prefixes),
+                self.assertRaisesRegex(ValueError, "prefix_lengths"),
+            ):
+                self.run_rows(self.rows, self.hidden, prefixes)
+
+    def test_cached_suffix_requires_complete_question_and_option_anchors(self):
+        invalid = (
+            (self.rows[0], 1),  # A cached row must not retain a state delimiter.
+            (self.rows[0][1:], 0),  # An uncached row must have a state delimiter.
+            (self.rows[0][3:], 3),  # The q delimiter was incorrectly cached.
+            (self.rows[0][6:], 6),  # An option anchor was incorrectly cached.
+            ([2, 2, 3, 101, 4, 5], 1),
+            ([3, 101, 2, 3, 102, 4, 5], 1),
+            ([4, 101, 2, 3, 102, 4, 5], 1),
+            ([5, 101, 2, 3, 102, 4, 5], 1),
+            ([2, 3, 101, 4], 1),
+        )
+        for row, prefix in invalid:
+            with self.subTest(row=row, prefix=prefix), self.assertRaises(ValueError):
+                self.run_rows(
+                    [row], torch.zeros((len(row), 4)), torch.tensor([prefix])
+                )
+
     def test_head_loading_rejects_missing_or_low_precision_weights(self):
         with self.assertRaises(ValueError):
             self.handler.init(
@@ -371,7 +459,7 @@ class KevHeadTest(unittest.TestCase):
         self.assertTrue(module.get_handler().prefill_only)
         self.assertEqual(
             module.get_handler().extend_forward_args(),
-            ["hidden_states", "input_ids", "input_lengths"],
+            ["hidden_states", "input_ids", "input_lengths", "prefix_lengths"],
         )
         self.handler = module.get_handler()
         self.assertEqual(self.run_rows(self.rows, self.hidden).dtype, torch.float32)
@@ -396,17 +484,97 @@ class KevHeadTest(unittest.TestCase):
             ):
                 KevModule(self.module_config(compute_dtype=dtype), FakeTokenizer())
 
-    def test_module_rejects_quantized_backbone_before_loading_head(self):
+    def fp8_block_config(self, **overrides):
+        from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
+
+        fields = {
+            "quantization": "FP8_PER_BLOCK",
+            "quant_config": Fp8BlockWiseQuantConfig(),
+            "quant_algo": SimpleNamespace(
+                isQuant=lambda: True,
+                isFp8=lambda: True,
+                getWeightBits=lambda: 8,
+                getGroupSize=lambda: 128,
+            ),
+        }
+        fields.update(overrides)
+        return self.module_config(**fields)
+
+    def test_module_accepts_resolved_fp8_per_block_and_keeps_head_fp32(self):
+        from safetensors.torch import save_file
+
+        from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
+
+        save_file(self.weights, str(Path(self.directory.name, "kev_head.safetensors")))
+        # Both online quantization and a prequantized checkpoint resolve to the
+        # same method; the latter need not have a QUANTIZATION CLI string.
+        for requested in ("FP8_PER_BLOCK", None):
+            module = KevModule(
+                self.fp8_block_config(
+                    quantization=requested,
+                    quant_config=Fp8BlockWiseQuantConfig(is_quanted=requested is None),
+                ),
+                FakeTokenizer(),
+            )
+            module.init(None)
+            self.handler = module.get_handler()
+            self.assertEqual(self.run_rows(self.rows, self.hidden).dtype, torch.float32)
+            for tensor in self.handler._weights.values():
+                self.assertEqual(tensor.dtype, torch.float32)
+        with self.assertRaisesRegex(ValueError, "--act_type bf16"):
+            KevModule(
+                self.fp8_block_config(compute_dtype=torch.float16), FakeTokenizer()
+            )
+
+    def test_module_rejects_unresolved_or_other_quantization_before_loading_head(self):
         for overrides in (
             {"quant_algo": SimpleNamespace(isQuant=lambda: True)},
             {"quantization": "fp8"},
             {"quant_config": object()},
+            {"quantization": "FP8_PER_BLOCK"},
+            {"enable_w4a16_sm120_dense_ffn": True},
         ):
             with (
                 self.subTest(overrides=overrides),
-                self.assertRaisesRegex(ValueError, "quantized backbone"),
+                self.assertRaisesRegex(ValueError, "only BF16 or FP8_PER_BLOCK"),
             ):
                 KevModule(self.module_config(**overrides), FakeTokenizer())
+        invalid = (
+            {"quant_config": SimpleNamespace(get_method=lambda: "FP8")},
+            {
+                "quant_config": SimpleNamespace(
+                    get_method=lambda: "FP8_PER_CHANNEL_QUARK"
+                )
+            },
+            {"quant_config": SimpleNamespace(get_method=lambda: "modelopt_fp4")},
+            {"quant_algo": SimpleNamespace(isQuant=lambda: False)},
+            {
+                "quant_algo": SimpleNamespace(
+                    isQuant=lambda: True, isFp8=lambda: False
+                )
+            },
+            {
+                "quant_algo": SimpleNamespace(
+                    isQuant=lambda: True,
+                    isFp8=lambda: True,
+                    getWeightBits=lambda: 8,
+                    getGroupSize=lambda: 64,
+                )
+            },
+            {"enable_nvfp4_dense_ffn": True},
+            {"enable_w4a16_sm120_dense_ffn": True},
+            {
+                "quant_config": SimpleNamespace(
+                    get_method=lambda: "FP8_PER_BLOCK", enable_nvfp4_dense_ffn=True
+                )
+            },
+        )
+        for overrides in invalid:
+            with (
+                self.subTest(overrides=overrides),
+                self.assertRaisesRegex(ValueError, "only BF16 or FP8_PER_BLOCK"),
+            ):
+                KevModule(self.fp8_block_config(**overrides), FakeTokenizer())
 
 
 if __name__ == "__main__":

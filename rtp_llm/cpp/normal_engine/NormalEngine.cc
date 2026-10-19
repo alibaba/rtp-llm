@@ -153,9 +153,10 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     RTP_LLM_LOG_INFO(__PRETTY_FUNCTION__);
     // As in PyWrappedModel, failed construction must release Python references under the GIL.
     auto cleanup_on_failure = [](NormalEngine* engine) noexcept {
-        if (engine->custom_output_selector_) {
+        if (engine->custom_output_selector_ || engine->custom_output_prefix_selector_) {
             py::gil_scoped_acquire gil;
             engine->custom_output_selector_ = py::object();
+            engine->custom_output_prefix_selector_ = py::object();
         }
     };
     std::unique_ptr<NormalEngine, decltype(cleanup_on_failure)> construction_guard(this, cleanup_on_failure);
@@ -166,6 +167,10 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
             custom_output_selector_ = handler.attr("select_token_position");
             custom_output_prefill_only_ =
                 py::hasattr(handler, "prefill_only") && handler.attr("prefill_only").cast<bool>();
+            if (custom_output_prefill_only_ && py::hasattr(handler, "supports_prefix_cache")
+                && handler.attr("supports_prefix_cache").cast<bool>()) {
+                custom_output_prefix_selector_ = handler.attr("cache_prefix_length");
+            }
         }
     }
     // Reject an explicitly requested generation-prefill/speculative combination
@@ -329,9 +334,10 @@ void NormalEngine::initScheduler() {
 NormalEngine::~NormalEngine() {
     RTP_LLM_LOG_INFO("destory normal engine");
     (void)stop();
-    if (custom_output_selector_) {
+    if (custom_output_selector_ || custom_output_prefix_selector_) {
         py::gil_scoped_acquire gil;
         custom_output_selector_ = py::object();
+        custom_output_prefix_selector_ = py::object();
     }
 }
 
@@ -758,6 +764,17 @@ std::shared_ptr<GenerateStream> NormalEngine::createStream(const std::shared_ptr
                 selection_error = ErrorInfo(ErrorCode::INVALID_PARAMS, "custom output position outside prompt");
             } else {
                 input->custom_output_token_position = position;
+                if (custom_output_prefix_selector_) {
+                    const int prefix_length = custom_output_prefix_selector_(input->input_ids).cast<int>();
+                    if (prefix_length < 0 || prefix_length > position) {
+                        selection_error = ErrorInfo(ErrorCode::INVALID_PARAMS,
+                                                    "custom output cache prefix outside prompt readout boundary");
+                    } else {
+                        // Derived from the validated full token row, never trusted from RPC.
+                        // Keep every readout anchor in the executed suffix.
+                        input->custom_output_prefix_length = prefix_length;
+                    }
+                }
             }
         } catch (const py::error_already_set& error) {
             // ValueError is the selector's input-rejection contract; other Python errors are execution failures.

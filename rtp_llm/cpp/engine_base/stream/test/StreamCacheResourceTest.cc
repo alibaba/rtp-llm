@@ -1014,6 +1014,7 @@ TEST_F(StreamCacheResourceTest, testPrefillOnlyDisablesPrefixAndDeviceCacheReuse
             .WillOnce(testing::Invoke([real_allocator](const MallocInfo& info) {
                 EXPECT_FALSE(info.reuse_cache);
                 EXPECT_FALSE(info.enable_cache_lookup);
+                EXPECT_EQ(info.cache_lookup_token_limit, -1);
                 return real_allocator->initMallocForCommonLen(info);
             }));
         EXPECT_CALL(*allocator, incrMalloc(testing::_))
@@ -1021,6 +1022,7 @@ TEST_F(StreamCacheResourceTest, testPrefillOnlyDisablesPrefixAndDeviceCacheReuse
             .WillRepeatedly(testing::Invoke([real_allocator](const MallocInfo& info) {
                 EXPECT_FALSE(info.reuse_cache);
                 EXPECT_FALSE(info.enable_cache_lookup);
+                EXPECT_EQ(info.cache_lookup_token_limit, -1);
                 return real_allocator->incrMalloc(info);
             }));
 
@@ -1038,6 +1040,46 @@ TEST_F(StreamCacheResourceTest, testPrefillOnlyDisablesPrefixAndDeviceCacheReuse
         stream_->releaseResource();
         EXPECT_EQ(cache_manager_->freeBlocksNum(), 8u);
     }
+}
+
+TEST_F(StreamCacheResourceTest, testPrefillOnlyExplicitCacheLookupOptInPropagatesTokenCap) {
+    prepareResource(/*reuse_cache=*/true);
+    auto& resource = stream_->streamCacheResource();
+
+    stream_->generateConfig()->max_new_tokens             = 0;
+    stream_->generateConfig()->num_return_sequences       = 1;
+    stream_->generateConfig()->reuse_cache                = true;
+    stream_->generate_input_->custom_output_prefix_length = 5;
+    resource.resource_context_.enable_device_cache        = true;
+    resource.resource_context_.enable_memory_cache        = true;
+    resource.resource_context_.enable_disk_cache          = true;
+    resource.resource_context_.enable_remote_cache        = true;
+    ASSERT_TRUE(resource.reuseCache());
+
+    const auto real_allocator = cache_manager_->coordinator_manager_;
+    auto       allocator = std::make_shared<testing::NiceMock<MockCoordinatorCacheManager>>(cache_manager_->config_);
+    cache_manager_->coordinator_manager_ = allocator;
+    EXPECT_CALL(*allocator, initMallocForCommonLen(testing::_))
+        .WillOnce(testing::Invoke([real_allocator](const MallocInfo& info) {
+            EXPECT_TRUE(info.reuse_cache);
+            EXPECT_TRUE(info.enable_cache_lookup);
+            EXPECT_EQ(info.cache_lookup_token_limit, 5);
+            return real_allocator->initMallocForCommonLen(info);
+        }));
+    EXPECT_CALL(*allocator, incrMalloc(testing::_))
+        .Times(2)
+        .WillRepeatedly(testing::Invoke([real_allocator](const MallocInfo& info) {
+            EXPECT_TRUE(info.reuse_cache);
+            EXPECT_TRUE(info.enable_cache_lookup);
+            EXPECT_EQ(info.cache_lookup_token_limit, 5);
+            return real_allocator->incrMalloc(info);
+        }));
+
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    ASSERT_TRUE(resource.incrKVBlock().ok());
+
+    cache_manager_->coordinator_manager_ = real_allocator;
+    stream_->releaseResource();
 }
 
 TEST_F(StreamCacheResourceTest, testReuseCacheIgnoresPerRequestSwitchWhenConfigured) {

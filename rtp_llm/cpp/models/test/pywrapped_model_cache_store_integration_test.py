@@ -3234,14 +3234,40 @@ class CustomOutputPostLayersTest(unittest.TestCase):
                 self.assertIsNone(result["custom_output"])
                 self.assertIn(message, result["custom_output_error"])
 
-    def run_decision_case(self, handler, indexes=(2, 5), python_norm=True):
+    def run_decision_case(self, handler, indexes=(2, 5), python_norm=True, prefixes=()):
         return _extension.run_post_layers(
             ForwardModel(),
             handler,
             torch.tensor(indexes, dtype=torch.int64).pin_memory(),
             python_norm,
             True,
+            list(prefixes),
         )
+
+    def test_prefix_aware_decision_handler_receives_cached_lengths(self):
+        class PrefixHandler(DecisionHandler):
+            supports_prefix_cache = True
+
+            def extend_forward_args(self):
+                return super().extend_forward_args() + ["prefix_lengths"]
+
+            def extend_forward(self, *, prefix_lengths, **kwargs):
+                self.prefixes = prefix_lengths.cpu().tolist()
+                return super().extend_forward(**kwargs)
+
+        handler = PrefixHandler()
+        result = self.run_decision_case(handler, prefixes=(64, 128))
+        self.assertEqual(result["custom_output_error"], "")
+        self.assertEqual(handler.prefixes, [64, 128])
+        self.assertEqual(handler.observed[1].numel(), 6)
+        self.assertEqual(tuple(result["custom_output"].shape), (2, 8))
+        self.assertIsNone(result["logits"])
+
+    def test_full_row_decision_handler_still_rejects_cached_prefix(self):
+        handler = DecisionHandler()
+        result = self.run_decision_case(handler, prefixes=(64, 0))
+        self.assertIn("does not support cached", result["custom_output_error"])
+        self.assertEqual(handler.calls, 0)
 
     def test_decision_handler_receives_all_normalized_tokens_without_lm_head(self):
         raw_hidden = (

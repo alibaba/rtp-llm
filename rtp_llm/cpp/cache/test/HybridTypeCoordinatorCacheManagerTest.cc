@@ -2181,6 +2181,64 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, DefaultHybridLinearPrefixReuseSupp
     EXPECT_EQ(result.reuse_len, 12);
 }
 
+TEST_F(HybridTypeCoordinatorCacheManagerTest, LookupTokenCapRoundsDownWithoutChangingAllocation) {
+    auto config    = makeTinyHybridConfig();
+    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator->init());
+
+    const CacheKeysType seed_keys{100, 101, 102};
+    auto                seed_res    = makeBatchResource(1, config, seed_keys);
+    auto                seed_tokens = makeCompleteTokenIds(1, 12, 4);
+    MallocInfo          seed_info{seed_res, seed_tokens};
+    seed_info.enable_cache_lookup = false;
+    // Prefix-enabled prefill materializes the complete linear history so the
+    // state at the publication boundary is a real source block.
+    seed_info.reuse_cache = true;
+    ASSERT_TRUE(allocator->malloc(seed_info).success);
+    size_t     resident_prefix_length = 0;
+    InsertInfo seed_insert{seed_res, seed_tokens, false};
+    seed_insert.cache_insert_token_limit = 9;
+    allocator->insertIntoCache(seed_insert, resident_prefix_length);
+
+    const auto seed_linear_blocks = seed_res->blocks(0, "linear");
+    const auto capped_path        = allocator->blockTreeCacheOwner()->tree()->findNode(CacheKeysType{100, 101});
+    ASSERT_EQ(capped_path.size(), 2u);
+    EXPECT_EQ(capped_path[1]->group_set_resources[0].device_blocks, (BlockIndicesType{seed_linear_blocks[1]}))
+        << "the cap must publish the GDN state at the complete prefix boundary";
+    EXPECT_EQ(allocator->blockTreeCacheOwner()->tree()->findNode(CacheKeysType{100, 101, 102}).size(), 2u)
+        << "the question/suffix block must not be published by a capped insert";
+
+    auto run_lookup = [&](int64_t cap, int expected_reuse_len) {
+        auto       hit_res    = makeBatchResource(1, config, CacheKeysType{100, 101, 102, 103});
+        auto       hit_tokens = makeCompleteTokenIds(1, 16, 4);
+        MallocInfo hit_info{hit_res, hit_tokens};
+        hit_info.enable_cache_lookup      = true;
+        hit_info.reuse_cache              = true;
+        hit_info.cache_lookup_token_limit = cap;
+
+        const auto result = allocator->malloc(hit_info);
+        ASSERT_TRUE(result.success);
+        EXPECT_EQ(result.reuse_len, expected_reuse_len);
+        // The cap only limits matched keys: the full four-block request still
+        // receives its complete allocation.
+        EXPECT_EQ(hit_res->blocksNum(0, "linear"), 4);
+        EXPECT_EQ(hit_res->blocksNum(0, "full1"), 4);
+        if (cap > 0) {
+            const auto& hit_linear_blocks = hit_res->blocks(0, "linear");
+            EXPECT_EQ(hit_linear_blocks[1], seed_linear_blocks[1])
+                << "the hit must load the GDN checkpoint at the capped boundary";
+            EXPECT_NE(hit_linear_blocks[2], seed_linear_blocks[2])
+                << "a suffix/question GDN state beyond the cap must remain private";
+        }
+        allocator->free(FreeInfo{hit_res, hit_tokens});
+    };
+
+    // seq_len=16 and cap=9 permit floor(9/4)=2 complete cache blocks.
+    run_lookup(/*cap=*/9, /*expected_reuse_len=*/8);
+    // Zero disables matching while leaving the requested allocation intact.
+    run_lookup(/*cap=*/0, /*expected_reuse_len=*/0);
+}
+
 TEST_F(HybridTypeCoordinatorCacheManagerTest, PdDecodeLinearTailOnlyKeepsFullReuseAndLeavesLinearSlotsNull) {
     auto config    = makeTinyHybridConfig();
     auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);

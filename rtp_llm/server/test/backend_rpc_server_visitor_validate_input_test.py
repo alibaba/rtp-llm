@@ -28,14 +28,16 @@ class _RecordingModelRpcClient:
     def __init__(self):
         self.inputs = []
         self.batches = []
+        self.routing_keys = []
 
     async def enqueue(self, input):
         self.inputs.append(input)
         if False:
             yield None
 
-    async def batch_enqueue(self, inputs):
+    async def batch_enqueue(self, inputs, *, routing_key=None):
         self.batches.append(inputs)
+        self.routing_keys.append(routing_key)
         return []
 
 
@@ -126,6 +128,22 @@ class BackendRPCServerVisitorValidateInputTest(unittest.IsolatedAsyncioTestCase)
 
         self.assertEqual(outputs, [])
         self.assertEqual(self.model_rpc_client.batches, [inputs])
+
+    async def test_batch_enqueue_forwards_optional_routing_key_without_changing_ids(
+        self,
+    ):
+        for routing_key in (None, 0, (1 << 63) - 1):
+            with self.subTest(routing_key=routing_key):
+                inputs = [_make_input(4, 0), _make_input(5, 0)]
+                inputs[0].request_id = 41
+                inputs[1].request_id = 42
+                result = await self.visitor.batch_enqueue(
+                    inputs, routing_key=routing_key
+                )
+                self.assertEqual(result, [])
+                self.assertIs(self.model_rpc_client.batches[-1], inputs)
+                self.assertEqual(self.model_rpc_client.routing_keys[-1], routing_key)
+                self.assertEqual([item.request_id for item in inputs], [41, 42])
 
     async def test_batch_enqueue_rejects_invalid_prefill_only_generate_config(self):
         input = _make_input(1, max_new_tokens=1, return_logits=True)

@@ -580,9 +580,14 @@ torch::Tensor PyWrappedModel::customOutputIndexes(const GptModelInputs& inputs) 
 void PyWrappedModel::initializeCustomOutput() {
     const auto handler = py_model_.attr("custom_output_handler");
     custom_output_prefill_only_ = py::hasattr(handler, "prefill_only") && handler.attr("prefill_only").cast<bool>();
-    const auto expected_args    = custom_output_prefill_only_ ?
-                                      std::vector<std::string>{"hidden_states", "input_ids", "input_lengths"} :
-                                      std::vector<std::string>{"selected_hidden_states"};
+    custom_output_prefix_cache_ = custom_output_prefill_only_ && py::hasattr(handler, "supports_prefix_cache")
+                                  && handler.attr("supports_prefix_cache").cast<bool>();
+    auto expected_args = custom_output_prefill_only_ ?
+                             std::vector<std::string>{"hidden_states", "input_ids", "input_lengths"} :
+                             std::vector<std::string>{"selected_hidden_states"};
+    if (custom_output_prefix_cache_) {
+        expected_args.push_back("prefix_lengths");
+    }
     TORCH_CHECK(py::cast<std::vector<std::string>>(handler.attr("extend_forward_args")()) == expected_args,
                 "custom output handler must request selected_hidden_states, or full-row arguments for prefill_only");
     TORCH_CHECK(custom_output_prefill_only_ || weights_.lm_head,
@@ -1349,16 +1354,19 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
                 TORCH_CHECK(inputs.sequence_lengths.numel() == 0, "decision output requires a context-only batch");
                 TORCH_CHECK(inputs.custom_output_indexes.numel() == inputs.input_lengths.numel(),
                             "decision output requires one complete selected row per sequence");
-                TORCH_CHECK(!inputs.prefix_lengths.defined() || inputs.prefix_lengths.numel() == 0
-                                || inputs.prefix_lengths.eq(0).all().item<bool>(),
+                TORCH_CHECK(custom_output_prefix_cache_ || !inputs.prefix_lengths.defined()
+                                || inputs.prefix_lengths.numel() == 0 || inputs.prefix_lengths.eq(0).all().item<bool>(),
                             "decision output does not support cached or chunked rows");
                 py::gil_scoped_acquire gil;
-                auto                   result = py_model_.attr("custom_output_handler")
-                                  .attr("extend_forward")(py::arg("hidden_states") =
-                                                              hidden.to(dataTypeToTorchType(description_.data_type)),
-                                                          py::arg("input_ids")     = inputs.combo_tokens,
-                                                          py::arg("input_lengths") = inputs.input_lengths)
-                                  .cast<torch::Tensor>();
+                py::dict               args;
+                args["hidden_states"] = hidden.to(dataTypeToTorchType(description_.data_type));
+                args["input_ids"]     = inputs.combo_tokens;
+                args["input_lengths"] = inputs.input_lengths;
+                if (custom_output_prefix_cache_) {
+                    args["prefix_lengths"] = inputs.prefix_lengths;
+                }
+                auto result =
+                    py_model_.attr("custom_output_handler").attr("extend_forward")(**args).cast<torch::Tensor>();
                 TORCH_CHECK(result.defined() && result.dim() == 2 && result.numel() > 0
                                 && result.size(0) == inputs.input_lengths.numel(),
                             "decision output must be a nonempty [batch, width] tensor");

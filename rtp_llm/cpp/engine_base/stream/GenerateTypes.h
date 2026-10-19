@@ -78,6 +78,9 @@ public:
         if (custom_output_token_position >= 0) {
             custom_output_token_position += prefix_length;
         }
+        if (custom_output_prefix_length >= 0) {
+            custom_output_prefix_length += prefix_length;
+        }
     }
 
 public:
@@ -106,6 +109,10 @@ public:
 
     // Selected position in input_ids; -1 means no custom output.
     int custom_output_token_position = -1;
+
+    // Explicit backend opt-in for prefill-only cache lookup. -1 keeps the
+    // ordinary prefill-only no-cache path; non-negative values are absolute.
+    int custom_output_prefix_length = -1;
 
     // Batch grouping params
     int     group_size = 1;

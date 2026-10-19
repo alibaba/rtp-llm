@@ -224,6 +224,7 @@ void GenerateStream::releaseResource() {
     if (!stream_cache_resource_->isResourceReleased()) {
         stream_cache_resource_->releaseResource();
     }
+    consumer_cv_->notify_all();
 }
 
 void GenerateStream::incPendingAsyncBookkeeping() {
@@ -852,6 +853,20 @@ bool GenerateStream::finishOrCancel(int64_t wait_timeout_ms, const std::string& 
                                cancel_reason + ": timed out waiting for scheduler lifecycle commit");
     }
     return finished;
+}
+
+bool GenerateStream::waitForCachePublication(int64_t wait_timeout_ms) {
+    RTP_LLM_CHECK_WITH_INFO(wait_timeout_ms > 0, "cache publication waits must be bounded");
+    std::unique_lock<std::mutex> lock(*mutex_);
+    const auto                   ready = [this] {
+        return hasErrorWithoutLock()
+               || (getStatus() == StreamState::FINISHED
+                   && (!stream_cache_resource_->resourceContext().cache_manager || !stream_cache_resource_->reuseCache()
+                       || stream_cache_resource_->isResourceReleased()));
+    };
+    // Scheduler release runs under mutex_; deferred worker release also takes
+    // that lock and notifies consumer_cv_ after publishing the cache entries.
+    return consumer_cv_->wait_for(lock, std::chrono::milliseconds(wait_timeout_ms), ready) && !hasErrorWithoutLock();
 }
 
 void GenerateStream::setReserveStep(size_t reserve_step) {

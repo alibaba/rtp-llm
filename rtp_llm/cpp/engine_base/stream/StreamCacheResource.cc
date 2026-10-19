@@ -126,6 +126,7 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
             if (target_tier != Tier::NONE) {
                 InsertInfo insert_info{batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), false, target_tier};
                 insert_info.pd_decode_linear_tail_only = pd_decode_linear_tail_only_;
+                insert_info.cache_insert_token_limit   = stream_->generateInput()->custom_output_prefix_length;
                 size_t     resident_prefix_length = 0;
                 resource_context_.cache_manager->insertIntoCache(insert_info, resident_prefix_length);
             }
@@ -218,6 +219,7 @@ absl::Status StreamCacheResource::initKVBlock() {
     }
     malloc_info.enable_remove_skipped_blocks = false;
     malloc_info.pd_decode_linear_tail_only   = pd_decode_linear_tail_only_;
+    malloc_info.cache_lookup_token_limit     = stream_->generateInput()->custom_output_prefix_length;
 
     MallocResult result = resource_context_.cache_manager->malloc(malloc_info);
     recordCacheReuseMallocResult(result);
@@ -417,6 +419,7 @@ absl::Status StreamCacheResource::incrKVBlock(int seq_len_override) {
     malloc_info.enable_remove_skipped_blocks = true;
     malloc_info.incr_seq_len_override        = seq_len_override;
     malloc_info.pd_decode_linear_tail_only   = pd_decode_linear_tail_only_;
+    malloc_info.cache_lookup_token_limit     = stream_->generateInput()->custom_output_prefix_length;
 
     auto result = resource_context_.cache_manager->malloc(malloc_info);
     if (!result.success) {
@@ -569,7 +572,8 @@ void StreamCacheResource::reportMallocRetry() const {
 bool StreamCacheResource::reuseCache() const {
     // AND logic: global REUSE_CACHE=1 AND per-request reuse_cache both must be true.
     // Per-request field flows frontend → FlexLB → engine via protobuf.
-    return !stream_->generateConfig()->isPrefillOnly() && resource_context_.reuse_cache
+    const bool prefill_only_opt_in = stream_->generateInput()->custom_output_prefix_length >= 0;
+    return (!stream_->generateConfig()->isPrefillOnly() || prefill_only_opt_in) && resource_context_.reuse_cache
            && (resource_context_.ignore_request_cache_switches || stream_->reuseCache());
 }
 

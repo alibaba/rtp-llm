@@ -543,7 +543,8 @@ MallocResult CoordinatorCacheManager::initMallocForCommonLen(const MallocInfo& m
 
     if (malloc_info.enable_cache_lookup) {
         CacheKeysType match_keys = cpCanonicalCacheKeys(cp_mapper, cache_keys);
-        match_keys.resize(std::min(match_keys.size(), maxReusableMatchKeys(seq_len, reuse_unit_tokens)));
+        match_keys.resize(std::min(
+            match_keys.size(), maxReusableMatchKeys(seq_len, reuse_unit_tokens, malloc_info.cache_lookup_token_limit)));
         const int64_t begin_us = currentTimeUs();
         load_context =
             prepareKVCache(match_keys, *kv_resource, cp_mapper, prepared, malloc_info.pd_decode_linear_tail_only);
@@ -999,6 +1000,16 @@ void CoordinatorCacheManager::insertIntoCache(const InsertInfo& insert_info, siz
         CacheKeysType insert_keys = cp_active ? cpCanonicalCacheKeys(cp_mapper, full_keys) : full_keys;
         if (insert_keys.empty()) {
             continue;
+        }
+        if (insert_info.cache_insert_token_limit >= 0) {
+            const int    reuse_unit_tokens = cp_mapper ? cp_mapper->reuseBlockTokens(config_) : seqSizePerBlock();
+            const size_t capped_keys = reuse_unit_tokens > 0 ? static_cast<size_t>(insert_info.cache_insert_token_limit)
+                                                                   / static_cast<size_t>(reuse_unit_tokens) :
+                                                               0;
+            insert_keys.resize(std::min(insert_keys.size(), capped_keys));
+            if (insert_keys.empty()) {
+                continue;
+            }
         }
         const auto&                                group_sets = block_tree_cache_->groupSets();
         std::vector<std::vector<GroupSetResource>> resources(insert_keys.size(),

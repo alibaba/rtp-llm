@@ -354,6 +354,10 @@ public:
     // wait for scheduler-owned resource release; otherwise publish cancellation
     // and wait for the same terminal transition.
     bool finishOrCancel(int64_t wait_timeout_ms, const std::string& cancel_reason);
+    // Wait until a terminal stream's cache resource has been released. For a
+    // cache-reusing stream this is the point at which DEVICE cache publication
+    // has completed; a positive timeout bounds the wait.
+    bool waitForCachePublication(int64_t wait_timeout_ms);
     bool isSubGenerateDoneWithoutLock(int batch_id) const;
 
     size_t iterCount() const;
@@ -792,7 +796,7 @@ public:
 
     bool reuseCache() const {
         const auto& config = *generate_input_->generate_config;
-        return config.reuse_cache && !config.isPrefillOnly();
+        return config.reuse_cache && (!config.isPrefillOnly() || generate_input_->custom_output_prefix_length >= 0);
     }
 
     bool enableDeviceCache() const {

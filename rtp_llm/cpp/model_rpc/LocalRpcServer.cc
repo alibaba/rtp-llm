@@ -367,6 +367,15 @@ ErrorInfo LocalRpcServer::collectStreamOutput(grpc::ServerContext*              
             if (output_result.status().code() != ErrorCode::FINISHED) {
                 return output_result.status();
             }
+            if (input->generate_config->isPrefillOnly() && input->custom_output_prefix_length >= 0
+                && !stream->waitForCachePublication(kRpcOutputWaitTimeoutMs)) {
+                // Keep cancellation/deadline checks in the outer loop. A final
+                // output can arrive before the scheduler publishes reusable blocks.
+                if (stream->hasError()) {
+                    return stream->statusInfo();
+                }
+                continue;
+            }
             break;
         }
         last_outputs = output_result.value();

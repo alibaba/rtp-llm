@@ -30,8 +30,11 @@ class KevDecideTest(unittest.TestCase):
             "max_options": 4,
             "max_state_tokens": 65536,
             "max_row_tokens": 73728,
+            "special_token_ids": [1, 2, 3, 4, 5],
         }
         self.worker.kev_max_row_tokens = 32768
+        self.worker.kev_reuse_cache = False
+        self.worker.kev_tokens_per_block = 64
         self.enqueue = AsyncMock()
         self.worker.backend_rpc_server_visitor = SimpleNamespace(
             batch_enqueue=self.enqueue
@@ -87,7 +90,8 @@ class KevDecideTest(unittest.TestCase):
         )
 
     def test_ids_are_distinct_across_concurrent_multi_question_requests(self):
-        async def respond(inputs):
+
+        async def respond(inputs, *, routing_key):
             return [self.output([0.5, 0.5]), self.output([1.0])]
 
         self.enqueue.side_effect = respond
@@ -107,6 +111,11 @@ class KevDecideTest(unittest.TestCase):
         self.assertEqual(len(ids), 4)
         self.assertEqual(len(set(ids)), 4)
         self.assertTrue(all(0 <= request_id < (1 << 63) for request_id in ids))
+        routing_keys = [
+            call.kwargs["routing_key"] for call in self.enqueue.await_args_list
+        ]
+        self.assertEqual(len(set(routing_keys)), 2)
+        self.assertTrue(all(0 <= key < (1 << 63) for key in routing_keys))
 
     def test_token_budget_splits_batches_preserving_question_order(self):
         request = {
@@ -141,6 +150,125 @@ class KevDecideTest(unittest.TestCase):
         for batch in batches:
             for item in batch:
                 self.assertEqual(item.token_ids[:5001].tolist(), expected_prefix)
+        self.assertEqual(
+            len({call.kwargs["routing_key"] for call in self.enqueue.await_args_list}),
+            1,
+        )
+
+    def test_cache_waits_for_leader_before_sending_followers(self):
+        self.worker.kev_reuse_cache = True
+        request = {
+            # The state delimiter plus 63 text tokens is exactly one full block.
+            "state": "s" * 63,
+            "questions": [
+                {"instr": str(index), "options": [f"answer-{index}"]}
+                for index in range(3)
+            ],
+        }
+
+        async def run():
+            leader_started = asyncio.Event()
+            release_leader = asyncio.Event()
+            leader_finished = False
+
+            async def respond(inputs, *, routing_key):
+                nonlocal leader_finished
+                if self.enqueue.await_count == 1:
+                    self.assertEqual(len(inputs), 1)
+                    leader_started.set()
+                    await release_leader.wait()
+                    leader_finished = True
+                else:
+                    self.assertTrue(leader_finished)
+                    self.assertEqual(len(inputs), 2)
+                return [self.output([1.0]) for _ in inputs]
+
+            self.enqueue.side_effect = respond
+            task = asyncio.create_task(self.worker.decide(request))
+            await asyncio.wait_for(leader_started.wait(), timeout=1)
+            await asyncio.sleep(0)
+            self.assertEqual(self.enqueue.await_count, 1)
+            self.assertFalse(task.done())
+            release_leader.set()
+            return await task
+
+        result = asyncio.run(run())
+        self.assertEqual(
+            [item["option"] for item in result["results"]],
+            ["answer-0", "answer-1", "answer-2"],
+        )
+        calls = self.enqueue.await_args_list
+        self.assertEqual(calls[0].kwargs["routing_key"], calls[1].kwargs["routing_key"])
+        inputs = [item for call in calls for item in call.args[0]]
+        self.assertEqual(len({item.request_id for item in inputs}), 3)
+        for item in inputs:
+            self.assertEqual(item.token_ids[:64].tolist(), [1] + [1115] * 63)
+            self.assertTrue(item.generate_config.reuse_cache)
+            self.assertEqual(item.prefix_length, 0)
+
+    def test_cache_disabled_short_state_or_single_question_keeps_one_batch(self):
+        for reuse_cache, state_length, question_count in (
+            (False, 63, 3),
+            (True, 62, 3),
+            (True, 0, 3),
+            (True, 63, 1),
+        ):
+            with self.subTest(
+                reuse_cache=reuse_cache,
+                state_length=state_length,
+                question_count=question_count,
+            ):
+                self.enqueue.reset_mock()
+                self.worker.kev_reuse_cache = reuse_cache
+                self.enqueue.return_value = [self.output([1])] * question_count
+                request = {
+                    "state": "s" * state_length,
+                    "questions": [{"instr": "x", "options": ["yes"]}] * question_count,
+                }
+                self.decide(request)
+                self.enqueue.assert_awaited_once()
+                self.assertEqual(len(self.enqueue.await_args.args[0]), question_count)
+
+    def test_cache_followers_keep_token_budget_for_64_questions(self):
+        self.worker.kev_reuse_cache = True
+        request = {
+            "state": "s" * 5000,
+            "questions": [
+                {"instr": str(index), "options": [f"answer-{index}"]}
+                for index in range(64)
+            ],
+        }
+
+        async def respond(inputs, *, routing_key):
+            return [self.output([1]) for _ in inputs]
+
+        self.enqueue.side_effect = respond
+        result = self.decide(request)
+        batches = [call.args[0] for call in self.enqueue.await_args_list]
+        self.assertEqual(list(map(len, batches)), [1] + [3] * 21)
+        self.assertTrue(
+            all(sum(item.input_length for item in batch) <= 16384 for batch in batches)
+        )
+        self.assertEqual(
+            len({call.kwargs["routing_key"] for call in self.enqueue.await_args_list}),
+            1,
+        )
+        self.assertEqual(
+            len({item.request_id for batch in batches for item in batch}), 64
+        )
+        self.assertEqual(
+            [item["option"] for item in result["results"]],
+            [f"answer-{index}" for index in range(64)],
+        )
+
+    def test_cache_leader_failure_does_not_submit_followers(self):
+        self.worker.kev_reuse_cache = True
+        self.enqueue.side_effect = RuntimeError("leader failed")
+        request = dict(self.request, state="s" * 63)
+        with self.assertRaisesRegex(RuntimeError, "leader failed"):
+            self.decide(request)
+        self.enqueue.assert_awaited_once()
+        self.assertEqual(len(self.enqueue.await_args.args[0]), 1)
 
     def test_long_row_is_admitted_as_its_own_batch(self):
         request = {

@@ -1,7 +1,8 @@
 """Kev's independent-row codec and fp32 pointer head.
 
 The serving contract is intentionally small: a complete causal row per question,
-no prefix reuse or chunked prefill, and probabilities rather than generated tokens.
+optional state-prefix reuse, no chunked prefill, and probabilities rather than
+generated tokens.
 Importing the codec does not load RTP-LLM's native runtime or PyTorch.
 """
 
@@ -227,9 +228,10 @@ def validate_kev_row(
 
 
 class KevHandler:
-    """Deployment-local, full-prefill pointer head; independent of native ops."""
+    """Deployment-local prefill pointer head; independent of native ops."""
 
     prefill_only = True
+    supports_prefix_cache = True
     need_post_process = False
 
     def __init__(self, config: KevConfig):
@@ -265,7 +267,12 @@ class KevHandler:
         self._device = None
 
     def extend_forward_args(self) -> list[str]:
-        return ["hidden_states", "input_ids", "input_lengths"]
+        return ["hidden_states", "input_ids", "input_lengths", "prefix_lengths"]
+
+    def cache_prefix_length(self, input_ids: torch.Tensor) -> int:
+        """Return the state length; every question/option anchor must be computed."""
+        self.select_token_position(input_ids)
+        return input_ids.tolist().index(self.config.special_token_ids[1])
 
     def select_token_position(
         self,
@@ -298,6 +305,7 @@ class KevHandler:
         hidden_states: torch.Tensor,
         input_ids: torch.Tensor,
         input_lengths: torch.Tensor,
+        prefix_lengths: torch.Tensor | None = None,
     ) -> torch.Tensor:
         import torch
         import torch.nn.functional as functional
@@ -320,19 +328,42 @@ class KevHandler:
             type(length) is not int or length <= 0 for length in lengths
         ):
             raise ValueError("Kev input_lengths must contain positive integers")
+        if prefix_lengths is None:
+            prefixes = [0] * len(lengths)
+        else:
+            if (
+                not isinstance(prefix_lengths, torch.Tensor)
+                or prefix_lengths.ndim != 1
+                or prefix_lengths.dtype not in (torch.int32, torch.int64)
+            ):
+                raise ValueError("Kev prefix_lengths must be one-dimensional integers")
+            prefixes = prefix_lengths.tolist()
+            if len(prefixes) != len(lengths) or any(
+                type(prefix) is not int or prefix < 0 for prefix in prefixes
+            ):
+                raise ValueError(
+                    "Kev prefix_lengths must contain one nonnegative integer per row"
+                )
         if sum(lengths) != input_ids.numel() or sum(lengths) != hidden_states.shape[0]:
-            raise ValueError("Kev requires complete, unpadded prefill rows")
+            raise ValueError("Kev requires complete, unpadded prefill suffix rows")
         tokens = input_ids.tolist()
         option_positions, decide_positions, owners, option_counts = [], [], [], []
         offset = 0
         for owner, length in enumerate(lengths):
+            row = tokens[offset : offset + length]
+            synthetic_state = int(prefixes[owner] > 0)
+            if synthetic_state:
+                # Only ordinary state text may precede the still-present q.
+                # The complete-row validator rejects a cached question, extra
+                # delimiters in the state tail, and incomplete option anchors.
+                row = [self.config.special_token_ids[0]] + row
             ends, decide = validate_kev_row(
-                tokens[offset : offset + length],
+                row,
                 self.config.special_token_ids,
                 self.config.max_options,
             )
-            option_positions.extend(offset + end for end in ends)
-            decide_positions.append(offset + decide)
+            option_positions.extend(offset + end - synthetic_state for end in ends)
+            decide_positions.append(offset + decide - synthetic_state)
             owners.extend([owner] * len(ends))
             option_counts.append(len(ends))
             offset += length
@@ -379,12 +410,34 @@ class KevModule:
             raise ValueError(
                 "Kev-4B requires BF16 backbone activations; set --act_type bf16"
             )
-        if (
-            config.quant_algo.isQuant()
-            or getattr(config, "quantization", None) not in (None, "", "none")
-            or getattr(config, "quant_config", None) is not None
-        ):
-            raise ValueError("Kev-4B does not support quantized backbone weights")
+        quant_config = getattr(config, "quant_config", None)
+        quant_algo = config.quant_algo
+        requested_quantization = getattr(config, "quantization", None)
+        has_quantization = (
+            quant_algo.isQuant()
+            or quant_config is not None
+            or str(requested_quantization or "").lower() not in ("", "none")
+        )
+        # Use the resolved checkpoint configuration, not just the CLI string:
+        # checkpoint quantization takes precedence in ModelConfig.
+        fp8_per_block = (
+            quant_config is not None
+            and getattr(quant_config, "get_method", lambda: None)() == "FP8_PER_BLOCK"
+            and quant_algo.isQuant()
+            and getattr(quant_algo, "isFp8", lambda: False)()
+            and getattr(quant_algo, "getWeightBits", lambda: None)() == 8
+            and getattr(quant_algo, "getGroupSize", lambda: None)() == 128
+        )
+        layered_quantization = (
+            getattr(config, "enable_nvfp4_dense_ffn", False)
+            or getattr(config, "enable_w4a16_sm120_dense_ffn", False)
+            or getattr(quant_config, "enable_nvfp4_dense_ffn", False)
+        )
+        if (has_quantization and not fp8_per_block) or layered_quantization:
+            raise ValueError(
+                "Kev-4B supports only BF16 or FP8_PER_BLOCK backbone weights "
+                "(8-bit, group_size=128), without layered quantization"
+            )
         self.config_ = config
         self.tokenizer_ = tokenizer
         self.kev_config = KevConfig.load(config.ckpt_path)

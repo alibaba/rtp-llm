@@ -225,11 +225,15 @@ protected:
     virtual void  decrKVCacheRef(const KVCacheResource& kvcache_resource);
     size_t        logicalSeqSizePerBlockForCapacity(const std::string& tag) const;
     int           deviceCacheMetricTokensPerBlock() const;
-    static size_t maxReusableMatchKeys(int seq_len, int reuse_unit_tokens) {
+    static size_t maxReusableMatchKeys(int seq_len, int reuse_unit_tokens, int64_t lookup_token_limit = -1) {
         if (seq_len <= 1 || reuse_unit_tokens <= 0) {
             return 0;
         }
-        return static_cast<size_t>(seq_len - 1) / static_cast<size_t>(reuse_unit_tokens);
+        int64_t reusable_tokens = static_cast<int64_t>(seq_len) - 1;
+        if (lookup_token_limit >= 0) {
+            reusable_tokens = std::min(reusable_tokens, lookup_token_limit);
+        }
+        return reusable_tokens > 0 ? static_cast<size_t>(reusable_tokens) / static_cast<size_t>(reuse_unit_tokens) : 0;
     }
 
     // Own the immutable configuration binding for all dense manager/pool rows.

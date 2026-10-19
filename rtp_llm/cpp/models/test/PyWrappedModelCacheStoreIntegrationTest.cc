@@ -1461,8 +1461,12 @@ py::dict runGenerationPrefillCaptureScenario(py::object                         
 
 // Exercise input preparation, Python forward, graphs and custom output together.
 // Only decoder math is replaced; all routing and post-layers code is production.
-py::dict
-runCustomOutput(py::object py_model, py::object handler, torch::Tensor indexes, bool python_norm, bool prefill_only) {
+py::dict runCustomOutput(py::object                  py_model,
+                         py::object                  handler,
+                         torch::Tensor               indexes,
+                         bool                        python_norm,
+                         bool                        prefill_only,
+                         const std::vector<int32_t>& prefix_lengths) {
     static std::once_flag runtime_once;
     std::call_once(runtime_once, []() { initRuntime(0, false, false, MlaOpsType::AUTO); });
     constexpr int     width             = 4;
@@ -1517,6 +1521,10 @@ runCustomOutput(py::object py_model, py::object handler, torch::Tensor indexes, 
     inputs.need_all_logits          = !python_norm;
     inputs.skip_lm_head             = prefill_only;
     inputs.capture_hidden_states    = prefill_only;
+    if (!prefix_lengths.empty()) {
+        TORCH_CHECK(prefix_lengths.size() == 2, "test requires two prefix lengths");
+        inputs.prefix_lengths = pinnedTensor(prefix_lengths, {2});
+    }
     py::dict result;
     if (enable_graph) {
         model.prepareAttentionInputs(inputs);
@@ -1560,7 +1568,8 @@ PYBIND11_MODULE(libth_pywrapped_model_cache_store_integration_test, m) {
           py::arg("handler"),
           py::arg("indexes"),
           py::arg("python_norm"),
-          py::arg("prefill_only") = false);
+          py::arg("prefill_only")   = false,
+          py::arg("prefix_lengths") = std::vector<int32_t>{});
     m.def("flush_capture_publisher_without_close", &rtp_llm::test::flushCapturePublisherWithoutClose);
     m.def("close_capture_publisher_without_gil", &rtp_llm::test::closeCapturePublisherWithoutGil);
     m.def("initialize_capture_publisher_with_core_dump", &rtp_llm::test::initializeCapturePublisherWithCoreDump);

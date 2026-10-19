@@ -128,6 +128,8 @@ class FrontendWorker:
 
         self.kev_config = load_kev_config(model_config.ckpt_path)
         self.kev_max_row_tokens = model_config.max_seq_len
+        self.kev_reuse_cache = bool(py_env_configs.kv_cache_config.reuse_cache)
+        self.kev_tokens_per_block = model_config.attn_config.tokens_per_block
 
         logging.info("frontend worker start done.")
 
@@ -177,15 +179,23 @@ class FrontendWorker:
             ),
             max_options=self.kev_config["max_options"],
         )
+        state_tokens = rows[0].index(self.kev_config["special_token_ids"][1])
+        warm_prefix = (
+            self.kev_reuse_cache
+            and self.kev_tokens_per_block > 0
+            and state_tokens >= self.kev_tokens_per_block
+            and len(rows) > 1
+        )
+        routing_key = uuid.uuid4().int & ((1 << 63) - 1)
         results = []
-        # This is an RPC admission budget, not shared-prefix execution. A long
-        # row is admitted alone; every row still includes the complete state.
+        # Complete the first row before its siblings so the backend can publish
+        # reusable state blocks. Every RPC still carries the complete row, and
+        # all batches use the same backend without sharing request IDs.
         start = 0
         while start < len(rows):
             end, tokens = start, 0
-            while end < len(rows) and (
-                end == start or tokens + len(rows[end]) <= 16384
-            ):
+            limit = 1 if warm_prefix and start == 0 else len(rows)
+            while end < limit and (end == start or tokens + len(rows[end]) <= 16384):
                 tokens += len(rows[end])
                 end += 1
             inputs = [
@@ -202,7 +212,9 @@ class FrontendWorker:
                 )
                 for row in rows[start:end]
             ]
-            outputs = await self.backend_rpc_server_visitor.batch_enqueue(inputs)
+            outputs = await self.backend_rpc_server_visitor.batch_enqueue(
+                inputs, routing_key=routing_key
+            )
             if len(outputs) != len(inputs):
                 raise RuntimeError("Kev backend returned an incorrect row count")
             for index, output in enumerate(outputs, start):

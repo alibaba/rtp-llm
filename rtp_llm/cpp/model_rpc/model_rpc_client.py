@@ -1447,13 +1447,15 @@ class ModelRpcClient(object):
                 response_iterator.cancel()
 
     async def batch_generate(
-        self, inputs: list[GenerateInput]
+        self, inputs: list[GenerateInput], *, routing_key: Optional[int] = None
     ) -> list[GenerateOutputs]:
         """Run BatchGenerateCall with atomic batch failure semantics.
 
         The service must return one result per input. Any item-level error, result
         cardinality mismatch, transport error, or conversion failure fails the
         entire batch; partial successes are never returned to the caller.
+        A routing key keeps related batches on one backend while their request
+        IDs remain distinct; ordinary batches route by their first request ID.
         """
         if not inputs:
             return []
@@ -1493,7 +1495,8 @@ class ModelRpcClient(object):
             input_pb = trans_input(inp)
             batch_input_pb.inputs.append(input_pb)
 
-        target_address = self._addresses[inputs[0].request_id % len(self._addresses)]
+        route_id = inputs[0].request_id if routing_key is None else routing_key
+        target_address = self._addresses[route_id % len(self._addresses)]
         logging.debug(
             f"batch request: [{len(inputs)} items] send to address: {target_address}"
         )
@@ -1627,6 +1630,10 @@ class ModelRpcClient(object):
                 )
             break
 
-    async def batch_enqueue(self, inputs: list[GenerateInput]) -> list[GenerateOutputs]:
+    async def batch_enqueue(
+        self, inputs: list[GenerateInput], *, routing_key: Optional[int] = None
+    ) -> list[GenerateOutputs]:
         """Compatibility alias for callers using the historical enqueue name."""
-        return await self.batch_generate(inputs)
+        if routing_key is None:
+            return await self.batch_generate(inputs)
+        return await self.batch_generate(inputs, routing_key=routing_key)

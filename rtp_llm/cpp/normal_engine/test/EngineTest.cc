@@ -759,6 +759,7 @@ TEST_F(NormalEngineCustomOutputTest, testDecisionHandlerSelectsPrefillRowsAndRej
     ASSERT_TRUE(engine->stop().ok());
     engine->reserve_step_               = 4;
     engine->custom_output_prefill_only_ = true;
+    engine->custom_output_prefix_selector_ = py::cpp_function([](const torch::Tensor&) { return 2; });
     int calls                           = 0;
     engine->custom_output_selector_     = py::cpp_function([&](const torch::Tensor& ids, py::object mask) {
         ++calls;
@@ -774,6 +775,8 @@ TEST_F(NormalEngineCustomOutputTest, testDecisionHandlerSelectsPrefillRowsAndRej
     auto selected = engine->makeStream(makeQuery(0, 7));
     ASSERT_FALSE(selected->hasError());
     EXPECT_EQ(selected->generateInput()->custom_output_token_position, 3);
+    EXPECT_EQ(selected->generateInput()->custom_output_prefix_length, 2);
+    EXPECT_TRUE(selected->reuseCache());
     EXPECT_EQ(selected->reserveStep(), 0u);
     engine->enqueue(selected);
     EXPECT_EQ(calls, 1);  // Re-enqueueing the prepared stream must not re-run its selector.
@@ -807,6 +810,7 @@ TEST_F(NormalEngineCustomOutputTest, testDecisionHandlerSelectsPrefillRowsAndRej
     fake->fake_query = true;
     EXPECT_FALSE(engine->makeStream(fake)->hasError());
     EXPECT_EQ(fake->custom_output_token_position, -1);
+    EXPECT_EQ(fake->custom_output_prefix_length, -1);
     EXPECT_EQ(calls, 4);
 }
 

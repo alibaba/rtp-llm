@@ -90,6 +90,9 @@ struct MallocInfo {
     // materialize, or publish LINEAR checkpoint blocks.  Keep this field after
     // the legacy aggregate fields above for positional initialization safety.
     bool pd_decode_linear_tail_only = false;
+    // -1 keeps the ordinary unlimited lookup policy; non-negative values cap
+    // lookup to complete cache blocks without changing allocation length.
+    int64_t cache_lookup_token_limit = -1;
 
     int incrSeqLen() const;
 };
@@ -157,6 +160,10 @@ struct InsertInfo {
     // Keep FULL insertion while excluding LINEAR blocks for a PD decode
     // handoff whose linear state is supplied by the prefill side.
     bool pd_decode_linear_tail_only = false;
+    // -1 keeps the ordinary full-row publication policy; non-negative values
+    // cap publication to complete cache-key blocks without shrinking the
+    // request allocation that owns the source blocks.
+    int64_t cache_insert_token_limit = -1;
 };
 
 }  // namespace rtp_llm

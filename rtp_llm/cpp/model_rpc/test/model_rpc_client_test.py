@@ -654,6 +654,50 @@ class ModelRpcClientTest(TestCase):
             ExceptionType.P2P_CONNECTOR_WORKER_READ_CANCELLED,
         )
 
+    def test_batch_routing_key_pins_backend_without_reusing_request_ids(self):
+        for method in ("batch_generate", "batch_enqueue"):
+            for routing_key in (None, 0, 7):
+                with self.subTest(method=method, routing_key=routing_key):
+                    client = self._make_batch_client()
+                    client._addresses = ["worker-0:1234", "worker-1:1234"]
+                    inputs = []
+                    for request_id in (11, 12):
+                        item = self._make_generate_input(GenerateConfig())
+                        item.request_id = request_id
+                        inputs.append(item)
+                    response = BatchGenerateOutputsPB()
+                    response.results.add().final_output.flatten_output.finished.append(
+                        True
+                    )
+                    stub = MagicMock()
+                    stub.BatchGenerateCall = AsyncMock(return_value=response)
+                    with patch(
+                        "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
+                        return_value=stub,
+                    ):
+                        for item in inputs:
+                            asyncio.run(
+                                getattr(client, method)([item], routing_key=routing_key)
+                            )
+                    targets = [
+                        call.args[0]
+                        for call in client._channel_pool.get.await_args_list
+                    ]
+                    expected = (
+                        ["worker-1:1234", "worker-0:1234"]
+                        if routing_key is None
+                        else [client._addresses[routing_key % 2]] * 2
+                    )
+                    self.assertEqual(targets, expected)
+                    self.assertEqual(
+                        [
+                            call.args[0].inputs[0].request_id
+                            for call in stub.BatchGenerateCall.await_args_list
+                        ],
+                        [11, 12],
+                    )
+                    self.assertEqual([item.request_id for item in inputs], [11, 12])
+
     def test_batch_generate_timeout_semantics(self):
         cases = (
             (0, [0, 0], None),
@@ -816,6 +860,9 @@ class ModelRpcClientTest(TestCase):
         ) as batch:
             self.assertEqual(asyncio.run(client.batch_enqueue([])), [])
             batch.assert_awaited_once_with([])
+            batch.reset_mock()
+            self.assertEqual(asyncio.run(client.batch_enqueue([], routing_key=0)), [])
+            batch.assert_awaited_once_with([], routing_key=0)
 
     def test_batch_enqueue_maps_error_codes_and_handles_missing_messages(self):
         cases = (
