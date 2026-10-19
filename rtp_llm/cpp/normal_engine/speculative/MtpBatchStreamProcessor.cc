@@ -876,12 +876,11 @@ absl::Status MtpBatchStreamProcessor::dispatchPrefill(const StreamGroups&  strea
                                                       const torch::Tensor& draft_last_hidden_states) const {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
 
-    const size_t                      total_batch_size_out = stream_groups.totalSamplerBatchSizeOut();
-    auto                              new_tokens_all = torch::empty({(int64_t)total_batch_size_out, 1}, torch::kInt32);
     std::vector<StreamSpecUpdateInfo> spec_update_infos;
+    spec_update_infos.reserve(stream_groups.size());
 
     preparePrefillSpecUpdateInfo(
-        stream_groups, prefill_output, propose_output, draft_last_hidden_states, new_tokens_all, spec_update_infos);
+        stream_groups, prefill_output, propose_output, draft_last_hidden_states, spec_update_infos);
 
     // we set propose token in extra loop to avoid cuda sync
     updateProposeTokens(stream_groups, propose_output, spec_update_infos);
@@ -2020,7 +2019,6 @@ void MtpBatchStreamProcessor::preparePrefillSpecUpdateInfo(const StreamGroups&  
                                                            const MergedOutput&                prefill_output,
                                                            const MergedOutput&                propose_output,
                                                            const torch::Tensor&               draft_last_hidden_states,
-                                                           const torch::Tensor&               new_tokens_all,
                                                            std::vector<StreamSpecUpdateInfo>& spec_update_infos) const {
     const auto& sampler_output       = prefill_output.sampler_output;
     const auto& draft_sampler_output = propose_output.sampler_output;
@@ -2037,11 +2035,12 @@ void MtpBatchStreamProcessor::preparePrefillSpecUpdateInfo(const StreamGroups&  
     RTP_LLM_CHECK(total_batch_size_out == (size_t)new_all_token_ids.size(0));
     const size_t token_stride = new_all_token_ids.size(1);
 
-    // TODO(async): stream bookkeeping below still iterates token_ids/success
-    // on CPU. Keep the .cpu() explicit until spec-update assembly is
-    // device-native.
-    const torch::Tensor new_all_token_ids_cpu =
-        new_all_token_ids.is_cuda() ? new_all_token_ids.cpu() : new_all_token_ids;
+    // Stream bookkeeping needs only the last sampled token from each row.
+    const torch::Tensor new_last_token_ids = new_all_token_ids.select(1, token_stride - 1);
+    // Keep CPU sampler input isolated: specUpdate may zero its token slice in perf tests.
+    const torch::Tensor new_tokens_all =
+        (new_last_token_ids.is_cuda() ? new_last_token_ids.contiguous().cpu() : new_last_token_ids.clone())
+            .unsqueeze(1);
     const torch::Tensor success_cpu = sampler_output.success.defined() ? sampler_output.success.cpu() : torch::Tensor();
 
     int batch_idx_in  = 0;
@@ -2055,11 +2054,6 @@ void MtpBatchStreamProcessor::preparePrefillSpecUpdateInfo(const StreamGroups&  
 
         // normal stream info
         auto new_tokens = new_tokens_all.narrow(0, batch_idx_out, next_batch_size);
-        for (size_t i = 0; i < next_batch_size; ++i) {
-            new_tokens.data_ptr<int32_t>()[i] =
-                new_all_token_ids_cpu.data_ptr<int32_t>()[(batch_idx_out + i) * token_stride + token_stride - 1];
-        }
-
         for (int i = 0; i < cur_batch_size; ++i) {
             if (success_cpu.defined() && !(success_cpu.data_ptr<bool>()[batch_idx_in + i])) {
                 stream->reportError(ErrorCode::UNKNOWN_ERROR, "sampler generate token id failed");

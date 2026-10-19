@@ -754,6 +754,11 @@ TEST_F(CudaSamplerTest, testDoSample) {
     ASSERT_EQ(output_token_ids_host[11], 1);
     ASSERT_EQ(output_token_ids_host[17], 1);
     ASSERT_EQ(output_token_ids_host[23], 1);
+    for (size_t row = 0; row < batch_size; ++row) {
+        ASSERT_EQ(std::vector<int32_t>(output_token_ids_host.begin() + row * (step + 1),
+                                       output_token_ids_host.begin() + row * (step + 1) + step),
+                  std::vector<int32_t>({2, 2, 2, 1, 1}));
+    }
 
     auto output_all_probs_host = toHostFloat(output_all_probs_t);
     ASSERT_VECTOR_NEAR(

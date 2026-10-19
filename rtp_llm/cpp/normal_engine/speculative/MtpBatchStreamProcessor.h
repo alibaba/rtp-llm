@@ -171,7 +171,6 @@ protected:
                                       const MergedOutput&                prefill_output,
                                       const MergedOutput&                propose_output,
                                       const torch::Tensor&               draft_last_hidden_states,
-                                      const torch::Tensor&               new_tokens_all,
                                       std::vector<StreamSpecUpdateInfo>& spec_update_infos) const;
 
     void prepareDecodeSpecUpdateInfo(const StreamGroups&                          stream_groups,
