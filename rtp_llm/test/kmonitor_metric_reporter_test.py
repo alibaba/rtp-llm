@@ -5,6 +5,8 @@ import threading
 import unittest
 from unittest.mock import Mock, patch
 
+from rtp_llm.utils.process_manager import SharedDrainingFlag
+
 from rtp_llm.aios.kmonitor.python_client.kmonitor.kmonitor import KMonitor
 from rtp_llm.aios.kmonitor.python_client.kmonitor.report_worker import ReportWorker
 from rtp_llm.metrics.kmonitor_metric_reporter import (
@@ -44,6 +46,8 @@ class MetricReporterServingStateTest(unittest.TestCase):
         # Use the real metric queues and rendering, but drive reporting cycles
         # explicitly so the tests need neither Flume nor a background thread.
         self.worker = ReportWorker.__new__(ReportWorker)
+        self.worker._runtime_tags = {}
+        self.worker._runtime_tag_keys = set()
         self.worker.metrics = {}
         self.worker.metric_lock = threading.Lock()
         self.worker.report_lock = threading.Lock()
@@ -139,7 +143,7 @@ class MetricReporterServingStateTest(unittest.TestCase):
 
     def test_shared_event_updates_all_backends_without_terminating_them(self):
         ctx = multiprocessing.get_context("spawn")
-        event = ctx.Event()
+        event = SharedDrainingFlag()
         self.reporter.bind_service_draining(event)
         children = []
         try:
@@ -171,7 +175,7 @@ class MetricReporterServingStateTest(unittest.TestCase):
                 parent.close()
 
     def test_notification_before_startup_is_retained(self):
-        event = multiprocessing.get_context("spawn").Event()
+        event = SharedDrainingFlag()
         event.set()
         self.reporter.bind_service_draining(event)
         self.reporter.start_serving_when_ready()

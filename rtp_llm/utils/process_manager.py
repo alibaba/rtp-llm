@@ -3,7 +3,7 @@ import os
 import signal
 import threading
 import time
-from multiprocessing import Process
+from multiprocessing import Event, Process, RawValue
 from typing import Callable, Dict, List, Optional, Set
 
 DEFER_FIRST_SIGTERM_ENV = "RTP_LLM_DEFER_FIRST_SIGTERM"
@@ -23,6 +23,41 @@ PRE_STOP_DRAIN_HEADROOM_SECONDS_ENV = "RTP_LLM_PRE_STOP_DRAIN_HEADROOM_SECONDS"
 DEFAULT_SHUTDOWN_TIMEOUT_SECONDS = 600
 DEFAULT_DEFERRED_GROUP_SHUTDOWN_HEADROOM_SECONDS = 60.0
 DEFAULT_BACKEND_POST_FRONTEND_DRAIN_SECONDS = 120.0
+
+
+class SharedDrainingFlag:
+    """One-way, process-shared shutdown latch; never reset during a launch.
+
+    Event.set() waits for Condition waiters to acknowledge wakeup and can hang
+    when a rank dies inside wait(). This single-byte flag has no shared lock
+    or read-modify-write: every writer stores 1. Readers poll only while waiting
+    for shutdown, so a killed reader cannot prevent other ranks from exiting.
+    """
+
+    def __init__(self):
+        self._value = RawValue("B", 0)
+
+    def set(self) -> None:
+        self._value.value = 1
+
+    def is_set(self) -> bool:
+        return bool(self._value.value)
+
+    def wait(self, timeout=None) -> bool:
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while not self.is_set():
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if remaining is not None and remaining <= 0:
+                return self.is_set()
+            time.sleep(0.1 if remaining is None else min(0.1, remaining))
+        return True
+
+
+def create_service_draining():
+    # Default to the crash-safe flag; set to 0 to restore the legacy Event.
+    if os.environ.get("RTP_LLM_USE_SHARED_DRAINING_FLAG", "1") == "0":
+        return Event()
+    return SharedDrainingFlag()
 
 
 class ProcessManager:

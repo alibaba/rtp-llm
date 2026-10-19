@@ -222,3 +222,10 @@ py_test(
     ],
     exec_properties = {'gpu':'A10'}
 )
+
+# Real child-process regression; no model or GPU is needed.
+py_test(
+    name = "process_manager_fatal_test",
+    srcs = ["process_manager_fatal_test.py"],
+    deps = ["//rtp_llm:utils"],
+)
