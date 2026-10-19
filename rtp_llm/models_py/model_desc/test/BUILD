@@ -18,6 +18,8 @@ py_test(
         "//rtp_llm:sdk",
         "//rtp_llm:testlib_lite",
         "//rtp_llm/models_py:models",
+        "//rtp_llm:torch",
+        "//rtp_llm:transformers",
     ],
     env = {
         "DGM_REAL_CKPT": "/mnt/fuse/smoke-test/hf/google--diffusiongemma-26B-A4B-it--f7f5b7f5fa82ffc52addd066915886d497f5517b",
