@@ -74,8 +74,11 @@ protected:
     void prepareResourceWithCacheConfig(const CacheConfig&      cache_config,
                                         const std::vector<int>& input_tokens,
                                         bool                    reuse_cache,
-                                        RoleType                role_type) {
-        cache_manager_ = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false, /*metrics_reporter=*/nullptr);
+                                        RoleType                role_type,
+                                        const KVCacheConfig&    cache_options = KVCacheConfig{},
+                                        const RuntimeConfig&    cache_runtime = RuntimeConfig{}) {
+        cache_manager_ = std::make_shared<KVCacheManager>(
+            cache_config, false, nullptr, cache_options, ParallelismConfig{}, cache_runtime);
         ASSERT_TRUE(cache_manager_->init());
         ASSERT_EQ(cache_manager_->freeBlocksNum(), 8);
         ResourceContext resource_context;
@@ -140,6 +143,85 @@ TEST_F(StreamCacheResourceTest, LayeredPrefillDisablesIndependentMemoryCacheOper
         EXPECT_TRUE(context.enable_device_cache);
         EXPECT_TRUE(context.reuse_cache);
     }
+}
+
+TEST_F(StreamCacheResourceTest, LayeredPrefillWatermarkReclaimsWithoutMemoryConnector) {
+    for (bool enabled : {false, true}) {
+        KVCacheConfig options;
+        options.reuse_cache                  = true;
+        options.enable_device_cache          = true;
+        options.enable_tiered_memory_cache   = enabled;
+        options.device_cache_min_free_blocks = 8;
+        prepareResourceWithCacheConfig(init_config(), {1, 2, 3, 4, 5, 6}, true, RoleType::PREFILL, options);
+        auto& resource = stream_->streamCacheResource();
+        ASSERT_TRUE(resource.initKVBlock(0).ok());
+        stream_->generate_status_->status = StreamState::FINISHED;
+        stream_->fillSubGenerateStatus(StreamState::FINISHED);
+        resource.tryReleaseKVBlock(resource.curBlocksNum());
+        const auto cached_free = cache_manager_->freeBlocksNum();
+        ASSERT_LT(cached_free, 8u);
+
+        auto mock_coord =
+            std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
+                                                                                 cache_manager_->kv_cache_config_,
+                                                                                 cache_manager_->runtime_config_,
+                                                                                 cache_manager_->allocator_);
+        cache_manager_->coordinator_ = mock_coord;
+        EXPECT_CALL(*mock_coord, asyncWrite(testing::_)).Times(0);
+
+        // The legacy layout remains on its existing connector-backed policy.
+        cache_manager_->maintainLayeredPrefillFreeBlocks();
+        EXPECT_EQ(cache_manager_->freeBlocksNum(), cached_free);
+
+        cache_manager_->config_.dsa_prefill_hbm_layers = 1;
+        cache_manager_->maintainLayeredPrefillFreeBlocks();
+        EXPECT_EQ(cache_manager_->freeBlocksNum(), enabled ? 8u : cached_free);
+        cache_manager_->maintainLayeredPrefillFreeBlocks();
+        EXPECT_EQ(cache_manager_->freeBlocksNum(), enabled ? 8u : cached_free);
+    }
+}
+
+TEST_F(StreamCacheResourceTest, LayeredPrefillWatermarkKeepsActiveRequestBlocks) {
+    KVCacheConfig options;
+    options.reuse_cache                  = true;
+    options.enable_device_cache          = true;
+    options.enable_tiered_memory_cache   = true;
+    options.device_cache_min_free_blocks = 1000;
+    prepareResourceWithCacheConfig(init_config(), {1, 2, 3, 4, 5, 6}, true, RoleType::PREFILL, options);
+    auto& resource = stream_->streamCacheResource();
+    ASSERT_TRUE(resource.initKVBlock(0).ok());
+    const auto active_blocks = resource.batch_kv_cache_resource_->blocks(0);
+    cache_manager_->insertIntoCache({resource.batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), false});
+    const auto free_before                         = cache_manager_->freeBlocksNum();
+    cache_manager_->config_.dsa_prefill_hbm_layers = 1;
+    cache_manager_->maintainLayeredPrefillFreeBlocks();
+    EXPECT_EQ(cache_manager_->freeBlocksNum(), free_before);
+    EXPECT_EQ(resource.batch_kv_cache_resource_->blocks(0), active_blocks);
+}
+
+TEST_F(StreamCacheResourceTest, LayeredPrefillWatermarkUsesLocalCpBlocks) {
+    KVCacheConfig options;
+    options.reuse_cache                = true;
+    options.enable_device_cache        = true;
+    options.enable_tiered_memory_cache = true;
+    RuntimeConfig runtime;
+    runtime.fifo_scheduler_config.max_batch_tokens_size = 80;
+    prepareResourceWithCacheConfig(init_config(), {1, 2, 3, 4, 5, 6}, true, RoleType::PREFILL, options, runtime);
+    auto& resource = stream_->streamCacheResource();
+    ASSERT_TRUE(resource.initKVBlock(0).ok());
+    stream_->generate_status_->status = StreamState::FINISHED;
+    stream_->fillSubGenerateStatus(StreamState::FINISHED);
+    resource.tryReleaseKVBlock(resource.curBlocksNum());
+    const auto cached_free = cache_manager_->freeBlocksNum();
+    ASSERT_GE(cached_free, 5u);
+    ASSERT_LT(cached_free, 8u);
+    cache_manager_->config_.dsa_prefill_hbm_layers = 1;
+    cache_manager_->cp_slot_mapper_                = std::make_shared<CPSlotMapper>(0, 8, 2);
+    cache_manager_->maintainLayeredPrefillFreeBlocks();
+    EXPECT_EQ(cache_manager_->freeBlocksNum(), cached_free);
+    cache_manager_->cp_slot_mapper_.reset();
+    cache_manager_->maintainLayeredPrefillFreeBlocks();
+    EXPECT_EQ(cache_manager_->freeBlocksNum(), 8u);
 }
 
 TEST_F(StreamCacheResourceTest, testAllocateResource) {

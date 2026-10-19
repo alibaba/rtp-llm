@@ -279,24 +279,54 @@ SharedBlockCache::EvictResult SharedBlockCache::selectAndEvictForGroup(int group
         return result;
     }
     if (prefix_tree_enabled_ && !leaf_lru_.empty()) {
+        static const bool incremental = [] {
+            const char* value = std::getenv("RTP_LLM_CACHE_EVICTION_INCREMENTAL");
+            return !value || std::strcmp(value, "0") != 0;
+        }();
         size_t selected_blocks = 0;
         bool   made_progress   = true;
         while (selected_blocks < min_blocks && made_progress && !leaf_lru_.empty()) {
             made_progress = false;
-            leaf_snapshot_scratch_.assign(leaf_lru_.begin(), leaf_lru_.end());
-            for (const auto& leaf : leaf_snapshot_scratch_) {
-                if (selected_blocks >= min_blocks) {
-                    break;
+            if (!incremental) {
+                leaf_snapshot_scratch_.assign(leaf_lru_.begin(), leaf_lru_.end());
+            }
+            size_t snapshot_index = 0;
+            auto   next_leaf      = leaf_lru_.begin();
+            while (selected_blocks < min_blocks) {
+                LeafKey leaf;
+                if (incremental) {
+                    if (next_leaf == leaf_lru_.end()) {
+                        break;
+                    }
+                    leaf = *next_leaf;
+                } else {
+                    if (snapshot_index == leaf_snapshot_scratch_.size()) {
+                        break;
+                    }
+                    leaf = leaf_snapshot_scratch_[snapshot_index++];
                 }
+                // Erasing a chain can remove several leaves through aliases.
+                // Look up the successor by value after mutations, never retain
+                // an iterator to a node that another alias may erase.
+                const auto advance = [&] {
+                    if (incremental) {
+                        next_leaf = leaf_lru_.upper_bound(leaf);
+                    }
+                };
                 const auto leaf_key = NamespacedKey{leaf.namespace_id, leaf.cache_key};
                 auto       chain    = collectEvictChainLocked(leaf_key);
                 if (chain.empty()) {
                     removeTreeAliasLocked(leaf_key);
                     made_progress = true;
+                    advance();
                     continue;
                 }
                 const bool chain_has_target = chainHasUsableSlotLocked(chain, group_id);
                 if (!chain_has_target && !chainHasReachableAncestorSlotLocked(chain, group_id)) {
+                    // No mutation: keep scans over unrelated groups linear.
+                    if (incremental) {
+                        ++next_leaf;
+                    }
                     continue;
                 }
                 std::vector<NamespacedKey> ordered_chain(chain.rbegin(), chain.rend());
@@ -325,6 +355,7 @@ SharedBlockCache::EvictResult SharedBlockCache::selectAndEvictForGroup(int group
                     }
                     removeAllTreeAliasesForCacheKeyLocked(tree_key.cache_key);
                 }
+                advance();
             }
         }
         return result;

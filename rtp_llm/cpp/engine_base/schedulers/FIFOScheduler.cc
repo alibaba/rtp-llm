@@ -885,6 +885,11 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     last_waiting_oldest_age_us_          = 0;
     const size_t running_streams_before  = running_streams_.size();
     bool         running_streams_changed = evaluateAndUpdateStreams(running_streams_);
+    if (!async_cache_prepare && (!waiting_streams_.empty() || !waiting_group_queue_.empty())) {
+        // Reclaim once per admission round, after finished requests released
+        // their references, instead of repeatedly evicting for every waiter.
+        cache_manager_->maintainLayeredPrefillFreeBlocks();
+    }
     if (async_cache_prepare && cache_prepare_blocked_stream_) {
         if (running_streams_.size() < running_streams_before) {
             cache_prepare_blocked_stream_.reset();

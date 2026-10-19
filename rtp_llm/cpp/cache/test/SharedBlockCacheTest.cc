@@ -457,6 +457,50 @@ TEST(SharedBlockCacheTest, SelectAndEvictForGroupDoesNotPruneWhenTargetAncestorB
     EXPECT_TRUE(cache.contains(4));
 }
 
+TEST(SharedBlockCacheTest, GroupEvictionMatchesGlobalAcrossBranchAndAliasMutations) {
+    SharedBlockCache grouped;
+    SharedBlockCache global;
+    for (auto* cache : {&grouped, &global}) {
+        for (int root = 1; root < 200; root += 4) {
+            putOne(*cache, root, root, rootDep());
+            putOne(*cache, root + 1, root + 1, childDep(root, 1));
+            putOne(*cache, root + 2, root + 2, childDep(root, 1));
+            putOne(*cache, root + 3, root + 3, childDep(root + 2, 2));
+            // Removing one key may invalidate another entry in the leaf set.
+            putOne(*cache, root + 1, root + 1, rootDep(), SharedBlockCache::kDefaultNamespace);
+        }
+    }
+    while (!global.empty()) {
+        const auto expected = global.selectAndEvict(3);
+        const auto actual   = grouped.selectAndEvictForGroup(0, 3);
+        ASSERT_EQ(actual.evicted_keys, expected.evicted_keys);
+        ASSERT_EQ(actual.evicted_slots, expected.evicted_slots);
+    }
+    EXPECT_TRUE(grouped.empty());
+}
+
+// Reproduce small, repeated admissions against a large cache. Cache creation
+// is excluded from timing; use the same binary/test on each side of an A/B.
+TEST(SharedBlockCacheTest, DISABLED_RepeatedSmallEvictionsBenchmark) {
+    const char*      size_env   = std::getenv("RTP_LLM_EVICT_BENCH_SIZE");
+    const size_t     node_count = size_env ? std::stoull(size_env) : 100000;
+    constexpr size_t calls      = 256;
+    ASSERT_GT(node_count, calls);
+    SharedBlockCache cache;
+    for (size_t key = 1; key <= node_count; ++key) {
+        putOne(cache, key, static_cast<BlockIdxType>(key), rootDep());
+    }
+    const auto begin = std::chrono::steady_clock::now();
+    for (size_t i = 0; i < calls; ++i) {
+        const auto evicted = cache.selectAndEvictForGroup(0, 1);
+        ASSERT_EQ(evicted.evicted_keys, (CacheKeysType{i + 1}));
+    }
+    const double elapsed_us =
+        std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - begin).count();
+    std::cerr << "EVICTION_BENCH nodes=" << node_count << " calls=" << calls << " total_us=" << elapsed_us
+              << " mean_us=" << elapsed_us / calls << std::endl;
+}
+
 // Manual performance regression benchmark. Keep disabled because it builds a
 // large synthetic prefix forest and is intended for local scaling checks rather
 // than every CI invocation.
