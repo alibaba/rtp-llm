@@ -29,10 +29,12 @@ int constexpr VOID_PTR_SZ = 2 + sizeof(void*) * 2;
 }
 
 RTPException::RTPException(char const* file, std::size_t line, const std::string& msg): std::runtime_error{""} {
-    mNbFrames                 = backtrace(mCallstack.data(), MAX_FRAMES);
-    auto const          trace = getTrace();
-    std::runtime_error::operator=(
-        std::runtime_error{rtp_llm::fmtstr("%s (%s:%zu)\n%s", msg.c_str(), file, line, trace.c_str())});
+    mNbFrames                      = backtrace(mCallstack.data(), MAX_FRAMES);
+    auto const               trace = getTrace();
+    const std::runtime_error formatted_error{
+        rtp_llm::fmtstr("%s (%s:%zu)\n%s", msg.c_str(), file, line, trace.c_str())};
+    // Avoid an unversioned move-assignment export from dependent libraries.
+    std::runtime_error::operator=(formatted_error);
 }
 
 RTPException::~RTPException() noexcept = default;
