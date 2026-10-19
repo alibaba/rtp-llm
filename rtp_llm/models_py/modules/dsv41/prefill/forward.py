@@ -452,7 +452,25 @@ def forward_layers(
             h = v4.embed(input_ids)  # [T_total, dim]
             if _rt_on:
                 _rt.record("prefill_embed_out", h)
-            h = h.unsqueeze(-2).repeat(1, v4.hc_mult, 1)  # [T_total, hc, dim]
+            if (
+                not _rt_on
+                and not torch.is_grad_enabled()
+                and h.is_cuda
+                and h.dtype == torch.bfloat16
+                and h.is_contiguous()
+                and h.ndim == 2
+                and h.shape[0] >= 8192
+                and h.shape[1] == 5120
+                and v4.hc_mult == 4
+                and not torch.cuda.is_current_stream_capturing()
+            ):
+                from rtp_llm.models_py.modules.dsv41.prefill._hc_expand_triton import (
+                    expand_hc,
+                )
+
+                h = expand_hc(h)
+            else:
+                h = h.unsqueeze(-2).repeat(1, v4.hc_mult, 1)  # [T_total, hc, dim]
         else:
             h = prepare_hidden_fn(input_ids=input_ids, positions=positions)
     image_token_mask = getattr(v4, "_image_token_mask", None)
