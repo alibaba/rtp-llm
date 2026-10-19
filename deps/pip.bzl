@@ -44,7 +44,7 @@ def pip_deps():
     pip_parse(
         name = "pip_ppu_torch",
         requirements_lock = "@rtp_deps//:requirements_lock_torch_ppu.txt",
-        python_interpreter = "/opt/conda310/bin/python3",
+        python_interpreter = "/opt/conda312/bin/python3",
         extra_pip_args = PIP_EXTRA_ARGS,
         timeout = 3600,
     )

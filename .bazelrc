@@ -407,9 +407,15 @@ build:ppu --define=NVSHMEM_DIR=/usr/local/PPU_SDK/sailSHMEM
 build:ppu --action_env CUDA_HOME="/usr/local/PPU_SDK/CUDA_SDK/"
 build:ppu --action_env CUDA_PATH="/usr/local/PPU_SDK/CUDA_SDK/"
 build:ppu --action_env PPU_SDK="/usr/local/PPU_SDK/"
-build:ppu --action_env LD_LIBRARY_PATH="/opt/conda310/lib/:/usr/local/PPU_SDK/lib/:/usr/local/cuda/lib64:/usr/local/PPU_SDK/sailSHMEM/lib"
+build:ppu --python_top=//:python312_ppu
+build:ppu --repo_env=PYTHON_BIN_PATH="/opt/conda312/bin/python3"
+build:ppu --action_env PYTHON_BIN_PATH="/opt/conda312/bin/python3"
+build:ppu --host_action_env PYTHON_BIN_PATH="/opt/conda312/bin/python3"
+build:ppu --action_env LD_LIBRARY_PATH="/opt/conda312/lib/:/usr/local/PPU_SDK/lib/:/usr/local/cuda/lib64:/usr/local/PPU_SDK/sailSHMEM/lib"
 test:ppu --test_env PPU_HOME="/usr/local/PPU_SDK/"
-test:ppu --test_env LD_LIBRARY_PATH="/opt/conda310/lib/:/usr/local/PPU_SDK/lib/:/usr/local/cuda/lib64:/usr/local/PPU_SDK/sailSHMEM/lib"
+test:ppu --test_env PIP_INDEX_URL="https://artlab.alibaba-inc.com/1/PYPI/simple/"
+test:ppu --test_env PATH="/opt/conda312/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+test:ppu --test_env LD_LIBRARY_PATH="/opt/conda312/lib/:/usr/local/PPU_SDK/lib/:/usr/local/cuda/lib64:/usr/local/PPU_SDK/sailSHMEM/lib"
 
 try-import %workspace%/internal_source/.internal_bazelrc
 try-import %workspace%/internal_source/.cicd_bazelrc

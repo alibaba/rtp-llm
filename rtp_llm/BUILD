@@ -662,9 +662,16 @@ py_package(
     }),
 )
 
-grpcio_tools_req = ["grpcio-tools==1.57.0"]
+grpcio_tools_req = select({
+    # grpcio-tools 1.57 ships no cp312 wheel; the PPU runtime is Python 3.12.
+    "@//:using_ppu": ["grpcio-tools==1.62.0"],
+    "//conditions:default": ["grpcio-tools==1.57.0"],
+})
 
-setuptools_req = ["setuptools==60.5.0"]
+setuptools_req = select({
+    "@//:using_ppu": ["setuptools==75.8.0"],
+    "//conditions:default": ["setuptools==60.5.0"],
+})
 
 whl_reqs = [
     "filelock>=3.20.0",

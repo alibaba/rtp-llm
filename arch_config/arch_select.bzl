@@ -177,6 +177,8 @@ def platform_deps():
         "@rtp_llm//:using_cuda12_arm": [],
         "@rtp_llm//:using_cuda13_arm": [],
         "@rtp_llm//:using_rocm": ["pyyaml==6.0.2", "decord==0.6.0", "av==16.1.0"],
+        # decord has no cp312 wheel; PPU video input is unsupported.
+        "@rtp_llm//:using_ppu": ["av==16.1.0"],
         "//conditions:default": ["decord==0.6.0", "av==16.1.0"],
     })
 
@@ -190,7 +192,7 @@ def cuda13_x86_test_gpu():
 
 def torch_deps():
     deps = select({
-        "@rtp_llm//:using_ppu": ["@torch_2.9_py310_ppu//:torch_api", "@torch_2.9_py310_ppu//:torch", "@torch_2.9_py310_ppu//:torch_libs"],
+        "@rtp_llm//:using_ppu": ["@torch_2.11_py312_ppu//:torch_api", "@torch_2.11_py312_ppu//:torch", "@torch_2.11_py312_ppu//:torch_libs"],
         "@rtp_llm//:using_rocm": [
             "@torch_rocm//:torch_api",
             "@torch_rocm//:torch",

@@ -250,6 +250,14 @@ py_runtime(
     visibility = ["//visibility:public"],
 )
 
+py_runtime(
+    name = "python312_ppu",
+    interpreter_path = "/opt/conda312/bin/python",
+    python_version = "PY3",
+    stub_shebang = "#!/opt/conda312/bin/python",
+    visibility = ["//visibility:public"],
+)
+
 refresh_compile_commands(
     name = "refresh_compdb",
     targets = {

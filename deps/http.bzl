@@ -5,10 +5,10 @@ def clean_dep(dep):
 
 def http_deps():
     http_archive(
-        name = "torch_2.9_py310_ppu",
-        sha256 = "f58af1af2f7bfba035b66a14e1ae75fdc21d5c03ee7ac0b4c842a1088d06b0e0",
+        name = "torch_2.11_py312_ppu",
+        sha256 = "34ec402766652465f13482025b8ebc35fe7a0921a5325c6b7d308fe31976d7ff",
         urls = [
-            "https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/ppu_sdk/v2.1.0_cu130/torch-2.9.0%2Bv0.1.0.ppu2.1.0.oe-cp310-cp310-linux_x86_64.whl",
+            "https://pkg.flytiger-eco.com/artifactory/pypi_generic/torch/2.11.0+v0.2.0.ppu2.2.0/torch-2.11.0+cu130alios7u2oe-cp312-cp312-linux_x86_64.whl",
         ],
         type = "zip",
         build_file = clean_dep("@rtp_llm//:BUILD.pytorch"),

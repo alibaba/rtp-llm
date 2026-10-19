@@ -251,8 +251,9 @@ class MagaServerManager(object):
             self._role_name,
             current_env.get("CUDA_VISIBLE_DEVICES", "<not set>"),
         )
+        python_bin = os.environ.get("RTP_PYTHON_BIN", sys.executable)
         p = subprocess.Popen(
-            ["/opt/conda310/bin/python", "-m", "rtp_llm.start_server"] + parsed_args,
+            [python_bin, "-m", "rtp_llm.start_server"] + parsed_args,
             env=current_env,
             stdout=self._file_stream,
             stderr=self._file_stream,
