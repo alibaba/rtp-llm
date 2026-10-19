@@ -115,6 +115,11 @@ RejectionSamplingLaunchConfig validateRejectionSamplingParams(const RejectionSam
     RTP_LLM_CHECK_WITH_INFO(params.output_accepted_token_num_d.size(0) == batch_size,
                             "output_accepted_token_num_d shape[0] mismatch");
     RTP_LLM_CHECK_WITH_INFO(params.do_sample_d.size(0) == batch_size, "do_sample_d shape[0] mismatch");
+    if (params.force_mask_d.defined()) {
+        checkRejectionSamplingTensor(params.force_mask_d, "force_mask_d", torch::kBool, 1);
+        checkSameDevice(params.force_mask_d, "force_mask_d", device);
+        RTP_LLM_CHECK_WITH_INFO(params.force_mask_d.size(0) == batch_size, "force_mask_d shape[0] mismatch");
+    }
 
     return {static_cast<int>(batch_size),
             static_cast<int>(num_speculative_tokens),
@@ -682,21 +687,28 @@ void rejectionSampling(const RejectionSamplingParams& params) {
     // A point-mass draft distribution passes no draft_probs buffer at all; the
     // kernel substitutes q(draft_token) == 1.
     float* draft_probs = params.draft_probs_point_mass ? nullptr : params.draft_probs_d.data_ptr<float>();
-    check_cuda_value(invokeRejectionSampling(draft_probs,
-                                             params.draft_token_ids_d.data_ptr<int32_t>(),
-                                             params.uniform_samples_d.data_ptr<float>(),
-                                             params.target_probs_d.data_ptr<float>(),
-                                             params.target_token_ids_d.data_ptr<int32_t>(),
-                                             config.target_token_stride,
-                                             params.output_token_ids_d.data_ptr<int32_t>(),
-                                             params.output_accepted_token_num_d.data_ptr<int32_t>(),
-                                             params.do_sample_d.data_ptr<bool>(),
-                                             config.batch_size,
-                                             config.num_speculative_tokens,
-                                             config.target_vocab_size,
-                                             stream,
-                                             params.draft_probs_point_mass,
-                                             params.target_probs_point_mass));
+    check_cuda_value(
+        invokeRejectionSampling(draft_probs,
+                                params.draft_token_ids_d.data_ptr<int32_t>(),
+                                params.uniform_samples_d.data_ptr<float>(),
+                                params.target_probs_d.data_ptr<float>(),
+                                params.target_token_ids_d.data_ptr<int32_t>(),
+                                config.target_token_stride,
+                                params.output_token_ids_d.data_ptr<int32_t>(),
+                                params.output_accepted_token_num_d.data_ptr<int32_t>(),
+                                params.do_sample_d.data_ptr<bool>(),
+                                config.batch_size,
+                                config.num_speculative_tokens,
+                                config.target_vocab_size,
+                                stream,
+                                params.draft_probs_point_mass,
+                                params.target_probs_point_mass,
+                                params.force_mask_d.defined() ? params.force_mask_d.data_ptr<bool>() : nullptr,
+                                params.finalize_outputs));
+}
+
+bool rejectionSamplingSupportsFinalize() {
+    return true;
 }
 
 void markovSoftmaxStep(const MarkovSoftmaxStepParams& params) {
@@ -1230,6 +1242,13 @@ void rejectionSampling(const RejectionSamplingParams& params) {
     auto config = validateRejectionSamplingParams(params);
     auto stream = at::hip::getCurrentHIPStream().stream();
 
+    // Folded finalization (force override + -1 -> 0 reset) is CUDA-only; the
+    // ROCm kernel has no finalize phase. A mis-plumbed capability must never
+    // silently skip the reset, so reject the flag loudly here.
+    RTP_LLM_CHECK_WITH_INFO(!params.finalize_outputs && !params.force_mask_d.defined(),
+                            "folded rejection finalization (finalize_outputs / force_mask_d) is CUDA-only; "
+                            "ROCm callers must keep the legacy eager post-rejection chain");
+
     // A point-mass draft distribution passes no draft_probs buffer at all; the
     // kernel substitutes q(draft_token) == 1.
     float*     draft_probs = params.draft_probs_point_mass ? nullptr : params.draft_probs_d.data_ptr<float>();
@@ -1248,6 +1267,10 @@ void rejectionSampling(const RejectionSamplingParams& params) {
                                                stream,
                                                params.draft_probs_point_mass);
     RTP_LLM_CHECK_WITH_INFO(err == hipSuccess, "invokeRejectionSampling failed: %s", hipGetErrorString(err));
+}
+
+bool rejectionSamplingSupportsFinalize() {
+    return false;
 }
 
 void markovSoftmaxStep(const MarkovSoftmaxStepParams& params) {
@@ -1541,6 +1564,10 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
 
 void rejectionSampling(const RejectionSamplingParams&) {
     RTP_LLM_CHECK_WITH_INFO(false, "rejection sampling is not supported on this device");
+}
+
+bool rejectionSamplingSupportsFinalize() {
+    return false;
 }
 
 void markovSoftmaxStep(const MarkovSoftmaxStepParams& params) {

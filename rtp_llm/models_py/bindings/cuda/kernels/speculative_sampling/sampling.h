@@ -28,5 +28,15 @@ cudaError_t invokeRejectionSampling(DType*       draft_probs,
                                     int          target_vocab_size,
                                     cudaStream_t stream,
                                     bool         draft_probs_point_mass  = false,
-                                    bool         target_probs_point_mass = false);
+                                    bool         target_probs_point_mass = false,
+                                    // Optional post-rejection finalization folded into the kernel:
+                                    // force_mask (nullable, [batch_size] device bool) overrides
+                                    // forced rows with all draft tokens + the target bonus token
+                                    // and a full accept count; finalize_outputs additionally resets
+                                    // every -1 padding slot to 0. With finalize_outputs the kernel
+                                    // writes every element of both output buffers on every path, so
+                                    // callers may pass uninitialized outputs. Defaults keep the
+                                    // legacy kernel contract byte-for-byte.
+                                    const bool* force_mask       = nullptr,
+                                    bool        finalize_outputs = false);
 }  // namespace rtp_llm

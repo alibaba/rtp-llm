@@ -105,7 +105,10 @@ GreedyOutput     execSampleGreedy(const GreedyParams& params);
 torch::Tensor    execSampleFromProbs(const torch::Tensor& probabilities);
 BeamSearchOutput execSampleBeamSearch(BeamSearchParams params);
 void             execRejectionSampling(const RejectionSamplingParams& params);
-void             execMarkovSoftmaxStep(const MarkovSoftmaxStepParams& params);
+// CUDA finalizes every output element, including forced rows and zero padding.
+// Other backends retain the caller's eager finalization.
+bool execRejectionSamplingSupportsFinalize();
+void execMarkovSoftmaxStep(const MarkovSoftmaxStepParams& params);
 // Softmax-free DSpARK draft step for all-greedy batches: returns int32 [B]
 // first-argmax tokens of (logits + markov_bias) / temperature. The caller
 // publishes them as a point mass (token_ids_are_point_mass).
