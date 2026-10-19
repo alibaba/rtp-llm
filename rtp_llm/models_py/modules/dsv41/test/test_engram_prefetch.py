@@ -208,8 +208,11 @@ class EngramPrefetchTest(unittest.TestCase):
         runtime = SimpleNamespace(
             cudaHostUnregister=lambda pointer: (order.append("unregister") or 0,)
         )
-        engram._PinnedSharedTable._unregister(runtime, torch.empty(1), [event])
-        self.assertEqual(order, ["wait", "unregister"])
+        storage = torch.empty(1)
+        engram._PinnedSharedTable._unregister(
+            runtime, storage, (storage.data_ptr(), storage.data_ptr() + 4096), [event]
+        )
+        self.assertEqual(order, ["wait", "unregister", "unregister"])
 
     def _layer(self, module=None):
         return SimpleNamespace(engram=module or self.module, engram_hashes=Tensor())
@@ -301,8 +304,12 @@ class EngramPrefetchTest(unittest.TestCase):
                 embedding(ids, ids.device, prefetch=True),
                 kernels.lookup_prefetch_rows.return_value,
             )
-        kernels.lookup_host_rows.assert_called_once_with(*embedding._uva, ids, 148)
-        kernels.lookup_prefetch_rows.assert_called_once_with(*embedding._uva, ids, 148)
+        kernels.lookup_host_rows.assert_called_once_with(
+            *embedding._uva, ids, 148, out=None
+        )
+        kernels.lookup_prefetch_rows.assert_called_once_with(
+            *embedding._uva, ids, 148, out=None
+        )
 
     def _carveout_fixture(self):
         path = Path(__file__).resolve().parents[1] / "_engram_triton.py"
@@ -436,6 +443,7 @@ class EngramPrefetchTest(unittest.TestCase):
         )
         model.kv_cache = object()
         model._engram_forward_active = False
+        model._engram_prefetch = None
         model._is_decode_role = False
         model._engram_layers = ((1, 0),)
         model._image_plan = object()

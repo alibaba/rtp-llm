@@ -43,7 +43,11 @@ py_test(
 
 py_test(
     name = "test_v41_sm90_topk",
-    srcs = ["test_v41_sm90_topk.py", "//rtp_llm/test/pytest:pytest_main.py"],
+    srcs = [
+        "test_v41_sm90_topk.py",
+        "//rtp_llm/models_py/modules/dsv4/fp8/test:test_topk_v3.py",
+        "//rtp_llm/test/pytest:pytest_main.py",
+    ],
     main = "//rtp_llm/test/pytest:pytest_main.py",
     args = ["--cuda-devices", "1", "--cuda-major", "9", "$(location :test_v41_sm90_topk.py)"],
     deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:modules", "//rtp_llm:jit_cache_env", test_requirement("pytest")],

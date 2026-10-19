@@ -65,21 +65,29 @@ def test_sm90_defaults_to_flashinfer_and_rejects_retired_backends(monkeypatch):
     ids=["sm100", "non_sm90_cuda", "hip_9_0", "hip_9_4"],
 )
 def test_non_sm90_keeps_existing_selector(monkeypatch, hip_version, capability):
+    monkeypatch.setenv("DSV41_MEGA_SHARED_EXPERT", "1")
+    monkeypatch.setenv("DSV4_USE_MEGA_MOE_SE", "1")
+    monkeypatch.setenv("DSV4_USE_MEGA_MOE_FUSED", "0")
     monkeypatch.setattr(torch.version, "hip", hip_version)
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda *args: capability)
     # Stub kernel availability, not architecture routing: non-SM90 devices
     # must reach the original selector, without importing CUDA FlashInfer.
-    existing = SimpleNamespace(name="mega", can_handle=lambda cfg: True)
+    existing = SimpleNamespace(name="mega_se", can_handle=lambda cfg: True)
+    legacy = SimpleNamespace(name="mega", can_handle=lambda cfg: True)
     monkeypatch.setattr(
         strategy_base,
         "_STRATEGY_PRIORITY",
-        [existing, candidate.SM90FlashInferStrategy],
+        [existing, legacy, candidate.SM90FlashInferStrategy],
     )
     assert not candidate.SM90FlashInferStrategy.can_handle(_cfg())
     assert select_strategy(_cfg()) is existing
+    assert select_strategy(_cfg(), forced="mega") is existing
     with pytest.raises(RuntimeError, match="cannot handle cfg"):
         select_strategy(_cfg(), forced="sm90_flashinfer")
+    monkeypatch.setenv("DSV41_MEGA_SHARED_EXPERT", "0")
+    monkeypatch.setenv("DSV4_USE_MEGA_MOE_SE", "0")
+    assert select_strategy(_cfg(), forced="mega") is legacy
 
 
 class _LocalStub(nn.Module):

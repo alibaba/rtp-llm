@@ -13,6 +13,13 @@ import unittest
 
 import torch
 
+# Reuse the upstream BF16/finite-epilogue oracle on the SM90 runner.
+from rtp_llm.models_py.modules.dsv4.fp8.test.test_topk_v3 import (
+    test_bf16_cuda_graph_replay_updates_scores_and_lengths,
+    test_bf16_dispatch_boundaries_match_fp32_cast,
+    test_bf16_ragged_padded_stride_and_short_rows,
+    test_bf16_special_values_ties_and_finite_epilogue,
+)
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 
