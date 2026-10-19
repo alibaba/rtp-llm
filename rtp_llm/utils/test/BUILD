@@ -349,3 +349,10 @@ py_test(
     srcs = ["scr_native_logger_test.py"],
     data = ["//rtp_llm/cpp/utils:scr_logger_test_sources"],
 )
+
+# Real child-process regression; no model or GPU is needed.
+py_test(
+    name = "process_manager_fatal_test",
+    srcs = ["process_manager_fatal_test.py"],
+    deps = ["//rtp_llm:utils"],
+)
