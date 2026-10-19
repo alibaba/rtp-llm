@@ -749,6 +749,43 @@ std::shared_ptr<GenerateStream> NormalEngine::makeStream(const std::shared_ptr<G
             selection_error = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error.what());
         }
     }
+#if USING_ASCEND
+    // C++-side gate mirroring GenerateConfig._check_ascend_unsupported_sampling:
+    // the C++ HTTP/gRPC entries bypass Python validate(). Stream-scoped error.
+    if (!selection_error.hasError()) {
+        const auto& config = *input->generate_config;
+        std::string unsupported;
+        auto append = [&unsupported](const std::string& item) {
+            if (!unsupported.empty()) {
+                unsupported += "; ";
+            }
+            unsupported += item;
+        };
+        const int max_beams = config.variable_num_beams.empty()
+                                  ? config.num_beams
+                                  : *std::max_element(config.variable_num_beams.begin(),
+                                                      config.variable_num_beams.end());
+        if (max_beams > 1) {
+            append("num_beams=" + std::to_string(max_beams) + " (beam search)");
+        }
+        if (config.repetition_penalty != 1.0) {
+            append("repetition_penalty=" + std::to_string(config.repetition_penalty));
+        }
+        if (config.presence_penalty != 0.0) {
+            append("presence_penalty=" + std::to_string(config.presence_penalty));
+        }
+        if (config.frequency_penalty != 0.0) {
+            append("frequency_penalty=" + std::to_string(config.frequency_penalty));
+        }
+        if (config.no_repeat_ngram_size.has_value() && config.no_repeat_ngram_size.value() > 0) {
+            append("no_repeat_ngram_size=" + std::to_string(config.no_repeat_ngram_size.value()));
+        }
+        if (!unsupported.empty()) {
+            selection_error = ErrorInfo(ErrorCode::INVALID_PARAMS,
+                                        "not yet supported on Ascend NPU: " + unsupported);
+        }
+    }
+#endif
     std::shared_ptr<GenerateStream> stream = std::make_shared<NormalGenerateStream>(
         input, model_config_, runtime_config, resource_context_, metrics_reporter_);
     // DecodeRpcServer calls makeStream() before enqueue() so it can allocate the
