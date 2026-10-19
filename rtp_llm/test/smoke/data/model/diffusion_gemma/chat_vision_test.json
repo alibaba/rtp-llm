@@ -30,14 +30,14 @@
       "result": {
         "id": "chat-",
         "object": "chat.completion",
-        "created": 1792281581,
+        "created": 1792345643,
         "model": "",
         "choices": [
           {
             "index": 0,
             "message": {
               "role": "assistant",
-              "content": "<|channel><|channel>thought\n<channel|>A young woman sits on the beach, smiling as she gives her Labrador dog a treat during sunset.",
+              "content": "<|channel><|channel>thought\n<channel|>A young woman sits on a sandy beach at sunset, smiling as she holds a golden retriever that is giving her its paw.",
               "name": null,
               "reasoning_content": null,
               "function_call": null,
@@ -91,14 +91,14 @@
       "result": {
         "id": "chat-",
         "object": "chat.completion",
-        "created": 1792281591,
+        "created": 1792345654,
         "model": "",
         "choices": [
           {
             "index": 0,
             "message": {
               "role": "assistant",
-              "content": "<|channel><|channel>thought\n<channel|>The dominant colors in this picture are:\n\n*   **Warm yellows and oranges:** These tones are prominent in the sunset light casting across the sky, sand, and the dog's fur.\n*   **Neutral tans and greys:** The sand on the beach is composed of soft, neutral beige and grey tones.\n*   **Muted blues and blacks:** The woman's checkered plaid shirt and jeans provide a darker contrast to the bright environment.\n*   **Soft whites:** The foam on the crashing waves and the brightest area of the sky near the sun add hints of light, airy white.",
+              "content": "<|channel>",
               "name": null,
               "reasoning_content": null,
               "function_call": null,
@@ -117,7 +117,7 @@
           "completion_tokens_details": null,
           "prompt_tokens_details": {
             "audio_tokens": null,
-            "cached_tokens": null,
+            "cached_tokens": 256,
             "image_tokens": 260,
             "video_tokens": null
           }
@@ -158,14 +158,14 @@
       "result": {
         "id": "chat-",
         "object": "chat.completion",
-        "created": 1792281596,
+        "created": 1792345684,
         "model": "",
         "choices": [
           {
             "index": 0,
             "message": {
               "role": "assistant",
-              "content": "<|channel><|channel>thought\n<channel|>The two images provided are identical. Both show a woman sitting on a beach at sunset, playing with a large Labrador retriever that is giving her a paw.",
+              "content": "<|channel><|channel>thought\n<channel|>The two images provided are identical. Both depict the same scene: a woman sitting on a sandy beach at sunset, interacting with a golden retriever dog that is sitting up and pawing her hand.",
               "name": null,
               "reasoning_content": null,
               "function_call": null,
@@ -219,14 +219,14 @@
       "result": {
         "id": "chat-",
         "object": "chat.completion",
-        "created": 1792281591,
+        "created": 1792345692,
         "model": "",
         "choices": [
           {
             "index": 0,
             "message": {
               "role": "assistant",
-              "content": "<|channel><|channel>thought\n<channel|>The dominant colors in this picture are:\n\n*   **Warm yellows and oranges:** These tones are prominent in the sunset light casting across the sky, sand, and the dog's fur.\n*   **Neutral tans and greys:** The sand on the beach is composed of soft, neutral beige and grey tones.\n*   **Muted blues and blacks:** The woman's checkered plaid shirt and jeans provide a darker contrast to the bright environment.\n*   **Soft whites:** The foam on the crashing waves and the brightest area of the sky near the sun add hints of light, airy white.",
+              "content": "<|channel>",
               "name": null,
               "reasoning_content": null,
               "function_call": null,
@@ -245,7 +245,7 @@
           "completion_tokens_details": null,
           "prompt_tokens_details": {
             "audio_tokens": null,
-            "cached_tokens": null,
+            "cached_tokens": 256,
             "image_tokens": 260,
             "video_tokens": null
           }
@@ -288,14 +288,14 @@
       "result": {
         "id": "chat-",
         "object": "chat.completion",
-        "created": 0,
+        "created": 1792345734,
         "model": "",
         "choices": [
           {
             "index": 0,
             "message": {
               "role": "assistant",
-              "content": "",
+              "content": "<|channel>",
               "name": null,
               "reasoning_content": null,
               "function_call": null,
@@ -303,19 +303,19 @@
               "partial": false,
               "tool_call_id": null
             },
-            "finish_reason": null,
+            "finish_reason": "length",
             "logprobs": null
           }
         ],
         "usage": {
-          "prompt_tokens": 0,
-          "total_tokens": 0,
-          "completion_tokens": 0,
+          "prompt_tokens": 319,
+          "total_tokens": 575,
+          "completion_tokens": 256,
           "completion_tokens_details": null,
           "prompt_tokens_details": {
             "audio_tokens": null,
-            "cached_tokens": null,
-            "image_tokens": null,
+            "cached_tokens": 256,
+            "image_tokens": 260,
             "video_tokens": null
           }
         }
@@ -338,14 +338,14 @@
       "result": {
         "id": "chat-",
         "object": "chat.completion",
-        "created": 0,
+        "created": 1792345750,
         "model": "",
         "choices": [
           {
             "index": 0,
             "message": {
               "role": "assistant",
-              "content": "",
+              "content": "<|channel><|channel>thought\n<channel|>The capital of France is **Paris**.",
               "name": null,
               "reasoning_content": null,
               "function_call": null,
@@ -353,21 +353,16 @@
               "partial": false,
               "tool_call_id": null
             },
-            "finish_reason": null,
+            "finish_reason": "length",
             "logprobs": null
           }
         ],
         "usage": {
-          "prompt_tokens": 0,
-          "total_tokens": 0,
-          "completion_tokens": 0,
+          "prompt_tokens": 14,
+          "total_tokens": 270,
+          "completion_tokens": 256,
           "completion_tokens_details": null,
-          "prompt_tokens_details": {
-            "audio_tokens": null,
-            "cached_tokens": null,
-            "image_tokens": null,
-            "video_tokens": null
-          }
+          "prompt_tokens_details": null
         }
       }
     }

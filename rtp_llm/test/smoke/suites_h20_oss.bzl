@@ -677,14 +677,6 @@ def diffusion_gemma_suites():
                 # the image fixture reuses the qwen_vl smoke data; add it to
                 # this target's runfiles so the relative URL resolves.
                 data = ["data/model/qwen_vl/1.jpeg"],
-                # Vision bring-up diag: the multimodal server skips the engine
-                # warmup (NormalEngine warm_up gate on is_multimodal), so the
-                # 278-token vision prefill is this process's first flashinfer
-                # sliding call and dies with CUBLAS_STATUS_EXECUTION_FAILED at
-                # the following o_proj GEMM (run 34). DGM_FI_DIAG=1 makes the
-                # model synchronize and label every flashinfer stage so the
-                # CI log names the kernel that poisons the context.
-                envs = ["DGM_FI_DIAG=1"],
                 # Consolidated multimodal case with KV-reuse coverage (hy_v3
                 # pattern): 6 queries in one session, --reuse_cache 1.
                 # Reuse scenarios (2026-10-14 decree): ① same-prefix
