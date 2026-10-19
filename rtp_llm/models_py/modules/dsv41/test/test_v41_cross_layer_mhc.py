@@ -157,6 +157,25 @@ class CrossLayerMHCCPUTest(unittest.TestCase):
             atol=0,
         )
 
+    def test_prefill_fast_engram_matches_regular_path_and_defers_post(self):
+        ids = torch.arange(10)
+        hidden = torch.randn(10, 4, 8, dtype=torch.bfloat16)
+        baseline = make_blocks(count=2, engram_layers=(1,))
+        candidate = make_blocks(count=2, engram_layers=(1,))
+        candidate[1].attn.v41_config = {}
+        with patch("rtp_llm.models_py.modules.dsv41.block.AttentionFP8", TestAttention):
+            self.assertIsNotNone(candidate[1].prefill_fast_callable())
+        for block in (*baseline, *candidate):
+            block._cp_sync_after_attn_done = True
+        args = (ids, ids.clone(), torch.tensor([0, 10]))
+        expected = baseline[1].forward(baseline[0].forward(hidden, *args), *args)
+        first = candidate[0]._forward_prefill_fast_fp8(hidden, *args)
+        pending = candidate[1]._forward_prefill_fast_fp8(
+            first, *args, _defer_ffn_post=True
+        )
+        self.assertIsInstance(pending, transition.PendingDecodePost)
+        torch.testing.assert_close(pending.materialize(), expected, rtol=0, atol=0)
+
     def setUp(self):
         env = patch.dict(os.environ, _ENV)
         env.start()
