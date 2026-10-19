@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <future>
 #include <set>
+#include <map>
 #include <chrono>
 #include <thread>
 #include <gtest/gtest.h>
@@ -692,12 +693,12 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_ReturnNotNull_AllSuccess) {
     EXPECT_EQ(prefill_server_->service()->getStartLoadCallCount(), 1);
 }
 
-TEST_F(P2PConnectorSchedulerTest, AsyncReadCpSendsEachWorkerItsRoundRobinKeys) {
+TEST_F(P2PConnectorSchedulerTest, AsyncReadCpSendsCompletePagesToEachDecodeWorker) {
     rebuildSchedulerWithLayerAttnTypes({CacheGroupType::FULL}, /*cp_size=*/2);
 
     auto resource = std::make_shared<KVCacheResource>();
     resource->initGroups(makeSingleMlaTopology());
-    resource->mutableBlockIds(resource->groupTags().at(0)).assign({10, 11});
+    resource->mutableBlockIds(resource->groupTags().at(0)).assign({10, 11, 12, 13});
     resource->cacheKeys() = {100, 101, 102, 103};
     auto meta = createMockMeta(2012, "test_async_read_cp", currentTimeMs() + 5000);
     meta->setPrefillTpSize(2);
@@ -709,33 +710,57 @@ TEST_F(P2PConnectorSchedulerTest, AsyncReadCpSendsEachWorkerItsRoundRobinKeys) {
     waitAsyncContextDone(result.context);
     ASSERT_TRUE(result.context->success());
 
-    const auto rank0_request = tp_broadcast_servers_[0]->service()->getLastBroadcastTpRequest();
-    const auto rank1_request = tp_broadcast_servers_[1]->service()->getLastBroadcastTpRequest();
-    ASSERT_EQ(rank0_request.routes_size(), 1);
-    ASSERT_EQ(rank1_request.routes_size(), 1);
-    ASSERT_EQ(rank0_request.routes(0).layer_blocks_size(), 1);
-    ASSERT_EQ(rank1_request.routes(0).layer_blocks_size(), 1);
-    const auto& rank0_layer = rank0_request.routes(0).layer_blocks(0);
-    const auto& rank1_layer = rank1_request.routes(0).layer_blocks(0);
-    ASSERT_EQ(rank0_layer.cache_keys_size(), 2);
-    ASSERT_EQ(rank1_layer.cache_keys_size(), 2);
-    EXPECT_EQ(rank0_layer.cache_keys(0), 100);
-    EXPECT_EQ(rank0_layer.cache_keys(1), 102);
-    EXPECT_EQ(rank1_layer.cache_keys(0), 101);
-    EXPECT_EQ(rank1_layer.cache_keys(1), 103);
-    ASSERT_EQ(rank0_layer.block_ids_size(), 2);
-    ASSERT_EQ(rank1_layer.block_ids_size(), 2);
-    EXPECT_EQ(rank0_layer.block_ids(0), 10);
-    EXPECT_EQ(rank0_layer.block_ids(1), 11);
-    EXPECT_EQ(rank1_layer.block_ids(0), 10);
-    EXPECT_EQ(rank1_layer.block_ids(1), 11);
+    std::set<int> all_routes;
+    for (const auto& server : tp_broadcast_servers_) {
+        const auto request = server->service()->getLastBroadcastTpRequest();
+        std::map<int64_t, uint32_t> received;
+        for (const auto& route : request.routes()) {
+            all_routes.insert(route.route_id());
+            for (const auto& layer : route.layer_blocks()) {
+                ASSERT_EQ(layer.cache_keys_size(), layer.block_ids_size());
+                for (int i = 0; i < layer.cache_keys_size(); ++i) {
+                    EXPECT_TRUE(received.emplace(layer.cache_keys(i), layer.block_ids(i)).second);
+                }
+            }
+        }
+        EXPECT_EQ(received, (std::map<int64_t, uint32_t>{{100, 10}, {101, 11}, {102, 12}, {103, 13}}));
+    }
+    const auto request = prefill_server_->service()->getLastStartLoadRequest();
+    EXPECT_EQ(std::set<int>(request.active_route_ids().begin(), request.active_route_ids().end()), all_routes);
+}
 
-    const auto start_load_request = prefill_server_->service()->getLastStartLoadRequest();
-    const std::set<int> active_route_ids(start_load_request.active_route_ids().begin(),
-                                         start_load_request.active_route_ids().end());
-    EXPECT_EQ(active_route_ids.size(), 2u);
-    EXPECT_EQ(active_route_ids.count(rank0_request.routes(0).route_id()), 1u);
-    EXPECT_EQ(active_route_ids.count(rank1_request.routes(0).route_id()), 1u);
+TEST_F(P2PConnectorSchedulerTest, DecodeCompactStateProjectsUsingPrefillCpSize) {
+    P2PConnectorSchedulerConfig cfg;
+    cfg.topology = test::makeTestCacheTopology(1, 1, {{0}}, 1, {CacheGroupType::SWA});
+    cfg.parallelism_config.tp_size = 1;
+    cfg.parallelism_config.prefill_cp_config.kv_cache_sharded = true;
+    cfg.parallelism_config.prefill_cp_config.prefill_cp_size = 4;
+    cfg.parallelism_config.prefill_cp_config.method = CPRotateMethod::PREFILL_CP;
+    P2PSchedulerDecodeRead scheduler(cfg, nullptr, nullptr);
+    KVCacheResource resource;
+    resource.initGroups(cfg.topology);
+    resource.cacheKeys() = {100, 101, 102, 103, 104, 105, 106, 107, 108};
+    resource.mutableBlockIds("group0").assign({10, 11, 12});
+    TransferPlan plan;
+    TransferRoute route;
+    route.cache_tag = "group0";
+    route.src_keys.modulus = 4;
+    route.src_keys.residue = 3;
+    route.src_keys.include_final_key = true;
+    route.src_keys.tail_count = 2;
+    plan.routes.push_back(route);
+    auto result = scheduler.buildDecodeRankRoutes(plan, resource, {0, -1}, 1);
+    ASSERT_TRUE(result.ok()) << result.status().ToString();
+    const auto& ranks = result.value();
+    ASSERT_EQ(ranks.size(), 1u);
+    ASSERT_EQ(ranks[0].size(), 1u);
+    ASSERT_EQ(ranks[0][0].layer_blocks_size(), 1);
+    const auto& layer = ranks[0][0].layer_blocks(0);
+    ASSERT_EQ(layer.cache_keys_size(), 2);
+    EXPECT_EQ(layer.cache_keys(0), 107);
+    EXPECT_EQ(layer.cache_keys(1), 108);
+    EXPECT_EQ(layer.block_ids(0), 11);
+    EXPECT_EQ(layer.block_ids(1), 12);
 }
 
 TEST_F(P2PConnectorSchedulerTest, AsyncReadCpRejectsDifferentSourceCpSize) {

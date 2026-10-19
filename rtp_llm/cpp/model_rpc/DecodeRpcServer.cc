@@ -410,6 +410,16 @@ grpc::Status DecodeRpcServer::GenerateStreamCall(grpc::ServerContext*           
         return generate_context.error_status;
     }
     auto stream = engine_->makeStream(input);
+    // Until enqueue succeeds, no scheduler owns this stream's terminal transition.
+    struct UnenqueuedStreamGuard {
+        GenerateStreamPtr stream;
+        bool submitted = false;
+        ~UnenqueuedStreamGuard() {
+            if (!submitted) {
+                stream->finishWithoutGenerate();
+            }
+        }
+    } unenqueued_guard{stream};
     stream->setPrefillTpSize(peer_info.tp_size);
     stream->setPrefillCpSize(peer_info.cp_size);
     generate_context.setStream(stream);
@@ -419,7 +429,9 @@ grpc::Status DecodeRpcServer::GenerateStreamCall(grpc::ServerContext*           
     PrefillContextGuard                         prefill_context_guard;
     if (!request->enqueued_by_master()) {
         if (cancel_handle->canceled.load()) {
-            engine_->enqueue(stream);  // Let the scheduler commit canceled lifecycle cleanup.
+            // NormalEngine settles rejected canceled streams without scheduler ownership.
+            engine_->enqueue(stream);
+            unenqueued_guard.submitted = true;
             generate_context.error_info   = cancel_handle->cancel_reason;
             generate_context.error_status = serializeErrorMsg(std::to_string(request_id), generate_context.error_info);
             return generate_context.error_status;
@@ -456,6 +468,7 @@ grpc::Status DecodeRpcServer::GenerateStreamCall(grpc::ServerContext*           
     }
 
     engine_->enqueue(stream);
+    unenqueued_guard.submitted = true;
 
     // Keep the async prefill RPC alive for the handoff lifecycle only. StartLoad applies the first token to the
     // decode stream, so client output must come exclusively from pollStreamOutput().
@@ -475,7 +488,9 @@ grpc::Status DecodeRpcServer::GenerateStreamCall(grpc::ServerContext*           
             server_context, generate_context.request_key, response_writer, generate_context.getStream());
     }
     prefill_cancel_guard.completed = generate_context.error_status.ok() && !server_context->IsCancelled()
-                                     && stream->getStatus() == StreamState::FINISHED;
+                                     && !stream->hasError()
+                                     && (stream->getStatus() == StreamState::FINISHED
+                                         || stream->hasEvent(StreamEvents::GenerateDone));
     if (prefill_cancel_guard.completed)
         cancel_registry_->finishDownstream(cancel_handle);
     else

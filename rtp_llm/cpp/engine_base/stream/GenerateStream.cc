@@ -798,7 +798,7 @@ bool GenerateStream::finishWithoutGenerate() {
     {
         std::lock_guard<std::mutex> lock(*mutex_);
         checkTimeoutWithoutLock();
-        if (getStatus() != StreamState::WAITING || hasErrorWithoutLock()) {
+        if (getStatus() != StreamState::WAITING) {
             return false;
         }
         // No token was generated here: do not publish GenerateDone or execution timing.

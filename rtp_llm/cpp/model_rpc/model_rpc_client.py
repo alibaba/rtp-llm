@@ -1248,9 +1248,9 @@ class ModelRpcClient(object):
 
     def _handle_grpc_error(self, e: grpc.RpcError, request_desc: str, target_address: str = "") -> None:
         # request_desc reaches the client; keep backend addresses in the log-only argument.
-        metadata = {key: value for key, value in (e.trailing_metadata() or ())}
         details = ErrorDetailsPB()
         try:
+            metadata = dict(e.trailing_metadata() or ())
             encoded = metadata.get("grpc-status-details-bin")
             if encoded:
                 details.ParseFromString(encoded)
@@ -1352,8 +1352,8 @@ class ModelRpcClient(object):
         client_span, trace_metadata = start_client_span(
             client_span_name, target_address
         )
+        client_settlement_abandoned = asyncio.Event()
         if client_span is not None:
-            client_settlement_abandoned = asyncio.Event()
             # Bailian Unitrace index key (see rtp_llm/telemetry/attributes.py)
             client_span.set_attribute(trace_attrs.REQUEST_ID, str(input_py.request_id))
         last_output = None
@@ -1390,7 +1390,7 @@ class ModelRpcClient(object):
                     self._raise_pb_error(response.error_info, f"request={input_pb.request_id}")
                 output_py = trans_output(input_py, response, stream_state, response_role_addrs=response_role_addrs)
                 last_output = output_py
-                if _engine_reported_finished(output_py) and client_span is not None:
+                if _engine_reported_finished(output_py):
                     # The finished application frame is not the gRPC EOF. If it
                     # escapes first, an upstream renderer can close this generator
                     # while the server is still settling the RPC. The application

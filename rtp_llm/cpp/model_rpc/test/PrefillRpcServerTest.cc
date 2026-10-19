@@ -73,7 +73,31 @@ TEST(PrefillRpcServerTest, StartLoadRejectsMissingEngine) {
     auto status = server.StartLoad(&context, &request, &response);
 
     EXPECT_EQ(status.error_code(), grpc::StatusCode::INTERNAL);
-    EXPECT_EQ(status.error_message(), "engine is null");
+    const auto error = errorInfoFromGrpcStatus(status);
+    EXPECT_EQ(error.code(), ErrorCode::P2P_CONNECTOR_TRANSFER_NOT_INITIALIZED);
+    EXPECT_NE(error.ToString().find("stage=StartLoad"), std::string::npos);
+    EXPECT_NE(error.ToString().find("engine is null"), std::string::npos);
+}
+
+TEST(PrefillRpcServerTest, BatchConversionExceptionReleasesReservationForRetry) {
+    PrefillRpcServer server;
+    EnqueueBatchRequestPB request;
+    request.set_batch_id(123);
+    auto* slot = request.add_dp_slots();
+    slot->set_dp_rank(0);
+    auto* input = slot->add_requests()->mutable_input();
+    input->set_request_id(987);
+    input->add_token_ids(1);
+    input->mutable_generate_config()->set_max_new_tokens(-1);
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        grpc::ServerContext context;
+        EnqueueBatchResponsePB response;
+        ASSERT_TRUE(server.EnqueueBatch(&context, &request, &response).ok());
+        EXPECT_TRUE(server.batch_entries_.empty());
+        ASSERT_EQ(response.errors_size(), 1);
+        EXPECT_EQ(response.errors(0).request_id(), 987);
+        EXPECT_EQ(response.errors(0).error_info().error_code(), static_cast<int64_t>(ErrorCode::INVALID_PARAMS));
+    }
 }
 
 TEST(PrefillRpcServerTest, GenerateStreamCallRejectsMissingRequestTimeout) {

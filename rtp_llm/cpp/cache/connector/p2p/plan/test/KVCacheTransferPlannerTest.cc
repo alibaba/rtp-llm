@@ -401,6 +401,35 @@ TEST(PlannerGroupA, A8_HybridRrAndCompactCoexist) {
     expectAllRouteBytesMatch(result.plan);
 }
 
+TEST(PlannerGroupA, AsymmetricDecodeKeepsCompactGeometryButFullPagesAreUnsharded) {
+    auto state = makeSwaGroup();
+    state.spec_type = KVCacheSpecType::OpaqueState;
+    auto src = makeLayout(4, CPRotateMethod::ALL_GATHER, true,
+                          {{kFullTag, makeMlaFullGroup()}, {kFixedTag, state}});
+    src.pc.role_type = RoleType::PREFILL;
+    auto dst = ShardLayoutFactory::peerOf(src, 1, true, RoleType::DECODE);
+    ASSERT_EQ(dst.cpSize(), 1);
+    EXPECT_EQ(dst.physicalCpSize(kFullTag), 1);
+    EXPECT_EQ(dst.physicalCpSize(kFixedTag), 4);
+    auto result = KVCacheTransferPlanner::plan(src, dst, {kFullTag, kFixedTag});
+    ASSERT_TRUE(result.ok()) << result.error.ToString();
+    std::set<size_t> full_positions;
+    for (const auto* route : result.plan.forTag(kFullTag)) {
+        for (auto pos : KVCacheTransferPlanner::resolveKeys(route->src_keys, 9)) {
+            full_positions.insert(pos);
+        }
+    }
+    EXPECT_EQ(full_positions, (std::set<size_t>{0, 1, 2, 3, 4, 5, 6, 7, 8}));
+    for (const auto* route : result.plan.forTag(kFixedTag)) {
+        EXPECT_EQ(KVCacheTransferPlanner::resolveKeys(route->src_keys, 9), (std::vector<size_t>{7, 8}));
+        EXPECT_EQ(CPSlotMapper::physicalBlockPosition(dst.group(kFixedTag).policy, 7, 9, 0,
+                                                     dst.physicalCpSize(kFixedTag)), 1u);
+        EXPECT_EQ(CPSlotMapper::physicalBlockPosition(dst.group(kFixedTag).policy, 8, 9, 0,
+                                                     dst.physicalCpSize(kFixedTag)), 2u);
+    }
+    EXPECT_FALSE(result.plan.forTag(kFixedTag).empty());
+}
+
 // 用例 A9: CP 字节切分（prefill 预切片、decode 持整块）
 TEST(PlannerGroupA, A9_CpByteSlicing) {
     auto sliced_group      = makeSwaGroup();

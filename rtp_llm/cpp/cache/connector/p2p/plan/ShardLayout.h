@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/cache/KVCacheSpecBase.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <map>
 #include <string>
@@ -47,6 +48,17 @@ struct ShardLayout {
                    static_cast<int>(pc.tp_size) : 1;
     }
 
+    // Compact state pages retain Prefill's token geometry on Decode, without
+    // distributing ownership across Decode ranks as FULL pages would do.
+    int physicalCpSize(const std::string& tag) const {
+        if (pc.role_type == RoleType::DECODE && pc.prefill_cp_config.kv_cache_sharded
+            && pc.prefill_cp_config.is_prefill_enabled() && hasGroup(tag)
+            && group(tag).policy.cp_mapping == CpBlockMappingMode::COMPACT_LAST_RANK) {
+            return std::max(1, static_cast<int>(pc.prefill_cp_config.prefill_cp_size));
+        }
+        return cpSize();
+    }
+
     int cpRank(int rank) const {
         const int n = cpSize();
         return n > 1 ? rank % n : 0;
@@ -78,9 +90,9 @@ struct ShardLayout {
 
     // ---- 生效的 CP 语义：镜像 CPSlotMapper::layoutForGroup ----
 
-    /// cpSize() <= 1 时 layoutForGroup 提前返回，mapping 退化为 NONE。
+    /// FULL follows local CP ownership; compact state retains its physical CP geometry.
     CpBlockMappingMode effectiveMapping(const std::string& tag) const {
-        if (cpSize() <= 1 || !hasGroup(tag)) {
+        if (!hasGroup(tag) || physicalCpSize(tag) <= 1) {
             return CpBlockMappingMode::NONE;
         }
         return group(tag).policy.cp_mapping;

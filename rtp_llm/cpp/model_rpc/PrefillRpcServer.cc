@@ -483,50 +483,67 @@ grpc::Status PrefillRpcServer::EnqueueBatch(grpc::ServerContext*         context
                 batch_entries_.at(masterEnqueuedHandoffUniqueKey(request_id)).reserved = true;
             }
 
-            GenerateInputPB item;
-            item.CopyFrom(external_input.input());
-            item.set_group_size(input_count);
-            item.mutable_group_id()->set_value(request->batch_id());
-            auto* config = item.mutable_generate_config();
-            config->set_unique_key(masterEnqueuedHandoffUniqueKey(request_id));
-            config->set_timeout_ms(clampRpcTimeoutMsToInt32(
-                normalizeRpcTimeoutMs(config->timeout_ms(), maga_init_params_.pd_sep_config.max_rpc_timeout_ms)));
-            auto input = QueryConverter::transQuery(&item);
-            input->request_deadline_ms =
-                engine_->getCacheManager()->prefillRequestDeadline(config->unique_key(), config->timeout_ms());
-            if (input->request_deadline_ms <= currentTimeMs()) {
-                release_request_id(request_id);
-                addBatchError(response,
-                              request_id,
-                              ErrorCode::GENERATE_TIMEOUT,
-                              "P2P EnqueueBatch request expired before admission");
-                continue;
-            }
             PDCancelRegistry::Handle cancel_handle;
-            const auto               admission =
-                cancel_registry_->admit(item, config->unique_key(), "", input->request_deadline_ms, cancel_handle);
-            if (!admission.ok()) {
+            const auto reject_item = [&](ErrorCode code, const std::string& message) {
+                if (cancel_handle) {
+                    cancel_registry_->finishLocal(cancel_handle);
+                    cancel_registry_->finishDownstream(cancel_handle);
+                    cancel_registry_->complete(cancel_handle);
+                }
                 release_request_id(request_id);
-                addBatchError(response, request_id, admission.code(), admission.ToString());
-                continue;
+                addBatchError(response, request_id, code, message);
+            };
+            try {
+                GenerateInputPB item;
+                item.CopyFrom(external_input.input());
+                item.set_group_size(input_count);
+                item.mutable_group_id()->set_value(request->batch_id());
+                auto* config = item.mutable_generate_config();
+                config->set_unique_key(masterEnqueuedHandoffUniqueKey(request_id));
+                config->set_timeout_ms(clampRpcTimeoutMsToInt32(
+                    normalizeRpcTimeoutMs(config->timeout_ms(), maga_init_params_.pd_sep_config.max_rpc_timeout_ms)));
+                auto input = QueryConverter::transQuery(&item);
+                input->request_deadline_ms =
+                    engine_->getCacheManager()->prefillRequestDeadline(config->unique_key(), config->timeout_ms());
+                if (input->request_deadline_ms <= currentTimeMs()) {
+                    release_request_id(request_id);
+                    addBatchError(response,
+                                  request_id,
+                                  ErrorCode::GENERATE_TIMEOUT,
+                                  "P2P EnqueueBatch request expired before admission");
+                    continue;
+                }
+                const auto               admission =
+                    cancel_registry_->admit(item, config->unique_key(), "", input->request_deadline_ms, cancel_handle);
+                if (!admission.ok()) {
+                    release_request_id(request_id);
+                    addBatchError(response, request_id, admission.code(), admission.ToString());
+                    continue;
+                }
+                const auto preprocess_status = preprocessForPD(input, mm_processor_.get(), engine_->isMTPEagle());
+                if (!preprocess_status.ok()) {
+                    cancel_registry_->finishLocal(cancel_handle);
+                    cancel_registry_->finishDownstream(cancel_handle);
+                    release_request_id(request_id);
+                    addBatchError(response, request_id, preprocess_status.code(), preprocess_status.ToString());
+                    continue;
+                }
+                if (cancel_handle->canceled.load()) {
+                    cancel_registry_->finishLocal(cancel_handle);
+                    release_request_id(request_id);
+                    addBatchError(
+                        response, request_id, cancel_handle->cancel_reason.code(), cancel_handle->cancel_reason.ToString());
+                    continue;
+                }
+                admitted_request_ids.push_back(request_id);
+                inputs.push_back(std::move(input));
+            } catch (const std::invalid_argument& e) {
+                reject_item(ErrorCode::INVALID_PARAMS, e.what());
+            } catch (const std::exception& e) {
+                reject_item(ErrorCode::EXECUTION_EXCEPTION, e.what());
+            } catch (...) {
+                reject_item(ErrorCode::EXECUTION_EXCEPTION, "PD batch input preparation failed");
             }
-            const auto preprocess_status = preprocessForPD(input, mm_processor_.get(), engine_->isMTPEagle());
-            if (!preprocess_status.ok()) {
-                cancel_registry_->finishLocal(cancel_handle);
-                cancel_registry_->finishDownstream(cancel_handle);
-                release_request_id(request_id);
-                addBatchError(response, request_id, preprocess_status.code(), preprocess_status.ToString());
-                continue;
-            }
-            if (cancel_handle->canceled.load()) {
-                cancel_registry_->finishLocal(cancel_handle);
-                release_request_id(request_id);
-                addBatchError(
-                    response, request_id, cancel_handle->cancel_reason.code(), cancel_handle->cancel_reason.ToString());
-                continue;
-            }
-            admitted_request_ids.push_back(request_id);
-            inputs.push_back(std::move(input));
         }
     }
     if (inputs.empty()) {

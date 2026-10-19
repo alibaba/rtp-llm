@@ -100,7 +100,7 @@ bool KVCacheTransferPlanner::ownsPosition(
     CacheGroupPolicy policy = side.group(tag).policy;
     // 镜像 CPSlotMapper::layoutForGroup：cpSize() <= 1 时 mapping 退化为 NONE。
     policy.cp_mapping = side.effectiveMapping(tag);
-    return CPSlotMapper::physicalBlockPosition(policy, pos, count, cp_rank, cp_size).has_value();
+    return CPSlotMapper::physicalBlockPosition(policy, pos, count, cp_rank, side.physicalCpSize(tag)).has_value();
 }
 
 ErrorInfo

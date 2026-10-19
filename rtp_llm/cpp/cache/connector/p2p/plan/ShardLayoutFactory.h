@@ -77,7 +77,8 @@ public:
                                                    CPRotateMethod::DISABLED;
         }
         peer_pc.prefill_cp_config.kv_cache_sharded    = peer_kv_cache_sharded;
-        peer_pc.prefill_cp_config.prefill_cp_size     = peer_kv_cache_sharded ? peer_tp_size : 0;
+        peer_pc.prefill_cp_config.prefill_cp_size     = peer_kv_cache_sharded ?
+            (peer_role == RoleType::PREFILL ? peer_tp_size : static_cast<int>(self.pc.tp_size)) : 0;
         peer_pc.role_type                             = peer_role;
         return ShardLayout::forPeer(self, peer_pc, peer_role == RoleType::PREFILL);
     }

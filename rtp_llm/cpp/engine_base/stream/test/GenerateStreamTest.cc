@@ -452,6 +452,25 @@ TEST_F(GenerateStreamTest, outputPublishedBeforeConsumerWaitIsObserved) {
     EXPECT_EQ(result.value().request_id, 321);
 }
 
+TEST_F(GenerateStreamTest, RejectedUnenqueuedStreamFinishesWithoutLosingOriginalError) {
+    GenerateStreamBuilder builder;
+    auto stream = builder.createContextStream({1, 2, 3});
+    ASSERT_EQ(stream->getStatus(), StreamState::WAITING);
+    stream->reportError(ErrorCode::INVALID_PARAMS, "rejected before enqueue");
+    ASSERT_TRUE(stream->finishWithoutGenerate());
+    EXPECT_EQ(stream->getStatus(), StreamState::FINISHED);
+    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+    EXPECT_FALSE(stream->hasEvent(StreamEvents::GenerateDone));
+}
+
+TEST_F(GenerateStreamTest, UnenqueuedCompletionCannotFinishSchedulerOwnedRunningStream) {
+    GenerateStreamBuilder builder;
+    auto stream = builder.createContextStream({1, 2, 3});
+    stream->generate_status_->status.store(StreamState::RUNNING);
+    EXPECT_FALSE(stream->finishWithoutGenerate());
+    EXPECT_EQ(stream->getStatus(), StreamState::RUNNING);
+}
+
 TEST_F(GenerateStreamTest, pendingCompletionIsConsumerVisibleBeforeSchedulerCommit) {
     auto builder = GenerateStreamBuilder();
     auto stream  = std::dynamic_pointer_cast<NormalGenerateStream>(builder.createComplexContextStream({1, 2, 3}));

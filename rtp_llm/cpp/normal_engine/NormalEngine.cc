@@ -764,9 +764,14 @@ std::shared_ptr<GenerateStream> NormalEngine::makeStream(const std::shared_ptr<G
 void NormalEngine::enqueue(std::shared_ptr<GenerateStream>& stream) {
     stream->setReserveStep(reserveStepForStream(reserve_step_, stream->generateConfig()->isPrefillOnly()));
     if (!validateStreamForScheduling(stream)) {
+        stream->finishWithoutGenerate();
         return;
     }
-    (void)scheduler_->enqueue(stream);
+    const auto status = scheduler_->enqueue(stream);
+    if (!status.ok()) {
+        stream->reportError(ErrorCode::EXECUTION_EXCEPTION, status.ToString());
+        stream->finishWithoutGenerate();
+    }
 }
 
 std::shared_ptr<GenerateStream> NormalEngine::enqueue(const std::shared_ptr<GenerateInput>& input) {

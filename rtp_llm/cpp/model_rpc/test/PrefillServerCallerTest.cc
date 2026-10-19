@@ -351,7 +351,10 @@ TEST_F(PrefillServerCallerTest, ErrorChunkMarksContextFailed) {
     EXPECT_FALSE(context->success());
     EXPECT_TRUE(context->failed());
     EXPECT_EQ(context->errorInfo().code(), ErrorCode::UNKNOWN_ERROR);
-    EXPECT_EQ(context->errorInfo().ToString(), "first chunk error");
+    EXPECT_EQ(context->errorInfo().ToString(),
+              "first chunk error [received_at location=PrefillServerCallerContext observer_role=DECODE "
+              "operation=GenerateStreamCall peer=127.0.0.1:" + std::to_string(server.port())
+                  + " request_id=1001 key=snapshot wire_code=1]");
 }
 
 TEST_F(PrefillServerCallerTest, ErrorChunkCancelsOutstandingRpcAndWaitsForFinish) {
@@ -365,7 +368,10 @@ TEST_F(PrefillServerCallerTest, ErrorChunkCancelsOutstandingRpcAndWaitsForFinish
     EXPECT_FALSE(context->success());
     EXPECT_TRUE(context->failed());
     EXPECT_EQ(context->errorInfo().code(), ErrorCode::UNKNOWN_ERROR);
-    EXPECT_EQ(context->errorInfo().ToString(), "first chunk error");
+    EXPECT_EQ(context->errorInfo().ToString(),
+              "first chunk error [received_at location=PrefillServerCallerContext observer_role=DECODE "
+              "operation=GenerateStreamCall peer=127.0.0.1:" + std::to_string(server.port())
+                  + " request_id=1011 key=error-cancel wire_code=1]");
     EXPECT_TRUE(server.service()->waitCancelled(std::chrono::seconds(1)));
 }
 

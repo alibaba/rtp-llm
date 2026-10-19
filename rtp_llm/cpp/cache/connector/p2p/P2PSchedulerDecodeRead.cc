@@ -152,14 +152,9 @@ P2PSchedulerDecodeRead::buildDecodeRankRoutes(const TransferPlan&        plan,
                                      std::min(logical_count, window_begin + static_cast<size_t>(block_range.second)) :
                                      logical_count;
 
-    // route 按 destination worker_rank 下发，物理块投影必须用该 worker 的本地 CP rank
-    // （ShardLayout::cpRank 语义：rank % cpSize）。config_.cp_rank 只是当前 scheduler
-    // 实例的投影，不能代表所有 broadcast 目标。CP size 与 planner 的 ShardLayout::cpSize()
-    // 保持一致（Decode 本地 CP size 恒为 1）。
-    // Decode retains complete pages on every TP rank, regardless of the peer's CP flag.
-    const int cp_size = 1;
+    const auto layout = ShardLayoutFactory::fromTopology(
+        *config_.topology, config_.parallelism_config, RoleType::DECODE);
     for (size_t worker_rank = 0; worker_rank < worker_num; ++worker_rank) {
-        const int worker_cp_rank = cp_size > 1 ? static_cast<int>(worker_rank % cp_size) : 0;
         for (const auto* route : plan.forDecodeRank(static_cast<int>(worker_rank))) {
             auto positions = KVCacheTransferPlanner::resolveKeys(route->src_keys, logical_count);
             // block_range 窗口只在 decode 侧叠加在 resolveKeys 结果之上。
@@ -171,6 +166,9 @@ P2PSchedulerDecodeRead::buildDecodeRankRoutes(const TransferPlan&        plan,
                 // 该 route 在本请求长度 / 窗口下解析为空是预期行为（两侧规则相同故一致判空）。
                 continue;
             }
+            const int cp_size = layout.physicalCpSize(route->cache_tag);
+            // COMPACT keeps the same state slots on every Decode rank; FULL uses identity mapping.
+            const int worker_cp_rank = 0;
             auto layer_buffers = LayerCacheBufferUtil::convertTagForRoute(
                 resource, *config_.topology, route->cache_tag, positions, worker_cp_rank, cp_size);
             if (!layer_buffers.ok()) {

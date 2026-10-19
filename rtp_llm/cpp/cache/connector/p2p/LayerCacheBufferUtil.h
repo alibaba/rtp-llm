@@ -46,7 +46,7 @@ public:
     /// 与 convertLayerTag 的关键区别：**本函数不施加 group.policy.active_tail_blocks**。
     /// 尾部裁剪必须由编排层统一算进 KeyShardSpec::tail_count —— convertLayerTag 里那段
     /// `logical_end - tail_count` 用的是**本侧**的 logical_end，两侧 compact 程度不同时
-    /// （prefill compact cp_size→1、decode 不 compact）「最后 N 个」会指向不同的 key，
+    /// （prefill compact cp_size→1、Decode FULL 页表不 compact，COMPACT/state 组按 Prefill CP 几何投影）「最后 N 个」会指向不同的 key，
     /// 破坏 executeCopy 的键集包含契约。logical_positions 由
     /// KVCacheTransferPlanner::resolveKeys 解析，已经含了 tail_count。
     [[nodiscard]] static ErrorResult<std::shared_ptr<LayerCacheBuffer>>
