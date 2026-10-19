@@ -2201,9 +2201,7 @@ TEST_F(PerRankBlockTransferEngineStrategyTest, StagedBatchRoundTripPreservesUnse
     ASSERT_TRUE(load->success());
     for (size_t i = 0; i < device_blocks.size(); ++i) {
         EXPECT_EQ(readDeviceLayer(device_pool_, 0, device_blocks[i]), std::vector<uint8_t>(128, 0x31 + i));
-        auto expected = std::vector<uint8_t>(256, 0);
-        std::fill_n(expected.begin(), 128, 0x71 + i);
-        EXPECT_EQ(readDeviceLayer(device_pool_, 1, device_blocks[i]), expected);
+        EXPECT_EQ(readDeviceLayer(device_pool_, 1, device_blocks[i]), std::vector<uint8_t>(layer_bytes_[1], 0x71 + i));
     }
     const auto* untouched = static_cast<const uint8_t*>(host_pool_->blockBuffer(host_blocks[1]).addr);
     EXPECT_EQ(std::vector<uint8_t>(untouched, untouched + host_block_size_),
