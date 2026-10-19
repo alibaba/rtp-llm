@@ -552,6 +552,9 @@ class DiffusionGemmaReuseABTest(unittest.TestCase):
         PAGE_BLOCKS = 64
         table = _torch.arange(PAGE_BLOCKS, dtype=_torch.int32).view(1, -1)
 
+        model_a_cache = None
+        model_b_cache = None
+
         def _caches():
             swa = [
                 _NS(
@@ -638,15 +641,41 @@ class DiffusionGemmaReuseABTest(unittest.TestCase):
         # flow A: fresh 277-token prefill
         model.kv_cache = _caches()
         with _torch.inference_mode():
-            model.forward(_inputs(full_ids, _attn(0, 277)))
+            out_a = model.forward(_inputs(full_ids, _attn(0, 277)))
         hidden_a = _canvas_hidden(277)
 
         # flow B: 256 prefill + 21 incremental over the cached prefix
+        groups_a = {li: model.kv_cache.get_layer_cache_groups(li) for li in (0, 5)}
         model.kv_cache = _caches()
         with _torch.inference_mode():
             model.forward(_inputs(prefix_ids, _attn(0, 256)))
-            model.forward(_inputs(suffix_ids, _attn(256, 21)))
+            out_b = model.forward(_inputs(suffix_ids, _attn(256, 21)))
+        groups_b = {li: model.kv_cache.get_layer_cache_groups(li) for li in (0, 5)}
         hidden_b = _canvas_hidden(277)
+
+        # Bisect the divergence: (1) the 21 new tokens' prefill hidden
+        # (split attention vs full attention), (2) the K rows they wrote to
+        # the last page, (3) the canvas hidden. Whichever diverges first
+        # names the breaker.
+        ha = out_a.hidden_states[-21:].float()
+        hb = out_b.hidden_states[-21:].float()
+        print(
+            f"[dgm-fi] prefill-21 hidden: max_diff={(ha - hb).abs().max().item():.4f} "
+            f"mean_diff={(ha - hb).abs().mean().item():.4f} absmax={float(ha.abs().max()):.1f}",
+            flush=True,
+        )
+        # page 5 K rows for slots 0..20, one sliding layer (layer 0) and a
+        # global layer (layer 5) — cache_a vs cache_b
+        for layer_idx in (0, 5):
+            ka = groups_a[layer_idx][0].kv_cache_base.view(-1, 2, SLIDING_KV if layer_idx != 5 else GLOBAL_KV, PAGE,
+                                        SLIDING_DIM if layer_idx != 5 else GLOBAL_DIM)[5, 0, :, :21, :].float()
+            kb = groups_b[layer_idx][0].kv_cache_base.view(-1, 2, SLIDING_KV if layer_idx != 5 else GLOBAL_KV, PAGE,
+                                        SLIDING_DIM if layer_idx != 5 else GLOBAL_DIM)[5, 0, :, :21, :].float()
+            print(
+                f"[dgm-fi] page5 K layer {layer_idx}: max_diff={(ka - kb).abs().max().item():.4f} "
+                f"mean_diff={(ka - kb).abs().mean().item():.4f} absmax={float(ka.abs().max()):.2f}",
+                flush=True,
+            )
 
         diff = (hidden_a.float() - hidden_b.float()).abs()
         std_a = float(hidden_a.float().reshape(-1, CANVAS, hidden_a.shape[-1]).std(dim=1).mean())
