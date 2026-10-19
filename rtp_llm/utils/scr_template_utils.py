@@ -590,6 +590,7 @@ def _prepare_cuda_for_arrival(device: Any | None = None) -> None:
         LOGGER.debug("sCR arrival CUDA prepare skipped for CPU-only participant")
         return
     _synchronize_cuda(device)
+    torch.cuda.empty_cache()
 
 
 def _cuda_synchronize() -> None:
