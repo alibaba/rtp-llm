@@ -276,6 +276,39 @@ class SM90PagedDecodeTest(unittest.TestCase):
                                     )
                                     torch.testing.assert_close(tensor_only, actual[0])
 
+    def test_h20_verification_preserves_single_step_arithmetic(self):
+        from rtp_llm.device.device_type import is_h20
+
+        if not is_h20():
+            self.skipTest("H20 verification arithmetic contract")
+        for batch in (1, 2, 4):
+            with self.subTest(batch=batch), _no_sparse_prefill():
+                args = _inputs(batch, 4, 64, True, global_count=3)
+                args["swa_slots"][..., 6:] = -1
+                selected = args["global_slots"]
+                args["global_slots"] = torch.full(
+                    (batch, 4, 512), -1, device="cuda", dtype=torch.int32
+                )
+                args["global_slots"][..., :3] = selected
+                actual, actual_lse = self.decode(**args)
+                self._check(args, (actual, actual_lse))
+                # Each speculative position must use the same arithmetic as
+                # an independent decode step with identical Q and visible KV.
+                outputs, lses = [], []
+                for index in range(4):
+                    single = dict(args)
+                    for name in ("q", "swa_slots", "global_slots"):
+                        single[name] = args[name][:, index : index + 1].contiguous()
+                    output, lse = self.decode(**single)
+                    outputs.append(output)
+                    lses.append(lse)
+                torch.testing.assert_close(
+                    actual, torch.cat(outputs, 1), rtol=0, atol=0
+                )
+                torch.testing.assert_close(
+                    actual_lse, torch.cat(lses, 2), rtol=0, atol=0
+                )
+
     def test_empty_rows_and_sink_semantics(self):
         args = _inputs(2, 2, 32, True)
         args["swa_lengths"] = torch.tensor([0, 17], device="cuda", dtype=torch.int32)
