@@ -25,6 +25,26 @@ _CUDA13_ARM_DEFERRED = ["flash_attn", "flash-attn-3"]
 # gracefully, so the other platforms resolve it to nothing.
 _DSV4_PLATFORM_ONLY = ["xgrammar"]
 
+# Names with no PPU wheel in the vendor lock (CUDA/ROCm-only deps, or no
+# cp312 wheel). requirement() resolves them to an empty library on PPU.
+_PPU_LOCK_SKIPPED = [
+    "aiter",
+    "amdsmi",
+    "decord",
+    "fast-safetensors",
+    "fastsafetensors",
+    "flashinfer-cubin",
+    "flashinfer-jit-cache",
+    "nvidia-cutlass-dsl",
+    "pyrsmi",
+    "rtp-kernel",
+    "tilelang",
+    "triton-kernels",
+    "xfastertransformer_devel",
+    "xfastertransformer_devel_icx",
+    "xgrammar",
+]
+
 def requirement(names):
     for name in names:
         if name == "flash-mla-legacy":
@@ -39,7 +59,7 @@ def requirement(names):
             continue
         cuda13_x86_deps = [] if name in _CUDA13_X86_DEFERRED else [requirement_gpu_cuda13(name)]
         cuda13_arm_deps = [] if name in _CUDA13_ARM_DEFERRED else [requirement_cuda13_arm(name)]
-        ppu_deps = [] if name in ["xgrammar", "rtp-kernel", "fastsafetensors", "flashinfer-cubin", "flashinfer-jit-cache", "nvidia-cutlass-dsl", "tilelang"] else [requirement_ppu(name)]
+        ppu_deps = [] if name in _PPU_LOCK_SKIPPED else [requirement_ppu(name)]
         if name in _DSV4_PLATFORM_ONLY:
             native.py_library(
                 name = name,
