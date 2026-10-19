@@ -19,9 +19,20 @@ any_cuda_deps = select({
     "//conditions:default": [],
 })
 
+ascend_deps = select({
+    "@//:using_ascend": [
+        "//rtp_llm/models_py/bindings/ascend:ascend_host_utils",
+        "@local_config_ascend//ascend:ascend_headers",
+    ],
+    "//conditions:default": [],
+})
+
 cc_library(
     name = "kernels_activation",
-    srcs = ["activation_kernels.cu"],
+    srcs = select({
+        "@//:using_ascend": [],
+        "//conditions:default": ["activation_kernels.cu"],
+    }),
     hdrs = ["activation_kernels.h"],
     deps = any_cuda_deps + [
         "//rtp_llm/cpp/utils:core_utils",
@@ -35,11 +46,14 @@ cc_library(
 
 cc_library(
     name = "kernels_sampling",
-    srcs = [
-        "sampling_penalty_kernels.cu",
-        "banRepeatNgram.cu",
-        "mask_logits.cu",
-    ],
+    srcs = select({
+        "@//:using_ascend": [],
+        "//conditions:default": [
+            "sampling_penalty_kernels.cu",
+            "banRepeatNgram.cu",
+            "mask_logits.cu",
+        ],
+    }),
     hdrs = [
         "sampling_penalty_kernels.h",
         "banRepeatNgram.h",
@@ -75,7 +89,10 @@ cc_library(
 
 cc_library(
     name = "kernels_layernorm",
-    srcs = ["layernorm_kernels.cu"],
+    srcs = select({
+        "@//:using_ascend": [],
+        "//conditions:default": ["layernorm_kernels.cu"],
+    }),
     hdrs = [
         "layernorm_kernels.h",
     ],
@@ -92,7 +109,10 @@ cc_library(
 
 cc_library(
     name = "kernels_debug",
-    srcs = ["debug_kernel.cu"],
+    srcs = select({
+        "@//:using_ascend": [],
+        "//conditions:default": ["debug_kernel.cu"],
+    }),
     hdrs = ["debug_kernel.h"],
     deps = any_cuda_deps + [
         "//rtp_llm/cpp/utils:core_utils",
@@ -109,7 +129,10 @@ cc_library(
 
 cc_library(
     name = "kernels_embedding",
-    srcs = ["embedding_kernels.cu"],
+    srcs = select({
+        "@//:using_ascend": [],
+        "//conditions:default": ["embedding_kernels.cu"],
+    }),
     hdrs = ["embedding_kernels.h"],
     deps = any_cuda_deps + [
         "//rtp_llm/cpp/utils:core_utils",
@@ -122,7 +145,10 @@ cc_library(
 
 cc_library(
     name = "kernels_moe",
-    srcs = ["moe_kernels.cu"],
+    srcs = select({
+        "@//:using_ascend": [],
+        "//conditions:default": ["moe_kernels.cu"],
+    }),
     hdrs = ["moe_kernels.h"],
     deps = any_cuda_deps + [
         "//rtp_llm/cpp/utils:core_utils",
@@ -135,7 +161,10 @@ cc_library(
 
 cc_library(
     name = "kernels_tensor_ops",
-    srcs = ["tensor_ops_kernels.cu"],
+    srcs = select({
+        "@//:using_ascend": [],
+        "//conditions:default": ["tensor_ops_kernels.cu"],
+    }),
     hdrs = ["tensor_ops_kernels.h"],
     deps = any_cuda_deps + [
         "//rtp_llm/cpp/utils:core_utils",
@@ -149,7 +178,10 @@ cc_library(
 
 cc_library(
     name = "kernels_kv_cache",
-    srcs = ["kv_cache_kernels.cu"],
+    srcs = select({
+        "@//:using_ascend": [],
+        "//conditions:default": ["kv_cache_kernels.cu"],
+    }),
     hdrs = ["kv_cache_kernels.h"],
     deps = any_cuda_deps + [
         "//rtp_llm/cpp/utils:core_utils",
@@ -162,11 +194,14 @@ cc_library(
 
 cc_library(
     name = "kernels_copy",
-    srcs = [
-        "batch_copy.cu",
-        "copy_utils.cu",
-        "cuda_graph_copy_kernel.cu",
-    ],
+    srcs = select({
+        "@//:using_ascend": [],
+        "//conditions:default": [
+            "batch_copy.cu",
+            "copy_utils.cu",
+            "cuda_graph_copy_kernel.cu",
+        ],
+    }),
     hdrs = [
         "batch_copy.h",
         "copy_utils.h",
@@ -184,7 +219,10 @@ cc_library(
 
 cc_library(
     name = "kernels_ep_util",
-    srcs = glob(["moe/*.cu"]),
+    srcs = select({
+        "@//:using_ascend": [],
+        "//conditions:default": glob(["moe/*.cu"]),
+    }),
     hdrs = glob(["moe/*.h"]),
     deps = any_cuda_deps + [
         "//3rdparty:cub_compat",
@@ -200,7 +238,10 @@ cc_library(
 
 cc_library(
     name = "sm_copy_kernel",
-    srcs = ["sm_copy_kernel.cu"],
+    srcs = select({
+        "@//:using_ascend": [],
+        "//conditions:default": ["sm_copy_kernel.cu"],
+    }),
     hdrs = ["sm_copy_kernel.h"],
     copts = any_cuda_copts(),
     deps = select({
@@ -227,9 +268,10 @@ cc_library(
 
 cc_library(
     name = "fuse_copy_kernel",
-    srcs = [
-        "fuse_copy_kernel.cu",
-    ],
+    srcs = select({
+        "@//:using_ascend": [],
+        "//conditions:default": ["fuse_copy_kernel.cu"],
+    }),
     hdrs = [
         "fuse_copy_kernel.h",
     ],
@@ -243,7 +285,10 @@ cc_library(
 
 cc_library(
     name = "vocab_prune_kernels",
-    srcs = ["vocab_prune/mapping.cu"],
+    srcs = select({
+        "@//:using_ascend": [],
+        "//conditions:default": ["vocab_prune/mapping.cu"],
+    }),
     hdrs = ["vocab_prune/mapping.h"],
     deps = any_cuda_deps + [
         "//rtp_llm/cpp/utils:core_utils",
@@ -273,6 +318,7 @@ cc_library(
         "@//:using_rocm": [
             "//rtp_llm/models_py/bindings/rocm/kernels:rocm_cu",
         ],
+        "@//:using_ascend": [],
         "//conditions:default": [],
     }) + any_cuda_deps + torch_deps(),
     copts = any_cuda_copts(),

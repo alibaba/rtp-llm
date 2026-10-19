@@ -10,6 +10,9 @@ def device_test_envs():
         "@//:using_rocm": {
             "TEST_USING_DEVICE": "ROCM",
         },
+        "@//:using_ascend": {
+            "TEST_USING_DEVICE": "ASCEND",
+        },
         "//conditions:default": {
             "TEST_USING_DEVICE": "CUDA",
             "LD_PRELOAD": "libtorch_cpu.so",
@@ -20,6 +23,9 @@ def device_impl_target():
     return select({
         "@//:using_cuda": [
             "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
+        ],
+        "@//:using_ascend": [
+            # Phase 5: "//rtp_llm/models_py/bindings/ascend/ops:ascend_impl",
         ],
         "//conditions:default": [],
     })

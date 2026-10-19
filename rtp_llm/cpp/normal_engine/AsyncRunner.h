@@ -20,7 +20,12 @@ public:
     AsyncRunner& operator=(const AsyncRunner&) = delete;
 
     void launch(std::function<void()> fn);
+    // Wait for the pending task to finish and rethrow its exception; then make
+    // the caller's stream wait on the completion event. On single-stream
+    // devices (Ascend default-stream execution) use the no-arg overload: the
+    // host join alone preserves ordering.
     void sync(const torch::Stream& wait_stream);
+    void sync();
 
 private:
     void workerLoop();
