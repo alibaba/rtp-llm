@@ -54,6 +54,8 @@ class _FusedSharedExperts(nn.Module):
         from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.activation import (
             mega_moe_functions, situ_kwargs,
         )
+        if not callable(getattr(deep_gemm, "fp8_fp4_mega_moe_k3", None)):
+            raise RuntimeError("K3 SiTU requires the dedicated DeepGEMM K3 API")
         self.kernel, transform_weights, allocate = mega_moe_functions(deep_gemm, "situ")
         self.activation_kwargs = situ_kwargs(
             self.kernel, cfg.activation_beta, cfg.activation_linear_beta
@@ -98,15 +100,27 @@ class _FusedSharedExperts(nn.Module):
         )
         group = _get_validated_world_ep_group(cfg, dist)
         capacity = max(int(cfg.max_tokens_per_rank), 1)
-        key = (id(group), cfg.n_routed_experts, capacity, cfg.n_activated_experts,
-               latent, intermediate, shared_intermediate)
+        key = (
+            "mega_moe_k3",
+            id(group),
+            cfg.n_routed_experts,
+            capacity,
+            cfg.n_activated_experts,
+            latent,
+            intermediate,
+            shared_intermediate,
+        )
         buf = _FUSED_SHARED_BUFFERS.get(key)
         if buf is None:
             buf = allocate(
-                group=group, num_experts=cfg.n_routed_experts,
-                num_max_tokens_per_rank=capacity, num_topk=cfg.n_activated_experts,
-                hidden=latent, intermediate_hidden=intermediate,
-                mma_type="fp8xfp4", activation="situ",
+                group=group,
+                num_experts=cfg.n_routed_experts,
+                num_max_tokens_per_rank=capacity,
+                num_topk=cfg.n_activated_experts,
+                hidden=latent,
+                intermediate_hidden=intermediate,
+                mma_type="fp8xfp4",
+                activation="situ",
                 shared_intermediate_hidden=shared_intermediate,
             )
             expected = (int(buf.num_max_tokens_per_rank), shared_intermediate)
@@ -160,11 +174,19 @@ class _FusedSharedExperts(nn.Module):
             if valid_mask is not None:
                 self.shared_x[:tokens].masked_fill_(~valid_mask[:, None], 0)
         self.kernel(
-            self.routed_y[:tokens], self.routed_l1, self.routed_l2, self.buf,
-            shared_x=self.shared_x, shared_y=self.shared_y,
-            shared_l1_weights=self.shared_l1, shared_l2_weights=self.shared_l2,
-            recipe=(1, 1, self.fp4_block), activation="situ",
-            activation_clamp=None, **self.activation_kwargs, fast_math=True,
+            self.routed_y[:tokens],
+            self.routed_l1,
+            self.routed_l2,
+            self.buf,
+            shared_x=self.shared_x,
+            shared_y=self.shared_y,
+            shared_l1_weights=self.shared_l1,
+            shared_l2_weights=self.shared_l2,
+            recipe=(1, 1, self.fp4_block),
+            activation="situ",
+            activation_clamp=None,
+            **self.activation_kwargs,
+            fast_math=True,
         )
         return self.routed_y[:tokens], self.shared_y[:tokens]
 
@@ -245,9 +267,15 @@ class KimiK3LatentMoE(nn.Module):
             activation_beta=self.beta,
             activation_linear_beta=self.linear_beta,
         )
-        if cfg.moe_strategy not in ("auto", "mega_moe", "mega_moe_se"):
+        if cfg.moe_strategy not in (
+            "auto",
+            "mega_moe",
+            "mega_moe_se",
+            "mega_moe_k3",
+            "mega_moe_k3_se",
+        ):
             raise ValueError("K3 native MXFP4 requires the MegaMoE executor")
-        fused_shared = cfg.moe_strategy == "mega_moe_se"
+        fused_shared = cfg.moe_strategy in ("mega_moe_se", "mega_moe_k3_se")
         self.fuses_layer_residual = fused_shared
         if fused_shared and parallelism.role_type != RoleType.DECODE:
             raise ValueError("BF16 fused shared expert requires Decode's full weights")
