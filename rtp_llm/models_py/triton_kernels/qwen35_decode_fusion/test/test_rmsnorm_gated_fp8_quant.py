@@ -4,7 +4,7 @@ Compares ``rmsnorm_gated_fp8_quant`` against the old two-op path::
 
     y = RmsNormGated(weight, group_size=128, eps=1e-6, activation="silu")(x, z)
     fp8, scale = sgl_per_token_group_quant_fp8(
-        y, 128, eps=1e-4,
+        y, 128, eps=1e-10,
         column_major_scales=True,
         scale_tma_aligned=True,
         scale_ue8m0=True,
@@ -51,9 +51,7 @@ class RmsNormGatedFp8QuantTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         os.environ["RTP_QWEN35_DECODE_FUSION"] = "1"
-        from rtp_llm.models_py.triton_kernels.common.layernorm_gated import (
-            RmsNormGated,
-        )
+        from rtp_llm.models_py.triton_kernels.common.layernorm_gated import RmsNormGated
         from rtp_llm.models_py.triton_kernels.qwen35_decode_fusion.rmsnorm_gated_fp8_quant import (
             is_supported,
             maybe_rmsnorm_gated_fp8_quant,
@@ -79,7 +77,7 @@ class RmsNormGatedFp8QuantTest(unittest.TestCase):
             def _sgl_fallback(
                 hidden: torch.Tensor,
                 group_size: int,
-                eps: float = 1e-4,
+                eps: float = 1e-10,
                 **_kwargs,
             ):
                 finfo = torch.finfo(torch.float8_e4m3fn)
@@ -114,7 +112,7 @@ class RmsNormGatedFp8QuantTest(unittest.TestCase):
         q, s = self._sgl(
             y,
             128,
-            eps=1e-4,
+            eps=1e-10,
             column_major_scales=True,
             scale_tma_aligned=True,
             scale_ue8m0=True,
@@ -176,8 +174,12 @@ class RmsNormGatedFp8QuantTest(unittest.TestCase):
     def _rand(
         self, m: int, n: int, *, shared: bool = True, scale: float = 2.0
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        x = (torch.randn(m, n, dtype=torch.bfloat16, device="cuda") * scale).contiguous()
-        z = (torch.randn(m, n, dtype=torch.bfloat16, device="cuda") * scale).contiguous()
+        x = (
+            torch.randn(m, n, dtype=torch.bfloat16, device="cuda") * scale
+        ).contiguous()
+        z = (
+            torch.randn(m, n, dtype=torch.bfloat16, device="cuda") * scale
+        ).contiguous()
         if shared:
             weight = self._shared_w(128)
         else:

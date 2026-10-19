@@ -36,9 +36,7 @@ def _configure_trtllm_gen_kernel_block_size(py_env_configs: PyEnvConfigs) -> Non
     """
     kv_cache_config = py_env_configs.kv_cache_config
     physical_block_size = kv_cache_config.seq_size_per_block
-    kernel_block_size = (
-        kv_cache_config.kernel_seq_size_per_block or physical_block_size
-    )
+    kernel_block_size = kv_cache_config.kernel_seq_size_per_block or physical_block_size
     if (
         not py_env_configs.fmha_config.enable_flashinfer_trtllm_gen
         or physical_block_size <= 0
@@ -445,6 +443,35 @@ def _infer_model_type(ckpt_path: str) -> Optional[str]:
         return None
 
 
+def _configure_qwen35_fp32_ssm_cache(py_env_configs: PyEnvConfigs) -> None:
+    """Select the Qwen3.5 FP32 cache preset before engine/model construction."""
+    if py_env_configs.model_args.model_type not in (
+        "qwen35_moe",
+        "qwen35_dense",
+        "qwen35_moe_mtp",
+        "qwen35_dense_mtp",
+    ):
+        return
+    if torch.version.hip is not None or os.path.exists("/dev/alixpu"):
+        return
+    policy = os.getenv("RTP_LENGTH_ALIGN_SSM_CACHE_POLICY", "fp32_cache")
+    if policy == "original":
+        return
+    if policy != "fp32_cache":
+        raise ValueError("SSM cache policy must be original or fp32_cache")
+    cache = py_env_configs.kv_cache_config
+    if not py_env_configs._explicit_ssm_state_dtype and cache.ssm_state_dtype == "bf16":
+        cache.ssm_state_dtype = "fp32"
+    if cache.ssm_state_dtype != "fp32":
+        return
+    # The mixed cache row must contain both FP32 SSM and BF16 convolution state.
+    if cache.seq_size_per_block < 8192:
+        logging.info("Qwen3.5 FP32 SSM cache: using SEQ_SIZE_PER_BLOCK=8192")
+        cache.seq_size_per_block = 8192
+    if cache.kernel_seq_size_per_block == 0:
+        cache.kernel_seq_size_per_block = 64
+
+
 def setup_default_args(py_env_configs):
     # Apply the parsed cache-store flag before configuring RDMA environment defaults.
     py_env_configs.pd_separation_config.cache_store_rdma_mode = (
@@ -470,6 +497,8 @@ def setup_default_args(py_env_configs):
         raise ValueError(
             f"model_type is not set and could not be inferred from checkpoint path: {py_env_configs.model_args.ckpt_path}. Please provide --model_type or MODEL_TYPE environment variable."
         )
+
+    _configure_qwen35_fp32_ssm_cache(py_env_configs)
 
     # add rocm env config, if using default value, change it to optimize version
     # 这些特殊处理仍然需要设置环境变量（因为可能被 C++ 代码读取）

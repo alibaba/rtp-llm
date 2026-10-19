@@ -16,6 +16,7 @@ from rtp_llm.models_py.triton_kernels.common.bf16_gate_linear import (
 )
 from rtp_llm.models_py.triton_kernels.common.scalar_linear import (
     maybe_bf16_scalar_linear,
+    maybe_fp32_scalar_linear,
 )
 from rtp_llm.models_py.triton_kernels.qwen35_decode_fusion.env import is_decode_phase
 from rtp_llm.ops import HWKernelConfig
@@ -23,6 +24,8 @@ from rtp_llm.ops import HWKernelConfig
 
 class CudaF16Linear(LinearBase):
     """CUDA F16 (non-quantized) Linear"""
+
+    _shared_scalar_weight_fp32: Optional[torch.Tensor] = None
 
     @classmethod
     def can_handle(
@@ -54,7 +57,28 @@ class CudaF16Linear(LinearBase):
         # One option controls all three BF16 gate repairs; snapshot before capture.
         self.batch_invariant_gates = os.environ.get("RTP_BF16_GATE_KERNEL", "0") == "1"
 
+    def enable_fp32_shared_scalar_decode(self) -> bool:
+        """Opt in only this loaded, bias-free CUDA BF16 shared scalar gate."""
+        if not (
+            self.weight.is_cuda
+            and self.weight.dtype == torch.bfloat16
+            and self.weight.shape == (1, 4096)
+            and self.bias is None
+        ):
+            return False
+        self._shared_scalar_weight_fp32 = self.weight.detach().float().contiguous()
+        self._shared_scalar_weight_source = self.weight
+        return True
+
     def forward(self, input: torch.Tensor) -> torch.Tensor:
+        if (
+            self._shared_scalar_weight_fp32 is not None
+            and self.weight is self._shared_scalar_weight_source
+            and is_decode_phase()
+        ):
+            output = maybe_fp32_scalar_linear(input, self._shared_scalar_weight_fp32)
+            if output is not None:
+                return output
         if not self.batch_invariant_gates:
             return F.linear(input, self.weight, self.bias)
 

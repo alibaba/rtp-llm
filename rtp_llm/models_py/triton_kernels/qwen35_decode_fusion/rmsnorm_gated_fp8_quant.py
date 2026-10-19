@@ -5,7 +5,7 @@ Replaces the two-kernel linear-attention epilogue (45 LA layers)::
     y = RmsNormGated(weight, group_size=128, eps=1e-6, activation="silu")(x, z)
     # NORM_BEFORE_GATE / IS_RMS_NORM: y = rmsnorm_group(x)*w * silu(z)
     fp8, scale = sgl_per_token_group_quant_fp8(
-        y, 128, eps=1e-4,
+        y, 128, eps=1e-10,
         column_major_scales=True,
         scale_tma_aligned=True,
         scale_ue8m0=True,
@@ -24,6 +24,7 @@ is typically shared ``[128]`` (``RmsNormGated`` ``group_size=head_v_dim``).
 
 from __future__ import annotations
 
+import os
 from typing import Optional
 
 import torch
@@ -40,7 +41,7 @@ from rtp_llm.models_py.utils.prefill_input_log import trace_triton
 
 _GROUP_SIZE = 128
 _NORM_EPS = 1.0e-6
-_CLAMP_EPS = 1.0e-4
+_CLAMP_EPS = 1.0e-10
 _FP8_DTYPE = torch.float8_e4m3fn
 
 
@@ -189,7 +190,7 @@ def _rmsnorm_gated_fp8_quant_kernel(
             y_f32 = y_bf16.to(tl.float32)
             absmax = tl.max(tl.abs(y_f32), axis=1)
             scale_raw = tl.maximum(absmax, CLAMP_EPS) / FP8_MAX
-            exponent = tl.ceil(tl.log2(scale_raw))
+            exponent = tl.ceil(tl.log2(tl.maximum(scale_raw, 1e-10)))
             scale = tl.math.exp2(exponent)
             q = tl.clamp(y_f32 / scale[:, None], FP8_MIN, FP8_MAX)
             tl.store(
@@ -281,7 +282,7 @@ def _rmsnorm_gated_fp8_quant_tile_kernel(
         y_f32 = y_bf16.to(tl.float32)
         absmax = tl.max(tl.abs(y_f32), axis=1)
         scale_raw = tl.maximum(absmax, CLAMP_EPS) / FP8_MAX
-        exponent = tl.ceil(tl.log2(scale_raw))
+        exponent = tl.ceil(tl.log2(tl.maximum(scale_raw, 1e-10)))
         scale = tl.math.exp2(exponent)
         q = tl.clamp(y_f32 / scale[:, None], FP8_MIN, FP8_MAX)
         tl.store(q_row + cols, q.to(output_q_ptr.dtype.element_ty), mask=mask)
@@ -461,15 +462,37 @@ def maybe_rmsnorm_gated_fp8_quant(
     activation: str = "silu",
     bias: Optional[torch.Tensor] = None,
     out_y: Optional[torch.Tensor] = None,
-) -> Optional[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+) -> Optional[tuple[Optional[torch.Tensor], torch.Tensor, torch.Tensor]]:
     """Return ``(y, fp8, scale)`` when supported; otherwise ``None`` (old path).
 
-    Production ``o_proj`` only reads FP8, so BF16 ``y`` is not written.
+    Production ``o_proj`` only reads FP8. With the vLLM norm schedule enabled,
+    no BF16 y tensor is allocated; the first result is the optional out_y buffer.
     """
     if not is_supported(
         x, z, weight, group_size=group_size, activation=activation, bias=bias
     ):
         return None
+    if (
+        os.getenv("RTP_LENGTH_ALIGN_GATED_NORM", "1") == "1"
+        and x.shape[1] % 512 == 0
+        and quant_eps in (1e-4, 1e-10)
+    ):
+        from rtp_llm.models_py.triton_kernels.common.gated_rmsnorm_fp8 import (
+            gated_rmsnorm_fp8,
+        )
+
+        q, scale = gated_rmsnorm_fp8(
+            x,
+            z,
+            weight,
+            eps=eps,
+            activation=activation,
+            scale_ue8m0=True,
+            vllm_math=True,
+            amax_floor=quant_eps,
+            out_y=out_y,
+        )
+        return out_y, q, scale
     return rmsnorm_gated_fp8_quant(
         x,
         z,

@@ -659,7 +659,11 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
         ssm_states = trace_call(
             "qwen3_next:self._get_ssm_states", self._get_ssm_states, kv_cache_tensor
         )
-        if gdn_decode_backend() == "flashinfer" and not is_target_verify and seq == 1:
+        if (
+            gdn_decode_backend(ssm_states.dtype) == "flashinfer"
+            and not is_target_verify
+            and seq == 1
+        ):
             core_attn_out = flashinfer_gdn_decode(
                 q=query,
                 k=key,
@@ -729,7 +733,10 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
         is_target_verify = attn_meta.is_target_verify
         g = None
         beta = None
-        use_flashinfer = gdn_decode_backend() == "flashinfer" and not is_target_verify
+        use_flashinfer = (
+            gdn_decode_backend(self.ssm_state_dtype) == "flashinfer"
+            and not is_target_verify
+        )
         if not is_target_verify and not use_flashinfer:
             batch, seq = trace_call(
                 "qwen3_next:self._get_bs_from_attenion_input",

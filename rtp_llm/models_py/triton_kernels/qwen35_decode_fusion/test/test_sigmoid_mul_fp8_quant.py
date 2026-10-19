@@ -1,10 +1,10 @@
 """Equivalence test for fused ``attn * sigmoid(gate)`` + UE8M0 FP8 quant.
 
-Compares ``sigmoid_mul_fp8_quant`` against the old three-op path::
+Compares ``sigmoid_mul_fp8_quant`` against an FP32 gate/product reference::
 
-    y = attn * torch.sigmoid(gate)
+    y = (attn.float() * torch.sigmoid(gate.float())).to(attn.dtype)
     fp8, scale = sgl_per_token_group_quant_fp8(
-        y, 128, eps=1e-4,
+        y, 128, eps=1e-10,
         column_major_scales=True,
         scale_tma_aligned=True,
         scale_ue8m0=True,
@@ -72,8 +72,9 @@ class SigmoidMulFp8QuantTest(unittest.TestCase):
             out_q = torch.empty((m, n), device=y.device, dtype=torch.float8_e4m3fn)
             return out_q, make_ue8m0_scale_like(y.shape, device=y.device)
         grouped = y_f.view(m, num_groups, group_size)
-        absmax = grouped.abs().amax(dim=-1).clamp_min(1e-4)
-        exponent = torch.ceil(torch.log2(absmax / float(finfo.max)))
+        absmax = grouped.abs().amax(dim=-1).clamp_min(1e-10)
+        raw_scale = (absmax / float(finfo.max)).clamp_min(1e-10)
+        exponent = torch.ceil(torch.log2(raw_scale))
         scale = torch.exp2(exponent)
         out_q = (
             torch.clamp(
@@ -85,9 +86,7 @@ class SigmoidMulFp8QuantTest(unittest.TestCase):
         exp_biased = (exponent + 127.0).clamp(0, 255).to(torch.int32)
         num_packed = (num_groups + 3) // 4
         if num_groups % 4 != 0:
-            exp_biased = torch.nn.functional.pad(
-                exp_biased, (0, 4 - num_groups % 4)
-            )
+            exp_biased = torch.nn.functional.pad(exp_biased, (0, 4 - num_groups % 4))
         packed = exp_biased.view(m, num_packed, 4)
         rowmajor = (
             packed[:, :, 0]
@@ -101,12 +100,12 @@ class SigmoidMulFp8QuantTest(unittest.TestCase):
 
     @staticmethod
     def _ref(attn: torch.Tensor, gate: torch.Tensor):
-        y = attn * torch.sigmoid(gate)
+        y = (attn.float() * torch.sigmoid(gate.float())).to(attn.dtype)
         if SigmoidMulFp8QuantTest._sgl is not None:
             return SigmoidMulFp8QuantTest._sgl(
                 y,
                 128,
-                eps=1e-4,
+                eps=1e-10,
                 column_major_scales=True,
                 scale_tma_aligned=True,
                 scale_ue8m0=True,
@@ -157,7 +156,9 @@ class SigmoidMulFp8QuantTest(unittest.TestCase):
                 f"(compared low {groups % 4} bytes; {live_bytes=})",
             )
 
-    def _rand(self, m: int, n: int, scale: float = 2.0) -> tuple[torch.Tensor, torch.Tensor]:
+    def _rand(
+        self, m: int, n: int, scale: float = 2.0
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         attn = torch.randn(m, n, dtype=torch.bfloat16, device="cuda") * scale
         gate = torch.randn(m, n, dtype=torch.bfloat16, device="cuda") * scale
         return attn.contiguous(), gate.contiguous()
@@ -193,6 +194,129 @@ class SigmoidMulFp8QuantTest(unittest.TestCase):
         for value in (20.0, -20.0):
             gate = torch.full((m, n), value, dtype=torch.bfloat16, device="cuda")
             self._check(attn, gate, msg=f"gate={value}")
+
+    def test_fp32_gate_rounding_boundary(self):
+        # The anchor fixes every group's scale at 1. Rounding sigmoid to BF16
+        # first gives product 0.453125 / FP8 byte 46; rounding the FP32 product
+        # only gives 0.455078125 / FP8 byte 47.
+        attn = torch.full((3, 512), 0.515625, dtype=torch.bfloat16, device="cuda")
+        gate = torch.full_like(attn, 2.0)
+        attn[:, ::128] = 512.0
+        gate[:, ::128] = 0.0
+        ref_q, ref_s = self._ref(attn, gate)
+        old_q, old_s = self._torch_ue8m0_quant(attn * torch.sigmoid(gate))
+        got_q, got_s = self._fused(attn, gate)
+        self.assertEqual(int(ref_q.view(torch.uint8)[0, 1]), 47)
+        self.assertEqual(int(old_q.view(torch.uint8)[0, 1]), 46)
+        torch.testing.assert_close(
+            got_q.view(torch.uint8), ref_q.view(torch.uint8), rtol=0, atol=0
+        )
+        torch.testing.assert_close(got_s, ref_s, rtol=0, atol=0)
+        torch.testing.assert_close(old_s, ref_s, rtol=0, atol=0)
+
+    def test_cuda_graph_replay_with_preallocated_outputs(self):
+        attn, gate = self._rand(3, 512)
+        out_q, out_s = self._fused(attn, gate)
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            for _ in range(3):
+                self._fused(attn, gate, out_q=out_q, out_scale=out_s)
+        torch.cuda.current_stream().wait_stream(stream)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            self._fused(attn, gate, out_q=out_q, out_scale=out_s)
+        for core_value, gate_value in (
+            (0.515625, 0.0),
+            (0.515625, 2.0),
+            (0.515625, -2.0),
+            (0.0, 0.0),
+            (1e-12, 0.0),
+            (1e-6, 0.0),
+        ):
+            attn.fill_(core_value)
+            gate.fill_(gate_value)
+            if core_value >= 0.5:
+                attn[:, ::128] = 512.0
+                gate[:, ::128] = 0.0
+            graph.replay()
+            ref_q, ref_s = self._ref(attn, gate)
+            torch.testing.assert_close(
+                out_q.view(torch.uint8), ref_q.view(torch.uint8), rtol=0, atol=0
+            )
+            torch.testing.assert_close(out_s, ref_s, rtol=0, atol=0)
+
+    def test_zero_and_small_inputs_match_native_scale_floor(self):
+        for value in (0.0, 1e-12, 1e-8, 1e-6):
+            with self.subTest(value=value):
+                attn = torch.full((3, 512), value, dtype=torch.bfloat16, device="cuda")
+                gate = torch.zeros_like(attn)
+                ref_q, ref_s = self._ref(attn, gate)
+                got_q, got_s = self._fused(attn, gate)
+                torch.testing.assert_close(
+                    got_q.view(torch.uint8), ref_q.view(torch.uint8), rtol=0, atol=0
+                )
+                torch.testing.assert_close(got_s, ref_s, rtol=0, atol=0)
+                if value <= 1e-12:
+                    self.assertTrue(torch.all(got_s == 0x5E5E5E5E))
+
+    def test_o_proj_floor_is_scoped_to_existing_deepgemm_instance(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from rtp_llm.models_py.modules.factory import LinearFactory
+        from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_deepgemm_linear import (
+            CudaFp8DeepGEMMLinear,
+        )
+        from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_gemm_linear import (
+            CudaFp8GEMMLinear,
+        )
+        from rtp_llm.models_py.modules.hybrid.causal_attention import CausalAttention
+
+        def quantizer():
+            linear = CudaFp8DeepGEMMLinear.__new__(CudaFp8DeepGEMMLinear)
+            torch.nn.Module.__init__(linear)
+            linear.K = 512
+            linear.scale_ue8m0 = True
+            linear.cached_scales = None
+            linear.cached_scales_max_len = 0
+            return linear
+
+        for wrapped in (False, True):
+            with self.subTest(wrapped=wrapped):
+                qkv, output, unrelated = quantizer(), quantizer(), quantizer()
+                receiver = output
+                if wrapped:
+                    receiver = CudaFp8GEMMLinear.__new__(CudaFp8GEMMLinear)
+                    torch.nn.Module.__init__(receiver)
+                    receiver._deepgemm_linear = output
+                with patch.object(
+                    LinearFactory,
+                    "create_linear_from_weights",
+                    side_effect=[qkv, receiver],
+                ), patch.object(CudaFp8DeepGEMMLinear, "maybe_cache_quant_scale"):
+                    attention = CausalAttention(
+                        SimpleNamespace(head_num=8, kv_head_num=2, size_per_head=64),
+                        SimpleNamespace(get_attn_tp_size=lambda: 1),
+                        {},
+                        1e-6,
+                    )
+                self.assertIs(attention.o_proj, receiver)
+                self.assertEqual(output.input_quant_eps, 1e-10)
+                self.assertEqual(qkv.input_quant_eps, 1e-4)
+                self.assertEqual(unrelated.input_quant_eps, 1e-4)
+                x = torch.full((3, 512), 1e-6, dtype=torch.bfloat16, device="cuda")
+                selected_q, selected_s = output.quantize_input(x)
+                ref_q, ref_s = self._torch_ue8m0_quant(x)
+                torch.testing.assert_close(
+                    selected_q.view(torch.uint8),
+                    ref_q.view(torch.uint8),
+                    rtol=0,
+                    atol=0,
+                )
+                torch.testing.assert_close(selected_s, ref_s, rtol=0, atol=0)
+                _, old_s = qkv.quantize_input(x)
+                self.assertFalse(torch.equal(selected_s, old_s))
 
     def test_unsupported_returns_none(self):
         attn, gate = self._rand(4, 8192)

@@ -383,6 +383,33 @@ class OpenaiGenerateConfigTest(TestCase):
         )
         return openai_endpoint._extract_generation_config(request)
 
+    def test_zero_temperature_uses_greedy_after_openai_config_merge(self):
+        requests = [
+            ChatCompletionRequest(messages=[], temperature=0.0),
+            ChatCompletionRequest(messages=[], temperature=0.0, top_k=17),
+            ChatCompletionRequest(
+                messages=[],
+                temperature=None,
+                extra_configs=GenerateConfig(temperature=0.0, top_k=31),
+            ),
+        ]
+        for request in requests:
+            with self.subTest(request=request):
+                config = self._extract_openai_generation_config(request)
+                self.assertEqual(config.temperature, 0.0)
+                self.assertEqual(config.top_k, 1)
+                self.assertTrue(config.do_sample)
+
+    def test_nonzero_openai_temperature_override_retains_top_k(self):
+        request = ChatCompletionRequest(
+            messages=[],
+            temperature=0.7,
+            extra_configs=GenerateConfig(temperature=0.0, top_k=31),
+        )
+        config = self._extract_openai_generation_config(request)
+        self.assertEqual(config.temperature, 0.7)
+        self.assertEqual(config.top_k, 31)
+
     def _assert_reasoning_envelope_wraps_json_object(self, config: GenerateConfig):
         """in_think_mode moves the final constraint inside the reasoning tag."""
         self.assertIsNone(config.json_schema)

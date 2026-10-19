@@ -38,6 +38,59 @@ from rtp_llm.config.response_format import ResponseFormat
 from rtp_llm.structure.request_extractor import RequestExtractor
 
 
+class TestZeroTemperatureGreedy(unittest.TestCase):
+    def test_zero_temperature_overrides_sampling_top_k(self):
+        for temperature in (0.0, -0.0):
+            for top_k in (0, 17):
+                with self.subTest(temperature=temperature, top_k=top_k):
+                    config = GenerateConfig.create_generate_config(
+                        {"temperature": temperature, "top_k": top_k}
+                    )
+                    self.assertEqual(config.top_k, 1)
+                    self.assertTrue(config.do_sample)
+                    config.validate()
+                    self.assertEqual(config.top_k, 1)
+
+    def test_nonzero_temperature_retains_sampling_top_k(self):
+        for temperature in (1e-12, 0.7, 1.0):
+            for top_k in (0, 17):
+                with self.subTest(temperature=temperature, top_k=top_k):
+                    config = GenerateConfig.create_generate_config(
+                        {"temperature": temperature, "top_k": top_k}
+                    )
+                    self.assertEqual(config.top_k, top_k)
+
+    def test_raw_request_normalizes_after_nested_and_top_level_merge(self):
+        extractor = RequestExtractor(GenerateConfig())
+        for temperature, expected in ((0.0, 1), (0.7, 17)):
+            with self.subTest(temperature=temperature):
+                config, _ = extractor._format_generate_config(
+                    {
+                        "prompt": "hello",
+                        "generate_config": {"temperature": 0.0, "top_k": 31},
+                        "temperature": temperature,
+                        "top_k": 17,
+                    }
+                )
+                config.validate()
+                self.assertEqual(config.top_k, expected)
+
+    def test_updated_config_normalizes_at_final_validation(self):
+        for method in ("update", "update_and_pop"):
+            with self.subTest(method=method):
+                config = GenerateConfig()
+                getattr(config, method)({"temperature": 0.0, "top_k": 19})
+                config.validate()
+                self.assertEqual(config.top_k, 1)
+                self.assertEqual(config.temperature, 0.0)
+
+    def test_zero_temperature_does_not_hide_invalid_top_k(self):
+        from rtp_llm.config.exceptions import FtRuntimeException
+
+        with self.assertRaises(FtRuntimeException):
+            GenerateConfig.create_generate_config({"temperature": 0.0, "top_k": -1})
+
+
 class TestRawGenerateConfigParsing(unittest.TestCase):
     def test_response_format_dict_is_validated(self):
         extractor = RequestExtractor(GenerateConfig(max_new_tokens=16))

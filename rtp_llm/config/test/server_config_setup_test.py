@@ -10,8 +10,8 @@ from rtp_llm.config.engine_config import EngineConfig, setup_pd_sep_config
 from rtp_llm.config.py_config_modules import PyEnvConfigs, ServerConfig
 from rtp_llm.config.server_config_setup import (
     set_parallelism_config,
-    setup_default_args,
     setup_and_configure_server,
+    setup_default_args,
 )
 from rtp_llm.ops import CPRotateMethod, NcclCommConfig, RoleType
 from rtp_llm.server.server_args.server_args import setup_args
@@ -26,6 +26,76 @@ _PINNED_DEVICES = {
 
 def _jit_env(**values):
     return {**_PINNED_DEVICES, "MODEL_TYPE": "fake_model", **values}
+
+
+class Qwen35FP32SSMCacheTest(TestCase):
+    def _config(self, args=(), env=None):
+        with patch.dict(os.environ, _jit_env(**(env or {})), clear=True):
+            return setup_args(list(args))
+
+    def test_qwen35_family_defaults_and_geometry(self):
+        for model_type in (
+            "qwen35_moe",
+            "qwen35_dense",
+            "qwen35_moe_mtp",
+            "qwen35_dense_mtp",
+        ):
+            with self.subTest(model_type=model_type):
+                config = self._config(["--model_type", model_type])
+                setup_default_args(config)
+                cache = config.kv_cache_config
+                self.assertEqual(cache.ssm_state_dtype, "fp32")
+                self.assertEqual(cache.seq_size_per_block, 8192)
+                self.assertEqual(cache.kernel_seq_size_per_block, 64)
+
+    def test_explicit_bf16_cli_and_env_override(self):
+        for args, env in (
+            (["--ssm_state_dtype=bf16"], {}),
+            ([], {"SSM_STATE_DTYPE": "bf16"}),
+            (["--ssm_state_dtype=bf16"], {"SSM_STATE_DTYPE": "fp32"}),
+        ):
+            with self.subTest(args=args, env=env):
+                config = self._config(["--model_type", "qwen35_moe", *args], env)
+                setup_default_args(config)
+                self.assertEqual(config.kv_cache_config.ssm_state_dtype, "bf16")
+                self.assertEqual(config.kv_cache_config.seq_size_per_block, 64)
+
+    def test_fp32_promotes_small_block_and_retains_safe_explicit_geometry(self):
+        for physical, kernel, expected in ((4096, 64, 8192), (16384, 64, 16384)):
+            with self.subTest(physical=physical):
+                config = self._config(
+                    [
+                        "--model_type",
+                        "qwen35_moe",
+                        "--seq_size_per_block",
+                        str(physical),
+                        "--kernel_seq_size_per_block",
+                        str(kernel),
+                    ]
+                )
+                setup_default_args(config)
+                self.assertEqual(config.kv_cache_config.seq_size_per_block, expected)
+                self.assertEqual(
+                    config.kv_cache_config.kernel_seq_size_per_block, kernel
+                )
+
+    def test_unrelated_model_defaults_remain_bf16(self):
+        for model_type in ("qwen3_next", "fake_model"):
+            config = self._config(["--model_type", model_type])
+            setup_default_args(config)
+            self.assertEqual(config.kv_cache_config.ssm_state_dtype, "bf16")
+            self.assertEqual(config.kv_cache_config.seq_size_per_block, 64)
+
+    def test_policy_opt_out_and_invalid_value(self):
+        config = self._config(["--model_type", "qwen35_moe"])
+        with patch.dict(os.environ, {"RTP_LENGTH_ALIGN_SSM_CACHE_POLICY": "original"}):
+            setup_default_args(config)
+        self.assertEqual(config.kv_cache_config.ssm_state_dtype, "bf16")
+        with patch.dict(
+            os.environ, {"RTP_LENGTH_ALIGN_SSM_CACHE_POLICY": "bf16_round"}
+        ):
+            with self.assertRaisesRegex(ValueError, "SSM cache policy"):
+                setup_default_args(config)
 
 
 class TrtllmGenKernelBlockSizeTest(TestCase):

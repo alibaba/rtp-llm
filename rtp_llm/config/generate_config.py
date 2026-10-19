@@ -863,6 +863,9 @@ class GenerateConfig(BaseModel):
                         self.prompt_logits_start <= self.prompt_logits_end,
                         f"prompt_logits_start ({self.prompt_logits_start}) must <= prompt_logits_end ({self.prompt_logits_end})",
                     )
+            # Zero temperature selects the existing deterministic greedy path.
+            if self.temperature == 0:
+                self.top_k = 1
         except Exception as e:
             raise FtRuntimeException(ExceptionType.ERROR_INPUT_FORMAT_ERROR, str(e))
 

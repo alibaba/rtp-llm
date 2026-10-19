@@ -1,4 +1,4 @@
-"""Optional FlashInfer GDN decode adapter for T=1 V-first BF16 paged state.
+"""FlashInfer GDN decode adapter for T=1 V-first BF16/FP32 paged state.
 
 Reuses FlashInfer ``gated_delta_rule_decode_pretranspose`` (gating + L2norm +
 recurrent). Serving selects this backend with ``RTP_QWEN35_GDN_DECODE_BACKEND``.
@@ -19,8 +19,9 @@ GDN_DECODE_BACKEND_ENV = "RTP_QWEN35_GDN_DECODE_BACKEND"
 _VALID_BACKENDS = ("native", "flashinfer")
 
 
-def gdn_decode_backend() -> str:
-    backend = os.getenv(GDN_DECODE_BACKEND_ENV, "native")
+def gdn_decode_backend(state_dtype: Optional[torch.dtype] = None) -> str:
+    default = "flashinfer" if state_dtype == torch.float32 else "native"
+    backend = os.getenv(GDN_DECODE_BACKEND_ENV, default)
     if backend not in _VALID_BACKENDS:
         raise ValueError(
             f"Unknown GDN decode backend {backend!r}; "
@@ -41,7 +42,7 @@ def supports_flashinfer_gdn_decode(
         return False
     if q.dtype != torch.bfloat16 or v.dtype != q.dtype:
         return False
-    if initial_state.dtype != torch.bfloat16:
+    if initial_state.dtype not in (torch.bfloat16, torch.float32):
         return False
     if q.shape[-1] != 128 or v.shape[-1] != 128:
         return False
@@ -186,9 +187,18 @@ def flashinfer_gdn_decode(
         raise ValueError(f"Expected Q [B,1,H,K], got {tuple(q.shape)}")
     batch, _, _, _ = q.shape
     hv = v.shape[2]
+    if initial_state.dtype == torch.float32:
+        if initial_state.ndim != 4 or initial_state.shape[1:] != (hv, 128, 128):
+            raise ValueError("FP32 SSM requires V-first [P,HV,128,128] state")
+        if tuple(initial_state.stride()[1:]) != (16384, 128, 1):
+            raise ValueError("FP32 SSM requires contiguous head/V/K dimensions")
+        ssm_bytes = hv * 128 * 128 * 4
+        conv_bytes = 3 * (2 * q.shape[2] + hv) * 128 * 2
+        if initial_state.stride(0) * 4 < ssm_bytes + conv_bytes:
+            raise ValueError("FP32 SSM and BF16 conv exceed the allocated cache row")
     if not supports_flashinfer_gdn_decode(q, v, initial_state, seq=1):
         raise ValueError(
-            "FlashInfer GDN decode requires SM90+, BF16 Q/K/V/SSM, K=V=128, T=1"
+            "FlashInfer GDN decode requires SM90+, BF16 Q/K/V, BF16/FP32 SSM, K=V=128, T=1"
         )
     if k.shape != q.shape or v.shape[:2] != q.shape[:2]:
         raise ValueError("Q/K/V batch and sequence dims must match")

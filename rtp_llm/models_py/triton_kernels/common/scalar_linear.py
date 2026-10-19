@@ -1,8 +1,10 @@
-"""Batch-invariant BF16 scalar projection for shared-expert gates."""
+"""BF16 scalar projections and FP32 shared-expert decode projection."""
 
+from threading import RLock
 from typing import Optional
 
 import torch
+import torch.nn.functional as F
 import triton
 import triton.language as tl
 
@@ -74,3 +76,33 @@ def maybe_bf16_scalar_linear(x, weight, bias=None) -> Optional[torch.Tensor]:
             enable_fp_fusion=False,
         )
     return output
+
+
+# Serialize this path's scoped changes to PyTorch's process-wide TF32 setting.
+_fp32_scalar_lock = RLock()
+
+
+def maybe_fp32_scalar_linear(x, weight) -> Optional[torch.Tensor]:
+    """FP32 projection with one BF16 output store; weight is a cold FP32 cache."""
+    if not (
+        x.is_cuda
+        and weight.is_cuda
+        and x.device == weight.device
+        and x.dtype == torch.bfloat16
+        and weight.dtype == torch.float32
+        and x.ndim == 2
+        and x.shape[1] == 4096
+        and weight.shape == (1, 4096)
+        and x.is_contiguous()
+        and weight.is_contiguous()
+    ):
+        return None
+    with _fp32_scalar_lock:
+        allow_tf32 = torch.backends.cuda.matmul.allow_tf32
+        try:
+            if allow_tf32:
+                torch.backends.cuda.matmul.allow_tf32 = False
+            return F.linear(x.float(), weight, None).to(torch.bfloat16)
+        finally:
+            if allow_tf32:
+                torch.backends.cuda.matmul.allow_tf32 = True

@@ -28,6 +28,9 @@ class CudaFp8DeepGEMMLinear(LinearBase):
     # 全局共享的 scale cache，key = (device, K, max_len)
     _global_scale_cache: dict = {}
 
+    # Owners can override the input amax floor for a specific projection.
+    input_quant_eps: float = 1.0e-4
+
     @classmethod
     def can_handle(
         cls,
@@ -251,7 +254,7 @@ class CudaFp8DeepGEMMLinear(LinearBase):
             input_fp8, input_scales = sgl_per_token_group_quant_fp8(
                 input,
                 group_size=128,
-                eps=1e-4,
+                eps=self.input_quant_eps,
                 column_major_scales=True,
                 scale_tma_aligned=True,
                 scale_ue8m0=self.scale_ue8m0,

@@ -540,6 +540,10 @@ def setup_args(args: Optional[Sequence[str]] = None) -> PyEnvConfigs:
 
     # 解析参数（会自动应用所有配置绑定）
     parser.parse_args(args)
+    py_env_configs._explicit_ssm_state_dtype = (
+        "ssm_state_dtype" in getattr(parser, "_cli_provided_args", set())
+        or "SSM_STATE_DTYPE" in os.environ
+    )
     py_env_configs.server_config.validate_allocator_dump_config()
 
     # Normalize the two switches before model construction and process spawn.

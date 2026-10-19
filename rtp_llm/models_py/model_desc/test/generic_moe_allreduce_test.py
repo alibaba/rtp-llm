@@ -1,5 +1,6 @@
 """GenericMoeLayer TP contracts and CUDA BF16 shared-expert rounding regression."""
 
+import os
 from types import SimpleNamespace
 from unittest import TestCase, main
 from unittest.mock import MagicMock, Mock, patch
@@ -51,6 +52,9 @@ def _make_layer(
         weights[W.shared_expert_gate] = torch.empty(8, 1)
     fused_moe = SimpleNamespace(
         includes_shared_expert=False,
+        fused_experts=SimpleNamespace(
+            gated_shared_expert_requested=False, uses_shared_expert_gates=False
+        ),
         topk_ids_dtype=torch.int32,
         router=SimpleNamespace(
             supports_skip_tp_allreduce=supports_skip_tp_allreduce,
@@ -95,6 +99,8 @@ def _configure_forward(layer, *, gate_enabled=False):
     )
     fused_moe = MagicMock(spec=FusedMoe, return_value=routed_output)
     fused_moe.topk_ids_dtype = torch.int32
+    fused_moe.supports_gate_pack = False
+    fused_moe.fused_experts = SimpleNamespace(uses_shared_expert_gates=False)
     layer.fused_moe = fused_moe
     layer.shared_expert = MagicMock(spec=DenseMLP, return_value=shared_output)
     if gate_enabled:
@@ -140,6 +146,14 @@ class GenericMoeInitializationTest(TestCase):
         self.assertTrue(
             _make_layer(ffn_tp_size=2, attn_tp_size=2).use_unified_tp_allreduce
         )
+
+    def test_shared_scalar_candidate_defaults_on_and_supports_opt_out(self):
+        with patch.dict(os.environ, {}, clear=True):
+            layer = _make_layer(with_shared_expert_gate=True)
+            layer.shared_expert_gate.enable_fp32_shared_scalar_decode.assert_called_once_with()
+        with patch.dict(os.environ, {"RTP_DECODE_ALIGN_SHARED_SCALAR_V1": "0"}):
+            layer = _make_layer(with_shared_expert_gate=True)
+            layer.shared_expert_gate.enable_fp32_shared_scalar_decode.assert_not_called()
 
     def test_shared_expert_gate_is_assembled_by_init(self):
         layer = _make_layer(with_shared_expert_gate=True)
@@ -210,6 +224,10 @@ class GenericMoeUnifiedAllreduceTest(TestCase):
                 )
                 fused_moe = MagicMock(spec=FusedMoe, return_value=routed)
                 fused_moe.topk_ids_dtype = torch.int32
+                fused_moe.supports_gate_pack = False
+                fused_moe.fused_experts = SimpleNamespace(
+                    uses_shared_expert_gates=False
+                )
                 layer.fused_moe = fused_moe
                 layer.shared_expert = MagicMock(spec=DenseMLP, return_value=shared)
                 layer.shared_expert_gate = Mock(return_value=gate)

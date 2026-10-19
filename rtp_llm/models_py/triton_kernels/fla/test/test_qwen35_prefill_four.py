@@ -7,6 +7,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
+import triton
+import triton.language as tl
 
 from rtp_llm.models_py.triton_kernels.common.prefill_fusion import (
     GATING,
@@ -33,6 +35,14 @@ from rtp_llm.ops.fused_rope_kvcache_op import (
     FusedRopeKVCachePrefillOpQOut,
     _get_fused_rope_kvcache,
 )
+
+
+@triton.jit
+def _fp32_sigmoid_product_reference(attn, gate, output, numel, BLOCK: tl.constexpr):
+    offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    core = tl.load(attn + offsets, mask=offsets < numel, other=0).to(tl.float32)
+    logits = tl.load(gate + offsets, mask=offsets < numel, other=0).to(tl.float32)
+    tl.store(output + offsets, core * tl.sigmoid(logits), mask=offsets < numel)
 
 
 def make_case(lengths, prefixes, fp8=False, explicit=True, qh=4, kh=2):
@@ -443,10 +453,14 @@ class PrefillFourTest(unittest.TestCase):
         for n in (1, 37, 2047, 2048, 2049, 24601, 49202):
             x = torch.randn(n, 8192, device="cuda", dtype=torch.bfloat16)
             gate = torch.randn_like(x)
+            product = torch.empty_like(x)
+            _fp32_sigmoid_product_reference[(triton.cdiv(x.numel(), 256),)](
+                x, gate, product, x.numel(), BLOCK=256
+            )
             refq, refs = sgl_per_token_group_quant_fp8(
-                x * torch.sigmoid(gate),
+                product,
                 128,
-                eps=1e-4,
+                eps=1e-10,
                 column_major_scales=True,
                 scale_tma_aligned=True,
                 scale_ue8m0=True,
@@ -460,7 +474,7 @@ class PrefillFourTest(unittest.TestCase):
                     torch.empty(n, 16384, device="cuda", dtype=torch.bfloat16)[:, ::2],
                 )
             )
-            del x, gate, refq, refs, q, s
+            del x, gate, product, refq, refs, q, s
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
     def test_flashinfer_adapter_combinations(self):

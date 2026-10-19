@@ -67,6 +67,17 @@ class CausalAttention(nn.Module):
         )
         self.cache_scale_len = 1024
         self.o_proj.maybe_cache_quant_scale(self.cache_scale_len)
+        if device_type == DeviceType.Cuda:
+            from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_deepgemm_linear import (
+                CudaFp8DeepGEMMLinear,
+            )
+
+            output_linear = getattr(self.o_proj, "_deepgemm_linear", self.o_proj)
+            if (
+                isinstance(output_linear, CudaFp8DeepGEMMLinear)
+                and output_linear.scale_ue8m0
+            ):
+                output_linear.input_quant_eps = 1.0e-10
         self.qk_fuse_norm = None
         if W.q_ln_gamma in weights and W.k_ln_gamma in weights:
             self.qk_fuse_norm = FusedQKRMSNorm(
@@ -152,7 +163,9 @@ class CausalAttention(nn.Module):
                     *fused
                 )
             else:
-                attn_output = attn_output * torch.sigmoid(gate)
+                attn_output = (attn_output.float() * torch.sigmoid(gate.float())).to(
+                    attn_output.dtype
+                )
                 output = self.o_proj(attn_output)
         else:
             output = self.o_proj(attn_output)

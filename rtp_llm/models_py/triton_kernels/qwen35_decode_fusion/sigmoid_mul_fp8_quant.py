@@ -2,9 +2,9 @@
 
 Replaces the three-kernel full-attention o_proj prep (15 FA layers)::
 
-    y = attn * torch.sigmoid(gate)          # BF16 sigmoid + mul
+    y = (attn.float() * torch.sigmoid(gate.float())).to(attn.dtype)
     fp8, scale = sgl_per_token_group_quant_fp8(
-        y, 128, eps=1e-4,
+        y, 128, eps=1e-10,
         column_major_scales=True,
         scale_tma_aligned=True,
         scale_ue8m0=True,
@@ -38,7 +38,7 @@ from rtp_llm.models_py.triton_kernels.qwen35_decode_fusion.fp8_scale import (
 from rtp_llm.models_py.utils.prefill_input_log import trace_triton
 
 _GROUP_SIZE = 128
-_CLAMP_EPS = 1.0e-4
+_CLAMP_EPS = 1.0e-10
 _FP8_DTYPE = torch.float8_e4m3fn
 
 
@@ -75,8 +75,8 @@ def is_supported(attn: torch.Tensor, gate: torch.Tensor) -> bool:
 
 
 # Packing / clamp match DSV4 ``_rmsnorm_fp8_quant_kernel`` and
-# ``_silu_mul_fp8_quant_packed_split_kernel``. CLAMP_EPS=1e-4 matches
-# ``sgl_per_token_group_quant_fp8(..., eps=1e-4)``.
+# ``_silu_mul_fp8_quant_packed_split_kernel``. The full-attention floor matches
+# ``sgl_per_token_group_quant_fp8(..., eps=1e-10)``.
 @triton.jit(do_not_specialize=["M", "output_scale_stride_k"])
 def _sigmoid_mul_fp8_quant_kernel(
     attn_ptr,
@@ -132,14 +132,14 @@ def _sigmoid_mul_fp8_quant_kernel(
                 eviction_policy="evict_first",
             ).to(tl.float32)
 
-            # aten BF16 sigmoid: fp32 sigmoid, then round to BF16, then BF16 mul.
-            sig_bf16 = (1.0 / (1.0 + tl.exp(-gate))).to(tl.bfloat16)
-            y_bf16 = (attn * sig_bf16.to(tl.float32)).to(tl.bfloat16)
+            # Keep sigmoid and product in FP32; round only the final product.
+            y_bf16 = (attn * tl.sigmoid(gate)).to(tl.bfloat16)
             y = y_bf16.to(tl.float32)
 
             absmax = tl.max(tl.abs(y), axis=1)
             scale_raw = tl.maximum(absmax, CLAMP_EPS) / FP8_MAX
-            exponent = tl.ceil(tl.log2(scale_raw))
+            # Native UE8M0 quant also clamps the raw scale before rounding.
+            exponent = tl.ceil(tl.log2(tl.maximum(scale_raw, 1.0e-10)))
             scale = tl.math.exp2(exponent)
 
             y_q = tl.clamp(y / scale[:, None], FP8_MIN, FP8_MAX)

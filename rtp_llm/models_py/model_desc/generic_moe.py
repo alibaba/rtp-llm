@@ -158,6 +158,12 @@ class GenericMoeLayer(nn.Module):
                 # layout. Keep this scalar projection on the no-swizzle backend.
                 hw_kernel_config=None,
             )
+            if os.environ.get("RTP_DECODE_ALIGN_SHARED_SCALAR_V1", "1") == "1":
+                enable_scalar = getattr(
+                    self.shared_expert_gate, "enable_fp32_shared_scalar_decode", None
+                )
+                if enable_scalar is not None:
+                    enable_scalar()
             self.sigmoid_gate_scale_add = SigmoidGateScaleAdd()
         else:
             self.shared_expert_gate = None

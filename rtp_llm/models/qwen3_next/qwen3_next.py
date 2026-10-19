@@ -188,6 +188,9 @@ class Qwen35Moe(Qwen3NextBase):
 
         config = ModelConfig()
         config.ckpt_path = ckpt_path
+        # Keep BF16 head weights for Qwen3.5. Explicit ModelArgs overrides
+        # still take precedence during configuration finalization.
+        config.enable_fp32_lm_head = False
 
         cls._parse_basic_config(text_config_json, config)
         cls._parse_rope_config(text_config_json, config)
