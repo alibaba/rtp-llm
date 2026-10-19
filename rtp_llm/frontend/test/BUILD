@@ -1,6 +1,12 @@
 load("@arch_config//:arch_select.bzl", "telemetry_test_deps")
 
 py_test(
+    name = "systemone_test",
+    srcs = ["systemone_test.py"],
+    deps = ["//rtp_llm:frontend"],
+)
+
+py_test(
     name = "kev_decide_test",
     srcs = ["kev_decide_test.py"],
     deps = [

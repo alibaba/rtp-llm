@@ -3,7 +3,8 @@ import json
 import logging
 import threading
 import time
-from typing import Any, Callable, Dict, Union
+import uuid
+from typing import Any, Awaitable, Callable, Dict, Union
 
 from fastapi import Request
 from fastapi import Request as RawRequest
@@ -20,11 +21,15 @@ from rtp_llm.frontend.frontend_worker import FrontendWorker, TokenizerEncodeResp
 from rtp_llm.frontend.request_id_generator import generate_request_id
 from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
 from rtp_llm.model_factory import ModelFactory
+from rtp_llm.models.downstream_modules.kev import KevRequestError
 from rtp_llm.openai.api_datatype import ChatCompletionRequest
 from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
 from rtp_llm.ops import SpecialTokens, TaskType
 from rtp_llm.server.misc import format_exception
-from rtp_llm.server.request_headers import extract_request_headers
+from rtp_llm.server.request_headers import (
+    extract_correlation_request_id,
+    extract_request_headers,
+)
 from rtp_llm.structure.request_constants import request_id_field_name
 from rtp_llm.telemetry import CURRENT_TRACE_STATE
 from rtp_llm.telemetry import attributes as trace_attrs
@@ -529,17 +534,125 @@ class FrontendServer(object):
         finally:
             self._global_controller.decrement()
 
-    async def decide(self, req: dict):
-        self._global_controller.increment()
+    async def decide(self, req: Any, raw_request: RawRequest | None = None):
+        return await self._kev_request(req, raw_request, "decide", 400, "error")
+
+    async def systemone(
+        self,
+        req: Any,
+        raw_request: RawRequest | None = None,
+        *,
+        request_id: str | None = None,
+    ):
+        return await self._kev_request(
+            req, raw_request, "systemone", 422, "detail", request_id=request_id
+        )
+
+    @staticmethod
+    async def _await_kev_result(
+        call: Callable[[], Awaitable[dict]], raw_request: RawRequest | None
+    ) -> dict:
+        if raw_request is None:
+            return await call()
+        if await raw_request.is_disconnected():
+            raise asyncio.CancelledError("client disconnects")
+
+        async def wait_for_disconnect():
+            # FastAPI has consumed the request body before entering this handler.
+            while (await raw_request.receive())["type"] != "http.disconnect":
+                pass
+
+        inference = asyncio.create_task(call())
+        disconnect = asyncio.create_task(wait_for_disconnect())
         try:
-            assert self._frontend_worker is not None
-            try:
-                result = await self._frontend_worker.decide(req)
-            except ValueError as error:
-                return ORJSONResponse({"error": str(error)}, status_code=400)
-            return ORJSONResponse(result)
+            await asyncio.wait(
+                (inference, disconnect), return_when=asyncio.FIRST_COMPLETED
+            )
+            if disconnect.done():
+                disconnect.result()
+                raise asyncio.CancelledError("client disconnects")
+            return inference.result()
         finally:
-            self._global_controller.decrement()
+            # Await cancellation so the in-flight gRPC is closed before releasing
+            # admission, and no later question batches can be submitted.
+            for task in (inference, disconnect):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(inference, disconnect, return_exceptions=True)
+
+    async def _kev_request(
+        self,
+        req: Any,
+        raw_request: RawRequest | None,
+        method: str,
+        validation_status: int,
+        validation_field: str,
+        *,
+        request_id: str | None = None,
+    ):
+        started = time.perf_counter()
+        tags = {
+            "rank_id": self.rank_id,
+            "server_id": self.server_id,
+            "source": "unknown",
+            "endpoint": method,
+        }
+        # Keep logging metadata out of the strict Kev request schema.
+        log_request = dict(req) if isinstance(req, dict) else {"body": req}
+        log_request[request_id_field_name] = uuid.uuid4().int & ((1 << 63) - 1)
+        headers = extract_request_headers(getattr(raw_request, "headers", None))
+        headers.setdefault(
+            "x-request-id", request_id or str(log_request[request_id_field_name])
+        )
+        log_request["correlation_request_id"] = extract_correlation_request_id(headers)
+        kmonitor.report(AccMetrics.QPS_METRIC, 1, tags)
+        admitted = False
+        try:
+            self._global_controller.increment()
+            admitted = True
+            self._access_logger.log_query_access(log_request)
+            assert self._frontend_worker is not None
+            result = await self._await_kev_result(
+                lambda: getattr(self._frontend_worker, method)(req, headers=headers),
+                raw_request,
+            )
+            response = ORJSONResponse(result)
+            self._access_logger.log_success_access(log_request, result)
+            # A Kev request is one service operation, regardless of row count.
+            # Prefill-only decisions have no first-token or decode-step metrics.
+            kmonitor.report(
+                GaugeMetrics.LANTENCY_METRIC,
+                (time.perf_counter() - started) * 1000,
+                tags,
+            )
+            kmonitor.report(AccMetrics.SUCCESS_QPS_METRIC, 1, tags)
+            return response
+        except ConcurrencyException as error:
+            kmonitor.report(AccMetrics.CONFLICT_QPS_METRIC, 1, tags)
+            content = format_exception(error)
+            self._access_logger.log_exception_access(log_request, error, content)
+            return ORJSONResponse(content, status_code=429)
+        except asyncio.CancelledError as error:
+            kmonitor.report(AccMetrics.CANCEL_QPS_METRIC, 1, tags)
+            self._access_logger.log_exception_access(log_request, error)
+            raise
+        except Exception as error:
+            if isinstance(error, KevRequestError):
+                content = {validation_field: str(error)}
+                status = validation_status
+                error_code = "INVALID_PARAMS"
+            else:
+                content = format_exception(error)
+                status = 500
+                error_code = content["error_code_str"]
+            kmonitor.report(
+                AccMetrics.ERROR_QPS_METRIC, 1, {**tags, "error_code": error_code}
+            )
+            self._access_logger.log_exception_access(log_request, error, content)
+            return ORJSONResponse(content, status_code=status)
+        finally:
+            if admitted:
+                self._global_controller.decrement()
 
     async def batch_infer(self, req: dict, raw_request: Request):
         from rtp_llm.frontend.frontend_worker import BatchPipelineResponse

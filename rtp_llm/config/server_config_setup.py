@@ -384,6 +384,28 @@ def _infer_model_type(ckpt_path: str) -> Optional[str]:
         return None
 
 
+def prepare_kev_model_args(py_env_configs):
+    """Resolve a raw Kev release before model inference or worker processes start."""
+    from rtp_llm.tools.prepare_kev_checkpoint import prepare_kev_checkpoint
+
+    model_args = py_env_configs.model_args
+    original = model_args.ckpt_path
+    if not original:
+        return
+    prepared = prepare_kev_checkpoint(original)
+    if prepared is None:
+        return
+    if model_args.tokenizer_path not in (None, "", original, prepared):
+        raise ValueError("Kev must use the tokenizer from its prepared checkpoint")
+    if model_args.model_type not in (None, "", "qwen35_dense"):
+        raise ValueError("Kev-4B requires model_type=qwen35_dense")
+    if model_args.task_type not in (None, "", "LANGUAGE_MODEL"):
+        raise ValueError("Kev checkpoints require the LANGUAGE_MODEL task type")
+    model_args.ckpt_path = prepared
+    model_args.tokenizer_path = prepared
+    logging.info("Prepared Kev checkpoint: %s", prepared)
+
+
 def setup_default_args(py_env_configs):
     set_parallelism_config(
         py_env_configs.parallelism_config,
@@ -474,7 +496,12 @@ def fetch_model_files_to_local(py_env_configs: PyEnvConfigs):
     # Fetch checkpoint_path from model_args
     model_args = py_env_configs.model_args
     if model_args.ckpt_path:
+        original = model_args.ckpt_path
         model_args.ckpt_path = fetch_remote_file_to_local(model_args.ckpt_path)
+        if model_args.tokenizer_path == original:
+            model_args.tokenizer_path = model_args.ckpt_path
+        # A mounted NAS/FUSE directory may itself contain a raw Kev release.
+        prepare_kev_model_args(py_env_configs)
 
     # Fetch tokenizer_path from model_args
     tokenizer_path = model_args.tokenizer_path
@@ -660,11 +687,12 @@ def configure_kv_cache_event_host_ip_port(py_env_configs: PyEnvConfigs) -> None:
 def setup_and_configure_server(py_env_configs: PyEnvConfigs):
     """
     Build parallelism_config from env and run auto_configure_deepep.
-    Caller should run setup_default_args and fetch_model_files_to_local before this.
+    Prepare checkpoints before inferring defaults, then fetch other model files.
 
     Args:
         py_env_configs: PyEnvConfigs object to configure
     """
+    prepare_kev_model_args(py_env_configs)
     setup_default_args(py_env_configs)
     fetch_model_files_to_local(py_env_configs)
     ll_num_max_token = py_env_configs.concurrency_config.concurrency_limit

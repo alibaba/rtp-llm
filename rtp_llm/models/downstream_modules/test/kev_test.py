@@ -157,6 +157,17 @@ class KevCodecTest(unittest.TestCase):
 
 
 class KevConfigTest(unittest.TestCase):
+    def test_local_checkpoint_does_not_require_hub_revisions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data = manifest()
+            data["source_revision"] = None
+            data.pop("base_revision")
+            Path(directory, "kev_config.json").write_text(json.dumps(data))
+            loaded = load_kev_config(directory)
+        self.assertIsNone(loaded["source_revision"])
+        self.assertIsNone(loaded["base_revision"])
+        self.assertEqual(loaded["base_model"], data["base_model"])
+
     def test_defaults_and_ordinary_checkpoint(self):
         with tempfile.TemporaryDirectory() as directory:
             self.assertIsNone(load_kev_config(directory))
@@ -183,6 +194,9 @@ class KevConfigTest(unittest.TestCase):
             ("max_state_tokens", 0),
             ("max_row_tokens", -1),
             ("source_revision", ""),
+            ("source_revision", 123),
+            ("base_revision", False),
+            ("base_model", None),
             ("option_isolation", True),
         ]
         with tempfile.TemporaryDirectory() as directory:

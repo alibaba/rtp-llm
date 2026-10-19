@@ -912,11 +912,30 @@ class FrontendApp(object):
             return await track_business_request(call)
 
         @app.post("/v1/decide")
-        async def decide(req: Dict[str, Any]):
+        async def decide(raw_request: RawRequest, req: Any = Body(...)):
             async def call():
-                return await self.frontend_server.decide(req)
+                return await self.frontend_server.decide(req, raw_request)
 
             return await track_business_request(call)
+
+        @app.post("/v1/systemone")
+        async def systemone(raw_request: RawRequest, req: Any = Body(...)):
+            started = time.perf_counter()
+            request_id = raw_request.headers.get(
+                "x-typesafe-request-id"
+            ) or secrets.token_hex(16)
+
+            async def call():
+                return await self.frontend_server.systemone(
+                    req, raw_request, request_id=request_id
+                )
+
+            response = await track_business_request(call)
+            response.headers["x-typesafe-request-id"] = request_id
+            response.headers["server-timing"] = (
+                f"app;dur={(time.perf_counter() - started) * 1000:.1f}"
+            )
+            return response
 
         @app.post("/batch_infer")
         async def batch_infer(req: Union[str, Dict[Any, Any]], raw_request: RawRequest):

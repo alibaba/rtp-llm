@@ -1,15 +1,23 @@
 import asyncio
+import copy
 import json
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import torch
+from fastapi import Request
+from fastapi.testclient import TestClient
 
+from rtp_llm.frontend.frontend_app import FrontendApp
 from rtp_llm.frontend.frontend_server import FrontendServer
 from rtp_llm.frontend.frontend_worker import FrontendWorker
+from rtp_llm.frontend.shutdown_manager import FrontendShutdownManager
+from rtp_llm.metrics import AccMetrics, GaugeMetrics
 from rtp_llm.models.downstream_modules.kev import SPECIAL
+from rtp_llm.structure.request_constants import request_id_field_name
 from rtp_llm.utils.base_model_datatypes import GenerateOutput, GenerateOutputs
+from rtp_llm.utils.concurrency_controller import ConcurrencyController
 
 
 class FakeTokenizer:
@@ -24,6 +32,9 @@ class FakeTokenizer:
 
 class KevDecideTest(unittest.TestCase):
     def setUp(self):
+        reporter = patch("rtp_llm.frontend.frontend_server.kmonitor.report")
+        self.report = reporter.start()
+        self.addCleanup(reporter.stop)
         self.worker = object.__new__(FrontendWorker)
         self.worker.tokenizer = FakeTokenizer()
         self.worker.kev_config = {
@@ -368,9 +379,7 @@ class KevDecideTest(unittest.TestCase):
 
     def test_normal_model_is_rejected_and_server_releases_admission_slot(self):
         self.worker.kev_config = None
-        server = object.__new__(FrontendServer)
-        server._frontend_worker = self.worker
-        server._global_controller = MagicMock()
+        server = self.systemone_server()
         response = asyncio.run(server.decide(self.request))
         self.assertEqual(response.status_code, 400)
         self.assertIn("Kev checkpoint", json.loads(response.body)["error"])
@@ -379,14 +388,524 @@ class KevDecideTest(unittest.TestCase):
         server._global_controller.decrement.assert_called_once_with()
 
     def test_server_releases_admission_slot_after_backend_failure(self):
+        server = self.systemone_server()
+        self.enqueue.side_effect = RuntimeError("backend unavailable")
+        response = asyncio.run(server.decide(self.request))
+        self.assertEqual(response.status_code, 500)
+        self.assertIn("backend unavailable", json.loads(response.body)["message"])
+        self.assert_metrics(AccMetrics.QPS_METRIC, AccMetrics.ERROR_QPS_METRIC)
+        server._global_controller.increment.assert_called_once_with()
+        server._global_controller.decrement.assert_called_once_with()
+
+    @staticmethod
+    def systemone_request():
+        return {
+            "state": {"text": "synthetic", "tags": ["fresh", "safe"]},
+            "questions": {
+                "selection": {
+                    "type": "choice",
+                    "instructions": "Choose a color",
+                    "criteria": {"red": "warm", "蓝": {"tone": "cool"}},
+                },
+                "rating": {
+                    "type": "score",
+                    "instructions": {"task": "Rate"},
+                    "criteria": ["low", {"level": "high"}],
+                },
+                "check": {
+                    "type": "noul",
+                    "criteria": {"true": "matches", "false": "misses"},
+                },
+            },
+        }
+
+    def systemone_outputs(self):
+        return [
+            self.output([0.25, 0.75]),
+            self.output([0.25, 0.75]),
+            self.output([0.125, 0.875]),
+        ]
+
+    def systemone_server(self):
         server = object.__new__(FrontendServer)
         server._frontend_worker = self.worker
         server._global_controller = MagicMock()
-        self.enqueue.side_effect = RuntimeError("backend unavailable")
-        with self.assertRaisesRegex(RuntimeError, "backend unavailable"):
-            asyncio.run(server.decide(self.request))
+        server._global_controller.max_concurrency = 4
+        server._access_logger = MagicMock()
+        server.rank_id = "0"
+        server.server_id = "0"
+        server.is_embedding = False
+        return server
+
+    def test_systemone_three_types_match_raw_rows_and_logical_usage(self):
+        request = self.systemone_request()
+        original = copy.deepcopy(request)
+        raw_request = {
+            "state": "text: synthetic\ntags:\n  - fresh\n  - safe",
+            "questions": [
+                {"instr": "Choose a color", "options": ["red: warm", "蓝: tone: cool"]},
+                {"instr": "task: Rate", "options": ["low", "level: high"]},
+                {"instr": "", "options": ["no: misses", "yes: matches"]},
+            ],
+        }
+        self.enqueue.return_value = self.systemone_outputs()
+        raw_result = self.decide(raw_request)
+        raw_rows = [item.token_ids.tolist() for item in self.enqueue.await_args.args[0]]
+        self.assertEqual(set(raw_result), {"results"})
+        self.assertEqual(
+            [item["option"] for item in raw_result["results"]],
+            ["蓝: tone: cool", "level: high", "yes: matches"],
+        )
+        self.enqueue.reset_mock()
+        result = asyncio.run(self.worker.systemone(request))
+        self.enqueue.assert_awaited_once()
+        self.assertEqual(
+            [item.token_ids.tolist() for item in self.enqueue.await_args.args[0]],
+            raw_rows,
+        )
+        expected_answers = {
+            "selection": {
+                "type": "choice",
+                "choice": "蓝",
+                "confidence": 0.5,
+                "probabilities": {"red": 0.25, "蓝": 0.75},
+            },
+            "rating": {
+                "type": "score",
+                "score": 0.75,
+                "legend": {"0": "low", "1": "level: high"},
+                "probabilities": {"0": 0.25, "1": 0.75},
+                "confidence": 0.5,
+            },
+            "check": {"type": "noul", "noul": 0.875},
+        }
+        self.assertEqual(result["model"], "kev-latest")
+        self.assertEqual(result["answers"], expected_answers)
+        state_tokens = 1 + len(raw_request["state"])
+        expected_input_tokens = state_tokens + sum(
+            len(row) - state_tokens for row in raw_rows
+        )
+        self.assertEqual(
+            result["usage"],
+            {
+                "input_tokens": expected_input_tokens,
+                "output_tokens": len(json.dumps(expected_answers)),
+            },
+        )
+        self.assertLess(result["usage"]["input_tokens"], sum(map(len, raw_rows)))
+        self.assertGreater(result["usage"]["output_tokens"], 0)
+        self.assertGreaterEqual(result["latency_ms"], 0)
+        self.assertEqual(request, original)
+        for item in self.enqueue.await_args.args[0]:
+            self.assertEqual(item.generate_config.max_new_tokens, 0)
+            self.assertFalse(item.generate_config.is_streaming)
+
+    def test_systemone_shared_prefix_keeps_leader_order_and_routing_key(self):
+        request = self.systemone_request()
+        request["state"] = "s" * 63
+        request["model"] = "kev-4b"
+        self.worker.kev_reuse_cache = True
+        outputs = self.systemone_outputs()
+        self.enqueue.side_effect = [outputs[:1], outputs[1:]]
+        result = asyncio.run(self.worker.systemone(request))
+        calls = self.enqueue.await_args_list
+        self.assertEqual([len(call.args[0]) for call in calls], [1, 2])
+        self.assertEqual(calls[0].kwargs["routing_key"], calls[1].kwargs["routing_key"])
+        inputs = [item for call in calls for item in call.args[0]]
+        self.assertEqual(len({item.request_id for item in inputs}), 3)
+        for item in inputs:
+            self.assertEqual(item.token_ids[:64].tolist(), [1] + [1115] * 63)
+            self.assertEqual(item.generate_config.max_new_tokens, 0)
+            self.assertEqual(item.prefix_length, 0)
+        self.assertEqual(result["model"], "kev-4b")
+        self.assertEqual(list(result["answers"]), ["selection", "rating", "check"])
+        self.assertEqual(
+            result["usage"]["input_tokens"],
+            64 + sum(item.input_length - 64 for item in inputs),
+        )
+
+    def test_systemone_limits_reject_all_rows_before_any_rpc(self):
+        too_many_questions = {
+            "state": "",
+            "questions": {str(index): {"type": "noul"} for index in range(65)},
+        }
+        too_many_options = {
+            "state": "",
+            "questions": {
+                "pick": {"type": "choice", "criteria": {str(i): "" for i in range(5)}}
+            },
+        }
+        overflowing_follower = {
+            "state": "s" * 63,
+            "questions": {
+                "first": {"type": "choice", "criteria": {"a": ""}},
+                "second": {"type": "choice", "criteria": {"b": "x" * 100}},
+            },
+        }
+        self.worker.kev_reuse_cache = True
+        self.worker.kev_max_row_tokens = 80
+        for request in (too_many_questions, too_many_options, overflowing_follower):
+            with self.subTest(request=request), self.assertRaises(ValueError):
+                asyncio.run(self.worker.systemone(request))
+        self.worker.kev_config["max_state_tokens"] = 63
+        with self.assertRaisesRegex(ValueError, "state"):
+            asyncio.run(self.worker.systemone(overflowing_follower))
+        self.enqueue.assert_not_awaited()
+
+    def test_systemone_non_kev_model_returns_422_without_rpc(self):
+        self.worker.kev_config = None
+        server = self.systemone_server()
+        response = asyncio.run(server.systemone(self.systemone_request()))
+        self.assertEqual(response.status_code, 422)
+        self.assertIn("Kev checkpoint", json.loads(response.body)["detail"])
+        self.enqueue.assert_not_awaited()
         server._global_controller.increment.assert_called_once_with()
         server._global_controller.decrement.assert_called_once_with()
+
+    def test_systemone_server_releases_admission_after_success_or_failure(self):
+        for failure in (
+            None,
+            ValueError("invalid request"),
+            RuntimeError("backend unavailable"),
+        ):
+            with self.subTest(failure=failure):
+                server = self.systemone_server()
+                self.enqueue.side_effect = failure
+                self.enqueue.return_value = self.systemone_outputs()
+                response = asyncio.run(server.systemone(self.systemone_request()))
+                if failure is None:
+                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual(json.loads(response.body)["model"], "kev-latest")
+                else:
+                    self.assertEqual(response.status_code, 500)
+                    self.assertIn(str(failure), json.loads(response.body)["message"])
+                server._global_controller.increment.assert_called_once_with()
+                server._global_controller.decrement.assert_called_once_with()
+
+    def test_systemone_server_releases_admission_after_cancellation(self):
+        server = self.systemone_server()
+
+        async def run():
+            entered = asyncio.Event()
+
+            async def blocked(inputs, *, routing_key):
+                entered.set()
+                await asyncio.Event().wait()
+
+            self.enqueue.side_effect = blocked
+            task = asyncio.create_task(server.systemone(self.systemone_request()))
+            await asyncio.wait_for(entered.wait(), timeout=1)
+            server._global_controller.decrement.assert_not_called()
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+
+        asyncio.run(run())
+        server._global_controller.increment.assert_called_once_with()
+        server._global_controller.decrement.assert_called_once_with()
+
+    def test_systemone_http_route_preserves_request_headers_and_validation(self):
+        self.enqueue.return_value = self.systemone_outputs()
+        server = self.systemone_server()
+        owner = FrontendApp.__new__(FrontendApp)
+        owner.frontend_server = server
+        owner.shutdown_manager = FrontendShutdownManager()
+        owner.separated_frontend = True
+        owner.server_config = SimpleNamespace(http_port=0)
+        owner.grpc_client = None
+        client = TestClient(owner.create_app())
+
+        for supplied_id in ("synthetic-request-id", None):
+            headers = {"x-typesafe-request-id": supplied_id} if supplied_id else {}
+            response = client.post(
+                "/v1/systemone", json=self.systemone_request(), headers=headers
+            )
+            self.assertEqual(response.status_code, 200)
+            if supplied_id:
+                self.assertEqual(response.headers["x-typesafe-request-id"], supplied_id)
+            else:
+                self.assertRegex(
+                    response.headers["x-typesafe-request-id"], r"^[0-9a-f]{32}$"
+                )
+            self.assertRegex(response.headers["server-timing"], r"^app;dur=\d+\.\d$")
+            self.assertEqual(
+                response.json()["answers"]["check"], {"type": "noul", "noul": 0.875}
+            )
+            self.assertEqual(owner.shutdown_manager.active_request_count(), 0)
+
+        self.enqueue.reset_mock()
+        response = client.post(
+            "/v1/systemone", json=[], headers={"x-typesafe-request-id": "invalid-body"}
+        )
+        self.assertEqual(response.status_code, 422)
+        self.assertIn("detail", response.json())
+        self.assertEqual(response.headers["x-typesafe-request-id"], "invalid-body")
+        self.assertIn("server-timing", response.headers)
+        self.enqueue.assert_not_awaited()
+        self.assertEqual(owner.shutdown_manager.active_request_count(), 0)
+        self.assertEqual(server._global_controller.increment.call_count, 3)
+        self.assertEqual(server._global_controller.decrement.call_count, 3)
+
+    def assert_metrics(self, *expected):
+        self.assertCountEqual(
+            [call.args[0] for call in self.report.call_args_list], expected
+        )
+        for call in self.report.call_args_list:
+            self.assertEqual(call.args[2]["rank_id"], "0")
+            self.assertEqual(call.args[2]["server_id"], "0")
+            if call.args[0] != GaugeMetrics.LANTENCY_METRIC:
+                self.assertEqual(call.args[1], 1)
+
+    def test_service_metrics_count_request_once_across_question_batches(self):
+        self.worker.kev_reuse_cache = True
+        for method in ("decide", "systemone"):
+            with self.subTest(method=method):
+                server = self.systemone_server()
+                request = (
+                    copy.deepcopy(self.request)
+                    if method == "decide"
+                    else self.systemone_request()
+                )
+                request["state"] = "s" * 63
+                original = copy.deepcopy(request)
+                outputs = (
+                    [self.output([0.25, 0.75]), self.output([1.0])]
+                    if method == "decide"
+                    else self.systemone_outputs()
+                )
+                self.enqueue.reset_mock()
+                self.enqueue.side_effect = [outputs[:1], outputs[1:]]
+                self.report.reset_mock()
+                response = asyncio.run(getattr(server, method)(request))
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(self.enqueue.await_count, 2)
+                self.assert_metrics(
+                    AccMetrics.QPS_METRIC,
+                    GaugeMetrics.LANTENCY_METRIC,
+                    AccMetrics.SUCCESS_QPS_METRIC,
+                )
+                latency = self.report.call_args_list[1]
+                self.assertGreaterEqual(latency.args[1], 0)
+                self.assertEqual(latency.args[2]["endpoint"], method)
+                server._access_logger.log_query_access.assert_called_once()
+                server._access_logger.log_success_access.assert_called_once()
+                log_request = server._access_logger.log_query_access.call_args.args[0]
+                self.assertIsInstance(log_request[request_id_field_name], int)
+                for call in self.enqueue.await_args_list:
+                    for row in call.args[0]:
+                        self.assertEqual(
+                            row.headers["x-request-id"],
+                            log_request["correlation_request_id"],
+                        )
+                self.assertEqual(request, original)
+
+    def test_validation_errors_are_reported_without_rpc(self):
+        for method, status, field in (
+            ("decide", 400, "error"),
+            ("systemone", 422, "detail"),
+        ):
+            for request in ([], {}, {"state": "", "questions": []}):
+                with self.subTest(method=method, request=request):
+                    server = self.systemone_server()
+                    self.report.reset_mock()
+                    response = asyncio.run(getattr(server, method)(request))
+                    self.assertEqual(response.status_code, status)
+                    self.assertIn(field, json.loads(response.body))
+                    self.assert_metrics(
+                        AccMetrics.QPS_METRIC, AccMetrics.ERROR_QPS_METRIC
+                    )
+                    self.assertEqual(
+                        self.report.call_args_list[-1].args[2]["error_code"],
+                        "INVALID_PARAMS",
+                    )
+                    self.enqueue.assert_not_awaited()
+                    server._global_controller.decrement.assert_called_once_with()
+                    server._access_logger.log_exception_access.assert_called_once()
+
+    def test_backend_and_tokenizer_value_errors_are_server_errors(self):
+        class BrokenTokenizer(FakeTokenizer):
+            def __call__(self, text, *, add_special_tokens):
+                raise ValueError("internal failure")
+
+        for method in ("decide", "systemone"):
+            for broken_part in ("backend", "tokenizer"):
+                with self.subTest(method=method, broken_part=broken_part):
+                    server = self.systemone_server()
+                    self.report.reset_mock()
+                    self.enqueue.side_effect = ValueError("internal failure")
+                    self.worker.tokenizer = (
+                        BrokenTokenizer()
+                        if broken_part == "tokenizer"
+                        else FakeTokenizer()
+                    )
+                    request = (
+                        self.request if method == "decide" else self.systemone_request()
+                    )
+                    response = asyncio.run(getattr(server, method)(request))
+                    self.assertEqual(response.status_code, 500)
+                    self.assert_metrics(
+                        AccMetrics.QPS_METRIC, AccMetrics.ERROR_QPS_METRIC
+                    )
+                    server._access_logger.log_exception_access.assert_called_once()
+
+    def test_service_latency_includes_the_complete_worker_operation(self):
+        server = self.systemone_server()
+        with patch(
+            "rtp_llm.frontend.frontend_server.time.perf_counter", return_value=1
+        ) as clock:
+
+            async def completed(request, *, headers):
+                clock.return_value = 1.25
+                return {"results": []}
+
+            server._frontend_worker = SimpleNamespace(decide=completed)
+            response = asyncio.run(server.decide(self.request))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.report.call_args_list[1].args[1], 250)
+        self.assert_metrics(
+            AccMetrics.QPS_METRIC,
+            GaugeMetrics.LANTENCY_METRIC,
+            AccMetrics.SUCCESS_QPS_METRIC,
+        )
+
+    def test_concurrency_rejection_does_not_release_another_requests_slot(self):
+        for method in ("decide", "systemone"):
+            with self.subTest(method=method):
+                server = self.systemone_server()
+                server._global_controller = ConcurrencyController(1)
+                server._global_controller.increment()
+                self.report.reset_mock()
+                response = asyncio.run(getattr(server, method)({}))
+                self.assertEqual(response.status_code, 429)
+                self.assertEqual(
+                    server._global_controller.get_available_concurrency(), 0
+                )
+                self.assert_metrics(
+                    AccMetrics.QPS_METRIC, AccMetrics.CONFLICT_QPS_METRIC
+                )
+                self.enqueue.assert_not_awaited()
+                server._global_controller.decrement()
+
+    def test_disconnect_and_task_cancellation_stop_followers_and_release_admission(
+        self,
+    ):
+        for method in ("decide", "systemone"):
+            for cancellation in ("before", "disconnect", "task"):
+                with self.subTest(method=method, cancellation=cancellation):
+                    server = self.systemone_server()
+                    self.worker.kev_reuse_cache = True
+                    request = (
+                        copy.deepcopy(self.request)
+                        if method == "decide"
+                        else self.systemone_request()
+                    )
+                    request["state"] = "s" * 63
+                    self.enqueue.reset_mock()
+                    self.report.reset_mock()
+
+                    async def run():
+                        received = asyncio.Queue()
+                        entered = asyncio.Event()
+                        cleaned_up = asyncio.Event()
+
+                        async def blocked(inputs, *, routing_key):
+                            entered.set()
+                            try:
+                                await asyncio.Event().wait()
+                            finally:
+                                cleaned_up.set()
+
+                        self.enqueue.side_effect = blocked
+                        raw = Request(
+                            {"type": "http", "headers": []}, receive=received.get
+                        )
+                        if cancellation == "before":
+                            received.put_nowait({"type": "http.disconnect"})
+                        task = asyncio.create_task(
+                            getattr(server, method)(request, raw)
+                        )
+                        if cancellation != "before":
+                            await asyncio.wait_for(entered.wait(), 1)
+                            if cancellation == "disconnect":
+                                received.put_nowait({"type": "http.disconnect"})
+                            else:
+                                task.cancel()
+                        with self.assertRaises(asyncio.CancelledError):
+                            await asyncio.wait_for(task, 1)
+                        if cancellation != "before":
+                            self.assertTrue(cleaned_up.is_set())
+                        self.assertEqual(
+                            [
+                                t
+                                for t in asyncio.all_tasks()
+                                if t is not asyncio.current_task()
+                            ],
+                            [],
+                        )
+
+                    asyncio.run(run())
+                    self.assertEqual(
+                        self.enqueue.await_count, int(cancellation != "before")
+                    )
+                    self.assert_metrics(
+                        AccMetrics.QPS_METRIC, AccMetrics.CANCEL_QPS_METRIC
+                    )
+                    server._global_controller.decrement.assert_called_once_with()
+                    server._access_logger.log_exception_access.assert_called_once()
+
+    def test_systemone_http_errors_keep_headers_and_shutdown_accounting(self):
+        server = self.systemone_server()
+        owner = FrontendApp.__new__(FrontendApp)
+        owner.frontend_server = server
+        owner.shutdown_manager = FrontendShutdownManager()
+        owner.separated_frontend = True
+        owner.server_config = SimpleNamespace(http_port=0)
+        owner.grpc_client = None
+        client = TestClient(owner.create_app())
+        traceparent = "00-" + "1" * 32 + "-" + "2" * 16 + "-01"
+        self.enqueue.side_effect = RuntimeError("backend unavailable")
+        response = client.post(
+            "/v1/systemone",
+            json=self.systemone_request(),
+            headers={
+                "x-typesafe-request-id": "correlated-id",
+                "traceparent": traceparent,
+                "authorization": "must-not-reach-engine",
+            },
+        )
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(response.headers["x-typesafe-request-id"], "correlated-id")
+        self.assertIn("server-timing", response.headers)
+        for row in self.enqueue.await_args.args[0]:
+            self.assertEqual(
+                row.headers,
+                {"x-request-id": "correlated-id", "traceparent": traceparent},
+            )
+        self.assertEqual(owner.shutdown_manager.active_request_count(), 0)
+        self.assert_metrics(AccMetrics.QPS_METRIC, AccMetrics.ERROR_QPS_METRIC)
+
+    def test_log_correlation_uses_the_same_header_precedence_as_backend(self):
+        server = self.systemone_server()
+        self.enqueue.return_value = [self.output([0.25, 0.75]), self.output([1.0])]
+        raw = MagicMock()
+        raw.headers = {
+            "x-request-id": "standard-id",
+            "x-dashscope-request-id": "gateway-id",
+        }
+        raw.is_disconnected = AsyncMock(return_value=False)
+
+        async def wait_for_disconnect():
+            await asyncio.Event().wait()
+
+        raw.receive = wait_for_disconnect
+        response = asyncio.run(server.decide(self.request, raw))
+        self.assertEqual(response.status_code, 200)
+        log_request = server._access_logger.log_success_access.call_args.args[0]
+        self.assertEqual(log_request["correlation_request_id"], "gateway-id")
+        self.assertEqual(
+            self.enqueue.await_args.args[0][0].headers,
+            raw.headers,
+        )
 
 
 if __name__ == "__main__":

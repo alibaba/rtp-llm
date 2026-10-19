@@ -4,6 +4,7 @@ import logging
 import os
 import pathlib
 import sys
+import time
 import traceback
 import uuid
 from functools import partial
@@ -25,6 +26,7 @@ from rtp_llm.distribute.distributed_server import (
     get_world_info,
 )
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactory
+from rtp_llm.models.downstream_modules.kev import KevRequestError
 from rtp_llm.ops import ParallelismConfig, SpecialTokens, VitSeparation
 from rtp_llm.pipeline.pipeline import Pipeline
 from rtp_llm.structure.request_extractor import Request, RequestExtractor
@@ -155,7 +157,46 @@ class FrontendWorker:
         tokens = [self.pipeline.decode(id) for id in token_ids]
         return token_ids, tokens
 
-    async def decide(self, request: dict) -> dict:
+    async def decide(
+        self, request: dict, *, headers: Optional[Dict[str, str]] = None
+    ) -> dict:
+        results, _ = await self._decide(request, headers=headers)
+        return {"results": results}
+
+    async def systemone(
+        self, request: dict, *, headers: Optional[Dict[str, str]] = None
+    ) -> dict:
+        from rtp_llm.frontend.systemone import parse_request, to_answers
+
+        started = time.perf_counter()
+        if self.kev_config is None:
+            raise KevRequestError("/v1/systemone requires an exported Kev checkpoint")
+        try:
+            model, record, metadata = parse_request(
+                request, max_options=self.kev_config["max_options"]
+            )
+        except ValueError as error:
+            raise KevRequestError(str(error)) from error
+        results, input_tokens = await self._decide(record, headers=headers)
+        answers = to_answers([result["probabilities"] for result in results], metadata)
+        tokenizer = self.tokenizer
+        if hasattr(tokenizer, "get_real_tokenizer"):
+            tokenizer = tokenizer.get_real_tokenizer()
+        # System One counts serialized answer tokens, although no tokens are generated.
+        output_tokens = len(
+            tokenizer(json.dumps(answers), add_special_tokens=False).input_ids
+        )
+        return {
+            "model": model,
+            "answers": answers,
+            "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens},
+            # Includes frontend processing and RPC queue/execution time.
+            "latency_ms": round((time.perf_counter() - started) * 1000, 1),
+        }
+
+    async def _decide(
+        self, request: dict, *, headers: Optional[Dict[str, str]] = None
+    ) -> tuple[list[dict], int]:
         """Run independent Kev rows through the existing prefill-only batch RPC."""
         import torch
 
@@ -163,12 +204,12 @@ class FrontendWorker:
         from rtp_llm.utils.base_model_datatypes import GenerateInput
 
         if self.kev_config is None:
-            raise ValueError("/v1/decide requires an exported Kev checkpoint")
+            raise KevRequestError("/v1/decide requires an exported Kev checkpoint")
         if not isinstance(request, dict) or set(request) != {"state", "questions"}:
-            raise ValueError("request must contain exactly state and questions")
+            raise KevRequestError("request must contain exactly state and questions")
         questions = request["questions"]
         if not isinstance(questions, list) or len(questions) > 64:
-            raise ValueError("questions must contain 1..64 entries")
+            raise KevRequestError("questions must contain 1..64 entries")
         rows = encode_kev_rows(
             self.tokenizer,
             request["state"],
@@ -209,6 +250,7 @@ class FrontendWorker:
                         max_new_tokens=0, is_streaming=False
                     ),
                     tokenizer=self.tokenizer,
+                    headers=dict(headers or {}),
                 )
                 for row in rows[start:end]
             ]
@@ -242,7 +284,9 @@ class FrontendWorker:
                     }
                 )
             start = end
-        return {"results": results}
+        # Logical input length counts the shared state once, independent of cache hits.
+        input_tokens = sum(map(len, rows)) - (len(rows) - 1) * state_tokens
+        return results, input_tokens
 
     async def batch_infer(
         self, prompts: List[str], request_id: int, generate_config: dict

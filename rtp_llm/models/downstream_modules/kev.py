@@ -29,6 +29,10 @@ SPECIAL = (
 _SPECIAL_RE = re.compile(r"<\|([A-Za-z0-9_]+)\|>")
 
 
+class KevRequestError(ValueError):
+    """Invalid caller input, distinct from tokenizer/model runtime failures."""
+
+
 def _positive_int(value: Any, name: str) -> int:
     if type(value) is not int or value <= 0:
         raise ValueError(f"{name} must be a positive integer")
@@ -62,8 +66,8 @@ class KevConfig:
     max_state_tokens: int
     max_row_tokens: int
     base_model: str
-    base_revision: str
-    source_revision: str
+    base_revision: str | None
+    source_revision: str | None
 
     @classmethod
     def load(cls, checkpoint: str | Path) -> KevConfig:
@@ -91,11 +95,16 @@ class KevConfig:
             or temperature <= 0
         ):
             raise ValueError("temperature must be finite and positive")
-        revisions = {}
-        for key in ("base_model", "base_revision", "source_revision"):
+        base_model = metadata.get("base_model")
+        if not isinstance(base_model, str) or not base_model:
+            raise ValueError("base_model must be a nonempty string")
+        revisions = {"base_model": base_model}
+        # Local checkpoint files have a content identity but may have no known
+        # Hub revision. Do not invent a revision to make them loadable.
+        for key in ("base_revision", "source_revision"):
             value = metadata.get(key)
-            if not isinstance(value, str) or not value:
-                raise ValueError(f"{key} must be a nonempty string")
+            if value is not None and (not isinstance(value, str) or not value):
+                raise ValueError(f"{key} must be a nonempty string or null")
             revisions[key] = value
         if metadata.get("option_isolation", False):
             raise ValueError("Kev row execution does not support option_isolation")
@@ -143,9 +152,9 @@ def encode_kev_rows(
     _positive_int(max_row_tokens, "max_row_tokens")
     _positive_int(max_options, "max_options")
     if not isinstance(state, str):
-        raise ValueError("state must be a string")
+        raise KevRequestError("state must be a string")
     if not isinstance(questions, list) or not questions:
-        raise ValueError("questions must be a nonempty list")
+        raise KevRequestError("questions must be a nonempty list")
     if hasattr(tokenizer, "get_real_tokenizer"):
         tokenizer = tokenizer.get_real_tokenizer()
     state_id, question_id, option_id, end_id, decide_id = kev_special_token_ids(
@@ -158,26 +167,28 @@ def encode_kev_rows(
 
     prefix = [state_id] + user_tokens(state)
     if len(prefix) > max_state_tokens:
-        raise ValueError(
+        raise KevRequestError(
             f"state has {len(prefix)} tokens, exceeding limit {max_state_tokens}"
         )
     rows = []
     for index, question in enumerate(questions):
         if not isinstance(question, dict) or not isinstance(question.get("instr"), str):
-            raise ValueError(f"questions[{index}].instr must be a string")
+            raise KevRequestError(f"questions[{index}].instr must be a string")
         options = question.get("options")
         if not isinstance(options, list) or not 1 <= len(options) <= max_options:
-            raise ValueError(
+            raise KevRequestError(
                 f"questions[{index}].options must contain 1..{max_options} options"
             )
         if any(not isinstance(option, str) or not option for option in options):
-            raise ValueError(f"questions[{index}].options must be nonempty strings")
+            raise KevRequestError(
+                f"questions[{index}].options must be nonempty strings"
+            )
         row = prefix + [question_id] + user_tokens(question["instr"])
         for option in options:
             row.extend([option_id] + user_tokens(option) + [end_id])
         row.append(decide_id)
         if len(row) > max_row_tokens:
-            raise ValueError(
+            raise KevRequestError(
                 f"question {index} row has {len(row)} tokens, "
                 f"exceeding limit {max_row_tokens}"
             )

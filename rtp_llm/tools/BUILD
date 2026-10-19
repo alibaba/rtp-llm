@@ -1,6 +1,23 @@
 package(default_visibility = ["//:__subpackages__"])
 
 py_library(
+    name = "prepare_kev_checkpoint",
+    srcs = ["prepare_kev_checkpoint.py"],
+    deps = [
+        ":convert_kev_checkpoint",
+        "//rtp_llm:safetensors",
+        "//rtp_llm:torch",
+        "//rtp_llm:transformers",
+    ],
+)
+
+py_test(
+    name = "prepare_kev_checkpoint_test",
+    srcs = ["prepare_kev_checkpoint_test.py"],
+    deps = [":prepare_kev_checkpoint", "//rtp_llm:torch"],
+)
+
+py_library(
     name = "convert_kev_checkpoint",
     srcs = ["convert_kev_checkpoint.py"],
 )

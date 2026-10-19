@@ -380,6 +380,7 @@ py_library(
         "config/**/*.py",
     ]),
     deps = [
+        "//rtp_llm/tools:prepare_kev_checkpoint",
         "//rtp_llm/distribute:distribute",
         ":multimodal"
     ],

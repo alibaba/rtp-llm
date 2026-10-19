@@ -1044,5 +1044,244 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(pc.ffn_tp_rank, 1)
 
 
+class KevCheckpointStartupTest(TestCase):
+    _prepare_target = "rtp_llm.tools.prepare_kev_checkpoint.prepare_kev_checkpoint"
+    _setup_module = "rtp_llm.config.server_config_setup"
+    _raw_path = "/models/kev-4b-raw"
+    _prepared_path = "/models/kev-4b-rtp"
+
+    def setUp(self):
+        env = patch.dict(os.environ, _jit_env(), clear=True)
+        env.start()
+        self.addCleanup(env.stop)
+        cuda = patch(
+            self._setup_module + ".torch.cuda.is_available", return_value=False
+        )
+        cuda.start()
+        self.addCleanup(cuda.stop)
+        self.config = setup_args([])
+        self.config.model_args.ckpt_path = self._raw_path
+        self.config.model_args.tokenizer_path = ""
+        self.config.model_args.model_type = ""
+        self.config.model_args.task_type = None
+        self.config.server_config.ip = "127.0.0.1"
+
+    def test_kev_prepare_rewrites_checkpoint_and_compatible_tokenizer(self):
+        from rtp_llm.config.server_config_setup import prepare_kev_model_args
+
+        for tokenizer, model_type, task_type in (
+            (None, None, None),
+            ("", "", ""),
+            (self._raw_path, "qwen35_dense", "LANGUAGE_MODEL"),
+            (self._prepared_path, "qwen35_dense", None),
+        ):
+            with self.subTest(
+                tokenizer=tokenizer, model_type=model_type, task=task_type
+            ):
+                model_args = self.config.model_args
+                model_args.ckpt_path = self._raw_path
+                model_args.tokenizer_path = tokenizer
+                model_args.model_type = model_type
+                model_args.task_type = task_type
+                with patch(
+                    self._prepare_target, return_value=self._prepared_path
+                ) as prepare:
+                    prepare_kev_model_args(self.config)
+                prepare.assert_called_once_with(self._raw_path)
+                self.assertEqual(model_args.ckpt_path, self._prepared_path)
+                self.assertEqual(model_args.tokenizer_path, self._prepared_path)
+                self.assertEqual(model_args.model_type, model_type)
+                self.assertEqual(model_args.task_type, task_type)
+
+    def test_kev_prepare_rejects_explicit_conflicts_without_rewriting_paths(self):
+        from rtp_llm.config.server_config_setup import prepare_kev_model_args
+
+        for field, value, message in (
+            ("tokenizer_path", "/models/unrelated-tokenizer", "tokenizer"),
+            ("model_type", "qwen_2", "model_type=qwen35_dense"),
+            ("task_type", "DENSE_EMBEDDING", "LANGUAGE_MODEL"),
+        ):
+            with self.subTest(field=field):
+                model_args = self.config.model_args
+                model_args.ckpt_path = self._raw_path
+                model_args.tokenizer_path = self._raw_path
+                model_args.model_type = "qwen35_dense"
+                model_args.task_type = "LANGUAGE_MODEL"
+                setattr(model_args, field, value)
+                original_tokenizer = model_args.tokenizer_path
+                with patch(self._prepare_target, return_value=self._prepared_path):
+                    with self.assertRaisesRegex(ValueError, message):
+                        prepare_kev_model_args(self.config)
+                self.assertEqual(model_args.ckpt_path, self._raw_path)
+                self.assertEqual(model_args.tokenizer_path, original_tokenizer)
+                self.assertEqual(getattr(model_args, field), value)
+
+    def test_kev_prepare_leaves_normal_model_configuration_unchanged(self):
+        from rtp_llm.config.server_config_setup import prepare_kev_model_args
+
+        original = {
+            "ckpt_path": "/models/embedding-model",
+            "tokenizer_path": "/models/embedding-tokenizer",
+            "model_type": "bert",
+            "task_type": "DENSE_EMBEDDING",
+        }
+        for field, value in original.items():
+            setattr(self.config.model_args, field, value)
+        with patch(self._prepare_target, return_value=None) as prepare:
+            prepare_kev_model_args(self.config)
+        prepare.assert_called_once_with(original["ckpt_path"])
+        for field, value in original.items():
+            self.assertEqual(getattr(self.config.model_args, field), value)
+
+    def test_kev_prepare_empty_checkpoint_does_not_probe(self):
+        from rtp_llm.config.server_config_setup import prepare_kev_model_args
+
+        self.config.model_args.ckpt_path = ""
+        with patch(self._prepare_target) as prepare:
+            prepare_kev_model_args(self.config)
+        prepare.assert_not_called()
+        self.assertEqual(self.config.model_args.tokenizer_path, "")
+
+    def test_kev_setup_converts_before_defaults_and_reinspects_export(self):
+        from unittest.mock import call
+
+        # HF identifiers must resolve before model inference or generic remote fetch.
+        source = "jaredpalmer/kev-4b"
+        self.config.model_args.ckpt_path = source
+        events = []
+
+        def prepare_checkpoint(path):
+            events.append(("prepare", path))
+            self.assertIn(path, (source, self._prepared_path))
+            return self._prepared_path
+
+        def infer_model_type(path):
+            events.append(("infer", path))
+            self.assertEqual(path, self._prepared_path)
+            self.assertEqual(self.config.model_args.tokenizer_path, self._prepared_path)
+            return "qwen35_dense"
+
+        def fetch_checkpoint(path):
+            self.assertEqual(path, self._prepared_path)
+            return path
+
+        with (
+            patch(self._prepare_target, side_effect=prepare_checkpoint) as prepare,
+            patch(
+                self._setup_module + "._infer_model_type", side_effect=infer_model_type
+            ),
+            patch(
+                self._setup_module + ".fetch_remote_file_to_local",
+                side_effect=fetch_checkpoint,
+            ) as fetch,
+            patch(self._setup_module + ".auto_configure_deepep"),
+        ):
+            setup_and_configure_server(self.config)
+
+        self.assertEqual(
+            events,
+            [
+                ("prepare", source),
+                ("infer", self._prepared_path),
+                ("prepare", self._prepared_path),
+            ],
+        )
+        self.assertEqual(
+            prepare.call_args_list, [call(source), call(self._prepared_path)]
+        )
+        self.assertEqual(
+            fetch.call_args_list, [call(self._prepared_path), call(self._prepared_path)]
+        )
+        self.assertEqual(self.config.model_args.ckpt_path, self._prepared_path)
+        self.assertEqual(self.config.model_args.tokenizer_path, self._prepared_path)
+        self.assertEqual(self.config.model_args.model_type, "qwen35_dense")
+
+    def test_kev_fetch_recognizes_raw_release_after_remote_mount(self):
+        from unittest.mock import call
+
+        from rtp_llm.config.server_config_setup import (
+            fetch_model_files_to_local,
+            prepare_kev_model_args,
+        )
+
+        source = "nas://models/kev-4b"
+        mounted = "/mnt/models/kev-4b-raw"
+        for tokenizer in ("", source):
+            with self.subTest(tokenizer=tokenizer):
+                self.config.model_args.ckpt_path = source
+                self.config.model_args.tokenizer_path = tokenizer
+                self.config.model_args.model_type = "qwen35_dense"
+                with (
+                    patch(
+                        self._prepare_target, side_effect=[None, self._prepared_path]
+                    ) as prepare,
+                    patch(
+                        self._setup_module + ".fetch_remote_file_to_local",
+                        side_effect=lambda path: {
+                            source: mounted,
+                            self._prepared_path: self._prepared_path,
+                        }[path],
+                    ) as fetch,
+                ):
+                    prepare_kev_model_args(self.config)
+                    self.assertEqual(self.config.model_args.ckpt_path, source)
+                    fetch_model_files_to_local(self.config)
+                self.assertEqual(prepare.call_args_list, [call(source), call(mounted)])
+                self.assertEqual(
+                    fetch.call_args_list, [call(source), call(self._prepared_path)]
+                )
+                self.assertEqual(self.config.model_args.ckpt_path, self._prepared_path)
+                self.assertEqual(
+                    self.config.model_args.tokenizer_path, self._prepared_path
+                )
+
+    def test_kev_fetch_preserves_normal_remote_tokenizer_selection(self):
+        from unittest.mock import call
+
+        from rtp_llm.config.server_config_setup import (
+            fetch_model_files_to_local,
+            prepare_kev_model_args,
+        )
+
+        source = "nas://models/embedding-model"
+        tokenizer = "nas://models/embedding-tokenizer"
+        local_model = "/mnt/models/embedding-model"
+        local_tokenizer = "/mnt/models/embedding-tokenizer"
+        model_args = self.config.model_args
+        model_args.ckpt_path = source
+        model_args.tokenizer_path = tokenizer
+        model_args.model_type = "bert"
+        model_args.task_type = "DENSE_EMBEDDING"
+        with (
+            patch(self._prepare_target, return_value=None) as prepare,
+            patch(
+                self._setup_module + ".fetch_remote_file_to_local",
+                side_effect=lambda path: {
+                    source: local_model,
+                    tokenizer: local_tokenizer,
+                }[path],
+            ) as fetch,
+        ):
+            prepare_kev_model_args(self.config)
+            fetch_model_files_to_local(self.config)
+        self.assertEqual(prepare.call_args_list, [call(source), call(local_model)])
+        self.assertEqual(fetch.call_args_list, [call(source), call(tokenizer)])
+        self.assertEqual(model_args.ckpt_path, local_model)
+        self.assertEqual(model_args.tokenizer_path, local_tokenizer)
+        self.assertEqual(model_args.model_type, "bert")
+        self.assertEqual(model_args.task_type, "DENSE_EMBEDDING")
+
+    def test_kev_prepare_conversion_failure_does_not_fall_back_to_raw_model(self):
+        from rtp_llm.config.server_config_setup import prepare_kev_model_args
+
+        with patch(
+            self._prepare_target, side_effect=ValueError("incomplete Kev release")
+        ):
+            with self.assertRaisesRegex(ValueError, "incomplete Kev release"):
+                prepare_kev_model_args(self.config)
+        self.assertEqual(self.config.model_args.ckpt_path, self._raw_path)
+        self.assertEqual(self.config.model_args.tokenizer_path, "")
+
+
 if __name__ == "__main__":
     unittest.main()
