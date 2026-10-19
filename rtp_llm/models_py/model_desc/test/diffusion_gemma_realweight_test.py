@@ -517,9 +517,10 @@ class DiffusionGemmaReuseABTest(unittest.TestCase):
             lw = _model_weights(_hf(i))
             for name, tensor in lw.items():
                 mw.set_layer_weight(i, name, tensor.to(_torch.bfloat16))
-        embed = _get("model.decoder.embed_tokens.weight")
-        mw.set_global_weight(W.embedding, embed.to(_torch.bfloat16))
-        mw.set_global_weight(W.lm_head, embed.to(_torch.bfloat16))
+        device = _torch.device("cuda:0")
+        embed = _get("model.decoder.embed_tokens.weight").to(_torch.bfloat16).to(device)
+        mw.set_global_weight(W.embedding, embed)
+        mw.set_global_weight(W.lm_head, embed)
         mw.set_global_weight(W.final_ln_gamma, _get("model.decoder.norm.weight").to(_torch.bfloat16))
         mw.set_global_weight(
             W.dgm_self_cond_pre_norm,
