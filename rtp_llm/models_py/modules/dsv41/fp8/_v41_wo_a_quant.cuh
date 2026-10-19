@@ -15,7 +15,7 @@ struct V41QuantPolicy {
 
     __device__ explicit V41QuantPolicy(float value): legacy(value) {}
 
-    template<typename DType = void>
+    template<typename DType>
     __device__ __forceinline__ unsigned scale_exp(nv_bfloat16 value) const {
         const float amax = fmaxf(__bfloat162float(value), 0x1p-126f);
         if (legacy != 0.0f) {
@@ -40,10 +40,9 @@ __device__ __forceinline__ unsigned v41_quant4(nv_bfloat162 a, nv_bfloat162 b, n
 
 // Override only these two epilogue operations in this translation unit.
 // The vendor mainloop, BF16 rounding, reductions and TMA stores stay intact.
-// DeepGEMM 2.8.2 calls both helpers from the CastToFP8WithClamp operator in
-// epilogue/operators.cuh, where the launch arguments are the member `args`.
-#define get_ue8m0_sf_exp V41QuantPolicy(args.alpha).template scale_exp
+#define get_ue8m0_sf_exp V41QuantPolicy(epilogue_op.alpha).template scale_exp
 #define scale_bf16x2_into_fp8x4 v41_quant4
-#include <deep_gemm/epilogue/operators.cuh>
+#include <deep_gemm/epilogue/sm100_store_cd.cuh>
+#include <deep_gemm/epilogue/sm100_store_cd_swap_ab.cuh>
 #undef scale_bf16x2_into_fp8x4
 #undef get_ue8m0_sf_exp
