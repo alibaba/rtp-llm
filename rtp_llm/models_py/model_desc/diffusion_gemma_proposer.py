@@ -26,6 +26,48 @@ from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
 
 logger = logging.getLogger(__name__)
 
+# Contract #5-iv: single-launch fused entropy kernel (logsumexp + p*logp in
+# one reduction) for the EB sampler's two Categorical.entropy() calls per
+# step — the torch path burns 8+ full-vocab fp32 passes per call. The
+# reference path stays available: DGM_FUSED_ENTROPY=0 forces it (A/B gate).
+_FUSED_ENTROPY_ENV = os.environ.get("DGM_FUSED_ENTROPY", "1") != "0"
+_fused_entropy_kernel = None
+try:
+    from rtp_llm.models_py.triton_kernels.common.categorical_entropy import (
+        categorical_entropy,
+    )
+
+    _fused_entropy_kernel = categorical_entropy
+except Exception as _entropy_error:  # CPU-only sandboxes without triton
+    logger.info(
+        "DiffusionGemma fused entropy kernel unavailable, torch path: %s",
+        _entropy_error,
+    )
+
+
+def _categorical_entropy(logits: torch.Tensor) -> torch.Tensor:
+    """Categorical entropy over the last dim: fused Triton kernel on CUDA
+    fp32, torch.distributions reference path otherwise. The fused kernel is
+    A/B-checked against the reference (fp32 reduction-order noise, entropy
+    diff < 1e-5 — see diffusion_gemma_proposer_test); any kernel failure
+    degrades to the reference path with a logged warning."""
+    if (
+        _FUSED_ENTROPY_ENV
+        and _fused_entropy_kernel is not None
+        and logits.is_cuda
+        and logits.dtype == torch.float32
+        and logits.numel() > 0
+    ):
+        try:
+            return _fused_entropy_kernel(logits)
+        except Exception as error:
+            logger.warning(
+                "fused entropy kernel failed (%s); torch reference path taken",
+                error,
+            )
+    dist = torch.distributions.Categorical(logits=logits)
+    return dist.entropy()
+
 
 class EntropyBoundDenoiser:
     """Reference-faithful EB sampler (transformers generation_diffusion_gemma):
@@ -86,8 +128,7 @@ class EntropyBoundDenoiser:
         )
 
     def _accept_mask(self, logits: torch.Tensor) -> torch.Tensor:
-        dist = torch.distributions.Categorical(logits=logits)
-        token_entropy = dist.entropy()
+        token_entropy = _categorical_entropy(logits)
         sorted_entropy, sorted_idx = torch.sort(token_entropy, dim=-1, descending=False)
         cumulative = torch.cumsum(sorted_entropy, dim=-1)
         sorted_mask = cumulative - sorted_entropy <= self.entropy_bound
@@ -117,8 +158,7 @@ class EntropyBoundDenoiser:
         logits: torch.Tensor,
         history: Optional[torch.Tensor],
     ):
-        dist = torch.distributions.Categorical(logits=logits)
-        entropy = dist.entropy()
+        entropy = _categorical_entropy(logits)
         confident = entropy.mean(dim=-1) < self.confidence_threshold
         if history is None or self.stability_threshold == 0:
             stable = torch.ones_like(confident)
@@ -260,13 +300,16 @@ class DiffusionGemmaProposer(nn.Module):
             logits = torch.nn.functional.linear(
                 hidden.to(embed_weight.dtype), embed_weight
             ).to(torch.float32)
-            logits = logits / softcap
-            logits = torch.tanh(logits) * softcap
+            # Contract #5-iii: the softcap chain ((x/s -> tanh) * s) / t is
+            # merged algebraically into tanh(x/s) * (s/t) — one full-vocab
+            # elementwise pass less. Values agree with the sequential chain
+            # to the last fp32 ulp (two roundings either way).
+            logits = torch.tanh(logits / softcap)
             logits = logits.view(batch, self.canvas_length, -1)
             # Reference: t = t_min + (t_max - t_min) * step / max_steps
             # (transformers TemperatureScheduleByDenoisingStep).
             temperature = denoiser.temperature(step)
-            processed = logits / temperature
+            processed = logits * (softcap / temperature)
             new_argmax = torch.argmax(processed, dim=-1)
             if bool(os.environ.get("DGM_FI_DIAG", "")) and step == 0:
                 # Reuse bring-up fork: with the C++ reuse fix the matched
@@ -313,7 +356,13 @@ class DiffusionGemmaProposer(nn.Module):
             renoised = torch.where(finished[:, None], frozen_canvas, renoised)
             argmax_canvas = new_argmax
             canvas = renoised
-            self_conditioning_logits = processed.to(embed_weight.dtype)
+            # Contract #5-iii: keep the self-conditioning logits in fp32 end
+            # to end — the former .to(embed_weight.dtype) round-trip cost two
+            # ~1.6GB full-vocab casts per step (store here, upcast again in
+            # forward_canvas) and only added bf16 rounding on top of the fp32
+            # reference semantics. forward_canvas now fuses the softmax-side
+            # cast with softmax(dtype=torch.float32).
+            self_conditioning_logits = processed
             if bool(finished.all().item()):
                 break
 

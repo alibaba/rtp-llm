@@ -1512,8 +1512,13 @@ class DiffusionGemmaModel(GptModelBase):
         embeds = embeds.view(batch, -1, embeds.shape[-1])
         if self_conditioning_logits is not None:
             weight = self.embed_tokens.weight
+            # Contract #5-iii: the proposer keeps self_conditioning_logits in
+            # fp32, so the former .to(torch.float32) upcast pass is gone;
+            # softmax(dtype=torch.float32) additionally fuses the upcast into
+            # the softmax kernel for any non-fp32 caller, leaving only the
+            # weight-dtype cast for the matmul.
             soft = torch.matmul(
-                self_conditioning_logits.to(torch.float32).softmax(dim=-1).to(weight.dtype),
+                self_conditioning_logits.softmax(dim=-1, dtype=torch.float32).to(weight.dtype),
                 weight,
             ) * self.embed_scale
             embeds = self.self_conditioning(embeds, soft)

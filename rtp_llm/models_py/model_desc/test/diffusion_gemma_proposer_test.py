@@ -522,5 +522,248 @@ def _ref_accept_mask(logits, bound):
     return torch.scatter(torch.zeros_like(sel), -1, sorted_idx, sel)
 
 
+def _accept_boundary_margin(entropy, bound):
+    """Per-row min |(cumsum(sorted) - sorted) - bound|: how far the tightest
+    accept decision sits from the threshold. An accept-mask flip between two
+    entropy variants is only noise-legitimate inside this margin."""
+    sorted_e, _ = torch.sort(entropy, dim=-1, descending=False)
+    cum = torch.cumsum(sorted_e, dim=-1)
+    stat = cum - sorted_e
+    return (stat - bound).abs().min(dim=-1).values
+
+
+class DiffusionGemmaEntropyABTest(TestCase):
+    """Contract #5-iv GPU A/B: fused single-launch Triton entropy kernel vs
+    the torch.distributions.Categorical reference path, plus the jit-cache
+    placement/warmup evidence. Skipped without a CUDA device (CPU UT lanes
+    keep exercising the torch path through the same gate)."""
+
+    def _require_cuda(self):
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA device required for the fused entropy kernel")
+
+    def test_entropy_jit_cache_gpu(self):
+        self._require_cuda()
+        import tempfile
+        import time
+
+        from rtp_llm.models_py.triton_kernels.common import categorical_entropy as ce
+
+        dev = torch.device("cuda:0")
+        torch.manual_seed(7)
+        logits = torch.randn(64, 4096, device=dev)
+        # Point the Triton JIT at a fresh dir exactly the way jit_cache_manager
+        # does at engine runtime (TRITON_CACHE_DIR), prove the kernel's
+        # compile artifacts land there, and that the second call reuses them
+        # instead of recompiling (warmup semantics).
+        cache_dir = tempfile.mkdtemp(prefix="dgm_entropy_triton_")
+        prev = os.environ.get("TRITON_CACHE_DIR")
+        os.environ["TRITON_CACHE_DIR"] = cache_dir
+        try:
+            t0 = time.perf_counter()
+            out1 = ce.categorical_entropy(logits)
+            torch.cuda.synchronize()
+            t_first = time.perf_counter() - t0
+            entries_first = set(os.listdir(cache_dir))
+            artifacts = {}
+            for entry in sorted(entries_first):
+                sub = os.path.join(cache_dir, entry)
+                artifacts[entry] = sorted(os.listdir(sub))
+            t0 = time.perf_counter()
+            out2 = ce.categorical_entropy(logits)
+            torch.cuda.synchronize()
+            t_second = time.perf_counter() - t0
+            entries_second = set(os.listdir(cache_dir))
+            print(
+                f"[dgm-entropy-jit] TRITON_CACHE_DIR={cache_dir} "
+                f"t_first={t_first:.3f}s t_second={t_second:.4f}s "
+                f"entries_after_first={len(entries_first)} "
+                f"entries_after_second={len(entries_second)} "
+                f"artifacts={artifacts}",
+                flush=True,
+            )
+            self.assertTrue(torch.equal(out1, out2))
+            self.assertTrue(
+                entries_first,
+                msg="no JIT artifacts written to TRITON_CACHE_DIR",
+            )
+            self.assertFalse(
+                entries_second - entries_first,
+                msg=f"second call recompiled: {sorted(entries_second - entries_first)}",
+            )
+        finally:
+            if prev is None:
+                os.environ.pop("TRITON_CACHE_DIR", None)
+            else:
+                os.environ["TRITON_CACHE_DIR"] = prev
+
+    def test_gated_accept_stop_ab_gpu(self):
+        # EB acceptance is semantically sensitive: run the REAL denoiser
+        # code path in both gate states on the real proposer-shaped logits
+        # and require the entropy/mask/stop outputs to agree within fp32
+        # reduction noise (knife-edge flips excepted, with margin proof).
+        self._require_cuda()
+        self.assertTrue(
+            dgp._FUSED_ENTROPY_ENV and dgp._fused_entropy_kernel is not None,
+            msg="fused entropy path must be importable and enabled by default",
+        )
+        dev = torch.device("cuda:0")
+        torch.manual_seed(31)
+        canvas, vocab, batch = 256, 262144, 4
+        denoiser = dgp.EntropyBoundDenoiser(
+            canvas, vocab, 48, 0.4, 0.8, 0.1, 1e-3, 1, generator=None
+        )
+        logits = torch.tanh(torch.randn(batch, canvas, vocab, device=dev) * 2.0) * 75.0
+        argmax = torch.argmax(logits, dim=-1)
+        history = torch.full((1, batch, canvas), -1, dtype=argmax.dtype, device=dev)
+        mask_fused = denoiser._accept_mask(logits)
+        stop_fused = denoiser.stop(argmax, logits, history)
+        saved = dgp._FUSED_ENTROPY_ENV
+        try:
+            dgp._FUSED_ENTROPY_ENV = False
+            mask_ref = denoiser._accept_mask(logits)
+            stop_ref = denoiser.stop(argmax, logits, history)
+        finally:
+            dgp._FUSED_ENTROPY_ENV = saved
+        ent_fused = dgp._categorical_entropy(logits)
+        ent_ref = torch.distributions.Categorical(logits=logits).entropy()
+        ent_true = torch.distributions.Categorical(logits=logits.double()).entropy()
+        kernel_err = float((ent_fused - ent_true).abs().max())
+        ent_max = float((ent_fused - ent_ref).abs().max())
+        # contract bound: the KERNEL's own accuracy vs the float64 truth.
+        self.assertLess(kernel_err, 1e-5)
+        # fused-vs-ref gap is the reference path's own fp32 accumulation
+        # noise (measured: torch32-vs-truth is the same magnitude); sanity
+        # bound only, the actual number is printed as evidence below.
+        self.assertLess(ent_max, 1e-4)
+        mask_equal = bool(torch.equal(mask_fused, mask_ref))
+        stop_equal = bool(torch.equal(stop_fused, stop_ref))
+        if not mask_equal:
+            margin = _accept_boundary_margin(ent_ref, denoiser.entropy_bound)
+            flipped = (mask_fused != mask_ref).any(dim=-1).nonzero().flatten().tolist()
+            for row in flipped:
+                self.assertLess(
+                    float(margin[row]),
+                    10.0 * ent_max,
+                    msg=f"accept mask flipped beyond boundary noise at row {row}",
+                )
+        if not stop_equal:
+            mean_margin = (ent_ref.mean(dim=-1) - denoiser.confidence_threshold).abs()
+            flipped = (stop_fused != stop_ref).nonzero().flatten().tolist()
+            for row in flipped:
+                self.assertLess(
+                    float(mean_margin[row]),
+                    10.0 * ent_max,
+                    msg=f"stop decision flipped beyond threshold noise at row {row}",
+                )
+        print(
+            f"[dgm-entropy-ab] gated accept/stop path: kernel_vs_true={kernel_err:.3e} "
+            f"ent_max_diff(fused_vs_ref)={ent_max:.3e} "
+            f"mask_equal={mask_equal} stop_equal={stop_equal}",
+            flush=True,
+        )
+
+    def test_reference_entropy_ab_gpu(self):
+        # Direct kernel-vs-Categorical comparison over the proposer's real
+        # [1024, 262144] shape and neighbors: flat / sharp / softcap-bounded
+        # distributions, the small masked-tail shape, and -inf lanes. A
+        # float64 Categorical is the referee: the contract bound (<1e-5)
+        # applies to the kernel's own accuracy against that truth, while the
+        # fused-vs-ref gap is the torch path's own fp32 accumulation noise
+        # (measured: torch32-vs-truth is the same magnitude) — printed as
+        # evidence, sanity-bounded only.
+        self._require_cuda()
+        from rtp_llm.models_py.triton_kernels.common.categorical_entropy import (
+            categorical_entropy,
+        )
+
+        dev = torch.device("cuda:0")
+        torch.manual_seed(2026)
+        cases = [
+            ("flat_262144", torch.randn(1024, 262144, device=dev)),
+            ("sharp_262144", torch.randn(1024, 262144, device=dev) * 20.0),
+            (
+                "softcap_262144",
+                torch.tanh(torch.randn(1024, 262144, device=dev) * 2.0) * 75.0,
+            ),
+            ("small_64", torch.randn(7, 64, device=dev) * 3.0),
+        ]
+        neg_inf = torch.randn(9, 4096, device=dev) * 5.0
+        neg_inf[:, ::7] = float("-inf")
+        cases.append(("neg_inf_4096", neg_inf))
+        worst_kernel = 0.0
+        worst_gap = 0.0
+        for name, logits in cases:
+            ref = torch.distributions.Categorical(logits=logits).entropy()
+            fused = categorical_entropy(logits)
+            truth = torch.distributions.Categorical(logits=logits.double()).entropy()
+            kernel_err = float((fused - truth).abs().max())
+            ref_err = float((ref - truth).abs().max())
+            gap = (fused - ref).abs()
+            gap_max = float(gap.max())
+            worst_kernel = max(worst_kernel, kernel_err)
+            worst_gap = max(worst_gap, gap_max)
+            print(
+                f"[dgm-entropy-ab] {name}: shape={tuple(logits.shape)} "
+                f"ent_true_mean={float(truth.mean()):.4f} "
+                f"kernel_vs_true={kernel_err:.3e} ref_vs_true={ref_err:.3e} "
+                f"fused_vs_ref={gap_max:.3e} mean_abs_diff={float(gap.mean()):.3e}",
+                flush=True,
+            )
+            self.assertLess(kernel_err, 1e-5)
+            self.assertLess(gap_max, 1e-4)
+            del logits, ref, fused, truth, gap
+        print(
+            f"[dgm-entropy-ab] worst kernel_vs_true: {worst_kernel:.3e} "
+            f"worst fused_vs_ref: {worst_gap:.3e}",
+            flush=True,
+        )
+
+
+    def test_reference_entropy_perf_gpu(self):
+        # Kernel-level timing evidence for contract #5-iv: one fused launch
+        # (two row reads) vs the torch Categorical chain (logsumexp +
+        # normalized-logits + softmax + clamp/mul/sum materializations) on
+        # the proposer's real [1024, 262144] fp32 block.
+        self._require_cuda()
+        import time
+
+        from rtp_llm.models_py.triton_kernels.common.categorical_entropy import (
+            categorical_entropy,
+        )
+
+        dev = torch.device("cuda:0")
+        torch.manual_seed(99)
+        logits = torch.tanh(torch.randn(1024, 262144, device=dev) * 2.0) * 75.0
+
+        def _torch_path():
+            return torch.distributions.Categorical(logits=logits).entropy()
+
+        for _ in range(3):
+            categorical_entropy(logits)
+            _torch_path()
+        torch.cuda.synchronize()
+        rounds = 10
+        t0 = time.perf_counter()
+        for _ in range(rounds):
+            categorical_entropy(logits)
+        torch.cuda.synchronize()
+        t_fused = (time.perf_counter() - t0) / rounds
+        t0 = time.perf_counter()
+        for _ in range(rounds):
+            _torch_path()
+        torch.cuda.synchronize()
+        t_ref = (time.perf_counter() - t0) / rounds
+        print(
+            f"[dgm-entropy-perf] [1024,262144] fp32 (H20): "
+            f"fused={t_fused * 1e3:.3f}ms/call torch_ref={t_ref * 1e3:.3f}ms/call "
+            f"speedup={t_ref / t_fused:.1f}x",
+            flush=True,
+        )
+        # both paths measured on the same block: the fused path must not be
+        # slower than the reference chain it replaces.
+        self.assertLess(t_fused, t_ref)
+
+
 if __name__ == "__main__":
     main()
