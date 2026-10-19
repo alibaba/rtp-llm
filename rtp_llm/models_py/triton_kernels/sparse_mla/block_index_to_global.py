@@ -30,13 +30,14 @@ def _convert_req_index_to_global_index_kernel(
     # program_id(0) -> token_id (row)
     # program_id(1) -> tile index along columns
     token_id = tl.program_id(0).to(tl.int64)
-    tile_id = tl.program_id(1)
+    tile_id = tl.program_id(1).to(tl.int64)
 
     # Each program covers BLOCK_N consecutive columns
     indice_id = tile_id * BLOCK_N + tl.arange(0, BLOCK_N)
 
     # Load request id for this token (no mask: grid is exact)
-    req = tl.load(req_id_ptr + token_id)
+    # Index tensors remain int32; pointer offsets must widen before stride products.
+    req = tl.load(req_id_ptr + token_id).to(tl.int64)
 
     # Load token indices for this tile
     ti_ptr = token_indices_ptr + token_id * ti_stride0 + indice_id * ti_stride1
@@ -49,7 +50,7 @@ def _convert_req_index_to_global_index_kernel(
         prefill_req_id = tl.load(prefill_request_id_ptr + token_id)
         is_prefill = prefill_req_id >= 0
     # Compute block id and in-block offset
-    block_id = tok // TOKENS_PER_BLOCK_FOR_BLOCK_TABLE
+    block_id = (tok // TOKENS_PER_BLOCK_FOR_BLOCK_TABLE).to(tl.int64)
     inblock_off = tok % ENTRIES_PER_BLOCK
 
     # Guard block_table access
