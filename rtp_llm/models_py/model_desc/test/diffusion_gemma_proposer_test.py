@@ -765,5 +765,338 @@ class DiffusionGemmaEntropyABTest(TestCase):
         self.assertLess(t_fused, t_ref)
 
 
+def _tv_distance(a: torch.Tensor, b: torch.Tensor, bins: int) -> float:
+    """Total-variation distance between two empirical token distributions."""
+    ca = torch.bincount(a.reshape(-1).to(torch.long), minlength=bins).double()
+    cb = torch.bincount(b.reshape(-1).to(torch.long), minlength=bins).double()
+    total = max(1, int(ca.sum().item()))
+    return 0.5 * float((ca - cb).abs().sum().item()) / total
+
+
+def _chi2_vs_analytic(tokens: torch.Tensor, probs: torch.Tensor, bins: int):
+    """Pearson chi-square of an empirical token distribution against the
+    analytic softmax probabilities (bins with expected count < 5 excluded,
+    the standard validity rule). Returns (chi2, dof)."""
+    counts = torch.bincount(
+        tokens.reshape(-1).to(torch.long), minlength=bins
+    ).double()
+    n = float(counts.sum().item())
+    expected = probs.reshape(-1).double() * n
+    keep = expected >= 5.0
+    chi2 = float(((counts[keep] - expected[keep]) ** 2 / expected[keep]).sum())
+    dof = max(1, int(keep.sum().item()) - 1)
+    return chi2, dof
+
+
+class DiffusionGemmaSamplingABTest(TestCase):
+    """Contract opt-r4 lane B GPU A/B: fused Gumbel-max categorical sampling
+    kernel vs the torch softmax+multinomial reference. Sampling is stochastic
+    and the two paths deliberately use independent RNG streams, so the
+    contract is distribution-level: same-seed determinism plus empirical
+    agreement of >= 1e3-sample draws (total variation < 1%, Pearson
+    chi-square vs the analytic softmax in the [0.5, 2.5]-per-dof noise band),
+    plus jit-cache placement and kernel-vs-torch timing evidence. Skipped
+    without a CUDA device (CPU UT lanes keep exercising the torch path
+    through the same gate)."""
+
+    def _require_cuda(self):
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA device required for the fused sampling kernel")
+
+    def _import_kernel(self):
+        from rtp_llm.models_py.triton_kernels.common.categorical_sample import (
+            categorical_sample,
+        )
+
+        return categorical_sample
+
+    def test_sampling_jit_cache_gpu(self):
+        # Same evidence pattern as the entropy kernel: point the Triton JIT
+        # at a fresh TRITON_CACHE_DIR, prove the compile artifacts land there
+        # and that the second call reuses them instead of recompiling.
+        self._require_cuda()
+        import os
+        import tempfile
+        import time
+
+        categorical_sample = self._import_kernel()
+        dev = torch.device("cuda:0")
+        torch.manual_seed(7)
+        logits = torch.randn(64, 4096, device=dev)
+        cache_dir = tempfile.mkdtemp(prefix="dgm_sample_triton_")
+        prev = os.environ.get("TRITON_CACHE_DIR")
+        os.environ["TRITON_CACHE_DIR"] = cache_dir
+        try:
+            t0 = time.perf_counter()
+            out1 = categorical_sample(logits, seed=1)
+            torch.cuda.synchronize()
+            t_first = time.perf_counter() - t0
+            entries_first = set(os.listdir(cache_dir))
+            t0 = time.perf_counter()
+            out2 = categorical_sample(logits, seed=2)
+            torch.cuda.synchronize()
+            t_second = time.perf_counter() - t0
+            entries_second = set(os.listdir(cache_dir))
+            print(
+                f"[dgm-sample-jit] TRITON_CACHE_DIR={cache_dir} "
+                f"t_first={t_first:.3f}s t_second={t_second:.4f}s "
+                f"entries_after_first={len(entries_first)} "
+                f"entries_after_second={len(entries_second)}",
+                flush=True,
+            )
+            self.assertEqual(out1.dtype, torch.int64)
+            self.assertEqual(tuple(out1.shape), (64,))
+            self.assertTrue(
+                ((out1 >= 0) & (out1 < 4096)).all(), "tokens out of range"
+            )
+            self.assertTrue(
+                entries_first,
+                msg="no JIT artifacts written to TRITON_CACHE_DIR",
+            )
+            self.assertFalse(
+                entries_second - entries_first,
+                msg=f"second call recompiled: {sorted(entries_second - entries_first)}",
+            )
+        finally:
+            if prev is None:
+                os.environ.pop("TRITON_CACHE_DIR", None)
+            else:
+                os.environ["TRITON_CACHE_DIR"] = prev
+
+    def test_sampling_smallvocab_distribution_ab_gpu(self):
+        # The exact proposer call shape (multinomial(probs, 1), replacement
+        # semantics irrelevant at 1 draw) at a small vocab where >= 1e3
+        # samples per path give a dense, statistically meaningful empirical
+        # distribution: fused-vs-torch TV < 1%, both paths' chi-square vs
+        # the analytic softmax in the noise band, plus determinism and the
+        # -inf-lane edge contract.
+        self._require_cuda()
+        categorical_sample = self._import_kernel()
+        dev = torch.device("cuda:0")
+        vocab = 64
+        draws = 524288
+        torch.manual_seed(41)
+        row = torch.randn(vocab, device=dev) * 0.6  # flat: every bin expected ~8192
+        logits = row.unsqueeze(0).expand(draws, vocab).contiguous()
+        probs = torch.softmax(row, dim=-1)
+        generator = torch.Generator(device=dev).manual_seed(17)
+        torch_ref = torch.multinomial(
+            probs.unsqueeze(0).expand(draws, vocab).contiguous(),
+            1,
+            generator=generator,
+        ).squeeze(-1)
+        fused_a = categorical_sample(logits, seed=2026)
+        fused_b = categorical_sample(logits, seed=2026)
+        fused_c = categorical_sample(logits, seed=2027)
+        self.assertTrue(torch.equal(fused_a, fused_b), "same seed must reproduce")
+        self.assertFalse(
+            torch.equal(fused_a, fused_c), "different seed must reshuffle"
+        )
+        self.assertEqual(fused_a.dtype, torch.int64)
+        self.assertTrue(
+            ((fused_a >= 0) & (fused_a < vocab)).all(),
+            "tokens out of range",
+        )
+        tv = _tv_distance(fused_a, torch_ref, vocab)
+        chi2_f, dof = _chi2_vs_analytic(fused_a, probs, vocab)
+        chi2_t, dof_t = _chi2_vs_analytic(torch_ref, probs, vocab)
+        print(
+            f"[dgm-sample-ab] small64 draws={draws}: fused_vs_torch TV={tv:.5f} "
+            f"chi2_fused={chi2_f:.1f} chi2_torch={chi2_t:.1f} dof={dof}",
+            flush=True,
+        )
+        self.assertLess(tv, 0.01)
+        self.assertLess(chi2_f / dof, 2.5)
+        self.assertGreater(chi2_f / dof, 0.5)
+        self.assertLess(chi2_t / dof_t, 2.5)
+        # -inf lanes must lose the argmax and never poison the draw.
+        neg = torch.randn(9, 4096, device=dev) * 5.0
+        neg[:, ::3] = float("-inf")
+        neg_toks = categorical_sample(neg, seed=3)
+        finite = neg.isfinite()
+        for r in range(neg.shape[0]):
+            self.assertTrue(
+                finite[r, int(neg_toks[r])],
+                msg=f"-inf lane won the draw at row {r}",
+            )
+
+    def test_sampling_bigvocab_distribution_ab_gpu(self):
+        # Proposer-scale vocab (262144): a concentrated support (~100 hot
+        # tokens over the full scan width) so 1e6+ pooled draws give a
+        # dense empirical distribution; torch reference is
+        # multinomial(probs, S, replacement=True) — the memory-feasible
+        # multi-draw form of the same softmax distribution (the exact
+        # production call, softmax + multinomial(., 1), cannot materialize
+        # 1e6 rows x 262144 fp32). The kernel exercises the identical
+        # full-vocab scan and its samples_per_row stream.
+        self._require_cuda()
+        categorical_sample = self._import_kernel()
+        dev = torch.device("cuda:0")
+        vocab = 262144
+        rows = 64
+        samples = 16384
+        torch.manual_seed(43)
+        hot = 100
+        base = torch.full((1, vocab), -30.0, device=dev)
+        hot_idx = torch.randperm(vocab, device=dev)[:hot]
+        base[0, hot_idx] = torch.randn(hot, device=dev) * 2.0 - 1.5
+        logits = base.expand(rows, vocab).contiguous()
+        probs = torch.softmax(base, dim=-1)
+        torch_ref = torch.multinomial(
+            probs.expand(rows, vocab).contiguous(), samples, replacement=True
+        )
+        fused = categorical_sample(logits, seed=515, samples_per_row=samples)
+        self.assertEqual(tuple(fused.shape), (rows, samples))
+        self.assertTrue(
+            ((fused >= 0) & (fused < vocab)).all(), "tokens out of range"
+        )
+        fused_rep = categorical_sample(logits, seed=515, samples_per_row=samples)
+        self.assertTrue(torch.equal(fused, fused_rep), "same seed must reproduce")
+        # pooled over the hot support + one "other" bucket
+        support = hot_idx.to(torch.long)
+        fused_counts = torch.bincount(
+            fused.reshape(-1).to(torch.long), minlength=vocab
+        ).double()
+        ref_counts = torch.bincount(
+            torch_ref.reshape(-1).to(torch.long), minlength=vocab
+        ).double()
+        other_f = float(fused_counts.sum() - fused_counts[support].sum())
+        other_r = float(ref_counts.sum() - ref_counts[support].sum())
+        diff = (fused_counts[support] - ref_counts[support]).abs().sum()
+        total = float(fused_counts.sum())
+        tv = 0.5 * float(diff + abs(other_f - other_r)) / total
+        p_expected = probs.reshape(-1).double()
+        chi2_f, dof = _chi2_vs_analytic(fused, p_expected, vocab)
+        print(
+            f"[dgm-sample-ab] big262144 rows={rows}x{samples} draws={int(total)}: "
+            f"fused_vs_torch TV={tv:.5f} support_chi2_fused={chi2_f:.1f} "
+            f"dof={dof} other_fused={other_f:.0f} other_torch={other_r:.0f}",
+            flush=True,
+        )
+        self.assertLess(tv, 0.01)
+        # expected hot-token frequencies must match the analytic softmax
+        # (per-token expected count >= 100 for the kept bins)
+        self.assertLess(chi2_f / dof, 2.5)
+        self.assertGreater(chi2_f / dof, 0.5)
+
+    def test_sampling_perf_gpu(self):
+        # Kernel-level timing evidence for the lane-B contract: one fused
+        # launch (single logits read) vs the torch chain (full fp32 softmax
+        # materialization + the multinomial walk) on the proposer's real
+        # [1024, 262144] fp32 block.
+        self._require_cuda()
+        import time
+
+        categorical_sample = self._import_kernel()
+        dev = torch.device("cuda:0")
+        torch.manual_seed(99)
+        logits = torch.tanh(torch.randn(1024, 262144, device=dev) * 2.0) * 75.0
+
+        def _torch_path(x):
+            probs = torch.softmax(x, dim=-1, dtype=torch.float32)
+            flat = probs.reshape(-1, probs.shape[-1])
+            return torch.multinomial(flat, 1)
+
+        for _ in range(3):
+            categorical_sample(logits, seed=7)
+            _torch_path(logits)
+        torch.cuda.synchronize()
+        rounds = 10
+        t0 = time.perf_counter()
+        for _ in range(rounds):
+            categorical_sample(logits, seed=7)
+        torch.cuda.synchronize()
+        t_fused = (time.perf_counter() - t0) / rounds
+        t0 = time.perf_counter()
+        for _ in range(rounds):
+            _torch_path(logits)
+        torch.cuda.synchronize()
+        t_ref = (time.perf_counter() - t0) / rounds
+        print(
+            f"[dgm-sample-perf] [1024,262144] fp32 (H20): "
+            f"fused={t_fused * 1e3:.3f}ms/call torch_ref={t_ref * 1e3:.3f}ms/call "
+            f"speedup={t_ref / t_fused:.1f}x",
+            flush=True,
+        )
+        # both paths measured on the same block: the fused path must not be
+        # slower than the reference chain it replaces.
+        self.assertLess(t_fused, t_ref)
+
+    def test_gated_step_sampling_ab_gpu(self):
+        # Proposer-level gated A/B: the real EntropyBoundDenoiser.step on
+        # the real [batch, canvas, 262144] logits shape. The fused kernel
+        # must engage under the default gate (spy proves it), reproduce
+        # identical step outputs for identical round state (determinism
+        # contract for golden reproducibility), and the gate-off run must
+        # fall back to the torch path while the entropy-driven accept mask
+        # (a different kernel's output) stays identical.
+        self._require_cuda()
+        self.assertTrue(
+            dgp._FUSED_SAMPLING_ENV and dgp._fused_sample_kernel is not None,
+            msg="fused sampling path must be importable and enabled by default",
+        )
+        dev = torch.device("cuda:0")
+        torch.manual_seed(31)
+        canvas, vocab, batch = 256, 262144, 4
+        logits = torch.tanh(
+            torch.randn(batch, canvas, vocab, device=dev) * 2.0
+        ) * 75.0
+        canvas_tokens = torch.randint(0, vocab, (batch, canvas), device=dev)
+
+        def _fresh_denoiser():
+            generator = torch.Generator(device=dev).manual_seed(2026)
+            return dgp.EntropyBoundDenoiser(
+                canvas, vocab, 48, 0.4, 0.8, 0.1, 1e-3, 1, generator=generator
+            )
+
+        calls = []
+        real_kernel = dgp._fused_sample_kernel
+
+        def _spy(logits_arg, seed):
+            # record only SUCCESSFUL kernel executions: a compile/runtime
+            # failure would otherwise silently pass through the proposer's
+            # torch fallback and fake the engagement evidence.
+            result = real_kernel(logits_arg, seed)
+            calls.append(int(seed))
+            return result
+
+        with patch.object(dgp, "_fused_sample_kernel", _spy):
+            renoised_a, mask_a = _fresh_denoiser().step(canvas_tokens, logits)
+        with patch.object(dgp, "_fused_sample_kernel", _spy):
+            renoised_b, mask_b = _fresh_denoiser().step(canvas_tokens, logits)
+        self.assertEqual(len(calls), 2, "one kernel draw per step() call")
+        self.assertGreater(calls[0], 0)
+        self.assertTrue(
+            torch.equal(renoised_a, renoised_b),
+            "identical round state must reproduce identical step outputs",
+        )
+        self.assertTrue(torch.equal(mask_a, mask_b))
+        self.assertEqual(renoised_a.dtype, canvas_tokens.dtype)
+        self.assertTrue(
+            ((renoised_a >= 0) & (renoised_a < vocab)).all(),
+            "renoised canvas tokens out of range",
+        )
+        saved = dgp._FUSED_SAMPLING_ENV
+        try:
+            dgp._FUSED_SAMPLING_ENV = False
+            renoised_ref, mask_ref = _fresh_denoiser().step(canvas_tokens, logits)
+        finally:
+            dgp._FUSED_SAMPLING_ENV = saved
+        self.assertEqual(len(calls), 2, "gate-off must not touch the fused kernel")
+        self.assertTrue(
+            torch.equal(mask_ref, mask_a),
+            "accept mask must not depend on the sampling gate",
+        )
+        self.assertTrue(
+            ((renoised_ref >= 0) & (renoised_ref < vocab)).all()
+        )
+        print(
+            f"[dgm-sample-ab] gated step path: fused_calls={len(calls)} "
+            f"deterministic=True mask_equal_gateAB={bool(torch.equal(mask_ref, mask_a))} "
+            f"renoised_dtype={renoised_a.dtype}",
+            flush=True,
+        )
+
+
 if __name__ == "__main__":
     main()

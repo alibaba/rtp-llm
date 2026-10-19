@@ -5,7 +5,10 @@ the python forward_propose runs the entropy-bounded denoising loop over the
 canvas (bidirectional decoder attention, read-only encoder KV), runs the EB
 sampler exactly like the HF reference (temperature schedule 0.8 -> 0.4,
 lowest-entropy acceptance under the mutual-information bound, full renoising,
-adaptive stopping), and returns the final argmax canvas tokens through
+adaptive stopping; the entropy and the per-step categorical draw are fused
+into single-launch Triton kernels on CUDA — see the gate notes below, both
+A/B-checked against their torch reference paths), and returns the final
+argmax canvas tokens through
 ``PyModelOutputs.diffusion_tokens``. The C++ target-verify forward of the
 same round is the canvas commit (encoder causal forward writing the main KV
 cache). All backbone weights are the main model's modules — nothing is loaded
@@ -44,6 +47,32 @@ except Exception as _entropy_error:  # CPU-only sandboxes without triton
         _entropy_error,
     )
 
+# Contract opt-r4 lane B: single-launch fused sampling kernel (Gumbel-max
+# argmax over logits + noise) for the EB sampler's per-step Categorical draw
+# — the torch chain materializes a full [rows, V] fp32 softmax block (read +
+# write) and then walks it again inside multinomial, three-plus full-vocab
+# passes per step where the profiled softmax alone cost 73.1ms x 210 over one
+# decode window. The kernel reads the logits once and emits token ids; it
+# samples the SAME distribution (diffusion_gemma_proposer_test: same-seed
+# determinism + empirical TV/chi-square agreement with the torch reference)
+# through its own counter-based RNG stream, so token sequences differ from
+# the torch path by design. The reference path stays available:
+# DGM_FUSED_SAMPLING=0 forces it (A/B gate; also the state the recorded
+# smoke goldens were produced under).
+_FUSED_SAMPLING_ENV = os.environ.get("DGM_FUSED_SAMPLING", "1") != "0"
+_fused_sample_kernel = None
+try:
+    from rtp_llm.models_py.triton_kernels.common.categorical_sample import (
+        categorical_sample,
+    )
+
+    _fused_sample_kernel = categorical_sample
+except Exception as _sampling_error:  # CPU-only sandboxes without triton
+    logger.info(
+        "DiffusionGemma fused sampling kernel unavailable, torch path: %s",
+        _sampling_error,
+    )
+
 
 def _categorical_entropy(logits: torch.Tensor) -> torch.Tensor:
     """Categorical entropy over the last dim: fused Triton kernel on CUDA
@@ -79,6 +108,12 @@ class EntropyBoundDenoiser:
       renoise everything else; final canvas = argmax of last logits.
     - adaptive stopping: mean entropy < confidence_threshold and argmax
       canvas stable across stability_threshold consecutive steps.
+
+    The multinomial(softmax(logits)) draw runs through the fused Gumbel-max
+    kernel on CUDA fp32 (DGM_FUSED_SAMPLING gate, default on): identical
+    sampling distribution, deterministic per-round RNG stream, one logits
+    read instead of the torch chain's full softmax materialization plus a
+    second full-width multinomial pass.
     """
 
     def __init__(
@@ -102,6 +137,7 @@ class EntropyBoundDenoiser:
         self.confidence_threshold = confidence_threshold
         self.stability_threshold = stability_threshold
         self.generator = generator
+        self._sample_draws = 0
 
     def temperature(self, step: int) -> float:
         # The reference schedules by steps REMAINING
@@ -136,6 +172,49 @@ class EntropyBoundDenoiser:
             torch.zeros_like(sorted_mask), -1, sorted_idx, sorted_mask
         )
 
+    def _fused_sample_seed(self) -> int:
+        """Deterministic per-round, per-draw seed for the fused sampler.
+
+        The torch path draws its randomness from the round generator's own
+        stream; the fused kernel uses a counter-based hash stream instead,
+        seeded from the same round generator's initial seed plus a per-draw
+        counter — reproducible for a fixed round seed (golden
+        reproducibility) and distinct across steps and rounds.
+        """
+        base = 0
+        if self.generator is not None:
+            base = int(self.generator.initial_seed())
+        seed = (base + self._sample_draws * 0x9E3779B97F4A7C15) & 0xFFFFFFFFFFFFFFFF
+        self._sample_draws += 1
+        return seed
+
+    def _sample(self, logits: torch.Tensor) -> torch.Tensor:
+        """One token per row of ``logits`` drawn from ``softmax(logits)``:
+        fused Gumbel-max Triton kernel under the DGM_FUSED_SAMPLING gate on
+        CUDA fp32 (fp32 logits in, int64 token ids out, one launch), the
+        torch softmax+multinomial reference path otherwise. The two paths
+        sample the same distribution but not the same tokens (independent
+        RNG streams); the acceptance evidence is distributional — see
+        diffusion_gemma_proposer_test. Any kernel failure degrades to the
+        reference path with a logged warning."""
+        if (
+            _FUSED_SAMPLING_ENV
+            and _fused_sample_kernel is not None
+            and logits.is_cuda
+            and logits.dtype == torch.float32
+            and logits.numel() > 0
+        ):
+            try:
+                return _fused_sample_kernel(logits, self._fused_sample_seed())
+            except Exception as error:
+                logger.warning(
+                    "fused sampling kernel failed (%s); torch reference path taken",
+                    error,
+                )
+        probs = torch.softmax(logits, dim=-1, dtype=torch.float32)
+        flat = probs.reshape(-1, probs.shape[-1])
+        return torch.multinomial(flat, 1, generator=self.generator).squeeze(-1)
+
     def step(
         self,
         current_canvas: torch.Tensor,
@@ -143,10 +222,7 @@ class EntropyBoundDenoiser:
     ):
         """One accept/re noise step. Returns (new_canvas, accepted_mask)."""
         mask = self._accept_mask(logits)
-        probs = torch.softmax(logits, dim=-1, dtype=torch.float32)
-        flat = probs.reshape(-1, probs.shape[-1])
-        sampled = torch.multinomial(flat, 1, generator=self.generator)
-        denoiser = sampled.squeeze(-1).view(current_canvas.shape)
+        denoiser = self._sample(logits).view(current_canvas.shape)
         accepted = torch.where(mask, denoiser, current_canvas)
         random_canvas = self.initialize_canvas(current_canvas.shape[0], current_canvas.device)
         renoised = torch.where(mask, accepted, random_canvas)
