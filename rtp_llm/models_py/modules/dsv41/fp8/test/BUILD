@@ -99,9 +99,9 @@ py_test(
 
 py_test(
     name = "test_v41_sm90_paged_decode",
-    srcs = ["test_v41_sm90_paged_decode.py", "test_v41_flash_mla_cache_format.py", "//rtp_llm/test/pytest:pytest_main.py"],
+    srcs = ["test_v41_sm90_paged_decode.py", "test_v41_flash_mla_cache_format.py", "//rtp_llm/models_py/modules/dsv41/test:test_flash_mla_heads.py", "//rtp_llm/test/pytest:pytest_main.py"],
     main = "//rtp_llm/test/pytest:pytest_main.py",
-    args = ["--cuda-devices", "1", "--cuda-major", "9", "$(location :test_v41_sm90_paged_decode.py)"],
+    args = ["--cuda-devices", "1", "--cuda-major", "9", "$(location :test_v41_sm90_paged_decode.py)", "$(location //rtp_llm/models_py/modules/dsv41/test:test_flash_mla_heads.py)"],
     deps = [
         "//rtp_llm:testlib",
         "//rtp_llm/models_py:modules",
