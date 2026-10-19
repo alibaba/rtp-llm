@@ -21,10 +21,12 @@ import org.flexlb.dao.cache.HostCacheMatch;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.pv.PvLogData;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskPhase;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.WorkerDirectory;
+import org.flexlb.util.JsonUtils;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -35,12 +37,14 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyDouble;
@@ -122,6 +126,63 @@ class CostBasedPrefillSelectionMetricTest {
     }
 
     @Test
+    void pvShowsKvcmTopThreeAndTheSelectedWorkersHitEvenWhenItIsNotInTheTopThree() throws Exception {
+        configureFocusedAffinity();
+        Map<String, HostCacheMatch> hits = new LinkedHashMap<>();
+        hits.put("10.0.0.5:8080@0", HostCacheMatch.local(2));
+        hits.put("10.0.0.1:8080@0", new HostCacheMatch(0, 1));
+        hits.put("10.0.0.4:8080@0", HostCacheMatch.local(3));
+        hits.put("10.0.0.3:8080@0", HostCacheMatch.local(4));
+        hits.put("10.0.0.2:8080@0", HostCacheMatch.local(5));
+        when(cache.findMatchingEngines(any())).thenReturn(new CacheMatchResult(
+                hits, CacheMatchSource.KVCM, 4L, 100L));
+
+        try (SelectedRole selected = select()) {
+            var decision = context.getRoutingTelemetry().routingDecisions().get(RoleType.PREFILL);
+            assertEquals("10.0.0.1", selected.serverStatus().getServerIp());
+            assertEquals("FASTEST_IS_CACHE_BEST", decision.cacheAffinityDecision());
+            var json = new com.fasterxml.jackson.databind.ObjectMapper()
+                    .readTree(JsonUtils.toStringOrEmpty(new PvLogData(context)))
+                    .path("routingDecisions").get(0);
+            assertEquals("10.0.0.1:8080@0", json.path("selectedEndpoint").asText());
+            assertEquals("FASTEST_IS_CACHE_BEST", json.path("cacheAffinityDecision").asText());
+            assertEquals(5, json.path("kvcmMatches").path("reportedNodeCount").asInt());
+            assertEquals(100, json.path("kvcmMatches").path("selectedHitTokens").asLong());
+            var topHits = json.path("kvcmMatches").path("topHits");
+            assertEquals(3, topHits.size());
+            assertEquals(500, topHits.path("10.0.0.2:8080@0").asLong());
+            assertEquals(400, topHits.path("10.0.0.3:8080@0").asLong());
+            assertEquals(300, topHits.path("10.0.0.4:8080@0").asLong());
+        }
+    }
+
+    @Test
+    void pvDistinguishesKvcmWithoutHitsFromLocalCacheMatching() throws Exception {
+        configureFocusedAffinity();
+        when(cache.findMatchingEngines(any())).thenReturn(new CacheMatchResult(
+                Map.of("10.0.0.1:8080@0", HostCacheMatch.local(0)),
+                CacheMatchSource.KVCM, 1L, 100L));
+
+        try (SelectedRole ignored = select()) {
+            var decision = new com.fasterxml.jackson.databind.ObjectMapper()
+                    .readTree(JsonUtils.toStringOrEmpty(new PvLogData(context)))
+                    .path("routingDecisions").get(0);
+            assertEquals("NO_CACHE_ANYWHERE", decision.path("cacheAffinityDecision").asText());
+            assertEquals(1, decision.path("kvcmMatches").path("reportedNodeCount").asInt());
+            assertTrue(decision.path("kvcmMatches").path("topHits").isEmpty());
+            assertEquals(0, decision.path("kvcmMatches").path("selectedHitTokens").asLong());
+        }
+
+        when(cache.findMatchingEngines(any())).thenReturn(CacheMatchResult.empty(CacheMatchSource.LOCAL_SYNC));
+        try (SelectedRole ignored = select()) {
+            var decision = new com.fasterxml.jackson.databind.ObjectMapper()
+                    .readTree(JsonUtils.toStringOrEmpty(new PvLogData(context)))
+                    .path("routingDecisions").get(0);
+            assertFalse(decision.has("kvcmMatches"));
+        }
+    }
+
+    @Test
     void selectionDoesNotOwnTheRequestDeadline() {
         context.setSchedulingMetadata(SchedulingMetadata.explicit(
                 50, System.currentTimeMillis() - 1L));
@@ -144,6 +205,9 @@ class CostBasedPrefillSelectionMetricTest {
                     RoleType.PREFILL, "10.0.0.1:8080", 200L, 1_000L, 0.2);
             verify(reporter).reportKvcmSelectedMatch(
                     RoleType.PREFILL, "10.0.0.1:8080", 200L, 200L, 1_000L);
+            var decision = context.getRoutingTelemetry().routingDecisions().get(RoleType.PREFILL);
+            assertEquals(200L, decision.kvcmMatches().selectedHitTokens());
+            assertEquals(Map.of(cacheWorkerKey, 200L), decision.kvcmMatches().topHits());
         }
     }
 
@@ -296,6 +360,8 @@ class CostBasedPrefillSelectionMetricTest {
             assertEquals("10.0.0.2", selected.serverStatus().getServerIp());
             verify(reporter).reportCacheAffinityDecision(
                     RoleType.PREFILL, "10.0.0.2:8080", "CACHE_LEADER");
+            assertEquals("CACHE_LEADER", context.getRoutingTelemetry().routingDecisions()
+                    .get(RoleType.PREFILL).cacheAffinityDecision());
         }
     }
 
@@ -351,6 +417,8 @@ class CostBasedPrefillSelectionMetricTest {
             assertEquals("10.0.0.1", selected.serverStatus().getServerIp());
             verify(reporter).reportCacheAffinityDecision(
                     RoleType.PREFILL, "10.0.0.1:8080", reason);
+            assertEquals(reason, context.getRoutingTelemetry().routingDecisions()
+                    .get(RoleType.PREFILL).cacheAffinityDecision());
         }
     }
 

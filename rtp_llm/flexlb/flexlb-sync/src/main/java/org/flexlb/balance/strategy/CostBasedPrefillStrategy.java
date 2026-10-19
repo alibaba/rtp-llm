@@ -36,6 +36,7 @@ import java.util.AbstractList;
 import java.util.ArrayList;
 import java.util.BitSet;
 import java.util.EnumMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -95,7 +96,7 @@ public class CostBasedPrefillStrategy {
                     rejections);
             balanceContext.recordSelectionReason(roleType, "NO_AVAILABLE_CANDIDATES");
             recordDecision(balanceContext, roleType, group, discovery.registeredCount(), survivors,
-                    -1, "NO_AVAILABLE_CANDIDATES", rejections);
+                    -1, "NO_AVAILABLE_CANDIDATES", rejections, cacheMatchResult);
             RoleType poolWideBlocker = provenPoolWideBlocker(
                     poolWideBlockers,
                     discovery.registeredCount());
@@ -120,7 +121,7 @@ public class CostBasedPrefillStrategy {
                     rejections);
             balanceContext.recordSelectionReason(roleType, "NO_SELECTED_CANDIDATE");
             recordDecision(balanceContext, roleType, group, discovery.registeredCount(), survivors,
-                    -1, "NO_SELECTED_CANDIDATE", rejections);
+                    -1, "NO_SELECTED_CANDIDATE", rejections, cacheMatchResult);
             return PlacementResult.blocked(roleType);
         }
 
@@ -133,7 +134,7 @@ public class CostBasedPrefillStrategy {
                         survivors.endpointAddress(selectedIndex));
         if (selectedPin == null || selectedPin.endpoint() != best) {
             recordDecision(balanceContext, roleType, group, discovery.registeredCount(), survivors,
-                    -1, "ENDPOINT_GENERATION_CHANGED", rejections);
+                    -1, "ENDPOINT_GENERATION_CHANGED", rejections, cacheMatchResult);
             if (selectedPin != null) {
                 selectedPin.close();
             }
@@ -160,7 +161,7 @@ public class CostBasedPrefillStrategy {
                 seqLen, bestCacheHit, cacheMatchResult);
         balanceContext.recordCacheSelection(roleType, best.getIp(), bestCacheHit);
         recordDecision(balanceContext, roleType, group, discovery.registeredCount(), survivors,
-                selectedIndex, balanceContext.selectionReason(roleType), rejections);
+                selectedIndex, balanceContext.selectionReason(roleType), rejections, cacheMatchResult);
         if (selectedTtft >= 0L) { reportSelectedEstimates(
                 roleType,
                 best,
@@ -208,15 +209,15 @@ public class CostBasedPrefillStrategy {
         };
     }
 
-    private void recordDecision(
-            BalanceContext context,
-            RoleType role,
-            String group,
-            int totalWorkers,
-            PrefillCandidateSet candidates,
-            int selectedIndex,
-            String reason,
-            Map<String, Integer> rejections) {
+    private void recordDecision(BalanceContext context,
+                                RoleType role,
+                                String group,
+                                int totalWorkers,
+                                PrefillCandidateSet candidates,
+                                int selectedIndex,
+                                String reason,
+                                Map<String, Integer> rejections,
+                                CacheMatchResult cacheMatchResult) {
         List<RoutingDecision.Candidate> snapshot = new ArrayList<>();
         if (selectedIndex >= 0) {
             snapshot.add(snapshotCandidate(candidates, selectedIndex, true));
@@ -231,6 +232,9 @@ public class CostBasedPrefillStrategy {
                 group,
                 "CostBasedPrefill",
                 reason == null ? "COST_BASED" : reason,
+                selectedIndex < 0 ? null : candidates.affinityDecision(),
+                kvcmMatches(cacheMatchResult, context.getRequest().getSeqLen(),
+                        selectedIndex < 0 ? null : candidates.endpoint(selectedIndex).getStatus()),
                 System.currentTimeMillis(),
                 context.routingAttempt(role),
                 selectedIndex < 0 ? null : candidates.endpointAddress(selectedIndex),
@@ -240,6 +244,46 @@ public class CostBasedPrefillStrategy {
                 rejections,
                 snapshot,
                 null));
+    }
+
+    private static RoutingDecision.KvcmMatches kvcmMatches(CacheMatchResult result,
+                                                           long inputTokens,
+                                                           WorkerStatus selectedWorker) {
+        if (result.source() != CacheMatchSource.KVCM || !result.querySucceeded()) {
+            return null;
+        }
+        List<Map.Entry<String, Long>> largestHits = new ArrayList<>(3);
+        for (Map.Entry<String, HostCacheMatch> match : result.hostMatches().entrySet()) {
+            long hitTokens = CacheMatchResult.matchedTokens(
+                    match.getValue().globalMatchBlocks(), result.blockSize(), inputTokens);
+            if (hitTokens == 0L) {
+                continue;
+            }
+            int position = 0;
+            while (position < largestHits.size()
+                    && (largestHits.get(position).getValue() > hitTokens
+                        || largestHits.get(position).getValue() == hitTokens
+                            && largestHits.get(position).getKey().compareTo(match.getKey()) < 0)) {
+                position++;
+            }
+            if (position < 3) {
+                largestHits.add(position, Map.entry(match.getKey(), hitTokens));
+                if (largestHits.size() > 3) {
+                    largestHits.remove(3);
+                }
+            }
+        }
+        Map<String, Long> topHits = new LinkedHashMap<>();
+        for (Map.Entry<String, Long> hit : largestHits) {
+            topHits.put(hit.getKey(), hit.getValue());
+        }
+        HostCacheMatch selectedMatch = selectedWorker == null ? null : result.hostMatch(selectedWorker);
+        Long selectedHitTokens = null;
+        if (selectedWorker != null) {
+            selectedHitTokens = selectedMatch == null ? 0L
+                    : CacheMatchResult.matchedTokens(selectedMatch.globalMatchBlocks(), result.blockSize(), inputTokens);
+        }
+        return new RoutingDecision.KvcmMatches(result.hostMatches().size(), topHits, selectedHitTokens);
     }
 
     private static RoutingDecision.Candidate snapshotCandidate(

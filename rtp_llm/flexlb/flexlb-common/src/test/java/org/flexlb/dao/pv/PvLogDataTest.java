@@ -27,7 +27,7 @@ class PvLogDataTest {
         BalanceContext context = new BalanceContext();
         context.recordCacheSelection(RoleType.PREFILL, "10.0.0.2", 512L);
         context.recordRoutingDecision(new RoutingDecision(RoleType.PREFILL, "default", "CostBasedPrefill",
-                "CACHE_LEADER", 1600L, 1, "10.0.0.2:8080", 1, 1, false, Map.of(), List.of(
+                "CACHE_LEADER", null, null, 1600L, 1, "10.0.0.2:8080", 1, 1, false, Map.of(), List.of(
                         new RoutingDecision.Candidate(null, true, 90L, 20L, 70L, 512L, 512L,
                                 1L, null, null, null, "MODELED", 1L)), null));
 
@@ -66,7 +66,7 @@ class PvLogDataTest {
         context.setDecisionGroup(new DecisionGroup("group", "SINGLE", "NON_BATCH", "worker",
                 1, "ready", requestTimeMs + 4_000, 7));
         context.recordRoutingDecision(new RoutingDecision(RoleType.PREFILL, "default", "CostBasedPrefill",
-                "ready", requestTimeMs + 3_000, 1, "worker", 1, 1, false, Map.of(), List.of(), null));
+                "ready", null, null, requestTimeMs + 3_000, 1, "worker", 1, 1, false, Map.of(), List.of(), null));
 
         var json = new com.fasterxml.jackson.databind.ObjectMapper().readTree(
                 JsonUtils.toStringOrEmpty(new PvLogData(context, 0, null, "LOCAL_MASTER", 0,
@@ -102,7 +102,7 @@ class PvLogDataTest {
         context.setDecisionGroup(new DecisionGroup("group", "SINGLE", "NON_BATCH", "worker",
                 1, "ready", 0, 0));
         context.recordRoutingDecision(new RoutingDecision(RoleType.PREFILL, "default", "CostBasedPrefill",
-                "ready", 0, 1, "worker", 1, 1, false, Map.of(), List.of(), null));
+                "ready", null, null, 0, 1, "worker", 1, 1, false, Map.of(), List.of(), null));
 
         var json = new com.fasterxml.jackson.databind.ObjectMapper().readTree(
                 JsonUtils.toStringOrEmpty(new PvLogData(context, 0, null, "LOCAL_MASTER", 0,
@@ -181,7 +181,7 @@ class PvLogDataTest {
         RoutingDecision.PrefillPolicy policy = new RoutingDecision.PrefillPolicy(100, "BEST_ONLY", 10L,
                 0.2, 20, 1, 0L, 15.0, 0.0, 50000L, 0, 50, 3.0, 3.0);
         context.recordRoutingDecision(new RoutingDecision(RoleType.PREFILL, "default", "CostBasedPrefill",
-                "BEST_ONLY", 1234, 1, "10.0.0.1:8080", 1, 1, false, java.util.Map.of(), List.of(), policy));
+                "BEST_ONLY", null, null, 1234, 1, "10.0.0.1:8080", 1, 1, false, java.util.Map.of(), List.of(), policy));
         var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
         var json = mapper.readTree(JsonUtils.toStringOrEmpty(new PvLogData(context)));
         assertEquals("compact", json.path("requestId").asText());
@@ -282,7 +282,7 @@ class PvLogDataTest {
         context.recordCacheSelection(RoleType.DECODE, "10.0.0.3", 128);
         context.recordSelectionReason(RoleType.PREFILL, "CACHE_LEADER");
         context.recordRoutingDecision(new RoutingDecision(RoleType.PREFILL, "default", "CostBasedPrefill",
-                "CACHE_LEADER", 1600L, 1, "10.0.0.2:8080", 2, 1, false, java.util.Map.of(), List.of(
+                "CACHE_LEADER", null, null, 1600L, 1, "10.0.0.2:8080", 2, 1, false, java.util.Map.of(), List.of(
                         new RoutingDecision.Candidate("10.0.0.2:8080", true, 90L, 20L, 70L, 512L, 512L, 1L, null, null, null, "MODELED", 1L)), null));
         context.finishRequestTiming();
 
@@ -371,7 +371,7 @@ class PvLogDataTest {
                     context.beginRoutingAttempt(RoleType.PREFILL);
                     context.recordCacheQuery("LOCAL_SYNC", 2);
                     context.recordRoutingDecision(new RoutingDecision(RoleType.PREFILL, "default",
-                            "CostBasedPrefill", "attempt-" + attempt, attempt, attempt + 1, "worker:8080",
+                            "CostBasedPrefill", "attempt-" + attempt, null, null, attempt, attempt + 1, "worker:8080",
                             1, 0, false, java.util.Map.of(), List.of(), null));
                     if (attempt == 0) {
                         published.countDown();
