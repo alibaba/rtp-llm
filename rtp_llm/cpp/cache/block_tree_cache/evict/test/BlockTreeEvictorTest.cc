@@ -2959,7 +2959,6 @@ TEST_F(BlockTreeEvictorTest, DemotionExcludesSourceAndRollbackOrSuccessRestoresO
     ASSERT_TRUE(task.has_value());
     ASSERT_EQ(task->descriptors().front().target_blocks.size(), 1u);
     EXPECT_EQ(task->timings.front().tier_enter_time_us, candidate_meta.tier_enter_time_us);
-    EXPECT_EQ(task->timings.front().insert_time_us, candidate_meta.insert_time_us);
     EXPECT_EQ(task->timings.front().last_access_time_us, candidate_meta.last_access_time_us);
     EXPECT_GE(task->timings.front().selected_time_us, candidate_meta.last_access_time_us);
     EXPECT_EQ(resource.transfer_state, GroupSetTransferState::DEMOTING);

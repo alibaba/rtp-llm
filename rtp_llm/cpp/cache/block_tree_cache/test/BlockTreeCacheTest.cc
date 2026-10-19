@@ -9,6 +9,7 @@
 #include <mutex>
 #include <stdexcept>
 #include <thread>
+#include <utility>
 
 #include "kmonitor/client/MetricsReporter.h"
 #include "kmonitor/client/core/MetricsData.h"
@@ -702,6 +703,73 @@ TEST(BlockTreeCacheMetricsTest, EvictionReferenceMetricKeepsLegacyAlias) {
     EXPECT_EQ(metricSeriesCount(metrics->eviction_ref_blocks_compat_metric), 1u);
     EXPECT_DOUBLE_EQ(snapshotQps(metrics->eviction_target_ref_blocks_metric, tags), 7);
     EXPECT_DOUBLE_EQ(snapshotQps(metrics->eviction_ref_blocks_compat_metric, tags), 7);
+}
+
+TEST_F(BlockTreeCacheTest, EvictionLifetimeStopsAtSelectionForEachSourceTier) {
+    auto metrics_reporter = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
+    BlockTreeCacheMetricsReporter reporter(metrics_reporter);
+
+    for (const auto& direction : {std::make_pair(Tier::DEVICE, Tier::HOST), std::make_pair(Tier::HOST, Tier::DISK)}) {
+        TransferDescriptor desc;
+        desc.group_set_id = 0;
+        desc.source_tier  = direction.first;
+        desc.target_tier  = direction.second;
+        EvictionTimingSnapshot timing;
+        timing.tier_enter_time_us  = 100000;
+        timing.last_access_time_us = 120000;
+        timing.selected_time_us    = 150000;
+        EvictionTransferTask task(TransferTask({desc}, std::chrono::seconds(30)), {timing});
+
+        reporter.reportEvictionFinished(task, cache_->groupSets());
+        auto* metrics = metrics_reporter->getMetricsGroup<RtpLLMCacheEvictionMetrics>();
+        ASSERT_NE(metrics, nullptr);
+        kmonitor::MetricsTags tags("source_tier", tierName(direction.first));
+        tags.AddTag("target_tier", tierName(direction.second));
+        tags.AddTag("group_type", metricCacheGroupTypeName(CacheGroupType::FULL));
+        EXPECT_DOUBLE_EQ(snapshotQps(metrics->evicted_block_lifetime_ms_metric, tags), 50);
+        EXPECT_DOUBLE_EQ(snapshotQps(metrics->evicted_block_idletime_ms_metric, tags), 30);
+    }
+}
+
+TEST_F(BlockTreeCacheTest, DropLifetimeCoversDiskAndPrunedResources) {
+    auto metrics_reporter = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
+    BlockTreeCacheMetricsReporter reporter(metrics_reporter);
+
+    EvictionDropTask task;
+    task.primary_desc.group_set_id          = 0;
+    task.primary_desc.source_tier           = Tier::DISK;
+    task.primary_desc.target_tier           = Tier::NONE;
+    task.primary_timing.tier_enter_time_us  = 100000;
+    task.primary_timing.last_access_time_us = 120000;
+    task.primary_timing.selected_time_us    = 150000;
+
+    TransferDescriptor dependent_desc = task.primary_desc;
+    dependent_desc.source_tier        = Tier::HOST;
+    task.dependent_prune_descs.push_back(dependent_desc);
+    task.dependent_prune_timings.push_back(task.primary_timing);
+    task.dependent_prune_timings.back().tier_enter_time_us = 110000;
+
+    TransferDescriptor cascade_desc = task.primary_desc;
+    cascade_desc.source_tier        = Tier::DEVICE;
+    task.cascade_descs.push_back(cascade_desc);
+    task.cascade_timings.push_back(task.primary_timing);
+    task.cascade_timings.back().tier_enter_time_us = 130000;
+
+    reporter.reportEvictionFinished(task, cache_->groupSets());
+    auto* metrics = metrics_reporter->getMetricsGroup<RtpLLMCacheEvictionMetrics>();
+    ASSERT_NE(metrics, nullptr);
+    EXPECT_EQ(metricSeriesCount(metrics->evicted_block_lifetime_ms_metric), 3u);
+    EXPECT_EQ(metricSeriesCount(metrics->evicted_block_idletime_ms_metric), 1u);
+    for (const auto& expected :
+         {std::make_pair(Tier::DISK, 50), std::make_pair(Tier::HOST, 40), std::make_pair(Tier::DEVICE, 20)}) {
+        kmonitor::MetricsTags tags("source_tier", tierName(expected.first));
+        tags.AddTag("target_tier", tierName(Tier::NONE));
+        tags.AddTag("group_type", metricCacheGroupTypeName(CacheGroupType::FULL));
+        EXPECT_DOUBLE_EQ(snapshotQps(metrics->evicted_block_lifetime_ms_metric, tags), expected.second);
+        if (expected.first == Tier::DISK) {
+            EXPECT_DOUBLE_EQ(snapshotQps(metrics->evicted_block_idletime_ms_metric, tags), 30);
+        }
+    }
 }
 
 TEST_F(BlockTreeCacheTest, EvictionTriggerQpsPublishesOnlyExistingGroupTypes) {

@@ -1065,20 +1065,17 @@ public:
     std::string target_tier;
     std::string group_type;
     std::string trigger_type;
-    int64_t     evictable_candidate_count  = 0;
-    int64_t     eviction_trigger_count     = 0;
-    int64_t     eviction_required_blocks   = 0;
-    int64_t     eviction_scheduled_blocks  = 0;
-    int64_t     tier_residence_time_ms     = 0;
-    int64_t     candidate_idle_time_ms     = 0;
-    int64_t     candidate_age_ms           = 0;
-    bool        report_evictable           = false;
-    bool        report_eviction_trigger    = false;
-    bool        report_eviction_blocks     = false;
-    bool        report_eviction            = false;
-    bool        report_tier_residence_time = false;
-    bool        report_candidate_idle_time = false;
-    bool        report_candidate_age       = false;
+    int64_t     evictable_candidate_count = 0;
+    int64_t     eviction_trigger_count    = 0;
+    int64_t     eviction_required_blocks  = 0;
+    int64_t     eviction_scheduled_blocks = 0;
+    int64_t     block_lifetime_ms         = 0;
+    int64_t     block_idletime_ms         = 0;
+    bool        report_evictable          = false;
+    bool        report_eviction_trigger   = false;
+    bool        report_eviction_blocks    = false;
+    bool        report_eviction           = false;
+    bool        report_block_idletime     = false;
 };
 
 class RtpLLMCacheEvictionMetrics: public kmonitor::MetricsGroup {
@@ -1087,12 +1084,11 @@ public:
     void report(const kmonitor::MetricsTags* tags, RtpLLMCacheEvictionMetricsCollector* collector);
 
 public:
-    kmonitor::MutableMetric* evictable_candidate_count_metric            = nullptr;
-    kmonitor::MutableMetric* eviction_trigger_qps_metric                 = nullptr;
-    kmonitor::MutableMetric* eviction_blocks_count_metric                = nullptr;
-    kmonitor::MutableMetric* evicted_block_tier_residence_time_ms_metric = nullptr;
-    kmonitor::MutableMetric* evicted_candidate_idle_time_ms_metric       = nullptr;
-    kmonitor::MutableMetric* evicted_candidate_age_ms_metric             = nullptr;
+    kmonitor::MutableMetric* evictable_candidate_count_metric = nullptr;
+    kmonitor::MutableMetric* eviction_trigger_qps_metric      = nullptr;
+    kmonitor::MutableMetric* eviction_blocks_count_metric     = nullptr;
+    kmonitor::MutableMetric* evicted_block_lifetime_ms_metric = nullptr;
+    kmonitor::MutableMetric* evicted_block_idletime_ms_metric = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();

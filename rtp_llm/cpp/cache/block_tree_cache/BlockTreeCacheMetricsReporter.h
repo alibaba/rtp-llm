@@ -151,8 +151,7 @@ private:
     void       reportEvictedDescriptor(const TransferDescriptor&       desc,
                                        const EvictionTimingSnapshot&   timing,
                                        const std::vector<GroupSetPtr>& group_sets,
-                                       int64_t                         finish_time_us,
-                                       bool                            report_candidate_times) const;
+                                       bool                            report_block_idletime) const;
     void
     reportEvictionTrigger(Tier source_tier, CacheGroupType group_type, const char* trigger_type, int64_t count) const;
     void reportStoreBlocks(Tier target_tier, const char* outcome, size_t block_count) const;
