@@ -105,7 +105,8 @@ def try_grouped_output_quant(o, freqs, weight, weight_scale):
 
     The BF16 API below is unchanged. Callers explicitly consume this pair with
     V41MXFP8Linear.forward_quantized and retain their original path on None.
-    Startup warmup must have prepared the device; cold calls never compile.
+    An unprepared device falls back. After device warmup, eager calls may JIT
+    new signatures; CUDA capture accepts only signatures prepared eagerly.
     """
     if not is_supported(o, freqs, weight, weight_scale):
         return None
@@ -126,7 +127,6 @@ def _try_grouped_output_quant_supported(o, freqs, weight, weight_scale, workspac
     return _v41_wo_a_quant.try_grouped_quant(
         pair,
         (weight, weight_scale),
-        quant_kernel=None if workspace is None else workspace.fp8_quant_kernel,
     )
 
 
