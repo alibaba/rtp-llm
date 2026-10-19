@@ -991,18 +991,25 @@ void BlockPool::regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_sto
         for (size_t layout_idx = 0; layout_idx < config_.memory_layouts.size(); ++layout_idx) {
             const auto& layout_cfg = config_.memory_layouts[layout_idx];
 
-            // Register KV buffer
-            registerUserMrForBuffer(memory_util,
-                                    layout_idx,
-                                    layout_cfg.kv_cache_offset_bytes,
-                                    layout_cfg.kv_block_pool_size_bytes,
-                                    layout_cfg.kv_block_stride_bytes,
-                                    gpu,
-                                    "kv");
+            // Layered prefill keeps MTP entirely in HBM, leaving its host KV empty.
+            if (layout_cfg.kv_block_pool_size_bytes > 0) {
+                registerUserMrForBuffer(memory_util,
+                                        layout_idx,
+                                        layout_cfg.kv_cache_offset_bytes,
+                                        layout_cfg.kv_block_pool_size_bytes,
+                                        layout_cfg.kv_block_stride_bytes,
+                                        gpu,
+                                        "kv");
+            }
 
-            if (config_.mla_tiered_cache) {
-                registerUserMrForBuffer(memory_util, layout_idx, 0, layout_cfg.mla_hbm_size_bytes,
-                                        layout_cfg.kv_block_stride_bytes, true, "hbm_kv");
+            if (config_.mla_tiered_cache && layout_cfg.mla_hbm_size_bytes > 0) {
+                registerUserMrForBuffer(memory_util,
+                                        layout_idx,
+                                        0,
+                                        layout_cfg.mla_hbm_size_bytes,
+                                        layout_cfg.kv_block_stride_bytes,
+                                        true,
+                                        "hbm_kv");
             }
             // Register scale buffer if present
             if (layout_cfg.hasScale()) {
@@ -1029,10 +1036,12 @@ void BlockPool::deregUserMr() {
         for (size_t layout_idx = 0; layout_idx < config_.memory_layouts.size(); ++layout_idx) {
             const auto& layout_cfg = config_.memory_layouts[layout_idx];
 
-            // Deregister KV buffer
-            deregisterUserMrForBuffer(memory_util, layout_idx, layout_cfg.kv_cache_offset_bytes, gpu, "kv");
+            // Match the nonempty buffers registered by regUserMr().
+            if (layout_cfg.kv_block_pool_size_bytes > 0) {
+                deregisterUserMrForBuffer(memory_util, layout_idx, layout_cfg.kv_cache_offset_bytes, gpu, "kv");
+            }
 
-            if (config_.mla_tiered_cache) {
+            if (config_.mla_tiered_cache && layout_cfg.mla_hbm_size_bytes > 0) {
                 deregisterUserMrForBuffer(memory_util, layout_idx, 0, true, "hbm_kv");
             }
             // Deregister scale buffer if present
