@@ -538,7 +538,8 @@ public class EngineHealthReporter {
         }
 
         FlexMetricTags metricTags = FlexMetricTags.of(
-                "code", String.valueOf(ctx.getResponse().getCode()));
+                "code", String.valueOf(ctx.getResponse().getCode()),
+                "priority", String.valueOf(ctx.getPriority()));
         monitor.report(ENGINE_BALANCING_MASTER_ALL_QPS, metricTags, 1.0);
         monitor.report(ENGINE_BALANCING_MASTER_ALL_RT, metricTags, System.currentTimeMillis() - ctx.getStartTime());
 

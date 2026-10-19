@@ -242,6 +242,30 @@ class EngineHealthReporterTest {
                 "code", "200"), 1.0);
     }
 
+    @ParameterizedTest
+    @ValueSource(ints = {200, 8431, 8433, 8434, 8435})
+    void shouldReportScheduleOutcomeWithRequestPriorityWithoutSelectedWorkers(int code) {
+        Request request = new Request();
+        request.setPriority(20);
+        Response response = new Response();
+        response.setSuccess(code == 200);
+        response.setCode(code);
+        BalanceContext context = new BalanceContext(new FlexlbConfig());
+        context.setRequest(request);
+        context.setResponse(response);
+        context.setStartTime(System.currentTimeMillis() - 10L);
+
+        reporter.reportBalancingService(context);
+
+        FlexMetricTags expectedTags = FlexMetricTags.of(
+                "code", String.valueOf(code), "priority", "20");
+        verify(monitor).report(MetricConstant.ENGINE_BALANCING_MASTER_ALL_QPS, expectedTags, 1.0);
+        verify(monitor).report(eq(MetricConstant.ENGINE_BALANCING_MASTER_ALL_RT),
+                eq(expectedTags), doubleThat(value -> value >= 10.0));
+        verify(monitor, never()).report(eq(MetricConstant.ENGINE_BALANCING_MASTER_SELECT_DETAIL),
+                any(FlexMetricTags.class), anyDouble());
+    }
+
     @Test
     void shouldSkipMissingWorkersAndReportValidSelection() {
         ServerStatus selectedWorker = new ServerStatus();
@@ -258,7 +282,7 @@ class EngineHealthReporterTest {
         reporter.reportBalancingService(context);
 
         verify(monitor).report(MetricConstant.ENGINE_BALANCING_MASTER_ALL_QPS,
-                FlexMetricTags.of("code", "200"), 1.0);
+                FlexMetricTags.of("code", "200", "priority", "50"), 1.0);
         verify(monitor).report(MetricConstant.ENGINE_BALANCING_MASTER_WORKER_SELECT_DETAIL, FlexMetricTags.of(
                 "role", "PREFILL",
                 "reason", "UNKNOWN",
