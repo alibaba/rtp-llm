@@ -5,13 +5,17 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.mockito.InOrder;
 
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -22,6 +26,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
@@ -129,7 +134,7 @@ class RequestOrchestratorsTest {
 
         new SchedulerRuntime(
                 lifecycle, registry, reporter, admissionReporter,
-                mock(ConfigService.class), new QueueCapacity()).report();
+                mock(ConfigService.class), new QueueCapacity(), new ModelMetaConfig()).report();
 
         verify(lifecycle, never()).trackedRequestStats();
         verify(registry, never()).snapshotPrefillEndpoints();
@@ -160,7 +165,7 @@ class RequestOrchestratorsTest {
 
         new SchedulerRuntime(
                 lifecycle, registry, reporter, admissionReporter,
-                mock(ConfigService.class), new QueueCapacity()).report();
+                mock(ConfigService.class), new QueueCapacity(), new ModelMetaConfig()).report();
 
         verify(lifecycle).trackedRequestStats();
         verify(reporter).reportSchedulerInflightMaxAgeMs(300L);
@@ -185,14 +190,15 @@ class RequestOrchestratorsTest {
         when(lifecycle.globalQueueStats()).thenReturn(new RequestRegistry.GlobalQueueStats(12, 256, 75L));
 
         new SchedulerRuntime(lifecycle, registry, reporter, mock(RequestSchedulerReporter.class),
-                mock(ConfigService.class), new QueueCapacity()).report();
+                mock(ConfigService.class), new QueueCapacity(), new ModelMetaConfig()).report();
 
         verify(reporter).reportGlobalQueue(12, 256);
         verify(reporter).reportGlobalQueueOldestWaitMs(75L);
     }
 
-    @Test
-    void sharedQueueReportsTotalAndSeparateRoleLimits() {
+    @ParameterizedTest
+    @EnumSource(value = RoleType.class, names = {"PREFILL", "PDFUSION"})
+    void sharedQueueReportsOnlyConfiguredRole(RoleType role) {
         FlexlbConfig config = SchedulingTestConfig.newConfig();
         SchedulingTestConfig.useFifoQueue(config);
         SchedulingTestConfig.useNonBatchDispatcher(config);
@@ -210,12 +216,40 @@ class RequestOrchestratorsTest {
         BatchSchedulerReporter reporter = mock(BatchSchedulerReporter.class);
         RequestRegistry requests = mock(RequestRegistry.class);
 
+        ModelMetaConfig modelMetaConfig = mock(ModelMetaConfig.class);
+        when(modelMetaConfig.requiredRoles()).thenReturn(List.of(role));
         new SchedulerRuntime(requests, registry, reporter, mock(RequestSchedulerReporter.class),
-                service, capacity).report();
+                service, capacity, modelMetaConfig).report();
 
         verify(reporter).reportTotalQueueWaiting(1L);
-        verify(reporter).reportSharedSubQueue("PREFILL", 1, 16L, 2);
-        verify(reporter).reportSharedSubQueue("PDFUSION", 1, 20L, 3);
+        verify(reporter).reportSharedSubQueue(role.name(), 1, role == RoleType.PREFILL ? 16L : 20L,
+                role == RoleType.PREFILL ? 2 : 3);
+        RoleType other = role == RoleType.PREFILL ? RoleType.PDFUSION : RoleType.PREFILL;
+        verify(reporter, never()).reportSharedSubQueue(eq(other.name()),
+                anyInt(), anyLong(), anyInt());
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = RoleType.class, names = {"PREFILL", "PDFUSION"})
+    void configuredRoleIsReportedEvenWithoutWorkers(RoleType role) {
+        FlexlbConfig config = SchedulingTestConfig.newConfig();
+        SchedulingTestConfig.useFifoQueue(config);
+        SchedulingTestConfig.useNonBatchDispatcher(config);
+        ConfigService service = mock(ConfigService.class);
+        when(service.loadBalanceConfig()).thenReturn(config);
+        ModelMetaConfig modelMetaConfig = mock(ModelMetaConfig.class);
+        when(modelMetaConfig.requiredRoles()).thenReturn(List.of(role));
+        BatchSchedulerReporter reporter = mock(BatchSchedulerReporter.class);
+        SchedulerRuntime runtime = new SchedulerRuntime(mock(RequestRegistry.class), mock(EndpointRegistry.class),
+                reporter, mock(RequestSchedulerReporter.class), service, new QueueCapacity(), modelMetaConfig);
+        when(modelMetaConfig.requiredRoles()).thenReturn(List.of());
+
+        runtime.report();
+
+        verify(reporter).reportSharedSubQueue(role.name(), 0, 0L, 0);
+        RoleType other = role == RoleType.PREFILL ? RoleType.PDFUSION : RoleType.PREFILL;
+        verify(reporter, never()).reportSharedSubQueue(eq(other.name()),
+                anyInt(), anyLong(), anyInt());
     }
 
     @Test
@@ -227,19 +261,18 @@ class RequestOrchestratorsTest {
         when(lifecycle.globalQueueStats()).thenReturn(null);
 
         new SchedulerRuntime(lifecycle, registry, reporter, mock(RequestSchedulerReporter.class),
-                mock(ConfigService.class), new QueueCapacity()).report();
+                mock(ConfigService.class), new QueueCapacity(), new ModelMetaConfig()).report();
 
         verify(reporter, never()).reportGlobalQueue(anyInt(), anyInt());
     }
 
-    private static SchedulerRuntime runtime(
-            RequestRegistry requests, EndpointRegistry endpoints) {
+    private static SchedulerRuntime runtime(RequestRegistry requests, EndpointRegistry endpoints) {
         return new SchedulerRuntime(
                 requests,
                 endpoints,
                 mock(BatchSchedulerReporter.class),
                 mock(RequestSchedulerReporter.class),
                 mock(ConfigService.class),
-                new QueueCapacity());
+                new QueueCapacity(), new ModelMetaConfig());
     }
 }

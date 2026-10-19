@@ -5,6 +5,7 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
@@ -14,6 +15,7 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PreDestroy;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 
@@ -30,39 +32,43 @@ final class SchedulerRuntime {
     private final ConfigService configService;
     private final QueueCapacity queueCapacity;
     private final Runnable closePlacement;
+    private final List<RoleType> queueRoles;
 
-    SchedulerRuntime(
-            RequestRegistry requests,
-            EndpointRegistry endpoints,
-            BatchSchedulerReporter reporter,
-            RequestSchedulerReporter admissionReporter,
-            ConfigService configService,
-            QueueCapacity queueCapacity) {
+    SchedulerRuntime(RequestRegistry requests,
+                     EndpointRegistry endpoints,
+                     BatchSchedulerReporter reporter,
+                     RequestSchedulerReporter admissionReporter,
+                     ConfigService configService,
+                     QueueCapacity queueCapacity,
+                     ModelMetaConfig modelMetaConfig) {
         this(requests, endpoints, reporter, admissionReporter,
-                configService, queueCapacity, () -> { });
+                configService, queueCapacity, modelMetaConfig, () -> { });
     }
 
     @Autowired
-    SchedulerRuntime(
-            RequestRegistry requests,
-            EndpointRegistry endpoints,
-            BatchSchedulerReporter reporter,
-            RequestSchedulerReporter admissionReporter,
-            RequestScheduler scheduler,
-            ConfigService configService,
-            QueueCapacity queueCapacity) {
-        this(requests, endpoints, reporter, admissionReporter, configService, queueCapacity,
+    SchedulerRuntime(RequestRegistry requests,
+                     EndpointRegistry endpoints,
+                     BatchSchedulerReporter reporter,
+                     RequestSchedulerReporter admissionReporter,
+                     RequestScheduler scheduler,
+                     ConfigService configService,
+                     QueueCapacity queueCapacity,
+                     ModelMetaConfig modelMetaConfig) {
+        this(requests, endpoints, reporter, admissionReporter, configService, queueCapacity, modelMetaConfig,
                 scheduler::closePlacement);
     }
 
-    private SchedulerRuntime(
-            RequestRegistry requests,
-            EndpointRegistry endpoints,
-            BatchSchedulerReporter reporter,
-            RequestSchedulerReporter admissionReporter,
-            ConfigService configService,
-            QueueCapacity queueCapacity,
-            Runnable closePlacement) {
+    private SchedulerRuntime(RequestRegistry requests,
+                             EndpointRegistry endpoints,
+                             BatchSchedulerReporter reporter,
+                             RequestSchedulerReporter admissionReporter,
+                             ConfigService configService,
+                             QueueCapacity queueCapacity,
+                             ModelMetaConfig modelMetaConfig,
+                             Runnable closePlacement) {
+        this.queueRoles = modelMetaConfig.requiredRoles().stream()
+                .filter(role -> role == RoleType.PREFILL || role == RoleType.PDFUSION)
+                .toList();
         this.requests = Objects.requireNonNull(requests, "requests");
         this.endpoints = Objects.requireNonNull(endpoints, "endpoints");
         this.reporter = Objects.requireNonNull(reporter, "reporter");
@@ -137,7 +143,7 @@ final class SchedulerRuntime {
         } catch (RuntimeException failure) {
             warnIsolated("Failed to report total queued requests", failure);
         }
-        for (RoleType role : new RoleType[]{RoleType.PREFILL, RoleType.PDFUSION}) {
+        for (RoleType role : queueRoles) {
             try {
                 int logicalEndpointCount = endpoints.getEndpointCount(role);
                 reporter.reportSharedSubQueue(role.name(), queueCapacity.engineSubQueueWaiting(role),

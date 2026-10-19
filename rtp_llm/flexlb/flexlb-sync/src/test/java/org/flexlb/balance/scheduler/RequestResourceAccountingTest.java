@@ -9,6 +9,7 @@ import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.config.SchedulerConfig;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.master.TaskInfo;
@@ -267,7 +268,7 @@ class RequestResourceAccountingTest {
                     new RouteDeliveryStrategy(requests, new DeliveryMetrics(reporter)),
                     new PlacementAvailability(), queueCapacity);
             runtime = new SchedulerRuntime(requests, endpoints, reporter, requestReporter,
-                    service, queueCapacity);
+                    service, queueCapacity, new ModelMetaConfig());
             var worker = WorkerStatus.createDiscovered(RoleType.PREFILL, "g", "127.0.0.1", 8080, 8081, "test");
             worker.lock.lock();
             try {

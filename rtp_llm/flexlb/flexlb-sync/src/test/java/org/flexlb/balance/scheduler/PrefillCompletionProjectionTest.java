@@ -8,6 +8,7 @@ import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.config.SchedulerConfig;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.master.TaskInfo;
@@ -51,7 +52,7 @@ class PrefillCompletionProjectionTest {
                 new RouteDeliveryStrategy(requests, new DeliveryMetrics(reporter)),
                 new PlacementAvailability(), queueCapacity);
         var runtime = new SchedulerRuntime(requests, endpoints, reporter, requestReporter,
-                service, queueCapacity);
+                service, queueCapacity, new ModelMetaConfig());
         try {
             WorkerStatus worker = WorkerStatus.createDiscovered(
                     RoleType.PREFILL, "g1", "127.0.0.1", 8080, 8081, "test");
