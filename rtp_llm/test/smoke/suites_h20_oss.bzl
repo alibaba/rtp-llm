@@ -699,6 +699,42 @@ def diffusion_gemma_suites():
                 smoke_args = "--act_type BF16 --tp_size 1 --dp_size 1 --ep_size 1 --world_size 1 --max_seq_len 12800 --reserver_runtime_mem_mb 24000 --seq_size_per_block 64 --test_block_num 2000 --concurrency_limit 2 --max_context_batch_size 2 --reuse_cache 1 --sp_type dspark --sp_model_type diffusion_gemma_proposer --sp_checkpoint_path /mnt/fuse/smoke-test/hf/google--diffusiongemma-26B-A4B-it--f7f5b7f5fa82ffc52addd066915886d497f5517b --gen_num_per_cycle 256",
                 gpu_type = ["H20_CU13"],
             ),
+
+            smoke_test(
+                name = "dgm_chat_vision_hack6",
+                task_info = "data/model/diffusion_gemma/chat_vision_hack6_test.json",
+                # the image fixture reuses the qwen_vl smoke data; add it to
+                # this target's runfiles so the relative URL resolves.
+                data = ["data/model/qwen_vl/1.jpeg"],
+                # Consolidated multimodal case with KV-reuse coverage (hy_v3
+                # pattern): 6 queries in one session, --reuse_cache 1 --hack_layer_num 6.
+                # Reuse scenarios (2026-10-14 decree): ① same-prefix
+                # different-suffix (vision_cache_reuse over vision_basic's
+                # image prefix + reuse_full_repeat exact repeat +
+                # reuse_continuation turn-2 chat) ② multimodal partial match
+                # (vision_two_images: first image block hits, second misses)
+                # ③ mixed hit/miss (reuse_full_repeat hit then
+                # reuse_mixed_fresh_miss fresh text prompt in the same
+                # session). Golden asserts each query's
+                # usage.prompt_tokens_details.cached_tokens. Content
+                # contract: cached-prefill queries are per-path
+                # deterministic and MAY differ from the no-cache baseline —
+                # bf16 path rounding flipped through the MoE-router top-8
+                # selection sends them deterministically into the EOS basin
+                # (K122, documented in the RUN handover); fresh queries must
+                # stay healthy 256-token generations. Determinism holds only
+                # under the fixed serial call order (proposer seeds count
+                # propose invocations).
+
+            # Cut-layer iteration engine (2026-10-20 decree): hack_layer_num 6
+            # is the minimal ratio-preserving cut for dgm's 6-periodic layer
+            # pattern (5 sliding + 1 global; a 4-layer prefix cut would drop
+            # the global layer and violate the hybrid-ratio constraint).
+            # ~1/5 of the weights load; cut golden recorded from this
+            # target's actuals — full-model gates stay on dgm_chat_vision.
+                smoke_args = "--act_type BF16 --tp_size 1 --dp_size 1 --ep_size 1 --world_size 1 --max_seq_len 12800 --reserver_runtime_mem_mb 24000 --seq_size_per_block 64 --test_block_num 2000 --concurrency_limit 2 --max_context_batch_size 2 --reuse_cache 1 --hack_layer_num 6 --sp_type dspark --sp_model_type diffusion_gemma_proposer --sp_checkpoint_path /mnt/fuse/smoke-test/hf/google--diffusiongemma-26B-A4B-it--f7f5b7f5fa82ffc52addd066915886d497f5517b --gen_num_per_cycle 256",
+                gpu_type = ["H20_CU13"],
+            ),
             smoke_test(
                 name = "dgm_chat_basic",
                 task_info = "data/model/diffusion_gemma/chat_test.json",

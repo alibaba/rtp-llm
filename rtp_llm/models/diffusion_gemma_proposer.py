@@ -63,6 +63,45 @@ if not _needed <= _base_fields:
     ModelConfig._python_fields = _base_fields | _needed
 
 
+def build_diffusion_gemma_proposer_kv_spec_descs(config: "DiffusionGemmaConfig") -> list:
+    """Tiny one-layer draft descs; canvas attention reads the MAIN cache.
+
+    mergeMTPModule requires samePolicy against the target swa_kv group: SWA
+    type, the target's sliding window, and the same active-tail policy (the
+    target materializes the full window so the block table carries no NULL
+    slots; run 37). The page follows the same fallback chain as the target
+    builder, evaluated at the same phase (_create_config, before
+    build_model_config finalizes the block sizes — the pre-finalization value
+    comes from the C++ AttentionConfig default, tokens_per_block=8). The draft
+    descs must NOT be re-derived post-finalization: the target restores its
+    cut descs from the _create_config-time stash, so the pages must match.
+    """
+    tiny = KVCacheSpecDesc()
+    tiny.tag = "swa_kv"
+    tiny.cache_type = KVCacheSpecType.MHA
+    tiny.group_type = CacheGroupType.SWA
+    tail = CacheTailPolicyDesc()
+    page = (
+        int(config.attn_config.kernel_tokens_per_block)
+        or int(config.attn_config.tokens_per_block)
+        or 64
+    )
+    tail.active_tail_blocks = (
+        int(config.attn_config.sliding_window) + page - 1
+    ) // page + 1
+    tiny.tail = tail
+    # mergeMTPModule samePolicy: the target swa_kv group enables prefix reuse
+    # (with the full window materialized, the SWA chain is complete and the
+    # matcher caps reuse at the window).
+    reuse = CacheReusePolicyDesc()
+    reuse.enable_prefix_reuse = True
+    tiny.reuse = reuse
+    tiny.mha_kv_head_num = 1
+    tiny.mha_size_per_head = 64
+    tiny.dtype = DataType.TYPE_BF16
+    return [[tiny]]
+
+
 class DiffusionGemmaProposerWeightInfo(ModelDeployWeightInfo):
     def _get_weight_info(self) -> ModelWeightInfo:
         vocab = int(self.model_config.vocab_size)
@@ -171,35 +210,13 @@ class DiffusionGemmaProposer(BaseModel):
         )
         config.dgm_diffusion_canvas = True
 
-        tiny = KVCacheSpecDesc()
-        tiny.tag = "swa_kv"
-        tiny.cache_type = KVCacheSpecType.MHA
-        # mergeMTPModule requires samePolicy against the target swa_kv group:
-        # SWA type, the target's sliding window, and the same active-tail
-        # policy (the target materializes the full window so the block table
-        # carries no NULL slots; run 37). Configs here are pre-finalization,
-        # so the page falls back to the 64-token default.
-        tiny.group_type = CacheGroupType.SWA
-        tail = CacheTailPolicyDesc()
-        page = (
-            int(config.attn_config.kernel_tokens_per_block)
-            or int(config.attn_config.tokens_per_block)
-            or 64
-        )
-        tail.active_tail_blocks = (
-            int(config.attn_config.sliding_window) + page - 1
-        ) // page + 1
-        tiny.tail = tail
-        # mergeMTPModule samePolicy: the target swa_kv group enables prefix
-        # reuse (with the full window materialized, the SWA chain is complete
-        # and the matcher caps reuse at the window).
-        reuse = CacheReusePolicyDesc()
-        reuse.enable_prefix_reuse = True
-        tiny.reuse = reuse
-        tiny.mha_kv_head_num = 1
-        tiny.mha_size_per_head = 64
-        tiny.dtype = DataType.TYPE_BF16
-        config.kv_cache_spec_descs = [[tiny]]
+        # The descs stay exactly as built here (pre-finalization block sizes):
+        # CacheConfig::mergeMTPModule enforces samePolicy against the target's
+        # swa_kv group, whose descs for a layer cut are restored from the
+        # target's _create_config-time stash — the same phase as this build —
+        # so both sides derive the page identically. Do NOT re-derive them
+        # after build_model_config finalizes the block sizes.
+        config.kv_cache_spec_descs = build_diffusion_gemma_proposer_kv_spec_descs(config)
         return config
 
     @staticmethod

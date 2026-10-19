@@ -1,0 +1,370 @@
+{
+    "model_type": "diffusion_gemma",
+    "model_path": "/mnt/fuse/smoke-test/hf/google--diffusiongemma-26B-A4B-it--f7f5b7f5fa82ffc52addd066915886d497f5517b",
+    "query_result": [
+        {
+            "endpoint": "/v1/chat/completions",
+            "case_name": "vision_basic",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": "data/model/qwen_vl/1.jpeg"
+                                }
+                            },
+                            {
+                                "type": "text",
+                                "text": "Describe this image in one sentence."
+                            }
+                        ]
+                    }
+                ],
+                "max_tokens": 256,
+                "temperature": 0.0,
+                "top_p": 0.01
+            },
+            "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 1792424622,
+                "model": "",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "<|channel><|channel>thought\n<channel|>A young woman sits on a sandy beach at sunset, smiling at a golden retriever that is sitting on its hind legs and giving her its paw.",
+                            "name": null,
+                            "reasoning_content": null,
+                            "function_call": null,
+                            "tool_calls": null,
+                            "partial": false,
+                            "tool_call_id": null
+                        },
+                        "finish_reason": "length",
+                        "logprobs": null
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 278,
+                    "total_tokens": 534,
+                    "completion_tokens": 256,
+                    "completion_tokens_details": null,
+                    "prompt_tokens_details": {
+                        "audio_tokens": null,
+                        "cached_tokens": null,
+                        "image_tokens": 260,
+                        "video_tokens": null
+                    }
+                }
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "case_name": "vision_cache_reuse",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": "data/model/qwen_vl/1.jpeg"
+                                }
+                            },
+                            {
+                                "type": "text",
+                                "text": "What colors dominate this picture?"
+                            }
+                        ]
+                    }
+                ],
+                "max_tokens": 256,
+                "temperature": 0.0,
+                "top_p": 0.01
+            },
+            "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 1792424630,
+                "model": "",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "<|channel>",
+                            "name": null,
+                            "reasoning_content": null,
+                            "function_call": null,
+                            "tool_calls": null,
+                            "partial": false,
+                            "tool_call_id": null
+                        },
+                        "finish_reason": "length",
+                        "logprobs": null
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 277,
+                    "total_tokens": 533,
+                    "completion_tokens": 256,
+                    "completion_tokens_details": null,
+                    "prompt_tokens_details": {
+                        "audio_tokens": null,
+                        "cached_tokens": 256,
+                        "image_tokens": 260,
+                        "video_tokens": null
+                    }
+                }
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "case_name": "vision_two_images",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "Compare the following two images."
+                            },
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": "data/model/qwen_vl/1.jpeg"
+                                }
+                            },
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": "data/model/qwen_vl/1.jpeg"
+                                }
+                            }
+                        ]
+                    }
+                ],
+                "max_tokens": 256,
+                "temperature": 0.0,
+                "top_p": 0.01
+            },
+            "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 1792424634,
+                "model": "",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "<|channel><|channel>thought\n<channel|>The two images provided are identical. Both depict the same scene: a woman sitting on a beach at sunset, interacting with a golden retriever dog that has its paw raised toward her hand.",
+                            "name": null,
+                            "reasoning_content": null,
+                            "function_call": null,
+                            "tool_calls": null,
+                            "partial": false,
+                            "tool_call_id": null
+                        },
+                        "finish_reason": "length",
+                        "logprobs": null
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 539,
+                    "total_tokens": 795,
+                    "completion_tokens": 256,
+                    "completion_tokens_details": null,
+                    "prompt_tokens_details": {
+                        "audio_tokens": null,
+                        "cached_tokens": null,
+                        "image_tokens": 520,
+                        "video_tokens": null
+                    }
+                }
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "case_name": "reuse_full_repeat",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": "data/model/qwen_vl/1.jpeg"
+                                }
+                            },
+                            {
+                                "type": "text",
+                                "text": "What colors dominate this picture?"
+                            }
+                        ]
+                    }
+                ],
+                "max_tokens": 256,
+                "temperature": 0.0,
+                "top_p": 0.01
+            },
+            "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 1792424637,
+                "model": "",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "<|channel>",
+                            "name": null,
+                            "reasoning_content": null,
+                            "function_call": null,
+                            "tool_calls": null,
+                            "partial": false,
+                            "tool_call_id": null
+                        },
+                        "finish_reason": "length",
+                        "logprobs": null
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 277,
+                    "total_tokens": 533,
+                    "completion_tokens": 256,
+                    "completion_tokens_details": null,
+                    "prompt_tokens_details": {
+                        "audio_tokens": null,
+                        "cached_tokens": 256,
+                        "image_tokens": 260,
+                        "video_tokens": null
+                    }
+                }
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "case_name": "reuse_continuation",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": "data/model/qwen_vl/1.jpeg"
+                                }
+                            },
+                            {
+                                "type": "text",
+                                "text": "Describe this image in one sentence."
+                            }
+                        ]
+                    },
+                    {
+                        "role": "assistant",
+                        "content": "<|channel><|channel>thought\n<channel|>A young woman sits on the beach, smiling as she gives her Labrador dog a treat during sunset."
+                    },
+                    {
+                        "role": "user",
+                        "content": "What is the person in the image doing right now?"
+                    }
+                ],
+                "max_tokens": 256,
+                "temperature": 0.0,
+                "top_p": 0.01
+            },
+            "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 1792424643,
+                "model": "",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "<|channel>",
+                            "name": null,
+                            "reasoning_content": null,
+                            "function_call": null,
+                            "tool_calls": null,
+                            "partial": false,
+                            "tool_call_id": null
+                        },
+                        "finish_reason": "length",
+                        "logprobs": null
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 319,
+                    "total_tokens": 575,
+                    "completion_tokens": 256,
+                    "completion_tokens_details": null,
+                    "prompt_tokens_details": {
+                        "audio_tokens": null,
+                        "cached_tokens": 256,
+                        "image_tokens": 260,
+                        "video_tokens": null
+                    }
+                }
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "case_name": "reuse_mixed_fresh_miss",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "The capital of France is"
+                    }
+                ],
+                "max_tokens": 256,
+                "temperature": 0.0,
+                "top_p": 0.01
+            },
+            "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 1792424644,
+                "model": "",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "<|channel><|channel>thought\n<channel|>The capital of France is **Paris**.",
+                            "name": null,
+                            "reasoning_content": null,
+                            "function_call": null,
+                            "tool_calls": null,
+                            "partial": false,
+                            "tool_call_id": null
+                        },
+                        "finish_reason": "length",
+                        "logprobs": null
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 14,
+                    "total_tokens": 270,
+                    "completion_tokens": 256,
+                    "completion_tokens_details": null,
+                    "prompt_tokens_details": null
+                }
+            }
+        }
+    ]
+}

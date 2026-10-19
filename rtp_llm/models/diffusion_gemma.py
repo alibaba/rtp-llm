@@ -130,6 +130,44 @@ def build_diffusion_gemma_kv_spec_descs(config: "DiffusionGemmaConfig") -> list:
 
 class DiffusionGemma(BaseModel):
     @classmethod
+    def _post_build_model_config(cls, model_config: ModelConfig) -> None:
+        # apply_layer_num_override (hack_layer_num) cuts num_layers but cannot
+        # know python-only per-layer metadata: dgm_layer_types stays at the
+        # checkpoint length and kv_cache_spec_descs is cleared, so the base
+        # fallback would rebuild a generic single-"default" MHA topology. That
+        # drops the swa_kv/global_kv groups and leaves the proposer's swa_kv
+        # tag unmapped in CacheConfig::mergeMTPModule. Keep the per-layer
+        # metadata in lockstep with the cut and restore the per-layer descs
+        # for the surviving layer prefix. Restore the stashed _create_config
+        # desc objects rather than re-deriving them: the swa tail policy is
+        # page-derived and CacheConfig::mergeMTPModule enforces samePolicy
+        # against the draft's descs, which are built at _create_config time
+        # (pre-finalization block sizes).
+        layer_types = list(getattr(model_config, "dgm_layer_types", None) or [])
+        if layer_types and len(layer_types) != model_config.num_layers:
+            layer_types = layer_types[: model_config.num_layers]
+            if len(layer_types) < model_config.num_layers:
+                from rtp_llm.models_py.model_desc.diffusion_gemma import (
+                    diffusion_gemma_layer_types,
+                )
+
+                layer_types += diffusion_gemma_layer_types(model_config.num_layers)[
+                    len(layer_types) :
+                ]
+            model_config.dgm_layer_types = layer_types
+        if len(model_config.kv_cache_spec_descs) != model_config.num_layers:
+            stashed = getattr(model_config, "_dgm_kv_descs_full", None) or []
+            if len(stashed) >= model_config.num_layers:
+                model_config.kv_cache_spec_descs = stashed[
+                    : model_config.num_layers
+                ]
+            else:
+                model_config.kv_cache_spec_descs = (
+                    build_diffusion_gemma_kv_spec_descs(model_config)
+                )
+        super()._post_build_model_config(model_config)
+
+    @classmethod
     def _create_config(cls, ckpt_path: str) -> ModelConfig:
         config_path = os.path.join(ckpt_path, "config.json")
         if not os.path.exists(config_path):
@@ -194,7 +232,16 @@ class DiffusionGemma(BaseModel):
         config.dgm_canvas_length = int(config_json.get("canvas_length", 256))
         config.dgm_final_logit_softcapping = float(text.get("final_logit_softcapping", 30.0))
 
-        config.kv_cache_spec_descs = build_diffusion_gemma_kv_spec_descs(config)
+        descs = build_diffusion_gemma_kv_spec_descs(config)
+        config.kv_cache_spec_descs = descs
+        # Underscore-private stash: apply_layer_num_override clears
+        # kv_cache_spec_descs on a layer cut; _post_build_model_config restores
+        # the surviving prefix from this original python-built list. Stash the
+        # built object, NOT the attribute read-back: kv_cache_spec_descs is a
+        # pybind C++ member and reading it back returns converted copies that
+        # do not convert cleanly on re-assignment (std::bad_alloc in the
+        # pybind setter, runs r7-r9).
+        config._dgm_kv_descs_full = descs
 
         # Multimodal: vision tower + embed_vision live in the same checkpoint
         # (model.encoder.vision_tower.* / model.encoder.embed_vision.*) and are
