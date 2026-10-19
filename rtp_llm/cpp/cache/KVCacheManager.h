@@ -128,6 +128,11 @@ public:
     void                        setCacheStore(std::shared_ptr<CacheStore> cache_store);
     std::shared_ptr<CacheStore> getCacheStore() const;
 
+    // model_id of the last regUserMr call, used to build PD cache-store keys
+    size_t modelId() const {
+        return model_id_;
+    }
+
     // 异步连接器操作
     // async load cache from connector to gpu, for all rank
     std::shared_ptr<AsyncContext>
@@ -214,6 +219,7 @@ private:
 
     mutable std::mutex          cache_store_mutex_;
     std::shared_ptr<CacheStore> cache_store_;
+    size_t                      model_id_{0};
 };
 
 }  // namespace rtp_llm

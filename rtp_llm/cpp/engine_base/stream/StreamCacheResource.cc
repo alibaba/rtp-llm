@@ -10,6 +10,10 @@
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorReadWriteContext.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorAsyncContext.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
+#include "rtp_llm/cpp/utils/KVCacheUtils.h"
+#include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/RequestBlockBuffer.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/model_rpc/TensorPbConvert.h"
 #include <thread>
@@ -816,9 +820,156 @@ void StreamCacheResource::holdKVCacheForPDSep() {
     if (ref) {
         pd_kvcache_ref_ = std::move(ref);
     }
+    publishKVCacheForPDSep();
 }
 
 void StreamCacheResource::releaseKVCacheForPDSep() {
     pd_kvcache_ref_.reset();
+}
+
+// PD cache-store publisher: enumerate this
+// stream's blocks exactly the way DecodeRpcServer builds load keys
+// ("kv_"/"kv_scale_"/"k_"/"v_"/"k_scale_"/"v_scale_" + makeCacheKey(model_id,
+// cache_key, layer_id, tag)) and publish them to the cache store under the
+// prefill request id. The decode side's load carries the same request id and
+// key rule, so its watch fires block by block. The recorded event gates the
+// publish inside NormalCacheStore until all prior device work (KV writes) is
+// complete.
+void StreamCacheResource::publishKVCacheForPDSep() {
+    if (pd_kvcache_published_) {
+        return;
+    }
+    auto cache_manager = resource_context_.cache_manager;
+    auto cache_store   = cache_manager ? cache_manager->getCacheStore() : nullptr;
+    if (!cache_store) {
+        // cache store disabled (non-PD or tcp-less config): nothing to publish
+        return;
+    }
+
+    const auto& cache_config      = cache_manager->cacheConfig();
+    const bool  use_mla           = cache_config.use_mla;
+    const bool  use_hybrid        = cache_config.groupNums() > 1;
+    const bool  use_kv_key_prefix = use_mla || cache_config.use_opaque_kv_cache_store || use_hybrid;
+    const auto  model_id          = cache_manager->modelId();
+    const auto& cache_keys        = batch_kv_cache_resource_->cacheResource(0).cacheKeys();
+    const auto& group_block_ids   = batch_kv_cache_resource_->groupBlocks(0);
+    const auto  request_id        = stream_->streamId();
+
+    auto event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
+    event->record(cuda_graph::graphGetCurrentStream());
+    auto request_block_buffer =
+        std::make_shared<RequestBlockBuffer>(std::to_string(request_id), std::move(event));
+
+    const auto& layer_group_ids = cache_config.topology().layerGroupIdsSnapshot();
+    size_t      block_count     = 0;
+    for (size_t layer_id = 0; layer_id < cache_config.layer_num; ++layer_id) {
+        std::vector<int> layer_gids;
+        if (use_hybrid) {
+            if (layer_id >= layer_group_ids.size() || layer_group_ids[layer_id].empty()) {
+                RTP_LLM_LOG_WARNING("publish kv cache for pd sep failed, stream %ld, layer %zu missing group ids",
+                                    (long)request_id,
+                                    layer_id);
+                return;
+            }
+            layer_gids = layer_group_ids[layer_id];
+        } else {
+            layer_gids.push_back(0);
+        }
+
+        for (int gid : layer_gids) {
+            const auto& tag = cache_config.tagForGroup(static_cast<size_t>(gid));
+            if (static_cast<size_t>(gid) >= group_block_ids.size() || group_block_ids[gid] == nullptr) {
+                RTP_LLM_LOG_WARNING("publish kv cache for pd sep failed, stream %ld, group %d has no block ids",
+                                    (long)request_id,
+                                    gid);
+                return;
+            }
+            const auto& block_ids = group_block_ids[gid]->blocks();
+            for (size_t block_pos = 0; block_pos < block_ids.size(); ++block_pos) {
+                const auto block_id = block_ids[block_pos];
+                if (isNullBlockIdx(block_id)) {
+                    continue;
+                }
+                if (block_pos >= cache_keys.size()) {
+                    RTP_LLM_LOG_WARNING(
+                        "publish kv cache for pd sep, stream %ld, block pos %zu exceeds cache keys %zu, stop "
+                        "enumerating this group",
+                        (long)request_id,
+                        block_pos,
+                        cache_keys.size());
+                    break;
+                }
+                auto cache_key = makeCacheKey(model_id, std::to_string(cache_keys[block_pos]), layer_id, tag);
+                auto parts = cache_manager->convertIndexToBufferByTag(block_id, static_cast<int>(layer_id), tag);
+
+                auto add_block = [&](const std::string& key, const BlockInfo& block) {
+                    if (block.addr == nullptr || block.size_bytes == 0) {
+                        RTP_LLM_LOG_WARNING("publish kv cache for pd sep skip invalid block, stream %ld, key %s",
+                                            (long)request_id,
+                                            key.c_str());
+                        return;
+                    }
+                    std::shared_ptr<void> addr(block.addr, [](void*) {});
+                    request_block_buffer->addBlock(
+                        key, addr, static_cast<uint32_t>(block.size_bytes), block.is_cuda, true);
+                    ++block_count;
+                };
+
+                if (use_kv_key_prefix) {
+                    if (parts.size() != 1 && parts.size() != 2) {
+                        RTP_LLM_LOG_WARNING(
+                            "publish kv cache for pd sep failed, stream %ld, unexpected parts size %zu for key %s",
+                            (long)request_id,
+                            parts.size(),
+                            cache_key.c_str());
+                        return;
+                    }
+                    add_block("kv_" + cache_key, parts[0]);
+                    if (parts.size() == 2) {
+                        add_block("kv_scale_" + cache_key, parts[1]);
+                    }
+                } else {
+                    if (parts.size() != 2 && parts.size() != 4) {
+                        RTP_LLM_LOG_WARNING(
+                            "publish kv cache for pd sep failed, stream %ld, unexpected parts size %zu for key %s",
+                            (long)request_id,
+                            parts.size(),
+                            cache_key.c_str());
+                        return;
+                    }
+                    add_block("k_" + cache_key, parts[0]);
+                    add_block("v_" + cache_key, parts[1]);
+                    if (parts.size() == 4) {
+                        add_block("k_scale_" + cache_key, parts[2]);
+                        add_block("v_scale_" + cache_key, parts[3]);
+                    }
+                }
+            }
+        }
+    }
+
+    if (block_count == 0) {
+        RTP_LLM_LOG_WARNING("publish kv cache for pd sep, stream %ld, no blocks to publish", (long)request_id);
+        return;
+    }
+
+    pd_kvcache_published_ = true;
+    RTP_LLM_LOG_INFO("publish kv cache for pd sep, stream %ld, model_id %zu, blocks %zu, hybrid %d, kv_prefix %d",
+                     (long)request_id,
+                     model_id,
+                     block_count,
+                     use_hybrid ? 1 : 0,
+                     use_kv_key_prefix ? 1 : 0);
+    cache_store->store(request_block_buffer, [request_id, block_count](bool success, CacheStoreErrorCode ec) {
+        if (!success) {
+            RTP_LLM_LOG_WARNING("publish kv cache for pd sep store failed, request %ld, error %s",
+                                (long)request_id,
+                                CacheStoreErrorCodeToString(ec).c_str());
+            return;
+        }
+        RTP_LLM_LOG_INFO("publish kv cache for pd sep store done, request %ld, blocks %zu",
+                         (long)request_id,
+                         block_count);
+    });
 }
 }  // namespace rtp_llm

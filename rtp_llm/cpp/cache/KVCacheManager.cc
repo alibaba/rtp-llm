@@ -620,6 +620,7 @@ KVCacheInfo KVCacheManager::buildKVCacheInfo(int64_t latest_version, bool need_c
 // 系统资源管理
 
 void KVCacheManager::regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store) {
+    model_id_ = model_id;
     allocator_->regUserMr(model_id, std::move(cache_store));
 }
 

@@ -112,6 +112,10 @@ public:
     void holdKVCacheForPDSep();
     void releaseKVCacheForPDSep();
 
+    // Publish this stream's KV blocks to the PD cache store so the decode
+    // side can pull them by cache key; called once from holdKVCacheForPDSep.
+    void publishKVCacheForPDSep();
+
     std::string debugString() const {
         std::stringstream debug_string;
         debug_string << "StreamCacheResource {"
@@ -149,6 +153,7 @@ private:
 
     // Connector reference counting for PD separation (RAII auto-release)
     std::shared_ptr<KVCacheResource> pd_kvcache_ref_;
+    bool                             pd_kvcache_published_{false};
     /// Async connector load is gated to once per cache lifecycle: duplicate `initKVBlock` must
     /// not re-issue async read (see tests). Reset in `releaseResource()` when blocks are cleared
     /// so any future reuse of this resource can load again. Concurrent callers use `exchange`.
