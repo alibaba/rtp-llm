@@ -989,8 +989,12 @@ perf_test(
         "--input_len", "128,1024,4096,12000",
         "--partial", "1",
         "--target_tpot", "20",
-        "--concurrency_limit", "8",
-        "--max_context_batch_size", "8",
+        # bs=8 batched propose hangs the engine step for 5+ min (perf r2:
+        # bs=4 completes and saves its trace, the bs=8 iteration freezes
+        # silently and the health monitor reaps the backend). Cap the grid
+        # at 4 until the batch>4 canvas geometry is root-caused C++-side.
+        "--concurrency_limit", "4",
+        "--max_context_batch_size", "4",
         "--decode_test_length", "30",
         "--num_measures", "10",
         "--reserver_runtime_mem_mb", "24000",
