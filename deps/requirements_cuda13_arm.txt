@@ -11,7 +11,7 @@ https://artlab.alibaba-inc.com/1/pypi/rtp_llm/flashinfer-cubin/flashinfer_cubin-
 
 # Self-built wheels (built from GitHub deepseek-ai/{DeepGEMM,FlashMLA} main
 # against torch 2.11+cu130; SHAs encoded in filename).
-https://search-ad.oss-cn-hangzhou-zmf-internal.aliyuncs.com/rtp-llm-deps/dsv41/20261009/deep_gemm-2.8.1%2B057ca59-cp310-cp310-linux_aarch64.whl
+http://artlab.alibaba-inc.com/1/pypi/rtp_llm/deep_gemm/deep_gemm-2.8.2+98a672e.cu132-cp310-cp310-linux_aarch64.whl
 https://search-ad.oss-cn-hangzhou-zmf-internal.aliyuncs.com/rtp-llm-deps/dsv41/20261009/flash_mla-1.0.0%2B2e5429f-cp310-cp310-linux_aarch64.whl
 # Preserve existing model KV formats through a separate namespace.
 https://search-ad.oss-cn-hangzhou-zmf-internal.aliyuncs.com/rtp-llm-deps/dsv41/20261009/flash_mla_legacy-1.0.0%2B92fd68b.rtp1-cp310-cp310-linux_aarch64.whl
