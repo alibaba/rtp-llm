@@ -49,8 +49,8 @@ def _run_tilelang_single_gemm(
     fwd_mul_kernel(
         residual_flat.view(-1, mhc_hidden_size),
         fn,
-        gemm_out_mul[:1].view(-1, 1, mhc_mult3),
-        gemm_out_sqrsum[:1].view(-1, 1),
+        gemm_out_mul[:1].view(1, -1, mhc_mult3),
+        gemm_out_sqrsum[:1].view(1, -1),
     )
     return 1
 

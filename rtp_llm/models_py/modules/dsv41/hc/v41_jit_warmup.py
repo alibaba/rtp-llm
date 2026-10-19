@@ -4,7 +4,7 @@ The pinned DeepGEMM 2.8.0 mega_mhc implementation specializes on hidden,
 split count, SM count and output modes; M is a runtime argument. The split
 planner below mirrors csrc/apis/mega_mhc.hpp and layout/mega_mhc.cuh.
 TileKernels norm_fn, split_mixes, sinkhorn, apply_mix and post likewise use
-T.dynamic for M, so one launch covers all prefill lengths for a configuration.
+T.dynamic for M; norm_fn needs one launch per reachable split count.
 The small-prenorm DG GEMM uses fixed split16, but RTP's Triton reduction has
 TOKENS constexpr: every reachable M <= 64 needs its own reduction variant.
 
@@ -16,8 +16,10 @@ existing eager preparation for DeepGEMM's per-stream split barriers.
 
 from __future__ import annotations
 
+import importlib
 import logging
 import math
+import os
 from functools import partial
 
 import torch
@@ -130,6 +132,20 @@ def _small_prenorm_ms(max_m):
     return tuple(range(1, min(max(int(max_m), 0), 64) + 1))
 
 
+def _tilelang_norm_ms(max_m, hidden, device, *, use_small):
+    min_m = 65 if use_small else 1
+    if int(max_m) < min_m:
+        return ()
+    _tile_ops()
+    norm = importlib.import_module(
+        "rtp_llm.models_py.3rdparty.tile_kernels.modeling.mhc.ops.norm_fn"
+    )
+    index = device.index if device.index is not None else torch.cuda.current_device()
+    return norm._tilelang_representative_ms(
+        max_m, hidden, norm._tilelang_device_num_sms(index), min_m=min_m
+    )
+
+
 def _clone_unit(source, device):
     return DelayedHCUnit(
         source.fn.detach().to(device=device).clone(),
@@ -150,6 +166,11 @@ def _launch_small_prenorm(unit, tokens, device):
         raise RuntimeError("V4.1 HC warmup small prenorm rejected a reachable shape")
 
 
+def _launch_tilelang_norm(unit, tokens, device):
+    residual = torch.ones((1, tokens, 4, unit.dim), dtype=torch.bfloat16, device=device)
+    _tile_ops().mhc_pre_norm_fn(residual, unit.fn, None, unit.norm_eps, n_splits=1)
+
+
 def _launch_tilelang_chain(unit, tokens, device, *, include_norm):
     ops = _tile_ops()  # Initializes TileLang/libz3/TVM environment before imports.
     residual = torch.ones((1, tokens, 4, unit.dim), dtype=torch.bfloat16, device=device)
@@ -165,21 +186,25 @@ def _launch_tilelang_chain(unit, tokens, device, *, include_norm):
     # The delayed collapse/final head uses this same apply_mix specialization.
     hidden = ops.mhc_pre_apply_mix(residual, pre)
     ops.mhc_post(hidden, residual, post, comb, out=residual)
-    if include_norm and can_fuse_big_pre():
-        small_deepgemm = tokens <= 64 and v41_prenorm._has_prenorm_gemm()
-        ops.mhc_pre_big_fuse(
-            residual,
-            v41_prenorm.prepare_tf32_weight(unit.fn) if small_deepgemm else unit.fn,
-            unit.scale,
-            unit.base,
-            unit.norm_eps,
-            unit.hc_eps,
-            unit.hc_eps,
-            2.0,
-            unit.hc_sinkhorn_iters,
-            previous_pre_mix=pre.reshape(1, tokens, 4),
-            gemm_backend="deepgemm" if small_deepgemm else None,
-        )
+
+
+def _launch_fused_pre(unit, tokens, device):
+    residual = torch.ones((1, tokens, 4, unit.dim), dtype=torch.bfloat16, device=device)
+    previous = torch.full((1, tokens, 4), 0.25, dtype=torch.float32, device=device)
+    small_deepgemm = tokens <= 64
+    _tile_ops().mhc_pre_big_fuse(
+        residual,
+        v41_prenorm.prepare_tf32_weight(unit.fn) if small_deepgemm else unit.fn,
+        unit.scale,
+        unit.base,
+        unit.norm_eps,
+        unit.hc_eps,
+        unit.hc_eps,
+        2.0,
+        unit.hc_sinkhorn_iters,
+        previous_pre_mix=previous,
+        gemm_backend="deepgemm" if small_deepgemm else None,
+    )
 
 
 def _clone_pair(pair, device):
@@ -238,6 +263,16 @@ def warmup_v41_hc_jit(v4, *, max_m, device):
     num_sms = common._get_deep_gemm_num_sms(device) if mega_enabled else 0
     small_ms = _small_prenorm_ms(max_m) if small_enabled else ()
     mega_ms = _mega_representative_ms(int(max_m), num_sms) if mega_enabled else ()
+    tile_ms = {
+        config: _tilelang_norm_ms(
+            max_m,
+            source.dim * source.hc_mult,
+            device,
+            use_small=small_enabled and source.dim == 5120,
+        )
+        for config, source in units.items()
+    }
+    fused_enabled = can_fuse_big_pre()
     stream = torch.cuda.current_stream(device)
     key = (
         str(device),
@@ -248,6 +283,9 @@ def warmup_v41_hc_jit(v4, *, max_m, device):
         small_ms,
         mega_ms,
         num_sms,
+        tuple(sorted(tile_ms.items())),
+        fused_enabled,
+        os.environ.get("DSV4_MHC_PRE_GEMM_BACKEND", ""),
     )
     if key in _WARMED_KEYS:
         return
@@ -281,25 +319,39 @@ def warmup_v41_hc_jit(v4, *, max_m, device):
                         ),
                         device=device,
                     )
+            norm_ms = tile_ms[config]
             common._run_tilelang_warmup_launch_with_retry(
                 "V41 HC TileLang",
                 f"config={config}",
                 partial(
                     _launch_tilelang_chain,
                     unit,
-                    min(int(max_m), 65),
+                    norm_ms[0] if norm_ms else 1,
                     device,
-                    include_norm=not use_small or int(max_m) > 64,
+                    include_norm=bool(norm_ms),
                 ),
                 device=device,
             )
-            if use_small and can_fuse_big_pre():
+            for tokens in norm_ms[1:]:
                 common._run_tilelang_warmup_launch_with_retry(
-                    "V41 HC fused small pre",
-                    f"config={config} m=1",
-                    partial(_launch_tilelang_chain, unit, 1, device, include_norm=True),
+                    "V41 HC TileLang prenorm",
+                    f"config={config} m={tokens}",
+                    partial(_launch_tilelang_norm, unit, tokens, device),
                     device=device,
                 )
+            if fused_enabled and unit.dim == 5120:
+                # The delayed caller uses DG at M<=64, and the configured
+                # backend above 64. Neither requires standalone norm/split.
+                fused_ms = ((1,) if use_small else ()) + (
+                    (65,) if int(max_m) > 64 else ()
+                )
+                for tokens in fused_ms:
+                    common._run_tilelang_warmup_launch_with_retry(
+                        "V41 HC fused pre",
+                        f"config={config} m={tokens}",
+                        partial(_launch_fused_pre, unit, tokens, device),
+                        device=device,
+                    )
             del unit
             common._sync_cuda(device)
             common._release_cuda_cache(device)
