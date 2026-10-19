@@ -167,7 +167,7 @@ class CostBasedPrefillSelectionMetricTest {
             var decision = new com.fasterxml.jackson.databind.ObjectMapper()
                     .readTree(JsonUtils.toStringOrEmpty(new PvLogData(context)))
                     .path("routingDecisions").get(0);
-            assertEquals("NO_CACHE_ANYWHERE_CONSISTENT_WITH_KVCM",
+            assertEquals("NO_CACHE_ANYWHERE_KVCM",
                     decision.path("cacheAffinityDecision").asText());
             assertEquals(1, decision.path("kvcmMatches").path("reportedNodeCount").asInt());
             assertTrue(decision.path("kvcmMatches").path("topHits").isEmpty());
@@ -187,13 +187,15 @@ class CostBasedPrefillSelectionMetricTest {
     @CsvSource({
             "1791, KVCM, true, -1, NO_CACHE_ANYWHERE_BELOW_BLOCK_SIZE",
             "1791, KVCM, true, 0, NO_CACHE_ANYWHERE_BELOW_BLOCK_SIZE",
-            "1792, KVCM, true, 0, NO_CACHE_ANYWHERE_CONSISTENT_WITH_KVCM",
-            "1793, KVCM, true, 0, NO_CACHE_ANYWHERE_CONSISTENT_WITH_KVCM",
-            "1792, KVCM, true, -1, NO_CACHE_ANYWHERE_CONSISTENT_WITH_KVCM",
+            "1792, KVCM, true, 0, NO_CACHE_ANYWHERE_KVCM",
+            "1793, KVCM, true, 0, NO_CACHE_ANYWHERE_KVCM",
+            "1792, KVCM, true, -1, NO_CACHE_ANYWHERE_KVCM",
             "1792, KVCM, false, -1, NO_CACHE_ANYWHERE",
-            "1791, LOCAL_SYNC, true, 0, NO_CACHE_ANYWHERE",
-            "1791, KVCM, false, 0, NO_CACHE_ANYWHERE",
-            "1791, KVCM, true, 1, NO_CACHE_ANYWHERE"
+            "1792, KVCM, true, 1, NO_CACHE_ANYWHERE_BUT_KVCM_HAS_HIT",
+            "1792, LOCAL_SYNC, true, 0, NO_CACHE_ANYWHERE",
+            "1791, LOCAL_SYNC, true, 0, NO_CACHE_ANYWHERE_BELOW_BLOCK_SIZE",
+            "1791, KVCM, false, 0, NO_CACHE_ANYWHERE_BELOW_BLOCK_SIZE",
+            "1791, KVCM, true, 1, NO_CACHE_ANYWHERE_BELOW_BLOCK_SIZE"
     })
     void distinguishesKvcmMisses(long inputTokens, CacheMatchSource source, boolean querySucceeded,
                                 long matchedBlocks, String expectedDecision) {
@@ -214,10 +216,10 @@ class CostBasedPrefillSelectionMetricTest {
 
     @ParameterizedTest
     @CsvSource({
-            "10.0.0.1:8080@0, 0, NO_CACHE_ANYWHERE_CONSISTENT_WITH_KVCM",
-            "10.0.0.2:8080@0, 0, NO_CACHE_ANYWHERE_CONSISTENT_WITH_KVCM",
-            "10.0.0.1:8080@0, 1, NO_CACHE_ANYWHERE",
-            "10.0.0.2:8080@0, 1, NO_CACHE_ANYWHERE"
+            "10.0.0.1:8080@0, 0, NO_CACHE_ANYWHERE_KVCM",
+            "10.0.0.2:8080@0, 0, NO_CACHE_ANYWHERE_KVCM",
+            "10.0.0.1:8080@0, 1, NO_CACHE_ANYWHERE_BUT_KVCM_HAS_HIT",
+            "10.0.0.2:8080@0, 1, NO_CACHE_ANYWHERE_BUT_KVCM_HAS_HIT"
     })
     void checksGlobalKvcmHitsAcrossAllReportedNodes(String workerKey, long globalBlocks, String expectedDecision) {
         configureFocusedAffinity();

@@ -125,14 +125,16 @@ public class CostBasedPrefillStrategy {
             return PlacementResult.blocked(roleType);
         }
 
-        if ("NO_CACHE_ANYWHERE".equals(survivors.affinityDecision())
-                && cacheMatchResult.source() == CacheMatchSource.KVCM
-                && cacheMatchResult.querySucceeded()
-                && cacheMatchResult.hostMatches().values().stream()
-                        .allMatch(match -> match.globalMatchBlocks() == 0L)) {
-            survivors.recordAffinityDecision(seqLen < cacheMatchResult.blockSize()
-                    ? "NO_CACHE_ANYWHERE_BELOW_BLOCK_SIZE"
-                    : "NO_CACHE_ANYWHERE_CONSISTENT_WITH_KVCM");
+        if ("NO_CACHE_ANYWHERE".equals(survivors.affinityDecision())) {
+            if (seqLen < cacheMatchResult.blockSize()) {
+                survivors.recordAffinityDecision("NO_CACHE_ANYWHERE_BELOW_BLOCK_SIZE");
+            } else if (cacheMatchResult.source() == CacheMatchSource.KVCM && cacheMatchResult.querySucceeded()) {
+                boolean kvcmHasHit = cacheMatchResult.hostMatches().values().stream()
+                        .anyMatch(match -> match.globalMatchBlocks() > 0L);
+                survivors.recordAffinityDecision(kvcmHasHit
+                        ? "NO_CACHE_ANYWHERE_BUT_KVCM_HAS_HIT"
+                        : "NO_CACHE_ANYWHERE_KVCM");
+            }
         }
 
         PrefillEndpoint best = survivors.endpoint(selectedIndex);
