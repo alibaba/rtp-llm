@@ -26,17 +26,18 @@ _READY = {}
 _LIBRARIES = {}
 _LOCK = threading.Lock()
 _SOURCES = ("_v41_wo_a_quant.cu", "_v41_wo_a_quant.cuh", "_v41_wo_a_driver.cc")
-# The shim and two schedules are qualified against DeepGEMM 2.8.0+122e18b.
-# Its EpilogueDynamicScaledFP8 receives EpilogueArgs directly; pin the behavior
-# and host-visible layout as well as the mainloop. Other revisions fall back
-# until their epilogue/layout has been verified.
+# The shim and two schedules are qualified against DeepGEMM 2.8.2+ad62a90.
+# Its CastToFP8WithClamp operator receives EpilogueOperatorArgs and keeps the
+# clamp fields inert at their defaults; pin the behavior and host-visible
+# layout as well as the mainloop. Other revisions fall back until their
+# epilogue/layout has been verified.
 _VENDOR_HASHES = {
-    "impls/sm100_fp8_fp4_gemm_1d1d.cuh": "0b42d290fbcaea544a7b1c2c786429e52453fc60a74a939c20fa73ce960abf69",
-    "epilogue/sm100_store_cd.cuh": "34264511eadb165477cfd92059e03f7cc7dbb5b694298f7e4e9f1074294dc4ad",
-    "epilogue/sm100_store_cd_swap_ab.cuh": "77c280afab2a284d7a105323f3a878549d1e7f358ab0a28190c43958aed247d2",
-    "epilogue/transform.cuh": "85c5159fbfa9cfbda4a1f99885e72668e4df771d01e200001fe39ab89da17ccb",
-    "common/types.cuh": "a5fc39709678359f8a326dcb6c216edf09aa7dc7443bacbe91cc416a8802e74a",
-    "common/math.cuh": "576e9db1a1889087f77b3f74d74d011bf452f16c0e5c030bdd661e961c074ddc",
+    "impls/sm100_fp8_fp4_gemm_1d1d.cuh": "f567031e4f6e2b86b0ee99560c3eaff0160623a82e01aff0559fbeb3c2ec17b4",
+    "epilogue/sm100_store_cd.cuh": "f90b1baca0b88bad39cd84a3634447e2a4f24c249ab067bfa6afb7eed5979aea",
+    "epilogue/sm100_store_cd_swap_ab.cuh": "23cf25fed0aa5bcc26465a88cb3b11144d236f9697458d072dbb9171ad1edd8d",
+    "epilogue/operators.cuh": "4e916eab753dcc06eee8fe8664a8f1ba412a4724119cdbb04de52e01c12f7bf3",
+    "common/types.cuh": "0382bf27efb6deea5dc21a4f8ae21296494e513166c2682c63e498c70cefa6b2",
+    "common/math.cuh": "65aef0dbff42f066d2715c33b632f452cb4e21503fe168be0dca55aed0af9262",
     "layout/gemm.cuh": "b692f024495a4160dc65a8094bb13eae65be4c902d10436fce6446e6919d2b57",
 }
 
