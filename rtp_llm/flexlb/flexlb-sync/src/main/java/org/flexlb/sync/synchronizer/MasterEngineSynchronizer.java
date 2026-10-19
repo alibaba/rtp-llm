@@ -35,6 +35,9 @@ import java.util.concurrent.atomic.LongAdder;
 @Component
 public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
 
+    @org.springframework.beans.factory.annotation.Autowired
+    private org.flexlb.sync.status.WorkerRetirementService retirementService;
+    private final java.util.Map<RoleType, java.util.concurrent.atomic.AtomicBoolean> roleInProgress = new java.util.concurrent.ConcurrentHashMap<>();
     private final List<String> modelNames = new ArrayList<>();
     private final EngineGrpcService engineGrpcService;
     private final CacheAwareService localKvCacheAwareManager;
@@ -84,6 +87,7 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
     }
 
     public void syncEngineStatus() {
+        if (retirementService == null) return;
         syncCount.increment();
         logger.debug("sync engine status start, times:{}, modelNames:{}", syncCount.longValue(), modelNames);
         try {
@@ -103,7 +107,10 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
                 for (RoleType roleType : roleTypes) {
                     List<Endpoint> roleEndpoints = serviceRoute.getRoleEndpoints(roleType);
                     if (roleEndpoints != null) {
-                        engineSyncExecutor.submit(new EngineSyncRunner(
+                        var active = roleInProgress.computeIfAbsent(roleType, ignored -> new java.util.concurrent.atomic.AtomicBoolean());
+                        if (!active.compareAndSet(false, true)) continue;
+                        try {
+                        EngineSyncRunner runner = new EngineSyncRunner(
                                 modelName, modelWorkerStatus.getRoleStatusMap(roleType),
                                 workerAddressService, statusCheckExecutor, engineHealthReporter,
                                 engineGrpcService, roleType, localKvCacheAwareManager,
@@ -111,7 +118,10 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
                                 flexlbConfig.getWorkerRegistry().getCacheStatus()
                                         .isFullSnapshotDebugMode(),
                                 priorityScheduler, endpointRegistry
-                        ));
+                        ).withIsolation(cacheStatusExecutor, retirementService,
+                                flexlbConfig.getWorkerRegistry().getHealth().getStatusStaleAfterMs());
+                        engineSyncExecutor.submit(() -> { try { runner.run(); } finally { active.set(false); } });
+                        } catch (RuntimeException error) { active.set(false); throw error; }
                     } else {
                         logger.error("roleEndpoints is null, by roleType : {}", roleType);
                     }

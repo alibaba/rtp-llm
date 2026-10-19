@@ -980,6 +980,9 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
 
     private static final class EmptyCacheAwareService implements CacheAwareService {
         @Override
+        public void retireEngineCache(String address) { }
+
+        @Override
         public Map<String, Integer> findMatchingEngines(List<Long> blockCacheKeys,
                                                         RoleType roleType,
                                                         String group) {

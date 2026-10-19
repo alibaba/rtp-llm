@@ -3,7 +3,6 @@ package org.flexlb.engine.grpc;
 import com.google.common.util.concurrent.FutureCallback;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
-import com.google.protobuf.MessageLite;
 import io.grpc.ManagedChannel;
 import io.grpc.StatusRuntimeException;
 import io.grpc.internal.GrpcUtil;
@@ -52,6 +51,24 @@ public class EngineGrpcClient extends AbstractGrpcClient<AbstractGrpcClient.Grpc
         nameResolver.start(this);
     }
 
+    private final java.util.concurrent.atomic.AtomicLong lastMetricsWarningNanos = new java.util.concurrent.atomic.AtomicLong();
+
+    private void reportCallMetricsSafely(String operation, long duration, int unusedSize, boolean retry) {
+        try { grpcReporter.reportCallMetrics(operation, duration, 0, retry); }
+        catch (RuntimeException failure) { warnMetricsFailure(operation, failure); }
+    }
+
+    private void reportConnectionSafely(String operation, long duration) {
+        try { grpcReporter.reportConnectionDuration(operation, duration); }
+        catch (RuntimeException failure) { warnMetricsFailure(operation, failure); }
+    }
+
+    private void warnMetricsFailure(String operation, RuntimeException failure) {
+        long now=System.nanoTime(), previous=lastMetricsWarningNanos.get();
+        if (now-previous > TimeUnit.SECONDS.toNanos(30) && lastMetricsWarningNanos.compareAndSet(previous,now))
+            Logger.warn("RPC metrics failed; transport completion is preserved: operation={}, cause={}", operation, failure.getClass().getSimpleName());
+    }
+
     /**
      * Common method to execute gRPC calls with proper channel management and error handling
      *
@@ -87,20 +104,17 @@ public class EngineGrpcClient extends AbstractGrpcClient<AbstractGrpcClient.Grpc
 
             // Calculate response body size in bytes
             int responseSize = 0;
-            if (response instanceof MessageLite messageLite) {
-                responseSize = messageLite.getSerializedSize();
-            }
 
             // Record statistics
             long duration = TimeUnit.NANOSECONDS.toMillis(endTime - startTime);
-            grpcReporter.reportCallMetrics(serviceType.getOperationName(), duration, responseSize, false);
+            reportCallMetricsSafely(serviceType.getOperationName(), duration, responseSize, false);
 
             return response;
         } catch (StatusRuntimeException e) {
             if (isConnectionBrokenError(e)) {
                 invoker.markExpired();
                 long connectionDuration = invoker.getConnectionDuration();
-                grpcReporter.reportConnectionDuration(serviceType.getOperationName(), connectionDuration);
+                reportConnectionSafely(serviceType.getOperationName(), connectionDuration);
                 Logger.warn("Connection broken for {}:{} {}, duration: {}μs, recreating channel and retrying once, msh:{}",
                         ip, port, serviceType, connectionDuration, e.getMessage());
                 return retryWithNewChannel(channelKey, invoker, grpcCall, requestTimeoutMs, ip, port, serviceType);
@@ -162,11 +176,8 @@ public class EngineGrpcClient extends AbstractGrpcClient<AbstractGrpcClient.Grpc
                 public void onSuccess(R response) {
                     long endTime = System.nanoTime();
                     int responseSize = 0;
-                    if (response instanceof MessageLite messageLite) {
-                        responseSize = messageLite.getSerializedSize();
-                    }
                     long duration = TimeUnit.NANOSECONDS.toMillis(endTime - startTime);
-                    grpcReporter.reportCallMetrics(
+                    reportCallMetricsSafely(
                             serviceType.getOperationName(), duration, responseSize, false);
                     resultFuture.complete(response);
                 }
@@ -178,7 +189,7 @@ public class EngineGrpcClient extends AbstractGrpcClient<AbstractGrpcClient.Grpc
                             && isConnectionBrokenError(e)) {
                         finalInvoker.markExpired();
                         long connectionDuration = finalInvoker.getConnectionDuration();
-                        grpcReporter.reportConnectionDuration(
+                        reportConnectionSafely(
                                 serviceType.getOperationName(), connectionDuration);
                         Logger.debug("Connection broken for {}:{} {}, duration: {}μs, recreating channel and retrying once async, msh:{}",
                                 ip, port, serviceType, connectionDuration, e.getMessage());
@@ -225,11 +236,8 @@ public class EngineGrpcClient extends AbstractGrpcClient<AbstractGrpcClient.Grpc
                 public void onSuccess(R response) {
                     long endTime = System.nanoTime();
                     int responseSize = 0;
-                    if (response instanceof MessageLite messageLite) {
-                        responseSize = messageLite.getSerializedSize();
-                    }
                     long duration = TimeUnit.NANOSECONDS.toMillis(endTime - originalStartTime);
-                    grpcReporter.reportCallMetrics(
+                    reportCallMetricsSafely(
                             serviceType.getOperationName(), duration, responseSize, true);
                     resultFuture.complete(response);
                 }
@@ -277,13 +285,10 @@ public class EngineGrpcClient extends AbstractGrpcClient<AbstractGrpcClient.Grpc
 
         // Calculate response body size in bytes
         int responseSize = 0;
-        if (response instanceof MessageLite messageLite) {
-            responseSize = messageLite.getSerializedSize();
-        }
 
         // Record retry statistics
         long duration = TimeUnit.NANOSECONDS.toMillis(endTime - startTime);
-        grpcReporter.reportCallMetrics(serviceType.getOperationName(), duration, responseSize, true);
+        reportCallMetricsSafely(serviceType.getOperationName(), duration, responseSize, true);
 
         return response;
     }

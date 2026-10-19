@@ -57,6 +57,9 @@ public class DefaultCacheAwareService implements CacheAwareService {
     }
 
     @Override
+    public void retireEngineCache(String address) { kvCacheManager.retireEngineCache(address); }
+
+    @Override
     public WorkerCacheUpdateResult updateEngineBlockCache(WorkerStatus workerStatus) {
         long startTime = System.nanoTime() / 1000;
         String engineIpPort = workerStatus.getIpPort();

@@ -409,7 +409,7 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
             if (!(ep instanceof PrefillEndpoint pe)) {
                 continue;
             }
-            if (!pe.getStatus().isAlive()) {
+            if (!pe.getStatus().isSchedulingStatusFresh()) {
                 continue;
             }
             if (!measure.isResourceAvailable(pe)) {

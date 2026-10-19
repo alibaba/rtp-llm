@@ -94,7 +94,7 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
             if (!(ep instanceof DecodeEndpoint de)) {
                 return;
             }
-            if (!de.getStatus().isAlive()) {
+            if (!de.getStatus().isSchedulingStatusFresh()) {
                 rejections.merge("NOT_ALIVE", 1, Integer::sum);
                 return;
             }

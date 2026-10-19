@@ -37,6 +37,7 @@ public abstract class AbstractEngineStatusSynchronizer {
      * Engine worker status request execution thread pool
      */
     public static ExecutorService statusCheckExecutor;
+    public static ExecutorService cacheStatusExecutor;
 
     /**
      * Engine worker status synchronization thread pool
@@ -65,12 +66,17 @@ public abstract class AbstractEngineStatusSynchronizer {
                 new LinkedBlockingQueue<>(15000), new NamedThreadFactory("engine-sync-executor"),
                 new ThreadPoolExecutor.CallerRunsPolicy());
 
+        cacheStatusExecutor = new ThreadPoolExecutor(
+                flexlbConfig.getInternalRuntime().getStatusCheckExecutorThreads(),
+                flexlbConfig.getInternalRuntime().getStatusCheckExecutorThreads(),
+                60L, TimeUnit.SECONDS, new LinkedBlockingQueue<>(15000),
+                new NamedThreadFactory("cache-status-executor"), new ThreadPoolExecutor.AbortPolicy());
         statusCheckExecutor = new ThreadPoolExecutor(
                 flexlbConfig.getInternalRuntime().getStatusCheckExecutorThreads(),
                 flexlbConfig.getInternalRuntime().getStatusCheckExecutorThreads(),
                 60L, TimeUnit.SECONDS,
                 new LinkedBlockingQueue<>(15000), new NamedThreadFactory("status-checker-executor"),
-                new ThreadPoolExecutor.CallerRunsPolicy());
+                new ThreadPoolExecutor.AbortPolicy());
     }
 
     protected abstract void syncEngineStatus();
@@ -80,5 +86,6 @@ public abstract class AbstractEngineStatusSynchronizer {
         Optional.ofNullable(scheduler).ifPresent(s -> scheduler.shutdown());
         Optional.ofNullable(engineSyncExecutor).ifPresent(s -> engineSyncExecutor.shutdown());
         Optional.ofNullable(statusCheckExecutor).ifPresent(s -> statusCheckExecutor.shutdown());
+        Optional.ofNullable(cacheStatusExecutor).ifPresent(s -> cacheStatusExecutor.shutdown());
     }
 }

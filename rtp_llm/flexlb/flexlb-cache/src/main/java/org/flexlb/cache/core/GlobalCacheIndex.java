@@ -130,6 +130,21 @@ public class GlobalCacheIndex {
         }
     }
 
+    /** Retire only this address's indexed keys; callers serialize its cache owner. */
+    public void removeEngineKeys(String address, Set<Long> keys) {
+        if (address == null || keys == null || keys.isEmpty()) return;
+        lock.lock();
+        try {
+            for (Long key : keys) {
+                Set<String> owners = blockToEnginesMap.get(key);
+                if (owners != null && owners.remove(address)) {
+                    totalMappings.decrement();
+                    if (owners.isEmpty() && blockToEnginesMap.remove(key, owners)) totalBlocks.decrement();
+                }
+            }
+        } finally { lock.unlock(); }
+    }
+
     /**
      * Calculate engine prefix match length based on prefix matching
      *

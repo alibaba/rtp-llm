@@ -62,7 +62,7 @@ public abstract class AbstractGrpcClient<STUB extends AbstractGrpcClient.GrpcStu
         updateGrpcChannelPool(ipPortList);
 
         // Update engine cache, remove offline engines
-        updateEngineKvCache(ipPortList);
+        // Cache ownership and retirement belong to WorkerRetirementService, not discovery callbacks.
     }
 
     /**

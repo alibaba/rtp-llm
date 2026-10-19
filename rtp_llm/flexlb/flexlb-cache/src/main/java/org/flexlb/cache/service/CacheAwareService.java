@@ -32,4 +32,6 @@ public interface CacheAwareService {
      * @return Update result
      */
     WorkerCacheUpdateResult updateEngineBlockCache(WorkerStatus workerStatus);
+
+    void retireEngineCache(String address);
 }

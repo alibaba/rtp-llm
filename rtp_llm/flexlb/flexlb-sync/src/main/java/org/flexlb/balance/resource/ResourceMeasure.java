@@ -23,7 +23,7 @@ public interface ResourceMeasure {
         if (endpoint == null) {
             return false;
         }
-        return endpoint.getStatus().isAlive();
+        return endpoint.getStatus().isSchedulingStatusFresh();
     }
 
     /**

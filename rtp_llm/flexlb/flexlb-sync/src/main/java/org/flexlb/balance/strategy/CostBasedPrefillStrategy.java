@@ -469,7 +469,7 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
             if (!(ep instanceof PrefillEndpoint pe)) {
                 return;
             }
-            if (!pe.getStatus().isAlive()) {
+            if (!pe.getStatus().isSchedulingStatusFresh()) {
                 rejections.merge("NOT_ALIVE", 1, Integer::sum);
                 return;
             }

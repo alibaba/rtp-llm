@@ -87,7 +87,7 @@ public class RandomStrategy implements LoadBalanceStrategy {
     }
 
     private boolean isWorkerAvailable(FlexlbConfig config, RoleType roleType, WorkerEndpoint ep) {
-        if (ep == null || !ep.getStatus().isAlive()) {
+        if (ep == null || !ep.getStatus().isSchedulingStatusFresh()) {
             return false;
         }
 

@@ -35,6 +35,17 @@ public class EngineSyncRunner implements Runnable {
     private final WorkerAddressService workerAddressService;
 
     private final ExecutorService statusCheckExecutor;
+    private ExecutorService cacheExecutor;
+    private org.flexlb.sync.status.WorkerRetirementService retirementService;
+    private long staleAfterMs = 10000;
+
+    public EngineSyncRunner withIsolation(ExecutorService cacheExecutor,
+            org.flexlb.sync.status.WorkerRetirementService retirementService, long staleAfterMs) {
+        this.cacheExecutor = cacheExecutor;
+        this.retirementService = retirementService;
+        this.staleAfterMs = staleAfterMs;
+        return this;
+    }
 
     private final EngineHealthReporter engineHealthReporter;
 
@@ -75,6 +86,7 @@ public class EngineSyncRunner implements Runnable {
         this.workerAddressService = workerAddressService;
         this.workerStatusMap = workerStatusMap;
         this.statusCheckExecutor = statusCheckExecutor;
+        this.cacheExecutor = statusCheckExecutor;
         this.engineHealthReporter = engineHealthReporter;
         this.engineGrpcService = engineGrpcService;
         this.roleType = roleType;
@@ -119,6 +131,10 @@ public class EngineSyncRunner implements Runnable {
                     // Use max(3 * actual sync interval, 1s) as removal threshold to tolerate transient service discovery flaps
                     long removalThresholdUs = Math.max(3 * actualIntervalUs, 1_000_000L);
                     if (System.nanoTime() / 1000 - lastTime > removalThresholdUs) {
+                        if (retirementService != null) {
+                            retirementService.retire(cachedWorkerStatuses, roleType, ipPort, workerStatus);
+                            continue;
+                        }
                         workerStatus.setAlive(false);
                         boolean statusRemoved = cachedWorkerStatuses.remove(ipPort, workerStatus);
                         boolean endpointRemoved = endpointRegistry != null
@@ -141,6 +157,8 @@ public class EngineSyncRunner implements Runnable {
                 String site = host.getSite();
 
                 WorkerStatus workerStatus = getOrCreateWorkerStatus(cachedWorkerStatuses, workerIpPort);
+                if (workerStatus == null) continue;
+                workerStatus.getPollState().configure(staleAfterMs);
 
                 if (workerStatus.getStatusCheckInProgress().compareAndSet(false, true)) {
                     try {
@@ -148,7 +166,8 @@ public class EngineSyncRunner implements Runnable {
                         GrpcWorkerStatusRunner grpcWorkerStatusRunner
                                 = new GrpcWorkerStatusRunner(modelName, workerIpPort, site, roleType, host.getGroup(),
                                 workerStatus, cachedWorkerStatuses, engineHealthReporter, engineGrpcService,
-                                syncRequestTimeoutMs, priorityScheduler, endpointRegistry, statusCheckExecutor);
+                                syncRequestTimeoutMs, priorityScheduler, endpointRegistry, statusCheckExecutor)
+                                        .withRetirementService(retirementService);
                         statusCheckExecutor.submit(grpcWorkerStatusRunner);
                     } catch (RejectedExecutionException e) {
                         workerStatus.getStatusCheckInProgress().set(false);
@@ -165,8 +184,8 @@ public class EngineSyncRunner implements Runnable {
                                 = new GrpcCacheStatusCheckRunner(modelName, workerIpPort, site, roleType,
                                 workerStatus, engineHealthReporter, engineGrpcService, localKvCacheAwareManager,
                                 syncRequestTimeoutMs, syncCount, syncEngineStatusInterval,
-                                cacheFullSnapshotDebugMode, statusCheckExecutor);
-                        statusCheckExecutor.submit(grpcCacheStatusCheckRunner);
+                                cacheFullSnapshotDebugMode, cacheExecutor);
+                        cacheExecutor.submit(grpcCacheStatusCheckRunner);
                     } catch (RejectedExecutionException e) {
                         workerStatus.getCacheCheckInProgress().set(false);
                         logger.debug("Cache check rejected for worker: {}, reset flag for retry", workerIpPort);
@@ -223,23 +242,24 @@ public class EngineSyncRunner implements Runnable {
     }
 
     private WorkerStatus getOrCreateWorkerStatus(Map<String, WorkerStatus> workerStatuses, String workerIpPort) {
-        WorkerStatus workerStatus = workerStatuses.get(workerIpPort);
-        if (workerStatus == null) {
-            workerStatus = new WorkerStatus();
+        if (retirementService != null && retirementService.isRetiring(roleType, workerIpPort)) return null;
+        WorkerStatus workerStatus = workerStatuses.computeIfAbsent(workerIpPort, address -> {
+            WorkerStatus created = new WorkerStatus();
             String[] split = workerIpPort.split(":");
-            workerStatus.setIp(split[0]);
-            workerStatus.setPort(Integer.parseInt(split[1]));
-            workerStatus.setRole(roleType);
-            workerStatus.getStatusLastUpdateTime().set(System.nanoTime() / 1000);
-            workerStatuses.put(workerIpPort, workerStatus);
+            created.setIp(split[0]);
+            created.setPort(Integer.parseInt(split[1]));
+            created.setRole(roleType);
+            created.getStatusLastUpdateTime().set(System.nanoTime() / 1000);
             logger.info("Created new WorkerStatus for worker: {}", workerIpPort);
-        }
+            return created;
+        });
+        if (workerStatus.getPollState().isRetired()) return null;
         // Cache and worker status checks run independently. Publish the role known
         // from service discovery before either callback can observe this object.
         if (workerStatus.getRole() == null) {
             workerStatus.setRole(roleType);
         }
-        if (endpointRegistry != null) {
+        if (endpointRegistry != null && retirementService == null) {
             if (!workerStatus.isAlive()) {
                 workerStatus.setAlive(true);
             }

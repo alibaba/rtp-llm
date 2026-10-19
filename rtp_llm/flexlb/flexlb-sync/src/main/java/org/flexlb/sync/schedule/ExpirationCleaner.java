@@ -39,6 +39,8 @@ public class ExpirationCleaner {
 
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
 
+    @Autowired
+    private org.flexlb.sync.status.WorkerRetirementService retirementService;
     private final long workerTimeoutUs;
     private final EndpointRegistry endpointRegistry;
 
@@ -86,7 +88,13 @@ public class ExpirationCleaner {
 
             long expirationTime = workerStatus.getStatusLastUpdateTime().get() + workerTimeoutUs;
             long currentTime = System.nanoTime() / 1000;
-            if (currentTime > expirationTime) {
+            if (workerStatus.getPollState().isManaged()
+                    ? workerStatus.getPollState().isExpired(currentTime, workerStatus.getStatusLastUpdateTime().get(), workerTimeoutUs)
+                    : currentTime > expirationTime) {
+                if (retirementService != null) {
+                    retirementService.retire(workerStatusMap, role, item.getKey(), workerStatus);
+                    continue;
+                }
                 workerStatus.setAlive(false);
                 boolean statusRemoved = workerStatusMap.remove(item.getKey(), workerStatus);
                 boolean endpointRemoved = endpointRegistry.remove(role, item.getKey(), workerStatus);

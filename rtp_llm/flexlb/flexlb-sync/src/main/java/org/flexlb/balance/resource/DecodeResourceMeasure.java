@@ -50,7 +50,7 @@ public class DecodeResourceMeasure implements ResourceMeasure {
     }
 
     public boolean isResourceAvailable(DecodeEndpoint endpoint) {
-        if (endpoint == null || !endpoint.getStatus().isAlive()) {
+        if (endpoint == null || !endpoint.getStatus().isSchedulingStatusFresh()) {
             return false;
         }
         // Gate on the engine-facing load — reservations parked in a prefill

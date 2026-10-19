@@ -15,6 +15,13 @@ import java.util.concurrent.locks.ReentrantLock;
 public class WorkerStatus {
     private static final org.slf4j.Logger logger = LoggerFactory.getLogger("syncLogger");
     public final transient ReentrantLock lock = new ReentrantLock();
+    public final transient ReentrantLock cacheMutationLock = new ReentrantLock();
+    @com.fasterxml.jackson.annotation.JsonIgnore
+    private final WorkerPollState pollState = new WorkerPollState();
+
+    public boolean isSchedulingStatusFresh() {
+        return alive && (!pollState.isManaged() || pollState.isSchedulingFresh(System.nanoTime() / 1000));
+    }
     private RoleType role;
     private String group;
     private String ip;

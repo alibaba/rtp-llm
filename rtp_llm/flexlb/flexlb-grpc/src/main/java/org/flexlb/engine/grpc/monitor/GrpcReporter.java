@@ -12,7 +12,6 @@ import static org.flexlb.constant.MetricConstant.GRPC_CALL_COUNT;
 import static org.flexlb.constant.MetricConstant.GRPC_CALL_DURATION;
 import static org.flexlb.constant.MetricConstant.GRPC_CHANNEL_POOL_SIZE;
 import static org.flexlb.constant.MetricConstant.GRPC_CONNECTION_DURATION;
-import static org.flexlb.constant.MetricConstant.GRPC_RESPONSE_SIZE;
 
 /**
  * Reporter for gRPC channel pool metrics.
@@ -35,7 +34,6 @@ public class GrpcReporter {
     public void init() {
         this.monitor.register(GRPC_CHANNEL_POOL_SIZE, FlexMetricType.GAUGE);
         this.monitor.register(GRPC_CALL_DURATION, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        this.monitor.register(GRPC_RESPONSE_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(GRPC_CALL_COUNT, FlexMetricType.QPS);
         this.monitor.register(GRPC_CONNECTION_DURATION, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
     }
@@ -67,7 +65,6 @@ public class GrpcReporter {
         monitor.report(GRPC_CALL_DURATION, tags, duration);
 
         // Report response body size
-        monitor.report(GRPC_RESPONSE_SIZE, tags, responseSize);
 
         // Report call count
         monitor.report(GRPC_CALL_COUNT, tags, 1);

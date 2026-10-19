@@ -45,7 +45,7 @@ public class PrefillResourceMeasure implements ResourceMeasure {
     }
 
     public boolean isResourceAvailable(PrefillEndpoint endpoint) {
-        if (endpoint == null || !endpoint.getStatus().isAlive()) {
+        if (endpoint == null || !endpoint.getStatus().isSchedulingStatusFresh()) {
             return false;
         }
         long pendingRequests = endpoint.realPendingCount();
@@ -55,7 +55,7 @@ public class PrefillResourceMeasure implements ResourceMeasure {
             Logger.debug("Prefill worker {} resource unavailable: pendingRequests={}, "
                             + "maxPendingRequests={}, alive={}",
                     endpoint.getIp(), pendingRequests, maxPendingRequests,
-                    endpoint.getStatus().isAlive());
+                    endpoint.getStatus().isSchedulingStatusFresh());
         }
         return available;
     }

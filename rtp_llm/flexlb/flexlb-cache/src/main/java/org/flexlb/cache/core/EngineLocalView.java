@@ -156,6 +156,9 @@ public class EngineLocalView {
         }
     }
 
+    /** Generation owner already serializes this idempotent retirement. */
+    public void removeEngineCacheIfPresent(String address) { engineViews.remove(address); }
+
     /**
      * Get all cache block IDs of an engine
      *

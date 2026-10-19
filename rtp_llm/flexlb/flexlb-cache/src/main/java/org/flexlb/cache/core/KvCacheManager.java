@@ -122,6 +122,12 @@ public class KvCacheManager {
     /**
      * Clear all data
      */
+    public void retireEngineCache(String address) {
+        Set<Long> keys = engineLocalView.getEngineCacheBlocks(address);
+        globalCacheIndex.removeEngineKeys(address, keys);
+        engineLocalView.removeEngineCacheIfPresent(address);
+    }
+
     public void clear() {
 
         globalCacheIndex.clear();
