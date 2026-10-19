@@ -171,7 +171,7 @@ def fused_permute(a: torch.Tensor, sfa: torch.Tensor):
         ),
         template=permute_template,
         args=args,
-        jit_include_dir="cutlass3",
+        jit_include_dir="actlize_v1.0.0",
     )
     runtime(*args)
 

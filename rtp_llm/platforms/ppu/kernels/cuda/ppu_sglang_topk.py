@@ -84,7 +84,7 @@ def topk_prefill(scores, starts, ends, out, topk=512):
         ),
         template=_TEMPLATE,
         args=args,
-        jit_include_dir="cutlass3",
+        jit_include_dir="actlize_v1.0.0",
     )
     runtime(*args)
     return out

@@ -2,7 +2,6 @@
 
 #include <cuda_pipeline.h>
 #include "cutlass/arch/memory.h"
-#include "cutlass/arch/memory_sm80.h"
 
 // Fused permute(1,0,2) for a paired (A, SFA) tensor set.
 // Optimization: cp.async (async prefetch to SMEM) + cache-global stores (ppu.st.global.cg).

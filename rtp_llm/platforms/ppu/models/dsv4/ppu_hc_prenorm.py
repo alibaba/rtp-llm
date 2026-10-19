@@ -144,7 +144,7 @@ def _launch_partials(x, weight, config):
         ),
         template=_TEMPLATE,
         args=args,
-        jit_include_dir="cutlass3",
+        jit_include_dir="actlize_v1.0.0",
     )
     runtime(*args)
     return partials, squares
