@@ -60,10 +60,10 @@ public class FlexlbGrpcForwarder {
         this.executor = executor;
     }
 
-    public CompletionStage<MasterForwardResult> forwardScheduleToMaster(
-            FlexlbScheduleProtocol.FlexlbScheduleRequestPB request) {
+    public CompletionStage<MasterForwardResult> forwardScheduleToMaster(FlexlbScheduleProtocol.FlexlbScheduleRequestPB request) {
+        String requestId = request.getRequestId();
         ForwardGuard guard = applyForwardGuard(
-                request.getRequestId(), request.getForwardHop(),
+                requestId, request.getForwardHop(),
                 ForwardOperation.SCHEDULE);
         if (guard.blocked()) {
             return CompletableFuture.completedFuture(MasterForwardResult.blocked(
@@ -83,7 +83,7 @@ public class FlexlbGrpcForwarder {
                 request.toBuilder().setForwardHop(guard.nextHop()).build();
         ListenableFuture<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> rpcFuture;
         ForwardTrace trace = new ForwardTrace("rtp_llm.flexlb.forward_schedule",
-                entryTraceContext(), request.getRequestId(), masterHostIpPort);
+                entryTraceContext(), requestId, masterHostIpPort);
         try {
             // The forward RPC inherits the inbound gRPC Context deadline. Do
             // not replace the request TTL with a load-balancer timeout.
@@ -93,7 +93,7 @@ public class FlexlbGrpcForwarder {
         } catch (RuntimeException error) {
             trace.finish(error);
             return CompletableFuture.completedFuture(forwardFailure(
-                    request.getRequestId(), guard, error));
+                    requestId, guard, error));
         }
 
         CompletableFuture<MasterForwardResult> result = new CompletableFuture<>();
@@ -119,7 +119,7 @@ public class FlexlbGrpcForwarder {
                         public void onFailure(Throwable error) {
                             trace.finish(error);
                             result.complete(forwardFailure(
-                                    request.getRequestId(), guard, error));
+                                    requestId, guard, error));
                         }
                     },
                     Runnable::run);
@@ -127,7 +127,7 @@ public class FlexlbGrpcForwarder {
             trace.finish(callbackRegistrationError);
             rpcFuture.cancel(true);
             result.complete(forwardFailure(
-                    request.getRequestId(), guard, callbackRegistrationError));
+                    requestId, guard, callbackRegistrationError));
         }
 
         // gRPC already propagates the inbound Context deadline/cancellation to

@@ -147,7 +147,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                 grpcForwarder.forwardScheduleToMaster(request).whenComplete((result, error) -> {
                     // The callback may run on another thread; keep the caller's deadline and cancellation.
                     callerContext.run(() -> handleForwardCompletion(
-                            request, requestContext, responseObserver, completionClaimed, result, error));
+                            requestContext, responseObserver, completionClaimed, result, error));
                 });
                 return;
             }
@@ -156,7 +156,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                     ? ScheduleOrigin.LOCAL_MASTER
                     : ScheduleOrigin.LOCAL_STANDALONE;
             errorOrigin = routeOrigin;
-            routeAndComplete(request, requestContext, responseObserver,
+            routeAndComplete(requestContext, responseObserver,
                     completionClaimed, routeOrigin);
 
         } catch (Exception e) {
@@ -179,13 +179,11 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                 .setErrorMessage(StrategyErrorType.NOT_MASTER.getErrorMsg()).build();
     }
 
-    private void handleForwardCompletion(
-            FlexlbScheduleProtocol.FlexlbScheduleRequestPB request,
-            BalanceContext context,
-            StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> responseObserver,
-            AtomicBoolean completionClaimed,
-            FlexlbGrpcForwarder.MasterForwardResult forwardResult,
-            Throwable forwardError) {
+    private void handleForwardCompletion(BalanceContext context,
+                                         StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> responseObserver,
+                                         AtomicBoolean completionClaimed,
+                                         FlexlbGrpcForwarder.MasterForwardResult forwardResult,
+                                         Throwable forwardError) {
         // Normalize exceptional completion so the routing decision has one input.
         if (forwardError != null) {
             forwardResult = FlexlbGrpcForwarder.MasterForwardResult.failed(forwardError, "");
@@ -194,7 +192,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         }
 
         if (shouldScheduleLocally(context, forwardResult)) {
-            routeAndComplete(request, context, responseObserver, completionClaimed, ScheduleOrigin.LOCAL_FALLBACK);
+            routeAndComplete(context, responseObserver, completionClaimed, ScheduleOrigin.LOCAL_FALLBACK);
             return;
         }
 
@@ -294,12 +292,10 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         }
     }
 
-    private void routeAndComplete(
-            FlexlbScheduleProtocol.FlexlbScheduleRequestPB request,
-            BalanceContext context,
-            StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> responseObserver,
-            AtomicBoolean completionClaimed,
-            ScheduleOrigin origin) {
+    private void routeAndComplete(BalanceContext context,
+                                  StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> responseObserver,
+                                  AtomicBoolean completionClaimed,
+                                  ScheduleOrigin origin) {
         CompletableFuture<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> routeFuture;
         try {
             // route() registers the scheduler owner synchronously. Install the

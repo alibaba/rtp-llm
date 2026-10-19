@@ -86,6 +86,10 @@ LoadBalancer 策略选 worker（读 EngineWorkerStatus 共享状态 + CacheAware
 后阶段失败 → DefaultRouter.rollBackRoutingFailure() 逐个 LoadBalancer.rollBack() 撤销记账
 ```
 
+Schedule 入口将请求字段转换为 `BalanceContext` / `Request`，本地路由、排队和转发完成回调使用内部上下文。
+原始 `FlexlbScheduleRequestPB` 仅用于入口解析和向 Master 发起 gRPC 转发；转发 RPC 回调使用提取出的 request ID。
+批量下发所需的 `generate_input` 字节由 `BalanceContext` 保存至下发阶段。
+
 ## 核心不变量
 
 - **路由读、同步写**：`EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS`（静态单例，四个角色各一个

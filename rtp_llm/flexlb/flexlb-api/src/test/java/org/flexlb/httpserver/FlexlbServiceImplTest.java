@@ -54,6 +54,7 @@ import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
@@ -834,6 +835,48 @@ class FlexlbServiceImplTest {
         assertTrue(resp.getEnqueuedByMaster());
         assertTrue(pvAppender.list.isEmpty());
         verify(engineHealthReporter, never()).reportRequestPayload(any());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void pendingForwardCallbackKeepsInternalContextWithoutScheduleProto() throws Exception {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(true);
+        when(lbStatusConsistencyService.isMaster()).thenReturn(false);
+        CompletionStage<FlexlbGrpcForwarder.MasterForwardResult> pending = mock(CompletionStage.class);
+        when(grpcForwarder.forwardScheduleToMaster(any())).thenReturn(pending);
+        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
+        var request = FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                .setRequestId("12352").setSeqLen(42).addBlockCacheKeys(71L).setCacheKeyBlockSize(16)
+                .setGenerateInput(ByteString.copyFromUtf8("engine-input")).build();
+
+        service.schedule(request, observer);
+
+        ArgumentCaptor<BiConsumer<FlexlbGrpcForwarder.MasterForwardResult, Throwable>> callback =
+                ArgumentCaptor.forClass(BiConsumer.class);
+        verify(pending).whenComplete(callback.capture());
+        BalanceContext capturedContext = null;
+        for (var field : callback.getValue().getClass().getDeclaredFields()) {
+            field.setAccessible(true);
+            Object value = field.get(callback.getValue());
+            assertFalse(value instanceof FlexlbScheduleProtocol.FlexlbScheduleRequestPB,
+                    "pending forward callback must not retain the wire request");
+            if (value instanceof BalanceContext context) {
+                capturedContext = context;
+            }
+        }
+        assertNotNull(capturedContext);
+        assertEquals("12352", capturedContext.getRequestId());
+        assertEquals(42, capturedContext.getRequest().getSeqLen());
+        assertEquals(List.of(71L), capturedContext.getRequest().getBlockCacheKeys());
+        assertEquals(request.getGenerateInput(), capturedContext.getGenerateInputPb());
+        verifyNoInteractions(observer);
+
+        when(routeService.route(any())).thenReturn(CompletableFuture.completedFuture(
+                Response.buildErrorResponse(StrategyErrorType.NO_PREFILL_WORKER, null)));
+        callback.getValue().accept(FlexlbGrpcForwarder.MasterForwardResult.noMaster(), null);
+        verify(routeService).route(capturedContext);
+        verify(observer).onNext(any());
+        verify(observer).onCompleted();
     }
 
     @Test
