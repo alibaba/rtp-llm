@@ -55,12 +55,19 @@ public:
                                              SamplerOutput&                      draft_sampler_output,
                                              SamplerOutput&                      target_sampler_output);
 
+    // batch_all_greedy: every stream in the batch is non-stochastic, i.e. the
+    // caller pinned all draft temperatures to kMinDraftTemperature and greedy
+    // rejection accepts on exact token match only. Return first-argmax tokens
+    // as a point mass (token_ids_are_point_mass=true, all_probs undefined).
+    // This may change proposals at ties and RNG consumption. Any stochastic
+    // row keeps the dense-q sampling path.
     SamplerOutput sampleDSparkDraft(const torch::Tensor& base_logits,
                                     const torch::Tensor& anchors,
                                     const torch::Tensor& temperature,
                                     const torch::Tensor& markov_w1,
                                     const torch::Tensor& markov_w2,
-                                    size_t               draft_vocab_size) const;
+                                    size_t               draft_vocab_size,
+                                    bool                 batch_all_greedy) const;
 
 private:
     void batchSample(SpeculativeSamplerOutput&           sample_output,

@@ -2282,6 +2282,7 @@ SamplerOutput MtpExecutor::sampleDSparkDraft(const StreamGroups&  stream_groups,
         torch::empty({batch_size}, torch::TensorOptions().dtype(torch::kFloat32).pinned_memory(true));
     auto*           temperatures         = temperature_cpu.data_ptr<float>();
     int64_t         row                  = 0;
+    bool            batch_all_greedy     = true;
     constexpr float kMinDraftTemperature = 1.0e-6f;
     for (const auto& stream : stream_groups.allStreams()) {
         // DSpARK admission is configuration-defined. needTilingForSampling()
@@ -2298,16 +2299,17 @@ SamplerOutput MtpExecutor::sampleDSparkDraft(const StreamGroups&  stream_groups,
         }
         // Greedy requests (do_sample=false or top_k=1) take the target's argmax
         // and the rejection rule accepts a draft token only on exact match, so
-        // the draft q must collapse to the argmax one-hot as well; a stochastic
-        // q there tanks the acceptance rate. Only stochastic requests use the
-        // request temperature.
-        temperatures[row++] =
-            config->stochastic() ? std::max(config->temperature, kMinDraftTemperature) : kMinDraftTemperature;
+        // concentrate draft q near its maxima to improve acceptance. Tiny
+        // temperature can retain ties; all-greedy batches use first argmax.
+        // Only stochastic requests use the request temperature.
+        const bool stochastic = config->stochastic();
+        temperatures[row++]   = stochastic ? std::max(config->temperature, kMinDraftTemperature) : kMinDraftTemperature;
+        batch_all_greedy      = batch_all_greedy && !stochastic;
     }
     buffer_holder_.hold_host(temperature_cpu);
     auto temperature = temperature_cpu.to(base_logits.device(), /*non_blocking=*/true);
     return speculative_sampler_->sampleDSparkDraft(
-        base_logits, anchors, temperature, dspark_markov_w1_, dspark_markov_w2_, draft_vocab_size_);
+        base_logits, anchors, temperature, dspark_markov_w1_, dspark_markov_w2_, draft_vocab_size_, batch_all_greedy);
 }
 
 void MtpExecutor::runDSparkProposal(GptModelInputs&                                  proposal_input,

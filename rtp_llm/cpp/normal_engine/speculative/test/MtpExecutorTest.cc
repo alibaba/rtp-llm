@@ -2469,7 +2469,7 @@ TEST_F(MtpExecutorTest, testDSparkDraftZeroTemperatureUsesClampedFullSoftmaxQ) {
     EXPECT_TRUE(torch::equal(output.token_ids.cpu(), expected_q.argmax(-1).to(torch::kInt32).cpu()));
 }
 
-TEST_F(MtpExecutorTest, testDSparkDraftGreedyRequestsCollapseQToArgmaxOneHot) {
+TEST_F(MtpExecutorTest, testDSparkDraftGreedyRequestsTakePointMassArgmaxTokens) {
     constexpr int32_t gamma      = 3;
     constexpr int32_t vocab_size = 4;
 
@@ -2488,7 +2488,8 @@ TEST_F(MtpExecutorTest, testDSparkDraftGreedyRequestsCollapseQToArgmaxOneHot) {
     auto expected_q = torch::softmax(base_logits / 1.0e-6f, -1);
 
     // do_sample=false is greedy even with a hot request temperature: the target
-    // takes its argmax and acceptance requires an exact token match.
+    // takes its argmax and acceptance requires an exact token match, so the
+    // all-greedy batch skips dense q and returns first-argmax proposals.
     {
         auto stream = createContextStream(
             components.model_config, components.runtime_config, components.resource_context, {0, 1});
@@ -2498,7 +2499,8 @@ TEST_F(MtpExecutorTest, testDSparkDraftGreedyRequestsCollapseQToArgmaxOneHot) {
 
         auto output =
             components.executor->sampleDSparkDraft(stream_groups, base_logits.reshape({gamma, vocab_size}), anchors);
-        EXPECT_TRUE(torch::allclose(output.all_probs, expected_q));
+        EXPECT_TRUE(output.token_ids_are_point_mass);
+        EXPECT_FALSE(output.all_probs.defined());
         EXPECT_TRUE(torch::equal(output.token_ids.cpu(), expected_q.argmax(-1).to(torch::kInt32).cpu()));
     }
 
@@ -2513,9 +2515,93 @@ TEST_F(MtpExecutorTest, testDSparkDraftGreedyRequestsCollapseQToArgmaxOneHot) {
 
         auto output =
             components.executor->sampleDSparkDraft(stream_groups, base_logits.reshape({gamma, vocab_size}), anchors);
-        EXPECT_TRUE(torch::allclose(output.all_probs, expected_q));
+        EXPECT_TRUE(output.token_ids_are_point_mass);
+        EXPECT_FALSE(output.all_probs.defined());
         EXPECT_TRUE(torch::equal(output.token_ids.cpu(), expected_q.argmax(-1).to(torch::kInt32).cpu()));
     }
+}
+
+TEST_F(MtpExecutorTest, testDSparkDraftTiesStillUseNormalTargetVerification) {
+    constexpr int32_t     gamma = 3, vocab_size = 4;
+    MtpExecutorTestConfig test_config;
+    test_config.vocab_size           = vocab_size;
+    test_config.gen_num_per_cycle    = gamma;
+    test_config.vocab_size_override  = vocab_size;
+    test_config.sp_type              = SP_TYPE_DSPARK;
+    test_config.dspark_mask_token_id = 0;
+    auto components                  = createMtpExecutorComponents(test_config);
+    auto stream =
+        createContextStream(components.model_config, components.runtime_config, components.resource_context, {0, 1});
+    stream->generateConfig()->do_sample = false;
+    StreamGroups stream_groups({stream});
+    auto         cuda_float = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+    auto         cuda_int   = cuda_float.dtype(torch::kInt32);
+    auto         logits     = torch::zeros({gamma, vocab_size}, cuda_float);
+    auto         anchors    = torch::zeros({1}, cuda_int);
+    auto         draft      = components.executor->sampleDSparkDraft(stream_groups, logits, anchors);
+    ASSERT_TRUE(draft.token_ids_are_point_mass);
+    ASSERT_FALSE(draft.all_probs.defined());
+    EXPECT_TRUE(draft.token_ids.eq(0).all().item<bool>());
+    // Tiny-T softmax is uniform at this tie, so it is not the new point mass.
+    EXPECT_TRUE(torch::allclose(torch::softmax(logits / 1.0e-6f, -1), torch::full_like(logits, 0.25f)));
+    spec::SpeculativeSampler verifier(torch::Tensor(), gamma);
+    for (int rejected : {0, 1, gamma}) {
+        SCOPED_TRACE(rejected);
+        SamplerOutput target;
+        target.token_ids              = torch::zeros({gamma + 1, 1}, cuda_int);
+        target.token_ids[rejected][0] = 2;
+        target.all_probs              = torch::zeros({1, gamma + 1, vocab_size}, cuda_float)
+                               .scatter_(2, target.token_ids.to(torch::kLong).reshape({1, gamma + 1, 1}), 1.0f);
+        auto verified = verifier.forward({stream}, draft, target);
+        EXPECT_EQ(verified.accept_len.cpu()[0].item<int32_t>(), rejected + 1);
+        auto expected         = torch::zeros({1, gamma + 1}, torch::kInt32);
+        expected[0][rejected] = 2;
+        EXPECT_TRUE(torch::equal(verified.accept_tokens.cpu(), expected));
+    }
+}
+
+TEST_F(MtpExecutorTest, testDSparkDraftMixedBatchKeepsDenseQForStochasticRow) {
+    constexpr int32_t gamma      = 3;
+    constexpr int32_t vocab_size = 4;
+
+    MtpExecutorTestConfig test_config;
+    test_config.vocab_size           = vocab_size;
+    test_config.gen_num_per_cycle    = gamma;
+    test_config.vocab_size_override  = vocab_size;
+    test_config.sp_type              = SP_TYPE_DSPARK;
+    test_config.dspark_mask_token_id = 0;
+    auto components                  = createMtpExecutorComponents(test_config);
+
+    auto base_logits = torch::tensor({0.1f, 0.4f, 0.3f, 0.4f, 0.5f, 0.4f, 0.3f, 0.2f, 0.1f, 0.2f, 0.4f, 0.3f,
+                                      0.2f, 0.5f, 0.1f, 0.4f, 0.3f, 0.1f, 0.2f, 0.6f, 0.4f, 0.2f, 0.5f, 0.1f})
+                           .reshape({2, gamma, vocab_size})
+                           .to(torch::kCUDA);
+    auto anchors = torch::tensor({1, 2}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+
+    auto greedy_stream =
+        createContextStream(components.model_config, components.runtime_config, components.resource_context, {0, 1});
+    greedy_stream->generateConfig()->do_sample = false;
+    auto stochastic_stream =
+        createContextStream(components.model_config, components.runtime_config, components.resource_context, {0, 1});
+    stochastic_stream->generateConfig()->do_sample   = true;
+    stochastic_stream->generateConfig()->top_k       = 0;
+    stochastic_stream->generateConfig()->temperature = 0.5f;
+    StreamGroups stream_groups({greedy_stream, stochastic_stream});
+
+    auto output =
+        components.executor->sampleDSparkDraft(stream_groups, base_logits.reshape({2 * gamma, vocab_size}), anchors);
+    // One stochastic row keeps the whole batch on the dense-q contract.
+    EXPECT_FALSE(output.token_ids_are_point_mass);
+    ASSERT_TRUE(output.all_probs.defined());
+    EXPECT_EQ((std::vector<int64_t>{2, gamma, vocab_size}), output.all_probs.sizes().vec());
+    // The greedy row retains the dense tiny-T distribution, including ties.
+    EXPECT_TRUE(torch::allclose(output.all_probs.select(0, 0), torch::softmax(base_logits.select(0, 0) / 1.0e-6f, -1)));
+    EXPECT_FLOAT_EQ(output.all_probs[0][0][1].item<float>(), 0.5f);
+    EXPECT_FLOAT_EQ(output.all_probs[0][0][3].item<float>(), 0.5f);
+    EXPECT_TRUE(output.all_probs.select(0, 0).isfinite().all().item<bool>());
+    // Stochastic row 1 uses the request temperature.
+    EXPECT_TRUE(torch::allclose(
+        output.all_probs.select(0, 1), torch::softmax(base_logits.select(0, 1) / 0.5f, -1), 1e-5, 1e-6));
 }
 
 TEST_F(MtpExecutorTest, testDSparkDraftUsesDenseSequentialMarkovDistribution) {
@@ -2594,11 +2680,20 @@ TEST_F(MtpExecutorTest, testDSparkReducedVocabFeedsMappedTargetTokenIntoMarkovCh
     auto markov_w2 =
         torch::tensor({-100.0f, 0.0f, 100.0f}, torch::kFloat32).reshape({draft_vocab_size, 1}).to(torch::kCUDA);
 
-    auto output = sampler.sampleDSparkDraft(base_logits, anchors, temperature, markov_w1, markov_w2, draft_vocab_size);
+    auto output =
+        sampler.sampleDSparkDraft(base_logits, anchors, temperature, markov_w1, markov_w2, draft_vocab_size, false);
 
     EXPECT_EQ((std::vector<int32_t>{5, 5}), toVec<int32_t>(output.token_ids.cpu()));
     auto expected_second_q = torch::softmax(torch::tensor({-100.0f, 0.0f, 100.0f}), -1);
     EXPECT_TRUE(torch::allclose(output.all_probs[0][1].cpu(), expected_second_q));
+
+    // The all-greedy point-mass path runs the same d2t-mapped Markov chain
+    // without materializing q: identical tokens, no all_probs.
+    auto point_mass_output =
+        sampler.sampleDSparkDraft(base_logits, anchors, temperature, markov_w1, markov_w2, draft_vocab_size, true);
+    EXPECT_TRUE(point_mass_output.token_ids_are_point_mass);
+    EXPECT_FALSE(point_mass_output.all_probs.defined());
+    EXPECT_EQ((std::vector<int32_t>{5, 5}), toVec<int32_t>(point_mass_output.token_ids.cpu()));
 }
 
 TEST_F(MtpExecutorTest, testDecodeOneStepSpecLogitsCapReplacesInvalidDraftWithTargetToken) {
