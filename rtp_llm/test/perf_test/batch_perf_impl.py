@@ -1,10 +1,16 @@
 import json
 import logging
 import os
+import shutil
+import subprocess
+import sys
+import threading
 import time
+from collections import Counter
 from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
+import psutil
 import requests
 
 from rtp_llm.test.perf_test.dataclass import (
@@ -59,6 +65,264 @@ def _wait_for_trace_flush(
         "[PERF_PROFILE_FLUSH] timed out after %ss; continuing", budget_s
     )
     return offset
+
+
+# ---------------------------------------------------------------------------
+#  Hang diagnostics (E1 for the DiffusionGemma bs>4 decode hang)
+# ---------------------------------------------------------------------------
+
+_HANG_DIAG_DIR_NAME = "hang_diag"
+_PY_SPY_INSTALL_TRIED = False
+
+
+def _hang_diag_config() -> Tuple[float, float]:
+    """(after_s, interval_s) for the hang watchdog; (0, 0) disables it.
+
+    Enabled by setting PERF_HANG_DIAG_AFTER_S to a positive number of seconds:
+    while a request batch stays pending longer than that, sample the engine
+    process tree. PERF_HANG_DIAG_INTERVAL_S controls the resample period.
+    """
+    raw = os.environ.get("PERF_HANG_DIAG_AFTER_S", "").strip()
+    if not raw:
+        return 0.0, 0.0
+    try:
+        after_s = float(raw)
+    except ValueError:
+        logging.warning("[PERF_HANG_DIAG] invalid PERF_HANG_DIAG_AFTER_S=%r; disabled", raw)
+        return 0.0, 0.0
+    if after_s <= 0:
+        return 0.0, 0.0
+    try:
+        interval_s = float(os.environ.get("PERF_HANG_DIAG_INTERVAL_S", "45"))
+    except ValueError:
+        interval_s = 45.0
+    return after_s, max(5.0, interval_s)
+
+
+def _hang_diag_dir() -> str:
+    base = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR") or os.getcwd()
+    path = os.path.join(base, _HANG_DIAG_DIR_NAME)
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _find_py_spy() -> Optional[str]:
+    candidates = [
+        shutil.which("py-spy"),
+        "/opt/conda310/bin/py-spy",
+        os.path.expanduser("~/.local/bin/py-spy"),
+    ]
+    for path in candidates:
+        if path and os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    return None
+
+
+def _ensure_py_spy() -> Optional[str]:
+    """Locate py-spy, best-effort installing it once when absent.
+
+    Workers may not ship py-spy; the install attempt is a single pip call so
+    the Python-stack channel of the hang diagnosis survives, and on failure
+    the /proc wchan and nvidia-smi channels keep working.
+    """
+    global _PY_SPY_INSTALL_TRIED
+    found = _find_py_spy()
+    if found or _PY_SPY_INSTALL_TRIED:
+        return found
+    _PY_SPY_INSTALL_TRIED = True
+    try:
+        ret = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "--quiet", "--disable-pip-version-check", "py-spy"],
+            timeout=120,
+            capture_output=True,
+            text=True,
+        )
+        if ret.returncode == 0:
+            logging.info("[PERF_HANG_DIAG] py-spy installed on demand")
+            return _find_py_spy()
+        logging.warning(
+            "[PERF_HANG_DIAG] py-spy install failed rc=%d: %s",
+            ret.returncode,
+            (ret.stderr or "").strip()[:300],
+        )
+    except Exception as e:
+        logging.warning("[PERF_HANG_DIAG] py-spy install attempt failed: %s", e)
+    return None
+
+
+def _is_server_side_process(cmdline: str, pid: int) -> bool:
+    """True for the start_server process and its server-side children.
+
+    start_server.py launches backend/frontend workers with the spawn start
+    method, so their cmdline carries multiprocessing spawn_main instead of
+    the server module name; the backend additionally renames its proctitle
+    to rtp_llm_backend_server. The test's own ProcessPoolExecutor workers
+    use fork and keep the parent cmdline, which excludes them.
+    """
+    if pid == os.getpid():
+        return False
+    markers = ("start_server", "spawn_main", "rtp_llm_backend", "rtp_llm_frontend")
+    return any(marker in cmdline for marker in markers)
+
+
+def _sample_proc_threads(pid: int, lines: List[str]) -> Counter:
+    """Append per-thread wchan/syscall/state lines for one pid; return wchan counts."""
+    wchans: Counter = Counter()
+    try:
+        task_dir = f"/proc/{pid}/task"
+        tids = sorted(os.listdir(task_dir), key=lambda t: int(t) if t.isdigit() else 0)
+    except OSError as e:
+        lines.append(f"  /proc/{pid}/task unreadable: {e}")
+        return wchans
+    for tid in tids:
+        wchan = "<gone>"
+        try:
+            with open(f"/proc/{pid}/task/{tid}/wchan", "r") as f:
+                wchan = f.read().strip()
+        except OSError:
+            pass
+        wchans[wchan or "<running>"] += 1
+        syscall = ""
+        try:
+            with open(f"/proc/{pid}/task/{tid}/syscall", "r") as f:
+                syscall = f.read().strip()
+        except OSError:
+            pass
+        state = ""
+        try:
+            with open(f"/proc/{pid}/task/{tid}/status", "r") as f:
+                for ln in f:
+                    if ln.startswith(("Name:", "State:")):
+                        state += ln.strip() + " "
+        except OSError:
+            pass
+        lines.append(f"  tid {tid} wchan={wchan!r} syscall={syscall[:48]!r} {state.strip()}")
+    return wchans
+
+
+def _collect_hang_diagnostics(tag: str) -> None:
+    """Sample the engine process tree while a request batch appears hung.
+
+    Writes py-spy dumps (Python frames: an H1 device-side hang parks the
+    forward thread at a .item()/cuda sync), /proc task wchan snapshots
+    (futex vs cuda/dma waits) and nvidia-smi utilization (idle GPU means a
+    host-side stall) into test.outputs/hang_diag/, and logs a one-line wchan
+    summary so the signal survives even without unzipping outputs.
+    """
+    stamp = time.strftime("%H%M%S")
+    out_dir = _hang_diag_dir()
+    try:
+        root = psutil.Process(os.getpid())
+        procs = [root] + root.children(recursive=True)
+    except Exception as e:
+        logging.warning("[PERF_HANG_DIAG] %s: process tree walk failed: %s", tag, e)
+        return
+
+    py_spy = _ensure_py_spy()
+    server_wchans: Counter = Counter()
+    lines: List[str] = [f"# hang diag {tag} at {stamp} pid={os.getpid()} procs={len(procs)} py_spy={bool(py_spy)}"]
+    for proc in procs:
+        try:
+            with proc.oneshot():
+                pid = proc.pid
+                cmdline = " ".join(proc.cmdline())
+        except Exception:
+            continue  # transient process: skip silently, next sample retries
+        server_side = _is_server_side_process(cmdline, pid)
+        lines.append(f"===== pid {pid} self={pid == os.getpid()} server_side={server_side} =====")
+        lines.append(f"cmdline: {cmdline[:300]}")
+        wchans = _sample_proc_threads(pid, lines)
+        if server_side:
+            server_wchans.update(wchans)
+            if py_spy:
+                dump_path = os.path.join(out_dir, f"pyspy_{stamp}_pid{pid}_{tag}.txt")
+                try:
+                    ret = subprocess.run(
+                        [py_spy, "dump", "--pid", str(pid)],
+                        timeout=60,
+                        capture_output=True,
+                        text=True,
+                    )
+                    with open(dump_path, "w") as f:
+                        f.write(ret.stdout or "")
+                        if ret.stderr:
+                            f.write("\n[stderr]\n" + ret.stderr)
+                    lines.append(f"  py-spy dump -> {dump_path} rc={ret.returncode}")
+                except Exception as e:
+                    lines.append(f"  py-spy dump failed: {e}")
+
+    for query in (
+        "--query-gpu=index,utilization.gpu,utilization.memory,memory.used,memory.total",
+        "--query-compute-apps=pid,used_memory",
+    ):
+        try:
+            ret = subprocess.run(
+                ["nvidia-smi", query, "--format=csv,noheader"],
+                timeout=30,
+                capture_output=True,
+                text=True,
+            )
+            lines.append(f"$ nvidia-smi {query}")
+            lines.append((ret.stdout or "").strip())
+        except Exception as e:
+            lines.append(f"nvidia-smi {query} failed: {e}")
+
+    report_path = os.path.join(out_dir, f"hang_{stamp}_{tag}.txt")
+    try:
+        with open(report_path, "w") as f:
+            f.write("\n".join(lines) + "\n")
+    except OSError as e:
+        logging.warning("[PERF_HANG_DIAG] %s: failed to write %s: %s", tag, report_path, e)
+    summary = ", ".join(f"{k}x{v}" for k, v in sorted(server_wchans.items())) or "<no server procs>"
+    logging.warning("[PERF_HANG_DIAG] %s: report=%s server_wchan_summary: %s", tag, report_path, summary)
+
+
+class _HangDiagnosticsWatchdog(threading.Thread):
+    """Sample hang diagnostics while request futures stay pending.
+
+    The backend can die silently minutes into a hang (frontend keepalive
+    resets the connection), so the sampling has to happen while the requests
+    are still pending, not after they fail.
+    """
+
+    def __init__(self, label: str, after_s: float, interval_s: float):
+        super().__init__(name=f"hang-diag-{label}", daemon=True)
+        self._label = label
+        self._after_s = after_s
+        self._interval_s = interval_s
+        self._started_at = time.monotonic()
+        self._stop_event = threading.Event()
+
+    def run(self) -> None:
+        logging.info(
+            "[PERF_HANG_DIAG] watchdog armed: label=%s after=%.0fs interval=%.0fs",
+            self._label,
+            self._after_s,
+            self._interval_s,
+        )
+        next_sample_at = self._started_at + self._after_s
+        while not self._stop_event.wait(0.5):
+            now = time.monotonic()
+            if now < next_sample_at:
+                continue
+            elapsed = int(now - self._started_at)
+            try:
+                _collect_hang_diagnostics(f"{self._label}_{elapsed}s")
+            except Exception as e:
+                logging.warning("[PERF_HANG_DIAG] sample failed at %ss: %s", elapsed, e)
+            next_sample_at = time.monotonic() + self._interval_s
+
+    def stop(self) -> None:
+        self._stop_event.set()
+
+
+def _start_hang_watchdog(label: str) -> Optional[_HangDiagnosticsWatchdog]:
+    after_s, interval_s = _hang_diag_config()
+    if after_s <= 0:
+        return None
+    watchdog = _HangDiagnosticsWatchdog(label, after_s, interval_s)
+    watchdog.start()
+    return watchdog
 
 
 def _curl_server_single_worker(
@@ -385,8 +649,14 @@ class BatchPerfImpl(object):
             )
 
         all_responses: List[ResponseInfo] = []
-        for future in futures:
-            all_responses.extend(future.result())
+        watchdog = _start_hang_watchdog(self.profile_trace_name or "perf")
+        try:
+            for future in futures:
+                all_responses.extend(future.result())
+        finally:
+            if watchdog is not None:
+                watchdog.stop()
+                watchdog.join(timeout=5)
 
         return all_responses
 

@@ -1048,6 +1048,184 @@ perf_test(
     ],
 )
 
+# DiffusionGemma bs=8 decode hang root-cause ladder (E1), isolated from the
+# 9a7ff60ebf "cap 4" ruling: dgm_grid_test above stays capped at concurrency 4;
+# these repro targets deliberately re-open bs=8 at the exact r2 hang point
+# (bs8_seq128_decode, enumerate mode — no TPS binary search) with the hang
+# diagnostics armed. Engine flags mirror dgm_grid_test so only the batch
+# geometry and instrumentation differ.
+#   dgm_bs8_hang_repro     → baseline: bs=8, decode_test_length 600 (r2 shape)
+#   dgm_bs8_hang_clb       → + CUDA_LAUNCH_BLOCKING=1 (serialize launches; a
+#                            hang that moves/disappears points at host-side
+#                            launch/async ordering rather than device hang)
+#   dgm_bs8_hang_len512    → decode_test_length 512 (exact 2x canvas 256, no
+#                            last-round clamp / batch-shrink tail; survives →
+#                            H3 last-round clamp path is the suspect)
+#   dgm_bs8_hang_expandseg → + PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+#                            (the 272s recoverable stall disappearing under
+#                            expandable segments would confirm H4 allocator)
+# PERF_HANG_DIAG_* arms the harness-side watchdog (py-spy dump + wchan +
+# nvidia-smi into test.outputs/hang_diag); RTP_LLM_DGM_STEP_TRACE turns on the
+# MtpExecutor/MtpBatchStreamProcessor per-phase INFO logs.
+perf_test(
+    name = "dgm_bs8_hang_repro",
+    model_type = "diffusion_gemma",
+    ckpt_path = "/mnt/fuse/smoke-test/hf/google--diffusiongemma-26B-A4B-it--f7f5b7f5fa82ffc52addd066915886d497f5517b",
+    gpu_type = "H20_CU13",
+    envs = {
+        "RTP_LLM_DGM_STEP_TRACE": "1",
+        "PERF_HANG_DIAG_AFTER_S": "60",
+        "PERF_HANG_DIAG_INTERVAL_S": "45",
+    },
+    args = [
+        "--input_len", "128",
+        "--partial", "1",
+        "--concurrency_limit", "8",
+        "--max_context_batch_size", "8",
+        "--batch_size", "8",
+        "--decode_test_length", "600",
+        "--num_measures", "12",
+        "--reserver_runtime_mem_mb", "24000",
+        "--max_seq_len", "12800",
+        "--seq_size_per_block", "64",
+        "--kernel_seq_size_per_block", "64",
+        "--tp_size", "1",
+        "--dp_size", "1",
+        "--ep_size", "1",
+        "--world_size", "1",
+        "--act_type", "BF16",
+        "--sp_type", "dspark",
+        "--sp_model_type", "diffusion_gemma_proposer",
+        "--sp_checkpoint_path", "/mnt/fuse/smoke-test/hf/google--diffusiongemma-26B-A4B-it--f7f5b7f5fa82ffc52addd066915886d497f5517b",
+        "--gen_num_per_cycle", "256",
+    ],
+)
+
+# Same as dgm_bs8_hang_repro with CUDA_LAUNCH_BLOCKING=1: serialized kernel
+# launches. A hang that moves or disappears under blocking launches points at
+# host-side launch/async ordering instead of a device-side stall.
+perf_test(
+    name = "dgm_bs8_hang_clb",
+    model_type = "diffusion_gemma",
+    ckpt_path = "/mnt/fuse/smoke-test/hf/google--diffusiongemma-26B-A4B-it--f7f5b7f5fa82ffc52addd066915886d497f5517b",
+    gpu_type = "H20_CU13",
+    envs = {
+        "RTP_LLM_DGM_STEP_TRACE": "1",
+        "PERF_HANG_DIAG_AFTER_S": "60",
+        "PERF_HANG_DIAG_INTERVAL_S": "45",
+        "CUDA_LAUNCH_BLOCKING": "1",
+    },
+    args = [
+        "--input_len", "128",
+        "--partial", "1",
+        "--concurrency_limit", "8",
+        "--max_context_batch_size", "8",
+        "--batch_size", "8",
+        "--decode_test_length", "600",
+        "--num_measures", "12",
+        "--reserver_runtime_mem_mb", "24000",
+        "--max_seq_len", "12800",
+        "--seq_size_per_block", "64",
+        "--kernel_seq_size_per_block", "64",
+        "--tp_size", "1",
+        "--dp_size", "1",
+        "--ep_size", "1",
+        "--world_size", "1",
+        "--act_type", "BF16",
+        "--sp_type", "dspark",
+        "--sp_model_type", "diffusion_gemma_proposer",
+        "--sp_checkpoint_path", "/mnt/fuse/smoke-test/hf/google--diffusiongemma-26B-A4B-it--f7f5b7f5fa82ffc52addd066915886d497f5517b",
+        "--gen_num_per_cycle", "256",
+    ],
+)
+
+# H3 discriminator: decode_test_length 512 is an exact multiple of the 256
+# token canvas, so the last diffusion round needs no clamp and no batch-shrink
+# tail. If bs=8 survives at 512 while 600 hangs, the last-round clamp/batch
+# contraction path becomes the prime suspect.
+perf_test(
+    name = "dgm_bs8_hang_len512",
+    model_type = "diffusion_gemma",
+    ckpt_path = "/mnt/fuse/smoke-test/hf/google--diffusiongemma-26B-A4B-it--f7f5b7f5fa82ffc52addd066915886d497f5517b",
+    gpu_type = "H20_CU13",
+    envs = {
+        "RTP_LLM_DGM_STEP_TRACE": "1",
+        "PERF_HANG_DIAG_AFTER_S": "60",
+        "PERF_HANG_DIAG_INTERVAL_S": "45",
+    },
+    args = [
+        "--input_len", "128",
+        "--partial", "1",
+        "--concurrency_limit", "8",
+        "--max_context_batch_size", "8",
+        "--batch_size", "8",
+        "--decode_test_length", "512",
+        "--num_measures", "12",
+        "--reserver_runtime_mem_mb", "24000",
+        "--max_seq_len", "12800",
+        "--seq_size_per_block", "64",
+        "--kernel_seq_size_per_block", "64",
+        "--tp_size", "1",
+        "--dp_size", "1",
+        "--ep_size", "1",
+        "--world_size", "1",
+        "--act_type", "BF16",
+        "--sp_type", "dspark",
+        "--sp_model_type", "diffusion_gemma_proposer",
+        "--sp_checkpoint_path", "/mnt/fuse/smoke-test/hf/google--diffusiongemma-26B-A4B-it--f7f5b7f5fa82ffc52addd066915886d497f5517b",
+        "--gen_num_per_cycle", "256",
+    ],
+)
+
+# H4 discriminator: PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True removes
+# cudaMalloc fragmentation stalls. If the 272s-class recoverable stall (and the
+# hang) disappears, the caching allocator is the prime suspect.
+perf_test(
+    name = "dgm_bs8_hang_expandseg",
+    model_type = "diffusion_gemma",
+    ckpt_path = "/mnt/fuse/smoke-test/hf/google--diffusiongemma-26B-A4B-it--f7f5b7f5fa82ffc52addd066915886d497f5517b",
+    gpu_type = "H20_CU13",
+    envs = {
+        "RTP_LLM_DGM_STEP_TRACE": "1",
+        "PERF_HANG_DIAG_AFTER_S": "60",
+        "PERF_HANG_DIAG_INTERVAL_S": "45",
+        "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
+    },
+    args = [
+        "--input_len", "128",
+        "--partial", "1",
+        "--concurrency_limit", "8",
+        "--max_context_batch_size", "8",
+        "--batch_size", "8",
+        "--decode_test_length", "600",
+        "--num_measures", "12",
+        "--reserver_runtime_mem_mb", "24000",
+        "--max_seq_len", "12800",
+        "--seq_size_per_block", "64",
+        "--kernel_seq_size_per_block", "64",
+        "--tp_size", "1",
+        "--dp_size", "1",
+        "--ep_size", "1",
+        "--world_size", "1",
+        "--act_type", "BF16",
+        "--sp_type", "dspark",
+        "--sp_model_type", "diffusion_gemma_proposer",
+        "--sp_checkpoint_path", "/mnt/fuse/smoke-test/hf/google--diffusiongemma-26B-A4B-it--f7f5b7f5fa82ffc52addd066915886d497f5517b",
+        "--gen_num_per_cycle", "256",
+    ],
+)
+
+test_suite(
+    name = "dgm_bs8_hang_suite",
+    tests = [
+        ":dgm_bs8_hang_repro",
+        ":dgm_bs8_hang_clb",
+        ":dgm_bs8_hang_len512",
+        ":dgm_bs8_hang_expandseg",
+    ],
+    tags = ["manual"],
+)
+
 # DeepSeek V4-Flash perf coverage on SM100/SM103 (GB200/GB300).
 #   v4_flash_cp4_ep4_prefill_64k_perf       → CP=4 EP=4 64k prefill timeline
 #   v4_flash_cp4_ep4_prefill_64k_page_rr_perf → CP=4 EP=4 64k prefill + page-RR KV sharding
