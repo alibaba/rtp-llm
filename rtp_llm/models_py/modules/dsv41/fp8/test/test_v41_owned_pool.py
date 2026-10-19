@@ -240,6 +240,7 @@ class OwnedPoolCudaTest(unittest.TestCase):
         ratio,
         dtypes=(torch.int32, torch.int64),
         token_blocks=(128, 128),
+        main_storage=(1, 11),
     ):
         ends_host = [n * ratio + ratio - 1 for n in counts]
         ends_backing = torch.zeros(
@@ -262,7 +263,7 @@ class OwnedPoolCudaTest(unittest.TestCase):
                     triton.cdiv(max(ends_host, default=0), owner * cp) * (owner // tpb),
                 )
                 pages = 1 + len(counts) * columns
-                offset, padding = (4, 12) if tag == INDEXER_KV else (1, 11)
+                offset, padding = (4, 12) if tag == INDEXER_KV else main_storage
                 backing = torch.randint(
                     0,
                     256,
@@ -411,8 +412,11 @@ class OwnedPoolCudaTest(unittest.TestCase):
         limit=None,
         dtypes=(torch.int32, torch.int64),
         token_blocks=(128, 128),
+        main_storage=(1, 11),
     ):
-        ranks, host, ends = self.fixture(counts, cp, ratio, dtypes, token_blocks)
+        ranks, host, ends = self.fixture(
+            counts, cp, ratio, dtypes, token_blocks, main_storage
+        )
         plan_fn = functools.partial(owned.plan_groups, limit=limit or owned._LIMIT)
         plan = plan_fn(counts, cp_size=cp, owner_rows=256 // ratio)
         self.assertIsNotNone(plan)
@@ -505,6 +509,88 @@ class OwnedPoolCudaTest(unittest.TestCase):
             direct=True,
             token_blocks=(64, 128),
         )
+
+    def test_word_pack_ragged_owners_and_direct_gaps(self):
+        for cp in (1, 2, 4):
+            for ratio in (1, 2):
+                for direct in (False, True):
+                    with self.subTest(cp=cp, ratio=ratio, direct=direct):
+                        self.check(
+                            (0, 1, 15, 16, 17, 255, 257, 1027),
+                            cp,
+                            ratio,
+                            direct=direct,
+                            token_blocks=(64, 128),
+                            main_storage=(4, 12),
+                        )
+
+    def test_word_alignment_and_byte_fallback_with_group_reuse(self):
+        for storage in ((4, 12), (1, 12), (4, 11), (1, 11)):
+            with self.subTest(offset=storage[0], padding=storage[1]):
+                self.check(
+                    (1, 15, 16, 17, 129, 257),
+                    4,
+                    2,
+                    direct=True,
+                    limit=400000,
+                    main_storage=storage,
+                )
+
+    def test_restore_partial_tiles_and_negative_destinations_preserve_canaries(self):
+        rows, local, cp = 35, 19, 4
+        packet = torch.randint(
+            0, 256, (cp * local * 356 + 4,), dtype=torch.uint8, device="cuda"
+        )[4:]
+        codes = [((i * 7 % local) << 2) | (i % cp) for i in range(rows)]
+        for i in (0, 15, 16, 34):
+            codes[i] = -1
+        destinations = [2 + 2 * i for i in range(rows)]
+        # Cover both missing and present sources paired with a negative target.
+        for i in (0, 1, 16, 17):
+            destinations[i] = -1
+        inverse = torch.tensor(
+            [0, *codes, *destinations], dtype=torch.int64, device="cuda"
+        )[1:]
+        expected_q = torch.zeros((rows, 64), dtype=torch.int8, device="cuda")
+        expected_s = torch.zeros(rows, dtype=torch.int32, device="cuda")
+        raw = torch.zeros((rows, 288), dtype=torch.uint8, device="cuda")
+        packets = [joint._views(p, local) for p in packet.split(local * 356)]
+        for row, encoded in enumerate(codes):
+            if encoded >= 0:
+                q, s, r = packets[encoded & 3]
+                source = encoded >> 2
+                expected_q[row].copy_(q[source])
+                expected_s[row].copy_(s[source])
+                raw[row].copy_(r[source])
+        decoded = codec.dequantize_k_cache_bytes_fp4(raw)
+        for direct in (False, True):
+            with self.subTest(direct=direct):
+                output_rows = 2 * rows + 3 if direct else rows
+                backing = torch.full(
+                    (output_rows + 2, 512), 7.25, dtype=torch.bfloat16, device="cuda"
+                )
+                out = backing[1:-1]
+                expected = backing.clone()
+                for row, encoded in enumerate(codes):
+                    destination = destinations[row] if direct else row
+                    if not direct or (encoded >= 0 and destination >= 0):
+                        expected[1 + destination].copy_(decoded[row])
+                q_backing = torch.full(
+                    (rows * 64 + 8,), 93, dtype=torch.int8, device="cuda"
+                )
+                s_backing = torch.full(
+                    (rows + 2,), -777, dtype=torch.int32, device="cuda"
+                )
+                oq, os = q_backing[4:-4].view(rows, 64), s_backing[1:-1]
+                owned._owned_pool_restore[(triton.cdiv(rows, codec.FP4_ROWS_PER_CTA),)](
+                    packet, inverse, out, oq, os, rows, local, direct, num_warps=4
+                )
+                self.assert_bits(backing, expected)
+                self.assert_bits(oq, expected_q)
+                self.assert_bits(os, expected_s)
+                self.assertEqual(q_backing[:4].cpu().tolist(), [93] * 4)
+                self.assertEqual(q_backing[-4:].cpu().tolist(), [93] * 4)
+                self.assertEqual(s_backing[[0, -1]].cpu().tolist(), [-777, -777])
 
     def test_inverse_metadata_matches_owner_rows_padding_and_direct_destinations(self):
         counts = (0, 1, 0, 127, 128, 129, 0, 257, 1027, 0)
@@ -613,21 +699,35 @@ class OwnedPoolCudaTest(unittest.TestCase):
                         )
                         self.assertEqual(backing[[0, -1]].cpu().tolist(), [-777, -777])
 
-    def test_cp1_graph_replays_changed_pool_values(self):
+    def test_cp1_graph_replays_changed_pool_values_on_side_stream(self):
         counts = (1, 129, 257)
-        ranks, host, ends = self.fixture(counts, 1, 2)
-        attn, main, index = ranks[0]
-        # Capture retains fixed host geometry but re-reads current pool bytes.
-        graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph):
-            actual = pools.try_gather_prefill_pools(attn, main, index, host, ends)
-        main.random_(0, 256)
-        index.random_(0, 256)
-        graph.replay()
-        expected = self.expected_outputs(ranks, counts)
-        for (g, keys), refs in zip(actual, expected):
-            for value, reference in zip((g, keys.quant, keys.scale), refs):
-                self.assert_bits(value, reference)
+        for storage in ((4, 12), (1, 11)):
+            with self.subTest(storage=storage):
+                ranks, host, ends = self.fixture(counts, 1, 2, main_storage=storage)
+                attn, main, index = ranks[0]
+                stream = torch.cuda.Stream()
+                stream.wait_stream(torch.cuda.current_stream())
+                # Fixed host geometry must re-read pool bytes and metadata on replay.
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.stream(stream), patch.object(
+                    triton.runtime.jit.JITFunction,
+                    "_do_compile",
+                    side_effect=AssertionError("hot-path JIT"),
+                ):
+                    with torch.cuda.graph(graph, stream=stream):
+                        actual = pools.try_gather_prefill_pools(
+                            attn, main, index, host, ends
+                        )
+                    main.random_(0, 256)
+                    index.random_(0, 256)
+                    attn._block_tables_by_type[HCA_KV][1, 0] = 0
+                    attn._block_tables_by_type[INDEXER_KV][2, 0] = -1
+                    graph.replay()
+                torch.cuda.current_stream().wait_stream(stream)
+                expected = self.expected_outputs(ranks, counts)
+                for (g, keys), refs in zip(actual, expected):
+                    for value, reference in zip((g, keys.quant, keys.scale), refs):
+                        self.assert_bits(value, reference)
 
     def test_cold_or_invalid_local_state_raises_before_collective(self):
         ranks, host, ends = self.fixture((3, 5), 4, 1)

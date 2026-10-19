@@ -24,6 +24,7 @@ _BYTES = 356
 _INDEX_BYTES = 68
 _INVERSE_BYTES = 16
 _LIMIT = 256 * 1024**2
+_TILE = tl.constexpr(codec.FP4_ROWS_PER_CTA)
 
 
 @dataclass(frozen=True)
@@ -223,6 +224,26 @@ def _owned_pool_metadata(
         tl.store(inverse + CANONICAL + row, destination, row < CANONICAL)
 
 
+@triton.jit(do_not_specialize=["ROWS", "MP", "IP"])
+def _owned_pool_pack(
+    slots,
+    main,
+    index,
+    quant,
+    scale,
+    raw,
+    ROWS,
+    MP,
+    IP,
+    MEB: tl.constexpr,
+    IEB: tl.constexpr,
+):
+    codec._fp4_indexer_gather_rows_kernel(
+        index, slots + ROWS, quant, scale, ROWS, IEB, IP, _TILE
+    )
+    codec._fp4_global_gather_bytes_rows_kernel(main, slots, raw, ROWS, MEB, MP, _TILE)
+
+
 @triton.jit(do_not_specialize=["ROWS", "LOCAL"])
 def _owned_pool_restore(
     packet,
@@ -234,43 +255,47 @@ def _owned_pool_restore(
     LOCAL,
     DIRECT: tl.constexpr,
 ):
-    row = tl.program_id(0).to(tl.int64)
-    encoded = tl.load(inverse + row)
-    valid = encoded >= 0
+    row = tl.program_id(0).to(tl.int64) * _TILE + tl.arange(0, _TILE)
+    in_bounds = row < ROWS
+    encoded = tl.load(inverse + row, in_bounds, other=-1)
+    valid = in_bounds & (encoded >= 0)
     address = tl.maximum(encoded, 0)
     rank = address & 3
     source = address >> 2
     base = packet + rank * LOCAL * 356
-    columns = tl.arange(0, 64)
-    q = tl.load(base + source * 64 + columns, valid, other=0)
+    columns = tl.arange(0, 16)
+    q = tl.load(
+        base[:, None].to(tl.pointer_type(tl.int32))
+        + source[:, None] * 16
+        + columns[None, :],
+        valid[:, None],
+        other=0,
+    )
     s = tl.load(
         (base + LOCAL * 64).to(tl.pointer_type(tl.int32)) + source, valid, other=0
     )
-    tl.store(oq + row * 64 + columns, q.to(tl.int8, bitcast=True))
-    tl.store(os + row, s)
-    if valid:
-        destination = tl.load(inverse + ROWS + row) if DIRECT else row
-        # Keep all FP4 decode arithmetic in its original codec. The base shift
-        # selects a gathered source row and the caller's final destination.
-        raw = base + LOCAL * 68 + (source - row) * 288
-        stride = tl.full((), 288, tl.int64)
-        codec._fp4_global_dequant_kernel(
-            raw,
-            raw,
-            out + (destination - row) * 512,
-            ROWS,
-            512,
-            16,
-            288,
-            1,
-            stride,
-            ROWS,
-            tl.bfloat16,
-            True,
-        )
-    elif not DIRECT:
-        channels = tl.arange(0, 512)
-        tl.store(out + row * 512 + channels, 0)
+    tl.store(
+        oq.to(tl.pointer_type(tl.int32)) + row[:, None] * 16 + columns[None, :],
+        q,
+        in_bounds[:, None],
+    )
+    tl.store(os + row, s, in_bounds)
+    if DIRECT:
+        destination = tl.load(inverse + ROWS + row, in_bounds, other=-1)
+        keep = valid & (destination >= 0)
+    else:
+        destination = row
+        keep = in_bounds
+    # Packet planes and rank strides are multiples of four even for ragged
+    # LOCAL. Invalid inverse rows decode zero; direct output skips them.
+    values = codec._fp4_global_dequant_words(
+        base + LOCAL * 68 + source * 288, valid & keep, _TILE
+    )
+    tl.store(
+        out + tl.maximum(destination, 0)[:, None] * 512 + tl.arange(0, 512)[None, :],
+        values.to(tl.bfloat16),
+        keep[:, None],
+    )
 
 
 def _metadata_args(
@@ -333,9 +358,9 @@ def warmup(layout, device, gather_fn):
     index = torch.zeros(ieb * 68 + 4, dtype=torch.uint8, device=device)[4:].view(
         1, ieb, 68
     )
-    q = torch.empty(256 * 64 + 1, dtype=torch.int8, device=device)[1:].view(256, 64)
+    q = torch.empty(256 * 64 + 4, dtype=torch.int8, device=device)[4:].view(256, 64)
     s = torch.empty(257, dtype=torch.int32, device=device)[1:]
-    raw = torch.empty(256 * 288 + 1, dtype=torch.uint8, device=device)[1:].view(
+    raw = torch.empty(256 * 288 + 4, dtype=torch.uint8, device=device)[4:].view(
         256, 288
     )
     meta_args = _metadata_args(
@@ -361,7 +386,7 @@ def warmup(layout, device, gather_fn):
     compiled[0][(2, 1, 1)](*meta_args)
     compiled[1][(256, 1, 1)](*gather_args)
     # Compile/launch a tiny independent, fully initialized decode fixture.
-    packet = torch.zeros(cp * 256 * _BYTES, dtype=torch.uint8, device=device)
+    packet = torch.zeros(cp * 256 * _BYTES + 4, dtype=torch.uint8, device=device)[4:]
     out = torch.empty(256 * 512 + 1, dtype=torch.bfloat16, device=device)[1:].view(
         256, 512
     )
@@ -383,10 +408,19 @@ def warmup(layout, device, gather_fn):
             256,
             direct,
         )
-        kernel = _owned_pool_restore.warmup(*args, grid=(1,), num_warps=4)
-        kernel[(256, 1, 1)](*args)
+        grid = (triton.cdiv(256, codec.FP4_ROWS_PER_CTA), 1, 1)
+        kernel = _owned_pool_restore.warmup(*args, grid=grid, num_warps=4)
+        kernel[grid](*args)
         compiled.append(kernel)
     compiled.append(direct_meta)
+    # Keep the byte packer at index 1; aligned owned packets use index 5.
+    main_words = torch.zeros(meb * 288 + 4, dtype=torch.uint8, device=device)[4:].view(
+        1, meb, 288
+    )
+    word_args = (slots, main_words, *gather_args[2:])
+    pack = _owned_pool_pack.warmup(*word_args, grid=grid, num_warps=4)
+    pack[grid](*word_args)
+    compiled.append(pack)
     return tuple(compiled)
 
 
@@ -464,6 +498,10 @@ def try_gather(
     if kernels is None:
         raise RuntimeError("Owned pool kernels were not prepared by startup warmup")
     _validate_local(main, index, seq_ends, mt, it, len(ends), layout)
+    pack_words = codec._words_aligned(
+        main.data_ptr(), main.stride(0), index.data_ptr(), index.stride(0)
+    )
+    pack_tile = codec.FP4_ROWS_PER_CTA if pack_words else 1
     if workspace is None and swa is not None:
         from ._v41_prefill_kv_workspace import prepare_global_workspace
 
@@ -513,7 +551,7 @@ def try_gather(
                         workspace is not None,
                     )
                 )
-                kernels[1][(local, 1, 1)](
+                kernels[5 if pack_words else 1][(triton.cdiv(local, pack_tile), 1, 1)](
                     slots,
                     main,
                     index,
@@ -537,7 +575,9 @@ def try_gather(
         os = torch.empty(rows, dtype=torch.int32, device=device)
         if rows:
             with record_function_range("dsv41.prefill.pool.owned.restore"):
-                kernels[3 if workspace is not None else 2][(rows, 1, 1)](
+                kernels[3 if workspace is not None else 2][
+                    (triton.cdiv(rows, codec.FP4_ROWS_PER_CTA), 1, 1)
+                ](
                     receive,
                     inverse,
                     out,
