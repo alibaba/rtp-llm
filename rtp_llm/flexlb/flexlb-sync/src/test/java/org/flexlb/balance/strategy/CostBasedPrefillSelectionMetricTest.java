@@ -167,7 +167,8 @@ class CostBasedPrefillSelectionMetricTest {
             var decision = new com.fasterxml.jackson.databind.ObjectMapper()
                     .readTree(JsonUtils.toStringOrEmpty(new PvLogData(context)))
                     .path("routingDecisions").get(0);
-            assertEquals("NO_CACHE_ANYWHERE", decision.path("cacheAffinityDecision").asText());
+            assertEquals("NO_CACHE_ANYWHERE_CONSISTENT_WITH_KVCM",
+                    decision.path("cacheAffinityDecision").asText());
             assertEquals(1, decision.path("kvcmMatches").path("reportedNodeCount").asInt());
             assertTrue(decision.path("kvcmMatches").path("topHits").isEmpty());
             assertEquals(0, decision.path("kvcmMatches").path("selectedHitTokens").asLong());
@@ -186,14 +187,16 @@ class CostBasedPrefillSelectionMetricTest {
     @CsvSource({
             "1791, KVCM, true, -1, NO_CACHE_ANYWHERE_BELOW_BLOCK_SIZE",
             "1791, KVCM, true, 0, NO_CACHE_ANYWHERE_BELOW_BLOCK_SIZE",
-            "1792, KVCM, true, 0, NO_CACHE_ANYWHERE",
-            "1793, KVCM, true, 0, NO_CACHE_ANYWHERE",
+            "1792, KVCM, true, 0, NO_CACHE_ANYWHERE_CONSISTENT_WITH_KVCM",
+            "1793, KVCM, true, 0, NO_CACHE_ANYWHERE_CONSISTENT_WITH_KVCM",
+            "1792, KVCM, true, -1, NO_CACHE_ANYWHERE_CONSISTENT_WITH_KVCM",
+            "1792, KVCM, false, -1, NO_CACHE_ANYWHERE",
             "1791, LOCAL_SYNC, true, 0, NO_CACHE_ANYWHERE",
             "1791, KVCM, false, 0, NO_CACHE_ANYWHERE",
             "1791, KVCM, true, 1, NO_CACHE_ANYWHERE"
     })
-    void distinguishesShortKvcmMisses(long inputTokens, CacheMatchSource source, boolean querySucceeded,
-                                     long matchedBlocks, String expectedDecision) {
+    void distinguishesKvcmMisses(long inputTokens, CacheMatchSource source, boolean querySucceeded,
+                                long matchedBlocks, String expectedDecision) {
         configureFocusedAffinity();
         context.getRequest().setSeqLen(inputTokens);
         when(cache.findMatchingEngines(any())).thenReturn(new CacheMatchResult(
@@ -204,6 +207,29 @@ class CostBasedPrefillSelectionMetricTest {
             assertEquals(expectedDecision, context.getRoutingTelemetry().routingDecisions()
                     .get(RoleType.PREFILL).cacheAffinityDecision());
             verify(reporter, never()).reportCacheAffinityDecision(any(), anyString(), anyString());
+            commit(selected);
+            verify(reporter).reportCacheAffinityDecision(RoleType.PREFILL, "10.0.0.1:8080", expectedDecision);
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "10.0.0.1:8080@0, 0, NO_CACHE_ANYWHERE_CONSISTENT_WITH_KVCM",
+            "10.0.0.2:8080@0, 0, NO_CACHE_ANYWHERE_CONSISTENT_WITH_KVCM",
+            "10.0.0.1:8080@0, 1, NO_CACHE_ANYWHERE",
+            "10.0.0.2:8080@0, 1, NO_CACHE_ANYWHERE"
+    })
+    void checksGlobalKvcmHitsAcrossAllReportedNodes(String workerKey, long globalBlocks, String expectedDecision) {
+        configureFocusedAffinity();
+        config.getRouter().getRoles().getPrefill().getCacheAffinity().setRemoteDiscount(0.0);
+        when(cache.findMatchingEngines(any())).thenReturn(new CacheMatchResult(
+                Map.of("10.0.0.1:8080", HostCacheMatch.local(0),
+                        workerKey, new HostCacheMatch(0, globalBlocks)),
+                CacheMatchSource.KVCM, 1L, 100L));
+
+        try (SelectedRole selected = select()) {
+            assertEquals(expectedDecision, context.getRoutingTelemetry().routingDecisions()
+                    .get(RoleType.PREFILL).cacheAffinityDecision());
             commit(selected);
             verify(reporter).reportCacheAffinityDecision(RoleType.PREFILL, "10.0.0.1:8080", expectedDecision);
         }

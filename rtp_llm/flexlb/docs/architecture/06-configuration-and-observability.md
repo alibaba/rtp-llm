@@ -337,9 +337,10 @@ Prefill 包含选中、最短 TTFT、最高有效缓存命中候选。`projected
 候选总体最小/最大命中、pending 和 ownershipVersion；Decode 记录 KV 用量、可用量与采样 logWeight。
 
 缓存亲和决策 `NO_CACHE_ANYWHERE` 表示通过筛选的候选节点有效命中均为零。
-当输入 Tokens 小于缓存查询的 block size，且 KVCM 查询成功、返回的所有节点 global 命中均为零
-（含空匹配）时，使用 `NO_CACHE_ANYWHERE_BELOW_BLOCK_SIZE`。该值同时用于缓存亲和决策指标
-和 PV 的 `cacheAffinityDecision`。
+当 KVCM 查询成功、返回的所有节点 global 命中均为零（含空匹配）时，使用
+`NO_CACHE_ANYWHERE_CONSISTENT_WITH_KVCM`；若输入 Tokens 小于缓存查询的 block size，
+则优先使用 `NO_CACHE_ANYWHERE_BELOW_BLOCK_SIZE`。判断范围包含未进入候选集的 KVCM 节点。
+这些分类同时用于缓存亲和决策指标和 PV 的 `cacheAffinityDecision`。
 
 缓存反馈以请求 ID、角色和 Worker 实例代次关联路由预测，`worker` 使用完整的
 `ip:port@engineIndex` 逻辑身份；`prefill_worker_status` 同时记录 `workerIp` 和 `engineIndex`。

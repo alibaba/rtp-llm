@@ -128,10 +128,11 @@ public class CostBasedPrefillStrategy {
         if ("NO_CACHE_ANYWHERE".equals(survivors.affinityDecision())
                 && cacheMatchResult.source() == CacheMatchSource.KVCM
                 && cacheMatchResult.querySucceeded()
-                && seqLen < cacheMatchResult.blockSize()
                 && cacheMatchResult.hostMatches().values().stream()
                         .allMatch(match -> match.globalMatchBlocks() == 0L)) {
-            survivors.recordAffinityDecision("NO_CACHE_ANYWHERE_BELOW_BLOCK_SIZE");
+            survivors.recordAffinityDecision(seqLen < cacheMatchResult.blockSize()
+                    ? "NO_CACHE_ANYWHERE_BELOW_BLOCK_SIZE"
+                    : "NO_CACHE_ANYWHERE_CONSISTENT_WITH_KVCM");
         }
 
         PrefillEndpoint best = survivors.endpoint(selectedIndex);
