@@ -1,4 +1,5 @@
 #include <cstddef>
+#include <chrono>
 #include <memory>
 #include <tuple>
 #include <vector>
@@ -491,7 +492,10 @@ void RtpLLMOp::stop() {
             model_rpc_service_->beginShutdown();
         }
         if (grpc_server_) {
-            auto begin_wait_us = autil::TimeUtility::currentTimeInMicroSeconds();
+            // In-flight Python execution must be able to finish while RPCs drain.
+            pybind11::gil_scoped_release release;
+            const auto deadline      = std::chrono::system_clock::now() + std::chrono::milliseconds(stop_timeout_ms);
+            auto       begin_wait_us = autil::TimeUtility::currentTimeInMicroSeconds();
             while (auto onflight_request = model_rpc_service_->onflightRequestNum()) {
                 RTP_LLM_LOG_INFO("rpc service has [%lu] onflight request, waiting 1s, stop_timeout_ms=%ld",
                                  onflight_request,
@@ -503,7 +507,7 @@ void RtpLLMOp::stop() {
                 }
             }
             RTP_LLM_LOG_INFO("Server shutdowning");
-            grpc_server_->Shutdown();
+            grpc_server_->Shutdown(deadline);
             grpc_server_.reset();
         }
         if (model_rpc_service_) {

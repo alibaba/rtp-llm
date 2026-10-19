@@ -1,4 +1,5 @@
-load("//:def.bzl", "copts")
+load("//:def.bzl", "cc_test_wrapper", "copts")
+load("//bazel:device_defs.bzl", "device_impl_target")
 load(
     "@arch_config//:arch_select.bzl",
     "no_block_copy_link_deps",
@@ -166,6 +167,36 @@ cc_library(
     copts = copts(),
     alwayslink = True,
     visibility = ["//visibility:public"],
+)
+
+cc_import(
+    name = "stop_test_cuda13_torch_nvshmem",
+    testonly = True,
+    shared_library = select({
+        "@//:using_cuda13_sm120": "@pip_gpu_cuda13_sm120_torch_torch//:site-packages/torch/lib/libtorch_nvshmem.so",
+        "//conditions:default": "@pip_gpu_cuda13_torch_torch//:site-packages/torch/lib/libtorch_nvshmem.so",
+    }),
+)
+
+cc_test_wrapper(
+    name = "rtp_llm_op_stop_test",
+    testonly = True,
+    srcs = ["test/RtpLLMOpStopTest.cc"],
+    deps = [
+        ":th_transformer_lib",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+        "@havenask//aios/autil:base64",
+        "@havenask//aios/autil:zlib",
+    ] + device_impl_target() + select({
+        "@//:using_cuda": ["//rtp_llm/models_py/bindings/core:exec_ops_test_lib"],
+        "//conditions:default": [],
+    }) + select({
+        "@//:using_cuda13_x86": [":stop_test_cuda13_torch_nvshmem"],
+        "//conditions:default": [],
+    }),
+    copts = copts(),
+    timeout = "short",
 )
 
 cc_library(

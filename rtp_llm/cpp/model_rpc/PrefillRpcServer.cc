@@ -653,6 +653,7 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
         generationPrefillCudaGraphStatusString(prefill_context.getStream()->generationPrefillCudaGraphStatus());
 
     auto first_token_rt_us = prefill_context.getStream()->getTimeInfo().first_token_rt_us;
+    bool output_finished   = false;
     while (prefill_context.client_stream->Read(&response)) {
         if (prefill_context.isRequestCancelled()) {
             RTP_LLM_LOG_WARNING("request [%ld] cancel by user", request_id);
@@ -690,8 +691,15 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
             setContextError(prefill_context, ErrorInfo(ErrorCode::CANCELLED, "request write outputs pb failed"));
             return;
         }
+        const auto& finished = response.flatten_output().finished();
+        output_finished      = std::all_of(finished.begin(), finished.end(), [](bool value) { return value; });
     }
     auto status = prefill_context.closeGrpcStream();
+    if (status.error_code() == grpc::StatusCode::CANCELLED && !output_finished) {
+        // A cancelled decode must not become a successful EOF before completion.
+        setContextError(prefill_context, ErrorInfo(ErrorCode::CANCELLED, status.error_message()), status);
+        return;
+    }
     if (!status.ok() && status.error_code() != grpc::StatusCode::CANCELLED) {
         CLIENT_GRPC_RET_IF_ERROR(prefill_context, false, ErrorCode::REMOTE_GENERATE_FAILED);
     }
