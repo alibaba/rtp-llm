@@ -379,6 +379,7 @@ std::string CacheStoreConfig::to_string() const {
         << "rdma_transfer_wait_timeout_ms: " << rdma_transfer_wait_timeout_ms << "\n"
         << "p2p_transfer_not_done_resource_hold_ms: " << p2p_transfer_not_done_resource_hold_ms << "\n"
         << "p2p_lease_query_timeout_ms: " << p2p_lease_query_timeout_ms << "\n"
+        << "p2p_kv_leak_exit_threshold_percent: " << p2p_kv_leak_exit_threshold_percent << "\n"
         << "p2p_resource_store_timeout_check_interval_ms: " << p2p_resource_store_timeout_check_interval_ms << "\n"
         << "p2p_cancel_broadcast_timeout_ms: " << p2p_cancel_broadcast_timeout_ms << "\n"
         << "p2p_cancelled_keys_ttl_ms: " << p2p_cancelled_keys_ttl_ms << "\n"

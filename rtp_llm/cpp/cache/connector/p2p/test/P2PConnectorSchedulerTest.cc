@@ -528,7 +528,7 @@ TEST_F(P2PConnectorSchedulerTest, HandleRead_ReturnFalse_BroadcastCancelled) {
     }
 }
 
-TEST_F(P2PConnectorSchedulerTest, AsyncRead_UnconfirmedLeaseDeadlineAbortsRankZero) {
+TEST_F(P2PConnectorSchedulerTest, AsyncRead_UnconfirmedLeaseKeepsPollingAndReleasesAfterLateStop) {
     auto tp_ctx = std::make_shared<P2PBroadcastClient::TpBroadcastResult::WorkerRpcContext>();
     tp_ctx->response.mutable_p2p_response()->set_error_code(
         transErrorCodeToRPC(ErrorCode::P2P_CONNECTOR_WORKER_READ_CANCELLED));
@@ -550,6 +550,11 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_UnconfirmedLeaseDeadlineAbortsRankZe
     auto collector = std::make_shared<P2PConnectorMetricsCollector>();
     auto context = std::make_shared<P2PConnectorAsyncReadContext>(
         resource, broadcast_result, server_result, collector, /*lease_query_timeout_ms=*/80);
+    std::weak_ptr<KVCacheResource> weak_resource = resource;
+    resource.reset();
+    for (auto& server : tp_broadcast_servers_) {
+        server->service()->setLeaseStatus(true, 1, 0, false);
+    }
 
     context->checkDone();
 
@@ -560,7 +565,20 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_UnconfirmedLeaseDeadlineAbortsRankZe
     EXPECT_EQ(context->errorInfo().code(), ErrorCode::P2P_CONNECTOR_WORKER_READ_CANCELLED);
 
     std::this_thread::sleep_for(std::chrono::milliseconds(120));
-    EXPECT_DEATH(context->failStopIfLeaseUnconfirmed(), "");
+    context->cancel(tp_broadcast_client_);
+    ASSERT_TRUE(waitUntil([&] { context->checkCancelDone(); return !context->needCancel(); }));
+    context->pollLeaseIfNeeded(tp_broadcast_client_);
+    EXPECT_TRUE(context->resourceHoldPending());
+    EXPECT_FALSE(weak_resource.expired());
+    for (auto& server : tp_broadcast_servers_) {
+        server->service()->setLeaseStatus(true, 1, 1, true);
+    }
+    ASSERT_TRUE(waitUntil([&] {
+        context->pollLeaseIfNeeded(tp_broadcast_client_);
+        return !context->resourceHoldPending();
+    }));
+    // Holding the terminal context must not retain KV after physical completion.
+    EXPECT_TRUE(weak_resource.expired());
 }
 
 TEST_F(P2PConnectorSchedulerTest, AsyncRead_CompletedBeforeDeadlineObservationRemainsSuccessful) {
@@ -1301,6 +1319,80 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_QueryTimeout_RetainsTargetUntilRetry
     EXPECT_TRUE(allBlockRefsEqual(allocated, 0));
 }
 
+TEST(P2PRetainedKvTest, ThresholdUsesCapacityBytesAndStrictGreaterThan) {
+    auto resource = std::make_shared<KVCacheResource>();
+    resource->initGroups(test::makeTestCacheTopology(1, 1, {{0}}));
+    resource->mutableBlockIds(0).assign({1, 2, 3});
+    const auto deadline = currentTimeMs() - 1;
+    auto       context =
+        std::make_shared<P2PConnectorAsyncReadContext>(resource, "retained", nullptr, 1, false, deadline, deadline);
+    ASSERT_TRUE(context->beginKickoff());
+    ASSERT_TRUE(context->expireTransferDeadlineIfNeeded());
+
+    P2PConnectorAsyncReadContextChecker checker;
+    checker.group_block_bytes_ = {100};
+    checker.total_kv_bytes_    = 1000;
+    // Exactly 30%, including duplicate contexts/blocks, must keep running.
+    checker.checkRetainedResources({context, context});
+    resource->mutableBlockIds(0).assign({1, 2, 3, NULL_BLOCK_IDX});
+    checker.checkRetainedResources({context});
+    resource->mutableBlockIds(0).assign({1, 2, 3, 4});
+    EXPECT_DEATH(checker.checkRetainedResources({context}), "P2P retained KV exceeded exit threshold");
+    checker.kv_leak_exit_threshold_percent_ = 40;
+    checker.checkRetainedResources({context});
+    checker.kv_leak_exit_threshold_percent_ = 39;
+    EXPECT_DEATH(checker.checkRetainedResources({context}), "P2P retained KV exceeded exit threshold");
+}
+
+TEST(P2PRetainedKvTest, DistinctRequestsAccumulateAndGroupsUseDifferentBlockSizes) {
+    const auto topology     = test::makeTestCacheTopology(2, 2, {{0}, {1}});
+    auto       make_context = [&](BlockIndicesType first, BlockIndicesType second) {
+        auto resource = std::make_shared<KVCacheResource>();
+        resource->initGroups(topology);
+        resource->mutableBlockIds(0).assign(std::move(first));
+        resource->mutableBlockIds(1).assign(std::move(second));
+        const auto deadline = currentTimeMs() - 1;
+        auto       context =
+            std::make_shared<P2PConnectorAsyncReadContext>(resource, "weighted", nullptr, 1, false, deadline, deadline);
+        EXPECT_TRUE(context->beginKickoff());
+        EXPECT_TRUE(context->expireTransferDeadlineIfNeeded());
+        return context;
+    };
+    P2PConnectorAsyncReadContextChecker checker;
+    checker.group_block_bytes_ = {100, 400};
+    checker.total_kv_bytes_    = 2000;
+    const auto a               = make_context({1}, {1});    // 500 bytes, 25%.
+    const auto b               = make_context({1, 2}, {});  // Union is 600 bytes, 30%.
+    checker.checkRetainedResources({a, b});
+    const auto c = make_context({3}, {});  // Union is 700 bytes, 35%.
+    EXPECT_DEATH(checker.checkRetainedResources({a, b, c}), "P2P retained KV exceeded exit threshold");
+    c->lease_hold_pending_.store(false);
+    checker.checkRetainedResources({a, b, c});
+}
+
+TEST(P2PRetainedKvTest, InitDerivesCapacityAndRejectsInvalidThreshold) {
+    auto pool = std::make_shared<autil::LockFreeThreadPool>(1, 16, nullptr, "P2PKvCapacityTest");
+    ASSERT_TRUE(pool->start());
+    P2PConnectorSchedulerConfig config;
+    config.topology = test::makeTestCacheTopology(2, 2, {{0}, {1}});
+    P2PConnectorAsyncReadContextChecker checker;
+    for (const int invalid : {-1, 0, 101}) {
+        config.p2p_kv_leak_exit_threshold_percent = invalid;
+        EXPECT_FALSE(checker.init(nullptr, nullptr, pool, config));
+    }
+    config.p2p_kv_leak_exit_threshold_percent = 45;
+    ASSERT_TRUE(checker.init(nullptr, nullptr, pool, config));
+    checker.stop();
+    size_t expected_bytes = 0;
+    for (const auto& group : config.topology->groups()) {
+        expected_bytes +=
+            group.block_num * group.layer_ids.size() * (group.kv_block_stride_bytes + group.kv_scale_stride_bytes);
+    }
+    EXPECT_EQ(checker.total_kv_bytes_, expected_bytes);
+    EXPECT_EQ(checker.kv_leak_exit_threshold_percent_, 45);
+    pool->stop();
+}
+
 TEST(P2PReadNotificationTest, GenerationRetainsNotificationBeforeWait) {
     P2PNotification notification;
     auto            observed = notification.generation();
@@ -1314,7 +1406,9 @@ TEST(P2PReadNotificationTest, CheckerWakesForBothRegistrationOrderings) {
     auto pool = std::make_shared<autil::LockFreeThreadPool>(1, 16, nullptr, "P2PEventTest");
     ASSERT_TRUE(pool->start());
     P2PConnectorAsyncReadContextChecker checker;
-    ASSERT_TRUE(checker.init(nullptr, nullptr, pool));
+    P2PConnectorSchedulerConfig config;
+    config.topology = test::makeTestCacheTopology(1, 1, {{0}});
+    ASSERT_TRUE(checker.init(nullptr, nullptr, pool, config));
     for (const bool complete_before_add : {false, true}) {
         const auto deadline = currentTimeMs() + 5000;
         auto       context  = std::make_shared<P2PConnectorAsyncReadContext>(
@@ -1348,7 +1442,9 @@ TEST(P2PReadNotificationTest, DeadlineWakesWithoutAnyCompletion) {
     auto pool = std::make_shared<autil::LockFreeThreadPool>(1, 16, nullptr, "P2PDeadlineTest");
     ASSERT_TRUE(pool->start());
     P2PConnectorAsyncReadContextChecker checker;
-    ASSERT_TRUE(checker.init(nullptr, nullptr, pool));
+    P2PConnectorSchedulerConfig config;
+    config.topology = test::makeTestCacheTopology(1, 1, {{0}});
+    ASSERT_TRUE(checker.init(nullptr, nullptr, pool, config));
     const auto deadline = currentTimeMs() + 50;
     auto       context  = std::make_shared<P2PConnectorAsyncReadContext>(
         nullptr, "deadline", std::make_shared<P2PConnectorMetricsCollector>(), 1000, false, deadline, deadline);
@@ -1369,7 +1465,9 @@ TEST(P2PReadNotificationTest, BusyControlJobDoesNotDelayDeadline) {
     auto pool = std::make_shared<autil::LockFreeThreadPool>(1, 16, nullptr, "P2PBusyControlTest");
     ASSERT_TRUE(pool->start());
     P2PConnectorAsyncReadContextChecker checker;
-    ASSERT_TRUE(checker.init(nullptr, nullptr, pool));
+    P2PConnectorSchedulerConfig config;
+    config.topology = test::makeTestCacheTopology(1, 1, {{0}});
+    ASSERT_TRUE(checker.init(nullptr, nullptr, pool, config));
     auto entered        = std::make_shared<std::promise<void>>();
     auto entered_future = entered->get_future();
     auto release        = std::make_shared<std::promise<void>>();

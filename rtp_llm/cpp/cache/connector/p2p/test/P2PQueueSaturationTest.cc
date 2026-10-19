@@ -78,7 +78,7 @@ protected:
         ASSERT_TRUE(pool_->start());
         scheduler_->async_read_pool_ = pool_;
         scheduler_->checker_ = std::make_shared<P2PConnectorAsyncReadContextChecker>();
-        ASSERT_TRUE(scheduler_->checker_->init(nullptr, client_, pool_));
+        ASSERT_TRUE(scheduler_->checker_->init(nullptr, client_, pool_, config_));
         gate_ = std::make_shared<QueueGate>();
         ASSERT_EQ(pool_->pushTask([gate = gate_] { gate->wait(); }, false), autil::ThreadPoolBase::ERROR_NONE);
         ASSERT_TRUE(gate_->entered());

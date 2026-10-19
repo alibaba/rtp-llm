@@ -420,7 +420,8 @@ struct CacheStoreConfig {
     int     rdma_max_block_pairs_per_connection = 0;  // 每条 RDMA 连接可处理的最大 block_pair 数量，0 表示不限制
     int64_t p2p_transfer_not_done_resource_hold_ms =
         10 * 1000;  // D 后等待 RDMA 物理完成的时间；到期后 close 相关 connection
-    int64_t p2p_lease_query_timeout_ms = 20 * 1000;  // D 后查询 lease 的期限；到期仍未确认则 rank 0 abort
+    int64_t p2p_lease_query_timeout_ms = 20 * 1000;  // 单轮 lease 查询的超时上限，内部最多等待 500ms
+    int     p2p_kv_leak_exit_threshold_percent = 30;  // 滞留目标 KV 字节占总 KV 容量超过该百分比则退出
 
     int     p2p_resource_store_timeout_check_interval_ms = 100;
     int64_t p2p_cancel_broadcast_timeout_ms              = 1000;

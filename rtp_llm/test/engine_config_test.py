@@ -227,8 +227,10 @@ class EngineConfigTest(TestCase):
         self.assertEqual(config.p2p_prefill_sender_queue_size, 10000)
         config.p2p_prefill_sender_thread_count = 8
         config.p2p_prefill_sender_queue_size = 20000
+        self.assertEqual(config.p2p_kv_leak_exit_threshold_percent, 30)
+        config.p2p_kv_leak_exit_threshold_percent = 45
         state = config.__getstate__()
-        self.assertEqual(len(state), 26)
+        self.assertEqual(len(state), 27)
         restored = CacheStoreConfig()
         maybe_restored = restored.__setstate__(state)
         if maybe_restored is not None:
@@ -236,6 +238,7 @@ class EngineConfigTest(TestCase):
         self.assertEqual(restored.__getstate__(), state)
         self.assertEqual(restored.p2p_prefill_sender_thread_count, 8)
         self.assertEqual(restored.p2p_prefill_sender_queue_size, 20000)
+        self.assertEqual(restored.p2p_kv_leak_exit_threshold_percent, 45)
         for removed in ("p2p_read_steal_before_deadline_ms", "p2p_read_return_before_deadline_ms",
                         "p2p_layer_cache_buffer_store_timeout_ms"):
             self.assertFalse(hasattr(restored, removed))

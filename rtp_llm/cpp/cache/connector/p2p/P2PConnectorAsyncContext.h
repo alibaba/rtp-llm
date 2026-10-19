@@ -21,6 +21,8 @@
 
 namespace rtp_llm {
 
+struct P2PConnectorSchedulerConfig;
+
 class P2PConnectorAsyncReadContext: public AsyncContext {
 public:
     P2PConnectorAsyncReadContext(const KVCacheResourcePtr&                            resource,
@@ -97,11 +99,8 @@ public:
     // Called periodically while Decode target resources are retained after the
     // request has already completed with timeout/cancellation.
     // Broadcasts QUERY_LEASE_STATUS to all TP workers. The hold ends when all
-    // ranks stop. If no valid all-rank stopped result is available by D plus
-    // the configured query timeout, rank 0 fails fast instead of releasing KV.
+    // ranks stop. An unconfirmed lease remains held without a time limit.
     void pollLeaseIfNeeded(const std::shared_ptr<P2PBroadcastClient>& tp_broadcast_client);
-
-    void failStopIfLeaseUnconfirmed();
 
     bool needLeasePoll() const {
         if (!lease_hold_pending_.load(std::memory_order_acquire)) {
@@ -110,11 +109,8 @@ public:
         if (!cancel_confirmed_.load(std::memory_order_acquire)) {
             return false;
         }
-        const int64_t now_ms        = currentTimeMs();
-        const int64_t hold_until_ms = lease_hold_until_ms_.load(std::memory_order_relaxed);
-        return (hold_until_ms > 0 && now_ms >= hold_until_ms)
-            || (!lease_all_ranks_stopped_.load(std::memory_order_acquire)
-                && now_ms >= lease_poll_next_ms_.load(std::memory_order_relaxed));
+        return !lease_all_ranks_stopped_.load(std::memory_order_acquire)
+               && currentTimeMs() >= lease_poll_next_ms_.load(std::memory_order_relaxed);
     }
 
     bool resourceHoldPending() const {
@@ -140,6 +136,7 @@ public:
     ErrorInfo errorInfo() const override;
 
     size_t matchedBlockCount() const {
+        std::lock_guard<std::mutex> lock(state_mutex_);
         return resource_ ? resource_->cacheKeys().size() : 0;
     }
 
@@ -148,6 +145,8 @@ public:
     }
 
 private:
+    friend class P2PConnectorAsyncReadContextChecker;
+
     void dispatchDoneCallbacks();
     struct DoneNotifier {
         P2PConnectorAsyncReadContext& context;
@@ -174,7 +173,7 @@ private:
     void                  registerReadCompletionCallbacksLocked();
     void                  notify() const;
 
-    const KVCacheResourcePtr                               resource_;
+    KVCacheResourcePtr                                     resource_;
     const std::string                                      unique_key_;
     std::shared_ptr<P2PBroadcastClient::Result>            tp_sync_result_;
     std::shared_ptr<DecodeLoadHelper::Result>              server_call_result_;
@@ -194,7 +193,6 @@ private:
     std::string             error_message_;
     std::atomic<int64_t>                         lease_hold_start_us_{0};
     std::atomic<bool>       lease_hold_pending_{false};
-    std::atomic<int64_t>    lease_hold_until_ms_{0};
     std::atomic<bool>                            tp_cancel_broadcast_triggered_{false};
     std::shared_ptr<P2PBroadcastClient::Result> cancel_result_;  // guarded by state_mutex_
     std::atomic<bool>                            cancel_confirmed_{false};
@@ -237,7 +235,8 @@ public:
     /// @brief 启动后台检查线程
     bool init(const kmonitor::MetricsReporterPtr&               metrics_reporter,
               const std::shared_ptr<P2PBroadcastClient>&        tp_broadcast_client,
-              const std::shared_ptr<autil::LockFreeThreadPool>& control_pool);
+              const std::shared_ptr<autil::LockFreeThreadPool>& control_pool,
+              const P2PConnectorSchedulerConfig&               config);
     void stop();
     /// @brief 添加需要跟踪的异步 read 上下文
     void   addContext(const std::shared_ptr<P2PConnectorAsyncReadContext>& context);
@@ -245,6 +244,7 @@ public:
 
 private:
     void checkOnce();
+    void checkRetainedResources(const std::vector<std::shared_ptr<P2PConnectorAsyncReadContext>>& contexts);
 
     // 上报一个终态的 read 上下文采样（必要时补算 total），保证每个上下文恰好上报一次。
     void reportDecodeScheduleMetrics(const std::shared_ptr<P2PConnectorAsyncReadContext>& context);
@@ -262,6 +262,10 @@ private:
     std::shared_ptr<std::atomic<bool>> control_busy_{std::make_shared<std::atomic<bool>>(false)};
     size_t                                                     lease_poll_cursor_{0};
     int64_t                                                    control_submit_retry_ms_{0};
+    std::vector<size_t>                                         group_block_bytes_;
+    size_t                                                     total_kv_bytes_{0};
+    int                                                        kv_leak_exit_threshold_percent_{30};
+    int64_t                                                    last_leak_log_ms_{0};
 };
 
 }  // namespace rtp_llm

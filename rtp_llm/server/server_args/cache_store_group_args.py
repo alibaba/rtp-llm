@@ -127,7 +127,16 @@ def init_cache_store_group_args(parser, cache_store_config):
         bind_to=(cache_store_config, "p2p_lease_query_timeout_ms"),
         type=int,
         default=20000,
-        help="Decode：到达 transfer deadline 后查询 lease 的期限，超时由 rank 0 abort（毫秒）。",
+        help="Decode：单轮 lease 查询的超时上限（毫秒），内部最多等待 500ms；未确认停止则继续持有 KV 并重试。",
+    )
+    cache_store_group.add_argument(
+        "--p2p_kv_leak_exit_threshold_percent",
+        env_name="P2P_KV_LEAK_EXIT_THRESHOLD_PERCENT",
+        bind_to=(cache_store_config, "p2p_kv_leak_exit_threshold_percent"),
+        type=int,
+        choices=range(1, 101),
+        default=30,
+        help="Decode：超时后滞留目标 KV 占总 KV 容量超过该百分比时退出进程，取值 1~100，默认 30。",
     )
 
     cache_store_group.add_argument(

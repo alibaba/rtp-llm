@@ -43,6 +43,10 @@ public:
     // ---- decode scheduler status：checker 周期采样 ----
     int64_t decode_scheduler_check_once_cost_time_us = -1;
     int64_t decode_scheduler_inflight_context_count  = -1;
+    int64_t decode_scheduler_retained_kv_bytes       = -1;
+    double  decode_scheduler_retained_kv_percent     = -1;
+    int64_t decode_scheduler_retained_context_count  = -1;
+    int64_t decode_scheduler_oldest_kv_hold_ms       = -1;
 
     // ---- stream store：资源数量周期采样与单次等待采样 ----
     int64_t stream_store_stream_count        = -1;
@@ -142,6 +146,10 @@ private:
     // decode scheduler status metrics
     kmonitor::MutableMetric* decode_scheduler_check_once_cost_time_us_metric = nullptr;
     kmonitor::MutableMetric* decode_scheduler_inflight_context_count_metric  = nullptr;
+    kmonitor::MutableMetric* decode_scheduler_retained_kv_bytes_metric       = nullptr;
+    kmonitor::MutableMetric* decode_scheduler_retained_kv_percent_metric     = nullptr;
+    kmonitor::MutableMetric* decode_scheduler_retained_context_count_metric  = nullptr;
+    kmonitor::MutableMetric* decode_scheduler_oldest_kv_hold_ms_metric        = nullptr;
 
     // stream store metrics
     kmonitor::MutableMetric* stream_store_stream_count_metric        = nullptr;

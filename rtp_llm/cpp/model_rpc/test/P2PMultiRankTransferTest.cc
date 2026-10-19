@@ -847,7 +847,7 @@ protected:
             ASSERT_TRUE(pool->start());
             scheduler->async_read_pool_ = pool;
             scheduler->checker_ = std::make_shared<P2PConnectorAsyncReadContextChecker>();
-            ASSERT_TRUE(scheduler->checker_->init(nullptr, scheduler->tp_broadcast_client_, pool));
+            ASSERT_TRUE(scheduler->checker_->init(nullptr, scheduler->tp_broadcast_client_, pool, scheduler->config_));
         }
     }
     // All requests in a wave coexist. Rank instances, pools, RPC channels and

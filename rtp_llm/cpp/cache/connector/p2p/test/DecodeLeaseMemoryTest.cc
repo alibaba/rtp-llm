@@ -17,6 +17,7 @@
 #include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorAsyncContext.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorConfig.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PWorkerDecodeRead.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/TransferTask.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
@@ -204,7 +205,9 @@ protected:
         control_pool_ = std::make_shared<autil::LockFreeThreadPool>(1, 16, nullptr, "LeaseMemoryTest");
         ASSERT_TRUE(control_pool_->start());
         checker_ = std::make_unique<P2PConnectorAsyncReadContextChecker>();
-        ASSERT_TRUE(checker_->init(nullptr, client_, control_pool_));
+        P2PConnectorSchedulerConfig scheduler_config;
+        scheduler_config.topology = config_.topologyPtr();
+        ASSERT_TRUE(checker_->init(nullptr, client_, control_pool_, scheduler_config));
     }
 
     void TearDown() override {

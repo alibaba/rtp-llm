@@ -3,6 +3,14 @@
 namespace rtp_llm {
 
 bool P2PConnectorMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_GAUGE_MUTABLE_METRIC(decode_scheduler_retained_kv_bytes_metric,
+                                  "rtp_llm_p2p_connector_decode_scheduler_retained_kv_bytes");
+    REGISTER_GAUGE_MUTABLE_METRIC(decode_scheduler_retained_kv_percent_metric,
+                                  "rtp_llm_p2p_connector_decode_scheduler_retained_kv_percent");
+    REGISTER_GAUGE_MUTABLE_METRIC(decode_scheduler_retained_context_count_metric,
+                                  "rtp_llm_p2p_connector_decode_scheduler_retained_context_count");
+    REGISTER_GAUGE_MUTABLE_METRIC(decode_scheduler_oldest_kv_hold_ms_metric,
+                                  "rtp_llm_p2p_connector_decode_scheduler_oldest_kv_hold_ms");
     REGISTER_GAUGE_MUTABLE_METRIC(decode_schedule_server_call_cost_time_us_metric,
                                   "rtp_llm_p2p_connector_decode_schedule_server_call_cost_time_us");
     REGISTER_GAUGE_MUTABLE_METRIC(decode_schedule_tp_sync_cost_time_us_metric,
@@ -126,6 +134,13 @@ bool P2PConnectorMetrics::init(kmonitor::MetricsGroupManager* manager) {
 }
 
 void P2PConnectorMetrics::report(const kmonitor::MetricsTags* tags, P2PConnectorMetricsCollector* collector) {
+    if (collector->decode_scheduler_retained_kv_bytes >= 0) {
+        REPORT_MUTABLE_METRIC(decode_scheduler_retained_kv_bytes_metric, collector->decode_scheduler_retained_kv_bytes);
+        REPORT_MUTABLE_METRIC(decode_scheduler_retained_kv_percent_metric, collector->decode_scheduler_retained_kv_percent);
+        REPORT_MUTABLE_METRIC(decode_scheduler_retained_context_count_metric,
+                              collector->decode_scheduler_retained_context_count);
+        REPORT_MUTABLE_METRIC(decode_scheduler_oldest_kv_hold_ms_metric, collector->decode_scheduler_oldest_kv_hold_ms);
+    }
     // decode schedule：请求级采样，total 由上报方保证已写入，作为本场景的触发字段。
     if (collector->decode_schedule_total_cost_time_us >= 0) {
         if (collector->decode_schedule_server_call_cost_time_us >= 0) {

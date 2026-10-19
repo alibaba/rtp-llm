@@ -1743,5 +1743,39 @@ class ServerArgsGrammarConfigTest(TestCase):
                     self._setup()
 
 
+class P2PKvLeakThresholdArgumentsTest(TestCase):
+    def parse_config(self, args, env):
+        from rtp_llm.ops import CacheStoreConfig
+        from rtp_llm.server.server_args.cache_store_group_args import (
+            init_cache_store_group_args,
+        )
+        from rtp_llm.server.server_args.server_args import EnvArgumentParser
+
+        config = CacheStoreConfig()
+        parser = EnvArgumentParser()
+        parser.set_root_config(config)
+        init_cache_store_group_args(parser, config)
+        with patch.dict(os.environ, env, clear=True):
+            parser.parse_args(args)
+        return config
+
+    def test_default_environment_override_and_cli_override(self):
+        self.assertEqual(self.parse_config([], {}).p2p_kv_leak_exit_threshold_percent, 30)
+        env = {"P2P_KV_LEAK_EXIT_THRESHOLD_PERCENT": "45"}
+        self.assertEqual(self.parse_config([], env).p2p_kv_leak_exit_threshold_percent, 45)
+        config = self.parse_config(["--p2p_kv_leak_exit_threshold_percent", "60"], env)
+        self.assertEqual(config.p2p_kv_leak_exit_threshold_percent, 60)
+
+    def test_out_of_range_threshold_is_rejected(self):
+        for value in ("0", "-1", "101", "invalid"):
+            for args, env in (
+                (["--p2p_kv_leak_exit_threshold_percent", value], {}),
+                ([], {"P2P_KV_LEAK_EXIT_THRESHOLD_PERCENT": value}),
+            ):
+                with self.subTest(value=value, env=env), patch("sys.stderr", io.StringIO()):
+                    with self.assertRaises(SystemExit):
+                        self.parse_config(args, env)
+
+
 if __name__ == "__main__":
     main()

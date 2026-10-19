@@ -50,7 +50,7 @@ bool P2PSchedulerDecodeRead::init(const std::string& process_id) {
     async_read_pool_ = std::move(async_read_pool);
 
     checker_ = std::make_shared<P2PConnectorAsyncReadContextChecker>();
-    if (!checker_->init(metrics_reporter_, tp_broadcast_client_, async_read_pool_)) {
+    if (!checker_->init(metrics_reporter_, tp_broadcast_client_, async_read_pool_, config_)) {
         RTP_LLM_LOG_ERROR("P2PSchedulerDecodeRead init failed: checker init failed");
         async_read_pool_->stop();
         async_read_pool_.reset();
