@@ -62,6 +62,21 @@ public:
 
     bool return_original_all_probs = false;
 
+    // When true the logits buffer is private to this sampling round (discarded
+    // after sampling): the sampler may skip writing softmax probabilities back
+    // into it. Set only by the speculative (MTP) gather, which clones logits
+    // per round; every other path keeps the legacy in-place contract.
+    bool skip_logits_probs_restore = false;
+
+    // When true every consumer of all_probs treats the renormalized
+    // distribution as a point mass at the sampled token, so the sampler may
+    // skip materializing the one-hot [batch_size, vocab_size] matrix (and the
+    // gather may leave all_probs uninitialized). Set only by the speculative
+    // (MTP) verify gather when it is locally provable that the fused greedy
+    // top-1 token-only path handles the whole batch; every other path keeps
+    // the legacy fully-materialized all_probs contract.
+    bool all_probs_point_mass = false;
+
     mutable torch::Tensor cum_log_probs;  // shape: [batch_size]
     mutable torch::Tensor all_probs;      // shape: [batch_size, vocab_size]
 
@@ -78,7 +93,7 @@ public:
     std::vector<std::optional<ErrorInfo>> processor_errors;
     // The draft distribution is a one-hot at token_ids and need not be
     // materialized as [batch, speculative_steps, vocab].
-    bool                                  token_ids_are_point_mass = false;
+    bool token_ids_are_point_mass = false;
 };
 
 struct MergedOutput {

@@ -73,6 +73,8 @@ SamplerInputs makeSamplerInputs(int64_t batch_size, int32_t top_k_value, float t
             torch::Tensor(),
             torch::Tensor(),
             /*return_original_all_probs=*/false,
+            /*skip_logits_probs_restore=*/false,
+            /*all_probs_point_mass=*/false,
             torch::zeros({batch_size}, torch::kFloat32),
             torch::zeros({batch_size, vocab_size}, gpu),
             makeGenerators(batch_size, seed)};

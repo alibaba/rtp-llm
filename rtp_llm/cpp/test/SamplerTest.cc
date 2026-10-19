@@ -150,6 +150,8 @@ TEST_F(SamplerTest, testMixedDynamicBeamTransitionsUseIndependentOutput) {
                          torch::Tensor(),
                          torch::Tensor(),
                          false,
+                         false,  // skip_logits_probs_restore
+                         false,  // all_probs_point_mass
                          cum_log_probs,
                          torch::Tensor(),
                          generators};
@@ -243,6 +245,8 @@ TEST_F(SamplerTest, testGeneralSampling) {
         torch::Tensor(),  // do_sample
         torch::Tensor(),  // finished_mask
         false,            // return_original_all_probs
+        false,            // skip_logits_probs_restore
+        false,            // all_probs_point_mass
         cum_log_probs.clone(),
         torch::Tensor(),  // all_probs
         generator,

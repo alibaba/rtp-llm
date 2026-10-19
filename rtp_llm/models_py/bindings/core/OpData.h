@@ -306,10 +306,29 @@ struct GreedyParams {
 
     std::vector<at::Generator> generator;
     GreedySamplingBuffers*     sampling_buffers = nullptr;
+
+    // Caller declares params.logits private to this sampling round (discarded
+    // afterwards): sampleGreedy may skip restoring softmax probabilities into
+    // logits and take the fused greedy top-1 path (CUDA). Default false keeps
+    // the legacy "logits become probs" in-place contract for every caller.
+    bool skip_logits_probs_restore = false;
+
+    // Caller declares that every consumer of output_all_probs treats the
+    // renormalized distribution as a point mass at the sampled token (e.g.
+    // the speculative rejection kernel's target_probs_point_mass synthesis):
+    // the fused greedy top-1 path may then skip materializing the one-hot
+    // [batch, vocab] matrix and only write the token. Default false keeps
+    // the legacy fully-materialized all_probs contract for every caller.
+    bool all_probs_point_mass = false;
 };
 
 struct GreedyOutput {
     torch::Tensor success;
+    // True only when the sampler actually ran the token-only point-mass mode
+    // and output_all_probs was left unmaterialized; consumers must then treat
+    // the distribution as a one-hot at the sampled token. Callers must never
+    // read all_probs values when this is set.
+    bool all_probs_point_mass = false;
 };
 
 struct BeamSearchParams {
@@ -378,6 +397,13 @@ struct RejectionSamplingParams {
     // (in-model proposers such as DSpARK emit tokens, not per-vocab probs).
     // The kernel then treats q(draft) == 1 instead of reading draft_probs_d.
     bool draft_probs_point_mass = false;
+    // True when target_probs_d is a degenerate point mass on the last column
+    // of target_token_ids_d (greedy top_k==1 verification may skip
+    // materializing the one-hot matrix). The kernel then synthesizes q as
+    // one-hot(target_token) instead of reading target_probs_d, bit-identical
+    // to the materialized matrix. target_probs_d must still be defined with
+    // the [batch, num_speculative_tokens + 1, vocab] shape.
+    bool target_probs_point_mass = false;
 };
 
 // One DSpARK draft step's fused distribution build:

@@ -672,3 +672,133 @@ TEST_F(CudaSamplerTest, testDoSample) {
                             step,
                             10);
 }
+
+// The fused greedy top-1 path (skip_logits_probs_restore + all top_k==1 +
+// full-width all_probs) must produce bit-identical tokens and renormalized
+// all_probs as the legacy softmax -> argmax -> top_k_renorm_probs chain,
+// while leaving the private logits buffer raw (no probs writeback).
+TEST_F(CudaSamplerTest, testGreedyTopKFusedSkipRestoreMatchesLegacy) {
+    const int64_t batch_size = 4, vocab_size = 64, step = 5;
+    torch::manual_seed(20261017);
+    auto base_logits =
+        (torch::randn({batch_size, vocab_size}, torch::TensorOptions().dtype(torch::kFloat32)) * 3.0f).to(torch::kCUDA);
+    auto expected_tokens = base_logits.argmax(-1);  // tie-free random rows
+
+    const std::vector<int32_t> initial_tokens(batch_size * (step + 1), 7);
+
+    auto run_case = [&](bool skip_restore, torch::Tensor& logits_out_state) {
+        auto logits_t           = base_logits.clone();
+        auto output_token_ids_t = cudaIntTensor(initial_tokens, {batch_size, step + 1});
+        auto sequence_lengths_t = cudaIntTensor({5, 5, 5, 5}, {4});
+        auto input_lengths_t    = cudaIntTensor({-1, -1, -1, -1}, {4});
+        auto top_k_t            = pinnedIntTensor({1, 1, 1, 1});
+        auto top_p_t            = pinnedFloatTensor({1.0, 1.0, 1.0, 1.0});
+        auto temperature_t      = pinnedFloatTensor({1.0, 1.0, 1.0, 1.0});
+        auto all_probs_t =
+            torch::zeros({batch_size, vocab_size}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+        std::vector<at::Generator> generator;
+        generator.resize(batch_size);
+
+        GreedyParams params({logits_t,
+                             input_lengths_t,
+                             sequence_lengths_t,
+                             output_token_ids_t,
+                             (size_t)step,
+                             top_k_t,
+                             top_p_t,
+                             temperature_t,
+                             nullopt,
+                             nullopt,
+                             nullopt,
+                             nullopt,
+                             false,
+                             all_probs_t,
+                             nullopt,
+                             nullopt,
+                             nullopt,
+                             generator});
+        params.skip_logits_probs_restore = skip_restore;
+        auto greedy_output               = execSampleGreedy(params);
+        check_cuda_error();
+        EXPECT_FALSE(greedy_output.success.defined());  // all_top_k_one marks all succeeded
+
+        logits_out_state = logits_t;
+        return std::make_pair(toHostInt(output_token_ids_t), toHostFloat(all_probs_t));
+    };
+
+    torch::Tensor logits_legacy, logits_fused;
+    auto [tokens_legacy, all_probs_legacy] = run_case(false, logits_legacy);
+    auto [tokens_fused, all_probs_fused]   = run_case(true, logits_fused);
+
+    // Tokens land in the step column and equal the row argmax in both runs.
+    for (int64_t b = 0; b < batch_size; ++b) {
+        ASSERT_EQ(tokens_legacy[b * (step + 1) + step], expected_tokens[b].item<int64_t>());
+        ASSERT_EQ(tokens_fused[b * (step + 1) + step], tokens_legacy[b * (step + 1) + step]);
+    }
+    // Renormalized all_probs: bit-identical one-hot(argmax) in both runs.
+    ASSERT_EQ(all_probs_fused, all_probs_legacy);
+    for (int64_t b = 0; b < batch_size; ++b) {
+        float row_sum = 0.0f;
+        for (int64_t v = 0; v < vocab_size; ++v) {
+            row_sum += all_probs_fused[b * vocab_size + v];
+        }
+        ASSERT_FLOAT_EQ(row_sum, 1.0f);
+        ASSERT_FLOAT_EQ(all_probs_fused[b * vocab_size + expected_tokens[b].item<int64_t>()], 1.0f);
+    }
+    // Legacy restores softmax probs into logits; the fused path leaves it raw.
+    auto legacy_row_sum = logits_legacy.sum(-1).cpu();
+    for (int64_t b = 0; b < batch_size; ++b) {
+        ASSERT_NEAR(legacy_row_sum[b].item<float>(), 1.0f, 1e-4);
+    }
+    ASSERT_TRUE(torch::equal(logits_fused.cpu(), base_logits.cpu()));
+}
+
+// The fused path is gated to the exact all_top_k_one renorm contract: with a
+// mixed top_k batch the flagged caller must still get the legacy chain
+// (including the probs writeback into logits).
+TEST_F(CudaSamplerTest, testGreedyTopKFusedGateFallsBackForMixedTopK) {
+    const int64_t batch_size = 4, vocab_size = 64, step = 5;
+    torch::manual_seed(20261017);
+    auto logits_t =
+        (torch::randn({batch_size, vocab_size}, torch::TensorOptions().dtype(torch::kFloat32)) * 3.0f).to(torch::kCUDA);
+    auto raw_logits         = logits_t.clone();
+    auto output_token_ids_t = cudaIntTensor(std::vector<int32_t>(batch_size * (step + 1), 7), {batch_size, step + 1});
+    auto sequence_lengths_t = cudaIntTensor({5, 5, 5, 5}, {4});
+    auto input_lengths_t    = cudaIntTensor({-1, -1, -1, -1}, {4});
+    auto top_k_t            = pinnedIntTensor({1, 3, 1, 1});
+    auto top_p_t            = pinnedFloatTensor({1.0, 1.0, 1.0, 1.0});
+    auto temperature_t      = pinnedFloatTensor({1.0, 1.0, 1.0, 1.0});
+    auto all_probs_t =
+        torch::zeros({batch_size, vocab_size}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+    std::vector<at::Generator> generator;
+    generator.resize(batch_size);
+
+    GreedyParams params({logits_t,
+                         input_lengths_t,
+                         sequence_lengths_t,
+                         output_token_ids_t,
+                         (size_t)step,
+                         top_k_t,
+                         top_p_t,
+                         temperature_t,
+                         nullopt,
+                         nullopt,
+                         nullopt,
+                         nullopt,
+                         false,
+                         all_probs_t,
+                         nullopt,
+                         nullopt,
+                         nullopt,
+                         generator});
+    params.skip_logits_probs_restore = true;  // flag set, but gate must reject (top_k != 1 row)
+    execSampleGreedy(params);
+    check_cuda_error();
+
+    // Legacy chain ran: logits now holds softmax probs (writeback happened).
+    auto row_sum = logits_t.sum(-1).cpu();
+    for (int64_t b = 0; b < batch_size; ++b) {
+        ASSERT_NEAR(row_sum[b].item<float>(), 1.0f, 1e-4);
+    }
+    ASSERT_FALSE(torch::equal(logits_t.cpu(), raw_logits.cpu()));
+}

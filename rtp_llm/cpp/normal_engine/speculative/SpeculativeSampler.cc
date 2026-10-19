@@ -139,6 +139,11 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
     auto       draft_token_probs      = draft_sampler_output.all_probs;
     auto       target_token_probs     = target_sampler_output.all_probs;
     const bool draft_probs_point_mass = draft_sampler_output.token_ids_are_point_mass;
+    // Greedy top_k==1 verification may skip materializing the target one-hot
+    // matrix; the rejection kernel then synthesizes q from target_token_ids
+    // (bit-identical to the matrix). target_token_probs stays defined with its
+    // [B, steps+1, vocab] shape for the launch-config validation below.
+    const bool target_probs_point_mass = target_sampler_output.token_ids_are_point_mass;
 
     buffer_holder_.hold_host(draft_token_ids);
     auto draft_token_ids_d_t = draft_token_ids.to(target_device, true);
@@ -227,6 +232,7 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
             output_accepted_token_num_d,
             do_sample_d,
             draft_probs_point_mass,
+            target_probs_point_mass,
         });
     }
 

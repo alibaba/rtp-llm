@@ -216,6 +216,12 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
         }
     } greedy_sampling_buffer_guard{this};
 
+    // The all_probs point-mass contract holds only if the caller declared it
+    // and every slice of this batch actually ran the token-only greedy path;
+    // any beam slice or legacy greedy slice clears it so consumers read the
+    // materialized matrix.
+    bool all_probs_point_mass = inputs.all_probs_point_mass;
+
     while (from_batch_idx_in < inputs.batch_size) {
         auto cur_num_beams_in  = num_beams_in[from_batch_idx_in];
         auto cur_num_beams_out = num_beams_out[from_batch_idx_in];
@@ -294,7 +300,10 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                  frequency_penalty,
                  do_sample,
                  generator,
-                 greedy_sampling_buffer_ptr});
+                 greedy_sampling_buffer_ptr,
+                 inputs.skip_logits_probs_restore,
+                 inputs.all_probs_point_mass});
+            all_probs_point_mass = all_probs_point_mass && greedy_output.all_probs_point_mass;
             if (greedy_output.success.defined()) {
                 success.copy_(greedy_output.success);
             } else {
@@ -356,6 +365,8 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
             }
             beam_indices.reshape({(int64_t)beam_batch_size, (int64_t)cur_num_beams_out}).copy_(output.beam_indices);
 
+            // Beam search does not emit a point-mass all_probs contract.
+            all_probs_point_mass = false;
             success.fill_(true);
         }
 
@@ -364,12 +375,17 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
         from_batch_idx_out = to_batch_idx_out;
     }
 
-    return SamplerOutput({std::move(all_token_ids_out),
+    SamplerOutput output({std::move(all_token_ids_out),
                           std::move(all_cum_log_probs_out),
                           std::move(inputs.all_probs),
                           std::move(all_beam_indices),
                           std::move(all_success),
                           std::move(processor_errors)});
+    // Reuse the existing point-mass field: on the target side it signals that
+    // all_probs is a one-hot at token_ids and was never materialized, so
+    // rejection sampling must synthesize q from token_ids instead of reading it.
+    output.token_ids_are_point_mass = all_probs_point_mass;
+    return output;
 }
 
 std::vector<std::optional<ErrorInfo>> Sampler::preprocessLogits(const SamplerInputs& inputs) {

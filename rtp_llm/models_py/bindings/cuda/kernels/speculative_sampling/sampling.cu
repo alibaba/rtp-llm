@@ -217,9 +217,10 @@ DeviceSamplingFromProb(uint32_t                                                 
     aggregate += aggregate_local;
 }
 
-// Fill p_vec with the draft distribution slice starting at base_token_id:
-// a one-hot at the proposed token. Point-mass proposals (dspark) carry no
-// materialized draft_probs, so the row is synthesized instead of loaded.
+// Fill a probability vector slice starting at base_token_id: a one-hot at
+// point_token_id. Point-mass rows carry no materialized distribution — draft
+// proposals (dspark) and greedy top_k==1 target verify rows alike — so the
+// slice is synthesized instead of loaded, bit-identical to the one-hot matrix.
 template<uint32_t VEC_SIZE, typename VecT, typename IdType>
 __device__ __forceinline__ void synthesizePointMassProbVec(VecT& p_vec, IdType draft_id, uint32_t base_token_id) {
     using ElemT = std::remove_reference_t<decltype(p_vec[0])>;
@@ -248,7 +249,8 @@ __global__ void rejection_sampling_kernel(DType*  draft_probs,
                                           int     batch_size,
                                           int     num_speculative_tokens,
                                           int     target_vocab_size,
-                                          bool    draft_probs_point_mass) {
+                                          bool    draft_probs_point_mass,
+                                          bool    target_probs_point_mass) {
     const uint32_t bx = blockIdx.x, tx = threadIdx.x;
     const uint32_t row_idx = bx;
 
@@ -273,7 +275,13 @@ __global__ void rejection_sampling_kernel(DType*  draft_probs,
             IdType target_id = target_token_ids[(row_idx * (num_speculative_tokens + 1) + i) * target_token_stride
                                                 + target_token_stride - 1];
 
-            float q = target_probs[(row_idx * (num_speculative_tokens + 1) + i) * target_vocab_size + draft_id];
+            // A point-mass target row is the one-hot at its greedy target
+            // token, so q(draft_id) is exactly 1.0f when the draft proposed
+            // that token and 0.0f otherwise — bit-identical to reading the
+            // materialized one-hot matrix, which the greedy sampler skipped.
+            float q = target_probs_point_mass ?
+                          (draft_id == target_id ? 1.0f : 0.0f) :
+                          target_probs[(row_idx * (num_speculative_tokens + 1) + i) * target_vocab_size + draft_id];
             float p = draft_probs_point_mass ?
                           1.0f :
                           draft_probs[(row_idx * num_speculative_tokens + i) * target_vocab_size + draft_id];
@@ -318,6 +326,15 @@ __global__ void rejection_sampling_kernel(DType*  draft_probs,
     }
     int pos = s_pos;
 
+    // Residual target token at the rejected position: the greedy verify row's
+    // chosen token (last column of target_token_ids). A point-mass target
+    // distribution is the one-hot here, so the residual relu(q - p) is
+    // synthesized from this id instead of loading target_probs.
+    const IdType residual_target_id =
+        target_probs_point_mass ? target_token_ids[(row_idx * (num_speculative_tokens + 1) + pos) * target_token_stride
+                                                   + target_token_stride - 1] :
+                                  IdType(0);
+
     // sample from relu(target_probs - draft_probs)
     DType                              sum_relu_q_minus_p(0);
     flashinfer::vec_t<DType, VEC_SIZE> q_vec, p_vec;
@@ -326,8 +343,12 @@ __global__ void rejection_sampling_kernel(DType*  draft_probs,
         q_vec.fill(DType(0));
         p_vec.fill(DType(0));
         if ((i * BLOCK_THREADS + tx) * VEC_SIZE < target_vocab_size) {
-            q_vec.load(target_probs + (row_idx * (num_speculative_tokens + 1) + pos) * target_vocab_size
-                       + i * BLOCK_THREADS * VEC_SIZE + tx * VEC_SIZE);
+            if (target_probs_point_mass) {
+                synthesizePointMassProbVec<VEC_SIZE>(q_vec, residual_target_id, (i * BLOCK_THREADS + tx) * VEC_SIZE);
+            } else {
+                q_vec.load(target_probs + (row_idx * (num_speculative_tokens + 1) + pos) * target_vocab_size
+                           + i * BLOCK_THREADS * VEC_SIZE + tx * VEC_SIZE);
+            }
             if (pos != num_speculative_tokens) {
                 // there is no draft_probs for the bonus token
                 if (draft_probs_point_mass) {
@@ -363,8 +384,12 @@ __global__ void rejection_sampling_kernel(DType*  draft_probs,
         q_vec.fill(DType(0));
         p_vec.fill(DType(0));
         if ((i * BLOCK_THREADS + tx) * VEC_SIZE < target_vocab_size) {
-            q_vec.load(target_probs + (row_idx * (num_speculative_tokens + 1) + pos) * target_vocab_size
-                       + i * BLOCK_THREADS * VEC_SIZE + tx * VEC_SIZE);
+            if (target_probs_point_mass) {
+                synthesizePointMassProbVec<VEC_SIZE>(q_vec, residual_target_id, (i * BLOCK_THREADS + tx) * VEC_SIZE);
+            } else {
+                q_vec.load(target_probs + (row_idx * (num_speculative_tokens + 1) + pos) * target_vocab_size
+                           + i * BLOCK_THREADS * VEC_SIZE + tx * VEC_SIZE);
+            }
             if (pos != num_speculative_tokens) {
                 // there is no draft_probs for the bonus token
                 if (draft_probs_point_mass) {
@@ -421,7 +446,8 @@ cudaError_t invokeRejectionSampling(DType*       draft_probs,
                                     int          num_speculative_tokens,
                                     int          target_vocab_size,
                                     cudaStream_t stream,
-                                    bool         draft_probs_point_mass) {
+                                    bool         draft_probs_point_mass,
+                                    bool         target_probs_point_mass) {
     if (batch_size == 0) {
         return cudaSuccess;
     }
@@ -445,7 +471,8 @@ cudaError_t invokeRejectionSampling(DType*       draft_probs,
                     &batch_size,
                     &num_speculative_tokens,
                     &target_vocab_size,
-                    &draft_probs_point_mass};
+                    &draft_probs_point_mass,
+                    &target_probs_point_mass};
 
     DISPATCH_ALIGNED_VEC_SIZE(vec_size, VEC_SIZE, {
         auto kernel = rejection_sampling_kernel<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO, VEC_SIZE, false, DType, IdType>;
@@ -470,7 +497,8 @@ cudaError_t invokeRejectionSampling(DType*       draft_probs,
                                                  int          num_speculative_tokens,                                  \
                                                  int          target_vocab_size,                                       \
                                                  cudaStream_t stream,                                                  \
-                                                 bool         draft_probs_point_mass);
+                                                 bool         draft_probs_point_mass,                                  \
+                                                 bool         target_probs_point_mass);
 
 INSTANTIATE_REJECTION_SAMPLING(float, int);
 }  // namespace rtp_llm
