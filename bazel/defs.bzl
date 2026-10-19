@@ -161,7 +161,6 @@ _rename_wheel = rule(
     attrs = {
         "src": attr.label(allow_single_file = True, mandatory = True),
         "out_name": attr.string(mandatory = True),
-        "tags": attr.string_list(),
     },
 )
 
