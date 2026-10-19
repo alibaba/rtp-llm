@@ -562,12 +562,24 @@ class IndexerFP8(PoolBackedModule):
             self._fp4_native_paged = paged_backend == "native"
             if self._fp4_native_paged:
                 from rtp_llm.models_py.modules.dsv4.fp4.native import paged_score
+            # Revert when DeepGEMM supports SM120 MX-SF: the native
+            # FP4 prefill path asserts SM100 (attention.hpp arch_major==10); allow
+            # the Triton reference prefill on SM120 via env.
+            prefill_backend = os.environ.get("DSV4_FP4_PREFILL_BACKEND", "native")
+            if prefill_backend not in ("triton", "native"):
+                raise ValueError("DSV4_FP4_PREFILL_BACKEND must be triton or native")
 
             self._quantize_q = partial(
                 quantize_q_rope, weight_scale=self.softmax_scale * self.n_heads**-0.5
             )
             self._score_paged = paged_score
-            self._score_prefill = prefill_score
+            if prefill_backend == "triton":
+                from rtp_llm.models_py.modules.dsv4.fp4.score import (
+                    prefill_score as triton_prefill_score,
+                )
+                self._score_prefill = triton_prefill_score
+            else:
+                self._score_prefill = prefill_score
             self._gather_cache = gather_cache
 
         from rtp_llm.models_py.modules.dsv4.fp8.attention import _v4_fp8_linear
