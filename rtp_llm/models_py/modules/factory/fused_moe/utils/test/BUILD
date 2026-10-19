@@ -78,6 +78,12 @@ py_test(
     target_compatible_with = _CUDA13_ONLY,
 )
 
+py_test(
+    name = "mega_moe_k3_buffer_contract_test",
+    srcs = ["mega_moe_k3_buffer_contract_test.py"],
+    data = ["//rtp_llm/models_py:modules/factory/fused_moe/utils/mega_moe/buffer.py"],
+)
+
 dsv4_py_test(
     name = "test_chunked_moe",
     deps = [

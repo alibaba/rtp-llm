@@ -466,7 +466,7 @@ def main():
     )
     parser.add_argument(
         "--moe-strategy",
-        choices=["mega_moe", "mega_moe_se"],
+        choices=["mega_moe", "mega_moe_se", "mega_moe_k3", "mega_moe_k3_se"],
         default="mega_moe",
         help="Select the routed/shared MoE executor",
     )

@@ -65,13 +65,34 @@ def _expected_ue8m0_dequant(values: torch.Tensor) -> torch.Tensor:
     return (values_fp32 / scales).to(torch.float8_e4m3fn).float() * scales
 
 
-def _tp2_indexer_worker(rank: int, nccl_port: int) -> None:
-    import deep_gemm
-    import torch.distributed as dist
+def _reference_legacy_fp8_mqa_logits(q_fp8, kv_fp8, weights, row_starts, row_ends):
+    """Independent FP32 oracle for the group-128 pre-MX cache contract.
 
-    from rtp_llm.models_py.kernels.cuda.fast_topk import (
-        fast_topk_transform_ragged_fused,
+    Q scales are folded into per-head FP32 weights. K has one FP32 scale per
+    128-wide row. Keep ReLU before weights (which may be negative), then apply
+    the positive per-key scale after the head reduction. Do not cast this old
+    format to the newer MX/BF16 DeepGEMM API or reuse the production adapter.
+    """
+    k_fp8, k_scale = kv_fp8
+    allow_tf32 = torch.backends.cuda.matmul.allow_tf32
+    try:
+        # Match the existing FP32 legacy-indexer oracle policy. This flag is
+        # scoped to the reference, after the real CP candidate has executed.
+        torch.backends.cuda.matmul.allow_tf32 = False
+        dots = torch.einsum("mhd,nd->mhn", q_fp8.float(), k_fp8.float())
+        logits = (dots.relu() * weights.float().unsqueeze(-1)).sum(dim=1)
+        logits = logits * k_scale.float().reshape(1, -1)
+    finally:
+        torch.backends.cuda.matmul.allow_tf32 = allow_tf32
+    columns = torch.arange(k_fp8.shape[0], device=q_fp8.device)
+    valid = (columns[None, :] >= row_starts[:, None]) & (
+        columns[None, :] < row_ends[:, None]
     )
+    return logits.masked_fill(~valid, -float("inf"))
+
+
+def _tp2_indexer_worker(rank: int, nccl_port: int) -> None:
+    import torch.distributed as dist
 
     initialized = False
     try:
@@ -269,20 +290,28 @@ def _tp2_indexer_worker(rank: int, nccl_port: int) -> None:
             atol=0,
         )
 
-        reference_logits = deep_gemm.fp8_mqa_logits(
-            q_fp8[total_local_ids].contiguous(),
+        selected_q = q_fp8[total_local_ids].contiguous()
+        selected_weights = q_scale[total_local_ids].squeeze(-1).contiguous()
+        # The oracle's Q ownership comes from the global fixture, independently
+        # of the local permutation consumed by the production CP path.
+        torch.testing.assert_close(
+            selected_q.float() * selected_weights.unsqueeze(-1),
+            _expected_ue8m0_dequant(global_queries[selected_global_ids]),
+            rtol=0,
+            atol=0,
+        )
+        reference_logits = _reference_legacy_fp8_mqa_logits(
+            selected_q,
             (gathered_k, gathered_scale_bytes.view(torch.float32).view(-1)),
-            q_scale[total_local_ids].squeeze(-1).contiguous(),
+            selected_weights,
             row_starts,
             row_ends,
-            clean_logits=False,
         )
-        expected_topk = fast_topk_transform_ragged_fused(
-            score=reference_logits,
-            lengths=lengths,
-            topk_indices_offset=topk_offsets,
-            topk=index_topk,
-            row_starts=row_starts,
+        # This fixture's visible prefix+query windows all exceed index_topk and
+        # start at global key zero; PyTorch indices are absolute logical KV IDs.
+        # Keep the reference independent of the production fused TopK kernel.
+        expected_topk = torch.topk(reference_logits, index_topk, dim=-1).indices.to(
+            torch.int32
         )
         torch.testing.assert_close(
             torch.sort(topk_result, dim=-1).values,
