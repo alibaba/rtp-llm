@@ -64,10 +64,10 @@ TEST(GroupSetTest, UsesPlannedBackingLayoutWithoutRecomputingStorage) {
     EXPECT_EQ(group->storageBytes(), 4096u);
 }
 
-TEST(GroupSetTest, CopyGeometryPreservesPhysicalLayersAndLogicalPaddingContract) {
-    const auto          topology = makeTestTopology({makeGroupBase({0, 2}), makeGroupBase({1})});
-    const auto          pool     = makeTestDevicePool({{80, 16}, {96, 24}}, 4, "group_set_copy_geometry");
-    auto                group    = makeTestGroupSet(0, topology, {"group0"}, {pool});
+TEST(GroupSetTest, CopyGeometryPreservesFullLogicalBlocksAndPhysicalLayers) {
+    const auto topology      = makeTestTopology({makeGroupBase({0, 2}), makeGroupBase({1})});
+    const auto pool          = makeTestDevicePool({{64, 16}, {64, 16}}, 4, "group_set_copy_geometry");
+    auto       group         = makeTestGroupSet(0, topology, {"group0"}, {pool});
     const auto logical_tiles = getDeviceHostCopyTiles(*group, {1});
     ASSERT_EQ(logical_tiles.size(), 4u);
     const std::vector<size_t> logical_sizes{64, 16, 64, 16};
@@ -81,8 +81,9 @@ TEST(GroupSetTest, CopyGeometryPreservesPhysicalLayersAndLogicalPaddingContract)
         EXPECT_EQ(tile.buffer.addr, pool->convertIndexToBuffer(i / 2, 1)[i % 2].addr);
     }
 
-    group->initialize(0, topology, {"group0"}, block_transfer_engine_test::makeTestBackingLayout(216, true, true));
-    const auto physical_tiles = getDeviceHostCopyTiles(*group, {1});
+    const auto physical_pool  = makeTestDevicePool({{80, 16}, {96, 24}}, 4, "group_set_physical_copy_geometry");
+    const auto physical_group = makeTestGroupSet(0, topology, {"group0"}, {physical_pool}, nullptr, nullptr, true, 216);
+    const auto physical_tiles = getDeviceHostCopyTiles(*physical_group, {1});
     ASSERT_EQ(physical_tiles.size(), 4u);
     const std::vector<size_t> physical_sizes{80, 16, 96, 24};
     const std::vector<size_t> physical_offsets{0, 80, 96, 192};
@@ -92,7 +93,7 @@ TEST(GroupSetTest, CopyGeometryPreservesPhysicalLayersAndLogicalPaddingContract)
         EXPECT_EQ(tile.host_offset, physical_offsets[i]);
         EXPECT_EQ(tile.member_group_id, 0u);
         EXPECT_EQ(tile.local_layer_index, i / 2);
-        EXPECT_EQ(tile.buffer.addr, pool->convertIndexToBuffer(i / 2, 1)[i % 2].addr);
+        EXPECT_EQ(tile.buffer.addr, physical_pool->convertIndexToBuffer(i / 2, 1)[i % 2].addr);
     }
 }
 
@@ -100,7 +101,7 @@ TEST(GroupSetTest, KeepsTopologyAliveAfterCallerReleasesOwnership) {
     auto                               topology      = makeTestTopology({makeGroupBase({0})});
     std::weak_ptr<const CacheTopology> weak_topology = topology;
     const auto                         pool          = makeTestDevicePool({{64, 16}}, 4, "group_set_topology_lifetime");
-    auto                               group          = makeTestGroupSet(0, topology, {"group0"}, {pool});
+    auto                               group         = makeTestGroupSet(0, topology, {"group0"}, {pool});
     const GroupBase*                   expected_group = &topology->group("group0");
 
     topology.reset();
