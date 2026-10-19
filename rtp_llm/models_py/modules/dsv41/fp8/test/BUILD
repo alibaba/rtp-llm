@@ -367,6 +367,7 @@ py_test(
     )
     for name, case in [
         ("test_attention_v41_sparse_selection", "SparseSelectionIntegrationCPU"),
+        ("test_v41_mega_attention", "MegaAttentionCPU"),
         ("test_v41_prefill_indexer", "V41PrefillIndexerCPU"),
         ("test_v41_decode_global", "V41DecodeGlobalCPU"),
     ]
