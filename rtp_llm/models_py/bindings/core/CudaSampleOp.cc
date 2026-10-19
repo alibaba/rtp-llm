@@ -12,6 +12,7 @@
 #include "rtp_llm/models_py/bindings/common/kernels/vocab_prune/mapping.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/speculative_sampling/sampling.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/speculative_sampling/markov_softmax.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/speculative_sampling/greedy_top1_renorm.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/sampling/sampling.h"
 #include <cstddef>
@@ -287,21 +288,103 @@ void processLogits(const GreedyParams&  params,
     }
 }
 
+// Fused greedy top-1 path: one two-phase row-split kernel writes the token
+// (first argmax of the raw logits) and the k=1 renormalized distribution
+// (one-hot at that argmax) straight into all_probs, replacing softmax ->
+// logits writeback -> argmax -> flashinfer RadixTopKRenorm. Only legal when
+// the caller opted into skip_logits_probs_restore (logits buffer private) and
+// every gate below holds; logits stays raw and is left otherwise untouched.
+// write_onehot=false selects the token-only point-mass mode: kernel 2 skips
+// the [batch, vocab] zero-fill + one-hot scatter and writes only `samples`.
+// Legal only when every consumer of the distribution treats it as a point
+// mass at the sampled token (GreedyOutput.all_probs_point_mass contract).
+void fusedGreedyTop1Renorm(const torch::Tensor& logits,
+                           const torch::Tensor& onehot_out,
+                           const torch::Tensor& samples,
+                           bool                 write_onehot = true) {
+    RTP_LLM_CHECK_WITH_INFO(logits.dim() == 2 && logits.is_cuda() && logits.is_contiguous()
+                                && logits.scalar_type() == torch::kFloat32,
+                            "fusedGreedyTop1Renorm: logits must be a contiguous CUDA FP32 [batch,vocab] tensor");
+    RTP_LLM_CHECK_WITH_INFO(onehot_out.dim() == 2 && onehot_out.is_cuda() && onehot_out.is_contiguous()
+                                && onehot_out.scalar_type() == torch::kFloat32 && onehot_out.size(0) == logits.size(0)
+                                && onehot_out.size(1) == logits.size(1) && onehot_out.device() == logits.device(),
+                            "fusedGreedyTop1Renorm: onehot_out must be a contiguous CUDA FP32 [batch,vocab] tensor "
+                            "on the logits device");
+    RTP_LLM_CHECK_WITH_INFO(samples.is_cuda() && samples.is_contiguous() && samples.scalar_type() == torch::kInt32
+                                && samples.numel() == logits.size(0) && samples.device() == logits.device(),
+                            "fusedGreedyTop1Renorm: samples must be a contiguous CUDA INT32 [batch] view "
+                            "on the logits device");
+    const int64_t batch_size = logits.size(0);
+    const int64_t vocab_size = logits.size(1);
+    RTP_LLM_CHECK_WITH_INFO(batch_size > 0 && vocab_size > 0 && vocab_size < (1 << 24),
+                            "fusedGreedyTop1Renorm: batch/vocab out of supported range");
+
+    at::cuda::CUDAGuard device_guard(logits.device());
+    const int           splits   = greedyTop1RenormSplits(static_cast<int>(batch_size), static_cast<int>(vocab_size));
+    auto                partials = torch::empty({2, batch_size, static_cast<int64_t>(splits)},
+                                 torch::TensorOptions().dtype(torch::kFloat32).device(logits.device()));
+    check_cuda_value(invokeGreedyTop1Renorm(logits.data_ptr<float>(),
+                                            onehot_out.data_ptr<float>(),
+                                            samples.data_ptr<int32_t>(),
+                                            static_cast<int>(batch_size),
+                                            static_cast<int>(vocab_size),
+                                            partials.data_ptr<float>(),
+                                            at::cuda::getCurrentCUDAStream().stream(),
+                                            write_onehot));
+}
+
 }  // anonymous namespace
 
 static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const torch::Tensor& transposed_tokens) {
     const auto batch_size = params.logits.size(0);
     auto       cur_stream = at::cuda::getCurrentCUDAStream().stream();
 
+    // [1, batch_size] — last row of transposed_tokens
+    auto samples_t = transposed_tokens.slice(0, transposed_tokens.size(0) - 1, transposed_tokens.size(0));
+
+    // Fused greedy top-1 fast path (see fusedGreedyTop1Renorm). Gated on the
+    // caller-declared private logits buffer plus the exact output contract of
+    // the all_top_k_one renorm branch below: full-width renormalized
+    // all_probs, no cum_log_probs, no original-probs request. Any other shape
+    // keeps the legacy chain byte-for-byte. Upstream precedent: vLLM #32852
+    // (skip softmax for all-greedy rejection sampling, using the identity
+    // argmax(softmax(x)) == argmax(x)) and SGLang topk1/row_argmax (k=1
+    // renorm == one-hot(argmax), computed without a softmax pass).
+    const bool fused_greedy_top1 = [&]() {
+        if (!params.skip_logits_probs_restore || params.cum_log_probs.has_value() || params.return_original_all_probs
+            || !params.output_all_probs.has_value()) {
+            return false;
+        }
+        const auto& all_probs = params.output_all_probs.value();
+        if (all_probs.dim() != 2 || all_probs.size(0) != batch_size || all_probs.size(1) != params.logits.size(1)) {
+            return false;
+        }
+        const int64_t vocab_size = params.logits.size(1);
+        if (batch_size <= 0 || vocab_size <= 0 || vocab_size >= (1 << 24) || params.top_k.numel() < batch_size) {
+            return false;
+        }
+        auto top_k_ptr = params.top_k.data_ptr<int32_t>();
+        if (!std::all_of(top_k_ptr, top_k_ptr + batch_size, [](auto t) { return t == 1; })) {
+            return false;
+        }
+        return params.logits.is_cuda() && params.logits.scalar_type() == torch::kFloat32
+               && params.logits.is_contiguous() && all_probs.is_cuda() && all_probs.scalar_type() == torch::kFloat32
+               && all_probs.is_contiguous() && samples_t.is_cuda() && samples_t.scalar_type() == torch::kInt32
+               && samples_t.is_contiguous();
+    }();
+
     // [batch_size, vocab_size] — compute softmax probabilities.
     // Copy result back to logits to preserve the in-place behavior of the original kernel,
     // since callers may reuse the logits tensor across iterations.
-    auto probs_t = torch::softmax(params.logits, -1);
-    params.logits.copy_(probs_t, true);
+    // The fused greedy top-1 path skips both: its caller declared the logits
+    // buffer private (skip_logits_probs_restore) and the one-hot(argmax)
+    // output does not depend on softmax values.
+    torch::Tensor probs_t;
+    if (!fused_greedy_top1) {
+        probs_t = torch::softmax(params.logits, -1);
+        params.logits.copy_(probs_t, true);
+    }
     auto success = torch::empty({(int64_t)batch_size}, torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA));
-
-    // [1, batch_size] — last row of transposed_tokens
-    auto samples_t = transposed_tokens.slice(0, transposed_tokens.size(0) - 1, transposed_tokens.size(0));
 
     constexpr bool deterministic       = true;
     constexpr int  max_sampling_rounds = 32;
@@ -316,13 +399,16 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
         output_all_probs_t = params.output_all_probs.value();
     }
     if (params.cum_log_probs.has_value() && !output_all_probs_t.defined()) {
-        output_all_probs_t = torch::zeros_like(probs_t);
+        // softmax preserves the logits shape/dtype, so zeros_like(logits) is
+        // the same allocation whether or not the fused path skipped probs_t
+        // (the fused gate excludes cum_log_probs consumers anyway).
+        output_all_probs_t = torch::zeros_like(params.logits);
     }
-    const auto output_width = output_all_probs_t.defined() ? output_all_probs_t.size(1) : probs_t.size(1);
-    RTP_LLM_CHECK_WITH_INFO(output_width > 0 && output_width <= probs_t.size(1),
+    const auto output_width = output_all_probs_t.defined() ? output_all_probs_t.size(1) : params.logits.size(1);
+    RTP_LLM_CHECK_WITH_INFO(output_width > 0 && output_width <= params.logits.size(1),
                             "output probability width must be in (0, padded vocab size]");
-    const bool need_full_sampling_probs = output_all_probs_t.defined() && output_width < probs_t.size(1);
-    auto       sampling_probs_t         = need_full_sampling_probs ? torch::zeros_like(probs_t) : output_all_probs_t;
+    const bool need_full_sampling_probs = output_all_probs_t.defined() && output_width < params.logits.size(1);
+    auto       sampling_probs_t = need_full_sampling_probs ? torch::zeros_like(params.logits) : output_all_probs_t;
 
     // top_k/top_p are CPU tensors with int32/float32 dtype
     auto top_k_ptr = params.top_k.data_ptr<int32_t>();
@@ -336,13 +422,28 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
     const bool all_top_p_one =
         std::all_of(top_p_ptr, top_p_ptr + batch_size, [](auto t) { return std::abs(t - 1.0f) < 1e-7; });
 
+    // Token-only point-mass mode: when the fused gate holds and the caller
+    // declared every all_probs consumer treats the distribution as a point
+    // mass at the sampled token, kernel 2 skips the [batch, vocab] one-hot
+    // materialization entirely. The returned flag tells consumers to read the
+    // token ids instead of the (unwritten) matrix.
+    bool all_probs_point_mass = false;
     if (all_top_k_one) {
-        torch::Tensor selected_tokens = torch::argmax(probs_t, -1, /*keepdim=*/false);
-        samples_t.copy_(selected_tokens, true);
-        success = torch::Tensor();  // mark as undefined — all succeeded
-        if (need_renorm_probs) {
-            top_k_renorm_probs(probs_t, sampling_probs_t, top_k_t, 0, (int64_t)cur_stream);
+        if (fused_greedy_top1) {
+            // token = first argmax(logits) == argmax(probs) (softmax is
+            // strictly monotonic); k=1 renorm == one-hot at that argmax.
+            // sampling_probs_t is the full-width all_probs output here (the
+            // gate rejected narrower widths and cum_log_probs consumers).
+            all_probs_point_mass = params.all_probs_point_mass;
+            fusedGreedyTop1Renorm(params.logits, sampling_probs_t, samples_t, /*write_onehot=*/!all_probs_point_mass);
+        } else {
+            torch::Tensor selected_tokens = torch::argmax(probs_t, -1, /*keepdim=*/false);
+            samples_t.copy_(selected_tokens, true);
+            if (need_renorm_probs) {
+                top_k_renorm_probs(probs_t, sampling_probs_t, top_k_t, 0, (int64_t)cur_stream);
+            }
         }
+        success = torch::Tensor();  // mark as undefined — all succeeded
     } else if (all_top_k_no_limit) {
         top_p_sampling_from_probs(probs_t,
                                   samples_t.squeeze(0),
@@ -420,7 +521,7 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
     auto transposed_t = transposed_tokens.transpose(0, 1).contiguous();
     params.token_ids.copy_(transposed_t, true);
     check_cuda_error();
-    return {success};
+    return {success, all_probs_point_mass};
 }
 
 GreedyOutput sampleGreedy(const GreedyParams& params) {
@@ -515,7 +616,8 @@ void rejectionSampling(const RejectionSamplingParams& params) {
                                              config.num_speculative_tokens,
                                              config.target_vocab_size,
                                              stream,
-                                             params.draft_probs_point_mass));
+                                             params.draft_probs_point_mass,
+                                             params.target_probs_point_mass));
 }
 
 void markovSoftmaxStep(const MarkovSoftmaxStepParams& params) {

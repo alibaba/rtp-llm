@@ -1072,10 +1072,35 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
                             vocab_size_);
     sampler_inputs.vocab_size = vocab_size_;
     if (return_all_probs != ReturnAllProbsMode::NONE) {
-        sampler_inputs.all_probs = torch::zeros({(int64_t)total_batch_size, (int64_t)vocab_size_},
-                                                torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
-        if (return_all_probs == ReturnAllProbsMode::ORIGINAL) {
-            sampler_inputs.return_original_all_probs = true;
+        const bool renorm_mode = (return_all_probs != ReturnAllProbsMode::ORIGINAL);
+        // Point-mass target contract. When renormalizing (not ORIGINAL) on a
+        // CUDA build, with no cum_log_probs consumer and every score row greedy
+        // (top_k == 1), the fused greedy top-1 path handles the whole batch and
+        // the one-hot [rows, vocab] matrix is never read: rejection sampling
+        // synthesizes q from target_token_ids instead (see batchSample). Skip
+        // both the FillFunctor zero-fill here and the kernel one-hot write by
+        // allocating uninitialized and declaring the contract. Any other
+        // configuration keeps the legacy zero-filled materialized matrix and
+        // full one-hot write byte-for-byte (and the sampler only honors the
+        // declaration when its own fused gate also passes, so a mismatch
+        // safely falls back to writing every column).
+        bool point_mass = false;
+#if USING_CUDA
+        if (renorm_mode && !sampler_inputs.cum_log_probs.defined()) {
+            auto* top_k_ptr = sampler_inputs.top_k.data_ptr<int32_t>();
+            point_mass      = std::all_of(top_k_ptr, top_k_ptr + total_batch_size, [](int32_t k) { return k == 1; });
+        }
+#endif
+        if (point_mass) {
+            sampler_inputs.all_probs            = torch::empty({(int64_t)total_batch_size, (int64_t)vocab_size_},
+                                                    torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+            sampler_inputs.all_probs_point_mass = true;
+        } else {
+            sampler_inputs.all_probs = torch::zeros({(int64_t)total_batch_size, (int64_t)vocab_size_},
+                                                    torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+            if (!renorm_mode) {
+                sampler_inputs.return_original_all_probs = true;
+            }
         }
     }
 
@@ -1147,6 +1172,13 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
         }
         SpecLogitsVerifyRunner::applyMaskToLogits(sampler_inputs.logits, spec_logits_result, sampler_inputs.vocab_size);
     }
+    // The narrow+clone above is private to this round's sampler inputs: after
+    // sampling, nothing reads the logits buffer on the MTP path (target
+    // all_probs feeds rejection sampling from its own tensor, streams consume
+    // the draft-side probabilities, and the next round re-clones from the
+    // model output). Declare it so the CUDA greedy sampler may skip the
+    // softmax-probs writeback into logits and take its fused top-1 path.
+    sampler_inputs.skip_logits_probs_restore = true;
 
     // TODO(async): debug formatting is CPU-only. Keep the .cpu() explicit
     // and do not route this through the model-input fast path.

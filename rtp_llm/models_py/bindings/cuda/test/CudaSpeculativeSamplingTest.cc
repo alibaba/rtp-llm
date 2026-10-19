@@ -6,6 +6,7 @@
 
 #include "rtp_llm/models_py/bindings/cuda/kernels/speculative_sampling/sampling.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/speculative_sampling/markov_softmax.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/speculative_sampling/greedy_top1_renorm.h"
 #include "rtp_llm/models_py/bindings/common/kernels/vocab_prune/mapping.h"
 
 class SpeculativeSamplingKernelTest: public ::testing::Test {
@@ -987,4 +988,532 @@ TEST_F(SpeculativeSamplingKernelTest, MappingDraft2Target_OutOfRangeUnchanged) {
     EXPECT_EQ(tokens_h[0].item<int>(), 101);  // mapped
     EXPECT_EQ(tokens_h[1].item<int>(), 10);   // out of range → unchanged
     EXPECT_EQ(tokens_h[2].item<int>(), 103);  // mapped
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// invokeGreedyTop1Renorm tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST_F(SpeculativeSamplingKernelTest, GreedyTop1Renorm_MatchesTorchArgmaxOneHot) {
+    // The fused op must reproduce exactly what the replaced chain produced for
+    // tie-free rows: token = torch::argmax(logits) (== argmax(softmax(logits))
+    // by strict monotonicity) and all_probs = one-hot at that index
+    // (== flashinfer top_k_renorm_probs(k=1)).
+    const int batch_size = 32, vocab_size = 4096;
+    auto      logits     = torch::randn({batch_size, vocab_size}, floatCuda()) * 3.0f;
+    auto      logits_ref = logits.clone();
+    auto      onehot     = torch::full({batch_size, vocab_size}, -777.0f, floatCuda());
+    auto      samples    = torch::full({batch_size}, -1, intCuda());
+    const int splits     = rtp_llm::greedyTop1RenormSplits(batch_size, vocab_size);
+    auto      partials   = torch::empty({2, batch_size, splits}, floatCuda());
+
+    auto status = rtp_llm::invokeGreedyTop1Renorm(logits.data_ptr<float>(),
+                                                  onehot.data_ptr<float>(),
+                                                  samples.data_ptr<int32_t>(),
+                                                  batch_size,
+                                                  vocab_size,
+                                                  partials.data_ptr<float>(),
+                                                  stream_);
+    ASSERT_EQ(status, cudaSuccess);
+    cudaStreamSynchronize(stream_);
+
+    auto expected = logits_ref.argmax(-1);  // first maximum, matching the kernel
+    EXPECT_TRUE(torch::equal(samples.to(torch::kLong), expected));
+    auto expected_onehot = torch::zeros({batch_size, vocab_size}, floatCuda());
+    expected_onehot.scatter_(1, expected.unsqueeze(1), 1.0f);
+    EXPECT_TRUE(torch::equal(onehot, expected_onehot));
+    EXPECT_TRUE(torch::equal(onehot.sum(-1), torch::ones({batch_size}, floatCuda())));
+    // Read-only contract: logits must be untouched (no probs writeback).
+    EXPECT_TRUE(torch::equal(logits, logits_ref));
+}
+
+TEST_F(SpeculativeSamplingKernelTest, GreedyTop1Renorm_ProductionShapeWideVocab) {
+    // The MTP verify shape: [B*(gamma+1), vocab] fp32 rows.
+    const int batch_size = 192, vocab_size = 129280;
+    auto      logits     = torch::randn({batch_size, vocab_size}, floatCuda());
+    auto      logits_ref = logits.clone();
+    auto      onehot     = torch::full({batch_size, vocab_size}, -777.0f, floatCuda());
+    auto      samples    = torch::full({batch_size}, -1, intCuda());
+    const int splits     = rtp_llm::greedyTop1RenormSplits(batch_size, vocab_size);
+    auto      partials   = torch::empty({2, batch_size, splits}, floatCuda());
+
+    auto status = rtp_llm::invokeGreedyTop1Renorm(logits.data_ptr<float>(),
+                                                  onehot.data_ptr<float>(),
+                                                  samples.data_ptr<int32_t>(),
+                                                  batch_size,
+                                                  vocab_size,
+                                                  partials.data_ptr<float>(),
+                                                  stream_);
+    ASSERT_EQ(status, cudaSuccess);
+    cudaStreamSynchronize(stream_);
+
+    auto expected = logits_ref.argmax(-1);
+    EXPECT_TRUE(torch::equal(samples.to(torch::kLong), expected));
+    auto expected_onehot = torch::zeros({batch_size, vocab_size}, floatCuda());
+    expected_onehot.scatter_(1, expected.unsqueeze(1), 1.0f);
+    EXPECT_TRUE(torch::equal(onehot, expected_onehot));
+    EXPECT_TRUE(torch::equal(logits, logits_ref));
+}
+
+TEST_F(SpeculativeSamplingKernelTest, GreedyTop1Renorm_ScalarPathOddVocab) {
+    const int batch_size = 8, vocab_size = 4097;  // not a multiple of 4
+    auto      logits     = torch::randn({batch_size, vocab_size}, floatCuda()) * 2.0f;
+    auto      logits_ref = logits.clone();
+    auto      onehot     = torch::full({batch_size, vocab_size}, -777.0f, floatCuda());
+    auto      samples    = torch::full({batch_size}, -1, intCuda());
+    const int splits     = rtp_llm::greedyTop1RenormSplits(batch_size, vocab_size);
+    auto      partials   = torch::empty({2, batch_size, splits}, floatCuda());
+
+    auto status = rtp_llm::invokeGreedyTop1Renorm(logits.data_ptr<float>(),
+                                                  onehot.data_ptr<float>(),
+                                                  samples.data_ptr<int32_t>(),
+                                                  batch_size,
+                                                  vocab_size,
+                                                  partials.data_ptr<float>(),
+                                                  stream_);
+    ASSERT_EQ(status, cudaSuccess);
+    cudaStreamSynchronize(stream_);
+
+    auto expected = logits_ref.argmax(-1);
+    EXPECT_TRUE(torch::equal(samples.to(torch::kLong), expected));
+    auto expected_onehot = torch::zeros({batch_size, vocab_size}, floatCuda());
+    expected_onehot.scatter_(1, expected.unsqueeze(1), 1.0f);
+    EXPECT_TRUE(torch::equal(onehot, expected_onehot));
+}
+
+TEST_F(SpeculativeSamplingKernelTest, GreedyTop1Renorm_TiesResolveToFirstMaximum) {
+    // torch::argmax returns the first maximal value; the fused kernel must
+    // match, including rows whose maximum repeats across split boundaries and
+    // degenerate all-equal rows.
+    auto      logits     = torch::tensor({{0.5f, 3.0f, 3.0f, 1.0f, 3.0f, 2.0f},
+                                          {1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f},
+                                          {-1.0f, -5.0f, -1.0f, -5.0f, -5.0f, -5.0f},
+                                          {2.0f, 1.0f, 1.0f, 1.0f, 1.0f, 2.0f}},
+                                floatCuda());
+    const int batch_size = 4, vocab_size = 6;
+    auto      onehot   = torch::full({batch_size, vocab_size}, -777.0f, floatCuda());
+    auto      samples  = torch::full({batch_size}, -1, intCuda());
+    const int splits   = rtp_llm::greedyTop1RenormSplits(batch_size, vocab_size);
+    auto      partials = torch::empty({2, batch_size, splits}, floatCuda());
+
+    auto status = rtp_llm::invokeGreedyTop1Renorm(logits.data_ptr<float>(),
+                                                  onehot.data_ptr<float>(),
+                                                  samples.data_ptr<int32_t>(),
+                                                  batch_size,
+                                                  vocab_size,
+                                                  partials.data_ptr<float>(),
+                                                  stream_);
+    ASSERT_EQ(status, cudaSuccess);
+    cudaStreamSynchronize(stream_);
+
+    EXPECT_TRUE(torch::equal(samples.to(torch::kLong), logits.argmax(-1)));
+    auto expected_onehot = torch::zeros({batch_size, vocab_size}, floatCuda());
+    expected_onehot.scatter_(1, logits.argmax(-1).unsqueeze(1), 1.0f);
+    EXPECT_TRUE(torch::equal(onehot, expected_onehot));
+}
+
+TEST_F(SpeculativeSamplingKernelTest, GreedyTop1Renorm_NaNsAndTiesMatchTorch) {
+    for (const int vocab_size : {4, 5, 131072, 131073}) {
+        SCOPED_TRACE(vocab_size);
+        auto logits   = torch::zeros({1, vocab_size}, floatCuda());
+        auto onehot   = torch::empty_like(logits);
+        auto samples  = torch::empty({1}, intCuda());
+        auto partials = torch::empty({2, 1, rtp_llm::greedyTop1RenormSplits(1, vocab_size)}, floatCuda());
+        auto check    = [&](int expected) {
+            for (bool write_onehot : {false, true}) {
+                SCOPED_TRACE(write_onehot);
+                onehot.fill_(-777.0f);
+                ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+                ASSERT_EQ(rtp_llm::invokeGreedyTop1Renorm(logits.data_ptr<float>(),
+                                                          onehot.data_ptr<float>(),
+                                                          samples.data_ptr<int32_t>(),
+                                                          1,
+                                                          vocab_size,
+                                                          partials.data_ptr<float>(),
+                                                          stream_,
+                                                          write_onehot),
+                          cudaSuccess);
+                ASSERT_EQ(cudaStreamSynchronize(stream_), cudaSuccess);
+                EXPECT_EQ(samples[0].item<int32_t>(), expected);
+                auto reference = logits.argmax(-1);
+                EXPECT_TRUE(torch::equal(samples, reference.to(torch::kInt32)));
+                if (write_onehot) {
+                    EXPECT_TRUE(
+                        torch::equal(onehot, torch::zeros_like(logits).scatter_(1, reference.unsqueeze(1), 1.0f)));
+                } else {
+                    EXPECT_TRUE(onehot.eq(-777.0f).all().item<bool>());
+                }
+            }
+        };
+        for (const int first_nan : {0, 1, 2, 3, 4096, vocab_size / 2, vocab_size - 1}) {
+            if (first_nan >= vocab_size) {
+                continue;
+            }
+            SCOPED_TRACE(first_nan);
+            logits.zero_();
+            logits[0][1]         = 2.0f;
+            logits[0][2]         = 1.0f;
+            logits[0][first_nan] = std::numeric_limits<float>::quiet_NaN();
+            check(first_nan);
+            logits[0][vocab_size - 1] = std::numeric_limits<float>::quiet_NaN();
+            check(first_nan);
+        }
+        for (const float value : {-std::numeric_limits<float>::infinity(), std::numeric_limits<float>::infinity()}) {
+            logits.fill_(value);
+            check(0);
+        }
+        logits.zero_();
+        for (const int index : {1, 2, vocab_size / 2, vocab_size - 1}) {
+            logits[0][index] = 5.0f;
+        }
+        check(1);
+    }
+}
+
+TEST_F(SpeculativeSamplingKernelTest, GreedyTop1Renorm_UnalignedContiguousStorageOffsets) {
+    constexpr int batch_size = 3, vocab_size = 8192;
+    for (int offset_arg = 0; offset_arg < 2; ++offset_arg) {
+        for (bool write_onehot : {false, true}) {
+            SCOPED_TRACE(offset_arg);
+            SCOPED_TRACE(write_onehot);
+            auto logits = torch::randn({batch_size * vocab_size + 1}, floatCuda())
+                              .narrow(0, offset_arg == 0 ? 1 : 0, batch_size * vocab_size)
+                              .view({batch_size, vocab_size});
+            auto onehot = torch::full({batch_size * vocab_size + 1}, -777.0f, floatCuda())
+                              .narrow(0, offset_arg == 1 ? 1 : 0, batch_size * vocab_size)
+                              .view({batch_size, vocab_size});
+            auto samples = torch::empty({batch_size}, intCuda());
+            auto partials =
+                torch::empty({2, batch_size, rtp_llm::greedyTop1RenormSplits(batch_size, vocab_size)}, floatCuda());
+            ASSERT_TRUE(logits.is_contiguous());
+            ASSERT_TRUE(onehot.is_contiguous());
+            ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+            ASSERT_EQ(rtp_llm::invokeGreedyTop1Renorm(logits.data_ptr<float>(),
+                                                      onehot.data_ptr<float>(),
+                                                      samples.data_ptr<int32_t>(),
+                                                      batch_size,
+                                                      vocab_size,
+                                                      partials.data_ptr<float>(),
+                                                      stream_,
+                                                      write_onehot),
+                      cudaSuccess);
+            ASSERT_EQ(cudaStreamSynchronize(stream_), cudaSuccess);
+            auto expected = logits.argmax(-1);
+            EXPECT_TRUE(torch::equal(samples, expected.to(torch::kInt32)));
+            if (write_onehot) {
+                EXPECT_TRUE(torch::equal(onehot, torch::zeros_like(logits).scatter_(1, expected.unsqueeze(1), 1.0f)));
+            } else {
+                EXPECT_TRUE(onehot.eq(-777.0f).all().item<bool>());
+            }
+        }
+    }
+}
+
+TEST_F(SpeculativeSamplingKernelTest, GreedyTop1Renorm_BatchSizeZeroIsNoop) {
+    auto status = rtp_llm::invokeGreedyTop1Renorm(nullptr, nullptr, nullptr, 0, 128, nullptr, stream_);
+    ASSERT_EQ(status, cudaSuccess);
+}
+
+TEST_F(SpeculativeSamplingKernelTest, GreedyTop1Renorm_RejectsBadArguments) {
+    const int batch_size = 2, vocab_size = 64;
+    auto      logits   = torch::randn({batch_size, vocab_size}, floatCuda());
+    auto      onehot   = torch::empty({batch_size, vocab_size}, floatCuda());
+    auto      samples  = torch::empty({batch_size}, intCuda());
+    const int splits   = rtp_llm::greedyTop1RenormSplits(batch_size, vocab_size);
+    auto      partials = torch::empty({2, batch_size, splits}, floatCuda());
+    // Missing partials scratch.
+    auto status = rtp_llm::invokeGreedyTop1Renorm(logits.data_ptr<float>(),
+                                                  onehot.data_ptr<float>(),
+                                                  samples.data_ptr<int32_t>(),
+                                                  batch_size,
+                                                  vocab_size,
+                                                  nullptr,
+                                                  stream_);
+    ASSERT_EQ(status, cudaErrorInvalidValue);
+    // Missing output.
+    status = rtp_llm::invokeGreedyTop1Renorm(logits.data_ptr<float>(),
+                                             nullptr,
+                                             samples.data_ptr<int32_t>(),
+                                             batch_size,
+                                             vocab_size,
+                                             partials.data_ptr<float>(),
+                                             stream_);
+    ASSERT_EQ(status, cudaErrorInvalidValue);
+    // Vocab beyond the exact float-index bound.
+    status = rtp_llm::invokeGreedyTop1Renorm(logits.data_ptr<float>(),
+                                             onehot.data_ptr<float>(),
+                                             samples.data_ptr<int32_t>(),
+                                             batch_size,
+                                             (1 << 24),
+                                             partials.data_ptr<float>(),
+                                             stream_);
+    ASSERT_EQ(status, cudaErrorInvalidValue);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Point-mass contract tests: the token-only greedy mode and the rejection
+// kernel's target_probs_point_mass synthesis must be bit-identical to the
+// materialized one-hot matrix path.
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST_F(SpeculativeSamplingKernelTest, GreedyTop1Renorm_TokenOnlySkipsOnehot) {
+    // write_onehot=false: samples still carry the first argmax, the one-hot
+    // destination is left untouched (sentinel survives), logits stay raw.
+    const int batch_size = 8, vocab_size = 4097;  // scalar path (odd vocab)
+    auto      logits     = torch::randn({batch_size, vocab_size}, floatCuda()) * 2.0f;
+    auto      logits_ref = logits.clone();
+    auto      onehot     = torch::full({batch_size, vocab_size}, -777.0f, floatCuda());
+    auto      samples    = torch::full({batch_size}, -1, intCuda());
+    const int splits     = rtp_llm::greedyTop1RenormSplits(batch_size, vocab_size);
+    auto      partials   = torch::empty({2, batch_size, splits}, floatCuda());
+
+    auto status = rtp_llm::invokeGreedyTop1Renorm(logits.data_ptr<float>(),
+                                                  onehot.data_ptr<float>(),
+                                                  samples.data_ptr<int32_t>(),
+                                                  batch_size,
+                                                  vocab_size,
+                                                  partials.data_ptr<float>(),
+                                                  stream_,
+                                                  /*write_onehot=*/false);
+    ASSERT_EQ(status, cudaSuccess);
+    cudaStreamSynchronize(stream_);
+
+    EXPECT_TRUE(torch::equal(samples.to(torch::kLong), logits_ref.argmax(-1)));
+    EXPECT_TRUE(torch::equal(onehot, torch::full({batch_size, vocab_size}, -777.0f, floatCuda())));
+    EXPECT_TRUE(torch::equal(logits, logits_ref));
+
+    // The same run on the vector path (vocab multiple of 4) must agree with a
+    // full-write run's tokens.
+    const int vocab_vec = 4096;
+    auto      logits_v  = torch::randn({batch_size, vocab_vec}, floatCuda());
+    auto      onehot_v  = torch::full({batch_size, vocab_vec}, -777.0f, floatCuda());
+    auto      samples_v = torch::full({batch_size}, -1, intCuda());
+    auto      partials_v =
+        torch::empty({2, batch_size, rtp_llm::greedyTop1RenormSplits(batch_size, vocab_vec)}, floatCuda());
+    ASSERT_EQ(rtp_llm::invokeGreedyTop1Renorm(logits_v.data_ptr<float>(),
+                                              onehot_v.data_ptr<float>(),
+                                              samples_v.data_ptr<int32_t>(),
+                                              batch_size,
+                                              vocab_vec,
+                                              partials_v.data_ptr<float>(),
+                                              stream_,
+                                              /*write_onehot=*/false),
+              cudaSuccess);
+    cudaStreamSynchronize(stream_);
+    EXPECT_TRUE(torch::equal(samples_v.to(torch::kLong), logits_v.argmax(-1)));
+    EXPECT_TRUE(torch::equal(onehot_v, torch::full({batch_size, vocab_vec}, -777.0f, floatCuda())));
+}
+
+TEST_F(SpeculativeSamplingKernelTest, GreedyTop1Renorm_TokenOnlyAllowsNullOnehot) {
+    const int batch_size = 4, vocab_size = 64;
+    auto      logits   = torch::randn({batch_size, vocab_size}, floatCuda());
+    auto      samples  = torch::full({batch_size}, -1, intCuda());
+    const int splits   = rtp_llm::greedyTop1RenormSplits(batch_size, vocab_size);
+    auto      partials = torch::empty({2, batch_size, splits}, floatCuda());
+    auto      status   = rtp_llm::invokeGreedyTop1Renorm(logits.data_ptr<float>(),
+                                                  nullptr,
+                                                  samples.data_ptr<int32_t>(),
+                                                  batch_size,
+                                                  vocab_size,
+                                                  partials.data_ptr<float>(),
+                                                  stream_,
+                                                  /*write_onehot=*/false);
+    ASSERT_EQ(status, cudaSuccess);
+    cudaStreamSynchronize(stream_);
+    EXPECT_TRUE(torch::equal(samples.to(torch::kLong), logits.argmax(-1)));
+    // With write_onehot=true a null destination stays invalid.
+    ASSERT_EQ(rtp_llm::invokeGreedyTop1Renorm(logits.data_ptr<float>(),
+                                              nullptr,
+                                              samples.data_ptr<int32_t>(),
+                                              batch_size,
+                                              vocab_size,
+                                              partials.data_ptr<float>(),
+                                              stream_),
+              cudaErrorInvalidValue);
+}
+
+TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_TargetPointMass_GreedyParity) {
+    // Greedy rows (do_sample=false): synthesized q must reproduce the accept /
+    // direct-target-fallback decisions of the materialized one-hot matrix
+    // bit-for-bit, with a multi-column target_token_ids stride.
+    torch::manual_seed(1234);
+    const int batch_size = 8, num_spec = 5, vocab_size = 1000, target_stride = 3;
+
+    auto target_token_ids = torch::randint(0, vocab_size, {batch_size, num_spec + 1, target_stride}, intCuda());
+    auto target_last      = target_token_ids.select(2, target_stride - 1);  // [B, num_spec+1]
+    // Force a deterministic mix of matches and mismatches against the greedy
+    // target column so both accept and reject branches are exercised.
+    auto draft_token_ids = torch::randint(0, vocab_size, {batch_size, num_spec}, torch::kInt32).contiguous();
+    {
+        auto     target_last_h = target_last.to(torch::kCPU).contiguous();
+        int32_t* dp            = draft_token_ids.data_ptr<int32_t>();
+        auto     tp            = target_last_h.data_ptr<int32_t>();
+        for (int b = 0; b < batch_size; ++b) {
+            for (int s = 0; s < num_spec; ++s) {
+                const int32_t tgt = tp[b * (num_spec + 1) + s];
+                // Odd (b + s): guaranteed mismatch — shift within the vocab.
+                dp[b * num_spec + s] =
+                    ((b + s) % 2 == 0) ? tgt : static_cast<int32_t>((tgt + 1 + (s % 7)) % vocab_size);
+            }
+        }
+        draft_token_ids = draft_token_ids.to(intCuda());
+    }
+
+    auto target_probs_onehot = torch::zeros({batch_size, num_spec + 1, vocab_size}, floatCuda());
+    target_probs_onehot.scatter_(2, target_last.to(torch::kLong).unsqueeze(-1), 1.0f);
+
+    auto draft_probs     = torch::rand({batch_size, num_spec, vocab_size}, floatCuda());
+    draft_probs          = draft_probs / draft_probs.sum(-1, true);
+    auto uniform_samples = torch::rand({batch_size, num_spec + 1}, floatCuda());
+    auto do_sample       = torch::zeros({batch_size}, boolCuda());
+
+    auto run_once = [&](const torch::Tensor& target_probs, bool target_point_mass) {
+        auto output_token_ids = torch::full({batch_size, num_spec + 1}, -1, intCuda());
+        auto output_acc_num   = torch::zeros({batch_size}, intCuda());
+        auto status           = rtp_llm::invokeRejectionSampling<float, int>(draft_probs.data_ptr<float>(),
+                                                                   draft_token_ids.data_ptr<int>(),
+                                                                   uniform_samples.data_ptr<float>(),
+                                                                   target_probs.data_ptr<float>(),
+                                                                   target_token_ids.data_ptr<int>(),
+                                                                   target_stride,
+                                                                   output_token_ids.data_ptr<int>(),
+                                                                   output_acc_num.data_ptr<int>(),
+                                                                   do_sample.data_ptr<bool>(),
+                                                                   batch_size,
+                                                                   num_spec,
+                                                                   vocab_size,
+                                                                   stream_,
+                                                                   /*draft_probs_point_mass=*/false,
+                                                                   target_point_mass);
+        EXPECT_EQ(status, cudaSuccess);
+        cudaStreamSynchronize(stream_);
+        return std::make_pair(output_token_ids.to(torch::kCPU), output_acc_num.to(torch::kCPU));
+    };
+
+    auto [ids_matrix, acc_matrix] = run_once(target_probs_onehot, false);
+    auto garbage                  = torch::full({batch_size, num_spec + 1, vocab_size}, -777.0f, floatCuda());
+    auto [ids_point, acc_point]   = run_once(garbage, true);
+
+    EXPECT_TRUE(torch::equal(ids_matrix, ids_point));
+    EXPECT_TRUE(torch::equal(acc_matrix, acc_point));
+    // Non-vacuous: the forced mismatches must reject some rows before the end
+    // while other rows accept at least their first proposal.
+    EXPECT_TRUE((acc_matrix < num_spec + 1).any().item<bool>());
+    EXPECT_TRUE((acc_matrix > 1).any().item<bool>());
+}
+
+TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_TargetPointMass_StochasticResidualParity) {
+    // Stochastic rows (do_sample=true) with dense draft probabilities: the
+    // residual relu(q - p) sampling must produce identical tokens whether q
+    // comes from the one-hot matrix or is synthesized from target_token_ids.
+    torch::manual_seed(987);
+    const int batch_size = 8, num_spec = 3, vocab_size = 1000, target_stride = 1;
+
+    auto target_token_ids = torch::randint(0, vocab_size, {batch_size, num_spec + 1, target_stride}, intCuda());
+    auto draft_token_ids  = torch::randint(0, vocab_size, {batch_size, num_spec}, intCuda());
+    auto target_last      = target_token_ids.select(2, target_stride - 1);
+
+    auto target_probs_onehot = torch::zeros({batch_size, num_spec + 1, vocab_size}, floatCuda());
+    target_probs_onehot.scatter_(2, target_last.to(torch::kLong).unsqueeze(-1), 1.0f);
+
+    auto draft_probs     = torch::rand({batch_size, num_spec, vocab_size}, floatCuda());
+    draft_probs          = draft_probs / draft_probs.sum(-1, true);
+    auto uniform_samples = torch::rand({batch_size, num_spec + 1}, floatCuda());
+    auto do_sample       = torch::ones({batch_size}, boolCuda());
+
+    auto run_once = [&](const torch::Tensor& target_probs, bool target_point_mass) {
+        auto output_token_ids = torch::full({batch_size, num_spec + 1}, -1, intCuda());
+        auto output_acc_num   = torch::zeros({batch_size}, intCuda());
+        auto status           = rtp_llm::invokeRejectionSampling<float, int>(draft_probs.data_ptr<float>(),
+                                                                   draft_token_ids.data_ptr<int>(),
+                                                                   uniform_samples.data_ptr<float>(),
+                                                                   target_probs.data_ptr<float>(),
+                                                                   target_token_ids.data_ptr<int>(),
+                                                                   target_stride,
+                                                                   output_token_ids.data_ptr<int>(),
+                                                                   output_acc_num.data_ptr<int>(),
+                                                                   do_sample.data_ptr<bool>(),
+                                                                   batch_size,
+                                                                   num_spec,
+                                                                   vocab_size,
+                                                                   stream_,
+                                                                   /*draft_probs_point_mass=*/false,
+                                                                   target_point_mass);
+        EXPECT_EQ(status, cudaSuccess);
+        cudaStreamSynchronize(stream_);
+        return std::make_pair(output_token_ids.to(torch::kCPU), output_acc_num.to(torch::kCPU));
+    };
+
+    auto [ids_matrix, acc_matrix] = run_once(target_probs_onehot, false);
+    auto garbage                  = torch::full({batch_size, num_spec + 1, vocab_size}, -777.0f, floatCuda());
+    auto [ids_point, acc_point]   = run_once(garbage, true);
+
+    EXPECT_TRUE(torch::equal(ids_matrix, ids_point));
+    EXPECT_TRUE(torch::equal(acc_matrix, acc_point));
+    // Non-vacuous: with dense random draft probs and random uniforms, the
+    // residual path must trigger (some row rejects before the bonus slot).
+    EXPECT_TRUE((acc_matrix < num_spec + 1).any().item<bool>());
+}
+
+TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_BothPointMass_Parity) {
+    // DSpARK-style draft (no draft_probs at all) combined with the point-mass
+    // target: accept reduces to same_token and the residual concentrates on
+    // the target token — identical to the matrix-based run.
+    torch::manual_seed(55);
+    const int batch_size = 4, num_spec = 3, vocab_size = 512, target_stride = 2;
+
+    auto target_token_ids = torch::randint(0, vocab_size, {batch_size, num_spec + 1, target_stride}, intCuda());
+    auto target_last      = target_token_ids.select(2, target_stride - 1);
+    // Half the proposals match the greedy target token.
+    auto draft_token_ids = torch::randint(0, vocab_size, {batch_size, num_spec}, torch::kInt32).contiguous();
+    {
+        auto     target_last_h = target_last.to(torch::kCPU).contiguous();
+        int32_t* dp            = draft_token_ids.data_ptr<int32_t>();
+        auto     tp            = target_last_h.data_ptr<int32_t>();
+        for (int b = 0; b < batch_size; ++b) {
+            for (int s = 0; s < num_spec; ++s) {
+                if ((b + s) % 2 == 0) {
+                    dp[b * num_spec + s] = tp[b * (num_spec + 1) + s];
+                }
+            }
+        }
+        draft_token_ids = draft_token_ids.to(intCuda());
+    }
+
+    auto target_probs_onehot = torch::zeros({batch_size, num_spec + 1, vocab_size}, floatCuda());
+    target_probs_onehot.scatter_(2, target_last.to(torch::kLong).unsqueeze(-1), 1.0f);
+
+    auto uniform_samples = torch::rand({batch_size, num_spec + 1}, floatCuda());
+    auto do_sample       = torch::ones({batch_size}, boolCuda());
+
+    auto run_once = [&](const torch::Tensor& target_probs, bool target_point_mass) {
+        auto output_token_ids = torch::full({batch_size, num_spec + 1}, -1, intCuda());
+        auto output_acc_num   = torch::zeros({batch_size}, intCuda());
+        auto status           = rtp_llm::invokeRejectionSampling<float, int>(nullptr,
+                                                                   draft_token_ids.data_ptr<int>(),
+                                                                   uniform_samples.data_ptr<float>(),
+                                                                   target_probs.data_ptr<float>(),
+                                                                   target_token_ids.data_ptr<int>(),
+                                                                   target_stride,
+                                                                   output_token_ids.data_ptr<int>(),
+                                                                   output_acc_num.data_ptr<int>(),
+                                                                   do_sample.data_ptr<bool>(),
+                                                                   batch_size,
+                                                                   num_spec,
+                                                                   vocab_size,
+                                                                   stream_,
+                                                                   /*draft_probs_point_mass=*/true,
+                                                                   target_point_mass);
+        EXPECT_EQ(status, cudaSuccess);
+        cudaStreamSynchronize(stream_);
+        return std::make_pair(output_token_ids.to(torch::kCPU), output_acc_num.to(torch::kCPU));
+    };
+
+    auto [ids_matrix, acc_matrix] = run_once(target_probs_onehot, false);
+    auto garbage                  = torch::full({batch_size, num_spec + 1, vocab_size}, -777.0f, floatCuda());
+    auto [ids_point, acc_point]   = run_once(garbage, true);
+
+    EXPECT_TRUE(torch::equal(ids_matrix, ids_point));
+    EXPECT_TRUE(torch::equal(acc_matrix, acc_point));
+    EXPECT_TRUE((acc_matrix < num_spec + 1).any().item<bool>());
 }
