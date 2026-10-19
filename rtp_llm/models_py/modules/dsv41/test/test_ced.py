@@ -1879,6 +1879,7 @@ class CedCandidatePublicationTest(_SingleThreadTest):
                 logging=logging,
                 host_block_tables=lambda *args: None,
                 layer_calls=[layer(i) for i in range(40)],
+                use_prefill_fast_path=False,
                 routing_metadata=None,
                 routing_kwargs={},
                 engram_prefetch=None,
@@ -1981,6 +1982,143 @@ class CedRouterProjectionTest(_SingleThreadTest):
         gate.route_scale = 1.0
         gate._dbg_prefix = None
         return gate
+
+    @staticmethod
+    def _reference_router_chunk_groups(plan, rows_per_chunk, *, gate_rows=0):
+        groups = []
+        for compact_rows, original_rows in plan.exchange.projection_groups_host:
+            chunks = {}
+            for dst, src in zip(compact_rows, original_rows):
+                outer_start = src // rows_per_chunk * rows_per_chunk
+                stop = min(
+                    outer_start + rows_per_chunk, plan.original_context.chunk_length
+                )
+                start = outer_start
+                if gate_rows > 0:
+                    start += (src - outer_start) // gate_rows * gate_rows
+                    stop = min(stop, start + gate_rows)
+                destinations, sources = chunks.setdefault((start, stop), ([], []))
+                destinations.append(dst)
+                sources.append(src - start)
+            groups.extend(
+                (destinations, sources, stop - start)
+                for (start, stop), (destinations, sources) in chunks.items()
+            )
+        return groups
+
+    def _assert_router_groups_equal(self, actual, expected):
+        self.assertEqual(len(actual), len(expected))
+        for (dst, src, span), (expected_dst, expected_src, expected_span) in zip(
+            actual, expected
+        ):
+            self.assertEqual(dst.dtype, torch.int64)
+            self.assertEqual(src.dtype, torch.int64)
+            self.assertEqual(dst.tolist(), expected_dst)
+            self.assertEqual(src.tolist(), expected_src)
+            self.assertEqual(span, expected_span)
+
+    def test_router_chunk_groups_match_reference_order_owners_and_ragged_chunks(self):
+        cases = [
+            ((), 64, 32, 0),
+            ((((), ()),), 64, 32, 0),
+            (
+                (((10, 3, 7, 20), (70, 5, 71, 6)), ((1, 2), (10, 70))),
+                96,
+                32,
+                0,
+            ),
+            ((((10, 3, 7, 20, 33), (94, 40, 6, 41, 63)),), 95, 32, 8),
+            ((((1, 2, 3), (4, 5)),), 64, 32, 0),
+        ]
+        rng = np.random.default_rng(1234)
+        for _ in range(12):
+            host_groups = []
+            for _ in range(int(rng.integers(0, 4))):
+                count = int(rng.integers(0, 900))
+                host_groups.append(
+                    (
+                        tuple(rng.permutation(count)),
+                        tuple(rng.integers(0, 32768, count)),
+                    )
+                )
+            cases.append(
+                (
+                    tuple(host_groups),
+                    32768,
+                    int(rng.choice([16384, 32768, 32767])),
+                    int(rng.choice([0, 4096, 32768])),
+                )
+            )
+        for case, (host_groups, length, rows, gate_rows) in enumerate(cases):
+            with self.subTest(case=case):
+                plan = _CED.CEDPlan(
+                    original_context=types.SimpleNamespace(chunk_length=length),
+                    context=types.SimpleNamespace(global_positions=torch.empty(0)),
+                    cu_seqlens=torch.empty(0),
+                    exchange=types.SimpleNamespace(projection_groups_host=host_groups),
+                    indexer_groups=(),
+                    _capture_ids=(),
+                )
+                with mock.patch.object(
+                    _CED, "_upload_layout_arrays", wraps=_CED._upload_layout_arrays
+                ) as upload:
+                    actual = plan._router_chunk_groups(rows, gate_rows=gate_rows)
+                self._assert_router_groups_equal(
+                    actual,
+                    self._reference_router_chunk_groups(
+                        plan, rows, gate_rows=gate_rows
+                    ),
+                )
+                self.assertEqual(upload.call_count, int(bool(actual)))
+
+    def test_router_real_cp4_maps_share_one_upload_and_retain_both_host_slabs(self):
+        for length in (131072, 131073):
+            owners, _ = _cp4_layout(length)
+            original_m = len(owners[0])
+            local_rows = [
+                0,
+                1,
+                16382,
+                16383,
+                16384,
+                16385,
+                original_m - 2,
+                original_m - 1,
+            ]
+            selected = torch.cat([rows[local_rows] for rows in owners])
+            selected = selected[selected < length].sort().values
+            for rank in range(4):
+                with self.subTest(length=length, rank=rank):
+                    plan, _ = _plan(length, rank, selected, candidate_publication=True)
+                    slabs = []
+                    for gate_rows in (0, 8192):
+                        with mock.patch.object(
+                            _CED,
+                            "_upload_layout_arrays",
+                            wraps=_CED._upload_layout_arrays,
+                        ) as upload:
+                            actual = plan._router_chunk_groups(
+                                16384, gate_rows=gate_rows
+                            )
+                        upload.assert_called_once()
+                        self._assert_router_groups_equal(
+                            actual,
+                            self._reference_router_chunk_groups(
+                                plan, 16384, gate_rows=gate_rows
+                            ),
+                        )
+                        slabs.append(plan._router_groups_host[-1])
+                        for dst, src, _ in actual:
+                            self.assertEqual(
+                                dst.untyped_storage().data_ptr(), slabs[-1].data_ptr()
+                            )
+                            self.assertEqual(
+                                src.untyped_storage().data_ptr(), slabs[-1].data_ptr()
+                            )
+                    self.assertEqual(len(plan._router_groups_host), 2)
+                    for retained, uploaded in zip(plan._router_groups_host, slabs):
+                        self.assertIs(retained, uploaded)
+                    self.assertNotEqual(slabs[0].data_ptr(), slabs[1].data_ptr())
 
     def test_router_scope_restores_absent_none_and_nested_callbacks_on_exception(self):
         outer, _ = _plan(
@@ -2615,6 +2753,7 @@ class CedEncoderSplitTest(_SingleThreadTest):
             logging=logging,
             host_block_tables=lambda *args: None,
             layer_calls=[layer(i) for i in range(40)],
+            use_prefill_fast_path=False,
             routing_metadata=None,
             routing_kwargs={},
             engram_prefetch=None,
