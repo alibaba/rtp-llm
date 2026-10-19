@@ -112,13 +112,22 @@ def fp8_fp4_mqa_indexer_score(
     # BF16 logits. Selectors keep their FP32 tensor ABI, but no longer rely on
     # the removed clean_logits argument or uninitialized tail values.
     width = max_seqlen_k if max_seqlen_k > 0 else k_payload.shape[0]
-    scores = _deep_gemm.fp8_fp4_mqa_logits(
+    # cuda13 x86 pins DeepGEMM 2.8.0 (explicit clean/dtype arguments),
+    # whereas cuda13_arm pins 2.8.1 (BF16 compressed logits by default).
+    # Both calls request the same BF16, request-relative output layout.
+    fn = _deep_gemm.fp8_fp4_mqa_logits
+    legacy = "logits_dtype" in (fn.__doc__ or "")
+    options = (
+        {"clean_logits": False, "max_seqlen_k": width, "logits_dtype": torch.bfloat16}
+        if legacy else {"max_seqlen_k": width}
+    )
+    scores = fn(
         (q_payload.contiguous(), q_sf.contiguous()),
         (k_payload.contiguous(), k_sf.contiguous()),
         weights.to(torch.bfloat16).contiguous(),
         cu_seqlen_ks.contiguous(),
         cu_seqlen_ke.contiguous(),
-        width,
+        **options,
     )
     return normalize_mqa_logits(
         scores, cu_seqlen_ks, cu_seqlen_ke, width, relative=max_seqlen_k > 0
@@ -188,7 +197,12 @@ def fp8_fp4_paged_indexer_score(
     schedule = _deep_gemm.get_paged_mqa_logits_metadata(
         lengths, block_size, _get_num_sms(q_payload.device), indices=request_ids
     )
-    scores = _deep_gemm.fp8_fp4_paged_mqa_logits(
+    fn = _deep_gemm.fp8_fp4_paged_mqa_logits
+    options = (
+        {"clean_logits": False, "logits_dtype": torch.bfloat16}
+        if "logits_dtype" in (fn.__doc__ or "") else {}
+    )
+    scores = fn(
         (q, sf),
         kv_pool_uint8.unsqueeze(2),
         weights.to(torch.bfloat16).contiguous(),
@@ -197,6 +211,7 @@ def fp8_fp4_paged_indexer_score(
         schedule,
         max_ctx_len,
         indices=request_ids,
+        **options,
     )
     ends = lengths.view(-1)
     return normalize_mqa_logits(
