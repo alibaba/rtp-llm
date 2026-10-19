@@ -356,3 +356,9 @@ py_test(
     srcs = ["process_manager_fatal_test.py"],
     deps = ["//rtp_llm:utils"],
 )
+
+py_test(
+    name = "glm5_layer_repeat_test",
+    srcs = ["glm5_layer_repeat_test.py"],
+    deps = ["//rtp_llm:utils"],
+)

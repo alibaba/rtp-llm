@@ -93,6 +93,9 @@ class ModelLoader:
         self._load_dynamic_weights(weights, device)
         # load eplb weight
         self._init_eplb_weight(weights, device)
+        from rtp_llm.utils.glm5_layer_repeat import expand_repeated_layer_weights
+
+        expand_repeated_layer_weights(self.model_config, weights)
         return weights
 
     def load_lora_weights(self, adapter_name: str, lora_path: str, device: str = "cpu"):

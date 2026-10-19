@@ -47,6 +47,11 @@ from rtp_llm.utils.model_weight import (
 
 
 class DeepSeekV2Weight(ModelDeployWeightInfo):
+    def __init__(self, model_config, *args, **kwargs):
+        from rtp_llm.utils.glm5_layer_repeat import checkpoint_layer_config
+
+        super().__init__(checkpoint_layer_config(model_config), *args, **kwargs)
+
     q_use_lora = False
     has_e_score_correction_bias = False
 

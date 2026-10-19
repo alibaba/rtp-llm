@@ -1,15 +1,33 @@
 import argparse
+import os
 import unittest
+from unittest.mock import patch
 
 from rtp_llm.test.perf_test.batch_decode_test import (
     _effective_grid_max_seq_len,
     _parse_grid_cases,
     _positive_int_arg,
 )
+from rtp_llm.test.perf_test.batch_perf_impl import BatchPerfImpl
+from rtp_llm.test.perf_test.dataclass import ResponseInfo
 from rtp_llm.test.perf_test.test_util import target_reuse_len_for_hit_rate
 
 
 class BatchDecodeTest(unittest.TestCase):
+    def test_perf_request_failures_are_not_success(self):
+        impl = BatchPerfImpl.__new__(BatchPerfImpl)
+        impl.batch_size = 2
+        impl.profile_trace_name = "unit"
+        ok = ResponseInfo({})
+        failed = ResponseInfo({}, False)
+        with patch.dict(os.environ, {"PERF_REQUIRE_ALL_REQUESTS_SUCCESS": "1"}):
+            impl._validate_request_success([ok, ok])
+            for responses in ([ok, failed], [], [ok]):
+                with self.assertRaises(Exception):
+                    impl._validate_request_success(responses)
+        with patch.dict(os.environ, {"PERF_REQUIRE_ALL_REQUESTS_SUCCESS": "0"}):
+            impl._validate_request_success([failed])
+
     def test_effective_grid_max_seq_len_uses_decode_need(self):
         args = argparse.Namespace(max_seq_len=8192, decode_test_length=30)
         self.assertEqual(_effective_grid_max_seq_len(args, [1024, 65536]), 65566)

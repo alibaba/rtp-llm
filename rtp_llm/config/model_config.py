@@ -897,6 +897,11 @@ def build_model_config(
     if model_args.json_model_override_args:
         model_config.apply_override_args(model_args.json_model_override_args)
 
+    # Expand execution topology before deriving the physical cache layout.
+    from rtp_llm.utils.glm5_layer_repeat import configure_glm5_layer_repeat
+
+    configure_glm5_layer_repeat(model_config)
+
     model_config.enable_glm52_shared_indexer_kv_cache = bool(
         model_args.enable_glm52_shared_indexer_kv_cache
     )
