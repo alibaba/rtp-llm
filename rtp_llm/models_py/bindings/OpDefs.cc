@@ -221,6 +221,16 @@ void registerPyOpDefs(pybind11::module& m) {
             "mm_extra_input", &PyMultimodalInputs::mm_extra_input, "Multimodal model-specific extra input tensor")
         .def("__repr__", [](const PyMultimodalInputs& self) { return "PyMultimodalInputs"; });
 
+    pybind11::class_<rtp_llm::ForwardExpertStats, rtp_llm::ForwardExpertStatsPtr>(m, "ForwardExpertStats")
+        .def_property_readonly("gpu_loads_buf", [](const rtp_llm::ForwardExpertStats& stats) {
+            return stats.data.stats_buf.gpu_loads_buf;
+        })
+        .def_property_readonly("log_stats_buf", [](const rtp_llm::ForwardExpertStats& stats) {
+            return stats.data.stats_buf.log_stats_buf;
+        })
+        .def_property_readonly("layer_num", [](const rtp_llm::ForwardExpertStats& stats) { return stats.data.layer_num; })
+        .def_property_readonly("ep_size", [](const rtp_llm::ForwardExpertStats& stats) { return stats.data.ep_size; });
+
     pybind11::class_<PyModelInputs>(m, "PyModelInputs")
         .def(pybind11::init<>())
         .def(pybind11::init([](torch::Tensor       input_ids,
@@ -254,6 +264,7 @@ void registerPyOpDefs(pybind11::module& m) {
              pybind11::arg("multimodal_inputs")     = PyMultimodalInputs(),
              pybind11::arg("attention_inputs")      = PyAttentionInputs(),
              pybind11::arg("bert_embedding_inputs") = BertEmbeddingInputs())
+        .def_readwrite("expert_stats", &PyModelInputs::expert_stats, "Per-forward expert statistics write handle")
         .def_readwrite("need_all_logits", &PyModelInputs::need_all_logits)
         .def_readwrite("need_all_hidden_states", &PyModelInputs::need_all_hidden_states)
         .def_readwrite("engram_token_windows", &PyModelInputs::engram_token_windows)

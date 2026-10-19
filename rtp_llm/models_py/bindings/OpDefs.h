@@ -18,6 +18,7 @@
 #include "rtp_llm/models_py/bindings/ParamsBase.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/models/eplb/stats/ExpertStats.h"
 
 namespace torch_ext {
 
@@ -360,6 +361,9 @@ struct PyModelInputs {
 
     // Internal homogeneous-batch signal; not part of the Generate RPC/config surface.
     bool capture_hidden_states = false;
+
+    // Optional per-forward write handle. Kernels receive these tensors, not model-global buffers.
+    rtp_llm::ForwardExpertStatsPtr expert_stats;
 
     bool hasAttentionInputsByTag() const {
         return !attention_inputs_by_tag.empty();

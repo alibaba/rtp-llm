@@ -163,6 +163,7 @@ ExpertBalancer::ExpertBalancer(size_t                       log_exp_num,
                                QuantAlgo                    quant_algo,
                                kmonitor::MetricsReporterPtr metrics_reporter,
                                const EPLBConfig&            eplb_config):
+    num_layers_(num_layers),
     num_logic_experts_(log_exp_num),
     num_physic_experts_(phy_exp_num),
     ep_rank_(ep_rank),
@@ -174,48 +175,58 @@ ExpertBalancer::ExpertBalancer(size_t                       log_exp_num,
     printf("DEBUG: ExpertBalancer constructor called for linker debug\n");
     eplb_control_data_ = eplb_config;
 
-    // init memory
-    stats_.init(num_layers, log_exp_num, ep_size_);
-    eplb_plan_buffers_.init(log_exp_num, phy_exp_num, hidden_size, moe_size, ep_size, dtype, quant_algo);
-    eplb_plan_tensors_.init(log_exp_num, phy_exp_num);
-    load_flags_.init();
-    load_flags_.setReady(false);
+    // Monitoring-only mode must not inspect/allocate generic expert weight buffers.
+    planning_initialized_ = eplb_config.eplb_mode == EplbMode::EPLB || eplb_config.eplb_mode == EplbMode::ALL;
+    if (planning_initialized_) {
+        stats_.init(num_layers, log_exp_num, ep_size_);
+        eplb_plan_buffers_.init(log_exp_num, phy_exp_num, hidden_size, moe_size, ep_size, dtype, quant_algo);
+        eplb_plan_tensors_.init(log_exp_num, phy_exp_num);
+        load_flags_.init();
+        load_flags_.setReady(false);
+    }
+    configureStatsReporting(eplb_config.eplb_stats_window_size);
     eplb_controller_.init(eplb_control_data_, eplb_config);
 
     test_mode_ = eplb_config.eplb_test_mode;
 
     balance_layer_per_step_ = eplb_config.eplb_balance_layer_per_step;
 
-    resetPlan(true);
+    if (planning_initialized_) {
+        resetPlan(true);
+    }
 }
 
 ExpertBalancer::~ExpertBalancer() {}
 
-void ExpertBalancer::stepForward(ModelBase& model, RtpLLMExecutorMetricsCollector& executor_collector) {
-    syncController();
+ForwardExpertStatsPtr ExpertBalancer::createStats() const {
+    // Fresh zeroed producer buffers per forward. The persistent accumulation lives in report_window_.
+    return std::make_shared<ForwardExpertStats>(
+        execCreateMoeExpertStates({num_layers_, ep_size_, num_logic_experts_, num_physic_experts_}));
+}
 
-    OverallExpertStats& stats = model.overall_expert_stats_;
-    auto clear_step_stats = [&]() {
-        if (stats.stats_buf.log_stats_buf.defined()) {
-            stats.stats_buf.log_stats_buf.zero_();
-        }
-        if (stats.stats_buf.gpu_loads_buf.defined()) {
-            stats.stats_buf.gpu_loads_buf.zero_();
-        }
-    };
+void ExpertBalancer::stepForward(ModelBase& model,
+                                 RtpLLMExecutorMetricsCollector& executor_collector,
+                                 const ForwardExpertStatsPtr& forward_stats) {
+    syncController();
+    TORCH_CHECK(forward_stats, "Expert statistics handle must belong to the completed forward");
+    TORCH_CHECK(!forward_stats->consumed.exchange(true), "Expert statistics handle was already consumed");
+    OverallExpertStats& stats = forward_stats->data;
     if (eplb_control_data_.eplb_mode == EplbMode::NONE) {
         report_window_.reset();
-        clear_step_stats();
         return;
     }
 
-    // Report owns a separate window. Preserve the original step counts until ALL consumers finish.
+    // Consume on the ordered forward stream. Do not zero or recycle the producer buffer: it is
+    // owned by this input/result handle and cannot be overwritten by the next forward.
     reportStats(stats);
-    excuteEplbPlan(stats, model);  // Existing upstream planning path; unchanged by monitoring.
-    clear_step_stats();
+    excuteEplbPlan(stats, model);  // Existing upstream planning path; does not own the source stats.
 }
 
 bool ExpertBalancer::updateEplbConfig(const EPLBConfig& config) {
+    if (!planning_initialized_ && (config.eplb_mode == EplbMode::EPLB || config.eplb_mode == EplbMode::ALL)) {
+        RTP_LLM_LOG_WARNING("STATS-only executor cannot enable weight adjustment; restart with planning enabled");
+        return false;
+    }
     eplb_controller_.setData(config);
     return true;
 }
@@ -229,6 +240,9 @@ void ExpertBalancer::syncController() {
             if (eplb_control_data.eplb_mode != eplb_control_data_.eplb_mode) {
                 report_window_.reset();
             }
+            TORCH_CHECK(planning_initialized_ || (eplb_control_data.eplb_mode != EplbMode::EPLB
+                                                 && eplb_control_data.eplb_mode != EplbMode::ALL),
+                        "Weight adjustment was not initialized in this monitoring-only executor");
             eplb_control_data_ = eplb_control_data;
             RTP_LLM_LOG_INFO("EPLB config changed to %s", eplb_control_data_.to_string().c_str());
         }
@@ -260,8 +274,6 @@ void ExpertBalancer::reportStats(OverallExpertStats& stats) {
     TORCH_CHECK(per_step_counts.dim() == 2 && per_step_counts.size(0) == static_cast<int64_t>(stats.layer_num)
                     && per_step_counts.size(1) == static_cast<int64_t>(ep_size_),
                 "EPLB reporting expected [model layers, ep_size] counts");
-    TORCH_CHECK(world_size_ == 1 || isCommOpsRegistered(),
-                "Distributed EPLB reporting requires registered collective operations");
     if (!report_window_.add(per_step_counts)) {
         return;
     }
@@ -278,6 +290,13 @@ void ExpertBalancer::reportStats(OverallExpertStats& stats) {
             ExpertStatsReportWindow::fillCollector(
                 aggregated, report_window_.steps(), stats_tp_replication_size_, executor_collector_);
             metrics_reporter_->report<RtpLLmEplbMetrics, RtpLLmEplbMetricsCollector>(nullptr, &executor_collector_);
+            int64_t assignments = 0;
+            for (const auto& row : executor_collector_.gpu_loads) {
+                for (const auto count : row) { assignments += count; }
+            }
+            RTP_LLM_LOG_INFO("EPLB_STATS_REPORTED steps=%ld layers=%ld ep=%zu assignments=%ld ib_layer_mean=%.6f tp_replication=%ld",
+                             executor_collector_.window_steps, executor_collector_.active_layer_count,
+                             ep_size_, assignments, executor_collector_.ib_layer_mean, stats_tp_replication_size_);
         } catch (const std::exception& e) {
             // Do not retain/retry a partially published window or relabel 20 steps as 10.
             RTP_LLM_LOG_WARNING("Discarding EPLB reporting window after report failure: %s", e.what());

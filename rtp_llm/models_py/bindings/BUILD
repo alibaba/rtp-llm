@@ -13,6 +13,7 @@ cc_library(
         "OpDefs.cc",
     ],
     deps = torch_deps() + [
+        "//rtp_llm/cpp/models:stats",
         "//rtp_llm/cpp/cache:cache_group_type",
         "//rtp_llm/cpp/cache:cache_layout",
         "//rtp_llm/cpp/cache:kv_cache_specs",

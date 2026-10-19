@@ -109,6 +109,9 @@ struct GptModelInputs {
     // not sync to other tp rank
     std::vector<std::string> trace_ids;
 
+    // Local, per-forward ownership; not included in TP/RPC input serialization.
+    ForwardExpertStatsPtr expert_stats;
+
 public:
     std::string debugString(bool force = false) const;
 };
@@ -136,6 +139,9 @@ struct GptModelOutputs {
     torch::Tensor custom_output;
     // The dispatcher turns handler failures into per-stream execution errors.
     std::string custom_output_error;
+
+    // Executor-owned handle retained with this particular forward's result.
+    ForwardExpertStatsPtr expert_stats;
 };
 
 struct CopyParams {

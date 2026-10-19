@@ -105,7 +105,10 @@ public:
                                                           const EPLBConfig&            eplb_config);
     ~ExpertBalancer();
 
-    void stepForward(ModelBase& model, RtpLLMExecutorMetricsCollector& executor_collector);
+    ForwardExpertStatsPtr createStats() const;
+    void stepForward(ModelBase& model,
+                     RtpLLMExecutorMetricsCollector& executor_collector,
+                     const ForwardExpertStatsPtr& forward_stats);
 
     bool updateEplbConfig(const EPLBConfig& config);
 
@@ -135,6 +138,7 @@ private:
     void copyToTensor(const torch::Tensor& src, torch::Tensor& dst);
 
 private:
+    size_t num_layers_;
     size_t num_logic_experts_;
     size_t num_physic_experts_;
 
@@ -168,6 +172,7 @@ private:
     mutable std::mutex eplb_plan_status_mutex_;
 
     bool test_mode_ = false;
+    bool planning_initialized_ = false;
 };
 
 }  // namespace rtp_llm

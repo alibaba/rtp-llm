@@ -254,7 +254,6 @@ public:
     }
 
     rtp_llm::Weights            weights_;
-    rtp_llm::OverallExpertStats overall_expert_stats_;
     size_t                      model_id_ = 0;
 };
 

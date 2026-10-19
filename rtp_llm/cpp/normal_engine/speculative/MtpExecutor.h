@@ -247,7 +247,7 @@ private:
                                int64_t              schedule_time_us,
                                int64_t              model_forward_us);
 
-    GptModelOutputs forwardModel(ModelBase* model, const GptModelInputs& inputs, ModelInputsModelRole role);
+    GptModelOutputs forwardModel(ModelBase* model, GptModelInputs& inputs, ModelInputsModelRole role);
 
     std::unique_ptr<ModelBase>                                               model_;
     std::unique_ptr<Sampler>                                                 sampler_;

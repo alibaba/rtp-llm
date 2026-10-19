@@ -93,12 +93,18 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
     }
 
     if (params.eplb_config.enable_eplb() && params.model_config_.moe_style != 0) {
-        // use first moe layer weight as moe weight type
-        int         first_moe_layer = params.model_config_.moe_layer_index.front();
-        const auto& moe_kernel      = params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel;
-        auto        moe_weight_type = torchDTypeToDataType(moe_kernel.dtype());
-        bool        is_gated_activation = params.model_config_.isGatedActivation();
-        auto        moe_inter_size      = is_gated_activation ? moe_kernel.size(1) / 2 : moe_kernel.size(1);
+        // STATS does not move expert weights. Python-native models (e.g. V4.1)
+        // need not populate the generic C++ moe_gate_weight at all.
+        auto moe_weight_type = params.model_config_.data_type;
+        int64_t moe_inter_size = 0;
+        if (params.eplb_config.eplb_mode != EplbMode::STATS) {
+            int first_moe_layer = params.model_config_.moe_layer_index.front();
+            const auto& moe_weight = params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight;
+            TORCH_CHECK(moe_weight, "EPLB weight adjustment requires generic C++ MoE weights");
+            const auto& moe_kernel = moe_weight->kernel;
+            moe_weight_type = torchDTypeToDataType(moe_kernel.dtype());
+            moe_inter_size = params.model_config_.isGatedActivation() ? moe_kernel.size(1) / 2 : moe_kernel.size(1);
+        }
 
         expert_balancer_ = make_shared<ExpertBalancer>(params.model_config_.expert_num,
                                                        params.eplb_config.phy_exp_num(params.model_config_.expert_num),
@@ -321,12 +327,14 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
             const auto role = is_propose_ ? ModelInputsModelRole::DRAFT : ModelInputsModelRole::NORMAL;
             model_inputs_logger_->log(model_input, role, model_->model_id_);
         }
+        model_input.expert_stats = expert_balancer_ ? expert_balancer_->createStats() : nullptr;
         model_output                        = std::move(model_->forward(model_input));
+        model_output.expert_stats = model_input.expert_stats;
         executor_collector.model_forward_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
     if (expert_balancer_) {
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        expert_balancer_->stepForward(*model_, executor_collector);
+        expert_balancer_->stepForward(*model_, executor_collector, model_output.expert_stats);
         executor_collector.eplb_step_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 

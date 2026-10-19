@@ -1,6 +1,9 @@
 #pragma once
 
 #include <torch/extension.h>
+#include <atomic>
+#include <memory>
+#include <utility>
 
 namespace rtp_llm {
 
@@ -31,6 +34,17 @@ struct OverallExpertStats {
     // use contiguous memory to store all layers' expert counts
     ExpertStatsBuffer stats_buf;
 };
+
+// One executor forward owns one handle. Input/micro-batch copies share this round only;
+// the next forward must allocate a new handle. Never store this handle as mutable model state.
+// Producers must finish/join their writes on the forward stream before executor consumption.
+struct ForwardExpertStats {
+    explicit ForwardExpertStats(OverallExpertStats value): data(std::move(value)) {}
+
+    OverallExpertStats data;
+    std::atomic<bool> consumed{false};
+};
+using ForwardExpertStatsPtr = std::shared_ptr<ForwardExpertStats>;
 
 struct ExpertStats {
     size_t layer_id;

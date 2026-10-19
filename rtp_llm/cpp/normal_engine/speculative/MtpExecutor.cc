@@ -58,17 +58,30 @@ int MtpExecutor::selectMtpPreviousSeqLenUpperBound(bool pending, int previous_ne
     return pending && previous_next_bound > 0 ? previous_next_bound : host_seq_len;
 }
 
-GptModelOutputs MtpExecutor::forwardModel(ModelBase* model, const GptModelInputs& inputs, ModelInputsModelRole role) {
+GptModelOutputs MtpExecutor::forwardModel(ModelBase* model, GptModelInputs& inputs, ModelInputsModelRole role) {
     RTP_LLM_CHECK_WITH_INFO(model != nullptr, "model is null before forward");
     if (model_inputs_logger_) {
         model_inputs_logger_->log(inputs, role, model->model_id_);
     }
+    inputs.expert_stats = role == ModelInputsModelRole::TARGET && expert_balancer_ ?
+                              expert_balancer_->createStats() : nullptr;
+    // The output retains the handle. Clear the input even on failure so later direct draft
+    // forwards reusing this input cannot write into a target's completed statistics.
+    struct ClearStatsHandle {
+        GptModelInputs& inputs;
+        ~ClearStatsHandle() { inputs.expert_stats.reset(); }
+    } clear_stats_handle{inputs};
+    GptModelOutputs output;
     if (is_dspark_ && role != ModelInputsModelRole::TARGET && inputs.engram_token_windows.defined()) {
-        auto draft_inputs                 = inputs;
+        auto draft_inputs = inputs;
         draft_inputs.engram_token_windows = torch::Tensor();
-        return model->forward(draft_inputs);
+        output = model->forward(draft_inputs);
+    } else {
+        // Preserve the existing in-place CP input preparation semantics.
+        output = model->forward(inputs);
     }
-    return model->forward(inputs);
+    output.expert_stats = inputs.expert_stats;
+    return output;
 }
 
 namespace {
@@ -1207,7 +1220,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     if (expert_balancer_) {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(eplb_step_forward)");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        expert_balancer_->stepForward(*model_, executor_collector);
+        expert_balancer_->stepForward(*model_, executor_collector, model_output.expert_stats);
         executor_collector.eplb_step_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
@@ -1728,7 +1741,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     if (expert_balancer_) {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(eplb_step_forward)");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        expert_balancer_->stepForward(*model_, executor_collector);
+        expert_balancer_->stepForward(*model_, executor_collector, model_output.expert_stats);
         executor_collector.eplb_step_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
@@ -2073,7 +2086,11 @@ absl::Status MtpExecutor::runDecodeAlignmentOnly(GptModelInputs& model_input) {
     applyCacheStrideToModelInput(model_input, cache_manager_->cacheConfig());
     model_input.is_target_verify = true;
     ensureModelInputsOnCuda(model_input, "decode.alignment_target_verify");
-    forwardModel(model_.get(), model_input, ModelInputsModelRole::TARGET);
+    auto target_output = forwardModel(model_.get(), model_input, ModelInputsModelRole::TARGET);
+    if (expert_balancer_) {
+        RtpLLMExecutorMetricsCollector executor_collector;
+        expert_balancer_->stepForward(*model_, executor_collector, target_output.expert_stats);
+    }
 
     applyCacheStrideToModelInput(model_input, draft_cache_config);
     runDraftPrefillForward(model_input);

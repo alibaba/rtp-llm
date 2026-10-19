@@ -710,6 +710,8 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
                                               py_attn_inputs,
                                               attention_inputs_by_tag,
                                               bert_embedding_inputs});
+        // Real micro-batches share their parent forward's counter; padding replicas must not count twice.
+        input_list.back().expert_stats = is_real_micro_input ? micro_inputs.expert_stats : nullptr;
         input_list.back().capture_hidden_states  = capture_hidden_states;
         input_list.back().need_all_logits        = micro_inputs.need_all_logits;
         input_list.back().need_all_hidden_states = micro_inputs.need_all_hidden_states;
@@ -1083,6 +1085,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                                               attention_inputs_by_tag_,
                                               bert_embedding_inputs});
 
+        py_model_inputs.expert_stats           = inputs.expert_stats;
         py_model_inputs.capture_hidden_states  = capture_hidden_states;
         py_model_inputs.need_all_logits        = inputs.need_all_logits;
         py_model_inputs.need_all_hidden_states = inputs.need_all_hidden_states;
@@ -1102,8 +1105,11 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             && generation_prefill_graph_runner_ != nullptr && !is_generation_prefill_runner) {
             generation_prefill_cuda_graph_status = GenerationPrefillCudaGraphStatus::MIXED_PREFILL_DECODE_NOT_SUPPORTED;
         }
-        const bool can_run_graph = !capture_hidden_states && enable_cuda_graph_ && graph_runner != nullptr
-                                   && graph_runner->canRun(py_model_inputs, graph_state);
+        // Captured kernels hold fixed tensor addresses. A fresh Stats handle cannot silently
+        // reuse a graph captured without that handle. Use eager until graph scratch/snapshot
+        // support is implemented; this applies to every phase, not just prefill or decode.
+        const bool can_run_graph = !inputs.expert_stats && !capture_hidden_states && enable_cuda_graph_
+                                   && graph_runner != nullptr && graph_runner->canRun(py_model_inputs, graph_state);
         if (!capture_hidden_states && is_generation_prefill_runner && !can_run_graph) {
             generation_prefill_cuda_graph_status =
                 graph_state.generation_prefill_status == GenerationPrefillCudaGraphStatus::NOT_REQUESTED ?

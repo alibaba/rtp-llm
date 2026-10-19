@@ -19,6 +19,8 @@ from typing import Dict, Optional
 
 import torch
 
+from rtp_llm.models_py.utils.forward_expert_stats import record_expert_routes
+
 from ..._profiler import record_function_range
 from ...quant_layouts import FP4_BLOCK, prepare_fp4_weight_scale_for_deepgemm
 from ..input_packer import get_mega_moe_input_packer
@@ -530,6 +532,10 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         T = x.size(0)
         buf = self._mega_buf
         self._input_packer.pack(x, weights, indices, buf, T)
+        record_expert_routes(
+            buf.topk_idx[:T], layer_id=self.cfg.layer_id,
+            num_experts=self.cfg.n_routed_experts, ep_size=self.cfg.ep_size,
+        )
         self._maybe_pre_kernel_barrier(T)
         sync_cuda_graph_warmup_ranks(
             f"dsv4.mega_moe.layer{self.cfg.layer_id}.before_deepgemm", x.device
@@ -590,6 +596,10 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
                     route_scale=float(gate.route_scale),
                     norm_eps=1e-12,
                 )
+        record_expert_routes(
+            buf.topk_idx[:T], layer_id=self.cfg.layer_id,
+            num_experts=self.cfg.n_routed_experts, ep_size=self.cfg.ep_size,
+        )
         self._maybe_pre_kernel_barrier(T)
         sync_cuda_graph_warmup_ranks(
             f"dsv4.mega_moe.layer{self.cfg.layer_id}.before_deepgemm", x.device

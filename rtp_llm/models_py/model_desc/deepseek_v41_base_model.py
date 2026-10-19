@@ -35,6 +35,7 @@ from typing import Any, Dict, Optional, Tuple
 
 import torch
 
+from rtp_llm.models_py.utils.forward_expert_stats import forward_expert_stats
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
@@ -1221,7 +1222,11 @@ class DeepSeekV4Model(GptModelBase):
             )
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
-        result = self._forward_impl(inputs, fmha_impl)
+        # Cache-less framework warmup returns synthetic hidden states without
+        # running any transformer layers; it is not a routing sample.
+        stats = getattr(inputs, "expert_stats", None) if self.kv_cache is not None else None
+        with forward_expert_stats(stats):
+            result = self._forward_impl(inputs, fmha_impl)
         if (
             self._captures_aux_hidden
             and self.v4 is not None

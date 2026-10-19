@@ -9,6 +9,7 @@ from . import rtp_llm_ops
 
 __all__: list[str] = [
     "BertEmbeddingInputs",
+    "ForwardExpertStats",
     "CacheGroupType",
     "CacheStoreWriter",
     "LayerKVCache",
@@ -306,7 +307,20 @@ class PyModelInitResources:
     @property
     def max_context_batch_size(self) -> int: ...
 
+class ForwardExpertStats:
+    """Executor-owned per-forward counters; producers write on the ordered forward stream."""
+
+    @property
+    def gpu_loads_buf(self) -> torch.Tensor: ...
+    @property
+    def log_stats_buf(self) -> torch.Tensor: ...
+    @property
+    def layer_num(self) -> int: ...
+    @property
+    def ep_size(self) -> int: ...
+
 class PyModelInputs:
+    expert_stats: ForwardExpertStats | None
     need_all_hidden_states: bool
     need_all_logits: bool
     engram_token_windows: torch.Tensor
