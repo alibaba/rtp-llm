@@ -24,6 +24,7 @@
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
+#include "rtp_llm/cpp/models/Sampler.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
 #include "rtp_llm/cpp/models/logits_processor/ThinkModeLogitsProcessor.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
@@ -263,6 +264,8 @@ AsyncSamplerInputCase makeAsyncSamplerInputCase(MtpBatchStreamProcessorTest& fix
         fixture.createContextStream(model_config, runtime_config, resource_context, {8, 9, 10, 11, 12}, 2));
     for (auto& stream : data.streams) {
         stream->setScoreLen(4);
+        // Keep a history reader active to exercise the full-upload DMA lifetime.
+        stream->generateConfig()->repetition_penalty = 1.05f;
     }
     data.model_output.logits = torch::zeros({8, 64}, torch::TensorOptions(torch::kFloat32).device(torch::kCUDA));
     data.draft_tokens        = torch::full({2, 3}, 21, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
@@ -473,6 +476,11 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputBuildsPositionSpec
     stream2->generateConfig()->top_k       = 0;
     stream2->generateConfig()->top_p       = 0.7f;
     stream2->generateConfig()->temperature = 1.0f;
+    // Position-specific committed history is only materialized when a reader
+    // is active; a non-identity repetition penalty keeps this case on the
+    // full-upload path instead of the dead-history elision.
+    stream1->generateConfig()->repetition_penalty = 1.05f;
+    stream2->generateConfig()->repetition_penalty = 1.05f;
 
     auto stream_groups = StreamGroups({stream1, stream2});
     auto processor     = MtpBatchStreamProcessor(
@@ -519,6 +527,508 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputBuildsPositionSpec
               toVec<float>(sampler_inputs.temperature));
 }
 
+// Logits ownership elision: when the verify round is provably free of logits
+// writers (point-mass greedy declaration, identity penalty values, no vocab
+// mask processor, full-width contiguous CUDA fp32 logits, single beam), the
+// gather must hand the sampler the model-output view directly instead of a
+// 2 * rows * vocab * 4-byte DtoD clone. Each writer condition on its own must
+// restore the private per-round clone.
+TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputAliasesLogitsWhenNoWriterActive) {
+    ModelConfig                 model_config;
+    RuntimeConfig               runtime_config;
+    SpeculativeExecutionConfig  sp_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config = makeProcessorCacheConfig();
+
+    model_config.max_seq_len    = 2048;
+    model_config.vocab_size     = 4;
+    model_config.num_layers     = 1;
+    sp_config.gen_num_per_cycle = 3;
+    sp_config.type              = SP_TYPE_DSPARK;
+
+    ResourceContext resource_context;
+
+    // Mirrors the production decode request: do_sample stays at its default
+    // true, top_k=1 selects greedy, penalties stay at identity defaults.
+    GenerateStreamPtr stream1 = createContextStream(model_config, runtime_config, resource_context, {5}, 1);
+    GenerateStreamPtr stream2 = createContextStream(model_config, runtime_config, resource_context, {6, 7}, 2);
+    for (const auto& stream : {stream1, stream2}) {
+        stream->setScoreLen(sp_config.gen_num_per_cycle + 1);
+        stream->generateConfig()->top_k = 1;
+    }
+
+    auto stream_groups = StreamGroups({stream1, stream2});
+    auto processor     = MtpBatchStreamProcessor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+
+    GptModelOutputs model_output;
+    model_output.logits =
+        torch::arange(32, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA)).reshape({8, 4});
+    auto draft_token_ids = torch::tensor({1, 2, 3, 3, 2, 1}, torch::kInt32).reshape({2, 3});
+
+    auto sampler_inputs_status = processor.gatherSpecSamplerInput(stream_groups, model_output, {}, draft_token_ids);
+    ASSERT_TRUE(sampler_inputs_status.ok());
+    const auto& sampler_inputs = sampler_inputs_status.value();
+
+    EXPECT_EQ((std::vector<int64_t>{8, 4}), sampler_inputs.logits.sizes().vec());
+    EXPECT_TRUE(sampler_inputs.logits.is_contiguous());
+    // The elided clone: the sampler consumes the model-output storage itself.
+    EXPECT_EQ(model_output.logits.data_ptr(), sampler_inputs.logits.data_ptr());
+    EXPECT_TRUE(torch::equal(model_output.logits, sampler_inputs.logits));
+    // The greedy contracts the elision relies on are declared.
+    EXPECT_TRUE(sampler_inputs.all_probs_point_mass);
+    EXPECT_TRUE(sampler_inputs.skip_logits_probs_restore);
+    EXPECT_EQ((std::vector<int64_t>{8, 4}), sampler_inputs.all_probs.sizes().vec());
+#if USING_CUDA
+    // Follow the real gather -> sampler path: unread history can remain
+    // uninitialized, but every final-column token must be defined.
+    Sampler sampler({8});
+    auto    original_logits = model_output.logits.clone();
+    auto    output          = sampler.forward(sampler_inputs);
+    EXPECT_TRUE(output.token_ids_are_point_mass);
+    EXPECT_TRUE(output.token_ids.select(1, output.token_ids.size(1) - 1).eq(3).all().item<bool>());
+    EXPECT_TRUE(torch::equal(model_output.logits, original_logits));
+#endif
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputClonesLogitsWhenAnyWriterPossible) {
+    ModelConfig                 model_config;
+    RuntimeConfig               runtime_config;
+    SpeculativeExecutionConfig  sp_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config = makeProcessorCacheConfig();
+
+    model_config.max_seq_len    = 2048;
+    model_config.vocab_size     = 4;
+    model_config.num_layers     = 1;
+    sp_config.gen_num_per_cycle = 3;
+    sp_config.type              = SP_TYPE_DSPARK;
+
+    auto draft_token_ids = torch::tensor({1, 2, 3, 3, 2, 1}, torch::kInt32).reshape({2, 3});
+
+    // (a) A non-identity temperature makes sampleGreedy's processLogits apply
+    // an in-place penalty kernel, so the round needs a private buffer even
+    // though the point-mass declaration still holds.
+    {
+        ResourceContext   resource_context;
+        GenerateStreamPtr stream1 = createContextStream(model_config, runtime_config, resource_context, {5}, 1);
+        GenerateStreamPtr stream2 = createContextStream(model_config, runtime_config, resource_context, {6, 7}, 2);
+        for (const auto& stream : {stream1, stream2}) {
+            stream->setScoreLen(sp_config.gen_num_per_cycle + 1);
+            stream->generateConfig()->top_k = 1;
+        }
+        stream1->generateConfig()->temperature = 0.5f;
+
+        auto stream_groups = StreamGroups({stream1, stream2});
+        auto processor     = MtpBatchStreamProcessor(
+            model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+
+        GptModelOutputs model_output;
+        model_output.logits =
+            torch::arange(32, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA)).reshape({8, 4});
+
+        auto status = processor.gatherSpecSamplerInput(stream_groups, model_output, {}, draft_token_ids);
+        ASSERT_TRUE(status.ok());
+        const auto& sampler_inputs = status.value();
+        EXPECT_TRUE(sampler_inputs.all_probs_point_mass);
+        EXPECT_NE(model_output.logits.data_ptr(), sampler_inputs.logits.data_ptr());
+        EXPECT_TRUE(torch::equal(model_output.logits, sampler_inputs.logits));
+    }
+
+    // (b) A TP-padded logits width trims the narrow view, which is strided;
+    // the fused kernel contract requires contiguity, so the clone stays and
+    // drops the synthetic padding columns.
+    {
+        ResourceContext   resource_context;
+        GenerateStreamPtr stream1 = createContextStream(model_config, runtime_config, resource_context, {5}, 1);
+        GenerateStreamPtr stream2 = createContextStream(model_config, runtime_config, resource_context, {6, 7}, 2);
+        for (const auto& stream : {stream1, stream2}) {
+            stream->setScoreLen(sp_config.gen_num_per_cycle + 1);
+            stream->generateConfig()->top_k = 1;
+        }
+
+        auto stream_groups = StreamGroups({stream1, stream2});
+        auto processor     = MtpBatchStreamProcessor(
+            model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+
+        GptModelOutputs model_output;
+        model_output.logits =
+            torch::arange(56, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA)).reshape({8, 7});
+
+        auto status = processor.gatherSpecSamplerInput(stream_groups, model_output, {}, draft_token_ids);
+        ASSERT_TRUE(status.ok());
+        const auto& sampler_inputs = status.value();
+        EXPECT_EQ((std::vector<int64_t>{8, 4}), sampler_inputs.logits.sizes().vec());
+        EXPECT_NE(model_output.logits.data_ptr(), sampler_inputs.logits.data_ptr());
+        EXPECT_TRUE(sampler_inputs.logits.is_contiguous());
+        EXPECT_TRUE(torch::equal(model_output.logits.narrow(1, 0, 4), sampler_inputs.logits));
+    }
+}
+
+// An active spec-logits vocab mask writes the packed allow-mask into the
+// sampler logits in place, which must never reach the model output buffer.
+TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputClonesLogitsUnderActiveMask) {
+    ModelConfig                 model_config;
+    RuntimeConfig               runtime_config;
+    SpeculativeExecutionConfig  sp_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config = makeProcessorCacheConfig();
+
+    model_config.max_seq_len    = 2048;
+    model_config.vocab_size     = 16;
+    model_config.num_layers     = 1;
+    sp_config.gen_num_per_cycle = 2;
+
+    ResourceContext   resource_context;
+    GenerateStreamPtr stream =
+        createContextStream(model_config, runtime_config, resource_context, {1, 2}, 1, {7}, {8, 9});
+    stream->setScoreLen(sp_config.gen_num_per_cycle + 1);
+    stream->generateConfig()->top_k = 1;
+
+    MtpBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+    StreamGroups stream_groups({stream});
+
+    GptModelOutputs model_output;
+    model_output.logits = torch::zeros({3, 16}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+
+    SpecLogitsVerifyRunner             runner;
+    SpecLogitsVerifyRunner::LaunchTask task;
+    task.total_streams = 1;
+    task.propose_step  = static_cast<int>(sp_config.gen_num_per_cycle);
+    task.vocab_size    = model_config.vocab_size;
+    task.draft_tokens  = torch::tensor(std::vector<int32_t>{1, 2}, torch::kInt32).reshape({1, 2});
+    for (const auto& processor_ptr : stream->getAllLogitsProcessorPtr()) {
+        ASSERT_NE(processor_ptr, nullptr);
+        task.active.push_back({processor_ptr, /*stream_idx=*/0});
+    }
+    ASSERT_EQ(1u, task.active.size());
+    auto spec_result = runner.run(task);
+    ASSERT_TRUE(spec_result.has_active_processor);
+
+    auto status = processor.gatherSpecSamplerInput(stream_groups, model_output, spec_result, task.draft_tokens);
+    ASSERT_TRUE(status.ok());
+    const auto& sampler_inputs = status.value();
+
+    // Private clone: the mask lands on it, the model output stays untouched.
+    EXPECT_NE(model_output.logits.data_ptr(), sampler_inputs.logits.data_ptr());
+    EXPECT_TRUE(model_output.logits.eq(0).all().item<bool>());
+    const float neg_inf = -std::numeric_limits<float>::max();
+    for (int i = 0; i < 3; ++i) {
+        EXPECT_EQ(neg_inf, sampler_inputs.logits[i][7].item<float>());
+    }
+}
+
+// Dead sampler-input elision: with production-equivalent defaults
+// (return_all_probs DEFAULT as the MTP executor sets it, identity penalties,
+// no ngram ban, single beam, no logits processor) no consumer reads the
+// history columns on device, so the gather skips the host snapshot fill,
+// full upload and proposal scatter. Only the matrix
+// geometry is defined; committed and proposal columns are don't-care (the
+// last column's only definer is the greedy sampler's direct scatter, which
+// runs after this gather) and are never asserted here.
+TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputSkipsHistoryMaterializationWhenNoReaderActive) {
+    ModelConfig                 model_config;
+    RuntimeConfig               runtime_config;
+    SpeculativeExecutionConfig  sp_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config = makeProcessorCacheConfig();
+
+    model_config.max_seq_len    = 2048;
+    model_config.vocab_size     = 4;
+    model_config.num_layers     = 1;
+    sp_config.gen_num_per_cycle = 3;
+    sp_config.type              = SP_TYPE_DSPARK;
+
+    ResourceContext resource_context;
+
+    GenerateStreamPtr stream1 = createContextStream(model_config, runtime_config, resource_context, {5}, 1);
+    GenerateStreamPtr stream2 = createContextStream(model_config, runtime_config, resource_context, {6, 7}, 2);
+    for (auto& stream : {stream1, stream2}) {
+        stream->setScoreLen(sp_config.gen_num_per_cycle + 1);
+    }
+
+    auto processor = MtpBatchStreamProcessor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+
+    GptModelOutputs model_output;
+    model_output.logits = torch::zeros({8, 7}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+
+    auto gather_and_check_dead =
+        [&](const std::list<GenerateStreamPtr>& streams, const torch::Tensor& draft, int64_t expected_width) {
+            auto status = processor.gatherSpecSamplerInput(StreamGroups(streams), model_output, {}, draft);
+            ASSERT_TRUE(status.ok());
+            const auto& sampler_inputs = status.value();
+            EXPECT_TRUE(sampler_inputs.token_ids.is_cuda());
+            EXPECT_TRUE(sampler_inputs.token_ids.is_contiguous());
+            EXPECT_EQ(sampler_inputs.token_ids.scalar_type(), torch::kInt32);
+            ASSERT_EQ(sampler_inputs.token_ids.sizes().vec(),
+                      (std::vector<int64_t>{static_cast<int64_t>(streams.size()) * 4, expected_width}));
+#if USING_CUDA
+            EXPECT_FALSE(processor.sampler_input_copy_stream_.has_value());
+#endif
+            // Column contents are don't-care on gate-on rounds (no reader);
+            // only the geometry contract above is asserted.
+        };
+
+    // Round 1: gate-on from a cold processor.
+    auto draft1 = torch::tensor({1, 2, 3, 3, 2, 1}, torch::kInt32).reshape({2, 3});
+    gather_and_check_dead({stream1, stream2}, draft1, /*expected_width=*/6);
+
+    // Commit accepted tokens; the host stream state is the only truth the
+    // next materialized round will read (the exposed matrix never feeds it).
+    stream1->update({torch::tensor({1, 2}, torch::kInt32).reshape({1, 2}),
+                     2,
+                     torch::Tensor(),
+                     torch::Tensor(),
+                     torch::Tensor(),
+                     torch::Tensor(),
+                     torch::Tensor(),
+                     torch::Tensor(),
+                     torch::Tensor(),
+                     torch::Tensor()});
+    stream2->update({torch::tensor({3}, torch::kInt32).reshape({1, 1}),
+                     1,
+                     torch::Tensor(),
+                     torch::Tensor(),
+                     torch::Tensor(),
+                     torch::Tensor(),
+                     torch::Tensor(),
+                     torch::Tensor(),
+                     torch::Tensor(),
+                     torch::Tensor()});
+
+    // Round 2: gate-on again with grown lengths.
+    auto draft2 = torch::tensor({2, 3, 1, 1, 3, 2}, torch::kInt32).reshape({2, 3});
+    gather_and_check_dead({stream1, stream2}, draft2, /*expected_width=*/7);
+}
+
+// Each reader-side gate condition on its own must restore the materialized
+// full-upload path with the current committed history and proposals.
+TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputDeadHistoryGateFlipsRestoreMaterialization) {
+    auto run_flip_case = [&](const char* name, const auto& tweak, bool expect_all_probs) {
+        ModelConfig                 model_config;
+        RuntimeConfig               runtime_config;
+        SpeculativeExecutionConfig  sp_config;
+        PDSepConfig                 pd_sep_config;
+        ProfilingDebugLoggingConfig profiling_debug_logging_config;
+        CacheConfig                 cache_config = makeProcessorCacheConfig();
+
+        model_config.max_seq_len    = 2048;
+        model_config.vocab_size     = 4;
+        model_config.num_layers     = 1;
+        sp_config.gen_num_per_cycle = 3;
+        sp_config.type              = SP_TYPE_DSPARK;
+
+        ResourceContext resource_context;
+
+        GenerateStreamPtr stream1 = createContextStream(model_config, runtime_config, resource_context, {5}, 1);
+        GenerateStreamPtr stream2 = createContextStream(model_config, runtime_config, resource_context, {6, 7}, 2);
+        for (auto& stream : {stream1, stream2}) {
+            stream->setScoreLen(sp_config.gen_num_per_cycle + 1);
+            tweak(stream);
+        }
+
+        auto processor = MtpBatchStreamProcessor(
+            model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+
+        GptModelOutputs model_output;
+        model_output.logits = torch::zeros({8, 7}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+        auto draft          = torch::tensor({1, 2, 3, 3, 2, 1}, torch::kInt32).reshape({2, 3});
+
+        auto status = processor.gatherSpecSamplerInput(StreamGroups({stream1, stream2}), model_output, {}, draft);
+        ASSERT_TRUE(status.ok()) << name;
+        const auto& sampler_inputs = status.value();
+        EXPECT_EQ(sampler_inputs.all_probs.defined(), expect_all_probs) << name;
+        auto        cpu    = sampler_inputs.token_ids.cpu();
+        const auto* values = cpu.data_ptr<int32_t>();
+        const auto  width  = cpu.size(1);
+        ASSERT_EQ(width, 6) << name;
+        const std::vector<int> prefix1 = {5, 1, 2, 3};
+        const std::vector<int> prefix2 = {6, 7, 3, 2, 1};
+        for (int64_t row = 0; row < 4; ++row) {
+            for (size_t col = 0; col < prefix1.size(); ++col) {
+                EXPECT_EQ(values[row * width + col], prefix1[col]) << name << " row=" << row << " col=" << col;
+            }
+        }
+        for (int64_t row = 4; row < 8; ++row) {
+            for (size_t col = 0; col < prefix2.size(); ++col) {
+                EXPECT_EQ(values[row * width + col], prefix2[col]) << name << " row=" << row << " col=" << col;
+            }
+        }
+    };
+
+    run_flip_case(
+        "repetition_penalty",
+        [](const GenerateStreamPtr& s) { s->generateConfig()->repetition_penalty = 1.05f; },
+        /*expect_all_probs=*/true);
+    run_flip_case(
+        "presence_penalty",
+        [](const GenerateStreamPtr& s) { s->generateConfig()->presence_penalty = 0.5f; },
+        /*expect_all_probs=*/true);
+    run_flip_case(
+        "frequency_penalty",
+        [](const GenerateStreamPtr& s) { s->generateConfig()->frequency_penalty = 0.25f; },
+        /*expect_all_probs=*/true);
+    run_flip_case(
+        "no_repeat_ngram_size",
+        [](const GenerateStreamPtr& s) { s->generateConfig()->no_repeat_ngram_size = 3; },
+        /*expect_all_probs=*/true);
+    run_flip_case(
+        "return_all_probs_none",
+        [](const GenerateStreamPtr& s) { s->setReturnAllProbs(ReturnAllProbsMode::NONE); },
+        /*expect_all_probs=*/false);
+}
+
+// Re-enabling a history reader must upload the current host history in full,
+// including commits made during elided rounds and replacement requests.
+TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputHistoryResumesAfterDeadHistoryRounds) {
+    ModelConfig                 model_config;
+    RuntimeConfig               runtime_config;
+    SpeculativeExecutionConfig  sp_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config = makeProcessorCacheConfig();
+
+    model_config.max_seq_len    = 2048;
+    model_config.vocab_size     = 4;
+    model_config.num_layers     = 1;
+    sp_config.gen_num_per_cycle = 3;
+    sp_config.type              = SP_TYPE_DSPARK;
+
+    ResourceContext resource_context;
+
+    GenerateStreamPtr stream1 = createContextStream(model_config, runtime_config, resource_context, {5}, 1);
+    GenerateStreamPtr stream2 = createContextStream(model_config, runtime_config, resource_context, {6, 7}, 2);
+    for (auto& stream : {stream1, stream2}) {
+        stream->setScoreLen(sp_config.gen_num_per_cycle + 1);
+        stream->generateConfig()->repetition_penalty = 1.05f;
+    }
+
+    auto processor = MtpBatchStreamProcessor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+
+    GptModelOutputs model_output;
+    model_output.logits = torch::zeros({8, 7}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+
+    // The single-block fixture KV resource reports an error from
+    // updateKvCacheBlocks once a stream's total tokens exceed the block
+    // capacity; the token history itself commits before that step. Force the
+    // update so every round's append-only commit lands and the multi-round
+    // history contract stays testable. Tokens must stay in-vocab
+    // (vocab_size=4): update() rejects out-of-vocab ids.
+    auto commit = [](const GenerateStreamPtr& stream, const std::vector<int32_t>& tokens) {
+        stream->update({torch::tensor(tokens, torch::kInt32).reshape({1, static_cast<int64_t>(tokens.size())}),
+                        static_cast<int>(tokens.size()),
+                        torch::Tensor(),
+                        torch::Tensor(),
+                        torch::Tensor(),
+                        torch::Tensor(),
+                        torch::Tensor(),
+                        torch::Tensor(),
+                        torch::Tensor(),
+                        torch::Tensor(),
+                        /*update_remote_generate=*/true,
+                        /*force_update_info=*/true});
+    };
+
+    // Round 1: materialized history with sequence lengths {1, 2}.
+    auto draft1 = torch::tensor({1, 2, 3, 3, 2, 1}, torch::kInt32).reshape({2, 3});
+    {
+        auto status = processor.gatherSpecSamplerInput(StreamGroups({stream1, stream2}), model_output, {}, draft1);
+        ASSERT_TRUE(status.ok());
+        auto cpu = status.value().token_ids.cpu();
+        ASSERT_EQ(cpu.size(1), 6);
+        EXPECT_EQ(cpu[0][0].item<int32_t>(), 5);
+        EXPECT_EQ(cpu[4][0].item<int32_t>(), 6);
+        EXPECT_EQ(cpu[4][1].item<int32_t>(), 7);
+    }
+    commit(stream1, {1, 2});  // seq 3
+    commit(stream2, {3});     // seq 3
+
+    // Round 2 (dead sampler input): penalties identity -> gate on. The
+    // exposed matrix's column contents are don't-care (history AND proposal
+    // materialization elided; only geometry is defined).
+    for (auto& stream : {stream1, stream2}) {
+        stream->generateConfig()->repetition_penalty = 1.0f;
+    }
+    auto draft2 = torch::tensor({2, 3, 1, 1, 3, 2}, torch::kInt32).reshape({2, 3});
+    {
+        auto status = processor.gatherSpecSamplerInput(StreamGroups({stream1, stream2}), model_output, {}, draft2);
+        ASSERT_TRUE(status.ok());
+        const auto& token_ids = status.value().token_ids;
+        EXPECT_TRUE(token_ids.is_cuda());
+        EXPECT_TRUE(token_ids.is_contiguous());
+        auto cpu = token_ids.cpu();
+        ASSERT_EQ(cpu.sizes().vec(), (std::vector<int64_t>{8, 7}));
+    }
+    commit(stream1, {3});     // seq 4
+    commit(stream2, {1, 2});  // seq 5
+
+    // Round 3: the full upload includes every newly committed column.
+    for (auto& stream : {stream1, stream2}) {
+        stream->generateConfig()->repetition_penalty = 1.05f;
+    }
+    auto draft3 = torch::tensor({0, 1, 2, 3, 0, 1}, torch::kInt32).reshape({2, 3});
+    {
+        auto status = processor.gatherSpecSamplerInput(StreamGroups({stream1, stream2}), model_output, {}, draft3);
+        ASSERT_TRUE(status.ok());
+        auto cpu = status.value().token_ids.cpu();
+        ASSERT_EQ(cpu.size(1), 9);
+        const std::vector<int> prefix1 = {5, 1, 2, 3, 0, 1, 2};
+        const std::vector<int> prefix2 = {6, 7, 3, 1, 2, 3, 0, 1};
+        for (int64_t row = 0; row < 4; ++row) {
+            for (size_t col = 0; col < prefix1.size(); ++col) {
+                EXPECT_EQ(cpu[row][col].item<int32_t>(), prefix1[col]) << "row=" << row << " col=" << col;
+            }
+        }
+        for (int64_t row = 4; row < 8; ++row) {
+            for (size_t col = 0; col < prefix2.size(); ++col) {
+                EXPECT_EQ(cpu[row][col].item<int32_t>(), prefix2[col]) << "row=" << row << " col=" << col;
+            }
+        }
+    }
+
+    // Round 4 (dead sampler input) with a composition change: stream2
+    // leaves and a new request reuses its ID. Only geometry is defined.
+    GenerateStreamPtr stream3 = createContextStream(model_config, runtime_config, resource_context, {2, 1}, 2);
+    stream3->setScoreLen(sp_config.gen_num_per_cycle + 1);
+    stream1->generateConfig()->repetition_penalty = 1.0f;
+    auto draft4                                   = torch::tensor({1, 1, 2, 2, 3, 3}, torch::kInt32).reshape({2, 3});
+    {
+        auto status = processor.gatherSpecSamplerInput(StreamGroups({stream1, stream3}), model_output, {}, draft4);
+        ASSERT_TRUE(status.ok());
+        auto cpu = status.value().token_ids.cpu();
+        ASSERT_EQ(cpu.sizes().vec(), (std::vector<int64_t>{8, 8}));
+    }
+
+    // Round 5: the replacement request must get its own complete history.
+    stream1->generateConfig()->repetition_penalty = 1.05f;
+    stream3->generateConfig()->repetition_penalty = 1.05f;
+    auto draft5                                   = torch::tensor({3, 2, 1, 1, 2, 3}, torch::kInt32).reshape({2, 3});
+    {
+        auto status = processor.gatherSpecSamplerInput(StreamGroups({stream1, stream3}), model_output, {}, draft5);
+        ASSERT_TRUE(status.ok());
+        auto cpu = status.value().token_ids.cpu();
+        ASSERT_EQ(cpu.size(1), 8);
+        const std::vector<int> prefix1 = {5, 1, 2, 3, 3, 2, 1};
+        const std::vector<int> prefix3 = {2, 1, 1, 2, 3};
+        for (int64_t row = 0; row < 4; ++row) {
+            for (size_t col = 0; col < prefix1.size(); ++col) {
+                EXPECT_EQ(cpu[row][col].item<int32_t>(), prefix1[col]) << "row=" << row << " col=" << col;
+            }
+        }
+        for (int64_t row = 4; row < 8; ++row) {
+            for (size_t col = 0; col < prefix3.size(); ++col) {
+                EXPECT_EQ(cpu[row][col].item<int32_t>(), prefix3[col]) << "row=" << row << " col=" << col;
+            }
+        }
+    }
+}
 TEST_F(MtpBatchStreamProcessorTest, testSpecSamplerInputMasksThinkBoundaryTokens) {
     ModelConfig                 model_config;
     RuntimeConfig               runtime_config;
