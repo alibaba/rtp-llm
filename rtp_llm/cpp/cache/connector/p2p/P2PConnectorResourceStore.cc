@@ -11,6 +11,24 @@ bool validDeadline(int64_t deadline_ms) {
     return deadline_ms > 0 && deadline_ms != std::numeric_limits<int64_t>::max();
 }
 
+// Cancellation may enter the registry and stream. Never call it under a store lock.
+template<typename Lock>
+bool cancellationOutsideLock(Lock& lock, const std::function<bool()>& is_cancelled) {
+    if (!is_cancelled) {
+        return false;
+    }
+    lock.unlock();
+    bool cancelled;
+    try {
+        cancelled = is_cancelled();
+    } catch (...) {
+        lock.lock();
+        throw;
+    }
+    lock.lock();
+    return cancelled;
+}
+
 // Generic backoff wait: polls `predicate` under `lock`, using `cv` with exponential backoff (capped at 8ms).
 //
 // Returns true if either `predicate()` or `is_cancelled()` became true before timeout.
@@ -25,7 +43,7 @@ bool waitWithBackoff(Lock&                                 lock,
     int           sleep_ms    = 1;
     constexpr int kBackoffCap = 8;
     while (true) {
-        if (is_cancelled && is_cancelled()) {
+        if (cancellationOutsideLock(lock, is_cancelled)) {
             return true;
         }
         if (predicate()) {
@@ -104,7 +122,8 @@ int64_t P2PConnectorResourceStore::waitForRequestDeadline(const std::string&    
             return stopping_ || (it != request_states_.end() && (it->second.request_registered || it->second.terminal));
         },
         is_cancelled);
-    if (!ready || stopping_ || (is_cancelled && is_cancelled()) || currentTimeMs() >= load_deadline_ms) {
+    const bool cancelled = cancellationOutsideLock(lock, is_cancelled);
+    if (!ready || cancelled || stopping_ || currentTimeMs() >= load_deadline_ms) {
         return 0;
     }
     const auto it = request_states_.find(unique_key);
@@ -253,8 +272,9 @@ std::shared_ptr<P2PConnectorResourceEntry> P2PConnectorResourceStore::waitAndSte
     const auto ready = waitWithBackoff(lock, resource_cv_,
         std::chrono::system_clock::time_point(std::chrono::milliseconds(deadline_ms)),
         [&]() { return stopped() || resource_map_.count(unique_key); }, is_cancelled);
-    if (!ready || stopped() || (is_cancelled && is_cancelled())) {
-        reportMetrics(!ready, is_cancelled && is_cancelled(), start_time_us);
+    const bool cancelled = cancellationOutsideLock(lock, is_cancelled);
+    if (!ready || cancelled || stopped() || !resource_map_.count(unique_key)) {
+        reportMetrics(!ready, cancelled, start_time_us);
         return nullptr;
     }
     auto entry = resource_map_.at(unique_key);

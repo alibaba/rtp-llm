@@ -42,8 +42,20 @@ bool PrefillResultStore::waitPrefillPayloadReady(const std::string&    unique_ke
     std::unique_lock<std::mutex> lock(mutex_);
     int                          sleep_ms = 1;
     while (true) {
+        // The callback may acquire registry/stream locks. Re-find the entry after relocking.
+        bool cancelled = false;
+        if (is_cancelled) {
+            lock.unlock();
+            try {
+                cancelled = is_cancelled();
+            } catch (...) {
+                lock.lock();
+                throw;
+            }
+            lock.lock();
+        }
         auto it = entries_.find(unique_key);
-        if (stopping_ || (is_cancelled && is_cancelled()) || it == entries_.end() || it->second.terminal
+        if (stopping_ || cancelled || it == entries_.end() || it->second.terminal
             || it->second.consumed) {
             return false;
         }

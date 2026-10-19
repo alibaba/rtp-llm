@@ -868,7 +868,8 @@ protected:
                 ranks_[rank]->fill(*resource, request.id, rank, true);
                 request.resources.push_back(std::move(resource));
             }
-            ASSERT_EQ(request.resources[0]->blocks(resources[0]->groupTags().at(0)), request.resources[1]->blocks(resources[1]->groupTags().at(0)));
+            ASSERT_EQ(request.resources[0]->blocks(request.resources[0]->groupTags().at(0)),
+                      request.resources[1]->blocks(request.resources[1]->groupTags().at(0)));
             batch_.push_back(std::move(request));
         }
         auto& scheduler = ranks_[0]->connector->decode_->scheduler_;

@@ -42,7 +42,9 @@ struct ShardLayout {
     // ---- rank 坐标：CP 轴与 head 轴相互独立，不做除法分解（设计文档 §3.3）----
 
     int cpSize() const {
-        return pc.prefill_cp_config.kv_cache_sharded ? static_cast<int>(pc.tp_size) : 1;
+        // Decode's flag describes its Prefill peer; local Decode pages are not CP-sharded.
+        return pc.role_type != RoleType::DECODE && pc.prefill_cp_config.kv_cache_sharded ?
+                   static_cast<int>(pc.tp_size) : 1;
     }
 
     int cpRank(int rank) const {

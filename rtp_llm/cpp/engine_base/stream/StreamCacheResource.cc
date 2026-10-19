@@ -224,8 +224,9 @@ void applyP2PSideChannel(const P2PSideChannelPayload& payload, GenerateStream* s
             memcpy(output->tokens.data_ptr<int>(),
                    payload.propose_tokens.data(),
                    payload.propose_tokens.size() * sizeof(int));
-            output->all_probs     = probs;
-            output->hidden_states = hidden;
+            // Wire snapshots are CPU-owned; speculative execution consumes device tensors.
+            output->all_probs     = probs.to(torch::kCUDA);
+            output->hidden_states = hidden.to(torch::kCUDA);
             output->tensors_holder.emplace_back(std::move(probs));
             output->tensors_holder.emplace_back(std::move(hidden));
             stream->setSPOutputBuffer(output);

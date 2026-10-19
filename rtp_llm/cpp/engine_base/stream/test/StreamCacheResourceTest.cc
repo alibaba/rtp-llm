@@ -227,9 +227,8 @@ protected:
     }
 
     void prepareP2PRegistrationResource(bool query_pd, const std::string& key) {
-        PDSepConfig pd;
-        pd.role_type = RoleType::PREFILL;
-        prepareResourceWithCacheConfig(init_config(), {1, 2, 3, 4, 5, 6}, true, RoleType::PREFILL, {}, pd);
+        // Inject the registration-only connector below; do not initialize transport workers.
+        prepareResourceWithCacheConfig(init_config(), {1, 2, 3, 4, 5, 6}, true, RoleType::PREFILL);
         stream_->generateConfig()->pd_separation      = query_pd;
         stream_->generateConfig()->unique_key         = key;
         stream_->generateInput()->request_deadline_ms = currentTimeMs() + 30000;

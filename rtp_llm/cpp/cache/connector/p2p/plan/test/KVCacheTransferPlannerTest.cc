@@ -208,6 +208,23 @@ TEST(PlannerGroupA, A2_SymmetricRrCp) {
 }
 
 // 用例 A3: 非对称 CP —— prefill 按 CP 分 4 片，decode 不分片
+TEST(PlannerGroupA, DecodeWithPeerCpFlagReceivesEveryLogicalKey) {
+    auto src = mlaLayout(2, CPRotateMethod::ALL_GATHER, true);
+    src.pc.role_type = RoleType::PREFILL;
+    auto dst = mlaLayout(2, CPRotateMethod::PREFILL_CP, true);
+    dst.pc.role_type = RoleType::DECODE;
+    const auto result = KVCacheTransferPlanner::plan(src, dst, {kFullTag});
+    ASSERT_TRUE(result.ok()) << result.error.ToString();
+    for (int rank = 0; rank < 2; ++rank) {
+        std::set<size_t> received;
+        for (const auto* route : result.plan.forDecodeRank(rank)) {
+            auto keys = KVCacheTransferPlanner::resolveKeys(route->src_keys, 6);
+            received.insert(keys.begin(), keys.end());
+        }
+        EXPECT_EQ(received, (std::set<size_t>{0, 1, 2, 3, 4, 5}));
+    }
+}
+
 TEST(PlannerGroupA, A3_AsymmetricCpShrinkToOne) {
     const auto src = mhaLayout(4, CPRotateMethod::ALL_GATHER, /*sharded=*/true);
     const auto dst = mhaLayout(1);

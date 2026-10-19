@@ -25,6 +25,23 @@ protected:
     int64_t            deadline_;
 };
 
+TEST_F(PrefillResultStoreTest, CancellationCallbackCanPublishWithoutStoreLock) {
+    bool called = false;
+    EXPECT_TRUE(store_.waitPrefillPayloadReady("request", deadline_, [&] {
+        called = true;
+        std::unique_lock<std::mutex> probe(store_.mutex_, std::try_to_lock);
+        EXPECT_TRUE(probe.owns_lock());
+        if (!probe.owns_lock()) {
+            return true;
+        }
+        probe.unlock();
+        store_.publishPrefillPayload("request", data());
+        return false;
+    }));
+    EXPECT_TRUE(called);
+    EXPECT_TRUE(store_.takePrefillPayload("request").has_value());
+}
+
 TEST_F(PrefillResultStoreTest, PublishBeforeWaitAndConsumeOnce) {
     store_.publishPrefillPayload("request", data(0));
     ASSERT_TRUE(store_.waitPrefillPayloadReady("request", deadline_));

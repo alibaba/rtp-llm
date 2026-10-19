@@ -52,6 +52,23 @@ protected:
 
 // ==================== addResource & stealResource 基础测试 ====================
 
+TEST_F(P2PConnectorResourceStoreTest, CancellationCallbackCanRegisterRequestWithoutStoreLock) {
+    const auto deadline = getDeadlineMs();
+    bool called = false;
+    EXPECT_GT(stream_store_->waitForRequestDeadline("reentrant", deadline, [&] {
+        called = true;
+        std::unique_lock<std::mutex> probe(stream_store_->resource_map_mutex_, std::try_to_lock);
+        EXPECT_TRUE(probe.owns_lock());
+        if (!probe.owns_lock()) {
+            return true;
+        }
+        probe.unlock();
+        stream_store_->requestDeadline("reentrant", 5000);
+        return false;
+    }), 0);
+    EXPECT_TRUE(called);
+}
+
 TEST_F(P2PConnectorResourceStoreTest, AddAndStealResource_Success) {
     std::string unique_key  = "test_key_1";
     int64_t     request_id  = 1001;

@@ -304,7 +304,7 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
             save_output("first_token_cum_log_probs", update_info.cum_log_probs, config.aux_info);
             save_output("first_token_all_probs",
                         update_info.all_probs,
-                        config.aux_info && config.return_all_probs != ReturnAllProbsMode::NONE);
+                        config.return_all_probs != ReturnAllProbsMode::NONE);
             if (!getProposeToken().empty()) {
                 side_data.propose_tokens = getProposeToken();
             }

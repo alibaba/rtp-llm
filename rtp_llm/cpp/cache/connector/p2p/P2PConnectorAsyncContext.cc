@@ -309,10 +309,16 @@ bool P2PConnectorAsyncReadContext::needCancel() const {
             return false;
         }
     }
-    if (tp_sync_result_->done() && !tp_sync_result_->success()) {
-        return true;
-    }
-    if (server_call_result_->done() && !server_call_result_->success()) {
+    try {
+        if (tp_sync_result_->done() && !tp_sync_result_->success()) {
+            return true;
+        }
+        if (server_call_result_->done() && !server_call_result_->success()) {
+            return true;
+        }
+    } catch (...) {
+        // A fatal RPC outcome still requires cancellation. The checker also calls
+        // this from its wakeup calculation, outside checkOnce's exception boundary.
         return true;
     }
     return false;

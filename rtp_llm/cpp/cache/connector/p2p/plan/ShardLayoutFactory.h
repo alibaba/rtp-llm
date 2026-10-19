@@ -25,6 +25,7 @@ public:
                                     RoleType                 role) {
         ShardLayout layout;
         layout.pc = pc;
+        layout.pc.role_type = role;
 
         for (const auto& group : topology.groups()) {
             ShardLayout::GroupLayout g;

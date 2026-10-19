@@ -11,7 +11,7 @@ PDSupportDecision checkPDSupport(const GenerateInputPB& request) {
     if (!config.can_use_pd_separation()) {
         return {false, "PD disabled by request"};
     }
-    if (config.max_new_tokens() <= 1) {
+    if (config.return_prompt_logits() || config.max_new_tokens() <= 1) {
         return {false, "PD requires more than one generated token"};
     }
     if (config.num_beams() > 1 || config.variable_num_beams_size() != 0) {
