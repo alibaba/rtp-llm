@@ -1,6 +1,7 @@
 """CPU contracts for V4.1 delayed-HC startup compilation; no GPU launches."""
 
 import contextlib
+import sys
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -10,6 +11,7 @@ import torch
 from rtp_llm.models_py.modules.base.cuda.norm import RMSNorm
 from rtp_llm.models_py.modules.dsv41.hc import v41_jit_warmup as warmup
 from rtp_llm.models_py.modules.dsv41.hc.delayed import DelayedHCUnit
+from rtp_llm.models_py.modules.dsv41.test import test_mhc_lazy_backward as _mhc_tests
 
 
 def unit(*, eps=1e-6, cls=DelayedHCUnit):
@@ -48,6 +50,27 @@ class V41HCJitWarmupCPU(unittest.TestCase):
         def run(_label, _description, launch, *, device):
             return launch()
 
+        norm = _mhc_tests.MHCLazyBackwardTest().load_norm()
+        stack.enter_context(
+            patch.dict(
+                sys.modules,
+                {
+                    "rtp_llm.models_py.3rdparty.tile_kernels.modeling.mhc.ops.norm_fn": norm,
+                },
+            )
+        )
+        stack.enter_context(patch.object(warmup, "_tile_ops"))
+        stack.enter_context(
+            patch.object(warmup, "can_fuse_big_pre", return_value=False)
+        )
+        stack.enter_context(patch.object(torch.cuda, "current_device", return_value=0))
+        stack.enter_context(
+            patch.object(
+                torch.cuda,
+                "get_device_properties",
+                return_value=SimpleNamespace(multi_processor_count=148),
+            )
+        )
         stack.enter_context(
             patch.object(warmup.common, "model_warm_up_enabled", return_value=True)
         )
@@ -267,6 +290,7 @@ class V41HCJitWarmupCPU(unittest.TestCase):
             serialized = self._mock_device(stack)
             small = stack.enter_context(patch.object(warmup, "_launch_small_prenorm"))
             tile = stack.enter_context(patch.object(warmup, "_launch_tilelang_chain"))
+            norm = stack.enter_context(patch.object(warmup, "_launch_tilelang_norm"))
             mega = stack.enter_context(patch.object(warmup, "_launch_mega"))
             for _ in range(2):
                 warmup.warmup_v41_hc_jit(root, max_m=131072, device="cpu")
@@ -277,6 +301,10 @@ class V41HCJitWarmupCPU(unittest.TestCase):
             tile.assert_called_once()
             self.assertEqual(tile.call_args.args[1], 65)
             self.assertTrue(tile.call_args.kwargs["include_norm"])
+            self.assertEqual(
+                [call.args[1] for call in norm.call_args_list],
+                [96, 256, 320, 480, 608, 960, 1216],
+            )
             self.assertEqual(
                 [call.args[1] for call in mega.call_args_list], [1, 193, 321, 449]
             )
@@ -300,8 +328,73 @@ class V41HCJitWarmupCPU(unittest.TestCase):
             warmup.warmup_v41_hc_jit(model(block()), max_m=4, device="cpu")
             small.assert_not_called()
             mega.assert_not_called()
-            self.assertEqual(tile.call_args.args[1], 4)
+            self.assertEqual(tile.call_args.args[1], 1)
             self.assertTrue(tile.call_args.kwargs["include_norm"])
+
+    def test_max_m_and_small_backend_bound_standalone_prewarm(self):
+        for maximum, expected in (
+            (64, []),
+            (65, [65]),
+            (95, [65]),
+            (96, [65, 96]),
+            (192, [65, 96]),
+            (256, [65, 96, 256]),
+        ):
+            with self.subTest(max_m=maximum), contextlib.ExitStack() as stack:
+                warmup._WARMED_KEYS.clear()
+                self._mock_device(stack)
+                stack.enter_context(patch.object(warmup, "_launch_small_prenorm"))
+                stack.enter_context(patch.object(warmup, "_launch_mega"))
+                tile = stack.enter_context(
+                    patch.object(warmup, "_launch_tilelang_chain")
+                )
+                norm = stack.enter_context(
+                    patch.object(warmup, "_launch_tilelang_norm")
+                )
+                fused = stack.enter_context(patch.object(warmup, "_launch_fused_pre"))
+                stack.enter_context(
+                    patch.object(warmup, "can_fuse_big_pre", return_value=True)
+                )
+                warmup.warmup_v41_hc_jit(model(block()), max_m=maximum, device="cpu")
+                actual = [
+                    c.args[1] for c in tile.call_args_list if c.kwargs["include_norm"]
+                ]
+                actual.extend(c.args[1] for c in norm.call_args_list)
+                self.assertEqual(actual, expected)
+                self.assertEqual(
+                    [c.args[1] for c in fused.call_args_list],
+                    [1, 65] if maximum > 64 else [1],
+                )
+
+    def test_missing_small_backend_warms_aligned_small_split_without_mega(self):
+        with contextlib.ExitStack() as stack:
+            self._mock_device(stack)
+            stack.enter_context(
+                patch.object(
+                    warmup.v41_prenorm, "_has_prenorm_gemm", return_value=False
+                )
+            )
+            stack.enter_context(
+                patch.object(warmup.v41_mega_mhc, "_get_mega_mhc", return_value=None)
+            )
+            stack.enter_context(patch.object(warmup, "_launch_tilelang_chain"))
+            norm = stack.enter_context(patch.object(warmup, "_launch_tilelang_norm"))
+            warmup.warmup_v41_hc_jit(model(block()), max_m=64, device="cpu")
+            self.assertEqual([c.args[1] for c in norm.call_args_list], [32])
+
+    def test_fused_small_prewarm_does_not_launch_standalone_norm(self):
+        source = unit()
+        ops = Mock()
+        with patch.object(warmup, "_tile_ops", return_value=ops), patch.object(
+            warmup.v41_prenorm, "prepare_tf32_weight", return_value=source.fn
+        ):
+            for tokens, backend in ((1, "deepgemm"), (65, None)):
+                warmup._launch_fused_pre(source, tokens, "cpu")
+                self.assertEqual(
+                    ops.mhc_pre_big_fuse.call_args.kwargs["gemm_backend"], backend
+                )
+        ops.mhc_pre_norm_fn.assert_not_called()
+        ops.mhc_pre_split_mixes.assert_not_called()
 
     def test_failure_is_not_marked_warm_and_same_configuration_can_retry(self):
         root = model(block())

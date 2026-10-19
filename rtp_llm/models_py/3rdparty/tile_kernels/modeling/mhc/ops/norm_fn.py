@@ -1,3 +1,5 @@
+import functools
+
 import torch
 from torch.utils.checkpoint import checkpoint
 
@@ -10,6 +12,75 @@ from ....mhc.norm_fn_kernel import (
     _mhc_pre_norm_fn_fwd_norm,
     round_to_tf32,
 )
+
+_TILELANG_HIDDEN_BLOCK = 256
+_TILELANG_TOKEN_BLOCK = 32
+_TILELANG_SPLIT_CAP = 20
+
+
+def _tilelang_split_plan(num_tokens: int, mhc_hidden_size: int, num_sms: int) -> int:
+    """Bound split-K to one SM wave and whole 256-column/32-token tiles."""
+    if (
+        num_tokens <= 0
+        or num_tokens % _TILELANG_TOKEN_BLOCK
+        or mhc_hidden_size <= 0
+        or mhc_hidden_size % _TILELANG_HIDDEN_BLOCK
+    ):
+        return 1
+    group_blocks = mhc_hidden_size // _TILELANG_HIDDEN_BLOCK
+    token_blocks = num_tokens // _TILELANG_TOKEN_BLOCK
+    splits = max(1, min(num_sms // token_blocks, _TILELANG_SPLIT_CAP, group_blocks))
+    while group_blocks % splits:
+        splits -= 1
+    return splits
+
+
+@functools.lru_cache(maxsize=None)
+def _tilelang_device_num_sms(device_index: int) -> int:
+    return torch.cuda.get_device_properties(device_index).multi_processor_count
+
+
+def _tilelang_num_splits(x: torch.Tensor, mhc_hidden_size: int) -> int:
+    if not x.is_cuda or mhc_hidden_size <= 0:
+        return 1
+    device_index = x.device.index
+    if device_index is None:
+        device_index = torch.cuda.current_device()
+    return _tilelang_split_plan(
+        x.numel() // mhc_hidden_size,
+        mhc_hidden_size,
+        _tilelang_device_num_sms(device_index),
+    )
+
+
+def _tilelang_representative_ms(
+    max_m: int, mhc_hidden_size: int, num_sms: int, *, min_m: int = 1
+) -> tuple[int, ...]:
+    """One reachable M per split specialization, without large warmup tensors."""
+    min_m, max_m = max(1, int(min_m)), int(max_m)
+    if max_m < min_m:
+        return ()
+    candidates = {min_m}
+    # Unaligned lengths use S=1. Beyond num_sms token blocks S=1 is stable.
+    if min_m % _TILELANG_TOKEN_BLOCK == 0 and min_m < max_m:
+        candidates.add(min_m + 1)
+    first_aligned = (
+        (min_m + _TILELANG_TOKEN_BLOCK - 1) // _TILELANG_TOKEN_BLOCK
+    ) * _TILELANG_TOKEN_BLOCK
+    candidates.update(
+        range(
+            first_aligned,
+            min(max_m, max(1, num_sms) * _TILELANG_TOKEN_BLOCK) + 1,
+            _TILELANG_TOKEN_BLOCK,
+        )
+    )
+    seen, representatives = set(), []
+    for tokens in sorted(candidates):
+        splits = _tilelang_split_plan(tokens, mhc_hidden_size, num_sms)
+        if splits not in seen:
+            seen.add(splits)
+            representatives.append(tokens)
+    return tuple(representatives)
 
 
 class _MHCFnNormwMerge(torch.autograd.Function):
@@ -67,6 +138,9 @@ class MHCPreNormFn(torch.autograd.Function):
         assert x.shape[-1] * x.shape[-2] == mhc_hidden_size
         outer_shape = x.shape[:-2]
 
+        # The reducer consumes split-major partials; allocate only the chosen
+        # launch's scratch, independent of the legacy caller hint.
+        n_splits = _tilelang_num_splits(x, mhc_hidden_size)
         out_mul_splitted = torch.empty(
             n_splits,
             *outer_shape,
@@ -89,20 +163,16 @@ class MHCPreNormFn(torch.autograd.Function):
             device=x.device,
         )
 
-        # TileLang implementation doesn't support split-k, so we set n_splits to 1
-        # You may want to adopt the DeepGEMM implementation with split-k for better performance
-        n_splits = 1
-        out_mul_splitted = out_mul_splitted[:1]
-        sqrsum_splitted = sqrsum_splitted[:1]
-
         fn = round_to_tf32(fn)
 
-        fwd_mul_kernel = _mhc_pre_norm_fn_fwd_mul(mhc_mult3, 1, mhc_hidden_size)
+        fwd_mul_kernel = _mhc_pre_norm_fn_fwd_mul(
+            mhc_mult3, n_splits, mhc_hidden_size // n_splits
+        )
         fwd_mul_kernel(
             x.view(-1, mhc_hidden_size),
             fn,
-            out_mul_splitted.view(-1, 1, mhc_mult3),
-            sqrsum_splitted.view(-1, 1),
+            out_mul_splitted.view(n_splits, -1, mhc_mult3),
+            sqrsum_splitted.view(n_splits, -1),
         )
         # END of TileLang implementation of pre-norm-fn forward matmul
 
