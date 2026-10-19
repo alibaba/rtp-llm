@@ -573,16 +573,36 @@ class ModelFactory:
                 "dspark_target_layer_ids must be unique and ordered by target "
                 f"layer boundary, got {target_layer_ids}"
             )
-        invalid_layer_ids = [
+        negative_layer_ids = [
+            layer_id for layer_id in target_layer_ids if layer_id < 0
+        ]
+        if negative_layer_ids:
+            raise ValueError(
+                f"dspark_target_layer_ids {negative_layer_ids} must be non-negative"
+            )
+        out_of_range_ids = [
             layer_id
             for layer_id in target_layer_ids
-            if layer_id < 0 or layer_id >= model_config.num_layers
+            if layer_id >= model_config.num_layers
         ]
-        if invalid_layer_ids:
-            raise ValueError(
-                f"dspark_target_layer_ids {invalid_layer_ids} are out of range "
-                f"for target with {model_config.num_layers} layers"
+        if out_of_range_ids:
+            # Layer-count cuts (hack_layer_num) shrink the target model; the
+            # proposer's anchor ids were computed against the full checkpoint
+            # layer count. Anchor semantics are "hidden at this layer
+            # boundary" — remap ids beyond the cut to the cut model's last
+            # layer instead of refusing to start.
+            remapped = [
+                min(layer_id, model_config.num_layers - 1)
+                for layer_id in target_layer_ids
+            ]
+            remapped = sorted(set(remapped))
+            logging.warning(
+                f"dspark_target_layer_ids {target_layer_ids} exceed the target's "
+                f"{model_config.num_layers} layers (layer cut active?); remapping "
+                f"to {remapped}"
             )
+            target_layer_ids = remapped
+            propose_model_config.dspark_target_layer_ids = remapped
 
         markov_rank = int(propose_model_config.dspark_markov_rank)
         if markov_rank <= 0:
