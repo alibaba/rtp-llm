@@ -31,7 +31,8 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraft(const torch::Tensor& base_lo
                                                     const torch::Tensor& temperature,
                                                     const torch::Tensor& markov_w1,
                                                     const torch::Tensor& markov_w2,
-                                                    size_t               draft_vocab_size) const {
+                                                    size_t               draft_vocab_size,
+                                                    bool                 batch_all_greedy) const {
     RTP_LLM_PROFILE_SCOPE("speculative_sampler.sample_dspark_draft");
     RTP_LLM_CHECK_WITH_INFO(temperature.defined() && temperature.is_cuda() && temperature.is_contiguous()
                                 && temperature.scalar_type() == torch::kFloat32 && temperature.dim() == 1,
@@ -46,10 +47,27 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraft(const torch::Tensor& base_lo
     RTP_LLM_CHECK_WITH_INFO(anchors.defined() && anchors.is_cuda() && anchors.numel() == batch_size,
                             "DSpARK anchors must be a CUDA tensor with one token per request");
 
+    // All-greedy verification accepts only exact target-token matches, so it
+    // permits deterministic first-argmax proposals without dense q. Tiny-T
+    // softmax can still distribute mass across ties or close logits; this
+    // changes draft choices and RNG consumption, but target verification
+    // preserves greedy output. Mixed batches retain the dense distribution.
+    // Float partial indices are exact only below 2^24.
+    const bool point_mass_path = batch_all_greedy && draft_vocab_size < (1u << 24);
+
     auto previous_tokens = anchors.reshape({batch_size}).to(torch::kLong);
     auto all_probabilities =
-        torch::empty({batch_size, static_cast<int64_t>(propose_step_), static_cast<int64_t>(draft_vocab_size)},
-                     torch::TensorOptions().dtype(torch::kFloat32).device(base_logits.device()));
+        point_mass_path ?
+            torch::Tensor() :
+            torch::empty({batch_size, static_cast<int64_t>(propose_step_), static_cast<int64_t>(draft_vocab_size)},
+                         torch::TensorOptions().dtype(torch::kFloat32).device(base_logits.device()));
+    // Contiguous per-step q scratch consumed by FlashInfer sampling; reused
+    // across draft steps because each step's fused kernel fully rewrites it
+    // and the sampler consumes it on the same stream before the next step.
+    auto sampling_probabilities =
+        point_mass_path ? torch::Tensor() :
+                          torch::empty({batch_size, static_cast<int64_t>(draft_vocab_size)},
+                                       torch::TensorOptions().dtype(torch::kFloat32).device(base_logits.device()));
     std::vector<torch::Tensor> token_columns;
     token_columns.reserve(propose_step_);
     // lm_head shards are padded to a TP alignment before gather. Sampling
@@ -58,32 +76,39 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraft(const torch::Tensor& base_lo
     auto proposal_logits =
         base_logits.narrow(1, 0, draft_vocab_size)
             .view({batch_size, static_cast<int64_t>(propose_step_), static_cast<int64_t>(draft_vocab_size)});
-    auto temperature_column = temperature.unsqueeze(1);
 
     for (int64_t step = 0; step < static_cast<int64_t>(propose_step_); ++step) {
         auto markov_embedding = markov_w1.index_select(0, previous_tokens);
-        auto markov_bias      = torch::mm(markov_embedding, markov_w2.transpose(0, 1)).to(torch::kFloat32);
-        auto logits           = proposal_logits.select(1, step) + markov_bias;
+        auto markov_bias      = torch::mm(markov_embedding, markov_w2.transpose(0, 1));
 
-        // Draft q applies request temperature only. Materialize that exact
-        // dense distribution once, sample from it with FlashInfer, and pass
-        // the same q to rejection sampling. Request top-k/top-p stay target-side.
-        logits.div_(temperature_column);
-        auto sampling_probabilities = torch::softmax(logits, -1);
-        auto sampled_draft_tokens   = execSampleFromProbs(sampling_probabilities).to(torch::kInt32);
-        auto sampled_target_tokens  = sampled_draft_tokens;
+        torch::Tensor sampled_draft_tokens;
+        if (point_mass_path) {
+            // Emit first-argmax int32 tokens without dense q or a sampling launch.
+            sampled_draft_tokens = execMarkovArgmaxStep({proposal_logits.select(1, step), markov_bias, temperature});
+        } else {
+            // Materialize the temperature-scaled q for both FlashInfer and
+            // rejection sampling. Request top-k/top-p stay target-side.
+            execMarkovSoftmaxStep({proposal_logits.select(1, step),
+                                   markov_bias,
+                                   temperature,
+                                   all_probabilities.select(1, step),
+                                   sampling_probabilities});
+            sampled_draft_tokens = execSampleFromProbs(sampling_probabilities).to(torch::kInt32);
+        }
+        auto sampled_target_tokens = sampled_draft_tokens;
         if (d2t_map_.defined()) {
             sampled_target_tokens = d2t_map_.index_select(0, sampled_draft_tokens.to(torch::kLong)).to(torch::kInt32);
         }
-        all_probabilities.select(1, step).copy_(sampling_probabilities);
         token_columns.push_back(sampled_target_tokens);
         previous_tokens = sampled_target_tokens.to(torch::kLong);
     }
 
     SamplerOutput output;
-    output.token_ids                = torch::stack(token_columns, 1).contiguous();
-    output.all_probs                = std::move(all_probabilities);
-    output.token_ids_are_point_mass = false;
+    output.token_ids = torch::stack(token_columns, 1).contiguous();
+    if (!point_mass_path) {
+        output.all_probs = std::move(all_probabilities);
+    }
+    output.token_ids_are_point_mass = point_mass_path;
     return output;
 }
 

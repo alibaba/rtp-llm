@@ -44,6 +44,8 @@ GreedyOutput     sampleGreedy(const GreedyParams& params);
 torch::Tensor    sampleFromProbs(const torch::Tensor& probabilities);
 BeamSearchOutput sampleBeamSearch(BeamSearchParams params);
 void             rejectionSampling(const RejectionSamplingParams& params);
+void             markovSoftmaxStep(const MarkovSoftmaxStepParams& params);
+torch::Tensor    markovArgmaxStep(const MarkovArgmaxStepParams& params);
 void             mappingDraft2Target(const MappingDraft2TargetParams& params);
 void             multiMergeCopy(const MultiMergeCopyParams& params);
 }  // namespace rtp_llm
@@ -644,6 +646,14 @@ BeamSearchOutput execSampleBeamSearch(BeamSearchParams params) {
 
 void execRejectionSampling(const RejectionSamplingParams& params) {
     rejectionSampling(params);
+}
+
+void execMarkovSoftmaxStep(const MarkovSoftmaxStepParams& params) {
+    markovSoftmaxStep(params);
+}
+
+torch::Tensor execMarkovArgmaxStep(const MarkovArgmaxStepParams& params) {
+    return markovArgmaxStep(params);
 }
 
 void execMappingDraft2Target(const MappingDraft2TargetParams& params) {
