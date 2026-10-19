@@ -181,6 +181,33 @@ std::pair<torch::Tensor, torch::Tensor> makeSamplingSeedOffsetTensors(const std:
     return {seed_d, offset_d};
 }
 
+// True when the repetition/presence/frequency penalty kernel will run this
+// round — the only consumer of the step-major transposed token history inside
+// processLogits (temperature reads nothing, ban-repeat-ngram reads the
+// row-major device history). A malformed combination (repetition penalty set,
+// presence/frequency missing) counts as active so processLogits keeps raising
+// its existing CHECK on the legacy transposed path.
+bool repetitionPenaltyActive(const GreedyParams& params, int64_t batch_size) {
+    if (!params.repetition_penalty.has_value()) {
+        return false;
+    }
+    if (!params.presence_penalty.has_value() || !params.frequency_penalty.has_value()) {
+        return true;
+    }
+    const auto& repetition_penalty = params.repetition_penalty.value();
+    const auto& presence_penalty   = params.presence_penalty.value();
+    const auto& frequency_penalty  = params.frequency_penalty.value();
+    return std::any_of(repetition_penalty.data_ptr<float>(),
+                       repetition_penalty.data_ptr<float>() + batch_size,
+                       [](auto t) { return t != 1.0f; })
+           || std::any_of(presence_penalty.data_ptr<float>(),
+                          presence_penalty.data_ptr<float>() + batch_size,
+                          [](auto t) { return t != 0.0f; })
+           || std::any_of(frequency_penalty.data_ptr<float>(),
+                          frequency_penalty.data_ptr<float>() + batch_size,
+                          [](auto t) { return t != 0.0f; });
+}
+
 void processLogits(const GreedyParams&  params,
                    const torch::Tensor& device_tokens,
                    const torch::Tensor& transposed_tokens) {
@@ -205,18 +232,10 @@ void processLogits(const GreedyParams&  params,
 
     if (params.repetition_penalty.has_value()) {
         RTP_LLM_CHECK(params.presence_penalty.has_value() && params.frequency_penalty.has_value());
-        const auto& repetition_penalty = params.repetition_penalty.value();
-        const auto& presence_penalty   = params.presence_penalty.value();
-        const auto& frequency_penalty  = params.frequency_penalty.value();
-        if (std::any_of(repetition_penalty.data_ptr<float>(),
-                        repetition_penalty.data_ptr<float>() + batch_size,
-                        [&](auto t) { return t != 1.0f; })
-            || std::any_of(presence_penalty.data_ptr<float>(),
-                           presence_penalty.data_ptr<float>() + batch_size,
-                           [&](auto t) { return t != 0.0f; })
-            || std::any_of(frequency_penalty.data_ptr<float>(),
-                           frequency_penalty.data_ptr<float>() + batch_size,
-                           [&](auto t) { return t != 0.0f; })) {
+        if (repetitionPenaltyActive(params, batch_size)) {
+            const auto& repetition_penalty = params.repetition_penalty.value();
+            const auto& presence_penalty   = params.presence_penalty.value();
+            const auto& frequency_penalty  = params.frequency_penalty.value();
             // Build sequence_lengths: clone input_lengths, then overwrite first decoder_batch_size entries
             auto sequence_lengths_gpu = params.input_lengths.to(torch::kCUDA, true);
             if (decoder_batch_size > 0) {
@@ -339,8 +358,18 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
     const auto batch_size = params.logits.size(0);
     auto       cur_stream = at::cuda::getCurrentCUDAStream().stream();
 
-    // [1, batch_size] — last row of transposed_tokens
-    auto samples_t = transposed_tokens.slice(0, transposed_tokens.size(0) - 1, transposed_tokens.size(0));
+    // Sampled-token destination, [1, batch_size]. Legacy: the last row of the
+    // transposed history (the write-back below round-trips the whole matrix).
+    // Direct scatter (transposed_tokens undefined; see sampleGreedy): a flat
+    // device buffer, scattered into the last column of token_ids at the end.
+    torch::Tensor direct_samples;
+    torch::Tensor samples_t;
+    if (transposed_tokens.defined()) {
+        samples_t = transposed_tokens.slice(0, transposed_tokens.size(0) - 1, transposed_tokens.size(0));
+    } else {
+        direct_samples = torch::empty({batch_size}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+        samples_t      = direct_samples.view({1, batch_size});
+    }
 
     // Fused greedy top-1 fast path (see fusedGreedyTop1Renorm). Gated on the
     // caller-declared private logits buffer plus the exact output contract of
@@ -388,8 +417,6 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
 
     constexpr bool deterministic       = true;
     constexpr int  max_sampling_rounds = 32;
-    auto [seed_t, offset_t] =
-        makeSamplingSeedOffsetTensors(params.generator, batch_size, max_sampling_rounds, params.sampling_buffers);
 
     torch::Tensor success_t = success;
     torch::Tensor top_k_t   = params.top_k;
@@ -421,6 +448,24 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
     const bool all_top_k_no_limit = std::all_of(top_k_ptr, top_k_ptr + batch_size, [](auto t) { return t <= 0; });
     const bool all_top_p_one =
         std::all_of(top_p_ptr, top_p_ptr + batch_size, [](auto t) { return std::abs(t - 1.0f) < 1e-7; });
+
+    // Philox seed/offset materialization gating. The tensors feed only the
+    // stochastic top-p/top-k flashinfer branches below; an all-greedy batch
+    // (every top_k == 1) consumes no entropy — neither the fused top-1
+    // kernel nor the argmax fallback reads them — so the batch-sized pinned
+    // fill and the two H2D copies (~4.3 us/step in the round-10 decode
+    // trace) are dead sampler-input materialization. Skipping the round's
+    // generator advances cannot change any decision: the round itself draws
+    // nothing, greedy verify accepts exactly when draft == target regardless
+    // of the uniform draws (point-mass q in {0, 1}), and any batch with a
+    // single stochastic row materializes exactly as before.
+    torch::Tensor seed_t, offset_t;
+    if (!all_top_k_one) {
+        auto seed_offset =
+            makeSamplingSeedOffsetTensors(params.generator, batch_size, max_sampling_rounds, params.sampling_buffers);
+        seed_t   = std::move(seed_offset.first);
+        offset_t = std::move(seed_offset.second);
+    }
 
     // Token-only point-mass mode: when the fused gate holds and the caller
     // declared every all_probs consumer treats the distribution as a point
@@ -517,18 +562,27 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
         cum_log_probs_t.add_(token_probs_t.log().to(cum_log_probs_t.device()));
     }
 
-    // Copy results back: transpose and copy to token_ids
-    auto transposed_t = transposed_tokens.transpose(0, 1).contiguous();
-    params.token_ids.copy_(transposed_t, true);
+    // Copy results back: transpose and copy to token_ids, or — on the direct
+    // scatter path — write only the sampled column. There token_ids is
+    // device-resident (aliased by device_tokens upstream) and no other column
+    // was touched this round, so the last-column scatter leaves the matrix
+    // bit-identical to the whole-matrix round trip at O(batch) instead of
+    // O(batch * step) traffic.
+    if (transposed_tokens.defined()) {
+        auto transposed_t = transposed_tokens.transpose(0, 1).contiguous();
+        params.token_ids.copy_(transposed_t, true);
+    } else {
+        params.token_ids.select(1, params.token_ids.size(1) - 1).copy_(direct_samples, true);
+    }
     check_cuda_error();
     return {success, all_probs_point_mass};
 }
 
 GreedyOutput sampleGreedy(const GreedyParams& params) {
-    // [batch_size, step + 1] — clone to GPU
+    // [batch_size, step + 1] — clone to GPU (a no-op alias when the caller
+    // already keeps the token history device-resident, e.g. the MTP verify
+    // gather's per-round snapshot)
     auto device_tokens = params.token_ids.to(torch::kCUDA, true);
-    // [step + 1, batch_size]
-    auto transposed_tokens = device_tokens.transpose(0, 1).contiguous();
 
     const auto batch_size        = params.logits.size(0);
     bool       has_not_do_sample = params.do_sample.has_value()
@@ -539,6 +593,35 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
                           || std::any_of(params.do_sample.value().data_ptr<bool>(),
                                          params.do_sample.value().data_ptr<bool>() + batch_size,
                                          [&](auto t) { return t; });
+
+    // fast path for topk = 1
+    // TODO: Support output_all_probs and cum_log_probs in this fast path.
+    auto       top_k_ptr       = params.top_k.data_ptr<int32_t>();
+    const bool topk1_fast_path = std::all_of(top_k_ptr, top_k_ptr + batch_size, [&](auto t) { return t == 1; })
+                                 && !params.output_all_probs.has_value() && !params.cum_log_probs.has_value();
+
+    // [step + 1, batch_size] transposed history clone. Exactly two consumers:
+    // the repetition/presence/frequency penalty kernel (step-major layout) and
+    // the legacy whole-matrix sample write-back. When neither applies — no
+    // active repetition penalty, history already device-resident (device_tokens
+    // then aliases params.token_ids, so the transpose-out + copy-back round
+    // trip is provably identity on every column except the last), and not the
+    // topk1 fast path — skip both O(batch * step) transpose clones and the
+    // O(batch * step) copy per decode step: sampling writes a flat [batch]
+    // buffer that flashinferSampleGreedy scatters into the last column of
+    // token_ids, bit-identical to the round trip's final state. Precedent:
+    // TRT-LLM writes the sampled token in place at outputIds[slot][curSeqLen]
+    // (topKStage2Sampling) and scatters a flat [num_rows] tensor
+    // (scatter_new_tokens); vLLM scatters prev_sampled_token_ids into input_ids
+    // and gates every history-derived tensor on no_penalties; SGLang feeds its
+    // penalizers only the latest [bs] token, gated on is_required.
+    const bool direct_token_scatter =
+        !topk1_fast_path && params.token_ids.is_cuda() && !repetitionPenaltyActive(params, batch_size);
+    torch::Tensor transposed_tokens;
+    if (!direct_token_scatter) {
+        transposed_tokens = device_tokens.transpose(0, 1).contiguous();
+    }
+
     if (need_do_sample) {
         torch::Tensor selected_logits;
         torch::Tensor mask_tensor;
@@ -553,11 +636,7 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
         }
     }
 
-    // fast path for topk = 1
-    // TODO: Support output_all_probs and cum_log_probs in this fast path.
-    auto top_k_ptr = params.top_k.data_ptr<int32_t>();
-    if (std::all_of(top_k_ptr, top_k_ptr + batch_size, [&](auto t) { return t == 1; })
-        && !params.output_all_probs.has_value() && !params.cum_log_probs.has_value()) {
+    if (topk1_fast_path) {
         torch::Tensor samples_t =
             transposed_tokens.slice(0, transposed_tokens.size(0) - 1, transposed_tokens.size(0)).squeeze(0);
         torch::Tensor probs_t         = params.logits;

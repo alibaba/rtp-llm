@@ -205,6 +205,108 @@ TEST_F(CudaSamplerTest, testCudaSamplingSeedOffsetSameAcrossBatchRows) {
     }
 }
 
+// Seed/offset materialization gating: an all-greedy batch consumes no
+// entropy (the fused top-1 point-mass kernel and the argmax fallback both
+// ignore the Philox tensors), so execSampleGreedy must neither upload them
+// nor advance any generator state. A single stochastic row restores the
+// historical materialization and advances every row's generator as before.
+TEST_F(CudaSamplerTest, testCudaSamplingGreedyBatchSkipsSeedOffsetMaterialization) {
+    size_t batch_size = 4;
+    auto   logits_t   = cudaTensor(
+        {
+            0,    0,    0,     0.1, 0.2,  0.3,   0,     0,     0, 0.01,   0.987, 0.887, 0.99999, 0.1,
+            0.2,  0.3,  0,     0,   0.99, 0.989, 0.221, 0,     0, 0.1,    0.2,   0.321, 0,       0.4432,
+            0.44, 0.01, 0.221, 0,   0,    0.1,   0.2,   0.321, 0, 0.4432, 0.44,  0.01,
+        },
+        {(int64_t)batch_size, 10});
+    size_t step             = 5;
+    auto output_token_ids_t = cudaIntTensor({100, 1, 1, 1, 1, 0, 1, 1, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0},
+                                            {(int64_t)batch_size, (int64_t)(step + 1)});
+    auto sequence_lengths_t = cudaIntTensor({5, 5, 5, 5}, {4});
+    auto input_lengths_t    = cudaIntTensor({-1, -1, -1, -1}, {4});
+    auto top_p_t            = pinnedFloatTensor({1.0, 1.0, 1.0, 1.0});
+    auto temperature_t      = pinnedFloatTensor({1.0, 1.0, 1.0, 1.0});
+
+    std::vector<at::Generator> generators;
+    for (size_t i = 0; i < batch_size; ++i) {
+        auto gen = torch::make_generator<at::CUDAGeneratorImpl>();
+        gen.set_current_seed(static_cast<int64_t>(20261018 + i));
+        generators.push_back(gen);
+    }
+    std::vector<torch::Tensor> states_before;
+    for (const auto& gen : generators) {
+        states_before.push_back(torch::Tensor(gen.get_state()));
+    }
+
+    // Round 1: all-greedy with the production verify shape (private logits,
+    // full-width point-mass all_probs) -> fused token-only kernel. Tokens
+    // are the row argmaxes; no generator may be touched.
+    auto all_probs_t =
+        torch::empty({(int64_t)batch_size, 10}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+    auto         top_k_greedy = pinnedIntTensor({1, 1, 1, 1});
+    GreedyParams greedy_params({logits_t,
+                                input_lengths_t,
+                                sequence_lengths_t,
+                                output_token_ids_t,
+                                step,
+                                top_k_greedy,
+                                top_p_t,
+                                temperature_t,
+                                nullopt,
+                                nullopt,
+                                nullopt,
+                                nullopt,
+                                false,
+                                all_probs_t,
+                                nullopt,
+                                nullopt,
+                                nullopt,
+                                generators,
+                                nullptr,
+                                /*skip_logits_probs_restore=*/true,
+                                /*all_probs_point_mass=*/true});
+    auto         greedy_output = execSampleGreedy(greedy_params);
+    check_cuda_error();
+    ASSERT_TRUE(greedy_output.all_probs_point_mass);
+    auto greedy_host = toHostInt(output_token_ids_t);
+    ASSERT_EQ(greedy_host[5], 5);
+    ASSERT_EQ(greedy_host[11], 2);
+    ASSERT_EQ(greedy_host[17], 7);
+    ASSERT_EQ(greedy_host[23], 7);
+    for (size_t i = 0; i < batch_size; ++i) {
+        EXPECT_TRUE(torch::equal(torch::Tensor(generators[i].get_state()), states_before[i]))
+            << "all-greedy round advanced generator " << i;
+    }
+
+    // Round 2: one stochastic row appears -> the historical seed/offset
+    // materialization runs and every row's generator advances.
+    auto         top_k_mixed = pinnedIntTensor({1, 1, 3, 2});
+    GreedyParams mixed_params({logits_t,
+                               input_lengths_t,
+                               sequence_lengths_t,
+                               output_token_ids_t,
+                               step,
+                               top_k_mixed,
+                               top_p_t,
+                               temperature_t,
+                               nullopt,
+                               nullopt,
+                               nullopt,
+                               nullopt,
+                               false,
+                               nullopt,
+                               nullopt,
+                               nullopt,
+                               nullopt,
+                               generators});
+    execSampleGreedy(mixed_params);
+    check_cuda_error();
+    for (size_t i = 0; i < batch_size; ++i) {
+        EXPECT_FALSE(torch::equal(torch::Tensor(generators[i].get_state()), states_before[i]))
+            << "stochastic round did not advance generator " << i;
+    }
+}
+
 TEST_F(CudaSamplerTest, testCudaSamplingKernelTopK) {
     size_t batch_size = 4;
     auto   logits_t   = cudaTensor(
@@ -801,4 +903,217 @@ TEST_F(CudaSamplerTest, testGreedyTopKFusedGateFallsBackForMixedTopK) {
         ASSERT_NEAR(row_sum[b].item<float>(), 1.0f, 1e-4);
     }
     ASSERT_FALSE(torch::equal(logits_t.cpu(), raw_logits.cpu()));
+}
+
+// Direct token scatter path (CUDA-resident history, no active penalties): the
+// last-column scatter must leave the whole [batch, step+1] matrix bit-identical
+// to the legacy transpose-out/copy-back round trip (executed by the CPU-history
+// run), with the fused greedy top-1 kernel as the sampler — the exact shape of
+// the MTP target-verify production path.
+TEST_F(CudaSamplerTest, testTokenHistoryDirectScatterMatchesLegacyRoundTrip) {
+    const int64_t batch_size = 4, vocab_size = 64, step = 5;
+    torch::manual_seed(20261018);
+    auto base_logits =
+        (torch::randn({batch_size, vocab_size}, torch::TensorOptions().dtype(torch::kFloat32)) * 3.0f).to(torch::kCUDA);
+    // Distinct values everywhere so a write to the wrong column is caught.
+    std::vector<int32_t> history(batch_size * (step + 1));
+    for (size_t i = 0; i < history.size(); ++i) {
+        history[i] = static_cast<int32_t>(1000 + i * 7);
+    }
+
+    auto run_case = [&](bool cuda_history) {
+        auto logits_t           = base_logits.clone();
+        auto token_ids_t        = torch::tensor(history, torch::kInt32).reshape({batch_size, step + 1});
+        token_ids_t             = cuda_history ? token_ids_t.to(torch::kCUDA) : token_ids_t.clone();
+        auto sequence_lengths_t = cudaIntTensor({5, 5, 5, 5}, {4});
+        auto input_lengths_t    = cudaIntTensor({-1, -1, -1, -1}, {4});
+        auto top_k_t            = pinnedIntTensor({1, 1, 1, 1});
+        auto top_p_t            = pinnedFloatTensor({1.0, 1.0, 1.0, 1.0});
+        auto temperature_t      = pinnedFloatTensor({1.0, 1.0, 1.0, 1.0});
+        auto all_probs_t =
+            torch::zeros({batch_size, vocab_size}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+        std::vector<at::Generator> generator;
+        generator.resize(batch_size);
+
+        GreedyParams params({logits_t,
+                             input_lengths_t,
+                             sequence_lengths_t,
+                             token_ids_t,
+                             (size_t)step,
+                             top_k_t,
+                             top_p_t,
+                             temperature_t,
+                             nullopt,
+                             nullopt,
+                             nullopt,
+                             nullopt,
+                             false,
+                             all_probs_t,
+                             nullopt,
+                             nullopt,
+                             nullopt,
+                             generator});
+        params.skip_logits_probs_restore = true;  // fused deterministic top-1
+        execSampleGreedy(params);
+        check_cuda_error();
+        cudaDeviceSynchronize();
+        return std::make_pair(toHostInt(token_ids_t), toHostFloat(all_probs_t));
+    };
+
+    auto [tokens_direct, probs_direct] = run_case(true);   // direct scatter
+    auto [tokens_legacy, probs_legacy] = run_case(false);  // legacy round trip
+    ASSERT_EQ(tokens_direct, tokens_legacy);
+    ASSERT_EQ(probs_direct, probs_legacy);
+
+    auto expected_tokens = base_logits.argmax(-1).cpu();
+    for (int64_t b = 0; b < batch_size; ++b) {
+        ASSERT_EQ(tokens_direct[b * (step + 1) + step], expected_tokens[b].item<int64_t>());
+        for (int64_t s = 0; s < step; ++s) {
+            ASSERT_EQ(tokens_direct[b * (step + 1) + s], history[b * (step + 1) + s]);
+        }
+    }
+}
+
+// Inactive penalty tensors (repetition==1.0, presence/frequency==0.0) must not
+// disable the direct scatter path, and the stochastic top-k branch must still
+// produce bit-identical tokens and renormalized all_probs versus the legacy
+// round trip (same per-row generator seeds on both runs).
+TEST_F(CudaSamplerTest, testTokenHistoryDirectScatterInactivePenaltiesParity) {
+    const int64_t batch_size = 4, vocab_size = 32, step = 5;
+    torch::manual_seed(20261019);
+    auto base_logits =
+        (torch::randn({batch_size, vocab_size}, torch::TensorOptions().dtype(torch::kFloat32)) * 2.0f).to(torch::kCUDA);
+    std::vector<int32_t> history(batch_size * (step + 1));
+    for (size_t i = 0; i < history.size(); ++i) {
+        history[i] = static_cast<int32_t>(100 + i * 3);
+    }
+
+    auto run_case = [&](bool cuda_history) {
+        auto logits_t             = base_logits.clone();
+        auto token_ids_t          = torch::tensor(history, torch::kInt32).reshape({batch_size, step + 1});
+        token_ids_t               = cuda_history ? token_ids_t.to(torch::kCUDA) : token_ids_t.clone();
+        auto sequence_lengths_t   = cudaIntTensor({5, 5, 5, 5}, {4});
+        auto input_lengths_t      = cudaIntTensor({-1, -1, -1, -1}, {4});
+        auto top_k_t              = pinnedIntTensor({2, 2, 2, 2});
+        auto top_p_t              = pinnedFloatTensor({1.0, 1.0, 1.0, 1.0});
+        auto temperature_t        = pinnedFloatTensor({1.0, 1.0, 1.0, 1.0});
+        auto repetition_penalty_t = pinnedFloatTensor({1.0, 1.0, 1.0, 1.0});
+        auto presence_penalty_t   = pinnedFloatTensor({0.0, 0.0, 0.0, 0.0});
+        auto frequency_penalty_t  = pinnedFloatTensor({0.0, 0.0, 0.0, 0.0});
+        auto all_probs_t =
+            torch::zeros({batch_size, vocab_size}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+        std::vector<at::Generator> generator;
+        for (int i = 0; i < batch_size; i++) {
+            generator.push_back(torch::make_generator<at::CUDAGeneratorImpl>());
+            generator[i].set_current_seed(i + 1);
+        }
+
+        GreedyParams params({logits_t,
+                             input_lengths_t,
+                             sequence_lengths_t,
+                             token_ids_t,
+                             (size_t)step,
+                             top_k_t,
+                             top_p_t,
+                             temperature_t,
+                             repetition_penalty_t,
+                             nullopt,
+                             nullopt,
+                             nullopt,
+                             false,
+                             all_probs_t,
+                             presence_penalty_t,
+                             frequency_penalty_t,
+                             nullopt,
+                             generator});
+        execSampleGreedy(params);
+        check_cuda_error();
+        cudaDeviceSynchronize();
+        return std::make_pair(toHostInt(token_ids_t), toHostFloat(all_probs_t));
+    };
+
+    auto [tokens_direct, probs_direct] = run_case(true);
+    auto [tokens_legacy, probs_legacy] = run_case(false);
+    ASSERT_EQ(tokens_direct, tokens_legacy);
+    ASSERT_EQ(probs_direct, probs_legacy);
+    for (int64_t b = 0; b < batch_size; ++b) {
+        for (int64_t s = 0; s < step; ++s) {
+            ASSERT_EQ(tokens_direct[b * (step + 1) + s], history[b * (step + 1) + s]);
+        }
+        ASSERT_GE(tokens_direct[b * (step + 1) + step], 0);
+        ASSERT_LT(tokens_direct[b * (step + 1) + step], vocab_size);
+    }
+}
+
+// Ban-repeat-ngram reads the row-major device history, so it must keep working
+// on the direct scatter path (no transposed clone is built): the repeated
+// bigram (3, 4) bans token 4 and the argmax falls back to token 9, identical
+// to the legacy round-trip run.
+TEST_F(CudaSamplerTest, testTokenHistoryDirectScatterNgramStillBans) {
+    const int64_t batch_size = 4, vocab_size = 16, step = 5;
+    // Per-row history [1, 3, 4, 2, 3, x]: the trailing 3 repeats the 3 at
+    // index 1, so with n=2 the successor token 4 is banned.
+    std::vector<int32_t> history;
+    for (int64_t b = 0; b < batch_size; ++b) {
+        for (int32_t t : {1, 3, 4, 2, 3, 0}) {
+            history.push_back(t);
+        }
+    }
+    std::vector<float> logits_flat(batch_size * vocab_size, 0.0f);
+    for (int64_t b = 0; b < batch_size; ++b) {
+        logits_flat[b * vocab_size + 4] = 10.0f;  // argmax without the ban
+        logits_flat[b * vocab_size + 9] = 5.0f;   // expected after the ban
+        logits_flat[b * vocab_size + 1] = 1.0f;
+    }
+    auto base_logits = torch::tensor(logits_flat, torch::kFloat32).reshape({batch_size, vocab_size}).to(torch::kCUDA);
+
+    auto run_case = [&](bool cuda_history) {
+        auto logits_t           = base_logits.clone();
+        auto token_ids_t        = torch::tensor(history, torch::kInt32).reshape({batch_size, step + 1});
+        token_ids_t             = cuda_history ? token_ids_t.to(torch::kCUDA) : token_ids_t.clone();
+        auto sequence_lengths_t = cudaIntTensor({5, 5, 5, 5}, {4});
+        auto input_lengths_t    = cudaIntTensor({-1, -1, -1, -1}, {4});
+        auto top_k_t            = pinnedIntTensor({1, 1, 1, 1});
+        auto top_p_t            = pinnedFloatTensor({1.0, 1.0, 1.0, 1.0});
+        auto temperature_t      = pinnedFloatTensor({1.0, 1.0, 1.0, 1.0});
+        auto ngram_t            = pinnedIntTensor({2, 2, 2, 2});
+        auto all_probs_t =
+            torch::zeros({batch_size, vocab_size}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+        std::vector<at::Generator> generator;
+        generator.resize(batch_size);
+
+        GreedyParams params({logits_t,
+                             input_lengths_t,
+                             sequence_lengths_t,
+                             token_ids_t,
+                             (size_t)step,
+                             top_k_t,
+                             top_p_t,
+                             temperature_t,
+                             nullopt,
+                             ngram_t,
+                             nullopt,
+                             nullopt,
+                             false,
+                             all_probs_t,
+                             nullopt,
+                             nullopt,
+                             nullopt,
+                             generator});
+        execSampleGreedy(params);
+        check_cuda_error();
+        cudaDeviceSynchronize();
+        return std::make_pair(toHostInt(token_ids_t), toHostFloat(all_probs_t));
+    };
+
+    auto [tokens_direct, probs_direct] = run_case(true);   // direct scatter + ngram
+    auto [tokens_legacy, probs_legacy] = run_case(false);  // legacy round trip + ngram
+    ASSERT_EQ(tokens_direct, tokens_legacy);
+    ASSERT_EQ(probs_direct, probs_legacy);
+    for (int64_t b = 0; b < batch_size; ++b) {
+        ASSERT_EQ(tokens_direct[b * (step + 1) + step], 9);  // 4 banned, fell back
+        for (int64_t s = 0; s < step; ++s) {
+            ASSERT_EQ(tokens_direct[b * (step + 1) + s], history[b * (step + 1) + s]);
+        }
+    }
 }

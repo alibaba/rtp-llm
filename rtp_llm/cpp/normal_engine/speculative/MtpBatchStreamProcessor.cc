@@ -1046,13 +1046,48 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
         allocateSamplerInputs(stream_groups, total_batch_size, total_batch_size, propose_step_);
     fillSamplerCommonInputs(sampler_inputs, all_streams, true, propose_step_);
 
+    // Without history readers, only the final token column is live. The CUDA
+    // sampler writes it directly before rejection sampling and accept-length
+    // capping read it. Penalties, ngram bans, processors, beams and the legacy
+    // top-k=1 path without all_probs still require the full history.
+    // Proposal columns share those readers and never include the final column.
+    bool sampler_token_matrix_dead = false;
+#if USING_CUDA
+    {
+        auto*      repetition_ptr = sampler_inputs.repetition_penalty.data_ptr<float>();
+        auto*      presence_ptr   = sampler_inputs.presence_penalty.data_ptr<float>();
+        auto*      frequency_ptr  = sampler_inputs.frequency_penalty.data_ptr<float>();
+        auto*      ngram_ptr      = sampler_inputs.no_repeat_ngram_size.data_ptr<int32_t>();
+        auto*      beams_in_ptr   = sampler_inputs.num_beams_in.data_ptr<int64_t>();
+        auto*      beams_out_ptr  = sampler_inputs.num_beams_out.data_ptr<int64_t>();
+        const auto count          = static_cast<int64_t>(total_batch_size);
+        sampler_token_matrix_dead =
+            return_all_probs != ReturnAllProbsMode::NONE && !spec_logits_result.has_active_processor
+            && sampler_inputs.logits_processor_states_ptr == nullptr
+            && std::all_of(repetition_ptr, repetition_ptr + count, [](float v) { return v == 1.0f; })
+            && std::all_of(presence_ptr, presence_ptr + count, [](float v) { return v == 0.0f; })
+            && std::all_of(frequency_ptr, frequency_ptr + count, [](float v) { return v == 0.0f; })
+            && std::all_of(ngram_ptr, ngram_ptr + count, [](int32_t v) { return v == 0; })
+            && std::all_of(beams_in_ptr, beams_in_ptr + count, [](int64_t n) { return n == 1; })
+            && std::all_of(beams_out_ptr, beams_out_ptr + count, [](int64_t n) { return n == 1; });
+    }
+#endif
+
     int64_t batch_idx = 0;
     for (auto& stream : all_streams) {
-        auto complete_token_ids = stream->completeTokenIds();
-        auto seq_len            = static_cast<int64_t>(stream->seqLength());
+        auto seq_len = static_cast<int64_t>(stream->seqLength());
 
-        copyScoreSamplerTokenIds(
-            sampler_inputs.token_ids, complete_token_ids, batch_idx, static_cast<int64_t>(score_len), seq_len);
+        // Gate-on rounds never upload the pinned snapshot (dead
+        // sampler-input elision above), so the O(batch*context) fill is
+        // skipped with it. The width bound still guards the materialized
+        // path's proposal scatter columns below.
+        if (!sampler_token_matrix_dead) {
+            copyScoreSamplerTokenIds(sampler_inputs.token_ids,
+                                     stream->completeTokenIds(),
+                                     batch_idx,
+                                     static_cast<int64_t>(score_len),
+                                     seq_len);
+        }
         RTP_LLM_CHECK_WITH_INFO(
             seq_len + static_cast<int64_t>(propose_step_) <= static_cast<int64_t>(sampler_inputs.step + 1),
             "MTP verify sampler history exceeds its allocated width: seq_len=%ld gamma=%zu step=%zu",
@@ -1060,9 +1095,11 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
             propose_step_,
             sampler_inputs.step);
         batch_idx += static_cast<int64_t>(score_len);
-        RTP_LLM_LOG_DEBUG("stream [%s], sampler inputs token ids = [%s]",
-                          stream->streamLogTag().c_str(),
-                          tensorDebugStringWithData<int32_t>(sampler_inputs.token_ids).c_str());
+        if (!sampler_token_matrix_dead) {
+            RTP_LLM_LOG_DEBUG("stream [%s], sampler inputs token ids = [%s]",
+                              stream->streamLogTag().c_str(),
+                              tensorDebugStringWithData<int32_t>(sampler_inputs.token_ids).c_str());
+        }
     }
 
     RTP_LLM_CHECK_WITH_INFO(model_output.logits.dim() == 2
@@ -1071,6 +1108,10 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
                             model_output.logits.dim() == 2 ? model_output.logits.size(1) : -1,
                             vocab_size_);
     sampler_inputs.vocab_size = vocab_size_;
+    // Set when the renormalized target distribution is provably a point mass
+    // at the sampled token for the whole batch (see below); also reused by the
+    // logits ownership elision under USING_CUDA further down.
+    bool target_point_mass = false;
     if (return_all_probs != ReturnAllProbsMode::NONE) {
         const bool renorm_mode = (return_all_probs != ReturnAllProbsMode::ORIGINAL);
         // Point-mass target contract. When renormalizing (not ORIGINAL) on a
@@ -1084,14 +1125,13 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
         // full one-hot write byte-for-byte (and the sampler only honors the
         // declaration when its own fused gate also passes, so a mismatch
         // safely falls back to writing every column).
-        bool point_mass = false;
 #if USING_CUDA
         if (renorm_mode && !sampler_inputs.cum_log_probs.defined()) {
-            auto* top_k_ptr = sampler_inputs.top_k.data_ptr<int32_t>();
-            point_mass      = std::all_of(top_k_ptr, top_k_ptr + total_batch_size, [](int32_t k) { return k == 1; });
+            auto* top_k_ptr   = sampler_inputs.top_k.data_ptr<int32_t>();
+            target_point_mass = std::all_of(top_k_ptr, top_k_ptr + total_batch_size, [](int32_t k) { return k == 1; });
         }
 #endif
-        if (point_mass) {
+        if (target_point_mass) {
             sampler_inputs.all_probs            = torch::empty({(int64_t)total_batch_size, (int64_t)vocab_size_},
                                                     torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
             sampler_inputs.all_probs_point_mass = true;
@@ -1112,58 +1152,90 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
                                 && draft_token_ids.size(1) == gamma,
                             "MTP verify draft tokens must be int32 [B,gamma]");
 
-    // The sampler already needs token history on device. Fill every proposal
-    // slot once for all score rows, then let each row's sequence length expose
-    // exactly proposals [0, score_position).
-#if USING_CUDA
-    const auto main_stream = cuda_graph::graphGetCurrentStream();
-    if (!sampler_input_copy_stream_ || sampler_input_copy_stream_->device_index() != main_stream.device_index()
-        || *sampler_input_copy_stream_ == main_stream) {
-        do {
-            sampler_input_copy_stream_ = cuda_graph::graphGetStreamFromPool(false);
-        } while (*sampler_input_copy_stream_ == main_stream);
-    }
-    const auto    copy_stream   = cuda_graph::toGraphStream(*sampler_input_copy_stream_);
-    auto          history_ready = cuda_graph::makeGraphEvent();
     torch::Tensor token_ids_gpu;
-    {
-        cuda_graph::GraphStreamGuard guard(copy_stream);
-        // This pinned CPU snapshot is independent of target/proposal GPU work.
-        // Upload it while target verify is still running on the main stream.
-        // PyTorch records the DMA use of the pinned allocation before it can
-        // be recycled; each round also owns a distinct device history.
-        token_ids_gpu = sampler_inputs.token_ids.to(torch::kCUDA, /*non_blocking=*/true);
-        history_ready.record(copy_stream);
-    }
-#else
-    auto token_ids_gpu = sampler_inputs.token_ids.to(torch::kCUDA, /*non_blocking=*/true);
-#endif
-    auto histories = token_ids_gpu.view({batch_size, rows, static_cast<int64_t>(sampler_inputs.step + 1)});
-    auto proposals = draft_token_ids.to(torch::kCUDA, /*non_blocking=*/true)
-                         .contiguous()
-                         .view({batch_size, 1, gamma})
-                         .expand({batch_size, rows, gamma});
-    auto base_lengths = sampler_inputs.sequence_lengths.view({batch_size, rows})
-                            .select(1, 0)
-                            .to(torch::Device(torch::kCUDA), torch::kLong, /*non_blocking=*/true)
-                            .view({batch_size, 1, 1});
-    auto proposal_offsets =
-        torch::arange(gamma, torch::TensorOptions().dtype(torch::kLong).device(torch::Device(torch::kCUDA)))
-            .view({1, 1, gamma});
-    auto proposal_columns = (base_lengths + proposal_offsets).expand({batch_size, rows, gamma});
+    if (sampler_token_matrix_dead) {
+        token_ids_gpu =
+            torch::empty({static_cast<int64_t>(total_batch_size), static_cast<int64_t>(sampler_inputs.step + 1)},
+                         torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+    } else {
 #if USING_CUDA
-    // Wait on the GPU at the first consumer, without blocking the host. The
-    // sampler/rejection sampler keep using this allocation on the main stream,
-    // so its copy-stream allocator must not recycle it until those uses finish.
-    history_ready.block(main_stream);
-    token_ids_gpu.record_stream(main_stream);
+        const auto main_stream = cuda_graph::graphGetCurrentStream();
+        if (!sampler_input_copy_stream_ || sampler_input_copy_stream_->device_index() != main_stream.device_index()
+            || *sampler_input_copy_stream_ == main_stream) {
+            do {
+                sampler_input_copy_stream_ = cuda_graph::graphGetStreamFromPool(false);
+            } while (*sampler_input_copy_stream_ == main_stream);
+        }
+        const auto copy_stream   = cuda_graph::toGraphStream(*sampler_input_copy_stream_);
+        auto       history_ready = cuda_graph::makeGraphEvent();
+        {
+            cuda_graph::GraphStreamGuard guard(copy_stream);
+            // Upload a fresh full snapshot each round; ATen tracks the pinned
+            // source until DMA completes, including after gate transitions.
+            token_ids_gpu = sampler_inputs.token_ids.to(torch::kCUDA, /*non_blocking=*/true);
+            history_ready.record(copy_stream);
+        }
+#else
+        token_ids_gpu = sampler_inputs.token_ids.to(torch::kCUDA, /*non_blocking=*/true);
 #endif
-    histories.scatter_(2, proposal_columns, proposals);
+        auto histories = token_ids_gpu.view({batch_size, rows, static_cast<int64_t>(sampler_inputs.step + 1)});
+        auto proposals = draft_token_ids.to(torch::kCUDA, /*non_blocking=*/true)
+                             .contiguous()
+                             .view({batch_size, 1, gamma})
+                             .expand({batch_size, rows, gamma});
+        auto base_lengths = sampler_inputs.sequence_lengths.view({batch_size, rows})
+                                .select(1, 0)
+                                .to(torch::Device(torch::kCUDA), torch::kLong, /*non_blocking=*/true)
+                                .view({batch_size, 1, 1});
+        auto proposal_offsets =
+            torch::arange(gamma, torch::TensorOptions().dtype(torch::kLong).device(torch::Device(torch::kCUDA)))
+                .view({1, 1, gamma});
+        auto proposal_columns = (base_lengths + proposal_offsets).expand({batch_size, rows, gamma});
+#if USING_CUDA
+        // Join at the first consumer and retain the allocation through all
+        // main-stream sampler/rejection uses.
+        history_ready.block(main_stream);
+        token_ids_gpu.record_stream(main_stream);
+#endif
+        histories.scatter_(2, proposal_columns, proposals);
+    }
     sampler_inputs.token_ids = std::move(token_ids_gpu);
 
     // lm_head shards may contain TP-alignment padding. Synthetic columns must
     // not participate in target sampling or the rejection distribution.
-    sampler_inputs.logits = model_output.logits.narrow(1, 0, static_cast<int64_t>(vocab_size_)).clone();
+    //
+    // Alias only when all downstream logits writers are inactive and the
+    // fused top-1 path can consume the complete contiguous FP32 vocabulary.
+    // Masking, penalties, trimmed padding and other backends keep a clone.
+    sampler_inputs.logits          = model_output.logits.narrow(1, 0, static_cast<int64_t>(vocab_size_));
+    bool logits_alias_model_output = false;
+#if USING_CUDA
+    {
+        auto*      temperature_ptr = sampler_inputs.temperature.data_ptr<float>();
+        auto*      repetition_ptr  = sampler_inputs.repetition_penalty.data_ptr<float>();
+        auto*      presence_ptr    = sampler_inputs.presence_penalty.data_ptr<float>();
+        auto*      frequency_ptr   = sampler_inputs.frequency_penalty.data_ptr<float>();
+        auto*      ngram_ptr       = sampler_inputs.no_repeat_ngram_size.data_ptr<int32_t>();
+        auto*      beams_in_ptr    = sampler_inputs.num_beams_in.data_ptr<int64_t>();
+        auto*      beams_out_ptr   = sampler_inputs.num_beams_out.data_ptr<int64_t>();
+        const auto count           = static_cast<int64_t>(total_batch_size);
+        logits_alias_model_output =
+            target_point_mass && !spec_logits_result.has_active_processor && vocab_size_ < (1u << 24)
+            && model_output.logits.dim() == 2 && model_output.logits.size(1) == static_cast<int64_t>(vocab_size_)
+            && model_output.logits.is_cuda() && model_output.logits.is_contiguous()
+            && model_output.logits.scalar_type() == torch::kFloat32
+            && std::all_of(temperature_ptr, temperature_ptr + count, [](float v) { return v == 1.0f; })
+            && std::all_of(repetition_ptr, repetition_ptr + count, [](float v) { return v == 1.0f; })
+            && std::all_of(presence_ptr, presence_ptr + count, [](float v) { return v == 0.0f; })
+            && std::all_of(frequency_ptr, frequency_ptr + count, [](float v) { return v == 0.0f; })
+            && std::all_of(ngram_ptr, ngram_ptr + count, [](int32_t v) { return v == 0; })
+            && std::all_of(beams_in_ptr, beams_in_ptr + count, [](int64_t n) { return n == 1; })
+            && std::all_of(beams_out_ptr, beams_out_ptr + count, [](int64_t n) { return n == 1; });
+    }
+#endif
+    if (!logits_alias_model_output) {
+        sampler_inputs.logits = sampler_inputs.logits.clone();
+    }
     if (spec_logits_result.has_active_processor) {
         // The runner uploads packed masks on its own (worker) stream; order this
         // stream's mask application after the uploads, then apply on GPU.
@@ -1172,12 +1244,14 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
         }
         SpecLogitsVerifyRunner::applyMaskToLogits(sampler_inputs.logits, spec_logits_result, sampler_inputs.vocab_size);
     }
-    // The narrow+clone above is private to this round's sampler inputs: after
-    // sampling, nothing reads the logits buffer on the MTP path (target
-    // all_probs feeds rejection sampling from its own tensor, streams consume
-    // the draft-side probabilities, and the next round re-clones from the
-    // model output). Declare it so the CUDA greedy sampler may skip the
-    // softmax-probs writeback into logits and take its fused top-1 path.
+    // The logits buffer above is either a per-round private clone or, under
+    // the elision gate, a read-only view of the model output. Either way no
+    // writer touches it for the rest of the round and nothing reads it after
+    // sampling on the MTP path (target all_probs feeds rejection sampling
+    // from its own tensor, streams consume the draft-side probabilities, and
+    // the next round recomputes logits from scratch). Declare it so the CUDA
+    // greedy sampler may skip the softmax-probs writeback into logits and
+    // take its fused top-1 path.
     sampler_inputs.skip_logits_probs_restore = true;
 
     // TODO(async): debug formatting is CPU-only. Keep the .cpu() explicit
