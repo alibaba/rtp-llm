@@ -136,7 +136,11 @@ def _case(device, ratio, batch, span, *, seed=4141, norm_dtype=torch.float32):
     x = torch.randn(batch, span, 5120, generator=generator).to(
         device=device, dtype=torch.bfloat16
     )
-    starts = torch.tensor([127, 255, 7, 508][:batch], device=device, dtype=torch.int64)
+    # Preserve the boundary fixtures and vary ring phases for larger batches.
+    start_values = [127, 255, 7, 508][:batch]
+    if batch > 4:
+        start_values += [(11 + 53 * i) % 499 for i in range(4, batch)]
+    starts = torch.tensor(start_values, device=device, dtype=torch.int64)
     req_ids = torch.arange(batch, device=device).repeat_interleave(span)
     positions = (starts[:, None] + torch.arange(span, device=device)).flatten()
     return SimpleNamespace(
@@ -432,6 +436,39 @@ class V41DecodeGlobalCUDA(unittest.TestCase):
                         _assert_result(self, old, new, initial)
 
     @torch.inference_mode()
+    def test_mtp_verify_token_count_all_cache_bytes(self):
+        for ratio in (1, 2):
+            for batch, span in ((11, 6), (32, 6)):
+                with self.subTest(ratio=ratio, batch=batch, span=span):
+                    old = _case("cuda", ratio, batch, span)
+                    new = _clone_case(old)
+                    initial = _snapshot(old)
+                    _reference(old)
+                    _candidate(new)
+                    _assert_result(self, old, new, initial)
+
+    @torch.inference_mode()
+    def test_mtp_verify_shape_speculative_rejection_tail(self):
+        for accepted in (0, 5):
+            with self.subTest(accepted=accepted):
+                old = _case("cuda", 2, 32, 6)
+                new = _clone_case(old)
+                initial = _snapshot(old)
+                _reference(old)
+                _candidate(new)
+                _assert_result(self, old, new, initial)
+                initial = _snapshot(old)
+                next_starts = (old.starts + accepted).tolist()
+                for case in (old, new):
+                    _set_starts(case, next_starts)
+                replacement = torch.randn_like(old.x)
+                old.x.copy_(replacement)
+                new.x.copy_(replacement)
+                _reference(old)
+                _candidate(new)
+                _assert_result(self, old, new, initial)
+
+    @torch.inference_mode()
     def test_padded_main_and_table_row_strides_both_trap_modes(self):
         for ratio in (1, 2):
             for trap in ("0", "1"):
@@ -536,11 +573,12 @@ class V41DecodeGlobalCUDA(unittest.TestCase):
 
     @torch.inference_mode()
     def test_graph_updates_device_inputs_page_tables_and_rejected_positions(self):
-        for ratio in (1, 2):
-            with self.subTest(ratio=ratio):
-                old = _case("cuda", ratio, 4, 6)
+        for ratio, batch in ((1, 4), (2, 4), (1, 32), (2, 32)):
+            with self.subTest(ratio=ratio, batch=batch):
+                old = _case("cuda", ratio, batch, 6)
                 new = _clone_case(old)
                 initial = _snapshot(old)
+                extra_starts = old.starts[4:].tolist()
                 stream = torch.cuda.Stream()
                 stream.wait_stream(torch.cuda.current_stream())
                 with torch.cuda.stream(stream):
@@ -563,7 +601,10 @@ class V41DecodeGlobalCUDA(unittest.TestCase):
                 for round_id, starts in enumerate(rounds):
                     before = _snapshot(old)
                     for case in (old, new):
-                        _set_starts(case, starts)
+                        _set_starts(
+                            case,
+                            starts + [start + round_id for start in extra_starts],
+                        )
                         if round_id == 1:
                             # Device table changes must be read on replay,
                             # including zero/negative unallocated sentinels.
@@ -594,6 +635,31 @@ class V41DecodeGlobalCUDA(unittest.TestCase):
                 del graph
 
     @torch.inference_mode()
+    def test_token_limit_rejects_complete_metadata_without_writing_pools(self):
+        helper = _fused()
+        for ratio in (1, 2):
+            with self.subTest(ratio=ratio):
+                case = _case("cuda", ratio, 193, 1)
+                args = (case.owner, case.x, case.positions, case.req_ids, case.starts)
+                # With only the cap relaxed, all metadata/layout checks pass.
+                with patch.object(helper, "_MAX_FUSED_TOKENS", 193):
+                    self.assertTrue(helper.is_supported(*args))
+                self.assertFalse(helper.is_supported(*args))
+                before = _snapshot(case)
+                with patch.object(
+                    helper, "_compress_norm_main_store_kernel"
+                ) as stage_a, patch.object(
+                    helper, "_index_norm_store_state_kernel"
+                ) as stage_b:
+                    self.assertFalse(helper.try_produce_global(*args))
+                stage_a.assert_not_called()
+                stage_b.assert_not_called()
+                for region, pool in before.items():
+                    torch.testing.assert_close(
+                        case.owner._test_pools[region], pool, rtol=0, atol=0
+                    )
+
+    @torch.inference_mode()
     def test_unsupported_inputs_do_not_write_pools(self):
         base = _case("cuda", 2, 1, 6)
         for label in (
@@ -603,7 +669,6 @@ class V41DecodeGlobalCUDA(unittest.TestCase):
             "sharded",
             "wrong_dtype",
             "wrong_width",
-            "too_many_tokens",
         ):
             with self.subTest(label=label):
                 case = _clone_case(base)
@@ -621,8 +686,6 @@ class V41DecodeGlobalCUDA(unittest.TestCase):
                     case.x = case.x.float()
                 elif label == "wrong_width":
                     case.x = case.x[..., :256].contiguous()
-                elif label == "too_many_tokens":
-                    case.x = case.x[:, :1].expand(65, 1, 5120).contiguous()
                 before = _snapshot(case)
                 helper = _fused()
                 with patch.dict(
