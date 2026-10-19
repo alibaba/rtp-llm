@@ -474,6 +474,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     py::class_<KVCacheConfig>(m, "KVCacheConfig")
         .def(py::init<>())
         .def_readwrite("reuse_cache", &KVCacheConfig::reuse_cache)
+        .def_readwrite("enable_prefill_partial_tail_reuse", &KVCacheConfig::enable_prefill_partial_tail_reuse)
         .def_readwrite("enable_remote_cache", &KVCacheConfig::enable_remote_cache)
         .def_readwrite("enable_device_cache", &KVCacheConfig::enable_device_cache)
         .def_readwrite("multi_task_prompt", &KVCacheConfig::multi_task_prompt)
@@ -574,7 +575,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::pickle(
             [](const KVCacheConfig& self) {
                 return py::make_tuple(std::string("KVCacheConfig"),
-                                      7,
+                                      8,
                                       self.reuse_cache,
                                       self.multi_task_prompt,
                                       self.multi_task_prompt_str,
@@ -641,9 +642,18 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.kv_cache_event_manager_endpoint,
                                       self.kv_cache_event_instance_group,
                                       self.kv_cache_event_instance_id,
-                                      self.kv_cache_event_host_ip_port);
+                                      self.kv_cache_event_host_ip_port,
+                                      self.enable_prefill_partial_tail_reuse);
             },
             [](py::tuple t) {
+                const bool has_partial_tail_field =
+                    t.size() == 70 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 8;
+                const bool enable_prefill_partial_tail_reuse =
+                    has_partial_tail_field ? t[69].cast<bool>() : false;
+                if (has_partial_tail_field) {
+                    t    = t[py::slice(0, 69, 1)].cast<py::tuple>();
+                    t[1] = py::int_(7);
+                }
                 const py::tuple event_state = t;
                 const bool has_event_fields = t.size() == 69 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 7;
                 if (has_event_fields) {
@@ -753,6 +763,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.kv_cache_event_instance_id      = event_state[67].cast<std::string>();
                     c.kv_cache_event_host_ip_port     = event_state[68].cast<std::string>();
                 }
+                c.enable_prefill_partial_tail_reuse = enable_prefill_partial_tail_reuse;
                 return c;
             }));
 
@@ -1889,14 +1900,17 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     py::class_<CacheReusePolicyDesc>(m, "CacheReusePolicyDesc")
         .def(py::init<>())
         .def_readwrite("enable_prefix_reuse", &CacheReusePolicyDesc::enable_prefix_reuse)
-        .def(py::pickle([](const CacheReusePolicyDesc& self) { return py::make_tuple(self.enable_prefix_reuse); },
-                        [](py::tuple t) {
-                            CacheReusePolicyDesc c;
-                            if (t.size() != 1)
-                                throw std::runtime_error("Invalid CacheReusePolicyDesc state!");
-                            c.enable_prefix_reuse = t[0].cast<std::optional<bool>>();
-                            return c;
-                        }));
+        .def_readwrite("local_only_state", &CacheReusePolicyDesc::local_only_state)
+        .def(py::pickle(
+            [](const CacheReusePolicyDesc& self) { return py::make_tuple(self.enable_prefix_reuse, self.local_only_state); },
+            [](py::tuple t) {
+                CacheReusePolicyDesc c;
+                if (t.size() != 2)
+                    throw std::runtime_error("Invalid CacheReusePolicyDesc state!");
+                c.enable_prefix_reuse = t[0].cast<std::optional<bool>>();
+                c.local_only_state    = t[1].cast<std::optional<bool>>();
+                return c;
+            }));
 
     py::class_<CacheCapacityPolicyDesc>(m, "CacheCapacityPolicyDesc")
         .def(py::init<>())

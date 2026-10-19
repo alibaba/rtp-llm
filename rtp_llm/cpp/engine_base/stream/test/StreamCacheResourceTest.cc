@@ -1,4 +1,5 @@
 
+#include <set>
 #include "gtest/gtest.h"
 #include "gmock/gmock.h"
 
@@ -24,6 +25,7 @@
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
+#include "rtp_llm/cpp/testing/TestLogCapture.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
@@ -35,6 +37,7 @@
 #include <functional>
 #include <memory>
 #include <limits>
+#include <numeric>
 #include <thread>
 
 using namespace std;
@@ -426,13 +429,16 @@ TEST_F(StreamCacheResourceTest, testResourceContextReadsIgnoreRequestCacheSwitch
         KVCacheConfig   kv_cache_config;
         resource_context.initCacheConfig(kv_cache_config);
         EXPECT_FALSE(resource_context.ignore_request_cache_switches);
+        EXPECT_FALSE(resource_context.enable_prefill_partial_tail_reuse);
     }
     {
         autil::EnvGuard env_guard("RTP_LLM_IGNORE_REQUEST_CACHE_SWITCHES", "1");
         ResourceContext resource_context;
         KVCacheConfig   kv_cache_config;
+        kv_cache_config.enable_prefill_partial_tail_reuse = true;
         resource_context.initCacheConfig(kv_cache_config);
         EXPECT_TRUE(resource_context.ignore_request_cache_switches);
+        EXPECT_TRUE(resource_context.enable_prefill_partial_tail_reuse);
     }
 }
 
@@ -556,15 +562,717 @@ TEST_F(StreamCacheResourceTest, CacheOwnedLayoutDrivesStreamInitIncrementAndRele
     EXPECT_EQ(resource.kvCache().cacheKeys(0).size(), 4u);
     EXPECT_EQ(resource.singleBatchNeedBlocks(/*seq_len=*/9, /*reserve_step=*/0), 1);
 
+    const auto original_keys = resource.kvCache().cacheKeys(0);
+    for (int batch = 0; batch < resource.kvCache().batchSize(); ++batch) {
+        stream_->completeTokenIdsPtr()->data(batch)[8] = 9;
+    }
     stream_->setSeqLength(9);
     ASSERT_TRUE(resource.incrKVBlock().ok());
     EXPECT_EQ(resource.kvCache().blocksNum(0, "default"), 3);
     EXPECT_EQ(resource.kvCache().blocksNum(1, "default"), 3);
-    EXPECT_EQ(resource.kvCache().cacheKeys(0).size(), 4u);
+    // Runtime/base keys include the new partial block (T02/T06 P-to-D
+    // contract); CP canonical pages and complete-only tree exports differ.
+    ASSERT_EQ(resource.kvCache().cacheKeys(0).size(), 5u);
+    EXPECT_TRUE(std::equal(original_keys.begin(), original_keys.end(), resource.kvCache().cacheKeys(0).begin()));
+    EXPECT_FALSE(resource.kvCache().lastBlockAligned());
+    auto fresh_keys = std::make_shared<BatchKVCacheResource>();
+    fresh_keys->resetBatchSize(resource.kvCache().batchSize());
+    fresh_keys->initGroups(cache_manager_->cacheConfig().topologyPtr());
+    initCacheKeys(fresh_keys, stream_->completeTokenIdsPtr(), cache_manager_->cacheConfig().seq_size_per_block);
+    for (int batch = 0; batch < resource.kvCache().batchSize(); ++batch) {
+        EXPECT_EQ(resource.kvCache().cacheKeys(batch), fresh_keys->cacheKeys(batch));
+    }
 
     stream_->generate_status_->status = StreamState::FINISHED;
     stream_->releaseResource();
     EXPECT_EQ(cache_manager_->freeBlocksNum(), free_before);
+}
+
+TEST_F(StreamCacheResourceTest, PartialTailRegistrationIsGatedAndIndependentOfObservation) {
+    for (const bool observation : {false, true}) {
+        prepareResourceWithInputTokens({1, 2, 3, 4, 5}, /*reuse_cache=*/true, RoleType::PREFILL);
+        auto& resource = stream_->streamCacheResource();
+        resource.resource_context_.ignore_request_cache_switches = true;
+        resource.resource_context_.enable_prefill_partial_tail_reuse = true;
+        if (observation) {
+            enablePrefixObservation();
+        }
+        ASSERT_TRUE(resource.initKVBlock().ok());
+        ASSERT_TRUE(resource.prefixCacheRegistration().has_value());
+        const auto original = *resource.prefixCacheRegistration();
+        EXPECT_EQ(original.original_input_tokens, 5u);
+        EXPECT_EQ(original.token_ids, (std::vector<int>{1, 2, 3, 4, 5}));
+        ASSERT_EQ(original.points.size(), 3u);
+        EXPECT_EQ(original.points[0].endpoint.pos, 2u);
+        EXPECT_EQ(original.points[1].endpoint.pos, 4u);
+        EXPECT_EQ(original.points[2].endpoint.pos, 5u);
+        EXPECT_EQ(original.points[2].endpoint.key, original.base_keys.back());
+        ASSERT_EQ(original.points[2].group_bindings.size(), cache_manager_->blockTreeCache()->groupSets().size());
+        for (const auto& binding : original.points[2].group_bindings) {
+            EXPECT_EQ(binding.state, PrefixCacheSaveState::REGISTERED);
+            EXPECT_EQ(binding.ownership, PrefixCacheSaveOwnership::NONE);
+            EXPECT_FALSE(binding.resource.hasTier(Tier::DEVICE));
+            EXPECT_TRUE(binding.unfulfilled_reason.empty());
+        }
+
+        // The live stream and its last partial key may change after prefill.
+        stream_->completeTokenIdsPtr()->data(0)[5] = 6;
+        stream_->setSeqLength(6);
+        stream_->setIsContextStream(false);
+        ASSERT_TRUE(resource.incrKVBlock().ok());
+        const auto& retained = *resource.prefixCacheRegistration();
+        EXPECT_EQ(retained.original_input_tokens, original.original_input_tokens);
+        EXPECT_EQ(retained.token_ids, original.token_ids);
+        EXPECT_EQ(retained.base_keys, original.base_keys);
+        EXPECT_EQ(retained.points.back().endpoint.pos, 5u);
+        stream_->releaseResource();
+    }
+}
+
+TEST_F(StreamCacheResourceTest, RegisteredShortSaveOwnsOptionalBlockUntilReleased) {
+    auto config = test::makeSimpleLinearCacheConfig(3, 12, 2, DataType::TYPE_FP16);
+    prepareResourceWithCacheConfig(config, {1, 2, 3, 4, 5}, /*reuse_cache=*/true, RoleType::PREFILL);
+    auto& resource = stream_->streamCacheResource();
+    resource.resource_context_.ignore_request_cache_switches = true;
+    resource.resource_context_.enable_prefill_partial_tail_reuse = true;
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    ASSERT_TRUE(resource.prefixCacheRegistration().has_value());
+
+    ASSERT_TRUE(resource.prepareRequiredContinuation().ok());
+    resource.prepareRegisteredSave();
+    const auto& registration = *resource.prefixCacheRegistration();
+    ASSERT_TRUE(registration.prepared);
+    ASSERT_EQ(registration.points.size(), 3u);
+    const auto& tail = registration.points.back().group_bindings.front();
+    ASSERT_EQ(tail.ownership, PrefixCacheSaveOwnership::OPTIONAL_REQUEST);
+    ASSERT_EQ(tail.state, PrefixCacheSaveState::REGISTERED);
+    ASSERT_TRUE(tail.resource.hasCompleteDeviceValue());
+    const auto block = tail.resource.device_blocks.front();
+    const auto pool = cache_manager_->blockTreeCache()->groupSets().front()->devicePools().front();
+    EXPECT_EQ(pool->refCount(block), 1u);
+
+    cache_manager_->releaseRegisteredSave(*resource.prefix_cache_registration_);
+    EXPECT_FALSE(pool->isAllocated(block));
+    EXPECT_FALSE(resource.prefix_cache_registration_->prepared);
+    stream_->releaseResource();
+}
+
+TEST_F(StreamCacheResourceTest, PartialTailRunningTransitionPreparesRequiredContinuation) {
+    prepareResourceWithInputTokens({1, 2, 3, 4, 5}, /*reuse_cache=*/true, RoleType::PREFILL);
+    auto& resource = stream_->streamCacheResource();
+    resource.resource_context_.ignore_request_cache_switches = true;
+    resource.resource_context_.enable_prefill_partial_tail_reuse = true;
+    stream_->generate_status_->status = StreamState::WAITING;
+    stream_->reportEvent(StreamEvents::CanRun);
+    ASSERT_EQ(stream_->moveToNext(), StreamState::RUNNING);
+    ASSERT_TRUE(resource.prefixCacheRegistration().has_value());
+    EXPECT_TRUE(resource.prefixCacheRegistration()->required_continuation_ready);
+    EXPECT_FALSE(resource.prefixCacheRegistration()->prepared);
+    resource.prepareRegisteredSave();
+    EXPECT_TRUE(resource.prefixCacheRegistration()->prepared);
+    stream_->releaseResource();
+}
+
+TEST_F(StreamCacheResourceTest, DenseTailSaveReusesPrivateContinuationWithoutSecondCopy) {
+    auto config = test::makeSimpleMhaCacheConfig(3, 16, 4, DataType::TYPE_FP16);
+    prepareResourceWithCacheConfig(config, {1, 2, 3, 4, 5, 6}, /*reuse_cache=*/true, RoleType::PREFILL);
+    auto& resource = stream_->streamCacheResource();
+    resource.resource_context_.ignore_request_cache_switches = true;
+    resource.resource_context_.enable_prefill_partial_tail_reuse = true;
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    ASSERT_TRUE(resource.prefixCacheRegistration().has_value());
+    ASSERT_EQ(resource.prefixCacheRegistration()->points.back().endpoint.pos, 6u);
+
+    const auto& tag = cache_manager_->cacheConfig().groupTags().front();
+    auto pool = cache_manager_->blockTreeCache()->groupSets().front()->devicePools().front();
+    const size_t slot = cache_manager_->cacheConfig().endpointBlockPosition(tag, 5);
+    const auto source = resource.kvCache().blocks(0, tag).at(slot);
+    ASSERT_FALSE(isNullBlockIdx(source));
+    pool->incTreeRef(source, BlockTreeRefType::CACHE);
+    stream_->setInitialReuseLength(5);
+    ASSERT_TRUE(resource.prepareRequiredContinuation().ok());
+
+    const auto running = resource.kvCache().blocks(0, tag).at(slot);
+    ASSERT_NE(running, source);
+    const auto& required_copies = resource.registeredSaveCopyMapping();
+    EXPECT_TRUE(std::any_of(required_copies.begin(), required_copies.end(), [&](const auto& copy) {
+        return copy.tag == tag && copy.src == source && copy.dst == running;
+    }));
+    const auto& source_pins = resource.prefixCacheRegistration()->source_pins;
+    const size_t source_pin_count = std::count_if(source_pins.begin(), source_pins.end(), [&](const auto& pin) {
+        return pin.tag == tag && pin.block == source;
+    });
+    ASSERT_GE(source_pin_count, 1u);
+    EXPECT_EQ(pool->refCount(source), 1u + source_pin_count);  // CACHE plus each request source pin
+
+    resource.prepareRegisteredSave();
+    const auto& registration = *resource.prefixCacheRegistration();
+    ASSERT_TRUE(registration.prepared);
+    const auto& tail = registration.points.back().group_bindings.front();
+    ASSERT_EQ(tail.ownership, PrefixCacheSaveOwnership::REQUIRED_RUNTIME);
+    ASSERT_TRUE(tail.resource.hasCompleteDeviceValue());
+    const auto saved = tail.resource.device_blocks.front();
+    EXPECT_NE(saved, source);
+    EXPECT_EQ(saved, running);
+    const auto& all_copies = resource.registeredSaveCopyMapping();
+    ASSERT_EQ(all_copies.size(), resource.kvCache().batchSize());
+    std::set<BlockIdxType> private_destinations;
+    for (int batch = 0; batch < resource.kvCache().batchSize(); ++batch) {
+        const auto destination = resource.kvCache().blocks(batch, tag).at(slot);
+        EXPECT_NE(destination, source);
+        EXPECT_TRUE(private_destinations.insert(destination).second);
+        EXPECT_EQ(std::count_if(all_copies.begin(),
+                                all_copies.end(),
+                                [&](const auto& copy) {
+                                    return copy.tag == tag && copy.src == source && copy.dst == destination;
+                                }),
+                  1);
+    }
+    EXPECT_FALSE(std::any_of(all_copies.begin(), all_copies.end(), [&](const auto& copy) {
+        return copy.tag == tag && copy.src == running && copy.dst == saved;
+    }));
+    EXPECT_EQ(tail.state, PrefixCacheSaveState::REGISTERED);
+    ASSERT_EQ(registration.points.front().endpoint.pos, 4u);
+    EXPECT_EQ(registration.points.front().group_bindings.front().state, PrefixCacheSaveState::CONTENT_COMPLETE);
+    EXPECT_TRUE(registration.content_completed);  // The recovered P4 is ready; future P6 is not.
+    InsertInfo info{resource.batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), false, Tier::DEVICE};
+    info.prefix_cache_registration = &registration;
+    size_t resident                = 0;
+    cache_manager_->insertIntoCache(info, resident);
+    const auto published = cache_manager_->blockTreeCache()->tree()->findNode(registration.base_keys);
+    ASSERT_EQ(published.size(), 1u);
+    EXPECT_EQ(published.front()->token_end, 4u);  // Never publish the uncomputed suffix at P6.
+
+    pool->decTreeRef(source, BlockTreeRefType::CACHE);
+    EXPECT_TRUE(pool->isAllocated(source));  // A remains pinned until the required copy completes or request release.
+    stream_->releaseResource();
+    EXPECT_FALSE(pool->isAllocated(source));
+    EXPECT_FALSE(pool->isAllocated(running));
+    EXPECT_FALSE(pool->isAllocated(saved));
+}
+
+TEST_F(StreamCacheResourceTest, OptionalGroupMemberFailureRollsBackEarlierMember) {
+    // Two LINEAR tags share an atomic GroupSet and need distinct exact states.
+    CacheConfig config;
+    config.dtype              = DataType::TYPE_FP16;
+    config.layer_num          = 2;
+    config.seq_size_per_block = 2;
+    auto first                = test::makeLinearSpec("first", 2, DataType::TYPE_FP16, 1, 1);
+    auto second               = test::makeLinearSpec("second", 2, DataType::TYPE_FP16, 1, 1);
+    config.fromGroupedSpecs(
+        {first, second}, {{0}, {1}}, {CacheGroupType::LINEAR, CacheGroupType::LINEAR}, {"first", "second"});
+    config.finalizeBlockNums(12, RuntimeConfig{});
+    prepareResourceWithCacheConfig(config, {1, 2, 3, 4, 5}, /*reuse_cache=*/true, RoleType::PREFILL);
+    auto& resource = stream_->streamCacheResource();
+    resource.resource_context_.ignore_request_cache_switches = true;
+    resource.resource_context_.enable_prefill_partial_tail_reuse = true;
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    ASSERT_TRUE(resource.prepareRequiredContinuation().ok());
+
+    const auto& group_sets = cache_manager_->blockTreeCache()->groupSets();
+    const auto group_it = std::find_if(group_sets.begin(), group_sets.end(), [](const auto& group) {
+        return group->groupTags().size() >= 2;
+    });
+    ASSERT_NE(group_it, group_sets.end());
+    const auto& group = *group_it;
+    auto first_pool = group->devicePools()[0];
+    auto second_pool = group->devicePools()[1];
+    const size_t first_free_before = first_pool->freeBlocksNum();
+    const auto held = second_pool->malloc(second_pool->freeBlocksNum());
+    ASSERT_TRUE(held.has_value());
+    second_pool->incRef(*held);
+
+    resource.prepareRegisteredSave();
+    ASSERT_TRUE(resource.prefixCacheRegistration()->prepared);
+    const auto& binding = resource.prefixCacheRegistration()->points.back().group_bindings[group->groupSetId()];
+    EXPECT_EQ(binding.state, PrefixCacheSaveState::UNFULFILLED);
+    EXPECT_EQ(binding.unfulfilled_reason, "optional_device_capacity");
+    EXPECT_TRUE(binding.resource.is_empty());
+    EXPECT_EQ(first_pool->freeBlocksNum(), first_free_before);
+
+    second_pool->decRef(*held);
+    stream_->releaseResource();
+}
+
+TEST_F(StreamCacheResourceTest, CompletedHistoryPinsDoNotBlockFallbackRuntimeGrowth) {
+    auto config = test::makeSimpleLinearCacheConfig(3, 8, 4, DataType::TYPE_FP16);
+    prepareResourceWithCacheConfig(config, {1, 2, 3, 4, 5, 6}, /*reuse_cache=*/true, RoleType::PREFILL);
+    auto& resource = stream_->streamCacheResource();
+    resource.init(1);
+    resource.resource_context_.ignore_request_cache_switches = true;
+    resource.resource_context_.enable_prefill_partial_tail_reuse = true;
+    ASSERT_TRUE(resource.initKVBlock().ok());
+
+    const auto& tag = cache_manager_->cacheConfig().groupTags().front();
+    auto pool = cache_manager_->blockTreeCache()->groupSets().front()->devicePools().front();
+    const size_t slot = cache_manager_->cacheConfig().endpointBlockPosition(tag, 5);
+    const auto source = resource.kvCache().blocks(0, tag).at(slot);
+    pool->incTreeRef(source, BlockTreeRefType::CACHE);
+    stream_->setInitialReuseLength(5);
+    ASSERT_TRUE(resource.prepareRequiredContinuation().ok());
+    resource.prepareRegisteredSave();
+    const auto& registration = *resource.prefixCacheRegistration();
+    ASSERT_TRUE(registration.prepared);
+    ASSERT_FALSE(registration.source_pins.empty());
+    ASSERT_TRUE(std::any_of(registration.copy_mappings.begin(), registration.copy_mappings.end(),
+                            [&](const auto& copy) { return copy.tag == tag && copy.src == source; }));
+    ASSERT_EQ(registration.points.back().group_bindings.front().ownership,
+              PrefixCacheSaveOwnership::OPTIONAL_REQUEST);
+    const auto original_key = registration.points.back().endpoint.key;
+
+    // Keep the cached A allocated independently of this request while the
+    // fallback allocator tries to reclaim its completed optional D.
+    pool->incRef(source);
+    const auto before_completion = pool->refCount(source);
+    const size_t source_pin_count = std::count_if(registration.source_pins.begin(), registration.source_pins.end(),
+                                                  [&](const auto& pin) {
+                                                      return pin.tag == tag && pin.block == source;
+                                                  });
+    resource.completeRegisteredSave(/*completed_endpoint=*/6);  // Inject T05's post-copy/writer completion signal.
+    EXPECT_TRUE(resource.prefixCacheRegistration()->source_pins.empty());
+    EXPECT_EQ(pool->refCount(source), before_completion - source_pin_count);
+
+    const auto held = pool->malloc(pool->freeBlocksNum());
+    ASSERT_TRUE(held.has_value());
+    pool->incRef(*held);
+    auto* ids = stream_->completeTokenIdsPtr()->data(0);
+    ids[6] = 7;
+    ids[7] = 8;
+    ids[8] = 9;
+    stream_->setSeqLength(9);
+    ASSERT_TRUE(resource.incrKVBlock().ok());
+    const auto& retained = *resource.prefixCacheRegistration();
+    EXPECT_EQ(retained.original_input_tokens, 6u);
+    EXPECT_EQ(retained.points.back().endpoint.key, original_key);
+    EXPECT_EQ(retained.points.back().group_bindings.front().state, PrefixCacheSaveState::UNFULFILLED);
+    EXPECT_EQ(retained.points.back().group_bindings.front().unfulfilled_reason, "runtime_priority");
+
+    pool->decRef(*held);
+    pool->decRef(source);
+    pool->decTreeRef(source, BlockTreeRefType::CACHE);
+    stream_->releaseResource();
+}
+
+TEST_F(StreamCacheResourceTest, CompletionOnlyMarksActuallyComputedSaveEndpoints) {
+    auto config = test::makeSimpleMhaCacheConfig(3, 12, 2, DataType::TYPE_FP16);
+    prepareResourceWithCacheConfig(config, {1, 2, 3, 4, 5}, /*reuse_cache=*/true, RoleType::PREFILL);
+    auto& resource = stream_->streamCacheResource();
+    resource.init(1);
+    resource.resource_context_.ignore_request_cache_switches = true;
+    resource.resource_context_.enable_prefill_partial_tail_reuse = true;
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    ASSERT_TRUE(resource.prepareRequiredContinuation().ok());
+    resource.prepareRegisteredSave();
+    const auto& initial = *resource.prefixCacheRegistration();
+    ASSERT_EQ(initial.points.size(), 3u);
+    EXPECT_EQ(initial.points[0].endpoint.pos, 2u);
+    EXPECT_EQ(initial.points[1].endpoint.pos, 4u);
+    EXPECT_EQ(initial.points[2].endpoint.pos, 5u);
+
+    resource.completeRegisteredSave(/*completed_endpoint=*/3);
+    const auto& after_first_chunk = *resource.prefixCacheRegistration();
+    EXPECT_EQ(after_first_chunk.points[0].group_bindings.front().state, PrefixCacheSaveState::CONTENT_COMPLETE);
+    EXPECT_EQ(after_first_chunk.points[1].group_bindings.front().state, PrefixCacheSaveState::REGISTERED);
+    EXPECT_EQ(after_first_chunk.points[2].group_bindings.front().state, PrefixCacheSaveState::REGISTERED);
+
+    resource.completeRegisteredSave(/*completed_endpoint=*/5);
+    const auto& after_final_chunk = *resource.prefixCacheRegistration();
+    EXPECT_EQ(after_final_chunk.points[1].group_bindings.front().state, PrefixCacheSaveState::CONTENT_COMPLETE);
+    EXPECT_EQ(after_final_chunk.points[2].group_bindings.front().state, PrefixCacheSaveState::CONTENT_COMPLETE);
+    stream_->releaseResource();
+}
+
+TEST_F(StreamCacheResourceTest, RegisteredHistoricalGroupsRecordMissingWithoutReplay) {
+    auto config = test::makeSimpleLinearCacheConfig(3, 12, 2, DataType::TYPE_FP16);
+    prepareResourceWithCacheConfig(config, {1, 2, 3, 4, 5}, /*reuse_cache=*/true, RoleType::PREFILL);
+    auto& resource = stream_->streamCacheResource();
+    resource.resource_context_.ignore_request_cache_switches = true;
+    resource.resource_context_.enable_prefill_partial_tail_reuse = true;
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    ASSERT_TRUE(resource.prepareRequiredContinuation().ok());
+    const auto original = *resource.prefixCacheRegistration();
+    const auto cache = cache_manager_->blockTreeCache();
+    const auto pool = cache->groupSets().front()->devicePools().front();
+    auto& runtime = *resource.batch_kv_cache_resource_;
+    auto missing = original;
+    const size_t free_before = pool->freeBlocksNum();
+    cache_manager_->prepareRegisteredSave(missing, runtime, 5);
+    for (const auto& point : missing.points) {
+        for (const auto& binding : point.group_bindings) {
+            EXPECT_EQ(binding.state, PrefixCacheSaveState::UNFULFILLED);
+            EXPECT_EQ(binding.unfulfilled_reason, "missing_history_before_resume");
+            EXPECT_TRUE(binding.resource.is_empty());
+        }
+    }
+    EXPECT_TRUE(missing.copy_mappings.empty());
+    EXPECT_EQ(pool->freeBlocksNum(), free_before);
+    cache_manager_->releaseRegisteredSave(missing);
+
+    // This cache ownership fixture supplies the existing completion signal;
+    // model writer correctness is covered by the CUDA integration gates.
+    resource.prepareRegisteredSave();
+    resource.completeRegisteredSave(5);
+    InsertInfo info{resource.batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), false, Tier::DEVICE};
+    info.prefix_cache_registration = &*resource.prefix_cache_registration_;
+    size_t resident = 0;
+    cache_manager_->insertIntoCache(info, resident);
+    ASSERT_EQ(cache->tree()->size(), 3u);
+
+    auto cached = original;
+    const size_t cached_free = pool->freeBlocksNum();
+    cache_manager_->prepareRegisteredSave(cached, runtime, 5);
+    for (const auto& point : cached.points) {
+        for (const auto& binding : point.group_bindings) {
+            EXPECT_EQ(binding.state, PrefixCacheSaveState::CACHED_REF);
+            EXPECT_TRUE(binding.unfulfilled_reason.empty());
+            EXPECT_EQ(binding.ownership, PrefixCacheSaveOwnership::CACHED_REQUEST);
+            EXPECT_TRUE(binding.resource.hasCompleteDeviceValue());
+            EXPECT_FALSE(binding.cached_path_indices.empty());
+        }
+    }
+    EXPECT_TRUE(cached.copy_mappings.empty());
+    EXPECT_TRUE(cached.source_pins.empty());
+    EXPECT_TRUE(cached.content_completed);  // Existing saved content satisfies the registered intent.
+    EXPECT_EQ(cached.cached_source_pins.size(), 3u);  // Shared across the FULL prefixes 2/4/5.
+    EXPECT_EQ(pool->freeBlocksNum(), cached_free);
+    cache_manager_->releaseRegisteredSave(cached);
+    stream_->releaseResource();
+}
+
+TEST_F(StreamCacheResourceTest, CachedRegistrationPinsSwaHistoryAndYieldsToRuntimeWithoutReplay) {
+    for (const bool yield_to_runtime : {false, true}) {
+        for (const bool missing_middle : {false, true}) {
+          for (const size_t resume : {6u, 7u}) {
+            SCOPED_TRACE(::testing::Message() << "yield=" << yield_to_runtime << "missing=" << missing_middle
+                                             << "resume=" << resume);
+            CacheConfig config;
+            config.dtype = DataType::TYPE_FP16;
+            config.layer_num = 2;
+            config.seq_size_per_block = 2;
+            auto full_spec = test::makeMhaSpec("full", 2, DataType::TYPE_FP16, 1, 1);
+            auto swa_spec = test::makeMhaSpec("swa", 2, DataType::TYPE_FP16, 1, 1);
+            CacheGroupPolicy full_policy;
+            CacheGroupPolicy swa_policy;
+            swa_policy.group_type = CacheGroupType::SWA;
+            swa_policy.sliding_window_size = 4;
+            swa_policy.active_tail_blocks = 2;
+            config.fromGroupedSpecs({full_spec, swa_spec}, {{0}, {1}},
+                                    {CacheGroupType::FULL, CacheGroupType::SWA}, {"full", "swa"},
+                                    {full_policy, swa_policy});
+            config.finalizeBlockNums(32, RuntimeConfig{});
+            prepareResourceWithCacheConfig(config, {1, 2, 3, 4, 5, 6, 7}, true, RoleType::PREFILL);
+            auto& resource = stream_->streamCacheResource();
+            resource.resource_context_.ignore_request_cache_switches = true;
+            resource.resource_context_.enable_prefill_partial_tail_reuse = true;
+            ASSERT_TRUE(resource.initKVBlock().ok());
+            ASSERT_TRUE(resource.prepareRequiredContinuation().ok());
+            auto probe = *resource.prefixCacheRegistration();
+            const auto cache = cache_manager_->blockTreeCache();
+            ASSERT_EQ(cache->groupSets().size(), 2u);
+            size_t full_id = 0;
+            size_t swa_id = 0;
+            for (const auto& group : cache->groupSets()) {
+                if (group->groupType() == CacheGroupType::FULL) full_id = group->groupSetId();
+                if (group->groupType() == CacheGroupType::SWA) swa_id = group->groupSetId();
+            }
+            ASSERT_NE(full_id, swa_id);
+            const auto full_pool = cache->groupSets()[full_id]->devicePools().front();
+            const auto swa_pool = cache->groupSets()[swa_id]->devicePools().front();
+            const auto full_blocks = full_pool->malloc(4);
+            const auto swa_blocks = swa_pool->malloc(4);
+            ASSERT_TRUE(full_blocks.has_value() && swa_blocks.has_value());
+            full_pool->incRef(*full_blocks);
+            swa_pool->incRef(*swa_blocks);
+            std::vector<std::vector<GroupSetResource>> stored(4, std::vector<GroupSetResource>(2));
+            for (size_t index = 0; index < 4; ++index) {
+                stored[index][full_id].device_blocks = {(*full_blocks)[index]};
+                if (!missing_middle || index != 1) {
+                    stored[index][swa_id].device_blocks = {(*swa_blocks)[index]};
+                }
+            }
+            const std::vector<std::vector<int>> tokens{{1, 2}, {3, 4}, {5, 6}, {7}};
+            const std::vector<size_t> endpoints{2, 4, 6, 7};
+            cache->insert(probe.base_keys, stored, Tier::DEVICE, false, &tokens, nullptr, &endpoints);
+            full_pool->decRef(*full_blocks);
+            swa_pool->decRef(*swa_blocks);
+            ASSERT_EQ(cache->tree()->size(), 4u);
+            if (missing_middle) {
+                // This fixture initialized a fresh runtime before supplying G.
+                // Reflect the same missing historical page there as on the tree;
+                // uncomputed fresh allocation must not stand in for restored KV.
+                auto&      runtime_ids = resource.batch_kv_cache_resource_->mutableBlockIds(0, "swa");
+                const auto unused      = runtime_ids.blocks().at(1);
+                ASSERT_FALSE(isNullBlockIdx(unused));
+                runtime_ids.setAt(1, NULL_BLOCK_IDX);
+                swa_pool->decRef(unused);
+            }
+            const auto baseline_free = cache_manager_->freeBlocksNum();
+            cache_manager_->prepareRegisteredSave(probe, *resource.batch_kv_cache_resource_, resume);
+            EXPECT_TRUE(probe.copy_mappings.empty());
+            EXPECT_EQ(cache_manager_->freeBlocksNum(), baseline_free);
+            // N7 is already cached even when G6<N7: it needs no producer destination.
+            for (const auto& point : probe.points) {
+                for (const auto& binding : point.group_bindings) {
+                    EXPECT_NE(binding.state, PrefixCacheSaveState::REGISTERED);
+                    EXPECT_NE(binding.ownership, PrefixCacheSaveOwnership::OPTIONAL_REQUEST);
+                }
+            }
+            EXPECT_EQ(probe.cached_source_pins.size(), missing_middle ? 7u : 8u);
+            for (size_t index = 0; index < 4; ++index) {
+                EXPECT_EQ(probe.points[index].group_bindings[full_id].state, PrefixCacheSaveState::CACHED_REF);
+                const auto& binding = probe.points[index].group_bindings[swa_id];
+                const bool missing_history = missing_middle && (index == 1 || index == 2);
+                EXPECT_EQ(binding.state, missing_history ? PrefixCacheSaveState::UNFULFILLED : PrefixCacheSaveState::CACHED_REF);
+                EXPECT_EQ(binding.unfulfilled_reason, missing_history ? "missing_history_before_resume" : "");
+            }
+            const auto& swa_tail = probe.points.back().group_bindings[swa_id];
+            ASSERT_EQ(swa_tail.cached_path_indices.size(), 2u);  // Previous and current SWA physical nodes.
+            for (const auto& pin : probe.cached_source_pins) {
+                const auto pool = pin.tag == "full" ? full_pool : swa_pool;
+                EXPECT_EQ(pool->refCount(pin.block), 2u);  // One tree + one request ref, even across points.
+            }
+            cache->evictForGroup("full", 32);
+            EXPECT_EQ(cache->tree()->size(), 0u);
+            for (const auto& pin : probe.cached_source_pins) {
+                const auto pool = pin.tag == "full" ? full_pool : swa_pool;
+                ASSERT_TRUE(pool->isAllocated(pin.block));
+                EXPECT_EQ(pool->refCount(pin.block), 1u);
+            }
+            if (yield_to_runtime) {
+                // A mandatory continuation source remains protected while its
+                // copy descriptor is live; optional saved-state pins may yield.
+                const auto& full_runtime = resource.batch_kv_cache_resource_->blocks(0, "full");
+                ASSERT_GE(full_runtime.size(), 2u);
+                const auto required_source = full_runtime[0];
+                const auto required_before = full_pool->refCount(required_source);
+                full_pool->incRef(required_source);
+                probe.source_pins.push_back({"full", 0, required_source});
+                probe.copy_mappings.push_back({"full", required_source, full_runtime[1]});
+                EXPECT_TRUE(cache_manager_->relinquishOptionalRegisteredSave(probe));
+                EXPECT_TRUE(probe.cached_source_pins.empty());
+                EXPECT_TRUE(probe.cached_path_resources.empty());
+                ASSERT_EQ(probe.copy_mappings.size(), 1u);
+                ASSERT_EQ(probe.source_pins.size(), 1u);
+                EXPECT_EQ(full_pool->refCount(required_source), required_before + 1);
+                EXPECT_EQ(probe.points.back().group_bindings[swa_id].unfulfilled_reason, "runtime_priority");
+                for (auto block : *full_blocks) EXPECT_FALSE(full_pool->isAllocated(block));
+                for (auto block : *swa_blocks) EXPECT_FALSE(swa_pool->isAllocated(block));
+            } else {
+                // Rebuild the evicted FULL/SWA path from pinned immutable state,
+                // including older SWA nodes; no model replay or new snapshot.
+                InsertInfo info{resource.batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), false, Tier::DEVICE};
+                info.prefix_cache_registration = &probe;
+                size_t resident = 0;
+                cache_manager_->insertIntoCache(info, resident);
+                ASSERT_EQ(cache->tree()->size(), 4u);
+                const auto path = cache->tree()->findNode(probe.base_keys);
+                ASSERT_EQ(path.size(), 4u);
+                EXPECT_EQ(path[2]->group_set_resources[swa_id].device_blocks, (BlockIndicesType{(*swa_blocks)[2]}));
+                EXPECT_EQ(path[3]->group_set_resources[swa_id].device_blocks, (BlockIndicesType{(*swa_blocks)[3]}));
+            }
+            cache_manager_->releaseRegisteredSave(probe);
+            EXPECT_TRUE(probe.cached_source_pins.empty());
+            cache_manager_->releaseRegisteredSave(probe);  // Reference cleanup is idempotent.
+            stream_->releaseResource();
+          }
+        }
+    }
+}
+
+TEST_F(StreamCacheResourceTest, RegisteredSavePublishesOnlyAfterCompletionAndReleasesConcurrentLoser) {
+    auto config = test::makeSimpleLinearCacheConfig(3, 32, 2, DataType::TYPE_FP16);
+    prepareResourceWithCacheConfig(config, {1, 2, 3, 4, 5}, /*reuse_cache=*/true, RoleType::PREFILL);
+    auto& resource = stream_->streamCacheResource();
+    resource.resource_context_.ignore_request_cache_switches = true;
+    resource.resource_context_.enable_prefill_partial_tail_reuse = true;
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    ASSERT_TRUE(resource.prepareRequiredContinuation().ok());
+
+    auto& runtime = *resource.batch_kv_cache_resource_;
+    auto first = *resource.prefixCacheRegistration();
+    auto second = first;
+    auto cancelled = first;
+    cache_manager_->prepareRegisteredSave(first, runtime, 0);
+    cache_manager_->prepareRegisteredSave(second, runtime, 0);
+    cache_manager_->prepareRegisteredSave(cancelled, runtime, 0);
+    ASSERT_TRUE(first.prepared && second.prepared && cancelled.prepared);
+    const auto cache = cache_manager_->blockTreeCache();
+    const auto pool = cache->groupSets().front()->devicePools().front();
+    const auto first_tail = first.points.back().group_bindings.front().resource.device_blocks.front();
+    const auto second_tail = second.points.back().group_bindings.front().resource.device_blocks.front();
+    const auto cancelled_tail = cancelled.points.back().group_bindings.front().resource.device_blocks.front();
+    ASSERT_NE(first_tail, second_tail);
+
+    auto insert = [&](const PrefixCacheRegistration& registration) {
+        InsertInfo info{resource.batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), false, Tier::DEVICE};
+        info.prefix_cache_registration = &registration;
+        size_t resident = 0;
+        cache_manager_->insertIntoCache(info, resident);
+    };
+    insert(cancelled);
+    EXPECT_EQ(cache->tree()->size(), 0u);  // Allocated IDs alone cannot publish.
+    cache_manager_->releaseRegisteredSave(cancelled);
+    EXPECT_FALSE(pool->isAllocated(cancelled_tail));
+
+    auto mark_complete = [](PrefixCacheRegistration& registration) {
+        for (auto& point : registration.points) {
+            for (auto& binding : point.group_bindings) {
+                if (binding.resource.hasCompleteDeviceValue()) {
+                    binding.state = PrefixCacheSaveState::CONTENT_COMPLETE;
+                }
+            }
+        }
+        registration.content_completed = true;
+    };
+    mark_complete(first);
+    mark_complete(second);
+    std::thread a([&] { insert(first); });
+    std::thread b([&] { insert(second); });
+    a.join();
+    b.join();
+    EXPECT_EQ(cache->tree()->size(), 3u);
+
+    cache_manager_->releaseRegisteredSave(first);
+    cache_manager_->releaseRegisteredSave(second);
+    const bool first_retained = pool->isAllocated(first_tail);
+    const bool second_retained = pool->isAllocated(second_tail);
+    EXPECT_NE(first_retained, second_retained);
+    stream_->releaseResource();
+}
+
+TEST_F(StreamCacheResourceTest, OptionalSaveYieldsToFallbackRuntimeGrowth) {
+    auto config = test::makeSimpleLinearCacheConfig(3, 5, 2, DataType::TYPE_FP16);
+    prepareResourceWithCacheConfig(config, {1, 2, 3, 4, 5}, /*reuse_cache=*/true, RoleType::PREFILL);
+    auto& resource = stream_->streamCacheResource();
+    resource.init(1);
+    resource.resource_context_.ignore_request_cache_switches = true;
+    resource.resource_context_.enable_prefill_partial_tail_reuse = true;
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    ASSERT_TRUE(resource.prepareRequiredContinuation().ok());
+    resource.prepareRegisteredSave();
+    ASSERT_TRUE(resource.prefixCacheRegistration()->prepared);
+    const auto& points = resource.prefixCacheRegistration()->points;
+    ASSERT_EQ(points.size(), 3u);
+    EXPECT_EQ(points[0].group_bindings.front().ownership, PrefixCacheSaveOwnership::REQUIRED_RUNTIME);
+    EXPECT_EQ(points[1].group_bindings.front().ownership, PrefixCacheSaveOwnership::REQUIRED_RUNTIME);
+    ASSERT_EQ(points[2].group_bindings.front().ownership, PrefixCacheSaveOwnership::OPTIONAL_REQUEST);
+    const auto optional = points[2].group_bindings.front().resource.device_blocks.front();
+    auto pool = cache_manager_->blockTreeCache()->groupSets().front()->devicePools().front();
+    EXPECT_EQ(pool->freeBlocksNum(), 0u);
+    resource.completeRegisteredSave(/*completed_endpoint=*/5);  // Inject the T05 completion signal for this ownership test.
+
+    auto* ids = stream_->completeTokenIdsPtr()->data(0);
+    ids[5] = 6;
+    ids[6] = 7;
+    stream_->setSeqLength(7);
+    ASSERT_TRUE(resource.incrKVBlock().ok());
+    const auto& runtime_blocks = resource.kvCache().blocks(0, cache_manager_->cacheConfig().groupTags().front());
+    EXPECT_EQ(runtime_blocks.size(), 4u);
+    const auto& retained = *resource.prefixCacheRegistration();
+    EXPECT_EQ(retained.points[0].group_bindings.front().state, PrefixCacheSaveState::CONTENT_COMPLETE);
+    EXPECT_EQ(retained.points[1].group_bindings.front().state, PrefixCacheSaveState::CONTENT_COMPLETE);
+    EXPECT_EQ(retained.points[2].group_bindings.front().state, PrefixCacheSaveState::UNFULFILLED);
+    EXPECT_EQ(retained.points[2].group_bindings.front().unfulfilled_reason, "runtime_priority");
+    EXPECT_EQ(retained.points[2].group_bindings.front().ownership, PrefixCacheSaveOwnership::NONE);
+    EXPECT_TRUE(retained.points[2].group_bindings.front().resource.is_empty());
+    EXPECT_TRUE(std::none_of(retained.copy_mappings.begin(), retained.copy_mappings.end(), [&](const auto& copy) {
+        return copy.dst == optional;
+    }));
+    if (pool->isAllocated(optional)) {
+        // The freed optional numeric ID may be immediately reused by mandatory runtime growth.
+        EXPECT_NE(std::find(runtime_blocks.begin(), runtime_blocks.end(), optional), runtime_blocks.end());
+        EXPECT_EQ(pool->refCount(optional), 1u);
+    }
+    EXPECT_TRUE(retained.content_completed);
+    stream_->releaseResource();
+}
+
+TEST_F(StreamCacheResourceTest, PartialTailRegistrationDeduplicatesAlignedEndAndHonorsRole) {
+    prepareResourceWithInputTokens({1, 2, 3, 4, 5}, /*reuse_cache=*/true, RoleType::PREFILL);
+    auto& default_off = stream_->streamCacheResource();
+    default_off.resource_context_.ignore_request_cache_switches = true;
+    ASSERT_TRUE(default_off.initKVBlock().ok());
+    EXPECT_FALSE(default_off.prefixCacheRegistration().has_value());
+    stream_->releaseResource();
+
+    for (const auto role : {RoleType::PREFILL, RoleType::PDFUSION, RoleType::DECODE}) {
+        prepareResourceWithInputTokens({1, 2, 3, 4, 5, 6}, /*reuse_cache=*/true, role);
+        auto& resource = stream_->streamCacheResource();
+        resource.resource_context_.ignore_request_cache_switches = true;
+        resource.resource_context_.enable_prefill_partial_tail_reuse = true;
+        ASSERT_TRUE(resource.initKVBlock().ok());
+        if (role == RoleType::PREFILL) {
+            ASSERT_TRUE(resource.prefixCacheRegistration().has_value());
+            const auto& points = resource.prefixCacheRegistration()->points;
+            ASSERT_EQ(points.size(), 3u);
+            EXPECT_EQ(points.back().endpoint.pos, 6u);
+        } else {
+            EXPECT_FALSE(resource.prefixCacheRegistration().has_value());
+        }
+        stream_->releaseResource();
+    }
+}
+
+TEST_F(StreamCacheResourceTest, PartialTailRegistrationUsesGlobalCpCheckpointUnit) {
+    prepareResourceWithCacheConfig(init_cp_config(),
+                                   {1, 2, 3, 4, 5, 6, 7},
+                                   /*reuse_cache=*/true,
+                                   RoleType::PREFILL);
+    auto& resource = stream_->streamCacheResource();
+    resource.resource_context_.ignore_request_cache_switches = true;
+    resource.resource_context_.enable_prefill_partial_tail_reuse = true;
+    ASSERT_EQ(cache_manager_->reuseUnitTokens(), 4);
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    ASSERT_TRUE(resource.prefixCacheRegistration().has_value());
+    const auto& points = resource.prefixCacheRegistration()->points;
+    ASSERT_EQ(points.size(), 2u);
+    EXPECT_EQ(points[0].endpoint.pos, 4u);
+    EXPECT_EQ(points[0].endpoint.index, 1u);
+    EXPECT_EQ(points[1].endpoint.pos, 7u);
+    EXPECT_EQ(points[1].endpoint.index, 3u);
+    stream_->releaseResource();
+}
+
+TEST_F(StreamCacheResourceTest, PartialTailRegistrationPreservesSparseStepPolicy) {
+    auto config = test::makeSimpleHybridMhaCacheConfig(4, 12, 2, DataType::TYPE_FP16, 2);
+    ASSERT_EQ(config.linear_step, 2);
+    prepareResourceWithCacheConfig(config, {1, 2, 3, 4, 5, 6, 7}, /*reuse_cache=*/true, RoleType::PREFILL);
+    auto& resource = stream_->streamCacheResource();
+    resource.resource_context_.ignore_request_cache_switches = true;
+    resource.resource_context_.enable_prefill_partial_tail_reuse = true;
+    ASSERT_TRUE(resource.initKVBlock().ok());
+#if USING_CUDA
+    ASSERT_TRUE(resource.prefixCacheRegistration().has_value());
+    const auto& points = resource.prefixCacheRegistration()->points;
+    ASSERT_EQ(points.size(), 2u);
+    EXPECT_EQ(points[0].endpoint.pos, 4u);
+    EXPECT_EQ(points[1].endpoint.pos, 7u);
+#else
+    // Precise LINEAR tail snapshots are unavailable outside NVIDIA CUDA.
+    EXPECT_FALSE(resource.prefixCacheRegistration().has_value());
+#endif
+    stream_->releaseResource();
+}
+
+TEST_F(StreamCacheResourceTest, PartialTailRegistrationDoesNotAddInternalMatchPosition) {
+    std::vector<int> input_tokens(900);
+    std::iota(input_tokens.begin(), input_tokens.end(), 1);
+    auto config = test::makeSimpleMhaCacheConfig(3, 16, 256, DataType::TYPE_INT8);
+    prepareResourceWithCacheConfig(config, input_tokens, /*reuse_cache=*/true, RoleType::PREFILL);
+    auto& resource = stream_->streamCacheResource();
+    resource.resource_context_.ignore_request_cache_switches = true;
+    resource.resource_context_.enable_prefill_partial_tail_reuse = true;
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    // Matching M=650 is an independent later phase, not a registration input.
+    stream_->setInitialReuseLength(650);
+    ASSERT_TRUE(resource.prefixCacheRegistration().has_value());
+    const auto& points = resource.prefixCacheRegistration()->points;
+    ASSERT_EQ(points.size(), 4u);
+    EXPECT_EQ(points[0].endpoint.pos, 256u);
+    EXPECT_EQ(points[1].endpoint.pos, 512u);
+    EXPECT_EQ(points[2].endpoint.pos, 768u);
+    EXPECT_EQ(points[3].endpoint.pos, 900u);
+    stream_->releaseResource();
 }
 
 TEST_F(StreamCacheResourceTest, ManagerMallocPreservesSuppliedBeginAndLegacyDefault) {
@@ -1278,6 +1986,7 @@ TEST_F(StreamCacheResourceTest, PrefixObservationEmitsOneRequestSummary) {
 
     const std::string payload = resource.prefixObservationSummaryPayload("ready");
     EXPECT_NE(payload.find("\"kind\":\"request\""), std::string::npos);
+    EXPECT_NE(payload.find("\"registration\":null"), std::string::npos);
     EXPECT_NE(payload.find("\"status\":\"ready\""), std::string::npos);
     EXPECT_NE(payload.find("\"instance\":"), std::string::npos);
     EXPECT_NE(payload.find("\"observation_time_us\":"), std::string::npos);
@@ -1288,6 +1997,105 @@ TEST_F(StreamCacheResourceTest, PrefixObservationEmitsOneRequestSummary) {
     EXPECT_TRUE(resource.prefix_summary_emitted_);
     resource.reportCacheReuseMetrics();
     EXPECT_TRUE(resource.prefix_summary_emitted_);
+}
+
+// Serialization contract only: injected binding states below are not evidence
+// that a producer completed, a copy succeeded, or a save entered the tree.
+TEST_F(StreamCacheResourceTest, PrefixObservationRegistrationSnapshotPreservesIntentAndStates) {
+    prepareResourceWithInputTokens({1, 2, 3, 4, 5}, /*reuse_cache=*/true, RoleType::PREFILL);
+    auto& resource = stream_->streamCacheResource();
+    resource.resource_context_.ignore_request_cache_switches = true;
+    resource.resource_context_.enable_prefill_partial_tail_reuse = true;
+    enablePrefixObservation();
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    ASSERT_TRUE(resource.prefix_cache_registration_.has_value());
+    const auto original = *resource.prefix_cache_registration_;
+    ASSERT_EQ(original.points.size(), 3u);
+    ASSERT_FALSE(original.points[0].group_bindings.empty());
+    ASSERT_FALSE(original.points[1].group_bindings.empty());
+    ASSERT_FALSE(original.points[2].group_bindings.empty());
+
+    auto& registration = *resource.prefix_cache_registration_;
+    registration.points[1].group_bindings[0].state = PrefixCacheSaveState::CONTENT_COMPLETE;
+    registration.points[2].group_bindings[0].state = PrefixCacheSaveState::UNFULFILLED;
+    registration.points[2].group_bindings[0].unfulfilled_reason = "runtime_priority\"\n";
+    const std::string payload = resource.prefixObservationSummaryPayload("failed");
+    EXPECT_NE(payload.find("\"sample_stage\":\"request_summary\""), std::string::npos);
+    EXPECT_NE(payload.find("\"original_input_tokens\":5"), std::string::npos);
+    EXPECT_NE(payload.find("\"prepared\":false,\"prepared_resume_endpoint\":0"), std::string::npos);
+    EXPECT_NE(payload.find("\"pos\":2,\"groups\":["), std::string::npos);
+    EXPECT_NE(payload.find("\"pos\":4,\"groups\":["), std::string::npos);
+    EXPECT_NE(payload.find("\"pos\":5,\"groups\":["), std::string::npos);
+    EXPECT_NE(payload.find("\"state\":\"registered\",\"unfulfilled_reason\":null"), std::string::npos);
+    EXPECT_NE(payload.find("\"state\":\"content_complete\",\"unfulfilled_reason\":null"), std::string::npos);
+    EXPECT_NE(payload.find("\"state\":\"unfulfilled\",\"unfulfilled_reason\":\"runtime_priority\\\"\\n\""),
+              std::string::npos);
+    EXPECT_NE(payload.find("\"used_pos\":null"), std::string::npos);
+    EXPECT_EQ(registration.points[0].group_bindings[0].state, PrefixCacheSaveState::REGISTERED);
+    EXPECT_EQ(registration.points[2].group_bindings[0].unfulfilled_reason, "runtime_priority\"\n");
+    resource.prefix_cache_registration_ = original;
+    stream_->releaseResource();
+}
+
+TEST_F(StreamCacheResourceTest, PrefixObservationRegistrationRetainsOriginalTailAfterGrowth) {
+    prepareResourceWithInputTokens({1, 2, 3, 4, 5}, /*reuse_cache=*/true, RoleType::PREFILL);
+    auto& resource = stream_->streamCacheResource();
+    resource.resource_context_.ignore_request_cache_switches = true;
+    resource.resource_context_.enable_prefill_partial_tail_reuse = true;
+    enablePrefixObservation();
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    stream_->completeTokenIdsPtr()->data(0)[5] = 6;
+    stream_->setSeqLength(6);
+    stream_->setIsContextStream(false);
+    ASSERT_TRUE(resource.incrKVBlock().ok());
+    const std::string payload = resource.prefixObservationSummaryPayload("cancelled");
+    EXPECT_NE(payload.find("\"original_input_tokens\":5"), std::string::npos);
+    EXPECT_NE(payload.find("\"pos\":5,\"groups\":["), std::string::npos);
+    EXPECT_EQ(payload.find("\"pos\":6,\"groups\":["), std::string::npos);
+    EXPECT_NE(payload.find("\"used_pos\":null"), std::string::npos);
+    stream_->releaseResource();
+}
+
+TEST_F(StreamCacheResourceTest, PrefixObservationPublicationIsCorrelatedAfterEitherSummaryExit) {
+    for (const bool report_first : {false, true}) {
+        for (const bool cancelled : {false, true}) {
+            SCOPED_TRACE(::testing::Message() << "report_first=" << report_first << " cancelled=" << cancelled);
+            preparePrefixObservationResource(/*reuse_cache=*/true, RoleType::PREFILL);
+            auto& resource = stream_->streamCacheResource();
+            ASSERT_TRUE(resource.initKVBlock().ok());
+            test::TestLogCapture capture("prefix_publication_exits");
+            if (cancelled) {
+                stream_->reportError(ErrorCode::CANCELLED, "cancel before publication");
+            } else {
+                stream_->generate_status_->status = StreamState::FINISHED;
+            }
+            if (report_first) {
+                resource.reportCacheReuseMetrics();
+            }
+            stream_->releaseResource();
+            resource.reportCacheReuseMetrics();
+            const std::string logs = capture.content();
+            const auto count = [&](const std::string& needle) {
+                size_t matches = 0;
+                for (size_t pos = logs.find(needle); pos != std::string::npos; pos = logs.find(needle, pos + 1)) {
+                    ++matches;
+                }
+                return matches;
+            };
+            EXPECT_EQ(count("\"kind\":\"request\""), 1u) << logs;
+            EXPECT_EQ(count("\"kind\":\"publication\""), 1u) << logs;
+            EXPECT_LT(logs.find("\"kind\":\"request\""), logs.find("\"kind\":\"publication\"")) << logs;
+            const std::string id = "\"request_id\":" + std::to_string(stream_->streamId());
+            EXPECT_GE(count(id), 2u) << logs;
+            if (cancelled) {
+                EXPECT_NE(logs.find("\"reason\":\"request_error\""), std::string::npos) << logs;
+                EXPECT_NE(logs.find("\"insert_attempted\":false"), std::string::npos) << logs;
+                EXPECT_NE(logs.find("\"used_pos\":null"), std::string::npos) << logs;
+            } else {
+                EXPECT_NE(logs.find("\"insert_attempted\":true"), std::string::npos) << logs;
+            }
+        }
+    }
 }
 
 TEST_F(StreamCacheResourceTest, PrefixObservationTerminalSummaryKeepsUnformedFieldsNull) {
@@ -1355,7 +2163,11 @@ TEST_F(StreamCacheResourceTest, testLoadCacheDone_PendingAllocatorLoad_ReturnsFa
 }
 
 TEST_F(StreamCacheResourceTest, StorageMatchDefersReusePublicationUntilReadCompletes) {
-    auto  backend  = prepareStorageBackendResource(/*block_matches=*/false);
+    auto  backend  = prepareStorageBackendResource(/*block_matches=*/false,
+                                                  /*seed_host=*/false,
+                                                  RoleType::PDFUSION,
+                                                  /*cp_size=*/0,
+                                                  /*enable_prefix_observability=*/true);
     auto& resource = stream_->streamCacheResource();
     backend->blockReads();
 
@@ -1382,6 +2194,47 @@ TEST_F(StreamCacheResourceTest, StorageMatchDefersReusePublicationUntilReadCompl
     EXPECT_EQ(resource.kvCache().cacheResource(0).memoryReuseBlockNum(), 0u);
     EXPECT_EQ(resource.kvCache().cacheResource(0).diskReuseBlockNum(), 0u);
     EXPECT_EQ(resource.kvCache().cacheResource(0).storageBackendReuseBlockNum(), 2u);
+    ASSERT_TRUE(resource.remote_observation_.effective.has_value());
+    EXPECT_TRUE(*resource.remote_observation_.effective);
+}
+
+TEST_F(StreamCacheResourceTest, RemoteQuerySelectingLocalShortLeafKeepsExactDeviceReuse) {
+    auto backend = prepareStorageBackendResource(/*block_matches=*/false,
+                                                 /*seed_host=*/false,
+                                                 RoleType::PREFILL,
+                                                 /*cp_size=*/0,
+                                                 /*enable_prefix_observability=*/true);
+    auto& resource = stream_->streamCacheResource();
+    auto coordinator = std::make_shared<LoadContextCoordinator>(
+        [](const std::shared_ptr<LoadAsyncContext>&) { return true; }, [](LoadAsyncContext&) {});
+    StorageRequest request{std::make_shared<CacheKeysType>(CacheKeysType{1234}), {{{"default", NULL_BLOCK_IDX}}}};
+    auto context = coordinator->create({}, {}, /*matched_blocks=*/0, backend, std::move(request));
+    ASSERT_TRUE(coordinator->registerContext(context));
+    context->setLocalFallback(/*token_endpoint=*/5, /*reuse_unit_tokens=*/2);
+    context->setMatchCallback([&resource](LoadAsyncContext& current, size_t matched) {
+        EXPECT_EQ(matched, 0u);
+        EXPECT_TRUE(current.localFallbackSelected());
+        // Coordinator transfers the pinned short-leaf references to the
+        // request before the Stream publishes the final source counters.
+        resource.kvCacheMutable().cacheResource(0).setDeviceReuseBlockNum(2);
+        return current.commit();
+    });
+    resource.allocator_load_context_ = context;
+    context->startBackendMatch();
+    context->waitDone();
+    ASSERT_TRUE(context->success());
+    ASSERT_TRUE(resource.loadCacheDone());
+    EXPECT_EQ(context->matchedTokenEndpoint(2), 5u);
+    EXPECT_EQ(stream_->initialReuseLength(), 5);
+    EXPECT_EQ(stream_->localReuseLength(), 5);
+    EXPECT_EQ(stream_->deviceReuseLength(), 5);
+    EXPECT_EQ(stream_->remoteReuseLength(), 0);
+    EXPECT_EQ(resource.kvCache().cacheResource(0).deviceReuseBlockNum(), 2u);
+    EXPECT_EQ(resource.kvCache().cacheResource(0).storageBackendReuseBlockNum(), 0u);
+    EXPECT_EQ(resource.remote_observation_.query_status, PrefixCacheRemoteQueryStatus::HIT);
+    ASSERT_TRUE(resource.remote_observation_.effective.has_value());
+    EXPECT_FALSE(*resource.remote_observation_.effective);
+    coordinator->shutdown();
 }
 
 TEST_F(StreamCacheResourceTest, StorageMatchWithExternalCpRequestLayoutWaitsForRemoteCompletion) {

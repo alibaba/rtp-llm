@@ -34,7 +34,10 @@ from typing import Any, Optional, Tuple
 
 import torch
 
-from rtp_llm.config.cuda_graph import CudaGraphSelectionMode, GenerationPrefillCudaGraphUnsupportedBackend
+from rtp_llm.config.cuda_graph import (
+    CudaGraphSelectionMode,
+    GenerationPrefillCudaGraphUnsupportedBackend,
+)
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.deepseek_v4_model import DeepSeekV4Model
@@ -55,6 +58,10 @@ from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_attn_metadata import (
 )
 from rtp_llm.models_py.modules.dsv4.fp8.decode.output_proj import decode_output_proj
 from rtp_llm.models_py.modules.dsv4.fp8.decode.write_swa import decode_write_swa_fp8
+from rtp_llm.models_py.modules.dsv4.fp8.sparse_save import (
+    SparseSaveTargets,
+    iter_sparse_save_slots,
+)
 from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
     SWA_KV,
     as_attention_inputs_by_tag,
@@ -91,6 +98,12 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
     # Draft side: carries the capture ids for the shared-buffer row-width
     # derivation but consumes the features — only the target captures.
     _captures_aux_hidden = False
+
+    @property
+    def supports_sparse_cache_save(self) -> bool:
+        return super().supports_sparse_cache_save and bool(
+            getattr(self, "_commit_only_prefill", False)
+        )
 
     def __init__(
         self,
@@ -445,6 +458,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         gathered_req_ids: Optional[torch.Tensor] = None,
         gathered_positions: Optional[torch.Tensor] = None,
         cp_ctx: Any = None,
+        sparse_save_targets: Optional[SparseSaveTargets] = None,
     ) -> None:
         """Insert committed target features through one layer's own
         wkv/kv_norm/RoPE pipeline. Rows superseded by newer SWA ring
@@ -534,6 +548,45 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
                     head_dim=int(attn.head_dim),
                 )
 
+            for _, save_slots in iter_sparse_save_slots(
+                sparse_save_targets,
+                context_positions,
+                context_req_ids,
+                entries_per_block=entries_per_block,
+                tokens_per_block=tokens_per_block,
+                runtime_block_table=block_table,
+            ):
+                if attn._swa_cp_byte_sliced():
+                    from rtp_llm.models_py.modules.dsv4.fp8 import (
+                        _swa_kv_insert_triton as insert_ops,
+                    )
+
+                    compaction = attn._build_swa_cp_byte_compaction(
+                        save_slots,
+                        full_entries_per_block=entries_per_block,
+                        validation_site=f"dspark.commit.sparse.layer_{layer_idx}",
+                        negative_mode="skip_minus_one",
+                    )
+                    assert compaction is not None
+                    insert_ops.quantize_and_insert_k_cache_cp_byte_sliced(
+                        context_kv.reshape(-1, int(attn.head_dim)).to(torch.bfloat16),
+                        attn._pool_raw_u8(SWA_KV),
+                        save_slots,
+                        full_entries_per_block=entries_per_block,
+                        cp_rank=int(attn._cp_ctx.cp_rank),
+                        cp_size=int(attn._cp_ctx.cp_size),
+                        compaction=compaction,
+                    )
+                else:
+                    decode_write_swa_fp8(
+                        kv=context_kv,
+                        slot_mapping=save_slots,
+                        swa_pool_3d=pool,
+                        bsz=context_rows,
+                        q_len=1,
+                        head_dim=int(attn.head_dim),
+                    )
+
     def map_commit_rows(
         self,
         starts: torch.Tensor,
@@ -615,6 +668,12 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         swa_attention_inputs = as_attention_inputs_by_tag(
             attention_inputs, self.kv_cache
         ).get(SWA_KV)
+        sparse_save_targets = None
+        if swa_attention_inputs is not None:
+            points = getattr(swa_attention_inputs, "cache_save_positions", None)
+            block_ids = getattr(swa_attention_inputs, "cache_save_block_ids", None)
+            if points is not None and block_ids is not None and points.numel() > 0:
+                sparse_save_targets = SparseSaveTargets(points, block_ids)
         write_cache_store_impl = create_write_cache_store_impl(
             swa_attention_inputs, self.kv_cache
         )
@@ -644,6 +703,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
                     gathered_req_ids=gathered_req_ids,
                     gathered_positions=gathered_positions,
                     cp_ctx=commit_ctx,
+                    sparse_save_targets=sparse_save_targets,
                 )
                 # PD-separated prefill publishes each committed draft-layer
                 # cache from the commit call: the published range is exactly

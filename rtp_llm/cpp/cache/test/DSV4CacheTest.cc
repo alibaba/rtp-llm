@@ -2892,6 +2892,120 @@ protected:
     }
 };
 
+TEST_F(DSV4AllocatorTest, PreciseSwaResumeValidatesOnlyRealWindowSlots) {
+    for (const uint32_t cp_size : {2u, 4u}) {
+        const auto config = makeDSV4CpAllocatorConfig(cp_size);
+        const auto& group = config.group("swa_kv");
+        ASSERT_EQ(group.policy.group_type, CacheGroupType::SWA);
+        ASSERT_EQ(group.policy.sliding_window_size, 128);
+        const size_t span = config.capacity_tokens_per_block.at("swa_kv");
+        const int local_two_slots = static_cast<int>(2 * group.seqSizePerBlock());
+        ASSERT_GT(span, 128u);
+        SWACacheManager manager(group, nullptr, 0);
+
+        // A resumed query after the boundary plus one full window only needs
+        // slot 1. The ordinary direct allocation contract remains strict.
+        const size_t one_slot_resume = span + 128;
+        ASSERT_EQ(config.endpointBlockPosition("swa_kv", one_slot_resume - 126), 1u);
+        ASSERT_EQ(config.endpointBlockPosition("swa_kv", one_slot_resume), 1u);
+        BlockIds one_slot;
+        one_slot.assign({NULL_BLOCK_IDX, 17});
+        EXPECT_THROW(manager.malloc(one_slot, local_two_slots), std::exception);
+        EXPECT_TRUE(manager.mallocWithHistory(
+            one_slot, local_two_slots, false, 0, nullptr, {}, {1, 2}));
+        EXPECT_NO_THROW(manager.removeSkippedBlocksWithHistory(one_slot, false, 0, {1, 2}));
+        EXPECT_THROW(manager.removeSkippedBlocks(one_slot), std::exception);
+
+        // Immediately after a physical boundary, the 128-token window crosses
+        // both slots. A missing older slot is a real restoration error.
+        const size_t crossing_resume = span + 1;
+        ASSERT_EQ(config.endpointBlockPosition("swa_kv", crossing_resume - 126), 0u);
+        ASSERT_EQ(config.endpointBlockPosition("swa_kv", crossing_resume), 1u);
+        EXPECT_THROW(manager.mallocWithHistory(
+                         one_slot, local_two_slots, false, 0, nullptr, {}, {0, 2}),
+                     std::exception);
+        BlockIds crossing;
+        crossing.assign({16, 17});
+        EXPECT_TRUE(manager.mallocWithHistory(
+            crossing, local_two_slots, false, 0, nullptr, {}, {0, 2}));
+
+        // A later allocation may add new tail slots. Cleanup before forward
+        // must retain the restored history slot even when it is no longer in
+        // the ordinary two-slot active tail.
+        BlockIds grown;
+        grown.assign({NULL_BLOCK_IDX, 17, 18, 19});
+        EXPECT_NO_THROW(manager.removeSkippedBlocksWithHistory(grown, false, 0, {1, 2}));
+        EXPECT_EQ(grown.blocks()[1], 17);
+        EXPECT_NO_THROW(manager.removeSkippedBlocksWithHistory(grown, false, 1, {1, 2}));
+    }
+}
+
+TEST_F(DSV4AllocatorTest, CoordinatorProjectsPreciseSwaHistoryAcrossCpRanks) {
+    for (const uint32_t cp_size : {2u, 4u}) {
+        auto model = makeProModelConfig();
+        model.attn_config.tokens_per_block = 256;
+        setDsv4KvCacheSpecs(model, makeProLayerCompressRatios());
+        ParallelismConfig parallelism;
+        parallelism.role_type = RoleType::PREFILL;
+        parallelism.tp_size = cp_size;
+        parallelism.prefill_cp_config.kv_cache_sharded = true;
+        auto config = createResolvedConfig(model, parallelism, KVCacheConfig{});
+        setGroupBlockNumsForTest(
+            config, config.groupTags(), std::vector<uint32_t>(static_cast<size_t>(config.groupNums()), 200u));
+        ASSERT_EQ(config.group("swa_kv").policy.cp_mapping, CpBlockMappingMode::COMPACT_LAST_RANK);
+        ASSERT_EQ(config.reuse_unit_tokens, 256u * cp_size);
+        ASSERT_NE(1300u % config.reuse_unit_tokens, 0u);
+        auto allocator = std::make_shared<TestDSV4HybridTypeAllocator>(config, AllocationType::DEVICE);
+        ASSERT_TRUE(allocator->init());
+
+        const int input_length = cp_size == 4 ? 2000 : 1320;
+        const int base = allocator->seqSizePerBlock();
+        auto resource = std::make_shared<BatchKVCacheResource>();
+        resource->resetBatchSize(1);
+        initDsv4BatchGroups(*resource, config);
+        auto tokens = std::make_shared<CompleteTokenIds>(1, 1, input_length + base, base);
+        auto input = std::make_shared<GenerateInput>();
+        input->input_ids = torch::arange(input_length, torch::kInt32);
+        input->generate_config = std::make_shared<GenerateConfig>();
+        tokens->init(input);
+
+        MallocInfo info{resource, tokens};
+        info.enable_cache_lookup = false;
+        info.reuse_cache = false;
+        info.enable_remove_skipped_blocks = false;
+        info.request_layout = snapshotGlobalCacheRequest(*resource, *tokens);
+        ASSERT_TRUE(allocator->malloc(info).success);
+
+        const size_t resumed_slot = config.endpointBlockPosition("swa_kv", 1300);
+        ASSERT_EQ(resumed_slot, cp_size == 4 ? 1u : 2u);
+        auto& swa_ids = resource->mutableBlockIds(0, "swa_kv");
+        ASSERT_GT(swa_ids.blocksNum(), resumed_slot);
+        const BlockIdxType old_history = swa_ids.blocks()[resumed_slot - 1];
+        ASSERT_FALSE(isNullBlockIdx(old_history));
+        bool released_history = false;
+        for (const auto& group : allocator->cacheGroups()) {
+            if (group->tag() == "swa_kv") {
+                group->unreference(BlockIndicesType{old_history});
+                released_history = true;
+                break;
+            }
+        }
+        ASSERT_TRUE(released_history);
+        swa_ids.setAt(resumed_slot - 1, NULL_BLOCK_IDX);
+
+        // Exact G1300 needs only its current physical slot. An earlier G1025
+        // spans this deliberately absent slot and must fail before allocation.
+        info.precise_resume_endpoint = 1300;
+        EXPECT_TRUE(allocator->malloc(info).success) << "CP=" << cp_size;
+        info.precise_resume_endpoint = 1025;
+        EXPECT_THROW((void)allocator->malloc(info), std::exception) << "CP=" << cp_size;
+        info.precise_resume_endpoint.reset();
+        EXPECT_THROW((void)allocator->malloc(info), std::exception) << "CP=" << cp_size;
+
+        allocator->free(FreeInfo{resource, tokens});
+    }
+}
+
 TEST_F(DSV4AllocatorTest, InitAndBasicProperties) {
     auto config    = makeDSV4AllocatorConfig();
     auto allocator = std::make_shared<TestDSV4HybridTypeAllocator>(config, AllocationType::DEVICE);
@@ -3009,6 +3123,25 @@ TEST_F(DSV4AllocatorTest, CpPageRrFixedAndSwaAllocateOneBlockPerVirtualBlock) {
 
     FreeInfo free_info{batch_res};
     allocator->free(free_info);
+}
+
+TEST_F(DSV4AllocatorTest, ExactEndpointUsesResolvedScaledStateSlot) {
+    auto model = makeProModelConfig();
+    model.attn_config.tokens_per_block = 256;
+    setDsv4KvCacheSpecs(model, makeProLayerCompressRatios());
+    for (const uint32_t cp_size : {2u, 4u}) {
+        KVCacheConfig options;
+        ParallelismConfig parallelism;
+        parallelism.role_type = RoleType::PREFILL;
+        parallelism.tp_size = cp_size;
+        parallelism.prefill_cp_config.kv_cache_sharded = true;
+        const auto config = createResolvedConfig(model, parallelism, options);
+        const size_t state_stride = config.group("csa_state").seqSizePerBlock();
+        EXPECT_EQ(state_stride, static_cast<size_t>(256 * cp_size));
+        EXPECT_EQ(config.endpointBlockPosition("csa_state", 1100), cp_size == 2 ? 2u : 1u);
+        EXPECT_EQ(config.group("hca_state").seqSizePerBlock(), static_cast<size_t>(256 * cp_size));
+        EXPECT_EQ(config.endpointBlockPosition("hca_state", 600), cp_size == 2 ? 1u : 0u);
+    }
 }
 
 TEST_F(DSV4AllocatorTest, ExternalStateEntryRequestSnapshotPreservesMixedCpAllocationAndReserve) {

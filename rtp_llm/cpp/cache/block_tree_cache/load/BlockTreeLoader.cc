@@ -4,6 +4,8 @@
 #include <cassert>
 #include <chrono>
 #include <exception>
+#include <limits>
+#include <numeric>
 #include <unordered_set>
 #include <utility>
 
@@ -15,6 +17,14 @@
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 
 namespace rtp_llm {
+
+PinnedLocalFallback::~PinnedLocalFallback() {
+    if (!transferred_to_request) {
+        for (const auto& resource : resources) {
+            group_sets[resource.group_set_id]->unreferenceBlocks(resource);
+        }
+    }
+}
 
 BlockTreeLoader::BlockTreeLoader(BlockTree*                      tree,
                                  BlockTreeEvictor&               evictor,
@@ -48,19 +58,188 @@ BlockTreeLoader::BlockTreeLoader(BlockTree*                      tree,
 
 BlockTreeMatchResult BlockTreeLoader::matchLocked(const CacheKeysType& cache_keys,
                                                    const std::function<bool(size_t)>& valid_prefix,
-                                                   const std::vector<int>* request_tokens) {
+                                                   const std::vector<int>* request_tokens,
+                                                   const PartialTailMatchRequest* partial_tail) {
+    std::optional<BlockTreeMatchResult> local;
+    if (partial_tail != nullptr && partial_tail->tokens != nullptr && partial_tail->endpoint_key
+        && partial_tail->valid_endpoint) {
+        local = preciseLocalMatchLocked(*partial_tail);
+        if (local.has_value() && storage_backend_ && !local->short_leaf
+            && local->matched_device_endpoint < partial_tail->remote_ceiling) {
+            // Complete local candidates keep the established local+remote
+            // path, including its ready prefix and lower-tier load sources.
+            for (const auto& resource : local->matched_device_resources) {
+                tree_->groupSets()[resource.group_set_id]->unreferenceBlocks(resource);
+            }
+            local.reset();
+        }
+        if (local.has_value() && (!storage_backend_ || local->matched_device_endpoint >= partial_tail->remote_ceiling)) {
+            return std::move(*local);
+        }
+    }
     if (cache_keys.empty()) {
+        if (local.has_value()) {
+            return std::move(*local);
+        }
         RTP_LLM_LOG_DEBUG("empty cache_keys, returning empty result");
         return {};
     }
 
-    std::vector<TreeNode*> path   = tree_->findNode(cache_keys);
+    // A farther complete-key backend candidate competes with the pinned local
+    // short leaf as a whole. Starting a HOST/DISK load for the older local path
+    // would make a later remote miss inherit its pending source references and
+    // could splice those groups into the short leaf. Query complete keys from
+    // an empty local path instead; a remote hit loads complete groups normally.
+    std::vector<TreeNode*> path = local.has_value() ? std::vector<TreeNode*>{} : tree_->findNode(cache_keys);
+    // A short leaf is reusable only after the exact-token, joint-group check
+    // above. The legacy validator counts each node as a full physical block;
+    // feeding it a short leaf could revive a candidate whose real SWA window
+    // crosses a missing ancestor.
+    if (!path.empty() && tree_->isShortLeaf(path.back())) {
+        path.pop_back();
+    }
     BlockTreeMatchResult   result = createMatchResult(path, cache_keys, valid_prefix, request_tokens);
+    if (local.has_value()) {
+        if (result.async_context != nullptr && result.async_context->needBackendMatch()
+            && local->matched_device_endpoint > result.matched_device_endpoint) {
+            auto fallback = std::make_shared<PinnedLocalFallback>();
+            fallback->endpoint           = local->matched_device_endpoint;
+            fallback->path_nodes         = local->matched_device_blocks;
+            fallback->group_sets         = tree_->groupSets();
+            fallback->resources          = std::move(local->matched_device_resources);
+            fallback->resource_endpoints = std::move(local->precise_resource_endpoints);
+            result.async_context->setLocalFallback(fallback->endpoint, partial_tail->reuse_unit_tokens);
+            result.local_fallback = std::move(fallback);
+        } else if (result.async_context == nullptr && local->matched_device_endpoint > result.matched_device_endpoint) {
+            for (const auto& resource : result.matched_device_resources) {
+                tree_->groupSets()[resource.group_set_id]->unreferenceBlocks(resource);
+            }
+            return std::move(*local);
+        } else {
+            for (const auto& resource : local->matched_device_resources) {
+                tree_->groupSets()[resource.group_set_id]->unreferenceBlocks(resource);
+            }
+        }
+    }
     RTP_LLM_LOG_DEBUG("matched %zu device blocks, cache_keys=%zu, tree_nodes=%zu",
                       result.matched_device_blocks,
                       cache_keys.size(),
                       tree_->size());
     return result;
+}
+
+std::optional<BlockTreeMatchResult> BlockTreeLoader::preciseLocalMatchLocked(const PartialTailMatchRequest& request) {
+    const auto ranges = tree_->contentMatchRanges(*request.tokens, request.endpoint_key, request.source_identity);
+    std::vector<size_t> endpoints;
+    std::vector<size_t> boundary_strides{1};
+    size_t              joint_boundary = 1;
+    for (const auto& group : tree_->groupSets()) {
+        if (!group->localOnly() || group->groupType() != CacheGroupType::SWA) {
+            continue;
+        }
+        const int window = group->group(group->groupTags().front()).policy.sliding_window_size;
+        if (window <= 0) {
+            continue;
+        }
+        const size_t stride = static_cast<size_t>(window);
+        boundary_strides.push_back(stride);
+        const size_t factor = stride / std::gcd(joint_boundary, stride);
+        joint_boundary      = joint_boundary > std::numeric_limits<size_t>::max() / factor ?
+                                  std::numeric_limits<size_t>::max() :
+                                  joint_boundary * factor;
+    }
+    // With several zero-demand groups, the last jointly empty compression
+    // boundary may precede every group's individual last boundary.
+    boundary_strides.push_back(joint_boundary);
+    std::sort(boundary_strides.begin(), boundary_strides.end());
+    boundary_strides.erase(std::unique(boundary_strides.begin(), boundary_strides.end()), boundary_strides.end());
+    for (const auto& range : ranges) {
+        for (const size_t stride : boundary_strides) {
+            size_t endpoint = std::min(range.matched_end, request.tokens->size() - 1);
+            endpoint -= endpoint % stride;
+            while (endpoint > 0 && request.preceding_valid_endpoint) {
+                const size_t legal = request.preceding_valid_endpoint(endpoint);
+                if (legal >= endpoint) {
+                    break;
+                }
+                endpoint = legal - legal % stride;
+            }
+            if (endpoint > 0 && endpoint <= range.matched_end && request.valid_endpoint(endpoint)) {
+                endpoints.push_back(endpoint);
+            }
+        }
+    }
+    std::sort(endpoints.begin(), endpoints.end(), std::greater<size_t>());
+    endpoints.erase(std::unique(endpoints.begin(), endpoints.end()), endpoints.end());
+    for (const size_t endpoint : endpoints) {
+        // Each group resolves the same G, but its physical data may come from
+        // different matched siblings (e.g. FULL at 700, LINEAR state at 600).
+        // A later recurrent state is never truncated to an earlier endpoint.
+        BlockTreeMatchResult                      result;
+        std::vector<std::pair<TreeNode*, size_t>> matched_nodes;
+        bool                                      ready = true;
+        for (size_t group_id = 0; group_id < tree_->groupSets().size(); ++group_id) {
+            const auto& group = tree_->groupSets()[group_id];
+            if (group->hasZeroStateDemand(endpoint)) {
+                continue;
+            }
+            bool found = false;
+            for (size_t source_index = 0; source_index < ranges.size(); ++source_index) {
+                const auto& range = ranges[source_index];
+                if (endpoint > range.matched_end || endpoint <= range.node->parent->token_end
+                    || (group->requiresExactStateEndpoint() && endpoint != range.node->token_end)) {
+                    continue;
+                }
+                // Build only sources that can actually cover this G. Keeping
+                // every range's ancestor path would use quadratic memory for
+                // a long, fully cached prefix.
+                std::vector<TreeNode*> path;
+                for (auto* cursor = range.node; cursor->parent != nullptr; cursor = cursor->parent) {
+                    path.push_back(cursor);
+                }
+                std::reverse(path.begin(), path.end());
+                const auto required = group->requiredPathIndices(path, endpoint);
+                const bool usable   = group->hasDeviceCoverage(path, endpoint);
+                if (!usable) {
+                    continue;
+                }
+                if (!required.empty()) {
+                    MultiNodeResource   pinned{group_id, Tier::DEVICE};
+                    std::vector<size_t> source_endpoints;
+                    for (const size_t index : required) {
+                        auto* source = path[index];
+                        pinned.node_blocks.emplace_back(nullptr,
+                                                        source->group_set_resources[group_id].getBlocks(Tier::DEVICE));
+                        source_endpoints.push_back(source->token_end);
+                        matched_nodes.emplace_back(source, group_id);
+                    }
+                    result.matched_device_resources.push_back(std::move(pinned));
+                    result.precise_resource_endpoints.push_back(std::move(source_endpoints));
+                }
+                found = true;
+                break;
+            }
+            if (!found) {
+                ready = false;
+                break;
+            }
+        }
+        if (!ready) {
+            continue;
+        }
+        // Descriptor construction above acquires no references. Failed joint
+        // candidates therefore leave no partial holds behind.
+        for (const auto& resource : result.matched_device_resources) {
+            tree_->groupSets()[resource.group_set_id]->referenceBlocks(resource);
+        }
+        result.matched_device_blocks   = (endpoint + request.reuse_unit_tokens - 1) / request.reuse_unit_tokens;
+        result.matched_device_endpoint = endpoint;
+        result.precise_local           = true;
+        result.short_leaf              = endpoint % request.reuse_unit_tokens != 0;
+        evictor_.onMatchedResources(matched_nodes);
+        return result;
+    }
+    return std::nullopt;
 }
 
 bool BlockTreeLoader::validMatch(std::vector<TreeNode*>& path,
@@ -79,8 +258,22 @@ bool BlockTreeLoader::validMatch(std::vector<TreeNode*>& path,
         TreeNode* node             = path[i];
         bool      all_groups_valid = true;
         for (size_t group_set_id = 0; group_set_id < tree_->groupSets().size(); ++group_set_id) {
-            const bool is_group_valid =
-                match_validators[group_set_id]->validate(node->group_set_resources[group_set_id]);
+            bool is_group_valid = false;
+            if (tree_->groupSets()[group_set_id]->localOnly()) {
+                const std::vector<TreeNode*> prefix(path.begin(), path.begin() + static_cast<std::ptrdiff_t>(i + 1));
+                is_group_valid = tree_->groupSets()[group_set_id]->hasDeviceCoverage(prefix, node->token_end);
+            } else {
+                is_group_valid = match_validators[group_set_id]->validate(node->group_set_resources[group_set_id]);
+                // A local DEVICE candidate is usable only if the complete-key
+                // endpoint satisfies the same retained-window contract as the
+                // exact matcher. Lower-tier candidates remain valid here and
+                // continue through the existing load/fallback paths.
+                if (is_group_valid && node->group_set_resources[group_set_id].hasCompleteDeviceValue()) {
+                    const std::vector<TreeNode*> prefix(path.begin(),
+                                                        path.begin() + static_cast<std::ptrdiff_t>(i + 1));
+                    is_group_valid = tree_->groupSets()[group_set_id]->hasDeviceCoverage(prefix, node->token_end);
+                }
+            }
             group_valid[i][group_set_id] = is_group_valid;
             if (!is_group_valid) {
                 all_groups_valid = false;
@@ -265,19 +458,19 @@ BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>& 
         bool all_groups_ready = true;
         for (size_t group_set_id = 0; group_set_id < tree_->groupSets().size(); ++group_set_id) {
             const GroupSetPtr& group_set = tree_->groupSets()[group_set_id];
-            const size_t reuse_count = std::min(group_set->computeReuseBlockCount(candidate_count), candidate_count);
-            for (size_t i = candidate_count - reuse_count; i < candidate_count; ++i) {
-                if (!path[i]->group_set_resources[group_set_id].hasCompleteDeviceValue()) {
-                    all_groups_ready = false;
-                    break;
-                }
-            }
-            if (!all_groups_ready) {
+            const std::vector<TreeNode*> prefix(path.begin(), path.begin() + static_cast<std::ptrdiff_t>(candidate_count));
+            // Legacy complete keys and the exact matcher must agree on physical
+            // coverage. A present block ID cannot repair a missing SWA slot in
+            // the model's retained window. Lower-tier candidates still follow
+            // the existing HOST/DISK/REMOTE load paths below.
+            if (!group_set->hasDeviceCoverage(prefix, prefix.back()->token_end)) {
+                all_groups_ready = false;
                 break;
             }
         }
         if (all_groups_ready) {
             result.matched_device_blocks = candidate_count;
+            result.matched_device_endpoint = path[candidate_count - 1]->token_end;
             break;
         }
     }
@@ -290,16 +483,27 @@ BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>& 
         const size_t       ready_reuse_count =
             std::min(group_set->computeReuseBlockCount(result.matched_device_blocks), result.matched_device_blocks);
         MultiNodeResource matched_device_resource{group_set_id, Tier::DEVICE};
-        for (size_t i = result.matched_device_blocks - ready_reuse_count; i < result.matched_device_blocks; ++i) {
+        const std::vector<TreeNode*> matched_path(path.begin(),
+                                                  path.begin() + static_cast<std::ptrdiff_t>(result.matched_device_blocks));
+        const auto required = group_set->localOnly() && !matched_path.empty() ?
+                                  group_set->requiredPathIndices(matched_path, matched_path.back()->token_end) :
+                                  std::vector<size_t>{};
+        const size_t start = group_set->localOnly() ? 0 : result.matched_device_blocks - ready_reuse_count;
+        for (size_t i = start; i < result.matched_device_blocks; ++i) {
+            if (group_set->localOnly() && std::find(required.begin(), required.end(), i) == required.end()) {
+                continue;
+            }
             const GroupSetResource& resource = path[i]->group_set_resources[group_set_id];
-            matched_device_resource.node_blocks.emplace_back(nullptr, resource.getBlocks(Tier::DEVICE));
+            matched_device_resource.node_blocks.emplace_back(
+                group_set->localOnly() ? path[i] : nullptr, resource.getBlocks(Tier::DEVICE));
         }
         if (!matched_device_resource.node_blocks.empty()) {
             group_set->referenceBlocks(matched_device_resource);
             result.matched_device_resources.push_back(std::move(matched_device_resource));
         }
 
-        const size_t logical_reuse_count = std::min(group_set->computeReuseBlockCount(path.size()), path.size());
+        const size_t logical_reuse_count = group_set->localOnly() ? 0 :
+            std::min(group_set->computeReuseBlockCount(path.size()), path.size());
         for (size_t i = std::max(path.size() - logical_reuse_count, result.matched_device_blocks); i < path.size();
              ++i) {
             GroupSetResource&  resource    = path[i]->group_set_resources[group_set_id];
@@ -367,6 +571,9 @@ StorageRequest BlockTreeLoader::makeStorageRequest(const CacheKeysType& cache_ke
                            local_matched_blocks_num};
     for (auto& key_handles : request.handles) {
         for (const auto& group_set : tree_->groupSets()) {
+            if (group_set->localOnly()) {
+                continue;
+            }
             for (const auto& tag : group_set->groupTags()) {
                 key_handles.push_back({tag, NULL_BLOCK_IDX});
             }

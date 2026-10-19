@@ -85,6 +85,7 @@ public:
     ~PyWrappedModel();
 
     GptModelOutputs            forward(const GptModelInputs& inputs) override;
+    bool                       supportsSparseCacheSave() const override;
     GptModelOutputs            forwardMicroBatched(const GptModelInputs& inputs, bool capture_hidden_states);
     void                       releaseBuffers() override;
     torch::Tensor              getMtpTargetHiddenStates(int64_t num_tokens) override;

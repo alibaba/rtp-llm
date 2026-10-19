@@ -167,7 +167,8 @@ std::shared_ptr<const MallocInfo::RequestLayout> makeRequestTokenSnapshot(const 
                                                                           CompleteTokenIds&           tokens,
                                                                           int  incr_seq_len_override,
                                                                           bool capture_theory_keys,
-                                                                          bool capture_tokens) {
+                                                                          bool capture_tokens,
+                                                                          bool partial_tail_reuse = false) {
     auto snapshot                    = std::make_shared<MallocInfo::RequestLayout>();
     snapshot->match_keys             = resource.cacheKeys(0);
     snapshot->request_seq_len        = tokens.seqLength();
@@ -175,8 +176,13 @@ std::shared_ptr<const MallocInfo::RequestLayout> makeRequestTokenSnapshot(const 
     snapshot->request_common_seq_len = tokens.commonSeqLength();
     snapshot->request_total_seq_len  = tokens.totalSeqLength();
     snapshot->request_reserve_step   = tokens.getReserveStep();
+    snapshot->partial_tail_reuse     = partial_tail_reuse;
+    snapshot->original_input_tokens  = partial_tail_reuse ? static_cast<size_t>(tokens.seqLength()) : 0;
     if (capture_tokens) {
         snapshot->token_ids = tokens.completeTokenIdsVec(0);
+        if (partial_tail_reuse) {
+            snapshot->token_ids.resize(snapshot->original_input_tokens);
+        }
     }
     if (capture_theory_keys) {
         std::vector<CacheKeysType> keys_by_batch;
@@ -211,6 +217,62 @@ void StreamCacheResource::init(int batch_size) {
                               warmupCacheTopology();
     batch_kv_cache_resource_->initGroups(topology);
     resource_released_ = false;
+    prefix_cache_registration_.reset();
+}
+
+void StreamCacheResource::prepareRegisteredSave() {
+    if (!prefix_cache_registration_ || resource_released_ || !partialTailReuseEnabled()) {
+        return;
+    }
+    const size_t resume_endpoint = static_cast<size_t>(std::max(0, stream_->initialReuseLength()));
+    resource_context_.cache_manager->prepareRegisteredSave(
+        *prefix_cache_registration_, *batch_kv_cache_resource_, resume_endpoint);
+}
+
+absl::Status StreamCacheResource::prepareRequiredContinuation() {
+    if (!prefix_cache_registration_ || resource_released_ || !partialTailReuseEnabled()) {
+        return absl::OkStatus();
+    }
+    const size_t resume_endpoint = static_cast<size_t>(std::max(0, stream_->initialReuseLength()));
+    const auto status = resource_context_.cache_manager->prepareRequiredContinuation(
+        *prefix_cache_registration_, *batch_kv_cache_resource_, resume_endpoint);
+    if (status == MallocStatus::NONE) {
+        return absl::OkStatus();
+    }
+    if (status == MallocStatus::PERMANENT_RESOURCE_EXHAUSTED) {
+        return absl::ResourceExhaustedError("request continuation exceeds usable kv cache capacity");
+    }
+    return absl::UnavailableError("kv cache continuation is temporarily unavailable");
+}
+
+const std::vector<TaggedBlockIdPair>& StreamCacheResource::registeredSaveCopyMapping() const {
+    static const std::vector<TaggedBlockIdPair> empty;
+    return prefix_cache_registration_ ? prefix_cache_registration_->copy_mappings : empty;
+}
+
+void StreamCacheResource::completeRegisteredSave(size_t completed_endpoint) {
+    if (!prefix_cache_registration_ || !prefix_cache_registration_->prepared) {
+        return;
+    }
+    bool any_completed = prefix_cache_registration_->content_completed;
+    for (auto& point : prefix_cache_registration_->points) {
+        if (point.endpoint.pos > completed_endpoint) {
+            continue;
+        }
+        for (auto& binding : point.group_bindings) {
+            if (binding.state == PrefixCacheSaveState::REGISTERED
+                && binding.resource.hasCompleteDeviceValue()) {
+                binding.state = PrefixCacheSaveState::CONTENT_COMPLETE;
+                any_completed = true;
+            }
+        }
+    }
+    // T05 calls this only after every rank has completed its copies and writer.
+    // Keeping source pins until request release would let completed optional
+    // history compete with mandatory fallback runtime allocation.
+    resource_context_.cache_manager->releaseRegisteredSourcePins(*prefix_cache_registration_);
+    prefix_cache_registration_->copy_mappings.clear();
+    prefix_cache_registration_->content_completed = any_completed;
 }
 
 void StreamCacheResource::releaseResource() {
@@ -291,6 +353,24 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
     int total_blocks = curBlocksNum();
     RTP_LLM_CHECK(nums == total_blocks);
 
+    if (prefixObservationEnabled()) {
+        const char* skipped_reason = nullptr;
+        if (total_blocks == 0) {
+            skipped_reason = "zero_block";
+        } else if (stream_->hasErrorWithoutLock()) {
+            skipped_reason = "request_error";
+        } else if (stream_->getStatus() != StreamState::FINISHED) {
+            skipped_reason = "request_not_finished";
+        } else if (!reuseCache()) {
+            skipped_reason = "reuse_disabled";
+        } else if (storeTarget() == Tier::NONE) {
+            skipped_reason = "store_disabled";
+        }
+        if (skipped_reason) {
+            resource_context_.cache_manager->blockTreeCache()->observePublicationSkipped(
+                stream_->streamId(), storeTarget(), skipped_reason);
+        }
+    }
     if (total_blocks == 0 && prefixObservationEnabled() && !stream_->hasErrorWithoutLock()
         && stream_->getStatus() == StreamState::FINISHED) {
         emitPrefixPlanClosed("zero_block");
@@ -305,6 +385,9 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
             if (target_tier != Tier::NONE) {
                 InsertInfo insert_info{batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), false, target_tier};
                 insert_info.prefix_plan_state = &prefix_plan_state_;
+                insert_info.observation_request_id = stream_->streamId();
+                insert_info.prefix_cache_registration = prefix_cache_registration_ ? &*prefix_cache_registration_ :
+                                                                                       nullptr;
                 size_t     resident_prefix_length = 0;
                 resource_context_.cache_manager->insertIntoCache(insert_info, resident_prefix_length);
             }
@@ -323,6 +406,10 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
         free_info.request_id = stream_->streamId();
 
         resource_context_.cache_manager->free(free_info);
+    }
+
+    if (prefix_cache_registration_) {
+        resource_context_.cache_manager->releaseRegisteredSave(*prefix_cache_registration_);
     }
 
     return total_blocks;
@@ -393,13 +480,72 @@ absl::Status StreamCacheResource::initKVBlock() {
         updateCacheKeys(batch_kv_cache_resource_, malloc_info.complete_token_ids, seqSizePerBlock());
     }
     malloc_info.cache_keys_prepared = true;
+    if (is_first_malloc && !prefix_cache_registration_ && partialTailReuseEnabled()) {
+        PrefixCacheRegistration registration;
+        registration.token_ids             = malloc_info.complete_token_ids->completeTokenIdsVec(0);
+        registration.original_input_tokens = static_cast<size_t>(malloc_info.complete_token_ids->seqLength());
+        RTP_LLM_CHECK_WITH_INFO(registration.token_ids.size() >= registration.original_input_tokens,
+                                "missing original input tokens for partial tail registration");
+        registration.token_ids.resize(registration.original_input_tokens);
+        registration.base_keys = batch_kv_cache_resource_->cacheKeys(0);
+
+        const size_t base_tokens = static_cast<size_t>(seqSizePerBlock());
+        const size_t full_unit   = static_cast<size_t>(reuseBlockTokens());
+        const auto&  cache_config = resource_context_.cache_manager->cacheConfig();
+        const auto&  groups       = cache_config.topology().groups();
+        const size_t checkpoint_step = static_cast<size_t>(std::max(1, cache_config.linear_step));
+        RTP_LLM_CHECK_WITH_INFO(base_tokens > 0 && full_unit >= base_tokens && full_unit % base_tokens == 0,
+                                "invalid full checkpoint unit for partial tail registration");
+        for (size_t pos = full_unit; pos <= registration.original_input_tokens; pos += full_unit) {
+            // Sparse group managers retain step hits plus their active tail.
+            // Use each tag's canonical physical slot: in CP, that may differ
+            // from both the base-key index and the global checkpoint ordinal.
+            const size_t checkpoint_index = pos / full_unit - 1;
+            const bool original_checkpoint = std::all_of(groups.begin(), groups.end(), [&](const GroupBase& group) {
+                if (group.policy.group_type == CacheGroupType::FULL || !group.policy.enable_prefix_reuse) {
+                    return true;
+                }
+                const size_t slot = cache_config.canonicalBlockPosition(group.tag, checkpoint_index);
+                const size_t local_tokens =
+                    static_cast<size_t>(cache_config.localAllocTokens(group.tag,
+                                                                       static_cast<int>(registration.original_input_tokens)));
+                const size_t seq_slots = (local_tokens + group.seqSizePerBlock() - 1) / group.seqSizePerBlock();
+                const size_t active_tail = std::max<size_t>(1, group.policy.active_tail_blocks);
+                return (slot + 1) % checkpoint_step == 0
+                       || (slot < seq_slots && slot >= seq_slots - std::min(seq_slots, active_tail));
+            });
+            if (!original_checkpoint) {
+                continue;
+            }
+            const size_t index = pos / base_tokens - 1;
+            RTP_LLM_CHECK_WITH_INFO(index < registration.base_keys.size(), "missing full checkpoint key");
+            registration.points.push_back({{index, registration.base_keys[index], pos}, {}});
+        }
+        if (registration.original_input_tokens > 0
+            && (registration.points.empty()
+                || registration.points.back().endpoint.pos != registration.original_input_tokens)) {
+            const size_t index = (registration.original_input_tokens - 1) / base_tokens;
+            RTP_LLM_CHECK_WITH_INFO(index < registration.base_keys.size(), "missing tail checkpoint key");
+            registration.points.push_back(
+                {{index, registration.base_keys[index], registration.original_input_tokens}, {}});
+        }
+        for (auto& point : registration.points) {
+            for (const auto& group_set : resource_context_.cache_manager->blockTreeCache()->groupSets()) {
+                PrefixCacheGroupSaveBinding binding;
+                binding.group_set_id = group_set->groupSetId();
+                point.group_bindings.push_back(std::move(binding));
+            }
+        }
+        prefix_cache_registration_ = std::move(registration);
+    }
     malloc_info.request_layout =
         makeRequestTokenSnapshot(*batch_kv_cache_resource_,
                                  *malloc_info.complete_token_ids,
                                  -1,
                                  is_first_malloc && malloc_info.cache_keys_initialized_now
                                      && resource_context_.cache_manager->needsPrefillHitSnapshot(),
-                                 prefixObservationEnabled());
+                                 prefixObservationEnabled() || (is_first_malloc && partialTailReuseEnabled()),
+                                 is_first_malloc && partialTailReuseEnabled());
 
     MallocResult result = resource_context_.cache_manager->malloc(malloc_info);
     recordCacheReuseMallocResult(result);
@@ -492,7 +638,6 @@ absl::Status StreamCacheResource::finalizeAllocatorLoad() {
                                                          static_cast<size_t>(input_length - 1));
         }
     }
-    remote_observation_.effective = load_success && stream_->remoteReuseLength() > 0;
     if (load_success) {
         RTP_LLM_CHECK(load_context != nullptr);
         const size_t total = load_context->matchedBlocks();
@@ -506,23 +651,30 @@ absl::Status StreamCacheResource::finalizeAllocatorLoad() {
                                 host,
                                 disk);
         const int tokens = reuseBlockTokens();
-        RTP_LLM_CHECK_WITH_INFO(tokens > 0 && total <= static_cast<size_t>(std::numeric_limits<int>::max()) / tokens,
+        const size_t exact_total = load_context->matchedTokenEndpoint(static_cast<size_t>(tokens));
+        RTP_LLM_CHECK_WITH_INFO(tokens > 0 && exact_total <= static_cast<size_t>(std::numeric_limits<int>::max()),
                                 "allocator reuse token count exceeds int range: blocks=%zu tokens=%d",
                                 total,
                                 tokens);
         const size_t backend  = total - local;
         auto&        resource = batch_kv_cache_resource_->cacheResource(0);
-        resource.setDeviceReuseBlockNum(local - host - disk);
+        // A remote miss can select a pinned local short leaf after the remote
+        // query started from an empty path. In that case the context's legacy
+        // block counts are zero, while its exact endpoint is the DEVICE reuse.
+        const size_t device_blocks = load_context->localFallbackSelected() ? exact_total / static_cast<size_t>(tokens) :
+                                                                           local - host - disk;
+        resource.setDeviceReuseBlockNum(device_blocks);
         resource.setMemoryReuseBlockNum(host);
         resource.setDiskReuseBlockNum(disk);
         resource.setStorageBackendReuseBlockNum(backend);
-        publishReuseLengths(total * tokens, host * tokens, disk * tokens, backend * tokens);
+        publishReuseLengths(static_cast<int>(exact_total), host * tokens, disk * tokens, backend * tokens);
     } else if (resource_context_.role_type == RoleType::PREFILL && malloc_status == MallocStatus::NONE) {
         stream_->setHostReuseLength(0);
         stream_->setDiskReuseLength(0);
     } else {
         clearCacheReuseState();
     }
+    remote_observation_.effective = load_success && stream_->remoteReuseLength() > 0;
     if (!cache_reuse_metrics_.report_load_metrics) {
         const int64_t load_end_time_us                = currentTimeUs();
         cache_reuse_metrics_.load_success             = load_success;
@@ -649,6 +801,48 @@ std::string StreamCacheResource::prefixObservationSummaryPayload(const char* sta
     } else {
         payload << "null";
     }
+    // This is a snapshot of request-owned intent at summary emission, not a
+    // publication event. CONTENT_COMPLETE does not imply adoption by the tree.
+    payload << ",\"registration\":";
+    if (!prefix_cache_registration_) {
+        payload << "null";
+    } else {
+        const auto& registration = *prefix_cache_registration_;
+        payload << "{\"sample_stage\":\"request_summary\",\"original_input_tokens\":"
+                << registration.original_input_tokens << ",\"prepared\":"
+                << (registration.prepared ? "true" : "false") << ",\"prepared_resume_endpoint\":"
+                << registration.prepared_resume_endpoint << ",\"points\":[";
+        for (size_t index = 0; index < registration.points.size(); ++index) {
+            if (index != 0) {
+                payload << ',';
+            }
+            const auto& point = registration.points[index];
+            payload << "{\"pos\":" << point.endpoint.pos << ",\"groups\":[";
+            for (size_t group = 0; group < point.group_bindings.size(); ++group) {
+                if (group != 0) {
+                    payload << ',';
+                }
+                const auto& binding = point.group_bindings[group];
+                const char* state = "registered";
+                switch (binding.state) {
+                    case PrefixCacheSaveState::REGISTERED: break;
+                    case PrefixCacheSaveState::CONTENT_COMPLETE: state = "content_complete"; break;
+                    case PrefixCacheSaveState::UNFULFILLED: state = "unfulfilled"; break;
+                    case PrefixCacheSaveState::CACHED_REF: state = "cached_ref"; break;
+                }
+                payload << "{\"group_set_id\":" << binding.group_set_id << ",\"state\":" << jsonEscape(state)
+                        << ",\"unfulfilled_reason\":";
+                if (binding.unfulfilled_reason.empty()) {
+                    payload << "null";
+                } else {
+                    payload << jsonEscape(binding.unfulfilled_reason);
+                }
+                payload << '}';
+            }
+            payload << "]}";
+        }
+        payload << "]}";
+    }
     PrefixCachePlanState plan_state = prefix_plan_state_;
     if (plan_state == PrefixCachePlanState::NOT_FORMED && absl::string_view(status) != "ready") {
         plan_state = PrefixCachePlanState::TERMINAL_UNFORMED;
@@ -694,7 +888,8 @@ void StreamCacheResource::emitPrefixPlanClosed(const char* reason) {
     } else {
         payload << "null";
     }
-    payload << ",\"state\":\"formed\",\"formed_time_us\":" << currentTimeUs() << ",\"points\":[],\"reason\":"
+    payload << ",\"request_id\":" << stream_->streamId()
+            << ",\"state\":\"formed\",\"formed_time_us\":" << currentTimeUs() << ",\"points\":[],\"reason\":"
             << jsonEscape(reason) << '}';
     RTP_LLM_LOG_INFO("event=prefix_cache_observation payload=%s", payload.str().c_str());
     prefix_plan_state_       = PrefixCachePlanState::FORMED;
@@ -739,6 +934,15 @@ absl::Status StreamCacheResource::incrKVBlock(int seq_len_override) {
     malloc_info.enable_remove_skipped_blocks = true;
     malloc_info.incr_seq_len_override        = seq_len_override;
     malloc_info.malloc_begin_time_us         = currentTimeUs();
+    const int initial_reuse = stream_->initialReuseLength();
+    // partialTailReuseEnabled() becomes false after a PREFILL-role stream
+    // leaves context mode; the registration still identifies this request.
+    // DSV4 publishes original full checkpoints at every reuseBlockTokens()
+    // boundary, so a nonaligned initial G identifies its added short leaf.
+    // LINEAR checkpoint spacing is a separate integration contract.
+    if (prefix_cache_registration_ && initial_reuse > 0 && initial_reuse % reuseBlockTokens() != 0) {
+        malloc_info.precise_resume_endpoint = static_cast<size_t>(initial_reuse);
+    }
     if (batch_kv_cache_resource_->curBlocksNum() == 0) {
         if (!batch_kv_cache_resource_->cacheKeysInitialized()) {
             initCacheKeys(batch_kv_cache_resource_, malloc_info.complete_token_ids, seqSizePerBlock());
@@ -757,6 +961,12 @@ absl::Status StreamCacheResource::incrKVBlock(int seq_len_override) {
                                  prefixObservationEnabled());
 
     auto result = resource_context_.cache_manager->malloc(malloc_info);
+    if (!result.success && prefix_cache_registration_
+        && resource_context_.cache_manager->relinquishOptionalRegisteredSave(*prefix_cache_registration_)) {
+        // The original running allocation retains its status semantics; optional
+        // save blocks yield once before declaring an incremental shortfall.
+        result = resource_context_.cache_manager->malloc(malloc_info);
+    }
     if (!result.success) {
         malloc_failed_times_++;
         return absl::InternalError("malloc failed");
@@ -873,6 +1083,23 @@ bool StreamCacheResource::reuseCache() const {
     // Per-request field flows frontend → FlexLB → engine via protobuf.
     return !stream_->generateConfig()->isPrefillOnly() && resource_context_.reuse_cache
            && (resource_context_.ignore_request_cache_switches || stream_->reuseCache());
+}
+
+bool StreamCacheResource::partialTailReuseEnabled() const {
+    if (!resource_context_.enable_prefill_partial_tail_reuse || resource_context_.role_type != RoleType::PREFILL
+        || !resource_context_.enable_device_cache || resource_context_.cache_manager == nullptr || !reuseCache()
+        || resource_context_.cache_manager->blockTreeCache() == nullptr || !stream_->isContextStream()) {
+        return false;
+    }
+#if !USING_CUDA
+    // Precise LINEAR state snapshots are supported on NVIDIA CUDA in the first release.
+    for (const auto& group : resource_context_.cache_manager->cacheConfig().topology().groups()) {
+        if (group.policy.group_type == CacheGroupType::LINEAR) {
+            return false;
+        }
+    }
+#endif
+    return true;
 }
 
 bool StreamCacheResource::enableMemoryCache() const {

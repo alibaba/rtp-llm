@@ -1073,6 +1073,139 @@ TEST_F(ExecOpsTest, testWriteCacheStoreCpRoundRobinUsesRealRequestKeyCount) {
     }
 }
 
+TEST_F(ExecOpsTest, testWriteCacheStoreExactShortPrefixSendsSeventhBaseKeyAcrossCpRanks) {
+    constexpr size_t base_tokens_per_block = 256;
+    constexpr size_t row_stride            = 16;
+    constexpr size_t key_count             = 7;
+    constexpr size_t local_block_num       = 4;
+
+    auto inputs = makePyCacheStoreInputs(base_tokens_per_block, key_count);
+    inputs.prefix_lengths_host   = torch::tensor({1300}, torch::kInt32);
+    inputs.input_lengths_host    = torch::tensor({244}, torch::kInt32);
+    inputs.host_kv_cache_offset  = torch::arange(static_cast<int64_t>(local_block_num), torch::kInt32).reshape({1, -1});
+    auto config = makeCacheConfig(base_tokens_per_block,
+                                  row_stride,
+                                  /*physical_scale_stride=*/0,
+                                  local_block_num,
+                                  "default",
+                                  /*layer_id=*/0,
+                                  resolvedCpFullPolicy(),
+                                  /*add_dummy_group=*/false,
+                                  /*mla_cache=*/true);
+
+    torch_ext::LayerKVCache layer_cache;
+    layer_cache.kv_cache_base      = torch::zeros({4, 16}, torch::kUInt8);
+    layer_cache.seq_size_per_block = base_tokens_per_block;
+    layer_cache.layer_id           = 0;
+    layer_cache.tag                = "default";
+
+    std::vector<std::string> transferred_keys;
+    for (int cp_rank = 0; cp_rank < 2; ++cp_rank) {
+        auto cache_store = std::make_shared<MockCacheStore>();
+        ASSERT_NO_THROW(runtimeWriteCacheStore(
+            inputs, layer_cache, config, cache_store, /*cache_model_id=*/0, cp_rank, /*cp_size=*/2, nullptr));
+        ASSERT_EQ(cache_store->records.size(), 1u);
+        const auto& record = cache_store->records.front();
+        ASSERT_EQ(record.blocks.size(), cp_rank == 0 ? 4u : 3u);
+        const auto base_addr = reinterpret_cast<uintptr_t>(layer_cache.kv_cache_base.data_ptr());
+        for (size_t local_slot = 0; local_slot < record.blocks.size(); ++local_slot) {
+            const size_t key_index = local_slot * 2 + static_cast<size_t>(cp_rank);
+            const auto   key       = "kv_" + cacheKeyAt(inputs, key_index, 0);
+            const auto   it        = record.blocks.find(key);
+            ASSERT_NE(it, record.blocks.end()) << "missing base key " << key_index;
+            EXPECT_EQ(reinterpret_cast<uintptr_t>(it->second.addr), base_addr + local_slot * row_stride);
+            EXPECT_EQ(it->second.len, row_stride);
+            transferred_keys.push_back(key);
+        }
+    }
+    EXPECT_EQ(transferred_keys.size(), key_count);
+    EXPECT_NE(std::find(transferred_keys.begin(), transferred_keys.end(), "kv_" + cacheKeyAt(inputs, 6, 0)),
+              transferred_keys.end());
+}
+
+TEST_F(ExecOpsTest, testWriteCacheStoreExactShortPrefixRejectsMissingSeventhKey) {
+    constexpr size_t base_tokens_per_block = 256;
+    auto inputs = makePyCacheStoreInputs(base_tokens_per_block, /*block_num=*/6);
+    inputs.prefix_lengths_host = torch::tensor({1300}, torch::kInt32);
+    inputs.input_lengths_host  = torch::tensor({244}, torch::kInt32);
+    auto config = makeCacheConfig(base_tokens_per_block,
+                                  /*physical_kv_stride=*/16,
+                                  /*physical_scale_stride=*/0,
+                                  /*block_num=*/7,
+                                  "default",
+                                  /*layer_id=*/0,
+                                  defaultCacheGroupPolicy(CacheGroupType::FULL),
+                                  /*add_dummy_group=*/false,
+                                  /*mla_cache=*/true);
+    torch_ext::LayerKVCache layer_cache;
+    layer_cache.kv_cache_base      = torch::zeros({7, 16}, torch::kUInt8);
+    layer_cache.seq_size_per_block = base_tokens_per_block;
+    layer_cache.layer_id           = 0;
+    layer_cache.tag                = "default";
+    auto cache_store = std::make_shared<MockCacheStore>();
+
+    const auto failure_message = [&]() -> std::string {
+        try {
+            runtimeWriteCacheStore(
+                inputs, layer_cache, config, cache_store, /*cache_model_id=*/0, /*cp_rank=*/0, /*cp_size=*/1, nullptr);
+        } catch (const std::runtime_error& e) {
+            return e.what();
+        }
+        return {};
+    };
+    EXPECT_NE(failure_message().find("requires 7 base keys"), std::string::npos);
+    EXPECT_TRUE(cache_store->records.empty());
+
+    inputs.cache_keys = torch::tensor({{100, 101, 102, 103, 104, 105, 0}}, torch::kInt64);
+    EXPECT_NE(failure_message().find("base key index=6 is missing"), std::string::npos);
+    EXPECT_TRUE(cache_store->records.empty());
+}
+
+TEST_F(ExecOpsTest, testWriteCacheStoreExactShortPrefixProjectsScaledCpTailKeys) {
+    constexpr size_t base_tokens_per_block  = 256;
+    constexpr size_t group_tokens_per_block = 512;
+    constexpr size_t row_stride             = 32;
+    auto policy               = defaultCacheGroupPolicy(CacheGroupType::SWA);
+    policy.cp_slice           = CpBlockSliceMode::PAYLOAD_BYTES;
+    policy.active_tail_blocks = 2;
+    auto config = makeCacheConfig(group_tokens_per_block,
+                                  row_stride,
+                                  /*physical_scale_stride=*/0,
+                                  /*block_num=*/4,
+                                  "swa_kv",
+                                  /*layer_id=*/1,
+                                  policy,
+                                  /*add_dummy_group=*/true,
+                                  /*mla_cache=*/false,
+                                  /*transfer_kv_bytes=*/row_stride,
+                                  /*transfer_scale_bytes=*/0,
+                                  /*opaque_store=*/true);
+    config.seq_size_per_block = base_tokens_per_block;
+    auto inputs = makePyCacheStoreInputs(base_tokens_per_block, /*block_num=*/7);
+    inputs.prefix_lengths_host  = torch::tensor({1300}, torch::kInt32);
+    inputs.input_lengths_host   = torch::tensor({244}, torch::kInt32);
+    inputs.host_kv_cache_offset = torch::tensor({{0, 1, 2, 3}}, torch::kInt32);
+
+    torch_ext::LayerKVCache layer_cache;
+    layer_cache.kv_cache_base      = torch::zeros({4, 32}, torch::kUInt8);
+    layer_cache.seq_size_per_block = group_tokens_per_block;
+    layer_cache.layer_id           = 1;
+    layer_cache.tag                = "swa_kv";
+
+    for (int cp_rank = 0; cp_rank < 2; ++cp_rank) {
+        auto cache_store = std::make_shared<MockCacheStore>();
+        ASSERT_NO_THROW(runtimeWriteCacheStore(
+            inputs, layer_cache, config, cache_store, /*cache_model_id=*/0, cp_rank, /*cp_size=*/2, nullptr));
+        ASSERT_EQ(cache_store->records.size(), 1u);
+        const auto& record = cache_store->records.front();
+        ASSERT_EQ(record.blocks.size(), 2u);
+        for (size_t key_index : {size_t(5), size_t(6)}) {
+            const auto key = "kv_" + cacheKeyAt(inputs, key_index, layer_cache.layer_id, layer_cache.tag);
+            EXPECT_NE(record.blocks.find(key), record.blocks.end()) << "missing scaled tail key " << key_index;
+        }
+    }
+}
+
 // Five real B=4 pages form one complete P=4 bundle and one incomplete bundle.
 // The physical table has two slots on every rank, but only rank zero owns a
 // real page in the second bundle. Never publish a key for its padded peers.

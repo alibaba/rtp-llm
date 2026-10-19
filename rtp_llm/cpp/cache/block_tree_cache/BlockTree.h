@@ -54,6 +54,13 @@ struct BlockTreeContentMatch {
     bool         partial{false};
 };
 
+// A content-matched interval backed by a real tree node. The source endpoint
+// can exceed matched_end; dense groups may reuse the shared part of that node.
+struct BlockTreeContentRange {
+    TreeNode* node{nullptr};
+    size_t    matched_end{0};
+};
+
 struct BlockTreeAgeSummary {
     size_t                     count{0};
     std::optional<int64_t>     mean_age_us;
@@ -80,12 +87,22 @@ public:
     std::vector<TreeNode*> findNode(const CacheKeysType& cache_keys) const;
     size_t                 contentMatchPos(const std::vector<int>& request_tokens) const;
     std::optional<BlockTreeContentMatch> contentMatchInfo(const std::vector<int>& request_tokens) const;
+    // Returns all content- and identity-matched endpoints, including terminal short leaves.
+    // The caller supplies keys computed with the request's original hash seed and base-block layout.
+    std::vector<TreeNode*> contentMatchCandidates(
+        const std::vector<int>& request_tokens, const std::function<CacheKeyType(size_t)>& endpoint_key) const;
+
+    std::vector<BlockTreeContentRange>
+    contentMatchRanges(const std::vector<int>&                                                   request_tokens,
+                       const std::function<CacheKeyType(size_t)>&                                endpoint_key,
+                       const std::function<bool(size_t, const std::vector<int>&, CacheKeyType)>& source_identity) const;
 
     std::vector<PrefixCachePlanPoint> planRecoveryPoints(
         const CacheKeysType&                              cache_keys,
         const std::vector<std::vector<GroupSetResource>>& resources,
         const std::vector<std::vector<int>>*              token_segments,
-        Tier                                              target_tier) const;
+        Tier                                              target_tier,
+        const std::vector<size_t>*                         token_ends = nullptr) const;
     std::vector<PrefixCachePlanPoint> unfulfilledPlanPoints(
         const std::vector<PrefixCachePlanPoint>& plan_points,
         const CacheKeysType&                     cache_keys) const;
@@ -96,7 +113,8 @@ public:
                                      const std::vector<std::vector<GroupSetResource>>& resources,
                                      bool                                              collect_path,
                                      bool                                              is_resident,
-                                     const std::vector<std::vector<int>>*              token_segments = nullptr);
+                                     const std::vector<std::vector<int>>*              token_segments = nullptr,
+                                     const std::vector<size_t>*                         token_ends = nullptr);
 
     bool      isRemovable(TreeNode* node) const;
     void      removePendingNodes(const std::unordered_set<TreeNode*>& nodes);
@@ -121,7 +139,11 @@ public:
     size_t size() const {
         return node_pool_.size();
     }
+    size_t reuseUnitTokens() const {
+        return reuse_unit_tokens_;
+    }
     CacheKeysType cacheKeys() const;
+    bool isShortLeaf(const TreeNode* node) const;
     int64_t keyVersion() const {
         return key_version_;
     }
@@ -176,10 +198,11 @@ private:
                                          const std::vector<std::vector<GroupSetResource>>& resources,
                                          bool                                              collect_path,
                                          bool                                              is_resident,
-                                         const std::vector<std::vector<int>>*              token_segments);
+                                         const std::vector<std::vector<int>>*              token_segments,
+                                         const std::vector<size_t>*                         token_ends);
 
     void      removeNode(TreeNode* node, const char* trigger = "mutation");
-    TreeNode* createNode(CacheKeyType key, TreeNode* parent);
+    TreeNode* createNode(CacheKeyType key, TreeNode* parent, size_t token_end);
     void      releaseNode(TreeNode* node);
 
     struct IntervalSet {

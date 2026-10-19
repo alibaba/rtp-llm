@@ -169,6 +169,8 @@ constexpr double kDefaultDiskHighWatermarkRatio   = 0.97;
 
 struct KVCacheConfig {
     bool                                    reuse_cache           = false;
+    // Prefill DEVICE short-tail registration and reuse. Independent of prefix observability.
+    bool                                    enable_prefill_partial_tail_reuse = false;
     std::string                             multi_task_prompt     = "";
     std::string                             multi_task_prompt_str = "";
     std::map<std::string, std::vector<int>> multi_task_prompt_tokens;

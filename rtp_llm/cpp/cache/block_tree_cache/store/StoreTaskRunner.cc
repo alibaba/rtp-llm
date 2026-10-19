@@ -15,11 +15,14 @@ StoreTaskRunner::StoreTaskRunner(const std::vector<GroupSetPtr>& group_sets): gr
 bool StoreTaskRunner::prepareTask(Task& task, const std::vector<std::vector<GroupSetResource>>& resources) {
     for (size_t key_index = 0; key_index < task.cache_keys.size(); ++key_index) {
         for (size_t group_set_id = 0; group_set_id < group_sets_.size(); ++group_set_id) {
+            const GroupSetPtr& group_set = group_sets_[group_set_id];
+            if (group_set->localOnly()) {
+                continue;
+            }
             const GroupSetResource& source = resources[key_index][group_set_id];
             if (source.device_blocks.empty()) {
                 continue;
             }
-            const GroupSetPtr& group_set    = group_sets_[group_set_id];
             const BlockIdxType target_block = group_set->allocateSingleBlock(task.target_tier, BlockTreeRefType::STORE);
             if (isNullBlockIdx(target_block)) {
                 RTP_LLM_LOG_WARNING(

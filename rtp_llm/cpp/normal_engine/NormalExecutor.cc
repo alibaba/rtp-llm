@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
+#include "rtp_llm/cpp/normal_engine/PrefillCacheWorkGuard.h"
 #include "rtp_llm/cpp/normal_engine/HiddenStateCapturePolicy.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
@@ -84,6 +85,8 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
     tp_rank_            = params.parallelism_config.tp_rank;
     parallelism_config_ = params.parallelism_config;
     role_type_          = params.pd_sep_config.role_type;
+    partial_tail_reuse_ = params.kv_cache_config.enable_prefill_partial_tail_reuse
+                          && role_type_ == RoleType::PREFILL && !warm_up_ && !is_propose_;
     RTP_LLM_LOG_INFO("enable_detail_log_ = %d, tp_rank_ = %d", enable_detail_log_, tp_rank_);
     if (params.profiling_debug_logging_config.enable_model_inputs_log) {
         model_inputs_logger_ =
@@ -263,6 +266,19 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         prepareGrpcNormalDeviceState(stream_groups);
     }
 
+    PrefillCacheWorkGuard cache_work_guard(stream_groups,
+                                           partial_tail_reuse_ && cache_manager_
+                                               && cache_manager_->isAllocatorOwner());
+
+    if (cache_manager_ && cache_manager_->isAllocatorOwner()) {
+        for (const auto& stream : stream_groups.contextStreams()) {
+            stream->streamCacheResource().prepareRegisteredSave();
+        }
+        // Optional A→D copies are decided by the owner above. Refresh the
+        // gatherer's copy-row count before it allocates the input tensor.
+        stream_groups = StreamGroups(streams);
+    }
+
     {
         RTP_LLM_PROFILE_SCOPE("executor.gather_model_input");
         int64_t start_time_us      = autil::TimeUtility::currentTimeInMicroSeconds();
@@ -304,13 +320,26 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     // PyWrappedModel TensorHolder release point for the previous model forward.
     model_->releaseBuffers();
 
+    const bool cache_completion_batch = partial_tail_reuse_ && model_input.prefix_lengths.defined()
+                                        && model_input.prefix_lengths.numel() > 0 && !model_input.is_fake_stream;
+    const bool has_sparse_save = model_input.cache_save_positions.defined()
+                                 && model_input.cache_save_positions.numel() > 0;
+    RTP_LLM_CHECK_WITH_INFO(!has_sparse_save || (model_ && model_->supportsSparseCacheSave()),
+                            "explicit sparse cache save requires a model writer");
     {
         // update kv cache
         if (model_input.kv_cache_update_mapping.defined() && model_input.kv_cache_update_mapping.numel() > 0) {
             RTP_LLM_PROFILE_SCOPE("executor.kv_cache_update");
             RTP_LLM_CHECK_WITH_INFO(static_cast<bool>(cache_manager_), "cache update mapping requires a cache manager");
+            if (cache_completion_batch) {
+                cache_work_guard.markGpuWorkSubmitted();
+            }
             cache_manager_->blockBatchCopyForForward(model_input.kv_cache_update_mapping,
-                                                     model_input.kv_cache_group_tags);
+                                                     model_input.kv_cache_group_tags,
+                                                     cache_completion_batch);
+            if (cache_completion_batch) {
+                confirmTpCacheWorkCompletion(parallelism_config_.tp_size, tp_rank_);
+            }
         }
     }
     {
@@ -330,6 +359,9 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
             const auto role = is_propose_ ? ModelInputsModelRole::DRAFT : ModelInputsModelRole::NORMAL;
             model_inputs_logger_->log(model_input, role, model_->model_id_);
         }
+        if (cache_completion_batch) {
+            cache_work_guard.markGpuWorkSubmitted();
+        }
         model_output                        = std::move(model_->forward(model_input));
         executor_collector.model_forward_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
@@ -337,6 +369,11 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         expert_balancer_->stepForward(*model_, executor_collector);
         executor_collector.eplb_step_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+    }
+
+    if (cache_completion_batch) {
+        confirmTpCacheWorkCompletion(parallelism_config_.tp_size, tp_rank_);
+        cache_work_guard.markComplete();
     }
 
     if (auto capture_error = model_->takeDeferredHiddenStateCaptureError(); capture_error.has_value()) {
@@ -349,6 +386,14 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
             profile_step_finish_();
         }
         return absl::OkStatus();
+    }
+
+    if (cache_completion_batch && cache_manager_ && cache_manager_->isAllocatorOwner()) {
+        for (const auto& [stream, executed_end] : cache_work_guard.completionEndpoints()) {
+            if (!stream->hasError()) {
+                stream->streamCacheResource().completeRegisteredSave(executed_end);
+            }
+        }
     }
 
     if (tp_rank_ > 0 || warm_up_ || streams.size() == 0) {

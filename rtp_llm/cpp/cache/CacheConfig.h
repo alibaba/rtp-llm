@@ -172,6 +172,20 @@ public:
         return (key_index + 1) * cp_size - 1;
     }
 
+    // Project a saved global token endpoint through this tag's resolved physical
+    // geometry. A short endpoint need not end at a canonical CP key boundary.
+    size_t endpointBlockPosition(const std::string& tag, size_t token_end) const {
+        RTP_LLM_CHECK_WITH_INFO(token_end > 0, "zero endpoint has no cache block position");
+        const auto& cache_group = group(tag);
+        const size_t stride = cache_group.seqSizePerBlock();
+        RTP_LLM_CHECK_WITH_INFO(stride > 0, "tag=%s has zero cache block stride", tag.c_str());
+        const size_t global_slot = (token_end - 1) / stride;
+        if (storage_cp_size > 1 && cache_group.policy.cp_mapping == CpBlockMappingMode::BLOCK_ROUND_ROBIN) {
+            return global_slot / static_cast<size_t>(storage_cp_size);
+        }
+        return global_slot;
+    }
+
     int localAllocTokens(const std::string& tag, int global_tokens) const {
         if (storage_cp_size == 1 || group(tag).policy.cp_mapping != CpBlockMappingMode::BLOCK_ROUND_ROBIN) {
             return global_tokens;

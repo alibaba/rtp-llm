@@ -178,6 +178,236 @@ custom_smoke_test(
     ],
 )
 
+# Manual four-layer DSV4 tail-reuse acceptance. The local six-shard checkpoint
+# view is intentionally ignored by Git; this target is not part of a CI suite.
+custom_smoke_test(
+    name = "deepseek_v4_tail_reuse_4layer_pd_sm103",
+    main = "deepseek_v4_tail_reuse_4layer_test.py",
+    args = ["DeepSeekV4TailReuseFourLayerTest.test_independent_g1300_branches_with_direct_state_oracle"],
+    smoke_args = "--world_size 2 --tp_size 1 --ep_size 1 --dp_size 1 --max_seq_len 2048 --fp8_kv_cache 1",
+    gpu_type = ["SM103_CU13"],
+    tags = ["manual", "dsv4_tail_reuse"],
+    data = [
+        "//rtp_llm:sdk",
+        "deepseek_v4_tail_reuse_probe.py",
+    ],
+)
+
+custom_smoke_test(
+    name = "deepseek_v4_tail_reuse_4layer_fork_pd_sm103",
+    main = "deepseek_v4_tail_reuse_4layer_test.py",
+    args = ["DeepSeekV4TailReuseFourLayerTest.test_exact_forks_with_direct_state_oracle"],
+    smoke_args = "--world_size 2 --tp_size 1 --ep_size 1 --dp_size 1 --max_seq_len 2048 --fp8_kv_cache 1",
+    gpu_type = ["SM103_CU13"],
+    tags = ["manual", "dsv4_tail_reuse"],
+    data = [
+        "//rtp_llm:sdk",
+        "deepseek_v4_tail_reuse_probe.py",
+    ],
+)
+
+custom_smoke_test(
+    name = "deepseek_v4_tail_reuse_4layer_cp2_1300_pd_sm103",
+    main = "deepseek_v4_tail_reuse_4layer_cp_test.py",
+    args = ["DeepSeekV4TailReuseFourLayerCP2Test.test_cp2_g1300_to_2000"],
+    smoke_args = "--world_size 4 --tp_size 2 --ep_size 2 --dp_size 1 --max_seq_len 2048 --fp8_kv_cache 1",
+    gpu_type = ["SM103_CU13"],
+    tags = ["manual", "dsv4_tail_reuse"],
+    data = [
+        "//rtp_llm:sdk",
+        "deepseek_v4_tail_reuse_4layer_test.py",
+        "deepseek_v4_tail_reuse_probe.py",
+    ],
+)
+
+# Manual CUDA13 CP prefill acceptance using the shared Qwen3.5 checkpoint,
+# truncated to its first three LINEAR layers at load time.
+custom_smoke_test(
+    name = "qwen35_tail_reuse_cp2_prefill_cuda13",
+    main = "qwen35_tail_reuse_cp_test.py",
+    args = ["Qwen35TailReuseCPTest.test_cp2_g1300_to_2000_prefill"],
+    smoke_args = "--world_size 3 --tp_size 2 --ep_size 2 --dp_size 1 --max_seq_len 2048",
+    gpu_type = ["L20_CU13"],
+    tags = ["manual", "linear_tail_reuse"],
+    data = [
+        "//rtp_llm:sdk",
+        "qwen35_tail_reuse_cp_probe.py",
+    ],
+)
+
+custom_smoke_test(
+    name = "deepseek_v4_tail_reuse_4layer_cp2_1025_pd_sm103",
+    main = "deepseek_v4_tail_reuse_4layer_cp_test.py",
+    args = ["DeepSeekV4TailReuseFourLayerCP2Test.test_cp2_g1025_to_1026"],
+    smoke_args = "--world_size 4 --tp_size 2 --ep_size 2 --dp_size 1 --max_seq_len 2048 --fp8_kv_cache 1",
+    gpu_type = ["SM103_CU13"],
+    tags = ["manual", "dsv4_tail_reuse"],
+    data = [
+        "//rtp_llm:sdk",
+        "deepseek_v4_tail_reuse_4layer_test.py",
+        "deepseek_v4_tail_reuse_probe.py",
+    ],
+)
+
+custom_smoke_test(
+    name = "deepseek_v4_tail_reuse_4layer_cp2_1300_to_1320_pd_sm103",
+    main = "deepseek_v4_tail_reuse_4layer_cp_test.py",
+    args = ["DeepSeekV4TailReuseFourLayerCP2Test.test_cp2_g1300_to_1320"],
+    smoke_args = "--world_size 3 --tp_size 2 --ep_size 2 --dp_size 1 --max_seq_len 2048 --fp8_kv_cache 1",
+    gpu_type = ["SM103_CU13"],
+    tags = ["manual", "dsv4_tail_reuse"],
+    data = [
+        "//rtp_llm:sdk",
+        "deepseek_v4_tail_reuse_4layer_test.py",
+        "deepseek_v4_tail_reuse_probe.py",
+    ],
+)
+
+custom_smoke_test(
+    name = "deepseek_v4_tail_reuse_4layer_cp4_1300_prefill_sm103",
+    main = "deepseek_v4_tail_reuse_4layer_cp4_test.py",
+    args = ["DeepSeekV4TailReuseFourLayerCP4Test.test_cp4_g1300_to_2000_local_prefill"],
+    smoke_args = "--world_size 4 --tp_size 4 --ep_size 4 --dp_size 1 --max_seq_len 2048 --fp8_kv_cache 1",
+    gpu_type = ["SM103_CU13"],
+    tags = ["manual", "dsv4_tail_reuse"],
+    data = [
+        "//rtp_llm:sdk",
+        "deepseek_v4_tail_reuse_4layer_test.py",
+        "deepseek_v4_tail_reuse_probe.py",
+    ],
+)
+
+custom_smoke_test(
+    name = "deepseek_v4_tail_reuse_4layer_mtp_pd_sm103",
+    main = "deepseek_v4_tail_reuse_4layer_mtp_test.py",
+    args = ["DeepSeekV4TailReuseFourLayerMTPTest.test_mtp_g1300_to_1320_target_and_draft"],
+    smoke_args = "--world_size 2 --tp_size 1 --ep_size 1 --dp_size 1 --max_seq_len 2048 --fp8_kv_cache 1",
+    gpu_type = ["SM103_CU13"],
+    tags = ["manual", "dsv4_tail_reuse"],
+    data = [
+        "//rtp_llm:sdk",
+        "deepseek_v4_tail_reuse_4layer_test.py",
+        "deepseek_v4_tail_reuse_4layer_mtp_probe.py",
+        "deepseek_v4_tail_reuse_probe.py",
+    ],
+)
+
+custom_smoke_test(
+    name = "deepseek_v4_tail_reuse_4layer_mtp_cp2_1300_to_1320_pd_sm103",
+    main = "deepseek_v4_tail_reuse_4layer_mtp_cp_test.py",
+    args = ["DeepSeekV4TailReuseFourLayerMTPCP2Test.test_mtp_cp2_g1300_to_1320"],
+    smoke_args = "--world_size 3 --tp_size 2 --ep_size 2 --dp_size 1 --max_seq_len 2048 --fp8_kv_cache 1",
+    gpu_type = ["SM103_CU13"],
+    tags = ["manual", "dsv4_tail_reuse"],
+    data = [
+        "//rtp_llm:sdk",
+        "deepseek_v4_tail_reuse_4layer_test.py",
+        "deepseek_v4_tail_reuse_4layer_cp_test.py",
+        "deepseek_v4_tail_reuse_4layer_mtp_test.py",
+        "deepseek_v4_tail_reuse_4layer_mtp_cp_probe.py",
+        "deepseek_v4_tail_reuse_4layer_mtp_probe.py",
+        "deepseek_v4_tail_reuse_probe.py",
+    ],
+)
+
+custom_smoke_test(
+    name = "deepseek_v4_tail_reuse_4layer_mtp_cp2_1300_to_2000_pd_sm103",
+    main = "deepseek_v4_tail_reuse_4layer_mtp_cp_test.py",
+    args = ["DeepSeekV4TailReuseFourLayerMTPCP2Test.test_mtp_cp2_g1300_to_2000"],
+    smoke_args = "--world_size 3 --tp_size 2 --ep_size 2 --dp_size 1 --max_seq_len 2048 --fp8_kv_cache 1",
+    gpu_type = ["SM103_CU13"],
+    tags = ["manual", "dsv4_tail_reuse"],
+    data = [
+        "//rtp_llm:sdk",
+        "deepseek_v4_tail_reuse_4layer_test.py",
+        "deepseek_v4_tail_reuse_4layer_cp_test.py",
+        "deepseek_v4_tail_reuse_4layer_mtp_test.py",
+        "deepseek_v4_tail_reuse_4layer_mtp_cp_probe.py",
+        "deepseek_v4_tail_reuse_4layer_mtp_probe.py",
+        "deepseek_v4_tail_reuse_probe.py",
+    ],
+)
+
+custom_smoke_test(
+    name = "deepseek_v4_tail_reuse_4layer_mtp_cp2_1025_to_1026_pd_sm103",
+    main = "deepseek_v4_tail_reuse_4layer_mtp_cp_test.py",
+    args = ["DeepSeekV4TailReuseFourLayerMTPCP2Test.test_mtp_cp2_g1025_to_1026"],
+    smoke_args = "--world_size 3 --tp_size 2 --ep_size 2 --dp_size 1 --max_seq_len 2048 --fp8_kv_cache 1",
+    gpu_type = ["SM103_CU13"],
+    tags = ["manual", "dsv4_tail_reuse"],
+    data = [
+        "//rtp_llm:sdk",
+        "deepseek_v4_tail_reuse_4layer_test.py",
+        "deepseek_v4_tail_reuse_4layer_cp_test.py",
+        "deepseek_v4_tail_reuse_4layer_mtp_test.py",
+        "deepseek_v4_tail_reuse_4layer_mtp_cp_probe.py",
+        "deepseek_v4_tail_reuse_4layer_mtp_probe.py",
+        "deepseek_v4_tail_reuse_probe.py",
+    ],
+)
+
+# Full 43-layer Flash-DSpARK checkpoint. Manual because three concurrent
+# P/D ranks require the high-memory local GPUs; keep capture layers 40-42.
+custom_smoke_test(
+    name = "deepseek_v4_tail_reuse_dspark_1300_to_1320_pd_sm103",
+    main = "deepseek_v4_tail_reuse_dspark_test.py",
+    args = ["FlashDSparkNonCPTest.test_g1300_to_1320"],
+    smoke_args = "--world_size 2 --tp_size 1 --ep_size 1 --dp_size 1 --max_seq_len 2048 --fp8_kv_cache 1",
+    gpu_type = ["SM103_CU13"],
+    tags = ["manual", "dsv4_tail_reuse"],
+    data = [
+        "//rtp_llm:sdk",
+        "deepseek_v4_tail_reuse_dspark_probe.py",
+        "deepseek_v4_tail_reuse_4layer_mtp_probe.py",
+        "deepseek_v4_tail_reuse_probe.py",
+    ],
+)
+
+custom_smoke_test(
+    name = "deepseek_v4_tail_reuse_dspark_1300_to_2000_pd_sm103",
+    main = "deepseek_v4_tail_reuse_dspark_test.py",
+    args = ["FlashDSparkNonCPTest.test_g1300_to_2000"],
+    smoke_args = "--world_size 2 --tp_size 1 --ep_size 1 --dp_size 1 --max_seq_len 2048 --fp8_kv_cache 1",
+    gpu_type = ["SM103_CU13"],
+    tags = ["manual", "dsv4_tail_reuse"],
+    data = [
+        "//rtp_llm:sdk",
+        "deepseek_v4_tail_reuse_dspark_probe.py",
+        "deepseek_v4_tail_reuse_4layer_mtp_probe.py",
+        "deepseek_v4_tail_reuse_probe.py",
+    ],
+)
+
+custom_smoke_test(
+    name = "deepseek_v4_tail_reuse_dspark_cp2_1300_to_2000_pd_sm103",
+    main = "deepseek_v4_tail_reuse_dspark_test.py",
+    args = ["FlashDSparkCP2Test.test_g1300_to_2000"],
+    smoke_args = "--world_size 3 --tp_size 2 --ep_size 2 --dp_size 1 --max_seq_len 2048 --fp8_kv_cache 1",
+    gpu_type = ["SM103_CU13"],
+    tags = ["manual", "dsv4_tail_reuse"],
+    data = [
+        "//rtp_llm:sdk",
+        "deepseek_v4_tail_reuse_dspark_probe.py",
+        "deepseek_v4_tail_reuse_4layer_mtp_probe.py",
+        "deepseek_v4_tail_reuse_probe.py",
+    ],
+)
+
+custom_smoke_test(
+    name = "deepseek_v4_tail_reuse_dspark_cp2_1025_to_1026_pd_sm103",
+    main = "deepseek_v4_tail_reuse_dspark_test.py",
+    args = ["FlashDSparkCP2Test.test_g1025_to_1026"],
+    smoke_args = "--world_size 3 --tp_size 2 --ep_size 2 --dp_size 1 --max_seq_len 2048 --fp8_kv_cache 1",
+    gpu_type = ["SM103_CU13"],
+    tags = ["manual", "dsv4_tail_reuse"],
+    data = [
+        "//rtp_llm:sdk",
+        "deepseek_v4_tail_reuse_dspark_probe.py",
+        "deepseek_v4_tail_reuse_4layer_mtp_probe.py",
+        "deepseek_v4_tail_reuse_probe.py",
+    ],
+)
+
 custom_smoke_test(
     name = "deepseek_v41_flash_tp4_ep4_graph_sm100_arm",
     main = "deepseek_v41_contract_test.py",
@@ -203,4 +433,69 @@ custom_smoke_test(
     gpu_type = ["SM100_ARM_CU13"],
     tags = ["dsv41_cuda13", "model_contract", "dspark_contract"],
     data = ["//rtp_llm:sdk", "deepseek_v41_contract_test.py"],
+)
+
+# Manual fixed-request feature toggle evidence; both P and D load real weights.
+custom_smoke_test(
+    name = "tail_reuse_benefit_pd_sm103",
+    main = "tail_reuse_benefit_test.py",
+    args = ["TailReuseBenefitNonCPTest.test_fixed_requests"],
+    smoke_args = "--world_size 2 --tp_size 1 --ep_size 1 --dp_size 1 --max_seq_len 2048 --fp8_kv_cache 1",
+    gpu_type = ["SM103_CU13"],
+    tags = ["manual", "dsv4_tail_reuse"],
+    data = ["//rtp_llm:sdk", "deepseek_v4_tail_reuse_4layer_test.py"],
+)
+
+custom_smoke_test(
+    name = "tail_reuse_benefit_cp2_pd_sm103",
+    main = "tail_reuse_benefit_test.py",
+    args = ["TailReuseBenefitCP2Test.test_fixed_requests"],
+    smoke_args = "--world_size 3 --tp_size 2 --ep_size 2 --dp_size 1 --max_seq_len 2048 --fp8_kv_cache 1",
+    gpu_type = ["SM103_CU13"],
+    tags = ["manual", "dsv4_tail_reuse"],
+    data = ["//rtp_llm:sdk", "deepseek_v4_tail_reuse_4layer_test.py"],
+)
+
+# Four-layer variant includes the first FULL layer in the hybrid CP model.
+custom_smoke_test(
+    name = "qwen35_tail_reuse_cp2_full_linear_cuda13",
+    main = "qwen35_tail_reuse_cp_test.py",
+    args = ["Qwen35FullLinearCPTest.test_cp2_g1300_to_2000_prefill"],
+    smoke_args = "--world_size 3 --tp_size 2 --ep_size 2 --dp_size 1 --max_seq_len 2048",
+    gpu_type = ["L20_CU13"],
+    tags = ["manual", "linear_tail_reuse"],
+    data = ["//rtp_llm:sdk", "qwen35_tail_reuse_cp_probe.py"],
+)
+
+
+# Single-rank FULL+LINEAR numerical and physical checkpoint acceptance.
+custom_smoke_test(
+    name = "qwen35_tail_reuse_full_linear_cuda13",
+    main = "qwen35_tail_reuse_cp_test.py",
+    args = ["Qwen35FullLinearNonCPTest.test_noncp_g1300_to_2000_prefill"],
+    smoke_args = "--world_size 2 --tp_size 1 --ep_size 1 --dp_size 1 --max_seq_len 2048",
+    gpu_type = ["L20_CU13"],
+    tags = ["manual", "linear_tail_reuse"],
+    data = ["//rtp_llm:sdk", "qwen35_tail_reuse_cp_probe.py"],
+)
+
+# Pure dense FULL needs no selected writer or snapshot at an interior endpoint.
+custom_smoke_test(
+    name = "qwen3_dense_tail_reuse_cuda13",
+    main = "qwen3_dense_tail_reuse_test.py",
+    args = ["Qwen3DenseTailReuseTest.test_interior_fork_and_tail_extension"],
+    smoke_args = "--world_size 2 --tp_size 1 --ep_size 1 --dp_size 1 --max_seq_len 1024",
+    gpu_type = ["L20_CU13"],
+    tags = ["manual", "dense_tail_reuse"],
+    data = ["//rtp_llm:sdk", "qwen3_dense_tail_reuse_probe.py", "qwen35_tail_reuse_cp_test.py", "qwen35_tail_reuse_cp_probe.py"],
+)
+
+custom_smoke_test(
+    name = "qwen3_dense_tail_reuse_cp2_cuda13",
+    main = "qwen3_dense_tail_reuse_test.py",
+    args = ["Qwen3DenseTailReuseCPTest.test_interior_fork_and_tail_extension"],
+    smoke_args = "--world_size 3 --tp_size 2 --ep_size 1 --dp_size 1 --max_seq_len 1024",
+    gpu_type = ["L20_CU13"],
+    tags = ["manual", "dense_tail_reuse"],
+    data = ["//rtp_llm:sdk", "qwen3_dense_tail_reuse_probe.py", "qwen35_tail_reuse_cp_test.py", "qwen35_tail_reuse_cp_probe.py"],
 )

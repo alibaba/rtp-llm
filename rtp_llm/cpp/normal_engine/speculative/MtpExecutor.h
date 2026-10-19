@@ -290,6 +290,7 @@ private:
 
     bool     warm_up_;
     RoleType role_type_;
+    bool     partial_tail_reuse_ = false;
     // True when any KV-cache group is CacheGroupType::LINEAR (RWKV / Mamba /
     // hybrid linear+full). Per-step state advances every token, so the page
     // table must be re-gathered between draft propose and target verify.

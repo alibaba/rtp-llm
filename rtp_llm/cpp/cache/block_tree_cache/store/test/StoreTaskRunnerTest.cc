@@ -16,6 +16,7 @@
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/group_set/SWAGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferBatchAsyncContext.h"
@@ -66,6 +67,47 @@ TEST(StoreTaskRunnerTest, PrepareTaskCreatesHostTransferAndTemporaryHolds) {
     EXPECT_EQ(host_pool->referencedBlocksNum(BlockTreeRefType::STORE), 0u);
 
     group_set->unreferenceBlocks(MultiNodeResource{0, Tier::DEVICE, {{nullptr, source_holder[0]}}});
+}
+
+TEST(StoreTaskRunnerTest, LocalOnlyGroupDoesNotBlockCompleteGroupLowerTierStore) {
+    auto full_policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    full_policy.enable_prefix_reuse = true;
+    auto hca_policy = defaultCacheGroupPolicy(CacheGroupType::SWA);
+    hca_policy.sliding_window_size = 128;
+    const auto topology = makeTestTopology({makeTestGroupBase(full_policy), makeTestGroupBase(hca_policy)});
+    auto full_device = makeTestDevicePool({{16, 0}}, 2, "store_full_device");
+    auto hca_device = makeTestDevicePool({{16, 0}}, 2, "store_hca_device");
+    auto full_host = block_transfer_engine_test::makeHostPool(16, 1);
+    auto full_disk = block_tree_cache_test::makeDiskPool(16, 1, std::make_unique<MemoryDiskBlockIO>());
+    GroupSetPtr full = makeTestGroupSet(0, topology, {"group0"}, {full_device}, full_host, full_disk);
+    GroupSetPtr hca = std::make_shared<SWAGroupSet>(128,
+                                                   topology->group("group1").seqSizePerBlock(),
+                                                   std::vector<DeviceBlockPoolPtr>{hca_device},
+                                                   nullptr,
+                                                   nullptr);
+    hca->initialize(1, topology, {"group1"}, {}, /*local_only=*/true);
+    const std::vector<GroupSetPtr> group_sets{full, hca};
+    StoreTaskRunner runner(group_sets);
+
+    const MultiNodeBlocks full_source = allocateDeviceBlocksForTest(*full, 1);
+    const MultiNodeBlocks hca_source = allocateDeviceBlocksForTest(*hca, 1);
+    std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(2));
+    resources[0][0].device_blocks = full_source[0];
+    resources[0][1].device_blocks = hca_source[0];
+
+    for (const Tier target : {Tier::HOST, Tier::DISK}) {
+        StoreTaskRunner::Task task(target, CacheKeysType{100}, std::chrono::seconds(30));
+        ASSERT_TRUE(runner.prepareTask(task, resources));
+        ASSERT_EQ(task.descriptors().size(), 1u);
+        EXPECT_EQ(task.descriptors()[0].group_set_id, 0u);
+        EXPECT_EQ(task.descriptors()[0].target_tier, target);
+        EXPECT_EQ(hca_device->referencedBlocksNum(BlockTreeRefType::STORE), 0u);
+        EXPECT_EQ(full_device->referencedBlocksNum(BlockTreeRefType::STORE), 1u);
+        runner.releaseTaskResources(task);
+        EXPECT_EQ(full_device->referencedBlocksNum(BlockTreeRefType::STORE), 0u);
+    }
+    unreferenceDeviceBlocksForTest(*full, full_source);
+    unreferenceDeviceBlocksForTest(*hca, hca_source);
 }
 
 TEST(StoreTaskRunnerTest, PrepareTaskRecordsPathIndexInTransferDescriptors) {

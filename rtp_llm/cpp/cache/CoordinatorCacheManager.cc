@@ -8,7 +8,9 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/models_py/bindings/core/OpData.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
+#include "rtp_llm/cpp/cache/PrefixCacheRegistration.h"
 #include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
+#include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
 #include "rtp_llm/cpp/cache/SingleTypeCacheManager.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
@@ -24,6 +26,23 @@
 
 namespace rtp_llm {
 namespace {
+
+size_t logicalBlockSpan(const CacheConfig& config, const GroupBase& group) {
+    const size_t ranks         = group.policy.cp_mapping == CpBlockMappingMode::BLOCK_ROUND_ROBIN ?
+                                     static_cast<size_t>(std::max(1, config.storage_cp_size)) :
+                                     1;
+    const size_t physical_span = group.seqSizePerBlock();
+    RTP_LLM_CHECK(physical_span <= std::numeric_limits<size_t>::max() / ranks);
+    return physical_span * ranks;
+}
+
+bool hasDenseSwaStorage(const GroupBase& group) {
+    // Fixed-state/opaque SWA can retain only a ring window inside one logical
+    // block. Even its final prefill value can be overwritten by fallback decode.
+    return group.policy.group_type == CacheGroupType::SWA && group.policy.validate_tail_blocks
+           && (group.spec->type == KVCacheSpecType::MultiHeadAttention
+               || group.spec->type == KVCacheSpecType::MultiHeadLatentAttention);
+}
 
 std::vector<std::vector<int>> makePrefixTokenSegments(const CacheConfig&                config,
                                                      const CacheKeysType&              cache_keys,
@@ -77,6 +96,25 @@ int resolvedGroupTokens(const CacheConfig& config, std::string_view tag, bool co
         return raw_tokens;
     }
     return config.localAllocTokens(std::string(tag), raw_tokens);
+}
+
+std::optional<SWACacheManager::HistorySlots>
+preciseSwaHistorySlots(const CacheConfig& config, const std::string& tag, size_t resume_endpoint) {
+    const auto& group = config.group(tag);
+    // HCA_STATE is also typed SWA, but its local-only GroupSet has a different
+    // pending-window rule and disables tail validation. Only ordinary SWA KV
+    // uses the contiguous attention history window here.
+    if (group.policy.group_type != CacheGroupType::SWA || !group.policy.validate_tail_blocks
+        || group.policy.active_tail_blocks < 2 || group.policy.sliding_window_size <= 0 || resume_endpoint == 0) {
+        return std::nullopt;
+    }
+    const size_t history_tokens = std::min(resume_endpoint, static_cast<size_t>(group.policy.sliding_window_size - 1));
+    if (history_tokens == 0) {
+        return SWACacheManager::HistorySlots{};
+    }
+    const size_t first_token = resume_endpoint - history_tokens;
+    return SWACacheManager::HistorySlots{config.endpointBlockPosition(tag, first_token + 1),
+                                         config.endpointBlockPosition(tag, resume_endpoint) + 1};
 }
 
 int requestSeqLength(const MallocInfo& info) {
@@ -177,7 +215,15 @@ MallocResult CoordinatorCacheManager::initMalloc(const MallocInfo& malloc_info) 
         std::dynamic_pointer_cast<LoadAsyncContext>(init_result.async_context);
     if (!load_context || !load_context->needBackendMatch()) {
         std::shared_ptr<AsyncContext> pending_async_context = std::move(init_result.async_context);
-        MallocResult                  incr_result           = incrMalloc(malloc_info);
+        MallocInfo incr_info = malloc_info;
+        // In the current DSV4 registration every base-B point is an original
+        // full checkpoint; only an endpoint between those points is a new
+        // short leaf. LINEAR checkpoint spacing is handled separately.
+        if (malloc_info.request_layout && malloc_info.request_layout->partial_tail_reuse && init_result.reuse_len > 0
+            && init_result.reuse_len % static_cast<int>(config_.reuse_unit_tokens) != 0) {
+            incr_info.precise_resume_endpoint = static_cast<size_t>(init_result.reuse_len);
+        }
+        MallocResult incr_result = incrMalloc(incr_info);
         if (!incr_result.success) {
             if (load_context != nullptr) {
                 load_context->abortPending();
@@ -432,44 +478,65 @@ size_t CoordinatorCacheManager::loadTargetPosition(size_t path_index, const std:
     return config_.canonicalBlockPosition(tag, path_index);
 }
 
+size_t CoordinatorCacheManager::loadTargetEndpoint(size_t token_end, const std::string& tag) const {
+    return config_.endpointBlockPosition(tag, token_end);
+}
+
 std::shared_ptr<LoadAsyncContext> CoordinatorCacheManager::prepareKVCache(
     const CacheKeysType& cache_keys, BatchKVCacheResource& kv_resource, PreparedKVCache& prepared,
-    const std::function<bool(size_t)>& valid_prefix, const std::vector<int>* request_tokens) {
-    if (!block_tree_cache_ || cache_keys.empty()) {
+    const std::function<bool(size_t)>& valid_prefix, const std::vector<int>* request_tokens,
+    const PartialTailMatchRequest* partial_tail) {
+    if (!block_tree_cache_ || (cache_keys.empty() && partial_tail == nullptr)) {
         return nullptr;
     }
-    BlockTreeMatchResult match_result = block_tree_cache_->match(cache_keys, valid_prefix, request_tokens);
+    BlockTreeMatchResult match_result = block_tree_cache_->match(cache_keys, valid_prefix, request_tokens, partial_tail);
     prepared.match_observation = match_result.match_observation;
     std::shared_ptr<LoadAsyncContext> load_context = std::move(match_result.async_context);
     prepared.matched_device_blocks                 = match_result.matched_device_blocks;
+    prepared.matched_device_endpoint               = match_result.matched_device_endpoint;
+    prepared.precise_local                         = match_result.precise_local;
     prepared.total_logical_blocks =
         load_context ? load_context->localMatchedBlocks() : match_result.matched_device_blocks;
     const auto& group_sets = block_tree_cache_->groupSets();
     if (prepared.total_logical_blocks > 0) {
         for (const auto& group_set : group_sets) {
             for (const auto& tag : group_set->groupTags()) {
-                const size_t reuse_size = loadTargetPosition(prepared.total_logical_blocks - 1, tag) + 1;
+                const size_t reuse_size = (prepared.precise_local ?
+                                               loadTargetEndpoint(prepared.matched_device_endpoint, tag) :
+                                               loadTargetPosition(prepared.total_logical_blocks - 1, tag)) + 1;
                 kv_resource.mutableBlockIds(0, tag).assign(BlockIndicesType(reuse_size, NULL_BLOCK_IDX));
             }
         }
     }
 
-    const auto set_group_set_blocks = [&](size_t group_set_id, size_t path_index, const BlockIndicesType& blocks) {
+    const auto set_group_set_blocks = [&](size_t group_set_id,
+                                          size_t path_index,
+                                          const BlockIndicesType& blocks,
+                                          size_t token_end = 0) {
         const auto& group_tags = group_sets[group_set_id]->groupTags();
         for (size_t member_group_id = 0; member_group_id < group_tags.size(); ++member_group_id) {
             const size_t group_id = groupIdForTag(group_tags[member_group_id]);
-            const size_t target_position = loadTargetPosition(path_index, group_tags[member_group_id]);
+            const size_t target_position = token_end == 0 ?
+                                               loadTargetPosition(path_index, group_tags[member_group_id]) :
+                                               loadTargetEndpoint(std::min(token_end, prepared.matched_device_endpoint),
+                                                                  group_tags[member_group_id]);
             kv_resource.mutableBlockIds(0, group_tags[member_group_id]).setAt(target_position, blocks[member_group_id]);
             prepared.referenced_blocks[group_id].push_back(blocks[member_group_id]);
         }
     };
 
-    for (const auto& resource : match_result.matched_device_resources) {
+    for (size_t resource_index = 0; resource_index < match_result.matched_device_resources.size(); ++resource_index) {
+        const auto& resource = match_result.matched_device_resources[resource_index];
         const size_t canonical_start = match_result.matched_device_blocks - resource.node_blocks.size();
         for (size_t i = 0; i < resource.node_blocks.size(); ++i) {
-            set_group_set_blocks(resource.group_set_id, canonical_start + i, resource.node_blocks[i].second);
+            set_group_set_blocks(resource.group_set_id,
+                                 canonical_start + i,
+                                 resource.node_blocks[i].second,
+                                 prepared.precise_local ? match_result.precise_resource_endpoints[resource_index][i] :
+                                                          0);
         }
     }
+    prepared.local_fallback = std::move(match_result.local_fallback);
 
     if (load_context != nullptr) {
         for (size_t desc_index = 0; desc_index < load_context->loadDescs().size(); ++desc_index) {
@@ -521,6 +588,57 @@ MallocResult CoordinatorCacheManager::initMallocForCommonLen(const MallocInfo& m
                    static_cast<int>(match_keys.size()) * reuse_unit_tokens, config_.cache_min_replay_tokens)) {
             match_keys.pop_back();
         }
+        PartialTailMatchRequest partial_tail;
+        const bool use_partial_tail = malloc_info.request_layout && malloc_info.request_layout->partial_tail_reuse
+                                      && request_tokens != nullptr
+                                      && request_tokens->size() == malloc_info.request_layout->original_input_tokens;
+        if (use_partial_tail) {
+            partial_tail.tokens = request_tokens;
+            partial_tail.remote_ceiling = match_keys.size() * reuse_tokens;
+            partial_tail.reuse_unit_tokens = reuse_tokens;
+            partial_tail.endpoint_key      = [tokens    = malloc_info.complete_token_ids,
+                                         base_keys = kv_resource->cacheKeys(0),
+                                         base      = static_cast<int>(config_.seq_size_per_block)](size_t endpoint) {
+                RTP_LLM_CHECK(base > 0 && endpoint <= static_cast<size_t>(tokens->seqLength()));
+                const size_t completed_blocks = endpoint / static_cast<size_t>(base);
+                RTP_LLM_CHECK(completed_blocks <= base_keys.size());
+                const int64_t seed  = completed_blocks == 0 ? 0 : base_keys[completed_blocks - 1];
+                const size_t  begin = completed_blocks * static_cast<size_t>(base);
+                if (begin == endpoint) {
+                    return seed;
+                }
+                const std::vector<int> tail(tokens->data(0) + begin, tokens->data(0) + endpoint);
+                return cacheKeyForSourceSegment(*tokens, tail, static_cast<int>(begin), base, seed);
+            };
+            partial_tail.source_identity = [tokens    = malloc_info.complete_token_ids,
+                                            base_keys = kv_resource->cacheKeys(0),
+                                            base      = static_cast<int>(config_.seq_size_per_block)](
+                                               size_t begin, const std::vector<int>& source, CacheKeyType key) {
+                if (begin > static_cast<size_t>(std::numeric_limits<int>::max()) || base <= 0
+                    || source.size() > static_cast<size_t>(std::numeric_limits<int>::max()) - begin
+                    || begin % static_cast<size_t>(base) != 0) {
+                    return false;
+                }
+                const size_t completed_blocks = begin / static_cast<size_t>(base);
+                if (completed_blocks > base_keys.size()) {
+                    return false;
+                }
+                const int64_t seed = completed_blocks == 0 ? 0 : base_keys[completed_blocks - 1];
+                return cacheKeyForSourceSegment(*tokens, source, static_cast<int>(begin), base, seed) == key;
+            };
+            partial_tail.preceding_valid_endpoint = [tokens       = malloc_info.complete_token_ids,
+                                                     max_endpoint = config_.maxPrefixReuseTokens(seq_len),
+                                                     min_replay   = config_.cache_min_replay_tokens](size_t upper) {
+                const int bounded = static_cast<int>(std::min(upper, static_cast<size_t>(std::max(0, max_endpoint))));
+                return static_cast<size_t>(tokens->maxValidReuseLength(bounded, min_replay));
+            };
+            partial_tail.valid_endpoint = [tokens = malloc_info.complete_token_ids,
+                                           max_endpoint = static_cast<size_t>(config_.maxPrefixReuseTokens(seq_len)),
+                                           min_replay = config_.cache_min_replay_tokens](size_t endpoint) {
+                return endpoint <= max_endpoint && endpoint <= static_cast<size_t>(std::numeric_limits<int>::max())
+                       && tokens->isValidReuseLength(static_cast<int>(endpoint), min_replay);
+            };
+        }
         const int64_t begin_us = currentTimeUs();
         load_context =
             prepareKVCache(match_keys,
@@ -529,14 +647,16 @@ MallocResult CoordinatorCacheManager::initMallocForCommonLen(const MallocInfo& m
                            [tokens = malloc_info.complete_token_ids, reuse_unit_tokens](size_t count) {
                                return tokens->isValidReuseLength(static_cast<int>(count) * reuse_unit_tokens);
                            },
-                           request_tokens);
+                           request_tokens,
+                           use_partial_tail ? &partial_tail : nullptr);
         match_end_time_us  = currentTimeUs();
         match_cost_time_us = match_end_time_us - begin_us;
         if (prepared.match_observation.has_value()) {
             prepared.match_observation->match_time_us = match_cost_time_us;
         }
         load_attempted     = load_context != nullptr;
-        kv_resource->cacheResource(0).setDeviceReuseBlockNum(prepared.matched_device_blocks);
+        kv_resource->cacheResource(0).setDeviceReuseBlockNum(
+            prepared.precise_local ? prepared.matched_device_endpoint / reuse_tokens : prepared.matched_device_blocks);
     }
 
     const auto rollback = [&]() -> MallocResult {
@@ -583,7 +703,11 @@ MallocResult CoordinatorCacheManager::initMallocForCommonLen(const MallocInfo& m
         return rollback();
     }
     MallocResult result{
-        true, static_cast<int>(prepared.matched_device_blocks) * reuse_unit_tokens, match_cost_time_us, load_context};
+        true,
+        prepared.precise_local ? static_cast<int>(prepared.matched_device_endpoint) :
+                                 static_cast<int>(prepared.matched_device_blocks) * reuse_unit_tokens,
+        match_cost_time_us,
+        load_context};
     result.match_end_time_us = match_end_time_us;
     result.load_attempted    = load_attempted;
     result.match_observation = prepared.match_observation;
@@ -600,7 +724,10 @@ bool CoordinatorCacheManager::materializeInitialBlocks(const MallocInfo& malloc_
     if (matched_blocks > 0) {
         for (const GroupSetPtr& group_set : block_tree_cache_->groupSets()) {
             for (const auto& tag : group_set->groupTags()) {
-                kv_resource.mutableBlockIds(0, tag).resize(loadTargetPosition(matched_blocks - 1, tag) + 1);
+                const size_t final_slot = prepared.precise_local ?
+                                              loadTargetEndpoint(prepared.matched_device_endpoint, tag) :
+                                              loadTargetPosition(matched_blocks - 1, tag);
+                kv_resource.mutableBlockIds(0, tag).resize(final_slot + 1);
             }
         }
     }
@@ -636,13 +763,26 @@ bool CoordinatorCacheManager::materializeInitialBlocks(const MallocInfo& malloc_
         const auto&         tag       = config_.groupTags()[static_cast<size_t>(group_id)];
         auto&               block_ids = kv_resource.mutableBlockIds(0, tag);
         std::vector<size_t> backfilled_positions;
-        if (!kv_cache_groups_[static_cast<size_t>(group_id)]->malloc(
-                block_ids,
-                resolvedGroupTokens(config_, tag, true, common_seq_len),
-                malloc_info.reuse_cache,
-                0,
-                &backfilled_positions,
-                prepared.required_positions[static_cast<size_t>(group_id)])) {
+        const auto history = prepared.precise_local ?
+                                 preciseSwaHistorySlots(config_, tag, prepared.matched_device_endpoint) :
+                                 std::nullopt;
+        const bool allocated = history ?
+                                   static_cast<SWACacheManager&>(*kv_cache_groups_[static_cast<size_t>(group_id)])
+                                       .mallocWithHistory(block_ids,
+                                                          resolvedGroupTokens(config_, tag, true, common_seq_len),
+                                                          malloc_info.reuse_cache,
+                                                          0,
+                                                          &backfilled_positions,
+                                                          prepared.required_positions[static_cast<size_t>(group_id)],
+                                                          *history) :
+                                   kv_cache_groups_[static_cast<size_t>(group_id)]->malloc(
+                                       block_ids,
+                                       resolvedGroupTokens(config_, tag, true, common_seq_len),
+                                       malloc_info.reuse_cache,
+                                       0,
+                                       &backfilled_positions,
+                                       prepared.required_positions[static_cast<size_t>(group_id)]);
+        if (!allocated) {
             return false;
         }
         const auto& blocks = block_ids.blocks();
@@ -691,9 +831,20 @@ bool CoordinatorCacheManager::finishDeferredMalloc(const MallocInfo& malloc_info
                                                    LoadAsyncContext& context,
                                                    size_t            matched_blocks) {
     std::lock_guard<std::mutex> lock(malloc_mutex_);
-    bool                        success = materializeInitialBlocks(malloc_info, prepared, &context, matched_blocks);
+    if (context.localFallbackSelected()) {
+        selectLocalFallback(*malloc_info.batch_kv_cache_resource, prepared);
+        matched_blocks = prepared.matched_device_blocks;
+    }
+    bool success = materializeInitialBlocks(
+        malloc_info, prepared, context.localFallbackSelected() ? nullptr : &context, matched_blocks);
     if (success) {
-        const auto incr_result = incrMalloc(malloc_info);
+        MallocInfo incr_info = malloc_info;
+        // The prepared match, rather than the request's common length, owns G.
+        if (prepared.precise_local && prepared.matched_device_endpoint > 0
+            && prepared.matched_device_endpoint % config_.reuse_unit_tokens != 0) {
+            incr_info.precise_resume_endpoint = prepared.matched_device_endpoint;
+        }
+        const auto incr_result = incrMalloc(incr_info);
         success                = incr_result.success;
         if (!success) {
             prepared.materialize_status = incr_result.status;
@@ -708,6 +859,48 @@ bool CoordinatorCacheManager::finishDeferredMalloc(const MallocInfo& malloc_info
         return false;
     }
     return true;
+}
+
+void CoordinatorCacheManager::selectLocalFallback(BatchKVCacheResource& kv_resource, PreparedKVCache& prepared) {
+    const auto fallback = prepared.local_fallback;
+    RTP_LLM_CHECK_WITH_INFO(fallback != nullptr && !fallback->transferred_to_request,
+                            "selected local fallback has no pinned resources");
+    for (int group_id = 0; group_id < config_.groupNums(); ++group_id) {
+        kv_cache_groups_[static_cast<size_t>(group_id)]->unreference(
+            prepared.referenced_blocks[static_cast<size_t>(group_id)]);
+        prepared.referenced_blocks[static_cast<size_t>(group_id)].clear();
+        kv_resource.mutableBlockIds(0, config_.groupTags()[static_cast<size_t>(group_id)]).assign(BlockIndicesType{});
+    }
+    prepared.precise_local = true;
+    prepared.matched_device_endpoint = fallback->endpoint;
+    prepared.matched_device_blocks = fallback->path_nodes;
+    for (size_t resource_index = 0; resource_index < fallback->resources.size(); ++resource_index) {
+        const auto& pinned = fallback->resources[resource_index];
+        const auto& tags = block_tree_cache_->groupSets()[pinned.group_set_id]->groupTags();
+        for (size_t node_index = 0; node_index < pinned.node_blocks.size(); ++node_index) {
+            const size_t endpoint = fallback->resource_endpoints[resource_index][node_index];
+            const auto& blocks = pinned.node_blocks[node_index].second;
+            for (size_t member = 0; member < tags.size(); ++member) {
+                const size_t group_id = groupIdForTag(tags[member]);
+                auto& block_ids = kv_resource.mutableBlockIds(0, tags[member]);
+                const size_t slot      = loadTargetEndpoint(std::min(endpoint, fallback->endpoint), tags[member]);
+                if (block_ids.blocksNum() <= slot) {
+                    block_ids.resize(slot + 1);
+                }
+                block_ids.setAt(slot, blocks[member]);
+                prepared.referenced_blocks[group_id].push_back(blocks[member]);
+            }
+        }
+    }
+    prepared.original_sizes.clear();
+    for (const auto& tag : config_.groupTags()) {
+        prepared.original_sizes.push_back(kv_resource.blocksNum(0, tag));
+    }
+    fallback->transferred_to_request = true;
+    prepared.local_fallback.reset();
+    const size_t reuse_tokens = config_.cache_key_layout_resolved ? config_.reuse_unit_tokens :
+                                                                 config_.seq_size_per_block;
+    kv_resource.cacheResource(0).setDeviceReuseBlockNum(fallback->endpoint / reuse_tokens);
 }
 
 MallocResult CoordinatorCacheManager::incrMalloc(const MallocInfo& malloc_info) {
@@ -737,8 +930,22 @@ MallocResult CoordinatorCacheManager::incrMalloc(const MallocInfo& malloc_info) 
             auto&       block_ids        = kv_resource->mutableBlockIds(b, tag);
             const int   group_seq_len    = resolvedGroupTokens(config_, tag, false, raw_seq_len);
             auto&       filled_positions = backfilled_positions[static_cast<size_t>(b)][static_cast<size_t>(group_id)];
-            if (!kv_cache_groups_[static_cast<size_t>(group_id)]->malloc(
-                    block_ids, group_seq_len, malloc_info.reuse_cache, reserve_step, &filled_positions)) {
+            const auto history = malloc_info.precise_resume_endpoint ?
+                                     preciseSwaHistorySlots(config_, tag, *malloc_info.precise_resume_endpoint) :
+                                     std::nullopt;
+            const bool allocated = history ?
+                                       static_cast<SWACacheManager&>(*kv_cache_groups_[static_cast<size_t>(group_id)])
+                                           .mallocWithHistory(block_ids,
+                                                              group_seq_len,
+                                                              malloc_info.reuse_cache,
+                                                              reserve_step,
+                                                              &filled_positions,
+                                                              {},
+                                                              *history) :
+                                       kv_cache_groups_[static_cast<size_t>(group_id)]->malloc(
+                                           block_ids, group_seq_len, malloc_info.reuse_cache, reserve_step,
+                                           &filled_positions);
+            if (!allocated) {
                 all_success  = false;
                 failed_batch = b;
                 failed_group = group_id;
@@ -757,8 +964,17 @@ MallocResult CoordinatorCacheManager::incrMalloc(const MallocInfo& malloc_info) 
         for (int b = 0; b < batch_size; ++b) {
             for (int group_id = 0; group_id < config_.groupNums(); ++group_id) {
                 const auto& tag = config_.groupTags()[static_cast<size_t>(group_id)];
-                kv_cache_groups_[static_cast<size_t>(group_id)]->removeSkippedBlocks(
-                    kv_resource->mutableBlockIds(b, tag), malloc_info.reuse_cache, reserve_step);
+                const auto history = malloc_info.precise_resume_endpoint ?
+                                         preciseSwaHistorySlots(config_, tag, *malloc_info.precise_resume_endpoint) :
+                                         std::nullopt;
+                if (history) {
+                    static_cast<SWACacheManager&>(*kv_cache_groups_[static_cast<size_t>(group_id)])
+                        .removeSkippedBlocksWithHistory(
+                            kv_resource->mutableBlockIds(b, tag), malloc_info.reuse_cache, reserve_step, *history);
+                } else {
+                    kv_cache_groups_[static_cast<size_t>(group_id)]->removeSkippedBlocks(
+                        kv_resource->mutableBlockIds(b, tag), malloc_info.reuse_cache, reserve_step);
+                }
             }
         }
         return {true, 0};
@@ -862,11 +1078,591 @@ void CoordinatorCacheManager::free(const FreeInfo& free_info) {
     kv_cache_resource->clearBlocks();
 }
 
+MallocStatus CoordinatorCacheManager::prepareRequiredContinuation(PrefixCacheRegistration& registration,
+                                                                  BatchKVCacheResource& runtime,
+                                                                  size_t resume_endpoint) {
+    if (registration.required_continuation_ready || resume_endpoint == 0 || !block_tree_cache_) {
+        registration.required_continuation_ready = true;
+        return MallocStatus::NONE;
+    }
+    std::lock_guard<std::mutex> lock(malloc_mutex_);
+    struct Replacement {
+        size_t       group_id;
+        std::string  tag;
+        int          batch;
+        size_t       slot;
+        BlockIdxType source;
+        BlockIdxType destination;
+    };
+    std::vector<Replacement> replacements;
+    auto shortageStatus = [&](size_t group_id, const std::string& tag) {
+        std::unordered_set<BlockIdxType> held;
+        for (int batch = 0; batch < runtime.batchSize(); ++batch) {
+            for (const auto block : runtime.blocks(batch, tag)) {
+                if (!isNullBlockIdx(block)) {
+                    held.insert(block);
+                }
+            }
+        }
+        const auto total = kv_cache_groups_[group_id]->blockPool()->totalBlocksNum();
+        return held.size() + 1 >= total ? MallocStatus::PERMANENT_RESOURCE_EXHAUSTED :
+                                           MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED;
+    };
+    auto rollback = [&]() {
+        for (const auto& replacement : replacements) {
+            kv_cache_groups_[replacement.group_id]->unreference({replacement.destination});
+        }
+    };
+    for (size_t group_id = 0; group_id < config_.topology().groups().size(); ++group_id) {
+        const auto& group = config_.topology().groups()[group_id];
+        const auto& tag   = group.tag;
+        const size_t span  = logicalBlockSpan(config_, group);
+        if (span == 0 || resume_endpoint % span == 0) {
+            continue;
+        }
+        const size_t slot = config_.endpointBlockPosition(tag, resume_endpoint);
+        auto& manager = kv_cache_groups_[group_id];
+        for (int batch = 0; batch < runtime.batchSize(); ++batch) {
+            const auto& blocks = runtime.blocks(batch, tag);
+            if (slot >= blocks.size() || isNullBlockIdx(blocks[slot])) {
+                continue;
+            }
+            const BlockIdxType source = blocks[slot];
+            if (manager->blockPool()->isExclusiveRequestBlock(source)) {
+                continue;
+            }
+            if (!manager->ensureFreeBlocks(1)) {
+                const auto status = shortageStatus(group_id, tag);
+                rollback();
+                return status;
+            }
+            const auto destination = manager->blockPool()->malloc();
+            if (!destination) {
+                const auto status = shortageStatus(group_id, tag);
+                rollback();
+                return status;
+            }
+            manager->reference({*destination});
+            replacements.push_back({group_id, tag, batch, slot, source, *destination});
+        }
+    }
+    // All required copies are reserved before changing any live model table.
+    for (const auto& replacement : replacements) {
+        auto& manager = kv_cache_groups_[replacement.group_id];
+        manager->reference({replacement.source});
+        registration.source_pins.push_back({replacement.tag, replacement.slot, replacement.source});
+        runtime.mutableBlockIds(replacement.batch, replacement.tag)
+            .setAt(replacement.slot, replacement.destination);
+        manager->unreference({replacement.source});
+        registration.copy_mappings.push_back(
+            {replacement.tag, replacement.source, replacement.destination});
+    }
+    registration.required_continuation_ready = true;
+    return MallocStatus::NONE;
+}
+
+void CoordinatorCacheManager::prepareRegisteredSave(PrefixCacheRegistration& registration,
+                                                    BatchKVCacheResource& runtime,
+                                                    size_t                      resume_endpoint) {
+    if (!block_tree_cache_ || registration.prepared || !registration.required_continuation_ready
+        || runtime.batchSize() == 0) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(malloc_mutex_);
+    const auto& group_sets = block_tree_cache_->groupSets();
+    RTP_LLM_CHECK(registration.cached_source_pins.empty() && registration.cached_path_resources.empty());
+    std::vector<size_t> endpoints;
+    endpoints.reserve(registration.points.size());
+    for (const auto& point : registration.points) {
+        endpoints.push_back(point.endpoint.pos);
+    }
+    auto cached = block_tree_cache_->pinRegisteredGroups(
+        registration.token_ids, registration.base_keys, config_.seq_size_per_block, endpoints);
+    // Transfer ownership first, without allocation. Any later preparation error
+    // is handled by the existing registration release path.
+    registration.cached_source_pins = std::move(cached.pins);
+    registration.cached_path_resources = std::move(cached.path_resources);
+    RTP_LLM_CHECK(registration.runtime_source_pins.empty() && registration.runtime_path_resources.empty());
+    std::unordered_map<std::string, std::unordered_set<BlockIdxType>> pinned_runtime;
+    const auto pin_runtime = [&](const std::string& tag, BlockIdxType block) {
+        if (pinned_runtime[tag].insert(block).second) {
+            kv_cache_groups_[groupIdForTag(tag)]->reference({block});
+            registration.runtime_source_pins.push_back({tag, block});
+        }
+    };
+    // Preserve actual dense SWA pages, including canonical positions omitted by
+    // another group's checkpoint step. A missing slot remains missing. Readiness
+    // is bounded by the recovered/completed endpoint when publishing below.
+    const size_t unit = config_.cache_key_layout_resolved ? config_.reuse_unit_tokens : config_.seq_size_per_block;
+    RTP_LLM_CHECK(unit > 0);
+    for (const auto& group_set : group_sets) {
+        if (!std::all_of(group_set->groupTags().begin(), group_set->groupTags().end(), [&](const auto& tag) {
+                return hasDenseSwaStorage(config_.group(tag));
+            })) {
+            continue;
+        }
+        for (size_t endpoint = std::min(unit, registration.original_input_tokens); endpoint > 0;) {
+            GroupSetResource resource;
+            for (const auto& tag : group_set->groupTags()) {
+                const size_t slot   = config_.endpointBlockPosition(tag, endpoint);
+                const auto&  blocks = runtime.blocks(0, tag);
+                if (slot >= blocks.size() || isNullBlockIdx(blocks[slot])) {
+                    resource.device_blocks.clear();
+                    break;
+                }
+                resource.device_blocks.push_back(blocks[slot]);
+            }
+            if (resource.hasCompleteDeviceValue()) {
+                for (size_t member = 0; member < group_set->groupTags().size(); ++member) {
+                    pin_runtime(group_set->groupTags()[member], resource.device_blocks[member]);
+                }
+                registration.runtime_path_resources.push_back({group_set->groupSetId(), endpoint, std::move(resource)});
+            }
+            if (endpoint == registration.original_input_tokens) {
+                break;
+            }
+            endpoint = std::min(endpoint + unit, registration.original_input_tokens);
+        }
+    }
+    for (size_t row = 0; row < registration.points.size(); ++row) {
+        auto& point = registration.points[row];
+        for (auto& binding : point.group_bindings) {
+            RTP_LLM_CHECK(binding.group_set_id < cached.groups[row].size());
+            auto& existing = cached.groups[row][binding.group_set_id];
+            if (existing.ready) {
+                binding.resource = std::move(existing.endpoint_resource);
+                binding.cached_path_indices = std::move(existing.path_indices);
+                binding.state = PrefixCacheSaveState::CACHED_REF;
+                binding.ownership = PrefixCacheSaveOwnership::CACHED_REQUEST;
+                binding.unfulfilled_reason.clear();
+            }
+            if (binding.state == PrefixCacheSaveState::CACHED_REF) {
+                registration.content_completed = true;
+                continue;  // Existing saved state satisfies intent without another snapshot.
+            }
+            RTP_LLM_CHECK_WITH_INFO(binding.group_set_id < group_sets.size(), "invalid registered GroupSet ID");
+            const auto& group_set = group_sets[binding.group_set_id];
+            if (!group_set || group_set->groupTags().empty()) {
+                binding.state              = PrefixCacheSaveState::UNFULFILLED;
+                binding.unfulfilled_reason = "missing_group_set";
+                continue;
+            }
+            const bool dense_swa = std::all_of(group_set->groupTags().begin(),
+                                               group_set->groupTags().end(),
+                                               [&](const auto& tag) { return hasDenseSwaStorage(config_.group(tag)); });
+            const bool dense_kv  = group_set->groupType() == CacheGroupType::FULL || dense_swa;
+            const bool stable_runtime_alias =
+                std::all_of(group_set->groupTags().begin(), group_set->groupTags().end(), [&](const auto& tag) {
+                    const auto&  group  = config_.group(tag);
+                    const size_t span   = logicalBlockSpan(config_, group);
+                    const size_t slot   = config_.endpointBlockPosition(tag, point.endpoint.pos);
+                    const auto&  blocks = runtime.blocks(0, tag);
+                    if (span == 0 || slot >= blocks.size() || isNullBlockIdx(blocks[slot])) {
+                        return false;
+                    }
+                    if (dense_kv) {
+                        return true;  // Later KV appends do not overwrite this valid prefix.
+                    }
+                    if (point.endpoint.pos % span != 0) {
+                        return false;
+                    }
+                    const auto& pool = kv_cache_groups_[groupIdForTag(tag)]->blockPool();
+                    if (!pool->isExclusiveRequestBlock(blocks[slot])) {
+                        return false;
+                    }
+                    return std::none_of(registration.points.begin(), registration.points.end(),
+                                        [&](const auto& later) {
+                                            return later.endpoint.pos > point.endpoint.pos
+                                                   && config_.endpointBlockPosition(tag, later.endpoint.pos) == slot;
+                                        });
+                });
+            if (point.endpoint.pos <= resume_endpoint) {
+                bool history_ready = dense_kv && stable_runtime_alias;
+                if (history_ready && dense_swa) {
+                    for (const auto& tag : group_set->groupTags()) {
+                        const auto  history = preciseSwaHistorySlots(config_, tag, point.endpoint.pos);
+                        const auto& blocks  = runtime.blocks(0, tag);
+                        if (!history || history->end > blocks.size()) {
+                            history_ready = false;
+                            break;
+                        }
+                        for (size_t slot = history->begin; slot < history->end; ++slot) {
+                            history_ready = history_ready && !isNullBlockIdx(blocks[slot]);
+                        }
+                    }
+                }
+                if (!history_ready) {
+                    binding.state              = PrefixCacheSaveState::UNFULFILLED;
+                    binding.unfulfilled_reason = "missing_history_before_resume";
+                    continue;  // Exact states and missing history are never replayed.
+                }
+            }
+            std::vector<BlockIdxType> acquired;
+            std::vector<TaggedBlockIdPair> history_copies;
+            std::vector<PrefixCacheRegistration::SourcePin> history_pins;
+            acquired.reserve(group_set->groupTags().size());
+            bool group_ready = true;
+            const char* failure_reason = "optional_device_capacity";
+            for (const auto& tag : group_set->groupTags()) {
+                const size_t group_id = groupIdForTag(tag);
+                const size_t slot     = config_.endpointBlockPosition(tag, point.endpoint.pos);
+                const auto&  blocks   = runtime.blocks(0, tag);
+                if (stable_runtime_alias) {
+                    acquired.push_back(blocks[slot]);
+                    continue;
+                }
+                auto& manager = kv_cache_groups_[group_id];
+                if (!manager->ensureFreeBlocks(1)) {
+                    group_ready = false;
+                    break;
+                }
+                const auto destination = manager->blockPool()->malloc();
+                if (!destination) {
+                    group_ready = false;
+                    break;
+                }
+                manager->reference({*destination});
+                acquired.push_back(*destination);
+                const auto& group = config_.group(tag);
+                const size_t resume_slot = resume_endpoint == 0 ? 0 :
+                    config_.endpointBlockPosition(tag, resume_endpoint);
+                if (resume_endpoint > 0 && resume_endpoint % logicalBlockSpan(config_, group) != 0
+                    && slot == resume_slot) {
+                    auto source_it = std::find_if(registration.source_pins.begin(), registration.source_pins.end(),
+                                                  [&](const auto& source) {
+                                                      return source.tag == tag && source.slot == slot;
+                                                  });
+                    BlockIdxType source = NULL_BLOCK_IDX;
+                    if (source_it != registration.source_pins.end()) {
+                        source = source_it->block;
+                    } else if (slot < blocks.size()) {
+                        source = blocks[slot];
+                        if (!isNullBlockIdx(source)) {
+                            history_pins.push_back({tag, slot, source});
+                        }
+                    }
+                    if (isNullBlockIdx(source)) {
+                        group_ready = false;
+                        failure_reason = "missing_immutable_history";
+                        break;
+                    }
+                    history_copies.push_back({tag, source, *destination});
+                }
+            }
+            if (!group_ready) {
+                for (size_t member = 0; member < acquired.size(); ++member) {
+                    const auto& tag = group_set->groupTags()[member];
+                    const auto  id  = acquired[member];
+                    if (!stable_runtime_alias) {
+                        kv_cache_groups_[groupIdForTag(tag)]->unreference({id});
+                    }
+                }
+                binding.state              = PrefixCacheSaveState::UNFULFILLED;
+                binding.unfulfilled_reason = failure_reason;
+                continue;
+            }
+            for (const auto& pin : history_pins) {
+                kv_cache_groups_[groupIdForTag(pin.tag)]->reference({pin.block});
+                registration.source_pins.push_back(pin);
+            }
+            registration.copy_mappings.insert(registration.copy_mappings.end(),
+                                               history_copies.begin(), history_copies.end());
+            binding.resource.device_blocks = std::move(acquired);
+            binding.ownership              = !stable_runtime_alias ? PrefixCacheSaveOwnership::OPTIONAL_REQUEST :
+                                             dense_swa             ? PrefixCacheSaveOwnership::PINNED_RUNTIME :
+                                                                     PrefixCacheSaveOwnership::REQUIRED_RUNTIME;
+            if (stable_runtime_alias) {
+                // Beam reorganization can transfer the last runtime reference of
+                // a FULL alias to a copied tail while the registration still
+                // owns the original ID. Keep that payload alive without copying
+                // it; publication transfers the saved reference to the tree.
+                for (size_t member = 0; member < group_set->groupTags().size(); ++member) {
+                    pin_runtime(group_set->groupTags()[member], binding.resource.device_blocks[member]);
+                }
+            }
+            // Only recovered history is already ready. Future KV must pass the
+            // ordinary forward-completion gate, even though it needs no writer.
+            binding.state = point.endpoint.pos <= resume_endpoint ? PrefixCacheSaveState::CONTENT_COMPLETE :
+                                                                    PrefixCacheSaveState::REGISTERED;
+            registration.content_completed =
+                registration.content_completed || binding.state == PrefixCacheSaveState::CONTENT_COMPLETE;
+        }
+    }
+    registration.prepared                 = true;
+    registration.prepared_resume_endpoint = resume_endpoint;
+}
+
+void CoordinatorCacheManager::releaseRegisteredSave(PrefixCacheRegistration& registration) {
+    if (!block_tree_cache_) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(malloc_mutex_);
+    const auto& group_sets = block_tree_cache_->groupSets();
+    for (auto& point : registration.points) {
+        for (auto& binding : point.group_bindings) {
+            if (binding.ownership == PrefixCacheSaveOwnership::OPTIONAL_REQUEST
+                && binding.group_set_id < group_sets.size()) {
+                const auto& tags = group_sets[binding.group_set_id]->groupTags();
+                RTP_LLM_CHECK(tags.size() == binding.resource.device_blocks.size());
+                for (size_t member = 0; member < tags.size(); ++member) {
+                    kv_cache_groups_[groupIdForTag(tags[member])]->unreference(
+                        {binding.resource.device_blocks[member]});
+                }
+            }
+            binding.cached_path_indices.clear();
+            if (binding.state == PrefixCacheSaveState::CACHED_REF) {
+                binding.state = PrefixCacheSaveState::REGISTERED;
+            }
+            binding.resource.device_blocks.clear();
+            binding.ownership = PrefixCacheSaveOwnership::NONE;
+        }
+    }
+    for (const auto& pin : registration.cached_source_pins) {
+        kv_cache_groups_[groupIdForTag(pin.tag)]->unreference({pin.block});
+    }
+    registration.cached_source_pins.clear();
+    registration.cached_path_resources.clear();
+    for (const auto& pin : registration.runtime_source_pins) {
+        kv_cache_groups_[groupIdForTag(pin.tag)]->unreference({pin.block});
+    }
+    registration.runtime_source_pins.clear();
+    registration.runtime_path_resources.clear();
+    for (const auto& pin : registration.source_pins) {
+        kv_cache_groups_[groupIdForTag(pin.tag)]->unreference({pin.block});
+    }
+    registration.source_pins.clear();
+    registration.copy_mappings.clear();
+    registration.prepared = false;
+    registration.required_continuation_ready = false;
+    registration.content_completed = false;
+}
+
+void CoordinatorCacheManager::releaseRegisteredSourcePins(PrefixCacheRegistration& registration) {
+    if (!block_tree_cache_) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(malloc_mutex_);
+    for (const auto& pin : registration.source_pins) {
+        kv_cache_groups_[groupIdForTag(pin.tag)]->unreference({pin.block});
+    }
+    registration.source_pins.clear();
+}
+
+bool CoordinatorCacheManager::relinquishOptionalRegisteredSave(PrefixCacheRegistration& registration) {
+    if (!registration.prepared || !block_tree_cache_) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(malloc_mutex_);
+    bool released = false;
+    const auto& group_sets = block_tree_cache_->groupSets();
+    for (auto& point : registration.points) {
+        for (auto& binding : point.group_bindings) {
+            if (binding.ownership == PrefixCacheSaveOwnership::CACHED_REQUEST
+                || binding.ownership == PrefixCacheSaveOwnership::PINNED_RUNTIME) {
+                binding.resource = {};
+                binding.cached_path_indices.clear();
+                binding.ownership = PrefixCacheSaveOwnership::NONE;
+                binding.state = PrefixCacheSaveState::UNFULFILLED;
+                binding.unfulfilled_reason = "runtime_priority";
+                released = true;
+                continue;
+            }
+            if (binding.ownership != PrefixCacheSaveOwnership::OPTIONAL_REQUEST) {
+                continue;
+            }
+            RTP_LLM_CHECK(binding.group_set_id < group_sets.size());
+            const auto& tags = group_sets[binding.group_set_id]->groupTags();
+            RTP_LLM_CHECK(tags.size() == binding.resource.device_blocks.size());
+            for (size_t member = 0; member < tags.size(); ++member) {
+                const auto destination = binding.resource.device_blocks[member];
+                registration.copy_mappings.erase(
+                    std::remove_if(registration.copy_mappings.begin(), registration.copy_mappings.end(),
+                                   [&](const TaggedBlockIdPair& copy) {
+                                       return copy.tag == tags[member] && copy.dst == destination;
+                                   }),
+                    registration.copy_mappings.end());
+                kv_cache_groups_[groupIdForTag(tags[member])]->unreference({destination});
+            }
+            binding.resource.device_blocks.clear();
+            binding.ownership = PrefixCacheSaveOwnership::NONE;
+            binding.state = PrefixCacheSaveState::UNFULFILLED;
+            binding.unfulfilled_reason = "runtime_priority";
+            released = true;
+        }
+    }
+    for (const auto& pin : registration.cached_source_pins) {
+        kv_cache_groups_[groupIdForTag(pin.tag)]->unreference({pin.block});
+    }
+    registration.cached_source_pins.clear();
+    registration.cached_path_resources.clear();
+    // A REQUIRED_RUNTIME binding may outlive the runtime's reference after a
+    // beam fork drops its original branch. Keep its alias pin until publication
+    // or registration release, even when optional saves yield to allocation.
+    std::unordered_map<std::string, std::unordered_set<BlockIdxType>> required_runtime;
+    for (const auto& point : registration.points) {
+        for (const auto& binding : point.group_bindings) {
+            if (binding.ownership != PrefixCacheSaveOwnership::REQUIRED_RUNTIME) {
+                continue;
+            }
+            RTP_LLM_CHECK(binding.group_set_id < group_sets.size());
+            const auto& tags = group_sets[binding.group_set_id]->groupTags();
+            RTP_LLM_CHECK(tags.size() == binding.resource.device_blocks.size());
+            for (size_t member = 0; member < tags.size(); ++member) {
+                required_runtime[tags[member]].insert(binding.resource.device_blocks[member]);
+            }
+        }
+    }
+    std::vector<CachedPrefixResources::Pin> retained_runtime_pins;
+    retained_runtime_pins.reserve(registration.runtime_source_pins.size());
+    for (const auto& pin : registration.runtime_source_pins) {
+        const auto required = required_runtime.find(pin.tag);
+        if (required != required_runtime.end() && required->second.count(pin.block) != 0) {
+            retained_runtime_pins.push_back(pin);
+        } else {
+            kv_cache_groups_[groupIdForTag(pin.tag)]->unreference({pin.block});
+            released = true;
+        }
+    }
+    registration.runtime_source_pins = std::move(retained_runtime_pins);
+    registration.runtime_path_resources.clear();
+    // A dropped optional destination has no future copy consumer. Retain a
+    // source pin only while another mapping (such as required A->C) still
+    // reads that source. The fallback path reaches here after prefill work.
+    auto pin_it = registration.source_pins.begin();
+    while (pin_it != registration.source_pins.end()) {
+        const bool still_used = std::any_of(registration.copy_mappings.begin(), registration.copy_mappings.end(),
+                                            [&](const TaggedBlockIdPair& copy) {
+                                                return copy.tag == pin_it->tag && copy.src == pin_it->block;
+                                            });
+        if (still_used) {
+            ++pin_it;
+        } else {
+            kv_cache_groups_[groupIdForTag(pin_it->tag)]->unreference({pin_it->block});
+            pin_it = registration.source_pins.erase(pin_it);
+        }
+    }
+    return released;
+}
+
 void CoordinatorCacheManager::insertIntoCache(const InsertInfo& insert_info, size_t& resident_prefix_length) {
     resident_prefix_length  = 0;
     auto& kv_cache_resource = insert_info.batch_kv_cache_resource;
     RTP_LLM_CHECK(kv_cache_resource != nullptr);
     if (!block_tree_cache_) {
+        return;
+    }
+
+    const auto* registration = insert_info.prefix_cache_registration;
+    if (registration != nullptr && insert_info.target_tier == Tier::DEVICE) {
+        // The T05 owner completion signal is stronger than populated block IDs.
+        if (!registration->prepared || !registration->content_completed || registration->original_input_tokens == 0) {
+            block_tree_cache_->observePublicationSkipped(insert_info.observation_request_id, insert_info.target_tier,
+                                                         "registration_not_complete");
+            return;
+        }
+        const size_t unit = config_.cache_key_layout_resolved ? config_.reuse_unit_tokens :
+                                                                  config_.seq_size_per_block;
+        const size_t base = config_.seq_size_per_block;
+        RTP_LLM_CHECK_WITH_INFO(unit > 0 && base > 0 && unit % base == 0,
+                                "invalid registered save key geometry");
+        const auto& group_sets = block_tree_cache_->groupSets();
+        size_t      completed_endpoint = registration->prepared_resume_endpoint;
+        for (const auto& point : registration->points) {
+            if (std::any_of(point.group_bindings.begin(), point.group_bindings.end(), [](const auto& binding) {
+                    return binding.state == PrefixCacheSaveState::CONTENT_COMPLETE;
+                })) {
+                completed_endpoint = std::max(completed_endpoint, point.endpoint.pos);
+            }
+        }
+        CacheKeysType keys;
+        std::vector<size_t> token_ends;
+        std::vector<std::vector<int>> token_segments;
+        std::vector<std::vector<GroupSetResource>> resources;
+        size_t previous = 0;
+        for (size_t endpoint = std::min(unit, registration->original_input_tokens);;
+             endpoint = std::min(endpoint + unit, registration->original_input_tokens)) {
+            const size_t key_index = (endpoint - 1) / base;
+            if (key_index >= registration->base_keys.size() || endpoint > registration->token_ids.size()) {
+                break;
+            }
+            const auto point_it = std::find_if(registration->points.begin(), registration->points.end(),
+                                               [endpoint](const auto& point) {
+                                                   return point.endpoint.pos == endpoint;
+                                               });
+            std::vector<GroupSetResource> per_group(group_sets.size());
+            bool full_ready = true;
+            for (size_t group_set_id = 0; group_set_id < group_sets.size(); ++group_set_id) {
+                const auto& group_set = group_sets[group_set_id];
+                if (!group_set || group_set->groupSetId() != group_set_id) {
+                    full_ready = false;
+                    break;
+                }
+                const auto cached = std::find_if(registration->cached_path_resources.begin(),
+                                                  registration->cached_path_resources.end(), [&](const auto& entry) {
+                    return entry.group_set_id == group_set_id && entry.endpoint == endpoint;
+                });
+                if (cached != registration->cached_path_resources.end()) {
+                    per_group[group_set_id] = cached->resource;
+                } else if (point_it != registration->points.end() && endpoint > registration->prepared_resume_endpoint) {
+                    const auto& binding = point_it->group_bindings[group_set_id];
+                    if (binding.group_set_id == group_set_id
+                        && binding.state == PrefixCacheSaveState::CONTENT_COMPLETE) {
+                        per_group[group_set_id] = binding.resource;
+                    }
+                } else if (endpoint <= completed_endpoint && group_set->groupType() == CacheGroupType::SWA) {
+                    const auto saved =
+                        std::find_if(registration->runtime_path_resources.begin(),
+                                     registration->runtime_path_resources.end(),
+                                     [&](const auto& entry) {
+                                         return entry.group_set_id == group_set_id && entry.endpoint == endpoint;
+                                     });
+                    if (saved != registration->runtime_path_resources.end()) {
+                        per_group[group_set_id] = saved->resource;
+                    }
+                } else if (endpoint <= completed_endpoint && group_set->groupType() == CacheGroupType::FULL) {
+                    auto& blocks = per_group[group_set_id].device_blocks;
+                    for (const auto& tag : group_set->groupTags()) {
+                        const auto& runtime_blocks = kv_cache_resource->blocks(0, tag);
+                        const size_t slot = config_.endpointBlockPosition(tag, endpoint);
+                        if (slot >= runtime_blocks.size() || isNullBlockIdx(runtime_blocks[slot])) {
+                            blocks.clear();
+                            break;
+                        }
+                        blocks.push_back(runtime_blocks[slot]);
+                    }
+                }
+                if (group_set->groupType() == CacheGroupType::FULL
+                    && !per_group[group_set_id].hasCompleteDeviceValue()) {
+                    full_ready = false;
+                    break;
+                }
+            }
+            if (!full_ready) {
+                break;
+            }
+            keys.push_back(registration->base_keys[key_index]);
+            token_ends.push_back(endpoint);
+            token_segments.emplace_back(registration->token_ids.begin() + static_cast<std::ptrdiff_t>(previous),
+                                        registration->token_ids.begin() + static_cast<std::ptrdiff_t>(endpoint));
+            resources.push_back(std::move(per_group));
+            previous = endpoint;
+            if (endpoint == registration->original_input_tokens) {
+                break;
+            }
+        }
+        if (!keys.empty()) {
+            resident_prefix_length = block_tree_cache_->insert(keys,
+                                                                 resources,
+                                                                 Tier::DEVICE,
+                                                                 insert_info.is_resident,
+                                                                 &token_segments,
+                                                                 insert_info.prefix_plan_state,
+                                                                 &token_ends,
+                                                                 insert_info.observation_request_id);
+        } else {
+            block_tree_cache_->observePublicationSkipped(insert_info.observation_request_id, insert_info.target_tier,
+                                                         "no_publishable_full_prefix");
+        }
         return;
     }
 
@@ -974,7 +1770,9 @@ void CoordinatorCacheManager::insertIntoCache(const InsertInfo& insert_info, siz
                                           insert_info.target_tier,
                                           true,
                                           &token_segments,
-                                          insert_info.prefix_plan_state);
+                                          insert_info.prefix_plan_state,
+                                          nullptr,
+                                          insert_info.observation_request_id);
             resident_prefix_length += batch_resident_prefix_length;
         } else {
             block_tree_cache_->insert(insert_keys,
@@ -982,7 +1780,9 @@ void CoordinatorCacheManager::insertIntoCache(const InsertInfo& insert_info, siz
                                           insert_info.target_tier,
                                           false,
                                           &token_segments,
-                                          insert_info.prefix_plan_state);
+                                          insert_info.prefix_plan_state,
+                                          nullptr,
+                                          insert_info.observation_request_id);
         }
     }
 }
@@ -1719,7 +2519,8 @@ void CoordinatorCacheManager::blockBatchCopy(const BlockIdPair* begin_ptr, const
 }
 
 void CoordinatorCacheManager::blockBatchCopyForForward(const torch::Tensor&            copy_mapping,
-                                                       const std::vector<std::string>& group_tags) {
+                                                       const std::vector<std::string>& group_tags,
+                                                       bool                            require_complete_payload) {
     RTP_LLM_CHECK_WITH_INFO(copy_mapping.defined() && copy_mapping.device().is_cpu()
                                 && copy_mapping.scalar_type() == torch::kInt32 && copy_mapping.is_contiguous()
                                 && copy_mapping.dim() == 2 && copy_mapping.size(1) == 3,
@@ -1744,10 +2545,11 @@ void CoordinatorCacheManager::blockBatchCopyForForward(const torch::Tensor&     
                                 row);
         mappings.push_back({group_tags[row], rows[3 * i + 1], rows[3 * i + 2]});
     }
-    blockBatchCopyByGroup(mappings);
+    blockBatchCopyByGroup(mappings, require_complete_payload);
 }
 
-void CoordinatorCacheManager::blockBatchCopyByGroup(const std::vector<TaggedBlockIdPair>& copy_mapping) {
+void CoordinatorCacheManager::blockBatchCopyByGroup(const std::vector<TaggedBlockIdPair>& copy_mapping,
+                                                   bool require_complete_payload) {
     if (copy_mapping.empty()) {
         return;
     }
@@ -1789,6 +2591,9 @@ void CoordinatorCacheManager::blockBatchCopyByGroup(const std::vector<TaggedBloc
                 kv_cache_groups_[static_cast<size_t>(group_id)]->convertIndexToAddr(layer_id, mapping.dst);
 
             if (!src_addr_info.kv_addr || !dst_addr_info.kv_addr) {
+                RTP_LLM_CHECK_WITH_INFO(!require_complete_payload,
+                                        "required cache copy is missing KV payload: tag=%s layer=%d src=%d dst=%d",
+                                        mapping.tag.c_str(), layer_id, mapping.src, mapping.dst);
                 RTP_LLM_LOG_ERROR("Failed to get block address for pool %s(group %d) layer %d, src_block %d, "
                                   "dst_block %d",
                                   group_block_pools_[static_cast<size_t>(group_id)]->poolName().c_str(),
@@ -1801,6 +2606,10 @@ void CoordinatorCacheManager::blockBatchCopyByGroup(const std::vector<TaggedBloc
 
             copy_params.add(dst_addr_info.kv_addr, src_addr_info.kv_addr, kv_block_size_bytes, copy_type);
 
+            RTP_LLM_CHECK_WITH_INFO(!require_complete_payload || scale_block_bytes == 0
+                                        || (src_addr_info.kv_scale_addr && dst_addr_info.kv_scale_addr),
+                                    "required cache copy is missing scale payload: tag=%s layer=%d src=%d dst=%d",
+                                    mapping.tag.c_str(), layer_id, mapping.src, mapping.dst);
             if (scale_block_bytes > 0 && src_addr_info.kv_scale_addr && dst_addr_info.kv_scale_addr) {
                 copy_params.add(dst_addr_info.kv_scale_addr, src_addr_info.kv_scale_addr, scale_block_bytes, copy_type);
             }

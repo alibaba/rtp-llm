@@ -24,6 +24,9 @@
 namespace rtp_llm {
 
 class LoadAsyncContext;
+struct PartialTailMatchRequest;
+struct PinnedLocalFallback;
+struct PrefixCacheRegistration;
 class BlockTreeCache;
 using BlockTreeCachePtr = std::shared_ptr<BlockTreeCache>;
 class SingleTypeCacheManager;
@@ -69,6 +72,18 @@ public:
     bool                           init();
     virtual void                   free(const FreeInfo& free_info);
     virtual void                   insertIntoCache(const InsertInfo& insert_info, size_t& resident_prefix_length);
+    // Optional save destinations are request-owned until the writer has completed
+    // and the request either publishes or abandons them.
+    void prepareRegisteredSave(PrefixCacheRegistration& registration,
+                               BatchKVCacheResource& runtime,
+                               size_t resume_endpoint);
+    MallocStatus prepareRequiredContinuation(PrefixCacheRegistration& registration,
+                                             BatchKVCacheResource& runtime,
+                                             size_t resume_endpoint);
+    void releaseRegisteredSave(PrefixCacheRegistration& registration);
+    // Called only after the owner has synchronized every registered copy and writer.
+    void releaseRegisteredSourcePins(PrefixCacheRegistration& registration);
+    bool relinquishOptionalRegisteredSave(PrefixCacheRegistration& registration);
     virtual BlockAddrInfo          convertIndexToAddr(int layer_id, int block_id) const;
     virtual std::vector<BlockInfo> convertIndexToBuffer(int layer_id, int block_id) const;
     virtual std::vector<BlockInfo>
@@ -102,7 +117,8 @@ public:
     virtual void blockBatchCopy(const std::vector<BlockIdPair>& copy_mapping);
     virtual void blockBatchCopy(const BlockIdPair* copy_mapping_begin, const BlockIdPair* copy_mapping_end);
     virtual void blockBatchCopy(const torch::Tensor& copy_mapping);
-    virtual void blockBatchCopyByGroup(const std::vector<TaggedBlockIdPair>& copy_mapping);
+    virtual void blockBatchCopyByGroup(const std::vector<TaggedBlockIdPair>& copy_mapping,
+                                       bool require_complete_payload = false);
 
     // Payload rows index group_tags, never the coordinator's private group order.
     // The GPU path enqueues asynchronously on the current CUDA stream, outside
@@ -110,7 +126,8 @@ public:
     // NormalExecutor calls this before PyWrappedModel::forward; eager execution
     // and ATen graph replay use that stream. Capture runs during model initialization.
     virtual void blockBatchCopyForForward(const torch::Tensor&            copy_mapping,
-                                          const std::vector<std::string>& group_tags);
+                                          const std::vector<std::string>& group_tags,
+                                          bool                            require_complete_payload = false);
 
     virtual const std::vector<DeviceBlockPoolPtr>& groupBlockPools() const {
         return group_block_pools_;
@@ -227,6 +244,9 @@ protected:
     struct PreparedKVCache {
         std::optional<PrefixCacheMatchObservation> match_observation;
         size_t                         matched_device_blocks = 0;
+        size_t                         matched_device_endpoint = 0;
+        bool                           precise_local = false;
+        std::shared_ptr<PinnedLocalFallback> local_fallback;
         size_t                         total_logical_blocks  = 0;
         std::vector<RequiredPositions> required_positions;
         std::vector<BlockIndicesType>  referenced_blocks;
@@ -238,7 +258,8 @@ protected:
                                                      BatchKVCacheResource&                kv_resource,
                                                      PreparedKVCache&                     prepared,
                                                      const std::function<bool(size_t)>&   valid_prefix = {},
-                                                     const std::vector<int>*              request_tokens = nullptr);
+                                                     const std::vector<int>*              request_tokens = nullptr,
+                                                     const PartialTailMatchRequest*       partial_tail = nullptr);
     bool                              materializeInitialBlocks(const MallocInfo& malloc_info,
                                                                PreparedKVCache&  prepared,
                                                                LoadAsyncContext* context,
@@ -247,6 +268,8 @@ protected:
                                                            PreparedKVCache&  prepared,
                                                            LoadAsyncContext& context,
                                                            size_t            matched_blocks);
+    void                              selectLocalFallback(BatchKVCacheResource& kv_resource,
+                                                          PreparedKVCache&      prepared);
 
     virtual MallocStatus evaluatePreparedInitCapacity(const MallocInfo&      malloc_info,
                                                       size_t                 reserve_blocks,
@@ -260,6 +283,7 @@ protected:
                                           bool              incremental,
                                           int               failed_need_blocks) const;
     size_t               loadTargetPosition(size_t path_index, const std::string& tag) const;
+    size_t               loadTargetEndpoint(size_t token_end, const std::string& tag) const;
     void                 rollbackBlockIdsToSize(int group_id, BlockIds& block_ids, size_t original_size);
     void                 rollbackInitMalloc(BatchKVCacheResource&                kv_resource,
                                             const std::vector<BlockIndicesType>& referenced_blocks,

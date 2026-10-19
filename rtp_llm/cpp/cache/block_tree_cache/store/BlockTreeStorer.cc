@@ -44,7 +44,8 @@ std::string jsonEscape(const std::string& value) {
 
 void logPrefixPlanFormed(const std::string&                       instance,
                          const std::vector<PrefixCachePlanPoint>& points,
-                         Tier                                      target_tier) {
+                         Tier                                      target_tier,
+                         std::optional<int64_t> observation_request_id) {
     std::ostringstream payload;
     payload << "{\"kind\":\"plan\",\"schema_version\":1,\"instance\":" << jsonEscape(instance)
             << ",\"state\":\"formed\","
@@ -56,22 +57,49 @@ void logPrefixPlanFormed(const std::string&                       instance,
         }
         payload << "{\"key\":\"" << points[i].key << "\",\"pos\":" << points[i].pos << '}';
     }
-    payload << "]}";
+    payload << "],\"request_id\":" << (observation_request_id ? std::to_string(*observation_request_id) : "null") << '}';
     RTP_LLM_LOG_INFO("event=prefix_cache_observation payload=%s", payload.str().c_str());
 }
 
 void logPrefixPlanUnfulfilled(const std::string&                       instance,
                               const std::vector<PrefixCachePlanPoint>& points,
                               const char*                              reason,
-                              const ErrorInfo&                        error) {
+                              const ErrorInfo&                        error,
+                              std::optional<int64_t> observation_request_id) {
     for (const PrefixCachePlanPoint& point : points) {
         std::ostringstream payload;
         payload << "{\"kind\":\"plan_unfulfilled\",\"schema_version\":1,\"instance\":"
                 << jsonEscape(instance) << ",\"key\":\"" << point.key
                 << "\",\"pos\":" << point.pos << ",\"reason\":\"" << reason << "\",\"error_code\":"
-                << static_cast<int>(error.code()) << ",\"error_message\":" << jsonEscape(error.ToString()) << '}';
+                << static_cast<int>(error.code()) << ",\"error_message\":" << jsonEscape(error.ToString())
+                << ",\"request_id\":" << (observation_request_id ? std::to_string(*observation_request_id) : "null") << '}';
         RTP_LLM_LOG_WARNING("event=prefix_cache_observation payload=%s", payload.str().c_str());
     }
+}
+
+// A settlement event reports tree mutation facts, never request token reuse.
+void logPrefixPublication(const std::string& instance,
+                          std::optional<int64_t> request_id,
+                          Tier tier,
+                          const BlockTreeInsertResult* result,
+                          const char* reason,
+                          size_t unfulfilled_count) {
+    std::ostringstream payload;
+    payload << "{\"kind\":\"publication\",\"schema_version\":1,\"instance\":" << jsonEscape(instance)
+            << ",\"request_id\":" << (request_id ? std::to_string(*request_id) : "null")
+            << ",\"settled_time_us\":" << currentTimeUs() << ",\"target_tier\":" << jsonEscape(tierName(tier))
+            << ",\"insert_attempted\":" << (result ? "true" : "false")
+            << ",\"inserted_nodes\":" << (result ? result->inserted_nodes.size() : 0)
+            << ",\"adopted_nodes\":" << (result ? result->adopted_nodes.size() : 0)
+            << ",\"accepted_resources\":" << (result ? result->accepted_resource_count : 0)
+            << ",\"unfulfilled_plan_points\":" << unfulfilled_count << ",\"reason\":";
+    if (reason) {
+        payload << jsonEscape(reason);
+    } else {
+        payload << "null";
+    }
+    payload << '}';
+    RTP_LLM_LOG_INFO("event=prefix_cache_observation payload=%s", payload.str().c_str());
 }
 
 }  // namespace
@@ -98,6 +126,12 @@ BlockTreeStorer::BlockTreeStorer(BlockTree*                      tree,
     storage_backend_(std::move(storage_backend)),
     settled_(std::move(settled)) {}
 
+void BlockTreeStorer::observePublicationSkipped(std::optional<int64_t> request_id, Tier tier, const char* reason) {
+    if (tree_->observabilityEnabled()) {
+        logPrefixPublication(tree_->observabilityInstance(), request_id, tier, nullptr, reason, 0);
+    }
+}
+
 void BlockTreeStorer::stopAdmissionLocked() {
     stopping_.store(true);
 }
@@ -108,7 +142,9 @@ StorageWriteTask BlockTreeStorer::storeLocked(const CacheKeysType&              
                                               bool                                              is_resident,
                                               size_t& resident_prefix_length,
                                               const std::vector<std::vector<int>>* token_segments,
-                                              PrefixCachePlanState* prefix_plan_state) {
+                                              PrefixCachePlanState* prefix_plan_state,
+                                              const std::vector<size_t>* token_ends,
+                                              std::optional<int64_t> observation_request_id) {
     resident_prefix_length = 0;
     assert(!is_resident || target_tier == Tier::DEVICE);
     RTP_LLM_CHECK_WITH_INFO(target_tier == Tier::DEVICE || target_tier == Tier::HOST || target_tier == Tier::DISK,
@@ -120,12 +156,14 @@ StorageWriteTask BlockTreeStorer::storeLocked(const CacheKeysType&              
                             is_resident,
                             resident_prefix_length,
                             token_segments,
-                            prefix_plan_state);
+                            prefix_plan_state,
+                            token_ends,
+                            observation_request_id);
     } else {
-        submitLowerTierLocked(cache_keys, resources, target_tier, token_segments, prefix_plan_state);
+        submitLowerTierLocked(cache_keys, resources, target_tier, token_segments, prefix_plan_state, observation_request_id);
         return {};
     }
-    return storage_backend_ ? storage_backend_->prepareWrite(makeStorageRequest(cache_keys, resources)) :
+    return storage_backend_ ? storage_backend_->prepareWrite(makeStorageRequest(cache_keys, resources, token_ends)) :
                               StorageWriteTask{};
 }
 
@@ -134,26 +172,32 @@ void BlockTreeStorer::publishDeviceLocked(const CacheKeysType&                  
                                           bool                                              is_resident,
                                           size_t&                                           resident_prefix_length,
                                           const std::vector<std::vector<int>>*              token_segments,
-                                          PrefixCachePlanState*                             prefix_plan_state) {
+                                          PrefixCachePlanState*                             prefix_plan_state,
+                                          const std::vector<size_t>*                         token_ends,
+                                          std::optional<int64_t> observation_request_id) {
     const bool plan_reached = tree_->observabilityEnabled() && !cache_keys.empty()
                               && resources.size() == cache_keys.size();
     std::vector<PrefixCachePlanPoint> plan_points;
     if (plan_reached) {
-        plan_points = tree_->planRecoveryPoints(cache_keys, resources, token_segments, Tier::DEVICE);
+        plan_points = tree_->planRecoveryPoints(cache_keys, resources, token_segments, Tier::DEVICE, token_ends);
         if (prefix_plan_state != nullptr) {
             *prefix_plan_state = PrefixCachePlanState::FORMED;
         }
     }
     if (tree_->observabilityEnabled() && plan_reached) {
-        logPrefixPlanFormed(tree_->observabilityInstance(), plan_points, Tier::DEVICE);
+        logPrefixPlanFormed(tree_->observabilityInstance(), plan_points, Tier::DEVICE, observation_request_id);
     }
     const BlockTreeInsertResult insert_result =
-        tree_->insertNode(cache_keys, resources, false, is_resident, token_segments);
+        tree_->insertNode(cache_keys, resources, false, is_resident, token_segments, token_ends);
     const auto unfulfilled = tree_->unfulfilledPlanPoints(plan_points, cache_keys);
     logPrefixPlanUnfulfilled(tree_->observabilityInstance(),
                              unfulfilled,
                              stopping_.load() ? "store_stopped" : "insert_not_fulfilled",
-                             ErrorInfo::OkStatus());
+                             ErrorInfo::OkStatus(), observation_request_id);
+    if (tree_->observabilityEnabled()) {
+        logPrefixPublication(tree_->observabilityInstance(), observation_request_id, Tier::DEVICE,
+                             &insert_result, unfulfilled.empty() ? nullptr : "insert_not_fulfilled", unfulfilled.size());
+    }
     const bool tree_data_mutated = !insert_result.inserted_nodes.empty() || !insert_result.adopted_nodes.empty();
     if (tree_data_mutated || !insert_result.newly_resident_nodes.empty()) {
         evictor_.onInserted(insert_result);
@@ -165,12 +209,21 @@ void BlockTreeStorer::publishDeviceLocked(const CacheKeysType&                  
 }
 
 StorageRequest BlockTreeStorer::makeStorageRequest(const CacheKeysType&                              cache_keys,
-                                                   const std::vector<std::vector<GroupSetResource>>& resources) const {
-    StorageRequest request{std::make_shared<CacheKeysType>(cache_keys),
-                           std::vector<std::vector<StorageBlockHandle>>(cache_keys.size())};
+                                                   const std::vector<std::vector<GroupSetResource>>& resources,
+                                                   const std::vector<size_t>* token_ends) const {
+    auto keys = std::make_shared<CacheKeysType>();
+    StorageRequest request{keys, {}};
     for (size_t key_index = 0; key_index < resources.size(); ++key_index) {
-        auto& key_handles = request.handles[key_index];
+        // The existing backend protocol only names complete cumulative keys.
+        if (token_ends != nullptr && (*token_ends)[key_index] % tree_->reuseUnitTokens() != 0) {
+            continue;
+        }
+        keys->push_back(cache_keys[key_index]);
+        auto& key_handles = request.handles.emplace_back();
         for (size_t group_set = 0; group_set < tree_->groupSets().size(); ++group_set) {
+            if (tree_->groupSets()[group_set]->localOnly()) {
+                continue;
+            }
             const auto& resource = resources[key_index][group_set];
             if (!resource.hasCompleteDeviceValue()) {
                 continue;
@@ -188,7 +241,8 @@ void BlockTreeStorer::submitLowerTierLocked(const CacheKeysType&                
                                             const std::vector<std::vector<GroupSetResource>>& resources,
                                             Tier                                              target_tier,
                                             const std::vector<std::vector<int>>*              token_segments,
-                                            PrefixCachePlanState*                             prefix_plan_state) {
+                                            PrefixCachePlanState*                             prefix_plan_state,
+                                            std::optional<int64_t> observation_request_id) {
     const bool plan_reached = tree_->observabilityEnabled() && !cache_keys.empty()
                               && resources.size() == cache_keys.size();
     std::vector<PrefixCachePlanPoint> plan_points;
@@ -199,12 +253,16 @@ void BlockTreeStorer::submitLowerTierLocked(const CacheKeysType&                
         }
     }
     if (tree_->observabilityEnabled() && plan_reached) {
-        logPrefixPlanFormed(tree_->observabilityInstance(), plan_points, target_tier);
+        logPrefixPlanFormed(tree_->observabilityInstance(), plan_points, target_tier, observation_request_id);
     }
     if (stopping_.load()) {
         logPrefixPlanUnfulfilled(tree_->observabilityInstance(), plan_points,
                                  "store_stopped",
-                                 ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "store stopped before admission"));
+                                 ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "store stopped before admission"), observation_request_id);
+        if (tree_->observabilityEnabled()) {
+            logPrefixPublication(tree_->observabilityInstance(), observation_request_id, target_tier,
+                                 nullptr, "store_stopped", plan_points.size());
+        }
         return;
     }
 
@@ -214,6 +272,7 @@ void BlockTreeStorer::submitLowerTierLocked(const CacheKeysType&                
         std::chrono::milliseconds(target_tier == Tier::DISK ? disk_timeout_ms_ : host_timeout_ms_),
         token_segments ? *token_segments : std::vector<std::vector<int>>{},
         plan_points);
+    task->observation_request_id = observation_request_id;
 
     const char* failure_reason = "prepare_failed";
     block_tree_cache_detail::ScopeRollback prepare_guard(
@@ -357,10 +416,16 @@ size_t BlockTreeStorer::settleLocked(StoreTask& task, bool publish, const char* 
         logPrefixPlanUnfulfilled(tree_->observabilityInstance(),
                                  unfulfilled,
                                  "insert_not_fulfilled",
-                                 ErrorInfo::OkStatus());
+                                 ErrorInfo::OkStatus(), task.observation_request_id);
     } else {
         unfulfilled = std::move(task.plan_points);
-        logPrefixPlanUnfulfilled(tree_->observabilityInstance(), unfulfilled, failure_reason, task.error);
+        logPrefixPlanUnfulfilled(tree_->observabilityInstance(), unfulfilled, failure_reason, task.error, task.observation_request_id);
+    }
+    if (tree_->observabilityEnabled()) {
+        logPrefixPublication(tree_->observabilityInstance(), task.observation_request_id, task.target_tier,
+                             publish ? &insert_result : nullptr,
+                             publish ? (unfulfilled.empty() ? nullptr : "insert_not_fulfilled") : failure_reason,
+                             unfulfilled.size());
     }
     task.plan_points.clear();
 

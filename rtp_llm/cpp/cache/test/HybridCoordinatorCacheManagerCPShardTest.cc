@@ -111,6 +111,16 @@ protected:
     }
 };
 
+TEST_F(HybridCoordinatorCacheManagerCPShardTest, ExactEndpointProjectsEachTagThroughItsResolvedCpGeometry) {
+    for (const int cp_size : {2, 4}) {
+        auto config = makeCPHybridConfig();  // B=4; LINEAR is unscaled, FULL is round robin.
+        resolveTestCpLayout(config, cp_size);
+        const size_t endpoint = 17;
+        EXPECT_EQ(config.endpointBlockPosition("linear", endpoint), 4u);
+        EXPECT_EQ(config.endpointBlockPosition("full", endpoint), cp_size == 2 ? 2u : 1u);
+    }
+}
+
 // 1) Without a sharded request projection, behavior follows the non-CP baseline:
 //    a request occupying 4 logical blocks allocates 4 blocks in the full group.
 TEST_F(HybridCoordinatorCacheManagerCPShardTest, OrdinaryRequestIsPassthrough) {

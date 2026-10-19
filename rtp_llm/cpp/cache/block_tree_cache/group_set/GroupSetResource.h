@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/CacheTier.h"
@@ -97,6 +98,29 @@ struct GroupSetResource {
         }
         return Tier::NONE;
     }
+};
+
+// Lower-layer transfer object: owned request references acquired atomically
+// from existing immutable DEVICE histories. The caller must move the pins into
+// request lifetime storage and release them; group paths only refer to indices.
+struct CachedPrefixResources {
+    struct Pin {
+        std::string tag;
+        BlockIdxType block{NULL_BLOCK_IDX};
+    };
+    struct PathResource {
+        size_t group_set_id{0};
+        size_t endpoint{0};
+        GroupSetResource resource;
+    };
+    struct Group {
+        bool ready{false};
+        GroupSetResource endpoint_resource;
+        std::vector<size_t> path_indices;
+    };
+    std::vector<Pin> pins;
+    std::vector<PathResource> path_resources;
+    std::vector<std::vector<Group>> groups;  // [requested endpoint][group set]
 };
 
 }  // namespace rtp_llm

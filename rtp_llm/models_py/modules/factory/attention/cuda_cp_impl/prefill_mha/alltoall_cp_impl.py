@@ -14,6 +14,7 @@ from rtp_llm.models_py.distributed.user_buffers import get_user_buffers_communic
 from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_utils import (
     generate_half_kv_indices,
     generate_half_q_indices,
+    plan_cp_attention,
     plan_prefix_paged_attention,
 )
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
@@ -67,7 +68,8 @@ class PCPAll2AllAttnOp:
         self.prefill_cp_rank = parallelism_config.tp_rank
         self.prefill_cp_size = parallelism_config.tp_size
 
-        self.seq_size_per_block = attn_configs.tokens_per_block
+        self.seq_size_per_block = attn_configs.kernel_tokens_per_block
+        self.cache_geometry = None
 
         self.communication_stream = torch.cuda.Stream(device=self.device)
         self.comm_events = [torch.cuda.Event() for _ in range(self.prefill_cp_size)]
@@ -108,6 +110,20 @@ class PCPAll2AllAttnOp:
             -1, shuffle_indices.shape[0]
         )
 
+        chunk_lengths = prefill_cp_chunk_lengths.to(
+            device=self.device, dtype=torch.long
+        )
+        prefix_per_token = torch.repeat_interleave(
+            attention_inputs.prefix_lengths.to(self.device), chunk_lengths
+        )
+        new_per_token = torch.repeat_interleave(
+            self.cp_info.prefill_actual_input_lengths_cpu.to(self.device), chunk_lengths
+        )
+        self.append_valid = (self.all_shuffle_indices >= 0) & (
+            self.all_shuffle_indices < new_per_token[None, :]
+        )
+        self.all_shuffle_indices = self.all_shuffle_indices + prefix_per_token[None, :]
+
         common_params = {
             "num_qo_heads": self.num_qo_heads,
             "num_kv_heads": self.num_kv_heads,
@@ -136,7 +152,9 @@ class PCPAll2AllAttnOp:
         ]
         for config in configs:
             wrapper_name = config.pop("wrapper_name")
-            self.prefill_wrappers[wrapper_name].plan(**config, **common_params)
+            plan_cp_attention(
+                self.prefill_wrappers[wrapper_name], **config, **common_params
+            )
 
         half_q_indices = generate_half_q_indices(prefill_cp_chunk_lengths)
         half_kv_indices = generate_half_kv_indices(prefill_cp_chunk_lengths)
@@ -147,7 +165,11 @@ class PCPAll2AllAttnOp:
             self.attn_inputs.prefix_lengths,
             self.attn_inputs.sequence_lengths,
             self.cp_info.prefill_actual_input_lengths_cpu,
-            self.attn_inputs.kv_cache_kernel_block_id,
+            (
+                self.cache_geometry.block_ids
+                if self.cache_geometry is not None
+                else self.attn_inputs.kv_cache_kernel_block_id
+            ),
             self.attn_configs.kernel_tokens_per_block,
         )
 
@@ -247,11 +269,12 @@ class PCPAll2AllAttnOp:
                 k = k.reshape(-1, self.num_kv_heads, self.head_dim)
                 v = v.reshape(-1, self.num_kv_heads, self.head_dim)
 
+                valid = self.append_valid[self.prefill_cp_rank]
                 append_paged_kv_cache(
-                    append_key=k,
-                    append_value=v,
-                    batch_indices=self.append_batch_indice,
-                    positions=self.all_shuffle_indices[self.prefill_cp_rank],
+                    append_key=k[valid],
+                    append_value=v[valid],
+                    batch_indices=self.append_batch_indice[valid],
+                    positions=self.all_shuffle_indices[self.prefill_cp_rank][valid],
                     paged_kv_cache=kv_cache_tensor,
                     kv_indices=params.page_indice_d,
                     kv_indptr=params.decode_page_indptr_d,
@@ -294,11 +317,12 @@ class PCPAll2AllAttnOp:
                 )
                 # TODO: make write local kvcache async
                 src_rank = (self.prefill_cp_rank - round_id) % self.prefill_cp_size
+                valid = self.append_valid[src_rank]
                 append_paged_kv_cache(
-                    append_key=remote_k,
-                    append_value=remote_v,
-                    batch_indices=self.append_batch_indice,
-                    positions=self.all_shuffle_indices[src_rank],
+                    append_key=remote_k[valid],
+                    append_value=remote_v[valid],
+                    batch_indices=self.append_batch_indice[valid],
+                    positions=self.all_shuffle_indices[src_rank][valid],
                     paged_kv_cache=kv_cache_tensor,
                     kv_indices=params.page_indice_d,
                     kv_indptr=params.decode_page_indptr_d,

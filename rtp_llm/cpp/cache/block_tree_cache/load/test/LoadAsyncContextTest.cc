@@ -767,6 +767,77 @@ TEST(LoadAsyncContextTest, FullKeyMatchKeepsLocalPrefixVisibleAndReadsOnlyRemote
     coordinator->shutdown();
 }
 
+TEST(LoadAsyncContextTest, RemoteMissSelectsExactLocalEndpointWithoutRemoteRead) {
+    size_t commits = 0;
+    size_t aborts = 0;
+    auto coordinator = makeCoordinator(commits, aborts);
+    auto backend = std::make_shared<ManualBackend>();
+    auto pool = std::make_shared<TestBlockPool>();
+    initBackend(*backend, pool);
+    auto request = makeRequest(3);
+    request.local_matched_blocks_num = 2;
+    auto context = coordinator->create({}, {}, 2, backend, std::move(request));
+    ASSERT_TRUE(coordinator->registerContext(context));
+    context->setLocalFallback(600, 256);
+    context->setMatchCallback([](LoadAsyncContext& current, size_t matched) {
+        EXPECT_EQ(matched, 2u);
+        EXPECT_TRUE(current.localFallbackSelected());
+        for (const auto& handles : current.backendHandles()) {
+            EXPECT_TRUE(handles.empty());
+        }
+        return current.commit();
+    });
+    context->startBackendMatch();
+    backend->completeMatch(2);
+    EXPECT_FALSE(backend->readPending());
+    EXPECT_TRUE(context->success());
+    EXPECT_EQ(context->matchedBlocks(), 2u);
+    EXPECT_EQ(context->matchedTokenEndpoint(256), 600u);
+    EXPECT_EQ(commits, 1u);
+    EXPECT_EQ(aborts, 0u);
+    coordinator->shutdown();
+}
+
+TEST(LoadAsyncContextTest, FartherRemoteHitWinsAndReadFailureDoesNotUseLocalFallback) {
+    for (bool fail_read : {false, true}) {
+        size_t commits = 0;
+        size_t aborts = 0;
+        auto coordinator = makeCoordinator(commits, aborts);
+        auto backend = std::make_shared<ManualBackend>();
+        auto pool = std::make_shared<TestBlockPool>();
+        auto block = pool->malloc().value();
+        pool->incRef(block);
+        initBackend(*backend, pool);
+        auto request = makeRequest(3);
+        request.local_matched_blocks_num = 2;
+        auto context = coordinator->create({}, {}, 2, backend, std::move(request));
+        ASSERT_TRUE(coordinator->registerContext(context));
+        context->setLocalFallback(600, 256);
+        context->setMatchCallback([&](LoadAsyncContext& current, size_t matched) {
+            EXPECT_EQ(matched, 3u);
+            EXPECT_FALSE(current.localFallbackSelected());
+            current.setBackendTargetBlock(2, 0, block);
+            return current.commit();
+        });
+        context->startBackendMatch();
+        backend->completeMatch(3);
+        ASSERT_TRUE(backend->readPending());
+        if (fail_read) {
+            backend->failNextRead();
+        }
+        backend->completeRead();
+        EXPECT_EQ(context->success(), !fail_read);
+        EXPECT_FALSE(context->localFallbackSelected());
+        if (!fail_read) {
+            EXPECT_EQ(context->matchedTokenEndpoint(256), 768u);
+        }
+        EXPECT_EQ(commits, 1u);
+        EXPECT_EQ(aborts, 0u);
+        pool->decRef(block);
+        coordinator->shutdown();
+    }
+}
+
 TEST(LoadAsyncContextTest, LocalAndStorageReadsMustBothComplete) {
     size_t commits     = 0;
     size_t aborts      = 0;

@@ -41,8 +41,11 @@ public:
                                  bool                                              is_resident,
                                  size_t&                                           resident_prefix_length,
                                  const std::vector<std::vector<int>>*              token_segments = nullptr,
-                                 PrefixCachePlanState*                             prefix_plan_state = nullptr);
+                                 PrefixCachePlanState*                             prefix_plan_state = nullptr,
+                                 const std::vector<size_t>*                         token_ends = nullptr,
+                  std::optional<int64_t> observation_request_id = std::nullopt);
     void             stopAdmissionLocked();
+    void observePublicationSkipped(std::optional<int64_t> request_id, Tier tier, const char* reason);
 
 private:
     using StoreTask    = StoreTaskRunner::Task;
@@ -53,14 +56,18 @@ private:
                                          bool                                              is_resident,
                                          size_t&                                           resident_prefix_length,
                                          const std::vector<std::vector<int>>*              token_segments,
-                                         PrefixCachePlanState*                             prefix_plan_state);
+                                         PrefixCachePlanState*                             prefix_plan_state,
+                                         const std::vector<size_t>*                         token_ends,
+                                         std::optional<int64_t> observation_request_id);
     StorageRequest   makeStorageRequest(const CacheKeysType&                              cache_keys,
-                                        const std::vector<std::vector<GroupSetResource>>& resources) const;
+                                        const std::vector<std::vector<GroupSetResource>>& resources,
+                                        const std::vector<size_t>*                         token_ends = nullptr) const;
     void             submitLowerTierLocked(const CacheKeysType&                              cache_keys,
                                            const std::vector<std::vector<GroupSetResource>>& resources,
                                            Tier                                              target_tier,
                                            const std::vector<std::vector<int>>*              token_segments,
-                                           PrefixCachePlanState*                             prefix_plan_state);
+                                           PrefixCachePlanState*                             prefix_plan_state,
+                                           std::optional<int64_t> observation_request_id);
     void             runStoreTask(const StoreTaskPtr& task);
     void             scheduleStoreSettlement(const StoreTaskPtr& task,
                                              ErrorInfo            error,

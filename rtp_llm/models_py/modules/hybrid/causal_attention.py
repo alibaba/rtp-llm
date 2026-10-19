@@ -7,6 +7,7 @@ from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.modules.factory import LinearFactory
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
+from rtp_llm.models_py.modules.hybrid.full_checkpoint import save_full_checkpoints
 from rtp_llm.ops import AttentionConfigs, HWKernelConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache
 from rtp_llm.utils.model_weight import W
@@ -32,6 +33,7 @@ class CausalAttention(nn.Module):
     ):
         super().__init__()
         self.layer_idx = layer_idx
+        self.cache_base_tokens = attn_config.tokens_per_block
         self.parallelism_config = parallelism_config
         self.tp_size = parallelism_config.get_attn_tp_size()
         self.head_num = attn_config.head_num
@@ -84,6 +86,7 @@ class CausalAttention(nn.Module):
         if self.qk_fuse_norm is not None:
             qkv = self.qk_fuse_norm(qkv)
         attn_output = fmha_impl.forward(qkv, kv_cache, self.layer_idx)
+        save_full_checkpoints(kv_cache, fmha_impl.attn_inputs, self.cache_base_tokens)
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         if gate is not None:
             attn_output = attn_output * torch.sigmoid(gate)

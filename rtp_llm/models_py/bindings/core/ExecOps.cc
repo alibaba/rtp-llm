@@ -273,13 +273,26 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
         const int    input_length = input_lengths_host[input_index];
         RTP_LLM_CHECK_WITH_INFO(cp_size > 0 && cp_rank >= 0 && cp_rank < cp_size,
                                 "producer cache-store requires a valid rank and CP size");
-        RTP_LLM_CHECK_WITH_INFO(cache_config.seq_size_per_block > 0 && input_length >= 0 && prefix_length >= 0
-                                    && static_cast<size_t>(prefix_length) % cache_config.seq_size_per_block == 0,
-                                "cache-store requires nonnegative input/prefix and a block-aligned prefix");
-        const size_t key_count    = std::min(cache_keys_per_batch,
-                                          (static_cast<size_t>(input_length) + cache_config.seq_size_per_block - 1)
-                                                  / cache_config.seq_size_per_block
-                                              + static_cast<size_t>(prefix_length) / cache_config.seq_size_per_block);
+        RTP_LLM_CHECK_WITH_INFO(cache_config.seq_size_per_block > 0 && input_length >= 0 && prefix_length >= 0,
+                                "cache-store requires nonnegative input/prefix and a positive base block size");
+        const size_t base_block_tokens = cache_config.seq_size_per_block;
+        const size_t total_tokens      = static_cast<size_t>(prefix_length) + static_cast<size_t>(input_length);
+        const size_t key_count         = total_tokens / base_block_tokens + (total_tokens % base_block_tokens != 0);
+        RTP_LLM_CHECK_WITH_INFO(key_count <= cache_keys_per_batch,
+                                "cache-store requires %zu base keys for prefix=%d input=%d but has width=%zu",
+                                key_count,
+                                prefix_length,
+                                input_length,
+                                cache_keys_per_batch);
+        // The gatherer zero-fills unused key cells. Reject an unpopulated
+        // partial endpoint instead of publishing it under the padding key.
+        for (size_t key_index = 0; key_index < key_count; ++key_index) {
+            RTP_LLM_CHECK_WITH_INFO(cache_keys[context_index][static_cast<int64_t>(key_index)] != 0,
+                                    "cache-store base key index=%zu is missing for prefix=%d input=%d",
+                                    key_index,
+                                    prefix_length,
+                                    input_length);
+        }
         const bool   compact_tail = cache_config.groupUsesCompactTransferTail(layer_kv.tag);
         RTP_LLM_CHECK_WITH_INFO(!compact_tail
                                     || cache_config.groupKeyScale(layer_kv.tag) == static_cast<size_t>(cp_size),
@@ -667,6 +680,32 @@ AllReduceOutput execAllReduce(const AllReduceParams& params) {
                      static_cast<int>(params.mode),
                      params.dest.defined() ? py::cast(params.dest) : py::none());
     return AllReduceOutput{result.cast<torch::Tensor>()};
+}
+
+void confirmTpCacheWorkCompletion(int tp_size, int tp_rank) {
+    RTP_LLM_CHECK_WITH_INFO(tp_size > 0 && tp_rank >= 0 && tp_rank < tp_size,
+                            "invalid TP cache completion rank %d of %d", tp_rank, tp_size);
+    // This covers the actual producer and copy streams already enqueued by
+    // the caller. The collective below is entered only after local completion.
+    cudaSyncAndCheck();
+    if (tp_size == 1) {
+        return;
+    }
+    auto identity = torch::zeros({tp_size + 1}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU));
+    identity.data_ptr<int32_t>()[tp_rank] = 1;
+    identity.data_ptr<int32_t>()[tp_size] = 1;
+    auto reduced = execAllReduce({identity.to(torch::kCUDA), ReduceOp::Sum, false, ParallelMode::TP}).buffer.cpu();
+    RTP_LLM_CHECK_WITH_INFO(reduced.dim() == 1 && reduced.size(0) == tp_size + 1
+                                && reduced.scalar_type() == torch::kInt32,
+                            "TP cache completion returned invalid membership payload");
+    const auto* members = reduced.data_ptr<int32_t>();
+    for (int rank = 0; rank < tp_size; ++rank) {
+        RTP_LLM_CHECK_WITH_INFO(members[rank] == 1,
+                                "TP cache completion group missing or duplicates rank %d (count=%d)",
+                                rank, members[rank]);
+    }
+    RTP_LLM_CHECK_WITH_INFO(members[tp_size] == tp_size,
+                            "TP cache completion did not include every rank");
 }
 
 void execAllGather(const AllGatherParams& params) {

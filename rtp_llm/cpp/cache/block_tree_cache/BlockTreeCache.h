@@ -129,7 +129,8 @@ public:
 
     BlockTreeMatchResult match(const CacheKeysType&               cache_keys,
                                const std::function<bool(size_t)>& valid_prefix = {},
-                               const std::vector<int>*            request_tokens = nullptr);
+                               const std::vector<int>*            request_tokens = nullptr,
+                               const PartialTailMatchRequest*     partial_tail = nullptr);
     void                 insert(const CacheKeysType&                              cache_keys,
                                 const std::vector<std::vector<GroupSetResource>>& resources,
                                 Tier                                              target_tier,
@@ -140,9 +141,18 @@ public:
                   Tier                                              target_tier,
                   bool                                              is_resident,
                   const std::vector<std::vector<int>>*              token_segments = nullptr,
-                  PrefixCachePlanState*                             prefix_plan_state = nullptr);
+                  PrefixCachePlanState*                             prefix_plan_state = nullptr,
+                  const std::vector<size_t>*                         token_ends = nullptr,
+                  std::optional<int64_t> observation_request_id = std::nullopt);
     // Directly reclaim up to num_blocks device blocks belonging to one group set
     // (target_tier = NONE, content dropped). Returns the number actually freed.
+    // Atomically protect existing complete per-group histories with one request
+    // ref per (tag, id); registration owns all returned references until release.
+    CachedPrefixResources pinRegisteredGroups(const std::vector<int>& tokens,
+                                               const CacheKeysType& base_keys,
+                                               size_t base_tokens,
+                                               const std::vector<size_t>& endpoints);
+    void observePublicationSkipped(std::optional<int64_t> request_id, Tier tier, const char* reason);
     int evictForGroup(std::string_view group_tag, size_t num_blocks);
 
     CacheStats                                getStats() const;

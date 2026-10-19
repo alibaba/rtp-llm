@@ -746,6 +746,21 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCacheForAllRank(DecodeGene
     auto&                              cache_keys      = generate_stream->cacheKeys(0);
     const auto&                        cache_resource  = generate_stream->kvCachePtr()->cacheResource(0);
     auto                               group_block_ids = cache_resource.groupBlockIds();
+    const auto&                        cache_config    = engine_->resourceContext().cache_manager->cacheConfig();
+    const size_t input_tokens = static_cast<size_t>(std::max(0, generate_stream->inputLength()));
+    for (const auto& tag : group_block_ids.orderedTags()) {
+        const auto& row = group_block_ids.blockIds(tag);
+        const auto  masked = windowedSwaHandoffBlocks(cache_config.group(tag).policy,
+                                                       row.blocks(),
+                                                       cache_config.group(tag).seqSizePerBlock(),
+                                                       input_tokens);
+        if (masked != row.blocks()) {
+            const size_t row_index = group_block_ids.tag_to_index_.at(tag);
+            auto         copy      = std::make_shared<BlockIds>(row);
+            copy->assign(masked);
+            group_block_ids.rows_[row_index] = std::move(copy);
+        }
+    }
 
     const auto topology_error = validateRemoteLoadTopology(resource_.workers.size(), decode_context.peer_addrs.size());
     if (!topology_error.ok()) {

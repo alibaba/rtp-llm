@@ -10,6 +10,7 @@
 #include "absl/status/statusor.h"
 #include "rtp_llm/cpp/engine_base/stream/ResourceContext.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
+#include "rtp_llm/cpp/cache/PrefixCacheRegistration.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 
 namespace rtp_llm {
@@ -108,6 +109,15 @@ public:
     }
 
     bool reuseCache() const;
+    bool partialTailReuseEnabled() const;
+    const std::optional<PrefixCacheRegistration>& prefixCacheRegistration() const {
+        return prefix_cache_registration_;
+    }
+    void prepareRegisteredSave();
+    absl::Status prepareRequiredContinuation();
+    const std::vector<TaggedBlockIdPair>& registeredSaveCopyMapping() const;
+    // Called only by the owner after the T05 copy/writer completion gate.
+    void completeRegisteredSave(size_t completed_endpoint);
     bool enableMemoryCache() const;
     bool enableDeviceCache() const;
     bool enableDiskCache() const;
@@ -153,6 +163,7 @@ private:
     std::shared_ptr<AsyncContext>    allocator_load_context_;
     RtpLLMCacheReuseMetricsCollector cache_reuse_metrics_;
     std::optional<PrefixCacheMatchObservation> prefix_match_observation_;
+    std::optional<PrefixCacheRegistration> prefix_cache_registration_;
     PrefixCacheRemoteObservation      remote_observation_;
     bool                              prefix_summary_emitted_{false};
     PrefixCachePlanState               prefix_plan_state_{PrefixCachePlanState::NOT_FORMED};

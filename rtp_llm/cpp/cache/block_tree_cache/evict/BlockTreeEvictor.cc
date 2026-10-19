@@ -184,10 +184,10 @@ void BlockTreeEvictor::onMatched(const std::vector<TreeNode*>& path) {
     for (const GroupSetPtr& group_set : tree_->groupSets()) {
         const size_t group_set_id = group_set->groupSetId();
         const size_t reuse_count  = std::min(group_set->computeReuseBlockCount(path.size()), path.size());
-        for (size_t path_index = path.size() - reuse_count; path_index < path.size(); ++path_index) {
-            TreeNode*         node     = path[path_index];
-            GroupSetResource& resource = node->group_set_resources[group_set_id];
-            const Tier        top      = resource.getTopTier();
+        for (size_t index = path.size() - reuse_count; index < path.size(); ++index) {
+            TreeNode*  node     = path[index];
+            auto&      resource = node->group_set_resources[group_set_id];
+            const Tier top      = resource.getTopTier();
             if (top == Tier::NONE) {
                 continue;
             }
@@ -196,6 +196,22 @@ void BlockTreeEvictor::onMatched(const std::vector<TreeNode*>& path) {
             ++resource.candidate_meta.hit_count;
             heapFor(group_set_id, top)->updateIfPresent(node, resource.candidate_meta);
         }
+    }
+}
+
+void BlockTreeEvictor::onMatchedResources(const std::vector<std::pair<TreeNode*, size_t>>& resources) {
+    const uint64_t access         = ++access_seq_;
+    const int64_t  access_time_us = currentTimeUs();
+    for (const auto& [node, group_set_id] : resources) {
+        auto&      resource = node->group_set_resources[group_set_id];
+        const Tier top      = resource.getTopTier();
+        if (top == Tier::NONE) {
+            continue;
+        }
+        resource.candidate_meta.last_access_seq     = access;
+        resource.candidate_meta.last_access_time_us = access_time_us;
+        ++resource.candidate_meta.hit_count;
+        heapFor(group_set_id, top)->updateIfPresent(node, resource.candidate_meta);
     }
 }
 
@@ -325,7 +341,8 @@ BlockTreeEvictor::batchEvictLocked(size_t group_set_id, Tier source_tier, size_t
     if (max_victim_count == 0) {
         return {};
     }
-    const Tier target_tier = watermarkTargetTier(source_tier);
+    const GroupSetPtr& group_set = tree_->groupSets()[group_set_id];
+    const Tier target_tier = group_set->localOnly() ? Tier::NONE : watermarkTargetTier(source_tier);
     if (target_tier == Tier::NONE) {
         size_t     scheduled_count = 0;
         const bool direct_progress = batchDropLocked(group_set_id, source_tier, max_victim_count, scheduled_count);
@@ -339,6 +356,14 @@ BlockTreeEvictor::batchEvictLocked(size_t group_set_id, Tier source_tier, size_t
     for (size_t victim_count = 0; victim_count < max_victim_count; ++victim_count) {
         auto eviction_desc = chooseVictim(group_set_id, source_tier, /*force_drop=*/false);
         if (!eviction_desc.has_value()) {
+            break;
+        }
+        if (eviction_desc->target_tier == Tier::NONE) {
+            if (descriptors.empty()) {
+                runDropTask(std::move(*eviction_desc), false);
+                settled_(false);
+                return {/*direct_progress=*/true, /*async_submitted=*/false, /*scheduled_count=*/1};
+            }
             break;
         }
         timings.emplace_back(eviction_desc->node->group_set_resources[eviction_desc->group_set_id].candidate_meta);
@@ -487,7 +512,8 @@ std::optional<TransferDescriptor> BlockTreeEvictor::chooseVictim(size_t group_se
 
     GroupSetResource& resource    = entry->node->group_set_resources[group_set_id];
     Tier              target_tier = Tier::NONE;
-    if (!force_drop) {
+    const GroupSetPtr& group_set = tree_->groupSets()[group_set_id];
+    if (!force_drop && !group_set->localOnly() && !tree_->isShortLeaf(entry->node)) {
         if (tier == Tier::DEVICE && is_tier_enabled_(Tier::HOST)) {
             target_tier = Tier::HOST;
         } else if ((tier == Tier::DEVICE || tier == Tier::HOST) && is_tier_enabled_(Tier::DISK)) {

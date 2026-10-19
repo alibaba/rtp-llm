@@ -1020,7 +1020,7 @@ TEST(BlockTreeStorerTest, StoreCopyFailureLeavesTreeAndPoolsUntouched) {
             MultiNodeBlocks request_holder = allocateDeviceBlocksForTest(*env.groups[0], 1);
             ASSERT_EQ(request_holder.size(), 1u);
 
-            env.cache->insert({100}, deviceSourceResources({request_holder[0]}), target_tier);
+            env.cache->insert({100}, deviceSourceResources({request_holder[0]}), target_tier, false, nullptr, nullptr, nullptr, 771);
             block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*env.cache);
 
             EXPECT_EQ(engine->submittedBatchCount(), 1u);
@@ -1032,6 +1032,11 @@ TEST(BlockTreeStorerTest, StoreCopyFailureLeavesTreeAndPoolsUntouched) {
             EXPECT_EQ(env.device_pools[0]->freeBlocksNum(), device_free_before);
 
             const std::string content = log_capture.content();
+            EXPECT_EQ(logOccurrenceCount(content, "\"request_id\":771"), 3u) << content;
+            EXPECT_EQ(logOccurrenceCount(content, "\"kind\":\"publication\""), 1u) << content;
+            EXPECT_NE(content.find("\"insert_attempted\":false"), std::string::npos) << content;
+            EXPECT_NE(content.find("\"accepted_resources\":0"), std::string::npos) << content;
+            EXPECT_EQ(content.find("\"used_pos\":"), std::string::npos) << content;
             EXPECT_EQ(logOccurrenceCount(content, "\"kind\":\"plan\""), 1u) << content;
             EXPECT_EQ(logOccurrenceCount(content, "\"kind\":\"plan_unfulfilled\""), 1u) << content;
             EXPECT_NE(content.find("\"reason\":\"copy_failed\""), std::string::npos) << content;
@@ -1237,13 +1242,19 @@ TEST(BlockTreeStorerTest, PrefixPlanOutputMarksEmptyFormedPlan) {
     ASSERT_EQ(request_holder.size(), 1u);
 
     PrefixCachePlanState initial_plan_state = PrefixCachePlanState::NOT_FORMED;
-    env.cache->insert({100}, deviceSourceResources({request_holder[0]}), Tier::DEVICE, &initial_plan_state);
+    env.cache->insert({100}, deviceSourceResources({request_holder[0]}), Tier::DEVICE, false, nullptr, &initial_plan_state, nullptr, 881);
     PrefixCachePlanState empty_plan_state = PrefixCachePlanState::NOT_FORMED;
-    env.cache->insert({100}, deviceSourceResources({request_holder[0]}), Tier::DEVICE, &empty_plan_state);
+    env.cache->insert({100}, deviceSourceResources({request_holder[0]}), Tier::DEVICE, false, nullptr, &empty_plan_state, nullptr, 882);
 
     EXPECT_EQ(initial_plan_state, PrefixCachePlanState::FORMED);
     EXPECT_EQ(empty_plan_state, PrefixCachePlanState::FORMED);
     const std::string content = log_capture.content();
+    EXPECT_EQ(logOccurrenceCount(content, "\"request_id\":881"), 2u) << content;
+    EXPECT_EQ(logOccurrenceCount(content, "\"request_id\":882"), 2u) << content;
+    EXPECT_EQ(logOccurrenceCount(content, "\"kind\":\"publication\""), 2u) << content;
+    EXPECT_EQ(logOccurrenceCount(content, "\"inserted_nodes\":1"), 1u) << content;
+    EXPECT_EQ(logOccurrenceCount(content, "\"inserted_nodes\":0"), 1u) << content;
+    EXPECT_NE(content.find("\"accepted_resources\":0"), std::string::npos) << content;
     EXPECT_EQ(logOccurrenceCount(content, "\"kind\":\"plan\""), 2u) << content;
     EXPECT_EQ(logOccurrenceCount(content, "\"kind\":\"plan_unfulfilled\""), 0u) << content;
 

@@ -50,6 +50,7 @@ public:
         CacheKeysType cache_keys;
         std::vector<std::vector<int>> token_segments;
         std::vector<PrefixCachePlanPoint> plan_points;
+        std::optional<int64_t> observation_request_id{std::nullopt};
         ErrorInfo     error;
         TransferTask  transfer_task;
         bool markTransferring() {

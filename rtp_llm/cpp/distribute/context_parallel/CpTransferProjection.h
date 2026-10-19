@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
@@ -33,6 +34,14 @@ std::vector<size_t> selectProducerTransferPages(const CacheGroupPolicy& policy,
                                                 size_t                  logical_page_count,
                                                 bool                    use_hybrid,
                                                 bool                    compact_tail);
+
+// Keep the destination row shape, but leave SWA pages outside the exact
+// attention history absent from a P->D load request. The live cache row is
+// unaffected; the caller transmits this value copy through existing block IDs.
+std::vector<int32_t> windowedSwaHandoffBlocks(const CacheGroupPolicy&     policy,
+                                               const std::vector<int32_t>& blocks,
+                                               size_t                      tokens_per_block,
+                                               size_t                      input_token_count);
 
 LoadTransferPlan selectLoadTransferPages(const CacheGroupPolicy& policy,
                                          size_t                  logical_page_count,

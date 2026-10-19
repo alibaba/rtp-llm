@@ -60,6 +60,33 @@ void SWACacheManager::checkSWATailBlockIds(const BlockIds& block_ids, const char
     }
 }
 
+void SWACacheManager::checkHistoryBlockIds(
+    const BlockIds& block_ids, HistorySlots history, const char* caller, bool check_tail) const {
+    if (!shouldCheckSWATailBlockIds()) {
+        return;
+    }
+    const auto& blocks = block_ids.blocks();
+    RTP_LLM_CHECK_WITH_INFO(history.begin <= history.end && history.end <= blocks.size(),
+                            "%s invalid SWA history slots [%zu,%zu), block_num=%zu",
+                            caller,
+                            history.begin,
+                            history.end,
+                            blocks.size());
+    for (size_t slot = history.begin; slot < history.end; ++slot) {
+        RTP_LLM_CHECK_WITH_INFO(!isNullBlockIdx(blocks[slot]),
+                                "%s missing required SWA history at slot=%zu, block_num=%zu",
+                                caller,
+                                slot,
+                                blocks.size());
+    }
+    if (check_tail && !blocks.empty()) {
+        RTP_LLM_CHECK_WITH_INFO(!isNullBlockIdx(blocks.back()),
+                                "%s invalid SWA block ids: tail block is NULL, block_num=%zu",
+                                caller,
+                                blocks.size());
+    }
+}
+
 void SWACacheManager::filterValidBlocks(const BlockIndicesType& in, BlockIndicesType& out) const {
     out.clear();
     out.reserve(in.size());
@@ -150,6 +177,40 @@ bool SWACacheManager::malloc(BlockIds&                block_ids,
                              int                      reserve_step,
                              std::vector<size_t>*     backfilled_positions,
                              const RequiredPositions& required_positions) {
+    return mallocImpl(
+        block_ids, seq_len, enable_reuse_cache, reserve_step, backfilled_positions, required_positions, std::nullopt);
+}
+
+bool SWACacheManager::mallocWithHistory(BlockIds&                block_ids,
+                                        int                      seq_len,
+                                        bool                     enable_reuse_cache,
+                                        int                      reserve_step,
+                                        std::vector<size_t>*     backfilled_positions,
+                                        const RequiredPositions& required_positions,
+                                        HistorySlots             history) {
+    return mallocImpl(
+        block_ids, seq_len, enable_reuse_cache, reserve_step, backfilled_positions, required_positions, history);
+}
+
+bool SWACacheManager::mallocImpl(BlockIds&                   block_ids,
+                                 int                         seq_len,
+                                 bool                        enable_reuse_cache,
+                                 int                         reserve_step,
+                                 std::vector<size_t>*        backfilled_positions,
+                                 const RequiredPositions&    required_positions,
+                                 std::optional<HistorySlots> history) {
+    if (history) {
+        // A recovered history slot must already be bound to a cached block.
+        // Reject a missing slot before allocating any fresh continuation block.
+        checkHistoryBlockIds(block_ids, *history, "SWACacheManager::mallocWithHistory", false);
+    }
+    const auto check_blocks = [&]() {
+        if (history) {
+            checkHistoryBlockIds(block_ids, *history, "SWACacheManager::mallocWithHistory");
+        } else {
+            checkSWATailBlockIds(block_ids, "SWACacheManager::malloc");
+        }
+    };
     if (backfilled_positions != nullptr) {
         backfilled_positions->clear();
     }
@@ -161,7 +222,7 @@ bool SWACacheManager::malloc(BlockIds&                block_ids,
     const int  new_blocks_len          = needBlocksNum(seq_len, current_blocks_len, reserve_step);
 
     if (required_positions.empty() && new_blocks_len == 0) {
-        checkSWATailBlockIds(block_ids, "SWACacheManager::malloc");
+        check_blocks();
         return true;
     }
 
@@ -230,14 +291,31 @@ bool SWACacheManager::malloc(BlockIds&                block_ids,
         }
     }
     block_ids.add(new_ids);
-    checkSWATailBlockIds(block_ids, "SWACacheManager::malloc");
+    check_blocks();
     return true;
 }
 
 void SWACacheManager::removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache, int reserve_step) {
+    removeSkippedBlocksImpl(block_ids, enable_reuse_cache, reserve_step, std::nullopt);
+}
+
+void SWACacheManager::removeSkippedBlocksWithHistory(
+    BlockIds& block_ids, bool enable_reuse_cache, int reserve_step, HistorySlots history) {
+    removeSkippedBlocksImpl(block_ids, enable_reuse_cache, reserve_step, history);
+}
+
+void SWACacheManager::removeSkippedBlocksImpl(
+    BlockIds& block_ids, bool enable_reuse_cache, int reserve_step, std::optional<HistorySlots> history) {
+    const auto check_blocks = [&]() {
+        if (history) {
+            checkHistoryBlockIds(block_ids, *history, "SWACacheManager::removeSkippedBlocksWithHistory");
+        } else {
+            checkSWATailBlockIds(block_ids, "SWACacheManager::removeSkippedBlocks");
+        }
+    };
     const auto& block_indices = block_ids.blocks();
     if (block_indices.empty()) {
-        checkSWATailBlockIds(block_ids, "SWACacheManager::removeSkippedBlocks");
+        check_blocks();
         return;
     }
     const int  step                    = std::max(1, linear_step_);
@@ -248,6 +326,9 @@ void SWACacheManager::removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse
     BlockIndicesType    blocks_to_free;
     std::vector<size_t> pos_to_remove;
     for (int i = block_size - active_tail_blocks - 1 - reserve_step; i >= 0; i--) {
+        if (history && static_cast<size_t>(i) >= history->begin && static_cast<size_t>(i) < history->end) {
+            continue;
+        }
         if (isNullBlockIdx(block_indices[i])) {
             continue;
         }
@@ -261,7 +342,7 @@ void SWACacheManager::removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse
         block_pool_->decRef(blocks_to_free);
         block_ids.remove(pos_to_remove);
     }
-    checkSWATailBlockIds(block_ids, "SWACacheManager::removeSkippedBlocks");
+    check_blocks();
 }
 
 }  // namespace rtp_llm

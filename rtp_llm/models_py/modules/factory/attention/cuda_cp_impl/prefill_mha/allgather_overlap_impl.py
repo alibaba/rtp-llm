@@ -26,6 +26,7 @@ from flashinfer.page import append_paged_kv_cache
 from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_utils import (
     generate_nonlocal_causal_kv_indices,
     generate_q_indices,
+    plan_cp_attention,
     plan_prefix_paged_attention,
 )
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
@@ -71,7 +72,8 @@ class PCPAllGatherOverlapAttnOp:
         self.prefill_cp_rank = parallelism_config.tp_rank
         self.prefill_cp_size = parallelism_config.tp_size
 
-        self.seq_size_per_block = attn_configs.tokens_per_block
+        self.seq_size_per_block = attn_configs.kernel_tokens_per_block
+        self.cache_geometry = None
 
         # write kv cache params
         self.kv_restore_unpad_indices = None
@@ -132,7 +134,11 @@ class PCPAllGatherOverlapAttnOp:
             self.attn_inputs.prefix_lengths,
             self.attn_inputs.sequence_lengths,
             cp_info.prefill_actual_input_lengths_cpu,
-            self.attn_inputs.kv_cache_kernel_block_id,
+            (
+                self.cache_geometry.block_ids
+                if self.cache_geometry is not None
+                else self.attn_inputs.kv_cache_kernel_block_id
+            ),
             self.attn_configs.kernel_tokens_per_block,
         )
 
@@ -186,8 +192,8 @@ class PCPAllGatherOverlapAttnOp:
         ]
         for config in configs:
             wrapper_name = config.pop("wrapper_name")
-            self.prefill_wrappers["ragged"][wrapper_name].plan(
-                **config, **common_params
+            plan_cp_attention(
+                self.prefill_wrappers["ragged"][wrapper_name], **config, **common_params
             )
 
     def _all_gather_kv(self, k: torch.Tensor, v: torch.Tensor):

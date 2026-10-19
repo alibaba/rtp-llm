@@ -23,7 +23,7 @@ from rtp_llm.models_py.modules.dsv4.fp8._swa_dequant_triton import (
 from rtp_llm.models_py.modules.dsv4.fp8._swa_kv_insert_triton import (
     quantize_and_insert_k_cache,
 )
-from rtp_llm.models_py.modules.dsv4.fp8.attention import AttentionFP8
+from rtp_llm.models_py.modules.dsv4.fp8.attention import AttentionFP8, bind_attn_cache
 from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_attn_metadata import (
     build_decode_metadata_fp8,
 )
@@ -42,6 +42,10 @@ from rtp_llm.models_py.modules.dsv4.fp8.decode.mega_hca_weights import (
     HCA_COMPRESS_RATIO,
     HCA_STATE_WIDTH,
 )
+from rtp_llm.models_py.modules.dsv4.fp8.sparse_save import (
+    SparseSaveTargets,
+    iter_sparse_save_slots,
+)
 from rtp_llm.models_py.modules.dsv4.fp8.test.mega_attention_test_utils import (
     TaggedKVCache,
     check_dynamic_graph_replays,
@@ -49,6 +53,7 @@ from rtp_llm.models_py.modules.dsv4.fp8.test.mega_attention_test_utils import (
 )
 from rtp_llm.models_py.modules.dsv4.hc import build_hc_unit
 from rtp_llm.models_py.modules.dsv4.kv_cache_utils import HCA_KV, HCA_STATE, SWA_KV
+from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
 from rtp_llm.test.utils.numeric_util import calc_diff
 from rtp_llm.utils.model_weight import W
 
@@ -195,11 +200,12 @@ def _make_pools(
     device: torch.device,
     batch_size: int,
     max_seq_len: int = _TEST_MAX_SEQ_LEN,
+    extra_fixed_blocks: int = 0,
 ) -> _Pools:
     compressed_pages_per_request = max_seq_len // _TOKENS_PER_BLOCK
     compressed_blocks = 1 + batch_size * compressed_pages_per_request
     fixed_blocks_per_request = 2
-    fixed_blocks = 1 + batch_size * fixed_blocks_per_request
+    fixed_blocks = 1 + batch_size * fixed_blocks_per_request + extra_fixed_blocks
     hca_stride = _align_up(
         _HCA_ENTRIES_PER_BLOCK * _KV_ENTRY_BYTES,
         _KV_BLOCK_ALIGNMENT_BYTES,
@@ -635,6 +641,177 @@ class MegaHCARTPEagerTest(unittest.TestCase):
             label=f"HCA MTP B={batch_size} S={q_len}",
             expect_boundary_write=True,
         )
+
+    @torch.inference_mode()
+    def _run_prefill_chunk(
+        self,
+        pools: _Pools,
+        start: int,
+        hidden: torch.Tensor,
+        *,
+        sparse: bool = False,
+    ) -> torch.Tensor:
+        """Run the real AttentionFP8 prefill entry with per-forward metadata."""
+        attn = self.block.attn
+        length = int(hidden.shape[0])
+        positions = torch.arange(
+            start, start + length, device=self.device, dtype=torch.int64
+        )
+        cu = torch.tensor([0, length], device=self.device, dtype=torch.int32)
+        one = torch.tensor([start], device=self.device, dtype=torch.int32)
+        req = torch.zeros(length, device=self.device, dtype=torch.int32)
+        workspace = PrefillWorkspace(
+            self.device,
+            q_rows=length,
+            q_dim=attn.n_heads * HEAD_DIM,
+            reserve_cp=False,
+            align_bytes=256,
+        )
+        with bind_attn_cache(attn, pools.kv_cache, pools.block_tables):
+            common = attn._build_shared_prefill_meta(
+                hidden,
+                positions,
+                sp_per_req=one,
+                cu_seqlens=cu,
+                batch_size=1,
+                input_lengths=torch.tensor(
+                    [length], device=self.device, dtype=torch.int32
+                ),
+                prefix_lengths=one,
+                position_ids=positions,
+                req_id_per_token=req,
+                max_seqlen_q=length,
+                any_cont=True,
+            )
+            if sparse:
+                assert common.hca_meta is not None
+                expected_slots = 3 * _HCA_STATE_ENTRIES_PER_BLOCK + positions % 128
+                torch.testing.assert_close(
+                    common.hca_meta.compressor_meta.state_slots,
+                    expected_slots,
+                    rtol=0,
+                    atol=0,
+                )
+                assert common.swa_meta is not None
+                runtime_swa_slots = common.swa_meta.slot_mapping
+                assert runtime_swa_slots is not None
+                torch.testing.assert_close(
+                    runtime_swa_slots,
+                    3 * _SWA_ENTRIES_PER_BLOCK + positions % 128,
+                    rtol=0,
+                    atol=0,
+                )
+            attn._set_prefill_meta_shared(common._replace(workspace=workspace))
+            attn._protect_short_prefix = start % 128 != 0
+            if sparse:
+                attn._sparse_save_targets = {
+                    HCA_STATE: SparseSaveTargets(
+                        torch.tensor([[1320]], dtype=torch.int64),
+                        torch.tensor([[4]], dtype=torch.int32),
+                    ),
+                    SWA_KV: SparseSaveTargets(
+                        torch.tensor([[1320]], dtype=torch.int64),
+                        torch.tensor([[4]], dtype=torch.int32),
+                    ),
+                }
+                save_swa_slots = list(
+                    iter_sparse_save_slots(
+                        attn._sparse_save_targets[SWA_KV],
+                        positions,
+                        req,
+                        entries_per_block=_SWA_ENTRIES_PER_BLOCK,
+                        tokens_per_block=_TOKENS_PER_BLOCK,
+                        runtime_block_table=pools.block_tables[SWA_KV],
+                    )
+                )
+                self.assertEqual(len(save_swa_slots), 1)
+                torch.testing.assert_close(
+                    save_swa_slots[0][1],
+                    4 * _SWA_ENTRIES_PER_BLOCK + positions % 128,
+                    rtol=0,
+                    atol=0,
+                )
+            try:
+                return attn.forward(
+                    hidden,
+                    positions,
+                    kv_cache=pools.kv_cache,
+                    block_tables_by_type=pools.block_tables,
+                )
+            finally:
+                attn._set_prefill_meta_shared(None)
+                attn._protect_short_prefix = False
+                attn._sparse_save_targets = None
+
+    def test_short_leaf_prefill_save_restore_continue_numeric(self) -> None:
+        """G1300→D1320 save must resume with the same real attention values as C."""
+        self.block, self.runtime, self.adapter = self._make_layer(
+            self.device, FLASH_GEOMETRY
+        )
+        pools = _make_pools(self.device, batch_size=1, extra_fixed_blocks=2)
+        _fill_random_context(pools, self.device, seed=1300)
+        _fill_random_state(pools, self.device, seed=1320)
+        # SWA's production slot mapper indexes the full logical table by
+        # position//256 (no modulo). Keep the prior page 4 and G1300 page 5.
+        swa_table = torch.zeros((1, 16), dtype=torch.int32, device=self.device)
+        swa_table[0, 4] = 1
+        swa_table[0, 5] = 3
+        pools.block_tables[SWA_KV] = swa_table
+        # G1300 owns the partially filled HCA state and SWA rings in A.
+        # Resource planning has already copied A into runtime C and save D.
+        pools.tensors[HCA_STATE][3].copy_(pools.tensors[HCA_STATE][1])
+        pools.tensors[HCA_STATE][4].copy_(pools.tensors[HCA_STATE][1])
+        pools.tensors[SWA_KV][3].copy_(pools.tensors[SWA_KV][2])
+        pools.tensors[SWA_KV][4].copy_(pools.tensors[SWA_KV][2])
+        source_state = pools.tensors[HCA_STATE][1].clone()
+        source_swa = pools.tensors[SWA_KV][2].clone()
+        # State block selection uses position//256 modulo the two table
+        # columns; G1300 and the 1320 checkpoint are in column 1.
+        pools.block_tables[HCA_STATE][0, 1] = 3
+
+        generator = torch.Generator(device=self.device).manual_seed(20261018)
+        suffix = torch.randn(
+            (20, FLASH_GEOMETRY.dim),
+            generator=generator,
+            dtype=torch.bfloat16,
+            device=self.device,
+        ).mul_(0.05)
+        self._run_prefill_chunk(pools, 1300, suffix, sparse=True)
+        torch.cuda.synchronize(self.device)
+        self.assertFalse(torch.equal(pools.tensors[HCA_STATE][3], source_state))
+        torch.testing.assert_close(
+            pools.tensors[HCA_STATE][1], source_state, rtol=0, atol=0
+        )
+        torch.testing.assert_close(pools.tensors[SWA_KV][2], source_swa, rtol=0, atol=0)
+        self.assertFalse(torch.equal(pools.tensors[SWA_KV][3], source_swa))
+        self.assertFalse(torch.equal(pools.tensors[SWA_KV][4], source_swa))
+        torch.testing.assert_close(
+            pools.tensors[HCA_STATE][4], pools.tensors[HCA_STATE][3], rtol=0, atol=0
+        )
+        torch.testing.assert_close(
+            pools.tensors[SWA_KV][4], pools.tensors[SWA_KV][3], rtol=0, atol=0
+        )
+
+        continuation = torch.randn(
+            (88, FLASH_GEOMETRY.dim),
+            generator=generator,
+            dtype=torch.bfloat16,
+            device=self.device,
+        ).mul_(0.05)
+        compressed_before = pools.tensors[HCA_KV].clone()
+        from_c = self._run_prefill_chunk(pools, 1320, continuation)
+        compressed_c = pools.tensors[HCA_KV].clone()
+        pools.tensors[HCA_KV].copy_(compressed_before)
+        pools.block_tables[HCA_STATE][0, 1] = 4
+        pools.block_tables[SWA_KV][0, 5] = 4
+        from_d = self._run_prefill_chunk(pools, 1320, continuation)
+        torch.cuda.synchronize(self.device)
+        self.assertLess(calc_diff(from_d.float(), from_c.float()), 1.0e-3)
+        torch.testing.assert_close(pools.tensors[HCA_KV], compressed_c, rtol=0, atol=0)
+        torch.testing.assert_close(
+            pools.tensors[HCA_STATE][1], source_state, rtol=0, atol=0
+        )
+        torch.testing.assert_close(pools.tensors[SWA_KV][2], source_swa, rtol=0, atol=0)
 
     def test_cuda_graph_capture_and_replay(self) -> None:
         def fill_history(pools: _Pools, device: torch.device, seed: int) -> None:

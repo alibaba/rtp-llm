@@ -81,6 +81,7 @@ cc_library(
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
         "//rtp_llm/cpp/metrics:metrics",
         "//rtp_llm/cpp/models",
+        "//rtp_llm/cpp/normal_engine",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/models_py/bindings:op_defs",
         "//rtp_llm/models_py/bindings/common",
@@ -111,6 +112,18 @@ pywrapped_model_test_deps = [
 py_test(
     name = "pywrapped_model_cache_store_integration_test",
     srcs = ["pywrapped_model_cache_store_integration_test.py"],
+    data = [":th_pywrapped_model_cache_store_integration_test"],
+    deps = pywrapped_model_test_deps,
+    env = {"TEST_USING_DEVICE": "CUDA"},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
+py_test(
+    name = "exact_prefix_pd_gather_integration_test",
+    srcs = ["pywrapped_model_cache_store_integration_test.py"],
+    main = "pywrapped_model_cache_store_integration_test.py",
+    args = ["PyWrappedModelCacheStoreIntegrationTest.test_exact_prefix_pd_gather_transfers_seven_keys"],
     data = [":th_pywrapped_model_cache_store_integration_test"],
     deps = pywrapped_model_test_deps,
     env = {"TEST_USING_DEVICE": "CUDA"},

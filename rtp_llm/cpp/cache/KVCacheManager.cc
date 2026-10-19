@@ -311,6 +311,8 @@ bool KVCacheManager::init() {
     }
 
     KVCacheConfig tree_kv_cache_config = kv_cache_config_;
+    tree_kv_cache_config.enable_prefill_partial_tail_reuse =
+        kv_cache_config_.enable_prefill_partial_tail_reuse && pd_sep_config_.role_type == RoleType::PREFILL;
     tree_kv_cache_config.enable_prefix_cache_observability =
         autil::EnvUtil::getEnv("RTP_LLM_PREFIX_CACHE_OBSERVABILITY", false)
         && pd_sep_config_.role_type == RoleType::PREFILL && parallelism_config_.tp_rank == 0;
@@ -507,9 +509,40 @@ std::function<void()> KVCacheManager::allocationChangeCallback() const {
 void KVCacheManager::insertIntoCache(const InsertInfo& insert_info, size_t& resident_prefix_length) {
     RTP_LLM_PROFILE_FUNCTION();
     const int64_t begin_time_us = metrics_reporter_ == nullptr ? 0 : currentTimeUs();
-    dropLastPartialBlock(insert_info.batch_kv_cache_resource);
+    if (insert_info.prefix_cache_registration == nullptr || insert_info.target_tier != Tier::DEVICE) {
+        dropLastPartialBlock(insert_info.batch_kv_cache_resource);
+    }
     coordinator_manager_->insertIntoCache(insert_info, resident_prefix_length);
     reportCacheOperation(metrics_reporter_, RtpLLMCacheOperationMetricsCollector::OpType::INSERT, begin_time_us);
+}
+
+void KVCacheManager::prepareRegisteredSave(PrefixCacheRegistration&    registration,
+                                           BatchKVCacheResource& runtime,
+                                           size_t                      resume_endpoint) {
+    RTP_LLM_CHECK(coordinator_manager_ != nullptr);
+    coordinator_manager_->prepareRegisteredSave(registration, runtime, resume_endpoint);
+}
+
+MallocStatus KVCacheManager::prepareRequiredContinuation(PrefixCacheRegistration& registration,
+                                                         BatchKVCacheResource& runtime,
+                                                         size_t resume_endpoint) {
+    RTP_LLM_CHECK(coordinator_manager_ != nullptr);
+    return coordinator_manager_->prepareRequiredContinuation(registration, runtime, resume_endpoint);
+}
+
+void KVCacheManager::releaseRegisteredSave(PrefixCacheRegistration& registration) {
+    RTP_LLM_CHECK(coordinator_manager_ != nullptr);
+    coordinator_manager_->releaseRegisteredSave(registration);
+}
+
+void KVCacheManager::releaseRegisteredSourcePins(PrefixCacheRegistration& registration) {
+    RTP_LLM_CHECK(coordinator_manager_ != nullptr);
+    coordinator_manager_->releaseRegisteredSourcePins(registration);
+}
+
+bool KVCacheManager::relinquishOptionalRegisteredSave(PrefixCacheRegistration& registration) {
+    RTP_LLM_CHECK(coordinator_manager_ != nullptr);
+    return coordinator_manager_->relinquishOptionalRegisteredSave(registration);
 }
 
 int KVCacheManager::singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
@@ -572,8 +605,9 @@ void KVCacheManager::blockBatchCopyByGroup(const std::vector<TaggedBlockIdPair>&
 }
 
 void KVCacheManager::blockBatchCopyForForward(const torch::Tensor&            copy_mapping,
-                                              const std::vector<std::string>& group_tags) {
-    coordinator_manager_->blockBatchCopyForForward(copy_mapping, group_tags);
+                                              const std::vector<std::string>& group_tags,
+                                              bool                            require_complete_payload) {
+    coordinator_manager_->blockBatchCopyForForward(copy_mapping, group_tags, require_complete_payload);
 }
 
 bool KVCacheManager::updateKVBlock(const BatchKVCacheResourcePtr&  batch_kv_cache_resource,

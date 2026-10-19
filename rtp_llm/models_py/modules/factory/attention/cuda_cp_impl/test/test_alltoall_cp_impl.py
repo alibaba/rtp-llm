@@ -77,7 +77,8 @@ class TestPCPAll2AllAttnOp(unittest.TestCase):
         indices: List[int] = []
         for new_len, pl in zip(new_lengths, prefix_lengths):
             positions = zigzag_positions_for_rank(new_len, cp_size, rank)
-            indices.extend(p + pl for p in positions)
+            # Runtime CP shuffle indices are relative to the suffix.
+            indices.extend(positions)
         return torch.tensor(indices, dtype=torch.int32, device=device)
 
     # ---- mock builders ----

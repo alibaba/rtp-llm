@@ -11,6 +11,7 @@ import torch
 from einops import rearrange
 
 from rtp_llm.models_py.triton_kernels.fla.chunk_delta_h import (
+    _validate_selected_state_output_alias,
     chunk_gated_delta_rule_fwd_h,
 )
 from rtp_llm.models_py.triton_kernels.fla.chunk_fwd import (
@@ -174,6 +175,8 @@ def chunk_gated_delta_rule_fwd(
     initial_state: Optional[torch.Tensor],
     output_final_state: bool,
     cu_seqlens: Optional[torch.LongTensor] = None,
+    state_positions: Optional[torch.Tensor] = None,
+    selected_states: Optional[torch.Tensor] = None,
 ):
     # AMD: scale g to log2 domain (multiply cumsum by 1/ln2) so AMD-side
     # downstream kernels can use the single-instruction exp2.
@@ -225,6 +228,8 @@ def chunk_gated_delta_rule_fwd(
         initial_state=initial_state,
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens,
+        state_positions=state_positions,
+        selected_states=selected_states,
     )
     o = chunk_fwd_o(
         q=q,
@@ -404,6 +409,8 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         output_final_state: bool,
         cu_seqlens: Optional[torch.LongTensor] = None,
         use_qk_l2norm_in_kernel: bool = False,
+        state_positions: Optional[torch.Tensor] = None,
+        selected_states: Optional[torch.Tensor] = None,
     ):
         q_orig = q
         k_orig = k
@@ -427,6 +434,8 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             initial_state=initial_state,
             output_final_state=output_final_state,
             cu_seqlens=cu_seqlens,
+            state_positions=state_positions,
+            selected_states=selected_states,
         )
         return o.to(q.dtype), h, final_state
 
@@ -444,6 +453,8 @@ def chunk_gated_delta_rule(
     cu_seqlens: Optional[torch.LongTensor] = None,
     head_first: bool = False,
     use_qk_l2norm_in_kernel: bool = False,
+    state_positions: Optional[torch.Tensor] = None,
+    selected_states: Optional[torch.Tensor] = None,
 ):
     r"""
     Args:
@@ -472,6 +483,16 @@ def chunk_gated_delta_rule(
         head_first (Optional[bool]):
             Whether the inputs are in the head-first format, which is not supported for variable-length inputs.
             Default: `False`.
+
+        state_positions (Optional[torch.Tensor]):
+            CUDA int32/int64 tensor `[N, S]` of sequence-local prefix lengths.
+            Zero selects the initial state. Duplicate and unsorted positions
+            are supported; invalid positions (including -1 padding) write zeros.
+        selected_states (Optional[torch.Tensor]):
+            Caller-owned contiguous CUDA FP32 output `[N, S, H, V, K]`, supplied
+            together with `state_positions`. This opt-in CUDA GDN feature adds
+            one kernel launch and preserves the existing return tuple. It must
+            not share storage with any input tensor.
 
     Returns:
         o (torch.Tensor):
@@ -508,6 +529,22 @@ def chunk_gated_delta_rule(
             cu_seqlens=cu_seqlens
         )
     """
+    # input_guard makes tensors contiguous. Reject an output view here so that
+    # the guard cannot silently replace the caller's destination with a copy.
+    if selected_states is not None and not selected_states.is_contiguous():
+        raise ValueError("selected_states must be contiguous")
+    if selected_states is not None:
+        _validate_selected_state_output_alias(
+            selected_states,
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+            initial_state=initial_state,
+            cu_seqlens=cu_seqlens,
+            state_positions=state_positions,
+        )
     assert q.dtype == k.dtype == v.dtype
     assert (
         q.dtype != torch.float32
@@ -579,6 +616,8 @@ def chunk_gated_delta_rule(
         output_final_state,
         cu_seqlens,
         use_qk_l2norm_in_kernel,
+        state_positions,
+        selected_states,
     )
     if head_first:
         o = rearrange(o, "b t h ... -> b h t ...")
