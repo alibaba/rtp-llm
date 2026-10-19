@@ -165,7 +165,10 @@ py_library(
 
 
 # Export sitecustomize.py for test targets to fix nvidia-cutlass-dsl import
-exports_files(["modules/factory/sitecustomize.py"])
+exports_files([
+    "modules/factory/fused_moe/utils/mega_moe/buffer.py",
+    "modules/factory/sitecustomize.py",
+])
 
 py_library(
     name = "modules_cuda",
