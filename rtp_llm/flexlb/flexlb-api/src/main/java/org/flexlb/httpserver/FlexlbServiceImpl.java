@@ -4,6 +4,7 @@ import io.grpc.Context;
 import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
 import io.opentelemetry.api.trace.Span;
+
 import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.RequestState;
 import org.flexlb.cache.match.CacheAwareService;
@@ -134,6 +135,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     public void schedule(
             FlexlbScheduleProtocol.FlexlbScheduleRequestPB request,
             StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> responseObserver) {
+        long requestId = request.getRequestId();
         Long interceptedEntryNanos = GrpcServerTimingInterceptor.getNanos();
         serverLatencyRecorder.recordArrival(
                 interceptedEntryNanos != null ? interceptedEntryNanos : System.nanoTime());
@@ -171,7 +173,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                                     callerContext.run(
                                             () ->
                                                     handleForwardCompletion(
-                                                            request,
+                                                            requestId,
                                                             requestContext,
                                                             responseObserver,
                                                             completionClaimed,
@@ -187,7 +189,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                             : ScheduleOrigin.LOCAL_STANDALONE;
             errorOrigin = routeOrigin;
             routeAndComplete(
-                    request, requestContext, responseObserver, completionClaimed, routeOrigin);
+                    requestId, requestContext, responseObserver, completionClaimed, routeOrigin);
 
         } catch (Exception e) {
             String requestId = RequestId.parse(request);
@@ -222,7 +224,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     }
 
     private void handleForwardCompletion(
-            FlexlbScheduleProtocol.FlexlbScheduleRequestPB request,
+            long requestId,
             BalanceContext context,
             StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> responseObserver,
             AtomicBoolean completionClaimed,
@@ -237,7 +239,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
 
         if (shouldScheduleLocally(context, forwardResult)) {
             routeAndComplete(
-                    request,
+                    requestId,
                     context,
                     responseObserver,
                     completionClaimed,
@@ -247,7 +249,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
 
         if (forwardResult.response() != null) {
             completeOnce(
-                    context.getRequestId(),
+                    requestId,
                     context,
                     forwardResult.response(),
                     responseObserver,
@@ -275,7 +277,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             }
         }
         completeOnce(
-                context.getRequestId(),
+                requestId,
                 context,
                 failureResponse,
                 responseObserver,
@@ -352,14 +354,16 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                             (cancelResult, cancelError) -> {
                                 if (cancelError != null) {
                                     Logger.warn(
-                                            "FlexlbService.schedule cancellation reconciliation failed, request_id={} master={}",
+                                            "FlexlbService.schedule cancellation reconciliation"
+                                                + " failed, request_id={} master={}",
                                             requestId,
                                             masterHost,
                                             cancelError);
                                 } else if (cancelResult == null
                                         || cancelResult.response() == null) {
                                     Logger.warn(
-                                            "FlexlbService.schedule cancellation reconciliation incomplete, request_id={} master={} failure={}",
+                                            "FlexlbService.schedule cancellation reconciliation"
+                                                + " incomplete, request_id={} master={} failure={}",
                                             requestId,
                                             masterHost,
                                             cancelResult == null
@@ -369,7 +373,8 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                             });
         } catch (Exception error) {
             Logger.warn(
-                    "FlexlbService.schedule cancellation reconciliation failed to start, request_id={} master={}",
+                    "FlexlbService.schedule cancellation reconciliation failed to start,"
+                        + " request_id={} master={}",
                     requestId,
                     masterHost,
                     error);
@@ -377,7 +382,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     }
 
     private void routeAndComplete(
-            FlexlbScheduleProtocol.FlexlbScheduleRequestPB request,
+            long requestId,
             BalanceContext context,
             StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> responseObserver,
             AtomicBoolean completionClaimed,
@@ -390,11 +395,9 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             routeFuture = routeLocally(context);
         } catch (Exception error) {
             Logger.warn(
-                    "FlexlbService.schedule local route error, request_id={}",
-                    context.getRequestId(),
-                    error);
+                    "FlexlbService.schedule local route error, request_id={}", requestId, error);
             completeOnce(
-                    context.getRequestId(),
+                    requestId,
                     context,
                     buildErrorResponse(error),
                     responseObserver,
@@ -409,7 +412,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                         return;
                     }
                     if (isAdmissionRequest(context)) {
-                        cancelUndeliveredRoute(context.getRequestId(), context.getRequestPhase());
+                        cancelUndeliveredRoute(requestId, requestPhase);
                     }
                 };
         inboundContext.addListener(cancellationListener, Runnable::run);
@@ -420,11 +423,11 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                     if (routeError != null) {
                         Logger.warn(
                                 "FlexlbService.schedule async error, request_id={}",
-                                context.getRequestId(),
+                                requestId,
                                 routeError);
                     }
                     completeOnce(
-                            context.getRequestId(),
+                            requestId,
                             context,
                             routeError == null ? response : buildErrorResponse(routeError),
                             responseObserver,
@@ -996,11 +999,11 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             }
             // Keep request summaries at DEBUG while metrics remain always-on.
             String logFormat =
-                    "[request-scheduler] request_id={} phase={} priority={} seq_len={} "
-                            + "encoder_cache_hit_len={} max_new_tokens={} "
-                            + "request_expires_at_ms={} plan_type={} plan_cost={} "
-                            + "victim_count={} selected_encoder={} selected_prefill={} selected_decode={} "
-                            + "failure_reason={} commit_result={}";
+                    "[request-scheduler] request_id={} phase={} priority={} seq_len={}"
+                        + " encoder_cache_hit_len={} max_new_tokens={} request_expires_at_ms={}"
+                        + " plan_type={} plan_cost={} victim_count={} selected_encoder={}"
+                        + " selected_prefill={} selected_decode={} failure_reason={}"
+                        + " commit_result={}";
             Object[] logArgs = {
                 ctx.getRequestId(),
                 ctx.getRequestPhase(),
@@ -1155,7 +1158,8 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         request.setBlockSize(pb.getCacheKeyBlockSize());
         if (pb.getBlockCacheKeysCount() > 0 && pb.getCacheKeyBlockSize() <= 0) {
             throw new InvalidScheduleRequestException(
-                    "cache_key_block_size must be greater than 0 when block_cache_keys are provided");
+                    "cache_key_block_size must be greater than 0 when block_cache_keys are"
+                        + " provided");
         }
 
         // QUEUE owns one absolute scheduling deadline, measured from FlexLB
@@ -1361,7 +1365,10 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                             default -> FlexlbTrace.scheduleFailureType(response.getCode());
                         };
                 FlexlbTrace.markBusinessError(traceContext, response.getCode(), errorType);
-                FlexlbTrace.recordScheduleFailure(traceContext, response.getCode(), errorType,
+                FlexlbTrace.recordScheduleFailure(
+                        traceContext,
+                        response.getCode(),
+                        errorType,
                         ctx == null ? null : ctx.getSchedulingDiagnostics());
             }
             if (ctx != null && ownsLocalRoute(origin)) {
