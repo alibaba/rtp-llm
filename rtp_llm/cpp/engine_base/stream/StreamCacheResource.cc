@@ -847,6 +847,7 @@ void StreamCacheResource::publishKVCacheForPDSep() {
     }
 
     const auto& cache_config      = cache_manager->cacheConfig();
+    const uint32_t global_layer_begin = cache_config.global_layer_begin;
     const bool  use_mla           = cache_config.use_mla;
     const bool  use_hybrid        = cache_config.groupNums() > 1;
     const bool  use_kv_key_prefix = use_mla || cache_config.use_opaque_kv_cache_store || use_hybrid;
@@ -899,7 +900,7 @@ void StreamCacheResource::publishKVCacheForPDSep() {
                         cache_keys.size());
                     break;
                 }
-                auto cache_key = makeCacheKey(model_id, std::to_string(cache_keys[block_pos]), layer_id, tag);
+                auto cache_key = makeCacheKey(model_id, std::to_string(cache_keys[block_pos]), global_layer_begin + layer_id, tag);
                 auto parts = cache_manager->convertIndexToBufferByTag(block_id, static_cast<int>(layer_id), tag);
 
                 auto add_block = [&](const std::string& key, const BlockInfo& block) {

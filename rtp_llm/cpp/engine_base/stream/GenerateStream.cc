@@ -1264,6 +1264,14 @@ void GenerateStream::updateFromPP(const StreamUpdateInfo& update_info) {
         return;
     }
     *is_context_stream_ = false;
+    if (queryPdSep() && update_info.update_remote_generate) {
+        // PP worker ranks finish their stage of the prefill here, but the
+        // rank-0 dispatcher path (NormalGenerateStream::update) that normally
+        // holds/publishes the PD-sep KV blocks never runs on them. Hold and
+        // publish this rank's stage-local blocks explicitly so the decode
+        // side can load every stage's layers.
+        holdKVCacheForPDSep();
+    }
     if ((hasErrorWithoutLock() || isFinished()) && !update_info.force_update_info) {
         return;
     }

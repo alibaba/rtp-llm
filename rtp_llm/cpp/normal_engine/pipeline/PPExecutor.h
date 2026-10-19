@@ -119,6 +119,9 @@ private:
     void clipNewTokenLengths(const PPSamplingPlan& sampling_plan, PPExecutionResult& result) const;
 
     absl::Status processExecutionResult(InflightBatch& batch);
+    // Publish PD-sep KV blocks for context-completed requests using plan data
+    // (valid on every PP rank, whose local schedule carries no stream objects).
+    void publishPdPlanRequests(const GptModelInputs& model_input);
 
     void verifyDraftTokens(const PPExecutionPlan& plan, const torch::Tensor& target_logits, PPExecutionResult& result);
 

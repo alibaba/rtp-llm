@@ -13,10 +13,14 @@
 #include "autil/EnvUtil.h"
 
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/RequestBlockBuffer.h"
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/schedulers/PPScheduler.h"
+#include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
@@ -239,6 +243,149 @@ void PPExecutor::waitAll(PPTickets& tickets, const char* what, bool throw_on_tim
         waitTicket(*ticket, what, throw_on_timeout);
     }
     tickets.clear();
+}
+
+void PPExecutor::publishPdPlanRequests(const GptModelInputs& model_input) {
+    const auto& mi = model_input;
+    if (!mi.pd_separation || !mi.request_id.defined() || !mi.cache_keys.defined() || !mi.prefix_lengths.defined()
+        || !mi.input_lengths.defined() || !mi.kv_cache_block_id.defined()) {
+        return;
+    }
+    auto cache_store = cache_manager_ ? cache_manager_->getCacheStore() : nullptr;
+    if (!cache_store) {
+        return;
+    }
+    const auto& cache_config       = cache_manager_->cacheConfig();
+    const auto  model_id           = cache_manager_->modelId();
+    const auto  global_layer_begin = cache_config.global_layer_begin;
+    const bool  use_mla            = cache_config.use_mla;
+    const bool  use_hybrid         = cache_config.groupNums() > 1;
+    const bool  use_kv_key_prefix  = use_mla || cache_config.use_opaque_kv_cache_store || use_hybrid;
+    const auto& layer_group_ids    = cache_config.topology().layerGroupIdsSnapshot();
+    const int64_t seq_per_block    = mi.seq_size_per_block > 0 ? mi.seq_size_per_block : 1;
+    const int64_t local_layers     = cache_config.layer_num;
+    const int64_t context_batch    = mi.request_id.numel();
+
+    for (int64_t i = 0; i < context_batch; ++i) {
+        if (mi.request_pd_separation.defined() && mi.request_pd_separation.numel() > i
+            && !mi.request_pd_separation[i].item<bool>()) {
+            continue;
+        }
+        const auto keys_row = mi.cache_keys[i];
+        int64_t       nblocks = 0;
+        while (nblocks < keys_row.numel() && keys_row[nblocks].item<int64_t>() != 0) {
+            ++nblocks;
+        }
+        if (nblocks == 0) {
+            continue;
+        }
+        const int64_t prefix  = mi.prefix_lengths[i].item<int>();
+        const int64_t cur_len = mi.input_lengths[i].item<int>();
+        // Only the chunk that starts the final block completes this stream's context.
+        if (prefix + cur_len <= (nblocks - 1) * seq_per_block) {
+            continue;
+        }
+        const int64_t request_id = mi.request_id[i].item<int64_t>();
+
+        auto event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
+        event->record(cuda_graph::graphGetCurrentStream());
+        auto request_block_buffer =
+            std::make_shared<RequestBlockBuffer>(std::to_string(request_id), std::move(event));
+
+        size_t block_count = 0;
+        bool   plan_failed = false;
+        for (int64_t layer_id = 0; layer_id < local_layers && !plan_failed; ++layer_id) {
+            std::vector<int> layer_gids;
+            if (use_hybrid) {
+                if (static_cast<size_t>(layer_id) >= layer_group_ids.size() || layer_group_ids[layer_id].empty()) {
+                    RTP_LLM_LOG_WARNING(
+                        "publish pd plan request %ld layer %ld missing group ids", (long)request_id, (long)layer_id);
+                    plan_failed = true;
+                    break;
+                }
+                layer_gids = layer_group_ids[layer_id];
+            } else {
+                layer_gids.push_back(0);
+            }
+            for (int gid : layer_gids) {
+                if (static_cast<int64_t>(gid) >= mi.kv_cache_block_id.size(0)) {
+                    continue;
+                }
+                const auto& tag = cache_config.tagForGroup(static_cast<size_t>(gid));
+                for (int64_t block_pos = 0; block_pos < nblocks; ++block_pos) {
+                    const int block_id = mi.kv_cache_block_id[gid][i][block_pos].item<int>();
+                    if (isNullBlockIdx(block_id)) {
+                        continue;
+                    }
+                    const auto cache_key = makeCacheKey(model_id,
+                                                        std::to_string(keys_row[block_pos].item<int64_t>()),
+                                                        global_layer_begin + layer_id,
+                                                        tag);
+                    auto       parts =
+                        cache_manager_->convertIndexToBufferByTag(block_id, static_cast<int>(layer_id), tag);
+                    const auto add_block = [&](const std::string& key, const BlockInfo& block) {
+                        if (block.addr == nullptr || block.size_bytes == 0) {
+                            return;
+                        }
+                        std::shared_ptr<void> addr(block.addr, [](void*) {});
+                        request_block_buffer->addBlock(
+                            key, addr, static_cast<uint32_t>(block.size_bytes), block.is_cuda, true);
+                        ++block_count;
+                    };
+                    if (use_kv_key_prefix) {
+                        if (parts.size() != 1 && parts.size() != 2) {
+                            RTP_LLM_LOG_WARNING("publish pd plan request %ld unexpected parts size %zu for key %s",
+                                                (long)request_id,
+                                                parts.size(),
+                                                cache_key.c_str());
+                            plan_failed = true;
+                            break;
+                        }
+                        add_block("kv_" + cache_key, parts[0]);
+                        if (parts.size() == 2) {
+                            add_block("kv_scale_" + cache_key, parts[1]);
+                        }
+                    } else {
+                        if (parts.size() != 2 && parts.size() != 4) {
+                            RTP_LLM_LOG_WARNING("publish pd plan request %ld unexpected parts size %zu for key %s",
+                                                (long)request_id,
+                                                parts.size(),
+                                                cache_key.c_str());
+                            plan_failed = true;
+                            break;
+                        }
+                        add_block("k_" + cache_key, parts[0]);
+                        add_block("v_" + cache_key, parts[1]);
+                        if (parts.size() == 4) {
+                            add_block("k_scale_" + cache_key, parts[2]);
+                            add_block("v_scale_" + cache_key, parts[3]);
+                        }
+                    }
+                }
+                if (plan_failed) {
+                    break;
+                }
+            }
+        }
+        if (plan_failed || block_count == 0) {
+            continue;
+        }
+        RTP_LLM_LOG_INFO("publish pd plan kv cache, request %ld, rank %ld, model_id %zu, blocks %zu",
+                         (long)request_id,
+                         (long)parallelism_config_.world_rank,
+                         model_id,
+                         block_count);
+        cache_store->store(request_block_buffer, [request_id, block_count](bool success, CacheStoreErrorCode ec) {
+            if (!success) {
+                RTP_LLM_LOG_WARNING("publish pd plan kv cache store failed, request %ld, error %s",
+                                    (long)request_id,
+                                    CacheStoreErrorCodeToString(ec).c_str());
+                return;
+            }
+            RTP_LLM_LOG_INFO(
+                "publish pd plan kv cache store done, request %ld, blocks %zu", (long)request_id, block_count);
+        });
+    }
 }
 
 absl::Status PPExecutor::processExecutionResult(InflightBatch& batch) {
@@ -1263,6 +1410,15 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
             local_model_input, isFirstStage() ? nullptr : &input_tensors, isLastStage() ? nullptr : &output_tensors);
         if (saved_input_lengths.defined()) {
             local_model_input.input_lengths = std::move(saved_input_lengths);
+        }
+
+        if (!local_model_input.is_fake_stream && !plan.is_decode && role_type_ == RoleType::PREFILL) {
+            // PP worker ranks finish their stage of each context stream here, but the
+            // stage-root result dispatch that normally holds/publishes PD-sep KV blocks
+            // only runs on the first-stage root. Publish this rank's stage-local blocks
+            // from the plan data (identical on every rank), so the decode side can load
+            // every stage's layers.
+            publishPdPlanRequests(plan.model_input);
         }
 
         if (expert_balancer_) {
