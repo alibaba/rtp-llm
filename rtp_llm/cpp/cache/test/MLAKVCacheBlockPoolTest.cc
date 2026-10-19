@@ -4,9 +4,10 @@
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <utility>
 
-#include "rtp_llm/cpp/cache/BlockPool.h"
-#include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
+#include "rtp_llm/cpp/cache/DeviceBlockPoolConfigHelper.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/MLAKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
@@ -81,8 +82,10 @@ TEST(MLAKVCacheBlockPoolTest, RocmSparseFp8CompactLayoutReadsWritesAcrossTokensA
     EXPECT_EQ(spec->block_size(), (kv_lora_rank + rope_head_dim) * seq_size_per_block);
 
     auto config      = makeSparseMlaBlockPoolConfig(spec, layer_num, block_num);
-    auto pool_config = BlockPoolConfigHelper::createConfig(config);
-    BlockPool block_pool(pool_config, AllocationType::HOST);
+    auto pool_config                   = DeviceBlockPoolConfigHelper::createConfigForGroup(
+        config, config.topology().groups().front());
+    pool_config.use_pinned_cpu_backing = true;
+    DeviceBlockPool block_pool(std::make_shared<const DeviceBlockPoolConfig>(std::move(pool_config)));
     ASSERT_TRUE(block_pool.init());
 
     constexpr uint8_t sentinel    = 0xA5;
