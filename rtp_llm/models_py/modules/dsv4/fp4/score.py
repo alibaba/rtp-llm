@@ -91,6 +91,11 @@ def gather_cache(cache, payload, scales, block_table, cu_lengths):
 def prefill_score(q, weights, packed_k, k_scales, starts, ends, *, clean_logits=False):
     from rtp_llm.models_py.modules.dsv4._indexer_score_triton import v4_indexer_score
 
+    # The native prefill flow passes packed (payload, scales) tuples;
+    # the Triton reference scores on dense rows, so dequantize first.
+    if isinstance(q, tuple):
+        q = dequantize_rows(q[0], q[1])
+
     keys = dequantize_rows(packed_k, k_scales)
     scores = v4_indexer_score(
         q.unsqueeze(0).contiguous(),
