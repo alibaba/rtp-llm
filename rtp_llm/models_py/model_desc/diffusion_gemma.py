@@ -248,10 +248,15 @@ class DiffusionGemmaAttnOp:
         causal: bool,
         prefix_lens: torch.Tensor,
         cu_seqlens: torch.Tensor,
+        prefix_cu: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """CPU reference attention: [tokens, heads, dim] layout, per-request
         masked softmax. Supports bidirectional canvas + windowed prefix and
-        GQA (kv heads repeated to the query head count)."""
+        GQA (kv heads repeated to the query head count).
+
+        prefix_k/prefix_v are the batch-concatenated prefix rows; request b's
+        rows live at [prefix_cu[b], prefix_cu[b]+plen) — NOT at the query
+        concat offset q_lo (equal only for a single request)."""
         if k.shape[1] != q.shape[1]:
             groups = q.shape[1] // k.shape[1]
             k = k.repeat_interleave(groups, dim=1)
@@ -270,8 +275,9 @@ class DiffusionGemmaAttnOp:
             keys = []
             values = []
             if plen > 0 and prefix_k is not None:
-                keys.append(prefix_k[q_lo : q_lo + plen])
-                values.append(prefix_v[q_lo : q_lo + plen])
+                p_lo = 0 if prefix_cu is None else int(prefix_cu[b].item())
+                keys.append(prefix_k[p_lo : p_lo + plen])
+                values.append(prefix_v[p_lo : p_lo + plen])
             keys.append(k[q_lo:q_hi])
             values.append(v[q_lo:q_hi])
             key = torch.cat(keys, dim=0)
@@ -361,6 +367,16 @@ class DiffusionGemmaAttnOp:
             cu_seqlens = attn_inputs.cu_seqlens
         batch_size = int(prefix_lens.numel())
         qo_indptr = cu_seqlens[: batch_size + 1]
+        # prefix rows are batch-concatenated by _gather_prefix; per-request
+        # offsets = exclusive cumsum of prefix_lens (0 for b=0)
+        if batch_size > 0:
+            prefix_cu = torch.zeros(
+                batch_size, dtype=prefix_lens.dtype, device=prefix_lens.device
+            )
+            if batch_size > 1:
+                prefix_cu[1:] = torch.cumsum(prefix_lens[: batch_size - 1], dim=0)
+        else:
+            prefix_cu = None
 
         has_prefix = (
             kv_cache is not None
@@ -375,10 +391,12 @@ class DiffusionGemmaAttnOp:
                     kv_cache, attn_inputs, prefix_lens, batch_size
                 )
             out = self._torch_attention(
-                q, k, v, prefix_k, prefix_v, causal, prefix_lens, qo_indptr
+                q, k, v, prefix_k, prefix_v, causal, prefix_lens, qo_indptr, prefix_cu
             )
             if write_kv and kv_cache is not None:
-                self._write_cache_torch(k, v, kv_cache, attn_inputs, prefix_lens, batch_size)
+                self._write_cache_torch(
+                    k, v, kv_cache, attn_inputs, prefix_lens, batch_size, qo_indptr
+                )
             return out
 
         qd = q
@@ -630,8 +648,12 @@ class DiffusionGemmaAttnOp:
         attn_inputs: Any,
         prefix_lens: torch.Tensor,
         batch_size: int,
+        cu_seqlens: Optional[torch.Tensor] = None,
     ) -> None:
-        """Write k/v rows [T, H, D] into the paged cache via the block table."""
+        """Write k/v rows [T, H, D] into the paged cache via the block table.
+
+        Spans come from cu_seqlens — requests in a batched propose can have
+        unequal spans, so k.shape[0] // batch_size is not a valid row count."""
         cache = self._reshape_paged(kv_cache.kv_cache_base)
         block_table = attn_inputs.kv_cache_kernel_block_id
         if block_table is None or block_table.numel() == 0:
@@ -639,17 +661,17 @@ class DiffusionGemmaAttnOp:
         if block_table is None or block_table.numel() == 0:
             return
         block_table = block_table.reshape(batch_size, -1)
-        rows_per_req = k.shape[0] // max(1, batch_size)
         pos = 0
         for b in range(batch_size):
             plen = int(prefix_lens[b].item())
-            for r in range(rows_per_req):
+            span = k.shape[0] if cu_seqlens is None else int(cu_seqlens[b + 1].item()) - int(cu_seqlens[b].item())
+            for r in range(span):
                 gpos = plen + r
                 page = int(block_table[b, gpos // self.page_size].item())
                 slot = gpos % self.page_size
                 cache[page, 0, :, slot, :] = k[pos + r].to(cache.dtype)
                 cache[page, 1, :, slot, :] = v[pos + r].to(cache.dtype)
-            pos += rows_per_req
+            pos += span
 
 
 class DiffusionGemmaAttention(nn.Module):
