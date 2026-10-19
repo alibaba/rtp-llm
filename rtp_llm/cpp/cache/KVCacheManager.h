@@ -92,6 +92,7 @@ public:
     size_t                  freeBlocksNum() const;
     size_t                  availableBlocksNum() const;
     size_t                  notInUseBlocksNum() const;
+    void                    maintainLayeredPrefillFreeBlocks();
     BatchKVCacheResourcePtr popBlocksFromCache(size_t min_blocks_to_free);
     void                    blockCacheFree(const BatchKVCacheResourcePtr& batch_kv_cache_resource);
     size_t                  availableTokensNum() const;
