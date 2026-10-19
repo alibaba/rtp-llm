@@ -1,8 +1,8 @@
 """Kimi K3 MegaMoE strategy with the BF16 shared expert fused in DeepGEMM.
 
 This module deliberately owns a separate setup, buffer cache and forward path
-from :mod:`kimi_k3.moe`.  Both strategies call the public
-``deep_gemm.fp8_fp4_mega_moe`` symbol, but only this class supplies the four
+from :mod:`kimi_k3.moe_k3`.  Both strategies call the public
+``deep_gemm.fp8_fp4_mega_moe_k3`` symbol, but only this class supplies the four
 ``shared_*`` tensors and consumes its independent shared output.
 """
 
@@ -16,14 +16,14 @@ from typing import TYPE_CHECKING, Dict, Optional
 import torch
 
 from rtp_llm.models.kimi_k3.kimi_k3_weight import KimiK3WeightNames as K3W
-from rtp_llm.models_py.modules.kimi_k3.input_packer_se import (
-    get_kimi_k3_mega_moe_se_input_packer,
+from rtp_llm.models_py.modules.kimi_k3.input_packer_k3_se import (
+    get_kimi_k3_mega_moe_k3_se_input_packer,
 )
-from rtp_llm.models_py.modules.kimi_k3.mega_se_buf import (
-    get_or_create_kimi_k3_mega_moe_se_buf,
-    get_or_create_kimi_k3_mega_moe_se_storages,
+from rtp_llm.models_py.modules.kimi_k3.mega_k3_se_buf import (
+    get_or_create_kimi_k3_mega_moe_k3_se_buf,
+    get_or_create_kimi_k3_mega_moe_k3_se_storages,
 )
-from rtp_llm.models_py.modules.kimi_k3.moe import KimiK3LatentMoE
+from rtp_llm.models_py.modules.kimi_k3.moe_k3 import KimiK3LatentMoE
 from rtp_llm.ops import ParallelismConfig
 
 if TYPE_CHECKING:
@@ -42,13 +42,13 @@ class KimiK3LatentMoESE(KimiK3LatentMoE):
         weights: Dict[str, torch.Tensor],
         layer_idx: int = -1,
     ) -> None:
-        # KimiK3LatentMoE.__init__ invokes _setup_deep_gemm_mega
+        # KimiK3LatentMoE.__init__ invokes _setup_deep_gemm_mega_k3
         # polymorphically after all K3 routing/shared layout fields are ready.
         super().__init__(config, parallelism_config, weights, layer_idx)
 
     @staticmethod
-    def _validate_deep_gemm_se_api(deep_gemm) -> None:
-        parameters = list(inspect.signature(deep_gemm.fp8_fp4_mega_moe).parameters)
+    def _validate_deep_gemm_k3_se_api(deep_gemm) -> None:
+        parameters = list(inspect.signature(deep_gemm.fp8_fp4_mega_moe_k3).parameters)
         required = {
             "activation_beta",
             "activation_linear_beta",
@@ -57,7 +57,7 @@ class KimiK3LatentMoESE(KimiK3LatentMoE):
         missing = required.difference(parameters)
         if missing:
             raise RuntimeError(
-                "Kimi K3 mega_moe_se resolved an old DeepGEMM without SiTU "
+                "Kimi K3 mega_moe_k3_se resolved an old DeepGEMM without SiTU "
                 "support; missing parameters: " + ", ".join(sorted(missing))
             )
         shared_parameters = [
@@ -70,7 +70,7 @@ class KimiK3LatentMoESE(KimiK3LatentMoE):
             shared_start = parameters.index("shared_x")
         except ValueError as error:
             raise RuntimeError(
-                "Kimi K3 mega_moe_se requires DeepGEMM's shared_x/shared_y API"
+                "Kimi K3 mega_moe_k3_se requires DeepGEMM's shared_x/shared_y API"
             ) from error
         if parameters[shared_start : shared_start + 4] != shared_parameters:
             raise RuntimeError(
@@ -78,18 +78,18 @@ class KimiK3LatentMoESE(KimiK3LatentMoE):
             )
         if "num_shared_experts" in parameters:
             raise RuntimeError(
-                "Kimi K3 mega_moe_se requires the count-free DeepGEMM execution API"
+                "Kimi K3 mega_moe_k3_se requires the count-free DeepGEMM execution API"
             )
         buffer_parameters = inspect.signature(
-            deep_gemm.get_symm_buffer_for_mega_moe
+            deep_gemm.get_symm_buffer_for_mega_moe_k3
         ).parameters
         if "shared_intermediate_hidden" not in buffer_parameters:
             raise RuntimeError(
-                "Kimi K3 mega_moe_se requires DeepGEMM buffer support for "
+                "Kimi K3 mega_moe_k3_se requires DeepGEMM buffer support for "
                 "shared_intermediate_hidden"
             )
 
-    def _setup_deep_gemm_mega(self) -> None:
+    def _setup_deep_gemm_mega_k3(self) -> None:
         """Prepare independent routed FP4 and shared BF16 fused-SE state."""
 
         max_tokens_per_rank = int(
@@ -99,7 +99,7 @@ class KimiK3LatentMoESE(KimiK3LatentMoE):
             raise ValueError("MEGA_MOE_MAX_TOKENS_PER_RANK must be positive")
         if self.shared_expert_weight_shard:
             raise ValueError(
-                "moe_strategy=mega_moe_se requires full shared-expert weights "
+                "moe_strategy=mega_moe_k3_se requires full shared-expert weights "
                 "on every rank; set KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD=0"
             )
 
@@ -116,7 +116,7 @@ class KimiK3LatentMoESE(KimiK3LatentMoE):
             raise RuntimeError(
                 f"K3 DeepGEMM MegaMoE SE requires topk <= 32, got {self.top_k}"
             )
-        self._validate_deep_gemm_se_api(deep_gemm)
+        self._validate_deep_gemm_k3_se_api(deep_gemm)
 
         st_w1_w = self.weights.pop(K3W.MOE_W1_PACKED)
         st_w1_s = self.weights.pop(K3W.MOE_W1_SCALE)
@@ -193,7 +193,7 @@ class KimiK3LatentMoESE(KimiK3LatentMoE):
         (self._mega_l1_w, self._mega_l1_sf), (
             self._mega_l2_w,
             self._mega_l2_sf,
-        ) = deep_gemm.transform_weights_for_mega_moe(
+        ) = deep_gemm.transform_weights_for_mega_moe_k3(
             (w13, s13),
             (w2, s2),
             activation="situ",
@@ -228,7 +228,7 @@ class KimiK3LatentMoESE(KimiK3LatentMoE):
         shared_l2 = shared_down_storage.transpose(0, 1).contiguous()
         del shared_down_storage
         self._mega_shared_l1_w, self._mega_shared_l2_w = (
-            deep_gemm.transform_weights_for_mega_moe(
+            deep_gemm.transform_weights_for_mega_moe_k3(
                 shared_l1.contiguous(),
                 shared_l2,
                 activation="situ",
@@ -237,7 +237,7 @@ class KimiK3LatentMoESE(KimiK3LatentMoE):
         del shared_l1, shared_l2
 
         self._mega_group = dist.group.WORLD
-        self._mega_buf = get_or_create_kimi_k3_mega_moe_se_buf(
+        self._mega_buf = get_or_create_kimi_k3_mega_moe_k3_se_buf(
             group=self._mega_group,
             num_experts=self.expert_num,
             num_max_tokens_per_rank=max_tokens_per_rank,
@@ -252,13 +252,13 @@ class KimiK3LatentMoESE(KimiK3LatentMoE):
             self._mega_y,
             self._mega_shared_x,
             self._mega_shared_y,
-        ) = get_or_create_kimi_k3_mega_moe_se_storages(
+        ) = get_or_create_kimi_k3_mega_moe_k3_se_storages(
             capacity=capacity,
             routed_hidden=self.latent_size,
             shared_hidden=shared_hidden,
             device=device,
         )
-        self._mega_input_packer = get_kimi_k3_mega_moe_se_input_packer()
+        self._mega_input_packer = get_kimi_k3_mega_moe_k3_se_input_packer()
         self._mega_shared_hidden = shared_hidden
         self._mega_shared_intermediate = shared_intermediate
 
@@ -284,7 +284,7 @@ class KimiK3LatentMoESE(KimiK3LatentMoE):
             )
             _DEEPGEMM_MEGA_SE_LOGGED_DEVICES.add(device_index)
 
-    def _deep_gemm_mega_expert_sum_with_shared(
+    def _deep_gemm_mega_k3_se_expert_sum(
         self,
         routed_input: torch.Tensor,
         shared_input: torch.Tensor,
@@ -321,7 +321,7 @@ class KimiK3LatentMoESE(KimiK3LatentMoE):
             shared_out=self._mega_shared_x,
         )
         routed_output = self._mega_y[:token_count]
-        deep_gemm.fp8_fp4_mega_moe(
+        deep_gemm.fp8_fp4_mega_moe_k3(
             routed_output,
             (self._mega_l1_w, self._mega_l1_sf),
             (self._mega_l2_w, self._mega_l2_sf),
@@ -341,7 +341,7 @@ class KimiK3LatentMoESE(KimiK3LatentMoE):
         )
         return routed_output, self._mega_shared_y[:token_count]
 
-    def _mega_expert_sum_with_shared(
+    def _mega_k3_se_expert_sum_with_shared(
         self,
         routed_input: torch.Tensor,
         shared_input: torch.Tensor,
@@ -351,7 +351,7 @@ class KimiK3LatentMoESE(KimiK3LatentMoE):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Execute tokens already owned by this TP-SP or DP/KTP rank."""
 
-        return self._deep_gemm_mega_expert_sum_with_shared(
+        return self._deep_gemm_mega_k3_se_expert_sum(
             routed_input,
             shared_input,
             expert_ids,
@@ -368,7 +368,7 @@ class KimiK3LatentMoESE(KimiK3LatentMoE):
         prepared_context=None,
         residual: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        expert_ids, routing_weights, pack_options = self._prepare_mega_moe_routing(
+        expert_ids, routing_weights, pack_options = self._prepare_mega_moe_k3_routing(
             hidden_states,
             valid_token_count=valid_token_count,
             valid_token_mask=valid_token_mask,
@@ -378,7 +378,7 @@ class KimiK3LatentMoESE(KimiK3LatentMoE):
             hidden_states,
             self.weights[K3W.MOE_ROUTED_DOWN],
         )
-        routed_output, shared_output = self._mega_expert_sum_with_shared(
+        routed_output, shared_output = self._mega_k3_se_expert_sum_with_shared(
             routed_input,
             hidden_states,
             expert_ids,

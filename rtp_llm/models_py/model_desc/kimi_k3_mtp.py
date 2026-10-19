@@ -25,8 +25,8 @@ from rtp_llm.models_py.modules.kimi_k3.gemm_reduce_scatter import (
     gemm_reduce_scatter,
 )
 from rtp_llm.models_py.modules.kimi_k3.mla import KimiK3MLA
-from rtp_llm.models_py.modules.kimi_k3.moe import KimiK3LatentMoE
-from rtp_llm.models_py.modules.kimi_k3.moe_se import KimiK3LatentMoESE
+from rtp_llm.models_py.modules.kimi_k3.moe_k3 import KimiK3LatentMoE
+from rtp_llm.models_py.modules.kimi_k3.moe_k3_se import KimiK3LatentMoESE
 from rtp_llm.models_py.modules.kimi_k3.utils import (
     collective_gemm_workspace_global_tokens,
     prefill_chunk_tokens,
@@ -91,7 +91,7 @@ class KimiK3MtpLayer(nn.Module):
             config, parallelism, weights, 0, latent_norm_eps=config.layernorm_eps
         )
         moe_cls = (
-            KimiK3LatentMoESE if moe_strategy == "mega_moe_se" else KimiK3LatentMoE
+            KimiK3LatentMoESE if moe_strategy == "mega_moe_k3_se" else KimiK3LatentMoE
         )
         self.moe = moe_cls(config, parallelism, weights, 0)
 

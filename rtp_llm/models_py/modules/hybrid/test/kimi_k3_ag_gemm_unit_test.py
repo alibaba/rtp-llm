@@ -744,7 +744,7 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
             ),
             patch.object(
                 module,
-                "_mega_expert_sum",
+                "_mega_k3_expert_sum",
                 side_effect=fake_expert_sum,
             ),
         ):

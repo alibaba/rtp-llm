@@ -91,8 +91,8 @@ from rtp_llm.models_py.modules.kimi_k3.ktp_step import (
     pad_ktp_decode_inputs,
 )
 from rtp_llm.models_py.modules.kimi_k3.mla import KimiK3MLA
-from rtp_llm.models_py.modules.kimi_k3.moe import KimiK3LatentMoE
-from rtp_llm.models_py.modules.kimi_k3.moe_se import KimiK3LatentMoESE
+from rtp_llm.models_py.modules.kimi_k3.moe_k3 import KimiK3LatentMoE
+from rtp_llm.models_py.modules.kimi_k3.moe_k3_se import KimiK3LatentMoESE
 from rtp_llm.models_py.modules.kimi_k3.parallel_mode import (
     KimiK3ParallelMode,
     resolve_kimi_k3_parallel_mode,
@@ -113,11 +113,11 @@ def resolve_kimi_k3_moe_strategy(moe_config: Optional[Any]) -> str:
 
     strategy = str(getattr(moe_config, "moe_strategy", "auto") or "auto")
     if strategy == "auto":
-        return "mega_moe"
-    if strategy not in ("mega_moe", "mega_moe_se"):
+        return "mega_moe_k3"
+    if strategy not in ("mega_moe_k3", "mega_moe_k3_se"):
         raise ValueError(
-            "Kimi K3 supports only moe_strategy=mega_moe or mega_moe_se "
-            f"(auto aliases mega_moe); got {strategy!r}"
+            "Kimi K3 supports only moe_strategy=mega_moe_k3 or mega_moe_k3_se "
+            f"(auto aliases mega_moe_k3); got {strategy!r}"
         )
     return strategy
 
@@ -169,7 +169,7 @@ class KimiK3DecoderLayer(nn.Module):
         weights: Dict[str, torch.Tensor],
         layer_idx: int,
         hw_kernel_config: Optional[Any] = None,
-        moe_strategy: str = "mega_moe",
+        moe_strategy: str = "mega_moe_k3",
     ) -> None:
         super().__init__()
         self.weights = weights
@@ -215,11 +215,11 @@ class KimiK3DecoderLayer(nn.Module):
         )
         self.mlp: nn.Module
         if layer_idx in set(config.moe_layer_index):
-            if moe_strategy == "mega_moe":
+            if moe_strategy == "mega_moe_k3":
                 self.mlp = KimiK3LatentMoE(
                     config, parallelism_config, weights, layer_idx
                 )
-            elif moe_strategy == "mega_moe_se":
+            elif moe_strategy == "mega_moe_k3_se":
                 self.mlp = KimiK3LatentMoESE(
                     config, parallelism_config, weights, layer_idx
                 )

@@ -71,8 +71,8 @@ py_test(
 )
 
 py_test(
-    name = "kimi_k3_mega_moe_se_unit_test",
-    srcs = ["kimi_k3_mega_moe_se_unit_test.py"],
+    name = "kimi_k3_mega_moe_k3_se_unit_test",
+    srcs = ["kimi_k3_mega_moe_k3_se_unit_test.py"],
     deps = [
         "//rtp_llm/models_py:models",
         "//rtp_llm:testlib",
@@ -81,8 +81,8 @@ py_test(
 )
 
 py_test(
-    name = "kimi_k3_mega_barrier_unit_test",
-    srcs = ["kimi_k3_mega_barrier_unit_test.py"],
+    name = "kimi_k3_mega_moe_k3_barrier_unit_test",
+    srcs = ["kimi_k3_mega_moe_k3_barrier_unit_test.py"],
     deps = [
         "//rtp_llm/models_py:models",
         "//rtp_llm:testlib",

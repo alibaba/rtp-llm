@@ -6,14 +6,15 @@ import copy
 import logging
 import os
 from dataclasses import dataclass
-from typing import Any, Optional
 from types import SimpleNamespace
+from typing import Any, Optional
 
 import torch
+
 from rtp_llm.models_py.distributed.sequence_parallel import (
     SequenceParallelLayout,
-    sequence_parallel_layout_from_attention_inputs,
     local_physical_token_view,
+    sequence_parallel_layout_from_attention_inputs,
 )
 from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
 from rtp_llm.models_py.modules.base.common.kvcache_store import (
@@ -30,11 +31,11 @@ from rtp_llm.models_py.modules.kimi_k3.kda.prefill import (
     prepare_kimi_kda_prefill_metadata,
 )
 from rtp_llm.models_py.modules.kimi_k3.mla import KimiK3MLAContext
-from rtp_llm.models_py.modules.kimi_k3.parallel_mode import KimiK3ParallelMode
-from rtp_llm.models_py.modules.kimi_k3.moe import (
+from rtp_llm.models_py.modules.kimi_k3.moe_k3 import (
     KimiK3LatentMoE,
-    validate_mega_moe_topology,
+    validate_mega_moe_k3_topology,
 )
+from rtp_llm.models_py.modules.kimi_k3.parallel_mode import KimiK3ParallelMode
 from rtp_llm.models_py.modules.kimi_k3.utils import (
     mask_multimodal_token_ids,
     prefill_chunk_tokens,
@@ -162,15 +163,22 @@ def prepare_round(
     tp_size = model.execution_spec.tp_size
     tp_rank = model.execution_spec.tp_rank
     layout = sequence_parallel_layout_from_attention_inputs(
-        attention_inputs, physical_tokens=int(input_ids.numel()),
-        world_size=tp_size, rank=tp_rank,
+        attention_inputs,
+        physical_tokens=int(input_ids.numel()),
+        world_size=tp_size,
+        rank=tp_rank,
     )
     prefill_sp = layout.mode == "prefill" and tp_size > 1
     mode: KDAExecutionMode = "prefill" if layout.mode == "prefill" else "decode"
-    if not attention_inputs.is_prefill and not getattr(model, "_decode_sp_startup_logged", False):
+    if not attention_inputs.is_prefill and not getattr(
+        model, "_decode_sp_startup_logged", False
+    ):
         logging.info(
             "[K3_PARALLEL_MODE] rank=%d mode=%s tokens=%d tp=%d ktp=%d ep=%d",
-            tp_rank, model.parallel_mode.value, input_ids.numel(), tp_size,
+            tp_rank,
+            model.parallel_mode.value,
+            input_ids.numel(),
+            tp_size,
             int(getattr(model.parallelism_config, "ktp_size", 1)),
             int(model.parallelism_config.ep_size),
         )
@@ -180,7 +188,7 @@ def prepare_round(
         # The token layout above belongs to this request's TP group. Expert
         # dispatch spans EP, which may contain several independent DP groups.
         parallelism = model.parallelism_config
-        validate_mega_moe_topology(
+        validate_mega_moe_k3_topology(
             attention_tp_size=tp_size,
             dp_size=int(parallelism.dp_size),
             ktp_size=int(getattr(parallelism, "ktp_size", 1)),
@@ -219,16 +227,20 @@ def prepare_round(
             kda_layer_indices=model.execution_spec.kda_layers,
         )
         sequence_count = int(lengths_host.numel())
-        real_count = len(round_plan.slices) if round_plan is not None else sequence_count
+        real_count = (
+            len(round_plan.slices) if round_plan is not None else sequence_count
+        )
         padding_requests = sequence_count - real_count
         if padding_requests not in (0, 1):
             raise RuntimeError("K3 chunk supports at most one TP dummy request")
         padding_index = (
             kda_current_state_registry.original_batch_size - 1
-            if padding_requests and kda_current_state_registry is not None else None
+            if padding_requests and kda_current_state_registry is not None
+            else None
         )
         active_indices, continuation_mask = kda_round_state_mapping(
-            round_plan, padding_original_batch_idx=padding_index,
+            round_plan,
+            padding_original_batch_idx=padding_index,
         )
         kda_prefill_metadata = prepare_kimi_kda_prefill_metadata(
             cu_host,
@@ -265,7 +277,8 @@ def prepare_round(
     moe_tokens = layout.tokens.local_tokens
     valid_tokens = (
         layout.tokens.local_valid_tokens
-        if layout.tokens.local_valid_tokens < moe_tokens else None
+        if layout.tokens.local_valid_tokens < moe_tokens
+        else None
     )
     moe_contexts = []
     moe_context_by_topology = {}

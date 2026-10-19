@@ -4,7 +4,7 @@ import torch
 
 from rtp_llm.models.kimi_k3.kimi_k3_weight import KimiK3WeightNames as K3W
 from rtp_llm.models_py.modules.dsv4.moe.input_pack_options import mask_pack_routes
-from rtp_llm.models_py.modules.kimi_k3.moe import KimiK3LatentMoE
+from rtp_llm.models_py.modules.kimi_k3.moe_k3 import KimiK3LatentMoE
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
@@ -29,7 +29,7 @@ class MoeResidualGpuTest(unittest.TestCase):
             captured.update(ids=routed_ids, weights=routed_weights)
             return x
 
-        module._mega_expert_sum = routed_expert
+        module._mega_k3_expert_sum = routed_expert
         module._shared_expert_forward = torch.ones_like
         hidden = torch.tensor(
             [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]], dtype=torch.bfloat16, device="cuda"

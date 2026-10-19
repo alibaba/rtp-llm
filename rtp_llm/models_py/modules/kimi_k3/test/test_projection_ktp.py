@@ -20,7 +20,7 @@ from rtp_llm.models_py.modules.kimi_k3.ktp_step import (
     normalize_capture_buckets,
     pad_ktp_decode_inputs,
 )
-from rtp_llm.models_py.modules.kimi_k3.moe import validate_mega_moe_topology
+from rtp_llm.models_py.modules.kimi_k3.moe_k3 import validate_mega_moe_k3_topology
 from rtp_llm.models_py.modules.kimi_k3.projection_ktp import (
     resolve_projection_local_heads,
     validate_projection_ktp_sp_type,
@@ -55,7 +55,7 @@ class KtpStepPlanTest(unittest.TestCase):
     def test_mega_moe_accepts_projection_ktp_and_ktp1_draft_layouts(self):
         for ktp_size in (8, 1):
             with self.subTest(ktp_size=ktp_size):
-                validate_mega_moe_topology(
+                validate_mega_moe_k3_topology(
                     attention_tp_size=1,
                     dp_size=8,
                     ktp_size=ktp_size,
@@ -67,7 +67,7 @@ class KtpStepPlanTest(unittest.TestCase):
     def test_mega_moe_accepts_mixed_tp_dp(self):
         for tp, dp in ((4, 2), (4, 4), (8, 1), (16, 1)):
             with self.subTest(tp=tp, dp=dp):
-                validate_mega_moe_topology(
+                validate_mega_moe_k3_topology(
                     attention_tp_size=tp,
                     dp_size=dp,
                     ktp_size=1,
@@ -77,7 +77,7 @@ class KtpStepPlanTest(unittest.TestCase):
                 )
         for tp, dp, ep, world in ((8, 2, 8, 8), (4, 2, 4, 8), (0, 2, 8, 8)):
             with self.assertRaises(RuntimeError):
-                validate_mega_moe_topology(
+                validate_mega_moe_k3_topology(
                     attention_tp_size=tp,
                     dp_size=dp,
                     ktp_size=1,
@@ -88,7 +88,7 @@ class KtpStepPlanTest(unittest.TestCase):
 
     def test_mega_moe_rejects_ambiguous_tp1_ep_layout(self):
         with self.assertRaisesRegex(RuntimeError, "TP\\*DP=EP=world"):
-            validate_mega_moe_topology(
+            validate_mega_moe_k3_topology(
                 attention_tp_size=1,
                 dp_size=1,
                 ktp_size=1,

@@ -7,13 +7,13 @@ import torch
 from torch import nn
 
 from rtp_llm.models_py.model_desc.kimi_k3 import resolve_kimi_k3_moe_strategy
-from rtp_llm.models_py.modules.kimi_k3.input_packer_se import (
+from rtp_llm.models_py.modules.kimi_k3.input_packer_k3_se import (
     FusedKimiK3MegaMoeSeInputPacker,
     TorchKimiK3MegaMoeSeInputPacker,
-    get_kimi_k3_mega_moe_se_input_packer,
+    get_kimi_k3_mega_moe_k3_se_input_packer,
 )
-from rtp_llm.models_py.modules.kimi_k3.moe import KimiK3LatentMoE
-from rtp_llm.models_py.modules.kimi_k3.moe_se import KimiK3LatentMoESE
+from rtp_llm.models_py.modules.kimi_k3.moe_k3 import KimiK3LatentMoE
+from rtp_llm.models_py.modules.kimi_k3.moe_k3_se import KimiK3LatentMoESE
 
 
 class KimiK3MegaMoeSeUnitTest(unittest.TestCase):
@@ -64,9 +64,9 @@ class KimiK3MegaMoeSeUnitTest(unittest.TestCase):
 
     def test_strategy_names_are_explicit_and_auto_preserves_regular_mega(self) -> None:
         for configured, expected in (
-            ("auto", "mega_moe"),
-            ("mega_moe", "mega_moe"),
-            ("mega_moe_se", "mega_moe_se"),
+            ("auto", "mega_moe_k3"),
+            ("mega_moe_k3", "mega_moe_k3"),
+            ("mega_moe_k3_se", "mega_moe_k3_se"),
         ):
             self.assertEqual(
                 resolve_kimi_k3_moe_strategy(SimpleNamespace(moe_strategy=configured)),
@@ -83,9 +83,9 @@ class KimiK3MegaMoeSeUnitTest(unittest.TestCase):
         routing_weights = torch.ones((3, 2), dtype=torch.float32)
         with patch.dict(
             sys.modules,
-            {"deep_gemm": SimpleNamespace(fp8_fp4_mega_moe=peer_kernel)},
+            {"deep_gemm": SimpleNamespace(fp8_fp4_mega_moe_k3=peer_kernel)},
         ):
-            output = module._deep_gemm_mega_expert_sum(
+            output = module._deep_gemm_mega_k3_expert_sum(
                 routed_input,
                 expert_ids,
                 routing_weights,
@@ -104,9 +104,9 @@ class KimiK3MegaMoeSeUnitTest(unittest.TestCase):
         routing_weights = torch.ones((3, 2), dtype=torch.float32)
         with patch.dict(
             sys.modules,
-            {"deep_gemm": SimpleNamespace(fp8_fp4_mega_moe=peer_kernel)},
+            {"deep_gemm": SimpleNamespace(fp8_fp4_mega_moe_k3=peer_kernel)},
         ):
-            routed_y, shared_y = module._deep_gemm_mega_expert_sum_with_shared(
+            routed_y, shared_y = module._deep_gemm_mega_k3_se_expert_sum(
                 routed_input,
                 shared_input,
                 expert_ids,
@@ -127,20 +127,20 @@ class KimiK3MegaMoeSeUnitTest(unittest.TestCase):
     def test_se_packer_has_independent_environment_switch(self) -> None:
         with patch.dict(
             "os.environ",
-            {"KIMI_K3_MEGA_MOE_SE_INPUT_PACKER": "torch"},
+            {"KIMI_K3_MEGA_MOE_K3_SE_INPUT_PACKER": "torch"},
             clear=False,
         ):
             self.assertIsInstance(
-                get_kimi_k3_mega_moe_se_input_packer(),
+                get_kimi_k3_mega_moe_k3_se_input_packer(),
                 TorchKimiK3MegaMoeSeInputPacker,
             )
         with patch.dict(
             "os.environ",
-            {"KIMI_K3_MEGA_MOE_SE_INPUT_PACKER": "fused"},
+            {"KIMI_K3_MEGA_MOE_K3_SE_INPUT_PACKER": "fused"},
             clear=False,
         ):
             self.assertIsInstance(
-                get_kimi_k3_mega_moe_se_input_packer(),
+                get_kimi_k3_mega_moe_k3_se_input_packer(),
                 FusedKimiK3MegaMoeSeInputPacker,
             )
 

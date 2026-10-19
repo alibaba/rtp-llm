@@ -843,7 +843,7 @@ py_test(
         "KIMI_K3_KDA_BACKEND": "kernel",
         "KIMI_K3_TARGET_VERIFY_KDA_BACKEND": "kernel",
         "KIMI_K3_EAGLE3_AUX_LAYER_IDS": "0,44,88",
-        "MOE_STRATEGY": "mega_moe_se",
+        "MOE_STRATEGY": "mega_moe_k3_se",
         "KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD": "0",
         "DSV4_MEGA_MOE_INPUT_PACKER": "fused",
         "DSV4_MEGA_MOE_INPUT_PACKER_IMPL": "optimized",

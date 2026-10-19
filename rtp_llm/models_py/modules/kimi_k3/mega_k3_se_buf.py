@@ -12,7 +12,7 @@ _MEGA_SE_SHARED_INPUT_CACHE: dict[tuple, torch.Tensor] = {}
 _MEGA_SE_SHARED_OUTPUT_CACHE: dict[tuple, torch.Tensor] = {}
 
 
-def get_or_create_kimi_k3_mega_moe_se_buf(
+def get_or_create_kimi_k3_mega_moe_k3_se_buf(
     *,
     group,
     num_experts: int,
@@ -27,7 +27,7 @@ def get_or_create_kimi_k3_mega_moe_se_buf(
 
     if shared_intermediate_hidden <= 0:
         raise ValueError(
-            "Kimi K3 mega_moe_se requires shared_intermediate_hidden > 0, got "
+            "Kimi K3 mega_moe_k3_se requires shared_intermediate_hidden > 0, got "
             f"{shared_intermediate_hidden}"
         )
     key = (
@@ -46,7 +46,7 @@ def get_or_create_kimi_k3_mega_moe_se_buf(
 
     import deep_gemm
 
-    cached = deep_gemm.get_symm_buffer_for_mega_moe(
+    cached = deep_gemm.get_symm_buffer_for_mega_moe_k3(
         group=group,
         num_experts=num_experts,
         num_max_tokens_per_rank=num_max_tokens_per_rank,
@@ -105,7 +105,7 @@ def _get_or_create_storage(
     return cached
 
 
-def get_or_create_kimi_k3_mega_moe_se_storages(
+def get_or_create_kimi_k3_mega_moe_k3_se_storages(
     *,
     capacity: int,
     routed_hidden: int,
@@ -139,6 +139,6 @@ def get_or_create_kimi_k3_mega_moe_se_storages(
 
 
 __all__ = [
-    "get_or_create_kimi_k3_mega_moe_se_buf",
-    "get_or_create_kimi_k3_mega_moe_se_storages",
+    "get_or_create_kimi_k3_mega_moe_k3_se_buf",
+    "get_or_create_kimi_k3_mega_moe_k3_se_storages",
 ]

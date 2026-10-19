@@ -119,12 +119,12 @@ class FusedKimiK3MegaMoeSeInputPacker(KimiK3MegaMoeSeInputPacker):
         )
 
 
-def get_kimi_k3_mega_moe_se_input_packer() -> KimiK3MegaMoeSeInputPacker:
+def get_kimi_k3_mega_moe_k3_se_input_packer() -> KimiK3MegaMoeSeInputPacker:
     """Return the independently configured K3 fused-SE input packer."""
 
     mode = (
         os.environ.get(
-            "KIMI_K3_MEGA_MOE_SE_INPUT_PACKER",
+            "KIMI_K3_MEGA_MOE_K3_SE_INPUT_PACKER",
             os.environ.get("DSV4_MEGA_MOE_INPUT_PACKER", "fused"),
         )
         .strip()
@@ -135,7 +135,7 @@ def get_kimi_k3_mega_moe_se_input_packer() -> KimiK3MegaMoeSeInputPacker:
     if mode in ("auto", "fused"):
         return FusedKimiK3MegaMoeSeInputPacker()
     raise ValueError(
-        f"invalid KIMI_K3_MEGA_MOE_SE_INPUT_PACKER={mode!r}; "
+        f"invalid KIMI_K3_MEGA_MOE_K3_SE_INPUT_PACKER={mode!r}; "
         "expected auto|torch|fused"
     )
 
@@ -144,5 +144,5 @@ __all__ = [
     "FusedKimiK3MegaMoeSeInputPacker",
     "KimiK3MegaMoeSeInputPacker",
     "TorchKimiK3MegaMoeSeInputPacker",
-    "get_kimi_k3_mega_moe_se_input_packer",
+    "get_kimi_k3_mega_moe_k3_se_input_packer",
 ]

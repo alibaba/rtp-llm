@@ -15,7 +15,7 @@ from rtp_llm.models_py.modules.dsv4.moe.input_packer import (
     FusedMegaMoeInputPacker,
     TorchMegaMoeInputPacker,
 )
-from rtp_llm.models_py.modules.kimi_k3.input_packer_se import (
+from rtp_llm.models_py.modules.kimi_k3.input_packer_k3_se import (
     FusedKimiK3MegaMoeSeInputPacker,
 )
 

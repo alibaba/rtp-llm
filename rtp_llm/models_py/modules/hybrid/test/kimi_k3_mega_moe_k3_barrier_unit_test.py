@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 import torch
 from torch import nn
 
-from rtp_llm.models_py.modules.kimi_k3.moe import KimiK3LatentMoE
+from rtp_llm.models_py.modules.kimi_k3.moe_k3 import KimiK3LatentMoE
 
 
 class KimiK3MegaBarrierUnitTest(unittest.TestCase):
@@ -80,10 +80,10 @@ class KimiK3MegaBarrierUnitTest(unittest.TestCase):
             patch.object(module, "_maybe_pre_kernel_barrier", barrier),
             patch.dict(
                 sys.modules,
-                {"deep_gemm": SimpleNamespace(fp8_fp4_mega_moe=peer_kernel)},
+                {"deep_gemm": SimpleNamespace(fp8_fp4_mega_moe_k3=peer_kernel)},
             ),
         ):
-            output = module._deep_gemm_mega_expert_sum(
+            output = module._deep_gemm_mega_k3_expert_sum(
                 routed_input,
                 expert_ids,
                 routing_weights,

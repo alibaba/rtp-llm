@@ -853,7 +853,7 @@ else:
         "DECODE_CP_MLA_BACKEND": decode_mla_backend,
         "DECODE_CP_MLA_FUSION_MODE": "AUTO",
         "DECODE_CP_MLA_A2A_BACKEND": os.environ.get("DECODE_CP_MLA_A2A_BACKEND", "AUTO"),
-        "MOE_STRATEGY": "mega_moe_se",
+        "MOE_STRATEGY": "mega_moe_k3_se",
         "RTP_LLM_DEVICE_INPUT": "1",
         "RTP_LLM_DROP_BROAD_SYNC": "1",
         "RTP_LLM_STREAM_ASYNC": "1",
@@ -1030,7 +1030,7 @@ apply_validated_decode_profile() {
         export TORCH_CUDA_PROFILER_DIR="${role_dir}/mla-profile"
         mkdir -p "${TORCH_CUDA_PROFILER_DIR}"
     fi
-    export MOE_STRATEGY=mega_moe_se
+    export MOE_STRATEGY=mega_moe_k3_se
     export RTP_LLM_DEVICE_INPUT=1
     export RTP_LLM_DROP_BROAD_SYNC=1
     export RTP_LLM_STREAM_ASYNC=1

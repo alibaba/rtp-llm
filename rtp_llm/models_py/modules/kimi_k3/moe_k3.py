@@ -26,7 +26,7 @@ _DEEPGEMM_MEGA_LOGGED_DEVICES: set[int] = set()
 _K3_MEGA_PRE_KERNEL_BARRIER_ENV = "DSV4_MEGA_MOE_PRE_KERNEL_BARRIER"
 
 
-def validate_mega_moe_topology(
+def validate_mega_moe_k3_topology(
     *,
     attention_tp_size: int,
     dp_size: int,
@@ -92,7 +92,7 @@ class KimiK3MoEContext:
 class KimiK3LatentMoE(nn.Module):
     """K3 latent MoE backed exclusively by DeepGEMM MegaMoE.
 
-    ``fp8_fp4_mega_moe`` owns expert dispatch, both MXFP4 expert GEMMs,
+    ``fp8_fp4_mega_moe_k3`` owns expert dispatch, both MXFP4 expert GEMMs,
     activation, and combine through a symmetric-memory collective.  K3 does
     not initialize or call RTP's separate DeepEP dispatch implementation.
     """
@@ -155,7 +155,7 @@ class KimiK3LatentMoE(nn.Module):
             os.environ.get(_K3_MEGA_PRE_KERNEL_BARRIER_ENV, "0") == "1"
         )
         self._group_topk = GroupTopK()
-        self._setup_deep_gemm_mega()
+        self._setup_deep_gemm_mega_k3()
 
     def prepare_context(self, token_count, valid_token_count):
         if valid_token_count is not None and not 0 <= valid_token_count <= token_count:
@@ -166,8 +166,8 @@ class KimiK3LatentMoE(nn.Module):
         """Check what both mega strategies require of the device and the world.
 
         K3 hands every rank exactly one distinct token-owner shard and one EP
-        partition. ``label`` names the calling strategy so ``mega_moe`` and
-        ``mega_moe_se`` stay distinguishable in the error text.
+        partition. ``label`` names the calling strategy so ``mega_moe_k3`` and
+        ``mega_moe_k3_se`` stay distinguishable in the error text.
         """
 
         import torch.distributed as dist
@@ -177,7 +177,7 @@ class KimiK3LatentMoE(nn.Module):
         if not dist.is_initialized():
             raise RuntimeError(f"{label} requires torch.distributed initialization")
         world_size = int(dist.get_world_size())
-        validate_mega_moe_topology(
+        validate_mega_moe_k3_topology(
             attention_tp_size=self.attn_tp_size,
             dp_size=int(self.parallelism_config.dp_size),
             ktp_size=self.ktp_size,
@@ -281,7 +281,7 @@ class KimiK3LatentMoE(nn.Module):
             f"{tensor.dtype}"
         )
 
-    def _setup_deep_gemm_mega(self) -> None:
+    def _setup_deep_gemm_mega_k3(self) -> None:
         """Transform K3's EP-local MXFP4 weights for DeepGEMM MegaMoE."""
 
         max_tokens_per_rank = int(
@@ -296,18 +296,18 @@ class KimiK3LatentMoE(nn.Module):
         from rtp_llm.models_py.modules.dsv4.moe.input_packer import (
             get_mega_moe_input_packer,
         )
-        from rtp_llm.models_py.modules.dsv4.moe.mega_buf import (
-            _get_or_create_mega_buf,
-            _get_or_create_mega_output,
-        )
         from rtp_llm.models_py.modules.dsv4.quant_layouts import (
             FP4_BLOCK,
             prepare_fp4_weight_scale_for_deepgemm,
         )
+        from rtp_llm.models_py.modules.kimi_k3.mega_k3_buf import (
+            get_or_create_kimi_k3_mega_moe_k3_buf,
+            get_or_create_kimi_k3_mega_moe_k3_output,
+        )
 
         self._validate_mega_preconditions("K3 DeepGEMM MegaMoE")
 
-        mega_signature = inspect.signature(deep_gemm.fp8_fp4_mega_moe)
+        mega_signature = inspect.signature(deep_gemm.fp8_fp4_mega_moe_k3)
         required_parameters = {
             "activation_beta",
             "activation_linear_beta",
@@ -403,7 +403,7 @@ class KimiK3LatentMoE(nn.Module):
         (self._mega_l1_w, self._mega_l1_sf), (
             self._mega_l2_w,
             self._mega_l2_sf,
-        ) = deep_gemm.transform_weights_for_mega_moe(
+        ) = deep_gemm.transform_weights_for_mega_moe_k3(
             (w13, s13),
             (w2, s2),
             activation="situ",
@@ -416,24 +416,22 @@ class KimiK3LatentMoE(nn.Module):
         torch.cuda.empty_cache()
 
         self._mega_group = dist.group.WORLD
-        self._mega_buf = _get_or_create_mega_buf(
+        self._mega_buf = get_or_create_kimi_k3_mega_moe_k3_buf(
             group=self._mega_group,
             num_experts=self.expert_num,
             num_max_tokens_per_rank=max_tokens_per_rank,
             num_topk=self.top_k,
             hidden=self.latent_size,
             intermediate_hidden=intermediate,
-            use_fp8_dispatch=True,
             activation="situ",
         )
         output_capacity = max(
             max_tokens_per_rank,
             int(getattr(self._mega_buf, "num_max_tokens_per_rank", 0)),
         )
-        self._mega_y = _get_or_create_mega_output(
+        self._mega_y = get_or_create_kimi_k3_mega_moe_k3_output(
             output_capacity,
             self.latent_size,
-            torch.bfloat16,
             device,
         )
         self._mega_input_packer = get_mega_moe_input_packer()
@@ -459,7 +457,7 @@ class KimiK3LatentMoE(nn.Module):
             )
             _DEEPGEMM_MEGA_LOGGED_DEVICES.add(device_index)
 
-    def _deep_gemm_mega_expert_sum(
+    def _deep_gemm_mega_k3_expert_sum(
         self,
         routed_input: torch.Tensor,
         expert_ids: torch.Tensor,
@@ -494,7 +492,7 @@ class KimiK3LatentMoE(nn.Module):
         # against a peer that has not finished publishing its next input.
         self._maybe_pre_kernel_barrier(routed_input.device, token_count)
         output = self._mega_y[:token_count]
-        deep_gemm.fp8_fp4_mega_moe(
+        deep_gemm.fp8_fp4_mega_moe_k3(
             output,
             (self._mega_l1_w, self._mega_l1_sf),
             (self._mega_l2_w, self._mega_l2_sf),
@@ -619,7 +617,7 @@ class KimiK3LatentMoE(nn.Module):
             )
         return expert_ids, expert_weights * self.routed_scaling_factor
 
-    def _mega_expert_sum(
+    def _mega_k3_expert_sum(
         self,
         routed_input: torch.Tensor,
         expert_ids: torch.Tensor,
@@ -628,14 +626,14 @@ class KimiK3LatentMoE(nn.Module):
     ) -> torch.Tensor:
         """Execute tokens already owned by this TP-SP or DP/KTP rank."""
 
-        return self._deep_gemm_mega_expert_sum(
+        return self._deep_gemm_mega_k3_expert_sum(
             routed_input,
             expert_ids,
             routing_weights,
             **pack_options,
         )
 
-    def _prepare_mega_moe_routing(
+    def _prepare_mega_moe_k3_routing(
         self,
         hidden_states: torch.Tensor,
         *,
@@ -667,14 +665,14 @@ class KimiK3LatentMoE(nn.Module):
         prepared_context=None,
         residual: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        expert_ids, routing_weights, pack_options = self._prepare_mega_moe_routing(
+        expert_ids, routing_weights, pack_options = self._prepare_mega_moe_k3_routing(
             hidden_states,
             valid_token_count=valid_token_count,
             valid_token_mask=valid_token_mask,
             prepared_context=prepared_context,
         )
         routed_input = torch.matmul(hidden_states, self.weights[K3W.MOE_ROUTED_DOWN])
-        routed_output = self._mega_expert_sum(
+        routed_output = self._mega_k3_expert_sum(
             routed_input,
             expert_ids,
             routing_weights,
