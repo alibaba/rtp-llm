@@ -798,7 +798,11 @@ class DiffusionGemmaReuseABTest(unittest.TestCase):
         # each path stays within bf16 noise of exact math (measured by the
         # ATTN EXACT-DIFF probes above); the hidden-level divergence is
         # expected and must stay bounded rather than explode.
-        self.assertLess(diff.max().item(), 1.0 * float(hidden_a.float().abs().max()))
+        # Observed divergence on the fresh-vs-reuse canvas A/B is bounded by
+        # ~0.5x the hidden absmax (bf16 path rounding amplified through the
+        # MoE router top-8 flips; K122). Keep the guard at that magnitude so
+        # a regression beyond documented path rounding fails loudly.
+        self.assertLess(diff.max().item(), 0.5 * float(hidden_a.float().abs().max()))
         self.assertGreater(std_b, 0.5)
 
 
