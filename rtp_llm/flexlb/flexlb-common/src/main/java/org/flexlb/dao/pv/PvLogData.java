@@ -64,6 +64,30 @@ public class PvLogData {
     @JsonInclude(JsonInclude.Include.NON_EMPTY)
     private Map<RoleType, String> selectionReasons;
 
+    @JsonProperty("requestTime")
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public String getRequestTime() {
+        return requestTimeMs == null ? null : PvLogTimeFormatter.format(requestTimeMs);
+    }
+
+    @JsonProperty("enqueuedAt")
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public String getEnqueuedAt() {
+        return PvLogTimeFormatter.format(enqueueTime);
+    }
+
+    @JsonProperty("startedAt")
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public String getStartedAt() {
+        return PvLogTimeFormatter.format(startTime);
+    }
+
+    @JsonProperty("requestExpiresAt")
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public String getRequestExpiresAt() {
+        return PvLogTimeFormatter.format(requestExpiresAtMs);
+    }
+
     public PvLogData(BalanceContext ctx) {
         populateCommonFields(ctx);
     }

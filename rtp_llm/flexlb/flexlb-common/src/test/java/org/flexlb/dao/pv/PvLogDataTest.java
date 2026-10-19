@@ -1,6 +1,9 @@
 package org.flexlb.dao.pv;
 
+import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.SchedulerConfig;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.route.RequestPhase;
@@ -47,6 +50,76 @@ class PvLogDataTest {
 
         assertEquals("shared-id", json.path("requestId").asText());
         assertEquals("ENCODER", json.path("phase").asText());
+    }
+
+    @Test
+    void keepsEpochMillisecondsAndFormatsAbsoluteTimes() throws Exception {
+        long requestTimeMs = 1_792_339_299_097L;
+        Request request = new Request();
+        request.setRequestId("timed-request");
+        request.setRequestTimeMs(requestTimeMs);
+        BalanceContext context = new BalanceContext();
+        context.setRequest(request);
+        context.setStartTime(requestTimeMs + 1_000);
+        context.setEnqueueTime(requestTimeMs + 2_000);
+        context.setSchedulingMetadata(SchedulingMetadata.explicit(50, requestTimeMs + 60_000));
+        context.setDecisionGroup(new DecisionGroup("group", "SINGLE", "NON_BATCH", "worker",
+                1, "ready", requestTimeMs + 4_000, 7));
+        context.recordRoutingDecision(new RoutingDecision(RoleType.PREFILL, "default", "CostBasedPrefill",
+                "ready", requestTimeMs + 3_000, 1, "worker", 1, 1, false, Map.of(), List.of(), null));
+
+        var json = new com.fasterxml.jackson.databind.ObjectMapper().readTree(
+                JsonUtils.toStringOrEmpty(new PvLogData(context, 0, null, "LOCAL_MASTER", 0,
+                        "COMPLETED", null, requestTimeMs + 5_000)));
+
+        assertEquals(requestTimeMs, json.path("requestTimeMs").asLong());
+        assertEquals("2026-10-19 00:01:39.097", json.path("requestTime").asText());
+        assertEquals(requestTimeMs + 1_000, json.path("startTime").asLong());
+        assertEquals("2026-10-19 00:01:40.097", json.path("startedAt").asText());
+        assertEquals(requestTimeMs + 2_000, json.path("enqueueTime").asLong());
+        assertEquals("2026-10-19 00:01:41.097", json.path("enqueuedAt").asText());
+        assertEquals(requestTimeMs + 60_000, json.path("requestExpiresAtMs").asLong());
+        assertEquals("2026-10-19 00:02:39.097", json.path("requestExpiresAt").asText());
+        var group = json.path("decisionGroup");
+        assertEquals(requestTimeMs + 4_000, group.path("committedAtMs").asLong());
+        assertEquals("2026-10-19 00:01:43.097", group.path("committedAt").asText());
+        assertEquals(7, group.path("requestWaitMs").asLong());
+        var decision = json.path("routingDecisions").get(0);
+        assertEquals(requestTimeMs + 3_000, decision.path("decisionTimeMs").asLong());
+        assertEquals("2026-10-19 00:01:42.097", decision.path("decisionTime").asText());
+        assertEquals(4_000, json.path("latencyMs").asLong());
+        assertFalse(json.has("latency"));
+        assertFalse(group.has("requestWait"));
+    }
+
+    @Test
+    void omitsFormattedTimesWhenTimestampsAreAbsentOrUnlimited() throws Exception {
+        FlexlbConfig config = new FlexlbConfig();
+        config.setScheduler(SchedulerConfig.direct());
+        BalanceContext context = new BalanceContext(config);
+        context.setStartTime(0);
+        context.setRequest(new Request());
+        context.setDecisionGroup(new DecisionGroup("group", "SINGLE", "NON_BATCH", "worker",
+                1, "ready", 0, 0));
+        context.recordRoutingDecision(new RoutingDecision(RoleType.PREFILL, "default", "CostBasedPrefill",
+                "ready", 0, 1, "worker", 1, 1, false, Map.of(), List.of(), null));
+
+        var json = new com.fasterxml.jackson.databind.ObjectMapper().readTree(
+                JsonUtils.toStringOrEmpty(new PvLogData(context, 0, null, "LOCAL_MASTER", 0,
+                        "COMPLETED", null, 0)));
+
+        assertEquals(0, json.path("requestTimeMs").asLong());
+        assertEquals(0, json.path("startTime").asLong());
+        assertEquals(0, json.path("enqueueTime").asLong());
+        assertEquals(Long.MAX_VALUE, json.path("requestExpiresAtMs").asLong());
+        assertFalse(json.has("requestTime"));
+        assertFalse(json.has("startedAt"));
+        assertFalse(json.has("enqueuedAt"));
+        assertFalse(json.has("requestExpiresAt"));
+        assertEquals(0, json.path("decisionGroup").path("committedAtMs").asLong());
+        assertFalse(json.path("decisionGroup").has("committedAt"));
+        assertEquals(0, json.path("routingDecisions").get(0).path("decisionTimeMs").asLong());
+        assertFalse(json.path("routingDecisions").get(0).has("decisionTime"));
     }
 
     @Test
@@ -119,11 +192,12 @@ class PvLogDataTest {
                 .path("server_status").get(0).path("request_id").asText());
         assertFalse(json.path("routingDecisions").get(0).has("prefillPolicy"));
         var group = json.path("decisionGroup");
-        assertEquals(5, group.size());
+        assertEquals(6, group.size());
         assertEquals("group", group.path("id").asText());
         assertEquals(2, group.path("committedSize").asInt());
         assertEquals("batch_full", group.path("reason").asText());
         assertEquals(1234, group.path("committedAtMs").asLong());
+        assertEquals("1970-01-01 08:00:01.234", group.path("committedAt").asText());
         assertEquals(10, group.path("requestWaitMs").asLong());
     }
 

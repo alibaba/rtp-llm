@@ -1,5 +1,7 @@
 package org.flexlb.dao.pv;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import org.flexlb.dao.route.RoleType;
 
 import java.util.List;
@@ -22,6 +24,12 @@ public record RoutingDecision(RoleType role,
     public RoutingDecision {
         rejections = Map.copyOf(rejections);
         candidates = List.copyOf(candidates);
+    }
+
+    @JsonProperty("decisionTime")
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public String getDecisionTime() {
+        return PvLogTimeFormatter.format(decisionTimeMs);
     }
 
     /** Configuration and population summary used by the current prefill selector, in explicit units. */
