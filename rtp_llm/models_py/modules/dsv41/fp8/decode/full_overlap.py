@@ -173,6 +173,7 @@ def try_full_decode(
             mega_attention=mega,
             shared_input_quant=shared_input_quant,
             qb_pdl=_qb_pdl_enabled(mega),
+            fuse_head_weights=False,
         )
         if not qkv.swa_written:
             attn._decode_write_swa_fp8(qkv.kv, batch, span, metadata)

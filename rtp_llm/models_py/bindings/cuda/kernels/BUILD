@@ -46,6 +46,28 @@ cuda_deps = [
     "@local_config_cuda//cuda:cudart",
 ]
 
+# Compile against the same patched, hash-locked wheel as the Python runtime.
+cc_library(
+    name = "v41_front_gemm",
+    srcs = ["v41_front_gemm.cu"],
+    hdrs = ["v41_front_gemm.h"],
+    copts = copts() + cuda_default_copts_without_arch() + [
+        "-std=c++20", "-O3",
+        "-nvcc_options=expt-relaxed-constexpr",
+        "-nvcc_options=expt-extended-lambda",
+        "-nvcc_options=ptxas-options=--register-usage-level=10",
+        "-nvcc_options=ftz=false",
+        "--cuda-gpu-arch=sm_103a",
+    ],
+    deps = [
+        "@pip_gpu_cuda13_torch_deep_gemm//:device_headers",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+        "@local_config_cuda//cuda:cuda_driver",
+    ],
+    visibility = ["//visibility:public"],
+)
+
 cc_library(
     name = "cuda_utils_common",
     hdrs = [

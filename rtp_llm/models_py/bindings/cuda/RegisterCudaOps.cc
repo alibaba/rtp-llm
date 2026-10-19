@@ -2,6 +2,9 @@
 #include "rtp_llm/models_py/bindings/cuda/RegisterBaseBindings.hpp"
 #include "rtp_llm/models_py/bindings/cuda/RegisterAttnOpBindings.hpp"
 #include "rtp_llm/models_py/bindings/cuda/Bf16GemmOp.h"
+#ifdef RTP_V41_FRONT_GEMM
+#include "rtp_llm/models_py/bindings/cuda/V41FrontGemmOp.h"
+#endif
 
 #if defined(ENABLE_FP4)
 #include "rtp_llm/models_py/bindings/cuda/kernels/scaled_fp4_quant.h"
@@ -13,6 +16,10 @@
 namespace rtp_llm {
 
 void registerPyModuleOps(py::module& rtp_ops_m) {
+#ifdef RTP_V41_FRONT_GEMM
+    rtp_ops_m.def("v41_front_gemm", &torch_ext::v41_front_gemm,
+                  py::arg("x"), py::arg("a"), py::arg("sa"), py::arg("b"), py::arg("sb"), py::arg("head"));
+#endif
     rtp_ops_m.def("cublas_gemm_bf16_bf16_fp32",
                   &torch_ext::cublas_gemm_bf16_bf16_fp32,
                   "cuBLAS BF16 x BF16 GEMM with FP32 accumulation and FP32 output",

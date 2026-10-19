@@ -22,6 +22,28 @@ FLASHINFER_069_ANNOTATIONS = {
     ),
 }
 
+CUDA13_ANNOTATIONS = dict(FLASHINFER_069_ANNOTATIONS, **{
+    "deep-gemm": package_annotation(
+        whl_patches = {
+            "@rtp_llm//patches/deep_gemm:0001-device-gemm-entry.patch": json.encode({
+                "whls": [
+                    "deep_gemm-2.8.2+ad62a90.cu132-cp310-cp310-linux_x86_64.whl",
+                    "deep_gemm-2.8.2+ad62a90.cu132-cp310-cp310-linux_aarch64.whl",
+                ],
+                "patch_strip": 1,
+            }),
+        },
+        additive_build_content = """
+cc_library(
+    name = "device_headers",
+    hdrs = glob(["site-packages/deep_gemm/include/**"]),
+    includes = ["site-packages/deep_gemm/include"],
+    visibility = ["//visibility:public"],
+)
+""",
+    ),
+})
+
 def pip_deps():
     pip_parse(
         name = "pip_cpu_torch",
@@ -68,7 +90,7 @@ def pip_deps():
 
     pip_parse(
         name = "pip_gpu_cuda13_torch",
-        annotations = FLASHINFER_069_ANNOTATIONS,
+        annotations = CUDA13_ANNOTATIONS,
         requirements_lock = "@rtp_deps//:requirements_lock_torch_gpu_cuda13.txt",
         python_interpreter = "/opt/conda310/bin/python3",
         extra_pip_args = PIP_EXTRA_ARGS + ["--quiet"],
@@ -87,7 +109,7 @@ def pip_deps():
 
     pip_parse(
         name = "pip_cuda13_arm_torch",
-        annotations = FLASHINFER_069_ANNOTATIONS,
+        annotations = CUDA13_ANNOTATIONS,
         requirements_lock = "@rtp_deps//:requirements_lock_cuda13_arm.txt",
         python_interpreter = "/opt/conda310/bin/python3",
         extra_pip_args = PIP_EXTRA_ARGS,

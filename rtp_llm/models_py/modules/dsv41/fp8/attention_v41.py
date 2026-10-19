@@ -728,6 +728,10 @@ class AttentionV41FP8(AttentionFP8):
                 if merged is not None:
                     self._qb_weight_owner = None
 
+        from ._v41_front_gemm import prepare as prepare_front
+
+        prepare_front(self)
+
     def _mega_position_chunks(self, positions, rows, chunk):
         # All layers consume the same absolute query positions. Keep conversion
         # and chunk views within this forward, including during graph capture.
@@ -2880,7 +2884,7 @@ class AttentionV41FP8(AttentionFP8):
         self._shared_attention["global"] = {self.layer_id: keys}
 
     def _prepare_indexer_query_decode(
-        self, x, qr, positions, qr_quantized=None, index_q=None
+        self, x, qr, positions, qr_quantized=None, index_q=None, head_weights=None
     ):
         """Prepare query-only work before waiting for the current layer's keys."""
         if not self.is_index_source:
@@ -2907,7 +2911,7 @@ class AttentionV41FP8(AttentionFP8):
                 self.index_wq, qr, self.freqs_cis, positions, qr_quantized
             )
             if pair is not None:
-                weights = F.linear(x.reshape(T, -1), self.index_weights)
+                weights = F.linear(x.reshape(T, -1), self.index_weights) if head_weights is None else head_weights
                 scaled = torch.empty_like(weights, dtype=torch.bfloat16)
                 torch.mul(
                     weights,
@@ -2934,7 +2938,7 @@ class AttentionV41FP8(AttentionFP8):
                 else self._lin(self.index_wq, qr.reshape(T, -1))
             )
         q = index_q.view(T, self.index_n_heads, self.index_head_dim)
-        weights = F.linear(x.reshape(T, -1), self.index_weights)
+        weights = F.linear(x.reshape(T, -1), self.index_weights) if head_weights is None else head_weights
         prepared = None
         if paged:
             prepared = decode_indexer.prepare_indexer_q_and_weights(
@@ -2954,6 +2958,7 @@ class AttentionV41FP8(AttentionFP8):
         positions,
         qr_quantized=None,
         index_q=None,
+        head_weights=None,
         *,
         prepared_query=None,
         overlap=None,
@@ -2974,7 +2979,7 @@ class AttentionV41FP8(AttentionFP8):
         capacity = keys.capacity if paged else keys.shape[1]
         if prepared_query is None:
             prepared_query = AttentionV41FP8._prepare_indexer_query_decode(
-                self, x, qr, positions, qr_quantized, index_q
+                self, x, qr, positions, qr_quantized, index_q, head_weights
             )
         q, weights, prepared = prepared_query
         if overlap is not None:
@@ -3339,6 +3344,7 @@ class AttentionV41FP8(AttentionFP8):
                     positions,
                     qkv.qr_quantized,
                     qkv.index_q,
+                    head_weights=qkv.head_weights,
                     prepared_query=prepared_query,
                 )
                 slots = (
@@ -3369,6 +3375,7 @@ class AttentionV41FP8(AttentionFP8):
                 qkv.qr,
                 positions,
                 qkv.qr_quantized,
+                head_weights=qkv.head_weights,
                 prepared_query=prepared_query,
             )
             from rtp_llm.models_py.modules.dsv41.fp8._v41_fp4_decode_attn import (
