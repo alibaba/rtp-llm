@@ -666,14 +666,24 @@ class DiffusionGemmaReuseABTest(unittest.TestCase):
         )
         # page 5 K rows for slots 0..20, one sliding layer (layer 0) and a
         # global layer (layer 5) — cache_a vs cache_b
+        # the mock table is arange(NUM_PAGES): 277 tokens land on pages 0..4
+        # (positions 256..276 -> page 4 slots 0..20)
         for layer_idx in (0, 5):
             ka = groups_a[layer_idx][0].kv_cache_base.view(-1, 2, SLIDING_KV if layer_idx != 5 else GLOBAL_KV, PAGE,
-                                        SLIDING_DIM if layer_idx != 5 else GLOBAL_DIM)[5, 0, :, :21, :].float()
+                                        SLIDING_DIM if layer_idx != 5 else GLOBAL_DIM)[4, 0, :, :21, :].float()
             kb = groups_b[layer_idx][0].kv_cache_base.view(-1, 2, SLIDING_KV if layer_idx != 5 else GLOBAL_KV, PAGE,
-                                        SLIDING_DIM if layer_idx != 5 else GLOBAL_DIM)[5, 0, :, :21, :].float()
+                                        SLIDING_DIM if layer_idx != 5 else GLOBAL_DIM)[4, 0, :, :21, :].float()
             print(
-                f"[dgm-fi] page5 K layer {layer_idx}: max_diff={(ka - kb).abs().max().item():.4f} "
+                f"[dgm-fi] page4 K layer {layer_idx}: max_diff={(ka - kb).abs().max().item():.4f} "
                 f"mean_diff={(ka - kb).abs().mean().item():.4f} absmax={float(ka.abs().max()):.2f}",
+                flush=True,
+            )
+        for layer_idx in (0,):
+            ka_full = groups_a[layer_idx][0].kv_cache_base.view(-1, 2, SLIDING_KV, PAGE, SLIDING_DIM)[:4, 0].float()
+            kb_full = groups_b[layer_idx][0].kv_cache_base.view(-1, 2, SLIDING_KV, PAGE, SLIDING_DIM)[:4, 0].float()
+            print(
+                f"[dgm-fi] shared-prefix pages0-3 K: max_diff={(ka_full - kb_full).abs().max().item():.4f} "
+                f"absmax={float(ka_full.abs().max()):.2f}",
                 flush=True,
             )
 
