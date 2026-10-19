@@ -463,15 +463,77 @@ class DiffusionGemmaReuseABTest(unittest.TestCase):
         if not _torch.cuda.is_available():
             self.skipTest("CUDA device required")
 
-        layer_weights, global_weights = _load_all_weights_fp32()
+        # bf16 direct-from-shard loading: the fp32 all-layers staging
+        # (_load_all_weights_fp32) needs ~100GB host RAM and OOMs the
+        # remote CI workers (exitcode -9). The A/B only needs consistent
+        # weights, not fp32 references. One shard stays resident at a time.
         from rtp_llm.model_loader.model_weight_info import ModelWeights
+        from safetensors.torch import load_file
 
         mw = ModelWeights(LAYERS, "cuda", _torch.bfloat16)
-        for i, lw in enumerate(layer_weights):
+        index = json.load(open(os.path.join(CKPT, "model.safetensors.index.json")))
+        weight_map = index["weight_map"]
+        _shards = {}
+
+        def _get(key):
+            shard = weight_map[key]
+            if shard not in _shards:
+                _shards.clear()
+                _shards[shard] = load_file(os.path.join(CKPT, shard))
+            return _shards[shard][key]
+
+        def _hf(layer_id):
+            pre = "model.decoder.layers.%d." % layer_id
+            if layer_id % 6 == 5:
+                qkv = _torch.cat(
+                    [_get(pre + "self_attn.q_proj.weight"), _get(pre + "self_attn.k_proj.weight")], dim=0)
+                qkv = _torch.cat([qkv, _get(pre + "self_attn.k_proj.weight")], dim=0)
+            else:
+                qkv = _torch.cat(
+                    [_get(pre + "self_attn.q_proj.weight"), _get(pre + "self_attn.k_proj.weight"),
+                     _get(pre + "self_attn.v_proj.weight")], dim=0)
+            return {
+                "qkv": qkv, "o": _get(pre + "self_attn.o_proj.weight"),
+                "q_ln": _get(pre + "self_attn.q_norm.weight"),
+                "k_ln": _get(pre + "self_attn.k_norm.weight"),
+                "input_ln": _get(pre + "input_layernorm.weight"),
+                "post_attn_ln": _get(pre + "post_attention_layernorm.weight"),
+                "pre_ffn_ln": _get(pre + "pre_feedforward_layernorm.weight"),
+                "post_ffn_ln": _get(pre + "post_feedforward_layernorm.weight"),
+                "pre_ffn_ln_2": _get(pre + "pre_feedforward_layernorm_2.weight"),
+                "post_ffn_ln_1": _get(pre + "post_feedforward_layernorm_1.weight"),
+                "post_ffn_ln_2": _get(pre + "post_feedforward_layernorm_2.weight"),
+                "gate": _get(pre + "mlp.gate_proj.weight"), "up": _get(pre + "mlp.up_proj.weight"),
+                "down": _get(pre + "mlp.down_proj.weight"),
+                "moe_gate_up": _get(pre + "experts.gate_up_proj"), "moe_down": _get(pre + "experts.down_proj"),
+                "router_proj": _get(pre + "router.proj.weight"),
+                "router_scale": _get(pre + "router.scale").reshape(-1),
+                "per_expert_scale": _get(pre + "router.per_expert_scale").reshape(-1),
+                "layer_scalar_enc": _get("model.encoder.language_model.layers.%d.layer_scalar" % layer_id),
+                "layer_scalar_dec": _get(pre + "layer_scalar"),
+            }
+
+        for i in range(LAYERS):
+            lw = _model_weights(_hf(i))
             for name, tensor in lw.items():
                 mw.set_layer_weight(i, name, tensor.to(_torch.bfloat16))
-        for name, tensor in global_weights.items():
-            mw.set_global_weight(name, tensor.to(_torch.bfloat16))
+        embed = _get("model.decoder.embed_tokens.weight")
+        mw.set_global_weight(W.embedding, embed.to(_torch.bfloat16))
+        mw.set_global_weight(W.lm_head, embed.to(_torch.bfloat16))
+        mw.set_global_weight(W.final_ln_gamma, _get("model.decoder.norm.weight").to(_torch.bfloat16))
+        mw.set_global_weight(
+            W.dgm_self_cond_pre_norm,
+            _get("model.decoder.self_conditioning.pre_norm.weight").to(_torch.bfloat16))
+        mw.set_global_weight(
+            W.dgm_self_cond_gate_w,
+            _get("model.decoder.self_conditioning.gate_proj.weight").T.contiguous().to(_torch.bfloat16))
+        mw.set_global_weight(
+            W.dgm_self_cond_up_w,
+            _get("model.decoder.self_conditioning.up_proj.weight").T.contiguous().to(_torch.bfloat16))
+        mw.set_global_weight(
+            W.dgm_self_cond_down_w,
+            _get("model.decoder.self_conditioning.down_proj.weight").T.contiguous().to(_torch.bfloat16))
+        _shards.clear()
 
         with patch.object(dgm, "RMSNorm", _TorchRMSNorm):
             model = dgm.DiffusionGemmaModel(
