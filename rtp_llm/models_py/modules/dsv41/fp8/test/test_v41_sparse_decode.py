@@ -61,7 +61,7 @@ class SparseDecodeTopKRoutingCPU(unittest.TestCase):
                     os.environ["DSV41_DECODE_DEEPSELECT"] = switch
 
                 def select(scores, lengths, *, out, filter_finite, enabled):
-                    self.assertEqual(scores.dtype, torch.float32)
+                    self.assertEqual(scores.dtype, self.logits.dtype)
                     self.assertEqual(scores.shape, (2, 4096))
                     self.assertEqual(lengths.shape, (2,))
                     self.assertFalse(filter_finite)
@@ -92,6 +92,10 @@ class SparseDecodeTopKRoutingCPU(unittest.TestCase):
                 sparse.select_tokens(self.logits, self.plan)
         fallback.assert_not_called()
         sparse._restore_indices_kernel.__getitem__.assert_not_called()
+
+    def test_fp32_input_keeps_its_precision(self):
+        self.logits = self.logits.float()
+        self.test_deepselect_default_switch_and_fallback()
 
 
 class SparseDecodeSupportCPU(unittest.TestCase):
@@ -202,6 +206,51 @@ class SparseDecodeCUDA(unittest.TestCase):
         self.context = torch.inference_mode()
         self.context.__enter__()
         self.addCleanup(self.context.__exit__, None, None, None)
+
+    def test_clean_logits_preserves_dtype_and_mask(self):
+        k, rows = 512, 4
+        blocks = (
+            torch.arange(k, device="cuda", dtype=torch.int32)[None].repeat(rows, 1) * 2
+        )
+        tokens = (blocks[:, :, None] * 8 + torch.arange(8, device="cuda")).reshape(
+            rows, -1
+        )
+        active = torch.ones_like(blocks, dtype=torch.bool)
+        active[:, 1::3] = False
+        lengths = torch.tensor([0, 513, 4097, 8192], device="cuda", dtype=torch.int32)
+        table = torch.ones(rows, 64, device="cuda", dtype=torch.int32)
+        table[:, ::7] = 0
+        valid = active.repeat_interleave(8, 1) & (tokens < lengths[:, None])
+        allocated = table.gather(1, tokens.long() // 128) > 0
+        for dtype in (torch.bfloat16, torch.float32):
+            # Include an input row stride larger than the compact output width.
+            raw = torch.randn(rows, k * 8 + 32, device="cuda", dtype=dtype)[
+                :, : k * 8
+            ]
+            raw.masked_fill_(~valid | ~allocated, torch.nan)
+            scores = torch.empty_like(raw, memory_format=torch.contiguous_format)
+            ends = torch.empty_like(lengths)
+            for tile in (256, 512, 1024, 2048, 4096):
+                sparse._clean_logits_kernel[(rows, k * 8 // tile)](
+                    raw,
+                    blocks,
+                    active,
+                    table,
+                    lengths,
+                    scores,
+                    ends,
+                    k,
+                    raw.stride(0),
+                    table.shape[1],
+                    tile,
+                )
+                expected = torch.where(
+                    valid, torch.where(allocated, raw, 0), -torch.inf
+                )
+                torch.testing.assert_close(scores, expected, rtol=0, atol=0)
+                torch.testing.assert_close(
+                    ends, lengths.clamp_max(k * 8), rtol=0, atol=0
+                )
 
     def _check_plan(self, plan, candidates, lengths, table, query_len):
         torch.testing.assert_close(
@@ -382,8 +431,10 @@ class SparseDecodeCUDA(unittest.TestCase):
         )
 
     def test_deepselect_and_fallback_masked_selection_graph(self):
-        if not sparse.deepselect.is_available(torch.device("cuda"), enabled=True):
-            self.skipTest("Native FP32 DeepSelect required")
+        if not sparse.deepselect.is_available(
+            torch.device("cuda"), torch.bfloat16, enabled=True
+        ):
+            self.skipTest("Native BF16 DeepSelect required")
         for k in (512, 1024, 2048):
             capacity = k * 16
             lengths = torch.tensor(

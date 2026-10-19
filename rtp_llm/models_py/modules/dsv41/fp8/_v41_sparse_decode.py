@@ -237,9 +237,12 @@ def select_tokens(logits, plan):
     """Select compact sparse logits and return logical compressed-token IDs."""
     rows, k = plan.blocks.shape
     width = k * BLOCK_SIZE
-    scores = torch.empty((rows, width), device=logits.device, dtype=torch.float32)
+    # Both native selectors accept BF16. Preserve DG's score precision instead
+    # of expanding the compact logits to FP32 before scanning them again.
+    scores = torch.empty((rows, width), device=logits.device, dtype=logits.dtype)
     lengths = torch.empty_like(plan.lengths)
-    _clean_logits_kernel[(rows, triton.cdiv(width, 256))](
+    tile = 2048
+    _clean_logits_kernel[(rows, triton.cdiv(width, tile))](
         logits,
         plan.blocks,
         plan.active,
@@ -250,7 +253,7 @@ def select_tokens(logits, plan):
         k,
         logits.stride(0),
         plan.table.shape[1],
-        256,
+        tile,
     )
     output = torch.empty((rows, TOKEN_TOPK), device=logits.device, dtype=torch.int32)
     selected = deepselect.try_select_tokens(
