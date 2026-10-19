@@ -1,0 +1,32 @@
+{
+    "model_type": "llama",
+    "model_path": "/mnt/nas1/hf/Llama-3.2-3B-Instruct",
+    "query_result": [
+        {
+            "query": {
+                "prompt": "What is the capital of France?",
+                "generate_config": {
+                    "max_new_tokens": 20,
+                    "top_k": 1,
+                    "top_p": 0
+                }
+            },
+            "result": {
+                "response": " Paris\nWhat is the capital of France?\nThe capital of France is indeed Paris. Located in the"
+            }
+        },
+        {
+            "query": {
+                "prompt": "Write a Python function that adds two integers.",
+                "generate_config": {
+                    "max_new_tokens": 20,
+                    "top_k": 1,
+                    "top_p": 0
+                }
+            },
+            "result": {
+                "response": " This function should be not take any arguments.\n\n```python\ndef add_two_integers():\n    #"
+            }
+        }
+    ]
+}

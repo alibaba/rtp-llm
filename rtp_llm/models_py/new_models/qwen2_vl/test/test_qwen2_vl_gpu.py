@@ -1,0 +1,99 @@
+import tempfile
+import unittest
+from unittest import mock
+
+import torch
+from rtp_llm.models_py.model_loader import NewLoaderConfig
+from rtp_llm.models_py.new_models.qwen2_vl.vision import (
+    Qwen2VLForVisionEmbedding,
+    load_qwen2_vl_vision,
+)
+from safetensors.torch import save_file
+
+
+def _vision_config():
+    return {
+        "depth": 1,
+        "embed_dim": 8,
+        "hidden_size": 6,
+        "hidden_act": "quick_gelu",
+        "mlp_ratio": 2.0,
+        "num_heads": 2,
+        "in_channels": 1,
+        "patch_size": 2,
+        "spatial_merge_size": 2,
+        "temporal_patch_size": 2,
+    }
+
+
+class Qwen2VLVisionGpuTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "Qwen2VLVisionGpuTest requires the accelerator assigned by CI"
+            )
+
+    def test_real_newloader_fp16_sdpa_fallback_matches_cpu_reference(self):
+        torch.manual_seed(11)
+        config = _vision_config()
+        source = Qwen2VLForVisionEmbedding(
+            {"model_type": "qwen2_vl_vision", "vision_config": config},
+            NewLoaderConfig(compute_dtype=torch.float32, device="cpu"),
+        ).eval()
+        pixel_values = torch.linspace(-1.0, 1.0, 128).reshape(16, 8)
+        grid_thw = torch.tensor([[2, 2, 2], [1, 4, 2]], dtype=torch.int64)
+        with torch.inference_mode():
+            expected = source(pixel_values, grid_thw)
+
+        with tempfile.TemporaryDirectory() as model_path:
+            save_file(
+                {
+                    name: tensor.detach().clone()
+                    for name, tensor in source.state_dict().items()
+                },
+                f"{model_path}/model.safetensors",
+            )
+            visual = load_qwen2_vl_vision(
+                vision_config=config,
+                model_path=model_path,
+                compute_dtype=torch.float16,
+                device="cuda:0",
+            )
+
+        self.assertFalse(visual.training)
+        self.assertEqual(visual.device, torch.device("cuda:0"))
+        with mock.patch(
+            "rtp_llm.models_py.new_models.qwen2_vl.vision."
+            "_resolve_flash_attn_varlen",
+            return_value=None,
+        ) as resolve_flash_attn:
+            with torch.inference_mode():
+                actual = visual(pixel_values.cuda(), grid_thw.cuda()).float().cpu()
+        resolve_flash_attn.assert_called()
+        torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
+
+    def test_fp32_accelerator_forward_uses_sdpa_fallback(self):
+        config = _vision_config()
+        model = Qwen2VLForVisionEmbedding(
+            {"model_type": "qwen2_vl_vision", "vision_config": config},
+            NewLoaderConfig(compute_dtype=torch.float32, device="cuda:0"),
+        ).cuda()
+        pixel_values = torch.linspace(-1.0, 1.0, 128, device="cuda").reshape(16, 8)
+        grid_thw = torch.tensor(
+            [[2, 2, 2], [1, 4, 2]], dtype=torch.int64, device="cuda"
+        )
+
+        with mock.patch(
+            "rtp_llm.models_py.new_models.qwen2_vl.vision."
+            "_resolve_flash_attn_varlen",
+            side_effect=AssertionError("FP32 must not resolve flash attention"),
+        ):
+            with torch.inference_mode():
+                output = model(pixel_values, grid_thw)
+        self.assertTrue(torch.isfinite(output).all())
+
+
+if __name__ == "__main__":
+    unittest.main()
