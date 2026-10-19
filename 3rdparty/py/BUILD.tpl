@@ -21,6 +21,7 @@ genrule(
     outs = [
         "%{PYTHON_LIB_NAME}",
     ],
+    tags = ["local"],
     cmd = """
 cp -f "%{PYTHON_LIB_PATH}" "$(@D)/%{PYTHON_LIB_NAME}"
    """,

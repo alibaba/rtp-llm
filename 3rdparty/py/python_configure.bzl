@@ -87,6 +87,9 @@ def _genrule(src_dir, genrule_name, command, outs):
 
   Genrule executes the given command and produces the given outputs.
   """
+  # These genrules copy files from the build image's absolute Python prefix,
+  # which only exists on the client. Remote execution hangs on the large,
+  # multi-output header tree; local copies are fast and cache-stable.
   return (
       'genrule(\n' +
       '    name = "' +
@@ -94,6 +97,7 @@ def _genrule(src_dir, genrule_name, command, outs):
       '    outs = [\n' +
       outs +
       '\n    ],\n' +
+      '    tags = ["local"],\n' +
       '    cmd = """\n' +
       command +
       '\n   """,\n' +
