@@ -262,7 +262,7 @@ class Block(nn.Module):
         return impls
 
     def prefill_fast_callable(self):
-        if self.engram is not None:
+        if self.engram is not None and getattr(self.attn, "v41_config", None) is None:
             return None
         if not isinstance(self.attn, AttentionFP8):
             return None
@@ -518,6 +518,8 @@ class Block(nn.Module):
             ffn_hc_post,
         ) = self._prefill_fast_hc_impls()
 
+        if _prepared_attn is None:
+            x = self._inject_engram(x)
         if _prepared_attn is not None:
             residual, x_pre, post, comb = _prepared_attn
             attn_out = self.attn(
