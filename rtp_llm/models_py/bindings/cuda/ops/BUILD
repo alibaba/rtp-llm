@@ -13,18 +13,6 @@ cc_library(
 
 cc_library(
     name = "gpu_base",
-    hdrs = select({
-        "@//:using_cuda12": [
-            "CudaXqa.h",
-        ],
-        "//conditions:default": [],
-    }),
-    srcs = select({
-        "@//:using_cuda12": [
-            "CudaXqa.cc",
-        ],
-        "//conditions:default": [],
-    }),
     deps = [
         "//rtp_llm/cpp/cache:cache_group_type",
         "//rtp_llm/cpp/config:config_modules",
@@ -51,12 +39,7 @@ cc_library(
         "@havenask//aios/autil:stack_tracer",
         "@havenask//aios/autil:string_helper",
         "@local_config_cuda//cuda:cuda_headers",
-    ] + select({
-        "@//:using_cuda12": [
-            "//3rdparty/xqa",
-        ],
-        "//conditions:default": [],
-    }),
+    ],
     visibility = ["//visibility:public"],
     copts = copts(),
     alwayslink = 1,
