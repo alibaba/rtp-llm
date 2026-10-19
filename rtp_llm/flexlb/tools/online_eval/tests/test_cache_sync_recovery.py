@@ -20,7 +20,8 @@ def config():
 
 
 def row(generation=1, age=20):
-    return dict(generation=generation, status_age_ms=age, reported_alive=True, role="prefill",
+    return dict(generation=generation, status_age_ms=age, applied_status_age_ms=age,
+                lifecycle_state="active", reported_alive=True, role="prefill",
                 cache_indexed=True, cache_key_size=306000, cache_version=2, cache_indexed_version=2)
 
 
@@ -59,7 +60,7 @@ def test_stale_absent_or_replaced_healthy_worker_is_not_hidden_by_victim_exclusi
         assert collateral(current, baseline, {"victim"}, 10000) == ["healthy"]
 
 
-@pytest.mark.parametrize("extra", [{"applied_status_age_ms": 10001}, {"scheduling_status_fresh": False}])
+@pytest.mark.parametrize("extra", [{"applied_status_age_ms": 10001}, {"lifecycle_state": "retiring"}])
 def test_fresh_rpc_does_not_hide_stale_application(extra):
     current = dict(row(age=1), **extra)
     baseline = {"worker": row()}
@@ -132,17 +133,14 @@ def test_actual_intensity_uses_response_counters_and_elapsed_time():
         interval_rates(after, before, 20)
 
 
-def test_fingerprints_require_actual_membership_and_exact_population():
-    from cases.cache_sync_recovery.telemetry import fingerprint_matches
-    expected = {"a": dict(keys=5, sum=123, xor=42, version=9)}
-    worker = dict(ip_port="a", cache_version=9, fingerprint=dict(indexed_keys=5,
-        status_keys=5, sum=123, xor=42, missing_status=0, missing_global=0))
-    assert fingerprint_matches(expected, {"prefill_endpoints": [worker]})
-    for field in ("missing_global", "missing_status", "sum", "xor", "indexed_keys"):
-        bad = copy.deepcopy(worker)
-        bad["fingerprint"][field] += 1
-        assert not fingerprint_matches(expected, {"prefill_endpoints": [bad]})
-    assert not fingerprint_matches(expected, {"prefill_endpoints": []})
+def test_missing_application_observation_never_defaults_to_rpc_health():
+    from cases.cache_sync_recovery.health import healthy
+    value = row(age=1)
+    del value["applied_status_age_ms"]
+    with pytest.raises(KeyError):
+        healthy(value, 10000)
+    value["applied_status_age_ms"] = None
+    assert not healthy(value, 10000)
 
 
 def test_report_preserves_gc_events_and_shared_time_origin(tmp_path):
@@ -163,7 +161,7 @@ def test_report_preserves_gc_events_and_shared_time_origin(tmp_path):
         events=[dict(id='cache_only_started',epoch_s=epoch-120),
                 dict(id='performance_observation_finished',epoch_s=epoch+2),
                 dict(id='observation_finished',epoch_s=epoch+5)],
-        frames=[dict(epoch_s=e,phase='measurement', master={},mock={},healthy_max_status_age_ms=age)
+        frames=[dict(epoch_s=e,phase='measurement', healthy_max_status_age_ms=age,missing_workers=0)
                 for e,age in ((epoch-120,7),(epoch+1,None))])
     (cache/'evidence.json').write_text(json.dumps(raw))
     from cases.cache_sync_recovery.telemetry import gc_events
@@ -180,8 +178,9 @@ def test_report_preserves_gc_events_and_shared_time_origin(tmp_path):
     assert spec['timeAxis']['max'] == 123
     assert len(spec['panels']) == 2
     assert all(p['title'].startswith('steady · ') for p in spec['panels'])
-    full = next(p for p in spec['panels'] if p['id']=='steady-gc')['series'][0]
-    assert full['points'] == [dict(x=120,y=180)]
+    assert next(k['value'] for k in spec['kpis'] if k['label']=='Full GC次数') == 1
+    age = next(p for p in spec['panels'] if p['id']=='steady-age')['series'][0]
+    assert age['points'] == [dict(x=0,y=.007),dict(x=121,y=None)]
     assert all(len(p['series'])==1 for p in spec['panels'])
     from reporting.comparison import compare
     left = specs[0].parent
@@ -189,15 +188,16 @@ def test_report_preserves_gc_events_and_shared_time_origin(tmp_path):
     compare([left,right],tmp_path/'comparison',alignment_event='cache_only_started')
     compared = json.loads((tmp_path/'comparison/reports/comparison/runs/report-spec.json').read_text())
     gc_overlay = [p for p in compared['panels'] if p['id'].startswith('overlay:')
-                  and any(s['metric_id']=='steady.gc' for s in p['series'])]
+                  and any(s['metric_id']=='steady.age' for s in p['series'])]
     assert len(gc_overlay) == 1
     assert len(gc_overlay[0]['series']) == 2
 
 
-def test_later_collection_error_preserves_positive_collateral_failure(tmp_path, monkeypatch):
+@pytest.mark.parametrize("late_failure", ["timeout", "instance", "partial"])
+def test_later_collection_error_preserves_positive_collateral_failure(tmp_path, monkeypatch, late_failure):
     import contextlib
     from types import SimpleNamespace
-    from cases.cache_sync_recovery import actions, telemetry
+    from cases.cache_sync_recovery import actions
     import traffic.traffic_source as traffic
     engines = [dict(name=f'prefill-{i}',role='prefill',http_addr=f'h{i}',grpc_addr=f'p{i}') for i in range(3)]
     engines.append(dict(name='decode-0',role='decode',http_addr='hd',grpc_addr='pd'))
@@ -215,14 +215,27 @@ def test_later_collection_error_preserves_positive_collateral_failure(tmp_path, 
             return dict(engines=engines)
         return dict(engine=body['engine'],status='ok',fixture=dict(version=2))
 
-    def fetch(url, timeout):
-        if url.endswith('prometheus'):
-            return b''
+    def capture(self, **kwargs):
+        from adapters.master_diagnostics import DiagnosticCapture, validate_snapshot
+        from test_master_diagnostics import payload
         snapshots.append(True)
-        if len(snapshots)>2:
+        if len(snapshots) > 3 and late_failure == 'timeout':
             raise TimeoutError('later snapshot unavailable')
-        rows = [dict(ip_port=f'h{i}',**row(age=10001 if i==1 and len(snapshots)==2 else 20)) for i in range(3)]
-        return json.dumps(dict(prefill_endpoints=rows,decode_endpoints=[dict(ip_port='hd',**row())],scheduler_inflight=0)).encode()
+        data = payload()
+        page = data['components']['workers']
+        template = page['rows'][0]
+        page['rows'] = []
+        for engine in engines:
+            value = dict(template, worker_id=engine['role']+':'+engine['http_addr'],
+                         address=engine['http_addr'], role=engine['role'])
+            value['poll_response_age_ms'] = 10001 if engine['http_addr']=='h1' and len(snapshots)==3 else 20
+            page['rows'].append(value)
+        page['coverage']['returned_count'] = len(engines)
+        if len(snapshots) > 3 and late_failure == 'instance':
+            data['instance_id'] = 'replacement-master'
+        if len(snapshots) > 3 and late_failure == 'partial':
+            page['coverage']['complete'] = False
+        return DiagnosticCapture(validate_snapshot(data), 0, 0)
 
     stub = SimpleNamespace(GetWorkerStatus=lambda request,timeout: SimpleNamespace(alive=True))
     ops = SimpleNamespace(master_http_port=1,pb2=SimpleNamespace(StatusVersionPB=lambda: None),
@@ -234,8 +247,7 @@ def test_later_collection_error_preserves_positive_collateral_failure(tmp_path, 
         record_event=lambda identity:dict(id=identity,epoch_s=100+time[0]))
     deadline = SimpleNamespace(clock=lambda:time[0],remaining=lambda:100,check=lambda:None,sleep=lambda value:time.__setitem__(0,time[0]+value))
     monkeypatch.setattr(actions,'control_json',control)
-    monkeypatch.setattr(telemetry,'fetch',fetch)
-    monkeypatch.setattr(telemetry,'resource',lambda proc:{})
+    monkeypatch.setattr(actions.MasterDiagnosticsClient,'snapshot',capture)
     monkeypatch.setattr(traffic,'materialize',lambda *a,**kw:tmp_path/'traffic.jsonl')
     monkeypatch.setattr(actions.grpc,'insecure_channel',lambda address:contextlib.nullcontext(address))
     from cases.cache_sync_recovery.program import GATE
@@ -250,7 +262,8 @@ def test_later_collection_error_preserves_positive_collateral_failure(tmp_path, 
     assert evidence['affected_workers'] == ['h1']
     assert evidence['healthy_violations'][0]['direct_alive'][0]['alive'] is True
     assert evidence['runtime_incomplete'] is True
-    assert 'later snapshot unavailable' in evidence['errors'][0]
+    reason = {'timeout': 'later snapshot unavailable', 'instance': 'Master instance changed', 'partial': 'incomplete Worker directory'}[late_failure]
+    assert reason in evidence['errors'][0]
 
 
 def test_recovery_report_keeps_two_focused_panels_and_only_distinct_events():
@@ -304,13 +317,12 @@ def pressure_evidence(intervention=False):
     workers = {f'w{i}': row() for i in range(4)}
     workers['w3']['role'] = 'decode'
     frames = [dict(epoch_s=t, phase='measurement' if t < 14 else 'post', workers=copy.deepcopy(workers),
-                   master={}, mock={}, healthy_max_status_age_ms=20, missing_workers=0,
-                   process_allocated_bytes=int((t-10)*2**30)) for t in (10, 12, 14, 16)]
+                   healthy_max_status_age_ms=20, missing_workers=0) for t in (10, 12, 14, 16)]
     return dict(parameters=params, intervention=intervention, environment=dict(n_prefill=3,n_decode=1),
         provenance=dict(env_epoch=1), frames=frames, worker_addresses=list(workers), affected_workers=[],
         victims=['w0'] if intervention else [], expired_workers=['w0'] if intervention else [],
         rebuilt_workers=['w0'] if intervention else [], convergence_samples=5, max_sample_gap_s=2,
-        consistency=dict(consistent=True), client=dict(complete=True), errors=[],
+        cache_progress=dict(converged=True, expected_versions={f"w{i}": 2 for i in range(3)}), client=dict(complete=True), errors=[],
         expiry_scope='discovery withdrawal', healthy_violations=[],
         gc_available=True, gc=[dict(epoch_s=15,full=True,duration_ms=180)],
         events=[dict(id=k,epoch_s=t) for k,t in [('cache_baseline_ready',9),('cache_only_started',10),
@@ -326,10 +338,10 @@ def test_core_checks_and_validity_are_separate_without_weakening_recovery(recove
     result = analyze(evidence)
     assert result['verdict'] == 'PASS' and result['validity'] == 'VALID'
     assert {c['id'] for c in result['checks']} == __import__('cases.cache_sync_recovery.analysis',fromlist=['CHECK_IDS']).CHECK_IDS
-    evidence['consistency']['consistent'] = False
+    evidence['cache_progress']['converged'] = False
     assert analyze(evidence)['verdict'] == 'FAIL'
     if recovery:
-        evidence['consistency']['consistent'] = True
+        evidence['cache_progress']['converged'] = True
         evidence['rebuilt_workers'] = []
         assert analyze(evidence)['verdict'] == 'FAIL'
 

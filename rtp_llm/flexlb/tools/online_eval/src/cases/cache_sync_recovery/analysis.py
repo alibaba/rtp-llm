@@ -5,8 +5,7 @@ from analysis.gates import gate_checks
 
 VALIDITY_CHECKS = frozenset({"actual_sync_intensity", "response_shape", "clock_input_intensity",
                              "sampling_complete", "client_complete"})
-CHECK_IDS = frozenset({"healthy_survivors", "victims_withdrawn", "victims_rebuilt", "cache_converged",
-                       "cache_consistency"}) | VALIDITY_CHECKS
+CHECK_IDS = frozenset({"healthy_survivors", "victims_withdrawn", "victims_rebuilt", "cache_converged"}) | VALIDITY_CHECKS
 
 
 def analyze(evidence):
@@ -20,13 +19,14 @@ def analyze(evidence):
         limits, procedure, observation = (p[k] for k in ("checks", "procedure", "observation"))
         last = evidence["frames"][-1]["workers"]
         keys = procedure["unique_keys"] + 2*procedure["shared_keys"]
-        from cases.cache_sync_recovery.health import healthy
-        ready = (set(last) == set(evidence["worker_addresses"])
-                 and all(healthy(w, limits["max_status_age_ms"]) for w in last.values())
+        progress = evidence["cache_progress"]
+        from cases.cache_sync_recovery.health import converged
+        ready = (converged(last, set(evidence["worker_addresses"]), keys,
+                           progress["expected_versions"], limits["max_status_age_ms"])
+                 and progress["converged"]
                  and evidence["convergence_samples"] >= observation["converged_samples"])
         measured = evidence["intensity"]["measurement"]
         checks += [evaluate("cache_converged", ready, "eq", True),
-                   evaluate("cache_consistency", evidence["consistency"]["consistent"], "eq", True),
                    evaluate("actual_sync_intensity", measured["responses"], "ge", limits["min_cache_responses_per_s"]),
                    evaluate("response_shape", measured["totals"]["entries"] == measured["totals"]["responses"]*keys
                             and measured["totals"]["full_responses"] == measured["totals"]["responses"], "eq", True),

@@ -86,12 +86,6 @@ produced:
     unit: ms
     value_kind: gauge
     labels: []
-  cache_stability/allocation_gib_s:
-    producer: cache_stability
-    source_type: debug_api
-    unit: GiB/s
-    value_kind: gauge
-    labels: []
   cache_stability/healthy_age_s:
     producer: cache_stability
     source_type: debug_api

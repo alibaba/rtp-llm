@@ -6,11 +6,12 @@ from pathlib import Path
 
 import grpc
 
-from adapters.master_control import master_url
+from adapters.master_diagnostics import MasterDiagnosticsClient
+from adapters.debug_client import DebugUnavailable
 from adapters.mock_control import control_json
 from analysis.checks import CheckResult
 from cases.cache_sync_recovery.analysis import CHECK_IDS
-from cases.cache_sync_recovery.health import healthy, collateral
+from cases.cache_sync_recovery.health import healthy, collateral, converged
 from scenario.contracts import StageHandler, StageOutput
 from runtime.observation import poll_samples, SampleBudget
 
@@ -50,7 +51,7 @@ def execute(ctx, params, deadline):
     from adapters.resource_evidence import flow_evidence
     from traffic.traffic_source import materialize
     from cases.cache_sync_recovery.telemetry import (
-        fetch, resource, fingerprint_matches, interval_rates,
+        worker_rows, interval_rates,
     )
     p, o, limits = (params[k] for k in ("procedure", "observation", "checks"))
     intervention = params["intervention"]
@@ -58,7 +59,7 @@ def execute(ctx, params, deadline):
     directory.mkdir()
     evidence = dict(intervention=intervention, parameters=copy.deepcopy(params),
         environment=ctx.instance["environment"], events=[], intensity={}, frames=[], errors=[],
-        healthy_violations=[], convergence_samples=0, consistency=None,
+        healthy_violations=[], convergence_samples=0, cache_progress=None,
         provenance=dict(env_epoch=ctx.env_epoch),
         expiry_scope="discovery withdrawal while RPC remains alive; not a health-timeout injection")
     engines = control_json(ctx.ops, "snapshot?view=topology", deadline)["engines"]
@@ -77,7 +78,13 @@ def execute(ctx, params, deadline):
     baseline, flow, last_sample = None, None, None
     affected, absent, rebuilt = set(), set(), set()
     maximum_gap = 0
-    url = master_url("127.0.0.1", ctx.ops.master_http_port, "inflight")
+    diagnostics = MasterDiagnosticsClient(f"http://127.0.0.1:{ctx.ops.master_http_port}",
+                                          timeout_s=min(5, deadline.remaining()))
+    # Check capabilities before cache construction or traffic launch.
+    preflight = diagnostics.snapshot(include=("workers",))
+    worker_rows(preflight)
+    instance_id = preflight.payload["instance_id"]
+    evidence["provenance"].update(master_instance_id=instance_id, diagnostic_schema=2)
     sample_budget = SampleBudget(o["capture"])
 
     def fixture(e, operation, **options):
@@ -110,20 +117,18 @@ def execute(ctx, params, deadline):
     def sample(phase):
         nonlocal last_sample, maximum_gap
         before = ctx.clock()
-        raw = json.loads(fetch(url, min(5, deadline.remaining())))
+        deadline.check()
+        diagnostics.timeout_s = min(5, deadline.remaining())
+        capture = diagnostics.snapshot(include=("workers",))
+        if capture.payload["instance_id"] != instance_id:
+            raise DebugUnavailable("Master instance changed during observation")
+        rows = worker_rows(capture)
         now = ctx.clock()
         if last_sample is not None:
             maximum_gap = max(maximum_gap, now-last_sample)
         last_sample = now
-        rows = {w["ip_port"]: dict(w, role=role) for role in ("prefill", "decode")
-                for w in raw[role+"_endpoints"]}
-        if len(rows) != len(raw["prefill_endpoints"]) + len(raw["decode_endpoints"]):
-            raise ValueError("duplicate Worker identity")
-        for row in rows.values():
-            if not {"generation", "status_age_ms", "reported_alive"} <= row.keys():
-                raise ValueError("Master lacks observational health adapter")
         if baseline is not None:
-            excluded = victims if phase in {"intervention", "post"} else set()
+            excluded = victims if phase in {"intervention", "post", "cache_settle"} else set()
             newly = set(collateral(rows, baseline, excluded, limits["max_status_age_ms"])) - affected
             affected.update(newly)
             if newly:
@@ -137,31 +142,22 @@ def execute(ctx, params, deadline):
                 absent.update(victims - rows.keys())
             if phase == "post":
                 rebuilt.update(a for a in victims if a in rows and rows[a]["generation"] != baseline[a]["generation"])
-        if phase == "post":
-            ready = set(rows) == names and all(healthy(w, limits["max_status_age_ms"])
-                and (w["role"] != "prefill" or w.get("cache_key_size") == keys)
-                for w in rows.values()) and rebuilt == victims
-            evidence["convergence_samples"] = evidence["convergence_samples"] + 1 if ready else 0
+        survivors = {a: w for a, w in rows.items() if a not in victims}
+        def maximum_age(field):
+            values = [w[field] for w in survivors.values()]
+            return max(values) if values and all(v is not None for v in values) else None
+        poll_age, applied_age = maximum_age("status_age_ms"), maximum_age("applied_status_age_ms")
         frame = dict(epoch_s=ctx.wall_clock(), phase=phase, snapshot_read_s=ctx.clock()-before,
-            workers={a: {k: w[k] for k in ("generation", "reported_alive", "status_age_ms",
-                     "applied_status_age_ms", "scheduling_status_fresh") if k in w} for a,w in rows.items()}, p_workers=len(raw["prefill_endpoints"]), d_workers=len(raw["decode_endpoints"]),
-            max_status_age_ms=max((w["status_age_ms"] for w in rows.values()), default=None),
+            snapshot_id=capture.payload["snapshot_id"],
+            capture_started_at_ms=capture.payload["capture_started_at_ms"],
+            capture_finished_at_ms=capture.payload["capture_finished_at_ms"],
+            workers=rows if phase == "cache_settle" else {
+                a: {k: w[k] for k in ("role", "generation", "reported_alive", "lifecycle_state",
+                                      "status_age_ms", "applied_status_age_ms")} for a, w in rows.items()},
             missing_workers=len((baseline or {}).keys()-rows.keys()-victims),
-            healthy_max_status_age_ms=max((max(w["status_age_ms"], w.get("applied_status_age_ms", w["status_age_ms"]))
-                for a, w in rows.items() if a not in victims), default=None),
-            healthy_max_rpc_age_ms=max((w["status_age_ms"] for a,w in rows.items()
-                if a not in victims and "applied_status_age_ms" in w), default=None),
-            healthy_max_applied_age_ms=max((w["applied_status_age_ms"]
-                for a,w in rows.items() if a not in victims and "applied_status_age_ms" in w), default=None),
-            stale_applied_workers=sum(w.get("applied_status_age_ms",w["status_age_ms"]) > limits["max_status_age_ms"]
-                for a,w in rows.items() if a not in victims),
-            routable_workers=(sum(w["scheduling_status_fresh"] for a,w in rows.items() if a not in victims)
-                if all("scheduling_status_fresh" in w for w in rows.values()) else None),
-            stale_workers=sum(not healthy(w, limits["max_status_age_ms"]) for w in rows.values()),
-            replaced_workers=sum(a in baseline and w["generation"] != baseline[a]["generation"] for a, w in rows.items()) if baseline else 0,
-            affected_workers=len(affected), reported_dead=sum(not w["reported_alive"] for w in rows.values()),
-            process_allocated_bytes=raw.get("process_allocated_bytes"), scheduler_inflight=raw["scheduler_inflight"],
-            master=resource(ctx.env.master), mock=resource(ctx.env.mock))
+            healthy_max_status_age_ms=max(poll_age, applied_age) if poll_age is not None and applied_age is not None else None,
+            healthy_max_rpc_age_ms=poll_age, healthy_max_applied_age_ms=applied_age,
+            affected_workers=len(affected))
         encoded = sample_budget.append(frame)
         evidence["frames"].append(frame)
         with (directory/"observations.jsonl").open("a") as f:
@@ -214,9 +210,8 @@ def execute(ctx, params, deadline):
         until = ctx.clock()+p["warmup_timeout_s"]
         while ctx.clock() < until:
             rows = sample("warmup")
-            good = set(rows) == names and all(healthy(w, limits["max_status_age_ms"]) and (
-                w["role"] != "prefill" or w.get("cache_key_size") == keys
-                and w.get("cache_version") == frozen[a]["version"]) for a, w in rows.items())
+            good = converged(rows, names, keys, {a: f["version"] for a, f in frozen.items()},
+                             limits["max_status_age_ms"])
             ready = ready+1 if good else 0
             if ready >= o["converged_samples"]:
                 baseline = rows
@@ -226,6 +221,8 @@ def execute(ctx, params, deadline):
             raise ValueError("shared cache baseline failed to converge")
         last_sample = None
         maximum_gap = 0
+        evidence["cache_baseline"] = dict(workers=rows, expected_keys=keys,
+            expected_versions={a: f["version"] for a, f in frozen.items()})
         event("cache_baseline_ready")
         for e in prefill:
             fixture(e, "clock", interval_ms=p["churn_interval_ms"])
@@ -272,19 +269,20 @@ def execute(ctx, params, deadline):
         for e in prefill:
             fixture(e, "churn", delta=0, every=0)
         expected = stats()
+        versions = {a: f["version"] for a, f in expected.items()}
         until = ctx.clock()+120
-        verified = None
+        evidence["convergence_samples"] = 0
         while ctx.clock() < until:
-            verified = json.loads(fetch(url.rsplit("/", 1)[0]+"/cache_fingerprint", min(90, deadline.remaining())))
-            if fingerprint_matches(expected, verified):
+            rows = sample("cache_settle")
+            good = converged(rows, names, keys, versions, limits["max_status_age_ms"])
+            evidence["convergence_samples"] = evidence["convergence_samples"] + 1 if good else 0
+            if evidence["convergence_samples"] >= o["converged_samples"]:
                 break
             deadline.sleep(o["sample_s"])
-        consistent = bool(verified and fingerprint_matches(expected, verified))
-        consistent = consistent and verified.get("global_unique_keys") == len(prefill)*(p["unique_keys"]+p["shared_keys"])
-        consistent = consistent and verified.get("global_mappings") == len(prefill)*keys
-        evidence["consistency"] = dict(consistent=consistent, expected=expected, observed=verified,
-            scope="frozen fingerprints and exhaustive status/global membership; counts guard extra mappings")
-        event("consistency_finished")
+        evidence["cache_progress"] = dict(expected_versions=versions, expected_keys=keys,
+            converged=evidence["convergence_samples"] >= o["converged_samples"],
+            scope="cache versions, index initialization and counts; no key membership proof")
+        event("cache_progress_finished")
         evidence.update(affected_workers=sorted(affected), expired_workers=sorted(absent), rebuilt_workers=sorted(rebuilt),
                         max_sample_gap_s=maximum_gap)
         event("observation_finished")

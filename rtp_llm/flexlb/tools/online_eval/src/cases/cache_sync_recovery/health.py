@@ -1,9 +1,11 @@
 """Worker freshness and generation identity shared by acquisition and analysis."""
 
 def healthy(row, maximum):
-    return (row["reported_alive"] and 0 <= row["status_age_ms"] <= maximum
-            and 0 <= row.get("applied_status_age_ms", row["status_age_ms"]) <= maximum
-            and row.get("scheduling_status_fresh", True))
+    # Required observations never fall back to a different source or default true.
+    poll, applied = row["status_age_ms"], row["applied_status_age_ms"]
+    return (row["reported_alive"] is True and row["lifecycle_state"] == "active"
+            and poll is not None and applied is not None
+            and 0 <= poll <= maximum and 0 <= applied <= maximum)
 
 
 def collateral(rows, baseline, victims, maximum):
