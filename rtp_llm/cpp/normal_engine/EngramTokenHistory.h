@@ -3,16 +3,15 @@
 #include <cstddef>
 #include <cstdint>
 #include <stdexcept>
-#include <vector>
 
 namespace rtp_llm {
 
 // Each row is [current, previous, previous-2, previous-3]. Explicit history
 // makes CP boundaries, prefix reuse, PD handover and speculative rollback
 // independent of a worker-local token cache.
-inline void
-fillEngramTokenWindows(const std::vector<int>& history, int start_position, size_t token_count, int32_t* output) {
-    if (start_position < 0 || static_cast<size_t>(start_position) + token_count > history.size()) {
+inline void fillEngramTokenWindows(
+    const int32_t* history, size_t history_size, int start_position, size_t token_count, int32_t* output) {
+    if (start_position < 0 || static_cast<size_t>(start_position) + token_count > history_size) {
         throw std::invalid_argument("Engram token window exceeds complete request history");
     }
     for (size_t row = 0; row < token_count; ++row) {

@@ -576,7 +576,8 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
                 ctx.input_lengths[ctx.batch_idx]    = stream->inputLength();
                 ctx.sequence_lengths[ctx.batch_idx] = stream->seqLength() - 1;
                 if (config_.has_engram) {
-                    fillEngramTokenWindows(stream->completeTokenIdsVec(i),
+                    fillEngramTokenWindows(stream->getCompleteTokenIds()->data(i),
+                                           stream->seqLength(),
                                            stream->seqLength() - 1,
                                            1,
                                            model_input.engram_token_windows.data_ptr<int32_t>() + ctx.batch_idx * 4);
@@ -653,7 +654,8 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
             }
             memcpy(ctx.merged_tokens + ctx.token_idx, input_tokens.data(), input_tokens.size() * sizeof(int));
             if (config_.has_engram) {
-                fillEngramTokenWindows(stream->completeTokenIdsVec(i),
+                fillEngramTokenWindows(stream->getCompleteTokenIds()->data(i),
+                                       stream->seqLength(),
                                        stream->prefixLength(),
                                        input_tokens.size(),
                                        model_input.engram_token_windows.data_ptr<int32_t>() + ctx.token_idx * 4);
