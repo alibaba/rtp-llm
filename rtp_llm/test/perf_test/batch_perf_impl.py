@@ -392,7 +392,18 @@ class BatchPerfImpl(object):
         for future in futures:
             all_responses.extend(future.result())
 
+        self._validate_request_success(all_responses)
         return all_responses
+
+    def _validate_request_success(self, responses: List[ResponseInfo]) -> None:
+        if os.environ.get("PERF_REQUIRE_ALL_REQUESTS_SUCCESS", "0") != "1":
+            return
+        succeeded = sum(response.success for response in responses)
+        check_with_info(
+            len(responses) == self.batch_size and succeeded == self.batch_size,
+            f"perf requests failed: {succeeded}/{self.batch_size} succeeded "
+            f"({len(responses)} responses), trace={self.profile_trace_name}",
+        )
 
     def _curl_server(
         self,

@@ -349,3 +349,9 @@ py_test(
     srcs = ["scr_native_logger_test.py"],
     data = ["//rtp_llm/cpp/utils:scr_logger_test_sources"],
 )
+
+py_test(
+    name = "glm5_layer_repeat_test",
+    srcs = ["glm5_layer_repeat_test.py"],
+    deps = ["//rtp_llm:utils"],
+)

@@ -11,8 +11,8 @@ class RemoteRpcServiceImpl: public LocalRpcServiceImpl {
 public:
     RemoteRpcServiceImpl() {}
     ~RemoteRpcServiceImpl() {}
-    void setDeferServiceStart(bool defer) override;
-    void startDeferredServices() override;
+    void         setDeferServiceStart(bool defer) override;
+    void         startDeferredServices() override;
     grpc::Status init(const EngineInitParams&                                maga_init_params,
                       py::object                                             mm_process_engine,
                       std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params) override;
@@ -20,6 +20,9 @@ public:
     grpc::Status GenerateStreamCall(grpc::ServerContext*                   context,
                                     const GenerateInputPB*                 request,
                                     grpc::ServerWriter<GenerateOutputsPB>* writer) override {
+        if (perf_local_requests_) {
+            return LocalRpcServiceImpl::GenerateStreamCall(context, request, writer);
+        }
         if (!prefill_server_) {
             auto error_msg = "server not implement GenerateStreamCall";
             RTP_LLM_LOG_ERROR(error_msg);
@@ -179,7 +182,8 @@ public:
 private:
     std::shared_ptr<PrefillBatchRpcServer> prefill_server_;
     std::shared_ptr<DecodeRpcServer>       decode_server_;
-    bool                                    defer_cache_store_{false};
+    bool                                   defer_cache_store_{false};
+    bool                                   perf_local_requests_{false};
 };
 
 }  // namespace rtp_llm

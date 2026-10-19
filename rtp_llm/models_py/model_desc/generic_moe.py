@@ -1,3 +1,4 @@
+import copy
 import os
 from typing import Any, Dict, Optional
 
@@ -597,6 +598,39 @@ class GenericMoeDecoderLayer(nn.Module):
         )
         return clone
 
+    def clone_for_layer_repeat(self, layer_idx: int) -> "GenericMoeDecoderLayer":
+        """Share initialized weights, but give attention its own logical KV ID."""
+
+        def shallow_module(module):
+            clone = copy.copy(module)
+            # nn.Module's shallow copy otherwise shares its child registry;
+            # replacing self_attn would also overwrite the source layer.
+            clone._modules = module._modules.copy()
+            clone._parameters = module._parameters.copy()
+            clone._buffers = module._buffers.copy()
+            return clone
+
+        clone = shallow_module(self)
+        clone.layer_idx = layer_idx
+        clone.self_attn = shallow_module(self.self_attn)
+        clone.self_attn.layer_idx = layer_idx
+        if self.self_attn.indexer is not None:
+            clone.self_attn.indexer = shallow_module(self.self_attn.indexer)
+            clone.self_attn.indexer.layer_idx = layer_idx
+        # Keep transformed MoE/linear weights and communication resources shared.
+        # CMP owns scheduling events, so create a separate coordinator per pass.
+        if self.cmp is not None:
+            clone.cmp = Glm5Cmp(
+                layer_idx=layer_idx,
+                config=self.cmp.config,
+                parallelism_config=self.cmp.parallelism_config,
+                self_attn=clone.self_attn,
+                input_layernorm=clone.input_layernorm,
+                mlp=clone.mlp,
+                post_attention_layernorm=clone.post_attention_layernorm,
+            )
+        return clone
+
     def _wait_pinned_mla_before_moe(self, fmha_impl: FMHAImplBase) -> None:
         if not getattr(self, "_drain_pinned_mla_before_moe", False):
             return
@@ -819,9 +853,12 @@ class GenericMoeModel(GptModelBase):
             if py_hw_kernel_config is not None
             else False
         )
+        from rtp_llm.utils.glm5_layer_repeat import build_execution_layers
+
         self.layers = nn.ModuleList(
-            [
-                GenericMoeDecoderLayer(
+            build_execution_layers(
+                model_config,
+                lambda idx: GenericMoeDecoderLayer(
                     model_config,
                     parallelism_config,
                     weights.weights[idx],
@@ -831,9 +868,9 @@ class GenericMoeModel(GptModelBase):
                     max_generate_batch_size,
                     enable_cuda_graph=enable_cuda_graph,
                     hw_kernel_config=py_hw_kernel_config,
-                )
-                for idx in range(self.layer_num)
-            ]
+                ),
+                lambda source, idx: source.clone_for_layer_repeat(idx),
+            )
         )
         self.norm = RMSResNorm(
             weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
