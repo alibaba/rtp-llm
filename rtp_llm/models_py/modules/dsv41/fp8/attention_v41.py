@@ -2914,6 +2914,7 @@ class AttentionV41FP8(AttentionFP8):
                 logical_entries_per_block=keys.logical_entries_per_block,
                 positions=positions.reshape(T),
                 preserve_score_dtype=True,
+                pad_invisible=False,
             )
         else:
             weights = (
@@ -2974,6 +2975,17 @@ class AttentionV41FP8(AttentionFP8):
                 )
                 shared["topk"] = {self.layer_id: output}
                 return output
+            # The batched chain above reads only length-bounded columns, so
+            # scoring elided the -inf padding. The per-request fallback below
+            # can run torch.topk over full rows; restore the padding before
+            # falling into it. Aten-only, so this stays CUDA-graph-capture
+            # safe without JIT-compiling a new kernel in the fallback.
+            if all_logits is not None:
+                all_logits.masked_fill_(
+                    torch.arange(all_logits.shape[1], device=x.device)[None]
+                    >= visible_i32.reshape(T, 1),
+                    -torch.inf,
+                )
         output = torch.full(
             (T, self.index_topk), -1, dtype=torch.int32, device=x.device
         )
