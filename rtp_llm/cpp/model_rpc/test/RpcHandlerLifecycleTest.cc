@@ -316,6 +316,15 @@ protected:
         if (action == OutputAction::COMPLETE) {
             engine->stream->reportEvent(StreamEvents::GenerateDone);
         }
+        if (kind == Handler::PREFILL) {
+            // This fixture has no Decode/StartLoad consumer. Settle its P2P
+            // registration explicitly, as downstream transfer completion would;
+            // scheduler completion alone must not drop the store's KV hold.
+            EXPECT_LT(engine->getCacheManager()->freeBlocksNum(), free_before);
+            auto store = engine->getCacheManager()->p2p_connector_->streamStore();
+            ASSERT_NE(store, nullptr);
+            store->markTerminal(engine->stream->uniqueKey(), engine->stream->deadlineMs());
+        }
         reap(engine, free_before);
     }
 };
