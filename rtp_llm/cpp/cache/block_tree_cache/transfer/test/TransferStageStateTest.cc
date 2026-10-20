@@ -153,5 +153,29 @@ TEST(TransferStageStateTest, ConcurrentFailuresPreserveHighestPriority) {
     EXPECT_EQ(std::count(result.status.ToString().begin(), result.status.ToString().end(), ';'), errors.size() - 1);
 }
 
+TEST(TransferStageStateTest, UnknownCompletionDominatesKnownFailuresInEitherOrder) {
+    for (bool unknown_first : {false, true}) {
+        size_t             callback_count = 0;
+        TransferStageState state([&](TransferResult result) {
+            EXPECT_EQ(result.status.code(), ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
+            EXPECT_EQ(result.copy_error, CacheCopyError::CRC_MISMATCH);
+            ++callback_count;
+        });
+        state.addBatch();
+        state.addBatch();
+        state.addBatch();
+        state.finishSubmitting();
+        const TransferResult unknown(ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "RPC timeout"),
+                                     CacheCopyError::RPC_FAILED);
+        const TransferResult failed(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "CRC mismatch"),
+                                    CacheCopyError::CRC_MISMATCH);
+        state.completeBatch(unknown_first ? unknown : failed);
+        state.completeBatch(unknown_first ? failed : unknown);
+        EXPECT_EQ(callback_count, 0u);
+        state.completeBatch(ErrorInfo::OkStatus());
+        EXPECT_EQ(callback_count, 1u);
+    }
+}
+
 }  // namespace
 }  // namespace rtp_llm
