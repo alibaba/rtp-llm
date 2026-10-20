@@ -15,7 +15,9 @@ class QsaCubTopkTest(unittest.TestCase):
     def setUp(self):
         if torch.cuda.get_device_capability() != (12, 0):
             self.skipTest("SM120 pinned Torch ordering")
-        self.env = patch.dict(os.environ, {"QWEN4_QSA_CUB_TOPK": "1"})
+        self.env = patch.dict(
+            os.environ, {"QWEN4_QSA_CUB_TOPK": "1", "QWEN4_QSA_MERGE_TOPK": "0"}
+        )
         self.env.start()
         self.addCleanup(self.env.stop)
         torch.manual_seed(143201)
@@ -167,6 +169,105 @@ class QsaCubMergeTopkTest(QsaCubTopkTest):
         env = patch.dict(os.environ, {"QWEN4_QSA_MERGE_TOPK": "1"})
         env.start()
         self.addCleanup(env.stop)
+
+
+@unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
+class QsaCubPackedDraftTopkTest(unittest.TestCase):
+    def setUp(self):
+        if torch.cuda.get_device_capability() != (12, 0):
+            self.skipTest("SM120 pinned Torch ordering")
+        env = patch.dict(
+            os.environ,
+            {
+                "QWEN4_QSA_CUB_TOPK": "1",
+                "QWEN4_QSA_MERGE_TOPK": "1",
+                "QWEN4_DRAFT_QSA_DIRECT": "1",
+            },
+        )
+        env.start()
+        self.addCleanup(env.stop)
+        torch.manual_seed(20261020)
+
+    def test_live_ragged_maps_ties_nonfinite_signed_zero(self):
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.draft_metadata_triton import (
+            draft_rows,
+        )
+
+        for batch in range(1, 9):
+            rows = batch * 4
+            scores = torch.randn(rows, 2144, device="cuda")
+            lengths = torch.full((batch,), 4, device="cuda", dtype=torch.int32)
+            prefix = torch.full_like(lengths, 8190)
+            cu = torch.arange(batch + 1, device="cuda", dtype=torch.int32) * 4
+
+            def call():
+                _, _, _, _, visible = draft_rows(lengths, prefix, cu, rows)
+                return cub.try_cub_draft_qsa_tokens(
+                    scores, visible.flatten(), lengths, cu
+                )
+
+            self.assertIsNotNone(call())
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                actual = call()
+            for generation in range(32):
+                requests = torch.arange(batch, device="cuda", dtype=torch.int32)
+                lengths.copy_((requests + generation) % 5)
+                cu[0] = 0
+                cu[1:].copy_(lengths.cumsum(0))
+                prefix.copy_((requests * 379 + generation * 19) % 8192)
+                scores.normal_()
+                kind = generation % 6
+                if kind == 1:
+                    scores.zero_()
+                if kind == 2:
+                    scores.copy_(torch.randint(-3, 4, scores.shape, device="cuda"))
+                if kind == 3:
+                    scores[:, ::3] = float("inf")
+                    scores[:, 1::5] = float("nan")
+                    scores[:, 2::7] = float("-inf")
+                if kind == 4:
+                    scores.view(torch.int32)[:, ::7] = -4194303
+                if kind == 5:
+                    scores.zero_()
+                    scores.view(torch.int32)[:, ::2] = -2147483648
+                _, inverse, valid, _, visible = draft_rows(lengths, prefix, cu, rows)
+                fixed = QsaCubTopkTest.reference(scores, visible.flatten())
+                expected = torch.where(
+                    valid[:, None], fixed.index_select(0, inverse), -1
+                )
+                graph.replay()
+                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+            graph.reset()
+
+    def test_unqualified_metadata_and_unprimed_capture_fall_back(self):
+        scores = torch.randn(4, 2144, device="cuda")
+        visible = torch.full((4,), 8192, device="cuda", dtype=torch.int32)
+        lengths = torch.tensor([4], device="cuda", dtype=torch.int32)
+        cu = torch.tensor([0, 4], device="cuda", dtype=torch.int32)
+        for args in (
+            (scores, visible, lengths.long(), cu),
+            (scores, visible, lengths.cpu(), cu),
+            (scores, visible, lengths, cu[:1]),
+            (scores, visible, lengths.repeat(2), cu),
+            (scores[:, :2048].contiguous(), visible, lengths, cu),
+        ):
+            self.assertIsNone(cub.try_cub_draft_qsa_tokens(*args))
+        for flag in (
+            "QWEN4_QSA_CUB_TOPK",
+            "QWEN4_QSA_MERGE_TOPK",
+            "QWEN4_DRAFT_QSA_DIRECT",
+        ):
+            with patch.dict(os.environ, {flag: "0"}):
+                self.assertIsNone(
+                    cub.try_cub_draft_qsa_tokens(scores, visible, lengths, cu)
+                )
+        with patch.object(cub, "_MODULE", None), patch.object(
+            cub, "_BUILD_FAILED", False
+        ), patch("torch.cuda.is_current_stream_capturing", return_value=True):
+            self.assertIsNone(
+                cub.try_cub_draft_qsa_tokens(scores, visible, lengths, cu)
+            )
 
 
 if __name__ == "__main__":

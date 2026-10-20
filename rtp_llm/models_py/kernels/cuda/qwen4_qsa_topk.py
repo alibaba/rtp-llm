@@ -21,7 +21,6 @@ _LOGGER = logging.getLogger(__name__)
 
 _CUDA_SOURCE = r"""
 
-
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -36,9 +35,15 @@ struct QsaGreater {
         return a > b;
     }
 };
-template<int N, int Threads, bool UseMerge = false>
-__global__ void
-qsaCubStableTopK(const float* scores, const int32_t* lengths, int32_t* output, int columns, bool finite_only) {
+template<int N, int Threads, bool UseMerge = false, bool DraftPacked = false>
+__global__ void qsaCubStableTopK(const float*   scores,
+                                 const int32_t* lengths,
+                                 int32_t*       output,
+                                 int            columns,
+                                 bool           finite_only,
+                                 const int32_t* draft_lengths = nullptr,
+                                 const int32_t* draft_cu      = nullptr,
+                                 int            draft_batch   = 0) {
     constexpr int Items = N / Threads;
     using FullSort      = std::conditional_t<UseMerge,
                                              cub::BlockMergeSort<uint32_t, Threads, Items, uint32_t>,
@@ -50,11 +55,24 @@ qsaCubStableTopK(const float* scores, const int32_t* lengths, int32_t* output, i
     } storage;
     __shared__ uint32_t chosen[512];
     __shared__ uint32_t cutoff;
-    const int           row      = blockIdx.x;
-    const int64_t       length   = lengths[row];
-    const int64_t       complete = (length - (length < 0 ? 3 : 0)) / 4;
-    uint32_t            key[Items], index[Items];
-    bool                special = false;
+    const int           row        = blockIdx.x;
+    int                 output_row = row;
+    if constexpr (DraftPacked) {
+        const int request = row / 4, lane = row % 4, count = draft_lengths[request];
+        if (lane < count) {
+            output_row = draft_cu[request] + lane;
+        } else {
+            output_row = draft_cu[draft_batch] + request * 4 - draft_cu[request] + lane - count;
+            for (int j = threadIdx.x; j < 2051; j += Threads)
+                output[output_row * 2051 + j] = -1;
+            return;
+        }
+    }
+
+    const int64_t length   = lengths[row];
+    const int64_t complete = (length - (length < 0 ? 3 : 0)) / 4;
+    uint32_t      key[Items], index[Items];
+    bool          special = false;
 #pragma unroll
     for (int i = 0; i < Items; ++i) {
         uint32_t col = threadIdx.x * Items + i;
@@ -124,7 +142,7 @@ qsaCubStableTopK(const float* scores, const int32_t* lengths, int32_t* output, i
                          && col < complete;
 #pragma unroll
             for (int j = 0; j < 4; ++j)
-                output[row * 2051 + rank * 4 + j] = valid ? static_cast<int32_t>(col * 4 + j) : -1;
+                output[output_row * 2051 + rank * 4 + j] = valid ? static_cast<int32_t>(col * 4 + j) : -1;
         }
     } else {
 #pragma unroll
@@ -138,14 +156,14 @@ qsaCubStableTopK(const float* scores, const int32_t* lengths, int32_t* output, i
                              && col < columns && col < complete;
 #pragma unroll
                 for (int j = 0; j < 4; ++j)
-                    output[row * 2051 + rank * 4 + j] = valid ? static_cast<int32_t>(col * 4 + j) : -1;
+                    output[output_row * 2051 + rank * 4 + j] = valid ? static_cast<int32_t>(col * 4 + j) : -1;
             }
         }
     }
     if (threadIdx.x == 0) {
 #pragma unroll
         for (int j = 0; j < 3; ++j)
-            output[row * 2051 + 2048 + j] = j < length - complete * 4 ? complete * 4 + j : -1;
+            output[output_row * 2051 + 2048 + j] = j < length - complete * 4 ? complete * 4 + j : -1;
     }
 }
 }  // namespace rtp_llm
@@ -217,6 +235,33 @@ void qsa_cub_topk(
 #undef LAUNCH
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
+void qsa_cub_topk_draft(
+    torch::Tensor scores, torch::Tensor lengths, torch::Tensor output, torch::Tensor row_lengths, torch::Tensor cu) {
+    TORCH_CHECK(scores.is_cuda() && lengths.is_cuda() && output.is_cuda() && row_lengths.is_cuda() && cu.is_cuda());
+    TORCH_CHECK(scores.scalar_type() == at::kFloat && lengths.scalar_type() == at::kInt
+                && output.scalar_type() == at::kInt && row_lengths.scalar_type() == at::kInt
+                && cu.scalar_type() == at::kInt);
+    TORCH_CHECK(scores.is_contiguous() && lengths.is_contiguous() && output.is_contiguous()
+                && row_lengths.is_contiguous() && cu.is_contiguous());
+    TORCH_CHECK(scores.device() == lengths.device() && scores.device() == output.device()
+                && scores.device() == row_lengths.device() && scores.device() == cu.device());
+    TORCH_CHECK(scores.dim() == 2 && lengths.dim() == 1 && row_lengths.dim() == 1 && cu.dim() == 1
+                && output.dim() == 2);
+    int rows = scores.size(0), cols = scores.size(1), batch = row_lengths.numel();
+    TORCH_CHECK(rows == batch * 4 && batch >= 1 && batch <= 8 && lengths.numel() == rows && output.size(0) == rows
+                && output.size(1) == 2051 && cu.numel() == batch + 1 && cols == 2144);
+    c10::cuda::CUDAGuard guard(scores.device());
+    auto                 stream = at::cuda::getCurrentCUDAStream().stream();
+    rtp_llm::qsaCubStableTopK<2304, 256, true, true><<<rows, 256, 0, stream>>>(scores.data_ptr<float>(),
+                                                                               lengths.data_ptr<int32_t>(),
+                                                                               output.data_ptr<int32_t>(),
+                                                                               cols,
+                                                                               true,
+                                                                               row_lengths.data_ptr<int32_t>(),
+                                                                               cu.data_ptr<int32_t>(),
+                                                                               batch);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
 """
 
 
@@ -269,9 +314,9 @@ def _load_module(device):
                 ).hexdigest()[:16]
                 _MODULE = load_inline(
                     name="qwen4_qsa_topk_" + identity,
-                    cpp_sources="void qsa_cub_topk(torch::Tensor scores, torch::Tensor lengths, torch::Tensor output, int64_t threads, bool finite_only, bool merge);",
+                    cpp_sources="void qsa_cub_topk(torch::Tensor scores, torch::Tensor lengths, torch::Tensor output, int64_t threads, bool finite_only, bool merge); void qsa_cub_topk_draft(torch::Tensor scores, torch::Tensor lengths, torch::Tensor output, torch::Tensor row_lengths, torch::Tensor cu);",
                     cuda_sources=_CUDA_SOURCE,
-                    functions=["qsa_cub_topk"],
+                    functions=["qsa_cub_topk", "qsa_cub_topk_draft"],
                     extra_cflags=["-O2"],
                     extra_cuda_cflags=flags,
                     with_cuda=True,
@@ -303,4 +348,38 @@ def try_cub_qsa_tokens(scores, lengths, *, finite_only=True):
         finite_only,
         os.environ.get("QWEN4_QSA_MERGE_TOPK", "0") == "1",
     )
+    return output
+
+
+def try_cub_draft_qsa_tokens(scores, visible, row_lengths, cu):
+    """Select directly into packed draft order; metadata is owner-validated.
+
+    Fixed four-lane input rows and packed output rows have a bijection even
+    for empty requests. Inactive rows fill the output padding with -1.
+    """
+    if not (
+        is_supported(scores, visible)
+        and os.environ.get("QWEN4_QSA_MERGE_TOPK", "0") == "1"
+        and os.environ.get("QWEN4_DRAFT_QSA_DIRECT", "0") == "1"
+        and scores.shape[1] == 2144
+        and row_lengths.ndim == cu.ndim == 1
+        and 1 <= row_lengths.numel() <= 8
+        and scores.shape[0] == 4 * row_lengths.numel()
+        and cu.numel() == row_lengths.numel() + 1
+        and all(
+            t.dtype == torch.int32
+            and t.device == scores.device
+            and t.is_contiguous()
+            and not t.requires_grad
+            for t in (row_lengths, cu)
+        )
+    ):
+        return None
+    module = _load_module(scores.device)
+    if module is None:
+        return None
+    output = torch.empty(
+        (scores.shape[0], 2051), device=scores.device, dtype=torch.int32
+    )
+    module.qsa_cub_topk_draft(scores, visible, output, row_lengths, cu)
     return output

@@ -276,16 +276,14 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             or selected_indices.dtype != torch.int32
         ):
             raise RuntimeError("qwen4_exp draft Graph query/selection capacity changed")
-        sources, inverse, valid, _, visible = draft_graph_rows(self.attn_inputs, tokens)
         self._qsa_main_cache_mutation_started = True
         qkv = self.rope_kvcache_impl.forward(qkv, kv_cache, self.rope_params)
         direct = try_draft_paged_attention(
             qkv,
             selected_indices,
-            sources,
-            inverse,
-            valid,
-            visible,
+            self.attn_inputs.input_lengths_device,
+            self.attn_inputs.prefix_lengths_device,
+            self.attn_inputs.cu_seqlens_device,
             kv_cache.kv_cache_base,
             self.attn_inputs.kv_cache_kernel_block_id_device,
             heads=self.head_num,
@@ -297,6 +295,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         )
         if direct is not None:
             return direct
+        sources, inverse, valid, _, visible = draft_graph_rows(self.attn_inputs, tokens)
         packed = try_pack_inputs(
             qkv,
             selected_indices,

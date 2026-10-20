@@ -13,18 +13,25 @@ from .sparse_paged_fmha import main_kv_scale_view
 
 
 @triton.jit
-def _merge_draft_packed_splits(
+def _merge_draft_metadata_splits(
     PARTIAL,
-    INVERSE,
-    VALID,
+    CU,
     GATE,
     OUT,
+    BATCH: tl.constexpr,
+    RB: tl.constexpr,
     SPLITS: tl.constexpr,
     WITH_GATE: tl.constexpr,
 ):
     packed, head = tl.program_id(0), tl.program_id(1)
-    inverse = tl.load(INVERSE + packed)
-    valid = tl.load(VALID + packed)
+    request = tl.arange(0, RB)
+    ends = tl.load(CU + request + 1, request < BATCH, other=2147483647)
+    owner = tl.minimum(
+        tl.sum(((packed >= ends) & (request < BATCH)).to(tl.int32), 0), BATCH - 1
+    )
+    inverse = owner * 4 + packed - tl.load(CU + owner)
+    valid = packed < tl.load(CU + BATCH)
+    inverse = tl.where(valid, inverse, 0)
     row = ((inverse // 4) * 12 + head) * 4 + inverse % 4
     splits = tl.arange(0, SPLITS)
     dim = tl.arange(0, 256)
@@ -49,10 +56,9 @@ def _merge_draft_packed_splits(
 def try_draft_paged_attention(
     qkv,
     selected,
-    sources,
-    inverse,
-    valid,
-    visible,
+    lengths,
+    prefixes,
+    cu,
     cache,
     table,
     *,
@@ -65,7 +71,8 @@ def try_draft_paged_attention(
 ):
     """Return None outside the measured domain, before launching any work.
 
-    Ownership maps come from draft_graph_rows. Address fusion keeps the same
+    Request lengths and cumulative offsets are validated by the owner.
+    Address fusion keeps the same
     grouped split policy, compensated BF16 PV and BF16 output/gate boundaries.
     """
     if not (
@@ -76,20 +83,18 @@ def try_draft_paged_attention(
         and qkv.shape[1] >= 3072
         and qkv.stride(1) == 1
         and qkv.stride(0) >= qkv.shape[1]
-        and visible.ndim == 2
-        and visible.shape[1] == 4
-        and 1 <= visible.shape[0] <= 8
-        and visible.numel() == qkv.shape[0]
-        and visible.dtype == torch.int32
+        and lengths.ndim == prefixes.ndim == cu.ndim == 1
+        and 1 <= lengths.numel() <= 8
+        and qkv.shape[0] == 4 * lengths.numel()
+        and prefixes.shape == lengths.shape
+        and cu.numel() == lengths.numel() + 1
+        and lengths.dtype == prefixes.dtype == cu.dtype == torch.int32
         and selected.shape == (qkv.shape[0], 2051)
         and selected.dtype == torch.int32
         and selected.stride(1) == 1
         and selected.stride(0) >= 2051
-        and sources.shape == inverse.shape == valid.shape == (qkv.shape[0],)
-        and sources.dtype == inverse.dtype == torch.int64
-        and valid.dtype == torch.bool
         and table.ndim == 2
-        and table.shape[0] == visible.shape[0]
+        and table.shape[0] == lengths.numel()
         and table.shape[1] > 0
         and table.dtype == torch.int32
         and cache.dtype == torch.float8_e4m3fn
@@ -98,15 +103,14 @@ def try_draft_paged_attention(
         and not cache.requires_grad
         and kv_scale is not None
         and not kv_scale.requires_grad
-        and all(t.is_contiguous() for t in (sources, inverse, valid, visible, table))
+        and all(t.is_contiguous() for t in (lengths, prefixes, cu, table))
         and all(
             t.device == qkv.device
             for t in (
                 selected,
-                sources,
-                inverse,
-                valid,
-                visible,
+                lengths,
+                prefixes,
+                cu,
                 cache,
                 table,
                 kv_scale,
@@ -151,7 +155,7 @@ def try_draft_paged_attention(
         return None
     if scales.stride(0) < 256:
         return None
-    batch = visible.shape[0]
+    batch = lengths.numel()
     rows = batch * 4
     splits = 32 if batch in (1, 4) else 8
     block_k = 128 if batch == 1 else 64
@@ -164,7 +168,7 @@ def try_draft_paged_attention(
         cache,
         scales,
         table,
-        visible,
+        lengths,
         selected,
         partial,
         QB=0,
@@ -193,19 +197,22 @@ def try_draft_paged_attention(
         ST=scales.stride(3),
         ROTATE_TILES=batch in (1, 4),
         FP16_PV=False,
-        DRAFT_SOURCES=sources,
+        DRAFT_CU=cu,
+        DRAFT_LENGTHS=lengths,
+        DRAFT_PREFIX=prefixes,
         DRAFT_INPUT=True,
         DRAFT_QS=qkv.stride(0),
         num_warps=4,
         num_stages=2,
         enable_fp_fusion=False,
     )
-    _merge_draft_packed_splits[(rows, 12)](
+    _merge_draft_metadata_splits[(rows, 12)](
         partial,
-        inverse,
-        valid,
+        cu,
         gate if gate is not None else output,
         output,
+        BATCH=batch,
+        RB=triton.next_power_of_2(batch),
         SPLITS=splits,
         WITH_GATE=gate is not None,
     )
