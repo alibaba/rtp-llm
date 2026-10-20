@@ -38,8 +38,8 @@ struct SharedStorage {
 
 
 
-template<int BM, bool TmaSF, bool Side=false>
-__global__ __launch_bounds__(256, 1) void q_gemm_group32(
+template<int BM, bool TmaSF, bool Side=false, bool IndexTeams=false>
+__global__ __launch_bounds__(IndexTeams ? 512 : 256, 1) void q_gemm_group32(
     const __grid_constant__ CUtensorMap desc_A,
     const __grid_constant__ CUtensorMap desc_B,
     const __grid_constant__ CUtensorMap desc_D,
@@ -84,6 +84,8 @@ __global__ __launch_bounds__(256, 1) void q_gemm_group32(
         ptx::tcgen05_alloc_2sm(static_cast<uint32_t>(__cvta_generic_to_shared(&s.tmem_base)), Dims::NUM_TMEM_COLS);
     }
     ptx::cluster_sync();
+
+    if(side.trigger_pdl && threadIdx.x==0)cudaTriggerProgrammaticLaunchCompletion();
 
 
     if (warp_id==0 && ptx::elect_one_sync()) {
@@ -161,10 +163,11 @@ __global__ __launch_bounds__(256, 1) void q_gemm_group32(
     } else if(warp_id==3) {
         if constexpr(Side) {
             if(side.kv)for(int row=blockIdx.x;row<side.rows;row+=gridDim.x)kv_row(side,row);
+            if constexpr(!IndexTeams)index_work(side,blockIdx.x,gridDim.x);
 
         }
     } else if(warp_id>=8) {
-
+        if constexpr(IndexTeams)index_work(side,blockIdx.x*8+warp_id-8,gridDim.x*8);
     } else if(warp_id>=4 && warp_id<8) {
         constexpr int STORE_M_T=Dims::STORE_M;
         constexpr int NUM_STORES=BM/STORE_M_T, NUM_TMEM_SUBROWS=STORE_M_T/8;
@@ -292,6 +295,9 @@ void launch(torch::Tensor x,torch::Tensor xs,torch::Tensor w,torch::Tensor ws,to
     CUtensorMap sx{},sw{};
     if constexpr(TmaSF) {sx=sf_tensor_map(xs,SwapDims<BM>::SF_BLOCK_M);sw=sf_tensor_map(ws,128);}
     auto kernel=q_gemm_group32<BM,TmaSF,Side>;
+    if constexpr(Side) {
+        if(side.global_indices)kernel=q_gemm_group32<BM,TmaSF,Side,true>;
+    }
     constexpr int smem=sizeof(SharedStorage<BM>);
     C10_CUDA_CHECK(cudaFuncSetAttribute(kernel,cudaFuncAttributeMaxDynamicSharedMemorySize,smem));
     cudaLaunchAttribute attrs[2]{};
@@ -299,8 +305,8 @@ void launch(torch::Tensor x,torch::Tensor xs,torch::Tensor w,torch::Tensor ws,to
     attrs[1].id=cudaLaunchAttributeProgrammaticStreamSerialization;
     attrs[1].val.programmaticStreamSerializationAllowed=1;
     cudaLaunchConfig_t cfg{};
-    cfg.gridDim=dim3(clusters*2);cfg.blockDim=dim3(256);cfg.dynamicSmemBytes=smem;
-    cfg.stream=at::cuda::getCurrentCUDAStream();cfg.attrs=attrs;cfg.numAttrs=side.wait_pdl?2:1;
+    cfg.gridDim=dim3(clusters*2);cfg.blockDim=dim3(Side && side.global_indices ? 512 : 256);cfg.dynamicSmemBytes=smem;
+    cfg.stream=at::cuda::getCurrentCUDAStream();cfg.attrs=attrs;cfg.numAttrs=(side.wait_pdl||side.trigger_pdl)?2:1;
     C10_CUDA_CHECK(cudaLaunchKernelEx(&cfg,kernel,a,b,d,sx,sw,
         reinterpret_cast<const uint32_t*>(xs.data_ptr()),reinterpret_cast<const uint32_t*>(ws.data_ptr()),
         xs.stride(0),xs.stride(1),ws.stride(0),ws.stride(1),m,nt,clusters,side));

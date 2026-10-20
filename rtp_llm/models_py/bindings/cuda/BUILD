@@ -210,6 +210,7 @@ cc_library(
     copts = copts(),
     deps = [
         "//rtp_llm/models_py/bindings/cuda/kernels:dsv41_qb_kv",
+        "//rtp_llm/models_py/bindings/cuda/kernels:dsv41_flashmla_pdl",
         "//rtp_llm/models_py/bindings:register_ops_hdr",
         "//rtp_llm/models_py/bindings/cuda/kernels:mla_quant_kernel",
         "//rtp_llm/models_py/bindings/cuda/kernels:deepselect_bf16",

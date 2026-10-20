@@ -4,6 +4,7 @@
 namespace rtp_dsv41_qb {
 struct SideArgs {
     bool wait_pdl=false;
+    bool trigger_pdl=false;
     bool trap_invalid=false;
     const __nv_bfloat16* kv=nullptr;
     const __nv_bfloat16* gamma=nullptr;
@@ -16,6 +17,13 @@ struct SideArgs {
     __nv_bfloat16* kv_out=nullptr;
     int64_t kv_stride=512,page_stride=0;
     int rows=0,pages=0,entries=64,num_freqs=0;
+    const int* req=nullptr;
+    const int* block_table=nullptr;
+    const int* local_indices=nullptr;
+    int* global_indices=nullptr;
+    int topk=0,num_requests=0,blocks_per_req=0,logical_entries=0,index_entries=0;
+    int64_t table_stride=0,local_stride=0;
+    int logical_shift=-1,entries_shift=-1;
     float eps=1e-6f;
 };
 
@@ -92,5 +100,39 @@ __device__ __forceinline__ void kv_row(const SideArgs& a,int row) {
     }
 }
 
+
+__device__ __forceinline__ void index_work(const SideArgs& a,int worker,int workers) {
+    if(a.global_indices) {
+        const int lane=threadIdx.x&31;
+        for(int row=worker;row<a.rows;row+=workers) {
+            const int req=a.req[row];
+            const int64_t row_start=int64_t(row)*a.local_stride;
+            const int64_t table_start=int64_t(req)*a.table_stride;
+            // Eight independent lookups in flight per lane. Loading all tokens
+            // first, then all table bases, avoids a serial token->table chain.
+            for(int chunk=0;chunk<a.topk;chunk+=256) {
+                int tok[8],block[8],base[8];bool valid[8];
+                #pragma unroll
+                for(int i=0;i<8;++i) {
+                    int col=chunk+i*32+lane;
+                    tok[i]=col<a.topk ? a.local_indices[row_start+col] : -1;
+                }
+                #pragma unroll
+                for(int i=0;i<8;++i) {
+                    block[i]=a.logical_shift>=0 ? tok[i]>>a.logical_shift : tok[i]/a.logical_entries;
+                    valid[i]=tok[i]>=0&&req>=0&&req<a.num_requests&&block[i]>=0&&block[i]<a.blocks_per_req;
+                    base[i]=valid[i]?a.block_table[table_start+block[i]]:0;
+                }
+                #pragma unroll
+                for(int i=0;i<8;++i) {
+                    int col=chunk+i*32+lane;
+                    int offset=a.entries_shift>=0 ? tok[i]&(a.index_entries-1) : tok[i]%a.index_entries;
+                    int out=valid[i]&&base[i]>0 ? base[i]*a.index_entries+offset : -1;
+                    if(col<a.topk)a.global_indices[int64_t(row)*a.topk+col]=out;
+                }
+            }
+        }
+    }
+}
 
 } // namespace rtp_dsv41_qb

@@ -39,6 +39,18 @@ def git_deps():
         build_file = str(Label("@rtp_llm//3rdparty/cutlass:cutlass.BUILD")),
     )
 
+    # Isolated native FlashMLA consumer. Its parameter ABI is not shared with
+    # the separately installed wheel; keep both source and submodule pinned.
+    new_git_repository(
+        name = "dsv41_flashmla_pdl",
+        remote = "https://github.com/deepseek-ai/FlashMLA.git",
+        commit = "0f11e178da1f67becb087a324b400854931ec3e3",
+        init_submodules = True,
+        patches = ["@rtp_llm//3rdparty/flashmla:0001-ready-qkv-pdl.patch"],
+        patch_args = ["-p1"],
+        build_file = str(Label("@rtp_llm//3rdparty/flashmla:flashmla.BUILD")),
+    )
+
     git_repository(
         name = "com_google_googletest",
         remote = "https://github.com/google/googletest.git",

@@ -333,6 +333,7 @@ class MegaAttention(torch.nn.Module):
         extra_pool=None,
         extra_indices=None,
         extra_lengths=None,
+        wait_pdl=False,
     ):
         """Joint softmax over native 528-byte SWA and optional 288-byte FP4.
 
@@ -343,6 +344,22 @@ class MegaAttention(torch.nn.Module):
         """
         q = self.pad_q(q)
         rows = q.shape[0]
+        if wait_pdl:
+            from .decode.ready_qkv import flashmla_decode
+
+            # The producer requested this exact native consumer protocol. Do
+            # not switch wheel/backend after publishing an early trigger.
+            return flashmla_decode(
+                self,
+                q,
+                swa_pool,
+                swa_indices,
+                positions,
+                extra_pool,
+                extra_indices,
+                swa_lengths=swa_lengths,
+                extra_lengths=extra_lengths,
+            )
         output, scales, _ = self.backend.fused_norm_rope_attn_rope_cast_decode(
             q,
             swa_pool.unsqueeze(2),

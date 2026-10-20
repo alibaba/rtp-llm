@@ -46,6 +46,8 @@ class DecodeQKV(NamedTuple):
     index_q: torch.Tensor | None = None
     head_weights: torch.Tensor | None = None
     index_prepared: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
+    global_slots: torch.Tensor | None = None
+    flashmla_pdl: bool = False
 
 
 def _fused_v41_q_rope_supported(q, freqs_cis, rope_dim: int) -> bool:
@@ -83,6 +85,7 @@ def decode_compute_qkv(
     mega_attention=None,
     shared_input_quant=None,
     qb_pdl: bool = False,
+    ready_plan=None,
 ) -> DecodeQKV:
     """Decode Q/KV path — RMSNorm + LoRA Q + KV linear + fused RMSNorm-RoPE.
 
@@ -137,6 +140,44 @@ def decode_compute_qkv(
         qr = attn._rmsnorm_weighted(attn._lin(attn.wq_a, x), attn.q_norm)
     else:
         qr = fused_qkv[0]
+    if (
+        ready_plan is not None
+        and mega_attention is not None
+        and qr_quantized is not None
+        and fused_qkv is not None
+        and not reindex
+        and getattr(attn, "skip_post_q_norm", False)
+        and rd == 64
+        and (attn.n_heads, attn.head_dim, mega_attention.padded_heads) == (64, 512, 64)
+    ):
+        from rtp_llm.models_py.modules.dsv41.fp8._v41_qb_kv import try_project_kv_index
+
+        result = try_project_kv_index(
+            mega_attention,
+            *qr_quantized,
+            fused_qkv[1],
+            attn.kv_norm,
+            position_ids,
+            attn.freqs_cis,
+            swa_pool,
+            swa_slots,
+            ready_plan,
+            eps=attn.eps,
+            wait_pdl=qb_pdl,
+            trigger_pdl=ready_plan.pdl,
+        )
+        if result is not None:
+            main_q, kv, slots = result
+            return DecodeQKV(
+                qr,
+                main_q.unflatten(-1, (64, 512)),
+                kv,
+                freqs_cis,
+                qr_quantized,
+                True,
+                global_slots=slots,
+                flashmla_pdl=ready_plan.pdl,
+            )
     index_q = None
     index_prepared = None
     merged = getattr(mega_attention, "merged_qb", None)

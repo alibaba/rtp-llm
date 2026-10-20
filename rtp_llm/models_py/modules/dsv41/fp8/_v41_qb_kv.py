@@ -5,12 +5,14 @@ from __future__ import annotations
 import math
 import os
 from functools import lru_cache
+from types import SimpleNamespace
 
 import torch
 
 # Qualified shapes only. M is B*S, not the number of requests.
 # M384 retains DeepGEMM until its pure-GEMM regression is resolved.
 _CONFIGS = {128: (0, 72), 192: (1, 72), 256: (3, 72), 512: (3, 72)}
+_READY_CONFIGS = {128: (0, 64), 192: (1, 64), 256: (2, 74), 384: (1, 64), 512: (2, 74)}
 
 
 def _ops():
@@ -36,21 +38,22 @@ def _config(merged, data, scales):
         or not data.is_contiguous()
         or data.dtype != torch.float8_e4m3fn
         or getattr(merged, "main_width", None) != 32768
-        or getattr(merged, "index_width", None) != 4096
+        or getattr(merged, "index_width", None) not in (0, 4096)
     ):
         return None
     rows = data.numel() // 1280
-    config = _CONFIGS.get(rows)
+    width = 32768 + merged.index_width
+    config = (_READY_CONFIGS if width == 32768 else _CONFIGS).get(rows)
     if config is None:
         return None
     weight, sf = merged.weight, merged.weight_scales
     if not (
         weight.device == sf.device == scales.device == data.device
-        and weight.shape == (36864, 1280)
+        and weight.shape == (width, 1280)
         and weight.dtype == data.dtype
         and weight.is_contiguous()
         and scales.shape == (rows, 10)
-        and sf.shape == (36864, 10)
+        and sf.shape == (width, 10)
         and all(
             t.dtype == torch.int32
             and t.stride(0) == 1
@@ -101,9 +104,12 @@ def try_project_kv(
     *,
     eps,
     wait_pdl=False,
+    _ready=None,
+    _trigger_pdl=False,
 ):
-    """Return (main_q, index_q, kv), or None before any output/cache write."""
-    if os.environ.get("DSV41_FUSED_QB_KV", "0") != "1":
+    """Return Q/KV (and optional slots), or None before any cache write."""
+    flag = "DSV41_FUSED_READY_QKV" if _ready is not None else "DSV41_FUSED_QB_KV"
+    if os.environ.get(flag, "0") != "1":
         return None
     config = _config(merged, data, scales)
     if config is None or any(t is None for t in (pool, slots)):
@@ -156,16 +162,22 @@ def try_project_kv(
         and eps >= 0
     ):
         return None
+    if _ready is not None and (
+        not _ready.supports(data.device, rows)
+        or not callable(getattr(_ops(), "dsv41_qb_kv_index_out", None))
+    ):
+        return None
+    width = merged.weight.shape[0]
     output = torch.empty(
-        (*data.shape[:-1], 36864), dtype=torch.bfloat16, device=data.device
+        (*data.shape[:-1], width), dtype=torch.bfloat16, device=data.device
     )
     kv = torch.empty(raw_kv.shape, dtype=torch.bfloat16, device=data.device)
-    _ops().dsv41_qb_kv_out(
+    arguments = (
         data.view(rows, 1280),
         scales,
         merged.weight,
         merged.weight_scales,
-        output.view(rows, 36864),
+        output.view(rows, width),
         raw_kv.view(rows, 512),
         gamma,
         positions,
@@ -178,5 +190,61 @@ def try_project_kv(
         wait_pdl,
         trap_invalid_kv_access_enabled(),
     )
+    if _ready is not None:
+        slots_out = torch.empty(
+            _ready.local.shape, dtype=torch.int32, device=data.device
+        )
+        _ops().dsv41_qb_kv_index_out(
+            *arguments,
+            _ready.req,
+            _ready.table,
+            _ready.local,
+            slots_out,
+            _ready.logical_entries,
+            _ready.entries,
+            _trigger_pdl,
+        )
+        return output, kv, slots_out
+    _ops().dsv41_qb_kv_out(*arguments)
     main, index = output.split((32768, 4096), dim=-1)
     return main, index, kv
+
+
+def try_project_kv_index(
+    mega,
+    data,
+    scales,
+    raw_kv,
+    gamma,
+    positions,
+    frequencies,
+    pool,
+    slots,
+    plan,
+    *,
+    eps,
+    wait_pdl=False,
+    trigger_pdl=False,
+):
+    """Q-only N32768 + SWA + already-ready TopK mapping, exactly one launch."""
+    state = SimpleNamespace(
+        main_width=32768,
+        index_width=0,
+        weight=mega.query_weight,
+        weight_scales=mega.query_scale,
+    )
+    return try_project_kv(
+        state,
+        data,
+        scales,
+        raw_kv,
+        gamma,
+        positions,
+        frequencies,
+        pool,
+        slots,
+        eps=eps,
+        wait_pdl=wait_pdl,
+        _ready=plan,
+        _trigger_pdl=trigger_pdl,
+    )

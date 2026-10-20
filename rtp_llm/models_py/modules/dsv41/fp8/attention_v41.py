@@ -3364,6 +3364,11 @@ class AttentionV41FP8(AttentionFP8):
             if output is not None:
                 finish_attention(self)
                 return output
+        # REUSE has no current-layer index scoring. Its local TopK is already
+        # published on this stream by the source layer; preserve that tensor.
+        from .decode.ready_qkv import make_ready_plan
+
+        ready_plan = make_ready_plan(self, mega, metadata, T, swa_pool, mega_swa)
         swa_slots = metadata.pool_write_slot_mappings.get(SWA_KV)
         global_work = None
         prepared_query = None
@@ -3385,6 +3390,7 @@ class AttentionV41FP8(AttentionFP8):
                 swa_pool=swa_pool,
                 swa_slots=None if swa_slots is None else swa_slots[:T],
                 **({"mega_attention": mega} if mega is not None else {}),
+                **({"ready_plan": ready_plan} if ready_plan is not None else {}),
             )
             if not qkv.swa_written:
                 self._decode_write_swa_fp8(qkv.kv, B, S, metadata)
@@ -3396,8 +3402,8 @@ class AttentionV41FP8(AttentionFP8):
             if global_work is not None:
                 global_work.finish()
         if mega is not None:
-            slots = None
-            if self.compress_ratio:
+            slots = getattr(qkv, "global_slots", None)
+            if self.compress_ratio and slots is None:
                 if self.is_kv_source and global_work is None:
                     self._produce_global_decode(x, positions, req, starts)
                 selected = self._select_indices_decode(
@@ -3415,7 +3421,11 @@ class AttentionV41FP8(AttentionFP8):
                     .to(dtype=torch.int32)
                     .contiguous()
                 )
-            mega_positions = self._mega_position_chunks(metadata.position_ids, T, T)[0]
+            mega_positions = (
+                ready_plan.positions
+                if getattr(qkv, "flashmla_pdl", False)
+                else self._mega_position_chunks(metadata.position_ids, T, T)[0]
+            )
             with record_function_range("dsv41.decode.mega_attention"):
                 pair = mega.decode(
                     qkv.q,
@@ -3424,6 +3434,7 @@ class AttentionV41FP8(AttentionFP8):
                     mega_positions,
                     extra_pool=mega_global,
                     extra_indices=slots,
+                    **({"wait_pdl": True} if getattr(qkv, "flashmla_pdl", False) else {}),
                 )
             out = mega.project_output(pair, self.wo_b)
             self._prefill_output_all_reduce(out)
