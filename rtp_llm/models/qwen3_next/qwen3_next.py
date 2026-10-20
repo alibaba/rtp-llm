@@ -228,6 +228,22 @@ class Qwen35Moe(Qwen3NextBase):
 
         return config
 
+    def _new_loader_unsupported_reason(
+        self, *, skip_python_model: bool = False
+    ) -> Optional[str]:
+        """Reject multimodal Qwen3.5 until vision injection is NewLoader-ready."""
+        reason = super()._new_loader_unsupported_reason(
+            skip_python_model=skip_python_model
+        )
+        if reason is not None:
+            return reason
+        if self.is_multimodal():
+            return (
+                "Qwen3.5 multimodal vision-feature injection is not supported "
+                "by NewLoader; use the legacy loader"
+            )
+        return None
+
     @classmethod
     def _parse_rope_config(cls, config_json: dict, config: ModelConfig):
         rope_parameters = config_json["rope_parameters"]
