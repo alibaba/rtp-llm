@@ -101,4 +101,24 @@ class RecentCacheKeyWindowTest {
         assertEquals(2L, snapshot.getRequestOccurrences());
         assertEquals(0L, snapshot.getRequestHitOccurrences());
     }
+
+    @Test
+    void should_report_age_of_capacity_evicted_keys_but_not_expired_ones() {
+        AtomicLong now = new AtomicLong(0L);
+        RecentCacheKeyWindow window = new RecentCacheKeyWindow(1000L, 2L, now::get);
+
+        window.record(List.of(1L));
+        now.set(100L);
+        window.record(List.of(2L));
+
+        now.set(300L);
+        RecentCacheKeyWindow.Snapshot full = window.record(List.of(3L));
+        assertEquals(1L, full.getCapacityEvictions());
+        assertEquals(300L, full.getCapacityEvictionAgeSumMs());
+
+        now.set(5000L);
+        RecentCacheKeyWindow.Snapshot expired = window.record(List.of(4L));
+        assertEquals(0L, expired.getCapacityEvictions());
+        assertEquals(0L, expired.getCapacityEvictionAgeSumMs());
+    }
 }

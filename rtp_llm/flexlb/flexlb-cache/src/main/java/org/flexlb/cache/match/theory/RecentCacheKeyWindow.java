@@ -31,6 +31,8 @@ public class RecentCacheKeyWindow {
     private final int tableMask;
 
     private int uniqueSize;
+    private long capacityEvictions;
+    private long capacityEvictionAgeSumMs;
 
     RecentCacheKeyWindow(long timeWindowMs, long maxCacheKeys, LongSupplier nowSupplier) {
         if (timeWindowMs <= 0L) {
@@ -57,6 +59,8 @@ public class RecentCacheKeyWindow {
 
     public Snapshot record(List<Long> cacheKeys) {
         long nowMs = nowSupplier.getAsLong();
+        capacityEvictions = 0L;
+        capacityEvictionAgeSumMs = 0L;
         evictExpired(nowMs);
 
         long requestOccurrences = 0L;
@@ -84,7 +88,8 @@ public class RecentCacheKeyWindow {
         if (log.isDebugEnabled()) {
             logRequest(nowMs, requestOccurrences, requestHitOccurrences);
         }
-        return new Snapshot(timeWindowMs, requestOccurrences, requestHitOccurrences);
+        return new Snapshot(timeWindowMs, requestOccurrences, requestHitOccurrences,
+                capacityEvictions, capacityEvictionAgeSumMs);
     }
 
     private void retainCacheKey(long cacheKey, long nowMs) {
@@ -95,6 +100,8 @@ public class RecentCacheKeyWindow {
             return;
         }
         if (uniqueSize == maxCacheKeys) {
+            capacityEvictions++;
+            capacityEvictionAgeSumMs += Math.max(0L, nowMs - oldestTimestampMs());
             evictOldestCacheKey();
         }
         int newSlot = findEmptySlot(cacheKey);
@@ -258,8 +265,15 @@ public class RecentCacheKeyWindow {
         private final long timeWindowMs;
         private final long requestOccurrences;
         private final long requestHitOccurrences;
+        /** Keys evicted because the pool was full during this record call (not window expiry). */
+        private final long capacityEvictions;
+        /** Sum of (eviction time - last seen time) over those keys; divide by capacityEvictions for average TTL. */
+        private final long capacityEvictionAgeSumMs;
 
-        Snapshot(long timeWindowMs, long requestOccurrences, long requestHitOccurrences) {
+        Snapshot(long timeWindowMs, long requestOccurrences, long requestHitOccurrences,
+                 long capacityEvictions, long capacityEvictionAgeSumMs) {
+            this.capacityEvictions = capacityEvictions;
+            this.capacityEvictionAgeSumMs = capacityEvictionAgeSumMs;
             this.timeWindowMs = timeWindowMs;
             this.requestOccurrences = requestOccurrences;
             this.requestHitOccurrences = requestHitOccurrences;

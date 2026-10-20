@@ -41,6 +41,8 @@ import static org.flexlb.constant.MetricConstant.CACHE_MATCH_STANDBY_FALLBACK_QP
 import static org.flexlb.constant.MetricConstant.CACHE_REQUEST_TOTAL;
 import static org.flexlb.constant.MetricConstant.CACHE_ROUTING_CANDIDATE_MAX_HIT_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_ROUTING_SELECTED_MATCH_HIT_TOKENS;
+import static org.flexlb.constant.MetricConstant.CACHE_THEORY_EVICT_AGE_MS_SUM;
+import static org.flexlb.constant.MetricConstant.CACHE_THEORY_EVICT_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_THEORY_HIT_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_THEORY_HIT_RATIO;
 import static org.flexlb.constant.MetricConstant.CACHE_THEORY_TOTAL_COUNT;
@@ -112,6 +114,8 @@ public class CacheMetricsReporter {
         monitor.register(CACHE_THEORY_HIT_COUNT, FlexMetricType.COUNTER);
         monitor.register(CACHE_THEORY_TOTAL_COUNT, FlexMetricType.COUNTER);
         monitor.register(CACHE_THEORY_HIT_RATIO, FlexMetricType.GAUGE);
+        monitor.register(CACHE_THEORY_EVICT_COUNT, FlexMetricType.COUNTER);
+        monitor.register(CACHE_THEORY_EVICT_AGE_MS_SUM, FlexMetricType.COUNTER);
         monitor.register(CACHE_ROUTING_SELECTED_MATCH_HIT_TOKENS, FlexMetricType.QPS);
         monitor.register(CACHE_ROUTING_CANDIDATE_MAX_HIT_TOKENS, FlexMetricType.QPS);
         monitor.register(CACHE_AFFINITY_DECISION, FlexMetricType.QPS);
@@ -350,6 +354,18 @@ public class CacheMetricsReporter {
         monitor.report(CACHE_THEORY_HIT_COUNT, tags, hitTokens);
         monitor.report(CACHE_THEORY_TOTAL_COUNT, tags, inputTokens);
         monitor.report(CACHE_THEORY_HIT_RATIO, tags, (double) hitTokens / inputTokens);
+    }
+
+    /**
+     * Report capacity evictions of the theory key pool: count and summed age (ms).
+     */
+    public void reportTheoryCacheEvictionMetrics(long evictions, long ageSumMs) {
+        if (evictions <= 0L) {
+            return;
+        }
+        FlexMetricTags tags = FlexMetricTags.of();
+        monitor.report(CACHE_THEORY_EVICT_COUNT, tags, evictions);
+        monitor.report(CACHE_THEORY_EVICT_AGE_MS_SUM, tags, ageSumMs);
     }
 
     /**
