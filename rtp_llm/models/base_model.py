@@ -555,11 +555,16 @@ class BaseModel(object):
             self.model_config, default_enabled=default_enabled
         )
         unsupported_reason = None
-        if enabled and self.model_config.use_new_loader is None:
+        if enabled:
             unsupported_reason = self._new_loader_unsupported_reason(
                 skip_python_model=skip_python_model
             )
             if unsupported_reason is not None:
+                if self.model_config.use_new_loader is not None:
+                    raise ValueError(
+                        "NewLoader was explicitly enabled but is unsupported: "
+                        f"{unsupported_reason}"
+                    )
                 legacy_reason = self._legacy_loader_unsupported_reason()
                 if legacy_reason is not None:
                     raise ValueError(
