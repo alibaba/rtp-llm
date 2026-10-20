@@ -303,7 +303,7 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
     int64_t mm_cost_us = 0, enqueue_cost_us = 0, poll_cost_us = 0;
     int64_t phase_start = currentTimeUs();
 
-    auto preprocess_status = preprocessForPD(input, mm_processor_.get(), engine_->isMTPEagle());
+    auto preprocess_status = preprocessForPD(input, mm_processor_.get(), engine_->isMTPEagle(), RoleType::PREFILL);
     mm_cost_us             = currentTimeUs() - phase_start;
     if (!preprocess_status.ok()) {
         generate_context.error_status = serializeErrorMsg(generate_context.request_key, preprocess_status);
@@ -520,7 +520,7 @@ grpc::Status PrefillRpcServer::EnqueueBatch(grpc::ServerContext*         context
                     addBatchError(response, request_id, admission.code(), admission.ToString());
                     continue;
                 }
-                const auto preprocess_status = preprocessForPD(input, mm_processor_.get(), engine_->isMTPEagle());
+                const auto preprocess_status = preprocessForPD(input, mm_processor_.get(), engine_->isMTPEagle(), RoleType::PREFILL);
                 if (!preprocess_status.ok()) {
                     cancel_registry_->finishLocal(cancel_handle);
                     cancel_registry_->finishDownstream(cancel_handle);

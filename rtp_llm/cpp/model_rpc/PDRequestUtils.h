@@ -18,7 +18,10 @@ PDSupportDecision checkPDSupport(const GenerateInputPB& request);
 ErrorInfo         validatePDHandoff(const GenerateInputPB& request);
 std::string       masterEnqueuedHandoffUniqueKey(int64_t request_id);
 
-// QueryConverter performs common PB conversion before PD multimodal preprocessing.
-ErrorInfo preprocessForPD(std::shared_ptr<GenerateInput>& input, MultimodalProcessor* processor, bool is_mtp_eagle);
+// Decode consumes FE-expanded IDs; Prefill performs multimodal embedding preparation.
+ErrorInfo preprocessForPD(std::shared_ptr<GenerateInput>& input,
+                          MultimodalProcessor*            processor,
+                          bool                            is_mtp_eagle,
+                          RoleType                        role);
 
 }  // namespace rtp_llm
