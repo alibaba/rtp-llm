@@ -84,9 +84,14 @@ final class EndpointGenerationLifecycle {
             notifyAll();
         }
         // Completion can acquire a generation lock; never run it under L.
-        retirementCompleted.complete(null);
+        if (failure == null) {
+            retirementCompleted.complete(null);
+        } else {
+            retirementCompleted.completeExceptionally(failure);
+        }
     }
 
+    /** Run finalization only after successful local cleanup, including after a wait timeout. */
     void onRetired(Runnable completion) {
         retirementCompleted.thenRun(Objects.requireNonNull(completion, "completion"));
     }

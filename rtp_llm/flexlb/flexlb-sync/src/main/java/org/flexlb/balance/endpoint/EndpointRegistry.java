@@ -82,10 +82,7 @@ public class EndpointRegistry {
                 throw new IllegalStateException("Worker retirement was already claimed: "
                         + address + "#" + status.getGenerationId());
             }
-            Runnable finalizeExact = () -> {
-                try { finalizeRetirement(role, address, status, cacheAwareService, logger); }
-                finally { resolveDetachedGeneration(); }
-            };
+            Runnable finalizeExact = () -> finalizeExact(cacheAwareService, logger);
             if (endpoint == null) {
                 finalizeExact.run();
                 return;
@@ -100,6 +97,15 @@ public class EndpointRegistry {
             if (failure != null) {
                 logger.error("Endpoint cleanup failed after retiring generation {} for {}",
                         status.getGenerationId(), address, failure);
+            }
+        }
+
+        private void finalizeExact(CacheAwareService cacheAwareService, org.slf4j.Logger logger) {
+            if (finalizeRetirement(role, address, status, cacheAwareService, logger)) {
+                resolveDetachedGeneration();
+            } else if (closeCompletion == null) {
+                CompletableFuture.delayedExecutor(1L, TimeUnit.SECONDS)
+                        .execute(() -> finalizeExact(cacheAwareService, logger));
             }
         }
     }
@@ -765,7 +771,7 @@ public class EndpointRegistry {
         return total;
     }
 
-    private void finalizeRetirement(
+    private boolean finalizeRetirement(
             RoleType role,
             String address,
             WorkerStatus status,
@@ -779,7 +785,7 @@ public class EndpointRegistry {
                 logger.error(
                         "Status identity changed before retirement finalized for {}#{}",
                         address, status.getGenerationId());
-                return;
+                return true;
             }
             try {
                 if (role.requiresCacheKeys()) {
@@ -789,16 +795,19 @@ public class EndpointRegistry {
                 logger.error(
                         "Cache cleanup failed while retiring generation {} for {}",
                         status.getGenerationId(), address, cacheCleanupFailure);
+                return false;
             }
             if (!statuses.remove(address, status)) {
                 logger.error(
                         "Exact status removal failed while its generation lock was held for {}#{}",
                         address, status.getGenerationId());
             }
+            return true;
         } catch (Throwable finalizationFailure) {
             logger.error(
                     "Status retirement finalization failed for {}#{}",
                     address, status.getGenerationId(), finalizationFailure);
+            return false;
         } finally {
             status.lock.unlock();
         }

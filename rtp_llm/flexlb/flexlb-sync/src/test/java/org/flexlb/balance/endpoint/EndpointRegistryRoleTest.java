@@ -63,7 +63,7 @@ class EndpointRegistryRoleTest {
         EndpointTestSupport.TestRequestRuntime requestRuntime =
                 EndpointTestSupport.requestRuntime();
         availability = Mockito.spy(new PlacementAvailability());
-        registry = new EndpointRegistry(configService, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(requestRuntime.events()), Mockito.mock(DeliveryMetricsReporter.class), EndpointTestSupport.routeStrategy(requestRuntime), availability);
+        registry = new EndpointRegistry(configService, new org.flexlb.balance.scheduler.RequestRepository(), Mockito.mock(DeliveryMetricsReporter.class), EndpointTestSupport.routeStrategy(requestRuntime), availability);
     }
 
     @AfterEach
@@ -364,7 +364,7 @@ class EndpointRegistryRoleTest {
     }
 
     @Test
-    void unpublishedRetirementOwnsFinalizationAndCannotRemoveItsReplacement() {
+    void unpublishedRetirementOwnsFinalizationAndCannotRemoveItsReplacement() throws Exception {
         WorkerStatus status = status(RoleType.PREFILL, 8300);
         String address = status.getIpPort();
         registry.currentOrDiscover(RoleType.PREFILL, address, () -> status);
@@ -374,17 +374,23 @@ class EndpointRegistryRoleTest {
         assertFalse(status.isActiveGeneration());
         assertSame(status, registry.statusSnapshot(RoleType.PREFILL).get(address));
         var cache = mock(org.flexlb.cache.service.CacheAwareService.class);
-        org.mockito.Mockito.doThrow(new IllegalStateException("cache unavailable"))
+        org.mockito.Mockito.doThrow(new IllegalStateException("cache unavailable")).doNothing()
                 .when(cache).removeEngineBlockCache(address);
         var logger = org.slf4j.LoggerFactory.getLogger(getClass());
         retirement.complete(cache, logger);
+        assertSame(status, registry.statusSnapshot(RoleType.PREFILL).get(address),
+                "failed cache cleanup must keep the old generation fenced");
+        long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(3L);
+        while (registry.statusSnapshot(RoleType.PREFILL).containsKey(address) && System.nanoTime() < deadline) {
+            Thread.sleep(5L);
+        }
         assertFalse(registry.statusSnapshot(RoleType.PREFILL).containsKey(address));
 
         WorkerStatus replacement = status(RoleType.PREFILL, 8300);
         registry.currentOrDiscover(RoleType.PREFILL, address, () -> replacement);
         assertThrows(IllegalStateException.class, () -> retirement.complete(cache, logger));
         assertSame(replacement, registry.statusSnapshot(RoleType.PREFILL).get(address));
-        org.mockito.Mockito.verify(cache).removeEngineBlockCache(address);
+        org.mockito.Mockito.verify(cache, org.mockito.Mockito.times(2)).removeEngineBlockCache(address);
         registry.close(); // An unpublished retirement must not leave a detached-endpoint barrier.
     }
 
