@@ -12,10 +12,33 @@ Java Mock 模拟 Prefill / Decode 的调度、KV 容量、执行耗时、请求�
 | `MockPerformanceModel`、`PrefillTimeFormula` | 性能 JSON、公式、执行耗时及有界噪声 |
 | `MockPrefillBatchPolicy` | FIFO 候选准入、token 预算与 CP 计价 |
 | `MockLruBlockCache` | Device KV lease、前缀匹配与驱逐 |
+| `KvcmEventPublisher` | 向真实 KVCM Meta HTTP 上报逻辑 Device cache key；协议和配置见下文 |
 | `MockControlServer`、`DynamicEngineManager` | HTTP 控制、故障和动态引擎管理 |
 | `JavaLoadClient` | 播放、Schedule、Fetch / Generate、请求终态证据 |
 
 性能配置由 `--performance` 指向的 JSON 提供。Prefill 可以使用固定耗时或公式，Decode 使用声明的 step 曲线或校准参数；角色 `scale` 与全局 `sleep_scale` 调整模拟时间。噪声参数必须有明确的标准差和绝对上限，不能与 `jitter_pct` 同时启用。配置字段与校验以 `MockPerformanceModel` 为准，采集档案和模型偏离规则见[数据规则](../tools/online_eval/data/README.md)。
+
+## KVCM 事件上报
+
+Java Mock 可以连接真实 KVCM，协议依据为 [KVCMPublisher.cc](../../cpp/cache/events/KVCMPublisher.cc) 和[引擎事件契约](../../../docs/backend/kv_cache_event_publisher.md)。它从 `MockLruBlockCache` 已可复用的 key 集合产生事件，不从请求完成数或日志推测缓存变化。新 key 产生 ADD，实际驱逐产生 DELETE；重复写入、命中和引用释放不产生事件。Host DRAM cache 不上报。
+
+默认关闭，不创建上报线程或 HTTP client。设置以下环境变量启用，bundle 和独立 Engine 入口均继承这些变量：
+
+| 环境变量 | 含义 |
+|---|---|
+| `KV_CACHE_EVENT_PUBLISHER_TYPE=kvcm` | 启用 Meta HTTP 事件上报；默认 `none` |
+| `KV_CACHE_EVENT_MANAGER_ENDPOINT` | 已解析的 HTTP/HTTPS endpoint；不负责 VIPServer 解析或 leader 切换 |
+| `KV_CACHE_EVENT_INSTANCE_GROUP` | 实例组；未设置时使用 `RECO_INSTANCE_GROUP` |
+| `KV_CACHE_EVENT_INSTANCE_ID` | 稳定身份前缀；未设置时使用 `BIZ_NAME/DEPLOYMENT_NAME`，禁止用 PID |
+| `MODEL_TYPE` | 注册的模型名；默认 `mock` |
+
+每个逻辑 Engine 使用自己的 advertised `host:HTTP-port`，并将它附加到 instance ID 前缀，隔离不同 P/D 和 block size。不能为整个 bundle 设置一个共享的 `KV_CACHE_EVENT_HOST_IP_PORT`。注册 descriptor 使用单个模拟 HBM spec，URI 为 `mock://host:port`；这只验证元数据事件，不提供真实 KV tensor 的读取或搬运能力。
+
+Mock 专属调节项为 `MOCK_KVCM_QUEUE_CAPACITY=65536`、`MOCK_KVCM_BATCH_SIZE=256`、`MOCK_KVCM_FLUSH_MS=100`、`MOCK_KVCM_HEARTBEAT_MS=5000`、`MOCK_KVCM_SNAPSHOT_MS=60000`、`MOCK_KVCM_TIMEOUT_MS=1500`、`MOCK_KVCM_RETRY_MS=100`、`MOCK_KVCM_MAX_RETRY_MS=5000`。这些是测试 publisher 的默认值，不等同于真实引擎配置。
+
+上报按注册 instance/node、权威快照、增量和心跳执行。缓存锁内仅尝试有界队列入队；网络请求在独立 worker 上发送。队列溢出、请求失败、心跳失败和定时校准触发快照；未确认的快照重试相同 payload，快照版本以前的队列事件不会回放。上报失败不阻断推理或改变缓存容量；配置非法时禁用上报。逻辑 Engine 停止时暂停心跳并尽力 HOST_DOWN，恢复后重新注册和快照；进程退出时也尽力 HOST_DOWN。
+
+`/snapshot` 各 Engine 的 `kvcm` 字段提供状态、owner endpoint、队列深度、入队丢弃数（容量耗尽或队列竞争）、请求失败数、成功报告数和快照数。合成的 `/cache_fixture` 与该功能互斥，因为 fixture 不代表推理缓存的真实 key 集合。HTTP 200 之外还检查 KVCM 顶层和逐项状态；协议 peer 测试不能替代指定真实 KVCM 版本的快照 fencing、故障恢复或容量验收。大快照需要复制并序列化完整 key 集合，不能据此宣称支持二十亿 key。
 
 ## FIFO 与 Master 派发
 

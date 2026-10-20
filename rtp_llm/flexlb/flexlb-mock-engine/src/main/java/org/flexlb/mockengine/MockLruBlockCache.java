@@ -77,6 +77,18 @@ final class MockLruBlockCache {
     synchronized void setPrefixTreeEnabled(boolean enabled) { prefixTreeEnabled = enabled; }
     synchronized boolean prefixTreeEnabled() { return prefixTreeEnabled; }
     private Consumer<EvictionEvent> evictionListener = event -> {};
+    // Mirrors SharedBlockCache's logical key transitions. The callback only
+    // enqueues; it must never perform network I/O while holding this monitor.
+    record Mutation(long version, Long key, boolean added) {}
+    record KeySnapshot(long version, Set<Long> keys) {}
+    private Consumer<Mutation> mutationListener;
+    private long mutationVersion;
+
+    synchronized void setMutationListener(Consumer<Mutation> listener) { mutationListener = listener; }
+    synchronized KeySnapshot keySnapshot() { return new KeySnapshot(mutationVersion, Set.copyOf(blocks.keySet())); }
+    private void mutation(Long key, boolean added) {
+        if (mutationListener != null) mutationListener.accept(new Mutation(++mutationVersion, key, added));
+    }
     /** Blocks held by in-flight requests that carry no cache key (growth/empty-bh). */
     private int heldBlocks;
     private long evictions;
@@ -337,6 +349,7 @@ final class MockLruBlockCache {
             Integer ref = blocks.get(key);
             if (ref == null) {
                 blocks.put(key, 0);
+                mutation(key, true);
                 changed = true;
             } else {
                 blocks.put(key, ref); // already indexed — refresh LRU order only
@@ -376,6 +389,7 @@ final class MockLruBlockCache {
             if (references == null || references == 0) referencedBlocks++;
             if (references == null) {
                 blocks.put(key, 1);
+                mutation(key, true);
             } else {
                 blocks.put(key, references + 1);
             }
@@ -414,6 +428,7 @@ final class MockLruBlockCache {
             // refreshed, exactly like the lease-based admit path.
             if (!blocks.containsKey(key)) {
                 blocks.put(key, 0);
+                mutation(key, true);
                 changed = true;
             }
         }
@@ -437,6 +452,7 @@ final class MockLruBlockCache {
         for (Long key : keys) {
             Integer ref = blocks.get(key);
             if (ref != null && ref == 0 && blocks.remove(key) != null) {
+                mutation(key, false);
                 reportEvictionLifetime(key);
                 removeNode(key);
                 evictions++;
@@ -457,6 +473,7 @@ final class MockLruBlockCache {
      */
     synchronized void clear() {
         blocks.clear();
+        mutation(null, false); // authoritative empty snapshot, not N queued deletes
         referencedBlocks = 0;
         tree.clear();
         leaves.clear();
@@ -706,6 +723,7 @@ final class MockLruBlockCache {
                 key = chain.get(i);
                 if (!Integer.valueOf(0).equals(blocks.get(key))) continue;
                 blocks.remove(key);
+                mutation(key, false);
                 reportEvictionLifetime(key);
                 removeNode(key);
                 removed++;
@@ -728,6 +746,7 @@ final class MockLruBlockCache {
         // Tree maintenance can touch the access-order map; finish iteration first.
         for (Long key : victims) {
             blocks.remove(key);
+            mutation(key, false);
             reportEvictionLifetime(key);
             removeNode(key);
         }
