@@ -85,9 +85,7 @@ public:
     std::vector<BlockInfo>
     convertIndexToBuffer(int layer_id, BlockIdxType block, int partition_count, int partition_id) const;
 
-    const std::vector<MemoryLayoutConfig>& memoryLayouts() const {
-        return config().memory_layouts;
-    }
+    const DeviceBlockPoolConfig& config() const;
 
     void* getBaseAddress() const {
         return cache_base_ptr_;
@@ -103,8 +101,7 @@ protected:
     bool hasExternalRefNoLock(BlockIdxType block) const override;
 
 private:
-    bool                         hasRequestRefNoLock(BlockIdxType block) const;
-    const DeviceBlockPoolConfig& config() const;
+    bool hasRequestRefNoLock(BlockIdxType block) const;
     // global_layer_id -> {layout_index, local_layer_id}
     std::pair<int, int> mapGlobalLayerIdToLocal(int global_layer_id) const;
     void                checkLayoutValidity(int layout_id) const;
