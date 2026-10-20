@@ -105,7 +105,7 @@ class InputEmbeddingOverrideModel:
         )
 
 
-class TransformerOnlyEmbeddingModel:
+class TransformerOnlyCudaGraphEmbeddingModel:
     use_transformer_cuda_graph = True
 
     def __init__(self):
@@ -310,9 +310,48 @@ def _build_target_verify_inputs(
 
 
 class TestCudaGraphTaggedCache(unittest.TestCase):
+    def test_uqi_graph_requires_valid_host_segment_bounds(self):
+        model = TransformerOnlyCudaGraphEmbeddingModel()
+        model.use_user_profile_mask = True
+        runner = CudaGraphRunner()
+        runner.init_prefill(model, 2, 8, 8, 8, [8], HIDDEN_SIZE, GROUP_TAGS)
+        inputs = _build_prefill_inputs(GROUP_TAGS, {"full": 1, "aux": 2}, 4)
+        self.assertFalse(runner.canRun(inputs))
+
+        self.assertIsInstance(inputs.attention_inputs, dict)
+        self.assertEqual(set(inputs.attention_inputs), set(GROUP_TAGS))
+
+        def set_bounds(starts, counts, device="cpu"):
+            # Each getter exposes references into the current C++ map. Fetch
+            # fresh references after every assignment replaces that map.
+            tagged = inputs.attention_inputs
+            for attention in tagged.values():
+                attention.uqi_b_starts = torch.tensor(starts, dtype=torch.int32, device=device)
+                attention.uqi_b_lens = torch.tensor(counts, dtype=torch.int32, device=device)
+            # The binding copies the primary input when assigning the mapping.
+            # Reassign it so both the primary input and every tag are refreshed.
+            inputs.attention_inputs = tagged
+
+        set_bounds([1], [2])
+        self.assertTrue(runner.canRun(inputs))
+        for starts, counts in (([1], [5]), ([1], [-1]), ([], [])):
+            with self.subTest(starts=starts, counts=counts):
+                set_bounds(starts, counts)
+                self.assertFalse(runner.canRun(inputs))
+        set_bounds([1], [2], device="cuda")
+        self.assertFalse(runner.canRun(inputs))
+        # A rejected request must not prevent a later valid request replaying.
+        set_bounds([1], [2])
+        self.assertTrue(runner.canRun(inputs))
+        runner.prepareAttentionInputs(inputs)
+        actual = runner.forward(inputs).hidden_states.clone()
+        torch.cuda.synchronize()
+        hidden = inputs.input_ids.to(torch.bfloat16).unsqueeze(1).expand(-1, HIDDEN_SIZE)
+        torch.testing.assert_close(actual, hidden * 2 + hidden.sum(dim=0))
+
     def test_transformer_only_32_sequences_exceed_single_sequence_capacity(self):
         runner = CudaGraphRunner()
-        model = TransformerOnlyEmbeddingModel()
+        model = TransformerOnlyCudaGraphEmbeddingModel()
         runner.init_prefill(model, 32, 512, 8, 8, [6144], HIDDEN_SIZE, GROUP_TAGS)
         self.assertEqual(model.prepare_calls, 0)
         # Alternate a packed 32-item batch and a short batch in the same graph.
@@ -364,7 +403,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
         self.assertFalse(runner.canRun(over_capacity))
 
     def test_transformer_only_replays_request_owned_visual_inputs(self):
-        model = TransformerOnlyEmbeddingModel()
+        model = TransformerOnlyCudaGraphEmbeddingModel()
         runner = CudaGraphRunner()
         runner.init_prefill(
             model,

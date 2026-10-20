@@ -85,3 +85,28 @@ py_test(
     tags = ["H20"],
     exec_properties = {"gpu": "H20", "gpu_count": "1"},
 )
+
+py_test(
+    name = "bert_uqi_graph_layout_test",
+    srcs = ["bert_uqi_graph_layout_test.py"],
+    data = ["//rtp_llm/models_py:bert_encoder_graph_source"],
+)
+
+py_test(
+    name = "bert_uqi_encoder_graph_test",
+    srcs = ["bert_uqi_encoder_graph_test.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20"],
+    exec_properties = {"gpu": "H20", "gpu_count": "1"},
+)
+
+py_test(
+    name = "bert_uqi_encoder_graph_test_rocm",
+    srcs = ["bert_uqi_encoder_graph_test.py"],
+    main = "bert_uqi_encoder_graph_test.py",
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["rocm"],
+    exec_properties = {"gpu": "MI308X-ROCM7"},
+)

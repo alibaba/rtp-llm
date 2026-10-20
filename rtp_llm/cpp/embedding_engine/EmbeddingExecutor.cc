@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/engine_base/EmbeddingIdRange.h"
 #include "rtp_llm/cpp/embedding_engine/EmbeddingExecutor.h"
+#include "rtp_llm/cpp/embedding_engine/EmbeddingInputMetadata.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/pybind/PyUtils.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
@@ -110,24 +111,6 @@ EmbeddingExecutor::EmbeddingExecutor(const EngineInitParams& params, py::object 
 void EmbeddingExecutor::init_position_ids(int max_seq_len) {
     max_position_ids_tensor_ = torch::arange(max_seq_len, torch::kInt32);
 }
-
-namespace {
-#if USING_CUDA
-torch::Tensor toCudaInt32ModelInput(const torch::Tensor& tensor) {
-    if (!tensor.defined()) {
-        return tensor;
-    }
-    auto options = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
-    if (tensor.is_cuda() && tensor.scalar_type() == torch::kInt32) {
-        return tensor;
-    }
-    if (tensor.numel() == 0) {
-        return torch::empty(tensor.sizes(), options);
-    }
-    return tensor.to(options, /*non_blocking=*/true);
-}
-#endif
-}  // namespace
 
 absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::list<EmbeddingStreamPtr>& streams) const {
     int64_t token_num  = 0;
@@ -258,20 +241,10 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
     // but the model-facing GptModelInputs metadata should be CUDA resident.
     // Non-CUDA platforms keep the host pipeline: buildPyAttentionInputs's
     // device-metadata branch requires the CUDA-only metadata kernel.
-    // BERT two-pass plans ragged attention from host lengths and scans host tokens.
-    // Keep the already gathered metadata on CPU rather than copying it back from CUDA.
-    static const bool use_uqi_two_pass = []() {
-        const char* mask = std::getenv("USE_VISION_BERT_UQI_BLOCK_MASK");
-        const char* two_pass = std::getenv("VISION_BERT_UQI_TWO_PASS");
-        return mask && std::string(mask) == "1"
-               && (!two_pass || std::string(two_pass) == "1");
-    }();
-    if (!use_uqi_two_pass) {
-        model_input.combo_tokens     = toCudaInt32ModelInput(model_input.combo_tokens);
-        model_input.input_lengths    = toCudaInt32ModelInput(model_input.input_lengths);
-        model_input.sequence_lengths = toCudaInt32ModelInput(model_input.sequence_lengths);
-        model_input.prefix_lengths   = toCudaInt32ModelInput(model_input.prefix_lengths);
-    }
+    prepareEmbeddingInputMetadata(model_input.combo_tokens,
+                                  model_input.input_lengths,
+                                  model_input.sequence_lengths,
+                                  model_input.prefix_lengths);
 #endif
     return model_input;
 }

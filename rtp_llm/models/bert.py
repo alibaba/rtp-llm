@@ -48,7 +48,7 @@ class Bert(BaseModel):
 
     def support_cuda_graph(self) -> bool:
         if os.environ.get("USE_VISION_BERT_UQI_BLOCK_MASK", "0") == "1":
-            return False
+            return self.model_config.model_type == "vision_bert"
         return True
 
     def _create_python_model(self):

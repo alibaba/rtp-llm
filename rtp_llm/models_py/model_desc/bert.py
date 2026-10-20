@@ -191,9 +191,11 @@ class BertModel(GptModelBase):
     def prepare_fmha_impl(
         self, inputs: PyModelInputs, is_cuda_graph: bool = False
     ) -> FMHAImplBase:
-        # Use device-specific two-pass attention for the user-profile block mask.
-        if self.use_user_profile_mask and is_cuda_graph:
-            raise ValueError("BERT user-profile attention does not support CUDA graphs")
+        # Graphs use one device-specific masked attention; eager retains its
+        # configured two-pass/custom-mask implementation.
+        uqi_graph = self.use_user_profile_mask and self.use_transformer_cuda_graph
+        if self.use_user_profile_mask and is_cuda_graph and not uqi_graph:
+            raise ValueError("BERT user-profile CUDA graph requires the VisionBert Transformer path")
         if self.use_transformer_cuda_graph and is_cuda_graph:
             from rtp_llm.models_py.modules.factory.attention.bert_encoder_graph import (
                 BertEncoderGraphImpl,
@@ -203,7 +205,19 @@ class BertModel(GptModelBase):
                 raise ValueError(
                     "BERT Transformer graph requires an encoder without KV cache"
                 )
-            return BertEncoderGraphImpl(
+            graph_impl = BertEncoderGraphImpl
+            if uqi_graph:
+                if torch.version.hip is not None:
+                    from rtp_llm.models_py.modules.factory.attention.rocm_impl.bert_uqi_encoder_graph import (
+                        BertUqiRocmEncoderGraphImpl,
+                    )
+                    graph_impl = BertUqiRocmEncoderGraphImpl
+                else:
+                    from rtp_llm.models_py.modules.factory.attention.bert_encoder_graph import (
+                        BertUqiEncoderGraphImpl,
+                    )
+                    graph_impl = BertUqiEncoderGraphImpl
+            return graph_impl(
                 self.config.getAttentionConfigs(
                     self.parallelism_config.get_attn_tp_size()
                 ),

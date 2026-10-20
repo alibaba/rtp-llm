@@ -65,10 +65,13 @@ public:
         is_target_verify_     = role_ == CudaGraphRole::TARGET_VERIFY;
         py_attn_pyobj_method_ = py_instance_.attr("prepare_fmha_impl");
         py_forward_method_    = py_instance_.attr("forward");
-        transformer_only_     = isEmbeddingStylePrefillCudaGraph()
+        enable_transformer_cuda_graph_     = isEmbeddingStylePrefillCudaGraph()
                             && py::hasattr(py_instance_, "use_transformer_cuda_graph")
                             && py_instance_.attr("use_transformer_cuda_graph").cast<bool>();
-        if (transformer_only_) {
+        enable_uqi_cuda_graph_ = enable_transformer_cuda_graph_
+                                && py::hasattr(py_instance_, "use_user_profile_mask")
+                                && py_instance_.attr("use_user_profile_mask").cast<bool>();
+        if (enable_transformer_cuda_graph_) {
             py_forward_method_             = py_instance_.attr("forward_transformer");
             py_prepare_transformer_inputs_ = py_instance_.attr("prepare_transformer_inputs");
         }
@@ -170,7 +173,8 @@ private:
     py::object              py_forward_method_;
     py::object              py_attn_pyobj_method_;
     py::object              py_prepare_transformer_inputs_;
-    bool                    transformer_only_{false};
+    bool                    enable_transformer_cuda_graph_{false};
+    bool                    enable_uqi_cuda_graph_{false};
     bool                    enable_cuda_graph_{false};
     bool                    is_prefill_cuda_graph_mode_{false};
     bool                    is_target_verify_{false};

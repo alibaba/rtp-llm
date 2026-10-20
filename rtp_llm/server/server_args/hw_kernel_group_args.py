@@ -20,15 +20,6 @@ def init_hw_kernel_group_args(parser, hw_kernel_config):
     )
 
     hw_kernel_group.add_argument(
-        "--embedding_cuda_graph_max_requests",
-        env_name="EMBEDDING_CUDA_GRAPH_MAX_REQUESTS",
-        bind_to=(hw_kernel_config, "embedding_cuda_graph_max_requests"),
-        type=int,
-        default=32,
-        help="VisionBert Transformer Graph 的最大序列数（独立于 RPC 并发数）；总 token 桶使用 PREFILL_CAPTURE_CONFIG",
-    )
-
-    hw_kernel_group.add_argument(
         "--enable_cuda_graph_debug_mode",
         env_name="ENABLE_CUDA_GRAPH_DEBUG_MODE",
         bind_to=(hw_kernel_config, "enable_cuda_graph_debug_mode"),

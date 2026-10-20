@@ -11,14 +11,12 @@ class ServerArgsPyEnvConfigsTest(TestCase):
 
 
 class ServerArgsSetTest(TestCase):
-    def test_embedding_graph_capacity_survives_pickle(self):
+    def test_prefill_graph_capture_lengths_survive_pickle(self):
         from rtp_llm.ops import HWKernelConfig
 
         config = HWKernelConfig()
-        config.embedding_cuda_graph_max_requests = 48
         config.prefill_capture_seq_lens = [6144, 8192]
         restored = pickle.loads(pickle.dumps(config))
-        self.assertEqual(restored.embedding_cuda_graph_max_requests, 48)
         self.assertEqual(restored.prefill_capture_seq_lens, [6144, 8192])
 
     def setUp(self):
@@ -54,7 +52,6 @@ class ServerArgsSetTest(TestCase):
         os.environ["THINK_MODE"] = "adaptive"
         os.environ["DISABLE_FLASHINFER_HYBRID_PREFILL"] = "1"
         os.environ["ENGINE_ASYNC_WORKER_COUNT"] = "3"
-        os.environ["EMBEDDING_CUDA_GRAPH_MAX_REQUESTS"] = "32"
         os.environ["PREFILL_CAPTURE_CONFIG"] = "6144"
 
         sys.argv = ["prog"]
@@ -65,9 +62,6 @@ class ServerArgsSetTest(TestCase):
         importlib.reload(rtp_llm.server.server_args.server_args)
         py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
 
-        self.assertEqual(
-            py_env_configs.py_hw_kernel_config.embedding_cuda_graph_max_requests, 32
-        )
         self.assertEqual(
             py_env_configs.py_hw_kernel_config.prefill_capture_seq_lens, [6144]
         )
