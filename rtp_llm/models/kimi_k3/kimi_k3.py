@@ -126,6 +126,8 @@ class KimiK3(BaseModel):
         for layer_descs in cache_descs:
             for desc in layer_descs:
                 if desc.cache_type == KVCacheSpecType.LINEAR:
+                    # KDA states use head shards, independently of MLA page ownership.
+                    desc.head_sharded_transfer = True
                     if model_config.attn_config.mla_fp8_compute:
                         # FP8 MLA does not change recurrent or conv storage.
                         desc.dtype = DataType.TYPE_BF16

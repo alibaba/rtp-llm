@@ -412,7 +412,7 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
                               kv_block_stride_bytes,
                               kv_block_transfer_bytes);
             const auto* linear_spec = dynamic_cast<const LinearKVCacheSpec*>(group.spec.get());
-            if (linear_spec != nullptr) {
+            if (linear_spec != nullptr && linear_spec->usesHeadShardedTransfer() && cp_size > 1) {
                 RTP_LLM_CHECK_WITH_INFO(!has_kv_scale,
                                         "head-sharded LINEAR cache-store does not support a scale buffer");
                 size_t segment_offset = 0;

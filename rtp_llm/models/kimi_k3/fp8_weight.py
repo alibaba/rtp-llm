@@ -140,6 +140,18 @@ class KimiK3LoadFp8Weight(LoadQuantPerBlockFp8Weight):
             rows.append(weight[offset:beta_begin])
             blocks.append(scale[offset // 128 : beta_begin // 128])
             local_heads = heads // parallel
+            # A local block can only use one global block's scale. Check all
+            # ranks so an unsupported checkpoint fails uniformly at load time,
+            # before some peers proceed into collective initialization.
+            if any(
+                (peer * local_heads) % 128
+                and (peer * local_heads) % 128 + local_heads > 128
+                for peer in range(parallel)
+            ):
+                raise ValueError(
+                    "KDA beta FP8 shards cross global 128-row scale blocks: "
+                    f"heads={heads}, {parallel_name}={parallel}"
+                )
             start = beta_begin + rank * local_heads
             self.tp_ranges["sharded"].append((start, start + local_heads))
             rows.append(weight[start : start + local_heads])

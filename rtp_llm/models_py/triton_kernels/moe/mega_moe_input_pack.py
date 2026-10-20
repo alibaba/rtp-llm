@@ -123,9 +123,9 @@ if triton is not None:
         pid_m_blk = tl.program_id(0)
         pid_blk = tl.program_id(1)
 
-        offs_m = pid_m_blk * BLOCK_M + tl.arange(0, BLOCK_M)
         if INDEX_64:
-            offs_m = offs_m.to(tl.int64)
+            pid_m_blk = pid_m_blk.to(tl.int64)
+        offs_m = pid_m_blk * BLOCK_M + tl.arange(0, BLOCK_M)
         offs_128 = tl.arange(0, 128)
         row_mask = offs_m < M
         cols = pid_blk * 128 + offs_128
@@ -637,7 +637,15 @@ def fused_pack_mega_moe_inputs_optimized(
         BLOCK_M=block_m,
         BLOCK_K=block_k,
         ASSUME_FINITE=assume_finite,
-        INDEX_64=T * D >= (1 << 31),
+        # Shared gate/up buffers span 2*D columns and may have a padded row
+        # stride; routing/output tensors also participate in row addressing.
+        INDEX_64=T * max(
+            x.stride(0), weights.stride(0), indices.stride(0),
+            out_fp8.stride(0), out_sf.stride(0),
+            out_weights.stride(0), out_indices.stride(0),
+            shared_input.stride(0) if shared_input is not None else 0,
+            shared_out.stride(0) if shared_out is not None else 0,
+        ) >= (1 << 31),
         num_warps=4,
     )
 
