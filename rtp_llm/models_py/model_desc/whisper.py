@@ -3,39 +3,43 @@
 Engine contract (GptModelBase): forward(inputs, fmha_impl) -> PyModelOutputs
 returning post-final-norm hidden [total_tokens, hidden]; C++ applies lm_head.
 
-Cross-attention state (Phase A):
-- At prefill, `PyMultimodalInputs.multimodal_features` carries the audio
+Cross-attention KV (Phase B, engine cache group):
+- The cross K/V live in the engine KV cache group tagged ``cross`` declared by
+  ``Whisper._post_build_model_config`` (kv_len_from_mm_features=True): blocks
+  are request-private, sized by the audio frame count, written once at prefill
+  and read by paged decode every step. No first-block-id aliasing: the group
+  never joins the block tree.
+- At prefill, ``PyMultimodalInputs.multimodal_features`` carries the audio
   encoder hidden [L, 1280] per request (mm_skip_token_expansion keeps the
-  token stream untouched). The model computes per-layer cross K/V once and
-  stores them in a slot pool keyed by the request's first KV-cache kernel
-  block id (unique for the request's lifetime; prefill overwrites stale
-  entries). Decode steps look the slot up by the same key.
+  token stream untouched). The model computes per-layer cross K/V once,
+  writes them into the ``cross`` group, and computes prefill cross attention
+  from the freshly computed (contiguous, zero-copy) tensors.
 - fp16 inf/nan clamp after every residual add, like modeling_whisper.py:635.
 
 Fused kernels (Phase C, whisper_fused_kernels.py):
 - Every residual add runs as one Triton kernel (add + fp16 nan_to_num guard,
   bit-exact vs the eager pair) instead of the ATen add + nan_to_num launches.
-- Cross attention runs through a shared FlashInfer ragged-prefill runner
-  (non-causal, per-row K/V, sm_scale in the kernel) instead of the eager
-  matmul-softmax-matmul; each layer's per-row K/V are fused into one
-  contiguous ragged buffer per layer at prefill so decode reads them without
-  per-step copies. The eager reference math remains as the fallback for
-  non-CUDA devices, non-fp16 dtypes and FlashInfer failures.
+- Prefill cross attention runs through a shared FlashInfer ragged-prefill
+  runner (non-causal, per-row K/V, sm_scale in the kernel) instead of the
+  eager matmul-softmax-matmul; decode cross attention reads the ``cross``
+  cache group through FlashInfer paged decode. The eager reference math
+  remains as the fallback for non-CUDA devices, non-fp16 dtypes and
+  FlashInfer failures.
 """
 
 import logging
 import os
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 import torch
 from torch import nn
-import torch.nn.functional as F
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.block_map import (
     get_attention_inputs_value,
-    select_fmha_impl_for_layer,
+    select_attention_inputs_for_tag,
+    select_fmha_impl_for_group,
 )
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.model_desc.whisper_fused_kernels import (
@@ -62,6 +66,126 @@ def _clamped_residual_add(residual: torch.Tensor, x: torch.Tensor) -> torch.Tens
     # Phase C: one Triton kernel replaces the ATen add + nan_to_num pair
     # (bit-exact; eager fallback for non-fp16/CPU/non-contiguous inputs).
     return fused_residual_clamp(residual, x)
+
+
+CROSS_KV_TAG = "cross"
+
+
+class WhisperCrossKVCacheGroup:
+    """Engine ``cross`` cache group access: write-once at prefill, paged decode.
+
+    The FlashInfer metadata (positions, page table, indptr, last-page lens) is
+    derived through :class:`rtp_llm_ops.FlashInferMlaAttnParams` exactly like
+    the standard attention path, but with cross semantics: prefix is always
+    zero and the KV length is the audio frame count, never the token stream.
+    """
+
+    def __init__(
+        self,
+        head_num: int,
+        head_dim: int,
+        page_size: int,
+        dtype: torch.dtype,
+    ) -> None:
+        from rtp_llm.models_py.modules.factory.attention.cuda_impl.kv_cache_write_op import (
+            KVCacheWriteOp,
+        )
+        from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
+            get_py_flashinfer_workspace_buffer,
+        )
+        from rtp_llm.ops.compute_ops import rtp_llm_ops
+        from flashinfer.decode import BatchDecodeWithPagedKVCacheWrapper
+
+        self.head_num = head_num
+        self.head_dim = head_dim
+        self.page_size = page_size
+        self.dtype = dtype
+        self.params = rtp_llm_ops.FlashInferMlaAttnParams()
+        self.write_op = KVCacheWriteOp(head_num, head_dim, page_size)
+        self.write_op.set_params(self.params)
+        self.workspace = get_py_flashinfer_workspace_buffer()
+        self.decode_wrapper = BatchDecodeWithPagedKVCacheWrapper(self.workspace, "HND")
+        self.active = True
+
+    @staticmethod
+    def _host_i32(tensor: torch.Tensor) -> torch.Tensor:
+        if tensor is None:
+            return torch.empty(0, dtype=torch.int32)
+        if tensor.is_cuda:
+            tensor = tensor.cpu()
+        return tensor.to(torch.int32).contiguous()
+
+    def _block_table_host(self, cross_inputs) -> torch.Tensor:
+        table = cross_inputs.kv_cache_kernel_block_id
+        if table is None or table.numel() == 0:
+            table = cross_inputs.kv_cache_kernel_block_id_device
+        return self._host_i32(table)
+
+    def write_prefill(
+        self,
+        cross_inputs,
+        kv_lens: torch.Tensor,
+        layer_kvs: List[Tuple[torch.Tensor, torch.Tensor]],
+        layer_caches: List[LayerKVCache],
+    ) -> None:
+        """Write each layer's fused [total_frames, hidden] K/V into the group."""
+        kv_lens = self._host_i32(kv_lens)
+        zero_prefix = torch.zeros_like(kv_lens)
+        block_table = self._block_table_host(cross_inputs)
+        # Prefill semantics with zero prefix: positions 0..frames-1 per row,
+        # page table from the cross group's block table.
+        self.params.fill_params(zero_prefix, kv_lens, kv_lens, block_table, self.page_size, False)
+        for (k, v), cache in zip(layer_kvs, layer_caches):
+            if cache is None:
+                continue
+            k = k.view(-1, self.head_num, self.head_dim)
+            v = v.view(-1, self.head_num, self.head_dim)
+            self.write_op.forward(k, v, cache)
+
+    def begin_decode(self, cross_inputs, kv_lens: torch.Tensor) -> None:
+        """Plan the paged decode wrapper for this step's batch."""
+        kv_lens = self._host_i32(kv_lens)
+        # Decode branch: kv_len = sequence_lengths + 1, so pass frames - 1 to
+        # make the cross KV length exactly the audio frame count.
+        seq_minus_one = (kv_lens - 1).clamp(min=0)
+        block_table = self._block_table_host(cross_inputs)
+        empty_prefix = torch.empty(0, dtype=torch.int32)
+        self.params.fill_params(empty_prefix, seq_minus_one, seq_minus_one, block_table, self.page_size, False)
+        self.decode_wrapper.plan(
+            self.params.decode_page_indptr_d,
+            self.params.page_indice_d,
+            self.params.paged_kv_last_page_len_d,
+            self.head_num,
+            self.head_num,
+            self.head_dim,
+            self.page_size,
+            q_data_type=self.dtype,
+            kv_data_type=self.dtype,
+            o_data_type=self.dtype,
+        )
+
+    def decode(self, q: torch.Tensor, layer_idx: int, layer_cache: Optional[LayerKVCache]) -> Optional[torch.Tensor]:
+        """q [batch, hidden] -> attention output [batch, hidden], or None when
+        this batch has no cross KV (the sublayer is skipped with zeros)."""
+        if layer_cache is None:
+            # No cross KV resolved for this batch (no audio / warmup rows):
+            # the reference semantics skip the whole cross sublayer — the
+            # caller must NOT run o_proj (its bias would leak in).
+            return None
+        q = q.view(-1, self.head_num, self.head_dim)
+        out = self.decode_wrapper.run(q, layer_cache.kv_cache_base)
+        result = out.reshape(-1, self.head_num * self.head_dim)
+        return result
+
+    def __del__(self):
+        try:
+            from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
+                release_py_flashinfer_workspace_buffer,
+            )
+
+            release_py_flashinfer_workspace_buffer(self.workspace)
+        except Exception:
+            pass
 
 
 class WhisperCrossAttention(nn.Module):
@@ -107,6 +231,30 @@ class WhisperCrossAttention(nn.Module):
     def compute_kv(self, encoder_hidden: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """encoder_hidden [L, D] -> k/v [L, num_heads * head_dim] (fp16/eager)."""
         return self.k_proj(encoder_hidden), self.v_proj(encoder_hidden)
+
+    def paged_forward(
+        self,
+        hidden_states: torch.Tensor,
+        cross_group: Optional["WhisperCrossKVCacheGroup"],
+        cross_layer_cache: Optional[LayerKVCache],
+    ) -> torch.Tensor:
+        """Decode path: q from hidden, K/V read paged from the ``cross`` group.
+
+        The group itself owns the no-cache semantics (the engine group reads
+        its paged blocks, an injected test double reads captured K/V), so a
+        present group is always consulted.
+        """
+        if cross_group is None:
+            # No engine cross group (no audio / warmup): pass through zeros,
+            # matching the reference cross-attn skip for text-only rows.
+            return torch.zeros_like(hidden_states)
+        q = self.q_proj(hidden_states)
+        attn = cross_group.decode(q, self.layer_idx, cross_layer_cache)
+        if attn is None:
+            # No cross KV for this batch: skip the sublayer entirely (zeros,
+            # no o_proj — its bias would otherwise leak into every row).
+            return torch.zeros_like(hidden_states)
+        return self.o_proj(attn)
 
     def forward(
         self,
@@ -206,7 +354,9 @@ class WhisperDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         fmha_impl: FMHAImplBase,
         kv_cache: Optional[LayerKVCache],
-        cross_rows: List[Tuple[slice, Optional[Tuple[torch.Tensor, torch.Tensor]]]],
+        cross_rows: Optional[List[Tuple[slice, Optional[Tuple[torch.Tensor, torch.Tensor]]]]],
+        cross_group: Optional["WhisperCrossKVCacheGroup"] = None,
+        cross_layer_cache: Optional[LayerKVCache] = None,
     ) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.self_attn_layer_norm(hidden_states)
@@ -217,7 +367,12 @@ class WhisperDecoderLayer(nn.Module):
 
         residual = hidden_states
         hidden_states = self.encoder_attn_layer_norm(hidden_states)
-        hidden_states = self.encoder_attn(hidden_states, cross_rows)
+        if cross_rows is not None:
+            hidden_states = self.encoder_attn(hidden_states, cross_rows)
+        else:
+            hidden_states = self.encoder_attn.paged_forward(
+                hidden_states, cross_group, cross_layer_cache
+            )
         hidden_states = self.encoder_attn.reduce_output(hidden_states)
         hidden_states = _clamped_residual_add(residual, hidden_states)
 
@@ -226,40 +381,6 @@ class WhisperDecoderLayer(nn.Module):
         hidden_states = self.mlp(hidden_states)
         hidden_states = _clamped_residual_add(residual, hidden_states)
         return hidden_states
-
-
-class WhisperCrossKVPool:
-    """Per-request cross-attention K/V slots keyed by first kernel block id.
-
-    The key (attention_inputs.kv_cache_kernel_block_id[row, 0]) is unique for
-    a request's lifetime: pages are not reassigned while allocated, and a
-    prefill overwrites any stale entry left on a reused block. Limitation
-    (Phase A): concurrent live requests sharing one prefix block (prefix
-    cache on, identical tiny prompts) can alias; production correctness comes
-    with the engine cross-KV cache group (Phase B).
-
-    Each slot holds 32 layers x 2 x L x 1280 fp16 (~245 MB for a 30 s audio),
-    so the default cap bounds model-side memory at ~15 GB; raise with
-    WHISPER_CROSS_KV_POOL_CAP when the GPU budget allows.
-    """
-
-    def __init__(self, capacity: Optional[int] = None):
-        if capacity is None:
-            try:
-                capacity = int(os.environ.get("WHISPER_CROSS_KV_POOL_CAP", "64"))
-            except ValueError:
-                capacity = 64
-        self.capacity = capacity
-        self._slots: Dict[int, List[Tuple[torch.Tensor, torch.Tensor]]] = {}
-
-    def put(self, key: int, layer_kvs: List[Tuple[torch.Tensor, torch.Tensor]]):
-        if len(self._slots) >= self.capacity and key not in self._slots:
-            self._slots.clear()  # simple bounded eviction; smokes are short-lived
-            logger.info("whisper cross-KV pool cleared (%d slots)", self.capacity)
-        self._slots[key] = layer_kvs
-
-    def get(self, key: int) -> Optional[List[Tuple[torch.Tensor, torch.Tensor]]]:
-        return self._slots.get(key)
 
 
 class WhisperModel(GptModelBase):
@@ -312,14 +433,46 @@ class WhisperModel(GptModelBase):
             beta=weights.get_global_weight(W.final_ln_beta),
             eps=config.layernorm_eps,
         )
-        self.cross_kv_pool = WhisperCrossKVPool()
+        # Engine ``cross`` cache group accessor (write at prefill, paged read
+        # at decode); created lazily on the first forward that sees the group.
+        self.cross_group: Optional[WhisperCrossKVCacheGroup] = None
+        self._cross_group_init_failed = False
 
-    def _first_block_ids(self, attention_inputs) -> List[int]:
-        block_table = attention_inputs.kv_cache_kernel_block_id
-        if block_table is None or block_table.numel() == 0:
-            block_table = attention_inputs.kv_cache_block_id
-        ids = block_table[:, 0].tolist()
-        return ids
+    def _get_cross_group(self) -> Optional[WhisperCrossKVCacheGroup]:
+        if self.cross_group is not None or self._cross_group_init_failed:
+            return self.cross_group
+        try:
+            if self.kv_cache is None or CROSS_KV_TAG not in self.kv_cache.group_tags:
+                self._cross_group_init_failed = True
+                return None
+            page_size = self.kv_cache.get_kernel_seq_size_per_block(CROSS_KV_TAG)
+            attn_configs = self.config.getAttentionConfigs(
+                self.parallelism_config.get_attn_tp_size()
+            )
+            self.cross_group = WhisperCrossKVCacheGroup(
+                attn_configs.head_num, attn_configs.size_per_head, page_size,
+                torch.float16,
+            )
+        except Exception as error:  # FlashInfer unavailable -> eager fallback
+            self._cross_group_init_failed = True
+            return None
+        return self.cross_group
+
+    @staticmethod
+    def _default_attention_inputs(attention_inputs):
+        """Token-stream attention inputs: the ``default`` group's entry when
+        the engine routes inputs by cache-group tag."""
+        if isinstance(attention_inputs, Mapping):
+            return select_attention_inputs_for_tag(attention_inputs, "default")
+        return attention_inputs
+
+    def _get_fmha_group_tags(self) -> Optional[List[str]]:
+        # The ``cross`` group is served by the model-private paged decoder
+        # (WhisperCrossKVCacheGroup); only the token-stream groups go through
+        # the standard FMHA factory.
+        if self.kv_cache is None:
+            return None
+        return [tag for tag in self.kv_cache.group_tags if tag != CROSS_KV_TAG]
 
     def _row_slices_prefill(self, attention_inputs) -> List[slice]:
         cu = attention_inputs.cu_seqlens
@@ -329,98 +482,88 @@ class WhisperModel(GptModelBase):
             bounds = [0, attention_inputs.total_tokens]
         return [slice(bounds[i], bounds[i + 1]) for i in range(len(bounds) - 1)]
 
-    def _row_slices_decode(self, attention_inputs, input_ids: torch.Tensor) -> List[slice]:
-        # Phase A: plain decode — one token per batch row. The engine sets
-        # total_tokens=0 for decode batches, so derive rows from
-        # sequence_lengths and tokens from input_ids. (MTP verify batches are
-        # not supported until the Phase B engine cross-KV cache group.)
-        batch = attention_inputs.sequence_lengths.numel()
-        total = input_ids.numel()
-        if total != batch:
-            raise RuntimeError(
-                f"whisper Phase A decode expects one token per row, got tokens={total} batch={batch}"
-            )
-        return [slice(i, i + 1) for i in range(total)]
-
-    def _prepare_cross_rows(
-        self, inputs: PyModelInputs, attention_inputs
+    def _prepare_cross_rows_prefill(
+        self, inputs: PyModelInputs, default_inputs, attention_inputs_by_group
     ) -> List[List[Tuple[slice, Optional[Tuple[torch.Tensor, torch.Tensor]]]]]:
-        """Per-layer row descriptors: [(row_slice, (k_i, v_i) or None)]."""
-        is_prefill = attention_inputs.is_prefill
-        if is_prefill:
-            row_slices = self._row_slices_prefill(attention_inputs)
-            first_blocks = self._first_block_ids(attention_inputs)
-            mm = inputs.multimodal_inputs
-            features = list(mm.multimodal_features)
-            if features:
-                locs = mm.mm_features_locs.tolist()
+        """Prefill per-layer row descriptors: [(row_slice, (k_i, v_i) or None)].
+
+        Also writes each layer's fused cross K/V into the engine ``cross``
+        cache group so decode steps can read them paged. Prefill-only: the
+        decode path reads the group through paged decode instead.
+        """
+        assert default_inputs.is_prefill, "cross row preparation is prefill-only"
+        row_slices = self._row_slices_prefill(default_inputs)
+        mm = inputs.multimodal_inputs
+        features = list(mm.multimodal_features)
+        if features:
+            locs = mm.mm_features_locs.tolist()
+        else:
+            locs = []
+        # map each feature to its batch row via its merged-batch position
+        row_of_feature = []
+        bounds = [s.start for s in row_slices] + [row_slices[-1].stop]
+        for loc in locs:
+            row_idx = 0
+            for b in range(len(bounds) - 1):
+                if bounds[b] <= loc < bounds[b + 1]:
+                    row_idx = b
+                    break
+            row_of_feature.append(row_idx)
+        row_encoder_hidden: List[Optional[torch.Tensor]] = [None] * len(row_slices)
+        for feat_idx, (feat, row_idx) in enumerate(zip(features, row_of_feature)):
+            row_encoder_hidden[row_idx] = feat
+        # compute per-layer cross K/V per row; the prefill compute reads the
+        # freshly computed tensors directly (zero-copy views), the engine
+        # ``cross`` group gets the same values written once for decode.
+        row_layer_kvs: List[Optional[List[Tuple[torch.Tensor, torch.Tensor]]]] = [None] * len(row_slices)
+        for row_idx, enc in enumerate(row_encoder_hidden):
+            if enc is None:
+                continue
+            row_layer_kvs[row_idx] = [layer.compute_cross_kv(enc) for layer in self.layers]
+        # Fuse each layer's per-row K/V into one contiguous ragged buffer and
+        # keep per-row views into it. The ragged cross-attention runner reads
+        # the shared storage zero-copy, and the engine-group write consumes
+        # the same ragged buffers (identical values, same lifetime).
+        kv_row_indices = [r for r, kvs in enumerate(row_layer_kvs) if kvs is not None]
+        layer_ragged_kvs: List[Tuple[torch.Tensor, torch.Tensor]] = []
+        for layer_idx in range(self.layer_num):
+            pairs = [row_layer_kvs[r][layer_idx] for r in kv_row_indices]
+            if not pairs:
+                layer_ragged_kvs.append((None, None))
+                continue
+            views, k_ragged, v_ragged = fuse_row_kv(pairs)
+            for r, view in zip(kv_row_indices, views):
+                row_layer_kvs[r][layer_idx] = view
+            layer_ragged_kvs.append((k_ragged, v_ragged))
+        # Write once into the engine ``cross`` cache group (paged blocks owned
+        # by the request; decode reads them back without any model-side copy).
+        cross_group = self._get_cross_group()
+        if cross_group is not None and kv_row_indices:
+            cross_inputs = select_attention_inputs_for_tag(attention_inputs_by_group, CROSS_KV_TAG)
+            kv_lens = cross_inputs.sequence_lengths
+            if kv_lens is None or kv_lens.numel() != len(row_slices):
+                kv_lens = torch.tensor(
+                    [enc.shape[0] if enc is not None else 0 for enc in row_encoder_hidden],
+                    dtype=torch.int32,
+                )
+            if self.kv_cache is not None and CROSS_KV_TAG in self.kv_cache.group_tags:
+                layer_caches = [
+                    self.kv_cache.get_layer_cache(i, CROSS_KV_TAG) for i in range(self.layer_num)
+                ]
             else:
-                locs = []
-            # map each feature to its batch row via its merged-batch position
-            row_of_feature = []
-            bounds = [s.start for s in row_slices] + [row_slices[-1].stop]
-            for loc in locs:
-                row_idx = 0
-                for b in range(len(bounds) - 1):
-                    if bounds[b] <= loc < bounds[b + 1]:
-                        row_idx = b
-                        break
-                row_of_feature.append(row_idx)
-            row_encoder_hidden: List[Optional[torch.Tensor]] = [None] * len(row_slices)
-            for feat_idx, (feat, row_idx) in enumerate(zip(features, row_of_feature)):
-                row_encoder_hidden[row_idx] = feat
-            # compute per-layer cross K/V per row; build this forward's rows
-            # from the freshly computed tensors directly (the pool may evict
-            # under capacity pressure mid-batch — never read back what we
-            # just put).
-            row_layer_kvs: List[Optional[List[Tuple[torch.Tensor, torch.Tensor]]]] = [None] * len(row_slices)
-            for row_idx, enc in enumerate(row_encoder_hidden):
-                if enc is None:
-                    continue
-                row_layer_kvs[row_idx] = [layer.compute_cross_kv(enc) for layer in self.layers]
-            # Phase C: fuse each layer's per-row K/V into one contiguous
-            # ragged buffer and keep per-row views into it. The ragged
-            # cross-attention runner reads the shared storage zero-copy, and
-            # so do later decode steps whose batch matches this prefill; the
-            # pool stores the views (identical values, same lifetime).
-            kv_row_indices = [r for r, kvs in enumerate(row_layer_kvs) if kvs is not None]
-            for layer_idx in range(self.layer_num):
-                pairs = [row_layer_kvs[r][layer_idx] for r in kv_row_indices]
-                if not pairs:
-                    continue
-                views, _, _ = fuse_row_kv(pairs)
-                for r, view in zip(kv_row_indices, views):
-                    row_layer_kvs[r][layer_idx] = view
-            for r in kv_row_indices:
-                self.cross_kv_pool.put(first_blocks[r], row_layer_kvs[r])
-            per_layer_rows = []
-            for layer_idx in range(self.layer_num):
-                rows = []
-                for row_idx in range(len(row_slices)):
-                    layer_kvs = row_layer_kvs[row_idx]
-                    if layer_kvs is None:
-                        rows.append((row_slices[row_idx], None))
-                    else:
-                        rows.append((row_slices[row_idx], layer_kvs[layer_idx]))
-                per_layer_rows.append(rows)
-            return per_layer_rows
-        # decode: per-row pool lookup
-        row_slices = self._row_slices_decode(attention_inputs, inputs.input_ids)
-        first_blocks = self._first_block_ids(attention_inputs)
+                # Test double installed without the engine cache: the group
+                # skips layers without a real cache object.
+                layer_caches = [None] * self.layer_num
+            cross_group.write_prefill(cross_inputs, kv_lens, layer_ragged_kvs, layer_caches)
         per_layer_rows = []
         for layer_idx in range(self.layer_num):
             rows = []
-            for row_idx, row_slice in enumerate(row_slices):
-                slot = self.cross_kv_pool.get(first_blocks[row_idx])
-                if slot is None:
-                    logger.warning(
-                        "whisper decode row %d has no cross-KV slot (block %s); "
-                        "cross attention output will be zero",
-                        row_idx, first_blocks[row_idx],
-                    )
-                    rows.append((row_slice, None))
+            for row_idx in range(len(row_slices)):
+                layer_kvs = row_layer_kvs[row_idx]
+                if layer_kvs is None:
+                    rows.append((row_slices[row_idx], None))
                 else:
-                    rows.append((row_slice, slot[layer_idx]))
+                    rows.append((row_slices[row_idx], layer_kvs[layer_idx]))
             per_layer_rows.append(rows)
         return per_layer_rows
 
@@ -439,19 +582,50 @@ class WhisperModel(GptModelBase):
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
         attention_inputs = get_attention_inputs_value(inputs)
-        per_layer_rows = self._prepare_cross_rows(inputs, attention_inputs)
-        # Plan the shared cross-attention ragged runner once from the row
-        # structure (identical for every layer); inactive (non-CUDA / no K/V
-        # rows / FlashInfer unavailable) leaves the eager path in place.
-        if per_layer_rows:
-            self.cross_attn_runner.begin_forward(per_layer_rows[0], hidden_states)
+        default_inputs = self._default_attention_inputs(attention_inputs)
+        cross_group = self._get_cross_group()
+        if default_inputs.is_prefill:
+            per_layer_rows = self._prepare_cross_rows_prefill(inputs, default_inputs, attention_inputs)
+            cross_layer_caches = None
+            # Plan the shared cross-attention ragged runner once from the row
+            # structure (identical for every layer); inactive (non-CUDA / no
+            # K/V rows / FlashInfer unavailable) leaves the eager path in place.
+            if per_layer_rows:
+                self.cross_attn_runner.begin_forward(per_layer_rows[0], hidden_states)
+        else:
+            per_layer_rows = None
+            cross_layer_caches = None
+            if cross_group is not None:
+                cross_inputs = select_attention_inputs_for_tag(attention_inputs, CROSS_KV_TAG)
+                kv_lens = cross_inputs.sequence_lengths
+                if (
+                    kv_lens is not None
+                    and kv_lens.numel() > 0
+                    and int(kv_lens.max()) > 0
+                    and self.kv_cache is not None
+                    and CROSS_KV_TAG in self.kv_cache.group_tags
+                ):
+                    cross_group.begin_decode(cross_inputs, kv_lens)
+                    cross_layer_caches = [
+                        self.kv_cache.get_layer_cache(i, CROSS_KV_TAG)
+                        for i in range(self.layer_num)
+                    ]
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
-            layer_fmha_impl = select_fmha_impl_for_layer(fmha_impl, self.kv_cache, i)
+            # Self-attention consumes the token-stream group's impl; the
+            # ``cross`` group is served by the model-private paged decoder.
+            if isinstance(fmha_impl, Mapping):
+                layer_fmha_impl = select_fmha_impl_for_group(fmha_impl, "default")
+            else:
+                layer_fmha_impl = fmha_impl
             hidden_states = decoder_layer(
                 hidden_states,
                 layer_fmha_impl,
-                kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
-                cross_rows=per_layer_rows[i],
+                kv_cache=self.kv_cache.get_layer_cache(i, "default") if self.kv_cache else None,
+                cross_rows=per_layer_rows[i] if per_layer_rows is not None else None,
+                cross_group=cross_group if per_layer_rows is None else None,
+                cross_layer_cache=(
+                    cross_layer_caches[i] if cross_layer_caches is not None else None
+                ),
             )
         hidden_states = self.norm(hidden_states)
         return PyModelOutputs(hidden_states)

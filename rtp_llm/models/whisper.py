@@ -28,6 +28,13 @@ import torch
 from rtp_llm.config.model_config import ModelConfig, VitParameters
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight, AttnConfig
+from rtp_llm.ops import (
+    CacheCapacityPolicyDesc,
+    CacheGroupType,
+    CacheReusePolicyDesc,
+    KVCacheSpecDesc,
+    KVCacheSpecType,
+)
 from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight, FfnConfig
 from rtp_llm.model_loader.model_weight_info import (
     ModelDeployWeightInfo,
@@ -304,6 +311,34 @@ class Whisper(BaseModel):
         # (request-level side state), never through token-sequence expansion.
         config.mm_model_config.mm_skip_token_expansion = True
         config.mm_related_params.config["ckpt_path"] = config.ckpt_path
+
+    @classmethod
+    def _post_build_model_config(cls, model_config: ModelConfig) -> None:
+        if model_config.kv_cache_spec_descs:
+            return
+        # Decoder self-attention KV: the standard reusable token-stream cache.
+        default_desc = KVCacheSpecDesc()
+        default_desc.tag = "default"
+        default_desc.cache_type = KVCacheSpecType.MHA
+        # Cross-attention KV: engine pool holding the projected encoder K/V
+        # (audio frames), written once at prefill and read-only during decode.
+        # Never prefix-shared and never reserved: blocks stay request-private
+        # and are sized by the audio frame count, not the token stream.
+        cross_desc = KVCacheSpecDesc()
+        cross_desc.tag = "cross"
+        cross_desc.cache_type = KVCacheSpecType.MHA
+        cross_desc.group_type = CacheGroupType.FULL
+        cross_desc.kv_len_from_mm_features = True
+        cross_reuse = CacheReusePolicyDesc()
+        cross_reuse.enable_prefix_reuse = False
+        cross_desc.reuse = cross_reuse
+        cross_capacity = CacheCapacityPolicyDesc()
+        cross_capacity.reservable = False
+        cross_desc.capacity = cross_capacity
+        # Assign once: pybind deep-copies the list at assignment time.
+        model_config.kv_cache_spec_descs = [
+            [default_desc, cross_desc] for _ in range(model_config.num_layers)
+        ]
 
     @staticmethod
     def get_weight_cls():

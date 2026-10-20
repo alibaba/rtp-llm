@@ -72,6 +72,25 @@ class ReferenceTranscribeTest(unittest.TestCase):
         torch.cuda.synchronize()
         per = (time.time() - t0) / 10
         print(f"ENCODER_TOWER_LATENCY: {per*1000:.2f} ms/forward", flush=True)
+        tower_tl = os.environ.get("WHISPER_TOWER_TIMELINE")
+        if tower_tl:
+            # per-kernel timeline of the same encoder forward (mfu attribution evidence)
+            from torch.profiler import ProfilerActivity, profile
+
+            for _ in range(3):
+                with torch.inference_mode():
+                    model.model.encoder(feats)
+            torch.cuda.synchronize()
+            with profile(
+                activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+                record_shapes=True,
+            ) as prof:
+                for _ in range(4):
+                    with torch.inference_mode():
+                        model.model.encoder(feats)
+                torch.cuda.synchronize()
+            prof.export_chrome_trace(tower_tl)
+            print(f"TOWER_TIMELINE written: {tower_tl}", flush=True)
         with open(os.path.join(audio_dir, "reference_transcripts.json"), "w") as f:
             json.dump(results, f, indent=2, ensure_ascii=False)
         print(f"reference transcripts written: {len(results)}", flush=True)

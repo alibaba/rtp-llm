@@ -340,9 +340,53 @@ class WhisperParityTest(unittest.TestCase):
         )
         self.assertGreater(cos.item(), 0.999)
 
+    def _install_fake_cross_group(self):
+        """Test double for the engine ``cross`` cache group.
+
+        The engine path writes per-layer cross K/V at prefill and reads them
+        back paged at decode; without the engine this double keeps the
+        captured K/V and serves eager single-row cross attention so the
+        decoder greedy loop stays reference-comparable.
+        """
+        attn_configs = self.model.config.getAttentionConfigs(
+            self.model.parallelism_config.get_attn_tp_size()
+        )
+        head_num = attn_configs.head_num
+        head_dim = attn_configs.size_per_head
+        scaling = head_dim**-0.5
+
+        class _FakeCrossGroup:
+            def __init__(self):
+                self.layer_kvs = {}
+
+            def write_prefill(self, cross_inputs, kv_lens, layer_kvs, layer_caches):
+                for i, (k, v) in enumerate(layer_kvs):
+                    if k is not None:
+                        self.layer_kvs[i] = (k, v)
+
+            def begin_decode(self, cross_inputs, kv_lens):
+                pass
+
+            def decode(self, q, layer_idx, layer_cache):
+                # SDPA stands in for the engine's FlashInfer paged-decode
+                # kernel: scale in-kernel with fp32 internal accumulation
+                # (measured vs the Phase-C ragged runner: |diff| <= 5e-4 on
+                # this fixture; both sit in the same kernel numerics family).
+                k, v = self.layer_kvs[layer_idx]
+                q = q.view(-1, 1, head_num, head_dim).transpose(1, 2)
+                k = k.view(1, -1, head_num, head_dim).transpose(1, 2)
+                v = v.view(1, -1, head_num, head_dim).transpose(1, 2)
+                out = torch.nn.functional.scaled_dot_product_attention(
+                    q, k, v, scale=scaling
+                )
+                return out.transpose(1, 2).reshape(-1, head_num * head_dim)
+
+        self.model.cross_group = _FakeCrossGroup()
+
     def test_l3_decoder_greedy_parity(self):
         from rtp_llm.ops.compute_ops import PyModelInputs, PyMultimodalInputs
 
+        self._install_fake_cross_group()
         my_enc = self._my_encoder_hidden()
         # my-side prefill with encoder side state
         mm = PyMultimodalInputs()
@@ -368,6 +412,11 @@ class WhisperParityTest(unittest.TestCase):
                 decoder_input_ids=torch.tensor([FORCED_TOKENS], device=self.mel.device),
             )
         ref_logits = ref.logits[0, -1].float()
+        if os.environ.get("WHISPER_L3_DEBUG"):
+            print(
+                f"L3DBG prefill maxdiff={float((my_logits[0] - ref_logits).abs().max()):.4f}",
+                flush=True,
+            )
         self.assertLess(
             (my_logits[0] - ref_logits).abs().max().item(), 0.5,
             f"prefill logits diff too large: {(my_logits[0] - ref_logits).abs().max().item():.4f}",
@@ -407,6 +456,13 @@ class WhisperParityTest(unittest.TestCase):
             ref_logits_last = ref.logits[0, -1].float()
             ref_margin = float(torch.topk(ref_logits_last, 2).values.diff())
             near_tie = min(my_margin, ref_margin) < LOGIT_DRIFT_BAND
+            if os.environ.get("WHISPER_L3_DEBUG"):
+                print(
+                    f"L3DBG step={gen} tok={tok} ref_tok={ref_tok} "
+                    f"maxdiff={float((my_logits[0] - ref_logits_last).abs().max()):.4f} "
+                    f"my_margin={my_margin:.4f} ref_margin={ref_margin:.4f}",
+                    flush=True,
+                )
             if diverged_at is None:
                 if near_tie and tok != ref_tok:
                     # numerically explained flip: both candidates must sit
