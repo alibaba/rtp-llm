@@ -34,10 +34,10 @@
 # OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
 # PERFORMANCE OF THIS SOFTWARE.
 
-"""Experimental Pillow-compatible RGB bicubic preprocessing for DeepSeek V4.1.
+"""Pillow-compatible RGB bicubic preprocessing for DeepSeek V4.1.
 
 The caller owns RGB conversion, the original-image H2D, the model's grid policy,
-and the explicit GPU opt-in/fallback. This module takes a contiguous CUDA
+and device/support fallback. This module takes a contiguous CUDA
 uint8 HWC RGB image, applies ImageOps.pad(BICUBIC, color=127), and returns owned
 contiguous BF16 patches. It does not decode images or copy pixels back to CPU.
 
@@ -48,8 +48,8 @@ bits; CPU double arithmetic preserves the reference coefficient construction.
 The small CPU normalization table uses the original three FP32 Torch operations
 before BF16 rounding. No floating-point resize or fused normalization is used.
 
-CPU tables are bounded. V41_GPU_PREPROCESS_TABLE_CACHE=1 additionally enables a
-bounded device cache of immutable tables; cold uploads stay inside this call.
+CPU tables and the device cache of immutable tables are bounded.
+Cold uploads stay inside this call; cache hits preserve stream dependencies.
 Output/workspace storage is never shared. Work is queued on the
 input device's current stream, without a device-wide synchronization. As usual,
 callers must make cross-stream inputs ready and maintain/record their lifetime.
@@ -59,7 +59,6 @@ CUDA graph capture is explicitly unsupported in this first implementation.
 from __future__ import annotations
 
 import math
-import os
 import threading
 from collections import OrderedDict
 from functools import lru_cache
@@ -273,7 +272,7 @@ _DEVICE_TABLES = _DeviceTableCache()
 
 
 def _tables_on_device(device, key, factory):
-    if os.environ.get("V41_GPU_PREPROCESS_TABLE_CACHE", "0") == "1":
+    if torch.device(device).type == "cuda":
         return _DEVICE_TABLES.get(device, key, factory)
     return tuple(table.to(device) for table in factory())
 

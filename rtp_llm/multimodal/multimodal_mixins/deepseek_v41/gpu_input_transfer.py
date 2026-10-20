@@ -53,7 +53,7 @@ class UploadedRGBBatch(PreparedMMInputs):
 class RGBBatchUploader:
     def __init__(self, device, max_bytes):
         if max_bytes <= 0:
-            raise ValueError("V41_GPU_PREFETCH_MAX_BYTES must be positive")
+            raise ValueError("RGB prefetch byte budget must be positive")
         self.device = torch.device(device)
         self.max_bytes = max_bytes
         self._stream = None

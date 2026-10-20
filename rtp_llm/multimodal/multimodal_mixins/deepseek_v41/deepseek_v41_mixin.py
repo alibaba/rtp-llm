@@ -3,6 +3,7 @@
 import torch
 
 from rtp_llm.config.dsv41_config import V41Config
+from rtp_llm.model_loader.load_config import LoadMethod
 from rtp_llm.model_loader.multimodal_mixin_loader import MultimodalMixinLoader
 from rtp_llm.multimodal.multimodal_mixin_register import register_multimodal_mixin
 from rtp_llm.multimodal.multimodal_mixins.base_multimodal_mixin import (
@@ -20,8 +21,20 @@ class V41VitWeights(BaseVitWeights):
 
 
 class V41MixinLoader(MultimodalMixinLoader):
-    def load_weights(self, device="cpu", data_type=torch.float32):
-        # The checkpoint's RMSNorm weights must not round through FP16/BF16.
+    def __init__(
+        self,
+        weights_info,
+        database,
+        load_method=LoadMethod.AUTO,
+        *,
+        data_type=torch.float32,
+    ):
+        super().__init__(weights_info, database, load_method)
+        self._data_type = data_type
+
+    def load_weights(self, device="cpu", data_type=None):
+        if data_type is None:
+            data_type = self._data_type
         return super().load_weights(device=device, data_type=data_type)
 
 
@@ -31,7 +44,10 @@ class DeepSeekV41Mixin(BaseMultiModalMixin):
         config = mm_related_params.config["v41_config"]
         if not isinstance(config, V41Config):
             config = V41Config.from_dict(config)
-        return DeepSeekV41VisionEmbedding(config)
+        return DeepSeekV41VisionEmbedding(
+            config,
+            max_batch_images=vit_config.embedding_scheduler_args()["max_batch_images"],
+        )
 
     def _init_multimodal(self):
         self.mm_part = self._get_mm_module(self.mm_related_params, self.vit_config)
@@ -41,7 +57,12 @@ class DeepSeekV41Mixin(BaseMultiModalMixin):
 
     def create_mm_mixin_loader(self):
         loader = super().create_mm_mixin_loader()
-        return V41MixinLoader(loader.weights_info, loader.database, loader.load_method)
+        return V41MixinLoader(
+            loader.weights_info,
+            loader.database,
+            loader.load_method,
+            data_type=self.mm_part.vision.norm.weight.dtype,
+        )
 
     def load_mm_weight(self, ctype, device):
         if not self.weights:

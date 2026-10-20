@@ -4,7 +4,6 @@ Extracted from ca840ddb38a7fafdb6781151ae11465454895de8; image-token layout
 belongs to each model adapter.
 """
 
-import os
 from functools import lru_cache
 
 import torch
@@ -35,22 +34,44 @@ class RMSNorm(nn.Module):
     def __init__(self, dim: int, eps: float = 1e-6):
         super().__init__()
         self.eps = eps
-        self.weight = nn.Parameter(torch.ones(dim, dtype=torch.float32))
-        self._fused_rmsnorm = os.environ.get("V41_VISION_RMSNORM_FUSED", "0") == "1"
+        # Checkpoint parameters remain BF16. FlashInfer accumulates in FP32
+        # inside the kernel; no per-forward weight conversion is needed.
+        self._rmsnorm_backend = "flashinfer"
+        self.weight = nn.Parameter(torch.ones(dim, dtype=torch.bfloat16))
+
+    def _uses_flashinfer(self, x):
+        return x.is_cuda and not self.training and not torch.is_grad_enabled()
+
+    def _flashinfer_rmsnorm(self, x):
+        from flashinfer.norm import rmsnorm
+
+        if x.dtype != torch.bfloat16 or self.weight.dtype != torch.bfloat16:
+            raise ValueError("FlashInfer vision RMSNorm requires BF16 input and weight")
+        if x.ndim not in (2, 3):
+            raise ValueError("FlashInfer vision RMSNorm requires 2D/3D input")
+        if x.stride(-1) != 1 or self.weight.device != x.device:
+            raise ValueError(
+                "FlashInfer vision RMSNorm requires contiguous last dimension and same-device weight"
+            )
+        # Out-of-place: the residual stream may still own x. Missing optional
+        # dependencies or failed launches are errors, not silent native fallback.
+        # FlashInfer loads BF16 operands and reduces in FP32 inside the kernel.
+        return rmsnorm(x, self.weight, eps=self.eps)
 
     def forward(self, x: torch.Tensor):
-        if self._fused_rmsnorm:
-            from rtp_llm.models_py.modules.dsv41.vision_rmsnorm_fused import (
-                apply_vision_rmsnorm,
-            )
-
-            output = apply_vision_rmsnorm(x, self.weight, self.eps)
-            if output is not None:
-                return output
+        if self._uses_flashinfer(x):
+            return self._flashinfer_rmsnorm(x)
+        # CPU and autograd retain the ordinary expression. Do not catch
+        # dependency or launch errors after selecting CUDA inference.
         dtype = x.dtype
         x = x.float()
         x = x * torch.rsqrt(x.square().mean(-1, keepdim=True) + self.eps)
         return (self.weight * x).to(dtype)
+
+    def forward_with_residual(self, x, residual):
+        """Preserve both outputs needed by the pre-norm residual block."""
+        summed = x + residual
+        return summed, self(summed)
 
 
 class PatchEmbed(nn.Module):
@@ -103,18 +124,24 @@ class MLP(nn.Module):
         dim, inter = config["vision_dim"], config["vision_inter_dim"]
         self.w1 = nn.Linear(dim, 2 * inter, bias=False)
         self.w2 = nn.Linear(inter, dim, bias=False)
-        self._fused_silu_mul = os.environ.get("V41_VISION_SILU_MUL_FUSED", "0") == "1"
 
     def forward(self, x):
-        gate, up = self.w1(x).chunk(2, dim=-1)
-        if self._fused_silu_mul:
-            from rtp_llm.models_py.modules.dsv41.vision_silu_mul_fused import (
-                apply_vision_silu_mul,
-            )
+        from rtp_llm.models_py.modules.dsv41.vision_silu_mul_fused import (
+            apply_vision_silu_mul,
+        )
+        from rtp_llm.models_py.modules.dsv41.vision_swiglu import apply_vision_swiglu
 
-            intermediate = apply_vision_silu_mul(gate, up)
+        if not self.training:
+            intermediate = apply_vision_swiglu(x, self.w1.weight)
             if intermediate is not None:
                 return self.w2(intermediate)
+
+        # Unsupported device/shape/dtype and autograd retain the old path.
+        # Supported Quack dependency/launch errors propagate from the helper.
+        gate, up = self.w1(x).chunk(2, dim=-1)
+        intermediate = apply_vision_silu_mul(gate, up)
+        if intermediate is not None:
+            return self.w2(intermediate)
         return self.w2(F.silu(gate) * up)
 
 
