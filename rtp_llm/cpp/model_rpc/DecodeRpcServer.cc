@@ -1102,6 +1102,43 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
     const int peer_cnt = static_cast<int>(load_context.peer_addrs.size());
     RTP_LLM_CHECK_WITH_INFO(peer_cnt > 0, "peer_addrs is empty");
 
+    // Stage-aware load scoping for pipeline-parallel prefill. Peer addresses
+    // are stage-major: with pp_size>1 stage s owns peers
+    // [s*peers_per_stage, (s+1)*peers_per_stage). The per-stage layer counts
+    // come from DSV4_PP_STAGE_LAYER_COUNTS (e.g. "22,21"); when it is absent
+    // or does not cover the peer count, every peer serves every layer
+    // (legacy single-stage behaviour).
+    std::vector<size_t> stage_layer_counts;
+    if (const char* slc = getenv("DSV4_PP_STAGE_LAYER_COUNTS"); slc != nullptr && *slc != '\0') {
+        std::string s(slc);
+        size_t      pos = 0;
+        while (true) {
+            const auto comma = s.find(',', pos);
+            stage_layer_counts.push_back(static_cast<size_t>(
+                std::stoi(s.substr(pos, comma == std::string::npos ? comma : comma - pos))));
+            if (comma == std::string::npos) {
+                break;
+            }
+            pos = comma + 1;
+        }
+    }
+    const size_t num_stages      = stage_layer_counts.size();
+    const size_t peers_per_stage = (num_stages > 1 && peer_cnt % num_stages == 0) ? peer_cnt / num_stages : 0;
+    bool         stage_aware     = peers_per_stage > 0;
+    if (stage_aware) {
+        size_t total = 0;
+        for (const auto n : stage_layer_counts) {
+            total += n;
+        }
+        if (total != static_cast<size_t>(layer_num)) {
+            RTP_LLM_LOG_WARNING(
+                "DSV4_PP_STAGE_LAYER_COUNTS sums to %zu, want %ld layers; fall back to all-peers-all-layers",
+                total,
+                layer_num);
+            stage_aware = false;
+        }
+    }
+
     const bool use_mla             = cache_config.use_mla;
     const bool use_hybrid          = cache_config.groupNums() > 1;
     const bool use_opaque_kv_store = cache_config.use_opaque_kv_cache_store;
@@ -1200,7 +1237,16 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
         std::vector<std::shared_ptr<RequestBlockBuffer>> layer_caches;
         RTP_LLM_LOG_DEBUG("load context request id is %d", load_context.request_id);
 
-        for (size_t layer_id = 0; layer_id < layer_num; layer_id++) {
+        size_t layer_begin = 0, layer_end = layer_num;
+        if (stage_aware) {
+            const size_t stage = static_cast<size_t>(i) / peers_per_stage;
+            for (size_t s = 0; s < stage; ++s) {
+                layer_begin += stage_layer_counts[s];
+            }
+            layer_end = layer_begin + stage_layer_counts[stage];
+        }
+
+        for (size_t layer_id = layer_begin; layer_id < layer_end; layer_id++) {
             // Some typed-region cache layouts let one logical layer own
             // multiple groups. Iterate every group the layer owns; other
             // layouts reduce to the legacy single-group-per-layer behaviour.
