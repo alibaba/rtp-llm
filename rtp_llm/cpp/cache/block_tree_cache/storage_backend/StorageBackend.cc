@@ -223,6 +223,16 @@ void StorageBackend::shutdown() {
     lifecycle_cv_.notify_all();
 }
 
+void StorageBackend::quarantineTask(const std::shared_ptr<storage_backend_detail::StorageTaskState>& state) {
+    if (!state) {
+        return;
+    }
+    for (const auto& pin : state->pins) {
+        pin.pool->freezeBlock(pin.block);
+    }
+    state->finish();
+}
+
 std::shared_ptr<storage_backend_detail::StorageTaskState> StorageBackend::prepare(StorageRequest request) {
     validateRequest(request, /*allow_null_blocks=*/false);
     auto state     = std::make_shared<storage_backend_detail::StorageTaskState>();

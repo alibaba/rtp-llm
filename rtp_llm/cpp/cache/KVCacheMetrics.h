@@ -25,6 +25,7 @@ struct CachePoolMetricsSnapshot {
     size_t      load_ref_blocks            = 0;
     size_t      eviction_target_ref_blocks = 0;
     size_t      store_ref_blocks           = 0;
+    size_t      frozen_ref_blocks          = 0;
     float       used_ratio                 = 0.0f;
 
     std::optional<int64_t> read_bytes;

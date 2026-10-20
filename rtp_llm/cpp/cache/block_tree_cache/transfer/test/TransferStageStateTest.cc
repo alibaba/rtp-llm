@@ -154,24 +154,36 @@ TEST(TransferStageStateTest, ConcurrentFailuresPreserveHighestPriority) {
     EXPECT_EQ(std::count(result.status.ToString().begin(), result.status.ToString().end(), ';'), errors.size() - 1);
 }
 
-TEST(TransferStageStateTest, UnknownCompletionDominatesKnownFailuresInEitherOrder) {
-    for (bool unknown_first : {false, true}) {
-        size_t             callback_count = 0;
-        TransferStageState state([&](TransferResult result) {
+TEST(TransferStageStateTest, UnknownCompletionPreservesCrcDiagnosticsAndStillDrainsEveryBatch) {
+    for (const auto known_error :
+         {CacheCopyError::COPY_FAILED, CacheCopyError::CRC_COMPUTE_FAILED, CacheCopyError::CRC_MISMATCH}) {
+        for (bool unknown_first : {false, true}) {
+            size_t             callback_count = 0;
+            TransferResult     result;
+            TransferStageState state(
+                [&](TransferResult completed) {
+                    result = std::move(completed);
+                    ++callback_count;
+                },
+                3);
+            state.addBatch();
+            state.addBatch();
+            state.addBatch();
+            state.finishSubmitting();
+            const TransferResult unknown(ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "RPC timeout"),
+                                         CacheCopyError::RPC_FAILED);
+            const TransferResult failed(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "known failure"), known_error);
+            state.completeBatch(unknown_first ? unknown : failed, {0});
+            state.completeBatch(unknown_first ? failed : unknown, {1});
+            EXPECT_EQ(callback_count, 0u);
+            state.completeBatch(ErrorInfo::OkStatus(), {2});
+            EXPECT_EQ(callback_count, 1u);
             EXPECT_EQ(result.status.code(), ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
-            ++callback_count;
-        });
-        state.addBatch();
-        state.addBatch();
-        state.addBatch();
-        state.finishSubmitting();
-        const ErrorInfo unknown(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "RPC timeout");
-        const ErrorInfo failed(ErrorCode::EXECUTION_EXCEPTION, "business failure");
-        state.completeBatch(unknown_first ? unknown : failed);
-        state.completeBatch(unknown_first ? failed : unknown);
-        EXPECT_EQ(callback_count, 0u);
-        state.completeBatch(ErrorInfo::OkStatus());
-        EXPECT_EQ(callback_count, 1u);
+            EXPECT_EQ(result.copy_error, std::max(CacheCopyError::RPC_FAILED, known_error));
+            EXPECT_EQ(result.block_errors[0], unknown_first ? CacheCopyError::RPC_FAILED : known_error);
+            EXPECT_EQ(result.block_errors[1], unknown_first ? known_error : CacheCopyError::RPC_FAILED);
+            EXPECT_EQ(result.block_errors[2], CacheCopyError::NONE);
+        }
     }
 }
 

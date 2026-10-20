@@ -434,9 +434,17 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferReportsRpcDeadline) {
 
     auto context = cache->transfer_dispatcher_->multi_rank_engine_->execute(
         TransferTask(makeBroadcastDescriptors(), std::chrono::milliseconds(50)));
+    std::promise<TransferResult> completion;
+    auto                         finished = completion.get_future();
+    context->onDone([&completion](TransferResult result) { completion.set_value(std::move(result)); });
     context->waitDone();
+    ASSERT_EQ(finished.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    const auto callback_result = finished.get();
     EXPECT_FALSE(context->success());
     EXPECT_EQ(context->errorInfo().code(), ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
+    EXPECT_EQ(context->result().copy_error, CacheCopyError::RPC_FAILED);
+    EXPECT_EQ(callback_result.status.code(), ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
+    EXPECT_EQ(callback_result.copy_error, CacheCopyError::RPC_FAILED);
 }
 
 TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferFailsOnWorkerBusinessError) {
@@ -697,8 +705,8 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastHostLoadFailureKeepsSourceReso
     EXPECT_EQ(cache->getStats().host_heap_total_size, 1u);
     EXPECT_EQ(cache->getStats().device_heap_total_size, 0u);
 
-    EXPECT_EQ(host_pool->frozenBlocksNum(), 0u);
-    EXPECT_EQ(group->devicePools().front()->frozenBlocksNum(), 0u);
+    EXPECT_EQ(host_pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
+    EXPECT_EQ(group->devicePools().front()->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
 
     std::lock_guard<std::mutex> lock(state->mutex);
     ASSERT_EQ(state->requests.size(), 2u);
@@ -753,8 +761,10 @@ TEST_F(MultiRankBlockTransferEngineTest, HostLoadRpcFailureFreezesBothEndsBefore
     EXPECT_FALSE(nodes.back()->group_set_resources[0].hasTier(Tier::DEVICE));
     device_pool->decRef(target);
     EXPECT_EQ(device_pool->refCount(target), 1u);
-    EXPECT_EQ(device_pool->frozenBlocksNum(), 1u);
-    EXPECT_EQ(host_pool->frozenBlocksNum(), 1u);
+    EXPECT_EQ(device_pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 1u);
+    EXPECT_EQ(host_pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 1u);
+    EXPECT_EQ(host_pool->referencedBlocksNum(BlockTreeRefType::LOAD), 0u);
+    EXPECT_EQ(device_pool->referencedBlocksNum(BlockTreeRefType::LOAD), 0u);
 }
 
 TEST_F(MultiRankBlockTransferEngineTest, EvictionRpcFailureFreezesBothEndsAndPreventsRepeatedDemotion) {
@@ -794,9 +804,11 @@ TEST_F(MultiRankBlockTransferEngineTest, EvictionRpcFailureFreezesBothEndsAndPre
     EXPECT_EQ(nodes.back()->group_set_resources[0].transfer_state, GroupSetTransferState::IDLE);
     EXPECT_FALSE(nodes.back()->group_set_resources[0].hasTier(Tier::DISK));
     EXPECT_TRUE(device_pool->isFrozen(source));
-    EXPECT_EQ(device_pool->frozenBlocksNum(), 1u);
-    EXPECT_EQ(disk_pool->frozenBlocksNum(), 1u);
+    EXPECT_EQ(device_pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 1u);
+    EXPECT_EQ(disk_pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 1u);
     EXPECT_EQ(disk_pool->freeBlocksNum(), 7u);
+    EXPECT_EQ(device_pool->referencedBlocksNum(BlockTreeRefType::EVICTION), 0u);
+    EXPECT_EQ(disk_pool->referencedBlocksNum(BlockTreeRefType::EVICTION), 0u);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     std::lock_guard<std::mutex> lock(state->mutex);
@@ -1130,8 +1142,8 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastD2DiskFailureRollsBackDeviceSo
     EXPECT_TRUE(full->devicePools().front()->isAllocated(device_block));
     EXPECT_EQ(disk_pool->freeBlocksNum(), 8u);
 
-    EXPECT_EQ(disk_pool->frozenBlocksNum(), 0u);
-    EXPECT_EQ(full->devicePools().front()->frozenBlocksNum(), 0u);
+    EXPECT_EQ(disk_pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
+    EXPECT_EQ(full->devicePools().front()->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
 
     std::lock_guard<std::mutex> lock(state->mutex);
     ASSERT_EQ(state->requests.size(), 2u);

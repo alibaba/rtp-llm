@@ -130,6 +130,7 @@ private:
     void                                 validateRequest(const StorageRequest& request, bool allow_null_blocks) const;
     bool                                 dispatch(Operation operation);
     void                                 taskFinished();
+    void quarantineTask(const std::shared_ptr<storage_backend_detail::StorageTaskState>& state);
     std::shared_ptr<const CacheTopology> topology_;
     PoolsByTag                           pools_by_tag_;
     BufferResolver                       buffer_resolver_;
