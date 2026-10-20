@@ -109,24 +109,21 @@ def h20_oss_suites():
                 smoke_args = "--quantization W4A8_INT4_PER_CHANNEL_COMPRESSED --warm_up 0 --act_type BF16 --reserver_runtime_mem_mb 16005 --seq_size_per_block 64 --concurrency_limit 64",
                 gpu_type = ["H20_CU13"],
             ),
-            smoke_test(
-                name = "moe_deepep_continuous_dp2",
-                task_info = "data/model/qwen3_moe/q_r_30b_py.json",
-                smoke_args = "--warm_up 0 --act_type BF16 --reserver_runtime_mem_mb 8192 --use_deepep_moe 1 --use_deepep_low_latency 0 --dp_size 2",
-                gpu_type = ["H20_CU13"],
-            ),
-            smoke_test(
-                name = "moe_deepep_ll_tp2",
-                task_info = "data/model/qwen3_moe/q_r_30b_py_tp2_ll.json",
-                smoke_args = "--warm_up 0 --act_type BF16 --reserver_runtime_mem_mb 8192 --use_deepep_moe 1 --use_deepep_low_latency 1 --tp_size 2 --world_size 2",
-                gpu_type = ["H20_CU13"],
-            ),
-            smoke_test(
-                name = "moe_deepep_normal_tp2",
-                task_info = "data/model/qwen3_moe/q_r_30b_py_tp2.json",
-                smoke_args = "--warm_up 0 --act_type BF16 --reserver_runtime_mem_mb 8192 --use_deepep_moe 1 --use_deepep_low_latency 0 --tp_size 2 --world_size 2",
-                gpu_type = ["H20_CU13"],
-            ),
+# REMOVED: moe_deepep_continuous_dp2 (DeepEP-dedicated H20 smoke)
+# Reason: DeepEP dispatch is covered by the unit tests instead of a standing
+# smoke case: //rtp_llm/models_py/distributed/test:deepep_test (normal /
+# low-latency / expert alignment on 2xH20) plus the DeepEP auto-configuration
+# matrix in rtp_llm/test/auto_configure_deepep_test.py.
+# REMOVED: moe_deepep_ll_tp2 (DeepEP-dedicated H20 smoke)
+# Reason: DeepEP dispatch is covered by the unit tests instead of a standing
+# smoke case: //rtp_llm/models_py/distributed/test:deepep_test (normal /
+# low-latency / expert alignment on 2xH20) plus the DeepEP auto-configuration
+# matrix in rtp_llm/test/auto_configure_deepep_test.py.
+# REMOVED: moe_deepep_normal_tp2 (DeepEP-dedicated H20 smoke)
+# Reason: DeepEP dispatch is covered by the unit tests instead of a standing
+# smoke case: //rtp_llm/models_py/distributed/test:deepep_test (normal /
+# low-latency / expert alignment on 2xH20) plus the DeepEP auto-configuration
+# matrix in rtp_llm/test/auto_configure_deepep_test.py.
             smoke_test(
                 name = "moe_headwise",
                 task_info = "data/model/qwen3_moe/q_r_30b_py_headwise.json",
@@ -300,6 +297,9 @@ def h20_oss_suites():
                 smoke_args = "--act_type BF16 --seq_size_per_block 2048 --tp_size 2 --max_seq_len 12800 --reserver_runtime_mem_mb 10000 --sp_model_type qwen35_moe_mtp --gen_num_per_cycle 4 --sp_type eagle --sp_checkpoint_path /mnt/nas1/hf/Qwen3.5-35B-A3B-FP8 --sp_act_type bf16 --reuse_cache 1",
                 gpu_type = ["H20_CU13"],
             ),
+            # Sentinel: the only H20 smoke case that still exercises the DeepEP
+            # low-latency dispatch end-to-end (with MTP + CUDA graph on top),
+            # so an EP dispatch/combine regression is caught while standing.
             smoke_test(
                 name = "next_mtp_cudagraph_deepep",
                 task_info = "data/model/qwen3_next/q_r_next_fp8_tp2_mtp_cudagraph.json",
@@ -328,13 +328,11 @@ def h20_oss_suites():
                 smoke_args = "--act_type BF16 --seq_size_per_block 2048 --tp_size 2 --kernel_seq_size_per_block 128",
                 gpu_type = ["H20_CU13"],
             ),
-            smoke_test(
-                name = "next_cudagraph_deepep",
-                task_info = "data/model/qwen3_next/q_r_next_cuda_graph.json",
-                smoke_args = "--act_type BF16 --seq_size_per_block 2048 --max_seq_len 128 --use_deepep_moe 1 --use_deepep_low_latency 1 --enable_cuda_graph 1 --warm_up 0  --concurrency_limit 8 --reserver_runtime_mem_mb 8192 --tp_size 2",
-                envs = [],
-                gpu_type = ["H20_CU13"],
-            ),
+# REMOVED: next_cudagraph_deepep (DeepEP-dedicated H20 smoke)
+# Reason: DeepEP dispatch is covered by the unit tests instead of a standing
+# smoke case: //rtp_llm/models_py/distributed/test:deepep_test (normal /
+# low-latency / expert alignment on 2xH20) plus the DeepEP auto-configuration
+# matrix in rtp_llm/test/auto_configure_deepep_test.py.
             smoke_test(
                 name = "next_long_reuse_memcache",
                 task_info = "data/model/qwen3_next/q_r_next_fp8_tp2_long_input_reuse_memory.json",
