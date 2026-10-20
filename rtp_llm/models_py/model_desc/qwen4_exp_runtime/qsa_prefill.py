@@ -239,7 +239,13 @@ def write_prefill_indexer_cache(
 
 
 def select_draft_graph_tokens(
-    self, q: torch.Tensor, raw_keys: torch.Tensor, *, indexer: Any, rope_config: Any
+    self,
+    q: torch.Tensor,
+    raw_keys: torch.Tensor,
+    *,
+    indexer: Any,
+    rope_config: Any,
+    raw_query: bool = False,
 ) -> torch.Tensor:
     """Capture a fixed-capacity draft plan; replay validates host mirrors."""
     from rtp_llm.models_py.model_desc.qwen4_exp_runtime.draft_prefill_graph import (
@@ -332,20 +338,42 @@ def select_draft_graph_tokens(
         batch_size=batch,
         device=q.device,
     )
-    sources, inverse, valid, positions, visible = draft_graph_rows(inputs, tokens)
-    from rtp_llm.models_py.modules.qwen4_exp.qsa.draft_prepare_triton import try_prepare
+    from rtp_llm.models_py.modules.qwen4_exp.qsa.draft_prepare_triton import (
+        try_prepare,
+        try_prepare_metadata,
+    )
 
     enabled = os.environ.get("QWEN4_DRAFT_QSA_FUSED", "0") == "1"
     get_frequency = getattr(indexer, "rope_inv_freq", None)
     frequency = (
         get_frequency(rope_config) if enabled and callable(get_frequency) else None
     )
-    prepared = try_prepare(
-        q, positions, sources, visible, frequency, rope_config=rope_config
+    inverse = None
+    metadata = try_prepare_metadata(
+        q,
+        inputs.input_lengths_device,
+        inputs.prefix_lengths_device,
+        inputs.cu_seqlens_device,
+        frequency,
+        rope_config=rope_config,
+        q_gamma=indexer.q_norm_gamma if raw_query else None,
+        norm_eps=indexer.norm_eps,
     )
-    if prepared is not None:
-        padded, block_cos, block_sin, weights, compressed_lengths = prepared
+    if metadata is not None:
+        padded, block_cos, block_sin, weights, compressed_lengths, visible = metadata
+        prepared = metadata
     else:
+        if raw_query:
+            from rtp_llm.models_py.modules.qwen4_exp.qsa.norm import exact_head_rms_norm
+
+            q = exact_head_rms_norm(q, indexer.q_norm_gamma, indexer.norm_eps)
+        sources, inverse, valid, positions, visible = draft_graph_rows(inputs, tokens)
+        prepared = try_prepare(
+            q, positions, sources, visible, frequency, rope_config=rope_config
+        )
+        if prepared is not None:
+            padded, block_cos, block_sin, weights, compressed_lengths = prepared
+    if prepared is None:
         cos, sin = build_qsa_rope_from_logical_positions(
             positions,
             rope_config,
@@ -400,6 +428,17 @@ def select_draft_graph_tokens(
         max_ctx_len=int(kv_table.shape[1]) * 32,
         validate_block_table=False,
     )
+    from rtp_llm.models_py.kernels.cuda.qwen4_qsa_topk import try_cub_draft_qsa_tokens
+
+    if int(indexer.token_budget) == 2048:
+        packed = try_cub_draft_qsa_tokens(
+            logits,
+            visible.reshape(-1),
+            inputs.input_lengths_device,
+            inputs.cu_seqlens_device,
+        )
+        if packed is not None:
+            return packed
     selected = select_qsa_paged_tokens(
         logits,
         visible.reshape(-1),
@@ -412,6 +451,8 @@ def select_draft_graph_tokens(
         try_restore_selection,
     )
 
+    if inverse is None:
+        _, inverse, valid, _, _ = draft_graph_rows(inputs, tokens)
     restored = try_restore_selection(selected, inverse, valid)
     if restored is not None:
         return restored

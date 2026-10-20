@@ -6,14 +6,22 @@ branch retains its BF16 output and original fused sigmoid-scale-add boundary.
 """
 
 import os
+from functools import lru_cache
 
 import torch
 
 from rtp_llm.models_py.model_desc.generic_moe import GenericMoeLayer
 
 
+@lru_cache(maxsize=None)
+def _shared_stream_for_device(device_index: int):
+    """Reuse an auxiliary stream across layers, as vLLM's aux_stream does."""
+    return torch.cuda.Stream(device=torch.device("cuda", device_index))
+
+
 class Qwen4MoeLayer(GenericMoeLayer):
     _shared_stream = None
+    _reused_shared_stream = None
 
     def prepare_shared_expert_overlap(self) -> None:
         """Allocate streams only for the explicitly qualified Qwen4 layout."""
@@ -60,11 +68,23 @@ class Qwen4MoeLayer(GenericMoeLayer):
         ):
             return
         self._shared_stream = torch.cuda.Stream(device=shared.up_proj.weight.device)
+        if os.environ.get("QWEN4_SHARED_EXPERT_REUSE_STREAM", "0") == "1":
+            self._reused_shared_stream = _shared_stream_for_device(
+                shared.up_proj.weight.device.index
+            )
         self._shared_input_ready = torch.cuda.Event()
         self._shared_output_ready = torch.cuda.Event()
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         stream = self._shared_stream
+        # Larger shapes did not improve in the complete TP2 consumer. Keep
+        # their established schedule and each layer's distinct event pair.
+        if (
+            self._reused_shared_stream is not None
+            and hidden_states.ndim == 2
+            and hidden_states.shape[0] in (1, 4)
+        ):
+            stream = self._reused_shared_stream
         if not (
             stream is not None
             and hidden_states.is_cuda
