@@ -45,7 +45,7 @@ class QsaCubTopkTest(unittest.TestCase):
 
     def test_native_bits_ties_nan_signs_ragged_and_partial_columns(self):
         for rows in (1, 3, 4, 8, 16, 20, 24, 28, 32):
-            for columns in (2047, 2048):
+            for columns in (2047, 2048, 2144):
                 scores = torch.randn(rows, columns, device="cuda")
                 lengths = torch.arange(rows, device="cuda", dtype=torch.int32) * 379
                 lengths[0] = columns * 4 - 1
@@ -91,7 +91,7 @@ class QsaCubTopkTest(unittest.TestCase):
         stream = torch.cuda.Stream()
         stream.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(stream):
-            for columns in (2047, 2048):
+            for columns in (2047, 2048, 2144):
                 scores = torch.randn(4, columns, device="cuda")
                 lengths = torch.full(
                     (4,), columns * 4, device="cuda", dtype=torch.int32
@@ -159,6 +159,14 @@ class QsaCubTopkTest(unittest.TestCase):
         torch.testing.assert_close(
             actual, self.reference(scores, lengths), rtol=0, atol=0
         )
+
+
+class QsaCubMergeTopkTest(QsaCubTopkTest):
+    def setUp(self):
+        super().setUp()
+        env = patch.dict(os.environ, {"QWEN4_QSA_MERGE_TOPK": "1"})
+        env.start()
+        self.addCleanup(env.stop)
 
 
 if __name__ == "__main__":
