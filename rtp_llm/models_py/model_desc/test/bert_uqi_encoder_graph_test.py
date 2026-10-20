@@ -76,7 +76,6 @@ class UqiEncoderGraphTest(unittest.TestCase):
             for name in (W.post_ln_beta, W.post_ffn_ln_beta):
                 weights.set_layer_weight(layer, name, torch.zeros(hidden, device="cuda", dtype=torch.float16))
         model = BertModel(config, ParallelismConfig(), weights, 1).eval()
-        model.use_transformer_cuda_graph = True
         model.use_user_profile_mask = True
 
         def attention_inputs(lengths, starts, counts):

@@ -162,9 +162,6 @@ class BertModel(GptModelBase):
             eps=config.layernorm_eps,
         )
         self.multimodal_embedding_injector = MultimodalEmbeddingInjector()
-        # Enabled by VisionBert after construction. Ordinary BERT keeps its
-        # existing graph path; the split path owns only Transformer kernels.
-        self.use_transformer_cuda_graph = False
         self.layers = nn.ModuleList(
             [
                 BertDecoderLayer(
@@ -193,10 +190,7 @@ class BertModel(GptModelBase):
     ) -> FMHAImplBase:
         # Graphs use one device-specific masked attention; eager retains its
         # configured two-pass/custom-mask implementation.
-        uqi_graph = self.use_user_profile_mask and self.use_transformer_cuda_graph
-        if self.use_user_profile_mask and is_cuda_graph and not uqi_graph:
-            raise ValueError("BERT user-profile CUDA graph requires the VisionBert Transformer path")
-        if self.use_transformer_cuda_graph and is_cuda_graph:
+        if is_cuda_graph:
             from rtp_llm.models_py.modules.factory.attention.bert_encoder_graph import (
                 BertEncoderGraphImpl,
             )
@@ -206,7 +200,7 @@ class BertModel(GptModelBase):
                     "BERT Transformer graph requires an encoder without KV cache"
                 )
             graph_impl = BertEncoderGraphImpl
-            if uqi_graph:
+            if self.use_user_profile_mask:
                 if torch.version.hip is not None:
                     from rtp_llm.models_py.modules.factory.attention.rocm_impl.bert_uqi_encoder_graph import (
                         BertUqiRocmEncoderGraphImpl,

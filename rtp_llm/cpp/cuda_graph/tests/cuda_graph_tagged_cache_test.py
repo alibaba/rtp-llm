@@ -106,7 +106,6 @@ class InputEmbeddingOverrideModel:
 
 
 class TransformerOnlyCudaGraphEmbeddingModel:
-    use_transformer_cuda_graph = True
 
     def __init__(self):
         self.prepare_calls = 0

@@ -236,7 +236,7 @@ void CudaGraphRunner::prepareInputData(const PyModelInputs& inputs, CudaGraphSta
     auto&     py_model_inputs = graph_instances_[graph_idx].mem_hold_.py_model_inputs_;
     const int token_num       = is_prefill_cuda_graph_mode_ ? state.current_seq_len : inputs.input_ids.size(0);
 
-    if (enable_transformer_cuda_graph_) {
+    if (usesTransformerGraphInterface()) {
         // The previous graph can still be reading this bucket's input on a
         // different stream. Order the graph-external producer before reuse.
         forward_event_.synchronize();
@@ -309,7 +309,7 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     // in runner-owned pinned host buffers. Those buffers may still be the
     // source of the previous replay's async H2D copies, so the stream-async
     // shortcut is not safe for this role.
-    if (enable_transformer_cuda_graph_ || isGenerativePrefillCudaGraph() || !skip_forward_event_sync
+    if (usesTransformerGraphInterface() || isGenerativePrefillCudaGraph() || !skip_forward_event_sync
         || !streamAsyncReplayPrepEnabled()) {
         RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareAttentionInputs(wait_forward_event)");
         forward_event_.synchronize();
@@ -484,7 +484,7 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
         tryAddD2DCopy(inputs.attention_inputs.decode_cu_seqlens_device,
                       py_model_inputs_.attention_inputs.decode_cu_seqlens_device,
                       (state.current_batch_size + 1) * sizeof(int));
-    } else if (!enable_transformer_cuda_graph_
+    } else if (!usesTransformerGraphInterface()
                && hasBothBertEmbeddingTables(py_model_inputs_.bert_embedding_inputs.position_encoding,
                                              py_model_inputs_.bert_embedding_inputs.token_type_embedding)) {
         // Bert embedding tables and scalar are capture-time constants, while
@@ -627,7 +627,7 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
             // Transformer-only encoder attention owns its ragged metadata and
             // does not consume padding_offset. Request lengths may be CUDA
             // resident, so the legacy host-pointer loop must not run here.
-            if (!enable_transformer_cuda_graph_) {
+            if (!usesTransformerGraphInterface()) {
                 auto* input_lengths      = inputs.attention_inputs.input_lengths.data_ptr<int32_t>();
                 auto* padding_offset     = py_model_inputs_.attention_inputs.padding_offset.data_ptr<int32_t>();
                 int   cumulative_padding = 0;
@@ -725,7 +725,7 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
             cuda_graph::graphGetCurrentStream().synchronize();
         }
         py::gil_scoped_acquire gil;
-        if (enable_uqi_cuda_graph_) {
+        if (requiresUqiSegmentBounds()) {
             // UQI host segment bounds are consumed only by graph-external planning.
             // Keep request metadata out of the captured GPU pointer contract.
             py_model_inputs_.attention_inputs.uqi_b_starts = inputs.attention_inputs.uqi_b_starts;
@@ -800,7 +800,7 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
             RTP_LLM_PROFILE_SCOPE("cuda_graph.forward(replayPrefill)");
             replayPrefill(state.current_real_graph_seq_len);
         }
-        if (enable_transformer_cuda_graph_) {
+        if (usesTransformerGraphInterface()) {
             const uint64_t count = full_prefill_replay_log_count_.fetch_add(1, std::memory_order_relaxed) + 1;
             if ((count & (count - 1)) == 0) {
                 RTP_LLM_LOG_INFO("embedding Transformer graph replay: requests=%d capacity=%zu tokens=%d "
@@ -987,7 +987,7 @@ bool CudaGraphRunner::canReplaySelectedGraph(const PyModelInputs& inputs, const 
             }
         }
     }
-    if (!enable_transformer_cuda_graph_ && is_prefill_cuda_graph_mode_
+    if (!usesTransformerGraphInterface() && is_prefill_cuda_graph_mode_
         && hasBothBertEmbeddingTables(captured_inputs.bert_embedding_inputs.position_encoding,
                                       captured_inputs.bert_embedding_inputs.token_type_embedding)) {
         const auto& source_bert      = inputs.bert_embedding_inputs;
@@ -1033,14 +1033,14 @@ bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state)
         return false;
     }
 
-    if (enable_transformer_cuda_graph_
+    if (usesTransformerGraphInterface()
         && (!inputs.attention_inputs.is_prefill || inputs.attention_inputs.is_target_verify
             || !inputs.attention_inputs.input_lengths.defined() || inputs.attention_inputs.input_lengths.numel() == 0
             || inputs.attention_inputs.input_lengths.numel() > max_bs_)) {
         return false;
     }
 
-    if (enable_uqi_cuda_graph_) {
+    if (requiresUqiSegmentBounds()) {
         // Missing or malformed host bounds must fall back before Python planning.
         // Eager attention can derive its schedule directly from the token IDs.
         const auto& attn = inputs.attention_inputs;
@@ -1244,7 +1244,7 @@ bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state)
         inputs.embedding_inputs.text_tokens_mask.defined() && inputs.embedding_inputs.text_tokens_mask.numel() > 0;
     const bool has_request_owned_multimodal_input =
         has_multimodal_features || has_multimodal_locs || has_multimodal_extra || has_text_tokens_mask;
-    if (has_request_owned_multimodal_input && (!enable_transformer_cuda_graph_ || has_multimodal_extra)) {
+    if (has_request_owned_multimodal_input && (!usesTransformerGraphInterface() || has_multimodal_extra)) {
         // These tensors are not copied into captured inputs. Even an all-one
         // mask is conservatively treated as request-owned because inspecting
         // its values here would synchronize the CUDA request hot path.
@@ -1425,7 +1425,7 @@ void CudaGraphRunner::setInputEmbeddingScalar(float input_embedding_scalar) {
 void CudaGraphRunner::initCaptureBertEmbeddingInputs(PyModelInputs& inputs, int max_bs) {
     // A position or token-type table can exist independently on non-Bert
     // models. Only the complete pair identifies the Bert embedding contract.
-    if (enable_transformer_cuda_graph_ || !hasBothBertEmbeddingTables(position_encoding_, token_type_embedding_)) {
+    if (usesTransformerGraphInterface() || !hasBothBertEmbeddingTables(position_encoding_, token_type_embedding_)) {
         return;
     }
     auto options_cuda_int32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
@@ -1480,7 +1480,7 @@ void CudaGraphRunner::initCapture() {
         } else {
             capture_range_ = getDecodeBatchSizesToCapture();
         }
-        max_num_token_ = (enable_transformer_cuda_graph_ || isGenerativePrefillCudaGraph()) ? capture_range_.back() :
+        max_num_token_ = (usesTransformerGraphInterface() || isGenerativePrefillCudaGraph()) ? capture_range_.back() :
                                                                                  max_bs_ * num_tokens_per_bs_;
         initPrefillScratchTensors();
 
@@ -1551,7 +1551,7 @@ void CudaGraphRunner::initCapture() {
         try {
             // The split path warms up each token bucket below. Its metadata
             // does not need a separate max_bs * max_seq_len attention plan.
-            if (!enable_transformer_cuda_graph_) {
+            if (!usesTransformerGraphInterface()) {
                 attn_pyobj = prepareFmhaImpl(capture_mem_hold_.py_model_inputs_, true);
             }
         } catch (const py::error_already_set& e) {
@@ -1564,7 +1564,7 @@ void CudaGraphRunner::initCapture() {
             // eager warmup forward. The flag is scoped so real graph capture
             // and replay never contain that synchronization.
             ScopedEnvFlag cuda_graph_warmup("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD", "1");
-            if (!enable_transformer_cuda_graph_) {
+            if (!usesTransformerGraphInterface()) {
                 py_forward_method_(capture_mem_hold_.py_model_inputs_, attn_pyobj);
             }
         } catch (const py::error_already_set& e) {
@@ -1602,7 +1602,7 @@ void CudaGraphRunner::replayGraph(int key) {
 void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
     auto inputs = graph_instances_[key].mem_hold_.py_model_inputs_;
     auto& mem_hold = graph_instances_[key].mem_hold_;
-    if (enable_transformer_cuda_graph_) {
+    if (usesTransformerGraphInterface()) {
         mem_hold.transformer_input_ = torch::zeros({key, hidden_size_}, options_cuda_float_);
     }
 
@@ -1612,7 +1612,7 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
     RTP_LLM_LOG_INFO("WarmUp for %s %d start.", key_type, key);
     auto attn_pyobj = graph_instances_[key].mem_hold_.attn_pyobj_;
     auto run_forward = [&]() {
-        return enable_transformer_cuda_graph_ ? py_forward_method_(mem_hold.transformer_input_, attn_pyobj) :
+        return usesTransformerGraphInterface() ? py_forward_method_(mem_hold.transformer_input_, attn_pyobj) :
                                    py_forward_method_(inputs, attn_pyobj);
     };
     try {

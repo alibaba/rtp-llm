@@ -43,10 +43,14 @@ it does not select the Graph backend:
 | Eager, two-pass enabled | FlashInfer two-pass | AITER two-pass |
 | Eager, two-pass disabled | FlashInfer custom mask | Unsupported; raises an error |
 
-There is no additional UQI Graph environment switch.
-`enable_transformer_cuda_graph_` identifies the shared Transformer Graph path;
-`enable_uqi_cuda_graph_` additionally requires the model's UQI mask setting.
-These runner members are derived state, not independent configuration options.
+`enable_cuda_graph_` is the single Graph execution switch, configured by the
+business at service startup. Embedding models exposing `prepare_transformer_inputs`
+and `forward_transformer` automatically use Transformer-only capture, including
+ordinary BERT. The model's `use_user_profile_mask` selects UQI attention semantics
+and required segment validation; it does not independently enable Graph.
+With `USE_VISION_BERT_UQI_BLOCK_MASK=1`, QI and UQI requests share the UQI Graph;
+QI requests must supply zero B lengths. ROCm still performs two attention calls
+per layer for pure QI requests.
 Rebuild after C++ changes and restart the service to apply environment settings.
 
 ## Execution boundary
@@ -133,7 +137,7 @@ schedule was omitted.
 
 The runner checks for correctly sized contiguous CPU int32 B-bound tensors and
 rejects invalid counts/host-visible ranges before UQI Graph planning. It forwards
-the current request's B bounds only when `enable_uqi_cuda_graph_` is true; these
+the current request's B bounds when the Transformer model uses the UQI mask; these
 host tensor references are not captured GPU pointers. Requests missing required
 bounds are ineligible for Graph. The supported eager path can derive missing
 bounds from tokens; malformed requests and unsupported eager configurations can
