@@ -11,9 +11,7 @@ available.
 
 from __future__ import annotations
 
-import inspect
 import logging
-import math
 import os
 from typing import Any, Dict, Optional
 
@@ -55,25 +53,7 @@ _PRE_KERNEL_BARRIER_VERBOSE_ENV = "MEGA_MOE_PRE_KERNEL_BARRIER_VERBOSE"
 _PRE_KERNEL_BARRIER_LOGGED_KEYS: set[tuple[int, int]] = set()
 
 
-def situ_kwargs(kernel, gate_beta, up_beta):
-    if gate_beta is None or not math.isfinite(gate_beta) or gate_beta <= 0:
-        raise ValueError("SiTU requires a finite positive gate beta")
-    if up_beta is not None and (not math.isfinite(up_beta) or up_beta <= 0):
-        raise ValueError("SiTU up beta must be finite and positive, or None")
-    parameters = inspect.signature(kernel).parameters
-    if {"situ_beta", "situ_linear_beta"}.issubset(parameters):
-        # main's kernel computes beta*tanh(gate/beta)*sigmoid(gate),
-        # multiplied by linear_beta*tanh(up/linear_beta).
-        if up_beta is None:
-            raise RuntimeError(
-                "This DeepGEMM SiTU backend requires a saturated up branch"
-            )
-        return dict(situ_beta=gate_beta, situ_linear_beta=up_beta)
-    if {"activation_alpha", "activation_beta"}.issubset(parameters):
-        # The reference K3 backend calls the gate scale alpha and up scale beta.
-        return dict(activation_alpha=gate_beta, activation_beta=up_beta or 0.0)
-    raise RuntimeError("K3 requires a DeepGEMM backend with SiTU support")
-
+from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.activation import situ_kwargs
 
 def _mega_output_capacity(buf, requested_capacity: int) -> int:
     """Output rows must cover DeepGEMM's internally aligned token capacity."""
@@ -232,10 +212,16 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
 
         cfg = self.cfg
         self._activation = getattr(cfg, "expert_activation", "swiglu")
+        from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.activation import (
+            mega_moe_functions,
+        )
+        self._mega_kernel, transform_weights, _ = mega_moe_functions(
+            deep_gemm, self._activation
+        )
         self._activation_kwargs = {}
         if self._activation == "situ":
             self._activation_kwargs = situ_kwargs(
-                deep_gemm.fp8_fp4_mega_moe,
+                self._mega_kernel,
                 cfg.activation_beta,
                 cfg.activation_linear_beta,
             )
@@ -270,7 +256,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
 
         # Mega MoE transform: L1 gate/up interleave (gran=8 along N) +
         # both SFs UTCCP-transposed. Drop inputs immediately after.
-        (l1_w, l1_sf), (l2_w, l2_sf) = deep_gemm.transform_weights_for_mega_moe(
+        (l1_w, l1_sf), (l2_w, l2_sf) = transform_weights(
             (w13, s13_int),
             (w2, s2_int),
             **({"activation": "situ"} if self._activation == "situ" else {}),
@@ -498,7 +484,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
             f"moe.mega_moe.layer{self.cfg.layer_id}.before_deepgemm",
             device,
         )
-        deep_gemm.fp8_fp4_mega_moe(
+        self._mega_kernel(
             y,
             (self._mega_l1_w, self._mega_l1_sf),
             (self._mega_l2_w, self._mega_l2_sf),

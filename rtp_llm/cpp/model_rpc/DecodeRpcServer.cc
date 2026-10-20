@@ -304,11 +304,9 @@ std::vector<CacheStoreBlockPair> DecodeRpcServer::buildGroupLoadPlan(const Cache
     const size_t total_logical_blocks =
         compact ? cache_key_count : (sharded_full ? group_block_count : std::min(local_block_num, group_block_count));
     // A truncated plan must not turn missing loads into zero requirements.
-    RTP_LLM_CHECK_WITH_INFO(total_logical_blocks == group_block_count,
-                            "cache load plan covers %zu of %zu logical blocks, decode block table has %zu slots",
-                            total_logical_blocks,
-                            group_block_count,
-                            local_block_num);
+    if (total_logical_blocks != group_block_count) {
+        throw std::invalid_argument("cache load plan has a truncated destination table");
+    }
     const size_t logical_reuse_block_size =
         compact ? reuse_block_size : reuse_block_size / key_blocks_per_logical_block;
     // A sharded Decode table is compact: local slot i holds global page
@@ -325,11 +323,9 @@ std::vector<CacheStoreBlockPair> DecodeRpcServer::buildGroupLoadPlan(const Cache
                                               key_blocks_per_logical_block,
                                               cache_key_count);
     for (const auto& pair : plan) {
-        RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(pair.offset_index) < local_block_num,
-                                "cache load for key %d requires slot %d, but decode block table has %zu slots",
-                                pair.key_index,
-                                pair.offset_index,
-                                local_block_num);
+        if (static_cast<size_t>(pair.offset_index) >= local_block_num) {
+            throw std::invalid_argument("cache load plan references a missing destination slot");
+        }
     }
     return plan;
 }
@@ -1203,7 +1199,7 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCacheAsyncForTp(DecodeGene
     return {ErrorInfo::OkStatus(), minLoadedCacheBlockCount(rank_loaded_cache_block_counts)};
 }
 
-DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
+DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) try {
     RTP_LLM_PROFILE_FUNCTION();
     AtomicGuard request_guard(onflight_load_cache_requests_);
     const auto& request_key   = load_context.request_key;
@@ -1213,7 +1209,14 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
     validateGroupTags(load_context, cache_config.topology());
 
     const int peer_cnt = static_cast<int>(load_context.peer_addrs.size());
-    RTP_LLM_CHECK_WITH_INFO(peer_cnt > 0, "peer_addrs is empty");
+    if (peer_cnt == 0) {
+        return {ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "peer_addrs is empty"), 0};
+    }
+    for (const auto& address : load_context.peer_addrs) {
+        if (autil::StringUtil::split(address, ":").size() != 3) {
+            return {ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "invalid cache-store peer address"), 0};
+        }
+    }
 
     const bool use_mla             = cache_config.use_mla;
     const bool use_hybrid          = cache_config.groupNums() > 1;
@@ -1251,13 +1254,10 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                               use_mla,
                               maga_init_params_.parallelism_config.prefill_cp_config.is_prefill_enabled()) :
         std::map<std::string, AsymmetricTPContext>{};
-    if (needs_head_partitions) {
-        RTP_LLM_CHECK_WITH_INFO(!head_partitions.empty(),
-                                "cache load requires divisible attention TP peers: "
-                                "decode_tp=%d decode_rank=%d peers=%d",
-                                decode_attention_tp,
-                                decode_attention_rank,
-                                peer_cnt);
+    if ((needs_head_partitions && head_partitions.empty())
+        || (has_linear_groups && !is_page_level_rr && legacy_partitions.empty())) {
+        return {ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED,
+                          "cache load has no compatible source partitions"), 0};
     }
     auto layerGroupTags = [](const CacheConfig& cfg, bool use_hybrid, size_t layer_id) {
         std::vector<std::string> layer_tags;
@@ -1439,7 +1439,7 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                             key, addr, static_cast<uint32_t>(block.size_bytes), block.is_cuda, true);
                     };
 
-                    if (linear_spec != nullptr) {
+                    if (linear_spec != nullptr && linear_spec->usesHeadShardedTransfer()) {
                         RTP_LLM_CHECK_WITH_INFO(parts.size() == 1 && parts[0].addr != nullptr,
                                                 "LINEAR state needs one contiguous cache block");
                         const auto segments =
@@ -1598,7 +1598,7 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                                         key, addr, static_cast<uint32_t>(block.size_bytes), block.is_cuda, true);
                                 };
 
-                                if (linear_spec != nullptr) {
+                                if (linear_spec != nullptr && linear_spec->usesHeadShardedTransfer()) {
                                     RTP_LLM_CHECK_WITH_INFO(parts.size() == 1 && parts[0].addr != nullptr,
                                                             "LINEAR state needs one contiguous cache block");
                                     const auto segments =
@@ -1695,6 +1695,9 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
     return {
         ErrorInfo::OkStatus(),
         completedHandoffPrefixBlocks(already_reused_blocks, required_cache_key_counts, transferred_cache_key_counts)};
+} catch (const std::exception& error) {
+    RTP_LLM_LOG_WARNING("request [%ld] cache load rejected: %s", load_context.request_id, error.what());
+    return {ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "invalid cache load plan"), 0};
 }
 
 grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_context,

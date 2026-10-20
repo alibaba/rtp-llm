@@ -19,8 +19,6 @@ from rtp_llm.models_py.triton_kernels.kda import (
     fused_recurrent_kda,
 )
 
-from cula.kda import chunk_kda
-
 logging.basicConfig(
     level="INFO",
     format="[%(asctime)s][%(filename)s:%(lineno)s][%(levelname)s] %(message)s",
@@ -170,6 +168,7 @@ class TestKdaOps(unittest.TestCase):
 
     @torch.inference_mode()
     def test_prefill_vs_naive(self):
+        from cula.kda import chunk_kda
         for B, seq_len in [(1, 11), (1, 64), (1, 128), (2, 11), (2, 64), (2, 128)]:
             with self.subTest(B=B, seq_len=seq_len):
                 q, k, v, g_raw, beta, A_log, dt_bias, state = make_kda_inputs(
@@ -224,6 +223,7 @@ class TestKdaOps(unittest.TestCase):
 
     @torch.inference_mode()
     def test_prefill_then_decode(self):
+        from cula.kda import chunk_kda
         q_all, k_all, v_all, g_all, beta_all, A_log, dt_bias, state = make_kda_inputs(
             1, 12
         )

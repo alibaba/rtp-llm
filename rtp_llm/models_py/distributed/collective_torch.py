@@ -1091,14 +1091,15 @@ def is_same_host_group(group):
 
 
 def _all_ready(ready: bool, group, device) -> bool:
-    flag = torch.tensor([int(ready)], dtype=torch.int32, device=device)
-    dist.all_reduce(flag, op=dist.ReduceOp.MIN, group=group)
-    return bool(flag.item())
+    from rtp_llm.models_py.distributed.symm_mem import _agree_across_group
+
+    return _agree_across_group(group, ready, "collective_workspace")
 
 
 def create_push_reduce_scatter(group, device, *, max_m: int, n: int):
-    """Return a same-host NVLink workspace for BF16 Decode ReduceScatter.
+    """Return an NVLink workspace for BF16 Decode ReduceScatter.
 
+    Cross-host groups require one usable fabric domain and FABRIC allocations.
     No allocation, rendezvous, topology query or backend change occurs during
     forward or CUDA Graph capture.
     """
@@ -1139,8 +1140,6 @@ def create_push_reduce_scatter(group, device, *, max_m: int, n: int):
         uuids = [item[1] for item in peers_metadata]
         hostnames = [item[0] for item in peers_metadata]
         cross_host = len(set(hostnames)) > 1
-        if cross_host:
-            raise RuntimeError("Decode push ReduceScatter requires one host")
         if (
             any(item[2:-1] != metadata[2:-1] for item in peers_metadata)
             or len(set(uuids)) != world_size
@@ -1166,6 +1165,8 @@ def create_push_reduce_scatter(group, device, *, max_m: int, n: int):
     storage = counters = None
     try:
         storage = symm.empty(2 * max_m * n * 2, dtype=torch.uint8, device=device)
+        if cross_host and not _is_fabric_allocation(storage):
+            raise RuntimeError("cross-host NVLink requires CUDA FABRIC allocations")
         counters = torch.zeros(
             props.multi_processor_count, dtype=torch.int32, device=device
         )
@@ -1198,10 +1199,11 @@ def create_push_reduce_scatter(group, device, *, max_m: int, n: int):
     dist.barrier(group=group)
     state = PushReduceScatter(kernel, storage, handle, buffers, counters, group.rank())
     logging.info(
-        "[PUSH_RS] enabled TP%d max_m=%d n=%d workspace=%.3f MiB",
+        "[PUSH_RS] enabled TP%d max_m=%d n=%d cross_host=%s workspace=%.3f MiB",
         world_size,
         max_m,
         n,
+        cross_host,
         storage.numel() / (1 << 20),
     )
     return state
@@ -1288,6 +1290,7 @@ def create_custom_all_gather(
 ):
     """Return a workspace or collectively retain the existing AG backend.
 
+    Cross-host groups require one usable fabric domain and FABRIC allocations.
     All capability, allocation and multicast mapping checks finish here. Forward
     must never rendezvous or make a rank-local choice to fall back to NCCL.
     max_m is the gathered output capacity (TP times the per-rank input rows).
@@ -1332,8 +1335,6 @@ def create_custom_all_gather(
         uuids = [item[1] for item in peers_metadata]
         hostnames = [item[0] for item in peers_metadata]
         cross_host = len(set(hostnames)) > 1
-        if cross_host:
-            raise RuntimeError("Decode FP8 staging AllGather requires one host")
         if (
             any(item[2:-1] != metadata[2:-1] for item in peers_metadata)
             or len(set(uuids)) != world_size
@@ -1413,11 +1414,12 @@ def create_custom_all_gather(
         kernel, storage, handles, counters, group.rank(), fp8, world_size
     )
     logging.info(
-        "[CUSTOM_AG] enabled TP%d max_m=%d k=%d fp8=%s workspace=%.3f MiB",
+        "[CUSTOM_AG] enabled TP%d max_m=%d k=%d fp8=%s cross_host=%s workspace=%.3f MiB",
         world_size,
         max_m,
         k,
         fp8,
+        cross_host,
         sum(t.numel() * t.element_size() for t in storage.values()) / (1 << 20),
     )
     return workspace

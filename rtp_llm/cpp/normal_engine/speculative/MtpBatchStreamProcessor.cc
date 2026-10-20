@@ -7,7 +7,9 @@
 #include "rtp_llm/cpp/utils/StringUtil.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#if USING_CUDA
 #include "rtp_llm/models_py/bindings/cuda/kernels/mtp_target_verify_prepare.h"
+#endif
 #include <algorithm>
 #include <atomic>
 #include <cstdlib>
@@ -1248,6 +1250,7 @@ void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(const StreamGroup
 
     const bool has_multimodal =
         model_input.multimodal_features.has_value() && !model_input.multimodal_features->empty();
+#if USING_CUDA
     // The default one-dimensional position policy reuses the final input
     // position for the sampled token. Other styles keep the stream policy below.
     const bool shift_default_positions =
@@ -1269,7 +1272,6 @@ void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(const StreamGroup
         sampled_d      = sampled_d.contiguous();
         auto offsets_d = input_lengths_d.cumsum(0).to(torch::kInt32);
         auto shifted_d = torch::empty_like(combo_tokens_d);
-#if USING_CUDA
         if (shift_default_positions) {
             auto positions_d         = toCudaInt32(model_input.combo_position_ids, host_holder).contiguous();
             auto shifted_positions_d = torch::empty_like(positions_d);
@@ -1292,13 +1294,11 @@ void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(const StreamGroup
                                         static_cast<int32_t>(token_stride),
                                         cuda_graph::graphGetCurrentStream().stream());
         }
-#else
-        RTP_LLM_CHECK_WITH_INFO(false, "MTP Prefill CUDA shift requires CUDA");
-#endif
         model_input.input_lengths = input_lengths_d;
         model_input.combo_tokens  = shifted_d;
         return;
     }
+#endif
 
     // set model_input.combo_tokens
     const size_t batch_size   = new_all_token_ids.size(0);

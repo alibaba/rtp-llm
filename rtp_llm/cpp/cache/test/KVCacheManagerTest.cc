@@ -629,7 +629,7 @@ TEST_F(KVCacheManagerTest, CandidateConfigAllocatesMergedDraftSegmentsWithinBudg
     const auto candidate =
         CacheConfigCreator::computeLocalBlockNum(candidate_config, target, {}, options, {}, std::nullopt, sp);
     EXPECT_EQ(candidate_config.group("default").block_num, 0u);
-    ASSERT_EQ(candidate_config.mtp_sub_configs.size(), 2u);
+    ASSERT_EQ(candidate_config.mtp_sub_configs.size(), 1u);
     for (const auto& sub : candidate_config.mtp_sub_configs) {
         EXPECT_EQ(sub->group("default").block_num, 0u);
     }
@@ -640,14 +640,14 @@ TEST_F(KVCacheManagerTest, CandidateConfigAllocatesMergedDraftSegmentsWithinBudg
     ASSERT_TRUE(manager.init());
     const auto& config = manager.cacheConfig();
     EXPECT_EQ(config.group("default").block_num, candidate);
-    ASSERT_EQ(config.mtp_sub_configs.size(), 2u);
+    ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
     ASSERT_EQ(manager.coordinator_manager_->groupBlockPools().size(), 1u);
     const auto& pool        = manager.coordinator_manager_->groupBlockPools()[0];
     const auto  pool_config = std::dynamic_pointer_cast<const DeviceBlockPoolConfig>(pool->config_);
     ASSERT_NE(pool_config, nullptr);
-    ASSERT_EQ(pool_config->memory_layouts.size(), 3u);
-    // FP16 K+V: 4 tokens/block * 2 bytes/element * (2 target + 2*4 draft elements/token).
-    constexpr size_t bytes_per_block = 4 * 2 * 2 * (2 + 2 * 4);
+    ASSERT_EQ(pool_config->memory_layouts.size(), 2u);
+    // FP16 K+V: one target segment (32 bytes) plus one draft segment (64 bytes).
+    constexpr size_t bytes_per_block = 4 * 2 * 2 * (2 + 4);
     constexpr size_t budget_bytes    = 1024 * 1024;
     EXPECT_EQ(config.group("default").block_num, budget_bytes / bytes_per_block);
     EXPECT_EQ(pool->getTotalSizeBytes(), static_cast<size_t>(config.group("default").block_num) * bytes_per_block);
