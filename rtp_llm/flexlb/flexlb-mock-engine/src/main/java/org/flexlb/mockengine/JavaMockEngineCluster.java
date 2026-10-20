@@ -371,6 +371,8 @@ public final class JavaMockEngineCluster {
             // semantics) — the FastRpcService has no other handle on the
             // server it backs.
             service.setGrpcServer(server);
+            service.kvcmPublisher = KvcmEventPublisher.fromEnvironment(service.cache,
+                    declaredHost(config, engineIndex) + ":" + grpcPort, spb);
         } catch (IOException e) {
             services.remove(grpcPort);
             throw e;
@@ -1102,6 +1104,7 @@ public final class JavaMockEngineCluster {
         private final ScheduledExecutorService scheduler;
         private final MockPerformanceModel performance;
         private final MockLruBlockCache cache;
+        private KvcmEventPublisher kvcmPublisher;
         private final ClusterStats stats;
         /** Reported token capacity (per-role; pool is ceil(total/spb) blocks). */
         private final long totalKvTokens;
@@ -6083,6 +6086,7 @@ public final class JavaMockEngineCluster {
          * Shut down the dedicated response-polling executor.
          */
         void shutdown() {
+            if (kvcmPublisher != null) kvcmPublisher.close();
             long expires = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
             requestDeadlines.values().forEach(MockRequestDeadline::close);
             requestDeadlines.clear();
@@ -6728,6 +6732,7 @@ public final class JavaMockEngineCluster {
             snap.put("fetch_attach_expirations", fetchAttachExpirations.get());
             snap.put("completed", completedCount.get());
             snap.put("cache_keys", cache.lruKeyBlocks());
+            if (kvcmPublisher != null) snap.put("kvcm", kvcmPublisher.status());
             snap.put("cache_evictions", cache.evictions());
             // Full per-engine key list (flexlb_test_framework KV cases' per-engine key-set
             // exposure). Debug endpoint — the whole list is exposed by design

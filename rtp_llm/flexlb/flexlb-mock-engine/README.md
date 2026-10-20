@@ -69,6 +69,24 @@ Memory 默认使用前缀树驱逐：读刷新 recency，在飞读写保护容�
 
 该模型的 H2D / D2H 复制是原子的元数据操作，不模拟 tensor、DMA 重叠、host pin、写入队列、partial block 或 disk tier；配置不接受 copy-delay 和 copy-lifecycle 开关。驱逐 lifetime 是插入到驱逐的时长，不是过期时间。
 
+## KVCM 元数据事件
+
+设置 `MOCK_KVCM_ENDPOINT` 后，Java Mock 为每个逻辑 Engine 启动独立的异步 publisher。
+同时必须设置 `MOCK_KVCM_INSTANCE_GROUP`、`MOCK_KVCM_INSTANCE_PREFIX` 和
+`MOCK_KVCM_STORAGE_TYPE`；存储类型显式选择服务端支持的 `ST_EVENT_REPORT_L1P5`
+或 `ST_EVENT_REPORT_L2`。KVCM 需预先创建对应 event-report storage 和 instance group。
+instance ID 由 prefix 与 Engine 的 advertised host:port 组成，多进程须使用不同 prefix 或地址。
+
+发布范围为 GPU 逻辑可复用 key：新 key 发 ADD，重复写入和 LRU touch 不发事件，实际淘汰发 DELETE。
+初始化、清空、队列溢出、发送失败和周期校准通过权威快照恢复状态。注册后上报节点、快照、增量与心跳，
+正常退出尽力发送 HOST_DOWN。缓存锁内只写有界队列，HTTP 在独立线程执行；网络失败不阻断推理。
+`/snapshot` 的 `kvcm` 字段提供上报身份、已确认事件数、快照数和错误。
+
+语义依据是 C++ `BlockTree::refreshPublishedState/removePublishedKey` 和 `KVCMPublisher`。
+Java Mock 只模拟单逻辑 cache group，metadata 中的 BF16、TP/DP/PP=1、4096-byte spec 是测试占位值；
+它不模拟 grouped/CP-sharded 缓存归属、不发布 host-memory 事件，也不实现 KV payload 搬运或 KVCM 路由。
+服务端枚举与快照协议必须实测核对；不能将 C++ 的 `ST_EVENT_REPORT` 字符串直接用于仅支持分层枚举的服务端。
+
 ## HTTP 控制与采集
 
 控制端口为 `baseGrpcPort - 1`。请求可用逻辑 `engine` 名或 gRPC `port` 选择引擎。
