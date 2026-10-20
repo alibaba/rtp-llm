@@ -159,14 +159,24 @@ class DSv4DecodeFmhaImplFP8:
         ``kv_cache_kernel_block_id_device`` buffers with one fused strided D2D
         copy.  Keeping a second metadata-owned copy therefore duplicates both
         the host loop and the device traffic.  Binding is only valid when the
-        source is the capture-stable device tensor with exactly the metadata's
-        row/column geometry; otherwise fall back to the copying path.
+        source is the capture-stable device tensor; otherwise fall back to the
+        copying path.
+
+        The Python planner sizes its tables from
+        ``ceil(max_seq_len / kernel_seq_size_per_block) + 1`` while the C++
+        capture buffer is sized by ``captureKernelBlockTableWidth`` (which
+        includes speculative reserve and kernel-block expansion).  The C++
+        width is the contract the captured kernels must read: keep the
+        metadata tensor at that width so the alias is a contiguous view and the
+        Triton row stride matches the source.
         """
         specs = self.config.paged_pool_specs
         if not specs:
             return None
         by_tag = as_attention_inputs_by_tag(attn_inputs)
-        bound: Dict[str, torch.Tensor] = {}
+        sources: Dict[str, torch.Tensor] = {}
+        # Validate everything before mutating metadata, so a fallback never
+        # leaves a partially resized table set behind.
         for attn_type in specs:
             key = str(attn_type)
             dst = self.metadata.pool_block_tables.get(key)
@@ -186,14 +196,48 @@ class DSv4DecodeFmhaImplFP8:
                 or src.dim() != 2
                 or not src.is_contiguous()
                 or src.shape[0] < dst.shape[0]
-                or src.shape[1] != dst.shape[1]
+                or src.shape[1] < dst.shape[1]
             ):
                 return None
-            bound[key] = src[: dst.shape[0]]
-        if len(bound) != len(specs):
+            sources[key] = src
+        if len(sources) != len(specs):
             return None
+
+        bound: Dict[str, torch.Tensor] = {}
+        for key, src in sources.items():
+            dst = self.metadata.pool_block_tables[key]
+            # The alias is already contiguous at the source width; replacing
+            # the metadata tensor is the resize.
+            bound[key] = src[: dst.shape[0]]
         self.metadata.pool_block_tables.update(bound)
+        self._refresh_decoder_swa_block_tables(bound)
         return bound
+
+    def _refresh_decoder_swa_block_tables(
+        self, bound: Dict[str, torch.Tensor]
+    ) -> None:
+        """Keep the decoder-SWA child's table view on the freshly bound parent.
+
+        ``allocate_decode_metadata_fp8`` creates ``decoder_swa_metadata``
+        before this impl can bind the runner's tables.  The child holds its own
+        ``pool_block_tables`` dict, so resizing/binding only the parent would
+        leave decoder write-slot planning reading the old zero table.
+        """
+        child = getattr(self.metadata, "decoder_swa_metadata", None)
+        if child is None:
+            return
+        from rtp_llm.models_py.modules.dsv41.attn_type import (
+            DECODER_SWA_KV,
+            SWA_KV,
+        )
+
+        for key, table in bound.items():
+            if key != SWA_KV:
+                child.pool_block_tables[key] = table
+        region_table = self.metadata.pool_block_tables.get(DECODER_SWA_KV)
+        if region_table is not None:
+            child.pool_block_tables[SWA_KV] = region_table
+            child.pool_block_tables[DECODER_SWA_KV] = region_table
 
     def prepare(self, attn_inputs: Any, forbid_realloc: bool = False) -> None:
         """Update persistent metadata and paged block-table snapshots.

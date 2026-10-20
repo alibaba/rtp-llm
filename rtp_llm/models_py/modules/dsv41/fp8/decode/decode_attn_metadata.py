@@ -272,6 +272,11 @@ def update_decoder_swa_metadata(meta, entries_per_block, *, batch_size=None):
             swa_global_slots=torch.full_like(meta.swa_global_slots, -1),
         )
         meta.decoder_swa_metadata = child
+    # The child owns a separate dict; keep its views on the parent's current
+    # table objects.  In particular, graph binding can replace/resize the
+    # parent's DECODER_SWA_KV table after this child was allocated.
+    child.pool_block_tables[region] = meta.pool_block_tables[region]
+    child.pool_block_tables[SWA_KV] = meta.pool_block_tables[region]
     if batch_size is None:
         return
     from rtp_llm.models_py.modules.dsv4.fp8.decode.paged_topk_translator import (

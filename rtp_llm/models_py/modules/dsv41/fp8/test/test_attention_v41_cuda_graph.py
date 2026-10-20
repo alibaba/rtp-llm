@@ -55,7 +55,12 @@ class AttentionV41CudaGraphTest(unittest.TestCase):
             input_lengths=torch.tensor([6, 6]),
             prefix_lengths=torch.tensor([1, 127], dtype=torch.int32, device=device),
             kv_cache_kernel_block_id_device_by_group=[
-                torch.tensor([[1, 2, 3], [4, 5, 6]], dtype=torch.int32, device=device)
+                # One column wider than the planner spec, matching the C++
+                # capture width (captureKernelBlockTableWidth includes the
+                # speculative reserve) and exercising the resize-and-bind path.
+                torch.tensor(
+                    [[1, 2, 3, 4], [5, 6, 7, 8]], dtype=torch.int32, device=device
+                )
                 for _ in specs
             ],
         )
@@ -89,6 +94,8 @@ class AttentionV41CudaGraphTest(unittest.TestCase):
         meta = impl.metadata
         self.assertEqual(meta.slot_mapping_compressed, {})
         self.assertEqual(set(meta.pool_block_tables), set(specs))
+        self.assertIsNotNone(impl._bound_block_tables)
+        self.assertEqual(meta.pool_block_tables[SWA_KV].shape[1], 4)
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
             captured_positions = meta.position_ids.clone()
@@ -111,7 +118,15 @@ class AttentionV41CudaGraphTest(unittest.TestCase):
             torch.testing.assert_close(captured_positions, eager.position_ids)
             torch.testing.assert_close(captured_slots, eager.swa_global_slots)
             torch.testing.assert_close(
+                meta.pool_write_slot_mappings[SWA_KV],
+                eager.pool_write_slot_mappings[SWA_KV],
+            )
+            torch.testing.assert_close(
                 captured_decoder_slots, eager.decoder_swa_metadata.swa_global_slots
+            )
+            torch.testing.assert_close(
+                meta.decoder_swa_metadata.pool_write_slot_mappings[SWA_KV],
+                eager.decoder_swa_metadata.pool_write_slot_mappings[SWA_KV],
             )
             self.assertFalse(torch.equal(captured_slots, captured_decoder_slots))
             torch.testing.assert_close(
