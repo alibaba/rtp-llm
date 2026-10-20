@@ -281,16 +281,20 @@ def select_tokens(logits, plan):
     return output
 
 
-def select_decode(q, weights, freqs_cis, positions, pool, plan, *, rope_head_dim):
+def select_decode(
+    q, weights, freqs_cis, positions, pool, plan, *, rope_head_dim, prepared_query=None
+):
     """Run fused Q preparation, official sparse score, and logical token TopK."""
-    payload, scales, weights = prepare_indexer_q_and_weights(
-        q,
-        weights,
-        freqs_cis,
-        positions,
-        rope_head_dim,
-        weights_out_dtype=torch.bfloat16,
-    )
+    if prepared_query is None:
+        prepared_query = prepare_indexer_q_and_weights(
+            q,
+            weights,
+            freqs_cis,
+            positions,
+            rope_head_dim,
+            weights_out_dtype=torch.bfloat16,
+        )
+    payload, scales, weights = prepared_query
     rows, k = plan.blocks.shape
     logits = deep_gemm.fp8_fp4_paged_sparse_mqa_logits(
         (
