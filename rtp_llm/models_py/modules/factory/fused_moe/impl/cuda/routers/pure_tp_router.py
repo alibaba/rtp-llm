@@ -108,12 +108,17 @@ class PureTpRouterBase(FusedMoeDataRouter):
         assert a1_scale is None and a2_scale is None, "not support quanted moe"
         expert_x, expert_x_scale = self._do_quant(a1)
 
-        # Keep fixed-width Top-p slots safe for kernels that index expert
-        # weights directly. Deleted slots carry zero weight and can use expert
-        # zero as a harmless placeholder.
+        # Keep the fixed-width Top-p contract safe for both router families.
+        # Quantized PureTP paths recompute per-expert token counts and use -1
+        # as the invalid-slot sentinel. The unquantized fused-MoE executor
+        # indexes the fixed-width IDs directly, so it still needs expert zero
+        # as a placeholder for deleted slots.
         valid_ids = (topk_ids >= 0) & (topk_ids < self.expert_num)
         safe_topk_ids = torch.where(
             valid_ids, topk_ids, torch.zeros_like(topk_ids)
+        )
+        recompute_topk_ids = torch.where(
+            valid_ids, topk_ids, torch.full_like(topk_ids, -1)
         )
         safe_topk_weights = torch.where(
             valid_ids, topk_weights, torch.zeros_like(topk_weights)
@@ -124,7 +129,9 @@ class PureTpRouterBase(FusedMoeDataRouter):
         if self.do_recompute_topk:
             adjusted_topk_ids, num_recv_tokens_per_expert = (
                 recompute_topk_ids_sum_expert_count(
-                    safe_topk_ids, self.expert_start_id, self.expert_num_per_rank
+                    recompute_topk_ids,
+                    self.expert_start_id,
+                    self.expert_num_per_rank,
                 )
             )
         return ExpertForwardPayload(
