@@ -92,7 +92,7 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         bind_to=(kv_cache_config, "kv_cache_event_manager_endpoint"),
         type=str,
         default="",
-        help="KVCM Meta HTTP endpoint，例如 http://127.0.0.1:56020。",
+        help="KVCM Meta HTTP endpoint；为空时复用 RECO_* 发现 leader，非空时覆盖自动发现。",
     )
     kv_cache_group.add_argument(
         "--kv_cache_event_instance_group",
