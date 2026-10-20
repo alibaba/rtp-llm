@@ -58,7 +58,7 @@ protected:
 
         ModelConfig   model_config;
         RuntimeConfig runtime_config;
-        model_config.max_seq_len = data_.size();
+        model_config.max_seq_len = data_.size() + 1;
 
         auto mock_stream = std::make_shared<MockGenerateStream>(input, model_config, runtime_config);
         return mock_stream;
@@ -393,6 +393,44 @@ TEST_F(InferenceServiceTest, fillGenerateInput) {
     EXPECT_EQ(static_cast<size_t>(input->input_ids.numel()), token_ids.size());
     EXPECT_EQ(static_cast<size_t>(input->input_ids.nbytes()), token_ids.size() * sizeof(int));
     EXPECT_TRUE(std::memcmp(input->input_ids.data_ptr(), token_ids.data(), input->input_ids.nbytes()) == 0);
+}
+
+namespace {
+class InferenceInputMultimodalProcessor: public MultimodalProcessor {
+public:
+    InferenceInputMultimodalProcessor(): MultimodalProcessor(py::none(), MMModelConfig{true, {{1}}, false}, 32) {}
+    bool fail = false;
+
+    ErrorResult<MultimodalOutput>
+    MultimodalEmbedding(const std::vector<MultimodalInput>, std::string, int64_t, grpc::ServerContext*) override {
+        if (fail) {
+            return ErrorInfo(ErrorCode::MM_DOWNLOAD_FAILED, "test image download failed");
+        }
+        MultimodalOutput output;
+        output.mm_features = {torch::ones({2, 1})};
+        return output;
+    }
+};
+}  // namespace
+
+TEST_F(InferenceServiceTest, fillGenerateInputEncodesBeforeExpansionAndPreservesExpandedIds) {
+    auto processor                    = std::make_shared<InferenceInputMultimodalProcessor>();
+    inference_service_->mm_processor_ = processor;
+    EXPECT_CALL(*mock_token_processor_, encode(_)).Times(2).WillRepeatedly(Return(std::vector<int>{10, 1, 20}));
+    auto input =
+        inference_service_->fillGenerateInput(1, "image prompt", {"test-image"}, std::make_shared<GenerateConfig>());
+    ASSERT_EQ(input->input_ids.numel(), 4);
+    EXPECT_EQ(input->input_ids[0].item<int32_t>(), 10);
+    EXPECT_EQ(input->input_ids[3].item<int32_t>(), 20);
+    ASSERT_TRUE(input->text_tokens_mask.has_value());
+    EXPECT_TRUE(torch::equal(*input->text_tokens_mask, torch::tensor({1, 0, 0, 1}, torch::kInt32)));
+    ASSERT_TRUE(input->multimodal_features.has_value());
+    ASSERT_EQ(input->multimodal_features->size(), 1);
+    EXPECT_EQ(input->multimodal_features->front().size(0), 2);
+    processor->fail = true;
+    EXPECT_THROW(
+        inference_service_->fillGenerateInput(2, "bad image", {"test-image"}, std::make_shared<GenerateConfig>()),
+        HttpApiServerException);
 }
 
 TEST_F(InferenceServiceTest, iterateStreams) {

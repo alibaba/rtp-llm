@@ -1548,8 +1548,11 @@ void standalone_stable_radix_11bits(void* buf, size_t& buf_size, T const* in, in
     // The multi-block path is only valid with grid_dim >= 2: the auto route has never
     // selected it below that (grid_dim==1 always went one-block), and forcing it there
     // yields invalid output, so any nonzero force_path clamps back to one-block.
-    bool const one_block
-        = (force_path == 2) || (force_path == 0 && auto_one_block) || (force_path != 0 && grid_dim < 2);
+    // Multi-block early_stop does not emit candidates when k == len. The
+    // one-block implementation handles this case explicitly, including when
+    // the diagnostic switch requests multi-block execution.
+    bool const one_block = (k == len) || (force_path == 2) || (force_path == 0 && auto_one_block)
+        || (force_path != 0 && grid_dim < 2);
     if (one_block)
     {
         standalone_stable_radix_topk_one_block_<T, idxT, topk_bits, block_dim>(buf, buf_size, in,

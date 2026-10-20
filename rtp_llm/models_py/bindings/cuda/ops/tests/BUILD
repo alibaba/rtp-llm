@@ -104,6 +104,19 @@ cc_test(
     tags = ["L20_CU13"],
 )
 
+cc_test(
+    name = "beam_search_force_multiblock_select_all_test",
+    srcs = ["CudaBeamSearchOpTest.cc"],
+    copts = copts(),
+    deps = test_deps + [
+        "//rtp_llm/models_py/bindings/cuda/kernels/sampling:sampling",
+    ] + cuda13_torch_link_deps,
+    args = ["--gtest_filter=CudaBeamSearchOpTest.selectAllTopkTest"],
+    env = {"RTP_LLM_BEAM_TOPK_FORCE_PATH": "1"},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
 # Aliases: CudaGraph tests at //rtp_llm/cpp/cuda_graph/tests/
 alias(
     name = "test_cuda_graph_runner_libs",

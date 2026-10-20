@@ -72,6 +72,7 @@ private:
     static bool   shouldEarlyReturnEmptyBatch(bool streams_empty, int64_t tp_size, bool enable_ffn_disaggregate);
     static bool   shouldAddMtpFakePrefill(bool has_prefill, bool use_batch_decode_scheduler, int64_t dp_size);
     void          mayAddFakeStream(std::list<GenerateStreamPtr>& streams);
+    bool          rejectInvalidInputEmbeddings(const GenerateStreamPtr& stream) const;
 
     void initExecutor(const EngineInitParams& params, std::unique_ptr<ProposeModelEngineInitParams>& propose_params);
 
@@ -85,6 +86,7 @@ private:
     std::unique_ptr<Executor>                     executor_;
     ModelConfig                                   model_config_;
     py::object                                    custom_output_selector_;
+    bool                                          model_supports_input_embeddings_ = false;
     ParallelismConfig                             parallelism_config;
     RuntimeConfig                                 runtime_config;
     EPLBConfig                                    eplb_config;

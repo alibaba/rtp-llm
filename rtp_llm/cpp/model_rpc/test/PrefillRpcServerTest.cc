@@ -1171,6 +1171,49 @@ TEST_F(PrefillRpcServerTest, multimodalProcessDoesNotMutateOriginalRequest) {
         torch::equal(context->generate_input->text_tokens_mask.value(), torch::tensor({1, 0, 0, 1}, torch::kInt32)));
 }
 
+TEST_F(PrefillRpcServerTest, ExpandedMultimodalAllocateIdsSurviveDecodeStreamConstruction) {
+    for (bool with_layout : {false, true}) {
+        GenerateInputPB request;
+        request.set_request_id(1);
+        request.add_token_ids(0);
+        request.add_token_ids(1);
+        request.add_token_ids(2);
+        request.mutable_generate_config()->set_max_new_tokens(1);
+        request.add_multimodal_inputs()->set_multimodal_url("image");
+        if (with_layout) {
+            auto* span = request.mutable_multimodal_token_layout()->add_spans();
+            span->set_offset(1);
+            span->set_length(2);
+        }
+        auto context            = makeContext(&request);
+        context->generate_input = makeMultimodalInput();
+        PrefillRpcServer server;
+        server.mm_processor_ = std::make_shared<TestMultimodalProcessor>(ErrorCode::NONE_ERROR);
+        server.multimodalProcess(*context);
+        ASSERT_FALSE(context->hasError());
+        // Use explicit negative/large feature hashes so the regression cannot
+        // accidentally pass when a computed hash falls inside the vocabulary.
+        context->generate_input->input_ids = torch::tensor({0, -12345, 12345, 2}, torch::kInt32);
+        const auto allocation              = server.buildAllocateRequest(*context);
+        auto       decoded                 = QueryConverter::transQuery(&allocation.input());
+        ASSERT_FALSE(decoded->text_tokens_mask.has_value());
+        EXPECT_TRUE(torch::equal(decoded->input_ids, context->generate_input->input_ids));
+        if (with_layout) {
+            // Also exercise the layout-only provenance accepted by decode.
+            decoded->multimodal_inputs.reset();
+        }
+        ModelConfig model_config;
+        model_config.max_seq_len = 32;
+        model_config.vocab_size  = 128;
+        ResourceContext resource_context;
+        resource_context.role_type = RoleType::DECODE;
+        NormalGenerateStream stream(decoded, model_config, RuntimeConfig{}, resource_context, nullptr);
+        ASSERT_FALSE(stream.hasError());
+        EXPECT_EQ(stream.completeTokenIdsVec(0), (std::vector<int>{0, -12345, 12345, 2}));
+        EXPECT_NO_THROW(stream.releaseResource());
+    }
+}
+
 TEST_F(PrefillRpcServerTest, successfulMultimodalProcessIsReusedAcrossRetries) {
     GenerateInputPB request;
     request.set_request_id(1);
@@ -1321,6 +1364,7 @@ TEST_F(PrefillRpcServerTest, allocateRequestKeepsOriginalIdsWithoutExpansion) {
     request.add_token_ids(10);
     request.add_token_ids(20);
     request.mutable_generate_config()->set_max_new_tokens(7);
+    request.mutable_generate_config()->set_accept_compact_output(true);
     auto context                              = makeContext(&request);
     context->generate_input                   = std::make_shared<GenerateInput>();
     context->prefill_worker_cache_store_addrs = {"a:1", "b:2"};
@@ -1336,6 +1380,7 @@ TEST_F(PrefillRpcServerTest, allocateRequestKeepsOriginalIdsWithoutExpansion) {
     EXPECT_EQ(alloc_request.input().token_ids(0), 10);
     EXPECT_EQ(alloc_request.input().token_ids(1), 20);
     EXPECT_EQ(alloc_request.input().generate_config().max_new_tokens(), 7);
+    EXPECT_TRUE(alloc_request.input().generate_config().accept_compact_output());
     ASSERT_EQ(alloc_request.peer_addrs_size(), 2);
     EXPECT_EQ(alloc_request.peer_addrs(0), "a:1");
     EXPECT_EQ(alloc_request.peer_addrs(1), "b:2");

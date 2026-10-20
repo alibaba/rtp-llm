@@ -65,6 +65,9 @@ class ServerConfig:
         self.pre_stop_drain_headroom_seconds: float = -1.0
         self.pre_stop_drain_signal: bool = True
         self.backend_post_frontend_drain_seconds: float = -1.0
+        self.enable_prompt_generator: bool = False
+        self.prompt_generator_server_count: int = 1
+        self.enable_prompt_generator_mps: bool = False
         self.enable_torch_allocator_dump: bool = False
         self.torch_allocator_dump_auth_token: str = ""
         self.torch_allocator_dump_auth_header: str = "X-RTP-LLM-Allocator-Dump-Token"
@@ -127,13 +130,23 @@ class ServerConfig:
         """Update rank_id in place; server_port-related properties reflect new values."""
         self.rank_id = local_rank
 
-    def validate_port_layout(self, *, dash_sc_enabled: bool) -> None:
-        if dash_sc_enabled and self.worker_info_port_num < MIN_WORKER_INFO_PORT_NUM:
+    def validate_port_layout(
+        self, *, dash_sc_enabled: bool, backend_enabled: bool = False
+    ) -> None:
+        minimum = (
+            MIN_WORKER_INFO_PORT_NUM if dash_sc_enabled else 8 if backend_enabled else 1
+        )
+        if self.worker_info_port_num < minimum:
+            listener = (
+                "DashSc gRPC"
+                if dash_sc_enabled
+                else "backend" if backend_enabled else "frontend"
+            )
             raise ValueError(
                 "worker_info_port_num must be at least "
-                f"{MIN_WORKER_INFO_PORT_NUM} when DashSc gRPC is enabled; "
-                f"got {self.worker_info_port_num}. DashSc uses port offset "
-                f"{DASH_SC_GRPC_SERVER_PORT_OFFSET}, which overlaps the next "
+                f"{minimum} when {listener} is enabled; "
+                f"got {self.worker_info_port_num}. The last listener uses port offset "
+                f"{minimum - 1}, which overlaps the next "
                 "rank's port block with a smaller stride."
             )
 
@@ -167,7 +180,10 @@ class ServerConfig:
             f"cache_store_rdma_listen_port: {self.cache_store_rdma_listen_port}\n"
             f"http_port: {self.http_port}\n"
             f"embedding_rpc_server_port: {self.embedding_rpc_server_port}\n"
-            f"dash_sc_grpc_server_port: {self.dash_sc_grpc_server_port}"
+            f"dash_sc_grpc_server_port: {self.dash_sc_grpc_server_port}\n"
+            f"enable_prompt_generator: {self.enable_prompt_generator}\n"
+            f"prompt_generator_server_count: {self.prompt_generator_server_count}\n"
+            f"enable_prompt_generator_mps: {self.enable_prompt_generator_mps}\n"
         )
 
 

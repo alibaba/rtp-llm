@@ -13,6 +13,8 @@ class QueryConverter {
 public:
     static std::shared_ptr<GenerateInput> transQuery(const GenerateInputPB* input);
 
+    static ErrorInfo requestParsingError(const std::exception& error);
+
     static RequestInfo transRequestInfo(const RequestInfoPB& request_info_pb);
 
     static int resolveMaxNewTokens(const GenerateConfigPB& config_proto);
@@ -21,7 +23,8 @@ public:
                               const GenerateOutputs* response,
                               bool                   dump_aux_info,
                               const std::string&     aux_string,
-                              const int32_t          eos_token_id);
+                              const int32_t          eos_token_id,
+                              bool                   accept_compact_output = false);
 
     static std::vector<RoleAddr> getRoleAddrs(const GenerateConfigPB* config_proto);
 
