@@ -123,15 +123,11 @@ class KdaBase(nn.Module):
 
 
 class KdaPrefill(KdaBase):
-    """All model prefill callers use cuLA; RTP owns convolution and cache IO."""
+    """Generic KDA Prefill using the existing in-tree chunk implementation."""
 
     def __init__(self, config, parallelism, weights, use_paged_conv=False):
         super().__init__(config, parallelism, weights)
-        if self.head_k_dim != 128 or self.local_num_k_heads != self.local_num_v_heads:
-            raise ValueError("cuLA paged KDA requires equal Q/K/V heads with head_dim=128")
         self.use_paged_conv = use_paged_conv
-        self.alog = self.alog.float().contiguous()
-        self.dt_bias = self.dt_bias.float().contiguous()
 
     @staticmethod
     def _validate_prefix_state(attn_inputs, seq_size_per_block):
@@ -175,65 +171,111 @@ class KdaPrefill(KdaBase):
 
     def _fla(
         self,
-        mixed_qkv,
-        forget_gate,
-        beta,
-        kv_cache_tensor,
-        seq_size_per_block,
-        attn_inputs,
-    ):
-        cu = attn_inputs.cu_seqlens
-        prefixes = attn_inputs.prefix_lengths
-        if cu.device.type != "cpu" or prefixes.device.type != "cpu":
-            raise ValueError("cuLA KDA prefill requires RTP host metadata mirrors")
-        cu, prefixes = cu.tolist(), prefixes.tolist()
-        if len(prefixes) != len(cu) - 1:
-            raise ValueError("cuLA KDA prefix metadata does not match the batch")
-        shape = (-1, self.local_num_v_heads, self.head_k_dim)
-        if isinstance(mixed_qkv, tuple):
-            q, k, v = (x.reshape(shape) for x in mixed_qkv)
-            tokens, device = mixed_qkv[0].shape[0], mixed_qkv[0].device
-        else:
-            q, k, v = (x.reshape(shape) for x in mixed_qkv.chunk(3, dim=-1))
-            tokens, device = mixed_qkv.shape[0], mixed_qkv.device
-        if kv_cache_tensor is None:
-            if any(prefixes):
-                raise ValueError("A cached KDA prefix requires recurrent cache storage")
-            count = len(prefixes)
-            logical = attn_inputs.logical_request_count or count
-            block_table = [[i + 1] if i < logical else [0] for i in range(count)]
-            max_length = max([1] + [b - a for a, b in zip(cu, cu[1:])])
-            seq_size_per_block = (max_length + 63) // 64 * 64
-            states = torch.zeros(
-                (count + 1, self.local_num_v_heads, self.head_k_dim, self.head_v_dim),
-                dtype=torch.float32,
-                device=device,
-            )
-        else:
-            table = attn_inputs.kv_cache_kernel_block_id
-            if table.device.type != "cpu":
-                raise ValueError("cuLA KDA block planning requires host block IDs")
-            block_table = table.tolist()
-            states = self._get_ssm_states(kv_cache_tensor)
-        from rtp_llm.models_py.modules.factory.attention.cuda_kda_impl import (
-            cula_kda_paged_prefill,
+        mixed_qkv: torch.Tensor,
+        forget_gate: torch.Tensor,
+        beta: torch.Tensor,
+        kv_cache_tensor: Optional[torch.Tensor],
+        seq_size_per_block: int,
+        attn_inputs: PyAttentionInputs,
+    ) -> torch.Tensor:
+        from rtp_llm.models_py.triton_kernels.kda.chunk import chunk_kda
+        from rtp_llm.models_py.triton_kernels.fla.block import (
+            load_initial_state_from_block_map, store_ssm_state_to_block_map,
         )
 
-        return cula_kda_paged_prefill(
-            q,
-            k,
-            v,
-            forget_gate.reshape(shape),
-            beta,
-            self.alog,
-            self.dt_bias,
-            self.gate_lower_bound,
-            states,
-            cu,
-            prefixes,
-            block_table,
-            seq_size_per_block,
-        ).reshape(tokens, -1)
+        # Compute gate: [T, local_H*D] -> [1, T, local_H, D]
+        g = forget_gate.view(
+            1, forget_gate.shape[0], self.local_num_v_heads, self.head_k_dim
+        ).contiguous()
+        # beta: [token, H] -> apply sigmoid in float32 -> [1, token, H]
+        beta_reshaped = beta.float().sigmoid().unsqueeze(0)
+
+        ssm_states = (
+            self._get_ssm_states(kv_cache_tensor)
+            if kv_cache_tensor is not None
+            else None
+        )
+        context_batch_size = attn_inputs.input_lengths.shape[0]
+        cu_seqlens_without_padding = attn_inputs.cu_seqlens_device
+        initial_states: Optional[torch.Tensor] = None
+        if ssm_states is not None:
+            initial_states = torch.empty(
+                context_batch_size,
+                self.local_num_v_heads,
+                self.head_k_dim,
+                self.head_v_dim,
+                device=mixed_qkv.device,
+                dtype=self.ssm_state_dtype,
+            )
+            load_initial_state_from_block_map(
+                attn_inputs.prefix_lengths_device,
+                attn_inputs.kv_cache_kernel_block_id_device,
+                ssm_states,
+                initial_states,
+                seq_size_per_block,
+            )
+
+        query, key, value = torch.split(
+            mixed_qkv,
+            [
+                self.local_num_k_heads * self.head_k_dim,
+                self.local_num_k_heads * self.head_k_dim,
+                self.local_num_v_heads * self.head_v_dim,
+            ],
+            dim=-1,
+        )
+        query = query.view(
+            1, query.shape[0], self.local_num_k_heads, self.head_k_dim
+        ).contiguous()
+        key = key.view(
+            1, key.shape[0], self.local_num_k_heads, self.head_k_dim
+        ).contiguous()
+        value = value.view(
+            1, value.shape[0], self.local_num_v_heads, self.head_v_dim
+        ).contiguous()
+
+        # Prefill: use chunk_kda with fused gate (use_gate_in_kernel=True)
+        attn_out, final_state, h = chunk_kda(
+            query,
+            key,
+            value,
+            g,
+            beta_reshaped,
+            initial_state=initial_states,
+            output_final_state=True,
+            cu_seqlens=cu_seqlens_without_padding,
+            use_qk_l2norm_in_kernel=True,
+            use_gate_in_kernel=True,
+            return_intermediate_states=True,
+            A_log=self.alog,
+            dt_bias=self.dt_bias,
+        )
+        h_from_chunk = h
+
+        if ssm_states is not None and final_state is not None:
+            h_for_store = (
+                h_from_chunk
+                if h_from_chunk is not None
+                else final_state.unsqueeze(0).unsqueeze(0)
+            )
+            # store_ssm_state_to_block_map requires h and final_state in float32
+            if h_for_store.dtype != torch.float32:
+                h_for_store = h_for_store.float()
+            if final_state.dtype != torch.float32:
+                final_state = final_state.float()
+
+            store_ssm_state_to_block_map(
+                h_for_store,
+                final_state,
+                attn_inputs.prefix_lengths_device,
+                cu_seqlens_without_padding,
+                attn_inputs.kv_cache_kernel_block_id_device,
+                ssm_states,
+                seq_size_per_block,
+                chunk_size=64,
+            )
+
+        return attn_out.squeeze_(0)
 
     def forward(
         self,
@@ -304,6 +346,79 @@ class KdaPrefill(KdaBase):
             mixed_qkv, forget_gate, beta, kv_cache_tensor,
             seq_size_per_block, attn_inputs,
         )
+
+
+class KdaPagedPrefill(KdaPrefill):
+    """Paged checkpoint prefill for callers using the pinned cuLA operator."""
+
+    def __init__(self, config, parallelism, weights, use_paged_conv=False):
+        super().__init__(config, parallelism, weights, use_paged_conv=use_paged_conv)
+        if self.head_k_dim != 128 or self.local_num_k_heads != self.local_num_v_heads:
+            raise ValueError("cuLA paged KDA requires equal Q/K/V heads with head_dim=128")
+        self.alog = self.alog.float().contiguous()
+        self.dt_bias = self.dt_bias.float().contiguous()
+
+    def _fla(
+        self,
+        mixed_qkv,
+        forget_gate,
+        beta,
+        kv_cache_tensor,
+        seq_size_per_block,
+        attn_inputs,
+    ):
+        cu = attn_inputs.cu_seqlens
+        prefixes = attn_inputs.prefix_lengths
+        if cu.device.type != "cpu" or prefixes.device.type != "cpu":
+            raise ValueError("cuLA KDA prefill requires RTP host metadata mirrors")
+        cu, prefixes = cu.tolist(), prefixes.tolist()
+        if len(prefixes) != len(cu) - 1:
+            raise ValueError("cuLA KDA prefix metadata does not match the batch")
+        shape = (-1, self.local_num_v_heads, self.head_k_dim)
+        if isinstance(mixed_qkv, tuple):
+            q, k, v = (x.reshape(shape) for x in mixed_qkv)
+            tokens, device = mixed_qkv[0].shape[0], mixed_qkv[0].device
+        else:
+            q, k, v = (x.reshape(shape) for x in mixed_qkv.chunk(3, dim=-1))
+            tokens, device = mixed_qkv.shape[0], mixed_qkv.device
+        if kv_cache_tensor is None:
+            if any(prefixes):
+                raise ValueError("A cached KDA prefix requires recurrent cache storage")
+            count = len(prefixes)
+            logical = attn_inputs.logical_request_count or count
+            block_table = [[i + 1] if i < logical else [0] for i in range(count)]
+            max_length = max([1] + [b - a for a, b in zip(cu, cu[1:])])
+            seq_size_per_block = (max_length + 63) // 64 * 64
+            states = torch.zeros(
+                (count + 1, self.local_num_v_heads, self.head_k_dim, self.head_v_dim),
+                dtype=torch.float32,
+                device=device,
+            )
+        else:
+            table = attn_inputs.kv_cache_kernel_block_id
+            if table.device.type != "cpu":
+                raise ValueError("cuLA KDA block planning requires host block IDs")
+            block_table = table.tolist()
+            states = self._get_ssm_states(kv_cache_tensor)
+        from rtp_llm.models_py.modules.factory.attention.cuda_kda_impl import (
+            cula_kda_paged_prefill,
+        )
+
+        return cula_kda_paged_prefill(
+            q,
+            k,
+            v,
+            forget_gate.reshape(shape),
+            beta,
+            self.alog,
+            self.dt_bias,
+            self.gate_lower_bound,
+            states,
+            cu,
+            prefixes,
+            block_table,
+            seq_size_per_block,
+        ).reshape(tokens, -1)
 
 
 class KdaDecode(KdaBase):

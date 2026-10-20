@@ -29,6 +29,12 @@ def _install_stubs(calls):
     deepgemm_wrapper.fp8_gemm_nt = fp8_gemm_nt
     deepgemm_wrapper.has_deep_gemm = lambda: True
     deepgemm_wrapper.is_deep_gemm_e8m0_used = lambda: True
+    deepgemm_wrapper.has_fp8_gemm_nt_skip_head_mid = lambda: False
+
+    def unexpected_packed_gemm(*args, **kwargs):
+        raise AssertionError("The ordinary quantized-input contract must not use packed GEMM")
+
+    deepgemm_wrapper.fp8_gemm_nt_skip_head_mid = unexpected_packed_gemm
 
     fp8_kernel = types.ModuleType("rtp_llm.models_py.kernels.cuda.fp8_kernel")
 

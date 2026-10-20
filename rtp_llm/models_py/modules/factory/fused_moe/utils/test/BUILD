@@ -7,6 +7,18 @@ _CUDA13_ONLY = select({
 })
 
 py_test(
+    name = "test_mega_moe_activation_contract",
+    srcs = ["test_mega_moe_activation_contract.py"],
+    data = ["//rtp_llm/models_py:modules"],
+)
+
+py_test(
+    name = "test_mega_moe_backend",
+    srcs = ["test_mega_moe_backend.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
     name = "timeline_test",
     srcs = ["timeline_test.py"],
     deps = [

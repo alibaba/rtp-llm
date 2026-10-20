@@ -4,8 +4,8 @@
 #include "rtp_llm/models_py/bindings/cuda/Bf16GemmOp.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/custom_all_gather.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/push_reduce_scatter.h"
-#ifdef RTP_K3_NATIVE_ATTNRES
-#include "rtp_llm/models_py/bindings/cuda/kernels/kimi_k3_attn_res.h"
+#ifdef RTP_NATIVE_ATTN_RES
+#include "rtp_llm/models_py/bindings/cuda/kernels/attn_res.h"
 #endif
 
 
@@ -19,6 +19,7 @@
 namespace rtp_llm {
 
 void registerPyModuleOps(py::module& rtp_ops_m) {
+    rtp_ops_m.def("is_cuda_fabric_allocation", &is_cuda_fabric_allocation, py::arg("tensor"));
     rtp_ops_m.def("custom_all_gather_staging",
                   &custom_all_gather_staging,
                   py::arg("input"),
@@ -51,10 +52,10 @@ void registerPyModuleOps(py::module& rtp_ops_m) {
                   py::arg("blocks"),
                   py::arg("threads"));
 
-#ifdef RTP_K3_NATIVE_ATTNRES
-    rtp_ops_m.def("kimi_k3_attn_res",
-                  &kimi_k3_attn_res,
-                  "Native Blackwell K3 AttnRes with optional fused RMSNorm",
+#ifdef RTP_NATIVE_ATTN_RES
+    rtp_ops_m.def("attn_res",
+                  &attn_res,
+                  "Blackwell AttnRes with optional fused RMSNorm",
                   py::arg("prefix"),
                   py::arg("delta"),
                   py::arg("blocks"),

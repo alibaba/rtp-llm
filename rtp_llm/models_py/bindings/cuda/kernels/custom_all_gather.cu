@@ -20,6 +20,7 @@
 // The FP8 pair traversal and lossless marker encoding extend those protocols.
 // This port uses only PyTorch/CUDA, with no SGLang or TVM runtime dependency.
 #include "rtp_llm/models_py/bindings/cuda/kernels/custom_all_gather.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/collective_poll.cuh"
 
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAException.h>
@@ -182,8 +183,12 @@ __global__ void all_gather_staging_kernel(const __grid_constant__ Params p) {
         const uint32_t local_vid = vid - src_rank * p.value_vecs;
         auto*          src       = p.workspace + phase_offset + src_rank * p.slot_bytes;
         Vector         value;
+        uint64_t poll_start = 0;
+        uint32_t polls = 0;
         do {
             load_vector<true>(value, src, local_vid);
+            if (value.words[0] == 0 || value.words[1] == 0 || value.words[2] == 0 || value.words[3] == 0)
+                check_collective_poll_timeout(poll_start, polls);
         } while (value.words[0] == 0 || value.words[1] == 0 || value.words[2] == 0 || value.words[3] == 0);
         store_vector(p.output, vid, value);
         store_vector(src, local_vid, zero);
@@ -233,12 +238,18 @@ __global__ void all_gather_fp8_staging_kernel(const __grid_constant__ Params p) 
     const Vector   zero     = {};
     for (uint32_t vid = tid; vid < p.total_vecs; vid += step) {
         Vector value;
+        uint64_t poll_start = 0;
+        uint32_t polls = 0;
         do {
             load_vector<true>(value, src, vid);
+            if ((value.words[0] & value.words[1] & value.words[2] & value.words[3] & 0x80000000u) == 0)
+                check_collective_poll_timeout(poll_start, polls);
         } while ((value.words[0] & value.words[1] & value.words[2] & value.words[3] & 0x80000000u) == 0);
         uint32_t meta;
         do {
             meta = load_word<false>(src_meta + vid);
+            if (meta == 0)
+                check_collective_poll_timeout(poll_start, polls);
         } while (meta == 0);
 #pragma unroll
         for (uint32_t j = 0; j < 4; ++j)
