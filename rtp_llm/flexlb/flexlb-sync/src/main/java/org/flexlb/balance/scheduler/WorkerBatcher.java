@@ -1272,6 +1272,11 @@ public final class WorkerBatcher {
                     transaction, decisionReason);
             return admitted == null
                     ? BatcherCycleResult.NO_ACTION : admitted;
+        } catch (EndpointRetiredException retired) {
+            // The resources are closed, no handoff happened and the head is still queued: requeue it
+            // instead of letting the exception stop the loop and fail every queued request.
+            return commitBoundary(
+                    candidates.get(0), CapacityBoundary.failed(retired));
         }
     }
 

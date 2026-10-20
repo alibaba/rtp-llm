@@ -438,6 +438,48 @@ class WorkerBatcherSchedulingTest {
     }
 
     @Test
+    @Timeout(value = 10, unit = TimeUnit.SECONDS)
+    void prefillRetiredDuringCommitFailsHeadAsPreparationFailureAndKeepsLoopRunning() throws Exception {
+        FlexlbConfig config = singleConfig();
+        PrefillEndpoint endpoint = stableEndpoint(stableStatus());
+        ScheduledRequest retiredItem = item(config, endpoint, 200L, 50, System.currentTimeMillis());
+        ScheduledRequest laterItem = item(config, endpoint, 201L, 50, System.currentTimeMillis());
+        DeliveryStrategy delivery = mock(DeliveryStrategy.class);
+        when(delivery.prepare(org.mockito.ArgumentMatchers.anyList(), org.mockito.ArgumentMatchers.any(),
+                org.mockito.ArgumentMatchers.any())).thenAnswer(invocation -> {
+            List<ScheduledRequest> members = List.copyOf(invocation.getArgument(0));
+            var transaction = mock(DeliveryStrategy.Transaction.class);
+            when(transaction.items()).thenReturn(members);
+            if (members.get(0) == retiredItem) {
+                when(transaction.commitUnderLock())
+                        .thenThrow(new EndpointRetiredException("Prefill", retiredItem));
+            } else {
+                org.mockito.Mockito.doAnswer(ignored -> {
+                    members.forEach(member -> member.future().complete(new Response()));
+                    return null;
+                }).when(transaction).handoff(
+                        org.mockito.ArgumentMatchers.anyString(),
+                        org.mockito.ArgumentMatchers.anyInt(),
+                        org.mockito.ArgumentMatchers.any());
+            }
+            return transaction;
+        });
+        EndpointEventProjector projector = mock(EndpointEventProjector.class);
+        WorkerBatcher runtime = new WorkerBatcher(
+                "retired-commit", endpoint, () -> config, delivery, projector, new QueueCapacity());
+        runtimes.add(runtime);
+        runtime.start();
+
+        assertEquals(ACCEPTED, runtime.offerWithResult(retiredItem));
+        org.mockito.Mockito.verify(projector, org.mockito.Mockito.timeout(5000)).onPreparedDeliveryFailure(
+                org.mockito.ArgumentMatchers.eq(retiredItem),
+                org.mockito.ArgumentMatchers.isA(EndpointRetiredException.class));
+
+        assertEquals(ACCEPTED, runtime.offerWithResult(laterItem));
+        laterItem.future().get(5, TimeUnit.SECONDS);
+    }
+
+    @Test
     void windowUpdateInvalidatesProjectionWithoutQueueMutation() {
         FlexlbConfig initial = fixedConfig();
         initial.decisionPolicy().setMaxCollectionWaitMs(100L);
