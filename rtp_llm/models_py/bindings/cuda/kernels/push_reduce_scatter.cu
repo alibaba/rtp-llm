@@ -21,6 +21,7 @@
 // Preserve its 16-byte Lamport payload, two phases, counter bumper, PDL and
 // rank-ordered FP32 accumulation, generalized to TP2/4/8/16 with PyTorch bindings.
 #include "rtp_llm/models_py/bindings/cuda/kernels/push_reduce_scatter.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/collective_poll.cuh"
 
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -129,6 +130,8 @@ __global__ void push_reduce_scatter_kernel(const __grid_constant__ Params params
     const Vector zero      = {};
     for (uint32_t vid = tid; vid < params.local_vecs; vid += step) {
         Vector values[WorldSize];
+        uint64_t poll_start = 0;
+        uint32_t polls = 0;
         while (true) {
             bool empty = false;
 #pragma unroll
@@ -140,6 +143,7 @@ __global__ void push_reduce_scatter_kernel(const __grid_constant__ Params params
             }
             if (!empty)
                 break;
+            check_collective_poll_timeout(poll_start, polls);
         }
         float2 acc[4];
 #pragma unroll

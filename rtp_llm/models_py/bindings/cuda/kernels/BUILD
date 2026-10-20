@@ -8,6 +8,12 @@ sm100_cuda_copts = copts() + cuda_default_copts_without_arch() + [
     '--cuda-include-ptx=sm_100a', '--cuda-gpu-arch=sm_100a',
 ]
 
+sm103_cuda_copts = select({
+    "@//:using_cuda13_x86": ["--cuda-gpu-arch=sm_103", "--cuda-include-ptx=sm_103"],
+    "@//:using_cuda13_arm": ["--cuda-gpu-arch=sm_103", "--cuda-include-ptx=sm_103"],
+    "//conditions:default": [],
+})
+
 # The DeepSeek V4 TopK uses CTA clusters and requires SM90+. CUDA Runtime reports
 # this host as SM103, so emit an exact SM103 cubin alongside production SM100.
 dsv4_indexer_topk_cuda_copts = copts() + cuda_default_copts_without_arch() + [
@@ -26,6 +32,30 @@ cuda_deps = [
     "@local_config_cuda//cuda:cuda_headers",
     "@local_config_cuda//cuda:cudart",
 ]
+
+cc_library(
+    name = "custom_all_gather",
+    srcs = ["custom_all_gather.cu"],
+    hdrs = ["custom_all_gather.h", "collective_poll.cuh"],
+    deps = [
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + torch_deps(),
+    copts = cuda_copts() + sm103_cuda_copts,
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "push_reduce_scatter",
+    srcs = ["push_reduce_scatter.cu"],
+    hdrs = ["push_reduce_scatter.h", "collective_poll.cuh"],
+    deps = [
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + torch_deps(),
+    copts = cuda_copts() + sm103_cuda_copts,
+    visibility = ["//visibility:public"],
+)
 
 cc_library(
     name = "cuda_utils_common",
@@ -279,6 +309,7 @@ cc_library(
     ],
     hdrs = ["mla_quant_kernel.h"],
     deps = [
+        "//rtp_llm/models_py/bindings/cuda:launch_utils",
         "//rtp_llm/models_py/bindings/cuda:cuda_utils_cu",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
@@ -381,4 +412,22 @@ cc_library(
         "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "attn_res",
+    srcs = ["attn_res.cu"],
+    hdrs = ["attn_res.h"],
+    deps = torch_deps() + [
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ],
+    copts = copts() + cuda_default_copts_without_arch() + [
+        "-O3",
+        # Match the pinned vLLM AttnRes translation unit's math and arch flags.
+        # These affect reciprocal/RMSNorm rounding; do not apply globally.
+        "-nvcc_options=use_fast_math",
+        "-nvcc_options=extended-lambda",
+        "--cuda-gpu-arch=sm_100f",
+    ],
 )

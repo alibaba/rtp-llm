@@ -15,7 +15,8 @@ from rtp_llm.models_py.distributed.collective_torch import (
     Fp8Activation,
     reduce_scatter_bf16 as reduce_scatter,
 )
-from rtp_llm.models_py.modules import KdaAttention, KdaDecode, KdaPrefill, RMSNorm
+from rtp_llm.models_py.modules import KdaAttention, KdaDecode, RMSNorm
+from rtp_llm.models_py.modules.factory.attention.kda_impl import KdaPagedPrefill
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.f16_linear import CudaF16Linear
 from rtp_llm.models_py.modules.factory.linear import LinearFactory
 from rtp_llm.models_py.triton_kernels.common.activation import gate_sigmoid_mul
@@ -72,7 +73,7 @@ class KimiK3KDA(KdaAttention):
         fa_width = forget_weight.shape[
             1 if forget_weight.dtype == torch.float8_e4m3fn else 0
         ]
-        prefill = KdaPrefill(
+        prefill = KdaPagedPrefill(
             cfg,
             parallelism,
             weights,

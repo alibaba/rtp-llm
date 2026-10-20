@@ -50,13 +50,20 @@ class _FusedSharedExperts(nn.Module):
             get_mega_moe_input_packer,
         )
 
-        params = inspect.signature(deep_gemm.fp8_fp4_mega_moe).parameters
+        from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.activation import (
+            mega_moe_functions, situ_kwargs,
+        )
+        self.kernel, transform_weights, allocate = mega_moe_functions(deep_gemm, "situ")
+        self.activation_kwargs = situ_kwargs(
+            self.kernel, cfg.activation_beta, cfg.activation_linear_beta
+        )
+        params = inspect.signature(self.kernel).parameters
         required = {"shared_x", "shared_y", "shared_l1_weights", "shared_l2_weights",
                     "activation_beta", "activation_linear_beta"}
         if not required.issubset(params):
             raise RuntimeError("DeepGEMM lacks BF16 fused shared-expert SiTU support")
         if "shared_intermediate_hidden" not in inspect.signature(
-            deep_gemm.get_symm_buffer_for_mega_moe
+            allocate
         ).parameters:
             raise RuntimeError("DeepGEMM lacks BF16 shared-expert workspace support")
         if cfg.world_size != cfg.ep_size:
@@ -74,7 +81,7 @@ class _FusedSharedExperts(nn.Module):
         s2 = prepare_fp4_weight_scale_for_deepgemm(
             packed.pop(W.moe_s2), latent, intermediate, experts, backend=deep_gemm
         )
-        self.routed_l1, self.routed_l2 = deep_gemm.transform_weights_for_mega_moe(
+        self.routed_l1, self.routed_l2 = transform_weights(
             (w13, s13), (w2, s2), activation="situ"
         )
         del w13, s13, w2, s2
@@ -85,7 +92,7 @@ class _FusedSharedExperts(nn.Module):
                 or tuple(shared_gate_up.shape) != (2 * shared_intermediate, shared_hidden)
                 or tuple(shared_down.shape) != (shared_intermediate, shared_hidden)):
             raise ValueError("fused shared-expert BF16 weights have unexpected layout")
-        self.shared_l1, self.shared_l2 = deep_gemm.transform_weights_for_mega_moe(
+        self.shared_l1, self.shared_l2 = transform_weights(
             shared_gate_up.contiguous(), shared_down.T.contiguous(), activation="situ"
         )
         group = _get_validated_world_ep_group(cfg, dist)
@@ -94,7 +101,7 @@ class _FusedSharedExperts(nn.Module):
                latent, intermediate, shared_intermediate)
         buf = _FUSED_SHARED_BUFFERS.get(key)
         if buf is None:
-            buf = deep_gemm.get_symm_buffer_for_mega_moe(
+            buf = allocate(
                 group=group, num_experts=cfg.n_routed_experts,
                 num_max_tokens_per_rank=capacity, num_topk=cfg.n_activated_experts,
                 hidden=latent, intermediate_hidden=intermediate,
@@ -117,13 +124,9 @@ class _FusedSharedExperts(nn.Module):
             _FUSED_SHARED_OUTPUTS[output_key] = outputs
         self.routed_y, self.shared_x, self.shared_y = outputs
         self.packer = get_mega_moe_input_packer()
-        self.beta = float(cfg.activation_beta)
-        self.linear_beta = cfg.activation_linear_beta
         self.fp4_block = FP4_BLOCK
 
     def forward(self, hidden, routed_input, routing, ids, valid_mask=None):
-        import deep_gemm
-
         tokens = int(routed_input.size(0))
         if tokens > self.buf.num_max_tokens_per_rank:
             raise ValueError("fused shared-expert input exceeds token capacity")
@@ -146,13 +149,12 @@ class _FusedSharedExperts(nn.Module):
             self.shared_x[:tokens].copy_(hidden)
             if valid_mask is not None:
                 self.shared_x[:tokens].masked_fill_(~valid_mask[:, None], 0)
-        deep_gemm.fp8_fp4_mega_moe(
+        self.kernel(
             self.routed_y[:tokens], self.routed_l1, self.routed_l2, self.buf,
             shared_x=self.shared_x, shared_y=self.shared_y,
             shared_l1_weights=self.shared_l1, shared_l2_weights=self.shared_l2,
             recipe=(1, 1, self.fp4_block), activation="situ",
-            activation_clamp=None, activation_beta=self.beta,
-            activation_linear_beta=self.linear_beta, fast_math=True,
+            activation_clamp=None, **self.activation_kwargs, fast_math=True,
         )
         return self.routed_y[:tokens], self.shared_y[:tokens]
 

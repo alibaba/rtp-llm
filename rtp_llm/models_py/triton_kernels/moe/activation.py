@@ -6,8 +6,8 @@ import triton.language as tl
 from triton.language.extra.cuda import libdevice
 
 
-@triton.jit
-def _situ_and_mul_kernel(G, U, O, N: tl.constexpr, W: tl.constexpr,
+@triton.jit(do_not_specialize=["N"])
+def _situ_and_mul_kernel(G, U, O, N, W: tl.constexpr,
           G0: tl.constexpr, G1: tl.constexpr, U0: tl.constexpr, U1: tl.constexpr,
           BETA: tl.constexpr, UP_BETA: tl.constexpr,
           BLOCK: tl.constexpr):

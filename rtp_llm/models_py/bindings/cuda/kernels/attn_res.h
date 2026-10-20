@@ -2,7 +2,7 @@
 #include <ATen/ATen.h>
 #include <optional>
 
-void kimi_k3_attn_res(at::Tensor& prefix, std::optional<at::Tensor> delta,
+void attn_res(at::Tensor& prefix, std::optional<at::Tensor> delta,
                      at::Tensor& blocks, const at::Tensor& norm_weight,
                      const at::Tensor& qk_weight,
                      std::optional<at::Tensor> output_norm_weight,

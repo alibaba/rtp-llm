@@ -2208,35 +2208,26 @@ TEST(CacheConfigTest, DSV4MtpKeepsProposeLayerInSwaPool) {
     auto           config = rtp_llm::test::finalizeCacheConfig(created_config, config_candidate_block_num);
 
     ASSERT_EQ(config.layer_num, 43u);
-    ASSERT_EQ(config.layer_all_num(), 45u);
+    ASSERT_EQ(config.layer_all_num(), 44u);
     ASSERT_EQ(config.topology().layers().size(), static_cast<size_t>(config.layer_all_num()));
-    ASSERT_EQ(config.mtp_sub_configs.size(), 2u);
+    ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
     ASSERT_NE(config.mtp_sub_configs[0], nullptr);
-    ASSERT_NE(config.mtp_sub_configs[1], nullptr);
 
     EXPECT_EQ(config.groupForLayer(43, "swa_kv").tag, "swa_kv");
     EXPECT_EQ(config.topology().layer(43).group_tags, std::vector<std::string>({"swa_kv"}));
-    EXPECT_EQ(config.topology().layer(44).group_tags, std::vector<std::string>({"swa_kv"}));
-    EXPECT_EQ(config.groupForLayer(44, "swa_kv").tag, "swa_kv");
-
-    EXPECT_EQ(config.layerIdsForGroup("swa_kv").size(), 45u);
+    EXPECT_EQ(config.layerIdsForGroup("swa_kv").size(), 44u);
 
     // Merge preserves target publication order and placeholder identities;
     // only layer IDs are draft-local. Runtime block tables carry their own tags.
     EXPECT_EQ(publishedGroupTags(config.mtp_sub_configs[0]->topology()), publishedGroupTags(config.topology()));
-    EXPECT_EQ(publishedGroupTags(config.mtp_sub_configs[1]->topology()), publishedGroupTags(config.topology()));
     EXPECT_EQ(config.mtp_sub_configs[0]->groupForLayer(0, "swa_kv").tag, "swa_kv");
-    EXPECT_EQ(config.mtp_sub_configs[1]->groupForLayer(0, "swa_kv").tag, "swa_kv");
     EXPECT_EQ(config.mtp_sub_configs[0]->layerIdsForGroup(config.mtp_sub_configs[0]->group("swa_kv").tag),
-              std::vector<int>({0}));
-    EXPECT_EQ(config.mtp_sub_configs[1]->layerIdsForGroup(config.mtp_sub_configs[1]->group("swa_kv").tag),
               std::vector<int>({0}));
     for (const auto& group : config.groups()) {
         if (group.tag == "swa_kv") {
             continue;
         }
         EXPECT_TRUE(config.mtp_sub_configs[0]->layerIdsForGroup(group.tag).empty()) << group.tag;
-        EXPECT_TRUE(config.mtp_sub_configs[1]->layerIdsForGroup(group.tag).empty()) << group.tag;
     }
     EXPECT_EQ(config.seq_size_per_block, 16384u);
 
@@ -2248,9 +2239,7 @@ TEST(CacheConfigTest, DSV4MtpKeepsProposeLayerInSwaPool) {
 
     EXPECT_EQ(config.group("swa_kv").block_num, 25u);
     EXPECT_EQ(config.mtp_sub_configs[0]->linear_step, 4);
-    EXPECT_EQ(config.mtp_sub_configs[1]->linear_step, 4);
     EXPECT_EQ(config.mtp_sub_configs[0]->group("swa_kv").block_num, 25u);
-    EXPECT_EQ(config.mtp_sub_configs[1]->group("swa_kv").block_num, 25u);
 
     EXPECT_EQ(test::explicitPoolReserveBytes(config), 256u * config.blockSizeBytesForGroup("hca_state"));
 }
@@ -2312,7 +2301,7 @@ TEST(CacheConfigTest, DSV4MtpJointBudgetIncludesScoreAndProposeSwaBacking) {
     EXPECT_LE(backing_bytes(block_num), budget_bytes);
     EXPECT_GT(backing_bytes(block_num + 1u), budget_bytes);
 
-    ASSERT_EQ(config.mtp_sub_configs.size(), 2u);
+    ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
     for (const auto& sub_config : config.mtp_sub_configs) {
         ASSERT_NE(sub_config, nullptr);
         EXPECT_EQ(sub_config->linear_step, 4);
@@ -3681,10 +3670,10 @@ TEST(CacheConfigCreatorTest, MergedBudgetUsesEachPhysicalSegmentOnce) {
             const uint32_t config_candidate_block_num =
                 CacheConfigCreator::computeLocalBlockNum(created_config, target, {}, options, {}, std::nullopt, sp);
             auto config = finalizeCacheConfig(created_config, config_candidate_block_num);
-            ASSERT_EQ(config.mtp_sub_configs.size(), 2u);
+            ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
 
             const auto pool = DeviceBlockPoolConfigHelper::createConfigForGroup(config, config.group("full"));
-            ASSERT_EQ(pool.memory_layouts.size(), 3u);
+            ASSERT_EQ(pool.memory_layouts.size(), 2u);
             EXPECT_EQ(pool.memory_layouts[1].kv_block_stride_bytes, 2 * pool.memory_layouts[0].kv_block_stride_bytes);
             for (const auto& sub : config.mtp_sub_configs) {
                 EXPECT_TRUE(sub->layerIdsForGroup("state").empty());
@@ -3721,10 +3710,16 @@ TEST(CacheConfigCreatorTest, MtpModuleCountsPreserveEagleAndDsparkRules) {
     sp.type              = SP_TYPE_MTP;
     sp.gen_num_per_cycle = 3;
 
-    auto mtp = CacheConfigCreator::createConfig(target, {}, options, sp, &draft, true);
-    EXPECT_EQ(mtp.mtp_sub_configs.size(), 3u);
-    EXPECT_EQ(mtp.layer_all_num(), 7u);
+    for (int prediction_depth : {1, 2, 3, 5}) {
+        sp.gen_num_per_cycle = prediction_depth;
+        auto mtp = CacheConfigCreator::createConfig(target, {}, options, sp, &draft, true);
+        ASSERT_EQ(mtp.mtp_sub_configs.size(), 1u) << "prediction_depth=" << prediction_depth;
+        EXPECT_EQ(mtp.mtp_sub_configs[0]->layer_num, 2u);
+        EXPECT_EQ(mtp.layer_all_num(), 3u);
+    }
 
+    sp.type = SP_TYPE_EAGLE;
+    sp.gen_num_per_cycle = 3;
     auto eagle = CacheConfigCreator::createConfig(target, {}, options, sp, &draft, true, true);
     EXPECT_EQ(eagle.mtp_sub_configs.size(), 1u);
     EXPECT_EQ(eagle.layer_all_num(), 3u);

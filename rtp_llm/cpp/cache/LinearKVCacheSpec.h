@@ -84,6 +84,7 @@ struct LinearKVCacheSpec: public KVCacheSpec {
                                 tp);
 
         auto spec                  = std::make_shared<LinearKVCacheSpec>(desc.tag, seq, kernel, local_v_heads);
+        spec->head_sharded_transfer_ = desc.head_sharded_transfer;
         spec->memory_layout_dtype_ = desc.dtype != DataType::TYPE_INVALID ? desc.dtype : ctx.dtype;
         RTP_LLM_CHECK_WITH_INFO(spec->memory_layout_dtype_ != DataType::TYPE_INVALID,
                                 "KVCacheSpecDesc tag=%s cache_type=%d requires valid dtype",
@@ -150,6 +151,10 @@ struct LinearKVCacheSpec: public KVCacheSpec {
         return transfer_segment_bytes_;
     }
 
+    bool usesHeadShardedTransfer() const {
+        return head_sharded_transfer_;
+    }
+
     DataType ssmStateDType() const { return ssm_state_dtype; }
     DataType convStateDType() const { return conv_state_dtype; }
 
@@ -170,6 +175,7 @@ struct LinearKVCacheSpec: public KVCacheSpec {
     }
 
 private:
+    bool     head_sharded_transfer_ = false;
     DataType memory_layout_dtype_ = DataType::TYPE_INVALID;
 
     size_t ssm_elems  = 0;

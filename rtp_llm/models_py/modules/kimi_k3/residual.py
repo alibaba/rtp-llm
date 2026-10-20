@@ -43,10 +43,10 @@ class KimiK3AttentionResidual(nn.Module):
         metadata=None,
     ):
         from rtp_llm.models_py.triton_kernels.common.activation import (
-            kimi_k3_attn_res_fp8,
+            attn_res_fp8,
         )
 
-        return kimi_k3_attn_res_fp8(
+        return attn_res_fp8(
             prefix_sum,
             block_residual,
             self.norm_weight,
@@ -111,10 +111,10 @@ class KimiK3AttentionResidual(nn.Module):
         ):
             from rtp_llm.ops.compute_ops import rtp_llm_ops
 
-            if not hasattr(rtp_llm_ops, "kimi_k3_attn_res"):
-                raise RuntimeError("Native K3 AttnRes requires the CUDA 13 RTP build")
+            if not hasattr(rtp_llm_ops, "attn_res"):
+                raise RuntimeError("Native AttnRes requires the CUDA 13 RTP build")
             output = torch.empty_like(prefix_sum)
-            rtp_llm_ops.kimi_k3_attn_res(
+            rtp_llm_ops.attn_res(
                 prefix_sum, delta, block_residual, self.norm_weight,
                 self.projection_weight, output_norm_weight, output,
                 active_blocks, block_write_idx, self.eps,

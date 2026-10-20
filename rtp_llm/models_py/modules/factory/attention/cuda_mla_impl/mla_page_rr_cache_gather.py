@@ -250,7 +250,10 @@ class MlaPageRRCacheGather:
         descriptor = self._prefix_descriptor
         gathered = payload.new_empty((self.shard_size, *payload.shape))
         if descriptor.total_local_pages:
-            collective_torch.all_gather_into(payload, gathered.flatten(0, 1), Group.TP)
+            wire_dtype = torch.uint8 if payload.dtype == torch.float8_e4m3fn else payload.dtype
+            collective_torch.all_gather_into(
+                payload.view(wire_dtype), gathered.flatten(0, 1).view(wire_dtype), Group.TP
+            )
         return _restore_mla_page_rr_prefix(gathered, descriptor)
 
     def build_prefix_chunk_descriptor(
@@ -287,7 +290,10 @@ class MlaPageRRCacheGather:
         )
         gathered = payload.new_empty((self.shard_size, *payload.shape))
         if descriptor.total_local_pages:
-            collective_torch.all_gather_into(payload, gathered.flatten(0, 1), Group.TP)
+            wire_dtype = torch.uint8 if payload.dtype == torch.float8_e4m3fn else payload.dtype
+            collective_torch.all_gather_into(
+                payload.view(wire_dtype), gathered.flatten(0, 1).view(wire_dtype), Group.TP
+            )
         return _restore_mla_page_rr_prefix(gathered, descriptor)
 
     def _pack_prefix_chunk(

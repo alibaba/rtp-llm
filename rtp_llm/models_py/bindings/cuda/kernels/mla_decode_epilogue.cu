@@ -11,6 +11,7 @@
 // See the repository LICENSE for the Apache-2.0 license.
 
 #include "rtp_llm/models_py/bindings/cuda/kernels/mla_quant_kernel.h"
+#include "rtp_llm/models_py/bindings/cuda/launch_utils.h"
 
 #include <c10/cuda/CUDAGuard.h>
 #include <c10/cuda/CUDAException.h>
@@ -100,7 +101,7 @@ void launch_decode_epilogue(const at::Tensor& q_latent, const at::Tensor& q_posi
 #if CUDART_VERSION >= 12000
     cudaLaunchAttribute attribute{};
     attribute.id = cudaLaunchAttributeProgrammaticStreamSerialization;
-    attribute.val.programmaticStreamSerializationAllowed = 1;
+    attribute.val.programmaticStreamSerializationAllowed = getEnvEnablePDL();
     cudaLaunchConfig_t config{};
     config.gridDim = dim3(blocks);
     config.blockDim = dim3(kBlockThreads);

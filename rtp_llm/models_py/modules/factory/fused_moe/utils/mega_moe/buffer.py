@@ -15,6 +15,7 @@ import logging
 
 import torch
 
+from .activation import mega_moe_functions
 # Module-level cache for the Mega MoE symm-mem dispatch buffer. Keyed by the
 # shape parameters so different model configs in the same process don't
 # collide; in practice there's only ever one entry per process.
@@ -103,14 +104,20 @@ def _get_or_create_mega_buf(
             if group_size > 0
             else None
         )
-        buf = backend.get_symm_buffer_for_mega_moe(
+        _, _, allocate = mega_moe_functions(backend, activation)
+        dispatch = (
+            {"mma_type": "fp8xfp4"}
+            if activation == "situ" and callable(getattr(backend, "fp8_fp4_mega_moe_k3", None))
+            else {"use_fp8_dispatch": use_fp8_dispatch}
+        )
+        buf = allocate(
             group=group,
             num_experts=num_experts,
             num_max_tokens_per_rank=num_max_tokens_per_rank,
             num_topk=num_topk,
             hidden=hidden,
             intermediate_hidden=intermediate_hidden,
-            use_fp8_dispatch=use_fp8_dispatch,
+            **dispatch,
             activation=activation,
         )
         actual_bytes = None

@@ -10,13 +10,13 @@
 //   - Q=res_weight*rms_weight remains in registers across persistent tokens.
 //   - V rows are converted once and cached as FP32 in TMEM between passes.
 //
-// Integration contract: Kimi K3 H=7168, 0<=num_blocks<=8, and token-major
+// Supported specialization: H=7168, 0<=num_blocks<=8, and token-major
 // block residual storage.
 
 // Adapted from vLLM c3b48446349569512749db7f6e2164aa8a33437d,
 // csrc/libtorch_stable/kimi_k3/attn_res_kernel.cu (Apache-2.0).
 // Device algorithm unchanged; RTP uses the regular ATen ABI.
-#include "rtp_llm/models_py/bindings/cuda/kernels/kimi_k3_attn_res.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/attn_res.h"
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <cuda_bf16.h>
@@ -614,6 +614,9 @@ __global__ void __launch_bounds__(BLK, 1) attn_res_fwd_online_v2_kernel(
         if (stat_n < N_CHUNK) {
           totals = plan.ws_stats[stat_w][stat_n];
         }
+        // Every consumer must finish reading before the next chunk/token
+        // (or the output norm below) reuses the shared statistics.
+        named_barrier_sync(CONSUMER_THREADS, 0);
   #pragma unroll
         for (int offset = CONSUMER_WARPS / 2; offset > 0; offset >>= 1) {
           totals.x +=
@@ -831,6 +834,7 @@ __global__ void __launch_bounds__(BLK, 1) attn_res_fwd_online_v2_kernel(
         }
         named_barrier_sync(CONSUMER_THREADS, 0);
         float total_sq = lane < CONSUMER_WARPS ? plan.ws_stats[lane][0].x : 0.f;
+        named_barrier_sync(CONSUMER_THREADS, 0);
   #pragma unroll
         for (int offset = CONSUMER_WARPS / 2; offset > 0; offset >>= 1) {
           total_sq +=
@@ -931,7 +935,7 @@ static void launch_fwd(bf16_t* block_residual, bf16_t* layer_residual,
 }  // namespace fwd_prod_v2
 }  // namespace sm100
 
-void kimi_k3_attn_res(at::Tensor& prefix,
+void attn_res(at::Tensor& prefix,
                       std::optional<at::Tensor> delta,
                       at::Tensor& blocks,
                       at::Tensor const& norm_weight,
@@ -941,11 +945,11 @@ void kimi_k3_attn_res(at::Tensor& prefix,
                       int64_t block_write_idx, double eps,
                       double output_norm_eps) {
   TORCH_CHECK(prefix.is_cuda() && prefix.dim() == 2 && prefix.scalar_type() == at::kBFloat16,
-              "Kimi K3 AttnRes prefix must be a CUDA BF16 matrix");
+              "AttnRes prefix must be a CUDA BF16 matrix");
   auto check_tensor = [&](const at::Tensor& tensor, const char* name) {
     TORCH_CHECK(tensor.device() == prefix.device() && tensor.scalar_type() == at::kBFloat16,
-                "Kimi K3 AttnRes ", name, " must match prefix device and BF16 dtype");
-    TORCH_CHECK(tensor.stride(-1) == 1, "Kimi K3 AttnRes requires contiguous inner dimensions");
+                "AttnRes ", name, " must match prefix device and BF16 dtype");
+    TORCH_CHECK(tensor.stride(-1) == 1, "AttnRes requires contiguous inner dimensions");
   };
   check_tensor(prefix, "prefix");
   check_tensor(blocks, "blocks");
@@ -953,42 +957,42 @@ void kimi_k3_attn_res(at::Tensor& prefix,
   check_tensor(norm_weight, "norm_weight");
   check_tensor(qk_weight, "qk_weight");
   TORCH_CHECK(blocks.dim() == 3 && blocks.size(0) == prefix.size(0) &&
-              blocks.size(2) == prefix.size(1), "Kimi K3 AttnRes blocks shape mismatch");
-  TORCH_CHECK(output.sizes() == prefix.sizes(), "Kimi K3 AttnRes output shape mismatch");
+              blocks.size(2) == prefix.size(1), "AttnRes blocks shape mismatch");
+  TORCH_CHECK(output.sizes() == prefix.sizes(), "AttnRes output shape mismatch");
   TORCH_CHECK(norm_weight.is_contiguous() && qk_weight.is_contiguous() &&
               norm_weight.numel() == prefix.size(1) && qk_weight.numel() == prefix.size(1),
-              "Kimi K3 AttnRes weight shape mismatch");
+              "AttnRes weight shape mismatch");
   if (delta.has_value()) {
     check_tensor(*delta, "delta");
-    TORCH_CHECK(delta->sizes() == prefix.sizes(), "Kimi K3 AttnRes delta shape mismatch");
+    TORCH_CHECK(delta->sizes() == prefix.sizes(), "AttnRes delta shape mismatch");
   }
   if (output_norm_weight.has_value()) {
     check_tensor(*output_norm_weight, "output_norm_weight");
     TORCH_CHECK(output_norm_weight->is_contiguous() && output_norm_weight->numel() == prefix.size(1),
-                "Kimi K3 AttnRes output norm shape mismatch");
+                "AttnRes output norm shape mismatch");
   }
   int const num_tokens = static_cast<int>(prefix.size(0));
   int const device = prefix.get_device();
   c10::cuda::CUDAGuard const device_guard(prefix.device());
   cudaDeviceProp const* properties = at::cuda::getDeviceProperties(device);
   TORCH_CHECK(properties->major == 10,
-                  "Kimi K3 AttnRes requires the SM100 family");
+                  "AttnRes requires the SM100 family");
   int64_t const hidden_size = prefix.size(1);
   TORCH_CHECK(hidden_size == 7168,
-                  "Kimi K3 AttnRes requires hidden_size=7168, got ",
+                  "AttnRes requires hidden_size=7168, got ",
                   hidden_size);
   TORCH_CHECK(prefix.stride(0) == hidden_size &&
                       (!delta.has_value() || delta->stride(0) == hidden_size) &&
                       output.stride(0) == hidden_size,
-                  "Kimi K3 AttnRes requires densely packed rows; got strides ",
+                  "AttnRes requires densely packed rows; got strides ",
                   prefix.stride(0), ", ",
                   delta.has_value() ? delta->stride(0) : 0, ", ",
                   output.stride(0), " for hidden_size ", hidden_size);
   TORCH_CHECK(
       num_blocks >= 0 && num_blocks <= 8 && num_blocks <= blocks.size(1),
-      "Kimi K3 AttnRes: num_blocks must be 0..min(8, blocks.size(1))");
+      "AttnRes: num_blocks must be 0..min(8, blocks.size(1))");
   TORCH_CHECK(block_write_idx >= -1 && block_write_idx < blocks.size(1),
-                  "Kimi K3 AttnRes: block_write_idx must be -1 or a valid "
+                  "AttnRes: block_write_idx must be -1 or a valid "
                   "block row, got ",
                   block_write_idx);
 
@@ -1062,5 +1066,5 @@ void kimi_k3_attn_res(at::Tensor& prefix,
   cudaError_t const error = cudaGetLastError();
   TORCH_CHECK(
       error == cudaSuccess,
-      "Kimi K3 AttnRes kernel launch failed: ", cudaGetErrorString(error));
+      "AttnRes kernel launch failed: ", cudaGetErrorString(error));
 }

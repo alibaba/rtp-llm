@@ -1446,7 +1446,7 @@ def _multi_block_attn_res_fp8_kernel(
 
 
 @torch.compiler.disable
-def kimi_k3_attn_res_fp8(
+def attn_res_fp8(
     prefix_sum: torch.Tensor,
     block_residual: torch.Tensor,
     norm_weight: torch.Tensor,
@@ -1471,7 +1471,7 @@ def kimi_k3_attn_res_fp8(
         active_blocks,
         block_write_idx,
     ):
-        raise ValueError("unsupported input for K3 fused AttnRes")
+        raise ValueError("unsupported input for fused AttnRes")
     if output_norm_weight is not None and output_norm_eps is None:
         raise ValueError("output_norm_eps is required when output RMSNorm is fused")
 
@@ -1673,7 +1673,7 @@ def _store_group128(values, out, scales, row, rows, width: tl.constexpr, block: 
 
     exponent = (scale.to(tl.int32, bitcast=True) >> 23) & 255
     # Match the existing quantizer's legacy/v2 padding at its 4M-element switch.
-    pad_exponent = tl.where(rows * width >= 4 * 1024 * 1024, 0, 0x3F)
+    pad_exponent = tl.where(rows.to(tl.int64) * width >= 4 * 1024 * 1024, 0, 0x3F)
     exponent = tl.where(
         tl.arange(0, block // 128) < width // 128, exponent, pad_exponent
     )
@@ -1706,7 +1706,7 @@ def _sigmoid_mul_group128_kernel(
     gate_row_stride: tl.constexpr,
     block: tl.constexpr,
 ):
-    row = tl.program_id(0)
+    row = tl.program_id(0).to(tl.int64)
     columns = tl.arange(0, block)
     a = tl.load(x + row * x_row_stride + columns, columns < width, other=0.0).to(
         tl.float32
@@ -1779,7 +1779,7 @@ def _rmsnorm_sigmoid_gate_group128_kernel(
     eps: tl.constexpr,
     block: tl.constexpr,
 ):
-    row = tl.program_id(0)
+    row = tl.program_id(0).to(tl.int64)
     columns = tl.arange(0, block)
     head = columns // 128
     dim = columns % 128
@@ -1869,7 +1869,7 @@ def _quantize_strided_group128_kernel(
     row_stride: tl.constexpr,
     block_rows: tl.constexpr,
 ):
-    row = tl.program_id(0) * block_rows + tl.arange(0, block_rows)
+    row = tl.program_id(0).to(tl.int64) * block_rows + tl.arange(0, block_rows)
     column = tl.arange(0, 128)
     values = tl.load(
         x + row[:, None] * row_stride + column[None, :],
@@ -1919,7 +1919,7 @@ def _quantize(
     X, Y, N, INV_SCALE: tl.constexpr, BLOCK: tl.constexpr,
     SHAPE, STRIDES, CONTIGUOUS: tl.constexpr,
 ):
-    offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    offsets = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
     if CONTIGUOUS:
         src = offsets
     else:

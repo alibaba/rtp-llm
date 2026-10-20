@@ -52,12 +52,22 @@ class KimiK3DenseMLP(nn.Module):
         super().__init__()
         self.gate_up = None
         decode_bf16 = (
-            parallelism.role_type == RoleType.DECODE
+            parallelism is not None
+            and parallelism.role_type == RoleType.DECODE
             and weights[W.ffn_w1].dtype == weights[W.ffn_w3].dtype == torch.bfloat16
         )
         tp_dense = decode_bf16 and parallelism.tp_size > 1
         if tp_dense:
             gate, up, down = (weights[W.ffn_w1], weights[W.ffn_w3], weights[W.ffn_w2])
+            if (
+                gate.shape != up.shape
+                or gate.shape[1] != down.shape[0]
+                or gate.shape[0] != down.shape[1]
+                or gate.shape[1] % parallelism.tp_size
+            ):
+                raise ValueError(
+                    "Decode TP dense MLP has incompatible weight dimensions"
+                )
             width = gate.shape[1] // parallelism.tp_size
             start = parallelism.tp_rank * width
             stop = start + width
@@ -71,7 +81,7 @@ class KimiK3DenseMLP(nn.Module):
             partial(reduce_scatter, group=Group.TP) if tp_dense else lambda value: value
         )
         if (
-            parallelism.role_type != RoleType.DECODE
+            (parallelism is None or parallelism.role_type != RoleType.DECODE)
             and weights[W.ffn_w1].dtype == weights[W.ffn_w3].dtype == torch.bfloat16
         ):
             gate_weight, up_weight = weights[W.ffn_w1], weights[W.ffn_w3]
@@ -232,6 +242,20 @@ class KimiK3Model(GptModelBase):
             py_hw_kernel_config,
             device_resource_config,
         )
+        if (
+            parallelism_config.ep_size
+            != parallelism_config.tp_size * parallelism_config.dp_size
+        ):
+            raise ValueError("K3 requires EP=TP×DP for the native expert placement")
+        if (
+            parallelism_config.pp_size != 1
+            or parallelism_config.get_attn_tp_size() != parallelism_config.tp_size
+        ):
+            raise ValueError(
+                "K3 migration requires PP=1 and context parallelism disabled"
+            )
+        if parallelism_config.tp_size > 1 and not parallelism_config.enable_sp:
+            raise ValueError("K3 TP execution requires sequence parallelism")
         self.tp_size, self.tp_rank = (
             parallelism_config.tp_size,
             parallelism_config.tp_rank,
@@ -239,6 +263,13 @@ class KimiK3Model(GptModelBase):
         self.fp8_collective_max_tokens = int(
             os.environ.get("RTP_LLM_FP8_COLLECTIVE_MAX_TOKENS", "65536")
         )
+        if (
+            self.fp8_collective_max_tokens <= 0
+            or self.fp8_collective_max_tokens % self.tp_size
+        ):
+            raise ValueError(
+                "FP8 collective capacity must be positive and divisible by TP"
+            )
         self._max_generate_batch_size = int(max_generate_batch_size)
         # The scheduler bound is global; SP routes only the local token shard.
         global_prefill = model_config.moe_prefill_max_tokens_per_rank
@@ -303,6 +334,23 @@ class KimiK3Model(GptModelBase):
         enable_rs = os.environ.get("RTP_LLM_FP8_GEMM_RS", "0") == "1"
         if not (enable_ag or enable_rs):
             return ready
+        if enable_ag and self.config.k3_runtime_config.attn_res_block_size:
+            if self.config.hidden_size != 7168 or any(
+                (layer.index + layer.block_size - 1) // layer.block_size > 8
+                for layer in self.layers
+            ):
+                raise ValueError(
+                    "FP8 AttnRes fusion requires hidden_size=7168 and at most "
+                    "8 residual blocks; validate the checkpoint before serving"
+                )
+        for layer in self.layers:
+            attention = layer.attention
+            if (enable_ag and not getattr(attention.input, "scale_ue8m0", False)) or (
+                enable_rs and not getattr(attention.output, "scale_ue8m0", False)
+            ):
+                raise ValueError(
+                    "FP8 collective fusion requires grouped E4M3 projections"
+                )
         from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_comm_fusion import (
             Fp8CollectiveProjection,
         )
@@ -310,10 +358,12 @@ class KimiK3Model(GptModelBase):
         device = self.layers[0].attention.input.weight.device
         max_m = self.fp8_collective_max_tokens
         if decode_staging:
-            rows = self._max_generate_batch_size * (
-                int(self.config.gen_num_per_cycle) + 1
-            )
-            max_m = (rows + self.tp_size - 1) // self.tp_size * self.tp_size
+            # SP pads complete requests, then expands each Verify request.
+            # Aligning the token product underallocates for non-aligned batches.
+            width = max(int(self.config.gen_num_per_cycle) + 1, 1)
+            unit = self.tp_size // gcd(self.tp_size, width)
+            requests = (self._max_generate_batch_size + unit - 1) // unit * unit
+            max_m = requests * width
         self._fp8_collective = Fp8CollectiveProjection(
             _get_group(Group.TP),
             device,

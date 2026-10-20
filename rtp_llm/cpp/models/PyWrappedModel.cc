@@ -96,6 +96,12 @@ GptModelInputs PyWrappedModel::padSequenceParallelInputs(const GptModelInputs& s
     const int64_t requests = source.input_lengths.numel();
     const int64_t tokens = source.combo_tokens.numel();
     RTP_LLM_CHECK_WITH_INFO(tp > 0 && requests > 0 && tokens > 0, "SP requires nonempty input");
+    // K3 MTP enables RTP_LLM_STREAM_ASYNC and RTP_LLM_MTP_ASYNC_DEVICE_STATE.
+    // Either flag keeps draft-update in fixed B * (gen_num_per_cycle + 1) rows;
+    // accept_len selects outputs and advances the logical cache state.
+    // Match updateDecodePostDraftModelInput: with both flags off, the host path
+    // compacts accepted rows and needs ragged-prefill padding. K3 MTP CUDA Graph
+    // uses the fixed-width configuration above.
     const auto env_on = [](const char* name) {
         const char* value = std::getenv(name);
         return value != nullptr && std::strcmp(value, "1") == 0;
