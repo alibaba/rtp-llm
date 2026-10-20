@@ -158,9 +158,12 @@ class JavaFlowGroup:
                 raise TimeoutError(message + ": " + str(state))
             time.sleep(min(self.poll_s, remaining))
 
-    def _wait_control(self, predicate, deadline, message):
+    def _wait_control(self, predicate, deadline, message, *, on_poll=None):
         while True:
             observation = self.observe_control()
+            if on_poll is not None:
+                deadline.check()
+                on_poll()
             if observation.status is not None and predicate(observation):
                 return observation
             if observation.process_returncode is not None:
@@ -174,7 +177,7 @@ class JavaFlowGroup:
             from adapters.flow_control import stop_sending
             self.stop_command = stop_sending(self.control, self.identity, self.stop_command)
 
-    def stop_sending(self, deadline):
+    def stop_sending(self, deadline, *, on_poll=None):
         if self._drain_result is not None:
             return self._drain_result.encode(self.identity)
         observation = self.observe_control()
@@ -184,16 +187,18 @@ class JavaFlowGroup:
             observation = self._wait_control(
                 lambda o: o.status.state.sending_finished,
                 deadline, "flow did not stop accepting new trace records",
+                on_poll=on_poll,
             )
         return dict(self.identity, **observation.status.encode(),
                     process_returncode=observation.process_returncode)
 
-    def drain(self, deadline):
+    def drain(self, deadline, *, on_poll=None):
         if self._drain_result is not None:
             return self._drain_result.encode(self.identity)
         self._wait_control(
             lambda o: o.status.state.terminal and o.process_returncode is not None,
             deadline, "flow did not drain and exit",
+            on_poll=on_poll,
         )
         # Read evidence once after the producer has exited; failures remain retryable.
         state = self.status()
