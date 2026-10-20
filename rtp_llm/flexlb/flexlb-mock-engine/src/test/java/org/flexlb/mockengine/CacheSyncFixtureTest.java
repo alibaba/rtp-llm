@@ -51,20 +51,37 @@ class CacheSyncFixtureTest {
         assertThrows(IllegalArgumentException.class, () -> fixture.churn(10, 0));
     }
     @Test
-    void unchangedResponseIsLightweightButColdAndDifferentVersionRemainFull() {
-        var fixture = new CacheSyncFixture(0, 6, 176, 65, 2, true, 0, () -> 0L);
+    void everyRequestedVersionKeepsTheFullRealEnginePayload() {
+        var fixture = new CacheSyncFixture(0, 6, 176, 65, 2, 0, () -> 0L);
         assertEquals(306, fixture.response(-1).getCacheKeysCount());
-        assertEquals(0, fixture.response(2).getCacheKeysCount());
+        assertEquals(306, fixture.response(2).getCacheKeysCount());
         assertEquals(2, fixture.response(2).getVersion());
         assertEquals(306, fixture.response(3).getCacheKeysCount());
-        assertEquals(2L, fixture.snapshot().get("unchanged_responses"));
+        assertEquals(0L, fixture.snapshot().get("unchanged_responses"));
+        assertEquals(4L, fixture.snapshot().get("full_responses"));
+        assertEquals(4L * 306, fixture.snapshot().get("entries"));
+    }
+
+    @Test
+    void legacyOmissionPropertyCannotChangeTheWireContract() {
+        String property = "flexlb.mock.cache.omit-unchanged";
+        String previous = System.getProperty(property);
+        try {
+            System.setProperty(property, "true");
+            var fixture = new CacheSyncFixture(0, 6, 176, 65, 2);
+            assertEquals(306, fixture.wireResponse(2).toProto().getCacheKeysCount());
+            assertEquals(0L, fixture.snapshot().get("unchanged_responses"));
+        } finally {
+            if (previous == null) System.clearProperty(property);
+            else System.setProperty(property, previous);
+        }
     }
 
     @Test
     void clockChurnIsIndependentFromPollingFrequencyAndCanBeFrozen() {
         var now = new java.util.concurrent.atomic.AtomicLong();
-        var first = new CacheSyncFixture(0, 6, 176, 65, 2, false, 1000, now::get);
-        var second = new CacheSyncFixture(0, 6, 176, 65, 2, true, 1000, now::get);
+        var first = new CacheSyncFixture(0, 6, 176, 65, 2, 1000, now::get);
+        var second = new CacheSyncFixture(0, 6, 176, 65, 2, 1000, now::get);
         first.churn(17, 2); second.churn(17, 2);
         for (int i = 0; i < 40; i++) second.response(2);
         now.set(1001);
@@ -82,7 +99,7 @@ class CacheSyncFixtureTest {
     @Test
     void controlClockUsesElapsedTimeAndValidatesItsBudget() {
         var now = new java.util.concurrent.atomic.AtomicLong();
-        var fixture = new CacheSyncFixture(0, 6, 176, 65, 2, false, 0, now::get);
+        var fixture = new CacheSyncFixture(0, 6, 176, 65, 2, 0, now::get);
         assertThrows(IllegalArgumentException.class, () -> fixture.clockInterval(0));
         fixture.clockInterval(6000); fixture.churn(17, 1);
         for (int i = 0; i < 40; i++) fixture.response();

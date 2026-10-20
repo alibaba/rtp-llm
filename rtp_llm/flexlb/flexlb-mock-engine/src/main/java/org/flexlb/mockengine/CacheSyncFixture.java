@@ -8,8 +8,7 @@ final class CacheSyncFixture {
     private final int worker, workers;
     private int unique, shared;
     private long offset, version = 1, calls, entries, bytes, changedResponses, changedKeys;
-    private long fullResponses, unchangedResponses, sum, xor, churnStart, appliedEpoch, grownKeys;
-    private final boolean omitUnchanged;
+    private long fullResponses, sum, xor, churnStart, appliedEpoch, grownKeys;
     private long intervalNanos;
     private final java.util.function.LongSupplier clock;
     private int delta, changeEvery;
@@ -19,13 +18,11 @@ final class CacheSyncFixture {
 
     CacheSyncFixture(int worker, int workers, int unique, int shared, long initialVersion) {
         this(worker, workers, unique, shared, initialVersion,
-                Boolean.getBoolean("flexlb.mock.cache.omit-unchanged"),
                 Long.getLong("flexlb.mock.cache.churn-interval-ms", 0L) * 1_000_000L, System::nanoTime);
     }
 
     CacheSyncFixture(int worker, int workers, int unique, int shared, long initialVersion,
-            boolean omitUnchanged, long intervalNanos, java.util.function.LongSupplier clock) {
-        this.omitUnchanged = omitUnchanged;
+            long intervalNanos, java.util.function.LongSupplier clock) {
         this.intervalNanos = intervalNanos;
         this.clock = clock;
         if (intervalNanos < 0) throw new IllegalArgumentException("negative churn interval");
@@ -90,16 +87,13 @@ final class CacheSyncFixture {
             appliedEpoch = epoch; rebuild();
         }
         var header = EngineRpcService.CacheStatusPB.newBuilder().setVersion(version).build();
-        CacheFixtureWire.Keys keys = wireKeys;
-        if (omitUnchanged && latestVersion >= 0 && latestVersion == version) {
-            keys = null;
-            unchangedResponses++;
-        } else {
-            fullResponses++;
-        }
-        entries += keys == null ? 0 : keys.count();
-        bytes += header.getSerializedSize() + (keys == null ? 0 : keys.encodedSize());
-        return new CacheFixtureWire.Frame(header, keys);
+        // Match the real engine's full snapshot response even when versions match
+        // (KVCacheManager::getKVCacheInfo/buildKVCacheInfo). A small diff does not
+        // reduce the payload, and freezing churn must not silently remove load.
+        fullResponses++;
+        entries += wireKeys.count();
+        bytes += header.getSerializedSize() + wireKeys.encodedSize();
+        return new CacheFixtureWire.Frame(header, wireKeys);
     }
 
     synchronized long version() { return version; }
@@ -110,7 +104,8 @@ final class CacheSyncFixture {
         result.put("responses", calls); result.put("entries", entries); result.put("key_payload_bytes", bytes);
         result.put("changed_responses", changedResponses); result.put("added_keys", changedKeys + grownKeys);
         result.put("removed_keys", changedKeys); result.put("full_responses", fullResponses);
-        result.put("unchanged_responses", unchangedResponses);
+        // Retain the metric schema: no same-version key payload is omitted.
+        result.put("unchanged_responses", 0L);
         result.put("sum", Long.toUnsignedString(sum)); result.put("xor", Long.toUnsignedString(xor));
         return result;
     }

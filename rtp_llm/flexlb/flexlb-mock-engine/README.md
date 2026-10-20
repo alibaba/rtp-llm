@@ -99,8 +99,9 @@ Java 测试位于 `src/test/java/org/flexlb/mockengine/`，通过 FlexLB 根目�
 合成 cache fixture 的 gRPC 响应直接从不可变的 key 几何快照编码标准
 `CacheStatusPB`，不在 Mock 中为每个版本重新构造完整 protobuf Map。
 该路径仍返回相同的 key、bool 值、版本、容量和 block size；在途响应持有自己的
-快照，不会被后续 churn 或 grow 改写。cold / changed / future version 保留全量
-语义，同版本省略仍由原有显式开关控制。普通推理缓存响应不变。
+快照，不会被后续 churn 或 grow 改写。cold / changed / future / same version
+均返回全量 keys；不支持通过 JVM 属性省略同版本载荷。冻结 churn 也不会降低
+单次同步载荷。普通推理缓存响应不变。
 
 协议依据为 `LocalRpcServer::GetCacheStatus` 和 `model_rpc_service.proto`；
 `CacheFixtureWireTest` 用原始 protobuf parser、完整响应字节及真实 gRPC 客户端验证。

@@ -56,20 +56,20 @@ class CacheFixtureWireTest {
             assertEquals(expected, EngineRpcService.CacheStatusPB.parseFrom(out.toByteArray()));
         }
     }
-    @Test void inFlightWireSnapshotSurvivesChurnAndSameVersionOmission() {
+    @Test void inFlightWireSnapshotSurvivesChurnAndSameVersionRemainsFull() {
         var clock = new AtomicLong();
-        var f = new CacheSyncFixture(0, 120, 176, 65, 2, true, 1000, clock::get);
+        var f = new CacheSyncFixture(0, 120, 176, 65, 2, 1000, clock::get);
         var first = f.wireResponse(-1); f.churn(17, 1); clock.set(5001);
         var second = f.wireResponse(2);
         assertEquals(reference(0, 120, 176, 65, 0, 2), first.toProto());
         assertEquals(reference(0, 120, 176, 65, 85, 7), second.toProto());
-        assertEquals(0, f.wireResponse(7).toProto().getCacheKeysCount());
+        assertEquals(306, f.wireResponse(7).toProto().getCacheKeysCount());
         assertEquals(306, f.wireResponse(8).toProto().getCacheKeysCount());
-        assertEquals(918L, f.snapshot().get("entries"));
+        assertEquals(1224L, f.snapshot().get("entries"));
         assertEquals(85L, f.snapshot().get("removed_keys"));
     }
     @Test void inFlightSnapshotSurvivesGrowthAndLegacySameVersionStillReturnsKeys() {
-        var fixture = new CacheSyncFixture(1, 3, 1, 0, 1, false, 0, () -> 0L);
+        var fixture = new CacheSyncFixture(1, 3, 1, 0, 1, 0, () -> 0L);
         var beforeGrowth = fixture.wireResponse(-1);
         fixture.grow(8, 2);
         var afterGrowth = fixture.wireResponse(fixture.version());
