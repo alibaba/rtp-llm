@@ -281,7 +281,9 @@ class Block(nn.Module):
             self.engram_token_mask,
         ).reshape(shape)
 
-    def _try_mega_mhc(self, attn_out, residual, post, comb, *, original_tokens=None):
+    def _try_mega_mhc(
+        self, attn_out, residual, post, comb, *, original_tokens=None, moe_inputs=None
+    ):
         """Fuse the intra-layer delayed mHC seam and FFN RMSNorm."""
         from rtp_llm.models_py.modules.dsv41.hc.v41_mega_mhc import try_fused_post_pre
 
@@ -294,6 +296,7 @@ class Block(nn.Module):
             self.ffn_hc,
             self.ffn_norm,
             original_tokens=original_tokens,
+            **({"moe_inputs": moe_inputs} if moe_inputs is not None else {}),
         )
 
     def prefill_fast_attn_pre(self, x: torch.Tensor):
@@ -413,9 +416,25 @@ class Block(nn.Module):
             )
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_attn_out", attn_out)
-        fused_mhc = (
-            None if _dbg_layer else self._try_mega_mhc(attn_out, residual, post, comb)
+        moe_inputs = (
+            self.ffn.prepare_mhc_inputs(attn_out)
+            if not _dbg_layer and routing_metadata is None and type(self.ffn) is MoE
+            else None
         )
+        fused_mhc = (
+            None
+            if _dbg_layer
+            else self._try_mega_mhc(
+                attn_out,
+                residual,
+                post,
+                comb,
+                **({"moe_inputs": moe_inputs} if moe_inputs is not None else {}),
+            )
+        )
+        if fused_mhc is None:
+            # Merely obtaining the buffer views does not prepare their data.
+            moe_inputs = None
         x = (
             self.attn_hc.post(attn_out, residual, post, comb)
             if fused_mhc is None
@@ -441,11 +460,14 @@ class Block(nn.Module):
             _, x_pre, post, comb = fused_mhc
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_ffn_in", x_pre)
-        ffn_out = (
-            self.ffn(x_pre, input_ids)
-            if routing_metadata is None
-            else self.ffn(x_pre, input_ids, routing_metadata=routing_metadata)
-        )
+        if moe_inputs is not None:
+            ffn_out = self.ffn(x_pre, input_ids, mhc_inputs=moe_inputs)
+        else:
+            ffn_out = (
+                self.ffn(x_pre, input_ids)
+                if routing_metadata is None
+                else self.ffn(x_pre, input_ids, routing_metadata=routing_metadata)
+            )
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_ffn_out", ffn_out)
         if _defer_ffn_post:
