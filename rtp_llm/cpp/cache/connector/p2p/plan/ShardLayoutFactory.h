@@ -22,10 +22,12 @@ public:
     ///        即只有 prefill 的 spec 本身被切成 1/cp_size，decode 持整块。
     static ShardLayout fromTopology(const CacheTopology&     topology,
                                     const ParallelismConfig& pc,
-                                    RoleType                 role) {
+                                    RoleType                 role,
+                                    size_t                   cache_key_tokens_per_block) {
         ShardLayout layout;
         layout.pc = pc;
         layout.pc.role_type = role;
+        layout.cache_key_tokens_per_block = cache_key_tokens_per_block;
 
         for (const auto& group : topology.groups()) {
             ShardLayout::GroupLayout g;

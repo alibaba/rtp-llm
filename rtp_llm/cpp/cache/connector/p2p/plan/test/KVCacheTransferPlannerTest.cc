@@ -68,7 +68,7 @@ ShardLayout::GroupLayout makeSwaGroup() {
     g.policy             = defaultCacheGroupPolicy(CacheGroupType::SWA);  // COMPACT_LAST_RANK, active_tail_blocks = 2
     g.policy.cp_slice    = CpBlockSliceMode::NONE;
     g.spec_type          = KVCacheSpecType::MultiHeadAttention;
-    g.seq_size_per_block = kSeqSizePerBlock;
+    g.seq_size_per_block = 4 * kSeqSizePerBlock;
     return g;
 }
 
@@ -92,6 +92,7 @@ ShardLayout makeLayout(int                                                      
                        const std::vector<std::pair<std::string, ShardLayout::GroupLayout>>& groups) {
     ShardLayout layout;
     layout.pc = makePc(tp_size, method, kv_cache_sharded);
+    layout.cache_key_tokens_per_block = kSeqSizePerBlock;
     for (const auto& [tag, g] : groups) {
         layout.groups[tag] = g;
     }
@@ -610,6 +611,56 @@ TEST(PlannerGroupB, B8_TailCountIsFoldedByPlanner) {
     }
 }
 
+TEST(PlannerGroupB, StateKeySpanDoesNotFollowDecodeCpSize) {
+    const auto src    = makeLayout(4, CPRotateMethod::ALL_GATHER, true, {{kSwaTag, makeSwaGroup()}});
+    const auto dst    = makeLayout(1, CPRotateMethod::PREFILL_CP, true, {{kSwaTag, makeSwaGroup()}});
+    const auto result = KVCacheTransferPlanner::plan(src, dst, {kSwaTag});
+    ASSERT_TRUE(result.ok()) << result.error.ToString();
+    ASSERT_EQ(result.plan.routes.size(), 1u);
+    const auto& rule = result.plan.routes.front().src_keys;
+    EXPECT_EQ(KVCacheTransferPlanner::resolveKeys(rule, 280), (std::vector<size_t>{275, 279}));
+    EXPECT_EQ(KVCacheTransferPlanner::resolveKeys(rule, 281), (std::vector<size_t>{279, 280}));
+    const std::map<size_t, std::vector<size_t>> partial_tails = {
+        {1, {0}}, {3, {2}}, {4, {3}}, {5, {3, 4}}, {7, {3, 6}}, {8, {3, 7}}, {9, {7, 8}}};
+    for (const auto& [count, expected] : partial_tails) {
+        EXPECT_EQ(KVCacheTransferPlanner::resolveKeys(rule, count), expected) << "key_count=" << count;
+    }
+}
+
+TEST(PlannerGroupB, UnscaledStateGroupDoesNotCompactKeysByTransportCp) {
+    auto group               = makeSwaGroup();
+    group.seq_size_per_block = kSeqSizePerBlock;
+    const auto src           = makeLayout(4, CPRotateMethod::ALL_GATHER, true, {{kSwaTag, group}});
+    const auto dst           = makeLayout(1, CPRotateMethod::PREFILL_CP, true, {{kSwaTag, group}});
+    const auto result        = KVCacheTransferPlanner::plan(src, dst, {kSwaTag});
+    ASSERT_TRUE(result.ok()) << result.error.ToString();
+    ASSERT_EQ(result.plan.routes.size(), 1u);
+    EXPECT_EQ(KVCacheTransferPlanner::resolveKeys(result.plan.routes.front().src_keys, 8), (std::vector<size_t>{6, 7}));
+}
+
+TEST(PlannerGroupB, TokenStrideMismatchIsRejectedAndStrideChangesAffectDigest) {
+    auto       src      = makeLayout(4, CPRotateMethod::ALL_GATHER, true, {{kSwaTag, makeSwaGroup()}});
+    auto       dst      = makeLayout(1, CPRotateMethod::PREFILL_CP, true, {{kSwaTag, makeSwaGroup()}});
+    const auto original = KVCacheTransferPlanner::plan(src, dst, {kSwaTag});
+    ASSERT_TRUE(original.ok()) << original.error.ToString();
+    dst.groups.at(kSwaTag).seq_size_per_block = kSeqSizePerBlock;
+    EXPECT_FALSE(KVCacheTransferPlanner::plan(src, dst, {kSwaTag}).ok());
+    dst.groups.at(kSwaTag).seq_size_per_block = 4 * kSeqSizePerBlock;
+    dst.cache_key_tokens_per_block *= 2;
+    EXPECT_FALSE(KVCacheTransferPlanner::plan(src, dst, {kSwaTag}).ok());
+    src.cache_key_tokens_per_block *= 2;
+    src.groups.at(kSwaTag).seq_size_per_block *= 2;
+    dst.groups.at(kSwaTag).seq_size_per_block *= 2;
+    const auto scaled = KVCacheTransferPlanner::plan(src, dst, {kSwaTag});
+    ASSERT_TRUE(scaled.ok()) << scaled.error.ToString();
+    EXPECT_EQ(original.plan.routes.front().src_keys, scaled.plan.routes.front().src_keys);
+    EXPECT_NE(original.plan.digest(), scaled.plan.digest());
+    dst.groups.at(kSwaTag).seq_size_per_block += 1;
+    EXPECT_FALSE(KVCacheTransferPlanner::plan(dst, dst, {kSwaTag}).ok());
+    dst.cache_key_tokens_per_block = 0;
+    EXPECT_FALSE(KVCacheTransferPlanner::plan(dst, dst, {kSwaTag}).ok());
+}
+
 // 用例 B9: 两侧 active_tail_blocks 不一致必须拒绝
 TEST(PlannerGroupB, B9_TailCountMismatchIsRejected) {
     auto shifted                      = makeSwaGroup();
@@ -963,7 +1014,7 @@ TEST(PlannerGroupD, FactoryMirrorsCpStatePayloadFromRealSpecs) {
                     group.policy.cp_slice           = mode;
                     group.block_num                 = 8;
                     auto topology = CacheTopology::create({group}, {{0, {kFixedTag}}});
-                    return ShardLayoutFactory::fromTopology(*topology, pc, pc.role_type);
+                    return ShardLayoutFactory::fromTopology(*topology, pc, pc.role_type, kSeqSizePerBlock);
                 };
                 const auto prefill = local_layout(prefill_pc);
                 const auto decode = local_layout(decode_pc);

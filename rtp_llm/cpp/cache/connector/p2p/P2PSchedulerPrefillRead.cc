@@ -29,7 +29,7 @@ std::shared_ptr<const PlanResult> P2PSchedulerPrefillRead::planFor(int          
     }
     // 与 decode 侧同一个 planner 函数、镜像的参数。decode 的 cp_size 由部署级同配开关推导。
     const auto src_layout = ShardLayoutFactory::fromTopology(
-        *config_.topology, config_.parallelism_config, RoleType::PREFILL);
+        *config_.topology, config_.parallelism_config, RoleType::PREFILL, config_.cache_key_tokens_per_block);
     const auto dst_layout = ShardLayoutFactory::peerOf(src_layout,
                                                       decode_tp_size,
                                                       config_.parallelism_config.prefill_cp_config.kv_cache_sharded,

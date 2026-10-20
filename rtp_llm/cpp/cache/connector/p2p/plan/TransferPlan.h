@@ -51,8 +51,8 @@ struct KeyShardSpec {
     ///
     /// 来源是 CacheGroupPolicy::active_tail_blocks（LINEAR=1、SWA=2、FULL=0）。**必须由编排层
     /// 折进规则、不能让两侧各自筛**：`buildCacheStorePlan` 的 `start = total - tail_count` 里的
-    /// `total` 是**本侧**的块数，而两侧 compact 程度可能不同（prefill compact 4→1、decode 不
-    /// compact），"最后 N 个"在两侧会指向不同的 key，破坏键集包含契约。
+    /// `total` 必须是 group 的物理块数。P/D 使用相同的 group token 跨度和基础 key 粒度，
+    /// 不以本端传输 CP 数解释 key 下标。
     int tail_count = 0;
 
     // 副本均分（设计文档 Step 3b，默认关闭）：在剩余类之上再筛一层。
@@ -88,6 +88,8 @@ struct TransferRoute {
     // Step 5 的形状校验留痕，便于断言与排障。
     size_t src_bytes = 0;
     size_t dst_bytes = 0;
+    size_t cache_key_tokens_per_block = 0;
+    size_t group_tokens_per_block     = 0;
 };
 
 struct TransferPlan {

@@ -98,7 +98,7 @@ P2PSchedulerDecodeRead::planFor(int prefill_tp_size, int prefill_cp_size, const 
     // 本端布局从真实 CacheTopology + ParallelismConfig 取；对端布局由本端推导
     // （ShardLayoutFactory::peerOf），因此 GetPeerInfo / StartLoad 无需新增字段。
     const auto dst_layout = ShardLayoutFactory::fromTopology(
-        *config_.topology, config_.parallelism_config, RoleType::DECODE);
+        *config_.topology, config_.parallelism_config, RoleType::DECODE, config_.cache_key_tokens_per_block);
     const auto src_layout = ShardLayoutFactory::peerOf(dst_layout,
                                                        prefill_tp_size,
                                                        config_.parallelism_config.prefill_cp_config.kv_cache_sharded,
@@ -153,7 +153,7 @@ P2PSchedulerDecodeRead::buildDecodeRankRoutes(const TransferPlan&        plan,
                                      logical_count;
 
     const auto layout = ShardLayoutFactory::fromTopology(
-        *config_.topology, config_.parallelism_config, RoleType::DECODE);
+        *config_.topology, config_.parallelism_config, RoleType::DECODE, config_.cache_key_tokens_per_block);
     for (size_t worker_rank = 0; worker_rank < worker_num; ++worker_rank) {
         for (const auto* route : plan.forDecodeRank(static_cast<int>(worker_rank))) {
             auto positions = KVCacheTransferPlanner::resolveKeys(route->src_keys, logical_count);
@@ -169,8 +169,13 @@ P2PSchedulerDecodeRead::buildDecodeRankRoutes(const TransferPlan&        plan,
             const int cp_size = layout.physicalCpSize(route->cache_tag);
             // COMPACT keeps the same state slots on every Decode rank; FULL uses identity mapping.
             const int worker_cp_rank = 0;
-            auto layer_buffers = LayerCacheBufferUtil::convertTagForRoute(
-                resource, *config_.topology, route->cache_tag, positions, worker_cp_rank, cp_size);
+            auto      layer_buffers  = LayerCacheBufferUtil::convertTagForRoute(resource,
+                                                                          *config_.topology,
+                                                                          route->cache_tag,
+                                                                          positions,
+                                                                          worker_cp_rank,
+                                                                          cp_size,
+                                                                          config_.cache_key_tokens_per_block);
             if (!layer_buffers.ok()) {
                 return ErrorInfo(layer_buffers.status().code(),
                                  "decode route=" + std::to_string(route->route_id) + " worker_rank="

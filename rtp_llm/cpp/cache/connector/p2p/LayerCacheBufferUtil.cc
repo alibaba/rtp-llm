@@ -3,6 +3,8 @@
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include <algorithm>
 #include <exception>
+#include <map>
+#include <stdexcept>
 #include <utility>
 
 namespace rtp_llm {
@@ -16,17 +18,41 @@ std::string bufferContext(const LayerCacheBuffer& buffer, int64_t key, int32_t b
     return "layer=" + std::to_string(buffer.getLayerId()) + " tag=" + buffer.cacheTag()
            + " cache_key=" + std::to_string(key) + " block_id=" + std::to_string(block_id);
 }
+// The same physical-tail/end-key projection used by ExecOps publication.
+// A state block can cover multiple base keys even when transport CP is one.
+std::map<size_t, size_t> stateProjection(const GroupBase& group, size_t key_count, size_t key_tokens) {
+    if (key_tokens == 0 || group.seqSizePerBlock() == 0 || group.seqSizePerBlock() % key_tokens != 0) {
+        throw std::invalid_argument("invalid group/cache-key token stride");
+    }
+    const size_t             span  = group.seqSizePerBlock() / key_tokens;
+    const size_t             slots = key_count / span + (key_count % span != 0);
+    std::map<size_t, size_t> result;
+    // The group span already incorporates CP scaling. Do not compact it again.
+    for (const auto& pair : buildCacheStorePlan(group.policy, slots, 0, true, 0, 1, span, key_count)) {
+        result.emplace(static_cast<size_t>(pair.key_index), static_cast<size_t>(pair.offset_index));
+    }
+    return result;
+}
 }  // namespace
 
-ErrorResult<std::vector<std::shared_ptr<LayerCacheBuffer>>> LayerCacheBufferUtil::convert(KVCacheResource&     resource,
-                                                                                          const CacheTopology& topology,
-                                                                                          int start_block_idx,
-                                                                                          int block_count,
-                                                                                          int cp_rank,
-                                                                                          int cp_size) {
+ErrorResult<std::vector<std::shared_ptr<LayerCacheBuffer>>>
+LayerCacheBufferUtil::convert(KVCacheResource&     resource,
+                              const CacheTopology& topology,
+                              int                  start_block_idx,
+                              int                  block_count,
+                              int                  cp_rank,
+                              int                  cp_size,
+                              size_t               cache_key_tokens_per_block) {
     std::vector<std::shared_ptr<LayerCacheBuffer>> result;
     for (const auto& layer : topology.layers()) {
-        auto buffers = convertLayer(resource, topology, layer.layer_id, start_block_idx, block_count, cp_rank, cp_size);
+        auto buffers = convertLayer(resource,
+                                    topology,
+                                    layer.layer_id,
+                                    start_block_idx,
+                                    block_count,
+                                    cp_rank,
+                                    cp_size,
+                                    cache_key_tokens_per_block);
         if (!buffers.ok()) {
             return buffers.status();
         }
@@ -44,13 +70,21 @@ LayerCacheBufferUtil::convertLayer(KVCacheResource&     resource,
                                    int                  start_block_idx,
                                    int                  block_count,
                                    int                  cp_rank,
-                                   int                  cp_size) {
+                                   int                  cp_size,
+                                   size_t               cache_key_tokens_per_block) {
     std::vector<std::shared_ptr<LayerCacheBuffer>> result;
     if (layer_id < 0 || static_cast<size_t>(layer_id) >= topology.layers().size()) {
         return conversionError("layer=" + std::to_string(layer_id) + ": invalid layer");
     }
     for (const auto& group : topology.groupsForLayer(layer_id)) {
-        auto buffer = convertLayerTag(resource, group.get(), layer_id, start_block_idx, block_count, cp_rank, cp_size);
+        auto buffer = convertLayerTag(resource,
+                                      group.get(),
+                                      layer_id,
+                                      start_block_idx,
+                                      block_count,
+                                      cp_rank,
+                                      cp_size,
+                                      cache_key_tokens_per_block);
         if (!buffer.ok()) {
             return buffer.status();
         }
@@ -61,13 +95,15 @@ LayerCacheBufferUtil::convertLayer(KVCacheResource&     resource,
     return std::move(result);
 }
 
-ErrorResult<std::shared_ptr<LayerCacheBuffer>> LayerCacheBufferUtil::convertLayerTag(KVCacheResource& resource,
-                                                                                     const GroupBase& group,
-                                                                                     int              layer_id,
-                                                                                     int              start_block_idx,
-                                                                                     int              block_count,
-                                                                                     int              cp_rank,
-                                                                                     int              cp_size) {
+ErrorResult<std::shared_ptr<LayerCacheBuffer>>
+LayerCacheBufferUtil::convertLayerTag(KVCacheResource& resource,
+                                      const GroupBase& group,
+                                      int              layer_id,
+                                      int              start_block_idx,
+                                      int              block_count,
+                                      int              cp_rank,
+                                      int              cp_size,
+                                      size_t           cache_key_tokens_per_block) {
     const size_t      count   = resource.cacheKeys().size();
     const std::string context = "layer=" + std::to_string(layer_id) + " tag=" + group.tag;
     if (cp_size <= 0 || cp_rank < 0 || cp_rank >= cp_size || start_block_idx < 0 || block_count < -1
@@ -79,18 +115,30 @@ ErrorResult<std::shared_ptr<LayerCacheBuffer>> LayerCacheBufferUtil::convertLaye
         return conversionError(context + ": requested block range exceeds cache keys");
     }
     const size_t end = block_count >= 0 ? begin + static_cast<size_t>(block_count) : count;
-    if (group.policy.active_tail_blocks > 0) {
-        const size_t tail = static_cast<size_t>(group.policy.active_tail_blocks);
-        begin             = std::max(begin, end > tail ? end - tail : 0);
-    }
     std::vector<size_t> positions;
-    for (size_t pos = begin; pos < end; ++pos) {
-        // Select ownership first. A block outside this CP projection is not missing.
-        if (CPSlotMapper::physicalBlockPosition(group.policy, pos, count, cp_rank, cp_size)) {
-            positions.push_back(pos);
+    if (group.policy.group_type != CacheGroupType::FULL) {
+        try {
+            for (const auto& [pos, slot] : stateProjection(group, count, cache_key_tokens_per_block)) {
+                (void)slot;
+                if (pos >= begin && pos < end) {
+                    positions.push_back(pos);
+                }
+            }
+        } catch (const std::exception& error) {
+            return conversionError(context + ": " + error.what());
+        }
+    } else {
+        if (group.policy.active_tail_blocks > 0) {
+            const size_t tail = static_cast<size_t>(group.policy.active_tail_blocks);
+            begin             = std::max(begin, end > tail ? end - tail : 0);
+        }
+        for (size_t pos = begin; pos < end; ++pos) {
+            if (CPSlotMapper::physicalBlockPosition(group.policy, pos, count, cp_rank, cp_size)) {
+                positions.push_back(pos);
+            }
         }
     }
-    return convertLayerTagForRoute(resource, group, layer_id, positions, cp_rank, cp_size);
+    return convertLayerTagForRoute(resource, group, layer_id, positions, cp_rank, cp_size, cache_key_tokens_per_block);
 }
 
 ErrorResult<std::shared_ptr<LayerCacheBuffer>>
@@ -99,7 +147,8 @@ LayerCacheBufferUtil::convertLayerTagForRoute(KVCacheResource&           resourc
                                               int                        layer_id,
                                               const std::vector<size_t>& logical_positions,
                                               int                        cp_rank,
-                                              int                        cp_size) {
+                                              int                        cp_size,
+                                              size_t                     cache_key_tokens_per_block) {
     const std::string context = "layer=" + std::to_string(layer_id) + " tag=" + group.tag;
     if (cp_size <= 0 || cp_rank < 0 || cp_rank >= cp_size) {
         return conversionError(context + ": invalid CP rank/size");
@@ -111,23 +160,38 @@ LayerCacheBufferUtil::convertLayerTagForRoute(KVCacheResource&           resourc
         const auto& keys   = resource.cacheKeys();
         const auto& blocks = resource.blocksForLayer(layer_id, group.tag);
         auto        buffer = std::make_shared<LayerCacheBuffer>(layer_id, group.tag);
-        // Route positions already include planner tail/window filtering. Never filter again here.
+        const bool  state_group = group.policy.group_type != CacheGroupType::FULL;
+        const auto  state_slots =
+            state_group ? stateProjection(group, keys.size(), cache_key_tokens_per_block) : std::map<size_t, size_t>{};
+        // Resolve every requested key exactly; an inactive/missing slot is an error, never a silent skip.
         for (size_t pos : logical_positions) {
             const std::string pos_context = context + " logical_pos=" + std::to_string(pos);
             if (pos >= keys.size()) {
                 return conversionError(pos_context
                                        + " cache_key=<missing> block_id=<missing>: logical position out of range");
             }
-            const auto physical = CPSlotMapper::physicalBlockPosition(group.policy, pos, keys.size(), cp_rank, cp_size);
+            std::optional<size_t> physical;
+            if (state_group) {
+                const auto it = state_slots.find(pos);
+                if (it != state_slots.end()) {
+                    physical = it->second;
+                }
+            } else {
+                physical = CPSlotMapper::physicalBlockPosition(group.policy, pos, keys.size(), cp_rank, cp_size);
+            }
             const std::string key_context = pos_context + " cache_key=" + std::to_string(keys[pos]);
             if (!physical || *physical >= blocks.size()) {
                 return conversionError(key_context + " block_id=<missing> physical_pos="
                                        + (physical ? std::to_string(*physical) : "<missing>")
+                                       + " key_tokens=" + std::to_string(cache_key_tokens_per_block)
+                                       + " group_tokens=" + std::to_string(group.seqSizePerBlock())
                                        + ": required physical block is missing");
             }
             if (isNullBlockIdx(blocks[*physical]) || blocks[*physical] < 0) {
                 return conversionError(key_context + " block_id=" + std::to_string(blocks[*physical])
-                                       + ": null/invalid block");
+                                       + " physical_pos=" + std::to_string(*physical)
+                                       + " key_tokens=" + std::to_string(cache_key_tokens_per_block) + " group_tokens="
+                                       + std::to_string(group.seqSizePerBlock()) + ": null/invalid block");
             }
             if (buffer->blockIdMap().count(keys[pos])) {
                 return conversionError(bufferContext(*buffer, keys[pos], blocks[*physical]) + ": duplicate cache key");
@@ -149,7 +213,8 @@ LayerCacheBufferUtil::convertTagForRoute(KVCacheResource&           resource,
                                          const std::string&         cache_tag,
                                          const std::vector<size_t>& positions,
                                          int                        cp_rank,
-                                         int                        cp_size) {
+                                         int                        cp_size,
+                                         size_t                     cache_key_tokens_per_block) {
     std::vector<std::shared_ptr<LayerCacheBuffer>> result;
     if (positions.empty()) {
         return std::move(result);
@@ -160,7 +225,8 @@ LayerCacheBufferUtil::convertTagForRoute(KVCacheResource&           resource,
         return conversionError("tag=" + cache_tag + ": non-empty route has no topology layers");
     }
     for (int layer_id : topology.layerIdsForGroup(cache_tag)) {
-        auto buffer = convertLayerTagForRoute(resource, *group, layer_id, positions, cp_rank, cp_size);
+        auto buffer = convertLayerTagForRoute(
+            resource, *group, layer_id, positions, cp_rank, cp_size, cache_key_tokens_per_block);
         if (!buffer.ok()) {
             return buffer.status();
         }

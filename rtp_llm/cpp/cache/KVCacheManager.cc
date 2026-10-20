@@ -1135,6 +1135,8 @@ bool KVCacheManager::initP2PConnector() {
                                                  config_.totalGroupBlockSizeBytes());
     p2p_config.scheduler_config.topology = config_.topologyPtr();
     p2p_config.worker_config.topology    = config_.topologyPtr();
+    p2p_config.scheduler_config.cache_key_tokens_per_block = config_.seq_size_per_block;
+    p2p_config.worker_config.cache_key_tokens_per_block    = config_.seq_size_per_block;
     const int cp_size = parallelism_config_.prefill_cp_config.kv_cache_sharded ?
                             static_cast<int>(parallelism_config_.tp_size) :
                             1;

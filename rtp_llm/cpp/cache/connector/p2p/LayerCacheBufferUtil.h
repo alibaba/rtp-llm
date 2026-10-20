@@ -19,10 +19,11 @@ public:
     [[nodiscard]] static ErrorResult<std::vector<std::shared_ptr<LayerCacheBuffer>>>
     convert(KVCacheResource&     resource,
             const CacheTopology& topology,
-            int                  start_block_idx = 0,
-            int                  block_count     = -1,
-            int                  cp_rank         = 0,
-            int                  cp_size         = 1);
+            int                  start_block_idx            = 0,
+            int                  block_count                = -1,
+            int                  cp_rank                    = 0,
+            int                  cp_size                    = 1,
+            size_t               cache_key_tokens_per_block = 1);
 
     [[nodiscard]] static ErrorResult<std::vector<std::shared_ptr<LayerCacheBuffer>>>
     convertLayer(KVCacheResource&     resource,
@@ -30,32 +31,32 @@ public:
                  int                  layer_id,
                  int                  start_block_idx,
                  int                  block_count,
-                 int                  cp_rank = 0,
-                 int                  cp_size = 1);
+                 int                  cp_rank                    = 0,
+                 int                  cp_size                    = 1,
+                 size_t               cache_key_tokens_per_block = 1);
 
-    [[nodiscard]] static ErrorResult<std::shared_ptr<LayerCacheBuffer>> convertLayerTag(KVCacheResource& resource,
-                                                                                        const GroupBase& group,
-                                                                                        int              layer_id,
-                                                                                        int start_block_idx,
-                                                                                        int block_count,
-                                                                                        int cp_rank = 0,
-                                                                                        int cp_size = 1);
+    [[nodiscard]] static ErrorResult<std::shared_ptr<LayerCacheBuffer>>
+    convertLayerTag(KVCacheResource& resource,
+                    const GroupBase& group,
+                    int              layer_id,
+                    int              start_block_idx,
+                    int              block_count,
+                    int              cp_rank                    = 0,
+                    int              cp_size                    = 1,
+                    size_t           cache_key_tokens_per_block = 1);
 
     /// @brief Route 驱动的投影：只取 logical_positions 指定的逻辑位置。
     ///
-    /// 与 convertLayerTag 的关键区别：**本函数不施加 group.policy.active_tail_blocks**。
-    /// 尾部裁剪必须由编排层统一算进 KeyShardSpec::tail_count —— convertLayerTag 里那段
-    /// `logical_end - tail_count` 用的是**本侧**的 logical_end，两侧 compact 程度不同时
-    /// （prefill compact cp_size→1、Decode FULL 页表不 compact，COMPACT/state 组按 Prefill CP 几何投影）「最后 N 个」会指向不同的 key，
-    /// 破坏 executeCopy 的键集包含契约。logical_positions 由
-    /// KVCacheTransferPlanner::resolveKeys 解析，已经含了 tail_count。
+    /// 不重新裁剪 logical_positions；state/SWA 位置必须命中与发布端相同的物理尾块投影。
+    /// cache_key_tokens_per_block 是基础 key 粒度，不能用传输 CP 数替代 group 的块跨度。
     [[nodiscard]] static ErrorResult<std::shared_ptr<LayerCacheBuffer>>
     convertLayerTagForRoute(KVCacheResource&           resource,
                             const GroupBase&           group,
                             int                        layer_id,
                             const std::vector<size_t>& logical_positions,
                             int                        cp_rank,
-                            int                        cp_size);
+                            int                        cp_size,
+                            size_t                     cache_key_tokens_per_block = 1);
 
     /// @brief 对某个 tag 覆盖的每一层各产出一个 buffer（route 与 layer 无关，故在此展开）。
     [[nodiscard]] static ErrorResult<std::vector<std::shared_ptr<LayerCacheBuffer>>>
@@ -64,7 +65,8 @@ public:
                        const std::string&         cache_tag,
                        const std::vector<size_t>& logical_positions,
                        int                        cp_rank,
-                       int                        cp_size);
+                       int                        cp_size,
+                       size_t                     cache_key_tokens_per_block = 1);
 
     /// @brief 将 LayerCacheBuffer 转换为 transfer 层需要的 KeyBlockInfoMap
     [[nodiscard]] static ErrorResult<transfer::KeyBlockInfoMap>

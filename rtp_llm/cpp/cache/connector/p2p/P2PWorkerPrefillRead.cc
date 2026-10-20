@@ -222,9 +222,14 @@ bool P2PWorkerPrefillRead::writeByLayer(int                           layer_id,
     // 本地投影：prefill worker 按自身 cp_rank 取出它持有的那一份。在 planner 允许的
     // 所有 CP 形态下，(src_rank, dst_rank, tag) 唯一确定一条 route，且该 route 的键集
     // 恰好等于这份本地投影 —— 因此 prefill 侧不需要下发键规则，也不必再筛。
-    auto layer_cache_buffers =
-        LayerCacheBufferUtil::convertLayer(
-            *resource, *config_.topology, layer_id, 0, -1, config_.tp_rank % config_.cp_size, config_.cp_size);
+    auto layer_cache_buffers = LayerCacheBufferUtil::convertLayer(*resource,
+                                                                  *config_.topology,
+                                                                  layer_id,
+                                                                  0,
+                                                                  -1,
+                                                                  config_.tp_rank % config_.cp_size,
+                                                                  config_.cp_size,
+                                                                  config_.cache_key_tokens_per_block);
     if (!layer_cache_buffers.ok()) {
         return rejectLayer(request_id, request_deadline_ms, layer_cache_buffers.status());
     }

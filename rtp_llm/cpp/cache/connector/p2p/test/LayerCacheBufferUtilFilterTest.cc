@@ -1,10 +1,13 @@
 #include <gtest/gtest.h>
+#include <numeric>
 
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBufferUtil.h"
 #include "rtp_llm/cpp/cache/connector/p2p/ComputedLayerCacheBuffer.h"
+#include "rtp_llm/cpp/cache/connector/p2p/plan/KVCacheTransferPlanner.h"
+#include "rtp_llm/cpp/cache/connector/p2p/plan/ShardLayoutFactory.h"
 
 namespace rtp_llm {
 namespace {
@@ -113,6 +116,83 @@ TEST_F(LayerCacheBufferUtilFilterTest, RouteProjectionRejectsNullBlock) {
     ASSERT_FALSE(results.ok());
     EXPECT_NE(results.status().ToString().find("layer=0 tag=group0"), std::string::npos);
     EXPECT_NE(results.status().ToString().find("cache_key=101 block_id=-1"), std::string::npos);
+}
+
+TEST_F(LayerCacheBufferUtilFilterTest, SwaPhysicalTailMatchesPublicationForCpFourToOne) {
+    for (size_t key_count : {280u, 281u, 282u, 283u}) {
+        SCOPED_TRACE(key_count);
+        const size_t         slots = (key_count + 3) / 4;
+        std::vector<int32_t> blocks(slots, -1);
+        blocks[slots - 2] = 101;
+        blocks[slots - 1] = 102;
+        std::vector<int64_t> keys(key_count);
+        std::iota(keys.begin(), keys.end(), 1000);
+        topology_ = test::makeTestCacheTopology(1, 1, {{0}}, 64, {CacheGroupType::SWA});
+        KVCacheResource resource;
+        resource.initGroups(topology_);
+        resource.mutableBlockIds(resource.groupTags().at(0)).assign(blocks);
+        resource.cacheKeys()            = keys;
+        const auto&               group = topology_->groupById(0);
+        const std::vector<size_t> positions =
+            key_count == 280 ? std::vector<size_t>{275, 279} : std::vector<size_t>{279, key_count - 1};
+
+        // Real publication policy: two physical tail slots, not the last two base keys.
+        const auto published = buildCacheStorePlan(group.policy, key_count, 0, true, 0, 4, 1, key_count);
+        ASSERT_EQ(published.size(), 2u);
+        for (size_t i = 0; i < positions.size(); ++i) {
+            EXPECT_EQ(published[i].key_index, positions[i]);
+            EXPECT_EQ(published[i].offset_index, slots - 2 + i);
+        }
+        ParallelismConfig pc;
+        pc.tp_size                            = 4;
+        pc.prefill_cp_config.kv_cache_sharded = true;
+        pc.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
+        const auto src                        = ShardLayoutFactory::fromTopology(*topology_, pc, RoleType::PREFILL, 16);
+        pc.tp_size                            = 1;
+        pc.prefill_cp_config.method           = CPRotateMethod::PREFILL_CP;
+        const auto dst                        = ShardLayoutFactory::fromTopology(*topology_, pc, RoleType::DECODE, 16);
+        const auto plan                       = KVCacheTransferPlanner::plan(src, dst, {group.tag});
+        ASSERT_TRUE(plan.ok()) << plan.error.ToString();
+        ASSERT_EQ(plan.plan.routes.size(), 1u);
+        const auto resolved = KVCacheTransferPlanner::resolveKeys(plan.plan.routes.front().src_keys, key_count);
+        EXPECT_EQ(resolved, positions);
+        auto decode  = LayerCacheBufferUtil::convertLayerTagForRoute(resource, group, 0, resolved, 0, 1, 16);
+        auto prefill = LayerCacheBufferUtil::convertLayerTag(resource, group, 0, 0, -1, 0, 4, 16);
+        ASSERT_TRUE(decode.ok()) << decode.status().ToString();
+        ASSERT_TRUE(prefill.ok()) << prefill.status().ToString();
+        ASSERT_NE(decode.value(), nullptr);
+        ASSERT_NE(prefill.value(), nullptr);
+        for (size_t i = 0; i < positions.size(); ++i) {
+            EXPECT_EQ(decode.value()->getBlockId(keys[positions[i]]), 101 + i);
+            EXPECT_EQ(prefill.value()->getBlockId(keys[positions[i]]), 101 + i);
+        }
+        EXPECT_EQ(decode.value()->blockIdMap().size(), 2u);
+        EXPECT_EQ(prefill.value()->blockIdMap().size(), 2u);
+        // Prefix clipping keeps the full-sequence projection and its physical slot.
+        auto suffix = LayerCacheBufferUtil::convertLayerTag(resource, group, 0, key_count - 1, 1, 0, 1, 16);
+        ASSERT_TRUE(suffix.ok()) << suffix.status().ToString();
+        ASSERT_NE(suffix.value(), nullptr);
+        EXPECT_EQ(suffix.value()->blockIdMap().size(), 1u);
+        EXPECT_EQ(suffix.value()->getBlockId(keys.back()), 102);
+
+        resource.mutableBlockIds(resource.groupTags().at(0)).setAt(slots - 2, -1);
+        auto missing = LayerCacheBufferUtil::convertLayerTagForRoute(resource, group, 0, positions, 0, 1, 16);
+        ASSERT_FALSE(missing.ok());
+        EXPECT_NE(missing.status().ToString().find("null/invalid block"), std::string::npos);
+    }
+}
+
+TEST_F(LayerCacheBufferUtilFilterTest, UnscaledSwaUsesDirectSlotsEvenOnFourPrefillRanks) {
+    auto resource = makeResource(
+        1, 1, {0}, {CacheGroupType::SWA}, {-1, -1, -1, -1, -1, -1, 31, 32}, {100, 101, 102, 103, 104, 105, 106, 107});
+    const auto& group  = topology_->groupById(0);
+    auto        result = LayerCacheBufferUtil::convertLayerTagForRoute(resource, group, 0, {6, 7}, 0, 4, 1);
+    ASSERT_TRUE(result.ok()) << result.status().ToString();
+    ASSERT_NE(result.value(), nullptr);
+    EXPECT_EQ(result.value()->getBlockId(106), 31);
+    EXPECT_EQ(result.value()->getBlockId(107), 32);
+    EXPECT_FALSE(LayerCacheBufferUtil::convertLayerTagForRoute(resource, group, 0, {5, 7}, 0, 4, 1).ok());
+    EXPECT_FALSE(LayerCacheBufferUtil::convertLayerTagForRoute(resource, group, 0, {6, 7}, 0, 4, 0).ok());
 }
 
 TEST_F(LayerCacheBufferUtilFilterTest, ConvertWithLayerAttnTypes) {

@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 
 #include <algorithm>
+#include <limits>
 #include <map>
 #include <set>
 #include <sstream>
@@ -97,6 +98,10 @@ bool KVCacheTransferPlanner::ownsPosition(
     if (cp_size <= 0 || cp_rank < 0 || cp_rank >= cp_size) {
         return false;
     }
+    if (side.group(tag).policy.group_type != CacheGroupType::FULL) {
+        const size_t span = side.group(tag).seq_size_per_block / side.cache_key_tokens_per_block;
+        return pos % span == span - 1 || pos + 1 == count;
+    }
     CacheGroupPolicy policy = side.group(tag).policy;
     // 镜像 CPSlotMapper::layoutForGroup：cpSize() <= 1 时 mapping 退化为 NONE。
     policy.cp_mapping = side.effectiveMapping(tag);
@@ -115,6 +120,22 @@ KVCacheTransferPlanner::validateTag(const ShardLayout& src, const ShardLayout& d
         return planError(std::string("group_type mismatch for tag '") + tag + "': src="
                          + cacheGroupTypeName(sg.policy.group_type) + " dst=" + cacheGroupTypeName(dg.policy.group_type));
     }
+    if (src.cache_key_tokens_per_block == 0 || src.cache_key_tokens_per_block != dst.cache_key_tokens_per_block) {
+        return planError("cache-key token stride mismatch or zero for tag '" + tag
+                         + "': src=" + std::to_string(src.cache_key_tokens_per_block)
+                         + " dst=" + std::to_string(dst.cache_key_tokens_per_block));
+    }
+    if (sg.seq_size_per_block == 0 || sg.seq_size_per_block != dg.seq_size_per_block
+        || sg.seq_size_per_block % src.cache_key_tokens_per_block != 0) {
+        return planError("group token stride mismatch or invalid key coverage for tag '" + tag + "': src="
+                         + std::to_string(sg.seq_size_per_block) + " dst=" + std::to_string(dg.seq_size_per_block)
+                         + " key_tokens=" + std::to_string(src.cache_key_tokens_per_block));
+    }
+    const size_t key_span = sg.seq_size_per_block / src.cache_key_tokens_per_block;
+    if (key_span > static_cast<size_t>(std::numeric_limits<int>::max())) {
+        return planError("group key span exceeds supported range for tag '" + tag + "'");
+    }
+
     if (sg.policy.active_tail_blocks != dg.policy.active_tail_blocks) {
         std::ostringstream oss;
         oss << "active_tail_blocks mismatch for tag '" << tag << "': src=" << sg.policy.active_tail_blocks
@@ -317,13 +338,15 @@ ErrorInfo KVCacheTransferPlanner::buildCpPairs(const ShardLayout&   src,
         return planError("invalid cp size for tag '" + tag + "'");
     }
 
-    // Step 1 的 (b0) 已保证 dst_cp_size ∈ {1, src_cp_size}，故 lcm(src, dst) 恒等于 src_cp_size，
-    // 无需 lcm / CRT。
-    const int  modulus    = src_cp_size;
-    const bool src_sliced = src.effectiveSlice(tag) != CpBlockSliceMode::NONE;
-    const bool is_compact = src.effectiveMapping(tag) == CpBlockMappingMode::COMPACT_LAST_RANK
-                            || dst.effectiveMapping(tag) == CpBlockMappingMode::COMPACT_LAST_RANK;
+    // FULL key ownership follows CP; state/SWA endpoint spacing follows group span.
     const bool is_full_group = src.group(tag).policy.group_type == CacheGroupType::FULL;
+    // Transport CP controls ranks/byte slices; state/SWA key spacing follows
+    // the physical group's token coverage, including on a single-rank Decode.
+    const int  modulus    = is_full_group ?
+                                src_cp_size :
+                                static_cast<int>(src.group(tag).seq_size_per_block / src.cache_key_tokens_per_block);
+    const bool src_sliced = src.effectiveSlice(tag) != CpBlockSliceMode::NONE;
+    const bool is_compact = !is_full_group && modulus > 1;
     // active_tail_blocks 由编排层折进规则，两侧共用同一个值（Step 1 已校验相等）。
     const int tail_count = static_cast<int>(src.group(tag).policy.active_tail_blocks);
 
@@ -559,6 +582,8 @@ PlanResult KVCacheTransferPlanner::plan(const ShardLayout&              src,
 
                     route.src_bytes = viewBytes(src.group(tag), route.src_partition, route.src_slice);
                     route.dst_bytes = viewBytes(dst.group(tag), route.dst_partition, route.dst_slice);
+                    route.cache_key_tokens_per_block = src.cache_key_tokens_per_block;
+                    route.group_tokens_per_block     = src.group(tag).seq_size_per_block;
 
                     if (route.src_bytes != route.dst_bytes || route.src_bytes == 0) {
                         std::ostringstream oss;
@@ -615,6 +640,8 @@ uint64_t TransferPlan::digest() const {
         mix(static_cast<uint64_t>(r.dst_slice.index));
         mix(static_cast<uint64_t>(r.src_bytes));
         mix(static_cast<uint64_t>(r.dst_bytes));
+        mix(static_cast<uint64_t>(r.cache_key_tokens_per_block));
+        mix(static_cast<uint64_t>(r.group_tokens_per_block));
     }
     return hash;
 }
@@ -624,6 +651,7 @@ ShardLayout ShardLayout::forPeer(const ShardLayout&       self,
                                  bool                     peer_is_prefill_role) {
     ShardLayout peer;
     peer.pc     = peer_pc;
+    peer.cache_key_tokens_per_block = self.cache_key_tokens_per_block;
     peer.groups = self.groups;  // same-build: policy / spec 类型 / seq 尺寸两侧相同
 
     peer.deriveHeadShardCounts();
