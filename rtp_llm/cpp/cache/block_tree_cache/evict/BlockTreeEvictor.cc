@@ -368,14 +368,43 @@ BlockTreeEvictor::batchEvictLocked(size_t group_set_id, Tier source_tier, size_t
 void BlockTreeEvictor::runEvictionTask(std::shared_ptr<const EvictionTransferTask> task) noexcept {
     try {
         task_runner_->runTransfer(
-            task, *metrics_reporter_, [this, task](bool success) { scheduleEvictionSettlement(task, success); });
+            task, *metrics_reporter_, [this, task](ErrorInfo error) noexcept {
+                completeEvictionTask(task, std::move(error));
+            });
         return;
     } catch (const std::exception& error) {
         RTP_LLM_LOG_ERROR("eviction copy failed with exception: %s", error.what());
     } catch (...) {
         RTP_LLM_LOG_ERROR("eviction copy failed with unknown exception");
     }
-    scheduleEvictionSettlement(std::move(task), false);
+    completeEvictionTask(std::move(task), ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "eviction task runner exception"));
+}
+
+void BlockTreeEvictor::completeEvictionTask(std::shared_ptr<const EvictionTransferTask> task, ErrorInfo error) noexcept {
+    if (error.code() == ErrorCode::TRANSFER_COMPLETION_UNKNOWN) {
+        // Ordinary source/target references are still held here. Freeze every
+        // saved endpoint before rollback can return any of them to a pool.
+        for (const TransferDescriptor& desc : task->descriptors()) {
+            if (desc.target_tier == Tier::NONE) {
+                continue;
+            }
+            const GroupSetPtr& group_set = tree_->groupSets()[desc.group_set_id];
+            const auto freeze = [&group_set](Tier tier, const std::vector<BlockIdxType>& blocks) noexcept {
+                if (tier == Tier::DEVICE) {
+                    for (size_t i = 0; i < blocks.size(); ++i) {
+                        group_set->devicePools()[i]->freezeBlock(blocks[i], BlockTreeRefType::EVICTION);
+                    }
+                } else {
+                    IBlockPool* pool = tier == Tier::HOST ? static_cast<IBlockPool*>(group_set->hostPool().get()) :
+                                                            static_cast<IBlockPool*>(group_set->diskPool().get());
+                    pool->freezeBlock(blocks.front(), BlockTreeRefType::EVICTION);
+                }
+            };
+            freeze(desc.source_tier, desc.source_blocks);
+            freeze(desc.target_tier, desc.target_blocks);
+        }
+    }
+    scheduleEvictionSettlement(std::move(task), error.ok());
 }
 
 void BlockTreeEvictor::scheduleEvictionSettlement(std::shared_ptr<const EvictionTransferTask> task,
@@ -450,6 +479,23 @@ std::optional<TransferDescriptor> BlockTreeEvictor::chooseVictim(size_t group_se
     }
 
     const auto can_evict = [this, group_set_id, tier, force_drop](TreeNode* node) {
+        if (!force_drop) {
+            const GroupSetPtr&      group_set = tree_->groupSets()[group_set_id];
+            const GroupSetResource& resource  = node->group_set_resources[group_set_id];
+            if (tier == Tier::DEVICE) {
+                for (size_t i = 0; i < resource.device_blocks.size(); ++i) {
+                    if (!isNullBlockIdx(resource.device_blocks[i])
+                        && group_set->devicePools()[i]->isFrozen(resource.device_blocks[i])) {
+                        return false;
+                    }
+                }
+            } else if ((tier == Tier::HOST && !isNullBlockIdx(resource.host_block)
+                        && group_set->hostPool()->isFrozen(resource.host_block))
+                       || (tier == Tier::DISK && !isNullBlockIdx(resource.disk_block)
+                           && group_set->diskPool()->isFrozen(resource.disk_block))) {
+                return false;
+            }
+        }
         if (force_drop || tier != Tier::DEVICE
             || tree_->groupSets()[group_set_id]->groupType() != CacheGroupType::FULL) {
             return true;

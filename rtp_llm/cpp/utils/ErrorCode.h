@@ -60,6 +60,8 @@ enum class ErrorCode {
     LOAD_KV_CACHE_FAILED                  = 8212,
     WAIT_TO_RUN_TIMEOUT                   = 8213,
     KEEP_ALIVE_TIMEOUT                    = 8214,
+    // Broadcast failed or returned no valid completion result; remote I/O may still be running.
+    TRANSFER_COMPLETION_UNKNOWN           = 8215,
 
     // cache store error
     LOAD_CACHE_TIMEOUT                   = 8300,
@@ -172,6 +174,8 @@ inline std::string ErrorCodeToString(ErrorCode code) {
             return "REMOTE_GENERATE_FAILED";
         case ErrorCode::RPC_FINISH_FAILED:
             return "RPC_FINISH_FAILED";
+        case ErrorCode::TRANSFER_COMPLETION_UNKNOWN:
+            return "TRANSFER_COMPLETION_UNKNOWN";
         case ErrorCode::DECODE_MALLOC_FAILED:
             return "DECODE_MALLOC_FAILED";
         case ErrorCode::LOAD_KV_CACHE_FAILED:

@@ -31,7 +31,10 @@ public:
             if (completed_ || remaining_ <= (submitting_finished_ ? 0u : 1u)) {
                 return;
             }
-            if (first_error_.ok() && !error.ok()) {
+            // A known failure must not hide another batch whose remote I/O may still be running.
+            if ((first_error_.ok() && !error.ok())
+                || (error.code() == ErrorCode::TRANSFER_COMPLETION_UNKNOWN
+                    && first_error_.code() != ErrorCode::TRANSFER_COMPLETION_UNKNOWN)) {
                 first_error_ = std::move(error);
             }
             --remaining_;

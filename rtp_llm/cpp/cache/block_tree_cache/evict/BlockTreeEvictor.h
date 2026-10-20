@@ -16,6 +16,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/EvictionHeap.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
 
 namespace rtp_llm {
 
@@ -123,6 +124,7 @@ private:
     Tier   watermarkTargetTier(Tier source_tier) const;
     size_t watermarkLogicalBatchLimit(Tier source_tier, Tier target_tier) const;
     void   runEvictionTask(std::shared_ptr<const EvictionTransferTask> task) noexcept;
+    void   completeEvictionTask(std::shared_ptr<const EvictionTransferTask> task, ErrorInfo error) noexcept;
     BatchEvictResult batchEvictLocked(size_t group_set_id, Tier source_tier, size_t max_victim_count);
     void scheduleEvictionSettlement(std::shared_ptr<const EvictionTransferTask> task, bool success) noexcept;
     void

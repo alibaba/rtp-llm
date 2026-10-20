@@ -133,7 +133,7 @@ protected:
         std::optional<bool> result;
         runner.runTransfer(std::make_shared<EvictionTransferTask>(std::move(task)),
                            metrics_reporter_,
-                           [&](bool success) { result = success; });
+                           [&](ErrorInfo error) { result = error.ok(); });
         if (!result.has_value()) {
             ADD_FAILURE() << "scripted transfer did not complete inline";
             return false;
@@ -190,9 +190,9 @@ TEST_F(EvictionTaskRunnerTest, SubmitsPrimaryWithoutBlocking) {
     std::optional<bool>     result;
     size_t                  terminal_count = 0;
 
-    runner.runTransfer(task, metrics_reporter_, [&](bool success) {
+    runner.runTransfer(task, metrics_reporter_, [&](ErrorInfo error) {
         ++terminal_count;
-        result = success;
+        result = error.ok();
     });
 
     ASSERT_EQ(deferred_engine->batchCount(), 1u);
@@ -235,7 +235,7 @@ TEST_F(EvictionTaskRunnerTest, RunTransferOwnsTransferMetricsLifetime) {
     auto                    task = std::make_shared<EvictionTransferTask>(makeCopyTask());
     std::optional<bool>     result;
 
-    runner.runTransfer(task, metrics_reporter_, [&](bool success) { result = success; });
+    runner.runTransfer(task, metrics_reporter_, [&](ErrorInfo error) { result = error.ok(); });
 
     EXPECT_FALSE(result.has_value());
     EXPECT_EQ(evictionInFlight(Tier::DEVICE, Tier::HOST), 1);

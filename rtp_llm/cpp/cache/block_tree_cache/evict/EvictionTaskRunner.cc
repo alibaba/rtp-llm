@@ -33,7 +33,7 @@ void EvictionTaskRunner::runTransfer(std::shared_ptr<const EvictionTransferTask>
                                                 {},
                                                 group_sets_);
         if (on_done) {
-            on_done(false);
+            on_done(ErrorInfo(ErrorCode::INVALID_PARAMS, "invalid eviction transfer descriptors"));
         }
         return;
     }
@@ -51,7 +51,7 @@ void EvictionTaskRunner::runTransfer(std::shared_ptr<const EvictionTransferTask>
                                                     success ? task->descriptors() : std::vector<TransferDescriptor>{},
                                                     group_sets_);
             if (on_done) {
-                on_done(success);
+                on_done(std::move(error));
             }
         });
 }

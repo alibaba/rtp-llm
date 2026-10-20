@@ -247,6 +247,51 @@ TEST(IBlockPoolTest, MultipleTreeRefsReleaseOnlyAtLastHolder) {
     EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::LOAD), 0u);
 }
 
+TEST(IBlockPoolTest, FreezeDeduplicatesOperationsAndSurvivesOrdinaryReferenceRelease) {
+    auto pool   = makeInitializedPool(/*physical_block_count=*/4);
+    auto blocks = pool->malloc(2);
+    ASSERT_TRUE(blocks.has_value());
+    const auto load_block     = blocks->at(0);
+    const auto eviction_block = blocks->at(1);
+    pool->incTreeRef(*blocks, BlockTreeRefType::CACHE);
+    pool->incTreeRef(load_block, BlockTreeRefType::LOAD);
+    pool->incTreeRef(eviction_block, BlockTreeRefType::EVICTION);
+    size_t notifications = 0;
+    pool->setCapacityChangeCallback([&] { ++notifications; });
+
+    EXPECT_EQ(pool->frozenBlocksNum(), 0u);
+    EXPECT_FALSE(pool->isFrozen(load_block));
+    pool->freezeBlock(load_block, BlockTreeRefType::LOAD);
+    pool->freezeBlock(load_block, BlockTreeRefType::EVICTION);
+    pool->freezeBlock(eviction_block, BlockTreeRefType::EVICTION);
+    pool->freezeBlock(eviction_block, BlockTreeRefType::LOAD);
+    EXPECT_EQ(pool->frozenBlocksNum(), 2u);
+    EXPECT_TRUE(pool->isFrozen(load_block));
+    EXPECT_TRUE(pool->isFrozen(eviction_block));
+    EXPECT_EQ(pool->treeRefCount(load_block), 3u);
+    EXPECT_EQ(pool->treeRefCount(eviction_block), 3u);
+
+    // A successful peer Task releases only its own ordinary reference.
+    pool->incTreeRef(load_block, BlockTreeRefType::LOAD);
+    pool->decTreeRef(load_block, BlockTreeRefType::LOAD);
+    pool->decTreeRef(load_block, BlockTreeRefType::LOAD);
+    pool->decTreeRef(eviction_block, BlockTreeRefType::EVICTION);
+    pool->decTreeRef(*blocks, BlockTreeRefType::CACHE);
+    EXPECT_EQ(pool->treeRefCount(load_block), 1u);
+    EXPECT_EQ(pool->treeRefCount(eviction_block), 1u);
+    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::CACHE), 0u);
+    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::LOAD), 1u);
+    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::EVICTION), 1u);
+    EXPECT_EQ(pool->activeBlocksNum(), 2u);
+    EXPECT_EQ(pool->availableBlocksNum(), 1u);
+    EXPECT_EQ(pool->freeBlocksNum(), 1u);
+    EXPECT_EQ(notifications, 0u);
+    EXPECT_EQ(pool->first_tree_edges, 2u);
+    EXPECT_EQ(pool->last_tree_edges, 0u);
+    EXPECT_EQ(pool->malloc(), std::optional<BlockIdxType>{3});
+    EXPECT_FALSE(pool->malloc().has_value());
+}
+
 TEST(IBlockPoolTest, DecTreeRefRejectsWrongInternalType) {
     auto pool  = makeInitializedPool(/*physical_block_count=*/4);
     auto block = pool->malloc();

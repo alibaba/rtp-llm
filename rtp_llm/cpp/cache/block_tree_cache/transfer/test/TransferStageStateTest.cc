@@ -71,5 +71,26 @@ TEST(TransferStageStateTest, PreservesFirstFailure) {
     EXPECT_EQ(result, ErrorCode::INVALID_PARAMS);
 }
 
+TEST(TransferStageStateTest, UnknownCompletionDominatesKnownFailuresInEitherOrder) {
+    for (bool unknown_first : {false, true}) {
+        size_t             callback_count = 0;
+        TransferStageState state([&](ErrorInfo error) {
+            EXPECT_EQ(error.code(), ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
+            ++callback_count;
+        });
+        state.addBatch();
+        state.addBatch();
+        state.addBatch();
+        state.finishSubmitting();
+        const ErrorInfo unknown(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "RPC timeout");
+        const ErrorInfo failed(ErrorCode::EXECUTION_EXCEPTION, "business failure");
+        state.completeBatch(unknown_first ? unknown : failed);
+        state.completeBatch(unknown_first ? failed : unknown);
+        EXPECT_EQ(callback_count, 0u);
+        state.completeBatch(ErrorInfo::OkStatus());
+        EXPECT_EQ(callback_count, 1u);
+    }
+}
+
 }  // namespace
 }  // namespace rtp_llm

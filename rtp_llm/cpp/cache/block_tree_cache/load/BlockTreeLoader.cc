@@ -421,7 +421,25 @@ void BlockTreeLoader::abortLoadLocked(const std::vector<TransferDescriptor>& loa
 }
 
 void BlockTreeLoader::runLoadTask(const LoadTaskRunner::TaskPtr& task) {
-    const auto complete = [task](ErrorInfo error) {
+    const auto complete = [this, task](ErrorInfo error) noexcept {
+        task->phase = LoadTaskRunner::Task::Phase::FINISHED;
+        if (error.code() == ErrorCode::TRANSFER_COMPLETION_UNKNOWN) {
+            // Ordinary LOAD references still protect both ends until settlement.
+            // Preserve those physical slots before publishing the failure.
+            for (const TransferDescriptor& desc : task->load_descs) {
+                const GroupSetPtr& group_set = tree_->groupSets()[desc.group_set_id];
+                IBlockPool* source_pool = desc.source_tier == Tier::HOST ?
+                                              static_cast<IBlockPool*>(group_set->hostPool().get()) :
+                                              static_cast<IBlockPool*>(group_set->diskPool().get());
+                for (BlockIdxType block : desc.source_blocks) {
+                    source_pool->freezeBlock(block, BlockTreeRefType::LOAD);
+                }
+                const auto& device_pools = group_set->devicePools();
+                for (size_t member = 0; member < device_pools.size(); ++member) {
+                    device_pools[member]->freezeBlock(desc.target_blocks[member], BlockTreeRefType::LOAD);
+                }
+            }
+        }
         const size_t descriptor_count = task->load_descs.size();
         if (!task->context->completeTransfers(descriptor_count, error.ok())) {
             RTP_LLM_LOG_WARNING("failed to record load copy completion, descriptor_count=%zu", descriptor_count);

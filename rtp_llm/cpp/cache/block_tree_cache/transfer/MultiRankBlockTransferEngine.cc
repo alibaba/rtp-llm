@@ -35,9 +35,9 @@ public:
         try {
             result_->waitDone();
         } catch (const std::exception& error) {
-            evaluate(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error.what()));
+            evaluate(ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, error.what()));
         } catch (...) {
-            evaluate(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown multi-rank transfer failure"));
+            evaluate(ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "unknown multi-rank transfer failure"));
         }
         evaluate();
         std::unique_lock<std::mutex> lock(mutex_);
@@ -98,18 +98,24 @@ private:
                 if (StaticConfig::user_ft_core_dump_on_exception) {
                     RTP_LLM_FAIL("multi-rank transfer aborted, at least one worker RPC status is not OK");
                 }
-                error = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "multi-rank transfer RPC failed");
+                error = ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "multi-rank transfer RPC failed");
             } else {
                 const auto responses = result_->responses();
                 if (responses.size() != worker_count_) {
-                    error = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "multi-rank transfer response count mismatch");
+                    error = ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN,
+                                      "multi-rank transfer response count mismatch");
                 } else {
                     for (size_t rank = 0; rank < responses.size(); ++rank) {
                         if (!responses[rank].has_mem_response()
-                            || responses[rank].mem_response().code() != MemoryOperationResponsePB::OK) {
+                            || (responses[rank].mem_response().code() != MemoryOperationResponsePB::OK
+                                && responses[rank].mem_response().code() != MemoryOperationResponsePB::FAILED)) {
+                            error = ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN,
+                                              "invalid multi-rank transfer response, rank=" + std::to_string(rank));
+                            break;
+                        }
+                        if (responses[rank].mem_response().code() == MemoryOperationResponsePB::FAILED && error.ok()) {
                             error = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION,
                                               "multi-rank transfer failed, rank=" + std::to_string(rank));
-                            break;
                         }
                     }
                 }

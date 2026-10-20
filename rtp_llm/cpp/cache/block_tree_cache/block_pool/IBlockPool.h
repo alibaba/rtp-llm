@@ -62,6 +62,11 @@ public:
     void     decTreeRef(const BlockIdList& blocks, BlockTreeRefType ref_type);
     uint32_t treeRefCount(BlockIdxType block) const;
 
+    // Keep one permanent tree reference per physical block for this pool's lifetime.
+    void   freezeBlock(BlockIdxType block, BlockTreeRefType ref_type) noexcept;
+    bool   isFrozen(BlockIdxType block) const;
+    size_t frozenBlocksNum() const;
+
     // Number of distinct blocks carrying at least one tree reference of this type.
     size_t referencedBlocksNum(BlockTreeRefType ref_type) const;
 
@@ -140,6 +145,7 @@ private:
     bool          validBlockNoLock(BlockIdxType block) const;
     void          checkUniqueBlocksNoLock(const BlockIdList& blocks) const;
     static size_t treeRefTypeIndex(BlockTreeRefType ref_type);
+    void          incTreeRefNoLock(BlockIdxType block, size_t ref_type_index);
 
     size_t       totalBlocksNumNoLock() const;
     size_t       availableFreeBlocksNoLock() const;
@@ -152,6 +158,7 @@ private:
     bool                                                      initialized_{false};
     std::function<void()>                                     capacity_change_callback_;
     std::vector<uint8_t>                                      allocated_;
+    std::vector<uint8_t>                                      frozen_blocks_;
     std::vector<uint32_t>                                     tree_refcounts_;
     std::array<std::vector<uint32_t>, kBlockTreeRefTypeCount> tree_refcounts_by_type_;
     std::array<size_t, kBlockTreeRefTypeCount>                tree_referenced_block_counts_{};
@@ -160,6 +167,7 @@ private:
     size_t                                                    free_head_{0};
     size_t                                                    active_blocks_num_{0};
     size_t                                                    available_blocks_num_{0};
+    size_t                                                    frozen_count_{0};
 };
 
 }  // namespace rtp_llm
