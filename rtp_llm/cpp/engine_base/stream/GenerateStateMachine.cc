@@ -169,6 +169,18 @@ void GenerateStateMachine::handleRunning() {
                 seq_len_override = normal_override;
             } else if (mtp_state.next_seq_len_upper_bound > 0) {
                 seq_len_override = mtp_state.next_seq_len_upper_bound;
+            } else {
+                // No published override (multi-row normal streams publish
+                // none). A normal decode round commits exactly one token per
+                // stream, so the in-flight round's host commit will land at
+                // seqLength() + 1. Reserve for that boundary NOW: the async
+                // output worker updates complete_token_ids behind the GPU
+                // sampler event, so the scheduler otherwise computes the
+                // block allocation from the stale seqLength() and skips the
+                // new block exactly at the block boundary — the attention
+                // metadata fill then reads the block table past the row end
+                // and cross-corrupts the next row's KV.
+                seq_len_override = stream->seqLength() + 1;
             }
         }
         if (asyncDebugEnabled() && stream->hasPendingAsyncBookkeeping()) {

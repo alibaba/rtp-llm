@@ -369,7 +369,19 @@ void FlashInferMlaAttnParams::fillParamsInternal(torch::Tensor t_prefix_lengths,
                                 "page_num exceed reserved %d > %d",
                                 total_page_idx + current_page_num,
                                 max_page_num_);
+        // The block table row must cover every page the (fresh) sequence
+        // lengths require. A short row makes the flat-index read below walk
+        // past the row end into the NEXT batch row's blocks — the write then
+        // lands in the neighbor's KV (silent cross-row corruption). Fail
+        // loud instead: the gatherer/scheduler must keep the width in sync
+        // with the sequence lengths it publishes.
         if (kv_cache_block_id) {
+            RTP_LLM_CHECK_WITH_INFO(current_page_num <= max_batch_blocks,
+                                    "block table width %d < required pages %d for row %d (seq_len %d)",
+                                    max_batch_blocks,
+                                    current_page_num,
+                                    i,
+                                    seq_len);
             for (int j = 0; j < current_page_num; j++) {
                 auto page_idx                     = kv_cache_block_id[i * max_batch_blocks + j];
                 page_indice_ptr[total_page_idx++] = page_idx;
