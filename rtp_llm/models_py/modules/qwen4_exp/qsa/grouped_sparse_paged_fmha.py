@@ -140,6 +140,9 @@ def _grouped_sparse_paged_split_kernel(
     ST: tl.constexpr,
     ROTATE_TILES: tl.constexpr,
     FP16_PV: tl.constexpr,
+    DRAFT_SOURCES=None,
+    DRAFT_INPUT: tl.constexpr = False,
+    DRAFT_QS: tl.constexpr = 0,
 ):
     batch = tl.program_id(0)
     group_query = tl.program_id(1)
@@ -150,13 +153,20 @@ def _grouped_sparse_paged_split_kernel(
     global_head = group * HG + head
     dim = tl.arange(0, 256)
     cols = tl.arange(0, BK)
+    if DRAFT_INPUT:
+        source = tl.load(DRAFT_SOURCES + batch * S + query)
+        query_base = source * DRAFT_QS
+        selected_row = source
+    else:
+        query_base = batch * QB + query * QS
+        selected_row = batch * S + query
     query_values = tl.load(
-        q + batch * QB + global_head[:, None] * QH + query * QS + dim[None, :],
+        q + query_base + global_head[:, None] * QH + dim[None, :],
         mask=head[:, None] < HG,
         other=0,
     )
     length = tl.load(lengths + batch * S + query)
-    row = selected + (batch * S + query) * ROW_WIDTH
+    row = selected + selected_row * ROW_WIDTH
     count = (
         tl.minimum(tl.maximum(tl.load(row + WIDTH), 0), WIDTH) if HAS_COUNT else WIDTH
     )
