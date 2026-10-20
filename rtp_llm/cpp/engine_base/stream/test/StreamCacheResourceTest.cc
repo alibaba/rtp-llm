@@ -2086,8 +2086,8 @@ TEST_F(StreamCacheResourceTest, testP2PFirstTokenOutputsRoundTripThroughStartLoa
             const int complete_prefix = (decode->inputLength() - 1)
                                         / decode->streamCacheResource().reuseBlockTokens()
                                         * decode->streamCacheResource().reuseBlockTokens();
-            EXPECT_EQ(decode->initialReuseLength(), complete_prefix);
-            EXPECT_EQ(decode->remoteReuseLength(), complete_prefix - local_prefix);
+            EXPECT_EQ(decode->initialReuseLength(), hybrid ? complete_prefix : local_prefix);
+            EXPECT_EQ(decode->remoteReuseLength(), hybrid ? complete_prefix - local_prefix : 0);
             EXPECT_EQ(decode->localReuseLength(), local_prefix);
             EXPECT_EQ(decode->prefillTotalReuseLen(), published.total_reuse_len);
             if (requested) {

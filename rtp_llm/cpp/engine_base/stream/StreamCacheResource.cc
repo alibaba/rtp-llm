@@ -161,11 +161,13 @@ void applyP2PSideChannel(const P2PSideChannelPayload& payload, GenerateStream* s
         }
     }
 #endif
-    // A successful StartLoad covers the remaining prompt KV after Tree reuse.
+    // Independent pools expose the resident Decode prefix after StartLoad.
+    // Single-pool reuse continues to count allocator/cache hits only; receiving
+    // newly computed Prefill KV is not an additional cache hit in that contract.
     // Count only complete logical blocks, using the same CP/group geometry as
     // allocator reuse. This is Decode remote reuse, not a Prefill cache hit.
     // Preserve execution positions: only the published usage counters change.
-    if (reuse_block_tokens > 0) {
+    if (payload.prefill_use_independent_block_pools && reuse_block_tokens > 0) {
         const int resident_prefix = std::max(0, stream->inputLength() - 1) / reuse_block_tokens * reuse_block_tokens;
         const int added_remote    = std::max(0, resident_prefix - stream->initialReuseLength());
         stream->setInitialReuseLength(stream->initialReuseLength() + added_remote);
