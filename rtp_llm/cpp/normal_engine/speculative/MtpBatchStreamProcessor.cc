@@ -912,7 +912,10 @@ absl::Status MtpBatchStreamProcessor::dispatchDecode(const StreamGroups&        
 
 absl::StatusOr<GptModelInputs> MtpBatchStreamProcessor::gatherDecodeModelInput(const StreamGroups& stream_groups,
                                                                                TensorHolder&       host_holder) const {
-    auto model_input = NormalBatchStreamProcessor::gatherModelInput(stream_groups, host_holder);
+    // This processor publishes both page tables below, after choosing device
+    // snapshots versus host rows. Other gather callers retain eager publication.
+    auto model_input = model_input_gatherer_->gather(
+        stream_groups, host_holder, /*defer_page_tables=*/true);
 
     RTP_LLM_CHECK(model_input.ok());
 
@@ -983,7 +986,31 @@ void MtpBatchStreamProcessor::overlayMtpCacheSnapshots(const StreamGroups& strea
     }
 
     if (buckets.empty()) {
+        if (model_input.combo_tokens.defined() && model_input.combo_tokens.is_cuda()) {
+            model_input.kv_cache_block_id = toCudaInt32(model_input.kv_cache_block_id, host_holder);
+            model_input.kv_cache_kernel_block_id = toCudaInt32(model_input.kv_cache_kernel_block_id, host_holder);
+        }
         return;
+    }
+    if (stream_groups.totalContextBatchSize() == 0 && buckets.size() == 1) {
+        const auto& [widths, bucket] = *buckets.begin();
+        const auto& physical = model_input.kv_cache_block_id;
+        const auto& kernel = model_input.kv_cache_kernel_block_id;
+        bool full_coverage = physical.defined() && kernel.defined() && physical.dim() == 3 && kernel.dim() == 3
+                             && physical.size(1) == static_cast<int64_t>(bucket.rows.size())
+                             && kernel.size(1) == physical.size(1)
+                             && physical.size(2) == widths.first && kernel.size(2) == widths.second;
+        for (size_t i = 0; full_coverage && i < bucket.rows.size(); ++i) {
+            full_coverage = bucket.rows[i] == static_cast<int64_t>(i)
+                            && bucket.physical_tables[i].size(0) == physical.size(0)
+                            && bucket.kernel_tables[i].size(0) == kernel.size(0);
+        }
+        if (full_coverage) {
+            RTP_LLM_PROFILE_SCOPE("mtp.page_tables_snapshot_concat");
+            model_input.kv_cache_block_id = torch::cat(bucket.physical_tables, 1);
+            model_input.kv_cache_kernel_block_id = torch::cat(bucket.kernel_tables, 1);
+            return;
+        }
     }
     // Generic gathering produces pinned host tables. Move the complete mixed
     // batch once, preserving freshly admitted host rows, then replace only the

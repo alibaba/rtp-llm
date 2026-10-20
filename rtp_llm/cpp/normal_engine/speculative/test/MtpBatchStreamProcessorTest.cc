@@ -22,6 +22,7 @@
 #include "rtp_llm/cpp/normal_engine/speculative/MtpBatchStreamProcessor.h"
 #undef private
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
+#include "rtp_llm/cpp/normal_engine/speculative/SpeculativeSampler.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
 #include "rtp_llm/cpp/models/Sampler.h"
@@ -2734,6 +2735,99 @@ TEST_F(MtpBatchStreamProcessorTest, testCacheSnapshotOverlayKeepsPhysicalKernelP
     too_narrow                          = model_input;
     too_narrow.kv_cache_kernel_block_id = torch::zeros({1, 2, 3}, pinned_i32);
     EXPECT_ANY_THROW(processor.overlayMtpCacheSnapshots(StreamGroups({steady, fresh}), too_narrow, holder));
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testSpeculativeMasksPreserveForcedAndRejectedTokens) {
+    ModelConfig model_config;
+    model_config.max_seq_len = 2048;
+    model_config.vocab_size = 8;
+    model_config.num_layers = 1;
+    RuntimeConfig runtime_config;
+    ResourceContext resource_context;
+    std::list<GenerateStreamPtr> streams;
+    for (int row = 0; row < 3; ++row) {
+        auto stream = createContextStream(model_config, runtime_config, resource_context, {1}, row + 1);
+        stream->generateConfig()->top_k = 1;
+        stream->generateConfig()->top_p = 1.0f;
+        streams.push_back(stream);
+    }
+    const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    SamplerOutput draft, target;
+    draft.token_ids = torch::tensor({{1, 2}, {1, 2}, {1, 2}}, torch::kInt32).to(cuda_i32);
+    draft.token_ids_are_point_mass = true;
+    target.token_ids = torch::tensor({{3}, {4}, {5}, {1}, {2}, {5}, {3}, {4}, {5}}, torch::kInt32).to(cuda_i32);
+    target.all_probs = torch::empty({3, 3, 8}, torch::TensorOptions().device(torch::kCUDA));
+    target.token_ids_are_point_mass = true;
+    speculative::SpeculativeSampler sampler(torch::Tensor(), 2);
+    for (int stochastic_row : {-1, 0, 1, 2}) {
+        for (const std::vector<bool>& forced :
+             {std::vector<bool>{false, false, false}, {true, true, true}, {true, false, false}, {false, true, true}}) {
+            int row = 0;
+            for (const auto& stream : streams) {
+                stream->generateConfig()->top_k = row == stochastic_row ? 2 : 1;
+                stream->generateConfig()->force_sp_accept = forced[row++];
+            }
+            auto output = sampler.forward(streams, draft, target);
+            std::vector<int32_t> expected_tokens, expected_lengths;
+            for (row = 0; row < 3; ++row) {
+                const bool accept_all = forced[row] || row == 1;
+                expected_lengths.push_back(accept_all ? 3 : 1);
+                const std::vector<int32_t> tokens = accept_all ? std::vector<int32_t>{1, 2, 5} :
+                                                               std::vector<int32_t>{3, 0, 0};
+                expected_tokens.insert(expected_tokens.end(), tokens.begin(), tokens.end());
+            }
+            EXPECT_EQ(expected_tokens, toVec<int32_t>(output.accept_tokens));
+            EXPECT_EQ(expected_lengths, toVec<int32_t>(output.accept_len));
+        }
+    }
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testCacheSnapshotFullBatchAndWidthFallbackPreserveEveryEntry) {
+    ModelConfig model_config;
+    model_config.max_seq_len = 2048;
+    model_config.vocab_size = 8;
+    model_config.num_layers = 1;
+    RuntimeConfig runtime_config;
+    ResourceContext resource_context;
+    auto first = createContextStream(model_config, runtime_config, resource_context, {1}, 1);
+    auto second = createContextStream(model_config, runtime_config, resource_context, {2}, 2);
+    first->setIsContextStream(false);
+    second->setIsContextStream(false);
+    SpeculativeExecutionConfig speculative;
+    speculative.gen_num_per_cycle = 3;
+    TestableMtpBatchStreamProcessor processor(
+        model_config, PDSepConfig{}, ProfilingDebugLoggingConfig{}, makeProcessorCacheConfig(), speculative, false);
+    const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    const auto pinned_i32 = torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true);
+
+    // Identical widths use direct device concatenation when enabled. Wider
+    // destinations and distinct snapshot widths must retain all host padding.
+    for (int mode : {0, 1, 2}) {
+        GptModelInputs input;
+        input.kv_cache_block_id = torch::full({2, 2, mode == 0 ? 3 : 5}, -7, pinned_i32);
+        input.kv_cache_kernel_block_id = torch::full({2, 2, mode == 0 ? 4 : 7}, -9, pinned_i32);
+        auto expected_physical = input.kv_cache_block_id.clone();
+        auto expected_kernel = input.kv_cache_kernel_block_id.clone();
+        std::vector<GenerateStreamPtr> streams{first, second};
+        for (int row = 0; row < 2; ++row) {
+            int physical_width = mode == 2 && row == 1 ? 4 : 3;
+            int kernel_width = mode == 2 && row == 1 ? 6 : 4;
+            auto physical = (torch::arange(2 * physical_width, torch::kInt32) + 100 * (row + 1))
+                                .reshape({2, 1, physical_width});
+            auto kernel = (torch::arange(2 * kernel_width, torch::kInt32) + 1000 * (row + 1))
+                              .reshape({2, 1, kernel_width});
+            expected_physical.narrow(1, row, 1).narrow(2, 0, physical_width).copy_(physical);
+            expected_kernel.narrow(1, row, 1).narrow(2, 0, kernel_width).copy_(kernel);
+            GenerateStream::MtpAsyncDeviceState state;
+            state.next_kv_cache_block_id_gpu = physical.to(cuda_i32);
+            state.next_kv_cache_kernel_block_id_gpu = kernel.to(cuda_i32);
+            streams[row]->setMtpAsyncDeviceState(std::move(state));
+        }
+        TensorHolder holder;
+        processor.overlayMtpCacheSnapshots(StreamGroups({first, second}), input, holder);
+        EXPECT_TRUE(torch::equal(input.kv_cache_block_id.cpu(), expected_physical)) << "mode=" << mode;
+        EXPECT_TRUE(torch::equal(input.kv_cache_kernel_block_id.cpu(), expected_kernel)) << "mode=" << mode;
+    }
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testPrefillShiftsMultimodalMaskAndPackedLocations) {
