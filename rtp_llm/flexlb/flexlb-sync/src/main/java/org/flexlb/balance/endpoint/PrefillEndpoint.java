@@ -10,6 +10,7 @@ import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.balance.scheduler.EndpointEventProjector;
 import org.flexlb.balance.scheduler.PlacementAvailability;
+import org.flexlb.balance.scheduler.RequestExecution;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.balance.scheduler.WorkerBatcher;
 import org.flexlb.config.DispatcherConfig;
@@ -322,18 +323,17 @@ public class PrefillEndpoint extends WorkerEndpoint {
     }
 
     /** Exact counterpart cleanup; stale item generations are a no-op. */
-    public boolean releaseCommittedItem(ScheduledRequest exactItem) {
+    public boolean releaseCommittedItem(RequestExecution exactItem) {
         return prefillState.terminalizeCommittedItem(exactItem);
     }
 
-    /** End the exact failed member, whether still queued or committed to a batch. */
-    public void settleFailedRequest(ScheduledRequest exactItem) {
-        removeQueued(exactItem, "REQUEST_FAILED");
+    /** End the exact failed committed member; queued items are removed by their scheduler owner. */
+    public void settleFailedRequest(RequestExecution exactItem) {
         releaseCommittedItem(exactItem);
     }
 
     /** Expire an exact local committed lease without claiming Engine completion. */
-    public boolean expireCommittedItem(ScheduledRequest exactItem) {
+    public boolean expireCommittedItem(RequestExecution exactItem) {
         return prefillState.terminalizeCommittedItem(exactItem);
     }
 
@@ -444,7 +444,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
     }
 
     /** Re-estimate surviving members, using the default formula if the configured predictor fails. */
-    private long predictRepackedBatchMs(List<ScheduledRequest> survivingRequests) {
+    private long predictRepackedBatchMs(List<RequestExecution> survivingRequests) {
         PrefillBatchFeatures features = PrefillBatchFeatures.from(
                 survivingRequests,
                 item -> Math.max(0L, item.seqLen()),

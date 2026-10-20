@@ -108,11 +108,11 @@ final class RequestLifecycleTestSupport {
 
     // State-only fixtures deliberately seed a phase without executing publication or timers.
     static void startRouteDelivery(RequestSlot slot) {
-        assertNotNull(slot.claimDelivery(slot.activeItem(), DeliveryClaimKind.ROUTE_DECISION, 0L, () -> true));
+        assertNotNull(slot.claimDelivery(slot.scheduledItem(), DeliveryClaimKind.ROUTE_DECISION, 0L, () -> true));
     }
 
     static void startBatchDelivery(RequestSlot slot, long batchId) {
-        assertNotNull(slot.claimDelivery(slot.activeItem(), DeliveryClaimKind.BATCH_ENQUEUE, batchId, () -> true));
+        assertNotNull(slot.claimDelivery(slot.scheduledItem(), DeliveryClaimKind.BATCH_ENQUEUE, batchId, () -> true));
     }
 
     static void markAcknowledged(RequestSlot slot) {

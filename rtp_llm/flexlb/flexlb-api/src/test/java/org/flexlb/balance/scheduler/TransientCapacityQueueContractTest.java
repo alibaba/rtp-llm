@@ -802,11 +802,11 @@ class TransientCapacityQueueContractTest {
             awaitCompletedResponses(admitted, 2, 2, TimeUnit.SECONDS);
             assertEquals(2, completedResponses(admitted));
 
-            List<ScheduledRequest> delivered = List.of(
+            List<RequestExecution> delivered = List.of(
                     fixture.runtime.activeItem(800L),
                     fixture.runtime.activeItem(801L));
             assertEquals(2, delivered.size());
-            for (ScheduledRequest item : delivered) {
+            for (RequestExecution item : delivered) {
                 assertTrue(item != null);
                 assertTrue(fixture.prefillEndpoint.releaseCommittedItem(item));
             }

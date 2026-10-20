@@ -80,6 +80,13 @@ public final class DeliveryStrategyTestSupport {
         Mockito.when(item.enqueuedAtMs()).thenReturn(enqueuedAtMs);
         Mockito.when(item.seqLen()).thenReturn(seqLen);
         Mockito.when(item.hitCache()).thenReturn(hitCache);
+        RequestExecution execution = Mockito.mock(RequestExecution.class);
+        Mockito.when(execution.requestId()).thenReturn(requestId);
+        Mockito.when(execution.priority()).thenReturn(priority);
+        Mockito.when(execution.enqueuedAtMs()).thenReturn(enqueuedAtMs);
+        Mockito.when(execution.seqLen()).thenReturn(seqLen);
+        Mockito.when(execution.hitCache()).thenReturn(hitCache);
+        Mockito.when(item.execution()).thenReturn(execution);
         return item;
     }
 

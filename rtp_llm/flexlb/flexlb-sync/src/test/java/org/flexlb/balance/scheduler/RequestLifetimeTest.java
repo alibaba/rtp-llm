@@ -203,7 +203,7 @@ class RequestLifetimeTest {
             assertTrue(fixture.slot.installDecisionDeadline(exact));
             var expiry = fixture.slot.onDecisionVisibilityDeadline(exact);
             assertTrue(expiry.needsConfirmation());
-            assertSame(fixture.item, expiry.item());
+            assertSame(fixture.item.execution(), expiry.item());
             assertTrue(fixture.slot.isLiveGeneration());
             assertFalse(fixture.slot.snapshot().state().isTerminal());
             assertTrue(fixture.slot.snapshot().detail().contains("SUSPECTED_LOST"));
@@ -305,7 +305,7 @@ class RequestLifetimeTest {
             assertEquals(RequestState.Phase.DISPATCHING, fixture.slot.snapshot().state());
             assertTrue(org.springframework.test.util.ReflectionTestUtils.<Boolean>invokeMethod(fixture.slot, "consumeInactivityDeadlineLocked", deadline));
             assertTrue(fixture.slot.inactivityDeadlineAtMs().isPresent());
-            assertSame(fixture.item, fixture.slot.activeItem());
+            assertSame(fixture.item.execution(), fixture.slot.activeItem());
         }
     }
 
@@ -368,7 +368,7 @@ class RequestLifetimeTest {
             EndpointEventProjector projector = new EndpointEventProjector(registry);
             if (evidenceSource == RoleType.PREFILL) {
                 projector.onPrefillStatus(prefill, RoleType.PREFILL,
-                        List.of(PrefillState.WorkerStatusFact.active(item)));
+                        List.of(PrefillState.WorkerStatusFact.active(item.execution())));
             } else {
                 projector.onDecodeStatus(decode, List.of(DecodeEndpoint.WorkerStatusFact.active(reservation)));
             }
@@ -438,7 +438,7 @@ class RequestLifetimeTest {
                 if (checks.incrementAndGet() == 1) {
                     // A matching status wins after the old timer fired but before cancellation.
                     org.springframework.test.util.ReflectionTestUtils.<RequestSlot.EngineObservation>invokeMethod(fixture.slot, "applyPrefillStatusLocked", fixture.item.prefillEp(), RoleType.PREFILL,
-                            PrefillState.WorkerStatusFact.active(fixture.item), start + 50L);
+                            PrefillState.WorkerStatusFact.active(fixture.item.execution()), start + 50L);
                     assertFalse(RequestLifecycleTestSupport.<Boolean>inspect(fixture.slot, "requestInactiveLocked", invocation.getArgument(1, Long.class)));
                     now.set(start + 150L);
                 } else {
@@ -471,7 +471,7 @@ class RequestLifetimeTest {
             var oldTimer = mock(ExpirationTimer.DecisionDeadline.class);
             when(oldTimer.deadlineAtMs()).thenReturn(oldDeadline);
             org.springframework.test.util.ReflectionTestUtils.<RequestSlot.EngineObservation>invokeMethod(fixture.slot, "applyPrefillStatusLocked", fixture.item.prefillEp(), RoleType.PREFILL,
-                    PrefillState.WorkerStatusFact.terminal(fixture.item,
+                    PrefillState.WorkerStatusFact.terminal(fixture.item.execution(),
                             PrefillState.WorkerStatusFact.Kind.COMPLETED, 0L), oldDeadline + 100L);
             assertFalse(fixture.slot.installDecisionDeadline(oldTimer));
             var handoffTimer = mock(ExpirationTimer.DecisionDeadline.class);
@@ -527,9 +527,9 @@ class RequestLifetimeTest {
 
     private static void observePrefillAt(Fixture fixture, boolean completed, long nowMs) {
         org.springframework.test.util.ReflectionTestUtils.<RequestSlot.EngineObservation>invokeMethod(fixture.slot, "applyPrefillStatusLocked", fixture.item.prefillEp(), RoleType.PREFILL,
-                completed ? PrefillState.WorkerStatusFact.terminal(fixture.item,
+                completed ? PrefillState.WorkerStatusFact.terminal(fixture.item.execution(),
                         PrefillState.WorkerStatusFact.Kind.COMPLETED, 0L)
-                        : PrefillState.WorkerStatusFact.active(fixture.item), nowMs);
+                        : PrefillState.WorkerStatusFact.active(fixture.item.execution()), nowMs);
     }
 
     private static Fixture fixture(boolean separateDecode) { return fixture(separateDecode, false); }
@@ -558,8 +558,8 @@ class RequestLifetimeTest {
 
     private static RequestSlot.EngineObservation observePrefill(RequestSlot slot, ScheduledRequest item, boolean completed) {
         return org.springframework.test.util.ReflectionTestUtils.<RequestSlot.EngineObservation>invokeMethod(slot, "applyPrefillStatusLocked", item.prefillEp(), RoleType.PREFILL,
-                completed ? PrefillState.WorkerStatusFact.terminal(item, PrefillState.WorkerStatusFact.Kind.COMPLETED, 0L)
-                        : PrefillState.WorkerStatusFact.active(item), System.currentTimeMillis());
+                completed ? PrefillState.WorkerStatusFact.terminal(item.execution(), PrefillState.WorkerStatusFact.Kind.COMPLETED, 0L)
+                        : PrefillState.WorkerStatusFact.active(item.execution()), System.currentTimeMillis());
     }
 
     private static void startPrediction(RequestSlot slot) {

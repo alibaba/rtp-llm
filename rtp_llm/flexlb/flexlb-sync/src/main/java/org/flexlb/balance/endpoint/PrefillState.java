@@ -4,6 +4,7 @@ import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.prediction.PrefillBatchFeatures;
 import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.projection.WorkSnapshot.Phase;
+import org.flexlb.balance.scheduler.RequestExecution;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
@@ -60,7 +61,7 @@ public final class PrefillState {
     }
 
     public record WorkerStatusFact(
-            ScheduledRequest item,
+            RequestExecution item,
             Kind kind,
             long errorCode) {
         public WorkerStatusFact {
@@ -72,12 +73,12 @@ public final class PrefillState {
             }
         }
 
-        public static WorkerStatusFact active(ScheduledRequest item) {
+        public static WorkerStatusFact active(RequestExecution item) {
             return new WorkerStatusFact(item, Kind.ACTIVE, 0L);
         }
 
         public static WorkerStatusFact terminal(
-                ScheduledRequest item, Kind kind, long errorCode) {
+                RequestExecution item, Kind kind, long errorCode) {
             if (kind == Kind.ACTIVE) {
                 throw new IllegalArgumentException(
                         "terminal Prefill fact requires a terminal kind");
@@ -116,7 +117,7 @@ public final class PrefillState {
     }
 
     public record Retirement(
-            List<ScheduledRequest> ownedItems,
+            List<RequestExecution> ownedItems,
             List<BatchCompletion> batchCompletions,
             Throwable invariantFailure) {
         public Retirement {
@@ -424,7 +425,7 @@ public final class PrefillState {
         private long lastObservedAtMs;
         private BatchWork batchWork;
         /** Canonical callback identity after admission commits. */
-        private ScheduledRequest committedItem;
+        private RequestExecution committedItem;
         private Reservation reservation;
         private RequestEntry(ScheduledRequest item) {
             this(item, QueueMembership.WAITING);
@@ -454,7 +455,7 @@ public final class PrefillState {
             remainingWorkMs = lease.predictedWorkMs;
             phaseBaseMs = nowMs;
             lastObservedAtMs = nowMs;
-            committedItem = activeItem;
+            committedItem = activeItem.execution();
             activeItem = null;
             queueMembership = QueueMembership.UNINDEXED;
             individualPhase = Phase.COMMITTED;
@@ -466,7 +467,7 @@ public final class PrefillState {
                         "request is not an ACTIVE batch member request_id=" + requestId);
             }
             batchWork = work;
-            committedItem = activeItem;
+            committedItem = activeItem.execution();
             reservation = null;
             activeItem = null;
             queueMembership = QueueMembership.UNINDEXED;
@@ -711,8 +712,8 @@ public final class PrefillState {
                 long[] updatedCounts = new long[PriorityNormalizer.MAX_PRIORITY + 1];
                 updatedCounts[0] = unknownEngineRequestCount;
                 for (RequestEntry entry : requests.values()) {
-                    ScheduledRequest item = entry.activeItem != null ? entry.activeItem : entry.committedItem;
-                    int occupant = item == null ? 0 : item.priority();
+                    int occupant = entry.activeItem != null ? entry.activeItem.priority()
+                            : entry.committedItem == null ? 0 : entry.committedItem.priority();
                     updatedCounts[occupant > 0 && occupant <= PriorityNormalizer.MAX_PRIORITY ? occupant : 0]++;
                 }
                 requestCountsByPriority = updatedCounts;
@@ -1140,10 +1141,10 @@ public final class PrefillState {
     }
 
     /**
-     * Total counterpart cleanup bound to one exact committed ScheduledRequest. A
+     * Total counterpart cleanup bound to one exact committed execution. A
      * reused request id or an ACTIVE item is a no-op.
      */
-    public boolean terminalizeCommittedItem(ScheduledRequest exactItem) {
+    public boolean terminalizeCommittedItem(RequestExecution exactItem) {
         boolean capacityReleased = false;
         lock.lock();
         try {
@@ -1171,7 +1172,7 @@ public final class PrefillState {
      */
     public StatusReconciliation reconcileWorkerStatus(
             WorkerStatus.StatusObservation observation,
-            ToLongFunction<List<ScheduledRequest>> repredictor,
+            ToLongFunction<List<RequestExecution>> repredictor,
             Runnable committedPublication,
             Runnable failedReduction) {
         return reconcileEngineStatus(
@@ -1295,7 +1296,7 @@ public final class PrefillState {
             Set<BatchReduction> changedBatches,
             Map<Long, TerminalObservation> terminals,
             IdentityHashMap<BatchWork, Phase> batchPhases,
-            ToLongFunction<List<ScheduledRequest>> repredictor,
+            ToLongFunction<List<RequestExecution>> repredictor,
             IdentityHashMap<BatchWork, Long> predictions) {
         requireLock();
         for (BatchReduction reduction : changedBatches) {
@@ -1304,7 +1305,7 @@ public final class PrefillState {
                     || batchPhases.get(batch) == Phase.ENGINE_RUNNING) {
                 continue;
             }
-            List<ScheduledRequest> survivors = new ArrayList<>(
+            List<RequestExecution> survivors = new ArrayList<>(
                     reduction.members.size());
             boolean executionObserved = false;
             for (RequestEntry member : reduction.members) {
@@ -1319,8 +1320,8 @@ public final class PrefillState {
             if (executionObserved || survivors.isEmpty()) {
                 continue;
             }
-            survivors.sort(Comparator.comparingLong(ScheduledRequest::enqueueSeq)
-                    .thenComparingLong(ScheduledRequest::requestId));
+            survivors.sort(Comparator.comparingLong(RequestExecution::enqueueSeq)
+                    .thenComparingLong(RequestExecution::requestId));
             long prediction = repredictor.applyAsLong(survivors);
             predictions.put(batch, prediction);
         }
@@ -1375,7 +1376,7 @@ public final class PrefillState {
     private StatusReconciliation reconcileEngineStatus(
             WorkerStatus.EngineObservation engine,
             Map<String, WorkerStatus.TaskObservation> finishedTasks,
-            ToLongFunction<List<ScheduledRequest>> repredictor,
+            ToLongFunction<List<RequestExecution>> repredictor,
             Runnable committedPublication,
             Runnable failedReduction) {
         boolean capacityReleased = false;
@@ -1511,7 +1512,7 @@ public final class PrefillState {
      * endpoint close total if that earlier invariant check failed.</p>
      */
     public Retirement retireGenerationOwnership() {
-        List<ScheduledRequest> ownedItems = new ArrayList<>();
+        List<RequestExecution> ownedItems = new ArrayList<>();
         List<BatchCompletion> completions = new ArrayList<>();
         List<EndpointGenerationLifecycle.HandoffPermit> orphanedHandoffs =
                 new ArrayList<>();
@@ -1532,15 +1533,16 @@ public final class PrefillState {
                             invariantFailure,
                             "request table key does not match request entry");
                 }
-                ScheduledRequest item = entry.isActive() ? entry.activeItem : entry.committedItem;
+                RequestExecution item = entry.isActive()
+                        ? entry.activeItem.execution() : entry.committedItem;
                 if (item == null) {
                     invariantFailure = appendRetirementInvariant(invariantFailure,
-                            "retirement owner has no ScheduledRequest request_id=" + entry.requestId);
+                            "retirement owner has no execution request_id=" + entry.requestId);
                 } else {
                     ownedItems.add(item);
                     if (entry.isActive() && entry.queueMembership == QueueMembership.WAITING) {
-                        canonicalActive.add(item);
-                    } else if (activeIndex.contains(item)) {
+                        canonicalActive.add(entry.activeItem);
+                    } else if (entry.activeItem != null && activeIndex.contains(entry.activeItem)) {
                         invariantFailure = appendRetirementInvariant(invariantFailure,
                                 "unindexed owner remains in waiting index request_id=" + entry.requestId);
                     }
@@ -1619,8 +1621,8 @@ public final class PrefillState {
             for (BatchWork batch : batches) {
                 completions.add(batch.retirementCompletion());
             }
-            ownedItems.sort(Comparator.comparingLong(ScheduledRequest::enqueueSeq)
-                    .thenComparingLong(ScheduledRequest::requestId));
+            ownedItems.sort(Comparator.comparingLong(RequestExecution::enqueueSeq)
+                    .thenComparingLong(RequestExecution::requestId));
             completions.sort(Comparator.comparingLong(BatchCompletion::batchId));
             plannedRetirement = new Retirement(
                     ownedItems,
