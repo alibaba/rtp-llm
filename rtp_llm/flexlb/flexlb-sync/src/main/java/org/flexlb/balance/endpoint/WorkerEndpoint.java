@@ -1,7 +1,7 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.util.Failures;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.util.Failures;
 
 import java.util.Objects;
 import java.util.OptionalLong;

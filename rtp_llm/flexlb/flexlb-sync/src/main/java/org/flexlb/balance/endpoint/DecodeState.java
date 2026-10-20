@@ -1,11 +1,7 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.endpoint.DecodeResources.AdmissionCapacity;
 import org.flexlb.balance.endpoint.DecodeResources.Acquisition;
-import org.flexlb.balance.endpoint.DecodeResources.ResourceChange;
-import org.flexlb.balance.endpoint.DecodeResources.ReserveStatus;
-import org.flexlb.balance.endpoint.DecodeResources.MutationStatus;
-import org.flexlb.balance.endpoint.DecodeResources.Ownership;
+import org.flexlb.balance.endpoint.DecodeResources.AdmissionCapacity;
 import org.flexlb.balance.endpoint.DecodeResources.CapacityRelease;
 import org.flexlb.balance.endpoint.DecodeResources.CapacityUsage;
 import org.flexlb.balance.endpoint.DecodeResources.DecodeRequestStatus;
@@ -14,11 +10,15 @@ import org.flexlb.balance.endpoint.DecodeResources.DecodeRoutingView;
 import org.flexlb.balance.endpoint.DecodeResources.DispatchOutcome;
 import org.flexlb.balance.endpoint.DecodeResources.EngineDispatchPermitAcquireStatus;
 import org.flexlb.balance.endpoint.DecodeResources.EngineDispatchPermitTransferStatus;
+import org.flexlb.balance.endpoint.DecodeResources.MutationStatus;
+import org.flexlb.balance.endpoint.DecodeResources.Ownership;
 import org.flexlb.balance.endpoint.DecodeResources.PreemptionBeginResult;
 import org.flexlb.balance.endpoint.DecodeResources.PreemptionUpdate;
 import org.flexlb.balance.endpoint.DecodeResources.ReleaseReason;
 import org.flexlb.balance.endpoint.DecodeResources.ReservationHandle;
 import org.flexlb.balance.endpoint.DecodeResources.ReservationReleaseResult;
+import org.flexlb.balance.endpoint.DecodeResources.ReserveStatus;
+import org.flexlb.balance.endpoint.DecodeResources.ResourceChange;
 import org.flexlb.balance.endpoint.DecodeResources.ResourceSnapshot;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.enums.DecodeTaskPhase;
