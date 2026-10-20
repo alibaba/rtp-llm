@@ -145,7 +145,7 @@ def run_case(rank, prefixes, lengths, producer):
     cache.begin_forward(fmha)
     pipeline = cache.kv_prefetch
     assert pipeline.registered == (
-        os.environ.get("RTP_LLM_CP_KV_REGISTERED", "0") == "1"
+        os.environ.get("RTP_LLM_CP_KV_REGISTERED", "1") == "1"
     )
     fmha._cross_layer_prefetch = pipeline
     compute = torch.cuda.current_stream()
@@ -459,7 +459,7 @@ def worker(rank, port):
     Path(os.environ["TEST_UNDECLARED_OUTPUTS_DIR"]).joinpath(
         f"prefetch_rank{rank}.json"
     ).write_text(json.dumps(results, indent=2))
-    if os.environ.get("RTP_LLM_CP_KV_REGISTERED", "0") == "1":
+    if os.environ.get("RTP_LLM_CP_KV_REGISTERED", "1") == "1":
         check_registered_buffer_growth(rank, producer)
     if os.environ.get("RTP_LLM_CP_INDEXER_REGISTERED", "0") == "1":
         check_registered_indexer(rank, producer)

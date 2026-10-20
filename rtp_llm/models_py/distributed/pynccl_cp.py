@@ -359,7 +359,7 @@ def registered_kv_overlap_buffers(rows, width, dtype, device, group):
     the persistent history stream. Crossing a power-of-two capacity boundary
     synchronizes the owner and releases its old pool; steady reuse does neither.
     """
-    if os.environ.get("RTP_LLM_CP_KV_REGISTERED", "0") != "1" or rows == 0:
+    if os.environ.get("RTP_LLM_CP_KV_REGISTERED", "1") != "1" or rows == 0:
         return None
     process_group = _resolve_process_group(group)
     comm_key = _comm_key(process_group, device)

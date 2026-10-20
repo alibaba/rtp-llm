@@ -452,7 +452,7 @@ class GenericMoeDecoderLayer(nn.Module):
         self._drain_pinned_mla_before_moe = (
             (
                 os.environ.get("RTP_LLM_DSA_MLA_DRAIN_BEFORE_MOE", "1") == "1"
-                or os.environ.get("RTP_LLM_CP_KV_CROSS_LAYER", "0") == "1"
+                or os.environ.get("RTP_LLM_CP_KV_CROSS_LAYER", "1") == "1"
             )
             and layer_idx in config.moe_layer_index
             and str(moe_config.moe_strategy).startswith("mega_moe")

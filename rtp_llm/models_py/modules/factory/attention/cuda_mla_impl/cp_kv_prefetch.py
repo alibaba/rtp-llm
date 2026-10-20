@@ -108,7 +108,7 @@ class CrossLayerKvPrefetch:
         # Each request's actual count is <= its padded count. Equal totals
         # therefore prove a dense identity layout without a GPU-side check.
         self.history_is_dense = (
-            os.environ.get("RTP_LLM_CP_KV_INDEX_OPT", "0") == "1"
+            os.environ.get("RTP_LLM_CP_KV_INDEX_OPT", "1") == "1"
             and plan["history_actual"] == plan["history_padded"]
         )
         self.actual = (

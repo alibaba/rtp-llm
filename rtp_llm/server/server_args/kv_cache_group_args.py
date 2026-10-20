@@ -404,7 +404,7 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         env_name="ENABLE_TIERED_MEMORY_CACHE",
         bind_to=(kv_cache_config, "enable_tiered_memory_cache"),
         type=str2bool,
-        default=False,
+        default=True,
         help="分层 cache 开关。开启后，stream 释放时只全量写 remote，再按 GPU 空闲 block 阈值将冷 block 淘汰到 memory。",
     )
     kv_cache_group.add_argument(
