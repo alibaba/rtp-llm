@@ -328,8 +328,8 @@ class EngineSyncRunnerTest {
         Mockito.doReturn(secondEndpoint)
                 .when(registry)
                 .get(RoleType.PREFILL, second.getIpPort(), second);
-        when(firstEndpoint.getLoadMetric()).thenReturn(OptionalLong.of(10L));
-        when(secondEndpoint.getLoadMetric()).thenReturn(OptionalLong.empty());
+        when(firstEndpoint.tryGetLoadMetric()).thenReturn(OptionalLong.of(10L));
+        when(secondEndpoint.tryGetLoadMetric()).thenReturn(OptionalLong.empty());
 
         EngineSyncRunner runner = varianceRunner(directory);
 
@@ -363,8 +363,8 @@ class EngineSyncRunnerTest {
         Mockito.doReturn(secondEndpoint)
                 .when(registry)
                 .get(RoleType.PREFILL, second.getIpPort(), second);
-        when(firstEndpoint.getLoadMetric()).thenReturn(OptionalLong.of(10L));
-        when(secondEndpoint.getLoadMetric()).thenReturn(OptionalLong.of(30L));
+        when(firstEndpoint.tryGetLoadMetric()).thenReturn(OptionalLong.of(10L));
+        when(secondEndpoint.tryGetLoadMetric()).thenReturn(OptionalLong.of(30L));
 
         EngineSyncRunner runner = varianceRunner(directory);
 

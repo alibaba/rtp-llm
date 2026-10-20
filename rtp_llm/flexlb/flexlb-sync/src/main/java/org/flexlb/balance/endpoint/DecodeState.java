@@ -992,6 +992,17 @@ final class DecodeState {
 
     record CleanupResult(int expiredReservations, boolean capacityReleased) {}
 
+    java.util.OptionalLong tryLoadMetric() {
+        if (!admissionLock.tryLock()) {
+            return java.util.OptionalLong.empty();
+        }
+        try {
+            return java.util.OptionalLong.of(confirmedEngineOwnedCount + reservedUsage.requests);
+        } finally {
+            admissionLock.unlock();
+        }
+    }
+
     DecodeRoutingView routingView(String address) {
         DecodeRoutingView cached = routingViewCache;
         if (cached != null
