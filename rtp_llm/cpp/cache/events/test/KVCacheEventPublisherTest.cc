@@ -7,6 +7,7 @@
 #include <condition_variable>
 #include <gtest/gtest.h>
 #include <mutex>
+#include <rapidjson/document.h>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -235,10 +236,9 @@ KVCacheEventPublisherContext makeContext() {
     context.host_ip_port      = "127.0.0.1:9000";
     context.model_name        = "test_model";
     context.dtype             = "BF16";
-    context.spec_name         = "rtp_llm_hbm_64";
-    context.location_uri      = "rtp-llm://127.0.0.1:9000/hbm";
+    context.specs = {{"rtp_llm_hbm_64_full", "event_report://127.0.0.1:9000/hbm?size=4096", 4096},
+                     {"rtp_llm_hbm_64_tail", "event_report://127.0.0.1:9000/hbm?size=1024", 1024}};
     context.block_size_tokens = 64;
-    context.spec_size_bytes   = 4096;
     context.tp_size           = 2;
     context.dp_size           = 1;
     return context;
@@ -342,7 +342,7 @@ TEST(KVCacheEventPublisherTest, SnapshotBackoffIsCappedAndKeepsHeartbeatsRunning
     reporter->replyNextBodyContaining("EVENT_BLOCK_SNAPSHOT",
         R"({"header":{"status":{"code":"SNAPSHOT_RATE_LIMITED"}},"retry_after_ms":"18446744073709551615"})",
         true);
-    KVCMPublisher publisher(config, makeContext(), [] { return KVCacheSnapshot{1, {11}}; }, reporter);
+    KVCMPublisher publisher(config, makeContext(), [] { return KVCacheSnapshot{1, {{11, {0}}}}; }, reporter);
     ASSERT_TRUE(publisher.start());
     ASSERT_TRUE(reporter->waitForBodyCount("EVENT_BLOCK_SNAPSHOT", 2, kAsyncTestTimeout));
     ASSERT_TRUE(waitForState(publisher, PublisherState::READY, kAsyncTestTimeout));
@@ -472,14 +472,14 @@ TEST(KVCacheEventPublisherTest, KVCMPublisherRegistersSnapshotsAndReportsDeltas)
         config,
         makeContext(),
         [] {
-            return KVCacheSnapshot{7, {10, 20}};
+            return KVCacheSnapshot{7, {{10, {0, 1}}, {20, {0}}}};
         },
         reporter);
 
     ASSERT_TRUE(publisher->start());
     ASSERT_TRUE(reporter->waitForBody("EVENT_BLOCK_SNAPSHOT", kAsyncTestTimeout));
-    EXPECT_EQ(PublishResult::ACCEPTED, publisher->tryPublish({KVCacheEventType::BLOCK_ADD, 30, 0}));
-    EXPECT_EQ(PublishResult::ACCEPTED, publisher->tryPublish({KVCacheEventType::BLOCK_DELETE, 10, 0}));
+    EXPECT_EQ(PublishResult::ACCEPTED, publisher->tryPublish({KVCacheEventType::BLOCK_ADD, 30, 1}));
+    EXPECT_EQ(PublishResult::ACCEPTED, publisher->tryPublish({KVCacheEventType::BLOCK_DELETE, 10, 1}));
     ASSERT_TRUE(reporter->waitForBody("\"block_key\":\"30\"", kAsyncTestTimeout));
 
     reporter->failNextBodyContaining("EVENT_BLOCK_ADD");
@@ -494,6 +494,15 @@ TEST(KVCacheEventPublisherTest, KVCMPublisherRegistersSnapshotsAndReportsDeltas)
     EXPECT_NE(std::string::npos, requests.front().body.find("rtp_llm_hbm_64"));
     EXPECT_NE(std::string::npos, requests.front().body.find("location_spec_groups"));
     EXPECT_EQ(1, countOccurrences(requests.front().body, "\"dtype\""));
+    rapidjson::Document registration;
+    registration.Parse(requests.front().body.c_str());
+    ASSERT_FALSE(registration.HasParseError());
+    ASSERT_EQ(registration["location_spec_infos"].Size(), 2u);
+    EXPECT_STREQ(registration["location_spec_infos"][0]["name"].GetString(), "rtp_llm_hbm_64_full");
+    EXPECT_EQ(registration["location_spec_infos"][0]["size"].GetInt64(), 4096);
+    EXPECT_STREQ(registration["location_spec_infos"][1]["name"].GetString(), "rtp_llm_hbm_64_tail");
+    EXPECT_EQ(registration["location_spec_infos"][1]["size"].GetInt64(), 1024);
+    EXPECT_EQ(registration["location_spec_groups"][0]["spec_names"].Size(), 2u);
 
     bool   saw_node_register = false;
     bool   saw_snapshot      = false;
@@ -502,6 +511,26 @@ TEST(KVCacheEventPublisherTest, KVCMPublisherRegistersSnapshotsAndReportsDeltas)
     bool   saw_delete        = false;
     size_t host_down_count   = 0;
     for (const auto& request : requests) {
+        if (request.route == "/api/reportEvent") {
+            rapidjson::Document report;
+            report.Parse(request.body.c_str());
+            ASSERT_FALSE(report.HasParseError());
+            for (const auto& event : report["events"].GetArray()) {
+                if (event.HasMember("block_snapshot")) {
+                    const auto& blocks = event["block_snapshot"]["blocks"];
+                    ASSERT_EQ(blocks.Size(), 2u);
+                    EXPECT_STREQ(blocks[0]["block_key"].GetString(), "10");
+                    ASSERT_EQ(blocks[0]["specs"].Size(), 2u);
+                    EXPECT_STREQ(blocks[0]["specs"][0]["name"].GetString(), "rtp_llm_hbm_64_full");
+                    EXPECT_STREQ(blocks[0]["specs"][1]["name"].GetString(), "rtp_llm_hbm_64_tail");
+                    EXPECT_EQ(blocks[1]["specs"].Size(), 1u);
+                } else if (event.HasMember("block_delete")) {
+                    const auto& names = event["block_delete"]["spec_names"];
+                    ASSERT_EQ(names.Size(), 1u);
+                    EXPECT_STREQ(names[0].GetString(), "rtp_llm_hbm_64_tail");
+                }
+            }
+        }
         saw_node_register = saw_node_register || request.body.find("EVENT_NODE_REGISTER") != std::string::npos;
         saw_snapshot      = saw_snapshot || request.body.find("EVENT_BLOCK_SNAPSHOT") != std::string::npos;
         saw_snapshot_item =
@@ -536,7 +565,7 @@ TEST(KVCacheEventPublisherTest, KVCMPublisherRecoversFromRegistrationFailure) {
         config,
         makeContext(),
         [] {
-            return KVCacheSnapshot{1, {10}};
+            return KVCacheSnapshot{1, {{10, {0}}}};
         },
         reporter);
 
@@ -565,7 +594,7 @@ TEST(KVCacheEventPublisherTest, KVCMPublisherRecoversFromSnapshotProviderFailure
             if (snapshot_attempts.fetch_add(1, std::memory_order_relaxed) == 0) {
                 throw std::runtime_error("injected snapshot failure");
             }
-            return KVCacheSnapshot{2, {10, 20}};
+            return KVCacheSnapshot{2, {{10, {0}}, {20, {0}}}};
         },
         reporter);
 
@@ -593,7 +622,7 @@ TEST(KVCacheEventPublisherTest, KVCMPublisherReusesSnapshotPayloadAndExponential
         config,
         makeContext(),
         [] {
-            return KVCacheSnapshot{1, {10, 20}};
+            return KVCacheSnapshot{1, {{10, {0}}, {20, {0}}}};
         },
         reporter);
 
@@ -636,7 +665,7 @@ TEST(KVCacheEventPublisherTest, KVCMPublisherHeartbeatsWhileSnapshotUploadKeepsF
         config,
         makeContext(),
         [] {
-            return KVCacheSnapshot{1, {10, 20}};
+            return KVCacheSnapshot{1, {{10, {0}}, {20, {0}}}};
         },
         reporter);
 
@@ -661,7 +690,7 @@ TEST(KVCacheEventPublisherTest, KVCMPublisherHeartbeatsWhileSnapshotUploadIsSlow
         config,
         makeContext(),
         [] {
-            return KVCacheSnapshot{1, {10, 20}};
+            return KVCacheSnapshot{1, {{10, {0}}, {20, {0}}}};
         },
         reporter);
 
@@ -698,7 +727,7 @@ TEST(KVCacheEventPublisherTest, KVCMPublisherPreservesMutationsCreatedWhileSnaps
         config,
         makeContext(),
         [] {
-            return KVCacheSnapshot{1, {10}};
+            return KVCacheSnapshot{1, {{10, {0}}}};
         },
         reporter);
 
@@ -711,13 +740,33 @@ TEST(KVCacheEventPublisherTest, KVCMPublisherPreservesMutationsCreatedWhileSnaps
         FAIL() << "periodic snapshot request did not reach the blocking reporter";
     }
 
-    EXPECT_EQ(PublishResult::ACCEPTED, publisher.tryPublish({KVCacheEventType::BLOCK_ADD, 20, 0}));
+    EXPECT_EQ(PublishResult::ACCEPTED, publisher.tryPublish({KVCacheEventType::BLOCK_ADD, 10, 1}));
+    EXPECT_EQ(PublishResult::ACCEPTED, publisher.tryPublish({KVCacheEventType::BLOCK_DELETE, 10, 0}));
     reporter->releaseSnapshot();
-    ASSERT_TRUE(reporter->waitForBodyCount("\"block_key\":\"20\"", 1, kAsyncTestTimeout));
+    ASSERT_TRUE(reporter->waitForBodyCount("EVENT_BLOCK_ADD", 1, kAsyncTestTimeout));
+    ASSERT_TRUE(reporter->waitForBodyCount("EVENT_BLOCK_DELETE", 1, kAsyncTestTimeout));
     publisher.stop();
+    for (const auto& request : reporter->requests()) {
+        rapidjson::Document report;
+        report.Parse(request.c_str());
+        ASSERT_FALSE(report.HasParseError());
+        if (!report.HasMember("events")) {
+            continue;
+        }
+        for (const auto& event : report["events"].GetArray()) {
+            if (event.HasMember("block_add")) {
+                EXPECT_STREQ(event["block_add"]["block_key"].GetString(), "10");
+                EXPECT_STREQ(event["block_add"]["specs"][0]["name"].GetString(), "rtp_llm_hbm_64_tail");
+            } else if (event.HasMember("block_delete")) {
+                EXPECT_STREQ(event["block_delete"]["block_key"].GetString(), "10");
+                ASSERT_EQ(event["block_delete"]["spec_names"].Size(), 1u);
+                EXPECT_STREQ(event["block_delete"]["spec_names"][0].GetString(), "rtp_llm_hbm_64_full");
+            }
+        }
+    }
 }
 
-TEST(KVCacheEventPublisherTest, KVCMPublisherCoalescesEachKeyToItsLastMutation) {
+TEST(KVCacheEventPublisherTest, KVCMPublisherCoalescesEachComponentToItsLastMutation) {
     KVCacheEventPublisherConfig config;
     config.queue_capacity        = 32;
     config.report_batch_size     = 16;
@@ -747,30 +796,48 @@ TEST(KVCacheEventPublisherTest, KVCMPublisherCoalescesEachKeyToItsLastMutation) 
 
     // KVCM applies all ADDs before all DELETEs within one request. Keeping both
     // transitions would make DELETE->ADD end deleted. The publisher must send
-    // only the final state for each key in this queued batch.
+    // only the final state for each (key, group) in this queued batch.
     EXPECT_EQ(PublishResult::ACCEPTED, publisher.tryPublish({KVCacheEventType::BLOCK_DELETE, 42, 0}));
     EXPECT_EQ(PublishResult::ACCEPTED, publisher.tryPublish({KVCacheEventType::BLOCK_ADD, 42, 0}));
     EXPECT_EQ(PublishResult::ACCEPTED, publisher.tryPublish({KVCacheEventType::BLOCK_ADD, 43, 0}));
     EXPECT_EQ(PublishResult::ACCEPTED, publisher.tryPublish({KVCacheEventType::BLOCK_DELETE, 43, 0}));
+    EXPECT_EQ(PublishResult::ACCEPTED, publisher.tryPublish({KVCacheEventType::BLOCK_ADD, 42, 1}));
+    EXPECT_EQ(PublishResult::ACCEPTED, publisher.tryPublish({KVCacheEventType::BLOCK_DELETE, 42, 1}));
+    EXPECT_EQ(PublishResult::ACCEPTED, publisher.tryPublish({KVCacheEventType::BLOCK_DELETE, 43, 1}));
+    EXPECT_EQ(PublishResult::ACCEPTED, publisher.tryPublish({KVCacheEventType::BLOCK_ADD, 43, 1}));
     reporter->releaseMutation();
 
     ASSERT_TRUE(reporter->waitForBodyCount("\"block_key\":\"42\"", 1, kAsyncTestTimeout));
     publisher.stop();
 
-    bool saw_final_add_42    = false;
-    bool saw_final_delete_43 = false;
+    size_t component_events = 0;
     for (const auto& request : reporter->requests()) {
-        if (request.find("\"block_key\":\"42\"") != std::string::npos) {
-            saw_final_add_42 = request.find("EVENT_BLOCK_ADD") != std::string::npos;
-            EXPECT_EQ(std::string::npos, request.find("\"block_delete\":{\"block_key\":\"42\""));
+        rapidjson::Document report;
+        report.Parse(request.c_str());
+        ASSERT_FALSE(report.HasParseError());
+        if (!report.HasMember("events")) {
+            continue;
         }
-        if (request.find("\"block_key\":\"43\"") != std::string::npos) {
-            saw_final_delete_43 = request.find("EVENT_BLOCK_DELETE") != std::string::npos;
-            EXPECT_EQ(std::string::npos, request.find("\"block_add\":{\"block_key\":\"43\""));
+        for (const auto& event : report["events"].GetArray()) {
+            const bool add = event.HasMember("block_add");
+            if (!add && !event.HasMember("block_delete")) {
+                continue;
+            }
+            const auto& mutation = event[add ? "block_add" : "block_delete"];
+            const std::string key = mutation["block_key"].GetString();
+            if (key == "999") {
+                continue;
+            }
+            ++component_events;
+            ASSERT_TRUE(key == "42" || key == "43");
+            const auto& specs = mutation[add ? "specs" : "spec_names"];
+            ASSERT_EQ(specs.Size(), 1u);
+            const auto* name = add ? specs[0]["name"].GetString() : specs[0].GetString();
+            const bool full = std::string(name) == "rtp_llm_hbm_64_full";
+            EXPECT_EQ(add, (key == "42") == full);
         }
     }
-    EXPECT_TRUE(saw_final_add_42);
-    EXPECT_TRUE(saw_final_delete_43);
+    EXPECT_EQ(component_events, 4u);
 }
 
 TEST(KVCacheEventPublisherTest, KVCMPublisherRecoversFromQueueOverflowWithSnapshot) {
@@ -788,7 +855,9 @@ TEST(KVCacheEventPublisherTest, KVCMPublisherRecoversFromQueueOverflowWithSnapsh
         config,
         makeContext(),
         [&snapshot_version] {
-            return KVCacheSnapshot{snapshot_version.load(std::memory_order_relaxed), {10, 20, 30, 31}};
+            const auto version = snapshot_version.load(std::memory_order_relaxed);
+            return KVCacheSnapshot{version, {{10, version == 1 ? std::vector<size_t>{0, 1} : std::vector<size_t>{1}},
+                                              {20, {0}}, {30, {0}}, {31, {0}}}};
         },
         reporter);
 
@@ -812,6 +881,26 @@ TEST(KVCacheEventPublisherTest, KVCMPublisherRecoversFromQueueOverflowWithSnapsh
     ASSERT_TRUE(reporter->waitForBodyCount("EVENT_BLOCK_SNAPSHOT", 2, kAsyncTestTimeout));
     publisher.stop();
     EXPECT_EQ(PublisherState::STOPPED, publisher.status().state);
+    size_t snapshots = 0;
+    for (const auto& request : reporter->requests()) {
+        if (request.find("EVENT_BLOCK_SNAPSHOT") == std::string::npos) {
+            continue;
+        }
+        rapidjson::Document report;
+        report.Parse(request.c_str());
+        ASSERT_FALSE(report.HasParseError());
+        const auto& blocks = report["events"][0]["block_snapshot"]["blocks"];
+        ASSERT_EQ(blocks.Size(), 4u);
+        EXPECT_STREQ(blocks[0]["block_key"].GetString(), "10");
+        const auto& specs = blocks[0]["specs"];
+        if (snapshots++ == 0) {
+            ASSERT_EQ(specs.Size(), 2u);
+        } else {
+            ASSERT_EQ(specs.Size(), 1u);
+            EXPECT_STREQ(specs[0]["name"].GetString(), "rtp_llm_hbm_64_tail");
+        }
+    }
+    EXPECT_EQ(snapshots, 2u);
 }
 
 }  // namespace
