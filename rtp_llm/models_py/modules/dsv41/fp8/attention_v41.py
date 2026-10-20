@@ -3032,11 +3032,6 @@ class AttentionV41FP8(AttentionFP8):
                 query_len=S,
                 compress_ratio=self.compress_ratio,
             )
-        visible_per_token = (
-            indexer_metadata.lengths
-            if indexer_metadata is not None
-            else (positions + 1) // self.compress_ratio
-        )
         config = self.v41_config
         candidate_source = int(config.get("candidate_source_layer_id", -1))
         candidate_blocks = int(config.get("candidate_topk_blocks", 0))
@@ -3066,7 +3061,9 @@ class AttentionV41FP8(AttentionFP8):
                     with record_function_range("dsv41.decode.sparse_mqa_plan"):
                         plan = sparse_decode.make_plan(
                             candidates,
-                            visible_per_token,
+                            # This branch requires ratio=1. Reused plans already
+                            # own the lengths; do not launch per-layer add/div.
+                            positions + 1,
                             keys.block_table,
                             query_len=S,
                         )
@@ -3088,6 +3085,12 @@ class AttentionV41FP8(AttentionFP8):
                     )
                 shared["topk"] = {self.layer_id: output}
                 return output
+        # The general scorer still needs causal lengths in compressed units.
+        visible_per_token = (
+            indexer_metadata.lengths
+            if indexer_metadata is not None
+            else (positions + 1) // self.compress_ratio
+        )
         if paged:
             if overlap is not None:
                 overlap.wait_global()
