@@ -10,10 +10,17 @@ Cross-attention state (Phase A):
   stores them in a slot pool keyed by the request's first KV-cache kernel
   block id (unique for the request's lifetime; prefill overwrites stale
   entries). Decode steps look the slot up by the same key.
-- Cross attention runs reference-exact eager math (q scaled right after
-  projection, matmul-softmax-matmul over all 1500 encoder positions with no
-  mask — whisper attends to padded silence too).
 - fp16 inf/nan clamp after every residual add, like modeling_whisper.py:635.
+
+Fused kernels (Phase C, whisper_fused_kernels.py):
+- Every residual add runs as one Triton kernel (add + fp16 nan_to_num guard,
+  bit-exact vs the eager pair) instead of the ATen add + nan_to_num launches.
+- Cross attention runs through a shared FlashInfer ragged-prefill runner
+  (non-causal, per-row K/V, sm_scale in the kernel) instead of the eager
+  matmul-softmax-matmul; each layer's per-row K/V are fused into one
+  contiguous ragged buffer per layer at prefill so decode reads them without
+  per-step copies. The eager reference math remains as the fallback for
+  non-CUDA devices, non-fp16 dtypes and FlashInfer failures.
 """
 
 import logging
@@ -31,6 +38,11 @@ from rtp_llm.models_py.model_desc.block_map import (
     select_fmha_impl_for_layer,
 )
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
+from rtp_llm.models_py.model_desc.whisper_fused_kernels import (
+    WhisperCrossAttnRaggedRunner,
+    fused_residual_clamp,
+    fuse_row_kv,
+)
 from rtp_llm.models_py.modules import (
     CausalAttention,
     DenseMLP,
@@ -47,11 +59,9 @@ logger = logging.getLogger(__name__)
 
 
 def _clamped_residual_add(residual: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
-    out = residual + x
-    if out.dtype == torch.float16:
-        clamp_value = torch.finfo(out.dtype).max - 1000
-        out = torch.nan_to_num(out, nan=clamp_value, posinf=clamp_value, neginf=-clamp_value)
-    return out
+    # Phase C: one Triton kernel replaces the ATen add + nan_to_num pair
+    # (bit-exact; eager fallback for non-fp16/CPU/non-contiguous inputs).
+    return fused_residual_clamp(residual, x)
 
 
 class WhisperCrossAttention(nn.Module):
@@ -65,6 +75,7 @@ class WhisperCrossAttention(nn.Module):
         layer_idx: int,
         quant_config: Optional[object] = None,
         hw_kernel_config: Optional["HWKernelConfig"] = None,
+        ragged_runner: Optional[WhisperCrossAttnRaggedRunner] = None,
     ):
         super().__init__()
         self.layer_idx = layer_idx
@@ -73,6 +84,9 @@ class WhisperCrossAttention(nn.Module):
         self.head_num = attn_config.head_num
         self.head_dim = attn_config.size_per_head
         self.scaling = self.head_dim**-0.5
+        # Shared FlashInfer ragged runner (one per model, planned once per
+        # forward by WhisperModel; None keeps the eager reference math).
+        self.ragged_runner = ragged_runner
         self.q_proj = LinearFactory.create_linear_from_weights(
             weights, W.cross_attn_q_w, None, W.cross_attn_q_b,
             quant_config=quant_config, hw_kernel_config=hw_kernel_config,
@@ -100,6 +114,17 @@ class WhisperCrossAttention(nn.Module):
         rows: List[Tuple[slice, Optional[Tuple[torch.Tensor, torch.Tensor]]]],
     ) -> torch.Tensor:
         """hidden_states [T, D] concatenated batch rows; rows carry per-row (k, v)."""
+        runner = self.ragged_runner
+        if runner is not None and runner.active:
+            # Phase C fused path: q goes in unscaled (the head_dim**-0.5
+            # softmax scale is the kernel's sm_scale), the shared plan covers
+            # this layer's rows, and text-only rows come back as zeros in
+            # assemble_output. Structure mismatch (None) falls through to
+            # the eager reference math below.
+            attn = runner.attention(self.layer_idx, rows, self.q_proj(hidden_states))
+            if attn is not None:
+                output = self.o_proj(attn)
+                return runner.assemble_output(output, hidden_states)
         outputs = []
         for row_slice, kv in rows:
             h = hidden_states[row_slice]
@@ -119,6 +144,14 @@ class WhisperCrossAttention(nn.Module):
             attn_output = torch.matmul(attn_weights, v)
             attn_output = attn_output.transpose(1, 2).reshape(tgt_len, -1)
             outputs.append(self.o_proj(attn_output))
+        # ATen has no single-input fast path: torch.cat over a one-element
+        # list still allocates and D2D-copies (32 memcpys per decode step at
+        # bs1, one per layer). Returning the tensor itself is value-identical
+        # (o_proj output / zeros_like are fresh, unaliased tensors and every
+        # downstream consumer — reduce_output, _clamped_residual_add,
+        # LayerNorm — is functional, never in-place).
+        if len(outputs) == 1:
+            return outputs[0]
         return torch.cat(outputs, dim=0)
 
     def reduce_output(self, output: torch.Tensor) -> torch.Tensor:
@@ -138,6 +171,7 @@ class WhisperDecoderLayer(nn.Module):
         weights: Dict[str, torch.Tensor],
         quant_config: Optional[object] = None,
         hw_kernel_config: Optional["HWKernelConfig"] = None,
+        ragged_runner: Optional[WhisperCrossAttnRaggedRunner] = None,
     ):
         super().__init__()
         attn_configs = config.getAttentionConfigs(parallelism_config.get_attn_tp_size())
@@ -147,7 +181,7 @@ class WhisperDecoderLayer(nn.Module):
         )
         self.encoder_attn = WhisperCrossAttention(
             attn_configs, parallelism_config, weights, layer_idx,
-            quant_config, hw_kernel_config,
+            quant_config, hw_kernel_config, ragged_runner,
         )
         self.mlp = DenseMLP(
             config.activation_type, parallelism_config, weights, quant_config, hw_kernel_config,
@@ -257,11 +291,18 @@ class WhisperModel(GptModelBase):
         self.positional_embedding = nn.Embedding.from_pretrained(
             pos_weight.clone().to(pos_weight.dtype), freeze=True
         )
+        # One ragged-prefill runner shared by all decoder layers (planned
+        # once per forward in WhisperModel.forward; the FlashInfer workspace
+        # is allocated lazily on the first CUDA forward).
+        attn_configs = config.getAttentionConfigs(parallelism_config.get_attn_tp_size())
+        self.cross_attn_runner: WhisperCrossAttnRaggedRunner = WhisperCrossAttnRaggedRunner(
+            attn_configs.head_num, attn_configs.size_per_head
+        )
         self.layers = nn.ModuleList(
             [
                 WhisperDecoderLayer(
                     config, parallelism_config, idx, weights.weights[idx],
-                    quant_config, py_hw_kernel_config,
+                    quant_config, py_hw_kernel_config, self.cross_attn_runner,
                 )
                 for idx in range(self.layer_num)
             ]
@@ -328,17 +369,30 @@ class WhisperModel(GptModelBase):
             row_encoder_hidden: List[Optional[torch.Tensor]] = [None] * len(row_slices)
             for feat_idx, (feat, row_idx) in enumerate(zip(features, row_of_feature)):
                 row_encoder_hidden[row_idx] = feat
-            # compute per-layer cross K/V per row, store into the pool for
-            # later decode steps, and build this forward's rows from the
-            # freshly computed tensors directly (the pool may evict under
-            # capacity pressure mid-batch — never read back what we just put).
+            # compute per-layer cross K/V per row; build this forward's rows
+            # from the freshly computed tensors directly (the pool may evict
+            # under capacity pressure mid-batch — never read back what we
+            # just put).
             row_layer_kvs: List[Optional[List[Tuple[torch.Tensor, torch.Tensor]]]] = [None] * len(row_slices)
             for row_idx, enc in enumerate(row_encoder_hidden):
                 if enc is None:
                     continue
-                layer_kvs = [layer.compute_cross_kv(enc) for layer in self.layers]
-                row_layer_kvs[row_idx] = layer_kvs
-                self.cross_kv_pool.put(first_blocks[row_idx], layer_kvs)
+                row_layer_kvs[row_idx] = [layer.compute_cross_kv(enc) for layer in self.layers]
+            # Phase C: fuse each layer's per-row K/V into one contiguous
+            # ragged buffer and keep per-row views into it. The ragged
+            # cross-attention runner reads the shared storage zero-copy, and
+            # so do later decode steps whose batch matches this prefill; the
+            # pool stores the views (identical values, same lifetime).
+            kv_row_indices = [r for r, kvs in enumerate(row_layer_kvs) if kvs is not None]
+            for layer_idx in range(self.layer_num):
+                pairs = [row_layer_kvs[r][layer_idx] for r in kv_row_indices]
+                if not pairs:
+                    continue
+                views, _, _ = fuse_row_kv(pairs)
+                for r, view in zip(kv_row_indices, views):
+                    row_layer_kvs[r][layer_idx] = view
+            for r in kv_row_indices:
+                self.cross_kv_pool.put(first_blocks[r], row_layer_kvs[r])
             per_layer_rows = []
             for layer_idx in range(self.layer_num):
                 rows = []
@@ -376,11 +430,21 @@ class WhisperModel(GptModelBase):
         hidden_states = self.embed_tokens(input_ids)
         if positions is not None and positions.numel() == input_ids.numel():
             positions = positions.to(device=hidden_states.device, dtype=torch.long)
-            hidden_states = hidden_states + self.positional_embedding(positions)
+            # Same Triton add as the residual path: the fp16 guard is a no-op
+            # for finite sums (embedding magnitudes are ~1e-2), so this is
+            # bit-identical to the reference ``embed + pos_embed`` fp16 add.
+            hidden_states = _clamped_residual_add(
+                hidden_states, self.positional_embedding(positions)
+            )
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
         attention_inputs = get_attention_inputs_value(inputs)
         per_layer_rows = self._prepare_cross_rows(inputs, attention_inputs)
+        # Plan the shared cross-attention ragged runner once from the row
+        # structure (identical for every layer); inactive (non-CUDA / no K/V
+        # rows / FlashInfer unavailable) leaves the eager path in place.
+        if per_layer_rows:
+            self.cross_attn_runner.begin_forward(per_layer_rows[0], hidden_states)
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
             layer_fmha_impl = select_fmha_impl_for_layer(fmha_impl, self.kv_cache, i)
             hidden_states = decoder_layer(
