@@ -282,6 +282,10 @@ public class PrefillEndpoint extends WorkerEndpoint {
                 exactItem, predictedMs);
     }
 
+    public boolean isRetired() {
+        return isGenerationRetiringOrRetired();
+    }
+
     /** Acquire the generation capability only for the final route commit. */
     public RouteCommitAdmission tryBeginRouteCommitAdmission() {
         EndpointGenerationLifecycle.HandoffPermit handoffPermit =

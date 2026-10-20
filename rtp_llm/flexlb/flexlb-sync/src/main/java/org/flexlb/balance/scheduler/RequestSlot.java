@@ -145,6 +145,12 @@ public final class RequestSlot {
      * finishAdmission clears this field and restores the original global queue entry after publication ends.
      */
     private ScheduledRequest itemWhoseWorkerStoppedDuringEnqueue;
+    /**
+     * Decode retired after the route claim but before the route was published. A retiring Decode keeps serving
+     * accepted requests for a grace period, so publish the route first and apply the retirement afterwards.
+     */
+    private DecodeEndpoint decodeRetiredDuringRouteClaim;
+    private DecodeEndpoint.ReservationHandle decodeReservationRetiredDuringRouteClaim;
 
     /** Storage/cleanup ownership; distinct from the public request lifecycle. */
     private SlotPhase slotPhase = SlotPhase.ACTIVE;
@@ -814,6 +820,14 @@ public final class RequestSlot {
     }
 
     void publishRoute(DeliveryClaim claim, WorkSnapshot work, long predictedMs) {
+        try {
+            publishRouteClaim(claim, work, predictedMs);
+        } finally {
+            replayDecodeRetirementDeferredByRouteClaim();
+        }
+    }
+
+    private void publishRouteClaim(DeliveryClaim claim, WorkSnapshot work, long predictedMs) {
         RequestEffect effect;
         DecisionDeadline obsolete;
         synchronized (this) {
@@ -825,6 +839,18 @@ public final class RequestSlot {
             effect = acknowledgeDeliveryLocked(claim.correlationId, null);
         }
         executeEngineObservationEffects(new EngineObservation(effect, obsolete));
+    }
+
+    private void replayDecodeRetirementDeferredByRouteClaim() {
+        DecodeEndpoint source;
+        DecodeEndpoint.ReservationHandle exact;
+        synchronized (this) {
+            source = decodeRetiredDuringRouteClaim;
+            exact = decodeReservationRetiredDuringRouteClaim;
+            decodeRetiredDuringRouteClaim = null;
+            decodeReservationRetiredDuringRouteClaim = null;
+        }
+        if (source != null) { recordDecodeRetirement(source, exact); }
     }
 
     private void completeDelivery(DeliveryClaim claim, DeliveryResult result) {
@@ -1208,6 +1234,13 @@ public final class RequestSlot {
         ScheduledRequest retiredRoute;
         synchronized (this) {
             if (ownsDecodeFactLocked(source, exact) && itemWhoseWorkerStoppedDuringEnqueue == item) {
+                return;
+            }
+            if (queueScheduling && ownsDecodeFactLocked(source, exact)
+                    && deliveryClaimKind == DeliveryClaimKind.ROUTE_DECISION
+                    && state == RequestState.Phase.DISPATCHING) {
+                decodeRetiredDuringRouteClaim = source;
+                decodeReservationRetiredDuringRouteClaim = exact;
                 return;
             }
             retiredRoute = queueScheduling && ownsDecodeFactLocked(source, exact)

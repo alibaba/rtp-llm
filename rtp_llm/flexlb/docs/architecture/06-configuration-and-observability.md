@@ -298,6 +298,12 @@ logger group `flexlb` 包含 `org.flexlb`、`flexlbLogger`、`syncLogger`、
 
 `/flexlb/update_log_level` 继续提供显式 HTTP 调级入口。
 
+`kvcm.log` 通过独立 `kvcmLogger` 记录每次收到的 KVCM 缓存查询响应，包含 requestId、
+查询目标和参数摘要、尝试序号、耗时，以及完整响应状态和节点列表；节点 `local/global`
+保留原始 block 数，包含零命中、重复和空名称节点，不做选路过滤。日志位于
+`flexlb.log.path`，沿用异步写入和按天/大小滚动：50MB、保留 5 天、总量 4GB。
+未收到响应的传输异常沿用现有异常处理和监控。
+
 ### 请求 PV 与回放
 
 gRPC Schedule 在校验请求 ID 前创建基础上下文，记录入口时间、请求大小和 arrival。

@@ -157,7 +157,7 @@ public class KvcmGrpcClient {
                 }
                 Map<String, org.flexlb.dao.cache.HostCacheMatch> result = queryOnce(
                         config, queryDeadline, requestId, blockCacheKeys, namespace, queryType,
-                        roleType, group, attemptIndex > 0);
+                        roleType, group, attemptIndex + 1);
                 recordQuerySuccess();
                 return result;
             } catch (RuntimeException failure) {
@@ -183,7 +183,7 @@ public class KvcmGrpcClient {
             QueryType queryType,
             RoleType roleType,
             String group,
-            boolean retry) {
+            int attempt) {
         GrpcTarget currentLeader = leaderResolver.resolve();
         if (currentLeader == null) {
             requestImmediateRefresh();
@@ -221,11 +221,13 @@ public class KvcmGrpcClient {
                         "KVCM_GET_HOST_CACHE_STATE",
                         TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startTimeNanos),
                         responseBytes,
-                        retry);
+                        attempt > 1);
             } catch (RuntimeException error) {
                 log.warn("Failed to report KVCM gRPC call metrics", error);
             }
         }
+        KvcmQueryLogger.logResponse(request, response, currentLeader, roleType, group, attempt,
+                TimeUnit.NANOSECONDS.toMicros(System.nanoTime() - startTimeNanos));
         ErrorCode code = response.getHeader().getStatus().getCode();
         if (code != ErrorCode.OK) {
             requestImmediateRefresh();

@@ -20,6 +20,7 @@ import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -204,6 +205,26 @@ class RouteDeliveryStrategyTest {
         assertSame(CapacityBoundary.OWNERSHIP_LOST,
                 fixture.context.emptyBoundary().result());
         assertTrue(fixture.slots.prepared().isEmpty());
+    }
+
+    @Test
+    void retiredPrefillFailsHeadBeforeTakingDecodePermit() {
+        Fixture fixture = new Fixture();
+        ScheduledRequest head = fixture.item(1L);
+        when(fixture.capabilities.prefill().isRetired()).thenReturn(true);
+
+        String result = fixture.context.deliver(
+                fixture.strategy, List.of(head),
+                "prefill-retired", 0, OptionalLong.empty());
+
+        assertEquals("BOUNDARY", result);
+        assertSame(head, fixture.context.emptyBoundary().item());
+        assertEquals(CapacityBoundary.Status.FAILED,
+                fixture.context.emptyBoundary().result().status());
+        assertInstanceOf(EndpointRetiredException.class,
+                fixture.context.emptyBoundary().result().cause());
+        verify(fixture.capabilities.prefill(), never()).tryBeginRouteCommitAdmission();
+        assertNull(fixture.capabilities.permit(head));
     }
 
     @Test

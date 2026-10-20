@@ -5,6 +5,7 @@ import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
+import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.SchedulingMetadata;
@@ -263,6 +264,25 @@ class QueuedDecodeWithdrawalTest {
 
         verify(queue, org.mockito.Mockito.times(1)).requeue(item);
         assertEquals(RequestState.Phase.QUEUED, registry.getRequestState("26", 0).state());
+    }
+
+    @Test
+    void decodeRetirementBetweenRouteClaimAndPublishStillPublishesRoute() throws Exception {
+        var item = queued(31);
+        var slot = registry.requestSlot("31");
+        var claim = slot.claimDelivery(item, DeliveryClaimKind.ROUTE_DECISION, 0L, () -> true);
+        assertNotNull(claim);
+
+        registry.projectDecodeRetirementReservation(decode, item.decodeReservation());
+
+        assertFalse(item.future().isDone());
+        verify(queue, never()).requeue(any());
+
+        registry.publishRoute(claim, new WorkSnapshot(System.currentTimeMillis(),
+                List.of(), List.of(), 0L), 30_000L);
+
+        assertTrue(item.future().get(2, TimeUnit.SECONDS).isSuccess());
+        verify(queue, never()).requeue(any());
     }
 
     @Test

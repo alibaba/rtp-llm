@@ -266,6 +266,9 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
                 ScheduledRequest exact,
                 PrefillTimePredictor.Evaluator evaluator) {
             requirePrepared("append");
+            if (prefill.isRetired()) {
+                return failed(PrefillAdmissionResources.retired("Prefill", exact));
+            }
             long predictedMs = predict(evaluator, exact);
             final CapacityBoundary.Attempt<ScheduledRequest> acceptedItem;
             try {
