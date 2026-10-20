@@ -141,7 +141,7 @@ bool p2pLoadSafeToRelease(const std::shared_ptr<AsyncContext>& context) {
     return !p2p || !p2p->resourceHoldPending();
 }
 
-void applyP2PSideChannel(const P2PSideChannelPayload& payload, GenerateStream* stream) {
+void applyP2PSideChannel(const P2PSideChannelPayload& payload, GenerateStream* stream, int reuse_block_tokens) {
 #if defined(USING_CUDA)
     auto generator = stream->getGenerator();
     if (stream->generateConfig()->random_seed.has_value() || payload.has_rng_state) {
@@ -161,6 +161,16 @@ void applyP2PSideChannel(const P2PSideChannelPayload& payload, GenerateStream* s
         }
     }
 #endif
+    // A successful StartLoad covers the remaining prompt KV after Tree reuse.
+    // Count only complete logical blocks, using the same CP/group geometry as
+    // allocator reuse. This is Decode remote reuse, not a Prefill cache hit.
+    // Preserve execution positions: only the published usage counters change.
+    if (reuse_block_tokens > 0) {
+        const int resident_prefix = std::max(0, stream->inputLength() - 1) / reuse_block_tokens * reuse_block_tokens;
+        const int added_remote    = std::max(0, resident_prefix - stream->initialReuseLength());
+        stream->setInitialReuseLength(stream->initialReuseLength() + added_remote);
+        stream->setRemoteReuseLength(stream->remoteReuseLength() + added_remote);
+    }
     stream->generateInput()->handoff_multimodal_lengths = payload.multimodal_lengths;
     if (payload.has_first_token) {
         const auto output_tensor = [&](const char* name) {
@@ -739,7 +749,7 @@ bool StreamCacheResource::loadCacheDone() {
         }
         if (p2p_load_context_->success()) {
             if (const auto* payload = p2pSideChannel(p2p_load_context_)) {
-                applyP2PSideChannel(*payload, stream_);
+                applyP2PSideChannel(*payload, stream_, reuseBlockTokens());
             }
             p2p_load_context_.reset();
         } else {

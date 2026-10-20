@@ -2018,6 +2018,9 @@ TEST_F(StreamCacheResourceTest, testP2PFirstTokenOutputsRoundTripThroughStartLoa
             };
             auto prefill    = make_stream(RoleType::PREFILL);
             auto decode     = make_stream(RoleType::DECODE);
+            const int local_prefix = requested ? 2 : 0;
+            decode->setInitialReuseLength(local_prefix);
+            decode->setLocalReuseLength(local_prefix);
             prefill->generateInput()->multimodal_inputs =
                 std::vector<MultimodalInput>{MultimodalInput("image", 1), MultimodalInput("video", 2)};
             prefill->generateInput()->multimodal_features =
@@ -2080,6 +2083,13 @@ TEST_F(StreamCacheResourceTest, testP2PFirstTokenOutputsRoundTripThroughStartLoa
             const auto& output = output_result.value().generate_outputs.front();
             EXPECT_EQ(output.output_ids.item<int32_t>(), 7);
             EXPECT_EQ(decode->generateInput()->multimodalLengths(), published.multimodal_lengths);
+            const int complete_prefix = (decode->inputLength() - 1)
+                                        / decode->streamCacheResource().reuseBlockTokens()
+                                        * decode->streamCacheResource().reuseBlockTokens();
+            EXPECT_EQ(decode->initialReuseLength(), complete_prefix);
+            EXPECT_EQ(decode->remoteReuseLength(), complete_prefix - local_prefix);
+            EXPECT_EQ(decode->localReuseLength(), local_prefix);
+            EXPECT_EQ(decode->prefillTotalReuseLen(), published.total_reuse_len);
             if (requested) {
                 EXPECT_EQ(output.aux_info.multimodal_lengths, published.multimodal_lengths);
             }
