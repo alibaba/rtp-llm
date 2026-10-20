@@ -172,6 +172,13 @@ cc_binary(
     name = "rtp_compute_ops",
     copts = copts(),
     linkopts = [
+        # Native test executables also link this DSO. Without a SONAME their
+        # DT_NEEDED embeds bazel-out/... and cannot resolve it from runfiles.
+        "-Wl,-soname,librtp_compute_ops.so",
+        # Native executables load this DSO before embedded Python imports
+        # hashlib. Keep BoringSSL private so it cannot interpose on Python's
+        # ABI-incompatible OpenSSL; other archives (notably gRPC) stay visible.
+        "-Wl,--exclude-libs,libcrypto.a:libcrypto.pic.a:libssl.a:libssl.pic.a",
         "-Wl,-rpath='$$ORIGIN'",
         "-Wl,-rpath=$(NVSHMEM_DIR)/lib",
         "-L$(NVSHMEM_DIR)/lib",

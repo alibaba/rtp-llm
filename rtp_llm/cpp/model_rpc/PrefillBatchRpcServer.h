@@ -23,6 +23,9 @@ struct DeferredPrefillContext {
         bool priority_finalizer_claimed{false};
     };
 
+    // Final-cleanup notification only. The scheduler retains the
+    // lease throughout prepare, deferred fetch, TTL and priority finalization.
+    std::function<void()>            admission_complete;
     AtomicGuardPtr                   request_guard;
     std::shared_ptr<GenerateInputPB> input;
     // Declared before context so the status outlives the span guard stored in
@@ -40,9 +43,9 @@ struct DeferredPrefillContext {
     void finishLogicalTrace(const GenerateStream::TimeInfo* time_info_override = nullptr) noexcept;
     // Return true exactly once when the caller becomes the asynchronous
     // finalization owner.
-    bool finishOperation();
+    bool                 finishOperation();
     StartOperationResult tryStartOperation();
-    bool requestPriorityFinalization();
+    bool                 requestPriorityFinalization();
 
 private:
     std::mutex operation_mu_;
@@ -63,18 +66,18 @@ public:
     armTtl(int64_t request_id, const std::shared_ptr<DeferredPrefillContext>& context, std::chrono::milliseconds ttl);
     grpc::Status                            take(int64_t request_id, std::shared_ptr<DeferredPrefillContext>& context);
     std::shared_ptr<DeferredPrefillContext> remove(int64_t request_id, const DeferredPrefillContext* expected);
-    PriorityCancelResult cancelByPriorityPreemption(int64_t                                 request_id,
-                                                     std::shared_ptr<DeferredPrefillContext>& context,
-                                                     bool* newly_installed = nullptr);
-    PriorityCancelResult cancelByPriorityPreemption(int64_t request_id) {
+    PriorityCancelResult                    cancelByPriorityPreemption(int64_t                                  request_id,
+                                                                       std::shared_ptr<DeferredPrefillContext>& context,
+                                                                       bool*                                    newly_installed = nullptr);
+    PriorityCancelResult                    cancelByPriorityPreemption(int64_t request_id) {
         std::shared_ptr<DeferredPrefillContext> ignored;
         return cancelByPriorityPreemption(request_id, ignored);
     }
-    void publishPriorityPreemptionCanceled(int64_t request_id, const DeferredPrefillContext* expected);
-    void finish(int64_t request_id, const DeferredPrefillContext* expected);
-    void                                    stopAccepting();
-    void                                    cancelAll(const grpc::Status& status);
-    size_t                                  size() const;
+    void   publishPriorityPreemptionCanceled(int64_t request_id, const DeferredPrefillContext* expected);
+    void   finish(int64_t request_id, const DeferredPrefillContext* expected);
+    void   stopAccepting();
+    void   cancelAll(const grpc::Status& status);
+    size_t size() const;
 
 private:
     enum class PriorityPreemptionTombstoneKind : uint8_t {
@@ -83,7 +86,7 @@ private:
     };
 
     struct PriorityPreemptionTombstone {
-        int64_t                          expires_at_ms;
+        int64_t                         expires_at_ms;
         PriorityPreemptionTombstoneKind kind;
     };
 
@@ -93,9 +96,7 @@ private:
     void sweepRecentlySeenRequests(int64_t now_ms);
     // mu_ must be held. A single helper keeps missing-active and
     // active-cancel tombstones on the same lifetime/expiry path.
-    void installPriorityPreemptionTombstone(int64_t request_id,
-                                            int64_t now_ms,
-                                            PriorityPreemptionTombstoneKind kind);
+    void installPriorityPreemptionTombstone(int64_t request_id, int64_t now_ms, PriorityPreemptionTombstoneKind kind);
 
     mutable std::mutex                                                   mu_;
     std::unordered_map<int64_t, std::shared_ptr<DeferredPrefillContext>> contexts_;
@@ -103,15 +104,15 @@ private:
     // Request-id reuse is explicitly out of scope. A latched tombstone keeps
     // duplicate Cancel and a future FetchResponse idempotent after the active
     // context has moved to asynchronous cleanup.
-    std::unordered_map<int64_t, PriorityPreemptionTombstone>             priority_preemption_tombstones_;
-    std::deque<std::pair<int64_t, int64_t>>                              priority_preemption_tombstone_expiries_;
+    std::unordered_map<int64_t, PriorityPreemptionTombstone> priority_preemption_tombstones_;
+    std::deque<std::pair<int64_t, int64_t>>                  priority_preemption_tombstone_expiries_;
     // Distinguishes a truly never-registered request from one whose active
     // context has already completed. Without this bounded history, a late
     // Cancel could install an ABSENT_FENCE for completed work and falsely
     // report TOMBSTONED to the master.
-    std::unordered_map<int64_t, int64_t>                                 recently_seen_requests_;
-    std::deque<std::pair<int64_t, int64_t>>                              recently_seen_request_expiries_;
-    bool                                                                 stopping_{false};
+    std::unordered_map<int64_t, int64_t>    recently_seen_requests_;
+    std::deque<std::pair<int64_t, int64_t>> recently_seen_request_expiries_;
+    bool                                    stopping_{false};
 };
 
 // Batch-enqueue prefill server for PD separation.

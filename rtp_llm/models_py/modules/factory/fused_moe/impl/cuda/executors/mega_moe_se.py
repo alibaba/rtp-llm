@@ -66,9 +66,8 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
         checker.check(not config.has_shared_expert_gate)
         checker.check(_mega_moe_se_available())
 
-    def setup_weights(self, layer_weights: Dict) -> None:
+    def _setup_kernel_weights(self, layer_weights: Dict) -> None:
         import deep_gemm
-        import torch.distributed as dist
 
         from rtp_llm.utils.model_weight import W
 
@@ -85,7 +84,6 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
             inter,
             cfg.moe_w1_layout,
         )
-        device = w13.device
         s13_int = prepare_fp4_weight_scale_for_deepgemm(s13_raw, 2 * inter, D, E)
         del s13_raw
         torch.cuda.empty_cache()
@@ -109,6 +107,22 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
 
         self._setup_shared_expert_weights(layer_weights, deep_gemm, W, D, inter)
 
+    def sleep_weight_tensors(self):
+        weights = super().sleep_weight_tensors()
+        weights.update(
+            {
+                name: getattr(self, name)
+                for name in ("_se_l1_w", "_se_l1_sf", "_se_l2_w", "_se_l2_sf")
+            }
+        )
+        return weights
+
+    def _setup_runtime(self) -> None:
+        import torch.distributed as dist
+
+        cfg = self.cfg
+        D, inter = cfg.dim, cfg.moe_inter_dim
+        device = self._mega_l1_w.device
         group = _get_validated_world_ep_group(cfg, dist)
         self._mega_group = group
         self._mega_buf = _get_or_create_mega_se_buf(

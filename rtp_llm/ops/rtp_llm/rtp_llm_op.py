@@ -33,6 +33,8 @@ class RtpLLMOp:
         self.mm_process_engine = mm_process_engine
 
     def start(self):
+        from rtp_llm.models_py.distributed.lifecycle_group import get_lifecycle_group
+
         self.weight = self.model.weight
         logging.info("engine_config: %s", self.engine_config.to_string())
         from rtp_llm.telemetry.config import load_trace_config
@@ -48,6 +50,7 @@ class RtpLLMOp:
             self.token_processor,
             self.mm_process_engine,
             trace_config,
+            get_lifecycle_group(),
         )
 
     def stop(self):

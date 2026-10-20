@@ -2295,11 +2295,35 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfoReadsCurrentKeysAndSkipsUnchangedVersio
     EXPECT_EQ(ahead.version, updated.version);
     EXPECT_EQ(ahead.cached_keys, updated.cached_keys);
 
+    // Sleep rebuilds the tree with a local version counter starting over.
+    // The externally visible version must still identify the current generation,
+    // and only an exact global-version match may omit the keys.
+    kv_cache_manager->cache_version_offset_ = updated.version + 2;
+    const auto new_generation = kv_cache_manager->getKVCacheInfo(updated.version, true);
+    EXPECT_EQ(new_generation.version, kv_cache_manager->cache_version_offset_ + updated.version);
+    EXPECT_EQ(new_generation.cached_keys, updated.cached_keys);
+    const auto same_generation = kv_cache_manager->getKVCacheInfo(new_generation.version, true);
+    EXPECT_EQ(same_generation.version, new_generation.version);
+    EXPECT_TRUE(same_generation.cached_keys.empty());
+    const auto forced = kv_cache_manager->getKVCacheInfo(-1, true);
+    EXPECT_EQ(forced.cached_keys, updated.cached_keys);
+    // A stale local version must not be confused with the global version.
+    EXPECT_EQ(kv_cache_manager->getKVCacheInfo(updated_tree_snapshot.version, true).cached_keys,
+              updated.cached_keys);
+
     kv_cache_manager->free(FreeInfo{resource, tokens});
     BlockTreeCacheTestPeer::reclaimBlocksForTest(*kv_cache_manager->blockTreeCache(), /*num_blocks=*/100, Tier::DEVICE);
-    const auto cleared = kv_cache_manager->getKVCacheInfo(updated.version, /*need_cache_keys=*/true);
-    EXPECT_GT(cleared.version, updated.version);
+    const auto cleared = kv_cache_manager->getKVCacheInfo(new_generation.version, /*need_cache_keys=*/true);
+    EXPECT_GT(cleared.version, new_generation.version);
     EXPECT_TRUE(cleared.cached_keys.empty());
+
+    kv_cache_manager->cache_version_offset_ = cleared.version + 2;
+    kv_cache_manager->coordinator_manager_->detachBlockTreeCacheForSleep();
+    kv_cache_manager->block_tree_cache_.reset();
+    kv_cache_manager->cache_backing_state_ = KVCacheManager::CacheBackingState::RELEASED;
+    const auto sleeping = kv_cache_manager->getKVCacheInfo(cleared.version, true);
+    EXPECT_EQ(sleeping.version, cleared.version + 1);
+    EXPECT_TRUE(sleeping.cached_keys.empty());
 }
 
 TEST_F(KVCacheManagerTest, GetKVCacheInfo_UsesSmallestFullGroupTokenCapacity) {

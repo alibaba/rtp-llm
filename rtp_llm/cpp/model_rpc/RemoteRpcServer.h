@@ -14,6 +14,8 @@ public:
                       std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
                       py::object                                             mm_process_engine);
 
+    size_t activeCacheTransferCount() override;
+
     auto& resource() {
         return resource_;
     }

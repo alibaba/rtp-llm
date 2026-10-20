@@ -4,8 +4,14 @@ from typing import Any, Dict, Optional
 
 from rtp_llm.async_decoder_engine.base_engine import BaseEngine
 from rtp_llm.async_decoder_engine.rpc_engine import LanguageCppEngine
+from rtp_llm.config.sleep_mode_compatibility import reject_dynamic_lora_mutation
 from rtp_llm.lora.lora_exception import LoraCountException, LoraException
 from rtp_llm.model_loader.loader import ModelLoader
+from rtp_llm.model_loader.weight_memory_saver import (
+    is_enabled,
+    sleep_mode_level,
+    weights_region,
+)
 from rtp_llm.utils.time_util import Timer
 
 
@@ -55,6 +61,11 @@ class LoraManager:
                     or lora_path != self.lora_infos_[adapter_name]
                 ):
                     add_lora_map[adapter_name] = lora_path
+            if add_lora_map:
+                reject_dynamic_lora_mutation(
+                    enable_sleep_mode=is_enabled(),
+                    sleep_mode_level=sleep_mode_level(),
+                )
             return add_lora_map
 
     def get_remove_lora_map(self, lora_infos: Dict[str, str]) -> Dict[str, str]:
@@ -70,15 +81,22 @@ class LoraManager:
             return remove_lora_map
 
     def add_lora(self, adapter_name: str, lora_path: str) -> Optional[LoraException]:
+        reject_dynamic_lora_mutation(
+            enable_sleep_mode=is_enabled(), sleep_mode_level=sleep_mode_level()
+        )
         with self.thread_lock_:
             assert adapter_name not in self.lora_infos_.keys()
-            self.lora_infos_[adapter_name] = lora_path
             weights = self.weights_loader_.load_lora_weights(
                 adapter_name, lora_path, "cpu"
             )
-            self.lora_cpp_wrapper_.add_lora(
-                adapter_name, weights.lora_a_weights, weights.lora_b_weights
-            )
+            # The C++ add_lora uploads adapters host->GPU on this thread;
+            # register those allocations as pausable weight memory (the
+            # LD_PRELOAD hook intercepts in-thread C++ cudaMalloc).
+            with weights_region():
+                self.lora_cpp_wrapper_.add_lora(
+                    adapter_name, weights.lora_a_weights, weights.lora_b_weights
+                )
+            self.lora_infos_[adapter_name] = lora_path
 
     def remove_lora(self, adapter_name: str) -> Optional[LoraException]:
         with self.thread_lock_:

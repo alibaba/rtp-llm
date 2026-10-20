@@ -31,6 +31,7 @@ from rtp_llm.utils.jit_cache_env import (
     configure_cache_env,
     read_cache_env,
 )
+from rtp_llm.utils.jit_cache_flashinfer import evict_dangling_flashinfer_ops
 
 SYNC_POLL_S, STOP_TIMEOUT_S = 120.0, 10.0
 RTP_JIT_VERSION, CUDA, ROCM = "v2", "cuda", "rocm"
@@ -247,6 +248,14 @@ def setup_jit_cache_env() -> Scope | None:
         logging.warning("JIT_CACHE_FAIL_OPEN: env setup failed", exc_info=True)
 
 
+def _validate_flashinfer_cache(scope: Scope) -> None:
+    # The wrapper checks its default root before this process selects a scope.
+    # Validate the actual managed root, also after restoring remote snapshots.
+    for item in scope.components:
+        if item.name == "flashinfer":
+            evict_dangling_flashinfer_ops(item.local_dir)
+
+
 class JitCacheManager(FileSystemEventHandler):
     def __init__(self, scope: Scope, remote_value: str):
         self.scope, self._remote_value, self.store = scope, remote_value, None
@@ -312,6 +321,7 @@ class JitCacheManager(FileSystemEventHandler):
             self._stop.set()  # a late restore drops its own staging, best effort
             logging.warning("JIT_CACHE_FAIL_OPEN: setup timed out after %ss", timeout_s)
             return False
+        _validate_flashinfer_cache(self.scope)
         if not self.store:
             return False
         if self._restored:
@@ -410,7 +420,10 @@ def start_from_config(config):
         logging.info("JIT cache management disabled by configuration")
         return
     remote = str(config.remote_jit_dir or "").strip()
-    if (scope := setup_jit_cache_env()) is None or not remote:
+    if (scope := setup_jit_cache_env()) is None:
+        return
+    if not remote:
+        _validate_flashinfer_cache(scope)
         return
     manager = JitCacheManager(scope, remote)
     try:

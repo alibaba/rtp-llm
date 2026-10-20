@@ -176,6 +176,11 @@ void BlockTreeTaskPool::waitForIdle() {
     });
 }
 
+bool BlockTreeTaskPool::waitForIdleUntil(Clock::time_point deadline) {
+    std::unique_lock<std::mutex> lock(wait_mutex_);
+    return wait_cv_.wait_until(lock, deadline, [this] { return pending_tasks_.load() == 0; });
+}
+
 void BlockTreeTaskPool::shutdown() {
     std::shared_ptr<autil::LockFreeThreadPool> thread_pool;
     bool                                       was_started   = false;

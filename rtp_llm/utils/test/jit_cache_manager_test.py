@@ -1280,11 +1280,17 @@ class BackendTest(JitCacheTestBase):
         return stack
 
     def test_no_remote_sets_up_local_jit_env(self):
+        scope = jit.Scope("local", self.root, ())
         with mock.patch.object(
-            jit, "setup_jit_cache_env", return_value=mock.Mock()
-        ) as setup, mock.patch.object(jit, "JitCacheManager") as manager:
+            jit, "setup_jit_cache_env", return_value=scope
+        ) as setup, mock.patch.object(
+            jit, "JitCacheManager"
+        ) as manager, mock.patch.object(
+            jit, "_validate_flashinfer_cache", wraps=jit._validate_flashinfer_cache
+        ) as validate:
             self.assertIsNone(jit.start_from_config(self.make_configs().jit_config))
         setup.assert_called_once_with()
+        validate.assert_called_once_with(scope)
         manager.assert_not_called()
 
     def test_manage_jit_cache_false_skips_all_setup(self):
@@ -1299,13 +1305,18 @@ class BackendTest(JitCacheTestBase):
 
     def test_cpu_path_forwards_pipe_writer_and_skips_jit(self):
         controller, configs, pipe_writer = mock.Mock(), mock.Mock(), mock.Mock()
+        reporting_state = mock.Mock()
         configs.parallelism_config.world_rank = 3
         with self.patched_backend(cuda=False), mock.patch.object(
             backend, "local_rank_start", return_value="served"
         ) as rank_start, mock.patch.object(jit, "start_from_config") as jit_start:
-            result = backend.start_backend_server(controller, configs, pipe_writer)
+            result = backend.start_backend_server(
+                controller, configs, pipe_writer, reporting_state
+            )
         self.assertEqual(result, "served")
-        rank_start.assert_called_once_with(controller, configs, 3, pipe_writer)
+        rank_start.assert_called_once_with(
+            controller, configs, 3, pipe_writer, reporting_state
+        )
         jit_start.assert_not_called()
 
     def test_bootstrap_failure_releases_the_manager(self):
@@ -1420,6 +1431,44 @@ class BackendTest(JitCacheTestBase):
         FakeBackendManager.instance.request_shutdown.assert_called_once_with()
         FakeBackendManager.instance.serve_forever.assert_called_once_with()
 
+    def test_allocator_settings_precede_cuda_device_setup(self):
+        events = []
+        backend_module = types.ModuleType("rtp_llm.server.backend_manager")
+        manager = mock.Mock()
+        backend_module.BackendManager = lambda _configs: manager
+        configs = mock.Mock()
+        configs.parallelism_config.local_rank = 0
+        configs.parallelism_config.world_size = 1
+
+        with mock.patch.dict(
+            sys.modules, {"rtp_llm.server.backend_manager": backend_module}
+        ), contextlib.ExitStack() as stack:
+            for name in (
+                "_install_hot_hook_runtime",
+                "copy_gemm_config",
+                "set_parallelism_config",
+                "configure_kv_cache_event_host_ip_port",
+                "set_global_controller",
+                "install_oom_dump",
+            ):
+                stack.enter_context(mock.patch.object(backend, name))
+            stack.enter_context(mock.patch.object(backend.signal, "signal"))
+            for name, event in (
+                ("prepare_expandable_coexistence", "prepare"),
+                ("limit_init_segment_splitting", "limit"),
+                ("setup_cuda_device_and_accl_env", "cuda"),
+            ):
+                stack.enter_context(
+                    mock.patch.object(
+                        backend,
+                        name,
+                        side_effect=lambda *args, e=event: events.append(e),
+                    )
+                )
+            backend.local_rank_start(None, configs)
+
+        self.assertEqual(events, ["prepare", "limit", "cuda"])
+
     def test_parent_signal_during_jit_setup_prevents_rank_start(self):
         handlers = {}
         configs = self.make_configs(remote="/r", world_size=2)
@@ -1440,7 +1489,7 @@ class BackendTest(JitCacheTestBase):
 
     @staticmethod
     def _fake_create(proc):
-        def fake(_gc, _cfg, _ctx, processes, readers):
+        def fake(_gc, _cfg, _ctx, processes, readers, reporting_state=None):
             processes.append(proc)
             readers.append(mock.Mock())
 

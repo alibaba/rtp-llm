@@ -383,9 +383,9 @@ GptModelInputs makeInputs(const std::vector<int32_t>&     input_lengths,
     inputs.lm_output_indexes   = pinnedTensor(output_indexes, {static_cast<int64_t>(batch_size)});
     inputs.prefix_lengths      = pinnedTensor(std::vector<int32_t>(batch_size, 0), {static_cast<int64_t>(batch_size)});
     inputs.kv_cache_block_id   = pinnedTensor(block_ids,
-                                            {static_cast<int64_t>(group_tags.size()),
-                                             static_cast<int64_t>(batch_size),
-                                             static_cast<int64_t>(block_table_width)});
+                                              {static_cast<int64_t>(group_tags.size()),
+                                               static_cast<int64_t>(batch_size),
+                                               static_cast<int64_t>(block_table_width)});
     inputs.kv_cache_kernel_block_id = inputs.kv_cache_block_id.clone().pin_memory();
     inputs.request_id               = pinnedLongTensor(request_ids, {static_cast<int64_t>(batch_size)});
     inputs.request_pd_separation    = pinnedBoolTensor(batch_size, true);
@@ -1230,8 +1230,11 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object         py_model,
             cp_handle_outputs_calls = test_cp_processor->handleOutputsCallCount();
         }
     }
-
-    auto result                    = serializeResult(*cache_store, scenario.base_addresses, output);
+    auto result = serializeResult(*cache_store, scenario.base_addresses, output);
+    std::weak_ptr<KVCacheManager> manager_reference = manager;
+    params.cache_manager.reset();
+    manager.reset();
+    result["cache_manager_released"] = manager_reference.expired();
     auto capture_metrics           = fake_metrics_reporter.snapshotHiddenStateCaptureMetrics();
     result["capture_metrics"]      = capture_metrics[0];
     result["capture_metric_types"] = capture_metrics[1];

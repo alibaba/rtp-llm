@@ -91,12 +91,40 @@ cc_test(
     ]),
     data = [],
     copts = test_copts,
+    # The selector suite embeds Python/Torch. Keep BoringSSL out of hashlib's
+    # OpenSSL namespace. Localize logging state, not the entire logging archive:
+    # dependent DSOs still need exported methods such as alog::Logger::setLevel.
+    additional_linker_inputs = ["engine_logging_globals.map"],
+    linkopts = [
+        "-Wl,--exclude-libs,libcrypto.a:libcrypto.pic.a:libssl.a:libssl.pic.a",
+        "-Wl,--version-script=$(location engine_logging_globals.map)",
+    ],
     deps = [
         ":mock_engine",
         "//rtp_llm/cpp/cache",
         "//rtp_llm/cpp/engine_base/schedulers",
     ] + torch_deps() + cuda13_torch_link_deps,
     env = device_test_envs(),
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
+cc_test(
+    name = "engine_admission_test",
+    srcs = ["EngineAdmissionTest.cc"],
+    copts = test_copts,
+    deps = [
+        ":mock_engine",
+        "//rtp_llm/cpp/engine_base/sleep:admission_gate",
+    ] + cuda13_torch_link_deps,
+    env = select({
+        "@//:using_rocm": {"TEST_USING_DEVICE": "ROCM"},
+        "//conditions:default": {
+            "TEST_USING_DEVICE": "CUDA",
+            "LD_PRELOAD": "libtorch_cpu.so",
+            "RTP_TEST_TMS_PRELOAD": "1",
+        },
+    }),
     exec_properties = {"gpu": "L20_CU13"},
     tags = ["L20_CU13"],
 )

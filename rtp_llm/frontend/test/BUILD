@@ -1,6 +1,15 @@
 load("@arch_config//:arch_select.bzl", "telemetry_test_deps")
 
 py_test(
+    name = "frontend_socket_test",
+    srcs = ["frontend_socket_test.py"],
+    deps = [
+        "//rtp_llm:frontend_socket",
+        "//rtp_llm:uvicorn",
+    ],
+)
+
+py_test(
     name = "custom_output_response_test",
     srcs = ["custom_output_response_test.py"],
     deps = [

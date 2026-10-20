@@ -1,0 +1,17 @@
+/* The executable and rtp_compute_ops both link logging archives. Non-trivial
+ * globals must not interpose: each ELF image registers its own destructor.
+ * Keep methods exported for DSOs that refer to alog (e.g. Logger::setLevel).
+ * These are unquoted globs: quoted version-script names match literally. */
+{
+  local:
+    extern "C++" {
+      alog::*::s_*;
+      alog::s_*;
+      alog::gEventBase;
+      kmonitor::PrometheusSink::REPORT_PATH*;
+      kmonitor::PrometheusSink::PROMETHEUS_GATEWAY_PORT*;
+      kmonitor::FlumeSink::AGENT_THRIFT_PORT*;
+      kmonitor::Util::HOST_INFO_PATH*;
+      kmonitor::Metric::HEADER_*;
+    };
+};

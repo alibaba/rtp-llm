@@ -20,6 +20,28 @@ using namespace ::testing;
 
 namespace rtp_llm {
 
+TEST(LocalRpcServerTest, LifecycleRpcsRejectUninitializedEngine) {
+    LocalRpcServer         server;
+    grpc::ServerContext    context;
+    EmptyPB                empty;
+    SleepRequestPB         sleep;
+    SleepQuiesceRequestPB  quiesce;
+    SleepQuiesceResponsePB quiesce_response;
+    WakeUpRequestPB        wake;
+    IsSleepingResponsePB   sleeping;
+    SleepStatusResponsePB  status;
+    quiesce.set_protocol(2);
+    const auto check = [](const grpc::Status& result) {
+        EXPECT_EQ(result.error_code(), grpc::StatusCode::FAILED_PRECONDITION);
+        EXPECT_EQ(result.error_message(), "engine is not initialized");
+    };
+    check(server.SleepServing(&context, &sleep, &empty));
+    check(server.QuiesceSleep(&context, &quiesce, &quiesce_response));
+    check(server.WakeUpServing(&context, &wake, &empty));
+    check(server.IsSleeping(&context, &empty, &sleeping));
+    check(server.GetSleepStatus(&context, &empty, &status));
+}
+
 class MockGenerateStream: public GenerateStream {
 public:
     MockGenerateStream(const std::shared_ptr<GenerateInput>& input,
@@ -757,13 +779,33 @@ TEST(LocalRpcServerTest, BatchGenerateCallPassesThroughRejectedStreamError) {
 }
 
 TEST(LocalRpcServerTest, BatchGenerateCallCancelsEnqueuedStreamsOnOuterExceptionAndPreservesCardinality) {
-    TestLocalRpcServer server;
+    class AdmissionTrackingServer: public TestLocalRpcServer {
+    public:
+        std::function<void()> on_complete;
+
+    protected:
+        AdmissionAcquireResult acquireAdmission() const override {
+            AdmissionAcquireResult result;
+            result.complete = on_complete;
+            return result;
+        }
+    } server;
     auto               engine = std::make_shared<FailingEngine>(EngineFailureMode::BATCH_SIZE_MISMATCH);
     for (int i = 0; i < 4; ++i) {
         engine->streams.push_back(createMockStream());
     }
     engine->streams.front()->reportEvent(StreamEvents::GenerateDone);
     server.setEngineForTest(engine);
+    int admission_completions = 0;
+    server.on_complete = [&] {
+        ++admission_completions;
+        // The sleep drain may proceed as soon as this callback runs. Batch
+        // exception cleanup from main must precede releasing our root lease.
+        for (size_t i = 1; i < engine->streams.size(); ++i) {
+            EXPECT_TRUE(engine->streams[i]->hasError());
+            EXPECT_EQ(engine->streams[i]->statusInfo().code(), ErrorCode::CANCELLED);
+        }
+    };
 
     BatchGenerateInputPB request;
     for (int i = 0; i < 3; ++i) {
@@ -777,6 +819,7 @@ TEST(LocalRpcServerTest, BatchGenerateCallCancelsEnqueuedStreamsOnOuterException
 
     grpc::Status status;
     EXPECT_NO_THROW(status = server.BatchGenerateCall(&context, &request, &response));
+    EXPECT_EQ(admission_completions, 1);
     EXPECT_TRUE(status.ok());
     ASSERT_EQ(response.results_size(), request.inputs_size());
     for (const auto& result : response.results()) {

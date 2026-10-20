@@ -16,6 +16,23 @@ cuda13_torch_link_deps = select({
 })
 
 cc_test(
+    name = "cpu_quiesce_coordinator_test",
+    srcs = ["CpuQuiesceCoordinatorTest.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/engine_base:cpu_quiesce_coordinator",
+        "//rtp_llm/cpp/engine_base/sleep",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+        "@local_config_python//:python_lib",
+    ] + torch_deps() + cuda13_torch_link_deps,
+    # Test-only: several Gloo ranks share one interpreter, unlike production.
+    # Torch 2.11's FlightRecorder does not serialize this concurrent bootstrap.
+    env = {"TORCH_FR_BUFFER_SIZE": "0"},
+    timeout = "short",
+)
+
+cc_test(
     name = "step_window_profiler_configure_test",
     srcs = [
         "StepWindowProfilerConfigureTest.cc",

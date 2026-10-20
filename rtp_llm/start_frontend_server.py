@@ -6,6 +6,7 @@ import traceback
 
 from setproctitle import setproctitle
 
+from rtp_llm.aios.kmonitor.python_client.kmonitor import reporting
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.server_config_setup import set_parallelism_config
 
@@ -37,7 +38,10 @@ def start_frontend_server(
     server_id: int,
     global_controller: ConcurrencyController,
     py_env_configs: PyEnvConfigs,
+    reporting_state=None,
 ):
+    if reporting_state is not None:
+        reporting.configure(reporting_state)
     _install_hot_hook_runtime(f"frontend_rank_{rank_id}_server_{server_id}")
     # Set rank_id and server_id on the passed config so port properties match this rank
     logging.info(

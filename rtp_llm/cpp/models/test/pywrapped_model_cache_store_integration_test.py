@@ -967,6 +967,35 @@ class TpSyncModelInputsIntegrationTest(unittest.TestCase):
 
 
 class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
+    def test_native_wrapper_releases_python_model_reference(self) -> None:
+        for cycle in range(2):
+            with self.subTest(cycle=cycle):
+                model = CacheStoreForwardModel()
+                reference = weakref.ref(model)
+                run_scenario(model, "multi_tag")
+                self.assertGreater(model.forward_calls, 0)
+                del model
+                self.assertIsNone(
+                    reference(), "native wrapper leaked its owning Python reference"
+                )
+
+    def test_retained_forward_input_cannot_keep_cache_service_alive(self) -> None:
+        class RetainingModel(CacheStoreForwardModel):
+            def _forward_one(self, inputs):
+                # Python models / diagnostics can keep the last forward input.
+                # Its writer must become inert when the native executor stops.
+                self.last_inputs = inputs
+                return super()._forward_one(inputs)
+
+        model = RetainingModel()
+        result = run_scenario(model, "multi_tag")
+        self.assertTrue(result["cache_manager_released"])
+        self.assertIsNotNone(model.last_inputs)
+        inputs = next(iter(model.last_inputs.attention_inputs.values()))
+        layer_cache = model.kv_cache.get_layer_cache_groups(0)[0]
+        with self.assertRaisesRegex(RuntimeError, "CacheStoreAsyncWriter is closed"):
+            inputs.cache_store_writer.write(inputs.cache_store_inputs, layer_cache)
+
     def test_successful_generation_prefill_capture_does_not_reserve_request_blocks(
         self,
     ) -> None:
@@ -1184,6 +1213,9 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
 
         self.assertEqual(model.forward_calls, 1)
         self.assertEqual(result["records"], [])
+        reference = weakref.ref(model)
+        del model
+        self.assertIsNone(reference())
 
     def setUp(self) -> None:
         previous_torchspec_modules = _install_fake_torchspec_modules()
@@ -2343,6 +2375,19 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
             run_scenario(MalformedCaptureLayoutModel(), "capture_micro_batch_tp")
 
         self.assertEqual(_FakeEagleMooncakeStore.instances[0].puts, [])
+
+    @unittest.skipUnless(
+        os.environ.get("TEST_USING_DEVICE") == "ROCM", "ROCm unsupported-backend contract"
+    )
+    def test_capture_context_parallel_is_rejected_on_rocm(self) -> None:
+        # Keep the backend's fail-closed contract covered rather than running
+        # CUDA-only restore/layout expectations against an unsupported path.
+        model = CacheStoreForwardModel()
+        with self.assertRaisesRegex(RuntimeError, "Context parallel not supported on ROCm"):
+            run_scenario(model, "capture_cp")
+        self.assertEqual(model.forward_calls, 0)
+        for store in _FakeEagleMooncakeStore.instances:
+            self.assertEqual(store.puts, [])
 
     def test_capture_context_parallel_and_micro_batch_is_explicitly_unsupported(
         self,

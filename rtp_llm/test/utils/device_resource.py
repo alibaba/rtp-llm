@@ -490,7 +490,23 @@ class DeviceResource:
 
 
 def _run_test_command():
-    result = subprocess.run(sys.argv[1:])
+    with ExitStack() as stack:
+        kwargs = {}
+        if os.environ.get("RTP_TEST_TMS_PRELOAD") == "1":
+            # Native sleep KV and scratch tests need the production shim loaded
+            # before the test process starts. Keep this opt-in and inside the
+            # GPU lease; a missing required allocator must fail, not skip.
+            from torch_memory_saver import configure_subprocess
+
+            original_preload = os.environ.get("LD_PRELOAD", "")
+            stack.enter_context(configure_subprocess())
+            # TMS replaces LD_PRELOAD. Native tests also need libtorch_cpu.so;
+            # retain it (and any caller libraries) for the child only.
+            child_env = os.environ.copy()
+            if original_preload:
+                child_env["LD_PRELOAD"] += ":" + original_preload
+            kwargs["env"] = child_env
+        result = subprocess.run(sys.argv[1:], **kwargs)
     logging.info("exitcode: %d", result.returncode)
     return result.returncode
 
