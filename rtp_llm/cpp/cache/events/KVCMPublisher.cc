@@ -6,6 +6,9 @@
 #include <charconv>
 #include <curl/curl.h>
 #include <exception>
+#include <grpcpp/create_channel.h>
+#include <grpcpp/generic/generic_stub.h>
+#include <grpcpp/security/credentials.h>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -17,6 +20,9 @@
 
 #include "rtp_llm/cpp/cache/events/KVCacheEventQueue.h"
 #include "rtp_llm/cpp/cache/events/KVCMPublisherUtils.h"
+#include "rtp_llm/cpp/cache/events/kvcm_discovery.pb.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/DirectSubscriber.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/VIPServerSubscriber.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
@@ -154,10 +160,132 @@ int abortCancelledCurlTransfer(void* user_data, curl_off_t, curl_off_t, curl_off
     return static_cast<std::atomic<bool>*>(user_data)->load(std::memory_order_acquire) ? 1 : 0;
 }
 
+class KVCMEndpointResolver {
+public:
+    KVCMEndpointResolver(const KVCacheEventPublisherConfig& config, std::string instance_id):
+        endpoint_(detail::normalizeKVCacheEventEndpoint(config.manager_endpoint)),
+        discover_(endpoint_.empty()),
+        timeout_ms_(std::max(config.request_timeout_ms, 1)),
+        instance_id_(std::move(instance_id)) {
+        if (discover_) {
+            if (config.enable_vipserver) {
+                subscriber_ = std::make_unique<kvcm::VIPServerSubscriber>();
+                domains_ = {config.vipserver_domain};
+            } else {
+                subscriber_ = std::make_unique<kvcm::DirectSubscriber>();
+                domains_ = {config.server_address};
+            }
+        }
+    }
+
+    std::string endpoint() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!endpoint_.empty()) {
+            return endpoint_;
+        }
+        if (!subscriber_initialized_) {
+            if (!subscriber_->init(domains_)) {
+                return {};
+            }
+            subscriber_initialized_ = true;
+        }
+        std::vector<std::string> addresses;
+        if (!subscriber_->getAddresses(addresses)) {
+            return {};
+        }
+        for (const auto& address : addresses) {
+            const auto endpoint = discoverLeader(address);
+            if (!endpoint.empty()) {
+                endpoint_ = endpoint;
+                RTP_LLM_LOG_INFO("KVCM event leader Meta HTTP endpoint resolved: %s", endpoint_.c_str());
+                return endpoint_;
+            }
+        }
+        RTP_LLM_LOG_WARNING("KVCM event leader discovery failed for all %zu RPC addresses", addresses.size());
+        return {};
+    }
+
+    void invalidate(const std::string& endpoint) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (discover_ && endpoint_ == endpoint) {
+            endpoint_.clear();
+        }
+    }
+
+private:
+    std::string discoverLeader(const std::string& address) const {
+        kvcm::discovery::GetClusterInfoRequest request;
+        request.set_trace_id("rtp-kv-event-discovery");
+        request.set_instance_id(instance_id_);
+        const std::string request_data = request.SerializeAsString();
+        grpc::Slice request_slice(request_data);
+        grpc::ByteBuffer request_buffer(&request_slice, 1);
+        grpc::ByteBuffer response_buffer;
+        grpc::ClientContext context;
+        context.set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(timeout_ms_));
+        grpc::GenericStub stub(grpc::CreateChannel(address, grpc::InsecureChannelCredentials()));
+        grpc::CompletionQueue queue;
+        auto call = stub.PrepareUnaryCall(
+            &context, "/kv_cache_manager.proto.meta.MetaService/GetClusterInfo", request_buffer, &queue);
+        if (!call) {
+            queue.Shutdown();
+            void* tag = nullptr;
+            bool completed = false;
+            while (queue.Next(&tag, &completed)) {}
+            return {};
+        }
+        call->StartCall();
+        grpc::Status status;
+        int completion_tag = 0;
+        call->Finish(&response_buffer, &status, &completion_tag);
+        void* tag = nullptr;
+        bool completed = false;
+        const bool received = queue.Next(&tag, &completed);
+        queue.Shutdown();
+        void* remaining_tag = nullptr;
+        bool remaining_ok = false;
+        while (queue.Next(&remaining_tag, &remaining_ok)) {}
+        if (!received || !completed || tag != &completion_tag || !status.ok()) {
+            RTP_LLM_LOG_WARNING("KVCM event leader lookup failed, RPC address=%s grpc_code=%d error=%s",
+                                address.c_str(), static_cast<int>(status.error_code()), status.error_message().c_str());
+            return {};
+        }
+        std::vector<grpc::Slice> slices;
+        if (!response_buffer.Dump(&slices).ok()) {
+            return {};
+        }
+        std::string response_data;
+        for (const auto& slice : slices) {
+            response_data.append(reinterpret_cast<const char*>(slice.begin()), slice.size());
+        }
+        kvcm::discovery::GetClusterInfoResponse response;
+        if (!response.ParseFromString(response_data) || response.header().status().code() != 1
+            || !response.has_leader_endpoint()) {
+            return {};
+        }
+        const auto& leader = response.leader_endpoint();
+        if (response.leader_node_id().empty() || leader.node_id() != response.leader_node_id()
+            || leader.host().empty() || leader.meta_http_port() <= 0 || leader.meta_http_port() > 65535) {
+            return {};
+        }
+        const auto host = leader.host().find(':') == std::string::npos ? leader.host() : "[" + leader.host() + "]";
+        return "http://" + host + ":" + std::to_string(leader.meta_http_port());
+    }
+
+    std::mutex mutex_;
+    std::string endpoint_;
+    bool discover_;
+    int timeout_ms_;
+    std::string instance_id_;
+    std::unique_ptr<kvcm::Subscriber> subscriber_;
+    std::vector<std::string> domains_;
+    bool subscriber_initialized_ = false;
+};
+
 class CurlKVCacheEventReporter final: public KVCacheEventReporter {
 public:
-    CurlKVCacheEventReporter(std::string endpoint, int request_timeout_ms):
-        endpoint_(detail::normalizeKVCacheEventEndpoint(std::move(endpoint))),
+    CurlKVCacheEventReporter(std::shared_ptr<KVCMEndpointResolver> resolver, int request_timeout_ms):
+        resolver_(std::move(resolver)),
         request_timeout_ms_(std::max(request_timeout_ms, 1)) {
         // Keep this publisher's process-wide curl initialization idempotent.
         // Other curl users remain responsible for following libcurl's global
@@ -172,7 +300,15 @@ public:
         }
         try {
             response.clear();
-            return postImpl(route, request, response);
+            const auto endpoint = resolver_->endpoint();
+            if (endpoint.empty()) {
+                return false;
+            }
+            const bool success = postImpl(endpoint, route, request, response);
+            if (!success) {
+                resolver_->invalidate(endpoint);
+            }
+            return success;
         } catch (...) { return false; }
     }
 
@@ -181,8 +317,9 @@ public:
     }
 
 private:
-    bool postImpl(const std::string& route, const std::string& request, std::string& response) {
-        const std::string url  = endpoint_ + route;
+    bool postImpl(const std::string& endpoint, const std::string& route,
+                  const std::string& request, std::string& response) {
+        const std::string url  = endpoint + route;
         CURL*             curl = curl_easy_init();
         if (curl == nullptr) {
             return false;
@@ -244,7 +381,7 @@ private:
         return true;
     }
 
-    std::string       endpoint_;
+    std::shared_ptr<KVCMEndpointResolver> resolver_;
     int               request_timeout_ms_;
     std::atomic<bool> cancelled_{false};
 };
@@ -487,11 +624,13 @@ public:
         queue_(config_.queue_capacity) {
         if (reporter_) {
             snapshot_reporter_ = reporter_;
-        } else if (!config_.manager_endpoint.empty()) {
+        } else if (!config_.manager_endpoint.empty()
+                   || (config_.enable_vipserver ? !config_.vipserver_domain.empty() : !config_.server_address.empty())) {
+            auto resolver = std::make_shared<KVCMEndpointResolver>(config_, context_.instance_id);
             reporter_ =
-                std::make_shared<CurlKVCacheEventReporter>(config_.manager_endpoint, config_.request_timeout_ms);
+                std::make_shared<CurlKVCacheEventReporter>(resolver, config_.request_timeout_ms);
             snapshot_reporter_ =
-                std::make_shared<CurlKVCacheEventReporter>(config_.manager_endpoint, config_.snapshot_timeout_ms);
+                std::make_shared<CurlKVCacheEventReporter>(resolver, config_.snapshot_timeout_ms);
         }
     }
 

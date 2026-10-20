@@ -45,12 +45,19 @@ Arguments have equivalent upper-case environment variables.
 | Argument | Default | Meaning |
 |---|---:|---|
 | `--kv_cache_event_publisher_type` | `none` | `none` or `kvcm` |
-| `--kv_cache_event_manager_endpoint` | empty | KVCM Meta HTTP endpoint |
+| `--kv_cache_event_manager_endpoint` | empty | explicit KVCM Meta HTTP endpoint; overrides discovery |
 | `--kv_cache_event_instance_group` | empty | group; falls back to `reco_instance_group` |
 | `--kv_cache_event_instance_id` | empty | stable deployment-level instance ID |
 | `--kv_cache_event_host_ip_port` | empty (auto-derived) | stable endpoint; must be unique for every DP replica when `dp_size>1` |
 
-Invalid configuration disables publishing without disabling inference. The KVCM manager endpoint must already be
-resolved; service discovery and leader switching are outside this version.
+When the explicit endpoint is empty, the publisher reuses `RECO_ENABLE_VIPSERVER` and `RECO_VIPSERVER_DOMAIN`, or
+`RECO_SERVER_ADDRESS` when VIPServer is disabled. The existing subscriber supplies Meta RPC bootstrap addresses;
+`GetClusterInfo` supplies the current leader's host and Meta HTTP port. Reporting still uses HTTP, with no KVCM SDK
+upgrade. A failed report invalidates the cached address so the publisher can rediscover the leader and re-register
+through its existing retry/reconciliation loop. Discovery runs on the publisher workers and never gates readiness.
+
+Invalid configuration disables publishing without disabling inference. VIPServer requires an internal build, as it
+does for remote-cache storage. Direct RPC discovery requires the server's `GetClusterInfo` API and a leader endpoint;
+standalone servers without leader election can continue to use the explicit HTTP endpoint.
 
 See [KVCM remote cache configuration](reuse_kv_cache.md#kvcm-remote-cache) for the shared backend settings.
