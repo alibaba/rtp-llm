@@ -83,7 +83,7 @@ public:
                                                   const std::function<void(const TreeNode&)>& visitor) const;
 
     // All publication operations require the owning BlockTreeCache mutex.
-    // Only complete, matchable DEVICE values in every required group are advertised.
+    // Complete, matchable DEVICE components are advertised independently.
     void setEventPublisher(KVCacheEventPublisherPtr publisher, const std::vector<std::string>& required_group_tags);
     KVCacheSnapshot logicalCacheSnapshot() const;
     void            refreshPublishedState(const TreeNode* node);
@@ -92,7 +92,7 @@ private:
     void                               removePublishedKey(CacheKeyType key);
     KVCacheEventPublisherPtr           event_publisher_;
     std::vector<ReusableGroupLocation> publication_groups_;
-    std::unordered_set<CacheKeyType>   published_keys_;
+    std::unordered_map<CacheKeyType, std::vector<size_t>> published_groups_;
     int64_t                            publication_version_{-1};
 
     friend class BlockTreeEvictor;

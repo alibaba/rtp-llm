@@ -6,13 +6,13 @@
 #include <charconv>
 #include <curl/curl.h>
 #include <exception>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
 #include <thread>
-#include <unordered_map>
 #include <utility>
 
 #include "rtp_llm/cpp/cache/events/KVCacheEventQueue.h"
@@ -281,11 +281,13 @@ std::string buildRegisterInstanceRequest(const KVCacheEventPublisherContext& con
 
     writer.Key("location_spec_infos");
     writer.StartArray();
-    writer.StartObject();
-    writeString(writer, "name", context.spec_name);
-    writer.Key("size");
-    writer.Int64(context.spec_size_bytes);
-    writer.EndObject();
+    for (const auto& spec : context.specs) {
+        writer.StartObject();
+        writeString(writer, "name", spec.name);
+        writer.Key("size");
+        writer.Int64(spec.size_bytes);
+        writer.EndObject();
+    }
     writer.EndArray();
 
     writer.Key("location_spec_groups");
@@ -294,7 +296,9 @@ std::string buildRegisterInstanceRequest(const KVCacheEventPublisherContext& con
     writeString(writer, "name", "default");
     writer.Key("spec_names");
     writer.StartArray();
-    writer.String(context.spec_name.c_str(), static_cast<rapidjson::SizeType>(context.spec_name.size()));
+    for (const auto& spec : context.specs) {
+        writer.String(spec.name.c_str(), static_cast<rapidjson::SizeType>(spec.name.size()));
+    }
     writer.EndArray();
     writer.EndObject();
     writer.EndArray();
@@ -317,14 +321,11 @@ void writeReportFooter(JsonWriter& writer) {
     writer.EndObject();
 }
 
-void writeLocationSpecs(JsonWriter& writer, const KVCacheEventPublisherContext& context) {
-    writer.Key("specs");
-    writer.StartArray();
+void writeLocationSpec(JsonWriter& writer, const KVCacheEventSpec& spec) {
     writer.StartObject();
-    writeString(writer, "name", context.spec_name);
-    writeString(writer, "uri", context.location_uri);
+    writeString(writer, "name", spec.name);
+    writeString(writer, "uri", spec.location_uri);
     writer.EndObject();
-    writer.EndArray();
 }
 
 std::string buildMutationReport(const KVCacheEventPublisherContext& context,
@@ -335,6 +336,7 @@ std::string buildMutationReport(const KVCacheEventPublisherContext& context,
     writeReportHeader(writer, context, trace_id);
     for (const auto& event : events) {
         const std::string block_key = std::to_string(event.block_key);
+        const auto&       spec      = context.specs.at(event.group_index);
         writer.StartObject();
         if (event.type == KVCacheEventType::BLOCK_ADD) {
             writeString(writer, "event_type", "EVENT_BLOCK_ADD");
@@ -342,7 +344,10 @@ std::string buildMutationReport(const KVCacheEventPublisherContext& context,
             writer.StartObject();
             writeString(writer, "block_key", block_key);
             writeString(writer, "medium", "hbm");
-            writeLocationSpecs(writer, context);
+            writer.Key("specs");
+            writer.StartArray();
+            writeLocationSpec(writer, spec);
+            writer.EndArray();
             writer.EndObject();
         } else {
             writeString(writer, "event_type", "EVENT_BLOCK_DELETE");
@@ -352,7 +357,7 @@ std::string buildMutationReport(const KVCacheEventPublisherContext& context,
             writeString(writer, "medium", "hbm");
             writer.Key("spec_names");
             writer.StartArray();
-            writer.String(context.spec_name.c_str(), static_cast<rapidjson::SizeType>(context.spec_name.size()));
+            writer.String(spec.name.c_str(), static_cast<rapidjson::SizeType>(spec.name.size()));
             writer.EndArray();
             writer.EndObject();
         }
@@ -364,14 +369,14 @@ std::string buildMutationReport(const KVCacheEventPublisherContext& context,
 
 std::vector<KVCacheEvent> coalesceMutations(const std::vector<KVCacheEvent>& events) {
     // KVCM aggregates all ADDs before all DELETEs inside one ReportEvent
-    // request. The final transition for each key is therefore the only one
+    // request. The final transition for each (key, group) is therefore the only one
     // this unsent batch may carry without inverting DELETE -> ADD.
-    std::vector<KVCacheEvent>           coalesced;
-    std::unordered_map<int64_t, size_t> key_to_index;
+    std::vector<KVCacheEvent>                   coalesced;
+    std::map<std::pair<int64_t, size_t>, size_t> component_to_index;
     coalesced.reserve(events.size());
-    key_to_index.reserve(events.size());
     for (const auto& event : events) {
-        const auto [it, inserted] = key_to_index.emplace(event.block_key, coalesced.size());
+        const auto [it, inserted] =
+            component_to_index.emplace(std::make_pair(event.block_key, event.group_index), coalesced.size());
         if (inserted) {
             coalesced.push_back(event);
         } else {
@@ -439,11 +444,16 @@ std::string buildSnapshotReport(const KVCacheEventPublisherContext& context,
     writer.StartObject();
     writer.Key("blocks");
     writer.StartArray();
-    for (const auto block_key_value : snapshot.block_keys) {
+    for (const auto& [block_key_value, group_indices] : snapshot.block_groups) {
         writer.StartObject();
         writeString(writer, "block_key", std::to_string(block_key_value));
         writeString(writer, "medium", "hbm");
-        writeLocationSpecs(writer, context);
+        writer.Key("specs");
+        writer.StartArray();
+        for (const auto group_index : group_indices) {
+            writeLocationSpec(writer, context.specs.at(group_index));
+        }
+        writer.EndArray();
         writer.EndObject();
     }
     writer.EndArray();
@@ -595,10 +605,15 @@ public:
 
 private:
     bool isConfigValid() const {
+        for (auto it = context_.specs.begin(); it != context_.specs.end(); ++it) {
+            if (it->name.empty() || it->location_uri.empty() || it->size_bytes <= 0
+                || std::any_of(context_.specs.begin(), it, [&](const auto& spec) { return spec.name == it->name; })) {
+                return false;
+            }
+        }
         return reporter_ && snapshot_reporter_ && snapshot_provider_ && !context_.instance_group.empty()
                && !context_.instance_id.empty() && !context_.host_ip_port.empty() && !context_.model_name.empty()
-               && !context_.dtype.empty() && !context_.spec_name.empty() && !context_.location_uri.empty()
-               && context_.block_size_tokens > 0 && context_.spec_size_bytes > 0;
+               && !context_.dtype.empty() && context_.block_size_tokens > 0 && !context_.specs.empty();
     }
 
     std::string nextTraceId(const char* operation) {
@@ -713,7 +728,7 @@ private:
             const auto trace_id      = nextTraceId("snapshot");
             pending_snapshot_report_ = PendingSnapshotReport{generation,
                                                              snapshot.version,
-                                                             snapshot.block_keys.size(),
+                                                             snapshot.block_groups.size(),
                                                              buildSnapshotReport(context_, trace_id, snapshot)};
         }
 

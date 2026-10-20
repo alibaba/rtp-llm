@@ -27,5 +27,6 @@ cc_test(
         "//rtp_llm/cpp/cache/events:kv_cache_event_publisher",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
+        "@rapidjson//:rapidjson",
     ],
 )

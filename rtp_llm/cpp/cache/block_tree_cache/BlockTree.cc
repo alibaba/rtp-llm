@@ -349,7 +349,7 @@ void BlockTree::setEventPublisher(KVCacheEventPublisherPtr        publisher,
     }
     event_publisher_    = std::move(publisher);
     publication_groups_ = std::move(locations);
-    published_keys_.clear();
+    published_groups_.clear();
     // Initialization only. Normal mutations update a single affected key.
     // The publisher starts after attachment and reconciles this initial snapshot.
     for (const auto& node : node_pool_) {
@@ -360,15 +360,18 @@ void BlockTree::setEventPublisher(KVCacheEventPublisherPtr        publisher,
 KVCacheSnapshot BlockTree::logicalCacheSnapshot() const {
     KVCacheSnapshot snapshot;
     snapshot.version = publication_version_;
-    snapshot.block_keys.assign(published_keys_.begin(), published_keys_.end());
-    std::sort(snapshot.block_keys.begin(), snapshot.block_keys.end());
+    snapshot.block_groups.insert(published_groups_.begin(), published_groups_.end());
     return snapshot;
 }
 
 void BlockTree::removePublishedKey(CacheKeyType key) {
-    if (event_publisher_ && published_keys_.erase(key)) {
-        ++publication_version_;
-        (void)event_publisher_->tryPublish({KVCacheEventType::BLOCK_DELETE, static_cast<int64_t>(key), 0});
+    const auto it = published_groups_.find(key);
+    if (event_publisher_ && it != published_groups_.end()) {
+        for (const auto group_index : it->second) {
+            ++publication_version_;
+            (void)event_publisher_->tryPublish({KVCacheEventType::BLOCK_DELETE, key, group_index});
+        }
+        published_groups_.erase(it);
     }
 }
 
@@ -376,18 +379,30 @@ void BlockTree::refreshPublishedState(const TreeNode* node) {
     if (!event_publisher_ || node == root_.get()) {
         return;
     }
-    for (const auto& location : publication_groups_) {
+    const auto it = published_groups_.find(node->cache_key);
+    std::vector<size_t> resident_groups;
+    for (size_t group_index = 0; group_index < publication_groups_.size(); ++group_index) {
+        const auto& location = publication_groups_[group_index];
         const auto& resource = node->group_set_resources.at(location.group_set_id);
-        if (resource.transfer_detached || resource.transfer_state != GroupSetTransferState::IDLE
-            || resource.device_blocks.size() != group_sets_[location.group_set_id]->groupTags().size()
-            || !resource.hasCompleteDeviceValue()) {
-            removePublishedKey(node->cache_key);
-            return;
+        const bool resident = !resource.transfer_detached && resource.transfer_state == GroupSetTransferState::IDLE
+                              && resource.device_blocks.size() == group_sets_[location.group_set_id]->groupTags().size()
+                              && resource.hasCompleteDeviceValue();
+        if (resident) {
+            resident_groups.push_back(group_index);
+        }
+        const bool was_resident = it != published_groups_.end()
+                                  && std::binary_search(it->second.begin(), it->second.end(), group_index);
+        if (resident != was_resident) {
+            ++publication_version_;
+            (void)event_publisher_->tryPublish({resident ? KVCacheEventType::BLOCK_ADD : KVCacheEventType::BLOCK_DELETE,
+                                               node->cache_key,
+                                               group_index});
         }
     }
-    if (published_keys_.insert(node->cache_key).second) {
-        ++publication_version_;
-        (void)event_publisher_->tryPublish({KVCacheEventType::BLOCK_ADD, static_cast<int64_t>(node->cache_key), 0});
+    if (!resident_groups.empty()) {
+        published_groups_[node->cache_key] = std::move(resident_groups);
+    } else if (it != published_groups_.end()) {
+        published_groups_.erase(it);
     }
 }
 

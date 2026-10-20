@@ -19,6 +19,9 @@
 #include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/group_set/LinearGroupSet.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/group_set/SWAGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferRequestConverter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/MultiRankBlockTransferEngine.h"
@@ -438,29 +441,144 @@ TEST_F(CacheHitRateWindowTest, ConcurrentRequestsDoNotLoseTokens) {
     EXPECT_FLOAT_EQ(window.host_hit_rate, 10.0f);
 }
 
-TEST_F(KVCacheManagerTest, PublicationRejectsTailSparseReuseAcrossAllGroups) {
-    for (const auto tail_type : {CacheGroupType::LINEAR, CacheGroupType::SWA}) {
-        for (const bool reversed : {false, true}) {
-            for (const bool tail_reuse : {false, true}) {
-                auto config = makeSimpleMhaCacheConfig(2, 5, 2, DataType::TYPE_FP16);
-                auto full   = config.group("default");
-                full.tag    = "full";
-                full.spec   = makeResolvedMhaSpec(config.dtype, 1, 1, config.seq_size_per_block, "full");
-                auto tail   = full;
-                tail.tag    = "tail";
-                tail.spec   = makeResolvedMhaSpec(config.dtype, 1, 1, config.seq_size_per_block, "tail");
-                tail.policy = defaultCacheGroupPolicy(tail_type);
-                tail.policy.active_tail_blocks  = 2;
-                tail.policy.enable_prefix_reuse = tail_reuse;
-                std::vector<GroupBase> groups{full, tail};
-                if (reversed) {
-                    std::reverse(groups.begin(), groups.end());
-                }
-                ASSERT_NO_THROW(config.setTopology(std::move(groups), {{0, {"full"}}, {1, {"tail"}}}));
-                KVCacheManager manager(config);
-                EXPECT_EQ(manager.hasTailSparseReuseGroup(), tail_reuse)
-                    << "tail_type=" << static_cast<int>(tail_type) << " reversed=" << reversed;
+static CacheConfig makeEventPublicationCacheConfig(bool reversed,
+                                                   CacheMemoryPlacement swa_placement = CacheMemoryPlacement::DEVICE) {
+    auto config = makeSimpleMhaCacheConfig(4, 128, 1, DataType::TYPE_FP16);
+    std::vector<GroupBase> groups;
+    const std::vector<std::string> tags{"full", "swa", "linear", "disabled"};
+    const std::vector<CacheGroupType> types{
+        CacheGroupType::FULL, CacheGroupType::SWA, CacheGroupType::LINEAR, CacheGroupType::FULL};
+    for (size_t i = 0; i < tags.size(); ++i) {
+        auto group = config.group("default");
+        group.tag = tags[i];
+        group.spec = makeResolvedMhaSpec(config.dtype, 1, 1, config.seq_size_per_block, tags[i]);
+        group.policy = defaultCacheGroupPolicy(types[i]);
+        group.policy.enable_prefix_reuse = tags[i] != "disabled";
+        if (tags[i] == "swa") {
+            group.policy.sliding_window_size = 2;
+            group.policy.memory_placement = swa_placement;
+        }
+        groups.push_back(std::move(group));
+    }
+    if (reversed) {
+        std::reverse(groups.begin(), groups.end());
+    }
+    config.setTopology(std::move(groups), {{0, {"full"}}, {1, {"swa"}}, {2, {"linear"}}, {3, {"disabled"}}});
+    return config;
+}
+
+static KVCacheConfig makeEventPublicationRuntimeConfig() {
+    KVCacheConfig config;
+    config.reuse_cache = true;
+    config.enable_device_cache = true;
+    config.kv_cache_event_publisher_type = "kvcm";
+    // Port zero is reserved. Initialization must wire the reporter without requiring a running Manager.
+    config.kv_cache_event_manager_endpoint = "http://127.0.0.1:0";
+    config.kv_cache_event_instance_group = "event_wiring_group";
+    config.kv_cache_event_instance_id = "event_wiring_instance";
+    config.kv_cache_event_host_ip_port = "127.0.0.1:19000";
+    return config;
+}
+
+TEST_F(KVCacheManagerTest, EventPublisherWiresEligibleGroupsInTopologyOrder) {
+    // Do not send the reserved loopback endpoint through a developer's proxy.
+    ScopedEnvVar no_proxy("no_proxy", "*");
+    ScopedEnvVar upper_no_proxy("NO_PROXY", "*");
+    for (const bool reversed : {false, true}) {
+        for (const int tp_size : {1, 2}) {
+            SCOPED_TRACE("reversed=" + std::to_string(reversed) + " tp_size=" + std::to_string(tp_size));
+            auto config = makeEventPublicationCacheConfig(reversed);
+            ParallelismConfig parallelism;
+            parallelism.tp_size = tp_size;
+            RuntimeConfig runtime;
+            runtime.model_name = "event_wiring_model";
+            KVCacheManager manager(config, false, nullptr, makeEventPublicationRuntimeConfig(), parallelism, runtime);
+
+            // Keep GroupSet order fixed while topology order changes. Non-reusable groups have no tree resource.
+            std::vector<GroupSetPtr> groups{
+                std::make_shared<FullGroupSet>(
+                    std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr),
+                std::make_shared<SWAGroupSet>(2, 1,
+                    std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(1)}, nullptr, nullptr),
+                std::make_shared<LinearGroupSet>(
+                    std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(2)}, nullptr, nullptr)};
+            const std::vector<std::string> group_tags{"full", "swa", "linear"};
+            for (size_t i = 0; i < groups.size(); ++i) {
+                groups[i]->initialize(i, config.topologyPtr(), {group_tags[i]});
             }
+            manager.block_tree_cache_ = block_tree_cache_test::makeBlockTreeCacheForTest(std::move(groups));
+            const auto cache = manager.block_tree_cache_;
+            ASSERT_NE(cache, nullptr);
+            std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(3));
+            resources[0][0].device_blocks = {42};
+            resources[1][0].device_blocks = {43};
+            resources[1][2].device_blocks = {48};
+            cache->insert({100, 200}, resources, Tier::DEVICE);
+
+            manager.initCacheEventPublisher();
+            ASSERT_NE(manager.cache_event_publisher_, nullptr);
+            EXPECT_EQ(cache->tree()->event_publisher_, manager.cache_event_publisher_);
+            const std::vector<std::string> expected_tags = reversed ? std::vector<std::string>{"swa", "full"}
+                                                                   : std::vector<std::string>{"full", "swa"};
+            const auto& publication_groups = cache->tree()->publication_groups_;
+            ASSERT_EQ(publication_groups.size(), expected_tags.size());
+            for (size_t i = 0; i < publication_groups.size(); ++i) {
+                const auto& location = publication_groups[i];
+                EXPECT_EQ(cache->groupSets().at(location.group_set_id)->groupTags().at(location.member_group_id),
+                          expected_tags[i]);
+            }
+            const size_t full_index = reversed ? 1 : 0;
+            const std::map<int64_t, std::vector<size_t>> full_only{{100, {full_index}}, {200, {full_index}}};
+            EXPECT_EQ(cache->logicalCacheSnapshot().block_groups, full_only);
+            EXPECT_EQ(manager.cache_event_publisher_->status().accepted_count, 0u);
+
+            // A LINEAR component mutation produces neither a snapshot component nor an event.
+            resources[0][2].device_blocks = {47};
+            cache->insert({100, 200}, resources, Tier::DEVICE);
+            EXPECT_EQ(cache->logicalCacheSnapshot().block_groups, full_only);
+            EXPECT_EQ(manager.cache_event_publisher_->status().accepted_count, 0u);
+
+            resources[1][1].device_blocks = {46};
+            cache->insert({100, 200}, resources, Tier::DEVICE);
+            EXPECT_EQ(cache->logicalCacheSnapshot().block_groups,
+                      (std::map<int64_t, std::vector<size_t>>{{100, {full_index}}, {200, {0, 1}}}));
+            EXPECT_EQ(manager.cache_event_publisher_->status().accepted_count, 1u);
+            EXPECT_EQ(cache->evictForGroup("swa", 1), 1);
+            EXPECT_EQ(cache->logicalCacheSnapshot().block_groups, full_only);
+            EXPECT_EQ(manager.cache_event_publisher_->status().accepted_count, 2u);
+            manager.stopCacheEventPublisher();
+        }
+    }
+}
+
+TEST_F(KVCacheManagerTest, EventPublisherRejectsEligibleNonDeviceGroup) {
+    ScopedEnvVar no_proxy("no_proxy", "*");
+    ScopedEnvVar upper_no_proxy("NO_PROXY", "*");
+    for (const auto placement : {CacheMemoryPlacement::HOST, CacheMemoryPlacement::HOST_PINNED}) {
+        for (const bool reversed : {false, true}) {
+            SCOPED_TRACE("placement=" + std::to_string(static_cast<int>(placement))
+                         + " reversed=" + std::to_string(reversed));
+            auto config = makeEventPublicationCacheConfig(reversed, placement);
+            RuntimeConfig runtime;
+            runtime.model_name = "event_wiring_model";
+            KVCacheManager manager(config, false, nullptr, makeEventPublicationRuntimeConfig(), {}, runtime);
+            auto full = std::make_shared<FullGroupSet>(
+                std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
+            auto swa = std::make_shared<SWAGroupSet>(2, 1,
+                std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(1)}, nullptr, nullptr);
+            full->initialize(0, config.topologyPtr(), {"full"});
+            swa->initialize(1, config.topologyPtr(), {"swa"});
+            // Keep every eligible tag resolvable so rejection cannot come from a missing tree group.
+            manager.block_tree_cache_ = block_tree_cache_test::makeBlockTreeCacheForTest({full, swa});
+            ASSERT_NE(manager.block_tree_cache_, nullptr);
+            std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(2));
+            resources[0][0].device_blocks = {42};
+            manager.block_tree_cache_->insert({100}, resources, Tier::DEVICE);
+
+            manager.initCacheEventPublisher();
+            EXPECT_EQ(manager.cache_event_publisher_, nullptr);
+            EXPECT_EQ(manager.block_tree_cache_->tree()->event_publisher_, nullptr);
+            EXPECT_TRUE(manager.block_tree_cache_->logicalCacheSnapshot().block_groups.empty());
         }
     }
 }

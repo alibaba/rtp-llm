@@ -2769,7 +2769,7 @@ TEST_F(BlockTreeCacheTest, EventPublicationAddsOnlyAfterHostLoadCompletes) {
 
     auto publisher = std::make_shared<RecordingCachePublisher>();
     cache->setEventPublisher(publisher, {"group0"});
-    EXPECT_TRUE(cache->logicalCacheSnapshot().block_keys.empty());
+    EXPECT_TRUE(cache->logicalCacheSnapshot().block_groups.empty());
 
     BlockTreeMatchResult              result       = cache->match({200});
     std::shared_ptr<LoadAsyncContext> load_context = takeLoadContext(result);
@@ -2786,7 +2786,7 @@ TEST_F(BlockTreeCacheTest, EventPublicationAddsOnlyAfterHostLoadCompletes) {
     ASSERT_EQ(load_context->loadDescs().size(), 1u);
     load_context->setTargetBlocks(0, {request_target});
 
-    EXPECT_TRUE(cache->logicalCacheSnapshot().block_keys.empty());
+    EXPECT_TRUE(cache->logicalCacheSnapshot().block_groups.empty());
     EXPECT_TRUE(publisher->events.empty());
     EXPECT_TRUE(load_context->commit());
 
@@ -2794,7 +2794,7 @@ TEST_F(BlockTreeCacheTest, EventPublicationAddsOnlyAfterHostLoadCompletes) {
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     ASSERT_TRUE(load_context->done());
     EXPECT_TRUE(load_context->success());
-    EXPECT_EQ(cache->logicalCacheSnapshot().block_keys, (std::vector<int64_t>{200}));
+    EXPECT_EQ(cache->logicalCacheSnapshot().block_groups, (std::map<int64_t, std::vector<size_t>>{{200, {0}}}));
     ASSERT_EQ(publisher->events.size(), 1u);
     EXPECT_EQ(publisher->events[0].type, KVCacheEventType::BLOCK_ADD);
     device_pool->decRef(request_targets);
@@ -2807,40 +2807,152 @@ TEST_F(BlockTreeCacheTest, EventPublicationTracksInsertDuplicateAndRealEviction)
     resources[0][0].device_blocks = {42};
     resources[1][0].device_blocks = {43};
     cache_->insert({100, 200}, resources, Tier::DEVICE);
-    EXPECT_EQ(cache_->logicalCacheSnapshot().block_keys, (std::vector<int64_t>{100, 200}));
+    EXPECT_EQ(cache_->logicalCacheSnapshot().block_groups, (std::map<int64_t, std::vector<size_t>>{{100, {0}}, {200, {0}}}));
     const auto version = cache_->logicalCacheSnapshot().version;
     cache_->insert({100, 200}, resources, Tier::DEVICE);
     EXPECT_EQ(cache_->logicalCacheSnapshot().version, version);
     ASSERT_EQ(publisher->events.size(), 2u);
     EXPECT_EQ(publisher->events[0].type, KVCacheEventType::BLOCK_ADD);
     EXPECT_EQ(cache_->evictForGroup("group0", 2), 2);
-    EXPECT_TRUE(cache_->logicalCacheSnapshot().block_keys.empty());
+    EXPECT_TRUE(cache_->logicalCacheSnapshot().block_groups.empty());
     ASSERT_EQ(publisher->events.size(), 4u);
     EXPECT_EQ(publisher->events[2].type, KVCacheEventType::BLOCK_DELETE);
     EXPECT_EQ(publisher->events[3].type, KVCacheEventType::BLOCK_DELETE);
 }
 
-TEST_F(BlockTreeCacheTest, EventPublicationRequiresEveryReusableGroup) {
+TEST_F(BlockTreeCacheTest, EventPublicationTracksComponentsIndependently) {
     auto pools = std::vector<DeviceBlockPoolPtr>{makeStructuralDevicePool(0), makeStructuralDevicePool(1)};
-    std::vector<GroupSetPtr> groups;
-    for (const auto& pool : pools) {
-        groups.push_back(std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{pool}, nullptr, nullptr));
-    }
+    std::vector<GroupSetPtr> groups{
+        std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{pools[0]}, nullptr, nullptr),
+        std::make_shared<SWAGroupSet>(2, 1, std::vector<DeviceBlockPoolPtr>{pools[1]}, nullptr, nullptr)};
     initializeSingleMemberGroupSets(groups, pools);
     auto cache     = makeBlockTreeCacheForTest(std::move(groups));
     auto publisher = std::make_shared<RecordingCachePublisher>();
-    cache->setEventPublisher(publisher, {"group0", "group1"});
-    std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(2));
-    resources[0][0].device_blocks = {42};
-    cache->insert({100}, resources, Tier::DEVICE);
-    EXPECT_TRUE(cache->logicalCacheSnapshot().block_keys.empty());
-    EXPECT_TRUE(publisher->events.empty());
-    resources[0][1].device_blocks = {43};
-    cache->insert({100}, resources, Tier::DEVICE);
-    EXPECT_EQ(cache->logicalCacheSnapshot().block_keys, (std::vector<int64_t>{100}));
-    ASSERT_EQ(publisher->events.size(), 1u);
+    // Publication indices follow this order, not the GroupSet IDs.
+    cache->setEventPublisher(publisher, {"group1", "group0"});
+    std::vector<std::vector<GroupSetResource>> resources(3, std::vector<GroupSetResource>(2));
+    for (size_t i = 0; i < resources.size(); ++i) {
+        resources[i][0].device_blocks = {static_cast<BlockIdxType>(42 + i)};
+    }
+    cache->insert({100, 200, 300}, resources, Tier::DEVICE);
+    EXPECT_EQ(cache->logicalCacheSnapshot().block_groups,
+              (std::map<int64_t, std::vector<size_t>>{{100, {1}}, {200, {1}}, {300, {1}}}));
+    ASSERT_EQ(publisher->events.size(), 3u);
+    for (const auto& event : publisher->events) {
+        EXPECT_EQ(event.group_index, 1u);
+    }
+
+    // The SWA window exists only at the final two keys; FULL history stays published.
+    resources[1][1].device_blocks = {45};
+    resources[2][1].device_blocks = {46};
+    cache->insert({100, 200, 300}, resources, Tier::DEVICE);
+    const auto complete = cache->logicalCacheSnapshot();
+    EXPECT_EQ(complete.block_groups,
+              (std::map<int64_t, std::vector<size_t>>{{100, {1}}, {200, {0, 1}}, {300, {0, 1}}}));
+    ASSERT_EQ(publisher->events.size(), 5u);
+    EXPECT_EQ(publisher->events[3].group_index, 0u);
+    EXPECT_EQ(publisher->events[4].group_index, 0u);
+    cache->insert({100, 200, 300}, resources, Tier::DEVICE);
+    EXPECT_EQ(cache->logicalCacheSnapshot().version, complete.version);
+    EXPECT_EQ(publisher->events.size(), 5u);
     EXPECT_THROW(cache->setEventPublisher(publisher, {"missing"}), std::invalid_argument);
-    EXPECT_EQ(cache->logicalCacheSnapshot().block_keys, (std::vector<int64_t>{100}));
+    EXPECT_EQ(cache->logicalCacheSnapshot().block_groups, complete.block_groups);
+
+    // A failed demotion retracts/restores only the affected component.
+    TreeNode* node = cache->tree()->findNode({100, 200, 300}).back();
+    const TransferDescriptor desc(node, 1, 0, Tier::DEVICE, Tier::HOST, {46});
+    {
+        std::lock_guard<std::mutex> lock(cache->mutex_);
+        cache->evictor_.reserveSource({desc});
+    }
+    EXPECT_EQ(cache->logicalCacheSnapshot().block_groups.at(300), (std::vector<size_t>{1}));
+    ASSERT_EQ(publisher->events.size(), 6u);
+    EXPECT_EQ(publisher->events.back().type, KVCacheEventType::BLOCK_DELETE);
+    EXPECT_EQ(publisher->events.back().group_index, 0u);
+    {
+        std::lock_guard<std::mutex> lock(cache->mutex_);
+        cache->evictor_.restoreSource({desc});
+    }
+    EXPECT_EQ(cache->logicalCacheSnapshot().block_groups, complete.block_groups);
+    EXPECT_EQ(publisher->events.back().type, KVCacheEventType::BLOCK_ADD);
+    EXPECT_EQ(publisher->events.back().group_index, 0u);
+
+    publisher->result = PublishResult::QUEUE_FULL;
+    EXPECT_EQ(cache->evictForGroup("group1", 2), 2);
+    const auto snapshot = cache->logicalCacheSnapshot();
+    EXPECT_EQ(snapshot.block_groups,
+              (std::map<int64_t, std::vector<size_t>>{{100, {1}}, {200, {1}}, {300, {1}}}));
+    std::map<int64_t, std::vector<size_t>> replayed;
+    for (const auto& event : publisher->events) {
+        auto& components = replayed[event.block_key];
+        if (event.type == KVCacheEventType::BLOCK_ADD) {
+            components.push_back(event.group_index);
+            std::sort(components.begin(), components.end());
+        } else {
+            components.erase(std::remove(components.begin(), components.end(), event.group_index), components.end());
+            if (components.empty()) {
+                replayed.erase(event.block_key);
+            }
+        }
+    }
+    EXPECT_EQ(replayed, snapshot.block_groups);
+}
+
+TEST_F(BlockTreeCacheTest, EventPublicationRequiresEveryMemberOfSharedGroupSet) {
+    auto pools = std::vector<DeviceBlockPoolPtr>{makeStructuralDevicePool(0), makeStructuralDevicePool(1)};
+    auto group = std::make_shared<FullGroupSet>(pools, nullptr, nullptr);
+    initializeTestGroupSet(group, pools);
+    auto cache     = makeBlockTreeCacheForTest({group});
+    auto publisher = std::make_shared<RecordingCachePublisher>();
+    cache->setEventPublisher(publisher, {"group1", "group0"});
+
+    std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
+    resources[0][0].device_blocks = {42, 43};
+    cache->insert({100}, resources, Tier::DEVICE);
+    const auto complete = cache->logicalCacheSnapshot();
+    EXPECT_EQ(complete.block_groups, (std::map<int64_t, std::vector<size_t>>{{100, {0, 1}}}));
+    ASSERT_EQ(publisher->events.size(), 2u);
+
+    TreeNode* node = cache->tree()->findNode({100}).front();
+    const std::vector<BlockIdList> incomplete_values{{42}, {42, NULL_BLOCK_IDX}, {NULL_BLOCK_IDX, 43}};
+    for (const auto& incomplete : incomplete_values) {
+        const size_t event_count = publisher->events.size();
+        KVCacheSnapshot incomplete_snapshot;
+        KVCacheSnapshot restored_snapshot;
+        {
+            std::lock_guard<std::mutex> lock(cache->mutex_);
+            auto& resource = node->group_set_resources[0];
+            // Keep pool ownership intact while checking partial member representations.
+            resource.device_blocks = incomplete;
+            cache->tree()->refreshPublishedState(node);
+            incomplete_snapshot = cache->tree()->logicalCacheSnapshot();
+            resource.device_blocks = resources[0][0].device_blocks;
+            cache->tree()->refreshPublishedState(node);
+            restored_snapshot = cache->tree()->logicalCacheSnapshot();
+        }
+        EXPECT_TRUE(incomplete_snapshot.block_groups.empty());
+        EXPECT_EQ(restored_snapshot.block_groups, complete.block_groups);
+        ASSERT_EQ(publisher->events.size(), event_count + 4);
+        for (size_t member = 0; member < 2; ++member) {
+            const auto& removed = publisher->events[event_count + member];
+            EXPECT_EQ(removed.type, KVCacheEventType::BLOCK_DELETE);
+            EXPECT_EQ(removed.block_key, 100);
+            EXPECT_EQ(removed.group_index, member);
+            const auto& restored = publisher->events[event_count + 2 + member];
+            EXPECT_EQ(restored.type, KVCacheEventType::BLOCK_ADD);
+            EXPECT_EQ(restored.block_key, 100);
+            EXPECT_EQ(restored.group_index, member);
+        }
+    }
+
+    const size_t event_count = publisher->events.size();
+    EXPECT_EQ(cache->evictForGroup("group0", 1), 1);
+    EXPECT_TRUE(cache->logicalCacheSnapshot().block_groups.empty());
+    ASSERT_EQ(publisher->events.size(), event_count + 2);
+    for (size_t member = 0; member < 2; ++member) {
+        EXPECT_EQ(publisher->events[event_count + member].type, KVCacheEventType::BLOCK_DELETE);
+        EXPECT_EQ(publisher->events[event_count + member].group_index, member);
+    }
 }
 
 TEST_F(BlockTreeCacheTest, EventPublicationWithdrawsDuringDemotionAndRestoresAfterFailure) {
@@ -2855,12 +2967,12 @@ TEST_F(BlockTreeCacheTest, EventPublicationWithdrawsDuringDemotionAndRestoresAft
         std::lock_guard<std::mutex> lock(cache_->mutex_);
         cache_->evictor_.reserveSource({desc});
     }
-    EXPECT_TRUE(cache_->logicalCacheSnapshot().block_keys.empty());
+    EXPECT_TRUE(cache_->logicalCacheSnapshot().block_groups.empty());
     {
         std::lock_guard<std::mutex> lock(cache_->mutex_);
         cache_->evictor_.restoreSource({desc});
     }
-    EXPECT_EQ(cache_->logicalCacheSnapshot().block_keys, (std::vector<int64_t>{100}));
+    EXPECT_EQ(cache_->logicalCacheSnapshot().block_groups, (std::map<int64_t, std::vector<size_t>>{{100, {0}}}));
     ASSERT_EQ(publisher->events.size(), 3u);
     EXPECT_EQ(publisher->events[1].type, KVCacheEventType::BLOCK_DELETE);
     EXPECT_EQ(publisher->events[2].type, KVCacheEventType::BLOCK_ADD);
@@ -2873,10 +2985,10 @@ TEST_F(BlockTreeCacheTest, EventSnapshotRemainsAuthoritativeWhenTransportQueueIs
     auto publisher    = std::make_shared<RecordingCachePublisher>();
     publisher->result = PublishResult::QUEUE_FULL;
     cache_->setEventPublisher(publisher, {"group0"});
-    EXPECT_EQ(cache_->logicalCacheSnapshot().block_keys, (std::vector<int64_t>{100}));
+    EXPECT_EQ(cache_->logicalCacheSnapshot().block_groups, (std::map<int64_t, std::vector<size_t>>{{100, {0}}}));
     const auto version = cache_->logicalCacheSnapshot().version;
     cache_->evictForGroup("group0", 1);
-    EXPECT_TRUE(cache_->logicalCacheSnapshot().block_keys.empty());
+    EXPECT_TRUE(cache_->logicalCacheSnapshot().block_groups.empty());
     EXPECT_GT(cache_->logicalCacheSnapshot().version, version);
     cache_->setEventPublisher(nullptr, {});
     const auto count              = publisher->events.size();
@@ -2890,15 +3002,15 @@ TEST_F(BlockTreeCacheTest, EventPublicationExcludesHostAndCancelledLoad) {
     auto publisher = std::make_shared<RecordingCachePublisher>();
     cache->setEventPublisher(publisher, {"group0"});
     EXPECT_EQ(cache->getKeySnapshot().keys, (CacheKeysType{200}));
-    EXPECT_TRUE(cache->logicalCacheSnapshot().block_keys.empty());
+    EXPECT_TRUE(cache->logicalCacheSnapshot().block_groups.empty());
     auto result  = cache->match({200});
     auto context = takeLoadContext(result);
     ASSERT_NE(context, nullptr);
-    EXPECT_TRUE(cache->logicalCacheSnapshot().block_keys.empty());
+    EXPECT_TRUE(cache->logicalCacheSnapshot().block_groups.empty());
     context.reset();
     releaseRequestRefsForTest(*cache, result.matched_device_resources);
     BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
-    EXPECT_TRUE(cache->logicalCacheSnapshot().block_keys.empty());
+    EXPECT_TRUE(cache->logicalCacheSnapshot().block_groups.empty());
     EXPECT_TRUE(publisher->events.empty());
 }
 
