@@ -220,6 +220,28 @@ class GlobalQueueProgressTest {
     }
 
     @Test
+    void requeueRestoresTotalQueueCountAfterDeliveryPreparationReleasedIt() throws Exception {
+        try (Fixture f = new Fixture(RoleType.PREFILL)) {
+            f.submit(1L, "b");
+            awaitCondition(() -> f.admitted.contains(1L) && f.scheduler.getQueuedRequestCount() == 0);
+            var future = f.requests.get(1L);
+            f.queueCapacity.decreaseTotalQueueCount(future);
+            assertEquals(0L, f.queueCapacity.globalQueueAndEngineSubQueueCount());
+            f.decodeBlocked.add(1L);
+            var previous = mock(ScheduledRequest.class);
+            when(previous.future()).thenReturn(future);
+            var queue = (GlobalQueueCoordinator) ReflectionTestUtils.getField(f.scheduler, "globalQueue");
+
+            assertTrue(queue.requeue(previous));
+
+            awaitCondition(() -> f.scheduler.getBlockedRequestCount() == 1);
+            assertEquals(1L, f.queueCapacity.globalQueueAndEngineSubQueueCount());
+            future.complete(new Response());
+            awaitCondition(() -> f.queueCapacity.globalQueueAndEngineSubQueueCount() == 0L);
+        }
+    }
+
+    @Test
     void globalQueueWaitIsRecordedOnlyWhenTheRequestLeavesTheQueue() throws Exception {
         try (Fixture f = new Fixture(RoleType.PREFILL)) {
             f.submit(1L, "a");

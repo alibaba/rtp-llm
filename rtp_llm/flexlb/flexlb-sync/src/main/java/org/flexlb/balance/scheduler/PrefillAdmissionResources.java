@@ -49,8 +49,7 @@ final class PrefillAdmissionResources {
         }
     }
 
-    static CapacityBoundary.Attempt<Member> prepareMember(
-            ScheduledRequest item) {
+    static CapacityBoundary.Attempt<Member> prepareMember(ScheduledRequest item) {
         ScheduledRequest.DecodeBinding binding = item.decodeBinding();
         if (binding.isAbsent()) {
             // The committed topology has no independent Decode resource.
@@ -135,9 +134,7 @@ final class PrefillAdmissionResources {
     static IllegalStateException retired(
             String role,
             ScheduledRequest item) {
-        return new IllegalStateException(
-                role + " endpoint generation retired: request_id="
-                        + item.requestId());
+        return new EndpointRetiredException(role, item);
     }
 
     static <T> CapacityBoundary.Attempt<T> accepted(T value) {
@@ -293,8 +290,7 @@ final class PrefillAdmissionResources {
             bound = true;
         }
 
-        public synchronized boolean transferToEndpoint(
-                ScheduledRequest exactItem) {
+        public synchronized boolean transferToEndpoint(ScheduledRequest exactItem) {
             if (closed) {
                 throw new IllegalStateException(
                         "committed admission is closed");

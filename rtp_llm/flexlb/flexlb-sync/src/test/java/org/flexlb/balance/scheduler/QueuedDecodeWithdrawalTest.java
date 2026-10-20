@@ -4,6 +4,7 @@ import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.SchedulingMetadata;
@@ -244,6 +245,131 @@ class QueuedDecodeWithdrawalTest {
     private boolean replace(ScheduledRequest item) {
         return registry.replaceQueuedDecodeReservations(decode, List.of(item.decodeReservation()),
                 "100", 16, 16, 80, capacity);
+    }
+
+    @Test
+    void decodeRetirementReleasesBothEndpointsAndRequeuesOnlyOnce() {
+        var item = queued(26);
+        doAnswer(call -> {
+            verify(item.prefillEp()).settleFailedRequest(item);
+            assertNull(decode.reservationHandle("26"));
+            assertNull(registry.requestSlot("26").activeItem());
+            assertFalse(item.future().isDone());
+            return true;
+        }).when(queue).requeue(item);
+
+        registry.projectDecodeRetirementReservation(decode, item.decodeReservation());
+        registry.projectDecodeRetirementReservation(decode, item.decodeReservation());
+
+        verify(queue, org.mockito.Mockito.times(1)).requeue(item);
+        assertEquals(RequestState.Phase.QUEUED, registry.getRequestState("26", 0).state());
+    }
+
+    @Test
+    void decodeRetirementDuringPublicationWaitsForAdmissionToClose() {
+        var item = queued(27, publishing -> {
+            registry.projectDecodeRetirementReservation(decode, publishing.decodeReservation());
+            registry.projectDecodeRetirementReservation(decode, publishing.decodeReservation());
+            assertNull(registry.requestSlot("27").claimDelivery(publishing,
+                    DeliveryClaimKind.BATCH_ENQUEUE, 1L, () -> {
+                        throw new AssertionError("retired Decode must not receive the route");
+                    }));
+            verify(queue, never()).requeue(any());
+            assertNotNull(registry.requestSlot("27").activeItem());
+        });
+        verify(queue).requeue(item);
+        assertNull(registry.requestSlot("27").activeItem());
+        assertFalse(item.future().isDone());
+    }
+
+    @ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {true, false})
+    void bothEndpointRetirementsDuringPublicationUseOnePendingRequeue(boolean decodeFirst) {
+        var item = queued(33, publishing -> {
+            if (decodeFirst) {
+                registry.projectDecodeRetirementReservation(decode, publishing.decodeReservation());
+                registry.onQueuedWorkerStopped(publishing);
+            } else {
+                registry.onQueuedWorkerStopped(publishing);
+                registry.projectDecodeRetirementReservation(decode, publishing.decodeReservation());
+            }
+            verify(queue, never()).requeue(any());
+        });
+        verify(queue, org.mockito.Mockito.times(1)).requeue(item);
+        verify(item.prefillEp()).settleFailedRequest(item);
+        assertNull(decode.reservationHandle("33"));
+        assertNull(registry.requestSlot("33").activeItem());
+        assertFalse(item.future().isDone());
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = CancelReason.class, names = {"CLIENT_CANCELLED", "DEADLINE_EXCEEDED"})
+    void cancellationWinsOverDeferredDecodeRequeue(CancelReason reason) throws Exception {
+        var item = queued(28, publishing -> {
+            registry.projectDecodeRetirementReservation(decode, publishing.decodeReservation());
+            registry.cancelRequest("28", 0, reason);
+        });
+        assertFalse(item.future().get(2, TimeUnit.SECONDS).isSuccess());
+        verify(queue, never()).requeue(any());
+        assertNull(decode.reservationHandle("28"));
+    }
+
+    @Test
+    void decodePreparationRetirementRequeuesInsteadOfPublishingFailure() {
+        var item = queued(29);
+        decode.close();
+        var prepared = PrefillAdmissionResources.prepareMember(item);
+        assertFalse(prepared.accepted());
+        registry.failDeliveryPreparation(item, prepared.boundary().cause());
+        verify(queue).requeue(item);
+        assertFalse(item.future().isDone());
+        assertNull(registry.requestSlot("29").activeItem());
+    }
+
+    @Test
+    void decodePermitRetirementBeforeDeliveryClaimRequeuesInsteadOfPublishingFailure() {
+        var item = queued(30);
+        var member = PrefillAdmissionResources.prepareMember(item).value();
+        var admission = PrefillAdmissionResources.createCommittedOwner(List.of(member));
+        admission.bindPrefillHandoff(null);
+        decode.close();
+        var failure = assertThrows(EndpointRetiredException.class,
+                () -> registry.claimRouteDelivery(item, admission));
+        registry.failDeliveryPreparation(item, failure);
+        admission.close();
+        verify(queue).requeue(item);
+        assertFalse(item.future().isDone());
+    }
+
+    @Test
+    void prefillBatchRetirementRequeuesInsteadOfPublishingFailure() {
+        var item = queued(34);
+        var failure = PrefillAdmissionResources.rejectedPrefill(
+                item, PrefillState.CapacityStatus.ENDPOINT_RETIRED, null);
+        assertFalse(failure.accepted());
+        registry.failDeliveryPreparation(item, failure.boundary().cause());
+        verify(queue).requeue(item);
+        assertFalse(item.future().isDone());
+        assertNull(registry.requestSlot("34").activeItem());
+    }
+
+    @Test
+    void decodeRetirementAfterDeliveryHandoffDoesNotRequeue() throws Exception {
+        var item = queued(31);
+        assertNotNull(registry.requestSlot("31").claimDelivery(item, DeliveryClaimKind.BATCH_ENQUEUE, 1L, () -> true));
+        registry.projectDecodeRetirementReservation(decode, item.decodeReservation());
+        verify(queue, never()).requeue(any());
+        assertFalse(item.future().get(2, TimeUnit.SECONDS).isSuccess());
+    }
+
+    @Test
+    void closedQueueEndsDecodeRetirementRequeue() throws Exception {
+        var item = queued(32);
+        when(queue.requeue(item)).thenReturn(false);
+        registry.projectDecodeRetirementReservation(decode, item.decodeReservation());
+        assertFalse(item.future().get(2, TimeUnit.SECONDS).isSuccess());
+        assertNull(decode.reservationHandle("32"));
+        assertNull(registry.requestSlot("32").activeItem());
     }
 
     @Test

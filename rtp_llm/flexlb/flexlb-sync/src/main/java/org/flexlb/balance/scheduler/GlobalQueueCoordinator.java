@@ -231,13 +231,24 @@ final class GlobalQueueCoordinator implements AutoCloseable {
     boolean requeue(ScheduledRequest previous) {
         lock.lock();
         try {
-            if (previous.future().isDone()) { return true; }
+            if (previous.future().isDone()) {
+                return true;
+            }
             GlobalQueueEntry entry = registered.get(previous.future());
-            if (closed.get() || entry == null) { return false; }
-            if (!entry.removed) { throw new IllegalStateException("withdrawn route still has a global queue entry"); }
+            if (closed.get() || entry == null) {
+                return false;
+            }
+            if (!entry.removed) {
+                throw new IllegalStateException("withdrawn route still has a global queue entry");
+            }
             entry.context.setPlanType("");
             entry.context.setPlanCost(0L);
             entry.context.setVictimCount(0);
+            queueCapacity.increaseTotalQueueCount(previous.future());
+            if (previous.future().isDone()) {
+                queueCapacity.decreaseTotalQueueCount(previous.future());
+                return true;
+            }
             orderedQueue.restore(entry);
             entry.enteredQueueAtNanos = System.nanoTime();
             changed.signal();

@@ -141,9 +141,8 @@ public final class RequestSlot {
     /** Routing identity survives handoff and is used to reject late facts. */
     private ScheduledRequest item;
     /**
-     * Set when the Prefill Worker stops while this request is still being enqueued to its subqueue (the admission
-     * handle is open). The global queue entry is only marked removed after enqueueing ends, so the requeue has to
-     * wait; finishAdmission requeues this item and clears the field.
+     * A Prefill or Decode retirement invalidated this route during publication. Block delivery until
+     * finishAdmission clears this field and restores the original global queue entry after publication ends.
      */
     private ScheduledRequest itemWhoseWorkerStoppedDuringEnqueue;
 
@@ -523,34 +522,48 @@ public final class RequestSlot {
     }
 
     /**
-     * The Prefill Worker holding this request in its subqueue has stopped before dispatch. Give back the Decode
-     * reservation and put the request back into its original global queue entry so it is routed again.
+     * A selected Prefill or Decode Worker stopped before delivery. Release the old route and select both
+     * endpoints again through the original global queue entry.
      */
     void requeueStoppedWorker(ScheduledRequest itemFromStoppedWorker) {
         synchronized (this) {
-            if (!ownsPreparedDeliveryLocked(itemFromStoppedWorker)) {
+            if (!detachRetiredRouteLocked(itemFromStoppedWorker)) {
                 return;
             }
-            if (admissionHandle != null) {
-                itemWhoseWorkerStoppedDuringEnqueue = itemFromStoppedWorker;
-                return;
-            }
-            item = null;
-            detail = "queued after Prefill worker stopped";
-            updatedAtMs = System.currentTimeMillis();
         }
+        restoreQueueAfterRouteRetirement(itemFromStoppedWorker);
+    }
+
+    private boolean detachRetiredRouteLocked(ScheduledRequest retiredRoute) {
+        if (!ownsPreparedDeliveryLocked(retiredRoute)) {
+            return false;
+        }
+        if (admissionHandle != null) {
+            itemWhoseWorkerStoppedDuringEnqueue = retiredRoute;
+            return false;
+        }
+        item = null;
+        detail = "queued after selected endpoint retired";
+        updatedAtMs = System.currentTimeMillis();
+        return true;
+    }
+
+    private void restoreQueueAfterRouteRetirement(ScheduledRequest retiredRoute) {
         try {
-            DecodeEndpoint.ReservationHandle decodeReservation = itemFromStoppedWorker.decodeReservation();
-            if (decodeReservation != null) {
-                itemFromStoppedWorker.decodeEp().release(decodeReservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
+            // Preparation may still own a committed Prefill reservation, but no route has been delivered.
+            Throwable cleanupFailure = runStep(null, () -> retiredRoute.prefillEp().settleFailedRequest(retiredRoute));
+            if (retiredRoute.decodeReservation() != null) {
+                cleanupFailure = runStep(cleanupFailure, () -> retiredRoute.decodeEp().release(
+                        retiredRoute.decodeReservation(), DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK));
             }
-            if (isOpen() && !globalQueue.requeue(itemFromStoppedWorker)) {
+            rethrowCleanup(cleanupFailure);
+            if (isOpen() && !globalQueue.requeue(retiredRoute)) {
                 terminateLocallyAndPublishResponse(buildErrorResponse(StrategyErrorType.DISPATCH_FAILED,
-                        "scheduler closed during worker requeue"));
+                        "scheduler closed during route retirement requeue"));
             }
         } catch (RuntimeException | Error failure) {
             terminateLocallyAndPublishResponse(buildErrorResponse(StrategyErrorType.DISPATCH_FAILED,
-                    "worker requeue failed: " + failure.getMessage()));
+                    "route retirement requeue failed: " + failure.getMessage()));
             throw failure;
         }
     }
@@ -623,6 +636,9 @@ public final class RequestSlot {
                     admissionHandle = null;
                     withdrawingRoute = null;
                     effect = settleAdmissionLocked(failureResponse);
+                    if (itemToRequeue != null && !detachRetiredRouteLocked(itemToRequeue)) {
+                        itemToRequeue = null;
+                    }
                 }
                 cleanupPending = cleanupProgress != null;
             }
@@ -632,7 +648,7 @@ public final class RequestSlot {
                 execute(effect);
             }
             if (itemToRequeue != null) {
-                requeueStoppedWorker(itemToRequeue);
+                restoreQueueAfterRouteRetirement(itemToRequeue);
             }
         } catch (Throwable settlementFailure) {
             failure = settlementFailure;
@@ -766,6 +782,7 @@ public final class RequestSlot {
     private boolean ownsPreparedDeliveryLocked(ScheduledRequest exact) {
         requireSlotLock("delivery eligibility");
         return ownsActiveItem(exact) && isOpen() && preemption == null && withdrawingRoute == null
+                && itemWhoseWorkerStoppedDuringEnqueue == null
                 && state == RequestState.Phase.QUEUED && deliveryClaimKind == DeliveryClaimKind.NONE;
     }
 
@@ -883,9 +900,15 @@ public final class RequestSlot {
     }
 
     void failDeliveryPreparation(ScheduledRequest exact, Throwable cause) {
+        if (queueScheduling && cause instanceof EndpointRetiredException) {
+            requeueStoppedWorker(exact);
+            return;
+        }
         SelectedPublication response;
         synchronized (this) {
-            if (!ownsPreparedDeliveryLocked(exact)) { return; }
+            if (!ownsPreparedDeliveryLocked(exact)) {
+                return;
+            }
             response = selectDeliveryFailureLocked(exact, DeliveryResult.Status.NOT_SENT,
                     "Delivery preparation failed: " + detailOf(cause));
         }
@@ -1182,11 +1205,28 @@ public final class RequestSlot {
 
     void recordDecodeRetirement(DecodeEndpoint source, DecodeEndpoint.ReservationHandle exact) {
         RequestEffect work;
+        ScheduledRequest retiredRoute;
         synchronized (this) {
-            work = applyDecodeRetirementLocked(source, exact,
-                            "Decode endpoint generation retired: generation=" + exact.endpointGenerationId());
+            if (ownsDecodeFactLocked(source, exact) && itemWhoseWorkerStoppedDuringEnqueue == item) {
+                return;
+            }
+            retiredRoute = queueScheduling && ownsDecodeFactLocked(source, exact)
+                    && ownsPreparedDeliveryLocked(item) ? item : null;
+            if (retiredRoute == null) {
+                work = applyDecodeRetirementLocked(source, exact,
+                        "Decode endpoint generation retired: generation=" + exact.endpointGenerationId());
+            } else {
+                work = RequestEffect.DEFERRED;
+                if (!detachRetiredRouteLocked(retiredRoute)) {
+                    retiredRoute = null;
+                }
+            }
         }
-        execute(work);
+        if (retiredRoute != null) {
+            restoreQueueAfterRouteRetirement(retiredRoute);
+        } else {
+            execute(work);
+        }
     }
 
     private RequestEffect applyDecodeRetirementLocked(
