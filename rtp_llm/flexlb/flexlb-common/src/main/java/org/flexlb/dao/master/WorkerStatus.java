@@ -242,6 +242,7 @@ public class WorkerStatus {
     private final AtomicReference<CacheIndexSnapshot> cacheIndexSnapshot =
             new AtomicReference<>(new CacheIndexSnapshot(null, false, -1L));
     private final AtomicLong cacheLastUpdateTime = new AtomicLong(-1L);
+    private final AtomicLong lastCachePollCycle = new AtomicLong(Long.MIN_VALUE);
 
     private final AtomicReference<PollLease> statusPollLease =
             new AtomicReference<>();
@@ -547,6 +548,14 @@ public class WorkerStatus {
                 "indexed cache version must match current cache status");
         cacheIndexSnapshot.set(new CacheIndexSnapshot(
                 current.cacheStatus(), true, version));
+    }
+
+    /** Preserve cache cadence when a coalesced discovery cycle crosses a due tick. */
+    public boolean shouldPollCache(long cycleId, long intervalCycles) {
+        checkArgument(intervalCycles > 0L, "cache poll interval must be positive");
+        long previous = lastCachePollCycle.getAndAccumulate(cycleId, Math::max);
+        return cycleId >= previous && (cycleId % intervalCycles == 0L
+                || previous != Long.MIN_VALUE && cycleId / intervalCycles > previous / intervalCycles);
     }
 
     public long recordSuccessfulCachePoll() {

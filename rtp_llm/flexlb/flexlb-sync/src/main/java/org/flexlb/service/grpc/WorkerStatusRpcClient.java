@@ -40,7 +40,7 @@ public class WorkerStatusRpcClient {
             long requestTimeoutMs, RoleType roleType) {
         boolean needCacheKeys = roleType.requiresCacheKeys();
         EngineRpcService.CacheVersionPB request = EngineRpcService.CacheVersionPB.newBuilder()
-                .setLatestCacheVersion((int) cacheVersion)
+                .setLatestCacheVersion(cacheVersion)
                 .setNeedCacheKeys(needCacheKeys)
                 .build();
         logger.debug("Get cache status Request: {}, cacheVersion: {}, needCacheKeys: {}",

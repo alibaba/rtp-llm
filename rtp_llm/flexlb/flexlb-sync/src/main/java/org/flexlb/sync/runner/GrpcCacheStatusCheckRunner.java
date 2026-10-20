@@ -91,7 +91,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
             // cache polling uses an integer number of those ticks so a changing
             // interval does not require a second scheduler or timer.
             if (roleType.requiresCacheKeys()
-                        && syncCount.longValue() % roundInterval != 0) {
+                        && !workerStatus.shouldPollCache(syncCount.longValue(), roundInterval)) {
                 logger.debug("Skip prefill cache status check for {} because not in {}ms interval", ipPort, prefillCacheStatusCheckInterval);
                 return; // The synchronous scope still owns the poll lease.
             }
