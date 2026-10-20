@@ -190,7 +190,7 @@ void RtpEmbeddingOp::stop() {
         grpc_server_.reset();
     }
     embedding_grpc_service_.reset();
-    stopKmonitorFactory();
+    // KMonitorFactory is process-wide; other ops and sub-reporters may still use it.
 }
 
 void RtpEmbeddingOp::startHttpServer(std::shared_ptr<EmbeddingEngine>     embedding_engine,

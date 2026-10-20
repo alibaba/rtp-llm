@@ -521,7 +521,7 @@ void RtpLLMOp::stop() {
             pybind11::gil_scoped_release release;
             telemetry::TelemetryRuntime::shutdown();
         }
-        stopKmonitorFactory();
+        // KMonitorFactory is process-wide; other ops and sub-reporters may still use it.
     }
 }
 
