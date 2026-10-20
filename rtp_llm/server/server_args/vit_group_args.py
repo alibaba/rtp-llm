@@ -225,21 +225,13 @@ def init_vit_group_args(parser, vit_config):
         help="多模态 CPU 预处理进程池的进程数量（不是 GPU forward 并发）",
     )
     vit_group.add_argument(
-        "--mm_preprocess_num_threads",
-        env_name="MM_PREPROCESS_NUM_THREADS",
-        bind_to=(vit_config, "mm_preprocess_num_threads"),
-        type=int,
-        default=0,
-        help="每个 CPU 预处理进程的 Torch intra-op 线程数；0 保留默认，不改变主进程",
-    )
-    vit_group.add_argument(
         "--gpu_prefetch_batches",
         env_name="GPU_PREFETCH_BATCHES",
         bind_to=(vit_config, "gpu_prefetch_batches"),
         type=int,
         choices=[0, 1],
-        default=0,
-        help="提前收集/上传至多 1 个 batch；默认 0，不增加 GPU forward 并发",
+        default=vit_config.gpu_prefetch_batches,
+        help="提前收集/上传至多 1 个 batch；默认 1，设 0 关闭，不增加 GPU forward 并发",
     )
     vit_group.add_argument(
         "--biencoder_preprocess",
@@ -395,24 +387,8 @@ def init_vit_group_args(parser, vit_config):
         env_name="VIT_GPU_MAX_BATCH_SIZE",
         bind_to=(vit_config, "gpu_max_batch_size"),
         type=int,
-        default=1,
-        help="GPU batch调度最大batch大小(请求数)；=1 为串行(每forward一个请求，不合批)，>1 开启跨请求合批",
-    )
-    vit_group.add_argument(
-        "--gpu_max_batch_images",
-        env_name="VIT_GPU_MAX_BATCH_IMAGES",
-        bind_to=(vit_config, "gpu_max_batch_images"),
-        type=int,
-        default=200,
-        help="防止单次forward OOM。单个batch内的最大原始图片/媒体数；同时限制单个请求的最大图片数，",
-    )
-    vit_group.add_argument(
-        "--mm_max_queue_size",
-        env_name="MM_MAX_QUEUE_SIZE",
-        bind_to=(vit_config, "mm_max_queue_size"),
-        type=int,
-        default=1024,
-        help="mm embedding调度器等待队列容量上限；超出时提交快速失败并返回过载错误，防止forward卡住时内存无界增长",
+        default=vit_config.gpu_max_batch_size,
+        help="=1 保留逐请求串行模式；>1 开启合批，同一上限约束工作块数和原始媒体总数；模型工作量预算可进一步限制",
     )
 
     vit_group.add_argument(
@@ -447,7 +423,7 @@ def init_vit_group_args(parser, vit_config):
         env_name="VIT_CONCURRENCY",
         bind_to=(vit_config, "vit_concurrency"),
         type=int,
-        default=64,
+        default=vit_config.vit_concurrency,
         help="ViT 异步计算的最大并发数",
     )
 
@@ -456,8 +432,8 @@ def init_vit_group_args(parser, vit_config):
         env_name="VIT_MAX_QUEUE_SIZE",
         bind_to=(vit_config, "vit_max_queue_size"),
         type=int,
-        default=64,
-        help="ViT 异步计算等待队列的最大任务数",
+        default=vit_config.vit_max_queue_size,
+        help="ViT 异步计算的额外等待任务数；GPU 就绪队列容量由 VIT_CONCURRENCY 加此值派生，满时拒绝新任务",
     )
 
     vit_group.add_argument(

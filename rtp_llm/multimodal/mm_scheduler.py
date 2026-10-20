@@ -408,7 +408,7 @@ class MMScheduler:
             if n_images > self._max_batch_images:
                 raise MMSchedulerRequestTooLargeError(
                     f"single work item image count {n_images} exceeds "
-                    f"gpu_max_batch_images {self._max_batch_images}; "
+                    f"batch media limit {self._max_batch_images}; "
                     "the model preprocess batch is not splittable"
                 )
             work_estimate = getattr(work_item, "work_estimate", None)
@@ -447,7 +447,7 @@ class MMScheduler:
             if n_images > self._max_batch_images:
                 raise MMSchedulerRequestTooLargeError(
                     f"request image count {n_images} exceeds "
-                    f"gpu_max_batch_images {self._max_batch_images}, "
+                    f"batch media limit {self._max_batch_images}, "
                     "request rejected"
                 )
             request.chunks = [
@@ -488,7 +488,7 @@ class MMScheduler:
             if item_images > self._max_batch_images:
                 raise MMSchedulerRequestTooLargeError(
                     f"single work item image count {item_images} exceeds "
-                    f"gpu_max_batch_images {self._max_batch_images}; "
+                    f"batch media limit {self._max_batch_images}; "
                     "the model preprocess batch is not splittable"
                 )
 

@@ -1,0 +1,11 @@
+# Optional model-plugin dependencies, layered on the existing CUDA13 runtime.
+# This file does not replace the shared Bazel requirements locks. Environments
+# enabling the SM10x BF16 V4.1 vision FFN must provision this plugin explicitly,
+# like the model's FA4 plugin; runtime code never installs packages or changes
+# sys.path. No broad dependency-lock update is part of this source-only change.
+#
+# Official source used in the FFN operator screen (Quack version 0.6.5).
+# Pin the commit/archive, not a potentially different release with that version.
+quack-kernels @ https://codeload.github.com/Dao-AILab/quack/tar.gz/77a750c0d9548d4a6e23c0f64062d61b3ea420ff#sha256=ebc940da966e88a05be318c3dc3f650a7359a281642f8f2f77c28ba4e9affa05
+nvidia-cutlass-dsl==4.7.1
+apache-tvm-ffi==0.1.12

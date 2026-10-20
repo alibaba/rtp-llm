@@ -58,15 +58,11 @@ _worker_vit_config: Optional[VitConfig] = None
 _worker_preprocess_params: Optional[dict] = None
 _worker_preprocess_func: Optional[Callable] = None
 
-# Experimental until the matched CPU/normal-path performance gates pass.
-_FAST_INPUT_METADATA = os.environ.get("RTP_MM_FAST_INPUT_METADATA", "0") == "1"
-
 
 def _input_has_url(mm_input: MultimodalInput) -> bool:
-    if _FAST_INPUT_METADATA:
-        native_check = getattr(mm_input, "has_url", None)
-        if callable(native_check):
-            return bool(native_check())
+    native_check = getattr(mm_input, "has_url", None)
+    if callable(native_check):
+        return bool(native_check())
     # Keep compatibility with Python-only input fixtures/providers.
     return mm_input.url != ""
 
@@ -74,7 +70,7 @@ def _input_has_url(mm_input: MultimodalInput) -> bool:
 def _acquire_input_cache(
     cache: MMEmbeddingCache, mm_input: MultimodalInput, *, require_key: bool = False
 ):
-    if _FAST_INPUT_METADATA and not require_key:
+    if not require_key:
         return cache.try_acquire_lazy(mm_input.cache_key)
     key = mm_input.cache_key()
     state, entry = cache.try_acquire(key)
@@ -159,11 +155,6 @@ def _worker_initializer(
     global _worker_vit_config, _worker_preprocess_params, _worker_preprocess_func
     # 让工作进程忽略 SIGINT 信号，这样主进程的 Ctrl+C 不会杀死它们
     signal.signal(signal.SIGINT, signal.SIG_IGN)
-    # Only the long-lived spawned CPU worker is changed. The scheduler/parent
-    # keeps its own thread budget; 32 workers need not each create 8 ATen threads.
-    worker_threads = getattr(vit_config, "mm_preprocess_num_threads", 0)
-    if worker_threads > 0:
-        torch.set_num_threads(worker_threads)
     _worker_vit_config = vit_config
     _worker_preprocess_params = preprocess_params
     _worker_preprocess_func = preprocess_func
@@ -343,10 +334,6 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
         preprocess_func: Callable,
     ):
         self.mp_context = mp_context
-        # Validate before spawning: a failing Pool initializer can respawn forever.
-        worker_threads = getattr(vit_config, "mm_preprocess_num_threads", 0)
-        if not isinstance(worker_threads, int) or worker_threads < 0:
-            raise ValueError("mm_preprocess_num_threads must be a non-negative int")
         self.vit_config = vit_config
         self.preprocess_params = preprocess_params
         self.preprocess_func = preprocess_func
@@ -837,8 +824,9 @@ class MMProcessEngine:
                 f"MMProcessEngine: Using MULTIPROCESS preprocessing mode with {vit_config.mm_preprocess_max_workers} workers"
             )
 
-        async_compute_workers = max(1, int(vit_config.vit_concurrency))
-        async_queue_size = max(0, int(vit_config.vit_max_queue_size))
+        async_limits = vit_config.async_compute_executor_args()
+        async_compute_workers = async_limits["max_workers"]
+        async_queue_size = async_limits["max_queue_size"]
         self._async_compute_executor = concurrent.futures.ThreadPoolExecutor(
             max_workers=async_compute_workers,
             thread_name_prefix="mm-async-compute",
@@ -870,8 +858,8 @@ class MMProcessEngine:
                 mm_part=mm_part,
                 device=self.device,
                 forward_profiler=self.profiler.profile_forward,
-                prefetch_fill_batch=os.environ.get("RTP_MM_PREFETCH_FILL_BATCH", "0")
-                == "1",
+                # Fill the existing bounded lookahead whenever it is provisioned.
+                prefetch_fill_batch=bool(scheduler_args.get("prefetch_batches", 0)),
                 **scheduler_args,
             )
         except Exception:

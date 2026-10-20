@@ -1,4 +1,4 @@
-"""Opt-in, byte-preserving BF16 SiLU/multiply candidate for vision MLPs.
+"""Byte-preserving BF16 SiLU/multiply fallback for vision MLPs.
 
 The reference is ``F.silu(gate) * up``: ATen first rounds SiLU to BF16,
 then promotes those BF16 values and ``up`` for the multiply. Existing fused
@@ -14,10 +14,9 @@ There is deliberately no eviction: captured graphs may retain table addresses.
 Warm this helper on each execution stream before measuring or graph capture.
 Cold graph capture returns None; supported execution errors propagate.
 
-The production vision MLP selects this helper with V41_VISION_SILU_MUL_FUSED
-(default off) and retains the original path when it returns None. This module
-does not enable itself. Numerical and performance acceptance require the
-independent Bazel GPU gates.
+The production vision MLP uses this helper when its fused GEMM path is
+unsupported and retains the original expression when this helper returns
+None. The lookup preserves the original BF16 rounding boundary.
 """
 
 import threading

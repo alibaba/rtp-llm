@@ -369,9 +369,6 @@ class VitConfig:
         self.igraph_table_name: str = ""
         self.default_key: Optional[str] = None
         self.mm_preprocess_max_workers: int = 4
-        # CPU worker intra-op threads, independent of the GPU owner's setting.
-        # Zero preserves the inherited runtime default; never changes the parent.
-        self.mm_preprocess_num_threads: int = 0
         self.vit_concurrency: int = 64
         self.vit_max_queue_size: int = 64
         self.vit_source_download_concurrency: int = 0
@@ -384,26 +381,37 @@ class VitConfig:
         self.use_local_preprocess: bool = False
         self.vit_proxy_load_balance_strategy: str = "round_robin"
         self.output_transport = MMTransportConfig()
-        # Cross-request GPU batching is inferred from gpu_max_batch_size alone:
-        # == 1 -> serial (one request per forward, no wait window); > 1 -> merge
-        # compatible requests within gpu_batch_wait_ms. Default 1 keeps the old
-        # serial behavior (there is no separate on/off switch).
+        # One public batch limit: >1 caps both collected chunks and media.
+        # ==1 preserves the legacy serial, whole-request execution policy.
+        # Model-specific patch/workspace budgets may lower the effective batch.
         self.gpu_batch_wait_ms: int = 10
         self.gpu_max_batch_size: int = 1
-        self.gpu_max_batch_images: int = 200
-        # Opt-in, bounded one-batch collect/upload lookahead (not GPU forwards).
-        self.gpu_prefetch_batches: int = 0
-        # Bound on the mm embedding scheduler's waiting queue. Caps memory when a
-        # forward stalls and requests pile up; over capacity, submit fails fast
-        # with an overload error instead of growing unbounded. Scheduler-level
-        # (like mm_timeout_ms): applies to serial and batch alike.
-        self.mm_max_queue_size: int = 1024
+        # Bounded one-batch collect/upload lookahead; never a second forward lane.
+        self.gpu_prefetch_batches: int = 1
+
+    def async_compute_executor_args(self) -> Dict[str, int]:
+        """Resolve the existing async admission policy in one place."""
+        return {
+            "max_workers": max(1, int(self.vit_concurrency)),
+            "max_queue_size": max(0, int(self.vit_max_queue_size)),
+        }
+
+    def embedding_queue_capacity(self) -> int:
+        """Bound ready GPU work by the same total async admission budget.
+
+        Active async tasks can all wait for GPU execution, so the ready queue
+        needs workers + waiting slots, not just the extra waiting slots.
+        Sync callers bypass async admission but still use this bounded queue.
+        This is a derived per-stage capacity, not a shared global semaphore.
+        """
+        limits = self.async_compute_executor_args()
+        return limits["max_workers"] + limits["max_queue_size"]
 
     def embedding_scheduler_args(self) -> Dict[str, int]:
         """Resolved MMScheduler kwargs, inferred from gpu_max_batch_size alone.
 
         gpu_max_batch_size > 1 -> cross-request GPU batching with the gpu_* limits;
-        gpu_max_batch_images caps each forward. Models with work estimates may
+        the same limit caps chunks and media. Models with work estimates may
         split a request across bounded forwards; other models keep the whole-request
         image cap. gpu_batch_wait_ms is the collect window.
         gpu_max_batch_size == 1 -> serial: one request per forward, no wait window
@@ -429,10 +437,8 @@ class VitConfig:
             # waits, so the configured gpu_batch_wait_ms has no effect.
             "batch_wait_ms": 0 if is_serial else self.gpu_batch_wait_ms,
             "max_batch_size": self.gpu_max_batch_size,
-            "max_batch_images": (
-                sys.maxsize if is_serial else self.gpu_max_batch_images
-            ),
-            "max_queue_size": self.mm_max_queue_size,
+            "max_batch_images": (sys.maxsize if is_serial else self.gpu_max_batch_size),
+            "max_queue_size": self.embedding_queue_capacity(),
         }
         if self.gpu_prefetch_batches:
             result["prefetch_batches"] = self.gpu_prefetch_batches
@@ -443,7 +449,6 @@ class VitConfig:
         control = transport.control
         rdma = transport.rdma
         return (
-            f"mm_preprocess_num_threads: {self.mm_preprocess_num_threads}\n"
             f"gpu_prefetch_batches: {self.gpu_prefetch_batches}\n"
             f"vit_separation: {self.vit_separation}\n"
             f"vit_trt: {self.vit_trt}\n"
@@ -490,9 +495,7 @@ class VitConfig:
             f"mm_rdma_max_slot_bytes: {rdma.max_slot_bytes}\n"
             f"mm_rdma_max_receipt_bytes: {rdma.max_receipt_bytes}\n"
             f"gpu_batch_wait_ms: {self.gpu_batch_wait_ms}\n"
-            f"gpu_max_batch_size: {self.gpu_max_batch_size}\n"
-            f"gpu_max_batch_images: {self.gpu_max_batch_images}\n"
-            f"mm_max_queue_size: {self.mm_max_queue_size}"
+            f"gpu_max_batch_size: {self.gpu_max_batch_size}"
         )
 
 
