@@ -380,6 +380,16 @@ absl::Status StreamCacheResource::incrKVBlock(int seq_len_override, int prefill_
     if (fake_inited_) {
         return absl::InternalError("fake inited not allow to incr block");
     }
+    if (prefill_chunk_start >= 0) {
+        // The allocator releases whole blocks before this point; a misaligned
+        // start would evict another stream's cache instead of our own prefix.
+        const int block_size = seqSizePerBlock();
+        if (block_size <= 0 || prefill_chunk_start % block_size != 0
+            || (seq_len_override >= 0 && prefill_chunk_start >= seq_len_override)) {
+            return absl::InvalidArgumentError(
+                "prefill_chunk_start must be block-aligned and inside the chunk window");
+        }
+    }
 
     MallocInfo malloc_info;
     malloc_info.batch_kv_cache_resource      = batch_kv_cache_resource_;

@@ -755,6 +755,8 @@ class Dsv4PlanTest(unittest.TestCase):
             env = {
                 **PREFILL_EXECUTION_OPTIONS,
                 "DSV4_TASK_RUN": f"/tmp/run/rank{rank}",
+                "DSV4_PROFILE_TRACE": f"/tmp/trace/rank{rank}.json",
+                "DSV4_TRITON_WARMUP_TMPDIR": f"/tmp/triton/rank{rank}",
                 "MOEDBG_DIR": f"/tmp/dumps/rank{rank}",
                 "WORLD_RANK": str(rank),
                 "DSV4_INDEXER_TOPK_BACKEND": "sglang",

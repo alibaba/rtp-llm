@@ -31,12 +31,23 @@ def get_registry():
     return get_module_registry(register_modules)
 
 
+_PROCESS_PRIVATE_OPTIONS = frozenset(
+    {
+        "DSV4_TASK_RUN",
+        "DSV4_PROFILE_TRACE",
+        "DSV4_MEGA_MOE_NVCC_TMPDIR",
+        "DSV4_TRITON_WARMUP_TMPDIR",
+    }
+)
+
+
 def execution_options_snapshot(environ):
     """Compare execution choices without process ownership/output paths."""
     return {
         key: value
         for key, value in environ.items()
-        if (key.startswith("DSV4_") and key != "DSV4_TASK_RUN") or key == "MOEDBG"
+        if (key.startswith("DSV4_") and key not in _PROCESS_PRIVATE_OPTIONS)
+        or key == "MOEDBG"
     }
 
 

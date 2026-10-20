@@ -94,9 +94,14 @@ silu_and_mul(__nv_bfloat162 gate, __nv_bfloat162 up, float swiglu_limit, float* 
   return __hmul2(up, silu);
 }
 
+template <int kThreadsPerBlock>
 __device__ __forceinline__ float group_reduce_max(float v) {
-  v = fmaxf(v, __shfl_xor_sync(0xFFFFFFFFu, v, 2));
-  v = fmaxf(v, __shfl_xor_sync(0xFFFFFFFFu, v, 1));
+  constexpr unsigned kMask =
+      kThreadsPerBlock >= 32 ? 0xFFFFFFFFu : ((1u << kThreadsPerBlock) - 1u);
+#pragma unroll
+  for (int offset = kThreadsPerGroup >> 1; offset > 0; offset >>= 1) {
+    v = fmaxf(v, __shfl_xor_sync(kMask, v, offset));
+  }
   return v;
 }
 
@@ -238,7 +243,7 @@ __global__ __launch_bounds__(kBlockN / kElemPerThread, 1) void silu_and_mul_mask
       local_absmax = fmaxf(__bfloat162float(__low2bfloat16(absmax_v2)), __bfloat162float(__high2bfloat16(absmax_v2)));
     }
 
-    local_absmax = fmaxf(group_reduce_max(local_absmax), kAbsmaxFloor);
+    local_absmax = fmaxf(group_reduce_max<kThreadsPerBlock>(local_absmax), kAbsmaxFloor);
 
     float quant_scale;
     uint8_t scale_byte;
