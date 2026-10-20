@@ -224,7 +224,7 @@ class CostBasedPrefillSelectionMetricTest {
                 assertEquals("10.0.0.2", selected.serverStatus().getServerIp());
             }
         } finally {
-            occupants.forEach(endpoint::releaseCommittedItem);
+            occupants.forEach(item -> endpoint.releaseCommittedItem(item.execution()));
             reservations.forEach(org.flexlb.balance.endpoint.PrefillState.RouteReservation::close);
         }
     }

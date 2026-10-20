@@ -115,7 +115,7 @@ class RequestInactivityTest {
         assertExpiredAndReleased(RequestState.Phase.TIMED_OUT);
 
         // A delayed status or timer callback cannot reopen or double-release this generation.
-        registry.processPrefillStatus(prefill, RoleType.PREFILL, PrefillState.WorkerStatusFact.active(item));
+        registry.processPrefillStatus(prefill, RoleType.PREFILL, PrefillState.WorkerStatusFact.active(item.execution()));
         registry.processDecodeStatus(decode, DecodeEndpoint.WorkerStatusFact.active(item.decodeReservation()));
         registry.processDecodeStatus(decode, DecodeEndpoint.WorkerStatusFact.terminal(item.decodeReservation(), 0L));
         registry.expireInactiveRequest(slot, lastStatusAt + 2L * TIMEOUT_MS);
@@ -170,11 +170,11 @@ class RequestInactivityTest {
         synchronized (slot) {
             RequestSlot.EngineObservation observation = switch (source) {
                 case PREFILL_ENDPOINT -> org.springframework.test.util.ReflectionTestUtils.<RequestSlot.EngineObservation>invokeMethod(slot, "applyPrefillStatusLocked", mock(PrefillEndpoint.class), RoleType.PREFILL,
-                        PrefillState.WorkerStatusFact.active(item), lateStatusAt);
+                        PrefillState.WorkerStatusFact.active(item.execution()), lateStatusAt);
                 case PREFILL_ITEM -> org.springframework.test.util.ReflectionTestUtils.<RequestSlot.EngineObservation>invokeMethod(slot, "applyPrefillStatusLocked", prefill, RoleType.PREFILL,
                         PrefillState.WorkerStatusFact.active(new ScheduledRequest(item.ctx(), item.future(),
                                 item.routeResponse(), item.prefill(), null, prefill, decode,
-                                item.decodeReservation(), registeredAtMs)), lateStatusAt);
+                                item.decodeReservation(), registeredAtMs).execution()), lateStatusAt);
                 case DECODE_ENDPOINT -> org.springframework.test.util.ReflectionTestUtils.<RequestSlot.EngineObservation>invokeMethod(slot, "applyDecodeStatusLocked", mock(DecodeEndpoint.class),
                         DecodeEndpoint.WorkerStatusFact.active(item.decodeReservation()), lateStatusAt);
                 case DECODE_GENERATION -> org.springframework.test.util.ReflectionTestUtils.<RequestSlot.EngineObservation>invokeMethod(slot, "applyDecodeStatusLocked", decode, DecodeEndpoint.WorkerStatusFact.active(
@@ -211,7 +211,7 @@ class RequestInactivityTest {
         synchronized (slot) {
             if (source == RoleType.PREFILL) {
                 org.springframework.test.util.ReflectionTestUtils.<RequestSlot.EngineObservation>invokeMethod(slot, "applyPrefillStatusLocked", prefill, RoleType.PREFILL,
-                        PrefillState.WorkerStatusFact.active(item), nowMs);
+                        PrefillState.WorkerStatusFact.active(item.execution()), nowMs);
             } else {
                 org.springframework.test.util.ReflectionTestUtils.<RequestSlot.EngineObservation>invokeMethod(slot, "applyDecodeStatusLocked", decode,
                         DecodeEndpoint.WorkerStatusFact.active(item.decodeReservation()), nowMs);
@@ -222,7 +222,7 @@ class RequestInactivityTest {
     private void assertLiveAndCharged() {
         assertEquals(1, registry.liveRequestCount());
         synchronized (slot) {
-            assertSame(item, slot.activeItem());
+            assertSame(item.execution(), slot.activeItem());
             assertFalse(slot.snapshot().state().isTerminal());
         }
         verify(decode, never()).release(any(), eq(DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK));
@@ -243,7 +243,7 @@ class RequestInactivityTest {
             assertFalse(slot.isLiveGeneration());
         }
         verify(decode, times(1)).release(item.decodeReservation(), DecodeEndpoint.ReleaseReason.EXPIRED);
-        verify(prefill, times(1)).expireCommittedItem(item);
+        verify(prefill, times(1)).expireCommittedItem(item.execution());
     }
 
     private enum StaleFact {

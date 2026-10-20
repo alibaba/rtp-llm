@@ -32,15 +32,8 @@ public final class ScheduledRequest implements Prioritized {
 
     private final BalanceContext ctx;
     private final CompletableFuture<Response> future;
-    private final Response routeResponse;
-    private final ServerStatus prefill;
-    private final PrefillEndpoint prefillEp;
-    private final DecodeBinding decodeBinding;
-    private final long enqueuedAtMs;
-    private final long enqueueSequence;
-    private final long expiresAtMs;
-    private final long hitCache;
-    private final int maxInflightBatchesPerPrefillWorker;
+    private final RequestExecution execution;
+
     public ScheduledRequest(BalanceContext ctx,
                      CompletableFuture<Response> future,
                      Response routeResponse,
@@ -66,28 +59,27 @@ public final class ScheduledRequest implements Prioritized {
                      DecodeBinding frozenDecode) {
         this.ctx = Objects.requireNonNull(ctx, "ctx");
         this.future = future;
-        this.routeResponse = routeResponse;
-        this.prefill = prefill;
-        this.prefillEp = prefillEp;
-        this.decodeBinding = frozenDecode.bind(decode, decodeEp, decodeReservation);
         if (ctx.getWorkerEnqueueSequence() == 0L) {
             ctx.setFirstWorkerEnqueueTime(enqueuedAtMs);
             ctx.setWorkerEnqueueSequence(ENQUEUE_SEQUENCE.incrementAndGet());
         }
-        this.enqueuedAtMs = ctx.getFirstWorkerEnqueueTime();
-        this.enqueueSequence = ctx.getWorkerEnqueueSequence();
-        this.expiresAtMs = ctx.getRequestExpiresAtMs();
-        this.hitCache = hitCacheOf(prefill);
         FlexlbConfig schedulingConfig = Objects.requireNonNull(
                 ctx.getConfig(), "request scheduling config");
         boolean routeDelivery = schedulingConfig.getDispatcher().getType() == DispatcherConfig.Type.NON_BATCH;
-        this.maxInflightBatchesPerPrefillWorker = routeDelivery ? 0
-                : schedulingConfig.getDispatcher().getMaxInflightPerPrefillWorker();
+        this.execution = new RequestExecution(
+                routeResponse, prefill, prefillEp,
+                frozenDecode.bind(decode, decodeEp, decodeReservation),
+                ctx.getFirstWorkerEnqueueTime(), ctx.getWorkerEnqueueSequence(),
+                ctx.getRequestExpiresAtMs(), hitCacheOf(prefill),
+                routeDelivery ? 0 : schedulingConfig.getDispatcher().getMaxInflightPerPrefillWorker());
     }
 
     // -- accessors --
 
     public BalanceContext ctx() { return ctx; }
+
+    /** Stable identity retained by endpoint state and request lifecycle tracking. */
+    public RequestExecution execution() { return execution; }
 
     /** O(1) wire-size bound; grouping must not parse or copy GenerateInput payloads. */
     public long batchPayloadSizeUpperBound() {
@@ -110,25 +102,26 @@ public final class ScheduledRequest implements Prioritized {
     }
 
     public CompletableFuture<Response> future() { return future; }
-    public Response routeResponse() { return routeResponse; }
-    public ServerStatus prefill() { return prefill; }
-    public ServerStatus decode() { return decodeBinding.status(); }
-    public PrefillEndpoint prefillEp() { return prefillEp; }
-    public DecodeEndpoint decodeEp() { return decodeBinding.endpoint(); }
+    public Response routeResponse() { return execution.routeResponse(); }
+    public ServerStatus prefill() { return execution.prefill(); }
+    public ServerStatus decode() { return execution.decode(); }
+    public PrefillEndpoint prefillEp() { return execution.prefillEp(); }
+    public DecodeEndpoint decodeEp() { return execution.decodeEp(); }
+
     public DecodeEndpoint.ReservationHandle decodeReservation() {
-        return decodeBinding.reservation();
+        return execution.decodeReservation();
     }
 
     public DecodeBinding decodeBinding() {
-        return decodeBinding;
+        return execution.decodeBinding();
     }
-    public long enqueuedAtMs() { return enqueuedAtMs; }
-    public long expiresAtMs() { return expiresAtMs; }
+    public long enqueuedAtMs() { return execution.enqueuedAtMs(); }
+    public long expiresAtMs() { return execution.expiresAtMs(); }
     public boolean requestExpired(long nowMs) {
-        return expiresAtMs <= 0L || nowMs >= expiresAtMs;
+        return execution.requestExpired(nowMs);
     }
     public int maxInflightBatchesPerPrefillWorker() {
-        return maxInflightBatchesPerPrefillWorker;
+        return execution.maxInflightBatchesPerPrefillWorker();
     }
 
     /**
@@ -137,7 +130,7 @@ public final class ScheduledRequest implements Prioritized {
      */
     @Override
     public int priority() {
-        return decodeBinding.priority();
+        return execution.priority();
     }
 
     /**
@@ -147,23 +140,23 @@ public final class ScheduledRequest implements Prioritized {
      */
     @Override
     public long enqueueSeq() {
-        return enqueueSequence;
+        return execution.enqueueSeq();
     }
 
     // -- derived accessors --
 
     public long requestId() {
-        return decodeBinding.requestId();
+        return execution.requestId();
     }
 
     /** Total sequence length of this request. */
     public long seqLen() {
-        return decodeBinding.hardKvTokens();
+        return execution.seqLen();
     }
 
     /** Cache-hit tokens on the assigned prefill endpoint. */
     public long hitCache() {
-        return hitCache;
+        return execution.hitCache();
     }
 
     /** Extract cache-hit length from a {@link ServerStatus} debug info. */
@@ -234,5 +227,4 @@ public final class ScheduledRequest implements Prioritized {
             return status == null && endpoint == null && reservation == null;
         }
     }
-
 }
