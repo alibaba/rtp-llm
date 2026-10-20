@@ -11,7 +11,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (  # type: ignore
 
 class RpcErrorCodeProtoTest(unittest.TestCase):
     def test_invalid_params_is_declared_and_round_trips(self):
-        self.assertEqual(ErrorCodePB.Value("INVALID_PARAMS"), 26)
+        self.assertEqual(ErrorCodePB.Value("INVALID_PARAMS"), 605)
 
         serialized = RpcErrorPB(
             error_code=ErrorCodePB.INVALID_PARAMS,
@@ -24,7 +24,7 @@ class RpcErrorCodeProtoTest(unittest.TestCase):
         self.assertEqual(parsed.error_message, "invalid zero-prefill config")
 
     def test_execution_exception_is_declared_and_round_trips(self):
-        self.assertEqual(ErrorCodePB.Value("EXECUTION_EXCEPTION"), 27)
+        self.assertEqual(ErrorCodePB.Value("EXECUTION_EXCEPTION"), 606)
 
         serialized = RpcErrorPB(
             error_code=ErrorCodePB.EXECUTION_EXCEPTION,

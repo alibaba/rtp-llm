@@ -642,7 +642,7 @@ TEST(LocalRpcServerTest, GenerateStreamCallRejectsNullWriterBeforeEngineAccess) 
 TEST(RpcErrorCodeTest, InvalidParamsUsesDeclaredRpcEnum) {
     EXPECT_EQ(transErrorCodeToRPC(ErrorCode::INVALID_PARAMS), ErrorCodePB::INVALID_PARAMS);
     EXPECT_EQ(transRPCErrorCode(ErrorCodePB::INVALID_PARAMS), ErrorCode::INVALID_PARAMS);
-    EXPECT_NE(static_cast<int>(ErrorCodePB::INVALID_PARAMS), static_cast<int>(ErrorCode::INVALID_PARAMS));
+    EXPECT_EQ(static_cast<int>(ErrorCodePB::INVALID_PARAMS), static_cast<int>(ErrorCode::INVALID_PARAMS));
 }
 
 TEST(LocalRpcServerTest, UninitializedServerRejectsValidBatchRequests) {

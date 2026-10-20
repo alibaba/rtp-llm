@@ -95,7 +95,7 @@ class _InvalidTypePDSepConfig:
             RoleType.PDFUSION,
             True,
             "not-an-int",
-        ] + [0] * 19
+        ] + [0] * 7
         return _new_config, (PDSepConfig,), tuple(state)
 
 
@@ -119,19 +119,19 @@ class MoeConfigPickleTest(unittest.TestCase):
 class PDSepConfigPickleTest(unittest.TestCase):
     def test_current_format_round_trip(self):
         config = PDSepConfig()
-        config.prefill_stop_stream_wait_timeout_ms = 118
-        config.prefill_prepare_resource_pool_size = 119
+        config.load_cache_timeout_ms = 118
+        config.max_rpc_timeout_ms = 119
 
         restored = pickle.loads(pickle.dumps(config))
 
-        self.assertEqual(restored.prefill_stop_stream_wait_timeout_ms, 118)
-        self.assertEqual(restored.prefill_prepare_resource_pool_size, 119)
+        self.assertEqual(restored.load_cache_timeout_ms, 118)
+        self.assertEqual(restored.max_rpc_timeout_ms, 119)
 
 
     def test_rejects_invalid_state_length(self):
-        for size in (20, 21, 23):
+        for size in (9, 11, 22):
             with self.subTest(size=size), self.assertRaisesRegex(
-                RuntimeError, "expected 22 fields"
+                RuntimeError, "expected 10 fields"
             ):
                 pickle.loads(pickle.dumps(_MalformedPDSepConfig(size)))
 

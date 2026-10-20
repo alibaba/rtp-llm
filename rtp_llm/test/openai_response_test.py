@@ -2998,14 +2998,14 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             sorted(["<|user|>", "<|observation|>"]),
         )
 
-    def test_frontend_pd_fallback_backend_role(self):
+    def test_frontend_without_domains_has_no_backend_roles(self):
         pd_sep_config = PDSepConfig()
         pd_sep_config.role_type = RoleType.FRONTEND
         host_args = HostServiceArgs()
 
         roles = BackendRPCServerVisitor.get_backend_role_list(pd_sep_config, host_args)
 
-        self.assertEqual(roles, [RoleType.DECODE, RoleType.PREFILL])
+        self.assertEqual(roles, [])
 
     def test_pdfusion_frontend_does_not_require_pd_roles(self):
         config = PDSepConfig()
@@ -3064,6 +3064,8 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             pd_sep_config=pd_sep_config,
             addresses=["localhost:8080"],
         )
+
+        visitor.backend_role_list = [RoleType.DECODE, RoleType.PREFILL]
 
         visitor.host_service.get_master_addr = lambda: ""
         visitor.host_service.service_available = True
