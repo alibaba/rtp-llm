@@ -46,11 +46,21 @@ needed beyond the first call. Divergence from torch: rows of all-(-inf)
 logits still return a well-defined (noise-argmax) token where torch's
 softmax+multinomial yields NaN/undefined; the proposer path is
 tanh-bounded, so this is unreachable there.
+
+Opt r5 softcap-inline mode: with ``softcap``/``out_scale`` the caller passes
+the RAW pre-softcap logits (bf16 or fp32) and the kernel applies
+``tanh(x/s) * out_scale`` in-register (contract #5-iii merged algebra,
+libdevice ``__nv_tanhf`` — the entry point torch's CUDA tanh lowers to), so
+the temperature/softcap elementwise materialization never runs for this
+consumer.
 """
+
+from typing import Optional
 
 import torch
 import triton
 import triton.language as tl
+import triton.language.extra.cuda.libdevice as libdevice
 
 _BLOCK_V = 4096
 _NUM_WARPS = 8
@@ -78,6 +88,9 @@ def _categorical_sample_kernel(
     stride_row,
     seed,
     samples_per_row,
+    softcap,
+    out_scale,
+    HAS_SOFTCAP: tl.constexpr,
     BLOCK_V: tl.constexpr,
 ):
     # int64 pid: rows * samples * V can exceed 2^31 (the proposer's hot block
@@ -92,7 +105,15 @@ def _categorical_sample_kernel(
     for off in range(0, vocab_size, BLOCK_V):
         idx = off + tl.arange(0, BLOCK_V)
         mask = idx < vocab_size
-        l = tl.load(base + idx, mask=mask, other=float("-inf"))
+        l = tl.load(base + idx, mask=mask, other=float("-inf")).to(tl.float32)
+        if HAS_SOFTCAP:
+            # opt r5 softcap-inline: transform the RAW logits in-register
+            # (tanh(x/s) * out_scale, contract #5-iii merged algebra via
+            # libdevice __nv_tanhf) so the draw is over softmax of the
+            # softcapped/temperature-scaled distribution without the
+            # materialized [N, V] passes. Padded lanes keep -inf and lose
+            # the argmax as in the plain path.
+            l = tl.where(mask, libdevice.tanh(l / softcap) * out_scale, l)
         # per-lane counter stream: seed + pid * V + idx — unique per
         # (seed, row, sample, vocab lane), sequential across lanes.
         counter = seed + pid * vocab_size + idx
@@ -116,6 +137,8 @@ def categorical_sample(
     logits: torch.Tensor,
     seed: int,
     samples_per_row: int = 1,
+    softcap: Optional[float] = None,
+    out_scale: Optional[float] = None,
 ) -> torch.Tensor:
     """Draw ``samples_per_row`` tokens per row from ``softmax(logits)``.
 
@@ -125,6 +148,12 @@ def categorical_sample(
     Python integer (folded to signed 64-bit) controlling the deterministic
     counter-based RNG stream: same (seed, logits) -> same tokens.
 
+    ``softcap``/``out_scale`` (opt r5 softcap-inline): when ``softcap`` is
+    given, ``logits`` are the RAW pre-softcap rows (bf16 or fp32) and the
+    draw runs over ``softmax(tanh(x/s) * out_scale)`` with the transform
+    applied in-register — bf16 inputs upcast exactly like the
+    ``.to(torch.float32)`` cast they replace.
+
     Returns shape ``logits.shape[:-1] + (samples_per_row,)``; with
     ``samples_per_row == 1`` (the proposer's call shape) the trailing 1 is
     squeezed, i.e. ``logits.shape[:-1]`` — matching
@@ -132,8 +161,15 @@ def categorical_sample(
     """
     if logits.dim() < 1:
         raise ValueError("categorical_sample needs at least one dimension")
-    if not logits.is_cuda or logits.dtype != torch.float32:
-        raise ValueError("categorical_sample requires CUDA fp32 logits")
+    if not logits.is_cuda:
+        raise ValueError("categorical_sample requires CUDA logits")
+    if softcap is None:
+        if logits.dtype != torch.float32:
+            raise ValueError("categorical_sample requires CUDA fp32 logits")
+    elif logits.dtype not in (torch.float32, torch.bfloat16, torch.float16):
+        raise ValueError(
+            "categorical_sample softcap mode requires fp32/bf16/fp16 logits"
+        )
     if samples_per_row < 1:
         raise ValueError("samples_per_row must be >= 1")
     vocab_size = int(logits.shape[-1])
@@ -161,6 +197,9 @@ def categorical_sample(
         flat.stride(0),
         seed,
         samples_per_row,
+        float(softcap) if softcap is not None else 1.0,
+        float(out_scale) if out_scale is not None else 1.0,
+        HAS_SOFTCAP=softcap is not None,
         BLOCK_V=_BLOCK_V,
         num_warps=_NUM_WARPS,
     )

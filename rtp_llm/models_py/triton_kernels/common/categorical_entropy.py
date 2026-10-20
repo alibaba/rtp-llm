@@ -33,9 +33,12 @@ jit_cache_manager as the "triton" component) — no local warmup logic is
 needed beyond the first call.
 """
 
+from typing import Optional
+
 import torch
 import triton
 import triton.language as tl
+import triton.language.extra.cuda.libdevice as libdevice
 
 # torch.finfo(torch.float32).min, inlined in the kernel body below: torch's
 # Categorical clamps logits to this value before p_log_p so -inf lanes
@@ -51,6 +54,9 @@ def _categorical_entropy_kernel(
     entropy_ptr,
     vocab_size,
     stride_row,
+    softcap,
+    out_scale,
+    HAS_SOFTCAP: tl.constexpr,
     BLOCK_V: tl.constexpr,
 ):
     # int64 row offset: the API is shape-generic (rows * V can exceed 2^31
@@ -62,7 +68,14 @@ def _categorical_entropy_kernel(
     for off in range(0, vocab_size, BLOCK_V):
         idx = off + tl.arange(0, BLOCK_V)
         mask = idx < vocab_size
-        l = tl.load(base + idx, mask=mask, other=float("-inf"))
+        l = tl.load(base + idx, mask=mask, other=float("-inf")).to(tl.float32)
+        if HAS_SOFTCAP:
+            # opt r5 softcap-inline: read the RAW (pre-softcap) logits and
+            # apply the contract-#5-iii merged algebra in-register,
+            # tanh(x/s) * (s/t) via libdevice __nv_tanhf — the same libdevice
+            # entry point torch's CUDA tanh lowers to. Padded lanes keep
+            # -inf so they stay exactly-zero mass like the plain path.
+            l = tl.where(mask, libdevice.tanh(l / softcap) * out_scale, l)
         l = tl.maximum(l, -3.4028234663852886e38)
         m = tl.maximum(m, tl.max(l, axis=0))
     # pass 2: s = sum(exp(l - m)); u = sum((l - m) * exp(l - m)).
@@ -71,7 +84,9 @@ def _categorical_entropy_kernel(
     for off in range(0, vocab_size, BLOCK_V):
         idx = off + tl.arange(0, BLOCK_V)
         mask = idx < vocab_size
-        l = tl.load(base + idx, mask=mask, other=float("-inf"))
+        l = tl.load(base + idx, mask=mask, other=float("-inf")).to(tl.float32)
+        if HAS_SOFTCAP:
+            l = tl.where(mask, libdevice.tanh(l / softcap) * out_scale, l)
         l = tl.maximum(l, -3.4028234663852886e38)
         centered = l - m
         e = tl.exp(centered)
@@ -81,18 +96,36 @@ def _categorical_entropy_kernel(
     tl.store(entropy_ptr + row, entropy)
 
 
-def categorical_entropy(logits: torch.Tensor) -> torch.Tensor:
+def categorical_entropy(
+    logits: torch.Tensor,
+    softcap: Optional[float] = None,
+    out_scale: Optional[float] = None,
+) -> torch.Tensor:
     """Entropy of ``Categorical(logits)`` over the last dim, fp32 in/out.
 
     Requires CUDA fp32 logits (the proposer's hot path); the caller owns
     the gate and the torch.distributions fallback for CPU / other dtypes
     (see diffusion_gemma_proposer._categorical_entropy). Returns fp32 with
     shape ``logits.shape[:-1]``.
+
+    ``softcap``/``out_scale`` (opt r5 softcap-inline): when ``softcap`` is
+    given, ``logits`` are the RAW pre-softcap rows (bf16 or fp32) and the
+    kernel computes the entropy of ``Categorical(tanh(x/s) * out_scale)``
+    in-register — the same merged algebra the torch chain applies before
+    calling the plain kernel (contract #5-iii, <= 2 ulp), with bf16 inputs
+    upcast exactly like the ``.to(torch.float32)`` cast they replace.
     """
     if logits.dim() < 1:
         raise ValueError("categorical_entropy needs at least one dimension")
-    if not logits.is_cuda or logits.dtype != torch.float32:
-        raise ValueError("categorical_entropy requires CUDA fp32 logits")
+    if not logits.is_cuda:
+        raise ValueError("categorical_entropy requires CUDA logits")
+    if softcap is None:
+        if logits.dtype != torch.float32:
+            raise ValueError("categorical_entropy requires CUDA fp32 logits")
+    elif logits.dtype not in (torch.float32, torch.bfloat16, torch.float16):
+        raise ValueError(
+            "categorical_entropy softcap mode requires fp32/bf16/fp16 logits"
+        )
     vocab_size = int(logits.shape[-1])
     rows = logits.numel() // vocab_size if vocab_size else 0
     out_shape = logits.shape[:-1]
@@ -107,6 +140,9 @@ def categorical_entropy(logits: torch.Tensor) -> torch.Tensor:
         out,
         vocab_size,
         flat.stride(0),
+        float(softcap) if softcap is not None else 1.0,
+        float(out_scale) if out_scale is not None else 1.0,
+        HAS_SOFTCAP=softcap is not None,
         BLOCK_V=_BLOCK_V,
         num_warps=_NUM_WARPS,
     )

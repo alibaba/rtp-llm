@@ -7,7 +7,10 @@ sampler exactly like the HF reference (temperature schedule 0.8 -> 0.4,
 lowest-entropy acceptance under the mutual-information bound, full renoising,
 adaptive stopping; the entropy and the per-step categorical draw are fused
 into single-launch Triton kernels on CUDA — see the gate notes below, both
-A/B-checked against their torch reference paths), and returns the final
+A/B-checked against their torch reference paths — and since opt r5 the
+softcap/temperature transform is applied in-register by those kernels plus
+a single softcap_argmax launch, while the accept mask runs as one
+accept_mask launch), and returns the final
 argmax canvas tokens through
 ``PyModelOutputs.diffusion_tokens``. The C++ target-verify forward of the
 same round is the canvas commit (encoder causal forward writing the main KV
@@ -73,13 +76,87 @@ except Exception as _sampling_error:  # CPU-only sandboxes without triton
         _sampling_error,
     )
 
+# opt r5 ⑥-clearing lane, item 2 (softcap inline): the per-step epilogue's
+# full-vocab elementwise chain — fp32 cast + tanh(x/s) pass + *(s/t) pass
+# (52.6 ms/window) plus torch.argmax (15.8 ms) — collapses into one
+# softcap_argmax launch that reads the RAW bf16 logits once, materializes
+# the transformed fp32 row for the self-conditioning consumer and emits the
+# row argmax; the entropy/sampling kernels additionally read the raw logits
+# with the transform applied in-register (contract #5-iii merged algebra
+# tanh(x/s)*(s/t), <= 2 ulp vs the sequential chain). DGM_FUSED_SOFTCAP=0
+# restores the materialized torch chain (A/B gate; the state the r75 goldens
+# were recorded under modulo the RNG stream).
+_FUSED_SOFTCAP_ENV = os.environ.get("DGM_FUSED_SOFTCAP", "1") != "0"
 
-def _categorical_entropy(logits: torch.Tensor) -> torch.Tensor:
+
+def _disable_softcap() -> None:
+    """Degrade switch: after a kernel failure the fused softcap path stays
+    off for the rest of the process (r4 fused-kernel contract)."""
+    global _FUSED_SOFTCAP_ENV
+    _FUSED_SOFTCAP_ENV = False
+
+
+_softcap_argmax_kernel = None
+try:
+    from rtp_llm.models_py.triton_kernels.common.softcap_argmax import (
+        softcap_argmax,
+    )
+
+    _softcap_argmax_kernel = softcap_argmax
+except Exception as _softcap_error:  # CPU-only sandboxes without triton
+    logger.info(
+        "DiffusionGemma fused softcap_argmax kernel unavailable, torch path: %s",
+        _softcap_error,
+    )
+
+# opt r5 ⑥-clearing lane, item 3 (accept-mask compact): the reference
+# sort/cumsum/scatter chain on [B, canvas] entropy rows was 3540 radixSort
+# invocations / 68.1 ms per decode window (six-plus tiny launches per step —
+# launch-overhead bound). One accept_mask launch preserves the exact
+# ascending-entropy budget semantics (the sort IS the acceptance rule, not
+# mask compaction — see the kernel module docstring).
+# DGM_FUSED_ACCEPT=0 forces the torch chain.
+_FUSED_ACCEPT_ENV = os.environ.get("DGM_FUSED_ACCEPT", "1") != "0"
+_fused_accept_kernel = None
+try:
+    from rtp_llm.models_py.triton_kernels.common.accept_mask import (
+        accept_mask,
+    )
+
+    _fused_accept_kernel = accept_mask
+except Exception as _accept_error:  # CPU-only sandboxes without triton
+    logger.info(
+        "DiffusionGemma fused accept_mask kernel unavailable, torch path: %s",
+        _accept_error,
+    )
+
+
+def _categorical_entropy(logits: torch.Tensor, logits_ctx=None) -> torch.Tensor:
     """Categorical entropy over the last dim: fused Triton kernel on CUDA
     fp32, torch.distributions reference path otherwise. The fused kernel is
     A/B-checked against the reference (fp32 reduction-order noise, entropy
     diff < 1e-5 — see diffusion_gemma_proposer_test); any kernel failure
-    degrades to the reference path with a logged warning."""
+    degrades to the reference path with a logged warning.
+
+    ``logits_ctx`` = (raw_logits, softcap, out_scale) (opt r5 softcap
+    inline): when given, the kernel reads the RAW logits and computes the
+    entropy of Categorical(tanh(x/s) * out_scale) in-register, skipping the
+    materialized transform passes; ``logits`` (the materialized processed
+    row) only serves the reference fallback."""
+    if logits_ctx is not None and (
+        _FUSED_ENTROPY_ENV and _fused_entropy_kernel is not None
+    ):
+        raw, softcap, out_scale = logits_ctx
+        if raw.is_cuda and raw.numel() > 0:
+            try:
+                return _fused_entropy_kernel(
+                    raw, softcap=softcap, out_scale=out_scale
+                )
+            except Exception as error:
+                logger.warning(
+                    "fused entropy kernel failed (%s); torch reference path taken",
+                    error,
+                )
     if (
         _FUSED_ENTROPY_ENV
         and _fused_entropy_kernel is not None
@@ -163,8 +240,23 @@ class EntropyBoundDenoiser:
             generator=self.generator,
         )
 
-    def _accept_mask(self, logits: torch.Tensor) -> torch.Tensor:
-        token_entropy = _categorical_entropy(logits)
+    def _accept_mask(self, logits: torch.Tensor, logits_ctx=None) -> torch.Tensor:
+        token_entropy = _categorical_entropy(logits, logits_ctx)
+        if (
+            _FUSED_ACCEPT_ENV
+            and _fused_accept_kernel is not None
+            and token_entropy.is_cuda
+            and token_entropy.dtype == torch.float32
+            and token_entropy.numel() > 0
+            and int(token_entropy.shape[-1]) <= 2048
+        ):
+            try:
+                return _fused_accept_kernel(token_entropy, self.entropy_bound)
+            except Exception as error:
+                logger.warning(
+                    "fused accept_mask kernel failed (%s); torch reference path taken",
+                    error,
+                )
         sorted_entropy, sorted_idx = torch.sort(token_entropy, dim=-1, descending=False)
         cumulative = torch.cumsum(sorted_entropy, dim=-1)
         sorted_mask = cumulative - sorted_entropy <= self.entropy_bound
@@ -188,7 +280,7 @@ class EntropyBoundDenoiser:
         self._sample_draws += 1
         return seed
 
-    def _sample(self, logits: torch.Tensor) -> torch.Tensor:
+    def _sample(self, logits: torch.Tensor, logits_ctx=None) -> torch.Tensor:
         """One token per row of ``logits`` drawn from ``softmax(logits)``:
         fused Gumbel-max Triton kernel under the DGM_FUSED_SAMPLING gate on
         CUDA fp32 (fp32 logits in, int64 token ids out, one launch), the
@@ -196,21 +288,40 @@ class EntropyBoundDenoiser:
         sample the same distribution but not the same tokens (independent
         RNG streams); the acceptance evidence is distributional — see
         diffusion_gemma_proposer_test. Any kernel failure degrades to the
-        reference path with a logged warning."""
-        if (
-            _FUSED_SAMPLING_ENV
-            and _fused_sample_kernel is not None
-            and logits.is_cuda
-            and logits.dtype == torch.float32
-            and logits.numel() > 0
-        ):
-            try:
-                return _fused_sample_kernel(logits, self._fused_sample_seed())
-            except Exception as error:
-                logger.warning(
-                    "fused sampling kernel failed (%s); torch reference path taken",
-                    error,
-                )
+        reference path with a logged warning.
+
+        ``logits_ctx`` = (raw_logits, softcap, out_scale) (opt r5 softcap
+        inline): when given, the kernel draws from
+        ``softmax(tanh(raw/s) * out_scale)`` with the transform in-register,
+        reading the raw bf16/fp32 logits instead of the materialized row."""
+        if _FUSED_SAMPLING_ENV and _fused_sample_kernel is not None:
+            if logits_ctx is not None:
+                raw, softcap, out_scale = logits_ctx
+                if raw.is_cuda and raw.numel() > 0:
+                    try:
+                        return _fused_sample_kernel(
+                            raw,
+                            self._fused_sample_seed(),
+                            softcap=softcap,
+                            out_scale=out_scale,
+                        )
+                    except Exception as error:
+                        logger.warning(
+                            "fused sampling kernel failed (%s); torch reference path taken",
+                            error,
+                        )
+            elif (
+                logits.is_cuda
+                and logits.dtype == torch.float32
+                and logits.numel() > 0
+            ):
+                try:
+                    return _fused_sample_kernel(logits, self._fused_sample_seed())
+                except Exception as error:
+                    logger.warning(
+                        "fused sampling kernel failed (%s); torch reference path taken",
+                        error,
+                    )
         probs = torch.softmax(logits, dim=-1, dtype=torch.float32)
         flat = probs.reshape(-1, probs.shape[-1])
         return torch.multinomial(flat, 1, generator=self.generator).squeeze(-1)
@@ -219,10 +330,11 @@ class EntropyBoundDenoiser:
         self,
         current_canvas: torch.Tensor,
         logits: torch.Tensor,
+        logits_ctx=None,
     ):
         """One accept/re noise step. Returns (new_canvas, accepted_mask)."""
-        mask = self._accept_mask(logits)
-        denoiser = self._sample(logits).view(current_canvas.shape)
+        mask = self._accept_mask(logits, logits_ctx)
+        denoiser = self._sample(logits, logits_ctx).view(current_canvas.shape)
         accepted = torch.where(mask, denoiser, current_canvas)
         random_canvas = self.initialize_canvas(current_canvas.shape[0], current_canvas.device)
         renoised = torch.where(mask, accepted, random_canvas)
@@ -233,8 +345,9 @@ class EntropyBoundDenoiser:
         argmax_canvas: torch.Tensor,
         logits: torch.Tensor,
         history: Optional[torch.Tensor],
+        logits_ctx=None,
     ):
-        entropy = _categorical_entropy(logits)
+        entropy = _categorical_entropy(logits, logits_ctx)
         confident = entropy.mean(dim=-1) < self.confidence_threshold
         if history is None or self.stability_threshold == 0:
             stable = torch.ones_like(confident)
@@ -373,20 +486,59 @@ class DiffusionGemmaProposer(nn.Module):
             )
             last_hidden = hidden
             self._last_step = step
-            logits = torch.nn.functional.linear(
+            raw_logits = torch.nn.functional.linear(
                 hidden.to(embed_weight.dtype), embed_weight
-            ).to(torch.float32)
-            # Contract #5-iii: the softcap chain ((x/s -> tanh) * s) / t is
-            # merged algebraically into tanh(x/s) * (s/t) — one full-vocab
-            # elementwise pass less. Values agree with the sequential chain
-            # to the last fp32 ulp (two roundings either way).
-            logits = torch.tanh(logits / softcap)
-            logits = logits.view(batch, self.canvas_length, -1)
+            )
             # Reference: t = t_min + (t_max - t_min) * step / max_steps
             # (transformers TemperatureScheduleByDenoisingStep).
             temperature = denoiser.temperature(step)
-            processed = logits * (softcap / temperature)
-            new_argmax = torch.argmax(processed, dim=-1)
+            out_scale = softcap / temperature
+            logits_ctx = None
+            if (
+                _FUSED_SOFTCAP_ENV
+                and _softcap_argmax_kernel is not None
+                and raw_logits.is_cuda
+                and raw_logits.dtype
+                in (torch.bfloat16, torch.float16, torch.float32)
+                and raw_logits.numel() > 0
+            ):
+                # opt r5 item 2 (softcap inline): one launch replaces the
+                # fp32 cast + tanh + scale passes and torch.argmax — the
+                # raw bf16 logits are read once, the fp32 transformed row
+                # (self-conditioning consumer) is materialized and the
+                # argmax falls out of the same registers. logits_ctx hands
+                # (raw, softcap, out_scale) to the entropy/sampling kernels
+                # so they apply the #5-iii merged algebra in-register
+                # instead of reading the materialized tensor.
+                try:
+                    processed, new_argmax = _softcap_argmax_kernel(
+                        raw_logits, softcap, out_scale
+                    )
+                    processed = processed.view(batch, self.canvas_length, -1)
+                    new_argmax = new_argmax.view(batch, self.canvas_length)
+                    logits_ctx = (
+                        raw_logits.view(batch, self.canvas_length, -1),
+                        softcap,
+                        out_scale,
+                    )
+                except Exception as error:
+                    logger.warning(
+                        "fused softcap_argmax kernel failed (%s); torch path "
+                        "for this process",
+                        error,
+                    )
+                    _disable_softcap()
+            if logits_ctx is None:
+                # Contract #5-iii: the softcap chain ((x/s -> tanh) * s) / t
+                # is merged algebraically into tanh(x/s) * (s/t) — one
+                # full-vocab elementwise pass less. Values agree with the
+                # sequential chain to the last fp32 ulp (two roundings
+                # either way).
+                logits = raw_logits.to(torch.float32)
+                logits = torch.tanh(logits / softcap)
+                logits = logits.view(batch, self.canvas_length, -1)
+                processed = logits * out_scale
+                new_argmax = torch.argmax(processed, dim=-1)
             if bool(os.environ.get("DGM_FI_DIAG", "")) and step == 0:
                 # Reuse bring-up fork: with the C++ reuse fix the matched
                 # blocks are shared and real (run-44 read probe), yet the
@@ -426,9 +578,13 @@ class DiffusionGemmaProposer(nn.Module):
                 frozen_canvas = canvas
             else:
                 frozen_canvas = canvas
-            finished = finished | denoiser.stop(new_argmax, processed, history)
+            finished = finished | denoiser.stop(
+                new_argmax, processed, history, logits_ctx=logits_ctx
+            )
             history = torch.cat([history[1:], new_argmax.unsqueeze(0)], dim=0)
-            renoised, _mask = denoiser.step(frozen_canvas, processed)
+            renoised, _mask = denoiser.step(
+                frozen_canvas, processed, logits_ctx=logits_ctx
+            )
             renoised = torch.where(finished[:, None], frozen_canvas, renoised)
             argmax_canvas = new_argmax
             canvas = renoised

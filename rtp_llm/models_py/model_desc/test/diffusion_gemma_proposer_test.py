@@ -788,6 +788,511 @@ def _chi2_vs_analytic(tokens: torch.Tensor, probs: torch.Tensor, bins: int):
     return chi2, dof
 
 
+class DiffusionGemmaSoftcapABTest(TestCase):
+    """Opt r5 ⑥-lane item 2 GPU A/B: the in-register softcap/temperature
+    transform (tanh(x/s) * out_scale, contract #5-iii merged algebra) inside
+    the entropy/sampling kernels and the fused softcap_argmax launch vs the
+    torch materialized chain
+
+        processed = tanh(raw.to(fp32) / s) * out_scale
+
+    that the fused paths replace. Reference criterion: the kernel outputs
+    agree with "CPU-merged-then-kernel" — argmax exactly (monotone
+    transform, distinct bf16-grid gaps), processed values to the last
+    fp32 ulp class, entropy within the kernel's own 1e-5 truth bound,
+    sampling distributionally (independent RNG streams). Skipped without
+    CUDA (CPU UT lanes keep the torch path through the gates)."""
+
+    def _require_cuda(self):
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA device required for the softcap-inline kernels")
+
+    def _reference_processed(self, raw, softcap, out_scale):
+        return torch.tanh(raw.to(torch.float32) / softcap) * out_scale
+
+    def test_softcap_argmax_ab_gpu(self):
+        self._require_cuda()
+        self.assertTrue(
+            dgp._FUSED_SOFTCAP_ENV and dgp._softcap_argmax_kernel is not None,
+            msg="fused softcap path must be importable and enabled by default",
+        )
+        from rtp_llm.models_py.triton_kernels.common.softcap_argmax import (
+            softcap_argmax,
+        )
+
+        dev = torch.device("cuda:0")
+        torch.manual_seed(2026)
+        softcap, out_scale = 30.0, 75.0
+        cases = [
+            ("flat_fp32", torch.randn(256, 262144, device=dev)),
+            ("sharp_fp32", torch.randn(256, 262144, device=dev) * 40.0),
+            ("bf16_raw", torch.randn(256, 262144, device=dev).to(torch.bfloat16)),
+            (
+                "small_64",
+                torch.randn(7, 64, device=dev) * 3.0,
+            ),
+        ]
+        # saturation: raw magnitudes beyond ~8.9*s collapse fp32 tanh to +-1,
+        # creating exact ties the argmax must resolve to the first index on
+        # both paths.
+        sat = torch.randn(9, 4096, device=dev)
+        sat[:, ::3] = 5000.0
+        sat[:, 1::3] = -5000.0
+        cases.append(("saturated_ties", sat))
+        for name, raw in cases:
+            processed, argmax = softcap_argmax(raw, softcap, out_scale)
+            ref = self._reference_processed(raw, softcap, out_scale)
+            ref_argmax = torch.argmax(ref, dim=-1)
+            ulp = (
+                processed.view(torch.int32)
+                - ref.contiguous().view(torch.int32)
+            ).abs()
+            argmax_eq = bool(torch.equal(argmax, ref_argmax))
+            proc_max = float((processed - ref).abs().max())
+            print(
+                f"[dgm-softcap-ab] argmax {name}: shape={tuple(raw.shape)} "
+                f"dtype={raw.dtype} argmax_equal={argmax_eq} "
+                f"processed_max_abs_diff={proc_max:.3e} "
+                f"processed_max_ulp={int(ulp.max())}",
+                flush=True,
+            )
+            self.assertEqual(processed.dtype, torch.float32)
+            self.assertEqual(argmax.dtype, torch.int64)
+            self.assertLessEqual(int(ulp.max()), 2)
+            if not argmax_eq:
+                # monotone transform: flips are only legitimate where the
+                # reference's own top-2 processed gap is zero (saturation
+                # collapse) — prove it per flipped row.
+                top2 = ref.topk(2, dim=-1).values
+                gap = top2[..., 0] - top2[..., 1]
+                flipped = (argmax != ref_argmax).nonzero(as_tuple=True)[0]
+                for row in flipped.tolist():
+                    self.assertEqual(
+                        float(gap[row]),
+                        0.0,
+                        msg=f"argmax flip at row {row} without a tie",
+                    )
+
+    def test_softcap_entropy_ab_gpu(self):
+        self._require_cuda()
+        from rtp_llm.models_py.triton_kernels.common.categorical_entropy import (
+            categorical_entropy,
+        )
+
+        dev = torch.device("cuda:0")
+        torch.manual_seed(2027)
+        softcap, out_scale = 30.0, 75.0
+        cases = [
+            ("flat_262144", torch.randn(512, 262144, device=dev) * 4.0),
+            (
+                "softcap_262144",
+                torch.randn(512, 262144, device=dev) * 2.0,
+            ),
+            ("bf16_262144", torch.randn(512, 262144, device=dev).to(torch.bfloat16)),
+            ("small_64", torch.randn(7, 64, device=dev) * 3.0),
+        ]
+        worst_kernel = 0.0
+        worst_gap = 0.0
+        for name, raw in cases:
+            fused = categorical_entropy(raw, softcap=softcap, out_scale=out_scale)
+            ref_logits = self._reference_processed(raw, softcap, out_scale)
+            ref = torch.distributions.Categorical(logits=ref_logits).entropy()
+            truth = torch.distributions.Categorical(
+                logits=ref_logits.double()
+            ).entropy()
+            kernel_err = float((fused - truth).abs().max())
+            gap_max = float((fused - ref).abs().max())
+            worst_kernel = max(worst_kernel, kernel_err)
+            worst_gap = max(worst_gap, gap_max)
+            print(
+                f"[dgm-softcap-ab] entropy {name}: shape={tuple(raw.shape)} "
+                f"dtype={raw.dtype} kernel_vs_true={kernel_err:.3e} "
+                f"fused_vs_ref={gap_max:.3e} "
+                f"ent_true_mean={float(truth.mean()):.4f}",
+                flush=True,
+            )
+            self.assertLess(kernel_err, 1e-5)
+            self.assertLess(gap_max, 1e-4)
+            del raw, ref_logits, fused, ref, truth
+        print(
+            f"[dgm-softcap-ab] entropy worst kernel_vs_true={worst_kernel:.3e} "
+            f"worst fused_vs_ref={worst_gap:.3e}",
+            flush=True,
+        )
+
+    def test_softcap_sample_smallvocab_ab_gpu(self):
+        self._require_cuda()
+        from rtp_llm.models_py.triton_kernels.common.categorical_sample import (
+            categorical_sample,
+        )
+
+        dev = torch.device("cuda:0")
+        torch.manual_seed(29)
+        softcap, out_scale = 30.0, 75.0
+        vocab = 64
+        draws = 262144
+        # raw scale picked so the transformed logits (tanh(x/s) * out_scale)
+        # land at std ~0.6 — the flat regime where every bin's expected
+        # count clears the chi-square validity floor (a sharper row leaves
+        # dof ~ 2 and the [0.5, 2.5] noise band meaningless).
+        row = (torch.randn(vocab, device=dev) * 0.24).to(torch.bfloat16)
+        raw = row.unsqueeze(0).expand(draws, vocab).contiguous()
+        ref_logits = self._reference_processed(raw, softcap, out_scale)
+        probs = torch.softmax(ref_logits[0].double(), dim=-1)
+        generator = torch.Generator(device=dev).manual_seed(17)
+        torch_ref = torch.multinomial(
+            probs.unsqueeze(0).expand(draws, vocab).contiguous().float(),
+            1,
+            generator=generator,
+        ).squeeze(-1)
+        fused_a = categorical_sample(raw, seed=31, softcap=softcap, out_scale=out_scale)
+        fused_b = categorical_sample(raw, seed=31, softcap=softcap, out_scale=out_scale)
+        self.assertTrue(torch.equal(fused_a, fused_b), "same seed must reproduce")
+        tv = _tv_distance(fused_a, torch_ref, vocab)
+        chi2_f, dof = _chi2_vs_analytic(fused_a, probs.float(), vocab)
+        chi2_t, dof_t = _chi2_vs_analytic(torch_ref, probs.float(), vocab)
+        print(
+            f"[dgm-softcap-ab] sample small64 draws={draws}: "
+            f"fused_vs_torch TV={tv:.5f} chi2_fused={chi2_f:.1f} "
+            f"chi2_torch={chi2_t:.1f} dof={dof}",
+            flush=True,
+        )
+        self.assertEqual(fused_a.dtype, torch.int64)
+        self.assertTrue(
+            ((fused_a >= 0) & (fused_a < vocab)).all(), "tokens out of range"
+        )
+        self.assertLess(tv, 0.01)
+        self.assertLess(chi2_f / dof, 2.5)
+        self.assertGreater(chi2_f / dof, 0.5)
+        self.assertLess(chi2_t / dof_t, 2.5)
+
+    def test_softcap_step_ab_gpu(self):
+        # Proposer-level gated A/B: the real EntropyBoundDenoiser.step on
+        # proposer-shaped RAW bf16 logits with a softcap ctx vs the reference
+        # path on the materialized processed rows. The accept mask (entropy
+        # + accept-mask kernel) must agree bit-for-bit or within boundary
+        # noise, and both sampling paths stay in-distribution.
+        self._require_cuda()
+        dev = torch.device("cuda:0")
+        torch.manual_seed(37)
+        canvas, vocab, batch = 256, 262144, 2
+        softcap = 30.0
+        out_scale = 75.0
+        raw = (torch.randn(batch, canvas, vocab, device=dev) * 2.0).to(torch.bfloat16)
+        processed = torch.tanh(raw.to(torch.float32) / softcap) * out_scale
+        canvas_tokens = torch.randint(0, vocab, (batch, canvas), device=dev)
+
+        def _fresh_denoiser():
+            generator = torch.Generator(device=dev).manual_seed(2026)
+            return dgp.EntropyBoundDenoiser(
+                canvas, vocab, 48, 0.4, 0.8, 0.1, 1e-3, 1, generator=generator
+            )
+
+        ctx = (raw, softcap, out_scale)
+        mask_fused, renoised_fused = None, None
+        calls = []
+        real_entropy = dgp._fused_entropy_kernel
+        real_sample = dgp._fused_sample_kernel
+
+        def _entropy_spy(logits, softcap=None, out_scale=None):
+            result = real_entropy(logits, softcap=softcap, out_scale=out_scale)
+            calls.append(int(logits.numel()))
+            return result
+
+        # fused softcap path: entropy reads raw, sampling reads raw
+        with patch.object(dgp, "_fused_entropy_kernel", _entropy_spy):
+            renoised_fused, mask_fused = _fresh_denoiser().step(
+                canvas_tokens, processed, logits_ctx=ctx
+            )
+        self.assertTrue(calls, "fused step must engage the softcap entropy kernel")
+        # reference path: no ctx -> materialized processed rows
+        renoised_ref, mask_ref = _fresh_denoiser().step(canvas_tokens, processed)
+        mask_equal = bool(torch.equal(mask_fused, mask_ref))
+        if not mask_equal:
+            ent_ref = torch.distributions.Categorical(logits=processed).entropy()
+            margin = _accept_boundary_margin(ent_ref, 0.1)
+            flipped = (mask_fused != mask_ref).any(dim=-1).nonzero().flatten().tolist()
+            for row in flipped:
+                self.assertLess(
+                    float(margin[row]),
+                    1e-4,
+                    msg=f"accept mask flipped beyond boundary noise at row {row}",
+                )
+        for renoised in (renoised_fused, renoised_ref):
+            self.assertTrue(
+                ((renoised >= 0) & (renoised < vocab)).all(),
+                "renoised canvas tokens out of range",
+            )
+        print(
+            f"[dgm-softcap-ab] gated step path: entropy_calls={len(calls)} "
+            f"mask_equal={mask_equal} "
+            f"fused_argmax_free_rnoised=True",
+            flush=True,
+        )
+
+    def test_softcap_argmax_perf_gpu(self):
+        # Kernel-level timing evidence: one fused launch (raw read +
+        # processed write + argmax) vs the torch chain it replaces (fp32
+        # cast + tanh + scale + torch.argmax — four full-width passes) on
+        # the proposer's real [1024, 262144] bf16 block.
+        self._require_cuda()
+        import time
+
+        from rtp_llm.models_py.triton_kernels.common.softcap_argmax import (
+            softcap_argmax,
+        )
+
+        dev = torch.device("cuda:0")
+        torch.manual_seed(99)
+        raw = torch.randn(1024, 262144, device=dev).to(torch.bfloat16)
+        softcap, out_scale = 30.0, 75.0
+
+        def _torch_path():
+            logits = raw.to(torch.float32)
+            logits = torch.tanh(logits / softcap)
+            processed = logits * out_scale
+            return torch.argmax(processed, dim=-1)
+
+        for _ in range(3):
+            softcap_argmax(raw, softcap, out_scale)
+            _torch_path()
+        torch.cuda.synchronize()
+        rounds = 10
+        t0 = time.perf_counter()
+        for _ in range(rounds):
+            softcap_argmax(raw, softcap, out_scale)
+        torch.cuda.synchronize()
+        t_fused = (time.perf_counter() - t0) / rounds
+        t0 = time.perf_counter()
+        for _ in range(rounds):
+            _torch_path()
+        torch.cuda.synchronize()
+        t_ref = (time.perf_counter() - t0) / rounds
+        print(
+            f"[dgm-softcap-perf] [1024,262144] bf16 (H20): "
+            f"fused={t_fused * 1e3:.3f}ms/call torch_ref={t_ref * 1e3:.3f}ms/call "
+            f"speedup={t_ref / t_fused:.1f}x",
+            flush=True,
+        )
+        self.assertLess(t_fused, t_ref)
+
+
+class DiffusionGemmaAcceptMaskABTest(TestCase):
+    """Opt r5 ⑥-lane item 3 GPU A/B: the single-launch accept_mask kernel
+    (in-register bitonic sort + exclusive cumsum + scatter) vs the torch
+    sort/cumsum/scatter chain it replaces — same ascending-entropy budget
+    semantics (the sort IS the rule; see the kernel docstring for the
+    semantics-first ruling). Bit-equality expected (both orders are
+    stable-in-practice); boundary-margin proof for entropy-noise flips."""
+
+    def _require_cuda(self):
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA device required for the fused accept-mask kernel")
+
+    def _torch_chain(self, entropy, bound):
+        sorted_entropy, sorted_idx = torch.sort(entropy, dim=-1, descending=False)
+        cumulative = torch.cumsum(sorted_entropy, dim=-1)
+        sorted_mask = cumulative - sorted_entropy <= bound
+        return torch.scatter(torch.zeros_like(sorted_mask), -1, sorted_idx, sorted_mask)
+
+    def test_accept_mask_ab_gpu(self):
+        self._require_cuda()
+        self.assertTrue(
+            dgp._FUSED_ACCEPT_ENV and dgp._fused_accept_kernel is not None,
+            msg="fused accept-mask path must be importable and enabled by default",
+        )
+        from rtp_llm.models_py.triton_kernels.common.accept_mask import accept_mask
+
+        dev = torch.device("cuda:0")
+        torch.manual_seed(47)
+        bound = 2.0
+        cases = [
+            ("flat_256", torch.rand(64, 256, device=dev) * 0.2),
+            ("spread_256", torch.rand(64, 256, device=dev) * 20.0),
+            ("sharp_256", torch.rand(64, 256, device=dev) ** 8 * 0.5),
+            ("batch4_256", torch.rand(4, 256, device=dev) * 0.1),
+            ("nonpow2_100", torch.rand(9, 100, device=dev) * 0.3),
+            ("nonpow2_37", torch.rand(5, 37, device=dev) * 3.0),
+            ("tiny_2", torch.rand(3, 2, device=dev) * 0.5),
+        ]
+        # exact-tie rows: duplicated entropies exercise the stable
+        # lower-index tie-break against torch's CUDA segment sort.
+        tie = torch.rand(8, 256, device=dev) * 0.1
+        tie[:, 1::2] = tie[:, ::2]
+        cases.append(("ties_256", tie))
+        for name, entropy in cases:
+            fused = accept_mask(entropy, bound)
+            ref = self._torch_chain(entropy, bound)
+            equal = bool(torch.equal(fused, ref))
+            mismatch_count = int((fused != ref).sum())
+            print(
+                f"[dgm-accept-ab] {name}: shape={tuple(entropy.shape)} "
+                f"equal={equal} mismatch={mismatch_count} "
+                f"accepted_fused={int(fused.sum())} accepted_ref={int(ref.sum())}",
+                flush=True,
+            )
+            self.assertEqual(fused.dtype, torch.bool)
+            self.assertEqual(fused.shape, entropy.shape)
+            if not equal:
+                # flips are only legitimate where the accept decision sits
+                # at the budget boundary within the two cumsum
+                # implementations' fp32 reduction-order noise (the same
+                # margin proof the entropy A/B uses) or on exact-tie
+                # positions (tie order is stable-lower-index here, the
+                # CUDA segment sort's order there — the accepted count
+                # within a tie group is order-invariant only when the
+                # boundary cuts inside the group).
+                margin = _accept_boundary_margin(entropy, bound)
+                pairs = (fused != ref).nonzero(as_tuple=False)
+                for p in range(pairs.shape[0]):
+                    row_idx = int(pairs[p, 0])
+                    pos = int(pairs[p, -1])
+                    row_ent = entropy[row_idx]
+                    is_tie = int((row_ent == row_ent[pos]).sum()) > 1
+                    if not is_tie:
+                        self.assertLess(
+                            float(margin[row_idx]),
+                            1e-3,
+                            msg=f"accept mask flipped beyond cumsum/tie noise "
+                            f"at row {row_idx} pos {pos} ({name})",
+                        )
+        # determinism
+        entropy = torch.rand(16, 256, device=dev) * 0.5
+        self.assertTrue(
+            torch.equal(accept_mask(entropy, bound), accept_mask(entropy, bound))
+        )
+
+    def test_accept_mask_perf_gpu(self):
+        # Launch-overhead evidence: the torch chain (sort + cumsum + sub +
+        # compare + zeros + scatter — six-plus launches) vs one fused launch
+        # on the proposer's real [4, 256] rows.
+        self._require_cuda()
+        import time
+
+        from rtp_llm.models_py.triton_kernels.common.accept_mask import accept_mask
+
+        dev = torch.device("cuda:0")
+        torch.manual_seed(51)
+        entropy = torch.rand(4, 256, device=dev) * 0.2
+        bound = 0.15
+
+        def _torch_path():
+            return self._torch_chain(entropy, bound)
+
+        for _ in range(10):
+            accept_mask(entropy, bound)
+            _torch_path()
+        torch.cuda.synchronize()
+        rounds = 2000
+        t0 = time.perf_counter()
+        for _ in range(rounds):
+            accept_mask(entropy, bound)
+        torch.cuda.synchronize()
+        t_fused = (time.perf_counter() - t0) / rounds
+        t0 = time.perf_counter()
+        for _ in range(rounds):
+            _torch_path()
+        torch.cuda.synchronize()
+        t_ref = (time.perf_counter() - t0) / rounds
+        print(
+            f"[dgm-accept-perf] [4,256] (H20): fused={t_fused * 1e6:.2f}us/call "
+            f"torch_ref={t_ref * 1e6:.2f}us/call speedup={t_ref / t_fused:.1f}x",
+            flush=True,
+        )
+        self.assertLess(t_fused, t_ref)
+
+
+class DiffusionGemmaAddNormABTest(TestCase):
+    """Opt r5 ⑥-lane item 1 GPU A/B: the fused residual-add + RMSNorm launch
+    (flashinfer.triton.norm.rms_norm_add_residual) vs the exact torch
+    two-step the layer chain ran (bf16 add, then the production
+    flashinfer.norm.rmsnorm). Value contract: the sum is bit-identical (same
+    fp32 accumulate + bf16 round), the normed pair agrees within bf16
+    rounding noise (<= 2 ulp; the fused path's rsqrt uses the unrounded fp32
+    sum — the one allowed deviation, dsv4 rmsnorm-replace precedent)."""
+
+    def _require_cuda(self):
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA device required for the fused add+rmsnorm")
+
+    def test_fused_add_rmsnorm_ab_gpu(self):
+        self._require_cuda()
+        self.assertTrue(
+            dgm._FUSED_ADD_NORM_ENV and dgm._FI_ADD_NORM is not None,
+            msg="fused add-norm must be importable and enabled by default",
+        )
+        import flashinfer
+
+        dev = torch.device("cuda:0")
+        torch.manual_seed(61)
+        eps = 1e-6
+        for shape in ((2048, 4096), (256, 5120)):
+            x = (torch.randn(*shape, device=dev) * 0.5).to(torch.bfloat16)
+            residual = (torch.randn(*shape, device=dev) * 0.5).to(torch.bfloat16)
+            weight = torch.ones(shape[1], device=dev, dtype=torch.bfloat16)
+            weight += 0.05 * torch.randn(shape[1], device=dev, dtype=torch.bfloat16)
+            x_ref, res_ref = x.clone(), residual.clone()
+            out, summed = dgm._fused_add_norm(
+                x, residual, dgm.RMSNorm(weight, eps)
+            )
+            ref_sum = res_ref + x_ref
+            ref_normed = flashinfer.norm.rmsnorm(ref_sum, weight, eps=eps)
+            self.assertTrue(
+                torch.equal(summed, ref_sum),
+                msg=f"sum diverged at {shape}: the fp32 accumulate + bf16 round "
+                f"must match the torch add",
+            )
+            diff = (out.to(torch.float32) - ref_normed.to(torch.float32)).abs()
+            ulp = (
+                out.view(torch.int16).to(torch.int32)
+                - ref_normed.view(torch.int16).to(torch.int32)
+            ).abs()
+            print(
+                f"[dgm-addnorm-ab] shape={shape}: max_diff={float(diff.max()):.3e} "
+                f"max_ulp={int(ulp.max())} "
+                f"mismatch_frac={float((out != ref_normed).float().mean()):.4f} "
+                f"sum_equal={bool(torch.equal(summed, ref_sum))}",
+                flush=True,
+            )
+            self.assertLessEqual(
+                int(ulp.max()),
+                2,
+                msg=f"normed pair diverged beyond bf16 noise at {shape}",
+            )
+            # chained-pair smoke: site-1 output feeds site-2 exactly like the
+            # layer forward does (residual threading through the fused op).
+            x2 = (torch.randn(*shape, device=dev) * 0.5).to(torch.bfloat16)
+            x2_ref = x2.clone()
+            out2, summed2 = dgm._fused_add_norm(x2, summed, dgm.RMSNorm(weight, eps))
+            ref2_sum = ref_sum + x2_ref
+            ref2 = flashinfer.norm.rmsnorm(ref2_sum, weight, eps=eps)
+            self.assertTrue(torch.equal(summed2, ref2_sum))
+            ulp2 = (
+                out2.view(torch.int16).to(torch.int32)
+                - ref2.view(torch.int16).to(torch.int32)
+            ).abs()
+            self.assertLessEqual(int(ulp2.max()), 2)
+
+    def test_fused_add_rmsnorm_gate_gpu(self):
+        # DGM_FUSED_ADD_NORM=0 must restore the exact torch two-step objects
+        # (fresh sum tensor, module's own norm).
+        self._require_cuda()
+        dev = torch.device("cuda:0")
+        torch.manual_seed(67)
+        x = (torch.randn(64, 128, device=dev) * 0.5).to(torch.bfloat16)
+        residual = (torch.randn(64, 128, device=dev) * 0.5).to(torch.bfloat16)
+        norm = dgm.RMSNorm(torch.ones(128, device=dev, dtype=torch.bfloat16), 1e-6)
+        saved = dgm._FUSED_ADD_NORM_ENV
+        try:
+            dgm._FUSED_ADD_NORM_ENV = False
+            out, summed = dgm._fused_add_norm(x, residual, norm)
+        finally:
+            dgm._FUSED_ADD_NORM_ENV = saved
+        ref_sum = residual + x
+        self.assertTrue(torch.equal(summed, ref_sum))
+        self.assertTrue(torch.equal(out, norm(ref_sum)))
+
+
 class DiffusionGemmaSamplingABTest(TestCase):
     """Contract opt-r4 lane B GPU A/B: fused Gumbel-max categorical sampling
     kernel vs the torch softmax+multinomial reference. Sampling is stochastic
