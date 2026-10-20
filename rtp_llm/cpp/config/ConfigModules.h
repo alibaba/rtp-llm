@@ -208,6 +208,7 @@ struct KVCacheConfig {
     bool        enable_memory_cache       = false;
     bool        enable_disk_cache         = false;
     bool        enable_remote_cache       = false;
+    bool        enable_crc                = true;
     std::string device_eviction_policy    = "lru";
     std::string memory_eviction_policy    = "lru";
     std::string disk_eviction_policy      = "fifo";
