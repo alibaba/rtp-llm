@@ -1380,6 +1380,40 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
                 PrepareOnlySpeculativeCommitBridgeModel(), "has_hooks"
             )
 
+    def test_cpu_status_bridge_preserves_false_and_ignores_non_target(self):
+        model = SpeculativeCommitBridgeModel()
+        calls = []
+        model.has_speculative_target_status_reducer = lambda: True
+        model.reduce_speculative_target_prepare_status = lambda ok: (
+            calls.append(ok),
+            False,
+        )[1]
+        self.assertFalse(run_speculative_commit_bridge(model, "reduce_true"))
+        self.assertFalse(run_speculative_commit_bridge(model, "reduce_false"))
+        self.assertEqual(calls, [True, False])
+        self.assertIsNone(run_speculative_commit_bridge(model, "reduce_true", False))
+        self.assertEqual(calls, [True, False])
+
+    def test_cpu_status_bridge_optional_and_disabled_capabilities(self):
+        model = SpeculativeCommitBridgeModel()
+        self.assertIsNone(run_speculative_commit_bridge(model, "reduce_true"))
+        model.has_speculative_target_status_reducer = lambda: False
+        model.reduce_speculative_target_prepare_status = lambda ok: (
+            _ for _ in ()
+        ).throw(AssertionError("disabled hook"))
+        self.assertIsNone(run_speculative_commit_bridge(model, "reduce_true"))
+
+    def test_cpu_status_bridge_transport_errors_propagate(self):
+        model = SpeculativeCommitBridgeModel()
+        model.has_speculative_target_status_reducer = lambda: True
+
+        def fail(ok):
+            raise RuntimeError("status transport poisoned")
+
+        model.reduce_speculative_target_prepare_status = fail
+        with self.assertRaisesRegex(RuntimeError, "status transport poisoned"):
+            run_speculative_commit_bridge(model, "reduce_true")
+
     def test_speculative_commit_prepare_exception_becomes_error(self) -> None:
         model = SpeculativeCommitBridgeModel(prepare_error=True)
 

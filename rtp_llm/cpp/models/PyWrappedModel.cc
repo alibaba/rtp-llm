@@ -191,6 +191,16 @@ bool PyWrappedModel::hasSpeculativeTargetCommitHooks() const {
     return has_speculative_target_commit_hooks_;
 }
 
+std::optional<bool> PyWrappedModel::reduceSpeculativeTargetPrepareStatus(bool local_ok) {
+    if (!has_speculative_target_status_reducer_) {
+        return std::nullopt;
+    }
+    py::gil_scoped_acquire gil;
+    // Native waiting releases the GIL. Do not catch errors and switch transports:
+    // the published generation may already have been consumed by the peer.
+    return py_model_.attr("reduce_speculative_target_prepare_status")(local_ok).cast<bool>();
+}
+
 std::string PyWrappedModel::prepareSpeculativeTargetCommit(const torch::Tensor& accept_len) {
     if (!has_speculative_target_commit_hooks_) {
         return {};

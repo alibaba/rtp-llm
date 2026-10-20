@@ -812,6 +812,11 @@ class Qwen4ExpModel(Qwen35Model):
         self._head_ipc_gather = prepare_head_ipc_gather(
             config, parallelism_config, getattr(self, "_fp8_lm_head", None)
         )
+        from rtp_llm.models_py.modules.qwen4_exp.cpu_target_status import (
+            prepare_cpu_target_status,
+        )
+
+        self._cpu_target_status = prepare_cpu_target_status(config, parallelism_config)
         annotate_compute_inventory(self.weight)
 
     def _ple_coordinator(self) -> PLETransactionCoordinator:
@@ -899,6 +904,9 @@ class Qwen4ExpModel(Qwen35Model):
         head_ipc = self.__dict__.get("_head_ipc_gather")
         if head_ipc is not None:
             head_ipc.close()
+        status = self.__dict__.get("_cpu_target_status")
+        if status is not None:
+            status.close()
         self._closed = True
 
     def try_gather_fp8_lm_head_for_tp(self, local):
@@ -1189,6 +1197,15 @@ class Qwen4ExpModel(Qwen35Model):
         self, transaction: _PLETargetTransaction
     ) -> None:
         return self._ple_coordinator()._release_ple_target_transaction(transaction)
+
+    def has_speculative_target_status_reducer(self) -> bool:
+        return self.__dict__.get("_cpu_target_status") is not None
+
+    def reduce_speculative_target_prepare_status(self, local_ok: bool) -> bool:
+        status = self.__dict__.get("_cpu_target_status")
+        if status is None:
+            raise RuntimeError("CPU target status was not initialized collectively")
+        return status.reduce(local_ok)
 
     def prepare_speculative_target_commit(self, accept_len: torch.Tensor) -> None:
         return self._ple_coordinator().prepare_speculative_target_commit(accept_len)

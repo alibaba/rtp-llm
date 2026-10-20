@@ -238,6 +238,7 @@ cc_library(
         "//rtp_llm/models_py/bindings:register_ops_hdr",
         ":bf16_gemm_op",
         "//rtp_llm/models_py/bindings/cuda/kernels:head_ipc_gather",
+        "//rtp_llm/models_py/bindings/common:common",
         ":cuda_bindings_base",
         ":cuda_attn_bindings_base",
     ],

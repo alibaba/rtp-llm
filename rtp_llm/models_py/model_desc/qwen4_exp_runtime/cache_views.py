@@ -240,8 +240,15 @@ class PLECacheViews:
             or int(rows.numel()) != int(pages.numel())
         ):
             raise RuntimeError(f"PLE cache {tag!r} block-table pairs are inconsistent")
-        rows_l = rows.to(device=table.device, dtype=torch.long)
-        pages_l = pages.to(device=table.device, dtype=torch.long)
+        host_pairs = (
+            rows.device.type == pages.device.type == "cpu"
+            and rows.dtype == pages.dtype == torch.long
+            and table.is_cuda
+            and torch.version.hip is None
+        )
+        check_device = rows.device if host_pairs else table.device
+        rows_l = rows.to(device=check_device, dtype=torch.long)
+        pages_l = pages.to(device=check_device, dtype=torch.long)
         if bool((rows_l < 0).any().item()) or bool(
             (rows_l >= int(table.shape[0])).any().item()
         ):
@@ -252,6 +259,16 @@ class PLECacheViews:
             raise RuntimeError(
                 f"PLE cache {tag!r} logical page exceeds its block table"
             )
+        if host_pairs:
+            # These indices originate on the host. Validate their bounds there,
+            # then upload together; the device table still gets its own check.
+            host_indices = torch.empty(
+                (2, rows_l.numel()), dtype=torch.long, device="cpu", pin_memory=True
+            )
+            host_indices[0].copy_(rows_l)
+            host_indices[1].copy_(pages_l)
+            device_indices = host_indices.to(device=table.device, non_blocking=True)
+            rows_l, pages_l = device_indices.unbind(0)
         blocks = table[rows_l, pages_l]
         if bool((blocks >= pool_rows).any().item()):
             raise RuntimeError(f"PLE cache {tag!r} physical block id exceeds its pool")

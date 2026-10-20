@@ -717,3 +717,11 @@ py_test(
     tags = ["RTX_5000_PRO_CU13"],
     exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "1"},
 )
+
+py_test(
+    name = "cpu_target_status_test",
+    srcs = ["cpu_target_status_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13"},
+)
