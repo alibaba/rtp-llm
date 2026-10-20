@@ -14,6 +14,10 @@
 #include <utility>
 #include <vector>
 
+#include "kmonitor/client/MetricsReporter.h"
+#include "kmonitor/client/core/MetricsData.h"
+#include "kmonitor/client/metric/GaugeMetric.h"
+#include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
@@ -31,6 +35,26 @@ public:
 namespace rtp_llm {
 namespace {
 using namespace block_tree_cache_test;
+
+void expectEvictionTimeSamples(const std::shared_ptr<kmonitor::MetricsReporter>& reporter,
+                               Tier                                              tier,
+                               const char*                                       trigger_type,
+                               size_t                                            count) {
+    auto* metrics = reporter->getMetricsGroup<RtpLLMCacheEvictionMetrics>();
+    ASSERT_NE(metrics, nullptr);
+    kmonitor::MetricsTags tags("tier", tierName(tier));
+    tags.AddTag("trigger_type", trigger_type);
+    tags.AddTag("group_type", metricCacheGroupTypeName(CacheGroupType::FULL));
+    for (auto* metric : {metrics->evicted_block_lifetime_ms_metric, metrics->evicted_block_idletime_ms_metric}) {
+        auto* series = metric->DeclareMetric(&tags);
+        auto* gauge  = dynamic_cast<kmonitor::GaugeMetric*>(series);
+        EXPECT_NE(gauge, nullptr);
+        if (gauge != nullptr) {
+            EXPECT_EQ(gauge->calculator_.Count(), count);
+        }
+        EXPECT_TRUE(metric->UndeclareMetric(series));
+    }
+}
 
 std::shared_ptr<LoadAsyncContext> getLoadContext(const BlockTreeMatchResult& result) {
     return std::dynamic_pointer_cast<LoadAsyncContext>(result.async_context);
@@ -1079,7 +1103,8 @@ TEST_F(BlockTreeCacheIntegrationTest, DirectDropDetachesInFlightDemotionAndDisca
     BlockTreeCacheConfig config;
     config.enable_host_cache = true;
     config.enable_disk_cache = true;
-    auto cache               = makeBlockTreeCacheForTest(std::vector<GroupSetPtr>{full}, config);
+    auto metrics_reporter    = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
+    auto cache = makeBlockTreeCacheForTest(std::vector<GroupSetPtr>{full}, config, nullptr, nullptr, metrics_reporter);
     ASSERT_NE(cache, nullptr);
 
     auto pausable_copy = std::make_shared<PausablePerRankBlockTransferEngine>(
@@ -1109,6 +1134,8 @@ TEST_F(BlockTreeCacheIntegrationTest, DirectDropDetachesInFlightDemotionAndDisca
     EXPECT_EQ(cache->evictForGroup(/*group_id=*/0, /*num_blocks=*/1), 1);
     EXPECT_TRUE(path[0]->group_set_resources[0].is_empty());
     EXPECT_TRUE(path[1]->group_set_resources[0].transfer_detached);
+    expectEvictionTimeSamples(metrics_reporter, Tier::DEVICE, "force_drop", 1);
+    expectEvictionTimeSamples(metrics_reporter, Tier::HOST, "force_drop", 1);
     EXPECT_TRUE(host_pool->isAllocated(host_source));
     EXPECT_TRUE(disk_pool->isAllocated(disk_target));
 
@@ -1116,6 +1143,10 @@ TEST_F(BlockTreeCacheIntegrationTest, DirectDropDetachesInFlightDemotionAndDisca
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
 
     EXPECT_FALSE(host_pool->isAllocated(host_source));
+    expectEvictionTimeSamples(metrics_reporter, Tier::HOST, "force_drop", 1);
+    auto* metrics = metrics_reporter->getMetricsGroup<RtpLLMCacheEvictionMetrics>();
+    EXPECT_EQ(metrics->evicted_block_lifetime_ms_metric->metric_data_->Size(), 2u);
+    EXPECT_EQ(metrics->evicted_block_idletime_ms_metric->metric_data_->Size(), 2u);
     EXPECT_FALSE(disk_pool->isAllocated(disk_target));
     EXPECT_TRUE(cache->tree()->findNode({100, 200}).empty());
 }
@@ -1127,7 +1158,8 @@ TEST_F(BlockTreeCacheIntegrationTest, DirectDropDetachesPendingLoadAndRejectsCom
 
     BlockTreeCacheConfig config;
     config.enable_host_cache = true;
-    auto cache               = makeBlockTreeCacheForTest(std::vector<GroupSetPtr>{full}, config);
+    auto metrics_reporter    = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
+    auto cache = makeBlockTreeCacheForTest(std::vector<GroupSetPtr>{full}, config, nullptr, nullptr, metrics_reporter);
     ASSERT_NE(cache, nullptr);
 
     const BlockIdxType host_source = full->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
@@ -1147,6 +1179,8 @@ TEST_F(BlockTreeCacheIntegrationTest, DirectDropDetachesPendingLoadAndRejectsCom
     EXPECT_EQ(path[1]->group_set_resources[0].transfer_state, GroupSetTransferState::LOAD_PENDING);
     EXPECT_EQ(cache->evictForGroup(/*group_id=*/0, /*num_blocks=*/1), 1);
     EXPECT_TRUE(path[1]->group_set_resources[0].transfer_detached);
+    expectEvictionTimeSamples(metrics_reporter, Tier::DEVICE, "force_drop", 1);
+    expectEvictionTimeSamples(metrics_reporter, Tier::HOST, "force_drop", 1);
     EXPECT_TRUE(host_pool->isAllocated(host_source));
 
     const BlockIdList target_blocks{20};
@@ -1156,6 +1190,10 @@ TEST_F(BlockTreeCacheIntegrationTest, DirectDropDetachesPendingLoadAndRejectsCom
     EXPECT_TRUE(context->done());
 
     EXPECT_FALSE(host_pool->isAllocated(host_source));
+    expectEvictionTimeSamples(metrics_reporter, Tier::HOST, "force_drop", 1);
+    auto* metrics = metrics_reporter->getMetricsGroup<RtpLLMCacheEvictionMetrics>();
+    EXPECT_EQ(metrics->evicted_block_lifetime_ms_metric->metric_data_->Size(), 2u);
+    EXPECT_EQ(metrics->evicted_block_idletime_ms_metric->metric_data_->Size(), 2u);
     path = cache->tree()->findNode({100, 200});
     ASSERT_EQ(path.size(), 2u);
     EXPECT_TRUE(path[0]->group_set_resources[0].is_empty());
@@ -1174,7 +1212,8 @@ TEST_F(BlockTreeCacheIntegrationTest, DirectDropDetachesInFlightLoadAndDiscardsI
 
     BlockTreeCacheConfig config;
     config.enable_host_cache = true;
-    auto cache               = makeBlockTreeCacheForTest(std::vector<GroupSetPtr>{full}, config);
+    auto metrics_reporter    = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
+    auto cache = makeBlockTreeCacheForTest(std::vector<GroupSetPtr>{full}, config, nullptr, nullptr, metrics_reporter);
     ASSERT_NE(cache, nullptr);
 
     auto pausable_copy = std::make_shared<PausablePerRankBlockTransferEngine>(
@@ -1212,6 +1251,8 @@ TEST_F(BlockTreeCacheIntegrationTest, DirectDropDetachesInFlightLoadAndDiscardsI
     EXPECT_EQ(cache->evictForGroup(/*group_id=*/0, /*num_blocks=*/1), 1);
     EXPECT_TRUE(path[0]->group_set_resources[0].is_empty());
     EXPECT_TRUE(path[1]->group_set_resources[0].transfer_detached);
+    expectEvictionTimeSamples(metrics_reporter, Tier::DEVICE, "force_drop", 1);
+    expectEvictionTimeSamples(metrics_reporter, Tier::HOST, "force_drop", 1);
     EXPECT_TRUE(host_pool->isAllocated(host_source));
 
     pausable_copy->release();
@@ -1220,6 +1261,10 @@ TEST_F(BlockTreeCacheIntegrationTest, DirectDropDetachesInFlightLoadAndDiscardsI
 
     EXPECT_FALSE(context->success());
     EXPECT_FALSE(host_pool->isAllocated(host_source));
+    expectEvictionTimeSamples(metrics_reporter, Tier::HOST, "force_drop", 1);
+    auto* metrics = metrics_reporter->getMetricsGroup<RtpLLMCacheEvictionMetrics>();
+    EXPECT_EQ(metrics->evicted_block_lifetime_ms_metric->metric_data_->Size(), 2u);
+    EXPECT_EQ(metrics->evicted_block_idletime_ms_metric->metric_data_->Size(), 2u);
     path = cache->tree()->findNode({100, 200});
     ASSERT_EQ(path.size(), 2u);
     EXPECT_TRUE(path[0]->group_set_resources[0].is_empty());

@@ -689,31 +689,29 @@ void RtpLLMCacheEvictionMetrics::report(const kmonitor::MetricsTags*         tag
     }
     if (collector->report_eviction_trigger) {
         kmonitor::MetricsTags trigger_tags("trigger_type", collector->trigger_type);
-        trigger_tags.AddTag("source_tier", collector->source_tier);
+        trigger_tags.AddTag("tier", collector->source_tier);
         trigger_tags.AddTag("group_type", collector->group_type);
         eviction_trigger_qps_metric->Report(&trigger_tags, collector->eviction_trigger_count);
     }
     if (collector->report_eviction_blocks) {
         kmonitor::MetricsTags required_tags("trigger_type", collector->trigger_type);
         required_tags.AddTag("block_type", "required");
-        required_tags.AddTag("source_tier", collector->source_tier);
+        required_tags.AddTag("tier", collector->source_tier);
         required_tags.AddTag("group_type", collector->group_type);
         eviction_blocks_count_metric->Report(&required_tags, collector->eviction_required_blocks);
 
         kmonitor::MetricsTags scheduled_tags("trigger_type", collector->trigger_type);
         scheduled_tags.AddTag("block_type", "scheduled");
-        scheduled_tags.AddTag("source_tier", collector->source_tier);
+        scheduled_tags.AddTag("tier", collector->source_tier);
         scheduled_tags.AddTag("group_type", collector->group_type);
         eviction_blocks_count_metric->Report(&scheduled_tags, collector->eviction_scheduled_blocks);
     }
     if (collector->report_eviction) {
-        kmonitor::MetricsTags eviction_tags("source_tier", collector->source_tier);
-        eviction_tags.AddTag("target_tier", collector->target_tier);
+        kmonitor::MetricsTags eviction_tags("tier", collector->source_tier);
+        eviction_tags.AddTag("trigger_type", collector->trigger_type);
         eviction_tags.AddTag("group_type", collector->group_type);
         evicted_block_lifetime_ms_metric->Report(&eviction_tags, collector->block_lifetime_ms);
-        if (collector->report_block_idletime) {
-            evicted_block_idletime_ms_metric->Report(&eviction_tags, collector->block_idletime_ms);
-        }
+        evicted_block_idletime_ms_metric->Report(&eviction_tags, collector->block_idletime_ms);
     }
 }
 
@@ -808,10 +806,9 @@ bool RtpLLMCacheReuseMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(stream_cache_memory_reuse_length_metric, "rtp_llm_stream_cache_memory_reuse_length");
     REGISTER_GAUGE_MUTABLE_METRIC(stream_cache_disk_reuse_length_metric, "rtp_llm_stream_cache_disk_reuse_length");
     REGISTER_GAUGE_MUTABLE_METRIC(stream_cache_remote_reuse_length_metric, "rtp_llm_stream_cache_remote_reuse_length");
-    REGISTER_GAUGE_MUTABLE_METRIC(reuse_interval_avg_ms_metric, "rtp_llm_kv_cache_reuse_interval_avg_ms");
-    REGISTER_GAUGE_MUTABLE_METRIC(reuse_interval_max_ms_metric, "rtp_llm_kv_cache_reuse_interval_max_ms");
-    REGISTER_GAUGE_MUTABLE_METRIC(hit_entry_age_avg_ms_metric, "rtp_llm_kv_cache_hit_entry_age_avg_ms");
-    REGISTER_GAUGE_MUTABLE_METRIC(hit_entry_age_max_ms_metric, "rtp_llm_kv_cache_hit_entry_age_max_ms");
+    REGISTER_GAUGE_MUTABLE_METRIC(reuse_block_first_hit_idletime_ms_metric,
+                                  "rtp_llm_kv_cache_reuse_block_first_hit_idletime_ms");
+    REGISTER_GAUGE_MUTABLE_METRIC(reuse_block_hit_idletime_ms_metric, "rtp_llm_kv_cache_reuse_block_hit_idletime_ms");
     REGISTER_GAUGE_MUTABLE_METRIC(match_cost_time_us_metric, "rtp_llm_match_cost_time_us");
     REGISTER_QPS_MUTABLE_METRIC(load_qps_metric, "rtp_llm_kv_cache_load_qps");
     REGISTER_QPS_MUTABLE_METRIC(load_fail_qps_metric, "rtp_llm_kv_cache_load_fail_qps");
@@ -837,10 +834,11 @@ void RtpLLMCacheReuseMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMCa
         }
     }
     if (collector->report_reuse_time_metrics) {
-        REPORT_MUTABLE_METRIC(reuse_interval_avg_ms_metric, collector->reuse_interval_avg_ms);
-        REPORT_MUTABLE_METRIC(reuse_interval_max_ms_metric, collector->reuse_interval_max_ms);
-        REPORT_MUTABLE_METRIC(hit_entry_age_avg_ms_metric, collector->hit_entry_age_avg_ms);
-        REPORT_MUTABLE_METRIC(hit_entry_age_max_ms_metric, collector->hit_entry_age_max_ms);
+        if (collector->reuse_block_first_hit_idletime_ms.has_value()) {
+            REPORT_MUTABLE_METRIC(reuse_block_first_hit_idletime_ms_metric,
+                                  *collector->reuse_block_first_hit_idletime_ms);
+        }
+        REPORT_MUTABLE_METRIC(reuse_block_hit_idletime_ms_metric, collector->reuse_block_hit_idletime_ms);
     }
     if (collector->report_load_metrics) {
         load_qps_metric->Report(tags, 1);

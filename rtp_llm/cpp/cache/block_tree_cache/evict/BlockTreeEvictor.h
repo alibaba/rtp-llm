@@ -65,8 +65,8 @@ public:
 
     // ---- Semantic events (must be called while holding BlockTreeCache mutex) ----
     void onInserted(const BlockTreeInsertResult& result);
-    // A real match hit: bump access clock / hit_count and re-sort in-heap entries.
-    void                   onMatched(const std::vector<TreeNode*>& path);
+    uint64_t               nextAccessSeq();
+    void                   onMatched(TreeNode* node, size_t group_set_id);
     CandidateStats         candidateStats() const;
     size_t                 candidateCount(size_t group_set_id, Tier tier) const;
     std::vector<TreeNode*> candidateNodes(size_t group_set_id, Tier tier) const;
@@ -74,7 +74,8 @@ public:
     // ---- Eviction selection & migration (caller owns synchronization) ----
     // Selection, task preparation, settlement, and abort mutate tree/group-set/pool/heap
     // state and must run under BlockTreeCache's mutex. Task execution is lock-free.
-    bool   dropLocked(size_t group_set_id, Tier source_tier, bool notify_settled);
+    bool
+    dropLocked(size_t group_set_id, Tier source_tier, bool notify_settled, const char* trigger_type = "force_drop");
     void   scheduleWatermarkEvictionsLocked(Tier tier, const TierWatermark& watermark);
     size_t computeWatermarkEvictCount(const GroupSet& group_set, Tier tier, const TierWatermark& watermark);
     // Discard a detached operation's source without publishing its target.
@@ -104,17 +105,18 @@ private:
     };
 
     struct GroupSetTierHeaps {
-        std::unique_ptr<EvictionHeap>         device;
-        std::unique_ptr<EvictionHeap>         host;
-        std::unique_ptr<EvictionHeap>         disk;
-        std::array<bool, 3>                   watermark_triggered{};
-        std::array<WatermarkEvictionRound, 3> watermark_rounds{};
+        std::unique_ptr<EvictionHeap>                         device;
+        std::unique_ptr<EvictionHeap>                         host;
+        std::unique_ptr<EvictionHeap>                         disk;
+        std::array<bool, 3>                                   watermark_triggered{};
+        std::array<WatermarkEvictionRound, 3>                 watermark_rounds{};
+        std::unordered_map<TreeNode*, EvictionTimingSnapshot> pending_timings;
     };
 
     EvictionHeap*                     heapFor(size_t group_set_id, Tier tier) const;
     bool                              isEvictable(TreeNode* node, size_t group_set_id, Tier source_tier) const;
     std::optional<TransferDescriptor> chooseVictim(size_t group_set_id, Tier tier, bool force_drop = false);
-    EvictionDropTask                  createDropTask(TransferDescriptor eviction_desc);
+    EvictionDropTask createDropTask(TransferDescriptor eviction_desc, const char* trigger_type = "force_drop");
     bool   batchDropLocked(size_t group_set_id, Tier source_tier, size_t max_victim_count, size_t& scheduled_count);
     bool   submitEvictionTask(std::vector<TransferDescriptor> descriptors, std::vector<EvictionTimingSnapshot> timings);
     void   finishWatermarkRoundLocked(size_t group_set_id, Tier source_tier);
@@ -123,7 +125,8 @@ private:
     void   runEvictionTask(std::shared_ptr<const EvictionTransferTask> task) noexcept;
     BatchEvictResult batchEvictLocked(size_t group_set_id, Tier source_tier, size_t max_victim_count);
     void scheduleEvictionSettlement(std::shared_ptr<const EvictionTransferTask> task, bool success) noexcept;
-    void runDropTask(TransferDescriptor eviction_desc, bool notify_settled = true);
+    void
+    runDropTask(TransferDescriptor eviction_desc, bool notify_settled = true, const char* trigger_type = "force_drop");
     void rollbackTransferLocked(const std::vector<TransferDescriptor>& descs);
     void updateFullCandidate(TreeNode* node, size_t group_set_id);
     void updateFullCandidate(TreeNode* parent);

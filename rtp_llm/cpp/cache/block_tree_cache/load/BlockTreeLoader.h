@@ -53,11 +53,13 @@ public:
     void                 shutdown();
 
 private:
-    bool validMatch(std::vector<TreeNode*>& path, std::vector<bool>& candidate_valid) const;
-    std::vector<BlockTreeCacheReuseTimeMetricsSnapshot> collectReuseTimeSnapshots(const std::vector<TreeNode*>& path,
-                                                                                  size_t  matched_device_blocks,
-                                                                                  int64_t access_time_us) const;
+    bool                 validMatch(std::vector<TreeNode*>& path, std::vector<bool>& candidate_valid) const;
     BlockTreeMatchResult createMatchResult(std::vector<TreeNode*>& path, const CacheKeysType& cache_keys);
+    void                 collectReuseTimeSnapshots(TreeNode*                                            node,
+                                                   size_t                                               group_set_id,
+                                                   uint64_t                                             access_seq,
+                                                   int64_t                                              access_time_us,
+                                                   std::vector<BlockTreeCacheReuseTimeMetricsSnapshot>& snapshots);
     StorageRequest       makeStorageRequest(const CacheKeysType& cache_keys, size_t local_matched_blocks_num) const;
     bool                 commitLoad(const std::shared_ptr<LoadAsyncContext>& context);
     void                 abortLoadLocked(const std::vector<TransferDescriptor>& load_descs,

@@ -58,21 +58,11 @@ struct BlockTreeEvictableMetricsSnapshot {
     size_t         evictable_candidate_count{0};
 };
 
-struct BlockTreeCacheReuseTimeSample {
-    Tier           tier{Tier::DEVICE};
-    CacheGroupType group_type{CacheGroupType::FULL};
-    int64_t        insert_time_us{0};
-    int64_t        last_access_time_us{0};
-    int64_t        access_time_us{0};
-};
-
 struct BlockTreeCacheReuseTimeMetricsSnapshot {
-    Tier           tier{Tier::DEVICE};
-    CacheGroupType group_type{CacheGroupType::FULL};
-    int64_t        reuse_interval_avg_ms{0};
-    int64_t        reuse_interval_max_ms{0};
-    int64_t        hit_entry_age_avg_ms{0};
-    int64_t        hit_entry_age_max_ms{0};
+    Tier                   tier{Tier::DEVICE};
+    CacheGroupType         group_type{CacheGroupType::FULL};
+    std::optional<int64_t> reuse_block_first_hit_idletime_ms;
+    int64_t                reuse_block_hit_idletime_ms{0};
 };
 
 struct BlockTreeTransferBytesKey {
@@ -102,11 +92,15 @@ public:
     std::vector<BlockTreeEvictableMetricsSnapshot>
     collectEvictableMetricsSnapshots(const std::vector<GroupSetPtr>& group_sets, const BlockTreeEvictor& evictor) const;
     void reportEvictableCandidateCount(const std::vector<BlockTreeEvictableMetricsSnapshot>& snapshots) const;
-    std::vector<BlockTreeCacheReuseTimeMetricsSnapshot>
-         collectCacheReuseTimeMetrics(const std::vector<BlockTreeCacheReuseTimeSample>& samples) const;
     void reportCacheReuseTimeMetrics(const std::vector<BlockTreeCacheReuseTimeMetricsSnapshot>& snapshots) const;
     void reportEvictionFinished(const EvictionTransferTask& task, const std::vector<GroupSetPtr>& group_sets) const;
-    void reportEvictionFinished(const EvictionDropTask& task, const std::vector<GroupSetPtr>& group_sets) const;
+    void reportEvictionFinished(const EvictionDropTask&         task,
+                                const std::vector<GroupSetPtr>& group_sets,
+                                const char*                     trigger_type) const;
+    void reportEvictedDescriptor(const TransferDescriptor&       desc,
+                                 const EvictionTimingSnapshot&   timing,
+                                 const std::vector<GroupSetPtr>& group_sets,
+                                 const char*                     trigger_type) const;
     void reportEvictionTriggered(Tier source_tier, CacheGroupType group_type, bool force_drop) const;
     void reportEvictionBlocks(Tier           source_tier,
                               CacheGroupType group_type,
@@ -148,10 +142,6 @@ private:
     static constexpr size_t kDirectionCount = 5;
 
     static int transferDirectionIndex(Tier source_tier, Tier target_tier);
-    void       reportEvictedDescriptor(const TransferDescriptor&       desc,
-                                       const EvictionTimingSnapshot&   timing,
-                                       const std::vector<GroupSetPtr>& group_sets,
-                                       bool                            report_block_idletime) const;
     void
     reportEvictionTrigger(Tier source_tier, CacheGroupType group_type, const char* trigger_type, int64_t count) const;
     void reportStoreBlocks(Tier target_tier, const char* outcome, size_t block_count) const;

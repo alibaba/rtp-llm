@@ -129,11 +129,12 @@ void BlockTreeEvictor::updateFullCandidate(TreeNode* node, size_t group_set_id) 
 }
 
 void BlockTreeEvictor::onLoaded(TreeNode* node, size_t group_set_id) {
-    GroupSetResource& resource                  = node->group_set_resources[group_set_id];
-    const int64_t     tier_enter_time_us        = currentTimeUs();
-    resource.candidate_meta.admission_seq       = ++admission_seq_;
-    resource.candidate_meta.tier_enter_time_us  = tier_enter_time_us;
-    resource.candidate_meta.last_access_time_us = tier_enter_time_us;
+    GroupSetResource& resource                    = node->group_set_resources[group_set_id];
+    const int64_t     tier_enter_time_us          = currentTimeUs();
+    resource.candidate_meta.admission_seq         = ++admission_seq_;
+    resource.candidate_meta.tier_enter_time_us    = tier_enter_time_us;
+    resource.candidate_meta.last_access_time_us   = tier_enter_time_us;
+    resource.candidate_meta.tier_last_hit_time_us = 0;
     admitCandidate(node, group_set_id, Tier::DEVICE);
     updateFullCandidate(node->parent, group_set_id);
 }
@@ -145,32 +146,32 @@ void BlockTreeEvictor::onInserted(const BlockTreeInsertResult& result) {
     }
     for (const auto& adopted : result.adopted_nodes) {
         for (size_t group_set_id : adopted.second) {
-            const int64_t     insert_time_us = currentTimeUs();
-            GroupSetResource& resource                  = adopted.first->group_set_resources[group_set_id];
-            resource.candidate_meta.last_access_seq     = ++access_seq_;
-            resource.candidate_meta.admission_seq       = ++admission_seq_;
-            resource.candidate_meta.hit_count           = 0;
-            resource.candidate_meta.insert_time_us      = insert_time_us;
-            resource.candidate_meta.last_access_time_us = insert_time_us;
-            resource.candidate_meta.tier_enter_time_us  = insert_time_us;
+            const int64_t     insert_time_us              = currentTimeUs();
+            GroupSetResource& resource                    = adopted.first->group_set_resources[group_set_id];
+            resource.candidate_meta.last_access_seq       = nextAccessSeq();
+            resource.candidate_meta.admission_seq         = ++admission_seq_;
+            resource.candidate_meta.hit_count             = 0;
+            resource.candidate_meta.tier_last_hit_time_us = 0;
+            resource.candidate_meta.last_access_time_us   = insert_time_us;
+            resource.candidate_meta.tier_enter_time_us    = insert_time_us;
             admitCandidate(adopted.first, group_set_id, resource.getTopTier());
             updateFullCandidate(adopted.first->parent, group_set_id);
         }
     }
 
     for (TreeNode* node : result.inserted_nodes) {
-        const uint64_t access         = ++access_seq_;
+        const uint64_t access         = nextAccessSeq();
         const uint64_t admit          = ++admission_seq_;
         const int64_t  insert_time_us = currentTimeUs();
         for (auto& group_set : tree_->groupSets()) {
-            const size_t      group_set_id              = group_set->groupSetId();
-            GroupSetResource& resource                  = node->group_set_resources[group_set_id];
-            resource.candidate_meta.last_access_seq     = access;
-            resource.candidate_meta.admission_seq       = admit;
-            resource.candidate_meta.hit_count           = 0;
-            resource.candidate_meta.insert_time_us      = insert_time_us;
-            resource.candidate_meta.last_access_time_us = insert_time_us;
-            resource.candidate_meta.tier_enter_time_us  = insert_time_us;
+            const size_t      group_set_id                = group_set->groupSetId();
+            GroupSetResource& resource                    = node->group_set_resources[group_set_id];
+            resource.candidate_meta.last_access_seq       = access;
+            resource.candidate_meta.admission_seq         = admit;
+            resource.candidate_meta.hit_count             = 0;
+            resource.candidate_meta.tier_last_hit_time_us = 0;
+            resource.candidate_meta.last_access_time_us   = insert_time_us;
+            resource.candidate_meta.tier_enter_time_us    = insert_time_us;
             admitCandidate(node, group_set_id, resource.getTopTier());
         }
     }
@@ -178,24 +179,15 @@ void BlockTreeEvictor::onInserted(const BlockTreeInsertResult& result) {
     updateFullCandidate(result.inserted_nodes.empty() ? nullptr : result.inserted_nodes.front()->parent);
 }
 
-void BlockTreeEvictor::onMatched(const std::vector<TreeNode*>& path) {
-    const uint64_t access         = ++access_seq_;
-    const int64_t  access_time_us = currentTimeUs();
-    for (const GroupSetPtr& group_set : tree_->groupSets()) {
-        const size_t group_set_id = group_set->groupSetId();
-        const size_t reuse_count  = std::min(group_set->computeReuseBlockCount(path.size()), path.size());
-        for (size_t path_index = path.size() - reuse_count; path_index < path.size(); ++path_index) {
-            TreeNode*         node     = path[path_index];
-            GroupSetResource& resource = node->group_set_resources[group_set_id];
-            const Tier        top      = resource.getTopTier();
-            if (top == Tier::NONE) {
-                continue;
-            }
-            resource.candidate_meta.last_access_seq     = access;
-            resource.candidate_meta.last_access_time_us = access_time_us;
-            ++resource.candidate_meta.hit_count;
-            heapFor(group_set_id, top)->updateIfPresent(node, resource.candidate_meta);
-        }
+uint64_t BlockTreeEvictor::nextAccessSeq() {
+    return ++access_seq_;
+}
+
+void BlockTreeEvictor::onMatched(TreeNode* node, size_t group_set_id) {
+    const GroupSetResource& resource = node->group_set_resources[group_set_id];
+    const Tier              tier     = resource.getTopTier();
+    if (tier != Tier::NONE) {
+        heapFor(group_set_id, tier)->updateIfPresent(node, resource.candidate_meta);
     }
 }
 
@@ -219,12 +211,15 @@ std::vector<TreeNode*> BlockTreeEvictor::candidateNodes(size_t group_set_id, Tie
     return heap == nullptr ? std::vector<TreeNode*>{} : heap->nodes();
 }
 
-bool BlockTreeEvictor::dropLocked(size_t group_set_id, Tier source_tier, bool notify_settled) {
+bool BlockTreeEvictor::dropLocked(size_t      group_set_id,
+                                  Tier        source_tier,
+                                  bool        notify_settled,
+                                  const char* trigger_type) {
     std::optional<TransferDescriptor> eviction_desc = chooseVictim(group_set_id, source_tier, /*force_drop=*/true);
     if (!eviction_desc.has_value()) {
         return false;
     }
-    runDropTask(std::move(*eviction_desc), notify_settled);
+    runDropTask(std::move(*eviction_desc), notify_settled, trigger_type);
     return true;
 }
 
@@ -253,7 +248,7 @@ bool BlockTreeEvictor::batchDropLocked(size_t  group_set_id,
         for (IBlockPool* pool : source_pools) {
             used_before.push_back(pool->usedBlocksNum());
         }
-        if (!dropLocked(group_set_id, source_tier, false)) {
+        if (!dropLocked(group_set_id, source_tier, false, "watermark")) {
             break;
         }
         processed                  = true;
@@ -281,6 +276,10 @@ bool BlockTreeEvictor::submitEvictionTask(std::vector<TransferDescriptor>     de
                                                                                        host_timeout_ms_);
     auto task_ptr =
         std::make_shared<EvictionTransferTask>(TransferTask(std::move(descriptors), timeout), std::move(timings));
+    for (size_t i = 0; i < task_ptr->descriptors().size(); ++i) {
+        const auto& desc = task_ptr->descriptors()[i];
+        heaps_[desc.group_set_id].pending_timings.emplace(desc.node, task_ptr->timings[i]);
+    }
     updatePendingRelease(task_ptr->descriptors(), true);
     const int64_t queue_begin = currentTimeUs();
     auto          on_timeout  = [this, task_ptr, queue_begin]() {
@@ -311,6 +310,9 @@ bool BlockTreeEvictor::submitEvictionTask(std::vector<TransferDescriptor>     de
         deadline,
         std::move(on_timeout));
     if (!submitted) {
+        for (const auto& desc : task_ptr->descriptors()) {
+            heaps_[desc.group_set_id].pending_timings.erase(desc.node);
+        }
         updatePendingRelease(task_ptr->descriptors(), false);
         rollbackTransferLocked(task_ptr->descriptors());
         return false;
@@ -387,6 +389,7 @@ void BlockTreeEvictor::scheduleEvictionSettlement(std::shared_ptr<const Eviction
             std::vector<bool>           detached;
             detached.reserve(task->descriptors().size());
             for (const TransferDescriptor& desc : task->descriptors()) {
+                heaps_[desc.group_set_id].pending_timings.erase(desc.node);
                 const bool is_detached = desc.node->group_set_resources[desc.group_set_id].transfer_detached;
                 detached.push_back(is_detached);
                 any_detached     = any_detached || is_detached;
@@ -404,12 +407,8 @@ void BlockTreeEvictor::scheduleEvictionSettlement(std::shared_ptr<const Eviction
 
             for (size_t desc_index = 0; desc_index < task->descriptors().size(); ++desc_index) {
                 const TransferDescriptor& desc = task->descriptors()[desc_index];
-                if (success || detached[desc_index]) {
-                    TransferDescriptor settled_desc = desc;
-                    if (detached[desc_index]) {
-                        settled_desc.target_tier = Tier::NONE;
-                    }
-                    settled_task.mutableDescriptorsForPreparation().push_back(std::move(settled_desc));
+                if (success && !detached[desc_index]) {
+                    settled_task.mutableDescriptorsForPreparation().push_back(desc);
                     settled_task.timings.push_back(task->timings[desc_index]);
                 }
             }
@@ -664,8 +663,8 @@ void BlockTreeEvictor::collectFullPrune(const TransferDescriptor&               
     std::reverse(task.full_prune_nodes_bottom_up.begin(), task.full_prune_nodes_bottom_up.end());
 }
 
-void BlockTreeEvictor::runDropTask(TransferDescriptor eviction_desc, bool notify_settled) {
-    const EvictionDropTask task = createDropTask(std::move(eviction_desc));
+void BlockTreeEvictor::runDropTask(TransferDescriptor eviction_desc, bool notify_settled, const char* trigger_type) {
+    const EvictionDropTask task = createDropTask(std::move(eviction_desc), trigger_type);
     for (const TransferDescriptor& dependent_desc : task.dependent_prune_descs) {
         completeDrop(dependent_desc);
     }
@@ -691,7 +690,7 @@ void BlockTreeEvictor::runDropTask(TransferDescriptor eviction_desc, bool notify
     if (notify_settled) {
         settled_(true, false);
     }
-    metrics_reporter_->reportEvictionFinished(task, tree_->groupSets());
+    metrics_reporter_->reportEvictionFinished(task, tree_->groupSets(), trigger_type);
 }
 
 void BlockTreeEvictor::completeDrop(const TransferDescriptor& desc) {
@@ -769,8 +768,10 @@ void BlockTreeEvictor::completeEvict(const std::vector<TransferDescriptor>& desc
                                 desc.group_set_id,
                                 desc.node->cache_key);
 
-        resource.candidate_meta.admission_seq      = ++admission_seq_;
-        resource.candidate_meta.tier_enter_time_us = tier_enter_time_us;
+        resource.candidate_meta.admission_seq         = ++admission_seq_;
+        resource.candidate_meta.tier_enter_time_us    = tier_enter_time_us;
+        resource.candidate_meta.last_access_time_us   = tier_enter_time_us;
+        resource.candidate_meta.tier_last_hit_time_us = 0;
         admitCandidate(desc.node, desc.group_set_id, desc.target_tier);
     }
     discardDetachedTransfer(detached_descs);
@@ -911,7 +912,7 @@ void BlockTreeEvictor::eraseNodeFromAllHeaps(TreeNode* node) {
     }
 }
 
-EvictionDropTask BlockTreeEvictor::createDropTask(TransferDescriptor eviction_desc) {
+EvictionDropTask BlockTreeEvictor::createDropTask(TransferDescriptor eviction_desc, const char* trigger_type) {
     EvictionDropTask task;
     task.primary_timing =
         EvictionTimingSnapshot(eviction_desc.node->group_set_resources[eviction_desc.group_set_id].candidate_meta);
@@ -1017,7 +1018,17 @@ EvictionDropTask BlockTreeEvictor::createDropTask(TransferDescriptor eviction_de
     reserveSource(task.cascade_descs);
     reserveSource(task.dependent_prune_descs);
     for (const auto& [node, group_set_id] : detached_resources) {
-        node->group_set_resources[group_set_id].transfer_detached = true;
+        GroupSetResource& resource = node->group_set_resources[group_set_id];
+        if (resource.transfer_detached) {
+            continue;
+        }
+        const Tier               tier = resource.getTopTier();
+        const TransferDescriptor desc{node, group_set_id, 0, tier, Tier::NONE, resource.getBlocks(tier)};
+        const auto               timing = resource.transfer_state == GroupSetTransferState::DEMOTING ?
+                                              heaps_[group_set_id].pending_timings.at(node) :
+                                              EvictionTimingSnapshot(resource.candidate_meta);
+        metrics_reporter_->reportEvictedDescriptor(desc, timing, group_sets, trigger_type);
+        resource.transfer_detached = true;
         tree_->refreshPublishedState(node);
     }
     return task;

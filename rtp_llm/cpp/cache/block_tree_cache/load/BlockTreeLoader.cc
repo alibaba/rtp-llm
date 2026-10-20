@@ -107,36 +107,33 @@ BlockIndicesType BlockTreeLoader::matchedBlocksForGroup(size_t                  
     return {};
 }
 
-std::vector<BlockTreeCacheReuseTimeMetricsSnapshot> BlockTreeLoader::collectReuseTimeSnapshots(
-    const std::vector<TreeNode*>& path, size_t matched_device_blocks, int64_t access_time_us) const {
-    std::vector<BlockTreeCacheReuseTimeSample> reuse_time_samples;
-    reuse_time_samples.reserve(path.size() * tree_->groupSets().size());
-    for (size_t group_set_id = 0; group_set_id < tree_->groupSets().size(); ++group_set_id) {
-        const GroupSetPtr& group_set = tree_->groupSets()[group_set_id];
-        const size_t       ready_reuse_count =
-            std::min(group_set->computeReuseBlockCount(matched_device_blocks), matched_device_blocks);
-        for (size_t i = matched_device_blocks - ready_reuse_count; i < matched_device_blocks; ++i) {
-            const GroupSetResource& resource       = path[i]->group_set_resources[group_set_id];
-            const CandidateMeta&    candidate_meta = resource.candidate_meta;
-            reuse_time_samples.push_back({Tier::DEVICE,
-                                          group_set->groupType(),
-                                          candidate_meta.insert_time_us,
-                                          candidate_meta.last_access_time_us,
-                                          access_time_us});
-        }
-
-        const size_t logical_reuse_count = std::min(group_set->computeReuseBlockCount(path.size()), path.size());
-        for (size_t i = std::max(path.size() - logical_reuse_count, matched_device_blocks); i < path.size(); ++i) {
-            const GroupSetResource& resource       = path[i]->group_set_resources[group_set_id];
-            const CandidateMeta&    candidate_meta = resource.candidate_meta;
-            reuse_time_samples.push_back({resource.getTopTier(),
-                                          group_set->groupType(),
-                                          candidate_meta.insert_time_us,
-                                          candidate_meta.last_access_time_us,
-                                          access_time_us});
-        }
+void BlockTreeLoader::collectReuseTimeSnapshots(TreeNode*                                            node,
+                                                size_t                                               group_set_id,
+                                                uint64_t                                             access_seq,
+                                                int64_t                                              access_time_us,
+                                                std::vector<BlockTreeCacheReuseTimeMetricsSnapshot>& snapshots) {
+    GroupSetResource& resource = node->group_set_resources[group_set_id];
+    const Tier        tier     = resource.getTopTier();
+    if (tier == Tier::NONE) {
+        return;
     }
-    return metrics_reporter_.collectCacheReuseTimeMetrics(reuse_time_samples);
+    CandidateMeta& meta             = resource.candidate_meta;
+    const bool     first_hit        = meta.tier_last_hit_time_us == 0;
+    const int64_t  previous_time_us = first_hit ? meta.tier_enter_time_us : meta.tier_last_hit_time_us;
+    BlockTreeCacheReuseTimeMetricsSnapshot snapshot;
+    snapshot.tier                        = tier;
+    snapshot.group_type                  = tree_->groupSets()[group_set_id]->groupType();
+    snapshot.reuse_block_hit_idletime_ms = std::max<int64_t>(0, access_time_us - previous_time_us) / 1000;
+    if (first_hit) {
+        snapshot.reuse_block_first_hit_idletime_ms = snapshot.reuse_block_hit_idletime_ms;
+    }
+    snapshots.push_back(snapshot);
+
+    meta.tier_last_hit_time_us = access_time_us;
+    meta.last_access_time_us   = access_time_us;
+    meta.last_access_seq       = access_seq;
+    ++meta.hit_count;
+    evictor_.onMatched(node, group_set_id);
 }
 
 BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>& path, const CacheKeysType& cache_keys) {
@@ -145,7 +142,9 @@ BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>& 
     if (!path.empty() && !validMatch(path, candidate_valid) && !storage_backend_) {
         return result;
     }
-    const int64_t access_time_us = currentTimeUs();
+    const int64_t  access_time_us = currentTimeUs();
+    const uint64_t access_seq     = evictor_.nextAccessSeq();
+    result.reuse_time_metrics_snapshots.reserve(path.size() * tree_->groupSets().size());
 
     for (size_t candidate_count = path.size(); candidate_count > 0; --candidate_count) {
         if (!candidate_valid[candidate_count - 1]) {
@@ -171,7 +170,6 @@ BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>& 
         }
     }
 
-    result.reuse_time_metrics_snapshots = collectReuseTimeSnapshots(path, result.matched_device_blocks, access_time_us);
     std::vector<TransferDescriptor> pending_load_descs;
     std::vector<bool>               joined_loads;
     for (size_t group_set_id = 0; group_set_id < tree_->groupSets().size(); ++group_set_id) {
@@ -180,6 +178,8 @@ BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>& 
             std::min(group_set->computeReuseBlockCount(result.matched_device_blocks), result.matched_device_blocks);
         MultiNodeResource matched_device_resource{group_set_id, Tier::DEVICE};
         for (size_t i = result.matched_device_blocks - ready_reuse_count; i < result.matched_device_blocks; ++i) {
+            collectReuseTimeSnapshots(
+                path[i], group_set_id, access_seq, access_time_us, result.reuse_time_metrics_snapshots);
             const GroupSetResource& resource = path[i]->group_set_resources[group_set_id];
             matched_device_resource.node_blocks.emplace_back(nullptr, resource.getBlocks(Tier::DEVICE));
         }
@@ -207,11 +207,12 @@ BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>& 
                     evictor_.suspendCandidate(path[i], group_set_id, source_tier);
                 }
             }
+            collectReuseTimeSnapshots(
+                path[i], group_set_id, access_seq, access_time_us, result.reuse_time_metrics_snapshots);
             pending_load_descs.emplace_back(std::move(desc));
             joined_loads.push_back(is_joined);
         }
     }
-    evictor_.onMatched(path);
 
     StorageRequest storage_request;
     if (storage_backend_ && path.size() < cache_keys.size()) {
