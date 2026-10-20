@@ -51,6 +51,7 @@ def translate_local_to_global_slots(
     local_idx: torch.Tensor,  # [T, K] int32, -1 sentinel preserved
     entries_per_block: int,
     tokens_per_block_for_block_table: int,
+    out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """[T, K] int32 global pool slot ids; -1 propagates as -1.
 
@@ -62,6 +63,9 @@ def translate_local_to_global_slots(
     ``K`` that doesn't naturally divide 128 (e.g. SWA win=128 →
     ``BLOCK_N=128`` works; smaller K → use 64). We pick the largest
     power-of-2 divisor of K up to 128.
+
+    Pass ``out`` (a contiguous ``[T, K]`` int32 buffer) to write in place;
+    CUDA-graph metadata uses this to skip an allocation and copy launch.
     """
     K = local_idx.shape[1]
     block_n = 128
@@ -75,4 +79,5 @@ def translate_local_to_global_slots(
         TOKENS_PER_BLOCK_FOR_BLOCK_TABLE=int(tokens_per_block_for_block_table),
         NUM_TOPK_TOKENS=K,
         BLOCK_N=block_n,
+        out=out,
     )

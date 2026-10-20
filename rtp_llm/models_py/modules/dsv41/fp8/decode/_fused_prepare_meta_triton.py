@@ -31,6 +31,10 @@ def _fused_prepare_meta_kernel(
     start_pos_in_ptr,  # [bs] i32
     # persistent outputs (max-sized; we write [:bs] prefix only)
     start_pos_out_ptr,  # [B_max] i32
+    position_ids_ptr,  # [B_max * q_len] i32
+    position_ids_long_ptr,  # [B_max * q_len] i64 — None when HAS_POS_IDS_LONG=False
+    decoder_start_ptr,  # [B_max] i64 — None when HAS_DECODER_START=False
+    swa_topk_length_ptr,  # [B_max] i32 — None when HAS_SWA_TOPK=False
     cmp_len_4_ptr,  # [B_max] i32 — None when HAS_CMP_4=False
     cmp_len_128_ptr,  # [B_max] i32 — None when HAS_CMP_128=False
     cmp_len_pt_4_ptr,  # [B_max, q_len] i32
@@ -56,6 +60,10 @@ def _fused_prepare_meta_kernel(
     BLOCK_HCA: tl.constexpr,  # >= HCA_DENSE_WIDTH, power of 2
     HAS_CMP_4: tl.constexpr,  # False for SWA-only (MTP draft)
     HAS_CMP_128: tl.constexpr,  # False when no HCA layers
+    HAS_POS_IDS_LONG: tl.constexpr,  # False for SWA-only V4.1 metadata
+    HAS_DECODER_START: tl.constexpr,  # False when no decoder SWA child metadata
+    HAS_SWA_TOPK: tl.constexpr,  # False when SWA lengths are not tracked
+    FULL_WIDTH: tl.constexpr,  # Capture/warmup: max-provision FlashMLA
 ):
     r = tl.program_id(0)
     q = tl.program_id(1)
@@ -68,9 +76,24 @@ def _fused_prepare_meta_kernel(
     in_ring = abs_pos % WINDOW  # i32 scalar
     out_rq = r * Q_LEN + q
 
+    # ---- Per-token position outputs ----
+    # Kept in this kernel so the replay path never allocates/broadcasts the
+    # [B, q_len] position stream on the host before copying it back.
+    tl.store(position_ids_ptr + out_rq, abs_pos)
+    if HAS_POS_IDS_LONG:
+        tl.store(position_ids_long_ptr + out_rq, abs_pos.to(tl.int64))
+
     # ---- Scalar outputs (write once per request; gate on q==0) ----
     if q == 0:
         tl.store(start_pos_out_ptr + r, sp)
+        if HAS_DECODER_START:
+            tl.store(decoder_start_ptr + r, sp.to(tl.int64))
+        if HAS_SWA_TOPK:
+            if FULL_WIDTH:
+                tl.store(swa_topk_length_ptr + r, WINDOW)
+            else:
+                swa_len = tl.minimum(tl.maximum(sp + Q_LEN, 0), WINDOW)
+                tl.store(swa_topk_length_ptr + r, swa_len)
         if HAS_CMP_4:
             tl.store(cmp_len_4_ptr + r, (sp + Q_LEN) // 4)
         if HAS_CMP_128:
@@ -166,6 +189,7 @@ def fused_update_decode_meta_pure(
     meta: Any,
     start_pos: torch.Tensor,
     max_seq_len: int,
+    full_width: bool = False,
 ) -> None:
     """Fuse the pure-start_pos metadata preparation into a single Triton kernel.
 
@@ -173,11 +197,13 @@ def fused_update_decode_meta_pure(
       - All tensors on CUDA
       - Supported ratio subsets: {4,128}, {4}, {128}, or {} (SWA-only)
 
-    Writes start_pos, slot_mapping_swa, slot_mapping_compressed,
-    compressed_lens, compressed_lens_per_token, topk_window_idxs,
-    topk_total_by_ratio, swa_abs_idx.
+    Writes start_pos, position_ids, position_ids_long,
+    decode_seq_start_per_req, SWA ``topk_length``, slot_mapping_swa,
+    slot_mapping_compressed, compressed_lens, compressed_lens_per_token,
+    topk_window_idxs, topk_total_by_ratio, swa_abs_idx.
     Callers handle pool_write_slot_mappings, swa_global_slots,
-    hca_cmp_global_slots, and topk_buffer_compressed reset separately.
+    hca_cmp_global_slots, compressed ``topk_length`` and
+    topk_buffer_compressed reset separately.
     """
     bs = int(start_pos.shape[0])
     q_len = meta.q_len_per_req
@@ -214,9 +240,16 @@ def fused_update_decode_meta_pure(
     BLOCK_HCA = _next_pow2(hca_dense_width)
 
     grid = (bs, q_len)
+    position_ids_long = getattr(meta, "position_ids_long", None)
+    decoder_start = getattr(meta, "decode_seq_start_per_req", None)
+    swa_topk_length = getattr(meta, "swa_topk_length", None)
     _fused_prepare_meta_kernel[grid](
         start_pos,
         meta.start_pos,
+        meta.position_ids,
+        position_ids_long,
+        decoder_start,
+        swa_topk_length,
         cmp_len_4,
         cmp_len_128,
         cmp_len_pt_4,
@@ -240,6 +273,10 @@ def fused_update_decode_meta_pure(
         BLOCK_HCA=BLOCK_HCA,
         HAS_CMP_4=has_4,
         HAS_CMP_128=has_128,
+        HAS_POS_IDS_LONG=position_ids_long is not None,
+        HAS_DECODER_START=decoder_start is not None,
+        HAS_SWA_TOPK=swa_topk_length is not None,
+        FULL_WIDTH=full_width,
     )
 
 
@@ -465,4 +502,57 @@ def fused_phase2b_pool_slot_mapping(
         HAS_CSA=has_csa,
         HAS_IDX=has_idx,
         HAS_HCA=has_hca,
+    )
+
+
+def fused_phase2b_swa_slot_mapping(
+    meta: Any,
+    start_pos: torch.Tensor,
+    bs: int,
+    entries_per_block: int,
+    tokens_per_block: int,
+) -> None:
+    """SWA-only specialization of :func:`fused_phase2b_pool_slot_mapping`.
+
+    V4.1 attention owns the compressed/index/state slot plans, so its graph
+    metadata only needs the always-written SWA pool.  Calling the generic
+    wrapper would still evaluate every compressed-pool branch and gather the
+    other block tables/dicts on the host before launching the same kernel.
+    This entry point passes just the SWA geometry and compile-time-eliminates
+    the remaining pool arms.
+    """
+    from rtp_llm.models_py.modules.dsv41.attn_type import SWA_KV
+
+    block_table = meta.pool_block_tables[SWA_KV]
+    slots = meta.pool_write_slot_mappings[SWA_KV]
+    dummy_bt = block_table
+    dummy_slot = slots
+    _fused_phase2b_pool_slot_mapping_kernel[(bs, meta.q_len_per_req)](
+        start_pos,
+        dummy_bt,
+        dummy_bt,
+        dummy_bt,
+        dummy_bt,
+        dummy_slot,
+        dummy_slot,
+        dummy_slot,
+        dummy_slot,
+        bs,
+        Q_LEN=meta.q_len_per_req,
+        SWA_E=int(entries_per_block),
+        SWA_TOKENS_PER_BLOCK=int(tokens_per_block),
+        SWA_BT_STRIDE=block_table.shape[1],
+        CSA_E=1,
+        CSA_TOKENS_PER_BLOCK=1,
+        CSA_BT_STRIDE=block_table.shape[1],
+        IDX_E=1,
+        IDX_TOKENS_PER_BLOCK=1,
+        IDX_BT_STRIDE=block_table.shape[1],
+        HCA_E=1,
+        HCA_TOKENS_PER_BLOCK=1,
+        HCA_BT_STRIDE=block_table.shape[1],
+        HAS_SWA=True,
+        HAS_CSA=False,
+        HAS_IDX=False,
+        HAS_HCA=False,
     )

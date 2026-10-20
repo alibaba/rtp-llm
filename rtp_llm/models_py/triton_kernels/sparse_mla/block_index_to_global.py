@@ -85,6 +85,7 @@ def triton_convert_req_index_to_global_index(
     HAS_PREFILL_WORKSPACE: bool = False,
     prefill_workspace_request_ids: torch.Tensor | None = None,
     prefill_workspace_starts: torch.Tensor | None = None,
+    out: torch.Tensor | None = None,
 ):
     """
     out[token_id, indice_id] =
@@ -133,7 +134,16 @@ def triton_convert_req_index_to_global_index(
     req_id_c = req_id.contiguous()
     block_table_c = block_table.contiguous()
     token_indices_c = token_indices.contiguous()
-    out = torch.empty_like(token_indices_c)
+    if out is None:
+        out = torch.empty_like(token_indices_c)
+    else:
+        # Callers that already own a stable output buffer (CUDA-graph decode
+        # metadata) pass it here so the kernel writes in place and we avoid a
+        # separate allocation plus a copy launch.
+        assert out.shape == token_indices_c.shape
+        assert out.dtype == torch.int32
+        assert out.device == token_indices_c.device
+        assert out.is_contiguous()
 
     # Strides in elements
     bt_stride0, bt_stride1 = block_table_c.stride()

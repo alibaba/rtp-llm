@@ -39,7 +39,6 @@ the slot indices we produce here are ``r * stride + offset_in_request``.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
@@ -287,41 +286,35 @@ def update_decoder_swa_metadata(meta, entries_per_block, *, batch_size=None):
     tpb = meta.paged_pool_tokens_per_block[region]
     table = meta.pool_block_tables[region][:batch_size]
     if meta.start_pos.is_cuda:
-        # Reuse the existing fused planner and its stable specialization;
-        # do not expand this additional pool into many eager CUDA launches.
+        # Only SWA needs a second physical slot map. The generic planner's
+        # global ratios are V4's 4/128, whereas V4.1 uses 2/1; never rewrite
+        # the shared global metadata through this additional SWA call. Call the
+        # SWA-only fused specialization directly so this extra pool does not
+        # re-evaluate the generic wrapper's compressed-pool branches.
         from rtp_llm.models_py.modules.dsv41.fp8.decode._fused_prepare_meta_triton import (
-            fused_phase2b_pool_slot_mapping,
+            fused_phase2b_swa_slot_mapping,
         )
 
-        fused_phase2b_pool_slot_mapping(
-            # Only SWA needs a second physical slot map. The generic planner's
-            # global ratios are V4's 4/128, whereas V4.1 uses 2/1; never rewrite
-            # the shared global metadata through this additional SWA call.
-            SimpleNamespace(
-                q_len_per_req=meta.q_len_per_req,
-                pool_block_tables={SWA_KV: child.pool_block_tables[SWA_KV]},
-                pool_write_slot_mappings={
-                    SWA_KV: child.pool_write_slot_mappings[SWA_KV]
-                },
-            ),
+        fused_phase2b_swa_slot_mapping(
+            child,
             meta.start_pos,
             batch_size,
-            {SWA_KV: eb},
-            {SWA_KV: tpb},
+            eb,
+            tpb,
         )
     else:
         writes = compute_kv_pool_slot_mapping(
             table, meta.position_ids[:count], eb, tpb, eb
         )
         child.pool_write_slot_mappings[SWA_KV][:count].copy_(writes)
-    reads = translate_local_to_global_slots(
+    translate_local_to_global_slots(
         meta.req_id_per_token[:count],
         table,
         meta.swa_abs_idx[:batch_size].reshape(count, meta.window_size),
         eb,
         tpb,
+        out=child.swa_global_slots[:count],
     )
-    child.swa_global_slots[:count].copy_(reads)
     child.batch_size = batch_size
     child.total_tokens = count
 
@@ -787,6 +780,7 @@ def _update_topk_lengths_in_place(
     start_pos: torch.Tensor,
     bs: int,
     full_width: bool = False,
+    write_swa: bool = True,
 ) -> None:
     """opt_flash_mla: fill the FlashMLA effective-length buffers in place.
 
@@ -809,6 +803,10 @@ def _update_topk_lengths_in_place(
     length (``window_size`` for SWA, ``extra_index_width_r`` for compressed)
     instead of the seq-len-derived value. This is REQUIRED for graph capture.
 
+    ``write_swa`` is disabled when the fused position kernel already wrote
+    the SWA length (the normal CUDA-graph update path); the default keeps this
+    helper usable on its own.
+
     FlashMLA builds its ``tile_scheduler_metadata`` / ``num_splits`` lazily on
     the FIRST ``flash_mla_with_kvcache`` call (sparse_decode.h:420) keyed on the
     ``topk_length`` VALUES, then freezes + reuses it. The capture harness
@@ -825,7 +823,7 @@ def _update_topk_lengths_in_place(
     """
     q_len = int(meta.q_len_per_req)
     window_size = int(meta.window_size)
-    if meta.swa_topk_length is not None:
+    if write_swa and meta.swa_topk_length is not None:
         if full_width:
             meta.swa_topk_length[:bs].fill_(window_size)
         else:
@@ -1062,6 +1060,8 @@ def update_decode_metadata_in_place_fp8(
     paged_pool_tokens_per_block: Optional[Dict[int, int]] = None,
     capture_full_width_lengths: bool = False,
     require_device_metadata: bool = False,
+    bound_block_tables: bool = False,
+    swa_only_metadata: bool = False,
 ) -> None:
     """Recompute every metadata buffer IN PLACE for new attention inputs.
 
@@ -1084,6 +1084,16 @@ def update_decode_metadata_in_place_fp8(
             ``sequence_lengths`` for that path. A tensor is accepted for
             focused metadata tests.
         forbid_realloc: Accepted for caller compatibility; updates are in place.
+        bound_block_tables: The metadata's ``pool_block_tables`` already alias
+            the CUDA-graph runner's stable per-group block-table buffers (the
+            runner refreshes those buffers before ``prepare_cuda_graph``), so
+            this call must not copy them into separate metadata storage again.
+        swa_only_metadata: The shared planner has no compressed-ratio (>1)
+            pools (V4.1 passes ``[0]`` and attention owns its index/state
+            slots).  Only the always-written SWA pool and its translated read
+            slots are consumed from this metadata object.  Skip the unused
+            compressed-pool, state-pool and topk-buffer refresh.  The SWA
+            ``topk_length`` is still written because SWA-only layers consume it.
     """
     q_len = meta.q_len_per_req
     window_size = meta.window_size
@@ -1097,30 +1107,41 @@ def update_decode_metadata_in_place_fp8(
         require_device_metadata=require_device_metadata,
     )
     bs = int(start_pos.shape[0])
-    position_ids_2d = _build_position_ids_2d(start_pos, q_len, device)
-    position_ids_flat = position_ids_2d.reshape(-1).contiguous()
-    meta.position_ids[: bs * q_len].copy_(position_ids_flat)
-    if meta.position_ids_long is not None:
-        meta.position_ids_long[: bs * q_len].copy_(position_ids_flat.to(torch.long))
-    if meta.decode_seq_start_per_req is not None:
-        meta.decode_seq_start_per_req[:bs].copy_(start_pos)
-    meta.topk_buffer_compressed[:bs].fill_(-1)
+    if not swa_only_metadata:
+        meta.topk_buffer_compressed[:bs].fill_(-1)
 
     from rtp_llm.models_py.modules.dsv41.fp8.decode._fused_prepare_meta_triton import (
         fused_update_decode_meta_pure,
     )
 
-    fused_update_decode_meta_pure(meta, start_pos, meta.max_seq_len)
-
-    # opt_flash_mla: derive FlashMLA topk_length / extra_topk_length from the
-    # just-filled compressed_lens + start_pos, in place (graph-stable buffers).
-    # During CUDA-graph capture/warmup (capture_full_width_lengths=True) write
-    # the FULL width so FlashMLA's frozen tile schedule is max-provisioned and
-    # safe for any real replay length; real per-request lengths are written
-    # before each replay by prepare_cuda_graph(). See _update_topk_lengths_in_place.
-    _update_topk_lengths_in_place(
-        meta, start_pos, bs, full_width=capture_full_width_lengths
+    # This kernel now also writes position_ids / position_ids_long (and the
+    # decoder start row when present), so the replay path no longer builds the
+    # [B, q_len] position stream, casts it and copies it back on the host.
+    fused_update_decode_meta_pure(
+        meta,
+        start_pos,
+        meta.max_seq_len,
+        full_width=capture_full_width_lengths,
     )
+
+    # opt_flash_mla: derive FlashMLA topk_length / extra_topk_length from
+    # the just-filled compressed_lens + start_pos, in place (graph-stable
+    # buffers).  During CUDA-graph capture/warmup
+    # (capture_full_width_lengths=True) write the FULL width so FlashMLA's
+    # frozen tile schedule is max-provisioned and safe for any real replay
+    # length; real per-request lengths are written before each replay by
+    # prepare_cuda_graph(). See _update_topk_lengths_in_place.
+    # The SWA length is written by the fused position kernel (it is required
+    # by SWA-only layers even in the V4.1 reduced-metadata mode); only the
+    # compressed-ratio lengths remain here.
+    if not swa_only_metadata:
+        _update_topk_lengths_in_place(
+            meta,
+            start_pos,
+            bs,
+            full_width=capture_full_width_lengths,
+            write_swa=False,
+        )
 
     # ------------------------------------------------------------------
     # Phase 2: paged write slot mappings (per attn_type).
@@ -1128,6 +1149,9 @@ def update_decode_metadata_in_place_fp8(
     # ONLY on their respective compression boundaries (sentinel ``-1``
     # otherwise — the write op honors that via ``mask_negative=True``).
     # ------------------------------------------------------------------
+    paged_ready = bool(paged_pool_entries_per_block) and (
+        bound_block_tables or bool(paged_block_tables)
+    )
     if paged_block_tables and paged_pool_entries_per_block:
         paged_pool_tokens_per_block = _resolve_paged_pool_tokens_per_block(
             paged_pool_entries_per_block,
@@ -1150,23 +1174,46 @@ def update_decode_metadata_in_place_fp8(
             if n_cols < dst_bt.shape[1]:
                 dst_bt[:n_rows, n_cols:].zero_()
 
-        from rtp_llm.models_py.modules.dsv41.fp8.decode._fused_prepare_meta_triton import (
-            fused_phase2b_pool_slot_mapping,
-        )
+    if paged_ready:
+        entries_per_block = paged_pool_entries_per_block
+        tokens_per_block = meta.paged_pool_tokens_per_block
+        if swa_only_metadata:
+            from rtp_llm.models_py.modules.dsv41.fp8.decode._fused_prepare_meta_triton import (
+                fused_phase2b_swa_slot_mapping,
+            )
+            from rtp_llm.models_py.modules.dsv41.attn_type import SWA_KV
 
-        fused_phase2b_pool_slot_mapping(
-            meta,
-            start_pos,
-            bs,
-            paged_pool_entries_per_block,
-            paged_pool_tokens_per_block,
-        )
+            if (
+                SWA_KV in meta.pool_block_tables
+                and SWA_KV in meta.pool_write_slot_mappings
+                and SWA_KV in entries_per_block
+                and SWA_KV in tokens_per_block
+            ):
+                fused_phase2b_swa_slot_mapping(
+                    meta,
+                    start_pos,
+                    bs,
+                    entries_per_block[SWA_KV],
+                    tokens_per_block[SWA_KV],
+                )
+        else:
+            from rtp_llm.models_py.modules.dsv41.fp8.decode._fused_prepare_meta_triton import (
+                fused_phase2b_pool_slot_mapping,
+            )
 
-        _update_compressor_state_slot_mappings(
-            meta,
-            bs,
-            paged_pool_entries_per_block,
-        )
+            fused_phase2b_pool_slot_mapping(
+                meta,
+                start_pos,
+                bs,
+                entries_per_block,
+                tokens_per_block,
+            )
+
+            _update_compressor_state_slot_mappings(
+                meta,
+                bs,
+                entries_per_block,
+            )
 
     # Iter3.3: precompute translate_swa / translate_hca once per step.
     # Shared across all 43 attention layers. Graph-safe: ``.copy_()`` into
@@ -1174,7 +1221,7 @@ def update_decode_metadata_in_place_fp8(
     # the attribute, so graph replays read from fixed addresses.
     # ``req_id_per_token`` is deterministic (``arange(B)``) so it was filled
     # at allocate time and stays stable.
-    if paged_block_tables and paged_pool_entries_per_block:
+    if paged_ready:
         from rtp_llm.models_py.modules.dsv4.fp8.decode.paged_topk_translator import (
             translate_local_to_global_slots,
         )
@@ -1192,46 +1239,47 @@ def update_decode_metadata_in_place_fp8(
             and meta.swa_abs_idx is not None
         ):
             swa_eb = paged_pool_entries_per_block[SWA_KV]
-            swa_tokens_per_block = paged_pool_tokens_per_block[SWA_KV]
+            swa_tokens_per_block = meta.paged_pool_tokens_per_block[SWA_KV]
             swa_local = meta.swa_abs_idx[:bs].reshape(T, window_size)
-            swa_global_new = translate_local_to_global_slots(
+            translate_local_to_global_slots(
                 req_id_bs,
                 meta.pool_block_tables[SWA_KV][:bs],
                 swa_local,
                 entries_per_block=swa_eb,
                 tokens_per_block_for_block_table=swa_tokens_per_block,
+                out=meta.swa_global_slots[:T],
             )
-            meta.swa_global_slots[:T].copy_(swa_global_new)
 
         # HCA layers all share the dense-idx-masked cmp_local_raw (already
         # materialised as topk_total[r=128][:, :, win:]); translate it once.
         if (
-            req_id_bs is not None
+            not swa_only_metadata
+            and req_id_bs is not None
             and meta.hca_cmp_global_slots is not None
             and HCA_KV in meta.pool_block_tables
             and 128 in meta.topk_total_by_ratio
         ):
             hca_eb = paged_pool_entries_per_block[HCA_KV]
             hca_tokens_per_block = _compressed_domain_tokens_per_block(
-                HCA_KV, paged_pool_tokens_per_block[HCA_KV]
+                HCA_KV, meta.paged_pool_tokens_per_block[HCA_KV]
             )
             hca_tt = meta.topk_total_by_ratio[128]
             K_h = hca_tt.shape[-1] - window_size
             hca_cmp_local = hca_tt[:bs, :, window_size:].reshape(T, K_h).contiguous()
-            hca_global_new = translate_local_to_global_slots(
+            translate_local_to_global_slots(
                 req_id_bs,
                 meta.pool_block_tables[HCA_KV][:bs],
                 hca_cmp_local,
                 entries_per_block=hca_eb,
                 tokens_per_block_for_block_table=hca_tokens_per_block,
+                out=meta.hca_cmp_global_slots[:T],
             )
-            meta.hca_cmp_global_slots[:T].copy_(hca_global_new)
 
     # Update Python-scalar geometry (cheap — these are not captured into the graph)
     meta.batch_size = bs
     meta.total_tokens = bs * q_len
 
-    if paged_block_tables and paged_pool_entries_per_block:
+    if paged_ready:
         update_decoder_swa_metadata(meta, paged_pool_entries_per_block, batch_size=bs)
 
 

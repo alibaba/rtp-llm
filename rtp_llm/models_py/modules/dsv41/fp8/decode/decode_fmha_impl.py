@@ -39,7 +39,10 @@ from rtp_llm.models_py.modules.dsv41.fp8.decode.decode_attn_metadata import (
     allocate_decode_metadata_fp8,
     update_decode_metadata_in_place_fp8,
 )
-from rtp_llm.models_py.modules.dsv41.kv_cache_utils import as_tagged_attention_inputs
+from rtp_llm.models_py.modules.dsv41.kv_cache_utils import (
+    as_attention_inputs_by_tag,
+    as_tagged_attention_inputs,
+)
 
 
 @dataclass
@@ -112,6 +115,23 @@ class DSv4DecodeFmhaImplFP8:
         self._paged_tokens_per_block: Dict[int, int] = {
             at: spec[1] for at, spec in config.paged_pool_specs.items()
         }
+        # When the shared planner has no compressed-ratio (>1) pools, V4.1's
+        # attention owns the compressed/index/state slot plans.  Its decode
+        # metadata only has to refresh the always-written SWA pool (and the
+        # decoder-SWA child), so the compressed/state/topk-buffer rebuild in
+        # ``update_decode_metadata_in_place_fp8`` is dead work there.
+        self._swa_only_metadata = not any(
+            int(r) > 1 for r in config.compress_ratios
+        )
+        # The CUDA-graph runner refreshes its own stable per-group block-table
+        # device buffers before every replay.  Alias those buffers here (at
+        # construction, i.e. before capture) instead of copying them into a
+        # second metadata-owned buffer on every prepare call.
+        self._bound_block_tables: Optional[Dict[str, torch.Tensor]] = (
+            self._bind_pool_block_tables(attn_inputs)
+            if attn_inputs is not None
+            else None
+        )
         self.prepare(attn_inputs, forbid_realloc=True)
 
     def support_cuda_graph(self) -> bool:
@@ -129,6 +149,52 @@ class DSv4DecodeFmhaImplFP8:
             None, attn_inputs, self.config.paged_pool_specs
         )
 
+    def _bind_pool_block_tables(
+        self, attn_inputs: Any
+    ) -> Optional[Dict[str, torch.Tensor]]:
+        """Alias the graph runner's stable per-group block tables.
+
+        ``CudaGraphRunner::prepareAttentionInputs`` already writes the current
+        step's block ids into the captured per-group
+        ``kv_cache_kernel_block_id_device`` buffers with one fused strided D2D
+        copy.  Keeping a second metadata-owned copy therefore duplicates both
+        the host loop and the device traffic.  Binding is only valid when the
+        source is the capture-stable device tensor with exactly the metadata's
+        row/column geometry; otherwise fall back to the copying path.
+        """
+        specs = self.config.paged_pool_specs
+        if not specs:
+            return None
+        by_tag = as_attention_inputs_by_tag(attn_inputs)
+        bound: Dict[str, torch.Tensor] = {}
+        for attn_type in specs:
+            key = str(attn_type)
+            dst = self.metadata.pool_block_tables.get(key)
+            src = getattr(
+                by_tag.get(key), "kv_cache_kernel_block_id_device", None
+            )
+            if (
+                dst is None
+                or not isinstance(src, torch.Tensor)
+                or not src.is_cuda
+                or src.device.type != self.device.type
+                or (
+                    self.device.index is not None
+                    and src.device.index != self.device.index
+                )
+                or src.dtype != torch.int32
+                or src.dim() != 2
+                or not src.is_contiguous()
+                or src.shape[0] < dst.shape[0]
+                or src.shape[1] != dst.shape[1]
+            ):
+                return None
+            bound[key] = src[: dst.shape[0]]
+        if len(bound) != len(specs):
+            return None
+        self.metadata.pool_block_tables.update(bound)
+        return bound
+
     def prepare(self, attn_inputs: Any, forbid_realloc: bool = False) -> None:
         """Update persistent metadata and paged block-table snapshots.
 
@@ -141,7 +207,11 @@ class DSv4DecodeFmhaImplFP8:
         written before each replay by :meth:`prepare_cuda_graph`. See
         ``opt_flash_mla/design/01_cuda_graph_sched_meta_freeze.md``.
         """
-        paged_block_tables = self._extract_paged_block_tables(attn_inputs)
+        paged_block_tables = (
+            None
+            if self._bound_block_tables is not None
+            else self._extract_paged_block_tables(attn_inputs)
+        )
         update_decode_metadata_in_place_fp8(
             self.metadata,
             as_tagged_attention_inputs(attn_inputs),
@@ -150,6 +220,8 @@ class DSv4DecodeFmhaImplFP8:
             paged_pool_entries_per_block=self._paged_entries_per_block,
             paged_pool_tokens_per_block=self._paged_tokens_per_block,
             capture_full_width_lengths=True,
+            bound_block_tables=self._bound_block_tables is not None,
+            swa_only_metadata=self._swa_only_metadata,
         )
 
     def prepare_cuda_graph(self, attn_inputs: Any) -> None:
@@ -164,7 +236,11 @@ class DSv4DecodeFmhaImplFP8:
         :meth:`prepare` stays a safe superset. See
         ``opt_flash_mla/design/01_cuda_graph_sched_meta_freeze.md``.
         """
-        paged_block_tables = self._extract_paged_block_tables(attn_inputs)
+        paged_block_tables = (
+            None
+            if self._bound_block_tables is not None
+            else self._extract_paged_block_tables(attn_inputs)
+        )
         update_decode_metadata_in_place_fp8(
             self.metadata,
             as_tagged_attention_inputs(attn_inputs),
@@ -173,4 +249,6 @@ class DSv4DecodeFmhaImplFP8:
             paged_pool_entries_per_block=self._paged_entries_per_block,
             paged_pool_tokens_per_block=self._paged_tokens_per_block,
             require_device_metadata=True,
+            bound_block_tables=self._bound_block_tables is not None,
+            swa_only_metadata=self._swa_only_metadata,
         )
