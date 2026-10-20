@@ -13,7 +13,7 @@ from rtp_llm.models_py.modules.qwen4_exp.qsa.draft_layout_triton import (
 )
 from rtp_llm.models_py.modules.qwen4_exp.qsa.draft_metadata_triton import draft_rows
 from rtp_llm.models_py.modules.qwen4_exp.qsa.draft_paged_fmha import (
-    _merge_draft_packed_splits,
+    _merge_draft_metadata_splits,
     try_draft_paged_attention,
 )
 from rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_paged_fmha import (
@@ -72,10 +72,9 @@ class DraftPagedFmhaTest(unittest.TestCase):
                     value = try_draft_paged_attention(
                         qkv,
                         packed,
-                        sources,
-                        inverse,
-                        valid,
-                        visible,
+                        lengths,
+                        prefixes,
+                        cu,
                         cache,
                         table,
                         heads=12,
@@ -154,8 +153,13 @@ class DraftPagedFmhaTest(unittest.TestCase):
             .repeat(2)[: 32 * 3072]
             .reshape(32, 3072)
         )
-        inverse = torch.randperm(32, device="cuda")
-        valid = torch.arange(32, device="cuda") % 3 != 0
+        lengths = torch.tensor(
+            [4, 0, 4, 3, 4, 3, 4, 4], device="cuda", dtype=torch.int32
+        )
+        cu = torch.cat(
+            (torch.zeros(1, device="cuda", dtype=torch.int32), lengths.cumsum(0).int())
+        )
+        _, inverse, valid, _, _ = draft_rows(lengths, torch.zeros_like(lengths), cu, 32)
         for splits in (8, 32):
             partial = torch.randn(8, 12, 4, splits, 258, device="cuda")
             partial[..., 257].abs_()
@@ -174,8 +178,8 @@ class DraftPagedFmhaTest(unittest.TestCase):
             )
             expected = try_unpack_output(baseline, inverse, valid, gate=gate)
             actual = torch.empty_like(expected)
-            _merge_draft_packed_splits[(32, 12)](
-                partial, inverse, valid, gate, actual, SPLITS=splits, WITH_GATE=True
+            _merge_draft_metadata_splits[(32, 12)](
+                partial, cu, gate, actual, BATCH=8, RB=8, SPLITS=splits, WITH_GATE=True
             )
             torch.testing.assert_close(actual, expected, rtol=0, atol=0, equal_nan=True)
             finite = ~torch.isnan(expected)
@@ -194,7 +198,9 @@ class DraftPagedFmhaTest(unittest.TestCase):
         cache = torch.zeros(3, 65536, device="cuda").to(torch.float8_e4m3fn)
         scale = torch.ones(3, 256, device="cuda")
         table = torch.ones(1, 2, device="cuda", dtype=torch.int32)
-        args = (qkv, selected, sources, sources, valid, visible, cache, table)
+        lengths = torch.tensor([4], device="cuda", dtype=torch.int32)
+        cu = torch.tensor([0, 4], device="cuda", dtype=torch.int32)
+        args = (qkv, selected, lengths, lengths, cu, cache, table)
         kwargs = dict(heads=12, kv_heads=1, head_dim=256, page_size=128, kv_scale=scale)
         for change in (
             {"heads": 24},

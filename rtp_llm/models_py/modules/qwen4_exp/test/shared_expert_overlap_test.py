@@ -9,7 +9,10 @@ from rtp_llm.models_py.model_desc.generic_moe import GenericMoeLayer
 from rtp_llm.models_py.modules.base import FusedSiluAndMul, SigmoidGateScaleAdd
 from rtp_llm.models_py.modules.hybrid.dense_mlp import DenseMLP
 from rtp_llm.models_py.modules.qwen4_exp.fp8_dense import Qwen4Fp8Linear
-from rtp_llm.models_py.modules.qwen4_exp.moe.shared_overlap import Qwen4MoeLayer
+from rtp_llm.models_py.modules.qwen4_exp.moe.shared_overlap import (
+    Qwen4MoeLayer,
+    _shared_stream_for_device,
+)
 
 
 def make_layer():
@@ -119,6 +122,70 @@ class SharedExpertOverlapTest(unittest.TestCase):
                 layer(x)
         torch.cuda.current_stream().synchronize()
         self.assertTrue(layer._shared_output_ready.query())
+
+    def test_reused_stream_multi_layer_two_graph_keys(self):
+        layers = [make_layer() for _ in range(3)]
+        for layer in layers:
+            layer._reused_shared_stream = _shared_stream_for_device(
+                torch.cuda.current_device()
+            )
+        self.assertIs(layers[0]._reused_shared_stream, layers[-1]._reused_shared_stream)
+        self.assertIsNot(layers[0]._shared_input_ready, layers[-1]._shared_input_ready)
+        graphs = []
+        for rows in (1, 4, 16):
+            x = torch.randn(rows, 2560, device="cuda", dtype=torch.bfloat16)
+
+            def call(reference=False):
+                value = x
+                for layer in layers:
+                    value = (
+                        GenericMoeLayer.forward(layer, value)
+                        if reference
+                        else layer(value)
+                    )
+                return value
+
+            for _ in range(3):
+                call()
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                actual = call()
+            graphs.append((rows, graph, x, actual))
+        for generation in range(32):
+            rows, graph, x, actual = graphs[generation % 3]
+            x.normal_(0, (0.01, 0.2, 2.0)[generation % 3])
+            expected = x
+            for layer in layers:
+                expected = GenericMoeLayer.forward(layer, expected)
+            graph.replay()
+            self.assertTrue(
+                torch.equal(actual.view(torch.uint8), expected.view(torch.uint8))
+            )
+        for _, graph, _, _ in graphs:
+            graph.reset()
+
+    def test_reused_stream_only_for_measured_rows_and_exception_join(self):
+        layer = make_layer()
+        layer._reused_shared_stream = _shared_stream_for_device(
+            torch.cuda.current_device()
+        )
+        for rows in (1, 3, 4, 8, 16, 32):
+            x = torch.randn(rows, 2560, device="cuda", dtype=torch.bfloat16)
+            with patch.object(
+                torch.cuda, "stream", wraps=torch.cuda.stream
+            ) as use_stream:
+                actual = layer(x)
+            use_stream.assert_called_once_with(
+                layer._reused_shared_stream if rows in (1, 4) else layer._shared_stream
+            )
+            self.assertTrue(torch.equal(actual, GenericMoeLayer.forward(layer, x)))
+        x = torch.randn(4, 2560, device="cuda", dtype=torch.bfloat16)
+        with patch.object(layer, "_forward_routed", side_effect=RuntimeError("route")):
+            with self.assertRaisesRegex(RuntimeError, "route"):
+                layer(x)
+        torch.cuda.current_stream().synchronize()
+        self.assertTrue(layer._shared_output_ready.query())
+        self.assertTrue(torch.equal(layer(x), GenericMoeLayer.forward(layer, x)))
 
     def test_unqualified_inputs_and_disabled_initialization_fall_back(self):
         layer = make_layer()

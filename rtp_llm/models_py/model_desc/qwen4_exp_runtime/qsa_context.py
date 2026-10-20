@@ -255,10 +255,21 @@ class Qwen4ExpQSARuntimeContext:
         )
 
     def select_draft_graph_tokens(
-        self, q: torch.Tensor, raw_keys: torch.Tensor, *, indexer: Any, rope_config: Any
+        self,
+        q: torch.Tensor,
+        raw_keys: torch.Tensor,
+        *,
+        indexer: Any,
+        rope_config: Any,
+        raw_query: bool = False,
     ) -> torch.Tensor:
         return qsa_prefill.select_draft_graph_tokens(
-            self, q, raw_keys, indexer=indexer, rope_config=rope_config
+            self,
+            q,
+            raw_keys,
+            indexer=indexer,
+            rope_config=rope_config,
+            raw_query=raw_query,
         )
 
     def select_draft_incremental_prefill_tokens(

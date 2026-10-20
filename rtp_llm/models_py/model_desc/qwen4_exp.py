@@ -166,8 +166,25 @@ class Qwen4ExpAttention(Qwen3NextAttention):
     ) -> torch.Tensor:
         """Project once, persist raw keys, then build request-local selections."""
         assert self.qsa_indexer is not None
+        raw_draft = (
+            os.environ.get("QWEN4_DRAFT_QSA_METADATA", "0") == "1"
+            and bool(getattr(self, "is_mtp_draft", False))
+            and bool(qsa_runtime.main_inputs.is_prefill)
+            and bool(getattr(qsa_runtime.main_inputs, "is_cuda_graph", False))
+            and not bool(qsa_runtime.main_inputs.is_target_verify)
+            and type(self.qsa_indexer) is Qwen4ExpQSAIndexer
+            and (self.qsa_indexer.n_heads, self.qsa_indexer.head_dim) == (4, 128)
+            and hidden_states.ndim == 2
+            and hidden_states.shape[1] == 2560
+            and hidden_states.shape[0] in range(4, 33, 4)
+            and not hidden_states.requires_grad
+            and not any(
+                name in self.qsa_indexer.__dict__
+                for name in ("project", "project_raw", "split_projected")
+            )
+        )
         raw_query = (
-            bool(qsa_runtime.main_inputs.is_target_verify)
+            (bool(qsa_runtime.main_inputs.is_target_verify) or raw_draft)
             and callable(getattr(self.qsa_indexer, "project_raw", None))
             and hidden_states.is_cuda
             and torch.version.hip is None
@@ -207,7 +224,11 @@ class Qwen4ExpAttention(Qwen3NextAttention):
             )
         if self.is_mtp_draft and bool(qsa_runtime.main_inputs.is_cuda_graph):
             return qsa_runtime.select_draft_graph_tokens(
-                q, raw_keys, indexer=self.qsa_indexer, rope_config=self.qsa_rope_config
+                q,
+                raw_keys,
+                indexer=self.qsa_indexer,
+                rope_config=self.qsa_rope_config,
+                **({"raw_query": True} if raw_query else {}),
             )
         prefixes = qsa_runtime.main_inputs.prefix_lengths
         has_prefix = bool(prefixes.numel()) and bool(torch.any(prefixes != 0).item())
@@ -368,6 +389,10 @@ class Qwen4ExpAttention(Qwen3NextAttention):
                     and hidden_states.ndim == 2
                     and (
                         3 <= hidden_states.shape[0] <= 32
+                        or (
+                            hidden_states.shape[0] == 1
+                            and os.environ.get("QWEN4_QSA_SMALL_PAIR", "0") == "1"
+                        )
                         or 4093 <= hidden_states.shape[0] <= 32768
                     )
                     and not any(

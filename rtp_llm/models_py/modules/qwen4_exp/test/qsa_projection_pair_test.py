@@ -1,6 +1,7 @@
+import os
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import torch
 
@@ -20,7 +21,7 @@ class QsaProjectionPairTest(unittest.TestCase):
             self.skipTest("SM120 complete-consumer domain")
         torch.manual_seed(107201)
 
-    def fixture(self):
+    def fixture(self, heads=8):
         def weight(shape):
             return (torch.randn(shape, device="cuda") * 0.1).to(torch.float8_e4m3fn)
 
@@ -28,10 +29,10 @@ class QsaProjectionPairTest(unittest.TestCase):
             weight((3072, 2560)), torch.tensor([0.119713], device="cuda")
         )
         indexer = Qwen4ExpQSAIndexer(
-            weight((1152, 2560)),
+            weight(((heads + 1) * 128, 2560)),
             torch.randn(128, device="cuda", dtype=torch.bfloat16) * 0.07,
             torch.randn(128, device="cuda", dtype=torch.bfloat16) * 0.07,
-            n_heads=8,
+            n_heads=heads,
             kv_heads=1,
             head_dim=128,
             token_budget=2048,
@@ -65,8 +66,8 @@ class QsaProjectionPairTest(unittest.TestCase):
                 torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
     def test_graph_reads_live_input_raw_gamma_and_separate_weight_scales(self):
-        for rows in (4, 16, 4096):
-            gate, indexer = self.fixture()
+        for rows in (1, 4, 16, 4096):
+            gate, indexer = self.fixture(heads=4 if rows == 1 else 8)
             x = torch.randn(rows, 2560, device="cuda", dtype=torch.bfloat16)
 
             def run():
@@ -83,7 +84,8 @@ class QsaProjectionPairTest(unittest.TestCase):
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph):
                 actual = run()
-            for gain in (0.01, 0.2, 2.0):
+            for step in range(32 if rows == 1 else 3):
+                gain = (0.01, 0.2, 2.0)[step % 3]
                 x.normal_(0, gain)
                 indexer.q_norm_gamma.normal_(0, gain)
                 gate.scale.fill_(gain)
@@ -109,6 +111,89 @@ class QsaProjectionPairTest(unittest.TestCase):
             handle.remove()
         gate.bias = torch.zeros(3072, device="cuda", dtype=torch.bfloat16)
         self.assertIsNone(project_fp8_pair(x, gate, other))
+
+    def test_owner_small_pair_is_opt_in_and_preserves_overrides(self):
+        gate, indexer = self.fixture(heads=4)
+        attention = Qwen4ExpAttention.__new__(Qwen4ExpAttention)
+        torch.nn.Module.__init__(attention)
+        attention.qsa_indexer = indexer
+        attention.gate = gate
+        attention.is_mtp_draft = False
+        inputs = SimpleNamespace(is_prefill=False, is_target_verify=False)
+        runtime = SimpleNamespace(
+            main_cache=None,
+            main_inputs=inputs,
+            rollback_side_cache=Mock(),
+            finalize_side_cache=Mock(),
+            validate_before_projection=Mock(),
+        )
+
+        class SelectionComplete(Exception):
+            pass
+
+        fmha = SimpleNamespace(
+            begin_qsa_cache_transaction=Mock(),
+            qsa_main_cache_mutation_started=Mock(return_value=False),
+            set_selected_indices=Mock(side_effect=SelectionComplete),
+        )
+        for enabled, rows, expected in (
+            ("0", 1, 0),
+            ("1", 1, 1),
+            ("1", 2, 0),
+            ("1", 3, 1),
+        ):
+            x = torch.randn(rows, 2560, device="cuda", dtype=torch.bfloat16)
+            with patch.dict(os.environ, {"QWEN4_QSA_SMALL_PAIR": enabled}), patch(
+                "rtp_llm.models_py.modules.qwen4_exp.fp8_dense.project_fp8_pair",
+                wraps=project_fp8_pair,
+            ) as pair, patch.object(
+                attention, "_qsa_selected_indices", return_value=None
+            ):
+                with self.assertRaises(SelectionComplete):
+                    attention(x, fmha, None, inputs, qsa_runtime=runtime)
+                self.assertEqual(pair.call_count, expected)
+                if rows == 1 and enabled == "1":
+                    pair.reset_mock()
+                    with patch.object(indexer, "project", wraps=indexer.project):
+                        with self.assertRaises(SelectionComplete):
+                            attention(x, fmha, None, inputs, qsa_runtime=runtime)
+                    pair.assert_not_called()
+
+    def test_draft_owner_raw_query_is_opt_in_and_overrides_keep_normalization(self):
+        _, indexer = self.fixture(heads=4)
+        attention = Qwen4ExpAttention.__new__(Qwen4ExpAttention)
+        torch.nn.Module.__init__(attention)
+        attention.qsa_indexer = indexer
+        attention.qsa_rope_config = SimpleNamespace()
+        attention.is_mtp_draft = True
+        x = torch.randn(4, 2560, device="cuda", dtype=torch.bfloat16)
+        inputs = SimpleNamespace(
+            is_prefill=True, is_target_verify=False, is_cuda_graph=True
+        )
+        runtime = SimpleNamespace(
+            main_inputs=inputs,
+            select_draft_graph_tokens=lambda q, k, **kwargs: (
+                q,
+                k,
+                kwargs.get("raw_query", False),
+            ),
+        )
+        for enabled in ("0", "1"):
+            with patch.dict(os.environ, {"QWEN4_DRAFT_QSA_METADATA": enabled}):
+                actual = attention._qsa_selected_indices(x, runtime)
+                expected = (
+                    indexer.project_raw(x) if enabled == "1" else indexer.project(x)
+                )
+                for got, ref in zip(actual[:2], expected):
+                    torch.testing.assert_close(got, ref, rtol=0, atol=0)
+                self.assertEqual(actual[2], enabled == "1")
+                with patch.object(indexer, "project", wraps=indexer.project) as project:
+                    actual = attention._qsa_selected_indices(x, runtime)
+                    project.assert_called_once()
+                self.assertFalse(actual[2])
+                expected = indexer.project(x)
+                for got, ref in zip(actual[:2], expected):
+                    torch.testing.assert_close(got, ref, rtol=0, atol=0)
 
     def test_owner_preserves_raw_target_and_normalized_decode_contracts(self):
         gate, indexer = self.fixture()
