@@ -62,10 +62,6 @@ std::string resolveKVCacheEventInstanceGroup(const std::string& event_group, con
     return event_group.empty() ? reco_group : event_group;
 }
 
-int64_t aggregateKVCacheEventSpecSizeBytes(const std::vector<int64_t>& group_sizes, int64_t tp_size) {
-    return std::accumulate(group_sizes.begin(), group_sizes.end(), int64_t{0}) * std::max<int64_t>(tp_size, 1);
-}
-
 RtpLLMCacheMetricsCollector collectGlobalCacheMetrics(const CoordinatorCacheManagerPtr& coordinator_manager) {
     RtpLLMCacheMetricsCollector collector;
     const BlockTreeCachePtr     block_tree_cache = coordinator_manager->blockTreeCache();
@@ -807,14 +803,7 @@ bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionR
     return true;
 }
 
-bool KVCacheManager::hasTailSparseReuseGroup() const {
-    const auto& groups = config_.groups();
-    return std::any_of(groups.begin(), groups.end(), [](const GroupBase& group) {
-        return group.policy.enable_prefix_reuse && group.policy.active_tail_blocks != 0;
-    });
-}
-
-void KVCacheManager::initCacheEventPublisher() {
+void KVCacheManager::initCacheEventPublisher(std::shared_ptr<KVCacheEventReporter> reporter) {
     try {
         const auto& publisher_type = kv_cache_config_.kv_cache_event_publisher_type;
         if (warmup_ || publisher_type.empty() || publisher_type == "none") {
@@ -838,36 +827,17 @@ void KVCacheManager::initCacheEventPublisher() {
                                 static_cast<long long>(parallelism_config_.tp_rank));
             return;
         }
-        if (cp_slot_mapper_ && cp_slot_mapper_->isSharded()) {
-            RTP_LLM_LOG_WARNING("KV cache event publisher disabled for CP-sharded KV cache");
-            return;
-        }
-
-        // ReportEvent can represent individual FULL/LINEAR components, but
-        // this publisher emits one aggregate HBM spec from complete DEVICE
-        // prefix chains. Tail-state residency is not part of that snapshot.
-        // Keep the guard until the emitter tracks those components; a FULL
-        // chain alone cannot advertise a reusable hybrid boundary.
-        if (hasTailSparseReuseGroup()) {
-            RTP_LLM_LOG_WARNING("KV cache event publisher disabled because tail-sparse reuse groups are unsupported");
-            return;
-        }
-        std::vector<int64_t>     group_block_size_bytes;
         std::vector<std::string> reuse_group_tags;
         for (const auto& group : config_.topology().groups()) {
-            if (!cacheGroupPublishesPrefixChain(group.policy)) {
+            if (!cacheGroupPublishesEvents(group.policy)
+                || group.policy.memory_placement != CacheMemoryPlacement::DEVICE
+                || group.tag == "csa_state" || group.tag == "swa_kv") {
                 continue;
             }
-            if (group.policy.memory_placement != CacheMemoryPlacement::DEVICE) {
-                RTP_LLM_LOG_WARNING(
-                    "KV cache event publisher disabled because publishing non-DEVICE cache groups is unsupported");
-                return;
-            }
             reuse_group_tags.push_back(group.tag);
-            group_block_size_bytes.push_back(static_cast<int64_t>(config_.blockSizeBytesForGroup(group.tag)));
         }
         if (reuse_group_tags.empty()) {
-            RTP_LLM_LOG_ERROR("KV cache event publisher disabled because no cache group participates in prefix reuse");
+            RTP_LLM_LOG_ERROR("KV cache event publisher disabled because no cache group is eligible for publication");
             return;
         }
 
@@ -879,6 +849,9 @@ void KVCacheManager::initCacheEventPublisher() {
 
         KVCacheEventPublisherConfig publisher_config;
         publisher_config.manager_endpoint = kv_cache_config_.kv_cache_event_manager_endpoint;
+        publisher_config.enable_vipserver = kv_cache_config_.kvcm_enable_vipserver;
+        publisher_config.vipserver_domain = kv_cache_config_.kvcm_vipserver_domain;
+        publisher_config.server_address   = kv_cache_config_.kvcm_server_address;
 
         KVCacheEventPublisherContext publisher_context;
         publisher_context.instance_group = resolveKVCacheEventInstanceGroup(
@@ -887,14 +860,21 @@ void KVCacheManager::initCacheEventPublisher() {
         publisher_context.host_ip_port      = kv_cache_config_.kv_cache_event_host_ip_port;
         publisher_context.model_name        = runtime_config_.model_name;
         publisher_context.dtype             = getDataTypeStr(config_.dtype);
-        publisher_context.spec_name         = "rtp_llm_hbm_" + std::to_string(config_.seq_size_per_block);
-        publisher_context.block_size_tokens = static_cast<int32_t>(config_.seq_size_per_block);
+        // CoordinatorCacheManager inserts canonical CP keys into the tree at this token stride.
+        publisher_context.block_size_tokens = cp_slot_mapper_ && cp_slot_mapper_->isSharded() ?
+                                                  cp_slot_mapper_->virtualBlockSize() :
+                                                  static_cast<int32_t>(config_.seq_size_per_block);
         // Pipeline parallelism is rejected above because a unique PP owner is
         // not represented in ParallelismConfig yet.
-        publisher_context.spec_size_bytes =
-            aggregateKVCacheEventSpecSizeBytes(group_block_size_bytes, parallelism_config_.tp_size);
-        publisher_context.location_uri = "event_report://" + publisher_context.host_ip_port + "/hbm?size="
-                                          + std::to_string(publisher_context.spec_size_bytes);
+        for (const auto& tag : reuse_group_tags) {
+            // CP specs already describe the local shard: count one physical block per TP rank.
+            const auto size_bytes = static_cast<int64_t>(config_.blockSizeBytesForGroup(tag))
+                                    * std::max<int64_t>(parallelism_config_.tp_size, 1);
+            publisher_context.specs.push_back(
+                {"rtp_llm_hbm_" + std::to_string(publisher_context.block_size_tokens) + "_" + tag,
+                 "event_report://" + publisher_context.host_ip_port + "/hbm?size=" + std::to_string(size_bytes),
+                 size_bytes});
+        }
         publisher_context.tp_size = static_cast<int32_t>(parallelism_config_.tp_size);
         publisher_context.dp_size = static_cast<int32_t>(parallelism_config_.dp_size);
         publisher_context.pp_size = static_cast<int32_t>(parallelism_config_.pp_size);
@@ -910,8 +890,8 @@ void KVCacheManager::initCacheEventPublisher() {
             return shared_cache->logicalCacheSnapshot();
         };
 
-        cache_event_publisher_ =
-            std::make_shared<KVCMPublisher>(publisher_config, publisher_context, std::move(snapshot_provider));
+        cache_event_publisher_ = std::make_shared<KVCMPublisher>(
+            publisher_config, publisher_context, std::move(snapshot_provider), std::move(reporter));
         block_tree_cache_->setEventPublisher(cache_event_publisher_, reuse_group_tags);
         if (!cache_event_publisher_->start()) {
             RTP_LLM_LOG_WARNING("KV cache event publisher failed to start, type=%s; inference remains enabled",
