@@ -10,6 +10,16 @@
 
 namespace rtp_llm {
 
+namespace {
+bool incrementalEvictionEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("RTP_LLM_CACHE_EVICTION_INCREMENTAL");
+        return !value || std::strcmp(value, "0") != 0;
+    }();
+    return enabled;
+}
+}  // namespace
+
 void SharedBlockCache::traceEvictionLifetime(CacheKeyType key, int64_t lifetime_ms, const char* scope) {
     static const bool enabled = [] {
         const char* value = std::getenv("RTP_LLM_CACHE_LIFETIME_TRACE");
@@ -209,22 +219,7 @@ SharedBlockCache::EvictResult SharedBlockCache::selectAndEvict(size_t min_blocks
         return result;
     }
 
-    std::unordered_set<CacheKeyType> resident_keys;
-    for (const auto& [key, item] : lru_cache_.items()) {
-        if (item.is_resident) {
-            resident_keys.insert(item.cache_key);
-        }
-    }
-
-    std::vector<CacheKeyType> lru_keys;
-    for (auto it = lru_cache_.items().rbegin(); it != lru_cache_.items().rend(); ++it) {
-        const auto& item = it->second;
-        if (item.is_resident || resident_keys.count(item.cache_key)) {
-            continue;
-        }
-        lru_keys.push_back(item.cache_key);
-    }
-
+    const auto lru_keys = collectFlatEvictionKeysLocked(min_blocks, std::nullopt);
     size_t selected_blocks = 0;
     for (const auto cache_key : lru_keys) {
         UnifiedCacheItem removed_item;
@@ -279,10 +274,7 @@ SharedBlockCache::EvictResult SharedBlockCache::selectAndEvictForGroup(int group
         return result;
     }
     if (prefix_tree_enabled_ && !leaf_lru_.empty()) {
-        static const bool incremental = [] {
-            const char* value = std::getenv("RTP_LLM_CACHE_EVICTION_INCREMENTAL");
-            return value && std::strcmp(value, "0") != 0;
-        }();
+        const bool incremental = incrementalEvictionEnabled();
         size_t selected_blocks = 0;
         bool   made_progress   = true;
         while (selected_blocks < min_blocks && made_progress && !leaf_lru_.empty()) {
@@ -361,22 +353,7 @@ SharedBlockCache::EvictResult SharedBlockCache::selectAndEvictForGroup(int group
         return result;
     }
 
-    std::unordered_set<CacheKeyType> resident_keys;
-    for (const auto& [key, item] : lru_cache_.items()) {
-        if (item.is_resident) {
-            resident_keys.insert(item.cache_key);
-        }
-    }
-
-    std::vector<CacheKeyType> lru_keys;
-    for (auto it = lru_cache_.items().rbegin(); it != lru_cache_.items().rend(); ++it) {
-        const auto& item = it->second;
-        if (item.is_resident || resident_keys.count(item.cache_key)) {
-            continue;
-        }
-        lru_keys.push_back(item.cache_key);
-    }
-
+    const auto lru_keys = collectFlatEvictionKeysLocked(min_blocks, group_id);
     size_t selected_blocks = 0;
     for (const auto cache_key : lru_keys) {
         UnifiedCacheItem removed_item;
@@ -410,6 +387,48 @@ SharedBlockCache::EvictResult SharedBlockCache::selectAndEvictForGroup(int group
     }
 
     return result;
+}
+
+CacheKeysType SharedBlockCache::collectFlatEvictionKeysLocked(size_t min_blocks, std::optional<int> group_id) const {
+    RTP_LLM_PROFILE_FUNCTION();
+    const bool incremental = incrementalEvictionEnabled();
+    std::unordered_set<CacheKeyType> resident_keys;
+    if (!incremental) {
+        for (const auto& [key, item] : lru_cache_.items()) {
+            if (item.is_resident) {
+                resident_keys.insert(item.cache_key);
+            }
+        }
+    }
+
+    CacheKeysType keys;
+    size_t        selected_blocks = 0;
+    for (auto it = lru_cache_.items().rbegin(); it != lru_cache_.items().rend(); ++it) {
+        const auto& item = it->second;
+        // The flat LRU has exactly one item per cache key, including aliases.
+        if (item.is_resident || (!incremental && resident_keys.count(item.cache_key))) {
+            continue;
+        }
+        if (incremental && group_id && !hasUsableSlot(item, *group_id)) {
+            continue;
+        }
+        keys.push_back(item.cache_key);
+        if (incremental) {
+            // Keep selection and deletion separate, so alias cleanup cannot
+            // invalidate traversal. Count slots exactly as the caller does.
+            if (group_id) {
+                ++selected_blocks;
+            } else {
+                for (const auto slot : item.slots) {
+                    selected_blocks += !isNullBlockIdx(slot);
+                }
+            }
+            if (selected_blocks >= min_blocks) {
+                break;
+            }
+        }
+    }
+    return keys;
 }
 
 size_t SharedBlockCache::evictAndFree(size_t min_blocks) {
