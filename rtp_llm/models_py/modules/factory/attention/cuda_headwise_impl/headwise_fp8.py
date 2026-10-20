@@ -365,6 +365,9 @@ class HeadWiseFP8PrefillImpl(FMHAImplBase):
     ) -> bool:
         if attn_configs.use_mla or attn_configs.kv_cache_dtype != KvCacheDataType.FP8:
             return False
+        if not attn_configs.need_rope_kv_cache:
+            # No-rope path passes fused QKV as Q (see trtllm_gen guard).
+            return False
         return _headwise_prefill_fp8_runtime_ready(attn_inputs)
 
     def forward(

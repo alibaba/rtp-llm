@@ -86,6 +86,10 @@ class XQAImpl(FMHAImplBase):
         # through to PyFlashinferPaged. See blockers.md R-4.
         if is_sm12x():
             return False
+        if not attn_configs.need_rope_kv_cache:
+            # No-rope path hands fused QKV to the kernel as Q (only the rope
+            # op splits/writes K/V); route no-rope models to PyFlashinfer.
+            return False
         fmha_impl = XQAAttnOp(attn_configs)
         return fmha_impl.support(attn_inputs)
 
@@ -189,6 +193,9 @@ class XQADecodeImpl(FMHAImplBase):
         # to PyFlashinferDecodeImpl (the working sm_120 path), mirroring the
         # XQAImpl.support gate.
         if is_sm12x():
+            return False
+        if not attn_configs.need_rope_kv_cache:
+            # Same no-rope fused-QKV-as-Q gap as XQAImpl above.
             return False
         if get_sm()[0] not in [9, 10]:
             return False

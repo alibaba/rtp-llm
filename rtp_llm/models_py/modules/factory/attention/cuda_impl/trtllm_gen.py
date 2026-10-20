@@ -580,6 +580,11 @@ class FlashInferTRTLLMPrefillImpl(FMHAImplBase):
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
+        if not attn_configs.need_rope_kv_cache:
+            # The no-rope path hands the fused QKV straight to the kernel as
+            # Q (only the rope op splits and writes K/V), which is invalid for
+            # no-rope causal models; route them to the PyFlashinfer impls.
+            return False
         fmha_impl = FlashInferTRTLLMPrefillOp(attn_configs)
         return fmha_impl.support(attn_inputs)
 
@@ -645,6 +650,12 @@ class FlashInferTRTLLMSpecDecodeImpl(FMHAImplBase):
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
         if attn_configs.use_mla:
+            return False
+        if not attn_configs.need_rope_kv_cache:
+            # No-rope fused-QKV-as-Q gap (see prefill impl).
+            return False
+        if not attn_configs.need_rope_kv_cache:
+            # Same no-rope QKV-as-Q contract gap as the prefill impl above.
             return False
         fmha_impl = FlashInferTRTLLMDecodeOp(attn_configs)
         return fmha_impl.support(attn_inputs)
@@ -721,6 +732,9 @@ class FlashInferTRTLLMDecodeImpl(FMHAImplBase):
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
         if attn_configs.use_mla:
+            return False
+        if not attn_configs.need_rope_kv_cache:
+            # No-rope fused-QKV-as-Q contract gap; route to PyFlashinfer.
             return False
         fmha_impl = FlashInferTRTLLMDecodeOp(attn_configs)
         return fmha_impl.support(attn_inputs)

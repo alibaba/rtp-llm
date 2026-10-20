@@ -1026,7 +1026,11 @@ class PyFlashinferPrefillImplBase(FMHAImplBase):
         key = quantize_to_fp8_if_needed(key, kv_dtype)
         value = quantize_to_fp8_if_needed(value, kv_dtype)
 
-        if self.need_rope_kv_cache:
+        # K/V must land in the paged cache for every causal model, with or
+        # without RoPE: no-rope models (e.g. whisper) read the cache for the
+        # paged prefill half and for all later decode steps. Encoder-only
+        # models pass kv_cache=None and the write op is a no-op there.
+        if kv_cache is not None or self.need_rope_kv_cache:
             self.kv_cache_write_op.forward(key, value, kv_cache)
 
         fmha_inputs = self._prepare_fmha_input(query, key, value)
@@ -1081,8 +1085,12 @@ class PyFlashinferPagedPrefillImpl(PyFlashinferPrefillImplBase):
         2. The underlying paged FMHA op supports the inputs
         3. MhaRotaryEmbeddingOp supports the inputs
         """
+        # On SM10x the TRT-LLM Gen family is the preferred prefill backend,
+        # but it only covers rope models; for no-rope models (e.g. whisper)
+        # TRT-LLM Gen is rejected and this paged path is the only prefill
+        # implementation left, so keep it selectable for them.
         return (
-            not is_sm10x()
+            not (is_sm10x() and attn_configs.need_rope_kv_cache)
             and PyFlashinferPrefillPagedAttnOp.support(attn_inputs)
             and attn_configs.rope_config.style != RopeStyle.Mrope
         )
@@ -1131,7 +1139,14 @@ class PyFlashinferHybridPrefillImpl(PyFlashinferPrefillImplBase):
         value = quantize_to_fp8_if_needed(value, kv_dtype)
 
         # Write new K/V after ragged attention and before paged attention.
-        kv_cache_write_op = self.kv_cache_write_op if self.need_rope_kv_cache else None
+        # No-rope causal models need the write just as much: the paged half
+        # and all decode steps read the cache. Encoder-only callers that pass
+        # kv_cache=None keep the old skip.
+        kv_cache_write_op = (
+            self.kv_cache_write_op
+            if (self.need_rope_kv_cache or kv_cache is not None)
+            else None
+        )
         result = self.fmha_impl.forward(
             query,
             key,
@@ -1149,7 +1164,7 @@ class PyFlashinferHybridPrefillImpl(PyFlashinferPrefillImplBase):
         """Check if hybrid prefill implementation is supported."""
         return (
             not attn_inputs.is_cuda_graph
-            and not is_sm10x()
+            and not (is_sm10x() and attn_configs.need_rope_kv_cache)
             and PyFlashinferHybridPrefillAttnOp.support(attn_inputs)
             and attn_configs.rope_config.style != RopeStyle.Mrope
         )
@@ -1486,7 +1501,35 @@ class PyFlashinferDecodeImpl(FMHAImplBase):
         self.fmha_impl.set_params(self.fmha_params)
         self.fmha_impl.prepare(attn_inputs)
         self.rope_params = self.rope_impl.prepare(attn_inputs)
+        # No-rope causal decode writes K/V through this op (rope models write
+        # inside rope_impl).
+        self.kv_cache_write_op = KVCacheWriteOp(
+            num_kv_heads=attn_configs.kv_head_num,
+            head_size=attn_configs.size_per_head,
+            token_per_block=attn_configs.kernel_tokens_per_block,
+        )
+        self.kv_cache_write_op.set_params(self.fmha_params)
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
+
+    def _split_and_write_no_rope_qkv(
+        self, qkv: torch.Tensor, kv_cache: Optional[LayerKVCache]
+    ) -> torch.Tensor:
+        """Split fused QKV, append K/V to the paged cache, return Q only."""
+        qkv = qkv.reshape(qkv.shape[0], -1)
+        head_dim = self.attn_configs.size_per_head
+        q_size = self.attn_configs.head_num * head_dim
+        kv_size = self.attn_configs.kv_head_num * head_dim
+        kv_dtype = attn_kv_dtype(self.attn_configs)
+        key = quantize_to_fp8_if_needed(
+            qkv[:, q_size : q_size + kv_size].reshape(-1, self.attn_configs.kv_head_num, head_dim),
+            kv_dtype,
+        )
+        value = quantize_to_fp8_if_needed(
+            qkv[:, q_size + kv_size :].reshape(-1, self.attn_configs.kv_head_num, head_dim),
+            kv_dtype,
+        )
+        self.kv_cache_write_op.forward(key, value, kv_cache)
+        return qkv[:, :q_size]
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs) -> None:
         """Prepare FlashInfer/RoPE buffers and metadata for CUDA graph replay."""
@@ -1529,6 +1572,10 @@ class PyFlashinferDecodeImpl(FMHAImplBase):
         # Apply RoPE and KV Cache processing
         if self.need_rope_kv_cache:
             qkv = self.rope_impl.forward(qkv, kv_cache, self.rope_params)
+        elif kv_cache is not None:
+            # No-rope causal decode: split the fused QKV, write this step's
+            # K/V into the paged cache, and hand the attention op Q only.
+            qkv = self._split_and_write_no_rope_qkv(qkv, kv_cache)
 
         # Apply write cache store if needed
         common.apply_write_cache_store(

@@ -407,6 +407,9 @@ class HeadWisePrefillImpl(FMHAImplBase):
     ) -> bool:
         # Must match factory ordering: only take this path when headwise config + deps exist,
         # otherwise fall through to other prefill implementations (e.g. FlashInfer).
+        if not attn_configs.need_rope_kv_cache:
+            # No-rope path passes fused QKV as Q (see trtllm_gen guard).
+            return False
         return not attn_configs.use_mla and _headwise_prefill_bf16_runtime_ready(attn_inputs)
 
     def forward(
