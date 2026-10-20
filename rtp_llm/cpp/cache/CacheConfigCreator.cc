@@ -79,10 +79,10 @@ void validateDsv4KernelSeqSize(size_t seq_size_per_block, size_t kernel_seq_size
                             kernel_seq_size_per_block);
 }
 
-size_t nonnegativeEnv(const char* name) {
+size_t nonnegativeEnv(const char* name, size_t default_value = 0) {
     const char* value = std::getenv(name);
     if (!value || !*value) {
-        return 0;
+        return default_value;
     }
     const std::string text(value);
     RTP_LLM_CHECK_WITH_INFO(std::all_of(text.begin(), text.end(), [](char c) { return c >= '0' && c <= '9'; }),
@@ -97,9 +97,18 @@ void configureLayeredPrefill(CacheConfig&             config,
                              const ParallelismConfig& parallelism,
                              const RuntimeConfig&     runtime,
                              const KVCacheConfig&     kv_config) {
-    const size_t enabled = nonnegativeEnv("RTP_LLM_DSA_PREFILL_LAYOUT");
+    const size_t enabled = nonnegativeEnv("RTP_LLM_DSA_PREFILL_LAYOUT", 1);
     RTP_LLM_CHECK_WITH_INFO(enabled <= 1, "RTP_LLM_DSA_PREFILL_LAYOUT must be 0 or 1");
     if (!enabled) {
+        return;
+    }
+    // Enable the default only for compatible caches. Explicit opt-in keeps the
+    // validation below so unsupported configurations still fail clearly.
+    const char* layout_env = std::getenv("RTP_LLM_DSA_PREFILL_LAYOUT");
+    if ((!layout_env || !*layout_env)
+        && (kv_config.memory_cache_size_mb <= 0 || !config.use_mla || !config.is_sparse || config.groupNums() != 1
+            || config.use_independent_block_pools || config.layer_to_indexer_kv_slot.empty() || config.layer_num <= 1
+            || kv_config.enable_remote_cache || nonnegativeEnv("RTP_LLM_DSA_MLA_HOST_CACHE_MB"))) {
         return;
     }
     RTP_LLM_CHECK_WITH_INFO(kv_config.memory_cache_size_mb > 0,

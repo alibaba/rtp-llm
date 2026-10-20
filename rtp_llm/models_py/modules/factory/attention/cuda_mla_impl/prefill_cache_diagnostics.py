@@ -58,7 +58,7 @@ class PrefillCacheDiagnostics:
         )
         pipeline = getattr(fmha, "_cross_layer_prefetch", None)
         self.row["kv_registered"] = bool(getattr(pipeline, "registered", False))
-        self.row["kv_index_opt"] = os.environ.get("RTP_LLM_CP_KV_INDEX_OPT", "0") == "1"
+        self.row["kv_index_opt"] = os.environ.get("RTP_LLM_CP_KV_INDEX_OPT", "1") == "1"
         self.row["async_prepare_cache"] = (
             os.environ.get("RTP_LLM_ASYNC_PREPARE_CACHE", "0") == "1"
         )

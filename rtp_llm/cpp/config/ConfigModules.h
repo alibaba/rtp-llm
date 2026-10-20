@@ -178,7 +178,7 @@ struct KVCacheConfig {
     bool    enable_memory_cache_sm_copy                  = false;
     bool    enable_remote_cache                          = false;
     bool    write_cache_sync                             = false;
-    bool    enable_tiered_memory_cache                   = false;
+    bool    enable_tiered_memory_cache                   = true;
     bool    enable_gpu_prefix_tree                       = true;
     bool    enable_prefix_tree_memory_cache              = true;
     bool    enable_legacy_memory_connector_fallback      = true;

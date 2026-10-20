@@ -1,5 +1,9 @@
 import importlib
+import os
 from typing import Any
+
+# Set the external FlashMLA default before any CUDA modules are loaded.
+os.environ.setdefault("FLASH_MLA_NO_L2_PERSIST", "1")
 
 
 def __getattr__(name: str) -> Any:

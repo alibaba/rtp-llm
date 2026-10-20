@@ -524,7 +524,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             if (
                 (
                     os.environ.get("RTP_CP_PREPARED_SCATTER", "0") == "1"
-                    or os.environ.get("RTP_LLM_CP_KV_INDEX_OPT", "0") == "1"
+                    or os.environ.get("RTP_LLM_CP_KV_INDEX_OPT", "1") == "1"
                 )
                 and not self.total_local_ids_is_identity
                 and self.total_local_ids.is_cuda
@@ -1189,8 +1189,8 @@ class SparseMlaCpImpl(SparseMlaImpl):
             and attn_configs.q_lora_rank > 0
             and not is_cuda_graph
             and (
-                os.environ.get("RTP_LLM_CP_KV_OVERLAP", "0") == "1"
-                or os.environ.get("RTP_LLM_CP_KV_CROSS_LAYER", "0") == "1"
+                os.environ.get("RTP_LLM_CP_KV_OVERLAP", "1") == "1"
+                or os.environ.get("RTP_LLM_CP_KV_CROSS_LAYER", "1") == "1"
             )
         )
         self._cross_layer_prefetch = None
@@ -1201,7 +1201,7 @@ class SparseMlaCpImpl(SparseMlaImpl):
     def begin_cross_layer_prefetch(self, cache):
         if (
             not self.overlap_kv
-            or os.environ.get("RTP_LLM_CP_KV_CROSS_LAYER", "0") != "1"
+            or os.environ.get("RTP_LLM_CP_KV_CROSS_LAYER", "1") != "1"
             or not cache.layerwise
             or len(cache.staging) < 2
             or not any(self.attn_inputs.prefix_lengths.reshape(-1).tolist())
@@ -1515,7 +1515,7 @@ class SparseMlaCpImpl(SparseMlaImpl):
         # Reorder its narrower output instead of the 512-wide Attention result.
         # Partial/padded layouts retain the original GEMM and scatter behavior.
         defer_output_scatter = (
-            os.environ.get("RTP_LLM_CP_KV_INDEX_OPT", "0") == "1"
+            os.environ.get("RTP_LLM_CP_KV_INDEX_OPT", "1") == "1"
             and original_q_len is not None
             and local_ids.numel() == original_q_len
             and original_q_len >= 256

@@ -281,7 +281,7 @@ SharedBlockCache::EvictResult SharedBlockCache::selectAndEvictForGroup(int group
     if (prefix_tree_enabled_ && !leaf_lru_.empty()) {
         static const bool incremental = [] {
             const char* value = std::getenv("RTP_LLM_CACHE_EVICTION_INCREMENTAL");
-            return !value || std::strcmp(value, "0") != 0;
+            return value && std::strcmp(value, "0") != 0;
         }();
         size_t selected_blocks = 0;
         bool   made_progress   = true;
