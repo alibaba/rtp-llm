@@ -364,11 +364,40 @@ class V41BackendPreprocessContractTest(unittest.TestCase):
         for item in result:
             torch.testing.assert_close(item.patches, original.patches, rtol=0, atol=0)
 
-    def test_invalid_later_media_rejects_whole_group_before_io(self):
-        media = [self.media(image_data(3, 5)), self.media(image_data(5, 3))]
+    def test_media_hints_leave_model_preprocessing_unchanged(self):
+        data = [image_data(3, 5), image_data(5, 3)]
+        media = [self.media(item) for item in data]
         media[1].mm_preprocess_config.width = 123
+        media[1].mm_preprocess_config.min_pixels = 0
+        media[1].mm_preprocess_config.max_pixels = 28901376
+        adapter = object.__new__(vision_module.DeepSeekV41VisionEmbedding)
+        adapter.validate_inputs(media)
+        for gpu_preprocess in (False, True):
+            with self.subTest(gpu_preprocess=gpu_preprocess):
+                actual = adapter.preprocess_input(
+                    media,
+                    self.vit_config,
+                    processor_config=self.config,
+                    gpu_preprocess=gpu_preprocess,
+                )
+                expected = [
+                    self.prepare(item, gpu_preprocess=gpu_preprocess) for item in data
+                ]
+                self.assertEqual(len(actual), len(expected))
+                for result, reference in zip(actual, expected):
+                    field = "rgb" if gpu_preprocess else "patches"
+                    torch.testing.assert_close(
+                        getattr(result, field),
+                        getattr(reference, field),
+                        rtol=0,
+                        atol=0,
+                    )
+
+    def test_invalid_later_media_type_rejects_whole_group_before_io(self):
+        media = [self.media(image_data(3, 5)), self.media(image_data(5, 3))]
+        media[1].mm_type = MMUrlType.VIDEO
         with patch.object(vision_module, "load_image_source") as loader:
-            with self.assertRaisesRegex(ValueError, "fixed by the model config"):
+            with self.assertRaisesRegex(ValueError, "non-empty IMAGE inputs"):
                 vision_module.DeepSeekV41VisionEmbedding.preprocess_input(
                     media, self.vit_config, processor_config=self.config
                 )
