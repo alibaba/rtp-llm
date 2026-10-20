@@ -2,6 +2,30 @@
 import json
 
 
+def current_discovery(endpoints, static=False, kvcm_json=None):
+    """Use the selected Master's public topology contract; preserve engine ports."""
+    env = dict(endpoints["env"])
+    service = json.loads(env["MODEL_SERVICE_CONFIG"])
+    if static:
+        service.pop("discovery_file", None)
+        for group in service["role_endpoints"]:
+            for role in ("prefill", "decode"):
+                endpoint = group.get(role + "_endpoint")
+                if endpoint is None:
+                    continue
+                hosts = [e["http_addr"] for e in endpoints["engines"] if e["role"] == role]
+                if not hosts:
+                    raise ValueError("static bundle discovery requires both P and D")
+                endpoint["discovery"] = {"type": "static-env", "hosts": hosts}
+    if kvcm_json:
+        kvcm = json.loads(kvcm_json)
+        if not isinstance(kvcm, dict) or not kvcm.get("address") or not kvcm.get("discovery"):
+            raise ValueError("MOCK_BUNDLE_KVCM_CONFIG_JSON requires a KVCM address and discovery")
+        service["kvcm"] = kvcm
+    env["MODEL_SERVICE_CONFIG"] = json.dumps(service)
+    return env
+
+
 def mock_formula_config(raw, legacy, mock_expression=None):
     config = json.loads(raw)
     if mock_expression is not None and (not isinstance(mock_expression, str) or not mock_expression.strip()):

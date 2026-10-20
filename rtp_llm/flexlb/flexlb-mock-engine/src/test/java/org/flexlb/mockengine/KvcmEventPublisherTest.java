@@ -99,6 +99,11 @@ class KvcmEventPublisherTest {
         var parsed = KvcmEventPublisher.Config.fromEnv(env);
         assertEquals(URI.create("http://localhost:56020"), parsed.endpoint());
         assertEquals("biz/dep", parsed.instance());
+        env.put("MOCK_KVCM_STORAGE_TYPE", "ST_EVENT_REPORT_L1P5");
+        assertEquals("ST_EVENT_REPORT_L1P5", KvcmEventPublisher.Config.fromEnv(env).storageType());
+        env.put("MOCK_KVCM_STORAGE_TYPE", "unknown");
+        assertThrows(IllegalArgumentException.class, () -> KvcmEventPublisher.Config.fromEnv(env));
+        env.remove("MOCK_KVCM_STORAGE_TYPE");
         env.put("KV_CACHE_EVENT_HOST_IP_PORT", "shared:1");
         assertThrows(IllegalArgumentException.class, () -> KvcmEventPublisher.Config.fromEnv(env));
         assertTrue(KvcmEventPublisher.responseOk(OK));
@@ -291,8 +296,33 @@ class KvcmEventPublisherTest {
             until(() -> first.status().get("state").equals("READY") && second.status().get("state").equals("READY"));
             Set<String> instances = new HashSet<>();
             requests.stream().filter(root -> root.has("instance_group")).forEach(root -> instances.add(root.path("instance_id").asText()));
-            assertEquals(Set.of("test-deployment/host:1", "test-deployment/host:2"), instances);
+            assertEquals(Set.of("test-deployment_128", "test-deployment_16"), instances);
             assertEquals(1L, (long) first.status().get("failures") + (long) second.status().get("failures"));
         } finally { server.stop(0); }
+    }
+
+    @Test void sameBlockSizeSharesQueryNamespaceButKeepsDistinctOwners() throws Exception {
+        var cfg = KvcmEventPublisher.Config.fromEnv(Map.of("KV_CACHE_EVENT_PUBLISHER_TYPE", "kvcm",
+                "KV_CACHE_EVENT_MANAGER_ENDPOINT", "http://localhost:1", "KV_CACHE_EVENT_INSTANCE_GROUP", "test-group",
+                "KV_CACHE_EVENT_INSTANCE_ID", "model-deployment", "MOCK_KVCM_STORAGE_TYPE", "ST_EVENT_REPORT_L1P5",
+                "MOCK_KVCM_FLUSH_MS", "5"));
+        var firstPeer = new Peer(); var secondPeer = new Peer();
+        var firstCache = new MockLruBlockCache(8); var secondCache = new MockLruBlockCache(8);
+        firstCache.admit(List.of(42L)); secondCache.admit(List.of(42L));
+        try (var first = new KvcmEventPublisher(cfg, firstCache, "host:1", 128, () -> true, firstPeer);
+             var second = new KvcmEventPublisher(cfg, secondCache, "host:2", 128, () -> true, secondPeer)) {
+            first.start(); second.start();
+            until(() -> !firstPeer.snapshots().isEmpty() && !secondPeer.snapshots().isEmpty());
+            for (var peer : List.of(firstPeer, secondPeer)) {
+                JsonNode snapshot = peer.snapshots().getFirst();
+                assertEquals("model-deployment_128", snapshot.path("instance_id").asText());
+                assertEquals("ST_EVENT_REPORT_L1P5", snapshot.path("storage_type").asText());
+            }
+            assertEquals("host:1", firstPeer.snapshots().getFirst().path("host_ip_port").asText());
+            assertEquals("host:2", secondPeer.snapshots().getFirst().path("host_ip_port").asText());
+            firstCache.evict(List.of(42L));
+            until(() -> firstPeer.keys.isEmpty());
+            assertEquals(Set.of(42L), secondPeer.keys);
+        }
     }
 }

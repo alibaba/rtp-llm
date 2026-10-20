@@ -29,10 +29,11 @@ Java Mock 可以连接真实 KVCM，协议依据为 [KVCMPublisher.cc](../../cpp
 | `KV_CACHE_EVENT_PUBLISHER_TYPE=kvcm` | 启用 Meta HTTP 事件上报；默认 `none` |
 | `KV_CACHE_EVENT_MANAGER_ENDPOINT` | 已解析的 HTTP/HTTPS endpoint；不负责 VIPServer 解析或 leader 切换 |
 | `KV_CACHE_EVENT_INSTANCE_GROUP` | 实例组；未设置时使用 `RECO_INSTANCE_GROUP` |
-| `KV_CACHE_EVENT_INSTANCE_ID` | 稳定身份前缀；未设置时使用 `BIZ_NAME/DEPLOYMENT_NAME`，禁止用 PID |
+| `KV_CACHE_EVENT_INSTANCE_ID` | Master 查询 namespace 的基础名；最终 instance ID 为 `<基础名>_<block_size>`，禁止用 PID |
+| `MOCK_KVCM_STORAGE_TYPE` | 默认 `ST_EVENT_REPORT`；指定旧包可选 `ST_EVENT_REPORT_L1P5`，必须与服务端 storage 配置一致 |
 | `MODEL_TYPE` | 注册的模型名；默认 `mock` |
 
-每个逻辑 Engine 使用自己的 advertised `host:HTTP-port`，并将它附加到 instance ID 前缀，隔离不同 P/D 和 block size。不能为整个 bundle 设置一个共享的 `KV_CACHE_EVENT_HOST_IP_PORT`。注册 descriptor 使用单个模拟 HBM spec，URI 为 `mock://host:port`；这只验证元数据事件，不提供真实 KV tensor 的读取或搬运能力。
+同一 namespace、同一 block size 的逻辑 Engine 共用 instance ID，每个逻辑 Engine 用自己的 advertised `host:HTTP-port` 区分 owner；与 `feature/flexlb-mu-dev` 的 `KvcmWorkerMetadataResolver` 查询规则一致。不同 block size 注册不同实例。不能为整个 bundle 设置一个共享的 `KV_CACHE_EVENT_HOST_IP_PORT`。注册 descriptor 使用单个模拟 HBM spec，URI 为 `mock://host:port`；这只验证聚合后的逻辑前缀 key 元数据事件，不模拟三组 FULL 的独立物理分配，也不提供真实 KV tensor 的读取或搬运能力。
 
 Mock 专属调节项为 `MOCK_KVCM_QUEUE_CAPACITY=65536`、`MOCK_KVCM_BATCH_SIZE=256`、`MOCK_KVCM_FLUSH_MS=100`、`MOCK_KVCM_HEARTBEAT_MS=5000`、`MOCK_KVCM_SNAPSHOT_MS=60000`、`MOCK_KVCM_TIMEOUT_MS=1500`、`MOCK_KVCM_RETRY_MS=100`、`MOCK_KVCM_MAX_RETRY_MS=5000`。这些是测试 publisher 的默认值，不等同于真实引擎配置。
 

@@ -4,6 +4,11 @@
 
 ## Mock 控制端口 API
 
+`MOCK_BUNDLE_STATIC_DISCOVERY=1` 将 bundle 的固定 P/D 列表转换为新版 Master 的
+`static-env` endpoint discovery（保留每个引擎 HTTP 端口）；该模式不动态更新引擎列表。
+`MOCK_BUNDLE_KVCM_CONFIG_JSON` 注入 `MODEL_SERVICE_CONFIG.kvcm` 定位配置，不覆盖 P/D
+拓扑。启用 KVCM 匹配仍需显式设置 `FLEXLB_CONFIG.cacheMatching.type=KVCM`。
+
 - [输出长度热更新](docs/OUTPUT_LENGTH_API.md)
 - [Prefill 执行时间公式热更新](docs/PREFILL_FORMULA_API.md)
 

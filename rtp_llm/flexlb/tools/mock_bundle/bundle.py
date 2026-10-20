@@ -3,7 +3,7 @@
 import json
 import re
 
-from master_compat import mock_formula_config, legacy_discovery
+from master_compat import mock_formula_config, legacy_discovery, current_discovery
 import os
 import shutil
 import signal
@@ -227,7 +227,9 @@ def run():
         )
         ready(mock_port - 1, mock, pod_ip)
         endpoints = json.loads((runtime / "endpoints.json").read_text())
-        env.update(legacy_discovery(endpoints, os.environ.get("MOCK_BUNDLE_FILE_DISCOVERY") == "1") if legacy else endpoints["env"])
+        env.update(legacy_discovery(endpoints, os.environ.get("MOCK_BUNDLE_FILE_DISCOVERY") == "1") if legacy else
+                   current_discovery(endpoints, os.environ.get("MOCK_BUNDLE_STATIC_DISCOVERY") == "1",
+                                     os.environ.get("MOCK_BUNDLE_KVCM_CONFIG_JSON")))
         env.update(
             FLEXLB_CONFIG=raw,
             SERVER_PORT=str(http_port),

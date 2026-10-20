@@ -32,11 +32,18 @@ final class KvcmEventPublisher implements AutoCloseable {
     private static final Map<Integer, HttpClient> HTTP_CLIENTS = new ConcurrentHashMap<>();
     record Config(URI endpoint, String group, String instance, String model,
                   int queueCapacity, int batchSize, int flushMs, int heartbeatMs,
-                  int snapshotMs, int timeoutMs, int retryMs, int maxRetryMs) {
+                  int snapshotMs, int timeoutMs, int retryMs, int maxRetryMs, String storageType) {
+        Config(URI endpoint, String group, String instance, String model,
+               int queueCapacity, int batchSize, int flushMs, int heartbeatMs,
+               int snapshotMs, int timeoutMs, int retryMs, int maxRetryMs) {
+            this(endpoint, group, instance, model, queueCapacity, batchSize, flushMs, heartbeatMs,
+                    snapshotMs, timeoutMs, retryMs, maxRetryMs, "ST_EVENT_REPORT");
+        }
         Config {
             if (!("http".equals(endpoint.getScheme()) || "https".equals(endpoint.getScheme())) || endpoint.getHost() == null
                     || endpoint.getUserInfo() != null || endpoint.getQuery() != null || endpoint.getFragment() != null
                     || group.isBlank() || instance.isBlank() || model.isBlank()
+                    || !("ST_EVENT_REPORT".equals(storageType) || "ST_EVENT_REPORT_L1P5".equals(storageType))
                     || queueCapacity <= 0 || batchSize <= 0 || flushMs <= 0 || heartbeatMs <= 0
                     || snapshotMs <= 0 || timeoutMs <= 0 || retryMs <= 0 || maxRetryMs < retryMs)
                 throw new IllegalArgumentException("invalid KVCM event configuration");
@@ -60,7 +67,8 @@ final class KvcmEventPublisher implements AutoCloseable {
                     integer(env, "QUEUE_CAPACITY", 65536), integer(env, "BATCH_SIZE", 256),
                     integer(env, "FLUSH_MS", 100), integer(env, "HEARTBEAT_MS", 5000),
                     integer(env, "SNAPSHOT_MS", 60000), integer(env, "TIMEOUT_MS", 1500),
-                    integer(env, "RETRY_MS", 100), integer(env, "MAX_RETRY_MS", 5000));
+                    integer(env, "RETRY_MS", 100), integer(env, "MAX_RETRY_MS", 5000),
+                    env.getOrDefault("MOCK_KVCM_STORAGE_TYPE", "ST_EVENT_REPORT"));
         }
 
         private static int integer(Map<String, String> env, String name, int fallback) {
@@ -129,7 +137,9 @@ final class KvcmEventPublisher implements AutoCloseable {
         this.config = config;
         this.cache = cache;
         this.host = host;
-        this.instanceId = config.instance() + "/" + host;
+        // Match KvcmWorkerMetadataResolver's namespace + block-size lookup.
+        // Per-engine ownership belongs in host_ip_port, not separate instances.
+        this.instanceId = config.instance() + "_" + blockSize;
         this.blockSize = blockSize;
         this.available = available;
         this.transport = transport == null ? httpTransport(config) : transport;
@@ -201,7 +211,7 @@ final class KvcmEventPublisher implements AutoCloseable {
     private ObjectNode report() {
         ObjectNode root = JSON.createObjectNode();
         root.put("trace_id", trace()).put("instance_id", instanceId).put("host_ip_port", host)
-                .put("storage_type", "ST_EVENT_REPORT");
+                .put("storage_type", config.storageType());
         root.putArray("events");
         return root;
     }
