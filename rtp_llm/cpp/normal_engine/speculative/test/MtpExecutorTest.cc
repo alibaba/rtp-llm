@@ -114,16 +114,16 @@ TEST(MtpExecutorPolicyTest, HybridCacheWaitsBeforeReadingNextRoundHostState) {
 }
 
 TEST(MtpExecutorPolicyTest, MtpSequenceUpperBoundChainsUntilBookkeepingCatchesUp) {
-    constexpr int width      = 8;
-    const int     first_next = MtpExecutor::selectMtpPreviousSeqLenUpperBound(
-                               /*pending=*/false, /*previous_next_bound=*/-1, /*host_seq_len=*/96)
-                           + width;
-    const int second_next = MtpExecutor::selectMtpPreviousSeqLenUpperBound(
-                                /*pending=*/true, /*previous_next_bound=*/first_next, /*host_seq_len=*/96)
-                            + width;
-    const int third_next = MtpExecutor::selectMtpPreviousSeqLenUpperBound(
-                               /*pending=*/true, /*previous_next_bound=*/second_next, /*host_seq_len=*/96)
-                           + width;
+    constexpr int width       = 8;
+    const int     first_next  = MtpExecutor::selectMtpPreviousSeqLenUpperBound(
+                                    /*pending=*/false, /*previous_next_bound=*/-1, /*host_seq_len=*/96)
+                                + width;
+    const int     second_next = MtpExecutor::selectMtpPreviousSeqLenUpperBound(
+                                    /*pending=*/true, /*previous_next_bound=*/first_next, /*host_seq_len=*/96)
+                                + width;
+    const int     third_next  = MtpExecutor::selectMtpPreviousSeqLenUpperBound(
+                                    /*pending=*/true, /*previous_next_bound=*/second_next, /*host_seq_len=*/96)
+                                + width;
     EXPECT_EQ(104, first_next);
     EXPECT_EQ(112, second_next);
     EXPECT_EQ(120, third_next);
@@ -288,6 +288,11 @@ public:
             std::rethrow_exception(publication_exception_);
         }
         return publication_error_;
+    }
+
+    std::function<std::optional<bool>(bool)> host_status_reducer;
+    std::optional<bool>                      reduceSpeculativeTargetPrepareStatus(bool local_ok) override {
+        return host_status_reducer ? host_status_reducer(local_ok) : std::nullopt;
     }
 
     bool hasSpeculativeTargetCommitHooks() const override {
@@ -767,6 +772,7 @@ public:
     using MtpExecutor::MtpExecutor;
     using MtpExecutor::asyncPrepareAllowed;
     using MtpExecutor::prepareAndCommitSpeculativeTargetState;
+    using MtpExecutor::reduceSpeculativeTargetPrepareStatus;
     using MtpExecutor::rendezvousSpeculativeTargetPhaseStatus;
     using MtpExecutor::rendezvousSpeculativeTargetSamplingStatus;
     using MtpExecutor::validateSpeculativeTargetExecutionPolicy;
@@ -2599,9 +2605,9 @@ TEST_F(MtpExecutorTest, testDSparkDraftUsesFlashInferSamplingAndReturnsExactQ) {
     stream->generateConfig()->temperature = 0.5f;
     StreamGroups stream_groups({stream});
 
-    auto base_logits = torch::tensor({0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.4f, 0.3f, 0.2f, 0.7f, 0.1f, 0.0f, -0.1f})
-                           .reshape({1, gamma, vocab_size})
-                           .to(torch::kCUDA);
+    auto base_logits   = torch::tensor({0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.4f, 0.3f, 0.2f, 0.7f, 0.1f, 0.0f, -0.1f})
+                             .reshape({1, gamma, vocab_size})
+                             .to(torch::kCUDA);
     auto anchors       = torch::tensor({1}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
     auto padded_logits = torch::cat(
         {base_logits.reshape({gamma, vocab_size}),
@@ -2643,7 +2649,7 @@ TEST_F(MtpExecutorTest, testDSparkDraftZeroTemperatureUsesClampedFullSoftmaxQ) {
     auto base_logits = torch::tensor({0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.4f, 0.3f, 0.2f, 0.1f, 0.2f, 0.4f, 0.3f})
                            .reshape({1, gamma, vocab_size})
                            .to(torch::kCUDA);
-    auto anchors = torch::tensor({1}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+    auto anchors     = torch::tensor({1}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
 
     auto output =
         components.executor->sampleDSparkDraft(stream_groups, base_logits.reshape({gamma, vocab_size}), anchors);
@@ -2672,8 +2678,8 @@ TEST_F(MtpExecutorTest, testDSparkDraftGreedyRequestsCollapseQToArgmaxOneHot) {
     auto base_logits = torch::tensor({0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.4f, 0.3f, 0.2f, 0.1f, 0.2f, 0.4f, 0.3f})
                            .reshape({1, gamma, vocab_size})
                            .to(torch::kCUDA);
-    auto anchors    = torch::tensor({1}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
-    auto expected_q = torch::softmax(base_logits / 1.0e-6f, -1);
+    auto anchors     = torch::tensor({1}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+    auto expected_q  = torch::softmax(base_logits / 1.0e-6f, -1);
 
     // do_sample=false is greedy even with a hot request temperature: the target
     // takes its argmax and acceptance requires an exact token match.
@@ -2737,7 +2743,7 @@ TEST_F(MtpExecutorTest, testDSparkDraftUsesDenseSequentialMarkovDistribution) {
     auto base_logits = torch::tensor({-10.0f, -10.0f, -10.0f, 10.0f, 0.1f, 0.4f, 0.3f, 0.2f, 0.2f, 0.1f, 0.4f, 0.3f})
                            .reshape({1, gamma, vocab_size})
                            .to(cuda_options);
-    auto anchors = torch::tensor({1}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+    auto anchors     = torch::tensor({1}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
 
     auto output =
         components.executor->sampleDSparkDraft(stream_groups, base_logits.reshape({gamma, vocab_size}), anchors);
@@ -2777,8 +2783,8 @@ TEST_F(MtpExecutorTest, testDSparkReducedVocabFeedsMappedTargetTokenIntoMarkovCh
     auto anchors     = torch::tensor({0}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
     auto temperature = torch::ones({1}, cuda_float);
     auto markov_w1   = torch::tensor({0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f}, torch::kFloat32)
-                         .reshape({target_vocab_size, 1})
-                         .to(torch::kCUDA);
+                           .reshape({target_vocab_size, 1})
+                           .to(torch::kCUDA);
     auto markov_w2 =
         torch::tensor({-100.0f, 0.0f, 100.0f}, torch::kFloat32).reshape({draft_vocab_size, 1}).to(torch::kCUDA);
 
@@ -3248,6 +3254,32 @@ TEST_F(MtpExecutorTest, testFakeDecodeUsesExplicitMtpInputHiddenSize) {
     ASSERT_NE(sp_buffer, nullptr);
     ASSERT_TRUE(sp_buffer->hidden_states.defined());
     EXPECT_EQ((std::vector<int64_t>{1, 8}), sp_buffer->hidden_states.sizes().vec());
+}
+
+TEST_F(MtpExecutorTest, HostTargetStatusDoesNotAllocateDeviceStatusAndPropagatesFailure) {
+    auto  components = createMtpExecutorComponents(MtpExecutorTestConfig{});
+    auto* model      = components.fake_target_model.get();
+    model->enableSpeculativeTargetCommit();
+    components.executor->setTargetModel(std::move(components.fake_target_model));
+    components.executor->parallelism_config_.tp_size        = 2;
+    components.executor->speculative_target_prepare_status_ = torch::Tensor();
+    std::vector<bool> seen;
+    model->host_status_reducer = [&seen](bool ok) -> std::optional<bool> {
+        seen.push_back(ok);
+        return false;
+    };
+    EXPECT_FALSE(components.executor->reduceSpeculativeTargetPrepareStatus(true));
+    EXPECT_FALSE(components.executor->reduceSpeculativeTargetPrepareStatus(false));
+    EXPECT_EQ(seen, (std::vector<bool>{true, false}));
+    EXPECT_FALSE(components.executor->speculative_target_prepare_status_.defined());
+    model->host_status_reducer = [](bool ok) -> std::optional<bool> { return ok; };
+    EXPECT_TRUE(components.executor->reduceSpeculativeTargetPrepareStatus(true));
+    model->host_status_reducer = [](bool) -> std::optional<bool> { throw std::runtime_error("poisoned host status"); };
+    EXPECT_THROW(components.executor->reduceSpeculativeTargetPrepareStatus(true), std::runtime_error);
+    // TP1 remains local and never enters the transport, even when configured.
+    components.executor->parallelism_config_.tp_size = 1;
+    EXPECT_TRUE(components.executor->reduceSpeculativeTargetPrepareStatus(true));
+    EXPECT_FALSE(components.executor->reduceSpeculativeTargetPrepareStatus(false));
 }
 
 TEST_F(MtpExecutorTest, testSpeculativeTargetCommitDefaultIsNoop) {

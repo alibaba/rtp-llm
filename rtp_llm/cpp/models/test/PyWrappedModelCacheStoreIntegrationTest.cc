@@ -1598,10 +1598,14 @@ runPyWrappedModelSpeculativeCommitBridge(py::object py_model, const std::string&
                               /*cache_manager=*/nullptr,
                               /*mtp_cache_config_index=*/std::nullopt};
     PyWrappedModel     model(params,
-                         std::move(py_model),
-                         /*is_prefill_cuda_graph_mode=*/false,
-                         /*use_spec_decoding=*/is_speculative_target);
+                             std::move(py_model),
+                             /*is_prefill_cuda_graph_mode=*/false,
+                             /*use_spec_decoding=*/is_speculative_target);
 
+    if (action == "reduce_true" || action == "reduce_false") {
+        const auto result = model.reduceSpeculativeTargetPrepareStatus(action == "reduce_true");
+        return result.has_value() ? py::object(py::bool_(*result)) : py::object(py::none());
+    }
     if (action == "has_hooks") {
         return py::bool_(model.hasSpeculativeTargetCommitHooks());
     }

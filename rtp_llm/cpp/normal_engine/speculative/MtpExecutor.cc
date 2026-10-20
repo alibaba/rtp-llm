@@ -243,15 +243,15 @@ void applySpecLogitsAcceptLenCap(const SpecLogitsVerifyRunner::LaunchResult& ver
     }
     const int64_t token_stride  = target_token_ids.size(1);
     auto          target_tokens = target_token_ids.reshape({batch_size, propose_step + 1, token_stride})
-                             .select(2, token_stride - 1)
-                             .to(output.accept_tokens.options());
+                                      .select(2, token_stride - 1)
+                                      .to(output.accept_tokens.options());
     auto cap_index   = cap_src.to(torch::TensorOptions().device(output.accept_tokens.device()).dtype(torch::kLong));
     auto replacement = target_tokens.gather(1, cap_index.unsqueeze(1));
 
-    auto cols = torch::arange(propose_step + 1,
-                              torch::TensorOptions().device(output.accept_tokens.device()).dtype(torch::kLong))
-                    .unsqueeze(0)
-                    .expand({batch_size, propose_step + 1});
+    auto cols         = torch::arange(propose_step + 1,
+                                      torch::TensorOptions().device(output.accept_tokens.device()).dtype(torch::kLong))
+                            .unsqueeze(0)
+                            .expand({batch_size, propose_step + 1});
     auto replace_mask = (cap_gpu < propose_step).unsqueeze(1) & (output.accept_len > cap_gpu).unsqueeze(1)
                         & (cols == cap_index.unsqueeze(1));
     output.accept_tokens =
@@ -1954,7 +1954,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         if (spec_logits_processor_present && !spec_logits_result->has_active_processor) {
             return absl::InternalError(
                 "MTP async spec logits processor is present but no verify artifact was produced; "
-                         "disable MTP/async or implement spec verify for this processor");
+                "disable MTP/async or implement spec verify for this processor");
         }
 
         if (isTpRank0()) {
@@ -2226,14 +2226,14 @@ void MtpExecutor::launchTargetVerifyPrepareAsync(const GptModelInputs& model_inp
             RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(prepare_target_verify_input_fallback)");
             model_input_copy.input_lengths =
                 torch::full({static_cast<int64_t>(batch_size)}, static_cast<int64_t>(propose_step_ + 1), cuda_i32);
-            model_input_copy.lm_output_indexes       = torch::arange(0,
+            model_input_copy.lm_output_indexes = torch::arange(0,
                                                                static_cast<int64_t>(batch_size * (propose_step_ + 1)),
                                                                static_cast<int64_t>(propose_step_ + 1),
                                                                cuda_i32);
-            const auto& target_prefix_lengths        = target_prefix_lengths_for_prepare.defined() ?
-                                                           target_prefix_lengths_for_prepare :
-                                                           model_input.prefix_lengths;
-            model_input_copy.prefix_lengths          = toCudaInt32WithHostHold(target_prefix_lengths, buffer_holder_);
+            const auto& target_prefix_lengths  = target_prefix_lengths_for_prepare.defined() ?
+                                                     target_prefix_lengths_for_prepare :
+                                                     model_input.prefix_lengths;
+            model_input_copy.prefix_lengths    = toCudaInt32WithHostHold(target_prefix_lengths, buffer_holder_);
             model_input_copy.sequence_lengths_plus_1 = model_input_copy.prefix_lengths + 1;
         }
     }
@@ -2384,6 +2384,12 @@ bool MtpExecutor::reduceSpeculativeTargetPrepareStatus(bool local_ok) {
     }
     if (parallelism_config_.tp_size <= 1) {
         return local_ok;
+    }
+    if (model_) {
+        const auto host_status = model_->reduceSpeculativeTargetPrepareStatus(local_ok);
+        if (host_status.has_value()) {
+            return *host_status;
+        }
     }
     RTP_LLM_CHECK_WITH_INFO(speculative_target_prepare_status_.defined(),
                             "speculative target TP prepare status buffer is not initialized");
@@ -3270,8 +3276,15 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
         model_input.input_lengths  = std::move(input_lengths);
         model_input.prefix_lengths = spec_prefix_lengths;
         model_input.combo_tokens   = draft_token_ids_t.reshape({(int64_t)(batch_size * (propose_step_ + 1))});
+        // Non-driver ranks have no stream-local device state, but their TP
+        // prefix tensor still supplies the target position receiver's shape
+        // and device. Keep that receiver on CUDA before the mixed-rank broadcast.
+        const bool device_position_receiver =
+            stream_groups.empty() && model_input.prefix_lengths.defined() && model_input.prefix_lengths.is_cuda();
         batch_stream_processor_->expandTargetVerifyPositionIds(
-            stream_groups, model_input, pre_target_from_device_state ? model_input.prefix_lengths : torch::Tensor());
+            stream_groups,
+            model_input,
+            (pre_target_from_device_state || device_position_receiver) ? model_input.prefix_lengths : torch::Tensor());
         model_input.sequence_lengths =
             torch::empty({0}, torch::TensorOptions(torch::kInt32).device(torch::kCPU).pinned_memory(true));
         model_input.last_hidden_states = torch::Tensor();

@@ -321,23 +321,9 @@ void MtpBatchStreamProcessor::expandTargetVerifyPositionIds(const StreamGroups& 
                             model_input.combo_position_ids.numel(),
                             position_id_len_factor);
     const size_t batch_size = model_input.combo_position_ids.numel() / position_id_len_factor;
-    auto         target_combo_position_ids =
-        torch::empty({(int64_t)(batch_size * (propose_step_ + 1) * position_id_len_factor)}, torch::kInt32)
-            .pin_memory();
-
-    int* dst_position_ids = target_combo_position_ids.data_ptr<int>();
-    if (stream_groups.empty()) {
-        // Non-driver TP ranks only need a correctly shaped placeholder here; draftModelDecode broadcasts rank0's
-        // stream-derived combo_position_ids into this storage before target verify.
-        target_combo_position_ids.zero_();
-        model_input.combo_position_ids = std::move(target_combo_position_ids);
-        return;
-    }
-
-    RTP_LLM_CHECK_WITH_INFO(stream_groups.size() == batch_size,
-                            "MTP target verify position batch mismatch: streams=%zu position_rows=%zu",
-                            stream_groups.size(),
-                            batch_size);
+    // Device-state target verify broadcasts CUDA positions from rank 0. Keep
+    // the receiver on that same device: a CPU placeholder would make the Python
+    // NCCL bridge upload it and synchronously copy the result back to the host.
     if (authoritative_prefix_lengths.defined()) {
         RTP_LLM_CHECK_WITH_INFO(authoritative_prefix_lengths.is_cuda()
                                     && authoritative_prefix_lengths.scalar_type() == torch::kInt32
@@ -354,11 +340,35 @@ void MtpBatchStreamProcessor::expandTargetVerifyPositionIds(const StreamGroups& 
                                 authoritative_prefix_lengths.is_contiguous());
     }
 
+    if (stream_groups.empty() && authoritative_prefix_lengths.defined()) {
+        model_input.combo_position_ids =
+            torch::zeros({static_cast<int64_t>(batch_size * (propose_step_ + 1) * position_id_len_factor)},
+                         torch::TensorOptions(torch::kInt32).device(authoritative_prefix_lengths.device()));
+        return;
+    }
+    auto target_combo_position_ids =
+        torch::empty({(int64_t)(batch_size * (propose_step_ + 1) * position_id_len_factor)}, torch::kInt32)
+            .pin_memory();
+
+    int* dst_position_ids = target_combo_position_ids.data_ptr<int>();
+    if (stream_groups.empty()) {
+        // Non-driver TP ranks only need a correctly shaped placeholder here; draftModelDecode broadcasts rank0's
+        // stream-derived combo_position_ids into this storage before target verify.
+        target_combo_position_ids.zero_();
+        model_input.combo_position_ids = std::move(target_combo_position_ids);
+        return;
+    }
+
+    RTP_LLM_CHECK_WITH_INFO(stream_groups.size() == batch_size,
+                            "MTP target verify position batch mismatch: streams=%zu position_rows=%zu",
+                            stream_groups.size(),
+                            batch_size);
+
     size_t batch_idx = 0;
     auto   host_position_anchors =
         authoritative_prefix_lengths.defined() ?
-              torch::empty({static_cast<int64_t>(batch_size)}, torch::TensorOptions(torch::kInt32).pinned_memory(true)) :
-              torch::Tensor();
+            torch::empty({static_cast<int64_t>(batch_size)}, torch::TensorOptions(torch::kInt32).pinned_memory(true)) :
+            torch::Tensor();
     // Speculative decoding rejects num_return_sequences > 1 and beam search before this path.
     for (const auto& stream : stream_groups.allStreams()) {
         int* base_position_ids = dst_position_ids + batch_idx * (propose_step_ + 1) * position_id_len_factor;
@@ -392,15 +402,15 @@ void MtpBatchStreamProcessor::expandTargetVerifyPositionIds(const StreamGroups& 
     // synchronization. Shift the host-derived base by the device-vs-host text
     // position delta, preserving any MRoPE per-axis offset, then add verify
     // steps entirely on the current CUDA stream.
-    const auto cuda_i32 =
-        torch::TensorOptions().dtype(torch::kInt32).device(authoritative_prefix_lengths.device());
-    auto       base_gpu =
-        target_combo_position_ids
+    const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(authoritative_prefix_lengths.device());
+    // Upload the contiguous pinned allocation before taking the strided view.
+    // The Torch pinned allocator records the asynchronous copy's lifetime.
+    auto base_gpu =
+        target_combo_position_ids.to(cuda_i32, /*non_blocking=*/true)
             .reshape(
                 {static_cast<int64_t>(batch_size), propose_step_ + 1, static_cast<int64_t>(position_id_len_factor)})
-            .select(1, 0)
-            .to(cuda_i32);
-    auto host_anchor_gpu = host_position_anchors.to(cuda_i32);
+            .select(1, 0);
+    auto host_anchor_gpu = host_position_anchors.to(cuda_i32, /*non_blocking=*/true);
     auto delta           = authoritative_prefix_lengths - host_anchor_gpu;
     auto steps           = torch::arange(propose_step_ + 1, cuda_i32).reshape({1, propose_step_ + 1, 1});
     model_input.combo_position_ids =

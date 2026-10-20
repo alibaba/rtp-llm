@@ -208,6 +208,20 @@ class IndexerPrefillTritonTest(unittest.TestCase):
     def fused(self, args):
         return write_zero_prefix_prefill(*args, page_size=128, norm_eps=1e-6)
 
+    def test_host_staging_with_cuda_as_default_device(self):
+        args = self.inputs([129, 17])
+        expected = self.fused(args)
+        expected_kv, expected_state = args[6].clone(), args[8].clone()
+        restore_indexer_cache(expected["undo"])
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream), torch.device("cuda"):
+            actual = self.fused(args)
+        stream.synchronize()
+        torch.testing.assert_close(args[6], expected_kv, rtol=0, atol=0)
+        torch.testing.assert_close(args[8], expected_state, rtol=0, atol=0)
+        restore_indexer_cache(actual["undo"])
+
     def test_emitted_selection_keys_match_old_preparation_and_preserve_cache(self):
         for lengths in ([1, 3], [4, 7, 129, 257], [4096, 131], [12288]):
             args = self.inputs(lengths)

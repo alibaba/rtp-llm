@@ -168,8 +168,11 @@ class DraftPrefillGraphReplay(Mapping):
         ):
             raise RuntimeError("QSA draft graph transported position capacity changed")
         expected_positions = torch.tensor(
-            positions, device=transported.device, dtype=transported.dtype
-        )
+            positions,
+            dtype=transported.dtype,
+            device="cpu",
+            pin_memory=transported.is_cuda,
+        ).to(device=transported.device, non_blocking=True)
         if state_geometry is None:
             raise RuntimeError("QSA draft graph requires a raw-state cache group")
         table, pool_size, page_size = state_geometry
