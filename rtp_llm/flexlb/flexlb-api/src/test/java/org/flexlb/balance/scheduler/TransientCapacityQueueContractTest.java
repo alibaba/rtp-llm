@@ -593,6 +593,8 @@ class TransientCapacityQueueContractTest {
             WorkerStatusResponse limited = statusResponse(RoleType.PREFILL, 3L, false);
             limited.setAvailableKvCacheTokens(1_000L);
             limited.setTotalKvCacheTokens(1_000L);
+            // An idle engine is admitted despite insufficient KV, so keep it busy.
+            limited.setRunningQueryLen(1L);
             fixture.runtime.applyStatus(fixture.prefillStatus, limited);
 
             CompletableFuture<Response> waiting = fixture.runtime.scheduler().submit(

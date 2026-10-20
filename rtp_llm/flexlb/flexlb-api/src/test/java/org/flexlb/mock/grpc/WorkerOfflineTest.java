@@ -23,6 +23,8 @@ class WorkerOfflineTest extends FlexLBMockTestBase {
     protected FlexlbConfig createConfig() {
         FlexlbConfig config = super.createConfig();
         config.getRequestLifecycle().getRequest().setTimeoutMs(1_800L);
+        config.getRequestLifecycle().getRequest().setDispatchConfirmTimeoutPolls(
+                (1_800L) / config.getWorkerRegistry().getHealth().getStatusPollIntervalMs());
         return config;
     }
 
@@ -48,7 +50,7 @@ class WorkerOfflineTest extends FlexLBMockTestBase {
         Response expired = offline.get(5, TimeUnit.SECONDS);
         assertFalse(expired.isSuccess());
         assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), expired.getCode());
-        assertTrue(expired.getErrorMessage().contains("REQUEST_INACTIVE"));
+        assertTrue(expired.getErrorMessage().contains("DISPATCH_CONFIRM_TIMEOUT"));
         assertEquals(0, scheduler.getTrackedRequestCount());
         assertEquals(0, getPrefillEndpoint().getInflightBatchCount());
         assertEquals(0, getPrefillEndpoint().getLocallyOwnedRequestCount());

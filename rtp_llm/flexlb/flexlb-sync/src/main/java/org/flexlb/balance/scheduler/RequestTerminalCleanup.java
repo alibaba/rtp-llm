@@ -67,8 +67,11 @@ final class RequestTerminalCleanup {
             failure = runStep(failure,
                     () -> exact.prefillEp().removeQueued(exact, "TERMINAL_RELEASE"));
         }
-        if (event != null && event.kind() == DeferredTerminal.Kind.INACTIVITY_EXPIRED) {
+        if (event != null && event.endsLocalTracking()) {
             // Expiry ends exact local tracking even when delivery is uncertain or Engine-owned.
+            if (event.kind() == DeferredTerminal.Kind.DISPATCH_CONFIRM_TIMEOUT) {
+                failure = runStep(failure, reporter::reportDispatchConfirmTimeout);
+            }
             failure = runStep(failure,
                     exact.decodeEp() == null ? null
                             : () -> exact.decodeEp().release(exact.decodeReservation(), DecodeEndpoint.ReleaseReason.EXPIRED));

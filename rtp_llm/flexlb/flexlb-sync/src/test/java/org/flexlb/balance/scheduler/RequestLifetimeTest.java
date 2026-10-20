@@ -162,8 +162,8 @@ class RequestLifetimeTest {
         Fixture fixture = fixture(true);
         var exact = mock(ExpirationTimer.InactivityDeadline.class);
         synchronized (fixture.slot) {
-            assertTrue(fixture.slot.installInactivityDeadline(exact));
             RequestLifecycleTestSupport.startRouteDelivery(fixture.slot);
+            assertTrue(fixture.slot.installInactivityDeadline(exact));
             RequestLifecycleTestSupport.markAcknowledged(fixture.slot);
             org.springframework.test.util.ReflectionTestUtils.<DecodeAcceptance>invokeMethod(fixture.slot, "markDecodeAcceptedLocked");
             assertTrue(fixture.slot.future().completeOwned(new Response()));
@@ -218,8 +218,8 @@ class RequestLifetimeTest {
         var full = mock(ExpirationTimer.InactivityDeadline.class);
         var decision = mock(ExpirationTimer.DecisionDeadline.class);
         synchronized (fixture.slot) {
-            fixture.slot.installInactivityDeadline(full);
             RequestLifecycleTestSupport.startRouteDelivery(fixture.slot);
+            fixture.slot.installInactivityDeadline(full);
             startPrediction(fixture.slot);
             when(decision.deadlineAtMs()).thenReturn(fixture.slot.decisionDeadlineAtMs().orElseThrow());
             fixture.slot.installDecisionDeadline(decision);

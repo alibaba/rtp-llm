@@ -117,6 +117,8 @@ public final class SchedulingTestConfig {
     public static void configureRequiredValues(FlexlbConfig config) {
         if (config.getRequestLifecycle().getRequest().getTimeoutMs() == null) {
             config.getRequestLifecycle().getRequest().setTimeoutMs(60_000L);
+            config.getRequestLifecycle().getRequest().setDispatchConfirmTimeoutPolls(
+                    60_000L / config.getWorkerRegistry().getHealth().getStatusPollIntervalMs());
         }
         if (config.getRequestLifecycle().getDecision().getLifetime() == null) {
             config.getRequestLifecycle().getDecision().setLifetime(2.0);

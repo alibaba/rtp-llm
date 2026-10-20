@@ -292,6 +292,8 @@ class FaultInjectionE2ETest {
         try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(
                 BASE_PORT + 80, 2, 1, "5", 1.0, true, DecisionPolicyConfig.single())) {
             h.config.getRequestLifecycle().getRequest().setTimeoutMs(2_000L);
+            h.config.getRequestLifecycle().getRequest().setDispatchConfirmTimeoutPolls(
+                    (2_000L) / h.config.getWorkerRegistry().getHealth().getStatusPollIntervalMs());
             arm(h);
             JavaMockEngineCluster.FastRpcService prefill = h.prefillEngines.get(0);
             PrefillEndpoint prefillEndpoint = h.prefillEndpoint(0);
@@ -338,7 +340,7 @@ class FaultInjectionE2ETest {
             assertEquals(expectedError.getErrorCode(), expired.getCode());
             // Cleanup may wait for inactivity, but it cannot replace an earlier client cancellation.
             assertTrue(expired.getErrorMessage().contains(clientCancellation
-                    ? CancelReason.CLIENT_CANCELLED.getMessage() : "REQUEST_INACTIVE"));
+                    ? CancelReason.CLIENT_CANCELLED.getMessage() : "DISPATCH_CONFIRM_TIMEOUT"));
             assertEquals(0, prefillEndpoint.getInflightBatchCount());
             assertEquals(0, prefillEndpoint.getLocallyOwnedRequestCount());
             AutoTpmE2EHarness.await(() -> h.scheduler.getTrackedRequestCount() == 0

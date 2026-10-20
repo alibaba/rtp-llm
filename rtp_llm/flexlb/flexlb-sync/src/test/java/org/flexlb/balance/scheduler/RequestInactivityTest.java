@@ -40,6 +40,7 @@ class RequestInactivityTest {
     private static final long REQUEST_ID = 101L;
     // Explicit observation/check timestamps advance virtual time without waiting for wall time.
     private static final long TIMEOUT_MS = TimeUnit.HOURS.toMillis(1L);
+    private static final long CONFIRM_TIMEOUT_MS = 1_000L;
 
     private RequestRegistry registry;
     private RequestSlot slot;
@@ -54,6 +55,8 @@ class RequestInactivityTest {
     void setUp() throws Exception {
         FlexlbConfig config = SchedulingTestConfig.batchConfig();
         config.getRequestLifecycle().getRequest().setTimeoutMs(TIMEOUT_MS);
+        config.getRequestLifecycle().getRequest().setDispatchConfirmTimeoutPolls(
+                TIMEOUT_MS / config.getWorkerRegistry().getHealth().getStatusPollIntervalMs());
         ConfigService service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);
         registry = new RequestRegistry(service, mock(BatchSchedulerReporter.class),
@@ -205,6 +208,35 @@ class RequestInactivityTest {
             assertFalse(RequestLifecycleTestSupport.<Boolean>inspect(slot, "requestInactiveLocked", originalDeadline));
             assertTrue(RequestLifecycleTestSupport.<Boolean>inspect(slot, "requestInactiveLocked", originalDeadline - 1L + TIMEOUT_MS));
         }
+    }
+
+    @Test
+    void deliveryAcknowledgementDoesNotConfirmAndTheConfirmDeadlineStartsAtDelivery() throws Exception {
+        long deliveredAt = shortenConfirmTimeout();
+        acknowledgeDelivery();
+        registry.expireInactiveRequest(slot, deliveredAt + CONFIRM_TIMEOUT_MS - 1L);
+        assertLiveAndCharged();
+
+        registry.expireInactiveRequest(slot, deliveredAt + CONFIRM_TIMEOUT_MS);
+        assertExpiredAndReleased(RequestState.Phase.TIMED_OUT);
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = RoleType.class, names = {"PREFILL", "DECODE"})
+    void matchingStatusBeforeTheConfirmDeadlineKeepsTheRequestAlive(RoleType source) throws Exception {
+        long deliveredAt = shortenConfirmTimeout();
+        acknowledgeDelivery();
+        observeActive(source, deliveredAt + CONFIRM_TIMEOUT_MS - 1L);
+
+        registry.expireInactiveRequest(slot, deliveredAt + CONFIRM_TIMEOUT_MS);
+        assertLiveAndCharged();
+        registry.expireInactiveRequest(slot, deliveredAt + CONFIRM_TIMEOUT_MS - 1L + TIMEOUT_MS);
+        assertExpiredAndReleased(RequestState.Phase.TIMED_OUT);
+    }
+
+    private long shortenConfirmTimeout() {
+        slot.configureDispatchConfirmTimeout(CONFIRM_TIMEOUT_MS);
+        return (long) org.springframework.test.util.ReflectionTestUtils.getField(slot, "deliveryStartedAtMs");
     }
 
     private void observeActive(RoleType source, long nowMs) {

@@ -31,6 +31,7 @@ import static org.flexlb.constant.MetricConstant.AUTO_TPM_SCHEDULE_LATENCY_MS;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_TTFT_MS;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_VICTIM_COUNT;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_VICTIM_KV_TOKENS;
+import static org.flexlb.constant.MetricConstant.REQUEST_DISPATCH_CONFIRM_TIMEOUT_COUNT;
 import static org.flexlb.constant.MetricConstant.REQUEST_LIFECYCLE_FAILURES_TOTAL;
 
 /**
@@ -93,6 +94,7 @@ public class RequestSchedulerReporter {
         monitor.register(AUTO_TPM_VICTIM_KV_TOKENS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
         monitor.register(AUTO_TPM_DECODE_RESERVED_COUNT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         monitor.register(AUTO_TPM_DECODE_SHADOW_KV_RESERVED, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        monitor.register(REQUEST_DISPATCH_CONFIRM_TIMEOUT_COUNT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
         reportLifecycleFailureCounts();
         log.info("RequestSchedulerReporter initialized");
     }
@@ -125,6 +127,13 @@ public class RequestSchedulerReporter {
     public void reportPreemptionTargetInvalid(String mode, String reason) {
         monitor.report(AUTO_TPM_PREEMPTION_TARGET_INVALID_COUNT,
                 FlexMetricTags.of("mode", mode, "reason", reason), 1.0);
+    }
+
+    /**
+     * Report one request released locally because its first Engine status never arrived after delivery.
+     */
+    public void reportDispatchConfirmTimeout() {
+        monitor.report(REQUEST_DISPATCH_CONFIRM_TIMEOUT_COUNT, FlexMetricTags.of(), 1.0);
     }
 
     /**

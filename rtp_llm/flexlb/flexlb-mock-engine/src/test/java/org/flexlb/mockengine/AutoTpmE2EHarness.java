@@ -219,6 +219,8 @@ final class AutoTpmE2EHarness implements AutoCloseable {
         // the default fixed_window algorithm reads fixedWaitMs (not windowMs):
         // hold dispatch by default so scenarios can assert stable queue state
         config.getRequestLifecycle().getRequest().setTimeoutMs(3_600_000L);
+        config.getRequestLifecycle().getRequest().setDispatchConfirmTimeoutPolls(
+                (3_600_000L) / config.getWorkerRegistry().getHealth().getStatusPollIntervalMs());
         config.getRequestLifecycle().getDecision().setLifetime(2.0);
         when(configService.loadBalanceConfig()).thenReturn(config);
 

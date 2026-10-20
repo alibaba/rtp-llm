@@ -173,6 +173,9 @@ public final class RequestSlot {
     private DecisionDeadline decisionDeadline;
     private InactivityDeadline inactivityDeadline;
     private long inactivityTimeoutMs;
+    private long dispatchConfirmTimeoutMs;
+    private long deliveryStartedAtMs;
+    private boolean engineStatusReceived;
     private long lastWorkerStatusAtMs;
     private static final long DECODE_HANDOFF_GRACE_MS = 10_000L;
     private enum DecisionStage { UNDECIDED, WAITING_ENGINE, PREFILL_RUNNING, WAITING_DECODE, ACCEPTED }
@@ -299,6 +302,7 @@ public final class RequestSlot {
                 return;
             }
             lastWorkerStatusAtMs = System.currentTimeMillis();
+            engineStatusReceived = true;
             if (finished) {
                 TerminalOutcome result = task.errorCode() == 0L
                         ? TerminalOutcome.complete("encoder completed")
@@ -693,7 +697,7 @@ public final class RequestSlot {
         TerminalAction retired = claimPrefillRetirementLocked(retirement);
         if (retired != null) { return RequestEffect.terminal(retired, null); }
         if (inactive && pendingCancellation != null) {
-            return RequestEffect.terminal(decideRequestEndLocked(DeferredTerminal.inactivityExpired(
+            return RequestEffect.terminal(decideRequestEndLocked(buildSilenceTerminalLocked(
                     "REQUEST_INACTIVE: no matching Engine request status before inactivity timeout")), null);
         }
 
@@ -712,7 +716,7 @@ public final class RequestSlot {
         if (effect.terminal() != null || pendingCancellation == null || !ownsActiveGenerationLocked()) { return effect; }
         TerminalAction cancelled = pendingCancellation == CancelReason.DEADLINE_EXCEEDED
                 || requestInactiveLocked(System.currentTimeMillis())
-                ? decideRequestEndLocked(DeferredTerminal.inactivityExpired(pendingCancellation.getMessage()))
+                ? decideRequestEndLocked(buildSilenceTerminalLocked(pendingCancellation.getMessage()))
                 : tryTerminateCancellationLocked();
         return cancelled == null ? effect : RequestEffect.terminal(cancelled, null);
     }
@@ -748,8 +752,10 @@ public final class RequestSlot {
     /** Atomically arbitrate expiry against the one endpoint-ownership handoff. */
     DeliveryClaim claimDelivery(ScheduledRequest exact, DeliveryClaimKind kind,
             long correlationId, BooleanSupplier transferToEndpoint) {
-        TerminalAction expired;
+        TerminalAction expired = null;
         boolean cleanup;
+        DeliveryClaim claim = null;
+        InactivityDeadline replacedInactivity = null;
         synchronized (this) {
             if (kind == DeliveryClaimKind.NONE || kind == DeliveryClaimKind.BATCH_ENQUEUE && correlationId <= 0L) {
                 throw new IllegalArgumentException("invalid delivery identity");
@@ -769,15 +775,23 @@ public final class RequestSlot {
                 if (!transferToEndpoint.getAsBoolean()) {
                     throw new IllegalStateException("endpoint ownership lost for request " + requestId);
                 }
-                DeliveryClaim claim = new DeliveryClaim(this, exact, kind, correlationId);
+                claim = new DeliveryClaim(this, exact, kind, correlationId);
                 deliveryClaimKind = kind;
                 batchId = correlationId;
+                deliveryStartedAtMs = nowMs;
+                replacedInactivity = inactivityDeadline;
+                inactivityDeadline = null;
                 if (kind == DeliveryClaimKind.BATCH_ENQUEUE) { batchEnqueueStartedAtMs = nowMs; }
                 transitionLocked(RequestState.Phase.DISPATCHING,
                         kind == DeliveryClaimKind.BATCH_ENQUEUE ? "batch enqueue started" : "route decision delivery started");
-                return claim;
             }
-            cleanup = cleanupProgress != null && cleanupProgress.expired;
+            cleanup = claim == null && cleanupProgress != null && cleanupProgress.expired;
+        }
+        if (claim != null) {
+            // The confirm deadline starts at delivery, earlier than the registration-time wake-up.
+            if (replacedInactivity != null) { expirationTimer.cancel(replacedInactivity); }
+            expirationTimer.attachInactivityDeadline(this);
+            return claim;
         }
         // Endpoint cleanup and response callbacks must never run under Slot's lock.
         if (cleanup) { resumeCleanup(); } else { terminalCleanup.submitTerminal(expired); }
@@ -1093,6 +1107,7 @@ public final class RequestSlot {
         requireSlotLock("Prefill fact reduction");
         if (!ownsPrefillFactLocked(source, fact.item())) { return EngineObservation.STALE; }
         lastWorkerStatusAtMs = Math.max(lastWorkerStatusAtMs, nowMs);
+        engineStatusReceived = true;
         if (cleanupProgress != null) {
             if (fact.kind() == PrefillState.WorkerStatusFact.Kind.ACTIVE) {
                 return new EngineObservation(applyPrefillActivityLocked(source, fact.item()), null);
@@ -1151,6 +1166,7 @@ public final class RequestSlot {
         requireSlotLock("Decode fact reduction");
         if (!ownsDecodeFactLocked(source, fact.reservation())) { return EngineObservation.STALE; }
         lastWorkerStatusAtMs = Math.max(lastWorkerStatusAtMs, nowMs);
+        engineStatusReceived = true;
         if (fact.kind() == DecodeEndpoint.WorkerStatusFact.Kind.TERMINAL) {
             if (cleanupProgress == null) {
                 advanceDecisionLocked(DecisionStage.ACCEPTED, OptionalLong.empty());
@@ -1459,6 +1475,10 @@ public final class RequestSlot {
         inactivityTimeoutMs = timeoutMs;
     }
 
+    synchronized void configureDispatchConfirmTimeout(long timeoutMs) {
+        dispatchConfirmTimeoutMs = timeoutMs;
+    }
+
     synchronized OptionalLong inactivityDeadlineAtMs() {
         return ownsResourceTrackingLocked() && inactivityDeadline == null
                 && (cleanupProgress == null || !cleanupProgress.expired)
@@ -1521,14 +1541,28 @@ public final class RequestSlot {
         if (!currentGeneration || !ownsActiveGenerationLocked() || state.isTerminal() || !requestInactiveLocked(nowMs)) {
             return null;
         }
-        String message = "REQUEST_INACTIVE: no matching Engine request status before inactivity timeout";
-        recordCancellationLocked(CancelReason.DEADLINE_EXCEEDED, message);
+        DeferredTerminal expiry = buildSilenceTerminalLocked(
+                "REQUEST_INACTIVE: no matching Engine request status before inactivity timeout");
+        recordCancellationLocked(CancelReason.DEADLINE_EXCEEDED, expiry.detail());
         if (admissionHandle != null) {
             pendingAdmissionInactivityExpired = true;
             assertInvariantLocked();
             return null;
         }
-        return decideRequestEndLocked(DeferredTerminal.inactivityExpired(message));
+        return decideRequestEndLocked(expiry);
+    }
+
+    private boolean awaitingFirstEngineStatusLocked() {
+        return dispatchConfirmTimeoutMs > 0L && deliveryStartedAtMs > 0L && !engineStatusReceived;
+    }
+
+    /** Delivered but never confirmed expires as a confirm timeout; otherwise as plain inactivity. */
+    private DeferredTerminal buildSilenceTerminalLocked(String inactivityMessage) {
+        if (awaitingFirstEngineStatusLocked()) {
+            return DeferredTerminal.dispatchConfirmTimeout("DISPATCH_CONFIRM_TIMEOUT: no matching Engine request status "
+                    + dispatchConfirmTimeoutMs + " ms after delivery started");
+        }
+        return DeferredTerminal.inactivityExpired(inactivityMessage);
     }
 
     private boolean requestInactiveLocked(long nowMs) {
@@ -1547,7 +1581,11 @@ public final class RequestSlot {
         if (deliveryClaimKind == DeliveryClaimKind.BATCH_ENQUEUE) {
             observedSince = Math.max(observedSince, batchEnqueueStartedAtMs);
         }
-        return deadlineAfter(observedSince, inactivityTimeoutMs);
+        long expiresAtMs = deadlineAfter(observedSince, inactivityTimeoutMs);
+        if (awaitingFirstEngineStatusLocked()) {
+            expiresAtMs = Math.min(expiresAtMs, deadlineAfter(deliveryStartedAtMs, dispatchConfirmTimeoutMs));
+        }
+        return expiresAtMs;
     }
 
     // ── 可见性期限：预测、Engine 证据、疑似丢失诊断 ──
@@ -2004,7 +2042,7 @@ public final class RequestSlot {
                 outcome = TerminalOutcome.timeout(message);
                 error = StrategyErrorType.BATCH_SLO_EXPIRED;
             }
-            case INACTIVITY_EXPIRED -> {
+            case INACTIVITY_EXPIRED, DISPATCH_CONFIRM_TIMEOUT -> {
                 CancelReason cause = requireCancellationFirstCauseLocked();
                 outcome = TerminalOutcome.cancellation(cause, message);
                 error = cancellationErrorTypeLocked(cause);
@@ -2391,7 +2429,8 @@ record DeferredTerminal(
         WORKER,
         PRIORITY,
         DECODE_GENERATION_RETIRED,
-        INACTIVITY_EXPIRED
+        INACTIVITY_EXPIRED,
+        DISPATCH_CONFIRM_TIMEOUT
     }
 
     DeferredTerminal {
@@ -2400,7 +2439,7 @@ record DeferredTerminal(
             case FAILURE ->
                     errorType != null && workerSource == null;
             case WORKER -> errorType == null && workerSource != null;
-            case TIMEOUT, INACTIVITY_EXPIRED, PRIORITY,
+            case TIMEOUT, INACTIVITY_EXPIRED, DISPATCH_CONFIRM_TIMEOUT, PRIORITY,
                     DECODE_GENERATION_RETIRED ->
                     errorType == null && workerSource == null;
         };
@@ -2418,6 +2457,15 @@ record DeferredTerminal(
 
     static DeferredTerminal inactivityExpired(String detail) {
         return new DeferredTerminal(Kind.INACTIVITY_EXPIRED, null, detail, null, false, 0L);
+    }
+
+    static DeferredTerminal dispatchConfirmTimeout(String detail) {
+        return new DeferredTerminal(Kind.DISPATCH_CONFIRM_TIMEOUT, null, detail, null, false, 0L);
+    }
+
+    /** Both silence expiries end local tracking even when Engine state is unknown. */
+    boolean endsLocalTracking() {
+        return kind == Kind.INACTIVITY_EXPIRED || kind == Kind.DISPATCH_CONFIRM_TIMEOUT;
     }
 
     static DeferredTerminal timeout(String detail) {

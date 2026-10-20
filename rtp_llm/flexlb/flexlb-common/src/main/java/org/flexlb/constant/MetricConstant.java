@@ -753,6 +753,12 @@ public class MetricConstant {
     public static final String REQUEST_LIFECYCLE_FAILURES_TOTAL = "auto_tpm.request.lifecycle.failures.total";
 
     /**
+     * Requests whose local tracking ended because no matching Engine status arrived within
+     * requestLifecycle.request.dispatchConfirmTimeoutPolls status polls after delivery started.
+     */
+    public static final String REQUEST_DISPATCH_CONFIRM_TIMEOUT_COUNT = "auto_tpm.request.dispatch_confirm_timeout.count";
+
+    /**
      * Auto-TPM request count by priority (QPS), tags: priority
      */
     public static final String AUTO_TPM_REQUEST_COUNT = "auto_tpm.request.count";

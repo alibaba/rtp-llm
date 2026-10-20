@@ -32,6 +32,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /** Request TTL reclaims real endpoint capacity locally, without an Engine Cancel channel. */
@@ -47,8 +48,10 @@ class RequestConfirmationTimeoutTest {
         config.setScheduler(SchedulerConfig.direct());
         SchedulingTestConfig.useNonBatchDispatcher(config);
         config.getDispatcher().setMaxInflightPerPrefillWorker(1);
-        config.getRequestLifecycle().getRequest().setTimeoutMs(
-                waiting == ConfirmationWait.AUTOMATIC_TIMER ? 300L : TIMEOUT_MS);
+        config.getRequestLifecycle().getRequest().setTimeoutMs(TIMEOUT_MS);
+        long confirmTimeoutMs = waiting == ConfirmationWait.AUTOMATIC_TIMER ? 300L : TIMEOUT_MS;
+        config.getRequestLifecycle().getRequest().setDispatchConfirmTimeoutPolls(
+                confirmTimeoutMs / config.getWorkerRegistry().getHealth().getStatusPollIntervalMs());
         ConfigService service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);
         var reporter = mock(BatchSchedulerReporter.class);
@@ -139,6 +142,7 @@ class RequestConfirmationTimeoutTest {
             assertFalse(future.get(2L, TimeUnit.SECONDS).isSuccess());
             assertEquals(RequestState.Phase.TIMED_OUT, requests.getRequestState(Long.toString(REQUEST_ID), 0L).state());
             assertEquals(0, requests.trackedRequestCount());
+            verify(requestReporter).reportDispatchConfirmTimeout();
             assertEquals(0L, prefill.observedRequestCount());
             assertEquals(0, prefill.getLocallyOwnedRequestCount());
             assertEquals(0L, decode.routingView().inputKvReserved());
