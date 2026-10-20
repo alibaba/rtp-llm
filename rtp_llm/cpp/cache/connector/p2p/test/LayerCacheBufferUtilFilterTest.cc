@@ -132,7 +132,7 @@ TEST_F(LayerCacheBufferUtilFilterTest, SwaPhysicalTailMatchesPublicationForCpFou
         resource.initGroups(topology_);
         resource.mutableBlockIds(resource.groupTags().at(0)).assign(blocks);
         resource.cacheKeys()            = keys;
-        const auto&               group = topology_->groupById(0);
+        const auto&               group = topology_->group("group0");
         const std::vector<size_t> positions =
             key_count == 280 ? std::vector<size_t>{275, 279} : std::vector<size_t>{279, key_count - 1};
 
@@ -185,7 +185,7 @@ TEST_F(LayerCacheBufferUtilFilterTest, SwaPhysicalTailMatchesPublicationForCpFou
 TEST_F(LayerCacheBufferUtilFilterTest, UnscaledSwaUsesDirectSlotsEvenOnFourPrefillRanks) {
     auto resource = makeResource(
         1, 1, {0}, {CacheGroupType::SWA}, {-1, -1, -1, -1, -1, -1, 31, 32}, {100, 101, 102, 103, 104, 105, 106, 107});
-    const auto& group  = topology_->groupById(0);
+    const auto& group  = topology_->group("group0");
     auto        result = LayerCacheBufferUtil::convertLayerTagForRoute(resource, group, 0, {6, 7}, 0, 4, 1);
     ASSERT_TRUE(result.ok()) << result.status().ToString();
     ASSERT_NE(result.value(), nullptr);

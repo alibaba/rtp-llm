@@ -619,9 +619,9 @@ bool P2PConnectorAsyncReadContextChecker::init(const kmonitor::MetricsReporterPt
     group_block_bytes_.clear();
     total_kv_bytes_ = 0;
     for (const auto& group : config.topology->groups()) {
-        const size_t block_bytes =
-            (group.kv_block_stride_bytes + group.kv_scale_stride_bytes) * group.layer_ids.size();
-        group_block_bytes_.push_back(block_bytes);
+        const size_t block_bytes = (group.kvBlockStrideBytes() + group.kvScaleStrideBytes())
+                                   * config.topology->layerIdsForGroup(group.tag).size();
+        group_block_bytes_.emplace(group.tag, block_bytes);
         total_kv_bytes_ += block_bytes * group.block_num;
     }
     if (total_kv_bytes_ == 0) {
@@ -708,7 +708,7 @@ void P2PConnectorAsyncReadContextChecker::checkRetainedResources(
     const std::vector<std::shared_ptr<P2PConnectorAsyncReadContext>>& contexts) {
     // Count each physical (group, block) once, including shared prefix blocks.
     // Groups can have different block sizes and layer counts, so compare bytes.
-    std::vector<std::set<BlockIdxType>> held_blocks(group_block_bytes_.size());
+    std::map<std::string, std::set<BlockIdxType>> held_blocks;
     size_t                              held_contexts  = 0;
     int64_t                             oldest_hold_ms = 0;
     const int64_t                       now_us         = currentTimeUs();
@@ -722,22 +722,19 @@ void P2PConnectorAsyncReadContextChecker::checkRetainedResources(
         if (hold_start_us > 0) {
             oldest_hold_ms = std::max(oldest_hold_ms, (now_us - hold_start_us) / 1000);
         }
-        const auto& groups = context->resource_->groupBlocks();
-        RTP_LLM_CHECK_WITH_INFO(groups.size() == held_blocks.size(), "P2P retained KV topology mismatch");
-        for (size_t gid = 0; gid < groups.size(); ++gid) {
-            if (!groups[gid]) {
-                continue;
-            }
-            for (const auto block : groups[gid]->blocks()) {
+        const auto& groups = context->resource_->groupBlockIds();
+        RTP_LLM_CHECK_WITH_INFO(groups.size() == group_block_bytes_.size(), "P2P retained KV topology mismatch");
+        for (const auto& [tag, block_bytes] : group_block_bytes_) {
+            for (const auto block : groups.blocks(tag)) {
                 if (!isNullBlockIdx(block)) {
-                    held_blocks[gid].insert(block);
+                    held_blocks[tag].insert(block);
                 }
             }
         }
     }
     size_t held_bytes = 0;
-    for (size_t gid = 0; gid < held_blocks.size(); ++gid) {
-        held_bytes += held_blocks[gid].size() * group_block_bytes_[gid];
+    for (const auto& [tag, blocks] : held_blocks) {
+        held_bytes += blocks.size() * group_block_bytes_.at(tag);
     }
     const double held_percent = total_kv_bytes_ > 0 ? 100.0 * held_bytes / total_kv_bytes_ : 0.0;
     if (metrics_reporter_) {

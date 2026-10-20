@@ -1322,7 +1322,7 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_QueryTimeout_RetainsTargetUntilRetry
 TEST(P2PRetainedKvTest, ThresholdUsesCapacityBytesAndStrictGreaterThan) {
     auto resource = std::make_shared<KVCacheResource>();
     resource->initGroups(test::makeTestCacheTopology(1, 1, {{0}}));
-    resource->mutableBlockIds(0).assign({1, 2, 3});
+    resource->mutableBlockIds("group0").assign({1, 2, 3});
     const auto deadline = currentTimeMs() - 1;
     auto       context =
         std::make_shared<P2PConnectorAsyncReadContext>(resource, "retained", nullptr, 1, false, deadline, deadline);
@@ -1330,13 +1330,13 @@ TEST(P2PRetainedKvTest, ThresholdUsesCapacityBytesAndStrictGreaterThan) {
     ASSERT_TRUE(context->expireTransferDeadlineIfNeeded());
 
     P2PConnectorAsyncReadContextChecker checker;
-    checker.group_block_bytes_ = {100};
+    checker.group_block_bytes_ = {{"group0", 100}};
     checker.total_kv_bytes_    = 1000;
     // Exactly 30%, including duplicate contexts/blocks, must keep running.
     checker.checkRetainedResources({context, context});
-    resource->mutableBlockIds(0).assign({1, 2, 3, NULL_BLOCK_IDX});
+    resource->mutableBlockIds("group0").assign({1, 2, 3, NULL_BLOCK_IDX});
     checker.checkRetainedResources({context});
-    resource->mutableBlockIds(0).assign({1, 2, 3, 4});
+    resource->mutableBlockIds("group0").assign({1, 2, 3, 4});
     EXPECT_DEATH(checker.checkRetainedResources({context}), "P2P retained KV exceeded exit threshold");
     checker.kv_leak_exit_threshold_percent_ = 40;
     checker.checkRetainedResources({context});
@@ -1345,12 +1345,14 @@ TEST(P2PRetainedKvTest, ThresholdUsesCapacityBytesAndStrictGreaterThan) {
 }
 
 TEST(P2PRetainedKvTest, DistinctRequestsAccumulateAndGroupsUseDifferentBlockSizes) {
-    const auto topology     = test::makeTestCacheTopology(2, 2, {{0}, {1}});
-    auto       make_context = [&](BlockIndicesType first, BlockIndicesType second) {
+    const auto topology = test::makeTestCacheTopology(2, 2, {{0}, {1}});
+    const auto reordered_topology =
+        CacheTopology::create({topology->group("group1"), topology->group("group0")}, topology->layers());
+    auto make_context = [&](BlockIndicesType first, BlockIndicesType second, bool reorder = false) {
         auto resource = std::make_shared<KVCacheResource>();
-        resource->initGroups(topology);
-        resource->mutableBlockIds(0).assign(std::move(first));
-        resource->mutableBlockIds(1).assign(std::move(second));
+        resource->initGroups(reorder ? reordered_topology : topology);
+        resource->mutableBlockIds("group0").assign(std::move(first));
+        resource->mutableBlockIds("group1").assign(std::move(second));
         const auto deadline = currentTimeMs() - 1;
         auto       context =
             std::make_shared<P2PConnectorAsyncReadContext>(resource, "weighted", nullptr, 1, false, deadline, deadline);
@@ -1359,10 +1361,10 @@ TEST(P2PRetainedKvTest, DistinctRequestsAccumulateAndGroupsUseDifferentBlockSize
         return context;
     };
     P2PConnectorAsyncReadContextChecker checker;
-    checker.group_block_bytes_ = {100, 400};
+    checker.group_block_bytes_ = {{"group0", 100}, {"group1", 400}};
     checker.total_kv_bytes_    = 2000;
     const auto a               = make_context({1}, {1});    // 500 bytes, 25%.
-    const auto b               = make_context({1, 2}, {});  // Union is 600 bytes, 30%.
+    const auto b               = make_context({1, 2}, {}, true);  // Reordered rows; union is 600 bytes, 30%.
     checker.checkRetainedResources({a, b});
     const auto c = make_context({3}, {});  // Union is 700 bytes, 35%.
     EXPECT_DEATH(checker.checkRetainedResources({a, b, c}), "P2P retained KV exceeded exit threshold");
@@ -1385,8 +1387,8 @@ TEST(P2PRetainedKvTest, InitDerivesCapacityAndRejectsInvalidThreshold) {
     checker.stop();
     size_t expected_bytes = 0;
     for (const auto& group : config.topology->groups()) {
-        expected_bytes +=
-            group.block_num * group.layer_ids.size() * (group.kv_block_stride_bytes + group.kv_scale_stride_bytes);
+        expected_bytes += group.block_num * config.topology->layerIdsForGroup(group.tag).size()
+                          * (group.kvBlockStrideBytes() + group.kvScaleStrideBytes());
     }
     EXPECT_EQ(checker.total_kv_bytes_, expected_bytes);
     EXPECT_EQ(checker.kv_leak_exit_threshold_percent_, 45);

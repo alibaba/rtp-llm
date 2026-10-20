@@ -13,6 +13,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <map>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -262,7 +263,7 @@ private:
     std::shared_ptr<std::atomic<bool>> control_busy_{std::make_shared<std::atomic<bool>>(false)};
     size_t                                                     lease_poll_cursor_{0};
     int64_t                                                    control_submit_retry_ms_{0};
-    std::vector<size_t>                                         group_block_bytes_;
+    std::map<std::string, size_t>                              group_block_bytes_;
     size_t                                                     total_kv_bytes_{0};
     int                                                        kv_leak_exit_threshold_percent_{30};
     int64_t                                                    last_leak_log_ms_{0};
