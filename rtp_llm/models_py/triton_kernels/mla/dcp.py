@@ -11,7 +11,8 @@ def _pack_a2a(
     partial, lse, lengths, packed_o, packed_lse, tokens,
     heads: tl.constexpr, local_heads: tl.constexpr, dim: tl.constexpr, block: tl.constexpr,
 ):
-    token, head = tl.program_id(0), tl.program_id(1)
+    token, head = tl.program_id(0).to(tl.int64), tl.program_id(1)
+    tokens = tl.cast(tokens, tl.int64)
     destination = head // local_heads
     output_row = (destination * tokens + token) * local_heads + head % local_heads
     # Each wire row is dim BF16 values followed by one bit-exact FP32 LSE.
@@ -29,7 +30,8 @@ def _combine_a2a(
     received_o, received_lse, output, tokens,
     local_heads: tl.constexpr, dim: tl.constexpr, cp_size: tl.constexpr, block: tl.constexpr,
 ):
-    token, head = tl.program_id(0), tl.program_id(1)
+    token, head = tl.program_id(0).to(tl.int64), tl.program_id(1)
+    tokens = tl.cast(tokens, tl.int64)
     offset = (token * local_heads + head) * (dim + 2)
     rank_stride = tokens * local_heads * (dim + 2)
     maximum = tl.full((), -float("inf"), tl.float32)

@@ -435,7 +435,7 @@ def fused_q_kv_rmsnorm(q, kv, q_weight, kv_weight, eps):
         if x.stride(-1) != 1 or not weight.is_contiguous():
             raise ValueError("MLA Q/KV norms require contiguous features and weights")
         if weight.ndim != 1 or weight.numel() != x.shape[1] or x.shape[1] <= 0:
-            raise ValueError("K3 MLA norm weight shape does not match input")
+            raise ValueError("MLA norm weight shape does not match input")
     q_out = torch.empty(q.shape, device=q.device, dtype=q.dtype)
     kv_out = torch.empty(kv.shape, device=kv.device, dtype=kv.dtype)
     if q.shape[0]:

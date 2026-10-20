@@ -34,8 +34,11 @@ class KimiK3MtpModel(KimiK3Model):
                 KimiK3MtpBf16Collectives,
             )
 
-            q = int(self.config.gen_num_per_cycle) + 1
-            batch = self._max_generate_batch_size
+            q = max(int(self.config.gen_num_per_cycle) + 1, 1)
+            batch = max(
+                self._max_generate_batch_size,
+                int(getattr(init_resource, "max_decode_graph_batch_size", 1)),
+            )
             request_alignment = self.tp_size // gcd(self.tp_size, q)
             batch = (
                 (batch + request_alignment - 1) // request_alignment * request_alignment
@@ -43,11 +46,20 @@ class KimiK3MtpModel(KimiK3Model):
             attention = self.layers[0].attention
             # Proposal and update runners initialize this shared model.
             # Captured kernels retain raw pointers into the first workspace.
-            if attention._mtp_bf16_collectives is None:
+            existing = attention._mtp_bf16_collectives
+            if existing is None:
                 attention._mtp_bf16_collectives = KimiK3MtpBf16Collectives(
                     attention.input.weight.device,
                     max_tokens=batch * q,
                     hidden_size=self.config.hidden_size,
+                )
+            elif (
+                existing.tp_size != self.tp_size
+                or existing.hidden_size != self.config.hidden_size
+                or existing.max_tokens < batch * q
+            ):
+                raise ValueError(
+                    "Cannot replace MTP workspaces retained by CUDA Graphs"
                 )
         return ready
 
@@ -61,8 +73,14 @@ class KimiK3MtpModel(KimiK3Model):
 
     def _project_local_mtp_input(self, inputs):
         physical_rows = inputs.input_ids.shape[0]
+        if physical_rows % self.tp_size:
+            raise ValueError("Native K3 MTP requires physical token padding for SP")
         local_rows = physical_rows // self.tp_size
         local_start = self.tp_rank * local_rows
+        if inputs.input_hiddens.shape[0] != physical_rows:
+            raise ValueError(
+                "Native K3 MTP requires a hidden state for every physical token"
+            )
         # The embedding gathers hidden shards across TP. Project only this
         # rank's token rows after that gather, before entering the SP layer.
         embedded = self.embed_tokens(
