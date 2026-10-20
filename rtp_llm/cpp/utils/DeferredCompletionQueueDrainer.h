@@ -6,7 +6,9 @@
 #include <list>
 #include <memory>
 #include <mutex>
+#include <system_error>
 #include <thread>
+#include "rtp_llm/cpp/utils/Logger.h"
 #include <utility>
 
 namespace rtp_llm {
@@ -29,8 +31,14 @@ public:
         }
         pending_.push_back(std::move(entry));
         if (!started_) {
-            started_ = true;
-            thread_  = std::thread([this] { run(); });
+            try {
+                thread_ = std::thread([this] { run(); });
+                started_ = true;
+            } catch (const std::system_error& error) {
+                // Keep CQ ownership in pending_. A subsequent enqueue retries
+                // startup; thread exhaustion must not escape a caller's destructor.
+                RTP_LLM_LOG_ERROR("deferred CQ drain thread failed to start: %s", error.what());
+            }
         }
         cv_.notify_one();
     }
@@ -43,6 +51,10 @@ public:
         cv_.notify_all();
         if (thread_.joinable()) {
             thread_.join();
+        } else {
+            // If every startup attempt failed, drain retained queues during
+            // shutdown instead of destroying a CQ with outstanding operations.
+            run();
         }
     }
 

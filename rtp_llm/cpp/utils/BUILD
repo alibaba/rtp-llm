@@ -180,6 +180,7 @@ cc_library(
         "DeferredCompletionQueueDrainer.h",
     ],
     deps = [
+        ":core_utils",
         "@grpc//:grpc++",
     ],
     copts = copts(),
