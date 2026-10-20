@@ -86,7 +86,7 @@ public:
             generate_input, model_config_, runtime_config_, resource_context, nullptr);
     };
 
-    GenerateStreamPtr createComplexContextStream(std::vector<int> input_ids) {
+    GenerateStreamPtr createComplexContextStream(std::vector<int> input_ids, RoleType role = RoleType::PDFUSION) {
         autil::EnvGuard perf_scope("PERF_TEST", "1");
 
         auto cache_config  = init_config();
@@ -95,6 +95,7 @@ public:
         ResourceContext resource_context;
         resource_context.cache_manager = cache_manager;
         resource_context.reuse_cache   = true;
+        resource_context.role_type     = role;
 
         std::shared_ptr<GenerateInput>  generate_input(new GenerateInput());
         std::shared_ptr<GenerateConfig> generate_config(new GenerateConfig());
@@ -652,7 +653,7 @@ TEST_F(GenerateStreamTest, consumerWaitWakesOnPrefillHandoffReady) {
 
 TEST_F(GenerateStreamTest, pdUpdatePublishesOutputBeforeRemoteHandoffCompletion) {
     auto builder = GenerateStreamBuilder();
-    auto stream  = std::dynamic_pointer_cast<NormalGenerateStream>(builder.createComplexContextStream({1, 2, 3}));
+    auto stream  = std::dynamic_pointer_cast<NormalGenerateStream>(builder.createComplexContextStream({1, 2, 3}, RoleType::PREFILL));
     stream->generateConfig()->num_return_sequences = 1;
     stream->generateConfig()->pd_separation        = true;
     stream->generate_status_->status.store(StreamState::RUNNING);
@@ -1191,7 +1192,7 @@ TEST_F(GenerateStreamTest, timeInfoPublishesFirstTokenAndGenerateDoneOnlyAfterCo
     EXPECT_EQ(invalid_info.first_token_time_us, 0);
     EXPECT_FALSE(invalid_info.generation_done);
 
-    auto valid                             = builder.createComplexContextStream({1, 2, 3});
+    auto valid                             = builder.createComplexContextStream({1, 2, 3}, RoleType::PREFILL);
     valid->generateConfig()->pd_separation = true;
     valid->reportEvent(StreamEvents::CanRun);
     ASSERT_EQ(valid->moveToNext(), StreamState::RUNNING);
@@ -1272,7 +1273,7 @@ TEST_F(GenerateStreamTest, firstTokenNotCommittedWhenMaxTokenTruncatesNewTokensT
 
 TEST_F(GenerateStreamTest, timeInfoSnapshotIsCoherentDuringLifecyclePublication) {
     auto builder                            = GenerateStreamBuilder();
-    auto stream                             = builder.createComplexContextStream({1, 2, 3});
+    auto stream                             = builder.createComplexContextStream({1, 2, 3}, RoleType::PREFILL);
     stream->generateConfig()->pd_separation = true;
 
     std::atomic<bool>  start{false};
