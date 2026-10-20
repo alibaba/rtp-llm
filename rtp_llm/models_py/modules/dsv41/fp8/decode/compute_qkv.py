@@ -93,13 +93,21 @@ def decode_compute_qkv(
         freqs_cis = attn.freqs_cis.index_select(0, position_ids).contiguous()
 
     from rtp_llm.models_py.modules.dsv41._v41_query_quant import (
+        try_project_qkv_to_cache,
         try_project_quantized_qkv,
     )
 
-    quantized_qkv = try_project_quantized_qkv(
-        attn,
-        x,
-        quantized_input=shared_input_quant,
+    native_qkv = try_project_qkv_to_cache(
+        attn, x, freqs_cis, swa_pool, swa_slots, shared_input_quant
+    )
+    quantized_qkv = (
+        native_qkv
+        if native_qkv is not None
+        else try_project_quantized_qkv(
+            attn,
+            x,
+            quantized_input=shared_input_quant,
+        )
     )
     qr_quantized = None if quantized_qkv is None else quantized_qkv[2]
     if quantized_qkv is not None:
@@ -135,6 +143,10 @@ def decode_compute_qkv(
             -1, (attn.n_heads, attn.head_dim)
         )  # [B, S, H, D]
     raw_kv = attn._lin(attn.wkv, x) if fused_qkv is None else fused_qkv[1]
+    if native_qkv is not None:
+        if mega_attention is None:
+            _apply_v41_q_rope(q, freqs_cis, rd)
+        return DecodeQKV(qr, q, raw_kv, freqs_cis, qr_quantized, True, index_q)
     if (
         getattr(attn, "skip_post_q_norm", False)
         and rd == 64

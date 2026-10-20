@@ -237,7 +237,7 @@ def prepare_indexer_q_and_weights(
 
 
 def score_decode_indexer(
-    q: torch.Tensor,
+    q: torch.Tensor | None,
     weights: torch.Tensor,
     freqs_cis: torch.Tensor,
     pool: torch.Tensor,
@@ -250,11 +250,16 @@ def score_decode_indexer(
     positions: torch.Tensor | None = None,
     preserve_score_dtype: bool = False,
     pad_invisible: bool = True,
+    prepared_query: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
 ) -> torch.Tensor | None:
     """Return [B*S,max_ctx_len], or None for an unsupported fast path.
 
     Default output is FP32. ``preserve_score_dtype`` retains DeepGEMM's native
     BF16/FP32 scores for decode selectors, with no additional rounding.
+
+    ``prepared_query`` supplies payload, packed scales and scaled head weights
+    from the caller's query branch. It permits q=None and avoids a BF16 query
+    projection allocation when a native GEMM epilogue produced the payload.
 
     ``pad_invisible=False`` skips the -inf materialization of columns >=
     context_lens, leaving them at the allocator contents (stable across CUDA
@@ -289,16 +294,24 @@ def score_decode_indexer(
     full frequency table, enabling fused Q preparation. Without positions,
     preserve the original scaled-FP32-weights/gathered-frequencies contract.
     """
-    b, s, h, d = q.shape
+    if prepared_query is None:
+        b, s, h, d = q.shape
+        device = q.device
+    else:
+        payload = prepared_query[0]
+        b, s, h, packed_d = payload.shape
+        d, device = packed_d * 2, payload.device
     block_size = pool.shape[1]
     logical_entries = (
         block_size if logical_entries_per_block is None else logical_entries_per_block
     )
-    if not is_supported(q.device, block_size, h, d):
+    if not is_supported(device, block_size, h, d):
         return None
     from ._indexer_score import fp8_fp4_paged_indexer_score
 
-    if positions is None:
+    if prepared_query is not None:
+        q_payload, q_sf, weights = prepared_query
+    elif positions is None:
         q_payload, q_sf = prepare_indexer_q(q, weights, freqs_cis, rope_head_dim)
     else:
         q_payload, q_sf, weights = prepare_indexer_q_and_weights(
@@ -311,7 +324,7 @@ def score_decode_indexer(
         )
     lengths = context_lens.to(torch.int32).contiguous()
     physical_lengths = torch.empty_like(lengths)
-    safe_table = torch.empty(block_table.shape, dtype=torch.int32, device=q.device)
+    safe_table = torch.empty(block_table.shape, dtype=torch.int32, device=device)
     _prepare_paged_metadata_kernel[
         (triton.cdiv(max(b * s, block_table.numel()), 128),)
     ](
@@ -348,7 +361,7 @@ def score_decode_indexer(
         b * s,
         max_ctx_len,
         dtype=logits.dtype if preserve_score_dtype else torch.float32,
-        device=q.device,
+        device=device,
     )
     if pad_invisible:
         _compact_logits_kernel[(b * s, triton.cdiv(max_ctx_len, 1024))](

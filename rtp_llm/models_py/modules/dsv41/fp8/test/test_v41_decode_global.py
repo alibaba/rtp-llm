@@ -635,29 +635,18 @@ class V41DecodeGlobalCUDA(unittest.TestCase):
                 del graph
 
     @torch.inference_mode()
-    def test_token_limit_rejects_complete_metadata_without_writing_pools(self):
+    def test_large_batch_runs_without_the_old_token_limit(self):
         helper = _fused()
         for ratio in (1, 2):
             with self.subTest(ratio=ratio):
                 case = _case("cuda", ratio, 193, 1)
                 args = (case.owner, case.x, case.positions, case.req_ids, case.starts)
-                # With only the cap relaxed, all metadata/layout checks pass.
-                with patch.object(helper, "_MAX_FUSED_TOKENS", 193):
-                    self.assertTrue(helper.is_supported(*args))
-                self.assertFalse(helper.is_supported(*args))
+                self.assertTrue(helper.is_supported(*args))
+                old = _clone_case(case)
                 before = _snapshot(case)
-                with patch.object(
-                    helper, "_compress_norm_main_store_kernel"
-                ) as stage_a, patch.object(
-                    helper, "_index_norm_store_state_kernel"
-                ) as stage_b:
-                    self.assertFalse(helper.try_produce_global(*args))
-                stage_a.assert_not_called()
-                stage_b.assert_not_called()
-                for region, pool in before.items():
-                    torch.testing.assert_close(
-                        case.owner._test_pools[region], pool, rtol=0, atol=0
-                    )
+                _reference(old)
+                _candidate(case)
+                _assert_result(self, old, case, before)
 
     @torch.inference_mode()
     def test_unsupported_inputs_do_not_write_pools(self):
