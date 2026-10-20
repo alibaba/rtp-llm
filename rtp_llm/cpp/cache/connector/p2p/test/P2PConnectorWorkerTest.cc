@@ -927,7 +927,7 @@ TEST_F(P2PConnectorWorkerTest, SendKVCache_FullQueueFailsBeforeBlockedSenderFini
     }
     ASSERT_EQ(sending.wait_for(std::chrono::seconds(2)), std::future_status::ready);
     const auto result = sending.get();
-    EXPECT_EQ(result.code(), ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED);
+    EXPECT_EQ(result.code(), ErrorCode::P2P_CONNECTOR_TRANSFER_QUEUE_REJECTED);
     EXPECT_NE(result.ToString().find("sender queue full"), std::string::npos);
     EXPECT_NE(result.ToString().find(unique_key), std::string::npos);
     EXPECT_LT(currentTimeMs(), deadline_ms);
@@ -1006,7 +1006,7 @@ TEST_F(P2PConnectorWorkerTest, SharedSenderQueueIsolatesRejectedCancelledAndSucc
     ASSERT_EQ(c.wait_for(std::chrono::seconds(2)), std::future_status::ready);
     const auto rejected = c.get();
     EXPECT_NE(rejected.ToString().find("sender queue full"), std::string::npos);
-    EXPECT_EQ(rejected.code(), ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED);
+    EXPECT_EQ(rejected.code(), ErrorCode::P2P_CONNECTOR_TRANSFER_QUEUE_REJECTED);
     EXPECT_TRUE(prefill_->cancelRequest(4101, "queue-4101", deadline, deadline));
     ASSERT_EQ(b.wait_for(std::chrono::seconds(2)), std::future_status::ready);
     EXPECT_EQ(b.get().code(), ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_CANCELLED);
@@ -1041,7 +1041,7 @@ TEST_F(P2PConnectorWorkerTest, SendLayer_UnavailablePoolCompletesRejectedTaskWit
         EXPECT_EQ(result->done_count.load(), 1);
         EXPECT_TRUE(result->dispatch_failed.load());
         EXPECT_FALSE(result->all_success.load());
-        EXPECT_EQ(result->error_code, ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED);
+        EXPECT_EQ(result->error_code, ErrorCode::P2P_CONNECTOR_TRANSFER_QUEUE_REJECTED);
         EXPECT_NE(result->error_msg.find("sender pool unavailable"), std::string::npos);
         EXPECT_EQ(mock_sender_->getTransferCallCount(), 0);
     }

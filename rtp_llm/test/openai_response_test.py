@@ -3093,7 +3093,7 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
 
     def _decode_batch_visitor_and_inputs(self):
         config = PDSepConfig()
-        config.role_type = RoleType.FRONTEND
+        config.role_type = RoleType.DECODE
         visitor = BackendRPCServerVisitor(
             max_seq_len=self.model_config.max_seq_len,
             seq_size_per_block=64,
