@@ -190,6 +190,26 @@ py_test(
     deps = flashinfer_test_deps,
 )
 
+# 4c contract (r8): Triton split-K windowed prefill kernel vs the fa3 ragged
+# path — numerics A/B (split_k 1/2/4), the DGM_SPLITK_ATTN gate integration
+# check, and the kernel-level MFU verdict (2*Q*avg_kv*16*256 / 148TF, the
+# >40% windowed gate). Manual (developer bench) diagnostic; the model gate
+# itself stays default-OFF in the AttnOp.
+py_test(
+    name = "test_diffusion_gemm_splitk_ab_prefill_sm90",
+    srcs = ["test_flashinfer_prefill/test_diffusion_gemm_splitk_ab_prefill.py"],
+    exec_properties = {
+        "gpu": "H20_CU13",
+    },
+    main = "test_flashinfer_prefill/test_diffusion_gemm_splitk_ab_prefill.py",
+    tags = [
+        "H20_CU13",
+        "manual",
+    ],
+    target_compatible_with = CUDA13_X86_ONLY,
+    deps = flashinfer_test_deps,
+)
+
 # Generates one py_test per (test, platform): <test name>_<sm>,
 # e.g. test_py_flashinfer_hybrid_mha_prefill_sm90.
 [

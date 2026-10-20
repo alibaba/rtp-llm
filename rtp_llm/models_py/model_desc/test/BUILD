@@ -4,6 +4,40 @@ py_test_deps = [
 
 
 py_test(
+    name = "diffusion_gemma_fused_ab_test",
+    srcs = [
+        "diffusion_gemma_fused_ab_test.py",
+        "diffusion_gemma_realweight_test.py",
+        "diffusion_gemma_test.py",
+    ],
+    main = "diffusion_gemma_fused_ab_test.py",
+    data = ["//:rtp_compute_ops"],
+    deps = [
+        "//rtp_llm:async_model",
+        "//rtp_llm:lora",
+        "//rtp_llm:models",
+        "//rtp_llm:sdk",
+        "//rtp_llm:testlib_lite",
+        "//rtp_llm/models_py:models",
+        "//rtp_llm:torch",
+        "//rtp_llm:transformers",
+    ],
+    env = {
+        "DGM_REAL_CKPT": "/mnt/fuse/smoke-test/hf/google--diffusiongemma-26B-A4B-it--f7f5b7f5fa82ffc52addd066915886d497f5517b",
+    },
+    # opt r8 contract-6 fused elementwise kernels (qkv norm+rope, add+scale,
+    # router scale fold) vs their exact torch chains, real layer-0 weights
+    # bf16; needs the FUSE-staged checkpoint, remote/CI GPU target.
+    tags = ["H20_CU13"],
+    exec_properties = {
+        "gpu": "H20_CU13",
+        "gpu_count": "1",
+    },
+    timeout = "eternal",
+)
+
+
+py_test(
     name = "diffusion_gemma_moe_ab_test",
     srcs = [
         "diffusion_gemma_moe_ab_test.py",
