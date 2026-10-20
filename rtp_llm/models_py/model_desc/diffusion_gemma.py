@@ -52,6 +52,132 @@ logger = logging.getLogger(__name__)
 _ROUTING_AB_CHECK = os.environ.get("DGM_ROUTING_AB", "") not in ("", "0")
 _NORM_AB_CHECK = os.environ.get("DGM_NORM_AB", "") not in ("", "0")
 
+# opt r5 ⑥-clearing lane, item 1: fused residual-add + RMSNorm. The two
+# in-layer "sum = residual + x; normed = RMSNorm(sum)" pairs (post-attention
+# add feeding pre_feedforward_layernorm, and the h1+h2 add feeding
+# post_feedforward_layernorm) run as ONE flashinfer.triton.norm
+# rms_norm_add_residual launch: the 42.7 ms/window torch add cluster plus
+# the paired norm read disappear into the fused kernel. The op updates the
+# residual IN PLACE (it becomes x + residual) and writes the normed output
+# to a fresh tensor; value contract: fp32 accumulation on both paths with
+# the sum rounded to bf16 at the store exactly like the torch add, so the
+# pair agrees within bf16 rounding noise (<= 1 ulp class, the
+# dsv4/dsv41 rmsnorm-replace precedent; the residual's rsqrt uses the
+# unrounded fp32 sum, the one allowed deviation). DGM_FUSED_ADD_NORM=0
+# forces the torch two-step; DGM_ADDNORM_AB=1 additionally prints the
+# fused-vs-torch comparison stats ([dgm-addnorm-ab]).
+_FUSED_ADD_NORM_ENV = os.environ.get("DGM_FUSED_ADD_NORM", "1") != "0"
+_ADDNORM_AB_CHECK = os.environ.get("DGM_ADDNORM_AB", "") not in ("", "0")
+_FI_ADD_NORM = None
+try:
+    # explicit submodule import: flashinfer.triton's package __init__ does
+    # not re-export .norm, so plain attribute access would miss it.
+    from flashinfer.triton.norm import rms_norm_add_residual as _FI_ADD_NORM
+except Exception as _addnorm_error:  # CPU-only / no flashinfer
+    _FI_ADD_NORM = None
+    logger.info(
+        "DiffusionGemma flashinfer fused add+rmsnorm unavailable, torch path: %s",
+        _addnorm_error,
+    )
+_addnorm_warned = False
+_addnorm_ab_logged: set = set()
+
+
+def _fused_add_norm_usable(x: torch.Tensor, residual: torch.Tensor, norm) -> bool:
+    if not (_FUSED_ADD_NORM_ENV and _FI_ADD_NORM is not None):
+        return False
+    weight = getattr(norm, "weight", None)
+    if weight is None or weight.dim() != 1 or weight.stride(0) != 1:
+        return False
+    return (
+        x.is_cuda
+        and x.dim() == 2
+        and x.dtype == torch.bfloat16
+        and residual.dtype == torch.bfloat16
+        and x.shape == residual.shape
+        and x.stride() == residual.stride()
+        and x.stride(1) == 1
+        # the op writes residual in place: x and residual must be distinct
+        # storages or the fused read/write would alias.
+        and x.data_ptr() != residual.data_ptr()
+        and x.numel() > 0
+    )
+
+
+def _addnorm_ab(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float,
+    out_normed: torch.Tensor,
+    out_residual: torch.Tensor,
+) -> None:
+    """Debug A/B (DGM_ADDNORM_AB=1): fused add+rmsnorm vs the exact torch
+    two-step the layer ran before (bf16 add, then the production
+    flashinfer.norm.rmsnorm), logged once per shape."""
+    key = (tuple(x.shape), x.dtype)
+    if key in _addnorm_ab_logged:
+        return
+    _addnorm_ab_logged.add(key)
+    try:
+        import flashinfer
+
+        ref_sum = residual + x
+        ref_normed = flashinfer.norm.rmsnorm(ref_sum, weight, eps=eps)
+        diff = (out_normed.to(torch.float32) - ref_normed.to(torch.float32)).abs()
+        # bf16 bit-pattern distance: for same-sign finite values the int16
+        # view distance counts ulps directly.
+        ulp = (
+            out_normed.view(torch.int16).to(torch.int32)
+            - ref_normed.view(torch.int16).to(torch.int32)
+        ).abs()
+        mismatch = out_normed != ref_normed
+        print(
+            f"[dgm-addnorm-ab] shape={tuple(x.shape)} dtype={x.dtype} "
+            f"max_diff={float(diff.max()):.3e} max_ulp={int(ulp.max())} "
+            f"mismatch_frac={float(mismatch.float().mean()):.4f} "
+            f"residual_equal={bool(torch.equal(out_residual, ref_sum))} "
+            f"ref_absmax={float(ref_normed.to(torch.float32).abs().max()):.3f}",
+            flush=True,
+        )
+    except Exception as error:
+        logger.warning("DiffusionGemma add-norm A/B check failed: %s", error)
+
+
+def _fused_add_norm(x: torch.Tensor, residual: torch.Tensor, norm):
+    """(normed, summed): one fused residual-add + RMSNorm launch on CUDA bf16,
+    the torch two-step otherwise.
+
+    Returns ``norm(sum + x)`` and the sum itself. On the fused path the sum
+    is written IN PLACE into ``residual`` (callers must pass a private
+    tensor; the layer chain's residual tensors are always the previous
+    op's fresh output). Any flashinfer/triton failure degrades to the torch
+    two-step for the rest of the process (r4 norm contract).
+    """
+    global _addnorm_warned
+    if _fused_add_norm_usable(x, residual, norm):
+        weight = norm.weight
+        eps = float(norm.variance_epsilon)
+        out = torch.empty_like(x)
+        # clone the inputs BEFORE the in-place launch for the A/B referee
+        x_ref = x.clone() if _ADDNORM_AB_CHECK else None
+        res_ref = residual.clone() if _ADDNORM_AB_CHECK else None
+        try:
+            _FI_ADD_NORM(x, residual, weight, eps, x_out=out)
+            if _ADDNORM_AB_CHECK:
+                _addnorm_ab(x_ref, res_ref, weight, eps, out, residual)
+            return out, residual
+        except Exception as error:
+            if not _addnorm_warned:
+                logger.warning(
+                    "DiffusionGemma fused add+rmsnorm failed (%s); torch path "
+                    "for this process",
+                    error,
+                )
+                _addnorm_warned = True
+    summed = residual + x
+    return norm(summed), summed
+
 
 SWA_TAG = "swa_kv"
 GLOBAL_TAG = "global_kv"
@@ -270,10 +396,17 @@ class DiffusionGemmaAttnOp:
                 pass
 
     def _window_left(self) -> int:
-        # HF sliding-window convention: attend positions in
-        # [q - window + 1, q + window - 1]; flashinfer's window_left is the
-        # inclusive lower bound, so -window + 1 matches the reference mask.
-        return -(self.window - 1) if self.window > 0 else -1
+        # flashinfer 0.6.9 ragged/paged prefill only compiles the sliding
+        # window branch for window_left >= 0 (prefill.py use_sliding_window);
+        # a negative value (the HF inclusive-lower-bound convention used
+        # here historically) falls into the NO-window branch and the kernel
+        # silently runs full causal — verified by the window A/B test
+        # (test_diffusion_gemm_window_ab_prefill: both arms bit-identical,
+        # W-arm matches the full-causal reference). Pass the positive window
+        # (window-1: query attends kv positions >= q - (window-1), exactly
+        # the HF [q-window+1, q] mask). ctx < window is unaffected (the
+        # window never bites), so all existing goldens stay bit-stable.
+        return (self.window - 1) if self.window > 0 else -1
 
     def _torch_attention(
         self,
@@ -1565,10 +1698,17 @@ class DiffusionGemmaLayer(nn.Module):
             hidden_states, rope, positions, attn_op, kv_cache, attn_inputs, causal, write_kv
         )
         hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = residual + hidden_states
+        # opt r5 item 1: h1 = residual + normed_attn followed by
+        # pre_feedforward_layernorm(h1) is the fused add+rmsnorm pattern —
+        # the torch add cluster (42.7 ms/window) and the paired norm read
+        # collapse into one flashinfer.triton launch (torch two-step on
+        # CPU/non-bf16/DGM_FUSED_ADD_NORM=0). The sum becomes the layer's
+        # residual (h1 feeds the routing input and the final add), exactly
+        # the values the torch chain produced.
+        hidden_states, residual = _fused_add_norm(
+            hidden_states, residual, self.pre_feedforward_layernorm
+        )
 
-        residual = hidden_states
-        hidden_states = self.pre_feedforward_layernorm(hidden_states)
         hidden_states = self.shared_mlp(hidden_states)
         hidden_states_1 = self.post_feedforward_layernorm_1(hidden_states)
 
@@ -1582,8 +1722,12 @@ class DiffusionGemmaLayer(nn.Module):
         )
         hidden_states_2 = self.post_feedforward_layernorm_2(hidden_states_2)
 
-        hidden_states = hidden_states_1 + hidden_states_2
-        hidden_states = self.post_feedforward_layernorm(hidden_states)
+        # opt r5 item 1, second site: h12 = h1 + h2 followed by
+        # post_feedforward_layernorm(h12) — same fused pattern (the in-place
+        # sum lands in the fresh post_attention_layernorm_1 output tensor).
+        hidden_states, _h12 = _fused_add_norm(
+            hidden_states_2, hidden_states_1, self.post_feedforward_layernorm
+        )
         hidden_states = residual + hidden_states
         scalar = self.layer_scalar_dec if decoder_mode else self.layer_scalar_enc
         return hidden_states * scalar
