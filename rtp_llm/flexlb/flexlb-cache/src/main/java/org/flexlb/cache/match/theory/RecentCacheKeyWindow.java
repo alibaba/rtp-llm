@@ -89,7 +89,7 @@ public class RecentCacheKeyWindow {
             logRequest(nowMs, requestOccurrences, requestHitOccurrences);
         }
         return new Snapshot(timeWindowMs, requestOccurrences, requestHitOccurrences,
-                capacityEvictions, capacityEvictionAgeSumMs);
+                capacityEvictions, capacityEvictionAgeSumMs, uniqueSize, maxCacheKeys);
     }
 
     private void retainCacheKey(long cacheKey, long nowMs) {
@@ -269,9 +269,14 @@ public class RecentCacheKeyWindow {
         private final long capacityEvictions;
         /** Sum of (eviction time - last seen time) over those keys; divide by capacityEvictions for average TTL. */
         private final long capacityEvictionAgeSumMs;
+        /** Unique keys held in the pool after this record call. */
+        private final long poolUsedKeys;
+        private final long poolCapacityKeys;
 
         Snapshot(long timeWindowMs, long requestOccurrences, long requestHitOccurrences,
-                 long capacityEvictions, long capacityEvictionAgeSumMs) {
+                 long capacityEvictions, long capacityEvictionAgeSumMs, long poolUsedKeys, long poolCapacityKeys) {
+            this.poolUsedKeys = poolUsedKeys;
+            this.poolCapacityKeys = poolCapacityKeys;
             this.capacityEvictions = capacityEvictions;
             this.capacityEvictionAgeSumMs = capacityEvictionAgeSumMs;
             this.timeWindowMs = timeWindowMs;

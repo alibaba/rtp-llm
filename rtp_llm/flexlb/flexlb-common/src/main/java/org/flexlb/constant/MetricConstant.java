@@ -472,6 +472,16 @@ public class MetricConstant {
     public static final String CACHE_THEORY_EVICT_AGE_MS_SUM = "app.cache.theory.evict.age.ms.sum";
 
     /**
+     * Unique cache keys currently held in the theory pool (gauge).
+     */
+    public static final String CACHE_THEORY_POOL_USED_KEYS = "app.cache.theory.pool.used.keys";
+
+    /**
+     * Maximum unique cache keys the theory pool can hold (gauge).
+     */
+    public static final String CACHE_THEORY_POOL_CAPACITY_KEYS = "app.cache.theory.pool.capacity.keys";
+
+    /**
      * Per-request theoretical cache-hit token ratio.
      */
     public static final String CACHE_THEORY_HIT_RATIO = "app.cache.theory.hit.ratio";

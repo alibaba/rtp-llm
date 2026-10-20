@@ -121,4 +121,16 @@ class RecentCacheKeyWindowTest {
         assertEquals(0L, expired.getCapacityEvictions());
         assertEquals(0L, expired.getCapacityEvictionAgeSumMs());
     }
+
+    @Test
+    void should_report_pool_used_and_capacity_keys() {
+        RecentCacheKeyWindow window = new RecentCacheKeyWindow(1000L, 3L, () -> 0L);
+
+        RecentCacheKeyWindow.Snapshot first = window.record(List.of(1L, 1L, 2L));
+        assertEquals(2L, first.getPoolUsedKeys());
+        assertEquals(3L, first.getPoolCapacityKeys());
+
+        RecentCacheKeyWindow.Snapshot second = window.record(List.of(3L, 4L));
+        assertEquals(3L, second.getPoolUsedKeys());
+    }
 }

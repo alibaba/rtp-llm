@@ -45,6 +45,8 @@ import static org.flexlb.constant.MetricConstant.CACHE_THEORY_EVICT_AGE_MS_SUM;
 import static org.flexlb.constant.MetricConstant.CACHE_THEORY_EVICT_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_THEORY_HIT_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_THEORY_HIT_RATIO;
+import static org.flexlb.constant.MetricConstant.CACHE_THEORY_POOL_CAPACITY_KEYS;
+import static org.flexlb.constant.MetricConstant.CACHE_THEORY_POOL_USED_KEYS;
 import static org.flexlb.constant.MetricConstant.CACHE_THEORY_TOTAL_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_UPDATE_ENGINE_BLOCK_CACHE_RT;
 
@@ -114,6 +116,8 @@ public class CacheMetricsReporter {
         monitor.register(CACHE_THEORY_HIT_COUNT, FlexMetricType.COUNTER);
         monitor.register(CACHE_THEORY_TOTAL_COUNT, FlexMetricType.COUNTER);
         monitor.register(CACHE_THEORY_HIT_RATIO, FlexMetricType.GAUGE);
+        monitor.register(CACHE_THEORY_POOL_USED_KEYS, FlexMetricType.GAUGE);
+        monitor.register(CACHE_THEORY_POOL_CAPACITY_KEYS, FlexMetricType.GAUGE);
         monitor.register(CACHE_THEORY_EVICT_COUNT, FlexMetricType.COUNTER);
         monitor.register(CACHE_THEORY_EVICT_AGE_MS_SUM, FlexMetricType.COUNTER);
         monitor.register(CACHE_ROUTING_SELECTED_MATCH_HIT_TOKENS, FlexMetricType.QPS);
@@ -354,6 +358,15 @@ public class CacheMetricsReporter {
         monitor.report(CACHE_THEORY_HIT_COUNT, tags, hitTokens);
         monitor.report(CACHE_THEORY_TOTAL_COUNT, tags, inputTokens);
         monitor.report(CACHE_THEORY_HIT_RATIO, tags, (double) hitTokens / inputTokens);
+    }
+
+    /**
+     * Report current occupancy and capacity (unique keys) of the theory key pool.
+     */
+    public void reportTheoryPoolMetrics(long usedKeys, long capacityKeys) {
+        FlexMetricTags tags = FlexMetricTags.of();
+        monitor.report(CACHE_THEORY_POOL_USED_KEYS, tags, usedKeys);
+        monitor.report(CACHE_THEORY_POOL_CAPACITY_KEYS, tags, capacityKeys);
     }
 
     /**
