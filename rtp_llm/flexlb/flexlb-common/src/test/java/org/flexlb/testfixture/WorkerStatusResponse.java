@@ -36,7 +36,6 @@ public class WorkerStatusResponse {
 
     private Long latestFinishedVersion = 0L;
 
-
     private double stepLatencyMs;
 
     private long iterateCount;
@@ -52,6 +51,8 @@ public class WorkerStatusResponse {
     private int cacheMatchRollbackBlocks;
 
     private KvCacheGroupMode kvCacheGroupMode = KvCacheGroupMode.UNSPECIFIED;
+
+    private org.flexlb.dao.master.CacheStatus cacheStatus;
 
     private boolean alive;
 

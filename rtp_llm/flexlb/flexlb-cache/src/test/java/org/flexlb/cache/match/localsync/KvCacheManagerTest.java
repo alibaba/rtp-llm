@@ -24,10 +24,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -117,121 +114,17 @@ class KvCacheManagerTest {
     }
 
     @Test
-    void removesStaleCacheWhenActiveWorkerIsReplacedAtTheSameCount() {
-        when(engineLocalView.getAllEngineIpPorts())
-                .thenReturn(Set.of("10.0.0.1:8080"));
+    void retiringOneLogicalEnginePreservesItsSiblingCache() {
+        KvCacheManager manager = kvCacheManagerWithRealIndexes();
+        WorkerStatus first = workerStatus(0, 2);
+        WorkerStatus sibling = workerStatus(1, 2);
+        manager.updateEngineCache(first, "PREFILL", Set.of(11L));
+        manager.updateEngineCache(sibling, "PREFILL", Set.of(11L));
 
-        kvCacheManager.removeStaleEngineCaches(List.of("10.0.0.2:8080"));
+        manager.removeEngineCache(first.getLogicalIpPort(), first.trace());
 
-        verify(engineLocalView).removeAllCacheBlockOfEngine("10.0.0.1:8080");
-        verify(globalCacheIndex).removeAllCacheBlockOfEngine("10.0.0.1:8080");
-        verify(engineLocalView, never()).removeAllCacheBlockOfEngine("10.0.0.2:8080");
-    }
-
-    @Test
-    void keepsLogicalCacheWhenItsPhysicalEngineRemainsDiscoverable() {
-        when(engineLocalView.getAllEngineIpPorts())
-                .thenReturn(Set.of("10.0.0.1:8080@0"));
-        when(engineLocalView.calculateDiff("10.0.0.1:8080@0", Set.of()))
-                .thenReturn(DiffResult.empty("10.0.0.1:8080@0"));
-        kvCacheManager.updateEngineCache(
-                workerStatus(0, 1), "PREFILL", Set.of());
-
-        kvCacheManager.removeStaleEngineCaches(List.of("10.0.0.1:8080"));
-
-        verify(engineLocalView, never()).removeAllCacheBlockOfEngine("10.0.0.1:8080@0");
-        verify(globalCacheIndex, never()).removeAllCacheBlockOfEngine("10.0.0.1:8080@0");
-    }
-
-    @Test
-    void removesLogicalCacheWhenItsPhysicalEngineDisappears() {
-        when(engineLocalView.getAllEngineIpPorts())
-                .thenReturn(Set.of("10.0.0.1:8080@0"));
-        when(engineLocalView.calculateDiff("10.0.0.1:8080@0", Set.of()))
-                .thenReturn(DiffResult.empty("10.0.0.1:8080@0"));
-        kvCacheManager.updateEngineCache(
-                workerStatus(0, 1), "PREFILL", Set.of());
-
-        kvCacheManager.removeStaleEngineCaches(List.of("10.0.0.2:8080"));
-
-        verify(engineLocalView).removeAllCacheBlockOfEngine("10.0.0.1:8080@0");
-        verify(globalCacheIndex).removeAllCacheBlockOfEngine("10.0.0.1:8080@0");
-    }
-
-    @Test
-    void directRetirementRemovesTheLogicalToPhysicalMapping() {
-        String logicalIpPort = "10.0.0.1:8080@0";
-        when(engineLocalView.calculateDiff(logicalIpPort, Set.of()))
-                .thenReturn(DiffResult.empty(logicalIpPort));
-        kvCacheManager.updateEngineCache(
-                workerStatus(0, 1), "PREFILL", Set.of());
-
-        kvCacheManager.removeEngineCache(logicalIpPort);
-        when(engineLocalView.getAllEngineIpPorts()).thenReturn(Set.of(logicalIpPort));
-        kvCacheManager.removeStaleEngineCaches(List.of("10.0.0.1:8080"));
-
-        verify(engineLocalView, times(2)).removeAllCacheBlockOfEngine(logicalIpPort);
-        verify(globalCacheIndex, times(2)).removeAllCacheBlockOfEngine(logicalIpPort);
-    }
-
-    @Test
-    void keepsAllSiblingLogicalCachesWhenTheirPhysicalEngineRemainsDiscoverable() {
-        when(engineLocalView.getAllEngineIpPorts())
-                .thenReturn(Set.of("10.0.0.1:8080@0", "10.0.0.1:8080@1"));
-        when(engineLocalView.calculateDiff("10.0.0.1:8080@0", Set.of()))
-                .thenReturn(DiffResult.empty("10.0.0.1:8080@0"));
-        when(engineLocalView.calculateDiff("10.0.0.1:8080@1", Set.of()))
-                .thenReturn(DiffResult.empty("10.0.0.1:8080@1"));
-        kvCacheManager.updateEngineCache(
-                workerStatus(0, 2), "PREFILL", Set.of());
-        kvCacheManager.updateEngineCache(
-                workerStatus(1, 2), "PREFILL", Set.of());
-
-        kvCacheManager.removeStaleEngineCaches(List.of("10.0.0.1:8080"));
-
-        verify(engineLocalView, never()).removeAllCacheBlockOfEngine("10.0.0.1:8080@0");
-        verify(engineLocalView, never()).removeAllCacheBlockOfEngine("10.0.0.1:8080@1");
-        verify(globalCacheIndex, never()).removeAllCacheBlockOfEngine("10.0.0.1:8080@0");
-        verify(globalCacheIndex, never()).removeAllCacheBlockOfEngine("10.0.0.1:8080@1");
-    }
-
-    @Test
-    void removesAllSiblingLogicalCachesWhenTheirPhysicalEngineDisappears() {
-        when(engineLocalView.getAllEngineIpPorts())
-                .thenReturn(Set.of("10.0.0.1:8080@0", "10.0.0.1:8080@1"));
-        when(engineLocalView.calculateDiff("10.0.0.1:8080@0", Set.of()))
-                .thenReturn(DiffResult.empty("10.0.0.1:8080@0"));
-        when(engineLocalView.calculateDiff("10.0.0.1:8080@1", Set.of()))
-                .thenReturn(DiffResult.empty("10.0.0.1:8080@1"));
-        kvCacheManager.updateEngineCache(
-                workerStatus(0, 2), "PREFILL", Set.of());
-        kvCacheManager.updateEngineCache(
-                workerStatus(1, 2), "PREFILL", Set.of());
-
-        kvCacheManager.removeStaleEngineCaches(List.of("10.0.0.2:8080"));
-
-        verify(engineLocalView).removeAllCacheBlockOfEngine("10.0.0.1:8080@0");
-        verify(engineLocalView).removeAllCacheBlockOfEngine("10.0.0.1:8080@1");
-        verify(globalCacheIndex).removeAllCacheBlockOfEngine("10.0.0.1:8080@0");
-        verify(globalCacheIndex).removeAllCacheBlockOfEngine("10.0.0.1:8080@1");
-    }
-
-    @Test
-    void treatsUnmappedLogicalKeyAsStaleEvenWhenItsPhysicalEngineRemainsDiscoverable() {
-        when(engineLocalView.getAllEngineIpPorts())
-                .thenReturn(Set.of("10.0.0.1:8080@0"));
-
-        kvCacheManager.removeStaleEngineCaches(List.of("10.0.0.1:8080"));
-
-        verify(engineLocalView).removeAllCacheBlockOfEngine("10.0.0.1:8080@0");
-        verify(globalCacheIndex).removeAllCacheBlockOfEngine("10.0.0.1:8080@0");
-    }
-
-    @Test
-    void ignoresNullAddressUpdates() {
-        kvCacheManager.removeStaleEngineCaches(null);
-
-        verifyNoInteractions(engineLocalView, globalCacheIndex);
+        assertEquals(Map.of(sibling.getLogicalIpPort(), 1), manager.findMatchingEngines(
+                List.of(11L), List.of(first.getLogicalIpPort(), sibling.getLogicalIpPort())));
     }
 
     private static WorkerStatus workerStatus(int engineIndex, int multiEngineNum) {

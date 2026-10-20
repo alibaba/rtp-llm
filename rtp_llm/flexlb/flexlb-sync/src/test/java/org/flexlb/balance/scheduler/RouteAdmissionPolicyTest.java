@@ -17,6 +17,7 @@ import static org.flexlb.balance.scheduler.RouteProjectionTestSupport.item;
 import static org.flexlb.balance.scheduler.RouteProjectionTestSupport.noCommittedWork;
 import static org.flexlb.balance.scheduler.RouteProjectionTestSupport.probe;
 import static org.flexlb.balance.scheduler.RouteProjectionTestSupport.project;
+import static org.flexlb.balance.scheduler.RouteProjectionTestSupport.queue;
 import static org.flexlb.balance.scheduler.RouteProjectionTestSupport.work;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;

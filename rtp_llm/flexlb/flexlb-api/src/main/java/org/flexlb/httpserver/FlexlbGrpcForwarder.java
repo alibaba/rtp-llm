@@ -278,7 +278,7 @@ public class FlexlbGrpcForwarder {
             channel = masterChannel(masterHostIpPort);
         } catch (RuntimeException error) {
             return CompletableFuture.completedFuture(cancelForwardFailure(
-                    request.getRequestId(), guard, null, error));
+                    RequestId.parse(request), guard, null, error));
         }
         String masterIp = ipOf(masterHostIpPort);
         FlexlbScheduleProtocol.FlexlbCancelRequestPB forwardedRequest =
@@ -384,11 +384,12 @@ public class FlexlbGrpcForwarder {
             boolean channelRetired = retirePanickedChannel(masterHost, channel, status);
             Throwable cause = status.getCause();
             Logger.warn(
-                    "event=flexlb_forward_failed request_id={} forward_hop={} master={} "
-                            + "local_ip={} status={} description={} cause={} channel_retired={}",
-                    requestId, guard.nextHop(), masterHost,
-                    guard.localIp(), status.getCode(), errorDetail(status.getDescription()),
-                    errorDetail(cause == null ? null : cause.toString()), channelRetired);
+                    "event=flexlb_forward_failed request_id={} operation={} forward_hop={} master={} "
+                            + "local_ip={} status={} cause={} channel_retired={} description={}",
+                    logDescription(requestId), operation.logValue(), guard.nextHop(), masterHost,
+                    guard.localIp(), status.getCode(),
+                    errorDetail(cause == null ? null : cause.toString()), channelRetired,
+                    logDescription(status.getDescription()), error);
             reportForwardResult(ipOfOrLocal(masterHost), "GRPC_FAILED");
         } else {
             Logger.error("event=flexlb_forward_failed request_id=" + errorDetail(requestId)
@@ -421,6 +422,18 @@ public class FlexlbGrpcForwarder {
                     masterHost, errorDetail(cleanupFailure.toString()));
         }
         return true;
+    }
+
+    private static String logDescription(String description) {
+        if (description == null) {
+            return "";
+        }
+        String singleLine = description.replace('\r', ' ').replace('\n', ' ');
+        if (singleLine.length() <= 512) {
+            return singleLine;
+        }
+        int end = Character.isHighSurrogate(singleLine.charAt(511)) ? 511 : 512;
+        return singleLine.substring(0, end);
     }
 
     private static String errorDetail(String text) {
@@ -504,7 +517,7 @@ public class FlexlbGrpcForwarder {
         try {
             channel = masterChannel(masterHostIpPort);
         } catch (RuntimeException error) {
-            recordForwardFailure(request.getRequestId(), guard, null, error);
+            recordForwardFailure(RequestId.parse(request), guard, null, ForwardOperation.STATE_QUERY, error);
             return null;
         }
         FlexlbScheduleProtocol.GetRequestStateRequestPB forwardedRequest =
@@ -520,7 +533,7 @@ public class FlexlbGrpcForwarder {
             return response;
         } catch (RuntimeException e) {
             trace.finish(e);
-            recordForwardFailure(RequestId.parse(request), guard, channel, ForwardOperation.SCHEDULE, e);
+            recordForwardFailure(RequestId.parse(request), guard, channel, ForwardOperation.STATE_QUERY, e);
             return null;
         }
     }

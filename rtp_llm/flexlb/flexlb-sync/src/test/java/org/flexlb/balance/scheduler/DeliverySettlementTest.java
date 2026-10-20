@@ -34,6 +34,7 @@ import java.util.concurrent.TimeUnit;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -42,6 +43,7 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.after;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -149,7 +151,7 @@ class DeliverySettlementTest {
         try {
             DecodeEndpoint.ReservationHandle reservation;
             try (var pin = decode.tryPinGeneration()) {
-                reservation = decode.reserveUnqueued(pin, 4L, 1L, 1L, 50);
+                reservation = decode.reserveUnqueued(pin, "4", 1L, 1L, 50);
             }
             assertNotNull(reservation);
             FailedInputReferences input = rejectInputAwaitingDecode(
@@ -178,7 +180,7 @@ class DeliverySettlementTest {
             assertTrue(input.blockKeys().refersTo(null), "failed cleanup must release block cache keys");
             assertTrue(input.affinityKeys().refersTo(null), "failed cleanup must release cache affinity keys");
             assertTrue(input.payload().refersTo(null), "failed cleanup must release the serialized payload");
-            assertEquals(1, registry.liveRequestCount(), "Decode still needs exact local tracking");
+            assertEquals(1, registry.trackedRequestCount(), "Decode still needs exact local tracking");
             assertEquals(1, decode.routingView().engineCapacityUsed());
             assertFalse(registry.removeExactTerminalRecord(input.slot(), Long.MAX_VALUE));
 
@@ -186,7 +188,7 @@ class DeliverySettlementTest {
 
             assertSame(failure, input.future().join());
             assertEquals(0, decode.routingView().engineCapacityUsed());
-            assertEquals(0, registry.liveRequestCount());
+            assertEquals(0, registry.trackedRequestCount());
             assertTrue(registry.removeExactTerminalRecord(input.slot(), Long.MAX_VALUE));
         } finally {
             decode.close();
@@ -201,7 +203,7 @@ class DeliverySettlementTest {
         var item = new ScheduledRequest(context, future, new Response(), null, null,
                 prefill, decode, reservation, System.currentTimeMillis());
         RequestLifecycleTestSupport.bindRoute(registry, new RequestLifecycleTestSupport.Registered(item, future));
-        RequestSlot slot = registry.requestSlot(4L);
+        RequestSlot slot = registry.requestSlot("4");
         // Use the Slot's real claim boundary: a mocked BatchTransaction stores its
         // ScheduledRequest argument in Mockito's stubbing/invocation bookkeeping.
         RequestSlot.DeliveryClaim claim = slot.claimDelivery(item, DeliveryClaimKind.BATCH_ENQUEUE, 14L, () -> true);

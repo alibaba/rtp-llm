@@ -75,7 +75,7 @@ class WorkerDirectoryTest {
                             org.flexlb.engine.grpc.EngineRpcService.WorkerStatusPB.newBuilder()
                                     .setAlive(true).setRole("DECODE").setStatusVersion(1L).build()));
             health.submit(() -> new org.flexlb.sync.runner.GrpcWorkerStatusRunner("model", survivor.getIpPort(),
-                    "test", RoleType.DECODE, survivor, survivor.tryBeginStatusPoll(1L), directory,
+                    "test", RoleType.DECODE, null, survivor, survivor.tryBeginStatusPoll(1L), directory,
                     Mockito.mock(org.flexlb.service.monitor.EngineHealthReporter.class), grpc, 1000L,
                     cache, Runnable::run).run()).get(1, java.util.concurrent.TimeUnit.SECONDS);
             assertEquals(1L, survivor.appliedStatusCursor().statusVersion());

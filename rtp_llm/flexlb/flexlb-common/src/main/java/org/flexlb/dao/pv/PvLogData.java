@@ -7,10 +7,10 @@ import lombok.Data;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
-import org.flexlb.telemetry.FlexlbTrace;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.route.RequestPhase;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.telemetry.FlexlbTrace;
 
 import java.util.List;
 import java.util.Map;

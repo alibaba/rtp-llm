@@ -10,8 +10,12 @@ import io.grpc.inprocess.InProcessChannelBuilder;
 import io.grpc.inprocess.InProcessServerBuilder;
 import io.grpc.stub.StreamObserver;
 import io.netty.channel.EventLoopGroup;
+import org.flexlb.config.CacheMatchConfiguration;
+import org.flexlb.engine.grpc.client.EngineGrpcClient;
+import org.flexlb.engine.grpc.core.GrpcChannelFactory;
+import org.flexlb.engine.grpc.core.GrpcTarget;
 import org.flexlb.engine.grpc.monitor.GrpcReporter;
-import org.flexlb.engine.grpc.nameresolver.CustomNameResolver;
+import org.flexlb.engine.grpc.nameresolver.EngineAddressResolver;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
@@ -46,7 +50,7 @@ class EngineGrpcClientCompletionTest {
     @AfterEach
     void close() throws InterruptedException {
         if (client != null) {
-            client.shutdownChannelPool();
+            client.shutdown();
         }
         executor.shutdownNow();
         executor.awaitTermination(5, TimeUnit.SECONDS);
@@ -152,7 +156,7 @@ class EngineGrpcClientCompletionTest {
                 EngineRpcService.CacheVersionPB.getDefaultInstance(), 5000).get(5, TimeUnit.SECONDS));
         verify(response, never()).getSerializedSize();
         verify(reporter).reportCallMetrics(
-                eq(AbstractGrpcClient.ServiceType.CACHE_STATUS.getOperationName()),
+                eq("GetCacheStatus"),
                 anyLong(), eq(retry));
     }
 
@@ -252,16 +256,13 @@ class EngineGrpcClientCompletionTest {
     }
 
     private static final class TestClient extends EngineGrpcClient {
-        private final String name;
-
         private TestClient(String name, ThreadPoolExecutor executor, GrpcReporter reporter) {
-            super(mock(CustomNameResolver.class), executor, mock(EventLoopGroup.class), reporter, 20, 5000);
-            this.name = name;
-        }
-
-        @Override
-        protected ManagedChannel createChannel(String channelKey) {
-            return InProcessChannelBuilder.forName(name).executor(getExecutor()).build();
+            super(mock(EngineAddressResolver.class), new GrpcChannelFactory(executor, mock(EventLoopGroup.class)) {
+                @Override
+                public ManagedChannel create(GrpcTarget target) {
+                    return InProcessChannelBuilder.forName(name).executor(executor).build();
+                }
+            }, reporter, mock(CacheMatchConfiguration.class));
         }
     }
 }

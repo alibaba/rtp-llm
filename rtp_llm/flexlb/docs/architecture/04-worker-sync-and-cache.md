@@ -165,9 +165,10 @@ cache 版本做增量；响应恒更新 KV token 总量，版本更新时把 `ca
 - **小表** `EngineLocalView`：`ConcurrentHashMap<String engineIpPort, Set<Long>>`。
   `calculateDiff` 在专用 ForkJoinPool 上并行算 added/removed，diff 大小回馈动态间隔服务。
 - `KvCacheManager`：门面——`findMatchingEngines`（候选来自 `WorkerStatusProvider`）、
-  `updateEngineCache`（diff 后双表应用）、`removeStaleEngineCaches`、`clear`。
-- `LocalSyncCacheMatchProvider` 仅在 LOCAL_SYNC 模式订阅 `EngineAddressResolver`，按最新
-  `WorkerHost` 集合清理已下线 frontend 的本地 cache；KVCM 模式不注册该 listener。
+  `updateEngineCache`（diff 后双表应用）、`removeEngineCache`、`clear`。
+- `WorkerDirectory` 在对应 worker generation 完成退役后，通过 `LocalSyncCacheMatchProvider`
+  清理该逻辑引擎的 cache。更新和清理共用该 generation 的 `cacheMutationLock`，清理失败时
+  保留本地 key 集合以便重试；服务发现通知不直接删除索引。
 
 上述 LOCAL_SYNC key、KVCM `host_ip_port`、LOCAL_STANDBY 映射与 cache-hit comparison 均使用
 逻辑 `ip:httpPort@index`。KVCM 对 N=1 worker 兼容旧 physical `ip:httpPort` key：logical key

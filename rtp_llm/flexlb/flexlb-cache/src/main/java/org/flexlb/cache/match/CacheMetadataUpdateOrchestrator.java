@@ -7,8 +7,8 @@ import org.flexlb.cache.match.localsync.LocalSyncCacheMatchProvider;
 import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
-import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.EndpointTrace;
+import org.flexlb.dao.master.WorkerStatus;
 import org.springframework.stereotype.Component;
 
 import java.util.List;

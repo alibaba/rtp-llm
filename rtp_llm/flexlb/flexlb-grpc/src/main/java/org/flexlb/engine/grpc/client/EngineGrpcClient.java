@@ -29,8 +29,8 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
-import java.util.function.Function;
 import java.util.concurrent.atomic.AtomicLongArray;
+import java.util.function.Function;
 
 /**
  * Engine gRPC client for status, batch enqueue, and cancel requests.

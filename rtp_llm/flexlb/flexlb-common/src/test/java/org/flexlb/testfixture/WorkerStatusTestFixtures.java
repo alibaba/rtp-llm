@@ -69,10 +69,14 @@ public final class WorkerStatusTestFixtures {
                 response.getDpSize(),
                 response.getTpSize(),
                 response.getDpRank(),
+                response.getCacheStatus() == null ? 0L : response.getCacheStatus().getBlockSize(),
+                response.getBlockHashLookaheadTokens(),
+                response.getCacheMatchRollbackBlocks(),
+                response.getKvCacheGroupMode(),
                 response.getMaxSeqLen(),
                 response.getMaxBatchTokensSize(),
                 response.getRunningQueryLen(),
-                response.getWaitingQueryLen());
+                response.getWaitingQueryLen(), response.getLastStepMetrics());
         return worker.bindStatusObservation(
                 engine,
                 response.isAlive(),
@@ -111,7 +115,25 @@ public final class WorkerStatusTestFixtures {
                 task.getBatchId(),
                 task.getPhase(),
                 task.getExecutionTimeMs(),
-                task.getPriorityPreemptionProgress());
+                task.getPriorityPreemptionProgress(),
+                    new WorkerStatus.TaskTelemetry(task.isPrefixLengthValid(),
+                            task.getRequestReceivedTimeMs(),
+                            task.getInputQueueEnqueueTimeMs(),
+                            task.getInputQueueDrainTimeMs(),
+                            task.getWaitingEnteredTimeMs(),
+                            task.getRunningEnteredTimeMs(),
+                            task.getRemoteKvWaitMs(),
+                            task.getFirstTokenTimeMs(),
+                            task.getHbmLocalMatchTokens(),
+                            task.getRemoteKvAddedMatchTokens(),
+                            task.getFirstPrefillStepId(),
+                            task.getLastPrefillStepId(),
+                            task.getPrefillStepCount(),
+                            task.getPrefillNonfinalChunkTokensMin(),
+                            task.getPrefillNonfinalChunkTokensMax(),
+                            task.getCompletedPrefillTokens(),
+                            task.getRemainingPrefillTokens() < 0 ? null : task.getRemainingPrefillTokens(),
+                            task.getLastCompletedPrefillStepId()));
     }
 
 }

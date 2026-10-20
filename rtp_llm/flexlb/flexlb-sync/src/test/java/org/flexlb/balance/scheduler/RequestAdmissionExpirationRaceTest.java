@@ -48,7 +48,7 @@ class RequestAdmissionExpirationRaceTest {
                     prefill, null, null, slot.createdAtMs());
             var cleanupFailure = new IllegalStateException("Prefill cleanup failed");
             doThrow(cleanupFailure).when(prefill).settleFailedRequest(item.execution());
-            try (var admission = registry.claimAdmissionHandle(302L, future)) {
+            try (var admission = registry.claimAdmissionHandle("302", future)) {
                 assertNotNull(admission);
                 assertTrue(registry.commitItemForPublication(item, () -> true));
                 registry.failDeliveryPreparation(item, new IllegalStateException("preparation failed"));
@@ -61,7 +61,7 @@ class RequestAdmissionExpirationRaceTest {
                 }));
             }
             assertFalse(future.get(2L, TimeUnit.SECONDS).isSuccess());
-            RequestLifecycleTestSupport.awaitCondition(() -> registry.liveRequestCount() == 0);
+            RequestLifecycleTestSupport.awaitCondition(() -> registry.trackedRequestCount() == 0);
             verify(prefill).expireCommittedItem(item.execution());
             assertEquals(RequestState.Phase.FAILED, slot.snapshot().state());
             assertTimeoutPreemptively(Duration.ofSeconds(2),

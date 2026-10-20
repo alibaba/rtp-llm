@@ -25,7 +25,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -255,7 +254,7 @@ class EngineGrpcClientTest {
             assertEquals(1, cancelCalls.get());
             verify(grpcReporter).reportConnectionDuration(eq("GetWorkerStatus"), anyLong());
             verify(grpcReporter).reportCallMetrics(
-                    eq("GetWorkerStatus"), anyLong(), anyInt(), eq(true));
+                    eq("GetWorkerStatus"), anyLong(), eq(true));
             verify(channelFactory, times(5)).create(new GrpcTarget("10.0.0.1", 18002));
             verify(channelFactory, times(2)).create(new GrpcTarget("10.0.0.1", 8081));
         } finally {

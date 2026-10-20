@@ -6,7 +6,6 @@ import org.flexlb.config.KvcmCacheMatchingConfig;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusProvider;
-import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.Endpoint;
 import org.flexlb.dao.route.GroupRoleEndPoint;
 import org.flexlb.dao.route.KvcmConfig;
@@ -14,6 +13,8 @@ import org.flexlb.dao.route.RoleType;
 import org.flexlb.dao.route.ServiceRoute;
 import org.flexlb.enums.KvCacheGroupMode;
 import org.flexlb.kvcm.grpc.QueryType;
+import org.flexlb.testfixture.WorkerStatusResponse;
+import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import org.junit.jupiter.api.Test;
 
 import java.util.Collection;
@@ -99,10 +100,9 @@ class KvcmWorkerMetadataResolverTest {
 
         workerStatus.lock.lock();
         try {
-            WorkerStatus.PreparedStatus prepared = workerStatus.prepareNewStatus(
-                    workerStatus.freezeStatusResponse(response));
+            WorkerStatus.PreparedStatus prepared = WorkerStatusTestFixtures.prepare(workerStatus, WorkerStatusTestFixtures.observation(workerStatus, response));
             workerStatus.publishPreparedStatus(prepared);
-            workerStatus.recordSuccessfulPoll(true);
+            WorkerStatusTestFixtures.receive(workerStatus, true, null);
         } finally {
             workerStatus.lock.unlock();
         }

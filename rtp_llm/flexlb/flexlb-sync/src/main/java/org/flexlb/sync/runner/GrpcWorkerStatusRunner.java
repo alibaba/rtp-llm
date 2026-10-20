@@ -14,7 +14,6 @@ import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.grpc.EngineStatusConverter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.WorkerDirectory;
-import org.flexlb.util.CommonUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -122,7 +121,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
                     boolean valid = cause == null && validStatusResponse(response);
                     workerStatus.recordStatusRpcResult(pollLease, valid, valid && response.getAlive(), cause);
                     if (cause != null) {
-                        handleException(cause);
+                        handleException(cause, startTime);
                         return;
                     }
                     pollTrace.record(Stage.CALLBACK_READY);

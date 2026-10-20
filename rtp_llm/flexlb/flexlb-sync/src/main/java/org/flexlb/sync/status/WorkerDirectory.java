@@ -10,11 +10,10 @@ import org.flexlb.dao.master.WorkerStatusProvider;
 import org.flexlb.dao.route.RoleType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.stereotype.Component;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Component;
 
 import javax.annotation.PreDestroy;
-
 import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.List;
@@ -39,9 +38,8 @@ import java.util.function.Supplier;
  * hiding it behind a derived capacity value.</p>
  */
 @Component
-public final class WorkerDirectory {
-    private static final Logger diagnosticLogger = LoggerFactory.getLogger("syncLogger");
 public final class WorkerDirectory implements WorkerStatusProvider {
+    private static final Logger diagnosticLogger = LoggerFactory.getLogger("syncLogger");
 
     private final Map<RoleType, ConcurrentHashMap<String, WorkerStatus>> statusesByRole = new EnumMap<>(RoleType.class);
     private final EndpointRegistry endpointRegistry;

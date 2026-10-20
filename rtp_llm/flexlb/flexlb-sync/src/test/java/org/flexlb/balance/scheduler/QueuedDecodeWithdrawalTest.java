@@ -1,6 +1,6 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.testfixture.WorkerStatusTestFixtures;
+import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.config.ConfigService;
@@ -8,13 +8,14 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
-import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskPhase;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
+import org.flexlb.testfixture.TaskInfo;
+import org.flexlb.testfixture.WorkerStatusResponse;
+import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -137,7 +138,7 @@ class QueuedDecodeWithdrawalTest {
         Runnable projection;
         status.lock.lock();
         try {
-            projection = decode.applyPreparedStatus(status, status.prepareNewStatus(status.freezeStatusResponse(response)));
+            projection = decode.applyPreparedStatus(status, WorkerStatusTestFixtures.prepare(status, WorkerStatusTestFixtures.observation(status, response)));
         } finally {
             status.lock.unlock();
         }
@@ -181,7 +182,7 @@ class QueuedDecodeWithdrawalTest {
             assertTrue(registry.commitItemForPublication(next, () -> true));
         }
         registry.processDecodeStatus(decode, DecodeEndpoint.WorkerStatusFact.terminal(item.decodeReservation(), 0));
-        assertSame(next.execution(), registry.requestSlot(1).activeItem());
+        assertSame(next.execution(), registry.requestSlot("1").activeItem());
         assertFalse(item.future().isDone(), "old reservation evidence must not terminate the new route");
     }
 
@@ -191,7 +192,7 @@ class QueuedDecodeWithdrawalTest {
         var permit = decode.acquireDispatchPermit(item.decodeReservation(), capacity).permit();
         assertNotNull(permit);
         assertFalse(replace(item));
-        assertSame(item.execution(), registry.requestSlot(2).activeItem());
+        assertSame(item.execution(), registry.requestSlot("2").activeItem());
         assertFalse(item.future().isDone());
         assertTrue(RequestLifecycleTestSupport.prepareMember(registry, item));
         verify(queue, never()).requeue(any());
@@ -202,9 +203,9 @@ class QueuedDecodeWithdrawalTest {
     void equalPriorityCannotBeWithdrawn() {
         var item = queued(3);
         assertFalse(registry.replaceQueuedDecodeReservations(decode, List.of(item.decodeReservation()),
-                100, 16, 16, 30, capacity));
-        assertSame(item.execution(), registry.requestSlot(3).activeItem());
-        assertNotNull(decode.reservationHandle(3));
+                "100", 16, 16, 30, capacity));
+        assertSame(item.execution(), registry.requestSlot("3").activeItem());
+        assertNotNull(decode.reservationHandle("3"));
         verify(queue, never()).requeue(any());
     }
 
@@ -229,9 +230,9 @@ class QueuedDecodeWithdrawalTest {
     void failedReplacementDoesNotRemoveOrRequeueVictim() {
         var item = queued(5);
         var stale = new DecodeEndpoint.ReservationHandle(item.decodeReservation().endpointGenerationId(),
-                5, item.decodeReservation().reservationToken() + 1);
-        assertFalse(registry.replaceQueuedDecodeReservations(decode, List.of(stale), 100, 16, 16, 80, capacity));
-        assertSame(item.execution(), registry.requestSlot(5).activeItem());
+                "5", item.decodeReservation().reservationToken() + 1);
+        assertFalse(registry.replaceQueuedDecodeReservations(decode, List.of(stale), "100", 16, 16, 80, capacity));
+        assertSame(item.execution(), registry.requestSlot("5").activeItem());
         assertTrue(RequestLifecycleTestSupport.prepareMember(registry, item));
         verify(item.prefillEp(), never()).removeQueued(any(), anyString());
     }
@@ -251,10 +252,10 @@ class QueuedDecodeWithdrawalTest {
         var missing = new DecodeEndpoint.ReservationHandle(
                 item.decodeReservation().endpointGenerationId(), "999", 1);
         assertFalse(registry.replaceQueuedDecodeReservations(decode,
-                List.of(item.decodeReservation(), missing), 100, 16, 16, 80, capacity));
-        assertSame(item.execution(), registry.requestSlot(7).activeItem());
-        assertNotNull(decode.reservationHandle(7));
-        assertNull(decode.reservationHandle(100));
+                List.of(item.decodeReservation(), missing), "100", 16, 16, 80, capacity));
+        assertSame(item.execution(), registry.requestSlot("7").activeItem());
+        assertNotNull(decode.reservationHandle("7"));
+        assertNull(decode.reservationHandle("100"));
         assertTrue(RequestLifecycleTestSupport.prepareMember(registry, item),
                 "an aborted multi-victim plan must not leave earlier victims fenced");
         verify(queue, never()).requeue(any());

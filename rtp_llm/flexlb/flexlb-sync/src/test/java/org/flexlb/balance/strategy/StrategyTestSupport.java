@@ -1,6 +1,5 @@
 package org.flexlb.balance.strategy;
 
-import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.delivery.DeliveryStrategy;
@@ -17,9 +16,10 @@ import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.testfixture.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.testfixture.WorkerStatusResponse;
+import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import org.mockito.Mockito;
 
 import java.util.List;
@@ -122,8 +122,6 @@ final class StrategyTestSupport {
                     WorkerStatusTestFixtures.prepare(status, observation);
             return registry.publishPreparedEndpoint(
                     address, status, prepared).endpoint();
-            status.recordSuccessfulPoll(observation.alive());
-            return endpoint;
         } finally {
             status.lock.unlock();
         }

@@ -1,20 +1,20 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.balance.scheduler.EndpointEventProjector;
+import org.flexlb.balance.scheduler.RequestExecution;
 import org.flexlb.balance.scheduler.RequestRegistry;
 import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
 import org.flexlb.balance.scheduler.RouteDeliveryStrategy;
-import org.flexlb.balance.scheduler.RequestExecution;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.testfixture.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.testfixture.WorkerStatusResponse;
+import org.flexlb.testfixture.WorkerStatusTestFixtures;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -217,9 +217,9 @@ public final class EndpointTestSupport {
 
     static void commitUnqueued(PrefillEndpoint endpoint, long requestId, long predictedMs) {
         ScheduledRequest item = org.mockito.Mockito.mock(ScheduledRequest.class);
-        org.mockito.Mockito.when(item.requestId()).thenReturn(requestId);
+        org.mockito.Mockito.when(item.requestId()).thenReturn(Long.toString(requestId));
         RequestExecution execution = org.mockito.Mockito.mock(RequestExecution.class);
-        org.mockito.Mockito.when(execution.requestId()).thenReturn(requestId);
+        org.mockito.Mockito.when(execution.requestId()).thenReturn(Long.toString(requestId));
         org.mockito.Mockito.when(item.execution()).thenReturn(execution);
         try (var reservation = reserveUnqueued(endpoint, item, predictedMs);
              var commit = endpoint.tryBeginRouteCommitAdmission();

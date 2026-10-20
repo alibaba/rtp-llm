@@ -167,12 +167,12 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
                 5_000L,
                 0L,
                 1L,
-                false);
+                false, false);
 
         EngineSyncRunner decodeSyncRunner = new EngineSyncRunner(
                 MODEL_NAME, engineWorkerStatus, workerAddressService, statusCheckExecutor, statusCheckExecutor, statusCheckExecutor,
                 healthReporter, engineGrpcService, RoleType.DECODE, cacheAwareService,
-                cacheIntervalService, 5_000L, 0L, 1L, false);
+                cacheIntervalService, 5_000L, 0L, 1L, false, false);
 
         syncScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread thread = new Thread(r, "e2e-engine-sync");

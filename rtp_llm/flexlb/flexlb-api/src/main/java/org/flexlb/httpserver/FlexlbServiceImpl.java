@@ -119,7 +119,6 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     @Override
     public void schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB request,
                          StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> responseObserver) {
-        long requestId = request.getRequestId();
         Long interceptedEntryNanos = GrpcServerTimingInterceptor.getNanos();
         serverLatencyRecorder.recordArrival(
                 interceptedEntryNanos != null ? interceptedEntryNanos : System.nanoTime());
@@ -129,6 +128,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
 
         try {
             context = buildContext(request);
+            String requestId = context.getRequestId();
             BalanceContext requestContext = context;
             boolean consistencyEnabled = masterElectService.isNeedConsistency();
             boolean masterAtEntry = consistencyEnabled

@@ -1,6 +1,5 @@
 package org.flexlb.sync.runner;
 
-import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.cache.domain.WorkerCacheUpdateResult;
 import org.flexlb.cache.match.CacheAwareService;
@@ -12,6 +11,7 @@ import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.WorkerDirectory;
+import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
@@ -47,7 +47,7 @@ class GrpcCacheStatusCheckRunnerTest {
         when(engineGrpcService.getCacheStatusAsync(anyString(), anyInt(), eq(status), anyLong(), anyLong(), any()))
                 .thenReturn(CompletableFuture.completedFuture(
                         EngineRpcService.CacheStatusPB.newBuilder().setVersion(1L).build()));
-        when(localKvCacheAwareManager.updateEngineBlockCache(eq(status), any()))
+        when(localKvCacheAwareManager.updateFromWorkerStatus(eq(status), any()))
                 .thenReturn(WorkerCacheUpdateResult.builder().success(true).build());
         var executor = java.util.concurrent.Executors.newSingleThreadExecutor();
         status.lock.lock();
@@ -55,7 +55,7 @@ class GrpcCacheStatusCheckRunnerTest {
             executor.submit(() -> {
                 var lease = status.tryBeginCachePoll(1L);
                 org.junit.jupiter.api.Assertions.assertNotNull(lease);
-                new GrpcCacheStatusCheckRunner("model", status.getIpPort(), "test", RoleType.PREFILL,
+                new GrpcCacheStatusCheckRunner("model", status.getLogicalIpPort(), "test", RoleType.PREFILL,
                         status, lease, directory, engineHealthReporter, engineGrpcService,
                         localKvCacheAwareManager, cacheIntervalService, 1000L, true, Runnable::run).run();
             }).get(2, java.util.concurrent.TimeUnit.SECONDS);
@@ -74,23 +74,23 @@ class GrpcCacheStatusCheckRunnerTest {
         var rpc = new CompletableFuture<EngineRpcService.CacheStatusPB>();
         when(engineGrpcService.getCacheStatusAsync(anyString(), anyInt(), eq(old), anyLong(), anyLong(), any()))
                 .thenReturn(rpc);
-        new GrpcCacheStatusCheckRunner("model", old.getIpPort(), "test", RoleType.PREFILL,
+        new GrpcCacheStatusCheckRunner("model", old.getLogicalIpPort(), "test", RoleType.PREFILL,
                 old, old.tryBeginCachePoll(1L), directory, engineHealthReporter, engineGrpcService,
                 localKvCacheAwareManager, cacheIntervalService, 1000L, true, Runnable::run).run();
         old.lock.lock();
         EndpointRegistry.DetachedGeneration detached;
         try {
-            detached = directory.beginRetirement(RoleType.PREFILL, old.getIpPort(), old, "TEST");
+            detached = directory.beginRetirement(RoleType.PREFILL, old.getLogicalIpPort(), old, "TEST");
         } finally {
             old.lock.unlock();
         }
-        directory.completeRetirement(RoleType.PREFILL, old.getIpPort(), old, detached,
+        directory.completeRetirement(RoleType.PREFILL, old.getLogicalIpPort(), old, detached,
                 localKvCacheAwareManager, org.slf4j.LoggerFactory.getLogger(getClass()));
         var replacement = workerStatus();
         org.junit.jupiter.api.Assertions.assertSame(replacement,
-                directory.currentOrDiscover(RoleType.PREFILL, old.getIpPort(), () -> replacement));
+                directory.currentOrDiscover(RoleType.PREFILL, old.getLogicalIpPort(), () -> replacement));
         rpc.complete(EngineRpcService.CacheStatusPB.newBuilder().setVersion(2L).putCacheKeys(123L, true).build());
-        verify(localKvCacheAwareManager, never()).updateEngineBlockCache(any(), any());
+        verify(localKvCacheAwareManager, never()).updateFromWorkerStatus(any(), any());
         org.junit.jupiter.api.Assertions.assertNull(replacement.getCacheStatus());
         assertEquals(-1L, replacement.cacheIndexSnapshot().indexedVersion());
         var discarded = old.trace().snapshot().cachePoll();
@@ -107,7 +107,7 @@ class GrpcCacheStatusCheckRunnerTest {
         when(engineGrpcService.getCacheStatusAsync(anyString(), anyInt(), any(), anyLong(), anyLong(), any()))
                 .thenReturn(rpc);
         var queue = new java.util.ArrayList<Runnable>();
-        new GrpcCacheStatusCheckRunner("model", status.getIpPort(), "test", RoleType.PREFILL,
+        new GrpcCacheStatusCheckRunner("model", status.getLogicalIpPort(), "test", RoleType.PREFILL,
                 status, lease, directory(status), engineHealthReporter, engineGrpcService,
                 localKvCacheAwareManager, cacheIntervalService, 1000L, true, queue::add).run();
         rpc.complete(EngineRpcService.CacheStatusPB.newBuilder().setVersion(1L).build());
@@ -138,7 +138,7 @@ class GrpcCacheStatusCheckRunnerTest {
                 anyLong(), anyLong(), eq(RoleType.PREFILL)))
                 .thenReturn(CompletableFuture.completedFuture(
                         EngineRpcService.CacheStatusPB.newBuilder().setVersion(1).build()));
-        when(localKvCacheAwareManager.updateEngineBlockCache(eq(status), any())).thenAnswer(call -> {
+        when(localKvCacheAwareManager.updateFromWorkerStatus(eq(status), any())).thenAnswer(call -> {
             org.junit.jupiter.api.Assertions.assertFalse(status.lock.isHeldByCurrentThread());
             org.junit.jupiter.api.Assertions.assertTrue(status.cacheMutationLock.isHeldByCurrentThread());
             updating.countDown();
@@ -148,7 +148,7 @@ class GrpcCacheStatusCheckRunnerTest {
         java.util.concurrent.ExecutorService threads = java.util.concurrent.Executors.newFixedThreadPool(2);
         try {
             java.util.concurrent.Future<?> update = threads.submit(() ->
-                    new GrpcCacheStatusCheckRunner("test-model", status.getIpPort(), "test-site",
+                    new GrpcCacheStatusCheckRunner("test-model", status.getLogicalIpPort(), "test-site",
                             RoleType.PREFILL, status, status.tryBeginCachePoll(1L), directory,
                             engineHealthReporter, engineGrpcService, localKvCacheAwareManager, cacheIntervalService,
                             5000, true, Runnable::run).run());
@@ -157,15 +157,15 @@ class GrpcCacheStatusCheckRunnerTest {
             org.flexlb.balance.endpoint.EndpointRegistry.DetachedGeneration detached;
             try {
                 WorkerStatusTestFixtures.readyForScheduling(status);
-                detached = directory.beginRetirement(RoleType.PREFILL, status.getIpPort(), status, "TEST_RETIREMENT");
+                detached = directory.beginRetirement(RoleType.PREFILL, status.getLogicalIpPort(), status, "TEST_RETIREMENT");
             } finally {
                 status.lock.unlock();
             }
             java.util.concurrent.Future<?> retiring = threads.submit(() -> directory.completeRetirement(
-                    RoleType.PREFILL, status.getIpPort(), status, detached, localKvCacheAwareManager,
+                    RoleType.PREFILL, status.getLogicalIpPort(), status, detached, localKvCacheAwareManager,
                     org.slf4j.LoggerFactory.getLogger(getClass())));
             org.junit.jupiter.api.Assertions.assertSame(status,
-                    directory.currentOrDiscover(RoleType.PREFILL, status.getIpPort(), () -> {
+                    directory.currentOrDiscover(RoleType.PREFILL, status.getLogicalIpPort(), () -> {
                         throw new AssertionError("replacement published before old cache writer drained");
                     }));
             // Even final cleanup/removal must not wait on the status lock.
@@ -210,12 +210,12 @@ class GrpcCacheStatusCheckRunnerTest {
             stub.thenReturn(CompletableFuture.failedFuture(new java.util.concurrent.CompletionException(failure)));
         }
         if (failurePoint.equals("CALLBACK_FAILED")) {
-            Mockito.doThrow(failure).when(engineHealthReporter).reportCacheStatusCheckerFail(anyString(), any(), any());
+            Mockito.doThrow(failure).when(engineHealthReporter).reportCacheStatusCheckerFail(any(WorkerStatus.class), any(org.flexlb.enums.BalanceStatusEnum.class));
         }
         java.util.concurrent.Executor executor = failurePoint.equals("CALLBACK_REJECTED")
                 ? task -> { throw new java.util.concurrent.RejectedExecutionException("pool full"); }
                 : Runnable::run;
-        var runner = new GrpcCacheStatusCheckRunner("test-model", status.getIpPort(), "test", RoleType.PREFILL,
+        var runner = new GrpcCacheStatusCheckRunner("test-model", status.getLogicalIpPort(), "test", RoleType.PREFILL,
                 status, lease, directory(status), engineHealthReporter, engineGrpcService,
                 localKvCacheAwareManager, cacheIntervalService, 1000L, true, executor);
         if (failurePoint.equals("RPC_THROW")) {
@@ -262,7 +262,7 @@ class GrpcCacheStatusCheckRunnerTest {
                 .thenReturn(CompletableFuture.completedFuture(response));
 
         new GrpcCacheStatusCheckRunner(
-                "test-model", status.getIpPort(), "test-site", RoleType.DECODE,
+                "test-model", status.getLogicalIpPort(), "test-site", RoleType.DECODE,
                 status, status.tryBeginCachePoll(1L), directory(status),
                 engineHealthReporter, engineGrpcService, localKvCacheAwareManager, cacheIntervalService,
                 20, true, Runnable::run).run();
@@ -289,7 +289,7 @@ class GrpcCacheStatusCheckRunnerTest {
                 .setBlockSize(128)
                 .build();
         when(engineGrpcService.getCacheStatusAsync(anyString(), anyInt(), any(WorkerStatus.class), anyLong(), anyLong(), eq(RoleType.PREFILL))).thenReturn(CompletableFuture.completedFuture(cacheStatusPB));
-        when(localKvCacheAwareManager.updateEngineBlockCache(eq(workerStatus), any(EndpointTrace.Poll.class)))
+        when(localKvCacheAwareManager.updateFromWorkerStatus(eq(workerStatus), any(EndpointTrace.Poll.class)))
                 .thenReturn(WorkerCacheUpdateResult.builder()
                         .success(true)
                         .cacheVersion(1)
@@ -339,7 +339,7 @@ class GrpcCacheStatusCheckRunnerTest {
                         CompletableFuture.completedFuture(firstResponse),
                         CompletableFuture.completedFuture(secondResponse),
                         CompletableFuture.completedFuture(secondResponse));
-        when(localKvCacheAwareManager.updateEngineBlockCache(eq(workerStatus), any(EndpointTrace.Poll.class)))
+        when(localKvCacheAwareManager.updateFromWorkerStatus(eq(workerStatus), any(EndpointTrace.Poll.class)))
                 .thenReturn(
                         WorkerCacheUpdateResult.builder()
                                 .success(true)
@@ -400,7 +400,7 @@ class GrpcCacheStatusCheckRunnerTest {
                 .build());
 
         verify(localKvCacheAwareManager, never())
-                .updateEngineBlockCache(eq(oldStatus), any(EndpointTrace.Poll.class));
+                .updateFromWorkerStatus(eq(oldStatus), any(EndpointTrace.Poll.class));
     }
 
     @org.junit.jupiter.params.ParameterizedTest
@@ -418,13 +418,13 @@ class GrpcCacheStatusCheckRunnerTest {
                 anyLong(), anyLong(), eq(RoleType.PREFILL)))
                 .thenReturn(CompletableFuture.completedFuture(full),
                         CompletableFuture.completedFuture(unchanged));
-        when(localKvCacheAwareManager.updateEngineBlockCache(eq(status), any(EndpointTrace.Poll.class)))
+        when(localKvCacheAwareManager.updateFromWorkerStatus(eq(status), any(EndpointTrace.Poll.class)))
                 .thenReturn(WorkerCacheUpdateResult.builder().success(true).cacheVersion(7).build());
-        runCachePoll(status.getIpPort(), status, directory, false);
+        runCachePoll(status.getLogicalIpPort(), status, directory, false);
         var ownedKeys = status.getCacheStatus().getCachedKeys();
         try (var converter = Mockito.mockStatic(org.flexlb.service.grpc.EngineStatusConverter.class,
                 Mockito.CALLS_REAL_METHODS)) {
-            runCachePoll(status.getIpPort(), status, directory, false);
+            runCachePoll(status.getLogicalIpPort(), status, directory, false);
             converter.verify(() -> org.flexlb.service.grpc.EngineStatusConverter
                     .convertToCacheStatus(unchanged), never());
         }
@@ -432,7 +432,7 @@ class GrpcCacheStatusCheckRunnerTest {
         assertEquals(java.util.Set.of(11L, 22L), status.getCacheStatus().getCachedKeys());
         assertEquals(80, status.getCacheStatus().getAvailableKvCache());
         assertEquals(7, status.cacheIndexSnapshot().indexedVersion());
-        verify(localKvCacheAwareManager, times(1)).updateEngineBlockCache(eq(status), any(EndpointTrace.Poll.class));
+        verify(localKvCacheAwareManager, times(1)).updateFromWorkerStatus(eq(status), any(EndpointTrace.Poll.class));
     }
 
     @Test
@@ -444,14 +444,14 @@ class GrpcCacheStatusCheckRunnerTest {
         when(engineGrpcService.getCacheStatusAsync(anyString(), anyInt(), eq(status),
                 anyLong(), anyLong(), eq(RoleType.PREFILL)))
                 .thenReturn(CompletableFuture.completedFuture(first), CompletableFuture.completedFuture(emptied));
-        when(localKvCacheAwareManager.updateEngineBlockCache(eq(status), any(EndpointTrace.Poll.class)))
+        when(localKvCacheAwareManager.updateFromWorkerStatus(eq(status), any(EndpointTrace.Poll.class)))
                 .thenReturn(WorkerCacheUpdateResult.builder().success(true).cacheVersion(7).build(),
                         WorkerCacheUpdateResult.builder().success(true).cacheVersion(8).build());
-        runCachePoll(status.getIpPort(), status, directory, false);
-        runCachePoll(status.getIpPort(), status, directory, false);
+        runCachePoll(status.getLogicalIpPort(), status, directory, false);
+        runCachePoll(status.getLogicalIpPort(), status, directory, false);
         org.junit.jupiter.api.Assertions.assertTrue(status.getCacheStatus().getCachedKeys().isEmpty());
         assertEquals(8, status.cacheIndexSnapshot().indexedVersion());
-        verify(localKvCacheAwareManager, times(2)).updateEngineBlockCache(eq(status), any(EndpointTrace.Poll.class));
+        verify(localKvCacheAwareManager, times(2)).updateFromWorkerStatus(eq(status), any(EndpointTrace.Poll.class));
     }
 
     private void runCachePoll(

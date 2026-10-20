@@ -2,37 +2,37 @@ package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.delivery.DeliveryMetrics;
+import org.flexlb.balance.scheduler.EndpointEventProjector;
+import org.flexlb.balance.scheduler.PlacementKey;
 import org.flexlb.balance.scheduler.RequestRegistry;
 import org.flexlb.balance.scheduler.RouteDeliveryStrategy;
-import org.flexlb.balance.scheduler.EndpointEventProjector;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.SelectedRole;
-import org.flexlb.balance.scheduler.PlacementKey;
 import org.flexlb.cache.match.CacheAwareService;
-import org.flexlb.dao.BalanceContext;
-import org.flexlb.dao.loadbalance.Request;
-import org.flexlb.service.monitor.EngineHealthReporter;
-import org.flexlb.sync.status.WorkerDirectory;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.testfixture.WorkerStatusResponse;
+import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.service.monitor.EngineHealthReporter;
+import org.flexlb.sync.status.WorkerDirectory;
+import org.flexlb.testfixture.WorkerStatusResponse;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 
 import java.lang.management.ManagementFactory;
 import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.Map;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.withSettings;
-import static org.mockito.ArgumentMatchers.any;
 
 /** Full-fleet selection uses real endpoint projections, including when every worker is full. */
 @Tag("performance-regression")
@@ -76,7 +76,7 @@ class PrefillAdmissionFailurePerformanceTest {
                     mock(EngineHealthReporter.class, withSettings().stubOnly()));
             var context = new BalanceContext(config);
             var request = new Request();
-            request.setRequestId(1L);
+            request.setRequestId("1");
             request.setSeqLen(100L);
             request.setBlockCacheKeys(List.of());
             context.setRequest(request);

@@ -1,6 +1,5 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryMetrics;
@@ -20,10 +19,11 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.testfixture.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
+import org.flexlb.testfixture.WorkerStatusResponse;
+import org.flexlb.testfixture.WorkerStatusTestFixtures;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -127,7 +127,9 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
     }
 
     /** Return the exact item currently owned by a fixture request slot. */
-    public RequestExecution activeItem(long requestId) {
+    public RequestExecution activeItem(long requestId) { return activeItem(Long.toString(requestId)); }
+
+    public RequestExecution activeItem(String requestId) {
         RequestSlot slot = lifecycle.requestSlot(requestId);
         if (slot == null) {
             return null;

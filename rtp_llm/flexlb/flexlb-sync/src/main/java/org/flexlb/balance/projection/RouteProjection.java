@@ -129,7 +129,7 @@ public final class RouteProjection {
             long routingCacheMatchTokens) {
 
         /** New requests follow existing requests of the same priority. */
-        public Probe(long requestId, int priority, long enqueuedAtMs,
+        public Probe(String requestId, int priority, long enqueuedAtMs,
                      long expiresAtMs, long seqLen, long hitCache, long routingCacheMatchTokens) {
             this(requestId, priority, Long.MAX_VALUE, enqueuedAtMs,
                     expiresAtMs, seqLen, hitCache, routingCacheMatchTokens);

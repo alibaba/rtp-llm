@@ -80,10 +80,10 @@ class CacheAwareServiceTest {
         WorkerCacheUpdateResult expected = WorkerCacheUpdateResult.builder()
                 .success(true)
                 .build();
-        when(updateOrchestrator.updateFromWorkerStatus(workerStatus)).thenReturn(expected);
+        when(updateOrchestrator.updateFromWorkerStatus(workerStatus, null)).thenReturn(expected);
 
-        assertSame(expected, service.updateFromWorkerStatus(workerStatus));
-        verify(updateOrchestrator).updateFromWorkerStatus(workerStatus);
+        assertSame(expected, service.updateFromWorkerStatus(workerStatus, null));
+        verify(updateOrchestrator).updateFromWorkerStatus(workerStatus, null);
     }
 
     @Test

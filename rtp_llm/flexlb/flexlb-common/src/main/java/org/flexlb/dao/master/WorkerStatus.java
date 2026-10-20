@@ -836,6 +836,8 @@ public class WorkerStatus {
         return committedStatus.get().fields().maxBatchTokensSize();
     }
 
+    public boolean isAlive() { return pollHealth().reportedAlive(); }
+
     public PollHealth pollHealth() {
         return workerHealth.health;
     }

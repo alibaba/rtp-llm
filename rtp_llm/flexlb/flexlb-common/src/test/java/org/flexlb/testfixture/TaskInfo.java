@@ -7,8 +7,10 @@ import org.flexlb.enums.TaskPhase;
 @Data
 public class TaskInfo {
 
-    private long requestId;
+    private String requestId;
 
+    public void setRequestId(String requestId) { this.requestId = requestId; }
+    public void setRequestId(long requestId) { this.requestId = Long.toString(requestId); }
 
     private long prefixLength;    // cache hit len
     private boolean prefixLengthValid;

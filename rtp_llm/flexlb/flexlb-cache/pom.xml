@@ -20,6 +20,14 @@
     </properties>
 
     <dependencies>
+        <dependency>
+            <groupId>org.flexlb</groupId>
+            <artifactId>flexlb-common</artifactId>
+            <version>${project.version}</version>
+            <type>test-jar</type>
+            <scope>test</scope>
+        </dependency>
+
         <!-- FlexLB Common Module -->
         <dependency>
             <groupId>org.flexlb</groupId>

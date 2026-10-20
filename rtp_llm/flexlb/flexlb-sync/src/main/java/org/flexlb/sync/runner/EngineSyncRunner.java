@@ -119,9 +119,6 @@ public class EngineSyncRunner implements Runnable {
                         modelName, roleType, latestEngineWorkerList.size(), failure.getMessage());
             }
             logger.debug("workerAddressService getEngineWorkerList, model: {}, role: {}, size: {}", modelName, roleType, latestEngineWorkerList.size());
-            if (discoverySucceeded) {
-                engineHealthReporter.reportServiceDiscoveryResult(modelName, latestEngineWorkerList.size(), roleType.toString());
-            }
             if (CollectionUtils.isEmpty(latestEngineWorkerList)) {
                 logger.debug("get engine worker list is empty, cost={}μs, model={}", System.nanoTime() / 1000 - startTimeInUs, modelName);
             }

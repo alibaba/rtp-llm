@@ -14,14 +14,12 @@ import org.flexlb.balance.projection.QueueSnapshot.AdmissionBlock;
 import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.config.DecisionPolicyConfig;
-import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.util.Logger;
 import org.flexlb.util.PriorityNormalizer;
 import org.flexlb.util.PriorityOrdering;
 
-import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -235,6 +233,7 @@ public final class WorkerBatcher {
     private final PrefillEndpoint prefillEndpoint;
     private final EndpointEventProjector endpointEvents;
     private final FlexlbConfig config;
+    private final Supplier<FlexlbConfig> configSupplier;
     private final DecisionPolicyConfig fixedWindowDecision;
     private final boolean singleDecision;
     private final boolean queueScheduling;

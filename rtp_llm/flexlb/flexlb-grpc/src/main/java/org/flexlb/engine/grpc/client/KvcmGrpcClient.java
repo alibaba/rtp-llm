@@ -200,12 +200,10 @@ public class KvcmGrpcClient {
                 .build();
 
         long startTimeNanos = System.nanoTime();
-        int responseBytes = 0;
         GetHostCacheStateResponse response;
         try {
             response = metaServiceClient.getHostCacheState(
                     currentLeader, request, queryDeadline);
-            responseBytes = response.getSerializedSize();
         } catch (StatusRuntimeException error) {
             requestImmediateRefresh();
             throw new KvcmQueryException(
@@ -215,7 +213,6 @@ public class KvcmGrpcClient {
                 grpcReporter.reportCallMetrics(
                         "KVCM_GET_HOST_CACHE_STATE",
                         TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startTimeNanos),
-                        responseBytes,
                         retry);
             } catch (RuntimeException error) {
                 log.warn("Failed to report KVCM gRPC call metrics", error);

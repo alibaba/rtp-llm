@@ -84,6 +84,6 @@ class EngineSyncRunnerTraceTest {
                                            CacheAwareService cache, long cycle) {
         return new EngineSyncRunner("model", directory, addresses, statusExecutor, cacheExecutor, statusExecutor,
                 mock(EngineHealthReporter.class), mock(EngineGrpcService.class), RoleType.PREFILL,
-                cache, mock(DynamicCacheIntervalService.class), 5_000L, cycle, 20L, false);
+                cache, mock(DynamicCacheIntervalService.class), 5_000L, cycle, 20L, false, false);
     }
 }

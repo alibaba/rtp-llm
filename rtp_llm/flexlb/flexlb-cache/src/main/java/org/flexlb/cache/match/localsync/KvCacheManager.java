@@ -2,8 +2,8 @@ package org.flexlb.cache.match.localsync;
 
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.cache.domain.DiffResult;
-import org.flexlb.dao.master.EndpointTrace;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
+import org.flexlb.dao.master.EndpointTrace;
 import org.flexlb.dao.master.WorkerIdentity;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusProvider;
@@ -13,9 +13,7 @@ import org.springframework.stereotype.Component;
 
 import javax.annotation.PostConstruct;
 import javax.annotation.PreDestroy;
-import java.util.Collection;
 import java.util.Collections;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -52,8 +50,6 @@ public class KvCacheManager {
     // key for replay; the next diff recovers the remaining changes from the views.
     // Callers serialize each address through its generation's cache lock.
     private final Map<String, Long> pendingAdditions = new ConcurrentHashMap<>();
-    private final Map<String, String> physicalIpPortByLogicalIpPort =
-            new ConcurrentHashMap<>();
 
     @PostConstruct
     public void init() {
@@ -137,7 +133,6 @@ public class KvCacheManager {
         if (engineIPort == null || newCacheBlocks == null) {
             return;
         }
-        physicalIpPortByLogicalIpPort.put(engineIPort, identity.getPhysicalIpPort());
 
         Long pending = pendingAdditions.get(engineIPort);
         if (pending != null) {
@@ -192,7 +187,6 @@ public class KvCacheManager {
         globalCacheIndex.removeAllCacheBlockOfEngine(engineIpPort, removedBlocks, trace);
         engineLocalView.removeAllCacheBlockOfEngine(engineIpPort);
         pendingAdditions.remove(engineIpPort);
-        physicalIpPortByLogicalIpPort.remove(engineIpPort);
         cacheMetricsReporter.reportGlobalCacheMetrics(
                 globalCacheIndex.totalBlocks(),
                 globalCacheIndex.totalMappings());
@@ -206,7 +200,6 @@ public class KvCacheManager {
         globalCacheIndex.clear();
         engineLocalView.clear();
         pendingAdditions.clear();
-        physicalIpPortByLogicalIpPort.clear();
 
         // Report
         cacheMetricsReporter.reportGlobalCacheMetrics(globalCacheIndex.totalBlocks(), globalCacheIndex.totalMappings());

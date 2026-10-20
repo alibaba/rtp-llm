@@ -14,7 +14,6 @@ import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.grpc.EngineStatusConverter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.WorkerDirectory;
-import org.flexlb.util.CommonUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -62,7 +61,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
         this(modelName, ipPort, workerStatus.getGrpcPort(), site, roleType,
                 workerStatus, pollLease, workerDirectory, engineHealthReporter,
                 engineGrpcService, cacheAwareService, cacheIntervalService,
-                requestTimeoutMs, syncCount, syncEngineStatusInterval,
+                requestTimeoutMs,
                 fullSnapshotDebugMode, callbackExecutor);
     }
 
@@ -76,8 +75,6 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                                       CacheAwareService cacheAwareService,
                                       DynamicCacheIntervalService cacheIntervalService,
                                       long requestTimeoutMs,
-                                      LongAdder syncCount,
-                                      Long syncEngineStatusInterval,
                                       boolean fullSnapshotDebugMode,
                                       Executor callbackExecutor) {
 

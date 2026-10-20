@@ -1,13 +1,13 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.scheduler.RequestExecution;
 import org.flexlb.balance.scheduler.ScheduledRequest;
-import org.flexlb.testfixture.TaskInfo;
-import org.flexlb.testfixture.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskPhase;
+import org.flexlb.testfixture.TaskInfo;
+import org.flexlb.testfixture.WorkerStatusResponse;
+import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
@@ -394,9 +394,9 @@ class PrefillStateSnapshotTest {
 
     private static ScheduledRequest item(long id) {
         var item = mock(ScheduledRequest.class);
-        when(item.requestId()).thenReturn(id);
+        when(item.requestId()).thenReturn(Long.toString(id));
         RequestExecution execution = mock(RequestExecution.class);
-        when(execution.requestId()).thenReturn(id);
+        when(execution.requestId()).thenReturn(Long.toString(id));
         when(item.execution()).thenReturn(execution);
         when(item.seqLen()).thenReturn(100L);
         when(execution.seqLen()).thenReturn(100L);

@@ -14,6 +14,7 @@ import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RequestPhase;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
@@ -196,7 +197,7 @@ class RequestRegistryTest {
         BalanceContext context = context(107L);
         context.setRequestPhase(RequestPhase.ENCODER);
         CompletableFuture<Response> future = lifecycle.register(context);
-        WorkerStatus worker = mock(WorkerStatus.class);
+        WorkerStatus worker = WorkerStatus.createDiscovered(RoleType.ENCODER, "default", "127.0.0.1", 8080, 9090, "");
         EncoderEndpoint endpoint = new EncoderEndpoint(worker, new EndpointEventProjector(lifecycle));
         Response route = new Response();
         route.setSuccess(true);
@@ -219,19 +220,24 @@ class RequestRegistryTest {
         WorkerStatus.StatusObservation running = mock(WorkerStatus.StatusObservation.class);
         when(running.owner()).thenReturn(worker);
         when(running.activeTasks()).thenReturn(Map.of("107", task));
-        endpoint.observeStatusHeartbeat(worker, running).run();
+        Runnable runningProjection;
+        worker.lock.lock();
+        try { runningProjection = endpoint.observeStatusHeartbeat(worker, running); }
+        finally { worker.lock.unlock(); }
+        runningProjection.run();
 
         assertEquals(0, endpoint.pendingEncoderRequestCount());
         assertEquals(RequestState.Phase.ACKNOWLEDGED,
                 lifecycle.getRequestState("107", 0L, RequestPhase.ENCODER).state());
 
-        WorkerStatus.StatusObservation finished = mock(WorkerStatus.StatusObservation.class);
-        when(finished.alive()).thenReturn(true);
-        when(finished.activeTasks()).thenReturn(Map.of());
-        when(finished.finishedTasks()).thenReturn(Map.of("107", task));
-        WorkerStatus.PreparedStatus prepared = mock(WorkerStatus.PreparedStatus.class);
-        when(prepared.observation()).thenReturn(finished);
-        endpoint.applyPreparedStatus(worker, prepared).run();
+        WorkerStatus.StatusObservation finished = worker.bindStatusObservation(
+                worker.committedEngineObservation(), true, 1L, 0L, Map.of("107", task));
+        Runnable finishedProjection;
+        worker.lock.lock();
+        try { finishedProjection = endpoint.applyPreparedStatus(worker,
+                org.flexlb.testfixture.WorkerStatusTestFixtures.prepare(worker, finished)); }
+        finally { worker.lock.unlock(); }
+        finishedProjection.run();
 
         assertEquals(RequestState.Phase.COMPLETED,
                 lifecycle.getRequestState("107", 0L, RequestPhase.ENCODER).state());
@@ -343,7 +349,7 @@ class RequestRegistryTest {
 
     @Test
     void encoderStatusAndCleanupRaceCannotDoubleReleasePendingRequest() throws Exception {
-        WorkerStatus worker = mock(WorkerStatus.class);
+        WorkerStatus worker = WorkerStatus.createDiscovered(RoleType.ENCODER, "default", "127.0.0.1", 8080, 9090, "");
         EncoderEndpoint endpoint = new EncoderEndpoint(worker, new EndpointEventProjector(lifecycle));
         try (var executor = Executors.newFixedThreadPool(2)) {
             for (int index = 0; index < 32; index++) {
@@ -379,7 +385,7 @@ class RequestRegistryTest {
         context.setRequestPhase(RequestPhase.ENCODER);
         CompletableFuture<Response> encoderFuture = lifecycle.register(context);
         CompletableFuture<Response> generationFuture = lifecycle.register(context(108L));
-        WorkerStatus worker = mock(WorkerStatus.class);
+        WorkerStatus worker = WorkerStatus.createDiscovered(RoleType.ENCODER, "default", "127.0.0.1", 8080, 9090, "");
         EncoderEndpoint endpoint = new EncoderEndpoint(worker, new EndpointEventProjector(lifecycle));
         Response route = new Response();
         route.setSuccess(true);
@@ -448,7 +454,7 @@ class RequestRegistryTest {
         BalanceContext context = context(112L);
         context.setRequestPhase(RequestPhase.ENCODER);
         CompletableFuture<Response> future = lifecycle.register(context);
-        WorkerStatus worker = mock(WorkerStatus.class);
+        WorkerStatus worker = WorkerStatus.createDiscovered(RoleType.ENCODER, "default", "127.0.0.1", 8080, 9090, "");
         EncoderEndpoint endpoint = new EncoderEndpoint(worker, new EndpointEventProjector(lifecycle));
         Response route = new Response();
         route.setSuccess(true);
@@ -519,13 +525,12 @@ class RequestRegistryTest {
         context.setGenerateInputPb(bytes);
         var future = lifecycle.register(context);
         assertFalse(future.isDone());
-        if (batch) { assertSame(bytes, context.getGenerateInputPb()); }
-        else { assertNull(context.getGenerateInputPb()); }
+        if (batch) { assertSame(bytes, context.getGenerateInputPb()); } else { assertNull(context.getGenerateInputPb()); }
 
-        lifecycle.cancelRequest(104L, 0L, CancelReason.CLIENT_CANCELLED);
+        lifecycle.cancelRequest("104", 0L, CancelReason.CLIENT_CANCELLED);
         future.get(5, TimeUnit.SECONDS);
         assertNull(context.getGenerateInputPb(), "retained context must not pin terminal input");
-        assertEquals(RequestState.Phase.CANCELLED, lifecycle.requestSlot(104L).snapshot().state());
+        assertEquals(RequestState.Phase.CANCELLED, lifecycle.requestSlot("104").snapshot().state());
     }
 
     @Test

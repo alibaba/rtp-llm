@@ -1,7 +1,7 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.dao.master.EndpointTrace.Stage;
 import lombok.Getter;
+import org.flexlb.dao.master.EndpointTrace.Stage;
 import org.flexlb.dao.master.WorkerStatus;
 
 import java.util.Objects;

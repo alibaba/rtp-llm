@@ -365,10 +365,10 @@ class RouteProjectionTest {
     void unknownWorkDoesNotEraseKnownWorkOrQueueOrdering() {
         WorkSnapshot known = work(
                 List.of(new WorkSnapshot.RequestWork(
-                        2L, WorkSnapshot.Phase.ENGINE_RUNNING, 30L)),
+                        "2", WorkSnapshot.Phase.ENGINE_RUNNING, 30L)),
                 List.of(), 0L);
         WorkSnapshot mixed = work(known.requests(),
-                List.of(new WorkSnapshot.BatchWork(7L, List.of(3L),
+                List.of(new WorkSnapshot.BatchWork(7L, List.of("3"),
                         WorkSnapshot.Phase.ENGINE_RUNNING, OptionalLong.empty())),
                 5L);
         for (boolean queueScheduling : List.of(false, true)) {

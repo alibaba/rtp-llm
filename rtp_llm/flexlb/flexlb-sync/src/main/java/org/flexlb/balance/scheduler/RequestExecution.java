@@ -51,7 +51,7 @@ public final class RequestExecution implements Prioritized {
     @Override
     public int priority() { return decodeBinding.priority(); }
 
-    public long seqLen() { return decodeBinding.hardKvTokens(); }
+    public long seqLen() { return decodeBinding.inputKvTokens(); }
     public long hitCache() { return hitCache; }
     public long enqueuedAtMs() { return enqueuedAtMs; }
 

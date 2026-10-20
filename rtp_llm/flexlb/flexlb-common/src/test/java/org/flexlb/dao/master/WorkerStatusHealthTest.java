@@ -1,15 +1,20 @@
 package org.flexlb.dao.master;
 
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.testfixture.WorkerStatusResponse;
 import org.flexlb.testfixture.WorkerStatusTestFixtures;
-import org.flexlb.dao.route.RoleType;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class WorkerStatusHealthTest {
     private static WorkerStatus worker() {

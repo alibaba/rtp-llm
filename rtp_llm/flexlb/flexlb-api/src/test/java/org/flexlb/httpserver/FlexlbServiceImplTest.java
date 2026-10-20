@@ -494,12 +494,11 @@ class FlexlbServiceImplTest {
         var config = configService.loadBalanceConfig();
         config.getDispatcher().setType(batch ? org.flexlb.config.DispatcherConfig.Type.BATCH
                 : org.flexlb.config.DispatcherConfig.Type.NON_BATCH);
-        var bytes = com.google.protobuf.ByteString.copyFrom(new byte[1024 * 1024]);
+        var bytes = largeGenerateInput(99999L);
         var request = FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
                 .setRequestId(99999L).setSeqLen(2048).setGenerateInput(bytes).build();
         BalanceContext context = org.springframework.test.util.ReflectionTestUtils.invokeMethod(service, "buildContext", request);
-        if (batch) { assertSame(bytes, context.getGenerateInputPb()); }
-        else { org.junit.jupiter.api.Assertions.assertNull(context.getGenerateInputPb()); }
+        if (batch) { assertSame(bytes, context.getGenerateInputPb()); } else { org.junit.jupiter.api.Assertions.assertNull(context.getGenerateInputPb()); }
     }
 
     @ParameterizedTest
@@ -536,13 +535,22 @@ class FlexlbServiceImplTest {
             verify(observer).onNext(any());
             verify(observer).onCompleted();
             inbound.cancel(null);
-            verify(routeService, never()).cancelRequest(anyLong(), anyLong(), any());
+            verify(routeService, never()).cancelRequest(org.mockito.ArgumentMatchers.anyString(), anyLong(), any());
         }
+    }
+
+    private static com.google.protobuf.ByteString largeGenerateInput(long requestId) {
+        var field = com.google.protobuf.UnknownFieldSet.Field.newBuilder()
+                .addLengthDelimited(com.google.protobuf.ByteString.copyFrom(new byte[1024 * 1024])).build();
+        return org.flexlb.engine.grpc.EngineRpcService.GenerateInputPB.newBuilder()
+                .setRequestId(requestId)
+                .setUnknownFields(com.google.protobuf.UnknownFieldSet.newBuilder().addField(999, field).build())
+                .build().toByteString();
     }
 
     private java.lang.ref.WeakReference<com.google.protobuf.ByteString> scheduleWithReferencedInput(
             StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer) {
-        var input = com.google.protobuf.ByteString.copyFrom(new byte[1024 * 1024]);
+        var input = largeGenerateInput(99998L);
         service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
                 .setRequestId(99998L).setSeqLen(2048).setGenerateInput(input).build(), observer);
         return new java.lang.ref.WeakReference<>(input);

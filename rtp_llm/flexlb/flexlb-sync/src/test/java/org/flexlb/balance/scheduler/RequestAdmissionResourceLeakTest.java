@@ -166,7 +166,7 @@ class RequestAdmissionResourceLeakTest {
         assertEquals(StrategyErrorType.PRIORITY_PREEMPTED.getErrorCode(), response.getCode());
         assertEquals("preempted by higher-priority request 62", response.getErrorMessage());
         lifecycle.finishYielded(victim.item(), "preempted by higher-priority request 62");
-        lifecycle.cancelRequest(61L, 0L, CancelReason.CLIENT_CANCELLED);
+        lifecycle.cancelRequest("61", 0L, CancelReason.CLIENT_CANCELLED);
         verify(victim.item().decodeEp(), times(1)).release(
                 victim.item().decodeReservation(),
                 DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED);
@@ -174,7 +174,7 @@ class RequestAdmissionResourceLeakTest {
     }
 
     private RequestExecution activeItem(long requestId) {
-        RequestSlot slot = lifecycle.requestSlot(requestId);
+        RequestSlot slot = lifecycle.requestSlot(Long.toString(requestId));
         synchronized (slot) {
             return slot.activeItem();
         }

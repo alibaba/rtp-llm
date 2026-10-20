@@ -15,7 +15,6 @@ import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerIdentity;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.client.EngineGrpcClient;
 import org.flexlb.enums.BalanceStatusEnum;
@@ -25,6 +24,8 @@ import org.flexlb.metric.FlexMetricTags;
 import org.flexlb.metric.FlexMonitor;
 import org.flexlb.metric.FlexStatisticsType;
 import org.flexlb.sync.status.WorkerDirectory;
+import org.flexlb.testfixture.WorkerStatusResponse;
+import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -850,10 +851,9 @@ class EngineHealthReporterTest {
             if (cacheStatus != null) {
                 workerStatus.publishCacheStatus(cacheStatus);
             }
-            WorkerStatus.PreparedStatus prepared = workerStatus.prepareNewStatus(
-                    workerStatus.freezeStatusResponse(response));
+            WorkerStatus.PreparedStatus prepared = WorkerStatusTestFixtures.prepare(workerStatus, WorkerStatusTestFixtures.observation(workerStatus, response));
             workerStatus.publishPreparedStatus(prepared);
-            workerStatus.recordSuccessfulPoll(true);
+            WorkerStatusTestFixtures.receive(workerStatus, true, null);
         } finally {
             workerStatus.lock.unlock();
         }

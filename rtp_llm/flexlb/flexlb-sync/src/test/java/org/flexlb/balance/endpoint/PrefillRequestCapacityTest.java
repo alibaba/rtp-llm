@@ -5,8 +5,8 @@ import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.enums.PriorityPreemptionProgress;
 import org.flexlb.enums.TaskPhase;
-import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -319,9 +319,9 @@ class PrefillRequestCapacityTest {
 
     private static ScheduledRequest item(long id) {
         ScheduledRequest item = mock(ScheduledRequest.class);
-        when(item.requestId()).thenReturn(id);
+        when(item.requestId()).thenReturn(Long.toString(id));
         RequestExecution execution = mock(RequestExecution.class);
-        when(execution.requestId()).thenReturn(id);
+        when(execution.requestId()).thenReturn(Long.toString(id));
         when(item.execution()).thenReturn(execution);
         return item;
     }

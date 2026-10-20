@@ -1,10 +1,10 @@
 package org.flexlb.balance.strategy;
 
+import org.flexlb.balance.PlacementResult;
+import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.PlacementResult;
-import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.QueueSnapshot;
@@ -13,8 +13,8 @@ import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.scheduler.RequestRegistry;
 import org.flexlb.balance.scheduler.RouteDeliveryStrategy;
 import org.flexlb.cache.match.CacheAwareService;
-import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.DispatcherConfig;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.SchedulerConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
@@ -29,14 +29,13 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
-import java.util.List;
 import java.util.Comparator;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyDouble;
-import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.doThrow;
@@ -88,14 +87,14 @@ class CostBasedPrefillStrategyBlockerTest {
         when(pin.generationId()).thenReturn(generationId);
         when(directory.captureEndpoint(RoleType.PREFILL, "worker:8080")).thenReturn(pin);
         long now = System.currentTimeMillis();
-        var head = new GroupPlanner.Item(2L, 50, 20L, now, Long.MAX_VALUE, 100L, 0L);
+        var head = new GroupPlanner.Item("2", 50, 20L, now, Long.MAX_VALUE, 100L, 0L);
         Comparator<GroupPlanner.Item> fifo = Comparator.comparingLong(GroupPlanner.Item::enqueueSeq);
         Comparator<GroupPlanner.Item> order = priorityOrdering
                 ? Comparator.comparingInt(GroupPlanner.Item::priority).reversed().thenComparing(fifo) : fifo;
         var active = new java.util.ArrayList<GroupPlanner.Item>();
         active.add(head);
         if (otherSequence != 0L) {
-            active.add(new GroupPlanner.Item(3L, otherPriority, otherSequence, now,
+            active.add(new GroupPlanner.Item("3", otherPriority, otherSequence, now,
                     otherExpired ? now : Long.MAX_VALUE, 100L, 0L));
         }
         active.sort(order);
@@ -114,7 +113,7 @@ class CostBasedPrefillStrategyBlockerTest {
         when(endpoint.deliveryProjection()).thenReturn(delivery);
         var context = new BalanceContext(new FlexlbConfig());
         var request = new Request();
-        request.setRequestId(1L);
+        request.setRequestId("1");
         request.setSeqLen(100L);
         context.setRequest(request);
         context.setSchedulingMetadata(SchedulingMetadata.explicit(priority, Long.MAX_VALUE));
@@ -161,17 +160,17 @@ class CostBasedPrefillStrategyBlockerTest {
         config.setDispatcher(DispatcherConfig.nonBatch());
         var context = new BalanceContext(config);
         var request = new Request();
-        request.setRequestId(1L);
+        request.setRequestId("1");
         request.setSeqLen(100L);
         context.setRequest(request);
         var reporter = mock(EngineHealthReporter.class);
         var failure = new IllegalStateException("metric failed");
         switch (metric) {
             case "cache_hit" -> doThrow(failure).when(reporter)
-                    .reportCacheHitMetrics(any(), anyLong(),
+                    .reportCacheHitMetrics(any(), org.mockito.ArgumentMatchers.anyString(), anyLong(), anyLong(),
                             anyDouble());
             case "selected_match" -> doThrow(failure).when(reporter)
-                    .reportRoutingSelectedCacheMatchMetrics(any(), anyLong(), anyLong());
+                    .reportRoutingSelectedCacheMatchMetrics(any(), anyLong());
             case "candidate_match" -> doThrow(failure).when(reporter)
                     .reportRoutingCandidateMaxCacheMatchMetrics(any(), anyLong());
             default -> throw new AssertionError(metric);
@@ -198,7 +197,7 @@ class CostBasedPrefillStrategyBlockerTest {
         config.setDispatcher(DispatcherConfig.nonBatch());
         var context = new BalanceContext(config);
         var request = new Request();
-        request.setRequestId(1L);
+        request.setRequestId("1");
         request.setSeqLen(100L);
         context.setRequest(request);
         var strategy = new CostBasedPrefillStrategy(directory, mock(CacheAwareService.class), mock(EngineHealthReporter.class));
@@ -246,8 +245,7 @@ class CostBasedPrefillStrategyBlockerTest {
                     verify(directory).prefillRoutingSnapshot(role);
                     verify(outside, never()).admissionRejectReason(anyInt());
                     verify(secondEndpoint, never()).admissionRejectReason(anyInt());
-                    verify(cache).findMatchingEngines(any(),
-                            eq(role), eq(List.of("first", "outside", "second")));
+                    verify(cache).findMatchingEngines(any(org.flexlb.cache.domain.CacheMatchQuery.class));
                     verify(pin).close();
                 }
             }

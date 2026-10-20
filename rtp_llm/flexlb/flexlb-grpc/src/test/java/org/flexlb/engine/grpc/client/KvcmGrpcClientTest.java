@@ -39,7 +39,6 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
@@ -260,7 +259,7 @@ class KvcmGrpcClientTest {
 
         long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt) + 1L;
         ArgumentCaptor<Long> duration = ArgumentCaptor.forClass(Long.class);
-        verify(reporter).reportCallMetrics(eq("KVCM_GET_HOST_CACHE_STATE"), duration.capture(), anyInt(), eq(false));
+        verify(reporter).reportCallMetrics(eq("KVCM_GET_HOST_CACHE_STATE"), duration.capture(), eq(false));
         assertTrue(duration.getValue() >= 5L);
         assertTrue(duration.getValue() <= elapsedMs, "Call duration must use milliseconds");
 
@@ -372,7 +371,7 @@ class KvcmGrpcClientTest {
                 .thenThrow(io.grpc.Status.DEADLINE_EXCEEDED.asRuntimeException());
         GrpcReporter reporter = mock(GrpcReporter.class);
         doThrow(new IllegalStateException("monitor unavailable")).when(reporter)
-                .reportCallMetrics(eq("KVCM_GET_HOST_CACHE_STATE"), anyLong(), anyInt(), eq(false));
+                .reportCallMetrics(eq("KVCM_GET_HOST_CACHE_STATE"), anyLong(), eq(false));
         client = createQueryTestClient(metaService, leader, metadata, reporter);
 
         Map<String, org.flexlb.dao.cache.HostCacheMatch> first = client.findMatchingEngines(
@@ -662,7 +661,7 @@ class KvcmGrpcClientTest {
         assertThrows(KvcmQueryException.class, () -> client.findMatchingEngines(
                 "failed-query", List.of(11L), 2192L, RoleType.PREFILL, "default"));
 
-        verify(reporter).reportCallMetrics(eq("KVCM_GET_HOST_CACHE_STATE"), anyLong(), eq(0), eq(false));
+        verify(reporter).reportCallMetrics(eq("KVCM_GET_HOST_CACHE_STATE"), anyLong(), eq(false));
         client.shutdown();
         verify(metaServiceClient, org.mockito.Mockito.never()).shutdown();
     }

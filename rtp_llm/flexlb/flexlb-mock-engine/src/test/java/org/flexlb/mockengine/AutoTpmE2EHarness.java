@@ -1,6 +1,5 @@
 package org.flexlb.mockengine;
 
-import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import com.google.protobuf.ByteString;
 import io.grpc.stub.StreamObserver;
 import org.flexlb.balance.PlacementResult;
@@ -35,9 +34,7 @@ import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
-import org.flexlb.testfixture.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.testfixture.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.engine.grpc.RequestId;
@@ -49,6 +46,9 @@ import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.flexlb.sync.status.WorkerDirectory;
+import org.flexlb.testfixture.TaskInfo;
+import org.flexlb.testfixture.WorkerStatusResponse;
+import org.flexlb.testfixture.WorkerStatusTestFixtures;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;

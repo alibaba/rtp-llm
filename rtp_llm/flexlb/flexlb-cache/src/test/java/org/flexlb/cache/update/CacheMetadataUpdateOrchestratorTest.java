@@ -37,12 +37,12 @@ class CacheMetadataUpdateOrchestratorTest {
         WorkerCacheUpdateResult expected = WorkerCacheUpdateResult.builder()
                 .success(true)
                 .build();
-        when(localSyncProvider.updateFromWorkerStatus(workerStatus)).thenReturn(expected);
+        when(localSyncProvider.updateFromWorkerStatus(workerStatus, null)).thenReturn(expected);
 
-        WorkerCacheUpdateResult actual = orchestrator().updateFromWorkerStatus(workerStatus);
+        WorkerCacheUpdateResult actual = orchestrator().updateFromWorkerStatus(workerStatus, null);
 
         assertSame(expected, actual);
-        verify(localSyncProvider).updateFromWorkerStatus(workerStatus);
+        verify(localSyncProvider).updateFromWorkerStatus(workerStatus, null);
     }
 
     @Test
@@ -50,7 +50,7 @@ class CacheMetadataUpdateOrchestratorTest {
         when(configuration.isLocalSyncEnabled()).thenReturn(false);
         WorkerStatus workerStatus = workerStatus("127.0.0.1", 8080, RoleType.PREFILL);
 
-        WorkerCacheUpdateResult result = orchestrator().updateFromWorkerStatus(workerStatus);
+        WorkerCacheUpdateResult result = orchestrator().updateFromWorkerStatus(workerStatus, null);
 
         assertFalse(result.isSuccess());
         assertEquals("127.0.0.1:8080@0", result.getLogicalIpPort());

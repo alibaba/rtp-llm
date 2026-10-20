@@ -1,6 +1,5 @@
 package org.flexlb.sync.worker;
 
-import com.fasterxml.jackson.core.type.TypeReference;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatus.StatusObservation;
 import org.flexlb.dao.route.RoleType;
