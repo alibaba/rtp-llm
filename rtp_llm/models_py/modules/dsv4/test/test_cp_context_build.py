@@ -269,14 +269,20 @@ def test_cp2_gather_last_by_request_handles_split_owners() -> None:
     cp_info = _CpInfo(
         padding_mask,
         restore_indice,
-        prefill_actual_input_lengths_cpu=torch.tensor(actual_lengths, dtype=torch.int32),
+        prefill_actual_input_lengths_cpu=torch.tensor(
+            actual_lengths, dtype=torch.int32
+        ),
         prefill_cp_chunk_lengths=torch.tensor(chunk_lengths, dtype=torch.int32),
     )
 
     ctx0 = build_cp_context(cp_info, cp_size, 0, chunk_length, torch.device("cpu"))
     ctx1 = build_cp_context(cp_info, cp_size, 1, chunk_length, torch.device("cpu"))
-    local0 = torch.arange(chunk_length * 2, dtype=torch.float32).reshape(chunk_length, 2)
-    local1 = (100 + torch.arange(chunk_length * 2, dtype=torch.float32)).reshape(chunk_length, 2)
+    local0 = torch.arange(chunk_length * 2, dtype=torch.float32).reshape(
+        chunk_length, 2
+    )
+    local1 = (100 + torch.arange(chunk_length * 2, dtype=torch.float32)).reshape(
+        chunk_length, 2
+    )
 
     rank0_last = torch.zeros(2, 2)
     rank0_last[1] = local0[6]
@@ -508,6 +514,11 @@ def test_cp_full_prefill_positions_preserve_request_ids() -> None:
     )
     positions, b_idx, seq_start, cu_seq = build_cp_full_prefill_positions(
         ctx, torch.device("cpu")
+    )
+    cached = build_cp_full_prefill_positions(ctx, torch.device("cpu"))
+    assert all(
+        a.data_ptr() == b.data_ptr()
+        for a, b in zip(cached, (positions, b_idx, seq_start, cu_seq))
     )
     assert torch.equal(
         positions,

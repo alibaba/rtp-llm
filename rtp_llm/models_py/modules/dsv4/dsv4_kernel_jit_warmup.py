@@ -8,12 +8,14 @@ cold compiles are otherwise likely to happen after the health gate opens.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
+from datetime import timedelta
 from functools import lru_cache, partial
 from importlib import import_module
-from typing import Any, Dict, Iterable, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, Optional, Tuple
 
 import torch
 
@@ -70,6 +72,9 @@ _MHC_PRENORM_GEMM_JIT_WARMED_KEYS: set[tuple] = set()
 _MHC_HEAD_FUSED_JIT_WARMED_KEYS: set[tuple] = set()
 _FP8_MQA_LOGITS_JIT_WARMED_KEYS: set[tuple] = set()
 _SWA_SLOT_DEQUANT_JIT_WARMED_KEYS: set[tuple] = set()
+_CP_METADATA_JIT_WARMED_KEYS: set[tuple] = set()
+_CP_METADATA_WARMUP_EPOCH = 0
+_CP_METADATA_WARMUP_TIMEOUT_SECONDS = 600
 _DEEPGEMM_WARMUP_COMPILE_RETRIES = 2
 _TILELANG_WARMUP_COMPILE_RETRIES = 2
 _TRITON_WARMUP_COMPILE_RETRIES = 2
@@ -91,9 +96,7 @@ def _cp_padded_tokens_per_rank_bound(max_seq_len: int, cp_size: int) -> int:
 def _batch_bucket_warmup_sizes(
     max_batch_size: int, *, max_supported_batch: int
 ) -> tuple[int, ...]:
-    max_supported = min(
-        max(int(max_batch_size), 1), int(max_supported_batch)
-    )
+    max_supported = min(max(int(max_batch_size), 1), int(max_supported_batch))
     max_bucket = 1 << (max_supported - 1).bit_length()
     sizes = []
     bucket = 1
@@ -119,6 +122,261 @@ def _swa_slot_metadata_batch_warmup_sizes(
 ) -> tuple[int, ...]:
     """Represent each SWA slot-metadata batch bucket through 1024."""
     return _batch_bucket_warmup_sizes(max_batch_size, max_supported_batch=1024)
+
+
+def _run_cp_metadata_warmup(local_warmup: Callable[[], bool]) -> bool:
+    """Agree on local JIT outcomes without issuing work on a failed CUDA device."""
+    import torch.distributed as dist
+
+    if (
+        not dist.is_available()
+        or not dist.is_initialized()
+        or dist.get_world_size() <= 1
+    ):
+        return local_warmup()
+
+    global _CP_METADATA_WARMUP_EPOCH
+    _CP_METADATA_WARMUP_EPOCH += 1
+    rank = dist.get_rank()
+    world_size = dist.get_world_size()
+    store = dist.distributed_c10d._get_default_store()
+    prefix = f"rtp_llm/dsv4/cp_metadata/{_CP_METADATA_WARMUP_EPOCH}/"
+    local_error: Optional[Exception] = None
+    completed = False
+    try:
+        completed = local_warmup()
+    except Exception as error:
+        local_error = error
+
+    outcome = {
+        "completed": completed,
+        "error": (
+            f"{type(local_error).__name__}: {local_error}"
+            if local_error is not None
+            else None
+        ),
+    }
+    try:
+        store.set(prefix + str(rank), json.dumps(outcome).encode("utf-8"))
+        keys = [prefix + str(peer) for peer in range(world_size)]
+        store.wait(keys, timedelta(seconds=_CP_METADATA_WARMUP_TIMEOUT_SECONDS))
+        outcomes = [json.loads(store.get(key)) for key in keys]
+    except Exception as status_error:
+        if local_error is not None:
+            logging.exception("CP metadata JIT warmup status exchange also failed")
+            raise local_error
+        raise RuntimeError(
+            "CP metadata JIT warmup could not collect all rank outcomes "
+            f"within {_CP_METADATA_WARMUP_TIMEOUT_SECONDS}s"
+        ) from status_error
+
+    failures = [
+        f"rank {peer}: {status['error']}"
+        for peer, status in enumerate(outcomes)
+        if status["error"] is not None
+    ]
+    if failures:
+        message = "CP metadata JIT warmup failed: " + "; ".join(failures)
+        logging.error(message)
+        if local_error is not None:
+            raise local_error
+        raise RuntimeError(message)
+    if any(status["completed"] != completed for status in outcomes):
+        raise RuntimeError("CP metadata fusion support differs across ranks")
+    return completed
+
+
+@torch.inference_mode()
+def warmup_prefill_cp_metadata_jit(
+    *,
+    is_decode_role: bool,
+    cp_enabled: bool,
+    cp_size: int,
+    max_batch_size: int,
+    fp8_kv_cache: bool,
+    kv_cache_sharded: bool,
+    device: torch.device,
+) -> None:
+    """Compile the metadata and indexer gather signatures used by CP prefill."""
+    if not model_warm_up_enabled():
+        return
+    device = torch.device(device)
+    if (
+        is_decode_role
+        or not cp_enabled
+        or int(cp_size) <= 1
+        or not _is_cuda_device(device)
+    ):
+        return
+    _assert_not_capturing()
+    batches = _batch_bucket_warmup_sizes(max_batch_size, max_supported_batch=64)
+    key = (
+        int(cp_size),
+        batches,
+        bool(fp8_kv_cache),
+        bool(kv_cache_sharded),
+        str(device),
+    )
+    if key in _CP_METADATA_JIT_WARMED_KEYS:
+        return
+    started = time.time()
+    completed = _run_cp_metadata_warmup(
+        partial(
+            _warmup_prefill_cp_metadata_kernels,
+            batches=batches,
+            cp_size=cp_size,
+            fp8_kv_cache=fp8_kv_cache,
+            kv_cache_sharded=kv_cache_sharded,
+            device=device,
+        )
+    )
+    if not completed:
+        return
+    logging.info(
+        "[DSV4 CPMetadata] JIT warmup batches=%s done in %.2fs",
+        batches,
+        time.time() - started,
+    )
+    _CP_METADATA_JIT_WARMED_KEYS.add(key)
+
+
+def _warmup_prefill_cp_metadata_kernels(
+    *,
+    batches: tuple[int, ...],
+    cp_size: int,
+    fp8_kv_cache: bool,
+    kv_cache_sharded: bool,
+    device: torch.device,
+) -> bool:
+    from rtp_llm.models_py.modules.dsv4 import _cp_metadata_triton as cp_meta
+    from rtp_llm.models_py.modules.dsv4.cp import cp_padded_local_kv_len
+    from rtp_llm.models_py.modules.dsv4.fp8._fused_compressor_meta_triton import (
+        fused_compressor_slot_mapping,
+    )
+    from rtp_llm.models_py.modules.dsv4.fp8._indexer_cp_gather_triton import (
+        try_gather_indexer_k_to_padded,
+    )
+    from rtp_llm.models_py.modules.dsv4.fp8._indexer_quant_triton import (
+        INDEXER_ENTRY_BYTES,
+        INDEXER_HEAD_DIM,
+    )
+
+    if not cp_meta.cp_metadata_fusion_supported():
+        return False
+    for batch_size in batches:
+        lengths = torch.full((batch_size,), 2, dtype=torch.int64, device=device)
+        prefixes = torch.zeros(batch_size, dtype=torch.int64, device=device)
+        chunks = torch.full((batch_size,), 2, dtype=torch.int32, device=device)
+        forward_lengths = lengths.to(torch.int32)
+        forward_prefixes = prefixes.to(torch.int32)
+        total = 2 * batch_size
+        local_kv = cp_padded_local_kv_len(2, cp_size, 4) * batch_size
+        padding = torch.zeros(
+            (batch_size, 2 * cp_size), dtype=torch.int32, device=device
+        )
+        padding[:, :2] = 1
+        padding = padding.flatten()
+        restore = torch.arange(padding.numel(), dtype=torch.int32, device=device)
+        shuffle = torch.tensor(
+            [0, 2 * cp_size - 1] * batch_size, dtype=torch.int32, device=device
+        )
+        indexer_cache = torch.zeros(
+            (2, 4, INDEXER_ENTRY_BYTES), dtype=torch.uint8, device=device
+        )
+        indexer_table = torch.ones((batch_size, 1), dtype=torch.int32, device=device)
+        actual_lens = torch.ones(batch_size, dtype=torch.int64, device=device)
+        indexer_q = torch.empty(
+            (total, INDEXER_HEAD_DIM), dtype=torch.float8_e4m3fn, device=device
+        )
+        indexer_s = torch.empty((total, 4), dtype=torch.uint8, device=device)
+
+        def launch() -> None:
+            forward = cp_meta.try_build_cp_forward_metadata(
+                forward_lengths,
+                chunks,
+                forward_prefixes,
+                padding,
+                restore,
+                shuffle,
+                cp_size=cp_size,
+                cp_rank=0,
+                chunk_length=total,
+                seq_len_full=total,
+            )
+            if forward is None:
+                raise RuntimeError("CP forward metadata warmup used the fallback")
+            if batch_size > 1:
+                positions = cp_meta.try_build_cp_full_prefill_positions(
+                    lengths, prefixes, total_tokens=total
+                )
+                if positions is None:
+                    raise RuntimeError("CP positions warmup used the fallback")
+            if kv_cache_sharded:
+                restored = cp_meta.try_build_cp_restore_indices(
+                    lengths,
+                    cp_size=cp_size,
+                    owner_block_size=4,
+                    total_tokens=total,
+                    total_local_kv=local_kv,
+                )
+                if restored is None:
+                    raise RuntimeError("CP restore metadata warmup used the fallback")
+                if fp8_kv_cache and not try_gather_indexer_k_to_padded(
+                    indexer_cache,
+                    indexer_table,
+                    lengths,
+                    actual_lens,
+                    indexer_q,
+                    indexer_s,
+                    total_actual_tokens=batch_size,
+                ):
+                    raise RuntimeError("CP indexer gather warmup used the fallback")
+
+        _run_triton_warmup_launch_with_retry(
+            "DSV4 CPMetadata",
+            f"batch_size={batch_size} cp_size={cp_size}",
+            launch,
+            device=device,
+        )
+
+    if fp8_kv_cache:
+        # Geometry is runtime-valued, while the host/device length paths can
+        # carry either integer pointer type into the compressor metadata ABI.
+        positions = torch.arange(2, dtype=torch.int64, device=device)
+        requests = torch.zeros(2, dtype=torch.int64, device=device)
+        table = torch.ones((1, 2), dtype=torch.int32, device=device)
+        for start_dtype in (torch.int32, torch.int64):
+            for cu_dtype in (torch.int32, torch.int64):
+                starts = torch.zeros(1, dtype=start_dtype, device=device)
+                cu = torch.tensor([0, 2], dtype=cu_dtype, device=device)
+
+                def launch_compressor() -> None:
+                    fused_compressor_slot_mapping(
+                        positions,
+                        requests,
+                        table,
+                        4,
+                        table,
+                        1,
+                        4,
+                        starts,
+                        cu,
+                        4,
+                        pool_rows=2,
+                        kv_tokens_per_block=4,
+                        cp_size=cp_size if kv_cache_sharded else 1,
+                        cp_rank=0,
+                        kv_owner_tokens_per_block=4,
+                    )
+
+                _run_triton_warmup_launch_with_retry(
+                    "DSV4 CPCompressorMetadata",
+                    f"start={start_dtype} cu={cu_dtype}",
+                    launch_compressor,
+                    device=device,
+                )
+    _sync_cuda(device)
+    return True
 
 
 def _compute_state_ring_entries(
@@ -1958,9 +2216,7 @@ def warmup_dsv4_fp8_swa_slot_dequant_jit(
         else ()
     )
     restore_batches = (
-        _cp_restore_batch_warmup_sizes(max_batch_size)
-        if direct_arch_supported
-        else ()
+        _cp_restore_batch_warmup_sizes(max_batch_size) if direct_arch_supported else ()
     )
     swa_slot_metadata_batches = _swa_slot_metadata_batch_warmup_sizes(max_batch_size)
     warmup_key = (
@@ -2002,9 +2258,7 @@ def warmup_dsv4_fp8_swa_slot_dequant_jit(
             dtype=torch.int32,
             device=device,
         )
-        swa_slot_prefixes = torch.zeros(
-            batch_size, dtype=torch.int32, device=device
-        )
+        swa_slot_prefixes = torch.zeros(batch_size, dtype=torch.int32, device=device)
 
         def _launch_swa_slot_metadata() -> None:
             compute_swa_slot_in_flat_from_cu(
@@ -2024,13 +2278,9 @@ def warmup_dsv4_fp8_swa_slot_dequant_jit(
         )
         del swa_slot_cu, swa_slot_prefixes
     if direct_scatter_enabled:
-        slot_mapping = torch.tensor(
-            [[0, 1], [1, -1]], dtype=torch.long, device=device
-        )
+        slot_mapping = torch.tensor([[0, 1], [1, -1]], dtype=torch.long, device=device)
         gather_lens = torch.tensor([2, 1], dtype=torch.int32, device=device)
-        workspace = torch.empty(
-            (2, 4, HEAD_DIM), dtype=torch.bfloat16, device=device
-        )
+        workspace = torch.empty((2, 4, HEAD_DIM), dtype=torch.bfloat16, device=device)
         direct_scatter = try_dequantize_and_gather_k_cache_slots_to_workspace(
             out=workspace,
             k_cache=full_view,
@@ -2054,9 +2304,7 @@ def warmup_dsv4_fp8_swa_slot_dequant_jit(
         )
         del slot_mapping, gather_lens, workspace
     if direct_gather_enabled:
-        pool_cache = torch.zeros(
-            (2, 4, ENTRY_BYTES), dtype=torch.uint8, device=device
-        )
+        pool_cache = torch.zeros((2, 4, ENTRY_BYTES), dtype=torch.uint8, device=device)
         for batch_size in direct_gather_batches:
             pool_block_table = torch.zeros(
                 (batch_size, 1), dtype=torch.int32, device=device
@@ -2064,9 +2312,7 @@ def warmup_dsv4_fp8_swa_slot_dequant_jit(
             pool_padded_lens = torch.full(
                 (batch_size,), 2, dtype=torch.int32, device=device
             )
-            pool_actual_lens = torch.ones(
-                batch_size, dtype=torch.int32, device=device
-            )
+            pool_actual_lens = torch.ones(batch_size, dtype=torch.int32, device=device)
             pool_local_flat = torch.empty(
                 (2 * batch_size, ENTRY_BYTES), dtype=torch.uint8, device=device
             )
@@ -2090,12 +2336,8 @@ def warmup_dsv4_fp8_swa_slot_dequant_jit(
         restore_gathered = torch.zeros(
             (batch_size, ENTRY_BYTES), dtype=torch.uint8, device=device
         )
-        restore_indices = torch.arange(
-            batch_size, dtype=torch.int64, device=device
-        )
-        restore_seq_lens = torch.ones(
-            batch_size, dtype=torch.int32, device=device
-        )
+        restore_indices = torch.arange(batch_size, dtype=torch.int64, device=device)
+        restore_seq_lens = torch.ones(batch_size, dtype=torch.int32, device=device)
         restore_workspace = torch.empty(
             (batch_size, 2, HEAD_DIM), dtype=torch.bfloat16, device=device
         )

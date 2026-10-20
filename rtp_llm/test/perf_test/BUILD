@@ -252,9 +252,9 @@ py_test(
     # the intended cuda13 / SM100 runner, matching the smoke_test() convention.
     tags = [
         "manual",
-        "SM100_ARM",
+        "SM100_ARM_CU13",
     ],
-    exec_properties = {"gpu": "SM100_ARM"},
+    exec_properties = {"gpu": "SM100_ARM_CU13"},
 )
 
 # V4-Flash CP=4 + EP=4 prefill profile sweep with CP page-RR KV sharding.
@@ -492,9 +492,9 @@ py_test(
     # the intended cuda13 / SM100 runner, matching the smoke_test() convention.
     tags = [
         "manual",
-        "SM100_ARM",
+        "SM100_ARM_CU13",
     ],
-    exec_properties = {"gpu": "SM100_ARM"},
+    exec_properties = {"gpu": "SM100_ARM_CU13"},
 )
 
 # V4-Flash DP=4 + EP=4 captured-graph decode at fixed bs=128 / input_len=64K.
@@ -579,9 +579,9 @@ py_test(
     # the intended cuda13 / SM100 runner, matching the smoke_test() convention.
     tags = [
         "manual",
-        "SM100_ARM",
+        "SM100_ARM_CU13",
     ],
-    exec_properties = {"gpu": "SM100_ARM"},
+    exec_properties = {"gpu": "SM100_ARM_CU13"},
 )
 
 # No-graph sibling for diagnosing cuda-graph capture failures.
@@ -972,7 +972,7 @@ test_suite(
     tags = ["manual"],
 )
 
-# DeepSeek V4-Flash perf coverage on SM100 (B300 / GB200).
+# DeepSeek V4-Flash perf coverage on SM100/SM103 (GB200/GB300).
 #   v4_flash_cp4_ep4_prefill_64k_perf       → CP=4 EP=4 64k prefill timeline
 #   v4_flash_cp4_ep4_prefill_64k_page_rr_perf → CP=4 EP=4 64k prefill + page-RR KV sharding
 #   v4_flash_cp4_ep4_prefill_200k_perf      → CP=4 EP=4 200k prefill timeline

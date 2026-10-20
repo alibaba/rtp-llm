@@ -47,6 +47,60 @@ cc_library(
             # "torch/lib/lib*amd*.so*",
         ]),
         "//conditions:default": [],
+    }) + select({
+        # Torch 2.11 CUDA 13 splits NVSHMEM out of libtorch_cuda. Declare
+        # both libraries so C++ links and Bazel runfiles carry the dependency.
+        # The cudnn/cusparselt/nccl wheel libraries are co-located for the
+        # same reason: libtorch_cuda/libtorch_python carry DT_NEEDED on them,
+        # so the link must resolve them on SDK-only images where no system
+        # copy exists (the wheel libs' RUNPATH=$ORIGIN finds the siblings in
+        # the shared-library symlink dir, covering cudnn's internal splits).
+        "@//:using_cuda13_x86": [
+            "torch/lib/libtorch_nvshmem.so",
+            "@pip_gpu_cuda13_torch_nvidia_nvshmem_cu13//:site-packages/nvidia/nvshmem/lib/libnvshmem_host.so.3",
+            "@pip_gpu_cuda13_torch_nvidia_cusparselt_cu13//:site-packages/nvidia/cusparselt/lib/libcusparseLt.so.0",
+            "@pip_gpu_cuda13_torch_nvidia_nccl_cu13//:site-packages/nvidia/nccl/lib/libnccl.so.2",
+        ] + [
+            "@pip_gpu_cuda13_torch_nvidia_cudnn_cu13//:site-packages/nvidia/cudnn/lib/libcudnn" + suffix + ".so.9"
+            for suffix in [
+                "",
+                "_adv",
+                "_cnn",
+                "_engines_precompiled",
+                "_engines_runtime_compiled",
+                "_graph",
+                "_heuristic",
+                "_ops",
+            ]
+        ],
+        "@//:using_cuda13_arm": [
+            "torch/lib/libtorch_nvshmem.so",
+            "@pip_cuda13_arm_torch_nvidia_nvshmem_cu13//:site-packages/nvidia/nvshmem/lib/libnvshmem_host.so.3",
+            "@pip_cuda13_arm_torch_nvidia_cusparselt_cu13//:site-packages/nvidia/cusparselt/lib/libcusparseLt.so.0",
+            "@pip_cuda13_arm_torch_nvidia_nccl_cu13//:site-packages/nvidia/nccl/lib/libnccl.so.2",
+            # The ARM wheel bundles these libtorch_cpu dependencies under
+            # torch/lib, not the torch.libs directory used by older wheels.
+            "torch/lib/libarm_compute.so",
+            "torch/lib/libarm_compute_graph.so",
+            "torch/lib/libgfortran.so.5",
+            "torch/lib/libnvpl_blas_core.so.0",
+            "torch/lib/libnvpl_blas_lp64_gomp.so.0",
+            "torch/lib/libnvpl_lapack_core.so.0",
+            "torch/lib/libnvpl_lapack_lp64_gomp.so.0",
+        ] + [
+            "@pip_cuda13_arm_torch_nvidia_cudnn_cu13//:site-packages/nvidia/cudnn/lib/libcudnn" + suffix + ".so.9"
+            for suffix in [
+                "",
+                "_adv",
+                "_cnn",
+                "_engines_precompiled",
+                "_engines_runtime_compiled",
+                "_graph",
+                "_heuristic",
+                "_ops",
+            ]
+        ],
+        "//conditions:default": [],
     }),
     hdrs = glob([
         "torch/include/*.h",
@@ -82,24 +136,31 @@ cc_library(
         "torch.libs/libgomp*.so*",
         "torch.libs/libopenblasp*.so",
     ]),
+    # No -lnccl/-lcudnn: the engine references zero nccl/cudnn symbols, so
+    # those flags only baked dead DT_NEEDED entries in and forced every build
+    # host to carry nccl/cudnn libs on the link path.  The pip wheel deps in
+    # the build graph (and the runtime images' wheel envs) carry what is
+    # actually needed.
     linkopts = select({
         "@//:cuda_pre_12_9": [
             "-L/usr/local/cuda/lib64",
             "-L/usr/local/cuda/extras/CUPTI/lib64",
             "-lcupti",
             "-lcudart",
-            "-lnccl",
-            "-lcudnn",
             "-lnvToolsExt",
         ],
-        "@//:using_cu12_9_or_13_x86": [
+        "@//:using_cuda12_9_x86": [
             "-L/usr/local/cuda/lib64",
             "-L/usr/local/cuda/extras/CUPTI/lib64",
             "-lcupti",
             "-lcudart",
-            "-lnccl",
-            "-lcudnn",
             "-lnvtx3interop",
+        ],
+        "@//:using_cuda13_x86": [
+            "-L/usr/local/cuda/lib64",
+            "-L/usr/local/cuda/extras/CUPTI/lib64",
+            "-lcupti",
+            "-lcudart",
         ],
         "//conditions:default": [],
     }),

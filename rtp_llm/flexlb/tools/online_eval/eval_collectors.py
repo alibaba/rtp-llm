@@ -70,15 +70,6 @@ MASTER_PROMETHEUS_PREFIXES = (
     "flexlb_app_cache_",
     "flexlb_app_flexlb_batcher_queue_size",
     "flexlb_app_flexlb_inflight_max_age_ms",
-    # TTL-eviction two-level counter (scheduler request-slot ledger sweep
-    # + P/D endpoint-ledger orphan sweeps).  Sparse: the master reports a
-    # series only once it is non-zero, so rounds with no lines for this
-    # prefix mean "no eviction in that window", not a collection gap; the
-    # series persists forever after first appearance (cumulative counter).
-    # Stress-run observability side benefit — the case-side assertions
-    # scrape the endpoint directly (EngineOps.master_ttl_eviction_counts),
-    # not this G3 file.
-    "flexlb_app_flexlb_inflight_ttl",
     "flexlb_app_engine_balancing_master_dispatch_reason_total",
     "flexlb_app_engine_balancing_master_batch_size",
     # G6/G4 collapse — the G3 lane is now the sole master-plane collector,
@@ -88,7 +79,7 @@ MASTER_PROMETHEUS_PREFIXES = (
     # all_qps_total{code} the completion side) and the five inflight
     # gauges (scheduler direct, per-engine prefill batch/request counts,
     # per-endpoint decode reserved/running — rebuilt into inflight_ts).
-    # Keep in sync with FLEXLB_MONITOR_METRIC_WHITELIST in
+    # Keep in sync with MASTER_METRIC_WHITELIST in
     # run_online_eval.sh (the master-side trim at the source).
     "flexlb_auto_tpm_request_count",
     "flexlb_app_engine_balancing_master_all_qps",

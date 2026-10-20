@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <memory>
+#include <limits>
 #include <numeric>
 #include <sstream>
 #include <string>
@@ -14,7 +15,11 @@
 namespace rtp_llm {
 
 struct OpaqueKVCacheSpec: public KVCacheSpec {
-    OpaqueKVCacheSpec() {
+    OpaqueKVCacheSpec(std::string tag                       = {},
+                      uint32_t    seq_size_per_block        = 1,
+                      uint32_t    kernel_seq_size_per_block = 1,
+                      uint32_t    local_kv_head_num         = 1):
+        KVCacheSpec(std::move(tag), seq_size_per_block, kernel_seq_size_per_block, local_kv_head_num) {
         type = KVCacheSpecType::OpaqueKV;
     }
 
@@ -52,6 +57,12 @@ struct OpaqueKVCacheSpec: public KVCacheSpec {
 
     size_t v_block_payload_bytes() const override {
         return 0;
+    }
+
+    // Logical payload entries, excluding byte alignment. For BLOCK_STRIDE CP
+    // slices this describes the complete logical ring, before byte slicing.
+    uint32_t entriesPerBlock() const {
+        return entry_count_;
     }
 
     rtp_llm::DataType memoryLayoutDType() const override {
@@ -240,7 +251,7 @@ protected:
                                              uint32_t                entry_count,
                                              const SpecBuildContext& ctx) {
         const auto cp_size = fixedRegionCpSize(desc, ctx);
-        if (cp_size <= 1 || !isPrefillCpSliced(desc, ctx) || !cpPrefillSliceBlockStride(desc)) {
+        if (cp_size <= 1 || !cpPrefillSliceBlockStride(desc)) {
             return blockStrideBytes(desc, payload_bytes, entry_count);
         }
         const size_t align             = desc.block_stride_bytes_alignment > 0 ?
@@ -252,7 +263,9 @@ protected:
                                 desc.tag.c_str(),
                                 full_stride_bytes,
                                 cp_size);
-        return full_stride_bytes / cp_size;
+        // Both PD roles must agree on the complete physical block. Only the
+        // prefill allocation stores one rank's contiguous byte slice.
+        return isPrefillCpSliced(desc, ctx) ? full_stride_bytes / cp_size : full_stride_bytes;
     }
 
 protected:
@@ -268,7 +281,11 @@ private:
 };
 
 struct CompressedKVCacheSpec: public OpaqueKVCacheSpec {
-    CompressedKVCacheSpec() {
+    CompressedKVCacheSpec(std::string tag                       = {},
+                          uint32_t    seq_size_per_block        = 1,
+                          uint32_t    kernel_seq_size_per_block = 1,
+                          uint32_t    local_kv_head_num         = 1):
+        OpaqueKVCacheSpec(std::move(tag), seq_size_per_block, kernel_seq_size_per_block, local_kv_head_num) {
         type = KVCacheSpecType::OpaqueKV;
     }
 
@@ -280,14 +297,24 @@ struct CompressedKVCacheSpec: public OpaqueKVCacheSpec {
                                 "COMPRESSED_KV KVCacheSpecDesc tag=%s requires valid entry_dtype",
                                 desc.tag.c_str());
 
-        auto spec                = std::make_shared<CompressedKVCacheSpec>();
-        spec->tag                = desc.tag;
-        spec->seq_size_per_block = seqSizePerBlock(desc, ctx);
-        spec->entry_dtype_       = desc.entry_dtype;
-        const uint32_t entries   = entryCount(desc, ctx);
-        const size_t   payload   = payloadBytes(desc.entry_elems, entries, desc.entry_dtype);
-        const size_t   stride    = blockStrideBytes(desc, payload, entries);
-        spec->setLayout(desc.entry_elems, entries, payload, stride);
+        const auto seq                   = seqSizePerBlock(desc, ctx);
+        const auto kernel                = SpecBuilder::kernelSeqSizePerBlock(desc, ctx, seq);
+        auto       spec                  = std::make_shared<CompressedKVCacheSpec>(desc.tag, seq, kernel, 1);
+        spec->entry_dtype_               = desc.entry_dtype;
+        auto page_ctx                    = ctx;
+        page_ctx.kernel_tokens_per_block = kernel;
+        const uint32_t entries           = entryCount(desc, page_ctx);
+        const size_t   payload           = payloadBytes(desc.entry_elems, entries, desc.entry_dtype);
+        const size_t   stride            = blockStrideBytes(desc, payload, entries);
+        const size_t   bpk =
+            desc.entry_count_mode == OpaqueBlockEntryCountMode::KERNEL_BLOCK_COMPRESSED ? seq / kernel : 1;
+        RTP_LLM_CHECK_WITH_INFO(entries <= std::numeric_limits<uint32_t>::max() / bpk
+                                    && payload <= std::numeric_limits<size_t>::max() / bpk
+                                    && stride <= std::numeric_limits<size_t>::max() / bpk,
+                                "opaque physical block layout overflows for tag=%s",
+                                desc.tag.c_str());
+        // Preserve each kernel page's padding; all public block sizes describe a physical block.
+        spec->setLayout(desc.entry_elems, static_cast<uint32_t>(entries * bpk), payload * bpk, stride * bpk);
         return spec;
     }
 
@@ -305,7 +332,11 @@ struct CompressedKVCacheSpec: public OpaqueKVCacheSpec {
 };
 
 struct FixedStateCacheSpec: public OpaqueKVCacheSpec {
-    FixedStateCacheSpec() {
+    FixedStateCacheSpec(std::string tag                       = {},
+                        uint32_t    seq_size_per_block        = 1,
+                        uint32_t    kernel_seq_size_per_block = 1,
+                        uint32_t    local_kv_head_num         = 1):
+        OpaqueKVCacheSpec(std::move(tag), seq_size_per_block, kernel_seq_size_per_block, local_kv_head_num) {
         type = KVCacheSpecType::OpaqueState;
     }
 
@@ -316,13 +347,13 @@ struct FixedStateCacheSpec: public OpaqueKVCacheSpec {
                                 "FIXED_STATE KVCacheSpecDesc tag=%s requires valid entry_dtype",
                                 desc.tag.c_str());
 
-        auto spec                = std::make_shared<FixedStateCacheSpec>();
-        spec->tag                = desc.tag;
-        spec->seq_size_per_block = seqSizePerBlock(desc, ctx);
-        spec->entry_dtype_       = desc.entry_dtype;
-        const uint32_t entries   = entryCount(desc, ctx);
-        const size_t   payload   = payloadBytes(desc.entry_elems, entries, desc.entry_dtype);
-        const size_t   stride    = fixedStateBlockStrideBytes(desc, payload, entries, ctx);
+        const auto seq         = seqSizePerBlock(desc, ctx);
+        const auto kernel      = SpecBuilder::kernelSeqSizePerBlock(desc, ctx, seq);
+        auto       spec        = std::make_shared<FixedStateCacheSpec>(desc.tag, seq, kernel, 1);
+        spec->entry_dtype_     = desc.entry_dtype;
+        const uint32_t entries = entryCount(desc, ctx);
+        const size_t   payload = payloadBytes(desc.entry_elems, entries, desc.entry_dtype);
+        const size_t   stride  = fixedStateBlockStrideBytes(desc, payload, entries, ctx);
         spec->setLayout(desc.entry_elems,
                         entries,
                         payload,

@@ -67,12 +67,15 @@ compile_pip_requirements(
     tags = ["manual"],
 )
 
-compile_pip_requirements(
-    name = "requirements_torch_gpu_cuda13",
-    src = "requirements_torch_gpu_cuda13.txt",
-    extra_args = PIP_EXTRA_ARGS,
-    extra_data = ["//:requirements_base.txt"],
-    requirements_txt = "requirements_lock_torch_gpu_cuda13.txt",
+sh_binary(
+    name = "requirements_torch_gpu_cuda13.update",
+    srcs = ["update_cuda13_locks.sh"],
+    args = ["x86"],
+    data = [
+        "requirements_base.txt",
+        "requirements_cuda13_overrides.txt",
+        "requirements_torch_gpu_cuda13.txt",
+    ],
     tags = ["manual"],
 )
 
@@ -85,13 +88,22 @@ compile_pip_requirements(
     tags = ["manual"],
 )
 
-compile_pip_requirements(
-    name = "requirements_cuda13_arm",
-    src = "requirements_cuda13_arm.txt",
-    extra_args = PIP_EXTRA_ARGS,
-    extra_data = ["//:requirements_base.txt"],
-    requirements_txt = "requirements_lock_cuda13_arm.txt",
+sh_binary(
+    name = "requirements_cuda13_arm.update",
+    srcs = ["update_cuda13_locks.sh"],
+    args = ["arm"],
+    data = [
+        "requirements_base.txt",
+        "requirements_cuda13_arm.txt",
+        "requirements_cuda13_overrides.txt",
+    ],
     tags = ["manual"],
+)
+
+sh_test(
+    name = "update_cuda13_locks_test",
+    srcs = ["update_cuda13_locks_test.sh"],
+    data = ["update_cuda13_locks.sh"],
 )
 
 compile_pip_requirements(

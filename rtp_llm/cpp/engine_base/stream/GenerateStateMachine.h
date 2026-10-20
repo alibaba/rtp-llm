@@ -43,6 +43,14 @@ public:
         return events_.has(event);
     }
 
+    void clearCanRun() {
+        events_.clearCanRun();
+    }
+
+    void clearLoadInitiated() {
+        events_.clearLoadInitiated();
+    }
+
     StreamState moveToNext();
 
     StreamState getStatus() const {
@@ -79,6 +87,7 @@ private:
     void handleWaiting();
     void handleLoading();
     void handleRunning();
+    void transitionToRunning();
     void releaseResource();
 
     StreamEvents events_;

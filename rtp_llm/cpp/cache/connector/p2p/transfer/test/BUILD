@@ -1,7 +1,5 @@
 load("//:def.bzl", "copts")
 
-load("//bazel:device_defs.bzl", "device_impl_target", "device_test_envs")
-
 test_copts = [
     "-fno-access-control",
 ] + copts()
@@ -15,11 +13,11 @@ cc_test(
     copts = test_copts,
     deps = [
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
-        "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
+        "//rtp_llm/cpp/metrics:metrics",
         "//rtp_llm/cpp/utils:time_util",
         "@com_google_googletest//:gtest",
-    ] + device_impl_target(),
-    exec_properties = {'gpu':'A10'},
+        "@havenask//aios/autil:log",
+    ],
 )
 
 cc_test(
@@ -31,9 +29,9 @@ cc_test(
     copts = test_copts,
     deps = [
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
-        "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
+        "//rtp_llm/cpp/metrics:metrics",
         "//rtp_llm/cpp/utils:time_util",
         "@com_google_googletest//:gtest",
-    ] + device_impl_target(),
-    exec_properties = {'gpu':'A10'},
+        "@havenask//aios/autil:log",
+    ],
 )

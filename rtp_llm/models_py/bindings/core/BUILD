@@ -2,6 +2,22 @@ load("//:def.bzl", "rpm_library", "copts")
 load("@arch_config//:arch_select.bzl", "torch_deps")
 
 cc_library(
+    name = "gpu_block_copy",
+    srcs = ["GpuBlockCopy.cc"],
+    hdrs = ["GpuBlockCopy.h"],
+    deps = torch_deps() + select({
+        "@//:using_cuda": [
+            "//rtp_llm/models_py/bindings/common/kernels:block_id_copy",
+            "@local_config_cuda//cuda:cuda_headers",
+            "@local_config_cuda//cuda:cudart",
+        ],
+        "//conditions:default": [],
+    }),
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "types_hdr",
     hdrs = [
         "Types.h",
@@ -109,14 +125,6 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
-filegroup(
-    name = "exec_ops_srcs",
-    srcs = [
-        "ExecOps.cc",
-    ],
-    visibility = ["//visibility:public"],
-)
-
 # Test-only library for ExecOps.cc.
 # Use this for tests that already link cuda_impl.
 cc_library(
@@ -195,7 +203,7 @@ filegroup(
 # lives in exactly ONE .so.
 #
 # exec_ctx_state: ExecOps.cc
-#   Defines the non-inline globalRuntime() singleton + comm op callbacks.
+#   Defines process-global runtime and Python callback state.
 #   Linked ONLY into librtp_compute_ops.so (via th_compute_lib).
 #
 # exec_ctx_ops: CudaOps.cc + sample ops
@@ -339,6 +347,23 @@ cc_library(
     alwayslink = 1,
 )
 
+# Isolate CudaSampleOp.cc from GPU-only dependencies so the generic PyTorch
+# fallback remains compile- and testable under --config=cpu.
+cc_library(
+    name = "generic_sampler_fallback_test_lib",
+    srcs = ["CudaSampleOp.cc"],
+    deps = [
+        ":common_defines",
+        ":op_data",
+    ] + torch_deps(),
+    copts = copts(),
+    target_compatible_with = select({
+        "@//:using_cpu": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    visibility = ["//rtp_llm/models_py/bindings/core/test:__pkg__"],
+)
+
 # Combined target for backward compatibility — pulls in both state + ops.
 cc_library(
     name = "exec_ctx_rocm",
@@ -360,7 +385,6 @@ cc_library(
     deps = [
         ":exec_ops_hdr",
         "//rtp_llm/cpp/cache:cache",
-        "//rtp_llm/cpp/cache:cp_slot_mapper",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:device_pin",
         "//rtp_llm/models_py/bindings:op_defs",

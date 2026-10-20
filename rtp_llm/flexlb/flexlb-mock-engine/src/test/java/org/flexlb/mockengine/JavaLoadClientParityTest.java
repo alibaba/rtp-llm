@@ -231,25 +231,6 @@ class JavaLoadClientParityTest {
     // ------------------------------------------------------------------
 
     @Test
-    void fallbackEndpointsFromDomainAddressEnv() throws Exception {
-        Path endpoints = tempDir.resolve("endpoints.json");
-        Files.writeString(endpoints, "{"
-                + "\"prefill_domain\": \"mock.prefill.hosts.address\","
-                + "\"decode_domain\": \"mock.decode.hosts.address\","
-                + "\"env\": {"
-                + "\"DOMAIN_ADDRESS:mock.prefill.hosts.address\": \"127.0.0.1:8001, 127.0.0.1:8002\","
-                + "\"DOMAIN_ADDRESS:mock.decode.hosts.address\": \"127.0.0.1:9001\""
-                + "}, \"engines\": []}");
-
-        JavaLoadClient client = dryRunClient();
-        client.loadFallbackEndpoints(endpoints.toString());
-
-        // HTTP port + 1 = gRPC port (CommonConstants.GRPC_PORT_OFFSET)
-        assertEquals(List.of("127.0.0.1:8002", "127.0.0.1:8003"), client.fallbackPrefillAddrs);
-        assertEquals(List.of("127.0.0.1:9002"), client.fallbackDecodeAddrs);
-    }
-
-    @Test
     void fallbackEndpointsFromEnginesArray() throws Exception {
         Path endpoints = tempDir.resolve("endpoints.json");
         Files.writeString(endpoints, "{"

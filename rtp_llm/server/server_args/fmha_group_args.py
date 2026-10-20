@@ -100,7 +100,7 @@ def init_fmha_group_args(parser, fmha_config):
         bind_to=(fmha_config, "use_triton_pa"),
         type=str2bool,
         default=False,
-        help="Rocm decode阶段是否使用Triton PA",
+        help="ROCm decode 及无 prefix prefill 阶段是否使用 Triton PA；该 prefill backend 支持 generation-prefill CUDA Graph",
     )
     fmha_group.add_argument(
         "--absorb_opt_len",

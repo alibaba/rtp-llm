@@ -5,7 +5,7 @@
 #include <torch/all.h>
 
 #ifdef ENABLE_FP4
-#include "rtp_llm/models_py/bindings/cuda/cutlass/cutlass_kernels/fp4_gemm/nvfp4_quant.cuh"
+#include "rtp_llm/models_py/bindings/cuda/kernels/nvfp4_quant.cuh"
 #endif
 #include "rtp_llm/models_py/bindings/cuda/kernels/util.h"
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"

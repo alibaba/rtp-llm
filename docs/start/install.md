@@ -21,6 +21,8 @@ pip install "rtp_llm>=0.2.0"
 | -------| -----| ----| ----|----|
 | Linux | 3.10 | Compute Capability 7.0 or higher <br> ✅ RTX20xx<br>  ✅RTX30xx<br>  ✅RTX40xx<br>  ✅V100<br>  ✅T4<br>  ✅A10/A30/A100<br>  ✅L40/L20<br>  ✅H100/H200/H20/H800.. <br> | ✅MI308X | bazelisk |
 
+Note: the default `--config=cuda13` build targets SM80+; V100/T4 (SM70/SM75) need the retained `cuda12_*` compat configs.
+
 
 ```bash
 # Use the last release branch
@@ -28,9 +30,9 @@ git clone git@github.com:alibaba/rtp-llm.git
 cd RTP-LLM
 
 # build RTP-LLM whl target
-# --config=cuda12_6 build target for NVIDIA GPU with cuda12_6
+# --config=cuda13 build target for NVIDIA GPU with cuda13
 # --config=rocm build target for AMD
-bazelisk build //rtp_llm:rtp_llm --verbose_failures --config=cuda12_6 --test_output=errors --test_env="LOG_LEVEL=INFO"  --jobs=64
+bazelisk build //rtp_llm:rtp_llm --verbose_failures --config=cuda13 --test_output=errors --test_env="LOG_LEVEL=INFO"  --jobs=64
 
 ln  -sf `pwd`/bazel-out/k8-opt/bin/rtp_llm/cpp/model_rpc/proto/model_rpc_service_pb2_grpc.py  `pwd`/rtp_llm/cpp/model_rpc/proto/
 ln  -sf `pwd`/bazel-out/k8-opt/bin/rtp_llm/cpp/model_rpc/proto/model_rpc_service_pb2.py  `pwd`/rtp_llm/cpp/model_rpc/proto/model_rpc_service_pb2.py

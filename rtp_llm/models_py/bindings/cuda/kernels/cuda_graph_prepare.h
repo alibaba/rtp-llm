@@ -1,9 +1,19 @@
 #pragma once
 
 #include <cstdint>
+#if USING_ROCM
+#include <hip/hip_runtime.h>
+#else
 #include <cuda_runtime_api.h>
+#endif
 
 namespace rtp_llm {
+
+#if USING_ROCM
+using CudaGraphPrepareStream = hipStream_t;
+#else
+using CudaGraphPrepareStream = cudaStream_t;
+#endif
 
 constexpr int kMaxCudaGraphPrepareFillRegions = 32;
 
@@ -12,6 +22,8 @@ struct CudaGraphPrepareFillRegion {
     const int32_t* value_ptr = nullptr;
     int64_t        count     = 0;
     int32_t        value     = 0;
+    int32_t        value_offset = 0;
+    int32_t        step         = 0;
 };
 
 struct CudaGraphPrepareFillParams {
@@ -19,7 +31,7 @@ struct CudaGraphPrepareFillParams {
     CudaGraphPrepareFillRegion regions[kMaxCudaGraphPrepareFillRegions];
 };
 
-void invokeCudaGraphPrepareFill(CudaGraphPrepareFillParams params, cudaStream_t stream);
+void invokeCudaGraphPrepareFill(CudaGraphPrepareFillParams params, CudaGraphPrepareStream stream);
 
 void invokePrepareFlashInferDecodeParams(const int32_t* sequence_lengths_plus_1,
                                          const int32_t* block_ids,
@@ -33,6 +45,6 @@ void invokePrepareFlashInferDecodeParams(const int32_t* sequence_lengths_plus_1,
                                          int32_t        batch_size,
                                          int32_t        max_blocks_per_batch,
                                          int32_t        seq_size_per_block,
-                                         cudaStream_t   stream);
+                                         CudaGraphPrepareStream stream);
 
 }  // namespace rtp_llm

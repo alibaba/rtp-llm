@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <memory>
@@ -75,6 +76,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     hidden_size_(model_config.hidden_size) {
     RTP_LLM_PROFILE_FUNCTION();
     stream_async_reserve_ = useStreamAsyncReserveTokens();
+    generate_input_->generate_config->validatePrefillOnly();
     if (!updatePrefix(resource_context.system_prompt)) {
         return;
     }
@@ -105,8 +107,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
 
     cum_log_probs_ = torch::zeros({(int64_t)init_batch_size}, torch::kFloat32);
 
-    is_context_stream_  = std::make_shared<bool>();
-    *is_context_stream_ = true;
+    is_context_stream_ = std::make_shared<std::atomic<bool>>(true);
     generate_status_    = std::make_shared<GenerateStateMachine>(stream_cache_resource_);
     sub_generate_status_.reserve(maxBatchSize());
     sub_generate_status_.clear();
@@ -419,7 +420,11 @@ bool GenerateStream::returnCumLogProbs() const {
 }
 
 bool GenerateStream::genTimeline() const {
-    return seqLength() <= inputLength() + profileStep() - 1 ? gen_timeline_ : false;
+    return genTimelineAtSeqLength(seqLength());
+}
+
+bool GenerateStream::genTimelineAtSeqLength(int seq_length) const {
+    return seq_length <= inputLength() + profileStep() - 1 ? gen_timeline_ : false;
 }
 
 void GenerateStream::setGenTimeline(bool gen_timeline) {
@@ -488,7 +493,7 @@ void GenerateStream::setReuseLength(int reuse_length) {
 
 void GenerateStream::setLocalReuseLength(int length) {
     local_reuse_length_ = length;
-    setDeviceReuseLength(local_reuse_length_ > memory_reuse_length_ ? local_reuse_length_ - memory_reuse_length_ : 0);
+    setDeviceReuseLength(std::max(local_reuse_length_ - host_reuse_length_ - disk_reuse_length_, 0));
 }
 
 void GenerateStream::setRemoteReuseLength(int length) {
@@ -511,13 +516,22 @@ int GenerateStream::remoteReuseLength() const {
     return remote_reuse_length_;
 }
 
-void GenerateStream::setMemoryReuseLength(int length) {
-    memory_reuse_length_ = length;
-    setDeviceReuseLength(local_reuse_length_ > memory_reuse_length_ ? local_reuse_length_ - memory_reuse_length_ : 0);
+void GenerateStream::setHostReuseLength(int length) {
+    host_reuse_length_ = length;
+    setDeviceReuseLength(std::max(local_reuse_length_ - host_reuse_length_ - disk_reuse_length_, 0));
 }
 
-int GenerateStream::memoryReuseLength() const {
-    return memory_reuse_length_;
+int GenerateStream::hostReuseLength() const {
+    return host_reuse_length_;
+}
+
+void GenerateStream::setDiskReuseLength(int length) {
+    disk_reuse_length_ = length;
+    setDeviceReuseLength(std::max(local_reuse_length_ - host_reuse_length_ - disk_reuse_length_, 0));
+}
+
+int GenerateStream::diskReuseLength() const {
+    return disk_reuse_length_;
 }
 
 void GenerateStream::setInitialReuseLength(int initial_reuse_length) {
@@ -556,7 +570,7 @@ void GenerateStream::incLastOutputPos() {
 }
 
 bool GenerateStream::isContextStream() const {
-    return *is_context_stream_;
+    return is_context_stream_->load(std::memory_order_acquire);
 }
 
 const torch::Tensor& GenerateStream::cumLogProbs() const {
@@ -661,6 +675,12 @@ int64_t GenerateStream::getTimeoutMs() const {
     return generate_input_->generate_config->timeout_ms;
 }
 
+bool GenerateStream::checkTimeoutAndHasError() {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    checkTimeoutWithoutLock();
+    return hasErrorWithoutLock();
+}
+
 void GenerateStream::checkTimeoutWithoutLock() {
     // Consumer-visible events and timeout publication share mutex_. Once a
     // consumer-ready event has linearized, a later scheduler timeout must not
@@ -742,6 +762,11 @@ bool GenerateStream::hasEventWithoutLock(StreamEvents::EventType event) const {
     return generate_status_->hasEvent(event);
 }
 
+void GenerateStream::clearCanRun() {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    generate_status_->clearCanRun();
+}
+
 StreamState GenerateStream::getStatus() const {
     return generate_status_->getStatus();
 }
@@ -750,9 +775,56 @@ bool GenerateStream::isFinished() const {
     return getStatus() == StreamState::FINISHED;
 }
 
+bool GenerateStream::finishWithoutGenerate() {
+    {
+        std::lock_guard<std::mutex> lock(*mutex_);
+        checkTimeoutWithoutLock();
+        if (getStatus() != StreamState::WAITING || hasErrorWithoutLock()) {
+            return false;
+        }
+        // No token was generated here: do not publish GenerateDone or execution timing.
+        generate_status_->status.store(StreamState::FINISHED, std::memory_order_release);
+        consumer_cv_->notify_all();
+    }
+    releaseResource();
+    reportMetricOnce();
+    return true;
+}
+
 bool GenerateStream::isActive() const {
     std::lock_guard<std::mutex> lock(*mutex_);
     return !hasErrorWithoutLock() && getStatus() != StreamState::FINISHED;
+}
+
+bool GenerateStream::finishOrCancel(int64_t wait_timeout_ms, const std::string& cancel_reason) {
+    RTP_LLM_CHECK_WITH_INFO(wait_timeout_ms >= 0, "finishOrCancel wait_timeout_ms must be non-negative");
+
+    std::unique_lock<std::mutex> lock(*mutex_);
+    const auto                   lifecycle_finished = [this] { return getStatus() == StreamState::FINISHED; };
+    if (lifecycle_finished()) {
+        return true;
+    }
+
+    const bool successful_completion_pending =
+        hasEventWithoutLock(StreamEvents::GenerateDone) && !hasErrorWithoutLock();
+    if (!successful_completion_pending) {
+        reportEventWithoutLock(StreamEvents::Error, ErrorCode::CANCELLED, cancel_reason);
+    }
+
+    bool finished = false;
+    if (wait_timeout_ms == 0) {
+        consumer_cv_->wait(lock, lifecycle_finished);
+        finished = true;
+    } else {
+        finished = consumer_cv_->wait_for(lock, std::chrono::milliseconds(wait_timeout_ms), lifecycle_finished);
+    }
+
+    if (!finished && !hasErrorWithoutLock()) {
+        reportEventWithoutLock(StreamEvents::Error,
+                               ErrorCode::CANCELLED,
+                               cancel_reason + ": timed out waiting for scheduler lifecycle commit");
+    }
+    return finished;
 }
 
 void GenerateStream::setReserveStep(size_t reserve_step) {
@@ -763,6 +835,15 @@ void GenerateStream::setReserveStep(size_t reserve_step) {
 }
 
 StreamState GenerateStream::moveToNext() {
+    // Most MTP rounds can execute from the immutable device page-table
+    // snapshot while the previous host commit is in flight.  A page-capacity
+    // boundary is different: the allocator must append blocks to the mutable
+    // host table, so join the worker before acquiring mutex_.  Waiting after
+    // taking mutex_ would deadlock with specUpdate().
+    if (needsAsyncBookkeepingJoinForKvReservation()) {
+        waitPendingAsyncBookkeeping();
+    }
+
     StreamState state;
     bool        should_report_metric = false;
     {
@@ -795,6 +876,31 @@ StreamState GenerateStream::moveToNext() {
         reportMetricOnce();
     }
     return state;
+}
+
+bool GenerateStream::needsAsyncBookkeepingJoinForKvReservation() const {
+    if (getStatus() != StreamState::RUNNING || !hasPendingAsyncBookkeeping()) {
+        return false;
+    }
+
+    const auto state = getMtpAsyncDeviceState();
+    // pending_async_bookkeeping_ is shared by normal decode and MTP.  Normal
+    // decode never publishes MtpAsyncDeviceState, so it must not be forced to
+    // wait on an MTP-only cache snapshot.  MTP publishes the state before it
+    // claims the async worker, making a non-zero epoch a stable mode marker.
+    if (state.epoch == 0) {
+        return false;
+    }
+    if (!hasMtpCacheSnapshot(state) || state.next_seq_len_upper_bound <= 0 || stream_cache_resource_ == nullptr) {
+        return true;
+    }
+
+    // Reading group vector sizes is safe while specUpdate only swaps existing
+    // elements.  No allocator mutation can run concurrently: scheduler calls
+    // moveToNext serially on this engine thread.
+    return stream_cache_resource_->singleBatchNeedBlocks(state.next_seq_len_upper_bound,
+                                                         static_cast<int>(reserve_step_))
+           > 0;
 }
 
 bool GenerateStream::hasError() const {
@@ -962,7 +1068,7 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
     RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(*mutex_);
     RTP_LLM_LOG_DEBUG("stream [%s] spec update", streamLogTag().c_str());
-    *is_context_stream_ = false;
+    is_context_stream_->store(false, std::memory_order_release);
     if (reportUpdateErrorWithoutLock(update_info.error_info)) {
         return;
     }
@@ -1094,7 +1200,7 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
     RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(*mutex_);
     RTP_LLM_LOG_DEBUG("stream [%s] update", streamLogTag().c_str());
-    *is_context_stream_ = false;
+    is_context_stream_->store(false, std::memory_order_release);
     if (reportUpdateErrorWithoutLock(update_info.error_info)) {
         return;
     }
@@ -1107,24 +1213,35 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
         return;
     }
 
-    const auto& new_tokens     = update_info.new_tokens;
-    auto        num_new_tokens = update_info.num_new_tokens;
+    const auto& new_tokens          = update_info.new_tokens;
+    auto        num_new_tokens      = update_info.num_new_tokens;
+    const bool  prefill_only_update = num_new_tokens == 0 && generate_input_->generate_config->isPrefillOnly();
 
-    int error_token_id = 0;
-    if (!complete_token_ids_->update(new_tokens,
-                                     begin_time_us_,
-                                     num_new_tokens,
-                                     generate_input_->inputLength(),
-                                     maxTokenNum(),
-                                     vocab_size_,
-                                     usesBeamSearchTokenLayoutForCurrentStep(),
-                                     streamId(),
-                                     error_token_id)) {
-        reportEventWithoutLock(StreamEvents::Error,
-                               ErrorCode::OUT_OF_VOCAB_RANGE,
-                               "output token id:" + std::to_string(error_token_id)
-                                   + " out of vocab size: " + std::to_string(vocab_size_));
+    if (prefill_only_update && generate_status_->checkFinished() && !update_info.force_update_info) {
         return;
+    }
+
+    if (prefill_only_update) {
+        RTP_LLM_CHECK(new_tokens.dim() == 2);
+        RTP_LLM_CHECK(new_tokens.size(0) == currentBatchSize());
+        RTP_LLM_CHECK(new_tokens.size(1) == 0);
+    } else {
+        int error_token_id = 0;
+        if (!complete_token_ids_->update(new_tokens,
+                                         begin_time_us_,
+                                         num_new_tokens,
+                                         generate_input_->inputLength(),
+                                         maxTokenNum(),
+                                         vocab_size_,
+                                         usesBeamSearchTokenLayoutForCurrentStep(),
+                                         streamId(),
+                                         error_token_id)) {
+            reportEventWithoutLock(StreamEvents::Error,
+                                   ErrorCode::OUT_OF_VOCAB_RANGE,
+                                   "output token id:" + std::to_string(error_token_id)
+                                       + " out of vocab size: " + std::to_string(vocab_size_));
+            return;
+        }
     }
 
     resizeSubGenerateStatus(update_info.new_tokens.size(0));
@@ -1293,20 +1410,25 @@ void GenerateStream::reportMetricOnce() {
 
 void GenerateStream::reportMetric() {
     reportStreamMetrics();
-    reportCacheReuseMetrics();
+    stream_cache_resource_->reportCacheReuseMetrics();
 }
 
 void GenerateStream::reportStreamMetrics() {
     RTP_LLM_PROFILE_FUNCTION();
     if (metrics_reporter_) {
-        bool                         cancelled = statusInfo().code() == ErrorCode::CANCELLED;
-        bool                         timeout   = statusInfo().code() == ErrorCode::GENERATE_TIMEOUT;
+        const auto error_info = statusInfo();
+        const auto error_code = error_info.code();
+        const bool cancelled  = error_code == ErrorCode::CANCELLED;
+        const bool timeout    = error_code == ErrorCode::GENERATE_TIMEOUT;
+        const bool malloc_terminal_failed =
+            error_code == ErrorCode::MALLOC_FAILED || error_code == ErrorCode::DECODE_MALLOC_FAILED;
         RtpLLMStreamMetricsCollector collector;
-        collector.qps               = true;
-        collector.cancel_qps        = cancelled;
-        collector.error_qps         = hasError() && !cancelled;
-        collector.is_streaming_qps  = generate_input_->generate_config->is_streaming;
-        collector.not_streaming_qps = !generate_input_->generate_config->is_streaming;
+        collector.qps                        = true;
+        collector.cancel_qps                 = cancelled;
+        collector.error_qps                  = error_info.hasError() && !cancelled;
+        collector.is_streaming_qps           = generate_input_->generate_config->is_streaming;
+        collector.not_streaming_qps          = !generate_input_->generate_config->is_streaming;
+        collector.kv_cache_malloc_failed_qps = malloc_terminal_failed;
         if (getStatus() == StreamState::FINISHED || cancelled || timeout) {
             collector.reuse_length       = initial_reuse_length_;
             collector.input_token_length = inputLength();
@@ -1339,24 +1461,6 @@ void GenerateStream::reportStreamMetrics() {
         static kmonitor::MetricsTags timeout_tag("timeout", "true");
         metrics_reporter_->report<RtpLLMStreamMetrics, RtpLLMStreamMetricsCollector>(timeout ? &timeout_tag : nullptr,
                                                                                      &collector);
-    }
-}
-
-void GenerateStream::reportCacheReuseMetrics() const {
-    if (metrics_reporter_ && stream_cache_resource_->reuseCache()) {
-        const int64_t input_length       = inputLength();
-        const int64_t total_reuse_length = initialReuseLength();
-        auto          hit_ratio          = [input_length](int64_t reuse_length) {
-            return input_length > 0 ? static_cast<float>(reuse_length * 100.0 / input_length) : 0.0f;
-        };
-        RtpLLMCacheReuseMetricsCollector collector;
-        collector.kv_cache_reuse_length            = total_reuse_length;
-        collector.kv_cache_hit_rate                = hit_ratio(total_reuse_length);
-        collector.stream_cache_device_reuse_length = deviceReuseLength();
-        collector.stream_cache_memory_reuse_length = memoryReuseLength();
-        collector.stream_cache_remote_reuse_length = remoteReuseLength();
-        kmonitor::MetricsTags tags;
-        metrics_reporter_->report<RtpLLMCacheReuseMetrics, RtpLLMCacheReuseMetricsCollector>(&tags, &collector);
     }
 }
 
@@ -1413,7 +1517,7 @@ void GenerateStream::setPerfTest(bool perf_test) {
 }
 
 void GenerateStream::setIsContextStream(bool is_context_stream) {
-    *is_context_stream_ = is_context_stream;
+    is_context_stream_->store(is_context_stream, std::memory_order_release);
 }
 
 StreamCacheResource& GenerateStream::streamCacheResource() {

@@ -78,7 +78,8 @@ public:
                 model_config.layernorm_type == rtp_llm::LayerNormType::post_layernorm,
                 model_config.input_embedding_scalar,
                 model_config.residual_scalar,
-                model_config.reverse_e_h_norm};
+                model_config.reverse_e_h_norm,
+                moe_config};
     }
 
     virtual ~Executor() {};

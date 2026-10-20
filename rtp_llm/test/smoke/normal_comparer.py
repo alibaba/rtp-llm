@@ -7,6 +7,7 @@ import torch
 from pydantic import BaseModel, ValidationError
 from smoke.base_comparer import BaseComparer
 from smoke.common_def import ABS_PATH, REL_PATH, QueryStatus, SmokeException
+from smoke.comparison_utils import integer_within_tolerance
 from smoke.utils import create_temporary_copy, save_hidden_states, save_logits
 
 from rtp_llm.config.generate_config import GenerateConfig
@@ -53,22 +54,27 @@ class AuxInfo(BaseModel):
     local_reuse_len: Optional[int] = None
     remote_reuse_len: Optional[int] = None
     memory_reuse_len: Optional[int] = None
+    disk_reuse_len: Optional[int] = None
     prefill_total_reuse_len: Optional[int] = None
     prefill_local_reuse_len: Optional[int] = None
     prefill_remote_reuse_len: Optional[int] = None
     prefill_memory_reuse_len: Optional[int] = None
+    prefill_disk_reuse_len: Optional[int] = None
     decode_total_reuse_len: Optional[int] = None
     decode_local_reuse_len: Optional[int] = None
     decode_remote_reuse_len: Optional[int] = None
     decode_memory_reuse_len: Optional[int] = None
+    decode_disk_reuse_len: Optional[int] = None
 
     output_len: Optional[int] = None
     step_output_len: Optional[int] = None
     iter_count: Optional[int] = None
+    iter_count_tolerance: Optional[int] = None
     cum_log_probs: Optional[Union[List[float], List[None]]] = None
     beam_responses: Optional[List[str]] = None
     pd_sep: Optional[bool] = None
     softmax_probs: Optional[List[float]] = None
+    generation_prefill_cuda_graph_status: Optional[str] = None
 
 
 class PromptLogitsGolden(BaseModel):
@@ -387,23 +393,45 @@ class NormalComparer(BaseComparer):
             "reuse_len",
             "output_len",
             "step_output_len",
-            "iter_count",
             "pd_sep",
             "local_reuse_len",
             "remote_reuse_len",
             "memory_reuse_len",
+            "disk_reuse_len",
             "prefill_total_reuse_len",
             "prefill_local_reuse_len",
             "prefill_remote_reuse_len",
             "prefill_memory_reuse_len",
+            "prefill_disk_reuse_len",
             "decode_total_reuse_len",
             "decode_local_reuse_len",
             "decode_remote_reuse_len",
             "decode_memory_reuse_len",
+            "decode_disk_reuse_len",
+            "generation_prefill_cuda_graph_status",
         ]:
             expect_val = getattr(expect_aux, field)
             actual_val = getattr(actual_aux, field)
             check_equal(field, expect_val, actual_val)
+
+        if expect_aux.iter_count is not None:
+            tolerance = expect_aux.iter_count_tolerance or 0
+            actual_iter_count = actual_aux.iter_count
+            try:
+                iter_count_matches = integer_within_tolerance(
+                    expect_aux.iter_count, actual_iter_count, tolerance
+                )
+            except ValueError as error:
+                diffs.append(f"{prefix}aux_info.iter_count_tolerance: {error}")
+            else:
+                if not iter_count_matches:
+                    lower = expect_aux.iter_count - tolerance
+                    upper = expect_aux.iter_count + tolerance
+                    diffs.append(
+                        f"{prefix}aux_info.iter_count:\n"
+                        f"    expect: {expect_aux.iter_count} (allowed range: [{lower}, {upper}])\n"
+                        f"    actual:  {repr(actual_iter_count)}"
+                    )
 
         check_equal(
             "beam_responses", expect_aux.beam_responses, actual_aux.beam_responses

@@ -5,7 +5,7 @@
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBuffer.h"
-#include "rtp_llm/cpp/cache/connector/KVCacheConnector.h"
+#include "rtp_llm/cpp/cache/connector/p2p/support/KVCacheConnector.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include <grpc++/grpc++.h>
@@ -15,8 +15,10 @@
 #include <optional>
 
 namespace rtp_llm {
-
 class GenerateStream;
+}
+
+namespace rtp_llm {
 
 // Side-channel payload for P2P bypass (carries first token, reuse, SP info, position_ids)
 struct P2PSideChannelPayload {
@@ -78,7 +80,7 @@ public:
         int64_t                                                                           request_id;
         int64_t                                                                           start_time_us;
         int64_t                                                                           total_cost_time_us;
-        GenerateStream*                                                                   generate_stream = nullptr;
+        ::rtp_llm::GenerateStream*                                                        generate_stream = nullptr;
         ErrorCode   error_code = ErrorCode::NONE_ERROR;
         std::string error_message;
 
@@ -89,12 +91,12 @@ public:
     };
 
     /// @brief 向 Prefill server 发起异步 StartLoad RPC，通知其开始向 Decode 发送 KV cache
-    std::shared_ptr<Result> load(int64_t                   request_id,
-                                 const std::string&        prefill_ip,
-                                 uint32_t                  prefill_port,
-                                 const std::string&        unique_key,
-                                 int64_t                   deadline_ms,
-                                 GenerateStream*           generate_stream);
+    std::shared_ptr<Result> load(int64_t                    request_id,
+                                 const std::string&         prefill_ip,
+                                 uint32_t                   prefill_port,
+                                 const std::string&         unique_key,
+                                 int64_t                    deadline_ms,
+                                 ::rtp_llm::GenerateStream* generate_stream);
 
 private:
     bool buildAndStartAsyncRpc(const std::shared_ptr<Result>& result,

@@ -4,6 +4,7 @@ import json
 import logging
 import math
 import time
+from dataclasses import replace
 from typing import Any, AsyncGenerator, Dict, Optional, Union
 
 import grpc
@@ -12,27 +13,36 @@ from grpc import StatusCode
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import ReturnAllProbsMode, RoleType
+from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.config.response_format_compiler import validate_engine_ready
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     BatchGenerateInputPB,
+    ErrorCodePB,
     ErrorDetailsPB,
     FetchRequestPB,
     GenerateConfigPB,
     GenerateInputPB,
     GenerateOutputsPB,
     MultimodalInputPB,
+    MultimodalInputsPB,
     RoleAddrPB,
 )
-from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import RpcServiceStub
+from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
+    MultimodalRpcServiceStub,
+    RpcServiceStub,
+)
 from rtp_llm.server.request_headers import (
+    dashscope_greennet_metadata,
     extract_correlation_request_id,
     extract_trace_id,
 )
 from rtp_llm.telemetry import CURRENT_TRACE_STATE
 from rtp_llm.telemetry import attributes as trace_attrs
-from rtp_llm.telemetry import start_client_span
+from rtp_llm.telemetry import inject_context_to_metadata, start_client_span
 from rtp_llm.utils.base_model_datatypes import (
+    GENERATION_PREFILL_CUDA_GRAPH_STATUS_NOT_REQUESTED,
     AuxInfo,
+    BatchedTerminalOutputs,
     GenerateConfig,
     GenerateInput,
     GenerateOutput,
@@ -51,6 +61,7 @@ MAX_GRPC_TIMEOUT_SECONDS = 3600
 RPC_CLEANUP_TIMEOUT_SECONDS = 0.1
 RPC_SETTLE_TIMEOUT_SECONDS = 5.0
 JsonableOption = Optional[Union[str, Dict[str, Any], bool]]
+logger = logging.getLogger(__name__)
 
 
 def _selected_pd_separation(
@@ -82,6 +93,8 @@ def _engine_reported_finished(outputs: Optional[GenerateOutputs]) -> bool:
     """
     if outputs is None or not outputs.generate_outputs:
         return False
+    if isinstance(outputs.generate_outputs, BatchedTerminalOutputs):
+        return True
     return all(bool(out.finished) for out in outputs.generate_outputs)
 
 
@@ -380,11 +393,89 @@ def _record_client_span_latency(
 class StreamState:
     def __init__(self):
         self.cached_logits_dict = {}
+        self.seen_output = False
+        self.prefill_aux_info_observed = False
+
+
+def _validate_prefill_only_response(
+    input_py: GenerateInput, outputs_pb: GenerateOutputsPB, stream_state: StreamState
+) -> None:
+    if not input_py.generate_config.is_prefill_only():
+        return
+
+    aux_infos = outputs_pb.flatten_output.aux_info
+    if not aux_infos:
+        return
+
+    stream_state.prefill_aux_info_observed = True
+    for index, aux_info in enumerate(aux_infos):
+        if aux_info.output_len != 0:
+            logger.error(
+                "prefill-only response contract violation: request_id=%s, "
+                "aux_info[%s].output_len=%s; backend generated tokens",
+                input_py.request_id,
+                index,
+                aux_info.output_len,
+            )
+            raise FtRuntimeException(
+                ExceptionType.EXECUTION_EXCEPTION,
+                f"prefill-only request [{input_py.request_id}] received "
+                f"aux_info[{index}].output_len={aux_info.output_len}; the backend "
+                "generated tokens and may not support GenerateConfigPB.prefill_only",
+            )
+
+
+def _validate_prefill_only_completed(
+    input_py: GenerateInput, stream_state: StreamState
+) -> None:
+    if (
+        input_py.generate_config.is_prefill_only()
+        and input_py.generate_config.aux_info
+        and not stream_state.prefill_aux_info_observed
+    ):
+        logger.error(
+            "prefill-only capability verification failed: request_id=%s "
+            "completed without aux_info",
+            input_py.request_id,
+        )
+        raise FtRuntimeException(
+            ExceptionType.EXECUTION_EXCEPTION,
+            f"prefill-only request [{input_py.request_id}] completed without "
+            "aux_info; the backend capability cannot be verified and it may not "
+            "support GenerateConfigPB.prefill_only",
+        )
 
 
 def _is_finished_response(outputs_pb: GenerateOutputsPB) -> bool:
     finished = outputs_pb.flatten_output.finished
     return bool(finished) and all(finished)
+
+
+_RPC_ERROR_CODE_OVERRIDES = {
+    # Preserve the legacy client-facing cancellation code instead of mapping to
+    # the distinct internal ExceptionType.CANCELLED member by name.
+    ErrorCodePB.CANCELLED: ExceptionType.CANCELLED_ERROR,
+    # The protobuf enum uses single-L CANCELED while ExceptionType uses CANCELLED.
+    ErrorCodePB.P2P_CONNECTOR_WORKER_READ_CANCELED: (
+        ExceptionType.P2P_CONNECTOR_WORKER_READ_CANCELLED
+    ),
+}
+
+
+def _rpc_error_code_name(error_code: int) -> str:
+    try:
+        return ErrorCodePB.Name(error_code)
+    except ValueError:
+        return f"UNRECOGNIZED_ERROR_CODE_{error_code}"
+
+
+def _trans_rpc_error_code(error_code: int) -> ExceptionType:
+    if error_code in _RPC_ERROR_CODE_OVERRIDES:
+        return _RPC_ERROR_CODE_OVERRIDES[error_code]
+    try:
+        return ExceptionType[_rpc_error_code_name(error_code)]
+    except KeyError:
+        return ExceptionType.UNKNOWN_ERROR
 
 
 def trans_role_type(role_type: RoleType) -> RoleAddrPB.RoleType:
@@ -437,7 +528,31 @@ def _trans_jsonable_options(
 def trans_input(input_py: GenerateInput):
     input_pb = GenerateInputPB()
     input_pb.request_id = input_py.request_id
-    input_pb.token_ids.extend(input_py.token_ids.reshape(-1).tolist())
+    expansion = input_py.mm_token_expansion
+    if expansion is not None:
+        input_pb.token_ids.extend(expansion.token_ids)
+        input_pb.multimodal_token_layout.SetInParent()
+        for offset, length in expansion.spans:
+            input_pb.multimodal_token_layout.spans.add(offset=offset, length=length)
+    else:
+        input_pb.token_ids.extend(input_py.token_ids.reshape(-1).tolist())
+    prepared = getattr(input_py, "v41_inputs", None)
+    if prepared is not None:
+        typed = input_pb.v41_inputs
+        typed.schema_version = 1
+        typed.token_types.extend(prepared.token_types)
+        typed.image_mask.extend(prepared.image_mask.tolist())
+        for image in prepared.images:
+            target = typed.images.add()
+            target.start, target.n_vit_h, target.n_vit_w = (
+                image.start,
+                image.n_vit_h,
+                image.n_vit_w,
+            )
+            target.types.extend(image.types.tolist())
+            target.patches.CopyFrom(trans_from_tensor(image.patches))
+            target.content_sha256 = image.content_sha256
+            target.processor_identity = image.processor_identity
     input_pb.start_time = int(time.time() * 1_000_000)
     input_pb.group_size = input_py.group_size
     if hasattr(input_py, "group_id") and input_py.group_id != -1:
@@ -465,6 +580,17 @@ def trans_input(input_py: GenerateInput):
             getattr(input_py, "headers", None)
         ) or str(input_pb.request_info.trace_id or input_py.request_id)
 
+    trace_state = CURRENT_TRACE_STATE.get()
+    server_context = trace_state.server_context if trace_state is not None else None
+    if server_context is not None:
+        carrier = dict(inject_context_to_metadata(server_context))
+        traceparent = carrier.get("traceparent", "")
+        if traceparent:
+            input_pb.request_info.trace_context.traceparent = traceparent
+            tracestate = carrier.get("tracestate", "")
+            if tracestate:
+                input_pb.request_info.trace_context.tracestate = tracestate
+
     trans_multimodal_input(input_py, input_pb, input_py.generate_config)
     # Preserve main's regular GenerateConfig validation at the RPC boundary,
     # then assert (without mutating) that the request entrypoint prepared grammar.
@@ -472,7 +598,9 @@ def trans_input(input_py: GenerateInput):
     validate_engine_ready(input_py.generate_config)
 
     generate_config_pb = input_pb.generate_config
+    generate_config_pb.aux_info.value = input_py.generate_config.aux_info
     generate_config_pb.max_new_tokens = input_py.generate_config.max_new_tokens
+    generate_config_pb.prefill_only = input_py.generate_config.is_prefill_only()
     generate_config_pb.max_thinking_tokens = (
         input_py.generate_config.max_thinking_tokens
     )
@@ -580,6 +708,7 @@ def trans_input(input_py: GenerateInput):
     generate_config_pb.enable_remote_cache = (
         input_py.generate_config.enable_remote_cache
     )
+    generate_config_pb.enable_disk_cache = input_py.generate_config.enable_disk_cache
     trans_option_cast(
         generate_config_pb, input_py.generate_config, "trace_id", functools.partial(str)
     )
@@ -617,7 +746,15 @@ def trans_input(input_py: GenerateInput):
     return input_pb
 
 
-def get_multimodal_preprocess_value(value: Optional[int], default: int):
+def _make_multimodal_inputs_pb(input_pb: GenerateInputPB) -> MultimodalInputsPB:
+    mm_inputs_pb = MultimodalInputsPB(request_id=input_pb.request_id)
+    mm_inputs_pb.multimodal_inputs.extend(input_pb.multimodal_inputs)
+    return mm_inputs_pb
+
+
+def get_multimodal_preprocess_value(
+    value: Optional[Union[int, float]], default: Union[int, float]
+) -> Union[int, float]:
     if value is not None and value != -1:
         return value
     else:
@@ -627,6 +764,11 @@ def get_multimodal_preprocess_value(value: Optional[int], default: int):
 def trans_multimodal_input(
     input_py: GenerateInput, input_pb: GenerateInputPB, generate_config: GenerateConfig
 ):
+    input_pb.multimodal_inputs.extend(iter_multimodal_inputs(input_py, generate_config))
+
+
+def iter_multimodal_inputs(input_py: GenerateInput, generate_config: GenerateConfig):
+    """Resolve preprocessing identically for inference and routing, one input at a time."""
     resized_shape = [-1, -1]
     if generate_config.resized_shape:
         if len(generate_config.resized_shape) != 2:
@@ -652,9 +794,10 @@ def trans_multimodal_input(
         mm_preprocess_config_pb.max_pixels = get_multimodal_preprocess_value(
             generate_config.max_pixels, mm_input.mm_preprocess_config.max_pixels
         )
-        mm_preprocess_config_pb.fps = get_multimodal_preprocess_value(
+        fps = get_multimodal_preprocess_value(
             generate_config.fps, mm_input.mm_preprocess_config.fps
         )
+        mm_preprocess_config_pb.fps = fps
         mm_preprocess_config_pb.min_frames = get_multimodal_preprocess_value(
             generate_config.min_frames, mm_input.mm_preprocess_config.min_frames
         )
@@ -669,7 +812,36 @@ def trans_multimodal_input(
         mm_preprocess_config_pb.mm_timeout_ms = get_multimodal_preprocess_value(
             generate_config.mm_timeout_ms, mm_input.mm_preprocess_config.mm_timeout_ms
         )
-        input_pb.multimodal_inputs.append(mm_input_pb)
+        mm_preprocess_config_pb.max_long_side_pixel = int(
+            get_multimodal_preprocess_value(
+                generate_config.max_long_side_pixel,
+                getattr(mm_input.mm_preprocess_config, "max_long_side_pixel", -1),
+            )
+        )
+        yield mm_input_pb
+
+
+def multimodal_cache_keys(input_py: GenerateInput) -> list[str]:
+    from rtp_llm.multimodal.multimodal_util import trans_config
+    from rtp_llm.ops import MultimodalInput
+
+    keys = []
+    for original, item in zip(
+        input_py.mm_inputs, iter_multimodal_inputs(input_py, input_py.generate_config)
+    ):
+        if not item.multimodal_url or (
+            original.tensor is not None and original.tensor.numel() > 0
+        ):
+            return []
+        # Use the worker's protobuf conversion so sentinel values produce
+        # identical cache keys on the frontend and ViT worker.
+        resolved = trans_config(item.mm_preprocess_config)
+        keys.append(
+            MultimodalInput(
+                item.multimodal_url, item.multimodal_type, original.tensor, resolved
+            ).cache_key()
+        )
+    return keys
 
 
 # 假设 trans_tensor 函数将 Protobuf 的 TensorPB 转换为 numpy array
@@ -679,12 +851,16 @@ def trans_multimodal_input(
 def trans_output(
     input_py: GenerateInput, outputs_pb: GenerateOutputsPB, stream_state: StreamState
 ) -> GenerateOutputs:
+    _validate_prefill_only_response(input_py, outputs_pb, stream_state)
     logging.debug("outputs_pb = %s", outputs_pb)
     output_pb = outputs_pb.flatten_output
     num_outputs = len(output_pb.finished)
 
     if num_outputs == 0:
         return GenerateOutputs()
+
+    first_output = not stream_state.seen_output
+    stream_state.seen_output = True
 
     logits_index = input_py.generate_config.logits_index
     aux_info_flag = input_py.generate_config.aux_info
@@ -695,6 +871,39 @@ def trans_output(
         and (len(output_pb.output_ids.shape) > 0 and output_pb.output_ids.shape[0] > 0)
         else None
     )
+    # Keep the wire batch intact for terminal multi-sequence responses. Checking
+    # both the config and actual fields prevents discarding optional outputs.
+    config = input_py.generate_config
+    if (
+        first_output
+        and not config.is_streaming
+        and config.has_num_beams()
+        and config.num_return_sequences > 1
+        and not aux_info_flag
+        and not stream_state.cached_logits_dict
+        and all(output_pb.finished)
+        and all_output_ids is not None
+        and all_output_ids.dim() == 3
+        and all_output_ids.shape[0] == num_outputs
+        and all_output_ids.shape[1] == 1
+        and not output_pb.HasField("prompt_logits")
+        and not any(
+            output_pb.HasField(name)
+            and getattr(output_pb, name).shape
+            and getattr(output_pb, name).shape[0] > 0
+            for name in (
+                "hidden_states",
+                "all_hidden_states",
+                "loss",
+                "logits",
+                "all_probs",
+                "custom_output",
+            )
+        )
+    ):
+        return GenerateOutputs(
+            BatchedTerminalOutputs(all_output_ids, input_py.token_ids.reshape(1, -1))
+        )
     all_hidden_states = (
         trans_tensor(output_pb.hidden_states)
         if output_pb.HasField("hidden_states")
@@ -728,6 +937,13 @@ def trans_output(
         if output_pb.HasField("all_probs")
         and len(output_pb.all_probs.shape) > 0
         and output_pb.all_probs.shape[0] > 0
+        else None
+    )
+    all_custom_output = (
+        trans_tensor(output_pb.custom_output)
+        if output_pb.HasField("custom_output")
+        and len(output_pb.custom_output.shape) > 0
+        and output_pb.custom_output.shape[0] > 0
         else None
     )
 
@@ -772,17 +988,24 @@ def trans_output(
                 local_reuse_len=aux_info_pb.local_reuse_len,
                 remote_reuse_len=aux_info_pb.remote_reuse_len,
                 memory_reuse_len=aux_info_pb.memory_reuse_len,
+                disk_reuse_len=aux_info_pb.disk_reuse_len,
                 prefill_total_reuse_len=aux_info_pb.prefill_total_reuse_len,
                 prefill_local_reuse_len=aux_info_pb.prefill_local_reuse_len,
                 prefill_remote_reuse_len=aux_info_pb.prefill_remote_reuse_len,
                 prefill_memory_reuse_len=aux_info_pb.prefill_memory_reuse_len,
+                prefill_disk_reuse_len=aux_info_pb.prefill_disk_reuse_len,
                 decode_total_reuse_len=aux_info_pb.decode_total_reuse_len,
                 decode_local_reuse_len=aux_info_pb.decode_local_reuse_len,
                 decode_remote_reuse_len=aux_info_pb.decode_remote_reuse_len,
                 decode_memory_reuse_len=aux_info_pb.decode_memory_reuse_len,
+                decode_disk_reuse_len=aux_info_pb.decode_disk_reuse_len,
                 speculative_draft_rounds=aux_info_pb.speculative_draft_rounds,
                 speculative_accepted_tokens_per_pos=list(
                     aux_info_pb.speculative_accepted_tokens_per_pos
+                ),
+                generation_prefill_cuda_graph_status=(
+                    aux_info_pb.generation_prefill_cuda_graph_status
+                    or GENERATION_PREFILL_CUDA_GRAPH_STATUS_NOT_REQUESTED
                 ),
                 aux_string=aux_info_pb.aux_string,
                 role_addrs=input_py.generate_config.role_addrs,
@@ -831,6 +1054,9 @@ def trans_output(
 
         if prompt_logits_data is not None:
             output_py.prompt_logits = prompt_logits_data
+
+        if all_custom_output is not None:
+            output_py.custom_output = all_custom_output[i]
 
         if (
             logits_index is not None
@@ -1018,19 +1244,27 @@ class ModelRpcClient(object):
         # gRPC CLIENT span: child of the HTTP SERVER span
         # published via CURRENT_TRACE_STATE; W3C traceparent goes into gRPC
         # metadata. Both are no-ops when telemetry is disabled.
+        client_span_name = (
+            "rtp_llm.fetch_response"
+            if use_fetch_response
+            else "rtp_llm.generate_stream_call"
+        )
         client_span, trace_metadata = start_client_span(
-            "rtp_llm.generate_stream_call", target_address
+            client_span_name, target_address
         )
         if client_span is not None:
             client_settlement_abandoned = asyncio.Event()
             # Bailian Unitrace index key (see rtp_llm/telemetry/attributes.py)
             client_span.set_attribute(trace_attrs.REQUEST_ID, str(input_py.request_id))
-            client_span.set_attribute(
-                trace_attrs.RTP_LLM_REQUEST_ID, input_py.request_id
-            )
         last_output = None
 
         try:
+            if input_pb.multimodal_inputs:
+                # GreenNet content-safety gate: block before prefill until the VIT
+                # encoder's inspection verdict lands. A violation raises
+                # FtRuntimeException(UNSAFE_INPUT_CONTENT) here, short-circuiting the
+                # request before any LLM compute.
+                await self._wait_greennet_verdict(input_py, input_pb)
             # Get channel from pool
             channel = await self._channel_pool.get(target_address)
             stub = RpcServiceStub(channel)
@@ -1038,6 +1272,8 @@ class ModelRpcClient(object):
             grpc_kwargs = {}
             if effective_ms > 0:
                 grpc_kwargs["timeout"] = effective_ms / 1000.0
+            identity_metadata = dashscope_greennet_metadata(input_py.headers)
+            trace_metadata = tuple(trace_metadata or ()) + tuple(identity_metadata)
             if trace_metadata:
                 # One injection point covers both channels: W3C traceparent
                 # rides gRPC metadata for FetchResponse and GenerateStreamCall.
@@ -1081,6 +1317,7 @@ class ModelRpcClient(object):
                         )
                 yield output_py
             stream_done = True
+            _validate_prefill_only_completed(input_py, stream_state)
         except grpc.RpcError as e:
             rpc_status = e.code()
             if client_span is not None:
@@ -1139,10 +1376,11 @@ class ModelRpcClient(object):
                     _record_client_span_latency(client_span, last_output)
                     client_span.finish()
                 else:
+                    _record_client_span_latency(client_span, last_output)
                     client_span.finish(error=e, error_type="Cancelled")
             raise
         except Exception as e:
-            if response_iterator:
+            if response_iterator and not stream_done:
                 response_iterator.cancel()
                 if (
                     rpc_status is None
@@ -1214,6 +1452,7 @@ class ModelRpcClient(object):
                         last_output,
                         include_all_sequences=include_all_sequences,
                     )
+                    _record_client_span_latency(client_span, last_output)
                     client_span.finish(error=cleanup_cancel, error_type="Cancelled")
                 raise
             should_cancel = (
@@ -1224,16 +1463,50 @@ class ModelRpcClient(object):
             if response_iterator and should_cancel:
                 response_iterator.cancel()
 
-    async def batch_enqueue(self, inputs: list[GenerateInput]) -> list[GenerateOutputs]:
+    async def batch_generate(
+        self, inputs: list[GenerateInput]
+    ) -> list[GenerateOutputs]:
+        """Run BatchGenerateCall with atomic batch failure semantics.
+
+        The service must return one result per input. Any item-level error, result
+        cardinality mismatch, transport error, or conversion failure fails the
+        entire batch; partial successes are never returned to the caller.
+        """
         if not inputs:
             return []
 
-        max_timeout_ms = max((inp.generate_config.timeout_ms or 0) for inp in inputs)
-        grpc_timeout_seconds = self._compute_grpc_timeout(max_timeout_ms)
+        # Keep validation/normalization inside trans_input off caller-owned configs.
+        # Each item retains its own positive request timeout; non-positive values
+        # use the same max_rpc_timeout_ms fallback as enqueue().
+        batch_inputs = []
+        effective_timeouts_ms = []
+        for inp in inputs:
+            config = inp.generate_config.model_copy(deep=True)
+            request_timeout_ms = config.timeout_ms
+            effective_ms = (
+                request_timeout_ms
+                if request_timeout_ms is not None and request_timeout_ms > 0
+                else self._max_rpc_timeout_ms
+            )
+            if effective_ms > 0:
+                config.timeout_ms = int(effective_ms)
+                effective_timeouts_ms.append(int(effective_ms))
+            batch_inputs.append(replace(inp, generate_config=config))
+
+        # A mixed batch with no service fallback has no safe finite batch deadline:
+        # the finite item must not terminate the unlimited item.
+        has_unlimited_request = self._max_rpc_timeout_ms <= 0 and any(
+            timeout_ms is None or timeout_ms <= 0
+            for timeout_ms in (inp.generate_config.timeout_ms for inp in inputs)
+        )
+        grpc_timeout_seconds = (
+            max(effective_timeouts_ms) / 1000.0
+            if effective_timeouts_ms and not has_unlimited_request
+            else None
+        )
 
         batch_input_pb = BatchGenerateInputPB()
-        for inp in inputs:
-            inp.generate_config.timeout_ms = int(grpc_timeout_seconds * 1000)
+        for inp in batch_inputs:
             input_pb = trans_input(inp)
             batch_input_pb.inputs.append(input_pb)
 
@@ -1245,22 +1518,42 @@ class ModelRpcClient(object):
         try:
             channel = await self._channel_pool.get(target_address)
             stub = RpcServiceStub(channel)
-            response = await stub.BatchGenerateCall(
-                batch_input_pb, timeout=grpc_timeout_seconds
+            grpc_kwargs = (
+                {"timeout": grpc_timeout_seconds}
+                if grpc_timeout_seconds is not None
+                else {}
             )
+            response = await stub.BatchGenerateCall(batch_input_pb, **grpc_kwargs)
+
+            if len(response.results) != len(inputs):
+                raise FtRuntimeException(
+                    ExceptionType.EXECUTION_EXCEPTION,
+                    "batch RPC returned an invalid result cardinality: "
+                    f"received {len(response.results)} results for {len(inputs)} requests",
+                )
 
             results = []
             for i, result_pb in enumerate(response.results):
-                if (
-                    result_pb.HasField("error_info")
-                    and result_pb.error_info.error_message
+                if result_pb.HasField("error_info") and (
+                    result_pb.error_info.error_code != ErrorCodePB.NONE_ERROR
+                    or result_pb.error_info.error_message
                 ):
+                    exception_type = _trans_rpc_error_code(
+                        result_pb.error_info.error_code
+                    )
+                    error_message = (
+                        result_pb.error_info.error_message
+                        or _rpc_error_code_name(result_pb.error_info.error_code)
+                    )
                     raise FtRuntimeException(
-                        ExceptionType.UNKNOWN_ERROR,
-                        f"batch item {i} failed: {result_pb.error_info.error_message}",
+                        exception_type,
+                        f"batch item {i} failed: {error_message}",
                     )
                 stream_state = StreamState()
-                output = trans_output(inputs[i], result_pb.final_output, stream_state)
+                output = trans_output(
+                    batch_inputs[i], result_pb.final_output, stream_state
+                )
+                _validate_prefill_only_completed(batch_inputs[i], stream_state)
                 results.append(output)
             return results
 
@@ -1271,3 +1564,86 @@ class ModelRpcClient(object):
         except Exception as e:
             logging.error(f"batch rpc unknown error: {str(e)}")
             raise e
+
+    async def _wait_greennet_verdict(
+        self, input_py: GenerateInput, input_pb: GenerateInputPB
+    ) -> None:
+        """Block until the VIT encoder's greennet inspection verdict lands.
+
+        Raises FtRuntimeException(UNSAFE_INPUT_CONTENT) on a violation — the
+        server signals it via an ErrorDetailsPB in the grpc-status-details-bin
+        trailer (same scheme as GenerateStreamCall). When no VIT role is routed
+        (in-process embedding), this is a no-op: the LOCAL path enforces greennet
+        inline inside mm_process_engine and surfaces the same exception through
+        the normal generate stream.
+
+        Successful hash metadata includes an approval for the exact ViT/media
+        pair, so that path returns without another RPC. Keep the verdict RPC
+        for requests that did not acquire approved metadata.
+
+        When greennet is disabled (open-source build or ENABLE_SAFETY_INSPECTION
+        off), this returns immediately WITHOUT any RPC — so the disabled path is
+        byte-identical to the pre-greennet behavior (no extra round-trip).
+        """
+        from rtp_llm.multimodal.greennet_hook import greennet_enabled
+
+        if not greennet_enabled():
+            return
+        for role_addr in input_py.generate_config.role_addrs:
+            if role_addr.role != RoleType.VIT:
+                continue
+            if (
+                input_py.greennet_verified_vit is not None
+                and input_py.greennet_verified_vit
+                == (
+                    role_addr.ip,
+                    role_addr.grpc_port,
+                    tuple(dict.fromkeys(multimodal_cache_keys(input_py))),
+                )
+            ):
+                # Hash acquisition already waited for inspection (or reused an
+                # approved hash). No separate ViT RPC is needed on this route.
+                continue
+            vit_addr = f"{role_addr.ip}:{role_addr.grpc_port}"
+            mm_inputs_pb = _make_multimodal_inputs_pb(input_pb)
+            channel = await self._channel_pool.get(vit_addr)
+            stub = MultimodalRpcServiceStub(channel)
+            try:
+                await stub.WaitGreenNetVerdict(
+                    mm_inputs_pb,
+                    timeout=VitConfig.DEFAULT_MM_TIMEOUT_MS / 1000.0,
+                    metadata=dashscope_greennet_metadata(input_py.headers),
+                )
+            except grpc.RpcError as e:
+                error_details = ErrorDetailsPB()
+                metadata = e.trailing_metadata() or {}
+                if (
+                    "grpc-status-details-bin" in metadata
+                    and error_details.ParseFromString(
+                        metadata["grpc-status-details-bin"]
+                    )
+                ):
+                    logging.warning(
+                        f"request: [{input_py.request_id}] greennet rejected: "
+                        f"{ExceptionType.from_value(error_details.error_code)}, "
+                        f"{error_details.error_message}"
+                    )
+                    raise FtRuntimeException(
+                        ExceptionType(error_details.error_code),
+                        error_details.error_message,
+                    )
+                # No structured detail: greennet infra error (timeout / VIT down).
+                # Fail closed — never let an uninspected request through.
+                logging.error(
+                    f"request: [{input_py.request_id}] greennet verdict rpc to "
+                    f"{vit_addr} failed: {e.code()}, {e.details()}"
+                )
+                raise FtRuntimeException(
+                    ExceptionType.MM_PROCESS_ERROR,
+                    f"greennet verdict unavailable: {e.code()}: {e.details()}",
+                )
+            break
+
+    async def batch_enqueue(self, inputs: list[GenerateInput]) -> list[GenerateOutputs]:
+        """Compatibility alias for callers using the historical enqueue name."""
+        return await self.batch_generate(inputs)

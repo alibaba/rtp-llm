@@ -34,9 +34,8 @@ torch::Tensor rows(int64_t n, int64_t cols = 4) {
 
 // A receipt with one descriptor per handle, each declaring a single EMBEDDING chunk of `chunk_rows`
 // rows. split_size describes the un-chunked per-image row counts, as the encoder sends it.
-MultimodalOutputPB rdmaReceipt(const std::vector<std::string>& handles,
-                               int64_t                         chunk_rows,
-                               const std::vector<int64_t>&     split_size) {
+MultimodalOutputPB
+rdmaReceipt(const std::vector<std::string>& handles, int64_t chunk_rows, const std::vector<int64_t>& split_size) {
     MultimodalOutputPB receipt;
     for (const auto& handle : handles) {
         auto* slot = receipt.add_output_rdma_slots();
@@ -75,10 +74,10 @@ public:
     std::vector<MultimodalOutputPB>       responses;
     std::vector<bool>                     advertised_rdma;
     std::vector<std::vector<std::string>> released;
-    std::vector<std::string>*             log      = nullptr;
-    size_t                                requests = 0;
+    std::vector<std::string>*             log           = nullptr;
+    size_t                                requests      = 0;
     size_t                                failure_round = std::numeric_limits<size_t>::max();
-    ErrorInfo                             failure = ErrorInfo::OkStatus();
+    ErrorInfo                             failure       = ErrorInfo::OkStatus();
 
     ErrorResult<MultimodalOutputPB>
     request(const std::string&, MultimodalInputsPB& request_pb, DeadlineBudget&) override {
@@ -136,8 +135,8 @@ public:
         block_cv_.notify_all();
     }
 
-    rdma_transport::RdmaReadResult
-    read(const std::vector<rdma_transport::RdmaDescriptor>& descriptors, int64_t) override {
+    rdma_transport::RdmaReadResult read(const std::vector<rdma_transport::RdmaDescriptor>& descriptors,
+                                        int64_t) override {
         ++reads;
         if (block_read) {
             std::unique_lock<std::mutex> lock(block_mutex_);
@@ -197,9 +196,9 @@ public:
 };
 
 struct Harness {
-    FakeControlClient*                       control    = nullptr;
-    FakeRdmaTransport*                       transport  = nullptr;
-    FakeTerminalReader*                      terminal   = nullptr;
+    FakeControlClient*                       control   = nullptr;
+    FakeRdmaTransport*                       transport = nullptr;
+    FakeTerminalReader*                      terminal  = nullptr;
     std::unique_ptr<MMRemoteOutputTransport> under_test;
     std::vector<std::string>                 log;
 
@@ -207,9 +206,9 @@ struct Harness {
     // still registered (only it can recognise a descriptor receipt) but advertises nothing, which
     // is exactly what createMMRemoteOutputTransport() sets up.
     explicit Harness(bool with_transport = true, std::optional<RdmaConfig> validated_config = std::nullopt) {
-        auto control_up = std::make_unique<FakeControlClient>();
-        control         = control_up.get();
-        control->log    = &log;
+        auto control_up  = std::make_unique<FakeControlClient>();
+        control          = control_up.get();
+        control->log     = &log;
         auto terminal_up = std::make_unique<FakeTerminalReader>();
         terminal         = terminal_up.get();
         terminal->log    = &log;
@@ -265,14 +264,14 @@ TEST(MMRemoteOutputTransportTest, rdmaReceiptIsReadAndSlotsAreReleasedOnce) {
 TEST(MMRemoteOutputTransportTest, invalidDescriptorsAreRejectedBeforeProviderRead) {
     using MutateReceipt = std::function<void(MultimodalOutputPB*)>;
     const std::vector<std::pair<std::string, MutateReceipt>> cases{
-        {"zero address", [](auto* receipt) { receipt->mutable_output_rdma_slots(0)
-                                                  ->mutable_rdma_descriptor()
-                                                  ->set_remote_addr(0); }},
-        {"tensor outside payload", [](auto* receipt) { receipt->mutable_output_rdma_slots(0)
-                                                             ->mutable_rdma_descriptor()
-                                                             ->mutable_tensors(0)
-                                                             ->set_offset(256); }},
-        {"overlapping tensors", [](auto* receipt) {
+        {"zero address",
+         [](auto* receipt) { receipt->mutable_output_rdma_slots(0)->mutable_rdma_descriptor()->set_remote_addr(0); }},
+        {"tensor outside payload",
+         [](auto* receipt) {
+             receipt->mutable_output_rdma_slots(0)->mutable_rdma_descriptor()->mutable_tensors(0)->set_offset(256);
+         }},
+        {"overlapping tensors",
+         [](auto* receipt) {
              auto* slot   = receipt->mutable_output_rdma_slots(0);
              auto* tensor = slot->mutable_rdma_descriptor()->add_tensors();
              tensor->add_shape(1);
@@ -282,18 +281,21 @@ TEST(MMRemoteOutputTransportTest, invalidDescriptorsAreRejectedBeforeProviderRea
              tensor->set_nbytes(16);
              slot->add_roles(MMRdmaSlotPB::EMBEDDING);
          }},
-        {"oversized payload", [](auto* receipt) { receipt->mutable_output_rdma_slots(0)
-                                                        ->mutable_rdma_descriptor()
-                                                        ->set_payload_bytes(65); }},
-        {"duplicate NIC key", [](auto* receipt) {
+        {"oversized payload",
+         [](auto* receipt) {
+             receipt->mutable_output_rdma_slots(0)->mutable_rdma_descriptor()->set_payload_bytes(65);
+         }},
+        {"duplicate NIC key",
+         [](auto* receipt) {
              auto* key = receipt->mutable_output_rdma_slots(0)->mutable_rdma_descriptor()->add_nic_keys();
              key->set_nic_id(0);
              key->set_rkey(2);
          }},
-        {"invalid dtype", [](auto* receipt) { receipt->mutable_output_rdma_slots(0)
-                                                    ->mutable_rdma_descriptor()
-                                                    ->mutable_tensors(0)
-                                                    ->set_data_type(static_cast<::TensorDataTypePB>(99)); }},
+        {"invalid dtype",
+         [](auto* receipt) {
+             receipt->mutable_output_rdma_slots(0)->mutable_rdma_descriptor()->mutable_tensors(0)->set_data_type(
+                 static_cast<::TensorDataTypePB>(99));
+         }},
     };
 
     RdmaConfig config;
@@ -318,21 +320,21 @@ TEST(MMRemoteOutputTransportTest, invalidDescriptorsAreRejectedBeforeProviderRea
 }
 
 TEST(MMRemoteOutputTransportTest, readerLockWaitHonorsDeadlineAndReleasesLeaseAsync) {
-    auto transport       = std::make_shared<FakeRdmaTransport>();
+    auto transport        = std::make_shared<FakeRdmaTransport>();
     transport->block_read = true;
-    MMRdmaReader reader(transport);
+    MMRdmaReader      reader(transport);
     FakeControlClient control;
-    const std::string endpoint = uniqueEndpoint("reader-lock-deadline");
-    auto first_receipt  = rdmaReceipt({"first"}, /*chunk_rows=*/1, /*split_size=*/{1});
-    auto second_receipt = rdmaReceipt({"second"}, /*chunk_rows=*/1, /*split_size=*/{1});
-    bool first_succeeded = false;
+    const std::string endpoint        = uniqueEndpoint("reader-lock-deadline");
+    auto              first_receipt   = rdmaReceipt({"first"}, /*chunk_rows=*/1, /*split_size=*/{1});
+    auto              second_receipt  = rdmaReceipt({"second"}, /*chunk_rows=*/1, /*split_size=*/{1});
+    bool              first_succeeded = false;
 
     std::thread first([&] {
         DeadlineBudget  budget(1000);
         DeliveryContext context{endpoint, budget, control};
         first_succeeded = reader.consume(first_receipt, context).succeeded();
     });
-    const bool read_entered = transport->waitUntilReadEntered(std::chrono::milliseconds(500));
+    const bool  read_entered = transport->waitUntilReadEntered(std::chrono::milliseconds(500));
     if (!read_entered) {
         transport->unblockRead();
         first.join();
@@ -341,9 +343,9 @@ TEST(MMRemoteOutputTransportTest, readerLockWaitHonorsDeadlineAndReleasesLeaseAs
 
     DeadlineBudget  short_budget(20);
     DeliveryContext short_context{endpoint, short_budget, control};
-    const auto      begin = std::chrono::steady_clock::now();
+    const auto      begin         = std::chrono::steady_clock::now();
     auto            second_result = reader.consume(second_receipt, short_context);
-    const auto elapsed =
+    const auto      elapsed =
         std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - begin);
     const auto reads_before_unblock    = transport->reads;
     const auto released_before_unblock = control.released;
@@ -444,4 +446,30 @@ TEST(MMRemoteOutputTransportTest, realInlineTerminalDecodesAndRejectsInconsisten
     }
 }
 
+TEST(MMRemoteOutputTransportTest, strictRdmaRejectsInlineAndReleasesMalformedMixedReceipt) {
+    Harness inline_client(/*with_transport=*/false);
+    inline_client.control->responses = {inlineReceipt(2)};
+    EXPECT_TRUE(inline_client.fetch(uniqueEndpoint("inline-without-rdma")).ok());
+    EXPECT_EQ(inline_client.terminal->consumed, 1u);
+
+    Harness strict_client;
+    auto    mixed = inlineReceipt(2);
+    TensorPbConvert::torchToPb(mixed.mutable_multimodal_embedding(), rows(2));
+    mixed.add_output_rdma_slots()->mutable_rdma_descriptor()->set_lease_id("unread-slot");
+    strict_client.control->responses = {inlineReceipt(2), mixed};
+    EXPECT_FALSE(strict_client.fetch(uniqueEndpoint("strict-inline")).ok());
+    EXPECT_TRUE(strict_client.control->released.empty());
+    EXPECT_FALSE(strict_client.fetch(uniqueEndpoint("strict-malformed-mixed")).ok());
+    EXPECT_EQ(strict_client.terminal->consumed, 0u);
+    EXPECT_EQ(strict_client.transport->reads, 0u);
+    ASSERT_EQ(strict_client.control->released.size(), 1u);
+    EXPECT_EQ(strict_client.control->released.front(), std::vector<std::string>({"unread-slot"}));
+}
+
+TEST(MMRemoteOutputTransportTest, typedRequestBudgetDoesNotExtendConfiguredRpcBudget) {
+    MultimodalInputsPB request;
+    request.set_timeout_ms(8000);
+    EXPECT_EQ(resolveRpcTimeoutMs(request, 5000), 5000);
+    EXPECT_EQ(resolveRpcTimeoutMs(request, 10000), 8000);
+}
 }  // namespace rtp_llm

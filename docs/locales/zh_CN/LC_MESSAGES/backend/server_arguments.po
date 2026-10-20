@@ -544,14 +544,6 @@ msgstr ""
 msgid "Override system maximum batch size."
 msgstr ""
 
-#: ../../backend/server_arguments.md
-msgid "`--enable-flashinfer-sample-kernel`"
-msgstr ""
-
-#: ../../backend/server_arguments.md
-msgid "Enables FlashInfer sampling kernel."
-msgstr ""
-
 #: ../../backend/server_arguments.md:103
 msgid "Logging & Profiling"
 msgstr ""

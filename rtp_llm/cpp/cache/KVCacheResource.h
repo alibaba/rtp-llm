@@ -78,33 +78,45 @@ private:
     size_t           kernel_blocks_per_kv_block_ = 1;
 };
 
-using GroupBlockIds = std::vector<std::shared_ptr<BlockIds>>;
+// Build the complete identity/row pair before publishing it through a const owner view.
+// Value copies own their index and row vector; the BlockIds holders remain shared.
+struct GroupBlockIds {
+    size_t                   size() const;
+    int                      blocksNum(std::string_view tag) const;
+    const BlockIndicesType&  blocks(std::string_view tag) const;
+    const BlockIndicesType&  kernelBlocks(std::string_view tag) const;
+    BlockIds&                mutableBlockIds(std::string_view tag);
+    const BlockIds&          blockIds(std::string_view tag) const;
+    std::vector<std::string> orderedTags() const;
+    void                     validate() const;
+
+    std::unordered_map<std::string, size_t> tag_to_index_;
+    std::vector<std::shared_ptr<BlockIds>>  rows_;
+};
 // Legacy per-layer view. Valid only when each layer maps to exactly one group.
 using LayerBlockIds     = std::vector<std::shared_ptr<BlockIds>>;
 using LayerAttnBlockIds = std::vector<std::vector<std::shared_ptr<BlockIds>>>;
 
 class KVCacheResource {
 public:
-    void initGroups(std::shared_ptr<const CacheTopology> topology);
+    void initGroups(std::shared_ptr<const CacheTopology> topology, bool materialize_layer_views = true);
     void resizeBlocks(int reserver_blocks, int value = 0);
 
-    int                     blocksNum(int group_id) const;
     int                     blocksNum(std::string_view tag) const;
-    const BlockIndicesType& blocks(int group_id) const;
     const BlockIndicesType& blocks(std::string_view tag) const;
-    const BlockIndicesType& blocks(int layer_id, int group_id) const;
     const BlockIndicesType& blocksForLayer(int layer_id, std::string_view tag) const;
-    const BlockIndicesType& kernelBlocks(int group_id) const;
     const BlockIndicesType& kernelBlocks(std::string_view tag) const;
-    const BlockIndicesType& kernelBlocks(int layer_id, int group_id) const;
     const BlockIndicesType& kernelBlocksForLayer(int layer_id, std::string_view tag) const;
-    BlockIds&               mutableBlockIds(int group_id) const;
     BlockIds&               mutableBlockIds(std::string_view tag) const;
-    BlockIds&               mutableBlockIds(int layer_id, int group_id) const;
     BlockIds&               mutableBlockIdsForLayer(int layer_id, std::string_view tag) const;
 
     const BlockIds& blockIds(std::string_view tag) const;
     const BlockIds& blockIdsForLayer(int layer_id, std::string_view tag) const;
+
+    // Shared-row view resolved through this resource's own tag map; keeps async
+    // holders aliasing the resource rows without re-deriving a group index.
+    std::shared_ptr<BlockIds> groupBlockIds(std::string_view tag) const;
+    const GroupBlockIds&      groupBlockIds() const;
 
     const std::vector<std::string>& groupTagsForLayer(int layer_id) const;
     const std::string&              soleGroupTagForLayer(int layer_id) const;
@@ -112,12 +124,11 @@ public:
     int layerNum() const;
     int groupNums() const;
 
-    GroupBlockIds&       groupBlocks();
-    const GroupBlockIds& groupBlocks() const;
+    std::vector<std::string> groupTags() const;
+    int                      maxBlocksNum() const;
+    size_t                   firstNonEmptyBlocksNum() const;
 
     LayerBlockIds            layerBlocks() const;
-    const LayerAttnBlockIds& layerGroupBlocks() const;
-    int                      groupId(int layer_id, int group_id) const;
 
     CacheKeysType&       cacheKeys();
     const CacheKeysType& cacheKeys() const;
@@ -156,29 +167,26 @@ public:
     size_t memoryReuseBlockNum() const;
     void   setMemoryReuseBlockNum(size_t memory_reuse_blocks_num);
 
-    size_t remoteReuseBlockNum() const;
-    void   setRemoteReuseBlockNum(size_t remote_reuse_blocks_num);
+    size_t diskReuseBlockNum() const;
+    void   setDiskReuseBlockNum(size_t disk_reuse_blocks_num);
+
+    size_t storageBackendReuseBlockNum() const;
+    void   setStorageBackendReuseBlockNum(size_t storage_backend_reuse_blocks_num);
 
     bool lastBlockAligned() const;
     void setLastBlockAligned(bool last_block_aligned);
 
-    size_t remoteReuseBlocksNum() const;
-    void   setRemoteReuseBlocksNum(size_t remote_reuse_blocks_num);
-
-    void swapBlocks(size_t group_id, size_t rhs, size_t lhs);
+    void swapBlocks(std::string_view group_tag, size_t rhs, size_t lhs);
 
     std::string debugString() const;
 
 private:
-    int  groupIdForTag(std::string_view tag) const;
-    int  groupIdForLayerTag(int layer_id, std::string_view tag) const;
+    void checkLayerTag(int layer_id, std::string_view tag) const;
     bool hasOneGroupPerLayer() const;
 
-    std::unordered_map<std::string, int>  tag_to_group_id_;
+    // Beam forks share immutable layer membership; default resources keep owning views.
+    std::shared_ptr<const CacheTopology>  topology_;
     std::vector<std::vector<std::string>> layer_group_tags_;
-    // layer_id -> group_id -> block_indices
-    LayerAttnBlockIds layer_group_block_ids;
-    // group_id -> block_indices
     GroupBlockIds         group_block_ids;
     CacheKeysType         cache_keys;
     BlockDependenciesType block_dependencies;
@@ -186,7 +194,8 @@ private:
 
     size_t device_reuse_block_num_{0};
     size_t memory_reuse_block_num_{0};
-    size_t remote_reuse_block_num_{0};
+    size_t disk_reuse_block_num_{0};
+    size_t storage_backend_reuse_block_num_{0};
     bool   last_block_aligned_{false};
 };
 

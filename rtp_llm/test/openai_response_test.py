@@ -175,6 +175,24 @@ async def fake_output_generator_once(
     yield outputs
 
 
+async def fake_output_generator_without_aux_info(
+    output_ids: List[int], num_choices: int, input_ids: torch.Tensor
+) -> AsyncGenerator[GenerateOutputs, None]:
+    """Simulate the engine response when aux_info collection is disabled."""
+    for output_len, token_id in enumerate(output_ids, start=1):
+        outputs = GenerateOutputs()
+        for _ in range(num_choices):
+            outputs.generate_outputs.append(
+                GenerateOutput(
+                    output_ids=torch.tensor([[token_id]], dtype=torch.int),
+                    finished=output_len == len(output_ids),
+                    input_ids=input_ids,
+                    aux_info=None,
+                )
+            )
+        yield outputs
+
+
 MAX_SEQ_LEN = 1024
 
 
@@ -506,6 +524,112 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         endpoint.stop_words_id_list = []
         endpoint.stop_words_str_list = []
         return tokenizer, renderer, endpoint
+
+    async def _run_without_aux_info(
+        self, stream: bool, num_choices: int, termination: str = "eos"
+    ):
+        tokenizer, renderer, endpoint = self._create_base_thinking_endpoint("disabled")
+        output_ids = tokenizer.encode("hello world", add_special_tokens=False)
+        self.assertGreater(len(output_ids), 1)
+        max_tokens = len(output_ids) if termination == "max_tokens" else 100
+        expected_reason = FinisheReason.length
+        if termination == "eos":
+            output_ids.append(renderer.eos_token_id)
+            expected_reason = FinisheReason.stop
+        elif termination == "max_seq_len":
+            renderer.max_seq_len = 7 + len(output_ids)
+
+        request = ChatCompletionRequest(
+            messages=[ChatMessage(role=RoleEnum.user, content="hello")],
+            stream=stream,
+            aux_info=False,
+            max_tokens=max_tokens,
+            n=num_choices,
+            extra_configs=GenerateConfig(
+                aux_info=False,
+                is_streaming=stream,
+                num_beams=num_choices,
+                num_return_sequences=num_choices,
+            ),
+        )
+        generate_config = endpoint._extract_generation_config(
+            request, input_ids=[1] * 7, renderer=renderer
+        )
+
+        class BackendWithoutAuxInfo:
+            def __init__(self):
+                self.generate_config = None
+
+            async def enqueue(self, generate_input: GenerateInput):
+                self.generate_config = generate_input.generate_config
+                return fake_output_generator_without_aux_info(
+                    output_ids, num_choices, generate_input.token_ids.reshape(1, -1)
+                )
+
+        backend = BackendWithoutAuxInfo()
+        choice_generator = renderer.generate_choice(
+            request_id=1,
+            input_ids=[1] * 7,
+            mm_inputs=[],
+            generate_config=generate_config,
+            backend_rpc_server_visitor=backend,
+            request=request,
+        )
+        response_generator = OpenaiEndpoint._complete_stream_response(
+            choice_generator, None, tokenizer
+        )
+        chunks = [chunk async for chunk in response_generator]
+        complete_response = await response_generator.gen_complete_response_once()
+
+        self.assertIsNotNone(backend.generate_config)
+        self.assertFalse(backend.generate_config.aux_info)
+        self.assertEqual(len(complete_response.choices), num_choices)
+        self.assertTrue(
+            all(
+                choice.finish_reason == expected_reason
+                for choice in complete_response.choices
+            )
+        )
+        self.assertTrue(
+            all(choice.message.content for choice in complete_response.choices)
+        )
+
+        self.assertEqual(complete_response.usage.prompt_tokens, 7)
+        self.assertEqual(
+            complete_response.usage.completion_tokens, len(output_ids) * num_choices
+        )
+        self.assertEqual(
+            complete_response.usage.total_tokens, 7 + len(output_ids) * num_choices
+        )
+        self.assertEqual(chunks[-1].usage, complete_response.usage)
+        serialized_chunks = [
+            chunk.model_dump(mode="json", exclude_none=True) for chunk in chunks
+        ]
+        serialized_response = complete_response.model_dump(
+            mode="json", exclude_none=True
+        )
+        self.assertTrue(all("aux_info" not in chunk for chunk in serialized_chunks))
+        self.assertNotIn("aux_info", serialized_response)
+
+        return request, generate_config
+
+    async def test_aux_info_false_preserves_eos_and_usage(self):
+        for stream, num_choices in ((True, 1), (False, 1), (True, 3), (False, 50)):
+            with self.subTest(stream=stream, num_choices=num_choices):
+                request, generate_config = await self._run_without_aux_info(
+                    stream, num_choices
+                )
+                self.assertEqual(generate_config.is_streaming, stream)
+                self.assertFalse(generate_config.aux_info)
+                self.assertFalse(request.aux_info)
+
+    async def test_aux_info_false_preserves_length_limits_and_usage(self):
+        for termination in ("max_tokens", "max_seq_len"):
+            for stream, num_choices in ((True, 1), (False, 1), (True, 3), (False, 3)):
+                with self.subTest(
+                    termination=termination, stream=stream, num_choices=num_choices
+                ):
+                    await self._run_without_aux_info(stream, num_choices, termination)
 
     async def _render_fixed_thinking_override(
         self, default_mode, request_mode, output_text
@@ -3008,6 +3132,51 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         )
 
         await return_output_ids_test_suite.test_no_stream()
+
+    async def test_custom_output_preserves_prefill_extra_outputs(self):
+        _, renderer = self._create_adaptive_qwen_renderer()
+        hidden = [[1.0, 2.0]]
+        score = [[-0.25]]
+        for with_score in (False, True):
+            with self.subTest(with_score=with_score):
+                config = GenerateConfig(return_all_hidden_states=True)
+
+                async def responses():
+                    for is_prefill in (True, False):
+                        output = GenerateOutput(
+                            all_hidden_states=(
+                                torch.tensor(hidden) if is_prefill else None
+                            ),
+                            custom_output=(torch.tensor(score) if with_score else None),
+                        )
+                        yield custom_renderer.StreamResponseObject(
+                            choices=[],
+                            extra_outputs=await renderer._generate_extra_outputs(
+                                output, config
+                            ),
+                        )
+
+                result = await OpenaiEndpoint._collect_complete_response(
+                    responses(), None
+                )
+                self.assertEqual(result.extra_outputs.all_hidden_states, hidden)
+                self.assertEqual(
+                    result.extra_outputs.custom_output, score if with_score else None
+                )
+
+    def test_native_chat_final_preserves_custom_output(self):
+        _, renderer = self._create_adaptive_qwen_renderer()
+        values = [[-0.25, 1.75]]
+        status = [custom_renderer.StreamStatusSync(ChatCompletionRequest(messages=[]))]
+        args = (status, [3], [2], [0], torch.tensor(values))
+        final = renderer.render_stream_response_final_blocking(*args)
+        for response in (
+            renderer.render_stream_response_final(*args),
+            renderer.collect_complete_response([final]),
+        ):
+            self.assertEqual(
+                json.loads(response)["extra_outputs"]["custom_output"], values
+            )
 
     async def test_debug_info_with_output_ids_and_raw_output(self):
         """Test that debug_info includes output_ids and raw_output when debug_info=True (non-streaming)"""

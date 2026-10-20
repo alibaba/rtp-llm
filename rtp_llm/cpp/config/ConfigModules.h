@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <sstream>
@@ -10,6 +11,11 @@
 #include "rtp_llm/models_py/bindings/core/Types.h"
 
 namespace rtp_llm {
+
+enum class HiddenStateCaptureDtype : int32_t {
+    BF16     = 0,
+    FP8_E4M3 = 1,
+};
 
 /** NCCL communication config (ip + ports). Aligns with Python NcclCommConfig. */
 struct NcclCommConfig {
@@ -37,7 +43,7 @@ struct PrefillCPConfig {
     bool kv_cache_sharded = false;
     // Explicit prefill CP size for decode-side fixed/SWA ring sizing; 0 = unset.
     int64_t prefill_cp_size = 0;
-    bool           is_enabled() const {
+    bool    is_enabled() const {
         return method != CPRotateMethod::DISABLED && method != CPRotateMethod::UNKNOWN
                && method != CPRotateMethod::PREFILL_CP;
     }
@@ -147,50 +153,64 @@ struct FMHAConfig {
     bool use_aiter_pa                        = true;
     bool use_asm_pa                          = true;
     // Default off: Triton PA on ROCm regressed vs ASM PA after the rocm_impl
-    // refactor; ASM/NonAsm now own the default decode path. Set to true to opt
-    // back into the Triton kernel.
+    // refactor. Set to true to select Triton for decode and no-prefix prefill;
+    // the latter is the ROCm generation-prefill graph-capable backend.
     bool        use_triton_pa  = false;
     int64_t     absorb_opt_len = 1024;
     std::string to_string() const;
 };
+
+constexpr double kDefaultDeviceLowWatermarkRatio  = 0.82;
+constexpr double kDefaultDeviceHighWatermarkRatio = 0.90;
+constexpr double kDefaultMemoryLowWatermarkRatio  = 0.90;
+constexpr double kDefaultMemoryHighWatermarkRatio = 0.94;
+constexpr double kDefaultDiskLowWatermarkRatio    = 0.92;
+constexpr double kDefaultDiskHighWatermarkRatio   = 0.97;
 
 struct KVCacheConfig {
     bool                                    reuse_cache           = false;
     std::string                             multi_task_prompt     = "";
     std::string                             multi_task_prompt_str = "";
     std::map<std::string, std::vector<int>> multi_task_prompt_tokens;
-    int64_t                                 reserve_block_ratio               = 5;
-    int                                     max_block_size_per_item           = 16;
-    int64_t                                 memory_cache_size_mb              = 0;
-    int64_t                                 memory_cache_sync_timeout_ms      = 10000;
-    bool                                    enable_memory_cache_disk          = false;
-    std::string                             memory_cache_disk_paths           = "";
-    int64_t                                 memory_cache_disk_size_mb         = 0;
-    bool                                    memory_cache_disk_buffered_io     = true;
-    int64_t                                 memory_cache_disk_sync_timeout_ms = 30000;
-    int                                     linear_step                       = 1;  // for linear attention cache reuse
+    int64_t                                 reserve_block_ratio                             = 5;
+    int                                     max_block_size_per_item                         = 16;
+    int64_t                                 memory_cache_size_mb                            = 0;
+    int64_t                                 memory_cache_sync_timeout_ms                    = 10000;
+    std::string                             disk_cache_paths                                = "";
+    int64_t                                 disk_cache_size_mb                              = 0;
+    bool                                    disk_cache_buffered_io                          = true;
+    int64_t                                 disk_cache_sync_timeout_ms                      = 30000;
+    int64_t                                 disk_cache_staging_block_count                  = 128;
+    int64_t                                 memory_cache_max_descriptors_per_transfer_batch = 8;
+    int64_t                                 block_tree_transfer_worker_count                = 4;
+    int64_t                                 block_tree_business_queue_max_size              = 10000;
+    int64_t                                 block_tree_transfer_queue_max_size              = 10000;
+    double block_tree_device_evict_low_watermark_ratio  = kDefaultDeviceLowWatermarkRatio;
+    double block_tree_device_evict_high_watermark_ratio = kDefaultDeviceHighWatermarkRatio;
+    double block_tree_memory_evict_low_watermark_ratio  = kDefaultMemoryLowWatermarkRatio;
+    double block_tree_memory_evict_high_watermark_ratio = kDefaultMemoryHighWatermarkRatio;
+    double block_tree_disk_evict_low_watermark_ratio    = kDefaultDiskLowWatermarkRatio;
+    double block_tree_disk_evict_high_watermark_ratio   = kDefaultDiskHighWatermarkRatio;
+    int    linear_step                                  = 1;  // for linear attention cache reuse
     // Fields merged from PyKvCacheConfig
-    int         fp8_kv_cache              = 0;
-    std::string ssm_state_dtype           = "bf16";
+    int fp8_kv_cache = 0;
+    // "auto" preserves a model-declared recurrent-state dtype. Models
+    // without such a declaration keep LinearAttentionConfig's BF16 default;
+    // the legacy remote connector falls back to BF16 because it requires one
+    // contiguous shared cache pool.
+    std::string ssm_state_dtype           = "auto";
     int64_t     kv_cache_mem_mb           = -1;
-    int         seq_size_per_block        = 64;
+    int         seq_size_per_block        = 0;
     int         kernel_seq_size_per_block = 0;
     int         test_block_num            = 0;
     int         use_block_cache           = -1;  // -1 means not set, use Optional<int> equivalent
     bool        enable_device_cache       = true;
     bool        enable_memory_cache       = false;
-    // When true, memory-cache H2D/D2H may use split-KV SM scatter/gather (CUDA) when layout is eligible.
-    bool    enable_memory_cache_sm_copy             = false;
-    bool    enable_remote_cache                     = false;
-    bool    write_cache_sync                        = false;
-    bool    enable_tiered_memory_cache              = false;
-    bool    enable_gpu_prefix_tree                  = false;
-    bool    enable_prefix_tree_memory_cache         = false;
-    bool    enable_legacy_memory_connector_fallback = true;
-    int64_t prefix_tree_memory_state_swa_pool_ratio = 0;
-    bool    enable_independent_group_eviction       = false;
-    int64_t device_cache_min_free_blocks            = 0;
-    int     load_cache_retry_times                  = 1;  // Maximum retry attempts for load cache transfer failures
+    bool        enable_disk_cache         = false;
+    bool        enable_remote_cache       = false;
+    std::string device_eviction_policy    = "lru";
+    std::string memory_eviction_policy    = "lru";
+    std::string disk_eviction_policy      = "fifo";
 
     // DSV4 fixed-allocation pool block count. 0 means the fixed regions
     // (INDEXER_STATE / CSA_STATE / HCA_STATE / SWA_KV) use the normal
@@ -206,33 +226,36 @@ struct KVCacheConfig {
     bool dsv4_fixed_pool_use_memory = false;
 
     // HBM cache event publishing. Only tp_rank=0 with pp_size=1 creates an active publisher for each DP replica.
-    std::string kv_cache_event_publisher_type        = "none";  // none | kvcm
-    std::string kv_cache_event_manager_endpoint      = "";      // KVCM Meta HTTP endpoint
-    std::string kv_cache_event_instance_group        = "";
-    std::string kv_cache_event_instance_id           = "";
-    std::string kv_cache_event_host_ip_port          = "";
+    std::string kv_cache_event_publisher_type   = "none";  // none | kvcm
+    std::string kv_cache_event_manager_endpoint = "";      // KVCM Meta HTTP endpoint
+    std::string kv_cache_event_instance_group   = "";
+    std::string kv_cache_event_instance_id      = "";
+    std::string kv_cache_event_host_ip_port     = "";
+    // BlockTreeCache FULL prefix invariant scanner; interval 0 disables the scanner thread.
+    // Batch size and detail cap are scanner-internal constants, not user-tunable.
+    int64_t block_tree_full_prefix_scan_interval_ms = 0;
 
-    // Remote connector configuration fields
-    bool        reco_enable_vipserver                = false;
-    std::string reco_vipserver_domain                = "";
-    std::string reco_server_address                  = "";
-    std::string reco_instance_group                  = "default";
-    uint32_t    reco_meta_channel_retry_time         = 3;
-    uint32_t    reco_meta_channel_connection_timeout = 6000;
-    uint32_t    reco_meta_channel_call_timeout       = 1500;
-    uint32_t    reco_storage_thread_num              = 4;
-    uint32_t    reco_storage_queue_size              = 2000;
-    int         reco_put_timeout_ms                  = 12000;
-    int         reco_get_timeout_ms                  = 12000;
-    std::string reco_model_sdk_config                = R"([{"type":"local","sdk_log_level":"DEBUG"}])";
-    std::string reco_model_user_data                 = "";
-    std::string reco_model_extra_info                = "";
-    std::string reco_instance_id_salt                = "";
-    size_t      reco_asyncwrapper_thread_num         = 16;
-    size_t      reco_asyncwrapper_queue_size         = 1000;
-    int         reco_get_broadcast_timeout           = 15000;
-    int         reco_put_broadcast_timeout           = 15000;
-    std::string reco_client_config                   = "";
+    // KVCM storage backend configuration fields
+    bool        kvcm_enable_vipserver                = false;
+    std::string kvcm_vipserver_domain                = "";
+    std::string kvcm_server_address                  = "";
+    std::string kvcm_instance_group                  = "default";
+    uint32_t    kvcm_meta_channel_retry_time         = 3;
+    uint32_t    kvcm_meta_channel_connection_timeout = 6000;
+    uint32_t    kvcm_meta_channel_call_timeout       = 1500;
+    uint32_t    kvcm_storage_thread_num              = 4;
+    uint32_t    kvcm_storage_queue_size              = 2000;
+    int         kvcm_put_timeout_ms                  = 12000;
+    int         kvcm_get_timeout_ms                  = 12000;
+    std::string kvcm_model_sdk_config                = R"([{"type":"local","sdk_log_level":"DEBUG"}])";
+    std::string kvcm_model_user_data                 = "";
+    std::string kvcm_model_extra_info                = "";
+    std::string kvcm_instance_id_salt                = "";
+    size_t      kvcm_asyncwrapper_thread_num         = 16;
+    size_t      kvcm_asyncwrapper_queue_size         = 1000;
+    int         kvcm_get_broadcast_timeout           = 15000;
+    int         kvcm_put_broadcast_timeout           = 15000;
+    std::string kvcm_client_config                   = "";
     void        insertMultiTaskPromptTokens(std::string task_id, std::vector<int64_t> tokens_id);
     std::string to_string() const;
 };
@@ -259,6 +282,17 @@ struct ProfilingDebugLoggingConfig {
 };
 
 struct HWKernelConfig {
+    static constexpr int kGenerationPrefillCudaGraphMaxCaptureTokens = 1 << 20;
+    // Every bucket retains a whole-model device graph and its graph-owned
+    // allocations. Keep malformed list/range/file input from turning startup
+    // into an unbounded capture loop; production presets use only seven.
+    static constexpr int kGenerationPrefillCudaGraphMaxCaptureBuckets = 64;
+    // The generation-prefill attention backend receives one additional
+    // positive-length padding-sentinel row. CUDA's graph-safe paged-attention
+    // plan is a single-CTA kernel with at most 1024 rows, so real requests must
+    // stay at or below 1023.
+    static constexpr int kGenerationPrefillCudaGraphMaxRequests = 1023;
+
     int         deep_gemm_num_sm             = -1;
     bool        arm_gemm_use_kai             = false;
     bool        enable_multi_block_mode      = true;
@@ -267,8 +301,12 @@ struct HWKernelConfig {
     bool        use_swizzleA                 = false;
     bool        enable_cuda_graph            = false;
     bool        enable_cuda_graph_debug_mode = false;
-    bool        enable_native_cuda_graph     = false;
-    int         num_native_cuda_graph        = 200;
+    // Generation-prefill graph is enabled only when the CUDA graph master
+    // switch is on and this capture bucket list is explicitly configured.
+    int              generation_prefill_cuda_graph_max_requests = 1;
+    std::vector<int> generation_prefill_capture_token_buckets;
+    bool             enable_native_cuda_graph = false;
+    int              num_native_cuda_graph    = 200;
     // Prefill CUDA Graph capture configuration
     // Can be set via: prefill_capture_file_path, prefill_capture_seq_lens, or prefill_capture_max_seq_len + step
     std::vector<int> prefill_capture_seq_lens;
@@ -333,8 +371,12 @@ struct SpeculativeExecutionConfig {
     std::string     checkpoint_path               = "";
     // DSpARK noise/mask token used to build each fixed-width draft block.
     // Filled from the draft checkpoint by ModelFactory.
-    int64_t     sp_dspark_mask_token_id = -1;
+    int64_t sp_dspark_mask_token_id = -1;
+    // True: gamma query rows, including the anchor prediction. False:
+    // one conditioning anchor followed by gamma prediction rows.
+    bool        sp_dspark_sample_from_anchor = true;
     std::string to_string() const;
+    size_t      speculativeReserveStep() const;
 
     // Helper functions for enum conversion
     static SpeculativeType from_string(const std::string& str);
@@ -364,18 +406,18 @@ struct VitConfig {
 };
 
 struct CacheStoreConfig {
-    bool    cache_store_rdma_mode               = false;
-    int     wrr_available_ratio                 = 80;
-    int     rank_factor                         = 0;
-    int     thread_count                        = 32;
-    int     rdma_connect_timeout_ms             = 250;
-    int     rdma_qp_count_per_connection        = 2;
-    int     rdma_io_thread_count                = 4;
-    int     rdma_worker_thread_count            = 2;
-    int     messager_io_thread_count            = 2;
-    int     messager_worker_thread_count        = 32;
-    int64_t rdma_transfer_wait_timeout_ms       = 180 * 1000;  // RDMA 传输完成最大等待超时时间，默认 180 秒
-    int     rdma_max_block_pairs_per_connection = 0;  // 每条 RDMA 连接可处理的最大 block_pair 数量，0 表示不限制
+    bool    cache_store_rdma_mode         = false;
+    int     wrr_available_ratio           = 80;
+    int     rank_factor                   = 0;
+    int     thread_count                  = 32;
+    int     rdma_connect_timeout_ms       = 250;
+    int     rdma_qp_count_per_connection  = 2;
+    int     rdma_io_thread_count          = 4;
+    int     rdma_worker_thread_count      = 2;
+    int     messager_io_thread_count      = 2;
+    int     messager_worker_thread_count  = 32;
+    int64_t rdma_transfer_wait_timeout_ms = 180 * 1000;  // RDMA 传输完成最大等待超时时间，默认 180 秒
+    int rdma_max_block_pairs_per_connection = 0;  // 每条 RDMA 连接可处理的最大 block_pair 数量，0 表示不限制
     int64_t p2p_read_steal_before_deadline_ms =
         250;  // Decode read：在此距 deadline 时从 recv store steal，阻止新 transfer 匹配
     int64_t p2p_read_return_before_deadline_ms = 100;  // Decode read 与 Prefill send：transfer 层 deadline / worker
@@ -419,7 +461,7 @@ struct FIFOSchedulerConfig {
     //   "N"   -> 1 prefill : N decode (decode-heavy); "1" = strict alternation.
     //   "1/X" -> X prefill : 1 decode (prefill-heavy).
     //   invalid input falls back to "1".
-    std::string decode_prefill_ratio = "1";
+    std::string decode_prefill_ratio           = "1";
     bool        cp_force_single_prefill        = true;
     int64_t     max_inited_kv_cache_streams    = 0;
     int64_t     max_batch_tokens_without_cache = 0;
@@ -437,7 +479,7 @@ struct GrammarConfig {
     // Positive number of grammar compiles that may run concurrently in this engine process.
     int compile_concurrency = 1;
     // Positive number of distinct compiles that may wait behind running work.
-    int compile_queue_size = 2;
+    int         compile_queue_size = 2;
     std::string tokenizer_info_json;
     // Total byte cap split between xgrammar's cache and the engine verdict LRU; <=0 = unlimited.
     int64_t     compiler_cache_bytes = 2L * 1024L * 1024L * 1024L;
@@ -453,6 +495,8 @@ struct RuntimeConfig {
     bool    warm_up                = false;
     bool    warm_up_with_loss      = false;
     bool    model_warm_up          = true;
+
+    int output_dispatcher_worker_count = 0;
 
     // Scheduler configuration
     bool                       use_batch_decode_scheduler = false;
@@ -635,7 +679,7 @@ struct GrpcMapsConfig {
 struct GrpcConfig: GrpcMapsConfig {
     /// If > 0, passed to gRPC sync server as ``MAX_POLLERS`` (per completion queue).
     int max_server_pollers = 0;
-    GrpcConfig() {};
+    GrpcConfig(){};
     GrpcConfig(const std::string& json_str);
     std::string to_string() const;
     void        from_json(const std::string& json_str);
@@ -644,7 +688,7 @@ struct GrpcConfig: GrpcMapsConfig {
 /// DashSc gRPC (predict_v2.proto) Python client/server channel options.
 struct DashScGrpcConfig: GrpcMapsConfig {
     int max_server_workers = 4;
-    DashScGrpcConfig() {};
+    DashScGrpcConfig(){};
     DashScGrpcConfig(const std::string& json_str);
     std::string to_string() const;
     void        from_json(const std::string& json_str);
@@ -668,8 +712,7 @@ enum class HybridAttentionType {
 };
 
 struct HybridAttentionConfig {
-    bool                             enable_hybrid_attention           = false;
-    bool                             enable_independent_kv_cache_pools = false;
+    bool                             enable_hybrid_attention = false;
     std::vector<HybridAttentionType> hybrid_attention_types;
     std::string                      to_string() const;
 };

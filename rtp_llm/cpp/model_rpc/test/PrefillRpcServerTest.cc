@@ -4,10 +4,12 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <vector>
 
 #include "gtest/gtest.h"
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 
@@ -15,10 +17,11 @@ namespace rtp_llm {
 
 class TestDecodeRpcService final: public RpcService::Service {
 public:
-    explicit TestDecodeRpcService(bool fail_first_allocate):
-        first_allocate_failure_(fail_first_allocate ? std::optional<grpc::Status>(
-                                    grpc::Status(grpc::StatusCode::INTERNAL, "allocate failed once")) :
-                                                      std::nullopt) {}
+    explicit TestDecodeRpcService(bool fail_first_allocate, bool supports_completion = false):
+        first_allocate_failure_(fail_first_allocate ? std::optional<grpc::Status>(grpc::Status(
+                                                          grpc::StatusCode::INTERNAL, "allocate failed once")) :
+                                                      std::nullopt),
+        supports_completion_(supports_completion) {}
 
     explicit TestDecodeRpcService(grpc::Status first_allocate_failure):
         first_allocate_failure_(std::move(first_allocate_failure)) {}
@@ -35,6 +38,7 @@ public:
         }
 
         GenerateOutputsPB response;
+        response.set_supports_prefill_completion(supports_completion_);
         if (!stream->Write(response)) {
             return grpc::Status(grpc::StatusCode::INTERNAL, "write allocate response failed");
         }
@@ -49,11 +53,13 @@ public:
 private:
     std::optional<grpc::Status> first_allocate_failure_;
     std::atomic<int>            allocate_count_{0};
+    bool                        supports_completion_ = false;
 };
 
 class TestDecodeRpcServer {
 public:
-    explicit TestDecodeRpcServer(bool fail_first_allocate): service_(fail_first_allocate) {}
+    explicit TestDecodeRpcServer(bool fail_first_allocate, bool supports_completion = false):
+        service_(fail_first_allocate, supports_completion) {}
     explicit TestDecodeRpcServer(grpc::Status first_allocate_failure): service_(std::move(first_allocate_failure)) {}
     ~TestDecodeRpcServer() {
         if (server_) {
@@ -99,7 +105,9 @@ public:
 
 private:
     ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<MultimodalInput> mm_inputs,
-                                                      std::string                        ip_port = "") override {
+                                                      std::string                        ip_port = "",
+                                                      int64_t                                    = 0,
+                                                      grpc::ServerContext*                       = nullptr) override {
         const auto result_code = result_codes_[std::min<size_t>(call_count_, result_codes_.size() - 1)];
         ++call_count_;
         if (result_code != ErrorCode::NONE_ERROR) {
@@ -214,8 +222,7 @@ protected:
         ModelConfig model_config;
         model_config.max_seq_len = 2048;
         model_config.vocab_size  = 1024;
-        return std::make_shared<NormalGenerateStream>(
-            input, model_config, RuntimeConfig{}, ResourceContext{}, nullptr);
+        return std::make_shared<NormalGenerateStream>(input, model_config, RuntimeConfig{}, ResourceContext{}, nullptr);
     }
 
     std::unique_ptr<PrefillGenerateContext> makeContext(GenerateInputPB* request, int64_t timeout_ms = 0) {
@@ -231,6 +238,98 @@ protected:
     kmonitor::MetricsReporterPtr metrics_reporter_;
 };
 
+TEST_F(PrefillRpcServerTest, PrefillCompletionRequiresCapabilityAndSuccessfulLocalFinish) {
+    class CompletionClient final: public PrefillGenerateContext::ClientStream {
+    public:
+        bool Read(GenerateOutputsPB*) override {
+            return true;
+        }
+        bool NextMessageSize(uint32_t*) override {
+            return false;
+        }
+        bool Write(const GenerateRequestPB& request, grpc::WriteOptions) override {
+            writes.push_back(request);
+            return write_ok;
+        }
+        void WaitForInitialMetadata() override {}
+        bool WritesDone() override {
+            return true;
+        }
+        grpc::Status Finish() override {
+            return grpc::Status::OK;
+        }
+        bool                           write_ok = true;
+        std::vector<GenerateRequestPB> writes;
+    };
+
+    for (const std::string mode : {"complete", "legacy", "continue", "unfinished", "error", "write_failure"}) {
+        SCOPED_TRACE(mode);
+        GenerateInputPB request;
+        request.set_request_id(42);
+        auto context                             = makeContext(&request);
+        context->meta                            = std::make_shared<RpcServerRuntimeMeta>();
+        context->generate_input                  = std::make_shared<GenerateInput>();
+        context->generate_input->generate_config = std::make_shared<GenerateConfig>();
+        auto stream                              = makeWaitingStream();
+        context->setStream(stream);
+        if (mode != "unfinished") {
+            stream->reportEvent(StreamEvents::GenerateDone);
+        }
+        if (mode == "continue") {
+            stream->reportEvent(StreamEvents::NeedRemoteGenerate);
+        }
+        if (mode == "error") {
+            stream->reportError(ErrorCode::CANCELLED, "cancelled before completion");
+        }
+        context->supports_prefill_completion = mode != "legacy";
+        auto client                          = std::make_shared<CompletionClient>();
+        client->write_ok                     = mode != "write_failure";
+        context->client_stream               = client;
+        TestPrefillRpcServer server;
+        server.setProcessIdForTest("prefill");
+        server.remoteLoadCacheEnd(*context);
+        if (mode == "complete" || mode == "write_failure") {
+            ASSERT_EQ(client->writes.size(), 1u);
+            EXPECT_EQ(client->writes[0].stage(), RemoteStage::PREFILL_COMPLETE);
+            EXPECT_EQ(client->writes[0].request_id(), 42);
+            EXPECT_EQ(client->writes[0].client_id(), "prefill");
+        } else {
+            EXPECT_TRUE(client->writes.empty());
+        }
+        if (mode == "write_failure") {
+            EXPECT_TRUE(context->hasError());
+        } else if (mode == "complete" || mode == "legacy") {
+            EXPECT_TRUE(context->finished);
+            EXPECT_FALSE(context->hasError());
+        } else if (mode == "continue") {
+            EXPECT_FALSE(context->finished);
+        }
+        context->stream_.reset();
+    }
+}
+
+TEST_F(PrefillRpcServerTest, AllocateNegotiatesPrefillCompletionPerAttempt) {
+    for (const bool supported : {true, false}) {
+        SCOPED_TRACE(supported);
+        TestDecodeRpcServer decode_server(false, supported);
+        ASSERT_TRUE(decode_server.start());
+        GenerateInputPB request;
+        request.set_request_id(42);
+        request.add_token_ids(1);
+        auto context            = makeContext(&request);
+        context->generate_input = makeMultimodalInput();
+        context->generate_input->generate_config->role_addrs.emplace_back(
+            RoleType::DECODE, "127.0.0.1", 0, decode_server.listenPort());
+        context->supports_prefill_completion = !supported;
+        TestPrefillRpcServer server;
+        server.mm_processor_ = std::make_shared<TestMultimodalProcessor>(ErrorCode::NONE_ERROR);
+        server.prepareAllocateResource(*context);
+        ASSERT_TRUE(context->ok());
+        EXPECT_EQ(context->supports_prefill_completion, supported);
+        EXPECT_TRUE(context->closeGrpcStream().ok());
+    }
+}
+
 TEST_F(PrefillRpcServerTest, waitStreamBeforeRunUsesEachServerTimeout) {
     TestPrefillRpcServer first_server;
     first_server.setPrefillMaxWaitTimeoutForTest(1);
@@ -243,6 +342,158 @@ TEST_F(PrefillRpcServerTest, waitStreamBeforeRunUsesEachServerTimeout) {
     auto second_error = second_server.waitStreamBeforeRunForTest(makeWaitingStream());
     EXPECT_EQ(second_error.code(), ErrorCode::WAIT_TO_RUN_TIMEOUT);
     EXPECT_NE(second_error.ToString().find("7000 us"), std::string::npos);
+}
+
+TEST_F(PrefillRpcServerTest, GenerateStreamCallRejectsNullRequestBeforeDereference) {
+    TestPrefillRpcServer server;
+    grpc::ServerContext  context;
+
+    const auto status = server.GenerateStreamCall(&context, nullptr, nullptr);
+
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+    ErrorDetailsPB error_details;
+    ASSERT_TRUE(error_details.ParseFromString(status.error_details()));
+    EXPECT_EQ(error_details.error_code(), static_cast<int>(ErrorCode::INVALID_PARAMS));
+    EXPECT_NE(error_details.error_message().find("prefill generate request must not be null"), std::string::npos);
+}
+
+TEST_F(PrefillRpcServerTest, explicitPrefillOnlyRejectsPositiveMaxNewTokensBeforeRouting) {
+    GenerateInputPB request;
+    request.set_request_id(1);
+    request.add_token_ids(0);
+    auto* config = request.mutable_generate_config();
+    config->set_max_new_tokens(2);
+    config->set_prefill_only(true);
+    config->set_can_use_pd_separation(true);
+
+    TestPrefillRpcServer server;
+    server.setEngineForTest(/*is_mtp_eagle=*/false);
+    grpc::ServerContext context;
+    const auto          status = server.GenerateStreamCall(&context, &request, nullptr);
+
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+    ErrorDetailsPB error_details;
+    ASSERT_TRUE(error_details.ParseFromString(status.error_details()));
+    EXPECT_EQ(error_details.error_code(), static_cast<int>(ErrorCode::INVALID_PARAMS));
+    EXPECT_NE(error_details.error_message().find("prefill_only"), std::string::npos);
+    EXPECT_NE(error_details.error_message().find("max_new_tokens"), std::string::npos);
+}
+
+TEST_F(PrefillRpcServerTest, explicitPrefillOnlyRejectsReturnPromptLogitsBeforeRouting) {
+    GenerateInputPB request;
+    request.set_request_id(2);
+    request.add_token_ids(0);
+    auto* config = request.mutable_generate_config();
+    config->set_max_new_tokens(0);
+    config->set_prefill_only(true);
+    config->set_return_prompt_logits(true);
+    config->set_can_use_pd_separation(true);
+
+    TestPrefillRpcServer server;
+    grpc::ServerContext  context;
+    const auto           status = server.GenerateStreamCall(&context, &request, nullptr);
+
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+    ErrorDetailsPB error_details;
+    ASSERT_TRUE(error_details.ParseFromString(status.error_details()));
+    EXPECT_EQ(error_details.error_code(), static_cast<int>(ErrorCode::INVALID_PARAMS));
+    EXPECT_NE(error_details.error_message().find("prefill_only"), std::string::npos);
+    EXPECT_NE(error_details.error_message().find("return_prompt_logits"), std::string::npos);
+}
+
+TEST_F(PrefillRpcServerTest, rawGrpcPromptScoringWithPositiveMaxNewTokensRoutesLocally) {
+    GenerateInputPB request;
+    request.set_request_id(3);
+    request.add_token_ids(0);
+    request.add_multimodal_inputs()->set_multimodal_url("image");
+    auto* config = request.mutable_generate_config();
+    config->set_max_new_tokens(8);
+    config->set_return_prompt_logits(true);
+    config->set_is_streaming(true);
+    config->set_reuse_cache(true);
+    config->set_can_use_pd_separation(true);
+    ASSERT_FALSE(config->prefill_only());
+    ASSERT_EQ(QueryConverter::resolveMaxNewTokens(*config), 1);
+
+    TestPrefillRpcServer server;
+    server.mm_processor_          = std::make_shared<TestMultimodalProcessor>(ErrorCode::MM_WRONG_FORMAT_ERROR);
+    auto                processor = std::static_pointer_cast<TestMultimodalProcessor>(server.mm_processor_);
+    grpc::ServerContext context;
+    const auto          status = server.GenerateStreamCall(&context, &request, nullptr);
+
+    EXPECT_EQ(processor->callCount(), 1);
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::INTERNAL);
+    ErrorDetailsPB error_details;
+    ASSERT_TRUE(error_details.ParseFromString(status.error_details()));
+    EXPECT_EQ(error_details.error_code(), static_cast<int>(ErrorCode::MM_WRONG_FORMAT_ERROR));
+    EXPECT_NE(error_details.error_message().find("multimodal test error"), std::string::npos);
+}
+
+TEST_F(PrefillRpcServerTest, bareWireZeroRoutesToLocalLegacyPrefill) {
+    GenerateInputPB request;
+    request.set_request_id(101);
+    request.add_token_ids(0);
+    auto* config = request.mutable_generate_config();
+    config->set_max_new_tokens(0);
+    config->set_prefill_only(false);
+    config->set_can_use_pd_separation(true);
+    ASSERT_EQ(QueryConverter::resolveMaxNewTokens(*config), 0);
+
+    std::string serialized_request;
+    ASSERT_TRUE(request.SerializeToString(&serialized_request));
+    GenerateInputPB wire_request;
+    ASSERT_TRUE(wire_request.ParseFromString(serialized_request));
+    ASSERT_EQ(wire_request.generate_config().max_new_tokens(), 0);
+    ASSERT_FALSE(wire_request.generate_config().prefill_only());
+    ASSERT_TRUE(wire_request.generate_config().can_use_pd_separation());
+
+    wire_request.add_multimodal_inputs()->set_multimodal_url("image");
+    TestPrefillRpcServer server;
+    server.mm_processor_          = std::make_shared<TestMultimodalProcessor>(ErrorCode::MM_WRONG_FORMAT_ERROR);
+    auto                processor = std::static_pointer_cast<TestMultimodalProcessor>(server.mm_processor_);
+    grpc::ServerContext context;
+    const auto          status = server.GenerateStreamCall(&context, &wire_request, nullptr);
+
+    EXPECT_EQ(processor->callCount(), 1);
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::INTERNAL);
+    ErrorDetailsPB error_details;
+    ASSERT_TRUE(error_details.ParseFromString(status.error_details()));
+    EXPECT_EQ(error_details.error_code(), static_cast<int>(ErrorCode::MM_WRONG_FORMAT_ERROR));
+    EXPECT_NE(error_details.error_message().find("multimodal test error"), std::string::npos);
+}
+
+TEST_F(PrefillRpcServerTest, flaggedWireZeroRoutesToLocalPrefillOnly) {
+    GenerateInputPB request;
+    request.set_request_id(102);
+    request.add_token_ids(0);
+    request.add_token_ids(1);
+    request.add_token_ids(2);
+    request.add_multimodal_inputs()->set_multimodal_url("image");
+    auto* config = request.mutable_generate_config();
+    config->set_max_new_tokens(0);
+    config->set_prefill_only(true);
+    config->set_can_use_pd_separation(true);
+
+    std::string serialized_request;
+    ASSERT_TRUE(request.SerializeToString(&serialized_request));
+    GenerateInputPB wire_request;
+    ASSERT_TRUE(wire_request.ParseFromString(serialized_request));
+    ASSERT_EQ(wire_request.generate_config().max_new_tokens(), 0);
+    ASSERT_TRUE(wire_request.generate_config().prefill_only());
+    ASSERT_TRUE(wire_request.generate_config().can_use_pd_separation());
+
+    TestPrefillRpcServer server;
+    server.mm_processor_          = std::make_shared<TestMultimodalProcessor>(ErrorCode::MM_WRONG_FORMAT_ERROR);
+    auto                processor = std::static_pointer_cast<TestMultimodalProcessor>(server.mm_processor_);
+    grpc::ServerContext context;
+    const auto          status = server.GenerateStreamCall(&context, &wire_request, nullptr);
+
+    EXPECT_EQ(processor->callCount(), 1);
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::INTERNAL);
+    ErrorDetailsPB error_details;
+    ASSERT_TRUE(error_details.ParseFromString(status.error_details()));
+    EXPECT_EQ(error_details.error_code(), static_cast<int>(ErrorCode::MM_WRONG_FORMAT_ERROR));
+    EXPECT_NE(error_details.error_message().find("multimodal test error"), std::string::npos);
 }
 
 TEST_F(PrefillRpcServerTest, prepareAllocateResourceRetriesDecodeWithoutRepeatingMultimodalProcessing) {
@@ -545,8 +796,7 @@ TEST_F(PrefillRpcServerTest, retrySleepSaturatesOverflowingInterval) {
     request.set_request_id(12);
     auto context = makeContext(&request);
 
-    EXPECT_EQ(context->cappedRetrySleepUs(std::numeric_limits<int64_t>::max()),
-              std::numeric_limits<int64_t>::max());
+    EXPECT_EQ(context->cappedRetrySleepUs(std::numeric_limits<int64_t>::max()), std::numeric_limits<int64_t>::max());
 }
 
 TEST_F(PrefillRpcServerTest, mergeMultimodalLengthsUsesPrefillMetadata) {
@@ -567,52 +817,193 @@ TEST_F(PrefillRpcServerTest, mergeMultimodalLengthsUsesPrefillMetadata) {
 
 TEST_F(PrefillRpcServerTest, mergeCacheReuseInfoReportsCompletedDecodeHandoffForColdPrefill) {
     AuxInfoPB aux_info;
-    aux_info.set_total_reuse_len(1280);
-    aux_info.set_local_reuse_len(1280);
+    aux_info.set_total_reuse_len(2560);
+    aux_info.set_local_reuse_len(2560);
 
-    PrefillRpcServer::mergeCacheReuseInfo(aux_info, 0, 0, 0, 0, /*use_independent_block_pools=*/true);
+    PrefillRpcServer::mergeCacheReuseInfo(aux_info,
+                                          /*prefill_total_reuse_len=*/0,
+                                          /*prefill_local_reuse_len=*/0,
+                                          /*prefill_remote_reuse_len=*/0,
+                                          /*prefill_memory_reuse_len=*/0,
+                                          /*prefill_disk_reuse_len=*/0,
+                                          /*group_num=*/2);
 
-    EXPECT_EQ(aux_info.total_reuse_len(), 1280);
+    EXPECT_EQ(aux_info.total_reuse_len(), 2560);
+    EXPECT_EQ(aux_info.local_reuse_len(), 2560);
     EXPECT_EQ(aux_info.prefill_total_reuse_len(), 0);
-    EXPECT_EQ(aux_info.decode_total_reuse_len(), 1280);
-    EXPECT_EQ(aux_info.decode_local_reuse_len(), 1280);
+    EXPECT_EQ(aux_info.decode_total_reuse_len(), 2560);
+    EXPECT_EQ(aux_info.decode_local_reuse_len(), 2560);
 }
 
-TEST_F(PrefillRpcServerTest, mergeCacheReuseInfoKeepsLongerPrefillPrefixWithoutAddingPhases) {
+TEST_F(PrefillRpcServerTest, mergeCacheReuseInfoKeepsLargerPrefillHitWithoutAddingPhases) {
     AuxInfoPB aux_info;
-    aux_info.set_total_reuse_len(1280);
-    aux_info.set_local_reuse_len(1280);
+    aux_info.set_total_reuse_len(2560);
+    aux_info.set_local_reuse_len(2560);
 
-    PrefillRpcServer::mergeCacheReuseInfo(aux_info, 1536, 1536, 0, 1536, /*use_independent_block_pools=*/true);
+    PrefillRpcServer::mergeCacheReuseInfo(aux_info,
+                                          /*prefill_total_reuse_len=*/2688,
+                                          /*prefill_local_reuse_len=*/2688,
+                                          /*prefill_remote_reuse_len=*/0,
+                                          /*prefill_memory_reuse_len=*/2688,
+                                          /*prefill_disk_reuse_len=*/0,
+                                          /*group_num=*/2);
 
-    EXPECT_EQ(aux_info.total_reuse_len(), 1536);
-    EXPECT_EQ(aux_info.memory_reuse_len(), 1536);
-    EXPECT_EQ(aux_info.prefill_total_reuse_len(), 1536);
-    EXPECT_EQ(aux_info.decode_total_reuse_len(), 1280);
+    EXPECT_EQ(aux_info.total_reuse_len(), 2688);
+    EXPECT_EQ(aux_info.local_reuse_len(), 2688);
+    EXPECT_EQ(aux_info.memory_reuse_len(), 2688);
+    EXPECT_EQ(aux_info.prefill_total_reuse_len(), 2688);
+    EXPECT_EQ(aux_info.decode_total_reuse_len(), 2560);
 }
 
-TEST_F(PrefillRpcServerTest, mergeCacheReuseInfoPrefersPrefillAttributionOnEqualPrefix) {
+TEST_F(PrefillRpcServerTest, mergeCacheReuseInfoPrefersPrefillTierOnEqualPrefix) {
     AuxInfoPB aux_info;
     aux_info.set_total_reuse_len(512);
     aux_info.set_local_reuse_len(512);
+    aux_info.set_memory_reuse_len(0);
 
-    PrefillRpcServer::mergeCacheReuseInfo(aux_info, 512, 512, 0, 512, /*use_independent_block_pools=*/true);
+    PrefillRpcServer::mergeCacheReuseInfo(aux_info,
+                                          /*prefill_total_reuse_len=*/512,
+                                          /*prefill_local_reuse_len=*/512,
+                                          /*prefill_remote_reuse_len=*/0,
+                                          /*prefill_memory_reuse_len=*/512,
+                                          /*prefill_disk_reuse_len=*/0,
+                                          /*group_num=*/2);
 
     EXPECT_EQ(aux_info.total_reuse_len(), 512);
+    EXPECT_EQ(aux_info.local_reuse_len(), 512);
     EXPECT_EQ(aux_info.memory_reuse_len(), 512);
+    EXPECT_EQ(aux_info.prefill_memory_reuse_len(), 512);
     EXPECT_EQ(aux_info.decode_memory_reuse_len(), 0);
 }
 
-TEST_F(PrefillRpcServerTest, mergeCacheReuseInfoKeepsSharedPoolTopLevelPrefillOnly) {
+TEST_F(PrefillRpcServerTest, mergeCacheReuseInfoKeepsSingleGroupTopLevelPrefillFields) {
     AuxInfoPB aux_info;
-    aux_info.set_total_reuse_len(1280);
-    aux_info.set_local_reuse_len(1280);
+    aux_info.set_total_reuse_len(8);
+    aux_info.set_local_reuse_len(8);
+    aux_info.set_memory_reuse_len(8);
 
-    PrefillRpcServer::mergeCacheReuseInfo(aux_info, 0, 0, 0, 0, /*use_independent_block_pools=*/false);
+    PrefillRpcServer::mergeCacheReuseInfo(aux_info,
+                                          /*prefill_total_reuse_len=*/0,
+                                          /*prefill_local_reuse_len=*/0,
+                                          /*prefill_remote_reuse_len=*/0,
+                                          /*prefill_memory_reuse_len=*/0,
+                                          /*prefill_disk_reuse_len=*/0,
+                                          /*group_num=*/1);
 
     EXPECT_EQ(aux_info.total_reuse_len(), 0);
+    EXPECT_EQ(aux_info.local_reuse_len(), 0);
+    EXPECT_EQ(aux_info.remote_reuse_len(), 0);
+    EXPECT_EQ(aux_info.memory_reuse_len(), 0);
+    EXPECT_EQ(aux_info.disk_reuse_len(), 0);
     EXPECT_EQ(aux_info.prefill_total_reuse_len(), 0);
-    EXPECT_EQ(aux_info.decode_total_reuse_len(), 1280);
+    EXPECT_EQ(aux_info.decode_total_reuse_len(), 8);
+    EXPECT_EQ(aux_info.decode_local_reuse_len(), 8);
+    EXPECT_EQ(aux_info.decode_memory_reuse_len(), 8);
+}
+
+TEST_F(PrefillRpcServerTest, mergeCacheReuseInfoPreservesDecodeTiersForLargerIndependentPoolHit) {
+    AuxInfoPB aux_info;
+    aux_info.set_total_reuse_len(1024);
+    aux_info.set_local_reuse_len(768);
+    aux_info.set_remote_reuse_len(256);
+    aux_info.set_memory_reuse_len(256);
+    aux_info.set_disk_reuse_len(128);
+
+    PrefillRpcServer::mergeCacheReuseInfo(aux_info,
+                                          /*prefill_total_reuse_len=*/512,
+                                          /*prefill_local_reuse_len=*/384,
+                                          /*prefill_remote_reuse_len=*/128,
+                                          /*prefill_memory_reuse_len=*/128,
+                                          /*prefill_disk_reuse_len=*/64,
+                                          /*group_num=*/2);
+
+    EXPECT_EQ(aux_info.total_reuse_len(), 1024);
+    EXPECT_EQ(aux_info.local_reuse_len(), 768);
+    EXPECT_EQ(aux_info.remote_reuse_len(), 256);
+    EXPECT_EQ(aux_info.memory_reuse_len(), 256);
+    EXPECT_EQ(aux_info.disk_reuse_len(), 128);
+    EXPECT_EQ(aux_info.prefill_total_reuse_len(), 512);
+    EXPECT_EQ(aux_info.prefill_local_reuse_len(), 384);
+    EXPECT_EQ(aux_info.prefill_remote_reuse_len(), 128);
+    EXPECT_EQ(aux_info.prefill_memory_reuse_len(), 128);
+    EXPECT_EQ(aux_info.prefill_disk_reuse_len(), 64);
+    EXPECT_EQ(aux_info.decode_total_reuse_len(), 1024);
+    EXPECT_EQ(aux_info.decode_local_reuse_len(), 768);
+    EXPECT_EQ(aux_info.decode_remote_reuse_len(), 256);
+    EXPECT_EQ(aux_info.decode_memory_reuse_len(), 256);
+    EXPECT_EQ(aux_info.decode_disk_reuse_len(), 128);
+}
+
+TEST_F(PrefillRpcServerTest, pollRemoteOutputForwardsTokensWithoutAuxInfo) {
+    class DecodeService final: public RpcService::Service {
+    public:
+        grpc::Status RemoteGenerate(grpc::ServerContext*,
+                                    grpc::ServerReaderWriter<GenerateOutputsPB, GenerateRequestPB>* rpc) override {
+            for (int token : {11, 12}) {
+                GenerateOutputsPB response;
+                auto*             flat = response.mutable_flatten_output();
+                flat->add_finished(token == 12);
+                auto* ids = flat->mutable_output_ids();
+                ids->set_data_type(TensorPB::INT32);
+                for (int dim : {1, 1, 1}) {
+                    ids->add_shape(dim);
+                }
+                const int32_t value = token;
+                ids->set_int32_data(reinterpret_cast<const char*>(&value), sizeof(value));
+                if (!rpc->Write(response)) {
+                    return grpc::Status(grpc::StatusCode::CANCELLED, "write failed");
+                }
+            }
+            return grpc::Status::OK;
+        }
+    } service;
+    class Writer final: public grpc::internal::WriterInterface<GenerateOutputsPB> {
+    public:
+        bool Write(const GenerateOutputsPB& output, grpc::WriteOptions) override {
+            outputs.push_back(output);
+            return true;
+        }
+        std::vector<GenerateOutputsPB> outputs;
+    } writer;
+
+    int                 port = 0;
+    grpc::ServerBuilder builder;
+    builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &port);
+    builder.RegisterService(&service);
+    auto decode_server = builder.BuildAndStart();
+    ASSERT_TRUE(decode_server);
+    GenerateInputPB request;
+    request.set_request_id(42);
+    auto context                                       = makeContext(&request);
+    context->meta                                      = std::make_shared<RpcServerRuntimeMeta>();
+    context->rpc_context.writer                        = &writer;
+    context->generate_input                            = std::make_shared<GenerateInput>();
+    context->generate_input->generate_config           = std::make_shared<GenerateConfig>();
+    context->generate_input->generate_config->aux_info = false;
+    context->generate_input->input_ids                 = torch::tensor({1, 2}, torch::kInt32);
+    ModelConfig model;
+    model.max_seq_len = 32;
+    model.vocab_size  = 128;
+    context->setStream(std::make_shared<NormalGenerateStream>(
+        context->generate_input, model, RuntimeConfig{}, ResourceContext{}, nullptr));
+    auto channel  = grpc::CreateChannel("127.0.0.1:" + std::to_string(port), grpc::InsecureChannelCredentials());
+    context->stub = RpcService::NewStub(channel);
+    context->client_context = std::make_shared<grpc::ClientContext>();
+    context->client_context->set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(5));
+    context->client_stream = context->stub->RemoteGenerate(context->client_context.get());
+    TestPrefillRpcServer server;
+    server.pollRemoteOutput(*context);
+    context->markRpcHandlingCompleted();
+    EXPECT_FALSE(context->hasError());
+    ASSERT_EQ(writer.outputs.size(), 2);
+    EXPECT_FALSE(writer.outputs[0].flatten_output().finished(0));
+    EXPECT_TRUE(writer.outputs[1].flatten_output().finished(0));
+    for (const auto& output : writer.outputs) {
+        EXPECT_EQ(output.flatten_output().aux_info_size(), 0);
+        EXPECT_EQ(output.flatten_output().output_ids().int32_data().size(), sizeof(int32_t));
+    }
+    decode_server->Shutdown();
+    decode_server->Wait();
 }
 
 TEST_F(PrefillRpcServerTest, multimodalProcessMarksDeterministicErrorNonRetryable) {

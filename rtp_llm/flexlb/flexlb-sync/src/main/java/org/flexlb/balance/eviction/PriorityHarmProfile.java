@@ -105,13 +105,6 @@ public final class PriorityHarmProfile implements Comparable<PriorityHarmProfile
         private Builder() {
         }
 
-        public Builder add(int priority, long harm) {
-            if (harm < 0) {
-                throw new IllegalArgumentException("harm must be non-negative: " + harm);
-            }
-            return add(priority, BigInteger.valueOf(harm));
-        }
-
         public Builder add(int priority, BigInteger harm) {
             requireValidPriority(priority);
             if (harm.signum() < 0) {

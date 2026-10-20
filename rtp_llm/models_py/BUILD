@@ -8,15 +8,46 @@ py_library(
     visibility = ["//visibility:public"],
 )
 
+# CPU-only subset of the DSv4 decode package: pure-torch modules plus the
+# package __init__ chain, without the CUDA/testlib closure. The lazily
+# imported paged/pool helpers (pool_slot_mapping, _pool_triton) are part of
+# the closure: without them, enabling the paged or is_cuda branches under
+# sandboxed runfiles raises ModuleNotFoundError instead of running the
+# (pure-torch / triton-optional) helper.
+py_library(
+    name = "dsv4_decode_cpu",
+    srcs = [
+        "modules/__init__.py",
+        "modules/dsv4/__init__.py",
+        "modules/dsv4/_pool_triton.py",
+        "modules/dsv4/decode/__init__.py",
+        "modules/dsv4/decode/decode_attn_metadata.py",
+        "modules/dsv4/decode/kv_write_decode_op.py",
+        "modules/dsv4/fp8/__init__.py",
+        "modules/dsv4/fp8/decode/__init__.py",
+        "modules/dsv4/fp8/decode/pool_slot_mapping.py",
+        "modules/dsv4/kv_cache_utils.py",
+    ],
+    data = [
+        "//rtp_llm:__init__.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//rtp_llm:torch",
+    ],
+)
+
 # flashinfer-python ships in the cuda12 and cuda13 locks
 flashinfer = ["flashinfer-python"]
 deep = ["deep_gemm", "deep_ep"]
 flashmla = ["fast-hadamard-transform", "flash-mla", "tilelang"]
 rtp_kernel = ["rtp-kernel"]
-flashattn = ["flash_attn","flash-attn-3"]
+flashattn2 = ["flash_attn"]
+flashattn = flashattn2 + ["flash-attn-3"]
 requirement(flashinfer)
 requirement(deep)
 requirement(flashmla)
+requirement(["flash-mla-legacy"])
 requirement(rtp_kernel)
 requirement(flashattn)
 
@@ -42,6 +73,28 @@ py_library(
         "3rdparty/tile_kernels/*.py",
         "3rdparty/tile_kernels/**/*.py",
     ]),
+    # The mhc kernels import tilelang at module scope; carry the wheel (and
+    # its z3-solver/apache-tvm-ffi closure, via the pip pkg deps) in runfiles
+    # instead of relying on the image's site-packages. Only the locks used by
+    # the DSv4 lanes ship tilelang.
+    deps = select({
+        "@//:using_cuda13_x86": ["//rtp_llm:tilelang"],
+        "@//:using_cuda13_arm": ["//rtp_llm:tilelang"],
+        "@//:using_cuda12_9_x86": ["//rtp_llm:tilelang"],
+        "//conditions:default": [],
+    }),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "dsv41_jit_sources",
+    srcs = glob([
+        "modules/dsv41/**/*.cu",
+        "modules/dsv41/**/*.cuh",
+        "modules/dsv41/**/*.cc",
+        "modules/dsv41/**/*.h",
+        "modules/dsv41/**/*.LICENSE",
+    ]),
     visibility = ["//visibility:public"],
 )
 
@@ -53,6 +106,7 @@ py_library(
     ]),
     data = [
         ":cutlass_moe_config",
+        ":dsv41_jit_sources",
         ":rocm_fp8_ptpc_hipb_solutions",
     ],
     deps = [
@@ -66,9 +120,9 @@ py_library(
         "//rtp_llm/models_py/distributed:collective_torch",
         "//rtp_llm/models_py/distributed:user_buffers",
     ] + select({
-        # cuda13 locks ship flashinfer-python; deep-ep only in the x86 lock.
+        # cuda13 locks ship flashinfer-python and deep-ep.
         "@//:using_cuda13_x86": flashinfer + deep,
-        "@//:using_cuda13_arm": flashinfer + ["deep_gemm"],
+        "@//:using_cuda13_arm": flashinfer + deep,
         "@//:using_cuda12": flashinfer + deep,
         "@//:using_ppu": deep,
         "@//:using_rocm": [
@@ -77,10 +131,9 @@ py_library(
         ],
         "//conditions:default": [],
     }) + select({
-        # cuda13 locks currently ship flash-mla (+tilelang on arm; no fast-hadamard).
         # cuda12_arm (kept from main) has no branch here: its lock ships none of these.
-        "@//:using_cuda13_x86": ["flash-mla"],
-        "@//:using_cuda13_arm": ["flash-mla", "tilelang"],
+        "@//:using_cuda13_x86": ["flash-mla", "fast-hadamard-transform", "tilelang"],
+        "@//:using_cuda13_arm": ["flash-mla", "flash-mla-legacy", "tilelang"],
         "@//:using_cuda12_9_x86": flashmla,
         "//conditions:default": [],
     }) + select({
@@ -90,8 +143,7 @@ py_library(
         "@//:using_cuda12_arm": rtp_kernel,
         "//conditions:default": [],
     }) + select({
-        # flash_attn / flash_attn_3: deferred rebuild for torch 2.11+cu130.
-        "@//:using_cuda13_x86": [],
+        "@//:using_cuda13_x86": flashattn2,
         "@//:using_cuda13_arm": [],
         "@//:using_cuda12_9_x86": flashattn,
         "@//:using_cuda12_arm": flashattn,
@@ -169,6 +221,16 @@ py_library(
         "@//:using_rocm": [
             ":modules_rocm"
         ],
+        "//conditions:default": [],
+    }) + select({
+        # deepseek_v4_model.py lazily imports modules/dsv4/tilelang_kernels and
+        # the DSv4 warmup reaches the mhc TileLang kernels; declare tilelang on
+        # the owning library so its runfiles do not depend on the image's
+        # site-packages install. z3-solver/apache-tvm-ffi ride along through the
+        # tilelang pip pkg deps.
+        "@//:using_cuda13_x86": ["//rtp_llm:tilelang"],
+        "@//:using_cuda13_arm": ["//rtp_llm:tilelang"],
+        "@//:using_cuda12_9_x86": ["//rtp_llm:tilelang"],
         "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],

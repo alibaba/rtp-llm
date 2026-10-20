@@ -36,6 +36,10 @@ from typing import Any, Dict, Optional, Tuple
 
 import torch
 
+from rtp_llm.config.cuda_graph import (
+    CudaGraphSelectionMode,
+    GenerationPrefillCudaGraphUnsupportedBackend,
+)
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
@@ -291,6 +295,7 @@ def _args_from_model_config(
         o_groups=attn_config.o_groups,
         o_lora_rank=attn_config.o_lora_rank,
         window_size=attn_config.sliding_window,
+        kernel_tokens_per_block=attn_config.kernel_tokens_per_block,
         compress_ratios=list(attn_config.layer_compress_ratios)[
             : model_config.num_layers
         ],
@@ -503,6 +508,21 @@ class DeepSeekV4Model(GptModelBase):
                 self._profile_trigger,
                 self._profile_path,
             )
+        self._init_capture_context(
+            self._capture_canonical_layer,
+            self._capture_canonical_final,
+        )
+
+    def _capture_canonical_layer(
+        self, hidden_states: torch.Tensor, residual: torch.Tensor | None
+    ) -> torch.Tensor:
+        return hidden_states.mean(dim=-2)
+
+    def _capture_canonical_final(
+        self, hidden_states: torch.Tensor, residual: torch.Tensor | None
+    ) -> torch.Tensor:
+        # Prefill forward owns HC reduction and final normalization.
+        return hidden_states
 
     def initialize(self, init_resource: PyModelInitResources) -> bool:
         try:
@@ -849,7 +869,9 @@ class DeepSeekV4Model(GptModelBase):
                 )
 
             try:
-                from flash_mla import flash_mla_sparse_fwd as _flash_mla_sparse_fwd
+                from rtp_llm.models_py.utils.flash_mla_legacy import (
+                    flash_mla_sparse_fwd as _flash_mla_sparse_fwd,
+                )
 
                 _swa_attn = self.v4.layers[0].attn
                 _H_swa = int(_swa_attn.n_heads)
@@ -953,6 +975,7 @@ class DeepSeekV4Model(GptModelBase):
                     warmup_fp8_mqa_logits_jit,
                     warmup_mhc_head_fused_jit,
                     warmup_mhc_prenorm_gemm_jit,
+                    warmup_prefill_cp_metadata_jit,
                 )
 
                 _jit_device = _torch.device(device_str)
@@ -1016,6 +1039,19 @@ class DeepSeekV4Model(GptModelBase):
                     int(getattr(self.parallelism_config, "tp_size", 1) or 1)
                     if _prefill_cp_enabled
                     else 1
+                )
+                warmup_prefill_cp_metadata_jit(
+                    is_decode_role=self._is_decode_role,
+                    cp_enabled=_prefill_cp_enabled,
+                    cp_size=_prefill_cp_size,
+                    max_batch_size=max(
+                        int(self._max_context_batch_size),
+                        int(self._max_generate_batch_size),
+                        1,
+                    ),
+                    fp8_kv_cache=self.fp8_kv_cache,
+                    kv_cache_sharded=_prefill_kv_cache_sharded,
+                    device=_jit_device,
                 )
                 _dense_gemm_max_m = resolve_dense_gemm_warmup_max_m(
                     max_seq_len=int(self._v4_args.max_seq_len),
@@ -1144,13 +1180,24 @@ class DeepSeekV4Model(GptModelBase):
         return h.unsqueeze(-2).repeat(1, self.v4.hc_mult, 1)
 
     def prepare_fmha_impl(
-        self, inputs: PyModelInputs, is_cuda_graph: bool = False
+        self,
+        inputs: PyModelInputs,
+        is_cuda_graph: bool = False,
+        cuda_graph_selection_mode: Optional[str] = None,
     ) -> Any:
         """Return a ``DSv4DecodeFmhaImpl`` for decode CUDA-graph capture; None otherwise.
 
         Prefill runs eagerly (no graph). Decode uses its own sparse/compressed
         attention; the impl owns persistent metadata buffers updated in place
         by ``prepare_cuda_graph`` between replays."""
+        if cuda_graph_selection_mode == CudaGraphSelectionMode.GENERATION_PREFILL_GRAPH:
+            # DSV4 captures only decode/target-verify graphs; generation-prefill
+            # capture would otherwise receive a decode impl, so degrade via the
+            # factory's unsupported-backend channel instead of crashing on the
+            # extra keyword.
+            raise GenerationPrefillCudaGraphUnsupportedBackend(
+                "DeepSeek V4 does not support generation prefill CUDA graphs"
+            )
         if not is_cuda_graph:
             return None
 
@@ -1375,6 +1422,7 @@ class DeepSeekV4Model(GptModelBase):
                 self.parallelism_config,
                 inputs,
                 prepare_hidden_fn=prep_prefill,
+                capture_context=self.capture_context(inputs.capture_hidden_states),
             )
         else:
             return forward_decode(

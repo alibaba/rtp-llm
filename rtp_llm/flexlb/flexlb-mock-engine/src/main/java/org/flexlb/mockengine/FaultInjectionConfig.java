@@ -58,7 +58,7 @@ public final class FaultInjectionConfig {
     private final long prefillAsyncFailCode;
     // ── Cancel-RPC fault family (RPC-layer failures simulated BEFORE the
     // engine cancel state machine is touched — production semantics "RPC
-    // failed = engine state unchanged": no fences, no tombstones, no census
+    // failed = engine state unchanged": no fences, no terminal records, no census
     // branch. Mirrors noRespond / generateError in shape: pure transport /
     // ack faults the master must survive one-shot — the production cancel
     // contract never retries) ──

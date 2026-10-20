@@ -139,6 +139,9 @@ bounds allow. Use `SINGLE` when every decision must contain exactly one request.
 A request the worker cannot take yet because of KV pressure or engine
 backpressure remains QUEUE-owned. There is no SLO-budget batching policy.
 
+`router.roles.decode.availability.maxKvUsagePercent` defaults to `90` and must
+be in `[1, 100]`; zero and negative values are invalid.
+
 PRIORITY preemption consumes the same exact Prefill and Decode route selected
 by ordinary placement. It may replace lower-priority owners on those endpoints,
 but it never calls the router or a selector again and never falls back to a

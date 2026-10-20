@@ -1,6 +1,8 @@
 #include "autil/TimeUtility.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
+#include <exception>
+#include "autil/Scope.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -13,6 +15,7 @@
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 #include <unistd.h>
@@ -337,7 +340,7 @@ void PrefillRpcServer::multimodalProcess(PrefillGenerateContext& prefill_context
 
     auto& input = prefill_context.generate_input;
     RTP_LLM_CHECK_WITH_INFO(input != nullptr, "multimodal processing requires a prepared generate input");
-    if (!input->multimodal_inputs || input->multimodal_inputs->empty()) {
+    if (!input->v41_inputs && (!input->multimodal_inputs || input->multimodal_inputs->empty())) {
         prefill_context.markMultimodalProcessed(false);
         return;
     }
@@ -353,7 +356,11 @@ void PrefillRpcServer::multimodalProcess(PrefillGenerateContext& prefill_context
         return;
     }
 
-    auto result = mm_processor_->updateMultimodalFeatures(input);
+    auto result = updateMultimodalFeaturesWithTrace(input,
+                                                    prefill_context.trace_span_guard ?
+                                                        prefill_context.trace_span_guard->sharedSpan() :
+                                                        opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>{},
+                                                    prefill_context.server_context);
     if (!result.ok()) {
         prefill_context.setRetryable(isRetryableMultimodalError(result.code()));
         setContextError(prefill_context, result);
@@ -451,8 +458,10 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
     CLIENT_GRPC_RET_IF_ERROR(
         prefill_context, client_stream->Write(alloc_request), ErrorCode::REMOTE_ALLOCATE_RESOURCE_WRITE_FAILED);
     GenerateOutputsPB allocate_response;
+    prefill_context.supports_prefill_completion = false;
     CLIENT_GRPC_RET_IF_ERROR(
         prefill_context, client_stream->Read(&allocate_response), ErrorCode::REMOTE_ALLOCATE_RESOURCE_READ_FAILED);
+    prefill_context.supports_prefill_completion = allocate_response.supports_prefill_completion();
     if (prefillTraceLogEnabled() && allocate_response.has_error_info()
         && allocate_response.error_info().error_code() != 0) {
         RTP_LLM_LOG_WARNING("Prefill request trace: event=remote_allocate_response_error request_id=%ld "
@@ -556,6 +565,16 @@ void PrefillRpcServer::remoteLoadCacheEnd(PrefillGenerateContext& prefill_contex
 
     prefill_context.dequeueStreamFromRuntimeMeta();
     if (!prefill_context.getStream()->hasEvent(StreamEvents::NeedRemoteGenerate)) {
+        if (prefill_context.supports_prefill_completion
+            && prefill_context.getStream()->hasEvent(StreamEvents::GenerateDone)
+            && !prefill_context.getStream()->hasError()) {
+            GenerateRequestPB completion;
+            completion.set_stage(RemoteStage::PREFILL_COMPLETE);
+            completion.set_client_id(process_id_);
+            completion.set_request_id(prefill_context.request_id);
+            CLIENT_GRPC_RET_IF_ERROR(
+                prefill_context, prefill_context.client_stream->Write(completion), ErrorCode::REMOTE_GENERATE_FAILED);
+        }
         RTP_LLM_LOG_DEBUG("request [%ld] pd-sep prefill finished locally without remote generate, "
                           "skipping remote generate stages",
                           prefill_context.request_id);
@@ -620,13 +639,18 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
     auto              prefill_total_reuse_len  = prefill_context.getStream()->initialReuseLength();
     auto              prefill_local_reuse_len  = prefill_context.getStream()->localReuseLength();
     auto              prefill_remote_reuse_len = prefill_context.getStream()->remoteReuseLength();
-    auto              prefill_memory_reuse_len = prefill_context.getStream()->memoryReuseLength();
+    auto              prefill_memory_reuse_len = prefill_context.getStream()->hostReuseLength();
+    auto              prefill_disk_reuse_len   = prefill_context.getStream()->diskReuseLength();
     const auto        cache_manager            = prefill_context.getStream()->resourceContext().cache_manager;
-    const bool use_independent_block_pools = cache_manager && cache_manager->cacheConfig().use_independent_block_pools;
+    const size_t      group_num                = cache_manager ? cache_manager->cacheConfig().groupNums() : 0;
     // Decode workers do not receive ViT features in PD mode, so preserve the
     // prefill-side media usage metadata when forwarding their responses.
     const auto multimodal_lengths =
         prefill_context.generate_input ? prefill_context.generate_input->multimodalLengths() : std::map<int, int>{};
+    // Decode-side updates use NOT_REQUESTED, so the prefill worker is the
+    // authoritative source for this request-level status in PD separation.
+    const std::string generation_prefill_cuda_graph_status =
+        generationPrefillCudaGraphStatusString(prefill_context.getStream()->generationPrefillCudaGraphStatus());
 
     auto first_token_rt_us = prefill_context.getStream()->getTimeInfo().first_token_rt_us;
     while (prefill_context.client_stream->Read(&response)) {
@@ -636,7 +660,8 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
             setContextError(prefill_context, ErrorInfo(ErrorCode::CANCELLED, status.error_message()), status);
             return;
         }
-        if (response.flatten_output().aux_info_size() == 0) {
+        // Auxiliary metadata is optional; completion flags identify output rows.
+        if (response.flatten_output().finished_size() == 0) {
             RTP_LLM_LOG_ERROR("request [%ld] generate output size is 0", request_id);
             break;
         }
@@ -649,12 +674,14 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
             auto* aux_info = response.mutable_flatten_output()->mutable_aux_info(i);
             aux_info->set_first_token_cost_time_us(first_token_rt_us);
             aux_info->set_cost_time_us(cost_time_us);
+            aux_info->set_generation_prefill_cuda_graph_status(generation_prefill_cuda_graph_status);
             mergeCacheReuseInfo(*aux_info,
                                 prefill_total_reuse_len,
                                 prefill_local_reuse_len,
                                 prefill_remote_reuse_len,
                                 prefill_memory_reuse_len,
-                                use_independent_block_pools);
+                                prefill_disk_reuse_len,
+                                group_num);
         }
         if (!prefill_context.rpc_context.writer->Write(response)) {
             RTP_LLM_LOG_WARNING("request [%ld] write outputs pb failed", request_id);
@@ -675,32 +702,40 @@ void PrefillRpcServer::mergeCacheReuseInfo(AuxInfoPB& aux_info,
                                            int        prefill_local_reuse_len,
                                            int        prefill_remote_reuse_len,
                                            int        prefill_memory_reuse_len,
-                                           bool       use_independent_block_pools) {
+                                           int        prefill_disk_reuse_len,
+                                           size_t     group_num) {
     const int decode_total_reuse_len  = aux_info.total_reuse_len();
     const int decode_local_reuse_len  = aux_info.local_reuse_len();
     const int decode_remote_reuse_len = aux_info.remote_reuse_len();
     const int decode_memory_reuse_len = aux_info.memory_reuse_len();
+    const int decode_disk_reuse_len   = aux_info.disk_reuse_len();
 
     aux_info.set_prefill_total_reuse_len(prefill_total_reuse_len);
     aux_info.set_prefill_local_reuse_len(prefill_local_reuse_len);
     aux_info.set_prefill_remote_reuse_len(prefill_remote_reuse_len);
     aux_info.set_prefill_memory_reuse_len(prefill_memory_reuse_len);
+    aux_info.set_prefill_disk_reuse_len(prefill_disk_reuse_len);
 
     aux_info.set_decode_total_reuse_len(decode_total_reuse_len);
     aux_info.set_decode_local_reuse_len(decode_local_reuse_len);
     aux_info.set_decode_remote_reuse_len(decode_remote_reuse_len);
     aux_info.set_decode_memory_reuse_len(decode_memory_reuse_len);
+    aux_info.set_decode_disk_reuse_len(decode_disk_reuse_len);
 
-    if (use_independent_block_pools && decode_total_reuse_len > prefill_total_reuse_len) {
+    // Preserve single-group prefill attribution. Multi-group handoff may
+    // complete additional reuse, so expose the longer proven phase.
+    if (group_num > 1 && decode_total_reuse_len > prefill_total_reuse_len) {
         aux_info.set_total_reuse_len(decode_total_reuse_len);
         aux_info.set_local_reuse_len(decode_local_reuse_len);
         aux_info.set_remote_reuse_len(decode_remote_reuse_len);
         aux_info.set_memory_reuse_len(decode_memory_reuse_len);
+        aux_info.set_disk_reuse_len(decode_disk_reuse_len);
     } else {
         aux_info.set_total_reuse_len(prefill_total_reuse_len);
         aux_info.set_local_reuse_len(prefill_local_reuse_len);
         aux_info.set_remote_reuse_len(prefill_remote_reuse_len);
         aux_info.set_memory_reuse_len(prefill_memory_reuse_len);
+        aux_info.set_disk_reuse_len(prefill_disk_reuse_len);
     }
 }
 
@@ -773,26 +808,35 @@ grpc::Status PrefillRpcServer::preferPriorityPreemption(PrefillGenerateContext& 
 
 grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*                   server_context,
                                                   const GenerateInputPB*                 request,
-                                                  grpc::ServerWriter<GenerateOutputsPB>* writer) {
+                                                  grpc::ServerWriter<GenerateOutputsPB>* writer) try {
     RTP_LLM_PROFILE_FUNCTION();
+    if (request == nullptr) {
+        return serializeErrorMsg("unknown",
+                                 ErrorInfo(ErrorCode::INVALID_PARAMS, "prefill generate request must not be null"));
+    }
     RTP_LLM_LOG_DEBUG("request [%ld] start generate stream call", request->request_id());
     c10::InferenceMode inference_guard(true);
-    auto pd_separation = request->generate_config().max_new_tokens() > 1 && request->generate_config().num_beams() <= 1
-                         && request->generate_config().variable_num_beams().size() == 0
-                         && request->generate_config().num_return_sequences() <= 1
-                         && request->generate_config().can_use_pd_separation();
+    const auto&        request_config = request->generate_config();
+    // Resolve generation mode before routing so the router and converter preserve the same
+    // legacy bare-zero semantics and reject the same explicit prefill-only conflicts.
+    const int raw_max_new_tokens      = request_config.max_new_tokens();
+    const int resolved_max_new_tokens = QueryConverter::resolveMaxNewTokens(request_config);
+    auto      pd_separation           = resolved_max_new_tokens > 1 && request_config.num_beams() <= 1
+                         && request_config.variable_num_beams().size() == 0
+                         && request_config.num_return_sequences() <= 1 && request_config.can_use_pd_separation();
     if (prefillTraceLogEnabled()) {
-        RTP_LLM_LOG_INFO(
-            "Prefill request trace: event=recv request_id=%ld pd_separation=%d token_ids=%d "
-            "max_new_tokens=%d num_beams=%d num_return_sequences=%d can_use_pd_separation=%d timeout_ms=%ld",
-            request->request_id(),
-            pd_separation,
-            request->token_ids_size(),
-            request->generate_config().max_new_tokens(),
-            request->generate_config().num_beams(),
-            request->generate_config().num_return_sequences(),
-            request->generate_config().can_use_pd_separation(),
-            static_cast<int64_t>(request->generate_config().timeout_ms()));
+        RTP_LLM_LOG_INFO("Prefill request trace: event=recv request_id=%ld pd_separation=%d token_ids=%d "
+                         "raw_max_new_tokens=%d resolved_max_new_tokens=%d num_beams=%d num_return_sequences=%d "
+                         "can_use_pd_separation=%d timeout_ms=%ld",
+                         request->request_id(),
+                         pd_separation,
+                         request->token_ids_size(),
+                         raw_max_new_tokens,
+                         resolved_max_new_tokens,
+                         request->generate_config().num_beams(),
+                         request->generate_config().num_return_sequences(),
+                         request->generate_config().can_use_pd_separation(),
+                         static_cast<int64_t>(request->generate_config().timeout_ms()));
     }
     if (!pd_separation) {
         if (prefillTraceLogEnabled()) {
@@ -814,6 +858,12 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
                                                   maga_init_params_.pd_sep_config.prefill_stop_stream_wait_timeout_ms);
     prefill_context.onflight_requests      = &onflight_requests_;
     prefill_context.loading_cache_requests = &loading_cache_requests_;
+    const int         uncaught_exceptions  = std::uncaught_exceptions();
+    autil::ScopeGuard rpc_completion_guard([&prefill_context, uncaught_exceptions] {
+        if (std::uncaught_exceptions() == uncaught_exceptions) {
+            prefill_context.markRpcHandlingCompleted();
+        }
+    });
 
     // Prefill SERVER span is created only on the PD path, AFTER the fallback
     // check above, so Local/Prefill each own exactly one SERVER span. RAII
@@ -823,10 +873,9 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
             "rtp_llm.prefill_generate_stream_call", server_context, true, "RpcService/GenerateStreamCall");
         prefill_context.trace_span_guard =
             std::make_unique<telemetry::GrpcStatusSpanGuard>(span, &prefill_context.error_status);
-        // Bailian Unitrace index key (string) + internal numeric field
+        // Bailian Unitrace index key: the internal request ID's string form.
         prefill_context.trace_span_guard->setAttribute(telemetry::kAttrRequestId,
                                                        std::to_string(prefill_context.request_id));
-        prefill_context.trace_span_guard->setAttribute(telemetry::kAttrRtpLlmRequestId, prefill_context.request_id);
     }
     telemetry::PhaseSpanSynthesisScope phase_span_scope([&prefill_context](bool exception_unwinding) {
         if (!prefill_context.trace_span_guard || !prefill_context.trace_span_guard->valid()) {
@@ -870,6 +919,14 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
         if (!status.ok()) {
             return status;
         }
+    } catch (const std::invalid_argument& e) {
+        auto error_msg  = "request [" + prefill_context.request_key + "] catch invalid argument [" + e.what() + "]";
+        auto error_info = ErrorInfo(ErrorCode::INVALID_PARAMS, error_msg);
+        setContextError(prefill_context,
+                        error_info,
+                        serializeErrorMsg(prefill_context.request_key, prefill_context.request_info, error_info));
+        logPrefillFailureTrace("catch_invalid_argument", prefill_context);
+        return prefill_context.error_status;
     } catch (const std::exception& e) {
         auto error_msg = "request [" + prefill_context.request_key + "] catch exception [" + e.what() + "]";
         setContextError(prefill_context, ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error_msg));
@@ -885,6 +942,22 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
     RTP_LLM_LOG_DEBUG("request [%ld] all done", prefill_context.request_id);
 
     return grpc::Status::OK;
+} catch (const std::invalid_argument& e) {
+    const auto request_key = request ? std::to_string(request->request_id()) : "unknown";
+    const auto error_info =
+        ErrorInfo(ErrorCode::INVALID_PARAMS, "request [" + request_key + "] catch invalid argument [" + e.what() + "]");
+    return serializeErrorMsg(request_key, RequestInfo(), error_info);
+} catch (const std::exception& e) {
+    const auto request_key = request ? std::to_string(request->request_id()) : "unknown";
+    return serializeErrorMsg(
+        request_key,
+        ErrorInfo(ErrorCode::EXECUTION_EXCEPTION,
+                  "request [" + request_key + "] catch exception [" + std::string(e.what()) + "]"));
+} catch (...) {
+    const auto request_key = request ? std::to_string(request->request_id()) : "unknown";
+    return serializeErrorMsg(
+        request_key,
+        ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "request [" + request_key + "] catch unknown exception"));
 }
 
 grpc::Status

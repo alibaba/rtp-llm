@@ -37,12 +37,24 @@ public class EngineGrpcClient extends AbstractGrpcClient {
     private static final int DEFAULT_CONNECT_TIMEOUT_MILLIS = 20;
     public static final String CONNECT_TIMEOUT_PROPERTY =
             "flexlb.engine-grpc.connect-timeout-ms";
+    public static final String VIT_CACHE_MAX_INBOUND_MESSAGE_BYTES_PROPERTY =
+            "flexlb.engine-grpc.vit-cache-max-inbound-message-bytes";
+    private static final int DEFAULT_MAX_INBOUND_MESSAGE_BYTES = 8 * 1024 * 1024;
+    private static final int DEFAULT_VIT_CACHE_MAX_INBOUND_MESSAGE_BYTES = 16 * 1024 * 1024;
+
+    @Value("${" + VIT_CACHE_MAX_INBOUND_MESSAGE_BYTES_PROPERTY + ":"
+            + DEFAULT_VIT_CACHE_MAX_INBOUND_MESSAGE_BYTES + "}")
+    private int vitCacheMaxInboundMessageBytes = DEFAULT_VIT_CACHE_MAX_INBOUND_MESSAGE_BYTES;
 
     @Getter
     private final Executor executor;
     @Getter
     private final EventLoopGroup eventLoopGroup;
+    public static final String ENQUEUE_TIMEOUT_PROPERTY =
+            "flexlb.engine-grpc.enqueue-timeout-ms";
+    private static final long DEFAULT_ENQUEUE_TIMEOUT_MILLIS = 5000L;
     private final int connectTimeoutMillis;
+    private final long enqueueTimeoutMillis;
 
     @Autowired
     public EngineGrpcClient(CustomNameResolver nameResolver,
@@ -51,8 +63,15 @@ public class EngineGrpcClient extends AbstractGrpcClient {
                             GrpcReporter grpcReporter,
                             @Value("${" + CONNECT_TIMEOUT_PROPERTY + ":"
                                     + DEFAULT_CONNECT_TIMEOUT_MILLIS + "}")
-                            int connectTimeoutMillis) {
+                            int connectTimeoutMillis,
+                            @Value("${" + ENQUEUE_TIMEOUT_PROPERTY + ":"
+                                    + DEFAULT_ENQUEUE_TIMEOUT_MILLIS + "}")
+                            long enqueueTimeoutMillis) {
         super(grpcReporter);
+        if (enqueueTimeoutMillis <= 0L) {
+            throw new IllegalArgumentException("enqueueTimeoutMillis must be positive");
+        }
+        this.enqueueTimeoutMillis = enqueueTimeoutMillis;
         if (connectTimeoutMillis <= 0) {
             throw new IllegalArgumentException(
                     "connectTimeoutMillis must be positive");
@@ -238,6 +257,11 @@ public class EngineGrpcClient extends AbstractGrpcClient {
     /**
      * Submit a batch of already-routed requests to a Prefill worker (async)
      */
+    public CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> batchEnqueueAsync(
+            String ip, int port, EngineRpcService.EnqueueBatchRequestPB request) {
+        return batchEnqueueAsync(ip, port, request, enqueueTimeoutMillis);
+    }
+
     public CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> batchEnqueueAsync(String ip, int port, EngineRpcService.EnqueueBatchRequestPB request, long requestTimeoutMs) {
         // EnqueueBatch is not safe to replay after an ambiguous connection
         // failure: the Engine may have accepted the first invocation even
@@ -267,6 +291,8 @@ public class EngineGrpcClient extends AbstractGrpcClient {
         String[] parts = parseServiceKey(channelKey);
         String ip = parts[0];
         int port = Integer.parseInt(parts[1]);
+        int maxInboundMessageBytes = ServiceType.MULTIMODAL_CACHE_STATUS.getSuffix().equals(parts[2])
+                ? vitCacheMaxInboundMessageBytes : DEFAULT_MAX_INBOUND_MESSAGE_BYTES;
         Logger.info("Creating new channel for ip: {}, port: {}", ip, port);
         return NettyChannelBuilder.forAddress(ip, port)
                 .channelType(NioSocketChannel.class)
@@ -281,8 +307,8 @@ public class EngineGrpcClient extends AbstractGrpcClient {
                 // Receive/send buffer size
                 .withOption(ChannelOption.SO_RCVBUF, 512 * 1024)
                 .withOption(ChannelOption.SO_SNDBUF, 512 * 1024)
-                // Maximum message size limit (8MB)
-                .maxInboundMessageSize(8 * 1024 * 1024)
+                // ViT directory snapshots have a separate configurable message limit.
+                .maxInboundMessageSize(maxInboundMessageBytes)
                 // HTTP/2 initial flow control window: prevents transmission issues due to flow control
                 .initialFlowControlWindow(2 * 1024 * 1024)
                 // gRPC keepalive configuration: keeps connection active, prevents disconnection by intermediate devices

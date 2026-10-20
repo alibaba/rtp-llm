@@ -29,7 +29,7 @@ py_library(
 py_library(
     name = "jit_sys_path_setup",
     srcs = ["jit_sys_path_setup.py"],
-    deps = [":filelock"],
+    deps = [":filelock", "//rtp_llm:jit_cache_env"],
 )
 
 py_binary(
@@ -48,7 +48,7 @@ py_library(
 py_library(
     name = "maga_server_manager",
     srcs = ["maga_server_manager.py"],
-    deps = [":test_util"],
+    deps = [":test_util", "//rtp_llm:jit_cache_env"],
     visibility = ["//visibility:public"],
 )
 
@@ -61,10 +61,27 @@ py_test(
 )
 
 py_test(
+    name = "maga_server_manager_test",
+    srcs = ["maga_server_manager_test.py"],
+    deps = [
+        ":maga_server_manager",
+        "//rtp_llm:testlib",
+    ],
+)
+
+py_test(
     name = "numeric_util_test",
     srcs = ["numeric_util_test.py"],
     deps = [
         ":test_util",
         ":torch",
     ],
+)
+
+
+py_test(
+    name = "device_resource_test",
+    srcs = ["device_resource_test.py"],
+    env = {"GPU_COUNT": "0"},
+    deps = [":device_resource"],
 )

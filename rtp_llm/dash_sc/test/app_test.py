@@ -9,7 +9,7 @@ import signal
 import threading
 import time
 from types import SimpleNamespace
-from unittest import TestCase, main
+from unittest import TestCase, main, skipUnless
 from unittest.mock import MagicMock, Mock, patch
 
 import grpc
@@ -25,6 +25,36 @@ from rtp_llm.dash_sc.app import (
     _wait_for_bind_barrier,
 )
 from rtp_llm.dash_sc.server import DashScGrpcDrainAioInterceptor, DashScGrpcServer
+
+
+class V41CheckpointProcessorConfigTest(TestCase):
+    @skipUnless(os.environ.get("DSV41_MODEL_PATH"), "requires V4.1 checkpoint config")
+    def test_real_model_factory_config_builds_image_processor(self):
+        from rtp_llm.config.dsv41_config import V41Config
+        from rtp_llm.config.py_config_modules import PyEnvConfigs
+        from rtp_llm.model_factory import ModelFactory
+
+        checkpoint = os.environ["DSV41_MODEL_PATH"]
+        env = PyEnvConfigs()
+        env.model_args.model_type = "deepseek_v41"
+        env.model_args.ckpt_path = checkpoint
+        config = ModelFactory.create_model_config(
+            model_args=env.model_args,
+            lora_config=env.lora_config,
+            kv_cache_config=env.kv_cache_config,
+            profiling_debug_logging_config=env.profiling_debug_logging_config,
+            generate_env_config=env.generate_env_config,
+            embedding_config=env.embedding_config,
+            quantization_config=env.quantization_config,
+            render_config=env.render_config,
+        )
+        self.assertNotIn("text_config", config.deepseek_v41_config)
+        self.assertIn("text_config", config.mm_related_params.config["v41_config"])
+        processor = bg_app._v41_image_processor_config(config)
+        source = V41Config.from_path(checkpoint)
+        self.assertEqual(processor.image_token_id, source.image_token_id)
+        self.assertEqual(processor.vision_patch_size, source.vision["patch_size"])
+        self.assertEqual(processor.max_seq_len, config.max_seq_len)
 
 
 class _EnvCfg:
@@ -92,6 +122,7 @@ class BindBarrierTest(TestCase):
         app.py_env_configs = SimpleNamespace(
             profiling_debug_logging_config=SimpleNamespace(log_file_backup_count=1)
         )
+        app.dash_sc_grpc_config = Mock()
         app._grpc_server = Mock()
         app._shutdown_manager = Mock()
         app._shutdown_event = Mock()
@@ -168,16 +199,25 @@ class CreateProxyServicerOnLoopTest(TestCase):
     def test_constructs_inside_running_loop(self) -> None:
         created_loops = []
         sentinel = object()
+        grpc_config = object()
 
         def fake_servicer(**kwargs):
             created_loops.append(asyncio.get_running_loop())
-            self.assertEqual(kwargs, {"rank_id": 7, "server_id": "42"})
+            self.assertEqual(
+                kwargs,
+                {
+                    "dash_sc_grpc_config": grpc_config,
+                    "rank_id": 7,
+                    "server_id": "42",
+                },
+            )
             return sentinel
 
         async def run():
             with patch.object(bg_app, "DashScProxyServicer", side_effect=fake_servicer):
                 loop = asyncio.get_running_loop()
                 servicer = await _create_proxy_servicer_on_loop(
+                    dash_sc_grpc_config=grpc_config,
                     rank_id=7,
                     server_id="42",
                 )
@@ -441,6 +481,7 @@ class PreStopDrainSecondsTest(TestCase):
             clear=True,
         ):
             handlers[signal.SIGUSR1](signal.SIGUSR1, None)
+            self.assertTrue(app.wait_for_signal_dispatch())
             self.assertTrue(app._shutdown_manager.is_unavailable())
             self.assertFalse(app._shutdown_manager.is_draining())
             self.assertEqual(app._shutdown_manager.drain_reason(), "signal 10")
@@ -481,6 +522,7 @@ class PreStopDrainSecondsTest(TestCase):
             os.environ, {"DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS": "10"}, clear=True
         ):
             handlers[signal.SIGTERM](signal.SIGTERM, None)
+            self.assertTrue(app.wait_for_signal_dispatch())
 
         self.assertFalse(app._shutdown_manager.try_begin_request())
         self.assertFalse(app._shutdown_manager.is_draining())
@@ -515,10 +557,12 @@ class PreStopDrainSecondsTest(TestCase):
             os.environ, {"DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS": "10"}, clear=True
         ):
             handlers[signal.SIGUSR1](signal.SIGUSR1, None)
+            self.assertTrue(app.wait_for_signal_dispatch())
             watchdog = app._pre_stop_timer
             self.assertIsNotNone(watchdog)
             with patch.object(watchdog, "cancel", wraps=watchdog.cancel) as cancel:
                 handlers[signal.SIGTERM](signal.SIGTERM, None)
+                self.assertTrue(app.wait_for_signal_dispatch())
 
         cancel.assert_called_once()
         self.assertTrue(app._shutdown_requested)

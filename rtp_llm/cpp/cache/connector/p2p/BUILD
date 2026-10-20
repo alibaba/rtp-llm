@@ -1,6 +1,23 @@
+load("//:def.bzl", "copts")
 load("//bazel:arch_select.bzl", "torch_deps")
 
 package(default_visibility = ["//rtp_llm/cpp/cache/connector/p2p:__subpackages__"])
+
+cc_library(
+    name = "legacy_support",
+    hdrs = [
+        "support/AsyncContext.h",
+        "support/KVCacheConnector.h",
+        "support/KVCacheConnectorLayerContext.h",
+        "support/Meta.h",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = [
+        "//rtp_llm/cpp/cache:batch_kv_cache_resource",
+        "//rtp_llm/cpp/utils:error_code",
+    ] + torch_deps(),
+)
 
 cc_library(
     name = "p2p_connector_config",
@@ -83,7 +100,7 @@ cc_library(
     deps = [
         ":layer_cache_buffer",
         ":metrics",
-        "//rtp_llm/cpp/cache/connector:connector_header",
+        ":legacy_support",
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/model_rpc:broadcast_manager",
         "//rtp_llm/cpp/model_rpc:model_rpc_pool",
@@ -126,7 +143,7 @@ cc_library(
         ":layer_cache_buffer",
         ":metrics",
         ":p2p_connector_config",
-        "//rtp_llm/cpp/cache/connector:connector_header",
+        ":legacy_support",
         "//rtp_llm/cpp/model_rpc:rpc_error_code",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:time_util",

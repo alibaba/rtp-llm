@@ -670,7 +670,9 @@ class AtomicWeight(WeightModule):
         raw_tensor = tensor.get(self.name) if isinstance(tensor, dict) else tensor
         return {
             self.name: load_config.exported_device.maybe_rewrite_weight_by_key(
-                self.name, raw_tensor
+                self.name,
+                raw_tensor,
+                use_swizzle_a=load_config.use_swizzleA,
             )
         }
 

@@ -397,107 +397,57 @@ stop_tomcat() {
 }
 
 stop_spring_boot() {
-    SLEEP=5
-    FORCE=1
-
-    PID=`cat "$SERVICE_PID"`
-
-    # Try a normal kill.
-    echo "Attempting to signal the process to stop through OS signal."
-    kill -15 "$PID" >/dev/null 2>&1
-
-    while [ $SLEEP -ge 0 ]; do
-        kill -0 "$PID" >/dev/null 2>&1
-        if [ $? -gt 0 ]; then
-            rm -f "$SERVICE_PID" >/dev/null 2>&1
-            if [ $? != 0 ]; then
-                if [ -w "$SERVICE_PID" ]; then
-                    cat /dev/null > "$SERVICE_PID"
-                else
-                    echo "The PID file could not be removed or cleared."
-                fi
-            fi
-            echo "Service stopped."
-            # If Service has stopped don't try and force a stop with an empty PID file
-            FORCE=0
-            break
-        fi
-        if [ $SLEEP -gt 0 ]; then
-            sleep 1
-        fi
-        SLEEP=`expr $SLEEP - 1 `
-    done
-
-    KILL_SLEEP_INTERVAL=5
-    if [ $FORCE -eq 1 ]; then
-        if [ -f "$SERVICE_PID" ]; then
-            PID=`cat "$SERVICE_PID"`
-            echo "Killing Service with the PID: $PID"
-            kill -9 $PID
-            while [ $KILL_SLEEP_INTERVAL -ge 0 ]; do
-                kill -0 `cat "$SERVICE_PID"` >/dev/null 2>&1
-                if [ $? -gt 0 ]; then
-                    rm -f "$SERVICE_PID" >/dev/null 2>&1
-                    if [ $? != 0 ]; then
-                        if [ -w "$SERVICE_PID" ]; then
-                            cat /dev/null > "$SERVICE_PID"
-                        else
-                            echo "The PID file could not be removed."
-                        fi
-                    fi
-                    # Set this to zero else a warning will be issued about the process still running
-                    KILL_SLEEP_INTERVAL=0
-                    echo "The Service process has been killed."
-                    break
-                fi
-                if [ $KILL_SLEEP_INTERVAL -gt 0 ]; then
-                    sleep 1
-                fi
-                KILL_SLEEP_INTERVAL=`expr $KILL_SLEEP_INTERVAL - 1 `
-            done
-            if [ $KILL_SLEEP_INTERVAL -gt 0 ]; then
-                echo "Service has not been killed completely yet. The process might be waiting on some system call or might be UNINTERRUPTIBLE."
-            fi
-        fi
+    # Java exits when requests drain. Keep its container alive until then;
+    # the platform owns forced termination at its 300s deadline.
+    local timeout=${FLEXLB_STOP_TIMEOUT_SECONDS:-300}
+    local pid
+    pid=$(cat "$SERVICE_PID") || return 1
+    case "$pid" in
+        ''|*[!0-9]*) echo "ERROR: invalid service PID: $pid"; return 1 ;;
+    esac
+    if [ "$pid" -le 1 ]; then
+        echo "ERROR: refusing to signal service PID $pid"
+        return 1
     fi
+    case "$timeout" in
+        ''|*[!0-9]*) echo "ERROR: invalid stop timeout: $timeout"; return 1 ;;
+    esac
+
+    if kill -0 "$pid" 2>/dev/null; then
+        echo "Sending SIGTERM to Java pid=$pid; waiting up to ${timeout}s for exit."
+        if ! kill -TERM "$pid" 2>/dev/null && kill -0 "$pid" 2>/dev/null; then
+            echo "ERROR: could not signal Java pid=$pid"
+            return 1
+        fi
+        local deadline=$((SECONDS + timeout))
+        while kill -0 "$pid" 2>/dev/null; do
+            if [ "$SECONDS" -ge "$deadline" ]; then
+                echo "ERROR: Java pid=$pid is still alive after ${timeout}s; stop incomplete."
+                return 1
+            fi
+            sleep 1
+        done
+    fi
+    rm -f "$SERVICE_PID" || return 1
+    echo "Java pid=$pid exited; service stopped."
 }
 
 stop() {
     beforeStopApp
     echo "INFO: ${APP_NAME} try to stop..."
     if [[ -f ${APP_HOME}/target/${APP_NAME}/bin/appctl.sh ]]; then
-        call_tappctl "stop"
+        call_tappctl "stop" || return $?
     else
-        # 0. stop xagent if need
-        echo "[stop 0] try to stop xaxgent..."
-        stop_xagent
-
-
-        # 1. stop nginx
-        echo "[stop 1] try to stop nginx..."
-        "$NGINXCTL" stop
-
-        # 2. stop old tomcat process
-        echo "[stop 2] try stop old tomcat..."
-        stop_tomcat
-
-        # 3. stop spring boot
-        echo "[stop 3] try stop spring boot..."
-        if [ -f "$SERVICE_PID" ]; then
-            if [ -s "$SERVICE_PID" ]; then
-                kill -0 `cat "$SERVICE_PID"` >/dev/null 2>&1
-                if [ $? -gt 0 ]; then
-                    echo "PID file found but no matching process was found. Stop aborted."
-                else
-                    stop_spring_boot
-                fi
-            else
-                echo "PID file is empty and has been ignored."
-                rm -f "$SERVICE_PID" >/dev/null 2>&1
-            fi
+        # Keep auxiliary serving resources until Java has finished draining.
+        if [ -s "$SERVICE_PID" ]; then
+            stop_spring_boot || return $?
         else
-            echo "\$SERVICE_PID was set but the specified file does not exist. Is Service running? Stop aborted."
+            # restart also invokes stop during the first container startup.
+            echo "No service PID recorded; no previous Java process to stop."
         fi
+        stop_xagent
+        "$NGINXCTL" stop
+        stop_tomcat
     fi
     echo "INFO: ${APP_NAME} stop success"
     afterStopApp
@@ -533,20 +483,20 @@ main() {
             stop
         ;;
         pubstart)
-            stop
+            stop || return $?
             start
             start_nginx
             after_start_up
         ;;
         restart)
-            stop
+            stop || return $?
             start
             start_nginx
             after_start_up
             start_xagent
         ;;
         deploy)
-            stop
+            stop || return $?
             start
             start_nginx
             after_start_up

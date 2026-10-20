@@ -21,6 +21,47 @@ using namespace std;
 
 namespace rtp_llm {
 
+TEST(CompleteTokenIdsTest, ImageHashIdentityAndShiftedReuseBoundaries) {
+    auto input               = std::make_shared<GenerateInput>();
+    input->input_ids         = torch::arange(16, torch::kInt32);
+    input->generate_config   = std::make_shared<GenerateConfig>();
+    auto          multimodal = std::make_shared<V41RequestInputs>();
+    V41ImageInput image;
+    image.start              = 4;
+    image.types              = torch::zeros({8}, torch::kInt32);
+    image.n_vit_h            = 2;
+    image.n_vit_w            = 2;
+    image.content_sha256     = std::string(64, 'a');
+    image.processor_identity = std::string(64, 'b');
+    multimodal->images.push_back(image);
+    input->v41_inputs = multimodal;
+    CompleteTokenIds tokens(1, 1, 32, 4);
+    tokens.init(input);
+    EXPECT_TRUE(tokens.imageCacheIdentity(0, 4).empty());
+    EXPECT_FALSE(tokens.imageCacheIdentity(4, 4).empty());
+    EXPECT_TRUE(tokens.isValidReuseLength(4));
+    EXPECT_FALSE(tokens.isValidReuseLength(8));
+    EXPECT_TRUE(tokens.isValidReuseLength(12));
+    EXPECT_FALSE(tokens.isValidReuseLength(12, 8));
+    CompleteTokenIds shifted(tokens, true, 2);
+    EXPECT_FALSE(shifted.isValidReuseLength(6));
+    EXPECT_TRUE(shifted.isValidReuseLength(10));
+    EXPECT_EQ(shifted.imageCacheIdentity(2, 4)[1], 2);
+    multimodal->images[0].content_sha256.clear();
+    EXPECT_TRUE(tokens.isValidReuseLength(4));
+    EXPECT_FALSE(tokens.isValidReuseLength(12));
+    EXPECT_FALSE(tokens.isValidReuseLength(16));
+}
+
+TEST(GenerateInputTest, PrefixPreservesCustomOutputTokenIdentity) {
+    GenerateInput input;
+    input.input_ids                    = torch::tensor({7, 8, 9}, torch::kInt32);
+    input.custom_output_token_position = 0;
+    input.updatePrefix({2, 3});
+    EXPECT_EQ(input.custom_output_token_position, 2);
+    EXPECT_EQ(input.input_ids[input.custom_output_token_position].item<int>(), 7);
+}
+
 class GenerateStreamBuilder {
 public:
     GenerateStreamBuilder() {
@@ -133,6 +174,55 @@ TEST_F(GenerateStreamTest, testConstruct) {
     auto stream2 = builder.createDecoderStream({1, 2, 3, 4, 5}, {1, 2, 3});
 }
 
+TEST_F(GenerateStreamTest, generationPrefillCudaGraphReplayStatusIsReturnedInAuxInfo) {
+    auto builder = GenerateStreamBuilder();
+    auto stream  = std::dynamic_pointer_cast<NormalGenerateStream>(builder.createComplexContextStream({1, 2, 3}));
+    stream->generateConfig()->num_return_sequences = 1;
+    stream->generateConfig()->max_new_tokens       = 4;
+    stream->generateConfig()->aux_info             = true;
+    stream->generateConfig()->pd_separation        = true;
+    stream->reportEvent(StreamEvents::CanRun);
+    ASSERT_EQ(stream->moveToNext(), StreamState::RUNNING);
+
+    const auto       new_tokens = torch::tensor({{42}}, torch::kInt32);
+    StreamUpdateInfo update_info{new_tokens,
+                                 1,
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 torch::Tensor()};
+    update_info.generation_prefill_cuda_graph_status = GenerationPrefillCudaGraphStatus::REPLAYED;
+    stream->update(update_info);
+
+    auto output_result = stream->nextOutput();
+    ASSERT_TRUE(output_result.ok());
+    ASSERT_EQ(output_result.value().generate_outputs.size(), 1);
+    EXPECT_EQ(output_result.value().generate_outputs[0].aux_info.generation_prefill_cuda_graph_status, "replayed");
+
+    // A later decode update carries the default status and must not erase the
+    // request's meaningful prefill result.
+    StreamUpdateInfo decode_update{torch::tensor({{43}}, torch::kInt32),
+                                   1,
+                                   torch::Tensor(),
+                                   torch::Tensor(),
+                                   torch::Tensor(),
+                                   torch::Tensor(),
+                                   torch::Tensor(),
+                                   torch::Tensor(),
+                                   torch::Tensor(),
+                                   torch::Tensor()};
+    stream->update(decode_update);
+    auto decode_output_result = stream->nextOutput();
+    ASSERT_TRUE(decode_output_result.ok());
+    ASSERT_EQ(decode_output_result.value().generate_outputs.size(), 1);
+    EXPECT_EQ(decode_output_result.value().generate_outputs[0].aux_info.generation_prefill_cuda_graph_status,
+              "replayed");
+}
+
 TEST_F(GenerateStreamTest, mtpUpdateKeepsLastGpuProposalWhenNextProposalIsMissing) {
     auto builder                                             = GenerateStreamBuilder();
     auto stream                                              = builder.createContextStream({1, 2, 3});
@@ -209,6 +299,82 @@ TEST_F(GenerateStreamTest, mtpCpuProposalClearsStaleGpuMirror) {
     EXPECT_EQ(stream->getSPOutputBuffer()->tokens[0][1].item<int32_t>(), 11);
 }
 
+TEST_F(GenerateStreamTest, prefillOnlyValidationPreservesCacheSetting) {
+    GenerateConfig config;
+    config.max_new_tokens = 0;
+    config.reuse_cache    = true;
+
+    EXPECT_NO_THROW(config.validatePrefillOnly());
+    EXPECT_TRUE(config.reuse_cache);
+}
+
+TEST_F(GenerateStreamTest, promptScoringNormalizesGenerationSettingsDuringConstruction) {
+    for (const int initial_max_new_tokens : {0, 7}) {
+        SCOPED_TRACE(initial_max_new_tokens);
+        auto input                                    = std::make_shared<GenerateInput>();
+        input->generate_config                        = std::make_shared<GenerateConfig>();
+        input->generate_config->max_new_tokens        = initial_max_new_tokens;
+        input->generate_config->return_prompt_logits  = true;
+        input->generate_config->is_streaming          = true;
+        input->generate_config->reuse_cache           = true;
+        input->generate_config->can_use_pd_separation = true;
+        input->begin_time_us                          = autil::TimeUtility::currentTimeInMicroSeconds();
+        input->input_ids                              = torch::tensor({1, 2, 3}, torch::kInt32);
+
+        ModelConfig model_config;
+        model_config.max_seq_len = 2048;
+        model_config.vocab_size  = 1024;
+        RuntimeConfig   runtime_config;
+        ResourceContext resource_context;
+
+        GenerateStreamPtr stream;
+        EXPECT_NO_THROW(stream = std::make_shared<NormalGenerateStream>(
+                            input, model_config, runtime_config, resource_context, nullptr));
+        ASSERT_NE(stream, nullptr);
+        EXPECT_EQ(stream->generateConfig()->max_new_tokens, 1);
+        EXPECT_TRUE(stream->generateConfig()->return_prompt_logits);
+        EXPECT_FALSE(stream->generateConfig()->isPrefillOnly());
+        EXPECT_FALSE(stream->generateConfig()->is_streaming);
+        EXPECT_FALSE(stream->generateConfig()->reuse_cache);
+        EXPECT_FALSE(stream->generateConfig()->can_use_pd_separation);
+    }
+}
+
+TEST_F(GenerateStreamTest, prefillOnlyValidationRejectsUnsupportedConfigWithoutMutation) {
+    struct UnsupportedConfig {
+        const char* name;
+        void (*set)(GenerateConfig&);
+    };
+    constexpr UnsupportedConfig fields[] = {
+        {"min_new_tokens", +[](GenerateConfig& config) { config.min_new_tokens = 1; }},
+        {"num_beams", +[](GenerateConfig& config) { config.num_beams = 2; }},
+        {"variable_num_beams", +[](GenerateConfig& config) { config.variable_num_beams = {1}; }},
+        {"num_return_sequences", +[](GenerateConfig& config) { config.num_return_sequences = 2; }},
+        {"return_logits", +[](GenerateConfig& config) { config.return_logits = true; }},
+        {"calculate_loss", +[](GenerateConfig& config) { config.calculate_loss = 1; }},
+        {"return_softmax_probs", +[](GenerateConfig& config) { config.return_softmax_probs = true; }},
+        {"return_all_probs", +[](GenerateConfig& config) { config.return_all_probs = ReturnAllProbsMode::DEFAULT; }},
+        {"return_cum_log_probs", +[](GenerateConfig& config) { config.return_cum_log_probs = true; }},
+        {"return_hidden_states", +[](GenerateConfig& config) { config.return_hidden_states = true; }},
+        {"return_all_hidden_states", +[](GenerateConfig& config) { config.return_all_hidden_states = true; }},
+    };
+    for (const auto& field : fields) {
+        SCOPED_TRACE(field.name);
+        GenerateConfig config;
+        config.max_new_tokens = 0;
+        config.reuse_cache    = true;
+        field.set(config);
+
+        try {
+            config.validatePrefillOnly();
+            FAIL() << field.name << " should be rejected";
+        } catch (const std::invalid_argument& error) {
+            EXPECT_NE(std::string(error.what()).find(field.name), std::string::npos);
+        }
+        EXPECT_TRUE(config.reuse_cache);
+    }
+}
+
 TEST_F(GenerateStreamTest, testGenerateStreamReuseCacheMethod) {
     auto builder = GenerateStreamBuilder();
     auto stream  = builder.createContextStream({1, 2, 3, 4, 5, 6});
@@ -222,6 +388,15 @@ TEST_F(GenerateStreamTest, testGenerateStreamReuseCacheMethod) {
 
     // flip back to true and verify
     stream->generate_input_->generate_config->reuse_cache = true;
+    ASSERT_TRUE(stream->reuseCache());
+
+    // prefill-only disables effective reuse without mutating the requested setting
+    stream->generate_input_->generate_config->max_new_tokens = 0;
+    ASSERT_TRUE(stream->generate_input_->generate_config->reuse_cache);
+    ASSERT_FALSE(stream->reuseCache());
+
+    // the same config object restores effective reuse for positive generation
+    stream->generate_input_->generate_config->max_new_tokens = 1;
     ASSERT_TRUE(stream->reuseCache());
 }
 
@@ -290,6 +465,53 @@ TEST_F(GenerateStreamTest, pendingCompletionIsConsumerVisibleBeforeSchedulerComm
     EXPECT_FALSE(stream->stream_cache_resource_->isResourceReleased());
 
     EXPECT_EQ(stream->moveToNext(), StreamState::FINISHED);
+    EXPECT_TRUE(stream->stream_cache_resource_->isResourceReleased());
+}
+
+TEST_F(GenerateStreamTest, finishOrCancelPreservesPendingSuccessfulCompletion) {
+    auto builder = GenerateStreamBuilder();
+    auto stream  = std::dynamic_pointer_cast<NormalGenerateStream>(builder.createComplexContextStream({1, 2, 3}));
+    stream->setNeedReleaseResource(true);
+    stream->generate_status_->status.store(StreamState::RUNNING);
+    stream->reportEvent(StreamEvents::GenerateDone);
+
+    std::promise<void> stop_started;
+    auto               stop_ready  = stop_started.get_future();
+    auto               stop_result = std::async(std::launch::async, [stream, &stop_started] {
+        stop_started.set_value();
+        return stream->finishOrCancel(1000, "cancel stream");
+    });
+    stop_ready.get();
+    EXPECT_EQ(stop_result.wait_for(std::chrono::milliseconds(10)), std::future_status::timeout);
+    EXPECT_FALSE(stream->hasError());
+
+    EXPECT_EQ(stream->moveToNext(), StreamState::FINISHED);
+    EXPECT_TRUE(stop_result.get());
+    EXPECT_FALSE(stream->hasError());
+    EXPECT_TRUE(stream->stream_cache_resource_->isResourceReleased());
+}
+
+TEST_F(GenerateStreamTest, finishOrCancelCancelsIncompleteStreamAndWaitsForCommit) {
+    auto builder = GenerateStreamBuilder();
+    auto stream  = std::dynamic_pointer_cast<NormalGenerateStream>(builder.createComplexContextStream({1, 2, 3}));
+    stream->setNeedReleaseResource(true);
+    stream->generate_status_->status.store(StreamState::RUNNING);
+
+    std::promise<void> stop_started;
+    auto               stop_ready  = stop_started.get_future();
+    auto               stop_result = std::async(std::launch::async, [stream, &stop_started] {
+        stop_started.set_value();
+        return stream->finishOrCancel(1000, "client closed");
+    });
+    stop_ready.get();
+    for (int i = 0; i < 100 && !stream->hasError(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_TRUE(stream->hasError());
+    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::CANCELLED);
+
+    EXPECT_EQ(stream->moveToNext(), StreamState::FINISHED);
+    EXPECT_TRUE(stop_result.get());
     EXPECT_TRUE(stream->stream_cache_resource_->isResourceReleased());
 }
 
@@ -476,6 +698,42 @@ TEST_F(GenerateStreamTest, queuedOutputWinsOverExpiredDeadline) {
     EXPECT_EQ(timeout_result.status().code(), ErrorCode::GENERATE_TIMEOUT);
 }
 
+TEST_F(GenerateStreamTest, checkTimeoutAndHasErrorDoesNotAdvanceWaitingStream) {
+    const struct {
+        const char* name;
+        int64_t     timeout_ms;
+        int64_t     elapsed_ms;
+        bool        has_existing_error;
+        ErrorCode   expected_error;
+    } cases[] = {
+        {"disabled", 0, 100, false, ErrorCode::NONE_ERROR},
+        {"not expired", 60000, 0, false, ErrorCode::NONE_ERROR},
+        {"expired", 10, 100, false, ErrorCode::GENERATE_TIMEOUT},
+        {"existing error", 10, 100, true, ErrorCode::CANCELLED},
+    };
+    auto builder = GenerateStreamBuilder();
+    for (const auto& test_case : cases) {
+        SCOPED_TRACE(test_case.name);
+        auto stream                          = builder.createContextStream({1, 2, 3});
+        stream->generateConfig()->timeout_ms = test_case.timeout_ms;
+        stream->resetBeginTime(autil::TimeUtility::currentTimeInMicroSeconds() - test_case.elapsed_ms * 1000);
+        stream->reportEvent(StreamEvents::CanRun);
+        if (test_case.has_existing_error) {
+            stream->reportError(ErrorCode::CANCELLED, "cancelled before timeout maintenance");
+        }
+
+        EXPECT_EQ(stream->checkTimeoutAndHasError(), test_case.expected_error != ErrorCode::NONE_ERROR);
+        EXPECT_EQ(stream->statusInfo().code(), test_case.expected_error);
+        EXPECT_EQ(stream->getStatus(), StreamState::WAITING);
+        EXPECT_TRUE(stream->hasEvent(StreamEvents::CanRun));
+        EXPECT_FALSE(stream->hasEvent(StreamEvents::LoadInitiated));
+        EXPECT_FALSE(stream->getTimeInfo().running_started);
+        if (test_case.has_existing_error) {
+            EXPECT_EQ(stream->stopReason(), "cancelled before timeout maintenance");
+        }
+    }
+}
+
 TEST_F(GenerateStreamTest, schedulerTimeoutDoesNotOverrideQueuedOutput) {
     auto builder = GenerateStreamBuilder();
     auto stream  = std::dynamic_pointer_cast<NormalGenerateStream>(builder.createContextStream({1, 2, 3}));
@@ -488,6 +746,7 @@ TEST_F(GenerateStreamTest, schedulerTimeoutDoesNotOverrideQueuedOutput) {
         std::lock_guard<std::mutex> lock(*stream->mutex_);
         stream->enqueueGenerateOutput(std::move(outputs));
     }
+    EXPECT_FALSE(stream->checkTimeoutAndHasError());
     EXPECT_EQ(stream->moveToNext(), StreamState::WAITING);
     EXPECT_TRUE(stream->statusInfo().ok());
 
@@ -506,6 +765,7 @@ TEST_F(GenerateStreamTest, schedulerTimeoutDoesNotOverridePendingCompletion) {
 
     stream->reportEvent(StreamEvents::GenerateDone);
 
+    EXPECT_FALSE(stream->checkTimeoutAndHasError());
     EXPECT_EQ(stream->moveToNext(), StreamState::FINISHED);
     EXPECT_TRUE(stream->statusInfo().ok());
 
@@ -522,6 +782,7 @@ TEST_F(GenerateStreamTest, schedulerTimeoutDoesNotOverrideRemoteHandoff) {
 
     stream->reportEvent(StreamEvents::NeedRemoteGenerate);
 
+    EXPECT_FALSE(stream->checkTimeoutAndHasError());
     EXPECT_EQ(stream->moveToNext(), StreamState::WAITING);
     EXPECT_TRUE(stream->statusInfo().ok());
 
@@ -669,12 +930,58 @@ TEST_F(GenerateStreamTest, testMtpAsyncDeviceStateTracksRealAndUpperBoundSeqLen)
     auto stream  = builder.createContextStream({1, 2, 3, 4, 5, 6});
 
     GenerateStream::MtpAsyncDeviceState state;
-    state.last_real_seq_len = stream->seqLength();
-    state.next_real_seq_len = state.last_real_seq_len + 2;
+    state.previous_seq_len_upper_bound = stream->seqLength();
+    state.next_seq_len_upper_bound     = state.previous_seq_len_upper_bound + 2;
     stream->setMtpAsyncDeviceState(std::move(state));
 
-    ASSERT_EQ(stream->getMtpAsyncDeviceState().last_real_seq_len, stream->seqLength());
-    ASSERT_EQ(stream->getMtpAsyncDeviceState().next_real_seq_len, stream->seqLength() + 2);
+    ASSERT_EQ(stream->getMtpAsyncDeviceState().previous_seq_len_upper_bound, stream->seqLength());
+    ASSERT_EQ(stream->getMtpAsyncDeviceState().next_seq_len_upper_bound, stream->seqLength() + 2);
+}
+
+TEST_F(GenerateStreamTest, testMtpAsyncDeviceStatePublishesCoherentConcurrentSnapshots) {
+    auto builder = GenerateStreamBuilder();
+    auto stream  = builder.createContextStream({1, 2, 3, 4, 5, 6});
+
+    constexpr int            publishes_per_writer = 1000;
+    std::atomic<bool>        start{false};
+    std::atomic<bool>        writers_done{false};
+    std::atomic<bool>        incoherent_snapshot{false};
+    std::vector<std::thread> writers;
+    for (int writer_id = 0; writer_id < 2; ++writer_id) {
+        writers.emplace_back([&, writer_id] {
+            while (!start.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+            for (int i = 1; i <= publishes_per_writer; ++i) {
+                const int                           marker = writer_id * publishes_per_writer + i;
+                GenerateStream::MtpAsyncDeviceState state;
+                state.previous_seq_len_upper_bound = marker;
+                state.next_seq_len_upper_bound     = marker;
+                stream->setMtpAsyncDeviceState(std::move(state));
+            }
+        });
+    }
+    std::thread reader([&] {
+        while (!start.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+        while (!writers_done.load(std::memory_order_acquire)) {
+            const auto state = stream->getMtpAsyncDeviceState();
+            if (state.epoch != 0 && state.previous_seq_len_upper_bound != state.next_seq_len_upper_bound) {
+                incoherent_snapshot.store(true, std::memory_order_release);
+            }
+        }
+    });
+
+    start.store(true, std::memory_order_release);
+    for (auto& writer : writers) {
+        writer.join();
+    }
+    writers_done.store(true, std::memory_order_release);
+    reader.join();
+
+    EXPECT_FALSE(incoherent_snapshot.load(std::memory_order_acquire));
+    EXPECT_EQ(stream->getMtpAsyncDeviceState().epoch, 2u * publishes_per_writer);
 }
 
 // setSpecDecodeDeviceState / clearSpecDecodeDeviceState

@@ -10,7 +10,6 @@
 // RtpProcessGroup is deprecated, use rtp_llm.distribute.collective_torch instead
 // #include "rtp_llm/models_py/bindings/common/RtpProcessGroup.h"
 #include "rtp_llm/models_py/bindings/cuda/PerTokenGroupQuantFp8.h"
-#include "3rdparty/flashinfer/flashinfer.h"
 #include "rtp_llm/models_py/bindings/cuda/TrtFp8QuantOp.h"
 #include "rtp_llm/models_py/bindings/cuda/ReuseKVCacheOp.h"
 #include "rtp_llm/models_py/bindings/cuda/MlaKMergeOp.h"
@@ -25,6 +24,7 @@
 #include "rtp_llm/models_py/bindings/cuda/kernels/topk_v3.h"
 #endif
 #include "rtp_llm/models_py/bindings/cuda/kernels/dsv4_top_k_per_row_prefill.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/deepselect_bf16.h"
 
 using namespace rtp_llm;
 
@@ -41,31 +41,6 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("n"),
                   py::arg("row_len"),  // Will use data.sizes()[1] if 0
                   py::arg("info_id"));
-
-    rtp_ops_m.def("rmsnorm",
-                  &rmsnorm,
-                  "RMSNorm kernel",
-                  py::arg("output"),
-                  py::arg("input"),
-                  py::arg("weight"),
-                  py::arg("eps"),
-                  py::arg("cuda_stream") = 0);
-
-    rtp_ops_m.def("fused_add_rmsnorm",
-                  &fused_add_rmsnorm,
-                  "Fused Add RMSNorm kernel",
-                  py::arg("input"),
-                  py::arg("residual"),
-                  py::arg("weight"),
-                  py::arg("eps"),
-                  py::arg("cuda_stream") = 0);
-
-    rtp_ops_m.def("silu_and_mul",
-                  &silu_and_mul,
-                  "SiLU and Multiply kernel",
-                  py::arg("output"),
-                  py::arg("input"),
-                  py::arg("cuda_stream") = 0);
 
     rtp_ops_m.def("fused_qk_rmsnorm",
                   &FusedQKRMSNorm,
@@ -281,6 +256,8 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
     // Per-row TopK over [row_starts[r], row_ends[r]); returned indices
     // are relative to row_starts[r], padded with -1 past the per-row
     // valid count. CUDA-only.
+    rtp_ops_m.def("deepselect_bf16_available", &deepselect_bf16_available);
+    rtp_ops_m.def("deepselect_bf16", &deepselect_bf16, py::arg("logits"), py::arg("ends"), py::arg("output"));
     rtp_ops_m.def("dsv4_top_k_per_row_prefill",
                   &dsv4_top_k_per_row_prefill,
                   "Per-row TopK for DSv4 indexer prefill",

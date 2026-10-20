@@ -111,7 +111,7 @@ class TrafficPolicyConfigTest {
 
     private static TrafficPolicyConfig parseGroupSelector(String json) {
         String document = "{\"router\":{\"groupSelector\":" + json + "}}";
-        return ConfigService.parse(document).getRouter().getGroupSelector();
+        return ConfigTestFixtures.parse(document).getRouter().getGroupSelector();
     }
 
     private static Request request(long id, String apiKey, long inputTokens) {

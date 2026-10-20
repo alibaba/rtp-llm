@@ -50,6 +50,10 @@ _attn_type_mod = _load_module(
     "rtp_llm.models_py.modules.dsv4.kv_cache_utils",
     _THIS_DIR.parent.parent / "kv_cache_utils.py",
 )
+SWA_KV = _attn_type_mod.SWA_KV
+CSA_KV = _attn_type_mod.CSA_KV
+HCA_KV = _attn_type_mod.HCA_KV
+INDEXER_KV = _attn_type_mod.INDEXER_KV
 _fused_mod = _load_module(
     "rtp_llm.models_py.modules.dsv4.fp8.decode._fused_prepare_meta_triton",
     _DECODE_DIR / "_fused_prepare_meta_triton.py",
@@ -234,7 +238,6 @@ def _alloc_phase2b(meta: MockMeta, bs: int, device, seqlen: int = 0) -> None:
     Block tables are sized dynamically based on seqlen and have 0 (sentinel)
     beyond the blocks actually needed, matching production behavior.
     """
-    SWA_KV, CSA_KV, HCA_KV, INDEXER_KV = 7, 1, 2, 3
     entries = {SWA_KV: 256, CSA_KV: 64, INDEXER_KV: 64, HCA_KV: 2}
     T = bs * meta.q_len_per_req
 
@@ -343,15 +346,14 @@ def ref_phase2b(
     meta: MockMeta,
     start_pos: torch.Tensor,
     bs: int,
-    entries_per_block: Dict[int, int],
-    tokens_per_block: Dict[int, int],
+    entries_per_block: Dict[str, int],
+    tokens_per_block: Dict[str, int],
 ) -> None:
     """Reference for fused_phase2b_pool_slot_mapping."""
-    SWA_KV, CSA_KV, HCA_KV, INDEXER_KV = 7, 1, 2, 3
     q_len = meta.q_len_per_req
     device = start_pos.device
 
-    def _raw_tokens(at: int, E: int, ratio: int) -> int:
+    def _raw_tokens(at: str, E: int, ratio: int) -> int:
         del E, ratio
         return int(tokens_per_block[at])
 
@@ -522,7 +524,6 @@ def _compare_phase2b(
     ref_meta: MockMeta, fused_meta: MockMeta, bs: int, q_len: int
 ) -> Optional[str]:
     T = bs * q_len
-    SWA_KV, CSA_KV, HCA_KV, INDEXER_KV = 7, 1, 2, 3
     for at, name in [
         (SWA_KV, "SWA"),
         (CSA_KV, "CSA"),
@@ -793,7 +794,6 @@ def run_correctness_tests():
     passed2 = 0
     failed2 = 0
     total2 = 0
-    SWA_KV, CSA_KV, HCA_KV, INDEXER_KV = 7, 1, 2, 3
     entries = {SWA_KV: 256, CSA_KV: 64, INDEXER_KV: 64, HCA_KV: 2}
     tokens = {SWA_KV: 256, CSA_KV: 256, INDEXER_KV: 256, HCA_KV: 256}
 
@@ -937,7 +937,6 @@ def run_benchmarks():
     )
     print("-" * 70)
 
-    SWA_KV, CSA_KV, HCA_KV, INDEXER_KV = 7, 1, 2, 3
     entries = {SWA_KV: 256, CSA_KV: 64, INDEXER_KV: 64, HCA_KV: 2}
     tokens = {SWA_KV: 256, CSA_KV: 256, INDEXER_KV: 256, HCA_KV: 256}
 
@@ -965,6 +964,10 @@ def run_benchmarks():
         print(
             f"{bs:>6} {q_len:>6} {seqlen:>10} | {t_ref:>10.3f}ms {t_fused:>10.3f}ms {speedup:>7.2f}x"
         )
+
+
+def test_fused_decode_metadata_correctness():
+    assert run_correctness_tests() == 0
 
 
 if __name__ == "__main__":

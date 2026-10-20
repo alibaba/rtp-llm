@@ -89,9 +89,12 @@ cc_library(
 cc_library(
     name = "scaled_fp4_quant",
     srcs = ["scaled_fp4_quant.cu"],
-    hdrs = ["scaled_fp4_quant.h"],
+    hdrs = [
+        "scaled_fp4_quant.h",
+        "nvfp4_quant.cuh",
+    ],
     deps = [
-        "//rtp_llm/models_py/bindings/cuda/cutlass:fp4_gemm_cu",
+        "@cutlass4.0//:cutlass",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
         "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
@@ -209,11 +212,18 @@ cc_library(
     name = "cuda_graph_prepare",
     srcs = ["cuda_graph_prepare.cu"],
     hdrs = ["cuda_graph_prepare.h"],
-    deps = [
-        "@local_config_cuda//cuda:cuda_headers",
-        "@local_config_cuda//cuda:cudart",
-    ] + torch_deps(),
-    copts = cuda_copts(),
+    deps = torch_deps() + select({
+        "@//:using_cuda": [
+            "@local_config_cuda//cuda:cuda_headers",
+            "@local_config_cuda//cuda:cudart",
+        ],
+        "@//:using_rocm": [
+            "@local_config_rocm//rocm:rocm_headers",
+            "@local_config_rocm//rocm:hip",
+        ],
+        "//conditions:default": [],
+    }),
+    copts = any_cuda_copts(),
     visibility = ["//visibility:public"],
 )
 
@@ -327,5 +337,45 @@ cc_library(
     ],
     copts = any_cuda_copts(),
     include_prefix = "src",
+    visibility = ["//visibility:public"],
+)
+
+deepselect_bf16_cuda_copts = [
+    "-DRTP_DEEPSELECT_BF16_ENABLED",
+    "-O3",
+    "-U__CUDA_NO_HALF_OPERATORS__",
+    "-U__CUDA_NO_HALF_CONVERSIONS__",
+    "-U__CUDA_NO_HALF2_OPERATORS__",
+    "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+    "-nvcc_options=expt-relaxed-constexpr",
+    "-nvcc_options=expt-extended-lambda",
+    "-nvcc_options=use_fast_math",
+    "-nvcc_options=ftz=false",
+    "--cuda-include-ptx=sm_100a", "--cuda-gpu-arch=sm_100a",
+    "--cuda-include-ptx=sm_103a", "--cuda-gpu-arch=sm_103a",
+]
+
+cc_library(
+    name = "deepselect_bf16",
+    srcs = ["deepselect_bf16.cu"],
+    hdrs = ["deepselect_bf16.h"] + glob([
+        "deepselect/**/*.h",
+        "deepselect/**/*.cuh",
+    ]),
+    copts = copts() + cuda_default_copts_without_arch() + select({
+        "@//:using_cuda13_x86": deepselect_bf16_cuda_copts,
+        "@//:using_cuda13_arm": deepselect_bf16_cuda_copts,
+        "@//:using_cuda12_9": deepselect_bf16_cuda_copts,
+        "//conditions:default": [],
+    }),
+    deps = torch_deps() + [
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + select({
+        "@//:using_cuda13_x86": ["@cutlass4.0//:cutlass"],
+        "@//:using_cuda13_arm": ["@cutlass4.0//:cutlass"],
+        "@//:using_cuda12_9": ["@cutlass4.0//:cutlass"],
+        "//conditions:default": [],
+    }),
     visibility = ["//visibility:public"],
 )

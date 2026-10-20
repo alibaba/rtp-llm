@@ -28,6 +28,12 @@ struct BatchedMemoryCopyParams {
     int                                device_index = -1;
 };
 
+enum class BatchedMemoryCopyStatus {
+    SUCCESS,
+    NOT_SUPPORTED,
+    EXECUTION_FAILED,
+};
+
 enum class StagedMemoryCopyDirection {
     H2D = 0,
     D2H = 1,
@@ -55,15 +61,11 @@ struct StagedMemoryCopyParams {
 };
 
 struct StagedMemoryCopyScratch {
-    void*  host_staging       = nullptr;
-    size_t host_capacity      = 0;
-    void*  device_staging     = nullptr;
-    size_t device_capacity    = 0;
-    void*  device_ptrs        = nullptr;
-    void*  device_offsets     = nullptr;
-    void*  device_sizes       = nullptr;
-    size_t meta_capacity      = 0;
-    int    device_index       = -1;
+    void*  device_staging  = nullptr;
+    size_t device_capacity = 0;
+    void*  device_tiles    = nullptr;
+    size_t meta_capacity   = 0;
+    int    device_index    = -1;
 };
 
 // Multi-tensor non-blocking copy with device-specific implementation.
@@ -74,11 +76,13 @@ void execNoBlockCopy(const MultiCopyParams& params);
 
 // One CUDA runtime call copy executor for regular host/device pointers.
 // CUDA 12.8+ uses cudaMemcpyBatchAsync to avoid per-tile cudaMemcpyAsync launches.
-bool execBatchedMemoryCopy(const BatchedMemoryCopyParams& params);
+// Only NOT_SUPPORTED permits the caller to fall back to another strategy;
+// EXECUTION_FAILED means a CUDA call was attempted and failed.
+BatchedMemoryCopyStatus execBatchedMemoryCopy(const BatchedMemoryCopyParams& params);
 
 // Stages compact host payload in GPU memory, then uses one SM gather/scatter kernel.
-// host_segments may describe non-contiguous host blocks; they are packed/unpacked on CPU.
-// scratch is optional; passing one lets callers reuse pinned host staging and device metadata buffers.
+// host_segments may describe non-contiguous host blocks; each segment copies directly to/from GPU staging.
+// scratch is optional; passing one lets callers reuse GPU staging and device metadata buffers.
 // H2D: compact host payload -> GPU staging -> tile.gpu by tile.host_offset.
 // D2H: tile.gpu -> GPU staging by tile.host_offset -> compact host payload.
 bool execStagedMemoryCopy(const StagedMemoryCopyParams& params, StagedMemoryCopyScratch* scratch = nullptr);

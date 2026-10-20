@@ -4,8 +4,8 @@ package org.flexlb.balance.preemption;
  * Canonical progress of one exact victim through the Engine-Cancel protocol.
  *
  * <p>This type deliberately excludes owner-specific terminal facts. A
- * scheduler registration may be settled, while an endpoint claim may transfer
- * its accounting to an Engine fence; neither fact is a Cancel protocol phase.
+ * scheduler registration and its endpoint claim can be settled by request
+ * expiry or matching Engine evidence; those facts are not Cancel protocol phases.
  */
 public enum PreemptionCancelPhase {
     CLAIMED,
@@ -31,13 +31,7 @@ public enum PreemptionCancelPhase {
         return this == CLAIMED || this == CANCEL_IN_FLIGHT;
     }
 
-    public boolean isFenceTransferable() {
-        return this == CLAIMED
-                || this == CANCEL_IN_FLIGHT
-                || this == NOT_FOUND_STALE;
-    }
-
-    public boolean acceptsTombstone() {
+    public boolean acceptsRequestFenced() {
         return this == CANCEL_IN_FLIGHT
                 || this == NOT_FOUND_STALE
                 || this == CANCEL_UNKNOWN;

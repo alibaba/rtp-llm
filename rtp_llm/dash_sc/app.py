@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 import os
+import queue
 import signal
 import threading
 import time
@@ -144,6 +145,20 @@ def _abort_bind_barrier(bind_barrier) -> None:
         logging.warning("[DashScApp] failed to abort gRPC bind barrier: %s", e)
 
 
+def _v41_image_processor_config(model_config):
+    if model_config.model_type not in ("deepseek_v41", "deepseek_v41_dspark"):
+        return None
+    from rtp_llm.config.dsv41_config import V41Config
+    from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_processor import (
+        V41ImageProcessorConfig,
+    )
+
+    # deepseek_v41_config is the flattened text execution config. Vision
+    # preprocessing consumes the full checkpoint config owned by the MM mixin.
+    raw = model_config.mm_related_params.config["v41_config"]
+    return V41ImageProcessorConfig.from_model_config(V41Config.from_dict(raw))
+
+
 class DashScShutdownManager:
     """Tracks DashSc draining state and accepted in-flight RPCs."""
 
@@ -245,6 +260,7 @@ class DashScShutdownManager:
 
 async def _create_proxy_servicer_on_loop(
     *,
+    dash_sc_grpc_config=None,
     rank_id: Optional[int] = None,
     server_id: str = "",
 ) -> DashScProxyServicer:
@@ -253,7 +269,9 @@ async def _create_proxy_servicer_on_loop(
     Outbound ``grpc.aio.Channel`` objects are event-loop affine, but the shared
     channel cache builds them lazily when a request first uses an address.
     """
-    return DashScProxyServicer(rank_id=rank_id, server_id=server_id)
+    return DashScProxyServicer(
+        dash_sc_grpc_config=dash_sc_grpc_config, rank_id=rank_id, server_id=server_id
+    )
 
 
 DashScAppServicer = DashScInferenceServicer | DashScProxyServicer
@@ -495,18 +513,69 @@ class DashScApp:
         self._enqueue_loop = None
         self._enqueue_loop_thread = None
 
+    def _dispatch_signal_events(self) -> None:
+        while True:
+            kind, payload = self._signal_events.get()
+            try:
+                if kind == "barrier":
+                    payload.set()
+                    continue
+                signum = payload
+                if kind == "pre_stop":
+                    logging.info(
+                        "[DashScApp] received pre-stop drain signal %s", signum
+                    )
+                    self._start_pre_stop_watchdog(signum)
+                else:
+                    logging.info(
+                        "[DashScApp] received signal %s, shutting down", signum
+                    )
+                    keep_unavailable = (
+                        signum == signal.SIGTERM
+                        and self._effective_pre_stop_drain_seconds() > 0
+                    )
+                    self._begin_shutdown(signum, start_draining=not keep_unavailable)
+            except Exception:
+                # Never let the dispatcher die: a lost signal means a server that
+                # ignores SIGTERM.
+                logging.exception("[DashScApp] signal dispatch failed for %s", payload)
+
+    def wait_for_signal_dispatch(self, timeout: float = 5.0) -> bool:
+        """Block until every signal handed over before this call was dispatched.
+
+        The queue is FIFO with a single consumer, so a barrier that has been
+        processed proves everything enqueued ahead of it was processed too. That
+        is what makes it sound to assert a post-condition after signalling
+        instead of racing the dispatcher.
+        """
+        done = threading.Event()
+        self._signal_events.put(("barrier", done))
+        return done.wait(timeout)
+
     def _install_signal_handlers(self) -> None:
+        # Signal handlers run on the main thread and can be entered mid-update,
+        # so they must not log or take locks: _begin_shutdown's logging can
+        # re-enter the stderr writer and raise "reentrant call inside
+        # <_io.BufferedWriter ...>", which escapes the handler and takes the
+        # shutdown path with it. SimpleQueue.put is reentrant-safe and usable
+        # from a handler, so the handlers only hand the signal over and return;
+        # the worker below does the real work off the handler. Same approach as
+        # FrontendApp.
+        self._signal_events: "queue.SimpleQueue" = queue.SimpleQueue()
+        self._signal_worker = threading.Thread(
+            target=self._dispatch_signal_events,
+            name="dash-sc-signal-dispatch",
+            daemon=True,
+        )
+        self._signal_worker.start()
+
         def _drain_only_handler(signum, frame):
-            logging.info("[DashScApp] received pre-stop drain signal %s", signum)
-            self._start_pre_stop_watchdog(signum)
+            # Signal-handler context: hand off and return.
+            self._signal_events.put(("pre_stop", signum))
 
         def _handler(signum, frame):
-            logging.info("[DashScApp] received signal %s, shutting down", signum)
-            keep_unavailable = (
-                signum == signal.SIGTERM
-                and self._effective_pre_stop_drain_seconds() > 0
-            )
-            self._begin_shutdown(signum, start_draining=not keep_unavailable)
+            # Signal-handler context: hand off and return.
+            self._signal_events.put(("exit", signum))
 
         try:
             try:
@@ -669,6 +738,7 @@ class DashScApp:
                             "[DashScApp] grammar admission validator disabled: %s", e
                         )
                         grammar_validator = None
+                v41_processor_config = _v41_image_processor_config(model_config)
                 servicer = DashScInferenceServicer(
                     backend_visitor=backend_visitor,
                     ip=self.server_config.ip,
@@ -682,12 +752,15 @@ class DashScApp:
                     rank_id=self.server_config.rank_id,
                     repetition_monitor_config=repetition_monitor_config,
                     grammar_validator=grammar_validator,
+                    v41_processor_config=v41_processor_config,
+                    max_seq_len=model_config.max_seq_len,
                 )
 
             loop = self._start_enqueue_loop()
             if is_proxy:
                 fut = asyncio.run_coroutine_threadsafe(
                     _create_proxy_servicer_on_loop(
+                        dash_sc_grpc_config=self.dash_sc_grpc_config,
                         rank_id=self.server_config.rank_id,
                         server_id=self.server_config.frontend_server_id,
                     ),

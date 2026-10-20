@@ -3,18 +3,11 @@
 #include "rtp_llm/models_py/bindings/cuda/FlashInferMlaParams.h"
 #include "rtp_llm/models_py/bindings/cuda/SparseMlaParams.h"
 
-#ifdef USING_CUDA12
-#include "rtp_llm/models_py/bindings/cuda/XQAAttnOp.h"
-#endif
-
 namespace torch_ext {
 
 void registerAttnOpBindings(py::module& rtp_ops_m) {
     rtp_llm::registerPyFlashInferMlaParams(rtp_ops_m);
     rtp_llm::registerPySparseMlaParams(rtp_ops_m);
-#ifdef USING_CUDA12
-    rtp_llm::registerXQAAttnOp(rtp_ops_m);
-#endif
 }
 
 }  // namespace torch_ext

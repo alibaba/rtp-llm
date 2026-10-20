@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <optional>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -119,6 +120,7 @@ public:
     bool               reuse_cache         = true;
     bool               enable_device_cache = true;
     bool               enable_memory_cache = true;
+    bool               enable_disk_cache   = true;
     bool               enable_remote_cache = true;
     std::string        trace_id;
     std::optional<int> group_timeout;
@@ -138,6 +140,64 @@ public:
     // 跨序列分叉起始商品位置：前 N 个商品所有序列保持 greedy 一致，
     // 从第 N+1 个商品开始对非主序列施加 top-K 遮蔽制造分叉。默认 0（立即分叉）。
     int cross_seq_diverge_start_combo = 0;
+
+    bool isPrefillOnly() const {
+        return max_new_tokens == 0;
+    }
+
+    void enforcePromptScoringConstraints() {
+        max_new_tokens        = 1;
+        is_streaming          = false;
+        reuse_cache           = false;
+        can_use_pd_separation = false;
+    }
+
+    void validatePrefillOnly() {
+        if (max_new_tokens < 0) {
+            throw std::invalid_argument("max_new_tokens must be greater than or equal to 0, got "
+                                        + std::to_string(max_new_tokens));
+        }
+        if (return_prompt_logits) {
+            enforcePromptScoringConstraints();
+        }
+        if (!isPrefillOnly()) {
+            return;
+        }
+        if (min_new_tokens > 0) {
+            throw std::invalid_argument("max_new_tokens == 0 does not support min_new_tokens > 0");
+        }
+        if (num_beams > 1) {
+            throw std::invalid_argument("max_new_tokens == 0 does not support num_beams > 1");
+        }
+        if (!variable_num_beams.empty()) {
+            throw std::invalid_argument("max_new_tokens == 0 does not support non-empty variable_num_beams");
+        }
+        if (num_return_sequences > 1) {
+            throw std::invalid_argument("max_new_tokens == 0 does not support num_return_sequences > 1");
+        }
+        if (return_logits) {
+            throw std::invalid_argument("max_new_tokens == 0 does not support return_logits");
+        }
+        if (calculate_loss != 0) {
+            throw std::invalid_argument("max_new_tokens == 0 does not support calculate_loss");
+        }
+
+        if (return_softmax_probs) {
+            throw std::invalid_argument("max_new_tokens == 0 does not support return_softmax_probs");
+        }
+        if (return_all_probs != ReturnAllProbsMode::NONE) {
+            throw std::invalid_argument("max_new_tokens == 0 does not support return_all_probs");
+        }
+        if (return_cum_log_probs) {
+            throw std::invalid_argument("max_new_tokens == 0 does not support return_cum_log_probs");
+        }
+        if (return_hidden_states) {
+            throw std::invalid_argument("max_new_tokens == 0 does not support return_hidden_states");
+        }
+        if (return_all_hidden_states) {
+            throw std::invalid_argument("max_new_tokens == 0 does not support return_all_hidden_states");
+        }
+    }
 
     bool top1() const {
         return top_k == 1;
@@ -209,9 +269,9 @@ public:
                      << ", end_think_token_ids: " << vectorToString(end_think_token_ids)
                      << ", gen_timeline: " << gen_timeline << ", profile_step: " << profile_step
                      << ", reuse_cache: " << reuse_cache << ", enable_device_cache: " << enable_device_cache
-                     << ", enable_memory_cache: " << enable_memory_cache
-                     << ", enable_remote_cache: " << enable_remote_cache
-                     << ", unique_key: " << unique_key << ", combo_token_size: " << combo_token_size
+                     << ", enable_memory_cache: " << enable_memory_cache << ", enable_disk_cache: " << enable_disk_cache
+                     << ", enable_remote_cache: " << enable_remote_cache << ", unique_key: " << unique_key
+                     << ", combo_token_size: " << combo_token_size
                      << ", banned_combo_token_ids_size: " << banned_combo_token_ids.size()
                      << ", enable_cross_sequence_ban: " << enable_cross_sequence_ban
                      << ", cross_seq_diverge_start_combo: " << cross_seq_diverge_start_combo << "}";
@@ -331,6 +391,7 @@ public:
         JSONIZE(reuse_cache);
         JSONIZE(enable_device_cache);
         JSONIZE(enable_memory_cache);
+        JSONIZE(enable_disk_cache);
         JSONIZE(enable_remote_cache);
         JSONIZE(aux_info);
         JSONIZE_OPTIONAL(group_timeout);

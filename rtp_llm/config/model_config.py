@@ -14,9 +14,9 @@ from rtp_llm.config.quant_config import (
     init_quant_config,
 )
 from rtp_llm.multimodal.multimodal_mixin_register import get_multimodal_mixin_cls
-from rtp_llm.ops import DataType, KvCacheDataType
+from rtp_llm.ops import DataType, HiddenStateCaptureDtype, KvCacheDataType
 from rtp_llm.ops import ModelConfig as CppModelConfig
-from rtp_llm.ops import TaskType
+from rtp_llm.ops import TaskType, VitSeparation
 from rtp_llm.utils.base_model_datatypes import VitParameters
 from rtp_llm.utils.util import get_config_from_path, to_torch_dtype
 from rtp_llm.utils.weight_type import WEIGHT_TYPE
@@ -42,22 +42,51 @@ def kv_cache_dtype_to_torch_dtype(
 
 def ssm_state_dtype_str_to_data_type(ssm_state_dtype: str) -> DataType:
     ssm_state_dtype = ssm_state_dtype.lower()
-    if ssm_state_dtype == "bf16":
+    if ssm_state_dtype in ("bf16", "bfloat16"):
         return DataType.TYPE_BF16
-    if ssm_state_dtype == "fp16":
+    if ssm_state_dtype in ("fp16", "float16"):
         return DataType.TYPE_FP16
-    if ssm_state_dtype == "fp32":
+    if ssm_state_dtype in ("fp32", "float32"):
         return DataType.TYPE_FP32
     raise ValueError(f"Unsupported ssm_state_dtype: {ssm_state_dtype}")
+
+
+def resolve_ssm_state_dtype(
+    configured_ssm_state_dtype: str,
+    model_ssm_state_dtype: DataType,
+    enable_remote_cache: bool,
+) -> DataType:
+    configured_ssm_state_dtype = configured_ssm_state_dtype.lower()
+    if configured_ssm_state_dtype != "auto":
+        return ssm_state_dtype_str_to_data_type(configured_ssm_state_dtype)
+
+    # The legacy remote connector addresses KV cache through one contiguous
+    # BlockPool. A model-declared recurrent-state dtype that differs from the
+    # attention cache dtype requires independent physical pools, which that
+    # connector explicitly rejects. Keep ``auto`` backward compatible for this
+    # connector while preserving an explicit user override for fail-fast
+    # validation once independent pools are requested deliberately.
+    if enable_remote_cache and model_ssm_state_dtype != DataType.TYPE_BF16:
+        logging.warning(
+            "SSM_STATE_DTYPE=auto resolved to %s, but remote cache requires a "
+            "contiguous shared KV cache pool; falling back to bf16",
+            model_ssm_state_dtype,
+        )
+        return DataType.TYPE_BF16
+
+    return model_ssm_state_dtype
 
 
 class ModelConfig(CppModelConfig):
     # Python-only fields that are allowed to be set
     _python_fields = {
         "is_mtp",
+        "is_deepseek_v41",
+        "deepseek_v41_config",
         "dspark_noise_token_id",
         "dspark_target_layer_ids",
         "dspark_markov_rank",
+        "dspark_sample_from_anchor",
         "capture_aux_hidden_layer_ids",
         "normalize_lm_head_weight",
         "enable_fp32_lm_head",
@@ -66,6 +95,7 @@ class ModelConfig(CppModelConfig):
         "tie_word_embeddings",
         "quantization",
         "mm_related_params",
+        "vit_separation",
         "src_quantization_bit",
         "config_dtype",
         "template_type",
@@ -92,6 +122,8 @@ class ModelConfig(CppModelConfig):
         "max_seq_len",
         "vocab_size",
         "hidden_size",
+        "hidden_state_capture_layer_ids",
+        "hidden_state_capture_dtype",
         "attn_config",
         "special_tokens",
         "quant_algo",
@@ -232,7 +264,11 @@ class ModelConfig(CppModelConfig):
             + self.word_emb_param_count(vocab_size) * 2
         )  # maybe some model donot have lm_head
 
-        if self.mm_model_config.is_multimodal:
+        if (
+            self.mm_model_config.is_multimodal
+            and not getattr(self, "is_mtp", False)
+            and self.vit_separation != VitSeparation.VIT_SEPARATION_REMOTE
+        ):
             model_size += get_multimodal_mixin_cls(self.model_type).eval_mm_model_size(
                 self.mm_related_params, self.extra_data_path, self.local_extra_data_path
             )
@@ -323,7 +359,11 @@ class ModelConfig(CppModelConfig):
             + self.hidden_size
         )
 
-        if self.mm_model_config.is_multimodal:
+        if (
+            self.mm_model_config.is_multimodal
+            and not getattr(self, "is_mtp", False)
+            and self.vit_separation != VitSeparation.VIT_SEPARATION_REMOTE
+        ):
             param_count += get_multimodal_mixin_cls(
                 self.model_type
             ).eval_mm_model_param_count(
@@ -537,11 +577,14 @@ class ModelConfig(CppModelConfig):
         super().__init__(*args, **kwargs)
         # Additional Python-only fields
         self.is_mtp: bool = False
+        self.is_deepseek_v41: bool = False
+        self.deepseek_v41_config = None
         # DSpARK draft checkpoint metadata. Runtime proposal width comes only
         # from sp_config.gen_num_per_cycle.
         self.dspark_noise_token_id: Optional[int] = None
         self.dspark_target_layer_ids: Optional[list[int]] = None
         self.dspark_markov_rank: Optional[int] = None
+        self.dspark_sample_from_anchor: bool = True
         # Target-side decoder layer outputs exported to the DSpARK draft.
         self.capture_aux_hidden_layer_ids: Optional[list[int]] = None
         self.normalize_lm_head_weight: bool = False
@@ -583,6 +626,7 @@ class ModelConfig(CppModelConfig):
         )
         self.render_config: Optional[Any] = None  # RenderConfig for renderer factory
         self.mm_related_params = VitParameters()
+        self.vit_separation: VitSeparation = VitSeparation.VIT_SEPARATION_LOCAL
         self.quant_config = None
 
     def apply_override_args(self, json_model_override_args: str) -> None:
@@ -592,9 +636,55 @@ class ModelConfig(CppModelConfig):
             json_model_override_args: JSON string with model override arguments
         """
         model_override_args = json.loads(json_model_override_args)
-        if model_override_args:
-            # Apply rope_scaling override via model_config
-            self.apply_rope_scaling_override(model_override_args)
+        if not model_override_args:
+            return
+
+        layer_ids = None
+        if "hidden_state_capture_layer_ids" in model_override_args:
+            layer_ids = model_override_args["hidden_state_capture_layer_ids"]
+            if not isinstance(layer_ids, list) or any(
+                isinstance(layer_id, bool) or not isinstance(layer_id, int)
+                for layer_id in layer_ids
+            ):
+                raise ValueError(
+                    "hidden_state_capture_layer_ids must be a list of integers"
+                )
+            if len(set(layer_ids)) != len(layer_ids):
+                raise ValueError("hidden_state_capture_layer_ids must be unique")
+            invalid_layer_ids = [
+                layer_id
+                for layer_id in layer_ids
+                if layer_id < 0 or layer_id >= self.num_layers
+            ]
+            if invalid_layer_ids:
+                raise ValueError(
+                    "hidden_state_capture_layer_ids contains out-of-range values "
+                    f"{invalid_layer_ids}; expected 0 <= layer_id < {self.num_layers}"
+                )
+
+        capture_dtype = None
+        if "hidden_state_capture_dtype" in model_override_args:
+            capture_dtype_name = model_override_args["hidden_state_capture_dtype"]
+            capture_dtype_by_name = {
+                name.lower(): dtype
+                for name, dtype in HiddenStateCaptureDtype.__members__.items()
+            }
+            if (
+                not isinstance(capture_dtype_name, str)
+                or capture_dtype_name not in capture_dtype_by_name
+            ):
+                raise ValueError(
+                    "hidden_state_capture_dtype must be 'bf16' or 'fp8_e4m3'"
+                )
+            capture_dtype = capture_dtype_by_name[capture_dtype_name]
+
+        # Apply only after all capture overrides have been validated so an
+        # invalid later field cannot leave an earlier field partially updated.
+        self.apply_rope_scaling_override(model_override_args)
+        if layer_ids is not None:
+            self.hidden_state_capture_layer_ids = layer_ids
+        if capture_dtype is not None:
+            self.hidden_state_capture_dtype = capture_dtype
 
     def init_precision_config(
         self, kv_cache_config: Optional[Any], act_type: Optional[str]
@@ -858,6 +948,11 @@ def apply_layer_num_override(model_config: ModelConfig, num_layers: int) -> None
     model_config.num_layers = num_layers
 
 
+def _apply_model_override_args(model_config: ModelConfig, model_args: Any) -> None:
+    if model_args.json_model_override_args:
+        model_config.apply_override_args(model_args.json_model_override_args)
+
+
 def build_model_config(
     model_config: ModelConfig,  # ModelConfig instance to build
     model_args: Any,  # ModelArgs from py_env_configs
@@ -890,6 +985,8 @@ def build_model_config(
     if vit_config:
         model_config.extra_data_path = vit_config.extra_data_path
         model_config.local_extra_data_path = vit_config.local_extra_data_path
+        # Remote ViT weights must not be instantiated or counted on the LLM worker.
+        model_config.vit_separation = vit_config.vit_separation
     model_config.phy2log_path = model_args.phy2log_path
 
     if model_args.mla_ops_type:
@@ -926,8 +1023,10 @@ def build_model_config(
         if kv_cache_config.kernel_seq_size_per_block > 0
         else kv_cache_config.seq_size_per_block
     )
-    model_config.linear_attention_config.ssm_state_dtype = (
-        ssm_state_dtype_str_to_data_type(kv_cache_config.ssm_state_dtype)
+    model_config.linear_attention_config.ssm_state_dtype = resolve_ssm_state_dtype(
+        kv_cache_config.ssm_state_dtype,
+        model_config.linear_attention_config.ssm_state_dtype,
+        kv_cache_config.enable_remote_cache,
     )
     model_config.linear_attention_config.conv_state_dtype = model_config.data_type
 
@@ -954,6 +1053,6 @@ def build_model_config(
     model_config.output_vocab_padded_size = 0
     model_config.enable_output_vocab_pruning = model_args.enable_output_vocab_pruning
 
-    # Apply model override args
-    if model_args.json_model_override_args:
-        model_config.apply_override_args(model_args.json_model_override_args)
+    # JSON model overrides are applied first; the dedicated operational switch
+    # is the final override when it was explicitly supplied by CLI or env.
+    _apply_model_override_args(model_config, model_args)

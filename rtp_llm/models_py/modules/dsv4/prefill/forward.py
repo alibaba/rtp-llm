@@ -341,6 +341,7 @@ def forward_layers(
     attn_inputs: Optional[PyAttentionInputs] = None,
     attention_inputs: Any = None,
     prepare_hidden_fn: Optional[Any] = None,
+    capture_context: Optional[Any] = None,
 ) -> torch.Tensor:
     """Flat per-layer loop — vLLM-aligned layout.
 
@@ -407,6 +408,8 @@ def forward_layers(
             int(input_ids.size(0)),
             input_ids.device,
             prefix_lengths=getattr(attn_inputs, "prefix_lengths", None),
+            prefix_lengths_host=getattr(cp_info, "prefill_prefix_lengths_cpu", None),
+            chunk_lengths_device=getattr(attn_inputs, "input_lengths", None),
             kv_cache_sharded=bool(getattr(v4, "_kv_cache_sharded", False)),
         )
     v4._propagate_cp_ctx(cp_ctx)
@@ -614,6 +617,7 @@ def forward_layers(
                 clear_prefill_meta_shared_fp8(v4)
                 raise
 
+    layer_forward_range = _profiler.make_layer_forward_range()
     try:
         with record_range_ctx(), synchronized_moe_chunk_plan(
             v4.layers, h.size(0), h.device
@@ -629,67 +633,72 @@ def forward_layers(
                 else v4.layers
             )
             for layer_idx, layer_call in enumerate(layer_calls):
-                h = layer_call(
-                    h,  # [T, hc, dim]
-                    input_ids,  # [T]
-                    positions,  # [T]
-                    cu_seqlens,  # [B+1]
-                    kv_cache=kv_cache,
-                    block_tables_by_type=block_tables_by_type,
-                )  # [T, hc, dim]
-                if layer_idx in capture_ids:
-                    v4.capture_aux_hidden(layer_idx, h)
-                if _rt_on:
-                    _rt.record(f"prefill_layer{layer_idx:02d}_out", h)
-                if write_cache_store_impl_by_tag:
-                    for layer_cache in kv_cache.get_layer_cache_groups(layer_idx):
-                        writer = write_cache_store_impl_by_tag.get(str(layer_cache.tag))
-                        if writer is None:
+                with layer_forward_range(layer_idx):
+                    h = layer_call(
+                        h,  # [T, hc, dim]
+                        input_ids,  # [T]
+                        positions,  # [T]
+                        cu_seqlens,  # [B+1]
+                        kv_cache=kv_cache,
+                        block_tables_by_type=block_tables_by_type,
+                    )  # [T, hc, dim]
+                    if layer_idx in capture_ids:
+                        v4.capture_aux_hidden(layer_idx, h)
+                    if capture_context is not None:
+                        capture_context.capture_layer(layer_idx, h)
+                    if _rt_on:
+                        _rt.record(f"prefill_layer{layer_idx:02d}_out", h)
+                    if write_cache_store_impl_by_tag:
+                        for layer_cache in kv_cache.get_layer_cache_groups(layer_idx):
+                            writer = write_cache_store_impl_by_tag.get(
+                                str(layer_cache.tag)
+                            )
+                            if writer is None:
+                                raise RuntimeError(
+                                    "missing cache-store writer for layer "
+                                    f"{layer_idx} tag {layer_cache.tag!r}"
+                                )
+                            writer(layer_cache)
+                    elif write_cache_store_impl is not None:
+                        layer_caches = kv_cache.get_layer_cache_groups(layer_idx)
+                        if len(layer_caches) != 1:
                             raise RuntimeError(
-                                "missing cache-store writer for layer "
-                                f"{layer_idx} tag {layer_cache.tag!r}"
+                                "plain cache-store inputs require exactly one cache group "
+                                f"for layer {layer_idx}; got {len(layer_caches)}"
                             )
-                        writer(layer_cache)
-                elif write_cache_store_impl is not None:
-                    layer_caches = kv_cache.get_layer_cache_groups(layer_idx)
-                    if len(layer_caches) != 1:
-                        raise RuntimeError(
-                            "plain cache-store inputs require exactly one cache group "
-                            f"for layer {layer_idx}; got {len(layer_caches)}"
-                        )
-                    write_cache_store_impl(layer_caches[0])
-                if _rt_on:
-                    _rt.record(f"layer{layer_idx:02d}_out", h)
-                    if cp_ctx is None:
-                        layer_last = h[-1:].contiguous()
-                    else:
-                        layer_last_pos = cp_ctx.seq_len_total - 1
-                        layer_last_mask = (
-                            cp_ctx.global_positions == layer_last_pos
-                        ) & cp_ctx.local_is_real
-                        layer_last = h[layer_last_mask].contiguous()
-                        dbg_pos = getattr(_rt, "_DBG_GLOBAL_POS", -1)
-                        if dbg_pos >= 0:
-                            layer_pos_mask = (
-                                cp_ctx.global_positions == dbg_pos
+                        write_cache_store_impl(layer_caches[0])
+                    if _rt_on:
+                        _rt.record(f"layer{layer_idx:02d}_out", h)
+                        if cp_ctx is None:
+                            layer_last = h[-1:].contiguous()
+                        else:
+                            layer_last_pos = cp_ctx.seq_len_total - 1
+                            layer_last_mask = (
+                                cp_ctx.global_positions == layer_last_pos
                             ) & cp_ctx.local_is_real
+                            layer_last = h[layer_last_mask].contiguous()
+                            dbg_pos = getattr(_rt, "_DBG_GLOBAL_POS", -1)
+                            if dbg_pos >= 0:
+                                layer_pos_mask = (
+                                    cp_ctx.global_positions == dbg_pos
+                                ) & cp_ctx.local_is_real
+                                _rt.record(
+                                    f"layer{layer_idx:02d}_pos{dbg_pos}",
+                                    h[layer_pos_mask].contiguous(),
+                                )
+                            layer_tail_mask = (
+                                (
+                                    cp_ctx.global_positions
+                                    >= max(cp_ctx.seq_len_total - 128, 0)
+                                )
+                                & (cp_ctx.global_positions < cp_ctx.seq_len_total)
+                                & cp_ctx.local_is_real
+                            )
                             _rt.record(
-                                f"layer{layer_idx:02d}_pos{dbg_pos}",
-                                h[layer_pos_mask].contiguous(),
+                                f"layer{layer_idx:02d}_tail128",
+                                h[layer_tail_mask].contiguous(),
                             )
-                        layer_tail_mask = (
-                            (
-                                cp_ctx.global_positions
-                                >= max(cp_ctx.seq_len_total - 128, 0)
-                            )
-                            & (cp_ctx.global_positions < cp_ctx.seq_len_total)
-                            & cp_ctx.local_is_real
-                        )
-                        _rt.record(
-                            f"layer{layer_idx:02d}_tail128",
-                            h[layer_tail_mask].contiguous(),
-                        )
-                    _rt.record(f"layer{layer_idx:02d}_last", layer_last)
+                        _rt.record(f"layer{layer_idx:02d}_last", layer_last)
     finally:
         # Always drop the per-layer ``common.workspace`` references, even if a
         # layer raises mid-prefill (e.g. a CUDA OOM under memory pressure —
@@ -797,6 +806,8 @@ def forward_layers(
     # forward (which runs right after the main model on a near-full card) can
     # borrow it. No explicit reset needed — the per-layer ``common.workspace``
     # references were cleared by ``clear_prefill_meta_shared_fp8`` above.
+    if capture_context is not None and capture_context.enabled:
+        return capture_context.finalize(h).hidden_states
     return h  # [T, dim]
 
 
@@ -806,6 +817,7 @@ def forward_prefill(
     parallelism_config: Optional[ParallelismConfig],
     inputs: PyModelInputs,
     prepare_hidden_fn: Optional[Any] = None,
+    capture_context: Optional[Any] = None,
 ) -> PyModelOutputs:
     """Prefill dispatcher — single :func:`forward_layers` call on the full
     flat ``[T_total]`` batch (vLLM-aligned).
@@ -869,6 +881,16 @@ def forward_prefill(
     if rebuild_input_lengths is None or rebuild_input_lengths.numel() == 0:
         rebuild_input_lengths = attn.input_lengths
     if framework_cu_seqlens is not None and framework_cu_seqlens.numel() >= 2:
+        if rebuild_input_lengths is not None and rebuild_input_lengths.numel() > 0:
+            required_cu_seqlens = int(rebuild_input_lengths.numel()) + 1
+            if framework_cu_seqlens.numel() < required_cu_seqlens:
+                raise RuntimeError(
+                    "DSV4 prefill: cu_seqlens has "
+                    f"{framework_cu_seqlens.numel()} entries; batch size "
+                    f"{rebuild_input_lengths.numel()} requires at least {required_cu_seqlens}"
+                )
+            if framework_cu_seqlens.numel() > required_cu_seqlens:
+                framework_cu_seqlens = framework_cu_seqlens[:required_cu_seqlens]
         capture_uses_device_mirror = framework_cu_seqlens.is_cuda and is_capturing
         cu_seqlens_target_device = (
             framework_cu_seqlens.device
@@ -919,5 +941,6 @@ def forward_prefill(
         attn_inputs=attn,
         attention_inputs=attn_inputs,
         prepare_hidden_fn=prepare_hidden_fn,
-    )  # [T_total, dim]
+        capture_context=capture_context,
+    )  # [T_total, dim] or [T_total, (num_capture_layers + 1) * dim]
     return PyModelOutputs(hidden)

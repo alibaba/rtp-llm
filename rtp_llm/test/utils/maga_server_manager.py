@@ -1,5 +1,5 @@
-import json
 import collections
+import json
 import logging
 import os
 import random
@@ -17,6 +17,7 @@ import requests
 
 from rtp_llm.config.py_config_modules import MIN_WORKER_INFO_PORT_NUM
 from rtp_llm.test.utils.port_util import PortManager
+from rtp_llm.utils.jit_cache_env import configure_cache_env
 
 CHECKPOINT_PATH = "CHECKPOINT_PATH"
 MODEL_TYPE = "MODEL_TYPE"
@@ -80,8 +81,10 @@ class MagaServerManager(object):
 
     @property
     def server_pid(self) -> Optional[int]:
-        if self._server_process is not None:
-            return self._server_process.pid
+        with self._state_lock:
+            server_process = self._server_process
+        if server_process is not None:
+            return server_process.pid
         return None
 
     @property
@@ -105,17 +108,25 @@ class MagaServerManager(object):
     def wait_sever_done(self, timeout: int = 1600):
         from rtp_llm.utils.util import wait_sever_done
 
+        # Keep the process being probed even if stop_server clears shared state.
+        with self._state_lock:
+            server_process = self._server_process
         # Health check uses START_PORT (self._port). The VIT server (VIT_SEPARATION==1)
         # exposes /health on its http port only after its preprocess engine and gRPC
         # server finish initializing, so it goes through the same readiness probe as the
         # LLM server instead of being assumed ready.
-        result = wait_sever_done(
-            self._server_process, int(self._port), timeout, self._health_check_path
+        result = server_process is not None and wait_sever_done(
+            server_process, int(self._port), timeout, self._health_check_path
         )
         if not result:
-            rc = self._server_process.poll() if self._server_process else None
+            rc = server_process.poll() if server_process is not None else None
             self._exit_code = rc
-            if rc is not None:
+            pid = server_process.pid if server_process is not None else None
+            if server_process is None:
+                logging.warning(
+                    "Server process is unavailable; health check was not started"
+                )
+            elif rc is not None:
                 if rc < 0:
                     sig = -rc
                     sig_name = (
@@ -124,15 +135,13 @@ class MagaServerManager(object):
                         else f"signal {sig}"
                     )
                     logging.warning(
-                        f"Server process pid={self._server_process.pid} killed by {sig_name} (exit code {rc})"
+                        f"Server process pid={pid} killed by {sig_name} (exit code {rc})"
                     )
                 else:
-                    logging.warning(
-                        f"Server process pid={self._server_process.pid} exited with code {rc}"
-                    )
+                    logging.warning(f"Server process pid={pid} exited with code {rc}")
             else:
                 logging.warning(
-                    f"Server process pid={self._server_process.pid} still alive, health check timed out after {timeout}s"
+                    f"Server process pid={pid} still alive, health check timed out after {timeout}s"
                 )
             self.print_process_log()
         return result
@@ -193,7 +202,12 @@ class MagaServerManager(object):
             and not current_env.get("REMOTE_JIT_DIR", "").strip()
         ):
             home_dir = os.environ.get("HOME", os.path.expanduser("~"))
-            current_env["DG_JIT_CACHE_DIR"] = os.path.join(home_dir, ".deep_gemm")
+            configure_cache_env(
+                "DG_JIT_CACHE_DIR",
+                os.path.join(home_dir, ".deep_gemm"),
+                automatic=False,
+                environ=current_env,
+            )
 
         bazel_outputs_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", os.getcwd())
         cwd_path = os.environ.get("MAGA_SERVER_WORK_DIR", bazel_outputs_dir)

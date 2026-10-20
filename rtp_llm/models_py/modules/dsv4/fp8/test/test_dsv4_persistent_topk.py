@@ -32,8 +32,6 @@ import torch
 
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
-# When the .so doesn't have the binding yet (pre-rebuild), exit cleanly so
-# CI / local runs report SKIP rather than ImportError.
 _HAS_OP = hasattr(rtp_llm_ops, "dsv4_persistent_topk")
 
 WORKSPACE_BYTES = 1024 * 1024  # matches RADIX_TOPK_WORKSPACE_SIZE
@@ -294,11 +292,9 @@ def bench_decode_sweep():
 
 if __name__ == "__main__":
     if not _HAS_OP:
-        print(
-            "SKIP: rtp_llm_ops.dsv4_persistent_topk not built — "
-            "rebuild //rtp_llm:rtp_compute_ops"
+        raise RuntimeError(
+            "rtp_llm_ops.dsv4_persistent_topk is required for this benchmark"
         )
-        raise SystemExit(0)
     print("== Correctness ==")
     test_decode_b1_k512_full()
     test_decode_b1_k512_varied()

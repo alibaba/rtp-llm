@@ -4,7 +4,7 @@ import typing
 
 import torch
 
-__all__: list[str] = ['ALLTOALL', 'ALL_GATHER', 'ALL_GATHER_WITH_OVERLAP', 'ActivationType', 'ArpcConfig', 'AttentionConfigs', 'BatchDecodeSchedulerConfig', 'CPRotateMethod', 'CacheStoreConfig', 'ConcurrencyConfig', 'DISABLED', 'DataType', 'DeviceResourceConfig', 'EPLBConfig', 'EplbMode', 'FIFOSchedulerConfig', 'FMHAConfig', 'FMHAType', 'FfnDisAggregateConfig', 'GrammarConfig', 'GrpcConfig', 'HWKernelConfig', 'HybridAttentionConfig', 'HybridAttentionType', 'KVCacheConfig', 'KvCacheDataType', 'LayerNormType', 'LinearAttentionConfig', 'MMModelConfig',
+__all__: list[str] = ['ALLTOALL', 'ALL_GATHER', 'ALL_GATHER_WITH_OVERLAP', 'ActivationType', 'ArpcConfig', 'AttentionConfigs', 'BatchDecodeSchedulerConfig', 'CPRotateMethod', 'CacheStoreConfig', 'ConcurrencyConfig', 'DISABLED', 'DataType', 'DeviceResourceConfig', 'EPLBConfig', 'EplbMode', 'FIFOSchedulerConfig', 'FMHAConfig', 'FMHAType', 'FfnDisAggregateConfig', 'GrammarConfig', 'GrpcConfig', 'HWKernelConfig', 'HiddenStateCaptureDtype', 'HybridAttentionConfig', 'HybridAttentionType', 'KVCacheConfig', 'KvCacheDataType', 'LayerNormType', 'LinearAttentionConfig', 'MMModelConfig',
                       'MiscellaneousConfig', 'MlaOpsType', 'ModelConfig', 'ModelSpecificConfig', 'MoeConfig', 'NcclCommConfig', 'NormType', 'PDSepConfig', 'PREFILL_CP', 'ParallelismConfig', 'PrefillCPConfig', 'ProfilingDebugLoggingConfig', 'QuantAlgo', 'QuantMethod', 'RoleSpecialTokens', 'RoleType', 'RopeCache', 'RopeConfig', 'RopeStyle', 'RuntimeConfig', 'SpecialTokens', 'SpeculativeExecutionConfig', 'SpeculativeType', 'TaskType', 'UNKNOWN', 'VitConfig', 'VitSeparation', 'check_rope_cache', 'get_block_cache_keys', 'get_rope_cache', 'get_rope_cache_once']
 
 
@@ -82,6 +82,7 @@ class ArpcConfig:
     def to_string(self) -> str:
         ...
 class AttentionConfigs:
+    v41_kv_source_layer_ids: list[int]
     dtype: torch.dtype
     fuse_qkv_add_bias: bool
     head_num: int
@@ -609,6 +610,9 @@ class GrpcConfig:
     def to_string(self) -> str:
         ...
 class HWKernelConfig:
+    generation_prefill_cuda_graph_max_capture_buckets: typing.ClassVar[int]
+    generation_prefill_cuda_graph_max_capture_tokens: typing.ClassVar[int]
+    generation_prefill_cuda_graph_max_requests_limit: typing.ClassVar[int]
     arm_gemm_use_kai: bool
     decode_capture_batch_sizes: list[int]
     deep_gemm_num_sm: int
@@ -623,6 +627,8 @@ class HWKernelConfig:
     ft_disable_custom_ar: bool
     num_native_cuda_graph: int
     prefill_capture_seq_lens: list[int]
+    generation_prefill_capture_token_buckets: list[int]
+    generation_prefill_cuda_graph_max_requests: int
     rocm_disable_custom_ag: bool
     rocm_hipblaslt_config: str
     use_swizzleA: bool
@@ -634,15 +640,51 @@ class HWKernelConfig:
         ...
     def to_string(self) -> str:
         ...
+class HiddenStateCaptureDtype:
+    """
+    Members:
+
+      BF16
+
+      FP8_E4M3
+    """
+    BF16: typing.ClassVar[HiddenStateCaptureDtype]  # value = <HiddenStateCaptureDtype.BF16: 0>
+    FP8_E4M3: typing.ClassVar[HiddenStateCaptureDtype]  # value = <HiddenStateCaptureDtype.FP8_E4M3: 1>
+    __members__: typing.ClassVar[dict[str, HiddenStateCaptureDtype]]  # value = {'BF16': <HiddenStateCaptureDtype.BF16: 0>, 'FP8_E4M3': <HiddenStateCaptureDtype.FP8_E4M3: 1>}
+    def __eq__(self, other: typing.Any) -> bool:
+        ...
+    def __getstate__(self) -> int:
+        ...
+    def __hash__(self) -> int:
+        ...
+    def __index__(self) -> int:
+        ...
+    def __init__(self, value: int) -> None:
+        ...
+    def __int__(self) -> int:
+        ...
+    def __ne__(self, other: typing.Any) -> bool:
+        ...
+    def __repr__(self) -> str:
+        ...
+    def __setstate__(self, state: int) -> None:
+        ...
+    def __str__(self) -> str:
+        ...
+    @property
+    def name(self) -> str:
+        ...
+    @property
+    def value(self) -> int:
+        ...
 class HybridAttentionConfig:
     enable_hybrid_attention: bool
-    enable_independent_kv_cache_pools: bool
     hybrid_attention_types: list[HybridAttentionType]
     @typing.overload
     def __init__(self) -> None:
         ...
     @typing.overload
-    def __init__(self, enable_hybrid_attention: bool, enable_independent_kv_cache_pools: bool, hybrid_attention_types: list[HybridAttentionType]) -> None:
+    def __init__(self, enable_hybrid_attention: bool, hybrid_attention_types: list[HybridAttentionType]) -> None:
         ...
     def to_string(self) -> str:
         ...
@@ -689,29 +731,60 @@ class HybridAttentionType:
 class KVCacheConfig:
     enable_device_cache: bool
     enable_memory_cache: bool
-    enable_memory_cache_sm_copy: bool
-    enable_prefix_tree_memory_cache: bool
-    enable_legacy_memory_connector_fallback: bool
-    enable_gpu_prefix_tree: bool
-    prefix_tree_memory_state_swa_pool_ratio: int
+    enable_disk_cache: bool
     enable_remote_cache: bool
+    device_eviction_policy: str
+    memory_eviction_policy: str
+    disk_eviction_policy: str
     dsv4_fixed_pool_blocks: int
     dsv4_hca_state_pool_blocks: int
     dsv4_fixed_pool_use_memory: bool
+    block_tree_full_prefix_scan_interval_ms: int
+    block_tree_transfer_worker_count: int
+    block_tree_business_queue_max_size: int
+    block_tree_transfer_queue_max_size: int
+    block_tree_device_evict_low_watermark_ratio: float
+    block_tree_device_evict_high_watermark_ratio: float
+    block_tree_memory_evict_low_watermark_ratio: float
+    block_tree_memory_evict_high_watermark_ratio: float
+    block_tree_disk_evict_low_watermark_ratio: float
+    block_tree_disk_evict_high_watermark_ratio: float
     fp8_kv_cache: int
     kv_cache_mem_mb: int
     linear_step: int
     max_block_size_per_item: int
     memory_cache_size_mb: int
     memory_cache_sync_timeout_ms: int
-    enable_memory_cache_disk: bool
-    memory_cache_disk_paths: str
-    memory_cache_disk_size_mb: int
-    memory_cache_disk_buffered_io: bool
-    memory_cache_disk_sync_timeout_ms: int
+    disk_cache_paths: str
+    disk_cache_size_mb: int
+    disk_cache_buffered_io: bool
+    disk_cache_sync_timeout_ms: int
+    disk_cache_staging_block_count: int
+    memory_cache_max_descriptors_per_transfer_batch: int
     multi_task_prompt: str
     multi_task_prompt_str: str
     multi_task_prompt_tokens: dict[str, list[int]]
+    kvcm_asyncwrapper_queue_size: int
+    kvcm_asyncwrapper_thread_num: int
+    kvcm_client_config: str
+    kvcm_enable_vipserver: bool
+    kvcm_get_broadcast_timeout: int
+    kvcm_get_timeout_ms: int
+    kvcm_instance_group: str
+    kvcm_instance_id_salt: str
+    kvcm_meta_channel_call_timeout: int
+    kvcm_meta_channel_connection_timeout: int
+    kvcm_meta_channel_retry_time: int
+    kvcm_model_extra_info: str
+    kvcm_model_sdk_config: str
+    kvcm_model_user_data: str
+    kvcm_put_broadcast_timeout: int
+    kvcm_put_timeout_ms: int
+    kvcm_server_address: str
+    kvcm_storage_queue_size: int
+    kvcm_storage_thread_num: int
+    kvcm_vipserver_domain: str
+    # Legacy aliases of the canonical KVCM members.
     reco_asyncwrapper_queue_size: int
     reco_asyncwrapper_thread_num: int
     reco_client_config: str
@@ -736,14 +809,6 @@ class KVCacheConfig:
     reuse_cache: bool
     seq_size_per_block: int
     kernel_seq_size_per_block: int
-    enable_tiered_memory_cache: bool
-    enable_gpu_prefix_tree: bool
-    enable_prefix_tree_memory_cache: bool
-    enable_legacy_memory_connector_fallback: bool
-    prefix_tree_memory_state_swa_pool_ratio: int
-    enable_independent_group_eviction: bool
-    device_cache_min_free_blocks: int
-    load_cache_retry_times: int
     kv_cache_event_publisher_type: str
     kv_cache_event_manager_endpoint: str
     kv_cache_event_instance_group: str
@@ -752,7 +817,6 @@ class KVCacheConfig:
     ssm_state_dtype: str
     test_block_num: int
     use_block_cache: int
-    write_cache_sync: bool
     def __getstate__(self) -> tuple:
         ...
     def __init__(self) -> None:
@@ -857,10 +921,12 @@ class MMModelConfig:
     include_sep_tokens: bool
     is_multimodal: bool
     mm_position_ids_style: int
+    mm_padding_size: int
     mm_sep_tokens: list[list[int]]
     def __init__(self) -> None:
         ...
 class MMPreprocessConfig:
+    max_long_side_pixel: int
     crop_positions: list[float]
     fps: int
     height: int
@@ -872,7 +938,7 @@ class MMPreprocessConfig:
     width: int
     def __getstate__(self) -> tuple:
         ...
-    def __init__(self, width: int = -1, height: int = -1, min_pixels: int = -1, max_pixels: int = -1, fps: int = -1, min_frames: int = -1, max_frames: int = -1, crop_positions: list[float] = ..., mm_timeout_ms: int = -1) -> None:
+    def __init__(self, width: int = -1, height: int = -1, min_pixels: int = -1, max_pixels: int = -1, fps: int = -1, min_frames: int = -1, max_frames: int = -1, crop_positions: list[float] = ..., mm_timeout_ms: int = -1, max_long_side_pixel: int = -1) -> None:
         ...
     def __setstate__(self, arg0: tuple) -> None:
         ...
@@ -948,15 +1014,6 @@ class CacheGroupType:
     FULL: typing.ClassVar[CacheGroupType]
     SWA: typing.ClassVar[CacheGroupType]
 
-class CacheReusePolicy:
-    REUSABLE: typing.ClassVar[CacheReusePolicy]
-    NON_REUSABLE: typing.ClassVar[CacheReusePolicy]
-
-class CacheEvictPolicy:
-    CHAIN: typing.ClassVar[CacheEvictPolicy]
-    INDEPENDENT: typing.ClassVar[CacheEvictPolicy]
-    NONE: typing.ClassVar[CacheEvictPolicy]
-
 class CacheMemoryPlacement:
     DEVICE: typing.ClassVar[CacheMemoryPlacement]
     HOST: typing.ClassVar[CacheMemoryPlacement]
@@ -984,7 +1041,6 @@ class CpPrefillSliceLayout:
 
 class CacheReusePolicyDesc:
     enable_prefix_reuse: typing.Any
-    evict_policy: typing.Any
     def __init__(self) -> None: ...
 
 class CacheCapacityPolicyDesc:
@@ -1043,6 +1099,8 @@ class ModelConfig:
     embedding_size: int
     eplb_config: EPLBConfig
     kv_cache_spec_descs: list[list[KVCacheSpecDesc]]
+    cache_min_replay_tokens: int
+    cache_key_hash_seed: int
     expert_num: int
     extra_data_path: str
     has_lm_head: bool
@@ -1051,6 +1109,8 @@ class ModelConfig:
     has_post_decoder_layernorm: bool
     has_pre_decoder_layernorm: bool
     hidden_size: int
+    hidden_state_capture_dtype: HiddenStateCaptureDtype
+    hidden_state_capture_layer_ids: list[int]
     hybrid_attention_config: HybridAttentionConfig
     input_embedding_scalar: float
     input_vocab_size: int
@@ -1614,6 +1674,7 @@ class RopeStyle:
     def value(self) -> int:
         ...
 class RuntimeConfig:
+    output_dispatcher_worker_count: int
     max_block_size_per_item: int
     max_generate_batch_size: int
     model_name: str
@@ -1836,7 +1897,7 @@ def check_rope_cache(rope_config: RopeConfig, rope_cache: RopeCache) -> bool:
     """
     Check if RoPE cache matches the given config
     """
-def get_block_cache_keys(token_ids_list: list[list[int]]) -> list[int]:
+def get_block_cache_keys(token_ids_list: list[list[int]], initial_hash: int = 0) -> list[int]:
     ...
 def get_rope_cache(rope_config: RopeConfig, max_position_embeddings: int, interleave: bool) -> torch.Tensor:
     """
@@ -1852,3 +1913,6 @@ ALL_GATHER_WITH_OVERLAP: CPRotateMethod  # value = <CPRotateMethod.ALL_GATHER_WI
 DISABLED: CPRotateMethod  # value = <CPRotateMethod.DISABLED: 0>
 PREFILL_CP: CPRotateMethod  # value = <CPRotateMethod.PREFILL_CP: 4>
 UNKNOWN: CPRotateMethod  # value = <CPRotateMethod.UNKNOWN: 5>
+
+def get_multimodal_token_spans(token_ids: list[int], separators: list[list[int]], include_separators: bool) -> list[tuple[int, int]]:
+    ...

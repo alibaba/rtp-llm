@@ -3,14 +3,20 @@
 # Licensed under the Apache License, Version 2.0
 import logging
 import math
+import os
+from contextlib import nullcontext
+from functools import cache
 from typing import Any, Dict, Optional
 
 import torch
+import triton.language as tl
 
 logger = logging.getLogger(__name__)
 
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
+    configure_deep_gemm_mk_alignment,
     configure_deep_gemm_num_sms,
+    get_theoretical_mk_alignment_for_contiguous_layout,
     is_deep_gemm_e8m0_used,
     m_grouped_fp8_gemm_nt_contiguous,
     m_grouped_fp8_gemm_nt_masked,
@@ -41,15 +47,135 @@ from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
     ep_scatter_v2,
     tma_align_input_scale,
 )
+from rtp_llm.models_py.triton_kernels.moe.fused_moe_kernel import (
+    get_default_config as get_triton_moe_config,
+)
+from rtp_llm.models_py.triton_kernels.moe.fused_moe_kernel import (
+    invoke_fused_moe_kernel as invoke_triton_moe_kernel,
+)
+from rtp_llm.models_py.triton_kernels.moe.fused_moe_kernel import (
+    moe_align_block_size_compiled,
+)
 from rtp_llm.models_py.utils.arch import get_num_device_sms, get_sm
 from rtp_llm.models_py.utils.math import align, ceil_div
 from rtp_llm.models_py.utils.memory import dispose_tensor
 from rtp_llm.ops.compute_ops import trt_fp8_quantize_128
 from rtp_llm.utils.model_weight import W
 
+_SM120_TRITON_MIN_TOKENS = 1
+_SM120_TRITON_MAX_TOKENS = 32
+_SM120_TRITON_MAX_TOKENS_ENV = "RTP_LLM_SM120_TRITON_FP8_MAX_TOKENS"
+_CUDA_GRAPH_WARMUP_FORWARD_ENV = "RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD"
+_SM120_TUNED_FP8_CONFIGS = {
+    # Qwen3-30B-A3B, TP=1. Exhaustive search over BM={8,16,32},
+    # BN={64,128,256}, BK={64,128}, warps={4,8}, and stages={2,3,4,5}.
+    (128, 1536, 2048, 8): {
+        "BLOCK_SIZE_M": 16,
+        "BLOCK_SIZE_N": 128,
+        "BLOCK_SIZE_K": 128,
+        "GROUP_SIZE_M": 1,
+        "num_warps": 4,
+        "num_stages": 3,
+    },
+    (128, 2048, 768, 8): {
+        "BLOCK_SIZE_M": 16,
+        "BLOCK_SIZE_N": 128,
+        "BLOCK_SIZE_K": 128,
+        "GROUP_SIZE_M": 1,
+        "num_warps": 4,
+        "num_stages": 2,
+    },
+}
+
+
+def _get_sm120_triton_max_tokens() -> int:
+    raw_max_tokens = os.environ.get(
+        _SM120_TRITON_MAX_TOKENS_ENV,
+        str(_SM120_TRITON_MAX_TOKENS),
+    )
+    try:
+        max_tokens = int(raw_max_tokens)
+    except ValueError as error:
+        raise ValueError(
+            f"{_SM120_TRITON_MAX_TOKENS_ENV} must be an integer, "
+            f"got {raw_max_tokens!r}"
+        ) from error
+    if not 0 <= max_tokens <= _SM120_TRITON_MAX_TOKENS:
+        raise ValueError(
+            f"{_SM120_TRITON_MAX_TOKENS_ENV} must be in "
+            f"[0, {_SM120_TRITON_MAX_TOKENS}], got {max_tokens}"
+        )
+    return max_tokens
+
+
+def _is_cuda_graph_warmup_or_capture() -> bool:
+    """Return whether this forward is preparing or capturing a CUDA graph.
+
+    ``enable_cuda_graph`` is an engine-level capability and is also true for
+    ordinary eager prefill forwards.  The C++ graph runner marks its eager
+    warmup with an environment flag, while PyTorch exposes the subsequent
+    capture directly.  Requiring either signal keeps short eager prefill out
+    of the static ``torch.compile(dynamic=False)`` routing path.
+    """
+    return (
+        os.environ.get(_CUDA_GRAPH_WARMUP_FORWARD_ENV) == "1"
+        or torch.cuda.is_current_stream_capturing()
+    )
+
+
+@cache
+def _log_sm120_triton_fp8_path(
+    min_tokens: int, max_tokens: int, config_source: str
+) -> None:
+    if max_tokens == 0:
+        logger.info(
+            "SM120 CUDA Graph Triton FP8 MoE is disabled by %s=0",
+            _SM120_TRITON_MAX_TOKENS_ENV,
+        )
+        return
+    logger.info(
+        "SM120 CUDA Graph MoE uses Triton FP8 for %d-%d tokens; "
+        "config source=%s; other shapes use DeepGEMM (set %s=0 to disable)",
+        min_tokens,
+        max_tokens,
+        config_source,
+        _SM120_TRITON_MAX_TOKENS_ENV,
+    )
+
 
 def align_up_math(n: int, alignment: int = 128) -> int:
     return int(math.ceil(n / alignment)) * alignment
+
+
+def get_sm120_triton_fp8_config(
+    M: int,
+    E: int,
+    N: int,
+    K: int,
+    top_k: int,
+) -> Dict[str, Any]:
+    """Return SM120 FP8 MoE configs without changing the SM90 defaults."""
+    tuned_config = _SM120_TUNED_FP8_CONFIGS.get((E, N, K, top_k))
+    if tuned_config is not None and M <= _SM120_TRITON_MAX_TOKENS:
+        return dict(tuned_config)
+
+    # Keep the SM120 override pure even if the generic selector starts caching
+    # configs in the future.
+    config = dict(get_triton_moe_config(M, E, N, K, top_k))
+    avg_tokens_per_expert = M * top_k / max(E, 1)
+    if avg_tokens_per_expert <= 2:
+        # Generic SM120 small-batch fallback from the original optimization.
+        config.update(
+            {
+                "BLOCK_SIZE_M": 16,
+                "BLOCK_SIZE_N": 128,
+                "BLOCK_SIZE_K": 128,
+                "GROUP_SIZE_M": 1,
+                "num_warps": 4,
+                "num_stages": 4,
+            }
+        )
+    return config
 
 
 class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
@@ -75,7 +201,7 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
         checker.check(resolver.is_bf16(config))
         checker.check(has_deep_gemm())
         checker.check(get_sm()[0] >= 9)
-        checker.check(not config.enable_cuda_graph)
+        checker.check(not config.enable_cuda_graph or get_sm()[0] == 12)
 
     def __init__(
         self,
@@ -101,6 +227,14 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
         self.use_block_quant = True
 
         self.masked_max_token_num = config.masked_max_token_num
+        self.enable_cuda_graph = config.enable_cuda_graph
+        self.is_sm120 = get_sm()[0] == 12
+        if self.is_sm120 and self.enable_cuda_graph and self.ep_size == 1:
+            self.sm120_triton_max_tokens = _get_sm120_triton_max_tokens()
+        else:
+            # Do not let an SM120-only rollback knob affect H20/SM100 or an
+            # executor configuration that can never enter the Triton path.
+            self.sm120_triton_max_tokens = 0
 
         # 权重初始化
         self.w13_weight = weights[W.moe_w1]
@@ -115,6 +249,21 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
         assert self.w2_weight.size(0) == self.E
         assert self.w2_weight.size(1) == self.K
         assert self.w2_weight.size(2) == self.N // 2
+
+        if self.is_sm120 and self.enable_cuda_graph and self.ep_size == 1:
+            gate_shape = (self.E, self.N, self.K, self.top_k)
+            down_shape = (self.E, self.K, self.N // 2, self.top_k)
+            config_source = (
+                "tuned"
+                if gate_shape in _SM120_TUNED_FP8_CONFIGS
+                and down_shape in _SM120_TUNED_FP8_CONFIGS
+                else "generic"
+            )
+            _log_sm120_triton_fp8_path(
+                _SM120_TRITON_MIN_TOKENS,
+                self.sm120_triton_max_tokens,
+                config_source,
+            )
 
         self.w13_weight_fp8 = (
             self.w13_weight,
@@ -138,7 +287,30 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
     ) -> CombineForwardPayload:
         assert payload.expert_x is not None, "hidden_states_fp8 is not initialized"
         token_num = payload.expert_x.shape[0]
-        if token_num <= self.masked_max_token_num:
+        # This local routed path neither remaps partitioned expert ids nor
+        # participates in an EP dispatch/combine collective.  expert_map=None
+        # alone does not imply that the payload follows the non-EP contract.
+        if (
+            self.is_sm120
+            and self.enable_cuda_graph
+            and self.ep_size == 1
+            and _is_cuda_graph_warmup_or_capture()
+            and token_num >= _SM120_TRITON_MIN_TOKENS
+            and token_num <= self.sm120_triton_max_tokens
+            and expert_map is None
+            and activation == "SiGLU"
+            and not apply_router_weight_on_input
+        ):
+            return self.execute_triton_fp8(
+                payload,
+                activation,
+                apply_router_weight_on_input,
+            )
+        # The contiguous path uses a shape-derived fixed workspace and performs
+        # all routing metadata work on GPU, so it is safe to capture/replay.
+        # It avoids the E * padded_M masked layout that dominates small decode
+        # batches on SM120.
+        if token_num <= self.masked_max_token_num and not self.enable_cuda_graph:
             return self.execute_masked(
                 payload,
                 activation,
@@ -156,6 +328,121 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
                 apply_router_weight_on_input,
                 extra_expert_args,
             )
+
+    def execute_triton_fp8(
+        self,
+        payload: ExpertForwardPayload,
+        activation: str,
+        apply_router_weight_on_input: bool,
+    ) -> CombineForwardPayload:
+        """Run small SM120 decode batches without per-expert 64-row padding."""
+        if not self.is_sm120:
+            raise RuntimeError("Triton FP8 MoE fast path requires SM120")
+        if self.ep_size != 1:
+            raise ValueError("Triton FP8 MoE fast path requires ep_size == 1")
+        if activation != "SiGLU":
+            raise ValueError("Triton FP8 MoE fast path only supports SiGLU")
+        if apply_router_weight_on_input:
+            raise ValueError(
+                "Triton FP8 MoE fast path does not support router weight on input"
+            )
+        if payload.expert_x is None:
+            raise ValueError("Triton FP8 MoE fast path requires expert_x")
+        if payload.expert_x_scale is None:
+            raise ValueError("Triton FP8 MoE fast path requires expert_x_scale")
+        if payload.expert_topk_ids is None:
+            raise ValueError("Triton FP8 MoE fast path requires expert_topk_ids")
+        if payload.expert_topk_weights is None:
+            raise ValueError("Triton FP8 MoE fast path requires expert_topk_weights")
+
+        hidden_states_fp8 = payload.expert_x
+        hidden_states_scale = payload.expert_x_scale
+        topk_ids = payload.expert_topk_ids
+        topk_weights = payload.expert_topk_weights
+        token_num, hidden_size = hidden_states_fp8.shape
+        topk = topk_ids.shape[1]
+        expert_num, gate_up_size, _ = self.w13_weight.shape
+        intermediate_size = gate_up_size // 2
+
+        config1 = get_sm120_triton_fp8_config(
+            token_num, expert_num, gate_up_size, hidden_size, topk
+        )
+        config2 = get_sm120_triton_fp8_config(
+            token_num, expert_num, hidden_size, intermediate_size, topk
+        )
+        block_m = min(config1["BLOCK_SIZE_M"], config2["BLOCK_SIZE_M"])
+        config1["BLOCK_SIZE_M"] = block_m
+        config2["BLOCK_SIZE_M"] = block_m
+        # The execute() gate restricts this path to EP=1, where SelectTopk
+        # produces global expert ids in [0, expert_num).  EP padding sentinels
+        # must stay on the contiguous path, which owns their remapping logic.
+        sorted_token_ids, expert_ids, num_tokens_post_padded = (
+            moe_align_block_size_compiled(topk_ids, block_m, expert_num)
+        )
+
+        route_num = token_num * topk
+        gate_up_output = torch.empty(
+            (route_num, gate_up_size),
+            device=hidden_states_fp8.device,
+            dtype=torch.bfloat16,
+        )
+        invoke_triton_moe_kernel(
+            hidden_states_fp8,
+            self.w13_weight,
+            gate_up_output,
+            topk_weights.reshape(-1),
+            topk_ids.reshape(-1),
+            sorted_token_ids,
+            expert_ids,
+            num_tokens_post_padded,
+            False,
+            topk,
+            config1,
+            tl.bfloat16,
+            A_scale=hidden_states_scale,
+            B_scale=self.w13_weight_scale_inv,
+            block_shape=self.DEEPGEMM_BLOCK_SHAPE,
+            scale_ue8m0=True,
+        )
+
+        down_input = torch.empty(
+            (route_num, intermediate_size),
+            device=hidden_states_fp8.device,
+            dtype=torch.bfloat16,
+        )
+        silu_and_mul(down_input, gate_up_output)
+        down_input_fp8, down_input_scale = sgl_per_token_group_quant_fp8(
+            down_input,
+            group_size=self.BLOCK_SIZE,
+            column_major_scales=True,
+            scale_tma_aligned=True,
+            scale_ue8m0=True,
+        )
+        down_output = torch.empty(
+            (route_num, hidden_size),
+            device=hidden_states_fp8.device,
+            dtype=torch.bfloat16,
+        )
+        invoke_triton_moe_kernel(
+            down_input_fp8,
+            self.w2_weight,
+            down_output,
+            topk_weights.reshape(-1),
+            topk_ids.reshape(-1),
+            sorted_token_ids,
+            expert_ids,
+            num_tokens_post_padded,
+            True,
+            1,
+            config2,
+            tl.bfloat16,
+            A_scale=down_input_scale,
+            B_scale=self.w2_weight_scale_inv,
+            block_shape=self.DEEPGEMM_BLOCK_SHAPE,
+            scale_ue8m0=True,
+        )
+        output = down_output.view(token_num, topk, hidden_size).sum(dim=1)
+        return CombineForwardPayload(fused_expert_output=output)
 
     def execute_masked(
         self,
@@ -240,8 +527,10 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
                 output_index,
                 scale_ue8m0=is_deep_gemm_e8m0_used(),
             )
-            dispose_tensor(hidden_states_fp8)
-
+            # Eager execution consumes the routed input as before; graph
+            # warmup/capture must retain the same storage for later replays.
+            if not self.enable_cuda_graph:
+                dispose_tensor(hidden_states_fp8)
             upgate_output = torch.empty(
                 (self.num_experts_per_partition, alignment, self.N),
                 device=hidden_states_fp8_device,
@@ -376,46 +665,80 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
         hidden_states_scale = payload.expert_x_scale
         topk_idx = payload.expert_topk_ids
         topk_weights = payload.expert_topk_weights
-        if payload.expert_tokens_meta.expert_num_tokens_cpu is not None:
-            num_recv_tokens_per_expert = (
+        num_recv_tokens_per_expert = payload.expert_tokens_meta.expert_num_tokens
+        if num_recv_tokens_per_expert is None:
+            num_recv_tokens_per_expert_cpu = (
                 payload.expert_tokens_meta.expert_num_tokens_cpu
             )
-        elif payload.expert_tokens_meta.expert_num_tokens is not None:
-            num_recv_tokens_per_expert = (
-                payload.expert_tokens_meta.expert_num_tokens.cpu().tolist()
+            if self.enable_cuda_graph:
+                raise ValueError(
+                    "expert_num_tokens GPU tensor is required for CUDA graph"
+                )
+            if num_recv_tokens_per_expert_cpu is None:
+                raise ValueError(
+                    "expert_num_tokens or expert_num_tokens_cpu is required"
+                )
+            num_recv_tokens_per_expert = torch.as_tensor(
+                num_recv_tokens_per_expert_cpu,
+                dtype=torch.int32,
+                device=hidden_states_fp8.device,
             )
-        else:
-            raise ValueError(
-                "expert_tokens_meta.expert_num_tokens or expert_tokens_meta.expert_num_tokens_cpu should be not None"
-            )
-        if isinstance(num_recv_tokens_per_expert, torch.Tensor):
-            num_recv_tokens_per_expert = num_recv_tokens_per_expert.tolist()
 
-        raw_tokens_per_expert = list(num_recv_tokens_per_expert)
-        num_recv_tokens_per_expert = [
-            align_up_math(x, self.EXPERT_ALIGNMENT) for x in num_recv_tokens_per_expert
-        ]
-        all_tokens: int = sum(num_recv_tokens_per_expert)
-
-        num_experts_local = len(num_recv_tokens_per_expert)
-
-        topk_max = topk_idx.max().item()
-        topk_min = topk_idx.min().item()
-        if topk_max >= num_experts_local or topk_min < -1:
-            logger.error(
-                f"[DeepGemm CLAMP] topk_ids out of range [{topk_min}, {topk_max}], "
-                f"num_experts={num_experts_local}, clamping to valid range"
-            )
-            topk_idx = topk_idx.clamp(min=-1, max=num_experts_local - 1)
-
-        if all_tokens <= 0:
+        num_experts_local = num_recv_tokens_per_expert.shape[0]
+        routed_tokens = hidden_states_fp8.shape[0] * topk_idx.shape[1]
+        if routed_tokens == 0:
             return CombineForwardPayload(
                 fused_expert_output=torch.zeros(
                     hidden_states_fp8.shape,
                     device=hidden_states_fp8.device,
                     dtype=torch.bfloat16,
+                )
+            )
+        if self.is_sm120:
+            expert_alignment = min(
+                self.EXPERT_ALIGNMENT,
+                get_theoretical_mk_alignment_for_contiguous_layout(
+                    routed_tokens, num_experts_local
                 ),
             )
+            max_active_experts = min(routed_tokens, num_experts_local)
+            all_tokens = align_up_math(
+                routed_tokens + max_active_experts * (expert_alignment - 1),
+                expert_alignment,
+            )
+        else:
+            # Preserve the pre-upgrade SM9x/SM100x layout: fixed 128-token
+            # expert alignment and CPU-padded metadata.
+            expert_alignment = self.EXPERT_ALIGNMENT
+            max_active_experts = min(routed_tokens, num_experts_local)
+            all_tokens = align_up_math(
+                routed_tokens + max_active_experts * (expert_alignment - 1),
+                expert_alignment,
+            )
+
+        if not self.enable_cuda_graph:
+            num_recv_tokens_per_expert_cpu = (
+                payload.expert_tokens_meta.expert_num_tokens_cpu
+            )
+            if num_recv_tokens_per_expert_cpu is None:
+                num_recv_tokens_per_expert_cpu = (
+                    num_recv_tokens_per_expert.cpu().tolist()
+                )
+            elif isinstance(num_recv_tokens_per_expert_cpu, torch.Tensor):
+                num_recv_tokens_per_expert_cpu = num_recv_tokens_per_expert_cpu.tolist()
+            actual_aligned = sum(
+                align_up_math(int(x), expert_alignment)
+                for x in num_recv_tokens_per_expert_cpu
+            )
+            all_tokens = actual_aligned
+            if all_tokens == 0:
+                return CombineForwardPayload(
+                    fused_expert_output=torch.zeros(
+                        hidden_states_fp8.shape,
+                        device=hidden_states_fp8.device,
+                        dtype=torch.bfloat16,
+                    )
+                )
         _, K = hidden_states_fp8.size()
         N = self.w13_weight.size(1)
         hidden_states_fp8_shape = hidden_states_fp8.shape
@@ -440,31 +763,46 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
                 )
             ),
         ]
-        m_indices = torch.empty(
-            all_tokens, device=hidden_states_fp8.device, dtype=torch.int32
+        # DeepGEMM's SM120 grouped kernel skips tiles whose group ID is -1;
+        # keep unused graph workspace tiles inactive instead of routing to 0.
+        # This relies on the pinned SM120 wheel (8bcfcab); non-SM120 scatter
+        # below fills all padded rows with valid expert IDs for older wheels.
+        m_indices = torch.full(
+            (all_tokens,), -1, device=hidden_states_fp8.device, dtype=torch.int32
         )
-        output_index = torch.empty_like(topk_idx)
-        num_recv_tokens_per_expert_gpu = torch.tensor(
-            num_recv_tokens_per_expert,
-            dtype=torch.int32,
-            pin_memory=True,
-            device="cpu",
-        ).cuda(non_blocking=True)
-        expert_start_loc = torch.empty_like(num_recv_tokens_per_expert_gpu)
+        output_index = torch.full_like(topk_idx, -1)
+        scatter_num_tokens_per_expert = num_recv_tokens_per_expert
+        scatter_alignment = expert_alignment
+        if not self.is_sm120 and not self.enable_cuda_graph:
+            padded_num_tokens_per_expert = [
+                align_up_math(int(x), expert_alignment)
+                for x in num_recv_tokens_per_expert_cpu
+            ]
+            scatter_num_tokens_per_expert = torch.tensor(
+                padded_num_tokens_per_expert,
+                dtype=torch.int32,
+                pin_memory=True,
+                device="cpu",
+            ).cuda(non_blocking=True)
+            scatter_alignment = 1
+        expert_start_loc = torch.empty_like(scatter_num_tokens_per_expert)
         ep_scatter(
             hidden_states_fp8,
             hidden_states_scale,
             topk_idx,
-            num_recv_tokens_per_expert_gpu,
+            scatter_num_tokens_per_expert,
             expert_start_loc,
             input_tensor[0],
             input_tensor[1],
             m_indices,
             output_index,
             scale_ue8m0=is_deep_gemm_e8m0_used(),
+            align_m=scatter_alignment,
+            derive_counts_from_topk=self.is_sm120 and self.enable_cuda_graph,
         )
-        m_indices.clamp_(min=0, max=self.num_experts_per_partition - 1)
-        dispose_tensor(hidden_states_fp8)
+        # Preserve the eager input lifetime without invalidating graph buffers.
+        if not self.enable_cuda_graph:
+            dispose_tensor(hidden_states_fp8)
         gateup_output = torch.empty(
             (all_tokens, N),
             device=hidden_states_fp8_device,
@@ -472,13 +810,20 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
         )
         if not is_deep_gemm_e8m0_used():
             input_tensor[1] = tma_align_input_scale(input_tensor[1])
-        m_grouped_fp8_gemm_nt_contiguous(
-            (input_tensor[0], input_tensor[1]),
-            self.w13_weight_fp8,
-            gateup_output,
-            m_indices,
-            disable_ue8m0_cast=not is_deep_gemm_e8m0_used(),
-        )
+        if self.is_sm120:
+            configure_deep_gemm_mk_alignment_context = configure_deep_gemm_mk_alignment(
+                expert_alignment
+            )
+        else:
+            configure_deep_gemm_mk_alignment_context = nullcontext()
+        with configure_deep_gemm_mk_alignment_context:
+            m_grouped_fp8_gemm_nt_contiguous(
+                (input_tensor[0], input_tensor[1]),
+                self.w13_weight_fp8,
+                gateup_output,
+                m_indices,
+                disable_ue8m0_cast=not is_deep_gemm_e8m0_used(),
+            )
         del input_tensor
         down_input = torch.empty(
             (
@@ -509,13 +854,20 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
         del down_input
         if not is_deep_gemm_e8m0_used():
             down_input_scale = tma_align_input_scale(down_input_scale)
-        m_grouped_fp8_gemm_nt_contiguous(
-            (down_input_fp8, down_input_scale),
-            self.w2_weight_fp8,
-            down_output,
-            m_indices,
-            disable_ue8m0_cast=not is_deep_gemm_e8m0_used(),
-        )
+        if self.is_sm120:
+            configure_deep_gemm_mk_alignment_context = configure_deep_gemm_mk_alignment(
+                expert_alignment
+            )
+        else:
+            configure_deep_gemm_mk_alignment_context = nullcontext()
+        with configure_deep_gemm_mk_alignment_context:
+            m_grouped_fp8_gemm_nt_contiguous(
+                (down_input_fp8, down_input_scale),
+                self.w2_weight_fp8,
+                down_output,
+                m_indices,
+                disable_ue8m0_cast=not is_deep_gemm_e8m0_used(),
+            )
         del down_input_fp8, down_input_scale
         gather_out = torch.empty(
             hidden_states_fp8_shape,

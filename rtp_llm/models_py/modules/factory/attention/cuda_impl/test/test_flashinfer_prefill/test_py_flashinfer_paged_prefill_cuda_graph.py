@@ -7,6 +7,8 @@ identical results to forward() without copy_params.
 import logging
 import math
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
 
@@ -57,16 +59,9 @@ class _PrefillPagedCudaGraphTestMixin:
 
         # Device, in both cases. These are what FlashInfer keeps as its persistent
         # graph buffers and dereferences on the device at each replay, and the
-        # field names say _device. The copy-params path does not change that: the
-        # engine pins exactly one tensor, cuda_graph_prefill_batch_size, and
-        # asserts is_pinned() on it (initCaptureAttentionInputsPost) -- these two
-        # it passes as device tensors.
-        #
-        # This branch used to hand over pinned *host* memory whenever
-        # with_copy_params was set, which is what made the kernel read a host
-        # pointer and abort with an illegal memory access. That was a bug in the
-        # test, not in the op: "fixing" the op to copy these onto the device
-        # instead broke the real engine's multi-graph capture path.
+        # field names say _device. The copy-params path uses device metadata too,
+        # including cuda_graph_prefill_batch_size below; pinned host tensors do
+        # not satisfy that contract.
         inp.cu_seqlens_device = torch.tensor(cu, dtype=torch.int32, device="cuda")
         inp.cu_kv_seqlens_device = torch.tensor(cu, dtype=torch.int32, device="cuda")
 
@@ -83,8 +78,8 @@ class _PrefillPagedCudaGraphTestMixin:
             ms = max_seq_len if max_seq_len > 0 else max(input_lengths)
             cp = PyPrefillCudaGaphCopyParams()
             cp.cuda_graph_prefill_batch_size = torch.tensor(
-                [batch_size], dtype=torch.int32
-            ).pin_memory()
+                [batch_size], dtype=torch.int32, device="cuda"
+            )
             cp.max_seq_len = ms
             cp.max_batch_size = batch_size
             inp.prefill_cuda_graph_copy_params = cp
@@ -158,7 +153,7 @@ class _PrefillPagedCudaGraphTestMixin:
         normal_op.prepare(normal_inp)
         normal_out = normal_op.forward(q, kv_cache)
 
-        # CUDA graph path: capture then replay.
+        # CUDA graph copy/plan contract (not an actual capture/replay).
         #
         # Scope, because this test has already been over-trusted once: it exercises
         # the *contract* the graph path depends on -- persistent buffers, plan()
@@ -173,7 +168,11 @@ class _PrefillPagedCudaGraphTestMixin:
         # 0/12 with the change -- so passing here is not evidence about the engine.
         # Adding a single-graph Python capture would not close that gap either; it
         # would just look like it had. Engine-level coverage belongs in the smoke
-        # cases, which is where that regression was actually caught.
+        # cases, which is where that regression was actually caught. In
+        # suites_h20_oss.bzl, eagle_mtp_cudagraph_concurrent disables competing
+        # TRT prefill backends to force this native paged implementation through
+        # the real C++ runner, its shared graph pool and concurrent metadata
+        # updates. Neither test enables generation-prefill graphs for MTP.
         capture_input_lengths = capture_input_lengths or input_lengths
         capture_prefix_lengths = capture_prefix_lengths or prefix_lengths
         cg_init = self._make_inputs(
@@ -181,8 +180,37 @@ class _PrefillPagedCudaGraphTestMixin:
         )
         cg_op = PyFlashinferPrefillPagedAttnOp(config.attn_configs, cg_init)
         cg_op.prepare(cg_init)
+        kv_ptr_address = cg_op.prefill_wrapper._paged_kv_indptr_buf.data_ptr()
+        kv_last_address = cg_op.prefill_wrapper._paged_kv_last_page_len_buf.data_ptr()
         cg_replay = self._make_inputs(input_lengths, prefix_lengths, True, max_seq_len)
-        cg_op.prepare(cg_replay, forbid_realloc=True)
+        plan = cg_op.prefill_wrapper.plan
+
+        def checked_plan(qo_indptr, kv_indptr, indices, last_page_len, *args, **kwargs):
+            # Check before entering native code: malformed metadata can crash
+            # rather than reliably producing a numerical mismatch.
+            self.assertEqual(kv_indptr.numel(), qo_indptr.numel())
+            self.assertEqual(last_page_len.numel(), qo_indptr.numel() - 1)
+            self.assertEqual(kv_indptr.data_ptr(), kv_ptr_address)
+            self.assertEqual(last_page_len.data_ptr(), kv_last_address)
+            active = len(input_lengths)
+            self.assertEqual(
+                last_page_len[active:].cpu().tolist(),
+                [0] * (len(capture_input_lengths) - active),
+            )
+            self.assertEqual(
+                kv_indptr[active:].cpu().tolist(),
+                [sum(math.ceil(s / PAGE_SIZE) for s in seq_lengths)]
+                * (len(capture_input_lengths) - active + 1),
+            )
+            return plan(qo_indptr, kv_indptr, indices, last_page_len, *args, **kwargs)
+
+        with patch.object(cg_op.prefill_wrapper, "plan", side_effect=checked_plan):
+            cg_op.prepare(cg_replay, forbid_realloc=True)
+        self.assertTrue(
+            cg_replay.prefill_cuda_graph_copy_params.cuda_graph_prefill_batch_size.is_cuda
+        )
+        self.assertTrue(cg_op.input_lengths.is_cuda)
+        self.assertTrue(cg_op.cu_seq_lens.is_cuda)
         cg_out = cg_op.forward(q, kv_cache)
 
         if verify_cast_buffer_reuse:
@@ -251,6 +279,67 @@ class TestPrefillPagedCudaGraph(_PrefillPagedCudaGraphTestMixin, BaseAttentionTe
 
     def test_multi_batch_single_tokens(self):
         self._test_forward_match([1, 1, 1], [100, 200, 300])
+
+    def test_replay_metadata_shrink_and_grow(self):
+        self._test_replay_metadata_shrink_and_grow(host_metadata=False)
+
+    def test_replay_host_metadata_shrink_and_grow(self):
+        self._test_replay_metadata_shrink_and_grow(host_metadata=True)
+
+    def _test_replay_metadata_shrink_and_grow(self, host_metadata):
+        def make_inputs(active):
+            inputs = self._make_inputs([5] * active, [200] * active, True, 5)
+            if host_metadata:
+                # Production sets device mirrors from C++; their Python
+                # bindings are read-only. Supply the same fields for this
+                # Python operator test without changing the bindings.
+                inputs = SimpleNamespace(
+                    **{
+                        name: getattr(inputs, name)
+                        for name in dir(inputs)
+                        if not name.startswith("_")
+                    }
+                )
+                inputs.input_lengths_device = inputs.input_lengths
+                inputs.input_lengths = inputs.input_lengths.cpu().pin_memory()
+                inputs.prefix_lengths = inputs.prefix_lengths.cpu().pin_memory()
+            return inputs
+
+        config = self._create_config(
+            head_num=8, head_num_kv=2, size_per_head=64, seq_size_per_block=PAGE_SIZE
+        )
+        inputs = make_inputs(4)
+        op = PyFlashinferPrefillPagedAttnOp(config.attn_configs, inputs)
+        op.prepare(inputs)
+        ptr = op.prefill_wrapper._paged_kv_indptr_buf
+        last = op.prefill_wrapper._paged_kv_last_page_len_buf
+        addresses = (ptr.data_ptr(), last.data_ptr())
+        plan = op.prefill_wrapper.plan
+
+        for active in (3, 1, 4, 2, 4):
+            with self.subTest(active=active):
+                inputs = make_inputs(active)
+
+                def checked_plan(qo, kv, indices, lengths, *args, **kwargs):
+                    self.assertEqual(qo.numel(), 5)
+                    self.assertEqual(kv.numel(), 5)
+                    self.assertEqual(lengths.numel(), 4)
+                    self.assertEqual((kv.data_ptr(), lengths.data_ptr()), addresses)
+                    self.assertEqual(
+                        kv.cpu().tolist(), [13 * min(i, active) for i in range(5)]
+                    )
+                    self.assertEqual(
+                        lengths.cpu().tolist(), [13] * active + [0] * (4 - active)
+                    )
+                    return plan(qo, kv, indices, lengths, *args, **kwargs)
+
+                with patch.object(op.prefill_wrapper, "plan", side_effect=checked_plan):
+                    op.prepare(inputs, forbid_realloc=True)
+
+        with patch.object(op.prefill_wrapper, "plan") as native_plan:
+            with self.assertRaisesRegex(ValueError, "captured batch size"):
+                op._plan_prefill_wrapper(op.qo_indptr[:4])
+            native_plan.assert_not_called()
 
 
 class TestPrefillPagedCudaGraphFP8(TestPrefillPagedCudaGraph):

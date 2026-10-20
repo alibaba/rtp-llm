@@ -1,13 +1,15 @@
 """CUDA 13 SM100 tests with separate ARM and x86 execution targets."""
 
+load("@arch_config//:arch_select.bzl", "cuda13_x86_test_gpu")
+
 def cuda13_sm100_py_test(name, srcs, main = None, gpu_count = 1, tags = [], env = {}, **kwargs):
     test_env = dict(env)
     test_env["GPU_COUNT"] = str(gpu_count)
-    # Internal CUDA13 CI maps L20D_TEST to B300 DGX (SM 10.3), not L20.
-    # SM100_ARM_CU13 is the separate CUDA13 GB200 pool.
+    # x86 tests run on the SM103 pool (SM 10.3); SM100_ARM_CU13 is the
+    # separate CUDA13 GB200 pool.
     for suffix, config, gpu in [
         ("", "@//:using_cuda13_arm", "SM100_ARM_CU13"),
-        ("_x86", "@//:using_cuda13_x86", "L20D_TEST"),
+        ("_x86", "@//:using_cuda13_x86", cuda13_x86_test_gpu()),
     ]:
         native.py_test(
             name = name + suffix,

@@ -7,6 +7,8 @@ all experts on one device). Used to validate end-to-end correctness with
 mock per-layer KV cache before wiring into RTP-LLM's GptModelBase.
 """
 
+import logging
+import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence
 
@@ -16,6 +18,7 @@ import torch.nn.functional as F
 
 from rtp_llm.models_py.modules import RMSNorm
 from rtp_llm.models_py.modules.base.common.embedding import EmbeddingTorch
+from rtp_llm.models_py.modules.dsv4 import _profiler
 from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 from rtp_llm.models_py.modules.dsv4.block import Block
 from rtp_llm.models_py.modules.dsv4.cp import CPContext, build_cp_context
@@ -23,6 +26,23 @@ from rtp_llm.models_py.modules.dsv4.hc import build_hc_head
 from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer import (
     synchronized_moe_chunk_plan,
 )
+
+_TRUE_ENV_VALUES = frozenset(("1", "true", "yes", "on"))
+_FALSE_ENV_VALUES = frozenset(("0", "false", "no", "off", ""))
+
+
+def _optional_env_bool(name: str) -> Optional[bool]:
+    if name not in os.environ:
+        return None
+    value = os.environ[name].strip().lower()
+    if value in _TRUE_ENV_VALUES:
+        return True
+    if value in _FALSE_ENV_VALUES:
+        return False
+    raise RuntimeError(
+        f"{name} must be one of {sorted(_TRUE_ENV_VALUES | _FALSE_ENV_VALUES)}, "
+        f"got {os.environ[name]!r}"
+    )
 
 
 @dataclass
@@ -40,6 +60,7 @@ class V4Args:
     o_groups: int = 8
     o_lora_rank: int = 1024
     window_size: int = 128
+    kernel_tokens_per_block: int = 128
     compress_ratios: List[int] = field(
         default_factory=lambda: [0, 0] + [4, 128] * 20 + [4, 0]
     )
@@ -200,6 +221,43 @@ class V4Transformer(nn.Module):
         from rtp_llm.utils.model_weight import W
 
         gw = mw.global_weights
+        self._mega_csa_runtime = None
+        self._mega_decode_enabled = False
+        embedding_weight = None
+        if not self.commit_only:
+            embedding_weight = gw[W.embedding]
+            # Process-level deployment override, intentionally outside V4Args.
+            # Set it consistently in each worker's environment.
+            mega_request = _optional_env_bool("DSV4_MEGA")
+            # SWA-only MTP/DSpark drafts share the process switch, but have no
+            # Mega sublayers to initialize or require from the runtime.
+            if mega_request is not False and any(args.compress_ratios[: args.n_layers]):
+                from rtp_llm.models_py.modules.dsv4.fp8.decode.mega_support import (
+                    mega_decode_unavailable_reason,
+                )
+
+                unavailable_reason = mega_decode_unavailable_reason(
+                    args,
+                    embedding_weight.device,
+                )
+                if unavailable_reason is not None and mega_request is True:
+                    raise RuntimeError(
+                        f"DSV4_MEGA=1 is unsupported: {unavailable_reason}"
+                    )
+                if unavailable_reason is not None:
+                    logging.info(
+                        "DSV4 Mega decode is unavailable; using the ordinary path: %s",
+                        unavailable_reason,
+                    )
+                else:
+                    self._mega_decode_enabled = True
+                    logging.info(
+                        "DSV4 Mega attention decode enabled on %s (TP1, dim=%d); "
+                        "set DSV4_MEGA=0 to disable",
+                        embedding_weight.device,
+                        args.dim,
+                    )
+
         self.layers = nn.ModuleList(
             [
                 _build_block(
@@ -232,8 +290,18 @@ class V4Transformer(nn.Module):
         else:
             # ``EmbeddingTorch`` keeps ``self.weight`` as a plain attribute (no
             # ``nn.Parameter``); the framework dict supplies the real tensor.
-            self.embed = EmbeddingTorch(gw[W.embedding])
+            assert embedding_weight is not None
+            self.embed = EmbeddingTorch(embedding_weight)
             self.norm = RMSNorm(gw[W.final_ln_gamma], args.norm_eps)
+            if self._mega_decode_enabled:
+                from rtp_llm.models_py.modules.dsv4.fp8.decode.mega_csa_runtime import (
+                    MegaCSARuntime,
+                )
+
+                self._mega_csa_runtime = MegaCSARuntime()
+                for layer_id, layer in enumerate(self.layers):
+                    layer.enable_mega_csa(self._mega_csa_runtime, mw.weights[layer_id])
+                    layer.enable_mega_hca(self._mega_csa_runtime, mw.weights[layer_id])
 
             # LM head — plain weight matrix [vocab_size, dim].  Accept either
             # BF16 (ckpt-native) or FP32 (legacy path).
@@ -463,6 +531,11 @@ class V4Transformer(nn.Module):
         """Reduce the hc axis for ``[B, S, hc, d]`` or flat ``[T, hc, d]``."""
         return self.head_hc.head(x)
 
+    def begin_decode(self, attn_metadata: object) -> None:
+        """Advance model-wide decode state before entering the layer loop."""
+        if self._mega_csa_runtime is not None:
+            self._mega_csa_runtime.begin_decode(attn_metadata)
+
     @torch.inference_mode()
     def forward_decode(
         self,
@@ -483,8 +556,15 @@ class V4Transformer(nn.Module):
             input_ids_2d = input_ids
         h = self.embed(input_ids_2d)  # [B, q_len, dim]
         h = h.unsqueeze(2).repeat(1, 1, self.hc_mult, 1)  # [B, q_len, hc, dim]
-        for layer in self.layers:
-            h = layer.forward_decode(h, attn_metadata, input_ids_2d, kv_cache=kv_cache)
+        begin_decode = getattr(self, "begin_decode", None)
+        if begin_decode is not None:
+            begin_decode(attn_metadata)
+        layer_forward_range = _profiler.make_layer_forward_range()
+        for layer_idx, layer in enumerate(self.layers):
+            with layer_forward_range(layer_idx):
+                h = layer.forward_decode(
+                    h, attn_metadata, input_ids_2d, kv_cache=kv_cache
+                )
         h = self._hc_head_reduce(h)  # [B, q_len, dim]
         # Framework RMSNorm wants 2D — flatten to [T_total, dim] and
         # return that directly (the next reshape would no-op anyway).
@@ -599,18 +679,20 @@ class V4Transformer(nn.Module):
         cu_seqlens = torch.tensor(
             [0, S], dtype=torch.int64, device=input_ids.device
         )  # [2]
+        layer_forward_range = _profiler.make_layer_forward_range()
         with synchronized_moe_chunk_plan(self.layers, S, input_ids.device):
             for li, layer in enumerate(self.layers):
-                h_flat = layer(
-                    h_flat,
-                    input_ids_flat,
-                    positions,
-                    cu_seqlens,
-                    kv_cache=kv_cache,
-                    block_tables_by_type=block_tables_by_type,
-                )
-                if _rt_on:
-                    _rt.record(f"layer{li:02d}_out", h_flat)
+                with layer_forward_range(li):
+                    h_flat = layer(
+                        h_flat,
+                        input_ids_flat,
+                        positions,
+                        cu_seqlens,
+                        kv_cache=kv_cache,
+                        block_tables_by_type=block_tables_by_type,
+                    )
+                    if _rt_on:
+                        _rt.record(f"layer{li:02d}_out", h_flat)
         h = h_flat.unsqueeze(0)  # [1, S, hc, d]
         h = self._hc_head_reduce(h)  # [B, S, d]
         if _rt_on:

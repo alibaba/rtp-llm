@@ -42,9 +42,15 @@ inline ModelConfig makeSingleLayerMTPModelConfig(const ModelConfig& model_config
                                 attention_types.size());
         single_layer_config.hybrid_attention_config.hybrid_attention_types = {attention_types[source_layer]};
     } else {
-        RTP_LLM_CHECK_WITH_INFO(!model_config.hybrid_attention_config.enable_hybrid_attention
-                                    || model_config.hybrid_attention_config.enable_independent_kv_cache_pools,
-                                "MTP legacy hybrid attention config requires one attention type per layer");
+        // Linear model weights consume this metadata even when the selected MTP layer is FULL.
+        RTP_LLM_CHECK_WITH_INFO(model_config.linear_attention_config.linear_num_value_heads == 0,
+                                "MTP linear attention model requires one attention type per layer");
+        for (const auto& descs : model_config.kv_cache_spec_descs) {
+            for (const auto& desc : descs) {
+                RTP_LLM_CHECK_WITH_INFO(desc.cache_type != KVCacheSpecType::LinearAttention,
+                                        "MTP linear attention cache requires one attention type per layer");
+            }
+        }
     }
     return single_layer_config;
 }

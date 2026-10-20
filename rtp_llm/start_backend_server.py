@@ -8,7 +8,7 @@ import traceback
 from contextlib import suppress
 from multiprocessing.connection import Connection
 from multiprocessing.process import BaseProcess
-from typing import List
+from typing import List, Optional
 
 import torch
 from setproctitle import setproctitle
@@ -28,6 +28,7 @@ from rtp_llm.utils.concurrency_controller import (
     set_global_controller,
 )
 from rtp_llm.utils.oom_diag import install_oom_dump
+from rtp_llm.utils.process_lifecycle import arm_parent_death_sigkill
 from rtp_llm.utils.process_manager import ProcessManager
 from rtp_llm.utils.util import copy_gemm_config
 
@@ -61,8 +62,11 @@ def local_rank_start(
     py_env_configs: PyEnvConfigs,
     world_rank: int = 0,
     pipe_writer=None,
+    expected_parent_pid: Optional[int] = None,
 ):
     """Start local rank with proper signal handling for graceful shutdown"""
+    if expected_parent_pid is not None:
+        arm_parent_death_sigkill(expected_parent_pid)
     _install_hot_hook_runtime(f"backend_rank_{world_rank}")
     backend_manager = None
     logging.info(f"[PROCESS_START]Start local rank process")
@@ -173,6 +177,7 @@ def _create_rank_processes(
     cuda_device_list = _get_cuda_device_list()
     _validate_dp_configuration(py_env_configs)
 
+    parent_pid = os.getpid()
     for world_rank in range(pc.world_rank, pc.world_rank + local_world_size):
         reader, writer = ctx.Pipe(duplex=False)
         rank_pipe_readers.append(reader)
@@ -180,7 +185,7 @@ def _create_rank_processes(
         os.environ["WORLD_RANK"] = str(world_rank)
         proc = ctx.Process(
             target=local_rank_start,
-            args=(global_controller, py_env_configs, world_rank, writer),
+            args=(global_controller, py_env_configs, world_rank, writer, parent_pid),
             name=f"rank-{world_rank}",
         )
         processes.append(proc)
@@ -367,7 +372,12 @@ def start_backend_server(
     global_controller: ConcurrencyController,
     py_env_configs: PyEnvConfigs,
     pipe_writer=None,
+    expected_parent_pid: Optional[int] = None,
 ):
+    # The debug-load path runs inline; only a spawned manager has a parent guard.
+    if expected_parent_pid is not None:
+        arm_parent_death_sigkill(expected_parent_pid)
+
     # Startup window only: turn SIGTERM/SIGINT into an exception so the teardown
     # below runs (a defaulted SIGTERM would kill the process with no cleanup);
     # local_rank_start / ProcessManager install the runtime handlers later.

@@ -31,7 +31,6 @@ struct LayerKVCache {
     torch::Tensor kv_scale_base;
     int           seq_size_per_block = 0;
     int           layer_id           = -1;
-    int           group_id           = -1;
     std::string   tag                = "default";
 
     LayerKVCache() = default;
@@ -39,14 +38,12 @@ struct LayerKVCache {
     LayerKVCache(torch::Tensor kv_cache_base,
                  int           seq_size_per_block,
                  int           layer_id      = -1,
-                 int           group_id      = -1,
                  std::string   tag           = "default",
                  torch::Tensor kv_scale_base = {}):
         kv_cache_base(std::move(kv_cache_base)),
         kv_scale_base(std::move(kv_scale_base)),
         seq_size_per_block(seq_size_per_block),
         layer_id(layer_id),
-        group_id(group_id),
         tag(std::move(tag)) {}
 };
 
@@ -90,8 +87,8 @@ public:
         return layer_caches;
     }
 
-    const std::vector<std::string>& groupTags() const {
-        return grouped_layout_.topology().groupTagsSnapshot();
+    std::vector<std::string> groupTags() const {
+        return grouped_layout_.topology().groupTags();
     }
 
     size_t layerCount() const {
@@ -99,12 +96,15 @@ public:
     }
 
     int getSeqSizePerBlock(const std::string& tag) const {
-        return static_cast<int>(grouped_layout_.topology().group(tag).seq_size_per_block);
+        return static_cast<int>(grouped_layout_.topology().group(tag).seqSizePerBlock());
     }
 
     int getKernelSeqSizePerBlock(const std::string& tag) const {
-        return static_cast<int>(grouped_layout_.topology().group(tag).kernel_seq_size_per_block);
+        return static_cast<int>(grouped_layout_.topology().group(tag).kernelSeqSizePerBlock());
     }
+
+    // Entry count of the exposed layer-cache view; zero for non-opaque specs.
+    size_t getEntriesPerBlock(const std::string& tag) const;
 
 private:
     void validateLayer(int layer_id) const {
@@ -114,13 +114,7 @@ private:
     }
 
     static int64_t kernelBlocksPerPhysicalBlock(const rtp_llm::GroupBase& group) {
-        RTP_LLM_CHECK_WITH_INFO(group.kernel_seq_size_per_block > 0
-                                    && group.seq_size_per_block % group.kernel_seq_size_per_block == 0,
-                                "invalid block subdivision for tag=%s physical=%zu kernel=%zu",
-                                group.tag.c_str(),
-                                group.seq_size_per_block,
-                                group.kernel_seq_size_per_block);
-        return static_cast<int64_t>(group.seq_size_per_block / group.kernel_seq_size_per_block);
+        return static_cast<int64_t>(group.kernelBlocksPerKvBlock());
     }
 
     static torch::Tensor reshapeMlaTensor(const torch::Tensor& tensor,
@@ -156,13 +150,8 @@ private:
                                 layer_id,
                                 group.tag.c_str());
 
-        const int    group_id = static_cast<int>(grouped_layout_.topology().groupIdForTag(group.tag));
-        LayerKVCache result(buffers.kv_addr,
-                            static_cast<int>(group.seq_size_per_block),
-                            layer_id,
-                            group_id,
-                            group.tag,
-                            buffers.kv_scale_addr);
+        LayerKVCache result(
+            buffers.kv_addr, static_cast<int>(group.seqSizePerBlock()), layer_id, group.tag, buffers.kv_scale_addr);
 
         const auto spec_type = group.spec->type;
         if (group.policy.group_type != rtp_llm::CacheGroupType::FULL
@@ -174,13 +163,13 @@ private:
         const int64_t physical_block_num  = buffers.kv_addr.size(0);
         const int64_t blocks_per_physical = kernelBlocksPerPhysicalBlock(group);
         const int64_t kernel_block_num    = physical_block_num * blocks_per_physical;
-        const int64_t kernel_seq_size     = static_cast<int64_t>(group.kernel_seq_size_per_block);
+        const int64_t kernel_seq_size     = static_cast<int64_t>(group.kernelSeqSizePerBlock());
         result.seq_size_per_block         = static_cast<int>(kernel_seq_size);
 
         if (spec_type == rtp_llm::KVCacheSpecType::MultiHeadAttention) {
-            const int64_t local_kv_heads = static_cast<int64_t>(group.local_kv_head_num);
+            const int64_t local_kv_heads = static_cast<int64_t>(group.localKvHeadNum());
             RTP_LLM_CHECK_WITH_INFO(local_kv_heads > 0, "MHA tag=%s has no local KV heads", group.tag.c_str());
-            const int64_t physical_seq_size = static_cast<int64_t>(group.seq_size_per_block);
+            const int64_t physical_seq_size = static_cast<int64_t>(group.seqSizePerBlock());
             const int64_t k_block_elems     = static_cast<int64_t>(group.spec->k_block_size());
             RTP_LLM_CHECK_WITH_INFO(k_block_elems > 0 && k_block_elems % (local_kv_heads * physical_seq_size) == 0,
                                     "MHA tag=%s cannot derive head dimension from k_block_size=%ld heads=%ld seq=%ld",
@@ -262,18 +251,24 @@ struct PyCacheStoreInputs {
 struct PyPrefillCudaGaphCopyParams {
     // for embedding model cuda graph capture, the attenton batch size is padded to max_batch_size,
     // so we can't get the real batch size for `copy kernel` using `input_lengths.size(0)`(which is max_batch_size).
+    // Keep this scalar in fixed-address device memory: captured kernels read it
+    // directly and replay preparation updates it with stream ordering.
     torch::Tensor cuda_graph_prefill_batch_size = torch::empty(0);
     int           max_seq_len                   = 0;
     int           max_batch_size                = 0;
 };
 
 struct PyContextParallelParams {
+    torch::Tensor prefill_qkv_restore_indice_cpu;
+    torch::Tensor prefill_qkv_padding_mask_cpu;
+    torch::Tensor prefill_mm_spans;
     torch::Tensor prefill_cp_padding_lengths;
     torch::Tensor prefill_cp_chunk_lengths;
     torch::Tensor prefill_shuffle_indices;
     torch::Tensor prefill_qkv_restore_indice;
     torch::Tensor prefill_qkv_padding_mask;
     torch::Tensor prefill_actual_input_lengths_cpu;
+    torch::Tensor prefill_prefix_lengths_cpu;
 };
 
 // Naming convention: the host (pinned CPU) tensor uses the bare name; its device (CUDA)
@@ -340,6 +335,7 @@ struct PyEmbeddingInputs {
 };
 
 struct PyMultimodalInputs {
+    torch::Tensor              mm_features_spans;
     std::vector<torch::Tensor> multimodal_features;
     torch::Tensor              mm_features_locs;
     std::vector<torch::Tensor> mm_extra_input;
@@ -358,6 +354,12 @@ struct PyModelInputs {
     PyAttentionInputs    attention_inputs;
     AttentionInputsByTag attention_inputs_by_tag;
     BertEmbeddingInputs  bert_embedding_inputs;
+    torch::Tensor        engram_token_windows;
+    bool                 need_all_logits        = true;
+    bool                 need_all_hidden_states = true;
+
+    // Internal homogeneous-batch signal; not part of the Generate RPC/config surface.
+    bool capture_hidden_states = false;
 
     bool hasAttentionInputsByTag() const {
         return !attention_inputs_by_tag.empty();
@@ -366,10 +368,17 @@ struct PyModelInputs {
 
 struct PyModelOutputs {
     torch::Tensor hidden_states;
+    // Optional model-side features consumed by speculative decoders.  This is
+    // a first-class forward output because CUDA graph replay does not execute
+    // Python and therefore cannot safely recover it from mutable model state.
+    torch::Tensor mtp_target_hidden_states;
 
     PyModelOutputs() = default;
 
     PyModelOutputs(torch::Tensor hidden_states): hidden_states(std::move(hidden_states)) {}
+
+    PyModelOutputs(torch::Tensor hidden_states, torch::Tensor mtp_target_hidden_states):
+        hidden_states(std::move(hidden_states)), mtp_target_hidden_states(std::move(mtp_target_hidden_states)) {}
 };
 
 void registerPyOpDefs(pybind11::module& m);

@@ -103,6 +103,7 @@ def _dsv4_pool_blocks(config_value: int | None, env_name: str) -> int:
         return 0
     return value if value > 0 else 0
 
+
 def _require_n_shared_experts(config_json: dict) -> int:
     """Return the explicitly declared shared-expert count.
 
@@ -649,7 +650,7 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
                 # ``last_hidden`` to match, dispatching to a f32 simt sgemm
                 # (``cutlass3x_sm100_simt_sgemm_f32_f32_f32_f32_f32`` — CUDA
                 # cores, ~2.3 ms / decode step at bs=128 / vocab=129280 on
-                # B300) instead of the bf16 tensor-core path (~0.1 ms).
+                # SM103) instead of the bf16 tensor-core path (~0.1 ms).
                 # ``None`` falls through to ``load_config.compute_dtype`` in
                 # AtomicWeight._load_raw_tensor (i.e. bf16 for V4), keeping
                 # the ckpt dtype.
@@ -742,9 +743,6 @@ class DeepSeekV4(DeepSeekV2):
 
         hybrid_config = model_config.hybrid_attention_config
         hybrid_config.hybrid_attention_types = [HybridAttentionType.NONE] * layer_num
-        # Without this the C++ side never dispatches into HybridPoolConfigCreator
-        # and falls back to a single homogeneous pool.
-        hybrid_config.enable_independent_kv_cache_pools = True
 
         descs = build_dsv4_kv_cache_spec_descs(
             layer_num=layer_num,
@@ -758,9 +756,7 @@ class DeepSeekV4(DeepSeekV2):
         )
 
         fixed_pool_blocks = _dsv4_pool_blocks(
-            None
-            if kv_cache_config is None
-            else kv_cache_config.dsv4_fixed_pool_blocks,
+            None if kv_cache_config is None else kv_cache_config.dsv4_fixed_pool_blocks,
             "DSV4_FIXED_POOL_BLOCKS",
         )
         if fixed_pool_blocks > 0:
@@ -773,15 +769,15 @@ class DeepSeekV4(DeepSeekV2):
             )
         # HCA_STATE takes a dedicated override that wins over the shared value.
         hca_state_pool_blocks = _dsv4_pool_blocks(
-            None
-            if kv_cache_config is None
-            else kv_cache_config.dsv4_hca_state_pool_blocks,
+            (
+                None
+                if kv_cache_config is None
+                else kv_cache_config.dsv4_hca_state_pool_blocks
+            ),
             "DSV4_HCA_STATE_POOL_BLOCKS",
         )
         if hca_state_pool_blocks > 0:
-            apply_dsv4_explicit_pool_blocks(
-                descs, HCA_STATE_TAG, hca_state_pool_blocks
-            )
+            apply_dsv4_explicit_pool_blocks(descs, HCA_STATE_TAG, hca_state_pool_blocks)
             logging.info(
                 "DeepSeek-V4 pinned HCA_STATE pool to %d blocks",
                 hca_state_pool_blocks,
@@ -804,13 +800,15 @@ class DeepSeekV4(DeepSeekV2):
         )
 
     @staticmethod
-    def _from_hf(config: ModelConfig, ckpt_path: str):  # noqa: C901  (acceptably long)
+    def _from_hf(
+        config: ModelConfig, ckpt_path: str, config_json=None
+    ):  # noqa: C901  (acceptably long)
         config_path = os.path.join(ckpt_path, "config.json")
-        if not os.path.exists(config_path):
-            return
-
-        with open(config_path) as reader:
-            config_json = json.loads(reader.read())
+        if config_json is None:
+            if not os.path.exists(config_path):
+                return
+            with open(config_path) as reader:
+                config_json = json.loads(reader.read())
 
         # ---- basic geometry ----
         config.num_layers = config_json["num_hidden_layers"]
@@ -1157,7 +1155,9 @@ class DeepSeekV4DSparkWeight(DeepSeekV4Weight):
             [weight for weight in layer if weight.name in layer_names]
             for layer in info.layer_weights
         ]
-        info.weights = [weight for weight in info.weights if weight.name in global_names]
+        info.weights = [
+            weight for weight in info.weights if weight.name in global_names
+        ]
         logging.info(
             "[DeepSeekV4DSparkWeight] PREFILL commit-only descriptors: "
             "layers=%d per-layer=%s globals=%s",
@@ -1187,7 +1187,7 @@ class DeepSeekV4DSparkWeight(DeepSeekV4Weight):
                 identity,
             ),
             AtomicWeight(
-                W.v4_dspark_markov_w1,
+                W.dspark_markov_w1,
                 [
                     CkptWeightInfo(
                         f"mtp.{last_stage}.markov_head.markov_w1.weight", identity
@@ -1197,7 +1197,7 @@ class DeepSeekV4DSparkWeight(DeepSeekV4Weight):
                 data_type=torch.bfloat16,
             ),
             AtomicWeight(
-                W.v4_dspark_markov_w2,
+                W.dspark_markov_w2,
                 [
                     CkptWeightInfo(
                         f"mtp.{last_stage}.markov_head.markov_w2.weight", identity

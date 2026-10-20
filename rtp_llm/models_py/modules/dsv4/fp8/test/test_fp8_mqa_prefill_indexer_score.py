@@ -174,9 +174,7 @@ def _compare(label, ref, cand, k_topk, q_pos_kernel=None, ratio=1):
 
 
 def test_prefill_fresh():
-    if not has_fp8_mqa_logits():
-        print("  [SKIP] deep_gemm.fp8_mqa_logits unavailable")
-        return
+    assert has_fp8_mqa_logits(), "required DeepGEMM indexer interface is unavailable"
     torch.manual_seed(0)
     B, S, H, D = 1, 128, 64, INDEXER_HEAD_DIM
     T_live = 128
@@ -202,9 +200,7 @@ def test_prefill_fresh():
 
 
 def test_prefill_continuation():
-    if not has_fp8_mqa_logits():
-        print("  [SKIP]")
-        return
+    assert has_fp8_mqa_logits(), "required DeepGEMM indexer interface is unavailable"
     torch.manual_seed(1)
     B, S, H, D = 1, 8, 64, INDEXER_HEAD_DIM
     T_live = 200
@@ -230,9 +226,7 @@ def test_prefill_continuation():
 
 
 def test_prefill_long_S():
-    if not has_fp8_mqa_logits():
-        print("  [SKIP]")
-        return
+    assert has_fp8_mqa_logits(), "required DeepGEMM indexer interface is unavailable"
     torch.manual_seed(2)
     B, S, H, D = 1, 4096, 64, INDEXER_HEAD_DIM
     T_live = 4096
@@ -260,9 +254,7 @@ def test_prefill_long_S():
 def test_prefill_chunked():
     """Split S into 2 chunks; each runs its own fp8_mqa call. Concat rows,
     compare vs single-shot fp8 (and bf16 reference)."""
-    if not has_fp8_mqa_logits():
-        print("  [SKIP]")
-        return
+    assert has_fp8_mqa_logits(), "required DeepGEMM indexer interface is unavailable"
     torch.manual_seed(3)
     B, S, H, D = 1, 256, 64, INDEXER_HEAD_DIM
     T_live = 256

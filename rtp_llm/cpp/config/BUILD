@@ -40,6 +40,7 @@ cc_library(
         ":eplb_config",
         ":mm_transport_mode",
         ":rdma_config",
+        "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/models_py/bindings/core:types",
     ],
     copts = copts(),

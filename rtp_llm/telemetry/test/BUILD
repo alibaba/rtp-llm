@@ -13,6 +13,13 @@ py_test(
 )
 
 py_test(
+    name = "test_trace_config",
+    srcs = ["test_trace_config.py"],
+    data = ["trace_config_cases.json"],
+    deps = ["//rtp_llm:telemetry"] + telemetry_test_deps(),
+)
+
+py_test(
     name = "trace_attributes_parity_test",
     srcs = ["trace_attributes_parity_test.py"],
     data = [

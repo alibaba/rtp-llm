@@ -14,6 +14,8 @@ _CLASS_TO_MODULE: Dict[str, str] = {
     "CosyVoiceQwen": "rtp_llm.models.cosyvoice_qwen",
     "DeepSeekV2": "rtp_llm.models.deepseek_v2",
     "DeepSeekV3Mtp": "rtp_llm.models.deepseek_v2",
+    "DeepSeekV41": "rtp_llm.models.deepseek_v41",
+    "DeepSeekV41DSpark": "rtp_llm.models.deepseek_v41",
     "DeepSeekV4": "rtp_llm.models.deepseek_v4",
     "DeepSeekV4Mtp": "rtp_llm.models.deepseek_v4",
     "DeepSeekVLV2": "rtp_llm.models.deepseek_vl2.deepseek_vl2",
@@ -45,6 +47,7 @@ _CLASS_TO_MODULE: Dict[str, str] = {
     "QWen3_VL": "rtp_llm.models.qwen3_vl",
     "QWen3_VL_MOE": "rtp_llm.models.qwen3_vl_moe",
     "QwenV3": "rtp_llm.models.qwen_v3",
+    "Qwen3DSpark": "rtp_llm.models.qwen_3_dspark",
     "StarCoder": "rtp_llm.models.starcoder",
     "StarCoder2": "rtp_llm.models.starcoder2",
 }

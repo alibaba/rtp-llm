@@ -1,23 +1,17 @@
 import logging
 from dataclasses import dataclass
-from typing import Any, Optional, Type
+from typing import Any, Optional
 
 import torch
 
 from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
 from rtp_llm.models_py.utils.arch import get_num_device_sms, get_sm, is_sm12x
-from rtp_llm.ops import (
-    AttentionConfigs,
-    FMHAConfig,
-    FMHAType,
-    ParallelismConfig,
-)
+from rtp_llm.ops import AttentionConfigs, ParallelismConfig
 from rtp_llm.ops.compute_ops import (
     FusedRopeKVCacheDecodeOp,
     LayerKVCache,
     PyAttentionInputs,
-    XQAAttnOp,
 )
 
 # Constants
@@ -58,101 +52,6 @@ class XQAParams:
     o_scale: float = 1.0
 
 
-class XQAImpl(FMHAImplBase):
-
-    def __init__(
-        self,
-        attn_configs: AttentionConfigs,
-        attn_inputs: PyAttentionInputs,
-        parallelism_config: Optional[ParallelismConfig] = None,
-    ) -> None:
-        self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
-        self.fmha_impl = XQAAttnOp(attn_configs)
-        self.rope_kvcache_impl = FusedRopeKVCacheDecodeOp(attn_configs)
-
-        self.attn_inputs = attn_inputs
-
-        self.fmha_params = self.fmha_impl.prepare(attn_inputs)
-        self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
-        self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
-        # C++ XQAParams.sequence_lengths shares storage with this tensor.
-        # Keep a reference so prepare_cuda_graph can update it in-place.
-        self._captured_seq_lens = attn_inputs.sequence_lengths
-
-    @classmethod
-    def support(
-        cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
-    ) -> bool:
-        # XQA cubin covers sm_90 only; sm_120a (Blackwell consumer, e.g.
-        # RTX 5000 Pro) lacks a binding and triggers cudaErrorInvalidSymbol
-        # at first forward. C++ XQAAttnOp.support gate is `>= kSM_90` and
-        # passes sm_120 erroneously — short-circuit here so dispatch falls
-        # through to PyFlashinferPaged. See blockers.md R-4.
-        if is_sm12x():
-            return False
-        fmha_impl = XQAAttnOp(attn_configs)
-        return fmha_impl.support(attn_inputs)
-
-    def forward(
-        self,
-        qkv: torch.Tensor,
-        kv_cache: Optional[LayerKVCache],
-        layer_idx: int = 0,
-    ) -> torch.Tensor:
-        if self.need_rope_kv_cache:
-            fmha_input = self.rope_kvcache_impl.forward(qkv, kv_cache, self.rope_params)
-        else:
-            fmha_input = qkv
-
-        common.apply_write_cache_store(
-            self.write_cache_store_impl, self.attn_inputs, kv_cache
-        )
-
-        return self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
-
-    def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
-        update_params = getattr(self.fmha_impl, "update", None)
-        # The C++ fast-path update consumes device-resident inputs published by
-        # the RTP_LLM_DEVICE_INPUT pipeline; fall back to the host update when
-        # the gatherer kept metadata host-resident (default).
-        block_id_device = attn_inputs.kv_cache_kernel_block_id_device
-        device_inputs_ready = (
-            block_id_device is not None
-            and block_id_device.numel() > 0
-            and block_id_device.is_cuda
-            and attn_inputs.input_lengths.is_cuda
-        )
-        if not callable(update_params) or not device_inputs_ready:
-            common.update_attention_params(
-                self.fmha_impl,
-                self.rope_kvcache_impl,
-                self.fmha_params,
-                self.rope_params,
-                attn_inputs,
-            )
-        else:
-            update_params(self.fmha_params, attn_inputs)
-            update_offset = getattr(self.fmha_impl, "update_kv_cache_offset", None)
-            if callable(update_offset):
-                update_offset(
-                    self.rope_params.kv_cache_offset,
-                    attn_inputs.kv_cache_kernel_block_id_device,
-                )
-            else:
-                new_rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
-                common.copy_kv_cache_offset(
-                    self.rope_params.kv_cache_offset,
-                    new_rope_params.kv_cache_offset,
-                )
-
-        # CUDA graph replay keeps the sequence-length pointer captured during
-        # initialization, so update that storage rather than replacing it.
-        new_seq_lens = attn_inputs.sequence_lengths
-        n = min(self._captured_seq_lens.numel(), new_seq_lens.numel())
-        self._captured_seq_lens[:n].copy_(new_seq_lens[:n], non_blocking=True)
-        self.rope_params.sequence_lengths = self._captured_seq_lens
-
-
 class XQADecodeImpl(FMHAImplBase):
 
     def __init__(
@@ -180,8 +79,7 @@ class XQADecodeImpl(FMHAImplBase):
         # sm_120a consumer Blackwell: the FlashInfer xqa() build here rejects
         # the nb_sub_seq_per_seq kwarg used in forward(), and XQA has no
         # sm_120a binding anyway. Gate it off so decode dispatch falls through
-        # to PyFlashinferDecodeImpl (the working sm_120 path), mirroring the
-        # XQAImpl.support gate.
+        # to PyFlashinferDecodeImpl (the working sm_120 path).
         if is_sm12x():
             return False
         if get_sm()[0] not in [9, 10]:
@@ -223,34 +121,24 @@ class XQADecodeImpl(FMHAImplBase):
         self.fmha_params.batch_size = new_fmha_params.batch_size
         self.fmha_params.max_seq_len = new_fmha_params.max_seq_len
 
-        new_rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
-        new_offset = new_rope_params.kv_cache_offset
-        old_offset = self.rope_params.kv_cache_offset
-        common.copy_kv_cache_offset(old_offset, new_offset)
+        if self.need_rope_kv_cache:
+            new_rope_params = self.rope_kvcache_impl.prepare(
+                attn_inputs, forbid_reallocation=True
+            )
+            new_offset = new_rope_params.kv_cache_offset
+            old_offset = self.rope_params.kv_cache_offset
+            common.copy_kv_cache_offset(old_offset, new_offset)
+            self.rope_params.sequence_lengths = new_rope_params.sequence_lengths
 
 
 def _load_xqa_fn():
-    """Load the XQA kernel function, handling rtp_kernel/flashinfer API differences.
-
-    Always prefer flashinfer.xqa.xqa directly over rtp_kernel.xqa.xqa, because
-    rtp_kernel's wrapper calls load_xqa_best_config() which overrides the caller's
-    nb_sub_seq_per_seq / use_qgmma with a config-file lookup (defaulting to
-    nb_sub_seq=4 when no config file exists). XQAWrapper.forward() already
-    computes these values adaptively, so the rtp_kernel override is harmful.
-    """
+    """Load FlashInfer's XQA kernel. rtp_kernel no longer ships an XQA wrapper."""
     import inspect
 
-    try:
-        from flashinfer.xqa import xqa as fi_xqa
+    from flashinfer.xqa import xqa as fi_xqa
 
-        needs_sf = "k_sf_cache" in inspect.signature(fi_xqa).parameters
-        return fi_xqa, needs_sf
-    except ImportError:
-        pass
-
-    from rtp_kernel.xqa import xqa
-
-    return xqa, False
+    needs_sf = "k_sf_cache" in inspect.signature(fi_xqa).parameters
+    return fi_xqa, needs_sf
 
 
 class XQAWrapper:
@@ -495,33 +383,3 @@ class XQAWrapper:
             xqa_kwargs["v_sf_cache"] = None
         self._xqa_fn(**xqa_kwargs)
         return output
-
-
-def get_xqa_impl() -> Type[FMHAImplBase]:
-    """
-    Select the appropriate XQA implementation based on CUDA version and flashinfer availability.
-
-    Returns XQADecodeImpl if CUDA >= 12.8 and flashinfer.xqa is available,
-    otherwise falls back to XQAImpl.
-    """
-    try:
-        major, minor = map(int, torch.version.cuda.split(".")[:2])
-        if (major, minor) >= (12, 8):
-            try:
-                from flashinfer.xqa import xqa
-
-                logging.info(
-                    "CUDA >= 12.8 and flashinfer.xqa available, using XQADecodeImpl"
-                )
-                return XQADecodeImpl
-            except (ImportError, AttributeError) as e:
-                logging.info(
-                    f"CUDA >= 12.8 but flashinfer.xqa not available ({e}), falling back to XQAImpl"
-                )
-                return XQAImpl
-        else:
-            logging.info(f"CUDA version {major}.{minor} < 12.8, using XQAImpl")
-            return XQAImpl
-    except Exception as e:
-        logging.warning(f"Failed to check CUDA version ({e}), using XQAImpl")
-        return XQAImpl

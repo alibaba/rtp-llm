@@ -3,13 +3,15 @@ package org.flexlb.service;
 import com.google.protobuf.ByteString;
 import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.DefaultRouter;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.flexlb.balance.scheduler.RequestScheduler;
 import org.flexlb.balance.scheduler.RequestState;
-import org.flexlb.config.ConfigService;
+import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.telemetry.FlexlbTrace;
 import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
 
@@ -18,17 +20,13 @@ import java.util.concurrent.CompletableFuture;
 @Component
 public class RouteService {
 
-    private final ConfigService configService;
-    private final DefaultRouter router;
     private final RequestScheduler requestScheduler;
+    @Autowired
+    private DefaultRouter router;
     private final RecentCacheKeyTraceReporter recentCacheKeyTraceReporter;
 
-    public RouteService(ConfigService configService,
-                        DefaultRouter defaultScheduler,
-                        RequestScheduler requestScheduler,
+    public RouteService(RequestScheduler requestScheduler,
                         RecentCacheKeyTraceReporter recentCacheKeyTraceReporter) {
-        this.configService = configService;
-        this.router = defaultScheduler;
         this.requestScheduler = requestScheduler;
         this.recentCacheKeyTraceReporter = recentCacheKeyTraceReporter;
     }
@@ -39,15 +37,23 @@ public class RouteService {
      * @return Routing result
      */
     public CompletableFuture<Response> route(BalanceContext balanceContext) {
-        FlexlbConfig flexlbConfig = configService.loadBalanceConfig();
-        balanceContext.setConfig(flexlbConfig);
-
-        CompletableFuture<Response> resultFuture;
-        if (flexlbConfig.isDirect()) {
-            resultFuture = routeDirect(balanceContext);
-        } else {
-            resultFuture = routeScheduled(balanceContext);
+        if (balanceContext.getRequest() != null && balanceContext.getRequest().isVitRouteOnly()) {
+            return CompletableFuture.completedFuture(router == null
+                    ? Response.error(StrategyErrorType.NO_VIT_WORKER) : router.routeVit(balanceContext));
         }
+        // Reject stale metadata before the scheduler creates request lifecycle ownership.
+        if (balanceContext.getRequest() != null && balanceContext.getRequest().getSelectedVit() != null
+                && getRequestState(balanceContext.getRequestId(), 0) == null
+                && (router == null || !router.selectedVitIsValid(balanceContext))) {
+            return CompletableFuture.completedFuture(Response.error(StrategyErrorType.VIT_ROUTE_STALE));
+        }
+        FlexlbConfig flexlbConfig = balanceContext.getConfig();
+        FlexlbTrace.setScheduleAttribute(balanceContext.getTraceContext(),
+                FlexlbTrace.SCHEDULE_MODE, flexlbConfig.isDirect() ? "DIRECT"
+                        : flexlbConfig.getDispatcher().getType() == DispatcherConfig.Type.BATCH
+                                ? "BATCH" : "QUEUE");
+
+        CompletableFuture<Response> resultFuture = routeScheduled(balanceContext);
 
         // Observe the scheduler-owned future without replacing it with a
         // dependent stage. Returning the exact source preserves external
@@ -58,7 +64,7 @@ public class RouteService {
             }
             try {
                 balanceContext.setResponse(result);
-                if (result != null && result.isSuccess()) {
+                if (result != null && result.isSuccess() && !balanceContext.getRequest().isVitRouteOnly()) {
                     recentCacheKeyTraceReporter.report(balanceContext);
                 }
             } catch (RuntimeException completionSideEffectFailure) {
@@ -74,13 +80,15 @@ public class RouteService {
             return CompletableFuture.failedFuture(new IllegalStateException(
                     "RequestScheduler is required for the configured scheduling path"));
         }
-        if (balanceContext.getConfig().getDispatcher().requiresGenerateInput()
+        if (!balanceContext.getRequest().isVitRouteOnly()
+                && balanceContext.getConfig().getDispatcher().requiresGenerateInput()
                 && !hasValidGenerateInput(balanceContext)) {
             Logger.warn("{} dispatcher rejected request without serialized generate input: request_id={}",
                     balanceContext.getConfig().getDispatcher().typeName(),
                     balanceContext.getRequestId());
             return CompletableFuture.completedFuture(
-                    Response.error(StrategyErrorType.BATCH_BUILD_FAILED));
+                    Response.buildErrorResponse(StrategyErrorType.INVALID_REQUEST,
+                            "missing serialized generate_input for batch dispatch"));
         }
         return submitScheduled(balanceContext);
     }
@@ -98,19 +106,6 @@ public class RouteService {
         CompletableFuture<Response> resultFuture = requestScheduler.submit(balanceContext);
         balanceContext.setFuture(resultFuture);
         return resultFuture;
-    }
-
-    private CompletableFuture<Response> routeDirect(BalanceContext balanceContext) {
-        try {
-            if (balanceContext.requestExpired(System.currentTimeMillis())) {
-                return CompletableFuture.completedFuture(
-                        Response.error(StrategyErrorType.BATCH_SLO_EXPIRED));
-            }
-            return CompletableFuture.completedFuture(
-                    router.routeDirect(balanceContext));
-        } catch (Exception e) {
-            return CompletableFuture.failedFuture(e);
-        }
     }
 
     private boolean hasValidGenerateInput(BalanceContext ctx) {

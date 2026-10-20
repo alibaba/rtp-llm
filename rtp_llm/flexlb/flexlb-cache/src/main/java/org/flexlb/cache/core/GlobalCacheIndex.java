@@ -28,14 +28,13 @@ public class GlobalCacheIndex {
     private final ConcurrentHashMap<Long, Set<String>> blockToEnginesMap = new ConcurrentHashMap<>();
 
     /**
-     * Read-write lock for data consistency
+     * Serializes index mutations and mapping-count updates
      */
     private final ReentrantLock lock = new ReentrantLock();
 
     /**
      * Statistics
      */
-    private final LongAdder totalBlocks = new LongAdder();
     private final LongAdder totalMappings = new LongAdder();
     /** Per-caller compaction storage; cache queries never retain this array. */
     private final ThreadLocal<String[]> prefixCandidates =
@@ -55,10 +54,8 @@ public class GlobalCacheIndex {
 
         lock.lock();
         try {
-            Set<String> engines = blockToEnginesMap.computeIfAbsent(blockCacheKey, k -> {
-                totalBlocks.increment();
-                return ConcurrentHashMap.newKeySet();
-            });
+            Set<String> engines = blockToEnginesMap.computeIfAbsent(
+                    blockCacheKey, k -> ConcurrentHashMap.newKeySet());
 
             boolean added = engines.add(engineIpPort);
             if (added) {
@@ -94,7 +91,6 @@ public class GlobalCacheIndex {
                 // Remove entire entry if no engine owns this cache block
                 if (engines.isEmpty()) {
                     blockToEnginesMap.remove(blockCacheKey);
-                    totalBlocks.decrement();
                 }
             }
         } finally {
@@ -122,7 +118,6 @@ public class GlobalCacheIndex {
                     // Remove entire entry if no engine owns this cache block
                     if (engines.isEmpty()) {
                         blockToEnginesMap.remove(blockCacheKey);
-                        totalBlocks.decrement();
                     }
                 }
             });
@@ -242,14 +237,18 @@ public class GlobalCacheIndex {
      */
     public void clear() {
 
-        blockToEnginesMap.clear();
-        totalBlocks.reset();
-        totalMappings.reset();
+        lock.lock();
+        try {
+            blockToEnginesMap.clear();
+            totalMappings.reset();
+        } finally {
+            lock.unlock();
+        }
         log.info("Cleared global cache index");
     }
 
     public long totalBlocks() {
-        return totalBlocks.sum();
+        return blockToEnginesMap.mappingCount();
     }
 
     public long totalMappings() {

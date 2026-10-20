@@ -3,7 +3,6 @@ package org.flexlb.sync.status;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.config.ConfigService;
-import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.sync.runner.RunnerTestSupport;
@@ -30,7 +29,7 @@ class WorkerDirectoryTest {
     void setUp() {
         ConfigService configService = Mockito.mock(ConfigService.class);
         Mockito.when(configService.loadBalanceConfig())
-                .thenReturn(new FlexlbConfig());
+                .thenReturn(org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
         registry = RunnerTestSupport.endpointRegistry(configService);
         workerDirectory = new WorkerDirectory(registry);
     }

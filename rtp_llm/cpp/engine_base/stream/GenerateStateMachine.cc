@@ -68,6 +68,7 @@ void GenerateStateMachine::handleWaiting() {
             const bool retryable_prefill_init = (role_type == RoleType::PDFUSION || role_type == RoleType::PREFILL)
                                                 && stream_cache_resource_->isContextStream();
             if (absl::IsUnavailable(result) && retryable_prefill_init) {
+                stream_cache_resource_->reportMallocRetry();
                 return;
             }
             error_info = ErrorInfo(ErrorCode::MALLOC_FAILED, "LACK MEM");
@@ -86,10 +87,7 @@ void GenerateStateMachine::handleWaiting() {
         } else if (stream_cache_resource_->resourceContext().role_type != RoleType::DECODE) {
             // Loading cache 失败或不需要loading，直接触发重计算
             // 当前decodeRpcServer会调用moveToNext，判断role type避免decodeRpcServer在enqueue前提早走到running状态
-            if (stream != nullptr) {
-                stream->recordRunningTime();
-            }
-            status.store(StreamState::RUNNING, std::memory_order_release);
+            transitionToRunning();
         }
         return;
     }
@@ -101,11 +99,7 @@ void GenerateStateMachine::handleWaiting() {
     // exactly like a decode stream.
     if (stream_cache_resource_->resourceContext().role_type == RoleType::PREFILL
         && stream_cache_resource_->isContextStream()) {
-        auto stream = stream_cache_resource_->stream();
-        if (stream != nullptr) {
-            stream->recordRunningTime();
-        }
-        status.store(StreamState::RUNNING, std::memory_order_release);
+        transitionToRunning();
         return;
     }
 
@@ -118,12 +112,7 @@ void GenerateStateMachine::handleWaiting() {
         releaseResource();
         return;
     }
-    auto stream = stream_cache_resource_->stream();
-    if (stream != nullptr) {
-        stream->recordRunningTime();
-    }
-    status.store(StreamState::RUNNING, std::memory_order_release);
-    return;
+    transitionToRunning();
 }
 
 void GenerateStateMachine::handleLoading() {
@@ -134,6 +123,14 @@ void GenerateStateMachine::handleLoading() {
         }
         status.store(StreamState::WAITING, std::memory_order_release);
     }
+}
+
+void GenerateStateMachine::transitionToRunning() {
+    auto stream = stream_cache_resource_->stream();
+    if (stream != nullptr) {
+        stream->recordRunningTime();
+    }
+    status.store(StreamState::RUNNING, std::memory_order_release);
 }
 
 void GenerateStateMachine::handleRunning() {
@@ -147,35 +144,53 @@ void GenerateStateMachine::handleRunning() {
         && stream_cache_resource_->isContextStream()) {
         return;
     }
-    // Use the publish-time seqLength so incrKVBlock doesn't race the async
-    // worker's update() — a stale read skips the block-boundary allocation.
-    // Prefer Normal state; fall back to MTP state if the stream is MTP.
+    // A pending MTP round may already own a complete device page-table
+    // snapshot for the next execution.  If the existing allocation also has
+    // enough reserved slots, do not touch the mutable host table: the worker
+    // will commit the identical swaps before a later capacity boundary.
     int             seq_len_override = -1;
     GenerateStream* stream           = stream_cache_resource_->stream();
     if (stream != nullptr) {
-        const int normal_override = stream->getNormalAsyncDeviceState().next_real_seq_len;
-        if (normal_override > 0) {
-            seq_len_override = normal_override;
-        } else {
-            const auto& mtp_state    = stream->getMtpAsyncDeviceState();
-            const int   mtp_override = mtp_state.next_real_seq_len;
-            if (mtp_override > 0) {
-                seq_len_override = mtp_override;
+        const bool  pending   = stream->hasPendingAsyncBookkeeping();
+        const auto mtp_state = stream->getMtpAsyncDeviceState();
+        if (pending && GenerateStream::hasMtpCacheSnapshot(mtp_state) && mtp_state.next_seq_len_upper_bound > 0
+            && stream_cache_resource_->singleBatchNeedBlocks(mtp_state.next_seq_len_upper_bound,
+                                                             static_cast<int>(reserve_step_))
+                   == 0) {
+            return;
+        }
+
+        // Only use publish-time overrides while the host commit is still in
+        // flight.  Once it finishes, complete_token_ids is authoritative and
+        // avoids carrying a conservative upper bound into later rounds.
+        if (pending) {
+            const int normal_override = stream->getNormalAsyncDeviceState().next_real_seq_len;
+            if (normal_override > 0) {
+                seq_len_override = normal_override;
+            } else if (mtp_state.next_seq_len_upper_bound > 0) {
+                seq_len_override = mtp_state.next_seq_len_upper_bound;
             }
         }
         if (asyncDebugEnabled() && stream->hasPendingAsyncBookkeeping()) {
             RTP_LLM_LOG_WARNING("[async-debug] handleRunning while async bookkeeping pending: stream=%ld pd_sep=%d "
-                                "status=%s seq_len=%d normal_last_real=%d normal_next_real=%d "
+                                "status=%s published_seq_upper=%d normal_last_real=%d normal_next_real=%d "
                                 "mtp_next_real=%d override=%d",
                                 stream->streamId(),
                                 stream->queryPdSep(),
                                 StreamStateToString(status.load(std::memory_order_acquire)).c_str(),
-                                stream->seqLength(),
+                                mtp_state.next_seq_len_upper_bound,
                                 stream->getNormalAsyncDeviceState().last_real_seq_len,
                                 stream->getNormalAsyncDeviceState().next_real_seq_len,
-                                stream->getMtpAsyncDeviceState().next_real_seq_len,
+                                mtp_state.next_seq_len_upper_bound,
                                 seq_len_override);
         }
+    }
+    // incrKVBlock may append or compact host block slots even when no new
+    // physical allocation is ultimately needed.  Invalidate the old device
+    // snapshot before entering that mutation path; the gatherer will use the
+    // now-authoritative host table for this round.
+    if (stream != nullptr) {
+        stream->clearMtpCacheSnapshot();
     }
     auto result = stream_cache_resource_->incrKVBlock(seq_len_override);
     if (!result.ok()) {

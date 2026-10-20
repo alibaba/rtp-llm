@@ -45,8 +45,8 @@ class DeepSeekV4DSparkCommitOnlyWeightTest(TestCase):
                 AtomicWeight(W.lm_head, [], identity),
                 AtomicWeight(W.v4_dspark_main_norm, [], identity),
                 main_proj,
-                AtomicWeight(W.v4_dspark_markov_w1, [], identity),
-                AtomicWeight(W.v4_dspark_markov_w2, [], identity),
+                AtomicWeight(W.dspark_markov_w1, [], identity),
+                AtomicWeight(W.dspark_markov_w2, [], identity),
             ],
         )
 

@@ -1526,9 +1526,29 @@ class Qwen3NextModel(GptModelBase):
         self.norm = RMSResNorm(
             weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
         )
+        self._init_capture_context(
+            self._capture_canonical_layer,
+            self._capture_canonical_final,
+        )
 
-    def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph: bool = False):
-        impls = super().prepare_fmha_impl(inputs, is_cuda_graph)
+    def _capture_canonical_layer(
+        self, hidden_states: torch.Tensor, residual: torch.Tensor | None
+    ) -> torch.Tensor:
+        return hidden_states if residual is None else hidden_states + residual
+
+    def _capture_canonical_final(
+        self, hidden_states: torch.Tensor, residual: torch.Tensor | None
+    ) -> torch.Tensor:
+        # Forward owns final normalization, independently of capture.
+        return hidden_states
+
+    def prepare_fmha_impl(
+        self,
+        inputs: PyModelInputs,
+        is_cuda_graph: bool = False,
+        cuda_graph_selection_mode: Optional[str] = None,
+    ):
+        impls = super().prepare_fmha_impl(inputs, is_cuda_graph, cuda_graph_selection_mode)
         if torch.version.hip is None:
             return impls
         attention_inputs = get_attention_inputs_value(inputs)
@@ -1643,6 +1663,7 @@ class Qwen3NextModel(GptModelBase):
         ):
             fmha_impl.bind_graph_inputs(inputs)
         hidden_states = self.word_embedding(inputs)
+        capture = self.capture_context(inputs.capture_hidden_states)
 
         is_cuda_graph = _is_cuda_graph_forward(inputs, fmha_impl)
         attention_inputs = get_primary_attention_inputs(inputs, self.kv_cache)
@@ -1750,6 +1771,9 @@ class Qwen3NextModel(GptModelBase):
             fmha_impl = self.prepare_fmha_impl(inputs)
 
         residual = torch.zeros_like(hidden_states)
+        capture_aux_hidden = bool(self._mtp_aux_capture_layer_ids)
+        if capture_aux_hidden:
+            self.begin_aux_hidden_capture(hidden_states, is_target_verify)
 
         for i, decoder_layer in enumerate(self.layers):
             layer_attention_inputs = select_attention_inputs_for_layer(
@@ -1768,9 +1792,19 @@ class Qwen3NextModel(GptModelBase):
                 attention_inputs=layer_attention_inputs,
                 attn_meta=attn_meta,
             )
+            if i in self._mtp_aux_capture_layer_id_set:
+                self.capture_aux_hidden(i, hidden_states, residual)
+            capture.capture_layer(i, hidden_states, residual)
+
+        if capture_aux_hidden:
+            self.finish_aux_hidden_capture()
 
         hidden_states, residual = self.norm(hidden_states, residual)
-        return PyModelOutputs(hidden_states)
+        outputs = capture.finalize(hidden_states)
+        if capture_aux_hidden:
+            assert self._mtp_target_hidden_states is not None
+            outputs.mtp_target_hidden_states = self._mtp_target_hidden_states
+        return outputs
 
 
 class Qwen35Model(Qwen3NextModel):

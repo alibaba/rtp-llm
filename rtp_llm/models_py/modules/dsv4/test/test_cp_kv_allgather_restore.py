@@ -132,9 +132,7 @@ def test_single_request_partial_last_virtual_block():
 
 def test_single_request_known_total_avoids_tensor_length_and_repeat_helpers():
     per_req = torch.tensor([17], dtype=torch.int64)
-    gathered, expected_tags = _ground_truth_restore(
-        per_req, 2, 4, torch.device("cpu")
-    )
+    gathered, expected_tags = _ground_truth_restore(per_req, 2, 4, torch.device("cpu"))
     old_padded = CP.cp_padded_local_kv_lens
     old_repeat = torch.repeat_interleave
     CP.cp_padded_local_kv_lens = lambda *args, **kwargs: (_ for _ in ()).throw(
@@ -188,6 +186,37 @@ def test_zero_kv_request_in_batch():
 def test_block_size_one():
     """block_size=1 degenerate case: every token is its own block, RR by token."""
     _check(per_req=[6], cp_size=2, block_size=1)
+
+
+def test_scalar_length_helpers_match_tensor_formulas():
+    for cp_size in (1, 2, 4):
+        for block_size in (1, 2, 4, 8):
+            for total in (0, 1, block_size - 1, block_size, 17, 65):
+                lengths = torch.tensor([total], dtype=torch.int64)
+                padded = CP.cp_padded_local_kv_lens(lengths, cp_size, block_size).item()
+                assert CP.cp_padded_local_kv_len(total, cp_size, block_size) == padded
+                for cp_rank in range(cp_size):
+                    actual = CP.cp_actual_owned_kv_lens(
+                        lengths, cp_size, block_size, cp_rank
+                    ).item()
+                    assert (
+                        CP.cp_actual_owned_kv_len(total, cp_size, block_size, cp_rank)
+                        == actual
+                    )
+
+
+def test_known_host_lengths_match_default_builder():
+    per_req = torch.tensor([8, 12, 4], dtype=torch.int64)
+    expected = CP.build_kv_allgather_restore_indices(per_req, 2, 4, torch.device("cpu"))
+    actual = CP.build_kv_allgather_restore_indices(
+        per_req,
+        2,
+        4,
+        torch.device("cpu"),
+        total_kv_len=24,
+        total_local_kv=16,
+    )
+    assert torch.equal(actual, expected)
 
 
 def test_rejects_negative_cp_size():

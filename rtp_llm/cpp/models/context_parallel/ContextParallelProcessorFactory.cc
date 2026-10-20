@@ -4,12 +4,12 @@
 namespace rtp_llm {
 
 std::unique_ptr<IContextParallelProcessor> ContextParallelProcessorFactory::create(
-    ProcessorType type, const ParallelismConfig& parallelism_config, bool split_hidden_states) {
+    ProcessorType type, const ParallelismConfig& parallelism_config, bool prefer_local_hidden_states) {
     switch (type) {
         case ProcessorType::ZIG_ZAG:
-            return std::make_unique<ZigZagProcessor>(parallelism_config, split_hidden_states);
+            return std::make_unique<ZigZagProcessor>(parallelism_config, prefer_local_hidden_states);
         default:
-            return std::make_unique<ZigZagProcessor>(parallelism_config, split_hidden_states);
+            return std::make_unique<ZigZagProcessor>(parallelism_config, prefer_local_hidden_states);
     }
 }
 }  // namespace rtp_llm

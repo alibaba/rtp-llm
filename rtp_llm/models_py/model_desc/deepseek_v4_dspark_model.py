@@ -34,10 +34,12 @@ from typing import Any, Optional, Tuple
 
 import torch
 
+from rtp_llm.config.cuda_graph import CudaGraphSelectionMode, GenerationPrefillCudaGraphUnsupportedBackend
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.deepseek_v4_model import DeepSeekV4Model
 from rtp_llm.models_py.modules import RMSNorm
+from rtp_llm.models_py.modules.dsv4 import _profiler
 from rtp_llm.models_py.modules.dsv4._fused_rmsnorm_rope_triton import fused_rmsnorm_rope
 from rtp_llm.models_py.modules.dsv4.cp import build_cp_context_for_forward
 from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import (
@@ -113,6 +115,8 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         )
 
         role_type = getattr(parallelism_config, "role_type", None)
+        self._disable_capture_context()
+
         self._commit_only_prefill = (
             role_type == RoleType.PREFILL
             or str(role_type).upper().rsplit(".", 1)[-1] == "PREFILL"
@@ -203,7 +207,10 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         return int(self._dspark_aux_feature_dim)
 
     def prepare_fmha_impl(
-        self, inputs: PyModelInputs, is_cuda_graph: bool = False
+        self,
+        inputs: PyModelInputs,
+        is_cuda_graph: bool = False,
+        cuda_graph_selection_mode: Optional[str] = None,
     ) -> Any:
         """Build the per-graph DSpARK metadata owner.
 
@@ -214,6 +221,13 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         the graph (via ``get_or_build_sched_meta``), so the schedule-build
         kernels replay with the current device-side ``topk_length`` values.
         """
+        if cuda_graph_selection_mode == CudaGraphSelectionMode.GENERATION_PREFILL_GRAPH:
+            # DSpARK's owner namespace is decode-graph specific; generation-prefill
+            # capture must degrade via the factory's unsupported-backend channel
+            # instead of crashing on the extra keyword.
+            raise GenerationPrefillCudaGraphUnsupportedBackend(
+                "DSpARK does not support generation prefill CUDA graphs"
+            )
         if not is_cuda_graph:
             return None
         return SimpleNamespace(
@@ -560,6 +574,8 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
             prefix_lengths=optional_tensor(
                 getattr(attention_inputs, "prefix_lengths", None)
             ),
+            prefix_lengths_host=getattr(cp_info, "prefill_prefix_lengths_cpu", None),
+            chunk_lengths_device=getattr(attention_inputs, "input_lengths", None),
             kv_cache_sharded=self._dspark_kv_cache_sharded,
         )
         positions = cp_ctx.global_positions
@@ -613,28 +629,30 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
             gathered_positions = all_gather(
                 context_positions.contiguous(), group=Group.TP
             )
+        layer_forward_range = _profiler.make_layer_forward_range()
         for layer_idx in range(len(self.v4.layers)):
-            self._commit_layer_features(
-                layer_idx,
-                main_x,
-                context_req_ids,
-                context_positions,
-                committed_ends,
-                block_table,
-                tokens_per_block,
-                batch_size,
-                gathered_req_ids=gathered_req_ids,
-                gathered_positions=gathered_positions,
-                cp_ctx=commit_ctx,
-            )
-            # PD-separated prefill publishes each committed draft-layer
-            # cache from the commit call: the published range is exactly
-            # the committed rows, so proposal rows never enter the store's
-            # block plan.
-            if write_cache_store_impl is not None:
-                write_cache_store_impl(
-                    self.kv_cache.get_layer_cache(layer_idx, SWA_KV)
+            with layer_forward_range(layer_idx):
+                self._commit_layer_features(
+                    layer_idx,
+                    main_x,
+                    context_req_ids,
+                    context_positions,
+                    committed_ends,
+                    block_table,
+                    tokens_per_block,
+                    batch_size,
+                    gathered_req_ids=gathered_req_ids,
+                    gathered_positions=gathered_positions,
+                    cp_ctx=commit_ctx,
                 )
+                # PD-separated prefill publishes each committed draft-layer
+                # cache from the commit call: the published range is exactly
+                # the committed rows, so proposal rows never enter the store's
+                # block plan.
+                if write_cache_store_impl is not None:
+                    write_cache_store_impl(
+                        self.kv_cache.get_layer_cache(layer_idx, SWA_KV)
+                    )
 
     def _forward_dspark_attention(
         self,
@@ -724,22 +742,24 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         # The hyper-connection choreography lives in Block.forward_decode;
         # only the attention call is substituted with the non-causal
         # fixed-block variant.
+        layer_forward_range = _profiler.make_layer_forward_range()
         for layer_idx, layer in enumerate(self.v4.layers):
-            hidden = layer.forward_decode(
-                hidden,
-                attn_metadata=None,
-                input_ids=query_ids,
-                attn_fn=lambda x_pre, layer_idx=layer_idx: self._forward_dspark_attention(
-                    layer_idx,
-                    x_pre,
-                    query_positions,
-                    prefix_lengths,
-                    active_requests,
-                    block_table,
-                    tokens_per_block,
-                    graph_metadata,
-                ),
-            )
+            with layer_forward_range(layer_idx):
+                hidden = layer.forward_decode(
+                    hidden,
+                    attn_metadata=None,
+                    input_ids=query_ids,
+                    attn_fn=lambda x_pre, layer_idx=layer_idx: self._forward_dspark_attention(
+                        layer_idx,
+                        x_pre,
+                        query_positions,
+                        prefix_lengths,
+                        active_requests,
+                        block_table,
+                        tokens_per_block,
+                        graph_metadata,
+                    ),
+                )
 
         return hidden
 

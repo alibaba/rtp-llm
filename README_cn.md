@@ -46,7 +46,7 @@ docker版本见[镜像发布历史](docs/DockerHistory.md)
 cd rtp-llm/docker
 # IMAGE_NAME =
 # if cuda11: registry.cn-hangzhou.aliyuncs.com/havenask/rtp_llm:{version}_cuda11
-# if cuda12: registry.cn-hangzhou.aliyuncs.com/havenask/rtp_llm:{version}_cuda12
+# if cuda13: registry.cn-hangzhou.aliyuncs.com/havenask/rtp_llm:{version}_cuda13
 sh ./create_container.sh <CONTAINER_NAME> <IMAGE_NAME>
 sh CONTAINER_NAME/sshme.sh
 
@@ -61,9 +61,9 @@ curl -XPOST http://localhost:8088 -d '{"prompt": "hello, what is your name", "ge
 ```bash
 # Install rtp-llm
 cd rtp-llm
-# For cuda12 environment, please use requirements_torch_gpu_cuda12.txt
-pip3 install -r ./deps/requirements_torch_gpu_cuda12.txt
-# Use the corresponding whl from the release version, here's an example for the cuda11 version 0.1.0, for the cuda12 whl package please check the release page.
+# For cuda13 environment, please use requirements_torch_gpu_cuda13.txt
+pip3 install -r ./deps/requirements_torch_gpu_cuda13.txt
+# Use the corresponding whl from the release version, here's an example for the cuda11 version 0.1.0, for the cuda13 whl package please check the release page.
 pip3 install rtp_llm-0.1.9+cuda118-cp310-cp310-manylinux1_x86_64.whl
 # start http service
 

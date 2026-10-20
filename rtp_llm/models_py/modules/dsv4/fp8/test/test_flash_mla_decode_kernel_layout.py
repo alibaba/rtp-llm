@@ -174,7 +174,7 @@ def _call_flash_mla(
     extra_k_cache: Optional[torch.Tensor] = None,
     extra_indices: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    from flash_mla import (  # type: ignore[import-not-found]
+    from rtp_llm.models_py.utils.flash_mla_legacy import (  # type: ignore[import-not-found]
         flash_mla_with_kvcache,
         get_mla_metadata,
     )
@@ -212,10 +212,8 @@ def _call_flash_mla(
 @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
 class FlashMlaDecodeKernelLayoutTest(unittest.TestCase):
     def setUp(self) -> None:
-        try:
-            import flash_mla  # noqa: F401
-        except Exception as e:  # noqa: BLE001
-            self.skipTest(f"flash_mla not importable: {e}")
+        import rtp_llm.models_py.utils.flash_mla_legacy as flash_mla  # noqa: F401
+
         torch.manual_seed(20240527)
 
     def test_swa_padded_stride_entries(self) -> None:

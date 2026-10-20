@@ -25,6 +25,15 @@ copy_files(
     }),
 )
 
+copy_files(
+    name = "copy_nvcomp_lib",
+    srcs = select({
+        "//:using_cuda13_x86": ["@nvcomp_cuda13_x86//:shared_library"],
+        "//:using_cuda13_arm": ["@nvcomp_cuda13_arm//:shared_library"],
+        "//conditions:default": [],
+    }),
+)
+
 # copy 3fs libs
 copy_files(
     name = "copy_hf3fs_libs",
@@ -44,15 +53,6 @@ copy_files(
     visibility = ["//visibility:public"],
 )
 
-copy_files(
-    name = "copy_acclep_libs",
-    srcs = select({
-        "//rtp_llm/models_py/bindings/cuda/ops:use_accl_ep": ["//3rdparty/accl_ep:accl_ep_shared"],
-        "//conditions:default": [],
-    }),
-    visibility = ["//visibility:public"],
-)
-
 filegroup(
     name = "frontend_libs",
     srcs = [],
@@ -65,11 +65,11 @@ filegroup(
     name = "libs",
     srcs = [],
     data = [
-        ":copy_acclep_libs",
+        ":copy_nvcomp_lib",
         ":copy_hf3fs_libs",
+        ":copy_remote_kv_cache_manager_client_libs",
         ":libmm_rdma_exporter_so",
         ":librtp_compute_ops_so",
-        ":copy_remote_kv_cache_manager_client_libs",
     ],
 )
 
@@ -78,6 +78,9 @@ filegroup(
     srcs = [],
     data = [
         ":copy_cuda13_flashinfer_libs",
+        ":copy_nvcomp_lib",
+        ":copy_hf3fs_libs",
+        ":copy_remote_kv_cache_manager_client_libs",
         ":libmm_rdma_exporter_so",
         ":librtp_compute_ops_so",
         ":libth_grammar_tokenizer_info_so",

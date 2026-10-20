@@ -54,9 +54,7 @@ class _PagedPrefillCache:
         ):
             base = torch.arange((2 * columns + 1) * entries * 8, device=device)
             base = base.to(torch.uint8).reshape(2 * columns + 1, entries * 8)
-            self.layers[tag] = LayerKVCache(
-                base, tokens_per_block, 0, len(self.layers), tag
-            )
+            self.layers[tag] = LayerKVCache(base, tokens_per_block, 0, tag)
             self.block_tables[tag] = torch.arange(
                 1, 2 * columns + 1, dtype=torch.int32, device=device
             ).reshape(2, columns)
@@ -107,9 +105,7 @@ class _CsaPrefillCache(_PagedPrefillCache):
                     base.shape[0], device=device
                 ).to(torch.uint8)[:, None]
                 base[:, entries * INDEXER_HEAD_DIM :].view(torch.float32).fill_(1)
-            self.layers[tag] = LayerKVCache(
-                base, tokens_per_block, 0, len(self.layers), tag
-            )
+            self.layers[tag] = LayerKVCache(base, tokens_per_block, 0, tag)
             self.block_tables[tag] = torch.arange(
                 1, 2 * columns + 1, dtype=torch.int32, device=device
             ).reshape(2, columns)
@@ -183,12 +179,50 @@ class PrefillFastPathCudaTest(_PrefillForwardTestBase):
             forwarded, torch.tensor([0, 2, 4], dtype=torch.int32)
         )
 
-    def test_full_forward_prefill_is_cuda_graph_capture_safe(self):
-        for host_mirror_present in (False, True):
-            with self.subTest(host_mirror_present=host_mirror_present):
-                self._check_forward_prefill_graph(host_mirror_present)
+    def test_eager_forward_prefill_moves_cuda_only_mirror_to_host(self):
+        device = torch.device("cuda", torch.cuda.current_device())
+        self.assertFalse(torch.cuda.is_current_stream_capturing())
+        for host_cu_seqlens in (
+            None,
+            torch.empty(0, dtype=torch.int32),
+            torch.tensor([0], dtype=torch.int32),
+        ):
+            with self.subTest(host_cu_seqlens=host_cu_seqlens):
+                attn = SimpleNamespace(
+                    cu_seqlens=host_cu_seqlens,
+                    cu_seqlens_device=torch.tensor(
+                        [0, 2, 4], dtype=torch.int32, device=device
+                    ),
+                    combo_position_ids=torch.tensor(
+                        [0, 1, 0, 1], dtype=torch.long, device=device
+                    ),
+                    input_lengths=None,
+                    input_lengths_device=None,
+                )
+                forwarded = self._forwarded_cu_seqlens(
+                    self._run_forward_prefill_with(attn, device=device)
+                )
+                self.assertEqual(forwarded.device.type, "cpu")
+                self.assertTrue(forwarded.is_contiguous())
+                torch.testing.assert_close(
+                    forwarded, torch.tensor([0, 2, 4], dtype=torch.int32)
+                )
 
-    def _check_forward_prefill_graph(self, host_mirror_present):
+    def test_full_forward_prefill_is_cuda_graph_capture_safe(self):
+        for host_mirror_present, device_mirror_present in (
+            (False, False),
+            (False, True),
+            (True, True),
+        ):
+            with self.subTest(
+                host_mirror_present=host_mirror_present,
+                device_mirror_present=device_mirror_present,
+            ):
+                self._check_forward_prefill_graph(
+                    host_mirror_present, device_mirror_present
+                )
+
+    def _check_forward_prefill_graph(self, host_mirror_present, device_mirror_present):
         device = torch.device("cuda", torch.cuda.current_device())
         v4 = _FakeV4()
         v4.layers = [_MetadataLayer(0, v4.calls)]
@@ -197,7 +231,11 @@ class PrefillFastPathCudaTest(_PrefillForwardTestBase):
             cu_seqlens=torch.tensor(
                 [0, 2, 4] if host_mirror_present else [], dtype=torch.int32
             ),
-            cu_seqlens_device=torch.tensor([0, 2, 4], dtype=torch.int32, device=device),
+            cu_seqlens_device=(
+                torch.tensor([0, 2, 4], dtype=torch.int32, device=device)
+                if device_mirror_present
+                else None
+            ),
             input_lengths=torch.tensor([2, 2], dtype=torch.int32),
             input_lengths_device=torch.tensor([2, 2], dtype=torch.int32, device=device),
             prefix_lengths=torch.tensor([5, 100], dtype=torch.int32),
@@ -241,9 +279,10 @@ class PrefillFastPathCudaTest(_PrefillForwardTestBase):
                 with self.subTest(lengths=lengths):
                     # The host mirrors deliberately retain the capture-time
                     # batch. Replay updates only the existing device tensors.
-                    attn.cu_seqlens_device.copy_(
-                        torch.tensor([0, lengths[0], 4], device=device)
-                    )
+                    if attn.cu_seqlens_device is not None:
+                        attn.cu_seqlens_device.copy_(
+                            torch.tensor([0, lengths[0], 4], device=device)
+                        )
                     attn.input_lengths_device.copy_(
                         torch.tensor(lengths, device=device)
                     )
@@ -558,6 +597,64 @@ class PrefillFastPathCudaTest(_PrefillForwardTestBase):
                                 captured_workspace.cmp_seq_lens,
                                 eager_workspace.cmp_seq_lens,
                             )
+
+    def test_cp_sharded_indexer_metadata_rejects_cuda_graph_capture(self):
+        device = torch.device("cuda", torch.cuda.current_device())
+        for batch_size in (1, 2):
+            with self.subTest(batch_size=batch_size):
+                indexer = IndexerFP8.__new__(IndexerFP8)
+                nn.Module.__init__(indexer)
+                indexer.compress_ratio = 4
+                indexer.freqs_cis = torch.ones(
+                    (32, 32), dtype=torch.complex64, device=device
+                )
+                lengths = torch.full((batch_size,), 2, dtype=torch.int32, device=device)
+                prefixes = torch.zeros_like(lengths)
+                cu = torch.arange(batch_size + 1, device=device, dtype=torch.int32) * 2
+                positions = torch.arange(2, device=device).repeat(batch_size)
+                requests = torch.arange(
+                    batch_size, device=device, dtype=torch.int32
+                ).repeat_interleave(2)
+                indexer._cp_ctx = SimpleNamespace(
+                    cp_size=2,
+                    cp_rank=0,
+                    kv_cache_sharded=True,
+                    input_lengths_global=lengths * 2,
+                )
+                block_table = torch.ones(
+                    (batch_size, 1), dtype=torch.int32, device=device
+                )
+                marker = torch.zeros(1, device=device)
+                torch.cuda.synchronize()
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph), torch.inference_mode():
+                    with self.assertRaisesRegex(
+                        RuntimeError,
+                        "CUDA Graph capture is not supported for CP-sharded indexer",
+                    ):
+                        indexer.prepare(
+                            bsz=1,
+                            seqlen=batch_size * 2,
+                            sp_int=0,
+                            device=device,
+                            kv_block_table=block_table,
+                            kv_eb=4,
+                            use_varlen=True,
+                            batch_size=batch_size,
+                            cu_seqlens=cu,
+                            input_lengths=lengths,
+                            prefix_lengths=prefixes,
+                            position_ids=positions,
+                            req_id_per_token=requests,
+                            max_seqlen_q=2,
+                            has_prefix=False,
+                        )
+                    marker.add_(1)
+                # Reject before a host sync or invalid pool read poisons capture.
+                marker.zero_()
+                graph.replay()
+                torch.cuda.synchronize()
+                torch.testing.assert_close(marker, torch.ones_like(marker))
 
     def test_full_csa_metadata_and_indexer_gather_capture_and_replay(self):
         device = torch.device("cuda", torch.cuda.current_device())

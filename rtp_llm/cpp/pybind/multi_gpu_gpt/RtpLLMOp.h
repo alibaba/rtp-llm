@@ -7,6 +7,7 @@
 #include "rtp_llm/cpp/api_server/HttpApiServer.h"
 #include "rtp_llm/cpp/model_rpc/LocalRpcServiceImpl.h"
 #include "rtp_llm/cpp/model_rpc/RemoteRpcServiceImpl.h"
+#include "rtp_llm/cpp/telemetry/TelemetryRuntime.h"
 
 namespace th = torch;
 
@@ -22,7 +23,8 @@ public:
               py::object vit_config,
               py::object propose_model,
               py::object token_processor,
-              py::object mm_process_engine);
+              py::object mm_process_engine,
+              py::object trace_config = py::none());
     void stop();
     void
     startHttpServer(py::object model_weights_loader, py::object world_info, py::object tokenizer, py::object render);
@@ -42,7 +44,8 @@ private:
     void                                          initRPCServer(const EngineInitParams                        maga_init_params,
                                                                 std::unique_ptr<ProposeModelEngineInitParams> propose_params,
                                                                 py::object                                    token_processor,
-                                                                py::object                                    mm_process_engine);
+                                                                py::object                                    mm_process_engine,
+                                                                telemetry::TelemetryConfig                    trace_config);
 
 private:
     std::unique_ptr<RpcServiceImpl> model_rpc_service_;

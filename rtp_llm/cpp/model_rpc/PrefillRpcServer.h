@@ -86,7 +86,8 @@ private:
                                     int        prefill_local_reuse_len,
                                     int        prefill_remote_reuse_len,
                                     int        prefill_memory_reuse_len,
-                                    bool       use_independent_block_pools);
+                                    int        prefill_disk_reuse_len,
+                                    size_t     group_num);
 
 private:
     std::string decode_cluster_name_;

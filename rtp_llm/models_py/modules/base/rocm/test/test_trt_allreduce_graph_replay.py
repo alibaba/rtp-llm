@@ -183,6 +183,68 @@ def _worker_graph_fused_rmsnorm(
         _teardown()
 
 
+def _worker_graph_recapture_with_rank_asymmetric_allocation(
+    rank, world_size, port, hidden_size=4096, num_tokens=8
+):
+    """Recapture when only one rank replaces its graph input allocation."""
+    try:
+        _setup(rank, world_size, port)
+        from rtp_llm.models_py.modules.base.rocm.trt_allreduce import TrtllmDistEnv
+
+        dev = torch.device(f"cuda:{rank}")
+        env = TrtllmDistEnv(group=dist.group.WORLD, device_id=rank)
+        torch.manual_seed(42 + rank)
+        source = torch.randn(
+            num_tokens, hidden_size, dtype=torch.bfloat16, device=dev
+        )
+        stream = torch.cuda.Stream(device=dev)
+        stream.wait_stream(torch.cuda.current_stream(dev))
+
+        first_in = source.clone()
+        first_out = torch.empty_like(first_in)
+        first_graph = torch.cuda.CUDAGraph()
+        with torch.cuda.stream(stream), torch.cuda.graph(first_graph, stream=stream):
+            env.allreduce_op(first_in, first_out)
+        stream.synchronize()
+        env.consume_capture_if_needed()
+
+        # Rank 0 deliberately reuses the first graph's allocation while rank 1
+        # uses a new allocation. A local-data_ptr cache makes one rank report
+        # a hit and the other a miss; generation-based collective registration
+        # must instead keep both ranks in the same capture sequence.
+        second_in = first_in if rank == 0 else source.clone()
+        second_out = torch.empty_like(second_in)
+        second_graph = torch.cuda.CUDAGraph()
+        with torch.cuda.stream(stream), torch.cuda.graph(second_graph, stream=stream):
+            env.allreduce_op(second_in, second_out)
+        stream.synchronize()
+        env.consume_capture_if_needed()
+
+        second_replay = torch.roll(source, shifts=1, dims=-1)
+        second_ref = second_replay.float()
+        dist.all_reduce(second_ref)
+        second_ref = second_ref.to(second_replay.dtype)
+        with torch.cuda.stream(stream):
+            second_in.copy_(second_replay)
+            second_graph.replay()
+        stream.synchronize()
+        torch.testing.assert_close(second_out, second_ref, atol=2e-2, rtol=1e-2)
+
+        # The first graph keeps its own CommPtrs slot and remains valid after
+        # the asymmetric recapture registers the newer collective generation.
+        first_replay = torch.roll(source, shifts=2, dims=-1)
+        first_ref = first_replay.float()
+        dist.all_reduce(first_ref)
+        first_ref = first_ref.to(first_replay.dtype)
+        with torch.cuda.stream(stream):
+            first_in.copy_(first_replay)
+            first_graph.replay()
+        stream.synchronize()
+        torch.testing.assert_close(first_out, first_ref, atol=2e-2, rtol=1e-2)
+    finally:
+        _teardown()
+
+
 class TestTrtAllReduceGraphReplay(unittest.TestCase):
 
     def setUp(self):
@@ -225,6 +287,9 @@ class TestTrtAllReduceGraphReplay(unittest.TestCase):
                         num_tokens=num_tokens,
                         fp8_out=fp8_out,
                     )
+
+    def test_graph_recapture_with_rank_asymmetric_allocation(self):
+        _launch(_worker_graph_recapture_with_rank_asymmetric_allocation)
 
 
 if __name__ == "__main__":

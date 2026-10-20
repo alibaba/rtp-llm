@@ -12,15 +12,17 @@ from __future__ import annotations
 import json
 import logging
 import struct
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from enum import IntEnum
 from functools import cache
+from itertools import chain
 from typing import TYPE_CHECKING, Any, Iterator, NamedTuple
 
 import torch
 
 from rtp_llm.config.response_format import parse_response_format
+from rtp_llm.config.thinking_mode import INT32_MAX
 from rtp_llm.dash_sc.proto import predict_v2_pb2
 from rtp_llm.dash_sc.structural_tag import (
     DashScStructuralTagError,
@@ -35,8 +37,22 @@ if TYPE_CHECKING:
     from rtp_llm.utils.base_model_datatypes import MMUrlType
 
 _INT32_MIN = -2_147_483_648
-_INT32_MAX = 2_147_483_647
 _DEFAULT_MAX_NEW_TOKENS = 32000
+
+_LOGGING_CONSENT_HEADERS = {
+    "x-dashscope-loggingconsent",
+    "x-dashscope-inner-loggingconsent",
+}
+
+
+def is_logging_consent_allowed(headers: Iterable[tuple[object, object]]) -> bool:
+    """Allow absent consent or 'all', ignoring case without trimming values."""
+    for key, value in headers:
+        if value is None or str(key).lower() not in _LOGGING_CONSENT_HEADERS:
+            continue
+        if not isinstance(value, str) or value.lower() != "all":
+            return False
+    return True
 
 
 class LLMFinishReason(IntEnum):
@@ -707,8 +723,9 @@ class DashScRequestControls:
     max_new_think_tokens: int | None = None
     timeout_ms: int | None = None
     traffic_reject_priority: int | None = None
-    reasoning_effort: str | None = None
+    reasoning_effort: str | int | None = None
     request_headers: dict[str, str] = field(default_factory=dict)
+    log_input_output: bool = True
 
 
 @dataclass(frozen=True)
@@ -767,12 +784,6 @@ class SamplingParams:
         request_max_think = self.max_new_think_tokens
         if request_max_think is None and request_controls is not None:
             request_max_think = request_controls.max_new_think_tokens
-        if request_max_think is None:
-            max_thinking_tokens = 32000
-        elif request_max_think < 0:
-            max_thinking_tokens = _INT32_MAX
-        else:
-            max_thinking_tokens = request_max_think
         backend_max_new_tokens = self.max_new_tokens
         if (
             request_controls is not None
@@ -783,6 +794,12 @@ class SamplingParams:
                 backend_max_new_tokens = min(
                     backend_max_new_tokens, int(self.max_total_tokens)
                 )
+        if request_max_think is None:
+            max_thinking_tokens = backend_max_new_tokens
+        elif request_max_think < 0:
+            max_thinking_tokens = INT32_MAX
+        else:
+            max_thinking_tokens = request_max_think
         return GenerateConfig(
             max_new_tokens=backend_max_new_tokens,
             num_return_sequences=self.num_return_sequences,
@@ -840,7 +857,7 @@ def _parse_input_ids_for_inference(request) -> ParsedInputIds | None:
         tensor = torch.frombuffer(bytearray(raw), dtype=torch.int64)
         if tensor.numel():
             min_value, max_value = torch.aminmax(tensor)
-            if min_value.item() < _INT32_MIN or max_value.item() > _INT32_MAX:
+            if min_value.item() < _INT32_MIN or max_value.item() > INT32_MAX:
                 raise DashScInputIdsError("input_ids value is outside the INT32 range")
         tensor = tensor.to(torch.int32)
     else:
@@ -964,6 +981,9 @@ def parse_sampling_params(
 def parse_request_controls(
     request: predict_v2_pb2.ModelInferRequest,
     ds_attrs: dict[str, Any] | None = None,
+    model_type: str | None = None,
+    *,
+    invocation_metadata: Iterable[tuple[object, object]] = (),
 ) -> DashScRequestControls:
     """Parse non-sampling request controls.
 
@@ -1009,13 +1029,35 @@ def parse_request_controls(
     if max_new_think_tokens is not None:
         max_new_think_tokens = int(max_new_think_tokens)
 
-    reasoning_effort = _parse_optional_parameter_reasoning_effort(
-        request, "reasoning_effort"
-    )
-    if reasoning_effort is None:
-        reasoning_effort = _extract_reasoning_effort_value(
-            _lookup_ds_request_control(ds_attrs, "reasoning_effort")
+    if model_type == "deepseek_v41":
+        from rtp_llm.openai.reasoning_effort import normalize_v41_reasoning_effort
+
+        raw_effort = _lookup_ds_request_control(ds_attrs, "reasoning_effort")
+        if "reasoning_effort" in request.parameters:
+            parameter = request.parameters["reasoning_effort"]
+            if parameter.HasField("int64_param"):
+                raw_effort = parameter.int64_param
+            elif parameter.HasField("string_param"):
+                raw_effort = parameter.string_param
+            else:
+                raise DashScParameterError(
+                    "reasoning_effort must be a strict string or integer"
+                )
+        try:
+            normalized = normalize_v41_reasoning_effort(raw_effort)
+            reasoning_effort = (
+                raw_effort if raw_effort in (None, "none") else normalized
+            )
+        except ValueError as error:
+            raise DashScParameterError(str(error)) from error
+    else:
+        reasoning_effort = _parse_optional_parameter_reasoning_effort(
+            request, "reasoning_effort"
         )
+        if reasoning_effort is None:
+            reasoning_effort = _extract_reasoning_effort_value(
+                _lookup_ds_request_control(ds_attrs, "reasoning_effort")
+            )
 
     timeout_s = _parse_optional_int_value(ds_attrs.get("x-dashscope-inner-timeout"))
     timeout_ms = timeout_s * 1000 if timeout_s is not None and timeout_s > 0 else None
@@ -1031,6 +1073,8 @@ def parse_request_controls(
     request_headers: dict[str, str] = {}
     for header_name in (
         "user_id",
+        "x-dashscope-uid",
+        "x-dashscope-service",
         "x-dashscope-apikeyid",
         "x-dashscope-inner-qos-level",
     ):
@@ -1046,11 +1090,17 @@ def parse_request_controls(
         traffic_reject_priority=traffic_reject_priority,
         reasoning_effort=reasoning_effort,
         request_headers=request_headers,
+        log_input_output=is_logging_consent_allowed(
+            chain(ds_attrs.items(), invocation_metadata)
+        ),
     )
 
 
 def parse_dash_sc_grpc_request(
     request: predict_v2_pb2.ModelInferRequest,
+    model_type: str | None = None,
+    *,
+    invocation_metadata: Iterable[tuple[object, object]] = (),
 ) -> tuple[ParsedInputIds | None, SamplingParams | None, DashScRequestControls | None]:
     """Parse one ``ModelInferRequest`` into ids, sampling, and request controls.
 
@@ -1064,7 +1114,12 @@ def parse_dash_sc_grpc_request(
     return (
         ids,
         parse_sampling_params(request, ds_attrs),
-        parse_request_controls(request, ds_attrs),
+        parse_request_controls(
+            request,
+            ds_attrs,
+            model_type=model_type,
+            invocation_metadata=invocation_metadata,
+        ),
     )
 
 
@@ -1097,6 +1152,7 @@ _MULTIMODAL_PARAMETER_KEYS: tuple[str, ...] = ("payload", "__messages__")
 _PER_PART_CONFIG_INT_KEYS: tuple[str, ...] = (
     "min_pixels",
     "max_pixels",
+    "max_long_side_pixel",
     "fps",
     "max_frames",
     "min_frames",
@@ -1111,6 +1167,7 @@ class MultimodalPart:
     mm_type: MMUrlType
     min_pixels: int = -1
     max_pixels: int = -1
+    max_long_side_pixel: int = -1
     fps: int = -1
     max_frames: int = -1
     min_frames: int = -1
@@ -1460,6 +1517,7 @@ def build_stream_response_from_generate_outputs(
     *,
     stream_finished: bool | None = None,
     token_ids: list[int] | None = None,
+    log_input_output: bool = True,
 ) -> predict_v2_pb2.ModelStreamInferResponse:
     """Build ``ModelStreamInferResponse`` from one ``GenerateOutputs`` chunk.
 
@@ -1508,7 +1566,11 @@ def build_stream_response_from_generate_outputs(
         generate_think_token_num=generate_think_token_num,
     )
 
-    logging.debug("[DashScGrpc] [%s] generated_ids: %s", request_log_tag, generated_ids)
+    logging.debug(
+        "[DashScGrpc] [%s] generated_ids: %s",
+        request_log_tag,
+        generated_ids if log_input_output else None,
+    )
     logging.debug(
         "[DashScGrpc] [%s] return_input_ids=%s prompt_len=%s is_streaming=%s",
         request_log_tag,
@@ -1530,6 +1592,8 @@ class StreamResponseBuilder:
     __slots__ = (
         "_dash_sc_request_id",
         "_model_name",
+        "_image_tokens",
+        "_prompt_token_fallback",
         "_request_log_tag",
         "_request_input_ids",
         "_return_input_ids",
@@ -1548,6 +1612,7 @@ class StreamResponseBuilder:
         "_template_prompt_tokens",
         "_template_cached_tokens",
         "_template_think_token_num",
+        "_log_input_output",
     )
 
     def __init__(
@@ -1562,9 +1627,18 @@ class StreamResponseBuilder:
         generate_config: Any = None,
         eos_token_id: int | None = None,
         max_token_id: int | None = None,
+        log_input_output: bool = True,
+        image_tokens: int | None = None,
+        prompt_token_fallback: int | None = None,
     ) -> None:
         self._dash_sc_request_id = dash_sc_request_id
         self._model_name = model_name
+        self._image_tokens = image_tokens
+        self._prompt_token_fallback = (
+            len(request_input_ids or [])
+            if prompt_token_fallback is None
+            else prompt_token_fallback
+        )
         self._request_log_tag = request_log_tag
         self._request_input_ids = request_input_ids
         self._return_input_ids = return_input_ids
@@ -1572,6 +1646,7 @@ class StreamResponseBuilder:
         self._generate_config = generate_config
         self._eos_token_id = eos_token_id
         self._max_token_id = max_token_id
+        self._log_input_output = log_input_output
         self._template: predict_v2_pb2.ModelStreamInferResponse | None = None
         self._generated_index = -1
         self._finish_index = -1
@@ -1611,7 +1686,7 @@ class StreamResponseBuilder:
         prompt_tokens = (
             int(aux_info.input_len)
             if aux_info is not None
-            else len(self._request_input_ids or [])
+            else self._prompt_token_fallback
         )
         cached_tokens = int(aux_info.reuse_len) if aux_info is not None else 0
 
@@ -1628,8 +1703,10 @@ class StreamResponseBuilder:
             _append_aux_info_metrics_outputs(
                 infer,
                 out_py,
-                prompt_token_fallback=len(self._request_input_ids or []),
+                prompt_token_fallback=self._prompt_token_fallback,
             )
+            if self._image_tokens is not None:
+                infer.parameters["image_tokens"].int64_param = self._image_tokens
             infer.parameters["incremental_output"].int64_param = (
                 1 if self._is_streaming else 0
             )
@@ -1659,7 +1736,7 @@ class StreamResponseBuilder:
             logging.debug(
                 "[DashScGrpc] [%s] generated_ids: %s",
                 self._request_log_tag,
-                generated_ids,
+                generated_ids if self._log_input_output else None,
             )
             logging.debug(
                 "[DashScGrpc] [%s] return_input_ids=%s prompt_len=%s is_streaming=%s",
@@ -1713,7 +1790,7 @@ class StreamResponseBuilder:
         logging.debug(
             "[DashScGrpc] [%s] generated_ids: %s",
             self._request_log_tag,
-            generated_ids,
+            generated_ids if self._log_input_output else None,
         )
         logging.debug(
             "[DashScGrpc] [%s] return_input_ids=%s prompt_len=%s is_streaming=%s",
@@ -1787,3 +1864,37 @@ def build_dash_error_response(
     infer.parameters["status_name"].string_param = error_spec.status_name
     infer.parameters["status_message"].string_param = status_message
     return resp
+
+
+def parse_v41_image_request(request) -> list[dict[str, str]]:
+    """Extract ordered images from Spectrum's media-only payload."""
+    raw = _parse_optional_parameter_string(request, "payload")
+    try:
+        payload = json.loads(raw) if raw is not None else None
+    except ValueError as error:
+        raise DashScParameterError("invalid V4.1 payload JSON") from error
+    if not isinstance(payload, dict):
+        raise DashScParameterError("V4.1 payload must be a JSON object")
+    input_value = payload.get("input")
+    messages = input_value.get("messages") if isinstance(input_value, dict) else None
+    if not isinstance(messages, list):
+        raise DashScParameterError("V4.1 payload.input.messages must be an array")
+    images = []
+    for message in messages:
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, list):
+            raise DashScParameterError("V4.1 media content must be an array")
+        for item in content:
+            if not isinstance(item, dict):
+                raise DashScParameterError("V4.1 media item must be an object")
+            if "image" in item:
+                url = item["image"]
+            elif item.get("type") == "image_url":
+                source = item.get("image_url")
+                url = source.get("url") if isinstance(source, dict) else None
+            else:
+                raise DashScParameterError("V4.1 payload supports images only")
+            if not isinstance(url, str) or not url:
+                raise DashScParameterError("V4.1 image URL must be non-empty")
+            images.append({"url": url})
+    return images

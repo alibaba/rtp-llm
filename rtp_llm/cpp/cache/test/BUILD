@@ -20,8 +20,6 @@ test_copts = [
 ] + copts()
 
 test_deps = [
-    "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
-    "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
     "//rtp_llm/cpp/config:config_modules",
     "//rtp_llm/cpp/config:model_config",
     "//rtp_llm/cpp/cache",
@@ -29,31 +27,53 @@ test_deps = [
     ":cache_config_test_utils",
     "@com_google_googletest//:gtest",
     "@com_google_googletest//:gtest_main",
-    "@local_config_cuda//cuda:cuda_headers",
-    "@local_config_cuda//cuda:cudart",
-] + torch_deps() + cuda13_torch_link_deps
+] + select({
+    "@//:using_rocm": [
+        "//rtp_llm/models_py/bindings/core:exec_ctx_rocm",
+    ],
+    "//conditions:default": [
+        "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
+        "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ],
+}) + torch_deps() + cuda13_torch_link_deps
 
-block_cache_test_deps = [
-    "//rtp_llm/cpp/testing:device_test_utils",
-    "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
-    "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
-    "//rtp_llm/cpp/config:config_modules",
-    "//rtp_llm/cpp/config:model_config",
-    "//rtp_llm/cpp/cache",
-    "@com_google_googletest//:gtest",
-    "@com_google_googletest//:gtest_main",
-    "@local_config_cuda//cuda:cuda_headers",
-    "@local_config_cuda//cuda:cudart",
-] + torch_deps() + cuda13_torch_link_deps
+cc_library(
+    name = "mock_async_context",
+    hdrs = ["MockAsyncContext.h"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/cache:cache_async_context",
+        "@com_google_googletest//:gtest",
+    ],
+    visibility = ["//visibility:public"],
+)
 
+cc_test(
+    name = "async_context_test",
+    srcs = ["AsyncContextTest.cc"],
+    copts = test_copts,
+    deps = [
+        ":mock_async_context",
+        "//rtp_llm/cpp/cache:cache_async_context",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+    env = {},
+    exec_properties = {"gpu": "H20_CU13"},
+    tags = ["H20_CU13"],
+)
 
 cc_library(
     name = "cache_config_test_utils",
     hdrs = [
         "CacheConfigTestUtils.h",
+        "TestLayoutSpec.h",
     ],
     copts = test_copts,
     deps = [
+        "//rtp_llm/cpp/cache:cache_config",
         "//rtp_llm/cpp/cache:cache_types",
         "//rtp_llm/cpp/config:model_config",
     ],
@@ -89,7 +109,9 @@ cc_test(
     srcs = ["KVCacheLayoutViewTest.cc"],
     copts = test_copts,
     deps = [
+        "//rtp_llm/cpp/cache:cp_slot_mapper",
         "//rtp_llm/cpp/cache:cache_types",
+        "//rtp_llm/cpp/cache:kv_cache_specs",
         "//rtp_llm/models_py/bindings:op_defs",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
@@ -149,7 +171,7 @@ cc_binary(
 cc_library(
     name = "block_pool_test_helper",
     hdrs = [
-        "BlockPoolTestHelper.h"
+        "BlockPoolTestHelper.h",
     ],
     srcs = [
     ],
@@ -159,28 +181,250 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
-cc_test(
-    name = "block_cache_test",
-    srcs = [
-        "BlockCacheTest.cc",
+cc_library(
+    name = "block_tree_cache_allocator_test_helper",
+    hdrs = [
+        "BlockTreeCacheAllocatorTestHelper.h",
     ],
-    data = [],
     copts = test_copts,
-    deps = block_cache_test_deps,
-    env = {},
-    exec_properties = {'gpu':'A10'},
+    deps = [
+        "//rtp_llm/cpp/cache/block_tree_cache",
+        "//rtp_llm/cpp/cache/block_tree_cache/test:block_tree_cache_test_utils",
+    ],
 )
 
 cc_test(
-    name = "shared_block_cache_test",
+    name = "block_pool_zero_init_test",
+    srcs = ["BlockPoolZeroInitTest.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/cache/block_tree_cache:device_block_pool",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps(),
+    tags = ["rocm"],
+    exec_properties = {"gpu": "MI308X-ROCM7"},
+)
+
+cc_test(
+    name = "block_pool_device_malloc_test",
     srcs = [
-        "SharedBlockCacheTest.cc",
+        "BlockPoolDeviceMallocTest.cc",
+    ],
+    copts = test_copts,
+    deps = [
+        ":cache_config_test_utils",
+        "//rtp_llm/cpp/cache:device_block_pool_config_helper",
+        "//rtp_llm/cpp/cache/block_tree_cache:device_block_pool",
+        "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps() + select({
+        "@//:using_cuda": [
+            "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
+            "@local_config_cuda//cuda:cuda_headers",
+            "@local_config_cuda//cuda:cudart",
+        ],
+        "@//:using_rocm": [
+            "//rtp_llm/models_py/bindings/core:exec_ctx_rocm",
+            "@local_config_rocm//rocm:hip",
+            "@local_config_rocm//rocm:rocm_headers",
+        ],
+        "//conditions:default": [],
+    }),
+    exec_properties = select({
+        "@//:using_cuda": {
+            "gpu": "H20_CU13",
+            "gpu_count": "2",
+        },
+        "@//:using_rocm": {
+            "gpu": "MI308X-ROCM7",
+            "gpu_count": "2",
+        },
+        "//conditions:default": {},
+    }),
+    env = {
+        "GPU_COUNT": "2",
+    },
+    tags = ["H20_CU13"],
+)
+
+cc_test(
+    name = "memory_layout_strategy_test",
+    srcs = [
+        "MemoryLayoutStrategyTest.cc",
     ],
     data = [],
     copts = test_copts,
-    deps = block_cache_test_deps,
+    deps = test_deps,
     env = {},
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
+cc_test(
+    name = "single_type_kv_cache_allocator_test",
+    srcs = [
+        "SingleTypeCoordinatorCacheManagerTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = test_deps + [
+        ":block_pool_test_helper",
+        ":block_tree_cache_allocator_test_helper",
+        "//rtp_llm/cpp/cache/block_tree_cache",
+        "//rtp_llm/cpp/cache/test/mock:mock_allocator_lib",
+    ],
+    env = {},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
+cc_test(
+    name = "kv_cache_manager_test",
+    srcs = [
+        "KVCacheManagerTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = test_deps + [
+        ":block_pool_test_helper",
+        "//rtp_llm/cpp/cache/block_tree_cache/test:block_tree_cache_test_utils",
+        "//rtp_llm/cpp/testing:device_test_utils",
+    ],
+    env = {},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
+cc_test(
+    name = "kv_cache_manager_with_tier_cache_test",
+    srcs = [
+        "KVCacheManagerWithTierCacheBasicTest.cc",
+        "KVCacheManagerWithTierCacheCapacityTest.cc",
+        "KVCacheManagerWithTierCacheComplexTopologyTest.cc",
+        "KVCacheManagerWithTierCacheLoadFailureTest.cc",
+        "KVCacheManagerWithTierCacheTestBase.cc",
+        "KVCacheManagerWithTierCacheTestBase.h",
+        "KVCacheManagerWithTierCacheWatermarkTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = test_deps + [
+        ":block_pool_test_helper",
+        "//rtp_llm/cpp/cache/block_tree_cache/test:block_tree_cache_test_utils",
+        "//rtp_llm/cpp/engine_base/schedulers",
+        "//rtp_llm/cpp/normal_engine",
+    ],
+    env = {},
+    exec_properties = {"gpu": "H20_CU13"},
+    tags = ["H20_CU13"],
+)
+
+cc_test(
+    name = "kv_cache_manager_cp_test",
+    srcs = [
+        "KVCacheManagerCPSlotMapperTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = test_deps + [
+        ":block_pool_test_helper",
+    ],
+    env = {},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
+cc_test(
+    name = "hybrid_kv_cache_allocator_test",
+    srcs = [
+        "HybridTypeCoordinatorCacheManagerTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = test_deps + [
+        ":block_pool_test_helper",
+        ":block_tree_cache_allocator_test_helper",
+        "//rtp_llm/cpp/cache/block_tree_cache",
+        "//rtp_llm/cpp/cache/block_tree_cache/test:block_tree_cache_test_utils",
+    ],
+    env = {},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
+cc_test(
+    name = "hybrid_kv_cache_allocator_cp_shard_test",
+    srcs = [
+        "HybridCoordinatorCacheManagerCPShardTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = test_deps + [
+        ":block_pool_test_helper",
+        ":block_tree_cache_allocator_test_helper",
+        "//rtp_llm/cpp/cache/block_tree_cache",
+    ],
+    env = {},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
+cc_test(
+    name = "hybrid_pool_kv_cache_allocator_test",
+    srcs = [
+        "HybridPoolCoordinatorCacheManagerTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = test_deps + [
+        ":block_pool_test_helper",
+        ":block_tree_cache_allocator_test_helper",
+        "//rtp_llm/cpp/cache/block_tree_cache",
+        "//rtp_llm/cpp/cache/block_tree_cache/test:block_tree_cache_test_utils",
+    ],
+    env = {},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
+cc_test(
+    name = "dsv4_cache_test",
+    srcs = [
+        "DSV4CacheTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = test_deps + [
+        ":block_pool_test_helper",
+        ":block_tree_cache_allocator_test_helper",
+        "//rtp_llm/cpp/cache:kv_cache_transfer_planner",
+        "//rtp_llm/cpp/cache/block_tree_cache",
+    ],
+    env = {},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
+cc_test(
+    name = "kv_cache_resource_test",
+    srcs = [
+        "KVCacheResourceTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/cache:batch_kv_cache_resource",
+        ":cache_config_test_utils",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+    env = {},
+    # cache_config_test_utils -> cache_types -> torch_deps() keeps libtorch_cuda
+    # in the link closure, so like its sibling tests this one needs a GPU node.
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 cc_test(
@@ -199,205 +443,27 @@ cc_test(
 )
 
 cc_test(
-    name = "block_pool_test",
-    srcs = [
-        "BlockPoolTest.cc",
-    ],
-    data = [],
-    copts = test_copts,
-    deps = test_deps + [
-        ":block_pool_test_helper",
-    ],
-    env = {},
-    exec_properties = {'gpu':'A10'},
-)
-
-cc_test(
-    name = "memory_layout_strategy_test",
-    srcs = [
-        "MemoryLayoutStrategyTest.cc",
-    ],
-    data = [],
-    copts = test_copts,
-    deps = test_deps,
-    env = {},
-    exec_properties = {'gpu':'A10'},
-)
-
-cc_test(
-    name = "full_kv_cache_group_test",
-    srcs = [
-        "FullKVCacheGroupTest.cc",
-    ],
-    data = [],
-    copts = test_copts,
-    deps = test_deps + [
-        ":block_pool_test_helper",
-    ],
-    env = {},
-    exec_properties = {'gpu':'A10'},
-)
-
-cc_test(
-    name = "single_type_kv_cache_allocator_test",
-    srcs = [
-        "SingleTypeKVCacheAllocatorTest.cc",
-    ],
-    data = [],
-    copts = test_copts,
-    deps = test_deps + [
-        ":block_pool_test_helper",
-        "//rtp_llm/cpp/cache/test/mock:mock_allocator_lib",
-    ],
-    env = {},
-    exec_properties = {'gpu':'A10'},
-)
-
-cc_test(
-    name = "kv_cache_manager_test",
-    srcs = [
-        "KVCacheManagerTest.cc",
-    ],
-    data = [],
-    copts = test_copts,
-    deps = test_deps + [
-        ":block_pool_test_helper",
-        "//rtp_llm/cpp/cache/test/mock:mock_allocator_lib",
-        "//rtp_llm/cpp/cache/connector/test/mock:connector_mock_files_lib",
-        "//rtp_llm/cpp/cache/connector/memory:memory_connector",
-    ],
-    env = {},
-    exec_properties = {'gpu':'A10'},
-)
-
-cc_test(
-    name = "kv_cache_manager_cp_test",
-    srcs = [
-        "KVCacheManagerCPSlotMapperTest.cc",
-    ],
-    data = [],
-    copts = test_copts,
-    deps = test_deps + [
-        ":block_pool_test_helper",
-        "//rtp_llm/cpp/cache/connector/test/mock:connector_mock_files_lib",
-        "//rtp_llm/cpp/cache/connector/memory:memory_connector",
-    ],
-    env = {},
-    exec_properties = {'gpu':'A10'},
-)
-
-cc_test(
-    name = "linear_kv_cache_group_test",
-    srcs = [
-        "LinearKVCacheGroupTest.cc",
-    ],
-    data = [],
-    copts = test_copts,
-    deps = test_deps + [
-        ":block_pool_test_helper",
-    ],
-    env = {},
-    exec_properties = {'gpu':'A10'},
-)
-
-cc_test(
-    name = "hybrid_kv_cache_allocator_test",
-    srcs = [
-        "HybridTypeKVCacheAllocatorTest.cc",
-    ],
-    data = [],
-    copts = test_copts,
-    deps = test_deps + [
-        ":block_pool_test_helper",
-    ],
-    env = {},
-    exec_properties = {'gpu':'A10'},
-)
-
-cc_test(
-    name = "hybrid_kv_cache_allocator_cp_shard_test",
-    srcs = [
-        "HybridKVCacheAllocatorCPShardTest.cc",
-    ],
-    data = [],
-    copts = test_copts,
-    deps = test_deps + [
-        ":block_pool_test_helper",
-    ],
-    env = {},
-    exec_properties = {'gpu':'A10'},
-)
-
-cc_test(
-    name = "hybrid_pool_kv_cache_allocator_test",
-    srcs = [
-        "HybridPoolKVCacheAllocatorTest.cc",
-    ],
-    data = [],
-    copts = test_copts,
-    deps = test_deps + [
-        ":block_pool_test_helper",
-    ],
-    env = {},
-    exec_properties = {'gpu':'A10'},
-)
-
-cc_test(
-    name = "swa_kv_cache_group_test",
-    srcs = [
-        "SWAKVCacheGroupTest.cc",
-    ],
-    data = [],
-    copts = test_copts,
-    deps = test_deps + [
-        ":block_pool_test_helper",
-    ],
-    env = {},
-    exec_properties = {'gpu':'A10'},
-)
-
-cc_test(
-    name = "swa_kv_cache_group_malloc_range_test",
-    srcs = [
-        "SWAKVCacheGroupMallocRangeTest.cc",
-    ],
-    data = [],
-    copts = test_copts,
+    name = "coordinator_cache_manager_atomic_update_test",
+    srcs = ["CoordinatorCacheManagerAtomicUpdateTest.cc"],
+    copts = copts(),
     deps = [
-        "//rtp_llm/cpp/cache:kv_cache_group",
-        "@com_google_googletest//:gtest",
+        ":block_tree_cache_allocator_test_helper",
+        ":cache_config_test_utils",
+        "//rtp_llm/cpp/cache:batch_kv_cache_resource",
+        "//rtp_llm/cpp/cache:coordinator_cache_manager",
         "@com_google_googletest//:gtest_main",
-    ] + torch_deps() + cuda13_torch_link_deps,
+    ] + torch_deps() + select({
+        "@//:using_rocm": [
+            "//rtp_llm/models_py/bindings/core:exec_ctx_rocm",
+        ],
+        "//conditions:default": [
+            "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
+            "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
+        ],
+    }) + cuda13_torch_link_deps,
     env = {
-        "RTP_LLM_PIN_HOST_BLOCK_POOL": "0",
+        "LOG_LEVEL": "ERROR",
     },
-    exec_properties = {'gpu':'A10'},
-)
-
-cc_test(
-    name = "dsv4_cache_test",
-    srcs = [
-        "DSV4CacheTest.cc",
-    ],
-    data = [],
-    copts = test_copts,
-    deps = test_deps + [
-        ":block_pool_test_helper",
-        "//rtp_llm/cpp/cache:kv_cache_transfer_planner",
-        "//rtp_llm/cpp/cache/connector/p2p:layer_block_converter",
-    ],
-    env = {},
-    exec_properties = {'gpu':'A10'},
-)
-
-cc_test(
-    name = "kv_cache_resource_test",
-    srcs = [
-        "KVCacheResourceTest.cc",
-    ],
-    data = [],
-    copts = test_copts,
-    deps = test_deps,
-    env = {},
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )

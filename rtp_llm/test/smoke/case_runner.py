@@ -30,10 +30,7 @@ from smoke.cache_status_comparer import CacheStatusComparer
 from smoke.classifier_comparer import ClassifierComparer
 from smoke.common_def import QueryStatus, SmokeException, Tracer
 from smoke.dash_grpc_comparer import DASH_ENDPOINT, DashGrpcComparer
-from smoke.dash_sc_grpc_comparer import (
-    DASH_SC_GRPC_ENDPOINT,
-    DashScGrpcComparer,
-)
+from smoke.dash_sc_grpc_comparer import DASH_SC_GRPC_ENDPOINT, DashScGrpcComparer
 from smoke.embedding_comparer import EmbeddingComparer
 from smoke.gpu_diagnostics import (
     ExceptionType,
@@ -279,11 +276,21 @@ class CaseRunner(object):
         return TaskStates()
 
     def _start_remote_kvcm_server(self) -> Optional[RemoteKVCMServer]:
-        server_path = os.path.join(
-            os.environ["TEST_SRCDIR"],
-            os.environ["TEST_WORKSPACE"],
-            "external/remote_kv_cache_manager_server",
+        runfiles_root = os.path.join(
+            os.environ["TEST_SRCDIR"], os.environ["TEST_WORKSPACE"]
         )
+        server_path = os.path.join(
+            runfiles_root,
+            "3rdparty",
+            "remote_kv_cache_manager",
+            "bin",
+            "kv_cache_manager_bin",
+        )
+        if not os.path.isfile(server_path):
+            raise FileNotFoundError(
+                "kv_cache_manager_bin is absent from Bazel runfiles"
+            )
+        server_path = os.path.dirname(os.path.dirname(server_path))
         kvcm_src_logs_path = os.path.join(os.environ["TEST_SRCDIR"], "rtp_llm/logs")
         bazel_outputs_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", os.getcwd())
         kvcm_dst_logs_path = os.path.join(bazel_outputs_dir, "kvcm_logs")
@@ -374,8 +381,7 @@ class CaseRunner(object):
             ["H", "O", "C"],
         ),
         (
-            "List the months of summer in the Northern Hemisphere, "
-            "one per line.",
+            "List the months of summer in the Northern Hemisphere, " "one per line.",
             ["June", "August"],
         ),
         (
@@ -938,7 +944,7 @@ class CaseRunner(object):
         for env_str in env_list:
             k, v = env_str.split("=", 1)
             v = self._expand_env_value(v)
-            if k == "MEMORY_CACHE_DISK_PATHS":
+            if k == "DISK_CACHE_PATHS":
                 self._prepare_memory_cache_disk_paths(v)
             env_dict.update({k: v})
             logging.info(f"env dict update {k}:{v}")
@@ -970,7 +976,7 @@ class CaseRunner(object):
                     os.path.commonpath([abs_path, root]) == root for root in safe_roots
                 ):
                     raise RuntimeError(
-                        f"refuse to clean MEMORY_CACHE_DISK_PATHS outside test dirs: {abs_path}"
+                        f"refuse to clean DISK_CACHE_PATHS outside test dirs: {abs_path}"
                     )
                 shutil.rmtree(abs_path)
                 logging.info("cleaned memory cache disk path: %s", abs_path)
@@ -1085,6 +1091,10 @@ class CaseRunner(object):
                     task_states.err_msg = f"{config['role_name']} server start cancelled because another server failed"
                     results[config["role_name"]] = (None, task_states)
                 except Exception as e:
+                    logging.exception(
+                        "Unexpected exception starting server %s",
+                        config["role_name"],
+                    )
                     task_states = TaskStates()
                     task_states.ret = False
                     task_states.err_msg = (

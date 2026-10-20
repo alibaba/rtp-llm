@@ -27,4 +27,20 @@ public class DebugInfo {
 
     @JsonProperty("hit_cache_len")
     private long hitCacheLen;
+
+    /** Return an independent copy, or null when the source is null. */
+    public static DebugInfo copyOf(DebugInfo source) {
+        if (source == null) {
+            return null;
+        }
+        DebugInfo copy = new DebugInfo();
+        copy.runningBatchSize = source.runningBatchSize;
+        copy.queueSize = source.queueSize;
+        copy.waitingTimeMs = source.waitingTimeMs;
+        copy.availableKvCacheLen = source.availableKvCacheLen;
+        copy.estimateTtftMs = source.estimateTtftMs;
+        copy.estimateTpotMs = source.estimateTpotMs;
+        copy.hitCacheLen = source.hitCacheLen;
+        return copy;
+    }
 }

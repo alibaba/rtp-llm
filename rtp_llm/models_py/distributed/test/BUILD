@@ -5,11 +5,17 @@ py_test (
         "//rtp_llm:config",
         "//rtp_llm:testlib",
         "//rtp_llm/models_py:modules",
-        "//rtp_llm/models_py/distributed:collective_torch"
+        "//rtp_llm/models_py/distributed:collective_torch",
     ],
     env = {"GPU_COUNT": "2"},
-    tags = ["open_skip", "H20"],
-    exec_properties = {'gpu':'H20', 'gpu_count':'2'},
+    tags = [
+        "H20_CU13",
+        "open_skip",
+    ],
+    exec_properties = {
+        "gpu": "H20_CU13",
+        "gpu_count": "2",
+    },
 )
 
 py_test (
@@ -23,18 +29,21 @@ py_test (
     ],
     timeout = "eternal",
     tags = ["rocm"],
-    exec_properties = {'gpu':'MI308X-ROCM7', 'gpu_count':'8'},
+    exec_properties = {
+        "gpu": "MI308X-ROCM7",
+        "gpu_count": "8",
+    },
 )
 
 # Needs 4 *visible* devices, not 4 devices that can talk directly: every
 # collective here goes through NCCL, and the symm_mem fast path in
 # collective_torch.all_reduce/all_gather is never eligible because this test
 # only ever builds float32 tensors while symm_mem.py:147-149 requires bfloat16.
-# Verified on sm86 with peer access unavailable (8x RTX 3090, CUDA_VISIBLE_DEVICES=0-3):
-# 4 tests run, 0 skipped, OK -- NCCL falls back to its shared-memory transport.
-# The A10 executor presents 4 visible GPUs per node, so gpu_count 4 is
-# satisfiable but occupies a whole node. Verification records live with the
-# internal CI evidence, not here.
+# Verified on L20_CU13 (sm89): 4 tests run, 0 skipped, OK -- NCCL falls back
+# to its shared-memory transport when peer access is unavailable (originally
+# proven on sm86 hardware without peer access). The L20 executor presents 8
+# GPUs per node, so gpu_count 4 is satisfiable. Verification records live
+# with the internal CI evidence, not here.
 py_test(
     name = "collective_torch_test",
     srcs = ["collective_torch_test.py"],
@@ -44,13 +53,29 @@ py_test(
     ],
     timeout = 'moderate',
     env = {"GPU_COUNT": "4"},
-    tags = ["open_skip"],
-    exec_properties = {'gpu':'A10', 'gpu_count':'4'},
+    tags = [
+        "L20_CU13",
+        "open_skip",
+    ],
+    exec_properties = {
+        "gpu": "L20_CU13",
+        "gpu_count": "4",
+    },
 )
 
 py_test(
     name = "collective_torch_hipgraph_unit_test",
     srcs = ["collective_torch_hipgraph_unit_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py/distributed:collective_torch",
+    ],
+    timeout = "short",
+)
+
+py_test(
+    name = "collective_torch_comm_ops_unit_test",
+    srcs = ["collective_torch_comm_ops_unit_test.py"],
     deps = [
         "//rtp_llm:testlib",
         "//rtp_llm/models_py/distributed:collective_torch",
@@ -72,16 +97,61 @@ py_test(
 # no NVLink and the peer-access/native-peer-atomic status of the A10 CI pool
 # could not be established, so moving this is not yet safe.
 py_test(
+    name = "symm_mem_unit_test",
+    srcs = ["symm_mem_unit_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py/distributed:collective_torch",
+    ],
+    timeout = "short",
+)
+
+py_test(
+    name = "flashinfer_all_reduce_unit_test",
+    srcs = ["flashinfer_all_reduce_unit_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py/distributed:collective_torch",
+    ],
+    timeout = "short",
+)
+
+py_test(
+    name = "flashinfer_all_reduce_integration_test",
+    srcs = ["flashinfer_all_reduce_integration_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py/distributed:collective_torch",
+    ],
+    env = {"GPU_COUNT": "2"},
+    exec_properties = {
+        "gpu": "H20_CU13",
+        "gpu_count": "2",
+    },
+    tags = [
+        "H20_CU13",
+        "open_skip",
+    ],
+    timeout = "moderate",
+)
+
+py_test(
    name = "user_buffers_test",
    srcs = ["user_buffers_test.py"],
-   deps = [
-       "//rtp_llm:testlib",
-       "//rtp_llm/models_py/distributed:user_buffers",
-       "//rtp_llm/models_py/distributed:collective_torch"
-   ],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py/distributed:collective_torch",
+        "//rtp_llm/models_py/distributed:user_buffers",
+    ],
    env = {"GPU_COUNT": "4"},
-   tags = ["open_skip", "H20"],
-   exec_properties = {'gpu':'H20', 'gpu_count':'4'},
+    tags = [
+        "H20_CU13",
+        "open_skip",
+    ],
+    exec_properties = {
+        "gpu": "H20_CU13",
+        "gpu_count": "4",
+    },
 )
 
 # Needs 4 visible devices, no interconnect: the roundtrip is plain NCCL
@@ -100,6 +170,12 @@ py_test(
     ],
     timeout = 'moderate',
     env = {"GPU_COUNT": "4"},
-    tags = ["open_skip"],
-    exec_properties = {'gpu':'A10', 'gpu_count':'4'},
+    tags = [
+        "L20_CU13",
+        "open_skip",
+    ],
+    exec_properties = {
+        "gpu": "L20_CU13",
+        "gpu_count": "4",
+    },
 )

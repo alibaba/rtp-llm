@@ -1,0 +1,279 @@
+{
+  "short_uncached": {
+    "query": {
+      "prompt": "Write the numbers from one to twenty, separated by commas: one, two,",
+      "generate_config": {
+        "max_new_tokens": 24,
+        "top_k": 1,
+        "top_p": 1.0,
+        "random_seed": 42,
+        "reuse_cache": false,
+        "can_use_pd_separation": true,
+        "return_input_ids": true,
+        "return_output_ids": true,
+        "return_cum_log_probs": false,
+        "aux_info": true
+      }
+    },
+    "output_ids": [
+      [
+        2038,
+        14,
+        2689,
+        14,
+        3818,
+        14,
+        4104,
+        14,
+        6170,
+        14,
+        4944,
+        14,
+        7341,
+        14,
+        5147,
+        14,
+        30116,
+        14,
+        20626,
+        14,
+        35953,
+        14,
+        37181,
+        14
+      ]
+    ],
+    "response": " three, four, five, six, seven, eight, nine, ten, eleven, twelve, thirteen, fourteen,",
+    "input_len": 16,
+    "prefill_reuse_len": 0
+  },
+  "short_repeat_uncached": {
+    "query": {
+      "prompt": "Write the numbers from one to twenty, separated by commas: one, two,",
+      "generate_config": {
+        "max_new_tokens": 24,
+        "top_k": 1,
+        "top_p": 1.0,
+        "random_seed": 42,
+        "reuse_cache": false,
+        "can_use_pd_separation": true,
+        "return_input_ids": true,
+        "return_output_ids": true,
+        "return_cum_log_probs": false,
+        "aux_info": true
+      }
+    },
+    "output_ids": [
+      [
+        2038,
+        14,
+        2689,
+        14,
+        3818,
+        14,
+        4104,
+        14,
+        6170,
+        14,
+        4944,
+        14,
+        7341,
+        14,
+        5147,
+        14,
+        30116,
+        14,
+        20626,
+        14,
+        35953,
+        14,
+        37181,
+        14
+      ]
+    ],
+    "response": " three, four, five, six, seven, eight, nine, ten, eleven, twelve, thirteen, fourteen,",
+    "input_len": 16,
+    "prefill_reuse_len": 0
+  },
+  "long_uncached": {
+    "query": {
+      "prompt": "The following notebook records a journey.\nNotebook entry 0: the archive stores books, maps, and letters.\nNotebook entry 1: the archive stores books, maps, and letters.\nNotebook entry 2: the archive stores books, maps, and letters.\nNotebook entry 3: the archive stores books, maps, and letters.\nNotebook entry 4: the archive stores books, maps, and letters.\nNotebook entry 5: the archive stores books, maps, and letters.\nNotebook entry 6: the archive stores books, maps, and letters.\nNotebook entry 7: the archive stores books, maps, and letters.\nNotebook entry 8: the archive stores books, maps, and letters.\nNotebook entry 9: the archive stores books, maps, and letters.\nNotebook entry 10: the archive stores books, maps, and letters.\nNotebook entry 11: the archive stores books, maps, and letters.\nNotebook entry 12: the archive stores books, maps, and letters.\nNotebook entry 13: the archive stores books, maps, and letters.\nNotebook entry 14: the archive stores books, maps, and letters.\nNotebook entry 15: the archive stores books, maps, and letters.\nNotebook entry 16: the archive stores books, maps, and letters.\nNotebook entry 17: the archive stores books, maps, and letters.\nNotebook entry 18: the archive stores books, maps, and letters.\nNotebook entry 19: the archive stores books, maps, and letters.\nNotebook entry 20: the archive stores books, maps, and letters.\nNotebook entry 21: the archive stores books, maps, and letters.\nNotebook entry 22: the archive stores books, maps, and letters.\nNotebook entry 23: the archive stores books, maps, and letters.\nNotebook entry 24: the archive stores books, maps, and letters.\nNotebook entry 25: the archive stores books, maps, and letters.\nNotebook entry 26: the archive stores books, maps, and letters.\nNotebook entry 27: the archive stores books, maps, and letters.\nNotebook entry 28: the archive stores books, maps, and letters.\nNotebook entry 29: the archive stores books, maps, and letters.\nNotebook entry 30: the archive stores books, maps, and letters.\nNotebook entry 31: the archive stores books, maps, and letters.\nNotebook entry 32: the archive stores books, maps, and letters.\nNotebook entry 33: the archive stores books, maps, and letters.\nNotebook entry 34: the archive stores books, maps, and letters.\nNotebook entry 35: the archive stores books, maps, and letters.\nNotebook entry 36: the archive stores books, maps, and letters.\nNotebook entry 37: the archive stores books, maps, and letters.\nNotebook entry 38: the archive stores books, maps, and letters.\nNotebook entry 39: the archive stores books, maps, and letters.\nNotebook entry 40: the archive stores books, maps, and letters.\nNotebook entry 41: the archive stores books, maps, and letters.\nNotebook entry 42: the archive stores books, maps, and letters.\nNotebook entry 43: the archive stores books, maps, and letters.\nNotebook entry 44: the archive stores books, maps, and letters.\nNotebook entry 45: the archive stores books, maps, and letters.\nNotebook entry 46: the archive stores books, maps, and letters.\nNotebook entry 47: the archive stores books, maps, and letters.\n\nIn a few words, the journey was",
+      "generate_config": {
+        "max_new_tokens": 24,
+        "top_k": 1,
+        "top_p": 1.0,
+        "random_seed": 42,
+        "reuse_cache": false,
+        "can_use_pd_separation": true,
+        "return_input_ids": true,
+        "return_output_ids": true,
+        "return_cum_log_probs": false,
+        "aux_info": true
+      }
+    },
+    "output_ids": [
+      [
+        1606,
+        305,
+        270,
+        41273,
+        515,
+        3530,
+        294,
+        6394,
+        14,
+        17942,
+        14,
+        305,
+        9263,
+        16,
+        1
+      ]
+    ],
+    "response": " long and the archive was full of books, maps, and letters.",
+    "input_len": 783,
+    "prefill_reuse_len": 0
+  },
+  "long_cache_fill": {
+    "query": {
+      "prompt": "The following notebook records a journey.\nNotebook entry 0: the archive stores books, maps, and letters.\nNotebook entry 1: the archive stores books, maps, and letters.\nNotebook entry 2: the archive stores books, maps, and letters.\nNotebook entry 3: the archive stores books, maps, and letters.\nNotebook entry 4: the archive stores books, maps, and letters.\nNotebook entry 5: the archive stores books, maps, and letters.\nNotebook entry 6: the archive stores books, maps, and letters.\nNotebook entry 7: the archive stores books, maps, and letters.\nNotebook entry 8: the archive stores books, maps, and letters.\nNotebook entry 9: the archive stores books, maps, and letters.\nNotebook entry 10: the archive stores books, maps, and letters.\nNotebook entry 11: the archive stores books, maps, and letters.\nNotebook entry 12: the archive stores books, maps, and letters.\nNotebook entry 13: the archive stores books, maps, and letters.\nNotebook entry 14: the archive stores books, maps, and letters.\nNotebook entry 15: the archive stores books, maps, and letters.\nNotebook entry 16: the archive stores books, maps, and letters.\nNotebook entry 17: the archive stores books, maps, and letters.\nNotebook entry 18: the archive stores books, maps, and letters.\nNotebook entry 19: the archive stores books, maps, and letters.\nNotebook entry 20: the archive stores books, maps, and letters.\nNotebook entry 21: the archive stores books, maps, and letters.\nNotebook entry 22: the archive stores books, maps, and letters.\nNotebook entry 23: the archive stores books, maps, and letters.\nNotebook entry 24: the archive stores books, maps, and letters.\nNotebook entry 25: the archive stores books, maps, and letters.\nNotebook entry 26: the archive stores books, maps, and letters.\nNotebook entry 27: the archive stores books, maps, and letters.\nNotebook entry 28: the archive stores books, maps, and letters.\nNotebook entry 29: the archive stores books, maps, and letters.\nNotebook entry 30: the archive stores books, maps, and letters.\nNotebook entry 31: the archive stores books, maps, and letters.\nNotebook entry 32: the archive stores books, maps, and letters.\nNotebook entry 33: the archive stores books, maps, and letters.\nNotebook entry 34: the archive stores books, maps, and letters.\nNotebook entry 35: the archive stores books, maps, and letters.\nNotebook entry 36: the archive stores books, maps, and letters.\nNotebook entry 37: the archive stores books, maps, and letters.\nNotebook entry 38: the archive stores books, maps, and letters.\nNotebook entry 39: the archive stores books, maps, and letters.\nNotebook entry 40: the archive stores books, maps, and letters.\nNotebook entry 41: the archive stores books, maps, and letters.\nNotebook entry 42: the archive stores books, maps, and letters.\nNotebook entry 43: the archive stores books, maps, and letters.\nNotebook entry 44: the archive stores books, maps, and letters.\nNotebook entry 45: the archive stores books, maps, and letters.\nNotebook entry 46: the archive stores books, maps, and letters.\nNotebook entry 47: the archive stores books, maps, and letters.\n\nIn a few words, the journey was",
+      "generate_config": {
+        "max_new_tokens": 24,
+        "top_k": 1,
+        "top_p": 1.0,
+        "random_seed": 42,
+        "reuse_cache": true,
+        "can_use_pd_separation": true,
+        "return_input_ids": true,
+        "return_output_ids": true,
+        "return_cum_log_probs": false,
+        "aux_info": true
+      }
+    },
+    "output_ids": [
+      [
+        1606,
+        305,
+        270,
+        41273,
+        515,
+        3530,
+        294,
+        6394,
+        14,
+        17942,
+        14,
+        305,
+        9263,
+        16,
+        1
+      ]
+    ],
+    "response": " long and the archive was full of books, maps, and letters.",
+    "input_len": 783,
+    "prefill_reuse_len": 0
+  },
+  "long_cache_hit": {
+    "query": {
+      "prompt": "The following notebook records a journey.\nNotebook entry 0: the archive stores books, maps, and letters.\nNotebook entry 1: the archive stores books, maps, and letters.\nNotebook entry 2: the archive stores books, maps, and letters.\nNotebook entry 3: the archive stores books, maps, and letters.\nNotebook entry 4: the archive stores books, maps, and letters.\nNotebook entry 5: the archive stores books, maps, and letters.\nNotebook entry 6: the archive stores books, maps, and letters.\nNotebook entry 7: the archive stores books, maps, and letters.\nNotebook entry 8: the archive stores books, maps, and letters.\nNotebook entry 9: the archive stores books, maps, and letters.\nNotebook entry 10: the archive stores books, maps, and letters.\nNotebook entry 11: the archive stores books, maps, and letters.\nNotebook entry 12: the archive stores books, maps, and letters.\nNotebook entry 13: the archive stores books, maps, and letters.\nNotebook entry 14: the archive stores books, maps, and letters.\nNotebook entry 15: the archive stores books, maps, and letters.\nNotebook entry 16: the archive stores books, maps, and letters.\nNotebook entry 17: the archive stores books, maps, and letters.\nNotebook entry 18: the archive stores books, maps, and letters.\nNotebook entry 19: the archive stores books, maps, and letters.\nNotebook entry 20: the archive stores books, maps, and letters.\nNotebook entry 21: the archive stores books, maps, and letters.\nNotebook entry 22: the archive stores books, maps, and letters.\nNotebook entry 23: the archive stores books, maps, and letters.\nNotebook entry 24: the archive stores books, maps, and letters.\nNotebook entry 25: the archive stores books, maps, and letters.\nNotebook entry 26: the archive stores books, maps, and letters.\nNotebook entry 27: the archive stores books, maps, and letters.\nNotebook entry 28: the archive stores books, maps, and letters.\nNotebook entry 29: the archive stores books, maps, and letters.\nNotebook entry 30: the archive stores books, maps, and letters.\nNotebook entry 31: the archive stores books, maps, and letters.\nNotebook entry 32: the archive stores books, maps, and letters.\nNotebook entry 33: the archive stores books, maps, and letters.\nNotebook entry 34: the archive stores books, maps, and letters.\nNotebook entry 35: the archive stores books, maps, and letters.\nNotebook entry 36: the archive stores books, maps, and letters.\nNotebook entry 37: the archive stores books, maps, and letters.\nNotebook entry 38: the archive stores books, maps, and letters.\nNotebook entry 39: the archive stores books, maps, and letters.\nNotebook entry 40: the archive stores books, maps, and letters.\nNotebook entry 41: the archive stores books, maps, and letters.\nNotebook entry 42: the archive stores books, maps, and letters.\nNotebook entry 43: the archive stores books, maps, and letters.\nNotebook entry 44: the archive stores books, maps, and letters.\nNotebook entry 45: the archive stores books, maps, and letters.\nNotebook entry 46: the archive stores books, maps, and letters.\nNotebook entry 47: the archive stores books, maps, and letters.\n\nIn a few words, the journey was",
+      "generate_config": {
+        "max_new_tokens": 24,
+        "top_k": 1,
+        "top_p": 1.0,
+        "random_seed": 42,
+        "reuse_cache": true,
+        "can_use_pd_separation": true,
+        "return_input_ids": true,
+        "return_output_ids": true,
+        "return_cum_log_probs": false,
+        "aux_info": true
+      }
+    },
+    "output_ids": [
+      [
+        1606,
+        305,
+        270,
+        41273,
+        515,
+        3530,
+        16,
+        1
+      ]
+    ],
+    "response": " long and the archive was full.",
+    "input_len": 783,
+    "prefill_reuse_len": 512
+  },
+  "long_second_cache_hit": {
+    "query": {
+      "prompt": "The following notebook records a journey.\nNotebook entry 0: the archive stores books, maps, and letters.\nNotebook entry 1: the archive stores books, maps, and letters.\nNotebook entry 2: the archive stores books, maps, and letters.\nNotebook entry 3: the archive stores books, maps, and letters.\nNotebook entry 4: the archive stores books, maps, and letters.\nNotebook entry 5: the archive stores books, maps, and letters.\nNotebook entry 6: the archive stores books, maps, and letters.\nNotebook entry 7: the archive stores books, maps, and letters.\nNotebook entry 8: the archive stores books, maps, and letters.\nNotebook entry 9: the archive stores books, maps, and letters.\nNotebook entry 10: the archive stores books, maps, and letters.\nNotebook entry 11: the archive stores books, maps, and letters.\nNotebook entry 12: the archive stores books, maps, and letters.\nNotebook entry 13: the archive stores books, maps, and letters.\nNotebook entry 14: the archive stores books, maps, and letters.\nNotebook entry 15: the archive stores books, maps, and letters.\nNotebook entry 16: the archive stores books, maps, and letters.\nNotebook entry 17: the archive stores books, maps, and letters.\nNotebook entry 18: the archive stores books, maps, and letters.\nNotebook entry 19: the archive stores books, maps, and letters.\nNotebook entry 20: the archive stores books, maps, and letters.\nNotebook entry 21: the archive stores books, maps, and letters.\nNotebook entry 22: the archive stores books, maps, and letters.\nNotebook entry 23: the archive stores books, maps, and letters.\nNotebook entry 24: the archive stores books, maps, and letters.\nNotebook entry 25: the archive stores books, maps, and letters.\nNotebook entry 26: the archive stores books, maps, and letters.\nNotebook entry 27: the archive stores books, maps, and letters.\nNotebook entry 28: the archive stores books, maps, and letters.\nNotebook entry 29: the archive stores books, maps, and letters.\nNotebook entry 30: the archive stores books, maps, and letters.\nNotebook entry 31: the archive stores books, maps, and letters.\nNotebook entry 32: the archive stores books, maps, and letters.\nNotebook entry 33: the archive stores books, maps, and letters.\nNotebook entry 34: the archive stores books, maps, and letters.\nNotebook entry 35: the archive stores books, maps, and letters.\nNotebook entry 36: the archive stores books, maps, and letters.\nNotebook entry 37: the archive stores books, maps, and letters.\nNotebook entry 38: the archive stores books, maps, and letters.\nNotebook entry 39: the archive stores books, maps, and letters.\nNotebook entry 40: the archive stores books, maps, and letters.\nNotebook entry 41: the archive stores books, maps, and letters.\nNotebook entry 42: the archive stores books, maps, and letters.\nNotebook entry 43: the archive stores books, maps, and letters.\nNotebook entry 44: the archive stores books, maps, and letters.\nNotebook entry 45: the archive stores books, maps, and letters.\nNotebook entry 46: the archive stores books, maps, and letters.\nNotebook entry 47: the archive stores books, maps, and letters.\n\nIn a few words, the journey was",
+      "generate_config": {
+        "max_new_tokens": 24,
+        "top_k": 1,
+        "top_p": 1.0,
+        "random_seed": 42,
+        "reuse_cache": true,
+        "can_use_pd_separation": true,
+        "return_input_ids": true,
+        "return_output_ids": true,
+        "return_cum_log_probs": false,
+        "aux_info": true
+      }
+    },
+    "output_ids": [
+      [
+        1606,
+        305,
+        270,
+        41273,
+        515,
+        3530,
+        16,
+        1
+      ]
+    ],
+    "response": " long and the archive was full.",
+    "input_len": 783,
+    "prefill_reuse_len": 512
+  },
+  "populated_cache_bypass": {
+    "query": {
+      "prompt": "The following notebook records a journey.\nNotebook entry 0: the archive stores books, maps, and letters.\nNotebook entry 1: the archive stores books, maps, and letters.\nNotebook entry 2: the archive stores books, maps, and letters.\nNotebook entry 3: the archive stores books, maps, and letters.\nNotebook entry 4: the archive stores books, maps, and letters.\nNotebook entry 5: the archive stores books, maps, and letters.\nNotebook entry 6: the archive stores books, maps, and letters.\nNotebook entry 7: the archive stores books, maps, and letters.\nNotebook entry 8: the archive stores books, maps, and letters.\nNotebook entry 9: the archive stores books, maps, and letters.\nNotebook entry 10: the archive stores books, maps, and letters.\nNotebook entry 11: the archive stores books, maps, and letters.\nNotebook entry 12: the archive stores books, maps, and letters.\nNotebook entry 13: the archive stores books, maps, and letters.\nNotebook entry 14: the archive stores books, maps, and letters.\nNotebook entry 15: the archive stores books, maps, and letters.\nNotebook entry 16: the archive stores books, maps, and letters.\nNotebook entry 17: the archive stores books, maps, and letters.\nNotebook entry 18: the archive stores books, maps, and letters.\nNotebook entry 19: the archive stores books, maps, and letters.\nNotebook entry 20: the archive stores books, maps, and letters.\nNotebook entry 21: the archive stores books, maps, and letters.\nNotebook entry 22: the archive stores books, maps, and letters.\nNotebook entry 23: the archive stores books, maps, and letters.\nNotebook entry 24: the archive stores books, maps, and letters.\nNotebook entry 25: the archive stores books, maps, and letters.\nNotebook entry 26: the archive stores books, maps, and letters.\nNotebook entry 27: the archive stores books, maps, and letters.\nNotebook entry 28: the archive stores books, maps, and letters.\nNotebook entry 29: the archive stores books, maps, and letters.\nNotebook entry 30: the archive stores books, maps, and letters.\nNotebook entry 31: the archive stores books, maps, and letters.\nNotebook entry 32: the archive stores books, maps, and letters.\nNotebook entry 33: the archive stores books, maps, and letters.\nNotebook entry 34: the archive stores books, maps, and letters.\nNotebook entry 35: the archive stores books, maps, and letters.\nNotebook entry 36: the archive stores books, maps, and letters.\nNotebook entry 37: the archive stores books, maps, and letters.\nNotebook entry 38: the archive stores books, maps, and letters.\nNotebook entry 39: the archive stores books, maps, and letters.\nNotebook entry 40: the archive stores books, maps, and letters.\nNotebook entry 41: the archive stores books, maps, and letters.\nNotebook entry 42: the archive stores books, maps, and letters.\nNotebook entry 43: the archive stores books, maps, and letters.\nNotebook entry 44: the archive stores books, maps, and letters.\nNotebook entry 45: the archive stores books, maps, and letters.\nNotebook entry 46: the archive stores books, maps, and letters.\nNotebook entry 47: the archive stores books, maps, and letters.\n\nIn a few words, the journey was",
+      "generate_config": {
+        "max_new_tokens": 24,
+        "top_k": 1,
+        "top_p": 1.0,
+        "random_seed": 42,
+        "reuse_cache": false,
+        "can_use_pd_separation": true,
+        "return_input_ids": true,
+        "return_output_ids": true,
+        "return_cum_log_probs": false,
+        "aux_info": true
+      }
+    },
+    "output_ids": [
+      [
+        1606,
+        305,
+        270,
+        41273,
+        515,
+        3530,
+        294,
+        6394,
+        14,
+        17942,
+        14,
+        305,
+        9263,
+        16,
+        1
+      ]
+    ],
+    "response": " long and the archive was full of books, maps, and letters.",
+    "input_len": 783,
+    "prefill_reuse_len": 0
+  }
+}

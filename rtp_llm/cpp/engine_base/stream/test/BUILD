@@ -1,5 +1,6 @@
 load("//:def.bzl", "cc_test_wrapper", "copts")
 load("@arch_config//:arch_select.bzl", "torch_deps")
+load("//bazel:device_defs.bzl", "device_impl_target")
 
 cc_test = cc_test_wrapper
 
@@ -24,14 +25,12 @@ test_deps = [
     "//rtp_llm/cpp/engine_base:engine_base",
     "//rtp_llm/cpp/engine_base/stream:stream",
     "//rtp_llm/cpp/testing:device_test_utils",
-    "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
     "//rtp_llm/cpp/config:config_modules",
     "//rtp_llm/cpp/cache/test:cache_config_test_utils",
     "//rtp_llm/cpp/cache/test/mock:mock_allocator_lib",
-    "//rtp_llm/cpp/cache/connector/p2p:connector",
-    "//rtp_llm/cpp/cache/connector/test/mock:connector_mock_files_lib",
-    "//rtp_llm/cpp/model_rpc:tensor_pb_convert",
-] + torch_deps() + cuda13_torch_link_deps
+    "//rtp_llm/cpp/cache/test:mock_async_context",
+    "//rtp_llm/cpp/cache/block_tree_cache:block_tree_cache",
+] + torch_deps() + device_impl_target() + cuda13_torch_link_deps
 
 cc_test(
     name = "stream_cache_resource_test",
@@ -44,7 +43,8 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 cc_test(
@@ -58,7 +58,8 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 cc_test(
@@ -69,10 +70,17 @@ cc_test(
     data = [],
     copts = test_copts,
     deps = test_deps,
+    # Count the otherwise non-virtual pending-abort seam without changing the
+    # production API. This is the Itanium ABI symbol for
+    # rtp_llm::KVCacheManager::abortPendingLoad(shared_ptr<AsyncContext> const&).
+    linkopts = [
+        "-Wl,--wrap=_ZN7rtp_llm14KVCacheManager16abortPendingLoadERKSt10shared_ptrINS_12AsyncContextEE",
+    ],
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 cc_test(
@@ -86,7 +94,7 @@ cc_test(
         "//rtp_llm/cpp/cache",
         "//rtp_llm/cpp/disaggregate/cache_store",
         "//rtp_llm/cpp/model_rpc:model_rpc_server",
-        "//rtp_llm/models_py/bindings/common:common",
+        "//rtp_llm/models_py/bindings/common",
         "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
         "@havenask//aios/autil:base64",
         "@havenask//aios/autil:zlib",
@@ -94,5 +102,6 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )

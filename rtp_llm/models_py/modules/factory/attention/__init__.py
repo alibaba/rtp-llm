@@ -36,8 +36,10 @@ if device_type == DeviceType.ROCm:
         AiterPrefillImplAsm,
         AiterPrefillImplNonAsm,
         AiterPrefillImplPaged,
+        AiterPrefillImplTriton,
     )
 
+    PREFILL_MHA_IMPS.append(AiterPrefillImplTriton)
     PREFILL_MHA_IMPS.append(AiterPrefillImplPaged)
     PREFILL_MHA_IMPS.append(AiterPrefillImplAsm)
     PREFILL_MHA_IMPS.append(AiterPrefillImplNonAsm)
@@ -51,6 +53,9 @@ elif device_type == DeviceType.Cuda:
     )
     from rtp_llm.models_py.modules.factory.attention.cuda_headwise_impl.headwise_fp8 import (
         HeadWiseFP8PrefillImpl,
+    )
+    from rtp_llm.models_py.modules.factory.attention.cuda_impl.flash_attn_3 import (
+        FlashAttn3PagedShortGraphImpl,
     )
     from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
         PyFlashinferDecodeImpl,
@@ -67,15 +72,13 @@ elif device_type == DeviceType.Cuda:
         FlashInferTRTLLMPrefillImpl,
         FlashInferTRTLLMSpecDecodeImpl,
     )
-    from rtp_llm.models_py.modules.factory.attention.cuda_impl.xqa import (
-        XQAImpl,
-        get_xqa_impl,
-    )
+    from rtp_llm.models_py.modules.factory.attention.cuda_impl.xqa import XQADecodeImpl
 
     PREFILL_MHA_IMPS.extend(
         [
             HeadWiseFP8PrefillImpl,
             HeadWisePrefillImpl,
+            FlashAttn3PagedShortGraphImpl,
             FlashInferTRTLLMSpecDecodeImpl,
             FlashInferTRTLLMPrefillImpl,
             FlashInferTRTLLMFMHAv2PrefillImpl,
@@ -86,14 +89,7 @@ elif device_type == DeviceType.Cuda:
         ]
     )
     DECODE_MHA_IMPS.extend([FlashInferTRTLLMDecodeImpl])
-    # XQAImpl (TRT GMMA) before XQADecodeImpl (FlashInfer HMMA): different
-    # accumulation paths produce <1 ULP divergence that flips tokens in long
-    # generations.  Existing golden data was generated with XQAImpl, so keep
-    # it higher-priority to avoid unnecessary golden refreshes.
-    DECODE_MHA_IMPS.append(XQAImpl)
-    _xqa_decode_impl = get_xqa_impl()
-    if _xqa_decode_impl is not XQAImpl:
-        DECODE_MHA_IMPS.append(_xqa_decode_impl)
+    DECODE_MHA_IMPS.append(XQADecodeImpl)
     DECODE_MHA_IMPS.append(PyFlashinferDecodeImpl)
 
     from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla_wrapper import (
@@ -129,7 +125,8 @@ elif device_type == DeviceType.Cuda:
     )
 
     PREFILL_MHA_IMPS.append(CPFlashInferImpl)
-else:
+elif device_type == DeviceType.Ppu:
+    # PPU uses the CUDA-flavored attention implementations.
     from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
         PyFlashinferDecodeImpl,
         PyFlashinferHybridPrefillImpl,
@@ -147,6 +144,9 @@ else:
     )
 
     PREFILL_MHA_IMPS.append(CPFlashInferImpl)
+else:
+    # Cpu / Yitian / ArmCpu: no accelerator attention backend to register.
+    pass
 
 # Out-of-tree backends registered a hook before this module existed. Ordering in
 # these lists is priority (earlier wins), so a backend inserts rather than

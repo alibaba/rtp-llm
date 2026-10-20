@@ -29,6 +29,8 @@ public:
         need_post_process_(need_post_process) {}
     explicit EmbeddingRpcServiceImpl() {};
     grpc::Status embedding(grpc::ServerContext* context, const EmbeddingInputPB* request, EmbeddingOutputPB* response);
+    grpc::Status
+    StartProfile(grpc::ServerContext* context, const StartProfileRequestPB* request, EmptyPB* response) override;
     grpc::Status health(grpc::ServerContext* context, const EmbeddingHealthRequestPB* request, EmptyPB* writer);
 
 private:

@@ -136,6 +136,10 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
                 generate_output.loss = loss_;
             }
         }
+        if (custom_output_.defined()) {
+            generate_output.custom_output =
+                custom_output_.size(0) == 1 ? custom_output_ : custom_output_.narrow(0, i, 1);
+        }
 
         if (update_info.prompt_logits.has_value()) {
             generate_output.prompt_logits = update_info.prompt_logits;
@@ -156,12 +160,15 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
             generate_output.aux_info.pd_sep           = queryPdSep();
             generate_output.aux_info.local_reuse_len  = local_reuse_length_;
             generate_output.aux_info.remote_reuse_len = remote_reuse_length_;
-            generate_output.aux_info.memory_reuse_len = memory_reuse_length_;
+            generate_output.aux_info.memory_reuse_len = host_reuse_length_;
+            generate_output.aux_info.disk_reuse_len   = disk_reuse_length_;
 
             generate_output.aux_info.multimodal_lengths = generate_input_->multimodalLengths();
 
             generate_output.aux_info.speculative_draft_rounds            = sp_iter_count_;
             generate_output.aux_info.speculative_accepted_tokens_per_pos = speculative_accepted_tokens_per_pos_;
+            generate_output.aux_info.generation_prefill_cuda_graph_status =
+                generationPrefillCudaGraphStatusString(generation_prefill_cuda_graph_status_);
 
             if (calculateSoftmaxProbs() && softmax_probs_.defined()) {
                 generate_output.aux_info.softmax_probs =
@@ -170,12 +177,14 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
             if (update_info.cum_log_probs.defined()) {
                 generate_output.aux_info.cum_log_probs = cum_log_probs_.narrow(0, i, 1).cpu().clone();
             }
-            if (generate_input_->generate_config->return_all_probs != ReturnAllProbsMode::NONE) {
-                if (!update_info.all_probs.defined()) {
-                    throw std::runtime_error("all_probs is not while generate_config return_all_probs is true");
-                }
-                generate_output.aux_info.all_probs = all_probs_.narrow(0, i, 1).clone();
+        }
+        // all_probs is returned as an independent tensor in FlattenOutputPB.
+        // Disabling auxiliary metadata must not discard this explicit output.
+        if (generate_input_->generate_config->return_all_probs != ReturnAllProbsMode::NONE) {
+            if (!update_info.all_probs.defined()) {
+                throw std::runtime_error("all_probs is not while generate_config return_all_probs is true");
             }
+            generate_output.aux_info.all_probs = all_probs_.narrow(0, i, 1).clone();
         }
         // hidden_states post process
         if (generate_output.finished && generate_input_->generate_config->return_hidden_states
@@ -215,8 +224,20 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     // TODO(xinfei.sxf) consider the case of pd-sep first token finished.
 
+    // Prefill is followed by one or more decode updates. Decode uses the
+    // default NOT_REQUESTED value, so retain the first meaningful prefill
+    // result until the request's final/streaming response is serialized.
+    if (update_info.generation_prefill_cuda_graph_status != GenerationPrefillCudaGraphStatus::NOT_REQUESTED) {
+        generation_prefill_cuda_graph_status_ = update_info.generation_prefill_cuda_graph_status;
+    }
+
     if (update_info.loss.defined()) {
         setLoss(update_info.loss);
+    }
+
+    if (update_info.custom_output.defined()) {
+        // Dispatcher already staged to CPU; clone to release its shared pinned buffer.
+        custom_output_ = update_info.custom_output.clone();
     }
 
     // TODO(wangyin.yx): check behaviour of update_info.hidden_states under mtp/eagle model
@@ -270,7 +291,8 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
         return;
     }
 
-    if (seqLength() - last_output_pos_ == 0) {
+    if (seqLength() - last_output_pos_ == 0
+        && !(update_info.num_new_tokens == 0 && generate_input_->generate_config->isPrefillOnly())) {
         return;
     }
 
@@ -282,5 +304,10 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
     }
 
     last_output_pos_ = seqLength();
+}
+
+GenerationPrefillCudaGraphStatus NormalGenerateStream::generationPrefillCudaGraphStatus() const {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    return generation_prefill_cuda_graph_status_;
 }
 };  // namespace rtp_llm

@@ -1,0 +1,49 @@
+diff --git python/private/pypi/package_annotation.bzl python/private/pypi/package_annotation.bzl
+--- python/private/pypi/package_annotation.bzl
++++ python/private/pypi/package_annotation.bzl
+@@ -20,7 +20,8 @@
+         copy_executables = {},
+         data = [],
+         data_exclude_glob = [],
+-        srcs_exclude_glob = []):
++        srcs_exclude_glob = [],
++        whl_patches = {}):
+     """Annotations to apply to the BUILD file content from package generated from a `pip_repository` rule.
+ 
+     [cf]: https://github.com/bazelbuild/bazel-skylib/blob/main/docs/copy_file_doc.md
+@@ -36,6 +37,9 @@
+             `py_library` target.
+         srcs_exclude_glob (list, optional): A list of labels to add as `srcs` to the generated `py_library` target.
+ 
++        whl_patches (dict, optional): Wheel patch labels mapped to JSON with
++            `whls` and `patch_strip`, as accepted by `whl_library`.
++
+     Returns:
+         str: A json encoded string of the provided content.
+     """
+@@ -46,4 +50,5 @@
+         data = data,
+         data_exclude_glob = data_exclude_glob,
+         srcs_exclude_glob = srcs_exclude_glob,
++        whl_patches = whl_patches,
+     ))
+diff --git python/private/pypi/whl_library.bzl python/private/pypi/whl_library.bzl
+--- python/private/pypi/whl_library.bzl
++++ python/private/pypi/whl_library.bzl
+@@ -304,9 +304,14 @@
+         if not rctx.delete("whl_file.json"):
+             fail("failed to delete the whl_file.json file")
+ 
+-    if rctx.attr.whl_patches:
++    whl_patches = dict(rctx.attr.whl_patches)
++    if rctx.attr.annotation:
++        annotation = json.decode(rctx.read(rctx.attr.annotation))
++        for patch_label, patch_args in annotation.get("whl_patches", {}).items():
++            whl_patches[Label(patch_label)] = patch_args
++    if whl_patches:
+         patches = {}
+-        for patch_file, json_args in rctx.attr.whl_patches.items():
++        for patch_file, json_args in whl_patches.items():
+             patch_dst = struct(**json.decode(json_args))
+             if whl_path.basename in patch_dst.whls:
+                 patches[patch_file] = patch_dst.patch_strip

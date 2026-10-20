@@ -12,6 +12,9 @@ from rtp_llm.distribute.distributed_server import DistributedServer, get_world_i
 from rtp_llm.metrics import kmonitor
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.models_py.distributed.collective_torch import init_distributed_environment
+from rtp_llm.server.server_args.hw_kernel_group_args import (
+    validate_hw_kernel_group_args,
+)
 from rtp_llm.utils.concurrency_controller import get_global_controller
 
 if TYPE_CHECKING:
@@ -28,6 +31,7 @@ class BackendManager(object):
             py_env_configs.profiling_debug_logging_config.log_file_backup_count,
             py_env_configs.server_config.rank_id,
             py_env_configs.server_config.frontend_server_id,
+            disable_access_log=py_env_configs.misc_config.disable_access_log,
         )
         self._distributed_server = DistributedServer(py_env_configs)
         self.thread_lock_ = threading.Lock()
@@ -54,6 +58,7 @@ class BackendManager(object):
                 nccl_init_port=self._distributed_server.get_nccl_init_port(),
                 backend="nccl",
                 timeout=self.py_env_configs.distribute_config.dist_comm_timeout,
+                disable_custom_all_reduce=self.py_env_configs.ft_disable_custom_ar_override,
             )
         world_info = get_world_info(
             self.py_env_configs.server_config,
@@ -84,6 +89,22 @@ class BackendManager(object):
             engine_config=engine_config,
             model_config=model_config,
         )
+        # Generation-prefill is a secondary runner owned only by the normalized
+        # PDFUSION language-model process. Validate its cross-option capacity
+        # after EngineConfig has applied the implicit VIT role and ModelFactory
+        # has resolved explicit/checkpoint-inferred task types. Earlier parser
+        # validation would reject shared configs in processes that never create
+        # this runner.
+        validate_hw_kernel_group_args(
+            engine_config.hw_kernel_config,
+            max_context_batch_size=(
+                engine_config.runtime_config.fifo_scheduler_config.max_context_batch_size
+            ),
+            concurrency_limit=engine_config.concurrency_config.concurrency_limit,
+            role_type=engine_config.parallelism_config.role_type,
+            speculative_type=engine_config.sp_config.type,
+            task_type=model_config.task_type,
+        )
 
         # Initialize DeepEP/MoriEP wrapper if MOE model and EP is enabled
         if (
@@ -94,8 +115,23 @@ class BackendManager(object):
             deepep_init_success = False
             moriep_init_success = False
 
+            # MegaMoE runs on DeepGEMM symmetric buffers and never uses the
+            # DeepEP/NVSHMEM wrapper. Initializing it anyway poisons the CUDA
+            # context when unused NVSHMEM device state cannot start, so the
+            # wrapper is skipped for those strategies.
+            skip_deepep = engine_config.moe_config.moe_strategy in (
+                "mega_moe",
+                "mega_moe_se",
+            )
+            if skip_deepep and engine_config.moe_config.use_deepep_moe:
+                logging.info(
+                    "moe_strategy=%s does not use DeepEP; skipping DeepEP wrapper "
+                    "initialization",
+                    engine_config.moe_config.moe_strategy,
+                )
+
             # Initialize DeepEP if enabled
-            if engine_config.moe_config.use_deepep_moe:
+            if engine_config.moe_config.use_deepep_moe and not skip_deepep:
                 try:
                     from rtp_llm.models_py.distributed.deepep_wrapper import (
                         init_deepep_wrapper,
@@ -120,7 +156,11 @@ class BackendManager(object):
                     logging.error(f"Failed to initialize MoriEP wrapper: {e}")
 
             # Raise if a requested EP backend failed to initialize
-            if engine_config.moe_config.use_deepep_moe and not deepep_init_success:
+            if (
+                engine_config.moe_config.use_deepep_moe
+                and not skip_deepep
+                and not deepep_init_success
+            ):
                 raise RuntimeError("DeepEP was requested but failed to initialize")
             if engine_config.moe_config.use_mori_ep and not moriep_init_success:
                 raise RuntimeError(

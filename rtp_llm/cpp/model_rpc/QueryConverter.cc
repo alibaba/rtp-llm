@@ -4,11 +4,13 @@
 #include <optional>
 
 #include <numeric>
+#include <stdexcept>
 
 #include "RPCPool.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/model_rpc/TensorPbConvert.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
+#include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
 
@@ -29,7 +31,7 @@ RoleType checkedRoleType(int value, const char* field_name) {
 }
 
 RoleType checkedRoleString(const std::string& value) {
-    std::string role = value;
+    std::string       role   = value;
     const std::string prefix = "RoleType.";
     if (role.rfind(prefix, 0) == 0) {
         role = role.substr(prefix.size());
@@ -54,7 +56,7 @@ RoleType checkedRoleString(const std::string& value) {
 
 RoleType transRoleAddrType(const RoleAddrPB& role_addr) {
     std::optional<RoleType> resolved;
-    auto merge = [&resolved](RoleType candidate, const char* source) {
+    auto                    merge = [&resolved](RoleType candidate, const char* source) {
         RTP_LLM_CHECK_WITH_INFO(!resolved.has_value() || *resolved == candidate,
                                 "conflicting RoleAddrPB role from %s: resolved=%d candidate=%d",
                                 source,
@@ -77,10 +79,32 @@ RoleType transRoleAddrType(const RoleAddrPB& role_addr) {
 
 }  // namespace
 
+int QueryConverter::resolveMaxNewTokens(const GenerateConfigPB& config_proto) {
+    const int wire_max_new_tokens = config_proto.max_new_tokens();
+    if (config_proto.prefill_only()) {
+        if (wire_max_new_tokens != 0) {
+            throw std::invalid_argument("prefill_only requires max_new_tokens to be 0, got "
+                                        + std::to_string(wire_max_new_tokens));
+        }
+        if (config_proto.return_prompt_logits()) {
+            throw std::invalid_argument("prefill_only cannot be combined with return_prompt_logits");
+        }
+    }
+    if (wire_max_new_tokens < 0) {
+        throw std::invalid_argument("max_new_tokens must be greater than or equal to 0, got "
+                                    + std::to_string(wire_max_new_tokens));
+    }
+    if (config_proto.return_prompt_logits()) {
+        return 1;
+    }
+    return wire_max_new_tokens;
+}
+
 std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const GenerateConfigPB* config_proto) {
     std::shared_ptr<GenerateConfig> generate_config = std::make_shared<GenerateConfig>();
     generate_config->global_request_id              = config_proto->global_request_id();
-    generate_config->max_new_tokens                 = config_proto->max_new_tokens();
+    const int resolved_max_new_tokens               = resolveMaxNewTokens(*config_proto);
+    generate_config->max_new_tokens                 = resolved_max_new_tokens;
     generate_config->min_new_tokens                 = config_proto->min_new_tokens();
     generate_config->num_beams                      = config_proto->num_beams();
     generate_config->variable_num_beams.resize(config_proto->variable_num_beams_size());
@@ -107,6 +131,7 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     generate_config->normalized_hidden_states = config_proto->normalized_hidden_states();
     generate_config->calculate_loss           = config_proto->calculate_loss();
     generate_config->is_streaming             = config_proto->is_streaming();
+    TRANS_OPTIONAL(aux_info);
     generate_config->timeout_ms               = config_proto->timeout_ms();
     generate_config->sp_edit                  = config_proto->sp_edit();
     generate_config->force_disable_sp_run     = config_proto->force_disable_sp_run();
@@ -165,10 +190,6 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     TRANS_OPTIONAL(ebnf);
     TRANS_OPTIONAL(structural_tag);
     TRANS_OPTIONAL(task_id);
-    TRANS_OPTIONAL(json_schema);
-    TRANS_OPTIONAL(regex);
-    TRANS_OPTIONAL(ebnf);
-    TRANS_OPTIONAL(structural_tag);
     TRANS_OPTIONAL(adapter_name);
     const bool legacy_in_think_mode = config_proto->in_think_mode();
     const int  thinking_mode        = static_cast<int>(config_proto->thinking_mode());
@@ -203,6 +224,7 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     generate_config->enable_device_cache = config_proto->enable_device_cache();
     generate_config->enable_memory_cache = config_proto->enable_memory_cache();
     generate_config->enable_remote_cache = config_proto->enable_remote_cache();
+    generate_config->enable_disk_cache   = config_proto->enable_disk_cache();
     TRANS_OPTIONAL(trace_id);
     TRANS_OPTIONAL(group_timeout);
 
@@ -219,6 +241,7 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
         generate_config->banned_combo_token_ids.push_back(std::move(combo));
     }
 
+    generate_config->validatePrefillOnly();
     return generate_config;
 }
 
@@ -253,6 +276,37 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
     generate_input->input_ids =
         torch::from_blob(const_cast<int*>(input->token_ids().data()), {(int64_t)input->token_ids_size()}, torch::kInt32)
             .clone();
+    if (input->has_v41_inputs()) {
+        const auto& typed = input->v41_inputs();
+        if (typed.schema_version() != 1) {
+            throw std::invalid_argument("unsupported V4.1 input schema version: "
+                                        + std::to_string(typed.schema_version()));
+        }
+        auto prepared         = std::make_shared<V41RequestInputs>();
+        prepared->token_types = torch::from_blob(const_cast<int32_t*>(typed.token_types().data()),
+                                                 {typed.token_types_size()},
+                                                 torch::kInt32)
+                                    .clone();
+        prepared->image_mask = torch::empty({typed.image_mask_size()}, torch::kBool);
+        for (int index = 0; index < typed.image_mask_size(); ++index) {
+            prepared->image_mask.data_ptr<bool>()[index] = typed.image_mask(index);
+        }
+        for (const auto& source : typed.images()) {
+            V41ImageInput image;
+            image.start   = source.start();
+            image.n_vit_h = source.n_vit_h();
+            image.n_vit_w = source.n_vit_w();
+            image.patches = transTensor(source.patches());
+            image.types =
+                torch::from_blob(const_cast<int32_t*>(source.types().data()), {source.types_size()}, torch::kInt32)
+                    .clone();
+            image.content_sha256     = source.content_sha256();
+            image.processor_identity = source.processor_identity();
+            prepared->images.push_back(std::move(image));
+        }
+        generate_input->v41_inputs        = std::move(prepared);
+        generate_input->multimodal_inputs = std::vector<MultimodalInput>{};
+    }
     if (input->multimodal_inputs_size() > 0) {
         std::vector<MultimodalInput> mm_inputs;
         for (int i = 0; i < input->multimodal_inputs_size(); i++) {
@@ -262,20 +316,29 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
             for (const auto& crop_position : mm_preprocess_config->crop_positions()) {
                 crop_positions.push_back(crop_position);
             }
-            mm_inputs.emplace_back(mm_input->multimodal_url(),
-                                   torch::empty(1),
-                                   mm_input->multimodal_type(),
-                                   mm_preprocess_config->width(),
-                                   mm_preprocess_config->height(),
-                                   mm_preprocess_config->min_pixels(),
-                                   mm_preprocess_config->max_pixels(),
-                                   mm_preprocess_config->fps(),
-                                   mm_preprocess_config->min_frames(),
-                                   mm_preprocess_config->max_frames(),
-                                   crop_positions,
-                                   mm_preprocess_config->mm_timeout_ms());
+            mm_inputs.emplace_back(
+                mm_input->multimodal_url(),
+                torch::empty(1),
+                mm_input->multimodal_type(),
+                mm_preprocess_config->width(),
+                mm_preprocess_config->height(),
+                mm_preprocess_config->min_pixels(),
+                mm_preprocess_config->max_pixels(),
+                mm_preprocess_config->fps(),
+                mm_preprocess_config->min_frames(),
+                mm_preprocess_config->max_frames(),
+                crop_positions,
+                mm_preprocess_config->mm_timeout_ms(),
+                mm_preprocess_config->max_long_side_pixel() > 0 ? mm_preprocess_config->max_long_side_pixel() : -1);
         }
         generate_input->multimodal_inputs = std::move(mm_inputs);
+    }
+    if (input->has_multimodal_token_layout()) {
+        MultimodalTokenLayout layout;
+        for (const auto& span : input->multimodal_token_layout().spans()) {
+            layout.spans.emplace_back(span.offset(), span.length());
+        }
+        generate_input->multimodal_token_layout = std::move(layout);
     }
     generate_input->group_size = input->group_size() > 0 ? input->group_size() : 1;
     if (input->has_group_id()) {
@@ -405,18 +468,22 @@ void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
             aux_info->set_local_reuse_len(response.aux_info.local_reuse_len);
             aux_info->set_remote_reuse_len(response.aux_info.remote_reuse_len);
             aux_info->set_memory_reuse_len(response.aux_info.memory_reuse_len);
+            aux_info->set_disk_reuse_len(response.aux_info.disk_reuse_len);
             aux_info->set_prefill_total_reuse_len(response.aux_info.prefill_total_reuse_len);
             aux_info->set_prefill_local_reuse_len(response.aux_info.prefill_local_reuse_len);
             aux_info->set_prefill_remote_reuse_len(response.aux_info.prefill_remote_reuse_len);
             aux_info->set_prefill_memory_reuse_len(response.aux_info.prefill_memory_reuse_len);
+            aux_info->set_prefill_disk_reuse_len(response.aux_info.prefill_disk_reuse_len);
             aux_info->set_decode_total_reuse_len(response.aux_info.decode_total_reuse_len);
             aux_info->set_decode_local_reuse_len(response.aux_info.decode_local_reuse_len);
             aux_info->set_decode_remote_reuse_len(response.aux_info.decode_remote_reuse_len);
             aux_info->set_decode_memory_reuse_len(response.aux_info.decode_memory_reuse_len);
+            aux_info->set_decode_disk_reuse_len(response.aux_info.decode_disk_reuse_len);
             aux_info->set_speculative_draft_rounds(response.aux_info.speculative_draft_rounds);
             for (const auto accepted_tokens : response.aux_info.speculative_accepted_tokens_per_pos) {
                 aux_info->add_speculative_accepted_tokens_per_pos(accepted_tokens);
             }
+            aux_info->set_generation_prefill_cuda_graph_status(response.aux_info.generation_prefill_cuda_graph_status);
             aux_info->set_aux_string(aux_string);
             auto* mm_map = aux_info->mutable_multimodal_lengths();
             for (const auto& [key, value] : response.aux_info.multimodal_lengths) {
@@ -467,6 +534,12 @@ void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
         }
         pb->set_start_pos(pl.start_pos);
         pb->set_end_pos(pl.end_pos);
+    }
+
+    if (std::any_of(
+            source_outputs.begin(), source_outputs.end(), [](const auto& r) { return r.custom_output.has_value(); })) {
+        stackBuffersToTensorPB(
+            flatten_output->mutable_custom_output(), source_outputs, [](const auto& r) { return r.custom_output; });
     }
 
     RTP_LLM_LOG_DEBUG("transResponse done");

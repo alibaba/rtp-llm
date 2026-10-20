@@ -36,6 +36,7 @@ _initialized: bool = False  # Track if we've initialized (to prevent double init
 _cpu_tp_broadcaster_base_path: Optional[str] = None
 _rocm_rccl = None
 _symm_mem = None
+_flashinfer_allreduce = None
 
 
 def _get_rocm_rccl():
@@ -60,6 +61,29 @@ def _get_symm_mem():
 
         _symm_mem = symm_mem
     return _symm_mem
+
+
+def _get_flashinfer_allreduce():
+    global _flashinfer_allreduce
+    if _flashinfer_allreduce is None:
+        from rtp_llm.models_py.distributed import flashinfer_all_reduce
+
+        _flashinfer_allreduce = flashinfer_all_reduce
+    return _flashinfer_allreduce
+
+
+def _init_flashinfer_allreduce(
+    parallelism_config: ParallelismConfig,
+    disable_custom_all_reduce: Optional[bool] = None,
+) -> None:
+    if parallelism_config.tp_size <= 1:
+        return
+    _get_flashinfer_allreduce().init_flashinfer_allreduce(
+        _get_group(Group.TP),
+        torch.device("cuda", parallelism_config.local_rank),
+        single_node=parallelism_config.tp_size <= parallelism_config.local_world_size,
+        disable_custom_all_reduce=disable_custom_all_reduce,
+    )
 
 
 def _make_cpu_tp_broadcaster_base_path(
@@ -118,6 +142,7 @@ def init_distributed_environment(
     nccl_init_port: int,
     backend: str = "nccl",
     timeout: Optional[int] = None,
+    disable_custom_all_reduce: Optional[bool] = None,
 ):
     """Initialize distributed environment and create process groups.
 
@@ -130,6 +155,8 @@ def init_distributed_environment(
         nccl_init_port: Port for torch.distributed init_process_group (tcp://ip:port).
         backend: Distributed backend (default: "nccl")
         timeout: Timeout in seconds for process group initialization
+        disable_custom_all_reduce: Explicit server-wide custom AllReduce
+            override. ``None`` preserves the implementation-specific default.
 
     Raises:
         RuntimeError: If already initialized and not destroyed
@@ -147,11 +174,17 @@ def init_distributed_environment(
             _cpu_tp_broadcaster_base_path = _make_cpu_tp_broadcaster_base_path(
                 parallelism_config, nccl_init_port
             )
-            _create_process_groups(parallelism_config, backend, timedelta(days=36500))
+            _create_process_groups(
+                parallelism_config,
+                backend,
+                timedelta(days=36500),
+                disable_custom_all_reduce,
+            )
             _register_process_groups_to_cpp()
         rocm_rccl = _get_rocm_rccl()
         if rocm_rccl is not None and parallelism_config.tp_size > 1:
             rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
+        _init_flashinfer_allreduce(parallelism_config, disable_custom_all_reduce)
         return
 
     _normalize_parallelism_ranks(parallelism_config)
@@ -175,12 +208,18 @@ def init_distributed_environment(
     # we still need to create our process groups
     if torch.distributed.is_initialized():
         logging.info("torch.distributed already initialized, creating process groups")
-        _create_process_groups(parallelism_config, backend, timedelta(days=36500))
+        _create_process_groups(
+            parallelism_config,
+            backend,
+            timedelta(days=36500),
+            disable_custom_all_reduce,
+        )
         _parallelism_config = parallelism_config
         _initialized = True
         _register_process_groups_to_cpp()
         if rocm_rccl is not None and parallelism_config.tp_size > 1:
             rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
+        _init_flashinfer_allreduce(parallelism_config, disable_custom_all_reduce)
         return
 
     logging.info(
@@ -209,19 +248,26 @@ def init_distributed_environment(
     )
 
     # Create DP and TP groups
-    _create_process_groups(parallelism_config, backend, timedelta(days=36500))
+    _create_process_groups(
+        parallelism_config,
+        backend,
+        timedelta(days=36500),
+        disable_custom_all_reduce,
+    )
     _parallelism_config = parallelism_config
     _initialized = True
     _register_process_groups_to_cpp()
     if rocm_rccl is not None and parallelism_config.tp_size > 1:
         rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
     init_user_buffers_environment(parallelism_config)
+    _init_flashinfer_allreduce(parallelism_config, disable_custom_all_reduce)
 
 
 def _create_process_groups(
     parallelism_config: ParallelismConfig,
     backend: str,
     timeout: Optional[timedelta],
+    disable_custom_all_reduce: Optional[bool] = None,
 ):
     """Create DP and TP process groups.
 
@@ -229,6 +275,7 @@ def _create_process_groups(
         parallelism_config: Configuration for parallelism setup
         backend: Distributed backend
         timeout: Timeout for process group creation
+        disable_custom_all_reduce: Explicit custom AllReduce override.
     """
     global _group_map
 
@@ -285,13 +332,19 @@ def _create_process_groups(
                         f"[rank: {world_rank}] Stored TP group with key: {group_key} {tp_group} with ranks: {tp_ranks}"
                     )
 
-                _get_symm_mem().init_symm_mem_communicator(tp_group)
+                _get_symm_mem().init_symm_mem_communicator(
+                    tp_group,
+                    disable_custom_all_reduce=disable_custom_all_reduce,
+                )
 
                 # All ranks must wait for group creation to complete
                 torch.distributed.barrier()
     elif tp_size > 1 and world_size == tp_size:
         # Single TP group: WORLD is the TP group, init symm_mem for it
-        _get_symm_mem().init_symm_mem_communicator(torch.distributed.group.WORLD)
+        _get_symm_mem().init_symm_mem_communicator(
+            torch.distributed.group.WORLD,
+            disable_custom_all_reduce=disable_custom_all_reduce,
+        )
 
 
 def _register_process_groups_to_cpp():
@@ -354,6 +407,17 @@ def _register_process_groups_to_cpp():
         if pg_world is not None:
             mode_to_group[_CPP_PARALLEL_MODE_TP] = pg_world
 
+    # If world_size == dp_size, WORLD is also the only DP group.
+    if (
+        _parallelism_config is not None
+        and _parallelism_config.dp_size > 1
+        and _parallelism_config.world_size == _parallelism_config.dp_size
+        and _CPP_PARALLEL_MODE_DP not in registered_modes
+    ):
+        pg_world = _group_map.get(Group.DP_AND_TP)
+        if pg_world is not None:
+            mode_to_group[_CPP_PARALLEL_MODE_DP] = pg_world
+
     # NOTE: These callbacks are NOT thin wrappers around the module-level broadcast()/
     # all_reduce()/all_gather() because the C++ calling convention differs significantly:
     #   - C++ uses int mode (ParallelMode enum ordinal) instead of Group enum
@@ -411,7 +475,10 @@ def _register_process_groups_to_cpp():
         """
         pg = mode_to_group.get(mode)
         if pg is None or pg.size() < 2:
-            return tensor if dest is None else tensor
+            if dest is None:
+                return tensor
+            dest.copy_(tensor)
+            return dest
         target = dest if dest is not None else tensor
         if dest is not None:
             target.copy_(tensor)
@@ -441,6 +508,9 @@ def _register_process_groups_to_cpp():
         """
         pg = mode_to_group.get(mode)
         if pg is None or pg.size() < 2:
+            if not inplace:
+                for i, recv_buf in enumerate(recv_buffers):
+                    recv_buf.copy_(send_buffers[i].reshape(recv_buf.shape))
             return
         world_size = pg.size()
         device_id: Optional[int] = None
@@ -565,6 +635,7 @@ def destroy_distributed_environment():
         )
 
         destroy_user_buffers_communicator()
+        _get_flashinfer_allreduce().destroy_flashinfer_allreduce()
 
     try:
         import librtp_compute_ops
@@ -691,13 +762,16 @@ def broadcast(tensor: torch.Tensor, src: int, group: Group) -> None:
     torch.distributed.broadcast(tensor, src, group=process_group)
 
 
-def all_reduce(tensor: torch.Tensor, group: Group, *, inplace: bool = False) -> torch.Tensor:
+def all_reduce(
+    tensor: torch.Tensor, group: Group, *, inplace: bool = True
+) -> torch.Tensor:
     """All-reduce a tensor across all ranks in the group.
 
     Args:
         tensor: Tensor to all-reduce.
         group: Process group to use
-        inplace: If true, write the symmetric-memory fast-path result back to ``tensor``.
+        inplace: If true, write fast-path results back to ``tensor``. Defaults to
+            true to preserve the in-place contract of torch.distributed.all_reduce.
 
     Returns:
         All-reduced tensor.
@@ -706,20 +780,30 @@ def all_reduce(tensor: torch.Tensor, group: Group, *, inplace: bool = False) -> 
     if rocm_rccl is not None:
         rocm_rccl.ensure_capture_comm_ready(group == Group.TP)
         if rocm_rccl.should_use_capture_collectives(group == Group.TP):
-            return rocm_rccl.capture_all_reduce(tensor, _get_group(group))
+            target = tensor if inplace else tensor.clone()
+            return rocm_rccl.capture_all_reduce(target, _get_group(group))
 
     if group == Group.TP:
+        flashinfer_ar = _get_flashinfer_allreduce().get_flashinfer_allreduce()
+        if flashinfer_ar is not None and flashinfer_ar.should_use(tensor):
+            result = flashinfer_ar.all_reduce(tensor)
+            if inplace:
+                tensor.copy_(result)
+                return tensor
+            return result
+
         symm_mem_comm = _get_symm_mem().get_symm_mem_communicator()
         if symm_mem_comm is not None and symm_mem_comm.should_torch_symm_mem_allreduce(
             tensor
         ):
             return symm_mem_comm.all_reduce(tensor, out=tensor if inplace else None)
 
+    target = tensor if inplace else tensor.clone()
     process_group = _get_group(group)
     torch.distributed.all_reduce(
-        tensor, op=torch.distributed.ReduceOp.SUM, group=process_group
+        target, op=torch.distributed.ReduceOp.SUM, group=process_group
     )
-    return tensor
+    return target
 
 
 def all_gather(tensor: torch.Tensor, group: Group) -> torch.Tensor:
@@ -797,7 +881,10 @@ def reduce_scatter(input_tensor: torch.Tensor, group: Group) -> torch.Tensor:
         dtype=input_tensor.dtype,
     )
     torch.distributed.reduce_scatter_tensor(
-        output_tensor, input_tensor, op=torch.distributed.ReduceOp.SUM, group=process_group
+        output_tensor,
+        input_tensor,
+        op=torch.distributed.ReduceOp.SUM,
+        group=process_group,
     )
     return output_tensor
 

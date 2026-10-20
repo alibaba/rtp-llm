@@ -1,7 +1,7 @@
 """Benchmark prefill attention implementations with one forward per CUDA Graph.
 
 Usage:
-    bazelisk test --config=cuda12_9 --config=sm9x \
+    bazelisk test --config=cuda13 \
         --run_under=//rtp_llm/test/utils:gpu_lock \
         //rtp_llm/models_py/modules/factory/attention/cuda_impl/test:bench_prefill_impls \
         --test_timeout=600 --test_output=streamed --nocache_test_results

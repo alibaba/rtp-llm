@@ -13,10 +13,10 @@ cc_library(
         "OpDefs.cc",
     ],
     deps = torch_deps() + [
-        "//rtp_llm/cpp/cache:cache_layout",
         "//rtp_llm/cpp/cache:cache_group_type",
+        "//rtp_llm/cpp/cache:cache_layout",
         "//rtp_llm/cpp/cache:kv_cache_specs",
-        "//rtp_llm/cpp/model_utils:model_utils",
+        "//rtp_llm/cpp/model_utils",
         "//rtp_llm/cpp/utils:core_utils",
     ],
     visibility = ["//visibility:public"],
@@ -32,7 +32,8 @@ py_test(
     deps = [
         "//rtp_llm:testlib",
     ],
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 cc_library(
@@ -66,7 +67,6 @@ cc_library(
     alwayslink = 1,
 )
 
-
 cc_library(
     name = "dummy_register",
     srcs = [
@@ -77,4 +77,27 @@ cc_library(
     ],
     visibility = ["//visibility:public"],
     alwayslink = 1,
+)
+
+cc_library(
+    name = "crc_block_copy_hdr",
+    hdrs = ["CrcBlockCopy.h"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "crc_block_copy_unavailable",
+    srcs = ["CrcBlockCopyUnavailable.cc"],
+    deps = [":crc_block_copy_hdr"],
+    copts = copts(),
+)
+
+alias(
+    name = "crc_block_copy",
+    actual = select({
+        "//:using_cuda13_x86": "//rtp_llm/models_py/bindings/cuda:crc_block_copy",
+        "//:using_cuda13_arm": "//rtp_llm/models_py/bindings/cuda:crc_block_copy",
+        "//conditions:default": ":crc_block_copy_unavailable",
+    }),
+    visibility = ["//visibility:public"],
 )

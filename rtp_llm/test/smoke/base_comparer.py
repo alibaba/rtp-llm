@@ -34,14 +34,17 @@ _COLD_CACHE_AUX_FIELDS = (
     "local_reuse_len",
     "remote_reuse_len",
     "memory_reuse_len",
+    "disk_reuse_len",
     "prefill_total_reuse_len",
     "prefill_local_reuse_len",
     "prefill_remote_reuse_len",
     "prefill_memory_reuse_len",
+    "prefill_disk_reuse_len",
     "decode_total_reuse_len",
     "decode_local_reuse_len",
     "decode_remote_reuse_len",
     "decode_memory_reuse_len",
+    "decode_disk_reuse_len",
 )
 
 
@@ -72,7 +75,7 @@ class BaseComparer(object):
         request_endpoint: str,
         q_r: Dict[str, Any],
         tracer: Tracer,
-        use_batch_scheduler: bool
+        use_batch_scheduler: bool,
     ):
         self.server_manager = server_manager
         self.request_endpoint = request_endpoint
@@ -142,7 +145,11 @@ class BaseComparer(object):
                     url, json={"batch_size": concurrecy_batch}, timeout=10
                 )
                 resp_json = response.json()
-                if response.status_code == 200 and "error" not in resp_json and resp_json.get("status") == "ok":
+                if (
+                    response.status_code == 200
+                    and "error" not in resp_json
+                    and resp_json.get("status") == "ok"
+                ):
                     return
                 logging.warning(
                     f"update_scheduler_info attempt {attempt+1}/{max_retries} error: {resp_json}"
@@ -161,7 +168,11 @@ class BaseComparer(object):
         query_info: BaseModel = self.format_query(self.qr_info["query"])
         self.tracer.query = query_info
         visit_retry_time = int(os.environ.get("VISIT_RETRY_TIME", 4))
-        if visit_retry_time > 1 and not save_response() and _asserts_cold_cache(self.qr_info):
+        if (
+            visit_retry_time > 1
+            and not save_response()
+            and _asserts_cold_cache(self.qr_info)
+        ):
             # Retrying here can only ever produce a *warm* cache result, which
             # the cold-start golden rejects with a confusing "N differences in
             # aux_info.*reuse_len" diff, burying the real error (e.g. an HTTP 500

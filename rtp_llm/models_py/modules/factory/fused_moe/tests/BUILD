@@ -1,8 +1,4 @@
-_CUDA13_ONLY = select({
-    "@//:using_cuda13_x86": [],
-    "@//:using_cuda13_arm": [],
-    "//conditions:default": ["@platforms//:incompatible"],
-})
+load("//rtp_llm/models_py/modules/dsv4/test:defs.bzl", "dsv4_py_test")
 
 py_test(
     name = "test_config_resolver",
@@ -10,7 +6,8 @@ py_test(
     deps = [
         "//rtp_llm:testlib",
     ],
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 py_test(
@@ -27,7 +24,10 @@ py_test(
     deps = [
         "//rtp_llm:testlib",
     ],
-    tags = ["open_skip", "H20"],
+    tags = [
+        "H20_CU13",
+        "open_skip",
+    ],
     # Back on H20 after measuring on sm86: 42 tests run, 4 fail on
     # assertTrue(strategy.can_handle(config)). The test mocks has_deep_gemm but
     # not the capability gate, and DeepGemmMaskedExecutorV2.check_conditions has
@@ -36,7 +36,7 @@ py_test(
     # sm90. Staying on H20 by decision, not as a TODO: the test is correct about
     # what the executor does, and mocking the capability gate to relocate it would
     # make it assert something the hardware does not do.
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {"gpu": "H20_CU13"},
 )
 
 py_test(
@@ -49,16 +49,15 @@ py_test(
     # exclude this target and it runs there while being dispatched to an H20
     # worker -- leaking sm8x work onto the pool smoke needs. Keeping upstream's
     # H20 choice, just making the routing agree with it.
-    tags = ["H20"],
-    exec_properties = {'gpu':'H20'},
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13"},
 )
 
-py_test(
+dsv4_py_test(
     name = "test_strategy_select",
-    srcs = ["test_strategy_select.py"],
     deps = [
-        "//rtp_llm/models_py:modules",
         "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
     ],
-    target_compatible_with = _CUDA13_ONLY,
+    visibility = ["//visibility:public"],
 )

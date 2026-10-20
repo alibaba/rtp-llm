@@ -112,6 +112,7 @@ cc_library(
     copts = copts(),
     deps = [
         "//rtp_llm/models_py/bindings:no_block_copy_hdr",
+        "//rtp_llm/models_py/bindings/common/kernels:copy_tile_kernel",
         "//rtp_llm/cpp/utils:core_utils",
         ":split_kv_cache_copy",
         ":cuda_host_utils",
@@ -171,6 +172,7 @@ cc_library(
         "//rtp_llm/models_py/bindings/cuda/kernels:fast_topk",
         "//rtp_llm/models_py/bindings/cuda/kernels:persistent_topk",
         "//rtp_llm/models_py/bindings/cuda/kernels:dsv4_persistent_topk",
+        "//rtp_llm/models_py/bindings/cuda/kernels:deepselect_bf16",
         "//rtp_llm/models_py/bindings/cuda/kernels:dsv4_top_k_per_row_prefill",
         "//rtp_llm/models_py/bindings/cuda/kernels:mha_paged_attn_plan",
         "//rtp_llm/models_py/bindings/cuda/kernels:mla_quant_kernel",
@@ -204,6 +206,7 @@ cc_library(
     deps = [
         "//rtp_llm/models_py/bindings:register_ops_hdr",
         "//rtp_llm/models_py/bindings/cuda/kernels:mla_quant_kernel",
+        "//rtp_llm/models_py/bindings/cuda/kernels:deepselect_bf16",
         "//rtp_llm/models_py/bindings/cuda/kernels:dsv4_top_k_per_row_prefill",
         ":cuda_bindings",
     ],
@@ -235,16 +238,26 @@ cc_library(
         "//rtp_llm/models_py/bindings:register_ops_hdr",
         ":bf16_gemm_op",
         ":cuda_bindings_base",
-        ":cuda_attn_bindings_base"
-    ] + select({
-        "@//:using_cuda12_9": [
-            "//rtp_llm/models_py/bindings/cuda/cutlass:fp4_gemm_cu",
-        ],
-        "@//:using_cuda13_x86": [
-            "//rtp_llm/models_py/bindings/cuda/cutlass:fp4_gemm_cu",
-        ],
-        "//conditions:default": [],
-    }),
+        ":cuda_attn_bindings_base",
+    ],
     visibility = ["//visibility:public"],
     alwayslink = 1,
+)
+
+cc_library(
+    name = "crc_block_copy",
+    srcs = ["CrcBlockCopy.cu"],
+    hdrs = ["CrcBlockCopyInternal.cuh"],
+    copts = cuda_copts(),
+    deps = [
+        "//rtp_llm/cpp/cache/block_tree_cache:crc_dump_writer",
+        "//rtp_llm/models_py/bindings:crc_block_copy_hdr",
+        "//rtp_llm/models_py/bindings/common/kernels:copy_tile_kernel",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + select({
+        "//:using_cuda13_arm": ["@nvcomp_cuda13_arm//:crc32"],
+        "//conditions:default": ["@nvcomp_cuda13_x86//:crc32"],
+    }),
+    visibility = ["//visibility:public"],
 )

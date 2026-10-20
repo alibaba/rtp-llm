@@ -25,12 +25,19 @@ struct DeferredPrefillContext {
 
     AtomicGuardPtr                   request_guard;
     std::shared_ptr<GenerateInputPB> input;
+    // Declared before context so the status outlives the span guard stored in
+    // context during reverse-order destruction.
+    grpc::Status logical_status = grpc::Status::OK;
     // Members are destroyed in reverse order: context must go before input,
     // because RPCContext keeps a raw pointer into input.
     std::unique_ptr<PrefillGenerateContext> context;
     std::shared_ptr<grpc::Alarm>            ttl_alarm;
 
+    ~DeferredPrefillContext();
     void cancel(const grpc::Status& status);
+    void commitTerminalStatus(const grpc::Status& status);
+    bool requestLogicalFinalization();
+    void finishLogicalTrace(const GenerateStream::TimeInfo* time_info_override = nullptr) noexcept;
     // Return true exactly once when the caller becomes the asynchronous
     // finalization owner.
     bool finishOperation();
@@ -42,6 +49,9 @@ private:
     bool       operation_active_{true};
     bool       priority_finalize_requested_{false};
     bool       priority_finalize_claimed_{false};
+    bool       logical_finalize_claimed_{false};
+    std::mutex trace_mu_;
+    bool       trace_finished_{false};
 };
 
 // Tracks cancel-visible active contexts and Fetch-visible prepared contexts.

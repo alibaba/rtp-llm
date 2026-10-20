@@ -1,5 +1,7 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "autil/EnvUtil.h"
+#include <limits>
 #include <map>
 #include <sstream>
 #include <algorithm>
@@ -121,11 +123,22 @@ std::string KVCacheConfig::to_string() const {
         << "max_block_size_per_item: " << max_block_size_per_item << "\n"
         << "memory_cache_size_mb: " << memory_cache_size_mb << "\n"
         << "memory_cache_sync_timeout_ms: " << memory_cache_sync_timeout_ms << "\n"
-        << "enable_memory_cache_disk: " << enable_memory_cache_disk << "\n"
-        << "memory_cache_disk_paths: " << memory_cache_disk_paths << "\n"
-        << "memory_cache_disk_size_mb: " << memory_cache_disk_size_mb << "\n"
-        << "memory_cache_disk_buffered_io: " << memory_cache_disk_buffered_io << "\n"
-        << "memory_cache_disk_sync_timeout_ms: " << memory_cache_disk_sync_timeout_ms << "\n"
+        << "disk_cache_paths: " << disk_cache_paths << "\n"
+        << "disk_cache_size_mb: " << disk_cache_size_mb << "\n"
+        << "disk_cache_buffered_io: " << disk_cache_buffered_io << "\n"
+        << "disk_cache_sync_timeout_ms: " << disk_cache_sync_timeout_ms << "\n"
+        << "disk_cache_staging_block_count: " << disk_cache_staging_block_count << "\n"
+        << "memory_cache_max_descriptors_per_transfer_batch: " << memory_cache_max_descriptors_per_transfer_batch
+        << "\n"
+        << "block_tree_transfer_worker_count: " << block_tree_transfer_worker_count << "\n"
+        << "block_tree_business_queue_max_size: " << block_tree_business_queue_max_size << "\n"
+        << "block_tree_transfer_queue_max_size: " << block_tree_transfer_queue_max_size << "\n"
+        << "block_tree_device_evict_low_watermark_ratio: " << block_tree_device_evict_low_watermark_ratio << "\n"
+        << "block_tree_device_evict_high_watermark_ratio: " << block_tree_device_evict_high_watermark_ratio << "\n"
+        << "block_tree_memory_evict_low_watermark_ratio: " << block_tree_memory_evict_low_watermark_ratio << "\n"
+        << "block_tree_memory_evict_high_watermark_ratio: " << block_tree_memory_evict_high_watermark_ratio << "\n"
+        << "block_tree_disk_evict_low_watermark_ratio: " << block_tree_disk_evict_low_watermark_ratio << "\n"
+        << "block_tree_disk_evict_high_watermark_ratio: " << block_tree_disk_evict_high_watermark_ratio << "\n"
         << "linear_step: " << linear_step << "\n"
         << "fp8_kv_cache: " << fp8_kv_cache << "\n"
         << "ssm_state_dtype: " << ssm_state_dtype << "\n"
@@ -136,17 +149,11 @@ std::string KVCacheConfig::to_string() const {
         << "use_block_cache: " << use_block_cache << "\n"
         << "enable_device_cache: " << enable_device_cache << "\n"
         << "enable_memory_cache: " << enable_memory_cache << "\n"
-        << "enable_memory_cache_sm_copy: " << enable_memory_cache_sm_copy << "\n"
+        << "enable_disk_cache: " << enable_disk_cache << "\n"
         << "enable_remote_cache: " << enable_remote_cache << "\n"
-        << "write_cache_sync: " << write_cache_sync << "\n"
-        << "enable_tiered_memory_cache: " << enable_tiered_memory_cache << "\n"
-        << "enable_gpu_prefix_tree: " << enable_gpu_prefix_tree << "\n"
-        << "enable_prefix_tree_memory_cache: " << enable_prefix_tree_memory_cache << "\n"
-        << "enable_legacy_memory_connector_fallback: " << enable_legacy_memory_connector_fallback << "\n"
-        << "prefix_tree_memory_state_swa_pool_ratio: " << prefix_tree_memory_state_swa_pool_ratio << "\n"
-        << "enable_independent_group_eviction: " << enable_independent_group_eviction << "\n"
-        << "device_cache_min_free_blocks: " << device_cache_min_free_blocks << "\n"
-        << "load_cache_retry_times: " << load_cache_retry_times << "\n"
+        << "device_eviction_policy: " << device_eviction_policy << "\n"
+        << "memory_eviction_policy: " << memory_eviction_policy << "\n"
+        << "disk_eviction_policy: " << disk_eviction_policy << "\n"
         << "dsv4_fixed_pool_blocks: " << dsv4_fixed_pool_blocks << "\n"
         << "dsv4_hca_state_pool_blocks: " << dsv4_hca_state_pool_blocks << "\n"
         << "dsv4_fixed_pool_use_memory: " << dsv4_fixed_pool_use_memory << "\n"
@@ -154,7 +161,8 @@ std::string KVCacheConfig::to_string() const {
         << "kv_cache_event_manager_endpoint: " << kv_cache_event_manager_endpoint << "\n"
         << "kv_cache_event_instance_group: " << kv_cache_event_instance_group << "\n"
         << "kv_cache_event_instance_id: " << kv_cache_event_instance_id << "\n"
-        << "kv_cache_event_host_ip_port: " << kv_cache_event_host_ip_port << "\n";
+        << "kv_cache_event_host_ip_port: " << kv_cache_event_host_ip_port << "\n"
+        << "block_tree_full_prefix_scan_interval_ms: " << block_tree_full_prefix_scan_interval_ms << "\n";
     return oss.str();
 }
 
@@ -195,8 +203,7 @@ std::string LinearAttentionConfig::to_string() const {
 // HybridAttentionConfig
 std::string HybridAttentionConfig::to_string() const {
     std::ostringstream oss;
-    oss << "enable_hybrid_attention: " << enable_hybrid_attention << "\n"
-        << "enable_independent_kv_cache_pools: " << enable_independent_kv_cache_pools << "\n";
+    oss << "enable_hybrid_attention: " << enable_hybrid_attention << "\n";
     return oss.str();
 }
 
@@ -211,6 +218,8 @@ std::string HWKernelConfig::to_string() const {
         << "use_swizzleA: " << use_swizzleA << "\n"
         << "enable_cuda_graph: " << enable_cuda_graph << "\n"
         << "enable_cuda_graph_debug_mode: " << enable_cuda_graph_debug_mode << "\n"
+        << "generation_prefill_cuda_graph_max_requests: " << generation_prefill_cuda_graph_max_requests << "\n"
+        << "generation_prefill_capture_token_buckets size: " << generation_prefill_capture_token_buckets.size() << "\n"
         << "enable_native_cuda_graph: " << enable_native_cuda_graph << "\n"
         << "num_native_cuda_graph: " << num_native_cuda_graph << "\n"
         << "prefill_capture_seq_lens size: " << prefill_capture_seq_lens.size() << "\n"
@@ -258,6 +267,21 @@ std::string ModelSpecificConfig::to_string() const {
 }
 
 // SpeculativeExecutionConfig
+size_t SpeculativeExecutionConfig::speculativeReserveStep() const {
+    if (type == SP_TYPE_NONE) {
+        return 0;
+    }
+    const int64_t gamma = gen_num_per_cycle;
+    const int64_t limit = std::numeric_limits<int>::max();
+    RTP_LLM_CHECK_WITH_INFO(gamma >= 0, "speculative gen_num_per_cycle must be non-negative: %ld", gamma);
+    if (type == SP_TYPE_DSPARK) {
+        RTP_LLM_CHECK_WITH_INFO(gamma <= limit / 3, "DSpARK gen_num_per_cycle is too large: %ld", gamma);
+        return static_cast<size_t>(3 * gamma);
+    }
+    RTP_LLM_CHECK_WITH_INFO(gamma < limit, "gen_num_per_cycle is too large: %ld", gamma);
+    return static_cast<size_t>(gamma + 1);
+}
+
 SpeculativeType SpeculativeExecutionConfig::from_string(const std::string& str) {
     if (str.empty() || str == "none") {
         return SP_TYPE_NONE;
@@ -311,7 +335,8 @@ std::string SpeculativeExecutionConfig::to_string() const {
         << "force_score_context_attention: " << force_score_context_attention << "\n"
         << "quantization: " << quantization << "\n"
         << "checkpoint_path: " << checkpoint_path << "\n"
-        << "sp_dspark_mask_token_id: " << sp_dspark_mask_token_id;
+        << "sp_dspark_mask_token_id: " << sp_dspark_mask_token_id << ", "
+        << "sp_dspark_sample_from_anchor: " << sp_dspark_sample_from_anchor;
     return oss.str();
 }
 
@@ -425,6 +450,7 @@ std::string RuntimeConfig::to_string() const {
         << "warm_up: " << warm_up << "\n"
         << "warm_up_with_loss: " << warm_up_with_loss << "\n"
         << "model_warm_up: " << model_warm_up << "\n"
+        << "output_dispatcher_worker_count: " << output_dispatcher_worker_count << "\n"
         << "use_batch_decode_scheduler: " << use_batch_decode_scheduler << "\n"
         << "batch_decode_scheduler_config: {\n"
         << batch_decode_scheduler_config.to_string() << "\n}\n"

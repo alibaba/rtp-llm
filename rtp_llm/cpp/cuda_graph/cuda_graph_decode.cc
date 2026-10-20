@@ -64,10 +64,14 @@ void CudaGraphRunner::captureDecode() {
 
         graph_instances_[bs].mem_hold_ = createCaptureMemoryHold(inputs, bs * num_tokens_per_bs_);
         graph_instances_[bs].mem_hold_.attn_pyobj_ =
-            py_attn_pyobj_method_(graph_instances_[bs].mem_hold_.py_model_inputs_, true);
+            prepareFmhaImpl(graph_instances_[bs].mem_hold_.py_model_inputs_, true);
         captureDecodeOneBatchSize(bs);
         cuda_graph::finish_capture_session();
         replayAndSyncCheck(bs, "batch size");
+        // Retain graph-owned buffers until the first replay is known complete.
+        // A launch/synchronization failure must take the same fail-closed path
+        // as a partially captured graph instead of deleting in-flight storage.
+        capture_session_may_be_dirty_.store(false, std::memory_order_release);
         RTP_LLM_LOG_INFO("capture success for batch size: %d", bs);
     }
     RTP_LLM_LOG_INFO("Capture Decode End");
