@@ -104,7 +104,8 @@ inline ErrorInfo transferStatusToErrorInfo(TransferStatus status) {
 // and NOT_EXECUTED means no target was committed to the caller. The copy may
 // have been skipped or discarded after a batch CRC failure; target bytes can change.
 // An empty block_errors vector represents a uniform result until the task boundary expands it.
-// status.code() and copy_error summarize the highest-priority failure, while status keeps all failure messages.
+// status.code() preserves unknown completion; copy_error summarizes the highest-priority diagnostic.
+// status keeps all failure messages.
 struct TransferResult {
     TransferResult() = default;
     explicit TransferResult(size_t block_count): block_errors(block_count, CacheCopyError::NOT_EXECUTED) {}
@@ -121,7 +122,8 @@ struct TransferResult {
         return status.ok();
     }
 
-    // Append every failure message; keep the first error code at equal priority.
+    // Append every failure message; keep unknown completion ahead of known failures
+    // without losing higher-priority copy diagnostics such as confirmed CRC errors.
     void merge(TransferResult other) {
         if (other.ok()) {
             return;
@@ -131,7 +133,11 @@ struct TransferResult {
             copy_error = other.copy_error;
             return;
         }
-        const auto code = other.copy_error > copy_error ? other.status.code() : status.code();
+        auto code = other.copy_error > copy_error ? other.status.code() : status.code();
+        if (status.code() == ErrorCode::TRANSFER_COMPLETION_UNKNOWN
+            || other.status.code() == ErrorCode::TRANSFER_COMPLETION_UNKNOWN) {
+            code = ErrorCode::TRANSFER_COMPLETION_UNKNOWN;
+        }
         status          = ErrorInfo(code, status.ToString() + "; " + other.status.ToString());
         copy_error      = std::max(copy_error, other.copy_error);
     }
