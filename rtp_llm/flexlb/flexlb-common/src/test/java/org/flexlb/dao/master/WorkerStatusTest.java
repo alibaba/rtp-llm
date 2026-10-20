@@ -41,6 +41,17 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @DisplayName("WorkerStatus status-commit contract")
 class WorkerStatusTest {
 
+    @Test
+    void skippedDiscoveryTicksDoNotSkipTheNextDueCachePoll() {
+        WorkerStatus status = discovered();
+        assertFalse(status.shouldPollCache(1L, 5L));
+        assertTrue(status.shouldPollCache(7L, 5L));
+        assertFalse(status.shouldPollCache(8L, 5L));
+        assertTrue(status.shouldPollCache(11L, 5L));
+        assertFalse(status.shouldPollCache(8L, 5L));
+        assertThrows(IllegalArgumentException.class, () -> status.shouldPollCache(12L, 0L));
+    }
+
     private static WorkerStatus discovered() {
         return WorkerStatus.createDiscovered(
                 RoleType.PREFILL, "group-a", "10.0.0.1", 8080, 9090, "site-a");

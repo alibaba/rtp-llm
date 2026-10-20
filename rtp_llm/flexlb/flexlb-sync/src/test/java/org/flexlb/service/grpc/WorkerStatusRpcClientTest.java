@@ -15,6 +15,16 @@ import static org.mockito.Mockito.verifyNoMoreInteractions;
 
 class WorkerStatusRpcClientTest {
 
+    @org.junit.jupiter.api.Test
+    void cacheVersionPreservesItsFullInt64Range() {
+        EngineGrpcClient client = mock(EngineGrpcClient.class);
+        long version = (long) Integer.MAX_VALUE + 10L;
+        new WorkerStatusRpcClient(client).getCacheStatusAsync("127.0.0.1", 8081, version, 100L, RoleType.PREFILL);
+        var request = ArgumentCaptor.forClass(EngineRpcService.CacheVersionPB.class);
+        verify(client).getCacheStatusAsync(eq("127.0.0.1"), eq(8081), request.capture(), eq(100L));
+        assertEquals(version, request.getValue().getLatestCacheVersion());
+    }
+
     @ParameterizedTest
     @CsvSource({"DECODE,false", "PREFILL,true", "PDFUSION,true", "VIT,false"})
     void cacheRequestOnlyFetchesDetailedKeysWhenNeeded(RoleType role, boolean needsCacheKeys) {
