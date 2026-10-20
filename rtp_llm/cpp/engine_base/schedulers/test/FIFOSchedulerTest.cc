@@ -6083,4 +6083,25 @@ TEST_F(FIFOSchedulerTest, testGlobalChunkBudgetRejectsOversizedFanoutAndAdmitsSh
     ASSERT_EQ(short_stream->currentBatchSize(), 8);
 }
 
+TEST_F(FIFOSchedulerTest, testNonChunkedPrefillRejectsFanoutOverModelBudget) {
+    ChunkSchedulerTestConfig config;
+    config.prefill_chunk_size    = 0;
+    config.max_batch_tokens_size = 64;
+    ChunkSchedulerTestEnv<FIFOScheduler> env(config);
+    ASSERT_TRUE(env.init());
+    auto& scheduler = env.scheduler();
+
+    const size_t free_blocks_before = env.cache_manager->freeBlocksNum();
+    // 8 rows x 20 prompt tokens exceeds max(max_batch_tokens_size=64,
+    // max_seq_len=128) and can never fit one non-chunked prefill forward.
+    auto fanout = env.makeStream(std::vector<int>(20, 1), 8, 8);
+    ASSERT_TRUE(scheduler.enqueue(fanout).ok());
+    auto batch = scheduler.schedule();
+    ASSERT_TRUE(batch.ok());
+    ASSERT_TRUE(batch->empty());
+    ASSERT_TRUE(fanout->hasError());
+    ASSERT_TRUE(fanout->isFinished());
+    ASSERT_EQ(env.cache_manager->freeBlocksNum(), free_blocks_before);
+}
+
 }  // namespace rtp_llm

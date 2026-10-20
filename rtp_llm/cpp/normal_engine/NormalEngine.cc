@@ -601,8 +601,21 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
     const int64_t token_heavy_seq_len      = std::max<int64_t>(1, static_cast<int64_t>(getWarmUpInputLength()));
 
     auto fake_input = makeFakeInput(static_cast<size_t>(token_heavy_seq_len));
-    fake_input->generate_config->num_return_sequences =
-        use_global_budget_warmup ? 1 : runtime_config.fifo_scheduler_config.max_context_batch_size;
+    int64_t warmup_rows = use_global_budget_warmup ?
+                              1 :
+                              runtime_config.fifo_scheduler_config.max_context_batch_size;
+    if (!use_global_budget_warmup) {
+        // The model prefill workspace is capped at
+        // max(max_batch_tokens_size, max_seq_len). Keep the warmed rectangle
+        // within the same budget; oversize warmups would assert in
+        // _materialize_prefill_q before the engine can start.
+        const int64_t budget = std::max<int64_t>(
+            runtime_config.fifo_scheduler_config.max_batch_tokens_size,
+            static_cast<int64_t>(model_config_.max_seq_len));
+        const int64_t max_rows = std::max<int64_t>(1, budget / token_heavy_seq_len);
+        warmup_rows            = std::min(warmup_rows, max_rows);
+    }
+    fake_input->generate_config->num_return_sequences = warmup_rows;
     fake_input->generate_config->calculate_loss       = int(runtime_config.warm_up_with_loss);
     if (use_global_budget_warmup) {
         size_t max_consumed                               = 0;

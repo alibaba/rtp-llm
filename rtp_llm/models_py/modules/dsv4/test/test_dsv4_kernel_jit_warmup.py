@@ -688,13 +688,22 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
                 "fn": torch.empty((24, 16384), dtype=torch.float32),
             },
         )
+        HybridHCUnit = _module_type(
+            "HybridHCUnit",
+            {
+                "fn": torch.empty((32, 16384), dtype=torch.float32),
+            },
+        )
         root.add_module("attn_hc", TileLangHCUnit())
         root.add_module("ffn_hc_same_shape", TileLangHCUnit())
         root.add_module("head_hc", TileLangHCHead())
         root.add_module("fallback_hc", FallbackHCUnit())
+        root.add_module("hybrid_hc", HybridHCUnit())
 
         with mock.patch.dict(os.environ, {"DSV4_MHC_PRE_GEMM_BACKEND": "fallback"}):
             shapes = _collect_dsv4_mhc_prenorm_shapes(root)
+        # Hybrid routes fallback PRE through pure torch, so it must not be
+        # collected into the JIT warmup that calls the ops backend.
         self.assertEqual(sorted(shapes.keys()), [(24, 16384)])
         self.assertEqual(shapes[(24, 16384)]["name"], "attn_hc")
         self.assertEqual(shapes[(24, 16384)]["dim"], 4096)

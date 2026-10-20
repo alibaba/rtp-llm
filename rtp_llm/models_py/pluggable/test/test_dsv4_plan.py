@@ -32,7 +32,7 @@ def selection(rank=0, *, device_name="ZW-M890P", **changed):
         pp_size=1,
         world_size=4,
         cp_enabled=False,
-        role="PDFUSION",
+        role="PREFILL",
         speculative=False,
         cuda_graph=False,
         reuse_cache=False,
@@ -426,6 +426,28 @@ class Dsv4PlanTest(unittest.TestCase):
                         ctx = make_context(execution_options=options)
                         with self.assertRaisesRegex(ValueError, "No compatible"):
                             ctx.prepare([request_for("model", ctx.selection)])
+
+    def test_plan_phases_follow_runtime_role_and_graph_mode(self):
+        for changed, expected in (
+            ({"role": "PREFILL"}, {"prefill"}),
+            ({"role": "DECODE"}, {"decode"}),
+            ({"role": "PDFUSION"}, {"prefill", "decode"}),
+            ({"role": "PREFILL", "cuda_graph": True}, {"prefill", "decode"}),
+            (
+                {"role": "PDFUSION", "speculative": True},
+                {"prefill", "decode", "target_verify"},
+            ),
+        ):
+            with self.subTest(**changed):
+                request = request_for("model", selection(**changed))
+                self.assertEqual(
+                    request.required_capabilities, frozenset(expected)
+                )
+
+    def test_pdfusion_requires_an_implementation_with_both_phases(self):
+        ctx = self.context(selection(role="PDFUSION"))
+        with self.assertRaisesRegex(ValueError, "No compatible"):
+            ctx.prepare([request_for("model", ctx.selection)])
 
     def test_selected_plan_controls_actual_forward_phase(self):
         from rtp_llm.models.dsv4.specs import (

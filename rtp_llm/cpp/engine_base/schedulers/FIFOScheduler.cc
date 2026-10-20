@@ -334,7 +334,7 @@ bool FIFOScheduler::waitPredicate() {
     // Check streams directly without calling empty() which acquires lock_ (already held by schedule())
     // Pending loads and capacity-blocked waiters are polled by the timed wait below. They are not
     // wakeup events themselves, otherwise a retryable KV shortage spins the scheduler.
-    return stop_ || schedule_trigger_ || !running_streams_.empty();
+    return stop_ || schedule_trigger_ || !running_streams_.empty() || !pending_decode_streams_.empty();
 }
 
 void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_streams,
@@ -718,7 +718,8 @@ bool FIFOScheduler::partitionChunkContinuations() {
 absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     unique_lock<mutex> lock(lock_);
     const bool has_retryable_backlog = !loading_cache_streams_.empty() || !loading_cache_group_queue_.empty()
-                                       || !waiting_group_queue_.empty() || !waiting_streams_.empty();
+                                       || !waiting_group_queue_.empty() || !waiting_streams_.empty()
+                                       || !pending_decode_streams_.empty();
     if (need_fill_fake_stream_ && !has_retryable_backlog) {
         // Pure DP keepalive: this rank has running_streams_ empty and no backlog, so the wait
         // is pacing back-to-back fake rounds for the EP/DP group rather than polling real work

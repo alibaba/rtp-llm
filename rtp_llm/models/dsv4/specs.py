@@ -115,13 +115,23 @@ def request_for(kind, selection, layer_id=None):
     elif kind == "moe":
         path += ".ffn"
     model = selection.model_metadata
-    phases = {"decode" if model.get("role") == "DECODE" else "prefill"}
+    role = model.get("role")
+    if role == "DECODE":
+        phases = {"decode"}
+    elif role == "PDFUSION":
+        phases = {"prefill", "decode"}
+    else:
+        phases = {"prefill"}
     if (
-        model.get("role") == "DECODE"
+        role in ("DECODE", "PDFUSION")
         and model.get("speculative")
         and model.get("model_type") == "deepseek_v4"
     ):
         phases.add("target_verify")
+    if model.get("cuda_graph"):
+        # Decode graph capture performs a decode-shaped forward during
+        # construction, including on prefill-only workers.
+        phases.add("decode")
     return BuildRequest.create(
         module_id="rtp.dsv4." + kind,
         path=path,
@@ -219,7 +229,7 @@ def register_modules(registry):
                 weight_format_id=WEIGHT_FORMAT,
                 state_format_id=STATE_FORMAT,
                 collective_protocol_id="rtp.dsv4.tp-reduced.v1",
-                capabilities={"prefill"},
+                capabilities={"prefill", "decode", "target_verify"},
                 auto_selectable=False,
                 validate_initialized=(
                     "rtp_llm.models.dsv4.builders:validate_initialized"

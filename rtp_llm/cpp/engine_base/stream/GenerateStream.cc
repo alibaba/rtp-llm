@@ -10,6 +10,7 @@
 #endif
 #include "autil/EnvUtil.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
+#include "rtp_llm/cpp/engine_base/stream/ChunkedPrefill.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
@@ -61,6 +62,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
                                bool                             perf_test):
     generate_input_(input),
     max_seq_len_(model_config.max_seq_len),
+    max_batch_tokens_size_(static_cast<size_t>(std::max<int64_t>(runtime_config.fifo_scheduler_config.max_batch_tokens_size, 0))),
     vocab_size_(model_config.vocab_size),
     output_vocab_size_(model_config.output_vocab_ids.size()),
     stream_cache_resource_(std::make_shared<StreamCacheResource>(
@@ -119,6 +121,10 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
 
     // Enable chunked prefill only for request shapes supported by the chunk window path.
     const auto chunk_size = runtime_config.fifo_scheduler_config.prefill_chunk_size;
+    prefill_chunk_batch_tokens_ = runtime_config.fifo_scheduler_config.prefill_chunk_batch_tokens;
+    chunk_align_final_suffix_ =
+        model_config.model_type == "deepseek_v4" && autil::EnvUtil::getEnv("DSV4_PPU_PREFIX_REUSE", false)
+        && autil::EnvUtil::getEnv("DSV4_PPU_PREFIX_TAIL_ALIGN", false);
     if (!input->fake_query && chunk_size > 0
         && (resource_context.role_type == RoleType::PREFILL || resource_context.role_type == RoleType::PDFUSION)) {
         const auto& config = *generateConfig();
@@ -130,6 +136,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
                              config.return_hidden_states                     ? "return_hidden_states" :
                              config.return_all_hidden_states                 ? "return_all_hidden_states" :
                              getReturnAllProbs() != ReturnAllProbsMode::NONE ? "return_all_probs" :
+                             input->custom_output_token_position >= 0    ? "custom_output" :
                              multimodalFeaturesLength() != 0                 ? "multimodal" :
                                                                               nullptr;
         if (reason != nullptr) {
@@ -245,6 +252,33 @@ absl::Status GenerateStream::preparePrefillChunk() {
         return absl::OkStatus();
     }
     return stream_cache_resource_->incrKVBlock(reuse_length_ + currentChunkLen(), reuse_length_);
+}
+
+int64_t GenerateStream::prefillChunkBudget() const {
+    if (!chunkedPrefillEnabled()) {
+        return 0;
+    }
+    const int64_t chunk_size = chunk_size_;
+    return prefill_chunk_batch_tokens_ > 0 ? std::min(prefill_chunk_batch_tokens_, chunk_size) : chunk_size;
+}
+
+int64_t GenerateStream::chunkedPrefillGrant() const {
+    if (!chunkedPrefillEnabled()) {
+        return -1;
+    }
+    return computeChunkGrant(prefillChunkBudget(),
+                             currentBatchSize(),
+                             static_cast<int64_t>(seqLength()) - reuseLength(),
+                             seqSizePerBlock(),
+                             chunk_align_final_suffix_);
+}
+
+int64_t GenerateStream::nonChunkedPrefillTokens() const {
+    return static_cast<int64_t>(std::max(contextLength(), 0)) * static_cast<int64_t>(std::max(currentBatchSize(), 0));
+}
+
+int64_t GenerateStream::prefillTokenBudget() const {
+    return static_cast<int64_t>(std::max(max_batch_tokens_size_, static_cast<size_t>(std::max(max_seq_len_, 0))));
 }
 
 void GenerateStream::releaseResource() {

@@ -89,6 +89,9 @@ private:
     void handleRunning();
     void transitionToRunning();
     void releaseResource();
+    // Rejects a prefill context that cannot produce a positive chunk grant or
+    // cannot fit the non-chunked forward budget at the final reuse point.
+    bool rejectUnreachablePrefill();
 
     StreamEvents events_;
 

@@ -165,13 +165,23 @@ class FallbackHCUnit(HCUnitBase):
         # operands to BF16 here compounds the projection error twice per layer
         # across the 43-layer model and materially changes greedy accuracy.
         backend = os.environ.get("DSV4_MHC_PRE_GEMM_BACKEND", "").strip().lower()
+        backend = {
+            "auto": "deepgemm",
+            "dg": "deepgemm",
+            "single": "tilelang_single",
+        }.get(backend, backend)
         if backend in ("", "fallback"):
             return _tp_linear_mixes(self, x_flat, use_fp32=True)
-        if backend == "deepgemm":
-            return _deepgemm_linear_mixes(self, x_flat)
+        if backend in ("deepgemm", "tilelang", "tilelang_single"):
+            return (
+                _deepgemm_linear_mixes(self, x_flat)
+                if backend == "deepgemm"
+                else _tp_linear_mixes(self, x_flat, use_fp32=True)
+            )
         raise ValueError(
             "fallback mHC supports DSV4_MHC_PRE_GEMM_BACKEND in "
-            f"{{'', 'fallback', 'deepgemm'}}, got {backend!r}"
+            f"{{'', 'fallback', 'deepgemm', 'dg', 'auto', 'tilelang', "
+            f"'tilelang_single', 'single'}}, got {backend!r}"
         )
 
     def _pre_impl(self, x: torch.Tensor, dbg_tag=None):

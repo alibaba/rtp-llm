@@ -1166,9 +1166,20 @@ def _collect_dsv4_mhc_prenorm_shapes(model: Any) -> Dict[tuple[int, int], dict]:
     """Collect mHC DeepGEMM prenorm GEMM shapes from live HC units."""
 
     shapes: Dict[tuple[int, int], dict] = {}
-    unit_classes = {"TileLangHCUnit", "HybridHCUnit"}
     requested_backend = os.environ.get("DSV4_MHC_PRE_GEMM_BACKEND", "").strip().lower()
-    if requested_backend in {"deepgemm", "dg"}:
+    # Match the ops-layer aliases so warmup and runtime select the same path.
+    requested_backend = {
+        "auto": "deepgemm",
+        "dg": "deepgemm",
+        "single": "tilelang_single",
+    }.get(requested_backend, requested_backend)
+    unit_classes = {"TileLangHCUnit"}
+    if requested_backend != "fallback":
+        # Hybrid routes fallback PRE through the pure-torch unit, which needs
+        # no JIT prewarm; collecting it would compile a kernel it never uses
+        # and fail on the ops backend gate.
+        unit_classes.add("HybridHCUnit")
+    if requested_backend == "deepgemm":
         unit_classes.add("FallbackHCUnit")
     for module_name, module in model.named_modules():
         class_name = module.__class__.__name__

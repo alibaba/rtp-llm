@@ -14,13 +14,11 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/engine_base/schedulers/EngineScheduleInfo.h"
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerBase.h"
+#include "rtp_llm/cpp/engine_base/stream/ChunkedPrefill.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 
 namespace rtp_llm {
-
-int64_t computeChunkGrant(
-    int64_t budget, int64_t rows, int64_t remaining, int64_t block_size, bool align_final_suffix = false);
 
 class FIFOSchedulerBase: public SchedulerBase {
 public:

@@ -275,6 +275,12 @@ public:
     // initial_reuse_length_ stays frozen for cache-hit metrics.
     void setChunkSize(int chunk_size) { chunk_size_ = chunk_size; }
     bool chunkedPrefillEnabled() const { return chunk_size_ > 0; }
+    // Per-stream chunk budget and the grant computed from the current reuse
+    // point. Returns -1 when chunking is disabled.
+    int64_t prefillChunkBudget() const;
+    int64_t chunkedPrefillGrant() const;
+    int64_t nonChunkedPrefillTokens() const;
+    int64_t prefillTokenBudget() const;
     void enableWarmupChunkWindow() { warmup_chunk_window_ = true; }
     bool useChunkWindow() const;       // enabled + RUNNING/warmup + context -> window funcs return chunk view
     int  currentChunkLen() const;      // tokens to compute in the current chunk
@@ -916,6 +922,7 @@ protected:
     std::shared_ptr<GenerateStateMachine> generate_status_;
     std::vector<StreamState>              sub_generate_status_;
     int                                   max_seq_len_;
+    size_t                                max_batch_tokens_size_;
     int64_t                               vocab_size_;
     size_t                                output_vocab_size_;
     std::shared_ptr<CompleteTokenIds>     complete_token_ids_;
@@ -953,6 +960,8 @@ protected:
     // Chunked prefill normally gates on RUNNING so admission-time calls keep whole-segment
     // semantics. Prefill warmup explicitly opts in because it bypasses the scheduler.
     int                                   chunk_size_          = 0;
+    int64_t                               prefill_chunk_batch_tokens_ = 0;
+    bool                                  chunk_align_final_suffix_   = false;
     bool                                  warmup_chunk_window_ = false;
     // prefill reuse info (PD-sep); read/write only under output_mutex_
     int64_t prefill_total_reuse_len_  = 0;
