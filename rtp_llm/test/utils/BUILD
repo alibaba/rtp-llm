@@ -46,6 +46,11 @@ py_library(
 )
 
 py_library(
+    name = "hang_watchdog",
+    srcs = ["hang_watchdog.py"],
+)
+
+py_library(
     name = "maga_server_manager",
     srcs = ["maga_server_manager.py"],
     deps = [":test_util", "//rtp_llm:jit_cache_env"],
@@ -84,4 +89,14 @@ py_test(
     srcs = ["device_resource_test.py"],
     env = {"GPU_COUNT": "0"},
     deps = [":device_resource"],
+)
+
+py_test(
+    name = "gpu_health_probe",
+    srcs = ["gpu_health_probe.py"],
+    main = "gpu_health_probe.py",
+    deps = [":torch"],
+    tags = ["SM100_ARM_CU13"],
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
 )
