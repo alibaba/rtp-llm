@@ -726,8 +726,9 @@ TEST(BlockTransferRequestConverterTest, ResponseRoundTripPreservesMixedBlockOutc
 
     const auto incomplete = BlockTransferRequestConverter::decodeTransferResult(received, 5);
     EXPECT_FALSE(incomplete.ok());
-    EXPECT_EQ(incomplete.copy_error, CacheCopyError::COPY_FAILED);
-    EXPECT_EQ(incomplete.block_errors, std::vector<CacheCopyError>(5, CacheCopyError::COPY_FAILED));
+    EXPECT_EQ(incomplete.status.code(), ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
+    EXPECT_EQ(incomplete.copy_error, CacheCopyError::RPC_FAILED);
+    EXPECT_EQ(incomplete.block_errors, std::vector<CacheCopyError>(5, CacheCopyError::RPC_FAILED));
 }
 
 TEST(BlockTransferRequestConverterTest, ResponsePreservesMergedMessagesAndOriginalErrorCode) {
