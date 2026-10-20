@@ -615,11 +615,11 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
         }
         load_request.set_timeout_ms(remaining_ms);
         rpc_context.diagnostic_submit_us = currentTimeUs();
-        RTP_LLM_LOG_INFO("[KV_RPC] RPC_SUBMIT request=[%s] attempt=%s worker=%s worker_index=%d "
-                         "channel=%p context=%p timeout_ms=%ld block_groups=%zu",
-                         decode_context.request_key.c_str(), rpc_context.diagnostic_attempt_id.c_str(), worker.c_str(), i,
-                         connect_status.value().channel.get(), rpc_context.client_context.get(), remaining_ms,
-                         load_context.block_ids_by_group.size());
+        RTP_LLM_LOG_DEBUG("[KV_RPC] RPC_SUBMIT request=[%s] attempt=%s worker=%s worker_index=%d "
+                          "channel=%p context=%p timeout_ms=%ld block_groups=%zu",
+                          decode_context.request_key.c_str(), rpc_context.diagnostic_attempt_id.c_str(), worker.c_str(), i,
+                          connect_status.value().channel.get(), rpc_context.client_context.get(), remaining_ms,
+                          load_context.block_ids_by_group.size());
         rpc_context.submitted = true;
         std::unique_ptr<ClientAsyncResponseReader<BroadcastLoadResponsePB>> reader(rpc_context.stub->AsyncRemoteLoad(
             rpc_context.client_context.get(), load_request, &completion_queues[i % completion_queues.size()]));
@@ -681,11 +681,14 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
             const auto& response         = all_context[rank].response;
             const auto& pb_error_code    = response.error_info().error_code();
             const auto& pb_error_message = response.error_info().error_message();
-            RTP_LLM_LOG_INFO("[KV_RPC] RPC_COMPLETE request=[%s] attempt=%s worker_index=%zu context=%p "
-                             "elapsed_us=%ld grpc_code=%d business_code=%d",
-                             decode_context.request_key.c_str(), all_context[rank].diagnostic_attempt_id.c_str(), rank,
-                             all_context[rank].client_context.get(), currentTimeUs() - all_context[rank].diagnostic_submit_us,
-                             status.error_code(), status.ok() ? static_cast<int>(pb_error_code) : -1);
+            const auto completion_log_level =
+                status.ok() && pb_error_code == ErrorCodePB::NONE_ERROR ? alog::LOG_LEVEL_DEBUG : alog::LOG_LEVEL_INFO;
+            RTP_LLM_LOG(completion_log_level,
+                        "[KV_RPC] RPC_COMPLETE request=[%s] attempt=%s worker_index=%zu context=%p "
+                        "elapsed_us=%ld grpc_code=%d business_code=%d",
+                        decode_context.request_key.c_str(), all_context[rank].diagnostic_attempt_id.c_str(), rank,
+                        all_context[rank].client_context.get(), currentTimeUs() - all_context[rank].diagnostic_submit_us,
+                        status.error_code(), status.ok() ? static_cast<int>(pb_error_code) : -1);
             if (!status.ok()) {
                 logKvRpcFailure(decode_context.request_key, all_context[rank].diagnostic_attempt_id,
                                 rank, status, *all_context[rank].client_context);
@@ -1336,10 +1339,10 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
             diagnostic_attempt_id = valid ? std::string(value.data(), value.size()) : "invalid";
         }
     } catch (...) {}
-    RTP_LLM_LOG_INFO("[KV_RPC] REMOTE_LOAD_ENTER request=[%s] attempt=%s peer=%s worker_dp_rank=%lld request_dp_rank=%lld",
-                     request->request_key().c_str(), diagnostic_attempt_id.c_str(), server_context->peer().c_str(),
-                     static_cast<long long>(maga_init_params_.parallelism_config.dp_rank),
-                     static_cast<long long>(request->dp_rank()));
+    RTP_LLM_LOG_DEBUG("[KV_RPC] REMOTE_LOAD_ENTER request=[%s] attempt=%s peer=%s worker_dp_rank=%lld request_dp_rank=%lld",
+                      request->request_key().c_str(), diagnostic_attempt_id.c_str(), server_context->peer().c_str(),
+                      static_cast<long long>(maga_init_params_.parallelism_config.dp_rank),
+                      static_cast<long long>(request->dp_rank()));
     if (request->dp_rank() != maga_init_params_.parallelism_config.dp_rank) {
         RTP_LLM_LOG_INFO("[KV_RPC] REMOTE_LOAD_RETURN attempt=%s reason=different_dp_rank grpc_code=0",
                          diagnostic_attempt_id.c_str());
@@ -1360,8 +1363,8 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
     std::vector<std::string> peer_addrs(request->peer_addrs().begin(), request->peer_addrs().end());
 
     // TODO(xinfei.sxf) add retry
-    RTP_LLM_LOG_INFO("[KV_RPC] KV_LOAD_BEGIN request=[%s] attempt=%s block_groups=%zu timeout_ms=%ld",
-                     request->request_key().c_str(), diagnostic_attempt_id.c_str(), block_ids_by_group.size(), request->timeout_ms());
+    RTP_LLM_LOG_DEBUG("[KV_RPC] KV_LOAD_BEGIN request=[%s] attempt=%s block_groups=%zu timeout_ms=%ld",
+                      request->request_key().c_str(), diagnostic_attempt_id.c_str(), block_ids_by_group.size(), request->timeout_ms());
     auto error_info = loadCache({request->request_id(),
                                  request->request_key(),
                                  peer_addrs,
@@ -1377,9 +1380,13 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
     response->mutable_error_info()->set_error_message(error_info.ToString());
     response->set_done_time_us(currentTimeUs());
     // This is application completion, not proof the response reached the client.
-    RTP_LLM_LOG_INFO("[KV_RPC] REMOTE_LOAD_RETURN request=[%s] attempt=%s business_code=%d grpc_code=0 cancelled=%d",
-                     request->request_key().c_str(), diagnostic_attempt_id.c_str(), static_cast<int>(error_info.code()),
-                     server_context->IsCancelled());
+    const bool request_cancelled = server_context->IsCancelled();
+    const auto return_log_level =
+        error_info.hasError() || request_cancelled ? alog::LOG_LEVEL_INFO : alog::LOG_LEVEL_DEBUG;
+    RTP_LLM_LOG(return_log_level,
+                "[KV_RPC] REMOTE_LOAD_RETURN request=[%s] attempt=%s business_code=%d grpc_code=0 cancelled=%d",
+                request->request_key().c_str(), diagnostic_attempt_id.c_str(), static_cast<int>(error_info.code()),
+                request_cancelled);
     RTP_LLM_LOG_DEBUG("request: %s, remote load cache grpc done", request->request_key().c_str());
     return grpc::Status::OK;
 }

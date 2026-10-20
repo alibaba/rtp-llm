@@ -1065,10 +1065,10 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncRead(const std::share
                     releaseCacheBacking(*removed_item);
                 }
             }
-            RTP_LLM_LOG_INFO("memory cache read success: read_blocks=%d released_blocks=%zu total_blocks=%zu",
-                             read_block_num,
-                             copy_plan->copy_infos.size(),
-                             total_block_num);
+            RTP_LLM_LOG_DEBUG("memory cache read success: read_blocks=%d released_blocks=%zu total_blocks=%zu",
+                              read_block_num,
+                              copy_plan->copy_infos.size(),
+                              total_block_num);
         }
         // reset ptr to release memory block refs
         copy_plan.reset();

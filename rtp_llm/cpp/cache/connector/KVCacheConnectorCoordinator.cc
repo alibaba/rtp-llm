@@ -332,9 +332,9 @@ KVCacheConnectorCoordinator::asyncWriteByLayer(int                              
         return nullptr;
     }
     if (layer_id == 0) {
-        RTP_LLM_LOG_INFO("asyncWriteByLayer [P2P]: dispatching layer_id=%d, request_id=%ld to P2PConnector",
-                         layer_id,
-                         layer_context->requestId());
+        RTP_LLM_LOG_DEBUG("asyncWriteByLayer [P2P]: dispatching layer_id=%d, request_id=%ld to P2PConnector",
+                          layer_id,
+                          layer_context->requestId());
     }
     return p2p_connector_->asyncWriteByLayer(layer_id, layer_context);
 }
