@@ -17,11 +17,14 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PreDestroy;
+import java.util.EnumMap;
 import java.util.List;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.LongAdder;
 
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_THREAD_POOL_INFO;
@@ -45,6 +48,8 @@ public final class WorkerStatusSynchronizer {
     private final DynamicCacheIntervalService cacheIntervalService;
     private final long syncRequestTimeoutMs;
     private final LongAdder syncCount = new LongAdder();
+    private final EnumMap<RoleType, AtomicBoolean> pendingCycles = new EnumMap<>(RoleType.class);
+    private final AtomicBoolean closed = new AtomicBoolean();
     private final Long syncEngineStatusInterval;
     private final long statusStaleAfterUs;
     private final ScheduledThreadPoolExecutor scheduler;
@@ -70,6 +75,9 @@ public final class WorkerStatusSynchronizer {
         this.cacheIntervalService = cacheIntervalService;
         this.modelName = modelMetaConfig.modelName();
         this.requiredRoles = modelMetaConfig.requiredRoles();
+        for (RoleType role : requiredRoles) {
+            pendingCycles.put(role, new AtomicBoolean());
+        }
 
         this.syncEngineStatusInterval =
                 flexlbConfig.getWorkerRegistry().getHealth().getStatusPollIntervalMs();
@@ -79,6 +87,7 @@ public final class WorkerStatusSynchronizer {
                 flexlbConfig.getWorkerRegistry().getHealth().getStatusStaleAfterMs() * 1000L;
         int engineThreads = flexlbConfig.getInternalRuntime().getEngineSyncExecutorThreads();
         engineSyncExecutor = executor(engineThreads, "engine-sync-executor");
+        engineSyncExecutor.setRejectedExecutionHandler(new ThreadPoolExecutor.AbortPolicy());
         int statusThreads = flexlbConfig.getInternalRuntime().getStatusCheckExecutorThreads();
         statusCheckExecutor = executor(statusThreads, "status-checker-executor");
         this.scheduler =
@@ -99,7 +108,12 @@ public final class WorkerStatusSynchronizer {
                 TimeUnit.SECONDS,
                 new LinkedBlockingQueue<>(15_000),
                 new NamedThreadFactory(name),
-                new ThreadPoolExecutor.CallerRunsPolicy());
+                (task, executor) -> {
+                    if (executor.isShutdown()) {
+                        throw new RejectedExecutionException("Worker sync executor is shut down");
+                    }
+                    task.run();
+                });
     }
 
     private void reportExecutorMetrics() {
@@ -114,6 +128,9 @@ public final class WorkerStatusSynchronizer {
     }
 
     public void syncEngineStatus() {
+        if (closed.get()) {
+            return;
+        }
         syncCount.increment();
         logger.debug(
                 "sync engine status start, times:{}, modelName:{}",
@@ -121,25 +138,44 @@ public final class WorkerStatusSynchronizer {
                 modelName);
         try {
             for (RoleType roleType : requiredRoles) {
-                engineSyncExecutor.submit(
-                        new EngineSyncRunner(
-                                modelName,
-                                endpointRegistry,
-                                workerAddressService,
-                                statusCheckExecutor,
-                                engineHealthReporter,
-                                workerStatusRpcClient,
-                                roleType,
-                                cacheAwareService,
-                                cacheIntervalService,
-                                syncRequestTimeoutMs,
-                                syncCount,
-                                syncEngineStatusInterval,
-                                flexlbConfig
-                                        .getWorkerRegistry()
-                                        .getCacheStatus()
-                                        .isFullSnapshotDebugMode(),
-                                statusStaleAfterUs));
+                AtomicBoolean pending = pendingCycles.get(roleType);
+                if (!pending.compareAndSet(false, true)) {
+                    continue;
+                }
+                try {
+                    engineSyncExecutor.submit(
+                            () -> {
+                                try {
+                                    if (closed.get()) {
+                                        return;
+                                    }
+                                    new EngineSyncRunner(
+                                                    modelName,
+                                                    endpointRegistry,
+                                                    workerAddressService,
+                                                    statusCheckExecutor,
+                                                    engineHealthReporter,
+                                                    workerStatusRpcClient,
+                                                    roleType,
+                                                    cacheAwareService,
+                                                    cacheIntervalService,
+                                                    syncRequestTimeoutMs,
+                                                    syncCount,
+                                                    syncEngineStatusInterval,
+                                                    flexlbConfig
+                                                            .getWorkerRegistry()
+                                                            .getCacheStatus()
+                                                            .isFullSnapshotDebugMode(),
+                                                    statusStaleAfterUs)
+                                            .run();
+                                } finally {
+                                    pending.set(false);
+                                }
+                            });
+                } catch (RuntimeException | Error rejected) {
+                    pending.set(false);
+                    throw rejected;
+                }
             }
         } catch (Exception e) {
             logger.error("sync engine prefill status error", e);
@@ -153,6 +189,7 @@ public final class WorkerStatusSynchronizer {
 
     @PreDestroy
     public void destroy() {
+        closed.set(true);
         scheduler.shutdown();
         engineSyncExecutor.shutdown();
         statusCheckExecutor.shutdown();
