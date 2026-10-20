@@ -23,8 +23,17 @@ from typing import Optional  # noqa: F401
 import torch
 from torch import nn
 
+try:
+    # Bit-exact Triton replacement for the eager add+nan_to_num pair (the
+    # decoder's Phase C kernel); non-CUDA/non-fp16 hosts fall back inside.
+    from rtp_llm.models_py.model_desc.whisper_fused_kernels import fused_residual_clamp as _fused_residual_clamp
+except Exception:  # pragma: no cover - CPU-only import hosts
+    _fused_residual_clamp = None
+
 
 def _clamped_fp32_add(residual: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+    if _fused_residual_clamp is not None:
+        return _fused_residual_clamp(residual, x)
     out = residual + x
     if out.dtype == torch.float16:
         clamp_value = torch.finfo(out.dtype).max - 1000
@@ -45,18 +54,21 @@ class WhisperAttention(nn.Module):
         self.out_proj = nn.Linear(embed_dim, embed_dim, bias=True)
 
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int) -> torch.Tensor:
-        return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
+        # [B, S, H, D] -> [B, H, S, D]; SDPA consumes the strided view, so no
+        # explicit contiguous copy (the eager matmul path needed three per
+        # layer plus the SxS softmax materialization).
+        return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         bsz, tgt_len, _ = hidden_states.size()
-        # reference scales q right after the projection (modeling_whisper.py:288)
-        query_states = self._shape(self.q_proj(hidden_states) * self.scaling, tgt_len, bsz)
+        # The transformers default (attn_implementation="sdpa") applies the
+        # head-dim scale inside the kernel; SDPA's default scale equals
+        # head_dim**-0.5, so the projection-time pre-scale is dropped.
+        # Non-causal, no padding mask: whisper encoder attends to all positions.
+        query_states = self._shape(self.q_proj(hidden_states), tgt_len, bsz)
         key_states = self._shape(self.k_proj(hidden_states), -1, bsz)
         value_states = self._shape(self.v_proj(hidden_states), -1, bsz)
-        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3))
-        # non-causal, no padding mask: whisper encoder attends to all positions
-        attn_weights = nn.functional.softmax(attn_weights, dim=-1)
-        attn_output = torch.matmul(attn_weights, value_states)
+        attn_output = nn.functional.scaled_dot_product_attention(query_states, key_states, value_states)
         attn_output = attn_output.transpose(1, 2).reshape(bsz, tgt_len, self.embed_dim)
         return self.out_proj(attn_output)
 
