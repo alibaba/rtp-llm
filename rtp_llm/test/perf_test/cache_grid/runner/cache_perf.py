@@ -573,6 +573,21 @@ def parser():
     prepare.add_argument("--engine-env-setting", action="append", default=[])
     prepare.add_argument("--runtime-env-setting", action="append", default=[])
     prepare.add_argument(
+        "--extra-engine-args-json",
+        default="{}",
+        help="JSON object merged over the default engine CLI arguments",
+    )
+    prepare.add_argument(
+        "--extra-engine-env-json",
+        default="{}",
+        help="JSON object merged over the default model-process environment",
+    )
+    prepare.add_argument(
+        "--extra-runtime-env-json",
+        default="{}",
+        help="JSON object merged over the default Bazel/runtime environment",
+    )
+    prepare.add_argument(
         "--grid-mode",
         choices=("stratified", "fixed-cache-sweep"),
         default="stratified",

@@ -75,6 +75,9 @@ class CachePerfCiTest(unittest.TestCase):
             engine_arg=["--reuse_cache=1", "act_type=BF16"],
             engine_env_setting=["WORLD_SIZE=4", "PERF_PROFILE_RUNS=0"],
             runtime_env_setting=["CC=/usr/bin/gcc"],
+            extra_engine_args_json="{}",
+            extra_engine_env_json="{}",
+            extra_runtime_env_json="{}",
             config=["cuda13_arm"],
             bazel=None,
             runs=2,
@@ -117,6 +120,41 @@ class CachePerfCiTest(unittest.TestCase):
         self.assertEqual(grid["profile_sha256"], first["profile_fingerprint"])
         self.assertEqual(grid["profile"], profile)
         self.assertEqual(grid["summary"]["estimated_measure_requests"], 18)
+
+    def test_prepare_extra_json_adds_and_overrides_launch_settings(self):
+        inputs = ci.create_inputs(
+            self.prepare_args(
+                extra_engine_args_json=(
+                    '{"reuse_cache":0,"enable_cuda_graph":1,"new_arg":"a=b"}'
+                ),
+                extra_engine_env_json=(
+                    '{"PERF_PROFILE_RUNS":2,"DSV4_CHUNK_TOKENS":4096}'
+                ),
+                extra_runtime_env_json=(
+                    '{"CC":"/opt/gcc/bin/gcc","TRITON_CACHE_DIR":"/tmp/triton"}'
+                ),
+            ),
+            repo=self.repo,
+        )
+        profile = json.loads(inputs["artifacts"][ci.PROFILE_NAME])
+        self.assertEqual(profile["engine_args"]["reuse_cache"], 0)
+        self.assertEqual(profile["engine_args"]["enable_cuda_graph"], 1)
+        self.assertEqual(profile["engine_args"]["new_arg"], "a=b")
+        self.assertEqual(profile["engine_env"]["PERF_PROFILE_RUNS"], 2)
+        self.assertEqual(profile["engine_env"]["DSV4_CHUNK_TOKENS"], 4096)
+        self.assertEqual(profile["runtime_env"]["CC"], "/opt/gcc/bin/gcc")
+        self.assertEqual(profile["runtime_env"]["TRITON_CACHE_DIR"], "/tmp/triton")
+
+    def test_prepare_rejects_invalid_extra_json(self):
+        with self.assertRaisesRegex(ValueError, "requires a JSON object"):
+            ci.create_inputs(
+                self.prepare_args(extra_engine_args_json="[]"), repo=self.repo
+            )
+        with self.assertRaisesRegex(ValueError, "expected a string or number"):
+            ci.create_inputs(
+                self.prepare_args(extra_engine_env_json='{"FEATURE":true}'),
+                repo=self.repo,
+            )
 
     def test_prepare_rejects_unsafe_or_ambiguous_settings(self):
         with self.assertRaisesRegex(ValueError, "repeats or overrides tp_size"):

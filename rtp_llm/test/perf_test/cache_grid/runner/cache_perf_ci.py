@@ -91,6 +91,40 @@ def _settings(
     return result
 
 
+def _json_settings(
+    value: str | None,
+    *,
+    option: str,
+    initial: Dict[str, Any] | None = None,
+    strip_dashes: bool = False,
+) -> Dict[str, Any]:
+    """Merge a JSON object over settings collected from repeatable CLI flags."""
+    result = dict(initial or {})
+    if value is None or not value.strip():
+        return result
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as error:
+        raise ValueError(
+            f"{option} requires a valid JSON object: {error.msg}"
+        ) from error
+    if not isinstance(parsed, dict):
+        raise ValueError(f"{option} requires a JSON object")
+    for raw_name, item in parsed.items():
+        name = raw_name.lstrip("-") if strip_dashes else raw_name
+        if not _NAME.fullmatch(name):
+            raise ValueError(f"{option} contains an invalid setting name: {raw_name!r}")
+        if isinstance(item, bool) or not isinstance(item, (str, int, float)):
+            raise ValueError(
+                f"{option}.{raw_name}: expected a string or number, "
+                f"got {type(item).__name__}"
+            )
+        if isinstance(item, float) and not math.isfinite(item):
+            raise ValueError(f"{option}.{raw_name}: value must be finite")
+        result[name] = item
+    return result
+
+
 def create_inputs(args: argparse.Namespace, *, repo: Path) -> Dict[str, Any]:
     """Generate validated profile/grid inputs from CI-friendly scalar options."""
     output_dir = _new_top_level_dir(args.inputs_dir, repo, "--inputs-dir")
@@ -120,18 +154,31 @@ def create_inputs(args: argparse.Namespace, *, repo: Path) -> Dict[str, Any]:
             **sizes,
         },
     )
-    engine_args = _settings(
-        args.engine_arg,
-        option="--engine-arg",
+    engine_args = _json_settings(
+        getattr(args, "extra_engine_args_json", None),
+        option="--extra-engine-args-json",
+        initial=_settings(
+            args.engine_arg,
+            option="--engine-arg",
+            strip_dashes=True,
+        ),
         strip_dashes=True,
     )
-    engine_env = _settings(
-        args.engine_env_setting,
-        option="--engine-env-setting",
+    engine_env = _json_settings(
+        getattr(args, "extra_engine_env_json", None),
+        option="--extra-engine-env-json",
+        initial=_settings(
+            args.engine_env_setting,
+            option="--engine-env-setting",
+        ),
     )
-    runtime_env = _settings(
-        args.runtime_env_setting,
-        option="--runtime-env-setting",
+    runtime_env = _json_settings(
+        getattr(args, "extra_runtime_env_json", None),
+        option="--extra-runtime-env-json",
+        initial=_settings(
+            args.runtime_env_setting,
+            option="--runtime-env-setting",
+        ),
     )
     configs = list(args.config or ["cuda13_arm"])
     if not configs or any(not value for value in configs):
