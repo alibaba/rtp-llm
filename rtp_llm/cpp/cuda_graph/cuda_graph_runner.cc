@@ -1588,22 +1588,36 @@ bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state,
                 continue;
             }
             const auto& lens = it->second.sequence_lengths;
-            if (lens.defined() && lens.numel() > 0 && !lens.is_cuda()) {
-                bool any_mm = false;
-                for (int64_t i = 0; i < lens.numel(); ++i) {
-                    if (lens[i].item<int32_t>() > 0) {
-                        any_mm = true;
-                        break;
-                    }
+            // Host-mirror contract: mm group sequence_lengths are produced host-
+            // side by the input gatherer's pinned allocation (the sole writer)
+            // and every plan path here reads them on the host. Any lens that
+            // is missing, empty or device-resident violates that contract and
+            // cannot be verified this step: route to eager instead of
+            // silently running the captured zero-page attention (its
+            // always-running kernel would leak the o_proj bias on a no-audio
+            // batch row).
+            if (!lens.defined() || lens.numel() == 0 || lens.is_cuda()) {
+                if (observe_fallback) {
+                    RTP_LLM_LOG_WARNING(
+                        "mm-length group=%s lens unavailable on host this step, fallback to normal run.",
+                        kv_cache_group_tags_[group_id].c_str());
                 }
-                if (!any_mm) {
-                    if (observe_fallback) {
-                        RTP_LLM_LOG_WARNING(
-                            "mm-length group=%s has no multimodal rows this step, fallback to normal run.",
-                            kv_cache_group_tags_[group_id].c_str());
-                    }
-                    return false;
+                return false;
+            }
+            bool any_mm = false;
+            for (int64_t i = 0; i < lens.numel(); ++i) {
+                if (lens[i].item<int32_t>() > 0) {
+                    any_mm = true;
+                    break;
                 }
+            }
+            if (!any_mm) {
+                if (observe_fallback) {
+                    RTP_LLM_LOG_WARNING(
+                        "mm-length group=%s has no multimodal rows this step, fallback to normal run.",
+                        kv_cache_group_tags_[group_id].c_str());
+                }
+                return false;
             }
         }
     } else if (!inputs.attention_inputs_by_tag.empty()) {
@@ -1683,7 +1697,9 @@ int CudaGraphRunner::getCurrentRealGraphSize(const CudaGraphState& state) const 
 void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_bs, int num_tokens_per_bs) {
     inputs.attention_inputs.is_target_verify = is_target_verify_;
     inputs.attention_inputs.is_prefill       = is_prefill_cuda_graph_mode_ || is_target_verify_;
-    inputs.attention_inputs.is_cuda_graph    = true;
+    // Same narrow capture flag as prepareCaptureInputs: mm-group models only
+    // (the rocm FusedRopeKVCacheOp semantic collision documented there).
+    inputs.attention_inputs.is_cuda_graph    = !kv_group_mm_len_.empty();
 
     // input_lengths [batch_size, int32] (decode only)
     inputs.attention_inputs.input_lengths        = torch::full({int(max_bs_)}, num_tokens_per_bs_, options_cpu_int32_);
@@ -2130,7 +2146,14 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
     // Common slice operations for input_ids and padding_offset
     inputs.attention_inputs.is_prefill       = is_prefill_cuda_graph_mode_ || is_target_verify_;
     inputs.attention_inputs.is_target_verify = is_target_verify_;
-    inputs.attention_inputs.is_cuda_graph    = true;
+    // Narrow capture flag: only models with mm-length KV groups (whisper-class
+    // cross-attention groups) need the Python forward to distinguish capture
+    // steps from eager fallbacks. The generic flag stays false otherwise:
+    // rocm FusedRopeKVCacheOp gives is_cuda_graph a narrower meaning (the
+    // generation-prefill capture stride) and must not newly activate for
+    // plain decode captures of non-mm models.
+    inputs.attention_inputs.is_cuda_graph    = !kv_group_mm_len_.empty();
+
     // HC-shaped MTP draft prefill executes a fixed-capacity Python path. Other
     // MTP models must slice to the current graph key so FlashInfer's batch
     // indices length remains equal to the query nnz.
