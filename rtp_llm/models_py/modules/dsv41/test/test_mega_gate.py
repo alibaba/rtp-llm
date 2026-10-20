@@ -160,6 +160,23 @@ class MegaGateHostTest(unittest.TestCase):
                 _MEGA_GATE.mega_gate(self.x, self.gate)
         kernel.assert_called_once()
 
+    def test_caller_owned_outputs_receive_routes(self):
+        indices = torch.full((8, 6), -1, dtype=torch.int64)
+        weights = torch.zeros((8, 6), dtype=torch.float32)
+
+        def fill_out(*args, out, **kwargs):
+            out[0].copy_(torch.arange(6).expand(8, 6))
+            out[1].fill_(2.5 / 6)
+
+        with patch.object(_MEGA_GATE, "_native_gate", return_value=fill_out):
+            actual_weights, actual_indices = _MEGA_GATE.mega_gate(
+                self.x, self.gate, out=(indices, weights)
+            )
+        self.assertIs(actual_indices, indices)
+        self.assertIs(actual_weights, weights)
+        torch.testing.assert_close(indices, torch.arange(6).expand(8, 6))
+        torch.testing.assert_close(weights.sum(-1), torch.full((8,), 2.5))
+
 
 class MegaGateMoETest(unittest.TestCase):
     def test_forward_and_chunk_preserve_strategy_and_shared_expert_paths(self):

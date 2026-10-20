@@ -4,6 +4,8 @@ This seam is internal to one block, so Engram injection, auxiliary hidden
 capture and the final delayed readout keep their existing boundaries. Both
 flat prefill and batched decode layouts retain BF16 outputs. Cross-layer
 decode can additionally request native FP8 output for the next projection.
+The intra-layer decode seam can instead write routed/shared FP8 scales
+directly into the following MegaMoE's buffers, retaining BF16 for its gate.
 
 DeepGEMM initializes persistent split barriers per CUDA stream. Warm up on
 the capture stream before recording a graph; an unwarmed capture stream
@@ -14,12 +16,15 @@ from __future__ import annotations
 
 import importlib
 from functools import lru_cache
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 import torch
 
 from rtp_llm.models_py.modules.dsv41.hc.delayed import DelayedHCUnit
 from rtp_llm.models_py.modules.dsv41.hc.v41_prenorm import prepare_tf32_weight
+
+if TYPE_CHECKING:
+    from rtp_llm.models_py.modules.dsv41.moe.mega_se_input_packer import MegaMoEInputs
 
 QuantizedInput = tuple[torch.Tensor, torch.Tensor]
 MHCOutput = tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
@@ -233,6 +238,7 @@ def try_fused_post_pre(
     original_tokens: int | None = None,
     reuse_residual: bool = False,
     output_fp8: bool = False,
+    moe_inputs: MegaMoEInputs | None = None,
 ) -> MHCOutput | MHCQuantizedOutput | None:
     """Return ``(residual, normalized_input, post, comb)`` or use the old path.
 
@@ -248,12 +254,23 @@ def try_fused_post_pre(
     DeepGEMM quantization and TMA-aligned GEMM scales. Its minimum scale
     is 2**-22 (legacy/v3: 2**-33), so tiny inputs may underflow to zero
     and are not bitwise equivalent to the legacy quantization path.
+    ``moe_inputs`` instead writes caller-owned MegaMoE activation/scales,
+    retaining the four-element return. It excludes QKV scales and compact
+    execution padding; the caller may consume it only after a non-None result.
     """
+    if moe_inputs is not None and output_fp8:
+        raise ValueError("Choose GEMM scales or MegaMoE scales, not both")
+    if moe_inputs is not None and original_tokens is not None:
+        return None
     if not is_supported(attn_out, residual, post, comb, previous, next_hc, norm):
         return None
     operation = _get_mega_mhc()
     leading = tuple(attn_out.shape[:-1])
     tokens = attn_out.numel() // 5120
+    if moe_inputs is not None and (
+        moe_inputs.x.shape != (tokens, 5120) or moe_inputs.x.device != attn_out.device
+    ):
+        raise ValueError("MegaMoE output buffers must match the MegaMHC token rows")
     execution_tokens = tokens
     if original_tokens is not None:
         execution_tokens = _compact_execution_tokens(
@@ -323,6 +340,13 @@ def try_fused_post_pre(
         )
         if quantized is not None:
             arguments.update(y_fp8=q, y_gemm_sf=sf)
+        elif moe_inputs is not None:
+            arguments.update(
+                y_fp8=moe_inputs.x,
+                y_routed_sf=moe_inputs.x_sf,
+                y_shared_sf=moe_inputs.shared_l1_acts_sf,
+                shared_sf_block_m=moe_inputs.block_m,
+            )
         operation(**arguments)
         if quantized is not None:
             quantized = (q[:tokens].view(*leading, 5120), sf[:tokens])
