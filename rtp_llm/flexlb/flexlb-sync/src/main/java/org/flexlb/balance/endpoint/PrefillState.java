@@ -471,8 +471,7 @@ public final class PrefillState {
             long lower = 0L, same = 0L, higher = 0L;
             for (int occupant = 1; occupant <= PriorityNormalizer.MAX_PRIORITY; occupant++) {
                 if (occupant < priority) { lower += requestCountsByPriority[occupant]; }
-                else if (occupant == priority) { same += requestCountsByPriority[occupant]; }
-                else { higher += requestCountsByPriority[occupant]; }
+                else if (occupant == priority) { same += requestCountsByPriority[occupant]; } else { higher += requestCountsByPriority[occupant]; }
             }
             admissionSummaryCache = new AdmissionSummary(outstandingRequestCount,
                     requestLimit > 0 ? Math.max(0L, outstandingRequestCount - requestLimit + 1L) : 0L,
@@ -990,6 +989,14 @@ public final class PrefillState {
                 progress, nowMs,
                 activeIndex.capture(),
                 captureWorkLocked(nowMs, null));
+    }
+
+    public java.util.OptionalLong tryLoadMetric() {
+        if (!lock.tryLock()) { return java.util.OptionalLong.empty(); }
+        WorkCapture capture;
+        try { capture = captureWorkLocked(clock.getAsLong(), Set.of()); }
+        finally { lock.unlock(); }
+        return capture.materialize().totalRemainingWorkMs();
     }
 
     public WorkSnapshot committedSnapshot() {

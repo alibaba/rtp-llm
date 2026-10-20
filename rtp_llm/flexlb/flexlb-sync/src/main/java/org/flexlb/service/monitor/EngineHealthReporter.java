@@ -242,7 +242,7 @@ public class EngineHealthReporter {
                     metricTags, (double) pollIntervalUs);
         }
         if (ep != null) {
-            ep.getLoadMetric().ifPresent(
+            ep.tryGetLoadMetric().ifPresent(
                     value -> monitor.report(
                             ENGINE_RUNNING_QUEUE_TIME, metricTags, value));
         }

@@ -414,7 +414,6 @@ final class DecodeState {
         }
     }
 
-
     ResourceChange<MutationStatus> updatePreemption(long token, PreemptionUpdate update) {
         java.util.Objects.requireNonNull(update, "update");
         admissionLock.lock();
@@ -616,7 +615,6 @@ final class DecodeState {
         }
     }
 
-
     record CleanupCandidate(long reservationToken, DecodeTaskPhase phase, long observedAtMs) { }
 
     Map<Long, CleanupCandidate> cleanupCandidates() {
@@ -627,7 +625,6 @@ final class DecodeState {
             return candidates;
         } finally { admissionLock.unlock(); }
     }
-
 
     CleanupResult evictExpiredRequests(long ttlMs, Map<Long, CleanupCandidate> orphanCandidates) {
         admissionLock.lock();
@@ -661,8 +658,13 @@ final class DecodeState {
         }
     }
 
-
     record CleanupResult(int expiredReservations, boolean capacityReleased) { }
+
+    java.util.OptionalLong tryLoadMetric() {
+        if (!admissionLock.tryLock()) { return java.util.OptionalLong.empty(); }
+        try { return java.util.OptionalLong.of(confirmedEngineOwnedCount + reservedUsage.requests); }
+        finally { admissionLock.unlock(); }
+    }
 
     DecodeRoutingView routingView(String address) {
         DecodeRoutingView cached = routingViewCache;
@@ -741,7 +743,6 @@ final class DecodeState {
             admissionLock.unlock();
         }
     }
-
 
     long placementVersion() { return admissionVersion; }
 
@@ -836,8 +837,7 @@ final class DecodeState {
                 expected = Math.addExact(expected, held ? expectedKvTokens : -expectedKvTokens);
             } catch (ArithmeticException overflow) { throw new IllegalStateException("Priority preemption KV hold counter overflow", overflow); }
             checkState(hard >= 0L && expected >= hard, "Invalid priority preemption KV hold counters");
-            if (held) { priorityPreemptionHeldExpectedKv = expected; priorityPreemptionHeldKv = hard; }
-            else { priorityPreemptionHeldKv = hard; priorityPreemptionHeldExpectedKv = expected; }
+            if (held) { priorityPreemptionHeldExpectedKv = expected; priorityPreemptionHeldKv = hard; } else { priorityPreemptionHeldKv = hard; priorityPreemptionHeldExpectedKv = expected; }
             kvHeldAfterWorkerRelease = held;
         }
     }

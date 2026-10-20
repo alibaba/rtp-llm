@@ -216,7 +216,7 @@ public class EngineSyncRunner implements Runnable {
             stepLatency.add(observation.stepLatencyMs());
             WorkerEndpoint endpoint = endpointRegistry.get(roleType, entry.getKey(), worker);
             if (endpoint != null) {
-                endpoint.getLoadMetric().ifPresent(runningLoad::add);
+                endpoint.tryGetLoadMetric().ifPresent(runningLoad::add);
             }
         }
         if (stepLatency.count() >= 2) {

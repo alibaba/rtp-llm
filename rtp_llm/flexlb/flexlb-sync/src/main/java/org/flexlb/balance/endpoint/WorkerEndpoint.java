@@ -296,6 +296,11 @@ public class WorkerEndpoint {
      * endpoint cannot publish a coherent complete work view.
      * <p>Decode: total active task count (confirmed running + inflight).
      */
+    /** Skip a monitoring sample when a stateful endpoint is busy. */
+    public OptionalLong tryGetLoadMetric() {
+        return getLoadMetric();
+    }
+
     public OptionalLong getLoadMetric() {
         WorkerStatus.EngineObservation engine =
                 status.committedEngineObservation();
