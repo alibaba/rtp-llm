@@ -30,6 +30,24 @@ try:
 except Exception:  # pragma: no cover - CPU-only import hosts
     _fused_residual_clamp = None
 
+try:
+    from rtp_llm.ops.compute_ops import rtp_llm_ops as _rtp_llm_ops
+except Exception:  # pragma: no cover - CPU-only import hosts
+    _rtp_llm_ops = None
+
+
+class _CudaLayerNorm(nn.LayerNorm):
+    """nn.LayerNorm parameter contract (checkpoint load by name) with the
+    engine's generalLayerNorm kernel as the forward. Falls back to the ATen
+    path when the ops binding is unavailable."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if _rtp_llm_ops is None or not x.is_cuda or x.dim() != 2 or not x.is_contiguous():
+            return nn.functional.layer_norm(x, self.normalized_shape, self.weight, self.bias, self.eps)
+        output = torch.empty(x.shape, dtype=x.dtype, device=x.device)
+        _rtp_llm_ops.layernorm(output, x, self.weight.data, self.bias, self.eps)
+        return output
+
 
 def _clamped_fp32_add(residual: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
     if _fused_residual_clamp is not None:
@@ -77,18 +95,22 @@ class WhisperEncoderLayer(nn.Module):
     def __init__(self, d_model: int, num_heads: int, ffn_dim: int, eps: float):
         super().__init__()
         self.self_attn = WhisperAttention(d_model, num_heads)
-        self.self_attn_layer_norm = nn.LayerNorm(d_model, eps=eps)
+        self.self_attn_layer_norm = _CudaLayerNorm(d_model, eps=eps)
         self.fc1 = nn.Linear(d_model, ffn_dim)
         self.fc2 = nn.Linear(ffn_dim, d_model)
-        self.final_layer_norm = nn.LayerNorm(d_model, eps=eps)
+        self.final_layer_norm = _CudaLayerNorm(d_model, eps=eps)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        # The engine generalLayerNorm kernel takes [rows, cols]; the tower runs
+        # [B, S, D]. Fold the batch/frame axes around the LN calls only.
         residual = hidden_states
-        hidden_states = self.self_attn_layer_norm(hidden_states)
+        rows = hidden_states.reshape(-1, hidden_states.shape[-1])
+        hidden_states = self.self_attn_layer_norm(rows).view_as(hidden_states)
         hidden_states = self.self_attn(hidden_states)
         hidden_states = _clamped_fp32_add(residual, hidden_states)
         residual = hidden_states
-        hidden_states = self.final_layer_norm(hidden_states)
+        rows = hidden_states.reshape(-1, hidden_states.shape[-1])
+        hidden_states = self.final_layer_norm(rows).view_as(hidden_states)
         hidden_states = nn.functional.gelu(self.fc1(hidden_states))
         hidden_states = self.fc2(hidden_states)
         hidden_states = _clamped_fp32_add(residual, hidden_states)
@@ -118,7 +140,7 @@ class WhisperEncoderTower(nn.Module):
         self.layers = nn.ModuleList(
             [WhisperEncoderLayer(d_model, num_heads, ffn_dim, layer_norm_eps) for _ in range(num_layers)]
         )
-        self.layer_norm = nn.LayerNorm(d_model, eps=layer_norm_eps)
+        self.layer_norm = _CudaLayerNorm(d_model, eps=layer_norm_eps)
 
     @property
     def num_audio_positions(self) -> int:
@@ -141,5 +163,5 @@ class WhisperEncoderTower(nn.Module):
         hidden_states = inputs_embeds + self.embed_positions(positions)
         for layer in self.layers:
             hidden_states = layer(hidden_states)
-        hidden_states = self.layer_norm(hidden_states)
+        hidden_states = self.layer_norm(hidden_states.reshape(-1, hidden_states.shape[-1])).view_as(hidden_states)
         return hidden_states
