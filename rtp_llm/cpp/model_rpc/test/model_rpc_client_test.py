@@ -2528,6 +2528,8 @@ class _FakeRpcError(grpc.RpcError):
         return "injected terminal RPC error"
 
     def trailing_metadata(self):
+        if isinstance(self._trailing_metadata, dict):
+            return tuple(self._trailing_metadata.items())
         return self._trailing_metadata
 
 
@@ -3483,6 +3485,27 @@ class FirstCauseRpcErrorTest(TestCase):
             client._handle_grpc_error(self.rpc_error(metadata), "relay")
         self.assertEqual(caught.exception.exception_type, ExceptionType.MM_PROCESS_ERROR)
         self.assertEqual(caught.exception.message, f"relay: {details.error_message}")
+
+    def test_aio_rpc_error_preserves_p2p_handoff_failure(self):
+        message = "reporter_role=DECODE: P2P side channel has invalid speculative tokens"
+        details = ErrorDetailsPB(error_code=8311, error_message=message)
+        error = grpc.aio.AioRpcError(
+            code=grpc.StatusCode.INTERNAL,
+            initial_metadata=grpc.aio.Metadata(),
+            trailing_metadata=grpc.aio.Metadata(
+                ("grpc-status-details-bin", details.SerializeToString()),
+            ),
+            details=message,
+        )
+        client = ModelRpcClient.__new__(ModelRpcClient)
+        with self.assertRaises(FtRuntimeException) as caught:
+            client._handle_grpc_error(error, "request=42", "worker:9000")
+        self.assertEqual(
+            caught.exception.exception_type,
+            ExceptionType.P2P_CONNECTOR_LOAD_FROM_PREFILL_FAILED,
+        )
+        self.assertEqual(caught.exception.message, f"request=42: {message}")
+        self.assertNotIn("worker:9000", caught.exception.message)
 
     def test_structured_cause_survives_generic_grpc_status(self):
         details = ErrorDetailsPB(error_code=903, error_message="Prefill VIT request=42 failed")

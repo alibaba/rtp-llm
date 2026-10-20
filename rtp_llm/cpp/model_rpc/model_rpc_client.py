@@ -1250,7 +1250,9 @@ class ModelRpcClient(object):
         # request_desc reaches the client; keep backend addresses in the log-only argument.
         details = ErrorDetailsPB()
         try:
-            metadata = dict(e.trailing_metadata() or ())
+            # aio.Metadata iterates (key, value) pairs, but dict(metadata)
+            # treats its keys() result as mapping keys and raises KeyError.
+            metadata = {key: value for key, value in (e.trailing_metadata() or ())}
             encoded = metadata.get("grpc-status-details-bin")
             if encoded:
                 details.ParseFromString(encoded)

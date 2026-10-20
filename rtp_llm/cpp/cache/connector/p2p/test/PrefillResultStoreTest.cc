@@ -233,6 +233,23 @@ TEST_F(PrefillResultStoreTest, RngOffsetPreservesPresenceAndFullWidth) {
     EXPECT_FALSE(response.payload().has_rng_state());
 }
 
+TEST_F(PrefillResultStoreTest, OmitsAbsentAndZeroElementSpeculativeTensors) {
+    P2PConnectorStartLoadResponsePB response;
+    auto                            result = data();
+    ASSERT_TRUE(PrefillResultStore::fillStartLoadResponsePayload(result, response).ok());
+    EXPECT_EQ(response.payload().tensors().count("propose_probs"), 0u);
+    EXPECT_EQ(response.payload().tensors().count("propose_hidden"), 0u);
+    for (auto dtype : {torch::kFloat32, torch::kFloat16, torch::kBFloat16}) {
+        result.propose_probs  = torch::empty({0}, torch::TensorOptions().dtype(dtype));
+        result.propose_hidden = torch::empty({2, 0}, torch::TensorOptions().dtype(dtype));
+        ASSERT_TRUE(PrefillResultStore::fillStartLoadResponsePayload(result, response).ok());
+        EXPECT_EQ(response.payload().tensors().count("propose_tokens"), 0u);
+        EXPECT_EQ(response.payload().tensors().count("propose_probs"), 0u);
+        EXPECT_EQ(response.payload().tensors().count("propose_hidden"), 0u);
+        EXPECT_TRUE(response.payload().has_first_generate_token());
+    }
+}
+
 TEST_F(PrefillResultStoreTest, SerializationFailureClearsPartialPayload) {
     auto result          = data();
     result.propose_probs = torch::ones({2}, torch::kInt64);

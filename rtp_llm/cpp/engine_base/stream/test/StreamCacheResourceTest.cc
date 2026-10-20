@@ -226,6 +226,24 @@ protected:
         prepareResourceWithInputTokens(/*input_tokens=*/{1, 2, 3, 4, 5, 6}, reuse_cache, role_type);
     }
 
+    void completeP2PSideChannel(P2PConnectorStartLoadResponsePB response) {
+        auto result = std::make_shared<DecodeLoadHelper::Result>();
+        result->response.Swap(&response);
+        result->complete(true);
+        ASSERT_TRUE(result->success());
+        auto broadcast = std::make_shared<P2PBroadcastClient::Result>("speculative-handoff");
+        auto context   = std::make_shared<P2PConnectorAsyncReadContext>(std::make_shared<KVCacheResource>(),
+                                                                      broadcast,
+                                                                      result,
+                                                                      std::make_shared<P2PConnectorMetricsCollector>(),
+                                                                      0,
+                                                                      true);
+        context->checkDone();
+        ASSERT_TRUE(context->success());
+        stream_->streamCacheResource().p2p_load_context_ = context;
+        ASSERT_TRUE(stream_->streamCacheResource().loadCacheDone());
+    }
+
     void prepareP2PRegistrationResource(bool query_pd, const std::string& key) {
         // Inject the registration-only connector below; do not initialize transport workers.
         prepareResourceWithCacheConfig(init_config(), {1, 2, 3, 4, 5, 6}, true, RoleType::PREFILL);
@@ -1688,7 +1706,100 @@ TEST_F(StreamCacheResourceTest, testP2PFirstTokenEnqueuesDecodeDuplicateForSuppr
     EXPECT_TRUE(stream_->hasOutput());
 }
 
+TEST_F(StreamCacheResourceTest, testP2PDsparkHandoffAcceptsAbsentAndZeroElementTensors) {
+    for (int shape_case : {0, 1, 2}) {
+        SCOPED_TRACE(shape_case);
+        prepareResource(/*reuse_cache=*/true, RoleType::DECODE);
+        stream_->generateConfig()->pd_separation = true;
+        stream_->setSpEditRun(true);
+        ASSERT_FALSE(stream_->disableSpRun());
+        P2PConnectorStartLoadResponsePB response;
+        auto*                           payload = response.mutable_payload();
+        payload->set_has_first_generate_token(true);
+        payload->set_first_generate_token_id(7);
+        if (shape_case != 0) {
+            for (const char* name : {"propose_probs", "propose_hidden"}) {
+                auto* tensor = (*payload->mutable_tensors())[name].mutable_tensor();
+                tensor->set_data_type(TensorPB::FP32);
+                if (shape_case == 2) {
+                    tensor->add_shape(2);
+                }
+                tensor->add_shape(0);
+            }
+        }
+        completeP2PSideChannel(std::move(response));
+        ASSERT_FALSE(stream_->hasError());
+        EXPECT_EQ(stream_->seqLength(), stream_->inputLength() + 1);
+        EXPECT_EQ(stream_->reuseLength(), stream_->seqLength() - 1);
+        EXPECT_EQ(stream_->getMtpTokenIndex(), stream_->seqLength() - 1);
+        EXPECT_FALSE(stream_->sp_edit_run_);
+        EXPECT_FALSE(stream_->contain_propose_token_);
+        EXPECT_TRUE(stream_->getProposeToken().empty());
+        EXPECT_EQ(stream_->getSPOutputBuffer(), nullptr);
+    }
+}
+
+TEST_F(StreamCacheResourceTest, testP2PHandoffRejectsIncompleteProposalAndMalformedTensor) {
+    for (int invalid_case : {0, 1, 2}) {
+        SCOPED_TRACE(invalid_case);
+        prepareResource(/*reuse_cache=*/true, RoleType::DECODE);
+        stream_->generateConfig()->pd_separation = true;
+        ASSERT_FALSE(stream_->disableSpRun());
+        P2PConnectorStartLoadResponsePB response;
+        auto*                           payload = response.mutable_payload();
+        payload->set_has_first_generate_token(true);
+        payload->set_first_generate_token_id(7);
+        if (invalid_case == 0) {
+            // Nonempty probabilities without a target/draft token pair are invalid.
+            const float value  = 1.0f;
+            auto*       tensor = (*payload->mutable_tensors())["propose_probs"].mutable_tensor();
+            tensor->set_data_type(TensorPB::FP32);
+            tensor->add_shape(1);
+            tensor->set_fp32_data(&value, sizeof(value));
+        } else if (invalid_case == 1) {
+            // A positive shape with missing bytes is malformed, not an empty proposal.
+            auto* tensor = (*payload->mutable_tensors())["propose_hidden"].mutable_tensor();
+            tensor->set_data_type(TensorPB::FP16);
+            tensor->add_shape(1);
+        } else {
+            const int32_t token  = 7;
+            auto*         tensor = (*payload->mutable_tensors())["propose_tokens"].mutable_tensor();
+            tensor->set_data_type(TensorPB::INT32);
+            tensor->add_shape(1);
+            tensor->set_int32_data(&token, sizeof(token));
+        }
+        completeP2PSideChannel(std::move(response));
+        ASSERT_TRUE(stream_->hasError());
+        EXPECT_EQ(stream_->statusInfo().code(), ErrorCode::P2P_CONNECTOR_LOAD_FROM_PREFILL_FAILED);
+    }
+}
+
 #if defined(USING_CUDA)
+TEST_F(StreamCacheResourceTest, testP2PHandoffRestoresNonemptyMtpProposal) {
+    prepareResource(/*reuse_cache=*/true, RoleType::DECODE);
+    stream_->generateConfig()->pd_separation = true;
+    PrefillResultStore::SideChannelData data;
+    data.has_first_token = true;
+    data.first_token_id  = 7;
+    data.propose_tokens  = {7, 8};
+    data.propose_probs   = torch::ones({1, 4}, torch::kFloat32);
+    data.propose_hidden  = torch::ones({1, 4}, torch::kFloat16);
+    P2PConnectorStartLoadResponsePB response;
+    ASSERT_TRUE(PrefillResultStore::fillStartLoadResponsePayload(data, response).ok());
+    completeP2PSideChannel(std::move(response));
+    ASSERT_FALSE(stream_->hasError());
+    EXPECT_EQ(stream_->getProposeToken(), (std::vector<int>{7, 8}));
+    EXPECT_TRUE(stream_->contain_propose_token_);
+    ASSERT_NE(stream_->getSPOutputBuffer(), nullptr);
+    const auto output = stream_->getSPOutputBuffer();
+    EXPECT_EQ(output->tokens.numel(), 2);
+    EXPECT_EQ(output->tokens[0][1].item<int32_t>(), 8);
+    EXPECT_TRUE(output->all_probs.is_cuda());
+    EXPECT_TRUE(output->hidden_states.is_cuda());
+    EXPECT_TRUE(torch::equal(output->all_probs.cpu(), data.propose_probs));
+    EXPECT_TRUE(torch::equal(output->hidden_states.cpu(), data.propose_hidden));
+}
+
 TEST_F(StreamCacheResourceTest, testP2PRngHandoffContinuesPrefillRandomSequence) {
     for (bool advance : {false, true}) {
         prepareResource(/*reuse_cache=*/true, RoleType::DECODE);

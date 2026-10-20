@@ -183,6 +183,8 @@ void applyP2PSideChannel(const P2PSideChannelPayload& payload, GenerateStream* s
              .force_update_info      = false,
              .generation_prefill_cuda_graph_status =
                  static_cast<GenerationPrefillCudaGraphStatus>(payload.generation_prefill_cuda_graph_status)});
+        // DSpARK resumes from the prompt tail without a Prefill proposal.
+        stream->initSpeculativeHandoffPositions();
     }
 
     {
@@ -194,12 +196,20 @@ void applyP2PSideChannel(const P2PSideChannelPayload& payload, GenerateStream* s
                                       payload.prefill_use_independent_block_pools);
     }
 
-    const bool has_probs = payload.propose_probs.shape_size() > 0 || !payload.propose_probs.fp16_data().empty()
-                           || !payload.propose_probs.bf16_data().empty()
-                           || !payload.propose_probs.fp32_data().empty();
-    const bool has_hidden = payload.propose_hidden.shape_size() > 0 || !payload.propose_hidden.fp16_data().empty()
-                            || !payload.propose_hidden.bf16_data().empty()
-                            || !payload.propose_hidden.fp32_data().empty();
+    torch::Tensor probs;
+    torch::Tensor hidden;
+    try {
+        // A shape such as [0] describes an empty tensor, not a proposal.
+        // Decode before checking numel so malformed shapes/bytes still fail.
+        probs  = TensorPbConvert::pbToTorch(payload.propose_probs);
+        hidden = TensorPbConvert::pbToTorch(payload.propose_hidden);
+    } catch (const std::exception& error) {
+        stream->reportErrorWithoutLock(ErrorCode::P2P_CONNECTOR_LOAD_FROM_PREFILL_FAILED,
+                                       std::string("invalid P2P speculative tensor: ") + error.what());
+        return;
+    }
+    const bool has_probs  = probs.numel() > 0;
+    const bool has_hidden = hidden.numel() > 0;
     if (!payload.propose_tokens.empty() || has_probs || has_hidden) {
         if (payload.propose_tokens.size() < 2) {
             stream->setContainProposeToken(false);
@@ -210,13 +220,13 @@ void applyP2PSideChannel(const P2PSideChannelPayload& payload, GenerateStream* s
                                                 "P2P side channel has invalid speculative tokens");
             }
         } else {
-            auto probs = has_probs ? TensorPbConvert::pbToTorch(payload.propose_probs) :
-                                     torch::empty({0}, torch::TensorOptions().dtype(torch::kFloat32));
-            auto hidden = has_hidden ? TensorPbConvert::pbToTorch(payload.propose_hidden) :
-                                       torch::empty({0}, torch::TensorOptions().dtype(torch::kFloat16));
-            stream->setReuseLength(stream->seqLength() - 1);
-            stream->setSpEditRun(false);
-            stream->setMtpTokenIndex(stream->seqLength() - 1);
+            if (!has_probs) {
+                probs = torch::empty({0}, torch::TensorOptions().dtype(torch::kFloat32));
+            }
+            if (!has_hidden) {
+                hidden = torch::empty({0}, torch::TensorOptions().dtype(torch::kFloat16));
+            }
+            stream->initSpeculativeHandoffPositions();
             stream->setContainProposeToken(true);
             stream->setProposeToken(payload.propose_tokens);
             auto output    = std::make_shared<SpeculativeExecutorStreamOutput>();

@@ -153,8 +153,6 @@ grpc::Status PrefillResultStore::fillStartLoadResponsePayload(const SideChannelD
         }
         const auto fill_tensor = [&](const char* name, const torch::Tensor& tensor) {
             if (!tensor.defined()) {
-                // An absent SPOutputBuffer previously supplied a default FP32 PB with no shape.
-                (*payload->mutable_tensors())[name].mutable_tensor();
                 return;
             }
             if (!tensor.device().is_cpu()) {
@@ -162,7 +160,6 @@ grpc::Status PrefillResultStore::fillStartLoadResponsePayload(const SideChannelD
             }
             switch (tensor.scalar_type()) {
                 case torch::kFloat32:
-                    break;
                 case torch::kFloat16:
                 case torch::kBFloat16:
                     if (tensor.numel() == 0) {
