@@ -248,6 +248,25 @@ py_test(
 )
 
 py_test(
+    name = "vision_downsample_cpu_test",
+    srcs = ["vision_downsample_test.py"],
+    main = "vision_downsample_test.py",
+    deps = ["//rtp_llm:testlib"],
+    size = "small",
+    env = {"CUDA_VISIBLE_DEVICES": "", "GPU_COUNT": "0"},
+)
+
+py_test(
+    name = "vision_downsample_gpu_test",
+    srcs = ["vision_downsample_test.py"],
+    main = "vision_downsample_test.py",
+    deps = ["//rtp_llm:testlib"],
+    size = "large",
+    tags = ["SM100_ARM_CU13"],
+    exec_properties = {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
+)
+
+py_test(
     name = "deepseek_v41_packed_vision_test",
     srcs = ["deepseek_v41_packed_vision_test.py"],
     deps = ["//rtp_llm:testlib"],
