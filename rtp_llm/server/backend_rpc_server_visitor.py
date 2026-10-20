@@ -783,7 +783,7 @@ class BackendRPCServerVisitor:
             kmonitor.report(GaugeMetrics.ROUTE_RT_METRIC, route_timer.cost_ms())
             final_roles = {addr.role for addr in input.generate_config.role_addrs}
             missing_roles = [role for role in self.backend_role_list if role not in final_roles]
-            if missing_roles:
+            if not input.generate_config.role_addrs or missing_roles:
                 route_error = FtRuntimeException(
                     ExceptionType.ROUTE_ERROR,
                     "request_id=%s no backend role addresses found after routing"

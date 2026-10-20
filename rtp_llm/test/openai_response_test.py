@@ -3093,6 +3093,43 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(Exception, "no backend role addresses found"):
             await visitor.route_ips(input_obj)
 
+    async def test_master_only_frontend_rejects_empty_route_and_preserves_error(self):
+        from unittest.mock import AsyncMock
+
+        from rtp_llm.server.master_client import FlexlbResponse
+
+        config = PDSepConfig()
+        config.role_type = RoleType.FRONTEND
+        visitor = BackendRPCServerVisitor(
+            max_seq_len=self.model_config.max_seq_len,
+            seq_size_per_block=64,
+            pd_sep_config=config,
+            addresses=["localhost:8080"],
+        )
+        visitor.backend_role_list = []
+        visitor.host_service.get_master_addr = lambda: "master:8080"
+        visitor.host_service.get_queue_length = lambda: 0
+        visitor.get_domain_route_addrs = AsyncMock()
+        for result in (
+            FlexlbResponse.connection_failed_response(),
+            FlexlbResponse.error_response(512, "admission rejected"),
+        ):
+            with self.subTest(connection_failed=result.connection_failed):
+                visitor.get_master_route_addrs = AsyncMock(return_value=result)
+                input_obj = GenerateInput(
+                    request_id=1,
+                    token_ids=torch.tensor([1, 2, 3], dtype=torch.int32),
+                    mm_inputs=[],
+                    generate_config=GenerateConfig(),
+                )
+                with self.assertRaisesRegex(
+                    FtRuntimeException, "no backend role addresses found"
+                ) as raised:
+                    await visitor.route_ips(input_obj)
+                if result.error_code is not None:
+                    self.assertEqual(raised.exception.rtp_error_code, result.error_code)
+                visitor.get_master_route_addrs.assert_awaited_once_with(input_obj)
+
     def _decode_batch_visitor_and_inputs(self):
         config = PDSepConfig()
         config.role_type = RoleType.DECODE
