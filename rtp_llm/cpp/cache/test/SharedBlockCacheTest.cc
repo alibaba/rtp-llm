@@ -1,10 +1,12 @@
 #include "gtest/gtest.h"
 
+#include <algorithm>
 #include <chrono>
 #include <atomic>
 #include <thread>
 #include <cstdlib>
 #include <iostream>
+#include <random>
 
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"
 
@@ -477,6 +479,150 @@ TEST(SharedBlockCacheTest, GroupEvictionMatchesGlobalAcrossBranchAndAliasMutatio
         ASSERT_EQ(actual.evicted_slots, expected.evicted_slots);
     }
     EXPECT_TRUE(grouped.empty());
+}
+
+TEST(SharedBlockCacheTest, FlatGlobalEvictionCountsSlotsAndKeepsResidents) {
+    SharedBlockCache cache;
+    cache.setPrefixTreeEnabled(false);
+    putOne(cache, 1, 101, rootDep(), SharedBlockCache::kGpuLogicalNamespace, true);
+    cache.put(2, {NULL_BLOCK_IDX, NULL_BLOCK_IDX}, false);
+    cache.put(3, {103, 203}, false);
+    cache.put(4, {104, NULL_BLOCK_IDX}, false);
+    ASSERT_TRUE(cache.match(3).found);
+
+    EXPECT_TRUE(cache.selectAndEvict(0).evicted_keys.empty());
+    EXPECT_EQ(cache.selectAndEvict(1).evicted_keys, (CacheKeysType{2, 4}));
+    EXPECT_EQ(cache.selectAndEvict(2).evicted_keys, (CacheKeysType{3}));
+    EXPECT_TRUE(cache.selectAndEvict(100).evicted_keys.empty());
+    EXPECT_TRUE(cache.contains(1));
+}
+
+TEST(SharedBlockCacheTest, FlatGroupEvictionSkipsMissingSlotsAndCountsNonMatchableSlots) {
+    SharedBlockCache cache;
+    cache.setPrefixTreeEnabled(false);
+    cache.put(1, {101, 201}, true);
+    cache.put(2, {102}, false);
+    cache.put(3, {103, NULL_BLOCK_IDX}, false);
+    cache.put(4, {104, 204}, false, SharedBlockCache::kGpuLogicalNamespace, childDep(3, 1), {true, false});
+    cache.put(5, {105, 205}, false);
+
+    EXPECT_TRUE(cache.selectAndEvictForGroup(-1, 1).evicted_keys.empty());
+    EXPECT_TRUE(cache.selectAndEvictForGroup(5, 1).evicted_keys.empty());
+    EXPECT_TRUE(cache.selectAndEvictForGroup(1, 0).evicted_keys.empty());
+    const auto evicted = cache.selectAndEvictForGroup(1, 1);
+    EXPECT_EQ(evicted.evicted_keys, (CacheKeysType{4}));
+    EXPECT_EQ(evicted.evicted_slots.at(4), (std::vector<BlockIdxType>{104, 204}));
+    EXPECT_EQ(evicted.evicted_dependencies.at(4).parent_key, 3);
+    EXPECT_EQ(cache.selectAndEvictForGroup(1, 100).evicted_keys, (CacheKeysType{5}));
+    EXPECT_EQ(cache.size(), 3);
+}
+
+TEST(SharedBlockCacheTest, FlatEvictionMatchesReferenceLruAfterTouchesAndResidentAliases) {
+    struct Item {
+        CacheKeyType              key;
+        std::vector<BlockIdxType> slots;
+        bool                      resident;
+    };
+    SharedBlockCache cache;
+    cache.setPrefixTreeEnabled(false);
+    std::vector<Item> oldest_first;
+    std::mt19937      random(20261020);
+    for (CacheKeyType key = 1; key <= 1000; ++key) {
+        Item item{key, {static_cast<BlockIdxType>(key), random() % 3 == 0 ? NULL_BLOCK_IDX :
+                                                                 static_cast<BlockIdxType>(key + 1000)},
+                  key % 11 == 0};
+        cache.put(key, item.slots, item.resident);
+        oldest_first.push_back(item);
+    }
+    for (int i = 0; i < 300; ++i) {
+        const size_t index = random() % oldest_first.size();
+        auto         item  = oldest_first[index];
+        if (i % 3 == 0) {
+            // A resident alias protects the single flat entry for this key.
+            item.resident = true;
+            cache.put(item.key, item.slots, true, SharedBlockCache::kGpuCpCanonicalNamespace, rootDep());
+            cache.put(item.key, item.slots, false, SharedBlockCache::kGpuLogicalNamespace, rootDep());
+        } else {
+            ASSERT_TRUE(cache.match(item.key).found);
+        }
+        oldest_first.erase(oldest_first.begin() + index);
+        oldest_first.push_back(item);
+    }
+    for (int step = 0; step < 100; ++step) {
+        const bool   global = step % 3 == 0;
+        const int    group  = step % 2;
+        const size_t target = random() % 30;
+        size_t       count  = 0;
+        CacheKeysType expected;
+        std::unordered_map<CacheKeyType, std::vector<BlockIdxType>> expected_slots;
+        for (auto it = oldest_first.begin(); it != oldest_first.end() && count < target;) {
+            if (it->resident || (!global && isNullBlockIdx(it->slots[group]))) {
+                ++it;
+                continue;
+            }
+            expected.push_back(it->key);
+            expected_slots[it->key] = it->slots;
+            count += global ? std::count_if(it->slots.begin(), it->slots.end(),
+                                            [](BlockIdxType slot) { return !isNullBlockIdx(slot); }) : 1;
+            it = oldest_first.erase(it);
+        }
+        const auto actual = global ? cache.selectAndEvict(target) : cache.selectAndEvictForGroup(group, target);
+        ASSERT_EQ(actual.evicted_keys, expected) << "step=" << step;
+        ASSERT_EQ(actual.evicted_slots, expected_slots) << "step=" << step;
+        ASSERT_EQ(cache.size(), oldest_first.size());
+    }
+}
+
+// Run in separate processes with RTP_LLM_CACHE_EVICTION_INCREMENTAL=0 and 1.
+// Only selection/deletion is timed; table creation and teardown are excluded.
+TEST(SharedBlockCacheTest, DISABLED_FlatEvictionScalingBenchmark) {
+    const char* size_env   = std::getenv("RTP_LLM_EVICT_BENCH_SIZE");
+    const char* target_env = std::getenv("RTP_LLM_EVICT_BENCH_TARGETS");
+    const bool shuffled = std::getenv("RTP_LLM_EVICT_BENCH_SHUFFLE") != nullptr;
+    const size_t nodes    = size_env ? std::stoull(size_env) : 150000;
+    const size_t target   = target_env ? std::stoull(target_env) : 32;
+    constexpr size_t calls = 32;
+    ASSERT_GT(nodes, calls * target);
+    for (bool global : {true, false}) {
+        SharedBlockCache cache;
+        cache.setPrefixTreeEnabled(false);
+        CacheKeysType oldest_first;
+        oldest_first.reserve(nodes);
+        for (size_t key = 1; key <= nodes; ++key) {
+            cache.put(key, {static_cast<BlockIdxType>(key)}, false);
+            oldest_first.push_back(key);
+        }
+        if (shuffled) {
+            // Model reuse scrambles list order relative to heap allocation.
+            // Keep this pointer-chasing case outside the timed region too.
+            std::mt19937 random(20261020);
+            std::shuffle(oldest_first.begin(), oldest_first.end(), random);
+            for (const auto key : oldest_first) {
+                ASSERT_TRUE(cache.match(key).found);
+            }
+        }
+        double elapsed_us = 0;
+        std::vector<double> samples;
+        samples.reserve(calls);
+        for (size_t i = 0; i < calls; ++i) {
+            const auto begin = std::chrono::steady_clock::now();
+            const auto result = global ? cache.selectAndEvict(target) : cache.selectAndEvictForGroup(0, target);
+            const double duration_us =
+                std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - begin).count();
+            elapsed_us += duration_us;
+            samples.push_back(duration_us);
+            ASSERT_EQ(result.evicted_keys.size(), target);
+            EXPECT_EQ(result.evicted_keys.front(), oldest_first[i * target]);
+            EXPECT_EQ(result.evicted_keys.back(), oldest_first[(i + 1) * target - 1]);
+        }
+        std::sort(samples.begin(), samples.end());
+        std::cerr << "FLAT_EVICTION_BENCH global=" << global << " nodes=" << nodes << " target=" << target
+                  << " shuffled=" << shuffled
+                  << " calls=" << calls << " mean_us=" << elapsed_us / calls
+                  << " median_us=" << (samples[calls / 2 - 1] + samples[calls / 2]) / 2
+                  << " p90_us=" << samples[(calls * 9 + 9) / 10 - 1]
+                  << " min_us=" << samples.front() << " max_us=" << samples.back() << std::endl;
+    }
 }
 
 // Reproduce small, repeated admissions against a large cache. Cache creation

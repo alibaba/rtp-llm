@@ -164,6 +164,7 @@ private:
                                     const BlockDependency& dependency) const;
     static bool slotMatchable(const UnifiedCacheItem& item, size_t group_id);
     static bool hasUsableSlot(const UnifiedCacheItem& item, int group_id);
+    CacheKeysType collectFlatEvictionKeysLocked(size_t min_blocks, std::optional<int> group_id) const;
     std::vector<NamespacedKey> collectEvictChainLocked(const NamespacedKey& leaf_key) const;
     bool chainHasUsableSlotLocked(const std::vector<NamespacedKey>& chain, int group_id) const;
     bool chainHasReachableAncestorSlotLocked(const std::vector<NamespacedKey>& chain, int group_id) const;
