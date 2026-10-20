@@ -479,8 +479,9 @@ ErrorInfo LocalRpcServer::collectStreamOutput(grpc::ServerContext*              
     while (true) {
         const auto output_result = stream->nextOutput(kRpcOutputWaitTimeoutMs);
         if (isCancelled(context)) {
-            stream->reportError(ErrorCode::CANCELLED, "request cancelled by client");
-            return stream->statusInfo();
+            const ErrorInfo cancellation(ErrorCode::CANCELLED, "request cancelled by client");
+            stream->reportError(cancellation.code(), cancellation.ToString());
+            return cancellation;
         }
         if (!output_result.ok()) {
             if (output_result.status().code() == ErrorCode::OUTPUT_QUEUE_NO_UPDATE) {

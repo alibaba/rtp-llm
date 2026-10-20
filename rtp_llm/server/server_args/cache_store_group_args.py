@@ -1,4 +1,13 @@
+import argparse
+
 from rtp_llm.server.server_args.util import str2bool
+
+
+def _kv_leak_threshold_percent(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError) as error:
+        raise argparse.ArgumentTypeError("KV leak threshold must be an integer") from error
 
 
 def init_cache_store_group_args(parser, cache_store_config):
@@ -133,7 +142,7 @@ def init_cache_store_group_args(parser, cache_store_config):
         "--p2p_kv_leak_exit_threshold_percent",
         env_name="P2P_KV_LEAK_EXIT_THRESHOLD_PERCENT",
         bind_to=(cache_store_config, "p2p_kv_leak_exit_threshold_percent"),
-        type=int,
+        type=_kv_leak_threshold_percent,
         choices=range(1, 101),
         default=30,
         help="Decode：超时后滞留目标 KV 占总 KV 容量超过该百分比时退出进程，取值 1~100，默认 30。",

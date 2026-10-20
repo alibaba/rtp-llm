@@ -255,6 +255,7 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_route_ips_falls_back_on_master_connection_failure(self):
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor._mm_cache_routing = False
         visitor.master_config = None
         visitor.host_service = _FakeHostService()
         visitor.backend_role_list = [RoleType.PREFILL]
@@ -281,6 +282,7 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_route_ips_records_master_success_when_domain_completes_roles(self):
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor._mm_cache_routing = False
         visitor.master_config = None
         visitor.host_service = _FakeHostService()
         visitor.backend_role_list = [RoleType.PREFILL, RoleType.DECODE]
@@ -313,6 +315,7 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_route_ips_preserves_request_source_when_domain_completes_roles(self):
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor._mm_cache_routing = False
         visitor.master_config = None
         visitor.host_service = _FakeHostService()
         visitor.backend_role_list = [RoleType.PREFILL, RoleType.DECODE]

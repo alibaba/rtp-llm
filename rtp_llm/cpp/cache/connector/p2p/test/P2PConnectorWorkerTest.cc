@@ -1682,7 +1682,7 @@ TEST_F(P2PConnectorWorkerTest, Read_InvalidLaterRouteRegistersNoReceiveTasks) {
 
     const auto result = decode_->read(3009, "invalid-later-route", currentTimeMs() + 5000, plan);
 
-    EXPECT_EQ(result.code(), ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED);
+    EXPECT_EQ(result.code(), ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED);
     EXPECT_NE(result.ToString().find("route=1 layer=1 tag=group1"), std::string::npos);
     EXPECT_NE(result.ToString().find("cache_key=1001 block_id=-1"), std::string::npos);
     // A zero final task count alone would also pass if an earlier task were

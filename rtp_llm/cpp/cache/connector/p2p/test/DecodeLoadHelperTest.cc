@@ -148,7 +148,11 @@ TEST_F(DecodeLoadHelperTest, LoadReturnsPlanDigestMismatchBeforeTransferDeadline
     ASSERT_TRUE(result->done());
     EXPECT_FALSE(result->success());
     EXPECT_EQ(result->error_code, error_code);
-    EXPECT_EQ(result->error_message, message);
+    EXPECT_EQ(result->error_message,
+              message
+                  + " [received_at location=DecodeLoadHelper::complete observer_role=DECODE operation=StartLoad peer="
+                  + "127.0.0.1:" + std::to_string(server_->listenPort())
+                  + " request_id=1012 key=test_plan_digest_mismatch wire_code=13]");
     EXPECT_EQ(server_->service()->getLastStartLoadRequest().plan_digest(), 1);
 }
 

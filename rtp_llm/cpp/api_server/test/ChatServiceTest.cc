@@ -481,13 +481,10 @@ TEST_F(ChatServiceTest, ChatCompletions_StreamErrorJsonEscaped) {
     GenerateOutputs outputs;
     outputs.generate_outputs.push_back(output);
 
-    EXPECT_CALL(*mock_stream, hasError())
-        .WillOnce(Return(false))
-        .WillOnce(Return(false))
-        .WillOnce(Return(true))
-        .WillRepeatedly(Return(true));
-    EXPECT_CALL(*mock_stream, getStatus()).WillOnce(Return(StreamState::RUNNING));
-    EXPECT_CALL(*mock_stream, nextOutput(_)).WillOnce(Return(ErrorResult<GenerateOutputs>(std::move(outputs))));
+    EXPECT_CALL(*mock_stream, hasError()).WillOnce(Return(false)).WillOnce(Return(true));
+    EXPECT_CALL(*mock_stream, nextOutput(_))
+        .WillOnce(Return(ErrorResult<GenerateOutputs>(std::move(outputs))))
+        .WillOnce(Return(ErrorResult<GenerateOutputs>(ErrorCode::FINISHED, "finished")));
 
     std::vector<std::string> writes;
     EXPECT_CALL(*mock_writer_, Write).WillRepeatedly(Invoke([&writes](const std::string& data) {

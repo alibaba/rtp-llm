@@ -578,7 +578,7 @@ BlockAddrInfo KVCacheManager::convertIndexToAddr(int block_index, int layer_id) 
 }
 
 std::vector<BlockInfo> KVCacheManager::convertIndexToBuffer(int block_index, int layer_id) const {
-    return coordinator_manager_->convertIndexToBuffer(layer_id, config_.topology().groups().front().tag, block_index);
+    return coordinator_manager_->convertIndexToBuffer(layer_id, block_index);
 }
 
 std::vector<BlockInfo>

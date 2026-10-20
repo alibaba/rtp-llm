@@ -486,6 +486,10 @@ def _is_finished_response(outputs_pb: GenerateOutputsPB) -> bool:
 
 
 _RPC_ERROR_CODE_OVERRIDES = {
+    ErrorCodePB.MALLOC_FAILED: ExceptionType.MALLOC_ERROR,
+    # Legacy worker-status lookup errors share the frontend routing lookup category.
+    ErrorCodePB.GET_PART_NODE_STATUS_FAILED: ExceptionType.GET_HOST_FAILED,
+    ErrorCodePB.GET_ALL_NODE_STATUS_FAILED: ExceptionType.GET_HOST_FAILED,
     # Preserve the legacy client-facing cancellation code instead of mapping to
     # the distinct internal ExceptionType.CANCELLED member by name.
     ErrorCodePB.CANCELLED: ExceptionType.CANCELLED_ERROR,
@@ -1233,7 +1237,8 @@ class ModelRpcClient(object):
             code = ExceptionType.UNKNOWN_ERROR.value
         elif 0 < code <= 25:
             names = {
-                "P2P_CONNECTOR_WORKER_READ_CANCELED": "P2P_CONNECTOR_WORKER_READ_CANCELLED"
+                "MALLOC_FAILED": "MALLOC_ERROR",
+                "P2P_CONNECTOR_WORKER_READ_CANCELED": "P2P_CONNECTOR_WORKER_READ_CANCELLED",
             }
             name = ErrorCodePB.Name(code)
             name = names.get(name, name)
@@ -1244,7 +1249,8 @@ class ModelRpcClient(object):
             "%s backend error frame: wire_code=%d backend_error_code=%d message=%s",
             request_desc, error.error_code, code, error.error_message,
         )
-        ModelRpcClient._raise_backend_error(code, f"{request_desc}: {error.error_message}")
+        message = error.error_message or _rpc_error_code_name(error.error_code)
+        ModelRpcClient._raise_backend_error(code, f"{request_desc}: {message}")
 
     def _handle_grpc_error(self, e: grpc.RpcError, request_desc: str, target_address: str = "") -> None:
         # request_desc reaches the client; keep backend addresses in the log-only argument.
@@ -1503,13 +1509,13 @@ class ModelRpcClient(object):
             raise e
         finally:
             try:
+                if (
+                    client_settlement_task is not None
+                    and not stream_done
+                    and client_settlement_abandoned is not None
+                ):
+                    client_settlement_abandoned.set()
                 if client_span is not None:
-                    if (
-                        client_settlement_task is not None
-                        and not stream_done
-                        and client_settlement_abandoned is not None
-                    ):
-                        client_settlement_abandoned.set()
                     # Normal completion has a detached settlement task. Do not
                     # await it here, otherwise aclose() would reintroduce the
                     # finished-frame blocking regression.
@@ -1773,13 +1779,13 @@ class ModelRpcClient(object):
                 )
             except grpc.RpcError as e:
                 error_details = ErrorDetailsPB()
-                metadata = e.trailing_metadata() or {}
-                if (
-                    "grpc-status-details-bin" in metadata
-                    and error_details.ParseFromString(
-                        metadata["grpc-status-details-bin"]
-                    )
-                ):
+                try:
+                    metadata = {key: value for key, value in (e.trailing_metadata() or ())}
+                    encoded = metadata.get("grpc-status-details-bin")
+                    has_details = bool(encoded) and bool(error_details.ParseFromString(encoded))
+                except (DecodeError, TypeError, ValueError):
+                    has_details = False
+                if has_details:
                     logging.warning(
                         f"request: [{input_py.request_id}] greennet rejected: "
                         f"{ExceptionType.from_value(error_details.error_code)}, "

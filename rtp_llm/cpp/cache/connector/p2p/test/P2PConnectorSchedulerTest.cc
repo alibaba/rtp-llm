@@ -260,6 +260,7 @@ TEST_F(P2PConnectorSchedulerTest, AsyncReadUsesConfiguredLoadBudgetAndRequestDea
     P2PConnectorSchedulerConfig config;
     config.worker_grpc_addrs = tp_broadcast_addrs_;
     config.worker_addrs.push_back("127.0.0.1:12345:" + std::to_string(prefill_server_->listenPort()));
+    config.topology              = test::makeTestCacheTopology(2, 2, {{0}, {1}});
     config.load_cache_timeout_ms = 1000;
     rebuildSchedulers(config);
     const int64_t before = currentTimeMs();

@@ -391,6 +391,7 @@ class BatchedTerminalOutputTest(TestCase):
         class Call:
             def __init__(self, pb):
                 self.pb, self.count, self.cancelled = pb, 0, False
+                self.cancelled_event = asyncio.Event()
 
             def __aiter__(self):
                 return self
@@ -401,8 +402,13 @@ class BatchedTerminalOutputTest(TestCase):
                     return self.pb
                 raise RuntimeError("test transport failure")
 
+            async def code(self):
+                await self.cancelled_event.wait()
+                return StatusCode.CANCELLED
+
             def cancel(self):
                 self.cancelled = True
+                self.cancelled_event.set()
 
         async def exercise(fail):
             client = ModelRpcClient(["127.0.0.1:1"], {})
@@ -413,6 +419,9 @@ class BatchedTerminalOutputTest(TestCase):
             with patch(
                 "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
                 return_value=stub,
+            ), patch(
+                "rtp_llm.cpp.model_rpc.model_rpc_client.RPC_SETTLE_TIMEOUT_SECONDS",
+                0.01,
             ):
                 stream = client.enqueue(self.input)
                 result = await stream.__anext__()
@@ -421,6 +430,7 @@ class BatchedTerminalOutputTest(TestCase):
                         await stream.__anext__()
                 else:
                     await stream.aclose()
+                await asyncio.wait_for(call.cancelled_event.wait(), timeout=5)
             self.assertTrue(call.cancelled)
             self.assertEqual(
                 result.generate_outputs.output_ids.reshape(-1).tolist(), list(range(8))
@@ -673,6 +683,12 @@ class ModelRpcClientTest(TestCase):
                     self.assertNotEqual(exception_type, ExceptionType.UNKNOWN_ERROR)
 
     def test_rpc_error_code_overrides_preserve_client_semantics(self):
+        for code in (
+            ErrorCodePB.GET_PART_NODE_STATUS_FAILED,
+            ErrorCodePB.GET_ALL_NODE_STATUS_FAILED,
+        ):
+            with self.subTest(code=code):
+                self.assertEqual(_trans_rpc_error_code(code), ExceptionType.GET_HOST_FAILED)
         self.assertEqual(
             _trans_rpc_error_code(ErrorCodePB.CANCELLED),
             ExceptionType.CANCELLED_ERROR,
@@ -835,7 +851,7 @@ class ModelRpcClientTest(TestCase):
             asyncio.run(client.batch_generate(inputs))
 
         self.assertEqual(context.exception.exception_type, ExceptionType.INVALID_PARAMS)
-        self.assertIn("batch item 1 failed", context.exception.message)
+        self.assertIn("batch item 1 request=1: invalid batch item", context.exception.message)
 
     def test_batch_enqueue_is_compatibility_alias_for_batch_generate(self):
         client = self._make_batch_client()
@@ -856,7 +872,7 @@ class ModelRpcClientTest(TestCase):
             (
                 ErrorCodePB.CANCELLED,
                 "",
-                ExceptionType.CANCELLED_ERROR,
+                ExceptionType.CANCELLED,
                 "CANCELLED",
             ),
             (
@@ -907,7 +923,7 @@ class ModelRpcClientTest(TestCase):
                 )
                 self.assertEqual(
                     context.exception.message,
-                    f"batch item 0 failed: {expected_message}",
+                    f"batch item 0 request=1: {expected_message}",
                 )
 
     def test_batch_enqueue_stops_before_later_items_after_first_error(self):
@@ -1855,7 +1871,10 @@ class ModelRpcClientTest(TestCase):
             "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
             return_value=ShortBatchStub(),
         ):
-            with self.assertRaisesRegex(FtRuntimeException, "batch result count mismatch"):
+            with self.assertRaisesRegex(
+                FtRuntimeException,
+                "batch RPC returned an invalid result cardinality: received 0 results for 1 requests",
+            ):
                 asyncio.run(client.batch_enqueue([input_obj]))
 
     def test_batch_rpc_error_does_not_expose_target_address(self):
@@ -3003,8 +3022,8 @@ class ClientSpanSettlementTest(TestCase):
                     span.attributes["rpc.response.status_code"], "CANCELLED"
                 )
             else:
-                self.assertFalse(iterator.code_waited)
-                self.assertEqual(iterator.events, ["cancel"])
+                self.assertTrue(iterator.code_waited)
+                self.assertEqual(iterator.events, ["code", "cancel"])
 
         with patch(
             "rtp_llm.cpp.model_rpc.model_rpc_client.RPC_SETTLE_TIMEOUT_SECONDS",
@@ -3341,12 +3360,12 @@ class ClientSpanSettlementTest(TestCase):
         client = self._build_client(span, total=2, finish_last=False)
         call_count = 0
 
-        def fail_second_response(*args):
+        def fail_second_response(*args, **kwargs):
             nonlocal call_count
             call_count += 1
             if call_count == 2:
                 raise RuntimeError("conversion failed")
-            return trans_output(*args)
+            return trans_output(*args, **kwargs)
 
         async def run():
             with patch(
@@ -3407,7 +3426,7 @@ class ClientSpanSettlementTest(TestCase):
             client._handle_grpc_error(error, "request: [7]", "worker:9000")
 
         self.assertEqual(raised.exception.exception_type, ExceptionType.UNKNOWN_ERROR)
-        self.assertEqual(raised.exception.message, "backend_error_code=999999: future error")
+        self.assertEqual(raised.exception.message, "backend_error_code=999999: request: [7]: future error")
 
 
 

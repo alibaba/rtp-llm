@@ -263,6 +263,7 @@ protected:
         connector->prefill_                = std::make_unique<P2PConnectorPrefill>(config, nullptr, nullptr);
         connector->prefill_->stream_store_ = std::make_shared<P2PConnectorResourceStore>(nullptr, 100);
         cache_manager_->p2p_connector_     = std::move(connector);
+        cache_manager_->pd_sep_config_.role_type = RoleType::PREFILL;
         ASSERT_TRUE(cache_manager_->hasP2PConnector());
         ASSERT_TRUE(stream_->streamCacheResource().initKVBlock().ok());
         ASSERT_FALSE(stream_->cacheKeys().empty());
@@ -984,6 +985,8 @@ TEST_F(StreamCacheResourceTest, PDRequestStillRegistersPrefillResource) {
 TEST_F(StreamCacheResourceTest, P2PRegistrationWaitsForAllocatorMaterialization) {
     prepareP2PRegistrationResource(/*query_pd=*/true, "materialized-handoff");
     auto& resource = stream_->streamCacheResource();
+    ASSERT_TRUE(resource.waitForAllocatorLoad().ok());
+    ASSERT_GT(resource.curBlocksNum(), 0u);
     const auto allocated = *resource.batch_kv_cache_resource_;
     resource.batch_kv_cache_resource_->clearBlocks();
     auto context = makeAllocatorLoadContext(1, {Tier::HOST});
