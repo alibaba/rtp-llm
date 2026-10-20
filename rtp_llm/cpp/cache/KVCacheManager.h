@@ -28,6 +28,7 @@ class CacheStore;
 class BroadcastManager;
 class PrefillCacheHitMetricsReporter;
 class KVCacheAllocationWaitState;
+class KVCacheEventReporter;
 
 class KVCacheManager {
 public:
@@ -173,7 +174,7 @@ private:
     const bool                         use_device_malloc_block_pool_;
     const bool                         warmup_;
     KVCacheEventPublisherPtr           cache_event_publisher_;
-    void                               initCacheEventPublisher();
+    void                               initCacheEventPublisher(std::shared_ptr<KVCacheEventReporter> reporter = nullptr);
     void                               stopCacheEventPublisher();
 
     std::shared_ptr<CPSlotMapper>                   cp_slot_mapper_;

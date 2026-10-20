@@ -13,13 +13,13 @@ Cache mutations only attempt a bounded non-blocking enqueue; network I/O runs on
 request failure, heartbeat failure, periodic reconciliation, and the server's `snapshot_required` feedback trigger an
 authoritative snapshot. Publishing is fail-open and never affects allocation, eviction, readiness, or inference responses.
 
-Only `tp_rank=0` publishes when `pp_size=1`. Pipeline parallelism and CP-sharded KV cache are unsupported because the
-runtime cannot assign an unambiguous external owner and block granularity. Each DP replica needs a distinct
+Only `tp_rank=0` publishes when `pp_size=1`. CP-sharded Prefill reports canonical keys at
+`seq_size_per_block * cp_size` tokens per key; Decode keeps its local block granularity. Each DP replica needs a distinct
 `KV_CACHE_EVENT_HOST_IP_PORT`; sharing one lets an authoritative snapshot from one replica replace another replica's
 host state. When the value is empty, RTP-LLM derives a per-rank endpoint as
 `server_ip:(start_port + rank_id * worker_info_port_num)`.
 
-Publishing supports DEVICE FULL/SWA caches, including sparse tails. Any eligible non-DEVICE group disables publishing.
+Publishing supports DEVICE FULL/SWA caches, including sparse tails. HOST/HOST_PINNED groups are skipped.
 
 ## KVCM lifecycle
 
@@ -36,7 +36,7 @@ Events use `ST_EVENT_REPORT_L1P5`, medium `hbm`, and one spec `rtp_llm_hbm_<bloc
 Its `event_report://host/hbm?size=...` URI records that group's byte size summed over TP ranks. Configure the L1P5
 event storage on the server and add it to the Instance Group's `event_report_storage_candidates`.
 
-Use a new instance ID for the per-tag schema. Consumers must check FULL history and SWA windows before reuse.
+Instance registrations must match the per-tag schema and token stride. Consumers must check FULL history and SWA windows before reuse.
 
 ## Configuration
 

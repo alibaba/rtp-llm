@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/cache/test/TestLayoutSpec.h"
 
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
 #include <future>
@@ -13,12 +14,14 @@
 #include <limits>
 #include <string>
 #include <thread>
+#include <rapidjson/document.h>
 
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/events/KVCacheEventReporter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/LinearGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/SWAGroupSet.h"
@@ -441,6 +444,49 @@ TEST_F(CacheHitRateWindowTest, ConcurrentRequestsDoNotLoseTokens) {
     EXPECT_FLOAT_EQ(window.host_hit_rate, 10.0f);
 }
 
+class EventPublicationReporter final: public KVCacheEventReporter {
+public:
+    bool post(const std::string& route, const std::string& request, std::string& response) noexcept override {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            requests_.emplace_back(route, request);
+        }
+        response = R"({"header":{"status":{"code":"OK"}}})";
+        cv_.notify_all();
+        return true;
+    }
+
+    std::string waitForRequest(const std::string& text, const std::string& spec = "") {
+        std::unique_lock<std::mutex> lock(mutex_);
+        const auto find_request = [&] {
+            return std::find_if(requests_.begin(), requests_.end(), [&](const auto& request) {
+                return (request.first == text || request.second.find(text) != std::string::npos)
+                       && request.second.find(spec) != std::string::npos;
+            });
+        };
+        if (!cv_.wait_for(lock, std::chrono::seconds(10), [&] { return find_request() != requests_.end(); })) {
+            return {};
+        }
+        return find_request()->second;
+    }
+
+private:
+    std::mutex                                       mutex_;
+    std::condition_variable                          cv_;
+    std::vector<std::pair<std::string, std::string>> requests_;
+};
+
+static bool waitForEventPublisherReady(const KVCacheEventPublisher& publisher) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (publisher.status().state == PublisherState::READY) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return publisher.status().state == PublisherState::READY;
+}
+
 static CacheConfig makeEventPublicationCacheConfig(bool reversed,
                                                    CacheMemoryPlacement swa_placement = CacheMemoryPlacement::DEVICE) {
     auto config = makeSimpleMhaCacheConfig(4, 128, 1, DataType::TYPE_FP16);
@@ -551,34 +597,189 @@ TEST_F(KVCacheManagerTest, EventPublisherWiresEligibleGroupsInTopologyOrder) {
     }
 }
 
-TEST_F(KVCacheManagerTest, EventPublisherRejectsEligibleNonDeviceGroup) {
-    ScopedEnvVar no_proxy("no_proxy", "*");
-    ScopedEnvVar upper_no_proxy("NO_PROXY", "*");
+TEST_F(KVCacheManagerTest, EventPublisherFiltersHostGroupsWithoutChangingDeviceSpecOrder) {
     for (const auto placement : {CacheMemoryPlacement::HOST, CacheMemoryPlacement::HOST_PINNED}) {
         for (const bool reversed : {false, true}) {
             SCOPED_TRACE("placement=" + std::to_string(static_cast<int>(placement))
                          + " reversed=" + std::to_string(reversed));
             auto config = makeEventPublicationCacheConfig(reversed, placement);
+            auto topology_groups = config.topology().groups();
+            auto layers = config.topology().layers();
+            auto second_full = config.group("full");
+            second_full.tag = "second_full";
+            second_full.spec = makeResolvedMhaSpec(config.dtype, 2, 1, config.seq_size_per_block, second_full.tag);
+            topology_groups.insert(topology_groups.begin() + 2, second_full);
+            layers.push_back(LayerBase{static_cast<int>(config.layer_num++), {second_full.tag}});
+            config.setTopology(std::move(topology_groups), std::move(layers));
             RuntimeConfig runtime;
             runtime.model_name = "event_wiring_model";
             KVCacheManager manager(config, false, nullptr, makeEventPublicationRuntimeConfig(), {}, runtime);
             auto full = std::make_shared<FullGroupSet>(
-                std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
+                std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0),
+                                                block_tree_cache_test::makeStructuralDevicePool(1)}, nullptr, nullptr);
             auto swa = std::make_shared<SWAGroupSet>(2, 1,
-                std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(1)}, nullptr, nullptr);
-            full->initialize(0, config.topologyPtr(), {"full"});
+                std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(2)}, nullptr, nullptr);
+            full->initialize(0, config.topologyPtr(), {"full", "second_full"});
             swa->initialize(1, config.topologyPtr(), {"swa"});
-            // Keep every eligible tag resolvable so rejection cannot come from a missing tree group.
             manager.block_tree_cache_ = block_tree_cache_test::makeBlockTreeCacheForTest({full, swa});
-            ASSERT_NE(manager.block_tree_cache_, nullptr);
+            const auto cache = manager.block_tree_cache_;
+            ASSERT_NE(cache, nullptr);
             std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(2));
-            resources[0][0].device_blocks = {42};
-            manager.block_tree_cache_->insert({100}, resources, Tier::DEVICE);
+            resources[0][0].device_blocks = {42, 44};
+            resources[0][1].device_blocks = {46};
+            cache->insert({100}, resources, Tier::DEVICE);
 
-            manager.initCacheEventPublisher();
-            EXPECT_EQ(manager.cache_event_publisher_, nullptr);
-            EXPECT_EQ(manager.block_tree_cache_->tree()->event_publisher_, nullptr);
-            EXPECT_TRUE(manager.block_tree_cache_->logicalCacheSnapshot().block_groups.empty());
+            auto reporter = std::make_shared<EventPublicationReporter>();
+            manager.initCacheEventPublisher(reporter);
+            ASSERT_NE(manager.cache_event_publisher_, nullptr);
+            ASSERT_TRUE(waitForEventPublisherReady(*manager.cache_event_publisher_));
+            const std::vector<std::string> expected_tags = reversed ? std::vector<std::string>{"second_full", "full"}
+                                                                   : std::vector<std::string>{"full", "second_full"};
+            rapidjson::Document registration;
+            registration.Parse(reporter->waitForRequest("/api/registerInstance").c_str());
+            ASSERT_FALSE(registration.HasParseError());
+            ASSERT_EQ(registration["location_spec_infos"].Size(), 2u);
+            rapidjson::Document snapshot;
+            snapshot.Parse(reporter->waitForRequest("EVENT_BLOCK_SNAPSHOT").c_str());
+            ASSERT_FALSE(snapshot.HasParseError());
+            const auto& blocks = snapshot["events"][0]["block_snapshot"]["blocks"];
+            ASSERT_EQ(blocks.Size(), 1u);
+            EXPECT_STREQ(blocks[0]["block_key"].GetString(), "100");
+            ASSERT_EQ(blocks[0]["specs"].Size(), 2u);
+            for (size_t i = 0; i < expected_tags.size(); ++i) {
+                const auto index = static_cast<rapidjson::SizeType>(i);
+                const auto name = "rtp_llm_hbm_1_" + expected_tags[i];
+                EXPECT_STREQ(registration["location_spec_infos"][index]["name"].GetString(), name.c_str());
+                EXPECT_EQ(registration["location_spec_infos"][index]["size"].GetInt64(),
+                          config.blockSizeBytesForGroup(expected_tags[i]));
+                EXPECT_STREQ(registration["location_spec_groups"][0]["spec_names"][index].GetString(), name.c_str());
+                EXPECT_STREQ(blocks[0]["specs"][index]["name"].GetString(), name.c_str());
+            }
+            EXPECT_EQ(cache->logicalCacheSnapshot().block_groups,
+                      (std::map<int64_t, std::vector<size_t>>{{100, {0, 1}}}));
+
+            // Host-backed primary pools still use device_blocks in BTC; placement filtering owns the distinction.
+            resources[0][1].device_blocks = {47};
+            cache->insert({100}, resources, Tier::DEVICE);
+            EXPECT_EQ(manager.cache_event_publisher_->status().accepted_count, 0u);
+            resources.resize(2, std::vector<GroupSetResource>(2));
+            resources[1][0].device_blocks = {43, 45};
+            cache->insert({100, 200}, resources, Tier::DEVICE);
+            EXPECT_EQ(manager.cache_event_publisher_->status().accepted_count, 2u);
+            for (const auto& tag : expected_tags) {
+                const auto body = reporter->waitForRequest("EVENT_BLOCK_ADD", "rtp_llm_hbm_1_" + tag);
+                EXPECT_NE(body.find("\"block_key\":\"200\""), std::string::npos);
+            }
+            EXPECT_EQ(cache->evictForGroup("full", 2), 2);
+            EXPECT_TRUE(cache->logicalCacheSnapshot().block_groups.empty());
+            EXPECT_EQ(manager.cache_event_publisher_->status().accepted_count, 6u);
+            for (const auto& tag : expected_tags) {
+                EXPECT_FALSE(reporter->waitForRequest("EVENT_BLOCK_DELETE", "rtp_llm_hbm_1_" + tag).empty());
+            }
+            manager.stopCacheEventPublisher();
+        }
+    }
+}
+
+TEST_F(KVCacheManagerTest, EventPublisherUsesCanonicalCpKeysAndKeepsDecodeOwnership) {
+    ScopedEnvVar no_proxy("no_proxy", "*");
+    ScopedEnvVar upper_no_proxy("NO_PROXY", "*");
+    for (const auto role : {RoleType::PREFILL, RoleType::DECODE}) {
+        for (const int rank : {0, 1}) {
+            SCOPED_TRACE("role=" + std::to_string(static_cast<int>(role)) + " rank=" + std::to_string(rank));
+            ParallelismConfig parallelism;
+            parallelism.role_type = role;
+            parallelism.tp_size = 4;
+            parallelism.tp_rank = rank;
+            parallelism.prefill_cp_config.method =
+                role == RoleType::PREFILL ? CPRotateMethod::ALL_GATHER : CPRotateMethod::PREFILL_CP;
+            parallelism.prefill_cp_config.kv_cache_sharded = true;
+            parallelism.prefill_cp_config.prefill_cp_size = 4;
+            ModelConfig model;
+            model.num_layers = 1;
+            model.attn_config.tokens_per_block = 128;
+            model.attn_config.kernel_tokens_per_block = 128;
+            model.attn_config.sliding_window = 128;
+            model.kv_cache_spec_descs = {{makeDsv4Desc("global_kv_1", "compressed_kv", 8, DataType::TYPE_UINT8),
+                                           makeDsv4Desc("swa_kv", "sliding_window_kv", 8, DataType::TYPE_UINT8)}};
+            const auto config = finalizeCacheConfig(CacheConfigCreator::createConfig(model, parallelism, {}), 32);
+            RuntimeConfig runtime;
+            runtime.model_name = "event_cp_model";
+            KVCacheManager manager(config, false, nullptr, makeEventPublicationRuntimeConfig(), parallelism, runtime);
+            ASSERT_TRUE(manager.init());
+            ASSERT_EQ(manager.cpSlotMapper() != nullptr, role == RoleType::PREFILL);
+            EXPECT_EQ(manager.cache_event_publisher_ != nullptr, rank == 0);
+            if (rank != 0) {
+                continue;
+            }
+            // Exercise normal init first, then reuse the publisher's transport seam to inspect requests.
+            manager.stopCacheEventPublisher();
+            auto reporter = std::make_shared<EventPublicationReporter>();
+            manager.initCacheEventPublisher(reporter);
+            ASSERT_NE(manager.cache_event_publisher_, nullptr);
+            ASSERT_TRUE(waitForEventPublisherReady(*manager.cache_event_publisher_));
+            rapidjson::Document registration;
+            registration.Parse(reporter->waitForRequest("/api/registerInstance").c_str());
+            ASSERT_FALSE(registration.HasParseError());
+            const int block_tokens = role == RoleType::PREFILL ? 512 : 128;
+            EXPECT_EQ(registration["block_size"].GetInt(), block_tokens);
+            EXPECT_EQ(registration["model_deployment"]["tp_size"].GetInt(), 4);
+            ASSERT_EQ(registration["location_spec_infos"].Size(), 2u);
+            for (size_t i = 0; i < config.groupTags().size(); ++i) {
+                const auto& tag = config.groupTags()[i];
+                const auto index = static_cast<rapidjson::SizeType>(i);
+                const auto name = "rtp_llm_hbm_" + std::to_string(block_tokens) + "_" + tag;
+                EXPECT_STREQ(registration["location_spec_infos"][index]["name"].GetString(), name.c_str());
+                EXPECT_EQ(registration["location_spec_infos"][index]["size"].GetInt64(),
+                          config.blockSizeBytesForGroup(tag) * 4);
+            }
+            if (role == RoleType::DECODE) {
+                continue;
+            }
+            EXPECT_EQ(manager.cpSlotMapper()->reuseBlockTokens(config), block_tokens);
+            auto resource = makeDSV4BatchResource(config);
+            auto tokens = makeDSV4CompleteTokenIds(1024, 1024, 128);
+            MallocInfo malloc_info{resource, tokens};
+            malloc_info.enable_cache_lookup = false;
+            ASSERT_TRUE(manager.malloc(malloc_info).success);
+            const auto raw_keys = resource->cacheKeys(0);
+            ASSERT_EQ(raw_keys.size(), 8u);
+            const CacheKeysType expected_keys{raw_keys[3], raw_keys[7]};
+            EXPECT_EQ(manager.cpSlotMapper()->canonicalCacheKeys(raw_keys), expected_keys);
+            for (const auto& tag : config.groupTags()) {
+                EXPECT_EQ(resource->blocksNum(0, tag), 2);
+            }
+            size_t resident_prefix = 0;
+            manager.insertIntoCache({resource, tokens, false}, resident_prefix);
+            manager.free({resource, tokens});
+            const std::map<int64_t, std::vector<size_t>> expected_groups{
+                {expected_keys[0], {0, 1}}, {expected_keys[1], {0, 1}}};
+            EXPECT_EQ(manager.block_tree_cache_->logicalCacheSnapshot().block_groups, expected_groups);
+            EXPECT_EQ(manager.cache_event_publisher_->status().accepted_count, 4u);
+            for (const auto& tag : config.groupTags()) {
+                EXPECT_FALSE(reporter->waitForRequest("EVENT_BLOCK_ADD", "rtp_llm_hbm_512_" + tag).empty());
+            }
+            // Reattaching reconciles the same canonical keys and component ordering through SNAPSHOT.
+            manager.stopCacheEventPublisher();
+            reporter = std::make_shared<EventPublicationReporter>();
+            manager.initCacheEventPublisher(reporter);
+            ASSERT_NE(manager.cache_event_publisher_, nullptr);
+            ASSERT_TRUE(waitForEventPublisherReady(*manager.cache_event_publisher_));
+            rapidjson::Document snapshot;
+            snapshot.Parse(reporter->waitForRequest("EVENT_BLOCK_SNAPSHOT").c_str());
+            ASSERT_FALSE(snapshot.HasParseError());
+            const auto& blocks = snapshot["events"][0]["block_snapshot"]["blocks"];
+            ASSERT_EQ(blocks.Size(), 2u);
+            size_t i = 0;
+            for (const auto& [key, groups] : expected_groups) {
+                const auto& block = blocks[static_cast<rapidjson::SizeType>(i++)];
+                EXPECT_STREQ(block["block_key"].GetString(), std::to_string(key).c_str());
+                ASSERT_EQ(block["specs"].Size(), 2u);
+                for (size_t g = 0; g < config.groupTags().size(); ++g) {
+                    EXPECT_STREQ(block["specs"][static_cast<rapidjson::SizeType>(g)]["name"].GetString(),
+                                 ("rtp_llm_hbm_512_" + config.groupTags()[g]).c_str());
+                }
+            }
         }
     }
 }
