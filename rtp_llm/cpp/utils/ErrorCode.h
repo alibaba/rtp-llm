@@ -64,7 +64,7 @@ enum class ErrorCode {
     WAIT_TO_RUN_TIMEOUT                   = 8213,
     KEEP_ALIVE_TIMEOUT                    = 8214,
     // Broadcast failed or returned no valid completion result; remote I/O may still be running.
-    TRANSFER_COMPLETION_UNKNOWN           = 8215,
+    TRANSFER_COMPLETION_UNKNOWN = 8215,
 
     // cache store error
     LOAD_CACHE_TIMEOUT                   = 8300,

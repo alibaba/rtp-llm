@@ -449,16 +449,16 @@ void BlockTreeLoader::runLoadTask(const LoadTaskRunner::TaskPtr& task) {
             // Ordinary LOAD references still protect both ends until settlement.
             // Preserve those physical slots before publishing the failure.
             for (const TransferDescriptor& desc : task->load_descs) {
-                const GroupSetPtr& group_set = tree_->groupSets()[desc.group_set_id];
-                IBlockPool* source_pool = desc.source_tier == Tier::HOST ?
-                                              static_cast<IBlockPool*>(group_set->hostPool().get()) :
-                                              static_cast<IBlockPool*>(group_set->diskPool().get());
+                const GroupSetPtr& group_set   = tree_->groupSets()[desc.group_set_id];
+                IBlockPool*        source_pool = desc.source_tier == Tier::HOST ?
+                                                     static_cast<IBlockPool*>(group_set->hostPool().get()) :
+                                                     static_cast<IBlockPool*>(group_set->diskPool().get());
                 for (BlockIdxType block : desc.source_blocks) {
-                    source_pool->freezeBlock(block, BlockTreeRefType::LOAD);
+                    source_pool->freezeBlock(block);
                 }
                 const auto& device_pools = group_set->devicePools();
                 for (size_t member = 0; member < device_pools.size(); ++member) {
-                    device_pools[member]->freezeBlock(desc.target_blocks[member], BlockTreeRefType::LOAD);
+                    device_pools[member]->freezeBlock(desc.target_blocks[member]);
                 }
             }
         }
