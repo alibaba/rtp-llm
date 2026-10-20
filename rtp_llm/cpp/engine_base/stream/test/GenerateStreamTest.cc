@@ -651,6 +651,49 @@ TEST_F(GenerateStreamTest, consumerWaitWakesOnPrefillHandoffReady) {
     EXPECT_NE(stream->getStatus(), StreamState::FINISHED);
 }
 
+TEST_F(GenerateStreamTest, PDDecodePublishesHandoffOnceThenHonorsStreamingMode) {
+    autil::EnvGuard real_outputs("PERF_TEST", "0");
+    for (bool streaming : {false, true}) {
+        SCOPED_TRACE(streaming);
+        GenerateStreamBuilder builder;
+        auto stream = std::dynamic_pointer_cast<NormalGenerateStream>(
+            builder.createComplexContextStream({1, 2, 3}, RoleType::DECODE));
+        stream->generateConfig()->pd_separation = true;
+        stream->generateConfig()->is_streaming = streaming;
+        stream->generateConfig()->max_new_tokens = 3;
+        stream->generateConfig()->aux_info = true;
+        stream->generate_status_->status.store(StreamState::RUNNING);
+        const auto update = [&](int token, bool handoff) {
+            stream->step();
+            stream->update({.new_tokens = torch::full({2, 1}, token, torch::kInt32),
+                            .num_new_tokens = 1,
+                            .update_remote_generate = !handoff});
+        };
+        update(42, true);
+        ASSERT_TRUE(stream->hasOutput());
+        auto first = stream->nextOutput(1);
+        ASSERT_TRUE(first.ok());
+        ASSERT_EQ(first.value().generate_outputs.size(), 2u);
+        EXPECT_EQ(first.value().generate_outputs[0].aux_info.step_output_len, 1);
+        update(43, false);
+        EXPECT_EQ(stream->hasOutput(), streaming);
+        if (streaming) {
+            auto middle = stream->nextOutput(1);
+            ASSERT_TRUE(middle.ok());
+            EXPECT_EQ(middle.value().generate_outputs[0].aux_info.step_output_len, 1);
+        }
+        update(44, false);
+        auto last = stream->nextOutput(1);
+        ASSERT_TRUE(last.ok());
+        const auto& output = last.value().generate_outputs[0];
+        EXPECT_TRUE(output.finished);
+        EXPECT_EQ(output.aux_info.output_len, 3);
+        EXPECT_EQ(output.aux_info.step_output_len, streaming ? 1 : 2);
+        EXPECT_EQ(output.output_ids.size(1), streaming ? 1 : 2);
+        EXPECT_EQ(output.output_ids[0][output.output_ids.size(1) - 1].item<int32_t>(), 44);
+    }
+}
+
 TEST_F(GenerateStreamTest, pdUpdatePublishesOutputBeforeRemoteHandoffCompletion) {
     auto builder = GenerateStreamBuilder();
     auto stream  = std::dynamic_pointer_cast<NormalGenerateStream>(builder.createComplexContextStream({1, 2, 3}, RoleType::PREFILL));

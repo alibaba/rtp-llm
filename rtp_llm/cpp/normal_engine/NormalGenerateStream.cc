@@ -281,7 +281,10 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
             }
             side_data.generation_prefill_cuda_graph_status =
                 static_cast<uint32_t>(generation_prefill_cuda_graph_status_);
-            side_data.prefill_use_independent_block_pools = true;
+            // Match the established PD aux contract: top-level reuse follows
+            // Prefill for single-group caches; multi-group caches may expose
+            // the longer proven Decode reuse phase.
+            side_data.prefill_use_independent_block_pools = rc.cache_manager->cacheConfig().groupNums() > 1;
             side_data.total_reuse_len  = reuseLength();
             side_data.local_reuse_len  = localReuseLength();
             side_data.remote_reuse_len = remoteReuseLength();
@@ -369,8 +372,14 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
                       isStreaming(),
                       update_info.update_remote_generate);
 
-    bool pd_sep_first_token = queryPdSep();
-    bool need_update        = pd_sep_first_token || isStreaming() || finished_;
+    // Prefill publishes its handoff output immediately. Decode replays that
+    // first token once; later non-streaming updates must stay buffered until
+    // completion, just as on the original PD output path.
+    const auto role = resourceContext().role_type;
+    const bool pd_sep_first_token = queryPdSep()
+        && (role == RoleType::PREFILL
+            || (role == RoleType::DECODE && !update_info.update_remote_generate && iter_count_ == 1));
+    const bool need_update = pd_sep_first_token || isStreaming() || finished_;
     if (!need_update) {
         return;
     }

@@ -4,6 +4,7 @@
 
 #include "gtest/gtest.h"
 #include "gmock/gmock.h"
+#include <utility>
 
 #include "kmonitor/client/MetricsReporter.h"
 #include "kmonitor/client/core/MetricsData.h"
@@ -244,9 +245,13 @@ protected:
         ASSERT_TRUE(stream_->streamCacheResource().loadCacheDone());
     }
 
-    void prepareP2PRegistrationResource(bool query_pd, const std::string& key) {
+    void prepareP2PRegistrationResource(bool query_pd, const std::string& key, bool hybrid = false) {
         // Inject the registration-only connector below; do not initialize transport workers.
-        prepareResourceWithCacheConfig(init_config(), {1, 2, 3, 4, 5, 6}, true, RoleType::PREFILL);
+        if (hybrid) {
+            prepareHybridResource(true, RoleType::PREFILL);
+        } else {
+            prepareResourceWithCacheConfig(init_config(), {1, 2, 3, 4, 5, 6}, true, RoleType::PREFILL);
+        }
         stream_->generateConfig()->pd_separation      = query_pd;
         stream_->generateConfig()->unique_key         = key;
         stream_->generateInput()->request_deadline_ms = currentTimeMs() + 30000;
@@ -1945,11 +1950,12 @@ TEST_F(StreamCacheResourceTest, testP2PFirstTokenFinishesSingleTokenRequestAfter
 
 TEST_F(StreamCacheResourceTest, testP2PFirstTokenOutputsRoundTripThroughStartLoad) {
     autil::EnvGuard real_outputs("PERF_TEST", "0");
-    for (bool requested : {false, true}) {
+    for (const auto& [requested, hybrid] : {std::pair{false, false}, std::pair{true, false},
+                                          std::pair{false, true}, std::pair{true, true}}) {
         for (bool eos : {false, true}) {
-            SCOPED_TRACE(::testing::Message() << "requested=" << requested << ", eos=" << eos);
+            SCOPED_TRACE(::testing::Message() << "requested=" << requested << ", hybrid=" << hybrid << ", eos=" << eos);
             const std::string key = "first-token-outputs";
-            prepareP2PRegistrationResource(true, key);
+            prepareP2PRegistrationResource(true, key, hybrid);
             auto&      prefill_connector = *cache_manager_->p2p_connector_->prefill_;
             const auto deadline_ms       = stream_->generateInput()->request_deadline_ms;
             const auto make_stream       = [&](RoleType role) {
@@ -2009,7 +2015,7 @@ TEST_F(StreamCacheResourceTest, testP2PFirstTokenOutputsRoundTripThroughStartLoa
             PrefillResultStore::SideChannelData published;
             ASSERT_TRUE(prefill_connector.stream_store_->takePrefillPayload(key, published));
             EXPECT_EQ(published.first_token_tensors.size(), requested ? 7u : 0u);
-            EXPECT_TRUE(published.prefill_use_independent_block_pools);
+            EXPECT_EQ(published.prefill_use_independent_block_pools, hybrid);
             EXPECT_EQ(published.generation_prefill_cuda_graph_status, static_cast<uint32_t>(graph_status));
             // Reusing executor buffers after publication must not change the payload.
             logits.fill_(-1);
