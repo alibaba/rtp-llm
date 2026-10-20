@@ -82,6 +82,80 @@ except Exception as _addnorm_error:  # CPU-only / no flashinfer
 _addnorm_warned = False
 _addnorm_ab_logged: set = set()
 
+# opt r8 contract 6 (BinaryFunctor 138ms/39300x + copy-cluster elimination).
+# The r7 decode trace's elementwise residue is dominated by three per-layer
+# launch-bound chains (see the kernel module docstrings for the accounting):
+#   1. the qkv-slice norm+rope complex (~16 launches: 3 strided reshape
+#      copies + 2 norm kernels + v norm + 2 gathers + 8 BinaryFunctor muls
+#      + 2 adds + 2 CatArrayBatchedCopy) -> one Triton launch per tensor
+#      (DGM_FUSED_QKV_NORMROPE, DGM_QKV_AB=1 prints the referee stats);
+#   2. the layer tail "residual + normed; * layer_scalar" add+mul pair ->
+#      one fused add_scale launch (DGM_FUSED_ADD_SCALE, DGM_ADDSCALE_AB=1);
+#   3. the router "norm(x) * scale * hidden^-0.5" two-mul chain -> the
+#      scale folds into the flashinfer rmsnorm gamma (DGM_FUSED_ROUTER_SCALE,
+#      DGM_ROUTERSCALE_AB=1; the gamma product rounds once in bf16 where the
+#      torch chain rounds three times — bf16-noise class, plus the existing
+#      near-tie routing-flip ruling).
+# All three keep the exact torch chains as references/fallbacks; any kernel
+# failure degrades to the torch path with one logged warning (r4 contract).
+_FUSED_QKV_ENV = os.environ.get("DGM_FUSED_QKV_NORMROPE", "1") != "0"
+_QKV_AB_CHECK = os.environ.get("DGM_QKV_AB", "") not in ("", "0")
+_qkv_kernel = None
+try:
+    from rtp_llm.models_py.triton_kernels.common.qkv_norm_rope import (
+        norm_rope_usable as _qkv_norm_rope_usable,
+    )
+    from rtp_llm.models_py.triton_kernels.common.qkv_norm_rope import (
+        qkv_norm_rope as _qkv_kernel_fn,
+    )
+
+    _qkv_kernel = _qkv_kernel_fn
+except Exception as _qkv_error:  # CPU-only sandboxes without triton
+    logger.info(
+        "DiffusionGemma fused qkv norm+rope unavailable, torch path: %s",
+        _qkv_error,
+    )
+_qkv_warned = False
+_qkv_ab_logged: set = set()
+
+_FUSED_ADD_SCALE_ENV = os.environ.get("DGM_FUSED_ADD_SCALE", "1") != "0"
+_ADDSCALE_AB_CHECK = os.environ.get("DGM_ADDSCALE_AB", "") not in ("", "0")
+_addscale_kernel = None
+try:
+    from rtp_llm.models_py.triton_kernels.common.residual_scale import (
+        add_scale as _add_scale_fn,
+    )
+    from rtp_llm.models_py.triton_kernels.common.residual_scale import (
+        add_scale_usable as _add_scale_usable,
+    )
+
+    _addscale_kernel = _add_scale_fn
+except Exception as _addscale_error:  # CPU-only sandboxes without triton
+    logger.info(
+        "DiffusionGemma fused add+scale unavailable, torch path: %s",
+        _addscale_error,
+    )
+_addscale_warned = False
+_addscale_ab_logged: set = set()
+
+_FUSED_ROUTER_SCALE_ENV = os.environ.get("DGM_FUSED_ROUTER_SCALE", "1") != "0"
+_ROUTERSCALE_AB_CHECK = os.environ.get("DGM_ROUTERSCALE_AB", "") not in ("", "0")
+
+# Contract 4c (opt r8): Triton split-K windowed prefill attention for the
+# ragged segment — DGM_SPLITK_ATTN gate (default OFF, fa3 stays the
+# production path), DGM_SPLITK_AB=1 prints the fused-vs-fa3 referee stats.
+_splitk_attn_fn = None
+try:
+    from rtp_llm.models_py.triton_kernels.common.splitk_window_attn import (
+        splitk_window_attn as _splitk_attn_fn,
+    )
+except Exception as _splitk_error:  # CPU-only sandboxes without triton
+    logger.info(
+        "DiffusionGemma split-K windowed attention unavailable, fa3 path: %s",
+        _splitk_error,
+    )
+_SPLITK_AB_CHECK = os.environ.get("DGM_SPLITK_AB", "") not in ("", "0")
+
 
 def _fused_add_norm_usable(x: torch.Tensor, residual: torch.Tensor, norm) -> bool:
     if not (_FUSED_ADD_NORM_ENV and _FI_ADD_NORM is not None):
@@ -184,6 +258,60 @@ def _fused_add_norm(x: torch.Tensor, residual: torch.Tensor, norm):
     return norm(summed), summed
 
 
+def _fused_add_scale(
+    a: torch.Tensor, b: torch.Tensor, scalar: torch.Tensor
+) -> torch.Tensor:
+    """Layer tail ``(b + a) * scalar`` as one Triton launch on CUDA bf16
+    (contract 6 item 2); the exact torch add+mul pair otherwise."""
+    global _addscale_warned
+    if _FUSED_ADD_SCALE_ENV and _addscale_kernel is not None:
+        if _add_scale_usable(a, b, scalar):
+            a_ref = a.clone() if _ADDSCALE_AB_CHECK else None
+            b_ref = b.clone() if _ADDSCALE_AB_CHECK else None
+            s_ref = scalar.clone() if _ADDSCALE_AB_CHECK else None
+            try:
+                out = _addscale_kernel(a, b, scalar)
+                if _ADDSCALE_AB_CHECK:
+                    _addscale_ab(a_ref, b_ref, s_ref, out)
+                return out
+            except Exception as error:
+                if not _addscale_warned:
+                    logger.warning(
+                        "DiffusionGemma fused add+scale failed (%s); torch "
+                        "path for this process",
+                        error,
+                    )
+                _addscale_warned = True
+    return (b + a) * scalar
+
+
+def _addscale_ab(
+    a: torch.Tensor, b: torch.Tensor, scalar: torch.Tensor, out: torch.Tensor
+) -> None:
+    """Debug A/B (DGM_ADDSCALE_AB=1): fused (a+b)*scalar vs the exact torch
+    two-step the layer tail ran before, logged once per shape."""
+    key = (tuple(a.shape), a.dtype)
+    if key in _addscale_ab_logged:
+        return
+    _addscale_ab_logged.add(key)
+    try:
+        ref = (b + a) * scalar
+        diff = (out.to(torch.float32) - ref.to(torch.float32)).abs()
+        ulp = (
+            out.view(torch.int16).to(torch.int32)
+            - ref.view(torch.int16).to(torch.int32)
+        ).abs()
+        print(
+            f"[dgm-addscale-ab] shape={tuple(a.shape)} dtype={a.dtype} "
+            f"max_diff={float(diff.max()):.3e} max_ulp={int(ulp.max())} "
+            f"mismatch_frac={float((out != ref).float().mean()):.4f} "
+            f"ref_absmax={float(ref.to(torch.float32).abs().max()):.3f}",
+            flush=True,
+        )
+    except Exception as error:
+        logger.warning("DiffusionGemma add-scale A/B check failed: %s", error)
+
+
 SWA_TAG = "swa_kv"
 GLOBAL_TAG = "global_kv"
 LAYER_TYPE_SLIDING = "sliding_attention"
@@ -262,20 +390,31 @@ class DiffusionGemmaRope(nn.Module):
         self._cos = emb.cos().to(self._dtype)
         self._sin = emb.sin().to(self._dtype)
 
-    def apply(
-        self, q: torch.Tensor, k: torch.Tensor, positions: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Rotate q/k (…, head_dim) in-place-safe with rotate-half layout."""
-        # positions.max().item() is a per-layer device sync, but every layer
-        # in one forward receives the SAME positions tensor object — pay the
-        # sync once per distinct tensor (memo on object identity) and reuse
-        # the host-side max for the rest of the forward. Same values reach
-        # _build_cache, zero semantic change.
+    def prepare(self, positions: torch.Tensor) -> None:
+        """Ensure the cos/sin cache covers ``positions`` (shared by the
+        torch apply() and the fused norm+rope kernel path).
+
+        positions.max().item() is a per-layer device sync, but every layer
+        in one forward receives the SAME positions tensor object — pay the
+        sync once per distinct tensor (memo on object identity) and reuse
+        the host-side max for the rest of the forward. Same values reach
+        _build_cache, zero semantic change.
+        """
         if positions is not self._pos_memo_ref:
             self._pos_memo_ref = positions
             self._pos_memo_max = int(positions.max().item()) if positions.numel() else 0
         need = self._pos_memo_max + 1 if positions.numel() else 1
         self._build_cache(need)
+
+    def cos_sin_cache(self) -> Tuple[torch.Tensor, torch.Tensor]:
+        """(cos, sin) [max_pos, head_dim] cache rows (duplicated halves)."""
+        return self._cos, self._sin
+
+    def apply(
+        self, q: torch.Tensor, k: torch.Tensor, positions: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Rotate q/k (…, head_dim) in-place-safe with rotate-half layout."""
+        self.prepare(positions)
         cos = self._cos[positions.long()].to(q.dtype)
         sin = self._sin[positions.long()].to(q.dtype)
         while cos.dim() < q.dim():
@@ -392,6 +531,30 @@ class DiffusionGemmaAttnOp:
         # the next cublas GEMM.
         self._fi_diag = bool(os.environ.get("DGM_FI_DIAG", ""))
         self._fi_diag_first = True
+        # Contract 4c (opt r8): Triton split-K windowed prefill attention for
+        # the ragged (current-block) segment. DEFAULT OFF — the fa3
+        # ragged path stays the production kernel; enable after the
+        # numerical A/B (DGM_SPLITK_AB=1) and the MFU verdict land.
+        # DGM_SPLITK_ATTN_SPLITS overrides the occupancy heuristic
+        # (auto: fill ~2x the SM count with CTAs, 1..4).
+        self.splitk_enabled = os.environ.get("DGM_SPLITK_ATTN", "") not in ("", "0")
+        self._splitk_splits_env = os.environ.get("DGM_SPLITK_ATTN_SPLITS", "")
+        self._splitk_warned = False
+        self._splitk_ab_logged: set = set()
+
+    def _splitk_splits(self, tiles: int) -> int:
+        if self._splitk_splits_env:
+            try:
+                return max(1, min(4, int(self._splitk_splits_env)))
+            except ValueError:
+                pass
+        ctas = tiles * self.head_num
+        sm = (
+            torch.cuda.get_device_properties(0).multi_processor_count
+            if torch.cuda.is_available()
+            else 1
+        )
+        return max(1, min(4, (2 * max(sm, 1) + ctas - 1) // ctas))
 
     def __del__(self):
         if self.use_flashinfer:
@@ -412,6 +575,113 @@ class DiffusionGemmaAttnOp:
         # the HF [q-window+1, q] mask). ctx < window is unaffected (the
         # window never bites), so all existing goldens stay bit-stable.
         return (self.window - 1) if self.window > 0 else -1
+
+    def _forward_splitk(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        qo_indptr: torch.Tensor,
+        batch_size: int,
+        causal: bool,
+    ):
+        """Contract 4c: the ragged segment through the Triton split-K
+        windowed prefill kernel (per-q-head CTAs + KV-dim split, see
+        splitk_window_attn.py). Returns (out [T, H, D] bf16, lse [T, H]
+        fp32 in the flashinfer cascade convention — merge_state_in_place
+        with the paged prefix composes unchanged), or None to fall back to
+        the fa3 ragged wrapper (gate off / shape mismatch / kernel failure
+        — warn once)."""
+        if not (
+            q.is_cuda
+            and q.dtype == torch.bfloat16
+            and self.head_dim in (64, 128, 256)
+            and self.head_num % self.kv_head_num == 0
+        ):
+            return None
+        if not causal:
+            # The 4c target is the causal TTFT prefill. The kernel itself
+            # supports non-causal (canvas: bidirectional, canvas < window),
+            # but the fa3 ragged path stays authoritative there while the
+            # gate is default-off.
+            return None
+        if q.dim() != 3 or k.dim() != 3 or v.dim() != 3:
+            return None
+        if q.shape[1] != self.head_num or k.shape[1] != self.kv_head_num:
+            return None
+        if not (q.is_contiguous() and k.is_contiguous() and v.is_contiguous()):
+            return None
+        if q.shape[0] < 1 or batch_size < 1:
+            return None
+        cu = qo_indptr
+        if cu.device != q.device or cu.dtype not in (torch.int32, torch.int64):
+            return None
+        if int(cu[-1].item()) != q.shape[0]:
+            return None
+        try:
+            tiles = (int(cu[-1].item()) + 127) // 128
+            splits = self._splitk_splits(tiles)
+            out, lse = _splitk_attn_fn(
+                q,
+                k,
+                v,
+                cu,
+                causal=causal,
+                window=self.window,
+                sm_scale=self.sm_scale,
+                split_k=splits,
+            )
+            if _SPLITK_AB_CHECK:
+                self._splitk_ab(q, k, v, qo_indptr, causal, out, lse)
+            return out, lse
+        except Exception as error:
+            if not self._splitk_warned:
+                logger.warning(
+                    "DiffusionGemma split-K windowed attention failed (%s); "
+                    "fa3 ragged path for this process",
+                    error,
+                )
+                self._splitk_warned = True
+            return None
+
+    def _splitk_ab(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        qo_indptr: torch.Tensor,
+        causal: bool,
+        out: torch.Tensor,
+        lse: torch.Tensor,
+    ) -> None:
+        """Debug A/B (DGM_SPLITK_AB=1): split-K kernel vs the fa3 ragged
+        wrapper on the same q/k/v, once per shape — output agreement plus
+        the lse convention check (ratio ~1.0 => same base; ~1.4427 =>
+        natural-vs-log2 mismatch)."""
+        key = (tuple(q.shape), causal, self.window)
+        if key in self._splitk_ab_logged:
+            return
+        self._splitk_ab_logged.add(key)
+        try:
+            ref_out, ref_lse = self.ragged_wrapper.run(q, k, v, return_lse=True)
+            diff = (out.to(torch.float32) - ref_out.to(torch.float32)).abs()
+            absmax = float(ref_out.to(torch.float32).abs().max())
+            lse_flat = lse.reshape(-1)
+            ref_flat = ref_lse.reshape(-1).to(torch.float32)
+            both = (torch.isfinite(lse_flat)) & (torch.isfinite(ref_flat))
+            ratio = (lse_flat[both] / ref_flat[both]).median() if bool(both.any()) else float("nan")
+            print(
+                f"[dgm-splitk-ab] q={tuple(q.shape)} causal={causal} "
+                f"window={self.window} splits=auto: "
+                f"max_diff={float(diff.max()):.4e} absmax={absmax:.3f} "
+                f"ratio={float(diff.max()) / max(absmax, 1e-6):.5f} | "
+                f"lse_median_ratio={float(ratio):.4f} "
+                f"lse_shape_mine={tuple(lse.shape)} "
+                f"lse_shape_fa3={tuple(ref_lse.shape)}",
+                flush=True,
+            )
+        except Exception as error:
+            logger.warning("DiffusionGemma splitk A/B check failed: %s", error)
 
     def _torch_attention(
         self,
@@ -632,10 +902,18 @@ class DiffusionGemmaAttnOp:
             )
         if self._fi_diag:
             torch.cuda.synchronize()
-        new_out, new_lse = self.ragged_wrapper.run(
-            qd, kd, vd,
-            return_lse=True,
-        )
+        splitk_state = None
+        if self.splitk_enabled and _splitk_attn_fn is not None:
+            splitk_state = self._forward_splitk(
+                qd, kd, vd, qo_indptr, batch_size, causal
+            )
+        if splitk_state is not None:
+            new_out, new_lse = splitk_state
+        else:
+            new_out, new_lse = self.ragged_wrapper.run(
+                qd, kd, vd,
+                return_lse=True,
+            )
         if self._fi_diag:
             torch.cuda.synchronize()
             logger.info("[dgm-fi] ragged run ok qo=%d causal=%s", q.shape[0], causal)
@@ -998,6 +1276,130 @@ class DiffusionGemmaAttention(nn.Module):
         )
         self.v_norm = _NoScaleRMSNorm(config.layernorm_eps)
 
+    def _norm_gamma(self, norm) -> Optional[torch.Tensor]:
+        """Weight of a per-head RMSNorm module, None when it does not look
+        like a production RMSNorm (mock norms in tests)."""
+        weight = getattr(norm, "weight", None)
+        if weight is None or weight.dim() != 1 or weight.stride(0) != 1:
+            return None
+        if weight.numel() != self.head_dim:
+            return None
+        if weight.dtype != torch.bfloat16:
+            return None
+        return weight
+
+    def _fused_qkv_norm_rope(
+        self, qkv: torch.Tensor, positions: torch.Tensor, rope: DiffusionGemmaRope
+    ) -> Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+        """Contract 6 item 1: norm (+rope) over the strided qkv slices in one
+        Triton launch per tensor, replacing the ~16-launch torch chain (see
+        qkv_norm_rope.py). Returns (q, k, v) [M, H, D] contiguous, or None
+        when the gate is off / the shapes do not qualify — the caller then
+        runs the exact torch chain."""
+        global _qkv_warned
+        if not (_FUSED_QKV_ENV and _qkv_kernel is not None):
+            return None
+        if qkv.dtype != torch.bfloat16 or not qkv.is_cuda:
+            return None
+        if qkv.dim() != 2 or qkv.stride(1) != 1 or qkv.shape[0] < 1:
+            return None
+        if qkv.shape[1] != self.q_size + 2 * self.kv_size:
+            return None
+        q_norm = self.qk_norm.q_norm
+        k_norm = self.qk_norm.k_norm
+        if q_norm is None or k_norm is None:
+            return None
+        if not (hasattr(q_norm, "variance_epsilon") and hasattr(k_norm, "variance_epsilon")):
+            # test harnesses patch RMSNorm with mocks lacking the attribute
+            return None
+        q_gamma = self._norm_gamma(q_norm)
+        k_gamma = self._norm_gamma(k_norm)
+        if q_gamma is None or k_gamma is None:
+            return None
+        eps = float(q_norm.variance_epsilon)
+        if float(k_norm.variance_epsilon) != eps:
+            return None
+        # ensure the cos/sin cache covers positions BEFORE any launch (the
+        # same memoized sync apply() pays; the fused path replaces it).
+        try:
+            rope.prepare(positions)
+        except Exception:
+            return None
+        cos, sin = rope.cos_sin_cache()
+        q_slice = qkv[..., : self.q_size]
+        k_slice = qkv[..., self.q_size : self.q_size + self.kv_size]
+        v_slice = qkv[..., self.q_size + self.kv_size :]
+        if not _qkv_norm_rope_usable(q_slice, self.head_num, q_gamma, cos, sin, positions):
+            return None
+        if not _qkv_norm_rope_usable(k_slice, self.kv_head_num, k_gamma, cos, sin, positions):
+            return None
+        if not _qkv_norm_rope_usable(v_slice, self.kv_head_num, None, None, None, None):
+            return None
+        try:
+            q = _qkv_kernel(q_slice, self.head_num, eps, q_gamma, cos, sin, positions)
+            k = _qkv_kernel(
+                k_slice, self.kv_head_num, eps, k_gamma, cos, sin, positions
+            )
+            # v: no-scale per-head norm (reference RMSNorm without weight).
+            v = _qkv_kernel(v_slice, self.kv_head_num, eps, None, None, None, None)
+            if _QKV_AB_CHECK:
+                self._qkv_ab(qkv, positions, rope, q, k, v)
+            return q, k, v
+        except Exception as error:
+            if not _qkv_warned:
+                logger.warning(
+                    "DiffusionGemma fused qkv norm+rope failed (%s); torch "
+                    "path for this process",
+                    error,
+                )
+                _qkv_warned = True
+            return None
+
+    def _qkv_ab(
+        self,
+        qkv: torch.Tensor,
+        positions: torch.Tensor,
+        rope: DiffusionGemmaRope,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+    ) -> None:
+        """Debug A/B (DGM_QKV_AB=1): fused norm+rope vs the exact torch chain
+        on the same qkv buffer, logged once per shape."""
+        key = (tuple(qkv.shape), self.head_dim)
+        if key in _qkv_ab_logged:
+            return
+        _qkv_ab_logged.add(key)
+        try:
+            q_slice = qkv[..., : self.q_size]
+            k_slice = qkv[..., self.q_size : self.q_size + self.kv_size]
+            v_slice = qkv[..., self.q_size + self.kv_size :]
+            q_ref, k_ref = self.qk_norm(
+                q_slice, k_slice, positions, rope, self.head_num, self.kv_head_num, self.head_dim
+            )
+            v_ref = self.v_norm(v_slice.reshape(-1, self.head_dim)).reshape(
+                -1, self.kv_head_num, self.head_dim
+            )
+            for tag, out, ref in (
+                ("q", q, q_ref.reshape(-1, self.head_num, self.head_dim)),
+                ("k", k, k_ref.reshape(-1, self.kv_head_num, self.head_dim)),
+                ("v", v, v_ref),
+            ):
+                diff = (out.to(torch.float32) - ref.to(torch.float32)).abs()
+                ulp = (
+                    out.view(torch.int16).to(torch.int32)
+                    - ref.view(torch.int16).to(torch.int32)
+                ).abs()
+                print(
+                    f"[dgm-qkv-ab] {tag} shape={tuple(out.shape)} "
+                    f"max_diff={float(diff.max()):.3e} max_ulp={int(ulp.max())} "
+                    f"mismatch_frac={float((out != ref).float().mean()):.4f} "
+                    f"ref_absmax={float(ref.to(torch.float32).abs().max()):.3f}",
+                    flush=True,
+                )
+        except Exception as error:
+            logger.warning("DiffusionGemma qkv A/B check failed: %s", error)
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -1012,16 +1414,20 @@ class DiffusionGemmaAttention(nn.Module):
         qkv = self.qkv_proj(hidden_states)
         input_shape = hidden_states.shape[:-1]
         qkv = qkv.reshape(-1, self.q_size + 2 * self.kv_size)
-        q = qkv[..., : self.q_size]
-        k = qkv[..., self.q_size : self.q_size + self.kv_size]
-        v = qkv[..., self.q_size + self.kv_size :]
-        q, k = self.qk_norm(q, k, positions, rope, self.head_num, self.kv_head_num, self.head_dim)
-        # v_norm is per-head (reference: RMSNorm without scale over head_dim).
-        v = v.reshape(-1, self.head_dim)
-        v = self.v_norm(v)
-        v = v.reshape(-1, self.kv_head_num, self.head_dim)
-        q = q.reshape(-1, self.head_num, self.head_dim)
-        k = k.reshape(-1, self.kv_head_num, self.head_dim)
+        fused = self._fused_qkv_norm_rope(qkv, positions, rope)
+        if fused is not None:
+            q, k, v = fused
+        else:
+            q = qkv[..., : self.q_size]
+            k = qkv[..., self.q_size : self.q_size + self.kv_size]
+            v = qkv[..., self.q_size + self.kv_size :]
+            q, k = self.qk_norm(q, k, positions, rope, self.head_num, self.kv_head_num, self.head_dim)
+            # v_norm is per-head (reference: RMSNorm without scale over head_dim).
+            v = v.reshape(-1, self.head_dim)
+            v = self.v_norm(v)
+            v = v.reshape(-1, self.kv_head_num, self.head_dim)
+            q = q.reshape(-1, self.head_num, self.head_dim)
+            k = k.reshape(-1, self.kv_head_num, self.head_dim)
         attn_output = attn_op.forward(
             q, k, v, kv_cache, attn_inputs, positions, causal, write_kv
         )
@@ -1130,7 +1536,30 @@ class _NoScaleRMSNorm(nn.Module):
         except Exception as error:
             logger.warning("DiffusionGemma norm A/B check failed: %s", error)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, gamma: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """RMSNorm(x) [* gamma]: ``gamma=None`` keeps the ones gamma; an
+        explicit bf16 [D] gamma folds a downstream elementwise scale INTO
+        the kernel (opt r8 contract 6: the router's ``* scale * root`` —
+        rmsnorm is linear in gamma for fixed x, so
+        ``rmsnorm(x, scale*root) == rmsnorm(x, ones) * scale * root`` modulo
+        the roundings: the fold computes fp32 all the way with one bf16
+        store where the torch chain rounds three times). The gamma path is
+        STRICT: any validation or kernel failure raises so the caller
+        (router) falls back to its exact torch chain — a silent ones-gamma
+        degradation would drop the scale entirely."""
+        if gamma is not None:
+            if (
+                gamma.dim() != 1
+                or gamma.numel() != x.shape[-1]
+                or gamma.stride(0) != 1
+                or gamma.dtype != torch.bfloat16
+                or gamma.device != x.device
+            ):
+                raise ValueError("fold gamma shape/dtype/device mismatch")
+            if not self._fi_usable(x):
+                raise ValueError("fold gamma needs the CUDA bf16 flashinfer path")
+            flat = x.view(-1, x.shape[-1])
+            return self._fi_norm(flat, gamma, eps=self.eps).view(x.shape)
         if self._fi_usable(x):
             try:
                 flat = x.view(-1, x.shape[-1])
@@ -1312,6 +1741,11 @@ class DiffusionGemmaRouter(nn.Module):
         self.fused_routing = os.environ.get("DGM_FUSED_ROUTING", "1") != "0"
         self._routing_kernel = None
         self._routing_warned = False
+        # opt r8 contract 6 item 3 (router scale fold into the norm gamma):
+        # lazy per-device fold-gamma cache + one-shot degrade flag.
+        self._fold_cache: Dict[Tuple[int, int], torch.Tensor] = {}
+        self._fold_warned = False
+        self._routerscale_ab_logged: set = set()
         if self.fused_routing:
             try:
                 self._routing_kernel = _get_routing_topk_kernel()
@@ -1437,11 +1871,111 @@ class DiffusionGemmaRouter(nn.Module):
         except Exception as error:
             logger.warning("DiffusionGemma routing A/B check failed: %s", error)
 
+    def _fold_gamma(self, x: torch.Tensor) -> Optional[torch.Tensor]:
+        """opt r8 contract 6 item 3: ``scale * hidden^-0.5`` folded into the
+        pre-norm flashinfer gamma — one kernel replaces norm + broadcast
+        BinaryFunctor Mul + scalar mul. Lazy per (device, dtype) cache like
+        the ones-gamma; None when the fold does not qualify (the caller then
+        runs the exact torch chain)."""
+        if not _FUSED_ROUTER_SCALE_ENV:
+            return None
+        if self.pre_norm._fi_norm is None or not x.is_cuda or x.dtype != torch.bfloat16:
+            return None
+        if x.dim() != 2 or not x.is_contiguous() or x.numel() < 1:
+            return None
+        key = (x.shape[-1], x.device.index)
+        gamma = self._fold_cache.get(key)
+        if gamma is None:
+            scale = self.scale
+            if (
+                scale.dim() != 1
+                or scale.numel() != x.shape[-1]
+                or scale.device != x.device
+                or scale.dtype != torch.bfloat16
+                or scale.stride(0) != 1
+            ):
+                return None
+            with torch.inference_mode(False):
+                gamma = (
+                    (scale.to(torch.float32) * self.scalar_root_size)
+                    .to(torch.bfloat16)
+                    .contiguous()
+                )
+            self._fold_cache[key] = gamma
+        return gamma
+
+    def _routerscale_ab(
+        self, x: torch.Tensor, folded: torch.Tensor
+    ) -> None:
+        """Debug A/B (DGM_ROUTERSCALE_AB=1): gamma-folded router input vs the
+        exact torch chain (norm -> *scale -> *root), plus the downstream
+        top-8 set/order effect (the near-tie ruling class), logged once per
+        shape."""
+        key = (tuple(x.shape), x.dtype)
+        if key in self._routerscale_ab_logged:
+            return
+        self._routerscale_ab_logged.add(key)
+        try:
+            ref = self.pre_norm(x) * self.scale * self.scalar_root_size
+            diff = (folded.to(torch.float32) - ref.to(torch.float32)).abs()
+            ulp = (
+                folded.view(torch.int16).to(torch.int32)
+                - ref.view(torch.int16).to(torch.int32)
+            ).abs()
+            line = (
+                f"[dgm-routerscale-ab] shape={tuple(x.shape)} "
+                f"max_diff={float(diff.max()):.3e} max_ulp={int(ulp.max())} "
+                f"mismatch_frac={float((folded != ref).float().mean()):.4f} "
+                f"ref_absmax={float(ref.to(torch.float32).abs().max()):.3f}"
+            )
+            try:
+                s_f = self.proj(folded)
+                s_r = self.proj(ref)
+                set_eq = (
+                    self._top_idx_of(s_f).sort(dim=-1).values
+                    == self._top_idx_of(s_r).sort(dim=-1).values
+                ).all(dim=-1)
+                order_eq = self._top_idx_of(s_f) == self._top_idx_of(s_r)
+                w_f = self._reference_route(s_f, folded.dtype)[0]
+                w_r = self._reference_route(s_r, ref.dtype)[0]
+                w_diff = (w_f.to(torch.float32) - w_r.to(torch.float32)).abs()
+                line += (
+                    f" | top8 same_set={int(set_eq.sum())}/{x.shape[0]}"
+                    f" exact_order={int(order_eq.sum())}/{x.shape[0]}"
+                    f" max_wdiff={float(w_diff.max()):.3e}"
+                )
+            except Exception as inner:  # downstream referee is best-effort
+                line += f" | downstream check skipped: {inner}"
+            print(line, flush=True)
+        except Exception as error:
+            logger.warning("DiffusionGemma router-scale A/B check failed: %s", error)
+
+    def _top_idx_of(self, scores: torch.Tensor) -> torch.Tensor:
+        probs = torch.softmax(scores.to(torch.float32), dim=-1)
+        return torch.topk(probs, self.top_k, dim=-1).indices
+
     def forward(
         self, hidden_states: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        h = self.pre_norm(hidden_states)
-        h = h * self.scale * self.scalar_root_size
+        gamma = self._fold_gamma(hidden_states)
+        if gamma is not None:
+            try:
+                h = self.pre_norm(hidden_states, gamma)
+                if _ROUTERSCALE_AB_CHECK:
+                    self._routerscale_ab(hidden_states, h)
+            except Exception as error:
+                if not self._fold_warned:
+                    logger.warning(
+                        "DiffusionGemma router scale fold failed (%s); torch "
+                        "chain for this process",
+                        error,
+                    )
+                    self._fold_warned = True
+                h = self.pre_norm(hidden_states)
+                h = h * self.scale * self.scalar_root_size
+        else:
+            h = self.pre_norm(hidden_states)
+            h = h * self.scale * self.scalar_root_size
         scores = self.proj(h)
         if self._fused_routing_usable(scores):
             fused = self._forward_fused_routing(scores, hidden_states.dtype)
@@ -1733,9 +2267,14 @@ class DiffusionGemmaLayer(nn.Module):
         hidden_states, _h12 = _fused_add_norm(
             hidden_states_2, hidden_states_1, self.post_feedforward_layernorm
         )
-        hidden_states = residual + hidden_states
         scalar = self.layer_scalar_dec if decoder_mode else self.layer_scalar_enc
-        return hidden_states * scalar
+        # opt r8 contract 6 item 2: the layer tail "(residual + normed) *
+        # scalar" add+mul pair (one CUDAFunctor_add + one BinaryFunctor Mul,
+        # three full [M, H] passes) runs as ONE fused Triton launch on CUDA
+        # bf16: fp32 add+scale in registers, one bf16 rounding at the store
+        # (<= 1 ulp vs the torch pair; DGM_FUSED_ADD_SCALE gate,
+        # DGM_ADDSCALE_AB=1 referee).
+        return _fused_add_scale(hidden_states, residual, scalar)
 
 
 class DiffusionGemmaSelfConditioning(nn.Module):
