@@ -246,12 +246,11 @@ protected:
     }
 
     void prepareP2PRegistrationResource(bool query_pd, const std::string& key, bool hybrid = false) {
-        // Inject the registration-only connector below; do not initialize transport workers.
-        if (hybrid) {
-            prepareHybridResource(true, RoleType::PREFILL);
-        } else {
-            prepareResourceWithCacheConfig(init_config(), {1, 2, 3, 4, 5, 6}, true, RoleType::PREFILL);
-        }
+        PDSepConfig pd_config;
+        pd_config.role_type = RoleType::PREFILL;
+        const auto cache_config =
+            hybrid ? test::makeSimpleHybridMhaCacheConfig(4, 9, 2, DataType::TYPE_FP16, 2) : init_config();
+        prepareResourceWithCacheConfig(cache_config, {1, 2, 3, 4, 5, 6}, true, RoleType::PREFILL, {}, pd_config);
         stream_->generateConfig()->pd_separation      = query_pd;
         stream_->generateConfig()->unique_key         = key;
         stream_->generateInput()->request_deadline_ms = currentTimeMs() + 30000;
@@ -259,11 +258,10 @@ protected:
         config.role_type = RoleType::PREFILL;
         config.tp_rank   = 0;
         auto connector   = std::make_unique<P2PConnector>(config, nullptr, nullptr);
-        // Exercise real registration without starting transport workers.
+        // Replace transport with a registration-only connector for the assertions below.
         connector->prefill_                = std::make_unique<P2PConnectorPrefill>(config, nullptr, nullptr);
         connector->prefill_->stream_store_ = std::make_shared<P2PConnectorResourceStore>(nullptr, 100);
         cache_manager_->p2p_connector_     = std::move(connector);
-        cache_manager_->pd_sep_config_.role_type = RoleType::PREFILL;
         ASSERT_TRUE(cache_manager_->hasP2PConnector());
         ASSERT_TRUE(stream_->streamCacheResource().initKVBlock().ok());
         ASSERT_FALSE(stream_->cacheKeys().empty());
@@ -296,14 +294,18 @@ protected:
                                         const std::vector<int>& input_tokens,
                                         bool                    reuse_cache,
                                         RoleType                role_type,
-                                        const KVCacheConfig&    kv_cache_config      = {},
-                                        const PDSepConfig&      pd_sep_config        = {}) {
+                                        const KVCacheConfig&    kv_cache_config = {},
+                                        const PDSepConfig&      pd_sep_config   = {}) {
+        RuntimeConfig runtime_config;
+        if (pd_sep_config.role_type == RoleType::PREFILL || pd_sep_config.role_type == RoleType::DECODE) {
+            runtime_config.worker_grpc_addrs = {"127.0.0.1:12345"};
+        }
         cache_manager_ = std::make_shared<KVCacheManager>(cache_config,
                                                           /*warmup=*/false,
                                                           /*metrics_reporter=*/nullptr,
                                                           kv_cache_config,
                                                           ParallelismConfig{},
-                                                          RuntimeConfig{},
+                                                          runtime_config,
                                                           SpeculativeExecutionConfig{},
                                                           pd_sep_config);
         ASSERT_TRUE(cache_manager_->init());
