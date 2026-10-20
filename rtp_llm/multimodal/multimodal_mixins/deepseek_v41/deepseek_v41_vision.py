@@ -58,6 +58,23 @@ class _RuntimeImage:
 
 
 class V41VisionAttention(Attention):
+    def __init__(self, config):
+        super().__init__(config)
+        self._attention_backend = os.environ.get("V41_VISION_ATTN_BACKEND", "fa4")
+        if self._attention_backend not in ("sdpa", "fa4"):
+            raise ValueError("V41_VISION_ATTN_BACKEND must be sdpa or fa4")
+
+    def _attention(self, q, k, v):
+        if self._attention_backend == "fa4":
+            from rtp_llm.models_py.modules.dsv41.vision_attention import (
+                apply_vision_fa4,
+            )
+
+            result = apply_vision_fa4(q.unsqueeze(0), k.unsqueeze(0), v.unsqueeze(0))
+            if result is not None:
+                return result.squeeze(0)
+        return super()._attention(q, k, v)
+
     def _apply_packed_rotary(self, q, k, cos, sin):
         from .packed_rotary import apply_packed_vision_qk_rope
 
@@ -78,32 +95,27 @@ class V41VisionAttention(Attention):
 class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
     inspection_verdict_is_request_scoped = True
 
-    def __init__(self, config, *, device=None):
+    def __init__(self, config, *, device=None, max_batch_images=126):
         super().__init__()
         self.processor_config = V41ImageProcessorConfig.from_model_config(config)
-        self._gpu_preprocess_enabled = os.environ.get("V41_GPU_PREPROCESS", "0") == "1"
-        self._rgb_uploader = None  # Created only by the opt-in staging hook.
-        # Opt-in until the real-weight byte and matched performance gates pass.
+        # CPU workers decode RGB; the GPU owner transforms and packs images.
         # Existing MMScheduler owns cross-request admission and cancellation.
-        self._packed_forward_enabled = os.environ.get("V41_PACKED_FORWARD", "0") == "1"
-        self._packed_max_images = int(os.environ.get("V41_PACKED_MAX_IMAGES", "8"))
-        self._packed_max_patches = int(
-            os.environ.get("V41_PACKED_MAX_PATCHES", "66368")
-        )
-        if min(self._packed_max_images, self._packed_max_patches) < 1:
-            raise ValueError("V4.1 packed image and patch budgets must be positive")
-        self._packed_stats_enabled = os.environ.get("V41_PACKED_STATS", "0") == "1"
-        self._packed_stats_lock = (
-            threading.Lock() if self._packed_stats_enabled else None
-        )
-        self._packed_batch_histogram = {} if self._packed_stats_enabled else None
-        self._packed_graph = None
-        if os.environ.get("V41_PACKED_CUDA_GRAPH", "0") == "1":
-            from .packed_graph import PackedVisionGraph
+        self._rgb_uploader = None
+        # Retain the qualified 126-image/1,058,400-patch safety ceilings.
+        # The common VitConfig may request a smaller media batch.
+        if max_batch_images < 1:
+            raise ValueError("V4.1 packed image budget must be positive")
+        self._packed_max_images = min(max_batch_images, 126)
+        self._packed_max_patches = 1058400
+        self._packed_stats_lock = threading.Lock()
+        self._packed_batch_histogram = {}
+        from .packed_graph import PackedVisionGraph
 
-            self._packed_graph = PackedVisionGraph(
-                self._packed_max_images, self._packed_max_patches
-            )
+        # The graph itself checks CUDA, full-batch shape and inference mode;
+        # unsupported shapes and CPU execution retain the eager path.
+        self._packed_graph = PackedVisionGraph(
+            self._packed_max_images, self._packed_max_patches
+        )
         self.vision = ViT(config.vision_parameters(), attention_cls=V41VisionAttention)
         self.aligner = Aligner(config.vision_parameters())
         hidden_size = config.text["hidden_size"]
@@ -111,9 +123,6 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
         self.image_newline = nn.Parameter(torch.empty(hidden_size))
         self.image_end = nn.Parameter(torch.empty(hidden_size))
         self.to(device=device, dtype=torch.bfloat16)
-        for module in self.vision.modules():
-            if isinstance(module, RMSNorm):
-                module.weight.data = module.weight.data.float()
 
     @property
     def _device(self):
@@ -131,13 +140,21 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
         model.requires_grad_(False)
         expected = model.state_dict()
         state = {}
-        for name, placeholder in expected.items():
+        for name in expected:
             state[name] = global_weights["v41." + name]
+            if (
+                "norm" in name
+                and name.endswith("weight")
+                and state[name].dtype != torch.bfloat16
+            ):
+                raise ValueError(
+                    "FlashInfer vision norm weights must be loaded as BF16"
+                )
         model.load_state_dict(state, strict=True, assign=True)
         return model.eval()
 
     def load_checkpoint(self, checkpoint: str | Path) -> dict[str, int]:
-        """Load only the real vision and delimiter tensors, retaining norm FP32."""
+        """Load real vision tensors into the selected backend's parameter dtype."""
         from safetensors import safe_open
 
         checkpoint = Path(checkpoint)
@@ -156,7 +173,11 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
         norms = [
             module for module in self.vision.modules() if isinstance(module, RMSNorm)
         ]
-        return {"weight_tensors": len(required), "fp32_norm_tensors": len(norms)}
+        return {
+            "weight_tensors": len(required),
+            "fp32_norm_tensors": sum(m.weight.dtype == torch.float32 for m in norms),
+            "bf16_norm_tensors": sum(m.weight.dtype == torch.bfloat16 for m in norms),
+        }
 
     @torch.inference_mode()
     def encode_image(self, image: _RuntimeImage) -> torch.Tensor:
@@ -183,8 +204,6 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
         return result
 
     def estimate_work(self, data, mm_type=None):
-        if not getattr(self, "_packed_forward_enabled", False):
-            return None
         data = self._image_group(data)
         grids = [self._vit_grid(image) for image in data]
         sizes = [height * width for height, width in grids]
@@ -203,20 +222,12 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
         )
 
     def get_batch_work_budget(self, max_batch_media):
-        if not getattr(self, "_packed_forward_enabled", False):
-            return None
         return MMWorkEstimate(input_patches=self._packed_max_patches)
 
     def packed_forward_stats(self):
-        if not self._packed_stats_enabled:
-            return {
-                "enabled": self._packed_forward_enabled,
-                "stats_enabled": False,
-                "image_batch_histogram": {},
-            }
         with self._packed_stats_lock:
             return {
-                "enabled": self._packed_forward_enabled,
+                "enabled": True,
                 "stats_enabled": True,
                 "image_batch_histogram": dict(self._packed_batch_histogram),
             }
@@ -232,7 +243,7 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
         return self._rgb_uploader.stats()
 
     def prepare_embedding_batch(self, data_list, mm_types):
-        if not self._gpu_preprocess_enabled or not self._packed_forward_enabled:
+        if self._device.type != "cuda":
             return None
         if len(data_list) != len(mm_types) or any(
             t != MMUrlType.IMAGE for t in mm_types
@@ -244,10 +255,8 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
         ):
             return None
         if self._rgb_uploader is None:
-            self._rgb_uploader = RGBBatchUploader(
-                self._device,
-                int(os.environ.get("V41_GPU_PREFETCH_MAX_BYTES", str(1024**3))),
-            )
+            # Bounded pinned staging as in the qualified 126-image path.
+            self._rgb_uploader = RGBBatchUploader(self._device, 4 * 1024**3)
         return self._rgb_uploader.upload(
             [[image.rgb for image in group] for group in groups],
             [isinstance(data, _DecodedImage) for data in data_list],
@@ -306,18 +315,17 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
                     outputs.extend(consume(forward(patches, grids)))
             if self._packed_graph is not None:
                 outputs.extend(self._packed_graph.run(patches, grids, forward, consume))
-            if self._packed_stats_enabled:
-                with self._packed_stats_lock:
-                    count = len(chunk)
-                    self._packed_batch_histogram[count] = (
-                        self._packed_batch_histogram.get(count, 0) + 1
-                    )
+            with self._packed_stats_lock:
+                count = len(chunk)
+                self._packed_batch_histogram[count] = (
+                    self._packed_batch_histogram.get(count, 0) + 1
+                )
             offset = end
         return outputs
 
     @staticmethod
     def preprocess_input(
-        mm_inputs, vit_config, *, processor_config, gpu_preprocess=False
+        mm_inputs, vit_config, *, processor_config, gpu_preprocess=True
     ):
         """Decode one bounded work item in MMProcessEngine's CPU executor.
 
@@ -394,7 +402,7 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
         # Picklable CPU-only values: do not pass self or CUDA state to workers.
         return {
             "processor_config": self.processor_config,
-            "gpu_preprocess": self._gpu_preprocess_enabled,
+            "gpu_preprocess": self._device.type == "cuda",
         }
 
     def validate_inputs(self, mm_inputs):
@@ -420,10 +428,7 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
         if not isinstance(image, (_DecodedImage, UploadedImage)):
             return image
         n_vit_h, n_vit_w = self._vit_grid(image)
-        if (
-            getattr(self, "_packed_forward_enabled", False)
-            and n_vit_h * n_vit_w > self._packed_max_patches
-        ):
+        if n_vit_h * n_vit_w > self._packed_max_patches:
             raise ValueError("V4.1 decoded image exceeds packed patch budget")
         patch = self.processor_config.vision_patch_size
         with torch.profiler.record_function("v41_gpu_preprocess"):
@@ -439,10 +444,7 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
     def embedding(self, data, **kwargs):
         images = self._image_group(data)
         images = [self._materialize_image(image) for image in images]
-        if getattr(self, "_packed_forward_enabled", False):
-            outputs = self.encode_images_packed(images)
-        else:
-            outputs = [self.encode_image(image) for image in images]
+        outputs = self.encode_images_packed(images)
         return (
             (
                 outputs[0]
@@ -460,8 +462,6 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
         if any(mm_type != MMUrlType.IMAGE for mm_type in mm_types):
             raise ValueError("V4.1 supports IMAGE inputs only")
         groups = [self._image_group(data) for data in data_list]
-        if not getattr(self, "_packed_forward_enabled", False):
-            return super().batched_embedding(data_list, mm_types, **kwargs)
         groups = [
             [self._materialize_image(image) for image in group] for group in groups
         ]
