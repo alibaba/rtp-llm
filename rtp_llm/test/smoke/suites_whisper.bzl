@@ -6,7 +6,7 @@ def whisper_suites():
     # (mm_skip_token_expansion); the decoder prompt is the forced
     # special-token sequence. One entry per acceptance architecture:
     # sm90 -> H20_CU13, sm103 -> SM103_CU13, sm12x -> RTX_5000_PRO_CU13.
-    smoke_args = "--act_type FP16 --warm_up 0 --seq_size_per_block 4 --reuse_cache 1 --enable_device_cache 1 --concurrency_limit 8"
+    smoke_args = "--act_type FP16 --warm_up 0 --seq_size_per_block 4 --reuse_cache 1 --enable_device_cache 1 --concurrency_limit 8 --enable_cuda_graph 1"
     native.test_suite(
         name = "smoke_whisper",
         tests = [

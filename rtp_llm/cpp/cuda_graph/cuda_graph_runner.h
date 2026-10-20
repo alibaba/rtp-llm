@@ -72,6 +72,8 @@ public:
         input_embedding_scalar_(graph_params.input_embedding_scalar),
         model_data_type_(graph_params.model_data_type),
         kv_cache_group_tags_(graph_params.kv_cache_group_tags),
+        kv_group_mm_len_(graph_params.kv_group_mm_len),
+        kv_group_mm_capacity_(graph_params.kv_group_mm_capacity),
         position_id_len_factor_(graph_params.position_id_len_factor),
         metrics_reporter_(std::move(metrics_reporter)),
         generation_prefill_cuda_graph_max_requests_(graph_params.generation_prefill_cuda_graph_max_requests),
@@ -265,6 +267,8 @@ private:
     cuda_graph::GraphPoolHandle            shared_graph_pool_{};
 
     std::vector<std::string>                   kv_cache_group_tags_;
+    std::vector<bool>                         kv_group_mm_len_;
+    std::vector<uint32_t>                     kv_group_mm_capacity_;
     int                                        position_id_len_factor_ = 0;  // 0 = model has no combo_position_ids
     std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter_;
     int                                        generation_prefill_cuda_graph_max_requests_{0};

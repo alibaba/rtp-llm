@@ -11,11 +11,19 @@ void refreshTaggedAttentionInputs(torch_ext::PyModelInputs& inputs) {
         auto kernel_block_id_device                   = tagged_inputs.kv_cache_kernel_block_id_device;
         auto block_id                                 = tagged_inputs.kv_cache_block_id;
         auto block_id_device                          = tagged_inputs.kv_cache_block_id_device;
+        // mm-length groups (kv_len_from_mm_features) keep their own KV lengths
+        // (audio frames), which are never derived from the common token stream;
+        // every other tag's lengths equal the common values anyway, so the
+        // unconditional preserve is a no-op for them.
+        auto sequence_lengths                = tagged_inputs.sequence_lengths;
+        auto sequence_lengths_plus_1_device  = tagged_inputs.sequence_lengths_plus_1_device;
         tagged_inputs                                 = inputs.attention_inputs;
         tagged_inputs.kv_cache_kernel_block_id        = std::move(kernel_block_id);
         tagged_inputs.kv_cache_kernel_block_id_device = std::move(kernel_block_id_device);
         tagged_inputs.kv_cache_block_id               = std::move(block_id);
         tagged_inputs.kv_cache_block_id_device        = std::move(block_id_device);
+        tagged_inputs.sequence_lengths               = std::move(sequence_lengths);
+        tagged_inputs.sequence_lengths_plus_1_device = std::move(sequence_lengths_plus_1_device);
     }
 }
 

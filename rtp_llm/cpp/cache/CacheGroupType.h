@@ -61,7 +61,8 @@ struct CacheGroupPolicy {
     CpBlockSliceMode     cp_slice               = CpBlockSliceMode::NONE;
     // Per-request KV length equals the request's multimodal feature row count
     // (encoder positions) instead of the token-stream length.
-    bool kv_len_from_mm_features = false;
+    bool     kv_len_from_mm_features = false;
+    uint32_t mm_kv_len_capacity      = 0;
     // Model-derived SWA attention window in tokens. Zero means no bounded
     // window is configured and remains the default for non-SWA groups.
     int sliding_window_size = 0;

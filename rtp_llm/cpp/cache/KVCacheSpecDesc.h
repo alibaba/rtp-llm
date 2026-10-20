@@ -64,6 +64,11 @@ struct KVCacheSpecDesc {
     // KV groups (whisper): K/V covers audio frames, never tokens.
     bool kv_len_from_mm_features = false;
 
+    // Max per-request KV length for kv_len_from_mm_features groups: sizes the
+    // CUDA-graph capture buffers (fake lengths, block-table width). Zero on
+    // non-mm groups; zero on an mm group falls back to the token-stream max.
+    uint32_t mm_kv_len_capacity = 0;
+
     uint32_t entry_elems = 0;
     DataType entry_dtype = DataType::TYPE_INVALID;
 

@@ -311,6 +311,9 @@ class Whisper(BaseModel):
         # (request-level side state), never through token-sequence expansion.
         config.mm_model_config.mm_skip_token_expansion = True
         config.mm_related_params.config["ckpt_path"] = config.ckpt_path
+        config.mm_related_params.config["max_source_positions"] = config_json.get(
+            "max_source_positions", 1500
+        )
 
     @classmethod
     def _post_build_model_config(cls, model_config: ModelConfig) -> None:
@@ -329,6 +332,11 @@ class Whisper(BaseModel):
         cross_desc.cache_type = KVCacheSpecType.MHA
         cross_desc.group_type = CacheGroupType.FULL
         cross_desc.kv_len_from_mm_features = True
+        # Audio-frame KV capacity (encoder positions per 30 s window) for the
+        # CUDA-graph capture sizing: fake lengths and block-table width.
+        cross_desc.mm_kv_len_capacity = model_config.mm_related_params.config.get(
+            "max_source_positions", 1500
+        )
         cross_reuse = CacheReusePolicyDesc()
         cross_reuse.enable_prefix_reuse = False
         cross_desc.reuse = cross_reuse
@@ -359,10 +367,7 @@ class Whisper(BaseModel):
         )
 
     def support_cuda_graph(self) -> bool:
-        # Phase A: model-side cross-KV slots are keyed per request and updated
-        # from Python at prefill, which is not CUDA-graph replay safe. Graph
-        # decode arrives with the engine cross-KV cache group (Phase B).
-        return False
+        return True
 
 
 register_model("whisper", Whisper, ["WhisperForConditionalGeneration"])

@@ -44,8 +44,13 @@ int64_t CudaGraphRunner::captureKernelBlockTableWidth(const CacheTopology& topol
     for (const auto& group : topology.groups()) {
         const size_t span = group.seqSizePerBlock();
         RTP_LLM_CHECK_WITH_INFO(span > 0, "CUDA graph requires a positive group block span");
-        const size_t tokens =
+        size_t tokens =
             group.policy.group_type == CacheGroupType::LINEAR ? max_seq_len : max_seq_len + max_reserved_step;
+        if (group.policy.kv_len_from_mm_features && group.policy.mm_kv_len_capacity > 0) {
+            // Cross-attention KV groups size by multimodal feature rows (audio
+            // frames), not by the token stream.
+            tokens = group.policy.mm_kv_len_capacity;
+        }
         size_t physical = tokens / span + (tokens % span != 0);
         if (group.policy.group_type == CacheGroupType::LINEAR && max_reserved_step > 0) {
             physical += max_reserved_step - 1;
@@ -962,6 +967,9 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
             for (const auto& [tag, src_inputs] : inputs.attention_inputs_by_tag) {
                 auto& dst_inputs = py_model_inputs_.attention_inputs_by_tag.at(tag);
                 stridedCopyHost(src_inputs.kv_cache_kernel_block_id, dst_inputs.kv_cache_kernel_block_id);
+                // mm-length groups carry their own KV lengths (audio frames);
+                // the common token-stream mirror above never refreshes them.
+                stridedCopyHost(src_inputs.sequence_lengths, dst_inputs.sequence_lengths);
             }
         }
     }
@@ -1566,6 +1574,38 @@ bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state,
                 return false;
             }
         }
+        // mm-length groups (kv_len_from_mm_features): a batch whose mm rows are
+        // all zero has no audio — the eager path skips the cross sublayer with
+        // raw zeros, while the captured kernel always runs and its zero-page
+        // attention would leak the o_proj bias instead. Route to eager.
+        for (size_t group_id = 0; group_id < kv_cache_group_tags_.size() && group_id < kv_group_mm_len_.size();
+             ++group_id) {
+            if (!kv_group_mm_len_[group_id]) {
+                continue;
+            }
+            const auto it = inputs.attention_inputs_by_tag.find(kv_cache_group_tags_[group_id]);
+            if (it == inputs.attention_inputs_by_tag.end()) {
+                continue;
+            }
+            const auto& lens = it->second.sequence_lengths;
+            if (lens.defined() && lens.numel() > 0 && !lens.is_cuda()) {
+                bool any_mm = false;
+                for (int64_t i = 0; i < lens.numel(); ++i) {
+                    if (lens[i].item<int32_t>() > 0) {
+                        any_mm = true;
+                        break;
+                    }
+                }
+                if (!any_mm) {
+                    if (observe_fallback) {
+                        RTP_LLM_LOG_WARNING(
+                            "mm-length group=%s has no multimodal rows this step, fallback to normal run.",
+                            kv_cache_group_tags_[group_id].c_str());
+                    }
+                    return false;
+                }
+            }
+        }
     } else if (!inputs.attention_inputs_by_tag.empty()) {
         if (observe_fallback) {
             RTP_LLM_LOG_WARNING(
@@ -1643,6 +1683,7 @@ int CudaGraphRunner::getCurrentRealGraphSize(const CudaGraphState& state) const 
 void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_bs, int num_tokens_per_bs) {
     inputs.attention_inputs.is_target_verify = is_target_verify_;
     inputs.attention_inputs.is_prefill       = is_prefill_cuda_graph_mode_ || is_target_verify_;
+    inputs.attention_inputs.is_cuda_graph    = true;
 
     // input_lengths [batch_size, int32] (decode only)
     inputs.attention_inputs.input_lengths        = torch::full({int(max_bs_)}, num_tokens_per_bs_, options_cpu_int32_);
@@ -1727,6 +1768,17 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
                     torch::zeros({int(max_bs_), max_blocks}, options_cuda_int32_);
                 tagged_inputs.kv_cache_kernel_block_id =
                     torch::zeros({int(max_bs_), max_blocks}, options_cpu_int32_).pin_memory();
+            }
+            if (kv_group_mm_len_.size() > group_id && kv_group_mm_len_[group_id]
+                && kv_group_mm_capacity_[group_id] > 0) {
+                // Cross-KV group: fake lengths cover the multimodal capacity so
+                // the captured plan/buffers size for the real page count.
+                tagged_inputs.sequence_lengths =
+                    torch::full({int(max_bs_)},
+                                static_cast<int64_t>(kv_group_mm_capacity_[group_id]),
+                                options_cpu_int32_)
+                        .pin_memory();
+                tagged_inputs.sequence_lengths_plus_1_device = tagged_inputs.sequence_lengths.cuda();
             }
             const auto [it, inserted] =
                 inputs.attention_inputs_by_tag.emplace(kv_cache_group_tags_[group_id], std::move(tagged_inputs));
@@ -2078,6 +2130,7 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
     // Common slice operations for input_ids and padding_offset
     inputs.attention_inputs.is_prefill       = is_prefill_cuda_graph_mode_ || is_target_verify_;
     inputs.attention_inputs.is_target_verify = is_target_verify_;
+    inputs.attention_inputs.is_cuda_graph    = true;
     // HC-shaped MTP draft prefill executes a fixed-capacity Python path. Other
     // MTP models must slice to the current graph key so FlashInfer's batch
     // indices length remains equal to the query nnz.
@@ -2159,6 +2212,16 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
         }
         if (cap_attn.kv_cache_block_id.defined()) {
             tagged_inputs.kv_cache_block_id = cap_attn.kv_cache_block_id.slice(0, 0, batch_size);
+        }
+        // mm-length groups keep their capacity fake lengths: the common
+        // token-stream lengths would mis-size the captured paged-decode plan.
+        if (cap_attn.sequence_lengths.defined() && cap_attn.sequence_lengths.numel() > 0) {
+            const auto it = std::find(kv_cache_group_tags_.begin(), kv_cache_group_tags_.end(), tag);
+            const size_t group_id = static_cast<size_t>(it - kv_cache_group_tags_.begin());
+            if (it != kv_cache_group_tags_.end() && kv_group_mm_len_.size() > group_id && kv_group_mm_len_[group_id]) {
+                tagged_inputs.sequence_lengths            = cap_attn.sequence_lengths.slice(0, 0, batch_size);
+                tagged_inputs.sequence_lengths_plus_1_device = cap_attn.sequence_lengths_plus_1_device.slice(0, 0, batch_size);
+            }
         }
         inputs.attention_inputs_by_tag.emplace(tag, std::move(tagged_inputs));
     }

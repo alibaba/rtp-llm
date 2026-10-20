@@ -56,6 +56,7 @@ CacheGroupPolicy SpecBuilder::groupPolicy(const KVCacheSpecDesc& desc) {
         policy.enable_prefix_reuse = true;
     }
     policy.kv_len_from_mm_features = desc.kv_len_from_mm_features;
+    policy.mm_kv_len_capacity      = desc.mm_kv_len_capacity;
     if (desc.reuse.has_value()) {
         if (desc.reuse->enable_prefix_reuse.has_value()) {
             policy.enable_prefix_reuse = *desc.reuse->enable_prefix_reuse;

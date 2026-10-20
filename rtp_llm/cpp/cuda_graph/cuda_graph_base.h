@@ -57,6 +57,11 @@ struct GraphParams {
     // topology keeps the direct AttentionInputs fast path; multiple groups
     // require an exact tag -> AttentionInputs mapping at replay time.
     std::vector<std::string> kv_cache_group_tags;
+
+    // Per-tag kv_len_from_mm_features flags and mm_kv_len_capacity values,
+    // aligned with kv_cache_group_tags (whisper cross-KV groups).
+    std::vector<bool>     kv_group_mm_len;
+    std::vector<uint32_t> kv_group_mm_capacity;
     // Final kernel block-table width, in kernel block IDs per row. Callers
     // compute it from model topology and actual reserve/fake bounds before
     // constructing the graph; this struct never re-derives page geometry.

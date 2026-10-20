@@ -1951,6 +1951,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("dtype", &KVCacheSpecDesc::dtype)
         .def_readwrite("is_state_cache", &KVCacheSpecDesc::is_state_cache)
         .def_readwrite("kv_len_from_mm_features", &KVCacheSpecDesc::kv_len_from_mm_features)
+        .def_readwrite("mm_kv_len_capacity", &KVCacheSpecDesc::mm_kv_len_capacity)
         .def_readwrite("entry_elems", &KVCacheSpecDesc::entry_elems)
         .def_readwrite("entry_dtype", &KVCacheSpecDesc::entry_dtype)
         .def_readwrite("entry_count_mode", &KVCacheSpecDesc::entry_count_mode)
@@ -1974,6 +1975,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.dtype,
                                       self.is_state_cache,
                                       self.kv_len_from_mm_features,
+                                      self.mm_kv_len_capacity,
                                       self.entry_elems,
                                       self.entry_dtype,
                                       self.entry_count_mode,
@@ -1993,29 +1995,30 @@ PYBIND11_MODULE(libth_transformer_config, m) {
             },
             [](py::tuple t) {
                 KVCacheSpecDesc c;
-                if (t.size() != 21)
+                if (t.size() != 22)
                     throw std::runtime_error("Invalid KVCacheSpecDesc state!");
                 c.tag                                  = t[0].cast<std::string>();
                 c.cache_type                           = t[1].cast<KVCacheSpecType>();
                 c.dtype                                = t[2].cast<DataType>();
                 c.is_state_cache                       = t[3].cast<bool>();
                 c.kv_len_from_mm_features              = t[4].cast<bool>();
-                c.entry_elems                          = t[5].cast<uint32_t>();
-                c.entry_dtype                          = t[6].cast<DataType>();
-                c.entry_count_mode                     = t[7].cast<OpaqueBlockEntryCountMode>();
-                c.explicit_entry_count                 = t[8].cast<uint32_t>();
-                c.compression_ratio                    = t[9].cast<uint32_t>();
-                c.state_ring_overlap                   = t[10].cast<uint32_t>();
-                c.state_ring_include_gen_num_per_cycle = t[11].cast<bool>();
-                c.block_stride_bytes_override          = t[12].cast<size_t>();
-                c.block_stride_bytes_alignment         = t[13].cast<size_t>();
-                c.block_stride_alignment_min_entries   = t[14].cast<uint32_t>();
-                c.group_type                           = t[15].cast<std::optional<CacheGroupType>>();
-                c.reuse                                = t[16].cast<std::optional<CacheReusePolicyDesc>>();
-                c.capacity                             = t[17].cast<std::optional<CacheCapacityPolicyDesc>>();
-                c.memory                               = t[18].cast<std::optional<CacheMemoryPolicyDesc>>();
-                c.tail                                 = t[19].cast<std::optional<CacheTailPolicyDesc>>();
-                c.cp                                   = t[20].cast<std::optional<CacheCpPolicyDesc>>();
+                c.mm_kv_len_capacity                   = t[5].cast<uint32_t>();
+                c.entry_elems                          = t[6].cast<uint32_t>();
+                c.entry_dtype                          = t[7].cast<DataType>();
+                c.entry_count_mode                     = t[8].cast<OpaqueBlockEntryCountMode>();
+                c.explicit_entry_count                 = t[9].cast<uint32_t>();
+                c.compression_ratio                    = t[10].cast<uint32_t>();
+                c.state_ring_overlap                   = t[11].cast<uint32_t>();
+                c.state_ring_include_gen_num_per_cycle = t[12].cast<bool>();
+                c.block_stride_bytes_override          = t[13].cast<size_t>();
+                c.block_stride_bytes_alignment         = t[14].cast<size_t>();
+                c.block_stride_alignment_min_entries   = t[15].cast<uint32_t>();
+                c.group_type                           = t[16].cast<std::optional<CacheGroupType>>();
+                c.reuse                                = t[17].cast<std::optional<CacheReusePolicyDesc>>();
+                c.capacity                             = t[18].cast<std::optional<CacheCapacityPolicyDesc>>();
+                c.memory                               = t[19].cast<std::optional<CacheMemoryPolicyDesc>>();
+                c.tail                                 = t[20].cast<std::optional<CacheTailPolicyDesc>>();
+                c.cp                                   = t[21].cast<std::optional<CacheCpPolicyDesc>>();
                 return c;
             }));
 

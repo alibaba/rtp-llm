@@ -71,6 +71,59 @@ def _clamped_residual_add(residual: torch.Tensor, x: torch.Tensor) -> torch.Tens
 CROSS_KV_TAG = "cross"
 
 
+class _GraphDecodeState:
+    """Per-batch-size CUDA graph decode state (params + wrapper pair).
+
+    One FlashInfer paged-decode wrapper can only hold one fixed batch size,
+    so each captured graph bucket owns its pair; the buffers stay at fixed
+    addresses across replays.
+    """
+
+    def __init__(self, params, wrapper, workspace, page_size: int):
+        self.params = params
+        self.wrapper = wrapper
+        self.workspace = workspace
+        self.page_size = page_size
+        self._plan_indptr_snapshot = None
+        self.plan_kv_len = 0
+
+    def bind(self, kv_lens: torch.Tensor, block_table: torch.Tensor) -> None:
+        """Capture-time fill + fixed-buffer binding for one batch bucket."""
+        self.plan_kv_len = int(kv_lens.max()) if kv_lens.numel() > 0 else 0
+        seq_minus_one = (kv_lens - 1).clamp(min=0)
+        empty_prefix = torch.empty(0, dtype=torch.int32)
+        self.params.fill_params(empty_prefix, seq_minus_one, seq_minus_one, block_table, self.page_size, False)
+        if self.wrapper._fixed_batch_size == 0:
+            self.wrapper._use_cuda_graph = True
+            self.wrapper._paged_kv_indptr_buf = self.params.decode_page_indptr_d
+            self.wrapper._paged_kv_last_page_len_buf = self.params.paged_kv_last_page_len_d
+            self.wrapper._paged_kv_indices_buf = self.params.page_indice_d
+            self.wrapper._fixed_batch_size = int(kv_lens.numel())
+            self.wrapper._qo_indptr_buf = torch.arange(
+                int(kv_lens.numel()) + 1, dtype=torch.int32, device=self.params.page_indice_d.device
+            )
+
+    def plan(self, head_num: int, head_dim: int, dtype: torch.dtype) -> None:
+        self.wrapper.plan(
+            self.params.decode_page_indptr_d,
+            self.params.page_indice_d,
+            self.params.paged_kv_last_page_len_d,
+            head_num,
+            head_num,
+            head_dim,
+            self.page_size,
+            q_data_type=dtype,
+            kv_data_type=dtype,
+            o_data_type=dtype,
+        )
+        self._plan_indptr_snapshot = self.params.decode_page_indptr_h.clone()
+
+    def replan_if_needed(self, head_num: int, head_dim: int, dtype: torch.dtype) -> None:
+        current = self.params.decode_page_indptr_h
+        if self._plan_indptr_snapshot is None or not torch.equal(self._plan_indptr_snapshot, current):
+            self.plan(head_num, head_dim, dtype)
+
+
 class WhisperCrossKVCacheGroup:
     """Engine ``cross`` cache group access: write-once at prefill, paged decode.
 
@@ -106,6 +159,15 @@ class WhisperCrossKVCacheGroup:
         self.workspace = get_py_flashinfer_workspace_buffer()
         self.decode_wrapper = BatchDecodeWithPagedKVCacheWrapper(self.workspace, "HND")
         self.active = True
+        # CUDA graph decode states, one per captured batch size: each graph
+        # owns its params/wrapper pair so the fixed buffers never alias across
+        # batch buckets (the eager path keeps using self.params/decode_wrapper).
+        self._graph_states: dict = {}
+        # Per-step dispatch flag: True only while a captured graph step owns
+        # the cross attention (capture warmup/capture forwards); eager steps
+        # always re-plan self.decode_wrapper and must not pick a stale
+        # graph-state wrapper even when the batch size matches a bucket.
+        self._graph_decode_step = False
 
     @staticmethod
     def _host_i32(tensor: torch.Tensor) -> torch.Tensor:
@@ -142,7 +204,7 @@ class WhisperCrossKVCacheGroup:
             v = v.view(-1, self.head_num, self.head_dim)
             self.write_op.forward(k, v, cache)
 
-    def begin_decode(self, cross_inputs, kv_lens: torch.Tensor) -> None:
+    def begin_decode(self, cross_inputs, kv_lens: torch.Tensor, is_cuda_graph: bool = False) -> None:
         """Plan the paged decode wrapper for this step's batch."""
         kv_lens = self._host_i32(kv_lens)
         # Decode branch: kv_len = sequence_lengths + 1, so pass frames - 1 to
@@ -151,6 +213,27 @@ class WhisperCrossKVCacheGroup:
         block_table = self._block_table_host(cross_inputs)
         empty_prefix = torch.empty(0, dtype=torch.int32)
         self.params.fill_params(empty_prefix, seq_minus_one, seq_minus_one, block_table, self.page_size, False)
+        if is_cuda_graph:
+            batch_size = int(kv_lens.numel())
+            state = self._graph_states.get(batch_size)
+            if state is None:
+                from flashinfer.decode import BatchDecodeWithPagedKVCacheWrapper
+                from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
+                    get_py_flashinfer_workspace_buffer,
+                )
+                from rtp_llm.ops.compute_ops import rtp_llm_ops as _ops
+
+                workspace = get_py_flashinfer_workspace_buffer()
+                state = _GraphDecodeState(
+                    params=_ops.FlashInferMlaAttnParams(),
+                    wrapper=BatchDecodeWithPagedKVCacheWrapper(workspace, "HND"),
+                    workspace=workspace,
+                    page_size=self.page_size,
+                )
+                self._graph_states[batch_size] = state
+            state.bind(kv_lens, block_table)
+            state.plan(self.head_num, self.head_dim, self.dtype)
+            return
         self.decode_wrapper.plan(
             self.params.decode_page_indptr_d,
             self.params.page_indice_d,
@@ -173,9 +256,37 @@ class WhisperCrossKVCacheGroup:
             # caller must NOT run o_proj (its bias would leak in).
             return None
         q = q.view(-1, self.head_num, self.head_dim)
-        out = self.decode_wrapper.run(q, layer_cache.kv_cache_base)
+        state = self._graph_states.get(int(q.shape[0])) if self._graph_decode_step else None
+        wrapper = state.wrapper if state is not None else self.decode_wrapper
+        out = wrapper.run(q, layer_cache.kv_cache_base)
         result = out.reshape(-1, self.head_num * self.head_dim)
         return result
+
+    def prepare_cuda_graph(self, attn_inputs) -> None:
+        """Replay-time in-place refresh (called by CudaGraphRunner per step).
+
+        The runner has already D2D-refreshed this tag's captured block table;
+        the cross KV length is constant (audio frame capacity), so the device
+        fill mainly re-stages indptr/last-page-length from the refreshed
+        table. ``kv_len = sequence_lengths`` (frames), not seq+1.
+        """
+        kv_lens = attn_inputs.sequence_lengths
+        if kv_lens is None or kv_lens.numel() == 0:
+            return
+        state = self._graph_states.get(int(kv_lens.numel()))
+        if state is None:
+            return
+        block_id = attn_inputs.kv_cache_kernel_block_id_device
+        if block_id is None or not block_id.is_cuda:
+            block_id = attn_inputs.kv_cache_kernel_block_id.cuda()
+        # Keep the device-fill metadata consistent with the captured plan
+        # (kv = planned capacity): flashinfer's work partition is derived at
+        # plan time, so a shorter indptr would desynchronize it. No-audio rows
+        # carry an all-zero block-table row (reserved block 0) and attention
+        # over zero pages yields zeros, matching the eager skip semantics.
+        frames = torch.full_like(kv_lens, state.plan_kv_len, dtype=torch.int32).cuda(non_blocking=True)
+        state.params.fill_decode_cuda_graph_params(frames, block_id, self.page_size)
+        state.replan_if_needed(self.head_num, self.head_dim, self.dtype)
 
     def __del__(self):
         try:
@@ -184,6 +295,8 @@ class WhisperCrossKVCacheGroup:
             )
 
             release_py_flashinfer_workspace_buffer(self.workspace)
+            for state in self._graph_states.values():
+                release_py_flashinfer_workspace_buffer(state.workspace)
         except Exception:
             pass
 
@@ -453,6 +566,12 @@ class WhisperModel(GptModelBase):
                 attn_configs.head_num, attn_configs.size_per_head, page_size,
                 torch.float16,
             )
+            # The pool backing is torch::empty (uninitialized): CUDA-graph
+            # dummy/no-audio rows point at reserved block 0 through their
+            # zero block-table rows, so that block must read as zeros to
+            # reproduce the eager cross-skip semantics.
+            for i in range(model_config.num_layers):
+                self.kv_cache.get_layer_cache(i, CROSS_KV_TAG).kv_cache_base[0].zero_()
         except Exception as error:  # FlashInfer unavailable -> eager fallback
             self._cross_group_init_failed = True
             return None
@@ -465,6 +584,41 @@ class WhisperModel(GptModelBase):
         if isinstance(attention_inputs, Mapping):
             return select_attention_inputs_for_tag(attention_inputs, "default")
         return attention_inputs
+
+    def cuda_graph_position_id_len_factor(self) -> int:
+        # The decoder adds a learned positional embedding indexed by
+        # combo_position_ids (no RoPE): the decode CUDA graph must capture
+        # that tensor and refresh it per replay, exactly like Mrope models.
+        return 1
+
+    def prepare_fmha_impl(
+        self,
+        inputs: PyModelInputs,
+        is_cuda_graph: bool = False,
+        cuda_graph_selection_mode: Optional[str] = None,
+    ):
+        # The ``cross`` group rides along as a dict member so CudaGraphRunner's
+        # callPrepareCudaGraph reaches its prepare_cuda_graph hook; layers
+        # never select it as an FMHA impl (self-attention uses "default").
+        result = super().prepare_fmha_impl(inputs, is_cuda_graph, cuda_graph_selection_mode)
+        cross_group = self._get_cross_group()
+        if cross_group is None:
+            return result
+        if isinstance(result, Mapping):
+            result = dict(result)
+            result[CROSS_KV_TAG] = cross_group
+            if is_cuda_graph:
+                # Capture-time: plan with the capture tag inputs (fake frame
+                # capacity) and flag them so the captured forward skips the
+                # per-step host plan.
+                attention_inputs = get_attention_inputs_value(inputs)
+                if isinstance(attention_inputs, Mapping):
+                    cross_inputs = select_attention_inputs_for_tag(attention_inputs, CROSS_KV_TAG)
+                    cross_inputs.is_cuda_graph = True
+                    kv_lens = cross_inputs.sequence_lengths
+                    if kv_lens is not None and kv_lens.numel() > 0 and int(kv_lens.max()) > 0:
+                        cross_group.begin_decode(cross_inputs, kv_lens, is_cuda_graph=True)
+        return result
 
     def _get_fmha_group_tags(self) -> Optional[List[str]]:
         # The ``cross`` group is served by the model-private paged decoder
@@ -595,7 +749,18 @@ class WhisperModel(GptModelBase):
         else:
             per_layer_rows = None
             cross_layer_caches = None
-            if cross_group is not None:
+            # Graph mode needs both the captured batch state and this step's
+            # graph flag (set by prepare_fmha_impl): the eager fallback after
+            # a canRun rejection must take the eager branch even though the
+            # graph states exist.
+            cross_inputs_for_gate = select_attention_inputs_for_tag(attention_inputs, CROSS_KV_TAG)
+            in_graph_mode = (
+                cross_group is not None
+                and int(default_inputs.sequence_lengths.numel()) in cross_group._graph_states
+                and bool(cross_inputs_for_gate.is_cuda_graph)
+            )
+            if cross_group is not None and not in_graph_mode:
+                cross_group._graph_decode_step = False
                 cross_inputs = select_attention_inputs_for_tag(attention_inputs, CROSS_KV_TAG)
                 kv_lens = cross_inputs.sequence_lengths
                 if (
@@ -610,6 +775,14 @@ class WhisperModel(GptModelBase):
                         self.kv_cache.get_layer_cache(i, CROSS_KV_TAG)
                         for i in range(self.layer_num)
                     ]
+            elif in_graph_mode and self.kv_cache is not None and CROSS_KV_TAG in self.kv_cache.group_tags:
+                # Capture: the paged kernels must be recorded with the graph-
+                # owned metadata; prepare_cuda_graph refreshes it per replay.
+                cross_group._graph_decode_step = True
+                cross_layer_caches = [
+                    self.kv_cache.get_layer_cache(i, CROSS_KV_TAG)
+                    for i in range(self.layer_num)
+                ]
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
             # Self-attention consumes the token-stream group's impl; the
             # ``cross`` group is served by the model-private paged decoder.

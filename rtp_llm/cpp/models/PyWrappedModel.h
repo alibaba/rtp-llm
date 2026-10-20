@@ -400,6 +400,10 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         if (params.kv_cache_layer_layout.has_value()) {
             RTP_LLM_CHECK_WITH_INFO(cache_manager_ != nullptr, "cache-backed CUDA graph requires a cache manager");
             graph_params.kv_cache_group_tags = params.kv_cache_layer_layout->topology().groupTags();
+            for (const auto& group : params.kv_cache_layer_layout->topology().groups()) {
+                graph_params.kv_group_mm_len.push_back(group.policy.kv_len_from_mm_features);
+                graph_params.kv_group_mm_capacity.push_back(group.policy.mm_kv_len_capacity);
+            }
         }
         // Derive combo_position_ids capture-buffer factor from the C++ rope_config:
         // 0 = model has no combo_position_ids (no buffer allocated, capture skips it);
@@ -409,6 +413,19 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         graph_params.position_id_len_factor = (description_.attention_conf.rope_config.style == RopeStyle::Mrope) ?
                                                   description_.attention_conf.rope_config.index_factor :
                                                   0;
+        // Models whose Python forward consumes combo_position_ids without a
+        // Mrope rope style (whisper's learned positional embedding indexes
+        // combo_position_ids directly) declare their graph capture factor on
+        // the Python model; models without the attribute keep the legacy 0
+        // (no position buffer captured). Same reflection pattern as the
+        // DSpARK cuda_graph_input_hidden_size hook above.
+        if (graph_params.position_id_len_factor == 0
+            && py::hasattr(py_instance, "cuda_graph_position_id_len_factor")) {
+            graph_params.position_id_len_factor =
+                py_instance.attr("cuda_graph_position_id_len_factor")().cast<int>();
+            RTP_LLM_CHECK_WITH_INFO(graph_params.position_id_len_factor > 0,
+                                    "cuda_graph_position_id_len_factor must be positive when declared");
+        }
 
         // clang-format off
         // Decision table for num_tokens_per_bs:
