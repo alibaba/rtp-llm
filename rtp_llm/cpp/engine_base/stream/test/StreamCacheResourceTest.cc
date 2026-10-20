@@ -296,16 +296,16 @@ protected:
                                         RoleType                role_type,
                                         const KVCacheConfig&    kv_cache_config = {},
                                         const PDSepConfig&      pd_sep_config   = {}) {
-        RuntimeConfig runtime_config;
+        RuntimeConfig cache_runtime_config;
         if (pd_sep_config.role_type == RoleType::PREFILL || pd_sep_config.role_type == RoleType::DECODE) {
-            runtime_config.worker_grpc_addrs = {"127.0.0.1:12345"};
+            cache_runtime_config.worker_grpc_addrs = {"127.0.0.1:12345"};
         }
         cache_manager_ = std::make_shared<KVCacheManager>(cache_config,
                                                           /*warmup=*/false,
                                                           /*metrics_reporter=*/nullptr,
                                                           kv_cache_config,
                                                           ParallelismConfig{},
-                                                          runtime_config,
+                                                          cache_runtime_config,
                                                           SpeculativeExecutionConfig{},
                                                           pd_sep_config);
         ASSERT_TRUE(cache_manager_->init());
