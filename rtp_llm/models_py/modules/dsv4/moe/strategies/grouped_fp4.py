@@ -71,6 +71,24 @@ _MOE_TILE_N = int(os.environ.get("DSV4_MOE_TILE_N", "128"))
 _SM120_FUSED_MOE_WORKSPACES: dict[tuple, list[tuple[int, torch.Tensor]]] = {}
 
 
+def _sm120_fp4_backend() -> str:
+    backend = os.environ.get("DSV4_MOE_FP4_BACKEND", "flashinfer").strip().lower()
+    if backend not in ("flashinfer", "deepgemm"):
+        raise ValueError("DSV4_MOE_FP4_BACKEND must be flashinfer or deepgemm")
+    return backend
+
+
+def _pack_sm120_ue8m0(scale: torch.Tensor) -> torch.Tensor:
+    """Lossless byte packing into DeepGEMM's MN-major int32 scale layout."""
+    return (
+        scale.contiguous()
+        .view(torch.int32)
+        .transpose(-2, -1)
+        .contiguous()
+        .transpose(-2, -1)
+    )
+
+
 def _has_sm120_flashinfer_grouped_fp4_kernels() -> bool:
     """Probe the complete eager + CUDA-graph SM120 MoE dependency set."""
     try:
@@ -118,6 +136,28 @@ def _has_fp8_fp4_grouped_kernel() -> bool:
         return False
     cap = torch.cuda.get_device_capability()
     if is_sm120():
+        if _sm120_fp4_backend() == "deepgemm":
+            try:
+                import deep_gemm
+                from flashinfer import block_scale_interleave, mxfp8_quantize
+            except (ImportError, OSError) as exc:
+                raise RuntimeError(
+                    "SM120 grouped DeepGEMM dependencies unavailable"
+                ) from exc
+
+            if not all(
+                callable(symbol)
+                for symbol in (
+                    getattr(deep_gemm, "m_grouped_fp8_fp4_gemm_nt_contiguous", None),
+                    getattr(deep_gemm, "get_mk_alignment_for_contiguous_layout", None),
+                    block_scale_interleave,
+                    mxfp8_quantize,
+                )
+            ):
+                raise RuntimeError(
+                    "SM120 grouped DeepGEMM kernels or quantization helpers unavailable"
+                )
+            return True
         return _has_sm120_flashinfer_grouped_fp4_kernels()
     try:
         import deep_gemm
@@ -185,6 +225,7 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
         # Bulk copy from stacked → repacked layout (one slice per dim,
         # no per-expert iteration).
         sm120 = is_sm120(device)
+        self._sm120_backend = _sm120_fp4_backend() if sm120 else None
         if sm120:
             self._w13[:, :inter].copy_(stacked_w3_w)
             s13_raw[:, :inter].copy_(stacked_w3_s)
@@ -210,6 +251,15 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
             )
             self._s13 = self._s2 = None
             self._s13_dense_t = self._s2_dense_t = None
+            if self._sm120_backend == "deepgemm":
+                import deep_gemm
+
+                alignment = deep_gemm.get_mk_alignment_for_contiguous_layout()
+                if _GROUPED_ALIGNMENT % alignment:
+                    raise ValueError("SM120 grouped DeepGEMM alignment must divide 128")
+                self._sm120_deepgemm = deep_gemm.m_grouped_fp8_fp4_gemm_nt_contiguous
+                self._s13 = _pack_sm120_ue8m0(s13_raw)
+                self._s2 = _pack_sm120_ue8m0(s2_raw)
             # Return the raw staging scales to the allocator before flushing
             # its cache; otherwise these live locals survive empty_cache() and
             # reduce the memory observed by KV-cache capacity planning.
@@ -270,6 +320,8 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
         if N == 0:
             return torch.zeros(N, D, dtype=torch.float32, device=device)
         if is_sm120(device):
+            if getattr(self, "_sm120_backend", "flashinfer") == "deepgemm":
+                return self._forward_sm120_deepgemm(x, weights, indices)
             if (
                 torch.cuda.is_current_stream_capturing()
                 or cuda_graph_warmup_forward_enabled()
@@ -404,6 +456,8 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
         self, x, weights, indices, input_scale: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         """Run the SM120 eager path, optionally consuming pre-quantized input."""
+        if getattr(self, "_sm120_backend", "flashinfer") == "deepgemm":
+            return self._forward_sm120_deepgemm(x, weights, indices, input_scale)
         if _MOE_DEVICE_META and _GROUPED_FP4_ASYNC:
             raise RuntimeError(
                 "DSV4_MOE_DEVICE_META requires the FI eager route and is mutually "
@@ -525,6 +579,92 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
         )
         down = gemm(hidden_q, hidden_scale, self._w2.view(torch.uint8), self._s2_sm120)
         output = torch.empty((n, d), dtype=torch.float32, device=device)
+        ep_gather(down, adjusted_ids, weights, output_index, output)
+        return output
+
+    def _forward_sm120_deepgemm(
+        self, x, weights, indices, input_scale=None
+    ) -> torch.Tensor:
+        """Group-32 FP8 x FP4 with device-only routing, also used in local replay."""
+        from flashinfer import mxfp8_quantize
+
+        from .._active_rows import validate_active_inputs
+
+        validate_active_inputs(self, x, weights, indices, input_scale)
+        n, d = x.shape
+        e, inter = self.cfg.n_routed_experts, self.cfg.moe_inter_dim
+        if n == 0:
+            return torch.empty((0, d), dtype=torch.float32, device=x.device)
+        capacity = align(n * indices.shape[1] + 127 * e, _GROUPED_ALIGNMENT)
+        if capacity > 2**31 - 1:
+            raise ValueError("SM120 grouped DeepGEMM capacity exceeds int32")
+        routed_ids = torch.where(weights != 0, indices, torch.full_like(indices, -1))
+        adjusted_ids, counts = recompute_topk_ids_sum_expert_count(
+            routed_ids, current_expert_start_id=0, num_local_experts=e
+        )
+        aligned = (counts + 127) // 128 * 128
+        indptr = torch.zeros(e + 1, dtype=torch.int32, device=x.device)
+        torch.cumsum(aligned, 0, dtype=torch.int32, out=indptr[1:])
+        groups = torch.full((capacity,), -1, dtype=torch.int32, device=x.device)
+        starts = torch.empty(e, dtype=torch.int32, device=x.device)
+        output_index = torch.full_like(adjusted_ids, -1)
+        if input_scale is None:
+            x_q, input_scale = mxfp8_quantize(x, is_sf_swizzled_layout=False)
+            input_scale = input_scale.reshape(n, d // FP4_BLOCK).view(torch.uint8)
+        else:
+            x_q = x
+        # Per-expert padding participates in GEMM. Define both operands there;
+        # capacity-only groups stay -1 and are never consumed by gather.
+        routed = torch.zeros((capacity, d), dtype=x_q.dtype, device=x.device)
+        routed_scale = torch.zeros(
+            (capacity, d // FP4_BLOCK), dtype=torch.uint8, device=x.device
+        )
+        ep_scatter(
+            x_q,
+            input_scale,
+            adjusted_ids,
+            aligned,
+            starts,
+            routed,
+            routed_scale,
+            groups,
+            output_index,
+        )
+
+        def gemm(q, scale, weight, weight_scale):
+            output = torch.empty(
+                (capacity, weight.size(1)), dtype=torch.bfloat16, device=x.device
+            )
+            self._sm120_deepgemm(
+                (q, _pack_sm120_ue8m0(scale)),
+                (weight, weight_scale),
+                output,
+                groups,
+                recipe_a=(1, FP4_BLOCK),
+                recipe_b=(1, FP4_BLOCK),
+                # Activation masks capacity-only rows; gather uses real routes.
+                ensure_zero_padding=False,
+            )
+            return output
+
+        gate_up = gemm(routed, routed_scale, self._w13, self._s13)
+        up, gate = gate_up[:, :inter], gate_up[:, inter:]
+        hidden, hidden_scale = silu_mul_fp8_quant_packed_from_parts(
+            gate,
+            up,
+            clamp_limit=self.cfg.swiglu_limit,
+            group_size=FP4_BLOCK,
+            active_indptr=indptr,
+            zero_inactive_q=False,
+            zero_inactive_scale=True,
+        )
+        hidden_scale = (
+            hidden_scale.contiguous()
+            .view(torch.uint8)
+            .reshape(capacity, inter // FP4_BLOCK)
+        )
+        down = gemm(hidden, hidden_scale, self._w2, self._s2)
+        output = torch.empty((n, d), dtype=torch.float32, device=x.device)
         ep_gather(down, adjusted_ids, weights, output_index, output)
         return output
 

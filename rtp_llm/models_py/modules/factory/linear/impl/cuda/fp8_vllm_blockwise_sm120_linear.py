@@ -43,7 +43,7 @@ def sm120_blockwise_backend_available(device_id=None) -> bool:
 
 
 class CudaFp8VllmBlockwiseLinear(LinearBase):
-    """CUDA FP8 PER_BLOCK Linear for sm_120 (RTX PRO 5000 / 5090).
+    """CUDA FP8 PER_BLOCK Linear for SM120.
 
     Only BF16 activations, output, and bias are currently supported. K and N
     must both be multiples of the 128-element block size. ``weight_scales`` is
@@ -57,6 +57,10 @@ class CudaFp8VllmBlockwiseLinear(LinearBase):
     because CUTLASS tile_atom_to_shape_SFA computes K-group stride as exactly
     M (no alignment padding).  scale_tma_aligned=True would pad to ceil4(M),
     causing a stride mismatch for non-multiple-of-4 M values.
+
+    ``backend="deepgemm"`` is an explicit arithmetic alternative: it requires
+    UE8M0 checkpoint scales and quantizes activations with UE8M0 scales instead
+    of the default FP32 scales. It does not round already-quantized FP32 scales.
     """
 
     @staticmethod
@@ -182,13 +186,21 @@ class CudaFp8VllmBlockwiseLinear(LinearBase):
         bias: Optional[torch.Tensor] = None,
         quant_config: object = None,
         weight_scale_2: Optional[torch.Tensor] = None,
+        backend: str = "cutlass",
     ):
         super().__init__(
             weight, weight_scales, input_scales, bias, quant_config, weight_scale_2
         )
         if weight_scales is None:
             raise ValueError("SM120 FP8 blockwise GEMM requires weight_scales")
-        self._gemm_op = _get_cutlass_scaled_mm_blockwise_sm120_fp8(weight.device)
+        if backend not in ("cutlass", "deepgemm"):
+            raise ValueError(f"Unsupported SM120 FP8 linear backend: {backend}")
+        self.backend = backend
+        self._gemm_op = (
+            self._deepgemm_gemm
+            if backend == "deepgemm"
+            else _get_cutlass_scaled_mm_blockwise_sm120_fp8(weight.device)
+        )
         if self._gemm_op is None:
             raise RuntimeError(
                 "cutlass_scaled_mm_blockwise_sm120_fp8 op is not available; "
@@ -223,6 +235,22 @@ class CudaFp8VllmBlockwiseLinear(LinearBase):
             self.scale_K,
             self.scale_N,
         ) = self._restore_blockwise_weight_layout(self.weight, self.weight_scales)
+
+        if backend == "deepgemm":
+            if not _is_sm120_runtime(weight.device):
+                raise ValueError("DeepGEMM SM120 linear requires an SM120 device")
+            # SM120 MMA consumes UE8M0, including activation scales. Never
+            # round arbitrary FP32 weight scales behind the caller's back.
+            if weight_scales.dtype != torch.float8_e8m0fnu:
+                raise ValueError("DeepGEMM SM120 linear requires UE8M0 weight scales")
+            import deep_gemm
+
+            self._deepgemm_op = deep_gemm.fp8_gemm_nt
+            self._deepgemm_weight_scales = (
+                deep_gemm.get_mn_major_tma_aligned_packed_ue8m0_tensor(
+                    self.weight_scales.repeat_interleave(128, dim=0)
+                )
+            )
 
         if self.weight.dtype != torch.float8_e4m3fn:
             raise ValueError(
@@ -273,7 +301,9 @@ class CudaFp8VllmBlockwiseLinear(LinearBase):
                     f"got {tuple(out.shape)}"
                 )
             if out.device != input.device:
-                raise ValueError("SM120 FP8 blockwise GEMM output must share input device")
+                raise ValueError(
+                    "SM120 FP8 blockwise GEMM output must share input device"
+                )
             if not out.is_contiguous():
                 raise ValueError("SM120 FP8 blockwise GEMM output must be contiguous")
         if M == 0:
@@ -288,8 +318,8 @@ class CudaFp8VllmBlockwiseLinear(LinearBase):
             group_size=128,
             eps=1e-4,
             column_major_scales=True,
-            scale_tma_aligned=False,
-            scale_ue8m0=False,
+            scale_tma_aligned=self.backend == "deepgemm",
+            scale_ue8m0=self.backend == "deepgemm",
         )
 
         output = (
@@ -307,3 +337,12 @@ class CudaFp8VllmBlockwiseLinear(LinearBase):
         if self.bias is not None:
             output.add_(self.bias)
         return output
+
+    def _deepgemm_gemm(self, output, input_fp8, weight, input_scales, weight_scales):
+        """Opt-in UE8M0 arithmetic; the default CUTLASS quantizer uses FP32 scales."""
+        self._deepgemm_op(
+            (input_fp8, input_scales),
+            (weight, self._deepgemm_weight_scales),
+            output,
+            recipe=(1, 1, 128),
+        )

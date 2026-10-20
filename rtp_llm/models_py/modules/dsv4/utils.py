@@ -95,14 +95,34 @@ def _repack_v4_fp8_scale_to_int32(scale: torch.Tensor) -> torch.Tensor:
     return get_mn_major_tma_aligned_packed_ue8m0_tensor(scale_rep)
 
 
-def _v4_fp8_linear(w: torch.Tensor, s: torch.Tensor):
-    """Build a CudaFp8DeepGEMMLinear from raw V4 FP8 weight + scale tensors."""
+def _sm120_linear_backend(env_name: str) -> str:
+    backend = os.environ.get(env_name, "default").strip().lower()
+    if backend not in ("default", "deepgemm"):
+        raise ValueError(f"{env_name} must be default or deepgemm, got {backend!r}")
+    return backend
+
+
+def _v4_fp8_linear(
+    w: torch.Tensor, s: torch.Tensor, *, sm120_backend: str | None = None
+):
+    """Build a V4 FP8 linear; DeepGEMM on SM120 opts into UE8M0 activations."""
     assert s is not None, "expected non-null FP8 scale"
-    # DeepGEMM's packed int32 UE8M0 contract is unsupported on consumer
-    # Blackwell.  Keep the compact checkpoint scale for the SM120 CUTLASS
-    # blockwise backend; only data-center architectures use the DeepGEMM
-    # TMA-aligned packed representation.
-    from rtp_llm.models_py.utils.arch import is_sm120
+    if is_sm120(w.device):
+        backend = (
+            _sm120_linear_backend("DSV4_SM120_FP8_LINEAR_BACKEND")
+            if sm120_backend is None
+            else sm120_backend
+        )
+        if backend not in ("default", "deepgemm"):
+            raise ValueError(f"Unsupported SM120 FP8 linear backend: {backend}")
+        if backend == "deepgemm":
+            from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_vllm_blockwise_sm120_linear import (
+                CudaFp8VllmBlockwiseLinear,
+            )
+
+            return CudaFp8VllmBlockwiseLinear(
+                w, s, quant_config=_V4_FP8_BLOCK_CFG, backend=backend
+            )
 
     if s.dtype == torch.float8_e8m0fnu and not is_sm120(s.device):
         s = _repack_v4_fp8_scale_to_int32(s)

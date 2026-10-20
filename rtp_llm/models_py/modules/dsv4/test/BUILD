@@ -18,6 +18,13 @@ _DSV4_TEST_DEPS = [
 ]
 
 py_test(
+    name = "test_sm120_deepgemm_alternatives",
+    srcs = ["test_sm120_deepgemm_alternatives.py"],
+    deps = _DSV4_TEST_DEPS,
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
     name = "test_fp4_indexer_contract",
     srcs = ["test_fp4_indexer_contract.py"],
     deps = _DSV4_TEST_DEPS,
