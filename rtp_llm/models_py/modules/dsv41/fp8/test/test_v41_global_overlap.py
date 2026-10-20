@@ -2,6 +2,7 @@
 
 import contextlib
 import os
+import threading
 import unittest
 from types import MethodType, SimpleNamespace
 from unittest.mock import Mock, patch
@@ -29,6 +30,39 @@ _ENV = {
 
 
 class GlobalOverlapCPUTest(unittest.TestCase):
+    def test_query_preparation_keeps_unsupported_scorer_on_original_path(self):
+        from rtp_llm.models_py.modules.dsv41.fp8 import _v41_decode_indexer
+
+        q = torch.ones(1, 4096, dtype=torch.bfloat16)
+        keys = _v41_decode_indexer.DecodeIndexerKeys(
+            torch.zeros(2, 128, 68, dtype=torch.uint8),
+            torch.zeros(1, 1, dtype=torch.int32),
+            128,
+            128,
+        )
+        attn = SimpleNamespace(
+            is_index_source=True,
+            kv_source_layer_id=2,
+            index_n_heads=32,
+            index_head_dim=128,
+            rope_head_dim=64,
+            index_weights=torch.ones(32, 5120, dtype=torch.bfloat16),
+            freqs_cis=torch.ones(1, 32, dtype=torch.complex64),
+            _shared_attention={"global": {2: keys}},
+        )
+        query, weights, packed = AttentionV41FP8._prepare_indexer_query_decode(
+            attn,
+            torch.ones(1, 1, 5120, dtype=torch.bfloat16),
+            torch.ones(1, 1, 1280, dtype=torch.bfloat16),
+            torch.zeros(1, dtype=torch.int64),
+            index_q=q,
+        )
+        torch.testing.assert_close(query, q.view(1, 32, 128), rtol=0, atol=0)
+        torch.testing.assert_close(
+            weights, torch.full((1, 32), 5120, dtype=torch.bfloat16), rtol=0, atol=0
+        )
+        self.assertIsNone(packed)
+
     def test_default_cpu_and_draft_gates(self):
         attn = SimpleNamespace(is_kv_source=True, compress_ratio=1, layer_id=2)
         x = torch.empty(4, 6, 5120, dtype=torch.bfloat16)
@@ -42,6 +76,7 @@ class GlobalOverlapCPUTest(unittest.TestCase):
 
     def _mock_streams(self):
         self.current = Mock(name="current")
+        self.current.cuda_stream = 51
         self.auxiliary = Mock(name="auxiliary")
         self.auxiliary.cuda_stream = 917
         self.attn = SimpleNamespace(_produce_global_decode=Mock())
@@ -50,7 +85,11 @@ class GlobalOverlapCPUTest(unittest.TestCase):
         stack = contextlib.ExitStack()
         stack.enter_context(patch.object(overlap, "is_supported", return_value=True))
         stack.enter_context(
-            patch.object(overlap, "_GLOBAL_COMPUTE_STREAMS", {0: self.auxiliary})
+            patch.object(
+                overlap,
+                "_GLOBAL_COMPUTE_STREAMS",
+                SimpleNamespace(streams={(0, 17, 51): self.auxiliary}),
+            )
         )
         stack.enter_context(
             patch(
@@ -60,6 +99,12 @@ class GlobalOverlapCPUTest(unittest.TestCase):
         )
         stack.enter_context(
             patch("torch.cuda.current_stream", return_value=self.current)
+        )
+        stack.enter_context(
+            patch(
+                "rtp_llm.models_py.modules.dsv41.fp8._v41_wo_a_quant._context",
+                return_value=17,
+            )
         )
         self.device_guard = stack.enter_context(
             patch("torch.cuda.device", side_effect=lambda _: contextlib.nullcontext())
@@ -110,7 +155,7 @@ class GlobalOverlapCPUTest(unittest.TestCase):
         self.current.wait_stream.assert_called_once_with(self.auxiliary)
         self.assertFalse(hasattr(self.attn, "_global_decode_overlap_warmed"))
 
-    def test_attention_body_joins_before_indexer_and_after_qkv_failure(self):
+    def test_attention_prepares_index_query_before_join_and_joins_on_failure(self):
         from rtp_llm.models_py.modules.dsv41.attn_type import SWA_KV
 
         x = torch.empty(1, 1, 5120)
@@ -135,8 +180,15 @@ class GlobalOverlapCPUTest(unittest.TestCase):
                         raise RuntimeError("qkv stop")
                     return qkv
 
-                def select(*args):
+                prepared_query = object()
+
+                def prepare(*args):
+                    calls.append("index_query")
+                    return prepared_query
+
+                def select(*args, **kwargs):
                     calls.append("indexer")
+                    self.assertIs(kwargs.get("prepared_query"), prepared_query)
                     raise RuntimeError("indexer stop")
 
                 attn = SimpleNamespace(
@@ -145,6 +197,7 @@ class GlobalOverlapCPUTest(unittest.TestCase):
                     freqs_cis=torch.zeros(1, 32, dtype=torch.complex64),
                     compress_ratio=1,
                     is_kv_source=True,
+                    is_index_source=True,
                     index_topk=128,
                     _mega_attention=SimpleNamespace(
                         supports_input=lambda _: True,
@@ -155,6 +208,7 @@ class GlobalOverlapCPUTest(unittest.TestCase):
                     _global_region=lambda: SWA_KV,
                     _pool_view_3d_fp8=lambda _: None,
                     _decode_write_swa_fp8=lambda *args: calls.append("swa"),
+                    _prepare_indexer_query_decode=prepare,
                     _select_indices_decode=select,
                     _produce_global_decode=Mock(),
                 )
@@ -168,7 +222,11 @@ class GlobalOverlapCPUTest(unittest.TestCase):
                         AttentionV41FP8._forward_decode_body(attn, x, metadata)
                 self.assertEqual(
                     calls,
-                    ["qkv", "join"] if fail_qkv else ["qkv", "swa", "join", "indexer"],
+                    (
+                        ["qkv", "join"]
+                        if fail_qkv
+                        else ["qkv", "swa", "index_query", "join", "indexer"]
+                    ),
                 )
                 attn._produce_global_decode.assert_not_called()
 
@@ -184,6 +242,69 @@ class GlobalOverlapCudaTest(unittest.TestCase):
         env = patch.dict(os.environ, _ENV)
         env.start()
         self.addCleanup(env.stop)
+
+    def test_independent_threads_capture_with_separate_auxiliary_streams(self):
+        import traceback
+
+        streams = [torch.cuda.Stream(), torch.cuda.Stream()]
+        inputs = [torch.ones(1, 1, 8, device="cuda") * (i + 1) for i in range(2)]
+        outputs = [torch.empty_like(x) for x in inputs]
+        metadata = torch.zeros(1, device="cuda", dtype=torch.int32)
+        owners = [
+            SimpleNamespace(
+                _produce_global_decode=lambda x, *args, i=i: outputs[i].copy_(x)
+            )
+            for i in range(2)
+        ]
+        ready = threading.Barrier(2)
+        forked = threading.Event()
+        attempted = threading.Event()
+        errors = []
+
+        def work(i):
+            try:
+                with torch.cuda.device(0), torch.cuda.stream(streams[i]):
+                    w = overlap.start_global_decode(
+                        owners[i], inputs[i], metadata, metadata, metadata
+                    )
+                    w.finish()
+                    streams[i].synchronize()
+                    ready.wait(timeout=10)
+                    graph = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(
+                        graph, stream=streams[i], capture_error_mode="thread_local"
+                    ):
+                        if i == 1:
+                            assert forked.wait(10)
+                        try:
+                            w = overlap.start_global_decode(
+                                owners[i], inputs[i], metadata, metadata, metadata
+                            )
+                            if i == 0:
+                                forked.set()
+                                assert attempted.wait(10)
+                            w.finish()
+                        finally:
+                            if i == 1:
+                                attempted.set()
+                    graph.replay()
+                    streams[i].synchronize()
+                    torch.testing.assert_close(outputs[i], inputs[i], rtol=0, atol=0)
+            except BaseException as error:
+                errors.append((i, str(error)))
+                traceback.print_exc()
+                attempted.set()
+                forked.set()
+
+        with patch.object(overlap, "is_supported", return_value=True):
+            threads = [threading.Thread(target=work, args=(i,)) for i in range(2)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(30)
+        assert not any(t.is_alive() for t in threads), "thread timed out"
+        if errors:
+            raise AssertionError(errors)
 
     def _prepare(self, case):
         case.owner.is_kv_source = True

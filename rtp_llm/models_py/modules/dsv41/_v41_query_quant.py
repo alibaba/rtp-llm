@@ -1,8 +1,9 @@
-"""Decode Q normalization with native DeepGEMM group-32 activation scales."""
+"""DeepGEMM producer epilogues with V4.1's original quantization boundaries."""
 
 from __future__ import annotations
 
 import os
+import threading
 
 import torch
 import triton
@@ -10,6 +11,145 @@ import triton.language as tl
 
 from rtp_llm.models_py.modules.dsv41._v41_fused_qkv import is_supported
 from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
+
+
+class _NativePrepared(threading.local):
+    def __init__(self):
+        self.keys = set()
+
+
+_NATIVE_PREPARED = _NativePrepared()
+
+
+def _native_signature(api, operation, x, rows):
+    from rtp_llm.models_py.modules.dsv41.fp8._v41_wo_a_quant import _context
+
+    return (
+        operation,
+        x.device.index,
+        _context(),
+        rows,
+        api.get_jit_config_fingerprint(),
+    )
+
+
+def try_project_indexer_q(linear, qr, freqs, positions, quantized_input=None):
+    """Project directly into RoPE/FP4 query storage; leave other linears unchanged."""
+    if (
+        not isinstance(linear, V41MXFP8Linear)
+        or not qr.is_cuda
+        or qr.dtype != torch.bfloat16
+        or (linear.N, linear.K) != (4096, 1280)
+        or freqs.ndim != 2
+        or freqs.shape[1] != 32
+        or torch.cuda.get_device_capability(qr.device)[0] != 10
+    ):
+        return None
+    import deep_gemm
+
+    if not callable(getattr(deep_gemm, "fp8_indexer_q_rope_fp4", None)):
+        return None
+    rows = qr.numel() // 1280
+    with torch.cuda.device(qr.device):
+        capturing = torch.cuda.is_current_stream_capturing()
+        key = _native_signature(deep_gemm, "indexer_q", qr, rows)
+        if capturing and key not in _NATIVE_PREPARED.keys:
+            return None
+        pair = (
+            linear._quantize_input(qr) if quantized_input is None else quantized_input
+        )
+        payload = torch.empty((rows, 32, 64), device=qr.device, dtype=torch.int8)
+        scales = torch.empty((rows, 32), device=qr.device, dtype=torch.int32)
+        deep_gemm.fp8_indexer_q_rope_fp4(
+            (pair[0].reshape(rows, 1280), pair[1]),
+            (linear.weight, linear.weight_scales),
+            freqs,
+            positions.reshape(rows).to(torch.int64).contiguous(),
+            payload,
+            scales,
+        )
+        if not capturing:
+            _NATIVE_PREPARED.keys.add(key)
+    return payload, scales
+
+
+def try_project_qkv_to_cache(attn, x, freqs, cache, slots, quantized_input=None):
+    """Use the native producer when its complete Q/SWA contract is supported.
+
+    Other shapes retain the existing model path. Capture accepts only an
+    eagerly prepared configuration on the same host thread and CUDA context.
+    """
+    linear = getattr(attn, "wq_a_wkv", None)
+    if (
+        os.environ.get("DSV41_FUSED_QUERY_QUANT", "1") != "1"
+        or os.environ.get("DSV41_FUSED_QKV_ROPE_CACHE", "1") != "1"
+        or os.environ.get("DSV4_FP8_QUANT_KERNEL", "auto").strip().lower()
+        not in ("auto", "legacy")
+        or not isinstance(attn.wq_b, V41MXFP8Linear)
+        or not isinstance(linear, V41MXFP8Linear)
+        or not is_supported(linear, x, attn.q_norm, attn.q_lora_rank)
+        or (linear.N, linear.K, attn.q_lora_rank) != (1792, 5120, 1280)
+        or not 0 < x.numel() // 5120 <= 512
+        or not getattr(attn, "skip_post_q_norm", False)
+        or attn.rope_head_dim != 64
+        or attn.kv_norm.dtype != torch.bfloat16
+        or cache is None
+        or slots is None
+        or cache.dtype != torch.uint8
+        or cache.ndim != 3
+        or cache.shape[-1] != 528
+        or cache.stride(1) != 528
+        or cache.stride(2) != 1
+        or cache.stride(0) % 8
+        or torch.cuda.get_device_capability(x.device)[0] != 10
+    ):
+        return None
+    import deep_gemm
+
+    if not callable(getattr(deep_gemm, "dsv41_qkv", None)):
+        return None
+    if deep_gemm.get_num_sms() < 14 * triton.cdiv(x.numel() // 5120, 80):
+        return None
+    from rtp_llm.models_py.modules.dsv41.fp8._trap_utils import (
+        trap_invalid_kv_access_enabled,
+    )
+
+    rows = x.numel() // 5120
+    with torch.cuda.device(x.device):
+        capturing = torch.cuda.is_current_stream_capturing()
+        key = _native_signature(deep_gemm, "qkv", x, rows)
+        if capturing and key not in _NATIVE_PREPARED.keys:
+            return None
+        pair = linear._quantize_input(x) if quantized_input is None else quantized_input
+        pair = (pair[0].reshape(rows, 5120), pair[1])
+        qr = torch.empty((rows, 1280), device=x.device, dtype=torch.bfloat16)
+        q8 = torch.empty_like(qr, dtype=torch.float8_e4m3fn)
+        sf = torch.empty(
+            (10, (rows + 3) // 4 * 4), device=x.device, dtype=torch.int32
+        ).T[:rows]
+        kv = torch.empty((rows, 512), device=x.device, dtype=torch.bfloat16)
+        deep_gemm.dsv41_qkv(
+            pair,
+            (linear.weight, linear.weight_scales),
+            attn.q_norm,
+            attn.kv_norm,
+            freqs,
+            cache,
+            slots.to(torch.int64).contiguous(),
+            qr,
+            q8,
+            sf,
+            kv,
+            eps=attn.eps,
+            trap_invalid_slots=trap_invalid_kv_access_enabled(),
+        )
+        if not capturing:
+            _NATIVE_PREPARED.keys.add(key)
+    return (
+        qr.view(*x.shape[:-1], 1280),
+        kv.view(*x.shape[:-1], 512),
+        (q8.view(*x.shape[:-1], 1280), sf),
+    )
 
 
 @triton.jit

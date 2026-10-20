@@ -2827,7 +2827,84 @@ class AttentionV41FP8(AttentionFP8):
         )
         self._shared_attention["global"] = {self.layer_id: keys}
 
-    def _select_indices_decode(self, x, qr, positions, qr_quantized=None, index_q=None):
+    def _prepare_indexer_query_decode(
+        self, x, qr, positions, qr_quantized=None, index_q=None
+    ):
+        """Prepare query-only work before waiting for the current layer's keys."""
+        if not self.is_index_source:
+            return None
+        from rtp_llm.models_py.modules.dsv41.fp8 import (
+            _v41_decode_indexer as decode_indexer,
+        )
+        from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
+
+        B, S, _ = x.shape
+        T = B * S
+        keys = self._shared_attention["global"][self.kv_source_layer_id]
+        paged = isinstance(keys, decode_indexer.DecodeIndexerKeys) and (
+            decode_indexer.is_supported(
+                x.device, keys.pool.shape[1], self.index_n_heads, self.index_head_dim
+            )
+        )
+        if index_q is None and paged and self.rope_head_dim == 64:
+            from rtp_llm.models_py.modules.dsv41._v41_query_quant import (
+                try_project_indexer_q,
+            )
+
+            pair = try_project_indexer_q(
+                self.index_wq, qr, self.freqs_cis, positions, qr_quantized
+            )
+            if pair is not None:
+                weights = F.linear(x.reshape(T, -1), self.index_weights)
+                scaled = torch.empty_like(weights, dtype=torch.bfloat16)
+                torch.mul(
+                    weights,
+                    (self.index_head_dim * self.index_n_heads) ** -0.5,
+                    out=scaled,
+                )
+                payload, scales = pair
+                return (
+                    None,
+                    weights,
+                    (
+                        payload.view(
+                            B, S, self.index_n_heads, self.index_head_dim // 2
+                        ),
+                        scales.view(B, S, self.index_n_heads),
+                        scaled.view(B, S, self.index_n_heads),
+                    ),
+                )
+        if index_q is None:
+            index_q = (
+                self.index_wq.forward_quantized(*qr_quantized)
+                if qr_quantized is not None
+                and isinstance(self.index_wq, V41MXFP8Linear)
+                else self._lin(self.index_wq, qr.reshape(T, -1))
+            )
+        q = index_q.view(T, self.index_n_heads, self.index_head_dim)
+        weights = F.linear(x.reshape(T, -1), self.index_weights)
+        prepared = None
+        if paged:
+            prepared = decode_indexer.prepare_indexer_q_and_weights(
+                q.view(B, S, self.index_n_heads, self.index_head_dim),
+                weights.view(B, S, self.index_n_heads),
+                self.freqs_cis,
+                positions.reshape(T),
+                self.rope_head_dim,
+                weights_out_dtype=torch.bfloat16,
+            )
+        return q, weights, prepared
+
+    def _select_indices_decode(
+        self,
+        x,
+        qr,
+        positions,
+        qr_quantized=None,
+        index_q=None,
+        *,
+        prepared_query=None,
+    ):
         """Capture-static index scoring with device-side causal/candidate masks."""
         shared = self._shared_attention
         if not self.is_index_source:
@@ -2842,18 +2919,11 @@ class AttentionV41FP8(AttentionFP8):
 
         paged = isinstance(keys, decode_indexer.DecodeIndexerKeys)
         capacity = keys.capacity if paged else keys.shape[1]
-        flat = x.reshape(T, -1)
-        from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
-
-        if index_q is None:
-            index_q = (
-                self.index_wq.forward_quantized(*qr_quantized)
-                if qr_quantized is not None
-                and isinstance(self.index_wq, V41MXFP8Linear)
-                else self._lin(self.index_wq, qr.reshape(T, -1))
+        if prepared_query is None:
+            prepared_query = AttentionV41FP8._prepare_indexer_query_decode(
+                self, x, qr, positions, qr_quantized, index_q
             )
-        q = index_q.view(T, self.index_n_heads, self.index_head_dim)
-        weights = F.linear(flat, self.index_weights)
+        q, weights, prepared = prepared_query
         visible_per_token = (positions + 1) // self.compress_ratio
         config = self.v41_config
         candidate_source = int(config.get("candidate_source_layer_id", -1))
@@ -2891,19 +2961,28 @@ class AttentionV41FP8(AttentionFP8):
                     shared["decode_sparse_plan"] = plan
                 with record_function_range("dsv41.decode.sparse_mqa_select"):
                     output = sparse_decode.select_decode(
-                        q.view(B, S, self.index_n_heads, self.index_head_dim),
+                        (
+                            None
+                            if q is None
+                            else q.view(B, S, self.index_n_heads, self.index_head_dim)
+                        ),
                         weights.view(B, S, self.index_n_heads),
                         self.freqs_cis,
                         positions.reshape(T),
                         keys.pool,
                         plan,
                         rope_head_dim=self.rope_head_dim,
+                        prepared_query=prepared,
                     )
                 shared["topk"] = {self.layer_id: output}
                 return output
         if paged:
             all_logits = decode_indexer.score_decode_indexer(
-                q.view(B, S, self.index_n_heads, self.index_head_dim),
+                (
+                    None
+                    if q is None
+                    else q.view(B, S, self.index_n_heads, self.index_head_dim)
+                ),
                 weights.view(B, S, self.index_n_heads),
                 self.freqs_cis,
                 keys.pool,
@@ -2915,6 +2994,7 @@ class AttentionV41FP8(AttentionFP8):
                 positions=positions.reshape(T),
                 preserve_score_dtype=True,
                 pad_invisible=False,
+                prepared_query=prepared,
             )
         else:
             weights = (
@@ -3120,6 +3200,7 @@ class AttentionV41FP8(AttentionFP8):
             mega = None
         swa_slots = metadata.pool_write_slot_mappings.get(SWA_KV)
         global_work = None
+        prepared_query = None
         if self.compress_ratio and self.is_kv_source:
             from rtp_llm.models_py.modules.dsv41.fp8.decode.global_overlap import (
                 start_global_decode,
@@ -3141,6 +3222,10 @@ class AttentionV41FP8(AttentionFP8):
             )
             if not qkv.swa_written:
                 self._decode_write_swa_fp8(qkv.kv, B, S, metadata)
+            if global_work is not None:
+                prepared_query = self._prepare_indexer_query_decode(
+                    x, qkv.qr, positions, qkv.qr_quantized, qkv.index_q
+                )
         finally:
             if global_work is not None:
                 global_work.finish()
@@ -3150,7 +3235,12 @@ class AttentionV41FP8(AttentionFP8):
                 if self.is_kv_source and global_work is None:
                     self._produce_global_decode(x, positions, req, starts)
                 selected = self._select_indices_decode(
-                    x, qkv.qr, positions, qkv.qr_quantized, qkv.index_q
+                    x,
+                    qkv.qr,
+                    positions,
+                    qkv.qr_quantized,
+                    qkv.index_q,
+                    prepared_query=prepared_query,
                 )
                 slots = (
                     self._decode_global_slots(selected, metadata.req_id_per_token[:T])
@@ -3176,7 +3266,11 @@ class AttentionV41FP8(AttentionFP8):
             if self.is_kv_source and global_work is None:
                 self._produce_global_decode(x, positions, req, starts)
             selected = self._select_indices_decode(
-                x, qkv.qr, positions, qkv.qr_quantized
+                x,
+                qkv.qr,
+                positions,
+                qkv.qr_quantized,
+                prepared_query=prepared_query,
             )
             from rtp_llm.models_py.modules.dsv41.fp8._v41_fp4_decode_attn import (
                 fp4_dual_decode_attention,
