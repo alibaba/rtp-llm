@@ -60,6 +60,133 @@ class BenchmarkRegistryDocumentationTest(unittest.TestCase):
                 self.assertTrue(profile["groups"])
 
 
+class BenchmarkCopyCapabilityTest(unittest.TestCase):
+    def _binary(self, directory, response):
+        path = os.path.join(directory, "capability_binary")
+        with open(path, "w") as script:
+            script.write(
+                f"#!{sys.executable}\n"
+                "import sys\n"
+                "assert sys.argv[1:] == ['capabilities', '--cuda-device', '2']\n"
+                f"print({response!r})\n"
+            )
+        os.chmod(path, os.stat(path).st_mode | stat.S_IXUSR)
+        return path
+
+    def test_registry_marks_only_explicit_3d_cases(self):
+        marked = [case for case in ALL_CASES if case.requires_cuda_3d_batch]
+        self.assertEqual(len(marked), 28)
+        for case in ALL_CASES:
+            self.assertEqual(
+                case.requires_cuda_3d_batch,
+                case.params.get("--copy-strategy") == "cuda-3d-batch",
+                case.name,
+            )
+
+    def test_unsupported_cases_are_preserved_and_suite_remains_strict(self):
+        cases = [
+            case
+            for case in PROFILE_CASES
+            if case.params.get("--copy-strategy") == "cuda-3d-batch"
+        ][:2]
+        profile = driver.resolve_runfile_path(
+            "profiles/deepseek_v4_pro_fp8_tp1_cp1.json"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            binary = self._binary(tmp, '{"cuda_3d_batch": false}')
+            for allow_incomplete in (False, True):
+                with self.subTest(allow_incomplete=allow_incomplete):
+                    output = os.path.join(tmp, str(allow_incomplete))
+                    with mock.patch.object(
+                        driver, "collect_environment", return_value={}
+                    ):
+                        result = driver.run_suite(
+                            suite="profile",
+                            case_name=",".join(c.name for c in cases),
+                            binary=binary,
+                            model_profile=profile,
+                            output_dir=output,
+                            cuda_device=2,
+                            max_device_memory_fraction=0.8,
+                            base_seed=42,
+                            task_pool_sizes=None,
+                            repetitions=1,
+                            case_timeout=5,
+                            grace_seconds=1,
+                            perf_mode="off",
+                            perf_frequency=99,
+                            flamegraph_tools=None,
+                            disk_root=None,
+                            allow_incomplete=allow_incomplete,
+                        )
+                    self.assertEqual(result, 0 if allow_incomplete else 1)
+                    with open(
+                        os.path.join(output, "profile", "suite_manifest.json")
+                    ) as source:
+                        manifest = json.load(source)
+                    self.assertEqual(manifest["skipped"], 2)
+                    self.assertEqual(manifest["failed"], 0)
+                    self.assertEqual(manifest["completed"], 0)
+                    for case in manifest["cases"]:
+                        self.assertEqual(case["status"], "skipped_unsupported_platform")
+                        self.assertIn("CUDA 13", case["skip_reason"])
+                        self.assertEqual(case["repetitions"], [])
+
+    def test_capability_probe_validates_native_response(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for value in (False, True):
+                binary = self._binary(tmp, json.dumps({"cuda_3d_batch": value}))
+                self.assertEqual(
+                    driver.query_copy_capabilities(binary, 2), {"cuda_3d_batch": value}
+                )
+            for response in ("not json", '{"cuda_3d_batch": "false"}', "{}"):
+                binary = self._binary(tmp, response)
+                with self.subTest(response=response), self.assertRaises(RuntimeError):
+                    driver.query_copy_capabilities(binary, 2)
+
+    def test_supported_case_still_runs_and_validates_measurement(self):
+        case = next(
+            c
+            for c in PROFILE_CASES
+            if c.params.get("--copy-strategy") == "cuda-3d-batch"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            binary = os.path.join(tmp, "supported_binary")
+            with open(binary, "w") as script:
+                script.write(
+                    f"#!{sys.executable}\n"
+                    "import json,sys\n"
+                    "if sys.argv[1] == 'capabilities':\n"
+                    " print(json.dumps({'cuda_3d_batch':True}))\n"
+                    "else:\n"
+                    " assert sys.argv[1] == 'transfer'\n"
+                    " p=sys.argv[sys.argv.index('--output-json')+1]\n"
+                    " with open(p,'w') as f: json.dump({'schema_version':1,'component':'BlockTreeCache',"
+                    "'binary':'block_tree_cache_gpu_benchmark','runner':'transfer','status':'completed',"
+                    "'phases_ns':{'measured':1}},f)\n"
+                )
+            os.chmod(binary, os.stat(binary).st_mode | stat.S_IXUSR)
+            manifest = driver.run_case(
+                case=case,
+                binary=binary,
+                model_profile="unused.json",
+                output_dir=tmp,
+                cuda_device=2,
+                max_device_memory_fraction=0.8,
+                base_seed=42,
+                repetitions=1,
+                case_timeout=5,
+                grace_seconds=1,
+                perf_mode="off",
+                perf_frequency=99,
+                flamegraph_tools=None,
+                disk_root=None,
+            )
+            self.assertEqual(manifest["status"], "completed")
+            self.assertEqual(len(manifest["repetitions"]), 1)
+            self.assertTrue(manifest["repetitions"][0]["valid"])
+
+
 class BenchmarkDriverProfileTest(unittest.TestCase):
     def test_loads_dsv4_flash_full_and_swa_layout(self):
         path = driver.resolve_runfile_path(

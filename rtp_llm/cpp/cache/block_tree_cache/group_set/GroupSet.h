@@ -78,16 +78,6 @@ struct BackingLayout {
     bool   crc_enabled{false};
 };
 
-// One regular region of one member; immutable after GroupSet initialization.
-struct DeviceHostCopyTemplate {
-    size_t member_index;
-    void*  device_base;
-    size_t host_offset;
-    size_t width_bytes;
-    size_t layer_count;
-    size_t device_pitch;
-};
-
 class GroupSet {
 public:
     GroupSet(std::vector<DeviceBlockPoolPtr> device_pools,
@@ -112,9 +102,6 @@ public:
     }
     const GroupBase& group(std::string_view tag) const {
         return topology_->group(tag);
-    }
-    const std::vector<DeviceHostCopyTemplate>& copy3DTemplates() const {
-        return copy_3d_templates_;
     }
     size_t payloadBytes() const {
         return payload_bytes_;
@@ -157,8 +144,6 @@ public:
     void                       releaseSingleBlock(Tier tier, BlockIdxType block, BlockTreeRefType ref_type) const;
 
 private:
-    std::vector<DeviceHostCopyTemplate>     initializeCopy3DTemplates() const;
-    std::vector<DeviceHostCopyTemplate>     copy_3d_templates_;
     std::vector<DeviceBlockPoolPtr>         device_pools_;
     std::shared_ptr<HostBlockPool>          host_pool_;
     std::shared_ptr<BlockTreeDiskBlockPool> disk_pool_;

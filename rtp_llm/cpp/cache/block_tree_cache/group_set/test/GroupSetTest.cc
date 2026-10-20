@@ -58,6 +58,12 @@ TEST(GroupSetTest, UsesPlannedBackingLayoutWithoutRecomputingStorage) {
     EXPECT_EQ(group->payloadBytes(), 160u);
     EXPECT_EQ(group->storageBytes(), 176u);
 
+    group->initialize(0, topology, {"group0"});
+    EXPECT_FALSE(group->usesPhysicalPayloadGeometry());
+    EXPECT_FALSE(group->crcEnabled());
+    EXPECT_EQ(group->payloadBytes(), 160u);
+    EXPECT_EQ(group->storageBytes(), 160u);
+
     group->initialize(0, topology, {"group0"}, BackingLayout{4096, 4096, 4096, false});
     EXPECT_TRUE(group->usesPhysicalPayloadGeometry());
     EXPECT_FALSE(group->crcEnabled());

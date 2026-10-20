@@ -7,6 +7,7 @@
 - driver 的 `--suite` 和 `--case` 默认均为 `all`；`--suite profile` 未指定 `--case` 时，会运行 registry 中全部 profile case，包括下面的 matrix 和 e2e 家族。
 - matrix/e2e 用于专项比较，但当前与基础 case 一同注册在 `PROFILE_CASES` 中，没有独立的专项 suite 或默认排除规则。只想跑某项实验时，用 `--case <完整名称>[,<完整名称>...]` 明确选择；该参数不支持通配符。
 - 当前 profile 共 109 个 case：1 个 Tree、20 个 mixed Transfer（含 6 个并发变体）、24 个 batch API matrix 和 64 个 e2e case。家族数量及全局名称唯一性由 `benchmark_driver_profile_test` 锁定，新增 case 时同步更新文档和测试。具体运行范围以本次 `suite_manifest.json` 为准，不依赖文档中的历史数量判定完整性。
+- 其中 28 个显式 `cuda-3d-batch` case 标记 `requires_cuda_3d_batch`：仅支持非 PPU CUDA 13 编译、13.x runtime 和 driver ≥ 13。driver 在测量前通过 native `capabilities` 查询；不支持的 case 保留在 manifest，记 `skipped_unsupported_platform` 及原因，不作为完成或真实 copy 失败。严格 suite 将其视为 incomplete，只有显式 `--allow-incomplete` 可允许带跳过成功退出。
 - 报告可只分析选定家族或子集，交代选择条件、完成/失败/跳过情况及未展示结果的位置即可，无需为每个注册 case 固定保留一个表格行。
 
 ## Smoke（2 个）

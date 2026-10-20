@@ -70,6 +70,7 @@ void TransferOptions::printHelp() {
         << "  --transfer-worker-count=N    Lower transfer workers (default: 1)\n"
         << "  --transfer-descriptor-batch-size=N  Descriptors per engine submit (0 = concurrency)\n"
         << "  --copy-strategy=STRATEGY     auto | batch (1D) | cuda-3d-batch | staged-sm (default: auto)\n"
+        << "                             cuda-3d-batch requires non-PPU CUDA 13 build/runtime, driver >= 13\n"
         << "  --min-measured-seconds=N     Measured phase duration floor; pilot run scales op count (default: 30)\n"
         << "  --disk-path=PATH             Disk directory for disk transfers\n"
         << "  --disk-io-mode=MODE          direct | buffered (default: direct)\n"

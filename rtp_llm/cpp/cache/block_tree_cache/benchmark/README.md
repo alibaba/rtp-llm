@@ -2,13 +2,13 @@
 
 ## Device/Host copy API priority
 
-默认顺序为 `cuda_batch > sm > generic`。
+默认顺序为 `cuda_3d_batch > cuda_batch > sm > generic`；不支持 3D 的平台从旧路径继续。
 
-`BLOCK_TREE_DEVICE_HOST_COPY_PRIORITY` 可设置为 `cuda_batch`、`sm` 或 `generic`。
+`BLOCK_TREE_DEVICE_HOST_COPY_PRIORITY` 可设置为 `cuda_3d_batch`、`cuda_batch`、`sm` 或 `generic`。
 只把指定接口移到首位，其他接口保持相对顺序。例如：
 
 ```bash
-export BLOCK_TREE_DEVICE_HOST_COPY_PRIORITY=sm  # sm > cuda_batch > generic
+export BLOCK_TREE_DEVICE_HOST_COPY_PRIORITY=sm  # sm > cuda_3d_batch > cuda_batch > generic
 ```
 
 仅在 executor 构造时读取；未设置/空值使用默认顺序，非法值告警后使用默认顺序。
@@ -21,7 +21,7 @@ export BLOCK_TREE_DEVICE_HOST_COPY_PRIORITY=sm  # sm > cuda_batch > generic
 
 ## 设计边界
 
-- C++ binary 只有 `tree`、`transfer` 两个子命令；suite/case registry 由 `benchmark_cases.py` 统一维护。
+- C++ binary 提供 `tree`、`transfer` 测量子命令和 `capabilities` 诊断子命令；suite/case registry 由 `benchmark_cases.py` 统一维护。
 - Tree case 是 scaled/flattened 在线生命周期 microbenchmark：**C32 是 32 个逻辑 request context（内存数据对象，不是线程）**，只有一个 foreground scheduler 线程串行调用 match/insert/release；BlockTreeCache 的共享 load/evict/store task pool 是唯一的 Tree 调节参数（`--task-pool-size`，默认 4）。GroupSet fixture 按 profile 构造真实 group set 类型：FULL 组构造 `FullGroupSet`，SWA 组构造 `SWAGroupSet`（含 profile 的滑动窗口语义）。payload 为 scaled，不复刻 profile 的 member fan-out、device-only group 或真实 GPU forward。
 - `tree_online_high_variation_c32` 是**唯一** active/representative Tree perf case。该 case 使用混合 BASE/CONTINUATION 请求：BASE 使用 shared-base + unique suffix（原 high-variation 形状），CONTINUATION 完整继承同一 family 的 parent path 并追加唯一 tail（append-only）。family 状态跨 warmup/measured 持久化，scheduler 正确处理 dependency skip 与 token-budget FIFO。
 - Transfer 的 device 侧按 profile member/layer 构造真实 copy tile；device/host lane blocks 只按 wave width 分配，host/disk working set 独立寻址，不按 working set 大小扩张 GPU staging 内存。每个 wave 按方向将独立 endpoint 组成 transfer-engine descriptor batch，再等待该方向完成后推进配对方向。device↔disk staging lease 数至少取 wave width，避免 lane 超订导致 `staging pool exhausted`。
@@ -148,6 +148,12 @@ export LD_LIBRARY_PATH=/opt/conda310/lib:$LD_LIBRARY_PATH
 `--perf` 默认是 `record`；仅测指标或跑 smoke 时显式传 `--perf off`。CPU perf 的宿主/容器执行边界，以及 off-CPU 的 fallback/skip 规则见后文能力矩阵。
 
 默认是严格 suite：任一 failed、partial、skipped 或 required perf 失败都会返回非零。仅调试时可显式传 `--allow-incomplete`。缺少 `--disk-root` 时 disk case 仍保留在 manifest，并记为 `skipped_no_disk`。
+
+显式 `--copy-strategy=cuda-3d-batch` 要求非 PPU 的 CUDA 13 编译及 13.x runtime、driver ≥ 13。
+driver 通过原生二进制的 `capabilities --cuda-device N` 查询与生产策略共享的能力判断，不依据显卡名称推断。
+不支持时，28 个显式 3D case 仍保留在 suite manifest 中，状态为 `skipped_unsupported_platform`，
+并记录 `skip_reason` 和 `copy_capabilities`，不启动测量或 perf；严格 suite 仍返回非零。
+能力查询进程失败、超时或响应格式无效会报错，不计为平台跳过。直接调用 native transfer 强制 3D 时，不支持的平台会明确报错。
 
 ### 正式 profile 的 profiling 完整性（必做）
 

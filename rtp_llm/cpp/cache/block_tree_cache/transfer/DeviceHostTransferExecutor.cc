@@ -42,11 +42,13 @@ DeviceHostTransferExecutor::DeviceHostTransferExecutor(BlockTreeTaskPool&    tra
                                                        DeviceHostCopyOptions options,
                                                        std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter,
                                                        std::shared_ptr<CrcTransferService>            crc_service,
-                                                       BlockTreeTaskPool*                             load_task_pool):
+                                                       BlockTreeTaskPool*                             load_task_pool,
+                                                       const std::vector<GroupSetPtr>&                group_sets):
     TransferExecutor(transfer_task_pool, max_descriptors_per_batch, std::move(metrics_reporter), load_task_pool),
     crc_service_(std::move(crc_service)),
     options_(std::move(options)) {
-    strategies_.push_back(std::make_unique<Cuda3DBatchDeviceHostCopyStrategy>());
+    strategies_.push_back(
+        std::make_unique<Cuda3DBatchDeviceHostCopyStrategy>(group_sets, options_.cuda_3d_batch_copy_enabled));
     strategies_.push_back(std::make_unique<CudaBatchDeviceHostCopyStrategy>());
     strategies_.push_back(std::make_unique<StagedSmDeviceHostCopyStrategy>());
     strategies_.push_back(std::make_unique<GenericMultiCopyDeviceHostCopyStrategy>());
@@ -92,17 +94,32 @@ TransferResult DeviceHostTransferExecutor::executeBatch(const std::vector<HostBu
         return crc_service_ ? crc_service_->copy(hosts, descriptors, group_sets) : TransferStatus::INVALID_ARGS;
     }
     std::vector<DeviceHostCopyExecutionContext> contexts;
-    std::vector<DeviceHostCopyPlan> plans;
-    std::vector<bool>               handled;
-    bool                            planned     = false;
-    bool                            any_handled = false;
+    std::vector<DeviceHostCopyPlan>             plans;
+    std::vector<bool>                           handled;
+    bool                                        planned     = false;
+    bool                                        any_handled = false;
     for (auto& strategy : strategies_) {
         if (auto* copy3d = dynamic_cast<Cuda3DBatchDeviceHostCopyStrategy*>(strategy.get())) {
             // A raw-batch copy must not repeat any plan already completed by an earlier strategy.
             if (!options_.cuda_3d_batch_copy_enabled || any_handled) {
                 continue;
             }
-            const auto result = copy3d->tryExecute(hosts, descriptors, group_sets);
+            const auto& pools = group_sets.front()->devicePools();
+            if (pools.empty()) {
+                continue;
+            }
+            const int device_index = pools.front()->deviceIndex();
+            if (device_index >= 0) {
+                std::call_once(copy_streams_once_,
+                               [this, device_index] { copy_streams_ = acquireDeviceHostCopyStreams(device_index); });
+                if (copy_streams_->device_index != device_index) {
+                    return TransferStatus::INVALID_ARGS;
+                }
+            }
+            const DeviceHostCopyExecutionContext context{
+                device_index < 0 ? std::make_shared<DeviceHostCopyStreams>(device_index, 0, 0) : copy_streams_,
+                target != Tier::DEVICE ? DeviceHostCopyDirection::D2H : DeviceHostCopyDirection::H2D};
+            const auto result = copy3d->tryExecute(hosts, descriptors, group_sets, context);
             if (result.status == StrategyStatus::DONE) {
                 return TransferStatus::OK;
             }
@@ -130,8 +147,9 @@ TransferResult DeviceHostTransferExecutor::executeBatch(const std::vector<HostBu
                     }
                 }
                 if (device_index < 0) {
-                    contexts.push_back({std::make_shared<DeviceHostCopyStreams>(device_index, 0, 0),
-                                        plan.device_to_host ? DeviceHostCopyDirection::D2H : DeviceHostCopyDirection::H2D});
+                    contexts.push_back(
+                        {std::make_shared<DeviceHostCopyStreams>(device_index, 0, 0),
+                         plan.device_to_host ? DeviceHostCopyDirection::D2H : DeviceHostCopyDirection::H2D});
                     continue;
                 }
                 std::call_once(copy_streams_once_,
@@ -143,8 +161,8 @@ TransferResult DeviceHostTransferExecutor::executeBatch(const std::vector<HostBu
                                         plan.group_set_id);
                     return TransferStatus::INVALID_ARGS;
                 }
-                contexts.push_back({copy_streams_,
-                                    plan.device_to_host ? DeviceHostCopyDirection::D2H : DeviceHostCopyDirection::H2D});
+                contexts.push_back(
+                    {copy_streams_, plan.device_to_host ? DeviceHostCopyDirection::D2H : DeviceHostCopyDirection::H2D});
             }
             planned = true;
         }

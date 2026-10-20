@@ -42,6 +42,7 @@ class BenchmarkCase:
     # Native process timeout override. The online Tree case needs to cover
     # setup + 15s warmup + 60s measured + drain + profiler teardown.
     expected_process_timeout_seconds: Optional[int] = None
+    requires_cuda_3d_batch: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -128,6 +129,7 @@ def _transfer_case(
         params=params,
         min_logical_bytes=min_bytes,
         requires_disk=disk_mode is not None,
+        requires_cuda_3d_batch=copy_strategy == "cuda-3d-batch",
         is_representative_perf=is_perf_rep,
     )
 

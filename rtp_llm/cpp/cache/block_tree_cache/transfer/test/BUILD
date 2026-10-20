@@ -183,7 +183,7 @@ cc_test(
 
 cc_test(
     name = "device_host_copy_template_test",
-    exec_properties = {"gpu": "L20_CU13"},
+    exec_properties = {"gpu": "L20_CU13", "gpu_count": "2"},
     testonly = True,
     srcs = ["DeviceHostCopyTemplateTest.cc"],
     copts = test_copts,
@@ -192,5 +192,5 @@ cc_test(
         "exclusive-if-local",
     ],
     deps = test_deps + [":block_transfer_engine_test_utils"],
-    env = {},
+    env = {"GPU_COUNT": "2"},
 )

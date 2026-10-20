@@ -81,13 +81,16 @@ private:
 
 class RecordingCuda3DBatchDeviceHostCopyStrategy final: public Cuda3DBatchDeviceHostCopyStrategy {
 public:
-    explicit RecordingCuda3DBatchDeviceHostCopyStrategy(BenchmarkDeviceHostCopyStats* stats): stats_(stats) {}
+    RecordingCuda3DBatchDeviceHostCopyStrategy(Cuda3DBatchDeviceHostCopyStrategy&& strategy,
+                                               BenchmarkDeviceHostCopyStats*       stats):
+        Cuda3DBatchDeviceHostCopyStrategy(std::move(strategy)), stats_(stats) {}
 
     StrategyResult tryExecute(const std::vector<HostBufferView>&     hosts,
                               const std::vector<TransferDescriptor>& descriptors,
-                              const std::vector<const GroupSet*>&    group_sets) override {
+                              const std::vector<const GroupSet*>&    group_sets,
+                              const DeviceHostCopyExecutionContext&  context) override {
         const auto start   = Clock::now();
-        auto       result  = Cuda3DBatchDeviceHostCopyStrategy::tryExecute(hosts, descriptors, group_sets);
+        auto       result  = Cuda3DBatchDeviceHostCopyStrategy::tryExecute(hosts, descriptors, group_sets, context);
         const auto elapsed = elapsedNs(start, Clock::now());
         if (result.status == StrategyStatus::DONE) {
             stats_->cuda_3d_batch.fetch_add(1, std::memory_order_relaxed);
@@ -105,8 +108,8 @@ void installStrategyRecorders(PerRankBlockTransferEngine&                       
                               const std::shared_ptr<BenchmarkDeviceHostCopyStats>& stats) {
     auto& strategies = engine.device_host_executor_->strategies_;
     for (auto& strategy : strategies) {
-        if (dynamic_cast<Cuda3DBatchDeviceHostCopyStrategy*>(strategy.get()) != nullptr) {
-            strategy = std::make_unique<RecordingCuda3DBatchDeviceHostCopyStrategy>(stats.get());
+        if (auto* copy3d = dynamic_cast<Cuda3DBatchDeviceHostCopyStrategy*>(strategy.get())) {
+            strategy = std::make_unique<RecordingCuda3DBatchDeviceHostCopyStrategy>(std::move(*copy3d), stats.get());
             continue;
         }
         std::atomic<size_t>* completed = nullptr;

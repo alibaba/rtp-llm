@@ -227,10 +227,10 @@ std::shared_ptr<DeviceHostCopyStreams> acquireDeviceHostCopyStreams(int device_i
         if (h2d == d2h || h2d == nullptr || d2h == nullptr) {
             throw std::runtime_error("copy direction streams are not distinct non-default streams");
         }
-        auto pair  = std::make_shared<CudaDeviceHostCopyStreams>(device_index, h2d, d2h);
-        h2d        = nullptr;
-        d2h        = nullptr;
-        entry      = pair;
+        auto pair = std::make_shared<CudaDeviceHostCopyStreams>(device_index, h2d, d2h);
+        h2d       = nullptr;
+        d2h       = nullptr;
+        entry     = pair;
         RTP_LLM_LOG_INFO("copy streams initialized device=%d owner=%p h2d=%p d2h=%p",
                          device_index,
                          pair.get(),
