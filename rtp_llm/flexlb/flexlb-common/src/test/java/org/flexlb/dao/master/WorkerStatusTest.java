@@ -1,7 +1,5 @@
 package org.flexlb.dao.master;
 
-import org.flexlb.dao.master.WorkerStatusTestSupport;
-
 import org.flexlb.dao.route.RoleType;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
