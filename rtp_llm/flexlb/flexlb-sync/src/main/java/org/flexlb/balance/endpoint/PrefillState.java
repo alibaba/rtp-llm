@@ -1352,6 +1352,19 @@ public final class PrefillState {
         return new Snapshot(progress, nowMs, activeIndex.capture(), captureWorkLocked(nowMs, null));
     }
 
+    public java.util.OptionalLong tryLoadMetric() {
+        if (!lock.tryLock()) {
+            return java.util.OptionalLong.empty();
+        }
+        WorkCapture capture;
+        try {
+            capture = captureWorkLocked(clock.getAsLong(), Set.of());
+        } finally {
+            lock.unlock();
+        }
+        return capture.materialize().totalRemainingWorkMs();
+    }
+
     public WorkSnapshot committedSnapshot() {
         WorkCapture capture;
         lock.lock();

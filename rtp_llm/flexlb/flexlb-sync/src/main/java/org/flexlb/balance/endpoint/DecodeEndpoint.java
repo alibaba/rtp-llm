@@ -384,6 +384,11 @@ public class DecodeEndpoint extends WorkerEndpoint {
         return state.placementVersion();
     }
 
+    public OptionalLong tryGetLoadMetric() {
+        return state.tryLoadMetric();
+    }
+
+    @Override
     public OptionalLong getLoadMetric() {
         return OptionalLong.of(state.routingView(ipPort()).totalLoad());
     }

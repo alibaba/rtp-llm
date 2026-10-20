@@ -626,6 +626,11 @@ public class PrefillEndpoint extends WorkerEndpoint {
     }
 
     @Override
+    public OptionalLong tryGetLoadMetric() {
+        return ownership.tryLoadMetric();
+    }
+
+    @Override
     public OptionalLong getLoadMetric() {
         return ownership.committedSnapshot().totalRemainingWorkMs();
     }
