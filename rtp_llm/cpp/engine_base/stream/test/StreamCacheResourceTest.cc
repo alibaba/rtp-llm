@@ -981,6 +981,31 @@ TEST_F(StreamCacheResourceTest, PDRequestStillRegistersPrefillResource) {
     EXPECT_FALSE(stream_->hasError());
 }
 
+TEST_F(StreamCacheResourceTest, P2PRegistrationWaitsForAllocatorMaterialization) {
+    prepareP2PRegistrationResource(/*query_pd=*/true, "materialized-handoff");
+    auto& resource = stream_->streamCacheResource();
+    const auto allocated = *resource.batch_kv_cache_resource_;
+    resource.batch_kv_cache_resource_->clearBlocks();
+    auto context = makeAllocatorLoadContext(1, {Tier::HOST});
+    resource.allocator_load_context_ = context;
+    auto store = cache_manager_->p2p_connector_->streamStore();
+
+    ASSERT_TRUE(resource.asyncLoadCache());
+    EXPECT_EQ(resource.p2p_load_context_, nullptr);
+    EXPECT_TRUE(store->resource_map_.empty());
+    EXPECT_FALSE(resource.loadCacheDone());
+
+    // Model the allocator callback publishing its physical targets before completion.
+    *resource.batch_kv_cache_resource_ = allocated;
+    ASSERT_TRUE(context->completeTransfers(1, true));
+    ASSERT_TRUE(resource.loadCacheDone());
+    EXPECT_EQ(store->resource_map_.count("materialized-handoff"), 1u);
+    EXPECT_EQ(resource.treeCoveredBlockNum(), 1u);
+    EXPECT_EQ(stream_->hostReuseLength(), resource.reuseBlockTokens());
+    EXPECT_FALSE(stream_->hasError());
+    store->markTerminal(stream_->uniqueKey(), stream_->deadlineMs());
+}
+
 TEST_F(StreamCacheResourceTest, testTreeCoveredBlockNumFallsBackToDeviceReuseWithoutLoadContext) {
     prepareResource(/*reuse_cache=*/true);
     auto& resource = stream_->streamCacheResource();

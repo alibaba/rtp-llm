@@ -649,6 +649,11 @@ absl::Status StreamCacheResource::incrKVBlock(int seq_len_override) {
 
 bool StreamCacheResource::asyncLoadCache() {
     RTP_LLM_PROFILE_FUNCTION();
+    // Async tree allocation publishes its final physical table on completion.
+    // P2P must hold that committed table, including newly materialized targets.
+    if (allocator_load_context_) {
+        return true;
+    }
     if (stream_->queryPdSep() && !p2p_load_context_ && resource_context_.cache_manager
         && resource_context_.cache_manager->hasP2PConnector()) {
         auto meta = std::make_shared<MetaImpl>(
@@ -666,8 +671,9 @@ bool StreamCacheResource::asyncLoadCache() {
 size_t StreamCacheResource::treeCoveredBlockNum() const {
     const auto& resource = batch_kv_cache_resource_->cacheResource(0);
     if (!allocator_load_context_) {
-        // A fully device-resident match has no asynchronous load context.
-        return resource.deviceReuseBlockNum();
+        // After materialization all restored tiers reside in the physical table.
+        return resource.deviceReuseBlockNum() + resource.memoryReuseBlockNum() + resource.diskReuseBlockNum()
+               + resource.storageBackendReuseBlockNum();
     }
     const auto load_context = std::dynamic_pointer_cast<LoadAsyncContext>(allocator_load_context_);
     if (!load_context) {
@@ -678,6 +684,7 @@ size_t StreamCacheResource::treeCoveredBlockNum() const {
 }
 
 bool StreamCacheResource::loadCacheDone() {
+    bool allocator_completed = false;
     if (allocator_load_context_) {
         if (!allocator_load_context_->done()) {
             return false;
@@ -685,6 +692,7 @@ bool StreamCacheResource::loadCacheDone() {
         const ErrorInfo error   = allocator_load_context_->errorInfo();
         const bool      success = allocator_load_context_->success();
         const auto      status  = finalizeAllocatorLoad();
+        allocator_completed     = status.ok();
         if (!success && !absl::IsUnavailable(status)) {
             RTP_LLM_LOG_WARNING(
                 "block tree load failed, stream=%ld error=%s", stream_->streamId(), error.ToString().c_str());
@@ -720,6 +728,10 @@ bool StreamCacheResource::loadCacheDone() {
         return true;
     }
 
+    if (allocator_completed && !p2p_load_context_) {
+        // Resume a P2P start deferred until tree allocation supplied its blocks.
+        asyncLoadCache();
+    }
     if (p2p_load_context_) {
         if (!p2p_load_context_->done()) {
             return false;
