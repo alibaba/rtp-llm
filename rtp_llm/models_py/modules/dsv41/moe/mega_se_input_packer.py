@@ -4,11 +4,31 @@ from __future__ import annotations
 
 import os
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 
 import torch
 
 from .quant_layouts import _per_token_cast_to_fp8_packed_ue8m0
 from .shared_expert import strict_fused_moe_enabled
+
+
+@dataclass(frozen=True)
+class MegaMoEInputs:
+    """Views written by one MegaMHC -> gate -> MegaMoE invocation.
+
+    Never cache a readiness flag on the strategy: the symmetric allocation
+    is shared across layers. Graph capture must record every producer;
+    replay executes those captured producers. A persistent readiness flag
+    must not skip their writes.
+    """
+
+    owner: object
+    x: torch.Tensor
+    x_sf: torch.Tensor
+    shared_l1_acts_sf: torch.Tensor
+    topk_idx: torch.Tensor
+    topk_weights: torch.Tensor
+    block_m: int
 
 
 class MegaMoeSEInputPacker(ABC):
@@ -80,6 +100,7 @@ def get_mega_moe_se_input_packer() -> MegaMoeSEInputPacker:
 
 __all__ = [
     "FusedMegaMoeSEInputPacker",
+    "MegaMoEInputs",
     "MegaMoeSEInputPacker",
     "TorchMegaMoeSEInputPacker",
     "get_mega_moe_se_input_packer",
