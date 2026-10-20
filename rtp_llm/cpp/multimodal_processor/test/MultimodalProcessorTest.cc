@@ -290,6 +290,26 @@ TEST_F(MultimodalProcessorTest, testGetMMFeatures) {
     EXPECT_EQ(res.expanded_ids.numel(), 6);
 }
 
+TEST_F(MultimodalProcessorTest, testGetMMFeaturesWithoutHash) {
+    FakeMultimodalProcessor processor = FakeMultimodalProcessor::createFakeMultimodalProcessor({{1, 2}}, false, 10);
+    auto                    input_ids = torch::tensor({0, 1, 2, 3}, torch::kInt32);
+    std::vector<MultimodalInput> mm_inputs;
+    mm_inputs.emplace_back("2");
+    auto result = processor.getMultimodalFeatures(input_ids, mm_inputs, false).value();
+    ASSERT_EQ(result.features.size(), 1);
+    ASSERT_EQ(result.expanded_ids.numel(), 6);
+    const auto* ids  = result.expanded_ids.data_ptr<int32_t>();
+    const auto* mask = result.text_tokens_mask.data_ptr<int32_t>();
+    EXPECT_EQ(ids[0], 0);
+    EXPECT_EQ(ids[1], 1);
+    EXPECT_EQ(ids[4], 2);
+    EXPECT_EQ(ids[5], 3);
+    for (int i = 2; i < 4; ++i) {
+        EXPECT_EQ(ids[i], -1);
+        EXPECT_EQ(mask[i], 0);
+    }
+}
+
 TEST(MultimodalErrorTest, validatesMultimodalErrorCodes) {
     EXPECT_EQ(parseMultimodalErrorCode(static_cast<int>(ErrorCode::MM_WRONG_FORMAT_ERROR)),
               ErrorCode::MM_WRONG_FORMAT_ERROR);

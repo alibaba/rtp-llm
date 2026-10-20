@@ -717,6 +717,9 @@ class MMProcessEngine:
         )
 
         self.mm_part = mm_part
+        self.supports_precomputed_embedding = (
+            getattr(mm_part, "supports_inline_embedding", False) is True
+        )
 
         self._remote_embedding_cache = None
         if vit_config.mm_remote_cache_enable:
@@ -1459,6 +1462,29 @@ class MMProcessEngine:
             raise
         return res
 
+    @cuda_graph_gate.operation()
+    def mm_embedding_precomputed_cpp(
+        self, tensors: List[torch.Tensor]
+    ) -> MMEmbeddingRes:
+        """Project an already-materialized ARPC tensor payload without rebuilding inputs."""
+        if not self.supports_precomputed_embedding:
+            raise RuntimeError(
+                "multimodal model does not support precomputed fast path"
+            )
+        if len(tensors) > self._scheduler.max_request_images:
+            raise MMSchedulerRequestTooLargeError(
+                f"request image count {len(tensors)} exceeds per-request limit "
+                f"{self._scheduler.max_request_images}, request rejected"
+            )
+        with torch.inference_mode():
+            result = self.mm_part.embedding(tensors)
+        embeddings = maybe_tensor_to_list(result[0], ndim_threshold=2)
+        positions = maybe_tensor_to_list(result[1], ndim_threshold=2)
+        extra_input = (
+            maybe_tensor_to_list(result[2], ndim_threshold=1) if len(result) > 2 else []
+        )
+        return MMEmbeddingRes(embeddings, [pos.cpu() for pos in positions], extra_input)
+
     def mm_embedding_impl(
         self, mm_inputs: List[MultimodalInput], request_id: int = 0
     ) -> MMEmbeddingRes:
@@ -1503,30 +1529,53 @@ class MMProcessEngine:
                 if not self.vit_config.disable_access_log:
                     self._access_logger.log_query_access(mm_inputs, request_id)
 
-                with torch.profiler.record_function("preprocess"):
-                    work_items = self._create_work_items(
-                        mm_inputs,
-                        cache_claim=cache_claim,
-                        defer_cache_complete=defer_cache_complete,
-                        defer_feature_hashes=defer_feature_hashes,
-                        deadline=deadline,
-                    )
-                    self._wait_for_preprocessing(work_items)
-
-                with torch.profiler.record_function("compute_embeddings"):
-                    emb_res, pos_res, extra_input_res = self._compute_embeddings(
-                        work_items, deadline=deadline
-                    )
-                    if report_embedding_length:
-                        kmonitor.report(
-                            GaugeMetrics.VIT_EMBEDDING_LENGTH_METRIC,
-                            _embedding_token_length(emb_res),
+                if self.supports_precomputed_embedding:
+                    if len(mm_inputs) > self._scheduler.max_request_images:
+                        raise MMSchedulerRequestTooLargeError(
+                            f"request image count {len(mm_inputs)} exceeds per-request limit "
+                            f"{self._scheduler.max_request_images}, request rejected"
                         )
+                    with torch.profiler.record_function("preprocess"):
+                        data = self.mm_part.preprocess_input(
+                            mm_inputs,
+                            self.vit_config,
+                            **self.mm_part.get_preprocess_params(),
+                        )
+                    with torch.profiler.record_function("compute_embeddings"):
+                        with cuda_graph_gate.operation(), torch.inference_mode():
+                            result = self.mm_part.embedding(data)
+                        emb_res = maybe_tensor_to_list(result[0], ndim_threshold=2)
+                        pos_res = maybe_tensor_to_list(result[1], ndim_threshold=2)
+                        extra_input_res = (
+                            maybe_tensor_to_list(result[2], ndim_threshold=1)
+                            if len(result) > 2
+                            else []
+                        )
+                else:
+                    with torch.profiler.record_function("preprocess"):
+                        work_items = self._create_work_items(
+                            mm_inputs,
+                            cache_claim=cache_claim,
+                            defer_cache_complete=defer_cache_complete,
+                            defer_feature_hashes=defer_feature_hashes,
+                            deadline=deadline,
+                        )
+                        self._wait_for_preprocessing(work_items)
+
+                    with torch.profiler.record_function("compute_embeddings"):
+                        emb_res, pos_res, extra_input_res = self._compute_embeddings(
+                            work_items, deadline=deadline
+                        )
+                if report_embedding_length:
+                    kmonitor.report(
+                        GaugeMetrics.VIT_EMBEDDING_LENGTH_METRIC,
+                        _embedding_token_length(emb_res),
+                    )
 
                 with torch.profiler.record_function("postprocess"):
                     hashes = (
                         None
-                        if defer_feature_hashes
+                        if defer_feature_hashes or self.supports_precomputed_embedding
                         else [h for wi in work_items for h in wi.feature_hashes or []]
                     )
                     result = MMEmbeddingRes(emb_res, pos_res, extra_input_res, hashes)

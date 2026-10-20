@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from typing import List
 from unittest import TestCase, main
 from unittest.mock import MagicMock, patch
+from unittest import mock
 
 import PIL
 import pillow_avif
@@ -359,6 +360,60 @@ class MMProcessEngineTest(TestCase):
         )
         self.assertEqual(res.embeddings, [torch.tensor(0)])
         engine.stop()
+
+    def test_precomputed_tensor_fast_paths_skip_scheduler(self):
+        class PrecomputedPart(FakeMultiModalEmbeddingInterface):
+            supports_inline_embedding = True
+
+            def __init__(self):
+                self.calls = 0
+
+            @staticmethod
+            def preprocess_input(mm_inputs, vit_config, **kwargs):
+                return [item.tensor for item in mm_inputs]
+
+            def get_preprocess_params(self):
+                return {}
+
+            @torch.inference_mode()
+            def embedding(self, data, **kwargs):
+                self.calls += 1
+                return [value + 1 for value in data], None
+
+        part = PrecomputedPart()
+        config = VitConfig()
+        config.use_local_preprocess = True
+        engine = MMProcessEngine(
+            part, FakeModel(part).model_config, config, ProfilingDebugLoggingConfig()
+        )
+        tensors = [torch.tensor([[1.0]]), torch.tensor([[2.0]])]
+        try:
+            self.assertTrue(engine.supports_precomputed_embedding)
+            with mock.patch.object(
+                engine._scheduler,
+                "submit_and_wait",
+                side_effect=AssertionError("scheduler must not run"),
+            ):
+                http_result = engine.mm_embedding_cpp(
+                    ["", ""],
+                    [MMUrlType.TENSOR, MMUrlType.TENSOR],
+                    tensors,
+                    [[-1, -1, -1, -1, -1, -1, -1, [], 30000]] * 2,
+                )
+                arpc_result = engine.mm_embedding_precomputed_cpp(tensors)
+            for result in (http_result, arpc_result):
+                self.assertEqual([value.item() for value in result.embeddings], [2, 3])
+                self.assertEqual(result.position_ids, [])
+                self.assertIsNone(result.feature_hashes)
+            self.assertEqual(part.calls, 2)
+            self.assertEqual(engine.get_query_num(), 0)
+        finally:
+            engine.stop()
+
+    def test_precomputed_path_requires_opt_in(self):
+        self.assertFalse(self.mm_process_engine.supports_precomputed_embedding)
+        with self.assertRaisesRegex(RuntimeError, "does not support precomputed"):
+            self.mm_process_engine.mm_embedding_precomputed_cpp([torch.zeros((1, 1))])
 
     def test_query_counter(self):
         self.assertEqual(self.mm_process_engine.get_query_num(), 0)
