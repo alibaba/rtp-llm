@@ -1,9 +1,9 @@
 import importlib.util
 import json
 import os
+import unittest
 from pathlib import Path
 from types import SimpleNamespace
-import unittest
 from unittest import TestCase, main
 
 import torch
@@ -119,13 +119,13 @@ class DeepSeekVisionTest(TestCase):
                     )
                     self.assertTrue(torch.isfinite(aligned).all().item())
 
-    def test_real_checkpoint_norms_remain_fp32(self):
+    def test_real_checkpoint_norms_remain_bf16(self):
         norms = [
             module for module in self.vision.modules() if isinstance(module, RMSNorm)
         ]
         self.assertEqual(len(norms), 2 * self.config["vision_n_layers"] + 1)
         for module in norms:
-            self.assertEqual(module.weight.dtype, torch.float32)
+            self.assertEqual(module.weight.dtype, torch.bfloat16)
         self.assertEqual(self.vision.patch_embed.proj.weight.dtype, torch.bfloat16)
 
 

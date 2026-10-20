@@ -174,7 +174,7 @@ class V41VisionEmbeddingTest(TestCase):
         )
 
     @torch.inference_mode()
-    def test_framework_binding_preserves_storage_and_fp32_norms(self):
+    def test_framework_binding_preserves_storage_and_bf16_norms(self):
         installed = {
             "v41." + name: tensor for name, tensor in self.adapter.state_dict().items()
         }
@@ -184,7 +184,7 @@ class V41VisionEmbeddingTest(TestCase):
             self.assertEqual(value.data_ptr(), installed["v41." + name].data_ptr())
         for module in bound.vision.modules():
             if isinstance(module, RMSNorm):
-                self.assertEqual(module.weight.dtype, torch.float32)
+                self.assertEqual(module.weight.dtype, torch.bfloat16)
         with sdpa_kernel(SDPBackend.MATH):
             image = vision_module._RuntimeImage(
                 torch.zeros(18, 3, 14, 14, dtype=torch.bfloat16), 3, 6
@@ -272,7 +272,7 @@ class V41VisionEmbeddingTest(TestCase):
         )
         for module in self.adapter.vision.modules():
             if isinstance(module, RMSNorm):
-                self.assertEqual(module.weight.dtype, torch.float32)
+                self.assertEqual(module.weight.dtype, torch.bfloat16)
         self.assertEqual(self.adapter.image_start.dtype, torch.bfloat16)
 
     @torch.inference_mode()

@@ -229,6 +229,40 @@ class PackedVisionTest(unittest.TestCase):
             [tuple(output.shape) for output in outputs], [(6, 16), (6, 16)]
         )
 
+    def test_residual_add_default_dispatch_preserves_both_paths(self):
+        grids = [(3, 5), (3, 5)]
+        patches = self.patches(grids)
+        with mock.patch.object(
+            packed_vision, "apply_vision_ffn_residual_add", return_value=None
+        ) as fallback:
+            expected = packed_vision.forward_packed(
+                self.vision, self.aligner, patches, grids
+            )
+        self.assertEqual(fallback.call_count, len(self.vision.blocks))
+        with mock.patch.object(
+            packed_vision,
+            "apply_vision_ffn_residual_add",
+            side_effect=lambda x, residual: x + residual,
+        ) as fused:
+            actual = packed_vision.forward_packed(
+                self.vision, self.aligner, patches, grids
+            )
+        self.assertEqual(fused.call_count, len(self.vision.blocks))
+        for got, want in zip(actual, expected):
+            self.byte_equal(got, want)
+
+    def test_residual_add_failure_is_not_retried(self):
+        with mock.patch.object(
+            packed_vision,
+            "apply_vision_ffn_residual_add",
+            side_effect=RuntimeError("residual launch failed"),
+        ) as fused:
+            with self.assertRaisesRegex(RuntimeError, "residual launch failed"):
+                packed_vision.forward_packed(
+                    self.vision, self.aligner, self.patches([(3, 5)]), [(3, 5)]
+                )
+        self.assertEqual(fused.call_count, 1)
+
 
 class PackedRotaryLaunchTest(unittest.TestCase):
     """CPU/meta mocks validate launch partitioning, never substitute GPU parity."""

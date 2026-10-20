@@ -221,6 +221,14 @@ py_test(
 )
 
 py_test(
+    name = "deepseek_v41_default_optimizations_test",
+    srcs = ["deepseek_v41_default_optimizations_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    size = "small",
+    env = {"CUDA_VISIBLE_DEVICES": "", "GPU_COUNT": "0"},
+)
+
+py_test(
     name = "deepseek_v41_backend_contract_test",
     srcs = ["deepseek_v41_backend_contract_test.py"],
     deps = ["//rtp_llm:testlib"],

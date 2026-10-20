@@ -336,7 +336,7 @@ class BatchPipelineTest(unittest.TestCase):
         self.assertTrue(scheduler.close())
         self.assertEqual(model.closed, [0, 1])
 
-    def test_default_does_not_call_prepare(self):
+    def test_explicit_disable_does_not_call_prepare(self):
         model = Backend()
         scheduler = self.scheduler(model, enabled=0)
         item = Item(7)
@@ -353,14 +353,28 @@ class BatchPipelineTest(unittest.TestCase):
         batch.close()
         self.assertEqual(batch.data_by_item, {})
 
-    def test_config_optin_and_validation(self):
+    def test_config_default_on_and_validation(self):
         config = VitConfig()
-        self.assertNotIn("prefetch_batches", config.embedding_scheduler_args())
-        config.gpu_prefetch_batches = 1
         self.assertEqual(config.embedding_scheduler_args()["prefetch_batches"], 1)
+        config.gpu_prefetch_batches = 0
+        self.assertNotIn("prefetch_batches", config.embedding_scheduler_args())
         config.gpu_prefetch_batches = 2
         with self.assertRaises(ValueError):
             config.embedding_scheduler_args()
+
+    def test_default_config_reaches_input_staging(self):
+        config = VitConfig()
+        model = Backend()
+        scheduler = MMScheduler(
+            model, device="cpu", **config.embedding_scheduler_args()
+        )
+        self.addCleanup(scheduler.close)
+        item = Item(7)
+        scheduler.submit_and_wait([item])
+        self.assertTrue(scheduler.close())
+        self.assertEqual(model.prepared, [[107]])
+        self.assertEqual(item.embedding_result, 107)
+        self.assertEqual(model.closed, [0])
 
     def test_graph_effective_cap_and_tails(self):
         graph = PackedVisionGraph(128, 1061888)
