@@ -44,7 +44,7 @@ public class WorkerStatusRpcClient {
         boolean needCacheKeys = roleType.requiresCacheKeys();
         EngineRpcService.CacheVersionPB request =
                 EngineRpcService.CacheVersionPB.newBuilder()
-                        .setLatestCacheVersion((int) cacheVersion)
+                        .setLatestCacheVersion(cacheVersion)
                         .setNeedCacheKeys(needCacheKeys)
                         .build();
         logger.debug(
