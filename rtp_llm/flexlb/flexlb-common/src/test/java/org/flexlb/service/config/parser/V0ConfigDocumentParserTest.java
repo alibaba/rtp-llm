@@ -64,7 +64,6 @@ class V0ConfigDocumentParserTest {
                   "syncStatusInterval": 50,
                   "scheduleWorkerSize": 1,
                   "maxQueueSize": 200000,
-                  "cacheAffinityFirstOutstandingUncachedTokensThreshold": 50000,
                   "shortestTtftSimilarityThresholdRatio": 0.2,
                   "loadBalanceStrategy": "CACHE_AFFINITY_FIRST",
                   "modelServiceConfig": {
@@ -119,7 +118,7 @@ class V0ConfigDocumentParserTest {
                 .isEqualTo(DispatcherConfig.Type.NON_BATCH);
         assertThat(behavior.getCacheMatching()).isInstanceOf(KvcmCacheMatchingConfig.class);
         assertThat(behavior.getRouter().getRoles().getPrefill().getCacheAffinity()
-                .getMaxOutstandingUncachedTokens()).isEqualTo(50000);
+                .getMinPrefixHitPercent()).isEqualTo(15);
         assertThat(behavior.getConsistency()).isInstanceOf(ZookeeperConsistencyConfig.class);
         assertThat(((ZookeeperConsistencyConfig) behavior.getConsistency()).getConnectString())
                 .isEqualTo("zk.example:2181");

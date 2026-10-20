@@ -179,7 +179,7 @@ class PvLogDataTest {
         context.setDecisionGroup(new DecisionGroup("group", "FIXED_WINDOW", "NON_BATCH", "10.0.0.1",
                 2, "batch_full", 1234, 10));
         RoutingDecision.PrefillPolicy policy = new RoutingDecision.PrefillPolicy(100, "BEST_ONLY", 10L,
-                0.2, 20, 1, 0L, 15.0, 0.0, 50000L, 0, 50, 3.0, 3.0);
+                0.2, 20, 1, 0L, 15.0, 0.0, 0, 50, 3.0, 3.0);
         context.recordRoutingDecision(new RoutingDecision(RoleType.PREFILL, "default", "CostBasedPrefill",
                 "BEST_ONLY", null, null, null, 1234, 1, "10.0.0.1:8080", 1, 1, false, java.util.Map.of(), List.of(), policy));
         var mapper = new com.fasterxml.jackson.databind.ObjectMapper();

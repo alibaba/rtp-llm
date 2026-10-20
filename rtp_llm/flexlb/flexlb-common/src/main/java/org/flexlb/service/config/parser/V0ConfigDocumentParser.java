@@ -97,14 +97,12 @@ public final class V0ConfigDocumentParser implements ConfigDocumentParser {
 
     private static void configureCacheAffinity(ObjectNode v0Config, ObjectNode prefill) {
         boolean configured = "CACHE_AFFINITY_FIRST".equals(v0Config.path("loadBalanceStrategy").asText())
-                || v0Config.has("cacheAffinityFirstMinHitRate")
-                || v0Config.has("cacheAffinityFirstOutstandingUncachedTokensThreshold");
+                || v0Config.has("cacheAffinityFirstMinHitRate");
         if (!configured) {
             return;
         }
         ObjectNode cacheAffinity = prefill.putObject("cacheAffinity");
         copyField(v0Config, cacheAffinity, "cacheAffinityFirstMinHitRate", "minPrefixHitPercent");
-        copyField(v0Config, cacheAffinity, "cacheAffinityFirstOutstandingUncachedTokensThreshold", "maxOutstandingUncachedTokens");
     }
 
     private static void configureWorkerHealth(ObjectNode v0Config, ObjectNode flexlbConfig) {

@@ -485,12 +485,7 @@ class BuildWorkbookTest(unittest.TestCase):
 
             snapshot_sheet = workbook["Decision Snapshot Top5"]
             snapshot_headers = [cell.value for cell in snapshot_sheet[4]]
-            guard_col = snapshot_headers.index("outstanding_guard_eligible")
-            guard_values = [
-                row[guard_col]
-                for row in snapshot_sheet.iter_rows(min_row=5, values_only=True)
-            ]
-            self.assertEqual(guard_values, [None, None])
+            self.assertNotIn("outstanding_guard_eligible", snapshot_headers)
 
     def test_prefill_extractors_do_not_fall_back_to_decode_role(self) -> None:
         decode_only = {
@@ -610,11 +605,6 @@ class BuildWorkbookTest(unittest.TestCase):
 
         self.assertEqual(rows[0]["selection_reason"], "SHORTEST_TTFT")
         self.assertEqual(selection_counts["SHORTEST_TTFT"], 1)
-
-    def test_optional_boolean_keeps_unknown_distinct_from_false(self) -> None:
-        self.assertEqual(workbook_module.yes_no_unknown(None), "")
-        self.assertEqual(workbook_module.yes_no_unknown(False), "NO")
-        self.assertEqual(workbook_module.yes_no_unknown(True), "YES")
 
     def test_discovers_collector_manifest_and_preserves_instance(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

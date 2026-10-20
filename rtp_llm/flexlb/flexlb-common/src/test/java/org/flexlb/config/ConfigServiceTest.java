@@ -70,6 +70,13 @@ class ConfigServiceTest {
     }
 
     @Test
+    void rejectsRemovedCacheAffinityOutstandingTokenLimit() {
+        assertInvalid("""
+                {"router":{"roles":{"prefill":{"cacheAffinity":{"maxOutstandingUncachedTokens":50000}}}}}
+                """, "maxOutstandingUncachedTokens");
+    }
+
+    @Test
     void localStandbyTtlReductionRatioAllowsEndpoints() {
         for (double ratio : new double[]{0.0, 1.0}) {
             String patch = "{\"cacheMatching\":{\"type\":\"KVCM\",\"localStandby\":{\"ttlReductionStartRatio\":"

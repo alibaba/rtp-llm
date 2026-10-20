@@ -10,16 +10,6 @@ public enum StrategySelectionReason {
     SHORTEST_TTFT,
 
     /**
-     * Cache affinity was rejected because its cache leader exceeds the outstanding uncached-work threshold.
-     */
-    SHORTEST_TTFT_OUTSTANDING_GUARD,
-
-    /**
-     * Every candidate exceeds the outstanding uncached-work threshold, so shortest-TTFT falls back to all workers.
-     */
-    SHORTEST_TTFT_OUTSTANDING_GUARD_FALLBACK,
-
-    /**
      * Cache affinity was rejected because its cache leader does not meet the minimum cache-hit rate.
      */
     SHORTEST_TTFT_LOW_CACHE_HIT,

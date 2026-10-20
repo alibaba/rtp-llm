@@ -340,14 +340,6 @@ def get_prefill_decision(route: dict[str, Any] | None) -> dict[str, Any]:
     return _prefill_equivalent_item(route, "shortestTtftDecisions")
 
 
-def yes_no_unknown(value: Any) -> str:
-    """Render an optional boolean without collapsing missing into false."""
-
-    if value is None:
-        return ""
-    return "YES" if bool(value) else "NO"
-
-
 def nearest_rank(values: list[float], percentile: float) -> float | None:
     if not values:
         return None
@@ -720,8 +712,6 @@ def build_rows(sources: Sequence[PvSource], start: datetime | str | None = None,
             "decision_cache_lead_tokens": as_number(cache_affinity_decision.get("cacheLeadTokens")),
             "decision_extra_work_tokens": as_number(cache_affinity_decision.get("extraTtft")),
             "decision_tolerated_extra_work_tokens": as_number(cache_affinity_decision.get("toleratedExtraTtft")),
-            "decision_outstanding_threshold_tokens": as_number(cache_affinity_decision.get("outstandingUncachedTokensThreshold")),
-            "decision_cache_leader_outstanding_eligible": cache_affinity_decision.get("cacheLeaderOutstandingEligible"),
             "selected_snapshot_rank": non_negative(selected_snapshot.get("estimatedTtftRank")),
             "selected_snapshot_hit_rate_pct": as_number(selected_snapshot.get("requestHitRatePct")),
             "selected_snapshot_uncache_tokens": as_number(selected_snapshot.get("requestUncachedTokens")),
@@ -862,8 +852,6 @@ LEFT_COLUMNS = [
     Column("decision_cache_lead_tokens", "decision cache lead tokens", 24, "integer"),
     Column("decision_extra_work_tokens", "decision extra work tokens", 24, "integer"),
     Column("decision_tolerated_extra_work_tokens", "decision max extra work tokens", 29, "integer"),
-    Column("decision_outstanding_threshold_tokens", "decision outstanding threshold", 28, "integer"),
-    Column("decision_cache_leader_outstanding_eligible", "cache leader outstanding eligible", 29),
     Column("selected_snapshot_rank", "selected snapshot TTFT rank", 26, "integer"),
     Column("selected_snapshot_hit_rate_pct", "selected snapshot hit rate", 25, "pct"),
     Column("selected_snapshot_uncache_tokens", "selected snapshot request uncache", 30, "integer"),
@@ -1023,7 +1011,7 @@ def write_requests_sheet(workbook: xlsxwriter.Workbook, rows: list[dict[str, Any
         columns = [column for column in columns if has_legacy or not (
             column.key.startswith("selected_snapshot_") or column.key.startswith("decision_cache_")
             or column.key in {"decision_extra_work_tokens", "decision_tolerated_extra_work_tokens",
-                              "decision_outstanding_threshold_tokens", "decision_shortest_ttft_ip_port"})]
+                              "decision_shortest_ttft_ip_port"})]
         prefix = columns[:6]
         columns = prefix + [column for column in columns if column.key in promoted] + [
             column for column in columns if column not in prefix and column.key not in promoted]
@@ -1169,7 +1157,7 @@ def write_routing_decisions_sheet(workbook: xlsxwriter.Workbook, rows: list[dict
               "usedKvTokens", "availableKvTokens", "logWeight", "ownershipVersion"]
     policy_fields = ["requestInputTokens", "candidateChoice", "minimumTtftMs", "relativeTolerance",
                      "minimumToleranceMs", "shortestTtftPoolSize", "cacheAffinityMaxExtraTtftMs",
-                     "cacheAffinityMinPrefixHitPercent", "remoteDiscount", "maxOutstandingUncachedTokens",
+                     "cacheAffinityMinPrefixHitPercent", "remoteDiscount",
                      "minimumEffectiveHitTokens", "maximumEffectiveHitTokens",
                      "maxPendingVsAverageMultiplier", "maxDrainVsAverageMultiplier"]
     group_fields = ["id", "policy", "dispatcher", "worker", "committedSize", "reason", "committedAtMs", "requestWaitMs"]
@@ -1224,7 +1212,6 @@ def write_decision_snapshot_sheet(workbook: xlsxwriter.Workbook, rows: list[dict
         ("selected", 12, "text", lambda row, candidate: "YES" if candidate.get("selected") else ""),
         ("cache_leader", 15, "text", lambda row, candidate: "YES" if candidate.get("cacheLeader") else ""),
         ("shortest_TTFT", 15, "text", lambda row, candidate: "YES" if candidate.get("shortestTtftWorker") else ""),
-        ("outstanding_guard_eligible", 27, "text", lambda row, candidate: yes_no_unknown(candidate.get("outstandingGuardEligible"))),
         ("request_hit_rate_pct", 22, "pct", lambda row, candidate: candidate.get("requestHitRatePct")),
         ("request_hit_cache_tokens", 24, "integer", lambda row, candidate: candidate.get("requestHitCacheTokens")),
         ("request_uncache_tokens", 23, "integer", lambda row, candidate: candidate.get("requestUncachedTokens")),

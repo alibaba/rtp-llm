@@ -185,7 +185,6 @@ def compact_candidate(row: dict[str, Any]) -> dict[str, Any] | None:
     if not row.get("request_id"):
         return None
     number = lambda name: cell_number(row.get(name))
-    eligible_value = row.get("outstanding_guard_eligible")
     return {
         "rank": number("candidate_rank_by_estimated_TTFT"),
         "host": str(row.get("candidate_ip") or "unknown"),
@@ -193,11 +192,6 @@ def compact_candidate(row: dict[str, Any]) -> dict[str, Any] | None:
         "selected": cell_bool(row.get("selected")),
         "cacheLeader": cell_bool(row.get("cache_leader")),
         "shortest": cell_bool(row.get("shortest_TTFT")),
-        "eligible": (
-            None
-            if eligible_value in (None, "")
-            else cell_bool(eligible_value)
-        ),
         "hitRate": number("request_hit_rate_pct"),
         "hitTokens": number("request_hit_cache_tokens"),
         "uncache": number("request_uncache_tokens"),
