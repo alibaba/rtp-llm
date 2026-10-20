@@ -149,6 +149,47 @@ py_test(
     deps = flashinfer_test_deps,
 )
 
+# 4c-attribution A/B (r75 stop-over, opt r5 4c lane; diagnostic only, no
+# model behavior change): the production fa3 ragged prefill kernel at the
+# dgm sliding-layer shape (Q=4096, GQA 16:8, head_dim 256, causal, bf16)
+# under window_left=-1023 vs window_left=-1, with the 4c-gate
+# effective-FLOPs accounting (2*Q*avg_kv*16*256) and the adjudicated H20
+# 148 TFLOPS peak. Manual (developer bench) so a diagnostic adds no CI
+# lane; the fa2 variant runs in its own process for crash isolation and
+# feeds the fa2/fa3/blockwise comparison rows.
+py_test(
+    name = "test_diffusion_gemm_window_ab_prefill_sm90",
+    srcs = ["test_flashinfer_prefill/test_diffusion_gemm_window_ab_prefill.py"],
+    exec_properties = {
+        "gpu": "H20_CU13",
+    },
+    main = "test_flashinfer_prefill/test_diffusion_gemm_window_ab_prefill.py",
+    tags = [
+        "H20_CU13",
+        "manual",
+    ],
+    target_compatible_with = CUDA13_X86_ONLY,
+    deps = flashinfer_test_deps,
+)
+
+py_test(
+    name = "test_diffusion_gemm_window_ab_prefill_fa2_sm90",
+    srcs = [
+        "test_flashinfer_prefill/test_diffusion_gemm_window_ab_prefill.py",
+        "test_flashinfer_prefill/test_diffusion_gemm_window_ab_prefill_fa2.py",
+    ],
+    exec_properties = {
+        "gpu": "H20_CU13",
+    },
+    main = "test_flashinfer_prefill/test_diffusion_gemm_window_ab_prefill_fa2.py",
+    tags = [
+        "H20_CU13",
+        "manual",
+    ],
+    target_compatible_with = CUDA13_X86_ONLY,
+    deps = flashinfer_test_deps,
+)
+
 # Generates one py_test per (test, platform): <test name>_<sm>,
 # e.g. test_py_flashinfer_hybrid_mha_prefill_sm90.
 [
