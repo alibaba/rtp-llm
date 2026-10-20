@@ -117,11 +117,25 @@ public:
         if (!status.ok()) {
             throw std::runtime_error(status.ToString());
         }
-        auto scheduled = scheduler_->schedule();
-        if (!scheduled.ok() || scheduled.value().size() != 1 || value->getStatus() != StreamState::RUNNING) {
-            throw std::runtime_error("test stream was not admitted to RUNNING: " + value->statusInfo().ToString());
+        // P2P registration completes synchronously, but admission still visits
+        // WAITING -> LOADING_CACHE -> WAITING -> RUNNING on separate scheduler ticks.
+        // Advance those ticks without adding a background engine or waiting for model output.
+        for (int tick = 0; tick < 3; ++tick) {
+            auto scheduled = scheduler_->schedule();
+            if (!scheduled.ok()) {
+                throw std::runtime_error("test scheduler failed: " + scheduled.status().ToString());
+            }
+            if (value->getStatus() == StreamState::RUNNING) {
+                if (scheduled.value().size() != 1) {
+                    throw std::runtime_error("test scheduler did not return its RUNNING stream");
+                }
+                return;
+            }
+            if (value->getStatus() == StreamState::FINISHED || value->hasError()) {
+                break;
+            }
         }
-        // No background engine loop: the test explicitly advances the next tick.
+        throw std::runtime_error("test stream was not admitted to RUNNING: " + value->statusInfo().ToString());
     }
     absl::Status stop() override {
         return scheduler_->stop();
@@ -277,7 +291,7 @@ protected:
         EXPECT_TRUE(reached_output);
         EXPECT_TRUE(returned) << "handler waited for scheduler completion";
         auto status = call.get();
-        EXPECT_EQ(status.ok(), action == OutputAction::COMPLETE);
+        EXPECT_EQ(status.ok(), action == OutputAction::COMPLETE) << status.error_message();
         if (action != OutputAction::COMPLETE) {
             EXPECT_NE(status.error_message().find(kFailureReason), std::string::npos);
         }
