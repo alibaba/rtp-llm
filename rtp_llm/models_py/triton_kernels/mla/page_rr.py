@@ -353,6 +353,10 @@ def _prepare_decode_metadata(
     length = end // interval * page_size + tl.minimum(
         tl.maximum(end % interval - cp_rank * page_size, 0), page_size
     )
+    tl.device_assert(
+        (~active) | (length <= table_width * kernel_page_size),
+        "Page-RR Decode page table is too narrow for the local history",
+    )
     tl.store(local_lengths + row, tl.where(active, length, 0), valid)
 
     slot = _page_rr_cache_slot(
