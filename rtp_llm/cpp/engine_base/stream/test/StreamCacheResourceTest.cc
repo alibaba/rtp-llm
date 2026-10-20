@@ -2018,6 +2018,10 @@ TEST_F(StreamCacheResourceTest, testP2PFirstTokenOutputsRoundTripThroughStartLoa
             };
             auto prefill    = make_stream(RoleType::PREFILL);
             auto decode     = make_stream(RoleType::DECODE);
+            prefill->generateInput()->multimodal_inputs =
+                std::vector<MultimodalInput>{MultimodalInput("image", 1), MultimodalInput("video", 2)};
+            prefill->generateInput()->multimodal_features =
+                std::vector<torch::Tensor>{torch::zeros({4, 2}), torch::zeros({2, 2})};
             auto logits     = torch::arange(16, torch::kFloat32).reshape({1, 16});
             auto hidden     = torch::arange(4, torch::kFloat32).reshape({1, 4});
             auto all_hidden = torch::arange(24, torch::kFloat32).reshape({6, 4});
@@ -2040,6 +2044,7 @@ TEST_F(StreamCacheResourceTest, testP2PFirstTokenOutputsRoundTripThroughStartLoa
             PrefillResultStore::SideChannelData published;
             ASSERT_TRUE(prefill_connector.stream_store_->takePrefillPayload(key, published));
             EXPECT_EQ(published.first_token_tensors.size(), requested ? 7u : 0u);
+            EXPECT_EQ(published.multimodal_lengths, (std::map<int, int>{{1, 4}, {2, 2}}));
             EXPECT_EQ(published.prefill_use_independent_block_pools, hybrid);
             EXPECT_EQ(published.generation_prefill_cuda_graph_status, static_cast<uint32_t>(graph_status));
             // Reusing executor buffers after publication must not change the payload.
@@ -2074,6 +2079,10 @@ TEST_F(StreamCacheResourceTest, testP2PFirstTokenOutputsRoundTripThroughStartLoa
             ASSERT_EQ(output_result.value().generate_outputs.size(), 1u);
             const auto& output = output_result.value().generate_outputs.front();
             EXPECT_EQ(output.output_ids.item<int32_t>(), 7);
+            EXPECT_EQ(decode->generateInput()->multimodalLengths(), published.multimodal_lengths);
+            if (requested) {
+                EXPECT_EQ(output.aux_info.multimodal_lengths, published.multimodal_lengths);
+            }
             EXPECT_EQ(output.finished, eos);
             EXPECT_EQ(decode->prefillUsesIndependentBlockPools(), requested);
             EXPECT_EQ(decode->generationPrefillCudaGraphStatus(), graph_status);

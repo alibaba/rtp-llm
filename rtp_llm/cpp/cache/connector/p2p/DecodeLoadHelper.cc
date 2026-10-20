@@ -316,6 +316,8 @@ void DecodeLoadHelper::Result::updateStreamFromResponse() {
         side_channel_payload.remote_reuse_len = payload.remote_reuse_len();
         side_channel_payload.memory_reuse_len = payload.memory_reuse_len();
         side_channel_payload.disk_reuse_len   = payload.disk_reuse_len();
+        side_channel_payload.multimodal_lengths =
+            std::map<int, int>(payload.multimodal_lengths().begin(), payload.multimodal_lengths().end());
         side_channel_payload.has_data         = true;
 
         for (const char* name : {"first_token_logits",

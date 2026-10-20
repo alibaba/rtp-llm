@@ -43,6 +43,9 @@ public:
     }
 
     std::map<int, int> multimodalLengths() const {
+        if (handoff_multimodal_lengths.has_value()) {
+            return *handoff_multimodal_lengths;
+        }
         std::map<int, int> lengths;
         if (v41_inputs && multimodal_features) {
             for (const auto& feature : *multimodal_features) {
@@ -95,6 +98,7 @@ public:
     bool                            need_release_resource = true;
     bool                            fake_query            = false;
     // For multi-modality models
+    std::optional<std::map<int, int>> handoff_multimodal_lengths;
     std::optional<std::vector<MultimodalInput>> multimodal_inputs;
     std::shared_ptr<const V41RequestInputs>     v41_inputs;
     std::optional<std::vector<torch::Tensor>>   multimodal_features;

@@ -290,6 +290,7 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
             side_data.remote_reuse_len = remoteReuseLength();
             side_data.memory_reuse_len = hostReuseLength();
             side_data.disk_reuse_len   = diskReuseLength();
+            side_data.multimodal_lengths = generate_input_->multimodalLengths();
             // Publish owned CPU snapshots. Decode applies these through its normal output path.
             const auto& config      = *generate_input_->generate_config;
             const auto  save_output = [&](const char* name, const torch::Tensor& tensor, bool requested) {

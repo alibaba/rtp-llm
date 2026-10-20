@@ -161,6 +161,7 @@ void applyP2PSideChannel(const P2PSideChannelPayload& payload, GenerateStream* s
         }
     }
 #endif
+    stream->generateInput()->handoff_multimodal_lengths = payload.multimodal_lengths;
     if (payload.has_first_token) {
         const auto output_tensor = [&](const char* name) {
             const auto it = payload.first_token_tensors.find(name);

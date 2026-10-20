@@ -33,6 +33,7 @@ struct P2PSideChannelPayload {
     int32_t              disk_reuse_len   = 0;
     bool                            prefill_use_independent_block_pools  = false;
     uint32_t                        generation_prefill_cuda_graph_status = 0;
+    std::map<int, int> multimodal_lengths;
     std::vector<int>     propose_tokens;
     TensorPB             propose_probs;
     TensorPB             propose_hidden;

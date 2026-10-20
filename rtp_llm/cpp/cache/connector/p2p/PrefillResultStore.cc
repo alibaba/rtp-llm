@@ -142,6 +142,9 @@ grpc::Status PrefillResultStore::fillStartLoadResponsePayload(const SideChannelD
         payload->set_remote_reuse_len(data.remote_reuse_len);
         payload->set_memory_reuse_len(data.memory_reuse_len);
         payload->set_disk_reuse_len(data.disk_reuse_len);
+        for (const auto& [type, length] : data.multimodal_lengths) {
+            (*payload->mutable_multimodal_lengths())[type] = length;
+        }
 
         if (!data.propose_tokens.empty()) {
             auto& propose_tensor = (*payload->mutable_tensors())["propose_tokens"];
