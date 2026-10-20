@@ -2,7 +2,42 @@
 
 #include "rtp_llm/cpp/api_server/Exception.h"
 
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <mutex>
+
 namespace rtp_llm {
+namespace {
+void dumpDiagOutputIds(const GenerateOutputs& outputs, const GenerateOutput& output) {
+    const char* enabled = std::getenv("RTP_QWEN35_DIAG_ENABLE");
+    const char* root = std::getenv("RTP_QWEN35_DIAG_DIR");
+    if (enabled == nullptr || enabled[0] != '1' || enabled[1] != 0 ||
+        root == nullptr || *root == 0 || !output.finished ||
+        !output.output_ids.defined()) {
+        return;
+    }
+    static std::mutex mutex;
+    std::lock_guard<std::mutex> guard(mutex);
+    std::filesystem::create_directories(root);
+    const char* rank = std::getenv("RANK");
+    std::string path = std::string(root) + "/generated_token_ids_rank" +
+                       (rank ? rank : "0") + ".jsonl";
+    auto ids = output.output_ids.to(torch::kCPU).contiguous();
+    std::ofstream file(path, std::ios::app);
+    if (!file || ids.scalar_type() != torch::kInt32) {
+        return;
+    }
+    file << R"({"request_id":)" << outputs.request_id
+         << R"(,"output_ids":[)";
+    const auto* data = ids.data_ptr<int32_t>();
+    for (int64_t i = 0; i < ids.numel(); ++i) {
+        if (i) file << ",";
+        file << data[i];
+    }
+    file << R"(]})" << "\n";
+}
+}  // namespace
 
 GenerateStreamWrapper::GenerateStreamWrapper(const std::shared_ptr<ApiServerMetricReporter>& metric_reporter,
                                              const std::shared_ptr<TokenProcessor>&          token_processor):
@@ -115,6 +150,7 @@ MultiSeqsResponse GenerateStreamWrapper::formatResponse(const std::vector<std::s
         auto loss          = generate_output.loss;
         auto hidden_states = generate_output.hidden_states;
         auto output_ids    = generate_output.output_ids;
+        dumpDiagOutputIds(generate_outputs, generate_output);
 
         if (generate_config->return_logits && logits.has_value()) {
             auto tensor = logits.value().to(torch::kFloat).contiguous();

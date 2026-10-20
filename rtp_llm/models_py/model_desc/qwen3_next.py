@@ -47,6 +47,7 @@ from rtp_llm.models_py.triton_kernels.fla.fused_recurrent import (
 from rtp_llm.models_py.triton_kernels.fla.gdn_gating import fused_gdn_gating
 from rtp_llm.models_py.utils.debug import cudagraph_debug_kernel
 from rtp_llm.models_py.utils.typed_storage_view import LinearCacheConverter
+from rtp_llm.models_py.model_desc.qwen3_next_diag import capture_layer
 from rtp_llm.ops import (
     AttentionConfigs,
     HybridAttentionType,
@@ -987,8 +988,11 @@ class Qwen3NextDecoderLayer(nn.Module):
         kv_cache: Optional[LayerKVCache] = None,
         attention_inputs: Optional[PyAttentionInputs] = None,
         attn_meta: Qwen3NextMetadata = Qwen3NextMetadata(),
+        input_ids: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         hidden_states, residual = self.input_layernorm(hidden_states, residual)
+        attention_input = hidden_states
+        attention_residual = residual
 
         hidden_states = self.self_attn(
             hidden_states=hidden_states,
@@ -997,6 +1001,16 @@ class Qwen3NextDecoderLayer(nn.Module):
             attention_inputs=attention_inputs,
             attn_meta=attn_meta,
         )
+        if self.layer_type != HybridAttentionType.LINEAR:
+            capture_layer(
+                layer_idx=self.layer_idx,
+                hidden_in=attention_input,
+                hidden_out=hidden_states,
+                residual=attention_residual,
+                attention_inputs=attention_inputs,
+                kv_cache=kv_cache,
+                input_ids=input_ids,
+            )
 
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
 
@@ -1182,6 +1196,7 @@ class Qwen3NextModel(GptModelBase):
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
                 attention_inputs=attention_inputs,
                 attn_meta=attn_meta,
+                input_ids=inputs.input_ids,
             )
 
         hidden_states, residual = self.norm(hidden_states, residual)
