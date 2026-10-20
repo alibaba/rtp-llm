@@ -140,23 +140,20 @@ public class EngineLocalView {
     }
 
     /**
-     * Detach all cache blocks of an engine
+     * Remove all cache blocks of an engine
      *
      * @param engineIPort Engine IP
-     * @return Removed key set, owned by the retirement caller
      */
-    public Set<Long> removeAllCacheBlockOfEngine(String engineIPort) {
+    public void removeAllCacheBlockOfEngine(String engineIPort) {
         if (engineIPort == null) {
-            return Collections.emptySet();
+            return;
         }
 
-        // The caller serializes updates and retirement with the worker generation lock.
         Set<Long> removed = engineViews.remove(engineIPort);
         // Warn if removal fails
         if (removed == null) {
             log.warn("Remove failed, the engine: {} not exist.", engineIPort);
         }
-        return removed == null ? Collections.emptySet() : removed;
     }
 
     /**

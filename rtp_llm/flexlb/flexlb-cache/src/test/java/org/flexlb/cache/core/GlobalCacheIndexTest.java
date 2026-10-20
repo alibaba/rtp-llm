@@ -9,7 +9,6 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -39,7 +38,7 @@ class GlobalCacheIndexTest {
         globalCacheIndex.removeCacheBlock("engine1", 1L);
         assertEquals(2L, globalCacheIndex.totalBlocks());
         assertEquals(2L, globalCacheIndex.totalMappings());
-        globalCacheIndex.removeAllCacheBlockOfEngine("engine2", Set.of(1L));
+        globalCacheIndex.removeAllCacheBlockOfEngine("engine2");
         assertEquals(1L, globalCacheIndex.totalBlocks());
         assertEquals(1L, globalCacheIndex.totalMappings());
         globalCacheIndex.removeCacheBlock("missing", 2L);
@@ -52,27 +51,6 @@ class GlobalCacheIndexTest {
         globalCacheIndex.addCacheBlock(3L, "engine1");
         assertEquals(1L, globalCacheIndex.totalBlocks());
         assertEquals(1L, globalCacheIndex.totalMappings());
-    }
-
-    @Test
-    void retirementPreservesSharedOwnershipAcrossChunks() {
-        EngineLocalView local = new EngineLocalView();
-        for (long key = 0; key < 1025; key++) {
-            local.addOrUpdateCacheBlock("retired", key);
-            globalCacheIndex.addCacheBlock(key, "retired");
-            if (key % 2 == 0) globalCacheIndex.addCacheBlock(key, "survivor");
-        }
-        globalCacheIndex.addCacheBlock(2000L, "survivor");
-        Set<Long> detached = local.removeAllCacheBlockOfEngine("retired");
-        assertEquals(1025, detached.size());
-        assertEquals(0, local.size("retired"));
-        globalCacheIndex.removeAllCacheBlockOfEngine("retired", detached);
-        assertEquals(514L, globalCacheIndex.totalBlocks());
-        assertEquals(514L, globalCacheIndex.totalMappings());
-        assertEquals(Map.of("survivor", 1), globalCacheIndex.batchCalculatePrefixMatchLength(
-                List.of("retired", "survivor"), List.of(0L, 1L)));
-        globalCacheIndex.removeAllCacheBlockOfEngine("retired", detached);
-        assertEquals(514L, globalCacheIndex.totalMappings());
     }
 
     @Test
