@@ -156,6 +156,28 @@ except Exception as _splitk_error:  # CPU-only sandboxes without triton
     )
 _SPLITK_AB_CHECK = os.environ.get("DGM_SPLITK_AB", "") not in ("", "0")
 
+# opt r9 ⑥ tail-clear lane, item 1 (fused MoE align) + item 4a (fused MoE
+# top-k sum): the decode-window residual #1 was radixSortKVInPlace
+# (70.2 ms / 3660x = 30 MoE layers x ~122 canvas forwards) whose call chain
+# is moe_align_block_size_torch's stable argsort — the surrounding chain
+# (zeros/ones/full fills, two cumsums, three gather/index kernels, the
+# index_put scatter, the int32 casts, searchsorted) is also most of the
+# 63.4 ms index/scatter and 17.9 ms int-FillFunctor residual clusters.
+# moe_align_block_size_triton reproduces all three outputs bit-exactly
+# (all-integer semantics) in ONE launch for the decode/canvas shapes
+# (num_valid <= 8192; larger prefill shapes keep the torch chain — there it
+# is throughput-bound and a single-CTA kernel would be slower). The top-k
+# output reduce (``out.view(M, top_k, K).sum(dim=1)`` = the 41.8 ms /
+# 3750x reduce_kernel<BFloat16> residual) becomes the coalesced fp32-acc
+# moe_sum_reduce launch, bf16-ulp class vs the ATen strided reduce.
+# DGM_FUSED_MOE_ALIGN=0 / DGM_FUSED_MOE_SUM=0 force the torch paths;
+# DGM_MOEALIGN_AB=1 / DGM_MOESUM_AB=1 print the per-call referee stats
+# ([dgm-moealign-ab] / [dgm-moesum-ab]).
+_FUSED_MOE_ALIGN_ENV = os.environ.get("DGM_FUSED_MOE_ALIGN", "1") != "0"
+_MOEALIGN_AB_CHECK = os.environ.get("DGM_MOEALIGN_AB", "") not in ("", "0")
+_FUSED_MOE_SUM_ENV = os.environ.get("DGM_FUSED_MOE_SUM", "1") != "0"
+_MOESUM_AB_CHECK = os.environ.get("DGM_MOESUM_AB", "") not in ("", "0")
+
 
 def _fused_add_norm_usable(x: torch.Tensor, residual: torch.Tensor, norm) -> bool:
     if not (_FUSED_ADD_NORM_ENV and _FI_ADD_NORM is not None):
@@ -2009,6 +2031,16 @@ class DiffusionGemmaExperts(nn.Module):
         self.top_k = config.moe_k
         self.fused_enabled = os.environ.get("DGM_FUSED_MOE", "1") != "0"
         self._fused_ready = False
+        # opt r9 item 1 / item 4a: single-launch metadata + top-k sum
+        # kernels (bit-exact / bf16-ulp vs the torch chain; see the module
+        # gate comment above). One-shot degrade flags keep the torch paths
+        # after any kernel failure (the r4 fused-kernel contract).
+        self._moe_align_triton = None
+        self._moe_sum_triton = None
+        self._align_warned = False
+        self._sum_warned = False
+        self._align_ab_logged = False
+        self._sum_ab_logged = False
         if self.fused_enabled:
             try:
                 import triton.language as tl
@@ -2027,6 +2059,28 @@ class DiffusionGemmaExperts(nn.Module):
                 self._invoke_fused_moe_kernel = invoke_fused_moe_kernel
                 self._moe_align_block_size = moe_align_block_size_torch
                 self._fused_ready = True
+                try:
+                    from rtp_llm.models_py.triton_kernels.moe.moe_align import (
+                        moe_align_block_size_triton,
+                    )
+
+                    self._moe_align_triton = moe_align_block_size_triton
+                except Exception as align_error:  # CPU-only / missing triton
+                    logger.info(
+                        "DiffusionGemma fused moe_align unavailable, torch chain: %s",
+                        align_error,
+                    )
+                try:
+                    from rtp_llm.models_py.triton_kernels.moe.moe_sum import (
+                        moe_sum_reduce,
+                    )
+
+                    self._moe_sum_triton = moe_sum_reduce
+                except Exception as sum_error:  # CPU-only / missing triton
+                    logger.info(
+                        "DiffusionGemma fused moe_sum unavailable, torch reduce: %s",
+                        sum_error,
+                    )
             except Exception as error:  # CPU-only / missing kernels
                 logger.info("DiffusionGemma fused MoE unavailable, loop path: %s", error)
 
@@ -2071,14 +2125,20 @@ class DiffusionGemmaExperts(nn.Module):
 
         # Flat routing tensors for the kernel
         flat_topk_weights = top_k_weights.reshape(-1)  # [M * top_k]
-        topk_ids = top_k_idx.to(torch.int32)
-        flat_topk_ids = topk_ids.reshape(-1)
+        # opt r9 item 1: the triton align reads the router's native int64
+        # ids directly (the .to(int32) cast launch also disappears); the
+        # torch chain keeps its own int32 cast exactly as before.
+        if self._align_kernel_usable(top_k_idx):
+            align_ids = top_k_idx
+        else:
+            align_ids = top_k_idx.to(torch.int32)
+        flat_topk_ids = align_ids.reshape(-1)
 
         # Token-expert alignment: compute once if block sizes match, else twice
         block_m1 = config1["BLOCK_SIZE_M"]
         block_m2 = config2["BLOCK_SIZE_M"]
-        sorted_token_ids, expert_ids, num_tokens_post_padded = (
-            self._moe_align_block_size(topk_ids, block_m1, E)
+        sorted_token_ids, expert_ids, num_tokens_post_padded = self._run_align(
+            align_ids, block_m1
         )
         if block_m1 == block_m2:
             sorted_token_ids2, expert_ids2, num_tokens_post_padded2 = (
@@ -2087,8 +2147,8 @@ class DiffusionGemmaExperts(nn.Module):
                 num_tokens_post_padded,
             )
         else:
-            sorted_token_ids2, expert_ids2, num_tokens_post_padded2 = (
-                self._moe_align_block_size(topk_ids, block_m2, E)
+            sorted_token_ids2, expert_ids2, num_tokens_post_padded2 = self._run_align(
+                align_ids, block_m2
             )
 
         # GEMM1: hidden_states @ w1.T → intermediate1 [M*top_k, 2I]
@@ -2129,8 +2189,106 @@ class DiffusionGemmaExperts(nn.Module):
             compute_type=compute_type,
         )
 
-        # Sum reduce over top_k: out is [M*top_k, K], reshape and sum
+        # Sum reduce over top_k: out is [M*top_k, K] — the r9 fused
+        # moe_sum_reduce launch (fp32 accumulation, bf16 rounding at the
+        # store) replaces the ATen strided mid-dim reduce.
+        if self._sum_kernel_usable(out):
+            try:
+                return self._moe_sum_triton(out, M, top_k)
+            except Exception as sum_error:
+                if not self._sum_warned:
+                    logger.warning(
+                        "DiffusionGemma fused moe_sum failed (%s); torch reduce "
+                        "for this process",
+                        sum_error,
+                    )
+                    self._sum_warned = True
+                return out.view(M, top_k, K).sum(dim=1)
         return out.view(M, top_k, K).sum(dim=1)
+
+    def _align_kernel_usable(self, top_k_idx: torch.Tensor) -> bool:
+        if not (_FUSED_MOE_ALIGN_ENV and self._moe_align_triton is not None):
+            return False
+        if self._align_warned:
+            return False
+        if not top_k_idx.is_cuda:
+            return False
+        if top_k_idx.dtype not in (torch.int32, torch.int64):
+            return False
+        if top_k_idx.dim() != 2 or top_k_idx.stride() != (top_k_idx.shape[1], 1):
+            return False
+        num_valid = top_k_idx.numel()
+        if num_valid > 8192 or self.num_experts > 512:
+            # Throughput regime: the multi-kernel torch chain is faster than
+            # a single-CTA kernel there (large prefill).
+            return False
+        return True
+
+    def _run_align(
+        self, align_ids: torch.Tensor, block_m: int
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Token-expert alignment with the r9 triton path + A/B referee and
+        the one-shot torch degrade (bit-exact contract: the referee asserts
+        torch.equal on all three outputs)."""
+        if self._align_kernel_usable(align_ids):
+            try:
+                fused = self._moe_align_triton(align_ids, block_m, self.num_experts)
+                if _MOEALIGN_AB_CHECK:
+                    self._align_ab(align_ids, block_m, fused)
+                return fused
+            except Exception as align_error:
+                if not self._align_warned:
+                    logger.warning(
+                        "DiffusionGemma fused moe_align failed (%s); torch chain "
+                        "for this process",
+                        align_error,
+                    )
+                    self._align_warned = True
+        return self._moe_align_block_size(align_ids, block_m, self.num_experts)
+
+    def _align_ab(
+        self,
+        align_ids: torch.Tensor,
+        block_m: int,
+        fused: Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+    ) -> None:
+        """Debug A/B (DGM_MOEALIGN_AB=1): triton metadata vs the torch chain
+        — all-integer, so the referee is exact equality on the three outputs."""
+        if self._align_ab_logged:
+            return
+        try:
+            ref = self._moe_align_block_size(
+                align_ids.to(torch.int32), block_m, self.num_experts
+            )
+            eq = [bool(torch.equal(a, b)) for a, b in zip(fused, ref)]
+            print(
+                f"[dgm-moealign-ab] M={align_ids.shape[0]} top_k={align_ids.shape[1]} "
+                f"E={self.num_experts} block_m={block_m}: "
+                f"sorted_eq={eq[0]} expert_ids_eq={eq[1]} post_padded_eq={eq[2]}",
+                flush=True,
+            )
+            if not all(eq):
+                for i, (a, b) in enumerate(zip(fused, ref)):
+                    if not torch.equal(a, b):
+                        diff = (a.long() - b.long()).abs()
+                        print(
+                            f"[dgm-moealign-ab]   output[{i}] mismatch count="
+                            f"{int((diff > 0).sum())} max={int(diff.max())}",
+                            flush=True,
+                        )
+            self._align_ab_logged = True
+        except Exception as ab_error:
+            print(f"[dgm-moealign-ab] referee failed: {ab_error}", flush=True)
+            self._align_ab_logged = True
+
+    def _sum_kernel_usable(self, out: torch.Tensor) -> bool:
+        if not (_FUSED_MOE_SUM_ENV and self._moe_sum_triton is not None):
+            return False
+        if self._sum_warned:
+            return False
+        if not out.is_cuda or out.dim() != 2 or not out.is_contiguous():
+            return False
+        return out.dtype in (torch.bfloat16, torch.float16, torch.float32)
 
     def _forward_loop(
         self,
@@ -2516,13 +2674,25 @@ class DiffusionGemmaModel(GptModelBase):
         canvas_tokens: torch.Tensor,
         canvas_positions: torch.Tensor,
         self_conditioning_logits: Optional[torch.Tensor],
+        self_conditioning_probs: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Decoder-mode bidirectional canvas forward. Returns final hidden
-        states [B*canvas, hidden]; caller applies lm_head + softcap."""
+        states [B*canvas, hidden]; caller applies lm_head + softcap.
+
+        ``self_conditioning_probs`` (opt r9 item 2): when the proposer's
+        fused softcap_argmax path already emitted the softmax
+        probabilities in the embed dtype, they arrive here directly and the
+        ATen softmax + full-vocab cast disappear — matmul(probs, weight) is
+        the same consumer numerics the reference produced via
+        softmax(processed).to(dtype)."""
         batch = canvas_tokens.shape[0]
         embeds = self.embed_tokens(canvas_tokens.reshape(-1)) * self.embed_scale
         embeds = embeds.view(batch, -1, embeds.shape[-1])
-        if self_conditioning_logits is not None:
+        if self_conditioning_probs is not None:
+            weight = self.embed_tokens.weight
+            soft = torch.matmul(self_conditioning_probs, weight) * self.embed_scale
+            embeds = self.self_conditioning(embeds, soft)
+        elif self_conditioning_logits is not None:
             weight = self.embed_tokens.weight
             # Contract #5-iii: the proposer keeps self_conditioning_logits in
             # fp32, so the former .to(torch.float32) upcast pass is gone;

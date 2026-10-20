@@ -109,6 +109,41 @@ except Exception as _softcap_error:  # CPU-only sandboxes without triton
         _softcap_error,
     )
 
+# opt r9 ⑥ tail-clear lane, item 2 (softmax fold): with the fused softcap
+# path active, the ONLY consumer of the materialized fp32 ``processed``
+# tensor is the next step's self-conditioning
+# ``softmax(processed).to(embed_dtype)`` matmul in forward_canvas — the
+# ATen cunn_SoftMaxForward (42.2 ms / 122x per decode window) plus the
+# full-vocab fp32->bf16 cast. ``emit_softmax`` computes the row softmax
+# inside the softcap kernel (row max / exp-sum / normalize in fp32
+# registers, three raw-logits reads) and hands forward_canvas bf16
+# probabilities directly: processed, the ATen softmax and the cast pass
+# all disappear. The entropy/sampling/accept kernels keep reading the RAW
+# logits through logits_ctx (unchanged); their torch fallbacks reconstruct
+# the reference chain from the ctx when the caller runs in probs mode
+# (``_ctx_logits`` — bit-identical to the materialized torch chain).
+# DGM_FUSED_PROBS=0 restores the processed+ATen-softmax path (A/B gate;
+# DGM_PROBS_AB=1 prints the fused-vs-reference referee stats,
+# [dgm-probs-ab]).
+_FUSED_PROBS_ENV = os.environ.get("DGM_FUSED_PROBS", "1") != "0"
+_PROBS_AB_CHECK = os.environ.get("DGM_PROBS_AB", "") not in ("", "0")
+
+
+def _ctx_logits(logits: Optional[torch.Tensor], logits_ctx) -> torch.Tensor:
+    """Materialize the reference softcap chain for the torch fallbacks.
+
+    In probs mode the caller passes ``logits=None`` (nothing materialized);
+    the reference the fallback must match is the exact torch sequence
+    ``tanh(raw.to(fp32) / softcap) * out_scale`` reconstructed from the ctx
+    (same ops in the same order as the proposer's torch chain — bit-equal).
+    """
+    if logits is not None:
+        return logits
+    if logits_ctx is None:
+        raise ValueError("no logits and no logits_ctx to reconstruct from")
+    raw, softcap, out_scale = logits_ctx
+    return torch.tanh(raw.to(torch.float32) / softcap) * out_scale
+
 # opt r5 ⑥-clearing lane, item 3 (accept-mask compact): the reference
 # sort/cumsum/scatter chain on [B, canvas] entropy rows was 3540 radixSort
 # invocations / 68.1 ms per decode window (six-plus tiny launches per step —
@@ -142,7 +177,9 @@ def _categorical_entropy(logits: torch.Tensor, logits_ctx=None) -> torch.Tensor:
     inline): when given, the kernel reads the RAW logits and computes the
     entropy of Categorical(tanh(x/s) * out_scale) in-register, skipping the
     materialized transform passes; ``logits`` (the materialized processed
-    row) only serves the reference fallback."""
+    row) only serves the reference fallback. In r9 probs mode ``logits``
+    is None and the reference fallback reconstructs the chain from the ctx
+    (``_ctx_logits``)."""
     if logits_ctx is not None and (
         _FUSED_ENTROPY_ENV and _fused_entropy_kernel is not None
     ):
@@ -157,6 +194,10 @@ def _categorical_entropy(logits: torch.Tensor, logits_ctx=None) -> torch.Tensor:
                     "fused entropy kernel failed (%s); torch reference path taken",
                     error,
                 )
+    if logits is None:
+        # probs mode: nothing materialized — reconstruct the reference
+        # chain from the ctx before the (fused-or-torch) logits paths.
+        logits = _ctx_logits(None, logits_ctx)
     if (
         _FUSED_ENTROPY_ENV
         and _fused_entropy_kernel is not None
@@ -293,7 +334,9 @@ class EntropyBoundDenoiser:
         ``logits_ctx`` = (raw_logits, softcap, out_scale) (opt r5 softcap
         inline): when given, the kernel draws from
         ``softmax(tanh(raw/s) * out_scale)`` with the transform in-register,
-        reading the raw bf16/fp32 logits instead of the materialized row."""
+        reading the raw bf16/fp32 logits instead of the materialized row.
+        In r9 probs mode ``logits`` is None and the torch fallback
+        reconstructs the reference chain from the ctx (``_ctx_logits``)."""
         if _FUSED_SAMPLING_ENV and _fused_sample_kernel is not None:
             if logits_ctx is not None:
                 raw, softcap, out_scale = logits_ctx
@@ -311,7 +354,8 @@ class EntropyBoundDenoiser:
                             error,
                         )
             elif (
-                logits.is_cuda
+                logits is not None
+                and logits.is_cuda
                 and logits.dtype == torch.float32
                 and logits.numel() > 0
             ):
@@ -322,6 +366,10 @@ class EntropyBoundDenoiser:
                         "fused sampling kernel failed (%s); torch reference path taken",
                         error,
                     )
+        if logits is None:
+            # probs mode: nothing materialized — reconstruct the reference
+            # chain from the ctx for this torch tail.
+            logits = _ctx_logits(None, logits_ctx)
         probs = torch.softmax(logits, dim=-1, dtype=torch.float32)
         flat = probs.reshape(-1, probs.shape[-1])
         return torch.multinomial(flat, 1, generator=self.generator).squeeze(-1)
@@ -415,6 +463,47 @@ class DiffusionGemmaProposer(nn.Module):
     def cuda_graph_input_hidden_size(self) -> int:
         return 0
 
+    def _probs_ab(
+        self,
+        raw_logits: torch.Tensor,
+        softcap: float,
+        out_scale: float,
+        probs: torch.Tensor,
+    ) -> None:
+        """Debug A/B (DGM_PROBS_AB=1): the fused in-kernel softmax against
+        the exact torch reference ``softmax(tanh(raw/s)*o).to(dtype)`` —
+        bf16 ulp-distance stats over the full [canvas, vocab] block (first
+        call per process; the [dgm-probs-ab] lines are the r9 evidence)."""
+        if getattr(self, "_probs_ab_logged", False):
+            return
+        self._probs_ab_logged = True
+        try:
+            ref_processed = torch.tanh(
+                raw_logits.to(torch.float32) / softcap
+            ) * out_scale
+            ref = ref_processed.softmax(dim=-1, dtype=torch.float32).to(probs.dtype)
+            ref = ref.view(probs.shape)
+            exact = int((probs == ref).sum())
+            abs_diff = float((probs.float() - ref.float()).abs().max())
+            if probs.dtype in (torch.bfloat16, torch.float16):
+                ulp = (probs.view(torch.int16) - ref.view(torch.int16)).abs()
+                print(
+                    f"[dgm-probs-ab] shape={tuple(probs.shape)} dtype={probs.dtype}: "
+                    f"exact_frac={exact / probs.numel():.6f} "
+                    f"max_ulp={int(ulp.max())} mean_ulp={float(ulp.float().mean()):.4f} "
+                    f"max_abs_diff={abs_diff:.3e}",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"[dgm-probs-ab] shape={tuple(probs.shape)} dtype={probs.dtype}: "
+                    f"exact_frac={exact / probs.numel():.6f} "
+                    f"max_abs_diff={abs_diff:.3e}",
+                    flush=True,
+                )
+        except Exception as error:
+            print(f"[dgm-probs-ab] referee failed: {error}", flush=True)
+
     # ------------------------------------------------------------------
     # DSpark roles
     # ------------------------------------------------------------------
@@ -473,6 +562,9 @@ class DiffusionGemmaProposer(nn.Module):
         )
         canvas = denoiser.initialize_canvas(batch, device)
         self_conditioning_logits = None
+        # opt r9 item 2: probs mode — the fused softcap kernel's bf16 softmax
+        # output (fed to forward_canvas directly; None on the torch path).
+        self_conditioning_probs = None
         argmax_canvas = canvas
         history = None
         finished = torch.zeros(batch, dtype=torch.bool, device=device)
@@ -482,7 +574,11 @@ class DiffusionGemmaProposer(nn.Module):
 
         for step in range(self.max_denoising_steps):
             hidden = main_model.forward_canvas(
-                inputs, canvas, flat_positions, self_conditioning_logits
+                inputs,
+                canvas,
+                flat_positions,
+                self_conditioning_logits,
+                self_conditioning_probs=self_conditioning_probs,
             )
             last_hidden = hidden
             self._last_step = step
@@ -494,6 +590,14 @@ class DiffusionGemmaProposer(nn.Module):
             temperature = denoiser.temperature(step)
             out_scale = softcap / temperature
             logits_ctx = None
+            # opt r9 item 2: in probs mode nothing is materialized — the
+            # softmax over the transformed row is computed inside the
+            # softcap kernel and handed to forward_canvas directly; the
+            # entropy/sampling/accept kernels keep reading the RAW logits
+            # through logits_ctx (their torch fallbacks reconstruct the
+            # reference chain via _ctx_logits when logits is None).
+            processed = None
+            probs = None
             if (
                 _FUSED_SOFTCAP_ENV
                 and _softcap_argmax_kernel is not None
@@ -511,16 +615,32 @@ class DiffusionGemmaProposer(nn.Module):
                 # so they apply the #5-iii merged algebra in-register
                 # instead of reading the materialized tensor.
                 try:
-                    processed, new_argmax = _softcap_argmax_kernel(
-                        raw_logits, softcap, out_scale
-                    )
-                    processed = processed.view(batch, self.canvas_length, -1)
+                    if (
+                        _FUSED_PROBS_ENV
+                        and embed_weight.dtype
+                        in (torch.bfloat16, torch.float16, torch.float32)
+                    ):
+                        probs, new_argmax = _softcap_argmax_kernel(
+                            raw_logits,
+                            softcap,
+                            out_scale,
+                            emit_softmax=True,
+                            probs_dtype=embed_weight.dtype,
+                        )
+                        probs = probs.view(batch, self.canvas_length, -1)
+                    else:
+                        processed, new_argmax = _softcap_argmax_kernel(
+                            raw_logits, softcap, out_scale
+                        )
+                        processed = processed.view(batch, self.canvas_length, -1)
                     new_argmax = new_argmax.view(batch, self.canvas_length)
                     logits_ctx = (
                         raw_logits.view(batch, self.canvas_length, -1),
                         softcap,
                         out_scale,
                     )
+                    if _PROBS_AB_CHECK and probs is not None:
+                        self._probs_ab(raw_logits, softcap, out_scale, probs)
                 except Exception as error:
                     logger.warning(
                         "fused softcap_argmax kernel failed (%s); torch path "
@@ -528,6 +648,7 @@ class DiffusionGemmaProposer(nn.Module):
                         error,
                     )
                     _disable_softcap()
+                    probs = None
             if logits_ctx is None:
                 # Contract #5-iii: the softcap chain ((x/s -> tanh) * s) / t
                 # is merged algebraically into tanh(x/s) * (s/t) — one
@@ -551,11 +672,16 @@ class DiffusionGemmaProposer(nn.Module):
                     .mean()
                     .item()
                 )
+                diag_processed = (
+                    processed
+                    if processed is not None
+                    else _ctx_logits(None, logits_ctx)
+                )
                 top5 = (
-                    processed[0, :3].topk(3, dim=-1).indices.tolist()
+                    diag_processed[0, :3].topk(3, dim=-1).indices.tolist()
                 )
                 entropy0 = torch.distributions.Categorical(
-                    logits=processed
+                    logits=diag_processed
                 ).entropy()[0, :3].tolist()
                 print(
                     f"[dgm-fi] step0: prefix={prefix.tolist()} "
@@ -578,6 +704,9 @@ class DiffusionGemmaProposer(nn.Module):
                 frozen_canvas = canvas
             else:
                 frozen_canvas = canvas
+            # processed is None in probs mode: the entropy/sampling/accept
+            # kernels read raw through logits_ctx and their torch fallbacks
+            # reconstruct the reference chain (bit-equal to this tensor).
             finished = finished | denoiser.stop(
                 new_argmax, processed, history, logits_ctx=logits_ctx
             )
@@ -588,13 +717,12 @@ class DiffusionGemmaProposer(nn.Module):
             renoised = torch.where(finished[:, None], frozen_canvas, renoised)
             argmax_canvas = new_argmax
             canvas = renoised
-            # Contract #5-iii: keep the self-conditioning logits in fp32 end
-            # to end — the former .to(embed_weight.dtype) round-trip cost two
-            # ~1.6GB full-vocab casts per step (store here, upcast again in
-            # forward_canvas) and only added bf16 rounding on top of the fp32
-            # reference semantics. forward_canvas now fuses the softmax-side
-            # cast with softmax(dtype=torch.float32).
+            # Contract #5-iii: keep the self-conditioning signal fp32 end to
+            # end (probs mode: bf16 probabilities straight from the kernel —
+            # the same values forward_canvas's reference produced via
+            # softmax(processed).to(embed dtype), bf16-ulp class).
             self_conditioning_logits = processed
+            self_conditioning_probs = probs
             if bool(finished.all().item()):
                 break
 

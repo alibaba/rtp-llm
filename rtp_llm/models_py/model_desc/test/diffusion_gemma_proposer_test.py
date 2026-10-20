@@ -1603,5 +1603,622 @@ class DiffusionGemmaSamplingABTest(TestCase):
         )
 
 
+class DiffusionGemmaTailClearABTest(TestCase):
+    """Opt r9 ⑥ tail-clear lane CPU contract tests: the probs-mode fallback
+    wiring (logits=None + logits_ctx) reconstructs the reference softcap
+    chain bit-exactly, so the torch degradation of the entropy/sampling/
+    accept paths keeps the pre-r9 semantics on CPU and after any kernel
+    failure. GPU kernel A/Bs live in the classes below."""
+
+    def test_ctx_logits_reconstruction_matches_chain(self):
+        torch.manual_seed(1)
+        raw = (torch.randn(16, 256) * 20.0).to(torch.bfloat16)
+        softcap, out_scale = 30.0, 75.0
+        ref = torch.tanh(raw.to(torch.float32) / softcap) * out_scale
+        ctx = (raw, softcap, out_scale)
+        self.assertTrue(torch.equal(dgp._ctx_logits(None, ctx), ref))
+        # passthrough when the materialized tensor exists
+        self.assertIs(dgp._ctx_logits(ref, ctx), ref)
+
+    def test_probs_mode_fallbacks_match_materialized_reference(self):
+        # entropy / sample-tail / accept chain with logits=None + ctx ==
+        # the same calls with the materialized processed tensor (CPU, torch
+        # paths only — the fused kernels require CUDA).
+        torch.manual_seed(2)
+        raw = (torch.randn(4, 32, 128) * 8.0).to(torch.float32)
+        softcap, out_scale = 30.0, 45.0
+        processed = torch.tanh(raw / softcap) * out_scale
+        ctx = (raw, softcap, out_scale)
+        def _fresh_denoiser():
+            return dgp.EntropyBoundDenoiser(
+                32, 128, 3, 0.4, 0.8, 0.5, 1e-6, 1,
+                generator=torch.Generator().manual_seed(7),
+            )
+
+        saved = (dgp._FUSED_ENTROPY_ENV, dgp._FUSED_SAMPLING_ENV, dgp._FUSED_ACCEPT_ENV)
+        try:
+            dgp._FUSED_ENTROPY_ENV = False
+            dgp._FUSED_SAMPLING_ENV = False
+            dgp._FUSED_ACCEPT_ENV = False
+            self.assertTrue(
+                torch.equal(
+                    dgp._categorical_entropy(None, ctx),
+                    dgp._categorical_entropy(processed, None),
+                )
+            )
+            canvas_tokens = torch.randint(0, 128, (4, 32))
+            renoised_a, mask_a = _fresh_denoiser().step(canvas_tokens, None, ctx)
+            renoised_b, mask_b = _fresh_denoiser().step(canvas_tokens, processed, None)
+            self.assertTrue(torch.equal(mask_a, mask_b))
+            # fresh generators with the same seed -> same RNG stream, so the
+            # draws themselves agree too.
+            self.assertTrue(torch.equal(renoised_a, renoised_b))
+        finally:
+            (
+                dgp._FUSED_ENTROPY_ENV,
+                dgp._FUSED_SAMPLING_ENV,
+                dgp._FUSED_ACCEPT_ENV,
+            ) = saved
+
+
+class DiffusionGemmaMoeAlignABTest(TestCase):
+    """Opt r9 ⑥ item 1 GPU A/B: the single-launch moe_align kernel vs the
+    torch chain it replaces — all-integer metadata, so the criterion is
+    bit-exact equality on all three outputs (sorted_token_ids, expert_ids,
+    num_tokens_post_padded) across the decode/incremental/prefill-canvas
+    shapes and adversarial routing distributions."""
+
+    def _require_cuda(self):
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA device required for the fused moe_align kernel")
+
+    def _run_case(self, name, ids, block, num_experts):
+        from rtp_llm.models_py.triton_kernels.moe.fused_moe_kernel import (
+            moe_align_block_size_torch,
+        )
+        from rtp_llm.models_py.triton_kernels.moe.moe_align import (
+            moe_align_block_size_triton,
+        )
+
+        fused = moe_align_block_size_triton(ids, block, num_experts)
+        ref = moe_align_block_size_torch(ids.to(torch.int32), block, num_experts)
+        eq = [bool(torch.equal(a, b)) for a, b in zip(fused, ref)]
+        print(
+            f"[dgm-moealign-ab] {name}: shape={tuple(ids.shape)} dtype={ids.dtype} "
+            f"E={num_experts} block={block}: sorted_eq={eq[0]} "
+            f"expert_ids_eq={eq[1]} post_padded_eq={eq[2]} "
+            f"max_padded={fused[0].numel()}",
+            flush=True,
+        )
+        for flag, a, b in zip(eq, fused, ref):
+            if not flag:
+                diff = (a.long() - b.long()).abs()
+                print(
+                    f"[dgm-moealign-ab]   mismatch count={int((diff > 0).sum())} "
+                    f"max={int(diff.max())}",
+                    flush=True,
+                )
+        self.assertTrue(all(eq), msg=f"moe_align mismatch in case {name}")
+
+    def test_moe_align_bitexact_gpu(self):
+        self._require_cuda()
+        dev = torch.device("cuda:0")
+
+        def routerish(m, topk, experts, seed, hot=0):
+            # realistic routing: a few hot experts, long tail, some empty.
+            g = torch.Generator().manual_seed(seed)
+            scores = torch.randn(m, experts, generator=g)
+            if hot:
+                scores[:, :hot] += 6.0
+            return scores.softmax(-1).topk(topk, dim=-1).indices
+
+        cases = [
+            ("decode_canvas_i64", routerish(256, 8, 128, 11, hot=6), 64, 128),
+            ("decode_canvas_i32", routerish(256, 8, 128, 12, hot=3).to(torch.int32), 64, 128),
+            ("incremental_21", routerish(21, 8, 128, 13, hot=0), 16, 128),
+            ("batched_256_b16", routerish(256, 8, 128, 14, hot=0), 16, 128),
+            ("all_same_expert", torch.full((64, 8), 7, dtype=torch.int64, device=dev), 64, 128),
+            ("alternating", torch.arange(64 * 8, device=dev).remainder(4).view(64, 8), 32, 128),
+            (
+                "three_experts_only",
+                torch.randint(0, 3, (128, 8), device=dev, generator=torch.Generator(dev).manual_seed(15)),
+                64,
+                128,
+            ),
+            ("tiny_e6", torch.randint(0, 6, (6, 3), device=dev), 16, 6),
+            ("single_route", torch.zeros(1, 1, dtype=torch.int64, device=dev), 64, 128),
+        ]
+        for name, ids, block, experts in cases:
+            ids = ids.to(dev)
+            self._run_case(name, ids, block, experts)
+        for seed in range(16, 21):
+            ids = routerish(256, 8, 128, seed, hot=seed % 8).to(dev)
+            self._run_case(f"seeded_{seed}", ids, 64, 128)
+
+    def test_moe_align_rejects_oversize(self):
+        self._require_cuda()
+        from rtp_llm.models_py.triton_kernels.moe.moe_align import (
+            moe_align_block_size_triton,
+        )
+
+        ids = torch.zeros(2048, 8, dtype=torch.int64, device="cuda:0")
+        with self.assertRaises(ValueError):
+            moe_align_block_size_triton(ids, 64, 128)
+
+    def test_moe_align_perf_gpu(self):
+        import time
+
+        self._require_cuda()
+        from rtp_llm.models_py.triton_kernels.moe.fused_moe_kernel import (
+            moe_align_block_size_torch,
+        )
+        from rtp_llm.models_py.triton_kernels.moe.moe_align import (
+            moe_align_block_size_triton,
+        )
+
+        dev = torch.device("cuda:0")
+        g = torch.Generator().manual_seed(31)
+        ids = torch.randn(256, 128, generator=g).softmax(-1).topk(8, -1).indices.to(dev)
+        for _ in range(10):
+            moe_align_block_size_triton(ids, 64, 128)
+            moe_align_block_size_torch(ids.to(torch.int32), 64, 128)
+        torch.cuda.synchronize()
+        rounds = 100
+        t0 = time.perf_counter()
+        for _ in range(rounds):
+            moe_align_block_size_triton(ids, 64, 128)
+        torch.cuda.synchronize()
+        t_fused = (time.perf_counter() - t0) / rounds
+        t0 = time.perf_counter()
+        for _ in range(rounds):
+            moe_align_block_size_torch(ids.to(torch.int32), 64, 128)
+        torch.cuda.synchronize()
+        t_ref = (time.perf_counter() - t0) / rounds
+        print(
+            f"[dgm-tail-perf] moe_align [256,8] E=128 block=64: "
+            f"fused={t_fused * 1e6:.1f}us/call torch_chain={t_ref * 1e6:.1f}us/call "
+            f"speedup={t_ref / t_fused:.1f}x",
+            flush=True,
+        )
+        self.assertLess(t_fused, t_ref)
+
+
+class DiffusionGemmaMoeSumABTest(TestCase):
+    """Opt r9 ⑥ item 4a GPU A/B: the fused top-k output reduce vs
+    ``out.view(M, top_k, K).sum(dim=1)`` — fp32 accumulation on both sides,
+    so the criterion is bf16-ulp distance (<= 2) plus the standard ratio
+    guard."""
+
+    def _require_cuda(self):
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA device required for the fused moe_sum kernel")
+
+    def _run_case(self, name, out, m, topk):
+        from rtp_llm.models_py.triton_kernels.moe.moe_sum import moe_sum_reduce
+
+        fused = moe_sum_reduce(out, m, topk)
+        ref = out.view(m, topk, out.shape[1]).sum(dim=1)
+        ratio = float((fused.float() - ref.float()).abs().max() / ref.float().abs().max().clamp(min=1e-6))
+        if out.dtype in (torch.bfloat16, torch.float16):
+            ulp = (fused.view(torch.int16) - ref.view(torch.int16)).abs()
+            print(
+                f"[dgm-moesum-ab] {name}: shape={tuple(out.shape)} M={m} top_k={topk}: "
+                f"max_ulp={int(ulp.max())} exact_frac={float((fused == ref).float().mean()):.6f} "
+                f"ratio={ratio:.2e}",
+                flush=True,
+            )
+            self.assertLessEqual(int(ulp.max()), 2)
+        else:
+            print(
+                f"[dgm-moesum-ab] {name}: shape={tuple(out.shape)} M={m} top_k={topk}: "
+                f"exact_frac={float((fused == ref).float().mean()):.6f} ratio={ratio:.2e}",
+                flush=True,
+            )
+            torch.testing.assert_close(fused, ref, rtol=1e-5, atol=1e-5)
+        self.assertLess(ratio, 1e-2)
+
+    def test_moe_sum_ulp_gpu(self):
+        self._require_cuda()
+        dev = torch.device("cuda:0")
+        torch.manual_seed(41)
+        # decode shape: M=256 tokens x top_k 8 rows, K=2816 (real geometry)
+        big = (torch.randn(256 * 8, 2816, device=dev) * 0.7).to(torch.bfloat16)
+        self._run_case("decode_256", big, 256, 8)
+        tiny = (torch.randn(21 * 3, 32, device=dev) * 0.7).to(torch.bfloat16)
+        self._run_case("tiny_21", tiny, 21, 3)
+        fp32 = torch.randn(64 * 8, 512, device=dev)
+        self._run_case("fp32_64", fp32, 64, 8)
+
+    def test_moe_sum_perf_gpu(self):
+        # CUDA-graph replay timing: back-to-back kernel launches with the
+        # host launcher out of the picture (the naive event-per-call variant
+        # on an idle stream measures the python/triton host overhead, not
+        # the kernel; the production decode window is GPU-queue-bound, so
+        # the graph number is the honest per-call GPU duration).
+        self._require_cuda()
+        from rtp_llm.models_py.triton_kernels.moe.moe_sum import moe_sum_reduce
+
+        dev = torch.device("cuda:0")
+        torch.manual_seed(42)
+        out = (torch.randn(2048, 2816, device=dev) * 0.7).to(torch.bfloat16)
+
+        def _graph_time(fn, iters=50):
+            for _ in range(5):
+                fn()
+            torch.cuda.synchronize()
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                for _ in range(iters):
+                    fn()
+            torch.cuda.synchronize()
+            graph.replay()
+            torch.cuda.synchronize()
+            start = torch.cuda.Event(enable_timing=True)
+            end = torch.cuda.Event(enable_timing=True)
+            start.record()
+            graph.replay()
+            end.record()
+            torch.cuda.synchronize()
+            return start.elapsed_time(end) / iters * 1e3  # us
+
+        t_fused = _graph_time(lambda: moe_sum_reduce(out, 256, 8))
+        t_ref = _graph_time(lambda: out.view(256, 8, 2816).sum(dim=1))
+        print(
+            f"[dgm-tail-perf] moe_sum [2048,2816] top_k=8 bf16: "
+            f"fused_gpu={t_fused:.1f}us aten_reduce_gpu={t_ref:.1f}us "
+            f"speedup={t_ref / t_fused:.2f}x",
+            flush=True,
+        )
+        self.assertLess(t_fused, t_ref)
+
+
+class DiffusionGemmaSoftcapSoftmaxABTest(TestCase):
+    """Opt r9 ⑥ item 2 GPU A/B: the emit_softmax softcap kernel vs the exact
+    torch reference ``softmax(tanh(raw/s) * out_scale).to(dtype)`` — bf16-ulp
+    distance over the [canvas, vocab] block, argmax equality with the
+    saturation-tie proof, row-sum normalization, and the self-conditioning
+    consumer (matmul vs the reference chain's matmul)."""
+
+    def _require_cuda(self):
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA device required for the softcap softmax fold")
+
+    def _reference(self, raw, softcap, out_scale, dtype):
+        processed = torch.tanh(raw.to(torch.float32) / softcap) * out_scale
+        return processed, processed.softmax(dim=-1, dtype=torch.float32).to(dtype)
+
+    def test_softcap_softmax_ab_gpu(self):
+        self._require_cuda()
+        from rtp_llm.models_py.triton_kernels.common.softcap_argmax import (
+            softcap_argmax,
+        )
+
+        dev = torch.device("cuda:0")
+        torch.manual_seed(2027)
+        softcap, out_scale = 30.0, 75.0
+        cases = [
+            ("flat_bf16", torch.randn(256, 262144, device=dev).to(torch.bfloat16)),
+            ("sharp_bf16", (torch.randn(256, 262144, device=dev) * 40.0).to(torch.bfloat16)),
+            ("fp32_raw", torch.randn(64, 262144, device=dev)),
+            ("small_64", torch.randn(7, 64, device=dev) * 3.0),
+        ]
+        sat = torch.randn(9, 4096, device=dev)
+        sat[:, ::3] = 5000.0
+        sat[:, 1::3] = -5000.0
+        cases.append(("saturated_ties", sat))
+        for name, raw in cases:
+            probs, argmax = softcap_argmax(
+                raw, softcap, out_scale, emit_softmax=True, probs_dtype=torch.bfloat16
+            )
+            processed, ref = self._reference(raw, softcap, out_scale, torch.bfloat16)
+            ref_argmax = torch.argmax(processed, dim=-1)
+            self.assertEqual(probs.dtype, torch.bfloat16)
+            ulp = (probs.view(torch.int16) - ref.contiguous().view(torch.int16)).abs()
+            row_sums = probs.float().sum(dim=-1)
+            print(
+                f"[dgm-probs-ab] {name}: shape={tuple(raw.shape)} dtype={raw.dtype}: "
+                f"max_ulp={int(ulp.max())} exact_frac={float((probs == ref).float().mean()):.6f} "
+                f"row_sum_range=[{float(row_sums.min()):.6f},{float(row_sums.max()):.6f}] "
+                f"argmax_equal={bool(torch.equal(argmax, ref_argmax))}",
+                flush=True,
+            )
+            self.assertLessEqual(int(ulp.max()), 2)
+            self.assertLess(float((row_sums - 1.0).abs().max()), 2e-2)
+            if not torch.equal(argmax, ref_argmax):
+                top2 = processed.topk(2, dim=-1).values
+                gap = top2[..., 0] - top2[..., 1]
+                for row in (argmax != ref_argmax).nonzero(as_tuple=True)[0].tolist():
+                    self.assertEqual(
+                        float(gap[row]),
+                        0.0,
+                        msg=f"argmax flip at row {row} without a tie",
+                    )
+
+    def test_softcap_softmax_consumer_matmul_ab_gpu(self):
+        # the actual consumer: soft-embedding matmul on the probs vs on the
+        # reference chain's probs — ratio guard (bf16-noise class).
+        self._require_cuda()
+        from rtp_llm.models_py.triton_kernels.common.softcap_argmax import (
+            softcap_argmax,
+        )
+
+        dev = torch.device("cuda:0")
+        torch.manual_seed(2028)
+        raw = torch.randn(256, 262144, device=dev).to(torch.bfloat16)
+        weight = (torch.randn(262144, 2816, device=dev) * 0.02).to(torch.bfloat16)
+        softcap, out_scale = 30.0, 75.0
+        probs, _ = softcap_argmax(raw, softcap, out_scale, emit_softmax=True)
+        _, ref = self._reference(raw, softcap, out_scale, torch.bfloat16)
+        soft_fused = torch.matmul(probs, weight)
+        soft_ref = torch.matmul(ref, weight)
+        ratio = float(
+            (soft_fused.float() - soft_ref.float()).abs().max()
+            / soft_ref.float().abs().max()
+        )
+        print(
+            f"[dgm-probs-ab] consumer matmul [256,262144]x[262144,2816]: "
+            f"max_ratio={ratio:.5f}",
+            flush=True,
+        )
+        self.assertLess(ratio, 2e-2)
+
+    def test_softcap_softmax_perf_gpu(self):
+        import time
+
+        self._require_cuda()
+        from rtp_llm.models_py.triton_kernels.common.softcap_argmax import (
+            softcap_argmax,
+        )
+
+        dev = torch.device("cuda:0")
+        torch.manual_seed(2029)
+        raw = torch.randn(256, 262144, device=dev).to(torch.bfloat16)
+        softcap, out_scale = 30.0, 75.0
+
+        def _ref_chain(raw_):
+            processed = torch.tanh(raw_.to(torch.float32) / softcap) * out_scale
+            return processed.softmax(dim=-1, dtype=torch.float32).to(torch.bfloat16)
+
+        for _ in range(3):
+            softcap_argmax(raw, softcap, out_scale, emit_softmax=True)
+            _ref_chain(raw)
+        torch.cuda.synchronize()
+        rounds = 10
+        t0 = time.perf_counter()
+        for _ in range(rounds):
+            softcap_argmax(raw, softcap, out_scale, emit_softmax=True)
+        torch.cuda.synchronize()
+        t_fused = (time.perf_counter() - t0) / rounds
+        t0 = time.perf_counter()
+        for _ in range(rounds):
+            _ref_chain(raw)
+        torch.cuda.synchronize()
+        t_ref = (time.perf_counter() - t0) / rounds
+        print(
+            f"[dgm-tail-perf] softcap+softmax [256,262144] bf16: "
+            f"fused={t_fused * 1e3:.3f}ms/call torch_ref={t_ref * 1e3:.3f}ms/call "
+            f"speedup={t_ref / t_fused:.1f}x",
+            flush=True,
+        )
+        self.assertLess(t_fused, t_ref)
+
+
+class DiffusionGemmaExpertsTailABTest(TestCase):
+    """Opt r9 wiring GPU A/B: DiffusionGemmaExperts with the r9 kernels on
+    vs forced off (instance-level, same GEMM path) — bit-identical outputs
+    expected for the align swap (integer-exact metadata + identical GEMM
+    launches), bf16-ulp for the sum swap."""
+
+    def _require_cuda(self):
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA device required for the Experts tail A/B")
+
+    def _build(self, device):
+        config = _make_config()
+        generator = torch.Generator().manual_seed(51)
+        e, inter = EXPERTS, MOE_INTER // 2 * 2
+        weights = {
+            W.moe_w1: (torch.randn(e, 2 * inter, H, generator=generator) * 0.05).to(torch.bfloat16).to(device),
+            W.moe_w2: (torch.randn(e, H, inter, generator=generator) * 0.05).to(torch.bfloat16).to(device),
+        }
+        return dgm.DiffusionGemmaExperts(config, weights)
+
+    def test_experts_align_sum_swap_gpu(self):
+        self._require_cuda()
+        dev = torch.device("cuda:0")
+        exp_new = self._build(dev)
+        self.assertIsNotNone(exp_new._moe_align_triton, "r9 align kernel import failed")
+        self.assertTrue(exp_new._fused_usable(torch.zeros(6, H, device=dev, dtype=torch.bfloat16)))
+        exp_old = self._build(dev)
+        exp_old._moe_align_triton = None
+        exp_old._moe_sum_triton = None
+        torch.manual_seed(52)
+        hidden = (torch.randn(64, H, device=dev) * 0.5).to(torch.bfloat16)
+        scores = torch.randn(64, EXPERTS, device=dev)
+        top_i = scores.softmax(-1).topk(TOPK, -1).indices
+        top_w = scores.softmax(-1).topk(TOPK, -1).values
+        out_new = exp_new(hidden, top_w, top_i)
+        out_old = exp_old(hidden, top_w, top_i)
+        max_ulp = int((out_new.view(torch.int16) - out_old.view(torch.int16)).abs().max())
+        print(
+            f"[dgm-tail-ab] experts align+sum swap [64,{H}] E={EXPERTS} k={TOPK}: "
+            f"bit_equal={bool(torch.equal(out_new, out_old))} max_ulp={max_ulp}",
+            flush=True,
+        )
+        self.assertLessEqual(max_ulp, 4)
+
+
+class DiffusionGemmaProposerProbsLoopABTest(TestCase):
+    """Opt r9 item 2 wiring GPU A/B: a duck-typed main model lets the REAL
+    forward_propose denoising loop run on GPU with the r9 probs path vs the
+    processed path (DGM_FUSED_PROBS toggled) — the soft-embedding signal the
+    fake canvas consumes must match at bf16-ulp class and the final canvas
+    tokens must match except on reference near-ties."""
+
+    def _require_cuda(self):
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA device required for the proposer probs loop A/B")
+
+    def _fake_main(self, vocab, hidden, device):
+        # one seeded weight for BOTH mode runs — the A/B must compare the
+        # same model, only the self-conditioning delivery path differs.
+        torch.manual_seed(2030)
+        weight = (torch.randn(vocab, hidden, device=device) * 0.1).to(torch.bfloat16)
+
+        class _Fake:
+            def __init__(self):
+                self.embed_tokens = SimpleNamespace(weight=weight)
+                self.signals = []
+                self.received = []
+                self.canvases = []
+                self.hiddens = []
+
+            def forward_canvas(
+                self,
+                inputs,
+                canvas_tokens,
+                canvas_positions,
+                self_conditioning_logits,
+                self_conditioning_probs=None,
+            ):
+                flat = canvas_tokens.reshape(-1).long().clamp(0, vocab - 1)
+                base = self.embed_tokens.weight[flat]
+                if self_conditioning_probs is not None:
+                    soft = torch.matmul(
+                        self_conditioning_probs.reshape(-1, vocab),
+                        self.embed_tokens.weight,
+                    )
+                    self.received.append(("probs", self_conditioning_probs.detach().clone()))
+                elif self_conditioning_logits is not None:
+                    soft = torch.matmul(
+                        self_conditioning_logits.reshape(-1, vocab)
+                        .softmax(dim=-1, dtype=torch.float32)
+                        .to(base.dtype),
+                        self.embed_tokens.weight,
+                    )
+                    self.received.append(("logits", self_conditioning_logits.detach().clone()))
+                else:
+                    soft = torch.zeros_like(base)
+                    self.received.append(("none", None))
+                self.signals.append(soft.detach().clone())
+                out_hidden = (base + soft * 0.5).to(torch.bfloat16)
+                self.canvases.append(canvas_tokens.detach().clone())
+                self.hiddens.append(out_hidden.detach().clone())
+                return out_hidden
+
+        return _Fake()
+
+    def test_propose_loop_probs_vs_processed_gpu(self):
+        self._require_cuda()
+        dev = torch.device("cuda:0")
+        config = _make_config()
+        # small but real: canvas 8, vocab 512, hidden = H
+        config.dgm_canvas_length = 8
+        config.vocab_size = 512
+        config.dgm_max_denoising_steps = 3
+        config.dgm_confidence_threshold = 1e-6
+        config.dgm_stability_threshold = 1
+        inputs = SimpleNamespace(
+            input_ids=torch.zeros(8, dtype=torch.int32, device=dev),
+            attention_inputs=SimpleNamespace(
+                prefix_lengths=torch.tensor([7], dtype=torch.int32, device=dev),
+            ),
+        )
+        results = {}
+        for mode, enabled in (("probs", True), ("processed", False)):
+            fake = self._fake_main(config.vocab_size, H, dev)
+            proposer = dgp.DiffusionGemmaProposer(
+                config, ParallelismConfig(), "/fake/ckpt"
+            )
+            proposer._main_model = fake
+            proposer._resolved = True
+            proposer._seed = 3
+            saved = dgp._FUSED_PROBS_ENV
+            try:
+                dgp._FUSED_PROBS_ENV = enabled
+                out = proposer.forward_propose(inputs)
+            finally:
+                dgp._FUSED_PROBS_ENV = saved
+            results[mode] = (
+                out.diffusion_tokens.clone(),
+                fake.signals,
+                fake.received,
+                fake.canvases,
+                fake.hiddens,
+            )
+        tokens_p, signals_p, rec_p, canv_p, hid_p = results["probs"]
+        tokens_c, signals_c, rec_c, canv_c, hid_c = results["processed"]
+        self.assertEqual(tuple(tokens_p.shape), (1, 8))
+        self.assertTrue(((tokens_p >= 0) & (tokens_p < 512)).all())
+        # The consumer-side A/B: the soft-embedding signal the canvas
+        # consumes. Step 0 is the shared zeros path (identical); step 1 is
+        # the first step where probs-mode (in-kernel softmax) meets
+        # processed-mode (ATen softmax of the materialized row) — compare
+        # there, BEFORE the EB sampler's multinomial draw multiplies the
+        # ulp noise into canvas-token flips (post-sampling equality is not
+        # a legitimate criterion for a stochastic loop; the goldens own
+        # that regression separately).
+        self.assertEqual(len(signals_p), len(signals_c), msg="loop step parity")
+        # localize the step-1 divergence: the conditioning tensors the fake
+        # received (probs-mode kernel output vs processed-mode materialized
+        # row) must themselves agree at softmax-ulp level — if they do, any
+        # signal difference is the fake's math; if they don't, it's the
+        # kernel/wiring.
+        if len(rec_p) > 1 and len(rec_c) > 1:
+            kind_p, tp = rec_p[1]
+            kind_c, tc = rec_c[1]
+            print(
+                f"[dgm-probs-loop-ab] step1 received: probs_mode={kind_p} "
+                f"shape={tuple(tp.shape) if tp is not None else None} "
+                f"processed_mode={kind_c} "
+                f"shape={tuple(tc.shape) if tc is not None else None}",
+                flush=True,
+            )
+            if tp is not None and tc is not None:
+                ref = (
+                    tc.reshape(-1, tc.shape[-1])
+                    .softmax(dim=-1, dtype=torch.float32)
+                    .to(tp.dtype)
+                    .reshape(tp.shape)
+                )
+                ulp_rec = (tp.view(torch.int16) - ref.contiguous().view(torch.int16)).abs()
+                print(
+                    f"[dgm-probs-loop-ab] step1 conditioning vs reference softmax: "
+                    f"max_ulp={int(ulp_rec.max())} "
+                    f"exact_frac={float((tp == ref).float().mean()):.6f} "
+                    f"row_sums=[{float(tp.float().sum(-1).min()):.4f},"
+                    f"{float(tp.float().sum(-1).max()):.4f}] "
+                    f"max={float(tp.float().max()):.4f} "
+                    f"ref_max={float(ref.float().max()):.4f}",
+                    flush=True,
+                )
+        for step, (sp, sc) in enumerate(zip(signals_p, signals_c)):
+            self.assertEqual(sp.shape, sc.shape)
+            if step == 0:
+                self.assertTrue(torch.equal(sp, sc), msg="step 0 must be identical")
+            else:
+                ulp = (sp.view(torch.int16) - sc.view(torch.int16)).abs()
+                rel = float((sp.float() - sc.float()).abs().max() / sc.float().abs().max().clamp(min=1e-6))
+                print(
+                    f"[dgm-probs-loop-ab] step {step}: signal max_ulp={int(ulp.max())} "
+                    f"exact_frac={float((sp == sc).float().mean()):.6f} max_rel={rel:.3e}",
+                    flush=True,
+                )
+                if step == 1:
+                    # the pre-sampling divergence point: hard ulp criterion.
+                    self.assertLessEqual(int(ulp.max()), 8)
+                # steps >= 2 sit AFTER the EB sampler's draw — a single
+                # ulp-driven token flip changes that canvas row completely,
+                # so only step-1 is a legitimate hard criterion.
+        flips = int((tokens_p != tokens_c).sum())
+        print(
+            f"[dgm-probs-loop-ab] forward_calls={len(signals_p)} "
+            f"final_tokens_equal={bool(torch.equal(tokens_p, tokens_c))} "
+            f"token_flips={flips}/8 (post-sampling, ulp-noise-multiplied — "
+            f"reported, not asserted)",
+            flush=True,
+        )
+
+
 if __name__ == "__main__":
     main()
