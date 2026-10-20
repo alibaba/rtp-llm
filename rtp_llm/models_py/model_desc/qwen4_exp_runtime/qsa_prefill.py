@@ -408,6 +408,13 @@ def select_draft_graph_tokens(
         validate_lengths=False,
         scores_are_masked=enabled,
     )
+    from rtp_llm.models_py.modules.qwen4_exp.qsa.draft_layout_triton import (
+        try_restore_selection,
+    )
+
+    restored = try_restore_selection(selected, inverse, valid)
+    if restored is not None:
+        return restored
     packed = selected.index_select(0, inverse)
     return torch.where(valid.unsqueeze(1), packed, -1)
 

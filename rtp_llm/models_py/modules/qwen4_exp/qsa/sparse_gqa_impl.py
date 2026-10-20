@@ -248,7 +248,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             and self._is_mtp_draft
         )
 
-    def _forward_draft_graph(self, qkv, kv_cache, selected_indices):
+    def _forward_draft_graph(self, qkv, kv_cache, selected_indices, output_gate=None):
         from rtp_llm.models_py.model_desc.qwen4_exp_runtime.draft_prefill_graph import (
             draft_graph_lanes,
             draft_graph_rows,
@@ -256,6 +256,9 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         from rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_paged_fmha import (
             sparse_paged_gqa_attn,
         )
+
+        from .draft_layout_triton import try_pack_inputs, try_unpack_output
+        from .draft_paged_fmha import try_draft_paged_attention
 
         if kv_cache is None or kv_cache.kv_cache_base.dtype not in (
             torch.bfloat16,
@@ -276,15 +279,44 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         sources, inverse, valid, _, visible = draft_graph_rows(self.attn_inputs, tokens)
         self._qsa_main_cache_mutation_started = True
         qkv = self.rope_kvcache_impl.forward(qkv, kv_cache, self.rope_params)
-        query = (
-            qkv[:, : self.q_width]
-            .index_select(0, sources)
-            .view(batch, lanes, self.head_num, self.head_dim)
-            .transpose(1, 2)
-            .contiguous()
+        direct = try_draft_paged_attention(
+            qkv,
+            selected_indices,
+            sources,
+            inverse,
+            valid,
+            visible,
+            kv_cache.kv_cache_base,
+            self.attn_inputs.kv_cache_kernel_block_id_device,
+            heads=self.head_num,
+            kv_heads=self.kv_head_num,
+            head_dim=self.head_dim,
+            page_size=int(self.attn_configs.kernel_tokens_per_block),
+            gate=output_gate,
+            **self._paged_kv_scale_args(kv_cache),
         )
-        selected = selected_indices.index_select(0, sources).view(batch, lanes, -1)
-        selected = torch.where(visible.unsqueeze(-1) > 0, selected, -1)
+        if direct is not None:
+            return direct
+        packed = try_pack_inputs(
+            qkv,
+            selected_indices,
+            sources,
+            visible,
+            heads=self.head_num,
+            head_dim=self.head_dim,
+        )
+        if packed is None:
+            query = (
+                qkv[:, : self.q_width]
+                .index_select(0, sources)
+                .view(batch, lanes, self.head_num, self.head_dim)
+                .transpose(1, 2)
+                .contiguous()
+            )
+            selected = selected_indices.index_select(0, sources).view(batch, lanes, -1)
+            selected = torch.where(visible.unsqueeze(-1) > 0, selected, -1)
+        else:
+            query, selected = packed
         output = sparse_paged_gqa_attn(
             query,
             kv_cache.kv_cache_base,
@@ -296,12 +328,16 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             **self._paged_kv_scale_args(kv_cache),
             graph_capture=True,
         )
+        unpacked = try_unpack_output(output, inverse, valid, gate=output_gate)
+        if unpacked is not None:
+            return unpacked
         output = (
             output.transpose(1, 2)
             .reshape(tokens, self.q_width)
             .index_select(0, inverse)
         )
-        return torch.where(valid.unsqueeze(1), output, 0)
+        output = torch.where(valid.unsqueeze(1), output, 0)
+        return output if output_gate is None else output * torch.sigmoid(output_gate)
 
     def support_cuda_graph(self) -> bool:
         return bool(
@@ -366,8 +402,17 @@ class SparseGqaFmhaImpl(FMHAImplBase):
 
     def forward_with_output_gate(self, qkv, kv_cache, layer_idx, gate):
         if (
-            (self.is_target_verify or not self.is_prefill)
-            and not self._is_draft_graph()
+            (
+                self.is_target_verify
+                or not self.is_prefill
+                or (
+                    self._is_draft_graph()
+                    and os.environ.get("QWEN4_DRAFT_QSA_LAYOUT", "0") == "1"
+                    and gate.shape == (qkv.shape[0], self.q_width)
+                    and gate.device == qkv.device
+                    and not gate.requires_grad
+                )
+            )
             and gate.dtype == torch.bfloat16
             and gate.is_contiguous()
         ):
@@ -395,8 +440,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             and output_gate.dtype == torch.bfloat16
             and output_gate.device == qkv.device
             and output_gate.is_contiguous()
-            and not self._is_draft_graph()
-            and (self.is_target_verify or not self.is_prefill)
+            and (self.is_target_verify or not self.is_prefill or self._is_draft_graph())
         ):
             raise ValueError(
                 "fused QSA output gate requires a packed paged decode plan"
@@ -414,7 +458,9 @@ class SparseGqaFmhaImpl(FMHAImplBase):
 
         self._paged_kv_scale_args(kv_cache)
         if self._is_draft_graph():
-            output = self._forward_draft_graph(qkv, kv_cache, selected_indices)
+            output = self._forward_draft_graph(
+                qkv, kv_cache, selected_indices, output_gate
+            )
             if uses_stored_selection:
                 self._selected_indices = None
             return output
