@@ -37,8 +37,8 @@ public:
             ~DiagnosticSnapshot() noexcept {
                 try {
                     if (looked_up) {
-                        RTP_LLM_LOG_INFO("[KV_RPC] event=POOL_LOOKUP peer=%s channel_ptr=%p observed_state=%d",
-                                         peer.c_str(), previous_channel_ptr, static_cast<int>(observed_state));
+                        RTP_LLM_LOG_DEBUG("[KV_RPC] event=POOL_LOOKUP peer=%s channel_ptr=%p observed_state=%d",
+                                          peer.c_str(), previous_channel_ptr, static_cast<int>(observed_state));
                     }
                     if (removed) {
                         RTP_LLM_LOG_INFO("[KV_RPC] event=POOL_REMOVE peer=%s channel_ptr=%p reason=observed_bad_state",
