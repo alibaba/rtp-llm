@@ -84,6 +84,7 @@ load("//rtp_llm/test/smoke:suites_sm100.bzl", "sm100_suites")
 load("//rtp_llm/test/smoke:suites_sm120.bzl", "sm120_suites")
 load("//rtp_llm/test/smoke:suites_rocm_oss.bzl", "rocm_oss_suites")
 load("//rtp_llm/test/smoke:suites_remote_cache.bzl", "remote_cache_suites")
+load("//rtp_llm/test/smoke:suites_whisper.bzl", "whisper_suites")
 
 h20_oss_suites()
 cuda13_suites()
@@ -92,6 +93,7 @@ sm100_suites()
 sm120_suites()
 rocm_oss_suites()
 remote_cache_suites()
+whisper_suites()
 
 # ============================================================================
 # Top-level CI suites (OSS tests only)
@@ -105,6 +107,7 @@ test_suite(
         ":smoke_h20_eagle",
         ":smoke_sm8x_basic",
         ":smoke_sm120_basic",
+        ":smoke_whisper",
     ],
 )
 

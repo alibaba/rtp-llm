@@ -680,6 +680,28 @@ def main() -> str:
             generate_config=generate_config,
             num_measures=args.num_measures,
         )
+        if getattr(args, "mm_url", ""):
+            mm_url = args.mm_url
+            if not mm_url.startswith(("http://", "https://", "data:", "oss://")):
+                # bazel $(location) expands to a runfiles-relative path; the
+                # server subprocess runs with a different CWD, so absolutize
+                # against the runfiles root here.
+                srcdir = os.environ.get("TEST_SRCDIR", "")
+                if srcdir and not os.path.isabs(mm_url):
+                    # bazel $(location) yields a main-workspace-relative
+                    # path; the runfiles tree nests the main repo under the
+                    # workspace name (rtp_llm).
+                    candidates = [
+                        os.path.abspath(os.path.join(srcdir, "rtp_llm", mm_url)),
+                        os.path.abspath(os.path.join(srcdir, mm_url)),
+                    ]
+                    existing = [c for c in candidates if os.path.exists(c)]
+                    if not existing:
+                        raise RuntimeError(
+                            f"mm_url {mm_url!r} not found in runfiles (tried {candidates})"
+                        )
+                    mm_url = existing[0]
+            runner_kwargs["mm_url"] = mm_url
 
         if args.partial == 2:
             _run_prefill(

@@ -302,6 +302,11 @@ def _register_builtin_lazy_models() -> None:
         ["Qwen3VLMoeForConditionalGeneration"],
     )
     register_lazy_model("qwen_v2_audio", "rtp_llm.models.qwen_v2_audio")
+    register_lazy_model(
+        "whisper",
+        "rtp_llm.models.whisper",
+        ["WhisperForConditionalGeneration"],
+    )
     register_lazy_model("llava", "rtp_llm.models.llava", ["LlavaLlamaForCausalLM"])
     register_lazy_model(
         "bert",

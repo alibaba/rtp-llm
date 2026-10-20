@@ -1303,6 +1303,13 @@ class W:
     cross_attn_qkv_b = "cross_attention_weights.query_weight.bias"
     cross_attn_o_w = "cross_attention_weights.output_weight.weight"
     cross_attn_o_b = "cross_attention_weights.output_weight.bias"
+    # per-projection cross-attention slots for encoder-decoder models (whisper):
+    # q consumes decoder hidden; k/v consume the encoder output, so q/k/v cannot
+    # live in one fused qkv slot.
+    cross_attn_q_w = "cross_attention_weights.q_proj.weight"
+    cross_attn_q_b = "cross_attention_weights.q_proj.bias"
+    cross_attn_k_w = "cross_attention_weights.k_proj.weight"
+    cross_attn_v_w = "cross_attention_weights.v_proj.weight"
 
     # lora
     attn_qkv_w_lora_a = "self_attention_weights.query_weight.kernel.lora_A"

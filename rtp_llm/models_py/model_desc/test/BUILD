@@ -130,3 +130,36 @@ py_test(
         "gpu_count": "1",
     },
 )
+
+[
+    py_test(
+        name = "whisper_parity_test_" + gpu_tag,
+        srcs = ["whisper_parity_test.py"],
+        main = "whisper_parity_test.py",
+        deps = py_test_deps + ["//rtp_llm:multimodal", "//rtp_llm:models", "//rtp_llm:async_model"],
+        env = {"GPU_COUNT": "1"},
+        tags = [gpu_tag, "manual"],
+        exec_properties = {
+            "gpu": gpu_tag,
+            "gpu_count": "1",
+        },
+    )
+    for gpu_tag in [
+        "SM103_CU13",
+        "H20_CU13",
+        "RTX_5000_PRO_CU13",
+    ]
+]
+
+py_test(
+    name = "whisper_reference_transcribe",
+    srcs = ["whisper_reference_transcribe.py"],
+    main = "whisper_reference_transcribe.py",
+    deps = py_test_deps + ["//rtp_llm:multimodal", "//rtp_llm:models", "//rtp_llm:async_model"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["manual", "SM103_CU13"],
+    exec_properties = {
+        "gpu": "SM103_CU13",
+        "gpu_count": "1",
+    },
+)

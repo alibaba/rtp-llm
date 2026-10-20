@@ -32,6 +32,7 @@ def _curl_server_single_worker(
     profile: bool = False,
     generate_config: Optional[Dict[str, Any]] = None,
     profile_trace_name: str = "",
+    mm_url: str = "",
 ) -> ResponseInfo:
     gen_config: Dict[str, Any] = {
         "max_new_tokens": decode_test_length if is_decode else 1,
@@ -42,6 +43,11 @@ def _curl_server_single_worker(
         "prompt": input_query,
         "generate_config": gen_config,
     }
+    if mm_url:
+        # Multimodal perf (e.g. whisper ASR): the media URL rides the bare /
+        # endpoint's images field alongside the text prompt.
+        gen_config["enable_device_cache"] = True
+        req["images"] = [mm_url]
 
     if generate_config is not None:
         gen_config.update(generate_config)
@@ -88,6 +94,7 @@ def _curl_server_batch_worker(
     profile: bool = False,
     generate_config: Optional[Dict[str, Any]] = None,
     profile_trace_name: str = "",
+    mm_url: str = "",
 ) -> List[ResponseInfo]:
     """Concurrently send requests, each with its own query string."""
     with ThreadPoolExecutor(max_workers=len(request_indices)) as executor:
@@ -104,6 +111,7 @@ def _curl_server_batch_worker(
                 profile,
                 generate_config,
                 profile_trace_name,
+                mm_url,
             )
             futures.append(future)
         return [f.result() for f in futures]
@@ -125,8 +133,10 @@ class BatchPerfImpl(object):
         warmup_runs: Optional[int] = None,
         measure_runs: Optional[int] = None,
         profile_runs: Optional[int] = None,
+        mm_url: str = "",
     ):
         self.base_port = base_port
+        self.mm_url = mm_url
         self.dp_size = dp_size
         self.batch_size = batch_size
         if isinstance(query, str):
@@ -331,6 +341,7 @@ class BatchPerfImpl(object):
                     profile,
                     self.generate_config,
                     self.profile_trace_name if profile else "",
+                    self.mm_url,
                 )
             )
 

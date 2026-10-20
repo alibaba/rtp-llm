@@ -196,6 +196,19 @@ ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm:
     input->multimodal_features = std::move(mm_embedding_res.mm_features);
     input->mm_position_ids     = std::move(mm_embedding_res.mm_position_ids);
     input->mm_extra_input      = std::move(mm_embedding_res.mm_extra_input);
+    if (mm_skip_token_expansion_) {
+        // Encoder-decoder side-state mode (e.g. whisper): mm features are
+        // request-level cross-attention memory, never sequence content.
+        // input_ids stay untouched; the mask marks every token as text and
+        // locs keep one zero entry per feature to satisfy the gatherer's
+        // feature/loc count contract.
+        const int64_t seq_len = input->input_ids.numel();
+        auto          mask    = torch::ones({seq_len}, torch::kInt32);
+        auto          locs    = torch::zeros({(int64_t)input->multimodal_features->size()}, torch::kInt32);
+        input->text_tokens_mask = std::move(mask);
+        input->mm_locs          = std::move(locs);
+        return ErrorInfo::OkStatus();
+    }
     CHECK_AND_RETURN_REF(
         expanded_ids,
         expandTokenIds(input->multimodal_features.value(), input->input_ids, input->multimodal_inputs.value()));

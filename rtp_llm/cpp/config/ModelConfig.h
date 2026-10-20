@@ -38,6 +38,12 @@ public:
     std::vector<std::vector<int64_t>> mm_sep_tokens         = {};
     bool                              include_sep_tokens    = false;
     int64_t                           mm_position_ids_style = 0;  // 0 for default; 1 for chatglm4v; 2 for qwen2 vl
+    // Encoder-decoder style models (e.g. whisper) consume mm features as
+    // request-level side state (cross-attention memory) instead of splicing
+    // them into the token sequence: input_ids stay unexpanded, text_tokens_mask
+    // is all ones and per-feature locs are zeros. The gatherer delivers the
+    // full features without prefix-reuse slicing.
+    bool mm_skip_token_expansion = false;
 };
 
 class ModelConfig {

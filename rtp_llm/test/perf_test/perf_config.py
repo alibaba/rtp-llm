@@ -37,6 +37,12 @@ def parse_args(
         default="1024,4096",
         help="Comma-separated input lengths for grid mode",
     )
+    perf.add_argument(
+        "--mm_url",
+        type=str,
+        default="",
+        help="Multimodal media URL (e.g. a whisper audio file URL) attached to every request via the bare / endpoint's images field",
+    )
     dataset_group = perf.add_mutually_exclusive_group()
     dataset_group.add_argument(
         "--dataset_name",

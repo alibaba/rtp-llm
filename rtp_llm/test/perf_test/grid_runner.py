@@ -29,8 +29,10 @@ class GridRunner:
         tp_size: int = 1,
         generate_config: Optional[Dict[str, Any]] = None,
         num_measures: int = 3,
+        mm_url: str = "",
     ):
         self._port = port
+        self._mm_url = mm_url
         self._dp_size = dp_size
         self._batch_size_list = batch_size_list
         self._input_len_list = input_len_list
@@ -63,6 +65,7 @@ class GridRunner:
             warmup_runs=0,
             measure_runs=warmup_runs,
             profile_runs=0,
+            mm_url=self._mm_url,
         ).run()
 
     def run(self) -> List[MetricState]:
@@ -96,6 +99,7 @@ class GridRunner:
                         True,
                         self._generate_config,
                         trace_name,
+                        mm_url=self._mm_url,
                     ).run(num_measures=self._num_measures)
                     metrics_list.append(MetricState(input_len, batch_size, metric))
 

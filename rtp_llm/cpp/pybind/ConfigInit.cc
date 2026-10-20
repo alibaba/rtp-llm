@@ -1857,7 +1857,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("is_multimodal", &MMModelConfig::is_multimodal)
         .def_readwrite("mm_sep_tokens", &MMModelConfig::mm_sep_tokens)
         .def_readwrite("include_sep_tokens", &MMModelConfig::include_sep_tokens)
-        .def_readwrite("mm_position_ids_style", &MMModelConfig::mm_position_ids_style);
+        .def_readwrite("mm_position_ids_style", &MMModelConfig::mm_position_ids_style)
+        .def_readwrite("mm_skip_token_expansion", &MMModelConfig::mm_skip_token_expansion);
 
     py::class_<CacheReusePolicyDesc>(m, "CacheReusePolicyDesc")
         .def(py::init<>())

@@ -38,6 +38,7 @@ public:
         metrics_reporter_(metrics_reporter),
         sep_token_ids_(mm_model_config.mm_sep_tokens),
         include_sep_tokens_(mm_model_config.include_sep_tokens),
+        mm_skip_token_expansion_(mm_model_config.mm_skip_token_expansion),
         max_seq_len_(max_seq_len) {}
 
 protected:
@@ -47,6 +48,7 @@ protected:
 private:
     std::vector<std::vector<int64_t>> sep_token_ids_;
     bool                              include_sep_tokens_;
+    bool                              mm_skip_token_expansion_ = false;
     int64_t                           max_seq_len_;
 
     ErrorInfo getFeatureHash(int32_t* token_ids, const torch::Tensor& mm_emb);

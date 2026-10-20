@@ -15,6 +15,7 @@ from .qwen2_vl.qwen2_vl_mixin import Qwen2_VLMixin
 from .qwen3_5_moe.qwen3_5_moe_mixin import Qwen3_5MoeMixin
 from .qwen3_vl_mixin import Qwen3_VLMixin
 from .qwen_vl.qwen_vl_mixin import QwenVLMixin
+from .whisper.whisper_mixin import WhisperMixin
 
 if has_internal_source():
     import internal_source.rtp_llm.multimodal_mixins.internal_init

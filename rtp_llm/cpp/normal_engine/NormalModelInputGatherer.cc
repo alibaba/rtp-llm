@@ -87,6 +87,7 @@ struct GatherModelInputContext {
     int*              sequence_lengths;
     bool              has_multimodal_input;
     bool              has_mm_extra_input;
+    bool              mm_skip_token_expansion;
     size_t            total_decode_batch_size;
     int*              prefix_lengths;
     int*              prefix_lengths_host;
@@ -118,6 +119,7 @@ GatherModelInputContext createGatherContext(const NormalModelInputGathererConfig
     ctx.combo_position_ids   = ctx.need_cal_position_id ? model_input.combo_position_ids.data_ptr<int32_t>() : nullptr;
     ctx.has_multimodal_input = config.is_multimodal && stream_groups.has_multimodal_input();
     ctx.has_mm_extra_input   = config.is_multimodal && stream_groups.hasMMExtraInput();
+    ctx.mm_skip_token_expansion = config.mm_skip_token_expansion;
     ctx.prefix_lengths       = model_input.prefix_lengths.data_ptr<int32_t>();
     ctx.prefix_lengths_host  = nullptr;
     ctx.merged_text_mask     = ctx.has_multimodal_input ? model_input.text_tokens_mask.data_ptr<int32_t>() : nullptr;
@@ -226,16 +228,25 @@ void gatherMultimodalInputsForContextBatch(const GenerateStreamPtr&    stream,
         const int64_t feature_len = mm_feature.size(0);
         const int64_t feature_loc = mm_locs_data[i];
         const int64_t feature_end = feature_loc + feature_len;
-        if (reuse_length >= feature_end) {
-            continue;
-        }
+        torch::Tensor current_feature;
+        int64_t       token_offset = 0;
+        if (ctx.mm_skip_token_expansion) {
+            // Side-state mode (whisper-style encoder-decoder): mm features are
+            // request-level cross-attention memory, never aligned to token
+            // positions; deliver them whole and skip prefix-reuse slicing.
+            current_feature = mm_feature.contiguous();
+        } else {
+            if (reuse_length >= feature_end) {
+                continue;
+            }
 
-        // ViT still runs on and caches the complete image. Only the rows already
-        // represented by the reused KV prefix are omitted from this model input.
-        // This gatherer owns prefix slicing; downstream injectors receive sliced
-        // features with non-negative local locations only.
-        const int64_t token_offset    = std::max<int64_t>(reuse_length - feature_loc, 0);
-        auto          current_feature = mm_feature.slice(0, token_offset, feature_len).contiguous();
+            // ViT still runs on and caches the complete image. Only the rows already
+            // represented by the reused KV prefix are omitted from this model input.
+            // This gatherer owns prefix slicing; downstream injectors receive sliced
+            // features with non-negative local locations only.
+            token_offset    = std::max<int64_t>(reuse_length - feature_loc, 0);
+            current_feature = mm_feature.slice(0, token_offset, feature_len).contiguous();
+        }
         if (!current_feature.is_cuda()) {
             host_holder.hold_host(current_feature);
             gathered_mm_features.emplace_back(current_feature.to(torch::kCUDA, /*non_blocking=*/true));
