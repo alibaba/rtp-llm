@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <functional>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -15,10 +16,10 @@ class RdmaDescriptorPB;
 
 namespace rtp_llm::rdma_transport {
 
-inline constexpr uint64_t kRdmaSlotAlign            = 256;
-inline constexpr size_t   kMaxRdmaNicKeys           = 64;
-inline constexpr size_t   kMaxRdmaTensorsPerSlot    = 4096;
-inline constexpr size_t   kMaxRdmaTensorDimensions  = 16;
+inline constexpr uint64_t kRdmaSlotAlign           = 256;
+inline constexpr size_t   kMaxRdmaNicKeys          = 64;
+inline constexpr size_t   kMaxRdmaTensorsPerSlot   = 4096;
+inline constexpr size_t   kMaxRdmaTensorDimensions = 16;
 
 enum class TensorDataType {
     FLOAT32,
@@ -80,16 +81,25 @@ public:
     // Flattens tensors in descriptor order, then manifest order. Successful results own
     // independent tensor storage; failures return a non-OK status and no partial tensors.
     virtual RdmaReadResult read(const std::vector<RdmaDescriptor>& descriptors, int64_t timeout_ms = 0) = 0;
+    // A provider with unconfirmed asynchronous reads retains both local storage
+    // and the remote release callback until all NIC completions are acknowledged.
+    virtual RdmaReadResult readWithCleanup(const std::vector<RdmaDescriptor>& descriptors,
+                                           int64_t                            timeout_ms,
+                                           std::function<void()>              release_after_completion,
+                                           bool*                              release_deferred) {
+        *release_deferred = false;
+        return read(descriptors, timeout_ms);
+    }
 };
 
 // Implemented by the build-selected provider (Barex or no-op).
-bool                        hasRdmaImplementation();
+bool hasRdmaImplementation();
 // device_id < 0 is retained for legacy callers; service paths pass an explicit local CUDA device.
 std::shared_ptr<RdmaExport> createRdmaExport(const RdmaConfig& config, int device_id = -1);
 std::shared_ptr<RdmaRead>   createRdmaRead(const RdmaConfig& config, int device_id = -1);
 
-void toProto(const RdmaDescriptor& src, ::RdmaDescriptorPB* dst);
-bool fromProto(const ::RdmaDescriptorPB& src, RdmaDescriptor* dst);
+void      toProto(const RdmaDescriptor& src, ::RdmaDescriptorPB* dst);
+bool      fromProto(const ::RdmaDescriptorPB& src, RdmaDescriptor* dst);
 ErrorInfo validateRdmaDescriptor(const RdmaDescriptor& descriptor, int64_t max_slot_bytes);
 
 }  // namespace rtp_llm::rdma_transport
