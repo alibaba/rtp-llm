@@ -6,6 +6,7 @@
 
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/EvictionTask.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
 
 namespace rtp_llm {
 
@@ -13,7 +14,7 @@ class BlockTransferDispatcher;
 class BlockTreeCacheMetricsReporter;
 class EvictionTaskRunner {
 public:
-    using EvictionDoneCallback = std::function<void(bool success)>;
+    using EvictionDoneCallback = std::function<void(ErrorInfo)>;
 
     EvictionTaskRunner(const std::vector<GroupSetPtr>& group_sets, const BlockTransferDispatcher* transfer_dispatcher);
 
