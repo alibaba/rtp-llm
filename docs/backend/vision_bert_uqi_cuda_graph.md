@@ -1,7 +1,57 @@
-# VisionBert UQI CUDA/HIP Graph
+# Embedding CUDA/HIP Graph: current implementation and support boundaries
 
-VisionBert captures the Transformer stack and prepares request-owned embeddings
-outside the graph. UQI attention preserves these visibility rules within each
+The goal is CUDA/HIP Graph execution for embedding workloads. Embedding is a
+service task, not a particular attention architecture: a BERT encoder and a
+Qwen3 model used for embedding can require different masks, positional encoding,
+normalization and cache behavior. Enabling the embedding executor's Graph entry
+point does not establish Graph support for every model or attention backend.
+
+## Shared execution entry and current coverage
+
+`EmbeddingExecutor` forwards the existing engine Graph configuration to
+`PyWrappedModel` in embedding-prefill mode. `ENABLE_CUDA_GRAPH` controls whether
+Graph capture is attempted. Token buckets and request capacities determine the
+captured input shapes. Pooling, classifier heads and response processing run
+outside the model Graph.
+
+The current Transformer-only adaptation is implemented by `BertModel`:
+`prepare_transformer_inputs` computes text/visual embeddings outside capture,
+and `forward_transformer` runs the layer stack inside capture. `CudaGraphRunner`
+selects this path through the model interfaces. Models without those interfaces
+continue through their existing `forward` and attention-factory paths; they do
+not automatically inherit BERT's Graph attention implementation.
+
+| Model/path | Current implementation | Validation boundary |
+| --- | --- | --- |
+| Ordinary BERT | Transformer-only Graph with noncausal, cache-free attention | GPU/checkpoint validation is still required |
+| VisionBert with UQI mask | BERT Graph with the CUDA or ROCm segmented-attention adaptation described below | CPU layout tests do not establish end-to-end GPU accuracy |
+| Qwen3-0.6B used for embedding | Existing Qwen3 model/attention-factory path; no adaptation added here | Graph execution is not established by this change |
+
+In particular, `Qwen3Model` has no `prepare_transformer_inputs` or
+`forward_transformer` interface. Its normal ragged FlashInfer prefill backend,
+`PyFlashinferPrefillImpl`, reports `support_cuda_graph() == False`; Graph
+selection rejects that implementation. Paged alternatives require a suitable
+KV-cache contract, while `EmbeddingExecutor` supplies no KV cache. Backend
+selection depends on the device and configuration, so capture can fail before
+request-time eager fallback is available. The model-level
+`support_cuda_graph()` flag inherited by Qwen3 is not an embedding-Graph test.
+
+Supporting Qwen3 embedding requires checking its actual attention configuration
+and adapting a cache-free, Graph-capable backend while preserving RoPE, QK norm,
+causal/noncausal semantics and final normalization. It also requires startup
+capture, repeated replay with changing sequence lengths, and output comparison
+against eager execution on the target GPU. This document does not claim those
+checks have passed.
+
+Do not set `USE_VISION_BERT_UQI_BLOCK_MASK` for Qwen3. It configures BERT user
+segment semantics; shared C++ metadata code currently also reads this variable,
+which is a remaining model-specific dependency in the common path.
+
+## BERT-specific adaptation: VisionBert UQI
+
+VisionBert is the embedding/reranking model used for the segmented-attention
+adaptation below. It captures the Transformer stack and prepares request-owned
+embeddings outside the graph. UQI attention preserves these visibility rules within each
 request:
 
 | Query | A keys: QI and vision | B keys: user profile |
@@ -17,11 +67,16 @@ Different requests and synthetic padding sequences never attend to each other.
 
 ## Configuration
 
-Set these variables before starting the service:
+For an embedding model with a compatible Graph backend, enable the shared switch:
+
+```bash
+export ENABLE_CUDA_GRAPH=1
+```
+
+For the VisionBert UQI example only, also configure the model's user-segment mask:
 
 ```bash
 export USE_VISION_BERT_UQI_BLOCK_MASK=1
-export ENABLE_CUDA_GRAPH=1
 ```
 
 Configure the existing prefill token buckets and `CONCURRENCY_LIMIT` for the
@@ -194,8 +249,8 @@ unresolved; the metadata and test fixes above do not establish their root cause.
 
 | File | Responsibility |
 | --- | --- |
-| `modules/factory/attention/bert_encoder_graph.py` | Shared `BertEncoderGraphImpl` and CUDA `BertUqiEncoderGraphImpl` |
-| `modules/factory/attention/rocm_impl/bert_uqi_encoder_graph.py` | Fixed-buffer AITER Graph adapter |
-| `modules/factory/attention/bert_uqi_graph_layout.py` | Host-only segment validation and ROCm layout generation |
+| `model_desc/bert.py` | Shared `BertEncoderGraphImpl` and CUDA `BertUqiEncoderGraphImpl` |
+| `modules/factory/attention/rocm_impl/bert_uqi_two_pass.py` | Fixed-buffer AITER Graph adapter |
+| `modules/factory/attention/bert_uqi_schedule.py` | Host-only segment validation and ROCm layout generation |
 | `cpp/embedding_engine/EmbeddingInputMetadata.h` | Model-facing metadata conversion shared by executor and regression tests |
 | `cpp/cuda_graph/cuda_graph_runner.{h,cc}` | Graph eligibility, request metadata handoff and replay |

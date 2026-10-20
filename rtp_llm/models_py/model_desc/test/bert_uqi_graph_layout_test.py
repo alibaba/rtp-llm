@@ -1,13 +1,21 @@
 """CPU tests of UQI mask semantics, including middle segments and padding."""
-import importlib.util
+import ast
+import types
+from array import array
 from pathlib import Path
 import random
 import unittest
 
-path = Path(__file__).resolve().parents[2] / "modules/factory/attention/bert_uqi_graph_layout.py"
-spec = importlib.util.spec_from_file_location("uqi_layout", path)
-module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(module)
+path = Path(__file__).resolve().parents[2] / "modules/factory/attention/bert_uqi_schedule.py"
+tree = ast.parse(path.read_text())
+names = {"build_uqi_graph_layout", "build_uqi_aiter_layout", "BertUqiAiterGraphLayout"}
+definitions = ast.Module(
+    body=[node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.ClassDef)) and node.name in names],
+    type_ignores=[],
+)
+module = types.ModuleType("uqi_layout")
+module.array = array
+exec(compile(definitions, str(path), "exec"), module.__dict__)
 build = module.build_uqi_graph_layout
 
 

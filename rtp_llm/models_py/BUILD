@@ -38,8 +38,8 @@ filegroup(
 filegroup(
     name = "bert_encoder_graph_source",
     srcs = [
-        "modules/factory/attention/bert_encoder_graph.py",
-        "modules/factory/attention/bert_uqi_graph_layout.py",
+        "model_desc/bert.py",
+        "modules/factory/attention/bert_uqi_schedule.py",
     ],
     visibility = ["//visibility:public"],
 )

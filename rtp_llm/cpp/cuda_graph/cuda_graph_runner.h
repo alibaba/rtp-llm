@@ -132,13 +132,8 @@ private:
     bool isEmbeddingStylePrefillCudaGraph() const {
         return role_ == CudaGraphRole::EMBEDDING_PREFILL;
     }
-    // Embeddings are prepared outside the graph; only the Transformer stack is captured.
-    // This selects the execution path, not whether CUDA graphs are enabled.
-    bool usesTransformerGraph() const {
-        return static_cast<bool>(py_prepare_transformer_inputs_);
-    }
     bool requiresUqiSegmentBounds() const {
-        if (!usesTransformerGraph()) {
+        if (!py_prepare_transformer_inputs_) {
             return false;
         }
         py::gil_scoped_acquire gil;
@@ -183,6 +178,8 @@ private:
     void                    initCaptureAttentionInputsPost();
     py::object              py_forward_method_;
     py::object              py_attn_pyobj_method_;
+    // When bound, embeddings are prepared outside capture and the graph runs only
+    // the Transformer stack. Binding this interface does not enable CUDA graphs.
     py::object              py_prepare_transformer_inputs_;
     bool                    enable_cuda_graph_{false};
     bool                    is_prefill_cuda_graph_mode_{false};

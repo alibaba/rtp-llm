@@ -77,7 +77,7 @@ class BertMultimodalEmbeddingTest(TestCase):
             raise SkipTest("CUDA is not available")
 
     def test_encoder_graph_replans_layout_and_isolates_padding(self):
-        from rtp_llm.models_py.modules.factory.attention.bert_encoder_graph import (
+        from rtp_llm.models_py.model_desc.bert import (
             BertEncoderGraphImpl,
         )
 

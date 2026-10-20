@@ -458,6 +458,12 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
                 const char* v = std::getenv("VISION_BERT_UQI_TWO_PASS");
                 return v == nullptr || std::string(v) == "1";
             }();
+            // If this block is skipped, keep the segment bounds assigned above.
+            // Graph attention prepares its own layout from those bounds. Enabling
+            // prefill graphs does not guarantee replay for every request: eager
+            // two-pass fallback builds the missing schedule from bounds in Python.
+            // With two-pass disabled, Python selects the configured alternative
+            // attention path (or reports an unsupported configuration).
             if (kUqiTwoPassEnabled && !(enable_cuda_graph_ && is_prefill_cuda_graph_mode_)) {
                 // 顺手把两趟 attention 的 schedule 也在 C++ 建好 (闭式 permutation,
                 // 免 Python host 小算子开销): bert.py 直接消费, Python 侧只剩 plan。

@@ -5,11 +5,11 @@ from types import SimpleNamespace
 import torch
 
 if torch.version.hip is not None:
-    from rtp_llm.models_py.modules.factory.attention.rocm_impl.bert_uqi_encoder_graph import (
+    from rtp_llm.models_py.modules.factory.attention.rocm_impl.bert_uqi_two_pass import (
         BertUqiRocmEncoderGraphImpl as GraphImpl,
     )
 else:
-    from rtp_llm.models_py.modules.factory.attention.bert_encoder_graph import (
+    from rtp_llm.models_py.model_desc.bert import (
         BertUqiEncoderGraphImpl as GraphImpl,
     )
 

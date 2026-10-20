@@ -1,12 +1,11 @@
 """CPU coverage for encoder graph planning; no native RTP ops are needed."""
 
-import importlib.util
-import sys
+import ast
 import types
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 
 import torch
 
@@ -14,22 +13,16 @@ import torch
 def _load_graph_module():
     # Isolate the Python metadata contract from the GPU/native binding loader.
     # All tensor operations in the tests still use real CPU PyTorch.
-    base = types.ModuleType(
-        "rtp_llm.models_py.modules.factory.attention.fmha_impl_base"
+    path = Path(__file__).resolve().parents[1] / "bert.py"
+    tree = ast.parse(path.read_text())
+    names = {"BertEncoderGraphParams", "BertEncoderGraphImpl", "BertUqiEncoderGraphImpl"}
+    definitions = ast.Module(
+        body=[node for node in tree.body if isinstance(node, ast.ClassDef) and node.name in names],
+        type_ignores=[],
     )
-    base.FMHAImplBase = object
-    ops = types.ModuleType("rtp_llm.ops.compute_ops")
-    ops.ParamsBase = object
-    path = (
-        Path(__file__).resolve().parents[2]
-        / "modules/factory/attention/bert_encoder_graph.py"
-    )
-    spec = importlib.util.spec_from_file_location(
-        "encoder_graph_metadata_test_impl", path
-    )
-    module = importlib.util.module_from_spec(spec)
-    with patch.dict(sys.modules, {base.__name__: base, ops.__name__: ops}):
-        spec.loader.exec_module(module)
+    module = types.ModuleType("encoder_graph_metadata_test_impl")
+    module.__dict__.update(torch=torch, FMHAImplBase=object, ParamsBase=object)
+    exec(compile(definitions, str(path), "exec"), module.__dict__)
     return module
 
 
