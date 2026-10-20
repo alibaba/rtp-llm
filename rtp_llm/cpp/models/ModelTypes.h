@@ -235,6 +235,13 @@ public:
         return false;
     }
 
+    // Optional host consensus, selected collectively at model startup. nullopt
+    // means the original device collective. A transport/protocol exception is
+    // fail-stop and must propagate; asymmetric fallback is forbidden.
+    virtual std::optional<bool> reduceSpeculativeTargetPrepareStatus(bool /*local_ok*/) {
+        return std::nullopt;
+    }
+
     virtual std::string prepareSpeculativeTargetCommit(const torch::Tensor& /*accept_len*/) {
         return {};
     }

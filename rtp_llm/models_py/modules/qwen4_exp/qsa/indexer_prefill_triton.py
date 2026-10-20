@@ -273,18 +273,28 @@ def write_zero_prefix_prefill(
         groups * 4, page_size
     ):
         raise ValueError("QSA prefill block table does not cover required pages")
-    expected_cu = torch.tensor(
-        [0, *itertools.accumulate(lengths)], dtype=torch.int32, device=device
+    # Pack host-owned metadata into one pinned transfer. Creating CUDA tensors
+    # directly from Python lists otherwise blocks this stream three times per
+    # layer. PyTorch retains the pinned allocation until the copy completes.
+    counts = (
+        [triton.cdiv(n, page_size) for n in lengths],
+        [triton.cdiv(n // 4 * 4, page_size) for n in lengths],
     )
-    invalid = torch.any(cu_seqlens != expected_cu)
+    metadata = torch.tensor(
+        [0, *itertools.accumulate(lengths), *counts[0], *counts[1]],
+        dtype=torch.int32,
+        device="cpu",
+        pin_memory=True,
+    ).to(device=device, non_blocking=True)
+    invalid = torch.any(cu_seqlens != metadata[: batch + 1])
     aliases = torch.zeros((), dtype=torch.bool, device=device)
-    for table, pool, counts in (
-        (state_table, state_pool, [triton.cdiv(n, page_size) for n in lengths]),
-        (kv_table, kv_pool, [triton.cdiv(n // 4 * 4, page_size) for n in lengths]),
+    for index, (table, pool) in enumerate(
+        ((state_table, state_pool), (kv_table, kv_pool))
     ):
+        offset = batch + 1 + index * batch
         required = (
             torch.arange(table.shape[1], device=device)[None, :]
-            < torch.tensor(counts, device=device)[:, None]
+            < metadata[offset : offset + batch, None]
         )
         invalid = invalid | torch.any(
             required & ((table <= 0) | (table >= pool.shape[0]))

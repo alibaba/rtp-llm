@@ -100,6 +100,7 @@ public:
     std::string     prepareSpeculativeTargetCommit(const torch::Tensor& accept_len) override;
     std::string     finishSpeculativeTargetCommit(bool commit) override;
     std::string     finalizeSpeculativeTargetCommit() override;
+    std::optional<bool> reduceSpeculativeTargetPrepareStatus(bool local_ok) override;
 
 private:
     friend struct test::PyWrappedModelTestPeer;
@@ -182,6 +183,7 @@ private:
     bool has_mtp_hidden_buffer_{false};
     bool supports_micro_batch_{false};
     bool has_speculative_target_commit_hooks_{false};
+    bool has_speculative_target_status_reducer_{false};
     bool requires_exact_cuda_graph_batch_{false};
     bool enable_device_perf_{false};
     bool check_nan_{false};
@@ -375,6 +377,13 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                 "finish_speculative_target_commit as a pair, together with "
                                 "finalize_speculative_target_commit");
         has_speculative_target_commit_hooks_ = has_prepare_speculative_target_commit;
+        if (has_speculative_target_commit_hooks_ && py::hasattr(py_model_, "has_speculative_target_status_reducer")) {
+            has_speculative_target_status_reducer_ =
+                py_model_.attr("has_speculative_target_status_reducer")().cast<bool>();
+            RTP_LLM_CHECK_WITH_INFO(!has_speculative_target_status_reducer_
+                                        || py::hasattr(py_model_, "reduce_speculative_target_prepare_status"),
+                                    "Python target status reducer capability requires its reduce hook");
+        }
         requires_exact_cuda_graph_batch_ |= has_speculative_target_commit_hooks_;
         if (has_speculative_target_commit_hooks_ && enable_cuda_graph_) {
             RTP_LLM_CHECK_WITH_INFO(py::hasattr(py_model_, "clear_speculative_target_graph_capture")

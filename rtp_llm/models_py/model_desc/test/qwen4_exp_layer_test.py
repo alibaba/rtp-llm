@@ -9,7 +9,7 @@ sublayers in the right order.
 
 import os
 from types import SimpleNamespace
-from unittest import TestCase, main
+from unittest import TestCase, main, skipUnless
 from unittest.mock import Mock, patch
 
 import torch
@@ -25,6 +25,7 @@ from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
     build_qwen4_exp_kv_cache_spec_descs,
 )
 from rtp_llm.models_py.model_desc import generic_moe, qwen3_next, qwen4_exp
+from rtp_llm.models_py.model_desc.qwen4_exp_runtime.cache_views import PLECacheViews
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.ple_state import (
     _PLETargetLayerStage,
     _PLETargetTransaction,
@@ -2744,6 +2745,89 @@ class Qwen4ExpSharedHCStorageTest(TestCase):
         layer._build_residual_modules(fixture.config, fixture.weights)
         self.assertIs(fixture.weights[W.qwen4_hc_attn_mix_down], original)
         self.assertFalse(getattr(original, "_rtp_requires_restart_for_update", False))
+
+
+@skipUnless(torch.cuda.is_available(), "CUDA page-table validation is required")
+class PLEHostPagePairsTest(TestCase):
+    def test_host_staging_with_cuda_as_default_device(self):
+        from rtp_llm.models_py.triton_kernels.causal_conv1d.causal_conv1d import (
+            prepare_causal_conv1d_metadata,
+        )
+
+        rows = torch.tensor([0, 1], device="cpu", dtype=torch.long)
+        pages = torch.tensor([1, 0], device="cpu", dtype=torch.long)
+        cu = torch.tensor([0, 3, 20], device="cpu", dtype=torch.int32)
+        table = torch.tensor([[1, 2], [3, 4]], device="cuda", dtype=torch.int32)
+        inputs = SimpleNamespace(kv_cache_block_id_device=table)
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream), torch.device("cuda"):
+            blocks, writable = PLECacheViews._physical_blocks_for_pairs(
+                inputs, PLE_STATE_TAG, rows, pages, 5, table.device
+            )
+            metadata = prepare_causal_conv1d_metadata(cu, table.device)
+        stream.synchronize()
+        self.assertEqual(blocks.tolist(), [2, 3])
+        self.assertEqual(writable.tolist(), [True, True])
+        self.assertEqual(metadata.total, 4)
+        self.assertEqual(metadata.batch_ptr.tolist(), [0, 1, 1, 1, -1])
+        self.assertEqual(metadata.token_chunk_offset_ptr.tolist(), [0, 0, 1, 2, -1])
+
+    def test_host_pairs_on_nondefault_stream_and_device_fallback(self):
+        stream = torch.cuda.Stream()
+        with torch.cuda.stream(stream):
+            storage = torch.full((2, 4), 99, device="cuda", dtype=torch.int32)
+            table = storage[:, :3]
+            table.copy_(torch.tensor([[1, 0, -1], [2, 3, 4]], dtype=torch.int32))
+            inputs = SimpleNamespace(kv_cache_block_id_device=table)
+            for source in ("cpu", "cuda"):
+                rows = torch.tensor([0, 0, 0, 1], dtype=torch.long, device=source)
+                pages = torch.tensor([0, 1, 2, 2], dtype=torch.long, device=source)
+                blocks, writable = PLECacheViews._physical_blocks_for_pairs(
+                    inputs, PLE_STATE_TAG, rows, pages, 5, table.device
+                )
+                self.assertEqual(blocks.tolist(), [1, 0, -1, 4])
+                self.assertEqual(writable.tolist(), [True, False, False, True])
+            empty = torch.empty(0, dtype=torch.long)
+            blocks, writable = PLECacheViews._physical_blocks_for_pairs(
+                inputs, PLE_STATE_TAG, empty, empty, 5, table.device
+            )
+            self.assertEqual(blocks.numel(), 0)
+            self.assertEqual(writable.numel(), 0)
+            self.assertEqual(storage[:, 3].tolist(), [99, 99])
+        stream.synchronize()
+
+    def test_invalid_host_indices_and_live_device_blocks_are_rejected(self):
+        table = torch.tensor([[1, 0, -1], [2, 3, 4]], device="cuda", dtype=torch.int32)
+        inputs = SimpleNamespace(kv_cache_block_id_device=table)
+        original = table.clone()
+        for row, page, message in (
+            (-1, 0, "block-table row"),
+            (2, 0, "block-table row"),
+            (0, -1, "invalid logical page"),
+            (0, 3, "logical page exceeds"),
+        ):
+            with self.subTest(row=row, page=page):
+                with self.assertRaisesRegex(RuntimeError, message):
+                    PLECacheViews._physical_blocks_for_pairs(
+                        inputs,
+                        PLE_STATE_TAG,
+                        torch.tensor([row]),
+                        torch.tensor([page]),
+                        5,
+                        table.device,
+                    )
+        torch.testing.assert_close(table, original, rtol=0, atol=0)
+        table[0, 0] = 5
+        with self.assertRaisesRegex(RuntimeError, "physical block id exceeds"):
+            PLECacheViews._physical_blocks_for_pairs(
+                inputs,
+                PLE_STATE_TAG,
+                torch.tensor([0]),
+                torch.tensor([0]),
+                5,
+                table.device,
+            )
 
 
 if __name__ == "__main__":

@@ -4,6 +4,10 @@
 #include <memory>
 #include <limits>
 #include "torch/all.h"
+#if USING_CUDA
+#include "c10/cuda/CUDAGuard.h"
+#include "c10/cuda/CUDAStream.h"
+#endif
 #include "gtest/gtest.h"
 #include "autil/EnvUtil.h"
 
@@ -1623,6 +1627,86 @@ TEST_F(MtpBatchStreamProcessorTest, testExpandTargetVerifyPositionIdsInitializes
     EXPECT_EQ(18, model_input.combo_position_ids.numel());
     EXPECT_EQ((vector<int>{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}),
               toVec<int>(model_input.combo_position_ids));
+}
+
+#if USING_CUDA
+TEST_F(MtpBatchStreamProcessorTest, testDevicePrefixPositionUploadsSurvivePinnedReuseOnNondefaultStream) {
+    ModelConfig                 model_config;
+    RuntimeConfig               runtime_config;
+    SpeculativeExecutionConfig  sp_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config           = makeProcessorCacheConfig();
+    model_config.max_seq_len                           = 2048;
+    model_config.vocab_size                            = 4;
+    model_config.num_layers                            = 1;
+    model_config.mm_model_config.mm_position_ids_style = MROPE;
+    model_config.attn_config.rope_config.index_factor  = 3;
+    sp_config.gen_num_per_cycle                        = 1;
+    ResourceContext resource_context;
+    auto            stream = createContextStream(model_config, runtime_config, resource_context, {1, 2, 3, 4}, 1);
+    stream->setContextPositionIds(torch::tensor({0, 0, 0, 1, 1, 1, 7, 9, 8, 10, 12, 11}, torch::kInt32));
+    MtpBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+    auto                  cuda_stream = c10::cuda::getStreamFromPool();
+    vector<torch::Tensor> outputs;
+    {
+        c10::cuda::CUDAStreamGuard guard(cuda_stream);
+        for (int step = 0; step < 32; ++step) {
+            GptModelInputs input;
+            input.combo_position_ids = torch::zeros({3}, torch::kInt32);
+            auto prefix = torch::full({1}, 20 + step, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
+            processor.expandTargetVerifyPositionIds(StreamGroups({stream}), input, prefix);
+            outputs.push_back(input.combo_position_ids);
+            // Reuse similarly sized pinned allocations after the function's
+            // temporary owners die, before any test-side synchronization.
+            for (int reuse = 0; reuse < 4; ++reuse) {
+                auto scratch = torch::empty({6}, torch::TensorOptions(torch::kInt32).pinned_memory(true));
+                scratch.fill_(-999);
+            }
+        }
+    }
+    cuda_stream.synchronize();
+    for (int step = 0; step < 32; ++step) {
+        EXPECT_EQ((vector<int>{29 + step, 29 + step, 29 + step, 30 + step, 30 + step, 30 + step}),
+                  toVec<int>(outputs[step]));
+    }
+}
+#endif
+
+TEST_F(MtpBatchStreamProcessorTest, testExpandTargetVerifyPositionIdsUsesDeviceReceiverForDeviceState) {
+    ModelConfig                 model_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config = makeProcessorCacheConfig();
+    SpeculativeExecutionConfig  sp_config;
+    model_config.max_seq_len                           = 2048;
+    model_config.vocab_size                            = 4;
+    model_config.num_layers                            = 1;
+    model_config.mm_model_config.mm_position_ids_style = MROPE;
+    model_config.attn_config.rope_config.index_factor  = 3;
+    sp_config.gen_num_per_cycle                        = 2;
+    MtpBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+    auto           empty_stream_groups = StreamGroups(std::list<GenerateStreamPtr>{});
+    GptModelInputs input;
+    input.combo_position_ids = torch::tensor({5, 6, 7, 10, 11, 12}, torch::kInt32);
+    auto prefix              = torch::tensor({19, 31}, torch::kInt32).to(torch::kCUDA);
+    processor.expandTargetVerifyPositionIds(empty_stream_groups, input, prefix);
+    ASSERT_TRUE(input.combo_position_ids.is_cuda());
+    EXPECT_EQ(input.combo_position_ids.device(), prefix.device());
+    EXPECT_EQ(input.combo_position_ids.scalar_type(), torch::kInt32);
+    EXPECT_TRUE(input.combo_position_ids.is_contiguous());
+    EXPECT_EQ(input.combo_position_ids.numel(), 18);
+    EXPECT_EQ(vector<int>(18, 0), toVec<int>(input.combo_position_ids));
+    // The whole receive buffer can be overwritten by the rank-0 CUDA payload.
+    auto positions = torch::arange(18, prefix.options());
+    input.combo_position_ids.copy_(positions);
+    EXPECT_EQ(toVec<int>(positions), toVec<int>(input.combo_position_ids));
+
+    input.combo_position_ids = torch::zeros({6}, torch::kInt32);
+    EXPECT_ANY_THROW(processor.expandTargetVerifyPositionIds(
+        empty_stream_groups, input, torch::tensor({1}, torch::kInt32).to(torch::kCUDA)));
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testUpdateOneStepDraftSamplerOutput) {
