@@ -13,7 +13,7 @@ from analysis.checks import CheckResult
 from cases.cache_sync_recovery.analysis import CHECK_IDS
 from cases.cache_sync_recovery.health import healthy, collateral, converged
 from scenario.contracts import StageHandler, StageOutput
-from runtime.observation import poll_samples, SampleBudget
+from runtime.observation import poll_samples, SampleBudget, SampleSchedule
 
 
 def validate(params, plan):
@@ -44,6 +44,22 @@ def withdraw(original, victims):
         raise ValueError("discovery withdrawal must remove every victim exactly once")
     return json.dumps({name: [value for value in values if value not in victims]
                        for name, values in data.items()})
+
+
+def drain_flow(flow, deadline, sample, interval_s, event):
+    """Keep observing on the caller thread until stop acknowledgement and exit."""
+    schedule = SampleSchedule(deadline.clock(), interval_s, immediate=True)
+
+    def observe():
+        if deadline.clock() >= schedule.next:
+            sample("drain")
+            schedule.advance(deadline.clock())
+
+    flow.stop_sending(deadline, on_poll=observe)
+    event("sending_stopped")
+    flow.drain(deadline, on_poll=observe)
+    sample("drain")
+    event("drain_finished")
 
 
 def execute(ctx, params, deadline):
@@ -128,7 +144,7 @@ def execute(ctx, params, deadline):
             maximum_gap = max(maximum_gap, now-last_sample)
         last_sample = now
         if baseline is not None:
-            excluded = victims if phase in {"intervention", "post", "cache_settle"} else set()
+            excluded = victims if phase in {"intervention", "post", "drain", "cache_settle"} else set()
             newly = set(collateral(rows, baseline, excluded, limits["max_status_age_ms"])) - affected
             affected.update(newly)
             if newly:
@@ -260,10 +276,7 @@ def execute(ctx, params, deadline):
         # Identical post duration and unchanged background; do not stop at first convergence.
         hold("post", p["post_s"])
         event("post_finished")
-        flow.stop_sending(deadline)
-        event("sending_stopped")
-        flow.drain(deadline)
-        event("drain_finished")
+        drain_flow(flow, deadline, sample, o["sample_s"], event)
         evidence["client"] = flow.evidence_snapshot()
         event("performance_observation_finished")
         for e in prefill:
