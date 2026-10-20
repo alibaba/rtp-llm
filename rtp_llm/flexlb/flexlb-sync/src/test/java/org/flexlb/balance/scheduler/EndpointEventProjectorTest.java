@@ -81,7 +81,7 @@ class EndpointEventProjectorTest {
 
     private static PrefillState.WorkerStatusFact prefillFact() {
         var fact = mock(PrefillState.WorkerStatusFact.class);
-        when(fact.item()).thenReturn(mock(ScheduledRequest.class));
+        when(fact.item()).thenReturn(mock(RequestExecution.class));
         return fact;
     }
 

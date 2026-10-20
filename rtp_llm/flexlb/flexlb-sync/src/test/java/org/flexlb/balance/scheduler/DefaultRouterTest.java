@@ -240,7 +240,7 @@ class DefaultRouterTest {
             assertEquals(RequestState.Phase.TIMED_OUT, requests.getRequestState(9L, 0L).state());
             assertEquals(0, requests.liveRequestCount());
             verify((DecodeEndpoint) decode.endpoint).release(reservation, DecodeEndpoint.ReleaseReason.EXPIRED);
-            verify((PrefillEndpoint) prefill.endpoint).expireCommittedItem(any(ScheduledRequest.class));
+            verify((PrefillEndpoint) prefill.endpoint).expireCommittedItem(any(RequestExecution.class));
         } finally {
             requests.closeAdmissionAndAwaitMutations();
             requests.closeOutstandingAndTerminalize();

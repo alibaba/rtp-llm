@@ -1,5 +1,6 @@
 package org.flexlb.balance.endpoint;
 
+import org.flexlb.balance.scheduler.RequestExecution;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.testfixture.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
@@ -53,6 +54,10 @@ public final class EndpointCleanupTestSupport {
             ScheduledRequest item = mock(ScheduledRequest.class);
             when(item.requestId()).thenReturn(requestId);
             when(item.seqLen()).thenReturn(100L);
+            RequestExecution execution = mock(RequestExecution.class);
+            when(execution.requestId()).thenReturn(requestId);
+            when(execution.seqLen()).thenReturn(100L);
+            when(item.execution()).thenReturn(execution);
             if (batch) {
                 lock.lock();
                 try {
@@ -113,7 +118,7 @@ public final class EndpointCleanupTestSupport {
         }
 
         public void assertStaleReleaseIsIgnored(Owner old) {
-            assertFalse(state.terminalizeCommittedItem(old.item()));
+            assertFalse(state.terminalizeCommittedItem(old.item().execution()));
             old.reservation().close();
         }
 

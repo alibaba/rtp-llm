@@ -125,7 +125,7 @@ class RequestCompletionPublicationRaceTest {
                     expired.getAdmissionRejectReason());
             assertEquals(RequestState.Phase.TIMED_OUT, slot.snapshot().state());
             verify(decode).release(reservation, DecodeEndpoint.ReleaseReason.EXPIRED);
-            verify(prefill).expireCommittedItem(item);
+            verify(prefill).expireCommittedItem(item.execution());
         } finally {
             resumeReporting.countDown();
             resumeCleanup.countDown();

@@ -73,16 +73,16 @@ class WorkerBatcherRequestCapacityTest {
             org.junit.jupiter.api.Assertions.assertNull(delivered.poll(150, TimeUnit.MILLISECONDS));
             assertEquals(2, fixture.endpoint.captureQueueSnapshot().items().size());
             assertFalse(fixture.endpoint.canAcceptRequest(), "dispatch slots remain full while the suffix waits");
-            assertTrue(fixture.endpoint.releaseCommittedItem(first));
+            assertTrue(fixture.endpoint.releaseCommittedItem(first.execution()));
             ScheduledRequest third = delivered.poll(3, TimeUnit.SECONDS);
             org.junit.jupiter.api.Assertions.assertNotNull(third, "completion must wake the worker without another enqueue");
-            assertFalse(fixture.endpoint.releaseCommittedItem(first));
+            assertFalse(fixture.endpoint.releaseCommittedItem(first.execution()));
             org.junit.jupiter.api.Assertions.assertNull(delivered.poll(150, TimeUnit.MILLISECONDS));
-            assertTrue(fixture.endpoint.releaseCommittedItem(second));
+            assertTrue(fixture.endpoint.releaseCommittedItem(second.execution()));
             ScheduledRequest fourth = delivered.poll(3, TimeUnit.SECONDS);
             org.junit.jupiter.api.Assertions.assertNotNull(fourth);
-            assertTrue(fixture.endpoint.releaseCommittedItem(third));
-            assertTrue(fixture.endpoint.releaseCommittedItem(fourth));
+            assertTrue(fixture.endpoint.releaseCommittedItem(third.execution()));
+            assertTrue(fixture.endpoint.releaseCommittedItem(fourth.execution()));
             assertEquals(0L, fixture.endpoint.observedRequestCount());
         }
     }

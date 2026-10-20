@@ -56,13 +56,13 @@ final class RequestTerminalCleanup {
     private void releaseEndpoints(TerminalAction action) {
         if (action.endpointsSettled()) { return; }
         DeliveryClaimKind delivery = action.deliveryKind();
-        ScheduledRequest exact = action.item();
+        RequestExecution exact = action.item();
         if (exact == null) { return; }
         DeferredTerminal event = action.event();
         Throwable failure = null;
-        if (delivery == DeliveryClaimKind.NONE && exact.prefillEp() != null) {
+        if (delivery == DeliveryClaimKind.NONE && exact.prefillEp() != null && action.queuedItem() != null) {
             failure = runStep(failure,
-                    () -> exact.prefillEp().removeQueued(exact, "TERMINAL_RELEASE"));
+                    () -> exact.prefillEp().removeQueued(action.queuedItem(), "TERMINAL_RELEASE"));
         }
         if (event != null && event.kind() == DeferredTerminal.Kind.INACTIVITY_EXPIRED) {
             // Expiry ends exact local tracking even when delivery is uncertain or Engine-owned.
@@ -95,17 +95,19 @@ final class RequestTerminalCleanup {
 
     // ── 派发失败：分别结算 Prefill 与 Decode ──
 
-    void settlePrefill(ScheduledRequest exact, boolean expired) {
+    void settlePrefill(RequestExecution exact, ScheduledRequest queuedInput, boolean expired) {
         if (exact.prefillEp() == null) { return; }
+        if (queuedInput != null) {
+            exact.prefillEp().removeQueued(queuedInput, expired ? "REQUEST_INACTIVE" : "DELIVERY_FAILED");
+        }
         if (expired) {
-            exact.prefillEp().removeQueued(exact, "REQUEST_INACTIVE");
             exact.prefillEp().expireCommittedItem(exact);
         } else {
             exact.prefillEp().settleFailedRequest(exact);
         }
     }
 
-    boolean settleDecode(ScheduledRequest exact, DeliveryResult.Status source, boolean expired) {
+    boolean settleDecode(RequestExecution exact, DeliveryResult.Status source, boolean expired) {
         if (exact.decodeEp() == null || exact.decodeReservation() == null) { return true; }
         if (expired) {
             exact.decodeEp().release(exact.decodeReservation(), DecodeEndpoint.ReleaseReason.EXPIRED);

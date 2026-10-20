@@ -152,6 +152,17 @@ groups. NON_BATCH decisions can read its published model, but route-request
 terminals do not contribute training samples; use a `FORMULA` estimator when a
 stable prediction cap is required for `FIXED_WINDOW + NON_BATCH`.
 
+`ScheduledRequest` owns scheduling input. A fixed `RequestExecution` contains
+only the selected route's identity, scalar estimates and endpoint reservations.
+Committed Prefill state and WorkerStatus facts retain that execution record.
+Delivery acknowledgement, for both NON_BATCH and BATCH, hands the scheduling
+object to response publication, while `RequestSlot` keeps only execution tracking.
+Cache reporting can still read the original keys; after the response and transport
+callbacks finish, the original request is collectible even while Decode is running.
+A failed delivery also drops its scheduling input after Prefill cleanup succeeds,
+without waiting for Decode reconciliation. Cancellation and timeouts continue to
+use the same slot and exact execution identity.
+
 ## Ordering and expiration
 
 FIFO orders by enqueue sequence. PRIORITY orders by normalized priority

@@ -43,7 +43,7 @@ public final class EndpointEventProjector {
 
     public void onPrefillGenerationRetired(
             PrefillEndpoint endpoint,
-            List<ScheduledRequest> ownedItems) {
+            List<RequestExecution> ownedItems) {
         if (endpoint == null || ownedItems == null) {
             return;
         }
@@ -129,9 +129,9 @@ public final class EndpointEventProjector {
 
     private void projectPrefillRetirementFacts(
             PrefillEndpoint retiredEndpoint,
-            List<ScheduledRequest> ownedItems) {
+            List<RequestExecution> ownedItems) {
         for (int index = 0; index < ownedItems.size(); index++) {
-            ScheduledRequest exactItem = ownedItems.get(index);
+            RequestExecution exactItem = ownedItems.get(index);
             try {
                 scheduler.projectPrefillRetirementItem(
                         retiredEndpoint, exactItem);
