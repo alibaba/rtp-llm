@@ -178,8 +178,12 @@ void FlashInferMlaAttnParams::ensureTensorSize(int  batch_size,
     max_page_num_        = std::max(MIN_CACHE_PAGE_NUM, max_page_num_);
 
     // Allocate HOST buffer with all tensors in continuous memory
+    // Layout: the per-step metadata arrays first, page_indice LAST. The
+    // per-step host-to-device refresh then copies one contiguous live prefix
+    // (all small arrays + page_indice[0:page_num)) instead of the whole
+    // buffer — MIN_CACHE_PAGE_NUM alone reserves 1M int32 (4 MB) that a
+    // steady decode step would otherwise re-copy every fill.
     auto alloc_ret_h = allocateManyBuffer({{max_input_token_num_},  // batch_indice
-                                           {max_page_num_},         // page_indice
                                            {max_reuse_page_num_},   // reuse_cache_page_indice
                                            {max_batch_size_ + 1},   // decode_page_indptr
                                            {max_batch_size_ + 1},   // prefill_ragged_kv_len_indptr
@@ -187,25 +191,25 @@ void FlashInferMlaAttnParams::ensureTensorSize(int  batch_size,
                                            {max_batch_size_ + 1},   // qo_indptr
                                            {max_batch_size_},       // kvlen
                                            {max_input_token_num_},  // positions
-                                           {max_batch_size_, 4}},   // batch_reuse_info_vec (2D: [batch_size, 4])
+                                           {max_batch_size_, 4},    // batch_reuse_info_vec (2D: [batch_size, 4])
+                                           {max_page_num_}},        // page_indice
                                           false);
 
     buf_h                          = std::get<0>(alloc_ret_h);
     auto& tensors_h                = std::get<1>(alloc_ret_h);
     batch_indice_h                 = tensors_h[0];
-    page_indice_h                  = tensors_h[1];
-    reuse_cache_page_indice_h      = tensors_h[2];
-    decode_page_indptr_h           = tensors_h[3];
-    prefill_ragged_kv_len_indptr_h = tensors_h[4];
-    paged_kv_last_page_len_h       = tensors_h[5];
-    qo_indptr_h                    = tensors_h[6];
-    kvlen_h                        = tensors_h[7];
-    positions_h                    = tensors_h[8];
-    batch_reuse_info_vec_h         = tensors_h[9];
+    reuse_cache_page_indice_h      = tensors_h[1];
+    decode_page_indptr_h           = tensors_h[2];
+    prefill_ragged_kv_len_indptr_h = tensors_h[3];
+    paged_kv_last_page_len_h       = tensors_h[4];
+    qo_indptr_h                    = tensors_h[5];
+    kvlen_h                        = tensors_h[6];
+    positions_h                    = tensors_h[7];
+    batch_reuse_info_vec_h         = tensors_h[8];
+    page_indice_h                  = tensors_h[9];
 
     // Allocate DEVICE buffer with all tensors in continuous memory
     auto alloc_ret_d = allocateManyBuffer({{max_input_token_num_},  // batch_indice
-                                           {max_page_num_},         // page_indice
                                            {max_reuse_page_num_},   // reuse_cache_page_indice
                                            {max_batch_size_ + 1},   // decode_page_indptr
                                            {max_batch_size_ + 1},   // prefill_ragged_kv_len_indptr
@@ -213,21 +217,22 @@ void FlashInferMlaAttnParams::ensureTensorSize(int  batch_size,
                                            {max_batch_size_ + 1},   // qo_indptr
                                            {max_batch_size_},       // kvlen
                                            {max_input_token_num_},  // positions
-                                           {max_batch_size_, 4}},   // batch_reuse_info_vec (2D: [batch_size, 4])
+                                           {max_batch_size_, 4},    // batch_reuse_info_vec (2D: [batch_size, 4])
+                                           {max_page_num_}},        // page_indice
                                           true);
 
     buf_d                          = std::get<0>(alloc_ret_d);
     auto& tensors_d                = std::get<1>(alloc_ret_d);
     batch_indice_d                 = tensors_d[0];
-    page_indice_d                  = tensors_d[1];
-    reuse_cache_page_indice_d      = tensors_d[2];
-    decode_page_indptr_d           = tensors_d[3];
-    prefill_ragged_kv_len_indptr_d = tensors_d[4];
-    paged_kv_last_page_len_d       = tensors_d[5];
-    qo_indptr_d                    = tensors_d[6];
-    kvlen_d                        = tensors_d[7];
-    positions_d                    = tensors_d[8];
-    batch_reuse_info_vec_d         = tensors_d[9];
+    reuse_cache_page_indice_d      = tensors_d[1];
+    decode_page_indptr_d           = tensors_d[2];
+    prefill_ragged_kv_len_indptr_d = tensors_d[3];
+    paged_kv_last_page_len_d       = tensors_d[4];
+    qo_indptr_d                    = tensors_d[5];
+    kvlen_d                        = tensors_d[6];
+    positions_d                    = tensors_d[7];
+    batch_reuse_info_vec_d         = tensors_d[8];
+    page_indice_d                  = tensors_d[9];
 
     // Allocate int64 buffers for slot_mapping
     auto alloc_ret_i64_h = allocateManyBuffer({{static_cast<int64_t>(max_i64_elements_)}}, false, torch::kInt64);
@@ -386,9 +391,24 @@ void FlashInferMlaAttnParams::refreshBuffer(
     // Get current CUDA stream
     cudaStream_t stream = GET_CURRENT_STREAM();
 
-    // Single async copy from HOST to DEVICE for the entire buffer
-    // Since all tensors are in continuous memory, we can copy the entire buffer at once
-    size_t total_bytes = buf_h.numel() * sizeof(int32_t);
+    // Copy only the live prefix: the small per-step arrays (full capacity,
+    // they sit before page_indice) plus page_indice[0:page_num). The buffer
+    // reserves MIN_CACHE_PAGE_NUM (1M int32 = 4 MB) of page capacity that a
+    // steady decode step must not re-copy. Device tails beyond the prefix
+    // stay stale by construction: kernels read metadata through the
+    // per-step resized sub-tensors, never the raw buffer tail.
+    auto   align32          = [](int64_t n) { return (n + 31) / 32 * 32; };
+    size_t page_indice_off = align32(max_input_token_num_) + align32(max_reuse_page_num_)
+                           + align32(max_batch_size_ + 1) + align32(max_batch_size_ + 1)
+                           + align32(max_batch_size_) + align32(max_batch_size_ + 1)
+                           + align32(max_batch_size_) + align32(max_input_token_num_)
+                           + align32(static_cast<int64_t>(max_batch_size_) * 4);
+    size_t live_elements   = page_indice_off + static_cast<size_t>(std::max(page_num, 0));
+    RTP_LLM_CHECK_WITH_INFO(live_elements <= static_cast<size_t>(buf_h.numel()),
+                            "FlashInferMlaAttnParams live prefix %zu exceeds buffer %lld",
+                            live_elements,
+                            static_cast<long long>(buf_h.numel()));
+    size_t total_bytes = live_elements * sizeof(int32_t);
     cudaMemcpyAsync(buf_d.data_ptr(), buf_h.data_ptr(), total_bytes, cudaMemcpyHostToDevice, stream);
 
     // Update tensor shapes (without reallocating memory)
