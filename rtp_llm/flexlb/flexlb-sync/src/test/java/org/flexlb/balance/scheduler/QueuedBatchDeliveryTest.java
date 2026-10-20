@@ -1,5 +1,25 @@
 package org.flexlb.balance.scheduler;
 
+import static org.flexlb.balance.scheduler.RequestLifecycleTestSupport.await;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
+
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
@@ -32,26 +52,6 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
-
-import static org.flexlb.balance.scheduler.RequestLifecycleTestSupport.await;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertInstanceOf;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertSame;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyInt;
-import static org.mockito.ArgumentMatchers.anyLong;
-import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.Mockito.doAnswer;
-import static org.mockito.Mockito.doThrow;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.times;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.verifyNoInteractions;
-import static org.mockito.Mockito.when;
 
 /** Real executor, Slot and endpoint ledgers; only the Engine transport is simulated. */
 class QueuedBatchDeliveryTest {
@@ -105,7 +105,7 @@ class QueuedBatchDeliveryTest {
         when(prefill.releaseCommittedItem(any()))
                 .thenAnswer(
                         call -> {
-                            ScheduledRequest item = call.getArgument(0);
+                            RequestExecution item = call.getArgument(0);
                             assertFalse(Thread.holdsLock(registry.requestSlot(item.requestId())));
                             return ledger.prefill.terminalizeCommittedItem(item);
                         });
@@ -177,7 +177,7 @@ class QueuedBatchDeliveryTest {
                         registry.expireInactiveRequest(slot, slot.createdAtMs() + TIMEOUT_MS);
                 case "LATE_DEADLINE" ->
                         ReflectionTestUtils.setField(
-                                item, "expiresAtMs", System.currentTimeMillis() - 1L);
+                                item.execution(), "expiresAtMs", System.currentTimeMillis() - 1L);
                 case "LATE_INACTIVITY" ->
                         ReflectionTestUtils.setField(
                                 slot,

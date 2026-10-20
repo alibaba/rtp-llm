@@ -1,5 +1,18 @@
 package org.flexlb.balance.scheduler;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
@@ -21,19 +34,6 @@ import org.junit.jupiter.params.provider.EnumSource;
 
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
-
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertSame;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.times;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
 
 /** Matching Engine activity renews the lease; silence always ends local ownership. */
 class RequestInactivityTest {
@@ -135,7 +135,7 @@ class RequestInactivityTest {
 
         // A delayed status or timer callback cannot reopen or double-release this generation.
         registry.processPrefillStatus(
-                prefill, RoleType.PREFILL, PrefillState.WorkerStatusFact.active(item));
+                prefill, RoleType.PREFILL, PrefillState.WorkerStatusFact.active(item.execution()));
         registry.processDecodeStatus(
                 decode, DecodeEndpoint.WorkerStatusFact.active(item.decodeReservation()));
         registry.processDecodeStatus(
@@ -207,7 +207,8 @@ class RequestInactivityTest {
                                                 "applyPrefillStatusLocked",
                                                 mock(PrefillEndpoint.class),
                                                 RoleType.PREFILL,
-                                                PrefillState.WorkerStatusFact.active(item),
+                                                PrefillState.WorkerStatusFact.active(
+                                                        item.execution()),
                                                 lateStatusAt);
                         case PREFILL_ITEM ->
                                 org.springframework.test.util.ReflectionTestUtils
@@ -218,15 +219,16 @@ class RequestInactivityTest {
                                                 RoleType.PREFILL,
                                                 PrefillState.WorkerStatusFact.active(
                                                         new ScheduledRequest(
-                                                                item.ctx(),
-                                                                item.future(),
-                                                                item.routeResponse(),
-                                                                item.prefill(),
-                                                                null,
-                                                                prefill,
-                                                                decode,
-                                                                item.decodeReservation(),
-                                                                registeredAtMs)),
+                                                                        item.ctx(),
+                                                                        item.future(),
+                                                                        item.routeResponse(),
+                                                                        item.prefill(),
+                                                                        null,
+                                                                        prefill,
+                                                                        decode,
+                                                                        item.decodeReservation(),
+                                                                        registeredAtMs)
+                                                                .execution()),
                                                 lateStatusAt);
                         case DECODE_ENDPOINT ->
                                 org.springframework.test.util.ReflectionTestUtils
@@ -303,7 +305,7 @@ class RequestInactivityTest {
                                 "applyPrefillStatusLocked",
                                 prefill,
                                 RoleType.PREFILL,
-                                PrefillState.WorkerStatusFact.active(item),
+                                PrefillState.WorkerStatusFact.active(item.execution()),
                                 nowMs);
             } else {
                 org.springframework.test.util.ReflectionTestUtils
@@ -320,7 +322,7 @@ class RequestInactivityTest {
     private void assertLiveAndCharged() {
         assertEquals(1, registry.trackedRequestCount());
         synchronized (slot) {
-            assertSame(item, slot.activeItem());
+            assertSame(item.execution(), slot.activeItem());
             assertFalse(slot.snapshot().state().isTerminal());
         }
         verify(decode, never()).release(any(), eq(DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK));
@@ -343,7 +345,7 @@ class RequestInactivityTest {
         }
         verify(decode, times(1))
                 .release(item.decodeReservation(), DecodeEndpoint.ReleaseReason.EXPIRED);
-        verify(prefill, times(1)).expireCommittedItem(item);
+        verify(prefill, times(1)).expireCommittedItem(item.execution());
     }
 
     private enum StaleFact {

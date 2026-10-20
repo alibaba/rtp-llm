@@ -220,7 +220,7 @@ public class RequestRegistry {
                 if (!isCurrentSlot(slot)) {
                     return null;
                 }
-                ScheduledRequest active = slot.activeItem();
+                ScheduledRequest active = slot.scheduledItem();
                 if (active == null || active.priority() >= incomingPriority) {
                     return null;
                 }
@@ -354,7 +354,7 @@ public class RequestRegistry {
         processDecodeStatus(source, DecodeEndpoint.WorkerStatusFact.accepted(reservation));
     }
 
-    void projectPrefillRetirementItem(PrefillEndpoint source, ScheduledRequest exact) {
+    void projectPrefillRetirementItem(PrefillEndpoint source, RequestExecution exact) {
         if (exact == null || exact.prefillEp() != source) {
             return;
         }
@@ -623,7 +623,7 @@ public class RequestRegistry {
         return slot == null ? null : slot.cancelRequest(expectedBatchId, reason);
     }
 
-    private static CancelTarget cancelTarget(ScheduledRequest item) {
+    private static CancelTarget cancelTarget(RequestExecution item) {
         ServerStatus prefill = item == null ? null : item.prefill();
         return prefill == null
                 ? null

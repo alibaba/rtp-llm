@@ -100,7 +100,7 @@ class RequestAdmissionResourceLeakTest {
         assertEquals(
                 PlacementResult.Status.CLOSED,
                 lifecycle.commitRoute(registered.item(), () -> true));
-        assertSame(registered.item(), activeItem(3L));
+        assertSame(registered.item().execution(), activeItem(3L));
         verify(registered.item().decodeEp(), never())
                 .release(any(), eq(DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED));
         lifecycle.cancelRequest("3", 0L, CancelReason.CLIENT_CANCELLED);
@@ -209,7 +209,7 @@ class RequestAdmissionResourceLeakTest {
         assertTrue(lifecycle.isAdmissionOpen("62", incoming.future()));
     }
 
-    private ScheduledRequest activeItem(long requestId) {
+    private RequestExecution activeItem(long requestId) {
         RequestSlot slot = lifecycle.requestSlot(Long.toString(requestId));
         synchronized (slot) {
             return slot.activeItem();

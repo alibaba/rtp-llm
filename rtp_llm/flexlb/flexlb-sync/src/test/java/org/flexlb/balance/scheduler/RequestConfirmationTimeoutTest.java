@@ -202,7 +202,9 @@ class RequestConfirmationTimeoutTest {
                 decode.release(next, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
             }
             requests.processPrefillStatus(
-                    prefill, RoleType.PREFILL, PrefillState.WorkerStatusFact.active(item));
+                    prefill,
+                    RoleType.PREFILL,
+                    PrefillState.WorkerStatusFact.active(item.execution()));
             requests.processDecodeStatus(
                     decode, DecodeEndpoint.WorkerStatusFact.active(reservation));
             assertEquals(

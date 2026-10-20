@@ -9,6 +9,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import org.flexlb.balance.scheduler.RequestExecution;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.enums.PriorityPreemptionProgress;
@@ -60,8 +61,8 @@ class PrefillRequestCapacityTest {
         assertFalse(
                 state.routeAvailability(2L, schedulingWorker).isAvailable(),
                 "handoff/ACK cannot release inflight work");
-        assertTrue(state.terminalizeCommittedItem(immediate));
-        assertFalse(state.terminalizeCommittedItem(immediate));
+        assertTrue(state.terminalizeCommittedItem(immediate.execution()));
+        assertFalse(state.terminalizeCommittedItem(immediate.execution()));
         assertTrue(state.routeAvailability(2L, schedulingWorker).isAvailable());
         var nextLease = state.reserveRoute(next, 10L, 2L).reservation();
         assertNotNull(nextLease);
@@ -174,10 +175,10 @@ class PrefillRequestCapacityTest {
         try (var handoff = reservation.commit(List.of(first, second), 0L)) {}
         assertFalse(state.batchAvailability(1, schedulingWorker).isAvailable());
         assertTrue(enqueue(item(3), 0L));
-        assertTrue(state.terminalizeCommittedItem(first));
+        assertTrue(state.terminalizeCommittedItem(first.execution()));
         assertEquals(2L, state.observedRequestCount());
         assertFalse(state.batchAvailability(1, schedulingWorker).isAvailable());
-        assertTrue(state.terminalizeCommittedItem(second));
+        assertTrue(state.terminalizeCommittedItem(second.execution()));
         assertEquals(1L, state.observedRequestCount());
         assertTrue(state.batchAvailability(1, schedulingWorker).isAvailable());
     }
@@ -189,7 +190,7 @@ class PrefillRequestCapacityTest {
         old.close();
         var current = reserve(item(1), 1L).reservation();
         old.close();
-        assertFalse(state.terminalizeCommittedItem(previous));
+        assertFalse(state.terminalizeCommittedItem(previous.execution()));
         assertEquals(1L, state.observedRequestCount());
         current.close();
         assertEquals(0L, state.observedRequestCount());
@@ -375,6 +376,9 @@ class PrefillRequestCapacityTest {
     private static ScheduledRequest item(long id) {
         ScheduledRequest item = mock(ScheduledRequest.class);
         when(item.requestId()).thenReturn(Long.toString(id));
+        RequestExecution execution = mock(RequestExecution.class);
+        when(execution.requestId()).thenReturn(Long.toString(id));
+        when(item.execution()).thenReturn(execution);
         return item;
     }
 }

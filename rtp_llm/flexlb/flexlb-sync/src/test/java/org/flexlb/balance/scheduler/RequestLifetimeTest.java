@@ -292,7 +292,7 @@ class RequestLifetimeTest {
             assertTrue(fixture.slot.installDecisionDeadline(exact));
             var expiry = fixture.slot.onDecisionVisibilityDeadline(exact);
             assertTrue(expiry.needsConfirmation());
-            assertSame(fixture.item, expiry.item());
+            assertSame(fixture.item.execution(), expiry.item());
             assertTrue(fixture.slot.isLiveGeneration());
             assertFalse(fixture.slot.snapshot().state().isTerminal());
             assertTrue(fixture.slot.snapshot().detail().contains("SUSPECTED_LOST"));
@@ -422,7 +422,7 @@ class RequestLifetimeTest {
                     org.springframework.test.util.ReflectionTestUtils.<Boolean>invokeMethod(
                             fixture.slot, "consumeInactivityDeadlineLocked", deadline));
             assertTrue(fixture.slot.inactivityDeadlineAtMs().isPresent());
-            assertSame(fixture.item, fixture.slot.activeItem());
+            assertSame(fixture.item.execution(), fixture.slot.activeItem());
         }
     }
 
@@ -515,7 +515,7 @@ class RequestLifetimeTest {
                 projector.onPrefillStatus(
                         prefill,
                         RoleType.PREFILL,
-                        List.of(PrefillState.WorkerStatusFact.active(item)));
+                        List.of(PrefillState.WorkerStatusFact.active(item.execution())));
             } else {
                 projector.onDecodeStatus(
                         decode, List.of(DecodeEndpoint.WorkerStatusFact.active(reservation)));
@@ -623,7 +623,7 @@ class RequestLifetimeTest {
                                                     fixture.item.prefillEp(),
                                                     RoleType.PREFILL,
                                                     PrefillState.WorkerStatusFact.active(
-                                                            fixture.item),
+                                                            fixture.item.execution()),
                                                     start + 50L);
                                     assertFalse(
                                             RequestLifecycleTestSupport.<Boolean>inspect(
@@ -674,7 +674,9 @@ class RequestLifetimeTest {
                             fixture.item.prefillEp(),
                             RoleType.PREFILL,
                             PrefillState.WorkerStatusFact.terminal(
-                                    fixture.item, PrefillState.WorkerStatusFact.Kind.COMPLETED, 0L),
+                                    fixture.item.execution(),
+                                    PrefillState.WorkerStatusFact.Kind.COMPLETED,
+                                    0L),
                             oldDeadline + 100L);
             assertFalse(fixture.slot.installDecisionDeadline(oldTimer));
             var handoffTimer = mock(ExpirationTimer.DecisionDeadline.class);
@@ -757,10 +759,10 @@ class RequestLifetimeTest {
                         RoleType.PREFILL,
                         completed
                                 ? PrefillState.WorkerStatusFact.terminal(
-                                        fixture.item,
+                                        fixture.item.execution(),
                                         PrefillState.WorkerStatusFact.Kind.COMPLETED,
                                         0L)
-                                : PrefillState.WorkerStatusFact.active(fixture.item),
+                                : PrefillState.WorkerStatusFact.active(fixture.item.execution()),
                         nowMs);
     }
 
@@ -819,8 +821,10 @@ class RequestLifetimeTest {
                         RoleType.PREFILL,
                         completed
                                 ? PrefillState.WorkerStatusFact.terminal(
-                                        item, PrefillState.WorkerStatusFact.Kind.COMPLETED, 0L)
-                                : PrefillState.WorkerStatusFact.active(item),
+                                        item.execution(),
+                                        PrefillState.WorkerStatusFact.Kind.COMPLETED,
+                                        0L)
+                                : PrefillState.WorkerStatusFact.active(item.execution()),
                         System.currentTimeMillis());
     }
 

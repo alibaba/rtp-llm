@@ -88,17 +88,17 @@ class WorkerBatcherRequestCapacityTest {
             assertFalse(
                     fixture.endpoint.canAcceptRequest(),
                     "dispatch slots remain full while the suffix waits");
-            assertTrue(fixture.endpoint.releaseCommittedItem(first));
+            assertTrue(fixture.endpoint.releaseCommittedItem(first.execution()));
             ScheduledRequest third = delivered.poll(3, TimeUnit.SECONDS);
             org.junit.jupiter.api.Assertions.assertNotNull(
                     third, "completion must wake the worker without another enqueue");
-            assertFalse(fixture.endpoint.releaseCommittedItem(first));
+            assertFalse(fixture.endpoint.releaseCommittedItem(first.execution()));
             org.junit.jupiter.api.Assertions.assertNull(delivered.poll(150, TimeUnit.MILLISECONDS));
-            assertTrue(fixture.endpoint.releaseCommittedItem(second));
+            assertTrue(fixture.endpoint.releaseCommittedItem(second.execution()));
             ScheduledRequest fourth = delivered.poll(3, TimeUnit.SECONDS);
             org.junit.jupiter.api.Assertions.assertNotNull(fourth);
-            assertTrue(fixture.endpoint.releaseCommittedItem(third));
-            assertTrue(fixture.endpoint.releaseCommittedItem(fourth));
+            assertTrue(fixture.endpoint.releaseCommittedItem(third.execution()));
+            assertTrue(fixture.endpoint.releaseCommittedItem(fourth.execution()));
             assertEquals(0L, fixture.endpoint.observedRequestCount());
         }
     }
@@ -201,7 +201,8 @@ class WorkerBatcherRequestCapacityTest {
             ScheduledRequest first = admitted.getFirst();
             assertFalse(
                     fixture.endpoint.removeQueued(
-                            item(config, fixture.endpoint, Long.parseLong(first.requestId())), "stale identity"));
+                            item(config, fixture.endpoint, Long.parseLong(first.requestId())),
+                            "stale identity"));
             assertTrue(fixture.endpoint.canAcceptRequest());
             assertTrue(fixture.endpoint.removeQueued(first, "cancel exact queued request"));
             assertTrue(
@@ -286,7 +287,7 @@ class WorkerBatcherRequestCapacityTest {
                     assertTrue(
                             EndpointTestSupport.offer(fixture.endpoint, queued),
                             "BATCH does not impose an additional request-count limit on the waiting"
-                                + " queue");
+                                    + " queue");
                 }
                 for (int index = 0; index < 2; index++) {
                     var result =

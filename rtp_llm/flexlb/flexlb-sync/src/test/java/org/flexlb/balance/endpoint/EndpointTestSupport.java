@@ -6,6 +6,7 @@ import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.balance.scheduler.EndpointEventProjector;
+import org.flexlb.balance.scheduler.RequestExecution;
 import org.flexlb.balance.scheduler.RequestRegistry;
 import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
 import org.flexlb.balance.scheduler.RouteDeliveryStrategy;
@@ -196,6 +197,9 @@ public final class EndpointTestSupport {
     static void commitUnqueued(PrefillEndpoint endpoint, long requestId, long predictedMs) {
         ScheduledRequest item = org.mockito.Mockito.mock(ScheduledRequest.class);
         org.mockito.Mockito.when(item.requestId()).thenReturn(Long.toString(requestId));
+        RequestExecution execution = org.mockito.Mockito.mock(RequestExecution.class);
+        org.mockito.Mockito.when(execution.requestId()).thenReturn(Long.toString(requestId));
+        org.mockito.Mockito.when(item.execution()).thenReturn(execution);
         try (var reservation = reserveUnqueued(endpoint, item, predictedMs);
                 var commit = endpoint.tryBeginRouteCommitAdmission();
                 var handoff = commit.commit(List.of(item), List.of(reservation))) {
@@ -308,7 +312,7 @@ public final class EndpointTestSupport {
         }
     }
 
-    record PrefillRetirement(PrefillEndpoint endpoint, List<ScheduledRequest> ownedItems) {
+    record PrefillRetirement(PrefillEndpoint endpoint, List<RequestExecution> ownedItems) {
         PrefillRetirement {
             ownedItems = List.copyOf(ownedItems);
         }

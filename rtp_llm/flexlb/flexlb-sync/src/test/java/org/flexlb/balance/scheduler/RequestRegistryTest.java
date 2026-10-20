@@ -1,5 +1,19 @@
 package org.flexlb.balance.scheduler;
 
+import static org.flexlb.balance.scheduler.RequestLifecycleTestSupport.awaitCondition;
+import static org.flexlb.balance.scheduler.RequestLifecycleTestSupport.commitRoute;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EncoderEndpoint;
@@ -32,20 +46,6 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
-
-import static org.flexlb.balance.scheduler.RequestLifecycleTestSupport.awaitCondition;
-import static org.flexlb.balance.scheduler.RequestLifecycleTestSupport.commitRoute;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertSame;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
 
 /** Canonical request-generation ownership tests, independent of the facade. */
 class RequestRegistryTest {
@@ -548,15 +548,21 @@ class RequestRegistryTest {
     @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
     void inputIsRetainedOnlyUntilBatchRequestTerminates(boolean batch) throws Exception {
-        config.getDispatcher().setType(batch ? org.flexlb.config.DispatcherConfig.Type.BATCH
-                : org.flexlb.config.DispatcherConfig.Type.NON_BATCH);
+        config.getDispatcher()
+                .setType(
+                        batch
+                                ? org.flexlb.config.DispatcherConfig.Type.BATCH
+                                : org.flexlb.config.DispatcherConfig.Type.NON_BATCH);
         BalanceContext context = context(104L);
         var bytes = com.google.protobuf.ByteString.copyFrom(new byte[1024 * 1024]);
         context.setGenerateInputPb(bytes);
         var future = lifecycle.register(context);
         assertFalse(future.isDone());
-        if (batch) { assertSame(bytes, context.getGenerateInputPb()); }
-        else { assertNull(context.getGenerateInputPb()); }
+        if (batch) {
+            assertSame(bytes, context.getGenerateInputPb());
+        } else {
+            assertNull(context.getGenerateInputPb());
+        }
 
         lifecycle.cancelRequest(104L, 0L, CancelReason.CLIENT_CANCELLED);
         future.get(5, TimeUnit.SECONDS);
@@ -748,7 +754,7 @@ class RequestRegistryTest {
                             registered.item().prefillEp(),
                             org.flexlb.dao.route.RoleType.PREFILL,
                             org.flexlb.balance.endpoint.PrefillState.WorkerStatusFact.active(
-                                    registered.item()),
+                                    registered.item().execution()),
                             System.currentTimeMillis());
         }
         lifecycle.cancelRequest("602", 0L, CancelReason.DEADLINE_EXCEEDED);

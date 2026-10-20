@@ -1,5 +1,18 @@
 package org.flexlb.balance.scheduler;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.config.ConfigService;
@@ -14,19 +27,6 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.Duration;
 import java.util.concurrent.TimeUnit;
-
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertSame;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.Mockito.doThrow;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.times;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
 
 /** A selected failure must not consume the cleanup deadline while admission still owns resources. */
 class RequestAdmissionExpirationRaceTest {
@@ -59,7 +59,7 @@ class RequestAdmissionExpirationRaceTest {
                             null,
                             slot.createdAtMs());
             var cleanupFailure = new IllegalStateException("Prefill cleanup failed");
-            doThrow(cleanupFailure).when(prefill).settleFailedRequest(item);
+            doThrow(cleanupFailure).when(prefill).settleFailedRequest(item.execution());
             try (var admission = registry.claimAdmissionHandle("302", future)) {
                 assertNotNull(admission);
                 assertTrue(registry.commitItemForPublication(item, () -> true));
@@ -80,7 +80,7 @@ class RequestAdmissionExpirationRaceTest {
             }
             assertFalse(future.get(2L, TimeUnit.SECONDS).isSuccess());
             RequestLifecycleTestSupport.awaitCondition(() -> registry.trackedRequestCount() == 0);
-            verify(prefill).expireCommittedItem(item);
+            verify(prefill).expireCommittedItem(item.execution());
             assertEquals(RequestState.Phase.FAILED, slot.snapshot().state());
             assertTimeoutPreemptively(
                     Duration.ofSeconds(2),
@@ -180,7 +180,7 @@ class RequestAdmissionExpirationRaceTest {
                     registry.getRequestState(Long.toString(requestId), 0L).state());
             assertEquals(0, registry.trackedRequestCount());
             verify(decode, times(1)).release(reservation, DecodeEndpoint.ReleaseReason.EXPIRED);
-            verify(prefill, times(1)).expireCommittedItem(item);
+            verify(prefill, times(1)).expireCommittedItem(item.execution());
         } finally {
             if (registry.closeAdmissionAndAwaitMutations()) {
                 registry.closeOutstandingAndTerminalize();

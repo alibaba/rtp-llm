@@ -85,11 +85,9 @@ public class FlexlbGrpcForwarder {
 
     public CompletionStage<MasterForwardResult> forwardScheduleToMaster(
             FlexlbScheduleProtocol.FlexlbScheduleRequestPB request) {
+        String requestId = RequestId.parse(request);
         ForwardGuard guard =
-                applyForwardGuard(
-                        RequestId.parse(request),
-                        request.getForwardHop(),
-                        ForwardOperation.SCHEDULE);
+                applyForwardGuard(requestId, request.getForwardHop(), ForwardOperation.SCHEDULE);
         if (guard.blocked()) {
             return CompletableFuture.completedFuture(
                     MasterForwardResult.blocked(
@@ -112,7 +110,7 @@ public class FlexlbGrpcForwarder {
             Logger.warn(
                     "event=flexlb_forward_budget_exhausted request_id={} bytes={} budget={}"
                         + " inflight={}",
-                    RequestId.parse(request),
+                    requestId,
                     forwardBytes,
                     maxForwardInflightBytes,
                     forwardInflightBytes.get());
@@ -126,8 +124,7 @@ public class FlexlbGrpcForwarder {
             channel = masterChannel(masterHostIpPort);
         } catch (RuntimeException error) {
             releaseForwardBytes(forwardBytes);
-            return CompletableFuture.completedFuture(
-                    forwardFailure(request.getRequestId(), guard, null, error));
+            return CompletableFuture.completedFuture(forwardFailure(requestId, guard, null, error));
         }
 
         AtomicBoolean forwardBytesSettled = new AtomicBoolean();
@@ -145,7 +142,7 @@ public class FlexlbGrpcForwarder {
                 new ForwardTrace(
                         "rtp_llm.flexlb.forward_schedule",
                         entryTraceContext(),
-                        RequestId.parse(request),
+                        requestId,
                         masterHostIpPort);
         try {
             // The forward RPC inherits the inbound gRPC Context deadline. Do
@@ -157,7 +154,7 @@ public class FlexlbGrpcForwarder {
             settleForwardBytes.run();
             trace.finish(error);
             return CompletableFuture.completedFuture(
-                    forwardFailure(RequestId.parse(request), guard, channel, error));
+                    forwardFailure(requestId, guard, channel, error));
         }
 
         CompletableFuture<MasterForwardResult> result = new CompletableFuture<>();
@@ -189,8 +186,7 @@ public class FlexlbGrpcForwarder {
                         public void onFailure(Throwable error) {
                             settleForwardBytes.run();
                             trace.finish(error);
-                            result.complete(
-                                    forwardFailure(RequestId.parse(request), guard, channel, error));
+                            result.complete(forwardFailure(requestId, guard, channel, error));
                         }
                     },
                     Runnable::run);
@@ -198,9 +194,7 @@ public class FlexlbGrpcForwarder {
             settleForwardBytes.run();
             trace.finish(callbackRegistrationError);
             rpcFuture.cancel(true);
-            result.complete(
-                    forwardFailure(
-                            RequestId.parse(request), guard, channel, callbackRegistrationError));
+            result.complete(forwardFailure(requestId, guard, channel, callbackRegistrationError));
         }
 
         // gRPC already propagates the inbound Context deadline/cancellation to
@@ -424,8 +418,9 @@ public class FlexlbGrpcForwarder {
             boolean channelRetired = retirePanickedChannel(masterHost, channel, status);
             Throwable cause = status.getCause();
             Logger.warn(
-                    "event=flexlb_forward_failed request_id={} operation={} forward_hop={} master={} "
-                            + "local_ip={} status={} description={} cause={} channel_retired={}",
+                    "event=flexlb_forward_failed request_id={} operation={} forward_hop={}"
+                        + " master={} local_ip={} status={} description={} cause={}"
+                        + " channel_retired={}",
                     logDescription(requestId),
                     operation.logValue(),
                     guard.nextHop(),
@@ -610,7 +605,8 @@ public class FlexlbGrpcForwarder {
             return response;
         } catch (RuntimeException e) {
             trace.finish(e);
-            recordForwardFailure(RequestId.parse(request), guard, channel, ForwardOperation.SCHEDULE, e);
+            recordForwardFailure(
+                    RequestId.parse(request), guard, channel, ForwardOperation.SCHEDULE, e);
             return null;
         }
     }

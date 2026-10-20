@@ -1,5 +1,9 @@
 package org.flexlb.balance.scheduler;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
@@ -17,10 +21,6 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.BooleanSupplier;
-
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Shared lifecycle primitives for scheduler contract tests. */
 final class RequestLifecycleTestSupport {
@@ -130,13 +130,16 @@ final class RequestLifecycleTestSupport {
     static void startRouteDelivery(RequestSlot slot) {
         assertNotNull(
                 slot.claimDelivery(
-                        slot.activeItem(), DeliveryClaimKind.ROUTE_DECISION, 0L, () -> true));
+                        slot.scheduledItem(), DeliveryClaimKind.ROUTE_DECISION, 0L, () -> true));
     }
 
     static void startBatchDelivery(RequestSlot slot, long batchId) {
         assertNotNull(
                 slot.claimDelivery(
-                        slot.activeItem(), DeliveryClaimKind.BATCH_ENQUEUE, batchId, () -> true));
+                        slot.scheduledItem(),
+                        DeliveryClaimKind.BATCH_ENQUEUE,
+                        batchId,
+                        () -> true));
     }
 
     static void markAcknowledged(RequestSlot slot) {
