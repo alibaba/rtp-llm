@@ -89,6 +89,11 @@ def _fused_add_norm_usable(x: torch.Tensor, residual: torch.Tensor, norm) -> boo
     weight = getattr(norm, "weight", None)
     if weight is None or weight.dim() != 1 or weight.stride(0) != 1:
         return False
+    # test harnesses patch layers with mock norm modules that do not carry
+    # variance_epsilon; those must take the torch two-step path (bit-equal
+    # to the pre-change behavior) instead of crashing in _fused_add_norm.
+    if not hasattr(norm, "variance_epsilon"):
+        return False
     return (
         x.is_cuda
         and x.dim() == 2
