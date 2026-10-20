@@ -226,8 +226,7 @@ public class KvcmGrpcClient {
                 log.warn("Failed to report KVCM gRPC call metrics", error);
             }
         }
-        KvcmQueryLogger.logResponse(request, response, currentLeader, roleType, group, attempt,
-                TimeUnit.NANOSECONDS.toMicros(System.nanoTime() - startTimeNanos));
+        KvcmQueryLogger.logResponse(requestId, response);
         ErrorCode code = response.getHeader().getStatus().getCode();
         if (code != ErrorCode.OK) {
             requestImmediateRefresh();

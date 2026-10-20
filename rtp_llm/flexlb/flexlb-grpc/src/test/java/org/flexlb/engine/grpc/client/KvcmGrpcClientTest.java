@@ -323,7 +323,7 @@ class KvcmGrpcClientTest {
     }
 
     @Test
-    void logsErrorAndCompleteHostResponsesBeforeHostFiltering() throws Exception {
+    void logsOnlyRequestIdAndAllHostBlockCountsBeforeHostFiltering() throws Exception {
         createHealthTestClient();
         var errorResponse = GetHostCacheStateResponse.newBuilder()
                 .setHeader(CommonResponseHeader.newBuilder().setRequestId("server-request")
@@ -354,25 +354,20 @@ class KvcmGrpcClientTest {
             assertEquals(5, matches.get("worker-1").globalMatchBlocks());
             assertEquals(2, appender.list.size());
             var failure = JsonUtils.toObject(appender.list.getFirst().getFormattedMessage(), JsonNode.class);
-            assertEquals("server-request", failure.at("/response/header/requestId").asText());
-            assertEquals("trace-result", failure.at("/response/header/tracerResult").asText());
-            assertEquals("SERVICE_NOT_READY", failure.at("/response/header/status/code").asText());
-            assertEquals("not ready\nretry", failure.at("/response/header/status/message").asText());
-            assertEquals(0, failure.at("/response/hosts").size());
+            assertEquals(2, failure.size());
+            assertEquals("health-query", failure.path("requestId").asText());
+            assertEquals(0, failure.path("hosts").size());
             var success = JsonUtils.toObject(appender.list.get(1).getFormattedMessage(), JsonNode.class);
             assertEquals("query-log", success.path("requestId").asText());
-            assertEquals(1, success.path("attempt").asInt());
-            assertEquals("127.0.0.1:7001", success.path("leader").asText());
-            assertEquals("deployment_2192", success.path("instanceId").asText());
-            assertEquals(2, success.path("blockCount").asInt());
-            assertTrue(success.path("durationUs").asLong() >= 0);
-            assertEquals("OK", success.at("/response/header/status/code").asText());
-            assertEquals(5, success.at("/response/hosts").size());
-            assertEquals(2, success.at("/response/hosts/0/local").asLong());
-            assertEquals(98, success.at("/response/hosts/0/global").asLong());
-            assertEquals(0, success.at("/response/hosts/2/global").asLong());
-            assertEquals("worker-1", success.at("/response/hosts/3/hostIpPort").asText());
-            assertEquals("", success.at("/response/hosts/4/hostIpPort").asText());
+            assertEquals(2, success.size());
+            assertEquals(5, success.path("hosts").size());
+            assertEquals(3, success.at("/hosts/0").size());
+            assertEquals("worker-1", success.at("/hosts/0/hostIpPort").asText());
+            assertEquals(2, success.at("/hosts/0/local").asLong());
+            assertEquals(98, success.at("/hosts/0/global").asLong());
+            assertEquals(0, success.at("/hosts/2/global").asLong());
+            assertEquals("worker-1", success.at("/hosts/3/hostIpPort").asText());
+            assertEquals("", success.at("/hosts/4/hostIpPort").asText());
             for (var event : appender.list) {
                 assertTrue(!event.getFormattedMessage().contains("\n"));
             }
