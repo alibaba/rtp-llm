@@ -333,7 +333,7 @@ class MMSchedulerTest(TestCase):
             self.assertEqual(sum(fake.calls), 5)
 
             # A single request above the whole budget is rejected up front.
-            with self.assertRaisesRegex(ValueError, "exceeds gpu_max_batch_images"):
+            with self.assertRaisesRegex(ValueError, "exceeds batch media limit"):
                 sched.submit_and_wait([_FakeWorkItem(images=20)])
         finally:
             sched.close()
@@ -402,7 +402,7 @@ class MMSchedulerTest(TestCase):
         sched = MMScheduler(fake, max_batch_images=5)
         try:
             # 3 + 3 = 6 images > 5 -> rejected, even though no single item exceeds.
-            with self.assertRaisesRegex(ValueError, "exceeds gpu_max_batch_images"):
+            with self.assertRaisesRegex(ValueError, "exceeds batch media limit"):
                 sched.submit_and_wait(
                     [_FakeWorkItem(images=3), _FakeWorkItem(images=3)]
                 )
@@ -1092,12 +1092,14 @@ class VitEmbeddingSchedulerArgsTest(TestCase):
         cfg = VitConfig()
         cfg.gpu_max_batch_size = 8
         cfg.gpu_batch_wait_ms = 20
-        cfg.gpu_max_batch_images = 200
+        cfg.vit_concurrency = 16
+        cfg.vit_max_queue_size = 7
 
         args = cfg.embedding_scheduler_args()
         self.assertEqual(args["max_batch_size"], 8)
         self.assertEqual(args["batch_wait_ms"], 20)
-        self.assertEqual(args["max_batch_images"], 200)
+        self.assertEqual(args["max_batch_images"], 8)
+        self.assertEqual(args["max_queue_size"], 23)
 
     def test_invalid_policy_values_rejected(self):
         cfg = VitConfig()

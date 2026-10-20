@@ -43,7 +43,6 @@ def _make_adapter(hidden=4):
     adapter = object.__new__(DeepSeekV41VisionEmbedding)
     torch.nn.Module.__init__(adapter)
     adapter.processor_config = V41ImageProcessorConfig(vision_min_pixels=1764)
-    adapter._packed_forward_enabled = True
     adapter._packed_max_patches = 1061888
     for name, value in (("image_start", -1), ("image_newline", -2), ("image_end", -3)):
         setattr(

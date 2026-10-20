@@ -292,6 +292,7 @@ class MMProcessEngineTest(TestCase):
             vit_config,
             ProfilingDebugLoggingConfig(),
         )
+        self.addCleanup(mm_process_engine.stop)
         try:
             mm_process_engine.mm_embedding_cpp(
                 ["./rtp_llm/multimodal/test/testdata/qwen2_vl/1.jpg"],
@@ -410,6 +411,8 @@ class MMProcessEngineTest(TestCase):
         vit_config = VitConfig()
         vit_config.use_local_preprocess = True  # fast preprocess; isolate embedding
         vit_config.mm_cache_item_num = 0  # no cache hit to short-circuit the forward
+        vit_config.mm_cache_gpu_max_bytes = 0
+        vit_config.mm_cache_cpu_max_bytes = 0
         engine = MMProcessEngine(
             model.mm_part,
             model.model_config,
@@ -432,6 +435,8 @@ class MMProcessEngineTest(TestCase):
         model = FakeModel(FakeMultiModalEmbeddingInterfaceBadCount())
         vit_config = VitConfig()
         vit_config.use_local_preprocess = True  # local preprocess, serial scheduler
+        vit_config.mm_cache_gpu_max_bytes = 0
+        vit_config.mm_cache_cpu_max_bytes = 0
         engine = MMProcessEngine(
             model.mm_part,
             model.model_config,
@@ -2206,8 +2211,8 @@ class MMProcessEngineGreenNetTest(TestCase):
         try:
             with patch.object(
                 engine.mm_part,
-                "encode_image",
-                wraps=engine.mm_part.encode_image,
+                "encode_images_packed",
+                wraps=engine.mm_part.encode_images_packed,
             ) as encode:
                 result = self._embed_v41_request(engine, request, user_id="uid-allow")
                 self.assertEqual(tuple(result.embeddings[0].shape), (4, 8))
@@ -2256,8 +2261,8 @@ class MMProcessEngineGreenNetTest(TestCase):
                 try:
                     with patch.object(
                         engine.mm_part,
-                        "encode_image",
-                        wraps=engine.mm_part.encode_image,
+                        "encode_images_packed",
+                        wraps=engine.mm_part.encode_images_packed,
                     ) as encode:
                         first = engine.get_embedding_result(
                             media, request_id=101, user_id="allow"

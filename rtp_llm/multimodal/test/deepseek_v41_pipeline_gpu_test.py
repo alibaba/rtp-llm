@@ -26,7 +26,7 @@ from rtp_llm.utils.base_model_datatypes import MMUrlType
 class PipelineGPUExactTest(unittest.TestCase):
     @torch.inference_mode()
     def test_tuning_large_batch_and_grouped_cpu_inputs(self):
-        """New 192-image eager/graph paths versus unchanged 126-image chunks."""
+        """192-image eager/graph paths versus the explicit 128-image reference."""
         self.assertTrue(torch.cuda.is_available(), "GPU gate must not skip")
         self.assertEqual(os.environ.get("GPU_COUNT"), "1")
         self.assertEqual(os.environ.get("WORLD_SIZE"), "1")
@@ -39,11 +39,12 @@ class PipelineGPUExactTest(unittest.TestCase):
         )
         model.eval().requires_grad_(False)
         model.load_checkpoint(checkpoint)
-        self.assertTrue(model._gpu_preprocess_enabled)
-        self.assertTrue(model._packed_forward_enabled)
-        self.assertIsNone(model._packed_graph)
+        self.assertTrue(model.get_preprocess_params()["gpu_preprocess"])
+        self.assertTrue(model.packed_forward_stats()["enabled"])
+        self.assertIsInstance(model._packed_graph, PackedVisionGraph)
+        model._packed_graph = None  # Explicit eager reference; no env toggle.
         self.assertEqual(
-            (model._packed_max_images, model._packed_max_patches), (128, 1061888)
+            (model._packed_max_images, model._packed_max_patches), (126, 1058400)
         )
         paths = json.loads(os.environ["DSV41_JPEG_PATHS"])
         images = []
@@ -177,13 +178,12 @@ class PipelineGPUExactTest(unittest.TestCase):
         )
         model.eval().requires_grad_(False)
         model.load_checkpoint(checkpoint)
-        self.assertTrue(model._gpu_preprocess_enabled)
-        self.assertTrue(model._packed_forward_enabled)
-        self.assertIsNone(
-            model._packed_graph, "start with the unchanged eager reference"
-        )
-        self.assertEqual(model._packed_max_images, 128)
-        self.assertEqual(model._packed_max_patches, 1061888)
+        self.assertTrue(model.get_preprocess_params()["gpu_preprocess"])
+        self.assertTrue(model.packed_forward_stats()["enabled"])
+        self.assertIsInstance(model._packed_graph, PackedVisionGraph)
+        model._packed_graph = None  # Start with the unchanged eager reference.
+        self.assertEqual(model._packed_max_images, 126)
+        self.assertEqual(model._packed_max_patches, 1058400)
         images = []
         for path in json.loads(os.environ["DSV41_JPEG_PATHS"]):
             with Image.open(path) as image:
