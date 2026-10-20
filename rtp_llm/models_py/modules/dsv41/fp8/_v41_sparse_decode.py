@@ -73,11 +73,19 @@ def _prepare_plan_kernel(
     COL_BLOCK: tl.constexpr,
     SEARCH_STEPS: tl.constexpr,
     BLOCK_SIZE: tl.constexpr = BLOCK_SIZE,
+    SORT_I16: tl.constexpr = False,
 ):
     row = tl.program_id(0)
     lanes = tl.arange(0, K)
     values = tl.load(candidates + row * K + lanes)
-    values = tl.sort(tl.where(values >= 0, values, 2147483647), descending=False)
+    if SORT_I16:
+        # Logical block IDs fit exactly; reserve INT16_MAX for padding only.
+        values = tl.sort(
+            tl.where(values >= 0, values, 32767).to(tl.int16), descending=False
+        ).to(tl.int32)
+        values = tl.where(values == 32767, 2147483647, values)
+    else:
+        values = tl.sort(tl.where(values >= 0, values, 2147483647), descending=False)
     length = tl.load(lengths + row)
     expected = tl.minimum(tl.cdiv(length, BLOCK_SIZE), K)
     count = tl.sum((values != 2147483647).to(tl.int32), 0)
@@ -120,13 +128,86 @@ def _prepare_plan_kernel(
     tl.store(requests + row, request)
 
 
-def make_plan(candidates, lengths, block_table, *, query_len):
+@triton.jit
+def _prepare_flags_plan_kernel(
+    flags, lengths, table, sorted_blocks, active_blocks, row_table, requests,
+    QUERY_LEN: tl.constexpr, K: tl.constexpr, COLS: tl.constexpr,
+    TABLE_STRIDE: tl.constexpr, COL_BLOCK: tl.constexpr,
+    DOMAIN: tl.constexpr, DOMAIN_BLOCK: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr = BLOCK_SIZE,
+):
+    row = tl.program_id(0)
+    ids = tl.arange(0, DOMAIN_BLOCK)
+    present = tl.load(flags + row * DOMAIN + ids, ids < DOMAIN, other=0) != 0
+    length = tl.load(lengths + row)
+    expected = tl.minimum(tl.cdiv(length, BLOCK_SIZE), K)
+    count = tl.sum(present.to(tl.int32), 0)
+    selected = present
+    if count < expected:
+        # Same fillers as the sorter: smallest unused IDs in [0, expected).
+        missing = (ids < expected) & ~present
+        missing_rank = tl.cumsum(missing.to(tl.int32), 0)
+        selected = present | (missing & (missing_rank <= expected - count))
+    slot = tl.cumsum(selected.to(tl.int32), 0) - 1
+    tl.store(sorted_blocks + row * K + slot, ids, selected)
+    tl.store(active_blocks + row * K + slot, present, selected)
+    lanes = tl.arange(0, K)
+    last = tl.maximum(tl.cdiv(length, BLOCK_SIZE) - 1, 0)
+    tl.store(sorted_blocks + row * K + lanes, last, lanes >= expected)
+    tl.store(active_blocks + row * K + lanes, False, lanes >= expected)
+    columns = tl.arange(0, COL_BLOCK)
+    request = row // QUERY_LEN
+    physical = tl.load(
+        table + request * TABLE_STRIDE + columns, columns < COLS, other=0
+    )
+    tl.store(row_table + row * COLS + columns, tl.maximum(physical, 0), columns < COLS)
+    tl.store(requests + row, request)
+
+
+def _plan_candidate_flags(candidates, block_table, candidate_mask):
+    """Reuse only the producer's mask bound to this forward's candidates.
+
+    The producer must update candidates and flags together. Identity/shape
+    checks do not inspect GPU contents or synchronize during graph capture.
+    Larger domains retain sorting until their scan performance is validated.
+    """
+    if (
+        candidates.shape[1] != 2048
+        or candidate_mask is None
+        or candidate_mask[0] is not candidates
+        or candidate_mask[2] != BLOCK_SIZE
+    ):
+        return None
+    flags = candidate_mask[1]
+    if (
+        flags.ndim != 2
+        or flags.shape[0] != candidates.shape[0]
+        or not 0 < flags.shape[1] <= min(
+            4224, block_table.shape[1] * (PAGE_SIZE // BLOCK_SIZE)
+        )
+        or flags.dtype != torch.uint8
+        or flags.device != candidates.device
+        or not flags.is_contiguous()
+    ):
+        return None
+    return flags
+
+
+def make_plan(candidates, lengths, block_table, *, query_len, candidate_mask=None):
     """Build once per forward from unique block IDs and -1 padding.
 
     NaN/-inf source scores may leave fewer candidates than context implies.
     Metadata fillers remain distinct and are never eligible for token TopK.
     Queries of the same request are consecutive; block_table is request-level.
     Warm up on the actual capture stream: DG's scheduler workspace is per-stream.
+
+    Candidate IDs must lie within the logical capacity of block_table. For
+    K=2048, sort in int16 when that capacity leaves INT16_MAX free as padding;
+    all downstream arithmetic and outputs remain int32. Dispatch uses shapes
+    only (no device synchronization), so it is safe during CUDA Graph capture.
+    DSV41_SPARSE_PLAN_I16=0 retains the original sorter for controlled A/B tests.
+    When the producer supplies matching candidate flags (K=2048, <=4224
+    logical blocks), compact those flags instead of sorting the IDs again.
     """
     rows, k = candidates.shape
     if k not in (512, 1024, 2048) or candidates.dtype != torch.int32:
@@ -140,7 +221,8 @@ def make_plan(candidates, lengths, block_table, *, query_len):
         (rows, block_table.shape[1]), device=candidates.device, dtype=torch.int32
     )
     requests = torch.empty(rows, device=candidates.device, dtype=torch.int32)
-    _prepare_plan_kernel[(rows,)](
+    flags = _plan_candidate_flags(candidates, block_table, candidate_mask)
+    common = (
         candidates,
         lengths,
         block_table,
@@ -153,9 +235,22 @@ def make_plan(candidates, lengths, block_table, *, query_len):
         table.shape[1],
         block_table.stride(0),
         triton.next_power_of_2(table.shape[1]),
-        k.bit_length(),
-        num_warps=8,
     )
+    if flags is not None:
+        _prepare_flags_plan_kernel[(rows,)](
+            flags, *common[1:], flags.shape[1],
+            triton.next_power_of_2(flags.shape[1]),
+            num_warps=4 if flags.shape[1] <= 4096 else 8,
+        )
+    else:
+        _prepare_plan_kernel[(rows,)](
+            *common, k.bit_length(), num_warps=8,
+            SORT_I16=(
+                k == 2048
+                and block_table.shape[1] * (PAGE_SIZE // BLOCK_SIZE) <= 32767
+                and os.environ.get("DSV41_SPARSE_PLAN_I16", "1") == "1"
+            ),
+        )
     metadata = deep_gemm.get_paged_sparse_mqa_logits_metadata(
         lengths,
         table,

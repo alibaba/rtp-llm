@@ -1099,7 +1099,9 @@ class AttentionV41FP8(AttentionFP8):
 
     def _begin_forward(self):
         if self.layer_id == min(self._shared_attention["layers"]):
-            for key in ("prefill_pool_ready", "prefill_state_ready"):
+            for key in (
+                "prefill_pool_ready", "prefill_state_ready", "decode_sparse_plan_ready"
+            ):
                 pending = self._shared_attention.pop(key, None)
                 if pending is not None:
                     # Direct callers also order a new forward after an
@@ -1111,6 +1113,7 @@ class AttentionV41FP8(AttentionFP8):
             self._shared_attention.pop("candidate_mask", None)
             self._shared_attention.pop("decode_sparse_plan", None)
             self._shared_attention.pop("decode_indexer_metadata", None)
+            self._shared_attention.pop("decode_sparse_plan_pending", None)
             self._shared_attention.pop("prefill_candidate_mask", None)
             self._shared_attention.pop("prefill_sparse_candidates", None)
             self._shared_attention.pop("prefill_sparse_plans", None)
@@ -3056,6 +3059,9 @@ class AttentionV41FP8(AttentionFP8):
                 and keys.logical_entries_per_block == 128
                 and sparse_decode.is_supported(candidates)
             ):
+                from .decode.sparse_plan_overlap import wait_plan
+
+                wait_plan(shared)
                 plan = shared.get("decode_sparse_plan")
                 if plan is None:
                     with record_function_range("dsv41.decode.sparse_mqa_plan"):
@@ -3066,6 +3072,7 @@ class AttentionV41FP8(AttentionFP8):
                             positions + 1,
                             keys.block_table,
                             query_len=S,
+                            candidate_mask=shared.get("candidate_mask"),
                         )
                     shared["decode_sparse_plan"] = plan
                 with record_function_range("dsv41.decode.sparse_mqa_select"):
@@ -3169,6 +3176,14 @@ class AttentionV41FP8(AttentionFP8):
                         )
                         shared["candidates"] = candidates
                         shared["candidate_mask"] = (candidates, flags, candidate_size)
+                        from .decode.sparse_plan_overlap import start_plan
+
+                        # Reuse the source's int32 lengths; plan/metadata need
+                        # no data produced by the later reindex layer.
+                        start_plan(
+                            self, keys, visible_i32, query_len=S,
+                            producer_stream=None if overlap is None else overlap.auxiliary,
+                        )
                     elif candidate_source >= 0 and self.layer_id > candidate_source:
                         decode_topk.mask_candidates(
                             all_logits, cached_mask[1], candidate_size
@@ -3245,6 +3260,10 @@ class AttentionV41FP8(AttentionFP8):
                     dense,
                     output[start:end, :count],
                 )
+        if paged and publish:
+            from .decode.sparse_plan_overlap import start_plan
+
+            start_plan(self, keys, visible_i32, query_len=S)
         shared["topk"] = {self.layer_id: output}
         return output
 
@@ -3287,6 +3306,8 @@ class AttentionV41FP8(AttentionFP8):
         return slots.int()
 
     def _forward_decode_body(self, x, metadata, shared_input_quant=None):
+        from .decode.sparse_plan_overlap import finish_attention
+
         from rtp_llm.models_py.modules.dsv41.fp8.decode.compute_qkv import (
             decode_compute_qkv,
         )
@@ -3337,6 +3358,7 @@ class AttentionV41FP8(AttentionFP8):
                 shared_input_quant=shared_input_quant,
             )
             if output is not None:
+                finish_attention(self)
                 return output
         swa_slots = metadata.pool_write_slot_mappings.get(SWA_KV)
         global_work = None
@@ -3401,6 +3423,7 @@ class AttentionV41FP8(AttentionFP8):
                 )
             out = mega.project_output(pair, self.wo_b)
             self._prefill_output_all_reduce(out)
+            finish_attention(self)
             return out.view(B, S, self.dim)
         if not self.compress_ratio:
             o = self._forward_decode_swa_only(qkv.q, B, S, metadata)
@@ -3445,4 +3468,5 @@ class AttentionV41FP8(AttentionFP8):
             )
         out = self._project_output(o, qkv.freqs_cis)
         self._prefill_output_all_reduce(out)
+        finish_attention(self)
         return out.view(B, S, self.dim)

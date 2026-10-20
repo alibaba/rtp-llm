@@ -99,6 +99,31 @@ class SparseDecodeTopKRoutingCPU(unittest.TestCase):
 
 
 class SparseDecodeSupportCPU(unittest.TestCase):
+    def test_plan_narrow_sort_dispatch(self):
+        # Exercise the real make_plan dispatch without launching GPU work.
+        backend = SimpleNamespace(get_paged_sparse_mqa_logits_metadata=Mock())
+        with patch.object(sparse, "_prepare_plan_kernel", MagicMock()) as kernel, patch.object(
+            sparse, "deep_gemm", backend
+        ):
+            for k in (512, 1024, 2048):
+                for cols in (256, 2047, 2048):
+                    for switch in (None, "0", "1"):
+                        with self.subTest(k=k, cols=cols, switch=switch), patch.dict(os.environ):
+                            os.environ.pop("DSV41_SPARSE_PLAN_I16", None)
+                            if switch is not None:
+                                os.environ["DSV41_SPARSE_PLAN_I16"] = switch
+                            candidates = torch.empty(6, k, dtype=torch.int32)
+                            lengths = torch.zeros(6, dtype=torch.int32)
+                            table = torch.zeros(1, cols, dtype=torch.int32)
+                            plan = sparse.make_plan(candidates, lengths, table, query_len=6)
+                            self.assertEqual(
+                                kernel.__getitem__.return_value.call_args.kwargs["SORT_I16"],
+                                k == 2048 and cols < 2048 and switch != "0",
+                            )
+                            self.assertEqual(plan.blocks.dtype, torch.int32)
+                            self.assertEqual(plan.table.dtype, torch.int32)
+                            self.assertEqual(plan.lengths.data_ptr(), lengths.data_ptr())
+
     def test_sparse_mqa_defaults_on_with_explicit_override(self):
         def init_base(attn, *args, **kwargs):
             torch.nn.Module.__init__(attn)
@@ -270,6 +295,46 @@ class SparseDecodeCUDA(unittest.TestCase):
                 plan.blocks[row][plan.active[row]], wanted, rtol=0, atol=0
             )
             self.assertFalse(bool(plan.active[row, expected:].any()))
+
+    def test_narrow_sort_range_guard_and_graph(self):
+        # 2047 pages fit signed int16 IDs; page 2048 introduces ID 32767,
+        # reserved by the narrow sorter. It must take the original int32 path.
+        for cols in (256, 2047, 2048):
+            rows, k = 6, 2048
+            capacity = cols * 128
+            table = torch.arange(1, cols + 1, device="cuda", dtype=torch.int32)[None]
+            lengths = torch.full((rows,), capacity, device="cuda", dtype=torch.int32)
+            ids = torch.arange(capacity // 8 - k, capacity // 8,
+                               device="cuda", dtype=torch.int32).flip(0)
+            candidates = ids.expand(rows, k).clone()
+
+            def run():
+                return sparse.make_plan(candidates, lengths, table, query_len=6)
+
+            stream = torch.cuda.Stream()
+            stream.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(stream), patch.dict(os.environ, {"DSV41_SPARSE_PLAN_I16": "1"}):
+                run()
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph, stream=stream):
+                    actual = run()
+                for mode in ("complete", "holes", "empty", "short"):
+                    if mode == "holes":
+                        candidates[:, ::2] = -1
+                    elif mode == "empty":
+                        candidates.fill_(-1)
+                    elif mode == "short":
+                        lengths.copy_(torch.tensor([0, 1, 7, 8, 511, 513], device="cuda"))
+                        # Keep all rows empty: the planner must rebuild fillers
+                        # for new lengths and read updated tables on replay.
+                        table[:, ::2] = -1
+                    graph.replay()
+                    with patch.dict(os.environ, {"DSV41_SPARSE_PLAN_I16": "0"}):
+                        expected = run()
+                    for a, b in zip(actual[:4], expected[:4]):
+                        torch.testing.assert_close(a, b, rtol=0, atol=0)
+                    self._check_plan(actual, candidates, lengths, table, 6)
+            torch.cuda.current_stream().wait_stream(stream)
 
     def _check_selection(self, result, candidates, lengths, dense):
         for row, length in enumerate(lengths.tolist()):
