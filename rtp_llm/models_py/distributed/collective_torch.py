@@ -495,10 +495,31 @@ def _register_process_groups_to_cpp():
             dest.copy_(tensor)
             return dest
         target = dest if dest is not None else tensor
+        flashinfer_ar = _get_flashinfer_allreduce().get_flashinfer_allreduce()
+        if (
+            op == 0
+            and mode == _CPP_PARALLEL_MODE_TP
+            and tensor.is_cuda
+            and target.is_cuda
+            and tensor.shape == target.shape
+            and tensor.dtype == target.dtype
+            and tensor.device == target.device
+            and target.is_contiguous()
+            and flashinfer_ar is not None
+            and pg is flashinfer_ar.group
+            and not (
+                _canonical_p2p is not None
+                and pg is _canonical_p2p.group
+                and _canonical_p2p.should_use(tensor)
+            )
+            and flashinfer_ar.should_use_cpp_small(tensor)
+        ):
+            return flashinfer_ar.all_reduce_into(tensor, target)
         if dest is not None:
             target.copy_(tensor)
         device_id = torch.cuda.current_device()
         gpu_t, was_cpu = _ensure_cuda(target, device_id)
+        flashinfer_ar = _get_flashinfer_allreduce().get_flashinfer_allreduce()
         if (
             op == 0
             and mode == _CPP_PARALLEL_MODE_TP
@@ -508,6 +529,17 @@ def _register_process_groups_to_cpp():
             and _canonical_p2p.should_use(gpu_t)
         ):
             _canonical_p2p.all_reduce(gpu_t)
+        elif (
+            op == 0
+            and mode == _CPP_PARALLEL_MODE_TP
+            and not was_cpu
+            and flashinfer_ar is not None
+            and pg is flashinfer_ar.group
+            and flashinfer_ar.should_use_cpp_small(gpu_t)
+        ):
+            result = flashinfer_ar.all_reduce(gpu_t)
+            # The C++ callback returns the original destination storage.
+            gpu_t.copy_(result)
         else:
             torch.distributed.all_reduce(
                 gpu_t, op=_REDUCE_OPS.get(op, torch.distributed.ReduceOp.SUM), group=pg
@@ -818,11 +850,12 @@ def all_reduce(
 
         flashinfer_ar = _get_flashinfer_allreduce().get_flashinfer_allreduce()
         if flashinfer_ar is not None and flashinfer_ar.should_use(tensor):
-            result = flashinfer_ar.all_reduce(tensor)
             if inplace:
-                tensor.copy_(result)
-                return tensor
-            return result
+                # IPC first stages the input, so the registered reduction may
+                # write directly back into its original destination. Avoid a
+                # second device copy at every model-layer collective.
+                return flashinfer_ar.all_reduce_into(tensor, tensor)
+            return flashinfer_ar.all_reduce(tensor)
 
         symm_mem_comm = _get_symm_mem().get_symm_mem_communicator()
         if symm_mem_comm is not None and symm_mem_comm.should_torch_symm_mem_allreduce(
@@ -871,7 +904,9 @@ def all_gather(tensor: torch.Tensor, group: Group) -> torch.Tensor:
     process_group = _get_group(group)
     world_size = torch.distributed.get_world_size(process_group)
 
-    tensor_list = torch.zeros(
+    # The blocking collective submits a complete write of every output element
+    # and orders its completion before consumers on this CUDA stream.
+    tensor_list = torch.empty(
         [world_size * tensor.shape[0]] + list(tensor.shape)[1:],
         device=tensor.device,
         dtype=tensor.dtype,

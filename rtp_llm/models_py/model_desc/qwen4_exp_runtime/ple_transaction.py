@@ -4,6 +4,7 @@ The C++ executor owns TP consensus. Captured stages retain their addresses in
 ``graph_registry``; releasing an active commit only releases its undo record.
 """
 
+import os
 from collections.abc import Callable, Mapping
 from typing import Optional
 
@@ -110,27 +111,47 @@ class PLETransactionCoordinator:
                 "qwen4_exp PLE target projection and side pools must share a device"
             )
 
-        read_pages = torch.div(prefixes_device - 1, page_size, rounding_mode="floor")
-        state_read_blocks = self._physical_blocks(
-            state_inputs,
-            PLE_STATE_TAG,
-            read_pages,
-            int(state_pool.shape[0]),
-            state_pool.device,
-            graph_capture=graph_capture,
-        )
-        ctx_read_blocks = self._physical_blocks(
-            ctx_inputs,
-            PLE_NGRAM_CTX_TAG,
-            read_pages,
-            int(ctx_pool.shape[0]),
-            ctx_pool.device,
-            graph_capture=graph_capture,
-        )
-        initial_state = state_pool.index_select(0, state_read_blocks)
-        initial_context = ctx_pool.index_select(0, ctx_read_blocks)
+        gathered = None
+        if graph_capture:
+            from rtp_llm.models_py.modules.qwen4_exp.ple.ple_commit_triton import (
+                gather_target_read_state,
+            )
+
+            gathered = gather_target_read_state(
+                prefixes_device,
+                ids,
+                PLECacheViews._resolve_block_table(state_inputs, PLE_STATE_TAG),
+                PLECacheViews._resolve_block_table(ctx_inputs, PLE_NGRAM_CTX_TAG),
+                state_pool,
+                ctx_pool,
+                page_size,
+            )
         candidate_ids = ids.reshape(batch_size, query_len)
-        history = torch.cat([initial_context, candidate_ids], dim=1)
+        if gathered is not None:
+            initial_state, initial_context, history = gathered
+        else:
+            read_pages = torch.div(
+                prefixes_device - 1, page_size, rounding_mode="floor"
+            )
+            state_read_blocks = self._physical_blocks(
+                state_inputs,
+                PLE_STATE_TAG,
+                read_pages,
+                int(state_pool.shape[0]),
+                state_pool.device,
+                graph_capture=graph_capture,
+            )
+            ctx_read_blocks = self._physical_blocks(
+                ctx_inputs,
+                PLE_NGRAM_CTX_TAG,
+                read_pages,
+                int(ctx_pool.shape[0]),
+                ctx_pool.device,
+                graph_capture=graph_capture,
+            )
+            initial_state = state_pool.index_select(0, state_read_blocks)
+            initial_context = ctx_pool.index_select(0, ctx_read_blocks)
+            history = torch.cat([initial_context, candidate_ids], dim=1)
         output, candidate_state_inputs = ple.decode_chunk(
             hyper_states.reshape(batch_size, query_len, -1),
             history,
@@ -284,101 +305,103 @@ class PLETransactionCoordinator:
             raise RuntimeError(
                 "qwen4_exp PLE target commit requires device-local int32 accept_len [B]"
             )
-        if bool(
-            torch.any((accept_len < 1) | (accept_len > transaction.query_len)).item()
-        ):
-            raise RuntimeError(
-                "qwen4_exp PLE target accept_len must be in "
-                f"[1, {transaction.query_len}]"
+        fused = None
+        if os.environ.get("QWEN4_PLE_COMMIT_METADATA_FUSED", "0") == "1":
+            from rtp_llm.models_py.modules.qwen4_exp.ple.ple_commit_metadata_triton import (
+                resolve_accepted_pair,
             )
 
-        accepted = accept_len.to(torch.long)
-        pending = []
-        destination_rows: set[tuple[int, int]] = set()
-        for layer_idx in sorted(transaction.stages):
-            stage = transaction.stages[layer_idx]
-            state_len = int(stage.initial_state.shape[1])
-            state_timeline = torch.cat(
-                [stage.initial_state, stage.candidate_state_inputs], dim=1
-            )
-            state_indices = accepted.unsqueeze(1) + torch.arange(
-                state_len, device=accepted.device, dtype=torch.long
-            ).unsqueeze(0)
-            state_values = state_timeline.gather(
-                1,
-                state_indices.unsqueeze(-1).expand(
-                    -1, -1, int(state_timeline.shape[-1])
-                ),
-            )
-
-            context_len = int(stage.initial_context.shape[1])
-            context_timeline = torch.cat(
-                [stage.initial_context, stage.candidate_ids], dim=1
-            )
-            context_indices = accepted.unsqueeze(1) + torch.arange(
-                context_len, device=accepted.device, dtype=torch.long
-            ).unsqueeze(0)
-            context_values = context_timeline.gather(1, context_indices)
-
-            final_positions = stage.prefixes + accepted - 1
-            final_pages = torch.div(
-                final_positions, stage.page_size, rounding_mode="floor"
-            )
-            state_blocks, state_host_blocks = self._commit_physical_blocks(
-                stage.state_inputs,
-                PLE_STATE_TAG,
-                final_pages,
-                int(stage.state_pool.shape[0]),
-                stage.state_pool.device,
-            )
-            ctx_blocks, ctx_host_blocks = self._commit_physical_blocks(
-                stage.ctx_inputs,
-                PLE_NGRAM_CTX_TAG,
-                final_pages,
-                int(stage.ctx_pool.shape[0]),
-                stage.ctx_pool.device,
-            )
-            pending.append(
-                (
-                    stage,
-                    state_blocks,
-                    state_values,
-                    ctx_blocks,
-                    context_values,
-                )
-            )
-
-            for pool, destination_ids, tag in (
-                (stage.state_pool, state_host_blocks, PLE_STATE_TAG),
-                (stage.ctx_pool, ctx_host_blocks, PLE_NGRAM_CTX_TAG),
+            fused = resolve_accepted_pair(transaction, accept_len)
+        if fused is not None:
+            accepted, pending = fused
+        else:
+            if bool(
+                torch.any(
+                    (accept_len < 1) | (accept_len > transaction.query_len)
+                ).item()
             ):
-                pool_ptr = int(pool.data_ptr())
-                for block in destination_ids:
-                    row = (pool_ptr, int(block))
-                    if row in destination_rows:
-                        raise RuntimeError(
-                            f"qwen4_exp PLE cache {tag!r} has a duplicate target "
-                            "destination physical row"
-                        )
-                    destination_rows.add(row)
+                raise RuntimeError(
+                    "qwen4_exp PLE target accept_len must be in "
+                    f"[1, {transaction.query_len}]"
+                )
 
-        # Every layer, destination and selected value has been validated. Only
-        # now allocate the immutable undo snapshots; this phase still performs
-        # no persistent-pool writes.
+            accepted = accept_len.to(torch.long)
+            pending = []
+            destination_rows: set[tuple[int, int]] = set()
+            for layer_idx in sorted(transaction.stages):
+                stage = transaction.stages[layer_idx]
+                destinations = PLECacheViews._commit_physical_block_pair(
+                    stage, accepted
+                )
+                if destinations is not None:
+                    state_blocks, state_host_blocks, ctx_blocks, ctx_host_blocks = (
+                        destinations
+                    )
+                else:
+                    final_positions = stage.prefixes + accepted - 1
+                    final_pages = torch.div(
+                        final_positions, stage.page_size, rounding_mode="floor"
+                    )
+                    state_blocks, state_host_blocks = self._commit_physical_blocks(
+                        stage.state_inputs,
+                        PLE_STATE_TAG,
+                        final_pages,
+                        int(stage.state_pool.shape[0]),
+                        stage.state_pool.device,
+                    )
+                    ctx_blocks, ctx_host_blocks = self._commit_physical_blocks(
+                        stage.ctx_inputs,
+                        PLE_NGRAM_CTX_TAG,
+                        final_pages,
+                        int(stage.ctx_pool.shape[0]),
+                        stage.ctx_pool.device,
+                    )
+                pending.append(
+                    (
+                        stage,
+                        state_blocks,
+                        ctx_blocks,
+                    )
+                )
+
+                for pool, destination_ids, tag in (
+                    (stage.state_pool, state_host_blocks, PLE_STATE_TAG),
+                    (stage.ctx_pool, ctx_host_blocks, PLE_NGRAM_CTX_TAG),
+                ):
+                    pool_ptr = int(pool.data_ptr())
+                    for block in destination_ids:
+                        row = (pool_ptr, int(block))
+                        if row in destination_rows:
+                            raise RuntimeError(
+                                f"qwen4_exp PLE cache {tag!r} has a duplicate target "
+                                "destination physical row"
+                            )
+                        destination_rows.add(row)
+
+        # Every layer and destination has been validated. Select values and
+        # allocate immutable undo only now, with no persistent-pool writes.
         prepared_writes = []
-        for stage, state_blocks, state_values, ctx_blocks, context_values in pending:
+        for stage, state_blocks, ctx_blocks in pending:
+            from rtp_llm.models_py.modules.qwen4_exp.ple.ple_commit_prepare_triton import (
+                prepare_commit_values,
+            )
+
+            selected = prepare_commit_values(stage, accepted, state_blocks, ctx_blocks)
+            if selected is None:
+                selected = self._prepare_ple_values_reference(
+                    stage, accepted, state_blocks, ctx_blocks
+                )
+            state_values, context_values, original_state, original_context = selected
             prepared_writes.append(
                 _PLEPreparedWrite(
                     state_pool=stage.state_pool,
                     state_blocks=state_blocks,
                     state_values=state_values,
-                    original_state=stage.state_pool.index_select(
-                        0, state_blocks
-                    ).clone(),
+                    original_state=original_state,
                     ctx_pool=stage.ctx_pool,
                     ctx_blocks=ctx_blocks,
                     ctx_values=context_values,
-                    original_context=stage.ctx_pool.index_select(0, ctx_blocks).clone(),
+                    original_context=original_context,
                 )
             )
         # Gather/clone launches above are part of prepare, not commit.  Complete
@@ -386,6 +409,36 @@ class PLETransactionCoordinator:
         # any asynchronous failure on this rank before persistent writes begin.
         self._synchronize_ple_transaction(transaction)
         transaction.prepared_writes = prepared_writes
+
+    @staticmethod
+    def _prepare_ple_values_reference(stage, accepted, state_blocks, ctx_blocks):
+        """Portable fallback with the original selection and immutable undo."""
+        state_len = int(stage.initial_state.shape[1])
+        state_timeline = torch.cat(
+            [stage.initial_state, stage.candidate_state_inputs], dim=1
+        )
+        state_indices = accepted.unsqueeze(1) + torch.arange(
+            state_len, device=accepted.device, dtype=torch.long
+        ).unsqueeze(0)
+        state_values = state_timeline.gather(
+            1,
+            state_indices.unsqueeze(-1).expand(-1, -1, int(state_timeline.shape[-1])),
+        )
+
+        context_len = int(stage.initial_context.shape[1])
+        context_timeline = torch.cat(
+            [stage.initial_context, stage.candidate_ids], dim=1
+        )
+        context_indices = accepted.unsqueeze(1) + torch.arange(
+            context_len, device=accepted.device, dtype=torch.long
+        ).unsqueeze(0)
+        context_values = context_timeline.gather(1, context_indices)
+        return (
+            state_values,
+            context_values,
+            stage.state_pool.index_select(0, state_blocks).clone(),
+            stage.ctx_pool.index_select(0, ctx_blocks).clone(),
+        )
 
     def finish_speculative_target_commit(self, commit: bool) -> None:
         """Tentatively apply a prepared PLE plan or idempotently roll it back."""

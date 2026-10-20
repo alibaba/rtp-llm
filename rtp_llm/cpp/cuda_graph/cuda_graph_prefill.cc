@@ -17,7 +17,9 @@ void CudaGraphRunner::capturePrefill() {
         // for attention, it always run the max_bs, so when we run `forward`, the real batch size is not sure
         // we will transfer a `batch size tensor(int)` for `copy kernel`.
         // Prepare common inputs using shared function
-        prepareCaptureInputs(inputs, max_bs_, seq_len);
+        const int capture_batch_size =
+            usesRequestSizedMtpDraftPrefillCudaGraph() ? seq_len / num_tokens_per_bs_ : static_cast<int>(max_bs_);
+        prepareCaptureInputs(inputs, capture_batch_size, seq_len);
         // Generation prefill uses Bmax real slots plus one fixed sentinel slot.
         // Capture the conservative layout [0, ..., 0, Tg] so FMHA/RoPE fix
         // batch size and max_q_len at their profile capacity. All sentinel KV
@@ -87,7 +89,7 @@ void CudaGraphRunner::capturePrefill() {
 
             cu_seqlens_host[0]    = 0;
             cu_kv_seqlens_host[0] = 0;
-            for (int b = 0; b < max_bs_; b++) {
+            for (int b = 0; b < capture_batch_size; b++) {
                 cu_seqlens_host[b + 1] = cu_seqlens_host[b].item<int>() + input_lengths[b].item<int>();
                 cu_kv_seqlens_host[b + 1] =
                     cu_kv_seqlens_host[b].item<int>() + input_lengths[b].item<int>() + prefix_lengths[b].item<int>();
@@ -119,7 +121,7 @@ void CudaGraphRunner::capturePrefill() {
         }
         // Prefill reshapes common metadata after prepareCaptureInputs synchronized the tag map.
         refreshTaggedAttentionInputs(inputs);
-        const int output_capacity           = isGenerationPrefillCudaGraph() ? seq_len : max_bs_ * num_tokens_per_bs_;
+        const int output_capacity = isGenerationPrefillCudaGraph() ? seq_len : capture_batch_size * num_tokens_per_bs_;
         graph_instances_[seq_len].mem_hold_ = createCaptureMemoryHold(inputs, output_capacity);
         graph_instances_[seq_len].mem_hold_.attn_pyobj_ =
             prepareFmhaImpl(graph_instances_[seq_len].mem_hold_.py_model_inputs_, true);

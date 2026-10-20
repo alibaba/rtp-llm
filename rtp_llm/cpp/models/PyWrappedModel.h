@@ -112,8 +112,8 @@ private:
     torch_ext::PyEmbeddingInputs  buildPyEmbeddingInputs(const GptModelInputs& inputs);
     torch_ext::PyMultimodalInputs buildPyMultimodalInputs(const GptModelInputs& inputs);
     torch_ext::BertEmbeddingInputs
-                                    buildBertEmbeddingInputs(const GptModelInputs& inputs,
-                                                             const torch::Tensor&  prepared_position_ids = torch::Tensor());
+    buildBertEmbeddingInputs(const GptModelInputs& inputs,
+                             const torch::Tensor&  prepared_position_ids = torch::Tensor());
     torch_ext::AttentionInputsByTag setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_attn_inputs,
                                                                    const GptModelInputs&         inputs);
     GptModelOutputs                 callForwardPostLayers(torch::Tensor         hidden_states,
@@ -128,7 +128,7 @@ private:
     bool          shouldCaptureHiddenStates(const GptModelInputs& inputs);
 
     // Methods absorbed from GptModel
-    torch::Tensor   tpSyncEmbeddingOrLogits(const torch::Tensor& input);
+    torch::Tensor   tpSyncEmbeddingOrLogits(const torch::Tensor& input, bool fp32_logits = false);
     GptModelOutputs forwardPostLayers(torch::Tensor         hidden,
                                       const bool            has_context_request,
                                       const bool            need_all_logits,

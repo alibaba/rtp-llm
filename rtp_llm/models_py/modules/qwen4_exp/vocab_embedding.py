@@ -4,7 +4,6 @@ import torch
 from torch import nn
 
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
-from rtp_llm.models_py.modules.qwen4_exp.ple.ple_gather_triton import gather_local
 
 
 class Qwen4Fp8VocabEmbedding(nn.Module):
@@ -33,6 +32,7 @@ class Qwen4Fp8VocabEmbedding(nn.Module):
         self.weight_scale = weight_scale.to(device=device, dtype=torch.float32).reshape(
             1
         )
+        self.column_scales = None
         self.tp_size = tp_size
         self.hidden_size = weight.shape[1]
         self.vocab_size = weight.shape[0]
@@ -55,6 +55,39 @@ class Qwen4Fp8VocabEmbedding(nn.Module):
             self.column_tiles, dtype=torch.int64, device=self.device
         )
 
+    def prepare_byte_gather(self, *, role="PDFUSION"):
+        """Collect immutable column scales once, before serving or capture.
+
+        FP8 vocabulary storage and its quantization scales already require a
+        model restart for replacement. Keep each rank's original scale; TP
+        shards are independently quantized and must not share a scalar.
+        """
+        # Engine ParallelismConfig supplies RoleType enums. Standalone callers
+        # may supply their string names; normalize both at this public boundary.
+        if str(role).rsplit(".", 1)[-1] not in ("PREFILL", "PDFUSION"):
+            return
+        if self.column_scales is not None:
+            return
+        if torch.cuda.is_current_stream_capturing():
+            raise RuntimeError("prepare vocabulary column scales before capture")
+        if not (
+            self.tp_size == 2
+            and self.hidden_size == 1280
+            and torch.version.hip is None
+            and torch.cuda.get_device_capability(self.device) == (12, 0)
+        ):
+            return
+        scales = all_gather(self.weight_scale, group=Group.TP)
+        if not (
+            scales.device == self.device
+            and scales.dtype == torch.float32
+            and scales.numel() == self.tp_size
+            and scales.is_contiguous()
+        ):
+            raise ValueError("invalid TP vocabulary column scales")
+        self.column_scales = scales.reshape(self.tp_size)
+        self.weight_scale._rtp_requires_restart_for_update = True
+
     def forward(
         self,
         input: torch.Tensor,
@@ -68,19 +101,15 @@ class Qwen4Fp8VocabEmbedding(nn.Module):
             or input.dtype not in (torch.int32, torch.int64)
         ):
             raise ValueError("FP8 vocabulary lookup requires packed CUDA token ids")
-        tokens = input.to(torch.int64)
-        tokens = torch.where((tokens >= 0) & (tokens < self.vocab_size), tokens, -1)
-        ids = tokens.unsqueeze(-1) * self.column_tiles + self.columns
-        output = gather_local(
-            ids, self.shards, (0,), 1, self.pointer_table, scale=self.weight_scale
-        ).view(input.numel(), self.hidden_size)
         if text_tokens_mask is not None and text_tokens_mask.numel():
             if (
                 text_tokens_mask.device != input.device
                 or text_tokens_mask.shape != input.shape
             ):
                 raise ValueError("vocabulary text mask must match packed token ids")
-            output = torch.where(text_tokens_mask.bool().unsqueeze(-1), output, 0)
+        from .vocab_embedding_triton import vocab_rows
+
+        output = vocab_rows(input, self.weight, self.weight_scale, text_tokens_mask)
         if self.tp_size > 1:
             rows, width = output.shape
             output = all_gather(output, group=Group.TP)
@@ -91,3 +120,48 @@ class Qwen4Fp8VocabEmbedding(nn.Module):
                 .reshape(rows, -1)
             )
         return output
+
+    def forward_hyper(self, input, *, branches, text_tokens_mask=None):
+        """Target-only embedding consumer; keep MTP's ordinary hidden width."""
+        if (
+            input.device != self.device
+            or input.ndim != 1
+            or input.dtype not in (torch.int32, torch.int64)
+        ):
+            raise ValueError("FP8 vocabulary lookup requires packed CUDA token ids")
+        if (
+            text_tokens_mask is not None
+            and text_tokens_mask.numel()
+            and (
+                text_tokens_mask.device != input.device
+                or text_tokens_mask.shape != input.shape
+            )
+        ):
+            raise ValueError("vocabulary text mask must match packed token ids")
+        if (
+            self.column_scales is not None
+            and branches == 4
+            and self.tp_size == 2
+            and self.hidden_size == 1280
+            and 1024 <= input.numel() <= 12288
+        ):
+            from .vocab_byte_gather import dequant_hyper, raw_rows
+
+            local = raw_rows(input, self.weight)
+            gathered = all_gather(local, group=Group.TP)
+            return dequant_hyper(
+                gathered,
+                self.column_scales,
+                input.numel(),
+                self.hidden_size,
+                self.tp_size,
+                branches,
+                text_tokens_mask,
+            )
+        from .vocab_embedding_triton import gather_hyper_rows, vocab_rows
+
+        local = vocab_rows(input, self.weight, self.weight_scale, text_tokens_mask)
+        gathered = all_gather(local, group=Group.TP) if self.tp_size > 1 else local
+        return gather_hyper_rows(
+            gathered, local.shape[0], local.shape[1], self.tp_size, branches
+        )

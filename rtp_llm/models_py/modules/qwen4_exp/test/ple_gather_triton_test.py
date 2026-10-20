@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 import torch
 
@@ -47,6 +48,74 @@ class PLEGatherTritonTest(unittest.TestCase):
         graph.replay()
         expected = module._gather_torch(ids)
         torch.testing.assert_close(output, expected, rtol=0, atol=0)
+
+    def test_cpu_fp8_prefill_tiling_preserves_all_bit_patterns(self):
+        from rtp_llm.models_py.modules.qwen4_exp.ple.ple_gather_triton import (
+            gather_local,
+            prepare_cpu_uva_shards,
+        )
+
+        raw = (
+            torch.arange(256, dtype=torch.int32)
+            .to(torch.uint8)
+            .repeat(5)
+            .reshape(8, 160)
+        )
+        shards, pointers = prepare_cpu_uva_shards(
+            [raw.view(torch.float8_e4m3fn)],
+            [0],
+            2,
+            torch.device("cuda", torch.cuda.current_device()),
+        )
+        for n in (17, 65536, 131072, 196608):
+            ids = torch.arange(n, device="cuda", dtype=torch.int64) % 20 - 2
+            for value in (0.00003125, 0.119713, 8.0):
+                scale = torch.tensor([value], device="cuda")
+                with patch.dict("os.environ", {"QWEN4_PLE_UVA_ROW_TILING": "0"}):
+                    expected = gather_local(ids, shards, (0,), 2, pointers, scale=scale)
+                with patch.dict("os.environ", {"QWEN4_PLE_UVA_ROW_TILING": "1"}):
+                    actual = gather_local(ids, shards, (0,), 2, pointers, scale=scale)
+                self.assertTrue(
+                    torch.equal(actual.view(torch.int16), expected.view(torch.int16))
+                )
+
+    def test_cpu_fp8_prefill_tiling_graph_refreshes_ids_and_scale(self):
+        from rtp_llm.models_py.modules.qwen4_exp.ple.ple_gather_triton import (
+            gather_local,
+            prepare_cpu_uva_shards,
+        )
+
+        shard = (
+            torch.arange(8 * 160, dtype=torch.float32)
+            .reshape(8, 160)
+            .remainder(63)
+            .to(torch.float8_e4m3fn)
+        )
+        shards, pointers = prepare_cpu_uva_shards(
+            [shard], [0], 2, torch.device("cuda", torch.cuda.current_device())
+        )
+        ids = torch.arange(65536, device="cuda", dtype=torch.int64) % 20 - 2
+        scale = torch.tensor([0.119713], device="cuda")
+        with patch.dict("os.environ", {"QWEN4_PLE_UVA_ROW_TILING": "1"}):
+            for _ in range(3):
+                gather_local(ids, shards, (0,), 2, pointers, scale=scale)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                actual = gather_local(ids, shards, (0,), 2, pointers, scale=scale)
+        for generation in range(8):
+            ids.copy_(
+                (torch.arange(65536, device="cuda", dtype=torch.int64) + generation)
+                % 20
+                - 2
+            )
+            scale.fill_((generation + 1) * 0.119713)
+            graph.replay()
+            with patch.dict("os.environ", {"QWEN4_PLE_UVA_ROW_TILING": "0"}):
+                expected = gather_local(ids, shards, (0,), 2, pointers, scale=scale)
+            self.assertTrue(
+                torch.equal(actual.view(torch.int16), expected.view(torch.int16))
+            )
+        graph.reset()
 
 
 if __name__ == "__main__":

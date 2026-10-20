@@ -73,6 +73,25 @@ public:
         runner_ = CudaGraphRunner::initializeCapture(std::make_unique<CudaGraphRunner>(params, std::move(py_instance)));
     }
 
+    void init_mtp_draft_prefill(py::object py_instance, int64_t max_requests, int64_t hidden_size) {
+        reset_runner();
+        GraphParams params;
+        params.enable_cuda_graph       = true;
+        params.role                    = CudaGraphRole::MTP_DRAFT_PREFILL;
+        params.max_seq_len             = 64;
+        params.tokens_per_block        = 64;
+        params.kernel_tokens_per_block = 64;
+        params.num_tokens_per_bs       = 4;
+        params.hc_mult                 = 4;
+        params.max_context_batch_size  = static_cast<size_t>(max_requests);
+        params.hidden_size             = static_cast<size_t>(hidden_size);
+        params.input_hidden_size       = static_cast<size_t>(hidden_size * 4);
+        params.model_data_type         = c10::ScalarType::BFloat16;
+        params.position_id_len_factor  = 1;
+        params.kv_cache_group_tags     = {"full"};
+        runner_ = CudaGraphRunner::initializeCapture(std::make_unique<CudaGraphRunner>(params, std::move(py_instance)));
+    }
+
     void init_generation_prefill(py::object                   py_instance,
                                  int64_t                      max_requests,
                                  int64_t                      max_seq_len,
@@ -251,9 +270,14 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("kernel_block_table_width"),
              py::arg("prefill_capture_seq_lens"),
              py::arg("hidden_size"),
-             py::arg("group_tags")            = std::vector<std::string>{},
-             py::arg("position_encoding")     = py::none(),
-             py::arg("token_type_embedding")  = py::none())
+             py::arg("group_tags")           = std::vector<std::string>{},
+             py::arg("position_encoding")    = py::none(),
+             py::arg("token_type_embedding") = py::none())
+        .def("init_mtp_draft_prefill",
+             &CudaGraphTestRunner::init_mtp_draft_prefill,
+             py::arg("py_instance"),
+             py::arg("max_requests"),
+             py::arg("hidden_size"))
         .def("init_decode",
              &CudaGraphTestRunner::init_decode,
              py::arg("py_instance"),
@@ -261,11 +285,11 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("max_seq_len"),
              py::arg("kernel_block_table_width"),
              py::arg("decode_capture_batch_sizes"),
-             py::arg("group_tags")        = std::vector<std::string>{},
-             py::arg("is_target_verify")  = false,
-             py::arg("num_tokens_per_bs") = 1,
+             py::arg("group_tags")             = std::vector<std::string>{},
+             py::arg("is_target_verify")       = false,
+             py::arg("num_tokens_per_bs")      = 1,
              py::arg("position_id_len_factor") = 0,
-             py::arg("exact_batch_only")        = false)
+             py::arg("exact_batch_only")       = false)
         .def("init_generation_prefill",
              &CudaGraphTestRunner::init_generation_prefill,
              py::arg("py_instance"),

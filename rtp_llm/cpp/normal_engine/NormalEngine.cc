@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/distribute/CpuTpBroadcaster.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
@@ -674,6 +675,10 @@ absl::Status NormalEngine::stop() {
     RTP_LLM_LOG_INFO("stop normal engine");
     running_ = false;
     RETURN_IF_STATUS_ERROR(scheduler_->stop());
+    // A non-root idle MTP loop may be waiting for the next CPU input frame.
+    // Wake it before join; otherwise rank 0's model teardown collective waits
+    // for a peer that cannot reach its own model destructor.
+    CpuTpBroadcaster::instance().interruptReceive();
     loop_thread_->join();
     // Join the async dispatch runner and release the dispatcher-owned worker pool.
     executor_.reset();

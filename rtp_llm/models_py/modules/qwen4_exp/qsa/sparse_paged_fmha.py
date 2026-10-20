@@ -137,6 +137,7 @@ def _sparse_paged_online_split_kernel(
     selected_width,
     max_blocks,
     cache_blocks,
+    HAS_COUNT: tl.constexpr,
     FP8_CACHE: tl.constexpr,
     H_Q: tl.constexpr,
     H_KV: tl.constexpr,
@@ -162,13 +163,24 @@ def _sparse_paged_online_split_kernel(
     maximum = tl.full((), float("-inf"), tl.float32)
     normalizer = tl.zeros((), tl.float32)
     acc = tl.zeros((D,), tl.float32)
-    for block in range(BLOCKS_PER_SPLIT):
+    count = (
+        tl.minimum(tl.maximum(tl.load(row + selected_width), 0), selected_width)
+        if HAS_COUNT
+        else selected_width
+    )
+    limit = tl.maximum(
+        0,
+        tl.minimum(
+            BLOCKS_PER_SPLIT, tl.cdiv(count - split * BLOCK_K, NUM_SPLITS * BLOCK_K)
+        ),
+    )
+    for block in range(limit):
         # Interleave chunks so a short valid prefix is not concentrated in
         # one partition when the selected tensor has a fixed wide capacity.
         offset = (block * NUM_SPLITS + split) * BLOCK_K + tl.arange(0, BLOCK_K)
-        index = tl.load(row + offset, mask=offset < selected_width, other=-1)
+        index = tl.load(row + offset, mask=offset < count, other=-1)
         logical = index // PAGE_SIZE
-        candidate = (offset < selected_width) & (index >= 0) & (index < kv_len)
+        candidate = (offset < count) & (index >= 0) & (index < kv_len)
         physical = tl.load(
             block_table_ptr + batch * stride_bt_b + logical * stride_bt_block,
             mask=candidate & (logical < max_blocks),
@@ -226,8 +238,12 @@ def _sparse_paged_online_split_kernel(
 def _merge_sparse_paged_splits_kernel(
     partial_ptr,
     out_ptr,
+    gate_ptr,
     D: tl.constexpr,
     NUM_SPLITS: tl.constexpr,
+    HEADS: tl.constexpr,
+    QUERIES: tl.constexpr,
+    WITH_GATE: tl.constexpr,
 ):
     row = tl.program_id(0)
     splits = tl.arange(0, NUM_SPLITS)
@@ -242,7 +258,17 @@ def _merge_sparse_paged_splits_kernel(
     numerator = tl.sum(partial * scale[:, None], axis=0)
     denominator = tl.sum(sums * scale, axis=0)
     out = tl.where(denominator > 0, numerator / denominator, 0.0)
-    tl.store(out_ptr + row * D + rd, out.to(out_ptr.dtype.element_ty))
+    if WITH_GATE:
+        batch = row // (HEADS * QUERIES)
+        head = (row // QUERIES) % HEADS
+        query = row % QUERIES
+        offset = ((batch * QUERIES + query) * HEADS + head) * D + rd
+        gate = tl.load(gate_ptr + offset).to(tl.float32)
+        sigmoid = tl.sigmoid(gate).to(tl.bfloat16).to(tl.float32)
+        out = out.to(tl.bfloat16).to(tl.float32) * sigmoid
+    else:
+        offset = row * D + rd
+    tl.store(out_ptr + offset, out.to(out_ptr.dtype.element_ty))
 
 
 def sparse_paged_gqa_attn(
@@ -257,6 +283,9 @@ def sparse_paged_gqa_attn(
     kv_scale: torch.Tensor | None = None,
     block_k: int = _BLOCK_K,
     graph_capture: bool = False,
+    output_gate: torch.Tensor | None = None,
+    selected_has_count: bool = False,
+    fp16_pv: bool = False,
 ) -> torch.Tensor:
     """Attend to request-local token indices in a paged main MHA cache.
 
@@ -278,6 +307,15 @@ def sparse_paged_gqa_attn(
     if q.dim() != 4 or q.dtype != torch.bfloat16 or not q.is_cuda:
         raise ValueError("q must be a rank-4 BF16 CUDA tensor")
     batch, q_heads, query_len, head_dim = q.shape
+    if output_gate is not None and not (
+        output_gate.shape == (batch, query_len, q_heads, head_dim)
+        and output_gate.dtype == torch.bfloat16
+        and output_gate.device == q.device
+        and output_gate.is_contiguous()
+    ):
+        raise ValueError(
+            "QSA output gate must be contiguous BF16 [B,S,H,D] on the query device"
+        )
     if q_heads <= 0 or head_dim <= 0 or head_dim & (head_dim - 1):
         raise ValueError("query heads must be positive and head_dim a power of two")
     if page_size <= 0 or page_size & (page_size - 1):
@@ -296,6 +334,9 @@ def sparse_paged_gqa_attn(
         raise ValueError(f"selected must have leading shape [{batch}, {query_len}]")
     if selected.dtype != torch.int32:
         raise ValueError("selected must be int32")
+
+    if selected_has_count and selected.shape[-1] != 2052:
+        raise ValueError("packed QSA requires 2051 token slots and one valid_count")
 
     if kv_cache.dim() == 2:
         if kv_head_num is None or kv_head_num <= 0:
@@ -366,10 +407,20 @@ def sparse_paged_gqa_attn(
                 "qwen4 sparse paged GQA graph_capture requires an active capture or graph warmup"
             )
     else:
+        if selected_has_count:
+            count = selected[..., -1]
+            slots = torch.arange(2051, device=selected.device)
+            tokens = selected[..., :-1]
+            invalid = (count < 0) | (count > 2051) | ((tokens >= 0).sum(-1) != count)
+            invalid = (
+                invalid.any() | ((tokens >= 0) != (slots < count.unsqueeze(-1))).any()
+            )
+            if bool(invalid.item()):
+                raise ValueError("invalid packed QSA prefix/count")
         _validate_sparse_paged_indices(
             block_table,
             kv_lens,
-            selected,
+            selected[..., :-1] if selected_has_count else selected,
             page_size=page_size,
             cache_blocks=cache_blocks,
         )
@@ -382,11 +433,21 @@ def sparse_paged_gqa_attn(
     if batch == 0 or query_len == 0:
         return output
 
-    selected_width = int(selected.shape[2])
+    selected_width = int(selected.shape[2]) - int(selected_has_count)
     if selected_width == 0:
         output.zero_()
+        if output_gate is not None:
+            output = output * torch.sigmoid(output_gate.transpose(1, 2))
         return output
     splits = min(8, triton.next_power_of_2(triton.cdiv(selected_width, block_k)))
+    from .grouped_sparse_paged_fmha import preferred_splits
+
+    tuned_splits = preferred_splits(
+        q, kv_cache, selected, page_size=page_size, block_k=block_k
+    )
+    if tuned_splits is not None:
+        splits = tuned_splits
+
     partial = (
         torch.empty(
             (batch, q_heads, query_len, splits, head_dim + 2),
@@ -413,6 +474,7 @@ def sparse_paged_gqa_attn(
         splits=splits,
         block_k=block_k,
         scale=scale_view,
+        selected_has_count=selected_has_count,
     )
     if grouped:
         grouped_sparse_paged_split(
@@ -425,6 +487,8 @@ def sparse_paged_gqa_attn(
             page_size=page_size,
             splits=splits,
             scale=scale_view,
+            selected_has_count=selected_has_count,
+            fp16_pv=fp16_pv,
         )
     if not grouped:
         _sparse_paged_online_split_kernel[(batch, q_heads, query_len * splits)](
@@ -444,6 +508,7 @@ def sparse_paged_gqa_attn(
             selected_width,
             int(block_table.shape[1]),
             cache_blocks,
+            HAS_COUNT=selected_has_count,
             FP8_CACHE=scale_view is not None,
             H_Q=q_heads,
             H_KV=kv_heads,
@@ -456,7 +521,22 @@ def sparse_paged_gqa_attn(
             BLOCKS_PER_SPLIT=triton.cdiv(selected_width, block_k * splits),
         )
     if splits > 1:
+        if output_gate is not None:
+            # The owner consumes [B,S,H,D]. Store that layout directly, while
+            # retaining the public attention result's logical [B,H,S,D] shape.
+            output = torch.empty(
+                (batch, query_len, q_heads, head_dim), device=q.device, dtype=q.dtype
+            ).transpose(1, 2)
         _merge_sparse_paged_splits_kernel[(batch * q_heads * query_len,)](
-            partial, output, D=head_dim, NUM_SPLITS=splits
+            partial,
+            output,
+            output_gate if output_gate is not None else output,
+            D=head_dim,
+            NUM_SPLITS=splits,
+            HEADS=q_heads,
+            QUERIES=query_len,
+            WITH_GATE=output_gate is not None,
         )
+    elif output_gate is not None:
+        output = output * torch.sigmoid(output_gate.transpose(1, 2))
     return output

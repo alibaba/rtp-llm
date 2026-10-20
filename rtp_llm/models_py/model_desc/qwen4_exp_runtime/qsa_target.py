@@ -22,6 +22,7 @@ def select_target_verify_tokens(
     *,
     indexer: Any,
     rope_config: Any,
+    raw_query: bool = False,
 ) -> torch.Tensor:
     """Select all ``gamma + 1`` target rows using a bounded tail overwrite."""
     token_count = int(raw_keys.shape[0]) if raw_keys.dim() == 2 else -1
@@ -72,22 +73,6 @@ def select_target_verify_tokens(
         block_starts = flat_query_positions - flat_query_positions.remainder(ratio)
     get_frequency = getattr(indexer, "rope_inv_freq", None)
     frequency = get_frequency(rope_config) if callable(get_frequency) else None
-    rope_cos, rope_sin = build_qsa_rope_from_logical_positions(
-        block_starts,
-        rope_config,
-        token_count=token_count,
-        dtype=raw_keys.dtype,
-        device=raw_keys.device,
-        inv_freq=frequency,
-    )
-    current_cos, current_sin = build_qsa_rope_from_logical_positions(
-        flat_query_positions,
-        rope_config,
-        token_count=token_count,
-        dtype=raw_keys.dtype,
-        device=raw_keys.device,
-        inv_freq=frequency,
-    )
     target_writer = True
     target_writer = target_writer and (
         1 <= query_len <= ratio == 4
@@ -97,51 +82,114 @@ def select_target_verify_tokens(
     )
     if bool(self.main_inputs.is_cuda_graph) and not target_writer:
         raise RuntimeError("qwen4_exp QSA target Graph requires Triton writer")
-    if target_writer:
-        from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_decode_triton import (
-            write_target_window_with_undo_,
+    rotated_q = None
+    prepared = None
+    if raw_query and target_writer:
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.target_prepare_triton import (
+            try_prepare_target_window,
         )
 
         if self._side_cache_undo is not None:
             raise RuntimeError("qwen4_exp QSA side-cache transaction is already active")
-        undo = write_target_window_with_undo_(
+        prepared = try_prepare_target_window(
+            q,
             raw_keys,
             plan.prefixes,
-            rope_cos,
-            rope_sin,
+            flat_query_positions,
+            block_starts,
+            frequency,
+            indexer.q_norm_gamma,
             indexer.k_norm_gamma,
             plan.kv_pool,
             plan.kv_table,
             plan.state_pool,
             plan.state_table,
+            rope_config=rope_config,
             norm_eps=float(indexer.norm_eps),
         )
+    if prepared is not None:
+        rotated_q, undo = prepared
         object.__setattr__(self, "_side_cache_undo", undo)
     else:
-        self._write_indexer_cache_transactional(
-            raw_keys,
-            plan.cu_seqlens,
-            plan.prefixes.to(torch.int64),
-            rope_cos,
-            rope_sin,
-            indexer.k_norm_gamma,
-            plan.kv_pool,
-            plan.kv_table,
-            plan.state_pool,
-            plan.state_table,
-            ratio=ratio,
-            kv_tokens_per_block=int(plan.kv_tokens_per_block),
-            state_tokens_per_block=int(plan.state_tokens_per_block),
-            norm_eps=float(indexer.norm_eps),
-            rope_is_token_aligned=True,
+        rope_cos, rope_sin = build_qsa_rope_from_logical_positions(
+            block_starts,
+            rope_config,
+            token_count=token_count,
+            dtype=raw_keys.dtype,
+            device=raw_keys.device,
+            inv_freq=frequency,
         )
+        current_cos, current_sin = build_qsa_rope_from_logical_positions(
+            flat_query_positions,
+            rope_config,
+            token_count=token_count,
+            dtype=raw_keys.dtype,
+            device=raw_keys.device,
+            inv_freq=frequency,
+        )
+        if target_writer:
+            from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_decode_triton import (
+                write_target_window_with_undo_,
+            )
 
+            if self._side_cache_undo is not None:
+                raise RuntimeError(
+                    "qwen4_exp QSA side-cache transaction is already active"
+                )
+            undo = write_target_window_with_undo_(
+                raw_keys,
+                plan.prefixes,
+                rope_cos,
+                rope_sin,
+                indexer.k_norm_gamma,
+                plan.kv_pool,
+                plan.kv_table,
+                plan.state_pool,
+                plan.state_table,
+                norm_eps=float(indexer.norm_eps),
+            )
+            object.__setattr__(self, "_side_cache_undo", undo)
+        else:
+            self._write_indexer_cache_transactional(
+                raw_keys,
+                plan.cu_seqlens,
+                plan.prefixes.to(torch.int64),
+                rope_cos,
+                rope_sin,
+                indexer.k_norm_gamma,
+                plan.kv_pool,
+                plan.kv_table,
+                plan.state_pool,
+                plan.state_table,
+                ratio=ratio,
+                kv_tokens_per_block=int(plan.kv_tokens_per_block),
+                state_tokens_per_block=int(plan.state_tokens_per_block),
+                norm_eps=float(indexer.norm_eps),
+                rope_is_token_aligned=True,
+            )
+
+        q = q.view(batch_size, query_len, head_num, head_dim)
+        cosine = current_cos.view(batch_size, query_len, 1, -1)
+        sine = current_sin.view(batch_size, query_len, 1, -1)
+        rotated_q = None
+        if raw_query:
+            from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_norm_rope import (
+                try_indexer_norm_rope,
+            )
+
+            rotated_q = try_indexer_norm_rope(
+                q, cosine, sine, indexer.q_norm_gamma, indexer.norm_eps
+            )
+            if rotated_q is None:
+                from rtp_llm.models_py.modules.qwen4_exp.qsa.norm import (
+                    exact_head_rms_norm,
+                )
+
+                q = exact_head_rms_norm(q, indexer.q_norm_gamma, indexer.norm_eps)
+        if rotated_q is None:
+            rotated_q = apply_partial_rope(q, cosine, sine)
     q = q.view(batch_size, query_len, head_num, head_dim)
-    rotated_q = apply_partial_rope(
-        q,
-        current_cos.view(batch_size, query_len, 1, -1),
-        current_sin.view(batch_size, query_len, 1, -1),
-    )
+    rotated_q = rotated_q.view(batch_size, query_len, head_num, head_dim)
     get_weights = getattr(indexer, "score_weights", None)
     score_weights = (
         get_weights(token_count, q.device) if callable(get_weights) else None
@@ -174,4 +222,5 @@ def select_target_verify_tokens(
         compress_ratio=ratio,
         token_budget=token_budget,
         validate_lengths=False,
+        scores_are_masked=True,
     )

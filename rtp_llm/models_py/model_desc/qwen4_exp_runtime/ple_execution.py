@@ -195,6 +195,8 @@ class PLEExecution:
         graph_key = inputs.input_ids.data_ptr()
         for key, ple in self.ple_layers.items():
             embedding = ple.ple_embedding
+            if getattr(embedding, "inline_cpu_uva_graph", False):
+                continue
             cache = self.kv_cache.get_layer_cache(int(key), PLE_NGRAM_CTX_TAG)
             pool = self._fixed_state_pool(
                 cache, torch.int64, embedding.context_len, 1
@@ -422,6 +424,7 @@ class PLEExecution:
                             history,
                             page_size,
                             state,
+                            add_residual=True,
                             embeddings=PLELookupResult(
                                 ple.ple_embedding._reduce_rows(local_rows[idx])
                                 if local_rows is not None
@@ -478,7 +481,7 @@ class PLEExecution:
                                     else None
                                 ).embeddings,
                             )
-                        chunk_outputs.append(output.squeeze(0))
+                        chunk_outputs.append((chunk_hyper + output).squeeze(0))
                         write_rows.append(idx)
                         write_pages.append((prefix + end - 1) // page_size)
                         write_states.append(state.squeeze(0))
@@ -534,7 +537,7 @@ class PLEExecution:
                     write_ctx_blocks[writable],
                     torch.stack(write_contexts)[writable].to(ctx_pool.dtype),
                 )
-                return hyper_states + torch.cat(outputs, dim=0)
+                return outputs[0] if len(outputs) == 1 else torch.cat(outputs, dim=0)
 
             lengths = state_inputs.input_lengths
             sequence_lengths = state_inputs.sequence_lengths
