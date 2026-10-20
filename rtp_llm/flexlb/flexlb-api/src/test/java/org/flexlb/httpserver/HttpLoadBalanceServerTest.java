@@ -70,6 +70,7 @@ class HttpLoadBalanceServerTest {
         WorkerStatus status = mock(WorkerStatus.class);
         when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
         when(endpoint.getStatus()).thenReturn(status);
+        when(status.pollHealth()).thenReturn(new WorkerStatus.PollHealth(0, 0, 0, true));
         when(status.cacheIndexSnapshot()).thenReturn(
                 new WorkerStatus.CacheIndexSnapshot(
                         CacheStatus.builder()
