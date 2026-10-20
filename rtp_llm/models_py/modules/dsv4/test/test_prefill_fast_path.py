@@ -2,19 +2,22 @@ import inspect
 import unittest
 from collections import namedtuple
 from contextlib import nullcontext
+from contextvars import Context, copy_context
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import torch
 import torch.nn as nn
 
+import rtp_llm.models_py.model_desc.deepseek_v4_model as model_module
+from rtp_llm.models_py.model_desc.deepseek_v4_model import DeepSeekV4Model
 from rtp_llm.models_py.model_desc.hidden_state_capture import CaptureContext
 from rtp_llm.models_py.modules.dsv4 import _profiler
 from rtp_llm.models_py.modules.dsv4.block import Block
 from rtp_llm.models_py.modules.dsv4.fp8.attention import AttentionFP8
 from rtp_llm.models_py.modules.dsv4.prefill import forward as prefill_forward
 from rtp_llm.models_py.modules.dsv4.transformer import V4Transformer
-from rtp_llm.models_py.modules.factory.fused_moe.utils import profiler as moe_profiler
+from rtp_llm.models_py.utils import profiler as moe_profiler
 
 _FakePrefillMeta = namedtuple("_FakePrefillMeta", ["workspace"])
 
@@ -213,6 +216,112 @@ class _PrefillForwardTestBase(unittest.TestCase):
 
 
 class PrefillFastPathTest(_PrefillForwardTestBase):
+    def test_capture_ranges_survive_fast_path_suppression(self):
+        for ranges_enabled, outer_disabled, fail_capture in (
+            (True, False, False),
+            (False, False, False),
+            (True, True, False),
+            (True, False, True),
+        ):
+            with self.subTest(
+                ranges_enabled=ranges_enabled,
+                outer_disabled=outer_disabled,
+                fail_capture=fail_capture,
+            ):
+                v4 = _FakeV4()
+                hook_gates = []
+
+                def capture_layer(hidden, residual):
+                    hook_gates.append(_profiler.record_function_ranges_enabled())
+                    if fail_capture:
+                        raise RuntimeError("capture failure")
+                    return hidden.mean(dim=-2)
+
+                plan = CaptureContext.configured(
+                    [1, 0], capture_layer, lambda hidden, residual: hidden
+                )
+                model = DeepSeekV4Model.__new__(DeepSeekV4Model)
+                nn.Module.__init__(model)
+                model.v4 = v4
+                model.kv_cache = object()
+                model.parallelism_config = SimpleNamespace()
+                model._capture_context = plan
+                inputs = SimpleNamespace(
+                    input_ids=torch.tensor([3, 4]),
+                    attention_inputs=SimpleNamespace(is_prefill=True),
+                    capture_hidden_states=True,
+                )
+
+                def forward_prefill(v4, kv_cache, parallelism, inputs, **kwargs):
+                    return prefill_forward.forward_layers(
+                        v4,
+                        kv_cache=None,
+                        input_ids=inputs.input_ids,
+                        positions=torch.tensor([7, 8]),
+                        cu_seqlens=torch.tensor([0, 2]),
+                        block_tables_by_type=None,
+                        capture_context=kwargs["capture_context"],
+                    )
+
+                with patch.object(
+                    _profiler, "_RANGES_ENABLED", ranges_enabled
+                ), patch.dict(
+                    prefill_forward.os.environ, {"DSV4_PREFILL_FAST_PATH": "1"}
+                ), patch.object(
+                    prefill_forward._rt, "ENABLED", False
+                ), patch.object(
+                    prefill_forward._fwd_dbg, "enabled", return_value=False
+                ), patch.object(
+                    prefill_forward, "PrefillWorkspace"
+                ), patch.object(
+                    prefill_forward, "build_and_propagate_prefill_meta_fp8"
+                ), patch.object(
+                    prefill_forward, "clear_prefill_meta_shared_fp8"
+                ), patch.object(
+                    model_module,
+                    "primary_attention_inputs",
+                    return_value=inputs.attention_inputs,
+                ), patch.object(
+                    model_module, "forward_prefill", side_effect=forward_prefill
+                ), torch.profiler.profile(
+                    activities=[torch.profiler.ProfilerActivity.CPU]
+                ) as prof:
+                    with (
+                        _profiler.disable_record_function_ranges()
+                        if outer_disabled
+                        else nullcontext()
+                    ):
+                        with (
+                            self.assertRaisesRegex(RuntimeError, "capture failure")
+                            if fail_capture
+                            else nullcontext()
+                        ):
+                            result = model.forward(inputs)
+                    self.assertTrue(moe_profiler.record_function_ranges_enabled())
+                events = [
+                    e
+                    for e in prof.events()
+                    if e.name.startswith("hidden_state_capture.")
+                ]
+                expected_names = []
+                if ranges_enabled and not outer_disabled:
+                    expected_names = ["hidden_state_capture.layer(layer=0)"]
+                    if not fail_capture:
+                        expected_names += [
+                            "hidden_state_capture.layer(layer=1)",
+                            "hidden_state_capture.pack",
+                        ]
+                self.assertEqual([e.name for e in events], expected_names)
+                self.assertTrue(all(not e.is_user_annotation for e in events))
+                self.assertTrue(hook_gates)
+                self.assertFalse(any(hook_gates))
+                if not fail_capture:
+                    embedded = v4.embed(torch.tensor([3, 4]))
+                    torch.testing.assert_close(
+                        result,
+                        torch.cat([embedded + 3, embedded + 1, embedded + 103], dim=-1),
+                    )
+
     def test_fast_forward_keeps_layer_ranges_with_nested_ranges_disabled(self):
         v4 = _FakeV4()
         with patch.object(_profiler, "_RANGES_ENABLED", True), patch.dict(
@@ -378,6 +487,70 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
                 pass
 
         self.assertEqual(calls, ["before", "after"])
+
+    def test_shared_record_function_ranges_restore_after_nested_exceptions(self):
+        def assert_ranges_enabled(expected):
+            self.assertEqual(_profiler.record_function_ranges_enabled(), expected)
+            self.assertEqual(moe_profiler.record_function_ranges_enabled(), expected)
+
+        for outer, inner in (
+            (_profiler, moe_profiler),
+            (moe_profiler, _profiler),
+        ):
+            with self.subTest(outer=outer.__name__), patch.object(
+                _profiler, "_RANGES_ENABLED", True
+            ):
+                assert_ranges_enabled(True)
+                with self.assertRaisesRegex(RuntimeError, "outer failure"):
+                    with outer.disable_record_function_ranges():
+                        assert_ranges_enabled(False)
+                        with self.assertRaisesRegex(RuntimeError, "inner failure"):
+                            with inner.disable_record_function_ranges():
+                                assert_ranges_enabled(False)
+                                raise RuntimeError("inner failure")
+                        assert_ranges_enabled(False)
+                        with inner.disable_record_function_ranges():
+                            assert_ranges_enabled(False)
+                        assert_ranges_enabled(False)
+                        raise RuntimeError("outer failure")
+                assert_ranges_enabled(True)
+
+    def test_shared_record_function_ranges_are_context_local(self):
+        def assert_ranges_enabled(expected):
+            self.assertEqual(_profiler.record_function_ranges_enabled(), expected)
+            self.assertEqual(moe_profiler.record_function_ranges_enabled(), expected)
+
+        def disable_in_isolated_context():
+            assert_ranges_enabled(True)
+            with self.assertRaisesRegex(RuntimeError, "isolated failure"):
+                with moe_profiler.disable_record_function_ranges():
+                    assert_ranges_enabled(False)
+                    raise RuntimeError("isolated failure")
+            assert_ranges_enabled(True)
+
+        def nest_in_inherited_context():
+            assert_ranges_enabled(False)
+            with _profiler.disable_record_function_ranges():
+                assert_ranges_enabled(False)
+            assert_ranges_enabled(False)
+
+        with patch.object(_profiler, "_RANGES_ENABLED", True):
+            assert_ranges_enabled(True)
+            enabled_context = copy_context()
+            fresh_context = Context()
+            with _profiler.disable_record_function_ranges():
+                disabled_context = copy_context()
+                assert_ranges_enabled(False)
+                for context in (enabled_context, fresh_context):
+                    context.run(disable_in_isolated_context)
+                    assert_ranges_enabled(False)
+                disabled_context.run(nest_in_inherited_context)
+                assert_ranges_enabled(False)
+            assert_ranges_enabled(True)
+            disabled_context.run(nest_in_inherited_context)
+            assert_ranges_enabled(True)
+            enabled_context.run(assert_ranges_enabled, True)
+            fresh_context.run(assert_ranges_enabled, True)
 
     def test_disabled_record_function_range_uses_reusable_noop_context(self):
         with patch.object(_profiler, "_RANGES_ENABLED", True):
@@ -685,12 +858,16 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
         lengths = torch.tensor([2, 0, 3], dtype=torch.int32)
         for placeholder in (None, torch.empty(0, dtype=torch.int32), torch.tensor([0])):
             for device_lengths in (None, torch.empty(0, dtype=torch.int32), lengths):
-                with self.subTest(placeholder=placeholder, device_lengths=device_lengths):
+                with self.subTest(
+                    placeholder=placeholder, device_lengths=device_lengths
+                ):
                     attn = SimpleNamespace(
                         cu_seqlens=placeholder,
                         cu_seqlens_device=placeholder,
                         combo_position_ids=torch.arange(5),
-                        input_lengths=lengths if device_lengths is not lengths else None,
+                        input_lengths=(
+                            lengths if device_lengths is not lengths else None
+                        ),
                         input_lengths_device=device_lengths,
                     )
 
@@ -856,7 +1033,9 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
                 prefill_forward.os.environ, {}, clear=True
             ), patch.object(prefill_forward._rt, "ENABLED", False), patch.object(
                 prefill_forward._fwd_dbg, "enabled", lambda: False
-            ), patch.object(v4, "norm", wraps=v4.norm) as norm:
+            ), patch.object(
+                v4, "norm", wraps=v4.norm
+            ) as norm:
                 out = prefill_forward.forward_layers(
                     v4,
                     kv_cache=None,
@@ -868,7 +1047,9 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
                     capture_context=capture_context.for_forward(enabled),
                 )
                 norm.assert_called_once()
-                torch.testing.assert_close(out, expected if enabled else expected[:, -2:])
+                torch.testing.assert_close(
+                    out, expected if enabled else expected[:, -2:]
+                )
                 self.assertIs(v4._mtp_hidden_buffer, aux_buffer)
                 torch.testing.assert_close(aux_buffer[:2], expected[:, 2:4])
                 self.assertTrue(torch.isnan(aux_buffer[2:]).all())

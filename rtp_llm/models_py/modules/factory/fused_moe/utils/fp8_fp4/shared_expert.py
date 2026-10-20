@@ -22,9 +22,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.config import (
 from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.warmup_sync import (
     cuda_graph_warmup_forward_enabled,
 )
-from rtp_llm.models_py.modules.factory.fused_moe.utils.profiler import (
-    record_function_range,
-)
+from rtp_llm.models_py.utils.profiler import record_function_range
 
 from .expert import require_silu_mul_split
 from .quantized_linear import create_fp8_linear
