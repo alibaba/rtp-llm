@@ -5,9 +5,9 @@ queue, worker, or connection; `kvcm` enables publishing.
 
 ## Semantics
 
-Events describe logical reusable keys, not physical block indices. A key is added only after every cache group that
-participates in prefix reuse is complete and matchable. Removing any required group deletes the key. Duplicate puts
-and LRU touches do not produce events.
+Events describe logical cache keys, not physical block indices. Reusable FULL/SWA components are reported independently;
+LINEAR and reuse-disabled groups are excluded. Each component requires a complete, IDLE, non-detached DEVICE GroupSet.
+Deleting a component preserves the others. Duplicate puts and LRU touches do not produce events.
 
 Cache mutations only attempt a bounded non-blocking enqueue; network I/O runs on the publisher worker. Queue overflow,
 request failure, heartbeat failure, periodic reconciliation, and the server's `snapshot_required` feedback trigger an
@@ -19,7 +19,7 @@ runtime cannot assign an unambiguous external owner and block granularity. Each 
 host state. When the value is empty, RTP-LLM derives a per-rank endpoint as
 `server_ip:(start_port + rank_id * worker_info_port_num)`.
 
-Publishing supports DEVICE prefix caches only; tail-sparse and non-DEVICE cache groups are unsupported.
+Publishing supports DEVICE FULL/SWA caches, including sparse tails. Any eligible non-DEVICE group disables publishing.
 
 ## KVCM lifecycle
 
@@ -32,9 +32,11 @@ commit semantics.
 `snapshot_required` requests a fresh snapshot. `retry_after_ms` delays data-event reports while heartbeats continue.
 Registration is preserved during throttling; missing instances/nodes and leader errors trigger re-registration.
 
-Events use `ST_EVENT_REPORT_L1P5`, medium `hbm`, and an `event_report://host/hbm?size=...` URI containing the aggregate
-byte size. Configure the corresponding L1P5 event storage on the server and add it to the Instance Group's
-`event_report_storage_candidates`.
+Events use `ST_EVENT_REPORT_L1P5`, medium `hbm`, and one spec `rtp_llm_hbm_<block_tokens>_<tag>` per eligible group.
+Its `event_report://host/hbm?size=...` URI records that group's byte size summed over TP ranks. Configure the L1P5
+event storage on the server and add it to the Instance Group's `event_report_storage_candidates`.
+
+Use a new instance ID for the per-tag schema. Consumers must check FULL history and SWA windows before reuse.
 
 ## Configuration
 
