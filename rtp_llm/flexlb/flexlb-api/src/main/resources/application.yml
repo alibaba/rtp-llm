@@ -9,7 +9,7 @@ spring:
     max-in-memory-size: ${MAX_IN_MEMORY_SIZE:10MB}
 logging:
   group:
-    flexlb: org.flexlb,flexlbLogger,syncLogger,syncConsistencyLogger
+    flexlb: org.flexlb,flexlbLogger,syncLogger,syncConsistencyLogger,kvcmLogger
   level:
     root: info
     io.grpc: info

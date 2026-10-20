@@ -1,5 +1,10 @@
 package org.flexlb.engine.grpc.client;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
+import com.fasterxml.jackson.databind.JsonNode;
 import io.grpc.Deadline;
 import io.grpc.Status.Code;
 import org.flexlb.config.CacheMatchConfiguration;
@@ -23,10 +28,12 @@ import org.flexlb.kvcm.grpc.Status;
 import org.flexlb.kvcm.grpc.StorageType;
 import org.flexlb.listener.ApplicationWarmupState;
 import org.flexlb.metric.NoOpFlexMonitor;
+import org.flexlb.util.JsonUtils;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -313,6 +320,62 @@ class KvcmGrpcClientTest {
 
         assertEquals(2, result.get("10.0.0.1:8601@1").localMatchBlocks());
         assertEquals(10, result.get("10.0.0.1:8601@1").globalMatchBlocks());
+    }
+
+    @Test
+    void logsOnlyRequestIdAndAllHostBlockCountsBeforeHostFiltering() throws Exception {
+        createHealthTestClient();
+        var errorResponse = GetHostCacheStateResponse.newBuilder()
+                .setHeader(CommonResponseHeader.newBuilder().setRequestId("server-request")
+                        .setTracerResult("trace-result")
+                        .setStatus(Status.newBuilder().setCode(ErrorCode.SERVICE_NOT_READY)
+                                .setMessage("not ready\nretry")))
+                .build();
+        var matchesResponse = GetHostCacheStateResponse.newBuilder().setHeader(okHeader())
+                .addHosts(HostCacheMatch.newBuilder().setHostIpPort("worker-1").setLocal(2).setGlobal(98))
+                .addHosts(HostCacheMatch.newBuilder().setHostIpPort("worker-2").setGlobal(4))
+                .addHosts(HostCacheMatch.newBuilder().setHostIpPort("worker-3"))
+                .addHosts(HostCacheMatch.newBuilder().setHostIpPort("worker-1").setGlobal(5))
+                .addHosts(HostCacheMatch.newBuilder().setGlobal(6))
+                .build();
+        when(healthMetaService.getHostCacheState(any(), any(), any(Deadline.class)))
+                .thenReturn(errorResponse, matchesResponse);
+        Logger logger = (Logger) LoggerFactory.getLogger("kvcmLogger");
+        Level originalLevel = logger.getLevel();
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        logger.setLevel(Level.INFO);
+        logger.addAppender(appender);
+        try {
+            assertThrows(KvcmQueryException.class, this::succeedQuery);
+            var matches = client.findMatchingEngines("query-log", List.of(11L, 22L), 2192L,
+                    RoleType.PREFILL, "default");
+            assertEquals(3, matches.size());
+            assertEquals(5, matches.get("worker-1").globalMatchBlocks());
+            assertEquals(2, appender.list.size());
+            var failure = JsonUtils.toObject(appender.list.getFirst().getFormattedMessage(), JsonNode.class);
+            assertEquals(2, failure.size());
+            assertEquals("health-query", failure.path("requestId").asText());
+            assertEquals(0, failure.path("hosts").size());
+            var success = JsonUtils.toObject(appender.list.get(1).getFormattedMessage(), JsonNode.class);
+            assertEquals("query-log", success.path("requestId").asText());
+            assertEquals(2, success.size());
+            assertEquals(5, success.path("hosts").size());
+            assertEquals(3, success.at("/hosts/0").size());
+            assertEquals("worker-1", success.at("/hosts/0/hostIpPort").asText());
+            assertEquals(2, success.at("/hosts/0/local").asLong());
+            assertEquals(98, success.at("/hosts/0/global").asLong());
+            assertEquals(0, success.at("/hosts/2/global").asLong());
+            assertEquals("worker-1", success.at("/hosts/3/hostIpPort").asText());
+            assertEquals("", success.at("/hosts/4/hostIpPort").asText());
+            for (var event : appender.list) {
+                assertTrue(!event.getFormattedMessage().contains("\n"));
+            }
+        } finally {
+            logger.detachAppender(appender);
+            logger.setLevel(originalLevel);
+            appender.stop();
+        }
     }
 
     @Test

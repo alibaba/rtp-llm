@@ -43,6 +43,7 @@ class FlexlbLoggingStartupTest {
             assertTrue(Files.exists(logDirectory.resolve("application.log")));
             assertTrue(Files.exists(logDirectory.resolve("pv.log")));
             assertTrue(Files.exists(logDirectory.resolve("flexlb.log")));
+            assertTrue(Files.exists(logDirectory.resolve("kvcm.log")));
         }
     }
 
