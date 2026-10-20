@@ -209,13 +209,19 @@ def forward_packed(vision, aligner, patches, grids, *, rope_bhsd=True):
     else:
         _, x = vision.norm.forward_with_residual(x, pending_mlp)
     ratio = aligner.downsample_ratio
-    columns, output_lengths = [], []
-    for part, (height, width) in zip(x.split(lengths, dim=0), grids):
-        image = part.view(height, width, -1).permute(2, 0, 1)
-        image = F.pad(image, (0, -width % ratio, 0, -height % ratio))
-        unfolded = F.unfold(image.unsqueeze(0), ratio, stride=ratio).squeeze(0)
-        columns.append(unfolded)
-        output_lengths.append(unfolded.shape[1])
+    from rtp_llm.models_py.modules.dsv41.vision_downsample_triton import (
+        apply_vision_downsample,
+    )
+
+    columns = apply_vision_downsample(x, grids, ratio)
+    if columns is None:
+        columns = []
+        for part, (height, width) in zip(x.split(lengths, dim=0), grids):
+            image = part.view(height, width, -1).permute(2, 0, 1)
+            image = F.pad(image, (0, -width % ratio, 0, -height % ratio))
+            unfolded = F.unfold(image.unsqueeze(0), ratio, stride=ratio).squeeze(0)
+            columns.append(unfolded)
+    output_lengths = [column.shape[1] for column in columns]
     # Preserve each image's original w1 GEMM
     # dimensions AND column-major leading dimension. Concatenating columns
     # before w1 changes its kernel/accumulation and fails the real-weight
