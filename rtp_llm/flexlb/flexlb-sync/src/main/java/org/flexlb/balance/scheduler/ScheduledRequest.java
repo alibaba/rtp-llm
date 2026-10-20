@@ -115,6 +115,12 @@ public final class ScheduledRequest implements Prioritized {
     public ServerStatus decode() { return decodeBinding.status(); }
     public PrefillEndpoint prefillEp() { return prefillEp; }
     public DecodeEndpoint decodeEp() { return decodeBinding.endpoint(); }
+
+    /** Advisory only: delivery still acquires the exact Decode permit. */
+    public boolean decodeReadyForDispatch() {
+        return decodeBinding.isAbsent() || decodeBinding.endpoint() == null
+                || decodeBinding.endpoint().shouldRetryDispatch(requestId(), decodeBinding.capacity());
+    }
     public DecodeEndpoint.ReservationHandle decodeReservation() {
         return decodeBinding.reservation();
     }

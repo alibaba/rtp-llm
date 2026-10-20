@@ -216,8 +216,7 @@ final class StrategyTestSupport {
                     new RouteProjection.AdmissionBlockSemantics(
                             "test delivery parked",
                             RouteProjection.AfterProbeAdmission.BLOCKED,
-                            "test delivery parked",
-                            RoleType.PREFILL));
+                            "test delivery parked"));
 
     private static final DeliveryMetrics NOOP_METRICS =
             Mockito.mock(DeliveryMetrics.class);

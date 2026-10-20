@@ -4,7 +4,6 @@ import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.projection.RouteProjection;
-import org.flexlb.dao.route.RoleType;
 import org.flexlb.util.Logger;
 
 import java.util.IdentityHashMap;
@@ -24,9 +23,8 @@ final class PrefillAdmissionResources {
     private static final RouteProjection.AdmissionBlockSemantics
             DECODE_BLOCK = new RouteProjection.AdmissionBlockSemantics(
                     "DELIVERY_CAPACITY_DECODE_ENGINE",
-                    RouteProjection.AfterProbeAdmission.UNAVAILABLE,
-                    "DECODE_CAPACITY_SCOPE_UNKNOWN",
-                    RoleType.DECODE);
+                    RouteProjection.AfterProbeAdmission.INDEPENDENT,
+                    "");
     private PrefillAdmissionResources() {
     }
 

@@ -16,6 +16,7 @@ import java.util.OptionalLong;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -47,7 +48,7 @@ class RouteProjectionTest {
                 evaluator,
                 routeProjection());
 
-        assertTrue(result.selectable());
+        assertTrue(result.hasPrediction());
         assertEquals(20L, result.incomingPrefillMs());
         assertTrue(evaluator.invocations() > 0);
 
@@ -74,40 +75,28 @@ class RouteProjectionTest {
                 probe(),
                 captured,
                 routeProjection());
-        assertTrue(result.selectable());
+        assertTrue(result.hasPrediction());
         assertEquals(before, captured.estimateMs(20L, 0L),
                 "a projection-owned evaluator cannot change mid-call");
     }
 
     @Test
-    void onlyModeledCandidateCarriesKnownTtft() {
-        assertThrows(IllegalArgumentException.class,
-                () -> candidate(RouteProjection.Candidate.State.MODELED,
-                        OptionalLong.empty()));
-        assertThrows(IllegalArgumentException.class,
-                () -> candidate(RouteProjection.Candidate.State.UNAVAILABLE,
-                        OptionalLong.of(1L)));
-        assertThrows(IllegalArgumentException.class,
-                () -> candidate(RouteProjection.Candidate.State.MODELED,
-                        OptionalLong.of(-2L)));
-
-        RouteProjection.Candidate modeled = candidate(
-                RouteProjection.Candidate.State.MODELED, OptionalLong.of(10L));
-        RouteProjection.Candidate unmodeled = candidate(
-                RouteProjection.Candidate.State.UNMODELED_ENGINE_WORK, OptionalLong.empty());
-        assertEquals(10L, modeled.requiredProjectedTtftMs());
-        assertTrue(unmodeled.engineWorkUnmodeled());
+    void predictionAvailabilityIsDerivedFromItsValue() {
+        assertThrows(IllegalArgumentException.class, () -> candidate(-2L));
+        RouteProjection.Candidate predicted = candidate(10L);
+        assertTrue(predicted.hasPrediction());
+        assertEquals(10L, predicted.requiredProjectedTtftMs());
+        RouteProjection.Candidate unavailable = candidate(RouteProjection.Candidate.UNKNOWN);
+        assertFalse(unavailable.hasPrediction());
+        assertEquals(OptionalLong.empty(), unavailable.projectedTtftMs());
+        assertThrows(IllegalStateException.class, unavailable::requiredProjectedTtftMs);
     }
 
-    private static RouteProjection.Candidate candidate(
-            RouteProjection.Candidate.State state,
-            OptionalLong projectedTtftMs) {
+    private static RouteProjection.Candidate candidate(long projectedTtftMs) {
         return new RouteProjection.Candidate(
-                state,
-                projectedTtftMs.orElse(RouteProjection.Candidate.UNKNOWN),
-                0L,
+                projectedTtftMs, 0L,
                 RouteProjection.Candidate.InitialHeadDisposition.NONE,
-                state.name(), null, 0L, 0L);
+                "", 0L, 0L);
     }
 
     private static RouteProjection.Inputs inputs(long capturedAtMs) {

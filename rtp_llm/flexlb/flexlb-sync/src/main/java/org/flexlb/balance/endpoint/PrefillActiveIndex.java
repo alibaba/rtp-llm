@@ -32,7 +32,13 @@ public sealed interface PrefillActiveIndex extends Iterable<ScheduledRequest>
     static PrefillActiveIndex ordered(
             int initialCapacity,
             Comparator<ScheduledRequest> ordering) {
-        return new Ordered(initialCapacity, ordering);
+        return ordered(initialCapacity, ordering, null);
+    }
+
+    static PrefillActiveIndex ordered(int initialCapacity,
+                                     Comparator<ScheduledRequest> ordering,
+                                     Runnable decodeCapacityChanged) {
+        return new Ordered(initialCapacity, ordering, decodeCapacityChanged);
     }
 
     boolean add(ScheduledRequest item);
@@ -188,9 +194,13 @@ public sealed interface PrefillActiveIndex extends Iterable<ScheduledRequest>
         private final int[] priorityCounts = new int[PriorityNormalizer.MAX_PRIORITY + 1];
         private long nextSequence;
         private Capture capture;
+        private final Runnable decodeCapacityChanged;
+        // One subscription per distinct Decode, not one callback per request.
+        private final IdentityHashMap<DecodeEndpoint, int[]> decodeReferences = new IdentityHashMap<>();
 
-        private Ordered(int initialCapacity, Comparator<ScheduledRequest> ordering) {
+        private Ordered(int initialCapacity, Comparator<ScheduledRequest> ordering, Runnable decodeCapacityChanged) {
             Objects.requireNonNull(ordering, "ordering");
+            this.decodeCapacityChanged = decodeCapacityChanged;
             identities = new IdentityHashMap<>(initialCapacity);
             queue = new TreeSet<>((left, right) -> {
                 int compared = ordering.compare(left.request, right.request);
@@ -209,6 +219,15 @@ public sealed interface PrefillActiveIndex extends Iterable<ScheduledRequest>
             queue.add(entry);
             identities.put(item, entry);
             priorityCounts[item.priority()]++;
+            if (decodeCapacityChanged != null && item.decodeEp() != null) {
+                int[] references = decodeReferences.get(item.decodeEp());
+                if (references == null) {
+                    references = new int[1];
+                    decodeReferences.put(item.decodeEp(), references);
+                    item.decodeEp().addEngineDispatchCapacityListener(decodeCapacityChanged);
+                }
+                references[0]++;
+            }
             capture = null;
             return true;
         }
@@ -222,6 +241,13 @@ public sealed interface PrefillActiveIndex extends Iterable<ScheduledRequest>
             queue.remove(entry);
             identities.remove(item);
             priorityCounts[item.priority()]--;
+            if (decodeCapacityChanged != null && item.decodeEp() != null) {
+                int[] references = decodeReferences.get(item.decodeEp());
+                if (--references[0] == 0) {
+                    decodeReferences.remove(item.decodeEp());
+                    item.decodeEp().removeEngineDispatchCapacityListener(decodeCapacityChanged);
+                }
+            }
             capture = null;
             return true;
         }
@@ -251,6 +277,12 @@ public sealed interface PrefillActiveIndex extends Iterable<ScheduledRequest>
 
         @Override
         public void clear() {
+            if (decodeCapacityChanged != null) {
+                for (DecodeEndpoint endpoint : decodeReferences.keySet()) {
+                    endpoint.removeEngineDispatchCapacityListener(decodeCapacityChanged);
+                }
+                decodeReferences.clear();
+            }
             Arrays.fill(priorityCounts, 0);
             queue.clear();
             identities.clear();
