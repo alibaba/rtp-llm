@@ -19,6 +19,7 @@ final class PrefillCandidateSet {
     private long[] routingCacheMatchTokens = new long[0];
     private long[] ownershipVersions = new long[0];
     private int size;
+    boolean inUse;
     long minimumTtftRank;
     boolean hasKnownTtft;
     long maximumCacheHit;

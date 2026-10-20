@@ -83,6 +83,24 @@ public class CostBasedPrefillStrategy {
             RoleType roleType,
             String group,
             RequestRoute route) {
+        PrefillCandidateSet cached = CANDIDATES.get();
+        PrefillCandidateSet candidates = cached.inUse ? new PrefillCandidateSet() : cached;
+        candidates.inUse = true;
+        try {
+            return selectCandidate(request, metadata, roleType, group, route, candidates);
+        } finally {
+            candidates.reset(0);
+            candidates.inUse = false;
+        }
+    }
+
+    private PlacementResult<ServerStatus, RoleType> selectCandidate(
+            Request request,
+            SchedulingMetadata metadata,
+            RoleType roleType,
+            String group,
+            RequestRoute route,
+            PrefillCandidateSet candidates) {
         long requestId = request.getRequestId();
         long seqLen = request.getSeqLen();
 
@@ -105,7 +123,8 @@ public class CostBasedPrefillStrategy {
                         metadata,
                         cacheMatchResults,
                         rejections,
-                        poolWideBlockers);
+                        poolWideBlockers,
+                        candidates);
         if (survivors.size() == 0) {
             Logger.debug(
                     "Prefill select failed: no available endpoints, request_id={},"
@@ -393,9 +412,9 @@ public class CostBasedPrefillStrategy {
             SchedulingMetadata metadata,
             Map<String, Integer> cacheMatchResults,
             Map<String, Integer> rejections,
-            Map<RoleType, Integer> poolWideBlockers) {
+            Map<RoleType, Integer> poolWideBlockers,
+            PrefillCandidateSet candidates) {
         int eligibleSize = discovery.candidates().size();
-        PrefillCandidateSet candidates = CANDIDATES.get();
         candidates.reset(eligibleSize);
         long planningAtMs = System.currentTimeMillis();
         var projector = RouteTimelineProjector.current();
