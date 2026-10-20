@@ -479,6 +479,7 @@ public class MetricConstant {
 
     /** Cache-affinity routing decisions, tagged by role, engineIp, and decision. */
     public static final String CACHE_AFFINITY_DECISION = "app.cache.affinity.decision.qps";
+    public static final String CACHE_AFFINITY_OVER_CAP_MS = "app.cache.affinity.over.cap.ms";
 
     /**
      * Cache request total count

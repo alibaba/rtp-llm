@@ -342,6 +342,15 @@ Prefill 包含选中、最短 TTFT、最高有效缓存命中候选。`projected
 则优先使用 `NO_CACHE_ANYWHERE_BELOW_BLOCK_SIZE`。判断范围包含未进入候选集的 KVCM 节点。
 这些分类同时用于缓存亲和决策指标和 PV 的 `cacheAffinityDecision`。
 
+启用缓存亲和且存在已建模 TTFT 时，PV 的 `cacheAffinity` 保存决策时的最快 TTFT、
+`maxExtraTtftMs`、`minPrefixHitPercent` 和 TTFT 上限。对于有效命中高于最快节点、且满足
+最低命中率的候选，记录其中 TTFT 最短的节点地址、TTFT 和命中 Tokens。`OVER_CAP` 的
+`overCapMs` 等于该候选 TTFT 减去上限，表示至少还需增加多少毫秒预算才能使用缓存亲和。
+没有已建模的更高命中候选时省略超出量。`app.cache.affinity.over.cap.ms` 以 TIMER
+记录该超出量，仅在 `OVER_CAP` 路由提交时上报，标签为所选节点 `engineIp` 和 `role`。
+Prometheus 导出为 `flexlb_app_cache_affinity_over_cap_ms_seconds` 的分布系列，值单位为秒；
+展示毫秒时乘以 1000。选路重试及放弃的选择不产生该指标样本。
+
 缓存反馈以请求 ID、角色和 Worker 实例代次关联路由预测，`worker` 使用完整的
 `ip:port@engineIndex` 逻辑身份；`prefill_worker_status` 同时记录 `workerIp` 和 `engineIndex`。
 选定 Worker 时上报 `app.cache.kvcm.predicted.tokens/ratio`；Local Standby 预测结果与所选 Worker 齐备时上报

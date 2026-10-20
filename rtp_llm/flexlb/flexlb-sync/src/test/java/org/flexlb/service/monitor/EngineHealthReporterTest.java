@@ -300,6 +300,14 @@ class EngineHealthReporterTest {
     }
 
     @Test
+    void shouldReportCacheAffinityExcessBySelectedEngine() {
+        reporter.reportCacheAffinityOverCap(RoleType.PREFILL, "10.0.0.1:8080@0", 100L);
+
+        verify(cacheMetricsReporter).reportCacheAffinityOverCap(
+                RoleType.PREFILL, "10.0.0.1:8080@0", 100L);
+    }
+
+    @Test
     void shouldSkipUnknownRequestPayloadMetrics() {
         reporter.reportRequestPayload(new BalanceContext());
 

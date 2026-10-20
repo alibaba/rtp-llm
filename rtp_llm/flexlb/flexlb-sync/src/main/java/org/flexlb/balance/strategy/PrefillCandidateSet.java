@@ -2,6 +2,7 @@ package org.flexlb.balance.strategy;
 
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.projection.RouteProjection;
+import org.flexlb.dao.pv.RoutingDecision;
 
 import java.util.Arrays;
 
@@ -22,6 +23,7 @@ final class PrefillCandidateSet {
     long maximumCacheHit;
     long maximumRoutingCacheMatchTokens;
     private String affinityDecision;
+    private RoutingDecision.CacheAffinity cacheAffinity;
 
     void reset(int expectedCapacity) {
         Arrays.fill(endpointAddresses, 0, size, null);
@@ -33,6 +35,7 @@ final class PrefillCandidateSet {
         maximumCacheHit = 0L;
         maximumRoutingCacheMatchTokens = 0L;
         affinityDecision = null;
+        cacheAffinity = null;
     }
 
     void addCandidate(String address,
@@ -61,6 +64,13 @@ final class PrefillCandidateSet {
 
     String affinityDecision() { return affinityDecision; }
     void recordAffinityDecision(String decision) { affinityDecision = decision; }
+    RoutingDecision.CacheAffinity cacheAffinity() {
+        return cacheAffinity;
+    }
+
+    void recordCacheAffinity(RoutingDecision.CacheAffinity details) {
+        cacheAffinity = details;
+    }
     PrefillEndpoint endpoint(int index) { return endpoints[index]; }
     String endpointAddress(int index) { return endpointAddresses[index]; }
     long cacheHit(int index) { return cacheHitTokens[index]; }

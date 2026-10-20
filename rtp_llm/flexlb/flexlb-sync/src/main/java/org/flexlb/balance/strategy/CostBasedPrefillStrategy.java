@@ -139,7 +139,7 @@ public class CostBasedPrefillStrategy {
                 roleType, best, cacheMatchResult, bestCacheHit, seqLen,
                 survivors.routingCacheMatchTokens(selectedIndex),
                 survivors.maximumRoutingCacheMatchTokens,
-                survivors.affinityDecision())));
+                survivors.affinityDecision(), survivors.cacheAffinity())));
     }
 
     /**
@@ -153,7 +153,8 @@ public class CostBasedPrefillStrategy {
             long seqLen,
             long selectedRoutingHitTokens,
             long candidateMaxRoutingHitTokens,
-            String affinityDecision) {
+            String affinityDecision,
+            RoutingDecision.CacheAffinity cacheAffinity) {
         String metricIpPort = best.getStatus().getMetricIpPort();
         HostCacheMatch selectedMatch = cacheMatchResult.hostMatch(best.getStatus());
         boolean kvcmQueried = cacheMatchResult.source() == CacheMatchSource.KVCM
@@ -172,6 +173,10 @@ public class CostBasedPrefillStrategy {
                     roleType, selectedRoutingHitTokens, candidateMaxRoutingHitTokens, seqLen);
             if (affinityDecision != null) {
                 reportCacheAffinityDecision(roleType, metricIpPort, affinityDecision);
+            }
+            if ("OVER_CAP".equals(affinityDecision) && cacheAffinity.overCapMs() != null) {
+                engineHealthReporter.reportCacheAffinityOverCap(
+                        roleType, metricIpPort, cacheAffinity.overCapMs());
             }
         };
     }
@@ -199,6 +204,7 @@ public class CostBasedPrefillStrategy {
                 "CostBasedPrefill",
                 reason == null ? "COST_BASED" : reason,
                 selectedIndex < 0 ? null : candidates.affinityDecision(),
+                candidates.cacheAffinity(),
                 kvcmMatches(cacheMatchResult, context.getRequest().getSeqLen(),
                         selectedIndex < 0 ? null : candidates.endpoint(selectedIndex).getStatus()),
                 System.currentTimeMillis(),
@@ -328,9 +334,12 @@ public class CostBasedPrefillStrategy {
         if (cacheAffinity != null && survivors.hasKnownTtft) {
             long referenceHitTokens = 0L;
             long maxHitTokens = survivors.maximumCacheHit;
+            long maxExtraTtftMs = Math.max(0L, cacheAffinity.getMaxExtraTtftMs());
+            double minimumHitRate = normalizedHitRate(cacheAffinity.getMinPrefixHitPercent());
+            int fastestHigherHitIndex = -1;
             affinityCutoffMs = saturatingAdd(
                     minProjectedTtftMs,
-                    Math.max(0L, cacheAffinity.getMaxExtraTtftMs()));
+                    maxExtraTtftMs);
             affinityReason = maxHitTokens > 0L ? "FASTEST_IS_CACHE_BEST" : "NO_CACHE_ANYWHERE";
             for (int i = 0; i < survivors.size(); i++) {
                 if (survivors.ttftRank(i)
@@ -342,8 +351,6 @@ public class CostBasedPrefillStrategy {
             }
             if (maxHitTokens > referenceHitTokens) {
                 boolean minimumHitRateMet = false;
-                double minimumHitRate = normalizedHitRate(
-                        cacheAffinity.getMinPrefixHitPercent());
                 for (int i = 0; i < survivors.size(); i++) {
                     long hitTokens = survivors.cacheHit(i);
                     if (hitTokens <= referenceHitTokens
@@ -356,6 +363,11 @@ public class CostBasedPrefillStrategy {
                         continue;
                     }
                     minimumHitRateMet = true;
+                    if (survivors.projectedTtftMs(i) >= 0L
+                            && (fastestHigherHitIndex < 0
+                                || survivors.ttftRank(i) < survivors.ttftRank(fastestHigherHitIndex))) {
+                        fastestHigherHitIndex = i;
+                    }
                     if (survivors.projectedTtftMs(i) >= 0L && survivors.ttftRank(i) <= affinityCutoffMs) {
                         preferredCandidates.set(i);
                     }
@@ -364,6 +376,15 @@ public class CostBasedPrefillStrategy {
                         ? "CACHE_LEADER"
                         : minimumHitRateMet ? "OVER_CAP" : "LOW_CACHE_HIT";
             }
+            Long fastestHigherHitTtftMs = fastestHigherHitIndex < 0
+                    ? null : survivors.projectedTtftMs(fastestHigherHitIndex);
+            survivors.recordCacheAffinity(new RoutingDecision.CacheAffinity(
+                    minProjectedTtftMs, maxExtraTtftMs, minimumHitRate, affinityCutoffMs,
+                    fastestHigherHitIndex < 0 ? null : survivors.endpointAddress(fastestHigherHitIndex),
+                    fastestHigherHitTtftMs,
+                    fastestHigherHitIndex < 0 ? null : survivors.cacheHit(fastestHigherHitIndex),
+                    "OVER_CAP".equals(affinityReason) && fastestHigherHitTtftMs != null
+                            ? fastestHigherHitTtftMs - affinityCutoffMs : null));
         }
 
         int selectedIndex;

@@ -15,6 +15,7 @@ public record RoutingDecision(RoleType role,
                               String strategy,
                               String selectionReason,
                               @JsonInclude(JsonInclude.Include.NON_NULL) String cacheAffinityDecision,
+                              @JsonInclude(JsonInclude.Include.NON_NULL) CacheAffinity cacheAffinity,
                               @JsonInclude(JsonInclude.Include.NON_NULL) KvcmMatches kvcmMatches,
                               long decisionTimeMs,
                               int routingAttempt,
@@ -40,6 +41,21 @@ public record RoutingDecision(RoleType role,
         public KvcmMatches {
             topHits = Collections.unmodifiableMap(new LinkedHashMap<>(topHits));
         }
+    }
+
+    /**
+     * Decision-time thresholds and the fastest higher-hit candidate meeting the minimum hit rate.
+     * Unknown candidate estimates and the corresponding over-cap amount are absent.
+     */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record CacheAffinity(long minimumTtftMs,
+                                long maxExtraTtftMs,
+                                double minPrefixHitPercent,
+                                long ttftCutoffMs,
+                                String fastestHigherHitEndpoint,
+                                Long fastestHigherHitTtftMs,
+                                Long fastestHigherHitTokens,
+                                Long overCapMs) {
     }
 
     /** Configuration and population summary used by the current prefill selector, in explicit units. */

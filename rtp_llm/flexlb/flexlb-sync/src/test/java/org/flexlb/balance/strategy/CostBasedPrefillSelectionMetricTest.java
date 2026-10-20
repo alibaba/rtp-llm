@@ -509,6 +509,104 @@ class CostBasedPrefillSelectionMetricTest {
     }
 
     @Test
+    void overCapPvAndCommittedMetricUseTheDecisionTimeThreshold() throws Exception {
+        configureAffinity(400L, 5.0);
+
+        try (SelectedRole selected = select()) {
+            verify(reporter, never()).reportCacheAffinityOverCap(any(), anyString(), anyLong());
+            config.getRouter().getRoles().getPrefill().getCacheAffinity().setMaxExtraTtftMs(900L);
+            commit(selected);
+            commit(selected);
+
+            var json = new com.fasterxml.jackson.databind.ObjectMapper()
+                    .readTree(JsonUtils.toStringOrEmpty(new PvLogData(context)))
+                    .path("routingDecisions").get(0);
+            assertEquals("OVER_CAP", json.path("cacheAffinityDecision").asText());
+            var affinity = json.path("cacheAffinity");
+            assertEquals(1_000L, affinity.path("minimumTtftMs").asLong());
+            assertEquals(400L, affinity.path("maxExtraTtftMs").asLong());
+            assertEquals(5.0, affinity.path("minPrefixHitPercent").asDouble());
+            assertEquals(1_400L, affinity.path("ttftCutoffMs").asLong());
+            assertEquals("10.0.0.2:8080@0", affinity.path("fastestHigherHitEndpoint").asText());
+            assertEquals(1_500L, affinity.path("fastestHigherHitTtftMs").asLong());
+            assertEquals(500L, affinity.path("fastestHigherHitTokens").asLong());
+            assertEquals(100L, affinity.path("overCapMs").asLong());
+            verify(reporter).reportCacheAffinityOverCap(RoleType.PREFILL, "10.0.0.1:8080", 100L);
+        }
+    }
+
+    @Test
+    void abandonedOverCapSelectionDoesNotReportAnExcessSample() {
+        configureAffinity(400L, 5.0);
+
+        try (SelectedRole ignored = select()) {
+            assertEquals("OVER_CAP", context.getRoutingTelemetry().routingDecisions()
+                    .get(RoleType.PREFILL).cacheAffinityDecision());
+        }
+
+        verify(reporter, never()).reportCacheAffinityOverCap(any(), anyString(), anyLong());
+    }
+
+    @Test
+    void overCapUsesTheSmallestIncreaseAmongHigherHitCandidatesMeetingTheHitRate() {
+        configureFocusedAffinity();
+        config.getRouter().getRoles().getPrefill().getCacheAffinity().setMinPrefixHitPercent(20.0);
+        PrefillCandidateSet candidates = candidates(
+                new long[] {100L, 111L, 180L, 145L, 130L},
+                new long[] {0L, 100L, 900L, 300L, 200L});
+
+        assertEquals(0, strategy.selectBestCandidate(
+                candidates, 100L, RoleType.PREFILL, null, 1_000L, config));
+
+        assertEquals("OVER_CAP", candidates.affinityDecision());
+        assertEquals("10.1.0.5:8080", candidates.cacheAffinity().fastestHigherHitEndpoint());
+        assertEquals(20L, candidates.cacheAffinity().overCapMs());
+        candidates.reset(1);
+        assertTrue(candidates.cacheAffinity() == null);
+    }
+
+    @ParameterizedTest
+    @CsvSource({"500,5.0,CACHE_LEADER", "400,60.0,LOW_CACHE_HIT"})
+    void nonOverCapDecisionsDoNotReportAnExcessSample(
+            long maxExtraTtftMs, double minPrefixHitPercent, String reason) {
+        configureAffinity(maxExtraTtftMs, minPrefixHitPercent);
+
+        try (SelectedRole selected = select()) {
+            commit(selected);
+            var decision = context.getRoutingTelemetry().routingDecisions().get(RoleType.PREFILL);
+            assertEquals(reason, decision.cacheAffinityDecision());
+            assertTrue(decision.cacheAffinity().overCapMs() == null);
+            verify(reporter, never()).reportCacheAffinityOverCap(any(), anyString(), anyLong());
+        }
+    }
+
+    @Test
+    void unknownHigherHitTtftDoesNotProduceAnOverCapAmount() {
+        configureFocusedAffinity();
+        PrefillCandidateSet candidates = candidates(new long[] {100L, -1L}, new long[] {0L, 500L});
+
+        strategy.selectBestCandidate(candidates, 100L, RoleType.PREFILL, null, 1_000L, config);
+
+        assertEquals("OVER_CAP", candidates.affinityDecision());
+        assertTrue(candidates.cacheAffinity().fastestHigherHitTtftMs() == null);
+        assertTrue(candidates.cacheAffinity().overCapMs() == null);
+    }
+
+    @Test
+    void saturatedTtftCutoffDoesNotCreateAFalseOverCapAmount() {
+        configureFocusedAffinity();
+        config.getRouter().getRoles().getPrefill().getCacheAffinity().setMaxExtraTtftMs(Long.MAX_VALUE);
+        PrefillCandidateSet candidates = candidates(
+                new long[] {100L, Long.MAX_VALUE}, new long[] {0L, 500L});
+
+        strategy.selectBestCandidate(candidates, 100L, RoleType.PREFILL, null, 1_000L, config);
+
+        assertEquals("CACHE_LEADER", candidates.affinityDecision());
+        assertEquals(Long.MAX_VALUE, candidates.cacheAffinity().ttftCutoffMs());
+        assertTrue(candidates.cacheAffinity().overCapMs() == null);
+    }
+
+    @Test
     void equalMaximumCacheHitPreservesBestOnlySelection() {
         configureFocusedAffinity();
         PrefillCandidateSet candidates = candidates(
@@ -665,9 +763,10 @@ class CostBasedPrefillSelectionMetricTest {
                     ip + ":8080",
                     endpoint,
                     new RouteProjection.Candidate(
-                            RouteProjection.Candidate.State.MODELED,
+                            ttftMs[i] < 0L ? RouteProjection.Candidate.State.UNMODELED_ENGINE_WORK
+                                    : RouteProjection.Candidate.State.MODELED,
                             ttftMs[i],
-                            ttftMs[i],
+                            Math.max(0L, ttftMs[i]),
                             RouteProjection.Candidate.InitialHeadDisposition.NONE,
                             "",
                             null,

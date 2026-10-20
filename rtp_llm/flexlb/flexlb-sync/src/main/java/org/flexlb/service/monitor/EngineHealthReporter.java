@@ -661,6 +661,13 @@ public class EngineHealthReporter {
     }
 
     /**
+     * Report the additional TTFT budget needed to admit a higher-hit cache candidate.
+     */
+    public void reportCacheAffinityOverCap(RoleType roleType, String engineIp, long overCapMs) {
+        cacheMetricsReporter.reportCacheAffinityOverCap(roleType, engineIp, overCapMs);
+    }
+
+    /**
      * Report KVCM matches only when KVCM supplied a result for the selected worker.
      *
      * @param roleType          selected role

@@ -1,6 +1,8 @@
 package org.flexlb.cache.telemetry;
 
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import io.micrometer.prometheus.PrometheusConfig;
+import io.micrometer.prometheus.PrometheusMeterRegistry;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.FlexMetricType;
 import org.flexlb.enums.FlexPriorityType;
@@ -14,8 +16,10 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.lang.reflect.Field;
+import java.util.concurrent.TimeUnit;
 
 import static org.flexlb.constant.MetricConstant.CACHE_AFFINITY_DECISION;
+import static org.flexlb.constant.MetricConstant.CACHE_AFFINITY_OVER_CAP_MS;
 import static org.flexlb.constant.MetricConstant.CACHE_ENGINE_LOCAL_BYTES;
 import static org.flexlb.constant.MetricConstant.CACHE_ENGINE_LOCAL_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COUNT;
@@ -33,6 +37,7 @@ import static org.flexlb.constant.MetricConstant.CACHE_THEORY_HIT_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_THEORY_HIT_RATIO;
 import static org.flexlb.constant.MetricConstant.CACHE_THEORY_TOTAL_COUNT;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -68,6 +73,7 @@ class CacheMetricsReporterTest {
         verify(monitor).register(CACHE_ROUTING_SELECTED_MATCH_HIT_TOKENS, FlexMetricType.QPS);
         verify(monitor).register(CACHE_ROUTING_CANDIDATE_MAX_HIT_TOKENS, FlexMetricType.QPS);
         verify(monitor).register(CACHE_AFFINITY_DECISION, FlexMetricType.QPS);
+        verify(monitor).register(CACHE_AFFINITY_OVER_CAP_MS, FlexMetricType.TIMER);
     }
 
     @Test
@@ -94,6 +100,32 @@ class CacheMetricsReporterTest {
                 "engineIp", "10.0.0.1",
                 "decision", "CACHE_LEADER");
         verify(monitor).report(CACHE_AFFINITY_DECISION, tags, 1.0);
+    }
+
+    @Test
+    void overCapMetricRetainsEveryRequestInTheDurationDistribution() throws Exception {
+        var registry = new PrometheusMeterRegistry(PrometheusConfig.DEFAULT);
+        try {
+            Field monitorField = CacheMetricsReporter.class.getDeclaredField("monitor");
+            monitorField.setAccessible(true);
+            monitorField.set(reporter, new MicrometerFlexMonitor(registry));
+            reporter.init();
+
+            reporter.reportCacheAffinityOverCap(RoleType.PREFILL, "10.0.0.1:8080", 100L);
+            reporter.reportCacheAffinityOverCap(RoleType.PREFILL, "10.0.0.1:8080", 300L);
+
+            var timer = registry.get("flexlb." + CACHE_AFFINITY_OVER_CAP_MS)
+                    .tags("role", "PREFILL", "engineIp", "10.0.0.1:8080").timer();
+            assertEquals(2, timer.count());
+            assertEquals(400.0, timer.totalTime(TimeUnit.MILLISECONDS));
+            assertEquals(300.0, timer.max(TimeUnit.MILLISECONDS));
+            String scrape = registry.scrape();
+            assertTrue(scrape.contains("flexlb_app_cache_affinity_over_cap_ms_seconds_bucket{"));
+            assertTrue(scrape.contains("flexlb_app_cache_affinity_over_cap_ms_seconds_count{"));
+            assertTrue(scrape.contains("flexlb_app_cache_affinity_over_cap_ms_seconds_sum{"));
+        } finally {
+            registry.close();
+        }
     }
 
     @Test

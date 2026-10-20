@@ -13,6 +13,7 @@ import org.springframework.stereotype.Component;
 import javax.annotation.PostConstruct;
 
 import static org.flexlb.constant.MetricConstant.CACHE_AFFINITY_DECISION;
+import static org.flexlb.constant.MetricConstant.CACHE_AFFINITY_OVER_CAP_MS;
 import static org.flexlb.constant.MetricConstant.CACHE_DIFF_ADDED_BLOCKS_SIZE;
 import static org.flexlb.constant.MetricConstant.CACHE_DIFF_REMOVED_BLOCKS_SIZE;
 import static org.flexlb.constant.MetricConstant.CACHE_ENGINE_LOCAL_BYTES;
@@ -114,6 +115,7 @@ public class CacheMetricsReporter {
         monitor.register(CACHE_ROUTING_SELECTED_MATCH_HIT_TOKENS, FlexMetricType.QPS);
         monitor.register(CACHE_ROUTING_CANDIDATE_MAX_HIT_TOKENS, FlexMetricType.QPS);
         monitor.register(CACHE_AFFINITY_DECISION, FlexMetricType.QPS);
+        monitor.register(CACHE_AFFINITY_OVER_CAP_MS, FlexMetricType.TIMER);
         monitor.register(CACHE_REQUEST_TOTAL, FlexMetricType.QPS);
         monitor.register(CACHE_LOCAL_STANDBY_CAPACITY_REJECTED_QPS,
                 FlexMetricType.QPS, FlexPriorityType.PRECISE);
@@ -325,6 +327,16 @@ public class CacheMetricsReporter {
                 "engineIp", engineIp,
                 "decision", decision);
         monitor.report(CACHE_AFFINITY_DECISION, tags, 1.0);
+    }
+
+    /**
+     * Report how far the fastest qualifying higher-hit candidate exceeded the TTFT cutoff.
+     */
+    public void reportCacheAffinityOverCap(RoleType roleType, String engineIp, long overCapMs) {
+        FlexMetricTags tags = FlexMetricTags.of(
+                "role", roleType.name(),
+                "engineIp", engineIp);
+        monitor.report(CACHE_AFFINITY_OVER_CAP_MS, tags, overCapMs);
     }
 
     /**
