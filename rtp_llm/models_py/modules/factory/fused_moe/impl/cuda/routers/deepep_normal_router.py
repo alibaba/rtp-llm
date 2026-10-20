@@ -110,11 +110,24 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
             a1, slice_begin, slice_size, use_fp8
         )
 
+        # Top-p routing keeps fixed-width slots and marks deleted slots with
+        # expert_num.  DeepEP's dispatch contract uses -1 for a dropped slot;
+        # preserve that sentinel so deleted routes are not dispatched at all.
+        valid_ids = (topk_ids >= 0) & (topk_ids < self.expert_num)
+        safe_topk_ids = torch.where(
+            valid_ids, topk_ids, torch.full_like(topk_ids, -1)
+        )
+        safe_topk_weights = torch.where(
+            valid_ids, topk_weights, torch.zeros_like(topk_weights)
+        )
+
         # pre dispatch
-        tp_expert_ids = torch.narrow(topk_ids, 0, slice_begin, slice_size).to(
+        tp_expert_ids = torch.narrow(safe_topk_ids, 0, slice_begin, slice_size).to(
             torch.int64
         )
-        tp_expert_scales = torch.narrow(topk_weights, 0, slice_begin, slice_size)
+        tp_expert_scales = torch.narrow(
+            safe_topk_weights, 0, slice_begin, slice_size
+        )
 
         (
             num_tokens_per_rank,

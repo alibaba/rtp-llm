@@ -59,6 +59,7 @@ from rtp_llm.utils.model_weight import (
     identity,
     stack_,
     stack_moe_w1,
+    transpose_stack_moe_w1,
     yarn_get_mscale,
     zeros,
 )
@@ -150,6 +151,13 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
     """
 
     def _process_meta(self, meta_dict, weight_keys):  # type: ignore[override]
+        # Fine-tuned HF exports retain stacked BF16 experts under
+        # ``model.layers.*``.  The original RTP conversion emits split FP4
+        # experts under ``layers.*``.  Keep both layouts available and let the
+        # runtime quantization setting decide which kernels consume them.
+        self._raw_hf_stacked = any(
+            ".mlp.experts.gate_up_proj" in key for key in weight_keys
+        )
         # V4 has no LoRA q-projection split (we use ``wq_a`` / ``wq_b`` directly)
         # and no e_score_correction_bias (uses noaux_tc gate.bias on layers ≥ num_hash_layers).
         self.q_use_lora = False
@@ -176,7 +184,58 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
 
     _LAYER_PREFIX: str = "layers.{i}"
 
+    _RAW_SUFFIXES = {
+        "attn_norm.weight": "input_layernorm.weight",
+        "attn.q_norm.weight": "self_attn.q_a_norm.weight",
+        "attn.kv_norm.weight": "self_attn.kv_norm.weight",
+        "attn.attn_sink": "self_attn.sinks",
+        "attn.wq_a.weight": "self_attn.q_a_proj.weight",
+        "attn.wq_b.weight": "self_attn.q_b_proj.weight",
+        "attn.wkv.weight": "self_attn.kv_proj.weight",
+        "attn.wo_a.weight": "self_attn.o_a_proj.weight",
+        "attn.wo_b.weight": "self_attn.o_b_proj.weight",
+        "attn.compressor.wkv.weight": "self_attn.compressor.kv_proj.weight",
+        "attn.compressor.wgate.weight": "self_attn.compressor.gate_proj.weight",
+        "attn.compressor.norm.weight": "self_attn.compressor.kv_norm.weight",
+        "attn.compressor.ape": "self_attn.compressor.position_bias",
+        "attn.indexer.wq_b.weight": "self_attn.compressor.indexer.q_b_proj.weight",
+        "attn.indexer.weights_proj.weight": (
+            "self_attn.compressor.indexer.weights_proj.weight"
+        ),
+        "attn.indexer.compressor.wkv.weight": (
+            "self_attn.compressor.indexer.kv_proj.weight"
+        ),
+        "attn.indexer.compressor.wgate.weight": (
+            "self_attn.compressor.indexer.gate_proj.weight"
+        ),
+        "attn.indexer.compressor.norm.weight": (
+            "self_attn.compressor.indexer.kv_norm.weight"
+        ),
+        "attn.indexer.compressor.ape": (
+            "self_attn.compressor.indexer.position_bias"
+        ),
+        "hc_attn_base": "attn_hc.base",
+        "hc_attn_fn": "attn_hc.fn",
+        "hc_attn_scale": "attn_hc.scale",
+        "hc_ffn_base": "ffn_hc.base",
+        "hc_ffn_fn": "ffn_hc.fn",
+        "hc_ffn_scale": "ffn_hc.scale",
+        "ffn_norm.weight": "post_attention_layernorm.weight",
+        "ffn.gate.weight": "mlp.gate.weight",
+        "ffn.gate.tid2eid": "mlp.gate.tid2eid",
+        "ffn.gate.bias": "mlp.gate.e_score_correction_bias",
+        "ffn.shared_experts.w1.weight": "mlp.shared_experts.gate_proj.weight",
+        "ffn.shared_experts.w3.weight": "mlp.shared_experts.up_proj.weight",
+        "ffn.shared_experts.w2.weight": "mlp.shared_experts.down_proj.weight",
+    }
+
     def _key(self, suffix: str) -> str:
+        if self._raw_hf_stacked:
+            try:
+                suffix = self._RAW_SUFFIXES[suffix]
+            except KeyError as exc:
+                raise KeyError(f"No raw DeepSeek-V4 mapping for {suffix!r}") from exc
+            return f"model.layers.{{i}}.{suffix}"
         return f"{self._LAYER_PREFIX}.{suffix}"
 
     # ------------------------------------------------------------------
@@ -442,6 +501,45 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
             )
         return out
 
+    def _build_routed_experts_stacked(self, layer_id: int) -> List[WeightModule]:
+        """Describe the two stacked BF16 expert tensors in raw HF exports."""
+
+        moe_cfg = MoeConfig(
+            expert_num=self.expert_num_,
+            align_size=self._moe_align_size,
+        )
+        return [
+            MoeWeight(
+                sub_weights=[
+                    MoeAtomicWeight(
+                        W.moe_w1,
+                        [
+                            CkptWeightInfo(
+                                "model.layers.{i}.mlp.experts.gate_up_proj",
+                                identity,
+                            )
+                        ],
+                        transpose_stack_moe_w1,
+                        config=moe_cfg,
+                        stacked_ckpt_keys=True,
+                    ),
+                    MoeAtomicWeight(
+                        W.moe_w2,
+                        [
+                            CkptWeightInfo(
+                                "model.layers.{i}.mlp.experts.down_proj",
+                                identity,
+                            )
+                        ],
+                        stack_,
+                        config=moe_cfg,
+                        stacked_ckpt_keys=True,
+                    ),
+                ],
+                config=moe_cfg,
+            )
+        ]
+
     # ------------------------------------------------------------------
     # Top-level entry points
     # ------------------------------------------------------------------
@@ -490,8 +588,12 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
         # 8. Shared expert (FP8)
         weights += self._build_shared_expert(layer_id)
 
-        # 9. Routed experts (FP4 — per-expert via MoeAtomicWeight)
-        weights += self._build_routed_experts_fp4(layer_id)
+        # 9. Routed experts: raw HF uses two stacked BF16 tensors, while the
+        # converted checkpoint uses three split FP4 tensors and scales.
+        if self._raw_hf_stacked:
+            weights += self._build_routed_experts_stacked(layer_id)
+        else:
+            weights += self._build_routed_experts_fp4(layer_id)
 
         return weights
 
@@ -500,15 +602,34 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
             self._get_hf_layer_weight_info(layer_id)
             for layer_id in range(self._num_layers)
         ]
+        global_keys = (
+            {
+                "embedding": "model.embed_tokens.weight",
+                "norm": "model.norm.weight",
+                "lm_head": "lm_head.weight",
+                "hc_base": "model.hc_head.hc_base",
+                "hc_fn": "model.hc_head.hc_fn",
+                "hc_scale": "model.hc_head.hc_scale",
+            }
+            if self._raw_hf_stacked
+            else {
+                "embedding": "embed.weight",
+                "norm": "norm.weight",
+                "lm_head": "head.weight",
+                "hc_base": "hc_head_base",
+                "hc_fn": "hc_head_fn",
+                "hc_scale": "hc_head_scale",
+            }
+        )
         weights: List[WeightModule] = [
             AtomicWeight(
                 W.embedding,
-                [CkptWeightInfo("embed.weight", identity)],
+                [CkptWeightInfo(global_keys["embedding"], identity)],
                 identity,
             ),
             AtomicWeight(
                 W.final_ln_gamma,
-                [CkptWeightInfo("norm.weight", identity)],
+                [CkptWeightInfo(global_keys["norm"], identity)],
                 identity,
             ),
             AtomicWeight(
@@ -518,7 +639,7 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
             ),
             AtomicWeight(
                 W.lm_head,
-                [CkptWeightInfo("head.weight", identity)],
+                [CkptWeightInfo(global_keys["lm_head"], identity)],
                 identity,
                 # Respect ``enable_fp32_lm_head``: prior code hardcoded
                 # ``data_type=torch.float32`` here, which ignored
@@ -536,19 +657,19 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
             ),
             AtomicWeight(
                 W.v4_hc_head_base,
-                [CkptWeightInfo("hc_head_base", identity)],
+                [CkptWeightInfo(global_keys["hc_base"], identity)],
                 identity,
                 data_type=torch.float32,
             ),
             AtomicWeight(
                 W.v4_hc_head_fn,
-                [CkptWeightInfo("hc_head_fn", identity)],
+                [CkptWeightInfo(global_keys["hc_fn"], identity)],
                 identity,
                 data_type=torch.float32,
             ),
             AtomicWeight(
                 W.v4_hc_head_scale,
-                [CkptWeightInfo("hc_head_scale", identity)],
+                [CkptWeightInfo(global_keys["hc_scale"], identity)],
                 identity,
                 data_type=torch.float32,
             ),

@@ -205,6 +205,9 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
     def shared_experts(self):
         return self._moe.shared_experts
 
+    def preload_norm_predictor(self, device: torch.device | str) -> None:
+        self._moe.preload_norm_predictor(device)
+
     def _should_chunk(self, tokens: int, *, is_decode_forward: bool = False) -> bool:
         max_tokens = self.max_tokens_per_rank
         if max_tokens <= 0:

@@ -11,7 +11,11 @@ import torch.nn as nn
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory import ModelFactory
-from rtp_llm.models.deepseek_v4 import DeepSeekV4, _require_n_shared_experts
+from rtp_llm.models.deepseek_v4 import (
+    DeepSeekV4,
+    DeepSeekV4Weight,
+    _require_n_shared_experts,
+)
 from rtp_llm.models_py.model_desc.deepseek_v4_model import (
     DeepSeekV4Model,
     _args_from_model_config,
@@ -450,6 +454,33 @@ class Dsv4MoeConfigTest(unittest.TestCase):
         ):
             FusedMoeFactory().create_fused_moe(runtime, {})
 
+    def test_v4_runtime_config_exposes_pure_dp_factory_contract(self):
+        from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.layer import (
+            Fp8Fp4MoeRuntimeConfig,
+        )
+
+        runtime = Fp8Fp4MoeRuntimeConfig(
+            layer_id=3,
+            hidden_size=4096,
+            moe_inter_dim=2048,
+            expert_num=256,
+            moe_k=6,
+            n_shared_experts=1,
+            swiglu_limit=7.0,
+            ep_size=8,
+            ep_rank=0,
+            world_size=8,
+            world_rank=0,
+            max_tokens_per_rank=4096,
+            moe_strategy="fp8_per_block_pure_dp",
+            moe_quant_method="FP8_PER_BLOCK",
+        )
+
+        self.assertEqual(runtime.model_config.data_type, torch.bfloat16)
+        self.assertEqual(runtime.model_config.moe_inter_size, 2048)
+        self.assertTrue(runtime.moe_config.use_all_gather)
+        self.assertFalse(runtime.moe_config.use_deepep_moe)
+
     def test_zero_routed_expert_width_fails_fast(self):
         model_config = self._load_minimal_model_config(0)
         model_config.moe_inter_size = 0
@@ -535,6 +566,56 @@ class Dsv4MoeConfigTest(unittest.TestCase):
                         },
                         {"layers.0.ffn.shared_experts.w2.weight"},
                     )
+
+    def test_raw_hf_stacked_dsv4_weight_graph(self):
+        from rtp_llm.config.kv_cache_config import KVCacheConfig
+        from rtp_llm.model_loader.ffn_weight import MoeWeight
+        from rtp_llm.ops import HWKernelConfig, ParallelismConfig
+        from rtp_llm.utils.model_weight import W
+
+        model_config = self._load_minimal_model_config(1)
+        builder = DeepSeekV4Weight(
+            model_config=model_config,
+            parallelism_config=ParallelismConfig(),
+            hw_kernel_config=HWKernelConfig(),
+            kv_cache_config=KVCacheConfig(),
+        )
+        builder._process_meta(
+            {}, {"model.layers.0.mlp.experts.gate_up_proj"}
+        )
+        info = builder._get_weight_info()
+
+        self.assertTrue(builder._raw_hf_stacked)
+        global_by_name = {weight.name: weight for weight in info.weights}
+        self.assertEqual(
+            global_by_name[W.embedding].weights[0].tensor_name(0),
+            "model.embed_tokens.weight",
+        )
+        self.assertEqual(
+            global_by_name[W.lm_head].weights[0].tensor_name(0),
+            "lm_head.weight",
+        )
+
+        layer_by_name = {weight.name: weight for weight in info.layer_weights[0]}
+        self.assertEqual(
+            layer_by_name[W.v4_router_w].weights[0].tensor_name(0),
+            "model.layers.0.mlp.gate.weight",
+        )
+        self.assertEqual(
+            layer_by_name[W.v4_shared_w2_w].weights[0].tensor_name(0),
+            "model.layers.0.mlp.shared_experts.down_proj.weight",
+        )
+        moe = layer_by_name[W.moe]
+        self.assertIsInstance(moe, MoeWeight)
+        self.assertTrue(moe.sub_weights[W.moe_w1].stacked_ckpt_keys)
+        self.assertEqual(
+            moe.sub_weights[W.moe_w1].weights[0].tensor_name(0),
+            "model.layers.0.mlp.experts.gate_up_proj",
+        )
+        self.assertEqual(
+            moe.sub_weights[W.moe_w2].weights[0].tensor_name(0),
+            "model.layers.0.mlp.experts.down_proj",
+        )
 
     def test_public_strategy_is_forwarded_to_the_shared_registry(self):
         from rtp_llm.server.server_args import server_args

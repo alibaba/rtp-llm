@@ -744,6 +744,15 @@ class DeepSeekV4Model(GptModelBase):
         for layer in self.v4.layers:
             layer.attn.init_rope_cache(device=device_str)
 
+        # Predictor weights are external to the model checkpoint. Load them
+        # eagerly, before any CUDA graph capture, so the first user request
+        # never performs filesystem I/O or allocates predictor tensors inside
+        # a captured stream.
+        for layer in self.v4.layers:
+            preload = getattr(layer.ffn, "preload_norm_predictor", None)
+            if preload is not None:
+                preload(device_str)
+
         # Subclass hook: lift any model-level weights (e.g. MTP fusion
         # norms / projections) off the ModelWeights wrapper before we
         # discard it.  Default impl is a no-op.

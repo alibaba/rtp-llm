@@ -8,6 +8,8 @@ from typing import Callable, Dict, Optional
 import torch
 import torch.nn as nn
 
+from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
+from rtp_llm.models_py.modules.dsv4.norm_predictor import Dsv4NormTopP
 from rtp_llm.models_py.modules.factory.fused_moe.factory import FusedMoeFactory
 from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.gate import Gate
 from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.shared_expert import (
@@ -24,7 +26,6 @@ from rtp_llm.utils.model_weight import W
 class Fp8Fp4MoeRuntimeConfig:
     """Configuration surface consumed by the common Router/Executor API."""
 
-    moe_quant_method = "FP8_FP4"
     activation_type = "silu"
     enable_cuda_graph = False
     use_mori_ep = False
@@ -54,6 +55,7 @@ class Fp8Fp4MoeRuntimeConfig:
         route_scale: float = 1.0,
         moe_w1_layout: str = "up_gate",
         physical_expert_num: Optional[int] = None,
+        moe_quant_method: str = "FP8_FP4",
     ) -> None:
         if expert_num % max(ep_size, 1) != 0:
             raise ValueError(
@@ -99,6 +101,7 @@ class Fp8Fp4MoeRuntimeConfig:
         self.local_expert_end = self.local_expert_start + self.n_local_experts
         self.max_tokens_per_rank = int(max_tokens_per_rank)
         self.moe_strategy = str(moe_strategy or "auto")
+        self.moe_quant_method = str(moe_quant_method)
         self.world_size = int(ep_size if world_size is None else world_size)
         self.world_rank = int(ep_rank if world_rank is None else world_rank)
 
@@ -110,15 +113,24 @@ class Fp8Fp4MoeRuntimeConfig:
         self.data_type = torch.bfloat16
         self.head_num = 0
         self.moe_topk_group = 0
-        self.quant_config = None
+        self.quant_config = (
+            Fp8BlockWiseQuantConfig(is_quanted=True)
+            if self.moe_quant_method == "FP8_PER_BLOCK"
+            else None
+        )
         self.model_config = SimpleNamespace(
             model_type=model_type,
-            quant_config=None,
+            quant_config=self.quant_config,
+            data_type=torch.bfloat16,
+            moe_inter_size=self.moe_inter_dim,
         )
         self.parallelism_config = SimpleNamespace(tp_size=1)
+        use_pure_dp = self.moe_strategy == "fp8_per_block_pure_dp"
         self.moe_config = SimpleNamespace(
             moe_strategy=self.moe_strategy,
             use_deepep_low_latency=False,
+            use_deepep_moe=not use_pure_dp and self.ep_size > 1,
+            use_all_gather=use_pure_dp or self.ep_size == 1,
         )
 
 
@@ -172,6 +184,24 @@ class Fp8Fp4MoeLayer(nn.Module):
             vocab_size,
             layer_weights=layer_weights,
         )
+        self.norm_top_p = Dsv4NormTopP(
+            layer_id=layer_id,
+            dim=dim,
+            n_routed_experts=n_routed_experts,
+            n_hash_layers=n_hash_layers,
+            model_type=model_type,
+        )
+        routed_dtype = layer_weights[W.moe_w1].dtype
+        if routed_dtype in {torch.float8_e4m3fn, torch.float8_e4m3fnuz}:
+            moe_quant_method = "FP8_PER_BLOCK"
+        elif routed_dtype == torch.int8:
+            moe_quant_method = "FP8_FP4"
+        else:
+            raise RuntimeError(
+                "DeepSeek-V4 routed experts must be FP8-per-block or packed FP4; "
+                f"got {routed_dtype}. Raw BF16 checkpoints require "
+                "--quantization FP8_PER_BLOCK."
+            )
         runtime_config = Fp8Fp4MoeRuntimeConfig(
             layer_id=layer_id,
             hidden_size=dim,
@@ -192,11 +222,22 @@ class Fp8Fp4MoeLayer(nn.Module):
             route_scale=route_scale,
             moe_w1_layout=moe_w1_layout,
             physical_expert_num=physical_expert_num,
+            moe_quant_method=moe_quant_method,
         )
         self.fused_moe = FusedMoeFactory().create_fused_moe(
             runtime_config, layer_weights
         )
         self.strategy_name = self.fused_moe.strategy_name
+        if self.norm_top_p.enabled and self.strategy_name not in {
+            "fp8_per_block_ep_normal",
+            "fp8_per_block_ep_low_latency",
+            "fp8_per_block_pure_dp",
+        }:
+            raise RuntimeError(
+                "DeepSeek-V4 norm Top-p requires an FP8-per-block MoE strategy "
+                "that skips dropped route slots; got "
+                f"{self.strategy_name!r}"
+            )
         # MegaMoE formerly fused hash routing with input packing. Preserve its
         # BF16-score/Triton epilogue numerics while keeping routing in the
         # common fused-MoE layer.
@@ -228,6 +269,11 @@ class Fp8Fp4MoeLayer(nn.Module):
                 swiglu_limit=swiglu_limit,
             )
             self._shared_executor.prepare(self.shared_experts)
+
+    def preload_norm_predictor(self, device: torch.device | str) -> None:
+        """Load the external predictor before CUDA graph capture starts."""
+
+        self.norm_top_p.preload(device)
 
     def forward(
         self,
@@ -265,6 +311,7 @@ class Fp8Fp4MoeLayer(nn.Module):
         topk_ids = None
         use_gate_pack = (
             observer is None
+            and not self.norm_top_p.enabled
             and self.fused_moe.supports_gate_pack
             and self.gate.can_prepare_gate_payload(x, flat_ids)
         )
@@ -280,6 +327,9 @@ class Fp8Fp4MoeLayer(nn.Module):
                         )
                 else:
                     topk_weights, topk_ids = self.gate(x, flat_ids)
+                    topk_weights, topk_ids = self.norm_top_p(
+                        x, topk_weights, topk_ids
+                    )
             if observer is not None and not use_gate_pack:
                 assert topk_weights is not None and topk_ids is not None
                 observer("topk_weights", topk_weights)

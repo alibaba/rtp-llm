@@ -6,7 +6,11 @@ import torch
 from fastsafetensors import ParallelLoader
 from fastsafetensors.parallel_loader import TimingContext
 
-_REQUIRED_FST_VERSION = "0.1.19"
+_SUPPORTED_FST_VERSIONS = ("0.1.19", "0.1.20")
+
+
+def _is_supported_fastsafetensors_version(version: str) -> bool:
+    return version.startswith(_SUPPORTED_FST_VERSIONS)
 
 
 class PerExpertParallelLoader(ParallelLoader):
@@ -25,10 +29,10 @@ class PerExpertParallelLoader(ParallelLoader):
 
     def __init__(self, stacked_key_config: Dict[str, str], *args, **kwargs):
         fst_ver = getattr(fastsafetensors, "__version__", "unknown")
-        if not fst_ver.startswith(_REQUIRED_FST_VERSION):
+        if not _is_supported_fastsafetensors_version(fst_ver):
             raise RuntimeError(
                 f"PerExpertParallelLoader is tested with fastsafetensors "
-                f"{_REQUIRED_FST_VERSION}*, current version: {fst_ver}. "
+                f"{_SUPPORTED_FST_VERSIONS}, current version: {fst_ver}. "
                 f"Internal API changes may cause breakage."
             )
         super().__init__(*args, **kwargs)

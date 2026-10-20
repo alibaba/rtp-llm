@@ -35,6 +35,7 @@ from rtp_llm.models_py.kernels.cuda.fp8_kernel.fp8_kernel import fp8_max, fp8_mi
 from rtp_llm.models_py.modules.dsv4._fused_inv_rope_fp8_quant_triton import (
     fused_inv_rope_fp8_quant,
 )
+from rtp_llm.models_py.modules.dsv4.fp8.attention import _prepare_wo_a_stacked
 from rtp_llm.models_py.modules.dsv4.rope import apply_rotary_emb_batched
 from rtp_llm.ops.compute_ops import per_token_group_quant_fp8
 
@@ -95,6 +96,31 @@ def _make_wo_a_weight(G: int, R: int, K: int, seed: int = 0):
     scale_rep = scale_fp32.index_select(-2, idx).contiguous()
     s_stk = get_mn_major_tma_aligned_packed_ue8m0_tensor(scale_rep)
     return weight_fp8, s_stk
+
+
+def test_prepare_wo_a_stacked_accepts_raw_and_packed_scale():
+    """Checkpoint and online-quant scale layouts must produce identical einsum SFs."""
+    G, R, K = 2, 128, 512
+    weight = torch.randn(G * R, K, device="cuda").to(torch.float8_e4m3fn)
+    raw_bytes = torch.randint(
+        115, 125, (G * R // 128, K // 128), dtype=torch.uint8, device="cuda"
+    )
+    raw_scale = raw_bytes.view(torch.float8_e8m0fnu)
+
+    scale_fp32 = raw_scale.float().view(G, R // 128, K // 128)
+    repeated = scale_fp32.repeat_interleave(128, dim=1)
+    globally_packed = get_mn_major_tma_aligned_packed_ue8m0_tensor(
+        repeated.view(G * R, K // 128)
+    )
+
+    raw_w, raw_s = _prepare_wo_a_stacked(weight, raw_scale, G, R, K)
+    packed_w, packed_s = _prepare_wo_a_stacked(
+        weight, globally_packed, G, R, K
+    )
+    assert torch.equal(raw_w.view(torch.uint8), packed_w.view(torch.uint8))
+    assert raw_s.shape == packed_s.shape
+    assert raw_s.stride() == packed_s.stride()
+    assert torch.equal(raw_s, packed_s)
 
 
 # ---------------------------------------------------------------------------

@@ -368,16 +368,47 @@ def _prepare_wo_a_stacked(
     - scale : ``[G, R, K/512]`` int32 UE8M0 packed, MN-major TMA-aligned
       (stride ``(K/512 * tma_R, 1, tma_R)``)
 
-    Cast e8m0fnu → fp32, row-repeat by 128 along R so
+    Raw checkpoint scales are cast e8m0fnu → fp32 and row-repeated by 128
+    along R so
     ``get_mn_major_tma_aligned_packed_ue8m0_tensor`` (which operates on
     fp32 ``[*, mn, k/128]``) sees the full [G, R, K/128] grid.  The helper
     floor-log2 bitcasts each block scale and packs 4 UE8M0 bytes per
     int32; output shape ``[G, R, K/512]`` matches
-    ``deep_gemm.fp8_einsum(..., recipe=(1, 1, 128))`` expectations."""
+    ``deep_gemm.fp8_einsum(..., recipe=(1, 1, 128))`` expectations.
+
+    Online BF16 quantization arrives already packed as a 2-D DeepGEMM scale
+    ``[G*R, K/512]``.  Its TMA stride spans all groups, so merely viewing it
+    as 3-D gives the wrong group stride.  Unpack the four exponent bytes and
+    repack each group into the einsum layout instead."""
     w_stk = weight_fp8.view(G, R, K).contiguous()
-    scale_fp32 = scale_raw.float().view(G, R // 128, K // 128)
-    idx = torch.arange(R, device=scale_raw.device) // 128
-    scale_rep = scale_fp32.index_select(-2, idx).contiguous()  # [G, R, K/128]
+    if scale_raw.dtype == torch.int32:
+        expected_shape = (G * R, K // 512)
+        assert tuple(scale_raw.shape) == expected_shape, (
+            f"unexpected packed wo_a scale shape {tuple(scale_raw.shape)}, "
+            f"expected {expected_shape}"
+        )
+        # ``contiguous()`` may preserve a non-unit last stride when K/512 is
+        # one because PyTorch ignores singleton strides.  Flattening first
+        # guarantees a byte-viewable logical row-major tensor in both cases.
+        scale_packed_row_major = scale_raw.reshape(-1).reshape(expected_shape)
+        scale_bytes = scale_packed_row_major.view(torch.uint8)
+        scale_rep = (
+            scale_bytes.view(G, R, K // 128)
+            .view(torch.float8_e8m0fnu)
+            .float()
+        )
+    else:
+        assert scale_raw.dtype == torch.float8_e8m0fnu, (
+            f"unexpected raw wo_a scale dtype {scale_raw.dtype}"
+        )
+        expected_shape = (G * R // 128, K // 128)
+        assert tuple(scale_raw.shape) == expected_shape, (
+            f"unexpected raw wo_a scale shape {tuple(scale_raw.shape)}, "
+            f"expected {expected_shape}"
+        )
+        scale_fp32 = scale_raw.float().view(G, R // 128, K // 128)
+        idx = torch.arange(R, device=scale_raw.device) // 128
+        scale_rep = scale_fp32.index_select(-2, idx).contiguous()
     s_stk = get_mn_major_tma_aligned_packed_ue8m0_tensor(scale_rep)
     return w_stk, s_stk
 

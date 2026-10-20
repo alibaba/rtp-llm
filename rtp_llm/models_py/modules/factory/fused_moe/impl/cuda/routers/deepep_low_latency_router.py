@@ -210,6 +210,15 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
         # Check handle
         assert self._handle is None
 
+        # Top-p marks deleted fixed-width slots with an out-of-range expert.
+        # DeepEP's low-latency dispatcher uses -1 as its dropped-slot
+        # sentinel, while zero route weights preserve the combine semantics.
+        valid_ids = (topk_ids >= 0) & (topk_ids < self._num_experts)
+        topk_ids = torch.where(valid_ids, topk_ids, torch.full_like(topk_ids, -1))
+        topk_weights = torch.where(
+            valid_ids, topk_weights, torch.zeros_like(topk_weights)
+        )
+
         # Slice dispatch activation, topk_ids and topk_weights by tp
         tp_dispatch_input, tp_topk_ids, tp_topk_weights = self._prepare_pre_tp_slice(
             a1, topk_ids, topk_weights

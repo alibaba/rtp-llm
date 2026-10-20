@@ -8,7 +8,7 @@ Covers:
 
 import unittest
 from typing import Dict, List
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import torch
 
@@ -20,7 +20,13 @@ from rtp_llm.model_loader.ffn_weight import (
     MoeWeight,
     iter_stacked_moe_weights,
 )
-from rtp_llm.model_loader.per_block_fp8_quant_weight import V4PerBlockFp8Weight
+from rtp_llm.model_loader.per_block_fp8_quant_weight import (
+    LoadQuantPerBlockFp8Weight,
+    V4PerBlockFp8Weight,
+)
+from rtp_llm.model_loader.per_expert_parallel_loader import (
+    _is_supported_fastsafetensors_version,
+)
 from rtp_llm.model_loader.tensor_source import StackSplitTensorSource, TensorSource
 from rtp_llm.utils.model_weight import CkptWeightInfo, W, concat_0, identity
 
@@ -41,6 +47,17 @@ class FakeTensorSource(TensorSource):
 
     def get_database(self):
         return None
+
+
+class TestPerExpertParallelLoaderVersion(unittest.TestCase):
+    def test_cuda13_locked_version_is_supported(self):
+        self.assertTrue(_is_supported_fastsafetensors_version("0.1.20+ali"))
+
+    def test_previous_tested_version_is_supported(self):
+        self.assertTrue(_is_supported_fastsafetensors_version("0.1.19rc5+ali"))
+
+    def test_unknown_internal_api_version_is_rejected(self):
+        self.assertFalse(_is_supported_fastsafetensors_version("0.1.21"))
 
 
 class TestV4SharedExpertW13Weight(unittest.TestCase):
@@ -75,6 +92,30 @@ class TestV4SharedExpertW13Weight(unittest.TestCase):
         )
         self.assertIs(wrapped.kernel.process_fun, concat_0)
         self.assertIs(wrapped.scale.process_fun, concat_0)
+
+    def test_online_v4_fp8_preserves_checkpoint_layout(self):
+        src = AttnAtomicWeight(
+            W.v4_attn_wq_a_w,
+            [CkptWeightInfo("layers.{i}.attn.wq_a.weight", identity)],
+            identity,
+        )
+        wrapped = src.create(src, Fp8BlockWiseQuantConfig(is_quanted=False))
+        self.assertIsInstance(wrapped, LoadQuantPerBlockFp8Weight)
+
+        raw = torch.randn(8, 4, dtype=torch.bfloat16)
+        quantized = torch.zeros(8, 4, dtype=torch.float8_e4m3fn)
+        scale = torch.ones(2, 1, dtype=torch.float32)
+        source = FakeTensorSource({"layers.0.attn.wq_a.weight": raw})
+        load_config = MagicMock(compute_dtype=torch.bfloat16)
+
+        with patch(
+            "rtp_llm.model_loader.per_block_fp8_quant_weight.per_block_cast_to_fp8",
+            return_value=(quantized, scale),
+        ):
+            result = wrapped._load_raw_tensor(source, 0, "cpu", load_config)
+
+        self.assertEqual(tuple(result[W.v4_attn_wq_a_w].shape), (8, 4))
+        self.assertEqual(tuple(result[W.v4_attn_wq_a_s].shape), (2, 1))
 
 
 class TestStackSplitTensorSource(unittest.TestCase):
