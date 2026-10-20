@@ -85,7 +85,10 @@ cc_library(
         "VIPServerSubscriber.h",
     ],
     copts = copts(),
-    visibility = ["//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:__subpackages__"],
+    visibility = [
+        "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:__subpackages__",
+        "//rtp_llm/cpp/cache/events:__pkg__",
+    ],
     deps = [
         "//rtp_llm/cpp/utils:core_utils",
         "@havenask//aios/autil:env_util",

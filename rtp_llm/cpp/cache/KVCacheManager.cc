@@ -855,6 +855,9 @@ void KVCacheManager::initCacheEventPublisher(std::shared_ptr<KVCacheEventReporte
 
         KVCacheEventPublisherConfig publisher_config;
         publisher_config.manager_endpoint = kv_cache_config_.kv_cache_event_manager_endpoint;
+        publisher_config.enable_vipserver = kv_cache_config_.kvcm_enable_vipserver;
+        publisher_config.vipserver_domain = kv_cache_config_.kvcm_vipserver_domain;
+        publisher_config.server_address   = kv_cache_config_.kvcm_server_address;
 
         KVCacheEventPublisherContext publisher_context;
         publisher_context.instance_group = resolveKVCacheEventInstanceGroup(

@@ -9,6 +9,9 @@ namespace rtp_llm {
 
 struct KVCacheEventPublisherConfig {
     std::string manager_endpoint;
+    bool        enable_vipserver = false;
+    std::string vipserver_domain;
+    std::string server_address;
 
     size_t queue_capacity        = 100000;
     size_t report_batch_size     = 1000;
