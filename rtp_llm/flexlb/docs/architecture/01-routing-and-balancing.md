@@ -65,6 +65,11 @@ ENCODER→`NO_ENCODER_WORKER`(8408)，均可重试。
 master forwarding 透传 protobuf 响应。物理地址字段与既有 service path 不变，旧客户端可忽略
 新增字段。此字段不改变 `EnqueueBatch` 的派发协议。
 
+ViT 两阶段选路在首次媒体 hash 尚未生成时允许空 affinity keys。`VitCacheDirectory` 的缓存快照、
+刷新记录和候选均以 `ip:httpPort@index` 为键。前端将首次响应的 `engine_index`（包括显式 0）和
+`worker_generation` 原样带回 `selected_vit`；`VitCacheSelector` 在完整路由时校验同一逻辑引擎的
+group 与 generation，并持有对应 endpoint pin。单引擎省略 `engine_index` 时按 `@0` 校验。
+
 ## 回滚机制
 
 `DefaultRouter.rollBackRoutingFailure()`：对 `RoutingResult` 中已成功的每个 `ServerStatus`，

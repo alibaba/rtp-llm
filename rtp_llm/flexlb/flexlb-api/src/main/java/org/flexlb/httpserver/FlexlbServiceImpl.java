@@ -973,6 +973,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             vit.setGrpcPort(selected.getGrpcPort());
             vit.setGroup(selected.getGroup().isEmpty() ? null : selected.getGroup());
             vit.setWorkerGeneration(selected.getWorkerGeneration());
+            vit.setEngineIndex(selected.hasEngineIndex() ? selected.getEngineIndex() : null);
             request.setSelectedVit(vit);
         }
         request.setSeqLen(pb.getSeqLen());

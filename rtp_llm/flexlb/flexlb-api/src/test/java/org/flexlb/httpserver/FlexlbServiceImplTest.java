@@ -583,6 +583,27 @@ class FlexlbServiceImplTest {
         verifyNoInteractions(observer);
     }
 
+    @ParameterizedTest
+    @ValueSource(ints = {0, 1})
+    void selectedVitRetainsEngineIndexFromScheduleRequest(int engineIndex) {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
+        when(routeService.route(any())).thenReturn(new CompletableFuture<>());
+        var selected = FlexlbScheduleProtocol.FlexlbServerStatusPB.newBuilder()
+                .setRole(RoleType.VIT.getCode()).setServerIp("10.0.0.1").setHttpPort(8000).setGrpcPort(8001)
+                .setEngineIndex(engineIndex).setWorkerGeneration(42).build();
+        var request = FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                .setRequestIdStr("12345").setVitRouteOnly(true).setSelectedVit(selected).build();
+
+        service.schedule(request, mock(StreamObserver.class));
+
+        ArgumentCaptor<BalanceContext> captured = ArgumentCaptor.forClass(BalanceContext.class);
+        verify(routeService).route(captured.capture());
+        var vit = captured.getValue().getRequest().getSelectedVit();
+        assertEquals(RoleType.VIT, vit.getRole());
+        assertEquals(engineIndex, vit.getEngineIndex());
+        assertEquals(42, vit.getWorkerGeneration());
+    }
+
     @Test
     void localScheduleReportsBalancingWithResponseAlreadyPublished() {
         when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
