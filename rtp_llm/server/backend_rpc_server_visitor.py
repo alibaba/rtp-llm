@@ -635,6 +635,51 @@ class BackendRPCServerVisitor:
                 missing_roles,
             )
 
+    async def _expand_pd_multimodal_tokens(self, input: GenerateInput):
+        # Domain and explicitly supplied routes bypass Master preselection, but
+        # Decode still consumes exactly the frontend-expanded token layout.
+        if (
+            not self._mm_cache_routing
+            or not input.mm_inputs
+            or input.mm_token_expansion is not None
+            or not any(
+                a.role == RoleType.DECODE for a in input.generate_config.role_addrs
+            )
+        ):
+            return
+        vit_addrs = [
+            a for a in input.generate_config.role_addrs if a.role == RoleType.VIT
+        ]
+        if len(vit_addrs) != 1:
+            raise FtRuntimeException(
+                ExceptionType.ROUTE_ERROR,
+                "PD multimodal expansion requires one selected ViT",
+            )
+        keys = multimodal_cache_keys(input)
+        metadata = await self.master_client.get_vit_cache_metadata(
+            vit_addrs[0], keys, input=input
+        )
+        spans = []
+        try:
+            token_ids, full_length = multimodal_routing_tokens(
+                input.token_ids.reshape(-1).tolist(),
+                self.mm_model_config.mm_sep_tokens,
+                self.mm_model_config.include_sep_tokens,
+                keys,
+                metadata,
+                self.max_seq_len,
+                compact=True,
+                expanded_spans=spans,
+            )
+            if full_length is None:
+                raise ValueError("Selected ViT did not return complete routing hashes")
+        except (ValueError, KeyError, TypeError, ImportError, OverflowError) as error:
+            raise FtRuntimeException(
+                ExceptionType.MM_PROCESS_ERROR,
+                f"Cannot expand PD multimodal tokens: {error}",
+            ) from error
+        input.mm_token_expansion = MultimodalTokenExpansion(token_ids, spans)
+
     async def route_ips(self, input: GenerateInput):
         # PD node selection span: master routing is a real RPC round-trip that
         # directly delays TTFT. Child of the HTTP SERVER span (same contextvars
@@ -751,6 +796,7 @@ class BackendRPCServerVisitor:
                 ):
                     route_error.rtp_error_code = master_route_result.error_code
                 raise route_error
+            await self._expand_pd_multimodal_tokens(input)
         except BaseException as e:
             if route_span is not None:
                 route_span.set_attribute(trace_attrs.RTP_LLM_ROUTE_SOURCE, route_source)
