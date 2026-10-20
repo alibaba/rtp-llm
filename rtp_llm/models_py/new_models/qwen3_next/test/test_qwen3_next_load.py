@@ -11,6 +11,7 @@ from safetensors.torch import save_file
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
 from rtp_llm.models_py.new_models.qwen3_next.language import (
+    Qwen35MoeForCausalLM,
     Qwen3NextForCausalLM,
     Qwen3NextGatedDeltaNet,
     Qwen3NextMetadata,
@@ -236,7 +237,7 @@ def _mtp_weights(embedding_prefix="model.language_model."):
 
 class Qwen3NextLoadTest(unittest.TestCase):
     def test_production_model_type_alias_uses_qwen3_next_newloader(self):
-        self.assertIs(get_model_class("qwen35_moe"), Qwen3NextForCausalLM)
+        self.assertIs(get_model_class("qwen35_moe"), Qwen35MoeForCausalLM)
 
     def test_mtp_model_type_aliases_use_typed_draft_models(self):
         self.assertIs(get_model_class("qwen3_next_mtp"), Qwen3NextMTPForCausalLM)

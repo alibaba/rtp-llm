@@ -22,7 +22,11 @@ from rtp_llm.models_py.model_desc.block_map import (
 )
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.module_base import RtpModule, copy_weight_
-from rtp_llm.models_py.modules import FakeBalanceExpert, SelectTopk
+from rtp_llm.models_py.modules import (
+    FakeBalanceExpert,
+    MultimodalEmbeddingInjector,
+    SelectTopk,
+)
 from rtp_llm.models_py.new_models.model_base import (
     required_config_value,
     select_fmha_impl_for_layer,
@@ -1947,8 +1951,11 @@ class Qwen3NextForCausalLM(GptModelBase):
             "lm_head": self.lm_head.weight,
         }
 
+    def word_embedding(self, inputs: PyModelInputs) -> torch.Tensor:
+        return self.embed_tokens(inputs.input_ids)
+
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
-        hidden_states = self.embed_tokens(inputs.input_ids)
+        hidden_states = self.word_embedding(inputs)
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
         attn_meta = _build_qwen3_next_metadata(inputs, hidden_states)
@@ -1972,6 +1979,39 @@ class Qwen3NextForCausalLM(GptModelBase):
             )
         hidden_states, residual = self.norm(hidden_states, residual)
         return PyModelOutputs(hidden_states)
+
+
+class Qwen35MoeForCausalLM(Qwen3NextForCausalLM):
+    """Qwen3.5 language runtime with multimodal feature injection."""
+
+    def __init__(self, model_config: ModelConfig, load_config: Any):
+        super().__init__(model_config, load_config)
+        self.multimodal_embedding_injector = MultimodalEmbeddingInjector()
+
+    def word_embedding(self, inputs: PyModelInputs) -> torch.Tensor:
+        input_ids = inputs.input_ids
+        embedding_inputs = getattr(inputs, "embedding_inputs", None)
+        text_tokens_mask = (
+            None if embedding_inputs is None else embedding_inputs.text_tokens_mask
+        )
+        if text_tokens_mask is None:
+            hidden_states = self.embed_tokens(input_ids)
+        else:
+            text_mask = text_tokens_mask.to(
+                device=input_ids.device, dtype=torch.bool
+            )
+            safe_input_ids = torch.where(text_mask, input_ids, 0)
+            hidden_states = self.embed_tokens(safe_input_ids)
+            hidden_states = hidden_states * text_mask.unsqueeze(-1)
+
+        multimodal_inputs = getattr(inputs, "multimodal_inputs", None)
+        if multimodal_inputs is None:
+            return hidden_states
+        features = getattr(multimodal_inputs, "multimodal_features", None)
+        locations = getattr(multimodal_inputs, "mm_features_locs", None)
+        if not features or locations is None:
+            return hidden_states
+        return self.multimodal_embedding_injector(hidden_states, features, locations)
 
 
 class Qwen3NextMTPForCausalLM(Qwen3NextForCausalLM):
