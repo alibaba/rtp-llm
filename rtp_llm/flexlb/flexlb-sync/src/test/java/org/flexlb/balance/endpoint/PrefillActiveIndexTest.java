@@ -28,6 +28,31 @@ class PrefillActiveIndexTest {
                     .thenComparingLong(ScheduledRequest::enqueueSeq);
 
     @Test
+    void decodeSubscriptionIsSharedAndReleasedWithLastQueuedIdentity() {
+        Runnable wake = () -> { };
+        var index = PrefillActiveIndex.ordered(16, ORDER, wake);
+        var decode = mock(DecodeEndpoint.class);
+        var first = item(1, 50);
+        var second = item(2, 50);
+        when(first.decodeEp()).thenReturn(decode);
+        when(second.decodeEp()).thenReturn(decode);
+        index.add(first);
+        index.add(second);
+        assertFalse(index.add(first));
+        verify(decode, times(1)).addEngineDispatchCapacityListener(wake);
+        index.remove(first);
+        verify(decode, times(0)).removeEngineDispatchCapacityListener(wake);
+        index.remove(second);
+        assertFalse(index.remove(second));
+        verify(decode, times(1)).removeEngineDispatchCapacityListener(wake);
+        index.add(first);
+        index.clear();
+        index.clear();
+        verify(decode, times(2)).addEngineDispatchCapacityListener(wake);
+        verify(decode, times(2)).removeEngineDispatchCapacityListener(wake);
+    }
+
+    @Test
     void additionsAndRemovalsMatchReferenceOrderAndPreserveOldCaptures() {
         var index = PrefillActiveIndex.ordered(16, ORDER);
         var expected = new ArrayList<ScheduledRequest>();
