@@ -1746,6 +1746,25 @@ class Qwen3NextModel(GptModelBase):
                 ) = self._build_cp_linear_attn_metadata(attention_inputs, device)
             else:
                 cu_seqlen_without_padding = attention_inputs.cu_seqlens_device
+                host_cu = attention_inputs.cu_seqlens
+                if (
+                    torch.version.hip is None
+                    and torch.device(device).type == "cuda"
+                    and not is_cuda_graph
+                    and not attention_inputs.is_cuda_graph
+                    and attention_inputs.input_lengths.device.type == "cpu"
+                    and isinstance(host_cu, torch.Tensor)
+                    and host_cu.device.type == "cpu"
+                    and host_cu.ndim == 1
+                    and host_cu.numel() > 0
+                    and host_cu.shape == cu_seqlen_without_padding.shape
+                    and host_cu.dtype == cu_seqlen_without_padding.dtype
+                ):
+                    # PyWrappedModel builds this host prefix sum from the live
+                    # host input lengths and uploads its device mirror before
+                    # forward. Reuse it for host launch metadata. Graph inputs
+                    # and device-only batches retain the live device fallback.
+                    cu_seqlen_without_padding = host_cu
                 prefill_conv1d_meta = prepare_causal_conv1d_metadata(
                     query_start_loc=cu_seqlen_without_padding,
                     device=device,
