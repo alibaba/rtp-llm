@@ -1217,7 +1217,7 @@ public final class WorkerBatcher {
         WorkerStatus status = prefillEndpoint != null
                 ? prefillEndpoint.getStatus() : null;
         if (status == null) {
-            return new BatchCapacitySnapshot(Long.MAX_VALUE, Long.MAX_VALUE);
+            return new BatchCapacitySnapshot(Long.MAX_VALUE, Long.MAX_VALUE, -1, -1);
         }
         WorkerStatus.EngineObservation engineStatus =
                 status.committedEngineObservation();
@@ -1232,17 +1232,26 @@ public final class WorkerBatcher {
         long total = engineStatus.totalKvCacheTokens();
         if (total <= 0) {
             return new BatchCapacitySnapshot(
-                    batchTokenCapacity, Long.MAX_VALUE);
+                    batchTokenCapacity, Long.MAX_VALUE, engineStatus.runningQueryLen(), engineStatus.waitingQueryLen());
         }
         long available = Math.max(
                 0, engineStatus.availableKvCacheTokens());
         return new BatchCapacitySnapshot(
-                batchTokenCapacity, Math.min(total, available));
+                batchTokenCapacity, Math.min(total, available),
+                engineStatus.runningQueryLen(), engineStatus.waitingQueryLen());
     }
 
     private record BatchCapacitySnapshot(
             long batchTokenCapacity,
-            long batchKvCapacity) {
+            long batchKvCapacity,
+            long runningQueryLen,
+            long waitingQueryLen) {
+        private long kvCapacityFor(GroupPlanner.Shape shape) {
+            if (!shape.fitsKv(batchKvCapacity) && runningQueryLen == 0 && waitingQueryLen == 0) {
+                return Long.MAX_VALUE;
+            }
+            return batchKvCapacity;
+        }
     }
 
     private static long positiveOrUnlimited(long value) {
@@ -1616,7 +1625,7 @@ public final class WorkerBatcher {
         GroupPlanner.Shape shape =
                 GroupPlanner.Shape.empty().add(head.seqLen());
         BatchCapacitySnapshot capacity = batchCapacitySnapshot();
-        if (!shape.fitsKv(capacity.batchKvCapacity())) {
+        if (!shape.fitsKv(capacity.kvCapacityFor(shape))) {
             return awaitPrefillKvCapacity(
                     head, snapshot.queueVersion(),
                     snapshot.schedulingInputVersion());
@@ -1625,7 +1634,7 @@ public final class WorkerBatcher {
         // Worker status and delivery ledgers advance independently. Re-read
         // the advisory gate immediately before hard-capacity admission.
         capacity = batchCapacitySnapshot();
-        if (!shape.fitsKv(capacity.batchKvCapacity())) {
+        if (!shape.fitsKv(capacity.kvCapacityFor(shape))) {
             return awaitPrefillKvCapacity(
                     head, snapshot.queueVersion(),
                     snapshot.schedulingInputVersion());
@@ -1697,9 +1706,9 @@ public final class WorkerBatcher {
                     observedOldestEnqueuedAtMs, fixedWaitMs);
         }
 
-        long batchKvTokens = capacity.batchKvCapacity();
-        if (!GroupPlanner.Shape.empty().add(observedHead.seqLen())
-                .fitsKv(batchKvTokens)) {
+        GroupPlanner.Shape observedHeadShape = GroupPlanner.Shape.empty().add(observedHead.seqLen());
+        long batchKvTokens = capacity.kvCapacityFor(observedHeadShape);
+        if (!observedHeadShape.fitsKv(batchKvTokens)) {
             return awaitPrefillKvCapacity(
                     observedHead,
                     observedQueueVersion,
@@ -1738,7 +1747,7 @@ public final class WorkerBatcher {
         }
         GroupPlanner.Shape headShape =
                 GroupPlanner.Shape.empty().add(head.seqLen());
-        batchKvTokens = capacity.batchKvCapacity();
+        batchKvTokens = capacity.kvCapacityFor(headShape);
         if (!headShape.fitsKv(batchKvTokens)) {
             return awaitPrefillKvCapacity(
                     head, snapshot.queueVersion(),
@@ -1817,15 +1826,14 @@ public final class WorkerBatcher {
         return null;
     }
 
-    private BatcherCycleResult admitDecisionGroup(
-            List<ScheduledRequest> picked,
-            GroupPlanner.Shape shape,
-            String reason,
-            PrefillTimePredictor.Evaluator evaluator,
-            OptionalLong plannedCommittedPredictionMs) {
+    private BatcherCycleResult admitDecisionGroup(List<ScheduledRequest> picked,
+                                                  GroupPlanner.Shape shape,
+                                                  String reason,
+                                                  PrefillTimePredictor.Evaluator evaluator,
+                                                  OptionalLong plannedCommittedPredictionMs) {
         BatchCapacitySnapshot capacity = batchCapacitySnapshot();
         if ((picked.size() > 1 && !shape.fitsCompute(capacity.batchTokenCapacity()))
-                || !shape.fitsKv(capacity.batchKvCapacity())) {
+                || !shape.fitsKv(capacity.kvCapacityFor(shape))) {
             return BatcherCycleResult.NO_ACTION;
         }
         return admitAndDeliverCapacityFeasiblePrefix(

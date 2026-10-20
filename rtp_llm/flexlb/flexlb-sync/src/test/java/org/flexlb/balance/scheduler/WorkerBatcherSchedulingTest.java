@@ -187,6 +187,46 @@ class WorkerBatcherSchedulingTest {
         assertEquals(Long.MAX_VALUE, inputs.queue().constraints().batchKvCapacity());
     }
 
+    @ParameterizedTest
+    @CsvSource({"false,0,0,0", "false,0,1,0", "false,0,0,1", "true,0,0,0", "true,0,1,0", "true,0,0,1",
+            "false,10,1,1", "true,10,1,1"})
+    @Timeout(value = 10, unit = TimeUnit.SECONDS)
+    void kvGateChecksEngineQueuesOnlyWhenCapacityIsInsufficient(boolean fixedWindow,
+                                                                long available,
+                                                                long running,
+                                                                long waiting) throws Exception {
+        FlexlbConfig config = singleConfig();
+        if (fixedWindow) {
+            DecisionPolicyConfig decision = SchedulingTestConfig.useFixedWindowDecision(config);
+            decision.setMaxRequests(1);
+            decision.setMaxCollectionWaitMs(0L);
+            decision.setMaxPredictedExecutionMs(0L);
+        }
+        WorkerStatus status = stableStatus();
+        when(status.committedEngineObservation()).thenReturn(new WorkerStatus.EngineObservation(
+                RoleType.PREFILL, null, available, 100L, Map.of(), 0.0,
+                0L, 0L, 0L, 0L, 1_000_000L, 1_000_000L, running, waiting));
+        PrefillEndpoint endpoint = stableEndpoint(status);
+        EventDrivenBlock delivery = new EventDrivenBlock();
+        WorkerBatcher runtime = runningRuntime(config, endpoint, delivery);
+        assertEquals(ACCEPTED, runtime.offerWithResult(
+                item(config, endpoint, 91L, 50, System.currentTimeMillis())));
+        if (available < 10 && (running != 0 || waiting != 0)) {
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            while (runtime.waitDiagnostics() == null && System.nanoTime() < deadline) {
+                TimeUnit.MILLISECONDS.sleep(10L);
+            }
+            assertNotNull(runtime.waitDiagnostics());
+            assertEquals(0, delivery.attempts.get());
+            when(status.committedEngineObservation()).thenReturn(new WorkerStatus.EngineObservation(
+                    RoleType.PREFILL, null, available, 100L, Map.of(), 0.0,
+                    0L, 0L, 0L, 0L, 1_000_000L, 1_000_000L, 0L, 0L));
+            runtime.signalSchedulingInputsChanged();
+        }
+        await(delivery.firstCapacity.subscribed);
+        assertEquals(1, delivery.attempts.get());
+    }
+
     @Test
     void batchSelectionDoesNotUseCurrentPrefillKvAsACandidateLimit() {
         FlexlbConfig config = singleConfig();
