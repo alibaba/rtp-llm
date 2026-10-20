@@ -135,6 +135,33 @@ bool ClientWrapper::initImpl(const ConfigMap&                     config_map,
             init_params_.role_type = kv_cache_manager::RoleType::WORKER;
         }
         const auto config_json = autil::legacy::ToJsonString(config_map_.begin()->second);
+        kv_cache_manager::ClientMemoryRegistrations memory_registrations;
+        for (auto& registration : pool_registrations_) {
+            if (!registration.memory_registrations) {
+                continue;
+            }
+            for (const auto& gpu : registration.memory_registrations->gpu) {
+                const auto duplicate = std::find_if(memory_registrations.gpu.begin(),
+                                                    memory_registrations.gpu.end(),
+                                                    [&](const auto& other) {
+                                                        return gpu.base == other.base && gpu.size == other.size
+                                                               && gpu.device_id == other.device_id;
+                                                    });
+                if (duplicate == memory_registrations.gpu.end()) {
+                    memory_registrations.gpu.push_back(gpu);
+                }
+            }
+            registration.memory_registrations->gpu.clear();
+        }
+        if (!memory_registrations.gpu.empty()) {
+            // PACE seals the process's MR registrations during the first client Init.
+            // Retain every GPU span in that client's descriptor before creating any client.
+            auto& first = pool_registrations_.front().memory_registrations;
+            if (!first) {
+                first.emplace();
+            }
+            first->gpu = std::move(memory_registrations.gpu);
+        }
         std::vector<std::unique_ptr<kv_cache_manager::TransferClient>> clients;
         clients.reserve(pool_registrations_.size());
         for (size_t index = 0; index < pool_registrations_.size(); ++index) {
