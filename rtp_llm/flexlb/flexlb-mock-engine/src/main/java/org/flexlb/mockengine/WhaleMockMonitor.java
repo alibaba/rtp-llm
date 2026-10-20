@@ -39,8 +39,16 @@ final class WhaleMockMonitor implements AutoCloseable {
 
     static WhaleMockMonitor create() {
         try {
-            FlexMonitor monitor = (FlexMonitor) Class.forName("org.flexlb.monitor.FlexMonitorFactory")
-                    .getMethod("createKMonitorAdapter", MasterStatusProvider.class).invoke(null, new Object[]{null});
+            Class<?> factory = Class.forName("org.flexlb.monitor.FlexMonitorFactory");
+            FlexMonitor monitor;
+            try {
+                // The release factory has no MasterStatusProvider parameter.
+                // Mock engines do not provide master status in either version.
+                monitor = (FlexMonitor) factory.getMethod("createKMonitorAdapter").invoke(null);
+            } catch (NoSuchMethodException releaseSignatureAbsent) {
+                monitor = (FlexMonitor) factory.getMethod("createKMonitorAdapter", MasterStatusProvider.class)
+                        .invoke(null, new Object[]{null});
+            }
             if (monitor instanceof NoOpFlexMonitor) {
                 throw new IllegalStateException("KMonitor initialization returned a no-op adapter");
             }
