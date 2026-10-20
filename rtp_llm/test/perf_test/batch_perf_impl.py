@@ -658,6 +658,24 @@ class BatchPerfImpl(object):
                 watchdog.stop()
                 watchdog.join(timeout=5)
 
+        # Decode-phase accounting guard: a "successful" HTTP 200 response
+        # whose stream finished at output_len <= 1 (the max_seq_len boundary
+        # instantly finishing the request, e.g. input 12000 vs limit 12800)
+        # yields decode_time_per_token = 0.0 — averaging that into
+        # avg_decode_time trivially "satisfies" any TPOT target and
+        # produces nonsense TPS. Such degenerate responses must count as
+        # measurement failures in the decode grid (the prefill/TTFT phase
+        # legitimately produces 1-token responses and is unaffected).
+        if self.is_decode:
+            for resp in all_responses:
+                if resp.success and resp.output_len <= 1:
+                    logging.warning(
+                        "[PERF_DEGENERATE] decode response finished at "
+                        "output_len=%d (max_seq_len boundary?), marking the "
+                        "measurement as failed",
+                        resp.output_len,
+                    )
+                    resp.success = False
         return all_responses
 
     def _curl_server(self, profile: bool = False) -> TestResultMetrics:
