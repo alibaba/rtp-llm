@@ -80,7 +80,8 @@ indexer_k_quant_and_cache_kernel(const scalar_t* __restrict__ k,            // [
                                  const int  quant_block_size,               // quantization block size
                                  const int  cache_block_size,               // cache block size
                                  const int  cache_stride,                   // stride for each token in kv_cache
-                                 const bool use_ue8m0                       // use ue8m0 scale format
+                                 const bool use_ue8m0,                      // use ue8m0 scale format
+                                 const bool use_mxfp8                       // packed ue8m0 scales per 32 elements
 ) {
     constexpr int VEC_SIZE  = 4;
     const int64_t token_idx = blockIdx.x;
@@ -105,8 +106,8 @@ indexer_k_quant_and_cache_kernel(const scalar_t* __restrict__ k,            // [
         amax = fmaxf(amax, fabsf(float(k_val_ptr[i])));
     }
 
-    // Warp reduction to find max across warp
-    for (int mask = 16; mask > 0; mask /= 2) {
+    // MXFP8 uses eight lanes (32 values) per scale; legacy modes use a full warp.
+    for (int mask = use_mxfp8 ? 4 : 16; mask > 0; mask /= 2) {
         amax = fmaxf(amax, warp_shfl_xor(amax, mask));
     }
 
@@ -114,7 +115,11 @@ indexer_k_quant_and_cache_kernel(const scalar_t* __restrict__ k,            // [
     float scale = fmaxf(amax, 1e-4f) / 448.0f;
 
     // Apply ue8m0 scale format (power of 2)
-    if (use_ue8m0) {
+    if (use_mxfp8) {
+        const uint32_t bits = __float_as_uint(scale);
+        const uint32_t exponent = min(254u, max(1u, (bits >> 23) + ((bits & 0x7fffff) != 0)));
+        scale = __uint_as_float(exponent << 23);
+    } else if (use_ue8m0) {
         scale = exp2f(ceilf(log2f(scale)));
     }
 
@@ -125,8 +130,12 @@ indexer_k_quant_and_cache_kernel(const scalar_t* __restrict__ k,            // [
         kv_cache[dst_offset + i] = fp8::scaled_convert<cache_t, scalar_t>(k_val_ptr[i], scale);
     }
 
-    // Write scale (first thread in warp writes scale)
-    if (threadIdx.x == 0) {
+    if (use_mxfp8 && threadIdx.x % 8 == 0) {
+        // Four exponent bytes occupy the existing four-byte scale slot per 128 values.
+        const int64_t dst_scale_idx = block_idx * cache_block_size * cache_stride + cache_block_size * head_dim
+                                      + (block_offset * head_dim + head_dim_idx) / 32;
+        reinterpret_cast<uint8_t*>(kv_cache)[dst_scale_idx] = static_cast<uint8_t>(__float_as_uint(scale) >> 23);
+    } else if (!use_mxfp8 && threadIdx.x == 0) {
         const int64_t dst_scale_idx = block_idx * cache_block_size * cache_stride + cache_block_size * head_dim
                                       + (block_offset * head_dim + head_dim_idx) * 4 / quant_block_size;
         reinterpret_cast<float*>(kv_cache)[dst_scale_idx / 4] = scale;
@@ -203,7 +212,8 @@ cp_gather_indexer_k_quant_cache_kernel(const char* __restrict__ kv_cache,  // [n
                                      quant_block_size,                                                                 \
                                      cache_block_size,                                                                 \
                                      cache_stride,                                                                     \
-                                     use_ue8m0);
+                                     use_ue8m0,                                                                        \
+                                     use_mxfp8);
 
 void indexer_k_quant_and_cache(torch::Tensor&     k,                 // [num_tokens, head_dim]
                                torch::Tensor&     kv_cache,          // [num_blocks, block_size, cache_stride]
@@ -230,6 +240,7 @@ void indexer_k_quant_and_cache(torch::Tensor&     k,                 // [num_tok
     int  cache_block_size = kv_cache.size(1);
     int  cache_stride     = kv_cache.size(2);
     bool use_ue8m0        = (scale_fmt == "ue8m0");
+    bool use_mxfp8        = (scale_fmt == "mxfp8");
 
     // Validation checks
     TORCH_CHECK(k.device() == kv_cache.device(), "k and kv_cache must be on the same device");
@@ -244,6 +255,8 @@ void indexer_k_quant_and_cache(torch::Tensor&     k,                 // [num_tok
                 slot_mapping.size(0),
                 " is smaller than k num_tokens ",
                 num_tokens);
+    TORCH_CHECK(!use_mxfp8 || (head_dim == 128 && quant_block_size == 128),
+                "indexer_k_quant_and_cache: mxfp8 requires head_dim=128 and quant_block_size=128");
     TORCH_CHECK(head_dim % quant_block_size == 0, "head_dim must be divisible by quant_block_size");
     TORCH_CHECK(cache_stride >= head_dim + head_dim / quant_block_size * 4,
                 "indexer_k_quant_and_cache: cache_stride ",

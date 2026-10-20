@@ -160,6 +160,9 @@ class Glm5Cmp:
         return self._is_moe_layer
 
     def _static_disabled_reason(self) -> str | None:
+        indexer = getattr(self.self_attn, "indexer", None)
+        if getattr(getattr(indexer, "indexer_op", None), "use_mxfp8", False):
+            return "GLM5 CMP Indexer kernels require legacy per-128 FP8 cache scales"
         reason = _unsupported_parallelism_reason(self.parallelism_config)
         if reason is not None:
             return reason

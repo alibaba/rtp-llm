@@ -563,8 +563,21 @@ class SparseMlaImpl(MlaImplBase):
         if not isinstance(lengths, torch.Tensor) or lengths.numel() == 0:
             return
         lengths_2d = paged_mqa_context_lens(attn_inputs, self.fmha_params)
+        metadata_args = {}
+        if (
+            not hasattr(deep_gemm, "fp8_paged_mqa_logits")
+            and hasattr(deep_gemm, "fp8_fp4_paged_mqa_logits")
+            and torch.cuda.get_device_capability(lengths.device)[0] == 10
+        ):
+            lengths_2d = lengths.reshape(-1, 1)
+            metadata_args["indices"] = torch.arange(
+                lengths.numel(), dtype=torch.int32, device=lengths.device
+            )
         new_schedule = deep_gemm.get_paged_mqa_logits_metadata(
-            lengths_2d, self.seq_size_per_block, deep_gemm.get_num_sms()
+            lengths_2d,
+            self.seq_size_per_block,
+            deep_gemm.get_num_sms(),
+            **metadata_args,
         )
 
         current = getattr(self.fmha_params, "schedule_metadata", None)

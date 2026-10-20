@@ -157,6 +157,13 @@ class Indexer(nn.Module):
         # ``self._fuse_logits_head_gate`` is resolved at __init__ from
         # ``HWKernelConfig.enable_fuse_kernels``.
         scale = self.softmax_scale * self.weights_scale
+        if self.indexer_op.use_mxfp8:
+            # Packed per-32 Q scales are consumed by DeepGEMM, not folded into gates.
+            return (
+                (self.weights_proj(x.float()).float() * scale)
+                .to(torch.bfloat16)
+                .unsqueeze(-1)
+            )
         if self._fuse_logits_head_gate and x.is_contiguous():
             return fused_logits_head_gate(
                 x,
@@ -325,13 +332,14 @@ class Indexer(nn.Module):
         fmha_params: Any,
         attention_inputs: Any,
         cp_params: Optional[Any],
+        q_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         is_multi_token_decode = bool(
             getattr(attention_inputs, "is_target_verify", False)
         ) or bool(getattr(attention_inputs, "is_draft_extend", False))
         if not attention_inputs.is_prefill or is_multi_token_decode:
             return self.indexer_op._get_topk_paged(
-                q_fp8, weights, kv_cache, fmha_params, attention_inputs
+                q_fp8, weights, kv_cache, fmha_params, attention_inputs, q_scale=q_scale
             )
         if self._prefill_cp_enabled():
             assert cp_params is not None
@@ -361,9 +369,10 @@ class Indexer(nn.Module):
                 total_local_ids_is_identity=bool(
                     getattr(cp_params, "total_local_ids_is_identity", False)
                 ),
+                q_scale=q_scale,
             )
         return self.indexer_op._get_topk_ragged(
-            q_fp8, weights, kv_cache, fmha_params, attention_inputs
+            q_fp8, weights, kv_cache, fmha_params, attention_inputs, q_scale=q_scale
         )
 
     def forward(
@@ -392,6 +401,7 @@ class Indexer(nn.Module):
         # RoPE + 128-pt Hadamard + ue8m0 FP8 quant for Q (decode only).
         if (
             self._is_sparse_prefill_cp(attention_inputs)
+            and not self.indexer_op.use_mxfp8
             and self._prefill_cp_fused_quant_enabled()
             and cp_params.full_rope_pos_ids is not None
         ):
@@ -408,6 +418,7 @@ class Indexer(nn.Module):
             )
         elif (
             self._fuse_logits_head_gate
+            and not self.indexer_op.use_mxfp8
             and not attention_inputs.is_prefill
             and cp_params is None
         ):
@@ -438,5 +449,11 @@ class Indexer(nn.Module):
 
         weights = self._get_logits_head_gate(hidden_states, q_scale)
         return self._compute_topk(
-            q_fp8, weights, kv_cache, fmha_params, attention_inputs, cp_params
+            q_fp8,
+            weights,
+            kv_cache,
+            fmha_params,
+            attention_inputs,
+            cp_params,
+            q_scale=q_scale if self.indexer_op.use_mxfp8 else None,
         )

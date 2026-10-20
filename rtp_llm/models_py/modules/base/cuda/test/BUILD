@@ -106,6 +106,14 @@ py_test (
     name = "indexer_k_quant_and_cache_test",
     srcs = ["indexer_k_quant_and_cache_test.py"],
     deps = py_test_deps,
-    tags = ["open_skip", "H20"],
-    exec_properties = {'gpu':'H20'},
+    tags = ["open_skip", "H20_CU13"],
+    exec_properties = {'gpu':'H20_CU13', 'gpu_count':'1'},
+)
+
+py_test(
+    name = "deepgemm_282_indexer_test",
+    srcs = ["deepgemm_282_indexer_test.py"],
+    deps = py_test_deps,
+    tags = ["manual", "open_skip", "SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
 )
