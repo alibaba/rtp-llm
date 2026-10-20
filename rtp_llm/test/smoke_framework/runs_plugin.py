@@ -23,7 +23,31 @@ Notes:
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import List
+from uuid import uuid4
+
+import pytest
+
+
+@dataclass(frozen=True)
+class RepeatExecution:
+    nodeid: str
+    index: int
+    count: int
+    invocation: str
+
+    @property
+    def action_identity(self) -> str:
+        return f"{self.invocation}:{self.index}/{self.count}"
+
+
+_REPEAT_EXECUTION = pytest.StashKey[RepeatExecution]()
+
+
+def repeat_execution(item):
+    stash = getattr(item, "stash", None)
+    return stash.get(_REPEAT_EXECUTION, None) if stash is not None else None
 
 
 def pytest_addoption(parser):
@@ -65,12 +89,16 @@ def pytest_collection_modifyitems(session, config, items: List):
         return
     width = max(2, len(str(n)))
     repeated = []
+    invocation = uuid4().hex
     for it in items:
         for i in range(1, n + 1):
             if i == 1:
                 # First rep keeps original name+nodeid (single-run baseline).
+                it.stash[_REPEAT_EXECUTION] = RepeatExecution(it.nodeid, i, n, invocation)
                 repeated.append(it)
                 continue
             new_name = "{}[run{:0{w}d}/{}]".format(it.name, i, n, w=width)
-            repeated.append(_clone_item(it, new_name))
+            replica = _clone_item(it, new_name)
+            replica.stash[_REPEAT_EXECUTION] = RepeatExecution(it.nodeid, i, n, invocation)
+            repeated.append(replica)
     items[:] = repeated
