@@ -1,0 +1,6 @@
+{
+  "source_branch": "develop/dsv41_ced_release",
+  "source_commit": "246852c6ab6889e14556cca5dfa24ea50d9c979d",
+  "schema_version": 3,
+  "jar": "master.jar"
+}
