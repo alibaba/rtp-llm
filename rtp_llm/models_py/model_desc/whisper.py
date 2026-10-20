@@ -86,10 +86,19 @@ class _GraphDecodeState:
         self.page_size = page_size
         self._plan_indptr_snapshot = None
         self.plan_kv_len = 0
+        # Device-resident constant kv-length vector: torch's non_blocking
+        # host-to-device .to() rides the allocator copy stream, which is not
+        # ordered with the graph stream (an async-pipeline race). Keep the
+        # frames on device and refresh the constant with a device-side fill
+        # on the current (graph) stream instead.
+        self.frames_dev = None
 
     def bind(self, kv_lens: torch.Tensor, block_table: torch.Tensor) -> None:
         """Capture-time fill + fixed-buffer binding for one batch bucket."""
         self.plan_kv_len = int(kv_lens.max()) if kv_lens.numel() > 0 else 0
+        self.frames_dev = torch.full(
+            (max(int(kv_lens.numel()), 1),), self.plan_kv_len, dtype=torch.int32, device=block_table.device
+        )
         seq_minus_one = (kv_lens - 1).clamp(min=0)
         empty_prefix = torch.empty(0, dtype=torch.int32)
         self.params.fill_params(empty_prefix, seq_minus_one, seq_minus_one, block_table, self.page_size, False)
@@ -284,8 +293,20 @@ class WhisperCrossKVCacheGroup:
         # plan time, so a shorter indptr would desynchronize it. No-audio rows
         # carry an all-zero block-table row (reserved block 0) and attention
         # over zero pages yields zeros, matching the eager skip semantics.
-        frames = torch.full_like(kv_lens, state.plan_kv_len, dtype=torch.int32).cuda(non_blocking=True)
-        state.params.fill_decode_cuda_graph_params(frames, block_id, self.page_size)
+        if (
+            state.frames_dev is None
+            or state.frames_dev.device != block_id.device
+            or state.frames_dev.numel() != int(kv_lens.numel())
+        ):
+            state.frames_dev = torch.full(
+                (int(kv_lens.numel()),), state.plan_kv_len, dtype=torch.int32, device=block_id.device
+            )
+        else:
+            # Constant value: a device-side fill on the current (graph) stream
+            # — never a host-to-device copy, whose non_blocking form rides the
+            # allocator copy stream and races the replay under stream-async.
+            state.frames_dev.fill_(state.plan_kv_len)
+        state.params.fill_decode_cuda_graph_params(state.frames_dev, block_id, self.page_size)
         state.replan_if_needed(self.head_num, self.head_dim, self.dtype)
 
     def __del__(self):
