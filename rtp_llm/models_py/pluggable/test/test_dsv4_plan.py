@@ -718,9 +718,8 @@ class Dsv4PlanTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "No compatible"):
                     ctx.prepare([request_for("model", ctx.selection)])
 
-    def test_engine_feature_flags_no_longer_disqualify(self):
+    def test_engine_feature_flags_match_executed_phases(self):
         for flagged in (
-            {"cuda_graph": True},
             {"lora": True},
             {"eplb": True},
         ):
@@ -728,6 +727,11 @@ class Dsv4PlanTest(unittest.TestCase):
                 ctx = self.context(selection(**flagged))
                 ctx.prepare([request_for("model", ctx.selection)])
                 self.assertEqual(len(ctx.bindings), 130)
+        # Graph capture runs a decode-shaped forward during construction, so a
+        # prefill-only implementation must be rejected at plan time.
+        ctx = self.context(selection(cuda_graph=True))
+        with self.assertRaisesRegex(ValueError, "No compatible"):
+            ctx.prepare([request_for("model", ctx.selection)])
         for flagged in (
             {"cuda_graph": False},
             {"lora": True},
