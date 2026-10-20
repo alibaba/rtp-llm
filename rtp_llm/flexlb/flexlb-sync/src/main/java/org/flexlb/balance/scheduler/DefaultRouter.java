@@ -131,7 +131,7 @@ public class DefaultRouter {
             }
             for (RoleType role : roles) {
                 if (role == RoleType.VIT && context.getRequest().getSelectedVit() != null) { continue; }
-                PlacementResult<SelectedRole, RoleType> result =
+                PlacementResult<SelectedRole, PlacementKey> result =
                         selectRole(context, role, group, decodeAdmission);
                 if (result.status() != PlacementResult.Status.SUCCESS) {
                     Logger.debug(
@@ -144,7 +144,7 @@ public class DefaultRouter {
                     if (result.status() == PlacementResult.Status.BLOCKED) {
                         return new PinnedRouting(
                                 selected,
-                                new PlacementKey(result.blocker(), group),
+                                result.blocker(),
                                 result.failure(), result.diagnostics());
                     }
                     throw new IllegalStateException("unexpected selector result: "
@@ -183,23 +183,28 @@ public class DefaultRouter {
                 .orElse(null);
     }
 
-    private PlacementResult<SelectedRole, RoleType> selectRole(
+    private PlacementResult<SelectedRole, PlacementKey> selectRole(
             BalanceContext context, RoleType role, String group, DecodeBinding decodeAdmission) {
         return switch (role) {
             case PREFILL, PDFUSION ->
                     prefillSelector.select(context, role, group);
-            case DECODE -> decodeSelector.select(decodeAdmission, group);
+            case DECODE -> {
+                var result = decodeSelector.select(decodeAdmission, group);
+                yield new PlacementResult<>(result.status(), result.value(), result.failure(),
+                        result.blocker() == null ? null : new PlacementKey(result.blocker(), group),
+                        result.diagnostics());
+            }
             case VIT -> selectedOrBlocked(
-                    vitSelector.select(context, role, group), role);
+                    vitSelector.select(context, role, group), role, group);
             case FRONTEND -> throw new IllegalArgumentException(
                     "Endpoint selection is not supported for FRONTEND");
         };
     }
 
-    private static PlacementResult<SelectedRole, RoleType> selectedOrBlocked(
-            SelectedRole selected, RoleType role) {
+    private static PlacementResult<SelectedRole, PlacementKey> selectedOrBlocked(
+            SelectedRole selected, RoleType role, String group) {
         return selected == null
-                ? PlacementResult.blocked(role)
+                ? PlacementResult.blocked(new PlacementKey(role, group))
                 : PlacementResult.success(selected);
     }
 

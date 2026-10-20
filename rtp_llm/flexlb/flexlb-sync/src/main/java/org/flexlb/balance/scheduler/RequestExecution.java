@@ -75,4 +75,10 @@ public final class RequestExecution implements Prioritized {
     public int maxInflightBatchesPerPrefillWorker() {
         return maxInflightBatchesPerPrefillWorker;
     }
+
+    /** Advisory only: delivery still acquires the exact Decode permit. */
+    public boolean decodeReadyForDispatch() {
+        return decodeBinding.isAbsent() || decodeBinding.endpoint() == null
+                || decodeBinding.endpoint().shouldRetryDispatch(requestId(), decodeBinding.capacity());
+    }
 }
