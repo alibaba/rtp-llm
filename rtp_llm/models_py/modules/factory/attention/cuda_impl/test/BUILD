@@ -210,6 +210,27 @@ py_test(
     deps = flashinfer_test_deps,
 )
 
+# 4c contract (r9, route-2 minimal increment): flashinfer fa3 sm90
+# kernel-config sweep (CTA_Q/CTA_KV/NUM_STAGES via a shadow JIT header —
+# upstream leaves the hd256 ragged tile untuned) at the r8 gate shape,
+# with numerics A/B vs the unpatched fa3 module (bf16-noise gate + the
+# lse convention check) and the 4c MFU verdict (2*Q*avg_kv*16*256 /
+# 148TF). Manual (developer bench) diagnostic; no wheel or AttnOp change.
+py_test(
+    name = "test_diffusion_gemm_4c_fi_tile_sweep_sm90",
+    srcs = ["test_flashinfer_prefill/test_diffusion_gemm_4c_fi_tile_sweep.py"],
+    exec_properties = {
+        "gpu": "H20_CU13",
+    },
+    main = "test_flashinfer_prefill/test_diffusion_gemm_4c_fi_tile_sweep.py",
+    tags = [
+        "H20_CU13",
+        "manual",
+    ],
+    target_compatible_with = CUDA13_X86_ONLY,
+    deps = flashinfer_test_deps,
+)
+
 # Generates one py_test per (test, platform): <test name>_<sm>,
 # e.g. test_py_flashinfer_hybrid_mha_prefill_sm90.
 [
