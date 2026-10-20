@@ -99,9 +99,11 @@ def _kv_write(
     gamma,
     slots,
     pool,
+    dense_keys,
     GROUPS: tl.constexpr,
     MAX_LENGTH: tl.constexpr,
     EPS: tl.constexpr,
+    EMIT_DENSE: tl.constexpr,
 ):
     request, group = tl.program_id(0), tl.program_id(1)
     slot = tl.load(slots + request * GROUPS + group)
@@ -130,6 +132,28 @@ def _kv_write(
             normalized,
         )
         tl.store(pool + slot * 128 + d, output)
+        if EMIT_DENSE:
+            # Selection's standalone CUDA mean uses 32 lanes, each reducing
+            # four adjacent squared FP32 values. Keep cache bytes above
+            # unchanged and reproduce that consumer's reduction separately.
+            lane = tl.arange(0, 32)
+            a = tl.gather(pooled, lane * 4, 0)
+            b = tl.gather(pooled, lane * 4 + 1, 0)
+            c0 = tl.gather(pooled, lane * 4 + 2, 0)
+            d0 = tl.gather(pooled, lane * 4 + 3, 0)
+            variance = tl.sum(((a * a + b * b) + c0 * c0) + d0 * d0, 0) / 128
+            dense_norm = (pooled * tl.rsqrt(variance + EPS) * gain).to(tl.bfloat16)
+            partner_value = tl.gather(dense_norm, partner, 0)
+            left = (dense_norm.to(tl.float32) * c).to(tl.bfloat16)
+            right = (partner_value.to(tl.float32) * s * tl.where(d < 32, -1.0, 1.0)).to(
+                tl.bfloat16
+            )
+            dense = tl.where(
+                d < 64,
+                (left.to(tl.float32) + right.to(tl.float32)).to(tl.bfloat16),
+                dense_norm,
+            )
+            tl.store(dense_keys + (request * GROUPS + group) * 128 + d, dense)
 
 
 @triton.jit
@@ -196,6 +220,7 @@ def write_zero_prefix_prefill(
     *,
     page_size,
     norm_eps,
+    emit_dense_keys=False,
 ) -> dict | None:
     """Return None for unsupported geometry or aliased pages, before any write.
 
@@ -282,6 +307,11 @@ def write_zero_prefix_prefill(
 
     # index_qk_proj exposes K as a strided slice of the joint Q/K output.
     raw_keys = raw_keys.contiguous()
+    dense_keys = (
+        torch.empty((batch, groups, 128), device=device, dtype=torch.bfloat16)
+        if emit_dense_keys
+        else kv_pool
+    )
     state_slots = torch.empty(batch * pages * 8, dtype=torch.int64, device=device)
     kv_slots = torch.empty(batch * groups, dtype=torch.int64, device=device)
     original_state = torch.empty(
@@ -345,9 +375,11 @@ def write_zero_prefix_prefill(
                 gamma,
                 kv_slots,
                 kv_pool,
+                dense_keys,
                 GROUPS=groups,
                 MAX_LENGTH=maximum,
                 EPS=norm_eps,
+                EMIT_DENSE=emit_dense_keys,
                 num_warps=4,
                 enable_fp_fusion=False,
             )
@@ -374,4 +406,5 @@ def write_zero_prefix_prefill(
         num_state_writes=sum(lengths),
         num_kv_writes=sum(n // 4 for n in lengths),
         undo=undo,
+        **({"block_keys": dense_keys} if emit_dense_keys else {}),
     )

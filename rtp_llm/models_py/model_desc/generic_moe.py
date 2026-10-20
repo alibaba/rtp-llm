@@ -174,7 +174,7 @@ class GenericMoeLayer(nn.Module):
             return torch.sigmoid(gate_output) * shared_expert_output
         return shared_expert_output
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def _forward_routed(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, _ = hidden_states.shape
         router_logits = self.gate(hidden_states)
 
@@ -228,6 +228,10 @@ class GenericMoeLayer(nn.Module):
             activation="SiGLU",
             skip_tp_allreduce=self.use_unified_tp_allreduce,
         )
+        return experts_output
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        experts_output = self._forward_routed(hidden_states)
         if self.shared_expert is not None:
             shared_expert_output = self.shared_expert(
                 hidden_states,
@@ -243,7 +247,9 @@ class GenericMoeLayer(nn.Module):
                 experts_output = self._merge_shared_expert_output(
                     hidden_states, experts_output, shared_expert_output
                 )
-                experts_output = all_reduce(experts_output, group=Group.TP)
+                experts_output = getattr(self, "tp_all_reduce", all_reduce)(
+                    experts_output, group=Group.TP
+                )
             elif self.use_ep_shared_allreduce:
                 # EP mode: routed expert output is already complete
                 # (EP combine via all_to_all / all_gather aggregated across ranks).
@@ -251,7 +257,9 @@ class GenericMoeLayer(nn.Module):
                 shared_expert_output = self._gate_shared_expert_output(
                     hidden_states, shared_expert_output
                 )
-                shared_expert_output = all_reduce(shared_expert_output, group=Group.TP)
+                shared_expert_output = getattr(self, "tp_all_reduce", all_reduce)(
+                    shared_expert_output, group=Group.TP
+                )
                 experts_output = experts_output + shared_expert_output
             else:
                 # Fallback path: each path is already complete independently.

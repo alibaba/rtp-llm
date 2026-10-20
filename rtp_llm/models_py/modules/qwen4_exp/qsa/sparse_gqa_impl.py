@@ -23,6 +23,7 @@ target verification and bounded draft prefill support CUDA Graph. Layout and
 publication preflights complete before either side or main-cache writes.
 """
 
+import os
 from typing import Optional
 
 import torch
@@ -67,6 +68,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         self._is_mtp_draft = False
         self._selected_indices: Optional[torch.Tensor] = None
         self._qsa_main_cache_mutation_started = False
+        self._qsa_target_visible_lengths = None
         self._validate_runtime_mode()
         rope_writer_cls = (
             FusedRopeKVCachePrefillOpQKVOut
@@ -144,6 +146,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
     def begin_qsa_cache_transaction(self) -> None:
         """Reset the main-cache phase before the paired side-cache write."""
         self._qsa_main_cache_mutation_started = False
+        self._qsa_target_visible_lengths = None
 
     def qsa_main_cache_mutation_started(self) -> bool:
         """Whether the fused main KV writer may have mutated its cache."""
@@ -329,12 +332,56 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             raise RuntimeError("qwen4_exp sparse GQA graph page geometry changed")
         captured_offset.copy_(offset, non_blocking=True)
 
+    def forward_with_qk_norm_and_output_gate(
+        self, qkv, kv_cache, layer_idx, gate, norm
+    ):
+        if (
+            norm is not None
+            and self.is_target_verify
+            and os.environ.get("QWEN4_QSA_FUSED_KV_WRITER", "0") == "1"
+            and not self._is_mtp_draft
+            and not self.attn_configs.use_logn_attn
+        ):
+            return self.forward(
+                qkv, kv_cache, layer_idx, qk_norm=norm, output_gate=gate
+            )
+        if not (
+            norm is not None
+            and self.is_prefill
+            and not self.is_target_verify
+            and not self._is_mtp_draft
+            and not self.attn_inputs.is_cuda_graph
+            and 4093 <= qkv.shape[0] <= 4096
+            and self.attn_inputs.input_lengths.numel() == 1
+            and self.rope_params.position_ids is not None
+            and self.rope_params.max_prefix_length == 0
+            and not self.attn_configs.use_logn_attn
+        ):
+            return self.forward_with_output_gate(
+                norm(qkv) if norm is not None else qkv, kv_cache, layer_idx, gate
+            )
+        return self.forward(qkv, kv_cache, layer_idx, qk_norm=norm) * torch.sigmoid(
+            gate
+        )
+
+    def forward_with_output_gate(self, qkv, kv_cache, layer_idx, gate):
+        if (
+            (self.is_target_verify or not self.is_prefill)
+            and not self._is_draft_graph()
+            and gate.dtype == torch.bfloat16
+            and gate.is_contiguous()
+        ):
+            return self.forward(qkv, kv_cache, layer_idx, output_gate=gate)
+        return self.forward(qkv, kv_cache, layer_idx) * torch.sigmoid(gate)
+
     def forward(
         self,
         qkv: torch.Tensor,
         kv_cache: Optional[LayerKVCache] = None,
         layer_idx: int = 0,
         selected_indices: Optional[torch.Tensor] = None,
+        output_gate: Optional[torch.Tensor] = None,
+        qk_norm=None,
     ) -> torch.Tensor:
         """Rotate/write packed QKV, then run per-request sparse prefill attention.
 
@@ -343,6 +390,17 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         tensor directly. Both forms use packed ``[total_tokens, K]`` indices;
         the legacy uniform ``[B, S, K]`` form is accepted after validation.
         """
+        if output_gate is not None and not (
+            output_gate.shape == (qkv.shape[0], self.q_width)
+            and output_gate.dtype == torch.bfloat16
+            and output_gate.device == qkv.device
+            and output_gate.is_contiguous()
+            and not self._is_draft_graph()
+            and (self.is_target_verify or not self.is_prefill)
+        ):
+            raise ValueError(
+                "fused QSA output gate requires a packed paged decode plan"
+            )
         if selected_indices is not None and self._selected_indices is not None:
             raise RuntimeError("qwen4_exp sparse GQA received two selections")
         uses_stored_selection = selected_indices is None
@@ -370,11 +428,73 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         elif self.is_target_verify or not self.is_prefill:
             paged_plan = self._prepare_paged_inputs(qkv, kv_cache, selected_indices)
 
-        # The fused op writes main K/V. Mark the phase before entering it:
-        # even a launch-time exception may follow a partial mutation.
+        writer = self.rope_kvcache_impl
+        fused_writer = None
+        if qk_norm is not None and self.is_target_verify:
+            from .main_qk_cache_triton import prepare_main_qk_cache
+
+            fused_writer = prepare_main_qk_cache(
+                qkv,
+                self.rope_params.position_ids,
+                qk_norm,
+                self.attn_configs.rope_config,
+                kv_cache.kv_cache_base,
+                kv_cache.kv_scale_base,
+                paged_plan,
+                self.rope_params,
+            )
+            if fused_writer is None:
+                qkv = qk_norm(qkv)
+        elif qk_norm is not None:
+            from .main_qk_norm_rope import try_main_qk_norm_rope
+
+            prepared = try_main_qk_norm_rope(
+                qkv,
+                self.rope_params.position_ids.reshape(-1, 3),
+                qk_norm,
+                self.attn_configs.rope_config,
+            )
+            if prepared is None:
+                qkv = qk_norm(qkv)
+            else:
+                qkv = prepared
+                writer = getattr(self, "_norm_rope_plain_writer", None)
+                if writer is None:
+                    from rtp_llm.ops import RopeStyle
+
+                    config = AttentionConfigs()
+                    for name in (
+                        "head_num",
+                        "kv_head_num",
+                        "size_per_head",
+                        "kernel_tokens_per_block",
+                        "max_seq_len",
+                        "use_logn_attn",
+                    ):
+                        setattr(config, name, getattr(self.attn_configs, name))
+                    config.rope_config.style = RopeStyle.No
+                    writer = FusedRopeKVCachePrefillOpQKVOut(config)
+                    self._norm_rope_plain_writer = writer
+        # Preparation above is read-only. Mark mutation immediately before the
+        # native or fused KV/FP32-scale writer; partial launch failures retain
+        # the existing fail-stop transaction contract.
         self._qsa_main_cache_mutation_started = True
         pre_writer_shape = tuple(qkv.shape)
-        qkv = self.rope_kvcache_impl.forward(qkv, kv_cache, self.rope_params)
+        if fused_writer is not None:
+            from libth_transformer_config import get_rope_cache_once
+
+            # The native writer initializes a process-wide RoPE cache policy
+            # even for MRoPE, which cannot use that cache. Preserve its first
+            # call here: otherwise a later Base-style MTP layer can initialize
+            # the cache instead and silently switch its rotary math path.
+            get_rope_cache_once(
+                self.attn_configs.rope_config, self.attn_configs.max_seq_len
+            )
+        qkv = (
+            fused_writer.run()
+            if fused_writer is not None
+            else writer.forward(qkv, kv_cache, self.rope_params)
+        )
         # The production decode writer returns [tokens, q_heads, head_dim] while
         # the paged kernels consume the flat [tokens, width] view.
         if qkv.dim() == 3 and int(qkv.numel()) == int(qkv.shape[0]) * self.q_width:
@@ -387,7 +507,9 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             common.apply_write_cache_store(
                 self.write_cache_store_impl, self.attn_inputs, kv_cache
             )
-            output = self._forward_paged(qkv[:, : self.q_width], kv_cache, paged_plan)
+            output = self._forward_paged(
+                qkv[:, : self.q_width], kv_cache, paged_plan, output_gate
+            )
             if uses_stored_selection:
                 self._selected_indices = None
             return output
@@ -421,7 +543,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             common.apply_write_cache_store(
                 self.write_cache_store_impl, self.attn_inputs, kv_cache
             )
-            output = self._forward_paged(qkv, kv_cache, paged_plan)
+            output = self._forward_paged(qkv, kv_cache, paged_plan, output_gate)
             if uses_stored_selection:
                 self._selected_indices = None
             return output
@@ -486,6 +608,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         q: torch.Tensor,
         kv_cache: Optional[LayerKVCache],
         plan: PagedInputs | IncrementalPrefillInputs,
+        output_gate: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Run paged sparse GQA after the production decode RoPE/KV writer."""
         assert kv_cache is not None
@@ -514,6 +637,15 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             selected_indices.contiguous(),
             page_size=page_size,
             kv_head_num=self.kv_head_num,
+            **(
+                {
+                    "output_gate": output_gate.view(
+                        batch, query_len, self.head_num, self.head_dim
+                    )
+                }
+                if output_gate is not None
+                else {}
+            ),
             **self._paged_kv_scale_args(kv_cache),
             **({"graph_capture": True} if self.attn_inputs.is_cuda_graph else {}),
         )

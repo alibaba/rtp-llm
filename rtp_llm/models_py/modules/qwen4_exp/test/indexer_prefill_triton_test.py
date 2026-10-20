@@ -208,6 +208,43 @@ class IndexerPrefillTritonTest(unittest.TestCase):
     def fused(self, args):
         return write_zero_prefix_prefill(*args, page_size=128, norm_eps=1e-6)
 
+    def test_emitted_selection_keys_match_old_preparation_and_preserve_cache(self):
+        for lengths in ([1, 3], [4, 7, 129, 257], [4096, 131], [12288]):
+            args = self.inputs(lengths)
+            old = self.fused(args)
+            legacy_kv, legacy_state = args[6].clone(), args[8].clone()
+            restore_indexer_cache(old["undo"])
+            result = write_zero_prefix_prefill(
+                *args, page_size=128, norm_eps=1e-6, emit_dense_keys=True
+            )
+            torch.testing.assert_close(args[6], legacy_kv, rtol=0, atol=0)
+            torch.testing.assert_close(args[8], legacy_state, rtol=0, atol=0)
+            offset = 0
+            for request, length in enumerate(lengths):
+                groups = length // 4
+                if groups:
+                    raw = args[0][offset : offset + groups * 4].reshape(groups, 4, 128)
+                    pooled = raw.mean(1).float()
+                    normalized = (
+                        pooled
+                        * torch.rsqrt(pooled.square().mean(-1, keepdim=True) + 1e-6)
+                        * (1 + args[5].float())
+                    ).bfloat16()
+                    cos, sin = (
+                        args[3][request, : groups * 4 : 4],
+                        args[4][request, : groups * 4 : 4],
+                    )
+                    rotary = normalized[:, :64]
+                    partner = torch.cat((-rotary[:, 32:], rotary[:, :32]), -1)
+                    expected = torch.cat(
+                        (rotary * cos + partner * sin, normalized[:, 64:]), -1
+                    )
+                    torch.testing.assert_close(
+                        result["block_keys"][request, :groups], expected, rtol=0, atol=0
+                    )
+                offset += length
+            restore_indexer_cache(result["undo"])
+
     def test_ragged_long_prefill_cache_metadata_and_rollback(self):
         for lengths in ([1, 3], [4, 7, 127, 128, 129, 257], [4096, 131]):
             with self.subTest(lengths=lengths):

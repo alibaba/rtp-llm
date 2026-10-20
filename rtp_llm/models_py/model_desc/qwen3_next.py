@@ -1344,11 +1344,14 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         valid_mask = attn_meta.cp_local_valid_mask
         local_attn_out[valid_mask] = full_attn_out[attn_meta.cp_local_extract_indices]
 
-        local_attn_out = self.norm(
-            local_attn_out.reshape(-1, self.local_num_v_heads * self.head_v_dim), z
-        )
-        local_attn_out = self.out_proj(local_attn_out)
-        return local_attn_out
+        return self._output_project(local_attn_out, z)
+
+    def _output_project(self, attn_output, gate):
+        value = attn_output.reshape(-1, self.local_num_v_heads * self.head_v_dim)
+        project = getattr(self.norm, "forward_project", None)
+        if callable(project):
+            return project(value, gate, self.out_proj)
+        return self.out_proj(self.norm(value, gate))
 
     def forward(
         self,
@@ -1386,17 +1389,16 @@ class Qwen3NextGatedDeltaNet(nn.Module):
                 kv_cache,
                 attn_meta,
             )
-        attn_output = self.norm(
-            attn_output.reshape(-1, self.local_num_v_heads * self.head_v_dim), z
-        )
-        attn_output = self.out_proj(attn_output)
+        attn_output = self._output_project(attn_output, z)
         if self.parallelism_config.get_attn_tp_size() > 1:
-            attn_output = all_reduce(attn_output, group=Group.TP)
+            reduce_output = getattr(self, "tp_all_reduce", all_reduce)
+            attn_output = reduce_output(attn_output, group=Group.TP)
         return attn_output
 
 
 class Qwen3NextDecoderLayer(nn.Module):
     _linear_factory = LinearFactory
+    _moe_layer_cls = GenericMoeLayer
 
     def __init__(
         self,
@@ -1443,7 +1445,7 @@ class Qwen3NextDecoderLayer(nn.Module):
             )
 
         if config.moe_style in (1, 2):
-            self.mlp = GenericMoeLayer(
+            self.mlp = self._moe_layer_cls(
                 config,
                 parallelism_config,
                 weights,

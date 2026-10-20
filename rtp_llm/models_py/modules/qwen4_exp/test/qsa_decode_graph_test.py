@@ -97,6 +97,12 @@ class Qwen4ExpQSADecodeGraphTest(TestCase):
             )
 
     def test_draft_graph_replays_engine_positions_and_side_cache(self):
+        self._check_draft_graph_replay(False)
+
+    def test_draft_graph_cached_frequency_preserves_selected_and_cache_bytes(self):
+        self._check_draft_graph_replay(True)
+
+    def _check_draft_graph_replay(self, use_cached_frequency):
         self.raw = torch.randn(1, 256, dtype=torch.bfloat16, device="cuda")[:, ::2]
         self.assertFalse(self.raw.is_contiguous())
         self.rope = SimpleNamespace(
@@ -106,6 +112,13 @@ class Qwen4ExpQSADecodeGraphTest(TestCase):
             base=10000,
             scale=1.0,
         )
+        if use_cached_frequency:
+            frequency = float(self.rope.base) ** (
+                -2.0 * torch.arange(32, dtype=torch.float32, device="cuda") / 64
+            )
+            weights = torch.full((1, 4), 1.0 / 128**0.5, device="cuda")
+            self.indexer.rope_inv_freq = lambda config: frequency
+            self.indexer.score_weights = lambda rows, device: weights[:rows]
         # Draft transport positions need not equal logical main-cache rows.
         self.positions = torch.tensor([13, 13, 13], dtype=torch.int32, device="cuda")
         context = self._context(True, draft=True)
@@ -130,15 +143,19 @@ class Qwen4ExpQSADecodeGraphTest(TestCase):
         self.positions.fill_(17)
         graph.replay()
 
+        if use_cached_frequency:
+            # The reference rebuilds frequencies and constants as before.
+            self.indexer.rope_inv_freq = lambda config: None
+            self.indexer.score_weights = lambda rows, device: None
         eager_kv = initial_kv.clone()
         eager_state = initial_state.clone()
         eager = self._context(False, eager_kv, eager_state, draft=True)
         expected = eager.select_decode_tokens(
             self.q, self.raw, indexer=self.indexer, rope_config=self.rope
         )
-        torch.testing.assert_close(selected, expected)
-        torch.testing.assert_close(self.kv, eager_kv)
-        torch.testing.assert_close(self.state, eager_state)
+        torch.testing.assert_close(selected, expected, rtol=0, atol=0)
+        torch.testing.assert_close(self.kv, eager_kv, rtol=0, atol=0)
+        torch.testing.assert_close(self.state, eager_state, rtol=0, atol=0)
 
     def test_graph_replay_matches_eager_after_length_and_projection_update(self):
         context = self._context(True)

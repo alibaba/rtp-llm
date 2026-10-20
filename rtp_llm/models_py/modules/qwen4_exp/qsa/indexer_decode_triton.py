@@ -267,6 +267,23 @@ def write_decode_key_with_undo_(
         ratio=4,
     ):
         raise ValueError("unsupported Qwen4 QSA decode writer layout")
+    from .decode_snapshot_triton import try_snapshot_decode
+
+    undo = try_snapshot_decode(positions, kv_pool, kv_table, state_pool, state_table)
+    if undo is not None:
+        write_decode_key_(
+            raw_keys,
+            positions,
+            rope_cos,
+            rope_sin,
+            gamma,
+            kv_pool,
+            kv_table,
+            state_pool,
+            state_table,
+            norm_eps=norm_eps,
+        )
+        return undo
     pos = positions.to(torch.long)
     batch_rows = torch.arange(raw_keys.shape[0], device=raw_keys.device)
     state_columns = (pos // 128).clamp(0, state_table.shape[1] - 1)
@@ -476,6 +493,25 @@ def write_draft_window_with_undo_(
         ratio=4,
     ):
         raise ValueError("unsupported Qwen4 QSA draft writer layout")
+
+    from .draft_writer_triton import try_write_draft_window
+
+    fused = try_write_draft_window(
+        raw_keys,
+        cu_seqlens,
+        prefixes,
+        lengths,
+        rope_cos,
+        rope_sin,
+        gamma,
+        kv_pool,
+        kv_table,
+        state_pool,
+        state_table,
+        norm_eps=norm_eps,
+    )
+    if fused is not None:
+        return fused
 
     offsets = torch.arange(4, dtype=torch.int32, device=raw_keys.device)
     active = offsets[None, :] < lengths[:, None]

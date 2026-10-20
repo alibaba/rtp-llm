@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import os
 from typing import Any
 
 import torch
@@ -202,6 +203,7 @@ def write_prefill_indexer_cache(
                 state_table,
                 page_size=kv_tokens_per_block,
                 norm_eps=float(indexer.norm_eps),
+                emit_dense_keys=True,
             )
         except ValueError:
             # Preserve the runtime's CU diagnostic; error-only checking
@@ -331,17 +333,36 @@ def select_draft_graph_tokens(
         device=q.device,
     )
     sources, inverse, valid, positions, visible = draft_graph_rows(inputs, tokens)
-    cos, sin = build_qsa_rope_from_logical_positions(
-        positions, rope_config, token_count=tokens, dtype=q.dtype, device=q.device
+    from rtp_llm.models_py.modules.qwen4_exp.qsa.draft_prepare_triton import try_prepare
+
+    enabled = os.environ.get("QWEN4_DRAFT_QSA_FUSED", "0") == "1"
+    get_frequency = getattr(indexer, "rope_inv_freq", None)
+    frequency = (
+        get_frequency(rope_config) if enabled and callable(get_frequency) else None
     )
-    block_starts = positions - positions.remainder(4)
-    block_cos, block_sin = build_qsa_rope_from_logical_positions(
-        block_starts,
-        rope_config,
-        token_count=tokens,
-        dtype=q.dtype,
-        device=q.device,
+    prepared = try_prepare(
+        q, positions, sources, visible, frequency, rope_config=rope_config
     )
+    if prepared is not None:
+        padded, block_cos, block_sin, weights, compressed_lengths = prepared
+    else:
+        cos, sin = build_qsa_rope_from_logical_positions(
+            positions,
+            rope_config,
+            token_count=tokens,
+            dtype=q.dtype,
+            device=q.device,
+            inv_freq=frequency,
+        )
+        block_starts = positions - positions.remainder(4)
+        block_cos, block_sin = build_qsa_rope_from_logical_positions(
+            block_starts,
+            rope_config,
+            token_count=tokens,
+            dtype=q.dtype,
+            device=q.device,
+            inv_freq=frequency,
+        )
     if self._side_cache_undo is not None:
         raise RuntimeError("QSA draft graph side-cache transaction is already active")
     undo = write_draft_window_with_undo_(
@@ -359,20 +380,22 @@ def select_draft_graph_tokens(
         norm_eps=float(indexer.norm_eps),
     )
     object.__setattr__(self, "_side_cache_undo", undo)
-    rotated = apply_partial_rope(q, cos.unsqueeze(1), sin.unsqueeze(1))
-    padded = rotated.index_select(0, sources).reshape(batch, lanes, heads, dim)
-    weights = torch.full(
-        (batch * lanes, heads),
-        1.0 / math.sqrt(dim),
-        device=q.device,
-        dtype=torch.float32,
-    )
+    if prepared is None:
+        rotated = apply_partial_rope(q, cos.unsqueeze(1), sin.unsqueeze(1))
+        padded = rotated.index_select(0, sources).reshape(batch, lanes, heads, dim)
+        weights = torch.full(
+            (batch * lanes, heads),
+            1.0 / math.sqrt(dim),
+            device=q.device,
+            dtype=torch.float32,
+        )
+        compressed_lengths = visible // 4
     logits = qsa_paged_indexer_score(
         padded.contiguous(),
         weights,
         kv_pool.flatten(0, 1),
         kv_table,
-        visible // 4,
+        compressed_lengths,
         block_size=32,
         max_ctx_len=int(kv_table.shape[1]) * 32,
         validate_block_table=False,
@@ -383,6 +406,7 @@ def select_draft_graph_tokens(
         compress_ratio=4,
         token_budget=int(indexer.token_budget),
         validate_lengths=False,
+        scores_are_masked=enabled,
     )
     packed = selected.index_select(0, inverse)
     return torch.where(valid.unsqueeze(1), packed, -1)

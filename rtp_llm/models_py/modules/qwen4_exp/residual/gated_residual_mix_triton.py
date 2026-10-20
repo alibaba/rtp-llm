@@ -54,7 +54,21 @@ def fused_mix_reduce(
     result = torch.empty(
         (*logits.shape[:-1], hidden), device=logits.device, dtype=logits.dtype
     )
-    _mix_reduce_kernel[(rows, triton.cdiv(hidden, 128))](
-        logits, normed, result, HIDDEN=hidden, BRANCHES=branches, BLOCK=128, num_warps=4
+    block, warps = 128, 4
+    if hidden == 2560 and torch.cuda.get_device_capability(logits.device) == (12, 0):
+        # Fewer CTAs for the bandwidth-bound prefill consumer. The four BF16
+        # products and their sequential FP32 sum keep the original boundaries.
+        if 4093 <= rows <= 4096:
+            block = 2048
+        elif rows == 12288:
+            block, warps = 256, 2
+    _mix_reduce_kernel[(rows, triton.cdiv(hidden, block))](
+        logits,
+        normed,
+        result,
+        HIDDEN=hidden,
+        BRANCHES=branches,
+        BLOCK=block,
+        num_warps=warps,
     )
     return result

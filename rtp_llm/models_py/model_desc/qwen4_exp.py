@@ -1,3 +1,4 @@
+import os
 import weakref
 from collections.abc import Mapping
 from typing import Any, Dict, Optional
@@ -52,6 +53,7 @@ from rtp_llm.models_py.model_desc.qwen4_exp_runtime.weight_views import (
 )
 from rtp_llm.models_py.modules import FMHAImplBase
 from rtp_llm.models_py.modules.hybrid.causal_attention import CausalAttention
+from rtp_llm.models_py.modules.qwen4_exp.moe.shared_overlap import Qwen4MoeLayer
 from rtp_llm.models_py.modules.qwen4_exp.ple.ple import (
     Qwen4ExpNGramEmbedding,
     Qwen4ExpPLELayer,
@@ -159,16 +161,42 @@ class Qwen4ExpAttention(Qwen3NextAttention):
         self,
         hidden_states: torch.Tensor,
         qsa_runtime: Qwen4ExpQSARuntimeContext,
+        *,
+        projected=None,
     ) -> torch.Tensor:
         """Project once, persist raw keys, then build request-local selections."""
         assert self.qsa_indexer is not None
-        q, raw_keys = self.qsa_indexer.project(hidden_states)
+        raw_query = (
+            bool(qsa_runtime.main_inputs.is_target_verify)
+            and callable(getattr(self.qsa_indexer, "project_raw", None))
+            and hidden_states.is_cuda
+            and torch.version.hip is None
+            and hidden_states.dtype == torch.bfloat16
+            and torch.cuda.get_device_capability(hidden_states.device) == (12, 0)
+        )
+        if projected is None:
+            q, raw_keys = (
+                self.qsa_indexer.project_raw(hidden_states)
+                if raw_query
+                else self.qsa_indexer.project(hidden_states)
+            )
+        else:
+            q, raw_keys = projected
+            if not raw_query:
+                from rtp_llm.models_py.modules.qwen4_exp.qsa.norm import (
+                    exact_head_rms_norm,
+                )
+
+                q = exact_head_rms_norm(
+                    q, self.qsa_indexer.q_norm_gamma, self.qsa_indexer.norm_eps
+                )
         if bool(qsa_runtime.main_inputs.is_target_verify):
             return qsa_runtime.select_target_verify_tokens(
                 q,
                 raw_keys,
                 indexer=self.qsa_indexer,
                 rope_config=self.qsa_rope_config,
+                **({"raw_query": True} if raw_query else {}),
             )
         if not bool(qsa_runtime.main_inputs.is_prefill):
             return qsa_runtime.select_decode_tokens(
@@ -215,14 +243,19 @@ class Qwen4ExpAttention(Qwen3NextAttention):
                 indexer=self.qsa_indexer,
                 rope_config=self.qsa_rope_config,
             )
-        lengths, rope_cos, rope_sin, _ = qsa_runtime.write_prefill_indexer_cache(
-            raw_keys,
-            indexer=self.qsa_indexer,
-            rope_config=self.qsa_rope_config,
+        lengths, rope_cos, rope_sin, indexer_write = (
+            qsa_runtime.write_prefill_indexer_cache(
+                raw_keys,
+                indexer=self.qsa_indexer,
+                rope_config=self.qsa_rope_config,
+            )
         )
 
         selections = []
         offset = 0
+        prepared_keys = (
+            indexer_write.get("block_keys") if isinstance(indexer_write, dict) else None
+        )
         for request_idx, seq_len in enumerate(lengths):
             end = offset + seq_len
             selections.append(
@@ -231,6 +264,15 @@ class Qwen4ExpAttention(Qwen3NextAttention):
                     raw_keys[offset:end].unsqueeze(0),
                     rope_cos[request_idx, :seq_len].unsqueeze(0),
                     rope_sin[request_idx, :seq_len].unsqueeze(0),
+                    **(
+                        {
+                            "precomputed_block_keys": prepared_keys[
+                                request_idx : request_idx + 1, : seq_len // 4
+                            ]
+                        }
+                        if prepared_keys is not None
+                        else {}
+                    ),
                 ).squeeze(0)
             )
             offset = end
@@ -316,11 +358,74 @@ class Qwen4ExpAttention(Qwen3NextAttention):
                     device=hidden_states.device,
                 )
             try:
-                gate = self.gate(hidden_states)
-                set_selected(self._qsa_selected_indices(hidden_states, qsa_runtime))
-                output = CausalAttention.forward(
-                    self, hidden_states, fmha_impl, kv_cache, gate
+                from rtp_llm.models_py.modules.qwen4_exp.fp8_dense import (
+                    project_fp8_pair,
                 )
+
+                prepared = None
+                if (
+                    type(self.qsa_indexer) is Qwen4ExpQSAIndexer
+                    and hidden_states.ndim == 2
+                    and (
+                        3 <= hidden_states.shape[0] <= 32
+                        or 4093 <= hidden_states.shape[0] <= 32768
+                    )
+                    and not any(
+                        name in self.qsa_indexer.__dict__
+                        for name in ("project", "project_raw", "split_projected")
+                    )
+                ):
+                    prepared = project_fp8_pair(
+                        hidden_states,
+                        self.gate,
+                        self.qsa_indexer.qk_projection,
+                    )
+                if prepared is None:
+                    gate = self.gate(hidden_states)
+                    selected = self._qsa_selected_indices(hidden_states, qsa_runtime)
+                else:
+                    gate, projected_qk = prepared
+                    selected = self._qsa_selected_indices(
+                        hidden_states,
+                        qsa_runtime,
+                        projected=self.qsa_indexer.split_projected(projected_qk),
+                    )
+                set_selected(selected)
+                fused_gate_forward = getattr(
+                    fmha_impl, "forward_with_output_gate", None
+                )
+                if callable(fused_gate_forward):
+                    from rtp_llm.models_py.distributed.collective_torch import (
+                        Group,
+                        all_reduce,
+                    )
+
+                    qkv = self.qkv_proj(hidden_states)
+                    norm_gate_forward = getattr(
+                        fmha_impl, "forward_with_qk_norm_and_output_gate", None
+                    )
+                    if callable(norm_gate_forward):
+                        attention = norm_gate_forward(
+                            qkv, kv_cache, self.layer_idx, gate, self.qk_fuse_norm
+                        )
+                    else:
+                        if self.qk_fuse_norm is not None:
+                            qkv = self.qk_fuse_norm(qkv)
+                        attention = fused_gate_forward(
+                            qkv, kv_cache, self.layer_idx, gate
+                        )
+                    attention = attention.reshape(
+                        *hidden_states.shape[:-1], -1
+                    ).contiguous()
+                    output = self.o_proj(attention)
+                    if self.tp_size > 1:
+                        output = getattr(self, "tp_all_reduce", all_reduce)(
+                            output, group=Group.TP
+                        )
+                else:
+                    output = CausalAttention.forward(
+                        self, hidden_states, fmha_impl, kv_cache, gate
+                    )
             except BaseException:
                 if main_cache_mutation_started():
                     # Once the fused main writer has started, rolling back only
@@ -347,6 +452,7 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
     """
 
     _linear_factory = Qwen4LinearFactory
+    _moe_layer_cls = Qwen4MoeLayer
 
     def __init__(
         self,
@@ -370,12 +476,34 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
             enable_cuda_graph,
             hw_kernel_config,
         )
+        if self.layer_type == HybridAttentionType.LINEAR:
+            import os
+
+            if os.environ.get("QWEN4_GDN_SM120_PREFILL") == "1":
+                from rtp_llm.models_py.modules.qwen4_exp.gdn_prefill_adapter import (
+                    Qwen4Sm120GdnPrefill,
+                )
+
+                native = self.self_attn.prefill_gdn
+                self.self_attn.prefill_gdn = Qwen4Sm120GdnPrefill(
+                    native.linear_attn_config, native.parallelism_config, native.weights
+                )
+            from rtp_llm.models_py.modules.qwen4_exp.gdn_prefill_norm_triton import (
+                Qwen4PrefillGatedNorm,
+            )
+
+            gdn_norm = getattr(self.self_attn, "norm", None)
+            if gdn_norm is not None:
+                self.self_attn.norm = Qwen4PrefillGatedNorm(
+                    gdn_norm, role=self._execution_role
+                )
         if hasattr(self.mlp, "select_topk"):
             from rtp_llm.models_py.modules.qwen4_exp.moe.moe_topk_triton import (
                 Qwen4ExpMoeTopk,
             )
 
             self.mlp.select_topk = Qwen4ExpMoeTopk(self.mlp.select_topk)
+            self.mlp.prepare_shared_expert_overlap()
         if self.layer_type != HybridAttentionType.LINEAR and getattr(
             config, "enable_qwen4_qsa", False
         ):
@@ -389,6 +517,14 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
                 hw_kernel_config=hw_kernel_config,
                 layer_idx=layer_idx,
             )
+        import os
+
+        if os.environ.get("QWEN4_TP_REGISTERED_INPUTS", "0") == "1":
+            from rtp_llm.models_py.modules.qwen4_exp.tp_reduce import (
+                install_target_graph_all_reduce,
+            )
+
+            install_target_graph_all_reduce(self.self_attn, self.mlp)
         # Full-attention layers only; linear-attention layers have no qk norm.
         # The checkpoint's q/k gamma is stored raw for this reason, so the fused
         # version would silently drop upstream's +1 -- see norm.py.
@@ -494,9 +630,37 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
         attn_meta: Qwen3NextMetadata = Qwen3NextMetadata(),
         qsa_runtime: Optional[Qwen4ExpQSARuntimeContext] = None,
     ) -> torch.Tensor:
-        hidden_states, hyper_states, inject_weights = self.attn_hyper_connection(
-            hyper_states
+        base, output, gate = self.forward_deferred(
+            hyper_states,
+            fmha_impl,
+            kv_cache=kv_cache,
+            attention_inputs=attention_inputs,
+            attn_meta=attn_meta,
+            qsa_runtime=qsa_runtime,
         )
+        return inject_into_residual(base, output, gate)
+
+    def forward_deferred(
+        self,
+        hyper_states: torch.Tensor,
+        fmha_impl: FMHAImplBase,
+        kv_cache: Optional[LayerKVCache] = None,
+        attention_inputs: Optional[PyAttentionInputs] = None,
+        attn_meta: Qwen3NextMetadata = Qwen3NextMetadata(),
+        qsa_runtime: Optional[Qwen4ExpQSARuntimeContext] = None,
+        pending_injection=None,
+    ) -> tuple:
+        if pending_injection is not None:
+            previous_output, previous_gate = pending_injection
+            hidden_states, hyper_states, inject_weights = (
+                self.attn_hyper_connection.forward_with_injection(
+                    hyper_states, previous_output, previous_gate
+                )
+            )
+        else:
+            hidden_states, hyper_states, inject_weights = self.attn_hyper_connection(
+                hyper_states
+            )
         attn_kwargs = dict(
             hidden_states=hidden_states,
             fmha_impl=fmha_impl,
@@ -521,7 +685,7 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
                 hyper_states
             )
         hidden_states = self.mlp(hidden_states)
-        return inject_into_residual(hyper_states, hidden_states, inject_weights)
+        return hyper_states, hidden_states, inject_weights
 
 
 class Qwen4ExpModel(Qwen35Model):
@@ -589,6 +753,12 @@ class Qwen4ExpModel(Qwen35Model):
                     W.embedding + FP8_STORAGE_SCALE_SUFFIX
                 ),
             )
+        if os.environ.get("QWEN4_VOCAB_BYTE_GATHER", "0") == "1" and getattr(
+            self.config, "_qwen4_full_fp8_nvfp4", False
+        ):
+            self.embed_tokens.prepare_byte_gather(
+                role=getattr(parallelism_config, "role_type", "PDFUSION")
+            )
         self.ple_layers = nn.ModuleDict()
         self.requires_cuda_graph_model_input_preparation = bool(
             getattr(self.config, "enable_qwen4_ple", False)
@@ -598,6 +768,25 @@ class Qwen4ExpModel(Qwen35Model):
         self._capture_mtp_target_hidden = bool(getattr(self.config, "is_mtp", False))
         if getattr(self.config, "enable_qwen4_ple", False):
             self._build_ple_layers()
+            self.requires_cuda_graph_model_input_preparation = any(
+                not ple.ple_embedding.inline_cpu_uva_graph
+                for ple in self.ple_layers.values()
+            )
+        from .qwen4_exp_runtime.target_head_graph import TargetHeadGraph
+
+        self._target_head_graph = TargetHeadGraph(
+            enabled=os.environ.get("QWEN4_MTP_HEAD_GRAPH") == "1"
+            and hasattr(self, "_fp8_lm_head")
+            and bool(self.ple_layers)
+            and not getattr(self.config, "is_mtp", False)
+        )
+        from rtp_llm.models_py.modules.qwen4_exp.head_ipc_gather import (
+            prepare_head_ipc_gather,
+        )
+
+        self._head_ipc_gather = prepare_head_ipc_gather(
+            config, parallelism_config, getattr(self, "_fp8_lm_head", None)
+        )
         annotate_compute_inventory(self.weight)
 
     def _ple_coordinator(self) -> PLETransactionCoordinator:
@@ -678,10 +867,33 @@ class Qwen4ExpModel(Qwen35Model):
         for ple in self.ple_layers.values():
             ple.ple_embedding.close()
         self._ple_execution_runtime = None
+        head_graph = self.__dict__.get("_target_head_graph")
+        if head_graph is not None:
+            head_graph.clear_activation()
+            head_graph.outputs.clear()
+        head_ipc = self.__dict__.get("_head_ipc_gather")
+        if head_ipc is not None:
+            head_ipc.close()
         self._closed = True
 
+    def try_gather_fp8_lm_head_for_tp(self, local):
+        workspace = self.__dict__.get("_head_ipc_gather")
+        return workspace.try_gather(local) if workspace is not None else None
+
     def compute_fp8_lm_head(self, hidden):
-        return self._fp8_lm_head(hidden.to(torch.bfloat16)).float()
+        head_graph = self.__dict__.get("_target_head_graph")
+        logits = head_graph.take(hidden) if head_graph is not None else None
+        if logits is None:
+            logits = self._fp8_lm_head(hidden.to(torch.bfloat16))
+        return logits.float()
+
+    def compute_fp8_lm_head_for_tp(self, hidden):
+        """Keep the GEMM's BF16 output until TP gather; native restores FP32."""
+        head_graph = self.__dict__.get("_target_head_graph")
+        logits = head_graph.take(hidden) if head_graph is not None else None
+        return (
+            self._fp8_lm_head(hidden.to(torch.bfloat16)) if logits is None else logits
+        )
 
     def initialize(self, init_resource) -> bool:
         initialized = super().initialize(init_resource)
@@ -717,6 +929,41 @@ class Qwen4ExpModel(Qwen35Model):
                 f"forward: requested={requested}, available={hidden.shape[0]}"
             )
         return hidden[:requested]
+
+    def _try_fp8_hyper_embedding(self, inputs):
+        # A target owns the HC repetition. Draft models consume the ordinary
+        # H-wide embedding through their separate input projection.
+        if type(self) is not Qwen4ExpModel:
+            return None
+        from rtp_llm.models_py.modules.qwen4_exp.vocab_embedding import (
+            Qwen4Fp8VocabEmbedding,
+        )
+
+        embedding = getattr(self, "embed_tokens", None)
+        if not isinstance(embedding, Qwen4Fp8VocabEmbedding) or embedding.tp_size != 2:
+            return None
+        if (
+            torch.version.hip is not None
+            or torch.cuda.get_device_capability(embedding.device) != (12, 0)
+            or "forward" in embedding.__dict__
+            or "word_embedding" in self.__dict__
+            or embedding._forward_pre_hooks
+            or embedding._forward_hooks
+            or torch.nn.modules.module._global_forward_pre_hooks
+            or torch.nn.modules.module._global_forward_hooks
+        ):
+            return None
+        multimodal = getattr(inputs, "multimodal_inputs", None)
+        if multimodal is not None:
+            for name in ("multimodal_features", "mm_features_locs"):
+                value = getattr(multimodal, name, None)
+                if value is not None and len(value):
+                    return None
+        embedding_inputs = getattr(inputs, "embedding_inputs", None)
+        mask = getattr(embedding_inputs, "text_tokens_mask", None)
+        return embedding.forward_hyper(
+            inputs.input_ids, branches=self.hc_mult, text_tokens_mask=mask
+        )
 
     def _initial_hyper_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
         expected = int(self.config.hidden_size)
@@ -793,6 +1040,11 @@ class Qwen4ExpModel(Qwen35Model):
                 distributed_reduce=tp_size > 1,
                 weight_scale=layer_weights.get(W.qwen4_ple_ngram_scale),
                 prefetch_budget_mb=getattr(self.config, "qwen4_ple_prefetch_mb", 256),
+                inline_cpu_uva_graph=(
+                    os.environ.get("QWEN4_PLE_INLINE_UVA_GRAPH", "0") == "1"
+                    and shard_pairs[0][1].device.type == "cpu"
+                    and torch.version.hip is None
+                ),
             )
             # Retain the same pinned owners in the weight/export inventory;
             # release pageable copies after this initialization scope finishes.
@@ -893,12 +1145,20 @@ class Qwen4ExpModel(Qwen35Model):
         return self._ple_coordinator().clear_speculative_target_graph_capture()
 
     def save_speculative_target_graph_capture(self, graph_key: int) -> None:
+        from rtp_llm.models_py.distributed.flashinfer_all_reduce import (
+            get_flashinfer_allreduce,
+        )
+
+        communicator = get_flashinfer_allreduce()
+        if communicator is not None:
+            communicator.finish_graph_capture()
         return self._ple_coordinator().save_speculative_target_graph_capture(graph_key)
 
     def activate_speculative_target_graph_replay(self, graph_key: int) -> None:
-        return self._ple_coordinator().activate_speculative_target_graph_replay(
-            graph_key
-        )
+        self._ple_coordinator().activate_speculative_target_graph_replay(graph_key)
+        head_graph = self.__dict__.get("_target_head_graph")
+        if head_graph is not None:
+            head_graph.activate(graph_key)
 
     def _release_ple_target_transaction(
         self, transaction: _PLETargetTransaction
@@ -1047,9 +1307,44 @@ class Qwen4ExpModel(Qwen35Model):
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         if self.__dict__.get("_closed", False):
             raise RuntimeError("Qwen4 model is closed")
+        from rtp_llm.models_py.distributed.flashinfer_all_reduce import (
+            get_flashinfer_allreduce,
+        )
+
+        communicator = get_flashinfer_allreduce()
+        prior_capture = None
+        if communicator is not None:
+            groups = get_attention_inputs_value(inputs)
+            groups = groups.values() if isinstance(groups, dict) else (groups,)
+            prior_capture = communicator.allow_ipc_capture
+            communicator.allow_ipc_capture = not bool(
+                getattr(self.config, "is_mtp", False)
+            ) and any(bool(getattr(a, "is_target_verify", False)) for a in groups)
+        head_graph = self.__dict__.get("_target_head_graph")
+        if head_graph is not None:
+            head_graph.clear_activation()
         try:
-            return self._forward_with_ple_prefetch(inputs, fmha_impl)
+            outputs = self._forward_with_ple_prefetch(inputs, fmha_impl)
+            transaction = (
+                self._ple_target_transaction
+                if head_graph is not None and head_graph.enabled
+                else None
+            )
+            if transaction is not None:
+                groups = get_attention_inputs_value(inputs)
+                values = (
+                    tuple(groups.values()) if isinstance(groups, Mapping) else (groups,)
+                )
+                if values and all(
+                    value.is_cuda_graph and value.is_target_verify for value in values
+                ):
+                    head_graph.stage(
+                        self._fp8_lm_head, outputs.hidden_states, transaction.batch_size
+                    )
+            return outputs
         finally:
+            if communicator is not None:
+                communicator.allow_ipc_capture = prior_capture
             for ple in self.ple_layers.values():
                 embedding = getattr(ple, "ple_embedding", None)
                 finish = getattr(embedding, "finish_prefetch", None)
@@ -1079,8 +1374,35 @@ class Qwen4ExpModel(Qwen35Model):
             if has_side_caches
             else {}
         )
-        ple_prefetch = self._start_eager_ple_prefetch(inputs, attention_inputs)
-        hidden_states = self.word_embedding(inputs)
+        # vLLM starts the PLE side-stream lookup after token embedding. An
+        # earlier pinned-host gather can occupy every SM while vocabulary
+        # lookup waits for it, despite the independent CUDA streams.
+        prefetch_after_embedding = False
+        if (
+            type(self) is Qwen4ExpModel
+            and self.ple_layers
+            and os.environ.get("QWEN4_PLE_PREFETCH_AFTER_EMBEDDING", "0") == "1"
+        ):
+            # Native grouped inputs are a tag mapping. Use the same PLE
+            # context group as _start_eager_ple_prefetch, not the mapping
+            # itself or an unrelated attention group's execution mode.
+            ple_context_inputs = select_attention_inputs_for_tag(
+                attention_inputs, PLE_NGRAM_CTX_TAG
+            )
+            prefetch_after_embedding = bool(
+                ple_context_inputs.is_prefill and not ple_context_inputs.is_cuda_graph
+            )
+        ple_prefetch = (
+            {}
+            if prefetch_after_embedding
+            else self._start_eager_ple_prefetch(inputs, attention_inputs)
+        )
+        prepared_hyper = self._try_fp8_hyper_embedding(inputs)
+        hidden_states = (
+            self.word_embedding(inputs) if prepared_hyper is None else prepared_hyper
+        )
+        if prefetch_after_embedding:
+            ple_prefetch = self._start_eager_ple_prefetch(inputs, attention_inputs)
 
         is_cuda_graph = _is_cuda_graph_forward(inputs, fmha_impl)
         attn_meta = self._build_attn_meta(inputs, hidden_states.device, is_cuda_graph)
@@ -1091,14 +1413,34 @@ class Qwen4ExpModel(Qwen35Model):
         # The target tiles token embeddings here.  The MTP draft overrides the
         # hook because its input projection has already produced one distinct
         # hidden vector per hyper-connection branch.
-        hyper_states = self._initial_hyper_states(hidden_states)
+        hyper_states = (
+            self._initial_hyper_states(hidden_states)
+            if prepared_hyper is None
+            else prepared_hyper
+        )
 
         attention_inputs = get_attention_inputs_value(inputs)
         ple_input_ids = inputs.input_ids
         if self.ple_layers:
             ple_input_ids = self._ple_input_ids(inputs)
+        pending_injection = None
+        defer_residual = (
+            not is_cuda_graph
+            and hyper_states.is_cuda
+            and torch.version.hip is None
+            and hyper_states.ndim == 2
+            and hyper_states.shape[1] == 10240
+            and 4093 <= hyper_states.shape[0] <= 12288
+            and hyper_states.dtype == torch.bfloat16
+            and torch.cuda.get_device_capability(hyper_states.device) == (12, 0)
+        )
         for i, decoder_layer in enumerate(self.layers):
             if str(i) in self.ple_layers:
+                if pending_injection is not None:
+                    hyper_states = inject_into_residual(
+                        hyper_states, *pending_injection
+                    )
+                    pending_injection = None
                 if self.kv_cache is None:
                     raise RuntimeError(
                         "qwen4_exp PLE requires its two state cache regions"
@@ -1137,15 +1479,36 @@ class Qwen4ExpModel(Qwen35Model):
                     layer_attention_inputs,
                     attention_inputs,
                 )
-            hyper_states = decoder_layer(
-                hyper_states,
-                layer_fmha_impl,
+            layer_kwargs = dict(
                 kv_cache=layer_kv_cache,
                 attention_inputs=layer_attention_inputs,
                 attn_meta=attn_meta,
                 qsa_runtime=qsa_runtime,
             )
+            if defer_residual and isinstance(decoder_layer, Qwen4ExpDecoderLayer):
+                hyper_states, pending_output, pending_gate = (
+                    decoder_layer.forward_deferred(
+                        hyper_states,
+                        layer_fmha_impl,
+                        pending_injection=pending_injection,
+                        **layer_kwargs,
+                    )
+                )
+                pending_injection = (pending_output, pending_gate)
+            else:
+                if pending_injection is not None:
+                    hyper_states = inject_into_residual(
+                        hyper_states, *pending_injection
+                    )
+                    pending_injection = None
+                hyper_states = decoder_layer(
+                    hyper_states, layer_fmha_impl, **layer_kwargs
+                )
             publish_layer_side_caches(self.kv_cache, i, side_cache_writers)
+
+        # PLE and MTP/global-mixer consumers observe the materialized BF16 stream.
+        if pending_injection is not None:
+            hyper_states = inject_into_residual(hyper_states, *pending_injection)
 
         if getattr(self, "_capture_mtp_target_hidden", False):
             # The pre-collapse stream is the MTP input. Return it as a

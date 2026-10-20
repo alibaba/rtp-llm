@@ -47,6 +47,116 @@ class GroupedFp8Test(unittest.TestCase):
             **kwargs,
         )
 
+    def test_measured_tp2_split_dispatch_and_fallback(self):
+        for batch, queries, splits in (
+            (1, 1, 32),
+            (1, 4, 32),
+            (4, 1, 32),
+            (4, 4, 32),
+            (2, 4, 8),
+            (8, 4, 8),
+        ):
+            q, cache, scale, table, lengths, selected = self.fixture(12, 1, queries)
+            q, table, lengths, selected = (
+                t[:batch].contiguous() for t in (q, table, lengths, selected)
+            )
+            with patch.object(
+                grouped,
+                "grouped_sparse_paged_split",
+                wraps=grouped.grouped_sparse_paged_split,
+            ) as called:
+                actual = self.run_grouped(q, cache, scale, table, lengths, selected, 1)
+                self.assertEqual(called.call_args.kwargs["splits"], splits)
+            expected = _reference(
+                q, cache.float() * scale.unsqueeze(-1), table, lengths, selected
+            )
+            torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
+
+    @staticmethod
+    def fp64_reference(q, cache, scale, table, lengths, selected):
+        # Independent dense attention after the reader's BF16 dequant boundary.
+        dequantized = (cache.float() * scale.unsqueeze(-1)).to(torch.bfloat16)
+        result = torch.zeros_like(q)
+        for batch in range(q.shape[0]):
+            for query in range(q.shape[2]):
+                indices = selected[batch, query]
+                indices = indices[(indices >= 0) & (indices < lengths[batch, query])]
+                if not indices.numel():
+                    continue
+                pages = table[batch, indices.long() // 128].long()
+                valid = (pages > 0) & (pages < cache.shape[0])
+                pages, indices = pages[valid], indices[valid]
+                if not indices.numel():
+                    continue
+                keys = dequantized[pages, 0, 0, indices.long() % 128].double()
+                values = dequantized[pages, 1, 0, indices.long() % 128].double()
+                scores = q[batch, :, query].double() @ keys.T / 16.0
+                result[batch, :, query] = (scores.softmax(-1) @ values).to(result.dtype)
+        return result
+
+    def test_tuned_tp2_short_long_and_cancellation_against_fp64(self):
+        for batch, queries in ((1, 4), (4, 1), (4, 4)):
+            for history in (129, 1023, 4096):
+                q, cache, scale, table, lengths, selected = self.fixture(12, 1, queries)
+                q, table, lengths, selected = (
+                    t[:batch].contiguous() for t in (q, table, lengths, selected)
+                )
+                lengths.fill_(history)
+                # Include duplicate indices and holes in the selected set.
+                selected.masked_fill_(selected >= history, -1)
+                selected[..., 1] = selected[..., 0]
+                selected[..., 7] = -1
+                # Alternate signs and use a wide, non-unit scale distribution.
+                cache[:, 1].copy_(
+                    (
+                        cache[:, 1].float()
+                        * torch.where(
+                            torch.arange(128, device="cuda")[:, None] % 2 == 0,
+                            1.0,
+                            -1.0,
+                        )
+                    ).to(cache.dtype)
+                )
+                scale.mul_(torch.linspace(0.01, 4.0, 128, device="cuda"))
+                actual = self.run_grouped(q, cache, scale, table, lengths, selected, 1)
+                expected = self.fp64_reference(
+                    q, cache, scale, table, lengths, selected
+                )
+                torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
+                nrmse = (actual.float() - expected.float()).square().mean().sqrt() / (
+                    expected.float().square().mean().sqrt() + 1e-8
+                )
+                self.assertLess(float(nrmse), 1e-3)
+
+    def test_tuned_tp2_graph_refreshes_pages_scales_and_selected(self):
+        for batch, queries in ((1, 4), (4, 1), (4, 4)):
+            q, cache, scale, table, lengths, selected = self.fixture(12, 1, queries)
+            q, table, lengths, selected = (
+                t[:batch].contiguous() for t in (q, table, lengths, selected)
+            )
+            for _ in range(2):
+                self.run_grouped(q, cache, scale, table, lengths, selected, 1)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                actual = self.run_grouped(
+                    q, cache, scale, table, lengths, selected, 1, graph_capture=True
+                )
+            for factor in (0.5, 2.0):
+                q.mul_(0.75)
+                scale.mul_(factor)
+                table.copy_(table.flip(1))
+                table[0, 0] = 0
+                selected.copy_(selected.flip(-1))
+                graph.replay()
+                expected = self.fp64_reference(
+                    q, cache, scale, table, lengths, selected
+                )
+                torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
+            lengths.zero_()
+            graph.replay()
+            torch.testing.assert_close(actual, torch.zeros_like(actual), atol=0, rtol=0)
+            graph.reset()
+
     def test_tp2_tp4_tp8_and_two_kv_heads_with_scaled_padded_cache(self):
         for heads, kv_heads in [(3, 1), (6, 1), (12, 1), (24, 2)]:
             for queries in (1, 4):
@@ -167,7 +277,7 @@ class GroupedFp8Test(unittest.TestCase):
         torch.testing.assert_close(got, torch.zeros_like(got))
 
     def test_automatic_routing_keeps_unprofitable_small_shapes_on_fallback(self):
-        for batch, heads, queries in [(1, 12, 1), (2, 12, 1), (3, 12, 1), (1, 6, 4)]:
+        for batch, heads, queries in [(1, 3, 1), (2, 12, 1), (3, 12, 1), (1, 6, 4)]:
             with self.subTest(batch=batch, heads=heads, queries=queries):
                 q, cache, scale, table, lengths, selected = self.fixture(
                     heads, 1, queries

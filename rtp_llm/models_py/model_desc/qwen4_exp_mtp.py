@@ -1,5 +1,6 @@
 """Python model descriptor for the Qwen4-Exp MTP draft."""
 
+import os
 from collections.abc import Mapping
 from typing import Optional
 
@@ -11,6 +12,9 @@ from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.block_map import get_attention_inputs_value
 from rtp_llm.models_py.model_desc.qwen3_next import Qwen3NextMetadata
 from rtp_llm.models_py.model_desc.qwen4_exp import Qwen4ExpModel
+from rtp_llm.models_py.model_desc.qwen4_exp_runtime.draft_head_graph import (
+    DraftHeadGraph,
+)
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.weight_views import (
     Qwen4LinearFactory as LinearFactory,
 )
@@ -140,9 +144,19 @@ class Qwen4ExpMTPInputProjection(nn.Module):
         ) != (self.hc_hidden_size,):
             raise RuntimeError("qwen4_exp MTP pre-FC norm weight shape is invalid")
 
-        embedding = exact_head_rms_norm(
-            inputs_embeds, self.embedding_gamma, self.norm_eps
-        )
+        embedding = None
+        if inputs_embeds.is_cuda and torch.version.hip is None:
+            from rtp_llm.models_py.modules.qwen4_exp.mtp_norm_triton import (
+                try_mtp_embedding_rms_norm,
+            )
+
+            embedding = try_mtp_embedding_rms_norm(
+                inputs_embeds, self.embedding_gamma, self.norm_eps
+            )
+        if embedding is None:
+            embedding = exact_head_rms_norm(
+                inputs_embeds, self.embedding_gamma, self.norm_eps
+            )
         hidden = grouped_rms_norm(
             input_hiddens,
             self.hidden_gamma,
@@ -284,7 +298,40 @@ class Qwen4ExpMTPModel(Qwen4ExpModel):
             hidden_size=model_config.hidden_size,
             norm_eps=model_config.layernorm_eps,
         )
+        self._draft_head_graph = DraftHeadGraph(
+            enabled=os.environ.get("QWEN4_MTP_HEAD_GRAPH") == "1"
+            and hasattr(self, "_fp8_lm_head")
+        )
         annotate_compute_inventory(self.weight)
+
+    def forward(self, inputs: PyModelInputs, fmha_impl=None):
+        self._draft_head_graph.clear_activation()
+        outputs = super().forward(inputs, fmha_impl)
+        groups = get_attention_inputs_value(inputs)
+        values = tuple(groups.values()) if isinstance(groups, Mapping) else (groups,)
+        if (
+            self._draft_head_graph.enabled
+            and values
+            and all(value.is_cuda_graph and not value.is_prefill for value in values)
+        ):
+            self._draft_head_graph.stage(self._fp8_lm_head, outputs.hidden_states)
+        return outputs
+
+    def activate_draft_lm_head_graph(self, graph_batch: int) -> None:
+        self._draft_head_graph.activate(graph_batch)
+
+    def compute_fp8_lm_head(self, hidden):
+        logits = self._draft_head_graph.take(hidden)
+        return super().compute_fp8_lm_head(hidden) if logits is None else logits.float()
+
+    def compute_fp8_lm_head_for_tp(self, hidden):
+        logits = self._draft_head_graph.take(hidden)
+        return super().compute_fp8_lm_head_for_tp(hidden) if logits is None else logits
+
+    def close(self) -> None:
+        self._draft_head_graph.clear_activation()
+        self._draft_head_graph.outputs.clear()
+        super().close()
 
     def word_embedding(self, inputs: PyModelInputs) -> torch.Tensor:
         input_hiddens: Optional[torch.Tensor] = getattr(inputs, "input_hiddens", None)

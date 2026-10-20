@@ -82,13 +82,32 @@ def _prepare_paged_inputs(
         raise RuntimeError("qwen4_exp sparse GQA Graph requires host lengths")
     if graph_paged and bool(torch.any(lengths_source < 0).item()):
         raise ValueError("qwen4_exp sparse GQA sequence lengths must be non-negative")
-    sequence_lengths = lengths_source.to(
-        device=qkv.device, dtype=torch.int32, non_blocking=True
-    ).contiguous()
-    if not graph_paged and bool(torch.any(sequence_lengths < 0).item()):
-        raise ValueError("qwen4_exp sparse GQA sequence lengths must be non-negative")
-    query_offsets = torch.arange(1, query_len + 1, device=qkv.device, dtype=torch.int32)
-    kv_lens = sequence_lengths.view(batch, 1) + query_offsets.view(1, query_len)
+    cached = getattr(self, "_qsa_target_visible_lengths", None)
+    self._qsa_target_visible_lengths = None
+    if graph_paged and self.is_target_verify and cached is not None:
+        owner_inputs, owner_tokens, kv_lens = cached
+        if not (
+            owner_inputs is self.attn_inputs
+            and owner_tokens == tokens
+            and isinstance(kv_lens, torch.Tensor)
+            and kv_lens.device == qkv.device
+            and kv_lens.dtype == torch.int32
+            and tuple(kv_lens.shape) == (batch, query_len)
+            and kv_lens.is_contiguous()
+        ):
+            raise RuntimeError("qwen4_exp main target metadata owner/geometry changed")
+    else:
+        sequence_lengths = lengths_source.to(
+            device=qkv.device, dtype=torch.int32, non_blocking=True
+        ).contiguous()
+        if not graph_paged and bool(torch.any(sequence_lengths < 0).item()):
+            raise ValueError(
+                "qwen4_exp sparse GQA sequence lengths must be non-negative"
+            )
+        query_offsets = torch.arange(
+            1, query_len + 1, device=qkv.device, dtype=torch.int32
+        )
+        kv_lens = sequence_lengths.view(batch, 1) + query_offsets.view(1, query_len)
 
     block_table = self.attn_inputs.kv_cache_kernel_block_id_device
     if (
@@ -154,7 +173,8 @@ def _prepare_paged_inputs(
             "qwen4_exp sparse GQA main cache must be packed 2-D or HND 5-D"
         )
 
-    required_columns = (kv_lens[:, -1] + page_size - 1) // page_size
+    if not graph_paged:
+        required_columns = (kv_lens[:, -1] + page_size - 1) // page_size
     exceeds_capacity = (
         bool(
             torch.any(

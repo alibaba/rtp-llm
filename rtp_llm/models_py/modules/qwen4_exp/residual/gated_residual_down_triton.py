@@ -65,3 +65,75 @@ def down_inject_epilogue(projection: torch.Tensor, rank: int, branches: int):
             enable_fp_fusion=False,
         )
     return mix, inject
+
+
+@triton.jit
+def _separate_down_inject_epilogue(
+    Down,
+    Inject,
+    Mix,
+    Gate,
+    RANK: tl.constexpr,
+    HAS_INJECT: tl.constexpr,
+    BLOCK: tl.constexpr,
+    I_STRIDE: tl.constexpr,
+):
+    row = tl.program_id(0)
+    col = tl.arange(0, BLOCK)
+    d = tl.load(Down + row * RANK + col, col < RANK, other=0).to(tl.float32)
+    scaled = (d / 4.0).to(tl.bfloat16).to(tl.float32)
+    tl.store(Mix + row * RANK + col, scaled * tl.sigmoid(scaled), col < RANK)
+    if HAS_INJECT:
+        i = tl.load(Inject + row * I_STRIDE + col, col < 4, other=0).to(tl.float32)
+        z = (i / 4.0).to(tl.bfloat16).to(tl.float32)
+        gate = tl.sigmoid(z).to(tl.bfloat16).to(tl.float32) * 2.0
+        tl.store(Gate + row * 4 + col, gate, col < 4)
+
+
+def separate_down_inject_epilogue(down, injection=None):
+    """Fuse only elementwise work; retain independent FP8/BF16 GEMMs/scales."""
+    if not (
+        down.is_cuda
+        and torch.version.hip is None
+        and down.dtype == torch.bfloat16
+        and down.is_contiguous()
+        and down.ndim >= 2
+        and down.shape[-1] == 320
+        and (
+            injection is None
+            or (
+                injection.device == down.device
+                and injection.dtype == down.dtype
+                and (
+                    injection.is_contiguous()
+                    or (
+                        injection.ndim == 2
+                        and injection.stride(1) == 1
+                        and injection.stride(0) == 16
+                    )
+                )
+                and injection.shape == (*down.shape[:-1], 4)
+            )
+        )
+    ):
+        return None
+    mix = torch.empty_like(down)
+    gate = (
+        torch.empty(injection.shape, device=injection.device, dtype=injection.dtype)
+        if injection is not None
+        else None
+    )
+    rows = down.numel() // 320
+    if rows:
+        _separate_down_inject_epilogue[(rows,)](
+            down,
+            injection if injection is not None else down,
+            mix,
+            gate if gate is not None else mix,
+            RANK=320,
+            HAS_INJECT=injection is not None,
+            BLOCK=512,
+            I_STRIDE=injection.stride(-2) if injection is not None else 4,
+            enable_fp_fusion=False,
+        )
+    return mix, gate

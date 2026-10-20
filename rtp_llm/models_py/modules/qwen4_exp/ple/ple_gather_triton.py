@@ -1,6 +1,7 @@
 """Fixed-shape, graph-capturable lookup into the TP-local PLE row shards."""
 
 import ctypes
+import os
 from pathlib import Path
 
 import torch
@@ -19,10 +20,11 @@ def _gather_shards(
     TOTAL_SHARDS: tl.constexpr,
     D: tl.constexpr,
     BD: tl.constexpr,
+    BR: tl.constexpr,
     BF16: tl.constexpr,
     FP8: tl.constexpr,
 ):
-    rows = tl.program_id(0) * 16 + tl.arange(0, 16)
+    rows = tl.program_id(0) * BR + tl.arange(0, BR)
     cols = tl.arange(0, BD)
     ids = tl.load(ids_ptr + rows, mask=rows < N, other=0)
     shard = ids // SHARD_ROWS
@@ -119,7 +121,22 @@ def gather_local(
         raise ValueError("PLE gather output must match ids and shard geometry")
     n = ids.numel()
     if n:
-        _gather_shards[(triton.cdiv(n, 16),)](
+        # The per-row UVA layout follows vLLM's pinned lookup. Four rows per
+        # CTA won the actual-table TP2 complete-consumer 4K/12K experiment;
+        # one row and explicit packed-word variants regressed and stay out.
+        rows_per_cta = (
+            4
+            if (
+                os.environ.get("QWEN4_PLE_UVA_ROW_TILING", "0") == "1"
+                and fp8
+                and shards[0].device.type == "cpu"
+                and shards[0].shape[1] == 160
+                and 65536 <= n <= 196608
+                and torch.cuda.get_device_capability(ids.device) == (12, 0)
+            )
+            else 16
+        )
+        _gather_shards[(triton.cdiv(n, rows_per_cta),)](
             ids,
             pointer_table,
             scale if fp8 else pointer_table,
@@ -129,6 +146,7 @@ def gather_local(
             TOTAL_SHARDS=total_shards,
             D=shards[0].shape[1],
             BD=triton.next_power_of_2(shards[0].shape[1]),
+            BR=rows_per_cta,
             BF16=shards[0].dtype == torch.bfloat16,
             FP8=fp8,
             num_warps=4,

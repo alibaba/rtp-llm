@@ -11,6 +11,14 @@ from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
     INDEXER_KV_TAG,
     INDEXER_STATE_TAG,
 )
+from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_cache_views import (
+    _block_table,
+    _typed_2d_pool,
+    _validate_required_blocks,
+)
+from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_selection import (
+    select_qsa_paged_tokens,
+)
 from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import (
     apply_partial_rope,
     build_base_rope,
@@ -18,9 +26,6 @@ from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import (
     build_qsa_rope_from_logical_positions,
     is_qsa_rope_style,
 )
-
-from .qsa_cache_views import _block_table, _typed_2d_pool, _validate_required_blocks
-from .qsa_selection import select_qsa_paged_tokens
 
 
 def select_decode_tokens(
@@ -104,8 +109,28 @@ def select_decode_tokens(
     # bookkeeping intentionally differs from the logical cache rows, so
     # only non-draft decodes can be validated against sequence_lengths.
     decode_logical_positions = None if self.is_mtp_draft else sequence_lengths
+    get_frequency = getattr(indexer, "rope_inv_freq", None)
+    frequency = get_frequency(rope_config) if callable(get_frequency) else None
+    prepared = None
+    if graph_decode and self.is_mtp_draft:
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.draft_decode_positions_triton import (
+            try_prepare_decode_positions,
+        )
+
+        prepared = try_prepare_decode_positions(
+            sequence_lengths, position_ids, frequency, rope_config
+        )
     try:
-        if graph_decode and self.is_mtp_draft:
+        if prepared is not None:
+            (
+                current_cos,
+                current_sin,
+                rope_cos,
+                rope_sin,
+                visible_token_lengths,
+                compressed_lengths,
+            ) = prepared
+        elif graph_decode and self.is_mtp_draft:
             if not is_qsa_rope_style(rope_config, "Base"):
                 raise RuntimeError("qwen4_exp draft Graph requires text-only Base RoPE")
             # MTP's text position generator repeats one scalar across its
@@ -117,6 +142,7 @@ def select_decode_tokens(
                 dtype=raw_keys.dtype,
                 device=raw_keys.device,
                 validate_position_axes=False,
+                inv_freq=frequency,
             )
         elif graph_decode:
             # Exact-batch Graph capture uses the engine's canonical text
@@ -127,6 +153,7 @@ def select_decode_tokens(
                 token_count=batch_size,
                 dtype=raw_keys.dtype,
                 device=raw_keys.device,
+                inv_freq=frequency,
             )
         else:
             current_cos, current_sin = build_qsa_rope(
@@ -182,8 +209,9 @@ def select_decode_tokens(
         device=q.device,
     )
 
-    visible_token_lengths = sequence_lengths + 1
-    compressed_lengths = visible_token_lengths // ratio
+    if prepared is None:
+        visible_token_lengths = sequence_lengths + 1
+        compressed_lengths = visible_token_lengths // ratio
     compressed_capacity = int(kv_table.shape[1]) * kv_entries_per_block
     exceeds_capacity = (
         host_max_compressed > compressed_capacity
@@ -195,10 +223,10 @@ def select_decode_tokens(
             "qwen4_exp QSA compressed decode length exceeds its tag-local "
             "indexer KV block table"
         )
-    required_kv_columns = (
-        compressed_lengths + kv_entries_per_block - 1
-    ) // kv_entries_per_block
     if not graph_decode:
+        required_kv_columns = (
+            compressed_lengths + kv_entries_per_block - 1
+        ) // kv_entries_per_block
         _validate_required_blocks(
             kv_table,
             required_kv_columns,
@@ -208,15 +236,17 @@ def select_decode_tokens(
 
     # Only rows that close a compression group consume these values. Build
     # one block-start RoPE row per request instead of [0, context_len).
-    block_starts = sequence_lengths.to(torch.int64)
-    block_starts = block_starts - block_starts.remainder(ratio)
-    rope_cos, rope_sin = build_qsa_rope_from_logical_positions(
-        block_starts,
-        rope_config,
-        token_count=batch_size,
-        dtype=raw_keys.dtype,
-        device=raw_keys.device,
-    )
+    if prepared is None:
+        block_starts = sequence_lengths.to(torch.int64)
+        block_starts = block_starts - block_starts.remainder(ratio)
+        rope_cos, rope_sin = build_qsa_rope_from_logical_positions(
+            block_starts,
+            rope_config,
+            token_count=batch_size,
+            dtype=raw_keys.dtype,
+            device=raw_keys.device,
+            inv_freq=frequency,
+        )
     fused_writer = True
     if fused_writer:
         from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_decode_triton import (
@@ -281,12 +311,15 @@ def select_decode_tokens(
     rotated_q = apply_partial_rope(
         q, current_cos.unsqueeze(1), current_sin.unsqueeze(1)
     )
-    score_weights = torch.full(
-        (batch_size, head_num),
-        1.0 / math.sqrt(head_dim),
-        dtype=torch.float32,
-        device=q.device,
-    )
+    get_weights = getattr(indexer, "score_weights", None)
+    score_weights = get_weights(batch_size, q.device) if callable(get_weights) else None
+    if score_weights is None:
+        score_weights = torch.full(
+            (batch_size, head_num),
+            1.0 / math.sqrt(head_dim),
+            dtype=torch.float32,
+            device=q.device,
+        )
     from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_paged_score import (
         qsa_paged_indexer_score,
     )
@@ -316,4 +349,5 @@ def select_decode_tokens(
         # above; repeating the device-to-host check per sparse layer adds
         # a synchronization to every decode step.
         validate_lengths=False,
+        scores_are_masked=True,
     )

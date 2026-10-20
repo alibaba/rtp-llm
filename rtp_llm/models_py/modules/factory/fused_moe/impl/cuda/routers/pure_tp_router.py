@@ -51,7 +51,7 @@ class PureTpRouterBase(FusedMoeDataRouter):
         self, output: torch.Tensor, extra_finalize_args: Optional[FinalizeArgs]
     ) -> torch.Tensor:
         if self.tp_size > 1 and not should_skip_tp_allreduce(extra_finalize_args):
-            return all_reduce(output, group=Group.TP)
+            return getattr(self, "tp_all_reduce", all_reduce)(output, group=Group.TP)
         return output
 
     @classmethod

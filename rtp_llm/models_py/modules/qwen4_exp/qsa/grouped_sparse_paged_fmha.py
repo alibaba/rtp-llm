@@ -6,6 +6,30 @@ import triton
 import triton.language as tl
 
 
+def preferred_splits(q, cache, selected, *, page_size, block_k):
+    """Measured FP8 TP2 shapes; keep the original split policy elsewhere."""
+    if not (
+        q.ndim == 4
+        and cache.ndim == 5
+        and q.dtype == torch.bfloat16
+        and cache.dtype == torch.float8_e4m3fn
+        and q.shape[1] == 12
+        and q.shape[3] == 256
+        and cache.shape[2] == 1
+        and q.shape[0] in (1, 4)
+        and q.shape[2] in (1, 4)
+        and selected.shape[:2] == (q.shape[0], q.shape[2])
+        and selected.shape[-1] in (2051, 2052)
+        and page_size == 128
+        and block_k == 64
+        and q.is_cuda
+        and torch.version.hip is None
+        and torch.cuda.get_device_capability(q.device) == (12, 0)
+    ):
+        return None
+    return 32
+
+
 def is_supported(
     q,
     cache,
@@ -18,6 +42,7 @@ def is_supported(
     splits,
     block_k,
     scale=None,
+    selected_has_count=False,
 ):
     if cache.ndim != 5 or q.ndim != 4:
         return False
@@ -27,7 +52,9 @@ def is_supported(
     group_heads = heads // kv_heads
     # Smaller decode batches benefit only for the larger GQA head group.
     # Single-query batches below four keep the lower-latency online path.
-    if q.shape[0] < 8 and (group_heads != 12 or (q.shape[0] < 4 and q.shape[2] == 1)):
+    if q.shape[0] < 8 and (
+        group_heads != 12 or (q.shape[0] < 4 and q.shape[2] == 1 and splits != 32)
+    ):
         return False
     fp8 = cache.dtype == torch.float8_e4m3fn
     if fp8 and (
@@ -59,13 +86,20 @@ def is_supported(
         and table.dtype == torch.int32
         and lengths.shape == (q.shape[0], q.shape[2])
         and lengths.dtype == torch.int32
-        and selected.shape == (q.shape[0], q.shape[2], 2051)
+        and selected.shape
+        == (q.shape[0], q.shape[2], 2052 if selected_has_count else 2051)
         and selected.dtype == torch.int32
-        and partial.shape == (q.shape[0], heads, q.shape[2], 8, 258)
+        and partial.shape == (q.shape[0], heads, q.shape[2], splits, 258)
         and partial.dtype == torch.float32
         and all(t.is_contiguous() for t in (q, table, lengths, selected, partial))
         and page_size == 128
-        and splits == 8
+        and (
+            splits == 8
+            or splits
+            == preferred_splits(
+                q, cache, selected, page_size=page_size, block_k=block_k
+            )
+        )
         and block_k == 64
         and torch.cuda.get_device_capability(q.device) == (12, 0)
     )
@@ -92,6 +126,8 @@ def _grouped_sparse_paged_split_kernel(
     PAGE: tl.constexpr,
     PAGES: tl.constexpr,
     WIDTH: tl.constexpr,
+    ROW_WIDTH: tl.constexpr,
+    HAS_COUNT: tl.constexpr,
     BK: tl.constexpr,
     NS: tl.constexpr,
     NB: tl.constexpr,
@@ -102,6 +138,8 @@ def _grouped_sparse_paged_split_kernel(
     SKV: tl.constexpr,
     SH: tl.constexpr,
     ST: tl.constexpr,
+    ROTATE_TILES: tl.constexpr,
+    FP16_PV: tl.constexpr,
 ):
     batch = tl.program_id(0)
     group_query = tl.program_id(1)
@@ -118,15 +156,26 @@ def _grouped_sparse_paged_split_kernel(
         other=0,
     )
     length = tl.load(lengths + batch * S + query)
-    row = selected + (batch * S + query) * WIDTH
+    row = selected + (batch * S + query) * ROW_WIDTH
+    count = (
+        tl.minimum(tl.maximum(tl.load(row + WIDTH), 0), WIDTH) if HAS_COUNT else WIDTH
+    )
     maximum = tl.full((16,), float("-inf"), tl.float32)
     normalizer = tl.zeros((16,), tl.float32)
     acc = tl.zeros((16, 256), tl.float32)
-    limit = tl.maximum(0, tl.minimum(NB, tl.cdiv(WIDTH - split * NB * BK, BK)))
+    # Round-robin tiles keep all useful splits active when 2051 slots need
+    # 33 tiles. Contiguous ceil-sized partitions used only 17 of 32 splits.
+    if ROTATE_TILES:
+        limit = tl.maximum(0, tl.cdiv(count - split * BK, NS * BK))
+    else:
+        limit = tl.maximum(0, tl.minimum(NB, tl.cdiv(count - split * NB * BK, BK)))
     limit = tl.where(length > 0, limit, 0)
     for step in range(limit):
-        offset = (split * NB + step) * BK + cols
-        token = tl.load(row + offset, mask=offset < WIDTH, other=-1)
+        if ROTATE_TILES:
+            offset = (split + step * NS) * BK + cols
+        else:
+            offset = (split * NB + step) * BK + cols
+        token = tl.load(row + offset, mask=offset < count, other=-1)
         logical = token // PAGE
         physical = tl.load(
             table + batch * BTW + logical,
@@ -134,7 +183,7 @@ def _grouped_sparse_paged_split_kernel(
             other=0,
         )
         valid = (
-            (offset < WIDTH)
+            (offset < count)
             & (token >= 0)
             & (token < length)
             & (logical < BTW)
@@ -162,10 +211,27 @@ def _grouped_sparse_paged_split_kernel(
         if FP8_CACHE:
             vscale = tl.load(sp + SKV, mask=valid, other=1.0)
             value *= vscale[:, None]
-        prob_hi = prob.to(tl.bfloat16)
-        prob_lo = (prob - prob_hi.to(tl.float32)).to(tl.bfloat16)
-        acc = tl.dot(prob_hi, value.to(tl.bfloat16), acc * alpha[:, None])
-        acc = tl.dot(prob_lo, value.to(tl.bfloat16), acc)
+        # Preserve the BF16 dequant boundary. A bounded alternative uses FP16
+        # probabilities; keep compensated BF16 for values outside FP16 range.
+        value_bf16 = value.to(tl.bfloat16)
+        if FP16_PV:
+            safe_fp16 = (
+                tl.max(tl.max(tl.abs(value_bf16.to(tl.float32)), 1), 0) <= 65504.0
+            )
+            if safe_fp16:
+                acc = tl.dot(
+                    prob.to(tl.float16), value_bf16.to(tl.float16), acc * alpha[:, None]
+                )
+            else:
+                prob_hi = prob.to(tl.bfloat16)
+                prob_lo = (prob - prob_hi.to(tl.float32)).to(tl.bfloat16)
+                acc = tl.dot(prob_hi, value_bf16, acc * alpha[:, None])
+                acc = tl.dot(prob_lo, value_bf16, acc)
+        else:
+            prob_hi = prob.to(tl.bfloat16)
+            prob_lo = (prob - prob_hi.to(tl.float32)).to(tl.bfloat16)
+            acc = tl.dot(prob_hi, value_bf16, acc * alpha[:, None])
+            acc = tl.dot(prob_lo, value_bf16, acc)
         normalizer = normalizer * alpha + tl.sum(prob, 1)
         maximum = new_max
     base = ((batch * HQ + global_head) * S + query) * NS * 258 + split * 258
@@ -175,7 +241,18 @@ def _grouped_sparse_paged_split_kernel(
 
 
 def grouped_sparse_paged_split(
-    q, cache, table, lengths, selected, partial, *, page_size, splits, scale=None
+    q,
+    cache,
+    table,
+    lengths,
+    selected,
+    partial,
+    *,
+    page_size,
+    splits,
+    scale=None,
+    selected_has_count=False,
+    fp16_pv=False,
 ):
     """Write FP32 split states using the original merge layout.
 
@@ -184,10 +261,19 @@ def grouped_sparse_paged_split(
     The caller validates metadata and selects the verified shape domain.
     """
     batch, heads, query_len, dim = q.shape
-    width = selected.shape[-1]
+    row_width = selected.shape[-1]
+    width = row_width - int(selected_has_count)
     kv_heads = cache.shape[2]
     fp8 = cache.dtype == torch.float8_e4m3fn
     strides = scale.stride() if fp8 else (0, 0, 0, 0)
+    tuned = fp8 and splits == preferred_splits(
+        q, cache, selected, page_size=page_size, block_k=64
+    )
+    # The measured M4 target/draft domains benefit from wider KV tiles.
+    # Keep per-token scales, BF16 dequant and compensated PV unchanged.
+    block_k = (
+        128 if tuned and not fp16_pv and (batch, query_len) in ((1, 4), (4, 1)) else 64
+    )
     _grouped_sparse_paged_split_kernel[(batch, kv_heads * query_len, splits)](
         q,
         cache,
@@ -208,9 +294,11 @@ def grouped_sparse_paged_split(
         PAGE=page_size,
         PAGES=cache.shape[0],
         WIDTH=width,
-        BK=64,
+        ROW_WIDTH=row_width,
+        HAS_COUNT=selected_has_count,
+        BK=block_k,
         NS=splits,
-        NB=triton.cdiv(width, 64 * splits),
+        NB=triton.cdiv(width, block_k * splits),
         HQ=heads,
         HG=heads // kv_heads,
         FP8_CACHE=fp8,
@@ -218,6 +306,8 @@ def grouped_sparse_paged_split(
         SKV=strides[1],
         SH=strides[2],
         ST=strides[3],
+        ROTATE_TILES=tuned,
+        FP16_PV=fp16_pv,
         num_warps=4,
         num_stages=2,
         enable_fp_fusion=False,

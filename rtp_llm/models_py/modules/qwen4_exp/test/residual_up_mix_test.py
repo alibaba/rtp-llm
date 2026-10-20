@@ -72,7 +72,7 @@ class ResidualUpMixTest(unittest.TestCase):
     def test_other_shapes_and_gradients_fall_back(self):
         w = torch.empty(10240, 320, device="cuda", dtype=torch.float8_e4m3fn)
         scale = torch.ones(1, device="cuda")
-        for rows in (0, 5, 8, 16):
+        for rows in (0, 5, 7, 33):
             x = torch.empty(rows, 320, device="cuda", dtype=torch.bfloat16)
             normed = torch.empty(rows, 10240, device="cuda", dtype=torch.bfloat16)
             self.assertIsNone(try_fp8_up_mix(x, w, scale, normed, 4))

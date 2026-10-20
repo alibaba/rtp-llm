@@ -68,7 +68,7 @@ bool waitFdUntil(int fd, short events, std::chrono::steady_clock::time_point dea
 
         const auto remaining_ms =
             static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count());
-        struct pollfd pfd {};
+        struct pollfd pfd{};
         pfd.fd     = fd;
         pfd.events = events;
         int rc     = ::poll(&pfd, 1, remaining_ms);
@@ -234,6 +234,19 @@ CpuTpBroadcaster::~CpuTpBroadcaster() {
     reset();
 }
 
+void CpuTpBroadcaster::interruptReceive() {
+    // Never take broadcast_mu_: the receiver holds it while blocked in read.
+    // mu_ keeps reset() from closing/reusing the descriptor during shutdown.
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!initialized_.load(std::memory_order_acquire) || tp_size_ <= 1 || tp_rank_ == 0) {
+        return;
+    }
+    receive_interrupted_.store(true, std::memory_order_release);
+    if (!peer_fds_.empty() && peer_fds_[0] >= 0) {
+        ::shutdown(peer_fds_[0], SHUT_RD);
+    }
+}
+
 void CpuTpBroadcaster::reset() {
     std::lock_guard<std::mutex> lock(mu_);
     std::lock_guard<std::mutex> broadcast_lock(broadcast_mu_);
@@ -250,6 +263,7 @@ void CpuTpBroadcaster::reset() {
     tp_rank_       = 0;
     tp_size_       = 1;
     next_sequence_ = 0;
+    receive_interrupted_.store(false, std::memory_order_release);
     initialized_.store(false, std::memory_order_release);
 }
 
@@ -292,7 +306,7 @@ void CpuTpBroadcaster::initialize(int tp_rank, int tp_size, const std::string& b
             listen_fd_ = ::socket(AF_UNIX, SOCK_STREAM, 0);
             RTP_LLM_CHECK_WITH_INFO(listen_fd_ >= 0, "CpuTpBroadcaster socket: %s", std::strerror(errno));
 
-            struct sockaddr_un addr {};
+            struct sockaddr_un addr{};
             addr.sun_family = AF_UNIX;
             RTP_LLM_CHECK_WITH_INFO(
                 path.size() < sizeof(addr.sun_path), "CpuTpBroadcaster UDS path too long: %s", path.c_str());
@@ -360,7 +374,7 @@ void CpuTpBroadcaster::initialize(int tp_rank, int tp_size, const std::string& b
         }
     } else {
         const std::string  path = makeUdsPath(base_path, 0);
-        struct sockaddr_un addr {};
+        struct sockaddr_un addr{};
         addr.sun_family = AF_UNIX;
         RTP_LLM_CHECK_WITH_INFO(
             path.size() < sizeof(addr.sun_path), "CpuTpBroadcaster UDS path too long: %s", path.c_str());
@@ -423,6 +437,8 @@ void CpuTpBroadcaster::broadcast(void* buf, std::size_t nbytes, int root) {
     if (tp_size_ <= 1) {
         return;
     }
+    RTP_LLM_CHECK_WITH_INFO(!receive_interrupted_.load(std::memory_order_acquire),
+                            "CpuTpBroadcaster receive interrupted during engine shutdown");
     RTP_LLM_CHECK_WITH_INFO(root == 0, "CpuTpBroadcaster supports only root=0 (star topology); got %d", root);
     RTP_LLM_CHECK_WITH_INFO(
         nbytes <= std::numeric_limits<uint64_t>::max(), "CpuTpBroadcaster payload is too large: %zu bytes", nbytes);

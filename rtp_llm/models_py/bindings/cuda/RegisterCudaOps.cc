@@ -2,6 +2,7 @@
 #include "rtp_llm/models_py/bindings/cuda/RegisterBaseBindings.hpp"
 #include "rtp_llm/models_py/bindings/cuda/RegisterAttnOpBindings.hpp"
 #include "rtp_llm/models_py/bindings/cuda/Bf16GemmOp.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/head_ipc_gather.h"
 
 #if defined(ENABLE_FP4)
 #include "rtp_llm/models_py/bindings/cuda/kernels/scaled_fp4_quant.h"
@@ -13,6 +14,11 @@
 namespace rtp_llm {
 
 void registerPyModuleOps(py::module& rtp_ops_m) {
+    rtp_ops_m.def("head_ipc_meta_size", &headIpcMetaSize);
+    rtp_ops_m.def(
+        "head_ipc_gather", &headIpcGather, py::arg("input"), py::arg("buffers"), py::arg("signals"), py::arg("rank"));
+    rtp_ops_m.def("head_ipc_close", &headIpcClose, py::arg("pointers"), py::arg("rank"));
+
     rtp_ops_m.def("cublas_gemm_bf16_bf16_fp32",
                   &torch_ext::cublas_gemm_bf16_bf16_fp32,
                   "cuBLAS BF16 x BF16 GEMM with FP32 accumulation and FP32 output",

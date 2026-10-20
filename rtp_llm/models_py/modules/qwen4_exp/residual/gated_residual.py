@@ -177,6 +177,25 @@ class Qwen4ExpGatedResidual(nn.Module):
         sublayer_out: torch.Tensor,
         inject_weights: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+        if (
+            self.down_projection is not None
+            and self.down_projection.use_scaled_mm
+            and tuple(self.down_projection.weight.shape) == (320, 10240)
+        ):
+            from .gated_residual_prefill_inject_norm_triton import (
+                try_inject_grouped_norm,
+            )
+
+            fused = try_inject_grouped_norm(
+                hyper_input,
+                sublayer_out,
+                inject_weights,
+                self.norm_gamma,
+                self.norm_eps,
+            )
+            if fused is not None:
+                residual, normed, scale = fused
+                return self._forward_normed(residual, normed, down_input_scale=scale)
         return self(inject_into_residual(hyper_input, sublayer_out, inject_weights))
 
     def _forward_normed(
@@ -205,13 +224,51 @@ class Qwen4ExpGatedResidual(nn.Module):
                 if down_input_scale is None
                 else self.down_projection(normed, input_scale=down_input_scale)
             )
-            mix = F.silu(down / self.hc_mult)
+            fused = None
+            if (
+                self.inject_projection is not None
+                and self.inject_projection.compute_weight is not None
+            ):
+                from .gated_residual_splitk_inject import try_splitk_down_inject
+
+                fused = try_splitk_down_inject(
+                    normed, self.inject_projection.compute_weight, down
+                )
+            if (
+                fused is None
+                and self.hc_mult == 4
+                and down.is_cuda
+                and torch.version.hip is None
+            ):
+                from .gated_residual_down_triton import separate_down_inject_epilogue
+
+                injection = (
+                    dense_projection(normed, self.inject, self.inject_projection)
+                    if self.inject is not None
+                    else None
+                )
+                fused = separate_down_inject_epilogue(down, injection)
+            if fused is None:
+                mix = F.silu(down / self.hc_mult)
+            else:
+                mix, inject_weights = fused
         mixed = None
         up = self.up_projection
         if up is not None and up.bias is None and up.role in ("DECODE", "PDFUSION"):
             from .gated_residual_up_mix_triton import try_fp8_up_mix
 
             mixed = try_fp8_up_mix(mix, up.weight, up.scale, normed, self.hc_mult)
+        if (
+            mixed is None
+            and up is not None
+            and up.bias is None
+            and up.role in ("PREFILL", "DECODE", "PDFUSION")
+        ):
+            from .gated_residual_prefill_up_mix_triton import try_fp8_prefill_up_mix
+
+            mixed = try_fp8_prefill_up_mix(
+                mix, up.weight, up.scale, normed, self.hc_mult
+            )
         if mixed is None:
             mix_logits = dense_projection(mix, self.mix_up, self.up_projection)
             branches = (self.hc_mult, self.hidden_size)

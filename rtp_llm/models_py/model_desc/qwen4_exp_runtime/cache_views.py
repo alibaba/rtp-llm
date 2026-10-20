@@ -79,6 +79,13 @@ class PLECacheViews:
             # the pool while capture/replay is in progress.
             if not pages.numel() or not int(table.shape[1]) or pool_rows <= 0:
                 raise RuntimeError(f"PLE cache {tag!r} graph table is empty")
+            from rtp_llm.models_py.modules.qwen4_exp.ple.ple_commit_triton import (
+                resolve_read_blocks,
+            )
+
+            resolved = resolve_read_blocks(table, pages, pool_rows)
+            if resolved is not None:
+                return resolved.to(device=device)
             valid_page = (pages >= 0) & (pages < int(table.shape[1]))
             safe_pages = pages.clamp(0, int(table.shape[1]) - 1)
             blocks = table.gather(1, safe_pages.unsqueeze(1)).squeeze(1)
@@ -139,20 +146,74 @@ class PLECacheViews:
                 ]
             ).to(torch.long)
             host = torch.cat([verdict, blocks.to(torch.long)]).tolist()
-        if host[0]:
+        cls._check_commit_verdict(tag, host[:4], host[4:], pool_rows)
+        return blocks.to(device=device, dtype=torch.long), host[4:]
+
+    @staticmethod
+    def _check_commit_verdict(tag, flags, host_blocks, pool_rows):
+        if flags[0]:
             raise RuntimeError(f"PLE cache {tag!r} has an invalid logical page")
-        if host[1]:
+        if flags[1]:
             raise RuntimeError(
                 f"PLE cache {tag!r} logical page exceeds its block table"
             )
-        if host[2]:
+        if flags[2]:
             raise RuntimeError(
                 f"PLE cache {tag!r} has an unallocated logical page; "
-                f"blocks={host[4:36]} pool_rows={pool_rows}"
+                f"blocks={host_blocks[:32]} pool_rows={pool_rows}"
             )
-        if host[3]:
+        if flags[3]:
             raise RuntimeError(f"PLE cache {tag!r} physical block id exceeds its pool")
-        return blocks.to(device=device, dtype=torch.long), host[4:]
+
+    @classmethod
+    def _commit_physical_block_pair(cls, stage, accepted):
+        """Fast path only when both tables have valid structural metadata.
+
+        Malformed metadata falls back to the original sequential validation;
+        valid metadata retains the state-before-context error precedence.
+        """
+        from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
+            PLE_NGRAM_CTX_TAG,
+            PLE_STATE_TAG,
+        )
+        from rtp_llm.models_py.modules.qwen4_exp.ple.ple_commit_triton import (
+            resolve_commit_pair,
+        )
+
+        tables = []
+        for inputs, tag in (
+            (stage.state_inputs, PLE_STATE_TAG),
+            (stage.ctx_inputs, PLE_NGRAM_CTX_TAG),
+        ):
+            try:
+                tables.append(cls._resolve_block_table(inputs, tag))
+            except RuntimeError:
+                return None
+        if (
+            stage.state_pool.device != accepted.device
+            or stage.ctx_pool.device != accepted.device
+        ):
+            return None
+        payload = resolve_commit_pair(
+            *tables,
+            stage.prefixes,
+            accepted,
+            stage.page_size,
+            int(stage.state_pool.shape[0]),
+            int(stage.ctx_pool.shape[0]),
+        )
+        if payload is None:
+            return None
+        batch = accepted.numel()
+        host = payload.tolist()
+        state_ids, ctx_ids = host[8 : 8 + batch], host[8 + batch :]
+        cls._check_commit_verdict(
+            PLE_STATE_TAG, host[:4], state_ids, stage.state_pool.shape[0]
+        )
+        cls._check_commit_verdict(
+            PLE_NGRAM_CTX_TAG, host[4:8], ctx_ids, stage.ctx_pool.shape[0]
+        )
+        return payload[8 : 8 + batch], state_ids, payload[8 + batch :], ctx_ids
 
     @classmethod
     def _physical_blocks_for_pairs(

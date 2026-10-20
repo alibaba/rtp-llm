@@ -404,6 +404,16 @@ class FusedRopeKVCacheDecodeOp:
             )
         rope_config = self.attn_configs.rope_config
         rope_cache = get_rope_cache_once(rope_config, self.attn_configs.max_seq_len)
+        use_rope_cache = check_rope_cache(rope_config, rope_cache)
+        # The cached decode kernel receives sequence_lengths as its position
+        # pointer, even when explicit multi-axis position_ids are supplied.
+        # That op-owned buffer contains one value per request. Applying the
+        # position-ID stride here reads past it (e.g. Qwen4 MTP inherits 3).
+        cached_decode = use_rope_cache and rope_config.style in (
+            RopeStyle.Base,
+            RopeStyle.Yarn,
+        )
+        decode_index_factor = 1 if cached_decode else rope_config.index_factor
         return _get_fused_rope_kvcache().decode_fused_rope_kvcache(
             qkv,
             params.position_ids,
@@ -418,9 +428,7 @@ class FusedRopeKVCacheDecodeOp:
             store_kv=False,
             kv_cache_scale=self._get_kv_scale(kv_cache),
             kv_cache_offset_h=params.kv_cache_offset_h,
-            rope_cache=(
-                rope_cache.data if check_rope_cache(rope_config, rope_cache) else None
-            ),
+            rope_cache=rope_cache.data if use_rope_cache else None,
             use_logn_attn=self.attn_configs.use_logn_attn,
             rope_style=rope_config.style,
             rope_dim=rope_config.dim,
@@ -432,7 +440,7 @@ class FusedRopeKVCacheDecodeOp:
             rope_extrapolation_factor=rope_config.extrapolation_factor,
             rope_mscale=rope_config.mscale,
             rope_offset=rope_config.offset,
-            rope_index_factor=rope_config.index_factor,
+            rope_index_factor=decode_index_factor,
             rope_mrope_dim1=rope_config.mrope_dim1,
             rope_mrope_dim2=rope_config.mrope_dim2,
             rope_mrope_dim3=rope_config.mrope_dim3,

@@ -61,8 +61,18 @@ class FlashInferAllReduce:
         self._dtype: Optional[torch.dtype] = None
         self._max_num_tokens = 0
         self._flashinfer_comm = None
+        self.cpp_small_enabled = False
+        # Qwen4 target has a native post-capture callback. Other capture owners
+        # must retain NCCL until they provide that lifecycle contract too.
+        self.allow_ipc_capture = False
 
         if not enabled_by_config(disable_custom_all_reduce) or not single_node:
+            logging.info(
+                "FlashInfer all-reduce fallback: explicit_disable=%s env_disable=%s single_node=%s",
+                disable_custom_all_reduce,
+                os.getenv("FT_DISABLE_CUSTOM_AR"),
+                single_node,
+            )
             return
         if self.world_size not in _MAX_WORKSPACE_BYTES:
             logging.info(
@@ -79,6 +89,20 @@ class FlashInferAllReduce:
                 return
             self._flashinfer_comm = flashinfer_comm
             self.disabled = False
+            self.cpp_small_enabled = (
+                self.world_size == 2
+                and torch.cuda.get_device_capability(device) == (12, 0)
+                and torch.cuda.device_count() == 2
+                and torch.cuda.can_device_access_peer(0, 1)
+                and torch.cuda.can_device_access_peer(1, 0)
+            )
+            logging.info(
+                "FlashInfer C++ small TP eligibility: rank=%s tp=%s device=%s eligible=%s",
+                self.rank,
+                self.world_size,
+                self.device,
+                self.cpp_small_enabled,
+            )
         except ImportError:
             logging.info("FlashInfer all-reduce unavailable; using NCCL")
 
@@ -92,21 +116,32 @@ class FlashInferAllReduce:
         local_success = False
         local_error: Optional[Exception] = None
         try:
-            from flashinfer.comm.mnnvl import TorchDistBackend
-
             hidden_dim = tensor.shape[1]
-            max_num_tokens = _MAX_WORKSPACE_BYTES[self.world_size] // (
-                hidden_dim * tensor.element_size()
-            )
-            workspace = self._flashinfer_comm.create_allreduce_fusion_workspace(
-                backend="trtllm",
-                world_size=self.world_size,
-                rank=self.rank,
-                max_token_num=max_num_tokens,
-                hidden_dim=hidden_dim,
-                dtype=tensor.dtype,
-                comm_backend=TorchDistBackend(group=self.group),
-            )
+            if self.cpp_small_enabled and hidden_dim == 2560:
+                from .flashinfer_ipc_all_reduce import FlashInferIpcAllReduce
+
+                large_prefill = os.environ.get("QWEN4_TP_LARGE_PREFILL", "0") == "1"
+                workspace = FlashInferIpcAllReduce(
+                    self.group,
+                    self.device,
+                    max_bytes=128 * 1024 * 1024 if large_prefill else 32 * 2560 * 2,
+                )
+                workspace.large_prefill = large_prefill
+            else:
+                from flashinfer.comm.mnnvl import TorchDistBackend
+
+                max_num_tokens = _MAX_WORKSPACE_BYTES[self.world_size] // (
+                    hidden_dim * tensor.element_size()
+                )
+                workspace = self._flashinfer_comm.create_allreduce_fusion_workspace(
+                    backend="trtllm",
+                    world_size=self.world_size,
+                    rank=self.rank,
+                    max_token_num=max_num_tokens,
+                    hidden_dim=hidden_dim,
+                    dtype=tensor.dtype,
+                    comm_backend=TorchDistBackend(group=self.group),
+                )
             local_success = True
         except Exception as exc:
             local_error = exc
@@ -133,8 +168,11 @@ class FlashInferAllReduce:
         self._workspace = workspace
         self._hidden_dim = tensor.shape[1]
         self._dtype = tensor.dtype
-        self._max_num_tokens = _MAX_WORKSPACE_BYTES[self.world_size] // (
-            self._hidden_dim * tensor.element_size()
+        self._max_num_tokens = (
+            workspace.max_bytes // (self._hidden_dim * tensor.element_size())
+            if hasattr(workspace, "max_bytes")
+            else _MAX_WORKSPACE_BYTES[self.world_size]
+            // (self._hidden_dim * tensor.element_size())
         )
         logging.info(
             "Initialized FlashInfer TRT-LLM all-reduce: rank=%s, tp=%s, "
@@ -179,6 +217,14 @@ class FlashInferAllReduce:
             return False
 
         if hasattr(self._workspace, "is_buffer_size_sufficient"):
+            from .flashinfer_ipc_all_reduce import FlashInferIpcAllReduce
+
+            if (
+                isinstance(self._workspace, FlashInferIpcAllReduce)
+                and torch.cuda.is_current_stream_capturing()
+                and not self.allow_ipc_capture
+            ):
+                return False
             return self._workspace.is_buffer_size_sufficient(
                 self.world_size,
                 tensor.shape[0],
@@ -187,9 +233,24 @@ class FlashInferAllReduce:
             )
         return True
 
+    def should_use_registered_graph_input(self, tensor):
+        from .flashinfer_ipc_all_reduce import FlashInferIpcAllReduce
+
+        return (
+            self.allow_ipc_capture
+            and isinstance(self._workspace, FlashInferIpcAllReduce)
+            and self._workspace.registered_graph_inputs
+            and torch.cuda.is_current_stream_capturing()
+            and self.should_use(tensor)
+        )
+
     def all_reduce(self, tensor: torch.Tensor) -> torch.Tensor:
         assert self._workspace is not None
         assert self._flashinfer_comm is not None
+        from .flashinfer_ipc_all_reduce import FlashInferIpcAllReduce
+
+        if isinstance(self._workspace, FlashInferIpcAllReduce):
+            return self._workspace.all_reduce(tensor)
         return self._flashinfer_comm.allreduce_fusion(
             input=tensor,
             workspace=self._workspace,
@@ -198,6 +259,32 @@ class FlashInferAllReduce:
             # FlashInfer 0.6.9 can expose one-shot output too early when PDL is
             # chained. Completion-at-end is the graph replay safety contract.
             trigger_completion_at_end=True,
+        )
+
+    def finish_graph_capture(self):
+        from .flashinfer_ipc_all_reduce import FlashInferIpcAllReduce
+
+        if isinstance(self._workspace, FlashInferIpcAllReduce):
+            self._workspace.finish_graph_capture()
+
+    def all_reduce_into(self, tensor, output):
+        from .flashinfer_ipc_all_reduce import FlashInferIpcAllReduce
+
+        if isinstance(self._workspace, FlashInferIpcAllReduce):
+            # The API first copies input to its IPC staging buffer. The kernel
+            # consumes staging, so input/output aliasing is safe here too.
+            return self._workspace.all_reduce(tensor, output)
+        output.copy_(self.all_reduce(tensor))
+        return output
+
+    def should_use_cpp_small(self, tensor: torch.Tensor) -> bool:
+        """Admit the verified two-rank BF16 hidden-width decode domain only."""
+        return (
+            self.cpp_small_enabled
+            and tensor.ndim == 2
+            and 1 <= tensor.shape[0] <= 32
+            and tensor.shape[1] == 2560
+            and self.should_use(tensor)
         )
 
     def destroy(self) -> None:
