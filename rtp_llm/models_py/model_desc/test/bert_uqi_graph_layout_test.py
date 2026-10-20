@@ -22,12 +22,12 @@ class UqiLayoutTest(unittest.TestCase):
             packed.update(lengths, starts, counts)
             expected = module.build_uqi_aiter_layout(lengths, starts, counts, capacity, limit)
             for actual, reference in zip(
-                (packed.perm, packed.inv, packed.first, packed.full, packed.b_mask, packed.valid),
+                (packed.perm, packed.inv_perm, packed.split_indptr, packed.full_indptr, packed.b_mask, packed.valid_mask),
                 expected,
             ):
                 self.assertEqual(list(actual), list(reference))
-            self.assertTrue(all(0 <= b - a <= limit for a, b in zip(packed.full, packed.full[1:])))
-            self.assertEqual(packed.full[-1], capacity)
+            self.assertTrue(all(0 <= b - a <= limit for a, b in zip(packed.full_indptr, packed.full_indptr[1:])))
+            self.assertEqual(packed.full_indptr[-1], capacity)
 
     def test_visibility_matches_original_block_mask(self):
         for lengths, starts, counts in [
@@ -111,13 +111,13 @@ class UqiLayoutTest(unittest.TestCase):
                     )
                     packed.update(lengths, starts, counts)
                     actual = tuple(list(view) for view in (
-                        packed.perm, packed.inv, packed.first, packed.full,
-                        packed.b_mask, packed.valid,
+                        packed.perm, packed.inv_perm, packed.split_indptr, packed.full_indptr,
+                        packed.b_mask, packed.valid_mask,
                     ))
                     self.assertEqual(actual, expected)
                     self.assertIs(packed.buffer, buffer)
-                    self.assertEqual(packed.first_offset % 8, 0)
-                    self.assertEqual(packed.full_offset % 4, 0)
+                    self.assertEqual(packed.split_indptr_offset % 8, 0)
+                    self.assertEqual(packed.full_indptr_offset % 4, 0)
 
     def test_packed_layout_rejects_invalid_requests_without_overwriting_plan(self):
         packed = module.BertUqiAiterGraphLayout(8, 2, 4)
@@ -140,11 +140,11 @@ class UqiLayoutTest(unittest.TestCase):
         lengths, starts, counts = [5, 5, 2], [1, 0, -1], [3, 5, 0]
         packed.update(lengths, starts, counts)
         self.assertEqual(list(packed.perm), [0, 4, 1, 2, 3, 5, 6, 7, 8, 9, 10, 11])
-        self.assertEqual([packed.perm[i] for i in packed.inv], list(range(12)))
+        self.assertEqual([packed.perm[i] for i in packed.inv_perm], list(range(12)))
         self.assertEqual(list(packed.b_mask), [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0])
-        self.assertTrue(all(packed.valid))
-        self.assertEqual(list(packed.first), [0, 2, 5, 5, 10, 12, 12, 12, 12, 12])
-        self.assertEqual(list(packed.full), [0, 5, 10, 12, 12, 12, 12])
+        self.assertTrue(all(packed.valid_mask))
+        self.assertEqual(list(packed.split_indptr), [0, 2, 5, 5, 10, 12, 12, 12, 12, 12])
+        self.assertEqual(list(packed.full_indptr), [0, 5, 10, 12, 12, 12, 12])
 
 
 if __name__ == "__main__":

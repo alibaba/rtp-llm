@@ -168,7 +168,7 @@ class UqiEncoderGraphTest(unittest.TestCase):
         with torch.cuda.graph(graph):
             output = run()
         buffers = (
-            (impl.uqi_perm, impl.uqi_inv_perm, impl.first_cu, impl.full_cu,
+            (impl.uqi_perm, impl.uqi_inv_perm, impl.split_cu_seqlens, impl.full_cu_seqlens,
              impl.b_mask, impl.valid_mask)
             if torch.version.hip is not None
             else (impl.custom_mask_buffer, impl.mask_indptr_buffer)

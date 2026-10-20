@@ -188,8 +188,8 @@ class BertModel(GptModelBase):
     def prepare_fmha_impl(
         self, inputs: PyModelInputs, is_cuda_graph: bool = False
     ) -> FMHAImplBase:
-        # Graphs use one device-specific masked attention; eager retains its
-        # configured two-pass/custom-mask implementation.
+        # Graphs use the device-specific graph attention implementation; eager
+        # retains its configured two-pass/custom-mask implementation.
         if is_cuda_graph:
             from rtp_llm.models_py.modules.factory.attention.bert_encoder_graph import (
                 BertEncoderGraphImpl,
@@ -205,11 +205,13 @@ class BertModel(GptModelBase):
                     from rtp_llm.models_py.modules.factory.attention.rocm_impl.bert_uqi_encoder_graph import (
                         BertUqiRocmEncoderGraphImpl,
                     )
+
                     graph_impl = BertUqiRocmEncoderGraphImpl
                 else:
                     from rtp_llm.models_py.modules.factory.attention.bert_encoder_graph import (
                         BertUqiEncoderGraphImpl,
                     )
+
                     graph_impl = BertUqiEncoderGraphImpl
             return graph_impl(
                 self.config.getAttentionConfigs(

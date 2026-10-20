@@ -132,11 +132,13 @@ private:
     bool isEmbeddingStylePrefillCudaGraph() const {
         return role_ == CudaGraphRole::EMBEDDING_PREFILL;
     }
-    bool usesTransformerGraphInterface() const {
+    // Embeddings are prepared outside the graph; only the Transformer stack is captured.
+    // This selects the execution path, not whether CUDA graphs are enabled.
+    bool usesTransformerGraph() const {
         return static_cast<bool>(py_prepare_transformer_inputs_);
     }
     bool requiresUqiSegmentBounds() const {
-        if (!usesTransformerGraphInterface()) {
+        if (!usesTransformerGraph()) {
             return false;
         }
         py::gil_scoped_acquire gil;
@@ -228,7 +230,7 @@ private:
     mutable std::atomic<uint64_t> bert_replay_id_fallback_log_count_{0};
     mutable std::atomic<uint64_t> multimodal_input_fallback_log_count_{0};
     mutable std::atomic<uint64_t> full_prefill_fallback_log_count_{0};
-    mutable std::atomic<uint64_t> full_prefill_replay_log_count_{0};
+    mutable std::atomic<uint64_t> prefill_replay_log_count_{0};
 
     // event to record forward done
     torch::Event forward_event_ = cuda_graph::makeGraphEvent();

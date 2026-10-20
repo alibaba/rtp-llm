@@ -103,7 +103,7 @@ class BertMultimodalEmbeddingTest(TestCase):
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph, stream=stream):
             output = impl.forward(qkv, None)
-        pointer = impl.cu_device.data_ptr()
+        pointer = impl.cu_seqlens_device.data_ptr()
         for lengths in ([3, 2], [8, 0], [2, 0], [1, 5], [4, 4]):
             with self.subTest(lengths=lengths):
                 torch.cuda.synchronize()
@@ -116,7 +116,7 @@ class BertMultimodalEmbeddingTest(TestCase):
                 qkv[real_tokens:].fill_(20)
                 graph.replay()
                 torch.cuda.synchronize()
-                self.assertEqual(impl.cu_device.data_ptr(), pointer)
+                self.assertEqual(impl.cu_seqlens_device.data_ptr(), pointer)
                 offset = 0
                 for length in lengths:
                     if length:

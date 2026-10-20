@@ -43,7 +43,7 @@ class BertEncoderGraphMetadataTest(unittest.TestCase):
         self.impl.heads = self.impl.kv_heads = 1
         self.impl.dim = 64
         self.impl.dtype = torch.bfloat16
-        self.impl.cu_host = torch.empty(5, dtype=torch.int32)
+        self.impl.cu_seqlens_host = torch.empty(5, dtype=torch.int32)
         self.impl.wrapper = Mock()
 
     @staticmethod
@@ -56,7 +56,7 @@ class BertEncoderGraphMetadataTest(unittest.TestCase):
         )
 
     def test_layout_changes_keep_storage_and_isolate_padding(self):
-        pointer = self.impl.cu_host.data_ptr()
+        pointer = self.impl.cu_seqlens_host.data_ptr()
         cases = [
             ([8, 0, 0], [0, 8, 8, 8, 8]),
             ([2, 3, 0], [0, 2, 5, 5, 8]),
@@ -67,8 +67,8 @@ class BertEncoderGraphMetadataTest(unittest.TestCase):
         for lengths, expected in cases:
             with self.subTest(lengths=lengths):
                 self.impl.prepare_cuda_graph(self._inputs(lengths))
-                self.assertEqual(self.impl.cu_host.tolist(), expected)
-                self.assertEqual(self.impl.cu_host.data_ptr(), pointer)
+                self.assertEqual(self.impl.cu_seqlens_host.tolist(), expected)
+                self.assertEqual(self.impl.cu_seqlens_host.data_ptr(), pointer)
                 kwargs = self.impl.wrapper.plan.call_args.kwargs
                 self.assertFalse(kwargs["causal"])
                 self.assertTrue(kwargs["disable_split_kv"])
@@ -88,7 +88,7 @@ class BertEncoderGraphMetadataTest(unittest.TestCase):
         self.impl.request_capacity = 32
         self.impl.token_capacity = 6144
         self.impl.max_sequence_length = 512
-        self.impl.cu_host = torch.empty(34, dtype=torch.int32)
+        self.impl.cu_seqlens_host = torch.empty(34, dtype=torch.int32)
         # Same item text lengths as mock_request/bert/request.json, plus four
         # visual rows and a seven-token query per item.
         item_lengths = [
@@ -127,9 +127,9 @@ class BertEncoderGraphMetadataTest(unittest.TestCase):
         ]
         lengths = [length + 4 + 7 for length in item_lengths]
         self.impl.prepare_cuda_graph(self._inputs(lengths))
-        self.assertEqual(int(self.impl.cu_host[-2]), 5402)
-        self.assertEqual(int(self.impl.cu_host[-1]), 6144)
-        self.assertEqual(self.impl.cu_host.numel(), 34)
+        self.assertEqual(int(self.impl.cu_seqlens_host[-2]), 5402)
+        self.assertEqual(int(self.impl.cu_seqlens_host[-1]), 6144)
+        self.assertEqual(self.impl.cu_seqlens_host.numel(), 34)
 
     def test_single_sequence_limit_is_independent_of_total_capacity(self):
         self.impl.token_capacity = 6144
@@ -137,8 +137,10 @@ class BertEncoderGraphMetadataTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "position-table"):
             self.impl.prepare_cuda_graph(self._inputs([513, 0, 0]))
         # The long synthetic sequence is legal only during initial capture.
-        self.impl._prepare(self._inputs([6144, 0, 0]), validate_sequence_length=False)
-        self.assertEqual(self.impl.cu_host.tolist(), [0, 6144, 6144, 6144, 6144])
+        self.impl._prepare(self._inputs([6144, 0, 0]), for_capture=True)
+        self.assertEqual(
+            self.impl.cu_seqlens_host.tolist(), [0, 6144, 6144, 6144, 6144]
+        )
 
 
 if __name__ == "__main__":
