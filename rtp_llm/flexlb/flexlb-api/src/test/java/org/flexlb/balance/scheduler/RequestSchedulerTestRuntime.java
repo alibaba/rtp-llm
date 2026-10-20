@@ -122,7 +122,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
     }
 
     /** Return the exact item currently owned by a fixture request slot. */
-    public ScheduledRequest activeItem(long requestId) {
+    public RequestExecution activeItem(long requestId) {
         RequestSlot slot = lifecycle.requestSlot(requestId);
         if (slot == null) {
             return null;

@@ -150,7 +150,7 @@ class RequestConfirmationTimeoutTest {
                 assertTrue(acquired.permit().release());
                 decode.release(next, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
             }
-            requests.processPrefillStatus(prefill, RoleType.PREFILL, PrefillState.WorkerStatusFact.active(item));
+            requests.processPrefillStatus(prefill, RoleType.PREFILL, PrefillState.WorkerStatusFact.active(item.execution()));
             requests.processDecodeStatus(decode, DecodeEndpoint.WorkerStatusFact.active(reservation));
             assertEquals(RequestState.Phase.TIMED_OUT, requests.getRequestState(REQUEST_ID, 0L).state());
             assertEquals(0, requests.liveRequestCount());

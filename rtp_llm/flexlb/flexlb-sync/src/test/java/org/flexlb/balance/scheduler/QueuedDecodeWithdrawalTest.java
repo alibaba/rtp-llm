@@ -112,7 +112,7 @@ class QueuedDecodeWithdrawalTest {
             assertTrue(registry.commitItemForPublication(next, () -> true));
         }
         registry.processDecodeStatus(decode, DecodeEndpoint.WorkerStatusFact.terminal(item.decodeReservation(), 0));
-        assertSame(next, registry.requestSlot(1).activeItem());
+        assertSame(next.execution(), registry.requestSlot(1).activeItem());
         assertFalse(item.future().isDone(), "old reservation evidence must not terminate the new route");
     }
 
@@ -122,7 +122,7 @@ class QueuedDecodeWithdrawalTest {
         var permit = decode.acquireDispatchPermit(item.decodeReservation(), capacity).permit();
         assertNotNull(permit);
         assertFalse(replace(item));
-        assertSame(item, registry.requestSlot(2).activeItem());
+        assertSame(item.execution(), registry.requestSlot(2).activeItem());
         assertFalse(item.future().isDone());
         assertTrue(RequestLifecycleTestSupport.prepareMember(registry, item));
         verify(queue, never()).requeue(any());
@@ -134,7 +134,7 @@ class QueuedDecodeWithdrawalTest {
         var item = queued(3);
         assertFalse(registry.replaceQueuedDecodeReservations(decode, List.of(item.decodeReservation()),
                 100, 16, 16, 30, capacity));
-        assertSame(item, registry.requestSlot(3).activeItem());
+        assertSame(item.execution(), registry.requestSlot(3).activeItem());
         assertNotNull(decode.reservationHandle(3));
         verify(queue, never()).requeue(any());
     }
@@ -162,7 +162,7 @@ class QueuedDecodeWithdrawalTest {
         var stale = new DecodeEndpoint.ReservationHandle(item.decodeReservation().endpointGenerationId(),
                 5, item.decodeReservation().reservationToken() + 1);
         assertFalse(registry.replaceQueuedDecodeReservations(decode, List.of(stale), 100, 16, 16, 80, capacity));
-        assertSame(item, registry.requestSlot(5).activeItem());
+        assertSame(item.execution(), registry.requestSlot(5).activeItem());
         assertTrue(RequestLifecycleTestSupport.prepareMember(registry, item));
         verify(item.prefillEp(), never()).removeQueued(any(), anyString());
     }
@@ -183,7 +183,7 @@ class QueuedDecodeWithdrawalTest {
                 item.decodeReservation().endpointGenerationId(), 999, 1);
         assertFalse(registry.replaceQueuedDecodeReservations(decode,
                 List.of(item.decodeReservation(), missing), 100, 16, 16, 80, capacity));
-        assertSame(item, registry.requestSlot(7).activeItem());
+        assertSame(item.execution(), registry.requestSlot(7).activeItem());
         assertNotNull(decode.reservationHandle(7));
         assertNull(decode.reservationHandle(100));
         assertTrue(RequestLifecycleTestSupport.prepareMember(registry, item),

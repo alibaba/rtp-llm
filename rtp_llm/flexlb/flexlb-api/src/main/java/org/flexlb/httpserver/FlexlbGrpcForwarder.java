@@ -79,8 +79,9 @@ public class FlexlbGrpcForwarder {
 
     public CompletionStage<MasterForwardResult> forwardScheduleToMaster(
             FlexlbScheduleProtocol.FlexlbScheduleRequestPB request) {
+        long requestId = request.getRequestId();
         ForwardGuard guard = applyForwardGuard(
-                request.getRequestId(), request.getForwardHop(),
+                requestId, request.getForwardHop(),
                 ForwardOperation.SCHEDULE);
         if (guard.blocked()) {
             return CompletableFuture.completedFuture(MasterForwardResult.blocked(
@@ -102,7 +103,7 @@ public class FlexlbGrpcForwarder {
         if (!tryChargeForwardBytes(forwardBytes)) {
             Logger.warn(
                     "event=flexlb_forward_budget_exhausted request_id={} bytes={} budget={} inflight={}",
-                    request.getRequestId(), forwardBytes, maxForwardInflightBytes,
+                    requestId, forwardBytes, maxForwardInflightBytes,
                     forwardInflightBytes.get());
             reportForwardResult(ipOf(masterHostIpPort), "FORWARD_BUDGET_EXHAUSTED");
             return CompletableFuture.completedFuture(MasterForwardResult.failed(
@@ -115,7 +116,7 @@ public class FlexlbGrpcForwarder {
         } catch (RuntimeException error) {
             releaseForwardBytes(forwardBytes);
             return CompletableFuture.completedFuture(forwardFailure(
-                    request.getRequestId(), guard, null, error));
+                    requestId, guard, null, error));
         }
 
         AtomicBoolean forwardBytesSettled = new AtomicBoolean();
@@ -129,7 +130,7 @@ public class FlexlbGrpcForwarder {
                 request.toBuilder().setForwardHop(guard.nextHop()).build();
         ListenableFuture<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> rpcFuture;
         ForwardTrace trace = new ForwardTrace("rtp_llm.flexlb.forward_schedule",
-                entryTraceContext(), request.getRequestId(), masterHostIpPort);
+                entryTraceContext(), requestId, masterHostIpPort);
         try {
             // The forward RPC inherits the inbound gRPC Context deadline. Do
             // not replace the request TTL with a load-balancer timeout.
@@ -140,7 +141,7 @@ public class FlexlbGrpcForwarder {
             settleForwardBytes.run();
             trace.finish(error);
             return CompletableFuture.completedFuture(forwardFailure(
-                    request.getRequestId(), guard, channel, error));
+                    requestId, guard, channel, error));
         }
 
         CompletableFuture<MasterForwardResult> result = new CompletableFuture<>();
@@ -168,7 +169,7 @@ public class FlexlbGrpcForwarder {
                             settleForwardBytes.run();
                             trace.finish(error);
                             result.complete(forwardFailure(
-                                    request.getRequestId(), guard, channel, error));
+                                    requestId, guard, channel, error));
                         }
                     },
                     Runnable::run);
@@ -177,7 +178,7 @@ public class FlexlbGrpcForwarder {
             trace.finish(callbackRegistrationError);
             rpcFuture.cancel(true);
             result.complete(forwardFailure(
-                    request.getRequestId(), guard, channel, callbackRegistrationError));
+                    requestId, guard, channel, callbackRegistrationError));
         }
 
         // gRPC already propagates the inbound Context deadline/cancellation to

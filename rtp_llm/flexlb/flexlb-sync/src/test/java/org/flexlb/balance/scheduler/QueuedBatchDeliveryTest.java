@@ -90,7 +90,7 @@ class QueuedBatchDeliveryTest {
         when(prefill.reserveBatch(any(), anyLong(), anyInt())).thenAnswer(call ->
                 ledger.reserveBatch(call.getArgument(0), call.getArgument(1), call.getArgument(2)));
         when(prefill.releaseCommittedItem(any())).thenAnswer(call -> {
-            ScheduledRequest item = call.getArgument(0);
+            RequestExecution item = call.getArgument(0);
             assertFalse(Thread.holdsLock(registry.requestSlot(item.requestId())));
             return ledger.prefill.terminalizeCommittedItem(item);
         });
@@ -137,7 +137,7 @@ class QueuedBatchDeliveryTest {
             switch (expiry) {
                 case "CANCEL" -> registry.cancelRequest(item.requestId(), 0L, CancelReason.CLIENT_CANCELLED);
                 case "TIMER" -> registry.expireInactiveRequest(slot, slot.createdAtMs() + TIMEOUT_MS);
-                case "LATE_DEADLINE" -> ReflectionTestUtils.setField(item, "expiresAtMs", System.currentTimeMillis() - 1L);
+                case "LATE_DEADLINE" -> ReflectionTestUtils.setField(item.execution(), "expiresAtMs", System.currentTimeMillis() - 1L);
                 case "LATE_INACTIVITY" -> ReflectionTestUtils.setField(slot, "lastWorkerStatusAtMs",
                         System.currentTimeMillis() - TIMEOUT_MS - 1L);
                 default -> throw new AssertionError(expiry);

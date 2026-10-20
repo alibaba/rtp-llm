@@ -2,6 +2,7 @@ package org.flexlb.balance.endpoint;
 
 import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import org.flexlb.balance.projection.WorkSnapshot;
+import org.flexlb.balance.scheduler.RequestExecution;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.testfixture.TaskInfo;
 import org.flexlb.testfixture.WorkerStatusResponse;
@@ -123,8 +124,8 @@ class PrefillStateSnapshotTest {
             }
         }
         assertEquals(2, state.committedSnapshot().requests().size(), "closing committed capabilities cannot release Engine ownership");
-        assertTrue(state.terminalizeCommittedItem(queued));
-        assertTrue(state.terminalizeCommittedItem(immediate));
+        assertTrue(state.terminalizeCommittedItem(queued.execution()));
+        assertTrue(state.terminalizeCommittedItem(immediate.execution()));
         assertTrue(state.committedSnapshot().requests().isEmpty());
     }
 
@@ -163,7 +164,7 @@ class PrefillStateSnapshotTest {
                 assertThrows(IllegalStateException.class, () -> state.commitRouteGroup(
                         List.of(immediate, queued), List.of(immediateReservation, queuedReservation), handoff));
             }
-            assertFalse(state.terminalizeCommittedItem(immediate));
+            assertFalse(state.terminalizeCommittedItem(immediate.execution()));
             assertTrue(waiting.add(queued));
             try (var handoff = state.commitRouteGroup(List.of(immediate, queued),
                     List.of(immediateReservation, queuedReservation), generation.tryAcquireHandoff())) {
@@ -185,7 +186,7 @@ class PrefillStateSnapshotTest {
         var retired = state.retireGenerationOwnership();
         assertNull(retired.invariantFailure());
         assertEquals(3, retired.ownedItems().size());
-        assertTrue(retired.ownedItems().containsAll(List.of(queued, prepared, committed)));
+        assertTrue(retired.ownedItems().containsAll(List.of(queued.execution(), prepared.execution(), committed.execution())));
         preparedReservation.close();
         committedReservation.close();
         assertTrue(state.committedSnapshot().requests().isEmpty());
@@ -256,13 +257,13 @@ class PrefillStateSnapshotTest {
                 });
 
         clock.set(150);
-        assertTrue(state.terminalizeCommittedItem(a));
+        assertTrue(state.terminalizeCommittedItem(a.execution()));
         assertEquals(List.of(2L, 3L), state.committedSnapshot().batches().getFirst().requestIds());
         assertEquals(250L, remainingWork());
         clock.set(190);
-        assertTrue(state.terminalizeCommittedItem(b));
-        assertFalse(state.terminalizeCommittedItem(a));
-        assertFalse(state.terminalizeCommittedItem(item(3)), "cleanup must match the exact item");
+        assertTrue(state.terminalizeCommittedItem(b.execution()));
+        assertFalse(state.terminalizeCommittedItem(a.execution()));
+        assertFalse(state.terminalizeCommittedItem(item(3).execution()), "cleanup must match the exact item");
         assertEquals(210L, remainingWork());
 
         // Returning to QUEUED pauses elapsed-time accounting, but does not undo work already started.
@@ -326,7 +327,7 @@ class PrefillStateSnapshotTest {
         clock.set(1_000);
         reconcile(Map.of("1", task(1, null, 500, 0)),
                 Map.of("2", task(2, TaskPhase.RECEIVED, 0, 0)), survivors -> {
-                    assertEquals(List.of(b), survivors);
+                    assertEquals(List.of(b.execution()), survivors);
                     return 200L;
                 });
         clock.set(1_200);
@@ -348,7 +349,7 @@ class PrefillStateSnapshotTest {
     }
 
     private void reconcile(Map<String, TaskInfo> finished, Map<String, TaskInfo> active,
-                           ToLongFunction<List<ScheduledRequest>> repredictor) {
+                           ToLongFunction<List<RequestExecution>> repredictor) {
         WorkerStatusResponse response = new WorkerStatusResponse();
         response.setRole(RoleType.PREFILL);
         response.setFinishedTaskInfo(finished);
@@ -376,7 +377,11 @@ class PrefillStateSnapshotTest {
     private static ScheduledRequest item(long id) {
         var item = mock(ScheduledRequest.class);
         when(item.requestId()).thenReturn(id);
+        RequestExecution execution = mock(RequestExecution.class);
+        when(execution.requestId()).thenReturn(id);
+        when(item.execution()).thenReturn(execution);
         when(item.seqLen()).thenReturn(100L);
+        when(execution.seqLen()).thenReturn(100L);
         return item;
     }
 

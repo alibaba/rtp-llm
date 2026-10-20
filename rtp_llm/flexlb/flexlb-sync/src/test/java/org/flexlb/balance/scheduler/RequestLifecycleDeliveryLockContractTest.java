@@ -113,7 +113,7 @@ class RequestLifecycleDeliveryLockContractTest {
             assertTrue(contenderEntered.await(5, TimeUnit.SECONDS),
                     "slot operations must proceed during endpoint publication");
             synchronized (slot) {
-                assertSame(registered.item(), slot.activeItem());
+                assertSame(registered.item().execution(), slot.activeItem());
             }
             assertTrue(RequestLifecycleTestSupport.prepareMember(lifecycle, registered.item()),
                     "queue publication must never expose an unready slot");
@@ -420,7 +420,7 @@ class RequestLifecycleDeliveryLockContractTest {
 
         new EndpointEventProjector(lifecycle).onPrefillStatus(endpoint, RoleType.PDFUSION,
                 List.of(PrefillState.WorkerStatusFact.terminal(
-                        registered.item(), PrefillState.WorkerStatusFact.Kind.COMPLETED, 0L)));
+                        registered.item().execution(), PrefillState.WorkerStatusFact.Kind.COMPLETED, 0L)));
         Response terminal = registered.future().get(5L, TimeUnit.SECONDS);
         assertTrue(terminal.isSuccess());
 
