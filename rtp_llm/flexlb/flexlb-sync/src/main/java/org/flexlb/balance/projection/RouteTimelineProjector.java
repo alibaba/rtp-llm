@@ -21,6 +21,7 @@ final class RouteTimelineProjector {
     private final PredictionBoundary predictions = new PredictionBoundary();
     private long requestId;
     private int priority;
+    private long enqueueSeq;
     private long enqueuedAtMs;
     private long expiresAtMs;
     private long seqLen;
@@ -34,6 +35,7 @@ final class RouteTimelineProjector {
     void reset(
             long requestId,
             int priority,
+            long enqueueSeq,
             long enqueuedAtMs,
             long expiresAtMs,
             long seqLen,
@@ -41,6 +43,7 @@ final class RouteTimelineProjector {
             long routingCacheMatchTokens) {
         this.requestId = requestId;
         this.priority = priority;
+        this.enqueueSeq = enqueueSeq;
         this.enqueuedAtMs = enqueuedAtMs;
         this.expiresAtMs = expiresAtMs;
         this.seqLen = seqLen;
@@ -51,7 +54,8 @@ final class RouteTimelineProjector {
     /**
      * Project one endpoint under a frozen serial-work model.
      *
-     * <p>Already committed work forms the engine cursor. Collection deadlines
+     * <p>Committed work with a known duration forms the engine cursor; unknown
+     * request and batch durations are omitted. Collection deadlines
      * and that cursor overlap via {@code max(cursor, readyAt)}. The snapshot's
      * frozen delivery projection defines each group's completion shape.
      */
@@ -100,21 +104,6 @@ final class RouteTimelineProjector {
                     predictionFailure.detail("SINGLE_PREDICTION_FAILED"));
         }
 
-        if (committed.hasUnknownWork()) {
-            if (containsActiveRequest(queue, requestId)) {
-                return unavailable("INCOMING_ALREADY_ACTIVE");
-            }
-            if (queue.queueScheduling()) {
-                if (seqLen > queue.constraints().batchKvCapacity()) {
-                    return blocked(
-                            incomingPrefillMs,
-                            RouteProjection.Candidate.InitialHeadDisposition.NONE,
-                            "PREFILL_KV_CAPACITY");
-                }
-            }
-            return unmodeledEngineWork(incomingPrefillMs);
-        }
-
         long committedMs = knownRemainingWorkMsAt(committed, projectionAtMs);
 
         /*
@@ -138,14 +127,13 @@ final class RouteTimelineProjector {
         if (!queue.queueScheduling()) {
             long completionMs = saturatedAdd(committedMs, incomingPrefillMs);
             return candidate(
-                    RouteProjection.Candidate.State.MODELED,
                     completionMs,
                     incomingPrefillMs,
                     RouteProjection.Candidate.InitialHeadDisposition.NONE,
                     "SERIAL_FROZEN_DIRECT");
         }
         GroupPlanner.Item probe = new GroupPlanner.Item(
-                requestId, priority, Long.MAX_VALUE, enqueuedAtMs,
+                requestId, priority, enqueueSeq, enqueuedAtMs,
                 expiresAtMs, seqLen, hitCache);
         GroupPlanner.Item initialActiveHead =
                 queue.activeItems().isEmpty() ? null : queue.activeItems().getFirst();
@@ -196,13 +184,6 @@ final class RouteTimelineProjector {
             }
 
             GroupPlanner.Item head = ordered.head();
-            if (head.seqLen() > queue.constraints().batchKvCapacity()) {
-                return blocked(
-                        incomingPrefillMs,
-                        initialHeadDisposition,
-                        "PREFILL_KV_CAPACITY");
-            }
-
             int probePosition = ordered.probePosition();
             final GroupPlanner.Plan<GroupPlanner.Item> plan;
             final RouteProjection.GroupPlanning planning;
@@ -244,7 +225,6 @@ final class RouteTimelineProjector {
                         deliveryProjection.service(plan, predictions, planning);
                 if (probePosition < plan.items().size()) {
                     return candidate(
-                            RouteProjection.Candidate.State.MODELED,
                             saturatedAdd(startMs, service.completionOffsetMs(probePosition)),
                             incomingPrefillMs,
                             initialHeadDisposition,
@@ -277,7 +257,6 @@ final class RouteTimelineProjector {
                     predictionFailure.detail("SERVICE_PREDICTION_FAILED"));
         }
         return candidate(
-                RouteProjection.Candidate.State.MODELED,
                 completionMs,
                 incomingPrefillMs,
                 RouteProjection.Candidate.InitialHeadDisposition.NONE,
@@ -287,16 +266,6 @@ final class RouteTimelineProjector {
     private static boolean containsCommittedRequest(
             WorkSnapshot committed, long requestId) {
         return committed.containsRequest(requestId);
-    }
-
-    private static boolean containsActiveRequest(
-            QueueSnapshot queue, long requestId) {
-        for (GroupPlanner.Item item : queue.activeItems()) {
-            if (item.requestId() == requestId) {
-                return true;
-            }
-        }
-        return false;
     }
 
     /** Remaining committed work normalized to the projection's common clock. */
@@ -489,42 +458,19 @@ final class RouteTimelineProjector {
 
     private RouteProjection.CandidateView unavailable(String detail) {
         return candidate(
-                RouteProjection.Candidate.State.UNAVAILABLE,
                 RouteProjection.Candidate.UNKNOWN,
                 0L,
                 RouteProjection.Candidate.InitialHeadDisposition.NONE, detail);
     }
 
-    private RouteProjection.CandidateView unmodeledEngineWork(
-            long incomingPrefillMs) {
-        return candidate(
-                RouteProjection.Candidate.State.UNMODELED_ENGINE_WORK,
-                RouteProjection.Candidate.UNKNOWN,
-                incomingPrefillMs,
-                RouteProjection.Candidate.InitialHeadDisposition.NONE,
-                "ENGINE_WORK_UNOBSERVABLE");
-    }
-
-    private RouteProjection.CandidateView blocked(
-            long incomingPrefillMs,
-            RouteProjection.Candidate.InitialHeadDisposition initialHeadDisposition,
-            String detail) {
-        return candidate(
-                RouteProjection.Candidate.State.BLOCKED,
-                RouteProjection.Candidate.UNKNOWN,
-                incomingPrefillMs,
-                initialHeadDisposition, detail);
-    }
-
     private RouteProjection.CandidateView candidate(
-            RouteProjection.Candidate.State state,
             long projectedTtftMs,
             long incomingPrefillMs,
             RouteProjection.Candidate.InitialHeadDisposition headDisposition,
             String detail) {
         result.reset(
-                state, projectedTtftMs, incomingPrefillMs,
-                headDisposition, detail, null,
+                projectedTtftMs, incomingPrefillMs,
+                headDisposition, detail,
                 hitCache, routingCacheMatchTokens);
         return result;
     }
@@ -532,37 +478,26 @@ final class RouteTimelineProjector {
     /** Reused only by the owning projection thread. */
     private static final class ProjectedCandidate
             implements RouteProjection.CandidateView {
-        private RouteProjection.Candidate.State state;
         private long projectedTtftMsValue;
         private long incomingPrefillMs;
         private RouteProjection.Candidate.InitialHeadDisposition headDisposition;
         private String detail;
-        private org.flexlb.dao.route.RoleType blockerRole;
         private long cacheHitTokens;
         private long routingCacheMatchTokens;
 
         private void reset(
-                RouteProjection.Candidate.State exactState,
                 long exactProjectedTtftMs,
                 long exactIncomingPrefillMs,
                 RouteProjection.Candidate.InitialHeadDisposition exactHeadDisposition,
                 String exactDetail,
-                org.flexlb.dao.route.RoleType exactBlockerRole,
                 long exactCacheHitTokens,
                 long exactRoutingCacheMatchTokens) {
-            state = exactState;
             projectedTtftMsValue = exactProjectedTtftMs;
             incomingPrefillMs = exactIncomingPrefillMs;
             headDisposition = exactHeadDisposition;
             detail = exactDetail;
-            blockerRole = exactBlockerRole;
             cacheHitTokens = exactCacheHitTokens;
             routingCacheMatchTokens = exactRoutingCacheMatchTokens;
-        }
-
-        @Override
-        public RouteProjection.Candidate.State state() {
-            return state;
         }
 
         @Override
@@ -584,11 +519,6 @@ final class RouteTimelineProjector {
         @Override
         public String detail() {
             return detail;
-        }
-
-        @Override
-        public org.flexlb.dao.route.RoleType blockerRole() {
-            return blockerRole;
         }
 
         @Override

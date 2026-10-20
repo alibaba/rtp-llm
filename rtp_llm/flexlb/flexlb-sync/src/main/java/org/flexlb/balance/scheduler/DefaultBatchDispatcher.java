@@ -64,8 +64,7 @@ public class DefaultBatchDispatcher {
             new RouteProjection.AdmissionBlockSemantics(
                     "DELIVERY_CAPACITY_BATCH_ADMISSION",
                     RouteProjection.AfterProbeAdmission.BLOCKED,
-                    "DELIVERY_CAPACITY_BATCH_ADMISSION",
-                    RoleType.PREFILL);
+                    "DELIVERY_CAPACITY_BATCH_ADMISSION");
 
     private final EngineGrpcClient grpcClient;
     private final ConfigService configService;
