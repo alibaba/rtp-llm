@@ -39,8 +39,10 @@ NormalBatchStreamProcessor::NormalBatchStreamProcessor(
         const auto& topology_groups                             = cache_config.topology().groups();
         model_input_gatherer_config_.kv_cache_group_types.reserve(topology_groups.size());
         model_input_gatherer_config_.kv_cache_group_tags = cache_config.groupTags();
+        model_input_gatherer_config_.kv_group_mm_len.reserve(topology_groups.size());
         for (const auto& group : topology_groups) {
             model_input_gatherer_config_.kv_cache_group_types.push_back(group.policy.group_type);
+            model_input_gatherer_config_.kv_group_mm_len.push_back(group.policy.kv_len_from_mm_features);
         }
     }
     model_input_gatherer_config_.warm_up                 = warm_up;

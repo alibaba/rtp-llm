@@ -36,6 +36,8 @@ struct NormalModelInputGathererConfig {
     bool                        use_opaque_kv_cache_store  = false;
     std::vector<CacheGroupType> kv_cache_group_types;
     std::vector<std::string>    kv_cache_group_tags;
+    // Per-group kv_len_from_mm_features flags aligned with kv_cache_group_tags.
+    std::vector<bool> kv_group_mm_len;
     bool                        warm_up{};
     bool                        enable_detail_log{};
     bool                        enable_model_inputs_log{};
@@ -61,6 +63,11 @@ private:
     absl::Status   processContextStreams(GptModelInputs&     model_input,
                                          const StreamGroups& stream_groups,
                                          TensorHolder&       host_holder) const;
+    // Per-row KV lengths for kv_len_from_mm_features groups (whisper cross
+    // attention): sum of the stream's raw multimodal feature rows.
+    void copyMmGroupKvLensToModelInput(GptModelInputs&        model_input,
+                                       const GenerateStreamPtr& stream,
+                                       int                    model_batch_idx) const;
 
     NormalModelInputGathererConfig config_;
 };

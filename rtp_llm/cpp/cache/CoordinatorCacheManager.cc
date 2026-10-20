@@ -44,6 +44,19 @@ inline int cpEffectiveSeqLenForGroup(const std::shared_ptr<CPSlotMapper>& mapper
                                                          seq_len;
 }
 
+// Per-group length override first (cross-attention groups size by multimodal
+// feature rows); otherwise the CP projection of the token-stream length.
+inline int effectiveSeqLenForGroup(const std::shared_ptr<CPSlotMapper>& mapper,
+                                   const CacheConfig&                   config,
+                                   std::string_view                     tag,
+                                   int                                  seq_len,
+                                   int                                  override_len) {
+    if (override_len >= 0) {
+        return override_len;
+    }
+    return cpEffectiveSeqLenForGroup(mapper, config, tag, seq_len);
+}
+
 inline int cpEffectiveSeqLenForReserve(const std::shared_ptr<CPSlotMapper>& mapper,
                                        const CacheConfig&                   config,
                                        std::string_view                     tag,
@@ -562,7 +575,7 @@ bool CoordinatorCacheManager::materializeInitialBlocks(const MallocInfo& malloc_
         std::vector<size_t> backfilled_positions;
         if (!kv_cache_groups_[static_cast<size_t>(group_id)]->malloc(
                 block_ids,
-                cpEffectiveSeqLenForGroup(cp_mapper, config_, tag, common_seq_len),
+                effectiveSeqLenForGroup(cp_mapper, config_, tag, common_seq_len, malloc_info.groupSeqLenOverride(tag)),
                 malloc_info.reuse_cache,
                 0,
                 &backfilled_positions,
@@ -658,12 +671,17 @@ MallocResult CoordinatorCacheManager::incrMalloc(const MallocInfo& malloc_info) 
     int  failed_need_blocks = -1;
     for (int b = 0; b < batch_size; ++b) {
         for (int group_id = 0; group_id < config_.groupNums(); ++group_id) {
-            const auto& tag              = config_.groupTags()[static_cast<size_t>(group_id)];
-            auto&       block_ids        = kv_resource->mutableBlockIds(b, tag);
-            const int   group_seq_len    = cpEffectiveSeqLenForGroup(cp_mapper, config_, tag, raw_seq_len);
+            const auto& tag       = config_.groupTags()[static_cast<size_t>(group_id)];
+            auto&       block_ids = kv_resource->mutableBlockIds(b, tag);
+            const int   group_seq_len_override = malloc_info.groupSeqLenOverride(tag);
+            const int   group_seq_len =
+                effectiveSeqLenForGroup(cp_mapper, config_, tag, raw_seq_len, group_seq_len_override);
+            // Overridden groups (multimodal feature length) do not grow with
+            // the token reserve step.
+            const int   group_reserve_step = group_seq_len_override >= 0 ? 0 : reserve_step;
             auto&       filled_positions = backfilled_positions[static_cast<size_t>(b)][static_cast<size_t>(group_id)];
             if (!kv_cache_groups_[static_cast<size_t>(group_id)]->malloc(
-                    block_ids, group_seq_len, malloc_info.reuse_cache, reserve_step, &filled_positions)) {
+                    block_ids, group_seq_len, malloc_info.reuse_cache, group_reserve_step, &filled_positions)) {
                 all_success  = false;
                 failed_batch = b;
                 failed_group = group_id;
@@ -1304,12 +1322,15 @@ int CoordinatorCacheManager::getNeedBlocks(const MallocInfo& malloc_info) const 
     int common_blocks_total = 0;
     int extra_blocks_total  = 0;
     for (int group_id = 0; group_id < static_cast<int>(kv_cache_groups_.size()); ++group_id) {
-        const auto& tag              = config_.groupTags()[static_cast<size_t>(group_id)];
-        const auto  group            = kv_cache_groups_[static_cast<size_t>(group_id)];
-        const int   group_common_seq = cpEffectiveSeqLenForGroup(cp_mapper, config_, tag, raw_common_seq_len);
-        const int   group_seq_len    = cpEffectiveSeqLenForGroup(cp_mapper, config_, tag, raw_seq_len);
-        const auto  need             = kv_cache_groups_[static_cast<size_t>(group_id)]->getNeedBlocks(
-            group_common_seq, group_seq_len, reserve_step, reuse_blocks_len, reuse_enabled);
+        const auto& tag                   = config_.groupTags()[static_cast<size_t>(group_id)];
+        const auto  group                 = kv_cache_groups_[static_cast<size_t>(group_id)];
+        const int   group_seq_len_override = malloc_info.groupSeqLenOverride(tag);
+        const int   group_common_seq =
+            effectiveSeqLenForGroup(cp_mapper, config_, tag, raw_common_seq_len, group_seq_len_override);
+        const int group_seq_len = effectiveSeqLenForGroup(cp_mapper, config_, tag, raw_seq_len, group_seq_len_override);
+        const int group_reserve_step = group_seq_len_override >= 0 ? 0 : reserve_step;
+        const auto need              = kv_cache_groups_[static_cast<size_t>(group_id)]->getNeedBlocks(
+            group_common_seq, group_seq_len, group_reserve_step, reuse_blocks_len, reuse_enabled);
         common_blocks_total += need.common_blocks;
         extra_blocks_total += need.extra_blocks;
     }

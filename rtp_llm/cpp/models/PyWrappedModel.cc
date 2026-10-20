@@ -473,6 +473,16 @@ PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_
                                                                             group_inputs.kv_cache_block_id;
             }
         }
+        if (group.policy.kv_len_from_mm_features && inputs.mm_group_kv_lens.defined()) {
+            RTP_LLM_CHECK_WITH_INFO(inputs.mm_group_kv_lens.dim() == 2
+                                        && inputs.mm_group_kv_lens.size(0) == static_cast<int64_t>(group_count),
+                                    "mm group kv lens payload must be [group, batch] for tag=%s",
+                                    group.tag.c_str());
+            // Cross-attention KV covers audio frames, not tokens: the group's
+            // decode reads sequence_lengths as its KV length. Prefill cross
+            // rows are derived model-side from the multimodal features.
+            group_inputs.sequence_lengths = inputs.mm_group_kv_lens[payload_row].clone();
+        }
         by_tag.emplace(group.tag, std::move(group_inputs));
     }
 

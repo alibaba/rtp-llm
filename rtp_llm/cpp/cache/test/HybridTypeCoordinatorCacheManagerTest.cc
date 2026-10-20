@@ -361,6 +361,41 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, CreateHybridConfigRejectsMultipleF
     }
 }
 
+TEST_F(HybridTypeCoordinatorCacheManagerTest, CreateConfigAllowsNonReuseFullAuxiliaryGroup) {
+    // whisper-style topology: the standard reusable FULL MHA group plus a
+    // model-private cross-attention FULL MHA pool that opts out of prefix
+    // reuse. The opted-out pool never joins the block tree or the reuse
+    // channel, so it does not consume the single validated FULL attention
+    // layout capability.
+    auto cfg = makeTinyModelConfig(/*num_layers=*/2);
+
+    KVCacheSpecDesc cross_desc;
+    cross_desc.tag        = "cross";
+    cross_desc.cache_type = KVCacheSpecType::MultiHeadAttention;
+    cross_desc.group_type = CacheGroupType::FULL;
+    CacheReusePolicyDesc cross_reuse;
+    cross_reuse.enable_prefix_reuse = false;
+    cross_desc.reuse                 = cross_reuse;
+    CacheCapacityPolicyDesc cross_capacity;
+    cross_capacity.reservable = false;
+    cross_desc.capacity       = cross_capacity;
+
+    for (auto& descs : cfg.kv_cache_spec_descs) {
+        descs.push_back(cross_desc);
+    }
+
+    ParallelismConfig parallelism_cfg;
+    parallelism_cfg.tp_size = 1;
+    auto cache_config       = CacheConfigCreator::createWarmupConfig(cfg, parallelism_cfg, /*gen_num_per_cycle=*/0);
+    ASSERT_EQ(cache_config.groupNums(), 2);
+    EXPECT_EQ(cache_config.group("full").policy.group_type, CacheGroupType::FULL);
+    EXPECT_TRUE(cache_config.group("full").policy.enable_prefix_reuse);
+    EXPECT_EQ(cache_config.group("cross").policy.group_type, CacheGroupType::FULL);
+    EXPECT_FALSE(cache_config.group("cross").policy.enable_prefix_reuse);
+    EXPECT_FALSE(cache_config.group("cross").policy.reservable);
+    EXPECT_EQ(cache_config.layerIdsForGroup("cross").size(), 2);
+}
+
 TEST_F(HybridTypeCoordinatorCacheManagerTest, CreateHybridConfigKeepsModelTokensPerBlock) {
     auto cfg = makeTinyModelConfig(/*num_layers=*/2);
     setHybridLayerDescs(cfg, {HybridAttentionType::NONE, HybridAttentionType::NONE});

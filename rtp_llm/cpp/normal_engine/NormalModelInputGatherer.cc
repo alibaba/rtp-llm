@@ -1,6 +1,5 @@
 #include <algorithm>
 #include <atomic>
-#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <sstream>
@@ -430,6 +429,12 @@ GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamG
     if (config_.kv_cache_group_nums > 0) {
         model_input.kv_cache_group_types = torch::empty({(int64_t)config_.kv_cache_group_nums}, pinned_i32);
     }
+    const bool has_mm_len_group =
+        std::any_of(config_.kv_group_mm_len.begin(), config_.kv_group_mm_len.end(), [](bool v) { return v; });
+    if (has_mm_len_group) {
+        model_input.mm_group_kv_lens =
+            torch::zeros({(int64_t)config_.kv_cache_group_nums, (int64_t)total_batch_size}, pinned_i32);
+    }
     if (total_block_copy_num > 0) {
         model_input.kv_cache_update_mapping = torch::empty({(int64_t)total_block_copy_num, 3}, pinned_i32);
     }
@@ -474,6 +479,31 @@ void NormalModelInputGatherer::initializeKvCacheMetadata(GptModelInputs& model_i
         for (size_t g = 0; g < config_.kv_cache_group_nums; ++g) {
             dst[g] = static_cast<int32_t>(config_.kv_cache_group_types[g]);
         }
+    }
+}
+
+void NormalModelInputGatherer::copyMmGroupKvLensToModelInput(GptModelInputs&          model_input,
+                                                            const GenerateStreamPtr& stream,
+                                                            int                      model_batch_idx) const {
+    if (!model_input.mm_group_kv_lens.defined()) {
+        return;
+    }
+    RTP_LLM_CHECK_WITH_INFO(model_input.mm_group_kv_lens.dim() == 2
+                                && model_input.kv_cache_group_tags.size() == config_.kv_group_mm_len.size(),
+                            "mm group kv lens payload must be [group, batch] aligned with group tags");
+    const auto batch = model_input.mm_group_kv_lens.size(1);
+    int        frames = 0;
+    // Raw features: the context gather may omit reused images, but the
+    // cross-attention KV still covers every encoder position.
+    for (const auto& feature : stream->multimodalFeatures()) {
+        frames += static_cast<int>(feature.size(0));
+    }
+    int32_t* dst_base = model_input.mm_group_kv_lens.data_ptr<int32_t>();
+    for (size_t row = 0; row < model_input.kv_cache_group_tags.size(); ++row) {
+        if (!config_.kv_group_mm_len[row]) {
+            continue;
+        }
+        *(dst_base + row * batch + static_cast<size_t>(model_batch_idx)) = frames;
     }
 }
 
@@ -582,6 +612,8 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
             if (!use_mtp_cache_snapshot) {
                 copyKvCacheBlocksToModelInput(model_input, stream, i, ctx.batch_idx);
             }
+            // mm-length groups read immutable stream features: no MTP snapshot race.
+            copyMmGroupKvLensToModelInput(model_input, stream, ctx.batch_idx);
             ctx.batch_idx += 1;
         }
         addCacheUpdateCopy(
@@ -661,6 +693,7 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
             }
 
             copyKvCacheBlocksToModelInput(model_input, stream, i, ctx.batch_idx);
+            copyMmGroupKvLensToModelInput(model_input, stream, ctx.batch_idx);
 
             if (ctx.max_blocks_num && config_.role_type == RoleType::PREFILL && stream->hasCacheKeys()) {
                 RTP_LLM_CHECK_WITH_INFO(static_cast<int64_t>(stream->cacheKeys(i).size())
@@ -686,6 +719,7 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
             ctx, stream->streamCacheResource().getKVBlockUpdateMapping(), model_input.kv_cache_group_tags);
         stream->step();
     }
+
 
     if (config_.is_multimodal && !gathered_mm_features.empty()) {
         model_input.multimodal_features = std::move(gathered_mm_features);

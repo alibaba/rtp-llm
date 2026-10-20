@@ -312,10 +312,14 @@ CacheConfig createConfigFromDescs(const ModelConfig&       model_config,
         config.is_sparse |= group.spec->type == KVCacheSpecType::OpaqueKV;
     }
     // Multiple standard FULL attention layouts have not been validated by the
-    // attention backend. Opaque auxiliary pools do not consume this capability.
+    // attention backend. Opaque auxiliary pools do not consume this capability,
+    // and neither do model-private FULL MHA/MLA pools that opt out of prefix
+    // reuse: they never join the block tree or the reuse/insert channel, so
+    // they cannot feed an attention backend layout at all.
     const auto full_attention_group_num =
         std::count_if(config.topology().groups().begin(), config.topology().groups().end(), [](const GroupBase& group) {
-            return group.policy.group_type == CacheGroupType::FULL && group.spec
+            return group.policy.group_type == CacheGroupType::FULL && group.policy.enable_prefix_reuse
+                   && group.spec
                    && (group.spec->type == KVCacheSpecType::MultiHeadAttention
                        || group.spec->type == KVCacheSpecType::MultiHeadLatentAttention);
         });

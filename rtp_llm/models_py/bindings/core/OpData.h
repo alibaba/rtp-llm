@@ -63,6 +63,12 @@ struct GptModelInputs {
     std::vector<std::string> kv_cache_group_tags;      // Local payload row -> group identity; not transmitted by TP.
     torch::Tensor            kv_cache_group_types;     // [group_num], int32, Convention: 0 -> LINEAR, 1 -> FULL.
     torch::Tensor            kv_cache_update_mapping;  // [block_copy_num, 3]: payload row, src/dst physical block IDs
+    // Per-row KV lengths for kv_len_from_mm_features groups (whisper
+    // cross-attention over encoder positions): [group_num, batch_size] int32,
+    // host, aligned with kv_cache_group_tags. Undefined when no group uses
+    // multimodal-length semantics. Consumed by the per-tag attention-input
+    // setup so the cross group's decode reads the audio-frame KV length.
+    torch::Tensor mm_group_kv_lens;
 
     std::optional<std::vector<torch::Tensor>> multimodal_features;  // all features in gathered stream stored here
     torch::Tensor text_tokens_mask;  // text part in multimodal input tokens [cumulated_seq_len]

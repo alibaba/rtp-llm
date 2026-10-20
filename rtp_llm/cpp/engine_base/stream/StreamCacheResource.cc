@@ -148,6 +148,31 @@ int StreamCacheResource::singleBatchNeedBlocks(int seq_len, int reserve_step) co
     return resource_context_.cache_manager->singleBatchNeedBlocks(batch_kv_cache_resource_, seq_len, reserve_step);
 }
 
+std::map<std::string, int> StreamCacheResource::groupSeqLenOverrides() const {
+    std::map<std::string, int> overrides;
+    if (!resource_context_.cache_manager) {
+        return overrides;
+    }
+    const auto& cache_config = resource_context_.cache_manager->cacheConfig();
+    int         mm_rows      = -1;
+    for (int group_id = 0; group_id < cache_config.groupNums(); ++group_id) {
+        const auto& tag = cache_config.groupTags()[static_cast<size_t>(group_id)];
+        if (!cache_config.group(tag).policy.kv_len_from_mm_features) {
+            continue;
+        }
+        if (mm_rows < 0) {
+            mm_rows = 0;
+            // Raw features: the gatherer may omit reused images, but the
+            // cross-attention KV still needs every encoder position.
+            for (const auto& feature : stream_->multimodalFeatures()) {
+                mm_rows += static_cast<int>(feature.size(0));
+            }
+        }
+        overrides.emplace(tag, mm_rows);
+    }
+    return overrides;
+}
+
 int StreamCacheResource::estimatePeakNeedBlocks(
     int seq_len, int common_seq_len, int remaining_tokens, int reserve_step, int target_batch_size) const {
     return resource_context_.cache_manager->estimatePeakNeedBlocks(batch_kv_cache_resource_,
@@ -183,6 +208,7 @@ absl::Status StreamCacheResource::initKVBlock() {
     malloc_info.complete_token_ids      = stream_->completeTokenIdsPtr();
     malloc_info.request_id              = stream_->streamId();
     malloc_info.verbose                 = malloc_failed_times_ >= 10 ? malloc_failed_times_ % 100 == 0 : true;
+    malloc_info.group_seq_len_overrides = groupSeqLenOverrides();
 
     const bool disable_first_malloc_reuse =
         resource_context_.cache_manager->cacheConfig().disable_decode_first_malloc_device_reuse;
@@ -390,6 +416,7 @@ absl::Status StreamCacheResource::incrKVBlock(int seq_len_override) {
     malloc_info.enable_cache_lookup          = enableCacheLookup();
     malloc_info.enable_remove_skipped_blocks = true;
     malloc_info.incr_seq_len_override        = seq_len_override;
+    malloc_info.group_seq_len_overrides      = groupSeqLenOverrides();
 
     auto result = resource_context_.cache_manager->malloc(malloc_info);
     if (!result.success) {

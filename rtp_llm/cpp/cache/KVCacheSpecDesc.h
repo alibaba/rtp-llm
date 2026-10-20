@@ -58,6 +58,12 @@ struct KVCacheSpecDesc {
     DataType        dtype          = DataType::TYPE_INVALID;
     bool            is_state_cache = false;
 
+    // Length semantics: when true, per-request block-count sizing for this
+    // group uses the request's multimodal feature row count (encoder
+    // positions) instead of the token-stream length. Used by cross-attention
+    // KV groups (whisper): K/V covers audio frames, never tokens.
+    bool kv_len_from_mm_features = false;
+
     uint32_t entry_elems = 0;
     DataType entry_dtype = DataType::TYPE_INVALID;
 

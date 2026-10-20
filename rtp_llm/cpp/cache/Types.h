@@ -1,8 +1,10 @@
 #pragma once
 
 #include <cstddef>
+#include <map>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 #include <cstdint>
@@ -73,7 +75,19 @@ struct MallocInfo {
     // Lets the state machine feed the publish-time value instead of racing with the async worker.
     int incr_seq_len_override = -1;
 
+    // Per-group sequence-length overrides for block-count sizing, keyed by
+    // cache group tag. Cross-attention groups (kv_len_from_mm_features) key
+    // by the request's multimodal feature row count instead of the token
+    // stream. Absent tag or negative value = token-stream length.
+    std::map<std::string, int> group_seq_len_overrides;
+
     int incrSeqLen() const;
+
+    // -1 when the group has no length override.
+    int groupSeqLenOverride(std::string_view tag) const {
+        auto it = group_seq_len_overrides.find(std::string(tag));
+        return it == group_seq_len_overrides.end() ? -1 : it->second;
+    }
 };
 
 // Separates "the pools are momentarily full, retry later" from "this request can never fit".

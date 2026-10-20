@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -136,6 +137,9 @@ private:
     void         recordCacheReuseMallocResult(const MallocResult& result);
     void         publishReuseLengths(int total_length, int host_length, int disk_length, int backend_length);
     absl::Status finalizeAllocatorLoad();
+    // Per-group seq-len overrides for groups sized by multimodal feature rows
+    // (kv_len_from_mm_features), e.g. the whisper cross-attention KV group.
+    std::map<std::string, int> groupSeqLenOverrides() const;
 
     GenerateStream*                stream_;
     BatchKVCacheResourcePtr        batch_kv_cache_resource_;
