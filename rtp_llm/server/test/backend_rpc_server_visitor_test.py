@@ -234,7 +234,7 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
         visitor.master_config = None
         visitor.host_service = _FakeHostService()
-        visitor.backend_role_list = ["PREFILL"]
+        visitor.backend_role_list = [RoleType.PREFILL]
 
         async def get_master_route_addrs(_input):
             return FlexlbResponse.error_response(
@@ -257,8 +257,9 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
         visitor.master_config = None
         visitor.host_service = _FakeHostService()
-        visitor.backend_role_list = ["PREFILL"]
+        visitor.backend_role_list = [RoleType.PREFILL]
         domain_route_called = False
+        domain_role = RoleAddr(role=RoleType.PREFILL, ip="domain", http_port=1, grpc_port=2)
 
         async def get_master_route_addrs(_input):
             return FlexlbResponse.connection_failed_response()
@@ -266,7 +267,7 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
         async def get_domain_route_addrs(input):
             nonlocal domain_route_called
             domain_route_called = True
-            input.generate_config.role_addrs.append("domain-role")
+            input.generate_config.role_addrs.append(domain_role)
 
         visitor.get_master_route_addrs = get_master_route_addrs
         visitor.get_domain_route_addrs = get_domain_route_addrs
@@ -276,13 +277,13 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
             await visitor.route_ips(input)
 
         self.assertTrue(domain_route_called)
-        self.assertEqual(input.generate_config.role_addrs, ["domain-role"])
+        self.assertEqual(input.generate_config.role_addrs, [domain_role])
 
     async def test_route_ips_records_master_success_when_domain_completes_roles(self):
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
         visitor.master_config = None
         visitor.host_service = _FakeHostService()
-        visitor.backend_role_list = ["PREFILL", "DECODE"]
+        visitor.backend_role_list = [RoleType.PREFILL, RoleType.DECODE]
         route_span = _FakeRouteSpan()
 
         async def get_master_route_addrs(route_input):
@@ -314,7 +315,7 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
         visitor.master_config = None
         visitor.host_service = _FakeHostService()
-        visitor.backend_role_list = ["PREFILL", "DECODE"]
+        visitor.backend_role_list = [RoleType.PREFILL, RoleType.DECODE]
         route_span = _FakeRouteSpan()
         input = _FakeInput()
         input.generate_config.role_addrs.append(
@@ -343,7 +344,7 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
         visitor.master_config = None
         visitor.host_service = _FakeHostService()
-        visitor.backend_role_list = ["PREFILL"]
+        visitor.backend_role_list = [RoleType.PREFILL]
         route_span = _FakeRouteSpan()
 
         async def get_master_route_addrs(_input):
@@ -413,7 +414,7 @@ class TestBackendRouteTrace(unittest.TestCase):
         visitor.master_config = None
         visitor.host_service = MagicMock()
         visitor.host_service.get_master_addr.return_value = "master:9000"
-        visitor.backend_role_list = ["PREFILL"]
+        visitor.backend_role_list = [RoleType.PREFILL]
         route_span = MagicMock()
 
         async def cancel_master_route(_input):
