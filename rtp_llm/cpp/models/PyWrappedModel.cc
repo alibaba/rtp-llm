@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
 #include "rtp_llm/cpp/cuda_graph/prepared_attention_inputs_guard.h"
+#include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
@@ -830,6 +831,13 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool s
     // implicit ordering.)
     {
         RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs(fused_h2d)");
+        // fusedCopy launches on the CALLING thread's current stream. Under
+        // RTP_LLM_STREAM_ASYNC this prepare runs on the worker thread, whose
+        // default stream is unordered with the forward/replay stream — the
+        // block-table H2D staging here would race the forward's reads of the
+        // same buffers (observed as mid-batch row corruption). Launch the
+        // fused H2D on the graph stream so it is ordered before the forward.
+        cuda_graph::GraphStreamGuard stream_guard(cuda_graph::graphGetCurrentStream());
         fusedCopy(d2d_copies_);
     }
 
