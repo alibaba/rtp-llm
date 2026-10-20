@@ -825,6 +825,7 @@ TEST_F(KVCacheManagerTest, DSV4IndependentPoolsUseGpuBacking) {
 
         PDSepConfig pd_sep_config;
         pd_sep_config.role_type = role_type;
+        pd_sep_config.cache_store_rdma_mode = false;
         RuntimeConfig runtime_config;
         runtime_config.worker_grpc_addrs = {"127.0.0.1:12345"};
         KVCacheConfig kv_cache_config;

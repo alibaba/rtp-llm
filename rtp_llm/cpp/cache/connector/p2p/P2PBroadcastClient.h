@@ -29,11 +29,7 @@ public:
 
     struct Result {
         Result(const std::string& unique_key, const std::shared_ptr<TpBroadcastResult>& tp_broadcast_result):
-            unique_key_(unique_key), tp_broadcast_result_(tp_broadcast_result), start_time_us_(currentTimeUs()) {
-            if (tp_broadcast_result_) {
-                tp_broadcast_result_->onDone([result = tp_broadcast_result_]() { result->waitDone(); });
-            }
-        }
+            unique_key_(unique_key), tp_broadcast_result_(tp_broadcast_result), start_time_us_(currentTimeUs()) {}
         explicit Result(const std::string& unique_key):
             unique_key_(unique_key), start_time_us_(currentTimeUs()), locally_completed_(true) {}
         ~Result() {}
@@ -45,10 +41,8 @@ public:
         bool done() const {
             const bool completed = locally_completed_ || (tp_broadcast_result_ && tp_broadcast_result_->done());
             if (completed) {
-                if (tp_broadcast_result_) {
-                    // Use the common fatal path for CQ failures and RPC deadlines.
-                    tp_broadcast_result_->waitDone();
-                }
+                // P2P consumes firstError() while retaining KV until lease confirmation.
+                // Observing completion must not throw before cancellation can progress.
                 int64_t expected = 0;
                 total_cost_time_us_.compare_exchange_strong(expected, currentTimeUs() - start_time_us_);
             }

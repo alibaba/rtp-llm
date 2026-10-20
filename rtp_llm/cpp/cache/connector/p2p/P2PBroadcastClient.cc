@@ -1,3 +1,4 @@
+#include <future>
 #include <limits>
 #include "rtp_llm/cpp/cache/connector/p2p/P2PBroadcastClient.h"
 
@@ -213,8 +214,11 @@ P2PBroadcastClient::LeaseStatusResult P2PBroadcastClient::queryLeaseStatus(const
         return result;
     }
 
-    // Block until all workers respond (with the given timeout).
-    const bool all_done = tp_result->waitDone(static_cast<int>(poll_timeout_ms));
+    // A lease-query timeout is an unconfirmed lease, not permission to release KV.
+    auto completed  = std::make_shared<std::promise<void>>();
+    auto completion = completed->get_future();
+    tp_result->onDone([completed]() { completed->set_value(); });
+    const bool all_done = completion.wait_for(std::chrono::milliseconds(poll_timeout_ms)) == std::future_status::ready;
     if (!all_done || !tp_result->success()) {
         RTP_LLM_LOG_WARNING("queryLeaseStatus: broadcast timed out or failed, unique_key=%s", unique_key.c_str());
         return result;

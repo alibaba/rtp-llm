@@ -248,6 +248,7 @@ protected:
     void prepareP2PRegistrationResource(bool query_pd, const std::string& key, bool hybrid = false) {
         PDSepConfig pd_config;
         pd_config.role_type = RoleType::PREFILL;
+        pd_config.cache_store_rdma_mode = false;
         const auto cache_config =
             hybrid ? test::makeSimpleHybridMhaCacheConfig(4, 9, 2, DataType::TYPE_FP16, 2) : init_config();
         prepareResourceWithCacheConfig(cache_config, {1, 2, 3, 4, 5, 6}, true, RoleType::PREFILL, {}, pd_config);

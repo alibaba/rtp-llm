@@ -172,9 +172,26 @@ TEST_F(P2PBroadcastClientTest, Broadcast_ReturnNotNull_Timeout) {
 
     ASSERT_NE(result, nullptr);
 
-    EXPECT_THROW(waitDone(result, 500), RTPException);
-    EXPECT_THROW(result->done(), RTPException);
+    EXPECT_NO_THROW(waitDone(result, 500));
+    ASSERT_TRUE(result->done());
+    EXPECT_TRUE(result->done());
     EXPECT_FALSE(result->success());
+    EXPECT_EQ(result->errorCode(), ErrorCode::GENERATE_TIMEOUT);
+    EXPECT_NE(result->errorMessage().find("Deadline Exceeded"), std::string::npos);
+}
+
+TEST_F(P2PBroadcastClientTest, CompletionQueueFailurePreservesTerminalErrorWithoutThrowing) {
+    auto worker    = std::make_shared<P2PBroadcastClient::TpBroadcastResult::WorkerRpcContext>();
+    auto transport = std::make_shared<P2PBroadcastClient::TpBroadcastResult>(
+        std::vector<std::shared_ptr<P2PBroadcastClient::TpBroadcastResult::WorkerRpcContext>>{worker});
+    auto result = std::make_shared<P2PBroadcastClient::Result>("cq-failure", transport);
+    EXPECT_NO_THROW(transport->finishRank(0, false));
+    ASSERT_TRUE(result->done());
+    EXPECT_NO_THROW(result->checkDone());
+    EXPECT_TRUE(result->done());
+    EXPECT_FALSE(result->success());
+    EXPECT_EQ(result->errorCode(), ErrorCode::RPC_FINISH_FAILED);
+    EXPECT_NE(result->errorMessage().find("Finish event failed"), std::string::npos);
 }
 
 TEST_F(P2PBroadcastClientTest, Broadcast_ReturnNotNull_PartialResponseFailed) {

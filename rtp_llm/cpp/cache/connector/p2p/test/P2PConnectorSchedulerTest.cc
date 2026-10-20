@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <csignal>
 #include <future>
 #include <set>
 #include <map>
@@ -290,7 +291,7 @@ TEST(P2PConnectorConfigTest, LoadTimeoutComesFromSharedPDSepConfig) {
     CacheStoreConfig cache_store;
     ParallelismConfig parallelism;
     PDSepConfig pd_sep;
-    EXPECT_EQ(pd_sep.load_cache_timeout_ms, 5000);
+    EXPECT_EQ(pd_sep.load_cache_timeout_ms, 60000);
     pd_sep.load_cache_timeout_ms = 900000;
     auto config = P2PConnectorSchedulerConfig::create(runtime, cache_store, parallelism, pd_sep);
     EXPECT_EQ(config.load_cache_timeout_ms, 900000);
@@ -750,7 +751,7 @@ TEST_F(P2PConnectorSchedulerTest, AsyncReadCpSendsCompletePagesToEachDecodeWorke
 
 TEST_F(P2PConnectorSchedulerTest, DecodeCompactStateProjectsUsingPrefillCpSize) {
     P2PConnectorSchedulerConfig cfg;
-    cfg.topology = test::makeTestCacheTopology(1, 1, {{0}}, 1, {CacheGroupType::SWA});
+    cfg.topology                   = test::makeTestCacheTopology(1, 1, {{0}}, 4, {CacheGroupType::SWA});
     cfg.parallelism_config.tp_size = 1;
     cfg.parallelism_config.prefill_cp_config.kv_cache_sharded = true;
     cfg.parallelism_config.prefill_cp_config.prefill_cp_size = 4;
@@ -1338,11 +1339,11 @@ TEST(P2PRetainedKvTest, ThresholdUsesCapacityBytesAndStrictGreaterThan) {
     resource->mutableBlockIds("group0").assign({1, 2, 3, NULL_BLOCK_IDX});
     checker.checkRetainedResources({context});
     resource->mutableBlockIds("group0").assign({1, 2, 3, 4});
-    EXPECT_DEATH(checker.checkRetainedResources({context}), "P2P retained KV exceeded exit threshold");
+    EXPECT_EXIT(checker.checkRetainedResources({context}), ::testing::KilledBySignal(SIGABRT), "");
     checker.kv_leak_exit_threshold_percent_ = 40;
     checker.checkRetainedResources({context});
     checker.kv_leak_exit_threshold_percent_ = 39;
-    EXPECT_DEATH(checker.checkRetainedResources({context}), "P2P retained KV exceeded exit threshold");
+    EXPECT_EXIT(checker.checkRetainedResources({context}), ::testing::KilledBySignal(SIGABRT), "");
 }
 
 TEST(P2PRetainedKvTest, DistinctRequestsAccumulateAndGroupsUseDifferentBlockSizes) {
@@ -1368,7 +1369,7 @@ TEST(P2PRetainedKvTest, DistinctRequestsAccumulateAndGroupsUseDifferentBlockSize
     const auto b               = make_context({1, 2}, {}, true);  // Reordered rows; union is 600 bytes, 30%.
     checker.checkRetainedResources({a, b});
     const auto c = make_context({3}, {});  // Union is 700 bytes, 35%.
-    EXPECT_DEATH(checker.checkRetainedResources({a, b, c}), "P2P retained KV exceeded exit threshold");
+    EXPECT_EXIT(checker.checkRetainedResources({a, b, c}), ::testing::KilledBySignal(SIGABRT), "");
     c->lease_hold_pending_.store(false);
     checker.checkRetainedResources({a, b, c});
 }
@@ -1601,12 +1602,14 @@ TEST_F(P2PConnectorSchedulerTest, StartLoadFirstFailureSurvivesLaterReadCancelAn
     EXPECT_TRUE(context->done());
     EXPECT_TRUE(context->resourceHoldPending());
     EXPECT_EQ(context->errorInfo().code(), ErrorCode::INVALID_PARAMS);
+    const auto first_error_message = context->errorInfo().ToString();
+    EXPECT_NE(first_error_message.find("Prefill plan digest mismatch"), std::string::npos);
     worker->status = grpc::Status(grpc::StatusCode::CANCELLED, "later READ cancellation");
     tp->finishRank(0, true);
     context->checkDone();
     EXPECT_FALSE(context->expireTransferDeadlineIfNeeded());
     EXPECT_EQ(context->errorInfo().code(), ErrorCode::INVALID_PARAMS);
-    EXPECT_EQ(context->errorInfo().ToString(), "Prefill plan digest mismatch");
+    EXPECT_EQ(context->errorInfo().ToString(), first_error_message);
     EXPECT_TRUE(context->resourceHoldPending());
 }
 

@@ -53,6 +53,8 @@ protected:
 // ==================== addResource & stealResource 基础测试 ====================
 
 TEST_F(P2PConnectorResourceStoreTest, CancellationCallbackCanRegisterRequestWithoutStoreLock) {
+    // Isolate the caller's lock ownership from the deadline thread's legitimate contention.
+    stream_store_       = std::make_unique<P2PConnectorResourceStore>(nullptr, 100);
     const auto deadline = getDeadlineMs();
     bool called = false;
     EXPECT_GT(stream_store_->waitForRequestDeadline("reentrant", deadline, [&] {
