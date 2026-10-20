@@ -7,6 +7,8 @@ import org.flexlb.balance.projection.QueueSnapshot;
 import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.balance.projection.WorkSnapshot;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.List;
 import java.util.OptionalLong;
@@ -320,7 +322,7 @@ class RouteProjectionTest {
     }
 
     @Test
-    void unknownRequestWorkIsExplicitlyUnmodeled() {
+    void unknownRequestWorkIsIgnoredByPrediction() {
         RouteProjection.Candidate candidate = project(
                 queue(true, constraints(1, 0L), List.of()),
                 work(List.of(), List.of(), 1L),
@@ -328,17 +330,12 @@ class RouteProjectionTest {
                 probe(99L, 50, 20L, 0L),
                 ROUTE);
 
-        assertEquals(RouteProjection.Candidate.State.UNMODELED_ENGINE_WORK,
-                candidate.state());
-        assertEquals("ENGINE_WORK_UNOBSERVABLE",
-                candidate.detail());
-        assertFalse(candidate.selectable());
-        assertTrue(candidate.engineWorkUnmodeled());
+        assertModeled(candidate, 20L);
         assertEquals(20L, candidate.incomingPrefillMs());
     }
 
     @Test
-    void unknownRepackedBatchWorkIsExplicitlyUnmodeled() {
+    void unknownRepackedBatchDurationIsIgnoredByPrediction() {
         WorkSnapshot unknown = work(
                 List.of(),
                 List.of(new WorkSnapshot.BatchWork(
@@ -354,10 +351,76 @@ class RouteProjectionTest {
                 probe(99L, 50, 20L, 0L),
                 ROUTE);
 
-        assertEquals(RouteProjection.Candidate.State.UNMODELED_ENGINE_WORK,
-                result.state());
-        assertEquals("ENGINE_WORK_UNOBSERVABLE", result.detail());
-        assertFalse(result.selectable());
+        assertModeled(result, 20L);
+
+        RouteProjection.Candidate duplicate = project(
+                queue(true, constraints(1, 0L), List.of()),
+                unknown, TOKEN_EVALUATOR,
+                probe(1L, 50, 20L, 0L), ROUTE);
+        assertEquals("INCOMING_ALREADY_COMMITTED", duplicate.detail());
+        assertFalse(duplicate.hasPrediction());
+    }
+
+    @Test
+    void unknownWorkDoesNotEraseKnownWorkOrQueueOrdering() {
+        WorkSnapshot known = work(
+                List.of(new WorkSnapshot.RequestWork(
+                        2L, WorkSnapshot.Phase.ENGINE_RUNNING, 30L)),
+                List.of(), 0L);
+        WorkSnapshot mixed = work(known.requests(),
+                List.of(new WorkSnapshot.BatchWork(7L, List.of(3L),
+                        WorkSnapshot.Phase.ENGINE_RUNNING, OptionalLong.empty())),
+                5L);
+        for (boolean queueScheduling : List.of(false, true)) {
+            for (boolean priority : List.of(false, true)) {
+                var snapshot = RouteProjectionTestSupport.queue(
+                        queueScheduling, priority, constraints(1, 0L),
+                        List.of(item(1L, 50, 1L, 100L)), null);
+                var incoming = probe(99L, 90, 20L, 0L);
+                var expected = project(snapshot, known, TOKEN_EVALUATOR, incoming, ROUTE);
+                var actual = project(snapshot, mixed, TOKEN_EVALUATOR, incoming, ROUTE);
+                assertEquals(expected, actual);
+                assertModeled(actual, queueScheduling && !priority ? 150L : 50L);
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(longs = {0L, 19L, 20L, 1_000_000L})
+    void currentKvAvailabilityDoesNotEraseWorkPrediction(long availableKv) {
+        var policy = new GroupPlanner.Constraints(2, 1_000_000L, availableKv, 0L, 0L);
+        for (boolean priority : List.of(false, true)) {
+            for (boolean queued : List.of(false, true)) {
+                var snapshot = queue(priority, policy,
+                        queued ? List.of(item(1L, 50, 1L, 100L)) : List.of());
+                for (var committed : List.of(noCommittedWork(), work(List.of(), List.of(), 1L))) {
+                    for (var delivery : List.of(ROUTE, BATCH)) {
+                        var result = project(snapshot, committed, TOKEN_EVALUATOR,
+                                probe(99L, 90, 20L, 0L), delivery);
+                        assertTrue(result.hasPrediction(),
+                                "temporary KV pressure must not remove an alive Prefill: " + result.detail());
+                        assertEquals(20L, result.incomingPrefillMs());
+                        assertTrue(result.requiredProjectedTtftMs() >= 20L);
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
+    void unknownWorkDoesNotHideInvalidIncomingRequests() {
+        WorkSnapshot unknown = work(List.of(), List.of(), 1L);
+        var snapshot = queue(false, constraints(1, 0L),
+                List.of(item(1L, 50, 1L, 100L)));
+        var duplicate = project(snapshot, unknown, TOKEN_EVALUATOR,
+                probe(1L, 50, 20L, 0L), ROUTE);
+        assertEquals("INCOMING_ALREADY_ACTIVE", duplicate.detail());
+        var expired = project(snapshot, unknown, TOKEN_EVALUATOR,
+                probe(99L, 50, NOW_MS, NOW_MS, 20L, 0L), ROUTE);
+        assertEquals("INCOMING_EXPIRED", expired.detail());
+        var missingPredictor = project(snapshot, unknown, null,
+                probe(99L, 50, 20L, 0L), ROUTE);
+        assertEquals("PREDICTOR_MISSING", missingPredictor.detail());
     }
 
     @Test
@@ -383,9 +446,8 @@ class RouteProjectionTest {
                         20L, 0L),
                 BATCH);
 
-        assertEquals(RouteProjection.Candidate.State.UNAVAILABLE, result.state());
+        assertFalse(result.hasPrediction());
         assertEquals("INCOMING_EXPIRED_BEFORE_DISPATCH", result.detail());
-        assertFalse(result.selectable());
     }
 
     @Test
@@ -459,7 +521,7 @@ class RouteProjectionTest {
                 probe(99L, 90, 20L, 0L),
                 ROUTE);
 
-        assertEquals(RouteProjection.Candidate.State.MODELED, result.state());
+        assertTrue(result.hasPrediction());
         assertEquals(OptionalLong.of(30L), result.projectedTtftMs());
         assertEquals("SERIAL_FROZEN_QUEUE", result.detail());
     }
@@ -473,7 +535,7 @@ class RouteProjectionTest {
                 probe(99L, 90, 20L, 0L),
                 BATCH);
 
-        assertEquals(RouteProjection.Candidate.State.MODELED, result.state());
+        assertTrue(result.hasPrediction());
         assertEquals(OptionalLong.of(20L), result.projectedTtftMs());
     }
 
@@ -506,7 +568,7 @@ class RouteProjectionTest {
                 probe(99L, 100, 20L, 0L),
                 ROUTE);
 
-        assertEquals(RouteProjection.Candidate.State.MODELED, result.state());
+        assertTrue(result.hasPrediction());
         assertEquals(OptionalLong.of(20L), result.projectedTtftMs());
         assertEquals(RouteProjection.Candidate.InitialHeadDisposition.AFTER_PROBE,
                 result.initialHeadDisposition());
@@ -531,10 +593,9 @@ class RouteProjectionTest {
                 probe(99L, 50, 20L, 0L),
                 ROUTE);
 
-        assertEquals(RouteProjection.Candidate.State.UNAVAILABLE, active.state());
+        assertFalse(active.hasPrediction());
         assertEquals("INCOMING_ALREADY_ACTIVE", active.detail());
-        assertEquals(RouteProjection.Candidate.State.UNAVAILABLE,
-                committed.state());
+        assertFalse(committed.hasPrediction());
         assertEquals("INCOMING_ALREADY_COMMITTED", committed.detail());
     }
 
@@ -589,9 +650,9 @@ class RouteProjectionTest {
                 100L, 50, 20L, 0L);
 
         assertTrue(project(empty, noCommittedWork(), first, probe, BATCH)
-                .selectable());
+                .hasPrediction());
         assertTrue(project(empty, noCommittedWork(), second, probe, BATCH)
-                .selectable());
+                .hasPrediction());
         assertEquals(1, singleCalls.get());
         assertEquals(1, batchCalls.get());
     }
@@ -625,16 +686,14 @@ class RouteProjectionTest {
     private static void assertModeled(
             RouteProjection.Candidate result,
             long ttftMs) {
-        assertEquals(RouteProjection.Candidate.State.MODELED, result.state());
+        assertTrue(result.hasPrediction());
         assertEquals(OptionalLong.of(ttftMs), result.projectedTtftMs());
-        assertTrue(result.selectable());
     }
 
     private static void assertInvalidPrediction(RouteProjection.Candidate result) {
-        assertEquals(RouteProjection.Candidate.State.UNAVAILABLE, result.state());
+        assertFalse(result.hasPrediction());
         assertEquals("PREDICTOR_RETURNED_INVALID_VALUE", result.detail());
         assertEquals(OptionalLong.empty(), result.projectedTtftMs());
-        assertFalse(result.selectable());
     }
 
     private static PrefillTimePredictor.Evaluator suffixFailingSingleEvaluator() {
