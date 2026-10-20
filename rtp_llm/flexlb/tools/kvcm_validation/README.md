@@ -38,3 +38,34 @@ HTTP 200 不代表通过；检查业务码、逐 key 查询和 `result.json`。
 该实验使用 KVCM 的 `ST_EVENT_REPORT_L1P5` 协议和本地内存索引。
 NFS storage 仅提供独立测试配置，不执行 block 数据写入；测试不覆盖跨引擎 KV 搬运、
 20 亿 key 容量、性能、生产资源池网络或 Whale 部署。
+
+## 元数据容量评估
+
+`run_capacity.py` 单独评估真实 KVCM，不启动 Master 或推理 JVM。
+有界批次的 Java 负载生成器模拟多个上报节点，共用一个模型 instance，每个 key 只有一个持有位置。
+它避免在发送端再保存一份全量 key map；逻辑上报节点数不能表述为真实 P/D Pod 数。
+
+先用 Java 21 编译同目录的 `KvcmCapacityLoad.java`，再运行：
+
+```bash
+javac tools/kvcm_validation/KvcmCapacityLoad.java
+python tools/kvcm_validation/run_capacity.py \
+  --kvcm-dir /path/to/extracted-kvcm --out /path/to/new-output \
+  --port-base <leased-base> --cpus <leased-cpus> \
+  --memory-budget-gib <process-address-space-limit> \
+  --rss-stop-gib <rss-stop-threshold> \
+  --reporters <logical-reporters> --concurrency <http-concurrency> \
+  --backend-capacity-mib <local-backend-quota-in-MiB> \
+  --checkpoints <ascending-comma-separated-key-counts>
+```
+
+`max_key_count` 和 local backend 字节配额分别生效。`--backend-capacity-mib` 通过
+`meta_storage_backend_config.storage_uri` 的 `capacity` 参数设置，单位 MiB；省略时使用服务端默认值。
+检查初始化日志和回读的 instance group，不能把默认配额触发的 `EC_NOSPC` 当成宿主机内存极限。
+
+每级保留服务端常驻 key 指标、业务响应计数、位置查询、RSS 和负载耗时。
+停写后最多等待 `--metric-settle-seconds`（默认 60 秒），要求常驻计数精确等于目标；
+指标尚未更新不能作为通过，也不能仅凭一次滞后采样断言丢 key。
+`TARGET_REACHED` 表示所声明目标完成；`RESOURCE_BOUND` 表示预算边界，`ERROR` 保留失败。
+20 亿内存投影是按当前字节/key 外推，不是 20 亿实测通过；快照恢复、共享 key 的多位置放大、
+并发删除与推理链路性能需要独立验证。采样查询正确不等于对全部 key 做逐条读取验证。
