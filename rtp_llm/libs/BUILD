@@ -5,6 +5,15 @@ package(default_visibility = ["//rtp_llm:__subpackages__"])
 
 copy_all_so()
 
+copy_files(
+    name = "copy_nvcomp_lib",
+    srcs = select({
+        "//:using_cuda13_x86": ["@nvcomp_cuda13_x86//:shared_library"],
+        "//:using_cuda13_arm": ["@nvcomp_cuda13_arm//:shared_library"],
+        "//conditions:default": [],
+    }),
+)
+
 # copy 3fs libs
 copy_files(
     name = "copy_hf3fs_libs",
@@ -36,6 +45,7 @@ filegroup(
     name = "libs",
     srcs = [],
     data = [
+        ":copy_nvcomp_lib",
         ":copy_hf3fs_libs",
         ":copy_remote_kv_cache_manager_client_libs",
         ":libmm_rdma_exporter_so",
@@ -47,6 +57,7 @@ filegroup(
     name = "whl_package_libs",
     srcs = [],
     data = [
+        ":copy_nvcomp_lib",
         ":copy_hf3fs_libs",
         ":copy_remote_kv_cache_manager_client_libs",
         ":libmm_rdma_exporter_so",

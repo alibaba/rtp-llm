@@ -54,7 +54,7 @@ struct BlockTreeCacheConfig {
     int    task_pool_size{4};
     size_t business_queue_max_size{10000};
 
-    // ---- Shared per-rank TransferEngine task pool ----
+    // ---- Per-rank TransferEngine task pools, one per direction ----
     size_t transfer_worker_count{4};
     size_t transfer_queue_max_size{10000};
 
@@ -119,6 +119,8 @@ public:
 
     ~BlockTreeCache();
     bool init();
+    // Reject pending loads and wait for allocator callbacks before its members are destroyed.
+    void shutdownLoads();
 
     BlockTreeMatchResult match(const CacheKeysType& cache_keys, const std::function<bool(size_t)>& valid_prefix = {});
     void                 insert(const CacheKeysType&                              cache_keys,
@@ -144,7 +146,7 @@ public:
     BlockIndicesType matchedBlocksForGroup(std::string_view                      group_tag,
                                            const std::vector<MultiNodeResource>& matched_resources) const;
 
-    bool executeTransfer(TransferTask task);
+    TransferResult executeTransfer(TransferTask task);
 
     // Accessors
     BlockTree* tree() const {

@@ -200,6 +200,13 @@ py_test(
 )
 
 py_test(
+    name = "process_lifecycle_test",
+    srcs = ["process_lifecycle_test.py"],
+    deps = ["//rtp_llm:utils"],
+    timeout = "short",
+)
+
+py_test(
     name = "grpc_host_channel_pool_test",
     srcs = [
         "grpc_host_channel_pool_test.py",

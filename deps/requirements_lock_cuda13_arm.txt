@@ -3507,8 +3507,8 @@ rpds-py==0.30.0 \
     # via
     #   jsonschema
     #   referencing
-rtp-kernel @ http://artlab.alibaba-inc.com/1/pypi/rtp_llm/rtp-kernel/rtp_kernel-0.1.0%2B34e3b72a.cu132-cp310-cp310-linux_aarch64.whl \
-    --hash=sha256:0333fa0aff767a391186d1e49f3e0c98f548d1e71b46967fc645aad9678586eb
+rtp-kernel @ http://artlab.alibaba-inc.com/1/pypi/rtp_llm/rtp-kernel/rtp_kernel-0.1.0%2B94fd20eb.cu132-cp310-cp310-linux_aarch64.whl \
+    --hash=sha256:ad078d78a5db96389febce578ac32c5667154184bcbce1748cf87373b6e52bd0
     # via -r deps/requirements_cuda13_arm.txt
 safetensors==0.7.0 \
     --hash=sha256:0071bffba4150c2f46cae1432d31995d77acfd9f8db598b5d1a2ce67e8440ad2 \
