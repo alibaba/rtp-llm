@@ -21,6 +21,7 @@ from smoke.gpu_diagnostics import (
 from smoke.multi_inst_case_runner import (
     DpSeperationCaseRunner,
     FrontAppSeperationCaseRunner,
+    PdSeperationCaseRunner,
     VitSeperationCaseRunner,
 )
 from smoke.task_info import TaskInfo
@@ -36,6 +37,8 @@ def get_runner_type(
         return CaseRunner
     else:
         if "prefill" in env_args:
+            if any(role == "vit" or role.startswith("vit_") for role in env_args):
+                return PdSeperationCaseRunner
             return DpSeperationCaseRunner
         elif "llm" in env_args and any(
             role == "vit" or role.startswith("vit_") for role in env_args

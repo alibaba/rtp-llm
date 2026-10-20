@@ -617,6 +617,7 @@ def h20_oss_suites():
                     "decode": [],
                 },
                 smoke_args = {
+                    "frontend": "--use_local 1 --role_type FRONTEND --warm_up 0",
                     "prefill": "--warm_up 0 --role_type PREFILL --cache_store_rdma_mode 0 --use_local 1 --tp_size 2 --dp_size 2 --world_size 4 --act_type BF16 --seq_size_per_block 2048 --reserver_runtime_mem_mb 12000 --use_deepep_moe 1 --use_deepep_low_latency 1",
                     "decode": "--warm_up 0 --role_type DECODE --cache_store_rdma_mode 0 --use_local 1 --tp_size 2 --dp_size 2 --world_size 4 --act_type BF16 --seq_size_per_block 2048 --reserver_runtime_mem_mb 12000 --use_deepep_moe 1 --use_deepep_low_latency 1",
                 },
@@ -632,6 +633,7 @@ def h20_oss_suites():
                 name = "next_pd",
                 task_info = "data/model/qwen3_next/q_r_next_fp8_tp2_pd_sep.json",
                 smoke_args = {
+                    "frontend": "--use_local 1 --role_type FRONTEND --warm_up 0",
                     "prefill": "--load_cache_timeout_ms 120000 --seq_size_per_block 2048 --act_type BF16 --role_type PREFILL --cache_store_rdma_mode 0 --use_local 1 --tp_size 2 --reserver_runtime_mem_mb 9861 --ssm_state_dtype fp32",
                     "decode": "--load_cache_timeout_ms 120000 --seq_size_per_block 2048 --act_type BF16 --role_type DECODE --cache_store_rdma_mode 0 --use_local 1 --tp_size 2 --reserver_runtime_mem_mb 9861 --ssm_state_dtype fp32",
                 },
@@ -723,6 +725,7 @@ def h20_oss_suites():
                 name = "kimi_pd",
                 task_info = "data/model/kimi_linear/q_r_bf16_tp2_pd_sep.json",
                 smoke_args = {
+                    "frontend": "--use_local 1 --role_type FRONTEND --warm_up 0",
                     "prefill": "--seq_size_per_block 2048 --act_type BF16 --role_type PREFILL --cache_store_rdma_mode 0 --use_local 1 --tp_size 2 --ssm_state_dtype fp32 --reserver_runtime_mem_mb 8192",
                     "decode": "--seq_size_per_block 2048 --act_type BF16 --role_type DECODE --cache_store_rdma_mode 0 --use_local 1 --tp_size 2 --ssm_state_dtype fp32 --reserver_runtime_mem_mb 8192",
                 },
@@ -861,6 +864,8 @@ def h20_oss_suites():
                 name = "qwen3_vl_cp2",
                 task_info = "data/model/qwen_vl/q_r_3_cp2.json",
                 smoke_args = {
+                    "frontend": "--use_local 1 --role_type FRONTEND --warm_up 0",
+                    "vit": "--act_type BF16 --use_local 1 --use_local_preprocess 1",
                     "prefill": "--warm_up 0 --act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --use_local_preprocess 1 --role_type PREFILL --tp_size 2 --world_size 2 --dp_size 1 --reuse_cache 1 --enable_cuda_graph 0 --cp_rotate_method ALL_GATHER",
                     "decode": "--warm_up 0 --act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --role_type DECODE --tp_size 2 --world_size 2 --dp_size 1 --reuse_cache 1 --enable_cuda_graph 0 --cp_rotate_method PREFILL_CP",
                 },
@@ -889,6 +894,8 @@ def h20_oss_suites():
                 name = "qwen35_moe_vl_fp8",
                 task_info = "data/model/qwen35/q_r_35b_moe_vl_fp8.json",
                 smoke_args = {
+                    "frontend": "--use_local 1 --role_type FRONTEND --warm_up 0",
+                    "vit": "--act_type BF16 --use_local 1 --use_local_preprocess 1",
                     "prefill": "--use_local 1 --role_type PREFILL --tp_size 2 --act_type BF16 --seq_size_per_block 2048 --max_seq_len 8192 --enable_cuda_graph 0 --warm_up 0 --concurrency_limit 8 --reserver_runtime_mem_mb 8192",
                     "decode": "--use_local 1 --role_type DECODE  --tp_size 2 --act_type BF16 --seq_size_per_block 2048 --max_seq_len 8192 --enable_cuda_graph 1 --warm_up 0 --concurrency_limit 8 --reserver_runtime_mem_mb 8192 --use_deepep_moe 1 --use_deepep_low_latency 1",
                 },
