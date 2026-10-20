@@ -108,6 +108,10 @@ public final class ScheduledRequest implements Prioritized {
     public PrefillEndpoint prefillEp() { return execution.prefillEp(); }
     public DecodeEndpoint decodeEp() { return execution.decodeEp(); }
 
+    /** Advisory only: delivery still acquires the exact Decode permit. */
+    public boolean decodeReadyForDispatch() {
+        return execution.decodeReadyForDispatch();
+    }
     public DecodeEndpoint.ReservationHandle decodeReservation() {
         return execution.decodeReservation();
     }

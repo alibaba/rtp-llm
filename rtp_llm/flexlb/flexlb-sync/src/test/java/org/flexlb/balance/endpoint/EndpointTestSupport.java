@@ -194,8 +194,7 @@ public final class EndpointTestSupport {
                     new RouteProjection.AdmissionBlockSemantics(
                             "test delivery parked",
                             RouteProjection.AfterProbeAdmission.BLOCKED,
-                            "test delivery parked",
-                            RoleType.PREFILL));
+                            "test delivery parked"));
 
     static boolean offer(PrefillEndpoint endpoint, ScheduledRequest item) {
         try (WorkerEndpoint.GenerationPin pin = endpoint.tryPinGeneration()) {

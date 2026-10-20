@@ -13,7 +13,6 @@ import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
-import org.flexlb.dao.route.RoleType;
 import org.mockito.Mockito;
 import org.springframework.test.util.ReflectionTestUtils;
 
@@ -656,7 +655,6 @@ public final class DeliveryStrategyTestSupport {
                 new RouteProjection.AdmissionBlockSemantics(
                         "TEST_BLOCK",
                         RouteProjection.AfterProbeAdmission.BLOCKED,
-                        "TEST_BLOCK",
-                        RoleType.PREFILL));
+                        "TEST_BLOCK"));
     }
 }
