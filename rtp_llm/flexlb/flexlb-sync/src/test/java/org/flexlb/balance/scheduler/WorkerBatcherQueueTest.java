@@ -238,8 +238,7 @@ class WorkerBatcherQueueTest {
                             new RouteProjection.AdmissionBlockSemantics(
                                     "TEST_QUEUE_BLOCK",
                                     RouteProjection.AfterProbeAdmission.BLOCKED,
-                                    "TEST_QUEUE_BLOCK",
-                                    RoleType.PREFILL)));
+                                    "TEST_QUEUE_BLOCK")));
         }
 
         @Override
