@@ -1085,6 +1085,13 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
             cuda_graph::graphGetCurrentStream().synchronize();
         }
         py::gil_scoped_acquire gil;
+        // Python prepare hooks enqueue device work (metadata fill kernels,
+        // plan staging H2D). Run them on the graph stream: on the
+        // stream-async pipeline this function executes on the worker
+        // thread, whose default stream is unordered with respect to the
+        // in-flight replay on the graph stream, so default-stream fills
+        // would race the replay's reads of the same buffers.
+        cuda_graph::GraphStreamGuard stream_guard(cuda_graph::graphGetCurrentStream());
         callPrepareCudaGraph(attn_pyobj, py_model_inputs_);
     }
     prepared_guard.commit();
