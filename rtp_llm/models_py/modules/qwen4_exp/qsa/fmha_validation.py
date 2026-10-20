@@ -219,3 +219,14 @@ def validate_qsa_before_side_write(
             and (not self.is_prefill or self.is_target_verify)
         ),
     )
+
+    # Reuse this invocation's already validated side-plan producer in the main
+    # Graph reader. It stays layer-local, is consumed once and is reset by the
+    # main-cache transaction owner; no position or history survives a call.
+    plan = getattr(qsa_runtime, "_target_verify_plan", None)
+    if self.is_target_verify and self.attn_inputs.is_cuda_graph and plan is not None:
+        self._qsa_target_visible_lengths = (
+            self.attn_inputs,
+            int(hidden_states.shape[0]),
+            plan.visible_lengths,
+        )

@@ -12,6 +12,7 @@ def select_qsa_paged_tokens(
     compress_ratio: int,
     token_budget: int,
     validate_lengths: bool = True,
+    scores_are_masked: bool = False,
 ) -> torch.Tensor:
     """Expand scored block top-k plus the unscored partial tail to token ids.
 
@@ -20,6 +21,10 @@ def select_qsa_paged_tokens(
     The fixed output layout matches :meth:`Qwen4ExpQSAIndexer.forward_causal`:
     ``token_budget`` scored-block token slots followed by ``ratio - 1`` tail
     slots, with ``-1`` padding.
+
+    ``scores_are_masked`` is an internal producer contract: all columns beyond
+    ``token_lengths // compress_ratio`` must already contain negative infinity.
+    It is used only with the paged-score kernel; generic inputs keep masking.
     """
     if block_logits.dim() != 2 or not block_logits.is_floating_point():
         raise ValueError("block_logits must be a floating-point [rows, blocks] tensor")
@@ -57,6 +62,7 @@ def select_qsa_paged_tokens(
         token_lengths,
         compress_ratio=compress_ratio,
         token_budget=token_budget,
+        scores_are_masked=scores_are_masked,
     )
     if result is not None:
         return result

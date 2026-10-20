@@ -97,6 +97,19 @@ class Qwen4ExpFusedQKRMSNorm(nn.Module):
                     self.size_per_head,
                     self.eps,
                 )
+            from .norm_triton import try_prefill_qk_rmsnorm_
+
+            normalized = try_prefill_qk_rmsnorm_(
+                hidden_states,
+                self.q_weight,
+                self.k_weight,
+                self.head_num,
+                self.kv_head_num,
+                self.size_per_head,
+                self.eps,
+            )
+            if normalized is not None:
+                return normalized
         qkv = hidden_states.reshape(
             rows, self.head_num + self.kv_head_num * 2, self.size_per_head
         )

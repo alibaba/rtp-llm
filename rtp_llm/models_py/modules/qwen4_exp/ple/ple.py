@@ -42,6 +42,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         distributed_reduce: bool = False,
         weight_scale: Optional[torch.Tensor] = None,
         prefetch_budget_mb: int = 256,
+        inline_cpu_uva_graph: bool = False,
     ):
         super().__init__()
         if not shards:
@@ -135,6 +136,11 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             and vocab_sizes.is_cuda
             and torch.version.hip is None
         )
+        if type(inline_cpu_uva_graph) is not bool:
+            raise ValueError("inline_cpu_uva_graph must be a boolean")
+        if inline_cpu_uva_graph and not self._cpu_uva_enabled:
+            raise ValueError("inline graph lookup requires pinned NVIDIA CPU UVA")
+        self.inline_cpu_uva_graph = inline_cpu_uva_graph
         if self._cpu_uva_enabled:
             from rtp_llm.models_py.modules.qwen4_exp.ple.ple_gather_triton import (
                 prepare_cpu_uva_shards,
@@ -194,7 +200,11 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             for shard in self.shards
             if shard.device.type == "cpu"
         }
-        graph_host = sum(host.nbytes for host, _ in self._cpu_graph_buffers.values())
+        graph_host = sum(
+            host.nbytes
+            for host, _ in self._cpu_graph_buffers.values()
+            if host is not None
+        )
         graph_device = sum(
             device.nbytes for _, device in self._cpu_graph_buffers.values()
         )
@@ -277,6 +287,21 @@ class Qwen4ExpNGramEmbedding(nn.Module):
 
     def hashed_ids(self, token_history: torch.Tensor, seq_len: int) -> torch.Tensor:
         """Map a ``[B, context_len + seq_len]`` history to ``[B, seq_len, heads]``."""
+        if token_history.is_cuda and torch.version.hip is None:
+            from .ple_hash_triton import try_hashed_ngram_ids
+
+            result = try_hashed_ngram_ids(
+                token_history,
+                seq_len,
+                self.vocab_sizes,
+                self.offsets,
+                self.multipliers,
+                ngram_size=self.ngram_size,
+                heads_per_ngram=self.heads_per_ngram,
+                eos_token_id=self.eos_token_id,
+            )
+            if result is not None:
+                return result
         shifted = [
             self._shift_right_ignore_eos(token_history, shift)
             for shift in range(self.ngram_size)
@@ -366,7 +391,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
 
     def _gather_local(self, ngram_ids: torch.Tensor) -> torch.Tensor:
         if self.shards[0].device.type == "cpu":
-            if self._graph_gather_required:
+            if self._graph_gather_required and not self.inline_cpu_uva_graph:
                 return self._prepared_cpu_graph_rows(
                     (*ngram_ids.shape, self.shards[0].shape[-1]), ngram_ids.device
                 )
@@ -470,18 +495,23 @@ class Qwen4ExpNGramEmbedding(nn.Module):
                 or token_history.shape[1] != self.context_len + seq_len
             ):
                 raise RuntimeError("PLE CPU graph history geometry is invalid")
-            # Preparation already hashed the current history. Captured forward
-            # consumes those rows directly instead of rehashing unused ids.
-            rows = self._prepared_cpu_graph_rows(
-                (
-                    token_history.shape[0],
-                    seq_len,
-                    self.ngram_heads,
-                    self.shards[0].shape[-1],
-                ),
-                token_history.device,
-            )
-            return self._reduce_rows(rows)
+            if not self.inline_cpu_uva_graph:
+                # Preparation already hashed the current history. Captured
+                # forward consumes those rows directly.
+                rows = self._prepared_cpu_graph_rows(
+                    (
+                        token_history.shape[0],
+                        seq_len,
+                        self.ngram_heads,
+                        self.shards[0].shape[-1],
+                    ),
+                    token_history.device,
+                )
+                return self._reduce_rows(rows)
+            # The constructor pinned and retained every table owner and mapped
+            # its device address before capture. Capture hash + UVA gather on
+            # the model stream so each replay reads its own current history.
+            # Eager prefetch and its ready/consumed lifecycle remain unchanged.
         return self.gather(self.hashed_ids(token_history.long(), seq_len))
 
 
@@ -543,6 +573,11 @@ class Qwen4ExpPLELayer(nn.Module):
         scales = projection_scales if projection_scales is not None else (None, None)
         self.key_projection = make_projection(key_proj, scales[0])
         self.value_projection = make_projection(value_proj, scales[1])
+        for projection in (self.key_projection, self.value_projection):
+            if projection is not None and getattr(projection, "use_scaled_mm", False):
+                projection._qwen4_ple_unit_columns = projection.unit_scale.expand(
+                    1, projection.weight.shape[0]
+                ).contiguous()
         self.conv_weight = conv_weight
         self.norm_key = norm_key
         self.norm_query = norm_query
@@ -586,21 +621,47 @@ class Qwen4ExpPLELayer(nn.Module):
         if embeddings is None:
             embeddings = self.ple_embedding(token_history, seq_len)
 
-        branches = (self.hc_mult, self.hidden_size)
-        key_normed = self._norm(
-            (
+        from rtp_llm.models_py.modules.qwen4_exp.fp8_dense import project_fp8_pair
+
+        paired = project_fp8_pair(
+            embeddings, self.key_projection, self.value_projection
+        )
+        if paired is not None:
+            key, value = paired
+        else:
+            key = (
                 self.key_projection(embeddings)
                 if self.key_projection is not None
                 else F.linear(embeddings, self.key_proj)
-            ),
-            self.norm_key,
-        ).unflatten(-1, branches)
+            )
+            value = (
+                self.value_projection(embeddings)
+                if self.value_projection is not None
+                else F.linear(embeddings, self.value_proj)
+            )
+        if hyper_states.is_cuda and torch.version.hip is None:
+            from .ple_gate_triton import try_ple_gate
+
+            fused = try_ple_gate(
+                key,
+                value,
+                hyper_states,
+                self.norm_key,
+                self.norm_query,
+                self.norm_conv,
+                self.norm_eps,
+            )
+            if fused is not None:
+                gated_value, gated_value_normed = fused
+                if padding_mask is not None:
+                    keep = padding_mask.unsqueeze(-1).to(gated_value.dtype)
+                    gated_value = gated_value * keep
+                    gated_value_normed = gated_value_normed * keep
+                return gated_value, gated_value_normed
+
+        branches = (self.hc_mult, self.hidden_size)
+        key_normed = self._norm(key, self.norm_key).unflatten(-1, branches)
         query_normed = self._norm(hyper_states, self.norm_query).unflatten(-1, branches)
-        value = (
-            self.value_projection(embeddings)
-            if self.value_projection is not None
-            else F.linear(embeddings, self.value_proj)
-        )
 
         gate = (key_normed * query_normed).sum(dim=-1, keepdim=True) / math.sqrt(
             self.hidden_size
@@ -671,13 +732,16 @@ class Qwen4ExpPLELayer(nn.Module):
         conv_buffer: Optional[torch.Tensor] = None,
         *,
         embeddings: Optional[torch.Tensor] = None,
+        add_residual: bool = False,
     ) -> tuple[torch.Tensor, list[torch.Tensor]]:
         """Gather once while retaining every page's resumable prefill state.
 
         Projections and convolution keep their original page-sized shapes to
         preserve BF16 accumulation and rounding. N-gram hashing, shard gather,
         and its TP reduction run once per request, including a partial final
-        page and a reused prefix's left context.
+        page and a reused prefix's left context. With ``add_residual``, the
+        convolution epilogue also adds the outer residual after rounding the
+        PLE output to BF16, as in vLLM's outer-residual PLE consumer.
         """
         if page_size <= 0:
             raise ValueError("PLE snapshot page size must be positive")
@@ -692,6 +756,119 @@ class Qwen4ExpPLELayer(nn.Module):
             raise ValueError("PLE snapshot prefill must contain at least one token")
         if embeddings is None:
             embeddings = self.ple_embedding(token_history, length)
+        if (
+            batch == 1
+            and width == 10240
+            and hyper_states.is_cuda
+            and hyper_states.dtype == torch.bfloat16
+            and torch.version.hip is None
+            and torch.cuda.get_device_capability(hyper_states.device) == (12, 0)
+            and self.key_projection is not None
+            and self.value_projection is not None
+            and self.key_projection.use_scaled_mm
+            and self.value_projection.use_scaled_mm
+        ):
+            from rtp_llm.models_py.modules.qwen4_exp.fp8_dense import project_fp8_pair
+
+            from .ple_gate_triton import try_ple_gate
+            from .ple_page_projection import project_pages_pair
+
+            projected = project_pages_pair(
+                embeddings, self.key_projection, self.value_projection, page_size
+            )
+            projection_scales = None
+            projection_done = projected is not None
+            if projection_done:
+                key, value, projection_scales = projected
+            else:
+                keys, values = [], []
+                for start in range(0, length, page_size):
+                    page = embeddings[
+                        :, start : min(start + page_size, length)
+                    ].contiguous()
+                    pair = project_fp8_pair(
+                        page, self.key_projection, self.value_projection
+                    )
+                    if pair is None:
+                        break
+                    keys.append(pair[0])
+                    values.append(pair[1])
+                else:
+                    key = keys[0] if len(keys) == 1 else torch.cat(keys, 1)
+                    value = values[0] if len(values) == 1 else torch.cat(values, 1)
+                    projection_done = True
+            if projection_done:
+                fused = try_ple_gate(
+                    key,
+                    value,
+                    hyper_states,
+                    self.norm_key,
+                    self.norm_query,
+                    self.norm_conv,
+                    self.norm_eps,
+                    projection_scales=projection_scales,
+                )
+                if fused is not None:
+                    gated, normed = fused
+                    from .ple_conv_triton import try_ple_conv
+
+                    output = try_ple_conv(
+                        gated,
+                        normed,
+                        conv_buffer,
+                        self.conv_weight,
+                        self.conv_dilation,
+                        residual=hyper_states if add_residual else None,
+                    )
+                    if output is not None:
+                        snapshots = []
+                        for start in range(0, length, page_size):
+                            end = min(start + page_size, length)
+                            if end >= self.short_conv_state_len:
+                                snapshots.append(
+                                    normed[:, end - self.short_conv_state_len : end]
+                                )
+                            else:
+                                initial = (
+                                    normed.new_zeros(
+                                        (1, self.short_conv_state_len, width)
+                                    )
+                                    if conv_buffer is None
+                                    else conv_buffer
+                                )
+                                snapshots.append(
+                                    torch.cat((initial, normed[:, :end]), 1)[
+                                        :, -self.short_conv_state_len :
+                                    ]
+                                )
+                        return output, snapshots
+                    if conv_buffer is None:
+                        initial = normed.new_zeros(
+                            (1, self.short_conv_state_len, width)
+                        )
+                    else:
+                        initial = conv_buffer
+                    history = torch.cat((initial, normed), dim=1)
+                    convolved = F.silu(
+                        F.conv1d(
+                            history.transpose(1, 2),
+                            self.conv_weight,
+                            groups=self.hc_hidden_size,
+                            dilation=self.conv_dilation,
+                        )
+                    ).transpose(1, 2)
+                    snapshots = [
+                        history[:, end : end + self.short_conv_state_len]
+                        for end in range(page_size, length + 1, page_size)
+                    ]
+                    if length % page_size:
+                        snapshots.append(
+                            history[:, length : length + self.short_conv_state_len]
+                        )
+                    output = gated + convolved
+                    return (
+                        hyper_states + output if add_residual else output
+                    ), snapshots
         outputs, snapshots = [], []
         for start in range(0, length, page_size):
             end = min(start + page_size, length)
@@ -716,7 +893,8 @@ class Qwen4ExpPLELayer(nn.Module):
                 outputs.append(gated + convolved)
                 conv_buffer = history[:, -self.short_conv_state_len :]
             snapshots.append(conv_buffer)
-        return torch.cat(outputs, dim=1), snapshots
+        output = torch.cat(outputs, dim=1)
+        return (hyper_states + output if add_residual else output), snapshots
 
     def prefill_conv_state(self, gated_value_normed: torch.Tensor) -> torch.Tensor:
         """The conv-input history decode must resume from: last state_len rows.
@@ -825,6 +1003,18 @@ class Qwen4ExpPLELayer(nn.Module):
         gated_value, candidate_inputs = self._gated_values(
             hyper_states, token_history, embeddings=embeddings
         )
+        if hyper_states.is_cuda and torch.version.hip is None:
+            from .ple_conv_triton import try_ple_conv
+
+            fused = try_ple_conv(
+                gated_value,
+                candidate_inputs,
+                conv_buffer,
+                self.conv_weight,
+                self.conv_dilation,
+            )
+            if fused is not None:
+                return fused, candidate_inputs
         conv_in = torch.cat([conv_buffer, candidate_inputs], dim=1).transpose(1, 2)
         conv_out = F.silu(
             F.conv1d(

@@ -41,7 +41,7 @@ def try_indexer_rmsnorm(x, gamma, eps):
         and x.dtype == torch.bfloat16
         and x.ndim in (2, 3, 4)
         and x.shape[-1] == 128
-        and 1 <= x.numel() // 128 <= 128
+        and 1 <= x.numel() // 128 <= 262144
         and x.stride(-1) == 1
         and all(stride > 0 for stride in x.stride())
         and (x.ndim != 4 or x.stride(0) == x.shape[1] * x.stride(1))
@@ -75,7 +75,14 @@ def try_indexer_rmsnorm(x, gamma, eps):
 
 @triton.jit
 def _small_qk_rmsnorm_kernel(
-    QKV, QG, KG, ROWS: tl.constexpr, STRIDE: tl.constexpr, EPS: tl.constexpr
+    QKV,
+    QG,
+    KG,
+    ROWS: tl.constexpr,
+    STRIDE: tl.constexpr,
+    Q_HEADS: tl.constexpr,
+    KV_HEADS: tl.constexpr,
+    EPS: tl.constexpr,
 ):
     row, head = tl.program_id(0), tl.program_id(1)
     lane = tl.arange(0, 32)
@@ -92,8 +99,10 @@ def _small_qk_rmsnorm_kernel(
     s0, s1, s2, s3 = a0 * a0, a1 * a1, a2 * a2, a3 * a3
     t0, t1, t2, t3 = b0 * b0, b1 * b1, b2 * b2, b3 * b3
     # CUDA mean uses 64 reduction lanes for fewer than 16 outputs, otherwise
-    # 32. Q and K are separate reductions with three and one output per row.
-    wide = ((head < 3) & (ROWS * 3 < 16)) | ((head >= 3) & (ROWS < 16))
+    # 32. Q and K use their own output counts, including replicated KV heads.
+    wide = ((head < Q_HEADS) & (ROWS * Q_HEADS < 16)) | (
+        (head >= Q_HEADS) & (ROWS * KV_HEADS < 16)
+    )
     sum_wide = (((s0 + s1) + s2) + s3) + (((t0 + t1) + t2) + t3)
     sum_narrow = (((s0 + t0) + (s1 + t1)) + (s2 + t2)) + (s3 + t3)
     variance = tl.sum(tl.where(wide, sum_wide, sum_narrow), 0) / 256
@@ -104,7 +113,7 @@ def _small_qk_rmsnorm_kernel(
             x = tl.load(QKV + base + rd).to(tl.float32)
             qg = tl.load(QG + rd).to(tl.float32)
             kg = tl.load(KG + rd).to(tl.float32)
-            g = tl.where(head < 3, qg, kg)
+            g = tl.where(head < Q_HEADS, qg, kg)
             tl.store(QKV + base + rd, (x * scale) * (1.0 + g))
 
 
@@ -116,8 +125,9 @@ def is_small_qk_supported(qkv, q_gamma, k_gamma, q_heads, kv_heads, head_dim):
         and qkv.dim() == 2
         and qkv.is_contiguous()
         and 1 <= qkv.shape[0] <= 32
-        and qkv.shape[1] == 1280
-        and (q_heads, kv_heads, head_dim) == (3, 1, 256)
+        and (q_heads, kv_heads, head_dim) in ((3, 1, 256), (6, 1, 256), (12, 1, 256))
+        and qkv.shape[1] == (q_heads + 2 * kv_heads) * head_dim
+        and torch.cuda.get_device_capability(qkv.device) == (12, 0)
         and q_gamma.device == k_gamma.device == qkv.device
         and q_gamma.dtype in (torch.bfloat16, torch.float32)
         and k_gamma.dtype in (torch.bfloat16, torch.float32)
@@ -130,12 +140,54 @@ def is_small_qk_supported(qkv, q_gamma, k_gamma, q_heads, kv_heads, head_dim):
 def small_qk_rmsnorm_(qkv, q_gamma, k_gamma, q_heads, kv_heads, head_dim, eps):
     if not is_small_qk_supported(qkv, q_gamma, k_gamma, q_heads, kv_heads, head_dim):
         raise ValueError("unsupported small Qwen4 Q/K RMSNorm layout")
-    _small_qk_rmsnorm_kernel[(qkv.shape[0], 4)](
+    _small_qk_rmsnorm_kernel[(qkv.shape[0], q_heads + kv_heads)](
         qkv,
         q_gamma,
         k_gamma,
         ROWS=qkv.shape[0],
         STRIDE=qkv.stride(0),
+        Q_HEADS=q_heads,
+        KV_HEADS=kv_heads,
+        EPS=eps,
+        num_warps=1,
+        enable_fp_fusion=False,
+    )
+    return qkv
+
+
+def try_prefill_qk_rmsnorm_(qkv, q_gamma, k_gamma, q_heads, kv_heads, head_dim, eps):
+    # The CUDA mean reduction uses 32 lanes for this domain. Preserve that
+    # reduction and both BF16 stores rather than folding gamma into BF16.
+    if not (
+        qkv.is_cuda
+        and torch.version.hip is None
+        and torch.cuda.get_device_capability(qkv.device) == (12, 0)
+        and qkv.dtype == torch.bfloat16
+        and qkv.ndim == 2
+        and qkv.is_contiguous()
+        and 33 <= qkv.shape[0] <= 32768
+        and (q_heads, kv_heads, head_dim) in ((3, 1, 256), (6, 1, 256), (12, 1, 256))
+        and qkv.shape[1] == (q_heads + 2 * kv_heads) * 256
+        and q_gamma.shape == k_gamma.shape == (256,)
+        and q_gamma.device == k_gamma.device == qkv.device
+        and q_gamma.dtype in (torch.bfloat16, torch.float32)
+        and k_gamma.dtype in (torch.bfloat16, torch.float32)
+        and q_gamma.is_contiguous()
+        and k_gamma.is_contiguous()
+        and not (qkv.requires_grad or q_gamma.requires_grad or k_gamma.requires_grad)
+        and isinstance(eps, (float, int))
+        and math.isfinite(eps)
+        and eps >= 0
+    ):
+        return None
+    _small_qk_rmsnorm_kernel[(qkv.shape[0], q_heads + kv_heads)](
+        qkv,
+        q_gamma,
+        k_gamma,
+        ROWS=qkv.shape[0],
+        STRIDE=qkv.stride(0),
+        Q_HEADS=q_heads,
+        KV_HEADS=kv_heads,
         EPS=eps,
         num_warps=1,
         enable_fp_fusion=False,

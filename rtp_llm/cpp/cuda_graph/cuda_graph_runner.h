@@ -3,6 +3,8 @@
 #include <array>
 #include <atomic>
 #include <exception>
+#include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -87,6 +89,8 @@ public:
         if (py::hasattr(py_instance_, "cuda_graph_engram_window_size")) {
             engram_window_size_ = py_instance_.attr("cuda_graph_engram_window_size")().cast<int>();
         }
+        const char* request_sized  = std::getenv("QWEN4_MTP_REQUEST_GRAPH_CAPACITY");
+        request_sized_mtp_prefill_ = request_sized != nullptr && std::strcmp(request_sized, "1") == 0;
         if (role_ == CudaGraphRole::AUTO) {
             role_ = is_target_verify_ ? CudaGraphRole::TARGET_VERIFY :
                     is_prefill_cuda_graph_mode_ ?
@@ -97,7 +101,7 @@ public:
         is_prefill_cuda_graph_mode_ = role_ == CudaGraphRole::EMBEDDING_PREFILL
                                       || role_ == CudaGraphRole::MTP_DRAFT_PREFILL
                                       || role_ == CudaGraphRole::GENERATION_PREFILL;
-        is_target_verify_ = role_ == CudaGraphRole::TARGET_VERIFY;
+        is_target_verify_           = role_ == CudaGraphRole::TARGET_VERIFY;
         if (role_ == CudaGraphRole::GENERATION_PREFILL) {
             RTP_LLM_CHECK_WITH_INFO(generation_prefill_cuda_graph_max_requests_ > 0
                                         && generation_prefill_cuda_graph_max_requests_
@@ -120,8 +124,8 @@ public:
         prepare_model_inputs_enabled_ =
             py::hasattr(py_instance_, "prepare_cuda_graph_model_inputs")
             && py::getattr(py_instance_, "requires_cuda_graph_model_input_preparation", py::bool_(false)).cast<bool>();
-        options_cuda_int32_   = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
-        options_cpu_int32_    = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).requires_grad(false);
+        options_cuda_int32_ = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
+        options_cpu_int32_  = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).requires_grad(false);
         options_cuda_float_ = torch::TensorOptions().dtype(model_data_type_).device(torch::kCUDA).requires_grad(false);
         RTP_LLM_LOG_INFO("Initialize CudaGraphRunner with parameters below: \n \
             enable_cuda_graph_: %d, max_bs_: %d, enable_cuda_graph_debug_mode_: %d, max_seq_len_: %d, max_kernel_block_table_width_: %lld, \
@@ -206,10 +210,12 @@ private:
     bool usesFixedCapacityMtpDraftPrefillCudaGraph() const {
         // DSpARK propose/commit now run as construction-time-role decode graphs
         // (is_prefill_cuda_graph_mode_ == false), so only the HC-shaped MTP draft
-        // prefill keeps the fixed-capacity Python path: slicing its output buffer
-        // would mismatch the forward_decode [B * q_len, dim] result in
-        // captureOneGraphInstance.
+        // prefill keeps fixed lanes per captured request. Each key's input,
+        // metadata and output capacities must agree with [B * q_len, dim].
         return isMtpDraftPrefillCudaGraph() && hc_mult_ > 1;
+    }
+    bool usesRequestSizedMtpDraftPrefillCudaGraph() const {
+        return usesFixedCapacityMtpDraftPrefillCudaGraph() && request_sized_mtp_prefill_;
     }
     // Common input preparation logic for capture
     void prepareCaptureInputs(PyModelInputs& inputs, int batch_size, int seq_len_or_tokens);
@@ -243,6 +249,7 @@ private:
     bool                    prepare_model_inputs_enabled_{false};
     bool                    enable_cuda_graph_{false};
     bool                    exact_batch_only_{false};
+    bool                    request_sized_mtp_prefill_{false};
     bool                    is_prefill_cuda_graph_mode_{false};
     bool                    is_target_verify_{false};
     CudaGraphRole           role_{CudaGraphRole::AUTO};

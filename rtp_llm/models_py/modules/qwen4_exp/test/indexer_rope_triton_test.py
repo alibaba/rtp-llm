@@ -7,6 +7,7 @@ import torch
 from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import (
     Qwen4ExpQSAIndexer,
     apply_partial_rope,
+    build_base_rope,
     build_qsa_rope_from_logical_positions,
 )
 from rtp_llm.models_py.modules.qwen4_exp.qsa.rope_triton import (
@@ -85,6 +86,45 @@ class IndexerRoPETritonTest(unittest.TestCase):
                 self.rope(value, self.config(), False),
             ):
                 torch.testing.assert_close(a, b, rtol=0, atol=0)
+
+    def test_base_transport_frequency_keeps_axis_checks_and_live_positions(self):
+        for factor in (1, 3):
+            config = self.config("Base", index_factor=factor, base=10000000.0)
+            frequency = float(config.base) ** (
+                -2.0 * torch.arange(32, device="cuda", dtype=torch.float32) / 64
+            )
+            positions = torch.arange(16, device="cuda", dtype=torch.int32)
+            transported = positions.repeat_interleave(factor)
+            kwargs = dict(token_count=16, dtype=torch.bfloat16, device=positions.device)
+            for prefix in (0, 127, 4093, 32749):
+                transported.copy_((positions + prefix).repeat_interleave(factor))
+                expected = build_base_rope(transported, config, **kwargs)
+                actual = build_base_rope(
+                    transported, config, inv_freq=frequency, **kwargs
+                )
+                for a, b in zip(actual, expected):
+                    torch.testing.assert_close(a, b, rtol=0, atol=0)
+            # Equality is already checked by the native draft graph owner;
+            # the explicit opt-out is unchanged from the old Graph path.
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                captured = build_base_rope(
+                    transported,
+                    config,
+                    inv_freq=frequency,
+                    validate_position_axes=False,
+                    **kwargs
+                )
+            for prefix in (3, 128, 32700):
+                transported.copy_((positions + prefix).repeat_interleave(factor))
+                graph.replay()
+                expected = build_base_rope(transported, config, **kwargs)
+                for a, b in zip(captured, expected):
+                    torch.testing.assert_close(a, b, rtol=0, atol=0)
+            if factor == 3:
+                transported[1] += 1
+                with self.assertRaisesRegex(ValueError, "three axes"):
+                    build_base_rope(transported, config, inv_freq=frequency, **kwargs)
 
     def test_rotation_preserves_bf16_products_and_tail(self):
         for batch, query, heads in ((1, 1, 32), (1, 4, 32), (4, 4, 32), (7, 4, 8)):

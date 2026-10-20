@@ -23,6 +23,14 @@ def draft_graph_rows(inputs, token_capacity):
     cu = inputs.cu_seqlens_device
     batch = lengths.numel()
     lanes = draft_graph_lanes(inputs, token_capacity)
+    if lengths.is_cuda:
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.draft_metadata_triton import (
+            draft_rows,
+        )
+
+        fused = draft_rows(lengths, prefixes, cu, token_capacity)
+        if fused is not None:
+            return fused
     offsets = torch.arange(lanes, device=cu.device, dtype=torch.int64)
     active = offsets.unsqueeze(0) < lengths.unsqueeze(1)
     sources = cu[:-1].long().unsqueeze(1) + offsets.unsqueeze(0)
@@ -102,6 +110,7 @@ class DraftPrefillGraphReplay(Mapping):
             raise RuntimeError(
                 "QSA draft graph cu_seqlens do not partition the live token capacity"
             )
+        state_geometry = None
         for tag, pool_size, page_size, compressed in self.bounds:
             inputs = groups[tag]
             if not torch.equal(
@@ -111,26 +120,7 @@ class DraftPrefillGraphReplay(Mapping):
             if tag == INDEXER_STATE_TAG:
                 # The graph runner refreshes the raw state table on device;
                 # unlike kernel tables, it has no refreshed host mirror.
-                table = inputs.kv_cache_block_id_device
-                length_device = anchor.input_lengths_device
-                prefix_device = anchor.prefix_lengths_device
-                first = (prefix_device - prefix_device.remainder(4)) // page_size
-                last = (prefix_device + length_device - 1) // page_size
-                active = length_device > 0
-                invalid = active & ((first < 0) | (last >= table.shape[1]))
-                columns = (
-                    torch.stack((first, last), dim=1)
-                    .clamp(0, table.shape[1] - 1)
-                    .long()
-                )
-                physical = table.gather(1, columns)
-                invalid_state = (
-                    invalid.any()
-                    | (
-                        active.unsqueeze(1)
-                        & ((physical <= 0) | (physical >= pool_size))
-                    ).any()
-                )
+                state_geometry = (inputs.kv_cache_block_id_device, pool_size, page_size)
                 continue
             table = (
                 inputs.kv_cache_block_id
@@ -180,11 +170,49 @@ class DraftPrefillGraphReplay(Mapping):
         expected_positions = torch.tensor(
             positions, device=transported.device, dtype=transported.dtype
         )
-        actual = transported.reshape(self.token_capacity, self.position_factor)[
-            : len(positions)
-        ]
-        invalid_positions = (actual != expected_positions.unsqueeze(1)).any()
-        if bool((invalid_state | invalid_positions).item()):
+        if state_geometry is None:
+            raise RuntimeError("QSA draft graph requires a raw-state cache group")
+        table, pool_size, page_size = state_geometry
+        length_device = anchor.input_lengths_device
+        prefix_device = anchor.prefix_lengths_device
+        invalid_replay = None
+        if length_device.is_cuda:
+            from rtp_llm.models_py.modules.qwen4_exp.qsa.draft_metadata_triton import (
+                replay_invalid,
+            )
+
+            invalid_replay = replay_invalid(
+                length_device,
+                prefix_device,
+                table,
+                transported,
+                expected_positions,
+                pool_size=pool_size,
+                page_size=page_size,
+                token_capacity=self.token_capacity,
+                position_factor=self.position_factor,
+            )
+        if invalid_replay is None:
+            first = (prefix_device - prefix_device.remainder(4)) // page_size
+            last = (prefix_device + length_device - 1) // page_size
+            active = length_device > 0
+            invalid = active & ((first < 0) | (last >= table.shape[1]))
+            columns = (
+                torch.stack((first, last), dim=1).clamp(0, table.shape[1] - 1).long()
+            )
+            physical = table.gather(1, columns)
+            invalid_state = (
+                invalid.any()
+                | (
+                    active.unsqueeze(1) & ((physical <= 0) | (physical >= pool_size))
+                ).any()
+            )
+            actual = transported.reshape(self.token_capacity, self.position_factor)[
+                : len(positions)
+            ]
+            invalid_positions = (actual != expected_positions.unsqueeze(1)).any()
+            invalid_replay = invalid_state | invalid_positions
+        if bool(invalid_replay.item()):
             raise RuntimeError(
                 "QSA draft graph has invalid raw-state pages or positions disagree with logical cache positions"
             )

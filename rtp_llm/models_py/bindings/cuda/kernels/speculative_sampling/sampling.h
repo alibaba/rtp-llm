@@ -28,4 +28,21 @@ cudaError_t invokeRejectionSampling(DType*       draft_probs,
                                     int          target_vocab_size,
                                     cudaStream_t stream,
                                     bool         draft_probs_point_mass = false);
+
+cudaError_t invokeSplitRejectionSampling(const float* draft_probs,
+                                         const int*   draft_ids,
+                                         const float* uniforms,
+                                         const float* target_probs,
+                                         const int*   target_ids,
+                                         int          target_stride,
+                                         int*         output_ids,
+                                         int*         accepted,
+                                         const bool*  do_sample,
+                                         int          batch,
+                                         int          steps,
+                                         int          vocab,
+                                         bool         point_mass,
+                                         float*       tile_sums,
+                                         int*         rejected_positions,
+                                         cudaStream_t stream);
 }  // namespace rtp_llm

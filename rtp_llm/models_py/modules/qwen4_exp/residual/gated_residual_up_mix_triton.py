@@ -42,6 +42,10 @@ def try_fp8_up_mix(x, weight, scale, normed, branches):
     if x.ndim < 2 or x.shape[-1] != 320 or not x.is_contiguous():
         return None
     rows = x.reshape(-1, x.shape[-1])
+    if rows.shape[0] > 4:
+        from .gated_residual_medium_up_mix_triton import try_fp8_hc_medium_up_mix
+
+        return try_fp8_hc_medium_up_mix(x, weight, scale, normed, branches)
     if not (
         branches == 4
         and is_supported(rows, weight, scale)

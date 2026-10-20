@@ -198,6 +198,7 @@ def build_base_rope(
     device: torch.device,
     logical_positions: Optional[torch.Tensor] = None,
     validate_position_axes: bool = True,
+    inv_freq: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Build one-axis Base RoPE for the Qwen4 MTP draft indexer.
 
@@ -239,6 +240,19 @@ def build_base_rope(
         )
 
     scale = _rope_scale(rope_config, "Base RoPE")
+    if inv_freq is not None and positions.is_cuda and torch.version.hip is None:
+        from .rope_triton import try_build_text_rope
+
+        fused = try_build_text_rope(
+            positions[:, 0],
+            rope_config,
+            "Base",
+            dtype=dtype,
+            device=device,
+            inv_freq=inv_freq,
+        )
+        if fused is not None:
+            return fused
     rotary_pairs = rope_dim // 2
     inv_freq = float(rope_config.base) ** (
         -2.0 * torch.arange(rotary_pairs, dtype=torch.float32, device=device) / rope_dim
@@ -474,19 +488,28 @@ class Qwen4ExpQSAIndexer(nn.Module):
 
     def project(self, hidden_states: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """``hidden -> (q [B,S,H,D], raw_keys [B,S,D])``, q normed but unrotated."""
+        q, token_k = self.project_raw(hidden_states)
+        q = exact_head_rms_norm(q, self.q_norm_gamma, self.norm_eps)
+        return q, token_k
+
+    def project_raw(self, hidden_states: torch.Tensor):
+        """Keep Q raw for a runtime consumer that explicitly fuses its norm."""
         qk = (
             self.qk_projection(hidden_states)
             if self.qk_projection is not None
             else F.linear(hidden_states, self.qk_proj)
         )
+        return self.split_projected(qk)
+
+    def split_projected(self, qk: torch.Tensor):
+        """Read the unchanged projection layout from an owner-prepared result."""
         q, token_k = torch.split(
             qk,
             [self.n_heads * self.head_dim, self.kv_heads * self.head_dim],
             dim=-1,
         )
-        shape = (*hidden_states.shape[:-1], -1, self.head_dim)
-        q = exact_head_rms_norm(q.reshape(shape), self.q_norm_gamma, self.norm_eps)
-        return q, token_k.reshape(shape).squeeze(-2)
+        shape = (*qk.shape[:-1], -1, self.head_dim)
+        return q.reshape(shape), token_k.reshape(shape).squeeze(-2)
 
     def pooled_block_keys(
         self,
@@ -633,6 +656,8 @@ class Qwen4ExpQSAIndexer(nn.Module):
         cos: torch.Tensor,
         sin: torch.Tensor,
         past_raw_keys: Optional[torch.Tensor] = None,
+        *,
+        precomputed_block_keys: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Causal selection from one already-computed indexer projection.
 
@@ -660,14 +685,25 @@ class Qwen4ExpQSAIndexer(nn.Module):
             q, cos[:, past_len:].unsqueeze(2), sin[:, past_len:].unsqueeze(2)
         )
 
-        out = torch.full(
-            (batch, seq_len, self.max_selected), -1, dtype=torch.int32, device=device
-        )
+        out = None
         positions = past_len + torch.arange(seq_len, device=device)
         # Complete blocks visible to each query; also where its tail starts.
         complete = (positions + 1) // ratio
 
-        block_keys = self.pooled_block_keys_all(raw_keys, cos, sin)
+        if precomputed_block_keys is not None:
+            if past_raw_keys is not None or not (
+                precomputed_block_keys.shape
+                == (batch, raw_keys.shape[1] // ratio, head_dim)
+                and precomputed_block_keys.dtype == raw_keys.dtype
+                and precomputed_block_keys.device == raw_keys.device
+                and precomputed_block_keys.stride(-1) == 1
+            ):
+                raise ValueError(
+                    "prefill block keys do not match the zero-prefix producer"
+                )
+            block_keys = precomputed_block_keys
+        else:
+            block_keys = self.pooled_block_keys_all(raw_keys, cos, sin)
         num_blocks = block_keys.shape[1]
         top_k = min(self.block_topk, num_blocks)
         if top_k > 0:
@@ -682,6 +718,25 @@ class Qwen4ExpQSAIndexer(nn.Module):
                 scores = torch.relu(scores.transpose(-1, -2)).sum(dim=-1) / math.sqrt(
                     self.head_dim
                 )
+            if ratio == 4 and self.token_budget == 2048:
+                from .qsa_topk_triton import try_select_qsa_tokens
+
+                visible_lengths = (positions + 1).to(torch.int32).repeat(batch)
+                selected = try_select_qsa_tokens(
+                    scores.reshape(batch * seq_len, num_blocks),
+                    visible_lengths,
+                    compress_ratio=4,
+                    token_budget=2048,
+                    finite_only=False,
+                )
+                if selected is not None:
+                    return selected.view(batch, seq_len, self.max_selected)
+            out = torch.full(
+                (batch, seq_len, self.max_selected),
+                -1,
+                dtype=torch.int32,
+                device=device,
+            )
             visible_block = torch.arange(num_blocks, device=device).unsqueeze(
                 0
             ) < complete.unsqueeze(1)
@@ -695,6 +750,13 @@ class Qwen4ExpQSAIndexer(nn.Module):
             tokens = torch.where(chosen.unsqueeze(-1) >= 0, tokens, -1)
             out[..., : top_k * ratio] = tokens.flatten(-2).to(torch.int32)
 
+        if out is None:
+            out = torch.full(
+                (batch, seq_len, self.max_selected),
+                -1,
+                dtype=torch.int32,
+                device=device,
+            )
         # Tail: the trailing incomplete block, always attended, never scored.
         tail_tokens = (complete * ratio).unsqueeze(-1) + torch.arange(
             ratio - 1, device=device

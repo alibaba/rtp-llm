@@ -336,7 +336,13 @@ class Qwen4ExpQSARuntimeContext:
         *,
         indexer: Any,
         rope_config: Any,
+        raw_query: bool = False,
     ) -> torch.Tensor:
         return qsa_target.select_target_verify_tokens(
-            self, q, raw_keys, indexer=indexer, rope_config=rope_config
+            self,
+            q,
+            raw_keys,
+            indexer=indexer,
+            rope_config=rope_config,
+            raw_query=raw_query,
         )
