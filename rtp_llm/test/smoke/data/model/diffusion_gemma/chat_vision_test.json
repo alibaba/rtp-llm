@@ -30,14 +30,14 @@
       "result": {
         "id": "chat-",
         "object": "chat.completion",
-        "created": 1792462216,
+        "created": 1792486246,
         "model": "",
         "choices": [
           {
             "index": 0,
             "message": {
               "role": "assistant",
-              "content": "<|channel><|channel>thought\n<channel|>A young woman sits on a sandy beach at sunset, smiling as her golden retriever sits up giving her its paw.",
+              "content": "<|channel><|channel>thought\n<channel|>A young woman sits on a sandy beach at sunset, smiling as she interacts with a golden retriever that is giving her its paw.",
               "name": null,
               "reasoning_content": null,
               "function_call": null,
@@ -91,7 +91,7 @@
       "result": {
         "id": "chat-",
         "object": "chat.completion",
-        "created": 1792462217,
+        "created": 1792486247,
         "model": "",
         "choices": [
           {
@@ -158,14 +158,14 @@
       "result": {
         "id": "chat-",
         "object": "chat.completion",
-        "created": 1792462220,
+        "created": 1792486248,
         "model": "",
         "choices": [
           {
             "index": 0,
             "message": {
               "role": "assistant",
-              "content": "<|channel><|channel>thought\n<channel|>The two images provided are identical. Both show a woman sitting on a beach at sunset, interacting with a golden Labrador-style dog that is sitting up on its hind legs to high-five with her.",
+              "content": "<|channel><|channel>thought\n<channel|>The two images provided are identical. Both show a woman sitting on a beach at sunset, interacting with a golden Labrador retriever that is giving her its paw.",
               "name": null,
               "reasoning_content": null,
               "function_call": null,
@@ -219,14 +219,14 @@
       "result": {
         "id": "chat-",
         "object": "chat.completion",
-        "created": 1792462222,
+        "created": 1792486251,
         "model": "",
         "choices": [
           {
             "index": 0,
             "message": {
               "role": "assistant",
-              "content": "<|channel>",
+              "content": "<|channel>******************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************",
               "name": null,
               "reasoning_content": null,
               "function_call": null,
@@ -288,7 +288,7 @@
       "result": {
         "id": "chat-",
         "object": "chat.completion",
-        "created": 1792462223,
+        "created": 1792486251,
         "model": "",
         "choices": [
           {
@@ -338,7 +338,7 @@
       "result": {
         "id": "chat-",
         "object": "chat.completion",
-        "created": 1792462223,
+        "created": 1792486252,
         "model": "",
         "choices": [
           {
