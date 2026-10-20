@@ -191,7 +191,10 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                         // Keep the generation lock through this in-memory index
                         // update so retirement cannot publish a replacement or
                         // clear the address between validation and publication.
-                        updateLocalKvCache();
+                        WorkerCacheUpdateResult result = updateLocalKvCache();
+                        if (result != null && result.isSuccess()) {
+                            workerStatus.recordDiagnosticCacheIndexedVersion(newCacheStatus.getVersion());
+                        }
                     }
                     logCacheStatusUpdate(newCacheStatus, startTime);
                 }
