@@ -329,9 +329,7 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
             media.mm_type != MMUrlType.IMAGE for media in mm_inputs
         ):
             raise ValueError("V4.1 preprocessing requires non-empty IMAGE inputs")
-        # Validate the complete item before doing I/O; never publish a partial group.
-        for media in mm_inputs:
-            DeepSeekV41VisionEmbedding._validate_media_config(media)
+        # Legacy image hints are ignored; the model config owns preprocessing.
         results = []
         deadline = time.monotonic() + 60
         for media in mm_inputs:
@@ -403,26 +401,6 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
         for media in mm_inputs:
             if media.mm_type != MMUrlType.IMAGE:
                 raise ValueError("V4.1 supports IMAGE inputs only")
-            self._validate_media_config(media)
-
-    @staticmethod
-    def _validate_media_config(media):
-        config = media.mm_preprocess_config
-        fields = (
-            "width",
-            "height",
-            "min_pixels",
-            "max_pixels",
-            "fps",
-            "min_frames",
-            "max_frames",
-            "max_long_side_pixel",
-        )
-        if (
-            any(getattr(config, name, -1) != -1 for name in fields)
-            or config.crop_positions
-        ):
-            raise ValueError("V4.1 image preprocessing is fixed by the model config")
 
     @staticmethod
     def _image_group(data):

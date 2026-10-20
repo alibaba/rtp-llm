@@ -152,7 +152,7 @@ class V41ImageRendererTest(TestCase):
             [item.url for item in rendered.multimodal_inputs],
         )
 
-    def test_text_remains_renderable_and_resize_override_fails(self):
+    def test_text_remains_renderable_and_resize_hints_are_ignored(self):
         request = ChatCompletionRequest.model_validate(
             {
                 "messages": [
@@ -182,8 +182,21 @@ class V41ImageRendererTest(TestCase):
                 ]
             }
         )
-        with self.assertRaisesRegex(FtRuntimeException, "fixed by the model config"):
-            self.renderer.render_chat(request)
+        original = request.model_dump()
+        actual = self.renderer.render_chat(request)
+        baseline = request.model_dump()
+        baseline["messages"][0]["content"][0]["preprocess_config"] = None
+        expected = self.renderer.render_chat(
+            ChatCompletionRequest.model_validate(baseline)
+        )
+        self.assertEqual(actual.rendered_prompt, expected.rendered_prompt)
+        self.assertEqual(actual.input_ids, expected.input_ids)
+        self.assertEqual(len(actual.multimodal_inputs), 1)
+        self.assertEqual(
+            actual.multimodal_inputs[0].url, expected.multimodal_inputs[0].url
+        )
+        self.assertEqual(actual.multimodal_inputs[0].mm_type, MMUrlType.IMAGE)
+        self.assertEqual(request.model_dump(), original)
 
     def test_normal_render_does_not_decode_pixels(self):
         url = data_url((17, 23, 42))

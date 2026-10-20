@@ -114,8 +114,6 @@ def _content(value, role: str) -> tuple[str, list[dict]]:
         return _validate_text(value), []
     parts, images = [], []
     for part in value:
-        if any(v is not None for v in (part.get("preprocess_config") or {}).values()):
-            raise ValueError("V4.1 image preprocessing is fixed by the model config")
         if part.get("type") == "text":
             parts.append(_validate_text(part.get("text") or ""))
         elif part.get("type") == "image_url":
