@@ -142,7 +142,8 @@ void P2PConnectorMetrics::report(const kmonitor::MetricsTags* tags, P2PConnector
         REPORT_MUTABLE_METRIC(decode_scheduler_oldest_kv_hold_ms_metric, collector->decode_scheduler_oldest_kv_hold_ms);
     }
     // decode schedule：请求级采样，total 由上报方保证已写入，作为本场景的触发字段。
-    if (collector->decode_schedule_total_cost_time_us >= 0) {
+    const auto decode_schedule_total_us = collector->decode_schedule_total_cost_time_us.load();
+    if (decode_schedule_total_us >= 0) {
         if (collector->decode_schedule_server_call_cost_time_us >= 0) {
             REPORT_MUTABLE_METRIC(decode_schedule_server_call_cost_time_us_metric,
                                   collector->decode_schedule_server_call_cost_time_us.load());
@@ -176,11 +177,11 @@ void P2PConnectorMetrics::report(const kmonitor::MetricsTags* tags, P2PConnector
                                   collector->decode_schedule_lease_hold_time_us);
         }
         REPORT_MUTABLE_QPS(decode_schedule_qps_metric);
-        if (!collector->decode_schedule_success) {
+        if (!collector->decode_schedule_success.load()) {
             REPORT_MUTABLE_QPS(decode_schedule_failed_qps_metric);
         }
-        if (collector->decode_schedule_total_cost_time_us > 0) {
-            REPORT_MUTABLE_METRIC(decode_schedule_cost_time_us_metric, collector->decode_schedule_total_cost_time_us);
+        if (decode_schedule_total_us > 0) {
+            REPORT_MUTABLE_METRIC(decode_schedule_cost_time_us_metric, decode_schedule_total_us);
         }
     }
 

@@ -683,9 +683,9 @@ void P2PConnectorAsyncReadContextChecker::reportDecodeScheduleMetrics(
     if (!collector) {
         return;
     }
-    if (collector->decode_schedule_total_cost_time_us < 0) {
-        collector->decode_schedule_total_cost_time_us = currentTimeUs() - collector->decode_schedule_start_time_us;
-    }
+    int64_t unset_total_us = -1;
+    collector->decode_schedule_total_cost_time_us.compare_exchange_strong(
+        unset_total_us, currentTimeUs() - collector->decode_schedule_start_time_us);
     metrics_reporter_->report<P2PConnectorMetrics, P2PConnectorMetricsCollector>(nullptr, collector.get());
 }
 

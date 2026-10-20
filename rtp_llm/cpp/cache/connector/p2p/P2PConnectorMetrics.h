@@ -19,11 +19,11 @@ public:
 
 public:
     // ---- decode schedule：每次 asyncRead 一份采样，终态且 lease 释放后上报一次 ----
-    bool                 decode_schedule_success       = true;
+    std::atomic<bool>    decode_schedule_success{true};
     int64_t              decode_schedule_start_time_us = 0;
     std::atomic<int64_t> decode_schedule_server_call_cost_time_us{-1};
     std::atomic<int64_t> decode_schedule_tp_sync_cost_time_us{-1};
-    int64_t              decode_schedule_total_cost_time_us       = -1;
+    std::atomic<int64_t> decode_schedule_total_cost_time_us{-1};
     int64_t              decode_schedule_plan_cost_time_us        = -1;
     int64_t              decode_schedule_kickoff_queue_time_us    = -1;
     int64_t              decode_schedule_server_submit_time_us    = -1;
