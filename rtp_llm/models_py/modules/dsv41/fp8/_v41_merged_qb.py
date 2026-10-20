@@ -103,8 +103,14 @@ class MergedQB(torch.nn.Module):
         self.weight_scales[: self.main_width].copy_(mega.query_scale)
         self.weight_scales[self.main_width :].copy_(index.weight_scales)
 
-    def forward_quantized(self, data, scales):
+    def forward_quantized(self, data, scales, *, wait_pdl=False):
         import deep_gemm
+
+        from ._v41_qb_kv import try_project
+
+        result = try_project(self, data, scales, wait_pdl=wait_pdl)
+        if result is not None:
+            return result
 
         width = self.main_width + self.index_width
         output = torch.empty(

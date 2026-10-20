@@ -99,6 +99,34 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+# Qualified SM103-only QB backend. Other build platforms expose an unavailable
+# stub so Python dispatch retains the existing DeepGEMM implementation.
+cc_library(
+    name = "dsv41_qb_kv",
+    srcs = ["dsv41_qb_kv.cu"],
+    hdrs = ["dsv41_qb_kv.h"] + glob(["dsv41_qb_kv/*.cuh"]),
+    deps = torch_deps() + select({
+        "@//:using_cuda13_x86": [
+            "@cutlass4.0//:cutlass",
+            "@local_config_cuda//cuda:cuda_headers",
+            "@local_config_cuda//cuda:cudart",
+            "@local_config_cuda//cuda:cuda_driver",
+        ],
+        "//conditions:default": [],
+    }),
+    copts = select({
+        "@//:using_cuda13_x86": copts() + cuda_default_copts_without_arch() + [
+            "-O3", "-std=c++17", "-DRTP_DSV41_QB_KV_ENABLED",
+            "-U__CUDA_NO_HALF_OPERATORS__", "-U__CUDA_NO_HALF_CONVERSIONS__",
+            "-U__CUDA_NO_HALF2_OPERATORS__", "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+            "-nvcc_options=expt-relaxed-constexpr", "-nvcc_options=ftz=false",
+            "--cuda-include-ptx=sm_103a", "--cuda-gpu-arch=sm_103a",
+        ],
+        "//conditions:default": cuda_copts(),
+    }),
+    visibility = ["//visibility:public"],
+)
+
 cc_library(
     name = "cuda_utils_common",
     hdrs = [

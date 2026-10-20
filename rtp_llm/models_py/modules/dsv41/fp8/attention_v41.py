@@ -2997,6 +2997,7 @@ class AttentionV41FP8(AttentionFP8):
         *,
         prepared_query=None,
         overlap=None,
+        slot_plan=None,
     ):
         """Capture-static index scoring with device-side causal/candidate masks."""
         shared = self._shared_attention
@@ -3189,7 +3190,10 @@ class AttentionV41FP8(AttentionFP8):
                             all_logits, cached_mask[1], candidate_size
                         )
                 output = decode_topk.select_tokens(
-                    all_logits, visible_i32, self.index_topk
+                    all_logits,
+                    visible_i32,
+                    self.index_topk,
+                    **({"slot_plan": slot_plan} if slot_plan is not None else {}),
                 )
                 shared["topk"] = {self.layer_id: output}
                 return output

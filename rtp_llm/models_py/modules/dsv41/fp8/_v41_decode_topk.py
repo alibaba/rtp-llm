@@ -12,6 +12,7 @@ Token K512 uses native DeepSelect when supported, with radix-select fallback.
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 
 import torch
 import triton
@@ -21,6 +22,39 @@ from rtp_llm.models_py.modules.dsv41.fp8 import _v41_prefill_deepselect as deeps
 from rtp_llm.models_py.modules.dsv41.fp8 import _v41_candidate_topk_v3 as candidate_topk
 from rtp_llm.models_py.modules.dsv41.fp8.indexer import _TOPK_V3_OK, _get_topk_workspace
 from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+
+@dataclass
+class DecodeSlotPlan:
+    """Forward-local slot output; shared TopK always remains in local coordinates."""
+
+    request_ids: torch.Tensor
+    block_table: torch.Tensor
+    entries: int
+    logical_entries: int
+    slots: torch.Tensor | None = None
+
+
+def make_slot_plan(request_ids, block_table, *, entries, logical_entries):
+    if os.environ.get("DSV41_FUSED_TOPK_SLOTS", "0") != "1":
+        return None
+    if not (
+        request_ids.is_cuda
+        and request_ids.ndim == 1
+        and request_ids.is_contiguous()
+        and request_ids.dtype == torch.int32
+        and block_table.device == request_ids.device
+        and block_table.dtype == torch.int32
+        and block_table.ndim == 2
+        and block_table.shape[0] > 0
+        and block_table.shape[1] > 0
+        and block_table.stride(1) == 1
+        and block_table.stride(0) >= block_table.shape[1]
+        and entries == logical_entries
+        and entries > 0
+    ):
+        return None
+    return DecodeSlotPlan(request_ids, block_table, entries, logical_entries)
 
 
 def is_supported(logits: torch.Tensor, lengths: torch.Tensor, topk: int) -> bool:
@@ -219,6 +253,55 @@ def _finite_topk_kernel(
     tl.store(output + row * K + columns, tl.where(keep, index, -1), columns < K)
 
 
+@triton.jit
+def _finite_topk_slots_kernel(
+    logits,
+    lengths,
+    output,
+    requests,
+    table,
+    slots,
+    WIDTH: tl.constexpr,
+    STRIDE: tl.constexpr,
+    K: tl.constexpr,
+    TABLE_ROWS: tl.constexpr,
+    TABLE_COLS: tl.constexpr,
+    TABLE_STRIDE: tl.constexpr,
+    ENTRIES: tl.constexpr,
+    LOGICAL: tl.constexpr,
+    TILE: tl.constexpr,
+):
+    row = tl.program_id(0).to(tl.int64)
+    columns = tl.program_id(1) * TILE + tl.arange(0, TILE)
+    length = tl.load(lengths + row)
+    index = tl.load(output + row * K + columns, columns < K, other=-1)
+    value = tl.load(
+        logits + row * STRIDE + index,
+        (columns < K) & (index >= 0) & (index < WIDTH),
+        other=-float("inf"),
+    )
+    keep = (length <= K) | (tl.abs(value) < float("inf"))
+    local = tl.where(keep, index, -1)
+    tl.store(output + row * K + columns, local, columns < K)
+    request = tl.load(requests + row).to(tl.int64)
+    block = local // LOGICAL
+    valid = (
+        (columns < K)
+        & (local >= 0)
+        & (block >= 0)
+        & (block < TABLE_COLS)
+        & (request >= 0)
+        & (request < TABLE_ROWS)
+    )
+    base = tl.load(table + request * TABLE_STRIDE + block, valid, other=0)
+    physical = base * ENTRIES + local % ENTRIES
+    tl.store(
+        slots + row * K + columns,
+        tl.where(valid & (base > 0), physical, -1),
+        columns < K,
+    )
+
+
 def select_candidates(
     logits: torch.Tensor,
     lengths: torch.Tensor,
@@ -310,9 +393,16 @@ def mask_candidates(logits: torch.Tensor, flags: torch.Tensor, block_size: int) 
 
 
 def select_tokens(
-    logits: torch.Tensor, lengths: torch.Tensor, topk: int
+    logits: torch.Tensor, lengths: torch.Tensor, topk: int, *, slot_plan=None
 ) -> torch.Tensor:
     rows, width = logits.shape
+    if slot_plan is not None:
+        if (
+            slot_plan.request_ids.numel() != rows
+            or slot_plan.request_ids.device != logits.device
+        ):
+            raise ValueError("Slot mapping does not match selected query rows")
+        slot_plan.slots = None
     output = torch.empty((rows, topk), dtype=torch.int32, device=logits.device)
     selected = None
     if topk == 512:
@@ -329,7 +419,29 @@ def select_tokens(
         )
     # Decode retains all visible indices on short rows, even candidate-mask holes.
     # Native selection must not filter them before this shared publication step.
-    _finite_topk_kernel[(rows, triton.cdiv(topk, 256))](
-        logits, lengths, output, width, logits.stride(0), topk, 256
-    )
+    if slot_plan is None:
+        _finite_topk_kernel[(rows, triton.cdiv(topk, 256))](
+            logits, lengths, output, width, logits.stride(0), topk, 256
+        )
+    else:
+        slots = torch.empty_like(output)
+        table = slot_plan.block_table
+        _finite_topk_slots_kernel[(rows, triton.cdiv(topk, 256))](
+            logits,
+            lengths,
+            output,
+            slot_plan.request_ids,
+            table,
+            slots,
+            width,
+            logits.stride(0),
+            topk,
+            table.shape[0],
+            table.shape[1],
+            table.stride(0),
+            slot_plan.entries,
+            slot_plan.logical_entries,
+            256,
+        )
+        slot_plan.slots = slots
     return output

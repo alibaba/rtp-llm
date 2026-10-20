@@ -11,6 +11,7 @@ keeps ``attention.py`` thin.
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING, NamedTuple
 
 import torch
@@ -139,6 +140,42 @@ def decode_compute_qkv(
     index_q = None
     index_prepared = None
     merged = getattr(mega_attention, "merged_qb", None)
+    if (
+        os.environ.get("DSV41_FUSED_QB_KV", "0") == "1"
+        and not reindex
+        and merged is not None
+        and qr_quantized is not None
+        and fused_qkv is not None
+        and getattr(attn, "skip_post_q_norm", False)
+        and rd == 64
+        and (attn.n_heads, attn.head_dim, getattr(mega_attention, "padded_heads", None))
+        == (64, 512, 64)
+    ):
+        from rtp_llm.models_py.modules.dsv41.fp8._v41_qb_kv import try_project_kv
+
+        result = try_project_kv(
+            merged,
+            *qr_quantized,
+            fused_qkv[1],
+            attn.kv_norm,
+            position_ids,
+            attn.freqs_cis,
+            swa_pool,
+            swa_slots,
+            eps=attn.eps,
+            wait_pdl=qb_pdl,
+        )
+        if result is not None:
+            main_q, index_q, kv = result
+            return DecodeQKV(
+                qr,
+                main_q.unflatten(-1, (attn.n_heads, attn.head_dim)),
+                kv,
+                freqs_cis,
+                qr_quantized,
+                True,
+                index_q,
+            )
     if merged is not None and qr_quantized is not None:
         from rtp_llm.models_py.modules.dsv41._profiler import record_function_range
 
@@ -152,7 +189,9 @@ def decode_compute_qkv(
                 if reindex and rd == 64 and not qb_pdl else None
             )
             if prepared is None:
-                q, index_q = merged.forward_quantized(*qr_quantized)
+                q, index_q = merged.forward_quantized(
+                    *qr_quantized, **({"wait_pdl": True} if qb_pdl else {})
+                )
             else:
                 q, index_prepared = prepared
         q = q.unflatten(-1, (attn.n_heads, attn.head_dim))
