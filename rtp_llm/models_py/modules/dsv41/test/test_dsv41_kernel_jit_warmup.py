@@ -393,6 +393,19 @@ class V41KernelJitWarmupTest(unittest.TestCase):
             self.assertEqual(warmup._sm90_dense_m_grid(3, 5120), (1, 2, 3))
             self.assertEqual(warmup._sm90_dense_m_grid(0, 5120), ())
 
+    def test_sm90_long_prefill_grid_bounds_allocations_and_keeps_quantizer_branches(
+        self,
+    ):
+        # CP8 at 1M scheduler tokens must not allocate a 131072 x 32768
+        # BF16 GEMM result just to compile Humming's M-independent kernels.
+        grid = warmup._sm90_dense_m_grid(131072, 1280)
+        self.assertEqual(grid, (1, 2, 3, 4, 16, 17, 511, 512, 3276, 3277, 4096))
+        # Small-K linears still cover the activation quantizer's 4M boundary.
+        small_k = warmup._sm90_dense_m_grid(131072, 512)
+        self.assertIn(8191, small_k)
+        self.assertIn(8192, small_k)
+        self.assertEqual(max(small_k), 8192)
+
     def test_v41_single_accumulator_allows_n256_without_changing_v4(self):
         kwargs = dict(m_value=1024, n_value=32768, k_value=1536, num_sms=152)
         current = warmup.common._sm100_dense_layout_signature(kind="v41_fp8", **kwargs)

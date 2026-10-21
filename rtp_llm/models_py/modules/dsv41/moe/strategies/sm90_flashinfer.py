@@ -176,14 +176,14 @@ class SM90FlashInferStrategy(RoutedExpertsStrategy):
                 self._max_tokens_per_rank,
                 self.cfg.dim,
                 8,
-                self.cfg.n_routed_experts,
                 self.cfg.ep_rank,
                 torch.cuda.current_device(),
                 id(group),
             )
-            # Target and draft may have different expert geometry/capacity.
-            # Keep each allocation alive for its captured graphs; identical
-            # layers still share the same buffer as in non-speculative decode.
+            # Expert geometry is a per-dispatch argument, not an allocation
+            # parameter. Serial target/draft forwards can share the same buffer;
+            # keep distinct capacities alive for their captured graphs. Local
+            # expert scratch and dispatch handles remain owned by each forward.
             buffers = getattr(wrapper, "_dsv41_elastic_buffers", None)
             if buffers is None:
                 buffers = wrapper._dsv41_elastic_buffers = {}

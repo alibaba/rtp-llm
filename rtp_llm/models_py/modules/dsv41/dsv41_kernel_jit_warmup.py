@@ -174,7 +174,9 @@ def _sm90_dense_m_grid(max_m, k):
 
     Humming 0.1.16's prepare_kernels compiles every configured M interval on
     the first call. The actual wrapper launches below additionally cover RTP's
-    packed-scale alignment, quantizer dispatch boundary and runtime row bound.
+    packed-scale alignment and both quantizer dispatch branches. Full scheduler
+    capacity is not a GEMM compile key: materializing its output can consume
+    several GiB in addition to the already allocated weights and KV cache.
     """
     threshold = (4 * 1024 * 1024 + k - 1) // k
     return tuple(
@@ -191,7 +193,7 @@ def _sm90_dense_m_grid(max_m, k):
                 512,
                 threshold - 1,
                 threshold,
-                int(max_m),
+                min(int(max_m), max(4096, threshold)),
             }
             if 0 < m <= max_m
         )

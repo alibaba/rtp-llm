@@ -283,7 +283,7 @@ def test_v2_guards_reject_before_dispatch(monkeypatch, graph):
 
 @pytest.mark.parametrize("graph", [False, True])
 @pytest.mark.parametrize("draft_first", [False, True])
-def test_v2_target_draft_buffers_are_isolated_and_reused(
+def test_v2_target_draft_share_allocation_with_distinct_expert_geometry(
     monkeypatch, graph, draft_first
 ):
     target_cfg = dataclasses.replace(
@@ -304,15 +304,15 @@ def test_v2_target_draft_buffers_are_isolated_and_reused(
     original = first._comm_buffer
     second.setup_runtime()
     assert first._comm_buffer is original
-    assert second._comm_buffer is not original
-    assert factory.call_count == 2
+    assert second._comm_buffer is original
+    assert factory.call_count == 1
     for cfg, expected in zip(configs, [first, second]):
         another = candidate.SM90FlashInferStrategy(dataclasses.replace(cfg, layer_id=1))
         another.setup_runtime()
         expected.setup_runtime()
         assert another._comm_buffer is expected._comm_buffer
-    assert factory.call_count == 2
-    assert len(wrapper._dsv41_elastic_buffers) == 2
+    assert factory.call_count == 1
+    assert len(wrapper._dsv41_elastic_buffers) == 1
     if graph:
         for strategy in [first, second]:
             topk = 8 if strategy.cfg.n_routed_experts == 384 else 4
