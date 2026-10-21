@@ -8,7 +8,7 @@ import logging
 import os
 from contextlib import contextmanager
 from types import SimpleNamespace
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import torch
 
@@ -340,6 +340,11 @@ def _scatter_actual_to_padded(
     padded.index_copy_(0, dst_idx, actual)
 
 
+# Share one ordered stream across layer/op instances so the existing symmetric
+# mla_ckv window keeps its single-stream ownership instead of falling back.
+_KV_GATHER_STREAMS: Dict[int, torch.cuda.Stream] = {}
+
+
 class SparseMlaFp8CPOp(SparseMlaFp8Op):
     """Context-parallel sparse MLA prefill: all-gather KV, restore to global order,
     write to paged cache, then run attention only on q tokens this rank owns."""
@@ -371,6 +376,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         self.prefill_cp_rank = int(getattr(parallelism_config, "tp_rank", 0))
         self.prefill_cp_size = int(getattr(parallelism_config, "tp_size", 1))
         self.device = torch.cuda.current_device()
+        self._kv_gather_stream: Optional[torch.cuda.Stream] = None
         # Default to kernel granularity (bpk == 1). SparseMlaCpImpl overrides
         # this with attn_configs.tokens_per_block right after construction so
         # page-RR sharding uses the same owner granularity as the C++
@@ -810,6 +816,68 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         )
         return global_2d.unsqueeze(1)
 
+    def gather_kv(
+        self,
+        compressed_kv: torch.Tensor,
+        k_pe: torch.Tensor,
+        overlap: bool = False,
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.cuda.Stream]]:
+        """Gather both main-KV components once, optionally alongside the Q BMM.
+
+        RoPE must already have updated k_pe. Indexer collectives precede this
+        call on every rank; the consumer joins before any later collective.
+        Capture retains the current-stream path and the same packed layout.
+        """
+        gather_stream = None
+        if (
+            overlap
+            and compressed_kv.is_cuda
+            and self.prefill_cp_size > 1
+            and not self.use_cuda_graph
+            and not torch.cuda.is_current_stream_capturing()
+        ):
+            producer = torch.cuda.current_stream(compressed_kv.device)
+            if self._kv_gather_stream is None:
+                device_index = compressed_kv.device.index
+                if device_index not in _KV_GATHER_STREAMS:
+                    _KV_GATHER_STREAMS[device_index] = torch.cuda.Stream(
+                        device=compressed_kv.device
+                    )
+                self._kv_gather_stream = _KV_GATHER_STREAMS[device_index]
+            gather_stream = self._kv_gather_stream
+            gather_stream.wait_stream(producer)
+            # Inputs belong to the producer stream, including temporary KPE
+            # copies. Keep their storage live until this stream has read it.
+            compressed_kv.record_stream(gather_stream)
+            k_pe.record_stream(gather_stream)
+            self.kv_restore_unpad_indices.record_stream(gather_stream)
+
+        with torch.cuda.stream(gather_stream):
+            if compressed_kv.dtype == k_pe.dtype:
+                packed = torch.cat((compressed_kv, k_pe), dim=-1)
+                # Reuse the existing cKV window; no extra persistent KV budget.
+                gathered = all_gather(packed, group=Group.TP, role="mla_ckv")
+                gathered = gathered.reshape(-1, packed.size(-1))
+                restored = gathered[self.kv_restore_unpad_indices]
+                restored_ckv, restored_k_pe = restored.split(
+                    (compressed_kv.size(-1), k_pe.size(-1)), dim=-1
+                )
+            else:
+                # Preserve the original dtype contract for nonstandard callers.
+                gathered_ckv = all_gather(
+                    compressed_kv.contiguous(), group=Group.TP, role="mla_ckv"
+                )
+                gathered_k_pe = all_gather(
+                    k_pe.contiguous(), group=Group.TP, role="mla_kpe"
+                )
+                restored_ckv = gathered_ckv.reshape(-1, compressed_kv.size(-1))[
+                    self.kv_restore_unpad_indices
+                ]
+                restored_k_pe = gathered_k_pe.reshape(-1, k_pe.size(-1))[
+                    self.kv_restore_unpad_indices
+                ]
+        return restored_ckv, restored_k_pe, gather_stream
+
     def forward(
         self,
         q: torch.Tensor,
@@ -823,6 +891,9 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         original_q_len: Optional[int] = None,
         prepared_kv: Optional[torch.Tensor] = None,
         defer_output_scatter: bool = False,
+        gathered_kv: Optional[
+            Tuple[torch.Tensor, torch.Tensor, Optional[torch.cuda.Stream]]
+        ] = None,
     ) -> torch.Tensor:
         """Attend in total_local_ids order, then restore the original local rows.
 
@@ -832,7 +903,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         defer_output_scatter keeps the selected order for the caller's V BMM.
         """
         if prepared_kv is None:
-            self.write_kv(compressed_kv, k_pe, kv_cache)
+            self.write_kv(compressed_kv, k_pe, kv_cache, gathered_kv=gathered_kv)
 
         no_q_work = (
             topk is None
@@ -887,16 +958,15 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         )
         return out
 
-    def write_kv(self, compressed_kv, k_pe, kv_cache):
-        gathered_ckv = all_gather(
-            compressed_kv.contiguous(), group=Group.TP, role="mla_ckv"
-        )
-        gathered_ckv = gathered_ckv.reshape(-1, compressed_kv.size(-1))
-        gathered_k_pe = all_gather(k_pe.contiguous(), group=Group.TP, role="mla_kpe")
-        gathered_k_pe = gathered_k_pe.reshape(-1, k_pe.size(-1))
-
-        restored_ckv = gathered_ckv[self.kv_restore_unpad_indices]
-        restored_k_pe = gathered_k_pe[self.kv_restore_unpad_indices]
+    def write_kv(self, compressed_kv, k_pe, kv_cache, gathered_kv=None):
+        if gathered_kv is None:
+            gathered_kv = self.gather_kv(compressed_kv, k_pe)
+        restored_ckv, restored_k_pe, gather_stream = gathered_kv
+        if gather_stream is not None:
+            consumer = torch.cuda.current_stream(compressed_kv.device)
+            consumer.wait_stream(gather_stream)
+            restored_ckv.record_stream(consumer)
+            restored_k_pe.record_stream(consumer)
         self.kv_cache_write_op.forward(
             restored_ckv,
             restored_k_pe,
@@ -1456,6 +1526,16 @@ class SparseMlaCpImpl(SparseMlaImpl):
         if prepared_kv is None:
             k_pe = self._apply_rope(q, k_pe)
 
+        # K is now rotated and independent of the absorbed Q projection. The
+        # side stream helps large prefills but adds launch/event overhead for
+        # small ones, so retain same-stream packed gathering by default.
+        gathered_kv = None
+        if (
+            prepared_kv is None
+            and os.environ.get("RTP_LLM_CP_KV_Q_OVERLAP", "0") == "1"
+        ):
+            gathered_kv = self.fmha_impl.gather_kv(compressed_kv, k_pe, overlap=True)
+
         workspace = self._glm53_prefill_workspace
         q_transform_out = None
         scatter_out = None
@@ -1523,6 +1603,7 @@ class SparseMlaCpImpl(SparseMlaImpl):
             original_q_len=original_q_len,
             prepared_kv=fused_kv,
             defer_output_scatter=defer_output_scatter,
+            gathered_kv=gathered_kv,
         )
         pipeline = getattr(self, "_cross_layer_prefetch", None)
         if pipeline is not None:

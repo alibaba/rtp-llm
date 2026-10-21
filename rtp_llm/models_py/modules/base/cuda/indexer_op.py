@@ -42,18 +42,77 @@ def _get_topk_workspace(device: torch.device) -> torch.Tensor:
     return ws
 
 
-def _fp8_mqa_logits_chunk_rows() -> int:
-    """Rows per FP8 MQA logits chunk.
+def _fp8_mqa_chunk_workspace_bytes(
+    rows: int,
+    num_kv_tokens: int,
+    index_topk: int,
+    index_n_heads: int,
+    score_dtype: torch.dtype,
+    canonicalize: bool,
+) -> int:
+    """Peak chunk-local storage, excluding full gathered K and final TopK output."""
+    if rows == 0:
+        return 0
+    # DeepGEMM's uncompressed MQA scores pad Q to 128 / heads and reserve
+    # K + 256 columns with a 1024-byte-aligned row stride (attention.hpp).
+    block_q = 128 // index_n_heads
+    padded_rows = (rows + block_q - 1) // block_q * block_q
+    row_bytes = ((num_kv_tokens + 256) * score_dtype.itemsize + 1023) // 1024 * 1024
+    score_peak = padded_rows * row_bytes + rows * index_topk * 4
+    # Both prefill TopK backends use shared/register scratch, not a second
+    # score matrix. The writer may promote offsets to int64; canonicalization
+    # also retains sort values/indices and masks. Include conservative scratch
+    # for both the fused writer and its Torch fallback. Scores are released
+    # before the writer, so these two phases do not add their peaks together.
+    writer_peak = rows * index_topk * (64 if canonicalize else 32)
+    return max(score_peak, writer_peak)
 
-    Long-context CP prefill can otherwise materialize a [local_q, full_k]
-    logits matrix. Keep this opt-in for the shared base indexer path; the GLM5
-    smoke target enables it explicitly with the same env used by DSV4.
+
+def _fp8_mqa_logits_chunk_rows(
+    num_rows: int,
+    num_kv_tokens: int,
+    index_topk: int,
+    index_n_heads: int,
+    score_dtype: torch.dtype = torch.float32,
+    topk_backend: str = "dsv4_per_row",
+) -> int:
+    """Choose prefill rows from a 256 MiB chunk-workspace budget by default.
+
+    Existing explicit row settings (including 0 = unchunked) keep precedence.
+    Full gathered K/scales and the final [num_rows, topk] output are a fixed
+    memory floor, not chunk-local workspace. No free-memory query or GPU
+    synchronization is needed. One Q tile is the minimum even if its workspace
+    exceeds the budget; chunking cannot eliminate that minimum allocation.
     """
-    return dsv4_chunk_tokens_from_env(
-        "DSV4_FP8_INDEXER_SCORE_CHUNK_ROWS",
-        default=0,
-        min_value=0,
+    if num_rows == 0:
+        return 0
+    if any(
+        name in os.environ
+        for name in ("DSV4_CHUNK_TOKENS", "DSV4_FP8_INDEXER_SCORE_CHUNK_ROWS")
+    ):
+        fixed_rows = dsv4_chunk_tokens_from_env(
+            "DSV4_FP8_INDEXER_SCORE_CHUNK_ROWS", default=0, min_value=0
+        )
+        return min(fixed_rows, num_rows) if fixed_rows > 0 else num_rows
+    # Without forced radix, the legacy kernel switches algorithms at row
+    # 12288. Rechunking would change that boundary and possibly tie ordering.
+    if topk_backend == "dsv4_per_row" and not _fp8_prefill_topk_force_radix_sort():
+        return num_rows
+    try:
+        budget_mb = int(os.environ.get("RTP_LLM_INDEXER_WORKSPACE_MB", "256"))
+    except ValueError:
+        budget_mb = 256
+    budget_bytes = max(budget_mb, 1) * 1024 * 1024
+    block_q = 128 // index_n_heads
+    tile_bytes = _fp8_mqa_chunk_workspace_bytes(
+        block_q,
+        num_kv_tokens,
+        index_topk,
+        index_n_heads,
+        score_dtype,
+        _fp8_prefill_topk_canonicalize(),
     )
+    return min(num_rows, max(1, budget_bytes // tile_bytes) * block_q)
 
 
 def _fp8_prefill_topk_force_radix_sort() -> bool:
@@ -923,8 +982,13 @@ class IndexerOp(nn.Module):
         )
         if num_rows == 0:
             return topk_result
-        chunk_rows_env = _fp8_mqa_logits_chunk_rows()
-        chunk_rows = num_rows if chunk_rows_env <= 0 else min(chunk_rows_env, num_rows)
+        chunk_rows = _fp8_mqa_logits_chunk_rows(
+            num_rows,
+            total_kv_tokens,
+            self.index_topk,
+            self.index_n_heads,
+            topk_backend=self._prefill_topk_backend,
+        )
         prefill_max_kv_len = int(
             getattr(fmha_params, "prefill_max_kv_len", total_kv_tokens)
         )
@@ -950,6 +1014,7 @@ class IndexerOp(nn.Module):
                 topk_part,
                 prefill_max_kv_len,
             )
+            del logits  # Same-stream reuse is safe after TopK has been enqueued.
             _write_prefill_topk(
                 topk_part,
                 (
@@ -960,7 +1025,7 @@ class IndexerOp(nn.Module):
                 ),
                 topk_result[row_start:row_end],
             )
-            del logits, topk_part
+            del topk_part
             row_start = row_end
 
         return topk_result
@@ -1141,8 +1206,13 @@ class IndexerOp(nn.Module):
             )
             if nr == 0:
                 return topk_result
-            chunk_rows_env = _fp8_mqa_logits_chunk_rows()
-            chunk_rows = nr if chunk_rows_env <= 0 else min(chunk_rows_env, nr)
+            chunk_rows = _fp8_mqa_logits_chunk_rows(
+                nr,
+                total_kv_tokens,
+                self.index_topk,
+                self.index_n_heads,
+                topk_backend=self._prefill_topk_backend,
+            )
             row_start = 0
             while row_start < nr:
                 row_end = min(row_start + chunk_rows, nr)
@@ -1169,6 +1239,7 @@ class IndexerOp(nn.Module):
                     topk_part,
                     prefill_max_kv_len,
                 )
+                del logits_p  # Do not retain scores during TopK postprocessing.
                 _write_prefill_topk(
                     topk_part,
                     (
@@ -1178,7 +1249,7 @@ class IndexerOp(nn.Module):
                     ),
                     topk_result[row_start:row_end],
                 )
-                del logits_p, topk_part
+                del topk_part
                 row_start = row_end
             return topk_result
 

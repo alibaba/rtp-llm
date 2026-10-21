@@ -5,6 +5,7 @@ RoPE, input/output BMM, FlashMLA sparse attention, and Triton scatter kernels.
 """
 
 import contextlib
+import os
 import unittest
 import weakref
 from types import SimpleNamespace
@@ -33,6 +34,7 @@ def _minimal_op(ids, identity=False):
     op.total_local_ids_is_identity = identity
     op.scatter_reverse_indices = None
     op.use_cuda_graph = False
+    op.prefill_cp_size = 1
     op.kv_restore_unpad_indices = torch.arange(3, device=ids.device)
     op.kv_cache_write_op = SimpleNamespace(forward=Mock())
     op.write_cache_store_impl = None
@@ -65,12 +67,15 @@ class QPreselectionControlTest(unittest.TestCase):
             total_local_ids=ids,
             total_local_ids_is_identity=identity,
             use_cuda_graph=graph,
+            gather_kv=Mock(return_value=None),
         )
         return impl
 
     def test_guard_and_small_q_lifetime(self):
         cases = [
             ("permuted", [0, 2, 1, 3], False, True, False, "valid", True),
+            ("overlap", [0, 2, 1, 3], False, True, False, "valid", True),
+            ("overlap_graph", [0, 2, 1, 3], False, True, True, "valid", False),
             ("padding", [0, 2, 1], False, True, False, "valid", True),
             ("identity", [0, 1, 2, 3], True, True, False, "valid", False),
             # An inconsistent identity flag conservatively retains the legacy path.
@@ -98,6 +103,12 @@ class QPreselectionControlTest(unittest.TestCase):
                 observed = {}
 
                 def project(q_arg, layer_id, out=None):
+                    # Only the opt-in side stream launches KV before the Q BMM.
+                    if name.startswith("overlap"):
+                        impl.fmha_impl.gather_kv.assert_called_once()
+                        self.assertTrue(impl.fmha_impl.gather_kv.call_args.kwargs["overlap"])
+                    else:
+                        impl.fmha_impl.gather_kv.assert_not_called()
                     self.assertEqual(layer_id, 2)
                     torch.testing.assert_close(q_arg, expected)
                     observed["selected_ref"] = weakref.ref(q_arg)
@@ -123,11 +134,15 @@ class QPreselectionControlTest(unittest.TestCase):
 
                 impl._apply_input_bmm = project
                 impl.fmha_impl.forward = attend
-                self.assertIsNone(
-                    impl.forward(
-                        q, torch.empty(4, 5), torch.empty(4, 1), object(), 2, topk
+                with patch.dict(
+                    os.environ,
+                    {"RTP_LLM_CP_KV_Q_OVERLAP": "1" if name.startswith("overlap") else "0"},
+                ):
+                    self.assertIsNone(
+                        impl.forward(
+                            q, torch.empty(4, 5), torch.empty(4, 1), object(), 2, topk
+                        )
                     )
-                )
                 if workspace:
                     self.assertIsNone(impl._glm53_prefill_workspace._storage)
 
@@ -188,7 +203,7 @@ class QPreselectionControlTest(unittest.TestCase):
                             object(),
                         )
                     self.assertIsNone(result)
-                    self.assertEqual(gather.call_count, 2)
+                    self.assertEqual(gather.call_count, 1)
                     op.kv_cache_write_op.forward.assert_called_once()
                     self.assertEqual(
                         op._gather_sharded_kv_cache.call_count, int(sharded)
@@ -592,7 +607,7 @@ class QPreselectionCudaTest(unittest.TestCase):
             self.assertIsNone(
                 impl.forward(data.q, data.ckv, data.kpe, object(), 0, data.topk)
             )
-        self.assertEqual(gather.call_count, 2)
+        self.assertEqual(gather.call_count, 1)
         self.assertIsNone(impl._glm53_prefill_workspace._storage)
 
 

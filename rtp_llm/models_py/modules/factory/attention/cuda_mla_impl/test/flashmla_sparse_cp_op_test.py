@@ -231,7 +231,10 @@ def _tp2_worker(rank: int, nccl_port: int, result_queue: mp.Queue) -> None:
         t1 = torch.index_select(g_topk, 0, q1_t).contiguous()
         topk_cat = torch.cat([t0, t1], dim=0)
         out = op.forward(g_q, ck, kp, topk_cat, bid, kvc, layer_id=0)
-        # Exercise preselected Q through the same real two-rank collectives.
+        cache_before_overlap = kvb.clone()
+        # Launch on the side stream before preparing Q, then verify the real
+        # cache-write/FlashMLA consumer joins it without changing any bytes.
+        gathered_kv = op.gather_kv(ck, kp, overlap=True)
         out_selected = op.forward(
             g_q[op.total_local_ids],
             ck,
@@ -241,7 +244,9 @@ def _tp2_worker(rank: int, nccl_port: int, result_queue: mp.Queue) -> None:
             kvc,
             layer_id=0,
             original_q_len=g_q.size(0),
+            gathered_kv=gathered_kv,
         )
+        torch.testing.assert_close(kvb, cache_before_overlap, rtol=0, atol=0)
         torch.testing.assert_close(out_selected, out, rtol=0, atol=0)
         torch.cuda.synchronize()
         lids = op.total_local_ids
@@ -486,7 +491,7 @@ class SparseMlaFp8CPOpTest(TestCase):
         self.assertIsNone(out)
         self.assertEqual(
             all_gather_shapes,
-            [(2, 512), (2, 64), (64, 576)],
+            [(2, 576), (64, 576)],
             "empty-Q sharded ranks must still join the KV all_gather",
         )
         self.assertEqual(cp_gather_shapes, [(64, 576)])
@@ -1313,7 +1318,7 @@ class SparseMlaFp8CPOpTest(TestCase):
 
         # Mock all_gather: return the full input KV (all 8 tokens) as if gathered
         # from 2 ranks (rank0 has first 4, rank1 has last 4).
-        _all_gather_returns = iter([input_ckv.contiguous(), input_k_pe.contiguous()])
+        _all_gather_returns = iter([torch.cat((input_ckv, input_k_pe), dim=-1)])
 
         def _mock_all_gather_tp2(tensor, group=None, **_kwargs):
             return next(_all_gather_returns)
