@@ -814,7 +814,7 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         else:
             w_name = src_weight_info.weights[0].name[: -len(W_SUFFIX)]
             kernel_name = w_name + QW_SUFFIX
-            scale_name = w_name + QS_SUFFIX
+            scale_name = w_name + self.qs_suffix
             opt1 = identity
             opt2 = stack_
         preshard = src_weight_info.enable_pure_tp_preshard and opt1 is identity
@@ -854,7 +854,7 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         else:
             w_names = [w.name[: -len(W_SUFFIX)] for w in src_weight_info.weights]
             kernel_names = [w_name + QW_SUFFIX for w_name in w_names]
-            scale_names = [w_name + QS_SUFFIX for w_name in w_names]
+            scale_names = [w_name + self.qs_suffix for w_name in w_names]
             opt1 = identity
             opt2 = stack_moe_w1
         preshard = src_weight_info.enable_pure_tp_preshard and opt1 is identity

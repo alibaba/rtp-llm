@@ -1,6 +1,12 @@
 test_envs = {}
 
 py_test(
+    name = "dense_mlp_parallelism_test",
+    srcs = ["dense_mlp_parallelism_test.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+)
+
+py_test(
     name = "decode_metadata_contract_test",
     srcs = ["decode_metadata_contract_test.py"],
     deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],

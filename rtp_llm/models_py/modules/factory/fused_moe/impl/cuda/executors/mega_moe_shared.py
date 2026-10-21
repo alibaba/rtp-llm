@@ -12,19 +12,16 @@ from typing import Optional
 
 import torch
 
-from rtp_llm.models_py.kernels.cuda.mega_moe_shared_quant_layouts import (
-    FP4_BLOCK,
-    SHARED_WEIGHT_RECIPE,
-)
+from rtp_llm.models_py.kernels.cuda.quant_layouts import FP4_BLOCK, FP8_BLOCK
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_backend import (
     MegaMoeBackend,
     _mega_output_capacity,
     _sync_cuda_graph_warmup_ranks,
 )
-from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.backend_jit_warmup import (
+from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.jit_warmup import (
     format_token_counts,
 )
-from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.backend_jit_warmup import (
+from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.jit_warmup import (
     generate_mega_moe_jit_token_counts as generate_mega_moe_se_jit_token_counts,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.shared_buffer import (
@@ -44,6 +41,8 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.shared_weights i
 from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.topology import (
     validated_world_ep_group,
 )
+
+SHARED_WEIGHT_RECIPE = (1, FP8_BLOCK, FP8_BLOCK)
 
 logger = logging.getLogger(__name__)
 
@@ -148,6 +147,7 @@ class MegaMoeSharedBackend(MegaMoeBackend):
             intermediate_hidden=cfg.moe_inter_dim,
             num_sms=num_sms,
             max_tokens_per_rank=cfg.max_tokens_per_rank,
+            include_cap=True,
         )
 
     def _maybe_warmup_jit_once(self) -> None:

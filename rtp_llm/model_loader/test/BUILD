@@ -91,3 +91,10 @@ py_test(
     srcs = ["test_native_ue8m0_scale.py"],
     deps = py_test_deps + ["//rtp_llm/models_py:modules"],
 )
+
+py_test(
+    name = "test_per_block_fp8_moe_weight",
+    srcs = ["test_per_block_fp8_moe_weight.py"],
+    deps = py_test_deps,
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)

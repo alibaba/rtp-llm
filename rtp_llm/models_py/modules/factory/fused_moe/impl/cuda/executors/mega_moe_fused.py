@@ -13,26 +13,26 @@ from typing import Optional
 
 import torch
 
-from rtp_llm.models_py.kernels.cuda.mega_moe_quant_layouts import FP4_BLOCK
+from rtp_llm.models_py.kernels.cuda.quant_layouts import FP4_BLOCK
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_backend import (
     MegaMoeBackend,
     MegaMoeBackendConfig,
     _mega_output_capacity,
     _sync_cuda_graph_warmup_ranks,
 )
-from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.backend_buffer import (
-    get_or_create_mega_output,
-)
 from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.backend_input_packer import (
     get_mega_moe_input_packer,
 )
-from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.backend_jit_warmup import (
-    format_token_counts,
+from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.buffer import (
+    _get_or_create_mega_output as get_or_create_mega_output,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.fused_buffer import (
     get_or_create_mega_buf_fused,
     make_shared_mid_workspace,
     transform_shared_expert_fp8_for_fused,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.jit_warmup import (
+    format_token_counts,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.topology import (
     validated_world_ep_group,

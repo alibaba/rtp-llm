@@ -22,18 +22,20 @@ from typing import Dict, Optional
 import torch
 import torch.nn as nn
 
-from rtp_llm.models_py.kernels.cuda.mega_moe_quant_layouts import (
+from rtp_llm.models_py.kernels.cuda.quant_layouts import (
     FP4_BLOCK,
     prepare_fp4_weight_scale_for_deepgemm,
-)
-from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.backend_buffer import (
-    get_or_create_mega_buf,
-    get_or_create_mega_output,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.backend_input_packer import (
     get_mega_moe_input_packer,
 )
-from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.backend_jit_warmup import (
+from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.buffer import (
+    _get_or_create_mega_buf as get_or_create_mega_buf,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.buffer import (
+    _get_or_create_mega_output as get_or_create_mega_output,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.jit_warmup import (
     format_token_counts,
     generate_mega_moe_jit_token_counts,
 )
@@ -537,6 +539,7 @@ class MegaMoeBackend(nn.Module):
             intermediate_hidden=cfg.moe_inter_dim,
             num_sms=num_sms,
             max_tokens_per_rank=max_tokens_per_rank,
+            include_cap=True,
         )
 
     def _maybe_warmup_jit_once(self) -> None:

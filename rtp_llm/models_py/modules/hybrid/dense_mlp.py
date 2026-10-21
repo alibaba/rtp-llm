@@ -3,13 +3,14 @@
 from typing import Dict, Optional, Type
 
 import torch
+from torch import nn
+
 from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.modules.base import FusedSiluAndMul
 from rtp_llm.models_py.modules.factory import LinearFactory
 from rtp_llm.ops import ActivationType, HWKernelConfig, ParallelismConfig
 from rtp_llm.utils.model_weight import W
-from torch import nn
 
 # CUDA-only fused silu_and_mul + per-token-group fp8 quant. Activated when
 # down_proj is CudaFp8GEMMLinear with UE8M0 scales — saves one launch
@@ -135,7 +136,7 @@ class DenseMLP(nn.Module):
             activated = self.up_proj.forward_with_bias_gelu(x)
             output = self.down_proj(activated)
             if not skip_allreduce and self.parallelism_config.get_ffn_tp_size() > 1:
-                output = all_reduce(output, group=Group.FFN_TP)
+                output = all_reduce(output, group=Group.TP)
             return output
         if x_fp8 is not None and x_scale is not None and self.accepts_fp8_input:
             up = self.up_proj(x_fp8, input_scales=x_scale)
@@ -155,5 +156,5 @@ class DenseMLP(nn.Module):
             activated = self.act_fn(up)
             output = self.down_proj(activated)
         if not skip_allreduce and self.parallelism_config.get_ffn_tp_size() > 1:
-            output = all_reduce(output, group=Group.FFN_TP)
+            output = all_reduce(output, group=Group.TP)
         return output

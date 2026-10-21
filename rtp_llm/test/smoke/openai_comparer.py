@@ -386,13 +386,13 @@ class OpenaiComparer(BaseComparer):
                 f"[grammar_constraint_only] constraint check failed: {e}",
             ) from e
 
-    def _choice_text(self, choice: Any) -> str:
+    def _choice_text(self, choice: Any, field: str = "content") -> str:
         message = getattr(choice, "message", None)
         if message is not None:
-            content = getattr(message, "content", "")
+            content = getattr(message, field, "")
         else:
             delta = getattr(choice, "delta", None)
-            content = getattr(delta, "content", "") if delta is not None else ""
+            content = getattr(delta, field, "") if delta is not None else ""
         if content is None:
             return ""
         if isinstance(content, str):
@@ -403,20 +403,7 @@ class OpenaiComparer(BaseComparer):
         content = self._choice_text(choice)
         if content.strip():
             return content
-
-        message = getattr(choice, "message", None)
-        if message is not None:
-            reasoning_content = getattr(message, "reasoning_content", "")
-        else:
-            delta = getattr(choice, "delta", None)
-            reasoning_content = (
-                getattr(delta, "reasoning_content", "") if delta is not None else ""
-            )
-        if reasoning_content is None:
-            return ""
-        if isinstance(reasoning_content, str):
-            return reasoning_content
-        return json.dumps(self._to_json_safe(reasoning_content), ensure_ascii=False)
+        return self._choice_text(choice, "reasoning_content")
 
     def _enum_value(self, value: Any) -> Any:
         return getattr(value, "value", value)
@@ -491,18 +478,6 @@ class OpenaiComparer(BaseComparer):
                     )
                 )
 
-            control_chars = [
-                c for c in content if ord(c) < 32 and c not in ("\n", "\r", "\t")
-            ]
-            if control_chars:
-                diffs.append(
-                    self._format_expect_actual(
-                        f"health choices[{idx}].content control chars",
-                        "none",
-                        [ord(c) for c in control_chars[:20]],
-                    )
-                )
-
             if min_unique_chars > 0:
                 unique_chars = {c for c in content if not c.isspace()}
                 if len(unique_chars) < min_unique_chars:
@@ -514,16 +489,32 @@ class OpenaiComparer(BaseComparer):
                         )
                     )
 
-            if repeat_window > 0:
-                repeated = _detect_repetition(content, repeat_window)
-                if repeated is not None:
+            # Check corruption in each field independently; answer requirements
+            # still use content, falling back to reasoning only when it is empty.
+            for field in ("content", "reasoning_content"):
+                text = self._choice_text(choice, field)
+                control_chars = [
+                    c for c in text if ord(c) < 32 and c not in ("\n", "\r", "\t")
+                ]
+                if control_chars:
                     diffs.append(
                         self._format_expect_actual(
-                            f"health choices[{idx}].content repetition",
-                            "no repeated fragment",
-                            repeated[:200],
+                            f"health choices[{idx}].{field} control chars",
+                            "none",
+                            [ord(c) for c in control_chars[:20]],
                         )
                     )
+
+                if repeat_window > 0:
+                    repeated = _detect_repetition(text, repeat_window)
+                    if repeated is not None:
+                        diffs.append(
+                            self._format_expect_actual(
+                                f"health choices[{idx}].{field} repetition",
+                                "no repeated fragment",
+                                repeated[:200],
+                            )
+                        )
 
             missing_required = [
                 text for text in required_substrings if text not in content

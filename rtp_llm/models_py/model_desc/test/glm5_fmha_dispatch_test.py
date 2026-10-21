@@ -1,3 +1,4 @@
+import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -9,6 +10,7 @@ from rtp_llm.models_py.model_desc.generic_moe import GenericMoeLayer, GenericMoe
 from rtp_llm.models_py.model_desc.generic_moe_mtp import GenericMoeMTPModel
 from rtp_llm.models_py.model_desc.glm5 import (
     DecodeLayerOutput,
+    Glm5MoeDecoderLayer,
     Glm5MoeLayer,
     Glm5MoeModel,
 )
@@ -28,8 +30,11 @@ from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.prepared_me
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.strategy.prepared_mega_moe import (
     PreparedMegaMoeRouter,
 )
+from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_gemm_linear import (
+    CudaFp8GEMMLinear,
+)
 from rtp_llm.models_py.modules.hybrid.glm5_cmp import Glm5Cmp
-from rtp_llm.ops import RoleType
+from rtp_llm.ops import ActivationType, HWKernelConfig, ParallelismConfig, RoleType
 from rtp_llm.utils.model_weight import W
 
 
@@ -52,6 +57,143 @@ class RecordingLayer(nn.Module):
 
 
 class Glm5FmhaDispatchTest(unittest.TestCase):
+    def make_capture_model(self, layer_ids):
+        class FinalNorm(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.calls = 0
+
+            def forward(self, hidden, residual):
+                self.calls += 1
+                return (hidden + residual) / 2, residual
+
+        config = SimpleNamespace(
+            num_layers=2,
+            vocab_size=8,
+            hidden_size=4,
+            layernorm_eps=1e-6,
+            hidden_state_capture_layer_ids=layer_ids,
+            capture_aux_hidden_layer_ids=[],
+        )
+        embedding = nn.Embedding(8, 4)
+        with torch.no_grad():
+            embedding.weight.copy_(torch.arange(32).reshape(8, 4))
+        package = "rtp_llm.models_py.model_desc.glm5."
+        with (
+            patch(package + "Embedding", return_value=embedding),
+            patch(package + "RMSResNorm", return_value=FinalNorm()),
+            patch(
+                package + "Glm5MoeDecoderLayer",
+                side_effect=lambda *args, **kwargs: RecordingLayer(True, args[4] + 1),
+            ),
+        ):
+            weights = Mock(weights=[{}, {}], global_weights={})
+            return Glm5MoeModel(config, ParallelismConfig(), weights, None, 4)
+
+    def test_capture_capability_initialized_by_constructor(self):
+        for layer_ids in ([], [1, 0]):
+            with self.subTest(layer_ids=layer_ids):
+                self.assertTrue(
+                    self.make_capture_model(layer_ids).supports_hidden_state_capture
+                )
+
+    def test_capture_preserves_layer_order_final_norm_and_cp_mtp_hidden(self):
+        model = self.make_capture_model([1, 0])
+        model._cp_mtp_handoff_enabled = True
+        fmha = {"default": object(), "indexer_kv": object()}
+        first_output = None
+        for step, token_ids in enumerate(([0, 1], [2])):
+            inputs = SimpleNamespace(
+                input_ids=torch.tensor(token_ids), capture_hidden_states=True
+            )
+            embedded = model.embed_tokens(inputs.input_ids)
+            final = (embedded + 6) / 2
+            with patch(
+                "rtp_llm.models_py.model_desc.glm5.should_enable_glm5_cmp",
+                return_value=False,
+            ):
+                output = model(inputs, fmha).hidden_states
+            expected = torch.cat([embedded + 6, embedded + 2, final], dim=-1)
+            torch.testing.assert_close(output, expected)
+            self.assertEqual(model.norm.calls, step + 1)
+            torch.testing.assert_close(
+                model.get_mtp_target_hidden_states(len(token_ids)), final
+            )
+            if first_output is None:
+                first_output = output
+                first_expected = expected.clone()
+        torch.testing.assert_close(first_output, first_expected)
+
+    def test_capture_disabled_or_unconfigured_returns_only_final_hidden(self):
+        for layer_ids, requested in (([1, 0], False), ([], True)):
+            with self.subTest(layer_ids=layer_ids, requested=requested):
+                model = self.make_capture_model(layer_ids)
+                inputs = SimpleNamespace(
+                    input_ids=torch.tensor([0, 1]), capture_hidden_states=requested
+                )
+                with patch(
+                    "rtp_llm.models_py.model_desc.glm5.should_enable_glm5_cmp",
+                    return_value=False,
+                ):
+                    output = model(
+                        inputs, {"default": object(), "indexer_kv": object()}
+                    ).hidden_states
+                expected = (model.embed_tokens(inputs.input_ids) + 6) / 2
+                torch.testing.assert_close(output, expected)
+                self.assertEqual(model.norm.calls, 1)
+
+    def test_dense_layer_honors_explicit_fusion_config(self):
+        class Attention(nn.Module):
+            def __init__(self, *args, **kwargs):
+                super().__init__()
+
+        config = SimpleNamespace(
+            quant_config=None,
+            attn_config=SimpleNamespace(use_mla=False),
+            getAttentionConfigs=lambda _: None,
+            layernorm_eps=1e-6,
+            moe_layer_index=[],
+            activation_type=ActivationType.Swiglu,
+        )
+        projection = CudaFp8GEMMLinear.__new__(CudaFp8GEMMLinear)
+        nn.Module.__init__(projection)
+        projection.K = 512
+        projection.scale_ue8m0 = True
+        weights = {W.pre_ln_gamma: torch.ones(4), W.post_ln_gamma: torch.ones(4)}
+        factory = "rtp_llm.models_py.modules.hybrid.dense_mlp.LinearFactory."
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled):
+                hw = HWKernelConfig()
+                hw.enable_fuse_kernels = enabled
+                with (
+                    patch.dict(
+                        os.environ,
+                        {"ENABLE_FUSE_KERNELS": "1", "RTP_LLM_GLM5_CMP": "0"},
+                    ),
+                    patch(
+                        "rtp_llm.models_py.model_desc.glm5.CausalAttention", Attention
+                    ),
+                    patch(
+                        "rtp_llm.models_py.modules.hybrid.dense_mlp.CudaFp8GEMMLinear",
+                        CudaFp8GEMMLinear,
+                    ),
+                    patch(factory + "create_merged_linear", return_value=projection),
+                    patch(
+                        factory + "create_linear_from_weights", return_value=projection
+                    ),
+                ):
+                    layer = Glm5MoeDecoderLayer(
+                        config,
+                        ParallelismConfig(),
+                        weights,
+                        {},
+                        layer_idx=0,
+                        moe_config=None,
+                        hw_kernel_config=hw,
+                    )
+                self.assertEqual(layer.mlp._fuse_silu_quant, enabled)
+                self.assertEqual(layer._fuse_post_norm_quant, enabled)
+
     def test_factory_fallback_respects_shared_expert_ownership(self):
         for gated in (False, True):
             with self.subTest(gated=gated):

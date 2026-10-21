@@ -106,6 +106,14 @@ py_test (
 )
 
 py_test(
+    name = "indexer_fused_rope_quant_test",
+    srcs = ["indexer_fused_rope_quant_test.py"],
+    deps = py_test_deps,
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13"},
+)
+
+py_test(
     name = "activation_test",
     srcs = ["activation_test.py"],
     exec_properties = {"gpu": "H20_CU13"},

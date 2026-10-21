@@ -475,13 +475,17 @@ class IndexerOp(nn.Module):
         """
         # Fast path: fused Triton kernel + cuBLAS GEMM (2 launches instead of 4)
         # Skips when full_rope_pos_ids is None (CP edge case: n_q == 0).
-        fused = _try_fused_prefill_rope_hadamard_qk(
-            q,
-            k,
-            full_rope_pos_ids,
-            self.cos_sin_cache,
-            self.rope_head_dim,
-            self.is_neox_style,
+        fused = (
+            _try_fused_prefill_rope_hadamard_qk(
+                q,
+                k,
+                full_rope_pos_ids,
+                self.cos_sin_cache,
+                self.rope_head_dim,
+                self.is_neox_style,
+            )
+            if self.enable_fuse_kernels
+            else None
         )
         if fused is not None:
             return fused
@@ -682,6 +686,7 @@ class IndexerOp(nn.Module):
             self.index_head_dim,
             actual_rot_dim,
             is_neox_style=self.is_neox_style,
+            scale_fmt=self.scale_fmt,
         )
 
     def fused_rope_quant_qk(
@@ -717,6 +722,7 @@ class IndexerOp(nn.Module):
             self.index_head_dim,
             actual_rot_dim,
             is_neox_style=self.is_neox_style,
+            scale_fmt=self.scale_fmt,
         )
 
     def quant_q_k_cp(

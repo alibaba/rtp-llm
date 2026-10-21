@@ -110,6 +110,7 @@ if triton is not None:
         fp8_max: tl.constexpr,
         BLOCK_M: tl.constexpr,
         BLOCK_K: tl.constexpr,
+        SANITIZE_NON_FINITE: tl.constexpr = True,
     ):
         pid_m_blk = tl.program_id(0).to(tl.int64)
         pid_blk = tl.program_id(1)
@@ -127,8 +128,9 @@ if triton is not None:
                 mask=mask,
                 other=0.0,
             ).to(tl.float32)
-            x_is_finite = tl.abs(x) < float("inf")
-            x = tl.where(x_is_finite, x, 0.0)
+            if SANITIZE_NON_FINITE:
+                x_is_finite = tl.abs(x) < float("inf")
+                x = tl.where(x_is_finite, x, 0.0)
 
             block_absmax = tl.maximum(tl.max(tl.abs(x), axis=1), eps)
             scale_raw = block_absmax / fp8_max

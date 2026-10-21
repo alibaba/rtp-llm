@@ -218,7 +218,7 @@ def transform_shared_expert_fp8_for_fused(
     import deep_gemm
 
     from rtp_llm.models_py.kernels.cuda.fp8_kernel import requant_weight_ue8m0
-    from rtp_llm.models_py.kernels.cuda.mega_moe_quant_layouts import (
+    from rtp_llm.models_py.kernels.cuda.quant_layouts import (
         prepare_fp8_weight_scale_for_deepgemm,
     )
 

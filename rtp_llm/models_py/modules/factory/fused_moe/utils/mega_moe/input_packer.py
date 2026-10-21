@@ -46,6 +46,9 @@ class MegaMoEInputPacker(ABC):
 class TorchMegaMoEInputPacker(MegaMoEInputPacker):
     name = "torch"
 
+    def __init__(self, *, sanitize_non_finite: bool = True):
+        self.sanitize_non_finite = sanitize_non_finite
+
     def pack(
         self,
         x: torch.Tensor,
@@ -56,7 +59,11 @@ class TorchMegaMoEInputPacker(MegaMoEInputPacker):
     ) -> None:
         if strict_fused_moe_enabled():
             raise RuntimeError("MOE_STRICT_FUSED=1 forbids TorchMegaMoEInputPacker")
-        safe_x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0).contiguous()
+        safe_x = (
+            torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+            if self.sanitize_non_finite
+            else x
+        ).contiguous()
         x_fp8, x_sf = per_token_cast_to_fp8_packed_ue8m0(safe_x, gran_k=32)
         buf.x[:tokens].copy_(x_fp8)
         buf.x_sf[:tokens].copy_(x_sf)
@@ -66,6 +73,11 @@ class TorchMegaMoEInputPacker(MegaMoEInputPacker):
 
 class FusedMegaMoEInputPacker(MegaMoEInputPacker):
     name = "fused"
+
+    def __init__(self, *, pack_inputs=None):
+        # Recipes may select a launch policy while sharing buffer validation
+        # and slicing. None preserves the environment-selected default path.
+        self.pack_inputs = pack_inputs
 
     def pack(
         self,
@@ -90,7 +102,8 @@ class FusedMegaMoEInputPacker(MegaMoEInputPacker):
             fused_pack_mega_moe_inputs,
         )
 
-        fused_pack_mega_moe_inputs(
+        pack_inputs = self.pack_inputs or fused_pack_mega_moe_inputs
+        pack_inputs(
             x,
             weights,
             indices,

@@ -10,7 +10,7 @@ from rtp_llm.models_py.modules.factory.linear import LinearBase
 
 logger = logging.getLogger(__name__)
 
-from flashinfer import autotune, fp4_quantize, mm_fp4
+from flashinfer import fp4_quantize, mm_fp4
 
 from rtp_llm.models_py.kernels.cuda.fp4_kernel import cutlass_scaled_fp4_mm_wrapper
 from rtp_llm.ops import HWKernelConfig
@@ -107,18 +107,18 @@ class CudaFp4GEMMLinear(LinearBase):
                 output_dtype,
             ).view(*output_shape)
         else:
-            with autotune():
-                output = mm_fp4(
-                    input_fp4,
-                    self.weight.T,
-                    input_scale_interleaved,
-                    self.weight_scales.T,
-                    self.alpha,
-                    output_dtype,
-                    block_size=16,
-                    use_nvfp4=True,
-                    backend=self.backend,
-                ).view(*output_shape)
+            # Honor the caller's FlashInfer autotune context.
+            output = mm_fp4(
+                input_fp4,
+                self.weight.T,
+                input_scale_interleaved,
+                self.weight_scales.T,
+                self.alpha,
+                output_dtype,
+                block_size=16,
+                use_nvfp4=True,
+                backend=self.backend,
+            ).view(*output_shape)
 
         if self.bias is not None:
             output = output + self.bias.to(output.dtype)

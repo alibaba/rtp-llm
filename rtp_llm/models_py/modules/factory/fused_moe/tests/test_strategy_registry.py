@@ -71,6 +71,21 @@ def _config(strategy: str, quant_config=None) -> MoEConfigAdapter:
 
 
 class StrategyRegistryDiagnosticsTest(unittest.TestCase):
+    def test_prepared_recipes_do_not_inspect_legacy_parallelism(self):
+        from rtp_llm.config.mega_moe import MEGA_MOE_STRATEGIES
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.strategy.prepared_mega_moe import (
+            CudaPreparedMegaMoeStrategy,
+        )
+
+        for name in MEGA_MOE_STRATEGIES:
+            with self.subTest(strategy=name):
+                config = _config(name)
+                # The DSv4 adapter does not expose GLM5's get_ffn_tp_size API.
+                config.parallelism_config = object()
+                checker = ConditionChecker("prepared recipe on legacy config")
+                CudaPreparedMegaMoeStrategy(name).check_conditions(checker, config)
+                self.assertFalse(checker.all_passed())
+
     def test_all_prepared_recipes_use_the_public_registry(self):
         from rtp_llm.config.mega_moe import MEGA_MOE_STRATEGIES, MegaMoeExecutionPolicy
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.strategy.prepared_mega_moe import (

@@ -163,6 +163,39 @@ class IndexerPagedContractTest(unittest.TestCase):
         )
         module.indexer_op.apply_rope_and_rotate_q_k_cp.assert_not_called()
 
+    def test_cp_rope_hadamard_honors_fusion_switch(self):
+        q, k = torch.zeros(4, 2, 128), torch.zeros(4, 128)
+        positions = torch.arange(4)
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled):
+                operator = indexer_op.IndexerOp(
+                    2, 128, 2, 64, enable_fuse_kernels=enabled
+                )
+                fused_output = (q + 1, k + 1)
+                with (
+                    patch.object(
+                        indexer_op,
+                        "_try_fused_prefill_rope_hadamard_qk",
+                        return_value=fused_output,
+                    ) as fused,
+                    patch.object(
+                        indexer_op, "_rotate_activation", side_effect=lambda x: x
+                    ) as rotate,
+                ):
+                    actual_q, actual_k = operator.apply_rope_and_rotate_q_k_cp(
+                        q, k, positions
+                    )
+                if enabled:
+                    fused.assert_called_once()
+                    rotate.assert_not_called()
+                    self.assertIs(actual_q, fused_output[0])
+                    self.assertIs(actual_k, fused_output[1])
+                else:
+                    fused.assert_not_called()
+                    self.assertEqual(rotate.call_count, 2)
+                    self.assertIs(actual_q, q)
+                    self.assertIs(actual_k, k)
+
     def make_operator(self):
         operator = indexer_op.IndexerOp.__new__(indexer_op.IndexerOp)
         nn.Module.__init__(operator)

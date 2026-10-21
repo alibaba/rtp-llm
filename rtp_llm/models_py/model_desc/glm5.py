@@ -11,6 +11,7 @@ from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.block_map import get_layer_caches_for_groups
 from rtp_llm.models_py.model_desc.cp_mtp_hidden_handoff import CpMtpHiddenHandoff
 from rtp_llm.models_py.model_desc.generic_moe import GenericMoeLayer, GenericMoeModel
+from rtp_llm.models_py.model_desc.hidden_state_capture import CaptureContext
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import (
     CausalAttention,
@@ -236,7 +237,11 @@ class Glm5MoeDecoderLayer(nn.Module):
         # Determine if this is a Dense layer (before first MoE layer or dense only)
         if layer_idx not in config.moe_layer_index:
             self.mlp = DenseMLP(
-                config.activation_type, parallelism_config, weights, quant_config
+                config.activation_type,
+                parallelism_config,
+                weights,
+                quant_config,
+                hw_kernel_config=hw_kernel_config,
             )
         elif moe_config.moe_strategy in MEGA_MOE_STRATEGIES:
             self.mlp = Glm5MoeLayer(
@@ -592,6 +597,7 @@ class Glm5ModelBase(CpMtpHiddenHandoff, GenericMoeModel):
         prev_topk_indices: Optional[torch.Tensor] = None,
         *,
         force_reuse_topk_indices: bool = False,
+        capture: Optional[CaptureContext] = None,
     ) -> DecodeLayerOutput:
         default_fmha = (
             fmha_impl["default"] if isinstance(fmha_impl, Mapping) else fmha_impl
@@ -638,6 +644,8 @@ class Glm5ModelBase(CpMtpHiddenHandoff, GenericMoeModel):
                 )
                 hidden_states, residual = result.hidden_states, result.residual
                 prev_topk_indices = result.topk_indices
+                if capture is not None:
+                    capture.capture_layer(idx, hidden_states, residual)
             return DecodeLayerOutput(hidden_states, residual, prev_topk_indices)
 
 
@@ -669,6 +677,17 @@ class Glm5MoeModel(Glm5ModelBase):
         self.norm = RMSResNorm(
             weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
         )
+        self._init_capture_context(
+            self._capture_canonical_layer,
+            self._capture_canonical_final,
+        )
+
+    def _capture_canonical_final(
+        self, hidden_states: torch.Tensor, residual: torch.Tensor | None
+    ) -> torch.Tensor:
+        hidden_states = super()._capture_canonical_final(hidden_states, residual)
+        self.capture_cp_mtp_hidden(hidden_states)
+        return hidden_states
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         hidden_states = self.embed_tokens(inputs.input_ids)
@@ -679,10 +698,9 @@ class Glm5MoeModel(Glm5ModelBase):
             "indexer_kv",
         }:
             raise RuntimeError("GLM5 requires default and indexer_kv attention routes")
-        result = self._forward_decoder_layers(hidden_states, fmha_impl)
-        hidden_states, _ = self.norm(result.hidden_states, result.residual)
-        self.capture_cp_mtp_hidden(hidden_states)
-        return PyModelOutputs(hidden_states)
+        capture = self.capture_context(inputs.capture_hidden_states)
+        result = self._forward_decoder_layers(hidden_states, fmha_impl, capture=capture)
+        return capture.finalize(result.hidden_states, result.residual)
 
 
 __all__ = [

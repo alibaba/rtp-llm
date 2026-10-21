@@ -7,7 +7,7 @@ from typing import Optional
 
 import torch
 
-from rtp_llm.models_py.kernels.cuda.mega_moe_quant_layouts import FP4_BLOCK
+from rtp_llm.models_py.kernels.cuda.quant_layouts import FP4_BLOCK
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_backend import (
     _mega_output_capacity,
     _sync_cuda_graph_warmup_ranks,
@@ -15,11 +15,11 @@ from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_ba
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_fp8 import (
     MegaMoeFp8Backend,
 )
-from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.backend_buffer import (
-    get_or_create_mega_output,
-)
 from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.backend_input_packer import (
     get_mega_moe_input_packer,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.buffer import (
+    _get_or_create_mega_output as get_or_create_mega_output,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.fp8_buffer import (
     get_or_create_mega_buf_fp8,

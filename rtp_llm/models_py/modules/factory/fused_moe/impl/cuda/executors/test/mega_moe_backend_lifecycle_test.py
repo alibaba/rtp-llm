@@ -1,4 +1,5 @@
 import unittest
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -68,11 +69,8 @@ class FakeKernel(nn.Module):
 
 
 class MegaMoeLifecycleTest(unittest.TestCase):
-    def test_generic_and_glm5_layers_share_routed_arena(self):
+    def test_routed_arena_is_cached_per_collective_group(self):
         from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe import buffer
-        from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.backend_buffer import (
-            get_or_create_mega_buf,
-        )
 
         group = SimpleNamespace(size=lambda: 4)
         arena = SimpleNamespace(buffer=torch.empty(1))
@@ -83,38 +81,37 @@ class MegaMoeLifecycleTest(unittest.TestCase):
             num_topk=2,
             hidden=128,
             intermediate_hidden=256,
+            use_fp8_dispatch=True,
+            activation="swiglu",
         )
         with patch.dict(buffer._MEGA_BUF_CACHE, {}, clear=True):
             with patch(
                 "deep_gemm.get_symm_buffer_for_mega_moe", return_value=arena
             ) as allocate:
-                generic = buffer._get_or_create_mega_buf(
-                    **params, use_fp8_dispatch=True, activation="swiglu"
-                )
-                glm = get_or_create_mega_buf(**params)
-                self.assertIs(glm, generic)
+                generic = buffer._get_or_create_mega_buf(**params)
+                cached = buffer._get_or_create_mega_buf(**params)
+                self.assertIs(cached, generic)
                 allocate.assert_called_once()
                 # Another group must retain a separate collective arena.
-                get_or_create_mega_buf(
+                buffer._get_or_create_mega_buf(
                     **{**params, "group": SimpleNamespace(size=lambda: 4)}
                 )
                 self.assertEqual(allocate.call_count, 2)
 
     def test_warmup_retains_automatic_capacity_buckets(self):
-        from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.backend_jit_warmup import (
-            generate_mega_moe_jit_token_counts,
-        )
-
-        counts = generate_mega_moe_jit_token_counts(
-            num_ranks=4,
-            num_experts=256,
-            num_experts_per_rank=64,
-            num_topk=8,
-            intermediate_hidden=2048,
-            num_sms=132,
-            max_tokens_per_rank=64,
-        )
-        self.assertEqual(counts, [1, 64])
+        for backend_type in (MegaMoeBackend, MegaMoeSharedBackend):
+            with self.subTest(backend=backend_type.__name__):
+                model = self.backend(backend_type)
+                model.cfg = replace(
+                    model.cfg,
+                    ep_size=4,
+                    n_routed_experts=256,
+                    n_local_experts=64,
+                    n_activated_experts=8,
+                    moe_inter_dim=2048,
+                    max_tokens_per_rank=64,
+                )
+                self.assertEqual(model._resolve_jit_warmup_token_counts(132), [1, 64])
 
     def backend(self, backend_type):
         cfg = MegaMoeBackendConfig(

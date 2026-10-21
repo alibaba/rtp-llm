@@ -4,7 +4,7 @@ Single Triton kernel that:
 1. Applies RoPE on the first ROT_DIM dims (NeOX or GPT-J interleaved)
 2. Passes through NoPE dims unchanged
 3. Applies N-point Walsh-Hadamard transform on the full HEAD_DIM vector
-4. Quantizes to FP8 (e4m3fn) with ue8m0 per-token-per-head scale
+4. Quantizes to FP8 (e4m3fn) with the caller's per-token-per-head scale format
 
 The Hadamard transform uses 7 butterfly stages (for HEAD_DIM=128) through
 a per-program scratch buffer in global memory (512 bytes/program, fits in
@@ -12,10 +12,46 @@ L1 cache).  Algorithm adapted from SGLang's fused_q_indexer_rope_hadamard_quant.
 """
 
 import math
+import os
 
 import torch
 import triton
 import triton.language as tl
+
+
+@triton.jit
+def _quantize_query(data, SCALE_UE8M0: tl.constexpr, USE_V2_QUANT: tl.constexpr):
+    # The unfused Hadamard transform writes BF16 before quantization reads it.
+    data = data.to(tl.bfloat16).to(tl.float32)
+    amax = tl.maximum(tl.max(tl.abs(data)), 1e-4)
+    if USE_V2_QUANT:
+        # Match per_token_group_quant_8bit_v2's multiply/reciprocal sequence.
+        scale = amax * (1.0 / 448.0)
+        if SCALE_UE8M0:
+            bits = scale.to(tl.uint32, bitcast=True)
+            exponent = (bits >> 23) + ((bits & 0x7FFFFF) != 0).to(tl.uint32)
+            scale = (exponent << 23).to(tl.float32, bitcast=True)
+            inv_scale = ((254 - exponent) << 23).to(tl.float32, bitcast=True)
+        else:
+            inv_scale = tl.div_rn(448.0, amax)
+        quantized = data * inv_scale
+    else:
+        scale = tl.div_rn(amax, 448.0)
+        if SCALE_UE8M0:
+            scale = tl.exp2(tl.ceil(tl.log2(scale)))
+        quantized = tl.div_rn(data, scale)
+    quantized = tl.clamp(quantized, -448.0, 448.0).to(tl.float8e4nv)
+    return quantized, scale
+
+
+def _use_v2_quant(q: torch.Tensor) -> bool:
+    # Match sgl_per_token_group_quant_fp8 for a contiguous group-128 query.
+    mode = os.environ.get("DSV4_FP8_QUANT_KERNEL", "auto").strip().lower()
+    if mode not in ("auto", "legacy", "v2"):
+        raise ValueError(
+            f"DSV4_FP8_QUANT_KERNEL must be one of auto, legacy, v2; got {mode!r}"
+        )
+    return mode == "v2" or (mode == "auto" and q.numel() >= 4 * 1024 * 1024)
 
 
 @triton.jit
@@ -36,8 +72,10 @@ def _fused_q_rope_hadamard_quant_kernel(
     HEAD_DIM: tl.constexpr,
     IS_NEOX_STYLE: tl.constexpr,
     LOG2_HEAD_DIM: tl.constexpr,
+    SCALE_UE8M0: tl.constexpr,
+    USE_V2_QUANT: tl.constexpr,
 ):
-    """Fused RoPE + Hadamard + ue8m0 FP8 quant for indexer Q.
+    """Fused RoPE + Hadamard + FP8 quant for indexer Q.
 
     Grid: [num_tokens, num_heads]
     Each program processes one (token, head) pair.
@@ -73,8 +111,9 @@ def _fused_q_rope_hadamard_quant_kernel(
     if IS_NEOX_STYLE:
         x_first = tl.load(base_ptr + half_offset).to(tl.float32)
         x_second = tl.load(base_ptr + half_offset + HALF_ROT_DIM).to(tl.float32)
-        r_first = x_first * cos - x_second * sin
-        r_second = x_second * cos + x_first * sin
+        # FlashInfer contracts the cosine product into the final addition.
+        r_first = tl.fma(x_first, cos, -x_second * sin)
+        r_second = tl.fma(x_second, cos, x_first * sin)
         # bf16 roundtrip for numerical parity with unfused path
         r_first = r_first.to(tl.bfloat16).to(tl.float32)
         r_second = r_second.to(tl.bfloat16).to(tl.float32)
@@ -83,8 +122,8 @@ def _fused_q_rope_hadamard_quant_kernel(
     else:
         x_even = tl.load(base_ptr + half_offset * 2).to(tl.float32)
         x_odd = tl.load(base_ptr + half_offset * 2 + 1).to(tl.float32)
-        r_first = x_even * cos - x_odd * sin
-        r_second = x_odd * cos + x_even * sin
+        r_first = tl.fma(x_even, cos, -x_odd * sin)
+        r_second = tl.fma(x_odd, cos, x_even * sin)
         r_first = r_first.to(tl.bfloat16).to(tl.float32)
         r_second = r_second.to(tl.bfloat16).to(tl.float32)
         tl.store(scratch_base + half_offset * 2, r_first)
@@ -114,20 +153,11 @@ def _fused_q_rope_hadamard_quant_kernel(
 
     data = tl.load(scratch_base + idx) * (HEAD_DIM**-0.5)
 
-    # ---- Step 4: ue8m0 FP8 quantization ----
-    amax = tl.max(tl.abs(data))
-    q_scale_val = tl.maximum(amax, 1e-4) / 448.0
-    q_scale_val = tl.math.exp2(tl.math.ceil(tl.math.log2(q_scale_val)))
-
+    # ---- Step 4: FP8 quantization matching the caller's scale format ----
+    quantized, scale = _quantize_query(data, SCALE_UE8M0, USE_V2_QUANT)
     fp8_base = q_fp8_ptr + tok_idx * q_fp8_stride0 + head_idx * q_fp8_stride1
-    tl.store(fp8_base + idx, (data / q_scale_val).to(tl.float8e4nv))
-
-    # Store ue8m0 scale directly as float32 via bitcast
-    log2_scale = tl.math.ceil(tl.math.log2(tl.maximum(amax, 1e-4) / 448.0)) + 127.0
-    log2_scale = tl.minimum(tl.maximum(log2_scale, 0.0), 255.0)
-    scale_i32 = log2_scale.to(tl.int32) << 23
-    scale_f32 = scale_i32.to(tl.float32, bitcast=True)
-    tl.store(q_scale_ptr + tok_idx * q_scale_stride0 + head_idx, scale_f32)
+    tl.store(fp8_base + idx, quantized)
+    tl.store(q_scale_ptr + tok_idx * q_scale_stride0 + head_idx, scale)
 
 
 def fused_q_rope_quant(
@@ -138,6 +168,7 @@ def fused_q_rope_quant(
     index_head_dim: int,
     rope_head_dim: int,
     is_neox_style: bool = True,
+    scale_fmt: str = "ue8m0",
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fused RoPE + Hadamard + FP8 quantization for indexer Q.
 
@@ -149,11 +180,12 @@ def fused_q_rope_quant(
         index_head_dim: Dimension of indexer heads (must be power of 2)
         rope_head_dim: Total rotation dimension (first dims affected by RoPE)
         is_neox_style: True for NeOX-style RoPE, False for GPT-J interleaved
+        scale_fmt: "ue8m0" for power-of-two scales, "none" for float scales.
 
     Returns:
         (q_fp8, q_scale):
             q_fp8: [num_tokens, index_n_heads, index_head_dim] float8_e4m3fn
-            q_scale: [num_tokens, index_n_heads, 1] float32 (unpacked ue8m0)
+            q_scale: [num_tokens, index_n_heads, 1] float32 (unpacked scales)
     """
     num_tokens = q.shape[0]
     half_rot_dim = rope_head_dim // 2
@@ -196,6 +228,8 @@ def fused_q_rope_quant(
             index_head_dim,
             is_neox_style,
             log2_head_dim,
+            scale_fmt == "ue8m0",
+            _use_v2_quant(q),
             num_warps=1,
         )
 
@@ -229,8 +263,10 @@ def _fused_qk_rope_hadamard_quant_kernel(
     HEAD_DIM: tl.constexpr,
     IS_NEOX_STYLE: tl.constexpr,
     LOG2_HEAD_DIM: tl.constexpr,
+    SCALE_UE8M0: tl.constexpr,
+    USE_V2_QUANT: tl.constexpr,
 ):
-    """Fused QK: K(RoPE+Hadamard→bf16) + Q(RoPE+Hadamard+ue8m0 FP8).
+    """Fused QK: K(RoPE+Hadamard→bf16) + Q(RoPE+Hadamard+FP8).
 
     Grid: [num_tokens, num_heads]
     head_idx==0 processes K then Q; all other heads process Q only.
@@ -264,15 +300,19 @@ def _fused_qk_rope_hadamard_quant_kernel(
         if IS_NEOX_STYLE:
             x_first = tl.load(k_base + half_offset).to(tl.float32)
             x_second = tl.load(k_base + half_offset + HALF_ROT_DIM).to(tl.float32)
-            r_first = (x_first * cos - x_second * sin).to(tl.bfloat16).to(tl.float32)
-            r_second = (x_second * cos + x_first * sin).to(tl.bfloat16).to(tl.float32)
+            r_first = (
+                tl.fma(x_first, cos, -x_second * sin).to(tl.bfloat16).to(tl.float32)
+            )
+            r_second = (
+                tl.fma(x_second, cos, x_first * sin).to(tl.bfloat16).to(tl.float32)
+            )
             tl.store(scratch_base + half_offset, r_first)
             tl.store(scratch_base + half_offset + HALF_ROT_DIM, r_second)
         else:
             x_even = tl.load(k_base + half_offset * 2).to(tl.float32)
             x_odd = tl.load(k_base + half_offset * 2 + 1).to(tl.float32)
-            r_first = (x_even * cos - x_odd * sin).to(tl.bfloat16).to(tl.float32)
-            r_second = (x_odd * cos + x_even * sin).to(tl.bfloat16).to(tl.float32)
+            r_first = tl.fma(x_even, cos, -x_odd * sin).to(tl.bfloat16).to(tl.float32)
+            r_second = tl.fma(x_odd, cos, x_even * sin).to(tl.bfloat16).to(tl.float32)
             tl.store(scratch_base + half_offset * 2, r_first)
             tl.store(scratch_base + half_offset * 2 + 1, r_second)
 
@@ -305,15 +345,15 @@ def _fused_qk_rope_hadamard_quant_kernel(
     if IS_NEOX_STYLE:
         x_first = tl.load(q_base + half_offset).to(tl.float32)
         x_second = tl.load(q_base + half_offset + HALF_ROT_DIM).to(tl.float32)
-        r_first = (x_first * cos - x_second * sin).to(tl.bfloat16).to(tl.float32)
-        r_second = (x_second * cos + x_first * sin).to(tl.bfloat16).to(tl.float32)
+        r_first = tl.fma(x_first, cos, -x_second * sin).to(tl.bfloat16).to(tl.float32)
+        r_second = tl.fma(x_second, cos, x_first * sin).to(tl.bfloat16).to(tl.float32)
         tl.store(scratch_base + half_offset, r_first)
         tl.store(scratch_base + half_offset + HALF_ROT_DIM, r_second)
     else:
         x_even = tl.load(q_base + half_offset * 2).to(tl.float32)
         x_odd = tl.load(q_base + half_offset * 2 + 1).to(tl.float32)
-        r_first = (x_even * cos - x_odd * sin).to(tl.bfloat16).to(tl.float32)
-        r_second = (x_odd * cos + x_even * sin).to(tl.bfloat16).to(tl.float32)
+        r_first = tl.fma(x_even, cos, -x_odd * sin).to(tl.bfloat16).to(tl.float32)
+        r_second = tl.fma(x_odd, cos, x_even * sin).to(tl.bfloat16).to(tl.float32)
         tl.store(scratch_base + half_offset * 2, r_first)
         tl.store(scratch_base + half_offset * 2 + 1, r_second)
 
@@ -338,19 +378,10 @@ def _fused_qk_rope_hadamard_quant_kernel(
 
     data = tl.load(scratch_base + idx) * (HEAD_DIM**-0.5)
 
-    # ue8m0 FP8 quantization
-    amax = tl.max(tl.abs(data))
-    q_scale_val = tl.maximum(amax, 1e-4) / 448.0
-    q_scale_val = tl.math.exp2(tl.math.ceil(tl.math.log2(q_scale_val)))
-
+    quantized, scale = _quantize_query(data, SCALE_UE8M0, USE_V2_QUANT)
     fp8_base = q_fp8_ptr + tok_idx * q_fp8_stride0 + head_idx * q_fp8_stride1
-    tl.store(fp8_base + idx, (data / q_scale_val).to(tl.float8e4nv))
-
-    log2_scale = tl.math.ceil(tl.math.log2(tl.maximum(amax, 1e-4) / 448.0)) + 127.0
-    log2_scale = tl.minimum(tl.maximum(log2_scale, 0.0), 255.0)
-    scale_i32 = log2_scale.to(tl.int32) << 23
-    scale_f32 = scale_i32.to(tl.float32, bitcast=True)
-    tl.store(q_scale_ptr + tok_idx * q_scale_stride0 + head_idx, scale_f32)
+    tl.store(fp8_base + idx, quantized)
+    tl.store(q_scale_ptr + tok_idx * q_scale_stride0 + head_idx, scale)
 
 
 def fused_qk_rope_quant(
@@ -362,6 +393,7 @@ def fused_qk_rope_quant(
     index_head_dim: int,
     rope_head_dim: int,
     is_neox_style: bool = True,
+    scale_fmt: str = "ue8m0",
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Fused QK: K(RoPE+Hadamard→bf16) + Q(RoPE+Hadamard+FP8) in one kernel.
 
@@ -374,11 +406,12 @@ def fused_qk_rope_quant(
         index_head_dim: Dimension of indexer heads (must be power of 2)
         rope_head_dim: Total rotation dimension (first dims affected by RoPE)
         is_neox_style: True for NeOX-style RoPE, False for GPT-J interleaved
+        scale_fmt: "ue8m0" for power-of-two scales, "none" for float scales.
 
     Returns:
         (q_fp8, q_scale, k_out):
             q_fp8: [num_tokens, index_n_heads, index_head_dim] float8_e4m3fn
-            q_scale: [num_tokens, index_n_heads, 1] float32 (unpacked ue8m0)
+            q_scale: [num_tokens, index_n_heads, 1] float32 (unpacked scales)
             k_out: [num_tokens, index_head_dim] bf16 (RoPE + Hadamard applied)
     """
     num_tokens = q.shape[0]
@@ -430,6 +463,8 @@ def fused_qk_rope_quant(
             index_head_dim,
             is_neox_style,
             log2_head_dim,
+            scale_fmt == "ue8m0",
+            _use_v2_quant(q),
             num_warps=1,
         )
 

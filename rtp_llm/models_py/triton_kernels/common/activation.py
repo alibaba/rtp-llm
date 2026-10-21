@@ -935,6 +935,7 @@ def silu_and_mul_per_token_group_fp8_quant_dense_packed_fwd(
         return sgl_per_token_group_quant_fp8(
             activated,
             group_size=quant_group_size,
+            eps=1e-4,
             column_major_scales=True,
             scale_tma_aligned=True,
             scale_ue8m0=scale_ue8m0,

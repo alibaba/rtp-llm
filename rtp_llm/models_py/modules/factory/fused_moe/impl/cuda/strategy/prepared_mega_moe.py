@@ -26,8 +26,10 @@ class CudaPreparedMegaMoeStrategy(MoeStrategy):
         self.strategy_name = strategy_name
 
     def check_conditions(self, checker, config):
-        checker.check(config.moe_strategy == self.strategy_name)
-        checker.check(getattr(config, "mega_moe_policy", None) is not None)
+        if not checker.check(config.moe_strategy == self.strategy_name):
+            return
+        if not checker.check(getattr(config, "mega_moe_policy", None) is not None):
+            return
         if self.strategy_name in FUSED_SHARED_STRATEGIES:
             checker.check(config.n_shared_experts > 0)
             checker.check(not config.has_shared_expert_gate)

@@ -4,7 +4,7 @@ from typing import NamedTuple
 
 import torch
 
-from rtp_llm.models_py.kernels.cuda.mega_moe_quant_layouts import (
+from rtp_llm.models_py.kernels.cuda.quant_layouts import (
     prepare_fp8_weight_scale_for_deepgemm,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_backend import (
