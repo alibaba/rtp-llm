@@ -114,6 +114,26 @@ TEST(PDRequestUtilsTest, PromptLogitsFallsBackEvenWithLargerWireTokenLimit) {
     EXPECT_FALSE(checkPDSupport(request).supported);
 }
 
+TEST(PDRequestUtilsTest, PDSupportRejectsEachUnsupportedRequestShape) {
+    const auto baseline = makeRequest();
+    ASSERT_TRUE(checkPDSupport(baseline).supported);
+    auto request = baseline;
+    request.mutable_generate_config()->set_can_use_pd_separation(false);
+    EXPECT_FALSE(checkPDSupport(request).supported);
+    request = baseline;
+    request.mutable_generate_config()->set_max_new_tokens(1);
+    EXPECT_FALSE(checkPDSupport(request).supported);
+    request = baseline;
+    request.mutable_generate_config()->set_num_beams(2);
+    EXPECT_FALSE(checkPDSupport(request).supported);
+    request = baseline;
+    request.mutable_generate_config()->add_variable_num_beams(2);
+    EXPECT_FALSE(checkPDSupport(request).supported);
+    request = baseline;
+    request.mutable_generate_config()->set_num_return_sequences(2);
+    EXPECT_FALSE(checkPDSupport(request).supported);
+}
+
 TEST(PDRequestUtilsTest, TextPreprocessingPreservesRequestAndAppliesSameSpPolicy) {
     const auto request = makeRequest();
     for (bool is_mtp_eagle : {false, true}) {

@@ -36,7 +36,8 @@ enum class OutputAction {
 enum class Handler {
     LOCAL,
     PREFILL,
-    PREFILL_LOCAL
+    PREFILL_LOCAL,
+    PREFILL_SINGLE_TOKEN
 };
 
 // Only model output is controlled. Stream state transitions, cache ownership,
@@ -293,7 +294,11 @@ protected:
             engine->getCacheManager()->p2p_connector_ = connector;
         }
         auto request = lifecycleRequest();
-        request.mutable_generate_config()->set_can_use_pd_separation(kind == Handler::PREFILL);
+        request.mutable_generate_config()->set_can_use_pd_separation(
+            kind == Handler::PREFILL || kind == Handler::PREFILL_SINGLE_TOKEN);
+        if (kind == Handler::PREFILL_SINGLE_TOKEN) {
+            request.mutable_generate_config()->set_max_new_tokens(1);
+        }
         request.mutable_generate_config()->set_unique_key("lifecycle-p2p");
         LifecycleService service(handler);
         ScopedRpcServer  server(&service);
@@ -367,6 +372,9 @@ TEST_F(RpcHandlerLifecycleTest, LocalExceptionUnwindsAndDiagnosesOnce) {
 }
 TEST_F(RpcHandlerLifecycleTest, PrefillNonPdFallbackCompletesThroughLocalHandler) {
     runSynchronousHandler(Handler::PREFILL_LOCAL, OutputAction::COMPLETE);
+}
+TEST_F(RpcHandlerLifecycleTest, PrefillSingleTokenFallsBackWithoutP2PHandoff) {
+    runSynchronousHandler(Handler::PREFILL_SINGLE_TOKEN, OutputAction::COMPLETE);
 }
 TEST_F(RpcHandlerLifecycleTest, PrefillNonPdFallbackPreservesExecutionFailure) {
     runSynchronousHandler(Handler::PREFILL_LOCAL, OutputAction::FAIL);
