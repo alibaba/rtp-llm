@@ -999,21 +999,66 @@ class TestComputeLocalLastHidden(unittest.TestCase):
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
 class TestHandleInputsWithPrefix(unittest.TestCase):
-    def test_cp2_rank0_uses_absolute_positions(self):
-        tokens, input_lengths, positions = cp_test.handle_inputs(
+    def test_cp2_rank0_keeps_relative_shuffle_indices(self):
+        tokens, input_lengths, shuffle_indices = cp_test.handle_inputs(
             [101, 102, 103, 104, 105, 106], 8, 0, 2
         )
         self.assertEqual(tokens.tolist(), [101, 102, 0, 0])
         self.assertEqual(input_lengths.tolist(), [4])
-        self.assertEqual(positions.tolist(), [8, 9, 14, 15])
+        self.assertEqual(shuffle_indices.tolist(), [0, 1, 6, 7])
 
-    def test_cp2_rank1_uses_absolute_positions(self):
-        tokens, input_lengths, positions = cp_test.handle_inputs(
+    def test_cp2_rank1_keeps_relative_shuffle_indices(self):
+        tokens, input_lengths, shuffle_indices = cp_test.handle_inputs(
             [101, 102, 103, 104, 105, 106], 8, 1, 2
         )
         self.assertEqual(tokens.tolist(), [103, 104, 105, 106])
         self.assertEqual(input_lengths.tolist(), [4])
-        self.assertEqual(positions.tolist(), [10, 11, 12, 13])
+        self.assertEqual(shuffle_indices.tolist(), [2, 3, 4, 5])
+
+    def test_prefix_offsets_only_absolute_positions_across_requests_and_ranks(self):
+        for cp_size in (2, 4):
+            for cp_rank in range(cp_size):
+                for lengths, prefixes in (([722], [2048]), ([7, 10], [2048, 1024])):
+                    with self.subTest(
+                        cp_size=cp_size, cp_rank=cp_rank, lengths=lengths
+                    ):
+                        expected_shuffle = []
+                        expected_positions = []
+                        for length, prefix in zip(lengths, prefixes):
+                            pair_size = (length + 2 * cp_size - 1) // (2 * cp_size)
+                            padded_length = 2 * cp_size * pair_size
+                            relative = list(
+                                range(cp_rank * pair_size, (cp_rank + 1) * pair_size)
+                            )
+                            relative += list(
+                                range(
+                                    padded_length - (cp_rank + 1) * pair_size,
+                                    padded_length - cp_rank * pair_size,
+                                )
+                            )
+                            expected_shuffle.extend(relative)
+                            expected_positions.extend(
+                                prefix + index if index < length else 0
+                                for index in relative
+                            )
+                        _, _, _, position_ids, shuffle_indices = (
+                            cp_test.remap_multimodal_inputs(
+                                torch.arange(sum(lengths), dtype=torch.int32),
+                                torch.empty(0, dtype=torch.int32),
+                                [],
+                                [],
+                                torch.empty(0, dtype=torch.int32),
+                                cp_rank,
+                                cp_size,
+                                torch.tensor(lengths, dtype=torch.int32),
+                                torch.empty(0, dtype=torch.int32),
+                                torch.tensor(prefixes, dtype=torch.int32),
+                            )
+                        )
+                        self.assertEqual(
+                            shuffle_indices.cpu().tolist(), expected_shuffle
+                        )
+                        self.assertEqual(position_ids.tolist(), expected_positions)
 
 
 if __name__ == "__main__":

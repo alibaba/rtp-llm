@@ -53,6 +53,14 @@ py_test(
     ],
 )
 
+py_test(
+    name = "v4_cp_writeback_acceptance_test",
+    srcs = [
+        "v4_cp_writeback_acceptance.py",
+        "v4_cp_writeback_acceptance_test.py",
+    ],
+)
+
 exports_files([
     "entry.py",
     "data/prompt_candidates.json",

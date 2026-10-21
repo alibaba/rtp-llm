@@ -32,6 +32,7 @@ struct P2PConnectorSchedulerConfig {
     std::shared_ptr<const CacheTopology> topology;
     int                                  cp_rank = 0;
     int                                  cp_size = 1;
+    size_t                               seq_size_per_block = 1;
 
     // 编排层（KVCacheTransferPlanner）需要完整的并行度与角色来构造本端 ShardLayout，
     // 并由 ShardLayoutFactory::peerOf 推导对端布局 —— 这是「跨端协议零改动」的前提。

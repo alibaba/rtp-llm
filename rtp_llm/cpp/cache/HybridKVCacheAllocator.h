@@ -90,11 +90,7 @@ protected:
                                           int               failed_group,
                                           bool              incremental,
                                           int               failed_need_blocks) const;
-    size_t               loadTargetPosition(size_t                               path_index,
-                                            size_t                               group_id,
-                                            const std::shared_ptr<CPSlotMapper>& mapper,
-                                            int                                  cp_scale) const;
-    bool                 cpCompactSwaGroup(size_t group_id, const std::shared_ptr<CPSlotMapper>& mapper) const;
+    size_t               loadTargetPosition(size_t path_index, size_t group_id, int cp_scale) const;
     void                 rollbackBlockIdsToSize(int group_id, BlockIds& block_ids, size_t original_size);
     void                 rollbackInitMalloc(BatchKVCacheResource&                kv_resource,
                                             const std::vector<BlockIndicesType>& referenced_blocks,

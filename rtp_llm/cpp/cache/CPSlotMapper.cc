@@ -8,6 +8,14 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm {
+
+size_t CPSlotMapper::treeBlockPosition(const CacheGroupPolicy& policy, size_t path_index, int cp_size) {
+    return policy.group_type == CacheGroupType::LINEAR
+                   || (policy.group_type == CacheGroupType::SWA
+                       && policy.cp_mapping != CpBlockMappingMode::COMPACT_LAST_RANK) ?
+               (path_index + 1) * static_cast<size_t>(cp_size) - 1 :
+               path_index;
+}
 namespace {
 
 size_t groupSeqSize(const CacheConfig& config, size_t gid, size_t fallback) {

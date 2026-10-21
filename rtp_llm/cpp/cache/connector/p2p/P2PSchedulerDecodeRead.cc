@@ -157,7 +157,13 @@ P2PSchedulerDecodeRead::buildDecodeRankRoutes(const TransferPlan&        plan,
                 continue;
             }
             auto layer_buffers = LayerCacheBufferUtil::convertTagForRoute(
-                resource, *config_.topology, route->cache_tag, positions, worker_cp_rank, cp_size);
+                resource,
+                *config_.topology,
+                route->cache_tag,
+                positions,
+                worker_cp_rank,
+                cp_size,
+                config_.seq_size_per_block);
             if (!layer_buffers.ok()) {
                 return ErrorInfo(layer_buffers.status().code(),
                                  "decode route=" + std::to_string(route->route_id) + " worker_rank="

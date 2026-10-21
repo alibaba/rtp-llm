@@ -11,6 +11,7 @@
 #include "autil/NetUtil.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
+#include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverterImpl.h"
@@ -122,6 +123,9 @@ protected:
     std::shared_ptr<transfer::tcp::TcpKVCacheReceiver> receiver_;
     WritebackService                                   decode_service_, prefill_service_;
     std::vector<std::unique_ptr<grpc::Server>>         servers_;
+    std::vector<std::shared_ptr<Allocator>>            peer_allocators_;
+    std::vector<std::shared_ptr<KVCacheManager>>       peer_managers_;
+    std::vector<std::unique_ptr<WritebackService>>     peer_services_;
     int                                                prefill_port_{0};
     GenerateStreamPtr                                  stream_;
     CacheKeysType                                      keys_;
@@ -155,18 +159,36 @@ protected:
                                                         false,
                                                         nullptr,
                                                         KVCacheConfig{},
-                                                        ParallelismConfig{},
+                                                        role == RoleType::DECODE ? parallelismFor(role) : ParallelismConfig{},
                                                         RuntimeConfig{},
                                                         SpeculativeExecutionConfig{},
                                                         pd,
                                                         store);
         manager->allocator_        = allocator;
         manager->block_tree_cache_ = allocator->blockTreeCache();
+        manager->cp_slot_mapper_   = allocator->cpSlotMapper();
         return manager;
     }
 
     virtual CacheConfig cacheConfig() const {
         return test::makeSimpleMhaCacheConfig(2, 16, 4, DataType::TYPE_FP16, 1, 2);
+    }
+
+    virtual int prefillCpSize() const {
+        return 1;
+    }
+
+    ParallelismConfig parallelismFor(RoleType role) const {
+        ParallelismConfig parallelism;
+        parallelism.role_type = role;
+        if (prefillCpSize() > 1) {
+            parallelism.tp_size                            = role == RoleType::PREFILL ? prefillCpSize() : 1;
+            parallelism.prefill_cp_config.kv_cache_sharded = true;
+            parallelism.prefill_cp_config.prefill_cp_size  = prefillCpSize();
+            parallelism.prefill_cp_config.method =
+                role == RoleType::PREFILL ? CPRotateMethod::ALL_GATHER : CPRotateMethod::PREFILL_CP;
+        }
+        return parallelism;
     }
 
     void SetUp() override {
@@ -176,6 +198,9 @@ protected:
         target_ = std::make_shared<Allocator>(config_);
         ASSERT_TRUE(source_->init());
         ASSERT_TRUE(target_->init());
+        if (prefillCpSize() > 1) {
+            target_->setCPSlotMapper(std::make_shared<CPSlotMapper>(0, prefillCpSize(), config_.seq_size_per_block));
+        }
         decode_                          = makeManager(RoleType::DECODE, source_);
         prefill_                         = makeManager(RoleType::PREFILL, target_);
         decode_service_.local.engine_    = std::make_shared<WritebackEngine>(decode_);
@@ -190,6 +215,48 @@ protected:
         sender_                          = std::make_shared<GatedTcpSender>();
         ASSERT_TRUE(receiver_->init(transfer_port, 1, 1));
         ASSERT_TRUE(sender_->sender_->init(1));
+        std::vector<std::string> prefill_grpc_addrs{prefill_addr};
+        std::vector<std::string> prefill_worker_addrs{"127.0.0.1:" + std::to_string(transfer_port) + ":"
+                                                      + std::to_string(prefill_port_)};
+        for (int rank = 1; rank < prefillCpSize(); ++rank) {
+            auto allocator = std::make_shared<Allocator>(config_);
+            ASSERT_TRUE(allocator->init());
+            allocator->setCPSlotMapper(
+                std::make_shared<CPSlotMapper>(rank, prefillCpSize(), config_.seq_size_per_block));
+            auto manager           = makeManager(RoleType::PREFILL, allocator);
+            auto service           = std::make_unique<WritebackService>();
+            service->local.engine_ = std::make_shared<WritebackEngine>(manager);
+            int rpc_port           = 0;
+            prefill_grpc_addrs.push_back(launch(*service, rpc_port));
+            const int tcp_port = autil::NetUtil::randomPort();
+            auto      receiver = std::make_shared<transfer::tcp::TcpKVCacheReceiver>();
+            ASSERT_TRUE(receiver->init(tcp_port, 1, 1));
+            prefill_worker_addrs.push_back("127.0.0.1:" + std::to_string(tcp_port) + ":" + std::to_string(rpc_port));
+            P2PConnectorConfig connector_config;
+            connector_config.role_type                          = RoleType::PREFILL;
+            connector_config.tp_rank                            = rank;
+            connector_config.p2p_writeback_enable               = true;
+            auto& worker                                        = connector_config.worker_config;
+            worker.topology                                     = config_.topologyPtr();
+            worker.layer_all_num                                = config_.layer_num;
+            worker.tp_rank                                      = rank;
+            worker.tp_size                                      = prefillCpSize();
+            worker.cp_size                                      = prefillCpSize();
+            worker.p2p_resource_store_timeout_check_interval_ms = 5;
+            auto converter                                      = std::make_shared<LayerBlockConverterImpl>(allocator);
+            auto connector = std::make_shared<P2PConnector>(connector_config, converter, nullptr, allocator);
+            auto entry     = std::make_unique<P2PConnectorPrefill>(connector_config, converter, nullptr, allocator);
+            entry->write_worker_ = std::make_unique<P2PWorkerPrefillWrite>(worker, converter, receiver);
+            entry->write_registration_client_ =
+                std::make_shared<P2PBroadcastClient>(std::vector<std::string>{prefill_addr}, 100);
+            ASSERT_TRUE(entry->write_worker_->init());
+            ASSERT_TRUE(entry->write_registration_client_->init());
+            connector->prefill_     = std::move(entry);
+            manager->p2p_connector_ = std::move(connector);
+            peer_allocators_.push_back(std::move(allocator));
+            peer_managers_.push_back(std::move(manager));
+            peer_services_.push_back(std::move(service));
+        }
         // Warm the synchronous D2H path before starting the writeback deadline.
         auto warmup = torch::zeros({4096}, torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
         std::array<std::array<char, 1024>, 4> host{};
@@ -209,18 +276,21 @@ protected:
             auto& worker                                           = connector_config.worker_config;
             worker.topology                                        = config_.topologyPtr();
             worker.layer_all_num                                   = config_.layer_num;
+            worker.tp_size                                         = role == RoleType::PREFILL ? prefillCpSize() : 1;
+            worker.cp_size                                         = role == RoleType::PREFILL ? prefillCpSize() : 1;
             worker.p2p_resource_store_timeout_check_interval_ms    = 5;
             auto& scheduler                                        = connector_config.scheduler_config;
             scheduler.topology                                     = config_.topologyPtr();
+            scheduler.seq_size_per_block                           = config_.seq_size_per_block;
             scheduler.role_type                                    = role;
-            scheduler.parallelism_config.role_type                 = role;
-            scheduler.worker_grpc_addrs                            = {address};
-            scheduler.worker_addrs                             = {"127.0.0.1:" + std::to_string(transfer_port) + ":"
-                                                                      + std::to_string(prefill_port_)};
+            scheduler.parallelism_config                           = parallelismFor(role);
+            scheduler.worker_grpc_addrs =
+                role == RoleType::PREFILL ? prefill_grpc_addrs : std::vector<std::string>{address};
+            scheduler.worker_addrs                                 = prefill_worker_addrs;
             scheduler.p2p_resource_store_timeout_check_interval_ms = 5;
             scheduler.p2p_cancel_broadcast_timeout_ms              = 100;
             scheduler.p2p_writeback_timeout_ms                     = 3000;
-            auto client = std::make_shared<P2PBroadcastClient>(std::vector<std::string>{address}, 100);
+            auto client = std::make_shared<P2PBroadcastClient>(scheduler.worker_grpc_addrs, 100);
             ASSERT_TRUE(client->init());
             auto connector = std::make_shared<P2PConnector>(connector_config, converter, nullptr, manager->allocator_);
             if (role == RoleType::DECODE) {
@@ -243,7 +313,9 @@ protected:
             manager->p2p_connector_ = std::move(connector);
         }
         keys_ = calculateCacheKeys(tokens_.data(), 12, 4);
-        ASSERT_TRUE(test::seedCompleteBlockTreePath(target_, {keys_.front()}).success);
+        if (prefillCpSize() == 1) {
+            ASSERT_TRUE(test::seedCompleteBlockTreePath(target_, {keys_.front()}).success);
+        }
     }
 
     void TearDown() override {
@@ -253,6 +325,9 @@ protected:
             decode_->stopWriteback();
         if (prefill_)
             prefill_->stopWriteback();
+        for (const auto& manager : peer_managers_) {
+            manager->stopWriteback();
+        }
         stream_.reset();
         for (auto& server : servers_) {
             server->Shutdown();
@@ -280,8 +355,8 @@ protected:
         model.vocab_size                   = 128;
         model.attn_config.tokens_per_block = 4;
         stream_ = std::make_shared<NormalGenerateStream>(input, model, RuntimeConfig{}, resources, nullptr);
-        stream_->setPrefillTpSize(1);
-        stream_->setPrefillCpSize(1);
+        stream_->setPrefillTpSize(prefillCpSize());
+        stream_->setPrefillCpSize(prefillCpSize());
         stream_->generate_status_->status = StreamState::RUNNING;
         ASSERT_TRUE(stream_->streamCacheResource().initKVBlock().ok());
         auto new_tokens =
@@ -309,6 +384,31 @@ protected:
         }
         ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
         stream_->generate_status_->status = StreamState::FINISHED;
+    }
+
+    void checkWritebackAfterFinalStepCrossesBoundary() {
+        prepare(7, 6);
+        ASSERT_EQ(stream_->cacheKeys().size(), 1u);
+        stream_->generate_status_->status = StreamState::RUNNING;
+        StreamUpdateInfo update{torch::tensor({{8, 9}}, torch::kInt32), 2};
+        update.kv_ready_token_count = 8;
+        stream_->update(update);
+        ASSERT_EQ(stream_->seqLength(), 9);
+        ASSERT_EQ(stream_->writebackKVReadyTokenCount(), 8);
+        ASSERT_EQ(stream_->cacheKeys().size(), 1u);
+        stream_->reportEvent(StreamEvents::GenerateDone);
+        ASSERT_EQ(stream_->moveToNext(), StreamState::FINISHED);
+        ASSERT_TRUE(await([&]() { return sender_->started > 0; }));
+        auto write = context();
+        ASSERT_NE(write, nullptr);
+        ASSERT_NE(writeSource(), nullptr);
+        EXPECT_EQ(writeSource()->cacheKeys(), (CacheKeysType{keys_[0], keys_[1]}));
+        sender_->release();
+        ASSERT_TRUE(await([&]() { return drained(); }));
+        ASSERT_TRUE(write->success()) << write->errorInfo().ToString();
+        const CacheKeysType expected_keys = prefillCpSize() == 1 ? CacheKeysType{keys_[0], keys_[1]} :
+                                                                 CacheKeysType{keys_[1]};
+        EXPECT_EQ(target_->devicePrefixBlocksForTest(expected_keys), expected_keys.size());
     }
 
     void checkWritebackAfterSpeculativeStop(bool eos) {
@@ -367,6 +467,70 @@ protected:
 };
 
 class DecodeWritebackIntegrationTest: public DecodeWritebackIntegrationTestBase<SingleTypeKVCacheAllocator> {};
+
+class DecodeWritebackCpIntegrationTest: public DecodeWritebackIntegrationTestBase<HybridPoolKVCacheAllocator> {
+protected:
+    int prefillCpSize() const override {
+        return 2;
+    }
+};
+
+TEST_F(DecodeWritebackIntegrationTest, FinalStepCrossesBoundaryWithoutAnotherAllocation) {
+    checkWritebackAfterFinalStepCrossesBoundary();
+}
+
+TEST_F(DecodeWritebackCpIntegrationTest, FinalStepCrossesBoundaryWithoutAnotherAllocation) {
+    checkWritebackAfterFinalStepCrossesBoundary();
+}
+
+TEST_F(DecodeWritebackCpIntegrationTest, TcpScatterPublishesCanonicalPrefixAndReusesBothRankBuffers) {
+    prepare();
+    stream_->generate_status_->status = StreamState::RUNNING;
+    stream_->reportEvent(StreamEvents::GenerateDone);
+    ASSERT_EQ(stream_->moveToNext(), StreamState::FINISHED);
+    ASSERT_TRUE(await([&]() { return sender_->started > 0; }));
+    auto write = context();
+    ASSERT_NE(write, nullptr);
+    EXPECT_EQ(target_->devicePrefixBlocksForTest({keys_[1]}), 0u);
+    sender_->release();
+    ASSERT_TRUE(await([&]() { return drained(); }));
+    ASSERT_TRUE(write->success()) << write->errorInfo().ToString();
+    EXPECT_EQ(target_->devicePrefixBlocksForTest({keys_[1]}), 1u);
+    EXPECT_EQ(target_->devicePrefixBlocksForTest({keys_[1], keys_[2]}), 1u);
+
+    auto reused = std::make_shared<BatchKVCacheResource>();
+    reused->resetBatchSize(1);
+    reused->initGroups(config_.topologyPtr());
+    auto ids               = std::make_shared<CompleteTokenIds>(1, 1, 64, 4);
+    auto input             = std::make_shared<GenerateInput>();
+    input->input_ids       = torch::tensor(tokens_, torch::kInt32);
+    input->generate_config = std::make_shared<GenerateConfig>();
+    ids->init(input);
+    MallocInfo info;
+    info.batch_kv_cache_resource = reused;
+    info.complete_token_ids      = ids;
+    info.reuse_cache             = true;
+    info.enable_cache_lookup     = true;
+    const auto result            = prefill_->malloc(info);
+    ASSERT_TRUE(result.success);
+    EXPECT_EQ(result.reuse_len, 8);
+    ASSERT_EQ(peer_allocators_.size(), 1u);
+    EXPECT_EQ(peer_allocators_.front()->devicePrefixBlocksForTest({keys_[1]}), 0u);
+    const std::array<std::shared_ptr<Allocator>, 2> ranks{target_, peer_allocators_.front()};
+    for (size_t rank = 0; rank < ranks.size(); ++rank) {
+        SCOPED_TRACE(rank);
+        for (int layer = 0; layer < 2; ++layer) {
+            for (const auto& block : ranks[rank]->convertIndexToBufferByTag(
+                     layer, config_.topology().groups().front().tag, reused->blocks(0, 0).front(), 1, 0)) {
+                std::vector<uint8_t> bytes(block.size_bytes);
+                ASSERT_EQ(cudaMemcpy(bytes.data(), block.addr, bytes.size(), cudaMemcpyDeviceToHost), cudaSuccess);
+                EXPECT_TRUE(std::all_of(
+                    bytes.begin(), bytes.end(), [&](uint8_t value) { return value == 10 * layer + rank + 1; }));
+            }
+        }
+    }
+    prefill_->free(FreeInfo{reused, ids});
+}
 
 class DecodeWritebackHybridIntegrationTest:
     public DecodeWritebackIntegrationTestBase<HybridPoolKVCacheAllocator>,

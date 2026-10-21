@@ -55,7 +55,8 @@ public:
                             int                        layer_id,
                             const std::vector<size_t>& logical_positions,
                             int                        cp_rank,
-                            int                        cp_size);
+                            int                        cp_size,
+                            size_t                     cache_key_block_size = 0);
 
     /// @brief 对某个 tag 覆盖的每一层各产出一个 buffer（route 与 layer 无关，故在此展开）。
     [[nodiscard]] static ErrorResult<std::vector<std::shared_ptr<LayerCacheBuffer>>>
@@ -64,7 +65,8 @@ public:
                        const std::string&         cache_tag,
                        const std::vector<size_t>& logical_positions,
                        int                        cp_rank,
-                       int                        cp_size);
+                       int                        cp_size,
+                       size_t                     cache_key_block_size = 0);
 
     /// @brief 将 LayerCacheBuffer 转换为 transfer 层需要的 KeyBlockInfoMap
     [[nodiscard]] static ErrorResult<transfer::KeyBlockInfoMap>

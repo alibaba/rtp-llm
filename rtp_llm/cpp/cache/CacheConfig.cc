@@ -225,6 +225,34 @@ void CacheConfig::setGroupBlockLayout(const std::vector<uint32_t>& block_nums,
     setTopology(std::move(groups), topology().layers());
 }
 
+std::shared_ptr<const CacheTopology> CacheConfig::activeModelTopologyPtr() const {
+    const auto& allocated_topology = topologyPtr();
+    if (mtp_sub_configs.empty()) {
+        return allocated_topology;
+    }
+    RTP_LLM_CHECK_WITH_INFO(mtp_sub_configs.front() != nullptr && mtp_sub_configs.front()->layer_num > 0,
+                            "active MTP module 0 must have a nonempty cache config");
+    const size_t active_layer_count = static_cast<size_t>(layer_num) + mtp_sub_configs.front()->layer_num;
+    RTP_LLM_CHECK_WITH_INFO(active_layer_count <= allocated_topology->layers().size(),
+                            "active model layers=%zu exceed allocated topology layers=%zu",
+                            active_layer_count,
+                            allocated_topology->layers().size());
+    if (active_layer_count == allocated_topology->layers().size()) {
+        return allocated_topology;
+    }
+    auto groups = allocated_topology->groups();
+    auto layers = allocated_topology->layers();
+    layers.resize(active_layer_count);
+    for (auto& group : groups) {
+        auto& layer_ids = group.layer_ids;
+        layer_ids.erase(std::remove_if(layer_ids.begin(), layer_ids.end(), [&](int layer_id) {
+                            return static_cast<size_t>(layer_id) >= active_layer_count;
+                        }),
+                        layer_ids.end());
+    }
+    return CacheTopology::create(std::move(groups), std::move(layers));
+}
+
 std::shared_ptr<CacheConfig>
 CacheConfig::mergeMTPModule(const CacheConfig& propose_config, int module_index, uint32_t main_layer_num) {
     RTP_LLM_CHECK_WITH_INFO(groupNums() > 0, "CacheConfig::mergeMTPModule requires destination topology");

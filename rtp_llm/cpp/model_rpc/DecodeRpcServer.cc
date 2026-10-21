@@ -452,7 +452,9 @@ grpc::Status DecodeRpcServer::GenerateStreamCall(grpc::ServerContext*           
             server_context, generate_context.request_key, response_writer, generate_context.getStream());
     }
     prefill_cancel_guard.completed = generate_context.error_status.ok() && !server_context->IsCancelled()
-                                     && stream->getStatus() == StreamState::FINISHED;
+                                     && !stream->hasError()
+                                     && (stream->getStatus() == StreamState::FINISHED
+                                         || stream->hasEvent(StreamEvents::GenerateDone));
     if (prefill_cancel_guard.completed)
         cancel_registry_->finishDownstream(cancel_handle);
     else

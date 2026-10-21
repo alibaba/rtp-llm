@@ -56,6 +56,8 @@ public:
 
     int localBlockCount(int seq_len) const;
 
+    static size_t treeBlockPosition(const CacheGroupPolicy& policy, size_t path_index, int cp_size);
+
     // Projects a logical cache-key position to the physical block slot owned
     // by the given CP rank. nullopt means that the rank does not own this key.
     static std::optional<size_t> physicalBlockPosition(const CacheGroupPolicy& policy,

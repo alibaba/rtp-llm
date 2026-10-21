@@ -39,19 +39,8 @@ inline int cpEffectiveSeqLenForGroup(const std::shared_ptr<CPSlotMapper>& mapper
 
 }  // namespace
 
-bool HybridKVCacheAllocator::cpCompactSwaGroup(size_t group_id, const std::shared_ptr<CPSlotMapper>& mapper) const {
-    return mapper && mapper->isSharded() && group_id < kv_cache_groups_.size()
-           && mapper->compactLastRankGroup(config_, group_id);
-}
-
-size_t HybridKVCacheAllocator::loadTargetPosition(size_t                               path_index,
-                                                  size_t                               group_id,
-                                                  const std::shared_ptr<CPSlotMapper>& mapper,
-                                                  int                                  cp_scale) const {
-    const CacheGroupType type = config_.typeForGroup(group_id);
-    return type == CacheGroupType::LINEAR || (type == CacheGroupType::SWA && !cpCompactSwaGroup(group_id, mapper)) ?
-               (path_index + 1) * static_cast<size_t>(cp_scale) - 1 :
-               path_index;
+size_t HybridKVCacheAllocator::loadTargetPosition(size_t path_index, size_t group_id, int cp_scale) const {
+    return CPSlotMapper::treeBlockPosition(config_.topology().groupById(group_id).policy, path_index, cp_scale);
 }
 
 HybridKVCacheAllocator::HybridKVCacheAllocator(const CacheConfig&                 config,
@@ -77,8 +66,7 @@ std::shared_ptr<LoadAsyncContext> HybridKVCacheAllocator::prepareKVCache(const C
     if (prepared.total_logical_blocks > 0) {
         for (const auto& group_set : group_sets) {
             for (const size_t group_id : group_set->groupIds()) {
-                const size_t reuse_size =
-                    loadTargetPosition(prepared.total_logical_blocks - 1, group_id, cp_mapper, cp_scale) + 1;
+                const size_t reuse_size = loadTargetPosition(prepared.total_logical_blocks - 1, group_id, cp_scale) + 1;
                 kv_resource.mutableBlockIds(0, static_cast<int>(group_id))
                     .assign(BlockIndicesType(reuse_size, NULL_BLOCK_IDX));
             }
@@ -89,7 +77,7 @@ std::shared_ptr<LoadAsyncContext> HybridKVCacheAllocator::prepareKVCache(const C
         const auto& group_ids = group_sets[group_set_id]->groupIds();
         for (size_t member_group_id = 0; member_group_id < group_ids.size(); ++member_group_id) {
             const size_t group_id        = group_ids[member_group_id];
-            const size_t target_position = loadTargetPosition(path_index, group_id, cp_mapper, cp_scale);
+            const size_t target_position = loadTargetPosition(path_index, group_id, cp_scale);
             kv_resource.mutableBlockIds(0, static_cast<int>(group_id)).setAt(target_position, blocks[member_group_id]);
             prepared.referenced_blocks[group_id].push_back(blocks[member_group_id]);
         }
@@ -202,12 +190,12 @@ bool HybridKVCacheAllocator::materializeInitialBlocks(const MallocInfo& malloc_i
         for (const GroupSetPtr& group_set : block_tree_cache_->groupSets()) {
             for (size_t group_id : group_set->groupIds()) {
                 kv_resource.mutableBlockIds(0, static_cast<int>(group_id))
-                    .resize(loadTargetPosition(matched_blocks - 1, group_id, cp_mapper, cp_scale) + 1);
+                    .resize(loadTargetPosition(matched_blocks - 1, group_id, cp_scale) + 1);
             }
         }
     }
     auto add_target = [&](size_t path, size_t group_id) {
-        prepared.required_positions[group_id].insert(loadTargetPosition(path, group_id, cp_mapper, cp_scale));
+        prepared.required_positions[group_id].insert(loadTargetPosition(path, group_id, cp_scale));
     };
     if (context != nullptr) {
         for (size_t i = 0; i < context->loadDescs().size(); ++i) {
@@ -254,8 +242,8 @@ bool HybridKVCacheAllocator::materializeInitialBlocks(const MallocInfo& malloc_i
     auto target_blocks = [&](size_t path, size_t group_set_id) {
         BlockIndicesType blocks;
         for (size_t group_id : block_tree_cache_->groupSets()[group_set_id]->groupIds()) {
-            blocks.push_back(kv_resource.blocks(
-                0, static_cast<int>(group_id))[loadTargetPosition(path, group_id, cp_mapper, cp_scale)]);
+            blocks.push_back(
+                kv_resource.blocks(0, static_cast<int>(group_id))[loadTargetPosition(path, group_id, cp_scale)]);
         }
         return blocks;
     };
@@ -275,8 +263,7 @@ bool HybridKVCacheAllocator::materializeInitialBlocks(const MallocInfo& malloc_i
                     handle_index,
                     kv_resource.blocks(
                         0,
-                        static_cast<int>(
-                            handle.group_id))[loadTargetPosition(key_index, handle.group_id, cp_mapper, cp_scale)]);
+                        static_cast<int>(handle.group_id))[loadTargetPosition(key_index, handle.group_id, cp_scale)]);
             }
         }
     }
@@ -453,14 +440,9 @@ void HybridKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info, size
                     mapping_valid = false;
                     break;
                 }
-                const auto type = config_.typeForGroup(static_cast<size_t>(group_id));
-                const bool sparse_logical =
-                    cp_active
-                    && (type == CacheGroupType::LINEAR
-                        || (type == CacheGroupType::SWA && !cpCompactSwaGroup(group_id, cp_mapper)));
                 const auto& blocks = kv_cache_resource->blocks(batch_id, group_id);
                 for (size_t i = 0; i < insert_keys.size(); ++i) {
-                    const size_t position = sparse_logical ? (i + 1) * static_cast<size_t>(cp_mapper->cpSize()) - 1 : i;
+                    const size_t position = loadTargetPosition(i, group_id, cp_active ? cp_mapper->cpSize() : 1);
                     if (position >= blocks.size() || isNullBlockIdx(blocks[position])) {
                         continue;
                     }

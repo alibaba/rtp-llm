@@ -99,7 +99,8 @@ LayerCacheBufferUtil::convertLayerTagForRoute(KVCacheResource&           resourc
                                               int                        layer_id,
                                               const std::vector<size_t>& logical_positions,
                                               int                        cp_rank,
-                                              int                        cp_size) {
+                                              int                        cp_size,
+                                              size_t                     cache_key_block_size) {
     const std::string context = "layer=" + std::to_string(layer_id) + " tag=" + group.tag;
     if (cp_size <= 0 || cp_rank < 0 || cp_rank >= cp_size) {
         return conversionError(context + ": invalid CP rank/size");
@@ -118,7 +119,13 @@ LayerCacheBufferUtil::convertLayerTagForRoute(KVCacheResource&           resourc
                 return conversionError(pos_context
                                        + " cache_key=<missing> block_id=<missing>: logical position out of range");
             }
-            const auto physical = CPSlotMapper::physicalBlockPosition(group.policy, pos, keys.size(), cp_rank, cp_size);
+            auto physical = CPSlotMapper::physicalBlockPosition(group.policy, pos, keys.size(), cp_rank, cp_size);
+            if (cp_size == 1 && cache_key_block_size > 0 && group.seq_size_per_block > cache_key_block_size) {
+                if (group.seq_size_per_block % cache_key_block_size != 0) {
+                    return conversionError(pos_context + ": incompatible cache-key and group block sizes");
+                }
+                physical = pos / (group.seq_size_per_block / cache_key_block_size);
+            }
             const std::string key_context = pos_context + " cache_key=" + std::to_string(keys[pos]);
             if (!physical || *physical >= blocks.size()) {
                 return conversionError(key_context + " block_id=<missing> physical_pos="
@@ -149,7 +156,8 @@ LayerCacheBufferUtil::convertTagForRoute(KVCacheResource&           resource,
                                          const std::string&         cache_tag,
                                          const std::vector<size_t>& positions,
                                          int                        cp_rank,
-                                         int                        cp_size) {
+                                         int                        cp_size,
+                                         size_t                     cache_key_block_size) {
     std::vector<std::shared_ptr<LayerCacheBuffer>> result;
     if (positions.empty()) {
         return std::move(result);
@@ -160,7 +168,8 @@ LayerCacheBufferUtil::convertTagForRoute(KVCacheResource&           resource,
         return conversionError("tag=" + cache_tag + ": non-empty route has no topology layers");
     }
     for (int layer_id : group->layer_ids) {
-        auto buffer = convertLayerTagForRoute(resource, *group, layer_id, positions, cp_rank, cp_size);
+        auto buffer =
+            convertLayerTagForRoute(resource, *group, layer_id, positions, cp_rank, cp_size, cache_key_block_size);
         if (!buffer.ok()) {
             return buffer.status();
         }

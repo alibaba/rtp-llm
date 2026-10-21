@@ -185,10 +185,8 @@ protected:
     evaluateInitCapacity(const MallocInfo& malloc_info, size_t reserve_blocks, InitCapacityMode mode) const;
     ErrorInfo populateMatchedBlocks(const BlockTreeMatchResult& match_result, KVCacheResource& resource) const;
     void      releaseMatchedBlockReferences(const BlockTreeMatchResult& match_result) const;
-    ErrorInfo mallocAndBindLoadTargets(KVCacheResource&  resource,
-                                       int               target_seq_len,
-                                       bool              enable_reuse_cache,
-                                       LoadAsyncContext* load_context) const;
+    ErrorInfo
+    mallocAndBindLoadTargets(KVCacheResource& resource, bool enable_reuse_cache, LoadAsyncContext* load_context) const;
     virtual MallocResult incrMalloc(const MallocInfo& malloc_info)             = 0;
     virtual MallocResult initMallocForCommonLen(const MallocInfo& malloc_info) = 0;
     virtual int          getNeedBlocks(const MallocInfo& malloc_info) const    = 0;
