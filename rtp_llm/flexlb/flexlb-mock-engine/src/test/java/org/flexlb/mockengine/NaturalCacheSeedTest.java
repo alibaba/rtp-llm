@@ -37,7 +37,8 @@ class NaturalCacheSeedTest {
             assertTrue(status(p).getVersion() > grown.getVersion());
             assertEquals(400, httpPostResponse(cluster.controlPort(), "/cache_seed",
                     "{\"port\":61360,\"keys\":[9]}").statusCode());
-            assertThrows(IllegalArgumentException.class, () -> p.cacheFixture("configure", 0, 1, 2, 1, 0, 1000));
+            p.cacheFixture("configure", 0, 1, 2, 1, 0, 1000);
+            assertTrue(status(p).getCacheKeysMap().containsKey(8L));
         }
     }
 
@@ -52,18 +53,19 @@ class NaturalCacheSeedTest {
         }
     }
 
-    @Test void controlledAndNaturalSourcesCannotBeCombinedAndInvalidSeedIsAtomic() throws Exception {
+    @Test void externalKeysCoexistWithNaturalSeedAndInvalidSeedIsAtomic() throws Exception {
         try (var cluster = MockEngineTestCluster.create(performanceModel(directory, "10"), 61380, 2, 0)) {
             var controlled = cluster.prefill(0);
             controlled.cacheFixture("configure", 0, 2, 2, 1, 0, 1000);
-            assertThrows(IllegalArgumentException.class, () -> controlled.seedNaturalCache(List.of(7L)));
+            controlled.seedNaturalCache(List.of(7L));
+            assertTrue(status(controlled).getCacheKeysMap().containsKey(7L));
             var natural = cluster.prefill(1);
             assertThrows(IllegalArgumentException.class, () -> natural.seedNaturalCache(List.of(7L, 7L)));
             assertThrows(IllegalArgumentException.class, () -> natural.seedNaturalCache(List.of()));
             assertTrue(status(natural).getCacheKeysMap().isEmpty());
             natural.seedNaturalCache(List.of(7L));
-            assertThrows(IllegalArgumentException.class, () -> natural.cacheFixture("configure", 1, 2, 2, 1, 0, 1000));
-            assertEquals(Set.of(7L), status(natural).getCacheKeysMap().keySet());
+            natural.cacheFixture("configure", 1, 2, 2, 1, 0, 1000);
+            assertTrue(status(natural).getCacheKeysMap().containsKey(7L));
         }
     }
 }

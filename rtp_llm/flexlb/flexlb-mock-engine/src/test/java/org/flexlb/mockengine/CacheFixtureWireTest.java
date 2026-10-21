@@ -26,6 +26,10 @@ class CacheFixtureWireTest {
         for (int worker : new int[]{0, 1, 119}) for (int shared : new int[]{0, 1, 65})
             for (long offset : new long[]{0, 117, 99991}) {
                 var keys = CacheFixtureWire.Keys.create(worker, 120, 176, shared, offset, 129);
+                for (int i = 0; i < keys.count(); i++) assertTrue(keys.contains(keys.key(i)));
+                assertFalse(keys.contains(hash(((long)worker << 40) + offset - 1)));
+                assertFalse(keys.contains(hash(((long)worker << 40) + offset + 176)));
+                assertFalse(keys.contains(hash(Long.MIN_VALUE + shared)));
                 var header = EngineRpcService.CacheStatusPB.newBuilder().setVersion(129).build();
                 var frame = new CacheFixtureWire.Frame(header, keys);
                 var expected = reference(worker, 120, 176, shared, offset, 129);
@@ -86,10 +90,27 @@ class CacheFixtureWireTest {
                 var request = EngineRpcService.CacheVersionPB.newBuilder().setNeedCacheKeys(true).setLatestCacheVersion(-1).build();
                 assertEquals(0, stub.getCacheStatus(request).getCacheKeysCount());
                 assertTrue(stub.getWorkerStatus(EngineRpcService.StatusVersionPB.getDefaultInstance()).getAlive());
+                service.seedNaturalCache(java.util.List.of(hash(0), hash(Long.MIN_VALUE), 7L));
+                var natural = stub.getCacheStatus(request);
+                assertEquals(3, natural.getCacheKeysCount());
                 service.cacheFixture("configure", 0, 120, 176, 65, 0, 1000);
                 var response = stub.getCacheStatus(request);
-                var expected = reference(0, 120, 176, 65, 0, response.getVersion());
+                var expected = reference(0, 120, 176, 65, 0, response.getVersion()).toBuilder()
+                        .putCacheKeys(7L, true).build();
+                assertTrue(response.getVersion() > natural.getVersion());
                 assertEquals(expected.getCacheKeysMap(), response.getCacheKeysMap());
+                CacheFixtureWire.Frame merged = MockEngineTestSupport.unary(o -> service.getCacheStatusWire(request, o));
+                try (var stream = merged.stream()) {
+                    assertEquals(response.getSerializedSize(), stream.available(), "overlapping keys occur only once on the wire");
+                    assertEquals(response, EngineRpcService.CacheStatusPB.parseFrom(stream));
+                }
+                assertEquals(response, MockEngineTestSupport.<EngineRpcService.CacheStatusPB>unary(o -> service.getCacheStatus(request, o)));
+                assertTrue(service.evictCacheKeys(java.util.List.of(7L)));
+                var evicted = stub.getCacheStatus(request);
+                assertEquals(241, evicted.getCacheKeysCount());
+                assertTrue(evicted.getVersion() > response.getVersion());
+                var scalar = stub.getCacheStatus(request.toBuilder().setNeedCacheKeys(false).build());
+                assertEquals(evicted.getVersion(), scalar.getVersion());
                 assertEquals(2, response.getBlockSize());
                 assertTrue(response.getTotalKvCache() > 0);
                 assertEquals(0, stub.getCacheStatus(request.toBuilder().setNeedCacheKeys(false).build()).getCacheKeysCount());

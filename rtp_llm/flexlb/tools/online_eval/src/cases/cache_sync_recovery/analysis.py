@@ -21,7 +21,7 @@ def analyze(evidence):
         keys = procedure["unique_keys"] + procedure["shared_keys"]
         progress = evidence["cache_progress"]
         from cases.cache_sync_recovery.health import converged
-        ready = (converged(last, set(evidence["worker_addresses"]), keys,
+        ready = (converged(last, set(evidence["worker_addresses"]), progress.get("expected_keys", keys),
                            progress["expected_versions"], limits["max_status_age_ms"])
                  and progress["converged"]
                  and evidence["convergence_samples"] >= observation["converged_samples"])

@@ -90,34 +90,41 @@ D 提前分配后，P 入队拒绝会清理 D 的准备状态。Master 可能先
 Prefill ownership、Decode reservation/dispatch permit 和引擎负载应分别核账；
 单个 Master 无客户端流量不意味着共享引擎空闲。完整流量排空后再验证全局收尾。
 
-缓存同步测试有两种互斥的数据来源，按引擎名或端口定位。
+缓存同步默认只上报自然缓存，外部合成 keys 默认关闭。控制接口按引擎名或
+引擎 gRPC 端口定位，HTTP 请求发往控制服务端口。
 
-- 自然模式：`POST /cache_seed` 传入 `engine` 或 `port` 与 `keys`（有序 int64 block keys）。
-  只允许在无请求、缓存为空的引擎初始化一次，keys 不得重复且不得超过实际缓存容量。
-  keys 直接进入推理使用的 LRU，后续请求可命中、追加和驱逐；缓存同步读取同一份状态。
+- `POST /cache_seed` 传入 `engine` 或 `port` 与 `keys`（有序 int64 block keys）。
+  只允许在无请求、自然缓存为空的引擎预热一次，keys 不得重复且不得超过实际缓存容量。
+  keys 直接进入推理使用的 LRU，后续请求可命中、追加和驱逐。
   输入 keys 表示一条已缓存前缀序列，要产生自然命中，须与请求 block hash/顺序一致。
   该控制面只预热模拟器元数据，不代表真实 GPU KV 数据已准备完成。
-- 受控模式：`POST /cache_fixture` 的 `configure` 一次设置
-  `worker/workers/unique/shared/delta/interval_ms`。每个 Worker 的集合为
-  `shared_global ∪ unique[worker]`，每 Worker 为 `unique + shared` 个，
-  全局去重为 `workers × unique + shared`；不同 Worker 的独有集合互不重叠。
+- `POST /cache_fixture` 的 `configure` 必须显式传入布尔值 `enabled:true`，再一次设置
+  `worker/workers/unique/shared/delta/interval_ms`。缺省、false 或非布尔值均拒绝，
+  不创建外部集合。每个 P 只能 configure 一次，可以在已有自然缓存或背景流量时配置。
+  每个 Worker 的外部集合为 `shared_global ∪ unique[worker]`，每 Worker 为
+  `unique + shared` 个，全局去重为 `workers × unique + shared`。
   `delta` 表示每隔 `interval_ms` 毫秒替换多少独有 keys，每次等量新增/移除，
-  shared 保持不变。`delta=0` 表示冻结；`churn` 只接收 `delta/interval_ms`，
-  `inspect` 返回版本、规模、替换速率和累计响应条目/字节数。
-  `changed_versions` 统计按时间推进的版本次数，不能当作收到变更响应的 RPC 数。
+  shared 保持不变。`delta=0` 冻结外部变化，不会停止自然缓存增长。
+  `churn` 只接收 `delta/interval_ms`；`inspect` 返回外部规模 `keys`、合并规模
+  `reported_keys`、外部版本 `fixture_version`、上报版本 `version`、替换速率和累计统计。
 
-受控模式的规模不受推理 KV 容量约束，也不会并入自然请求产生的缓存变化。
-可以同时发送业务流量作为 Master 背景压力，但不能据此验收真实缓存命中或容量。
-初始化规模一次到位，不提供 grow、clock 或基于 RPC 次数的 every 参数。
+外部集合与自然缓存可同时存在，GetCacheStatus 上报两者去重后的并集。
+背景请求始终正常写入、复用和驱逐 LRU，控制链路只修改外部集合，不覆盖自然缓存。
+任一来源变化都会推进上报版本；外部数量和替换速率只描述外部集合，不能用于断言
+合并后的固定数量或总变化速率。流量排空、外部替换暂停后，可按各引擎的
+`reported_keys/version` 检查索引收敛。
+
+外部集合不受推理 KV 容量约束，容量字段仍来自正常缓存模拟，不能据此验收真实缓存
+命中或容量。自然 seed 可与外部集合共存，两者均不隐式清空已有缓存。
+初始化外部规模一次到位，不提供 grow、clock 或基于 RPC 次数的 every 参数。
 替换按单调时钟计算，读取时补齐经过的完整时间区间；暂停前也补齐尚未读取的变化。
 各引擎按自身配置时刻计时，不承诺多个引擎在同一瞬间切换版本。
 
-同一引擎只能选择一种来源，重复初始化或跨模式操作直接拒绝；切换需创建新引擎，
-不隐式清空或覆盖已有缓存。自然模式使用正常缓存版本与驱逐；受控模式每次仍返回
-完整 keys，即使请求版本相同，冻结变化也不会降低缓存同步载荷。
-响应快照在发送期间不可变，编码路径不为每个 key 创建额外 Java 对象。
-字节计数包括 fixture 的 map 与 version，不等于完整 RPC 响应或连接层流量。
-受控接口不接收整批 key 列表，自然 seed 不允许设置合成 churn 参数。
+启用外部集合后每次仍返回完整并集，即使请求版本相同。
+响应快照在发送期间不可变，外部 keys 保持流式编码，不建立完整合并 Map。
+统计中的条目与字节只计外部集合，字节包括 fixture 的 map 与 version，
+不等于合并后的完整 RPC 响应或连接层流量；`changed_versions` 是按时间推进次数，
+不能当作收到变更响应的 RPC 数。受控接口不接收整批 key 列表，自然 seed 不接收 churn 参数。
 
 使用 `inflight_status` 中的 `generation/reported_alive/status_age_ms` 观测 Master 已提交的
 状态；年龄采用单调时钟，负值表示尚未成功提交，不能当作零延迟。

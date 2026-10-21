@@ -642,16 +642,18 @@ final class MockControlServer {
         handleServicePost(exchange, (body, service) -> {
             String operation = body.path("operation").asText();
             java.util.Set<String> allowed = switch (operation) {
-                case "configure" -> java.util.Set.of("engine", "port", "operation", "worker", "workers", "unique", "shared", "delta", "interval_ms");
+                case "configure" -> java.util.Set.of("engine", "port", "operation", "enabled", "worker", "workers", "unique", "shared", "delta", "interval_ms");
                 case "churn" -> java.util.Set.of("engine", "port", "operation", "delta", "interval_ms");
                 case "inspect" -> java.util.Set.of("engine", "port", "operation");
                 default -> throw new ApiException(400, "unknown fixture operation; use configure, churn or inspect");
             };
+            if ("configure".equals(operation) && !body.path("enabled").equals(com.fasterxml.jackson.databind.node.BooleanNode.TRUE))
+                throw new ApiException(400, "external keys are disabled by default; configure requires enabled=true");
             var names = body.fieldNames();
             while (names.hasNext())
                 if (!allowed.contains(names.next())) throw new ApiException(400, "unknown fixture field");
             for (String field : allowed) {
-                if (java.util.Set.of("engine", "port", "operation").contains(field)) continue;
+                if (java.util.Set.of("engine", "port", "operation", "enabled").contains(field)) continue;
                 if (!body.path(field).isIntegralNumber() || !body.path(field).canConvertToInt())
                     throw new ApiException(400, "fixture field requires int32: " + field);
             }

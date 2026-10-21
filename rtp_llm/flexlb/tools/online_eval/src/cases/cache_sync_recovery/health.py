@@ -19,7 +19,7 @@ def converged(rows, names, keys, versions, maximum):
     if set(rows) != set(names):
         return False
     return all(healthy(row, maximum) and (row["role"] != "prefill" or (
-        row.get("cache_indexed") is True and row.get("cache_key_size") == keys
+        row.get("cache_indexed") is True and row.get("cache_key_size") == (keys[address] if isinstance(keys, dict) else keys)
         and row.get("cache_version") == versions[address]
         and row.get("cache_indexed_version") == versions[address]))
                for address, row in rows.items())

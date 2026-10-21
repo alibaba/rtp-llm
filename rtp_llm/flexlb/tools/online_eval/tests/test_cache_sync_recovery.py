@@ -400,3 +400,27 @@ def test_controlled_snapshot_rejects_obsolete_growth_controls(removed):
     data["parameters"]["procedure"][removed] = 1
     with pytest.raises(ValueError):
         configure_program(data, "case.yaml")
+
+
+def test_convergence_checks_exact_per_worker_union_counts_after_natural_growth():
+    rows = {"w0": row(), "w1": row()}
+    rows["w0"]["cache_key_size"] += 7
+    rows["w1"]["cache_key_size"] += 11
+    counts = {address: item["cache_key_size"] for address, item in rows.items()}
+    versions = {address: 2 for address in rows}
+    assert converged(rows, set(rows), counts, versions, 100)
+    assert not converged(rows, set(rows), 241000, versions, 100)
+    rows["w1"]["cache_key_size"] -= 1
+    assert not converged(rows, set(rows), counts, versions, 100)
+
+
+def test_analysis_uses_observed_union_counts_without_weakening_exact_convergence():
+    from cases.cache_sync_recovery.analysis import analyze
+    evidence = pressure_evidence()
+    counts = {"w0": 241007, "w1": 241011, "w2": 241019}
+    evidence["cache_progress"]["expected_keys"] = counts
+    for address, count in counts.items():
+        evidence["frames"][-1]["workers"][address]["cache_key_size"] = count
+    assert analyze(evidence)["verdict"] == "PASS"
+    evidence["frames"][-1]["workers"]["w1"]["cache_key_size"] -= 1
+    assert analyze(evidence)["verdict"] == "FAIL"

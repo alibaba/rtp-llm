@@ -90,7 +90,6 @@ def execute(ctx, params, deadline):
     original = path.read_text()
     ctx.add_cleanup("restore_cache_discovery", lambda d: atomic_write(path, original))
     evidence["victims"] = sorted(victims)
-    keys = p["unique_keys"] + p["shared_keys"]
     baseline, flow, last_sample = None, None, None
     affected, absent, rebuilt = set(), set(), set()
     maximum_gap = 0
@@ -208,18 +207,19 @@ def execute(ctx, params, deadline):
             raise ValueError("initial healthy Worker population unavailable")
         event("cache_seed_started")
         for i, e in enumerate(prefill):
-            fixture(e, "configure", worker=i, workers=len(prefill),
+            fixture(e, "configure", enabled=True, worker=i, workers=len(prefill),
                     unique=p["unique_keys"], shared=p["shared_keys"],
                     delta=0, interval_ms=p["churn_interval_ms"])
             sample("cache_construction")
         event("cache_seed_finished")
         frozen = stats()
+        baseline_keys = {a: f["reported_keys"] for a, f in frozen.items()}
         baseline = None
         ready = 0
         until = ctx.clock()+p["warmup_timeout_s"]
         while ctx.clock() < until:
             rows = sample("warmup")
-            good = converged(rows, names, keys, {a: f["version"] for a, f in frozen.items()},
+            good = converged(rows, names, baseline_keys, {a: f["version"] for a, f in frozen.items()},
                              limits["max_status_age_ms"])
             ready = ready+1 if good else 0
             if ready >= o["converged_samples"]:
@@ -230,7 +230,7 @@ def execute(ctx, params, deadline):
             raise ValueError("shared cache baseline failed to converge")
         last_sample = None
         maximum_gap = 0
-        evidence["cache_baseline"] = dict(workers=rows, expected_keys=keys,
+        evidence["cache_baseline"] = dict(workers=rows, expected_keys=baseline_keys,
             expected_global_keys=len(prefill)*p["unique_keys"] + p["shared_keys"],
             expected_versions={a: f["version"] for a, f in frozen.items()})
         event("cache_baseline_ready")
@@ -276,16 +276,17 @@ def execute(ctx, params, deadline):
             fixture(e, "churn", delta=0, interval_ms=p["churn_interval_ms"])
         expected = stats()
         versions = {a: f["version"] for a, f in expected.items()}
+        reported_keys = {a: f["reported_keys"] for a, f in expected.items()}
         until = ctx.clock()+120
         evidence["convergence_samples"] = 0
         while ctx.clock() < until:
             rows = sample("cache_settle")
-            good = converged(rows, names, keys, versions, limits["max_status_age_ms"])
+            good = converged(rows, names, reported_keys, versions, limits["max_status_age_ms"])
             evidence["convergence_samples"] = evidence["convergence_samples"] + 1 if good else 0
             if evidence["convergence_samples"] >= o["converged_samples"]:
                 break
             deadline.sleep(o["sample_s"])
-        evidence["cache_progress"] = dict(expected_versions=versions, expected_keys=keys,
+        evidence["cache_progress"] = dict(expected_versions=versions, expected_keys=reported_keys,
             converged=evidence["convergence_samples"] >= o["converged_samples"],
             scope="cache versions, index initialization and counts; no key membership proof")
         event("cache_progress_finished")

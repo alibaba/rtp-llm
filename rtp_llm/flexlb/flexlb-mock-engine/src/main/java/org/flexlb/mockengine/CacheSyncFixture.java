@@ -71,6 +71,8 @@ final class CacheSyncFixture {
         return new CacheFixtureWire.Frame(header, wireKeys);
     }
 
+    synchronized CacheFixtureWire.Keys keys() { return wireKeys; }
+
     synchronized long version() { advance(); return version; }
 
     synchronized Map<String, Object> snapshot() {

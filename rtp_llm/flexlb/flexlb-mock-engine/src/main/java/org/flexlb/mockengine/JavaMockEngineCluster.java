@@ -5308,53 +5308,49 @@ public final class JavaMockEngineCluster {
 
         void getCacheStatusWire(EngineRpcService.CacheVersionPB request,
                                 StreamObserver<CacheFixtureWire.Frame> observer) {
-            CacheSyncFixture fixture = cacheSyncFixture;
-            if (fixture != null && request.getNeedCacheKeys()) {
-                stats.cacheRpcs.increment();
-                var frame = fixture.wireResponse(request.getLatestCacheVersion());
-                var header = frame.header().toBuilder()
-                        .setAvailableKvCache(availableKvTokens())
-                        .setTotalKvCache(totalKvTokens)
-                        .setBlockSize(performance.blockSize()).build();
-                observer.onNext(new CacheFixtureWire.Frame(header, frame.keys()));
-                observer.onCompleted();
-                return;
-            }
-            getCacheStatus(request, new StreamObserver<>() {
-                public void onNext(EngineRpcService.CacheStatusPB value) {
-                    observer.onNext(new CacheFixtureWire.Frame(value, null));
-                }
-                public void onError(Throwable error) { observer.onError(error); }
-                public void onCompleted() { observer.onCompleted(); }
-            });
+            observer.onNext(cacheStatusFrame(request));
+            observer.onCompleted();
         }
 
         @Override
         public void getCacheStatus(EngineRpcService.CacheVersionPB request,
                                    StreamObserver<EngineRpcService.CacheStatusPB> observer) {
-            stats.cacheRpcs.increment();
-            // Capacity model v2 + pressure consistency: available derives from
-            // the block pool (free + pure-LRU blocks count) minus injected
-            // pressure, clamped to the reported total — the SAME caliber as
-            // WorkerStatus.availableKvCache and /snapshot available_kv_tokens
-            // (previously getCacheStatus ignored kv_pressure while WorkerStatus
-            // subtracted it).
-            EngineRpcService.CacheStatusPB.Builder status = EngineRpcService.CacheStatusPB.newBuilder()
-                    .setAvailableKvCache(availableKvTokens())
-                    .setTotalKvCache(totalKvTokens)
-                    .setBlockSize(performance.blockSize())
-                    .setVersion(cacheVersion.get());
-            CacheSyncFixture fixture = cacheSyncFixture;
-            if (fixture != null) status.setVersion(fixture.version());
-            if (request.getNeedCacheKeys() && fixture != null) {
-                status.mergeFrom(fixture.response(request.getLatestCacheVersion()));
-            } else if (request.getNeedCacheKeys()) {
-                for (Long key : cache.snapshotKeys()) status.putCacheKeys(key, true);
-                if (memoryCache != null)
-                    for (Long key : memoryCache.keys()) status.putCacheKeys(key, true);
-            }
-            observer.onNext(status.build());
+            observer.onNext(cacheStatusFrame(request).toProto());
             observer.onCompleted();
+        }
+
+        private java.util.Set<Long> naturalCacheKeys() {
+            var keys = cache.snapshotKeys();
+            if (memoryCache == null) return keys;
+            var combined = new java.util.HashSet<>(keys);
+            combined.addAll(memoryCache.keys());
+            return combined;
+        }
+
+        private CacheFixtureWire.Frame cacheStatusFrame(EngineRpcService.CacheVersionPB request) {
+            stats.cacheRpcs.increment();
+            // Capture the natural version before its keys: concurrent writes remain visible on the next poll.
+            long naturalVersion = cacheVersion.get();
+            var status = EngineRpcService.CacheStatusPB.newBuilder()
+                    .setAvailableKvCache(availableKvTokens()).setTotalKvCache(totalKvTokens)
+                    .setBlockSize(performance.blockSize());
+            CacheSyncFixture fixture = cacheSyncFixture;
+            CacheFixtureWire.Keys external = null;
+            long externalVersion = 0;
+            if (fixture != null) {
+                if (request.getNeedCacheKeys()) {
+                    var frame = fixture.wireResponse(request.getLatestCacheVersion());
+                    external = frame.keys();
+                    externalVersion = frame.header().getVersion();
+                } else externalVersion = fixture.version();
+            }
+            status.setVersion(naturalVersion + externalVersion);
+            if (request.getNeedCacheKeys()) {
+                for (Long key : naturalCacheKeys())
+                    if (external == null || !external.contains(key)) status.putCacheKeys(key, true);
+            }
+            // The header contains only natural-only keys; synthetic keys remain streamed with constant scratch space.
+            return new CacheFixtureWire.Frame(status.build(), external);
         }
 
         /**
@@ -5653,13 +5649,13 @@ public final class JavaMockEngineCluster {
         /** Current cache version (gRPC getCacheStatus / /cache_evict echo). */
         long getCacheVersion() {
             CacheSyncFixture fixture = cacheSyncFixture;
-            return fixture == null ? cacheVersion.get() : fixture.version();
+            return cacheVersion.get() + (fixture == null ? 0 : fixture.version());
         }
 
         /** One-time warm start of the ordinary cache; subsequent requests own all changes. */
         synchronized Map<String, Object> seedNaturalCache(List<Long> keys) {
-            if (cacheSyncFixture != null || naturalCacheSeeded)
-                throw new IllegalArgumentException("cache mode already selected; use a fresh engine");
+            if (naturalCacheSeeded)
+                throw new IllegalArgumentException("natural cache already seeded");
             if (acceptedCount.get() != 0 || cache.heldBlocks() != 0 || !cache.snapshotKeys().isEmpty())
                 throw new IllegalArgumentException("natural seed requires a fresh idle engine");
             if (keys.isEmpty() || keys.size() > Math.min(cache.totalBlocks(), cache.retentionBlocks())
@@ -5668,7 +5664,7 @@ public final class JavaMockEngineCluster {
             cache.admit(keys);
             naturalCacheSeeded = true;
             cacheVersion.incrementAndGet();
-            return Map.of("mode", "natural", "keys", cache.snapshotKeys().size(), "version", cacheVersion.get());
+            return Map.of("mode", "natural", "keys", cache.snapshotKeys().size(), "version", getCacheVersion());
         }
 
         synchronized Map<String, Object> cacheFixture(String operation, int worker, int workers,
@@ -5676,10 +5672,9 @@ public final class JavaMockEngineCluster {
             if (!"PREFILL".equals(getRoleName()))
                 throw new IllegalArgumentException("cache fixture requires PREFILL");
             if ("configure".equals(operation)) {
-                if (cacheSyncFixture != null || naturalCacheSeeded || acceptedCount.get() != 0
-                        || !cache.snapshotKeys().isEmpty())
-                    throw new IllegalArgumentException("configure requires a fresh engine without another cache source");
-                var candidate = new CacheSyncFixture(worker, workers, unique, shared, cacheVersion.get() + 1);
+                if (cacheSyncFixture != null)
+                    throw new IllegalArgumentException("external keys already configured");
+                var candidate = new CacheSyncFixture(worker, workers, unique, shared, 1);
                 candidate.churn(delta, intervalMs); // Validate everything before selecting the source.
                 cacheSyncFixture = candidate;
             } else {
@@ -5687,7 +5682,15 @@ public final class JavaMockEngineCluster {
                 if ("churn".equals(operation)) cacheSyncFixture.churn(delta, intervalMs);
                 else if (!"inspect".equals(operation)) throw new IllegalArgumentException("unknown fixture operation");
             }
-            return cacheSyncFixture.snapshot();
+            synchronized (cacheSyncFixture) {
+                var result = new java.util.LinkedHashMap<>(cacheSyncFixture.snapshot());
+                var external = cacheSyncFixture.keys();
+                result.put("fixture_version", external.version());
+                result.put("version", cacheVersion.get() + external.version());
+                result.put("reported_keys", external.count()
+                        + naturalCacheKeys().stream().filter(key -> !external.contains(key)).count());
+                return result;
+            }
         }
 
         @Override

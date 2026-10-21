@@ -47,6 +47,17 @@ final class CacheFixtureWire {
             // One global namespace: every P owns the same shared keys.
             return hash(Long.MIN_VALUE + index - unique);
         }
+        /** Invert the bijective hash to test membership without materializing synthetic keys. */
+        boolean contains(long key) {
+            long x = key ^ (key >>> 31) ^ (key >>> 62);
+            x *= 0x319642b2d24d8ec3L;
+            x ^= (x >>> 27) ^ (x >>> 54);
+            x *= 0x96de1b173f119089L;
+            x ^= (x >>> 30) ^ (x >>> 60);
+            long first = ((long) worker << 40) + offset;
+            return (x >= first && x - first < unique)
+                    || (x < Long.MIN_VALUE + shared);
+        }
         static Keys create(int worker, int workers, int unique, int shared, long offset, long version) {
             var shape = new Keys(worker, workers, unique, shared, offset, version, 0, 0, 0);
             int bytes = 0; long sum = 0, xor = 0;
@@ -69,6 +80,7 @@ final class CacheFixtureWire {
             return new WireStream(header.toByteArray(), keys);
         }
         EngineRpcService.CacheStatusPB toProto() {
+            if (keys == null) return header;
             try (var stream = stream()) { return EngineRpcService.CacheStatusPB.parseFrom(stream); }
             catch (IOException e) { throw new java.io.UncheckedIOException(e); }
         }
