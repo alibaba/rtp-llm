@@ -1,4 +1,4 @@
-FROM hub.docker.alibaba-inc.com/aone-base-global/flexlb_base:20260924155444114895
+FROM hub.docker.alibaba-inc.com/aone-base-global/flexlb_base:20261021212013427636
 
 ############# production #################
 # 由于金山云bridge_vpc无法访问公网，因此跳过check
