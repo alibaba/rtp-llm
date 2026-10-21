@@ -1,4 +1,4 @@
-"""DeepGEMM ``fp8_fp4_mega_moe`` fused expert executor.
+"""DeepGEMM fused expert executor for FP4 and FP8 weight recipes.
 
 EP > 1 only. The Mega kernel fuses dispatch + L1 GEMM + SwiGLU + L2 GEMM +
 combine into one kernel backed by a PyTorch symmetric-memory buffer for
@@ -18,6 +18,7 @@ from typing import Any, Dict
 
 import torch
 
+from rtp_llm.config.mega_moe import FP8_MEGA_MOE_STRATEGIES
 from rtp_llm.models_py.kernels.cuda.quant_layouts import (
     FP4_BLOCK,
     prepare_fp4_weight_scale_for_deepgemm,
@@ -149,9 +150,27 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
 
     _defer_buffer_until_shared_weights = False
     _defer_jit_until_shared_weights = False
-    _fp8_routed = False
-    _kernel_name = "fp8_fp4_mega_moe"
-    _buffer_factory = "get_symm_buffer_for_mega_moe"
+
+    @staticmethod
+    def _kernel_spec(config):
+        strategy = getattr(config, "moe_strategy", "mega_moe")
+        if strategy in FP8_MEGA_MOE_STRATEGIES:
+            return "fp8_fp8_mega_moe", "get_symm_buffer_for_mega_moe_fp8"
+        if strategy == "mega_moe_fused":
+            return "fp8_fp4_mega_moe_fused", "get_symm_buffer_for_mega_moe_fused"
+        return "fp8_fp4_mega_moe", "get_symm_buffer_for_mega_moe"
+
+    @property
+    def _fp8_routed(self):
+        return getattr(self.cfg, "moe_strategy", "mega_moe") in FP8_MEGA_MOE_STRATEGIES
+
+    @property
+    def _kernel_name(self):
+        return self._kernel_spec(self.cfg)[0]
+
+    @property
+    def _buffer_factory(self):
+        return self._kernel_spec(self.cfg)[1]
 
     def __init__(self, config, quant_config, weights):
         self._mega_l1_w = self._mega_l1_sf = None
@@ -235,10 +254,11 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         checker.check(config.world_size == config.ep_size)
         checker.check(config.world_rank == config.ep_rank)
         if prepared:
+            kernel, allocator = cls._kernel_spec(config)
             checker.check(
                 _mega_moe_available(
-                    kernel_name=cls._kernel_name,
-                    allocator_name=cls._buffer_factory,
+                    kernel_name=kernel,
+                    allocator_name=allocator,
                     allow_single_rank=True,
                 )
             )
@@ -281,6 +301,8 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         retaining every original weight/scale tensor on a caller's argument
         stack while symmetric arenas and JIT workspaces are allocated.
         """
+        if self._fp8_routed:
+            raise ValueError("FP8 MegaMoE only accepts FP8 per-block weights")
         import deep_gemm
 
         from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.weights import (
@@ -389,6 +411,12 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         )
 
     def _allocate_mega_buffer(self):
+        if self._fp8_routed:
+            from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.fp8_buffer import (
+                get_or_create_mega_buf_fp8,
+            )
+
+            return get_or_create_mega_buf_fp8(**self._buffer_kwargs())
         return _get_or_create_mega_buf(**self._buffer_kwargs())
 
     def _allocate_mega_output(self):
@@ -414,10 +442,16 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
 
     def setup_weights_from_fp8(self, *args, **kwargs) -> None:
         from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.weights import (
+            transform_fp8_mega_weights,
             transform_fp8_to_fp4_mega_weights,
         )
 
-        l1, l2 = transform_fp8_to_fp4_mega_weights(self.cfg, *args, **kwargs)
+        transform = (
+            transform_fp8_mega_weights
+            if self._fp8_routed
+            else transform_fp8_to_fp4_mega_weights
+        )
+        l1, l2 = transform(self.cfg, *args, **kwargs)
         self._mega_l1_w, self._mega_l1_sf = l1
         self._mega_l2_w, self._mega_l2_sf = l2
         self._setup_buffer_and_warmup()
@@ -624,7 +658,8 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
     def _run_kernel(self, y: torch.Tensor, tokens: int) -> None:
         import deep_gemm
 
-        deep_gemm.fp8_fp4_mega_moe(
+        kwargs = {"assume_all_topk_valid": True} if self._fp8_routed else {}
+        getattr(deep_gemm, self._kernel_name)(
             y,
             (self._mega_l1_w, self._mega_l1_sf),
             (self._mega_l2_w, self._mega_l2_sf),
@@ -633,6 +668,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
             activation="swiglu",
             activation_clamp=self._activation_clamp,
             fast_math=self._fast_math,
+            **kwargs,
         )
 
     def forward(self, x, weights, indices) -> torch.Tensor:

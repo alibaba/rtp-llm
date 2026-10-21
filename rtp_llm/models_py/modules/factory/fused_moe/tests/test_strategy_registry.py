@@ -125,6 +125,48 @@ class StrategyRegistryDiagnosticsTest(unittest.TestCase):
                         with self.assertRaises(ValueError):
                             registry.get_strategy(config)
 
+    def test_fp8_recipes_reuse_native_executors_and_check_the_fp8_kernel(self):
+        from rtp_llm.config.mega_moe import MegaMoeExecutionPolicy
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe import (
+            MegaMoeExecutor,
+        )
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_se import (
+            MegaMoeSEExecutor,
+        )
+
+        for strategy_type, executor_type in (
+            (cuda_strategies.CudaMegaMoeFp8Strategy, MegaMoeExecutor),
+            (cuda_strategies.CudaMegaMoeFp8SEStrategy, MegaMoeSEExecutor),
+        ):
+            for available in (False, True):
+                with self.subTest(
+                    strategy=strategy_type.strategy_name, available=available
+                ):
+                    config = _config(strategy_type.strategy_name)
+                    config.mega_moe_policy = MegaMoeExecutionPolicy()
+                    config.n_shared_experts = 1
+                    registry = StrategyRegistry()
+                    registry.register(strategy_type())
+                    with patch(
+                        "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe._mega_moe_available",
+                        return_value=available,
+                    ) as capability, patch(
+                        "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_se._mega_moe_se_available",
+                        return_value=False,
+                    ) as fp4_shared_capability:
+                        if available:
+                            chosen = registry.get_strategy(config)
+                            self.assertIs(chosen.get_executor_class(), executor_type)
+                        else:
+                            with self.assertRaises(ValueError):
+                                registry.get_strategy(config)
+                    capability.assert_called_once_with(
+                        kernel_name="fp8_fp8_mega_moe",
+                        allocator_name="get_symm_buffer_for_mega_moe_fp8",
+                        allow_single_rank=True,
+                    )
+                    fp4_shared_capability.assert_not_called()
+
     def test_all_mega_recipes_use_the_public_registry_once(self):
         from rtp_llm.config.mega_moe import MEGA_MOE_STRATEGIES, MegaMoeExecutionPolicy
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe import (

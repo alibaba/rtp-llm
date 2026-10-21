@@ -14,16 +14,8 @@ from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe im
     _MEGA_MOE_JIT_WARMED_KEYS,
     MegaMoeExecutor,
 )
-from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_fp8 import (
-    MegaMoeFp8Backend,
-)
-from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_fp8_se import (
-    MegaMoeFp8SharedBackend,
-)
-from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_fused import (
-    MegaMoeFusedBackend,
-)
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_se import (
+    MegaMoeFusedBackend,
     MegaMoeSEExecutor,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.shared_fp8_scale import (
@@ -31,14 +23,14 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.shared_fp8_scale
 )
 
 PACKAGE = "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors"
-RECIPES = (
-    MegaMoeExecutor,
-    MegaMoeSEExecutor,
-    MegaMoeFp8Backend,
-    MegaMoeFp8SharedBackend,
-    MegaMoeFusedBackend,
-)
-SHARED_SCALES = (MegaMoeSEExecutor, MegaMoeFp8SharedBackend)
+RECIPES = {
+    "mega_moe": MegaMoeExecutor,
+    "mega_moe_se": MegaMoeSEExecutor,
+    "mega_moe_fp8": MegaMoeExecutor,
+    "mega_moe_fp8_se": MegaMoeSEExecutor,
+    "mega_moe_fused": MegaMoeFusedBackend,
+}
+SHARED_SCALES = ("mega_moe_se", "mega_moe_fp8_se")
 
 
 class RecordingPacker:
@@ -56,9 +48,10 @@ class RecordingPacker:
 
 
 class CommonMegaMoeExecutionTest(unittest.TestCase):
-    def executor(self, recipe=MegaMoeExecutor, *, prepared=True):
+    def executor(self, recipe="mega_moe", *, prepared=True):
         cfg = SimpleNamespace(
             layer_id=3,
+            moe_strategy=recipe,
             dim=128,
             moe_inter_dim=16,
             n_routed_experts=4,
@@ -73,8 +66,9 @@ class CommonMegaMoeExecutionTest(unittest.TestCase):
             route_scale=1.5,
             mega_moe_policy=MegaMoeExecutionPolicy() if prepared else None,
         )
-        with patch.object(recipe, "setup_weights"):
-            executor = recipe(cfg, object(), {})
+        executor_type = RECIPES[recipe]
+        with patch.object(executor_type, "setup_weights"):
+            executor = executor_type(cfg, object(), {})
         executor._mega_l1_w = executor._mega_l2_w = torch.ones(2, 2)
         executor._mega_l1_sf = executor._mega_l2_sf = torch.ones(2, 2)
         executor._shared_l1_w = executor._shared_l2_w = torch.ones(2, 2)
@@ -114,7 +108,7 @@ class CommonMegaMoeExecutionTest(unittest.TestCase):
     def test_zero_and_nonzero_tokens_enter_every_recipe_collective(self):
         for recipe in RECIPES:
             for tokens in (0, 3):
-                with self.subTest(recipe=recipe.__name__, tokens=tokens):
+                with self.subTest(recipe=recipe, tokens=tokens):
                     executor = self.executor(recipe)
                     x = torch.ones(tokens, 128, dtype=torch.bfloat16)
                     context, kernel = self.launch_context(executor)
@@ -141,7 +135,7 @@ class CommonMegaMoeExecutionTest(unittest.TestCase):
 
     def test_prepacked_inputs_skip_packing_and_stage_shared_scales(self):
         for recipe in RECIPES:
-            with self.subTest(recipe=recipe.__name__):
+            with self.subTest(recipe=recipe):
                 executor = self.executor(recipe)
                 x, sf, ids, weights = executor.prepacked_input_views(3)
                 self.assertEqual(x.data_ptr(), executor._mega_buf.x.data_ptr())
@@ -166,7 +160,7 @@ class CommonMegaMoeExecutionTest(unittest.TestCase):
 
     def test_capacity_fails_before_packing_or_entering_kernel(self):
         for recipe in RECIPES:
-            with self.subTest(recipe=recipe.__name__):
+            with self.subTest(recipe=recipe):
                 executor = self.executor(recipe)
                 with patch.object(executor, "_launch") as launch:
                     with self.assertRaisesRegex(RuntimeError, "input tokens=9 exceeds"):
@@ -184,7 +178,7 @@ class CommonMegaMoeExecutionTest(unittest.TestCase):
     def test_recipe_arguments_preserve_model_numerical_policy(self):
         for recipe in RECIPES:
             for prepared in (False, True):
-                with self.subTest(recipe=recipe.__name__, prepared=prepared):
+                with self.subTest(recipe=recipe, prepared=prepared):
                     executor = self.executor(recipe, prepared=prepared)
                     context, kernel = self.launch_context(executor)
                     with context:
@@ -195,13 +189,13 @@ class CommonMegaMoeExecutionTest(unittest.TestCase):
                         kwargs["activation_clamp"], None if prepared else 7.0
                     )
                     self.assertEqual(kwargs["fast_math"], not prepared)
-                    if recipe is MegaMoeSEExecutor:
+                    if recipe == "mega_moe_se":
                         self.assertEqual(kwargs["shared_recipe"], (1, 128, 128))
                     if recipe in SHARED_SCALES:
                         self.assertIs(
                             kwargs["shared_l1_weights"][0], executor._shared_l1_w
                         )
-                    if recipe in (MegaMoeFp8Backend, MegaMoeFp8SharedBackend):
+                    if recipe in ("mega_moe_fp8", "mega_moe_fp8_se"):
                         self.assertTrue(kwargs["assume_all_topk_valid"])
 
     def test_warmup_cache_separates_policy_recipe_and_collective_group(self):
@@ -211,7 +205,7 @@ class CommonMegaMoeExecutionTest(unittest.TestCase):
         another_layer = self.executor()
         another_layer._mega_group = prepared._mega_group
         another_group = self.executor()
-        fp8 = self.executor(MegaMoeFp8Backend)
+        fp8 = self.executor("mega_moe_fp8")
         fp8._mega_group = prepared._mega_group
         executors = (ordinary, prepared, another_layer, another_group, fp8)
         with ExitStack() as stack:
@@ -231,8 +225,17 @@ class CommonMegaMoeExecutionTest(unittest.TestCase):
                 executor._maybe_warmup_jit_once()
         self.assertEqual([e.warmup_jit.call_count for e in executors], [1, 1, 0, 1, 1])
 
+    def test_fp8_recipes_reject_fp4_weights_before_allocating(self):
+        for recipe in ("mega_moe_fp8", "mega_moe_fp8_se"):
+            with self.subTest(recipe=recipe):
+                executor = self.executor(recipe)
+                with patch.object(executor, "_setup_buffer_and_warmup") as allocate:
+                    with self.assertRaisesRegex(ValueError, "only accepts FP8"):
+                        executor.setup_weights_from_fp4(None, None, None, None)
+                allocate.assert_not_called()
+
     def test_fp8_accepts_strided_native_ue8m0_scale_views(self):
-        executor = self.executor(MegaMoeFp8Backend)
+        executor = self.executor("mega_moe_fp8")
         stacked = torch.arange(16, dtype=torch.uint8).reshape(2, 4, 2)
         up_scale, gate_scale = stacked.view(torch.float8_e8m0fnu).chunk(2, dim=1)
         self.assertFalse(up_scale.is_contiguous())
@@ -244,7 +247,8 @@ class CommonMegaMoeExecutionTest(unittest.TestCase):
             return scale.view(torch.uint8).to(torch.int32)
 
         with patch(
-            PACKAGE + ".mega_moe_fp8.prepare_fp8_weight_scale_for_deepgemm", new=prepare
+            "rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.weights.prepare_fp8_weight_scale_for_deepgemm",
+            new=prepare,
         ), patch(
             "deep_gemm.transform_weights_for_mega_moe_fp8",
             side_effect=lambda l1, l2: (l1, l2),
@@ -306,11 +310,11 @@ class CommonMegaMoeExecutionTest(unittest.TestCase):
         w2 = torch.empty(128, 16, dtype=torch.float8_e4m3fn)
         raw_scale = torch.ones(1, 1)
         packed_scale = torch.ones(1, 1, dtype=torch.int32)
-        native = self.executor(MegaMoeSEExecutor, prepared=False)
+        native = self.executor("mega_moe_se", prepared=False)
         native.cfg.n_shared_experts = 1
         with self.assertRaisesRegex(TypeError, "expected shared UE8M0 scale"):
             native.setup_shared_expert_from_fp8(w1, raw_scale, w2, raw_scale)
-        prepared = self.executor(MegaMoeSEExecutor)
+        prepared = self.executor("mega_moe_se")
         with patch(
             "rtp_llm.models_py.kernels.cuda.fp8_kernel.requant_weight_ue8m0",
             side_effect=lambda weight, scale: (weight, packed_scale),

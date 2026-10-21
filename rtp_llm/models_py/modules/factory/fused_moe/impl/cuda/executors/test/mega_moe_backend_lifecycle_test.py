@@ -17,16 +17,8 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe import (
     MegaMoeExecutor,
 )
-from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_fp8 import (
-    MegaMoeFp8Backend,
-)
-from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_fp8_se import (
-    MegaMoeFp8SharedBackend,
-)
-from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_fused import (
-    MegaMoeFusedBackend,
-)
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_se import (
+    MegaMoeFusedBackend,
     MegaMoeSEExecutor,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.fp8_fp4_router import (
@@ -40,11 +32,11 @@ from rtp_llm.utils.model_weight import W
 
 PACKAGE = "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors"
 BACKENDS = (
-    (MegaMoeExecutor, "get_symm_buffer_for_mega_moe"),
-    (MegaMoeFp8Backend, "get_symm_buffer_for_mega_moe_fp8"),
-    (MegaMoeSEExecutor, "get_symm_buffer_for_mega_moe"),
-    (MegaMoeFp8SharedBackend, "get_symm_buffer_for_mega_moe_fp8"),
-    (MegaMoeFusedBackend, "get_symm_buffer_for_mega_moe_fused"),
+    ("mega_moe", MegaMoeExecutor, "get_symm_buffer_for_mega_moe"),
+    ("mega_moe_fp8", MegaMoeExecutor, "get_symm_buffer_for_mega_moe_fp8"),
+    ("mega_moe_se", MegaMoeSEExecutor, "get_symm_buffer_for_mega_moe"),
+    ("mega_moe_fp8_se", MegaMoeSEExecutor, "get_symm_buffer_for_mega_moe_fp8"),
+    ("mega_moe_fused", MegaMoeFusedBackend, "get_symm_buffer_for_mega_moe_fused"),
 )
 CHUNK_MODULE = "rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer"
 
@@ -96,9 +88,12 @@ class MegaMoeLifecycleTest(unittest.TestCase):
                 )
                 self.assertEqual(model._resolve_jit_warmup_token_counts(132), [1, 64])
 
-    def backend(self, backend_type):
+    def backend(self, backend_type, strategy=None):
+        if strategy is None:
+            strategy = next(name for name, cls, _ in BACKENDS if cls is backend_type)
         cfg = SimpleNamespace(
             layer_id=0,
+            moe_strategy=strategy,
             dim=8,
             hidden_size=8,
             moe_inter_dim=4,
@@ -144,7 +139,6 @@ class MegaMoeLifecycleTest(unittest.TestCase):
         model._input_packer.name = "fused"
         if backend_type in (
             MegaMoeSEExecutor,
-            MegaMoeFp8SharedBackend,
             MegaMoeFusedBackend,
         ):
             model._shared_l1_w = torch.ones(2, 2)
@@ -165,9 +159,9 @@ class MegaMoeLifecycleTest(unittest.TestCase):
     def test_each_clone_allocates_only_its_recipe_arena(self):
         from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe import buffer
 
-        for backend_type, allocator_name in BACKENDS:
-            with self.subTest(backend=backend_type.__name__):
-                model = self.backend(backend_type)
+        for strategy, backend_type, allocator_name in BACKENDS:
+            with self.subTest(backend=strategy):
+                model = self.backend(backend_type, strategy)
                 arena = object()
                 with ExitStack() as stack:
                     stack.enter_context(
@@ -179,7 +173,7 @@ class MegaMoeLifecycleTest(unittest.TestCase):
                         name: stack.enter_context(
                             patch("deep_gemm." + name, return_value=arena, create=True)
                         )
-                        for name in {name for _, name in BACKENDS}
+                        for name in {name for _, _, name in BACKENDS}
                     }
                     clone = model.clone_for_cuda_graph()
                 for name, allocator in allocators.items():
@@ -189,9 +183,9 @@ class MegaMoeLifecycleTest(unittest.TestCase):
                 self.assertEqual(
                     kwargs["num_max_tokens_per_rank"], model.cfg.max_tokens_per_rank
                 )
-                if backend_type in (MegaMoeSEExecutor, MegaMoeFp8SharedBackend):
-                    self.assertEqual(kwargs["num_shared_experts"], 2)
                 if backend_type is MegaMoeSEExecutor:
+                    self.assertEqual(kwargs["num_shared_experts"], 2)
+                if strategy == "mega_moe_se":
                     self.assertEqual(kwargs["mma_type"], "fp8xfp4")
                 self.assertIs(type(clone), backend_type)
                 self.assertIs(clone._mega_buf, arena)
@@ -220,9 +214,9 @@ class MegaMoeLifecycleTest(unittest.TestCase):
                 self.assertEqual(model._mega_y.tolist(), [[1] * 8] * 3)
 
     def test_ordered_shared_clones_reuse_arena_but_isolate_outputs(self):
-        for backend_type, allocator_name in BACKENDS:
-            with self.subTest(backend=backend_type.__name__):
-                model = self.backend(backend_type)
+        for strategy, backend_type, allocator_name in BACKENDS:
+            with self.subTest(backend=strategy):
+                model = self.backend(backend_type, strategy)
                 with patch(
                     PACKAGE + ".mega_moe.get_or_create_mega_clone_buffer",
                     side_effect=AssertionError("shared clone must not allocate"),
@@ -232,9 +226,9 @@ class MegaMoeLifecycleTest(unittest.TestCase):
                 self.assertNotEqual(clone._mega_y.data_ptr(), model._mega_y.data_ptr())
 
     def test_uninitialized_shared_arena_is_rejected(self):
-        for backend_type, _ in BACKENDS:
-            with self.subTest(backend=backend_type.__name__):
-                model = self.backend(backend_type)
+        for strategy, backend_type, _ in BACKENDS:
+            with self.subTest(backend=strategy):
+                model = self.backend(backend_type, strategy)
                 model._mega_buf = None
                 self.assertRaises(
                     RuntimeError, model.clone_for_cuda_graph, share_mega_buf=True
@@ -270,13 +264,11 @@ class MegaMoeLifecycleTest(unittest.TestCase):
                     chunked_layer._SYNCHRONIZED_CHUNK_TOKENS.reset(token)
 
     def test_shared_recipes_defer_warmup_until_all_weights_are_ready(self):
-        for backend_type in (
-            MegaMoeSEExecutor,
-            MegaMoeFp8SharedBackend,
-            MegaMoeFusedBackend,
-        ):
-            with self.subTest(backend=backend_type.__name__):
-                model = self.backend(backend_type)
+        for strategy, backend_type, _ in BACKENDS:
+            if not backend_type.includes_shared_expert:
+                continue
+            with self.subTest(backend=strategy):
+                model = self.backend(backend_type, strategy)
                 model._num_shared_experts = 0
                 with patch(
                     PACKAGE + ".mega_moe._get_validated_world_ep_group",
@@ -312,9 +304,9 @@ class MegaMoeLifecycleTest(unittest.TestCase):
         execute.assert_not_called()
 
     def test_uneven_ranks_execute_the_same_number_of_chunks(self):
-        for backend_type, _ in BACKENDS:
-            with self.subTest(backend=backend_type.__name__):
-                model = self.backend(backend_type)
+        for strategy, backend_type, _ in BACKENDS:
+            with self.subTest(backend=strategy):
+                model = self.backend(backend_type, strategy)
                 model._mega_buf.num_max_tokens_per_rank = 2
                 hidden = torch.zeros(3, 8)
                 with patch(
@@ -405,10 +397,10 @@ class MegaMoeLifecycleTest(unittest.TestCase):
         )
 
     def test_standard_constructor_prepares_routes_then_shared_weights(self):
-        for backend_type, _ in BACKENDS:
+        for strategy, backend_type, _ in BACKENDS:
             for layout in ("up_gate", "gate_up"):
-                with self.subTest(backend=backend_type.__name__, layout=layout):
-                    config = self.backend(backend_type).cfg
+                with self.subTest(backend=strategy, layout=layout):
+                    config = self.backend(backend_type, strategy).cfg
                     config.mega_moe_policy = MegaMoeExecutionPolicy(
                         w1_layout=layout, activation_clamp=5.0, fast_math=False
                     )

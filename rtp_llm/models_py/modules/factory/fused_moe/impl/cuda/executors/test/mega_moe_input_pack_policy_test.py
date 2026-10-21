@@ -15,9 +15,6 @@ from rtp_llm.models_py.kernels.cuda.quant_layouts import (
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe import (
     MegaMoeExecutor,
 )
-from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_fp8 import (
-    MegaMoeFp8Backend,
-)
 from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.input_packer import (
     FusedMegaMoEInputPacker,
     TorchMegaMoEInputPacker,
@@ -82,6 +79,7 @@ class InputPackPolicyTest(unittest.TestCase):
     def test_fp8_constructor_preserves_strided_e8m0_checkpoint_scales(self):
         config = SimpleNamespace(
             layer_id=0,
+            moe_strategy="mega_moe_fp8",
             dim=256,
             moe_inter_dim=256,
             n_local_experts=2,
@@ -93,7 +91,7 @@ class InputPackPolicyTest(unittest.TestCase):
             ),
             moe_config=SimpleNamespace(ll_num_max_token=0),
         )
-        package = "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_fp8"
+        package = "rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.weights"
         for layout in ("up_gate", "gate_up"):
             with self.subTest(layout=layout):
                 config.mega_moe_policy = MegaMoeExecutionPolicy(w1_layout=layout)
@@ -122,9 +120,9 @@ class InputPackPolicyTest(unittest.TestCase):
                     "deep_gemm.transform_weights_for_mega_moe_fp8",
                     side_effect=lambda l1, l2: (l1, l2),
                 ), patch.object(
-                    MegaMoeFp8Backend, "_setup_buffer_and_warmup"
+                    MegaMoeExecutor, "_setup_buffer_and_warmup"
                 ):
-                    MegaMoeFp8Backend(config, object(), weights)
+                    MegaMoeExecutor(config, object(), weights)
                 expected = torch.cat(
                     (
                         (second.float(), first.float())

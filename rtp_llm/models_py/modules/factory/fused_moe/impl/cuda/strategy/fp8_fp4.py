@@ -117,14 +117,6 @@ class CudaMegaMoeFp8Strategy(CudaMegaMoeStrategy):
     strategy_name = "mega_moe_fp8"
     requires_policy = True
 
-    @classmethod
-    def get_executor_class(cls) -> Type:
-        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_fp8 import (
-            MegaMoeFp8Backend,
-        )
-
-        return MegaMoeFp8Backend
-
 
 class CudaMegaMoeFp8SEStrategy(CudaMegaMoeFp8Strategy):
     strategy_name = "mega_moe_fp8_se"
@@ -132,11 +124,11 @@ class CudaMegaMoeFp8SEStrategy(CudaMegaMoeFp8Strategy):
 
     @classmethod
     def get_executor_class(cls) -> Type:
-        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_fp8_se import (
-            MegaMoeFp8SharedBackend,
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_se import (
+            MegaMoeSEExecutor,
         )
 
-        return MegaMoeFp8SharedBackend
+        return MegaMoeSEExecutor
 
 
 class CudaMegaMoeFusedStrategy(CudaMegaMoeStrategy):
@@ -146,7 +138,7 @@ class CudaMegaMoeFusedStrategy(CudaMegaMoeStrategy):
 
     @classmethod
     def get_executor_class(cls) -> Type:
-        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_fused import (
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_se import (
             MegaMoeFusedBackend,
         )
 
