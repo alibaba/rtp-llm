@@ -244,7 +244,7 @@ TEST(PDCancelRegistryTest, CancelBeforeAdmissionFencesRepeatedAndLateEnqueue) {
     EXPECT_TRUE(meta->getEngineScheduleInfo(0).running_task_info_list.empty());
 }
 
-TEST(PDCancelRegistryTest, AcceptedCancelRequiresLocalTransferAndDownstreamCleanup) {
+TEST(PDCancelRegistryTest, AcceptedCancelRequiresLocalTransferCompletion) {
     auto             meta = std::make_shared<RpcServerRuntimeMeta>();
     PDCancelRegistry registry(meta);
     GenerateInputPB  request;
@@ -260,10 +260,12 @@ TEST(PDCancelRegistryTest, AcceptedCancelRequiresLocalTransferAndDownstreamClean
     registry.beginRead("handoff102");
     registry.finishLocal(handle);
     EXPECT_FALSE(registry.complete(handle));
-    registry.finishDownstream(handle);
-    EXPECT_FALSE(registry.complete(handle));
     registry.endRead("handoff102");
     ASSERT_TRUE(registry.complete(handle));
+    EXPECT_FALSE(handle->downstream_done);
+    ASSERT_EQ(registry.pending().size(), 1u);
+    registry.finishDownstream(handle);
+    EXPECT_TRUE(registry.pending().empty());
     EXPECT_FALSE(registry.complete(handle));
     auto info = meta->getEngineScheduleInfo(0);
     EXPECT_TRUE(info.running_task_info_list.empty());
@@ -369,7 +371,7 @@ TEST(PDCancelRegistryTest, FinishedDecodeReturnsNotFoundWithoutAbsentFence) {
     EXPECT_TRUE(meta->getEngineScheduleInfo(0).finished_task_info_list.empty());
 }
 
-TEST(PDCancelRegistryTest, DecodeControlSurvivesLocalCompletionUntilPrefillFinishes) {
+TEST(PDCancelRegistryTest, LocalTerminalRetainsRemoteCleanupRecordUntilPrefillFinishes) {
     auto             meta = std::make_shared<RpcServerRuntimeMeta>();
     PDCancelRegistry registry(meta);
     GenerateInputPB  request;
@@ -378,9 +380,16 @@ TEST(PDCancelRegistryTest, DecodeControlSurvivesLocalCompletionUntilPrefillFinis
     ASSERT_TRUE(registry.admit(request, "handoff104", "prefill:123", currentTimeMs() + 1000, handle).ok());
     registry.finishLocal(handle);
     EXPECT_EQ(registry.cancel(104, {ErrorCode::PRIORITY_PREEMPTED, "preempted"}), CANCEL_STATUS_ACCEPTED);
-    EXPECT_FALSE(registry.complete(handle));
+    ASSERT_TRUE(registry.complete(handle));
+    EXPECT_TRUE(handle->terminal.load());
+    EXPECT_FALSE(handle->downstream_done);
+    ASSERT_EQ(registry.pending().size(), 1u);
+    EXPECT_TRUE(registry.isCanceled("handoff104"));
+    EXPECT_TRUE(meta->getEngineScheduleInfo(0).running_task_info_list.empty());
+    ASSERT_EQ(meta->getEngineScheduleInfo(0).finished_task_info_list.size(), 1u);
     registry.finishDownstream(handle);
-    EXPECT_TRUE(registry.complete(handle));
+    EXPECT_TRUE(registry.pending().empty());
+    EXPECT_FALSE(registry.complete(handle));
 }
 
 TEST(PrefillRpcServerTest, CancelValidatesRequestAndUsesRegistry) {
@@ -574,10 +583,10 @@ TEST(PDCancelRegistryTest, OrdinaryCleanupRetainsCauseAndDoesNotPublishPriorityP
         EXPECT_EQ(rpc_error.code(), code);
         EXPECT_NE(rpc_error.ToString().find("original failure"), std::string::npos);
         registry.finishLocal(handle);
-        EXPECT_FALSE(registry.complete(handle));
-        EXPECT_TRUE(meta->getEngineScheduleInfo(0).finished_task_info_list.empty());
-        registry.finishDownstream(handle);
         ASSERT_TRUE(registry.complete(handle));
+        ASSERT_EQ(registry.pending().size(), 1u);
+        registry.finishDownstream(handle);
+        EXPECT_TRUE(registry.pending().empty());
         const auto info = meta->getEngineScheduleInfo(0);
         ASSERT_EQ(info.finished_task_info_list.size(), 1);
         EXPECT_EQ(info.finished_task_info_list.front().error_code, static_cast<int64_t>(code));
@@ -642,9 +651,14 @@ TEST(PDCancelRegistryTest, UnconfirmedCanceledRequestSurvivesExpirationAndRemain
     }
     EXPECT_TRUE(registry.isCanceled("pending111"));
     EXPECT_EQ(registry.pending().size(), 1u);
-    EXPECT_FALSE(registry.complete(handle));
-    registry.finishDownstream(handle);
     ASSERT_TRUE(registry.complete(handle));
+    {
+        std::lock_guard<std::mutex> lock(registry.mutex_);
+        registry.trimLocked(handle->retain_until_ms);
+        EXPECT_EQ(registry.entries_.count(111), 1u);
+    }
+    ASSERT_EQ(registry.pending().size(), 1u);
+    registry.finishDownstream(handle);
     EXPECT_TRUE(registry.pending().empty());
     {
         std::lock_guard<std::mutex> lock(registry.mutex_);

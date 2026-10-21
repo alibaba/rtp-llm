@@ -325,7 +325,7 @@ TEST(DecodeRpcServerTest, CancelBeforeDecodeAdmissionForwardsToSelectedPrefillAn
     }
 }
 
-TEST(DecodeRpcServerTest, FailedPrefillCancelBacksOffWithoutPublishingCompletion) {
+TEST(DecodeRpcServerTest, FailedPrefillCancelBacksOffAfterLocalCompletion) {
     LocalPrefillCancelService prefill;
     prefill.fail_cancel = true;
     grpc::ServerBuilder builder;
@@ -350,15 +350,42 @@ TEST(DecodeRpcServerTest, FailedPrefillCancelBacksOffWithoutPublishingCompletion
     handle->next_cancel_retry_ms.store(std::numeric_limits<int64_t>::max());
     decode.cancelCleanupTick();
     EXPECT_EQ(prefill.calls, 1);
-    EXPECT_FALSE(handle->terminal.load());
-    EXPECT_TRUE(decode.meta_->getEngineScheduleInfo(0).finished_task_info_list.empty());
+    EXPECT_TRUE(handle->terminal.load());
+    EXPECT_FALSE(handle->downstream_done);
+    ASSERT_EQ(decode.cancel_registry_->pending().size(), 1u);
+    ASSERT_EQ(decode.meta_->getEngineScheduleInfo(0).finished_task_info_list.size(), 1u);
     handle->next_cancel_retry_ms.store(0);
     decode.cancelCleanupTick();
     EXPECT_EQ(prefill.calls, 2);
     rpc_server->Shutdown();
 }
 
-TEST(DecodeRpcServerTest, UnreachablePrefillDoesNotPublishCancellationComplete) {
+TEST(DecodeRpcServerTest, LocalReadMustStopBeforeTerminalEvenDuringRemoteCancelBackoff) {
+    DecodeRpcServer decode;
+    decode.meta_ = std::make_shared<RpcServerRuntimeMeta>();
+    decode.cancel_registry_ = std::make_unique<PDCancelRegistry>(decode.meta_);
+    GenerateInputPB input;
+    input.set_request_id(206);
+    PDCancelRegistry::Handle handle;
+    ASSERT_TRUE(decode.cancel_registry_->admit(
+        input, "local-read206", "127.0.0.1:1", currentTimeMs() + 1000, handle).ok());
+    decode.cancel_registry_->beginRead(handle->unique_key);
+    decode.cancel_registry_->finishLocal(handle);
+    ASSERT_EQ(decode.cancel_registry_->cancel(206, {ErrorCode::PRIORITY_PREEMPTED, "preempted"}),
+              CANCEL_STATUS_ACCEPTED);
+    handle->next_cancel_retry_ms.store(std::numeric_limits<int64_t>::max());
+    decode.cancelCleanupTick();
+    EXPECT_FALSE(handle->terminal.load());
+    EXPECT_TRUE(decode.meta_->getEngineScheduleInfo(0).finished_task_info_list.empty());
+    decode.cancel_registry_->endRead(handle->unique_key);
+    decode.cancelCleanupTick();
+    EXPECT_TRUE(handle->terminal.load());
+    EXPECT_FALSE(handle->downstream_done);
+    ASSERT_EQ(decode.meta_->getEngineScheduleInfo(0).finished_task_info_list.size(), 1u);
+    ASSERT_EQ(decode.cancel_registry_->pending().size(), 1u);
+}
+
+TEST(DecodeRpcServerTest, UnreachablePrefillAllowsLocalTerminalButRetainsRemoteRetry) {
     DecodeRpcServer decode;
     decode.meta_            = std::make_shared<RpcServerRuntimeMeta>();
     decode.cancel_registry_ = std::make_unique<PDCancelRegistry>(decode.meta_);
@@ -369,7 +396,12 @@ TEST(DecodeRpcServerTest, UnreachablePrefillDoesNotPublishCancellationComplete) 
     grpc::ServerContext context;
     ASSERT_TRUE(decode.Cancel(&context, &request, &response).ok());
     decode.cancelCleanupTick();
-    EXPECT_FALSE(decode.cancel_registry_->find(204)->terminal.load());
-    EXPECT_TRUE(decode.meta_->getEngineScheduleInfo(0).finished_task_info_list.empty());
+    auto handle = decode.cancel_registry_->find(204);
+    ASSERT_TRUE(handle);
+    EXPECT_TRUE(handle->terminal.load());
+    EXPECT_FALSE(handle->downstream_done);
+    ASSERT_EQ(decode.cancel_registry_->pending().size(), 1u);
+    EXPECT_TRUE(decode.cancel_registry_->isCanceled(handle->unique_key));
+    ASSERT_EQ(decode.meta_->getEngineScheduleInfo(0).finished_task_info_list.size(), 1u);
 }
 }  // namespace rtp_llm

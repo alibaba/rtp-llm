@@ -164,7 +164,8 @@ grpc::Status DecodeRpcServer::Cancel(grpc::ServerContext*, const CancelRequestPB
     }
     if (handle && handle->terminal.load()) {
         // Internal forwarding may retry after WorkerStatus's short delta window.
-        // This retained terminal record proves both endpoint cleanups returned.
+        // This retained terminal proves Decode physical cleanup; Prefill cleanup
+        // remains in the independent retry record if it is still unreachable.
         response->set_status(CANCEL_STATUS_NOT_FOUND);
     } else {
         response->set_status(cancel_registry_->cancel(
@@ -178,8 +179,10 @@ grpc::Status DecodeRpcServer::Cancel(grpc::ServerContext*, const CancelRequestPB
 
 void DecodeRpcServer::cancelCleanupTick() {
     for (const auto& handle : cancel_registry_->pending()) {
+        // This checks scheduler completion and physical P2P resource holds,
+        // even when remote cancellation is backing off or Prefill is unreachable.
+        cancel_registry_->complete(handle);
         if (handle->downstream_address.empty()) {
-            cancel_registry_->complete(handle);
             continue;
         }
         const auto monotonic_ms = [] {

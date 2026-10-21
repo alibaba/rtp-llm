@@ -27,7 +27,8 @@ void PDCancelRegistry::trimLocked(int64_t now_ms) {
             continue;
         }
         const auto& e = it->second;
-        if (!e->local_done || (e->canceled.load() && !e->terminal) || e->retain_until_ms != expires_at_ms) {
+        if (!e->local_done || (e->canceled.load() && (!e->terminal || !e->downstream_done))
+            || e->retain_until_ms != expires_at_ms) {
             continue;
         }
         if (e->canceled.load()) {
@@ -167,6 +168,9 @@ void PDCancelRegistry::finishDownstream(const Handle& handle) {
         return;
     }
     handle->downstream_done = true;
+    if (handle->terminal) {
+        pending_cancels_.erase(handle->identity.request_id);
+    }
     if (handle->local_done) {
         scheduleExpirationLocked(handle, currentTimeMs() + kRetentionMs);
     }
@@ -186,7 +190,7 @@ void PDCancelRegistry::endRead(const std::string& key) {
 
 bool PDCancelRegistry::complete(const Handle& handle) {
     std::unique_lock<std::mutex> lock(mutex_);
-    if (handle->terminal || !handle->canceled.load() || !handle->local_done || !handle->downstream_done)
+    if (handle->terminal || !handle->canceled.load() || !handle->local_done)
         return false;
     if (active_reads_.count(handle->unique_key))
         return false;
@@ -210,7 +214,11 @@ bool PDCancelRegistry::complete(const Handle& handle) {
                                          stream))
         return false;
     handle->terminal = true;
-    pending_cancels_.erase(handle->identity.request_id);
+    // Local terminal is independent of remote control-plane availability. Keep
+    // the cancellation fence and retry record until Prefill confirms cleanup.
+    if (handle->downstream_done) {
+        pending_cancels_.erase(handle->identity.request_id);
+    }
     handle->stream.reset();
     scheduleExpirationLocked(handle, currentTimeMs() + kRetentionMs);
     return true;
