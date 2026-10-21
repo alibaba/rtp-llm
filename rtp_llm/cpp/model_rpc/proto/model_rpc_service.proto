@@ -427,8 +427,9 @@ enum ErrorCodePB {
     MALLOC_FAILED = 602;
     GENERATE_TIMEOUT = 603;
     ERROR_GENERATE_CONFIG_FORMAT = 604;
-    INVALID_PARAMS = 605;
-    EXECUTION_EXCEPTION = 606;
+    // Stable protobuf wire IDs; internal ErrorCode uses explicit conversion.
+    INVALID_PARAMS = 26;
+    EXECUTION_EXCEPTION = 27;
     EXCEEDS_KV_CACHE_MAX_LEN = 607;
     MM_LONG_PROMPT_ERROR = 901;
     MM_WRONG_FORMAT_ERROR = 902;

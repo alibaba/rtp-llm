@@ -1261,7 +1261,7 @@ class ModelRpcClient(object):
         code = error.error_code
         if code == 0:
             code = ExceptionType.UNKNOWN_ERROR.value
-        elif 0 < code <= 25:
+        elif 0 < code <= 27:
             names = {
                 "MALLOC_FAILED": "MALLOC_ERROR",
                 "P2P_CONNECTOR_WORKER_READ_CANCELED": "P2P_CONNECTOR_WORKER_READ_CANCELLED",

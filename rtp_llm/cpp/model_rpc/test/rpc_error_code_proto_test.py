@@ -11,7 +11,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (  # type: ignore
 
 class RpcErrorCodeProtoTest(unittest.TestCase):
     def test_invalid_params_is_declared_and_round_trips(self):
-        self.assertEqual(ErrorCodePB.Value("INVALID_PARAMS"), 605)
+        self.assertEqual(ErrorCodePB.Value("INVALID_PARAMS"), 26)
 
         serialized = RpcErrorPB(
             error_code=ErrorCodePB.INVALID_PARAMS,
@@ -24,7 +24,7 @@ class RpcErrorCodeProtoTest(unittest.TestCase):
         self.assertEqual(parsed.error_message, "invalid zero-prefill config")
 
     def test_execution_exception_is_declared_and_round_trips(self):
-        self.assertEqual(ErrorCodePB.Value("EXECUTION_EXCEPTION"), 606)
+        self.assertEqual(ErrorCodePB.Value("EXECUTION_EXCEPTION"), 27)
 
         serialized = RpcErrorPB(
             error_code=ErrorCodePB.EXECUTION_EXCEPTION,
@@ -35,6 +35,18 @@ class RpcErrorCodeProtoTest(unittest.TestCase):
         self.assertEqual(parsed.error_code, ErrorCodePB.EXECUTION_EXCEPTION)
         self.assertEqual(ErrorCodePB.Name(parsed.error_code), "EXECUTION_EXCEPTION")
         self.assertEqual(parsed.error_message, "handler threw")
+
+    def test_existing_wire_error_ids_keep_their_meaning(self):
+        for wire_id, expected in (
+            (26, ErrorCodePB.INVALID_PARAMS),
+            (27, ErrorCodePB.EXECUTION_EXCEPTION),
+        ):
+            with self.subTest(wire_id=wire_id):
+                # These bytes are independent of the generated enum values.
+                encoded = bytes((0x08, wire_id))
+                parsed = RpcErrorPB.FromString(encoded)
+                self.assertEqual(parsed.error_code, expected)
+                self.assertEqual(parsed.SerializeToString(), encoded)
 
     def test_disk_cache_and_prefill_only_keep_independent_wire_fields(self):
         fields = GenerateConfigPB.DESCRIPTOR.fields_by_name

@@ -3696,6 +3696,21 @@ class FirstCauseRpcErrorTest(TestCase):
                     for message in logs.output
                 ))
 
+    def test_existing_proto_error_ids_map_to_internal_frontend_codes(self):
+        for wire_code, expected in (
+            (26, ExceptionType.INVALID_PARAMS),
+            (27, ExceptionType.EXECUTION_EXCEPTION),
+        ):
+            with self.subTest(wire_code=wire_code), self.assertRaises(
+                FtRuntimeException
+            ) as caught:
+                ModelRpcClient._raise_pb_error(
+                    SimpleNamespace(error_code=wire_code, error_message="original cause"),
+                    "request=42",
+                )
+            self.assertEqual(caught.exception.exception_type, expected)
+            self.assertEqual(caught.exception.message, "request=42: original cause")
+
     def test_batch_pb_preserves_new_and_existing_application_codes(self):
         for code, expected in (
             (ErrorCodePB.MM_PROCESS_ERROR, ExceptionType.MM_PROCESS_ERROR),
