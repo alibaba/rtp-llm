@@ -56,6 +56,12 @@ public:
         return grpc::Status(grpc::StatusCode::INTERNAL, "server not implement GetPeerInfo");
     }
 
+    void beginShutdown() override {
+        if (prefill_server_) {
+            prefill_server_->beginShutdown();
+        }
+    }
+
     void stop() override {
         if (prefill_server_) {
             prefill_server_->stop();

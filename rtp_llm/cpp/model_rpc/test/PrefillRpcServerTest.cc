@@ -6,6 +6,7 @@
 #include <atomic>
 
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/RemoteRpcServiceImpl.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 
 namespace rtp_llm {
@@ -278,6 +279,51 @@ TEST(PDCancelRegistryTest, RacingCancelAndAdmissionCannotLoseTheCancelIntent) {
 }  // namespace rtp_llm
 
 namespace rtp_llm {
+TEST(PrefillRpcServerTest, ShutdownRejectsNewBatchBeforeEngineAccess) {
+    PrefillRpcServer server;
+    server.beginShutdown();
+    grpc::ServerContext context;
+    EnqueueBatchRequestPB request;
+    EnqueueBatchResponsePB response;
+    EXPECT_EQ(server.EnqueueBatch(&context, &request, &response).error_code(), grpc::StatusCode::UNAVAILABLE);
+    EXPECT_EQ(server.onflightRequestNum(), 0u);
+    EXPECT_EQ(response.successes_size(), 0);
+}
+
+TEST(PrefillRpcServerTest, RemoteServiceForwardsShutdownAndUsesBatchDrainCount) {
+    RemoteRpcServiceImpl service;
+    auto server = std::make_shared<PrefillRpcServer>();
+    service.prefill_server_ = server;
+    service.local_server_ = server;
+    server->batch_entries_["acknowledged"].reserved = true;
+    service.beginShutdown();
+    EXPECT_EQ(service.onflightRequestNum(), 1u);
+    grpc::ServerContext context;
+    EnqueueBatchRequestPB request;
+    EnqueueBatchResponsePB response;
+    EXPECT_EQ(service.EnqueueBatch(&context, &request, &response).error_code(), grpc::StatusCode::UNAVAILABLE);
+    server->batch_entries_.clear();
+    EXPECT_EQ(service.onflightRequestNum(), 0u);
+}
+
+TEST(PrefillRpcServerTest, ShutdownWaitCountIncludesAcknowledgedBatchLifetime) {
+    PrefillRpcServer server;
+    server.batch_entries_["admitting"].reserved = true;
+    GenerateInputPB input;
+    input.set_request_id(1001);
+    server.batch_entries_["acknowledged"].context = server.makeBatchRequestContext(input, nullptr);
+    server.batch_entries_["acknowledged"].context->markRpcHandlingCompleted();
+    server.batch_entries_["terminal-fence"].attach_pending = true;
+    server.onflight_requests_.store(1);
+    server.beginShutdown();
+    EXPECT_EQ(server.onflightRequestNum(), 3u);
+    server.batch_entries_["admitting"].reserved = false;
+    server.batch_entries_["acknowledged"].context.reset();
+    EXPECT_EQ(server.onflightRequestNum(), 1u);
+    server.onflight_requests_.store(0);
+    EXPECT_EQ(server.onflightRequestNum(), 0u);
+}
+
 TEST(PrefillRpcServerTest, BatchAttachDeadlineUsesDefaultAndOverallCap) {
     PrefillRpcServer server;
     server.registerBatchAttach("default", nullptr, 0, 1000000, 100);

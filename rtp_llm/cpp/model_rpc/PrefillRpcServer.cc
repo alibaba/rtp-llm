@@ -531,6 +531,23 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
         ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "request [" + request_key + "] catch unknown exception"));
 }
 
+void PrefillRpcServer::beginShutdown() {
+    std::lock_guard<std::mutex> lock(batch_mutex_);
+    batch_stopping_ = true;
+}
+
+size_t PrefillRpcServer::onflightRequestNum() {
+    std::lock_guard<std::mutex> lock(batch_mutex_);
+    size_t count = onflight_requests_.load();
+    for (const auto& [key, entry] : batch_entries_) {
+        (void)key;
+        if (entry.reserved || entry.context) {
+            ++count;
+        }
+    }
+    return count;
+}
+
 grpc::Status PrefillRpcServer::EnqueueBatch(grpc::ServerContext*         context,
                                             const EnqueueBatchRequestPB* request,
                                             EnqueueBatchResponsePB*      response) {
@@ -542,6 +559,13 @@ grpc::Status PrefillRpcServer::EnqueueBatch(grpc::ServerContext*         context
     c10::InferenceMode inference_guard(true);
     RTP_LLM_PROFILE_FUNCTION();
     AtomicGuard request_guard(onflight_requests_);
+    {
+        std::lock_guard<std::mutex> lock(batch_mutex_);
+        if (batch_stopping_) {
+            trace_status = grpc::Status(grpc::StatusCode::UNAVAILABLE, "Prefill batch server is shutting down");
+            return trace_status;
+        }
+    }
     response->Clear();
     response->set_batch_id(request->batch_id());
 

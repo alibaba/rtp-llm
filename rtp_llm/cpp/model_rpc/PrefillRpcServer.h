@@ -22,6 +22,9 @@ public:
                       std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
                       py::object                                             mm_process_engine) override;
 
+    void beginShutdown();
+    size_t onflightRequestNum() override;
+
     grpc::Status Cancel(grpc::ServerContext* context, const CancelRequestPB* request, CancelResponsePB* response);
 
     grpc::Status GenerateStreamCall(grpc::ServerContext*                   context,
@@ -88,6 +91,7 @@ private:
                                                                     int64_t                  now_ms);
     bool                                        attachBatch(const std::string& key, int64_t now_ms);
     void                                        expireBatchAttachments(int64_t now_ms);
+    bool                                        batch_stopping_{false};
     std::mutex                                  batch_mutex_;
     std::unordered_map<std::string, BatchEntry> batch_entries_;
 
