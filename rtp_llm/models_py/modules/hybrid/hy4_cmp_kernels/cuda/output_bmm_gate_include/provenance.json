@@ -1,0 +1,14 @@
+{
+  "source": "/tmp/cmp-cuda-extension-source/rtp_kernel/glm5/include/rtp_kernel/glm5/deep_gemm",
+  "upstream_sha256": {
+    "bf16_gemm.cuh": "055618a59fb31219d65239173733f27fe882497e6a1a9685005a56534b22ba5e",
+    "fused_quant_store.cuh": "2f13b6633c56e3fe355102a63aa9be84732d24f51a32ed39e7f05368614b562f",
+    "scheduler.cuh": "1da839014b87c64a97dcfe7aa990f6486de9a39abfa5b5cc665e8f0280e37a56",
+    "smem.h": "b7a6ca65d13b22b04782eaf5aec4d5c39a2940c16c15a7c050a60f1e184463a9"
+  },
+  "modifications": [
+    "private namespace",
+    "explicit compile-time PDL toggle",
+    "BF16 expanded diagnostic and HY4 BF16 sigmoid/multiply group32 quant epilogue"
+  ]
+}

@@ -134,6 +134,12 @@ class Hy4DecoderLayer(nn.Module):
             and mlp_mxfp8_consumer is not None
             and getattr(mlp_mxfp8_consumer, "accepts_mxfp8_input", False)
         )
+        self._init_cmp()
+
+    def _init_cmp(self) -> None:
+        from rtp_llm.models_py.modules.hybrid.hy4_cmp import Hy4Cmp, cmp_requested
+
+        self.cmp = Hy4Cmp(self.self_attn) if cmp_requested() else None
 
     def clone_for_cuda_graph(self) -> "Hy4DecoderLayer":
         clone = object.__new__(type(self))
@@ -151,6 +157,7 @@ class Hy4DecoderLayer(nn.Module):
         clone.mlp_ihc = self.mlp_ihc
         clone._fuse_attn_ihc_mxfp8 = self._fuse_attn_ihc_mxfp8
         clone._fuse_mlp_ihc_mxfp8 = self._fuse_mlp_ihc_mxfp8
+        clone.cmp = self.cmp.clone_for_cuda_graph() if self.cmp is not None else None
         return clone
 
     def forward(
@@ -179,7 +186,8 @@ class Hy4DecoderLayer(nn.Module):
                 "x_fp8": attn_input_fp8,
                 "x_scale": attn_input_scale,
             }
-        attn_output, topk_indices = self.self_attn(
+        attention = self.cmp if self.cmp is not None else self.self_attn
+        attn_output, topk_indices = attention(
             hidden_states=attn_input,
             fmha_impl=fmha_impl,
             kv_cache=kv_cache,

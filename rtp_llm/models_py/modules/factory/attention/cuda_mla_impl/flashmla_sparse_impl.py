@@ -875,6 +875,9 @@ class SparseMlaImpl(MlaImplBase):
         topk_indices: Optional[torch.Tensor] = None,
         kv_prefetched: bool = False,
         attn_sink: Optional[torch.Tensor] = None,
+        return_absorbed_output: bool = False,
+        prepared_query: Optional[torch.Tensor] = None,
+        kv_write_query: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Sparse MLA forward. q: [T, H, qk_head_dim], topk: [T, (H,) topk] (req-local).
         Returns [T, H, nope_head_dim]."""
@@ -896,11 +899,25 @@ class SparseMlaImpl(MlaImplBase):
             )
             write_slots = torch.arange(q.shape[0], dtype=torch.int64, device=q.device)
 
+        if prepared_query is not None:
+            if (working_entry is not None or not self._fuse_qk_rope_cat_cache_mla
+                    or self._is_neox_style or kv_write_query is None):
+                raise ValueError("prepared HY4 query requires fused interleaved cache write without pinned cache")
+            if (prepared_query.shape != (q.shape[0], q.shape[1], self.kv_lora_rank+self.rope_head_dim)
+                    or prepared_query.dtype != q.dtype or prepared_query.device != q.device
+                    or not prepared_query.is_contiguous()
+                    or kv_write_query.shape != (q.shape[0],1,q.shape[2])
+                    or kv_write_query.dtype != q.dtype or kv_write_query.device != q.device
+                    or not kv_write_query.is_contiguous()
+                    or kv_write_query.untyped_storage().data_ptr() in (
+                        q.untyped_storage().data_ptr(), prepared_query.untyped_storage().data_ptr())):
+                raise ValueError("prepared query/cache-write scratch layout mismatch")
+
         # 1. RoPE on q_pe and k_pe; write KV to cache + optional store
         q_pe = q[:, :, self.nope_head_dim :]
         if self._fuse_qk_rope_cat_cache_mla and kv_cache is not None:
             fused_qk_rope_cat_cache_mla(
-                q=q,
+                q=q if prepared_query is None else kv_write_query,
                 compressed_kv=compressed_kv,
                 k_pe=k_pe,
                 kv_cache=cache_target.kv_cache_base,
@@ -928,7 +945,8 @@ class SparseMlaImpl(MlaImplBase):
             self.write_cache_store_impl, self.attn_inputs, kv_cache
         )
         if working_entry is None:
-            q_transformed = self._apply_input_bmm(q, layer_id)
+            q_transformed = (self._apply_input_bmm(q, layer_id)
+                             if prepared_query is None else prepared_query)
 
         # 3. Sparse attention. FP8 op consumes paged shape; BF16 op wants flat.
         kv_input = (working.resident[group_layer] if working_entry is not None
@@ -945,4 +963,6 @@ class SparseMlaImpl(MlaImplBase):
         )
 
         # 4. Project attention output via W_vc → final output
+        if return_absorbed_output:
+            return attn_output
         return self._apply_output_bmm(attn_output, layer_id)
