@@ -25,6 +25,10 @@ message IntMatrix {
     repeated IntVector rows = 1;
 }
 
+// PD release contract: Frontend, FlexLB master, Prefill and Decode must be
+// deployed as one matching release bundle. Mixed old/new PD control protocols
+// are unsupported; there is no automatic version negotiation or legacy shim.
+// See docs/backend/pd_entrance_transpose.md for group switch and rollback steps.
 // KV-cache protocol compatibility contract:
 // Grouped topology and independent block pools change block addressing and
 // payload structures. Prefill, decode, P2P, remote-cache, and host-cache
