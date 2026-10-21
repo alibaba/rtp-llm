@@ -413,8 +413,8 @@ GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamG
     model_input.request_pd_separation = torch::empty({(int64_t)total_context_batch_size}, pinned_bool);
     // Per-context-request absolute business deadline (ms since epoch). Used by
     // P2P prefill to set ComputedLayerCacheBuffer lifetime aligned with the
-    // request's own deadline. INT64_MAX means "no deadline" (workers fall back
-    // to their store_wait_timeout).
+    // request's own deadline. INT64_MAX denotes an absent business deadline;
+    // P2P workers reject that value because layer publication requires a finite deadline.
     model_input.request_deadline_ms = torch::empty({(int64_t)total_context_batch_size}, pinned_i64);
 
     if (max_blocks_num || kernel_width) {

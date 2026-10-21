@@ -53,14 +53,6 @@ struct P2PWorkerRoutePlan {
         }
         return n;
     }
-
-    int maxRoutesPerTag() const {
-        int n = 0;
-        for (const auto& r : routes) {
-            n = std::max(n, routeCountForTag(r.cache_tag));
-        }
-        return std::max(1, n);
-    }
 };
 
 }  // namespace rtp_llm
