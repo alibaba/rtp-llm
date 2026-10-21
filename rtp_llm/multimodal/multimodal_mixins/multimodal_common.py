@@ -150,6 +150,7 @@ class MultiModalEmbeddingInterface:
     # Embeddings may be shared even when inspection must be repeated per caller.
     # Existing mixins retain their cache-owned inspection contract by default.
     inspection_verdict_is_request_scoped = False
+    strict_work_budget = False
 
     @property
     def _data_type(self):
@@ -194,6 +195,16 @@ class MultiModalEmbeddingInterface:
 
     def validate_inputs(self, mm_inputs: List[MultimodalInput]) -> None:
         """Validate request-level constraints before preprocessing starts."""
+
+    def run_embedding_idle_work(self) -> bool:
+        """Run at most one bounded maintenance job on the GPU owner thread.
+
+        Only a standalone ViT owner may opt in: integrated LLM CUDA producers
+        are not covered by the multimodal capture gate. Requests already
+        completed before this hook must own their output storage. Return False
+        when there is no work or a safe capture window cannot be reserved.
+        """
+        return False
 
     def estimate_work(
         self, data: Any, mm_type: Optional[MMUrlType] = None

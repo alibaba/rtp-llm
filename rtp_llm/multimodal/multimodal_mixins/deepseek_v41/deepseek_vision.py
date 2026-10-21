@@ -10,6 +10,10 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from rtp_llm.models_py.modules.dsv41.vision_residual_add import (
+    apply_vision_residual_rmsnorm,
+)
+
 
 @lru_cache(32)
 def _vision_cos_sin(n_h: int, n_w: int, dim: int, theta: float, device: str):
@@ -70,6 +74,12 @@ class RMSNorm(nn.Module):
 
     def forward_with_residual(self, x, residual):
         """Preserve both outputs needed by the pre-norm residual block."""
+        if self._uses_flashinfer(x):
+            fused = apply_vision_residual_rmsnorm(
+                x, residual, self.weight, self.eps
+            )
+            if fused is not None:
+                return fused
         summed = x + residual
         return summed, self(summed)
 

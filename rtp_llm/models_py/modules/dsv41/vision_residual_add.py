@@ -1,7 +1,8 @@
-"""Single-launch residual addition for vision tensors beyond 32-bit offsets.
+"""Out-of-place fused residual addition and RMSNorm for DeepSeek vision.
 
-No normalization or GEMM arithmetic is changed. Small tensors retain ATen,
-whose eager launch path is faster. Outputs never alias either residual input.
+The BF16 residual-add rounding boundary matches the existing ``x + residual``
+path. RMS reduction and weight multiplication use FP32 inside the kernel. Both
+returned tensors own fresh storage; neither input is mutated.
 """
 
 import torch
@@ -18,36 +19,76 @@ except ModuleNotFoundError as error:
 if triton is not None:
 
     @triton.jit
-    def _vision_residual_add64_kernel(X, R, Y, N: tl.constexpr):
-        offsets = tl.program_id(0).to(tl.int64) * 1024 + tl.arange(0, 1024)
-        x = tl.load(X + offsets, offsets < N, other=0).to(tl.float32)
-        r = tl.load(R + offsets, offsets < N, other=0).to(tl.float32)
-        tl.store(Y + offsets, x + r, offsets < N)
+    def _vision_residual_rmsnorm_kernel(
+        X,
+        R,
+        W,
+        S,
+        Y,
+        M: tl.constexpr,
+        N: tl.constexpr,
+        EPS: tl.constexpr,
+        ROWS: tl.constexpr,
+        COLS: tl.constexpr,
+    ):
+        rows = tl.program_id(0).to(tl.int64) * ROWS + tl.arange(0, ROWS)
+        cols = tl.arange(0, COLS)
+        offsets = rows[:, None] * N + cols[None, :]
+        mask = (rows[:, None] < M) & (cols[None, :] < N)
+        x = tl.load(X + offsets, mask=mask, other=0).to(tl.float32)
+        residual = tl.load(R + offsets, mask=mask, other=0).to(tl.float32)
+        # Match the old two-op path: BF16 add is rounded before RMS reduction.
+        summed = (x + residual).to(tl.bfloat16)
+        value = summed.to(tl.float32)
+        inv_rms = tl.rsqrt(tl.sum(value * value, axis=1) / N + EPS)
+        weight = tl.load(W + cols, mask=cols < N, other=0).to(tl.float32)
+        normalized = value * inv_rms[:, None] * weight[None, :]
+        tl.store(S + offsets, summed, mask=mask)
+        tl.store(Y + offsets, normalized.to(tl.bfloat16), mask=mask)
 
 
-def apply_vision_ffn_residual_add(x, residual):
-    """Return a fresh sum, or None when the ordinary residual path is better."""
+def apply_vision_residual_rmsnorm(x, residual, weight, eps):
+    """Return ``(sum, norm)`` or ``None`` for unsupported inputs."""
     if not (
         isinstance(x, torch.Tensor)
         and isinstance(residual, torch.Tensor)
+        and isinstance(weight, torch.Tensor)
         and not torch.is_grad_enabled()
-        and x.layout == residual.layout == torch.strided
+        and x.layout == residual.layout == weight.layout == torch.strided
         and x.is_cuda
-        and x.device == residual.device
-        and x.dtype == residual.dtype == torch.bfloat16
+        and x.device == residual.device == weight.device
+        and x.dtype == residual.dtype == weight.dtype == torch.bfloat16
         and x.ndim == 2
+        and x.shape[0] > 0
         and x.shape == residual.shape
         and x.shape[1] == 1024
+        and weight.shape == (1024,)
         and x.is_contiguous()
         and residual.is_contiguous()
-        and x.numel() * x.element_size() > 2**31 - 1
+        and weight.is_contiguous()
         and torch.cuda.get_device_capability(x.device)[0] == 10
     ):
         return None
     if triton is None:
         return None
-    output = torch.empty_like(x)
-    _vision_residual_add64_kernel[(triton.cdiv(x.numel(), 1024),)](
-        x, residual, output, x.numel(), num_warps=4, enable_fp_fusion=False
+    summed = torch.empty_like(x)
+    normalized = torch.empty_like(x)
+    # FlashInfer's H=1024 RMSNorm uses one 32-thread warp per row and four
+    # rows per 128-thread block. Matching that row grouping reduces reduction
+    # order drift through the 32-layer vision stack.
+    rows = 4
+    _vision_residual_rmsnorm_kernel[(triton.cdiv(x.shape[0], rows),)](
+        x,
+        residual,
+        weight,
+        summed,
+        normalized,
+        x.shape[0],
+        x.shape[1],
+        eps,
+        rows,
+        triton.next_power_of_2(x.shape[1]),
+        num_warps=4,
+        enable_fp_fusion=False,
     )
-    return output
+    return summed, normalized

@@ -391,6 +391,29 @@ def init_vit_group_args(parser, vit_config):
         help="=1 保留逐请求串行模式；>1 开启合批，同一上限约束工作块数和原始媒体总数；模型工作量预算可进一步限制",
     )
 
+    for field, help_text in (
+        (
+            "gpu_batch_max_bytes",
+            "模型工作量/临时显存预算(bytes)，0在权重加载后自动分配，非无限制",
+        ),
+        (
+            "gpu_graph_cache_max_entries",
+            "每个ViT模型的多shape graph缓存及待构建队列上限，0关闭",
+        ),
+        (
+            "gpu_graph_cache_max_bytes",
+            "每个ViT模型的graph显存预算(bytes)，0自动分配；仅独立ViT支持后台capture",
+        ),
+    ):
+        vit_group.add_argument(
+            "--" + field,
+            env_name="VIT_" + field.upper(),
+            bind_to=(vit_config, field),
+            type=int,
+            default=getattr(vit_config, field),
+            help=help_text,
+        )
+
     vit_group.add_argument(
         "--mm_cache_gpu_max_bytes",
         env_name="MM_CACHE_GPU_MAX_BYTES",

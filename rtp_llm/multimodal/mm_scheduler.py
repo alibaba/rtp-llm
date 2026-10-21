@@ -229,6 +229,7 @@ class MMScheduler:
         forward_profiler: Optional[Callable[[], AbstractContextManager]] = None,
         prefetch_batches: int = 0,
         prefetch_fill_batch: bool = False,
+        allow_idle_work: bool = False,
     ):
         if batch_wait_ms < 0:
             raise ValueError(f"batch_wait_ms must be >= 0, got {batch_wait_ms}")
@@ -240,6 +241,8 @@ class MMScheduler:
             raise ValueError(f"max_queue_size must be > 0, got {max_queue_size}")
 
         self._mm_part = mm_part
+        self._allow_idle_work = allow_idle_work
+        self._collector_idle = threading.Event()
         if prefetch_batches not in (0, 1):
             raise ValueError("prefetch_batches must be 0 or 1")
         self._prefetch_batches = prefetch_batches
@@ -424,6 +427,7 @@ class MMScheduler:
                         f"MMWorkEstimate, got {type(work_estimate).__name__}"
                     )
                 if not work_estimate.fits_within(self._work_budget):
+                    self._check_hard_work_budget(work_estimate)
                     logging.warning(
                         "MMScheduler: one work item exceeds the model work "
                         "budget; running it alone (estimate=%s, budget=%s)",
@@ -529,6 +533,7 @@ class MMScheduler:
             chunk_work = chunk_work + item_work
 
             if len(chunk_items) == 1 and not item_work.fits_within(self._work_budget):
+                self._check_hard_work_budget(item_work)
                 # A model work item is not generically splittable (for example,
                 # one long video). Run it alone rather than reintroduce the old
                 # whole-request rejection; a true OOM still reaches the caller.
@@ -713,7 +718,7 @@ class MMScheduler:
             while not self._stopped.is_set():
                 batch = None
                 try:
-                    batch = self._collect_batch()
+                    batch = self._collect_batch(idle_work=True)
                     if batch is None:
                         break
                     # Stop-check and Future claim are one atomic transition against
@@ -793,7 +798,18 @@ class MMScheduler:
                 if demanded is not None:
                     demanded.set()
                     self._collect_wakeup.set()
-                current = pending.result()
+                while True:
+                    try:
+                        current = pending.result(timeout=_STOP_POLL_INTERVAL_S)
+                        break
+                    except FutureTimeoutError:
+                        if pending.done():
+                            raise  # The producer itself failed with TimeoutError.
+                        # No current forward or retained output envelope. The
+                        # sole collector is waiting for its FIRST item, not
+                        # accumulating a partial batch or performing H2D.
+                        if self._collector_idle.is_set():
+                            self._run_idle_work()
                 pending = None
                 if current is None:
                     break
@@ -858,7 +874,36 @@ class MMScheduler:
             except InvalidStateError:
                 pass
 
-    def _collect_batch(self, demanded=None) -> Optional[List[_EmbeddingChunk]]:
+    def _check_hard_work_budget(self, estimate):
+        if getattr(self._mm_part, "strict_work_budget", False):
+            raise MMSchedulerRequestTooLargeError(
+                f"single work item exceeds model resource budget: {estimate}; "
+                f"budget={self._work_budget}"
+            )
+
+    def _run_idle_work(self):
+        hook = getattr(self._mm_part, "run_embedding_idle_work", None)
+        if (
+            not self._allow_idle_work
+            or not callable(hook)
+            or self._stopped.is_set()
+            or not self._waiting.empty()
+        ):
+            return
+        try:
+            with torch.inference_mode():
+                hook()
+        except Exception:
+            # A failed capture can invalidate CUDA/allocator state. Do not
+            # silently retry eager on this owner or accept more requests.
+            logging.exception("MMScheduler: idle GPU maintenance failed; stopping")
+            self._stopped.set()
+            self._collect_wakeup.set()
+            raise
+
+    def _collect_batch(
+        self, demanded=None, idle_work=False
+    ) -> Optional[List[_EmbeddingChunk]]:
         # Pick the first chunk, skipping any whose caller already timed out
         # (cancelled) so dead work neither anchors a batch nor spends its budget.
         # _pending (carried over from last round) goes first.
@@ -879,9 +924,14 @@ class MMScheduler:
                 self._report_queue_depth()
             else:
                 try:
+                    self._collector_idle.set()
                     first = self._waiting.get(timeout=_STOP_POLL_INTERVAL_S)
                 except queue.Empty:
+                    if idle_work:
+                        self._run_idle_work()
                     continue
+                finally:
+                    self._collector_idle.clear()
                 self._report_queue_depth()
             if not first.request.cancelled.is_set():
                 break
