@@ -5,6 +5,8 @@
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include <atomic>
 #include <map>
+#include <functional>
+#include <utility>
 #include <mutex>
 
 namespace rtp_llm {
@@ -23,7 +25,15 @@ public:
                                       ::grpc::ServerWriter<::GenerateOutputsPB>* writer) override;
     void           setSleepMillis(int ms);
     void           setStartLoadSleepMillis(int ms);
+    void setStartLoadGate(std::function<void()> gate) {
+        std::lock_guard<std::mutex> lock(behavior_mutex_);
+        start_load_gate_ = std::move(gate);
+    }
     void           setP2PRequestSleepMillis(P2PConnectorBroadcastType type, int ms);
+    void setP2PRequestGate(P2PConnectorBroadcastType type, std::function<void()> gate) {
+        std::lock_guard<std::mutex> lock(behavior_mutex_);
+        p2p_request_gates_[static_cast<int>(type)] = std::move(gate);
+    }
     void           setLeaseStatus(bool sealed, int started_ops, int finished_ops, bool stopped);
     void           setP2PResponseSuccess(bool success);
     void           setOmitP2PResponse(bool omit);
@@ -45,9 +55,11 @@ public:
     void resetCallCounts();
 
 private:
+    std::function<void()> start_load_gate_;
     int              sleep_millis_{0};
     int              start_load_sleep_millis_{-1};
     std::map<int, int> p2p_request_sleep_millis_;
+    std::map<int, std::function<void()>> p2p_request_gates_;
     std::map<int, int> p2p_request_call_count_;
     LeaseStatusResponsePB lease_status_;
     bool             p2p_response_success_{true};

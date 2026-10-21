@@ -9,12 +9,15 @@ namespace rtp_llm {
                                                const ::FunctionRequestPB* request,
                                                ::FunctionResponsePB*      response) {
     int p2p_sleep_millis = 0;
+    std::function<void()> gate;
     // 处理 p2p_request
     if (request->has_p2p_request()) {
         const int type = static_cast<int>(request->p2p_request().type());
         {
             std::lock_guard<std::mutex> lock(behavior_mutex_);
             ++p2p_request_call_count_[type];
+            const auto gate_it = p2p_request_gates_.find(type);
+            if (gate_it != p2p_request_gates_.end()) gate = gate_it->second;
             const auto it  = p2p_request_sleep_millis_.find(type);
             const bool is_cancel = request->p2p_request().type() == P2PConnectorBroadcastType::CANCEL_READ
                                    || request->p2p_request().type()
@@ -25,6 +28,7 @@ namespace rtp_llm {
             std::lock_guard<std::mutex> lock(last_broadcast_tp_request_mutex_);
             last_broadcast_tp_request_.CopyFrom(request->p2p_request());
         }
+        if (gate) gate();
         if (p2p_sleep_millis > 0) {
             std::this_thread::sleep_for(std::chrono::milliseconds(p2p_sleep_millis));
         }
@@ -80,11 +84,14 @@ namespace rtp_llm {
         last_start_load_request_ = *request;
     }
 
+    std::function<void()> gate;
     int start_load_sleep_millis = 0;
     {
         std::lock_guard<std::mutex> lock(behavior_mutex_);
         start_load_sleep_millis = start_load_sleep_millis_ < 0 ? sleep_millis_ : start_load_sleep_millis_;
+        gate = start_load_gate_;
     }
+    if (gate) gate();
     if (start_load_sleep_millis > 0) {
         std::this_thread::sleep_for(std::chrono::milliseconds(start_load_sleep_millis));
     }

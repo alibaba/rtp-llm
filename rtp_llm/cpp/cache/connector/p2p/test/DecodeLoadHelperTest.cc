@@ -1,4 +1,5 @@
 #include <thread>
+#include <atomic>
 #include <future>
 #include <mutex>
 #include <unordered_map>
@@ -427,12 +428,19 @@ TEST_F(DecodeLoadHelperTest, CheckDone_TotalCostTimeUs) {
 // Regression for the 8-min decode-side stall (DingTalk doc §7). Before the fix,
 // shutdownAndDrainCompletionQueue used an unbounded Next() that could block for the
 // remaining gRPC deadline when the peer channel was unhealthy. With the bounded-drain
-// fix, cancel() must return within ~100ms (drain budget) + slack regardless of how
-// long the server takes to respond.
+// fix, cancel() must return while the remote handler is still blocked.
 TEST_F(DecodeLoadHelperTest, Cancel_BoundedByDrainDeadline_WhenServerSlow) {
-    // Make the server sleep long enough that the drain budget would be exhausted if
-    // we waited synchronously for the call to complete.
-    server_->service()->setSleepMillis(5000);
+    auto entered = std::make_shared<std::promise<void>>();
+    auto reached = entered->get_future();
+    auto release = std::make_shared<std::promise<void>>();
+    auto gate = release->get_future().share();
+    auto exited = std::make_shared<std::atomic<bool>>(false);
+    auto cleanup = std::shared_ptr<void>(nullptr, [release](void*) { release->set_value(); });
+    server_->service()->setStartLoadGate([entered, gate, exited] {
+        entered->set_value();
+        gate.wait();
+        exited->store(true);
+    });
 
     std::string unique_key   = "test_cancel_bounded";
     int64_t     request_id   = 3001;
@@ -443,18 +451,17 @@ TEST_F(DecodeLoadHelperTest, Cancel_BoundedByDrainDeadline_WhenServerSlow) {
     auto result = client_->load(request_id, prefill_ip, prefill_port, unique_key, deadline_ms, deadline_ms, 5000);
     ASSERT_NE(result, nullptr);
 
-    // Give the request a moment to reach the (sleeping) server.
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    const auto reached_status = reached.wait_for(std::chrono::seconds(5));
+    if (reached_status != std::future_status::ready) cleanup.reset();
+    ASSERT_EQ(reached_status, std::future_status::ready);
     EXPECT_FALSE(result->done());
-
-    // Measure cancel wall time — must be bounded by the drain budget (100ms) + slack,
-    // never by the server's 5000ms sleep.
-    const int64_t cancel_start_ms = currentTimeMs();
-    result->cancel();
-    const int64_t cancel_cost_ms  = currentTimeMs() - cancel_start_ms;
-
-    EXPECT_LT(cancel_cost_ms, 1000) << "cancel should return within ~drain_budget+slack, got " << cancel_cost_ms
-                                     << "ms (regression of the 8-min stall fix)";
+    auto cancelled = std::async(std::launch::async, [result] { result->cancel(); });
+    const auto ready = cancelled.wait_for(std::chrono::seconds(5));
+    // Causal check: cancellation returns while the remote handler remains gated.
+    EXPECT_EQ(ready, std::future_status::ready);
+    EXPECT_FALSE(exited->load());
+    cleanup.reset();
+    cancelled.get();
     EXPECT_TRUE(result->done());
     EXPECT_FALSE(result->success());
 }
@@ -476,11 +483,13 @@ TEST_F(DecodeLoadHelperTest, Cancel_Idempotent) {
     EXPECT_FALSE(result->success());
     EXPECT_EQ(result->error_code, ErrorCode::CANCELLED);
 
-    // Second cancel is a no-op — should not crash or hang.
-    const int64_t second_cancel_start_ms = currentTimeMs();
+    // Idempotence preserves the completed outcome.
+    const auto error = result->error_code;
     result->cancel();
-    const int64_t second_cancel_cost_ms  = currentTimeMs() - second_cancel_start_ms;
-    EXPECT_LT(second_cancel_cost_ms, 50);
+    EXPECT_TRUE(result->done());
+    EXPECT_FALSE(result->success());
+    EXPECT_EQ(result->error_code, error);
+
 }
 
 }  // namespace rtp_llm

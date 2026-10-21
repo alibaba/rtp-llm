@@ -452,56 +452,43 @@ TEST_F(P2PConnectorSchedulerTest, HandleRead_ReturnError_BroadcastTimeout) {
     EXPECT_EQ(error_info.code(), ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_TIMEOUT);
 }
 
-// 修复 5/22 现场 B 类(7 笔 handleRead cost > 60s,最大 ~1h)的回归测试:
-// cancel 已发且 cancel_result 已 done(成功送达 or cancel 自身 gRPC timeout)后,
-// 即使原 HANDLE_READ broadcast 的 result 仍未 done(worker hang / channel down),
-// waitForBroadcastCompletion 也应立即退出,不再盲等 client 业务 deadline_ms。
-//
-// 复现 corner case 的近似手法:让 broadcast worker 慢响应 3s(模拟 worker hang),
-// 把 deadline_ms 设到 10s 远大于 worker sleep(避免靠 gRPC client deadline 退出),
-// 100ms 后触发 cancel。test server 的 cancel 路径立即 ack,所以 cancel_result 几 ms done。
-// - 修复前:主循环只看 result->done(),要等 worker sleep 结束 ~3s 才返回
-// - 修复后:cancel done 立即 break,函数在 ~120ms 内返回
+// Cancel completion must release the caller without waiting for blocked HANDLE_READ workers.
 TEST_F(P2PConnectorSchedulerTest, HandleRead_ExitsImmediately_AfterCancelDoneEvenIfBroadcastSlow) {
+    auto release = std::make_shared<std::promise<void>>();
+    auto gate = release->get_future().share();
+    auto exited = std::make_shared<std::atomic<int>>(0);
+    auto cleanup = std::shared_ptr<void>(nullptr, [release](void*) { release->set_value(); });
+    std::vector<std::future<void>> entered;
     for (auto& server : tp_broadcast_servers_) {
-        server->service()->setSleepMillis(3000);  // 3s 慢 worker,模拟 hang
+        auto signal = std::make_shared<std::promise<void>>();
+        entered.push_back(signal->get_future());
+        server->service()->setP2PRequestGate(P2PConnectorBroadcastType::HANDLE_READ, [signal, gate, exited] {
+            signal->set_value();
+            gate.wait();
+            exited->fetch_add(1);
+        });
     }
-
-    std::vector<std::pair<std::string, uint32_t>> decode_transfer_servers;
-    decode_transfer_servers.push_back({"127.0.0.1", 12345});
-
-    // deadline_ms 设大,确保不靠 gRPC client deadline 退出循环
-    auto deadline_ms = currentTimeMs() + 10000;
-
+    const auto deadline = currentTimeMs() + 30000;
     std::atomic<bool> cancelled{false};
-    auto              is_cancelled = [&cancelled]() { return cancelled.load(); };
-    std::thread       cancel_thread([&cancelled]() {
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        cancelled = true;
+    auto sending = std::async(std::launch::async, [&] {
+        return prefill_scheduler_->sendKVCache("test_exit_after_cancel_done", 4007,
+            {{"127.0.0.1", 12345}}, deadline, [&] { return cancelled.load(); }, false, deadline);
     });
-
-    auto      start_ms   = currentTimeMs();
-    ErrorInfo error_info = prefill_scheduler_->sendKVCache("test_exit_after_cancel_done", 4007, decode_transfer_servers, deadline_ms, is_cancelled, false, deadline_ms);
-    auto duration_ms = currentTimeMs() - start_ms;
-
-    cancel_thread.join();
-
-    EXPECT_TRUE(error_info.hasError());
-    EXPECT_EQ(error_info.code(), ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_CANCELLED);
-
-    // 修复后应在 cancel done 后立即返回(~100ms cancel 触发延迟 + 几 ms cancel RPC + break)。
-    // 给 CI 噪声留充足余量(1s),但远低于 broadcast worker 的 3s sleep,
-    // 确保确实因为 cancel done 早退,而不是等 worker 自然完成。
-    EXPECT_LT(duration_ms, 1000) << "function should exit shortly after cancel completes, "
-                                 << "but took " << duration_ms << "ms (likely waited for broadcast worker)";
-
-    for (size_t i = 0; i < tp_broadcast_servers_.size(); ++i) {
-        const auto cancel_check_deadline = currentTimeMs() + 1000;
-        while (tp_broadcast_servers_[i]->service()->getBroadcastTpCancelCallCount() == 0
-               && currentTimeMs() < cancel_check_deadline) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
-        EXPECT_EQ(tp_broadcast_servers_[i]->service()->getBroadcastTpCancelCallCount(), 1);
+    for (auto& ready : entered) {
+        const auto state = ready.wait_for(std::chrono::seconds(5));
+        if (state != std::future_status::ready) cleanup.reset();
+        ASSERT_EQ(state, std::future_status::ready);
+    }
+    cancelled.store(true);
+    const auto state = sending.wait_for(std::chrono::seconds(5));
+    // Cancellation must finish while every original HANDLE_READ remains blocked.
+    EXPECT_EQ(state, std::future_status::ready);
+    EXPECT_EQ(exited->load(), 0);
+    cleanup.reset();
+    const auto error = sending.get();
+    EXPECT_EQ(error.code(), ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_CANCELLED);
+    for (const auto& server : tp_broadcast_servers_) {
+        EXPECT_EQ(server->service()->getBroadcastTpCancelCallCount(), 1);
     }
 }
 
@@ -1468,9 +1455,14 @@ TEST(P2PReadNotificationTest, GenerationRetainsNotificationBeforeWait) {
     P2PNotification notification;
     auto            observed = notification.generation();
     notification.notify();
-    const auto start = currentTimeMs();
-    notification.waitUntil(observed, currentTimeMs() + 2000);
-    EXPECT_LT(currentTimeMs() - start, 1000);
+    auto waiting = std::async(std::launch::async, [&] {
+        notification.waitUntil(observed, std::numeric_limits<int64_t>::max());
+    });
+    const auto ready = waiting.wait_for(std::chrono::seconds(5));
+    // There is no deadline to release a lost notification; rescue only on failure.
+    if (ready != std::future_status::ready) notification.notify();
+    EXPECT_EQ(ready, std::future_status::ready);
+    waiting.get();
 }
 
 TEST(P2PReadNotificationTest, CheckerWakesForBothRegistrationOrderings) {
