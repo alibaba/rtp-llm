@@ -1816,11 +1816,14 @@ class ModelRpcClientTest(TestCase):
                     self.assertEqual(config.logits_index.value, logits_index)
 
     def test_frontend_incomplete_route_never_falls_back_to_local_rpc(self):
-        for role_addrs in ([], [_prefill_role_addr("prefill", 9001)]):
-            with self.subTest(role_addrs=role_addrs):
-                client = ModelRpcClient(
-                    ["frontend-without-backend:9000"], {}, role_type=RoleType.FRONTEND
-                )
+        cases = (
+            (RoleType.FRONTEND, []),
+            (RoleType.FRONTEND, [_prefill_role_addr("prefill", 9001)]),
+            (RoleType.PDFUSION, [_prefill_role_addr("prefill", 9001)]),
+        )
+        for role, role_addrs in cases:
+            with self.subTest(role=role, role_addrs=role_addrs):
+                client = ModelRpcClient(["local:9000"], {}, role_type=role)
                 input_py = GenerateInput(
                     token_ids=torch.tensor([1, 2]),
                     generate_config=GenerateConfig(role_addrs=role_addrs),
@@ -1834,6 +1837,21 @@ class ModelRpcClientTest(TestCase):
                 )
                 self.assertIn("request_id=326", caught.exception.message)
                 self.assertIn("DECODE or PDFUSION", caught.exception.message)
+
+    def test_pdfusion_without_explicit_route_keeps_local_execution(self):
+        client = ModelRpcClient(["fusion:9000"], {}, role_type=RoleType.PDFUSION)
+        input_py = GenerateInput(
+            token_ids=torch.tensor([1, 2]),
+            generate_config=GenerateConfig(),
+            request_id=327,
+            mm_inputs=[],
+        )
+        addresses, target, response_roles = client._select_address_and_response_role_addrs(
+            input_py
+        )
+        self.assertEqual(addresses, ["fusion:9000"])
+        self.assertEqual(target, "fusion:9000")
+        self.assertIsNone(response_roles)
 
     def test_pd_route_ignores_prefill_and_targets_decode_without_mode_flag(self):
         client = ModelRpcClient(["local:9000"], {})

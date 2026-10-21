@@ -1194,12 +1194,20 @@ class ModelRpcClient(object):
         explicit_target_address = self._get_explicit_target_address(input_py)
         if explicit_target_address is not None:
             address_list = [explicit_target_address]
-        elif self._role_type == RoleType.FRONTEND:
+        elif self._role_type == RoleType.FRONTEND or (
+            self._role_type == RoleType.PDFUSION
+            and any(
+                addr.role == RoleType.PREFILL
+                for addr in input_py.generate_config.role_addrs
+            )
+        ):
             # A frontend has no local inference RPC listener. Incomplete PD
             # routing must not silently target its own configured backend port.
+            # A fusion service also must not override an explicit Prefill-only
+            # route with local execution. Empty fusion routes remain local.
             raise FtRuntimeException(
                 ExceptionType.ROUTE_ERROR,
-                f"request_id={input_py.request_id} frontend route requires a "
+                f"request_id={input_py.request_id} route requires a "
                 "DECODE or PDFUSION backend address",
             )
 
