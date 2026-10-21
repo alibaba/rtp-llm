@@ -1775,8 +1775,30 @@ class ModelRpcClientTest(TestCase):
         self.assertEqual(client._get_explicit_target_address(input_py), "decode:9002")
         self.assertEqual(
             client._build_response_role_addrs(input_py, "decode:9002"),
-            [input_py.generate_config.role_addrs[1]],
+            input_py.generate_config.role_addrs,
         )
+
+    def test_explicit_decode_response_preserves_vit_and_prefill_route(self):
+        client = ModelRpcClient(["local:9000"], {}, role_type=RoleType.FRONTEND)
+        roles = [
+            RoleAddr(role=RoleType.VIT, ip="vit", http_port=8000, grpc_port=8001),
+            _prefill_role_addr("prefill", 9001),
+            _decode_role_addr("decode", 9002),
+        ]
+        input_py = GenerateInput(
+            token_ids=torch.tensor([1, 2]),
+            generate_config=GenerateConfig(role_addrs=roles),
+            request_id=1,
+            mm_inputs=[],
+        )
+        self.assertEqual(client._get_explicit_target_address(input_py), "decode:9002")
+        actual = client._build_response_role_addrs(input_py, "decode:9002")
+        self.assertEqual(actual, input_py.generate_config.role_addrs)
+        self.assertEqual(
+            [addr.role for addr in actual],
+            [RoleType.VIT, RoleType.PREFILL, RoleType.DECODE],
+        )
+        self.assertEqual(actual[0].http_port, 8000)
 
     def test_pdfusion_route_does_not_fabricate_decode_response_address(self):
         client = ModelRpcClient(["local:9000"], {}, role_type=RoleType.DECODE)
@@ -1995,11 +2017,17 @@ class ModelRpcClientTest(TestCase):
         config = GenerateConfig(aux_info=True)
         config.role_addrs = [
             SimpleNamespace(
+                role=RoleType.VIT,
+                ip="10.0.0.3",
+                http_port=4000,
+                grpc_port=4001,
+            ),
+            SimpleNamespace(
                 role=RoleType.PREFILL,
                 ip="10.0.0.2",
                 http_port=3000,
                 grpc_port=3001,
-            )
+            ),
         ]
         input_obj = GenerateInput(
             token_ids=torch.tensor([1, 2, 3]),
@@ -2031,6 +2059,15 @@ class ModelRpcClientTest(TestCase):
         self.assertEqual(decode_role_addr.ip, "10.0.0.11")
         self.assertEqual(decode_role_addr.grpc_port, 10111)
         self.assertEqual(decode_role_addr.http_port, 10110)
+        response_roles = result.generate_outputs[0].aux_info.role_addrs
+        self.assertEqual(
+            [addr.role for addr in response_roles],
+            [RoleType.VIT, RoleType.PREFILL, RoleType.DECODE],
+        )
+        self.assertEqual(response_roles[0].ip, "10.0.0.3")
+        self.assertEqual(response_roles[0].http_port, 4000)
+        self.assertEqual(response_roles[1].ip, "10.0.0.2")
+        self.assertEqual(len(input_obj.generate_config.role_addrs), 2)
 
     def test_handle_grpc_error_maps_resource_exhausted_to_malloc_error(self):
         # Regression: prefill's LACK MEM surfaces to decode as a grpc

@@ -1169,15 +1169,13 @@ class ModelRpcClient(object):
             if role_addr.role in (RoleType.DECODE, RoleType.PDFUSION) and role_addr.ip:
                 if role_addr.role == RoleType.PDFUSION:
                     return None
-                return [
-                    addr
-                    for addr in input_py.generate_config.role_addrs
-                    if addr.role == RoleType.DECODE
-                ]
+                # AuxInfo attributes the complete FE-selected route, including
+                # ViT affinity and the Prefill selected for the Decode handoff.
+                return list(input_py.generate_config.role_addrs)
         if self._role_type not in (RoleType.PREFILL, RoleType.DECODE):
             return None
         target_ip, target_port = _split_host_port(target_address)
-        return [
+        return list(input_py.generate_config.role_addrs) + [
             RoleAddr(
                 role=RoleType.DECODE,
                 ip=target_ip,
