@@ -815,6 +815,7 @@ class ModelLoader:
                 phy2log=phy2log,
                 database=ep_lb_database,
                 model_config=self.model_config,
+                weight_preparation=self._load_config.weight_preparation,
             )
         return py_eplb, phy2log
 

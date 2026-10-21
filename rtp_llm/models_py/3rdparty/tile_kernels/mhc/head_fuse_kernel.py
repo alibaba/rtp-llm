@@ -18,6 +18,7 @@ def _mhc_head_fuse(
     mhc_mult: int = 4,
     n_thr: int = 128,
     h_blk: int = 1024,
+    enable_pdl: bool = True,
 ):
     num_tokens = T.dynamic("num_tokens")
     mhc_hidden_size = mhc_mult * hidden_size
@@ -33,7 +34,10 @@ def _mhc_head_fuse(
         out: T.Tensor[(num_tokens, hidden_size), T.bfloat16],
     ) -> None:
         with T.Kernel(num_tokens, threads=n_thr) as pid:
-            T.pdl_sync()
+            # M890P's TileLang lowering rejects kernels with explicit PDL;
+            # PPU serving disables it through the same switch as the post kernel.
+            if enable_pdl:
+                T.pdl_sync()
 
             sqrsum = T.alloc_reducer((1,), T.float32, replication="all")
             mixes = T.alloc_reducer((mhc_mult,), T.float32, replication="all")
@@ -88,6 +92,7 @@ def _mhc_head_fuse(
 
                 T.copy(out_local, out[pid, i_h * hidden_block], disable_tma=True)
 
-            T.pdl_trigger()
+            if enable_pdl:
+                T.pdl_trigger()
 
     return mhc_head_fuse

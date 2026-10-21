@@ -408,6 +408,9 @@ absl::Status StreamCacheResource::incrKVBlock(int seq_len_override, int prefill_
     auto result = resource_context_.cache_manager->malloc(malloc_info);
     if (!result.success) {
         malloc_failed_times_++;
+        if (result.status == MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED) {
+            return absl::UnavailableError("malloc temporarily exhausted");
+        }
         return absl::InternalError("malloc failed");
     }
 

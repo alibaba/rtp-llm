@@ -11,6 +11,7 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "autil/EnvUtil.h"
+#include <absl/status/status.h>
 
 using namespace std;
 namespace rtp_llm {
@@ -254,6 +255,13 @@ std::list<GenerateStreamPtr> FIFOSchedulerBase::selectPrefillPrefix(std::list<Ge
         // final grant, including PDFusion streams already in RUNNING state.
         const auto prepared = stream->preparePrefillChunk();
         if (!prepared.ok()) {
+            if (absl::IsUnavailable(prepared)) {
+                // A transient block-pool shortfall is retryable: keep the
+                // stream WAITING and stop this round instead of killing it.
+                RTP_LLM_LOG_INFO("chunk prefill admission deferred: %s",
+                                 prepared.ToString().c_str());
+                break;
+            }
             it = finish_invalid_stream(it, ErrorCode::EXECUTION_EXCEPTION,
                                        "chunk prefill state allocation failed: " + prepared.ToString());
             continue;

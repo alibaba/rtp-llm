@@ -196,6 +196,7 @@ class Dsv4ModelAdapter:
             b.implementation.prepare_weights
             for b in bindings
             if b.request.module_id == "rtp.dsv4.moe"
+            and b.implementation.prepare_weights is not None
         }
         if len(weight_plans) > 1:
             raise ValueError(

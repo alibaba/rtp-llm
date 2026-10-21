@@ -356,7 +356,7 @@ class V4Transformer(nn.Module):
                 hc_eps=args.hc_eps,
                 tp_size=args.tp_size,
                 tp_rank=args.tp_rank,
-                platform_provider=platform_provider,
+                platform_provider=self.platform_provider,
             )
 
         self._dbg_step = 0
@@ -591,6 +591,7 @@ class V4Transformer(nn.Module):
             x,
             tp_size=self.args.tp_size,
             tp_rank=self.args.tp_rank,
+            global_dim=self.args.dim,
         )
         if normalized.shape[-1] == self.args.dim:
             return normalized

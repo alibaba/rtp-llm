@@ -23,10 +23,13 @@ def prepare_model_runtime(model_config, engine_config):
 
 def configure_model_weight_loader(model_config, loader):
     config = loader.get_load_config()
-    if model_config.model_type == "deepseek_v4" and config.moe_pure_tp_mode:
-        from .models.dsv4.resources import routed_tp_preparation
+    if (
+        model_config.model_type in ("deepseek_v4", "deepseek_v4_mtp")
+        and config.moe_pure_tp_mode
+    ):
+        from .models.dsv4.resources import tp_moe_shared_fp32_preparation
 
-        config.weight_preparation = routed_tp_preparation()
+        config.weight_preparation = tp_moe_shared_fp32_preparation()
 
 
 class PpuStreamPool:

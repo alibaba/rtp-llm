@@ -2592,6 +2592,7 @@ def _launch_dummy_mhc_pre_big_fuse(
         post_mix,
         comb_mix,
         layer_input,
+        layer_input.view(-1)[:0],
     )
     del (
         gemm_out_mul,

@@ -12,6 +12,7 @@ def tp_rms_norm(
     *,
     tp_size: int,
     tp_rank: int,
+    global_dim: int | None = None,
 ) -> torch.Tensor:
     """Apply RMSNorm to one contiguous hidden-dimension TP shard."""
 
@@ -19,21 +20,35 @@ def tp_rms_norm(
     tp_rank = int(tp_rank)
     local_dim = int(x.shape[-1])
     weight = norm.weight.data
-    if tp_size == 1 or int(weight.numel()) == local_dim:
-        # The regular TP layout keeps hidden states replicated; both the
-        # activation and the affine weight therefore have the global width.
+    weight_numel = int(weight.numel())
+    declared_dim = None if global_dim is None else int(global_dim)
+    if declared_dim is not None and declared_dim < local_dim:
+        raise ValueError(
+            f"RMSNorm local hidden size={local_dim} exceeds declared global "
+            f"size={declared_dim}"
+        )
+    if tp_size == 1:
+        return norm(x)
+    if declared_dim is None and weight_numel == local_dim:
+        # Legacy call sites do not declare the global width, so a local-width
+        # weight is indistinguishable from a replicated one.
         return norm(x)
     if tp_size <= 0 or not 0 <= tp_rank < tp_size:
         raise ValueError(f"invalid RMSNorm TP geometry: size={tp_size}, rank={tp_rank}")
 
-    global_dim = local_dim * tp_size
-    if int(weight.numel()) == global_dim:
+    global_dim = declared_dim if declared_dim is not None else local_dim * tp_size
+    if local_dim == global_dim and weight_numel == global_dim:
+        return norm(x)
+    if weight_numel == global_dim:
         start = tp_rank * local_dim
         weight_shard = weight[start : start + local_dim]
+    elif weight_numel == local_dim:
+        # Both the activation and the affine weight are TP-sharded.
+        weight_shard = weight
     else:
         raise ValueError(
-            f"RMSNorm weight size={weight.numel()} does not match global hidden "
-            f"size={global_dim} for local hidden size={local_dim}"
+            f"RMSNorm weight size={weight_numel} does not match global hidden "
+            f"size={global_dim} or local hidden size={local_dim}"
         )
 
     square_sum = x.float().square().sum(-1, keepdim=True)

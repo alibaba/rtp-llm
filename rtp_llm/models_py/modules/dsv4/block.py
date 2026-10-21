@@ -38,11 +38,22 @@ def _prefill_fast_norm(
     *,
     tp_size: int = 1,
     tp_rank: int = 0,
+    global_dim: int | None = None,
 ) -> torch.Tensor:
     # Regular CUDA TP retains full-width hidden states. Preserve its in-place
-    # norm path; only hidden-dimension shards need the TP adapter.
-    if tp_size > 1 and norm.weight.numel() != x.shape[-1]:
-        return tp_rms_norm(norm, x, tp_size=tp_size, tp_rank=tp_rank)
+    # norm path; hidden-dimension shards need the TP adapter, including the
+    # layout where the affine weight is sharded to the same local width.
+    if tp_size > 1 and (
+        (global_dim is not None and x.shape[-1] != global_dim)
+        or norm.weight.numel() != x.shape[-1]
+    ):
+        return tp_rms_norm(
+            norm,
+            x,
+            tp_size=tp_size,
+            tp_rank=tp_rank,
+            global_dim=global_dim,
+        )
     if (
         isinstance(norm, RMSNorm)
         and norm.__class__.__module__ == "rtp_llm.models_py.modules.base.cuda.norm"
@@ -421,6 +432,7 @@ class Block(nn.Module):
                 x_pre,
                 tp_size=self.tp_size,
                 tp_rank=self.tp_rank,
+                global_dim=self.dim,
             )
         return residual, x_pre, post, comb
 
@@ -468,6 +480,7 @@ class Block(nn.Module):
                 x_pre,
                 tp_size=self.tp_size,
                 tp_rank=self.tp_rank,
+                global_dim=self.dim,
             )
         return residual, x_pre, post, comb
 
@@ -668,6 +681,7 @@ class Block(nn.Module):
                 x_pre,
                 tp_size=self.tp_size,
                 tp_rank=self.tp_rank,
+                global_dim=self.dim,
             )
             attn_out = self.attn(
                 x_pre,
@@ -693,6 +707,7 @@ class Block(nn.Module):
                 x_pre,
                 tp_size=self.tp_size,
                 tp_rank=self.tp_rank,
+                global_dim=self.dim,
             )
         ffn_out = self.ffn(x_pre, input_ids)
         return ffn_hc_post(ffn_out, residual, post, comb)

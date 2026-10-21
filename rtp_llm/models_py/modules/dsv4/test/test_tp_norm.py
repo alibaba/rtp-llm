@@ -52,6 +52,30 @@ class TensorParallelRMSNormTest(unittest.TestCase):
         expected = _Norm(weight)(x)[:, local_dim:]
         torch.testing.assert_close(actual, expected)
 
+    def test_dual_sharded_weight_uses_global_statistics(self) -> None:
+        torch.manual_seed(20261021)
+        x = torch.randn(5, 8, dtype=torch.bfloat16)
+        weight = torch.randn(8, dtype=torch.bfloat16)
+        rank, local_dim = 1, 4
+        local = x[:, rank * local_dim : (rank + 1) * local_dim]
+        rank0_square_sum = x[:, :local_dim].float().square().sum(-1, keepdim=True)
+
+        def add_rank0(square_sum, _group):
+            return square_sum + rank0_square_sum
+
+        target = "rtp_llm.models_py.distributed.collective_torch.all_reduce"
+        with mock.patch(target, side_effect=add_rank0):
+            actual = tp_rms_norm(
+                _Norm(weight[rank * local_dim : (rank + 1) * local_dim]),
+                local,
+                tp_size=2,
+                tp_rank=rank,
+                global_dim=8,
+            )
+
+        expected = _Norm(weight)(x)[:, local_dim:]
+        torch.testing.assert_close(actual, expected)
+
     def test_replicated_hidden_skips_collective(self) -> None:
         x = torch.ones(2, 4, dtype=torch.bfloat16)
         weight = torch.arange(1, 5, dtype=torch.bfloat16)

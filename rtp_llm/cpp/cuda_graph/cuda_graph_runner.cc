@@ -1957,12 +1957,15 @@ void CudaGraphRunner::initCapture() {
         } else {
             captureDecode();
         }
-        // Capability is opt-in per captured backend and per device-input
-        // runtime. Legacy/embedding/generation-prefill graphs keep host prep.
+        // Capability is opt-in per captured backend. Prepare every bucket at
+        // init whenever the backend reports device-only preparation: a backend
+        // may lazily capture its metadata graph on the first preparation, and
+        // doing that on a serving thread invalidates global capture. Replay
+        // still skips host preparation only under the device-input runtime.
 #if USING_CUDA
         const char* device_input = std::getenv("RTP_LLM_DEVICE_INPUT");
-        if (device_input != nullptr && std::string(device_input) == "1"
-            && !isGenerationPrefillCudaGraph() && !isEmbeddingStylePrefillCudaGraph()) {
+        const bool device_input_enabled = device_input != nullptr && std::string(device_input) == "1";
+        if (!isGenerationPrefillCudaGraph() && !isEmbeddingStylePrefillCudaGraph()) {
             py::gil_scoped_acquire gil;
             bool supported = !graph_instances_.empty();
             for (const auto& [key, instance] : graph_instances_) {
@@ -1987,7 +1990,7 @@ void CudaGraphRunner::initCapture() {
                 }
                 cuda_graph::graphGetCurrentStream().synchronize();
             }
-            device_only_preparation_ = supported;
+            device_only_preparation_ = supported && device_input_enabled;
             RTP_LLM_LOG_INFO("CUDA graph device-only attention preparation: %d", supported);
         }
 #endif
