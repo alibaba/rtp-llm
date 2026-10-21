@@ -1735,7 +1735,13 @@ class Qwen3NextModel(GptModelBase):
         cp_local_extract_indices = None
         cp_local_valid_mask = None
         aiter_gdn_prefill_metadata: dict[int, tuple[torch.Tensor, object]] = {}
-        if attention_inputs.is_prefill and not is_target_verify:
+        # Full-attention-only models (including the MTP draft) have no
+        # convolution consumer. Avoid its device-to-host launch metadata copy.
+        if (
+            linear_layer_idx is not None
+            and attention_inputs.is_prefill
+            and not is_target_verify
+        ):
             if is_cp:
                 (
                     full_prefill_conv1d_meta,
