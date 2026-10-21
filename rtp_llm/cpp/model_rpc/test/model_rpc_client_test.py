@@ -1504,6 +1504,29 @@ class ModelRpcClientTest(TestCase):
             "rtp_llm.generate_stream_call", "worker:9000"
         )
 
+    def test_stream_error_frame_preserves_typed_failure_without_unknown_log(self):
+        client = ModelRpcClient(["worker:9000"], {}, 0, RoleType.PDFUSION)
+        client._channel_pool = _FakeChannelPool()
+        response = GenerateOutputsPB()
+        response.error_info.error_code = ErrorCodePB.INVALID_PARAMS
+        response.error_info.error_message = "invalid request from backend frame"
+        stub = _RoutingStub(generate_responses=[response])
+        input_py = self._make_generate_input(GenerateConfig(timeout_ms=1000))
+        with (
+            patch("rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub", return_value=stub),
+            patch("rtp_llm.cpp.model_rpc.model_rpc_client.start_client_span", return_value=(None, [])),
+            patch("rtp_llm.cpp.model_rpc.model_rpc_client.trans_output") as convert,
+            self.assertLogs(level="ERROR") as logs,
+            self.assertRaises(FtRuntimeException) as caught,
+        ):
+            asyncio.run(self._run(client, input_py))
+        self.assertEqual(caught.exception.exception_type, ExceptionType.INVALID_PARAMS)
+        self.assertIn("invalid request from backend frame", caught.exception.message)
+        self.assertTrue(stub.generate_iterator.cancelled)
+        convert.assert_not_called()
+        self.assertTrue(any("backend error: code=" in message for message in logs.output))
+        self.assertFalse(any("unknown error:" in message for message in logs.output))
+
     def test_prefill_only_fails_fast_when_backend_reports_generated_tokens(self):
         client = ModelRpcClient(
             addresses=["worker:9000"],

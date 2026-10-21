@@ -1503,10 +1503,20 @@ class ModelRpcClient(object):
                 )
                 _record_client_span_latency(client_span, last_output)
                 client_span.finish(error=e)
-            logging.error(
-                f"request: [{input_pb.request_id}] rpc to [{target_address}] unknown error: {str(e)}"
-            )
-            raise e
+            if isinstance(e, FtRuntimeException):
+                logging.error(
+                    "request: [%s] rpc to [%s] backend error: code=%d name=%s message=%s",
+                    input_pb.request_id,
+                    target_address,
+                    e.exception_type.value,
+                    e.exception_type.name,
+                    e.message,
+                )
+            else:
+                logging.error(
+                    f"request: [{input_pb.request_id}] rpc to [{target_address}] unknown error: {str(e)}"
+                )
+            raise
         finally:
             try:
                 if (
@@ -1682,28 +1692,8 @@ class ModelRpcClient(object):
                 if error.error_code or error.error_message:
                     request_id = inputs[i].request_id if i < len(inputs) else "unmatched"
                     self._raise_pb_error(error, f"batch item {i} request={request_id}")
-            if len(response.results) != len(inputs):
-                raise FtRuntimeException(
-                    ExceptionType.UNKNOWN_ERROR,
-                    f"batch result count mismatch: expected {len(inputs)}, got {len(response.results)}",
-                )
             results = []
             for i, result_pb in enumerate(response.results):
-                if result_pb.HasField("error_info") and (
-                    result_pb.error_info.error_code != ErrorCodePB.NONE_ERROR
-                    or result_pb.error_info.error_message
-                ):
-                    exception_type = _trans_rpc_error_code(
-                        result_pb.error_info.error_code
-                    )
-                    error_message = (
-                        result_pb.error_info.error_message
-                        or _rpc_error_code_name(result_pb.error_info.error_code)
-                    )
-                    raise FtRuntimeException(
-                        exception_type,
-                        f"batch item {i} failed: {error_message}",
-                    )
                 stream_state = StreamState()
                 output = trans_output(
                     batch_inputs[i], result_pb.final_output, stream_state,
