@@ -396,6 +396,64 @@ TEST(RpcWriterCancellationTest, RecordedRpcFailureFeedsMetricsAndPreservesExisti
     with_stream.markRpcHandlingCompleted();
 }
 
+TEST(RpcWriterCancellationTest, BatchItemTraceUsesItsRemoteContextAndEndsOnPreemption) {
+    namespace memory = opentelemetry::exporter::memory;
+    telemetry::TelemetryRuntime::shutdown(5000);
+    std::shared_ptr<memory::InMemorySpanData> span_data;
+    auto exporter = memory::InMemorySpanExporterFactory::Create(span_data);
+    telemetry::TelemetryConfig config;
+    config.enabled = true;
+    config.role = "test";
+    ASSERT_TRUE(telemetry::TelemetryRuntime::initWithExporter(std::move(exporter), config));
+    {
+        PrefillRpcServer server;
+        server.meta_ = std::make_shared<RpcServerRuntimeMeta>();
+        server.cancel_registry_ = std::make_unique<PDCancelRegistry>(server.meta_);
+        GenerateInputPB request;
+        request.set_request_id(64);
+        request.mutable_generate_config()->set_timeout_ms(1000);
+        request.mutable_request_info()->mutable_trace_context()->set_traceparent(
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01");
+        auto context = server.makeBatchRequestContext(request, {});
+        auto stream = std::make_shared<SingleOutputStream>();
+        stream->begin_time_us_ = currentTimeUs() - 3000;
+        stream->running_started_ = true;
+        stream->running_started_time_us_ = currentTimeUs() - 2000;
+        context->setStream(stream);
+        auto& entry = server.batch_entries_["trace-batch"];
+        entry.reserved = true;
+        entry.context = std::move(context);
+        stream->reportError(ErrorCode::PRIORITY_PREEMPTED, "victim preempted");
+        server.batchContextCleanupTick();
+        EXPECT_TRUE(server.batch_entries_.empty());
+    }
+    EXPECT_TRUE(telemetry::TelemetryRuntime::shutdown(5000));
+    auto spans = span_data->GetSpans();
+    size_t requests = 0;
+    size_t prefill_phases = 0;
+    for (const auto& span : spans) {
+        if (span->GetName() == "prefill") {
+            ++prefill_phases;
+        }
+        if (span->GetName() != "rtp_llm.prefill_batch_request") {
+            continue;
+        }
+        ++requests;
+        char source_id[16];
+        span->GetParentSpanId().ToLowerBase16(source_id);
+        EXPECT_EQ(std::string(source_id, sizeof(source_id)), "00f067aa0ba902b7");
+        EXPECT_EQ(span->GetSpanKind(), opentelemetry::trace::SpanKind::kInternal);
+        EXPECT_EQ(span->GetStatus(), opentelemetry::trace::StatusCode::kError);
+        const auto& attrs = span->GetAttributes();
+        ASSERT_NE(attrs.find(telemetry::kAttrErrorType), attrs.end());
+        EXPECT_EQ(opentelemetry::nostd::get<std::string>(attrs.at(telemetry::kAttrErrorType)), "PRIORITY_PREEMPTED");
+        EXPECT_EQ(opentelemetry::nostd::get<int64_t>(attrs.at(telemetry::kAttrRtpLlmErrorCode)),
+                  static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED));
+    }
+    EXPECT_EQ(requests, 1u);
+    EXPECT_EQ(prefill_phases, 1u);
+}
+
 TEST(RpcWriterCancellationTest, RequestGaugeSamplesLiveAtomicValue) {
     std::atomic<size_t>          onflight_requests{3};
     kmonitor::MetricsReporterPtr metrics_reporter;

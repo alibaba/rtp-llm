@@ -93,6 +93,9 @@ private:
 
     void               hangDiagTick();
     void               batchContextCleanupTick();
+    std::unique_ptr<GenerateContext> makeBatchRequestContext(
+        const GenerateInputPB& request,
+        const opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>& batch_span);
     void               cancelCleanupTick();
     int64_t            last_cancel_tick_ms_{0};
     static const char* stepName(int step);

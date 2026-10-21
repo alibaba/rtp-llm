@@ -32,6 +32,48 @@ namespace rtp_llm {
 
 namespace {
 
+class BatchTraceCarrier: public opentelemetry::context::propagation::TextMapCarrier {
+public:
+    explicit BatchTraceCarrier(const TraceContextPB& context): context_(context) {}
+    opentelemetry::nostd::string_view Get(opentelemetry::nostd::string_view key) const noexcept override {
+        if (key == "traceparent") {
+            return {context_.traceparent().data(), context_.traceparent().size()};
+        }
+        if (key == "tracestate") {
+            return {context_.tracestate().data(), context_.tracestate().size()};
+        }
+        return {};
+    }
+    void Set(opentelemetry::nostd::string_view, opentelemetry::nostd::string_view) noexcept override {}
+private:
+    const TraceContextPB& context_;
+};
+
+class PrefillBatchGenerateContext final: public GenerateContext {
+public:
+    using GenerateContext::GenerateContext;
+    ~PrefillBatchGenerateContext() override {
+        try {
+            auto& stream = getStream();
+            if (stream && stream->hasError()) {
+                recordRpcFailure(stream->firstError().error);
+            } else if (!rpc_handling_completed_) {
+                recordRpcFailure({std::uncaught_exceptions() > 0 ? ErrorCode::EXECUTION_EXCEPTION : ErrorCode::CANCELLED,
+                                  "PD batch request cleanup before completion"});
+            }
+            if (trace_span_guard && error_info.hasError()) {
+                const auto reason = ErrorCodeToString(error_info.code());
+                trace_span_guard->setLogicalErrorType(reason);
+                trace_span_guard->setAttribute(telemetry::kAttrRtpLlmErrorCode, static_cast<int64_t>(error_info.code()));
+                trace_span_guard->setAttribute(telemetry::kAttrRtpLlmErrorReason, reason);
+            }
+            synthesizeTracePhases(telemetry::PhaseRole::Prefill, std::uncaught_exceptions() > 0);
+        } catch (...) {
+            // Observability must not prevent the base context from cleaning up.
+        }
+    }
+};
+
 void addBatchSuccess(EnqueueBatchResponsePB* response, int64_t request_id) {
     response->add_successes()->set_request_id(request_id);
 }
@@ -121,6 +163,39 @@ void PrefillRpcServer::hangDiagTick() {
             age_ms,
             stepName(t->step.load()));
     }
+}
+
+std::unique_ptr<GenerateContext> PrefillRpcServer::makeBatchRequestContext(
+    const GenerateInputPB& request,
+    const opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>& batch_span) {
+    auto context = std::make_unique<PrefillBatchGenerateContext>(
+        request.request_id(), request.generate_config().timeout_ms(), nullptr, metrics_reporter_, meta_);
+    context->request_info = QueryConverter::transRequestInfo(request.request_info());
+    context->onflight_requests = &onflight_requests_;
+    if (telemetry::TelemetryRuntime::isActive()) {
+        opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span> span;
+        try {
+            opentelemetry::trace::StartSpanOptions options;
+            options.kind = opentelemetry::trace::SpanKind::kInternal;
+            if (batch_span) {
+                options.parent = batch_span->GetContext();
+            }
+            BatchTraceCarrier carrier(request.request_info().trace_context());
+            auto propagator = opentelemetry::context::propagation::GlobalTextMapPropagator::GetGlobalPropagator();
+            auto remote = propagator->Extract(carrier, opentelemetry::context::Context{});
+            if (opentelemetry::trace::GetSpan(remote)->GetContext().IsValid()) {
+                options.parent = remote;
+            }
+            span = telemetry::TelemetryRuntime::tracer()->StartSpan("rtp_llm.prefill_batch_request", options);
+        } catch (...) {
+            // Span creation is best-effort.
+        }
+        context->trace_span_guard = std::make_unique<telemetry::GrpcStatusSpanGuard>(
+            span, &context->error_status, telemetry::SpanStatusSemantics::Logical);
+        context->trace_span_guard->setAttribute(telemetry::kAttrRequestId, std::to_string(request.request_id()));
+        context->trace_span_guard->setAttribute(telemetry::kAttrGenAiPdRole, telemetry::kValPdRoleProducer);
+    }
+    return context;
 }
 
 void PrefillRpcServer::registerBatchAttach(const std::string&       key,
@@ -493,11 +568,18 @@ grpc::Status PrefillRpcServer::EnqueueBatch(grpc::ServerContext*         context
 
     std::vector<std::shared_ptr<GenerateInput>> inputs;
     std::vector<int64_t>                        admitted_request_ids;
+    std::vector<std::unique_ptr<GenerateContext>> admitted_contexts;
     const auto                                  release_request_id = [this](int64_t request_id) {
         std::lock_guard<std::mutex> lock(batch_mutex_);
         batch_entries_.erase(masterEnqueuedHandoffUniqueKey(request_id));
     };
-    const auto release_admitted_request_ids = [this, &admitted_request_ids]() {
+    const auto release_admitted_request_ids = [this, &admitted_request_ids, &admitted_contexts](const ErrorInfo& error) {
+        for (auto& context : admitted_contexts) {
+            if (context) {
+                context->recordRpcFailure(error);
+                context->markRpcHandlingCompleted();
+            }
+        }
         std::lock_guard<std::mutex> lock(batch_mutex_);
         for (const auto request_id : admitted_request_ids) {
             batch_entries_.erase(masterEnqueuedHandoffUniqueKey(request_id));
@@ -507,6 +589,7 @@ grpc::Status PrefillRpcServer::EnqueueBatch(grpc::ServerContext*         context
     };
     inputs.reserve(input_count);
     admitted_request_ids.reserve(input_count);
+    admitted_contexts.reserve(input_count);
     for (const auto& dp_slot : request->dp_slots()) {
         for (const auto& external_input : dp_slot.requests()) {
             if (!external_input.has_input()) {
@@ -523,7 +606,7 @@ grpc::Status PrefillRpcServer::EnqueueBatch(grpc::ServerContext*         context
                 continue;
             }
             if (context && context->IsCancelled()) {
-                release_admitted_request_ids();
+                release_admitted_request_ids({ErrorCode::CANCELLED, "EnqueueBatch cancelled before admission"});
                 trace_status = grpc::Status(grpc::StatusCode::CANCELLED, "P2P EnqueueBatch cancelled before admission");
                 return trace_status;
             }
@@ -540,7 +623,12 @@ grpc::Status PrefillRpcServer::EnqueueBatch(grpc::ServerContext*         context
             }
 
             PDCancelRegistry::Handle cancel_handle;
+            std::unique_ptr<GenerateContext> item_context;
             const auto reject_item = [&](ErrorCode code, const std::string& message) {
+                if (item_context) {
+                    item_context->recordRpcFailure({code, message});
+                    item_context->markRpcHandlingCompleted();
+                }
                 if (cancel_handle) {
                     cancel_registry_->finishLocal(cancel_handle);
                     cancel_registry_->finishDownstream(cancel_handle);
@@ -557,41 +645,37 @@ grpc::Status PrefillRpcServer::EnqueueBatch(grpc::ServerContext*         context
                 config->set_unique_key(masterEnqueuedHandoffUniqueKey(request_id));
                 config->set_timeout_ms(clampRpcTimeoutMsToInt32(
                     normalizeRpcTimeoutMs(config->timeout_ms(), maga_init_params_.pd_sep_config.max_rpc_timeout_ms)));
+                item_context = makeBatchRequestContext(item, batch_span);
                 auto input = QueryConverter::transQuery(&item);
+                item_context->request_info = input->request_info;
                 input->request_deadline_ms =
                     engine_->getCacheManager()->prefillRequestDeadline(config->unique_key(), config->timeout_ms());
                 if (input->request_deadline_ms <= currentTimeMs()) {
-                    release_request_id(request_id);
-                    addBatchError(response,
-                                  request_id,
-                                  ErrorCode::GENERATE_TIMEOUT,
-                                  "P2P EnqueueBatch request expired before admission");
+                    reject_item(ErrorCode::GENERATE_TIMEOUT, "P2P EnqueueBatch request expired before admission");
                     continue;
                 }
                 const auto               admission =
                     cancel_registry_->admit(item, config->unique_key(), "", input->request_deadline_ms, cancel_handle);
                 if (!admission.ok()) {
-                    release_request_id(request_id);
-                    addBatchError(response, request_id, admission.code(), admission.ToString());
+                    reject_item(admission.code(), admission.ToString());
                     continue;
                 }
-                const auto preprocess_status = preprocessForPD(input, mm_processor_.get(), engine_->isMTPEagle(), RoleType::PREFILL, context, batch_span);
+                const auto item_span = item_context->trace_span_guard ?
+                    item_context->trace_span_guard->sharedSpan() :
+                    opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>{};
+                const auto preprocess_status = preprocessForPD(
+                    input, mm_processor_.get(), engine_->isMTPEagle(), RoleType::PREFILL, context, item_span);
                 if (!preprocess_status.ok()) {
-                    cancel_registry_->finishLocal(cancel_handle);
-                    cancel_registry_->finishDownstream(cancel_handle);
-                    release_request_id(request_id);
-                    addBatchError(response, request_id, preprocess_status.code(), preprocess_status.ToString());
+                    reject_item(preprocess_status.code(), preprocess_status.ToString());
                     continue;
                 }
                 if (cancel_handle->canceled.load()) {
-                    cancel_registry_->finishLocal(cancel_handle);
-                    release_request_id(request_id);
-                    addBatchError(
-                        response, request_id, cancel_handle->cancel_reason.code(), cancel_handle->cancel_reason.ToString());
+                    reject_item(cancel_handle->cancel_reason.code(), cancel_handle->cancel_reason.ToString());
                     continue;
                 }
                 admitted_request_ids.push_back(request_id);
                 inputs.push_back(std::move(input));
+                admitted_contexts.push_back(std::move(item_context));
             } catch (const std::invalid_argument& e) {
                 reject_item(ErrorCode::INVALID_PARAMS, e.what());
             } catch (const std::exception& e) {
@@ -615,27 +699,23 @@ grpc::Status PrefillRpcServer::EnqueueBatch(grpc::ServerContext*         context
     try {
         std::tie(enqueue_successes, streams) = engine_->enqueueMultiple(inputs);
     } catch (const std::exception& e) {
-        release_admitted_request_ids();
+        release_admitted_request_ids({ErrorCode::EXECUTION_EXCEPTION, e.what()});
         trace_status = grpc::Status(grpc::StatusCode::INTERNAL,
                             "P2P EnqueueBatch enqueueMultiple exception: " + std::string(e.what()));
         return trace_status;
     } catch (...) {
-        release_admitted_request_ids();
+        release_admitted_request_ids({ErrorCode::EXECUTION_EXCEPTION, "enqueueMultiple unknown exception"});
         trace_status = grpc::Status(grpc::StatusCode::INTERNAL, "P2P EnqueueBatch enqueueMultiple unknown exception");
         return trace_status;
     }
     if (enqueue_successes.size() != inputs.size() || streams.size() != inputs.size()) {
-        release_admitted_request_ids();
+        release_admitted_request_ids({ErrorCode::EXECUTION_EXCEPTION, "enqueueMultiple result size mismatch"});
         trace_status = grpc::Status(grpc::StatusCode::INTERNAL, "P2P EnqueueBatch result size mismatch");
         return trace_status;
     }
     for (size_t i = 0; i < inputs.size(); ++i) {
         if (enqueue_successes[i]) {
-            auto batch_context = std::make_unique<GenerateContext>(admitted_request_ids[i],
-                                                                   inputs[i]->generate_config->timeout_ms,
-                                                                   /*server_context=*/nullptr,
-                                                                   metrics_reporter_,
-                                                                   meta_);
+            auto batch_context = std::move(admitted_contexts[i]);
             batch_context->setStream(streams[i]);
             cancel_registry_->attach(cancel_registry_->find(admitted_request_ids[i]), streams[i]);
             registerBatchAttach(inputs[i]->generate_config->unique_key,
@@ -651,6 +731,9 @@ grpc::Status PrefillRpcServer::EnqueueBatch(grpc::ServerContext*         context
             continue;
         }
         auto error = streams[i] ? streams[i]->statusInfo() : ErrorInfo(ErrorCode::UNKNOWN_ERROR, "null stream");
+        admitted_contexts[i]->recordRpcFailure(error.hasError() ? error :
+            ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, "scheduler rejected request"));
+        admitted_contexts[i]->markRpcHandlingCompleted();
         if (auto handle = cancel_registry_->find(admitted_request_ids[i])) {
             cancel_registry_->finishLocal(handle);
             cancel_registry_->finishDownstream(handle);
