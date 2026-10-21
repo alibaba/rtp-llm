@@ -34,8 +34,11 @@ def mock_formula_config(raw, legacy, mock_expression=None):
     if not legacy:
         if config.get("schemaVersion", 3) != 3:
             raise ValueError("legacy master config requires MOCK_BUNDLE_LEGACY_MASTER=1")
+        # The KVCM Master has its own cache-matching schema. The mock only
+        # consumes timing/lifecycle settings and uses an older strict parser.
+        master_cache_matching = config.pop("cacheMatching", None)
         if mock_expression is None:
-            return raw
+            return json.dumps(config) if master_cache_matching is not None else raw
         config["router"]["roles"]["prefill"]["executionTimeEstimator"] = {
             "type": "FORMULA", "expression": mock_expression}
         return json.dumps(config)

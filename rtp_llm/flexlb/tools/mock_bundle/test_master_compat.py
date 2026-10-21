@@ -4,6 +4,19 @@ import unittest
 from master_compat import legacy_discovery, mock_formula_config, current_discovery
 
 class MasterCompatibilityTest(unittest.TestCase):
+    def test_kvcm_master_config_is_projected_only_for_mock_timing(self):
+        document = {"schemaVersion": 3, "cacheMatching": {"type": "KVCM"},
+                    "router": {"roles": {"prefill": {"executionTimeEstimator": {
+                        "type": "FORMULA", "expression": "5"}}}}}
+        raw = json.dumps(document)
+        mock = json.loads(mock_formula_config(raw, False))
+        self.assertNotIn("cacheMatching", mock)
+        self.assertEqual(document["router"], mock["router"])
+        self.assertEqual("KVCM", json.loads(raw)["cacheMatching"]["type"])
+        adjusted = json.loads(mock_formula_config(raw, False, "6"))
+        self.assertNotIn("cacheMatching", adjusted)
+        self.assertEqual("6", adjusted["router"]["roles"]["prefill"]["executionTimeEstimator"]["expression"])
+
     def test_current_master_gets_static_engine_ports_and_separate_kvcm_route(self):
         endpoints = {"env": {"MODEL_SERVICE_CONFIG": json.dumps({"service_id": "mock", "discovery_file": "f", "load_balance": True,
             "role_endpoints": [{"group": "mock", "prefill_endpoint": {"address": "p"},
