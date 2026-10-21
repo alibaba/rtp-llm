@@ -1451,6 +1451,32 @@ TEST(P2PRetainedKvTest, InitDerivesCapacityAndRejectsInvalidThreshold) {
     pool->stop();
 }
 
+TEST_F(P2PConnectorSchedulerTest, ControlWorkProgressesWhileEveryKickoffThreadIsBlocked) {
+    auto gate_release = std::make_shared<std::promise<void>>();
+    auto gate = gate_release->get_future().share();
+    auto cleanup = std::shared_ptr<void>(nullptr, [gate_release](void*) { gate_release->set_value(); });
+    std::vector<std::future<void>> entered;
+    for (int i = 0; i < 4; ++i) {
+        auto signal = std::make_shared<std::promise<void>>();
+        entered.push_back(signal->get_future());
+        ASSERT_EQ(decode_scheduler_->async_read_pool_->pushTask([signal, gate] {
+            signal->set_value();
+            gate.wait();
+        }), autil::ThreadPoolBase::ERROR_NONE);
+    }
+    for (auto& ready : entered) {
+        ASSERT_EQ(ready.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    }
+    ASSERT_NE(decode_scheduler_->control_pool_, decode_scheduler_->async_read_pool_);
+    EXPECT_EQ(decode_scheduler_->checker_->control_pool_, decode_scheduler_->control_pool_);
+    auto executed = std::make_shared<std::promise<void>>();
+    auto done = executed->get_future();
+    ASSERT_EQ(decode_scheduler_->control_pool_->pushTask([executed] { executed->set_value(); }),
+              autil::ThreadPoolBase::ERROR_NONE);
+    EXPECT_EQ(done.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    cleanup.reset();
+}
+
 TEST(P2PReadNotificationTest, GenerationRetainsNotificationBeforeWait) {
     P2PNotification notification;
     auto            observed = notification.generation();

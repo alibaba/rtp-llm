@@ -31,6 +31,11 @@ P2PSchedulerDecodeRead::~P2PSchedulerDecodeRead() {
     if (checker_) {
         checker_->stop();
     }
+    if (control_pool_) {
+        control_pool_->stop(autil::ThreadPool::STOP_AFTER_QUEUE_EMPTY);
+        control_pool_->join();
+        control_pool_.reset();
+    }
     if (async_read_pool_) {
         async_read_pool_->stop(autil::ThreadPool::STOP_AFTER_QUEUE_EMPTY);
         async_read_pool_->join();
@@ -59,9 +64,21 @@ bool P2PSchedulerDecodeRead::init(const std::string& process_id) {
     }
     async_read_pool_ = std::move(async_read_pool);
 
+    // The checker has at most one control job in flight. Isolate that job
+    // from kickoff threads which may be stalled in channel creation or D2H.
+    control_pool_ = std::make_shared<autil::LockFreeThreadPool>(1, 16, nullptr, "P2PReadControl");
+    if (!control_pool_->start()) {
+        RTP_LLM_LOG_ERROR("P2PSchedulerDecodeRead init failed: control pool start failed");
+        control_pool_.reset();
+        async_read_pool_->stop();
+        async_read_pool_.reset();
+        return false;
+    }
     checker_ = std::make_shared<P2PConnectorAsyncReadContextChecker>();
-    if (!checker_->init(metrics_reporter_, tp_broadcast_client_, async_read_pool_, config_)) {
+    if (!checker_->init(metrics_reporter_, tp_broadcast_client_, control_pool_, config_)) {
         RTP_LLM_LOG_ERROR("P2PSchedulerDecodeRead init failed: checker init failed");
+        control_pool_->stop();
+        control_pool_.reset();
         async_read_pool_->stop();
         async_read_pool_.reset();
         return false;

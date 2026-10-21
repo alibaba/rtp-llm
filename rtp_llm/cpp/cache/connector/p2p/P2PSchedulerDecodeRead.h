@@ -102,6 +102,7 @@ private:
     std::shared_ptr<DecodeLoadHelper>                   server_caller_;
     std::shared_ptr<P2PConnectorAsyncReadContextChecker> checker_;
     std::shared_ptr<autil::LockFreeThreadPool>           async_read_pool_;
+    std::shared_ptr<autil::LockFreeThreadPool>           control_pool_;
 };
 
 }  // namespace rtp_llm

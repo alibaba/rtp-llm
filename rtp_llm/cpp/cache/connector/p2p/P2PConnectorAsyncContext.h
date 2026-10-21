@@ -261,7 +261,7 @@ private:
     std::atomic<bool>                                          stopping_{false};
     std::shared_ptr<P2PNotification>                           notification_{std::make_shared<P2PNotification>()};
     std::shared_ptr<autil::LockFreeThreadPool>                 control_pool_;
-    // At most one slow control job, leaving the other kickoff pool threads free.
+    // At most one control job on the dedicated pool; kickoff cannot starve it.
     std::shared_ptr<std::atomic<bool>> control_busy_{std::make_shared<std::atomic<bool>>(false)};
     size_t                                                     lease_poll_cursor_{0};
     int64_t                                                    control_submit_retry_ms_{0};
