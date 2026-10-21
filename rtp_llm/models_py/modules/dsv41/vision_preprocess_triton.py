@@ -43,6 +43,10 @@ contiguous BF16 patches. It does not decode images or copy pixels back to CPU.
 
 Compatibility reference: Pillow 11.2.1, ImageOps.contain/pad and the RGB8 path in
 https://github.com/python-pillow/Pillow/blob/11.2.1/src/libImaging/Resample.c
+This defines the device algorithm, not a required installed Pillow version.
+Pillow only decodes/converts RGB before this module. Newer CPU resize routines
+may use a different pass order for very tall images; the device path retains
+the reference's horizontal-then-vertical rounding semantics.
 Both separable passes round/clip to uint8. Integer coefficients have 22 fraction
 bits; CPU double arithmetic preserves the reference coefficient construction.
 The small CPU normalization table uses the original three FP32 Torch operations
@@ -66,9 +70,7 @@ from functools import lru_cache
 import torch
 import triton
 import triton.language as tl
-from PIL import __version__ as pillow_version
 
-_PILLOW_VERSION = "11.2.1"
 _PRECISION_BITS = 22
 _MAX_DIMENSION = 65536
 _MAX_TAPS = 1025
@@ -104,8 +106,7 @@ def is_supported_shape(
 ) -> bool:
     """CPU metadata gate, usable before H2D; never touches the CUDA runtime."""
     if (
-        pillow_version != _PILLOW_VERSION
-        or type(patch_size) is not int
+        type(patch_size) is not int
         or not 1 <= patch_size <= 64
         or not isinstance(source_hw, (tuple, list))
         or len(source_hw) != 2
@@ -361,7 +362,7 @@ def preprocess_rgb_u8(
 ) -> torch.Tensor:
     """Resize/pad and patchify RGB8 on CUDA, or raise ValueError if unsupported.
 
-    Call is_supported_shape before H2D to reject unsupported geometry/version.
+    Call is_supported_shape before H2D to reject unsupported geometry.
     The caller decides whether to reject or explicitly choose the CPU path;
     this function never silently falls back to CPU execution.
     A successful call is asynchronous on the current stream; the returned tensor
