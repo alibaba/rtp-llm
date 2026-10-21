@@ -59,10 +59,9 @@ std::shared_ptr<const PlanResult> P2PSchedulerDecodeWrite::planFor(int prefill_t
         }
     }
     const auto& pc = config_.parallelism_config;
-    if (pc.tp_size <= 0 || prefill_tp_size != pc.tp_size || pc.prefill_cp_config.is_enabled()
-        || pc.prefill_cp_config.kv_cache_sharded) {
+    if (pc.tp_size <= 0 || prefill_tp_size <= 0 || (pc.prefill_cp_config.kv_cache_sharded && pc.tp_size != 1)) {
         return std::make_shared<const PlanResult>(
-            PlanResult{{}, ErrorInfo(ErrorCode::INVALID_PARAMS, "writeback requires symmetric TP and disabled CP")});
+            PlanResult{{}, ErrorInfo(ErrorCode::INVALID_PARAMS, "writeback requires D_CP=1 and positive TP sizes")});
     }
     const auto               src_layout = ShardLayoutFactory::fromTopology(*config_.topology, pc, RoleType::DECODE, config_.cache_key_tokens_per_block);
     std::vector<std::string> tags;
@@ -71,7 +70,8 @@ std::shared_ptr<const PlanResult> P2PSchedulerDecodeWrite::planFor(int prefill_t
             tags.push_back(group.tag);
         }
     }
-    const auto dst_layout = ShardLayoutFactory::peerOf(src_layout, prefill_tp_size, false, RoleType::PREFILL);
+    const auto dst_layout = ShardLayoutFactory::peerOf(
+        src_layout, prefill_tp_size, pc.prefill_cp_config.kv_cache_sharded, RoleType::PREFILL);
     auto       result = std::make_shared<const PlanResult>(KVCacheTransferPlanner::plan(src_layout, dst_layout, tags));
     std::lock_guard<std::mutex> lock(plan_cache_mutex_);
     auto [it, inserted] = plan_cache_.emplace(prefill_tp_size, result);
@@ -109,14 +109,8 @@ ErrorInfo P2PSchedulerDecodeWrite::buildDecodeRankRoutes(const TransferPlan&    
         if (std::find(tags.begin(), tags.end(), group.tag) == tags.end()) {
             return ErrorInfo(ErrorCode::INVALID_PARAMS, "writeback source group missing");
         }
-        for (const auto pos : positions) {
-            if (pos >= resource.blocks(group.tag).size() || resource.blocks(group.tag)[pos] <= 0) {
-                return ErrorInfo(ErrorCode::INVALID_PARAMS, "writeback source block missing");
-            }
-        }
-        const auto buffers =
-            LayerCacheBufferUtil::convertTagForRoute(resource, *config_.topology, group.tag, positions, 0, 1,
-                                                      config_.cache_key_tokens_per_block);
+        const auto buffers = LayerCacheBufferUtil::convertTagForRoute(
+            resource, *config_.topology, group.tag, positions, 0, 1, config_.cache_key_tokens_per_block);
         if (!buffers.ok()) {
             return buffers.status();
         }
@@ -219,7 +213,10 @@ void P2PSchedulerDecodeWrite::startAsyncWriteCalls(const std::shared_ptr<P2PConn
     try {
         if (input_length < 0 || static_cast<size_t>(input_length) > kv_ready_token_count
             || kv_ready_token_count > token_ids.size()
-            || token_ids.size() > static_cast<size_t>(std::numeric_limits<int>::max()) || routing.prefill_cp_size != 1
+            || token_ids.size() > static_cast<size_t>(std::numeric_limits<int>::max())
+            || routing.prefill_cp_size
+                   != (config_.parallelism_config.prefill_cp_config.kv_cache_sharded ? routing.prefill_tp_size : 1)
+            || routing.prefill_cp_size <= 0 || config_.cache_key_tokens_per_block == 0
             || formatGrpcHostPort(routing.prefill_addr.first, routing.prefill_addr.second).empty()) {
             return invalid("invalid writeback input or peer endpoint");
         }
@@ -230,8 +227,13 @@ void P2PSchedulerDecodeWrite::startAsyncWriteCalls(const std::shared_ptr<P2PConn
         if (!planned->ok()) {
             return context->finishWithoutTransfer(planned->error);
         }
-        const auto      block_size = config_.topology->groups().front().seqSizePerBlock();
-        const auto      blocks     = kv_ready_token_count / block_size;
+        const auto   block_size      = config_.cache_key_tokens_per_block;
+        const size_t cp_size         = routing.prefill_cp_size;
+        const auto   blocks          = kv_ready_token_count / block_size / cp_size * cp_size;
+        const size_t candidate_start = static_cast<size_t>(input_length) / block_size / cp_size * cp_size;
+        if (blocks <= candidate_start) {
+            return context->finishWithoutTransfer();
+        }
         auto            owner      = source_group->sourceResource();
         if (!owner) {
             return context->finishWithoutTransfer(ErrorInfo(ErrorCode::CANCELLED, "writeback source was released"));
@@ -249,6 +251,8 @@ void P2PSchedulerDecodeWrite::startAsyncWriteCalls(const std::shared_ptr<P2PConn
         if (blocks == 0) {
             return context->finishWithoutTransfer();
         }
+
+        // STARTWRITE RPC
         P2PConnectorStartWriteRequestPB request;
         request.set_request_id(routing.request_id);
         request.set_unique_key(routing.unique_key);
@@ -261,9 +265,9 @@ void P2PSchedulerDecodeWrite::startAsyncWriteCalls(const std::shared_ptr<P2PConn
             request.add_token_ids(token);
         }
 
+        // step 2. generate the actual routes for each decode worker to prefill worker, including the block ids and layer ids.
         P2PBroadcastClient::RankRoutes routes(config_.worker_grpc_addrs.size());
         int64_t                        planned_bytes   = 0;
-        const size_t                   candidate_start = static_cast<size_t>(input_length) / block_size;
         const auto                     error           = buildDecodeRankRoutes(
             planned->plan, resource, candidate_start, blocks - candidate_start, routes, &planned_bytes);
         if (error.hasError()) {
@@ -297,6 +301,8 @@ void P2PSchedulerDecodeWrite::startAsyncWriteCalls(const std::shared_ptr<P2PConn
             })) {
             return context->finishWithoutTransfer(context->errorInfo());
         }
+
+        // step 3. call the prefill worker to start the writeback, which will trigger the prefill worker to broadcast the request to all decode workers.
         context->setPeerCallResult(server_caller_.write(
             routing.prefill_addr.first, routing.prefill_addr.second, std::move(request), deadline_ms));
     } catch (const std::exception& e) {

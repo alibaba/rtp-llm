@@ -105,6 +105,7 @@ ErrorInfo CoordinatorCacheManager::populateMatchedBlocks(const BlockTreeMatchRes
                                                          KVCacheResource&            resource) const {
     using ResourceSlot = std::pair<std::string, size_t>;
     std::map<ResourceSlot, BlockIdxType> assignments;
+    const int cp_size = cp_slot_mapper_ ? cp_slot_mapper_->cpSize() : 1;
 
     // check that all matched blocks are not conflicting with the current resource, and collect the matched blocks into
     // the resource.
@@ -114,11 +115,15 @@ ErrorInfo CoordinatorCacheManager::populateMatchedBlocks(const BlockTreeMatchRes
         for (size_t member = 0; member < group_tags.size(); ++member) {
             const auto& tag = group_tags[member];
             const auto& target = resource.blocks(tag);
-            const auto  current  = target[path_index];
+            const auto position = loadTargetPosition(path_index, tag, cp_slot_mapper_, cp_size);
+            if (position >= target.size()) {
+                return ErrorInfo(ErrorCode::CACHE_STORE_STORE_FAILED, "matched KV cache position out of range");
+            }
+            const auto current = target[position];
             if (!isNullBlockIdx(current) && current != blocks[member]) {
                 return ErrorInfo(ErrorCode::CACHE_STORE_STORE_FAILED, "matched KV cache block changed");
             }
-            if (!assignments.emplace(ResourceSlot{tag, path_index}, blocks[member]).second) {
+            if (!assignments.emplace(ResourceSlot{tag, position}, blocks[member]).second) {
                 return ErrorInfo(ErrorCode::CACHE_STORE_STORE_FAILED, "duplicate matched KV cache block mapping");
             }
         }
@@ -188,16 +193,16 @@ void CoordinatorCacheManager::releaseMatchedBlockReferences(const BlockTreeMatch
 }
 
 ErrorInfo CoordinatorCacheManager::mallocAndBindLoadTargets(KVCacheResource&  resource,
-                                                            int               target_seq_len,
                                                             bool              enable_reuse_cache,
                                                             LoadAsyncContext* load_context) const {
     const auto groups = cacheGroups();
+    const int cp_size = cp_slot_mapper_ ? cp_slot_mapper_->cpSize() : 1;
     std::unordered_map<std::string, RequiredPositions> required_positions;
     for (const auto& group : groups) {
         if (!group->prefixReuseEnabled() || group->policy().group_type == CacheGroupType::FULL) {
             continue;
         }
-        const size_t blocks = resource.cacheKeys().size();
+        const size_t blocks = resource.blocks(group->tag()).size();
         const size_t tail   = group->activeTailBlocks();
         const size_t first  = tail > 0 && blocks > tail ? blocks - tail : 0;
         for (size_t index = first; index < blocks; ++index) {
@@ -207,7 +212,7 @@ ErrorInfo CoordinatorCacheManager::mallocAndBindLoadTargets(KVCacheResource&  re
     if (load_context) {
         for (const auto& desc : load_context->loadDescs()) {
             for (const auto& tag : block_tree_cache_->groupSets()[desc.group_set_id]->groupTags()) {
-                required_positions[tag].insert(desc.path_index);
+                required_positions[tag].insert(loadTargetPosition(desc.path_index, tag, cp_slot_mapper_, cp_size));
             }
         }
     }
@@ -216,7 +221,7 @@ ErrorInfo CoordinatorCacheManager::mallocAndBindLoadTargets(KVCacheResource&  re
             continue;
         }
         if (!group->malloc(resource.mutableBlockIds(group->tag()),
-                           target_seq_len,
+                           resource.blocks(group->tag()).size() * group->seqSizePerBlock(),
                            enable_reuse_cache,
                            0,
                            nullptr,
@@ -232,10 +237,11 @@ ErrorInfo CoordinatorCacheManager::mallocAndBindLoadTargets(KVCacheResource&  re
         BlockIndicesType targets;
         for (const auto& tag : block_tree_cache_->groupSets()[desc.group_set_id]->groupTags()) {
             const auto& blocks = resource.blocks(tag);
-            if (desc.path_index >= blocks.size() || isNullBlockIdx(blocks[desc.path_index])) {
+            const auto position = loadTargetPosition(desc.path_index, tag, cp_slot_mapper_, cp_size);
+            if (position >= blocks.size() || isNullBlockIdx(blocks[position])) {
                 return ErrorInfo(ErrorCode::CACHE_STORE_STORE_FAILED, "invalid KV cache load target");
             }
-            targets.push_back(blocks[desc.path_index]);
+            targets.push_back(blocks[position]);
         }
         if (load_context->joinedLoads()[i] && targets != desc.target_blocks) {
             return ErrorInfo(ErrorCode::CACHE_STORE_STORE_FAILED, "joined KV cache load target changed");
@@ -255,19 +261,31 @@ ErrorInfo CoordinatorCacheManager::admitWriteBackDecodeCache(const CacheKeysType
     resource.reset();
     load_context.reset();
     start_block = 0;
-    if (!block_tree_cache_ || !block_tree_cache_->isDeviceCacheEnabled() || allocation_type_ != AllocationType::DEVICE
-        || (cp_slot_mapper_ && cp_slot_mapper_->isSharded())) {
+    if (!block_tree_cache_ || !block_tree_cache_->isDeviceCacheEnabled() || allocation_type_ != AllocationType::DEVICE) {
         return ErrorInfo(ErrorCode::INVALID_PARAMS, "external insert requires reusable DEVICE groups");
     }
     const size_t block_size = seqSizePerBlock();
+    const size_t cp_size = cp_slot_mapper_ ? cp_slot_mapper_->cpSize() : 1;
+    if (block_size == 0 || cp_size == 0 || cache_keys.size() % cp_size != 0
+        || required_prefix_blocks > cache_keys.size()) {
+        return ErrorInfo(ErrorCode::INVALID_PARAMS, "external insert requires complete CP canonical units");
+    }
     for (const auto& group : config_.topology().groups()) {
         if (!group.policy.enable_prefix_reuse) {
             continue;
         }
+        const auto mapping = group.policy.cp_mapping;
+        const bool compact_swa =
+            group.policy.group_type == CacheGroupType::SWA && mapping == CpBlockMappingMode::COMPACT_LAST_RANK;
         if (group.policy.memory_placement != CacheMemoryPlacement::DEVICE
             || (group.policy.group_type == CacheGroupType::FULL && group.policy.active_tail_blocks != 0)
-            || group.seqSizePerBlock() != block_size) {
-            return ErrorInfo(ErrorCode::INVALID_PARAMS, "external insert requires reusable DEVICE groups");
+            || (group.seqSizePerBlock() != block_size
+                && !(cp_size > 1 && compact_swa && group.seqSizePerBlock() == block_size * cp_size))
+            || (cp_size > 1 && group.policy.group_type == CacheGroupType::FULL
+                && mapping != CpBlockMappingMode::BLOCK_ROUND_ROBIN)
+            || (cp_size > 1 && group.policy.group_type != CacheGroupType::FULL && mapping != CpBlockMappingMode::NONE
+                && !compact_swa)) {
+            return ErrorInfo(ErrorCode::INVALID_PARAMS, "unsupported writeback group layout: " + group.tag);
         }
     }
     if (cache_keys.size() > static_cast<size_t>(std::numeric_limits<int>::max() / seqSizePerBlock())) {
@@ -285,9 +303,10 @@ ErrorInfo CoordinatorCacheManager::admitWriteBackDecodeCache(const CacheKeysType
     owner->setCacheKeys(cache_keys);
     owner->setLastBlockAligned(true);
     BlockTreeMatchResult match_result;
+    const auto tree_keys = cp_size > 1 ? cp_slot_mapper_->canonicalCacheKeys(cache_keys) : cache_keys;
 
     // step 1. match the existing blocks in the cache, admission control and hold the resource with the matched blocks
-    const auto error = block_tree_cache_->matchForExternalInsert(cache_keys, required_prefix_blocks, match_result);
+    const auto error = block_tree_cache_->matchForExternalInsert(tree_keys, required_prefix_blocks / cp_size, match_result);
     if (error.hasError()) {
         return error;
     }
@@ -296,7 +315,10 @@ ErrorInfo CoordinatorCacheManager::admitWriteBackDecodeCache(const CacheKeysType
 
     // match() already owns these request references; transfer them into the resource without incrementing again.
     for (const auto& group : groups) {
-        owner->mutableBlockIds(group->tag()).assign(BlockIndicesType(cache_keys.size(), NULL_BLOCK_IDX));
+        const size_t count = tree_keys.empty() ?
+                                 0 :
+                                 loadTargetPosition(tree_keys.size() - 1, group->tag(), cp_slot_mapper_, cp_size) + 1;
+        owner->mutableBlockIds(group->tag()).assign(BlockIndicesType(count, NULL_BLOCK_IDX));
     }
 
     // step 2. bind the matched blocks to the resource
@@ -306,13 +328,12 @@ ErrorInfo CoordinatorCacheManager::admitWriteBackDecodeCache(const CacheKeysType
     }
 
     // step 3. malloc the remaining blocks and bind them to the resource and load context
-    const auto malloc_error = mallocAndBindLoadTargets(
-        *owner, static_cast<int>(cache_keys.size()) * seqSizePerBlock(), false, local_load.get());
+    const auto malloc_error = mallocAndBindLoadTargets(*owner, false, local_load.get());
     if (malloc_error.hasError()) {
         return malloc_error;
     }
     resource     = std::move(owner);
-    start_block  = matched_blocks;
+    start_block  = matched_blocks * cp_size;
     load_context = std::move(local_load);
     return ErrorInfo::OkStatus();
 }
@@ -320,21 +341,25 @@ ErrorInfo CoordinatorCacheManager::admitWriteBackDecodeCache(const CacheKeysType
 ErrorInfo CoordinatorCacheManager::commitWriteBackDecodeCache(const KVCacheResource& resource,
                                                               size_t                 start_block,
                                                               int64_t                deadline_ms) {
-    if (start_block > resource.cacheKeys().size() || resource.groupNums() != cacheGroups().size()) {
+    const size_t cp_size = cp_slot_mapper_ ? cp_slot_mapper_->cpSize() : 1;
+    if (start_block > resource.cacheKeys().size() || resource.groupNums() != cacheGroups().size()
+        || start_block % cp_size != 0 || resource.cacheKeys().size() % cp_size != 0) {
         return ErrorInfo(ErrorCode::INVALID_PARAMS, "unsupported external insert resource");
     }
     const auto&                                groups = block_tree_cache_->groupSets();
-    std::vector<std::vector<GroupSetResource>> resources(resource.cacheKeys().size(),
+    const auto tree_keys = cp_size > 1 ? cp_slot_mapper_->canonicalCacheKeys(resource.cacheKeys()) : resource.cacheKeys();
+    std::vector<std::vector<GroupSetResource>> resources(tree_keys.size(),
                                                          std::vector<GroupSetResource>(groups.size()));
     for (size_t gid = 0; gid < groups.size(); ++gid) {
-        for (size_t i = start_block; i < resources.size(); ++i) {
+        for (size_t i = start_block / cp_size; i < resources.size(); ++i) {
             auto& blocks = resources[i][gid].device_blocks;
             for (const auto& tag : groups[gid]->groupTags()) {
                 const auto& source = resource.blocks(tag);
-                if (source.size() <= i) {
+                const auto position = loadTargetPosition(i, tag, cp_slot_mapper_, cp_size);
+                if (source.size() <= position) {
                     return ErrorInfo(ErrorCode::INVALID_PARAMS, "external insert has missing blocks");
                 }
-                blocks.push_back(source[i]);
+                blocks.push_back(source[position]);
             }
             if (groups[gid]->groupType() != CacheGroupType::FULL
                 && std::all_of(blocks.begin(), blocks.end(), isNullBlockIdx)) {
@@ -344,7 +369,7 @@ ErrorInfo CoordinatorCacheManager::commitWriteBackDecodeCache(const KVCacheResou
             }
         }
     }
-    return block_tree_cache_->insertExternalBlocks(resource.cacheKeys(), start_block, resources, deadline_ms);
+    return block_tree_cache_->insertExternalBlocks(tree_keys, start_block / cp_size, resources, deadline_ms);
 }
 
 MallocResult CoordinatorCacheManager::initMalloc(const MallocInfo& malloc_info) {

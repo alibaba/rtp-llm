@@ -322,11 +322,6 @@ bool P2PConnectorDecode::writePerRank(const P2PConnectorBroadcastTpRequestPB& re
     P2PWorkerRoutePlan plan;
     plan.plan_digest = request.plan_digest();
     for (const auto& pb : request.routes()) {
-        if (pb.partition_count() != 1 || pb.partition_id() != 0
-            || pb.slice_mode() != static_cast<int>(CpBlockSliceMode::NONE) || pb.slice_count() != 1
-            || pb.slice_index() != 0) {
-            return reject("writeback currently requires symmetric whole-block routes");
-        }
         const auto     local = RouteCodec::decode(pb);
         P2PWorkerRoute route;
         route.route_id  = local.route_id;

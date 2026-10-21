@@ -19,6 +19,7 @@
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/utils/TimeUtil.h"
 
 namespace rtp_llm {
 namespace test {
@@ -139,6 +140,91 @@ TEST_F(HybridCoordinatorCacheManagerCPShardTest, RecomputeDetachesSuffixUsingGro
     linear_pool->decTreeRef(*linear_blocks, BlockTreeRefType::CACHE);
     EXPECT_EQ(linear_pool->freeBlocksNum(), linear_pool->totalBlocksNum());
     EXPECT_EQ(pool->freeBlocksNum(), pool->totalBlocksNum());
+}
+
+TEST_F(HybridCoordinatorCacheManagerCPShardTest, WritebackUsesCanonicalKeysAndGroupLocalPositions) {
+    for (int cp_size : {2, 4}) {
+        for (int cp_rank = 0; cp_rank < cp_size; ++cp_rank) {
+            SCOPED_TRACE(::testing::Message() << "cp_size=" << cp_size << " rank=" << cp_rank);
+            auto config    = makeCPHybridConfig();
+            auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
+            ASSERT_TRUE(allocator->init());
+            auto mapper = std::make_shared<CPSlotMapper>(cp_rank, cp_size, config.seq_size_per_block);
+            allocator->setCPSlotMapper(mapper);
+            CacheKeysType keys;
+            for (int position = 0; position < 3 * cp_size; ++position) {
+                keys.push_back(100 + position);
+            }
+            const CacheKeysType               prefix(keys.begin(), keys.begin() + cp_size);
+            KVCacheResourcePtr                resource;
+            std::shared_ptr<LoadAsyncContext> load;
+            size_t                            start = 0;
+            ASSERT_TRUE(allocator->admitWriteBackDecodeCache(prefix, 0, resource, start, load).ok());
+            ASSERT_TRUE(allocator->commitWriteBackDecodeCache(*resource, start, currentTimeMs() + 5000).ok());
+            resource.reset();
+
+            const auto error = allocator->admitWriteBackDecodeCache(keys, cp_size + 1, resource, start, load);
+            ASSERT_TRUE(error.ok()) << error.ToString();
+            EXPECT_EQ(start, cp_size);
+            EXPECT_EQ(resource->cacheKeys(), keys);
+            EXPECT_FALSE(resource->cacheKeysAreCpCanonical());
+            ASSERT_EQ(resource->blocks("linear").size(), keys.size());
+            ASSERT_EQ(resource->blocks("full").size(), 3u);
+            EXPECT_GT(resource->blocks("linear")[cp_size - 1], 0);
+            EXPECT_TRUE(isNullBlockIdx(resource->blocks("linear")[2 * cp_size - 1]));
+            EXPECT_GT(resource->blocks("linear").back(), 0);
+            ASSERT_TRUE(allocator->commitWriteBackDecodeCache(*resource, start, currentTimeMs() + 5000).ok());
+            resource.reset();
+            const auto cache = allocator->blockTreeCacheOwner();
+            auto       match = cache->match(mapper->canonicalCacheKeys(keys));
+            EXPECT_EQ(match.matched_device_blocks, 3u);
+            block_tree_cache_test::releaseRequestRefsForTest(*cache, match.matched_device_resources);
+        }
+    }
+}
+
+TEST_F(HybridCoordinatorCacheManagerCPShardTest, WritebackRejectsIncompleteCanonicalUnitWithoutAllocating) {
+    auto config    = makeCPHybridConfig();
+    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator->init());
+    allocator->setCPSlotMapper(std::make_shared<CPSlotMapper>(0, 2, config.seq_size_per_block));
+    const auto                        free_before = allocator->freeBlocksNum();
+    KVCacheResourcePtr                resource;
+    std::shared_ptr<LoadAsyncContext> load;
+    size_t                            start = 99;
+    EXPECT_TRUE(allocator->admitWriteBackDecodeCache({1, 2, 3}, 0, resource, start, load).hasError());
+    EXPECT_EQ(resource, nullptr);
+    EXPECT_EQ(start, 0u);
+    EXPECT_EQ(allocator->freeBlocksNum(), free_before);
+}
+
+TEST_F(HybridCoordinatorCacheManagerCPShardTest, WritebackCompactSwaAllocatesOnlyTransferredLocalTail) {
+    auto config    = makeFullSwaLinearCacheConfig();
+    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator->init());
+    auto mapper = std::make_shared<CPSlotMapper>(0, 2, config.seq_size_per_block);
+    allocator->setCPSlotMapper(mapper);
+    const CacheKeysType               keys{11, 22, 33, 44, 55, 66, 77, 88};
+    KVCacheResourcePtr                resource;
+    std::shared_ptr<LoadAsyncContext> load;
+    size_t                            start = 0;
+    const auto                        error = allocator->admitWriteBackDecodeCache(keys, 0, resource, start, load);
+    ASSERT_TRUE(error.ok()) << error.ToString();
+    ASSERT_EQ(resource->blocks("full").size(), 4u);
+    ASSERT_EQ(resource->blocks("swa").size(), 4u);
+    ASSERT_EQ(resource->blocks("linear").size(), 8u);
+    EXPECT_TRUE(isNullBlockIdx(resource->blocks("swa")[0]));
+    EXPECT_TRUE(isNullBlockIdx(resource->blocks("swa")[1]));
+    EXPECT_GT(resource->blocks("swa")[2], 0);
+    EXPECT_GT(resource->blocks("swa")[3], 0);
+    EXPECT_TRUE(isNullBlockIdx(resource->blocks("linear")[5]));
+    EXPECT_GT(resource->blocks("linear")[7], 0);
+    ASSERT_TRUE(allocator->commitWriteBackDecodeCache(*resource, start, currentTimeMs() + 5000).ok());
+    resource.reset();
+    const auto cache = allocator->blockTreeCacheOwner();
+    auto       match = cache->match(mapper->canonicalCacheKeys(keys));
+    EXPECT_EQ(match.matched_device_blocks, 4u);
+    block_tree_cache_test::releaseRequestRefsForTest(*cache, match.matched_device_resources);
 }
 
 TEST_F(HybridCoordinatorCacheManagerCPShardTest, ConnectorRefPreservesKeysAndDifferentGroupLayouts) {
