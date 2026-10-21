@@ -1815,6 +1815,26 @@ class ModelRpcClientTest(TestCase):
                 if logits_index is not None:
                     self.assertEqual(config.logits_index.value, logits_index)
 
+    def test_frontend_incomplete_route_never_falls_back_to_local_rpc(self):
+        for role_addrs in ([], [_prefill_role_addr("prefill", 9001)]):
+            with self.subTest(role_addrs=role_addrs):
+                client = ModelRpcClient(
+                    ["frontend-without-backend:9000"], {}, role_type=RoleType.FRONTEND
+                )
+                input_py = GenerateInput(
+                    token_ids=torch.tensor([1, 2]),
+                    generate_config=GenerateConfig(role_addrs=role_addrs),
+                    request_id=326,
+                    mm_inputs=[],
+                )
+                with self.assertRaises(FtRuntimeException) as caught:
+                    client._select_address_and_response_role_addrs(input_py)
+                self.assertEqual(
+                    caught.exception.exception_type, ExceptionType.ROUTE_ERROR
+                )
+                self.assertIn("request_id=326", caught.exception.message)
+                self.assertIn("DECODE or PDFUSION", caught.exception.message)
+
     def test_pd_route_ignores_prefill_and_targets_decode_without_mode_flag(self):
         client = ModelRpcClient(["local:9000"], {})
         input_py = GenerateInput(
