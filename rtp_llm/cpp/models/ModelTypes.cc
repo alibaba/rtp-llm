@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/models/ModelTypes.h"
+#include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
@@ -220,6 +221,7 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
     shape_hints[GptModelInputIndex::kvCacheBlockIdRank]       = block_table.rank;
     shape_hints[GptModelInputIndex::requestDeadlineMsLength] =
         inputs.request_deadline_ms.defined() ? inputs.request_deadline_ms.numel() : 0;
+    shape_hints[GptModelInputIndex::p2pDeadlineSourceTimeMs] = currentTimeMs();
     return shape_hints;
 }
 
@@ -309,6 +311,11 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     // execBroadcastCpu's fallback path keeps the NCCL+cudaSyncAndCheck
     // contract for cross-node TP.
     execBroadcastCpu({{shape_hints_t}, 0});
+    const auto source_time_ms = shape_hints_ptr[GptModelInputIndex::p2pDeadlineSourceTimeMs];
+    RTP_LLM_CHECK_WITH_INFO(source_time_ms > 0, "invalid P2P deadline source clock");
+    // Root request deadlines retain their identity across TP. Only local P2P
+    // layer retention uses this offset; later publication cannot renew a stored horizon.
+    inputs.p2p_deadline_clock_offset_ms = parallelism_config.tp_rank == 0 ? 0 : currentTimeMs() - source_time_ms;
 
     // multimodal features shape broadcast
     torch::Tensor mm_features_shape_t;

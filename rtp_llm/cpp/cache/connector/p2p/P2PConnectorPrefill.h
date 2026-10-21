@@ -42,7 +42,8 @@ public:
                          const KVCacheResourcePtr&          resource,
                          int64_t                            request_id,
                          const std::shared_ptr<c10::Event>& event,
-                         int64_t                            deadline_ms);
+                         int64_t                            deadline_ms,
+                         int64_t                            deadline_clock_offset_ms);
 
     void processRead(const P2PConnectorStartLoadRequestPB& request,
                      P2PConnectorStartLoadResponsePB&      response,

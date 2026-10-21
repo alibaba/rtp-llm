@@ -750,7 +750,8 @@ bool KVCacheManager::writeP2PLayer(size_t                               model_id
                                    const std::vector<int32_t>&          block_ids,
                                    int64_t                              request_id,
                                    const std::shared_ptr<torch::Event>& event,
-                                   int64_t                              deadline_ms) {
+                                   int64_t                              deadline_ms,
+                                   int64_t                              deadline_clock_offset_ms) {
     if (!p2p_connector_) {
         return false;
     }
@@ -806,8 +807,13 @@ bool KVCacheManager::writeP2PLayer(size_t                               model_id
                                     block_ids[i]);
                 // Let the worker publish the request error before returning.
                 // Invalid blocks must never reach allocator reference bookkeeping.
-                return p2p_connector_->writeByLayerTag(
-                    static_cast<int>(global_layer_id), tag, layer_resource, request_id, event, deadline_ms);
+                return p2p_connector_->writeByLayerTag(static_cast<int>(global_layer_id),
+                                                       tag,
+                                                       layer_resource,
+                                                       request_id,
+                                                       event,
+                                                       deadline_ms,
+                                                       deadline_clock_offset_ms);
             }
         }
         layer_resource = coordinator_manager_->incrKVCacheRef(*layer_resource, cache_keys, true);
@@ -821,8 +827,13 @@ bool KVCacheManager::writeP2PLayer(size_t                               model_id
         }
     }
 
-    return p2p_connector_->writeByLayerTag(
-        static_cast<int>(global_layer_id), tag, layer_resource, request_id, event, deadline_ms);
+    return p2p_connector_->writeByLayerTag(static_cast<int>(global_layer_id),
+                                           tag,
+                                           layer_resource,
+                                           request_id,
+                                           event,
+                                           deadline_ms,
+                                           deadline_clock_offset_ms);
 }
 
 // 异步连接器操作

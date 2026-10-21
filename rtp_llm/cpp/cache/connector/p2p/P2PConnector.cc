@@ -84,8 +84,11 @@ bool P2PConnector::writeByLayerTag(int                                layer_id,
                                    const KVCacheResourcePtr&          resource,
                                    int64_t                            request_id,
                                    const std::shared_ptr<c10::Event>& event,
-                                   int64_t                            deadline_ms) {
-    return prefill_ ? prefill_->writeByLayerTag(layer_id, tag, resource, request_id, event, deadline_ms) : false;
+                                   int64_t                            deadline_ms,
+                                   int64_t                            deadline_clock_offset_ms) {
+    return prefill_ ? prefill_->writeByLayerTag(
+                          layer_id, tag, resource, request_id, event, deadline_ms, deadline_clock_offset_ms) :
+                      false;
 }
 
 void P2PConnector::handleRead(const P2PConnectorStartLoadRequestPB& request,

@@ -163,7 +163,8 @@ public:
                                     const std::vector<int32_t>&          block_ids,
                                     int64_t                              request_id,
                                     const std::shared_ptr<torch::Event>& event,
-                                    int64_t                              deadline_ms);
+                                    int64_t                              deadline_ms,
+                                    int64_t                              deadline_clock_offset_ms);
     BlockTreeCachePtr blockTreeCache() const {
         return block_tree_cache_;
     }

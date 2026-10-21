@@ -328,7 +328,8 @@ private:
                                                          blocks,
                                                          stream->streamId(),
                                                          nullptr,
-                                                         stream->generateInput()->request_deadline_ms),
+                                                         stream->generateInput()->request_deadline_ms,
+                                                         0),
                         "writeP2PLayer rejected real allocated buffers");
                 ++published_layers;
                 progress = layer + 1;

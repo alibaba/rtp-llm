@@ -3,6 +3,7 @@
 
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
+#include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/models/GenerationPrefillCudaGraphEligibility.h"
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
 #include "rtp_llm/cpp/models/Sampler.h"
@@ -103,6 +104,18 @@ TEST_F(ModelDataTest, testPrefillCPExecutionFollowsRoleConfig) {
     ParallelismConfig decode_config;
     decode_config.prefill_cp_config.method = CPRotateMethod::PREFILL_CP;
     EXPECT_FALSE(buildExecProperties(decode_config, DeviceResourceConfig{}).enable_prefill_cp);
+}
+
+TEST_F(ModelDataTest, P2PDeadlineClockAnchorDoesNotRewriteRequestIdentity) {
+    GptModelInputs inputs;
+    inputs.request_deadline_ms = torch::tensor({int64_t{123456}}, torch::kInt64);
+    const auto before_ms       = currentTimeMs();
+    const auto hints           = getModelInputShapeHints(inputs);
+    const auto after_ms        = currentTimeMs();
+    EXPECT_GE(hints[GptModelInputIndex::p2pDeadlineSourceTimeMs], before_ms);
+    EXPECT_LE(hints[GptModelInputIndex::p2pDeadlineSourceTimeMs], after_ms);
+    EXPECT_EQ(inputs.request_deadline_ms.item<int64_t>(), 123456);
+    EXPECT_EQ(inputs.p2p_deadline_clock_offset_ms, 0);
 }
 
 TEST_F(ModelDataTest, testDSparkLongPrefillShapeHintsStayInt64) {
@@ -289,6 +302,7 @@ void checkGroupedTpRound(GptModelInputs&                 inputs,
     if (rank == 0) {
         inputs.combo_tokens             = torch::tensor({7, 8}, torch::kInt32);
         inputs.input_lengths            = torch::tensor({1, 1}, torch::kInt32);
+        inputs.request_deadline_ms      = torch::tensor({int64_t{123456}, int64_t{123457}}, torch::kInt64);
         inputs.sequence_lengths         = torch::tensor({4, 5}, torch::kInt32);
         inputs.kv_cache_block_id        = physical.clone();
         inputs.kv_cache_kernel_block_id = kernel.clone();
@@ -329,6 +343,10 @@ void checkGroupedTpRound(GptModelInputs&                 inputs,
         expectIntTensor(inputs.kv_cache_update_mapping, expected_copies.to(inputs.kv_cache_update_mapping.device()));
     }
     expectIntTensor(inputs.combo_tokens, torch::tensor({7, 8}, torch::kInt32));
+    expectIntTensor(inputs.request_deadline_ms, torch::tensor({int64_t{123456}, int64_t{123457}}, torch::kInt64));
+    if (rank == 0) {
+        EXPECT_EQ(inputs.p2p_deadline_clock_offset_ms, 0);
+    }
     if (rank == 0) {
         EXPECT_TRUE(inputs.kv_cache_block_id.is_same(original_physical));
         EXPECT_TRUE(inputs.kv_cache_kernel_block_id.is_same(original_kernel));

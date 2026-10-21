@@ -588,7 +588,8 @@ TEST_F(P2PMultiRankPeer, DISABLED_Serve) {
                                                                    source.resources[r],
                                                                    command.id,
                                                                    nullptr,
-                                                                   source.deadline),
+                                                                   source.deadline,
+                                                                   0),
                               "batch publication failed");
                     }
                 }
@@ -622,10 +623,14 @@ TEST_F(P2PMultiRankPeer, DISABLED_Serve) {
             } else if (command.op == 'P') {
                 for (const auto& rank : ranks) {
                     for (int l = 0; l < kLayers; ++l) {
-                        check(
-                            rank->connector->writeByLayerTag(
-                                l, rank->config.topologyPtr()->groups()[0].tag, rank->resource, id, nullptr, deadline),
-                            "Prefill publication failed");
+                        check(rank->connector->writeByLayerTag(l,
+                                                               rank->config.topologyPtr()->groups()[0].tag,
+                                                               rank->resource,
+                                                               id,
+                                                               nullptr,
+                                                               deadline,
+                                                               0),
+                              "Prefill publication failed");
                     }
                 }
             } else {

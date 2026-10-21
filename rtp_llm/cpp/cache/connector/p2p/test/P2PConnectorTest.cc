@@ -10,6 +10,8 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnector.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorBackend.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorDecode.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorPrefill.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PWorkerPrefillRead.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PWorkerDecodeRead.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PSchedulerPrefillRead.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
@@ -1245,6 +1247,40 @@ TEST_F(P2PConnectorTest, PrefillBroadcastBudgetDoesNotInterpretSourceClock) {
             EXPECT_EQ(response.p2p_response().error_code(), ErrorCodePB::NONE_ERROR);
         }
     }
+}
+
+TEST_F(P2PConnectorTest, LayerBeforeStartLoadReanchorsHorizonWithoutChangingSourceIdentity) {
+    auto resource = createValidKVCacheResource();
+    auto store    = connector_->prefill_->worker_->getComputedBuffersStore();
+    for (const int64_t skew_ms : {-3600000LL, 3600000LL}) {
+        const auto request_id      = 9600 + (skew_ms > 0);
+        const auto source_identity = currentTimeMs() + skew_ms + 60000;
+        ASSERT_TRUE(connector_->writeByLayerTag(0, "group0", resource, request_id, nullptr, source_identity, -skew_ms));
+        ASSERT_EQ(store->requestHorizon(request_id, source_identity), source_identity - skew_ms);
+        // A later model pass must not renew the first publication's local budget.
+        ASSERT_TRUE(
+            connector_->writeByLayerTag(1, "group1", resource, request_id, nullptr, source_identity, -skew_ms + 10000));
+        EXPECT_EQ(store->requestHorizon(request_id, source_identity), source_identity - skew_ms);
+        EXPECT_FALSE(store->requestHorizon(request_id, source_identity + 1));
+        const auto transfer_horizon = currentTimeMs() + 5000;
+        ASSERT_EQ(store->activateRequestHorizon(request_id, transfer_horizon, source_identity), transfer_horizon);
+        ASSERT_TRUE(
+            connector_->writeByLayerTag(1, "group1", resource, request_id, nullptr, source_identity, -skew_ms + 10000));
+        EXPECT_EQ(store->requestHorizon(request_id, source_identity), transfer_horizon);
+        store->removeBuffer(request_id, source_identity);
+        ASSERT_TRUE(connector_->writeByLayerTag(0, "group0", resource, request_id, nullptr, source_identity, -skew_ms));
+        EXPECT_FALSE(store->requestHorizon(request_id, source_identity));
+        EXPECT_EQ(store->getBuffer(request_id, source_identity), nullptr);
+    }
+}
+
+TEST_F(P2PConnectorTest, LayerClockOffsetRejectsOverflowAndMissingBusinessDeadline) {
+    auto       resource = createValidKVCacheResource();
+    const auto max_ms   = std::numeric_limits<int64_t>::max();
+    EXPECT_FALSE(connector_->writeByLayerTag(0, "group0", resource, 9700, nullptr, max_ms, 0));
+    EXPECT_FALSE(connector_->writeByLayerTag(0, "group0", resource, 9701, nullptr, max_ms - 1, 2));
+    EXPECT_FALSE(
+        connector_->writeByLayerTag(0, "group0", resource, 9702, nullptr, 1000, std::numeric_limits<int64_t>::min()));
 }
 
 }  // namespace rtp_llm

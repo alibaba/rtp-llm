@@ -2,6 +2,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorMetrics.h"
 
 #include <set>
+#include <limits>
 
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorLayerContext.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
@@ -121,13 +122,27 @@ bool P2PConnectorPrefill::writeByLayerTag(int                                lay
                                           const KVCacheResourcePtr&          resource,
                                           int64_t                            request_id,
                                           const std::shared_ptr<c10::Event>& event,
-                                          int64_t                            deadline_ms) {
+                                          int64_t                            deadline_ms,
+                                          int64_t                            deadline_clock_offset_ms) {
     if (!worker_ || !resource) {
         RTP_LLM_LOG_WARNING("writeByLayerTag failed, worker or resource is null, request_id=%ld layer_id=%d tag=%s",
                             request_id,
                             layer_id,
                             tag.c_str());
         return false;
+    }
+    // The source timestamp remains the buffer/tombstone identity. Reanchor only
+    // the acceptance horizon, including when layers arrive before StartLoad.
+    const auto max_ms = std::numeric_limits<int64_t>::max();
+    if (deadline_ms <= 0 || deadline_ms == max_ms
+        || (deadline_clock_offset_ms > 0 && deadline_ms >= max_ms - deadline_clock_offset_ms)
+        || deadline_clock_offset_ms <= -deadline_ms) {
+        return false;
+    }
+    const auto local_deadline_ms = deadline_ms + deadline_clock_offset_ms;
+    if (!worker_->getComputedBuffersStore()->registerRequestHorizon(request_id, local_deadline_ms, deadline_ms)) {
+        // Expiration or a terminal tombstone is a request outcome, not dispatch failure.
+        return true;
     }
     return worker_->writeByLayerTag(layer_id, tag, resource, request_id, event, deadline_ms);
 }
