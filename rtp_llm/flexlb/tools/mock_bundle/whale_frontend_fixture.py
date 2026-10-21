@@ -82,9 +82,10 @@ def main():
     source = Path(os.environ.get('MOCK_FRONTEND_SOURCE_ROOT', str(Path(__file__).parents[4])))
     sys.path.insert(0, str(source))
     runtime = Path(os.environ.get('HIPPO_PROC_WORKDIR', '/tmp')) / 'legacy-vit-assets'
-    model = prepare_assets(os.environ['CHECKPOINT_PATH'], runtime)
-    tokenizer = os.environ.get('TOKENIZER_PATH', os.environ['CHECKPOINT_PATH'])
-    tokenizer = model if tokenizer == os.environ['CHECKPOINT_PATH'] else prepare_assets(tokenizer, runtime / 'tokenizer')
+    checkpoint = os.environ.get('CHECKPOINT_PATH') or os.environ['TOKENIZER_PATH']
+    model = prepare_assets(checkpoint, runtime)
+    tokenizer = os.environ.get('TOKENIZER_PATH') or checkpoint
+    tokenizer = model if tokenizer == checkpoint else prepare_assets(tokenizer, runtime / 'tokenizer')
     os.environ.update(CHECKPOINT_PATH=str(model), TOKENIZER_PATH=str(tokenizer))
     if os.environ.get('MOCK_BUNDLE_ROLE') == 'vit':
         from rtp_llm.server.mock_vit_engine import main as vit_main
