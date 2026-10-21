@@ -649,7 +649,7 @@ class AtomicWeight(WeightModule):
             tp_for_skip = load_config.lm_head_tp_size
         else:
             tp_for_skip = load_config.tp_size
-        preparation = load_config.weight_preparation
+        preparation = getattr(load_config, "weight_preparation", None)
         has_preparation = (
             preparation is not None
             and preparation.split_function(self.name, None) is not None
