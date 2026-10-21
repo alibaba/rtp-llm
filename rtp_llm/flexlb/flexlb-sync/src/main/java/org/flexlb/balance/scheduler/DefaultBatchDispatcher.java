@@ -16,6 +16,7 @@ import org.flexlb.config.DispatcherConfig;
 import org.flexlb.constant.MetricConstant;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
+import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
@@ -742,6 +743,16 @@ public class DefaultBatchDispatcher {
         config.clearRoleAddrs();
         addRoleAddr(config, roleAddresses.prefill(item.prefill()));
         addRoleAddr(config, roleAddresses.decode(item.decode()));
+        // P fetches image features from the exact ViT selected for this route.
+        // Rebuilding only P/D addresses loses that binding in BATCH mode.
+        Response route = item.routeResponse();
+        if (route != null && route.getServerStatus() != null) {
+            for (ServerStatus status : route.getServerStatus()) {
+                if (status != null && status.getRole() == RoleType.VIT) {
+                    addRoleAddr(config, buildRoleAddr(status));
+                }
+            }
+        }
         // Pass the normalized Auto-TPM priority through to the engine
         // (metrics tagging only). normalize() always sets 1-100, so every
         // dispatched request carries its priority into the proto field.

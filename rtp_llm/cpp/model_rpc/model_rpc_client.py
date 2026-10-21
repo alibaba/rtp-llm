@@ -38,11 +38,9 @@ from rtp_llm.utils.base_model_datatypes import (
     GenerateInput,
     GenerateOutput,
     GenerateOutputs,
-    RoleAddr,
 )
 from rtp_llm.utils.grpc_host_channel_pool import GrpcHostChannelPool
 from rtp_llm.utils.grpc_util import (
-    trans_from_tensor,
     trans_option,
     trans_option_cast,
     trans_tensor,
@@ -438,7 +436,11 @@ def _trans_jsonable_options(
 def trans_input(input_py: GenerateInput):
     input_pb = GenerateInputPB()
     input_pb.request_id = input_py.request_id
-    input_pb.token_ids.extend(input_py.token_ids.reshape(-1).tolist())
+    expansion = getattr(input_py, "mm_token_expansion", None)
+    input_pb.token_ids.extend(expansion.token_ids if expansion else input_py.token_ids.reshape(-1).tolist())
+    if expansion:
+        for offset, length in expansion.spans:
+            input_pb.multimodal_token_layout.spans.add(offset=offset, length=length)
     input_pb.start_time = int(time.time() * 1_000_000)
     input_pb.group_size = input_py.group_size
     if hasattr(input_py, "group_id") and input_py.group_id != -1:
@@ -640,14 +642,13 @@ def get_multimodal_preprocess_value(value: Optional[int], default: int):
 def trans_multimodal_input(
     input_py: GenerateInput, input_pb: GenerateInputPB, generate_config: GenerateConfig
 ):
-    resized_shape = [-1, -1]
-    if generate_config.resized_shape:
-        if len(generate_config.resized_shape) != 2:
-            logging.info(
-                "Resized shape must be a list with 2 positive int, refering width and height"
-            )
-        else:
-            resized_shape = generate_config.resized_shape
+    input_pb.multimodal_inputs.extend(iter_multimodal_inputs(input_py, generate_config))
+
+
+def iter_multimodal_inputs(input_py, generate_config):
+    resized_shape = generate_config.resized_shape or [-1, -1]
+    if len(resized_shape) != 2:
+        resized_shape = [-1, -1]
     for mm_input in input_py.mm_inputs:
         mm_input_pb = MultimodalInputPB()
         mm_input_pb.multimodal_url = mm_input.url
@@ -682,7 +683,7 @@ def trans_multimodal_input(
         mm_preprocess_config_pb.mm_timeout_ms = get_multimodal_preprocess_value(
             generate_config.mm_timeout_ms, mm_input.mm_preprocess_config.mm_timeout_ms
         )
-        input_pb.multimodal_inputs.append(mm_input_pb)
+        yield mm_input_pb
 
 
 # 假设 trans_tensor 函数将 Protobuf 的 TensorPB 转换为 numpy array
@@ -1305,3 +1306,8 @@ class ModelRpcClient(object):
         except Exception as e:
             logging.error(f"batch rpc unknown error: {str(e)}")
             raise e
+
+
+def multimodal_cache_keys(input_py):
+    from rtp_llm.server.mm_cache_key import multimodal_key
+    return [multimodal_key(item) for item in iter_multimodal_inputs(input_py, input_py.generate_config)]

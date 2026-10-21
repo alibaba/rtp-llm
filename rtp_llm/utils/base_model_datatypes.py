@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import Any, Dict, List, NamedTuple, Optional, Union
+from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Tuple, Union
 
 import torch
 
@@ -63,6 +63,12 @@ class RequestInfo:
 
 
 @dataclass
+class MultimodalTokenExpansion:
+    token_ids: Sequence[int]
+    spans: List[Tuple[int, int]]
+
+
+@dataclass
 class GenerateInput:
     request_id: int
     token_ids: torch.Tensor
@@ -73,6 +79,8 @@ class GenerateInput:
     token_type_ids: List[int] = field(default_factory=list)
     group_size: int = 1
     group_id: int = -1  # Batch group ID for force batch grouping, -1 means not set
+    mm_token_expansion: Optional[MultimodalTokenExpansion] = field(default=None, init=False, repr=False)
+    greennet_verified_vit: Any = field(default=None, init=False, repr=False)
     enqueued_by_master: bool = False
     headers: Dict[str, str] = field(default_factory=dict, repr=False)
     request_info: RequestInfo = field(default_factory=RequestInfo, repr=False)

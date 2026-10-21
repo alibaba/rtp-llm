@@ -1,7 +1,6 @@
 import asyncio
 import logging
 import os
-import time
 from dataclasses import replace
 from typing import TYPE_CHECKING, AsyncGenerator, Callable, List, Optional, Set
 
@@ -9,14 +8,14 @@ import torch
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import RoleAddr, RoleType
-from rtp_llm.config.model_config import ModelConfig as PyModelConfig
-from rtp_llm.cpp.model_rpc.model_rpc_client import ModelRpcClient, trans_input
+from rtp_llm.cpp.model_rpc.model_rpc_client import ModelRpcClient, trans_input, multimodal_cache_keys
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.ops import SpeculativeExecutionConfig, VitSeparation, get_block_cache_keys
 from rtp_llm.server.cache_key_routing import route_cache_keys_for_page_rr
 from rtp_llm.server.host_service import HostService, HostServiceArgs
-from rtp_llm.server.master_client import FlexlbResponse, MasterClient
+from rtp_llm.server.master_client import FlexlbResponse, MasterClient, VIT_ROUTE_STALE_CODE
+from rtp_llm.server.mm_cache_routing import multimodal_routing_tokens
 from rtp_llm.server.misc import format_exception
 from rtp_llm.server.recent_cache_key_window import RecentCacheKeyWindow
 from rtp_llm.server.request_headers import (
@@ -27,6 +26,7 @@ from rtp_llm.telemetry import attributes as trace_attrs
 from rtp_llm.telemetry import start_internal_span
 from rtp_llm.utils.base_model_datatypes import (
     GenerateInput,
+    MultimodalTokenExpansion,
     GenerateOutputs,
     RequestInfo,
 )
@@ -73,6 +73,7 @@ class BackendRPCServerVisitor:
         master_config=None,
         parallelism_config=None,
         prefill_cp_config=None,
+        mm_model_config=None,
         source_role: str = "frontend",
     ) -> None:
         """Initialize BackendRPCServerVisitor.
@@ -91,6 +92,8 @@ class BackendRPCServerVisitor:
             prefill_cp_config: Optional PrefillCPConfig for page-RR route cache keys
             source_role: Caller role used for request-info correlation fields.
         """
+        self.mm_model_config = mm_model_config
+        self._mm_cache_routing = vit_separation == VitSeparation.VIT_SEPARATION_REMOTE and mm_model_config is not None
         self.max_seq_len = max_seq_len
         self.seq_size_per_block = seq_size_per_block
         self.pd_sep_config = pd_sep_config
@@ -240,18 +243,38 @@ class BackendRPCServerVisitor:
         return role_list
 
     async def get_master_route_addrs(
-        self, input: GenerateInput
+        self, input: GenerateInput, _vit_retries: int = 1
     ) -> Optional[FlexlbResponse]:
         """
         Resolve role addrs from FlexLB master (and slave on connection failure).
         Returns None on success; on failure returns FlexlbResponse for routing decisions.
         request_id is frontend-generated and is not overwritten.
         """
-        token_ids = (
-            input.token_ids.tolist()[0]
-            if len(input.token_ids.shape) == 2
-            else input.token_ids.tolist()
-        )
+        input.mm_token_expansion = None
+        token_ids = input.token_ids.reshape(-1).tolist()
+        route_args = {}
+        if self._mm_cache_routing and input.mm_inputs:
+            keys = multimodal_cache_keys(input)
+            selected = await self.master_client.get_backend_role_addrs(
+                block_cache_keys=[], cache_key_block_size=self._cache_key_block_size(),
+                input=input, request_id=input.request_id, cache_affinity_keys=keys, vit_only=True)
+            if not selected.is_ok:
+                return selected
+            vits = [a for a in selected.role_addrs if a.role == RoleType.VIT]
+            statuses = [a for a in (selected.result or {}).get("server_status", []) if a.get("role") == "VIT"]
+            if len(vits) != 1 or len(statuses) != 1:
+                raise FtRuntimeException(ExceptionType.ROUTE_ERROR, "invalid ViT-only route")
+            metadata = await self.master_client.get_vit_cache_metadata(vits[0], keys, input)
+            spans = []
+            token_ids, full_length = multimodal_routing_tokens(
+                token_ids, self.mm_model_config.mm_sep_tokens,
+                self.mm_model_config.include_sep_tokens, keys, metadata, self.max_seq_len,
+                compact=True, expanded_spans=spans)
+            if metadata is not None:
+                if full_length is None:
+                    raise FtRuntimeException(ExceptionType.MM_PROCESS_ERROR, "incomplete ViT routing hashes")
+                input.mm_token_expansion = MultimodalTokenExpansion(token_ids, spans)
+                route_args = {"selected_vit": statuses[0], "seq_len": full_length - input.prefix_length}
         # Keep hash generation at the physical KV block granularity. Page-RR
         # routing samples canonical keys from this full logical-block key list;
         # it must not recompute request hashes with the virtual block size.
@@ -267,6 +290,7 @@ class BackendRPCServerVisitor:
                 input=input,
                 request_id=input.request_id,
                 input_pb=input_pb,
+                **route_args,
             )
         except BaseException as e:
             exception_json = format_exception(e)
@@ -277,6 +301,11 @@ class BackendRPCServerVisitor:
             )
             raise
 
+        if route_result.error_code == VIT_ROUTE_STALE_CODE and input.mm_token_expansion is not None:
+            input.mm_token_expansion = None
+            if _vit_retries > 0:
+                return await self.get_master_route_addrs(input, _vit_retries=_vit_retries - 1)
+            raise FtRuntimeException(ExceptionType.ROUTE_ERROR, "selected ViT became stale; routing hashes discarded")
         if route_result.is_ok:
             input.generate_config.role_addrs = route_result.role_addrs
             input.enqueued_by_master = route_result.enqueued_by_master

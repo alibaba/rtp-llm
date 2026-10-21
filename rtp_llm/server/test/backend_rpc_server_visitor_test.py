@@ -87,6 +87,9 @@ class _FakeInput:
 class _FakeRouteTokenIds:
     shape = (3,)
 
+    def reshape(self, *_):
+        return self
+
     def tolist(self):
         return [1, 2, 3]
 
@@ -187,6 +190,7 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
     async def test_get_master_route_addrs_passes_pb_and_marks_master_enqueue(self):
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
         visitor.seq_size_per_block = 16
+        visitor._mm_cache_routing = False
         visitor.master_client = _FakeMasterClient()
         visitor._route_cache_keys = lambda keys: keys
         visitor._report_recent_cache_key_metrics = lambda keys: None

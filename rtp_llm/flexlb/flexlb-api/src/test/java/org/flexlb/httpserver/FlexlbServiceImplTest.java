@@ -1325,6 +1325,25 @@ class FlexlbServiceImplTest {
         assertFalse(captor.getValue().getFound());
     }
 
+    @Test
+    void vitProbeDoesNotReadOrCancelPdAdmissionOnDeliveryFailure() {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
+        Response response = new Response();
+        response.setSuccess(true);
+        when(routeService.route(any())).thenReturn(CompletableFuture.completedFuture(response));
+        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
+        doThrow(new RuntimeException("probe disconnected")).when(observer).onNext(any());
+        var request = FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                .setRequestId(800L).setVitRouteOnly(true).addCacheAffinityKeys("image").build();
+        service.schedule(request, observer);
+        verify(routeService, never()).getRequestState(800L, 0L);
+        verify(routeService, never()).cancelRequest(800L, 0L, CancelReason.CLIENT_CANCELLED);
+        ArgumentCaptor<BalanceContext> context = ArgumentCaptor.forClass(BalanceContext.class);
+        verify(routeService).route(context.capture());
+        assertTrue(context.getValue().getRequest().isVitRouteOnly());
+        assertEquals(java.util.List.of("image"), context.getValue().getRequest().getCacheAffinityKeys());
+    }
+
     private void assertPvContains(String expected) {
         assertEquals(1, pvAppender.list.size());
         assertTrue(pvAppender.list.get(0).getFormattedMessage().contains(expected),

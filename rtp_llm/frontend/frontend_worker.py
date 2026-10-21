@@ -106,6 +106,7 @@ class FrontendWorker:
             seq_size_per_block=model_config.attn_config.tokens_per_block,
             tokenizer=self.tokenizer,
             sp_config=py_env_configs.sp_config,
+            mm_model_config=model_config.mm_model_config,
             mm_related_params=None,  # Frontend doesn't need mm_related_params
             grpc_config=py_env_configs.grpc_config,
             vit_separation=vit_separation,

@@ -4,6 +4,7 @@
 
 ## Mock 控制端口 API
 
+- [Mock ViT 图片链路](docs/VIT_API.md)
 - [输出长度热更新](docs/OUTPUT_LENGTH_API.md)
 - [Prefill 执行时间公式热更新](docs/PREFILL_FORMULA_API.md)
 
