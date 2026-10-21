@@ -8,6 +8,9 @@
 #endif
 #if USING_CUDA
 #include <cuda_fp16.h>
+#ifdef ENABLE_BF16
+#include <cuda_bf16.h>
+#endif
 #include <cuda_runtime.h>
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
 #endif
@@ -27,5 +30,17 @@ void invokeFusedQkRmsNorm(T* __restrict input,
                           const int    n,
                           const int    norm_size,
                           cudaStream_t stream);
+
+#if USING_CUDA && defined(ENABLE_BF16)
+// CUDA-only, BF16 Q16/K8/D128 packed input; PDL is deliberately disabled.
+cudaError_t invokeFusedQkRmsNormCudaVec8(__nv_bfloat16*       input,
+                                         const __nv_bfloat16* q_weight,
+                                         const __nv_bfloat16* k_weight,
+                                         uint32_t             m,
+                                         float                eps,
+                                         int                  device_id,
+                                         int                  sm_count,
+                                         cudaStream_t         stream);
+#endif
 
 }  // namespace rtp_llm

@@ -1,3 +1,5 @@
+import functools
+import math
 from typing import Optional, Tuple
 
 import flashinfer
@@ -10,6 +12,47 @@ from rtp_llm.models_py.modules.base.common.norm import (
     BaseResNorm,
 )
 from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+
+@functools.lru_cache(maxsize=None)
+def _qk_vec8_device_supported(device_index: int) -> bool:
+    # Tensor metadata may change between calls; only immutable device capability
+    # is cached. Normal warmup resolves this before CUDA Graph capture.
+    return torch.cuda.get_device_capability(device_index) == (12, 0)
+
+
+def _qk_vec8_tensor_contract(input, q_weight, k_weight, eps) -> bool:
+    if (
+        not input.is_cuda
+        or input.dtype != torch.bfloat16
+        or input.dim() != 2
+        or input.shape[1] != 4096
+        or not 1 <= input.shape[0] <= 2048
+        or input.stride() != (4096, 1)
+        or not input.is_contiguous()
+        or input.data_ptr() % 16
+        or not isinstance(eps, (int, float))
+    ):
+        return False
+    try:
+        if not math.isfinite(eps) or eps <= 0:
+            return False
+    except OverflowError:
+        return False
+    begin = input.data_ptr()
+    end = begin + input.numel() * input.element_size()
+    for weight in (q_weight, k_weight):
+        if (
+            weight.device != input.device
+            or weight.dtype != torch.bfloat16
+            or weight.shape != (128,)
+            or weight.stride() != (1,)
+            or not weight.is_contiguous()
+            or weight.data_ptr() % 16
+            or (weight.data_ptr() < end and begin < weight.data_ptr() + 256)
+        ):
+            return False
+    return _qk_vec8_device_supported(input.device.index)
 
 
 class RMSNorm(BaseNorm):
@@ -103,6 +146,22 @@ class FusedQKRMSNorm(nn.Module):
         self.enable_pdl = enable_pdl
 
     def forward(self, hidden_states: torch.Tensor):
+        if (
+            self.enable_pdl is False
+            and self.head_num == 16
+            and self.kv_head_num == 8
+            and self.size_per_head == 128
+            and getattr(flashinfer.norm, "_USE_CUDA_NORM", False) is True
+            and hasattr(rtp_llm_ops, "fused_qk_rmsnorm_cuda_vec8")
+            and _qk_vec8_tensor_contract(
+                hidden_states, self.q_weight, self.k_weight, self.eps
+            )
+        ):
+            rtp_llm_ops.fused_qk_rmsnorm_cuda_vec8(
+                hidden_states, self.q_weight, self.k_weight, self.eps
+            )
+            return hidden_states
+
         assert hidden_states.dim() == 2
         m, n = hidden_states.shape
         qkv = hidden_states.reshape(

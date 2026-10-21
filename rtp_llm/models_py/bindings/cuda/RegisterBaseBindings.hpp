@@ -62,6 +62,16 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("input"),
                   py::arg("cuda_stream") = 0);
 
+#if USING_CUDA && defined(ENABLE_BF16)
+    rtp_ops_m.def("fused_qk_rmsnorm_cuda_vec8",
+                  &FusedQKRMSNormCudaVec8,
+                  "FI CUDA vec8 Q16/K8/D128 RMSNorm, in-place and PDL=False",
+                  py::arg("input"),
+                  py::arg("q_gamma"),
+                  py::arg("k_gamma"),
+                  py::arg("layernorm_eps"));
+#endif
+
     rtp_ops_m.def("fused_qk_rmsnorm",
                   &FusedQKRMSNorm,
                   "Fused QK RMSNorm kernel",
