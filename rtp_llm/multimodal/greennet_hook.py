@@ -115,11 +115,19 @@ def get_greennet_provider() -> GreenNetProvider:
     from rtp_llm.utils.import_util import has_internal_source
 
     if has_internal_source():
-        from internal_source.rtp_llm.multimodal.greennet.provider import (
-            InternalGreenNetProvider,
-        )
-
-        _PROVIDER = InternalGreenNetProvider()
+        try:
+            from internal_source.rtp_llm.multimodal.greennet.provider import (
+                InternalGreenNetProvider,
+            )
+        except ModuleNotFoundError as exc:
+            # Some plugin installations expose the internal_source namespace
+            # without shipping the optional GreenNet integration. Do not make
+            # multimodal serving depend on that unrelated namespace fragment.
+            if not (exc.name or "").startswith("internal_source.rtp_llm.multimodal"):
+                raise
+            _PROVIDER = NoopGreenNetProvider()
+        else:
+            _PROVIDER = InternalGreenNetProvider()
     else:
         _PROVIDER = NoopGreenNetProvider()
     return _PROVIDER
