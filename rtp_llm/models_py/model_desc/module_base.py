@@ -122,8 +122,7 @@ class GptModelBase(nn.Module):
         if (
             type(self).prepare_transformer_inputs
             is GptModelBase.prepare_transformer_inputs
-            or type(self).forward_embedding_graph
-            is GptModelBase.forward_embedding_graph
+            or type(self).forward is GptModelBase.forward
         ):
             return "model has no split embedding/Transformer implementation"
         if self.kv_cache is not None:
@@ -142,16 +141,8 @@ class GptModelBase(nn.Module):
         )
 
     def prepare_transformer_inputs(self, inputs: PyModelInputs) -> torch.Tensor:
-        """Compute embeddings outside capture. Return [real_tokens, hidden_size]."""
+        """Prepare [tokens, hidden_size] outside capture; forward consumes input_hiddens."""
         raise NotImplementedError("model must implement embedding input preparation")
-
-    def forward_embedding_graph(
-        self, inputs: PyModelInputs, fmha_impl: Any
-    ) -> PyModelOutputs:
-        """Forward prepared hidden states without recomputing embeddings during capture."""
-        raise NotImplementedError(
-            "model must adapt forward for prepared embedding inputs"
-        )
 
     def prepare_embedding_attention_inputs(
         self, attn_inputs, host_tokens, host_text_mask

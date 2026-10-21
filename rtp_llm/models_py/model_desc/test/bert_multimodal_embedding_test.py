@@ -61,7 +61,8 @@ class BertMultimodalEmbeddingTest(TestCase):
         torch.testing.assert_close(
             prepared[1], inputs.multimodal_inputs.multimodal_features[0][0]
         )
-        actual = model.forward(inputs, attention, input_hiddens=prepared).hidden_states
+        inputs.input_hiddens = prepared
+        actual = model.forward(inputs, attention).hidden_states
         torch.testing.assert_close(actual, expected)
 
     def test_user_mask_routes_only_text_markers_to_flashinfer(self):

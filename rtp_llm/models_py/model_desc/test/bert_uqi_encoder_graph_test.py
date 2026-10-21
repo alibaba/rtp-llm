@@ -96,13 +96,13 @@ class UqiEncoderGraphTest(unittest.TestCase):
         stream.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(stream):
             for _ in range(3):
-                model.forward_embedding_graph(
+                model.forward(
                     SimpleNamespace(input_hiddens=source), impl
                 )
         torch.cuda.current_stream().wait_stream(stream)
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
-            actual = model.forward_embedding_graph(
+            actual = model.forward(
                 SimpleNamespace(input_hiddens=source), impl
             ).hidden_states
 
@@ -134,7 +134,7 @@ class UqiEncoderGraphTest(unittest.TestCase):
             graph.replay()
             torch.cuda.synchronize()
             saved = actual[:sum(lengths)].clone()
-            reference = model.forward_embedding_graph(
+            reference = model.forward(
                 SimpleNamespace(input_hiddens=source[:sum(lengths)]),
                 SimpleNamespace(forward=dense_forward),
             ).hidden_states

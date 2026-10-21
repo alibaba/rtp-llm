@@ -457,13 +457,12 @@ class BertModel(GptModelBase):
         self,
         inputs: PyModelInputs,
         fmha_impl: FMHAImplBase = None,
-        *,
-        input_hiddens: Optional[torch.Tensor] = None,
     ) -> PyModelOutputs:
         # Graph replay supplies the fixed buffer prepared outside capture.
+        input_hiddens = getattr(inputs, "input_hiddens", None)
         hidden_states = (
             self.prepare_transformer_inputs(inputs)
-            if input_hiddens is None
+            if input_hiddens is None or input_hiddens.numel() == 0
             else input_hiddens
         )
         if fmha_impl is None:
@@ -496,11 +495,6 @@ class BertModel(GptModelBase):
         if uqi_perm is not None:
             hidden_states = hidden_states.index_select(0, fmha_impl.uqi_inv_perm)
         return PyModelOutputs(hidden_states)
-
-    def forward_embedding_graph(
-        self, inputs: PyModelInputs, fmha_impl: FMHAImplBase
-    ) -> PyModelOutputs:
-        return self.forward(inputs, fmha_impl, input_hiddens=inputs.input_hiddens)
 
     def prepare_transformer_inputs(self, inputs: PyModelInputs) -> torch.Tensor:
         """Request-owned embedding and visual injection, always outside graphs."""

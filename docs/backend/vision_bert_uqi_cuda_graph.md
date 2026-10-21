@@ -59,8 +59,7 @@ The interfaces are defined on `GptModelBase` and implemented/overridden by model
 | Interface | Responsibility |
 | --- | --- |
 | `prepare_transformer_inputs(inputs)` | Return real-token hidden states `[tokens, hidden_size]` outside capture |
-| `forward(inputs, attention, input_hiddens=...)` | BERT reuses its eager forward backbone with prepared hidden states; no embedding computation when supplied |
-| `forward_embedding_graph(inputs, attention)` | Model adapter: delegate fixed `inputs.input_hiddens` to the existing `forward` without recomputing embeddings |
+| `forward(inputs, attention)` | Reuse the eager backbone; nonempty `inputs.input_hiddens` supplies prepared embeddings and skips embedding computation |
 | `prepare_embedding_attention_inputs(attention_inputs, host_tokens, host_text_mask)` | Reuse supplied metadata or derive missing model metadata from host views, without reading deferred H2D storage |
 | `validate_embedding_graph_inputs(inputs)` | Side-effect-free eligibility check before replay planning |
 | `prepare_embedding_graph_attention(inputs, is_cuda_graph)` | Create bucket-owned Attention buffers and its startup plan |
@@ -88,7 +87,7 @@ Replay follows this sequence:
    run the existing pooling or classifier. CLS, last-token and mean pooling are model/head choices.
 
 Warmup and capture use the common call `py_forward_method_(inputs, attn_pyobj)`.
-For embedding, the Runner binds `forward_embedding_graph` and aliases the local
+For embedding, the Runner reuses `forward` and aliases the local
 capture inputs' `input_hiddens` to the existing bucket-owned `transformer_input_`
 buffer. Request preparation continues writing into that buffer before replay;
 its address and ownership remain unchanged.
@@ -198,10 +197,11 @@ GPU tests cover causal/noncausal replay through the existing device prefill
 implementations, BERT backbone replay and model-specific user-segment attention,
 including GQA and FP16/BF16, compared against dense or eager oracles.
 
-The standalone Runner test models expose `forward_embedding_graph` through
-`EmbeddingGraphTestModel` because they do not inherit `GptModelBase`. This
-adapter delegates to each test model's existing `forward` with the prepared
-`input_hiddens`; embedding preparation remains outside capture.
+The standalone Runner test models use the same `forward(inputs, attention)`
+entry as eager execution. Their `forward` consumes prepared `input_hiddens`;
+embedding preparation remains outside capture. Models that implement
+`prepare_transformer_inputs` must honor this prepared-input contract in `forward`;
+models without that preparation contract remain on eager execution.
 The target list describes test coverage, not a successful native GPU test run.
 
 Relevant targets:

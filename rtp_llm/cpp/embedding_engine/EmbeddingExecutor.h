@@ -41,6 +41,13 @@ public:
     absl::Status process(const std::list<EmbeddingStreamPtr>& streams);
 
 private:
+    friend class EmbeddingInputMetadataTest;
+
+    static void prepareEmbeddingInputMetadata(torch::Tensor& tokens,
+                                             torch::Tensor& input_lengths,
+                                             torch::Tensor& sequence_lengths,
+                                             torch::Tensor& prefix_lengths);
+
     std::unique_ptr<ModelBase>   model_;
     py::object                   handler_;
     HandlerArgs::Flag            handler_args_;

@@ -293,20 +293,25 @@ class EmbeddingGraphContractTest(unittest.TestCase):
         model.layers = torch.nn.ModuleList()
         model.layer_num = 0
         hidden = torch.randn(3, 4)
-        inputs = SimpleNamespace(input_hiddens=hidden)
         attention = SimpleNamespace()
-        with patch.object(
-            model, "prepare_transformer_inputs", return_value=hidden
-        ) as prepare:
-            eager = model.forward(inputs, attention).hidden_states
-            prepare.assert_called_once_with(inputs)
+        for inputs in (
+            SimpleNamespace(),
+            SimpleNamespace(input_hiddens=None),
+            SimpleNamespace(input_hiddens=torch.empty(0)),
+        ):
+            with self.subTest(inputs=inputs), patch.object(
+                model, "prepare_transformer_inputs", return_value=hidden
+            ) as prepare:
+                eager = model.forward(inputs, attention).hidden_states
+                prepare.assert_called_once_with(inputs)
+                torch.testing.assert_close(eager, hidden)
+        inputs = SimpleNamespace(input_hiddens=hidden)
         with patch.object(
             model,
             "prepare_transformer_inputs",
             side_effect=AssertionError("graph must reuse prepared embeddings"),
-        ), patch.object(model, "forward", wraps=model.forward) as forward:
-            replay = model.forward_embedding_graph(inputs, attention).hidden_states
-            forward.assert_called_once_with(inputs, attention, input_hiddens=hidden)
+        ):
+            replay = model.forward(inputs, attention).hidden_states
         torch.testing.assert_close(replay, eager)
 
     def test_rotary_positions_reset_per_sequence_and_preserve_unrotated_tail(self):

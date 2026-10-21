@@ -119,7 +119,7 @@ public:
         // Embedding graphs always capture only the Transformer backbone.
         // Capability is checked before constructing this runner.
         if (isEmbeddingStylePrefillCudaGraph()) {
-            py_forward_method_             = py_instance_.attr("forward_embedding_graph");
+            py_forward_method_             = py_instance_.attr("forward");
             py_prepare_transformer_inputs_ = py_instance_.attr("prepare_transformer_inputs");
             py_attn_pyobj_method_           = py_instance_.attr("prepare_embedding_graph_attention");
         }

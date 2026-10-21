@@ -1,11 +1,11 @@
 #include <cstdlib>
+#include <initializer_list>
 #include <string>
 #include "ATen/ops/ones.h"
 #include "c10/core/ScalarType.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/engine_base/EmbeddingIdRange.h"
 #include "rtp_llm/cpp/embedding_engine/EmbeddingExecutor.h"
-#include "rtp_llm/cpp/embedding_engine/EmbeddingInputMetadata.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/pybind/PyUtils.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
@@ -79,11 +79,10 @@ EmbeddingExecutor::EmbeddingExecutor(const EngineInitParams& params, py::object 
     model_init_params.device_resource_config       = params.device_resource_config;
     model_init_params.max_seq_len                  = model_config_.max_seq_len;
     model_init_params.hidden_size                  = model_config_.hidden_size;
-    model_init_params.tokens_per_block             = model_config_.attn_config.tokens_per_block;
-    model_init_params.kernel_tokens_per_block      = model_config_.attn_config.kernel_tokens_per_block > 0 ?
-                                                         model_config_.attn_config.kernel_tokens_per_block :
-                                                         model_init_params.tokens_per_block;
-
+    // Embedding has no KV cache, but the shared graph runner still allocates
+    // block-table input buffers and requires a positive width. One unused
+    // column satisfies that contract without depending on cache page geometry.
+    model_init_params.kernel_block_table_width = 1;
 
     RTP_LLM_CHECK_WITH_INFO(!params.py_model.is_none(), "py_model must be provided, legacy C++ GptModel path removed");
     RTP_LLM_LOG_INFO("init executor with python model");
@@ -132,6 +131,19 @@ torch::Tensor toCudaInt32ModelInput(const torch::Tensor& tensor) {
 }
 #endif
 }  // namespace
+
+void EmbeddingExecutor::prepareEmbeddingInputMetadata(torch::Tensor& tokens,
+                                                     torch::Tensor& input_lengths,
+                                                     torch::Tensor& sequence_lengths,
+                                                     torch::Tensor& prefix_lengths) {
+    // Normalize gathered host metadata before model-facing device conversion.
+    // Graph planning obtains its host views separately in PyWrappedModel.
+    for (auto* tensor : {&tokens, &input_lengths, &sequence_lengths, &prefix_lengths}) {
+        if (tensor->defined()) {
+            *tensor = tensor->to(torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU)).contiguous();
+        }
+    }
+}
 
 absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::list<EmbeddingStreamPtr>& streams) const {
     int64_t token_num  = 0;

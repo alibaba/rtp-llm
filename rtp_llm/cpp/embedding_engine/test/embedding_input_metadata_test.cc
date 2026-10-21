@@ -1,12 +1,22 @@
-#include "rtp_llm/cpp/embedding_engine/EmbeddingInputMetadata.h"
+#include "rtp_llm/cpp/embedding_engine/EmbeddingExecutor.h"
 
 #include <gtest/gtest.h>
-#include <torch/cuda.h>
 
 namespace rtp_llm {
+
+class EmbeddingInputMetadataTest : public ::testing::Test {
+protected:
+    static void prepareEmbeddingInputMetadata(torch::Tensor& tokens,
+                                             torch::Tensor& input_lengths,
+                                             torch::Tensor& sequence_lengths,
+                                             torch::Tensor& prefix_lengths) {
+        EmbeddingExecutor::prepareEmbeddingInputMetadata(tokens, input_lengths, sequence_lengths, prefix_lengths);
+    }
+};
+
 namespace {
 
-TEST(EmbeddingInputMetadataTest, PreservesHostPlanningBuffers) {
+TEST_F(EmbeddingInputMetadataTest, PreservesHostPlanningBuffers) {
     const auto options = torch::TensorOptions().dtype(torch::kInt32);
     auto tokens = torch::tensor({11, 17, 21, 37}, options);
     auto lengths = torch::tensor({3, 1}, options);
@@ -25,7 +35,7 @@ TEST(EmbeddingInputMetadataTest, PreservesHostPlanningBuffers) {
     EXPECT_TRUE(torch::equal(lengths, original_lengths));
 }
 
-TEST(EmbeddingInputMetadataTest, NormalizesIntegerTypeAndStrides) {
+TEST_F(EmbeddingInputMetadataTest, NormalizesIntegerTypeAndStrides) {
     auto tokens = torch::arange(8, torch::kInt64).slice(0, 0, 8, 2);
     auto lengths = torch::tensor({4}, torch::kInt64);
     auto sequence = torch::Tensor();

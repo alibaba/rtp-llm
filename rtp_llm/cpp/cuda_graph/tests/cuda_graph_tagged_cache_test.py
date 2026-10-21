@@ -48,9 +48,6 @@ class EmbeddingGraphTestModel:
     def prepare_transformer_inputs(self, inputs):
         return inputs.input_hiddens
 
-    def forward_embedding_graph(self, inputs, fmha_impl=None):
-        return self.forward(inputs, fmha_impl)
-
 
 class BertEmbeddingModel(EmbeddingGraphTestModel):
     """Prepare real BERT embeddings outside capture with model-owned weights."""
@@ -292,9 +289,6 @@ class TextOnlyMultimodalCapableModel(EmbeddingGraphTestModel):
     def prepare_transformer_inputs(self, inputs):
         return self.forward(inputs).hidden_states
 
-    def forward_embedding_graph(self, inputs, fmha_impl=None):
-        return PyModelOutputs(inputs.input_hiddens)
-
     def __init__(self) -> None:
         self.bert_buffer_shapes: list[tuple[int, int]] = []
 
@@ -309,6 +303,8 @@ class TextOnlyMultimodalCapableModel(EmbeddingGraphTestModel):
 
     def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
         self.input_hiddens_numel = inputs.input_hiddens.numel()
+        if self.input_hiddens_numel > 0:
+            return PyModelOutputs(inputs.input_hiddens)
         position_ids = inputs.bert_embedding_inputs.combo_position_ids
         token_type_ids = inputs.bert_embedding_inputs.combo_tokens_type_ids
         self.bert_buffer_shapes.append(
@@ -339,6 +335,8 @@ class BertWeightAwareModel(TextOnlyMultimodalCapableModel):
     """Expose both fixed embedding tables and request-owned dynamic IDs."""
 
     def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
+        if inputs.input_hiddens.numel() > 0:
+            return PyModelOutputs(inputs.input_hiddens)
         base = super().forward(inputs, fmha_impl).hidden_states
         position_bias = inputs.bert_embedding_inputs.position_encoding.index_select(
             0, inputs.bert_embedding_inputs.combo_position_ids.to(torch.int64)
@@ -355,6 +353,8 @@ class PrefillPaddingBlockTableModel(TextOnlyMultimodalCapableModel):
     """Make any non-zero padding-row block id visible in every real output."""
 
     def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
+        if inputs.input_hiddens.numel() > 0:
+            return PyModelOutputs(inputs.input_hiddens)
         base = super().forward(inputs, fmha_impl).hidden_states
         padding_signature = (
             inputs.attention_inputs["full"].kv_cache_kernel_block_id_device[-1].sum()
