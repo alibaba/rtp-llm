@@ -2,7 +2,6 @@ import asyncio
 import itertools
 import json
 import logging
-from dataclasses import replace
 from functools import partial
 from typing import Any, AsyncGenerator, List, Optional
 
@@ -558,11 +557,6 @@ class OpenaiEndpoint(object):
                     tokenizer.decode(output_ids)
                     for output_ids in extra_outputs.output_ids
                 ]
-
-        if aux_info is not None:
-            # A complete response contains all output blocks, including a PD first token.
-            # Copy the final snapshot so streaming block statistics stay unchanged.
-            aux_info = replace(aux_info, step_output_len=aux_info.output_len)
 
         return ChatCompletionResponse(
             choices=all_choices,

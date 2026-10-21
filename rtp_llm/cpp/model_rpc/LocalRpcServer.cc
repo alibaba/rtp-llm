@@ -264,6 +264,12 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*              
     RTP_LLM_PROFILE_FUNCTION();
     // Observe local and remote failures before waiting for another token.
     bool remote_done = !check_remote;
+    // Decode replays the Prefill token into its queue even for non-streaming
+    // requests. Collect these internal blocks into one RPC output while retaining
+    // optional first-token tensors; streaming and other roles keep block semantics.
+    const bool collect_pd_output =
+        stream->queryPdSep() && stream->resourceContext().role_type == RoleType::DECODE && !stream->isStreaming();
+    BatchStreamOutputCollector complete_output(stream->generateConfig()->logits_index);
     while (true) {
         auto remote_error = check_remote ? check_remote(remote_done) : FirstError::Snapshot{};
         auto first        = FirstError::earlier(stream->firstError(), remote_error);
@@ -291,11 +297,27 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*              
                 break;
             }
         }
+        auto output = result.value();
+        if (collect_pd_output) {
+            const bool finished = !output.generate_outputs.empty()
+                                  && std::all_of(output.generate_outputs.begin(),
+                                                 output.generate_outputs.end(),
+                                                 [](const auto& item) { return item.finished; });
+            const auto status = complete_output.add(std::move(output));
+            if (!status.ok()) {
+                stream->reportError(status.code(), status.ToString());
+                return serializeErrorMsg(request_key, stream->generateInput()->request_info, status);
+            }
+            if (!finished) {
+                continue;
+            }
+            output = complete_output.finish();
+        }
         RTP_LLM_LOG_DEBUG("request [%s] generate next output success", request_key.c_str());
         GenerateOutputsPB outputs_pb;
 
         QueryConverter::transResponse(&outputs_pb,
-                                      &(result.value()),
+                                      &output,
                                       stream->generateConfig()->aux_info,
                                       maga_init_params_.misc_config.aux_string,
                                       stream->specialTokens().eos_token_id);

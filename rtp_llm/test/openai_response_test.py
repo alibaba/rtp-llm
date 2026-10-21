@@ -3410,37 +3410,6 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
 
         await return_output_ids_test_suite.test_no_stream()
 
-    async def test_complete_response_counts_pd_first_token_without_mutating_chunks(self):
-        _, renderer = self._create_adaptive_qwen_renderer()
-        first = AuxInfo(output_len=1, step_output_len=1, pd_sep=True)
-        final = AuxInfo(
-            output_len=3,
-            step_output_len=2,
-            pd_sep=True,
-            reuse_len=96,
-            prefill_total_reuse_len=64,
-            decode_total_reuse_len=96,
-        )
-        chunks = [
-            custom_renderer.StreamResponseObject(choices=[], aux_info=first),
-            custom_renderer.StreamResponseObject(choices=[], aux_info=final),
-        ]
-
-        async def responses():
-            for chunk in chunks:
-                yield chunk
-
-        result = await OpenaiEndpoint._collect_complete_response(responses(), None)
-        native = json.loads(renderer.collect_complete_response(chunks))["aux_info"]
-        self.assertEqual(result.aux_info.step_output_len, 3)
-        self.assertEqual(native["step_output_len"], 3)
-        for info in (result.aux_info, AuxInfo(**native)):
-            self.assertEqual(info.reuse_len, 96)
-            self.assertEqual(info.prefill_total_reuse_len, 64)
-            self.assertEqual(info.decode_total_reuse_len, 96)
-        self.assertEqual(first.step_output_len, 1)
-        self.assertEqual(final.step_output_len, 2)
-
     async def test_custom_output_preserves_prefill_extra_outputs(self):
         _, renderer = self._create_adaptive_qwen_renderer()
         hidden = [[1.0, 2.0]]
