@@ -174,15 +174,19 @@ TcpKVCacheSender::makeTransferRequest(const transfer::SendRequest&              
 
     if (!copy_tasks.empty()) {
         int device_index = -1;
-        for (const auto& [cache_key, kbi_ptr] : request.block_info) {
-            for (const auto& bi : kbi_ptr->blocks) {
+        bool device_found = false;
+        for (const auto& entry : request.block_info) {
+            for (const auto& bi : entry.second->blocks) {
                 if (bi.addr != nullptr && bi.is_cuda) {
                     device_index = bi.device_index;
-                    goto found_device;
+                    device_found = true;
+                    break;
                 }
             }
+            if (device_found) {
+                break;
+            }
         }
-        found_device:
         if (!tryStagedGatherCopyToHost(copy_tasks, device_index)) {
             if (!cuda_copy_util_->batchCopyToHost(copy_tasks)) {
                 RTP_LLM_LOG_WARNING("TcpKVCacheSender: batchCopyToHost failed, unique_key: %s", request.unique_key.c_str());

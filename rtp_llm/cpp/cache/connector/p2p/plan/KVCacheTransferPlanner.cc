@@ -607,7 +607,7 @@ PlanResult KVCacheTransferPlanner::plan(const ShardLayout&              src,
 
 uint64_t TransferPlan::digest() const {
     // FNV-1a over the route fields, in vector order.
-    uint64_t       hash  = 1469598103934665603ULL;
+    uint64_t       hash  = 14695981039346656037ULL;
     constexpr auto prime = 1099511628211ULL;
     auto           mix   = [&hash](uint64_t value) {
         for (int i = 0; i < 8; ++i) {
