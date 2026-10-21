@@ -1,0 +1,31 @@
+{
+  "base_commit": "3a8d3074d4ab8a76b6c3434d813c83c795f4cc79",
+  "source_state": "frozen Round2 final",
+  "files": [
+    {
+      "file": "beamSearchKernelsTemplate.h",
+      "source": "3rdparty/trt_beam_search/beamSearchKernelsTemplate.h",
+      "source_sha256": "a613ef4bcdb3bf43dd7e2f80635382a8b74b0496964a2661c179a1784473068a",
+      "sha256": "a613ef4bcdb3bf43dd7e2f80635382a8b74b0496964a2661c179a1784473068a",
+      "transformation": "none; byte-exact frozen source"
+    },
+    {
+      "file": "CudaBeamSearchOp.cc",
+      "source": "rtp_llm/models_py/bindings/core/CudaBeamSearchOp.cc",
+      "source_sha256": "4d5ff995fb5ebf4079dd38e98f65405599cbd60e630ad2057a61bfd87ad39eb1",
+      "sha256": "4d5ff995fb5ebf4079dd38e98f65405599cbd60e630ad2057a61bfd87ad39eb1",
+      "transformation": "none; byte-exact frozen source"
+    },
+    {
+      "file": "addCumLogProbs.cuh",
+      "source": "3rdparty/trt_beam_search/beamSearchKernels.cu",
+      "source_sha256": "61964fd284cedbab2008629eb6c17a917e206d2b4f9a75e9acfc783b262e470d",
+      "source_lines": [
+        144,
+        197
+      ],
+      "sha256": "c06de7f366dec9246a5681d30531f51b9428048990236359769b7bc47c809158",
+      "transformation": "verbatim contiguous source extraction; no arithmetic/launch edits"
+    }
+  ]
+}
