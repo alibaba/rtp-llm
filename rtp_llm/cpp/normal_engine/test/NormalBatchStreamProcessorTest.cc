@@ -1336,10 +1336,14 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
         EXPECT_EQ(kv_cache_block_id, toVec<int>(model_input.kv_cache_block_id));
         EXPECT_EQ(model_input.kv_block_stride_bytes, cache_config.groups().front().kvBlockStrideBytes());
         EXPECT_EQ(model_input.kv_scale_stride_bytes, cache_config.groups().front().kvScaleStrideBytes());
+        EXPECT_FALSE(model_input.all_input_token_ids.has_value());
+        EXPECT_FALSE(model_input.request_is_multimodal.has_value());
     }
     {
         MMModelConfig mm_model_config;
-        model_config.mm_model_config = mm_model_config;
+        model_config.mm_model_config                           = mm_model_config;
+        profiling_debug_logging_config.enable_model_inputs_log = true;
+        stream4->completeTokenIdsPtr()->setSeqLength(3);
         NormalBatchStreamProcessor processor(
             model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
 
@@ -1349,6 +1353,15 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
         EXPECT_TRUE(merge_input_status.ok());
         auto& model_input = merge_input_status.value();
         EXPECT_FALSE(model_input.attention_mask.defined());
+        ASSERT_TRUE(model_input.all_input_token_ids.has_value());
+        ASSERT_EQ(model_input.all_input_token_ids->size(), 2);
+        ASSERT_TRUE(model_input.request_is_multimodal.has_value());
+        EXPECT_EQ(*model_input.request_is_multimodal, (std::vector<bool>{false, false}));
+        EXPECT_EQ(toVec<int>(model_input.all_input_token_ids->at(0)), (vector<int>{1, 2, 3}));
+        EXPECT_EQ(toVec<int>(model_input.all_input_token_ids->at(1)), (vector<int>{1, 2, 3, 4}));
+        EXPECT_EQ(toVec<int>(model_input.combo_tokens), (vector<int>{2, 3, 1, 2, 3, 2, 3}));
+        stream4->completeTokenIds().fill_(99);
+        EXPECT_EQ(toVec<int>(model_input.all_input_token_ids->at(1)), (vector<int>{1, 2, 3, 4}));
     }
 }
 
@@ -2404,7 +2417,8 @@ TEST_F(NormalBatchStreamProcessorTest, testMultimodalGatherBatch) {
     model_config.mm_model_config.is_multimodal = true;
     PDSepConfig                 pd_sep_config;
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
-    CacheConfig                 cache_config;
+    profiling_debug_logging_config.enable_model_inputs_log = true;
+    CacheConfig cache_config;
     initFullCacheConfig(cache_config, model_config.num_layers);
     RuntimeConfig              runtime_config;
     NormalBatchStreamProcessor processor(
@@ -2467,6 +2481,24 @@ TEST_F(NormalBatchStreamProcessorTest, testMultimodalGatherBatch) {
         EXPECT_EQ(model_input.multimodal_features.value().size(), 2);
         EXPECT_EQ(model_input.multimodal_features.value()[0].numel(), 3 * 10);
         EXPECT_EQ(model_input.multimodal_features.value()[1].numel(), 2 * 10);
+        ASSERT_TRUE(model_input.request_is_multimodal.has_value());
+        EXPECT_EQ(*model_input.request_is_multimodal, (std::vector<bool>{true, false, true}));
+    }
+    {
+        stream1->setReuseLength(4);
+        stream3->setReuseLength(4);
+        StreamGroups stream_groups(streams);
+        TensorHolder holder;
+        auto         result = processor.gatherModelInput(stream_groups, holder);
+        ASSERT_TRUE(result.ok());
+        const auto& model_input = result.value();
+        EXPECT_FALSE(model_input.multimodal_features.has_value());
+        EXPECT_EQ(toVec<int>(model_input.combo_tokens), (vector<int>{2, 3, 4, 5, 8}));
+        ASSERT_TRUE(model_input.all_input_token_ids.has_value());
+        EXPECT_EQ(toVec<int>(model_input.all_input_token_ids->at(0)), (vector<int>{1, -1, -1, -1, 2}));
+        EXPECT_EQ(toVec<int>(model_input.all_input_token_ids->at(2)), (vector<int>{6, 7, -1, -1, 8}));
+        ASSERT_TRUE(model_input.request_is_multimodal.has_value());
+        EXPECT_EQ(*model_input.request_is_multimodal, (std::vector<bool>{true, false, true}));
     }
 }
 
