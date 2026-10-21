@@ -205,8 +205,13 @@ def _run_decode(
     input_query_dict: Dict[int, str],
     engine_status: Dict[str, Any],
     tp_size: int = 1,
+    use_batch_decode_scheduler: bool = True,
     **kwargs: Any,
 ) -> None:
+    if not use_batch_decode_scheduler and (
+        args.target_tpot > 0 or config.is_distribution
+    ):
+        raise ValueError("Native-scheduler decode perf supports only grid mode")
     max_kv = (
         float(engine_status.get("max_kv_tokens", float("inf")))
         if engine_status
@@ -260,6 +265,7 @@ def _run_decode(
                     input_query_dict,
                     is_decode=True,
                     tp_size=tp_size,
+                    use_batch_decode_scheduler=use_batch_decode_scheduler,
                     **kwargs,
                 ).run()
 
@@ -340,6 +346,7 @@ def main() -> str:
                 config,
                 input_query_dict,
                 engine_status,
+                use_batch_decode_scheduler=use_batch_decode_scheduler,
                 **runner_kwargs,
             )
 

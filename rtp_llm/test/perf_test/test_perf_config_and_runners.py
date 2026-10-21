@@ -206,7 +206,14 @@ class TestRunDecode(unittest.TestCase):
         engine_meta = {"max_kv_tokens": 2048}
 
         _run_decode(
-            8000, 1, args, config, query_dict, engine_meta, dump_json_path="/tmp"
+            8000,
+            1,
+            args,
+            config,
+            query_dict,
+            engine_meta,
+            dump_json_path="/tmp",
+            use_batch_decode_scheduler=False,
         )
 
         self.assertEqual(MockGridRunner.call_count, 2)
@@ -215,6 +222,7 @@ class TestRunDecode(unittest.TestCase):
         self.assertEqual(c1[0][2], [1, 8, 16])
         self.assertEqual(c1[0][3], [128])
         self.assertTrue(c1[1]["is_decode"])
+        self.assertFalse(c1[1]["use_batch_decode_scheduler"])
         # input_len=256: only [1, 8]
         c2 = MockGridRunner.call_args_list[1]
         self.assertEqual(c2[0][2], [1, 8])

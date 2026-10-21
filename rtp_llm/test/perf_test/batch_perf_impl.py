@@ -249,7 +249,7 @@ class BatchPerfImpl(object):
             )
             metric = self._curl_server()
             if not getattr(self, "use_batch_decode_scheduler", True):
-                require_complete_measurement(metric, context="PP warmup")
+                require_complete_measurement(metric, context="Native warmup")
             if skip_on_fail and metric.success_requests == 0:
                 logging.warning(
                     "Warmup had no successful requests; skipping measurement and profile"
@@ -264,10 +264,11 @@ class BatchPerfImpl(object):
             responses = self._curl_server_responses()
             metric = analyze_results(responses)
             if not getattr(self, "use_batch_decode_scheduler", True):
-                require_complete_measurement(metric, context="PP request")
+                require_complete_measurement(metric, context="Native request")
             logging.info(
                 "[PERF_MEASURE_RUN] %d/%d trace=%s success=%d/%d "
-                "avg_prefill_ms=%.3f avg_total_ms=%.3f avg_wait_ms=%.3f",
+                "avg_prefill_ms=%.3f avg_total_ms=%.3f avg_wait_ms=%.3f "
+                "avg_tpot_ms=%.3f",
                 i + 1,
                 measure_runs,
                 self.profile_trace_name,
@@ -276,6 +277,7 @@ class BatchPerfImpl(object):
                 metric.avg_prefill_time,
                 metric.avg_total_time,
                 metric.avg_wait_time,
+                metric.avg_decode_time,
             )
             measurements.append(metric)
             all_measure_responses.extend(responses)
@@ -344,10 +346,16 @@ class BatchPerfImpl(object):
     def _set_concurrency(self):
         if not self.use_batch_decode_scheduler:
             check_with_info(
-                not self.is_decode and self.batch_size == self.dp_size == 1,
-                "Native-scheduler perf supports only single-client prefill",
+                self.batch_size > 0
+                and self.dp_size > 0
+                and (
+                    (self.is_decode and self.batch_size % self.dp_size == 0)
+                    or (not self.is_decode and self.batch_size == self.dp_size == 1)
+                ),
+                "Native-scheduler perf requires DP-divisible decode batches "
+                "or single-client prefill",
             )
-            return  # PP scheduler has no /update_scheduler_info API.
+            return  # Native schedulers have no /update_scheduler_info API.
         check_with_info(
             self.batch_size % self.dp_size == 0,
             f"concurrency {self.batch_size} must be divisible by dp_size {self.dp_size}",

@@ -131,6 +131,7 @@ class BatchDecodeTest(unittest.TestCase):
             num_measures=1,
             batch_size="1",
             max_seq_len=8,
+            concurrency_limit=1,
         )
         config = argparse.Namespace(
             is_distribution=False,
@@ -142,7 +143,11 @@ class BatchDecodeTest(unittest.TestCase):
         server = MagicMock(port=12345)
         with (
             patch("rtp_llm.config.log_config.setup_logging"),
-            patch.object(batch_decode_test, "parse_args", return_value=(args, [])),
+            patch.object(
+                batch_decode_test,
+                "parse_args",
+                return_value=(args, ["--use_batch_decode_scheduler", "0"]),
+            ),
             patch.object(
                 batch_decode_test, "resolve_perf_engine_paths", side_effect=lambda x: x
             ),
@@ -155,7 +160,7 @@ class BatchDecodeTest(unittest.TestCase):
                 batch_decode_test,
                 "_run_decode",
                 side_effect=RuntimeError("runner failed"),
-            ),
+            ) as run_decode,
             patch.object(batch_decode_test, "summarize_and_cleanup_coredumps"),
             patch.object(batch_decode_test.os, "makedirs"),
         ):
@@ -164,6 +169,8 @@ class BatchDecodeTest(unittest.TestCase):
                 batch_decode_test.main()
 
         server.stop.assert_called_once_with()
+        self.assertFalse(run_decode.call_args.kwargs["use_batch_decode_scheduler"])
+        self.assertFalse(server.start.call_args.kwargs["use_batch_decode_scheduler"])
 
 
 class PipelinePrefillPerfTest(unittest.TestCase):
@@ -254,11 +261,40 @@ class PipelinePrefillPerfTest(unittest.TestCase):
                 post.call_args.kwargs["json"], {"batch_size": 2, "mode": "decode"}
             )
 
+    def test_native_decode_admits_dp_batches_without_control_api(self):
+        runner = BatchPerfImpl.__new__(BatchPerfImpl)
+        runner.use_batch_decode_scheduler = False
+        runner.is_decode = True
+        runner.dp_size = 8
+        with patch("rtp_llm.test.perf_test.batch_perf_impl.requests.post") as post:
+            for batch_size in (8, 16):
+                runner.batch_size = batch_size
+                runner._set_concurrency()
+            for batch_size, dp_size in ((7, 8), (0, 8), (8, 0)):
+                runner.batch_size, runner.dp_size = batch_size, dp_size
+                with self.assertRaises(Exception):
+                    runner._set_concurrency()
+            post.assert_not_called()
+
+    def test_tpot_excludes_wait_and_prefill(self):
+        response = ResponseInfo(
+            {
+                "aux_info": {
+                    "cost_time": 11400,
+                    "first_token_cost_time": 10000,
+                    "wait_time": 250,
+                    "input_len": 32768,
+                    "output_len": 9,
+                }
+            }
+        )
+        self.assertEqual(response.decode_time_per_token, 175)
+
     def test_pp_fails_on_first_bad_request(self):
         runner = BatchDecodeTest._batch_perf([ResponseInfo({}, False)])
         runner.use_batch_decode_scheduler = False
         runner.measure_runs = 2
-        with self.assertRaisesRegex(RuntimeError, "PP request"):
+        with self.assertRaisesRegex(RuntimeError, "Native request"):
             runner.run()
         self.assertEqual(runner._curl_server_responses.call_count, 1)
 
@@ -267,7 +303,7 @@ class PipelinePrefillPerfTest(unittest.TestCase):
         runner.use_batch_decode_scheduler = False
         runner.warmup_runs = 1
         runner._curl_server = MagicMock(return_value=TestResultMetrics(1, 0, 1))
-        with self.assertRaisesRegex(RuntimeError, "PP warmup"):
+        with self.assertRaisesRegex(RuntimeError, "Native warmup"):
             runner.run()
         runner._curl_server_responses.assert_not_called()
 
