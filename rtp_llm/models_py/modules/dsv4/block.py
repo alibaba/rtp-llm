@@ -85,6 +85,7 @@ class Block(nn.Module):
     # pre-TP single-rank behavior; real instances overwrite both in __init__.
     tp_size: int = 1
     tp_rank: int = 0
+    dim: int | None = None
 
     def __init__(
         self,
@@ -142,6 +143,7 @@ class Block(nn.Module):
         self.layer_id = layer_id
         self.tp_size = int(tp_size)
         self.tp_rank = int(tp_rank)
+        self.dim = int(dim)
         self.fp8_kv_cache = fp8_kv_cache
         self._platform_provider = platform_provider
         self._attention_layout = resolve_dsv4_attention_layout(
