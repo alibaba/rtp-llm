@@ -378,10 +378,8 @@ TEST_F(PrefillServerCallerTest, AsyncClientTracePropagatesAndWaitsForRpcTerminal
         if (mode == FakePrefillRpcService::Mode::kWaitForCancel) {
             // Receipt alone does not end the streaming CLIENT span.
             EXPECT_FALSE(context->done());
-            const auto spans = span_data->GetSpans();
-            size_t completed_calls = 0;
-            for (const auto& span : spans) completed_calls += span->GetName() == "rtp_llm.call_prefill";
-            EXPECT_EQ(completed_calls, 1u);  // Only the preceding successful call.
+            ASSERT_NE(context->async_state_->trace_guard, nullptr);
+            EXPECT_TRUE(context->async_state_->trace_guard->sharedSpan()->IsRecording());
             context->cancel();
         }
         ASSERT_TRUE(waitDone(context));
