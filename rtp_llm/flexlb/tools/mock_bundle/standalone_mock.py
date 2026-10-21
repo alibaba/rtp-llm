@@ -57,6 +57,10 @@ def command(env):
         "--base-grpc-port": port,
         "--block-size": block_size,
     }
+    for role in ("PREFILL", "DECODE"):
+        key = f"MOCK_{role}_BLOCK_SIZE"
+        if key in env:
+            numeric[f"--{role.lower()}-block-size"] = integer(env, key, block_size)
     for flag, key, default in (
         ("--prefill-kv-pool-blocks", "MOCK_PREFILL_KV_POOL_BLOCKS", 1024),
         ("--decode-kv-pool-blocks", "MOCK_DECODE_KV_POOL_BLOCKS", 1024),
