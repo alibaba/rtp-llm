@@ -23,7 +23,7 @@ python3 -m rtp_llm.server.mock_vit_engine \
 
 实现复用 release 的 `MultimodalRpcServer`，保留 active request/byte admission、状态 epoch 微秒版本推进、token-ID 数量/时间窗口缓存、V4.1 串行 forward/export 锁与异常清理。仅替换 forward，按 worker 注入 CPU hash 函数；真实服务默认 hash kernel 不变。
 
-URL fixture 目前只接受 base64 data 图片，使用 Qwen2-VL 28 像素粒度计算长度，不能视为 DeepSeek-V4 原始图片 processor 的精确 token 数。V4.1 输入则使用真实 release processor 的 prepared patches、types 和 identity 校验，按 types 长度生成确定性特征。GPU 性能、内容审查、RDMA slot/lease、动态 batching 与 HTTP frontend 渲染不在此 CPU 后端的验证范围内。
+URL fixture 目前只接受 base64 data 图片，使用 Qwen2-VL 28 像素粒度计算长度，不能视为 DeepSeek-V4 原始图片 processor 的精确 token 数。V4.1 输入则使用真实 release processor 的 prepared patches、types 和 identity 校验，按 types 长度生成确定性特征。GPU 性能、内容审查、RDMA slot/lease 与动态 batching 不在此 CPU 后端的验证范围内；HTTP frontend 的独立 Pod 验证见下文。
 
 ## 验证
 
@@ -36,7 +36,7 @@ python3 -m rtp_llm.server.legacy_vit_wire_smoke \
 
 协议探针执行真实旧 frontend metadata client → Master → Mock P → ViT → Mock D，分别验证 NON_BATCH/GenerateStreamCall 与 BATCH/FetchResponse。普通图片输入 66 token、热前缀 64；prepared V4.1 输入 129 token、完整图片热前缀 128。它不启动 HTTP frontend，也不证明事故已复现。
 
-远端验证曾使用旧容器的 native config 库；该库缺少新 seed 常量。仅测试启动脚本临时提供了 `CacheKeyConfig.h` 中的准确常量，未替换 native KV hash 实现，也未把此脚本写入产品代码。native seeded hash/完整 HTTP frontend 必须在匹配 release 的运行时中重验。跨 134/111 的 Master 连 ViT 使用测试参数 `-Dflexlb.engine-grpc.connect-timeout-ms=1000`；默认 20ms 的跨主机尝试未通过，源码默认值保留。这些差异不能作为线上事故因果证据。
+远端验证曾使用旧容器的 native config 库；该库缺少新 seed 常量。仅测试启动脚本临时提供了 `CacheKeyConfig.h` 中的准确常量，未替换 native KV hash 实现，也未把此脚本写入产品代码。这仅是早期协议探针的环境记录；随后已在匹配 release 的 Whale 镜像中重验真实 native seed/hash 和完整 HTTP frontend，未替换 native 常量。跨 134/111 的 Master 连 ViT 使用测试参数 `-Dflexlb.engine-grpc.connect-timeout-ms=1000`；默认 20ms 的跨主机尝试未通过，源码默认值保留。这些差异不能作为线上事故因果证据。
 
 ## 独立 Whale 部署
 
@@ -57,3 +57,33 @@ CI 的 `frontend_bundle_image` 参数将指定 bundle 复制进 Python 运行镜
 P=45083、D=932802 只是选定的实验容量，不等价于真实多 pool allocator；
 也不代表已复现 RDMA 或 CED 事故。历史拓扑为 2 Master、45 frontend、20 ViT、
 40 P、160 D；先以较小 frontend/ViT 数量验通协议，再独立扩大规模。
+
+## Whale HTTP 验收
+
+```bash
+python3 -m rtp_llm.server.legacy_vit_http_smoke \
+  --frontend http://<frontend-ip>:20550 \
+  --control http://<mock-ip>:29129 \
+  --expected-workers 200 --output /path/to/run/release-http.json
+```
+
+此探针只依赖 Python 标准库，生成确定性 PNG。它执行真实 HTTP renderer 和
+chat completion，覆盖文本、224x224 单图、1024x768 单图、多图、重复图片、
+单 token 输出、SSE 流式输出、坏图片后的文本恢复；核对 renderer/input usage、
+输出 token 数、选中的 P/D/ViT 地址，以及 Mock running/waiting/held/referenced 排空。
+坏图片在该 release 的 HTTP frontend 返回 500，探针只将它作为预期拒绝路径；
+不能把它计为成功图片请求。
+
+2026-10-21，专用部署 `na130_bailian_cpu_mock_cache_repro` 的 biz 16 / 模板 25
+完成发布：2 Master、10 frontend、1 ViT、1 独立 Mock Pod（40 P、160 D）。
+Master 为同一 ZK role 下的一主一从；独立启动器使用真实 process_ok/after_start
+生命周期 hook，重启后自动上线。23 项 Java 回归、8 项真实 native 环境中的
+ViT RPC 测试、8 项启动器测试通过；10 个新 frontend 各执行文本和图片请求，
+20 次均为 HTTP 200。完整探针输入 token 为文本 35、小图 219、大图 531、
+多图 716，均与 renderer 一致；输出 4 和 1 token 的计数也一致。
+ViT 活跃任务为 0，Mock 的运行、等待、持有块与引用块均归零。
+
+最终镜像 CI 为 81753260，组合的 Master/Mock bundle CI 为 81750798。
+frontend/ViT 与 Mock 源码为 `0706104ba6`，Master Java 源码为 `1b81cc980d`；
+其 Java 实现未在这些启动器/Mock 修复中改变。该结果验收了 release 协议，
+不代表历史 45 frontend / 20 ViT 的规模验证、8-pool 容量等价或线上事故复现。
