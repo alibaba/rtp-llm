@@ -335,6 +335,7 @@ public final class JavaMockEngineCluster {
                 poolTotalKvTokens, config.decodeMaxConcurrency);
         service.setResponsePollTimeoutMs(DEFAULT_RESPONSE_POLL_TIMEOUT_MS);
         service.setAutoFetch(config.autoFetch);
+        service.cacheStatusCompactEncoding = config.cacheStatusCompactEncoding;
         // Bundled P/D share one JVM and event loop group. Use local ownership
         // callbacks so P cannot block those event loops awaiting D RPC admission.
         service.setWhaleRemote(config.whale && !config.whaleBundle);
@@ -5319,6 +5320,10 @@ public final class JavaMockEngineCluster {
             observer.onCompleted();
         }
 
+        // Real LocalRpcServer::GetCacheStatus still builds a protobuf map per RPC.
+        // This extra Mock allocation optimization is deliberately opt-in.
+        boolean cacheStatusCompactEncoding;
+
         private java.util.Set<Long> naturalCacheKeys() {
             var keys = cache.snapshotKeys();
             if (memoryCache == null) return keys;
@@ -5345,6 +5350,11 @@ public final class JavaMockEngineCluster {
                 } else externalVersion = fixture.version();
             }
             status.setVersion(naturalVersion + externalVersion);
+            if (request.getNeedCacheKeys() && cacheStatusCompactEncoding) {
+                var natural = CacheFixtureWire.NaturalKeys.takeSnapshots(cache.snapshotKeyArray(),
+                        memoryCache == null ? new long[0] : memoryCache.snapshotKeyArray(), external);
+                return new CacheFixtureWire.Frame(status.build(), external, natural);
+            }
             if (request.getNeedCacheKeys()) {
                 for (Long key : naturalCacheKeys())
                     if (external == null || !external.contains(key)) status.putCacheKeys(key, true);
@@ -7147,6 +7157,7 @@ public final class JavaMockEngineCluster {
         int nDecode = 4;
         int baseGrpcPort = 61_000;
         int eventLoopThreads = 32;
+        boolean cacheStatusCompactEncoding = false;
         int rpcThreads = 2;
         int rpcMaxCalls = 32768;
         int completionThreads = 8;
@@ -7235,6 +7246,7 @@ public final class JavaMockEngineCluster {
                     case "--n-decode" -> config.nDecode = Integer.parseInt(value);
                     case "--base-grpc-port" -> config.baseGrpcPort = Integer.parseInt(value);
                     case "--event-loop-threads" -> config.eventLoopThreads = Integer.parseInt(value);
+                    case "--cache-status-compact-encoding" -> config.cacheStatusCompactEncoding = parseBooleanFlag(value, key);
                     case "--rpc-threads" -> config.rpcThreads = Integer.parseInt(value);
                     case "--rpc-max-calls" -> config.rpcMaxCalls = Integer.parseInt(value);
                     case "--completion-threads" -> config.completionThreads = Integer.parseInt(value);

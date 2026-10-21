@@ -19,6 +19,7 @@ Whale 只配置参数，不再配置 `MOCK_STARTUP_PY` 或 `MOCK_STARTUP_B64`。
 | `MOCK_JAVA_OPTS` | `-Xms512m -Xmx2g`，支持带引号的 JVM 参数，不执行 shell |
 | `FETCH_OUTPUT_STREAM` | 1；等待客户端取结果；0 开启 Mock 自动接续 |
 | `MOCK_KMONITOR_ENABLED` | true；环境中的监控 role 别名由 Mock reporter 继承 |
+| `MOCK_CACHE_STATUS_COMPACT_ENCODING` | false；显式开启后用紧凑快照编码 CacheStatus，减少 Java 临时对象；完整 keys、版本和 KV 容量语义不变 |
 | `MOCK_PERFORMANCE_CONFIG_JSON` | 缺省使用镜像内 performance.json；显式值必须是完整 JSON 对象，block_size 与环境变量一致 |
 | `FLEXLB_CONFIG` | 缺省 `{}`，使用 Mock 内置公式；也可提供匹配 Master 的配置 JSON 对象 |
 | `JAVA_HOME` | `/opt/taobao/java` |

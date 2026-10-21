@@ -271,6 +271,13 @@ final class MockMemoryBlockCache {
     synchronized int availableBlocks() { return capacity - pinnedBlocks() - pending.size(); }
     synchronized long writeRejected() { return writeRejected; }
     synchronized List<Long> keys() { return List.copyOf(entries.keySet()); }
+
+    synchronized long[] snapshotKeyArray() {
+        long[] keys = new long[entries.size()];
+        int index = 0;
+        for (Long key : entries.keySet()) keys[index++] = key;
+        return keys;
+    }
     synchronized int size() { return entries.size(); }
     int capacity() { return capacity; }
     synchronized long evictions() { return evictions; }

@@ -6,6 +6,19 @@ Java Mock 模拟 Prefill / Decode 的调度、KV 容量、执行耗时、请求�
 
 ## 实现与配置入口
 
+CacheStatus 的额外编码优化由 `--cache-status-compact-encoding true` 开启，默认关闭。
+独立 Whale Mock role 对应环境变量 `MOCK_CACHE_STATUS_COMPACT_ENCODING=1`。
+开启后用每次 RPC 独立持有的 `long[]` 快照编码自然 keys，绕过临时 Set 和 protobuf map；
+Device、Host 和外部 fixture 的重复 keys 只输出一次。响应仍是标准 CacheStatusPB，
+相同版本也返回全量 keys，`need_cache_keys=false` 仍只返回标量，KV 容量和 LRU 驱逐不变。
+该开关不复用旧版本快照，不限制 keys 数量，不改变同步频率或启用未变化 keys 省略。
+
+核对了 `246852c6a` 和当前 next 的 real 实现：[LocalRpcServer::GetCacheStatus](../../cpp/model_rpc/LocalRpcServer.cc)
+仍逐次向 protobuf map 填入完整 keys；`246852c6a` 的 Device/Host 合并还会创建临时 unordered_set，
+因此 Mock 不默认启用这项编码优化。
+real 的 [KVCacheManager::getKVCacheInfo / refreshKVCacheInfoSnapshot](../../cpp/cache/KVCacheManager.cc)
+另有 `RTP_LLM_CACHE_STATUS_SNAPSHOT=1` 的快照复用路径；它与这里减少 Java 对象的开关分别控制，不能视为同一配置。
+
 | 组件 | 职责 |
 |---|---|
 | `JavaMockEngineCluster` | 逻辑 P/D 引擎、队列、gRPC、请求所有权与状态报告 |

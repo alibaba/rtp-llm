@@ -512,6 +512,14 @@ final class MockLruBlockCache {
         return Set.copyOf(blocks.keySet());
     }
 
+    /** Owned immutable-by-caller snapshot; avoids Set.copyOf's temporary hash table. */
+    synchronized long[] snapshotKeyArray() {
+        long[] keys = new long[blocks.size()];
+        int index = 0;
+        for (Long key : blocks.keySet()) keys[index++] = key;
+        return keys;
+    }
+
     /** Pool size in blocks (== ceil(totalKvTokens / spb)). */
     synchronized int totalBlocks() {
         return totalBlocks;

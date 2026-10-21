@@ -79,13 +79,15 @@ def command(env):
     master = json_object(env.get("FLEXLB_CONFIG", "{}"), "FLEXLB_CONFIG")
     fetch = boolean(env, "FETCH_OUTPUT_STREAM", "1")
     kmonitor = boolean(env, "MOCK_KMONITOR_ENABLED", "true")
+    compact = boolean(env, "MOCK_CACHE_STATUS_COMPACT_ENCODING", "false")
     runtime = Path(env.get("MOCK_BUNDLE_RUN_DIR", "/home/admin/ai-whale/mock"))
     java = str(Path(env.get("JAVA_HOME", "/opt/taobao/java")) / "bin/java")
     jar = Path(env.get("MOCK_BUNDLE_JAR_DIR", str(ROOT / "jars"))) / "mock.jar"
     args = [java, *shlex.split(env.get("MOCK_JAVA_OPTS", "-Xms512m -Xmx2g")),
             "-jar", str(jar), "--whale", "true", "--whale-bundle", "true",
             "--kmonitor", str(kmonitor).lower(), "--host", host,
-            "--unique-engine-ips", "false", "--auto-fetch", str(not fetch).lower()]
+            "--unique-engine-ips", "false", "--auto-fetch", str(not fetch).lower(),
+            "--cache-status-compact-encoding", str(compact).lower()]
     for flag, value in numeric.items():
         args.extend([flag, str(value)])
     for flag, name in (("--endpoint-file", "endpoints.json"),

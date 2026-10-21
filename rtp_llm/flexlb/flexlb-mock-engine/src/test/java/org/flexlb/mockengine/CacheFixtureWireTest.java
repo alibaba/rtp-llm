@@ -4,6 +4,8 @@ import io.grpc.Drainable;
 import io.grpc.KnownLength;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import java.io.ByteArrayOutputStream;
 import java.util.concurrent.atomic.AtomicLong;
 import static org.junit.jupiter.api.Assertions.*;
@@ -77,12 +79,89 @@ class CacheFixtureWireTest {
         assertEquals(reference(119, 120, 176000, 65000, 117, 4), frame.toProto());
     }
 
-    @Test void unmodifiedGrpcClientDecodesFixtureAndOrdinaryResponses() throws Exception {
+    @Test void compactNaturalUnionUsesCanonicalWireAndIndependentStreams() throws Exception {
+        var external = CacheFixtureWire.Keys.create(0, 1, 2, 2, 0, 3);
+        long[] device = {Long.MIN_VALUE, -1, 0, Long.MAX_VALUE, external.key(0)};
+        long[] host = {0, -1, 42, external.key(2)};
+        var natural = CacheFixtureWire.NaturalKeys.takeSnapshots(device, host, external);
+        var header = EngineRpcService.CacheStatusPB.newBuilder().setVersion(9).setBlockSize(512).build();
+        var frame = new CacheFixtureWire.Frame(header, external, natural);
+        var expected = reference(0, 1, 2, 2, 0, 9).toBuilder().mergeFrom(header);
+        for (long key : new long[]{Long.MIN_VALUE, -1, 0, Long.MAX_VALUE, 42}) expected.putCacheKeys(key, true);
+        var proto = expected.build();
+        assertEquals(0, frame.header().getCacheKeysCount());
+        assertEquals(proto, frame.toProto());
+        try (var first = frame.stream(); var second = frame.stream()) {
+            int head = first.read();
+            assertEquals(proto, EngineRpcService.CacheStatusPB.parseFrom(second));
+            var bytes = new ByteArrayOutputStream(); bytes.write(head);
+            ((Drainable)first).drainTo(bytes);
+            assertEquals(proto, EngineRpcService.CacheStatusPB.parseFrom(bytes.toByteArray()));
+            assertEquals(proto.getSerializedSize(), bytes.size());
+        }
+    }
+
+    @Test void compactNaturalEncodingAvoidsPerKeyProtobufAllocations() throws Exception {
+        var bean = java.lang.management.ManagementFactory.getThreadMXBean();
+        org.junit.jupiter.api.Assumptions.assumeTrue(bean instanceof com.sun.management.ThreadMXBean);
+        var allocations = (com.sun.management.ThreadMXBean) bean;
+        org.junit.jupiter.api.Assumptions.assumeTrue(allocations.isThreadAllocatedMemorySupported());
+        allocations.setThreadAllocatedMemoryEnabled(true);
+        long thread = Thread.currentThread().threadId();
+        int count = 50_000;
+        long[] keys = new long[count];
+        for (int i = 0; i < count; i++) keys[i] = hash(i);
+        var metadata = EngineRpcService.CacheStatusPB.newBuilder().setVersion(7).build();
+        // Warm both serializers without including reference construction in compact's measurement.
+        var warm = metadata.toBuilder();
+        for (int i = 0; i < 100; i++) warm.putCacheKeys(keys[i], true);
+        warm.build().toByteArray();
+        new CacheFixtureWire.Frame(metadata, null,
+                CacheFixtureWire.NaturalKeys.takeSnapshots(new long[]{7}, new long[0], null)).toProto();
+        long before = allocations.getThreadAllocatedBytes(thread);
+        var compact = new CacheFixtureWire.Frame(metadata, null,
+                CacheFixtureWire.NaturalKeys.takeSnapshots(keys.clone(), new long[0], null));
+        int compactBytes;
+        try (var stream = compact.stream()) {
+            compactBytes = ((Drainable)stream).drainTo(java.io.OutputStream.nullOutputStream());
+        }
+        long compactAllocated = allocations.getThreadAllocatedBytes(thread) - before;
+        before = allocations.getThreadAllocatedBytes(thread);
+        var builder = metadata.toBuilder();
+        for (long key : keys) builder.putCacheKeys(key, true);
+        var legacy = new CacheFixtureWire.Frame(builder.build(), null);
+        int legacyBytes;
+        try (var stream = legacy.stream()) {
+            legacyBytes = ((Drainable)stream).drainTo(java.io.OutputStream.nullOutputStream());
+        }
+        long legacyAllocated = allocations.getThreadAllocatedBytes(thread) - before;
+        assertEquals(legacyBytes, compactBytes);
+        assertTrue(compactAllocated * 4 < legacyAllocated,
+                "compact=" + compactAllocated + " legacy=" + legacyAllocated);
+        System.out.println("CacheStatus allocation bytes: compact=" + compactAllocated + " legacy=" + legacyAllocated);
+    }
+
+    @Test void compactEncodingCliDefaultsOffAndRejectsInvalidBoolean() {
+        var args = new java.util.ArrayList<>(java.util.List.of("--endpoint-file", "endpoints.json",
+                "--performance", "performance.json", "--master-config", "master.json"));
+        assertFalse(JavaMockEngineCluster.Config.parse(args.toArray(String[]::new)).cacheStatusCompactEncoding);
+        args.addAll(java.util.List.of("--cache-status-compact-encoding", "true"));
+        assertTrue(JavaMockEngineCluster.Config.parse(args.toArray(String[]::new)).cacheStatusCompactEncoding);
+        args.set(args.size() - 1, "invalid");
+        assertThrows(IllegalArgumentException.class,
+                () -> JavaMockEngineCluster.Config.parse(args.toArray(String[]::new)));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void unmodifiedGrpcClientDecodesFixtureAndOrdinaryResponses(boolean compact) throws Exception {
         var perf = directory.resolve("perf.json"); java.nio.file.Files.writeString(perf, "{\"block_size\":2}");
         var config = directory.resolve("master.json"); MockMasterConfig.writeWithPrefillExpression(config, "20");
         var model = MockPerformanceModel.load(perf.toString(), config.toString());
         try (var cluster = MockEngineTestCluster.create(model, 61580, 1, 0)) {
             var service = cluster.prefill(0);
+            assertFalse(service.cacheStatusCompactEncoding, "extra Mock optimization defaults off");
+            service.cacheStatusCompactEncoding = compact;
             var server = io.grpc.netty.NettyServerBuilder.forPort(0).addService(CacheFixtureWire.bind(service)).build().start();
             var channel = io.grpc.ManagedChannelBuilder.forAddress("127.0.0.1", server.getPort()).usePlaintext().build();
             try {
@@ -100,14 +179,18 @@ class CacheFixtureWireTest {
                 assertTrue(response.getVersion() > natural.getVersion());
                 assertEquals(expected.getCacheKeysMap(), response.getCacheKeysMap());
                 CacheFixtureWire.Frame merged = MockEngineTestSupport.unary(o -> service.getCacheStatusWire(request, o));
+                assertEquals(compact, merged.natural() != null);
                 try (var stream = merged.stream()) {
                     assertEquals(response.getSerializedSize(), stream.available(), "overlapping keys occur only once on the wire");
                     assertEquals(response, EngineRpcService.CacheStatusPB.parseFrom(stream));
                 }
                 assertEquals(response, MockEngineTestSupport.<EngineRpcService.CacheStatusPB>unary(o -> service.getCacheStatus(request, o)));
                 assertTrue(service.evictCacheKeys(java.util.List.of(7L)));
+                assertEquals(response, merged.toProto(), "in-flight snapshot survives live cache eviction");
                 var evicted = stub.getCacheStatus(request);
                 assertEquals(241, evicted.getCacheKeysCount());
+                assertEquals(evicted, stub.getCacheStatus(request.toBuilder().setLatestCacheVersion(evicted.getVersion()).build()),
+                        "acknowledged versions still return full keys like real");
                 assertTrue(evicted.getVersion() > response.getVersion());
                 var scalar = stub.getCacheStatus(request.toBuilder().setNeedCacheKeys(false).build());
                 assertEquals(evicted.getVersion(), scalar.getVersion());

@@ -34,6 +34,7 @@ class StandaloneMockTest(unittest.TestCase):
                             ("--base-grpc-port", "29130"),
                             ("--unique-engine-ips", "false"),
                             ("--auto-fetch", "false"), ("--kmonitor", "true"),
+                            ("--cache-status-compact-encoding", "false"),
                             ("--prefill-kv-pool-blocks", "113282"),
                             ("--decode-kv-pool-blocks", "113282")):
             self.assertEqual(args[args.index(flag) + 1], value)
@@ -53,6 +54,11 @@ class StandaloneMockTest(unittest.TestCase):
         self.assertEqual(args[args.index("--kmonitor") + 1], "false")
         self.assertEqual(json.loads((Path(self.directory.name) / "performance.json").read_text())["sleep_scale"], 2)
 
+    def test_compact_cache_status_is_explicitly_opt_in(self):
+        self.env["MOCK_CACHE_STATUS_COMPACT_ENCODING"] = "1"
+        args = standalone_mock.command(self.env)
+        self.assertEqual(args[args.index("--cache-status-compact-encoding") + 1], "true")
+
     def test_invalid_configuration_cannot_exec(self):
         cases = [
             {"RTP_LLM_MOCK_BUNDLE": "0"},
@@ -62,6 +68,7 @@ class StandaloneMockTest(unittest.TestCase):
             {"MOCK_DECODE_KV_POOL_BLOCKS": "zero"},
             {"POD_IP": "127.0.0.1"}, {"POD_IP": "0.0.0.0"},
             {"FETCH_OUTPUT_STREAM": "maybe"},
+            {"MOCK_CACHE_STATUS_COMPACT_ENCODING": "maybe"},
             {"MOCK_PERFORMANCE_CONFIG_JSON": "[]"},
             {"MOCK_PERFORMANCE_CONFIG_JSON": '{"block_size":128}'},
             {"FLEXLB_CONFIG": "[]"},
