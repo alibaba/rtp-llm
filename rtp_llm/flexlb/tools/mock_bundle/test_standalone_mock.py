@@ -74,6 +74,18 @@ class StandaloneMockTest(unittest.TestCase):
                     standalone_mock.run()
                 execute.assert_not_called()
 
+    def test_master_kvcm_settings_do_not_reach_mock_timing_parser(self):
+        self.env["FLEXLB_CONFIG"] = json.dumps({
+            "schemaVersion": 3, "cacheMatching": {"type": "KVCM"},
+            "router": {"roles": {"prefill": {"executionTimeEstimator": {
+                "type": "FORMULA", "expression": "5"}}}},
+        })
+        standalone_mock.command(self.env)
+        projected = json.loads((Path(self.directory.name) / "master-config.json").read_text())
+        self.assertNotIn("cacheMatching", projected)
+        self.assertEqual(projected["router"]["roles"]["prefill"]
+                         ["executionTimeEstimator"]["expression"], "5")
+
 
 if __name__ == "__main__":
     unittest.main()

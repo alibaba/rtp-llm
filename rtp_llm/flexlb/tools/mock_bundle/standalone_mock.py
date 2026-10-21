@@ -7,6 +7,8 @@ from pathlib import Path
 import shlex
 import socket
 
+from master_compat import mock_formula_config
+
 
 ROOT = Path(__file__).resolve().parent
 
@@ -72,7 +74,9 @@ def command(env):
     if "block_size" in performance and performance["block_size"] != block_size:
         raise ValueError("Performance block_size must match MOCK_BLOCK_SIZE")
     performance["block_size"] = block_size
-    master = json_object(env.get("FLEXLB_CONFIG", "{}"), "FLEXLB_CONFIG")
+    raw = env.get("FLEXLB_CONFIG", "{}")
+    json_object(raw, "FLEXLB_CONFIG")
+    master = json.loads(mock_formula_config(raw, False))
     fetch = boolean(env, "FETCH_OUTPUT_STREAM", "1")
     kmonitor = boolean(env, "MOCK_KMONITOR_ENABLED", "true")
     runtime = Path(env.get("MOCK_BUNDLE_RUN_DIR", "/home/admin/ai-whale/mock"))
