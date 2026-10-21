@@ -162,6 +162,31 @@ class KvTotalReportAlignmentTest {
         assertEquals(pressured, EngineRpcService.CacheStatusPB.parseFrom(pressured.toByteArray()));
     }
 
+    @Test
+    void realServerDefaultAcceptsMessagesLargerThanSixteenMiB() throws Exception {
+        startOne("prefill", 4, BASE_PORT + 7, 0);
+        var channel = io.grpc.netty.NettyChannelBuilder.forAddress("127.0.0.1", BASE_PORT + 7)
+                .usePlaintext().build();
+        try {
+            // Unknown protobuf fields are legal and ignored by this RPC. This exercises
+            // the real network construction path without allocating a large KV pool.
+            var padding = com.google.protobuf.UnknownFieldSet.Field.newBuilder()
+                    .addLengthDelimited(com.google.protobuf.ByteString.copyFrom(new byte[17 * 1024 * 1024]))
+                    .build();
+            var large = EngineRpcService.CacheVersionPB.newBuilder().setNeedCacheKeys(false)
+                    .setUnknownFields(com.google.protobuf.UnknownFieldSet.newBuilder()
+                            .addField(1000, padding).build()).build();
+            var stub = org.flexlb.engine.grpc.RpcServiceGrpc.newBlockingStub(channel)
+                    .withDeadlineAfter(20, TimeUnit.SECONDS);
+            assertEquals(4L * SPB, stub.getCacheStatus(large).getTotalKvCache());
+            // A subsequent ordinary request must remain usable on the same channel.
+            assertEquals(4L * SPB, stub.getCacheStatus(EngineRpcService.CacheVersionPB
+                    .newBuilder().setNeedCacheKeys(false).build()).getTotalKvCache());
+        } finally {
+            channel.shutdownNow().awaitTermination(3, TimeUnit.SECONDS);
+        }
+    }
+
     /** The master's KV gate math on the reported pair: used = total - available. */
     private static double usedRatio(long total, long available) {
         return total <= 0 ? 1.0 : (double) (total - available) / total;

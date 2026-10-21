@@ -6,6 +6,8 @@ Java Mock 模拟 Prefill / Decode 的调度、KV 容量、执行耗时、请求�
 
 ## 实现与配置入口
 
+gRPC 服务端接收上限为 1GiB，对齐 [RtpLLMOp.cc](../../cpp/pybind/multi_gpu_gpt/RtpLLMOp.cc) 的 real 默认值；不再使用 Mock 独有的 16MiB 限制。real 还支持通过 `server_config` 覆盖默认值，Mock 暂未模拟该覆盖入口。
+
 CacheStatus 的额外编码优化由 `--cache-status-compact-encoding true` 开启，默认关闭。
 独立 Whale Mock role 对应环境变量 `MOCK_CACHE_STATUS_COMPACT_ENCODING=1`。
 开启后用每次 RPC 独立持有的 `long[]` 快照编码自然 keys，绕过临时 Set 和 protobuf map；

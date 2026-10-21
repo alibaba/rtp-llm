@@ -370,7 +370,8 @@ public final class JavaMockEngineCluster {
                     .executor(runtime.controlExecutor())
                     .callExecutor(rpcEngine)
                     .intercept(rpcEngine)
-                    .maxInboundMessageSize(16 * 1024 * 1024)
+                    // Match real RtpLLMOp.cc server default (its server_config may override it).
+                    .maxInboundMessageSize(1024 * 1024 * 1024)
                     .addService(CacheFixtureWire.bind(service))
                     .build()
                     .start();
