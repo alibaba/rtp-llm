@@ -2583,7 +2583,6 @@ TEST_F(P2PConnectorWorkerTest, RecvFirstCallbackWinsOverTaskOrderAndLaterCancel)
     EXPECT_EQ(outcome.error_msg, first.error.ToString());
 }
 
-}  // namespace test
 TEST_F(P2PConnectorWorkerTest, LateLayerUsesInstalledLocalHorizonWithSourceClockBehind) {
     const int64_t request_id      = 9300;
     const auto    source_identity = currentTimeMs() - 3600000;
@@ -2624,4 +2623,5 @@ TEST_F(P2PConnectorWorkerTest, InvalidLayerPublishesErrorUsingInstalledLocalHori
     }
 }
 
+}  // namespace test
 }  // namespace rtp_llm
