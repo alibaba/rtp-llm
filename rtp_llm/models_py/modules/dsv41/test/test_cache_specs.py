@@ -99,6 +99,7 @@ class CacheSpecsTest(unittest.TestCase):
                     v41_kv_source_layer_ids=[1],
                     size_per_head=512,
                 ),
+                kv_cache_spec_descs=[],
                 is_mtp=False,
                 num_layers=2,
                 hybrid_attention_config=SimpleNamespace(),

@@ -202,6 +202,7 @@ struct FullSWAEnvironmentOptions {
     size_t path_length{4};
     size_t usable_device_blocks{16};
     size_t usable_host_blocks{16};
+    size_t usable_swa_host_blocks{0};  // Zero follows usable_host_blocks.
     size_t usable_disk_blocks{16};
     bool   enable_disk{true};
 };
