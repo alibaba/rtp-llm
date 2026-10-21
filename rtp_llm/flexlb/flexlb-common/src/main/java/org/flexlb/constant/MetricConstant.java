@@ -15,6 +15,12 @@ public class MetricConstant {
      * Sum of GC notification pause durations in milliseconds, with the same tags as the count.
      */
     public static final String JVM_GC_PAUSE_TOTAL_MS = "app.jvm.gc.pause.total.ms";
+    public static final String NETTY_DIRECT_RESERVED_BYTES = "app.netty.direct.reserved.bytes";
+    public static final String NETTY_DIRECT_PINNED_BYTES = "app.netty.direct.pinned.bytes";
+    public static final String NETTY_MEMORY_SAMPLE_DURATION_MS =
+            "app.netty.memory.sample.duration.ms";
+    public static final String NETTY_MEMORY_SAMPLE_TIMESTAMP_MS =
+            "app.netty.memory.sample.timestamp.ms";
 
     /* ------------------------ Engine Status Metrics -------------------------- */
 
