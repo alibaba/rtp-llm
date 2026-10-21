@@ -80,5 +80,9 @@ KV key 使用 main C++ 的长度前缀字节身份及模型 namespace：默认 f
 ## 集成提交边界
 
 本分支先合并 next + main，复用 main 原生 frontend/Master/协议。Mock 功能提交只修改 Mock engine 与 tools/mock_bundle。
-单独的生产修复提交保留 BATCH 的 ViT 地址，并修复 frontend 与 CompleteTokenIds 的图片身份编码不一致；不把这两处修复混称为 Mock 能力。
+单独的生产修复提交分别保留 BATCH 的 ViT 地址、对齐 frontend 与 CompleteTokenIds 的图片身份编码，以及允许 prepared V4.1 不带 URL affinity keys 选择 ViT；这些修复与 Mock 功能独立 review。
 旧分支的 Whale 验收记录只对应旧源码，不作为这份集成分支的运行验收。
+
+协议集成 smoke 使用 `vit_protocol_smoke.py --master host:grpc-port --control http://host:mock-control-port --processor-identity <sha256> --output result.json`。
+它使用生成的 protobuf，对真实 Master 调度、Mock ViT、P/D 执行及排空做检查；必须分别启动 NON_BATCH/BATCH 环境。
+覆盖 URL 图片、V4.1 prepared 图片、text-only prepared metadata。此客户端不覆盖真实 frontend 的 HTTP 入口、原生扩展加载或真实图片预处理。
