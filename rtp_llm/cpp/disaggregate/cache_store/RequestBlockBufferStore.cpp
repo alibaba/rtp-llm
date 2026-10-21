@@ -224,7 +224,7 @@ bool RequestBlockBufferStore::regUserBuffers(const std::vector<std::shared_ptr<B
     for (auto& buffer : buffers) {
         buffer_map_[buffer->key] = buffer;
     }
-    RTP_LLM_LOG_INFO("reg user buffer count %d", buffers.size());
+    RTP_LLM_LOG_DEBUG("reg user buffer count %d", buffers.size());
     return true;
 }
 

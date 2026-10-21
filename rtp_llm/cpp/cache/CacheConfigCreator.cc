@@ -106,7 +106,8 @@ void configureLayeredPrefill(CacheConfig&             config,
     // validation below so unsupported configurations still fail clearly.
     const char* layout_env = std::getenv("RTP_LLM_DSA_PREFILL_LAYOUT");
     if ((!layout_env || !*layout_env)
-        && (kv_config.memory_cache_size_mb <= 0 || !config.use_mla || !config.is_sparse || config.groupNums() != 1
+        && (parallelism.role_type != RoleType::PREFILL || kv_config.memory_cache_size_mb <= 0
+            || !config.use_mla || !config.is_sparse || config.groupNums() != 1
             || config.use_independent_block_pools || config.layer_to_indexer_kv_slot.empty() || config.layer_num <= 1
             || kv_config.enable_remote_cache || nonnegativeEnv("RTP_LLM_DSA_MLA_HOST_CACHE_MB"))) {
         return;

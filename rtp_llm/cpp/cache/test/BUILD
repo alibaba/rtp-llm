@@ -188,6 +188,15 @@ cc_test(
 )
 
 cc_test(
+    name = "layered_prefill_block_pool_test",
+    srcs = ["BlockPoolTest.cc"],
+    copts = test_copts,
+    deps = test_deps + [":block_pool_test_helper"],
+    args = ["--gtest_filter=BlockPoolTest.LayeredPrefill*"],
+    tags = ["manual"],
+)
+
+cc_test(
     name = "pinned_mla_block_pool_test",
     srcs = ["BlockPoolTest.cc"],
     copts = test_copts,
