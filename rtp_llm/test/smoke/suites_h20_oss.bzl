@@ -174,7 +174,7 @@ def h20_oss_suites():
     native.test_suite(
         name = "smoke_h20_dense",
         tests = [
-            # Paired Prefill/Decode cases: legacy controls and P2P transfer paths.
+            # Prefill/Decode P2P cases; repeated entrance names below share the same tests.
             # Dense models cover asymmetric TP, DP routing and prefix reuse.
             smoke_test(
                 name="dense_dp_sep_tp2",
@@ -598,7 +598,7 @@ def h20_oss_suites():
                 },
                 gpu_type = ["H20_CU13"],
             ),
-            # Paired P2P counterpart to the legacy PD case.
+            # Direct Decode HTTP entry; the companion case uses a separate Frontend.
             smoke_test(
                 name="next_pd_decode_entrance",
                 task_info="data/model/qwen3_next/q_r_next_fp8_tp2_pd_sep_decode_entrance.json",
