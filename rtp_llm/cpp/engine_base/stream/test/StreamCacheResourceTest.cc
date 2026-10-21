@@ -990,11 +990,14 @@ TEST_F(StreamCacheResourceTest, P2PRegistrationWaitsForAllocatorMaterialization)
     auto& resource = stream_->streamCacheResource();
     ASSERT_TRUE(resource.waitForAllocatorLoad().ok());
     ASSERT_GT(resource.curBlocksNum(), 0u);
-    ASSERT_EQ(resource.batch_kv_cache_resource_->batchSize(), 1);
-    const auto                    tags = resource.batch_kv_cache_resource_->cacheResource(0).groupTags();
-    std::vector<BlockIndicesType> allocated_blocks;
-    for (const auto& tag : tags) {
-        allocated_blocks.push_back(resource.batch_kv_cache_resource_->blocks(0, tag));
+    const int batch_size = resource.batch_kv_cache_resource_->batchSize();
+    ASSERT_GT(batch_size, 0);
+    const auto                                 tags = resource.batch_kv_cache_resource_->cacheResource(0).groupTags();
+    std::vector<std::vector<BlockIndicesType>> allocated_blocks(batch_size);
+    for (int batch = 0; batch < batch_size; ++batch) {
+        for (const auto& tag : tags) {
+            allocated_blocks[batch].push_back(resource.batch_kv_cache_resource_->blocks(batch, tag));
+        }
     }
     resource.batch_kv_cache_resource_->clearBlocks();
     auto context                     = makeAllocatorLoadContext(1, {Tier::HOST});
@@ -1008,8 +1011,11 @@ TEST_F(StreamCacheResourceTest, P2PRegistrationWaitsForAllocatorMaterialization)
 
     // Model the allocator callback publishing its physical targets before completion.
     // KVCacheResource copies share BlockIds; preserve the physical IDs by value.
-    for (size_t i = 0; i < tags.size(); ++i) {
-        resource.batch_kv_cache_resource_->setBatchBlocks(0, tags[i], allocated_blocks[i]);
+    for (int batch = 0; batch < batch_size; ++batch) {
+        for (size_t i = 0; i < tags.size(); ++i) {
+            resource.batch_kv_cache_resource_->setBatchBlocks(batch, tags[i], allocated_blocks[batch][i]);
+            EXPECT_EQ(resource.batch_kv_cache_resource_->blocks(batch, tags[i]), allocated_blocks[batch][i]);
+        }
     }
     ASSERT_GT(resource.curBlocksNum(), 0u);
     ASSERT_TRUE(context->completeTransfers(1, true));
