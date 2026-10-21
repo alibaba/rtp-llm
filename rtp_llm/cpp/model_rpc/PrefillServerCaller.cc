@@ -186,10 +186,11 @@ PrefillServerCaller::callPrefill(const GenerateInputPB* request,
         RTP_LLM_LOG_WARNING("request [%lld] get grpc connection to prefill failed, addr: %s",
                             request->request_id(),
                             prefill_addr.c_str());
-        context->async_state_->trace_status = grpcStatusFromErrorInfo(connect_status.status());
-        return ErrorInfo(ErrorCode::GET_CONNECTION_FAILED,
-                         "Prefill GenerateStreamCall getConnection peer=" + prefill_addr + " key=" + unique_key + ": "
-                             + connect_status.status().ToString());
+        const ErrorInfo error(ErrorCode::GET_CONNECTION_FAILED,
+                              "Prefill GenerateStreamCall getConnection peer=" + prefill_addr + " key=" + unique_key
+                                  + ": " + connect_status.status().ToString());
+        context->async_state_->trace_status = grpcStatusFromErrorInfo(error);
+        return error;
     }
 
     auto stub = connect_status.value().stub;
