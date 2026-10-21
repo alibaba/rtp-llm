@@ -46,6 +46,8 @@ public class MetricConstant {
      */
     public static final String ENGINE_STATUS_CHECK_FAIL = "app.engine.health.check.fail";
 
+    public static final String STATUS_FAILURE_DETAIL = "app.status.failure.detail";
+
     /**
      * Master load balancing service total QPS
      */
@@ -394,6 +396,8 @@ public class MetricConstant {
      * gRPC call count
      */
     public static final String GRPC_CALL_COUNT = "app.grpc.call.count";
+    public static final String GRPC_CALL_FAILURE = "app.grpc.call.failure";
+    public static final String GRPC_DELIVERY_DELAY = "app.grpc.delivery.delay_ms";
 
     /**
      * gRPC connection duration in microseconds

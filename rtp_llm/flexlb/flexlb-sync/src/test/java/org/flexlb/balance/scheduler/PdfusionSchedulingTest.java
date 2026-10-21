@@ -23,6 +23,7 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.testfixture.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskPhase;
+import org.flexlb.service.monitor.StatusFailureReporter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
@@ -85,7 +86,7 @@ class PdfusionSchedulingTest {
                         }), new AtomicLong()::incrementAndGet,
                         lifecycle, new DeliveryMetrics(reporter))
                 : new RouteDeliveryStrategy(lifecycle, new DeliveryMetrics(reporter));
-        EndpointRegistry endpoints = new EndpointRegistry(service, new EndpointEventProjector(lifecycle), reporter,
+        EndpointRegistry endpoints = new EndpointRegistry(service, new EndpointEventProjector(lifecycle, mock(StatusFailureReporter.class)), reporter,
                 delivery, availability);
         WorkerStatus worker = WorkerStatusTestFixtures.readyForScheduling(WorkerStatus.createDiscovered(RoleType.PDFUSION, "g1", "127.0.0.1", 8080, 8081, "test"));
         WorkerStatusResponse status = new WorkerStatusResponse();

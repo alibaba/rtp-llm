@@ -170,7 +170,7 @@ public final class WorkerDirectory {
 
         WorkerStatus.PollHealth health = status.pollHealth();
         status.trace().recordUnavailable(reason, health.lastSuccessfulPollUs(),
-                health.consecutiveTransportFailures());
+                health.consecutiveWorkerFailures());
 
         WorkerEndpoint expected = endpointRegistry.get(
                 role, address, status);

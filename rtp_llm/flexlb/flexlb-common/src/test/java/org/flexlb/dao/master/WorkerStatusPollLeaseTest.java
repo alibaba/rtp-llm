@@ -13,9 +13,11 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.LockSupport;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class WorkerStatusPollLeaseTest {
@@ -70,7 +72,7 @@ class WorkerStatusPollLeaseTest {
             assertTrue(status.beginRetirementAfterEndpointGateClosed());
         } finally { status.lock.unlock(); }
         status.recordStatusRpcResult(lease, true, true, null);
-        org.junit.jupiter.api.Assertions.assertSame(health, status.pollHealth());
+        assertSame(health, status.pollHealth());
         lease.close();
         assertNull(status.tryBeginStatusPoll(2L));
         assertNull(status.tryBeginCachePoll(2L));
@@ -84,7 +86,7 @@ class WorkerStatusPollLeaseTest {
         WorkerStatus.PollLease second = status.tryBeginStatusPoll(2L);
         var health = status.pollHealth();
         status.recordStatusRpcResult(first, true, true, null);
-        org.junit.jupiter.api.Assertions.assertSame(health, status.pollHealth());
+        assertSame(health, status.pollHealth());
         status.recordStatusRpcResult(second, true, true, null);
         assertTrue(status.pollHealth().reportedAlive());
         second.close();
@@ -104,6 +106,88 @@ class WorkerStatusPollLeaseTest {
         assertNull(status.tryBeginStatusPoll(1L));
         second.close();
         assertNotNull(status.tryBeginStatusPoll(1L));
+    }
+
+    @Test
+    @Timeout(5)
+    void concurrentDuplicateNotAliveReportsCountOnlyOneWorkerFailure() throws Exception {
+        WorkerStatus status = workerStatus();
+        try (var initial = status.tryBeginStatusPoll(1L)) {
+            status.recordStatusRpcResult(initial, true, true, null);
+        }
+        try (var lease = status.tryBeginStatusPoll(2L);
+             var executor = Executors.newFixedThreadPool(8)) {
+            var start = new CountDownLatch(1);
+            var calls = new ArrayList<Future<?>>();
+            for (int i = 0; i < 8; i++) {
+                calls.add(executor.submit(() -> {
+                    start.await();
+                    status.recordStatusRpcResult(lease, true, false, null);
+                    return null;
+                }));
+            }
+            start.countDown();
+            for (var call : calls) {
+                call.get(2, TimeUnit.SECONDS);
+            }
+            assertEquals(1L, status.pollHealth().consecutiveWorkerFailures());
+            assertTrue(status.trace().snapshot().statusPoll().times().healthMs() >= 0L);
+            assertTrue(status.isAvailableForScheduling());
+            assertNull(status.retirementReason());
+            var recorded = status.pollHealth();
+            status.recordStatusRpcResult(lease, true, true, null);
+            assertSame(recorded, status.pollHealth());
+        }
+    }
+
+    @Test
+    void invalidFirstResultCannotBeReclassifiedByDuplicateCallbacks() {
+        WorkerStatus status = workerStatus();
+        try (var lease = status.tryBeginStatusPoll(1L)) {
+            status.recordStatusRpcResult(lease, false, false, null);
+            var health = status.pollHealth();
+            for (int i = 0; i < 3; i++) {
+                status.recordStatusRpcResult(lease, true, false, null);
+            }
+            status.recordStatusRpcResult(lease, true, true, null);
+            assertSame(health, status.pollHealth());
+            assertEquals(0L, health.consecutiveWorkerFailures());
+            assertFalse(status.isAvailableForScheduling());
+            assertNull(status.retirementReason());
+        }
+    }
+
+    @Test
+    void unconfirmedFirstResultConsumesTheLeaseWithoutPublishingHealth() {
+        WorkerStatus status = workerStatus();
+        try (var lease = status.tryBeginStatusPoll(1L)) {
+            var health = status.pollHealth();
+            status.recordStatusRpcResult(lease, false, false, new java.net.ConnectException());
+            for (int i = 0; i < 3; i++) {
+                status.recordStatusRpcResult(lease, true, false, null);
+            }
+            status.recordStatusRpcResult(lease, true, true, null);
+            assertSame(health, status.pollHealth());
+            assertEquals(0L, health.consecutiveWorkerFailures());
+            assertFalse(status.isAvailableForScheduling());
+            assertNull(status.retirementReason());
+        }
+    }
+
+    @Test
+    void oldGenerationLeaseCannotUpdateTheReplacementAtTheSameAddress() {
+        WorkerStatus old = workerStatus();
+        WorkerStatus replacement = workerStatus();
+        try (var oldLease = old.tryBeginStatusPoll(1L);
+             var replacementLease = replacement.tryBeginStatusPoll(1L)) {
+            var health = replacement.pollHealth();
+            replacement.recordStatusRpcResult(oldLease, true, true, null);
+            replacement.recordStatusRpcResult(oldLease, true, false, null);
+            assertSame(health, replacement.pollHealth());
+            replacement.recordStatusRpcResult(replacementLease, true, true, null);
+            assertTrue(replacement.isAvailableForScheduling());
+            assertEquals(0L, replacement.pollHealth().consecutiveWorkerFailures());
+        }
     }
 
     @Test

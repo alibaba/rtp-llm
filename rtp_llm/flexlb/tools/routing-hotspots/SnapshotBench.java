@@ -15,6 +15,8 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.*;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.config.ConfigService;
+import org.flexlb.metric.NoOpFlexMonitor;
+import org.flexlb.service.monitor.StatusFailureReporter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 
@@ -69,7 +71,7 @@ public class SnapshotBench {
         var config = config();
         // No scheduler thread or RPCs. Mutations still use the real ownership ledger and lock.
         var runtime = new WorkerBatcher("bench-" + seed, null, config, strategy,
-                new EndpointEventProjector(registry));
+                new EndpointEventProjector(registry, new StatusFailureReporter(new NoOpFlexMonitor())));
         Field lockField = WorkerBatcher.class.getDeclaredField("queueLock");
         lockField.setAccessible(true);
         var lock = (ReentrantLock) lockField.get(runtime);
