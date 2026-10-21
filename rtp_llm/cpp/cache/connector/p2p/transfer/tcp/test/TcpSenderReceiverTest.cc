@@ -184,6 +184,58 @@ TEST_F(TcpSenderOnlyTest, D1_ConnectionFailed_ReceiverNotRunning) {
 
 // B1: Receiver is running but has not called recv(); the RPC enters wait_tasks_
 //     and times out after the deadline.
+TEST_F(TcpSenderOnlyTest, BusyStagedScratchSelectsDirectCopyWithoutWaitingForItsOwner) {
+    std::unique_lock<std::mutex> owner(sender_->staged_scratch_mutex_);
+    auto source = torch::ones({64}, torch::TensorOptions(torch::kUInt8).device(torch::kCUDA));
+    auto target = torch::zeros({64}, torch::kUInt8);
+    std::vector<CopyTask> tasks(4);
+    for (size_t i = 0; i < tasks.size(); ++i) {
+        tasks[i].src_ptr = source.data_ptr<uint8_t>() + 16 * i;
+        tasks[i].dst_ptr = target.data_ptr<uint8_t>() + 16 * i;
+        tasks[i].size = 16;
+    }
+    auto attempt = std::async(std::launch::async, [&] {
+        return sender_->tryStagedGatherCopyToHost(tasks, 0);
+    });
+    const auto ready = attempt.wait_for(std::chrono::seconds(5));
+    // Keep the owner locked through the observation; release on every path
+    // before joining so a regression cannot hang test teardown.
+    EXPECT_EQ(ready, std::future_status::ready);
+    owner.unlock();
+    EXPECT_FALSE(attempt.get());
+}
+
+TEST_F(TcpSenderOnlyTest, BusyStagedScratchDirectFallbackPreservesEverySerializedByte) {
+    auto source = torch::arange(64, torch::TensorOptions(torch::kUInt8).device(torch::kCUDA));
+    at::cuda::getCurrentCUDAStream().synchronize();
+    SendRequest request;
+    request.unique_key = "busy-staged-byte-check";
+    for (int i = 0; i < 4; ++i) {
+        auto block = std::make_shared<KeyBlockInfo>();
+        block->blocks.push_back(BlockInfo{true, 0, 0, source.data_ptr<uint8_t>() + 16 * i, 16});
+        request.block_info.emplace(100 + i, std::move(block));
+    }
+    auto metrics = std::make_shared<TransferClientMetricsCollector>();
+    std::unique_lock<std::mutex> owner(sender_->staged_scratch_mutex_);
+    auto building = std::async(std::launch::async, [&] { return sender_->makeTransferRequest(request, metrics); });
+    const auto ready = building.wait_for(std::chrono::seconds(5));
+    EXPECT_EQ(ready, std::future_status::ready);
+    owner.unlock();
+    auto serialized = building.get();
+    ASSERT_NE(serialized, nullptr);
+    ASSERT_EQ(serialized->blocks_size(), 4);
+    for (const auto& block : serialized->blocks()) {
+        ASSERT_GE(block.key(), 100);
+        ASSERT_LT(block.key(), 104);
+        ASSERT_EQ(block.blocks_size(), 1);
+        const auto& content = block.blocks(0).content();
+        ASSERT_EQ(content.size(), 16u);
+        for (size_t byte = 0; byte < content.size(); ++byte) {
+            EXPECT_EQ(static_cast<uint8_t>(content[byte]), 16 * (block.key() - 100) + byte);
+        }
+    }
+}
+
 TEST_F(TcpSenderOnlyTest, ExpiredTransferDoesNotSubmitTcpRpc) {
     auto request = std::make_shared<::tcp_transfer::TcpLayerBlockTransferRequest>();
     request->set_unique_key("expired-before-submit");

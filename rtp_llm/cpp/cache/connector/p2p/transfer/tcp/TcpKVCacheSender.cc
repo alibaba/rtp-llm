@@ -258,7 +258,12 @@ bool TcpKVCacheSender::tryStagedGatherCopyToHost(std::vector<CopyTask>& copy_tas
         params.host_bytes = offset + task.size;
     }
 
-    std::lock_guard<std::mutex> lock(staged_scratch_mutex_);
+    // The scratch is shared, but sender threads need not queue behind its GPU
+    // copy. The caller already supports independent direct D2H copies.
+    std::unique_lock<std::mutex> lock(staged_scratch_mutex_, std::try_to_lock);
+    if (!lock.owns_lock()) {
+        return false;
+    }
     return execStagedMemoryCopy(params, &staged_scratch_);
 }
 
