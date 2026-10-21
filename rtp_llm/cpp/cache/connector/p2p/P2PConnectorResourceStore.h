@@ -68,9 +68,12 @@ public:
     // the next checkTimeout() cycle.
     void markCancelled(const std::string& unique_key, int64_t request_deadline_ms);
 
-    // Record a terminal request after its resource has been consumed. Late
-    // side-channel notifications and duplicate StartLoad calls are rejected.
-    void markTerminal(const std::string& unique_key, int64_t request_deadline_ms);
+    enum class TerminalReason { COMPLETED, FAILED, TIMED_OUT, CANCELLED };
+
+    // Seal a request and retire any remaining resource. The explicit reason
+    // distinguishes cancellation and timeout metrics from other terminal paths.
+    // Late side-channel notifications and duplicate StartLoad calls are rejected.
+    void markTerminal(const std::string& unique_key, int64_t request_deadline_ms, TerminalReason reason);
 
     std::shared_ptr<P2PConnectorResourceEntry> waitAndStealResource(const std::string&    unique_key,
                                                                     int64_t               deadline_ms,

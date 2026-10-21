@@ -208,10 +208,12 @@ bool P2PConnectorResourceStore::addResource(const std::shared_ptr<Meta>& meta,
 }
 
 void P2PConnectorResourceStore::markCancelled(const std::string& unique_key, int64_t request_deadline_ms) {
-    markTerminal(unique_key, request_deadline_ms);
+    markTerminal(unique_key, request_deadline_ms, TerminalReason::CANCELLED);
 }
 
-void P2PConnectorResourceStore::markTerminal(const std::string& unique_key, int64_t request_deadline_ms) {
+void P2PConnectorResourceStore::markTerminal(const std::string& unique_key,
+                                             int64_t request_deadline_ms,
+                                             TerminalReason reason) {
     std::optional<int64_t>                                    request_id;
     std::optional<PrefillResultStore::SideChannelData> retired;
     {
@@ -230,7 +232,9 @@ void P2PConnectorResourceStore::markTerminal(const std::string& unique_key, int6
         auto resource = resource_map_.find(unique_key);
         if (resource != resource_map_.end()) {
             request_id = resource->second->request_id;
-            reportMetrics(false, true, resource->second->add_time_us);
+            reportMetrics(reason == TerminalReason::TIMED_OUT,
+                          reason == TerminalReason::CANCELLED,
+                          resource->second->add_time_us);
             resource_map_.erase(resource);
         }
         scheduleDeadlineCheckLocked(unique_key, it->second);

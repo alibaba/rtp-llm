@@ -157,7 +157,7 @@ void P2PConnectorPrefill::processRead(const P2PConnectorStartLoadRequestPB& requ
     const int64_t      now_ms     = currentTimeMs();
     if (unique_key.empty() || request.timeout_ms() <= 0 || request.timeout_ms() > std::numeric_limits<int32_t>::max()) {
         if (!unique_key.empty()) {
-            stream_store_->markTerminal(unique_key, 0);
+            stream_store_->markTerminal(unique_key, 0, P2PConnectorResourceStore::TerminalReason::FAILED);
             stream_store_->clearPrefillPayload(unique_key);
         }
         response.set_error_code(transErrorCodeToRPC(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED));
@@ -182,7 +182,7 @@ void P2PConnectorPrefill::processRead(const P2PConnectorStartLoadRequestPB& requ
             RTP_LLM_LOG_WARNING("handleRead rejected StartLoad, unique_key=%s, error=%s",
                                 unique_key.c_str(),
                                 plan_error.ToString().c_str());
-            stream_store_->markTerminal(unique_key, 0);
+            stream_store_->markTerminal(unique_key, 0, P2PConnectorResourceStore::TerminalReason::FAILED);
             stream_store_->clearPrefillPayload(unique_key);
             response.set_error_code(transErrorCodeToRPC(plan_error.code()));
             response.set_error_message(plan_error.ToString());
@@ -198,7 +198,9 @@ void P2PConnectorPrefill::processRead(const P2PConnectorStartLoadRequestPB& requ
         transfer_deadline_ms = std::min(transfer_deadline_ms, request_deadline_ms);
     }
     if (cancelled || request_deadline_ms <= 0 || currentTimeMs() >= transfer_deadline_ms) {
-        stream_store_->markTerminal(unique_key, 0);
+        stream_store_->markTerminal(unique_key, 0,
+                                    cancelled ? P2PConnectorResourceStore::TerminalReason::CANCELLED
+                                              : P2PConnectorResourceStore::TerminalReason::TIMED_OUT);
         stream_store_->clearPrefillPayload(unique_key);
         response.set_error_code(transErrorCodeToRPC(cancelled ? ErrorCode::CANCELLED : ErrorCode::GENERATE_TIMEOUT));
         response.set_error_message(cancelled ? "request registration wait cancelled" :
@@ -279,7 +281,7 @@ void P2PConnectorPrefill::processRead(const P2PConnectorStartLoadRequestPB& requ
         // Seal the consumed request before clearing its side-channel entry.
         // Otherwise a late first-token notification can recreate the entry
         // with the request-level deadline after this handler returns.
-        stream_store_->markTerminal(unique_key, request_deadline_ms);
+        stream_store_->markTerminal(unique_key, request_deadline_ms, P2PConnectorResourceStore::TerminalReason::FAILED);
         stream_store_->clearPrefillPayload(unique_key);
         response.set_error_code(transErrorCodeToRPC(error_info.code()));
         response.set_error_message(error_info.ToString());
@@ -295,7 +297,7 @@ void P2PConnectorPrefill::processRead(const P2PConnectorStartLoadRequestPB& requ
     // waitPrefillPayloadAndFillResponse clears the currently visible payload. Mark terminal
     // and clear once more to close the race with a notification arriving
     // between its final clear and this handler returning.
-    stream_store_->markTerminal(unique_key, request_deadline_ms);
+    stream_store_->markTerminal(unique_key, request_deadline_ms, P2PConnectorResourceStore::TerminalReason::COMPLETED);
     stream_store_->clearPrefillPayload(unique_key);
     RTP_LLM_LOG_DEBUG("[PD-DIAG] handleRead complete, unique_key=%s, request_id=%ld, "
                      "total_cost_us=%ld, wait_resource_us=%ld, send_us=%ld",
@@ -458,7 +460,7 @@ grpc::Status P2PConnectorPrefill::waitForResourceEntry(
     // The transfer wait window ended before the resource arrived. This
     // StartLoad attempt is terminal; retain that state for one hour so
     // duplicate or delayed calls cannot wait again.
-    stream_store_->markCancelled(unique_key, request_deadline_ms);
+    stream_store_->markTerminal(unique_key, request_deadline_ms, P2PConnectorResourceStore::TerminalReason::TIMED_OUT);
     return grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "resource wait transfer deadline exceeded");
 }
 
