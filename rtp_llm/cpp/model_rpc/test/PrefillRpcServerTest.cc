@@ -635,7 +635,7 @@ TEST(PDCancelRegistryTest, DownstreamCompletionReplacesEarlierExpirationWithoutS
     }
 }
 
-TEST(PDCancelRegistryTest, UnconfirmedCanceledRequestSurvivesExpirationAndRemainsPending) {
+TEST(PDCancelRegistryTest, UnconfirmedCancelCannotExpireBeforeLocalTerminalButRetryIsBoundedAfterward) {
     auto meta = std::make_shared<RpcServerRuntimeMeta>();
     PDCancelRegistry registry(meta);
     GenerateInputPB request;
@@ -652,20 +652,79 @@ TEST(PDCancelRegistryTest, UnconfirmedCanceledRequestSurvivesExpirationAndRemain
     EXPECT_TRUE(registry.isCanceled("pending111"));
     EXPECT_EQ(registry.pending().size(), 1u);
     ASSERT_TRUE(registry.complete(handle));
-    {
-        std::lock_guard<std::mutex> lock(registry.mutex_);
-        registry.trimLocked(handle->retain_until_ms);
-        EXPECT_EQ(registry.entries_.count(111), 1u);
-    }
+    ASSERT_FALSE(handle->downstream_done);
     ASSERT_EQ(registry.pending().size(), 1u);
-    registry.finishDownstream(handle);
-    EXPECT_TRUE(registry.pending().empty());
     {
         std::lock_guard<std::mutex> lock(registry.mutex_);
+        registry.trimLocked(handle->retain_until_ms - 1);
+        EXPECT_EQ(registry.entries_.count(111), 1u);
         registry.trimLocked(handle->retain_until_ms);
+        EXPECT_EQ(registry.entries_.count(111), 0u);
+        EXPECT_TRUE(registry.entry_expirations_.empty());
     }
+    EXPECT_FALSE(handle->downstream_done);  // Expiry is not a physical-stop ACK.
+    EXPECT_TRUE(registry.pending().empty());
     EXPECT_FALSE(registry.find(111));
     EXPECT_FALSE(registry.isCanceled("pending111"));
+    EXPECT_TRUE(meta->getEngineScheduleInfo(0).running_task_info_list.empty());
+}
+
+TEST(PDCancelRegistryTest, LateRemoteAckCannotRemoveReplacementRequestAfterRetryExpiry) {
+    auto             meta = std::make_shared<RpcServerRuntimeMeta>();
+    PDCancelRegistry registry(meta);
+    GenerateInputPB  request;
+    request.set_request_id(116);
+    PDCancelRegistry::Handle old_handle;
+    ASSERT_TRUE(registry.admit(request, "old116", "prefill:123", currentTimeMs() + 1000, old_handle).ok());
+    ASSERT_EQ(registry.cancel(116, {ErrorCode::CANCELLED, "old cancel"}), CANCEL_STATUS_ACCEPTED);
+    registry.finishLocal(old_handle);
+    ASSERT_TRUE(registry.complete(old_handle));
+    {
+        std::lock_guard<std::mutex> lock(registry.mutex_);
+        registry.trimLocked(old_handle->retain_until_ms);
+    }
+    PDCancelRegistry::Handle replacement;
+    ASSERT_TRUE(registry.admit(request, "new116", "prefill:456", currentTimeMs() + 1000, replacement).ok());
+    ASSERT_EQ(registry.cancel(116, {ErrorCode::CANCELLED, "new cancel"}), CANCEL_STATUS_ACCEPTED);
+    registry.finishLocal(replacement);
+    ASSERT_TRUE(registry.complete(replacement));
+    const auto replacement_expiry = replacement->retain_until_ms;
+    registry.finishDownstream(old_handle);
+    registry.finishLocal(old_handle);
+    EXPECT_FALSE(old_handle->downstream_done);
+    EXPECT_FALSE(replacement->downstream_done);
+    EXPECT_EQ(registry.find(116), replacement);
+    ASSERT_EQ(registry.pending().size(), 1u);
+    EXPECT_EQ(registry.pending().front(), replacement);
+    EXPECT_EQ(replacement->retain_until_ms, replacement_expiry);
+    EXPECT_TRUE(registry.isCanceled("new116"));
+    {
+        std::lock_guard<std::mutex> lock(registry.mutex_);
+        EXPECT_EQ(registry.entry_expirations_.size(), 1u);
+    }
+}
+
+TEST(PDCancelRegistryTest, ActiveReadCannotBeRetiredByCancellationRetention) {
+    auto             meta = std::make_shared<RpcServerRuntimeMeta>();
+    PDCancelRegistry registry(meta);
+    GenerateInputPB  request;
+    request.set_request_id(117);
+    PDCancelRegistry::Handle handle;
+    ASSERT_TRUE(registry.admit(request, "reading117", "prefill:123", currentTimeMs() + 1000, handle).ok());
+    ASSERT_EQ(registry.cancel(117, {ErrorCode::CANCELLED, "cancel"}), CANCEL_STATUS_ACCEPTED);
+    registry.beginRead("reading117");
+    registry.finishLocal(handle);
+    EXPECT_FALSE(registry.complete(handle));
+    {
+        std::lock_guard<std::mutex> lock(registry.mutex_);
+        registry.trimLocked(handle->retain_until_ms);
+    }
+    EXPECT_EQ(registry.find(117), handle);
+    EXPECT_TRUE(registry.isCanceled("reading117"));
+    EXPECT_FALSE(handle->terminal);
+    registry.endRead("reading117");
+    ASSERT_TRUE(registry.complete(handle));
+    EXPECT_FALSE(handle->downstream_done);
 }
 
 TEST(PDCancelRegistryTest, CancelKeyIndexKeepsOtherCanceledRequestWithSameKey) {

@@ -1,8 +1,13 @@
 #include "rtp_llm/cpp/model_rpc/PDCancelRegistry.h"
+#include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
 
 void PDCancelRegistry::scheduleExpirationLocked(const Handle& handle, int64_t expires_at_ms) {
+    const auto current = entries_.find(handle->identity.request_id);
+    if (current == entries_.end() || current->second != handle) {
+        return;
+    }
     // Keep one scheduled expiration per record, even when downstream completion
     // shortens an earlier deadline-based retention period.
     entry_expirations_.erase({handle->retain_until_ms, handle->identity.request_id});
@@ -11,6 +16,7 @@ void PDCancelRegistry::scheduleExpirationLocked(const Handle& handle, int64_t ex
 }
 
 void PDCancelRegistry::trimLocked(int64_t now_ms) {
+    size_t expired_remote_retries = 0;
     while (!fence_expirations_.empty() && fence_expirations_.begin()->first <= now_ms) {
         const auto [expires_at_ms, request_id] = *fence_expirations_.begin();
         fence_expirations_.erase(fence_expirations_.begin());
@@ -27,11 +33,15 @@ void PDCancelRegistry::trimLocked(int64_t now_ms) {
             continue;
         }
         const auto& e = it->second;
-        if (!e->local_done || (e->canceled.load() && (!e->terminal || !e->downstream_done))
-            || e->retain_until_ms != expires_at_ms) {
+        if (!e->local_done || (e->canceled.load() && !e->terminal) || e->retain_until_ms != expires_at_ms) {
             continue;
         }
         if (e->canceled.load()) {
+            if (!e->downstream_done) {
+                // complete() already proved local physical cleanup. Retiring this
+                // lightweight retry record must never masquerade as a remote ACK.
+                ++expired_remote_retries;
+            }
             auto key = canceled_keys_.find(e->unique_key);
             if (key != canceled_keys_.end() && --key->second == 0) {
                 canceled_keys_.erase(key);
@@ -39,6 +49,10 @@ void PDCancelRegistry::trimLocked(int64_t now_ms) {
         }
         pending_cancels_.erase(request_id);
         entries_.erase(it);
+    }
+    if (expired_remote_retries != 0) {
+        RTP_LLM_LOG_WARNING("PD cancel retry retention expired after local physical cleanup, unconfirmed_peers=%zu",
+                            expired_remote_retries);
     }
 }
 
@@ -164,7 +178,8 @@ std::vector<PDCancelRegistry::Handle> PDCancelRegistry::pending() {
 
 void PDCancelRegistry::finishDownstream(const Handle& handle) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (handle->downstream_done) {
+    const auto                  current = entries_.find(handle->identity.request_id);
+    if (current == entries_.end() || current->second != handle || handle->downstream_done) {
         return;
     }
     handle->downstream_done = true;
@@ -215,7 +230,8 @@ bool PDCancelRegistry::complete(const Handle& handle) {
         return false;
     handle->terminal = true;
     // Local terminal is independent of remote control-plane availability. Keep
-    // the cancellation fence and retry record until Prefill confirms cleanup.
+    // the cancellation fence and bounded retry record independently of Prefill
+    // availability. Retention expiry only retires bookkeeping after this local proof.
     if (handle->downstream_done) {
         pending_cancels_.erase(handle->identity.request_id);
     }

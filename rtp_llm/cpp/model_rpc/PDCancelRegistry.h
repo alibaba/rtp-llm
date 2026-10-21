@@ -18,7 +18,7 @@
 namespace rtp_llm {
 
 // Decode publishes its terminal after local physical cleanup, retaining the
-// control record separately until Prefill cleanup is confirmed.
+// control record separately until Prefill cleanup is confirmed or its retention expires.
 // Admission and the cancel latch share a lock, including cancel-before-enqueue.
 class PDCancelRegistry {
 public:
