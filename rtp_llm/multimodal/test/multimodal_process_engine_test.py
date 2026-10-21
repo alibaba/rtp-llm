@@ -2204,7 +2204,7 @@ class MMProcessEngineGreenNetTest(TestCase):
             **kwargs,
         )
 
-    def test_v41_cache_hits_still_inspect_source_for_each_uid(self):
+    def test_v41_cache_hits_reuse_verdict_across_requests_and_uids(self):
         engine, request = self._make_v41_engine_and_request()
         provider = _StubGreenNetProvider(GreenNetVerdict(passed=True))
         engine._greennet_provider = provider
@@ -2214,29 +2214,23 @@ class MMProcessEngineGreenNetTest(TestCase):
                 "encode_images_packed",
                 wraps=engine.mm_part.encode_images_packed,
             ) as encode:
-                result = self._embed_v41_request(engine, request, user_id="uid-allow")
-                self.assertEqual(tuple(result.embeddings[0].shape), (4, 8))
-                for code, expected in (
-                    (2, ExceptionType.UNSAFE_INPUT_CONTENT),
-                    (11, ExceptionType.MM_PROCESS_ERROR),
-                ):
-                    request.request_id += 1
-                    provider._verdict = GreenNetVerdict(
-                        passed=False, code=code, message="inspection refused"
-                    )
-                    with self.assertRaises(FtRuntimeException) as raised:
-                        self._embed_v41_request(engine, request, user_id=f"uid-{code}")
-                    self.assertEqual(raised.exception.exception_type, expected)
-                self.assertEqual(encode.call_count, 1)
-            self.assertEqual(provider.user_ids, ["uid-allow", "uid-2", "uid-11"])
-            self.assertEqual(provider.request_ids, ["101", "102", "103"])
-            for urls in provider.input_urls:
-                self.assertEqual(
-                    base64.b64decode(urls[0].split(",", 1)[1]),
-                    base64.b64decode(
-                        request.multimodal_inputs[0].multimodal_url.split(",", 1)[1]
-                    ),
+                first = self._embed_v41_request(engine, request, user_id="uid-first")
+                self.assertEqual(tuple(first.embeddings[0].shape), (4, 8))
+                provider._verdict = GreenNetVerdict(
+                    passed=False, code=2, message="must not re-inspect a cache hit"
                 )
+                for request_id in (102, 103):
+                    request.request_id = request_id
+                    hit = self._embed_v41_request(
+                        engine, request, user_id=f"uid-{request_id}"
+                    )
+                    torch.testing.assert_close(
+                        hit.embeddings[0], first.embeddings[0], rtol=0, atol=0
+                    )
+                self.assertEqual(encode.call_count, 1)
+            self.assertEqual(provider.calls, 1)
+            self.assertEqual(provider.user_ids, ["uid-first"])
+            self.assertEqual(provider.request_ids, ["101"])
         finally:
             engine.stop()
 
@@ -2251,7 +2245,7 @@ class MMProcessEngineGreenNetTest(TestCase):
         finally:
             engine.stop()
 
-    def test_v41_async_cache_and_hash_hits_require_current_caller_inspection(self):
+    def test_v41_async_cache_and_hash_hits_reuse_verdict(self):
         for hashes_only in (False, True):
             with self.subTest(hashes_only=hashes_only):
                 engine, request = self._make_v41_engine_and_request()
@@ -2264,34 +2258,32 @@ class MMProcessEngineGreenNetTest(TestCase):
                         "encode_images_packed",
                         wraps=engine.mm_part.encode_images_packed,
                     ) as encode:
+                        engine.async_submit(media, request_id=101, user_id="first")
+                        self.assertTrue(
+                            engine.wait_greennet_verdict(
+                                media, request_id=101, user_id="first"
+                            ).passed
+                        )
                         first = engine.get_embedding_result(
-                            media, request_id=101, user_id="allow"
+                            media, request_id=101, user_id="first"
                         )
                         provider._verdict = GreenNetVerdict(
-                            passed=False, code=2, message="blocked"
+                            passed=False, code=2, message="must reuse cached approval"
                         )
-                        with self.assertRaises(FtRuntimeException) as raised:
-                            engine.get_embedding_result(
-                                media,
-                                request_id=102,
-                                user_id="deny",
-                                hashes_only=hashes_only,
-                            )
-                        self.assertEqual(
-                            raised.exception.exception_type,
-                            ExceptionType.UNSAFE_INPUT_CONTENT,
+                        hit = engine.get_embedding_result(
+                            media,
+                            request_id=102,
+                            user_id="second",
+                            hashes_only=hashes_only,
                         )
-                        provider._verdict = GreenNetVerdict(
-                            passed=False, code=11, message="inspection failed"
+                        self.assertEqual(len(hit), 1)
+                        self.assertTrue(
+                            engine.wait_greennet_verdict(
+                                media, request_id=103, user_id="third"
+                            ).passed
                         )
-                        verdict = engine.wait_greennet_verdict(
-                            media, request_id=103, user_id="error"
-                        )
-                        self.assertFalse(verdict.passed)
-                        self.assertEqual(verdict.code, 11)
-                        provider._verdict = GreenNetVerdict(passed=True)
                         last = engine.get_embedding_result(
-                            media, request_id=104, user_id="allow-again"
+                            media, request_id=104, user_id="fourth"
                         )
                         torch.testing.assert_close(
                             last[0].embeddings[0],
@@ -2300,10 +2292,10 @@ class MMProcessEngineGreenNetTest(TestCase):
                             atol=0,
                         )
                         self.assertEqual(encode.call_count, 1)
-                    self.assertEqual(
-                        provider.user_ids, ["allow", "deny", "error", "allow-again"]
-                    )
-                    self.assertEqual(provider.cached_verdict_hints, [False] * 4)
+                    self.assertEqual(provider.calls, 1)
+                    self.assertEqual(provider.request_ids, ["101"])
+                    self.assertEqual(provider.user_ids, ["first"])
+                    self.assertEqual(provider.cached_verdict_hints, [False])
                 finally:
                     engine.stop()
 
