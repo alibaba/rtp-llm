@@ -384,7 +384,7 @@ grpc::Status LocalRpcServer::pollBatchStreamOutput(grpc::ServerContext*         
             }
             if (stream->getStatus() != StreamState::FINISHED || stream->hasOutput()) {
                 all_finished = false;
-                if (stream->generateInput()->request_deadline_ms <= currentTimeMs()) {
+                if (stream->deadlineMs() <= currentTimeMs()) {
                     return fail(grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, key + " deadline exceeded"));
                 }
             }

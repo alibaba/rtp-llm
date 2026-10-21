@@ -3158,10 +3158,6 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         ):
             await visitor.batch_enqueue(inputs)
 
-
-
-
-
     async def test_batch_enqueue_pd_empty(self):
         visitor, _ = self._decode_batch_visitor_and_inputs()
         self.assertEqual(await visitor.batch_enqueue([]), [])

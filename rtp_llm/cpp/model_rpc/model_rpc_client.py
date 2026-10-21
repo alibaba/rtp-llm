@@ -418,7 +418,10 @@ def _split_host_port(address: str) -> tuple[str, int]:
         if ":" not in address:
             raise ValueError(f"invalid grpc address: {address}")
         host, port_text = address.rsplit(":", 1)
-    port = int(port_text)
+    try:
+        port = int(port_text)
+    except ValueError as error:
+        raise ValueError(f"invalid grpc address: {address}") from error
     if not host or port < 1 or port > 65535:
         raise ValueError(f"invalid grpc address: {address}")
     return host, port
@@ -1286,7 +1289,6 @@ class ModelRpcClient(object):
             StatusCode.RESOURCE_EXHAUSTED: ExceptionType.MALLOC_ERROR,
             StatusCode.INVALID_ARGUMENT: ExceptionType.INVALID_PARAMS,
             StatusCode.OUT_OF_RANGE: ExceptionType.LONG_PROMPT_ERROR,
-            StatusCode.UNAVAILABLE: ExceptionType.CONNECT_FAILED,
         }
         self._raise_backend_error(
             codes.get(e.code(), ExceptionType.UNKNOWN_ERROR).value,

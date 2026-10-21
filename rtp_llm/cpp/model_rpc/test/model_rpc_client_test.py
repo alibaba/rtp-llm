@@ -56,6 +56,7 @@ from rtp_llm.cpp.model_rpc.model_rpc_client import (
     ModelRpcClient,
     StreamState,
     _selected_pd_separation,
+    _split_host_port,
     _engine_reported_finished,
     _record_client_span_latency,
     _record_client_span_usage,
@@ -1879,7 +1880,7 @@ class ModelRpcClientTest(TestCase):
             error_code=ExceptionType.MM_PROCESS_ERROR.value,
             error_message="original backend failure",
         )
-        for role_type in (RoleType.PDFUSION,):
+        for role_type in (RoleType.PDFUSION, RoleType.VIT):
             for metadata in (None, (("grpc-status-details-bin", details.SerializeToString()),)):
                 with self.subTest(role_type=role_type, structured=bool(metadata)):
                     client = ModelRpcClient([target], {}, 5000, role_type)
@@ -1921,6 +1922,15 @@ class ModelRpcClientTest(TestCase):
                     )
                     if metadata:
                         self.assertIn(details.error_message, caught.exception.message)
+
+    def test_grpc_address_errors_include_the_original_address(self):
+        for address in ("host:", "host:abc", "[::1]:", "[::1]:abc", "host:0", "host:65536"):
+            with self.subTest(address=address):
+                with self.assertRaises(ValueError) as caught:
+                    _split_host_port(address)
+                self.assertEqual(str(caught.exception), f"invalid grpc address: {address}")
+        self.assertEqual(_split_host_port("host:9000"), ("host", 9000))
+        self.assertEqual(_split_host_port("[::1]:9000"), ("::1", 9000))
 
     def test_explicit_decode_role_addr_formats_raw_ipv6_target(self):
         client = ModelRpcClient(["10.0.0.10:10101"], {}, 0, RoleType.DECODE)
