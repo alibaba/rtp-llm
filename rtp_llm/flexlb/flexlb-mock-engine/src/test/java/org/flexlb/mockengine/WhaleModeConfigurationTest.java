@@ -358,8 +358,16 @@ class WhaleModeConfigurationTest {
             var dForwards = decodeEvents.stream().filter(m -> m.containsKey("rtp_llm_model_forward_us"))
                     .map(m -> m.get("rtp_llm_model_forward_us").doubleValue()).toList();
             assertEquals(List.of(2000.0), pForwards, "P reports one sample per batch, in microseconds");
-            assertEquals(java.util.Collections.nCopies(8, direct ? 30000.0 : 2000.0), dForwards,
-                    "D reports each forward step, not full request latency");
+            assertTrue(dForwards.isEmpty(), "legacy DSv4 MTP D does not publish model_forward_us");
+            assertEquals(1, eventMetrics.stream().filter(m -> m.containsKey("rtp_llm_sp_step_latency_us")).count(),
+                    "MTP prefill also owns an execution step sample");
+            var dSteps = decodeEvents.stream().filter(m -> m.containsKey("mock_decode_step_forward_us"))
+                    .map(m -> m.get("mock_decode_step_forward_us").doubleValue()).toList();
+            assertEquals(java.util.Collections.nCopies(8, direct ? 30000.0 : 2000.0), dSteps);
+            assertEquals(1, eventMetrics.stream().filter(m -> m.containsKey("rtp_llm_latency_us")).count());
+            assertEquals(1L, eventMetrics.stream().filter(m -> m.containsKey("rtp_llm_output_token_length"))
+                    .findFirst().orElseThrow().get("rtp_llm_output_token_length").longValue());
+            assertEquals(1, decodeEvents.stream().filter(m -> m.containsKey("rtp_llm_first_token_latency_us")).count());
 
             assertEquals(0, d.getRunningCount());
             assertEquals(8, d.whaleMetrics().get("mock_generate_tokens_total").longValue());

@@ -124,6 +124,9 @@ final class WhaleMockMonitor implements AutoCloseable {
             if (!schedulerMetric(entry.getKey()))
                 throw new IllegalArgumentException("Not a scheduler metric: " + entry.getKey());
             if (!belongsToRole(entry.getKey(), labels)) continue;
+            // Executor REPORT_GAUGE omits empty generate batches; scheduler
+            // running/waiting still report zero so idle state remains visible.
+            if (entry.getKey().equals("rtp_llm_generate_batch_size") && entry.getValue().doubleValue() == 0) continue;
             if (!registered.contains(entry.getKey())) {
                 monitor.register(entry.getKey(), FlexMetricType.GAUGE);
                 registered.add(entry.getKey());
@@ -166,6 +169,7 @@ final class WhaleMockMonitor implements AutoCloseable {
             // short P batches must not dilute them. With no rounds this period,
             // retain the instantaneous gauge so idle engines return to zero.
             if (name.equals("rtp_llm_context_batch_size")) return;
+            if (name.equals("rtp_llm_generate_batch_size") && value.doubleValue() == 0) return;
             // P running size is sampled at execution transitions. FIFO blocks
             // while idle; periodic zeros would bias low-traffic averages.
             // Completion already emits the terminal zero, so preserve that event.

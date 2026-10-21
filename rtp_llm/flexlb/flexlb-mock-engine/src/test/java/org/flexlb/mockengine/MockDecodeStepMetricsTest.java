@@ -7,7 +7,8 @@ class MockDecodeStepMetricsTest {
         var metrics = MockDecodeStepMetrics.values(40, 5, 2);
         assertEquals(16000.0, metrics.get("rtp_llm_sp_estimate_tpot_us"));
         assertEquals(2.5, metrics.get("rtp_llm_sp_avg_accept_token_num"));
-        assertEquals(40000.0, metrics.get("rtp_llm_model_forward_us"));
+        assertEquals(40000.0, metrics.get("mock_decode_step_forward_us"));
+        assertFalse(metrics.containsKey("rtp_llm_model_forward_us"));
     }
     @Test void emptyStepDoesNotInventTpotOrAcceptanceRate() {
         var metrics = MockDecodeStepMetrics.values(40, 0, 0);

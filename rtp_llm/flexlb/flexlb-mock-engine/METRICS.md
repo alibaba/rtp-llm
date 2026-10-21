@@ -8,6 +8,38 @@ HTTP `/metrics` 默认按 role 汇总；`?per_engine=true` 带 `engine_name`、`
 
 `rtp_llm_` 表示有对应真实引擎语义的观测，不保证模拟时间或数值等于真实 GPU。`mock_` 保留模拟器专属状态和口径，不能只换前缀来合并。
 
+## P/D 上报者与线上版本边界
+
+本 Mock 的 Whale forward 对照采用本次 DSv4 MTP 线上基线 `e4a9162f6f` /
+`b501eec968`：`MtpExecutor::prefillStep` 填充 `executor_collector.model_forward_us`，
+Decode 没有填充；`RtpLLMMetrics.cc` 的 `REPORT_GAUGE` 会省略零值。因此
+`rtp_llm_model_forward_us` 只由 P 每执行批上报，D 的模拟 step 耗时保留为
+`mock_decode_step_forward_us`。
+`MtpExecutor::process` 对 P/D 都调用 speculative reporter，因此
+`rtp_llm_sp_step_latency_us` 两边均按执行 step 上报，accept/TPOT 指标仍限 D。
+这不是所有 real 引擎的通用角色规则：NormalExecutor 可在 D 上报 forward，next 的
+MtpExecutor 也已补充 Decode forward 计时。比较这些版本时须按角色选择大盘查询，
+不能把 Mock 基线当成所有版本的能力声明。
+
+`GenerateStream::reportStreamMetrics` 的输入/输出长度、复用长度、有效 context、
+首 token 延迟和流驻留延迟由 P、D 各自流生命周期产生。P 的输出长度是其实际产生的
+首 token（最多 1），不是 D 的最终输出长度；D 的首 token 时间在第一次模拟 token
+推进时冻结，驻留时间在完成时采样，都以 D 自己的进入时间为起点，不冒充 frontend
+端到端延迟。成功终态以外的取消/超时流指标尚未完整模拟。
+
+D 的复用长度取该请求在 D 本地 lease 的初始命中，不能沿用 P 的 `shape.hitTokens`。
+`StreamCacheResource::reportCacheReuseMetrics` 无 P-only 限制；启用复用的 D 也提供
+KV/device/host 复用长度与缓存命中窗口，当前 D 只模拟 device 命中，host 为 0。
+流级 `REPORT_GAUGE` 按 real 省略零值；缓存复用指标的真实 reporter 则允许显式 0，
+两类不能用同一套补零策略。执行 batch size 同样不补空闲 0，
+但 scheduler running/waiting 保留 0，避免混淆执行批均值与当前活跃量。
+
+调度 running/waiting、KV pool 和 WorkerStatus 由 P/D 各自报告；context batch/TPS
+仅在 P，generate batch/TPS 和 speculative accept/TPOT 指标仅在 D；MTP step latency 在两边。
+`rtp_llm_prefill_worker_*` 历史 key 诊断保持 P-only。frontend 的 `py_rtp_*` 继续由
+真实 frontend 上报，Mock 不增加别名。跨 P/D 的 avg 必须明确所比较的阶段；正确
+的生产者范围本身不保证不同生命周期的平均值具有相同含义。
+
 ## 执行 TPS 与墙钟 TPS
 
 Prefill 批次 i 的 C 为实际计算 context token，I 为含复用的输入 token，E 为实测执行微秒：

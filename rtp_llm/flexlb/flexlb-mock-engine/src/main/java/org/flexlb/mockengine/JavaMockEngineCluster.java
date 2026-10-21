@@ -1271,6 +1271,8 @@ public final class JavaMockEngineCluster {
             final int totalSteps;
             /** Σ actual step durations (the per-step exec caliber). */
             double accumulatedExecMs;
+            long firstTokenTimeMs;
+            long initialReuseTokens;
             /** Set under decodeQueueLock when this step's terminal ownership is claimed (cancel may win it first). */
             boolean owned;
             /**
@@ -3935,7 +3937,8 @@ public final class JavaMockEngineCluster {
                     return; // crashed mid-flight: this batch died with the process
                 }
                 // One modeled forward per P batch; excludes waiting and injected delay.
-                reportMetricEvent(Map.of("rtp_llm_model_forward_us", executionMs * 1000.0));
+                reportMetricEvent(Map.of("rtp_llm_model_forward_us", executionMs * 1000.0,
+                        "rtp_llm_sp_step_latency_us", executionMs * 1000.0));
                 int activeCount = 0;
                 // ── prefill_async_partial_fail (execution-phase partial
                 // failure): snapshot the volatile config ONCE for the whole
@@ -3996,17 +3999,13 @@ public final class JavaMockEngineCluster {
                     // the BATCH execution duration — prefill runs whole batches,
                     // so every member of one batch logs the same value.
                     if (!alreadyCancelled && !asyncFail && shape.outputLen() > 0) {
-                        Long arrived = eventArrivalMs.get(requestId);
-                        if (arrived != null) {
-                            reportMetricEvent(Map.of("rtp_llm_first_token_latency_us",
-                                    Math.max(0L, doneTsMs - arrived) * 1000L));
-                        }
                         long requestStartMs = requestStartEpochMs(shape.input(), doneTsMs);
                         if (requestStartMs != 0) {
                             reportMetricEvent(Map.of("mock_backend_ttft_us",
                                     (doneTsMs - requestStartMs) * 1000L));
                         }
                     }
+                    Long prefillArrivedMs = eventArrivalMs.get(requestId);
                     writePrefillDoneEvent(shape, requestId, member.batchId(), doneTsMs,
                             executionMs, shapes.size(), alreadyCancelled);
                     if (!alreadyCancelled) {
@@ -4019,9 +4018,13 @@ public final class JavaMockEngineCluster {
                         lifetimeContextComputeTokens.add(Math.max(0L, inputLen - hitTokens));
                         lifetimeContextTokens.add(inputLen);
                         lifetimeContextRequests.increment();
-                        reportMetricEvent(Map.of("rtp_llm_input_token_length", inputLen,
-                                "rtp_llm_reuse_length", hitTokens,
-                                "rtp_llm_effective_context_length", Math.max(0L, inputLen - hitTokens)));
+                        if (!asyncFail) {
+                            long residenceUs = prefillArrivedMs == null ? 0L
+                                    : Math.max(0L, doneTsMs - prefillArrivedMs) * 1000L;
+                            // The P stream ends after producing its first token, not the D output length.
+                            reportMetricEvent(MockStreamMetrics.completed(inputLen,
+                                    shape.outputLen() > 0 ? 1 : 0, hitTokens, residenceUs, residenceUs));
+                        }
                         hitTokensTotal.addAndGet(hitTokens);
                     }
                     // Python marks the prefill-side lifecycle entry finished when the
@@ -4622,8 +4625,7 @@ public final class JavaMockEngineCluster {
                     // When no tick is pending, the arm below prices the step with
                     // this stream already in the count.
                     decodeRunning.put(requestId,
-                            new DecodeStream(shape, batchId, responseQueue,
-                                    performance.decodeSteps(shape.outputLen()), decodeStepScheduled));
+                            newDecodeStream(shape, batchId, responseQueue));
                     stats.decodeAdmitted.increment();
                     recordLifecycleRunning(requestId);
                     recordEventStart(requestId);
@@ -4734,6 +4736,8 @@ public final class JavaMockEngineCluster {
                     stream.generatedTokens = Math.min(stream.shape.outputLen(),
                             stream.generatedTokens + performance.tokensPerStep());
                     int generated = (int) Math.ceil(stream.generatedTokens);
+                    if (stream.firstTokenTimeMs == 0 && generated > previousGenerated)
+                        stream.firstTokenTimeMs = System.currentTimeMillis();
                     stream.remainingSteps = (int) Math.ceil((stream.shape.outputLen()
                             - stream.generatedTokens) / performance.tokensPerStep());
                     stream.accumulatedExecMs += stepDelayMs;
@@ -4891,10 +4895,7 @@ public final class JavaMockEngineCluster {
                 // top-up a tick may be pending, and the promoted request waits
                 // for that boundary like a mid-step admission.
                 decodeRunning.put(candidateId,
-                        new DecodeStream(candidate.shape(), candidate.batchId(),
-                                candidate.responseQueue(),
-                                performance.decodeSteps(candidate.shape().outputLen()),
-                                decodeStepScheduled));
+                        newDecodeStream(candidate.shape(), candidate.batchId(), candidate.responseQueue()));
                 stats.decodeAdmitted.increment();
                 recordLifecycleRunning(candidateId);
                 recordEventStart(candidateId);
@@ -4937,6 +4938,16 @@ public final class JavaMockEngineCluster {
             pendingRequests.decrementAndGet();
         }
 
+        private DecodeStream newDecodeStream(MockPerformanceModel.RequestShape shape, long batchId,
+                LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> responseQueue) {
+            var stream = new DecodeStream(shape, batchId, responseQueue,
+                    performance.decodeSteps(shape.outputLen()), decodeStepScheduled);
+            var lease = activeBlockLeases.get(shape.input().getRequestId());
+            stream.initialReuseTokens = lease == null ? 0L
+                    : Math.min(shape.inputLen(), (long) lease.hitKeys.size() * seqSizePerBlock);
+            return stream;
+        }
+
         /**
          * Publish the normal completion of a stream whose terminal ownership was
          * claimed at a step boundary. Caliber note: executionMs is the SUM OF
@@ -4952,11 +4963,13 @@ public final class JavaMockEngineCluster {
             long executionMs = Math.round(stream.accumulatedExecMs);
             boolean alreadyCancelled = cancelledRequests.containsKey(requestId);
             Long arrivedMs = eventArrivalMs.get(requestId);
-            if (!alreadyCancelled && arrivedMs != null) {
-                // D engine residence includes reservation/queueing and all decode
-                // steps. Emit at the terminal, independent of client Fetch.
-                reportMetricEvent(Map.of("rtp_llm_latency_us",
-                        Math.max(0L, System.currentTimeMillis() - arrivedMs) * 1000L));
+            if (!alreadyCancelled) {
+                // D owns its own admission-to-first-token and terminal observations.
+                long firstUs = arrivedMs == null || stream.firstTokenTimeMs == 0 ? 0L
+                        : Math.max(0L, stream.firstTokenTimeMs - arrivedMs) * 1000L;
+                reportMetricEvent(MockStreamMetrics.completed(shape.inputLen(), shape.outputLen(),
+                        stream.initialReuseTokens, firstUs,
+                        arrivedMs == null ? 0L : Math.max(0L, System.currentTimeMillis() - arrivedMs) * 1000L));
             }
             if (!alreadyCancelled) {
                 long doneMs = System.currentTimeMillis();
@@ -4988,8 +5001,7 @@ public final class JavaMockEngineCluster {
                 // Successful output totals are business completions; execution
                 // TPS comes from decodeTps, including work later cancelled.
                 lifetimeGenerateTokens.add(shape.outputLen());
-                reportMetricEvent(Map.of("rtp_llm_input_token_length", shape.inputLen(),
-                        "rtp_llm_output_token_length", shape.outputLen()));
+                // Stream dimensions were emitted with the terminal timing above.
             }
             // Completion does not depend on a client Fetch in auto-fetch mode;
             // strict mode reaches this point only after the client attached.
@@ -5455,6 +5467,13 @@ public final class JavaMockEngineCluster {
             // blocks this decode admission did NOT re-allocate — the
             // net-demand deduction, accumulated for the /metrics counter.
             decodeReuseBlocks.add(outcome.lease().hitKeys.size());
+            if (MockCachePolicy.reuse(shape.input(), shape.nativeKeys(), performance.decodeReuseCache)) {
+                long reuseTokens = Math.min(shape.inputLen(), (long) outcome.lease().hitKeys.size() * seqSizePerBlock);
+                cacheHitMetrics.record(shape.inputLen(), reuseTokens);
+                reportMetricEvent(Map.of("rtp_llm_kv_cache_reuse_length", reuseTokens,
+                        "rtp_llm_kv_cache_device_reuse_length", reuseTokens,
+                        "rtp_llm_kv_cache_host_reuse_length", 0L));
+            }
             activeBlockLeases.put(requestId, outcome.lease());
             return outcome;
         }

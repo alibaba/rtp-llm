@@ -7,7 +7,7 @@ import java.util.Map;
 final class MockDecodeStepMetrics {
     static Map<String, Number> values(long stepMs, int acceptedTokens, int streams) {
         Map<String, Number> values = new LinkedHashMap<>();
-        values.put("rtp_llm_model_forward_us", stepMs * 1000.0);
+        values.put("mock_decode_step_forward_us", stepMs * 1000.0);
         values.put("rtp_llm_sp_step_latency_us", stepMs * 1000.0);
         if (streams > 0 && acceptedTokens > 0) {
             double average = (double) acceptedTokens / streams;
