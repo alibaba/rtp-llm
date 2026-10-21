@@ -2,8 +2,9 @@
 
 import os
 import unittest
+from contextlib import nullcontext
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 import torch
 
@@ -22,22 +23,18 @@ class SparsePlanOverlapCPU(unittest.TestCase):
                                  compress_ratio=1, _shared_attention=shared,
                                  v41_config={"candidate_source_layer_id": 20,
                                              "candidate_block_size": 8})
-        for mode in ("candidates", "attention_end"):
-            with self.subTest(mode=mode), patch.dict(
-                os.environ, {"DSV41_SPARSE_PLAN_LAUNCH": mode}
-            ), patch.object(sparse, "is_supported", return_value=False) as supported:
-                os.environ.pop("DSV41_OVERLAP_SPARSE_PLAN", None)
-                overlap.start_plan(source, Mock(), Mock(), query_len=6)
-                overlap.finish_attention(source)
-                supported.assert_called_once_with(shared["candidates"])
-                supported.reset_mock()
-                os.environ["DSV41_OVERLAP_SPARSE_PLAN"] = "0"
-                overlap.start_plan(source, Mock(), Mock(), query_len=6)
-                overlap.finish_attention(source)
-                supported.assert_not_called()
-                self.assertNotIn("decode_sparse_plan_pending", shared)
+        with patch.dict(os.environ), patch.object(
+            sparse, "is_supported", return_value=False
+        ) as supported:
+            os.environ.pop("DSV41_OVERLAP_SPARSE_PLAN", None)
+            overlap.start_plan(source, Mock(), Mock(), query_len=6)
+            supported.assert_called_once_with(shared["candidates"])
+            supported.reset_mock()
+            os.environ["DSV41_OVERLAP_SPARSE_PLAN"] = "0"
+            overlap.start_plan(source, Mock(), Mock(), query_len=6)
+            supported.assert_not_called()
 
-    def test_full_fast_return_finishes_pending_plan_launch(self):
+    def test_full_fast_return_preserves_output(self):
         from rtp_llm.models_py.modules.dsv41.fp8.decode import full_overlap
         from rtp_llm.models_py.modules.dsv41.fp8.decode import rope_metadata
 
@@ -57,11 +54,9 @@ class SparsePlanOverlapCPU(unittest.TestCase):
         output = torch.empty_like(x)
         with patch.object(rope_metadata, "decode_rope_metadata",
                           return_value=(positions, Mock())), \
-             patch.object(full_overlap, "try_full_decode", return_value=output), \
-             patch.object(overlap, "finish_attention") as finish:
+             patch.object(full_overlap, "try_full_decode", return_value=output):
             actual = AttentionV41FP8._forward_decode_body(layer, x, metadata)
         self.assertIs(actual, output)
-        finish.assert_called_once_with(layer)
 
     def test_wait_once_and_record_output_lifetimes(self):
         current, auxiliary = Mock(), Mock()
@@ -86,27 +81,51 @@ class SparsePlanOverlapCPU(unittest.TestCase):
         layer = SimpleNamespace(layer_id=20, _shared_attention={"layers": {20: None}})
         self.assertFalse(overlap.has_consumer(layer))
 
-    def test_late_launch_waits_for_source_attention_and_drops_stale_inputs(self):
-        shared = {"layers": {0: None}}
-        source = SimpleNamespace(layer_id=20, v41_config={"candidate_source_layer_id": 20},
-                                 _shared_attention=shared)
-        first = SimpleNamespace(layer_id=0, _shared_attention=shared)
-        keys, lengths, producer = Mock(), Mock(), Mock()
-        with patch.dict(os.environ, {"DSV41_OVERLAP_SPARSE_PLAN": "1",
-                                     "DSV41_SPARSE_PLAN_LAUNCH": "attention_end"}), \
-             patch.object(overlap, "_launch_plan") as launch:
+    def test_candidate_launch_orders_producer_and_publishes_work_immediately(self):
+        candidates = torch.empty(2, 2048, dtype=torch.int32)
+        table = torch.empty(2, 256, dtype=torch.int32)
+        lengths = torch.empty(2, dtype=torch.int32)
+        flags = torch.empty_like(candidates)
+        shared = {"candidates": candidates, "candidate_mask": Mock()}
+        source = SimpleNamespace(
+            layer_id=20, kv_source_layer_id=20, compress_ratio=1,
+            v41_config={"candidate_source_layer_id": 20, "candidate_block_size": 8},
+            _shared_attention=shared,
+        )
+        keys = SimpleNamespace(pool=SimpleNamespace(shape=(1, 128)),
+                               block_table=table, logical_entries_per_block=128)
+        current, auxiliary, producer = Mock(), Mock(), Mock()
+        plan = sparse.SparseDecodePlan(*(Mock() for _ in range(5)))
+        with patch.dict(os.environ, {"DSV41_OVERLAP_SPARSE_PLAN": "1"}), \
+             patch.dict(overlap._PLAN_STREAMS, {0: auxiliary}, clear=True), \
+             patch.object(overlap, "has_consumer", return_value=True), \
+             patch.object(sparse, "is_supported", return_value=True), \
+             patch.object(sparse, "_plan_candidate_flags", return_value=flags), \
+             patch.object(torch.cuda, "current_stream", return_value=current), \
+             patch.object(torch.cuda, "device", return_value=nullcontext()), \
+             patch.object(torch.cuda, "stream", return_value=nullcontext()), \
+             patch.object(torch.cuda, "is_current_stream_capturing", return_value=False), \
+             patch("rtp_llm.models_py.modules.dsv41.fp8.attention._cuda_device_index",
+                   return_value=0), \
+             patch.object(sparse, "make_plan", return_value=plan) as planner:
             overlap.start_plan(source, keys, lengths, query_len=6, producer_stream=producer)
-            launch.assert_not_called()
-            overlap.finish_attention(first)
-            launch.assert_not_called()
-            overlap.finish_attention(source)
-            launch.assert_called_once_with(
-                source, keys, lengths, query_len=6, producer_stream=producer
+            self.assertEqual(auxiliary.wait_stream.call_args_list,
+                             [call(current), call(producer)])
+            planner.assert_called_once_with(
+                candidates, lengths, table, query_len=6,
+                candidate_mask=shared["candidate_mask"],
             )
-            self.assertNotIn("decode_sparse_plan_pending", shared)
-            overlap.start_plan(source, keys, lengths, query_len=6)
-            AttentionV41FP8._begin_forward(first)
-            self.assertNotIn("decode_sparse_plan_pending", shared)
+            work = shared["decode_sparse_plan_ready"]
+            self.assertIs(work.plan, plan)
+            current.wait_stream.assert_not_called()
+            # Publication is once per forward; consumers join only when needed.
+            overlap.start_plan(source, keys, lengths, query_len=6, producer_stream=producer)
+            self.assertEqual(planner.call_count, 1)
+            overlap.wait_plan(shared)
+            self.assertIs(shared["decode_sparse_plan"], plan)
+            current.wait_stream.assert_called_once_with(auxiliary)
+            self.assertEqual(work.inputs, ())
+            self.assertNotIn("decode_sparse_plan_ready", shared)
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
@@ -167,13 +186,10 @@ class SparsePlanOverlapCUDA(unittest.TestCase):
                 source_layer, keys, lengths, query_len=query_len,
                 producer_stream=producer,
             )
-            late = os.environ.get("DSV41_SPARSE_PLAN_LAUNCH") == "attention_end"
-            self.assertEqual("decode_sparse_plan_ready" in shared, expect_async and not late)
+            self.assertEqual("decode_sparse_plan_ready" in shared, expect_async)
             # Independent main-stream work between publication and consumption.
             scratch = torch.mm(qr.reshape(rows, 16).float(), qr.reshape(rows, 16).float().T)
             work.finish()
-            overlap.finish_attention(source_layer)
-            self.assertNotIn("decode_sparse_plan_pending", shared)
             self.assertEqual("decode_sparse_plan_ready" in shared, expect_async)
             outputs = [layer._select_indices_decode(x, qr, positions) for layer in layers]
             self.assertNotIn("decode_sparse_plan_ready", shared)

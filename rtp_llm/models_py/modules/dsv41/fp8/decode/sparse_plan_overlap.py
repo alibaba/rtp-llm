@@ -53,30 +53,6 @@ def has_consumer(attn):
 
 
 def start_plan(attn, keys, lengths, *, query_len, producer_stream=None):
-    """Publish planner inputs; optionally defer the fork until attention ends."""
-    if os.environ.get("DSV41_SPARSE_PLAN_LAUNCH", "candidates") == "attention_end":
-        if (
-            os.environ.get("DSV41_OVERLAP_SPARSE_PLAN", "1") == "1"
-            and attn.layer_id == int(attn.v41_config.get("candidate_source_layer_id", -1))
-        ):
-            attn._shared_attention["decode_sparse_plan_pending"] = (
-                attn, keys, lengths, query_len, producer_stream
-            )
-        return
-    _launch_plan(attn, keys, lengths, query_len=query_len, producer_stream=producer_stream)
-
-
-def finish_attention(attn):
-    """Fork after the source attention's output projection/collective, before MoE."""
-    shared = attn._shared_attention
-    pending = shared.get("decode_sparse_plan_pending")
-    if pending is not None and pending[0] is attn:
-        shared.pop("decode_sparse_plan_pending")
-        _, keys, lengths, query_len, producer_stream = pending
-        _launch_plan(attn, keys, lengths, query_len=query_len, producer_stream=producer_stream)
-
-
-def _launch_plan(attn, keys, lengths, *, query_len, producer_stream=None):
     """Default-on overlap; cold capture and unsupported layouts stay serial.
 
     Call only after the candidate source has published its complete result.

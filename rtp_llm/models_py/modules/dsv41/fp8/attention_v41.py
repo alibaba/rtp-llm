@@ -1113,7 +1113,6 @@ class AttentionV41FP8(AttentionFP8):
             self._shared_attention.pop("candidate_mask", None)
             self._shared_attention.pop("decode_sparse_plan", None)
             self._shared_attention.pop("decode_indexer_metadata", None)
-            self._shared_attention.pop("decode_sparse_plan_pending", None)
             self._shared_attention.pop("prefill_candidate_mask", None)
             self._shared_attention.pop("prefill_sparse_candidates", None)
             self._shared_attention.pop("prefill_sparse_plans", None)
@@ -3310,8 +3309,6 @@ class AttentionV41FP8(AttentionFP8):
         return slots.int()
 
     def _forward_decode_body(self, x, metadata, shared_input_quant=None):
-        from .decode.sparse_plan_overlap import finish_attention
-
         from rtp_llm.models_py.modules.dsv41.fp8.decode.compute_qkv import (
             decode_compute_qkv,
         )
@@ -3362,7 +3359,6 @@ class AttentionV41FP8(AttentionFP8):
                 shared_input_quant=shared_input_quant,
             )
             if output is not None:
-                finish_attention(self)
                 return output
         # REUSE has no current-layer index scoring. Its local TopK is already
         # published on this stream by the source layer; preserve that tensor.
@@ -3438,7 +3434,6 @@ class AttentionV41FP8(AttentionFP8):
                 )
             out = mega.project_output(pair, self.wo_b)
             self._prefill_output_all_reduce(out)
-            finish_attention(self)
             return out.view(B, S, self.dim)
         if not self.compress_ratio:
             o = self._forward_decode_swa_only(qkv.q, B, S, metadata)
@@ -3483,5 +3478,4 @@ class AttentionV41FP8(AttentionFP8):
             )
         out = self._project_output(o, qkv.freqs_cis)
         self._prefill_output_all_reduce(out)
-        finish_attention(self)
         return out.view(B, S, self.dim)

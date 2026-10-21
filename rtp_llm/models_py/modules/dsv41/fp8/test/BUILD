@@ -126,8 +126,6 @@ _X86_TESTS = [
 ]
 
 
-
-
 cuda13_sm100_py_test(
     name = "test_v41_decode_qkv_integration",
     srcs = [
@@ -171,7 +169,6 @@ cuda13_sm100_py_test(
     tags = ["dsv41_cuda13"],
     legacy_create_init = 0,
 )
-
 
 
 cuda13_sm100_py_test(
