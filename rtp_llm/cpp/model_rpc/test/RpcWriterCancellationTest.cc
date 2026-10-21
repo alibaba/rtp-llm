@@ -320,6 +320,7 @@ TEST(RpcWriterCancellationTest, PdValidationAndAdmissionErrorsEndServerSpanBefor
     {
         GenerateInputPB request;
         request.set_request_id(60);
+        request.mutable_request_info()->set_trace_id("prefill-rejected-trace");
         request.add_token_ids(1);
         auto* generate = request.mutable_generate_config();
         generate->set_can_use_pd_separation(true);
@@ -327,15 +328,18 @@ TEST(RpcWriterCancellationTest, PdValidationAndAdmissionErrorsEndServerSpanBefor
         generate->set_timeout_ms(1000);
         grpc::ServerContext context;
         PrefillRpcServer server;
+        server.maga_init_params_.pd_sep_config.role_type = RoleType::PREFILL;
         // Missing handoff key must fail before the uninitialized engine is used.
         const auto status = server.GenerateStreamCall(&context, &request, nullptr);
         EXPECT_EQ(errorInfoFromGrpcStatus(status).code(), ErrorCode::INVALID_PARAMS);
+        EXPECT_NE(status.error_message().find("trace_id=prefill-rejected-trace"), std::string::npos);
         EXPECT_EQ(server.onflight_requests_.load(), 0u);
         EXPECT_TRUE(server.onflight_trackers_.empty());
     }
     {
         GenerateInputPB request;
         request.set_request_id(61);
+        request.mutable_request_info()->set_trace_id("decode-rejected-trace");
         request.set_enqueued_by_master(true);
         auto* generate = request.mutable_generate_config();
         generate->set_can_use_pd_separation(true);
@@ -343,12 +347,14 @@ TEST(RpcWriterCancellationTest, PdValidationAndAdmissionErrorsEndServerSpanBefor
         generate->set_timeout_ms(1000);
         grpc::ServerContext context;
         DecodeRpcServer server;
+        server.maga_init_params_.pd_sep_config.role_type = RoleType::DECODE;
         server.meta_ = std::make_shared<RpcServerRuntimeMeta>();
         server.cancel_registry_ = std::make_unique<PDCancelRegistry>(server.meta_);
         EXPECT_EQ(server.cancel_registry_->cancel(61, {ErrorCode::GENERATE_TIMEOUT, "late admission"}),
                   CANCEL_STATUS_TOMBSTONED);
         const auto status = server.GenerateStreamCall(&context, &request, nullptr);
         EXPECT_EQ(errorInfoFromGrpcStatus(status).code(), ErrorCode::GENERATE_TIMEOUT);
+        EXPECT_NE(status.error_message().find("trace_id=decode-rejected-trace"), std::string::npos);
         EXPECT_EQ(server.onflight_requests_.load(), 0u);
         EXPECT_TRUE(server.cancel_registry_->pending().empty());
     }
@@ -364,6 +370,30 @@ TEST(RpcWriterCancellationTest, PdValidationAndAdmissionErrorsEndServerSpanBefor
         }
     }
     EXPECT_EQ(server_count, 2u);
+}
+
+TEST(RpcWriterCancellationTest, RecordedRpcFailureFeedsMetricsAndPreservesExistingStreamCause) {
+    kmonitor::MetricsReporterPtr reporter;
+    auto meta = std::make_shared<RpcServerRuntimeMeta>();
+    GenerateContext context(62, 0, nullptr, reporter, meta);
+    context.recordRpcFailure({ErrorCode::INVALID_PARAMS, "invalid input"});
+    RpcMetricsCollector metrics;
+    context.collectBasicMetrics(metrics);
+    EXPECT_TRUE(metrics.error_qps);
+    EXPECT_EQ(metrics.error_code, ErrorCode::INVALID_PARAMS);
+    EXPECT_EQ(errorInfoFromGrpcStatus(context.error_status).code(), ErrorCode::INVALID_PARAMS);
+    context.recordRpcFailure({ErrorCode::EXECUTION_EXCEPTION, "later exception"});
+    EXPECT_EQ(context.error_info.code(), ErrorCode::INVALID_PARAMS);
+    context.markRpcHandlingCompleted();
+
+    GenerateContext with_stream(63, 0, nullptr, reporter, meta);
+    auto stream = std::make_shared<SingleOutputStream>();
+    stream->reportError(ErrorCode::PRIORITY_PREEMPTED, "original stream failure");
+    with_stream.setStream(stream);
+    with_stream.recordRpcFailure({ErrorCode::EXECUTION_EXCEPTION, "later exception"});
+    EXPECT_EQ(with_stream.error_info.code(), ErrorCode::PRIORITY_PREEMPTED);
+    EXPECT_EQ(errorInfoFromGrpcStatus(with_stream.error_status).code(), ErrorCode::PRIORITY_PREEMPTED);
+    with_stream.markRpcHandlingCompleted();
 }
 
 TEST(RpcWriterCancellationTest, RequestGaugeSamplesLiveAtomicValue) {

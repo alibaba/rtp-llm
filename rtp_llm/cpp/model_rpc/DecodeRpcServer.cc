@@ -350,16 +350,20 @@ grpc::Status DecodeRpcServer::GenerateStreamCall(grpc::ServerContext*           
 
     const auto log_pd_error = [&](const char* stage, const grpc::Status& status) {
         const auto error = errorInfoFromGrpcStatus(status);
+        const auto& trace_id = request->request_info().trace_id().empty()
+                                   ? request->generate_config().trace_id()
+                                   : request->request_info().trace_id();
         if (status.error_code() == grpc::StatusCode::CANCELLED && error.code() == ErrorCode::CANCELLED) {
-            RTP_LLM_LOG_INFO("P2P Decode request cancelled, stage=%s request_id=%ld unique_key=%s error=%s",
+            RTP_LLM_LOG_INFO("P2P Decode request cancelled, stage=%s request_id=%ld unique_key=%s trace_id=%s error=%s",
                              stage,
                              request->request_id(),
                              effective_request->generate_config().unique_key().c_str(),
+                             trace_id.c_str(),
                              error.ToString().c_str());
             return;
         }
         RTP_LLM_LOG_WARNING("P2P Decode request failed, stage=%s request_id=%ld business_unique_key=%s unique_key=%s "
-                            "grpc_code=%d error_code=%d error_name=%s error=%s",
+                            "grpc_code=%d error_code=%d error_name=%s trace_id=%s error=%s",
                             stage,
                             request->request_id(),
                             request->generate_config().unique_key().c_str(),
@@ -367,6 +371,7 @@ grpc::Status DecodeRpcServer::GenerateStreamCall(grpc::ServerContext*           
                             static_cast<int>(status.error_code()),
                             static_cast<int>(error.code()),
                             ErrorCodeToString(error.code()).c_str(),
+                            trace_id.c_str(),
                             error.ToString().c_str());
     };
 
@@ -378,6 +383,13 @@ grpc::Status DecodeRpcServer::GenerateStreamCall(grpc::ServerContext*           
     auto                        generate_context =
         GenerateContext(request_id, normalized_timeout_ms, server_context, metrics_reporter_, meta_);
     generate_context.onflight_requests = &onflight_requests_;
+    generate_context.request_info = QueryConverter::transRequestInfo(request->request_info());
+    if (generate_context.request_info.trace_id.empty()) {
+        generate_context.request_info.trace_id = request->generate_config().trace_id();
+    }
+    if (generate_context.request_info.request_id.empty()) {
+        generate_context.request_info.request_id = std::to_string(request_id);
+    }
     if (telemetry::TelemetryRuntime::isActive()) {
         auto span = telemetry::startRpcServerSpan(
             "rtp_llm.generate_stream_call", server_context, true, "RpcService/GenerateStreamCall");
@@ -402,7 +414,7 @@ grpc::Status DecodeRpcServer::GenerateStreamCall(grpc::ServerContext*           
                                                   cancel_handle);
     if (!admission.ok()) {
         generate_context.error_info = admission;
-        generate_context.error_status = serializeErrorMsg(generate_context.request_key, admission);
+        generate_context.error_status = serializeErrorMsg(generate_context.request_key, generate_context.request_info, admission);
         return generate_context.error_status;
     }
     cancel_guard.emplace(*cancel_registry_, cancel_handle);
@@ -423,140 +435,155 @@ grpc::Status DecodeRpcServer::GenerateStreamCall(grpc::ServerContext*           
                 cancel();
         }
     } prefill_cancel_guard{*cancel_registry_, cancel_handle, generate_context};
-    std::shared_ptr<GenerateInput> input;
-    GenerateInputPB                prefill_request;
-    PrefillPeerInfo                peer_info;
-    const auto                     prepare_start_us = currentTimeUs();
-    auto                           prepare_status   = preparePDRequest(
-        *effective_request, request_entry_ms + normalized_timeout_ms, input, prefill_request, peer_info);
-    {
-        RpcMetricsCollector collector;
-        collector.min_response_done_time_us      = 0;
-        collector.prepare_generate_context_rt_us = currentTimeUs() - prepare_start_us;
-        generate_context.reportMetrics(collector);
-    }
-    if (!prepare_status.ok()) {
-        generate_context.error_status = prepare_status;
-        log_pd_error("prepare", generate_context.error_status);
-        return generate_context.error_status;
-    }
-    if (cancel_handle->canceled.load()) {
-        generate_context.error_info   = cancel_handle->cancel_reason;
-        generate_context.error_status = serializeErrorMsg(std::to_string(request_id), generate_context.error_info);
-        return generate_context.error_status;
-    }
-    auto stream = engine_->makeStream(input);
-    // Until enqueue succeeds, no scheduler owns this stream's terminal transition.
-    struct UnenqueuedStreamGuard {
-        GenerateStreamPtr stream;
-        bool submitted = false;
-        ~UnenqueuedStreamGuard() {
-            if (!submitted) {
-                stream->finishWithoutGenerate();
-            }
-        }
-    } unenqueued_guard{stream};
-    stream->setPrefillTpSize(peer_info.tp_size);
-    stream->setPrefillCpSize(peer_info.cp_size);
-    generate_context.setStream(stream);
-    cancel_registry_->attach(cancel_handle, stream);
-
-    std::shared_ptr<PrefillServerCallerContext> prefill_caller_ctx;
-    PrefillContextGuard                         prefill_context_guard;
-    if (!request->enqueued_by_master()) {
-        if (cancel_handle->canceled.load()) {
-            // NormalEngine settles rejected canceled streams without scheduler ownership.
-            engine_->enqueue(stream);
-            unenqueued_guard.submitted = true;
-            generate_context.error_info   = cancel_handle->cancel_reason;
-            generate_context.error_status = serializeErrorMsg(std::to_string(request_id), generate_context.error_info);
-            return generate_context.error_status;
-        }
-        const auto& unique_key          = input->generate_config->unique_key;
-        const auto  request_deadline_ms = input->request_deadline_ms;
-        // The frontend owns Prefill selection. Use the same endpoint as the peer-info probe.
-        std::string target_ip;
-        uint32_t    target_port  = 0;
-        auto        parse_status = parsePrefillDpAddr(prefillAddress(prefill_request), &target_ip, &target_port);
-        if (!parse_status.ok()) {
-            const auto status = parse_status;
-            log_pd_error("prefill_address", status);
-            return status;
-        }
-        const auto prefill_call_start_us = currentTimeUs();
-        auto       started               = prefill_server_caller_->callPrefill(
-            &prefill_request, target_ip, target_port, unique_key, request_deadline_ms);
+    try {
+        std::shared_ptr<GenerateInput> input;
+        GenerateInputPB                prefill_request;
+        PrefillPeerInfo                peer_info;
+        const auto                     prepare_start_us = currentTimeUs();
+        auto                           prepare_status   = preparePDRequest(
+            *effective_request, request_entry_ms + normalized_timeout_ms, input, prefill_request, peer_info);
         {
             RpcMetricsCollector collector;
-            collector.min_response_done_time_us = 0;
-            collector.remote_generate_rt_us     = currentTimeUs() - prefill_call_start_us;
+            collector.min_response_done_time_us      = 0;
+            collector.prepare_generate_context_rt_us = currentTimeUs() - prepare_start_us;
             generate_context.reportMetrics(collector);
         }
-        if (!started.ok()) {
-            generate_context.error_info = started.status();
-            generate_context.error_status =
-                serializeErrorMsg(generate_context.request_key, generate_context.error_info);
-            log_pd_error("call_prefill", generate_context.error_status);
+        if (!prepare_status.ok()) {
+            generate_context.error_info = errorInfoFromGrpcStatus(prepare_status);
+            generate_context.error_status = serializeErrorMsg(
+                generate_context.request_key, generate_context.request_info, generate_context.error_info);
+            log_pd_error("prepare", generate_context.error_status);
             return generate_context.error_status;
         }
-        prefill_caller_ctx            = std::move(started.value());
-        prefill_context_guard.context = prefill_caller_ctx;
-    }
-
-    engine_->enqueue(stream);
-    unenqueued_guard.submitted = true;
-
-    // Keep the async prefill RPC alive for the handoff lifecycle only. StartLoad applies the first token to the
-    // decode stream, so client output must come exclusively from pollStreamOutput().
-    std::optional<StreamState> observed_state;
-    const auto check_progress = [&](bool& remote_done) {
-        const auto state = stream->getStatus();
-        if (!observed_state || state != *observed_state) {
-            observed_state = state;
-            RpcMetricsCollector collector;
-            generate_context.reportMetrics(collector);
+        if (cancel_handle->canceled.load()) {
+            generate_context.error_info   = cancel_handle->cancel_reason;
+            generate_context.error_status = serializeErrorMsg(std::to_string(request_id), generate_context.request_info, generate_context.error_info);
+            return generate_context.error_status;
         }
-        if (!prefill_caller_ctx) {
-            remote_done = true;
-            return FirstError::Snapshot{};
-        }
-        remote_done = prefill_caller_ctx->done();
-        const auto remote = prefill_caller_ctx->firstError();
-        const auto first = FirstError::earlier(stream->firstError(), remote);
-        if (remote.error.hasError() && first.order == remote.order) {
-            generate_context.dependency_failure = remote;
-        }
-        return remote;
-    };
-    // Also sample the Master-enqueued path, which has no Prefill RPC to poll.
-    generate_context.error_status = pollStreamOutput(
-        server_context, generate_context.request_key, response_writer, generate_context.getStream(), check_progress);
-    prefill_cancel_guard.completed = generate_context.error_status.ok() && !server_context->IsCancelled()
-                                     && !stream->hasError()
-                                     && (stream->getStatus() == StreamState::FINISHED
-                                         || stream->hasEvent(StreamEvents::GenerateDone));
-    if (prefill_cancel_guard.completed)
-        cancel_registry_->finishDownstream(cancel_handle);
-    else
-        prefill_cancel_guard.cancel();
-    meta_->dequeue(generate_context.request_id, generate_context.getStream());
+        auto stream = engine_->makeStream(input);
+        // Until enqueue succeeds, no scheduler owns this stream's terminal transition.
+        struct UnenqueuedStreamGuard {
+            GenerateStreamPtr stream;
+            bool submitted = false;
+            ~UnenqueuedStreamGuard() {
+                if (!submitted) {
+                    stream->finishWithoutGenerate();
+                }
+            }
+        } unenqueued_guard{stream};
+        stream->setPrefillTpSize(peer_info.tp_size);
+        stream->setPrefillCpSize(peer_info.cp_size);
+        generate_context.setStream(stream);
+        cancel_registry_->attach(cancel_handle, stream);
 
-    if (prefill_caller_ctx && (!generate_context.error_status.ok() || server_context->IsCancelled())) {
-        prefill_caller_ctx->cancel();
+        std::shared_ptr<PrefillServerCallerContext> prefill_caller_ctx;
+        PrefillContextGuard                         prefill_context_guard;
+        if (!request->enqueued_by_master()) {
+            if (cancel_handle->canceled.load()) {
+                // NormalEngine settles rejected canceled streams without scheduler ownership.
+                engine_->enqueue(stream);
+                unenqueued_guard.submitted = true;
+                generate_context.error_info   = cancel_handle->cancel_reason;
+                generate_context.error_status = serializeErrorMsg(std::to_string(request_id), generate_context.request_info, generate_context.error_info);
+                return generate_context.error_status;
+            }
+            const auto& unique_key          = input->generate_config->unique_key;
+            const auto  request_deadline_ms = input->request_deadline_ms;
+            // The frontend owns Prefill selection. Use the same endpoint as the peer-info probe.
+            std::string target_ip;
+            uint32_t    target_port  = 0;
+            auto        parse_status = parsePrefillDpAddr(prefillAddress(prefill_request), &target_ip, &target_port);
+            if (!parse_status.ok()) {
+                generate_context.error_info = errorInfoFromGrpcStatus(parse_status);
+                generate_context.error_status = serializeErrorMsg(
+                    generate_context.request_key, generate_context.request_info, generate_context.error_info);
+                log_pd_error("prefill_address", generate_context.error_status);
+                return generate_context.error_status;
+            }
+            const auto prefill_call_start_us = currentTimeUs();
+            auto       started               = prefill_server_caller_->callPrefill(
+                &prefill_request, target_ip, target_port, unique_key, request_deadline_ms);
+            {
+                RpcMetricsCollector collector;
+                collector.min_response_done_time_us = 0;
+                collector.remote_generate_rt_us     = currentTimeUs() - prefill_call_start_us;
+                generate_context.reportMetrics(collector);
+            }
+            if (!started.ok()) {
+                generate_context.error_info = started.status();
+                generate_context.error_status =
+                    serializeErrorMsg(generate_context.request_key, generate_context.request_info, generate_context.error_info);
+                log_pd_error("call_prefill", generate_context.error_status);
+                return generate_context.error_status;
+            }
+            prefill_caller_ctx            = std::move(started.value());
+            prefill_context_guard.context = prefill_caller_ctx;
+        }
+
+        engine_->enqueue(stream);
+        unenqueued_guard.submitted = true;
+
+        // Keep the async prefill RPC alive for the handoff lifecycle only. StartLoad applies the first token to the
+        // decode stream, so client output must come exclusively from pollStreamOutput().
+        std::optional<StreamState> observed_state;
+        const auto check_progress = [&](bool& remote_done) {
+            const auto state = stream->getStatus();
+            if (!observed_state || state != *observed_state) {
+                observed_state = state;
+                RpcMetricsCollector collector;
+                generate_context.reportMetrics(collector);
+            }
+            if (!prefill_caller_ctx) {
+                remote_done = true;
+                return FirstError::Snapshot{};
+            }
+            remote_done = prefill_caller_ctx->done();
+            const auto remote = prefill_caller_ctx->firstError();
+            const auto first = FirstError::earlier(stream->firstError(), remote);
+            if (remote.error.hasError() && first.order == remote.order) {
+                generate_context.dependency_failure = remote;
+            }
+            return remote;
+        };
+        // Also sample the Master-enqueued path, which has no Prefill RPC to poll.
+        generate_context.error_status = pollStreamOutput(
+            server_context, generate_context.request_key, response_writer, generate_context.getStream(), check_progress);
+        prefill_cancel_guard.completed = generate_context.error_status.ok() && !server_context->IsCancelled()
+                                         && !stream->hasError()
+                                         && (stream->getStatus() == StreamState::FINISHED
+                                             || stream->hasEvent(StreamEvents::GenerateDone));
+        if (prefill_cancel_guard.completed)
+            cancel_registry_->finishDownstream(cancel_handle);
+        else
+            prefill_cancel_guard.cancel();
+        meta_->dequeue(generate_context.request_id, generate_context.getStream());
+
+        if (prefill_caller_ctx && (!generate_context.error_status.ok() || server_context->IsCancelled())) {
+            prefill_caller_ctx->cancel();
+        }
+        if (!generate_context.error_status.ok()) {
+            log_pd_error("stream_output", generate_context.error_status);
+        }
+        return generate_context.error_status;
+    } catch (const std::invalid_argument& error) {
+        generate_context.recordRpcFailure({ErrorCode::INVALID_PARAMS, error.what()});
+        throw;
+    } catch (const std::exception& error) {
+        generate_context.recordRpcFailure({ErrorCode::EXECUTION_EXCEPTION, error.what()});
+        throw;
+    } catch (...) {
+        generate_context.recordRpcFailure({ErrorCode::EXECUTION_EXCEPTION, "unknown PD handler exception"});
+        throw;
     }
-    if (!generate_context.error_status.ok()) {
-        log_pd_error("stream_output", generate_context.error_status);
-    }
-    return generate_context.error_status;
 } catch (const std::invalid_argument& error) {
     const auto key = request ? std::to_string(request->request_id()) : "unknown";
-    return serializeErrorMsg(key, ErrorInfo(ErrorCode::INVALID_PARAMS, error.what()));
+    return serializeErrorMsg(key, request ? QueryConverter::transRequestInfo(request->request_info()) : RequestInfo(), ErrorInfo(ErrorCode::INVALID_PARAMS, error.what()));
 } catch (const std::exception& error) {
     const auto key = request ? std::to_string(request->request_id()) : "unknown";
-    return serializeErrorMsg(key, ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error.what()));
+    return serializeErrorMsg(key, request ? QueryConverter::transRequestInfo(request->request_info()) : RequestInfo(), ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error.what()));
 } catch (...) {
     const auto key = request ? std::to_string(request->request_id()) : "unknown";
-    return serializeErrorMsg(key, ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown decode RPC exception"));
+    return serializeErrorMsg(key, request ? QueryConverter::transRequestInfo(request->request_info()) : RequestInfo(), ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown decode RPC exception"));
 }
 
 void DecodeRpcServer::updateAuxInfo(GenerateOutputsPB& outputs_pb, std::shared_ptr<GenerateStream>& stream) {

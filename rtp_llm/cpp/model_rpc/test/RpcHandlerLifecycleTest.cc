@@ -302,6 +302,7 @@ protected:
         EXPECT_EQ(engine->stream->getStatus(), StreamState::RUNNING);
         const auto expected_error = action == OutputAction::COMPLETE ? ErrorCode::NONE_ERROR :
                                     action == OutputAction::FAIL     ? ErrorCode::PRIORITY_PREEMPTED :
+                                    kind == Handler::PREFILL         ? ErrorCode::EXECUTION_EXCEPTION :
                                                                      ErrorCode::CANCELLED;
         EXPECT_EQ(engine->stream->statusInfo().code(), expected_error);
         expectFinishedOnce(meta, expected_error);

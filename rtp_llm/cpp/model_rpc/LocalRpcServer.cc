@@ -269,7 +269,7 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*              
         auto first        = FirstError::earlier(stream->firstError(), remote_error);
         if (first.error.hasError()) {
             stream->reportError(first.error.code(), first.error.ToString());
-            return serializeErrorMsg(request_key, first.error);
+            return serializeErrorMsg(request_key, stream->generateInput()->request_info, first.error);
         }
         const auto result = stream->nextOutput(kRpcOutputWaitTimeoutMs);
         if (isCancelled(context)) {

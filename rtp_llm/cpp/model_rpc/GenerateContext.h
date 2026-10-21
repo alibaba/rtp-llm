@@ -58,6 +58,7 @@ public:
     virtual void                             setStream(const std::shared_ptr<GenerateStream>& stream);
     virtual std::shared_ptr<GenerateStream>& getStream();
     void                                     markRpcHandlingCompleted();
+    void                                     recordRpcFailure(const ErrorInfo& error);
     void                                     synthesizeTracePhases(telemetry::PhaseRole role, bool exception_unwinding);
 
 public:

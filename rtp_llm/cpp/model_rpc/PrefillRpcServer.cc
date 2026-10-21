@@ -284,6 +284,13 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
     auto          generate_context =
         GenerateContext(request_id, request->generate_config().timeout_ms(), server_context, metrics_reporter_, meta_);
     generate_context.onflight_requests = &onflight_requests_;
+    generate_context.request_info = QueryConverter::transRequestInfo(request->request_info());
+    if (generate_context.request_info.trace_id.empty()) {
+        generate_context.request_info.trace_id = request->generate_config().trace_id();
+    }
+    if (generate_context.request_info.request_id.empty()) {
+        generate_context.request_info.request_id = std::to_string(request_id);
+    }
     if (telemetry::TelemetryRuntime::isActive()) {
         auto span = telemetry::startRpcServerSpan(
             "rtp_llm.generate_stream_call", server_context, true, "RpcService/GenerateStreamCall");
@@ -301,130 +308,143 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
             generate_context.markRpcHandlingCompleted();
         }
     });
-    auto handoff_status = validatePDHandoff(*request);
-    if (!handoff_status.ok()) {
-        generate_context.error_info = handoff_status;
-        generate_context.error_status = serializeErrorMsg(generate_context.request_key, handoff_status);
+    try {
+        auto handoff_status = validatePDHandoff(*request);
+        if (!handoff_status.ok()) {
+            generate_context.error_info = handoff_status;
+            generate_context.error_status = serializeErrorMsg(generate_context.request_key, generate_context.request_info, handoff_status);
+            return generate_context.error_status;
+        }
+        const auto local_deadline = engine_->getCacheManager()->prefillRequestDeadline(
+            request->generate_config().unique_key(), request->generate_config().timeout_ms());
+        const auto admission = cancel_registry_->admit(
+            *request, request->generate_config().unique_key(), "", local_deadline, cancel_handle);
+        if (!admission.ok()) {
+            generate_context.error_info = admission;
+            generate_context.error_status = serializeErrorMsg(generate_context.request_key, generate_context.request_info, admission);
+            return generate_context.error_status;
+        }
+        cancel_guard.emplace(*cancel_registry_, cancel_handle);
+        auto input                 = QueryConverter::transQuery(request);
+        input->request_deadline_ms = local_deadline;
+        const bool request_cancelled = server_context && server_context->IsCancelled();
+        if (local_deadline <= currentTimeMs() || request_cancelled) {
+            generate_context.error_info = request_cancelled
+                                              ? ErrorInfo(ErrorCode::CANCELLED, "prefill request cancelled")
+                                              : ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "prefill request expired");
+            generate_context.error_status = serializeErrorMsg(generate_context.request_key, generate_context.request_info, generate_context.error_info);
+            return generate_context.error_status;
+        }
+        int64_t mm_cost_us = 0, enqueue_cost_us = 0, poll_cost_us = 0;
+        int64_t phase_start = currentTimeUs();
+
+        auto preprocess_status = preprocessForPD(
+            input, mm_processor_.get(), engine_->isMTPEagle(), RoleType::PREFILL, server_context,
+            generate_context.trace_span_guard ? generate_context.trace_span_guard->sharedSpan() :
+                                               opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>{});
+        mm_cost_us             = currentTimeUs() - phase_start;
+        if (!preprocess_status.ok()) {
+            generate_context.error_status = serializeErrorMsg(generate_context.request_key, generate_context.request_info, preprocess_status);
+        }
+        if (generate_context.finished || generate_context.hasError()) {
+            // mm_processor (or upstream CHECK_ERROR_STATUS path) early-aborted.
+            // Print a paired exit log so this thread's [HANG-DIAG] trail is self-
+            // contained (entry -> early-exit), and so watchdog never sees a
+            // request perma-stuck at step=entry without an obvious cause.
+            RTP_LLM_LOG_WARNING("[HANG-DIAG] PrefillRpcServer::GenerateStreamCall step=early-exit-at-mm, "
+                                "request_id=%ld, status=%s",
+                                request_id,
+                                generate_context.error_status.error_message().c_str());
+            return generate_context.error_status;
+        }
+
+        // [HANG-DIAG] step 2/4: transQuery + mm_processor done.
+        onflight_scope.markStep(GenerateStreamStep::kAfterTransQuery);
+        RTP_LLM_LOG_DEBUG("[HANG-DIAG] PrefillRpcServer::GenerateStreamCall step=after-transQuery, "
+                          "request_id=%ld, mm_us=%ld",
+                          request_id,
+                          mm_cost_us);
+
+        if (cancel_handle->canceled.load()) {
+            generate_context.error_info   = cancel_handle->cancel_reason;
+            generate_context.error_status = serializeErrorMsg(std::to_string(request_id), generate_context.request_info, generate_context.error_info);
+            return generate_context.error_status;
+        }
+        phase_start     = currentTimeUs();
+        auto stream     = engine_->enqueue(input);
+        enqueue_cost_us = currentTimeUs() - phase_start;
+        generate_context.setStream(stream);
+        cancel_registry_->attach(cancel_handle, stream);
+
+        // [HANG-DIAG] step 3/4: engine_->enqueue returned (NormalGenerateStream
+        // constructed and pushed to FIFOScheduler). If this log is missing, the
+        // hang is inside the stream-construction / scheduler-enqueue path; check
+        // FIFOScheduler::enqueue INFO for the stream_id to disambiguate further.
+        onflight_scope.markStep(GenerateStreamStep::kAfterEngineEnqueue);
+        RTP_LLM_LOG_DEBUG("[HANG-DIAG] PrefillRpcServer::GenerateStreamCall step=after-engine-enqueue, "
+                          "request_id=%ld, enqueue_us=%ld",
+                          request_id,
+                          enqueue_cost_us);
+
+        phase_start = currentTimeUs();
+        generate_context.error_status =
+            pollStreamOutput(server_context, generate_context.request_key, response_writer, generate_context.getStream());
+        poll_cost_us = currentTimeUs() - phase_start;
+        // [HANG-DIAG] step 4/4: pollStreamOutput returned. The dominant phase for
+        // normal requests; absence here while step 3 fired means the stream never
+        // produced output (cuda/scheduler hang) or pollStream itself is stuck.
+        onflight_scope.markStep(GenerateStreamStep::kAfterPollStream);
+
+        int64_t total_us = mm_cost_us + enqueue_cost_us + poll_cost_us;
+        if (total_us >= 2000000) {
+            RTP_LLM_LOG_WARNING("[PD-DIAG] PrefillRpcServer slow GenerateStreamCall request_id=%ld total_us=%ld "
+                                "mm_us=%ld enqueue_us=%ld poll_us=%ld",
+                                request_id,
+                                total_us,
+                                mm_cost_us,
+                                enqueue_cost_us,
+                                poll_cost_us);
+        }
+        // Final exit log paired with the entry log. WARN if non-OK so error
+        // paths (pollStreamOutput surfacing stream error, etc.) are always
+        // visible regardless of total_us; INFO for healthy exit gives the
+        // watchdog a definitive "request done" marker.
+        if (!generate_context.error_status.ok()) {
+            RTP_LLM_LOG_WARNING("[HANG-DIAG] PrefillRpcServer::GenerateStreamCall step=exit-error, "
+                                "request_id=%ld, total_us=%ld, status=%s",
+                                request_id,
+                                total_us,
+                                generate_context.error_status.error_message().c_str());
+        }
+        meta_->dequeue(generate_context.request_id, generate_context.getStream());
         return generate_context.error_status;
+    } catch (const std::invalid_argument& error) {
+        generate_context.recordRpcFailure({ErrorCode::INVALID_PARAMS, error.what()});
+        throw;
+    } catch (const std::exception& error) {
+        generate_context.recordRpcFailure({ErrorCode::EXECUTION_EXCEPTION, error.what()});
+        throw;
+    } catch (...) {
+        generate_context.recordRpcFailure({ErrorCode::EXECUTION_EXCEPTION, "unknown PD handler exception"});
+        throw;
     }
-    const auto local_deadline = engine_->getCacheManager()->prefillRequestDeadline(
-        request->generate_config().unique_key(), request->generate_config().timeout_ms());
-    const auto admission = cancel_registry_->admit(
-        *request, request->generate_config().unique_key(), "", local_deadline, cancel_handle);
-    if (!admission.ok()) {
-        generate_context.error_info = admission;
-        generate_context.error_status = serializeErrorMsg(generate_context.request_key, admission);
-        return generate_context.error_status;
-    }
-    cancel_guard.emplace(*cancel_registry_, cancel_handle);
-    auto input                 = QueryConverter::transQuery(request);
-    input->request_deadline_ms = local_deadline;
-    const bool request_cancelled = server_context && server_context->IsCancelled();
-    if (local_deadline <= currentTimeMs() || request_cancelled) {
-        generate_context.error_info = request_cancelled
-                                          ? ErrorInfo(ErrorCode::CANCELLED, "prefill request cancelled")
-                                          : ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "prefill request expired");
-        generate_context.error_status = serializeErrorMsg(generate_context.request_key, generate_context.error_info);
-        return generate_context.error_status;
-    }
-    int64_t mm_cost_us = 0, enqueue_cost_us = 0, poll_cost_us = 0;
-    int64_t phase_start = currentTimeUs();
-
-    auto preprocess_status = preprocessForPD(
-        input, mm_processor_.get(), engine_->isMTPEagle(), RoleType::PREFILL, server_context,
-        generate_context.trace_span_guard ? generate_context.trace_span_guard->sharedSpan() :
-                                           opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>{});
-    mm_cost_us             = currentTimeUs() - phase_start;
-    if (!preprocess_status.ok()) {
-        generate_context.error_status = serializeErrorMsg(generate_context.request_key, preprocess_status);
-    }
-    if (generate_context.finished || generate_context.hasError()) {
-        // mm_processor (or upstream CHECK_ERROR_STATUS path) early-aborted.
-        // Print a paired exit log so this thread's [HANG-DIAG] trail is self-
-        // contained (entry -> early-exit), and so watchdog never sees a
-        // request perma-stuck at step=entry without an obvious cause.
-        RTP_LLM_LOG_WARNING("[HANG-DIAG] PrefillRpcServer::GenerateStreamCall step=early-exit-at-mm, "
-                            "request_id=%ld, status=%s",
-                            request_id,
-                            generate_context.error_status.error_message().c_str());
-        return generate_context.error_status;
-    }
-
-    // [HANG-DIAG] step 2/4: transQuery + mm_processor done.
-    onflight_scope.markStep(GenerateStreamStep::kAfterTransQuery);
-    RTP_LLM_LOG_DEBUG("[HANG-DIAG] PrefillRpcServer::GenerateStreamCall step=after-transQuery, "
-                      "request_id=%ld, mm_us=%ld",
-                      request_id,
-                      mm_cost_us);
-
-    if (cancel_handle->canceled.load()) {
-        generate_context.error_info   = cancel_handle->cancel_reason;
-        generate_context.error_status = serializeErrorMsg(std::to_string(request_id), generate_context.error_info);
-        return generate_context.error_status;
-    }
-    phase_start     = currentTimeUs();
-    auto stream     = engine_->enqueue(input);
-    enqueue_cost_us = currentTimeUs() - phase_start;
-    generate_context.setStream(stream);
-    cancel_registry_->attach(cancel_handle, stream);
-
-    // [HANG-DIAG] step 3/4: engine_->enqueue returned (NormalGenerateStream
-    // constructed and pushed to FIFOScheduler). If this log is missing, the
-    // hang is inside the stream-construction / scheduler-enqueue path; check
-    // FIFOScheduler::enqueue INFO for the stream_id to disambiguate further.
-    onflight_scope.markStep(GenerateStreamStep::kAfterEngineEnqueue);
-    RTP_LLM_LOG_DEBUG("[HANG-DIAG] PrefillRpcServer::GenerateStreamCall step=after-engine-enqueue, "
-                      "request_id=%ld, enqueue_us=%ld",
-                      request_id,
-                      enqueue_cost_us);
-
-    phase_start = currentTimeUs();
-    generate_context.error_status =
-        pollStreamOutput(server_context, generate_context.request_key, response_writer, generate_context.getStream());
-    poll_cost_us = currentTimeUs() - phase_start;
-    // [HANG-DIAG] step 4/4: pollStreamOutput returned. The dominant phase for
-    // normal requests; absence here while step 3 fired means the stream never
-    // produced output (cuda/scheduler hang) or pollStream itself is stuck.
-    onflight_scope.markStep(GenerateStreamStep::kAfterPollStream);
-
-    int64_t total_us = mm_cost_us + enqueue_cost_us + poll_cost_us;
-    if (total_us >= 2000000) {
-        RTP_LLM_LOG_WARNING("[PD-DIAG] PrefillRpcServer slow GenerateStreamCall request_id=%ld total_us=%ld "
-                            "mm_us=%ld enqueue_us=%ld poll_us=%ld",
-                            request_id,
-                            total_us,
-                            mm_cost_us,
-                            enqueue_cost_us,
-                            poll_cost_us);
-    }
-    // Final exit log paired with the entry log. WARN if non-OK so error
-    // paths (pollStreamOutput surfacing stream error, etc.) are always
-    // visible regardless of total_us; INFO for healthy exit gives the
-    // watchdog a definitive "request done" marker.
-    if (!generate_context.error_status.ok()) {
-        RTP_LLM_LOG_WARNING("[HANG-DIAG] PrefillRpcServer::GenerateStreamCall step=exit-error, "
-                            "request_id=%ld, total_us=%ld, status=%s",
-                            request_id,
-                            total_us,
-                            generate_context.error_status.error_message().c_str());
-    }
-    meta_->dequeue(generate_context.request_id, generate_context.getStream());
-    return generate_context.error_status;
 } catch (const std::invalid_argument& e) {
     const auto request_key = request ? std::to_string(request->request_id()) : "unknown";
     const auto error_info =
         ErrorInfo(ErrorCode::INVALID_PARAMS, "request [" + request_key + "] catch invalid argument [" + e.what() + "]");
-    return serializeErrorMsg(request_key, RequestInfo(), error_info);
+    return serializeErrorMsg(request_key, request ? QueryConverter::transRequestInfo(request->request_info()) : RequestInfo(), error_info);
 } catch (const std::exception& e) {
     const auto request_key = request ? std::to_string(request->request_id()) : "unknown";
     return serializeErrorMsg(
         request_key,
+        request ? QueryConverter::transRequestInfo(request->request_info()) : RequestInfo(),
         ErrorInfo(ErrorCode::EXECUTION_EXCEPTION,
                   "request [" + request_key + "] catch exception [" + std::string(e.what()) + "]"));
 } catch (...) {
     const auto request_key = request ? std::to_string(request->request_id()) : "unknown";
     return serializeErrorMsg(
         request_key,
+        request ? QueryConverter::transRequestInfo(request->request_info()) : RequestInfo(),
         ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "request [" + request_key + "] catch unknown exception"));
 }
 

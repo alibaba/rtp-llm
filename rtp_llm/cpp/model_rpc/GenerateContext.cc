@@ -75,6 +75,14 @@ void GenerateContext::synthesizeTracePhases(telemetry::PhaseRole role, bool exce
     telemetry::synthesizePhaseSpans(trace_span_guard->sharedSpan(), phase_timing, role, request_ok);
 }
 
+void GenerateContext::recordRpcFailure(const ErrorInfo& error) {
+    if (!error_info.hasError()) {
+        const auto first = stream_ ? stream_->firstError() : FirstError::Snapshot{};
+        error_info = first.error.hasError() ? first.error : error;
+    }
+    error_status = grpcStatusFromErrorInfo(error_info);
+}
+
 void GenerateContext::reset() {
     error_info   = ErrorInfo::OkStatus();
     error_status = grpc::Status::OK;
