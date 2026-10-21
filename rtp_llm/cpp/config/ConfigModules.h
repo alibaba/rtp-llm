@@ -416,14 +416,12 @@ struct CacheStoreConfig {
     int     rdma_worker_thread_count            = 2;
     int     messager_io_thread_count            = 2;
     int     messager_worker_thread_count        = 32;
-    int64_t rdma_transfer_wait_timeout_ms       = 180 * 1000;  // RDMA 传输完成最大等待超时时间，默认 180 秒
     int     rdma_max_block_pairs_per_connection = 0;  // 每条 RDMA 连接可处理的最大 block_pair 数量，0 表示不限制
     int64_t p2p_transfer_not_done_resource_hold_ms =
         10 * 1000;  // D 后等待 RDMA 物理完成的时间；到期后 close 相关 connection
     int64_t p2p_lease_query_timeout_ms = 20 * 1000;  // 单轮 lease 查询的超时上限，内部最多等待 500ms
     int     p2p_kv_leak_exit_threshold_percent = 30;  // 滞留目标 KV 字节占总 KV 容量超过该百分比则退出
 
-    int     p2p_resource_store_timeout_check_interval_ms = 100;
     int64_t p2p_cancel_broadcast_timeout_ms              = 1000;
     // TTL for cancelled_keys_ tombstones; should cover the longest expected
     // decode StartLoad arrival skew so we can tell "request expired" vs

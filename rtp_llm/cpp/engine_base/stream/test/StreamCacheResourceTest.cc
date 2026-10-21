@@ -261,7 +261,7 @@ protected:
         auto connector   = std::make_unique<P2PConnector>(config, nullptr, nullptr);
         // Replace transport with a registration-only connector for the assertions below.
         connector->prefill_                = std::make_unique<P2PConnectorPrefill>(config, nullptr, nullptr);
-        connector->prefill_->stream_store_ = std::make_shared<P2PConnectorResourceStore>(nullptr, 100);
+        connector->prefill_->stream_store_ = std::make_shared<P2PConnectorResourceStore>(nullptr);
         cache_manager_->p2p_connector_     = std::move(connector);
         ASSERT_TRUE(cache_manager_->hasP2PConnector());
         ASSERT_TRUE(stream_->streamCacheResource().initKVBlock().ok());

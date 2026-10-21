@@ -263,7 +263,7 @@ protected:
             config.role_type = RoleType::PREFILL;
             auto connector = std::make_shared<P2PConnector>(config, nullptr, nullptr);
             connector->prefill_ = std::make_unique<P2PConnectorPrefill>(config, nullptr, nullptr);
-            connector->prefill_->stream_store_ = std::make_shared<P2PConnectorResourceStore>(nullptr, 1000);
+            connector->prefill_->stream_store_ = std::make_shared<P2PConnectorResourceStore>(nullptr);
             engine->getCacheManager()->p2p_connector_ = connector;
         }
         auto request = lifecycleRequest();

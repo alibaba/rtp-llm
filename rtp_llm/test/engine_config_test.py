@@ -228,14 +228,16 @@ class EngineConfigTest(TestCase):
         self.assertEqual(config.p2p_kv_leak_exit_threshold_percent, 30)
         config.p2p_kv_leak_exit_threshold_percent = 45
         state = config.__getstate__()
-        self.assertEqual(len(state), 27)
+        self.assertEqual(len(state), 25)
         restored = pickle.loads(pickle.dumps(config))
         self.assertEqual(restored.__getstate__(), state)
         self.assertEqual(restored.p2p_prefill_sender_thread_count, 8)
         self.assertEqual(restored.p2p_prefill_sender_queue_size, 20000)
         self.assertEqual(restored.p2p_kv_leak_exit_threshold_percent, 45)
         for removed in ("p2p_read_steal_before_deadline_ms", "p2p_read_return_before_deadline_ms",
-                        "p2p_layer_cache_buffer_store_timeout_ms"):
+                        "p2p_layer_cache_buffer_store_timeout_ms",
+                        "rdma_transfer_wait_timeout_ms",
+                        "p2p_resource_store_timeout_check_interval_ms"):
             self.assertFalse(hasattr(restored, removed))
 
     def test_cache_store_config_preserves_rdma_h2d_staging_total_bytes(self):

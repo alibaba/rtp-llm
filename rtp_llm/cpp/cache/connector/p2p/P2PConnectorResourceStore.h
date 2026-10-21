@@ -35,8 +35,7 @@ struct P2PConnectorResourceEntry {
 // Lightweight terminal state remains for one hour after completion/cancellation/timeout.
 class P2PConnectorResourceStore {
 public:
-    P2PConnectorResourceStore(const kmonitor::MetricsReporterPtr& metrics_reporter,
-                              int                                 timeout_check_interval_ms);
+    explicit P2PConnectorResourceStore(const kmonitor::MetricsReporterPtr& metrics_reporter);
     ~P2PConnectorResourceStore();
 
 public:

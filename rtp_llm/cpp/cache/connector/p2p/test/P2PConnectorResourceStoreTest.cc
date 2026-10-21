@@ -17,7 +17,7 @@ namespace rtp_llm {
 class P2PConnectorResourceStoreTest: public ::testing::Test {
 protected:
     void SetUp() override {
-        stream_store_ = std::make_unique<P2PConnectorResourceStore>(nullptr, 100);
+        stream_store_ = std::make_unique<P2PConnectorResourceStore>(nullptr);
         ASSERT_TRUE(stream_store_->init());
     }
 
@@ -54,7 +54,7 @@ protected:
 
 TEST_F(P2PConnectorResourceStoreTest, CancellationCallbackCanRegisterRequestWithoutStoreLock) {
     // Isolate the caller's lock ownership from the deadline thread's legitimate contention.
-    stream_store_       = std::make_unique<P2PConnectorResourceStore>(nullptr, 100);
+    stream_store_       = std::make_unique<P2PConnectorResourceStore>(nullptr);
     const auto deadline = getDeadlineMs();
     bool called = false;
     EXPECT_GT(stream_store_->waitForRequestDeadline("reentrant", deadline, [&] {
@@ -389,7 +389,7 @@ TEST(P2PConnectorResourceStoreDeadlineTest, ResourceTimeoutUsesRequestDeadlineNo
     std::condition_variable released_cv;
     bool                    released = false;
     {
-        P2PConnectorResourceStore store(nullptr, 10 * 1000);
+        P2PConnectorResourceStore store(nullptr);
         ASSERT_TRUE(store.init());
         store.setOnRequestReleased([&](int64_t, int64_t) {
             std::lock_guard<std::mutex> lock(mutex);
@@ -685,7 +685,7 @@ TEST_F(P2PConnectorResourceStoreTest, MissingOrInfiniteDeadlineDoesNotCreateReso
 }
 
 TEST(P2PRequestTimeoutTest, FirstArrivalWinsAndTerminalCannotRenew) {
-    P2PConnectorResourceStore store(nullptr, 10);
+    P2PConnectorResourceStore store(nullptr);
     const auto before = currentTimeMs();
     const auto deadline = store.requestDeadline("relative-timeout", 5000);
     EXPECT_GE(deadline, before + 5000);
@@ -697,7 +697,7 @@ TEST(P2PRequestTimeoutTest, FirstArrivalWinsAndTerminalCannotRenew) {
 }
 
 TEST(P2PRequestTimeoutTest, RegistrationWaitReadsExistingDeadline) {
-    P2PConnectorResourceStore store(nullptr, 10);
+    P2PConnectorResourceStore store(nullptr);
     const auto                deadline = store.requestDeadline("registered", 5000);
     EXPECT_EQ(store.waitForRequestDeadline("registered", currentTimeMs() + 1000), deadline);
     EXPECT_EQ(store.waitForRequestDeadline("registered", currentTimeMs() + 1000, [] { return true; }), 0);
@@ -706,7 +706,7 @@ TEST(P2PRequestTimeoutTest, RegistrationWaitReadsExistingDeadline) {
 }
 
 TEST(P2PRequestTimeoutTest, RegistrationWaitRequiresMatchingGenerateStream) {
-    P2PConnectorResourceStore store(nullptr, 10);
+    P2PConnectorResourceStore store(nullptr);
     store.requestDeadline("other-key", 5000);
     std::promise<void> waiting;
     auto               started = waiting.get_future();
@@ -727,7 +727,7 @@ TEST(P2PRequestTimeoutTest, RegistrationWaitRequiresMatchingGenerateStream) {
 }
 
 TEST(P2PRequestTimeoutTest, RegistrationWaitDoesNotCreateOrRenewDeadline) {
-    P2PConnectorResourceStore store(nullptr, 10);
+    P2PConnectorResourceStore store(nullptr);
     const auto                load_deadline = currentTimeMs() + 20;
     EXPECT_EQ(store.waitForRequestDeadline("not-registered", load_deadline), 0);
     EXPECT_GE(currentTimeMs(), load_deadline);
@@ -749,7 +749,7 @@ TEST_F(P2PConnectorResourceStoreTest, ResourcePublicationDoesNotReplaceGenerateS
 }
 
 TEST(P2PRequestTimeoutTest, InvalidDurationsDoNotCreateRequest) {
-    P2PConnectorResourceStore store(nullptr, 10);
+    P2PConnectorResourceStore store(nullptr);
     EXPECT_EQ(store.requestDeadline("", 1000), 0);
     EXPECT_EQ(store.requestDeadline("key", 0), 0);
     EXPECT_EQ(store.requestDeadline("key", -1), 0);
@@ -761,7 +761,7 @@ TEST(P2PRequestTimeoutTest, InvalidDurationsDoNotCreateRequest) {
 class P2PResourceStoreDeadlineIndexTest: public P2PConnectorResourceStoreTest {
 protected:
     void SetUp() override {
-        stream_store_ = std::make_unique<P2PConnectorResourceStore>(nullptr, 100);
+        stream_store_ = std::make_unique<P2PConnectorResourceStore>(nullptr);
     }
 };
 

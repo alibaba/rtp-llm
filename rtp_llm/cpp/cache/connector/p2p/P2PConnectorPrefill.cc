@@ -57,9 +57,7 @@ bool P2PConnectorPrefill::init() {
     }
 
     if (config_.tp_rank == 0) {
-        stream_store_ = std::make_shared<P2PConnectorResourceStore>(
-            metrics_reporter_,
-            config_.scheduler_config.p2p_resource_store_timeout_check_interval_ms);
+        stream_store_ = std::make_shared<P2PConnectorResourceStore>(metrics_reporter_);
         stream_store_->setOnRequestReleased(
             [computed_buffers = worker_->getComputedBuffersStore()](int64_t request_id, int64_t request_deadline_ms) {
                 if (computed_buffers) {

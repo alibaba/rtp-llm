@@ -113,14 +113,6 @@ def init_cache_store_group_args(parser, cache_store_config):
         default=32,
         help="为 cache store P2P messager 通信层设置 worker 线程数量。",
     )
-    cache_store_group.add_argument(
-        "--cache_store_rdma_transfer_wait_timeout_ms",
-        env_name="CACHE_STORE_RDMA_TRANSFER_WAIT_TIMEOUT_MS",
-        bind_to=(cache_store_config, "rdma_transfer_wait_timeout_ms"),
-        type=int,
-        default=180000,
-        help="RDMA 传输完成最大等待超时时间（毫秒），默认 180 秒。",
-    )
 
     cache_store_group.add_argument(
         "--p2p_transfer_not_done_resource_hold_ms",
@@ -148,14 +140,6 @@ def init_cache_store_group_args(parser, cache_store_config):
         help="Decode：超时后滞留目标 KV 占总 KV 容量超过该百分比时退出进程，取值 1~100，默认 30。",
     )
 
-    cache_store_group.add_argument(
-        "--p2p_resource_store_timeout_check_interval_ms",
-        env_name="P2P_RESOURCE_STORE_TIMEOUT_CHECK_INTERVAL_MS",
-        bind_to=(cache_store_config, "p2p_resource_store_timeout_check_interval_ms"),
-        type=int,
-        default=100,
-        help="P2P decode 侧资源 store 周期扫描超时资源的间隔（毫秒）。",
-    )
     cache_store_group.add_argument(
         "--p2p_cancel_broadcast_timeout_ms",
         env_name="P2P_CANCEL_BROADCAST_TIMEOUT_MS",

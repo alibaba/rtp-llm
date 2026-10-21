@@ -66,8 +66,7 @@ bool waitWithBackoff(Lock&                                 lock,
 
 namespace rtp_llm {
 
-P2PConnectorResourceStore::P2PConnectorResourceStore(const kmonitor::MetricsReporterPtr& metrics_reporter,
-                                                   int /*timeout_check_interval_ms*/):
+P2PConnectorResourceStore::P2PConnectorResourceStore(const kmonitor::MetricsReporterPtr& metrics_reporter):
     metrics_reporter_(metrics_reporter) {}
 
 P2PConnectorResourceStore::~P2PConnectorResourceStore() {

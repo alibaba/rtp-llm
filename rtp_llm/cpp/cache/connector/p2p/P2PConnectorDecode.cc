@@ -239,7 +239,9 @@ bool P2PConnectorDecode::queryLeaseStatusPerRank(const std::string& unique_key, 
     int  finished_ops = 0;
     bool stopped      = true;
 
-    worker_->queryLeaseStatus(unique_key, sealed, started_ops, finished_ops, stopped);
+    const bool found = worker_->queryLeaseStatus(unique_key, sealed, started_ops, finished_ops, stopped);
+    // Missing leases are deliberately reported stopped; the worker checks the
+    // registration fence under the same lock before returning not-found.
 
     auto* p2p_response = response.mutable_p2p_response();
     p2p_response->set_error_code(ErrorCodePB::NONE_ERROR);
@@ -249,8 +251,9 @@ bool P2PConnectorDecode::queryLeaseStatusPerRank(const std::string& unique_key, 
     lease_status->set_finished_ops(finished_ops);
     lease_status->set_stopped(stopped);
 
-    RTP_LLM_LOG_DEBUG("executeQueryLeaseStatus: unique_key=%s sealed=%d started=%d finished=%d stopped=%d",
+    RTP_LLM_LOG_DEBUG("executeQueryLeaseStatus: unique_key=%s found=%d sealed=%d started=%d finished=%d stopped=%d",
                       unique_key.c_str(),
+                      found,
                       sealed,
                       started_ops,
                       finished_ops,
