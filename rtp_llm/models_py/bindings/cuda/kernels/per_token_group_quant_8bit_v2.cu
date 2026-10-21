@@ -245,6 +245,7 @@ template<typename SCHEDULER,
          bool IS_COLUMN_MAJOR    = false,
          bool SCALE_UE8M0        = false,
          bool FUSE_SILU_AND_MUL  = false,
+         bool PRESERVE_SILU_MUL_ROUNDING = false,
          typename scale_packed_t = std::conditional_t<SCALE_UE8M0, uint32_t, float>>
 __global__ void per_token_group_quant_8bit_kernel(const T* __restrict__ input,
                                                   DST_DTYPE* __restrict__ output_q,
@@ -346,9 +347,20 @@ __global__ void per_token_group_quant_8bit_kernel(const T* __restrict__ input,
             for (uint32_t j = 0; j < INPUT_PRIMARY_VEC_SIZE; ++j) {
                 float val;
                 if constexpr (FUSE_SILU_AND_MUL) {
-                    // TODO maybe vectorize
-                    T val_lowprec =
-                        static_cast<T>(silu(static_cast<float>(input_primary_vec[j]))) * input_secondary_vec[j];
+                    T val_lowprec;
+                    if constexpr (PRESERVE_SILU_MUL_ROUNDING) {
+                        // DenseMLP uses FlashInfer's FP32 SiLU * up, followed by
+                        // one BF16 rounding. Keep its exp-based activation and
+                        // rounding boundary, rather than the legacy MoE path's
+                        // BF16 SiLU intermediate and SM100+ tanh approximation.
+                        const float gate = static_cast<float>(input_primary_vec[j]);
+                        const float up = static_cast<float>(input_secondary_vec[j]);
+                        const float activated = gate / (1.0f + __expf(-gate));
+                        val_lowprec = static_cast<T>(activated * up);
+                    } else {
+                        val_lowprec =
+                            static_cast<T>(silu(static_cast<float>(input_primary_vec[j]))) * input_secondary_vec[j];
+                    }
                     val                  = static_cast<float>(val_lowprec);
                     input_primary_vec[j] = val_lowprec;
                 } else {
@@ -362,11 +374,24 @@ __global__ void per_token_group_quant_8bit_kernel(const T* __restrict__ input,
             local_absmax = GroupReduceMax<THREADS_PER_SUBWARP>(local_absmax, lane_id);
 
             float y_scale, y_scale_inv;
-            calculate_fp8_scales<SCALE_UE8M0, dst_dtype_info>(local_absmax, y_scale, y_scale_inv);
+            if constexpr (PRESERVE_SILU_MUL_ROUNDING) {
+                // Match the dense v1 quantizer, including its scale threshold
+                // behavior. The legacy v2 integer log2 approximation is not
+                // substituted for the existing floating-point expression.
+                y_scale_inv = local_absmax / dst_dtype_info::MAX;
+                y_scale_inv = exp2f(ceilf(log2f(fmaxf(y_scale_inv, 1e-10f))));
+                y_scale = 1.0f / y_scale_inv;
+            } else {
+                calculate_fp8_scales<SCALE_UE8M0, dst_dtype_info>(local_absmax, y_scale, y_scale_inv);
+            }
             float2 y_scale_repeated = {y_scale, y_scale};
 
             if (lane_id == 0) {
-                *scale_output = extract_required_scale_format<SCALE_UE8M0>(y_scale_inv);
+                if constexpr (PRESERVE_SILU_MUL_ROUNDING) {
+                    *scale_output = static_cast<uint8_t>(static_cast<int>(log2f(y_scale_inv)) + 127);
+                } else {
+                    *scale_output = extract_required_scale_format<SCALE_UE8M0>(y_scale_inv);
+                }
             }
 
             int4 output_buf;
@@ -381,7 +406,12 @@ __global__ void per_token_group_quant_8bit_kernel(const T* __restrict__ input,
                 for (uint32_t j = 0; j < INPUT_PRIMARY_VEC_SIZE; j += 2) {
                     float2 inputx2  = {static_cast<float>(input_primary_vec[j]),
                                        static_cast<float>(input_primary_vec[j + 1])};
-                    float2 outputx2 = fmul2_rn(inputx2, y_scale_repeated);
+                    float2 outputx2;
+                    if constexpr (PRESERVE_SILU_MUL_ROUNDING) {
+                        outputx2 = {inputx2.x / y_scale_inv, inputx2.y / y_scale_inv};
+                    } else {
+                        outputx2 = fmul2_rn(inputx2, y_scale_repeated);
+                    }
 
                     outputx2.x = fminf(fmaxf(outputx2.x, dst_dtype_info::MIN), dst_dtype_info::MAX);
                     outputx2.y = fminf(fmaxf(outputx2.y, dst_dtype_info::MIN), dst_dtype_info::MAX);
@@ -418,7 +448,8 @@ void sgl_per_token_group_quant_8bit_v2(
     double                              max_8bit,
     bool                                scale_ue8m0,
     bool                                fuse_silu_and_mul,
-    const std::optional<torch::Tensor>& masked_m) {
+    const std::optional<torch::Tensor>& masked_m,
+    bool                                preserve_silu_mul_rounding) {
     CHECK_INPUT(input);
     CHECK_INPUT(output_q);
     TORCH_CHECK(input.numel() > 0);
@@ -442,6 +473,24 @@ void sgl_per_token_group_quant_8bit_v2(
     const int  num_tokens_per_expert = static_cast<int>(output_q.size(-2));
     const int  scale_expert_stride   = masked_layout ? static_cast<int>(output_s.stride(0)) : 0;
     const int  scale_hidden_stride   = static_cast<int>(output_s.stride(-1));
+
+    if (preserve_silu_mul_rounding) {
+        TORCH_CHECK(fuse_silu_and_mul && !masked_layout && scale_ue8m0 && is_column_major,
+                    "Dense SiLU quant requires unmasked fused activation and column-major UE8M0 scales");
+        TORCH_CHECK(input.scalar_type() == at::ScalarType::BFloat16 && input.dim() == 2 && group_size == 128,
+                    "Dense SiLU quant requires BF16 [tokens, 2 * hidden] and group_size=128");
+        TORCH_CHECK(dst_type == at::ScalarType::Float8_e4m3fn && output_q.dim() == 2
+                        && output_q.size(0) == input.size(0) && output_q.size(1) * 2 == input.size(1)
+                        && output_q.size(1) % 512 == 0,
+                    "Dense SiLU quant requires FP8 [tokens, hidden] and hidden divisible by 512");
+        TORCH_CHECK(output_s.scalar_type() == at::ScalarType::Int
+                        && output_s.size(0) == input.size(0)
+                        && output_s.size(1) == hidden_dim_num_groups / 4
+                        && output_s.stride(0) == 1
+                        && output_s.stride(1) == (input.size(0) + 3) / 4 * 4
+                        && output_s.device() == input.device() && output_q.device() == input.device(),
+                    "Dense SiLU quant requires TMA-aligned packed UE8M0 scales on the input device");
+    }
 
 #define LAUNCH_KERNEL_INNER(SCHEDULER, GROUP_SIZE, THREADS_PER_SUBWARP, T, DST_DTYPE, output_s_dtype, ...)             \
     do {                                                                                                               \
@@ -477,7 +526,10 @@ void sgl_per_token_group_quant_8bit_v2(
         CHECK_EQ(dst_dtype_info::MIN, min_8bit);                                                                       \
         CHECK_EQ(dst_dtype_info::MAX, max_8bit);                                                                       \
                                                                                                                        \
-        if (is_column_major) {                                                                                         \
+        if (preserve_silu_mul_rounding) {                                                                               \
+            LAUNCH_KERNEL_INNER(                                                                                       \
+                NaiveScheduler, GROUP_SIZE, THREADS_PER_SUBWARP, T, DST_DTYPE, uint32_t, true, true, true, true);         \
+        } else if (is_column_major) {                                                                                   \
             if (scale_ue8m0) {                                                                                         \
                 if (fuse_silu_and_mul) {                                                                               \
                     if (masked_layout) {                                                                               \

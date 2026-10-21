@@ -115,11 +115,28 @@ def sgl_per_token_group_quant_fp8(
     scale_ue8m0: bool = False,
     fuse_silu_and_mul: bool = False,
     masked_m: Optional[torch.Tensor] = None,
+    preserve_silu_mul_rounding: bool = False,
 ):
     assert (
         x.shape[-1] % group_size == 0
     ), "the last dimension of `x` cannot be divisible by `group_size`"
     assert x.is_contiguous(), "`x` is not contiguous"
+    if preserve_silu_mul_rounding:
+        if not (
+            fuse_silu_and_mul
+            and masked_m is None
+            and x.dim() == 2
+            and x.dtype == torch.bfloat16
+            and group_size == 128
+            and x.shape[-1] % 1024 == 0
+            and column_major_scales
+            and scale_tma_aligned
+            and scale_ue8m0
+        ):
+            raise ValueError(
+                "Dense SiLU quant requires BF16 [tokens, 2 * hidden], hidden divisible by 512, group 128, "
+                "unmasked input, and TMA-aligned column-major UE8M0 scales"
+            )
 
     out_shape = (*x.shape[:-1], x.shape[-1] // (2 if fuse_silu_and_mul else 1))
     x_q = torch.empty(out_shape, device=x.device, dtype=fp8_dtype)
@@ -132,7 +149,21 @@ def sgl_per_token_group_quant_fp8(
         scale_ue8m0=scale_ue8m0,
     )
     if x.shape[0] > 0:
-        if masked_m is not None:
+        if preserve_silu_mul_rounding:
+            per_token_group_quant_fp8_v2(
+                x,
+                x_q,
+                x_s,
+                group_size,
+                eps,
+                fp8_min,
+                fp8_max,
+                scale_ue8m0,
+                fuse_silu_and_mul,
+                masked_m,
+                preserve_silu_mul_rounding=True,
+            )
+        elif masked_m is not None:
             per_token_group_quant_fp8_v2(
                 x,
                 x_q,
