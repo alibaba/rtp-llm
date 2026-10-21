@@ -372,40 +372,49 @@ P2PSchedulerDecodeRead::AsyncReadResult P2PSchedulerDecodeRead::asyncRead(
                 return;
             }
 
-            ErrorInfo start_error;
-            auto      async_calls = startAsyncReadCalls(request_id,
-                                                   prefill_ip,
-                                                   prefill_port,
-                                                   unique_key,
-                                                   request_deadline_ms,
-                                                   transfer_deadline_ms,
-                                                   collector,
-                                                   start_error,
-                                                   prefill_tp_size,
-                                                   no_transfer,
-                                                   std::move(rank_routes),
-                                                   std::move(active_route_ids),
-                                                   plan_digest);
-            if (!async_calls) {
-                async_context->markStartFailed(start_error);
-                return;
-            }
-
-            const bool cancel_requested =
-                async_context->setCallResults(async_calls->tp_sync_result, async_calls->server_call_result);
-            if (cancel_requested) {
-                // cancel() can rethrow an RPC-creation failure; contain it here so it
-                // cannot escape the pool thread. Retry state is already armed inside
-                // cancel() and the checker keeps driving the cancellation.
-                try {
-                    async_context->cancel(tp_broadcast_client_);
-                } catch (const std::exception& e) {
-                    RTP_LLM_LOG_WARNING("P2P async read kickoff cancel failed, unique_key: %s, error: %s",
-                                        unique_key.c_str(),
-                                        e.what());
-                } catch (...) {
-                    RTP_LLM_LOG_WARNING("P2P async read kickoff cancel failed, unique_key: %s", unique_key.c_str());
+            try {
+                ErrorInfo start_error;
+                auto      async_calls = startAsyncReadCalls(request_id,
+                                                       prefill_ip,
+                                                       prefill_port,
+                                                       unique_key,
+                                                       request_deadline_ms,
+                                                       transfer_deadline_ms,
+                                                       collector,
+                                                       start_error,
+                                                       prefill_tp_size,
+                                                       no_transfer,
+                                                       std::move(rank_routes),
+                                                       std::move(active_route_ids),
+                                                       plan_digest);
+                if (!async_calls) {
+                    async_context->markStartFailed(start_error);
+                    return;
                 }
+
+                const bool cancel_requested =
+                    async_context->setCallResults(async_calls->tp_sync_result, async_calls->server_call_result);
+                if (cancel_requested) {
+                    // cancel() can rethrow an RPC-creation failure; contain it here so it
+                    // cannot escape the pool thread. Retry state is already armed inside
+                    // cancel() and the checker keeps driving the cancellation.
+                    try {
+                        async_context->cancel(tp_broadcast_client_);
+                    } catch (const std::exception& e) {
+                        RTP_LLM_LOG_WARNING("P2P async read kickoff cancel failed, unique_key: %s, error: %s",
+                                            unique_key.c_str(),
+                                            e.what());
+                    } catch (...) {
+                        RTP_LLM_LOG_WARNING("P2P async read kickoff cancel failed, unique_key: %s", unique_key.c_str());
+                    }
+                }
+            } catch (const std::exception& error) {
+                async_context->markKickoffUnconfirmed(
+                    {ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED,
+                     std::string("P2P kickoff failed after possible RPC dispatch: ") + error.what()});
+            } catch (...) {
+                async_context->markKickoffUnconfirmed(
+                    {ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, "P2P kickoff failed after possible RPC dispatch"});
             }
         },
         false);

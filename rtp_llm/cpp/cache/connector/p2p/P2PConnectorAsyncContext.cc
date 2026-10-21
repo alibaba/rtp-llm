@@ -120,6 +120,28 @@ void P2PConnectorAsyncReadContext::markStartFailed(const ErrorInfo& error_info) 
     notify();
 }
 
+void P2PConnectorAsyncReadContext::markKickoffUnconfirmed(const ErrorInfo& error_info) {
+    DoneNotifier done_notifier{*this};
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (!done_) {
+            done_ = true;
+            success_ = false;
+            error_code_ = error_info.code();
+            error_message_ = error_info.ToString();
+        }
+        // StartLoad/READ may already be in flight even if no result was returned.
+        kickoff_state_ = KickoffState::CALLS_READY;
+        if (!lease_hold_pending_.load(std::memory_order_acquire)) {
+            beginLeaseHold();
+        }
+    }
+    cancel_requested_.store(true, std::memory_order_release);
+    calls_ready_.store(true, std::memory_order_release);
+    done_cv_.notify_all();
+    notify();
+}
+
 void P2PConnectorAsyncReadContext::beginLeaseHold() {
     if (no_transfer_) {
         return;
@@ -356,14 +378,14 @@ void P2PConnectorAsyncReadContext::cancel(const std::shared_ptr<P2PBroadcastClie
 
     std::string unique_key = uniqueKey();
 
-    if (!server_call_result_->done()) {
+    if (server_call_result_ && !server_call_result_->done()) {
         server_call_result_->cancel();
     }
 
     // A failed client-side READ result does not prove that every worker handler
     // has stopped. A D-timeout lease hold always broadcasts CANCEL_READ, even
     // if READ itself completed, so the cancel-done barrier cannot be skipped.
-    const bool read_confirmed_success = tp_sync_result_->done() && tp_sync_result_->success();
+    const bool read_confirmed_success = tp_sync_result_ && tp_sync_result_->done() && tp_sync_result_->success();
     const bool lease_stop_confirmation_required = lease_hold_pending_.load(std::memory_order_acquire);
     if ((lease_stop_confirmation_required || !read_confirmed_success) && tp_broadcast_client
         && !cancel_confirmed_.load(std::memory_order_acquire)) {

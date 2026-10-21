@@ -658,6 +658,31 @@ TEST_F(P2PConnectorSchedulerTest, AsyncReadPendingContextWaitsForKickoff) {
     EXPECT_EQ(context->uniqueKey(), "pending-kickoff");
 }
 
+TEST_F(P2PConnectorSchedulerTest, KickoffExceptionRetainsLeaseAndCanCancelWithoutCallResults) {
+    auto context = std::make_shared<P2PConnectorAsyncReadContext>(
+        createValidKVCacheResource(1, 1), "kickoff-exception",
+        std::make_shared<P2PConnectorMetricsCollector>(), 10000, false, currentTimeMs() + 10000);
+    ASSERT_TRUE(context->beginKickoff());
+    context->markKickoffUnconfirmed({ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, "dispatch exception"});
+    EXPECT_TRUE(context->done());
+    EXPECT_FALSE(context->success());
+    EXPECT_TRUE(context->resourceHoldPending());
+    EXPECT_TRUE(context->needCancel());
+    EXPECT_NO_THROW(context->cancel(tp_broadcast_client_));
+    for (int i = 0; i < 1000 && context->needCancel(); ++i) {
+        context->checkCancelDone();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    EXPECT_FALSE(context->needCancel());
+    // A cancel ACK alone is insufficient to release a possibly targeted KV block.
+    EXPECT_TRUE(context->resourceHoldPending());
+    context->markKickoffUnconfirmed({ErrorCode::GENERATE_TIMEOUT, "later timeout"});
+    EXPECT_NE(context->errorInfo().ToString().find("dispatch exception"), std::string::npos);
+    for (const auto& server : tp_broadcast_servers_) {
+        EXPECT_EQ(server->service()->getBroadcastTpCancelCallCount(), 1);
+    }
+}
+
 TEST_F(P2PConnectorSchedulerTest, AsyncReadPendingContextCanBeCancelledBeforeKickoff) {
     auto resource  = createValidKVCacheResource(1, 1);
     auto collector = std::make_shared<P2PConnectorMetricsCollector>();

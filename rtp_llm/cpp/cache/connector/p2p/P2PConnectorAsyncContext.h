@@ -89,6 +89,8 @@ public:
     bool setCallResults(const std::shared_ptr<P2PBroadcastClient::Result>& tp_sync_result,
                         const std::shared_ptr<DecodeLoadHelper::Result>&  server_call_result);
     void markStartFailed(const ErrorInfo& error_info);
+    // An exception may follow a partial RPC dispatch: retain KV until workers confirm stop.
+    void markKickoffUnconfirmed(const ErrorInfo& error_info);
     void    setNotification(const std::shared_ptr<P2PNotification>& notification);
     int64_t nextWakeupMs(bool allow_control) const;
     bool    needsControl() const;
