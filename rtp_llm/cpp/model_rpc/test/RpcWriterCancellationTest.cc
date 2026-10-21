@@ -399,7 +399,7 @@ TEST(RpcWriterCancellationTest, PdValidationAndAdmissionErrorsEndServerSpanBefor
         server.maga_init_params_.pd_sep_config.role_type = RoleType::DECODE;
         server.meta_ = std::make_shared<RpcServerRuntimeMeta>();
         server.cancel_registry_ = std::make_unique<PDCancelRegistry>(server.meta_);
-        EXPECT_EQ(server.cancel_registry_->cancel(61, {ErrorCode::GENERATE_TIMEOUT, "late admission"}),
+        EXPECT_EQ(server.cancel_registry_->cancel(61, {ErrorCode::GENERATE_TIMEOUT, "late admission"}).value(),
                   CANCEL_STATUS_TOMBSTONED);
         const auto status = server.GenerateStreamCall(&context, &request, nullptr);
         EXPECT_EQ(errorInfoFromGrpcStatus(status).code(), ErrorCode::GENERATE_TIMEOUT);

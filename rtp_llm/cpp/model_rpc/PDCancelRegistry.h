@@ -4,6 +4,8 @@
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include <algorithm>
+#include <cstddef>
+#include "absl/status/statusor.h"
 #include <atomic>
 #include <cstdint>
 #include <memory>
@@ -50,7 +52,7 @@ public:
     Handle              find(int64_t request_id);
     void                attach(const Handle& handle, const GenerateStreamPtr& stream);
     void                finishLocal(const Handle& handle);
-    CancelStatusPB      cancel(int64_t request_id, const ErrorInfo& reason);
+    absl::StatusOr<CancelStatusPB> cancel(int64_t request_id, const ErrorInfo& reason);
     bool                isCanceled(const std::string& unique_key);
     std::vector<Handle> pending();
     void                finishDownstream(const Handle& handle);
@@ -90,6 +92,10 @@ private:
     void                                    trimLocked(int64_t now_ms);
     void                                    scheduleExpirationLocked(const Handle& handle, int64_t expires_at_ms);
     static constexpr int64_t                kRetentionMs = 10 * 60 * 1000;
+    // Shared bound for admitted requests and cancel-before-admission fences.
+    // Existing requests remain cancellable when new record admission is full.
+    size_t                                  record_capacity_       = 1u << 20;
+    static constexpr size_t                 kMaxExpirationsPerPass = 128;
     std::mutex                              mutex_;
     std::unordered_map<int64_t, Handle>     entries_;
     struct CancelFence {

@@ -856,11 +856,15 @@ PrefillRpcServer::Cancel(grpc::ServerContext*, const CancelRequestPB* request, C
     // A completed Prefill may still have unconsumed KV in the resource store.
     if (handle && engine_ && engine_->getCacheManager())
         engine_->getCacheManager()->cancelPrefillRequest(handle->unique_key, handle->deadline_ms);
-    response->set_status(cancel_registry_->cancel(
+    const auto cancellation = cancel_registry_->cancel(
         request->request_id(),
         {request->cancel_error_code() == 0 ? ErrorCode::PRIORITY_PREEMPTED :
                                              static_cast<ErrorCode>(request->cancel_error_code()),
-         request->cancel_error_message().empty() ? "PD request canceled" : request->cancel_error_message()}));
+         request->cancel_error_message().empty() ? "PD request canceled" : request->cancel_error_message()});
+    if (!cancellation.ok()) {
+        return grpc::Status(grpc::StatusCode::RESOURCE_EXHAUSTED, std::string(cancellation.status().message()));
+    }
+    response->set_status(cancellation.value());
     return grpc::Status::OK;
 }
 

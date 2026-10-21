@@ -168,11 +168,15 @@ grpc::Status DecodeRpcServer::Cancel(grpc::ServerContext*, const CancelRequestPB
         // remains in the independent retry record if it is still unreachable.
         response->set_status(CANCEL_STATUS_NOT_FOUND);
     } else {
-        response->set_status(cancel_registry_->cancel(
+        const auto cancellation = cancel_registry_->cancel(
             request->request_id(),
             {request->cancel_error_code() == 0 ? ErrorCode::PRIORITY_PREEMPTED :
                                                  static_cast<ErrorCode>(request->cancel_error_code()),
-             request->cancel_error_message().empty() ? "PD request canceled" : request->cancel_error_message()}));
+             request->cancel_error_message().empty() ? "PD request canceled" : request->cancel_error_message()});
+        if (!cancellation.ok()) {
+            return grpc::Status(grpc::StatusCode::RESOURCE_EXHAUSTED, std::string(cancellation.status().message()));
+        }
+        response->set_status(cancellation.value());
     }
     return grpc::Status::OK;
 }

@@ -17,7 +17,10 @@ void PDCancelRegistry::scheduleExpirationLocked(const Handle& handle, int64_t ex
 
 void PDCancelRegistry::trimLocked(int64_t now_ms) {
     size_t expired_remote_retries = 0;
-    while (!fence_expirations_.empty() && fence_expirations_.begin()->first <= now_ms) {
+    size_t fences_trimmed         = 0;
+    while (!fence_expirations_.empty() && fence_expirations_.begin()->first <= now_ms
+           && fences_trimmed < kMaxExpirationsPerPass) {
+        ++fences_trimmed;
         const auto [expires_at_ms, request_id] = *fence_expirations_.begin();
         fence_expirations_.erase(fence_expirations_.begin());
         auto it = absent_fences_.find(request_id);
@@ -25,7 +28,10 @@ void PDCancelRegistry::trimLocked(int64_t now_ms) {
             absent_fences_.erase(it);
         }
     }
-    while (!entry_expirations_.empty() && entry_expirations_.begin()->first <= now_ms) {
+    size_t entries_trimmed = 0;
+    while (!entry_expirations_.empty() && entry_expirations_.begin()->first <= now_ms
+           && entries_trimmed < kMaxExpirationsPerPass) {
+        ++entries_trimmed;
         const auto [expires_at_ms, request_id] = *entry_expirations_.begin();
         entry_expirations_.erase(entry_expirations_.begin());
         auto it = entries_.find(request_id);
@@ -72,6 +78,9 @@ ErrorInfo PDCancelRegistry::admit(const GenerateInputPB& request,
     if (existing != entries_.end()) {
         return {ErrorCode::INVALID_PARAMS, "duplicate PD request_id"};
     }
+    if (entries_.size() + absent_fences_.size() >= record_capacity_) {
+        return {ErrorCode::CONCURRENCY_LIMIT_ERROR, "PD cancellation registry capacity exhausted"};
+    }
     handle = std::make_shared<Entry>(
         TaskIdentity{request.request_id(), request.has_group_id() ? request.group_id().value() : -1});
     handle->unique_key         = key;
@@ -117,11 +126,17 @@ void PDCancelRegistry::finishLocal(const Handle& handle) {
         handle->stream.reset();
 }
 
-CancelStatusPB PDCancelRegistry::cancel(int64_t request_id, const ErrorInfo& reason) {
+absl::StatusOr<CancelStatusPB> PDCancelRegistry::cancel(int64_t request_id, const ErrorInfo& reason) {
     std::lock_guard<std::mutex> lock(mutex_);
     trimLocked(currentTimeMs());
     auto found = entries_.find(request_id);
     if (found == entries_.end()) {
+        if (absent_fences_.count(request_id)) {
+            return CANCEL_STATUS_TOMBSTONED;
+        }
+        if (entries_.size() + absent_fences_.size() >= record_capacity_) {
+            return absl::ResourceExhaustedError("PD cancellation registry capacity exhausted");
+        }
         const auto expires_at_ms = currentTimeMs() + kRetentionMs;
         const bool inserted = absent_fences_.emplace(request_id, CancelFence{expires_at_ms, reason}).second;
         if (inserted) {

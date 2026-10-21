@@ -230,7 +230,7 @@ TEST(DecodeRpcServerTest, CancelBeforeStreamBindingStopsTheFutureStream) {
     request.set_request_id(201);
     PDCancelRegistry::Handle handle;
     ASSERT_TRUE(registry.admit(request, "handoff201", "", currentTimeMs() + 1000, handle).ok());
-    EXPECT_EQ(registry.cancel(201, {ErrorCode::PRIORITY_PREEMPTED, "preempted"}), CANCEL_STATUS_ACCEPTED);
+    EXPECT_EQ(registry.cancel(201, {ErrorCode::PRIORITY_PREEMPTED, "preempted"}).value(), CANCEL_STATUS_ACCEPTED);
     auto stream = test::makeStream({1, 2, 3});
     registry.attach(handle, stream);
     EXPECT_EQ(stream->statusInfo().code(), ErrorCode::PRIORITY_PREEMPTED);
@@ -385,7 +385,7 @@ TEST(DecodeRpcServerTest, CleanupPublishesWholeLocalBatchBeforeOneOldestRemoteRe
         ASSERT_TRUE(decode.cancel_registry_->admit(input, "batch" + std::to_string(id),
             "127.0.0.1:" + std::to_string(port), currentTimeMs() + 1000, handle).ok());
         decode.cancel_registry_->finishLocal(handle);
-        ASSERT_EQ(decode.cancel_registry_->cancel(id, {ErrorCode::CANCELLED, "batch canceled"}),
+        ASSERT_EQ(decode.cancel_registry_->cancel(id, {ErrorCode::CANCELLED, "batch canceled"}).value(),
                   CANCEL_STATUS_ACCEPTED);
         handle->next_cancel_retry_ms.store(id);
         handles.push_back(handle);
@@ -420,7 +420,7 @@ TEST(DecodeRpcServerTest, LocalReadMustStopBeforeTerminalEvenDuringRemoteCancelB
         input, "local-read206", "127.0.0.1:1", currentTimeMs() + 1000, handle).ok());
     decode.cancel_registry_->beginRead(handle->unique_key);
     decode.cancel_registry_->finishLocal(handle);
-    ASSERT_EQ(decode.cancel_registry_->cancel(206, {ErrorCode::PRIORITY_PREEMPTED, "preempted"}),
+    ASSERT_EQ(decode.cancel_registry_->cancel(206, {ErrorCode::PRIORITY_PREEMPTED, "preempted"}).value(),
               CANCEL_STATUS_ACCEPTED);
     handle->next_cancel_retry_ms.store(std::numeric_limits<int64_t>::max());
     decode.cancelCleanupTick();
@@ -453,4 +453,21 @@ TEST(DecodeRpcServerTest, UnreachablePrefillAllowsLocalTerminalButRetainsRemoteR
     EXPECT_TRUE(decode.cancel_registry_->isCanceled(handle->unique_key));
     ASSERT_EQ(decode.meta_->getEngineScheduleInfo(0).finished_task_info_list.size(), 1u);
 }
+TEST(DecodeRpcServerTest, CancelCapacityFailureDoesNotAcknowledgeAnUnstoredFence) {
+    DecodeRpcServer server;
+    server.meta_                              = std::make_shared<RpcServerRuntimeMeta>();
+    server.cancel_registry_                   = std::make_unique<PDCancelRegistry>(server.meta_);
+    server.cancel_registry_->record_capacity_ = 1;
+    ASSERT_TRUE(server.cancel_registry_->cancel(130, {ErrorCode::CANCELLED, "existing fence"}).ok());
+    CancelRequestPB request;
+    request.set_request_id(131);
+    CancelResponsePB    response;
+    grpc::ServerContext context;
+    const auto          status = server.Cancel(&context, &request, &response);
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::RESOURCE_EXHAUSTED);
+    EXPECT_NE(response.status(), CANCEL_STATUS_TOMBSTONED);
+    EXPECT_NE(response.status(), CANCEL_STATUS_ACCEPTED);
+    EXPECT_EQ(server.cancel_registry_->absent_fences_.count(131), 0u);
+}
+
 }  // namespace rtp_llm

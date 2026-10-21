@@ -230,11 +230,84 @@ TEST(PrefillRpcServerTest, GenerateStreamCallRejectsPdRequestWithoutUniqueKey) {
 
 namespace rtp_llm {
 
+TEST(PDCancelRegistryTest, CapacityBoundsNewRecordsButExistingRequestsRemainCancellable) {
+    auto             meta = std::make_shared<RpcServerRuntimeMeta>();
+    PDCancelRegistry registry(meta);
+    registry.record_capacity_ = 2;
+    GenerateInputPB first_request;
+    first_request.set_request_id(120);
+    PDCancelRegistry::Handle first;
+    ASSERT_TRUE(registry.admit(first_request, "capacity120", "", currentTimeMs() + 10000, first).ok());
+    auto absent = registry.cancel(121, {ErrorCode::CANCELLED, "first fence"});
+    ASSERT_TRUE(absent.ok());
+    EXPECT_EQ(absent.value(), CANCEL_STATUS_TOMBSTONED);
+    GenerateInputPB overflow_request;
+    overflow_request.set_request_id(122);
+    PDCancelRegistry::Handle overflow;
+    EXPECT_EQ(registry.admit(overflow_request, "capacity122", "", currentTimeMs() + 10000, overflow).code(),
+              ErrorCode::CONCURRENCY_LIMIT_ERROR);
+    EXPECT_FALSE(overflow);
+    auto rejected = registry.cancel(122, {ErrorCode::CANCELLED, "not stored"});
+    EXPECT_EQ(rejected.status().code(), absl::StatusCode::kResourceExhausted);
+    EXPECT_EQ(registry.entries_.size() + registry.absent_fences_.size(), 2u);
+    EXPECT_EQ(registry.absent_fences_.count(122), 0u);
+    auto repeated = registry.cancel(121, {ErrorCode::GENERATE_TIMEOUT, "must not replace first"});
+    ASSERT_TRUE(repeated.ok());
+    EXPECT_EQ(repeated.value(), CANCEL_STATUS_TOMBSTONED);
+    EXPECT_EQ(registry.absent_fences_.at(121).reason.code(), ErrorCode::CANCELLED);
+    auto cancellation = registry.cancel(120, {ErrorCode::CANCELLED, "existing request"});
+    ASSERT_TRUE(cancellation.ok());
+    EXPECT_EQ(cancellation.value(), CANCEL_STATUS_ACCEPTED);
+    registry.finishLocal(first);
+    ASSERT_TRUE(registry.complete(first));
+    {
+        std::lock_guard<std::mutex> lock(registry.mutex_);
+        registry.trimLocked(first->retain_until_ms);
+    }
+    ASSERT_TRUE(registry.admit(overflow_request, "capacity122", "", currentTimeMs() + 10000, overflow).ok());
+    EXPECT_EQ(registry.find(122), overflow);
+}
+
+TEST(PDCancelRegistryTest, ExpirationWorkPerAdmissionPassIsBounded) {
+    auto             meta = std::make_shared<RpcServerRuntimeMeta>();
+    PDCancelRegistry registry(meta);
+    const auto       count = 3 * registry.kMaxExpirationsPerPass;
+    for (size_t id = 1; id <= count; ++id) {
+        ASSERT_TRUE(registry.cancel(id, {ErrorCode::CANCELLED, "fence"}).ok());
+    }
+    std::lock_guard<std::mutex> lock(registry.mutex_);
+    const auto                  expire_all_at = registry.fence_expirations_.rbegin()->first;
+    registry.trimLocked(expire_all_at);
+    EXPECT_EQ(registry.absent_fences_.size(), count - registry.kMaxExpirationsPerPass);
+    EXPECT_EQ(registry.fence_expirations_.size(), count - registry.kMaxExpirationsPerPass);
+    registry.trimLocked(expire_all_at);
+    registry.trimLocked(expire_all_at);
+    EXPECT_TRUE(registry.absent_fences_.empty());
+    EXPECT_TRUE(registry.fence_expirations_.empty());
+}
+
+TEST(PrefillRpcServerTest, CancelCapacityFailureDoesNotAcknowledgeAnUnstoredFence) {
+    PrefillRpcServer server;
+    server.meta_                              = std::make_shared<RpcServerRuntimeMeta>();
+    server.cancel_registry_                   = std::make_unique<PDCancelRegistry>(server.meta_);
+    server.cancel_registry_->record_capacity_ = 1;
+    ASSERT_TRUE(server.cancel_registry_->cancel(130, {ErrorCode::CANCELLED, "existing fence"}).ok());
+    CancelRequestPB request;
+    request.set_request_id(131);
+    CancelResponsePB    response;
+    grpc::ServerContext context;
+    const auto          status = server.Cancel(&context, &request, &response);
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::RESOURCE_EXHAUSTED);
+    EXPECT_NE(response.status(), CANCEL_STATUS_TOMBSTONED);
+    EXPECT_NE(response.status(), CANCEL_STATUS_ACCEPTED);
+    EXPECT_EQ(server.cancel_registry_->absent_fences_.count(131), 0u);
+}
+
 TEST(PDCancelRegistryTest, CancelBeforeAdmissionFencesRepeatedAndLateEnqueue) {
     auto             meta = std::make_shared<RpcServerRuntimeMeta>();
     PDCancelRegistry registry(meta);
-    EXPECT_EQ(registry.cancel(101, {ErrorCode::PRIORITY_PREEMPTED, "preempted"}), CANCEL_STATUS_TOMBSTONED);
-    EXPECT_EQ(registry.cancel(101, {ErrorCode::PRIORITY_PREEMPTED, "preempted"}), CANCEL_STATUS_TOMBSTONED);
+    EXPECT_EQ(registry.cancel(101, {ErrorCode::PRIORITY_PREEMPTED, "preempted"}).value(), CANCEL_STATUS_TOMBSTONED);
+    EXPECT_EQ(registry.cancel(101, {ErrorCode::PRIORITY_PREEMPTED, "preempted"}).value(), CANCEL_STATUS_TOMBSTONED);
     GenerateInputPB request;
     request.set_request_id(101);
     PDCancelRegistry::Handle handle;
@@ -252,8 +325,8 @@ TEST(PDCancelRegistryTest, AcceptedCancelRequiresLocalTransferCompletion) {
     request.mutable_group_id()->set_value(77);
     PDCancelRegistry::Handle handle;
     ASSERT_TRUE(registry.admit(request, "handoff102", "prefill:123", currentTimeMs() + 1000, handle).ok());
-    EXPECT_EQ(registry.cancel(102, {ErrorCode::PRIORITY_PREEMPTED, "preempted"}), CANCEL_STATUS_ACCEPTED);
-    EXPECT_EQ(registry.cancel(102, {ErrorCode::PRIORITY_PREEMPTED, "preempted"}), CANCEL_STATUS_ACCEPTED);
+    EXPECT_EQ(registry.cancel(102, {ErrorCode::PRIORITY_PREEMPTED, "preempted"}).value(), CANCEL_STATUS_ACCEPTED);
+    EXPECT_EQ(registry.cancel(102, {ErrorCode::PRIORITY_PREEMPTED, "preempted"}).value(), CANCEL_STATUS_ACCEPTED);
     EXPECT_TRUE(registry.isCanceled("handoff102"));
     ASSERT_EQ(meta->getEngineScheduleInfo(0).running_task_info_list.size(), 1u);
     EXPECT_FALSE(registry.complete(handle));
@@ -287,8 +360,8 @@ TEST(PDCancelRegistryTest, PriorityCancelLosingToOrdinaryCleanupReturnsNotFound)
     request.set_request_id(106);
     PDCancelRegistry::Handle handle;
     ASSERT_TRUE(registry.admit(request, "ordinary-first", "", currentTimeMs() + 10000, handle).ok());
-    ASSERT_EQ(registry.cancel(106, {ErrorCode::CANCELLED, "client disconnected"}), CANCEL_STATUS_ACCEPTED);
-    EXPECT_EQ(registry.cancel(106, {ErrorCode::PRIORITY_PREEMPTED, "priority"}), CANCEL_STATUS_NOT_FOUND);
+    ASSERT_EQ(registry.cancel(106, {ErrorCode::CANCELLED, "client disconnected"}).value(), CANCEL_STATUS_ACCEPTED);
+    EXPECT_EQ(registry.cancel(106, {ErrorCode::PRIORITY_PREEMPTED, "priority"}).value(), CANCEL_STATUS_NOT_FOUND);
     EXPECT_EQ(handle->cancel_reason.code(), ErrorCode::CANCELLED);
     registry.finishLocal(handle);
     ASSERT_TRUE(registry.complete(handle));
@@ -315,7 +388,7 @@ TEST(PDCancelRegistryTest, PriorityCancelLosingToStreamFailureDoesNotInstallPree
     auto stream = std::make_shared<NormalGenerateStream>(input, model, RuntimeConfig{}, ResourceContext{}, nullptr);
     registry.attach(handle, stream);
     stream->reportError(ErrorCode::EXECUTION_EXCEPTION, "original execution failure");
-    EXPECT_EQ(registry.cancel(107, {ErrorCode::PRIORITY_PREEMPTED, "priority"}), CANCEL_STATUS_NOT_FOUND);
+    EXPECT_EQ(registry.cancel(107, {ErrorCode::PRIORITY_PREEMPTED, "priority"}).value(), CANCEL_STATUS_NOT_FOUND);
     EXPECT_FALSE(handle->canceled.load());
     EXPECT_TRUE(registry.pending().empty());
     EXPECT_EQ(stream->firstError().error.code(), ErrorCode::EXECUTION_EXCEPTION);
@@ -333,11 +406,11 @@ TEST(PDCancelRegistryTest, RacingOrdinaryAndPriorityCancelAckMatchesPublishedTer
         CancelStatusPB priority_ack = CANCEL_STATUS_UNSPECIFIED;
         std::thread ordinary([&] {
             while (!start.load(std::memory_order_acquire)) std::this_thread::yield();
-            registry.cancel(108, {ErrorCode::CANCELLED, "ordinary"});
+            registry.cancel(108, {ErrorCode::CANCELLED, "ordinary"}).value();
         });
         std::thread priority([&] {
             while (!start.load(std::memory_order_acquire)) std::this_thread::yield();
-            priority_ack = registry.cancel(108, {ErrorCode::PRIORITY_PREEMPTED, "priority"});
+            priority_ack = registry.cancel(108, {ErrorCode::PRIORITY_PREEMPTED, "priority"}).value();
         });
         start.store(true, std::memory_order_release);
         ordinary.join();
@@ -366,7 +439,7 @@ TEST(PDCancelRegistryTest, FinishedDecodeReturnsNotFoundWithoutAbsentFence) {
     PDCancelRegistry::Handle handle;
     ASSERT_TRUE(registry.admit(request, "handoff103", "", currentTimeMs() + 1000, handle).ok());
     registry.finishLocal(handle);
-    EXPECT_EQ(registry.cancel(103, {ErrorCode::PRIORITY_PREEMPTED, "preempted"}), CANCEL_STATUS_NOT_FOUND);
+    EXPECT_EQ(registry.cancel(103, {ErrorCode::PRIORITY_PREEMPTED, "preempted"}).value(), CANCEL_STATUS_NOT_FOUND);
     EXPECT_TRUE(registry.pending().empty());
     EXPECT_TRUE(meta->getEngineScheduleInfo(0).finished_task_info_list.empty());
 }
@@ -379,7 +452,7 @@ TEST(PDCancelRegistryTest, LocalTerminalRetainsRemoteCleanupRecordUntilPrefillFi
     PDCancelRegistry::Handle handle;
     ASSERT_TRUE(registry.admit(request, "handoff104", "prefill:123", currentTimeMs() + 1000, handle).ok());
     registry.finishLocal(handle);
-    EXPECT_EQ(registry.cancel(104, {ErrorCode::PRIORITY_PREEMPTED, "preempted"}), CANCEL_STATUS_ACCEPTED);
+    EXPECT_EQ(registry.cancel(104, {ErrorCode::PRIORITY_PREEMPTED, "preempted"}).value(), CANCEL_STATUS_ACCEPTED);
     ASSERT_TRUE(registry.complete(handle));
     EXPECT_TRUE(handle->terminal.load());
     EXPECT_FALSE(handle->downstream_done);
@@ -427,7 +500,7 @@ TEST(PDCancelRegistryTest, RacingCancelAndAdmissionCannotLoseTheCancelIntent) {
         std::thread              cancel([&]() {
             while (!start.load())
                 std::this_thread::yield();
-            ack = registry.cancel(106, {ErrorCode::PRIORITY_PREEMPTED, "preempted"});
+            ack = registry.cancel(106, {ErrorCode::PRIORITY_PREEMPTED, "preempted"}).value();
         });
         start.store(true);
         enqueue.join();
@@ -561,7 +634,7 @@ TEST(PDCancelRegistryTest, LocalCancelWaitsForActivePrefillReadEvenAfterLocalCom
     ASSERT_TRUE(registry.admit(request, "handoff107", "", currentTimeMs() + 1000, handle).ok());
     registry.beginRead("handoff107");
     registry.finishLocal(handle);
-    EXPECT_EQ(registry.cancel(107, {ErrorCode::PRIORITY_PREEMPTED, "preempted"}), CANCEL_STATUS_ACCEPTED);
+    EXPECT_EQ(registry.cancel(107, {ErrorCode::PRIORITY_PREEMPTED, "preempted"}).value(), CANCEL_STATUS_ACCEPTED);
     EXPECT_FALSE(registry.complete(handle));
     registry.endRead("handoff107");
     EXPECT_TRUE(registry.complete(handle));
@@ -577,7 +650,7 @@ TEST(PDCancelRegistryTest, OrdinaryCleanupRetainsCauseAndDoesNotPublishPriorityP
         request.set_request_id(108);
         PDCancelRegistry::Handle handle;
         ASSERT_TRUE(registry.admit(request, "handoff108", "prefill:123", currentTimeMs() + 1000, handle).ok());
-        EXPECT_EQ(registry.cancel(108, {code, "original failure"}), CANCEL_STATUS_ACCEPTED);
+        EXPECT_EQ(registry.cancel(108, {code, "original failure"}).value(), CANCEL_STATUS_ACCEPTED);
         ASSERT_TRUE(handle->canceled.load());
         const auto rpc_error = errorInfoFromGrpcStatus(PrefillRpcServer{}.serializeErrorMsg("108", handle->cancel_reason));
         EXPECT_EQ(rpc_error.code(), code);
@@ -642,7 +715,7 @@ TEST(PDCancelRegistryTest, UnconfirmedCancelCannotExpireBeforeLocalTerminalButRe
     request.set_request_id(111);
     PDCancelRegistry::Handle handle;
     ASSERT_TRUE(registry.admit(request, "pending111", "prefill:123", currentTimeMs() + 1000, handle).ok());
-    ASSERT_EQ(registry.cancel(111, {ErrorCode::GENERATE_TIMEOUT, "timeout"}), CANCEL_STATUS_ACCEPTED);
+    ASSERT_EQ(registry.cancel(111, {ErrorCode::GENERATE_TIMEOUT, "timeout"}).value(), CANCEL_STATUS_ACCEPTED);
     registry.finishLocal(handle);
     {
         std::lock_guard<std::mutex> lock(registry.mutex_);
@@ -676,7 +749,7 @@ TEST(PDCancelRegistryTest, LateRemoteAckCannotRemoveReplacementRequestAfterRetry
     request.set_request_id(116);
     PDCancelRegistry::Handle old_handle;
     ASSERT_TRUE(registry.admit(request, "old116", "prefill:123", currentTimeMs() + 1000, old_handle).ok());
-    ASSERT_EQ(registry.cancel(116, {ErrorCode::CANCELLED, "old cancel"}), CANCEL_STATUS_ACCEPTED);
+    ASSERT_EQ(registry.cancel(116, {ErrorCode::CANCELLED, "old cancel"}).value(), CANCEL_STATUS_ACCEPTED);
     registry.finishLocal(old_handle);
     ASSERT_TRUE(registry.complete(old_handle));
     {
@@ -685,7 +758,7 @@ TEST(PDCancelRegistryTest, LateRemoteAckCannotRemoveReplacementRequestAfterRetry
     }
     PDCancelRegistry::Handle replacement;
     ASSERT_TRUE(registry.admit(request, "new116", "prefill:456", currentTimeMs() + 1000, replacement).ok());
-    ASSERT_EQ(registry.cancel(116, {ErrorCode::CANCELLED, "new cancel"}), CANCEL_STATUS_ACCEPTED);
+    ASSERT_EQ(registry.cancel(116, {ErrorCode::CANCELLED, "new cancel"}).value(), CANCEL_STATUS_ACCEPTED);
     registry.finishLocal(replacement);
     ASSERT_TRUE(registry.complete(replacement));
     const auto replacement_expiry = replacement->retain_until_ms;
@@ -711,7 +784,7 @@ TEST(PDCancelRegistryTest, ActiveReadCannotBeRetiredByCancellationRetention) {
     request.set_request_id(117);
     PDCancelRegistry::Handle handle;
     ASSERT_TRUE(registry.admit(request, "reading117", "prefill:123", currentTimeMs() + 1000, handle).ok());
-    ASSERT_EQ(registry.cancel(117, {ErrorCode::CANCELLED, "cancel"}), CANCEL_STATUS_ACCEPTED);
+    ASSERT_EQ(registry.cancel(117, {ErrorCode::CANCELLED, "cancel"}).value(), CANCEL_STATUS_ACCEPTED);
     registry.beginRead("reading117");
     registry.finishLocal(handle);
     EXPECT_FALSE(registry.complete(handle));
@@ -738,8 +811,8 @@ TEST(PDCancelRegistryTest, CancelKeyIndexKeepsOtherCanceledRequestWithSameKey) {
     PDCancelRegistry::Handle second;
     ASSERT_TRUE(registry.admit(first_request, "shared-key", "", currentTimeMs() + 1000, first).ok());
     ASSERT_TRUE(registry.admit(second_request, "shared-key", "", currentTimeMs() + 1000, second).ok());
-    ASSERT_EQ(registry.cancel(112, {ErrorCode::CANCELLED, "cancel"}), CANCEL_STATUS_ACCEPTED);
-    ASSERT_EQ(registry.cancel(113, {ErrorCode::CANCELLED, "cancel"}), CANCEL_STATUS_ACCEPTED);
+    ASSERT_EQ(registry.cancel(112, {ErrorCode::CANCELLED, "cancel"}).value(), CANCEL_STATUS_ACCEPTED);
+    ASSERT_EQ(registry.cancel(113, {ErrorCode::CANCELLED, "cancel"}).value(), CANCEL_STATUS_ACCEPTED);
     registry.finishLocal(first);
     ASSERT_TRUE(registry.complete(first));
     {
@@ -760,8 +833,8 @@ TEST(PDCancelRegistryTest, CancelKeyIndexKeepsOtherCanceledRequestWithSameKey) {
 TEST(PDCancelRegistryTest, RepeatedAbsentCancelHasSingleExpiryAndPreservesFirstReason) {
     auto meta = std::make_shared<RpcServerRuntimeMeta>();
     PDCancelRegistry registry(meta);
-    EXPECT_EQ(registry.cancel(114, {ErrorCode::GENERATE_TIMEOUT, "first"}), CANCEL_STATUS_TOMBSTONED);
-    EXPECT_EQ(registry.cancel(114, {ErrorCode::CANCELLED, "second"}), CANCEL_STATUS_TOMBSTONED);
+    EXPECT_EQ(registry.cancel(114, {ErrorCode::GENERATE_TIMEOUT, "first"}).value(), CANCEL_STATUS_TOMBSTONED);
+    EXPECT_EQ(registry.cancel(114, {ErrorCode::CANCELLED, "second"}).value(), CANCEL_STATUS_TOMBSTONED);
     {
         std::lock_guard<std::mutex> lock(registry.mutex_);
         ASSERT_EQ(registry.fence_expirations_.size(), 1u);
@@ -776,7 +849,7 @@ TEST(PDCancelRegistryTest, RepeatedAbsentCancelHasSingleExpiryAndPreservesFirstR
 TEST(PDCancelRegistryTest, LateAdmissionRetainsOrdinaryCancellationCause) {
     auto             meta = std::make_shared<RpcServerRuntimeMeta>();
     PDCancelRegistry registry(meta);
-    EXPECT_EQ(registry.cancel(109, {ErrorCode::GENERATE_TIMEOUT, "deadline"}), CANCEL_STATUS_TOMBSTONED);
+    EXPECT_EQ(registry.cancel(109, {ErrorCode::GENERATE_TIMEOUT, "deadline"}).value(), CANCEL_STATUS_TOMBSTONED);
     GenerateInputPB request;
     request.set_request_id(109);
     PDCancelRegistry::Handle handle;
