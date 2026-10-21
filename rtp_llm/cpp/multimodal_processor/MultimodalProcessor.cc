@@ -154,6 +154,77 @@ MultimodalProcessor::getMultimodalTags(const torch::Tensor& token_ids) {
     }
 }
 
+ErrorResult<ExpandedOutput> MultimodalProcessor::expandMarkerTokenIds(
+    const std::vector<torch::Tensor>&                mm_embedding,
+    const torch::Tensor&                             token_ids,
+    const std::vector<torch::Tensor>&                mm_extra_input,
+    const std::optional<std::vector<torch::Tensor>>& feature_hashes) {
+    (void)feature_hashes;  // reserved for hash-marker cache distinctness
+    if (mm_embedding.empty()) {
+        return ExpandedOutput(token_ids, torch::Tensor());
+    }
+    assert(token_ids.dim() == 1);
+    const int32_t mm_num = mm_embedding.size();
+    if (mm_extra_input.size() != (size_t)mm_num) {
+        return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR,
+                         "marker mode requires one geometry extra-input per media");
+    }
+
+    // per-media frame counts from the [num_frames, eh, ew] geometry tensors
+    std::vector<int64_t> frames(mm_num, 1);
+    for (int i = 0; i < mm_num; ++i) {
+        const auto& extra = mm_extra_input[i];
+        if (extra.numel() < 3) {
+            return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR,
+                             "marker mode geometry extra-input must carry [num_frames, eh, ew]");
+        }
+        auto values = extra.reshape(-1).to(torch::kInt64).cpu();
+        frames[i]   = values.data_ptr<int64_t>()[0];
+        if (frames[i] <= 0 || mm_embedding[i].size(0) % frames[i] != 0) {
+            return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, "marker mode rows not divisible by frame count");
+        }
+    }
+    int64_t total_frames = 0;
+    for (int i = 0; i < mm_num; ++i) {
+        total_frames += frames[i];
+    }
+
+    // locate marker positions
+    const auto* ids    = token_ids.data_ptr<int32_t>();
+    const auto  length = token_ids.numel();
+    std::vector<int32_t> marker_positions;
+    marker_positions.reserve(total_frames);
+    for (int64_t i = 0; i < length; ++i) {
+        if (ids[i] == marker_token_) {
+            marker_positions.push_back((int32_t)i);
+        }
+    }
+    if ((int64_t)marker_positions.size() != total_frames) {
+        std::stringstream exception_str;
+        exception_str << "marker mode expects " << total_frames << " marker tokens, got "
+                      << marker_positions.size();
+        return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, exception_str.str());
+    }
+
+    // Markers keep the text length and their ORIGINAL token id: the marker
+    // embedding is the plain vocab row (reference semantics) and the id stays
+    // inside the vocab range for the embedding lookup. Prefix-cache
+    // distinctness across different images with identical marker layout is
+    // delegated to the cross-KV target-state design (bring-up scope: the
+    // python-side store; multi-request/reuse arrives with the engine work).
+    auto out_ids      = token_ids.clone();
+    auto text_masks   = torch::ones({length}, torch::kInt32);
+    auto locs         = torch::empty({total_frames}, torch::kInt32);
+    auto* locs_data   = locs.data_ptr<int32_t>();
+    int64_t frame     = 0;
+    for (int i = 0; i < mm_num; ++i) {
+        for (int64_t f = 0; f < frames[i]; ++f, ++frame) {
+            locs_data[frame] = marker_positions[frame];
+        }
+    }
+    return ExpandedOutput(std::move(out_ids), torch::Tensor(), std::move(text_masks), std::move(locs));
+}
+
 ErrorInfo MultimodalProcessor::checkExpandLength(const ExpandedOutput& expand_output) {
     if (expand_output.expanded_ids.numel() >= max_seq_len_) {
         std::stringstream exception_str;
@@ -361,6 +432,11 @@ ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm:
         mm_extra_input = std::move(mm_embedding_res.mm_extra_input.value());
     }
     CHECK_AND_RETURN_REF(expanded_ids,
+                         marker_token_ >= 0 ?
+                             expandMarkerTokenIds(mm_features,
+                                                  input->input_ids,
+                                                  mm_extra_input,
+                                                  mm_embedding_res.mm_feature_hashes) :
                          input->multimodal_token_layout.has_value() ?
                              useExpandedTokenLayout(*input, mm_features, mm_embedding_res.mm_feature_hashes) :
                              expandTokenIds(mm_features,

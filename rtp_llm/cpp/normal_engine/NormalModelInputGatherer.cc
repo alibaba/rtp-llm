@@ -97,6 +97,7 @@ struct GatherModelInputContext {
     int               token_idx;
     int               cum_output_seq_len;
     int               mm_feature_index;
+    bool              is_marker_mode = false;
 };
 
 enum class GatherContextMode {
@@ -119,6 +120,7 @@ GatherModelInputContext createGatherContext(const NormalModelInputGathererConfig
     ctx.sequence_lengths     = model_input.sequence_lengths.data_ptr<int32_t>();
     ctx.combo_position_ids   = ctx.need_cal_position_id ? model_input.combo_position_ids.data_ptr<int32_t>() : nullptr;
     ctx.has_multimodal_input = config.is_multimodal && stream_groups.has_multimodal_input();
+    ctx.is_marker_mode       = config.is_marker_mode;
     ctx.has_mm_extra_input   = config.is_multimodal && stream_groups.hasMMExtraInput();
     ctx.prefix_lengths       = model_input.prefix_lengths.data_ptr<int32_t>();
     ctx.prefix_lengths_host  = nullptr;
@@ -229,6 +231,41 @@ void gatherMultimodalInputsForContextBatch(const GenerateStreamPtr&    stream,
         const int64_t feature_len = mm_feature.size(0);
         const int64_t feature_loc = mm_locs_data[i];
         const int64_t feature_end = feature_loc + feature_len;
+        if (ctx.is_marker_mode) {
+            // marker mode (moss_vl): locs are marker TEXT positions and
+            // feature rows are image content (not text-token indexed).
+            // Features whose marker is in the reused prefix belong to a
+            // prior turn of the same conversation: their cross K/V is
+            // already in the model-side store, so skip gathering them.
+            // Features for markers in the new region arrive whole — no
+            // reuse slicing applies (vision rows are independent of the
+            // text prefix).
+            if (feature_loc < reuse_length) {
+                continue;
+            }
+            auto& current_feature = mm_feature;
+            if (!current_feature.is_cuda()) {
+                host_holder.hold_host(current_feature);
+                gathered_mm_features.emplace_back(current_feature.to(torch::kCUDA, /*non_blocking=*/true));
+            } else {
+                gathered_mm_features.emplace_back(current_feature);
+            }
+            ctx.mm_features_locs[ctx.mm_feature_index] = ctx.token_idx + feature_loc - reuse_length;
+            ctx.mm_features_spans[ctx.mm_feature_index * 3]     = ctx.batch_idx - ctx.total_decode_batch_size;
+            ctx.mm_features_spans[ctx.mm_feature_index * 3 + 1] = feature_loc;
+            ctx.mm_features_spans[ctx.mm_feature_index * 3 + 2] = feature_end;
+            ctx.mm_feature_index++;
+            if (!mm_extra_input.empty()) {
+                auto& current_extra = mm_extra_input[i];
+                if (!current_extra.is_cuda()) {
+                    host_holder.hold_host(current_extra);
+                    gathered_mm_extra_input.emplace_back(current_extra.to(torch::kCUDA, /*non_blocking=*/true));
+                } else {
+                    gathered_mm_extra_input.emplace_back(current_extra);
+                }
+            }
+            continue;
+        }
         if (reuse_length >= feature_end) {
             continue;
         }
@@ -254,13 +291,20 @@ void gatherMultimodalInputsForContextBatch(const GenerateStreamPtr&    stream,
         ctx.mm_feature_index++;
 
         if (!mm_extra_input.empty()) {
-            auto current_extra_input =
-                sliceMultimodalExtraInput(mm_extra_input[i], mm_feature, token_offset, feature_len);
+            // Extra inputs are opaque model-specific tensors. Only
+            // deepstack-shaped ones (numel divisible by tokens*hidden) carry
+            // per-token semantics and need prefix slicing; other payloads
+            // (e.g. moss_vl frame geometry, 3 values) pass through verbatim.
+            const int64_t layer_numel = feature_len * mm_feature.size(1);
+            auto         current_extra_input =
+                (mm_extra_input[i].numel() % layer_numel == 0)
+                    ? sliceMultimodalExtraInput(mm_extra_input[i], mm_feature, token_offset, feature_len)
+                    : mm_extra_input[i];
             if (!current_extra_input.is_cuda()) {
                 host_holder.hold_host(current_extra_input);
                 gathered_mm_extra_input.emplace_back(current_extra_input.to(torch::kCUDA, /*non_blocking=*/true));
             } else {
-                gathered_mm_extra_input.emplace_back(std::move(current_extra_input));
+                gathered_mm_extra_input.emplace_back(current_extra_input.clone());
             }
         }
     }

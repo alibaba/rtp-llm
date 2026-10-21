@@ -83,6 +83,54 @@ torch::Tensor PositionIdsGenerator::generatePositionIds(int32_t                 
             }
             break;
         }
+        case PositionIdsStyle::MARKER_MROPE: {
+            // moss_vl marker contract: each frame contributes ONE marker token.
+            // mm_locs holds per-frame marker positions; mm_position_ids holds
+            // one [frames, 3] tensor per media with rows (0, eh, ew).
+            // Marker position = now_id + max(eh, ew); subsequent text resumes
+            // at marker + 1 (reference compute_vision_position_ids math).
+            res          = torch::empty({(int64_t)input_len, 3}, torch::kInt32);
+            position_ids = res.data_ptr<int32_t>();
+            int32_t now_pos = 0, now_id = 0, frame_idx = 0;
+
+            if (!mm_locs || !mm_position_ids) {
+                for (int32_t i = 0; i < input_len; ++i) {
+                    position_ids[3 * i] = position_ids[3 * i + 1] = position_ids[3 * i + 2] = i;
+                }
+            } else {
+                const auto& mm_pos_ids = mm_position_ids.value();
+                int32_t*    mm_loc_data = mm_locs.value().data_ptr<int32_t>();
+                int32_t     loc_count   = mm_locs.value().numel();
+                size_t      media_idx   = 0;
+                int32_t     frame_in_media = 0;
+                while (now_pos < input_len) {
+                    bool has_frame = media_idx < mm_pos_ids.size()
+                                     && frame_idx < loc_count
+                                     && frame_in_media < mm_pos_ids[media_idx].size(0);
+                    if (!has_frame || now_pos < mm_loc_data[frame_idx]) {
+                        position_ids[now_pos * 3] = position_ids[now_pos * 3 + 1] =
+                            position_ids[now_pos * 3 + 2] = now_id;
+                        now_pos++;
+                        now_id++;
+                    } else {
+                        const int32_t* row =
+                            mm_pos_ids[media_idx].data_ptr<int32_t>() + frame_in_media * 3;
+                        int32_t max_hw = std::max(row[1], row[2]);
+                        position_ids[now_pos * 3] = position_ids[now_pos * 3 + 1] =
+                            position_ids[now_pos * 3 + 2] = now_id + max_hw;
+                        now_pos++;
+                        now_id += max_hw + 1;
+                        frame_idx++;
+                        frame_in_media++;
+                        if (frame_in_media >= mm_pos_ids[media_idx].size(0)) {
+                            media_idx++;
+                            frame_in_media = 0;
+                        }
+                    }
+                }
+            }
+            break;
+        }
     }
     return res;
 }
@@ -100,7 +148,8 @@ void PositionIdsGenerator::generateNextPositionId(int32_t*         now_pos,
             context_len = context_pos_ids.numel();
             now_pos[0]  = context_pos_ids.data_ptr<int32_t>()[context_len - 1] + now_len - context_len;
             break;
-        case PositionIdsStyle::MROPE: {
+        case PositionIdsStyle::MROPE:
+        case PositionIdsStyle::MARKER_MROPE: {
             context_len              = context_pos_ids.numel();
             int32_t* context_pos     = context_pos_ids.data_ptr<int32_t>();
             int32_t  last_pos_max_id = std::max(context_pos[context_len - 1],

@@ -10,9 +10,10 @@
 namespace rtp_llm {
 
 typedef enum {
-    DEFAULT   = 0,
-    MMWITHTAG = 1,  // chatglm4v
-    MROPE     = 2   // qwen2vl
+    DEFAULT      = 0,
+    MMWITHTAG    = 1,  // chatglm4v
+    MROPE        = 2,  // qwen2vl
+    MARKER_MROPE = 3   // moss_vl: one marker token per frame; positions advance max(eh,ew)+1 per marker
 } PositionIdsStyle;
 
 // assume position ids in position encoding (word embedding) and rotary embedding is same

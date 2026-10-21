@@ -922,6 +922,7 @@ class MMModelConfig:
     is_multimodal: bool
     mm_position_ids_style: int
     mm_padding_size: int
+    mm_marker_token: int
     mm_sep_tokens: list[list[int]]
     def __init__(self) -> None:
         ...

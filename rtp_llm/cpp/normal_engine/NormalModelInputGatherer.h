@@ -27,6 +27,9 @@ struct NormalModelInputGathererConfig {
     size_t                      position_id_len_factor{};
     RoleType                    role_type{};
     bool                        decode_entrance{};
+    // marker mode (moss_vl): vision features are image content, not
+    // text-token-indexed — never slice by text prefix reuse
+    bool                        is_marker_mode{};
     size_t                      block_stride_bytes{};
     size_t                      scale_stride_bytes{};
     size_t                      seq_size_per_block{};

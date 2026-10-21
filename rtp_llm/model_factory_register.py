@@ -301,6 +301,9 @@ def _register_builtin_lazy_models() -> None:
         "qwen3_vl", "rtp_llm.models.qwen3_vl", ["Qwen3VLForConditionalGeneration"]
     )
     register_lazy_model(
+        "moss_vl", "rtp_llm.models.moss_vl", ["MossVLForConditionalGeneration"]
+    )
+    register_lazy_model(
         "qwen3_vl_moe",
         "rtp_llm.models.qwen3_vl_moe",
         ["Qwen3VLMoeForConditionalGeneration"],

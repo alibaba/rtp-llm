@@ -182,6 +182,17 @@ py_test(
 )
 
 py_test(
+    name = "moss_vl_vision_test",
+    srcs = ["moss_vl_vision_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    data = [
+        ":testdata",
+    ],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
+py_test(
     name = "deepseek_v41_processor_test",
     srcs = ["deepseek_v41_processor_test.py"],
     deps = ["//rtp_llm:testlib"],

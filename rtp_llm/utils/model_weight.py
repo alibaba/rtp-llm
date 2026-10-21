@@ -1303,6 +1303,9 @@ class W:
     cross_attn_qkv_b = "cross_attention_weights.query_weight.bias"
     cross_attn_o_w = "cross_attention_weights.output_weight.weight"
     cross_attn_o_b = "cross_attention_weights.output_weight.bias"
+    # moss_vl cross-attention tanh gates (scalar [1] per cross-attn layer)
+    cross_attn_attn_gate = "cross_attention_weights.attn_gate"
+    cross_attn_mlp_gate = "cross_attention_weights.mlp_gate"
 
     # lora
     attn_qkv_w_lora_a = "self_attention_weights.query_weight.kernel.lora_A"
@@ -1558,6 +1561,8 @@ class W:
         cross_attn_qkv_b: sp_head_b,
         cross_attn_o_w: sp_0,
         cross_attn_o_b: sp_id,
+        cross_attn_attn_gate: sp_id,
+        cross_attn_mlp_gate: sp_id,
         ffn_w1: ffn_sp_neg1,
         ffn_z1: ffn_sp_neg1,
         ffn_s1: ffn_sp_neg1,

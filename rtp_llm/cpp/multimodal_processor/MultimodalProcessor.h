@@ -44,6 +44,7 @@ public:
         metrics_reporter_(metrics_reporter),
         sep_token_ids_(mm_model_config.mm_sep_tokens),
         include_sep_tokens_(mm_model_config.include_sep_tokens),
+        marker_token_(mm_model_config.mm_marker_token),
         max_seq_len_(max_seq_len) {}
 
 protected:
@@ -62,6 +63,7 @@ protected:
 private:
     std::vector<std::vector<int64_t>> sep_token_ids_;
     bool                              include_sep_tokens_;
+    int64_t                           marker_token_;
     int64_t                           max_seq_len_;
 
     virtual ErrorResult<MultimodalOutput> V41MultimodalEmbedding(const V41RequestInputs& inputs,
@@ -83,6 +85,16 @@ private:
                    const std::vector<rtp_llm::MultimodalInput>      mm_inputs,
                    torch::Tensor                                    token_type_ids = {},
                    const std::optional<std::vector<torch::Tensor>>& feature_hashes = std::nullopt);
+
+    // Marker mode (mm_marker_token >= 0, e.g. moss_vl): marker tokens stay
+    // single-per-frame in the token stream (no length change); each marker
+    // receives the per-frame feature hash as its token id and locs records
+    // per-frame marker positions.
+    ErrorResult<ExpandedOutput>
+    expandMarkerTokenIds(const std::vector<torch::Tensor>&                mm_embedding,
+                         const torch::Tensor&                             token_ids,
+                         const std::vector<torch::Tensor>&                mm_extra_input,
+                         const std::optional<std::vector<torch::Tensor>>& feature_hashes = std::nullopt);
 
     ErrorResult<std::vector<std::pair<int32_t, int32_t>>> getMultimodalTags(const torch::Tensor& token_ids);
 

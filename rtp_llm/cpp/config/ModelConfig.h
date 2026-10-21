@@ -39,6 +39,11 @@ public:
     bool                              include_sep_tokens    = false;
     int64_t                           mm_padding_size       = 0;
     int64_t                           mm_position_ids_style = 0;  // 0 for default; 1 for chatglm4v; 2 for qwen2 vl
+    // Marker mode (e.g. moss_vl): >= 0 activates no-expand multimodal
+    // processing — media marker tokens stay single-per-frame in the token
+    // stream (vision features never enter it) and receive per-frame
+    // feature-hash ids for prefix-cache distinctness.
+    int64_t                           mm_marker_token       = -1;
 };
 
 class ModelConfig {

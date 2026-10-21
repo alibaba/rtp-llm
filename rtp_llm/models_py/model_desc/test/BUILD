@@ -3,6 +3,22 @@ py_test_deps = [
 ]
 
 py_test(
+    name = "mossvl_desc_test",
+    srcs = ["mossvl_desc_test.py"],
+    deps = py_test_deps,
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
+py_test(
+    name = "mossvl_triton_test",
+    srcs = ["mossvl_triton_test.py"],
+    deps = py_test_deps,
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
+py_test(
     name = "qwen_gdn_graph_replay_test_rocm",
     srcs = ["qwen_gdn_graph_replay_test.py"],
     main = "qwen_gdn_graph_replay_test.py",

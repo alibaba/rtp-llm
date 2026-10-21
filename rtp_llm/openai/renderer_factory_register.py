@@ -155,6 +155,9 @@ def _register_builtin_lazy_renderers() -> None:
         ],
         "rtp_llm.openai.renderers.qwen_vl_renderer",
     )
+    register_lazy_renderer(
+        ["moss_vl"], "rtp_llm.openai.renderers.moss_vl_renderer"
+    )
 
 
 _register_builtin_lazy_renderers()
