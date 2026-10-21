@@ -754,6 +754,8 @@ class KVCacheConfig:
     linear_step: int
     max_block_size_per_item: int
     memory_cache_size_mb: int
+    memory_cache_swa_block_ratio: float
+    dsv41_decoder_swa_pool_blocks: int
     memory_cache_sync_timeout_ms: int
     disk_cache_paths: str
     disk_cache_size_mb: int

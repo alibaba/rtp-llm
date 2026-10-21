@@ -123,6 +123,32 @@ class CacheConfigArgumentsTest(TestCase):
             parser.parse_args(None if use_sys_argv else args)
         return config
 
+    def test_pool_capacity_options_survive_startup_serialization(self):
+        config = self.parse_cache_config(
+            ["--dsv41_decoder_swa_pool_blocks", "512"],
+            {
+                "DSV41_DECODER_SWA_POOL_BLOCKS": "768",
+                "MEMORY_CACHE_SWA_BLOCK_RATIO": "0.5",
+            },
+        )
+        restored = pickle.loads(pickle.dumps(config))
+        self.assertEqual(restored.dsv41_decoder_swa_pool_blocks, 512)
+        self.assertEqual(restored.memory_cache_swa_block_ratio, 0.5)
+        for name, values in (
+            ("memory_cache_swa_block_ratio", ["0", "-1", "nan", "inf", "invalid"]),
+            ("dsv41_decoder_swa_pool_blocks", ["-1", "1", str(2**31), "invalid"]),
+        ):
+            for value in values:
+                with self.subTest(name=name, value=value), self.assertRaises(
+                    SystemExit
+                ):
+                    self.parse_cache_config(["--" + name, value], {})
+                for args in (None, []):
+                    with self.subTest(
+                        name=name, value=value, args=args
+                    ), self.assertRaises(SystemExit):
+                        self.parse_cache_config(args, {name.upper(): value})
+
     def test_canonical_env_and_cli_bind_all_fields(self):
         samples = self.startup_samples()
         env = self.startup_env(samples)

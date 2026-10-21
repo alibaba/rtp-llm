@@ -3,6 +3,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
@@ -15,6 +16,13 @@ class BroadcastManager;
 class StorageBackend;
 
 size_t computeHostUsableBlockCount(size_t capacity_bytes, size_t stride_bytes);
+
+// Ratios apply to usable blocks, while the byte budget also includes each
+// pool's reserved block zero. Without both FULL and SWA, preserve equal counts.
+std::vector<size_t> computeHostUsableBlockCounts(size_t                             capacity_bytes,
+                                                 const std::vector<size_t>&         strides,
+                                                 const std::vector<CacheGroupType>& types,
+                                                 double                             swa_full_ratio);
 
 std::string resolveDiskMountPath(const std::string& disk_paths_csv, int64_t local_world_size, int64_t local_rank);
 

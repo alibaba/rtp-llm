@@ -483,6 +483,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("reserve_block_ratio", &KVCacheConfig::reserve_block_ratio)
         .def_readwrite("max_block_size_per_item", &KVCacheConfig::max_block_size_per_item)
         .def_readwrite("memory_cache_size_mb", &KVCacheConfig::memory_cache_size_mb)
+        .def_readwrite("memory_cache_swa_block_ratio", &KVCacheConfig::memory_cache_swa_block_ratio)
+        .def_readwrite("dsv41_decoder_swa_pool_blocks", &KVCacheConfig::dsv41_decoder_swa_pool_blocks)
         .def_readwrite("memory_cache_sync_timeout_ms", &KVCacheConfig::memory_cache_sync_timeout_ms)
         .def_readwrite("disk_cache_paths", &KVCacheConfig::disk_cache_paths)
         .def_readwrite("disk_cache_size_mb", &KVCacheConfig::disk_cache_size_mb)
@@ -575,7 +577,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::pickle(
             [](const KVCacheConfig& self) {
                 return py::make_tuple(std::string("KVCacheConfig"),
-                                      7,
+                                      8,
                                       self.reuse_cache,
                                       self.multi_task_prompt,
                                       self.multi_task_prompt_str,
@@ -642,9 +644,17 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.kv_cache_event_manager_endpoint,
                                       self.kv_cache_event_instance_group,
                                       self.kv_cache_event_instance_id,
-                                      self.kv_cache_event_host_ip_port);
+                                      self.kv_cache_event_host_ip_port,
+                                      self.memory_cache_swa_block_ratio,
+                                      self.dsv41_decoder_swa_pool_blocks);
             },
             [](py::tuple t) {
+                const py::tuple pool_state = t;
+                const bool has_pool_fields = t.size() == 71 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 8;
+                if (has_pool_fields) {
+                    t    = t[py::slice(0, 69, 1)].cast<py::tuple>();
+                    t[1] = py::int_(7);
+                }
                 const py::tuple event_state = t;
                 const bool has_event_fields = t.size() == 69 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 7;
                 if (has_event_fields) {
@@ -753,6 +763,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.kv_cache_event_instance_group   = event_state[66].cast<std::string>();
                     c.kv_cache_event_instance_id      = event_state[67].cast<std::string>();
                     c.kv_cache_event_host_ip_port     = event_state[68].cast<std::string>();
+                }
+                if (has_pool_fields) {
+                    c.memory_cache_swa_block_ratio  = pool_state[69].cast<double>();
+                    c.dsv41_decoder_swa_pool_blocks = pool_state[70].cast<uint32_t>();
                 }
                 return c;
             }));
