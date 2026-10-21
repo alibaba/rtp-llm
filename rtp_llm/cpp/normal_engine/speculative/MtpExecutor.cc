@@ -2280,9 +2280,15 @@ SamplerOutput MtpExecutor::sampleDSparkDraft(const StreamGroups&  stream_groups,
     const auto batch_size = static_cast<int64_t>(stream_groups.size());
     auto       temperature_cpu =
         torch::empty({batch_size}, torch::TensorOptions().dtype(torch::kFloat32).pinned_memory(true));
-    auto*           temperatures         = temperature_cpu.data_ptr<float>();
-    int64_t         row                  = 0;
-    bool            batch_all_greedy     = true;
+    auto    top_k_cpu = torch::empty({batch_size}, torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
+    auto    top_p_cpu = torch::empty({batch_size}, torch::TensorOptions().dtype(torch::kFloat32).pinned_memory(true));
+    auto*   temperatures                 = temperature_cpu.data_ptr<float>();
+    auto*   top_ks                       = top_k_cpu.data_ptr<int32_t>();
+    auto*   top_ps                       = top_p_cpu.data_ptr<float>();
+    int64_t row                          = 0;
+    bool    batch_all_greedy             = true;
+    bool    has_top_k                    = false;
+    bool    has_top_p                    = false;
     constexpr float kMinDraftTemperature = 1.0e-6f;
     for (const auto& stream : stream_groups.allStreams()) {
         // DSpARK admission is configuration-defined. needTilingForSampling()
@@ -2303,13 +2309,29 @@ SamplerOutput MtpExecutor::sampleDSparkDraft(const StreamGroups&  stream_groups,
         // temperature can retain ties; all-greedy batches use first argmax.
         // Only stochastic requests use the request temperature.
         const bool stochastic = config->stochastic();
-        temperatures[row++]   = stochastic ? std::max(config->temperature, kMinDraftTemperature) : kMinDraftTemperature;
-        batch_all_greedy      = batch_all_greedy && !stochastic;
+        temperatures[row]     = stochastic ? std::max(config->temperature, kMinDraftTemperature) : kMinDraftTemperature;
+        top_ks[row]           = config->top_k > 0 ? config->top_k : 1 << 30;
+        top_ps[row]           = std::abs(config->top_p) < 1e-7f ? 1.0f : config->top_p;
+        has_top_k             = has_top_k || config->top_k > 0;
+        has_top_p             = has_top_p || std::abs(top_ps[row] - 1.0f) >= 1e-7f;
+        ++row;
+        batch_all_greedy = batch_all_greedy && !stochastic;
     }
     buffer_holder_.hold_host(temperature_cpu);
+    buffer_holder_.hold_host(top_k_cpu);
+    buffer_holder_.hold_host(top_p_cpu);
     auto temperature = temperature_cpu.to(base_logits.device(), /*non_blocking=*/true);
-    return speculative_sampler_->sampleDSparkDraft(
-        base_logits, anchors, temperature, dspark_markov_w1_, dspark_markov_w2_, draft_vocab_size_, batch_all_greedy);
+    auto top_k       = has_top_k ? top_k_cpu.to(base_logits.device(), /*non_blocking=*/true) : torch::Tensor();
+    auto top_p       = has_top_p ? top_p_cpu.to(base_logits.device(), /*non_blocking=*/true) : torch::Tensor();
+    return speculative_sampler_->sampleDSparkDraft(base_logits,
+                                                   anchors,
+                                                   temperature,
+                                                   top_k,
+                                                   top_p,
+                                                   dspark_markov_w1_,
+                                                   dspark_markov_w2_,
+                                                   draft_vocab_size_,
+                                                   batch_all_greedy);
 }
 
 void MtpExecutor::runDSparkProposal(GptModelInputs&                                  proposal_input,
