@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <csignal>
+#include <sys/resource.h>
 #include <future>
 #include <set>
 #include <map>
@@ -1348,7 +1349,17 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_QueryTimeout_RetainsTargetUntilRetry
     EXPECT_TRUE(allBlockRefsEqual(allocated, 0));
 }
 
+namespace {
+
+void disableRetainedKvCoreDump() {
+    const rlimit no_core{0, 0};
+    setrlimit(RLIMIT_CORE, &no_core);
+}
+
+}  // namespace
+
 TEST(P2PRetainedKvTest, ThresholdUsesCapacityBytesAndStrictGreaterThan) {
+    ::testing::GTEST_FLAG(death_test_style) = "threadsafe";
     auto resource = std::make_shared<KVCacheResource>();
     resource->initGroups(test::makeTestCacheTopology(1, 1, {{0}}));
     resource->mutableBlockIds("group0").assign({1, 2, 3});
@@ -1366,14 +1377,21 @@ TEST(P2PRetainedKvTest, ThresholdUsesCapacityBytesAndStrictGreaterThan) {
     resource->mutableBlockIds("group0").assign({1, 2, 3, NULL_BLOCK_IDX});
     checker.checkRetainedResources({context});
     resource->mutableBlockIds("group0").assign({1, 2, 3, 4});
-    EXPECT_EXIT(checker.checkRetainedResources({context}), ::testing::KilledBySignal(SIGABRT), "");
+    EXPECT_EXIT({
+        disableRetainedKvCoreDump();
+        checker.checkRetainedResources({context});
+    }, ::testing::KilledBySignal(SIGABRT), "");
     checker.kv_leak_exit_threshold_percent_ = 40;
     checker.checkRetainedResources({context});
     checker.kv_leak_exit_threshold_percent_ = 39;
-    EXPECT_EXIT(checker.checkRetainedResources({context}), ::testing::KilledBySignal(SIGABRT), "");
+    EXPECT_EXIT({
+        disableRetainedKvCoreDump();
+        checker.checkRetainedResources({context});
+    }, ::testing::KilledBySignal(SIGABRT), "");
 }
 
 TEST(P2PRetainedKvTest, DistinctRequestsAccumulateAndGroupsUseDifferentBlockSizes) {
+    ::testing::GTEST_FLAG(death_test_style) = "threadsafe";
     const auto topology = test::makeTestCacheTopology(2, 2, {{0}, {1}});
     const auto reordered_topology =
         CacheTopology::create({topology->group("group1"), topology->group("group0")}, topology->layers());
@@ -1396,7 +1414,10 @@ TEST(P2PRetainedKvTest, DistinctRequestsAccumulateAndGroupsUseDifferentBlockSize
     const auto b               = make_context({1, 2}, {}, true);  // Reordered rows; union is 600 bytes, 30%.
     checker.checkRetainedResources({a, b});
     const auto c = make_context({3}, {});  // Union is 700 bytes, 35%.
-    EXPECT_EXIT(checker.checkRetainedResources({a, b, c}), ::testing::KilledBySignal(SIGABRT), "");
+    EXPECT_EXIT({
+        disableRetainedKvCoreDump();
+        checker.checkRetainedResources({a, b, c});
+    }, ::testing::KilledBySignal(SIGABRT), "");
     c->lease_hold_pending_.store(false);
     checker.checkRetainedResources({a, b, c});
 }
