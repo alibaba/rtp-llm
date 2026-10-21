@@ -160,3 +160,11 @@ py_test(
     tags = ["manual"],
     exec_properties = {"gpu": "L20D_DEV"},
 )
+
+py_test(
+    name = "cp_kv_gather_test",
+    srcs = ["cp_kv_gather_test.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    tags = ["L20_CU13"],
+    exec_properties = {"gpu": "L20_CU13", "gpu_count": "2"},
+)
