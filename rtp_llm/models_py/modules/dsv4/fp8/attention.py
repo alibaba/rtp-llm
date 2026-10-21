@@ -1075,6 +1075,7 @@ class PrefillQKV(NamedTuple):
     q: Optional[torch.Tensor]
     kv_full: Optional[torch.Tensor]
     kv_full_handle: Optional[Any] = None
+    kv_full_packed: Optional[torch.Tensor] = None
 
 
 class AttentionFP8(nn.Module):
@@ -2996,7 +2997,7 @@ class AttentionFP8(nn.Module):
         # (abs pos [sp-P, sp)) target disjoint slots.
         qkv = self._ensure_prefill_kv_full(qkv, common)
         with record_function_range("dsv4.fp8.attn.prefill.swa_write"):
-            self._prefill_write_swa_fp8_paged(common, qkv.kv_full)
+            self._prefill_store_swa(common, qkv)
 
         if self.compress_ratio == 0:
             with record_function_range("dsv4.fp8.attn.prefill.path_swa"):
@@ -3174,7 +3175,7 @@ class AttentionFP8(nn.Module):
                 )
             with record_function_range("dsv4.fp8.attn.csa_overlap.swa_write"):
                 qkv = self._ensure_prefill_kv_full(qkv, common)
-                self._prefill_write_swa_fp8_paged(common, qkv.kv_full)
+                self._prefill_store_swa(common, qkv)
 
             def wait_main_before_indexer_k() -> None:
                 if main_pending is None:
@@ -3300,7 +3301,7 @@ class AttentionFP8(nn.Module):
             with record_function_range("dsv4.fp8.attn.hca_overlap.swa_write"):
                 # Default-stream work that overlaps with the NCCL gather above.
                 qkv = self._ensure_prefill_kv_full(qkv, common)
-                self._prefill_write_swa_fp8_paged(common, qkv.kv_full)
+                self._prefill_store_swa(common, qkv)
             with record_function_range("dsv4.fp8.attn.hca_overlap.finish_compressor"):
                 self.compressor.finish_prefill(main_pending)
             main_pending = None
@@ -3621,18 +3622,14 @@ class AttentionFP8(nn.Module):
             # round-trip loss on tokens we just wrote, while keeping the hot
             # path free of casts / gathers / per-request slicing.
             with record_function_range("dsv4.fp8.attn.workspace.overlay_new_k"):
-                kv_bf16 = qkv.kv_full.to(torch.bfloat16).reshape(-1, D)
-                workspace.view(B * wm.M, D).index_copy_(
-                    0, wm.new_k_slot_in_flat, kv_bf16
-                )
-                # Free the kv_full storage before combine_topk + flash_mla_sparse_fwd.
-                # After the overlay, kv_full has no remaining consumer in this
-                # function or any caller; workspace attention now output-projects
-                # each FlashMLA chunk immediately after attention.
-                # The NamedTuple ref keeps it alive otherwise, costing ~1.1 GiB
-                # of peak overlap with the sparse-attn workspace at 1M ctx.
-                dispose_tensor(kv_bf16)
-                dispose_tensor(qkv.kv_full)
+                if qkv.kv_full_packed is None:
+                    kv_bf16 = qkv.kv_full.to(torch.bfloat16).reshape(-1, D)
+                    workspace.view(B * wm.M, D).index_copy_(
+                        0, wm.new_k_slot_in_flat, kv_bf16
+                    )
+                    # The overlay is the final BF16 KV consumer on this path.
+                    dispose_tensor(kv_bf16)
+                    dispose_tensor(qkv.kv_full)
 
             # combine_topk: HCA uses precomputed dense arange(N_max); CSA uses
             # the runtime indexer output (raw compressed-pool offsets in [0, N_b)).
@@ -3771,9 +3768,24 @@ class AttentionFP8(nn.Module):
             sm120_swa_kv = sm120_extra_kv = sm120_swa_indices = None
             sm120_swa_lens = sm120_extra_indices = sm120_extra_lens = None
             sm120_extra_page_size = None
+            sm120_swa_cache = None
             if is_sm120(qkv.q.device):
                 sm120_extra_kv = workspace[:, : wm.N, :].contiguous().view(-1, D)
-                sm120_swa_kv = workspace[:, wm.N :, :].contiguous().view(-1, D)
+                if qkv.kv_full_packed is None:
+                    sm120_swa_kv = workspace[:, wm.N :, :].contiguous().view(-1, D)
+                else:
+                    from rtp_llm.models_py.modules.dsv4.fp8._swa_cp_packed_triton import (
+                        build_attention_cache,
+                    )
+
+                    assert B == 1
+                    prefix_count = wm.M - wm.N - qkv.kv_full_packed.shape[0]
+                    assert 0 <= prefix_count < self.window_size
+                    sm120_swa_cache = build_attention_cache(
+                        qkv.kv_full_packed,
+                        common.workspace,
+                        prefix=workspace[0, wm.N : wm.N + prefix_count],
+                    )
                 from rtp_llm.models_py.modules.dsv4.fp8._sm120_prefill_indices import (
                     split_sm120_combined_tables,
                 )
@@ -3824,6 +3836,7 @@ class AttentionFP8(nn.Module):
                 profile_name="dsv4.fp8.attn.workspace.flash_mla_sparse_fwd",
                 out=projected_out,
                 sm120_swa_kv=sm120_swa_kv,
+                sm120_swa_cache=sm120_swa_cache,
                 sm120_prefix_cache=swa_pool_3d if preserve_packed_prefix else None,
                 sm120_prefix_slots=(
                     wm.swa_cache_slot_mapping if preserve_packed_prefix else None
@@ -5927,6 +5940,41 @@ class AttentionFP8(nn.Module):
             cache_compaction=cache_compaction,
         )
 
+    def _use_packed_swa_cp(self, common: PrefillMeta, kv: torch.Tensor) -> bool:
+        from rtp_llm.models_py.modules.dsv4.fp8._swa_cp_packed_triton import (
+            packed_swa_cp_enabled,
+        )
+
+        if not packed_swa_cp_enabled():
+            return False
+        # Prefix-byte preservation skips the BF16 prefix this path repacks.
+        if os.environ.get("DSV4_SM120_PRESERVE_PREFIX_BYTES", "0") == "1":
+            return False
+        if (
+            not common.cp_on
+            or common.batch_size != 1
+            or common.workspace is None
+            or int(common.cp_ctx.cp_size) != 4
+            or self.head_dim != 512
+            or self.window_size != 128
+            or not is_sm120(kv.device)
+            or kv.dtype != torch.bfloat16
+            or torch.cuda.is_current_stream_capturing()
+            or _cp_swa_kv_async_enabled()
+            or _prefill_cp_overlap_enabled()
+            or _fp8_gather_enabled("kv")
+            or _sm120_paged_cache_prefill_enabled()
+            or _use_cp_cache_hit_raw_q_merge()
+        ):
+            return False
+        meta = common.csa_meta if self.compress_ratio == 4 else common.hca_meta
+        wm = None if meta is None else meta.workspace_meta
+        return wm is None or (
+            not wm.use_cp_raw_q_merge
+            and wm.swa_pool_slot_mapping is None
+            and (self.compress_ratio != 128 or wm.N <= 8192)
+        )
+
     def _prefill_compute_qkv(
         self,
         x: torch.Tensor,
@@ -5980,12 +6028,27 @@ class AttentionFP8(nn.Module):
         qr = compute_qr()
         kv = compute_kv()
         kv_full_handle = None
+        kv_full_packed = None
         if common.cp_on:
             kv_flat = kv.reshape(kv.size(0) * kv.size(1), *kv.shape[2:])
             kv_profile_name = (
                 f"dsv4.cp.all_gather.L{self.layer_id:02d}.swa_kv_full.varlen"
             )
-            if _cp_swa_kv_async_enabled() and not _fp8_gather_enabled("kv"):
+            if self._use_packed_swa_cp(common, kv):
+                from rtp_llm.models_py.modules.dsv4.fp8._swa_cp_packed_triton import (
+                    pack_local_kv,
+                )
+
+                with record_function_range("dsv4.fp8.attn.swa_cp.pack_local"):
+                    local_packed = pack_local_kv(kv_flat, common.workspace)
+                with record_function_range("dsv4.fp8.attn.swa_cp.gather_packed"):
+                    kv_full_packed = cp_all_gather_full_varlen(
+                        local_packed,
+                        common.cp_ctx,
+                        profile_name=kv_profile_name + ".packed",
+                    )
+                kv_full = None
+            elif _cp_swa_kv_async_enabled() and not _fp8_gather_enabled("kv"):
                 # Deferred to _ensure_prefill_kv_full: the main stream runs the
                 # compressor / indexer projections (and enqueues their own NCCL
                 # on this same stream) while this all-gather is in flight.
@@ -6019,6 +6082,7 @@ class AttentionFP8(nn.Module):
             q=None,  # deferred to _materialize_prefill_q
             kv_full=None if kv_full is None else kv_full.squeeze(0),
             kv_full_handle=kv_full_handle,
+            kv_full_packed=kv_full_packed,
         )
 
     def _materialize_prefill_q(
@@ -6059,14 +6123,26 @@ class AttentionFP8(nn.Module):
                 kv_full=cp_wait_gather_full_varlen(qkv.kv_full_handle),
                 kv_full_handle=None,
             )
-        assert qkv.kv_full is not None, "PrefillQKV must carry materialized kv_full"
+        assert (
+            qkv.kv_full is not None or qkv.kv_full_packed is not None
+        ), "PrefillQKV must carry materialized BF16 or packed KV"
         return qkv
 
     # ------------------------------------------------------------------
     # FP8 SWA-only fast path: paged write + concat-from-cache
     # ------------------------------------------------------------------
+    def _prefill_store_swa(self, common: PrefillMeta, qkv: PrefillQKV) -> None:
+        if qkv.kv_full_packed is None:
+            self._prefill_write_swa_fp8_paged(common, qkv.kv_full)
+        else:
+            self._prefill_write_swa_fp8_paged(common, None, packed=qkv.kv_full_packed)
+
     def _prefill_write_swa_fp8_paged(
-        self, common: PrefillMeta, kv_full: torch.Tensor
+        self,
+        common: PrefillMeta,
+        kv_full: Optional[torch.Tensor],
+        *,
+        packed: Optional[torch.Tensor] = None,
     ) -> None:
         """Single-launch quantize + insert into the FP8 SWA pool, using
         the paged ``slot_mapping`` pre-built in ``common.swa_meta``.
@@ -6090,6 +6166,28 @@ class AttentionFP8(nn.Module):
         ):
             return
 
+        if packed is not None:
+            from rtp_llm.models_py.modules.dsv4.fp8._swa_cp_packed_triton import (
+                insert_packed_rows,
+                insert_packed_rows_cp_byte_sliced,
+            )
+
+            with record_function_range("dsv4.fp8.attn.swa.insert_packed"):
+                if cp_byte_sliced:
+                    assert common.cp_ctx is not None
+                    insert_packed_rows_cp_byte_sliced(
+                        packed,
+                        raw_u8,
+                        full_entries_per_block=self._swa_entries_per_block(),
+                        cp_rank=int(common.cp_ctx.cp_rank),
+                        cp_size=int(common.cp_ctx.cp_size),
+                        compaction=meta.slot_compaction,
+                    )
+                else:
+                    insert_packed_rows(packed, packed_3d, meta.slot_mapping)
+            return
+
+        assert kv_full is not None
         k_bf16 = kv_full.reshape(-1, self.head_dim)
         if k_bf16.dtype != torch.bfloat16:
             k_bf16 = k_bf16.to(torch.bfloat16)
@@ -6114,7 +6212,7 @@ class AttentionFP8(nn.Module):
         self,
         *,
         q: torch.Tensor,
-        kv: torch.Tensor,
+        kv: Optional[torch.Tensor],
         indices: torch.Tensor,
         topk_length: torch.Tensor,
         freqs_cis: torch.Tensor,
@@ -6195,6 +6293,7 @@ class AttentionFP8(nn.Module):
             )
 
             if sm120_cache is None:
+                assert kv is not None or sm120_swa_kv is not None
                 from rtp_llm.models_py.modules.dsv4.fp8._swa_kv_insert_triton import (
                     quantize_and_insert_k_cache,
                 )
@@ -6245,6 +6344,7 @@ class AttentionFP8(nn.Module):
                     prefill_workspace.sm120_linear_slots(extra_role, extra_tokens),
                 )
         else:
+            assert kv is not None
             from flash_mla import flash_mla_sparse_fwd  # type: ignore[import-not-found]
 
         chunk_rows = min(_FLASH_MLA_SPARSE_Q_CHUNK, s_q)
@@ -6476,13 +6576,33 @@ class AttentionFP8(nn.Module):
         # varlen topk builder receives CP global positions plus global
         # per-request cu_seqlens, so indices address the gathered KV for B>=1.
         if common.cp_on:
+            gathered_kv = (
+                qkv.kv_full_packed if qkv.kv_full_packed is not None else qkv.kv_full
+            )
             assert (
-                qkv.kv_full.size(0) == common.seqlen_full
+                gathered_kv.size(0) == common.seqlen_full
             ), "CP gather should produce kv_full sized to seq_len_full"
         ti = common.topk_idxs
         if ti.dim() == 3:
             ti = ti.squeeze(0)
         indices = ti.unsqueeze(1).to(torch.int32)
+
+        if qkv.kv_full_packed is not None:
+            from rtp_llm.models_py.modules.dsv4.fp8._swa_cp_packed_triton import (
+                build_attention_cache,
+            )
+
+            cache = build_attention_cache(qkv.kv_full_packed, common.workspace)
+            return self._flash_mla_sparse_fwd_chunked_projected(
+                q=qkv.q,
+                kv=None,
+                indices=indices,
+                topk_length=meta.topk_length_kv_full,
+                freqs_cis=common.freqs_cis,
+                prefill_workspace=common.workspace,
+                sm120_swa_cache=cache,
+                profile_name="dsv4.fp8.attn.swa.flash_mla_kv_full",
+            )
 
         try:
             out = self._flash_mla_sparse_fwd_chunked_projected(
@@ -6606,6 +6726,30 @@ class AttentionFP8(nn.Module):
                         gather_lens=meta.cache_gather_lens,
                         offset=0,
                     )
+
+        if qkv.kv_full_packed is not None:
+            from rtp_llm.models_py.modules.dsv4.fp8._swa_cp_packed_triton import (
+                build_attention_cache,
+            )
+
+            assert B == 1
+            prefix_count = meta.M - qkv.kv_full_packed.shape[0]
+            assert 0 <= prefix_count < self.window_size
+            cache = build_attention_cache(
+                qkv.kv_full_packed,
+                common.workspace,
+                prefix=workspace[0, :prefix_count],
+            )
+            return self._flash_mla_sparse_fwd_chunked_projected(
+                q=qkv.q,
+                kv=None,
+                indices=meta.combined_indices.unsqueeze(1),
+                topk_length=meta.combined_lens,
+                freqs_cis=common.freqs_cis,
+                prefill_workspace=common.workspace,
+                sm120_swa_cache=cache,
+                profile_name="dsv4.fp8.attn.swa_concat.flash_mla",
+            )
 
         # 2. New K BF16 overlay.
         kv_bf16 = qkv.kv_full.to(torch.bfloat16)
