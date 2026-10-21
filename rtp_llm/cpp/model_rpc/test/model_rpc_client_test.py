@@ -826,7 +826,7 @@ class ModelRpcClientTest(TestCase):
             asyncio.run(client.batch_generate(inputs))
 
         self.assertEqual(context.exception.exception_type, ExceptionType.INVALID_PARAMS)
-        self.assertIn("batch item 1 request=1: invalid batch item", context.exception.message)
+        self.assertIn("batch item 1 failed: invalid batch item", context.exception.message)
 
     def test_batch_enqueue_is_compatibility_alias_for_batch_generate(self):
         client = self._make_batch_client()
@@ -847,7 +847,7 @@ class ModelRpcClientTest(TestCase):
             (
                 ErrorCodePB.CANCELLED,
                 "",
-                ExceptionType.CANCELLED,
+                ExceptionType.CANCELLED_ERROR,
                 "CANCELLED",
             ),
             (
@@ -898,8 +898,40 @@ class ModelRpcClientTest(TestCase):
                 )
                 self.assertEqual(
                     context.exception.message,
-                    f"batch item 0 request=1: {expected_message}",
+                    f"batch item 0 failed: {expected_message}",
                 )
+
+    def test_batch_cancel_body_and_nested_error_keep_legacy_contract(self):
+        for nested in (False, True):
+            with self.subTest(nested=nested):
+                response = BatchGenerateOutputsPB()
+                result = response.results.add()
+                error = result.final_output.error_info if nested else result.error_info
+                error.error_code = ErrorCodePB.CANCELLED
+                error.error_message = "canceled by client"
+                client = self._make_batch_client()
+                stub = MagicMock()
+                stub.BatchGenerateCall = AsyncMock(return_value=response)
+                with (
+                    patch(
+                        "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
+                        return_value=stub,
+                    ),
+                    patch(
+                        "rtp_llm.cpp.model_rpc.model_rpc_client.trans_output"
+                    ) as convert,
+                    self.assertRaises(FtRuntimeException) as caught,
+                ):
+                    asyncio.run(
+                        client.batch_generate(
+                            [self._make_generate_input(GenerateConfig())]
+                        )
+                    )
+                self.assertEqual(caught.exception.exception_type.value, 499)
+                self.assertEqual(
+                    caught.exception.message, "batch item 0 failed: canceled by client"
+                )
+                convert.assert_not_called()
 
     def test_batch_enqueue_stops_before_later_items_after_first_error(self):
         response = BatchGenerateOutputsPB()

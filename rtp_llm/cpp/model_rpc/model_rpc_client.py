@@ -1699,8 +1699,25 @@ class ModelRpcClient(object):
                     else result_pb.final_output.error_info
                 )
                 if error.error_code or error.error_message:
-                    request_id = inputs[i].request_id if i < len(inputs) else "unmatched"
-                    self._raise_pb_error(error, f"batch item {i} request={request_id}")
+                    # BatchGenerateCall keeps its existing client-visible error
+                    # mapping and wording, including cancellation code 499.
+                    # Request identity belongs in diagnostics, not a replacement
+                    # for the established batch error message.
+                    error_type = _trans_rpc_error_code(error.error_code)
+                    message = error.error_message or _rpc_error_code_name(
+                        error.error_code
+                    )
+                    logging.error(
+                        "batch item %d request=%s wire_code=%d frontend_error_code=%d: %s",
+                        i,
+                        inputs[i].request_id,
+                        error.error_code,
+                        error_type.value,
+                        message,
+                    )
+                    raise FtRuntimeException(
+                        error_type, f"batch item {i} failed: {message}"
+                    )
             results = []
             for i, result_pb in enumerate(response.results):
                 stream_state = StreamState()
