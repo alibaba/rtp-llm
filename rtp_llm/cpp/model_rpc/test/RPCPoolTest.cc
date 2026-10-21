@@ -126,6 +126,19 @@ TEST(RPCPoolTest, UnreadyRemoteGenerateBlocksUntilClientDeadline) {
     EXPECT_LT(elapsed_ms, 1500);
 }
 
+TEST(RPCPoolTest, CachedLookupDoesNotStartConnectingAnIdleChannel) {
+    TcpBlackhole blackhole;
+    RPCPool pool;
+    auto original = pool.getConnection(blackhole.address());
+    ASSERT_TRUE(original.ok());
+    ASSERT_EQ(original->channel->GetState(false), GRPC_CHANNEL_IDLE);
+    auto reused = pool.getConnection(blackhole.address());
+    ASSERT_TRUE(reused.ok());
+    EXPECT_EQ(reused->channel, original->channel);
+    EXPECT_EQ(reused->stub, original->stub);
+    EXPECT_EQ(reused->channel->GetState(false), GRPC_CHANNEL_IDLE);
+}
+
 TEST(RPCPoolTest, ReadyPreflightBoundsUnreadyChannelAndEvictsItsGeneration) {
     TcpBlackhole blackhole;
     RPCPool      pool;

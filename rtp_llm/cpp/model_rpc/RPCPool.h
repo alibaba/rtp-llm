@@ -27,7 +27,7 @@ public:
     absl::StatusOr<Connection<T>> getConnection(std::string peer) {
         // [PD-DIAG] Stage timestamps. Production has shown getConnection blocking
         // 18-22s on a single peer; we want to know exactly which step is the
-        // bottleneck (lock acquire vs GetState vs CreateCustomChannel vs NewStub).
+        // bottleneck (lock acquire vs CreateCustomChannel vs NewStub).
         const auto t_enter = std::chrono::steady_clock::now();
         auto       t_locked = t_enter;
 
@@ -53,29 +53,13 @@ public:
             }
             peer_mutex = getPeerMutexLocked(peer);
         }
-        std::chrono::steady_clock::time_point t_after_get_state = t_locked;
-        grpc_connectivity_state                channel_state    = GRPC_CHANNEL_IDLE;
-        bool need_new_connection = !cached_connection.channel || !cached_connection.stub;
-        if (!need_new_connection) {
-            // Check if existing connection is in a bad state. GetState(true) is
-            // documented as non-blocking but in practice can sit for seconds when
-            // the channel is in TRANSIENT_FAILURE under reconnect backoff.
-            channel_state     = cached_connection.channel->GetState(true);
-            t_after_get_state = std::chrono::steady_clock::now();
-            need_new_connection =
-                (channel_state == GRPC_CHANNEL_SHUTDOWN || channel_state == GRPC_CHANNEL_TRANSIENT_FAILURE);
-        }
-        if (!need_new_connection) {
-            logSlowGetConnection(peer,
-                                 channel_state,
-                                 false,
-                                 t_enter,
-                                 t_locked,
-                                 t_after_get_state,
-                                 t_after_get_state,
-                                 t_after_get_state);
+        // RPCs drive IDLE channels and gRPC owns transient-failure reconnect.
+        // Avoid synchronous state probes/rebuilds on the cached hot path.
+        if (cached_connection.channel && cached_connection.stub) {
             return cached_connection;
         }
+        const auto t_after_get_state = t_locked;
+        const auto channel_state = GRPC_CHANNEL_IDLE;  // No state probe was performed.
 
         std::lock_guard<std::mutex> peer_guard(*peer_mutex);
         Connection<T> previous_connection = std::move(cached_connection);
@@ -90,24 +74,7 @@ public:
             }
         }
 
-        channel_state       = GRPC_CHANNEL_IDLE;
-        t_after_get_state   = t_locked;
-        need_new_connection = !cached_connection.channel || !cached_connection.stub;
-        if (!need_new_connection) {
-            channel_state     = cached_connection.channel->GetState(true);
-            t_after_get_state = std::chrono::steady_clock::now();
-            need_new_connection =
-                (channel_state == GRPC_CHANNEL_SHUTDOWN || channel_state == GRPC_CHANNEL_TRANSIENT_FAILURE);
-        }
-        if (!need_new_connection) {
-            logSlowGetConnection(peer,
-                                 channel_state,
-                                 false,
-                                 t_enter,
-                                 t_locked,
-                                 t_after_get_state,
-                                 t_after_get_state,
-                                 t_after_get_state);
+        if (cached_connection.channel && cached_connection.stub) {
             return cached_connection;
         }
 
@@ -287,7 +254,8 @@ private:
 
     /// [PD-DIAG] Emit a single WARN with each stage's cost when total getConnection
     /// time exceeds 100ms. Lets us pin down whether the slow getConnection call is
-    /// stuck on the lock, on GetState(true), on CreateCustomChannel, or on NewStub.
+    /// stuck on the lock, on CreateCustomChannel, or on NewStub. The historical
+    /// state-probe timing slot is zero: cached lookups no longer poll gRPC.
     static void logSlowGetConnection(const std::string&                    peer,
                                      grpc_connectivity_state               channel_state,
                                      bool                                  need_new_connection,
