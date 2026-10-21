@@ -85,6 +85,10 @@ size_t estimateBytes(const GptModelInputs& inputs) {
     addTensorListBytes(bytes, inputs.multimodal_features);
     addTensorListBytes(bytes, inputs.mm_extra_input);
     addTensorListBytes(bytes, inputs.input_embeddings);
+    addTensorListBytes(bytes, inputs.all_input_token_ids);
+    if (inputs.request_is_multimodal) {
+        addBytes(bytes, inputs.request_is_multimodal->size());
+    }
     return bytes;
 }
 torch::Tensor snapshotTensor(const torch::Tensor& tensor, std::vector<c10::Device>& devices) {
@@ -154,6 +158,16 @@ c10::impl::GenericDict snapshotPayload(const GptModelInputs&     inputs,
     addTensorList(payload, "multimodal_features", inputs.multimodal_features, devices, float8_dtypes);
     addTensorList(payload, "mm_extra_input", inputs.mm_extra_input, devices, float8_dtypes);
     addTensorList(payload, "input_embeddings", inputs.input_embeddings, devices, float8_dtypes);
+    addTensorList(payload, "all_input_token_ids", inputs.all_input_token_ids, devices, float8_dtypes);
+    if (inputs.request_is_multimodal) {
+        c10::List<bool> modalities;
+        for (bool is_multimodal : *inputs.request_is_multimodal) {
+            modalities.push_back(is_multimodal);
+        }
+        payload.insert("request_is_multimodal", std::move(modalities));
+    } else {
+        payload.insert("request_is_multimodal", c10::IValue());
+    }
     payload.insert("float8_dtypes", std::move(float8_dtypes));
     payload.insert("kv_block_stride_bytes", static_cast<int64_t>(inputs.kv_block_stride_bytes));
     payload.insert("kv_scale_stride_bytes", static_cast<int64_t>(inputs.kv_scale_stride_bytes));

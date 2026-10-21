@@ -198,6 +198,16 @@ grpc::Status PrefillRpcServer::init(const EngineInitParams&                     
     if (!ret.ok()) {
         return ret;
     }
+    if (autil::EnvUtil::getEnv("ENABLE_PREFILL_REQUEST_LOG", false)) {
+        try {
+            request_logger_ = std::make_unique<PrefillRequestLogger>(
+                autil::EnvUtil::getEnv("LOG_PATH", std::string("logs")),
+                maga_init_params.parallelism_config.world_rank,
+                maga_init_params.profiling_debug_logging_config.log_file_backup_count);
+        } catch (const std::exception& e) {
+            RTP_LLM_LOG_WARNING("Failed to initialize prefill request logger: %s", e.what());
+        }
+    }
     return grpc::Status::OK;
 }
 
@@ -794,6 +804,9 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
                                                   grpc::ServerWriter<GenerateOutputsPB>* writer) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] start generate stream call", request->request_id());
+    if (request_logger_) {
+        request_logger_->log(*request);
+    }
     c10::InferenceMode inference_guard(true);
     auto pd_separation = request->generate_config().max_new_tokens() > 1 && request->generate_config().num_beams() <= 1
                          && request->generate_config().variable_num_beams().size() == 0
