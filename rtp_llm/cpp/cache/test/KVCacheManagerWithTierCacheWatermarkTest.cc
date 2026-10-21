@@ -539,7 +539,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceAndHostWatermarksDemoteToDiskA
     ASSERT_NO_FATAL_FAILURE(reclaimAndExpectInitialPools(manager_, initial_device, initial_lower, GetParam()));
 }
 
-TEST_P(KVCacheManagerWithTierCacheTest, DSV4HostToDiskWatermarkFailureKeepsHostSourceMatchableAndCanRetry) {
+TEST_P(KVCacheManagerWithTierCacheTest, DSV4HostToDiskWatermarkFailurePreservesOwnershipAndRecovers) {
     if (GetParam() != TierLayout::HOST_DISK) {
         GTEST_SKIP() << "HOST-to-DISK failure serviceability requires HostDisk layout";
     }
@@ -587,6 +587,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4HostToDiskWatermarkFailureKeepsHostS
         const auto& group_set = cache->groupSets()[group_set_id];
         const auto& resource  = (*after_device_failure)[0][group_set_id];
         EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
+        EXPECT_TRUE(resource.isMatchUsable());
         ASSERT_TRUE(resource.hasTier(Tier::DEVICE));
         EXPECT_FALSE(resource.hasTier(Tier::HOST));
         EXPECT_EQ(resource.getTopTier(), Tier::DEVICE);
@@ -681,6 +682,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4HostToDiskWatermarkFailureKeepsHostS
             const auto& group_set = cache->groupSets()[group_set_id];
             const auto& resource  = (*after_host_failure)[0][group_set_id];
             EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
+            EXPECT_TRUE(resource.isMatchUsable());
             ASSERT_TRUE(resource.hasTier(Tier::HOST));
             EXPECT_FALSE(resource.hasTier(Tier::DISK));
             EXPECT_EQ(resource.getTopTier(), Tier::HOST);
@@ -693,10 +695,10 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4HostToDiskWatermarkFailureKeepsHostS
         }
         expectPoolSnapshotsEq(lower_before_host_failure, snapshotLowerPools(*cache, GetParam()));
 
-        // Prove the preserved HOST copy remains manager-serviceable before the
-        // demotion retry. A successful load consumes that HOST copy, so the
-        // same cached path is demoted back to HOST below before retrying H2Dk.
         recording_engine->clearScriptedResults();
+        // A transport failure preserves the valid HOST copy for subsequent requests
+        // before the demotion retry. A successful load consumes that HOST copy,
+        // so demote the same cached path back to HOST before retrying H2Dk.
         const size_t submits_before_host_hit = recording_engine->submittedDescriptorCount();
         auto         host_hit_resource       = makeResource(cache_config_);
         auto         host_hit_tokens         = makeTokenIds(

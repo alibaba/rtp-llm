@@ -88,6 +88,7 @@ public:
     void blockBatchCopy(const torch::Tensor& copy_mapping);
     void blockBatchCopy(const BlockIdPair* copy_mapping_begin, const BlockIdPair* copy_mapping_end);
     void blockBatchCopyByGroup(const std::vector<TaggedBlockIdPair>& copy_mapping);
+    void blockBatchCopyForForward(const torch::Tensor& copy_mapping, const std::vector<std::string>& group_tags);
 
     bool updateKVBlock(const BatchKVCacheResourcePtr&  batch_kv_cache_resource,
                        const std::vector<int>&         block_src_batch,
@@ -119,8 +120,6 @@ public:
     size_t      totalBlocksNum() const;
     size_t      maxAvailableTokensNum() const;
     KVCacheInfo getKVCacheInfo(int64_t latest_version, bool need_cache_keys) const;
-    void        refreshKVCacheInfoSnapshot();
-    KVCacheInfo buildKVCacheInfo(int64_t latest_version, bool need_cache_keys) const;
 
     // 系统资源管理
     void regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store = nullptr);
@@ -191,9 +190,6 @@ private:
 
     BlockTreeCachePtr                           block_tree_cache_;
     std::shared_ptr<KVCacheAllocationWaitState> allocation_wait_state_;
-
-    mutable std::mutex                 cache_status_snapshot_mutex_;
-    std::shared_ptr<const KVCacheInfo> cache_status_snapshot_;
 
     mutable std::mutex          cache_store_mutex_;
     std::shared_ptr<CacheStore> cache_store_;

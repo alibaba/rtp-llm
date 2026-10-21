@@ -27,6 +27,20 @@ using namespace std;
 
 namespace rtp_llm {
 
+TEST(EngramHistoryTest, VerifyAndRejectedCandidatesDoNotPolluteNextHistory) {
+    auto anchor   = torch::tensor({{10, 9, 8, 7}, {20, 19, 18, 17}}, torch::kInt32);
+    auto verify   = torch::tensor({{10, 11, 12}, {20, 21, 22}}, torch::kInt32);
+    auto windows  = MtpBatchStreamProcessor::makeEngramVerifyWindows(anchor, verify);
+    auto expected = torch::tensor(
+        {{10, 9, 8, 7}, {11, 10, 9, 8}, {12, 11, 10, 9}, {20, 19, 18, 17}, {21, 20, 19, 18}, {22, 21, 20, 19}},
+        torch::kInt32);
+    EXPECT_TRUE(torch::equal(windows, expected));
+    auto accepted = torch::tensor({{30, 31, 32}, {40, 41, 42}}, torch::kInt32);
+    auto lengths  = torch::tensor({1, 3}, torch::kInt32);
+    auto next     = MtpBatchStreamProcessor::advanceEngramTokenWindows(anchor, accepted, lengths);
+    EXPECT_TRUE(torch::equal(next, torch::tensor({{30, 10, 9, 8}, {42, 41, 40, 20}}, torch::kInt32)));
+}
+
 template<typename T>
 std::vector<T> toVec(const torch::Tensor& t) {
     auto c = t.is_cuda() ? t.cpu().contiguous() : t.contiguous();
@@ -433,6 +447,25 @@ TEST_F(MtpBatchStreamProcessorTest, testDispatchDecodeStream) {
     // Device-state real_seq_len publication moved to the executor layer
     // (MtpExecutor::publishSyncMtpDeviceState); dispatchDecode itself only
     // performs host bookkeeping now, so no device-state asserts here.
+}
+
+TEST_F(MtpBatchStreamProcessorTest, EmptyDSpARKDecodeRoundPreservesEmptyEngramHistory) {
+    ModelConfig model_config;
+    model_config.max_seq_len                         = 128;
+    model_config.vocab_size                          = 8;
+    model_config.num_layers                          = 1;
+    model_config.attn_config.v41_kv_source_layer_ids = {0};
+    SpeculativeExecutionConfig sp_config;
+    sp_config.type              = SP_TYPE_DSPARK;
+    sp_config.gen_num_per_cycle = 3;
+    MtpBatchStreamProcessor processor(model_config, {}, {}, makeProcessorCacheConfig(), sp_config, false);
+    TensorHolder            holder;
+    StreamGroups            empty(std::list<GenerateStreamPtr>{});
+    auto                    input = processor.gatherDecodeModelInput(empty, holder);
+    ASSERT_TRUE(input.ok());
+    EXPECT_EQ(input->combo_tokens.numel(), 0);
+    ASSERT_TRUE(input->engram_token_windows.defined());
+    EXPECT_EQ(input->engram_token_windows.sizes().vec(), (std::vector<int64_t>{0, 4}));
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testGatherDecodeModelInput) {
@@ -1895,4 +1928,47 @@ TEST_F(MtpBatchStreamProcessorTest, testCacheSnapshotOverlayKeepsPhysicalKernelP
     too_narrow.kv_cache_kernel_block_id = torch::zeros({1, 2, 3}, pinned_i32);
     EXPECT_ANY_THROW(processor.overlayMtpCacheSnapshots(StreamGroups({steady, fresh}), too_narrow, holder));
 }
+
+TEST_F(MtpBatchStreamProcessorTest, testPrefillShiftsMultimodalMaskAndPackedLocations) {
+    ModelConfig model_config;
+    model_config.max_seq_len = 2048;
+    model_config.vocab_size  = 64;
+    model_config.num_layers  = 1;
+    RuntimeConfig   runtime_config;
+    ResourceContext resource_context;
+    auto            stream1 = createContextStream(model_config, runtime_config, resource_context, {10, 11, 12}, 1);
+    auto            stream2 = createContextStream(model_config, runtime_config, resource_context, {20, 21}, 2);
+    auto            groups  = StreamGroups({stream1, stream2});
+    SpeculativeExecutionConfig speculative;
+    speculative.gen_num_per_cycle = 1;
+    MtpBatchStreamProcessor processor(
+        model_config, PDSepConfig{}, ProfilingDebugLoggingConfig{}, makeProcessorCacheConfig(), speculative, false);
+    for (bool starts_at_boundary : {false, true}) {
+        GptModelInputs input;
+        input.combo_tokens          = torch::tensor({10, 11, 12, 20, 21}, torch::kInt32);
+        input.input_lengths         = torch::tensor({3, 2}, torch::kInt32);
+        input.text_tokens_mask      = torch::tensor({1, 0, 1, 1, 0}, torch::kInt32);
+        input.combo_tokens_type_ids = torch::tensor({0, 1, 0, 0, 1}, torch::kInt32);
+        input.mm_features_locs =
+            torch::tensor(starts_at_boundary ? std::vector<int>{0, 3} : std::vector<int>{1, 4}, torch::kInt32);
+        int rows                  = starts_at_boundary ? 2 : 1;
+        input.multimodal_features = std::vector<torch::Tensor>{torch::ones({rows, 4}), torch::ones({rows, 4})};
+        input.mm_extra_input      = std::vector<torch::Tensor>{torch::arange(rows * 8), torch::arange(rows * 8)};
+        GptModelOutputs output;
+        SamplerOutput   sampled;
+        sampled.token_ids = torch::tensor({{30}, {40}}, torch::kInt32);
+        TensorHolder holder;
+        processor.updatePrefillPostDraftModelInput(groups, input, output, sampled, holder);
+        EXPECT_EQ((std::vector<int>{11, 12, 30, 21, 40}), toVec<int>(input.combo_tokens));
+        EXPECT_EQ((std::vector<int>{0, 1, 1, 0, 1}), toVec<int>(input.text_tokens_mask));
+        EXPECT_EQ((std::vector<int>{1, 0, 0, 1, 0}), toVec<int>(input.combo_tokens_type_ids));
+        EXPECT_EQ((std::vector<int>{0, 3}), toVec<int>(input.mm_features_locs));
+        ASSERT_EQ(input.multimodal_features->size(), 2);
+        EXPECT_EQ(input.multimodal_features->at(0).size(0), 1);
+        EXPECT_EQ(input.multimodal_features->at(1).size(0), 1);
+        EXPECT_EQ(input.mm_extra_input->at(0).numel(), 8);
+        EXPECT_EQ(input.mm_extra_input->at(1).numel(), 8);
+    }
+}
+
 }  // namespace rtp_llm

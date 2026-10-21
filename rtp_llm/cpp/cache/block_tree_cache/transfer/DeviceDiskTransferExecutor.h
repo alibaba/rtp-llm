@@ -5,7 +5,7 @@
 #include <utility>
 #include <vector>
 
-#include "rtp_llm/cpp/cache/AsyncContext.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferAsyncContext.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/HostStagingBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
@@ -25,15 +25,16 @@ public:
                                size_t                                         staging_block_count,
                                BlockTreeTaskPool&                             transfer_task_pool,
                                size_t                                         max_descriptors_per_batch,
-                               std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter = nullptr);
+                               std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter = nullptr,
+                               BlockTreeTaskPool*                             load_task_pool   = nullptr);
 
     DeviceDiskTransferExecutor(const DeviceDiskTransferExecutor&)            = delete;
     DeviceDiskTransferExecutor& operator=(const DeviceDiskTransferExecutor&) = delete;
 
-    std::shared_ptr<AsyncContext> executeDiskToDevice(TransferTask                        task,
-                                                      const std::vector<const GroupSet*>& group_sets);
+    std::shared_ptr<TransferAsyncContext> executeDiskToDevice(TransferTask                        task,
+                                                              const std::vector<const GroupSet*>& group_sets);
 
-    std::shared_ptr<AsyncContext> executeDeviceToDisk(TransferTask task, const GroupSet& group_set);
+    std::shared_ptr<TransferAsyncContext> executeDeviceToDisk(TransferTask task, const GroupSet& group_set);
 
     void cancelPendingTransfers();
 
@@ -44,6 +45,7 @@ private:
     DeviceHostTransferExecutor&                    device_host_executor_;
     HostDiskTransferExecutor&                      host_disk_executor_;
     BlockTreeTaskPool&                             transfer_task_pool_;
+    BlockTreeTaskPool*                             load_task_pool_;
     std::unique_ptr<HostStagingBlockPool>          full_staging_pool_;
     std::unique_ptr<HostStagingBlockPool>          swa_staging_pool_;
     size_t                                         full_batch_capacity_{0};

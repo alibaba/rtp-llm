@@ -344,12 +344,23 @@ TEST(BlockTreeTest, RemovingNonTailNodeUpdatesMovedNodeIndex) {
     EXPECT_EQ(node100->index, 0u);
     EXPECT_EQ(node200->index, 1u);
     EXPECT_EQ(node300->index, 2u);
+    const auto before = tree.cacheKeys();
+    EXPECT_EQ(before, (CacheKeysType{100, 200, 300}));
 
     EXPECT_EQ(tree.removeNodeAndEmptyAncestors(node200), node100);
 
     EXPECT_EQ(tree.size(), 2u);
     EXPECT_EQ(node300->index, 1u);
     EXPECT_EQ(node100->children.at(300), node300);
+    EXPECT_EQ(tree.cacheKeys(), (CacheKeysType{100, 300}));
+    EXPECT_EQ(before, (CacheKeysType{100, 200, 300}));
+
+    TreeNode* reinserted = insertAndGetNode(tree, {100, 200}, makeEmpty2DResources(2));
+    EXPECT_EQ(tree.cacheKeys(), (CacheKeysType{100, 300, 200}));
+    EXPECT_EQ(tree.removeNodeAndEmptyAncestors(node300), node100);
+    EXPECT_EQ(tree.cacheKeys(), (CacheKeysType{100, 200}));
+    EXPECT_EQ(tree.removeNodeAndEmptyAncestors(reinserted), tree.root());
+    EXPECT_TRUE(tree.cacheKeys().empty());
 }
 
 TEST(BlockTreeTest, RemoveNodeAndEmptyAncestorsStopsAtData) {

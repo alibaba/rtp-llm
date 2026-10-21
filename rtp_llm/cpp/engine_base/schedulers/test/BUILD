@@ -42,6 +42,8 @@ cc_test(
     copts = copts() + ["-fno-access-control"],
     deps = test_deps + [
         "//rtp_llm/cpp/cache/test:cache_config_test_utils",
+        "//rtp_llm/cpp/cache/test/mock:mock_allocator_lib",
+        "//rtp_llm/cpp/cache/block_tree_cache:block_tree_cache",
     ],
     env = {
         "TEST_USING_DEVICE": "CUDA",

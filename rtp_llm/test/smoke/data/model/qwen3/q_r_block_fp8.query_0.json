@@ -1,7 +1,7 @@
 {
   "id": "chat-",
   "object": "chat.completion",
-  "created": 1777092410,
+  "created": 1791780410,
   "model": "",
   "choices": [
     {
@@ -28,14 +28,14 @@
   },
   "debug_info": null,
   "aux_info": {
-    "cost_time": 20591.975,
+    "cost_time": 44790.779,
     "iter_count": 34,
     "prefix_len": 0,
     "input_len": 497,
     "output_len": 34,
     "step_output_len": 34,
-    "first_token_cost_time": 13467.777,
-    "wait_time": 0.0,
+    "first_token_cost_time": 30695.299,
+    "wait_time": 0.701,
     "pd_sep": false,
     "cum_log_probs": [],
     "beam_responses": [],

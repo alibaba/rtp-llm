@@ -4,7 +4,7 @@
 #include <memory>
 #include <vector>
 
-#include "rtp_llm/cpp/cache/AsyncContext.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferAsyncContext.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceDiskTransferExecutor.h"
@@ -17,20 +17,22 @@ namespace rtp_llm {
 class PerRankBlockTransferEngine {
 public:
     explicit PerRankBlockTransferEngine(std::vector<GroupSetPtr> group_sets,
-                                        bool                     enable_disk_cache                         = false,
-                                        DeviceHostCopyOptions    device_host_options                       = {},
-                                        size_t                   device_disk_staging_block_count           = 128,
-                                        size_t                   max_descriptors_per_batch                  = 8,
-                                        size_t                   transfer_worker_count                     = 4,
-                                        size_t                   transfer_queue_max_size                   = 10000,
-                                        std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter    = nullptr);
+                                        bool                     enable_disk_cache                      = false,
+                                        DeviceHostCopyOptions    device_host_options                    = {},
+                                        size_t                   device_disk_staging_block_count        = 128,
+                                        size_t                   max_descriptors_per_batch              = 8,
+                                        size_t                   transfer_worker_count                  = 4,
+                                        size_t                   transfer_queue_max_size                = 10000,
+                                        std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter = nullptr,
+                                        int64_t                                        world_rank       = 0);
     PerRankBlockTransferEngine() = delete;
     virtual ~PerRankBlockTransferEngine();
 
-    virtual std::shared_ptr<AsyncContext> execute(TransferTask task);
-    void                                  cancelPendingStagingTransfers();
-    BlockTreeQueueSizes                   queueSizes() const;
+    virtual std::shared_ptr<TransferAsyncContext> execute(TransferTask task);
+    void                                          cancelPendingStagingTransfers();
+    BlockTreeQueueSizes                           queueSizes() const;
 
+    // Worker count in each direction pool.
     size_t transferWorkerCount() const {
         return transfer_worker_count_;
     }
@@ -40,6 +42,7 @@ private:
 
     std::vector<GroupSetPtr> group_sets_;
 
+    std::unique_ptr<BlockTreeTaskPool>          load_transfer_task_pool_;
     std::unique_ptr<BlockTreeTaskPool>          transfer_task_pool_;
     std::unique_ptr<DeviceHostTransferExecutor> device_host_executor_;
     std::unique_ptr<HostDiskTransferExecutor>   host_disk_executor_;

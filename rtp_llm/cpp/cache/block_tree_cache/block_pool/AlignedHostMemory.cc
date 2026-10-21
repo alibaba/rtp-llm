@@ -19,6 +19,12 @@ AlignedHostMemory::AlignedHostMemory(size_t usable_bytes, size_t alignment, cons
     RTP_LLM_CHECK_WITH_INFO(
         backing_.is_pinned(), "host allocation [%s] must use pinned CPU memory", allocation_name.c_str());
 
+#if USING_ROCM
+    // Host/staging blocks may later be copied to GPU caches consumed by Gluon
+    // PA. Keep unused lanes finite, matching device-pool initialization.
+    backing_.zero_();
+#endif
+
     const auto raw_base = reinterpret_cast<uintptr_t>(backing_.data_ptr<uint8_t>());
     data_               = reinterpret_cast<uint8_t*>((raw_base + alignment - 1) / alignment * alignment);
 }

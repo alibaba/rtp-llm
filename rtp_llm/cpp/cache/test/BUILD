@@ -109,6 +109,7 @@ cc_test(
     srcs = ["KVCacheLayoutViewTest.cc"],
     copts = test_copts,
     deps = [
+        "//rtp_llm/cpp/cache:cp_slot_mapper",
         "//rtp_llm/cpp/cache:cache_types",
         "//rtp_llm/cpp/cache:kv_cache_specs",
         "//rtp_llm/models_py/bindings:op_defs",
@@ -190,6 +191,19 @@ cc_library(
         "//rtp_llm/cpp/cache/block_tree_cache",
         "//rtp_llm/cpp/cache/block_tree_cache/test:block_tree_cache_test_utils",
     ],
+)
+
+cc_test(
+    name = "block_pool_zero_init_test",
+    srcs = ["BlockPoolZeroInitTest.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/cache/block_tree_cache:device_block_pool",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps(),
+    tags = ["rocm"],
+    exec_properties = {"gpu": "MI308X-ROCM7"},
 )
 
 cc_test(

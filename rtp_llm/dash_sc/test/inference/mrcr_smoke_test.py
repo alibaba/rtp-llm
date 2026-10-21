@@ -30,6 +30,7 @@ from pathlib import Path
 
 import torch
 
+from rtp_llm.config.py_config_modules import GenerateEnvConfig
 from rtp_llm.dash_sc.codec import DashScRequestControls, SamplingParams
 from rtp_llm.dash_sc.inference.servicer import (
     build_think_runtime,
@@ -85,11 +86,12 @@ class _Dsv4Tokenizer:
         )
 
 
-class _GenerateEnvCfg:
-    think_mode = 1
-    think_end_token_id = -1
-    think_start_tag = "<think>\n"
-    think_end_tag = "</think>\n\n"
+class _GenerateEnvCfg(GenerateEnvConfig):
+    def __init__(self):
+        super().__init__()
+        self.think_mode = 1
+        self.think_start_tag = "<think>\n"
+        self.think_end_tag = "</think>\n\n"
 
 
 class _FakeAsyncStream:

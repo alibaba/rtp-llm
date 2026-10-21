@@ -8,11 +8,11 @@ from typing import Any, Callable, ContextManager
 
 import torch
 
-from rtp_llm.models_py.modules.factory.fused_moe.utils.profiler import (
+from rtp_llm.models_py.utils.profiler import (
     _NOOP_RECORD_FUNCTION_RANGE,
     disable_record_function_ranges,
 )
-from rtp_llm.models_py.modules.factory.fused_moe.utils.profiler import (
+from rtp_llm.models_py.utils.profiler import (
     record_function_ranges_enabled as _generic_ranges_enabled,
 )
 

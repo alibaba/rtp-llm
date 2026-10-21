@@ -60,6 +60,9 @@ public:
     size_t   matchedBlocks(Tier tier) const;
     bool     needBackendMatch() const;
 
+    void setValidPrefix(std::function<bool(size_t)> valid_prefix) {
+        valid_prefix_ = std::move(valid_prefix);
+    }
     void setMatchCallback(MatchCallback callback);
     void setSettlementReadyCallback(SettlementReadyCallback callback);
     void startBackendMatch();
@@ -76,6 +79,8 @@ public:
     void         startJoinWait(int64_t start_time_us);
     bool         completeJoinedOne(bool success, bool& join_completed, int64_t& join_wait_latency_us);
     bool         completeTransfers(size_t count, bool success);
+    void         cancelUnsubmittedTransfers();
+    ErrorInfo    errorInfo() const override;
     bool         aggregateSuccess() const;
     bool         settle(bool success);
     bool         onTaskFail();
@@ -107,6 +112,7 @@ private:
 
     std::shared_ptr<StorageBackend> storage_backend_;
     StorageRequest                  storage_request_;
+    std::function<bool(size_t)>     valid_prefix_;
     MatchCallback                   match_callback_;
     const bool                      need_backend_match_{false};
     bool                            backend_started_{false};

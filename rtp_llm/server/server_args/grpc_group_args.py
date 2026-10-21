@@ -4,7 +4,8 @@ import logging
 
 DEFAULT_GRPC_MAX_SERVER_POLLERS = 4
 DEFAULT_DASH_SC_GRPC_MAX_SERVER_WORKERS = 4
-_DASH_SC_DEFAULT_SERVER_RECV_BYTES = 64 * 1024 * 1024
+DEFAULT_DASH_SC_GRPC_MAX_MESSAGE_BYTES = 1024 * 1024 * 1024
+_DASH_SC_DEFAULT_SERVER_RECV_BYTES = DEFAULT_DASH_SC_GRPC_MAX_MESSAGE_BYTES
 # Model RPC (C++ GenerateStreamCall path) allows 1GiB receive / metadata on both ends.
 _MODEL_GRPC_DEFAULT_JSON = '{"client_config": {"grpc.max_receive_message_length": 1073741824, "grpc.max_send_message_length": 1073741824, "grpc.max_metadata_size": 1073741824}, "server_config": {"grpc.max_receive_message_length": 1073741824, "grpc.max_send_message_length": 1073741824, "grpc.max_metadata_size": 1073741824,"grpc.max_concurrent_streams": 100000, "grpc.max_connection_idle_ms": 600000, "grpc.http2.min_recv_ping_interval_without_data_ms": 1000, "grpc.http2.max_ping_strikes": 1000}}'
 
@@ -22,9 +23,9 @@ def default_model_grpc_config_json() -> str:
 
 def default_dash_sc_grpc_config_json() -> str:
     obj = json.loads(default_model_grpc_config_json())
-    obj["server_config"]["grpc.max_receive_message_length"] = (
-        _DASH_SC_DEFAULT_SERVER_RECV_BYTES
-    )
+    obj["server_config"][
+        "grpc.max_receive_message_length"
+    ] = _DASH_SC_DEFAULT_SERVER_RECV_BYTES
     obj["max_server_workers"] = DEFAULT_DASH_SC_GRPC_MAX_SERVER_WORKERS
     return json.dumps(obj, separators=(",", ":"))
 

@@ -4,7 +4,6 @@
 
 #include <chrono>
 #include <cstdint>
-#include <cstdlib>
 #include <future>
 #include <memory>
 #include <mutex>
@@ -36,6 +35,7 @@
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 
 namespace rtp_llm {
+
 namespace test {
 using block_tree_cache_test::BlockTreeCacheTestPeer;
 
@@ -44,30 +44,6 @@ constexpr int                  kDsv4PoolNum = 7;
 const std::vector<std::string> kDsv4Tags    = {
     "swa_kv", "csa_kv", "indexer_kv", "indexer_state", "csa_state", "hca_kv", "hca_state"};
 
-class ScopedEnvVar {
-public:
-    ScopedEnvVar(const char* name, const char* value): name_(name) {
-        const char* old_value = std::getenv(name_);
-        if (old_value != nullptr) {
-            old_value_ = old_value;
-            had_value_ = true;
-        }
-        setenv(name_, value, 1);
-    }
-
-    ~ScopedEnvVar() {
-        if (had_value_) {
-            setenv(name_, old_value_.c_str(), 1);
-        } else {
-            unsetenv(name_);
-        }
-    }
-
-private:
-    const char* name_;
-    std::string old_value_;
-    bool        had_value_ = false;
-};
 }  // namespace
 
 class KVCacheManagerTest: public ::testing::Test {
@@ -1584,7 +1560,7 @@ public:
         barrier_ = barrier;
     }
 
-    std::shared_ptr<AsyncContext> execute(TransferTask task) override {
+    std::shared_ptr<TransferAsyncContext> execute(TransferTask task) override {
         std::shared_ptr<block_tree_cache_test::CallbackBarrier> barrier;
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -1867,7 +1843,7 @@ TEST_F(KVCachePayloadTest, ConcurrentEvictionAndTwoLoadBacksPreserveEveryKVAndSc
     roundTrip(/*concurrent=*/true);
 }
 
-TEST_F(KVCacheManagerTest, ExecuteFunctionReportsFailedCodeForEmptyMemoryRequest) {
+TEST_F(KVCacheManagerTest, ExecuteFunctionReportsInvalidRequestForEmptyMemoryRequest) {
     auto cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
     auto manager      = std::make_shared<KVCacheManager>(cache_config);
     ASSERT_TRUE(manager->init());
@@ -1877,7 +1853,7 @@ TEST_F(KVCacheManagerTest, ExecuteFunctionReportsFailedCodeForEmptyMemoryRequest
     FunctionResponsePB response;
     EXPECT_TRUE(manager->executeFunction(request, response));
     ASSERT_TRUE(response.has_mem_response());
-    EXPECT_EQ(response.mem_response().code(), MemoryOperationResponsePB::FAILED);
+    EXPECT_EQ(response.mem_response().code(), MemoryOperationResponsePB::INVALID_REQUEST);
 }
 
 TEST_F(KVCacheManagerTest, ExecuteFunctionFormsNoResponseForUnsupportedRequestType) {
@@ -1903,14 +1879,21 @@ class RecordingBatchTransferEngine final: public PerRankBlockTransferEngine {
 public:
     RecordingBatchTransferEngine(): PerRankBlockTransferEngine(std::vector<GroupSetPtr>{}) {}
 
-    std::shared_ptr<AsyncContext> execute(TransferTask task) override {
+    std::shared_ptr<TransferAsyncContext> execute(TransferTask task) override {
         ++submitted_batch_count;
         submitted_descriptor_count += task.descriptors().size();
-        return std::make_shared<CompletedAsyncContext>(ErrorInfo::OkStatus());
+        TransferResult result(completion_error);
+        result.block_errors = copy_errors;
+        for (const auto error : copy_errors) {
+            result.merge({completion_error, error});
+        }
+        return std::make_shared<CompletedTransferAsyncContext>(std::move(result), task.descriptors().size());
     }
 
     size_t submitted_batch_count{0};
     size_t submitted_descriptor_count{0};
+    std::vector<CacheCopyError> copy_errors;
+    ErrorInfo                   completion_error{ErrorInfo::OkStatus()};
 };
 
 TEST_F(KVCacheManagerTest, ExecuteFunctionValidatesTimeoutBeforeSubmittingTransfer) {
@@ -1930,7 +1913,7 @@ TEST_F(KVCacheManagerTest, ExecuteFunctionValidatesTimeoutBeforeSubmittingTransf
         request.mutable_mem_request()->set_timeout_ms(timeout);
         FunctionResponsePB response;
         EXPECT_TRUE(manager->executeFunction(request, response));
-        EXPECT_EQ(response.mem_response().code(), MemoryOperationResponsePB::FAILED);
+        EXPECT_EQ(response.mem_response().code(), MemoryOperationResponsePB::INVALID_REQUEST);
         EXPECT_EQ(engine->submitted_batch_count, 0u);
     }
     size_t submitted = 0;
@@ -1984,7 +1967,42 @@ TEST_F(KVCacheManagerTest, ExecuteFunctionSubmitsAllMemoryItemsAsOneBatch) {
     EXPECT_EQ(engine->submitted_descriptor_count, 2u);
 }
 
-TEST_F(KVCacheManagerTest, ExecuteFunctionReportsFailedCodeForMixedPartialAndOutOfRangeGroupedItems) {
+TEST_F(KVCacheManagerTest, ExecuteFunctionReportsHighestRankErrorWithoutRecordIndices) {
+    auto          cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.enable_memory_cache  = true;
+    kv_cache_config.memory_cache_size_mb = 1;
+    auto manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, kv_cache_config);
+    ASSERT_TRUE(manager->init());
+    auto engine              = std::make_shared<RecordingBatchTransferEngine>();
+    engine->completion_error = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "injected batch failure");
+    manager->block_tree_cache_->transfer_dispatcher_ = std::make_unique<BlockTransferDispatcher>(engine);
+    FunctionRequestPB request;
+    ASSERT_TRUE(BlockTransferRequestConverter::encodeTransfer(
+        *request.mutable_mem_request(),
+        TransferTask({TransferDescriptor::deviceToHost(0, {1}, 1), TransferDescriptor::deviceToHost(0, {2}, 2)},
+                     std::chrono::seconds(30)),
+        manager->blockTreeCache()->groupSets()));
+
+    engine->copy_errors = {CacheCopyError::IO_FAILED, CacheCopyError::CRC_COMPUTE_FAILED};
+    FunctionResponsePB response;
+    ASSERT_TRUE(manager->executeFunction(request, response));
+    EXPECT_EQ(response.mem_response().code(), MemoryOperationResponsePB::CRC_COMPUTE_FAILED);
+    ASSERT_EQ(response.mem_response().block_errors_size(), 2);
+    EXPECT_EQ(response.mem_response().block_errors(0), MemoryOperationResponsePB::IO_FAILED);
+    EXPECT_EQ(response.mem_response().block_errors(1), MemoryOperationResponsePB::CRC_COMPUTE_FAILED);
+
+    engine->copy_errors = {CacheCopyError::CRC_MISMATCH, CacheCopyError::CRC_COMPUTE_FAILED};
+    ASSERT_TRUE(manager->executeFunction(request, response));
+    EXPECT_EQ(response.mem_response().code(), MemoryOperationResponsePB::CRC_MISMATCH);
+
+    engine->copy_errors.clear();
+    ASSERT_TRUE(manager->executeFunction(request, response));
+    EXPECT_EQ(response.mem_response().code(), MemoryOperationResponsePB::COPY_FAILED);
+    EXPECT_EQ(engine->submitted_batch_count, 3u);
+}
+
+TEST_F(KVCacheManagerTest, ExecuteFunctionReportsInvalidRequestForMixedPartialAndOutOfRangeGroupedItems) {
     auto          cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
     KVCacheConfig tiered_config;
     tiered_config.enable_memory_cache  = true;
@@ -2000,7 +2018,7 @@ TEST_F(KVCacheManagerTest, ExecuteFunctionReportsFailedCodeForMixedPartialAndOut
         mixed->set_group_tags(0, "missing");
         FunctionResponsePB response;
         EXPECT_TRUE(tiered_manager->executeFunction(request, response));
-        EXPECT_EQ(response.mem_response().code(), MemoryOperationResponsePB::FAILED);
+        EXPECT_EQ(response.mem_response().code(), MemoryOperationResponsePB::INVALID_REQUEST);
     }
     {
         FunctionRequestPB request;
@@ -2008,7 +2026,7 @@ TEST_F(KVCacheManagerTest, ExecuteFunctionReportsFailedCodeForMixedPartialAndOut
         request.mutable_mem_request()->mutable_copy_items(0)->clear_group_blocks();
         FunctionResponsePB response;
         EXPECT_TRUE(tiered_manager->executeFunction(request, response));
-        EXPECT_EQ(response.mem_response().code(), MemoryOperationResponsePB::FAILED);
+        EXPECT_EQ(response.mem_response().code(), MemoryOperationResponsePB::INVALID_REQUEST);
     }
     {
         FunctionRequestPB request;
@@ -2027,7 +2045,7 @@ TEST_F(KVCacheManagerTest, ExecuteFunctionReportsFailedCodeForMixedPartialAndOut
         const size_t       available_before    = backing->availableBlocksNum();
         FunctionResponsePB response;
         EXPECT_TRUE(tiered_manager->executeFunction(request, response));
-        EXPECT_EQ(response.mem_response().code(), MemoryOperationResponsePB::FAILED);
+        EXPECT_EQ(response.mem_response().code(), MemoryOperationResponsePB::INVALID_REQUEST);
         EXPECT_EQ(backing->freeBlocksNum(), free_before);
         EXPECT_EQ(backing->usedBlocksNum(), used_before);
         EXPECT_EQ(block_tree_cache_test::unreferencedBlocksNum(*backing), unreferenced_before);
@@ -2098,7 +2116,6 @@ TEST_F(KVCacheManagerTest, MultiRankZeroRejectsMismatchedBroadcastAddressCount) 
 }
 
 TEST_F(KVCacheManagerTest, GetKVCacheInfoReturnsAllKeysBeyondTenThousand) {
-    ScopedEnvVar  snapshot_env("RTP_LLM_CACHE_STATUS_SNAPSHOT", "0");
     constexpr int kKeyCount    = 10001;
     constexpr int kSeqLen      = kKeyCount * 2;
     CacheConfig   cache_config = makeSimpleMhaCacheConfig(1, kKeyCount + 4, 2, rtp_llm::DataType::TYPE_INT8);
@@ -2140,7 +2157,7 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfoReturnsAllKeysBeyondTenThousand) {
     const KVCacheInfo same =
         kv_cache_manager->getKVCacheInfo(/*latest_version=*/tree_snapshot.version, /*need_cache_keys=*/true);
     EXPECT_EQ(same.version, tree_snapshot.version);
-    EXPECT_EQ(same.cached_keys, tree_snapshot.keys);
+    EXPECT_TRUE(same.cached_keys.empty());
 
     const KVCacheInfo version_only =
         kv_cache_manager->getKVCacheInfo(/*latest_version=*/empty.version, /*need_cache_keys=*/false);
@@ -2155,15 +2172,10 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfoReturnsAllKeysBeyondTenThousand) {
     const BlockTreeKeySnapshot after_duplicate = kv_cache_manager->blockTreeCache()->getKeySnapshot();
     EXPECT_EQ(after_duplicate.version, before_duplicate.version);
     EXPECT_EQ(after_duplicate.keys, before_duplicate.keys);
-    EXPECT_EQ(kv_cache_manager->getKVCacheInfo(after_duplicate.version, true).cached_keys, after_duplicate.keys);
-
-    {
-        ScopedEnvVar snapshot_enabled("RTP_LLM_CACHE_STATUS_SNAPSHOT", "1");
-        kv_cache_manager->refreshKVCacheInfoSnapshot();
-        const KVCacheInfo cached = kv_cache_manager->getKVCacheInfo(after_duplicate.version, true);
-        EXPECT_EQ(cached.version, after_duplicate.version);
-        EXPECT_EQ(cached.cached_keys, after_duplicate.keys);
-    }
+    EXPECT_TRUE(kv_cache_manager->getKVCacheInfo(after_duplicate.version, true).cached_keys.empty());
+    const KVCacheInfo stale = kv_cache_manager->getKVCacheInfo(empty.version, true);
+    EXPECT_EQ(stale.version, after_duplicate.version);
+    EXPECT_EQ(stale.cached_keys, after_duplicate.keys);
 
     kv_cache_manager->free(FreeInfo{resource, tokens});
 }
@@ -2223,9 +2235,7 @@ TEST_F(KVCacheManagerTest, StorePublishesFullBlocksOnlyAndLookupLeavesOneToken) 
     BlockTreeCacheTestPeer::reclaimBlocksForTest(*manager->blockTreeCache(), /*num_blocks=*/100, Tier::DEVICE);
 }
 
-TEST_F(KVCacheManagerTest, GetKVCacheInfo_UsesSnapshotForCacheKeysWhenEnabled) {
-    ScopedEnvVar snapshot_env("RTP_LLM_CACHE_STATUS_SNAPSHOT", "1");
-
+TEST_F(KVCacheManagerTest, GetKVCacheInfoReadsCurrentKeysAndSkipsUnchangedVersion) {
     auto          cache_config = makeSimpleMhaCacheConfig(1, 8, 2, rtp_llm::DataType::TYPE_INT8);
     KVCacheConfig kv_cache_config;
     kv_cache_config.reuse_cache = true;
@@ -2247,18 +2257,21 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_UsesSnapshotForCacheKeysWhenEnabled) {
     const auto initial_tree_snapshot = kv_cache_manager->blockTreeCache()->getKeySnapshot();
     ASSERT_EQ(initial_tree_snapshot.keys.size(), 2u);
 
-    kv_cache_manager->refreshKVCacheInfoSnapshot();
-
-    auto first = kv_cache_manager->getKVCacheInfo(/*latest_version=*/-1, /*need_cache_keys=*/true);
-    ASSERT_GE(first.version, 0);
-    auto first_keys = first.cached_keys;
-    std::sort(first_keys.begin(), first_keys.end());
-    auto expected_initial_keys = initial_tree_snapshot.keys;
-    std::sort(expected_initial_keys.begin(), expected_initial_keys.end());
-    EXPECT_EQ(first_keys, expected_initial_keys);
+    const auto first = kv_cache_manager->getKVCacheInfo(/*latest_version=*/-1, /*need_cache_keys=*/true);
+    EXPECT_EQ(first.version, initial_tree_snapshot.version);
+    EXPECT_EQ(first.cached_keys, initial_tree_snapshot.keys);
 
     tokens->setSeqLength(6);
     ASSERT_TRUE(kv_cache_manager->malloc(malloc_info).success);
+
+    const auto unchanged = kv_cache_manager->getKVCacheInfo(first.version, /*need_cache_keys=*/true);
+    EXPECT_EQ(unchanged.version, first.version);
+    EXPECT_TRUE(unchanged.cached_keys.empty());
+    EXPECT_LT(unchanged.available_kv_cache, first.available_kv_cache);
+    EXPECT_EQ(unchanged.available_kv_cache, kv_cache_manager->availableTokensNum());
+    EXPECT_EQ(unchanged.total_kv_cache, first.total_kv_cache);
+    EXPECT_EQ(unchanged.block_size, first.block_size);
+
     {
         size_t resident_prefix_length = 0;
         kv_cache_manager->insertIntoCache(InsertInfo{resource, tokens, /*is_resident=*/false}, resident_prefix_length);
@@ -2267,36 +2280,26 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_UsesSnapshotForCacheKeysWhenEnabled) {
     ASSERT_EQ(updated_tree_snapshot.keys.size(), 3u);
     ASSERT_GT(updated_tree_snapshot.version, initial_tree_snapshot.version);
 
-    auto unchanged = kv_cache_manager->getKVCacheInfo(first.version, /*need_cache_keys=*/true);
-    EXPECT_EQ(unchanged.version, first.version);
-    auto unchanged_keys = unchanged.cached_keys;
-    std::sort(unchanged_keys.begin(), unchanged_keys.end());
-    EXPECT_EQ(unchanged_keys, expected_initial_keys);
+    const auto updated = kv_cache_manager->getKVCacheInfo(first.version, /*need_cache_keys=*/true);
+    EXPECT_EQ(updated.version, updated_tree_snapshot.version);
+    EXPECT_EQ(updated.cached_keys, updated_tree_snapshot.keys);
 
-    auto stale = kv_cache_manager->getKVCacheInfo(first.version - 1, /*need_cache_keys=*/true);
-    EXPECT_EQ(stale.version, first.version);
-    auto stale_keys = stale.cached_keys;
-    std::sort(stale_keys.begin(), stale_keys.end());
-    EXPECT_EQ(stale_keys, expected_initial_keys);
-
-    kv_cache_manager->refreshKVCacheInfoSnapshot();
-
-    auto updated = kv_cache_manager->getKVCacheInfo(first.version, /*need_cache_keys=*/true);
-    EXPECT_GT(updated.version, first.version);
-    auto updated_keys = updated.cached_keys;
-    std::sort(updated_keys.begin(), updated_keys.end());
-    auto expected_updated_keys = updated_tree_snapshot.keys;
-    std::sort(expected_updated_keys.begin(), expected_updated_keys.end());
-    EXPECT_EQ(updated_keys, expected_updated_keys);
-
-    auto current = kv_cache_manager->getKVCacheInfo(updated.version, /*need_cache_keys=*/true);
+    const auto current = kv_cache_manager->getKVCacheInfo(updated.version, /*need_cache_keys=*/true);
     EXPECT_EQ(current.version, updated.version);
-    auto current_keys = current.cached_keys;
-    std::sort(current_keys.begin(), current_keys.end());
-    EXPECT_EQ(current_keys, expected_updated_keys);
+    EXPECT_TRUE(current.cached_keys.empty());
+    EXPECT_EQ(current.available_kv_cache, updated.available_kv_cache);
+    EXPECT_EQ(current.total_kv_cache, updated.total_kv_cache);
+    EXPECT_EQ(current.block_size, updated.block_size);
+
+    const auto ahead = kv_cache_manager->getKVCacheInfo(updated.version + 1, /*need_cache_keys=*/true);
+    EXPECT_EQ(ahead.version, updated.version);
+    EXPECT_EQ(ahead.cached_keys, updated.cached_keys);
 
     kv_cache_manager->free(FreeInfo{resource, tokens});
     BlockTreeCacheTestPeer::reclaimBlocksForTest(*kv_cache_manager->blockTreeCache(), /*num_blocks=*/100, Tier::DEVICE);
+    const auto cleared = kv_cache_manager->getKVCacheInfo(updated.version, /*need_cache_keys=*/true);
+    EXPECT_GT(cleared.version, updated.version);
+    EXPECT_TRUE(cleared.cached_keys.empty());
 }
 
 TEST_F(KVCacheManagerTest, GetKVCacheInfo_UsesSmallestFullGroupTokenCapacity) {

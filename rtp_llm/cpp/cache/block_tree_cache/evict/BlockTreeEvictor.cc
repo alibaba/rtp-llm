@@ -93,7 +93,7 @@ void BlockTreeEvictor::suspendCandidate(TreeNode* node, size_t group_set_id, Tie
 }
 
 void BlockTreeEvictor::admitCandidate(TreeNode* node, size_t group_set_id, Tier target_tier) {
-    if (node->is_resident || target_tier == Tier::NONE) {
+    if (node->parent == nullptr || node->is_resident || target_tier == Tier::NONE) {
         return;
     }
     const GroupSetPtr& group_set = tree_->groupSets()[group_set_id];
@@ -268,7 +268,7 @@ bool BlockTreeEvictor::batchDropLocked(size_t  group_set_id,
         remaining_count -= progress;
     }
     if (processed) {
-        settled_(true, false);
+        settled_(false);
     }
     return processed;
 }
@@ -344,14 +344,18 @@ BlockTreeEvictor::batchEvictLocked(size_t group_set_id, Tier source_tier, size_t
         descriptors.push_back(std::move(*eviction_desc));
     }
     if (descriptors.empty()) {
-        return {};
+        return {/*direct_progress=*/false,
+                /*async_submitted=*/false,
+                /*scheduled_count=*/0};
     }
 
     auto target_blocks =
         tree_->groupSets()[group_set_id]->allocateBlocks(descriptors.size(), target_tier, BlockTreeRefType::EVICTION);
     if (!target_blocks.has_value()) {
         rollbackTransferLocked(descriptors);
-        return {};
+        return {/*direct_progress=*/false,
+                /*async_submitted=*/false,
+                /*scheduled_count=*/0};
     }
     for (size_t desc_index = 0; desc_index < descriptors.size(); ++desc_index) {
         descriptors[desc_index].target_blocks = {(*target_blocks)[desc_index]};
@@ -379,7 +383,6 @@ void BlockTreeEvictor::runEvictionTask(std::shared_ptr<const EvictionTransferTas
 void BlockTreeEvictor::scheduleEvictionSettlement(std::shared_ptr<const EvictionTransferTask> task,
                                                   bool                                        success) noexcept {
     auto settle = [this, task = std::move(task), success]() noexcept {
-        bool                 any_detached     = false;
         bool                 any_not_detached = false;
         EvictionTransferTask settled_task(task->transfer_task.subtask({}));
         {
@@ -389,7 +392,6 @@ void BlockTreeEvictor::scheduleEvictionSettlement(std::shared_ptr<const Eviction
             for (const TransferDescriptor& desc : task->descriptors()) {
                 const bool is_detached = desc.node->group_set_resources[desc.group_set_id].transfer_detached;
                 detached.push_back(is_detached);
-                any_detached     = any_detached || is_detached;
                 any_not_detached = any_not_detached || !is_detached;
             }
 
@@ -413,7 +415,7 @@ void BlockTreeEvictor::scheduleEvictionSettlement(std::shared_ptr<const Eviction
                     settled_task.timings.push_back(task->timings[desc_index]);
                 }
             }
-            settled_(success || any_detached, success && any_not_detached);
+            settled_(success && any_not_detached);
             finishWatermarkRoundLocked(descriptor.group_set_id, descriptor.source_tier);
         }
         if (!settled_task.descriptors().empty()) {
@@ -676,12 +678,8 @@ void BlockTreeEvictor::runDropTask(TransferDescriptor eviction_desc, bool notify
     if (task.hasFullPrune()) {
         TreeNode* const boundary_node = task.primary_desc.node->parent;
         for (TreeNode* node : task.full_prune_nodes_bottom_up) {
-            if (tree_->isRemovable(node)) {
-                eraseNodeFromAllHeaps(node);
-                tree_->removeNode(node);
-            } else {
-                updateFullCandidate(node);
-            }
+            eraseNodeFromAllHeaps(node);
+            tree_->removeNode(node);
         }
         TreeNode* survivor = tree_->removeNodeAndEmptyAncestors(boundary_node);
         updateFullCandidate(survivor);
@@ -689,7 +687,7 @@ void BlockTreeEvictor::runDropTask(TransferDescriptor eviction_desc, bool notify
         settleSingleEviction(task.primary_desc.node);
     }
     if (notify_settled) {
-        settled_(true, false);
+        settled_(false);
     }
     metrics_reporter_->reportEvictionFinished(task, tree_->groupSets());
 }
@@ -839,6 +837,32 @@ void BlockTreeEvictor::discardDetachedTransfer(const std::vector<TransferDescrip
     }
 }
 
+void BlockTreeEvictor::invalidateSources(const std::vector<InvalidationSource>& sources) {
+    for (const auto& source : sources) {
+        const auto path = tree_->findNode(source.cache_keys);
+        // findNode returns the surviving prefix when an earlier drop removed this source.
+        if (path.size() != source.cache_keys.size()) {
+            continue;
+        }
+        TreeNode*               node     = path.back();
+        const GroupSetResource& resource = node->group_set_resources[source.group_set_id];
+        if (!resource.hasTier(source.source_tier)) {
+            continue;
+        }
+        RTP_LLM_CHECK_WITH_INFO(resource.transfer_state == GroupSetTransferState::IDLE,
+                                "invalidated source must be settled: group_set=%zu node_key=%ld",
+                                source.group_set_id,
+                                node->cache_key);
+        runDropTask(TransferDescriptor(node,
+                                       source.group_set_id,
+                                       /*path_index=*/0,
+                                       source.source_tier,
+                                       Tier::NONE,
+                                       resource.getBlocks(source.source_tier)),
+                    /*notify_settled=*/false);
+    }
+}
+
 void BlockTreeEvictor::releaseTargetBlocks(const std::vector<TransferDescriptor>& descs) {
     if (descs.empty()) {
         return;
@@ -863,30 +887,14 @@ void BlockTreeEvictor::settleEviction(const std::vector<TransferDescriptor>& des
     pending_nodes.reserve(descs.size());
     refresh_nodes.reserve(descs.size());
     for (const TransferDescriptor& desc : descs) {
-        pending_nodes.insert(desc.node);
-    }
-
-    while (!pending_nodes.empty()) {
-        TreeNode* node = *pending_nodes.begin();
-        pending_nodes.erase(node);
-        if (!tree_->isRemovable(node)) {
-            refresh_nodes.insert(node->parent);
-            continue;
+        if (desc.node->parent == nullptr) {
+            pending_nodes.insert(desc.node);
+        } else {
+            refresh_nodes.insert(desc.node->parent);
         }
-
-        TreeNode* current = node;
-        do {
-            TreeNode* parent = current->parent;
-            pending_nodes.erase(current);
-            refresh_nodes.erase(current);
-            RTP_LLM_LOG_DEBUG("deleting empty node key=%ld", current->cache_key);
-            eraseNodeFromAllHeaps(current);
-            tree_->removeNode(current);
-            current = parent;
-        } while (tree_->isRemovable(current));
-        refresh_nodes.insert(current);
     }
 
+    tree_->removePendingNodes(pending_nodes);
     for (TreeNode* node : refresh_nodes) {
         updateFullCandidate(node);
     }

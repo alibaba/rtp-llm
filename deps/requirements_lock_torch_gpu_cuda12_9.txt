@@ -789,9 +789,6 @@ flash-mla @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/fl
 flashinfer-cubin @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flashinfer_260714/flashinfer_cubin-0.6.9-py3-none-any.whl \
     --hash=sha256:d4adf132ef0d0f7a85433c438466d0855abeddb7ed18fff86c30f992b7fcfffd
     # via -r requirements_torch_gpu_cuda12_9.txt
-flashinfer-jit-cache @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flashinfer_260714/flashinfer_jit_cache-0.6.9-cp39-abi3-manylinux_2_28_x86_64.whl \
-    --hash=sha256:6c9b571fa8b47a7ad4dbc8e7ad1e74e49e44cad9247383da39a75083f27b2544
-    # via -r requirements_torch_gpu_cuda12_9.txt
 flashinfer-python @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flashinfer_260714/flashinfer_python-0.6.9-py3-none-any.whl \
     --hash=sha256:449125202602aed5be37b5ed3af2d83c39c124cf4fe051a8260f81e52140b6f1
     # via

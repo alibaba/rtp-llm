@@ -27,8 +27,7 @@ int64_t expandedCaptureBlockTableWidth(const GroupBase& group, size_t physical) 
     const size_t expansion =
         group.policy.group_type == CacheGroupType::FULL ? std::max<size_t>(1, group.kernelBlocksPerKvBlock()) : 1;
     const size_t limit = static_cast<size_t>(std::numeric_limits<int64_t>::max());
-    RTP_LLM_CHECK_WITH_INFO(physical > 0 && physical <= limit / expansion,
-                            "CUDA graph block table capacity overflow");
+    RTP_LLM_CHECK_WITH_INFO(physical > 0 && physical <= limit / expansion, "CUDA graph block table capacity overflow");
     return static_cast<int64_t>(physical * expansion);
 }
 }  // namespace
@@ -55,13 +54,11 @@ int64_t CudaGraphRunner::captureKernelBlockTableWidth(const CacheTopology& topol
     return width;
 }
 
-int64_t CudaGraphRunner::captureKernelBlockTableWidth(const CacheTopology& topology,
-                                                      size_t               fake_physical_block_count) {
+int64_t CudaGraphRunner::captureKernelBlockTableWidth(const CacheTopology& topology, size_t fake_physical_block_count) {
     RTP_LLM_CHECK_WITH_INFO(!topology.groups().empty(), "CUDA graph requires a non-empty cache topology");
     int64_t width = 0;
     for (const auto& group : topology.groups()) {
-        width = std::max(width,
-                         expandedCaptureBlockTableWidth(group, std::max<size_t>(1, fake_physical_block_count)));
+        width = std::max(width, expandedCaptureBlockTableWidth(group, std::max<size_t>(1, fake_physical_block_count)));
     }
     return width;
 }
@@ -348,6 +345,16 @@ void CudaGraphRunner::prepareInputData(const PyModelInputs& inputs, CudaGraphSta
                             token_num,
                             py_model_inputs.input_ids.numel());
     optimizedCopyAsync(inputs.input_ids, py_model_inputs.input_ids, token_num * sizeof(int));
+    if (engram_window_size_ > 0) {
+        RTP_LLM_CHECK_WITH_INFO(inputs.engram_token_windows.defined() && inputs.engram_token_windows.dim() == 2
+                                    && inputs.engram_token_windows.size(0) == token_num
+                                    && inputs.engram_token_windows.size(1) == engram_window_size_,
+                                "invalid Engram graph history");
+        py_model_inputs.engram_token_windows.fill_(-1);
+        optimizedCopyAsync(inputs.engram_token_windows,
+                           py_model_inputs.engram_token_windows,
+                           token_num * engram_window_size_ * sizeof(int32_t));
+    }
     if (isGenerationPrefillCudaGraph() && token_num < state.graph_token_capacity) {
         py_model_inputs.input_ids.slice(0, token_num, state.graph_token_capacity)
             .fill_(generation_prefill_cuda_graph_pad_token_id_);
@@ -1835,6 +1842,9 @@ void CudaGraphRunner::initCapture() {
         // owns only attention metadata and must not replace this tensor because
         // the captured graph retains its address.
         inputs.input_ids = torch::zeros({max_num_token_}, options_cuda_int32_);
+        if (engram_window_size_ > 0) {
+            inputs.engram_token_windows = torch::full({max_num_token_, engram_window_size_}, -1, options_cuda_int32_);
+        }
         // input_hidden_size_ is the width of one input_hiddens row. PyWrappedModel sets it
         // to hidden_size * hc_mult for regular (MTP) graphs and to
         // len(target_layer_ids) * hidden_size for a DSpARK draft graph, so it must be used
@@ -2084,6 +2094,10 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
     const bool fixed_capacity_draft_prefill = usesFixedCapacityMtpDraftPrefillCudaGraph();
     const int  token_slice_len = fixed_capacity_draft_prefill ? max_bs_ * num_tokens_per_bs_ : seq_len_or_tokens;
     inputs.input_ids           = capture_mem_hold_.py_model_inputs_.input_ids.slice(0, 0, token_slice_len);
+    if (engram_window_size_ > 0) {
+        inputs.engram_token_windows =
+            capture_mem_hold_.py_model_inputs_.engram_token_windows.slice(0, 0, token_slice_len);
+    }
     if (isGenerationPrefillCudaGraph()) {
         // Generation prefill builds embeddings from input_ids. Keep this
         // transport-only tensor empty, matching initCapture(), instead of

@@ -1,9 +1,12 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceHostTransferExecutor.h"
 
+#include <algorithm>
 #include <map>
 #include <utility>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/CrcTransferService.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceHostCopyGeometry.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/models_py/bindings/NoBlockCopy.h"
 
@@ -12,17 +15,33 @@ namespace rtp_llm {
 DeviceHostTransferExecutor::DeviceHostTransferExecutor(BlockTreeTaskPool&    transfer_task_pool,
                                                        size_t                max_descriptors_per_batch,
                                                        DeviceHostCopyOptions options,
-                                                       std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter):
-    TransferExecutor(transfer_task_pool, max_descriptors_per_batch, std::move(metrics_reporter)),
+                                                       std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter,
+                                                       std::shared_ptr<CrcTransferService>            crc_service,
+                                                       BlockTreeTaskPool*                             load_task_pool):
+    TransferExecutor(transfer_task_pool, max_descriptors_per_batch, std::move(metrics_reporter), load_task_pool),
+    crc_service_(std::move(crc_service)),
     options_(std::move(options)) {
     strategies_.push_back(std::make_unique<CudaBatchDeviceHostCopyStrategy>());
     strategies_.push_back(std::make_unique<StagedSmDeviceHostCopyStrategy>());
     strategies_.push_back(std::make_unique<GenericMultiCopyDeviceHostCopyStrategy>());
 }
 
-TransferStatus DeviceHostTransferExecutor::executeBatch(const std::vector<HostBufferView>&     hosts,
+TransferResult DeviceHostTransferExecutor::executeBatch(const std::vector<HostBufferView>&     hosts,
                                                         const std::vector<TransferDescriptor>& descriptors,
                                                         const std::vector<const GroupSet*>&    group_sets) {
+    if (hosts.empty() || hosts.size() != descriptors.size() || hosts.size() != group_sets.size()
+        || std::any_of(group_sets.begin(), group_sets.end(), [](const GroupSet* group) { return group == nullptr; })) {
+        return TransferStatus::INVALID_ARGS;
+    }
+    const bool enable_crc = group_sets.front()->crcEnabled();
+    if (std::any_of(group_sets.begin(), group_sets.end(), [enable_crc](const GroupSet* group) {
+            return group->crcEnabled() != enable_crc;
+        })) {
+        return TransferStatus::INVALID_ARGS;
+    }
+    if (enable_crc) {
+        return crc_service_ ? crc_service_->copy(hosts, descriptors, group_sets) : TransferStatus::INVALID_ARGS;
+    }
     auto [status, plans] = generatePlan(hosts, descriptors, group_sets);
     if (status != TransferStatus::OK) {
         return status;
@@ -65,55 +84,21 @@ DeviceHostTransferExecutor::generatePlan(const std::vector<HostBufferView>&     
         }
 
         const std::vector<BlockIdxType>& device_blocks = descriptor.blocksAt(Tier::DEVICE);
-        const auto&                      device_pools  = group_set.devicePools();
-        size_t                           host_offset   = 0;
-        for (size_t member_group_id = 0; member_group_id < group_set.groupTags().size(); ++member_group_id) {
-            const auto& group_tag   = group_set.groupTags()[member_group_id];
-            const auto& group_base  = group_set.group(group_tag);
-            const auto  layer_ids   = group_set.topologyPtr()->layerIdsForGroup(group_tag);
-            auto&       device_pool = *device_pools[member_group_id];
-            for (size_t local_layer_index = 0; local_layer_index < layer_ids.size(); ++local_layer_index) {
-                auto*      layer_host_addr = static_cast<uint8_t*>(host.base) + host_offset;
-                const auto buffers         = device_pool.convertIndexToBuffer(static_cast<int>(local_layer_index),
-                                                                      device_blocks[member_group_id]);
-                const auto append_tile     = [&](size_t buffer_index, size_t logical_bytes, size_t layer_offset) {
-                    if (logical_bytes == 0) {
-                        return;
-                    }
-                    auto& plan = plans_by_device[device_pool.deviceIndex()];
-                    if (plan.copy_tiles.empty()) {
-                        plan.device_to_host = device_to_host;
-                        plan.group_set_id   = descriptor.group_set_id;
-                        plan.host           = host;
-                    }
-                    plan.copy_tiles.push_back(DeviceHostCopyTile{layer_host_addr + layer_offset,
-                                                                 buffers[buffer_index].addr,
-                                                                 host_offset + layer_offset,
-                                                                 logical_bytes,
-                                                                 device_pool.deviceIndex(),
-                                                                 member_group_id,
-                                                                 local_layer_index});
-                };
-                size_t layer_offset = 0;
-                if (group_set.usesPhysicalPayloadGeometry()) {
-                    for (size_t buffer_index = 0; buffer_index < buffers.size(); ++buffer_index) {
-                        append_tile(buffer_index, buffers[buffer_index].size_bytes, layer_offset);
-                        layer_offset += buffers[buffer_index].size_bytes;
-                    }
-                } else {
-                    const size_t kv_bytes    = group_base.kvBlockStrideBytes();
-                    const size_t scale_bytes = group_base.kvScaleStrideBytes();
-                    append_tile(0, kv_bytes, 0);
-                    append_tile(1, scale_bytes, kv_bytes);
-                    layer_offset = kv_bytes + scale_bytes;
-                }
-                host_offset += layer_offset;
+        for (const auto& tile : getDeviceHostCopyTiles(group_set, device_blocks)) {
+            const int device = group_set.devicePools()[tile.member_group_id]->deviceIndex();
+            auto&     plan   = plans_by_device[device];
+            if (plan.copy_tiles.empty()) {
+                plan.device_to_host = device_to_host;
+                plan.group_set_id   = descriptor.group_set_id;
+                plan.host           = host;
             }
+            plan.copy_tiles.push_back(DeviceHostCopyTile{static_cast<uint8_t*>(host.base) + tile.host_offset,
+                                                         tile.buffer.addr,
+                                                         tile.buffer.size_bytes,
+                                                         device,
+                                                         tile.member_group_id,
+                                                         tile.local_layer_index});
         }
-        RTP_LLM_CHECK_WITH_INFO(host_offset == required_host_bytes,
-                                "device-host payload geometry mismatch: planned=%zu required=%zu",
-                                host_offset,
-                                required_host_bytes);
     }
 
     if (plans_by_device.empty()) {

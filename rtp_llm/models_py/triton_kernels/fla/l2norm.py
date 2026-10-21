@@ -1,13 +1,11 @@
 # Adapt from https://github.com/fla-org/flash-linear-attention/blob/main/fla/modules/l2norm.py
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-from typing import Optional
 
 import torch
-import torch.nn as nn
 import triton
 import triton.language as tl
+from torch import nn
 
 from rtp_llm.models_py.triton_kernels.fla.utils import input_guard
 
@@ -126,16 +124,24 @@ def l2norm_fwd_kernel(
     BD: tl.constexpr,
 ):
     i_t = tl.program_id(0)
-    p_x = tl.make_block_ptr(x, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
-    b_x = tl.load(p_x, boundary_check=(0, 1)).to(tl.float32)
+    p_x_i0 = tl.arange(0, BT).to(tl.int64) + (i_t * BT)
+    p_x_m0 = (p_x_i0 >= 0) & (p_x_i0 < (T))
+    p_x_i1 = tl.arange(0, BD).to(tl.int64) + (0)
+    p_x_m1 = (p_x_i1 >= 0) & (p_x_i1 < (D))
+    p_x = (x) + p_x_i0[:, None] * (D) + p_x_i1[None, :] * (1)
+    b_x = tl.load(p_x, mask=p_x_m0[:, None] & p_x_m1[None, :], other=0).to(tl.float32)
     b_var = tl.sum(b_x * b_x, axis=1)
     b_y = b_x / tl.sqrt(b_var + eps)[:, None]
-    p_y = tl.make_block_ptr(y, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
-    tl.store(p_y, b_y.to(p_y.dtype.element_ty), boundary_check=(0, 1))
+    p_y_i0 = tl.arange(0, BT).to(tl.int64) + (i_t * BT)
+    p_y_m0 = (p_y_i0 >= 0) & (p_y_i0 < (T))
+    p_y_i1 = tl.arange(0, BD).to(tl.int64) + (0)
+    p_y_m1 = (p_y_i1 >= 0) & (p_y_i1 < (D))
+    p_y = (y) + p_y_i0[:, None] * (D) + p_y_i1[None, :] * (1)
+    tl.store(p_y, b_y.to(p_y.dtype.element_ty), mask=p_y_m0[:, None] & p_y_m1[None, :])
 
 
 def l2norm_fwd(
-    x: torch.Tensor, eps: float = 1e-6, output_dtype: Optional[torch.dtype] = None
+    x: torch.Tensor, eps: float = 1e-6, output_dtype: torch.dtype | None = None
 ):
     x_shape_og = x.shape
     x = x.view(-1, x.shape[-1])
@@ -191,7 +197,7 @@ def fused_l2norm_qk(
     q: torch.Tensor,
     k: torch.Tensor,
     eps: float = 1e-6,
-    output_dtype: Optional[torch.dtype] = None,
+    output_dtype: torch.dtype | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert (
         q.shape == k.shape
@@ -260,7 +266,7 @@ class L2NormFunction(torch.autograd.Function):
 
 
 def l2norm(
-    x: torch.Tensor, eps: float = 1e-6, output_dtype: Optional[torch.dtype] = None
+    x: torch.Tensor, eps: float = 1e-6, output_dtype: torch.dtype | None = None
 ) -> torch.Tensor:
     return L2NormFunction.apply(x, eps, output_dtype)
 
@@ -270,7 +276,7 @@ l2_norm = l2norm
 
 class L2Norm(nn.Module):
 
-    def __init__(self, eps: float = 1e-6, output_dtype: Optional[torch.dtype] = None):
+    def __init__(self, eps: float = 1e-6, output_dtype: torch.dtype | None = None):
         super().__init__()
         self.eps = eps
         self.output_dtype = output_dtype

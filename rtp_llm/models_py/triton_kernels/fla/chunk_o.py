@@ -1,8 +1,6 @@
 # Adapted from https://github.com/fla-org/flash-linear-attention/blob/main/fla/ops/common/chunk_o.py
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-from typing import Optional
 
 import torch
 import triton
@@ -105,22 +103,28 @@ def chunk_fwd_kernel_o(
     b_A = tl.zeros([BT, BT], dtype=tl.float32)
 
     for i_k in range(tl.cdiv(K, BK)):
-        p_q = tl.make_block_ptr(
-            q, (T, K), (Hg * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0)
-        )
-        p_k = tl.make_block_ptr(
-            k, (K, T), (1, Hg * K), (i_k * BK, i_t * BT), (BK, BT), (0, 1)
-        )
+        p_q_i0 = tl.arange(0, BT).to(tl.int64) + (i_t * BT)
+        p_q_m0 = (p_q_i0 >= 0) & (p_q_i0 < (T))
+        p_q_i1 = tl.arange(0, BK).to(tl.int64) + (i_k * BK)
+        p_q_m1 = (p_q_i1 >= 0) & (p_q_i1 < (K))
+        p_q = (q) + p_q_i0[:, None] * (Hg * K) + p_q_i1[None, :] * (1)
+        p_k_i0 = tl.arange(0, BK).to(tl.int64) + (i_k * BK)
+        p_k_m0 = (p_k_i0 >= 0) & (p_k_i0 < (K))
+        p_k_i1 = tl.arange(0, BT).to(tl.int64) + (i_t * BT)
+        p_k_m1 = (p_k_i1 >= 0) & (p_k_i1 < (T))
+        p_k = (k) + p_k_i0[:, None] * (1) + p_k_i1[None, :] * (Hg * K)
         # V-first h view (matches chunk_delta_h.py / SGL main): (V, K) + (K, 1).
-        p_h = tl.make_block_ptr(
-            h, (V, K), (K, 1), (i_v * BV, i_k * BK), (BV, BK), (1, 0)
-        )
+        p_h_i0 = tl.arange(0, BV).to(tl.int64) + (i_v * BV)
+        p_h_m0 = (p_h_i0 >= 0) & (p_h_i0 < (V))
+        p_h_i1 = tl.arange(0, BK).to(tl.int64) + (i_k * BK)
+        p_h_m1 = (p_h_i1 >= 0) & (p_h_i1 < (K))
+        p_h = (h) + p_h_i0[:, None] * (K) + p_h_i1[None, :] * (1)
         # [BT, BK]
-        b_q = tl.load(p_q, boundary_check=(0, 1))
+        b_q = tl.load(p_q, mask=p_q_m0[:, None] & p_q_m1[None, :], other=0)
         # [BK, BT]
-        b_k = tl.load(p_k, boundary_check=(0, 1))
+        b_k = tl.load(p_k, mask=p_k_m0[:, None] & p_k_m1[None, :], other=0)
         # [BV, BK]
-        b_h = tl.load(p_h, boundary_check=(0, 1))
+        b_h = tl.load(p_h, mask=p_h_m0[:, None] & p_h_m1[None, :], other=0)
 
         # [BT, BK] @ [BK, BV] -> [BT, BV] — transpose b_h at dot time
         b_o += tl.dot(b_q, tl.trans(b_h.to(b_q.dtype)))
@@ -137,8 +141,10 @@ def chunk_fwd_kernel_o(
         else:
             g += bos64 * H + i_h64
             g_stride = H
-        p_g = tl.make_block_ptr(g, (T,), (g_stride,), (i_t * BT,), (BT,), (0,))
-        b_g = tl.load(p_g, boundary_check=(0,))
+        p_g_i0 = tl.arange(0, BT).to(tl.int64) + (i_t * BT)
+        p_g_m0 = (p_g_i0 >= 0) & (p_g_i0 < (T))
+        p_g = (g) + p_g_i0 * (g_stride)
+        b_g = tl.load(p_g, mask=p_g_m0, other=0)
         if IS_LOG2:
             # AMD path: g is in log2 domain (RCP_LN2-scaled cumsum upstream).
             # Within each chunk b_g[i] - b_g[j] ≤ 0 for i ≥ j (cumsum of
@@ -166,18 +172,22 @@ def chunk_fwd_kernel_o(
     b_A = tl.where(m_A, b_A, 0)
 
     v_stride_t = V if V_HEAD_MAJOR else H * V
-    p_v = tl.make_block_ptr(
-        v, (T, V), (v_stride_t, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0)
-    )
-    p_o = tl.make_block_ptr(
-        o, (T, V), (H * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0)
-    )
-    b_v = tl.load(p_v, boundary_check=(0, 1))
+    p_v_i0 = tl.arange(0, BT).to(tl.int64) + (i_t * BT)
+    p_v_m0 = (p_v_i0 >= 0) & (p_v_i0 < (T))
+    p_v_i1 = tl.arange(0, BV).to(tl.int64) + (i_v * BV)
+    p_v_m1 = (p_v_i1 >= 0) & (p_v_i1 < (V))
+    p_v = (v) + p_v_i0[:, None] * (v_stride_t) + p_v_i1[None, :] * (1)
+    p_o_i0 = tl.arange(0, BT).to(tl.int64) + (i_t * BT)
+    p_o_m0 = (p_o_i0 >= 0) & (p_o_i0 < (T))
+    p_o_i1 = tl.arange(0, BV).to(tl.int64) + (i_v * BV)
+    p_o_m1 = (p_o_i1 >= 0) & (p_o_i1 < (V))
+    p_o = (o) + p_o_i0[:, None] * (H * V) + p_o_i1[None, :] * (1)
+    b_v = tl.load(p_v, mask=p_v_m0[:, None] & p_v_m1[None, :], other=0)
 
     # to fix mma -> mma layout conversion
     # already solved by triton v3.2 or higher
     b_o = b_o * scale + tl.dot(b_A.to(b_v.dtype), b_v) * scale
-    tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=p_o_m0[:, None] & p_o_m1[None, :])
 
 
 def chunk_fwd_o(
@@ -185,9 +195,9 @@ def chunk_fwd_o(
     k: torch.Tensor,
     v: torch.Tensor,
     h: torch.Tensor,
-    g: Optional[torch.Tensor] = None,
-    scale: Optional[float] = None,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    g: torch.Tensor | None = None,
+    scale: float | None = None,
+    cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
 ) -> torch.Tensor:
     B, T, Hg, K, V = *q.shape, v.shape[-1]
