@@ -59,15 +59,18 @@ class SparsePlanOverlapCPU(unittest.TestCase):
         self.assertIs(actual, output)
 
     def test_wait_once_and_record_output_lifetimes(self):
-        current, auxiliary = Mock(), Mock()
-        outputs = sparse.SparseDecodePlan(*(Mock() for _ in range(5)))
-        work = overlap.SparsePlanWork(current, auxiliary, (Mock(),), outputs)
-        self.assertIs(work.wait(), outputs)
-        self.assertIs(work.wait(), outputs)
-        current.wait_stream.assert_called_once_with(auxiliary)
-        for tensor in outputs:
-            tensor.record_stream.assert_called_once_with(current)
-        self.assertEqual(work.inputs, ())
+        for count in (5, 7):
+            with self.subTest(plan_fields=count):
+                current, auxiliary = Mock(), Mock()
+                outputs = sparse.SparseDecodePlan(*(Mock() for _ in range(count)))
+                work = overlap.SparsePlanWork(current, auxiliary, (Mock(),), outputs)
+                self.assertIs(work.wait(), outputs)
+                self.assertIs(work.wait(), outputs)
+                current.wait_stream.assert_called_once_with(auxiliary)
+                for tensor in outputs:
+                    if tensor is not None:
+                        tensor.record_stream.assert_called_once_with(current)
+                self.assertEqual(work.inputs, ())
 
     def test_interrupted_forward_joins_before_dropping_plan(self):
         work = Mock()
@@ -86,7 +89,9 @@ class SparsePlanOverlapCPU(unittest.TestCase):
         table = torch.empty(2, 256, dtype=torch.int32)
         lengths = torch.empty(2, dtype=torch.int32)
         flags = torch.empty_like(candidates)
-        shared = {"candidates": candidates, "candidate_mask": Mock()}
+        valid_requests = torch.ones(2, dtype=torch.bool)
+        shared = {"candidates": candidates, "candidate_mask": Mock(),
+                  "decode_valid_requests": valid_requests}
         source = SimpleNamespace(
             layer_id=20, kv_source_layer_id=20, compress_ratio=1,
             v41_config={"candidate_source_layer_id": 20, "candidate_block_size": 8},
@@ -114,8 +119,10 @@ class SparsePlanOverlapCPU(unittest.TestCase):
             planner.assert_called_once_with(
                 candidates, lengths, table, query_len=6,
                 candidate_mask=shared["candidate_mask"],
+                valid_requests=valid_requests,
             )
             work = shared["decode_sparse_plan_ready"]
+            self.assertIs(work.inputs[-1], valid_requests)
             self.assertIs(work.plan, plan)
             current.wait_stream.assert_not_called()
             # Publication is once per forward; consumers join only when needed.
@@ -179,9 +186,9 @@ class SparsePlanOverlapCUDA(unittest.TestCase):
 
             current = torch.cuda.current_stream()
             work = FullDecodeWork(current, current, producer)
-            candidates, flags = work.select_candidates(source, lengths, 8, 2048)
+            candidates, flags = work.select_candidates(source, lengths, 8, 2048, complete=True)
             shared["candidates"] = candidates
-            shared["candidate_mask"] = (candidates, flags, 8)
+            shared["candidate_mask"] = (candidates, flags, 8, "sorted_prefix")
             overlap.start_plan(
                 source_layer, keys, lengths, query_len=query_len,
                 producer_stream=producer,

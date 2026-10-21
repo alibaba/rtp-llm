@@ -30,7 +30,8 @@ class SparsePlanWork:
                 # Outputs were allocated on auxiliary but outlive the join:
                 # all four reindex layers consume them on current.
                 for tensor in self.plan:
-                    tensor.record_stream(self.current)
+                    if tensor is not None:
+                        tensor.record_stream(self.current)
             self.inputs = ()
             self.joined = True
         return self.plan
@@ -93,17 +94,23 @@ def start_plan(attn, keys, lengths, *, query_len, producer_stream=None):
         stream = _get_process_cuda_stream(_PLAN_STREAMS, device)
     table = keys.block_table
     candidate_mask = shared.get("candidate_mask")
-    flags = sparse._plan_candidate_flags(candidates, table, candidate_mask)
+    valid_requests = shared.get("decode_valid_requests")
+    complete_prefix = sparse._has_complete_prefix(candidates, candidate_mask)
+    flags = None if complete_prefix else sparse._plan_candidate_flags(candidates, table, candidate_mask)
     warm_key = (
         stream.cuda_stream, tuple(candidates.shape), tuple(table.shape),
         table.stride(), lengths.dtype, query_len,
         None if flags is None else tuple(flags.shape),
+        complete_prefix,
+        None if valid_requests is None else (tuple(valid_requests.shape), valid_requests.dtype),
     )
     warmed = shared.setdefault("decode_sparse_plan_warmed", set())
     # DeepGEMM initializes scheduler workspace once per stream, outside capture.
     if capturing and warm_key not in warmed:
         return
     inputs = (candidates, lengths, table) + (() if flags is None else (flags,))
+    if valid_requests is not None:
+        inputs += (valid_requests,)
     work = SparsePlanWork(current, stream, inputs)
     stream.wait_stream(current)
     # FULL publishes candidate tensors while their writes are still queued on
@@ -117,6 +124,7 @@ def start_plan(attn, keys, lengths, *, query_len, producer_stream=None):
                 work.plan = sparse.make_plan(
                     candidates, lengths, table, query_len=query_len,
                     candidate_mask=candidate_mask,
+                    valid_requests=valid_requests,
                 )
     except BaseException:
         work.wait()

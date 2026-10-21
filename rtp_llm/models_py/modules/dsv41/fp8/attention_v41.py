@@ -1112,6 +1112,7 @@ class AttentionV41FP8(AttentionFP8):
             self._shared_attention["candidates"] = None
             self._shared_attention.pop("candidate_mask", None)
             self._shared_attention.pop("decode_sparse_plan", None)
+            self._shared_attention.pop("decode_valid_requests", None)
             self._shared_attention.pop("decode_indexer_metadata", None)
             self._shared_attention.pop("prefill_candidate_mask", None)
             self._shared_attention.pop("prefill_sparse_candidates", None)
@@ -3073,6 +3074,7 @@ class AttentionV41FP8(AttentionFP8):
                             keys.block_table,
                             query_len=S,
                             candidate_mask=shared.get("candidate_mask"),
+                            valid_requests=shared.get("decode_valid_requests"),
                         )
                     shared["decode_sparse_plan"] = plan
                 with record_function_range("dsv41.decode.sparse_mqa_select"):
@@ -3163,11 +3165,19 @@ class AttentionV41FP8(AttentionFP8):
                             if overlap is None
                             else overlap.select_candidates
                         )
+                        complete_prefix = (
+                            candidate_size == 8 and candidate_blocks in (512, 1024, 2048)
+                        )
                         candidates, flags = select_candidates(
-                            all_logits, visible_i32, candidate_size, candidate_blocks
+                            all_logits, visible_i32, candidate_size, candidate_blocks,
+                            **({"complete": True} if complete_prefix else {}),
                         )
                         shared["candidates"] = candidates
-                        shared["candidate_mask"] = (candidates, flags, candidate_size)
+                        shared["candidate_mask"] = (
+                            (candidates, flags, candidate_size, "sorted_prefix")
+                            if complete_prefix
+                            else (candidates, flags, candidate_size)
+                        )
                         from .decode.sparse_plan_overlap import start_plan
 
                         # Reuse the source's int32 lengths; plan/metadata need
@@ -3310,6 +3320,13 @@ class AttentionV41FP8(AttentionFP8):
 
         self._begin_forward()
         B, S, _ = x.shape
+        # Stable GPU contents are refreshed by prepare_cuda_graph each replay.
+        # The mask affects selection only, not query/KV-write geometry.
+        valid_requests = getattr(metadata, "valid_requests", None)
+        if valid_requests is None:
+            self._shared_attention.pop("decode_valid_requests", None)
+        else:
+            self._shared_attention["decode_valid_requests"] = valid_requests[:B]
         T = B * S
         positions, freqs = decode_rope_metadata(
             self._shared_attention, self.freqs_cis, metadata.position_ids[:T]

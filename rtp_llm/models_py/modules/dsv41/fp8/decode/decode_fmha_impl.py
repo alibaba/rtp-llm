@@ -11,7 +11,9 @@ expects:
   exact same kernel launches with frozen pointers — the only way to
   get different behavior across replays is to update the buffers
   ``forward`` reads from BEFORE replay. That update is
-  ``prepare_cuda_graph(attn_inputs)``.
+  ``prepare_cuda_graph(attn_inputs, valid_request_count=...)``. This backend
+  opts in to the runner's live request count; padded tensor shapes alone
+  cannot distinguish live requests from CUDA Graph padding.
 
 This impl is **DSv4-specific** and intentionally does not inherit
 ``MlaImplBase`` because DSv4's attention does not use the standard MLA
@@ -19,8 +21,8 @@ FMHA pipeline (custom CSA / HCA / SWA + TileLang sparse attention).
 The impl only carries:
 
   * Pre-allocated ``DSv4DecodeAttnMetadataFP8`` (sized for the captured BS).
-  * A ``prepare_cuda_graph(attn_inputs)`` method that updates the
-    metadata in place from the framework attention inputs.
+  * A ``prepare_cuda_graph`` method that updates metadata and selection
+    validity in place, without changing the original MTP/KV-write lengths.
 
 ``DeepSeekV4Model._forward_decode`` reads the metadata off the impl
 when one is supplied; otherwise it builds inline (Phase 2 eager path).
@@ -86,6 +88,7 @@ class DSv4DecodeFmhaImplFP8:
     # replay reads the persistent device buffers built from them. The runner
     # preserves stream dependencies and padding of those device inputs.
     cuda_graph_uses_device_metadata = True
+    cuda_graph_uses_valid_request_count = True
 
     def __init__(
         self,
@@ -152,7 +155,7 @@ class DSv4DecodeFmhaImplFP8:
             capture_full_width_lengths=True,
         )
 
-    def prepare_cuda_graph(self, attn_inputs: Any) -> None:
+    def prepare_cuda_graph(self, attn_inputs: Any, *, valid_request_count: int | None = None) -> None:
         """Called by ``CudaGraphRunner::prepareInputs`` between every
         replay.
 
@@ -164,6 +167,10 @@ class DSv4DecodeFmhaImplFP8:
         :meth:`prepare` stays a safe superset. See
         ``opt_flash_mla/design/01_cuda_graph_sched_meta_freeze.md``.
         """
+        if valid_request_count is None:
+            # An older C++ runner cannot infer live rows from padded tensor
+            # shapes. Fail rather than silently retain capture-time validity.
+            raise ValueError("CUDA Graph replay requires the live request count from the matching C++ runner")
         paged_block_tables = self._extract_paged_block_tables(attn_inputs)
         update_decode_metadata_in_place_fp8(
             self.metadata,
@@ -173,4 +180,5 @@ class DSv4DecodeFmhaImplFP8:
             paged_pool_entries_per_block=self._paged_entries_per_block,
             paged_pool_tokens_per_block=self._paged_tokens_per_block,
             require_device_metadata=True,
+            valid_request_count=valid_request_count,
         )

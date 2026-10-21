@@ -3,6 +3,8 @@
 """Batched V4.1 decode selection and fused candidate metadata.
 
 Candidate pooling/flags follow vLLM's attention/dsa/candidate_blocks.py.
+The L20 source can publish DeepInfer-style complete, sorted visible prefixes;
+other callers retain the historical score-filtered candidate contract.
 Supported candidate-block selections reuse RTP's exact radix-select kernel;
 other candidate counts retain torch.topk. Candidate scores remain FP32.
 Output order and cutoff-tie choices are unspecified; the newest block is pinned.
@@ -207,6 +209,52 @@ def _candidate_store_flags_kernel(
 
 
 @triton.jit
+def _candidate_store_prefix_kernel(
+    candidates, flags, block_lengths,
+    K: tl.constexpr, NBLOCKS: tl.constexpr, SEARCH_STEPS: tl.constexpr,
+):
+    """Publish sorted visible IDs, not score-filtered holes (decode only)."""
+    row = tl.program_id(0).to(tl.int64)
+    offsets = tl.arange(0, 1024)
+    for tile in range(tl.cdiv(NBLOCKS, 1024)):
+        blocks = tile * 1024 + offsets
+        tl.store(flags + row * NBLOCKS + blocks, 0, blocks < NBLOCKS)
+    lanes = tl.arange(0, K)
+    visible = tl.maximum(tl.minimum(tl.load(block_lengths + row), NBLOCKS), 0)
+    expected = tl.minimum(visible, K)
+    if NBLOCKS <= K:
+        ids = lanes
+    else:
+        ids = tl.load(candidates + row * K + lanes)
+    values = tl.sort(tl.where((ids >= 0) & (ids < visible), ids, 2147483647))
+    count = tl.sum((values != 2147483647).to(tl.int32), 0)
+    if count < expected:
+        # A full-width torch.topk fallback can choose padding on all--inf ties.
+        # Complete it with distinct visible IDs, rather than inventing inactive
+        # metadata fillers. Finite, length-bounded TopK skips this branch.
+        lo = tl.full((K,), 0, tl.int32)
+        hi = tl.full((K,), K, tl.int32)
+        for _ in range(SEARCH_STEPS):
+            mid = (lo + hi) // 2
+            value = tl.gather(values, tl.minimum(mid, K - 1), 0)
+            right = (mid < K) & (value < lanes)
+            lo = tl.where(right, mid + 1, lo)
+            hi = tl.where(right, hi, mid)
+        present = tl.gather(values, tl.minimum(lo, K - 1), 0) == lanes
+        fillers = tl.sort(tl.where((lanes < expected) & ~present, lanes, 2147483647))
+        filler = tl.gather(fillers, tl.maximum(lanes - count, 0), 0)
+        values = tl.sort(tl.where(lanes < expected, tl.where(lanes < count, values, filler), 2147483647))
+    # Preserve the partial context tail even if NaN scores displaced its +inf
+    # pin. It is the largest logical ID, so replacing the last slot stays sorted.
+    has_last = tl.sum(((lanes < expected) & (values == visible - 1)).to(tl.int32), 0) != 0
+    values = tl.where((expected > 0) & ~has_last & (lanes == expected - 1), visible - 1, values)
+    valid = lanes < expected
+    tl.store(candidates + row * K + lanes, tl.where(valid, values, -1))
+    tl.debug_barrier()
+    tl.store(flags + row * NBLOCKS + values, 1, valid)
+
+
+@triton.jit
 def _candidate_mask_kernel(
     logits,
     flags,
@@ -307,10 +355,19 @@ def select_candidates(
     lengths: torch.Tensor,
     block_size: int,
     topk_blocks: int,
+    *, complete: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """``complete`` publishes sorted valid-prefix IDs for the decode source.
+
+    It keeps selected NaN/-inf-score blocks (unlike legacy publication), pins
+    the last visible block and pads only after min(visible_blocks, K). Callers
+    must publish the matching prefix contract together with these tensors.
+    """
     rows, width = logits.shape
     nblocks = triton.cdiv(width, block_size)
     count = min(topk_blocks, nblocks)
+    if complete and count not in (512, 1024, 2048):
+        raise ValueError("Complete decode candidates require K512/K1024/K2048")
     # Keep score rows aligned for topk_v3's vectorized loads, without widening
     # its logical selection domain or reading uninitialized padding.
     score_stride = triton.cdiv(nblocks, 256) * 256
@@ -379,9 +436,14 @@ def select_candidates(
         else:
             candidates.copy_(scores.topk(count, dim=-1, sorted=False).indices)
     flags = torch.empty((rows, nblocks), dtype=torch.uint8, device=logits.device)
-    _candidate_store_flags_kernel[(rows,)](
-        scores, candidates, flags, count, nblocks, score_stride
-    )
+    if complete:
+        _candidate_store_prefix_kernel[(rows,)](
+            candidates, flags, block_lengths, count, nblocks, count.bit_length(), num_warps=8,
+        )
+    else:
+        _candidate_store_flags_kernel[(rows,)](
+            scores, candidates, flags, count, nblocks, score_stride
+        )
     return candidates, flags
 
 
