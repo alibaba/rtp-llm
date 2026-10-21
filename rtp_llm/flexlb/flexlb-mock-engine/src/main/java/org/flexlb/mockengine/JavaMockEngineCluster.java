@@ -5672,27 +5672,21 @@ public final class JavaMockEngineCluster {
         }
 
         synchronized Map<String, Object> cacheFixture(String operation, int worker, int workers,
-                int unique, int shared, int delta, int every, int intervalMs) {
+                int unique, int shared, int delta, int intervalMs) {
             if (!"PREFILL".equals(getRoleName()))
                 throw new IllegalArgumentException("cache fixture requires PREFILL");
-            if ("seed".equals(operation)) {
-                if (naturalCacheSeeded || acceptedCount.get() != 0 || !cache.snapshotKeys().isEmpty())
-                    throw new IllegalArgumentException("controlled fixture requires a fresh engine without natural cache");
-                if (cacheSyncFixture != null) throw new IllegalArgumentException("fixture already seeded");
-                cacheSyncFixture = new CacheSyncFixture(worker, workers, unique, shared, cacheVersion.get() + 1);
-            } else if ("churn".equals(operation)) {
-                if (cacheSyncFixture == null) throw new IllegalArgumentException("fixture not seeded");
-                cacheSyncFixture.churn(delta, every);
-            } else if ("grow".equals(operation)) {
-                if (cacheSyncFixture == null) throw new IllegalArgumentException("fixture not seeded");
-                cacheSyncFixture.grow(unique, shared);
-            } else if ("clock".equals(operation)) {
-                if (cacheSyncFixture == null) throw new IllegalArgumentException("fixture not seeded");
-                cacheSyncFixture.clockInterval(intervalMs);
-            } else if (!"inspect".equals(operation)) {
-                throw new IllegalArgumentException("unknown cache fixture operation");
+            if ("configure".equals(operation)) {
+                if (cacheSyncFixture != null || naturalCacheSeeded || acceptedCount.get() != 0
+                        || !cache.snapshotKeys().isEmpty())
+                    throw new IllegalArgumentException("configure requires a fresh engine without another cache source");
+                var candidate = new CacheSyncFixture(worker, workers, unique, shared, cacheVersion.get() + 1);
+                candidate.churn(delta, intervalMs); // Validate everything before selecting the source.
+                cacheSyncFixture = candidate;
+            } else {
+                if (cacheSyncFixture == null) throw new IllegalArgumentException("controlled fixture not configured");
+                if ("churn".equals(operation)) cacheSyncFixture.churn(delta, intervalMs);
+                else if (!"inspect".equals(operation)) throw new IllegalArgumentException("unknown fixture operation");
             }
-            if (cacheSyncFixture == null) throw new IllegalArgumentException("fixture not seeded");
             return cacheSyncFixture.snapshot();
         }
 

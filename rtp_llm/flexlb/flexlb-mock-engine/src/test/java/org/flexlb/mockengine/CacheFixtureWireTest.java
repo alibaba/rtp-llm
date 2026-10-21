@@ -57,8 +57,8 @@ class CacheFixtureWireTest {
     }
     @Test void inFlightWireSnapshotSurvivesChurnAndSameVersionRemainsFull() {
         var clock = new AtomicLong();
-        var f = new CacheSyncFixture(0, 120, 176, 65, 2, 1000, clock::get);
-        var first = f.wireResponse(-1); f.churn(17, 1); clock.set(5001);
+        var f = new CacheSyncFixture(0, 120, 176, 65, 2, clock::get);
+        var first = f.wireResponse(-1); f.churn(17, 1); clock.set(5_000_001);
         var second = f.wireResponse(2);
         assertEquals(reference(0, 120, 176, 65, 0, 2), first.toProto());
         assertEquals(reference(0, 120, 176, 65, 85, 7), second.toProto());
@@ -67,18 +67,6 @@ class CacheFixtureWireTest {
         assertEquals(964L, f.snapshot().get("entries"));
         assertEquals(85L, f.snapshot().get("removed_keys"));
     }
-    @Test void inFlightSnapshotSurvivesGrowthAndLegacySameVersionStillReturnsKeys() {
-        var fixture = new CacheSyncFixture(1, 3, 1, 0, 1, 0, () -> 0L);
-        var beforeGrowth = fixture.wireResponse(-1);
-        fixture.grow(8, 2);
-        var afterGrowth = fixture.wireResponse(fixture.version());
-        assertEquals(reference(1, 3, 1, 0, 0, 1), beforeGrowth.toProto());
-        assertEquals(reference(1, 3, 8, 2, 0, 2), afterGrowth.toProto());
-        assertEquals(10, fixture.snapshot().get("keys"));
-        assertEquals(9L, fixture.snapshot().get("added_keys"));
-        assertEquals(afterGrowth.toProto(), fixture.response(fixture.version()));
-    }
-
     @Test void productionSizeResponseMatchesReference() {
         var keys = CacheFixtureWire.Keys.create(119, 120, 176000, 65000, 117, 4);
         var frame = new CacheFixtureWire.Frame(EngineRpcService.CacheStatusPB.newBuilder().setVersion(4).build(), keys);
@@ -98,7 +86,7 @@ class CacheFixtureWireTest {
                 var request = EngineRpcService.CacheVersionPB.newBuilder().setNeedCacheKeys(true).setLatestCacheVersion(-1).build();
                 assertEquals(0, stub.getCacheStatus(request).getCacheKeysCount());
                 assertTrue(stub.getWorkerStatus(EngineRpcService.StatusVersionPB.getDefaultInstance()).getAlive());
-                service.cacheFixture("seed", 0, 120, 176, 65, 0, 0, 0);
+                service.cacheFixture("configure", 0, 120, 176, 65, 0, 1000);
                 var response = stub.getCacheStatus(request);
                 var expected = reference(0, 120, 176, 65, 0, response.getVersion());
                 assertEquals(expected.getCacheKeysMap(), response.getCacheKeysMap());

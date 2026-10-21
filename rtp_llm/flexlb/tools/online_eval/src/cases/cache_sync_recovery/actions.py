@@ -208,18 +208,11 @@ def execute(ctx, params, deadline):
             raise ValueError("initial healthy Worker population unavailable")
         event("cache_seed_started")
         for i, e in enumerate(prefill):
-            fixture(e, "seed", worker=i, workers=len(prefill), unique=1, shared=0)
+            fixture(e, "configure", worker=i, workers=len(prefill),
+                    unique=p["unique_keys"], shared=p["shared_keys"],
+                    delta=0, interval_ms=p["churn_interval_ms"])
             sample("cache_construction")
-            if i+1 < len(prefill):
-                deadline.sleep(p["seed_interval_s"])
-        event("cache_growth_started")
-        for step in range(1, p["baseline_steps"]+1):
-            for e in prefill:
-                fixture(e, "grow", unique=max(1, p["unique_keys"]*step//p["baseline_steps"]),
-                        shared=p["shared_keys"]*step//p["baseline_steps"])
-            sample("cache_construction")
-            deadline.sleep(p["baseline_interval_s"])
-        event("cache_growth_finished")
+        event("cache_seed_finished")
         frozen = stats()
         baseline = None
         ready = 0
@@ -238,11 +231,11 @@ def execute(ctx, params, deadline):
         last_sample = None
         maximum_gap = 0
         evidence["cache_baseline"] = dict(workers=rows, expected_keys=keys,
+            expected_global_keys=len(prefill)*p["unique_keys"] + p["shared_keys"],
             expected_versions={a: f["version"] for a, f in frozen.items()})
         event("cache_baseline_ready")
         for e in prefill:
-            fixture(e, "clock", interval_ms=p["churn_interval_ms"])
-            fixture(e, "churn", delta=p["delta_keys"], every=1)
+            fixture(e, "churn", delta=p["delta_keys"], interval_ms=p["churn_interval_ms"])
         hold("cache_only", p["cache_only_s"])
         client = ctx.services.environment.client_operations(t["jvm_xms"], t["jvm_xmx"])
         flow = JavaFlowGroup(client, directory/"flow", run_id=str(ctx.artifact_dir), group_id=t["group_id"],
@@ -280,7 +273,7 @@ def execute(ctx, params, deadline):
         evidence["client"] = flow.evidence_snapshot()
         event("performance_observation_finished")
         for e in prefill:
-            fixture(e, "churn", delta=0, every=0)
+            fixture(e, "churn", delta=0, interval_ms=p["churn_interval_ms"])
         expected = stats()
         versions = {a: f["version"] for a, f in expected.items()}
         until = ctx.clock()+120

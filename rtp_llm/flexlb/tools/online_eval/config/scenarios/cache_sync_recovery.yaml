@@ -4,7 +4,7 @@ program: default
 default_variant: steady
 metadata:
   kind: workload
-  description: 同一大缓存与业务背景下，验证稳态同步及部分 Worker 撤出恢复的健康隔离。
+  description: 受控全局共享快照与固定业务背景下，验证稳态同步及部分 Worker 撤出恢复的健康隔离。
   category: status
   tags: [cache, lifecycle]
 profiles: [single-nonbatch, batch-window]
@@ -70,6 +70,7 @@ parameters:
     jvm_xms: 2g
     jvm_xmx: 8g
   procedure:
+    # 受控同步快照一次初始化；背景请求的自然缓存不并入该集合。
     setup_timeout_s: 300
     warmup_timeout_s: 300
     cache_only_s: 120
@@ -77,9 +78,6 @@ parameters:
     measurement_s: 300
     withdraw_s: 20
     post_s: 120
-    seed_interval_s: 0
-    baseline_steps: 60
-    baseline_interval_s: 5
     unique_keys: 176000
     shared_keys: 65000
     delta_keys: 117

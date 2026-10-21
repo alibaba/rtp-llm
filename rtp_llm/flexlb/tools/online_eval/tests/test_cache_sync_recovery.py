@@ -122,7 +122,7 @@ def test_status_poll_override_is_distinct_from_rpc_timeout_and_validated():
 def test_actual_intensity_uses_response_counters_and_elapsed_time():
     from cases.cache_sync_recovery.telemetry import interval_rates
     fields = ("responses", "full_responses", "unchanged_responses", "entries", "key_payload_bytes",
-              "changed_responses", "added_keys", "removed_keys")
+              "changed_versions", "added_keys", "removed_keys")
     before = {"a": dict.fromkeys(fields, 10), "b": dict.fromkeys(fields, 20)}
     after = {"a": dict.fromkeys(fields, 110), "b": dict.fromkeys(fields, 320)}
     rates = interval_rates(before, after, 20)
@@ -204,7 +204,7 @@ def test_later_collection_error_preserves_positive_collateral_failure(tmp_path, 
     discovery = tmp_path/'discovery.json'
     discovery.write_text(json.dumps(dict(P=['h0','h1','h2'],D=['hd'])))
     params = copy.deepcopy(config()['parameters'])
-    params['procedure'].update(seed_interval_s=0,expired_workers=1)
+    params['procedure'].update(expired_workers=1)
     params['observation']['converged_samples'] = 1
     params['intervention'] = False
     time = [0]
@@ -392,3 +392,11 @@ def test_cache_suite_stays_out_of_default_ci():
     assert suites['suites']['cache_sync'] == ['cache_sync_recovery::steady','cache_sync_recovery::recovery']
     assert all(not x.startswith('cache_sync_recovery::') for x in suites['suites']['workload'])
     assert all(j['suite'] != 'cache_sync' for j in suites['ci_jobs'].values())
+
+
+@pytest.mark.parametrize("removed", ["baseline_steps", "baseline_interval_s", "seed_interval_s"])
+def test_controlled_snapshot_rejects_obsolete_growth_controls(removed):
+    data = config()
+    data["parameters"]["procedure"][removed] = 1
+    with pytest.raises(ValueError):
+        configure_program(data, "case.yaml")

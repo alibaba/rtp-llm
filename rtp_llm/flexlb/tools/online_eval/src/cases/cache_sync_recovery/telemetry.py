@@ -61,7 +61,7 @@ def archived_metrics(store, frames, *, epoch, maximum_gap_s):
 
 def interval_rates(before, after, seconds):
     fields = ("responses", "full_responses", "unchanged_responses", "entries", "key_payload_bytes",
-              "changed_responses", "added_keys", "removed_keys")
+              "changed_versions", "added_keys", "removed_keys")
     totals = {key: sum(after[a][key]-before[a][key] for a in after) for key in fields}
     if seconds <= 0 or any(v < 0 for v in totals.values()):
         raise ValueError("invalid fixture accounting interval")

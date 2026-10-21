@@ -2,111 +2,88 @@ package org.flexlb.mockengine;
 
 import org.flexlb.engine.grpc.EngineRpcService;
 import java.util.Map;
+import java.util.function.LongSupplier;
 
-/** Explicit synthetic cache-status payload; independent from inference KV capacity. */
+/** Controlled sync-only snapshot, deliberately separate from inference cache capacity. */
 final class CacheSyncFixture {
-    private final int worker, workers;
-    private int unique, shared;
-    private long offset, version = 1, calls, entries, bytes, changedResponses, changedKeys;
-    private long fullResponses, sum, xor, churnStart, appliedEpoch, grownKeys;
-    private long intervalNanos;
-    private final java.util.function.LongSupplier clock;
-    private int delta, changeEvery;
+    private final int worker, workers, unique, shared;
+    private final LongSupplier clock;
+    private long offset, version, calls, entries, bytes, changedVersions, changedKeys;
+    private long churnStart, appliedEpoch, intervalNanos;
+    private int delta;
     private CacheFixtureWire.Keys wireKeys;
-    // Used only by direct Java callers; the gRPC path never materializes a key map.
     private EngineRpcService.CacheStatusPB compatibilityPayload;
 
     CacheSyncFixture(int worker, int workers, int unique, int shared, long initialVersion) {
-        this(worker, workers, unique, shared, initialVersion,
-                Long.getLong("flexlb.mock.cache.churn-interval-ms", 0L) * 1_000_000L, System::nanoTime);
+        this(worker, workers, unique, shared, initialVersion, System::nanoTime);
     }
 
-    CacheSyncFixture(int worker, int workers, int unique, int shared, long initialVersion,
-            long intervalNanos, java.util.function.LongSupplier clock) {
-        this.intervalNanos = intervalNanos;
-        this.clock = clock;
-        if (intervalNanos < 0) throw new IllegalArgumentException("negative churn interval");
-        if (initialVersion <= 0 || workers < 1 || workers > 4096 || worker < 0 || worker >= workers || unique < 1
-                || shared < 0 || (long) unique + (long) shared > 1_000_000) {
+    CacheSyncFixture(int worker, int workers, int unique, int shared, long initialVersion, LongSupplier clock) {
+        if (initialVersion <= 0 || workers < 1 || workers > 4096 || worker < 0 || worker >= workers
+                || unique < 1 || shared < 0 || (long) unique + shared > 1_000_000)
             throw new IllegalArgumentException("invalid global-shared cache fixture geometry");
-        }
-        this.version = initialVersion;
-        this.worker = worker; this.workers = workers;
-        this.unique = unique; this.shared = shared;
+        this.worker = worker; this.workers = workers; this.unique = unique; this.shared = shared;
+        this.version = initialVersion; this.clock = clock;
         rebuild();
     }
 
     private void rebuild() {
         wireKeys = CacheFixtureWire.Keys.create(worker, workers, unique, shared, offset, version);
-        sum = wireKeys.sum(); xor = wireKeys.xor();
         compatibilityPayload = null;
     }
 
-    synchronized void grow(int unique, int shared) {
-        if (changeEvery != 0 || offset != 0 || unique < this.unique || shared < this.shared
-                || (long) unique + (long) shared > 1_000_000)
-            throw new IllegalArgumentException("growth requires monotonic bounded geometry before churn");
-        if (unique == this.unique && shared == this.shared) return;
-        grownKeys += (long) unique + (long) shared - this.unique - this.shared;
-        this.unique = unique; this.shared = shared; version++;
-        rebuild();
-    }
-
-    synchronized void clockInterval(int intervalMs) {
-        if (intervalMs <= 0) throw new IllegalArgumentException("positive clock interval required");
+    /** Changes only private keys; polling frequency never controls mutation rate. */
+    synchronized void churn(int delta, int intervalMs) {
+        if (delta < 0 || delta > unique || intervalMs <= 0)
+            throw new IllegalArgumentException("churn requires bounded delta and positive interval_ms");
+        advance(); // Preserve elapsed changes before pausing or changing the rate.
+        this.delta = delta;
         intervalNanos = Math.multiplyExact((long) intervalMs, 1_000_000L);
         churnStart = clock.getAsLong(); appliedEpoch = 0;
     }
 
-    synchronized void churn(int delta, int every) {
-        if (delta < 0 || delta > unique || every < 0 || (delta == 0) != (every == 0))
-            throw new IllegalArgumentException("churn requires bounded delta and positive response cadence");
-        this.delta = delta; this.changeEvery = every;
-        churnStart = clock.getAsLong(); appliedEpoch = 0;
+    private void advance() {
+        if (delta == 0) return;
+        long epoch = Math.max(0L, clock.getAsLong() - churnStart) / intervalNanos;
+        long steps = epoch - appliedEpoch;
+        if (steps <= 0) return;
+        long moved = Math.multiplyExact((long) delta, steps);
+        if (offset + moved + unique >= (1L << 40))
+            throw new IllegalStateException("fixture key namespace exhausted");
+        offset += moved; version += steps; changedVersions += steps; changedKeys += moved;
+        appliedEpoch = epoch;
+        rebuild();
     }
 
     synchronized EngineRpcService.CacheStatusPB response() { return response(-1L); }
 
     synchronized EngineRpcService.CacheStatusPB response(long latestVersion) {
         var frame = wireResponse(latestVersion);
-        if (frame.keys() == null) return frame.header();
         if (compatibilityPayload == null) compatibilityPayload = frame.toProto();
         return compatibilityPayload;
     }
 
     synchronized CacheFixtureWire.Frame wireResponse(long latestVersion) {
-        calls++;
-        long epoch = intervalNanos > 0 ? Math.max(0L, clock.getAsLong() - churnStart) / intervalNanos : 0L;
-        long steps = changeEvery == 0 ? 0L : intervalNanos > 0 ? epoch - appliedEpoch
-                : calls % changeEvery == 0 ? 1L : 0L;
-        if (steps > 0) {
-            long moved = Math.multiplyExact((long) delta, steps);
-            if (offset + moved + unique >= (1L << 40))
-                throw new IllegalStateException("fixture key namespace exhausted");
-            offset += moved; version += steps; changedResponses++; changedKeys += moved;
-            appliedEpoch = epoch; rebuild();
-        }
+        advance(); calls++;
         var header = EngineRpcService.CacheStatusPB.newBuilder().setVersion(version).build();
-        // Match the real engine's full snapshot response even when versions match
-        // (KVCacheManager::getKVCacheInfo/buildKVCacheInfo). A small diff does not
-        // reduce the payload, and freezing churn must not silently remove load.
-        fullResponses++;
-        entries += wireKeys.count();
-        bytes += header.getSerializedSize() + wireKeys.encodedSize();
+        entries += wireKeys.count(); bytes += header.getSerializedSize() + wireKeys.encodedSize();
+        // Real engines send full snapshots even when the requested version matches.
         return new CacheFixtureWire.Frame(header, wireKeys);
     }
 
-    synchronized long version() { return version; }
+    synchronized long version() { advance(); return version; }
 
     synchronized Map<String, Object> snapshot() {
+        advance();
         Map<String, Object> result = new java.util.LinkedHashMap<>();
-        result.put("keys", wireKeys.count()); result.put("version", version);
+        result.put("mode", "controlled"); result.put("keys", wireKeys.count()); result.put("version", version);
+        result.put("unique_keys", unique); result.put("shared_keys", shared);
+        result.put("replacement_keys_per_second", delta == 0 ? 0.0 : delta * 1e9 / intervalNanos);
         result.put("responses", calls); result.put("entries", entries); result.put("key_payload_bytes", bytes);
-        result.put("changed_responses", changedResponses); result.put("added_keys", changedKeys + grownKeys);
-        result.put("removed_keys", changedKeys); result.put("full_responses", fullResponses);
-        // Retain the metric schema: no same-version key payload is omitted.
+        result.put("changed_versions", changedVersions); result.put("added_keys", changedKeys);
+        result.put("removed_keys", changedKeys); result.put("full_responses", calls);
         result.put("unchanged_responses", 0L);
-        result.put("sum", Long.toUnsignedString(sum)); result.put("xor", Long.toUnsignedString(xor));
+        result.put("sum", Long.toUnsignedString(wireKeys.sum())); result.put("xor", Long.toUnsignedString(wireKeys.xor()));
         return result;
     }
 }

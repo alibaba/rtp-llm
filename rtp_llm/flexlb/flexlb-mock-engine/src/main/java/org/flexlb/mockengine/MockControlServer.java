@@ -642,12 +642,10 @@ final class MockControlServer {
         handleServicePost(exchange, (body, service) -> {
             String operation = body.path("operation").asText();
             java.util.Set<String> allowed = switch (operation) {
-                case "seed" -> java.util.Set.of("engine", "port", "operation", "worker", "workers", "unique", "shared");
-                case "churn" -> java.util.Set.of("engine", "port", "operation", "delta", "every");
+                case "configure" -> java.util.Set.of("engine", "port", "operation", "worker", "workers", "unique", "shared", "delta", "interval_ms");
+                case "churn" -> java.util.Set.of("engine", "port", "operation", "delta", "interval_ms");
                 case "inspect" -> java.util.Set.of("engine", "port", "operation");
-                case "grow" -> java.util.Set.of("engine", "port", "operation", "unique", "shared");
-                case "clock" -> java.util.Set.of("engine", "port", "operation", "interval_ms");
-                default -> throw new ApiException(400, "unknown fixture operation");
+                default -> throw new ApiException(400, "unknown fixture operation; use configure, churn or inspect");
             };
             var names = body.fieldNames();
             while (names.hasNext())
@@ -662,7 +660,7 @@ final class MockControlServer {
                 result.put("fixture", service.cacheFixture(operation,
                         body.path("worker").asInt(), body.path("workers").asInt(),
                         body.path("unique").asInt(), body.path("shared").asInt(),
-                        body.path("delta").asInt(), body.path("every").asInt(), body.path("interval_ms").asInt()));
+                        body.path("delta").asInt(), body.path("interval_ms").asInt()));
                 return result;
             } catch (IllegalArgumentException e) {
                 throw new ApiException(400, e.getMessage());
