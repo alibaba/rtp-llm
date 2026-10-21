@@ -115,6 +115,16 @@ CancelStatusPB PDCancelRegistry::cancel(int64_t request_id, const ErrorInfo& rea
         return CANCEL_STATUS_TOMBSTONED;
     }
     const auto& e = found->second;
+    const auto prior_error = e->stream ? e->stream->firstError().error : ErrorInfo::OkStatus();
+    if (reason.code() == ErrorCode::PRIORITY_PREEMPTED
+        && ((e->canceled.load() && e->cancel_reason.code() != ErrorCode::PRIORITY_PREEMPTED)
+            || (!e->canceled.load() && prior_error.hasError()
+                && prior_error.code() != ErrorCode::PRIORITY_PREEMPTED))) {
+        // An earlier outcome already won. ACCEPTED would promise a typed
+        // preemption terminal that this record cannot publish; let FlexLB
+        // reconcile the original worker outcome through its NOT_FOUND path.
+        return CANCEL_STATUS_NOT_FOUND;
+    }
     if (e->canceled.load())
         return CANCEL_STATUS_ACCEPTED;
     if (e->local_done && e->downstream_done && !active_reads_.count(e->unique_key)
@@ -124,8 +134,8 @@ CancelStatusPB PDCancelRegistry::cancel(int64_t request_id, const ErrorInfo& rea
         return CANCEL_STATUS_NOT_FOUND;
     e->cancel_reason = reason;
     // Preserve the first local failure if it preceded the cleanup request.
-    if (e->stream && e->stream->firstError().error.hasError())
-        e->cancel_reason = e->stream->firstError().error;
+    if (prior_error.hasError())
+        e->cancel_reason = prior_error;
     e->canceled.store(true);
     ++canceled_keys_[e->unique_key];
     pending_cancels_.emplace(request_id, e);

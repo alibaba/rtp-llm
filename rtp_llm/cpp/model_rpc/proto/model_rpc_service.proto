@@ -1093,6 +1093,9 @@ enum CancelStatusPB {
     // latch/intent. Decode forwards cancellation to Prefill. This
     // is not a resource-release acknowledgement.
     CANCEL_STATUS_ACCEPTED = 1;
+    // No priority intent was installed: the request completed or an earlier
+    // ordinary cancellation/execution outcome won. Reconcile WorkerStatus;
+    // this reply alone does not prove resource release.
     CANCEL_STATUS_NOT_FOUND = 2;
     // No active request was visible, so the endpoint installed (or found) a
     // short-lived request-id tombstone. A later Enqueue for the same id is

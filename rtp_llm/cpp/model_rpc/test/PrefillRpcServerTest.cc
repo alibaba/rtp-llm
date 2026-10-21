@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/RemoteRpcServiceImpl.h"
 #include "rtp_llm/cpp/model_rpc/PDRequestUtils.h"
+#include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 
 namespace rtp_llm {
@@ -275,6 +276,84 @@ TEST(PDCancelRegistryTest, AcceptedCancelRequiresLocalTransferAndDownstreamClean
     PDCancelRegistry::Handle late;
     EXPECT_EQ(registry.admit(request, "retry102", "prefill:123", currentTimeMs() + 1000, late).code(),
               ErrorCode::PRIORITY_PREEMPTED);
+}
+
+TEST(PDCancelRegistryTest, PriorityCancelLosingToOrdinaryCleanupReturnsNotFound) {
+    auto meta = std::make_shared<RpcServerRuntimeMeta>();
+    PDCancelRegistry registry(meta);
+    GenerateInputPB request;
+    request.set_request_id(106);
+    PDCancelRegistry::Handle handle;
+    ASSERT_TRUE(registry.admit(request, "ordinary-first", "", currentTimeMs() + 10000, handle).ok());
+    ASSERT_EQ(registry.cancel(106, {ErrorCode::CANCELLED, "client disconnected"}), CANCEL_STATUS_ACCEPTED);
+    EXPECT_EQ(registry.cancel(106, {ErrorCode::PRIORITY_PREEMPTED, "priority"}), CANCEL_STATUS_NOT_FOUND);
+    EXPECT_EQ(handle->cancel_reason.code(), ErrorCode::CANCELLED);
+    registry.finishLocal(handle);
+    ASSERT_TRUE(registry.complete(handle));
+    const auto info = meta->getEngineScheduleInfo(0);
+    ASSERT_EQ(info.finished_task_info_list.size(), 1u);
+    EXPECT_EQ(info.finished_task_info_list.front().error_code, static_cast<int64_t>(ErrorCode::CANCELLED));
+    EXPECT_EQ(info.finished_task_info_list.front().priority_preemption_progress, PriorityPreemptionProgress::NONE);
+}
+
+TEST(PDCancelRegistryTest, PriorityCancelLosingToStreamFailureDoesNotInstallPreemptionIntent) {
+    auto meta = std::make_shared<RpcServerRuntimeMeta>();
+    PDCancelRegistry registry(meta);
+    GenerateInputPB request;
+    request.set_request_id(107);
+    PDCancelRegistry::Handle handle;
+    ASSERT_TRUE(registry.admit(request, "failure-first", "", currentTimeMs() + 10000, handle).ok());
+    auto input = std::make_shared<GenerateInput>();
+    input->request_id = 107;
+    input->generate_config = std::make_shared<GenerateConfig>();
+    input->input_ids = torch::tensor({1}, torch::kInt32);
+    ModelConfig model;
+    model.max_seq_len = 32;
+    model.vocab_size = 128;
+    auto stream = std::make_shared<NormalGenerateStream>(input, model, RuntimeConfig{}, ResourceContext{}, nullptr);
+    registry.attach(handle, stream);
+    stream->reportError(ErrorCode::EXECUTION_EXCEPTION, "original execution failure");
+    EXPECT_EQ(registry.cancel(107, {ErrorCode::PRIORITY_PREEMPTED, "priority"}), CANCEL_STATUS_NOT_FOUND);
+    EXPECT_FALSE(handle->canceled.load());
+    EXPECT_TRUE(registry.pending().empty());
+    EXPECT_EQ(stream->firstError().error.code(), ErrorCode::EXECUTION_EXCEPTION);
+}
+
+TEST(PDCancelRegistryTest, RacingOrdinaryAndPriorityCancelAckMatchesPublishedTerminal) {
+    for (int iteration = 0; iteration < 32; ++iteration) {
+        auto meta = std::make_shared<RpcServerRuntimeMeta>();
+        PDCancelRegistry registry(meta);
+        GenerateInputPB request;
+        request.set_request_id(108);
+        PDCancelRegistry::Handle handle;
+        ASSERT_TRUE(registry.admit(request, "cancel-race", "", currentTimeMs() + 10000, handle).ok());
+        std::atomic<bool> start{false};
+        CancelStatusPB priority_ack = CANCEL_STATUS_UNSPECIFIED;
+        std::thread ordinary([&] {
+            while (!start.load(std::memory_order_acquire)) std::this_thread::yield();
+            registry.cancel(108, {ErrorCode::CANCELLED, "ordinary"});
+        });
+        std::thread priority([&] {
+            while (!start.load(std::memory_order_acquire)) std::this_thread::yield();
+            priority_ack = registry.cancel(108, {ErrorCode::PRIORITY_PREEMPTED, "priority"});
+        });
+        start.store(true, std::memory_order_release);
+        ordinary.join();
+        priority.join();
+        registry.finishLocal(handle);
+        ASSERT_TRUE(registry.complete(handle));
+        const auto info = meta->getEngineScheduleInfo(0);
+        ASSERT_EQ(info.finished_task_info_list.size(), 1u);
+        const auto& terminal = info.finished_task_info_list.front();
+        if (priority_ack == CANCEL_STATUS_ACCEPTED) {
+            EXPECT_EQ(terminal.error_code, static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED));
+            EXPECT_EQ(terminal.priority_preemption_progress, PriorityPreemptionProgress::CANCELED);
+        } else {
+            EXPECT_EQ(priority_ack, CANCEL_STATUS_NOT_FOUND);
+            EXPECT_EQ(terminal.error_code, static_cast<int64_t>(ErrorCode::CANCELLED));
+            EXPECT_EQ(terminal.priority_preemption_progress, PriorityPreemptionProgress::NONE);
+        }
+    }
 }
 
 TEST(PDCancelRegistryTest, FinishedDecodeReturnsNotFoundWithoutAbsentFence) {
