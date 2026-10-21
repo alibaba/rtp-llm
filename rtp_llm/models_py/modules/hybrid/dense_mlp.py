@@ -97,14 +97,21 @@ class DenseMLP(nn.Module):
         )
 
     def forward(self, x: torch.Tensor, skip_allreduce: bool = False) -> torch.Tensor:
+        output = None
         if not self.is_gated and self.activation_type == ActivationType.Gelu:
             activated = self.up_proj.forward_with_bias_gelu(x)
         else:
             up = self.up_proj(x)
-            activated = self.act_fn(up)
+            if self.enable_fused_activation_quant and getattr(
+                self.down_proj, "supports_fused_silu_quant", False
+            ):
+                output = self.down_proj.forward_silu_and_mul_quantized(up)
+            if output is None:
+                activated = self.act_fn(up)
 
         ffn_tp_size = self.parallelism_config.get_ffn_tp_size()
-        output = self.down_proj(activated)
+        if output is None:
+            output = self.down_proj(activated)
         if not skip_allreduce and ffn_tp_size > 1:
             output = all_reduce(output, group=Group.TP)
         return output
@@ -132,6 +139,17 @@ class DenseMLP(nn.Module):
             activated = self.up_proj.forward_with_bias_gelu(x)
         else:
             up = self.up_proj(x)
+            if (
+                self.enable_fused_activation_quant
+                and ffn_tp_size == 1
+                and getattr(self.down_proj, "supports_fused_silu_quant", False)
+                and self.down_proj.supports_deferred_bias
+            ):
+                output = self.down_proj.forward_silu_and_mul_quantized(
+                    up, apply_bias=False
+                )
+                if output is not None:
+                    return output, self.down_proj.bias
             activated = self.act_fn(up)
         if ffn_tp_size > 1 or not self.down_proj.supports_deferred_bias:
             output = self.down_proj(activated)

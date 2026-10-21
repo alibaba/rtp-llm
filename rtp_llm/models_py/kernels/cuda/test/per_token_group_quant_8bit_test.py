@@ -346,5 +346,181 @@ class PerTokenGroupQuantTest(TestCase):
                 self._run_quant_test(*params)
 
 
+class DenseSiluGroupQuantTest(TestCase):
+    """Bitwise regression against the production BF16 activation + v1 quantizer."""
+
+    TARGET_TOKEN_COUNTS = (128, 256, 500, 512, 1000, 1024)
+    TOKEN_COUNTS = TARGET_TOKEN_COUNTS + (131, 257, 503, 1009)
+    HIDDEN_DIM = 3072
+
+    def setUp(self):
+        if _is_hip or not torch.cuda.is_available():
+            raise SkipTest("Dense SiLU group quant is a CUDA path")
+        from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
+            create_per_token_group_quant_fp8_output_scale,
+            sgl_per_token_group_quant_fp8,
+        )
+        from rtp_llm.ops.compute_ops import per_token_group_quant_fp8_v2, rtp_llm_ops
+
+        self.make_scales = create_per_token_group_quant_fp8_output_scale
+        self.quantize = sgl_per_token_group_quant_fp8
+        self.quantize_v2 = per_token_group_quant_fp8_v2
+        self.silu_and_mul = rtp_llm_ops.silu_and_mul
+
+    def _outputs(self, x):
+        shape = (x.shape[0], x.shape[1] // 2)
+        q = torch.empty(shape, dtype=torch.float8_e4m3fn, device=x.device)
+        scales = self.make_scales(shape, x.device, 128, True, True, True)
+        return q, scales
+
+    def _separate(self, x, activated, q, scales):
+        self.silu_and_mul(activated, x, torch.cuda.current_stream().cuda_stream)
+        per_token_group_quant_fp8(activated, q, scales, 128, 1e-4, -448.0, 448.0, True)
+
+    def _fused(self, x, q, scales):
+        self.quantize_v2(x, q, scales, 128, 1e-4, -448.0, 448.0, True, True, None, True)
+
+    def _assert_equal(self, x):
+        expected_q, expected_scales = self._outputs(x)
+        actual_q, actual_scales = self._outputs(x)
+        activated = torch.empty_like(expected_q, dtype=torch.bfloat16)
+        self._separate(x, activated, expected_q, expected_scales)
+        self._fused(x, actual_q, actual_scales)
+        self.assertTrue(
+            torch.equal(actual_scales, expected_scales), "UE8M0 scale mismatch"
+        )
+        self.assertTrue(
+            torch.equal(actual_q.view(torch.uint8), expected_q.view(torch.uint8)),
+            "FP8 output bytes differ from the separate production path",
+        )
+        return expected_q, expected_scales
+
+    def test_rejects_incomplete_hidden_groups(self):
+        # These widths pass floor(hidden / 128) % 4 == 0 but contain a
+        # partial group. M=128 also passes the total-numel divisibility check.
+        # Call the raw binding to verify validation below the Python wrapper.
+        for hidden in (513, 3073):
+            with self.subTest(hidden=hidden):
+                x = torch.empty((128, 2 * hidden), device="cuda", dtype=torch.bfloat16)
+                q, scales = self._outputs(x)
+                with self.assertRaisesRegex(RuntimeError, "hidden divisible by 512"):
+                    self._fused(x, q, scales)
+
+    def test_target_and_prime_shapes(self):
+        for tokens in self.TOKEN_COUNTS:
+            for seed in (0, 17, 20261015):
+                with self.subTest(tokens=tokens, seed=seed):
+                    generator = torch.Generator(device="cuda").manual_seed(seed)
+                    x = torch.randn(
+                        (tokens, 2 * self.HIDDEN_DIM),
+                        generator=generator,
+                        dtype=torch.bfloat16,
+                        device="cuda",
+                    )
+                    reference_q, reference_scales = self._assert_equal(x)
+                    actual_q, actual_scales = self.quantize(
+                        x,
+                        128,
+                        eps=1e-4,
+                        column_major_scales=True,
+                        scale_tma_aligned=True,
+                        scale_ue8m0=True,
+                        fuse_silu_and_mul=True,
+                        preserve_silu_mul_rounding=True,
+                    )
+                    self.assertTrue(
+                        torch.equal(
+                            reference_q.view(torch.uint8), actual_q.view(torch.uint8)
+                        )
+                    )
+                    self.assertTrue(torch.equal(reference_scales, actual_scales))
+
+    def test_scale_and_fp8_rounding_boundaries(self):
+        # SiLU(16) is close enough to 16 that the BF16 product reaches the
+        # desired representable values. Sweep the adjacent BF16 values around
+        # each UE8M0 amax boundary, then place FP8 rounding ties in each group.
+        for tokens in self.TARGET_TOKEN_COUNTS:
+            x = torch.empty(
+                (tokens, 2 * self.HIDDEN_DIM), device="cuda", dtype=torch.bfloat16
+            )
+            x[:, : self.HIDDEN_DIM].fill_(16)
+            up = x[:, self.HIDDEN_DIM :]
+            up.zero_()
+            for group in range(self.HIDDEN_DIM // 128):
+                exponent = (-24, -20, -14, -1, 0, 1, 5, 10)[group % 8]
+                boundary = torch.tensor(
+                    448.0 * 2.0**exponent, device="cuda", dtype=torch.bfloat16
+                )
+                direction = group // 8 - 1
+                if direction:
+                    toward = torch.full_like(
+                        boundary, float("inf") if direction > 0 else 0.0
+                    )
+                    boundary = torch.nextafter(boundary, toward)
+                base = group * 128
+                up[:, base] = boundary / 16
+                tie = torch.tensor(
+                    1.0625 * 2.0**exponent, device="cuda", dtype=torch.bfloat16
+                )
+                vals = (
+                    torch.stack(
+                        (
+                            tie,
+                            torch.nextafter(tie, torch.zeros_like(tie)),
+                            torch.nextafter(tie, torch.full_like(tie, float("inf"))),
+                            -tie,
+                            -torch.nextafter(tie, torch.zeros_like(tie)),
+                            -torch.nextafter(tie, torch.full_like(tie, float("inf"))),
+                        )
+                    )
+                    / 16
+                )
+                up[:, base + 1 : base + 7] = vals
+            self._assert_equal(x)
+            x.zero_()
+            self._assert_equal(x)
+            # Nonlinear SiLU inputs include negative saturation and values
+            # close to zero; vary the multiplier across several exponents.
+            gate_values = torch.tensor(
+                [-20, -8, -1, -(2**-10), 0, 2**-10, 1, 8, 20],
+                dtype=torch.bfloat16,
+                device="cuda",
+            )
+            columns = torch.arange(self.HIDDEN_DIM, device="cuda")
+            x[:, : self.HIDDEN_DIM] = gate_values[columns % gate_values.numel()]
+            x[:, self.HIDDEN_DIM :] = torch.exp2((columns % 17 - 8).float()).to(
+                torch.bfloat16
+            )
+            self._assert_equal(x)
+
+    def test_graph_replay_uses_new_input(self):
+        for tokens in self.TARGET_TOKEN_COUNTS:
+            x = torch.randn(
+                (tokens, 2 * self.HIDDEN_DIM), device="cuda", dtype=torch.bfloat16
+            )
+            q, scales = self._outputs(x)
+            self._fused(x, q, scales)
+            torch.cuda.synchronize()
+            pointers = (x.data_ptr(), q.data_ptr(), scales.data_ptr())
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                self._fused(x, q, scales)
+            for seed in (41, 73, 101):
+                generator = torch.Generator(device="cuda").manual_seed(seed)
+                replacement = torch.randn(
+                    x.shape, generator=generator, device=x.device, dtype=x.dtype
+                )
+                expected_q, expected_scales = self._assert_equal(replacement)
+                x.copy_(replacement)
+                graph.replay()
+                self.assertEqual(
+                    pointers, (x.data_ptr(), q.data_ptr(), scales.data_ptr())
+                )
+                self.assertTrue(
+                    torch.equal(q.view(torch.uint8), expected_q.view(torch.uint8))
+                )
+                self.assertTrue(torch.equal(scales, expected_scales))
+
+
 if __name__ == "__main__":
     main()
