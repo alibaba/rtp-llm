@@ -1219,12 +1219,21 @@ class ModelRpcClient(object):
 
     @staticmethod
     def _raise_backend_error(code: int, message: str) -> None:
-        try:
-            error_type = ExceptionType(code)
-        except ValueError:
-            # Keep the original code visible even if this frontend has no enum name.
-            error_type = ExceptionType.UNKNOWN_ERROR
-            message = f"backend_error_code={code}: {message}"
+        if code in (
+            ErrorCodePB.GET_PART_NODE_STATUS_FAILED,
+            ErrorCodePB.GET_ALL_NODE_STATUS_FAILED,
+        ):
+            # Backend 8400 is a worker-status lookup error, while frontend
+            # 8400 names a Master capacity error. Numeric identity is not a
+            # shared category for these two existing backend codes.
+            error_type = _RPC_ERROR_CODE_OVERRIDES[code]
+        else:
+            try:
+                error_type = ExceptionType(code)
+            except ValueError:
+                # Keep the original code visible even if this frontend has no enum name.
+                error_type = ExceptionType.UNKNOWN_ERROR
+                message = f"backend_error_code={code}: {message}"
         logging.error(
             "backend failure: backend_error_code=%d frontend_error_code=%d error_name=%s message=%s",
             code, error_type.value, error_type.name, message,

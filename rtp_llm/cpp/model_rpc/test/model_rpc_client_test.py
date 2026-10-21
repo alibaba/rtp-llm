@@ -3604,6 +3604,28 @@ class FirstCauseRpcErrorTest(TestCase):
             self.assertIn("connection reset by peer", caught.exception.message)
             self.assertNotIn("worker:9000", caught.exception.message)
 
+    def test_worker_status_codes_do_not_alias_frontend_master_capacity(self):
+        client = ModelRpcClient.__new__(ModelRpcClient)
+        for code in (ErrorCodePB.GET_PART_NODE_STATUS_FAILED, ErrorCodePB.GET_ALL_NODE_STATUS_FAILED):
+            for source in ("frame", "trailer"):
+                with self.subTest(code=code, source=source), self.assertLogs(level="ERROR") as logs:
+                    with self.assertRaises(FtRuntimeException) as caught:
+                        if source == "frame":
+                            client._raise_pb_error(
+                                SimpleNamespace(error_code=code, error_message="worker lookup failed"), "request=42"
+                            )
+                        else:
+                            details = ErrorDetailsPB(error_code=code, error_message="worker lookup failed")
+                            client._handle_grpc_error(
+                                self.rpc_error((("grpc-status-details-bin", details.SerializeToString()),)), "request=42"
+                            )
+                self.assertEqual(caught.exception.exception_type, ExceptionType.GET_HOST_FAILED)
+                self.assertEqual(caught.exception.message, "request=42: worker lookup failed")
+                self.assertTrue(any(
+                    f"backend_error_code={code} frontend_error_code={ExceptionType.GET_HOST_FAILED.value}" in message
+                    for message in logs.output
+                ))
+
     def test_batch_pb_preserves_new_and_existing_application_codes(self):
         for code, expected in (
             (ErrorCodePB.MM_PROCESS_ERROR, ExceptionType.MM_PROCESS_ERROR),
