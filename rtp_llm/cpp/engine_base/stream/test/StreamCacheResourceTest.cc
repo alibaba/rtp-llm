@@ -1025,7 +1025,8 @@ TEST_F(StreamCacheResourceTest, P2PRegistrationWaitsForAllocatorMaterialization)
     EXPECT_EQ(resource.treeCoveredBlockNum(), 1u);
     EXPECT_EQ(stream_->hostReuseLength(), resource.reuseBlockTokens());
     EXPECT_FALSE(stream_->hasError());
-    store->markTerminal(stream_->uniqueKey(), stream_->deadlineMs());
+    store->markTerminal(
+        stream_->uniqueKey(), stream_->deadlineMs(), P2PConnectorResourceStore::TerminalReason::COMPLETED);
 }
 
 TEST_F(StreamCacheResourceTest, testTreeCoveredBlockNumFallsBackToDeviceReuseWithoutLoadContext) {
