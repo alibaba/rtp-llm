@@ -41,12 +41,11 @@ final class CacheFixtureWire {
 
     record Keys(int worker, int workers, int unique, int shared, long offset, long version,
                 int encodedSize, long sum, long xor) {
-        int count() { return unique + 2 * shared; }
+        int count() { return unique + shared; }
         long key(int index) {
             if (index < unique) return hash(((long) worker << 40) + offset + index);
-            int n = index - unique;
-            int segment = n < shared ? worker : (worker + workers - 1) % workers;
-            return hash(Long.MIN_VALUE + ((long) segment << 40) + n % shared);
+            // One global namespace: every P owns the same shared keys.
+            return hash(Long.MIN_VALUE + index - unique);
         }
         static Keys create(int worker, int workers, int unique, int shared, long offset, long version) {
             var shape = new Keys(worker, workers, unique, shared, offset, version, 0, 0, 0);

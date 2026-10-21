@@ -18,7 +18,7 @@ def analyze(evidence):
         p = evidence["parameters"]
         limits, procedure, observation = (p[k] for k in ("checks", "procedure", "observation"))
         last = evidence["frames"][-1]["workers"]
-        keys = procedure["unique_keys"] + 2*procedure["shared_keys"]
+        keys = procedure["unique_keys"] + procedure["shared_keys"]
         progress = evidence["cache_progress"]
         from cases.cache_sync_recovery.health import converged
         ready = (converged(last, set(evidence["worker_addresses"]), keys,

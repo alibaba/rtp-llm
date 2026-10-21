@@ -1143,6 +1143,7 @@ public final class JavaMockEngineCluster {
         private final AtomicLong statusVersion = new AtomicLong();
         private final AtomicLong completionVersion = new AtomicLong();
         private volatile CacheSyncFixture cacheSyncFixture;
+        private boolean naturalCacheSeeded;
         private final AtomicLong cacheVersion = new AtomicLong(1);
         private final Map<Integer, AtomicLong> nextPrefillAvailableNanosByDp = new ConcurrentHashMap<>();
         // ── KV capacity model v2: single block-pool truth ──
@@ -5655,11 +5656,28 @@ public final class JavaMockEngineCluster {
             return fixture == null ? cacheVersion.get() : fixture.version();
         }
 
+        /** One-time warm start of the ordinary cache; subsequent requests own all changes. */
+        synchronized Map<String, Object> seedNaturalCache(List<Long> keys) {
+            if (cacheSyncFixture != null || naturalCacheSeeded)
+                throw new IllegalArgumentException("cache mode already selected; use a fresh engine");
+            if (acceptedCount.get() != 0 || cache.heldBlocks() != 0 || !cache.snapshotKeys().isEmpty())
+                throw new IllegalArgumentException("natural seed requires a fresh idle engine");
+            if (keys.isEmpty() || keys.size() > Math.min(cache.totalBlocks(), cache.retentionBlocks())
+                    || keys.size() > 1_000_000 || new java.util.HashSet<>(keys).size() != keys.size())
+                throw new IllegalArgumentException("seed requires unique keys within physical cache capacity");
+            cache.admit(keys);
+            naturalCacheSeeded = true;
+            cacheVersion.incrementAndGet();
+            return Map.of("mode", "natural", "keys", cache.snapshotKeys().size(), "version", cacheVersion.get());
+        }
+
         synchronized Map<String, Object> cacheFixture(String operation, int worker, int workers,
                 int unique, int shared, int delta, int every, int intervalMs) {
             if (!"PREFILL".equals(getRoleName()))
                 throw new IllegalArgumentException("cache fixture requires PREFILL");
             if ("seed".equals(operation)) {
+                if (naturalCacheSeeded || acceptedCount.get() != 0 || !cache.snapshotKeys().isEmpty())
+                    throw new IllegalArgumentException("controlled fixture requires a fresh engine without natural cache");
                 if (cacheSyncFixture != null) throw new IllegalArgumentException("fixture already seeded");
                 cacheSyncFixture = new CacheSyncFixture(worker, workers, unique, shared, cacheVersion.get() + 1);
             } else if ("churn".equals(operation)) {

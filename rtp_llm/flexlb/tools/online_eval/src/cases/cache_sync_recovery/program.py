@@ -30,9 +30,9 @@ def build(case, intervention):
     p, o, c = data.procedure, data.observation, data.checks
     if any(v <= 0 for k, v in p.items() if k not in {"shared_keys", "seed_interval_s"}):
         raise ValueError("pressure windows and key parameters must be positive")
-    if case.env.n_prefill < 3 or case.env.discovery != "discovery_file" or not 0 < p["expired_workers"] < case.env.n_prefill:
+    if case.env.n_prefill < 2 or case.env.discovery != "discovery_file" or not 0 < p["expired_workers"] < case.env.n_prefill:
         raise ValueError("partial withdrawal requires owned discovery and a proper Prefill subset")
-    if p["unique_keys"] + 2*p["shared_keys"] > 1_000_000 or p["delta_keys"] > p["unique_keys"]:
+    if p["unique_keys"] + p["shared_keys"] > 1_000_000 or p["delta_keys"] > p["unique_keys"]:
         raise ValueError("invalid fixture key budget")
     if not 0 < o["sample_s"] <= o["max_gap_s"] <= c["max_status_age_ms"]/1000:
         raise ValueError("sampling gap must not exceed health stale threshold")

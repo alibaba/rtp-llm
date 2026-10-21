@@ -22,7 +22,7 @@ def config():
 def row(generation=1, age=20):
     return dict(generation=generation, status_age_ms=age, applied_status_age_ms=age,
                 lifecycle_state="active", reported_alive=True, role="prefill",
-                cache_indexed=True, cache_key_size=306000, cache_version=2, cache_indexed_version=2)
+                cache_indexed=True, cache_key_size=241000, cache_version=2, cache_indexed_version=2)
 
 
 def test_registered_workload_compiles_with_shared_monitoring_and_automatic_reports():
@@ -65,17 +65,17 @@ def test_fresh_rpc_does_not_hide_stale_application(extra):
     current = dict(row(age=1), **extra)
     baseline = {"worker": row()}
     assert collateral({"worker": current}, baseline, set(), 10000) == ["worker"]
-    assert not converged({"worker": current}, {"worker"}, 306000, {"worker": 2}, 10000)
+    assert not converged({"worker": current}, {"worker"}, 241000, {"worker": 2}, 10000)
 
 
 def test_recovery_needs_exact_population_version_index_and_fresh_status():
-    assert converged({"a": row()}, {"a"}, 306000, {"a": 2}, 10000)
+    assert converged({"a": row()}, {"a"}, 241000, {"a": 2}, 10000)
     for field, value in (("cache_key_size", 305999), ("cache_indexed_version", 1),
                          ("cache_indexed", False), ("reported_alive", False), ("status_age_ms", -1)):
         current = row()
         current[field] = value
-        assert not converged({"a": current}, {"a"}, 306000, {"a": 2}, 10000)
-    assert not converged({}, {"a"}, 306000, {"a": 2}, 10000)
+        assert not converged({"a": current}, {"a"}, 241000, {"a": 2}, 10000)
+    assert not converged({}, {"a"}, 241000, {"a": 2}, 10000)
 
 
 def test_withdrawal_preserves_other_roles_and_atomic_restore(tmp_path):
@@ -157,7 +157,7 @@ def test_report_preserves_gc_events_and_shared_time_origin(tmp_path):
         f'[{stamp}][2.0s][info][gc] GC(9) Pause Full (G1 Compaction Pause) 63G->20G(64G) 180.000ms\n')
     raw = dict(parameters=config()['parameters'], environment={}, errors=[], checks=[dict(
         id='healthy_survivors',status='PASS',actual=0)], intensity={'measurement': dict(
-            responses=1,entries=306000,key_payload_bytes=100)}, expiry_scope='discovery',
+            responses=1,entries=241000,key_payload_bytes=100)}, expiry_scope='discovery',
         events=[dict(id='cache_only_started',epoch_s=epoch-120),
                 dict(id='performance_observation_finished',epoch_s=epoch+2),
                 dict(id='observation_finished',epoch_s=epoch+5)],
@@ -286,9 +286,9 @@ def test_recovery_report_keeps_two_focused_panels_and_only_distinct_events():
     assert spec['events'][0]['id']=='cache_only_started'
 
 
-def test_ring_fixture_requires_at_least_three_prefill_workers_before_launch():
+def test_withdrawal_requires_at_least_two_prefill_workers_before_launch():
     data = config()
-    data['environment']['n_prefill'] = 2
+    data['environment']['n_prefill'] = 1
     data['parameters']['procedure']['expired_workers'] = 1
     with pytest.raises(ValueError):
         configure_program(data,'case.yaml')
@@ -327,8 +327,8 @@ def pressure_evidence(intervention=False):
         gc_available=True, gc=[dict(epoch_s=15,full=True,duration_ms=180)],
         events=[dict(id=k,epoch_s=t) for k,t in [('cache_baseline_ready',9),('cache_only_started',10),
             ('measurement_started',10),('performance_observation_finished',17),('observation_finished',18)]],
-        intensity={'measurement':dict(responses=50,entries=50*306000,key_payload_bytes=200000000,
-            added_keys=2340,totals=dict(responses=15000,full_responses=15000,entries=15000*306000))})
+        intensity={'measurement':dict(responses=50,entries=50*241000,key_payload_bytes=200000000,
+            added_keys=2340,totals=dict(responses=15000,full_responses=15000,entries=15000*241000))})
 
 
 @pytest.mark.parametrize('recovery', [False, True])

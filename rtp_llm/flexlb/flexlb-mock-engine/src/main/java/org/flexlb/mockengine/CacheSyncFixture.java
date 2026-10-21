@@ -26,9 +26,9 @@ final class CacheSyncFixture {
         this.intervalNanos = intervalNanos;
         this.clock = clock;
         if (intervalNanos < 0) throw new IllegalArgumentException("negative churn interval");
-        if (initialVersion <= 0 || workers < 3 || workers > 4096 || worker < 0 || worker >= workers || unique < 1
-                || shared < 0 || (long) unique + 2L * shared > 1_000_000) {
-            throw new IllegalArgumentException("invalid ring cache fixture geometry");
+        if (initialVersion <= 0 || workers < 1 || workers > 4096 || worker < 0 || worker >= workers || unique < 1
+                || shared < 0 || (long) unique + (long) shared > 1_000_000) {
+            throw new IllegalArgumentException("invalid global-shared cache fixture geometry");
         }
         this.version = initialVersion;
         this.worker = worker; this.workers = workers;
@@ -44,10 +44,10 @@ final class CacheSyncFixture {
 
     synchronized void grow(int unique, int shared) {
         if (changeEvery != 0 || offset != 0 || unique < this.unique || shared < this.shared
-                || (long) unique + 2L * shared > 1_000_000)
+                || (long) unique + (long) shared > 1_000_000)
             throw new IllegalArgumentException("growth requires monotonic bounded geometry before churn");
         if (unique == this.unique && shared == this.shared) return;
-        grownKeys += (long) unique + 2L * shared - this.unique - 2L * this.shared;
+        grownKeys += (long) unique + (long) shared - this.unique - this.shared;
         this.unique = unique; this.shared = shared; version++;
         rebuild();
     }

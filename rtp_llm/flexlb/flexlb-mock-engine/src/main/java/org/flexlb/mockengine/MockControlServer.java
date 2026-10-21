@@ -92,6 +92,7 @@ final class MockControlServer {
         httpServer.createContext("/set_kv_pressure", this::handleSetKvPressure);
         httpServer.createContext("/set_queue_depth", this::handleSetQueueDepth);
         httpServer.createContext("/cache_fixture", this::handleCacheFixture);
+        httpServer.createContext("/cache_seed", this::handleCacheSeed);
         httpServer.createContext("/cache_evict", this::handleCacheEvict);
         httpServer.createContext("/stop_engine", this::handleStopEngine);
         httpServer.createContext("/start_engine", this::handleStartEngine);
@@ -613,6 +614,26 @@ final class MockControlServer {
             builder.queueDepthLimit(depth);
             service.setFaultConfig(builder.build());
             return successResponse(service);
+        });
+    }
+
+    /** Natural warmup writes the same LRU used by inference and cache status. */
+    private void handleCacheSeed(HttpExchange exchange) throws IOException {
+        handleServicePost(exchange, (body, service) -> {
+            var fields = body.fieldNames();
+            while (fields.hasNext())
+                if (!java.util.Set.of("engine", "port", "keys").contains(fields.next()))
+                    throw new ApiException(400, "unknown natural seed field");
+            var values = body.path("keys");
+            if (!values.isArray() || values.size() > 1_000_000)
+                throw new ApiException(400, "keys must be a bounded int64 array");
+            List<Long> keys = new ArrayList<>();
+            for (JsonNode key : values) keys.add(parseBlockKey(key));
+            try {
+                var result = successResponse(service);
+                result.put("cache", service.seedNaturalCache(keys));
+                return result;
+            } catch (IllegalArgumentException error) { throw new ApiException(400, error.getMessage()); }
         });
     }
 

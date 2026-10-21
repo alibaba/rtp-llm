@@ -7,17 +7,26 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class CacheSyncFixtureTest {
     @Test
-    void ringHasExactOwnershipAndSignedWireKeys() throws Exception {
+    void globalSharedSetHasExactOwnershipAndSignedWireKeys() throws Exception {
         var union = new HashSet<Long>();
+        var sets = new java.util.ArrayList<java.util.Set<Long>>();
         for (int worker = 0; worker < 6; worker++) {
             var fixture = new CacheSyncFixture(worker, 6, 176, 65, 2);
             var response = fixture.response();
-            assertEquals(306, response.getCacheKeysCount());
+            assertEquals(241, response.getCacheKeysCount());
             assertEquals(response, EngineRpcService.CacheStatusPB.parseFrom(response.toByteArray()));
             assertEquals(2, response.getVersion());
+            sets.add(response.getCacheKeysMap().keySet());
             union.addAll(response.getCacheKeysMap().keySet());
         }
-        assertEquals(6 * (176 + 65), union.size());
+        assertEquals(6 * 176 + 65, union.size());
+        var common = new HashSet<>(sets.get(0));
+        sets.forEach(common::retainAll);
+        assertEquals(65, common.size());
+        for (int a = 0; a < sets.size(); a++) for (int c = a + 1; c < sets.size(); c++) {
+            var overlap = new HashSet<>(sets.get(a)); overlap.retainAll(sets.get(c));
+            assertEquals(common, overlap, "every pair shares exactly the global set");
+        }
         assertTrue(union.stream().anyMatch(key -> key < 0));
     }
 
@@ -34,17 +43,17 @@ class CacheSyncFixtureTest {
         removed.removeAll(after.getCacheKeysMap().keySet());
         assertEquals(17, added.size());
         assertEquals(17, removed.size());
-        assertEquals(306, after.getCacheKeysCount());
+        assertEquals(241, after.getCacheKeysCount());
         assertEquals(3, after.getVersion());
         fixture.churn(0, 0);
         assertSame(after, fixture.response());
         assertEquals(17L, fixture.snapshot().get("added_keys"));
-        assertEquals(4L * 306, fixture.snapshot().get("entries"));
+        assertEquals(4L * 241, fixture.snapshot().get("entries"));
     }
 
     @Test
     void invalidGeometryAndUnboundedDiffAreRejected() {
-        assertThrows(IllegalArgumentException.class, () -> new CacheSyncFixture(0, 2, 1, 1, 2));
+        assertThrows(IllegalArgumentException.class, () -> new CacheSyncFixture(0, 0, 1, 1, 2));
         assertThrows(IllegalArgumentException.class, () -> new CacheSyncFixture(0, 6, 1_000_001, 0, 2));
         var fixture = new CacheSyncFixture(0, 6, 100, 10, 2);
         assertThrows(IllegalArgumentException.class, () -> fixture.churn(101, 1));
@@ -53,13 +62,13 @@ class CacheSyncFixtureTest {
     @Test
     void everyRequestedVersionKeepsTheFullRealEnginePayload() {
         var fixture = new CacheSyncFixture(0, 6, 176, 65, 2, 0, () -> 0L);
-        assertEquals(306, fixture.response(-1).getCacheKeysCount());
-        assertEquals(306, fixture.response(2).getCacheKeysCount());
+        assertEquals(241, fixture.response(-1).getCacheKeysCount());
+        assertEquals(241, fixture.response(2).getCacheKeysCount());
         assertEquals(2, fixture.response(2).getVersion());
-        assertEquals(306, fixture.response(3).getCacheKeysCount());
+        assertEquals(241, fixture.response(3).getCacheKeysCount());
         assertEquals(0L, fixture.snapshot().get("unchanged_responses"));
         assertEquals(4L, fixture.snapshot().get("full_responses"));
-        assertEquals(4L * 306, fixture.snapshot().get("entries"));
+        assertEquals(4L * 241, fixture.snapshot().get("entries"));
     }
 
     @Test
@@ -69,7 +78,7 @@ class CacheSyncFixtureTest {
         try {
             System.setProperty(property, "true");
             var fixture = new CacheSyncFixture(0, 6, 176, 65, 2);
-            assertEquals(306, fixture.wireResponse(2).toProto().getCacheKeysCount());
+            assertEquals(241, fixture.wireResponse(2).toProto().getCacheKeysCount());
             assertEquals(0L, fixture.snapshot().get("unchanged_responses"));
         } finally {
             if (previous == null) System.clearProperty(property);
@@ -111,14 +120,14 @@ class CacheSyncFixtureTest {
     }
 
     @Test
-    void gradualGrowthKeepsCountersMonotonicAndReachesTheSameRing() {
+    void gradualGrowthKeepsCountersMonotonicAndReachesTheSameGlobalSet() {
         var gradual = new CacheSyncFixture(0, 6, 1, 0, 2);
         gradual.response();
         gradual.grow(88, 32); gradual.response();
         gradual.grow(176, 65);
         var full = new CacheSyncFixture(0, 6, 176, 65, 2);
         assertEquals(full.response().getCacheKeysMap(), gradual.response().getCacheKeysMap());
-        assertEquals(305L, gradual.snapshot().get("added_keys"));
+        assertEquals(240L, gradual.snapshot().get("added_keys"));
         assertEquals(0L, gradual.snapshot().get("removed_keys"));
         assertEquals(3L, gradual.snapshot().get("responses"));
         assertThrows(IllegalArgumentException.class, () -> gradual.grow(100, 65));

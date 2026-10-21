@@ -19,8 +19,7 @@ class CacheFixtureWireTest {
                                                             int shared, long offset, long version) {
         var b = EngineRpcService.CacheStatusPB.newBuilder().setVersion(version);
         for (int i = 0; i < unique; i++) b.putCacheKeys(hash(((long)worker << 40) + offset + i), true);
-        for (int segment : new int[]{worker, (worker + workers - 1) % workers})
-            for (int i = 0; i < shared; i++) b.putCacheKeys(hash(Long.MIN_VALUE + ((long)segment << 40) + i), true);
+        for (int i = 0; i < shared; i++) b.putCacheKeys(hash(Long.MIN_VALUE + i), true);
         return b.build();
     }
     @Test void canonicalProtobufContentAndBytesMatchAcrossGeometryAndOffsets() throws Exception {
@@ -63,9 +62,9 @@ class CacheFixtureWireTest {
         var second = f.wireResponse(2);
         assertEquals(reference(0, 120, 176, 65, 0, 2), first.toProto());
         assertEquals(reference(0, 120, 176, 65, 85, 7), second.toProto());
-        assertEquals(306, f.wireResponse(7).toProto().getCacheKeysCount());
-        assertEquals(306, f.wireResponse(8).toProto().getCacheKeysCount());
-        assertEquals(1224L, f.snapshot().get("entries"));
+        assertEquals(241, f.wireResponse(7).toProto().getCacheKeysCount());
+        assertEquals(241, f.wireResponse(8).toProto().getCacheKeysCount());
+        assertEquals(964L, f.snapshot().get("entries"));
         assertEquals(85L, f.snapshot().get("removed_keys"));
     }
     @Test void inFlightSnapshotSurvivesGrowthAndLegacySameVersionStillReturnsKeys() {
@@ -75,8 +74,8 @@ class CacheFixtureWireTest {
         var afterGrowth = fixture.wireResponse(fixture.version());
         assertEquals(reference(1, 3, 1, 0, 0, 1), beforeGrowth.toProto());
         assertEquals(reference(1, 3, 8, 2, 0, 2), afterGrowth.toProto());
-        assertEquals(12, fixture.snapshot().get("keys"));
-        assertEquals(11L, fixture.snapshot().get("added_keys"));
+        assertEquals(10, fixture.snapshot().get("keys"));
+        assertEquals(9L, fixture.snapshot().get("added_keys"));
         assertEquals(afterGrowth.toProto(), fixture.response(fixture.version()));
     }
 

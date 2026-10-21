@@ -90,7 +90,7 @@ def execute(ctx, params, deadline):
     original = path.read_text()
     ctx.add_cleanup("restore_cache_discovery", lambda d: atomic_write(path, original))
     evidence["victims"] = sorted(victims)
-    keys = p["unique_keys"] + 2*p["shared_keys"]
+    keys = p["unique_keys"] + p["shared_keys"]
     baseline, flow, last_sample = None, None, None
     affected, absent, rebuilt = set(), set(), set()
     maximum_gap = 0

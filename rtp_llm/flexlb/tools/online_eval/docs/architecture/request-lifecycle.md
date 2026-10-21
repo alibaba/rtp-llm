@@ -91,11 +91,17 @@ Prefill ownership、Decode reservation/dispatch permit 和引擎负载应分别�
 单个 Master 无客户端流量不意味着共享引擎空闲。完整流量排空后再验证全局收尾。
 
 缓存同步协议测试可使用 Mock 的 `POST /cache_fixture`，按引擎名或端口定位。
-`seed` 接收 `worker/workers/unique/shared`，构造相邻 Worker 共享部分键的环形集合；
+`seed` 接收 `worker/workers/unique/shared`，构造所有 Worker 共用的 shared 集合及每 Worker 独有的 unique 集合；
 `churn` 接收 `delta/every`，按实际完整缓存响应次数触发等量增删，传入两个零值冻结变化；
 `inspect` 返回当前版本、键数和累计响应条目、变更键数、protobuf 键载荷字节数。
 字节数包括 fixture 的 map 与 version，不能当成完整 RPC 响应或连接层流量。
 控制面不接收整批 key 列表，不在观测时重新序列化整个集合。
+
+自然缓存预热使用 `POST /cache_seed`，传入 `engine` 或 `port` 与 `keys`（有序 int64 block keys）。
+它只允许在无请求、缓存为空的引擎初始化一次，初始 keys 不得重复且不得超过实际缓存容量。
+这些 keys 直接进入推理使用的 LRU；后续请求可命中、追加和驱逐，缓存同步读取同一份状态。
+输入 keys 表示一条已缓存的前缀序列；要形成自然命中，须与请求的 block hash/顺序一致。
+同一引擎不能同时使用自然 seed 和受控 fixture，切换需创建新引擎，不隐式覆盖已有缓存。
 
 fixture 显式替换该引擎的缓存状态响应键集合，独立于推理请求的 KV 容量、LRU 和驱逐。
 它只在单次隔离测试环境中使用，不能用于验收真实 KV 容量与请求缓存命中。
