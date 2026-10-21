@@ -34,12 +34,13 @@ namespace {
 class WriteBufferConverter: public LayerBlockConverter {
 public:
     mutable std::array<std::array<std::array<uint8_t, 8>, 4>, 2> bytes{};
+    size_t                                                       block_bytes = 8;
 
-    std::vector<BlockInfo>
-    convertIndexToBuffer(int layer, const std::string&, int block, int = 1, int = 0) const override {
+    std::vector<BlockInfo> convertIndexToBuffer(
+        int layer, const std::string&, int block, int partition_count = 1, int partition_id = 0) const override {
         BlockInfo info;
-        info.addr       = bytes.at(layer).at(block).data();
-        info.size_bytes = bytes.at(layer).at(block).size();
+        info.size_bytes = block_bytes / partition_count;
+        info.addr       = bytes.at(layer).at(block).data() + info.size_bytes * partition_id;
         return {info};
     }
     std::vector<std::pair<BlockInfo, size_t>> getAllBuffers() const override {
@@ -50,14 +51,15 @@ public:
 class WriteCudaBufferConverter: public LayerBlockConverter {
 public:
     torch::Tensor bytes = torch::zeros({2, 4, 8}, torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+    size_t block_bytes = 8;
 
-    std::vector<BlockInfo>
-    convertIndexToBuffer(int layer, const std::string&, int block, int = 1, int = 0) const override {
+    std::vector<BlockInfo> convertIndexToBuffer(
+        int layer, const std::string&, int block, int partition_count = 1, int partition_id = 0) const override {
         BlockInfo info;
         info.is_cuda      = true;
         info.device_index = bytes.get_device();
-        info.addr         = bytes[layer][block].data_ptr();
-        info.size_bytes   = bytes.size(2);
+        info.size_bytes   = block_bytes / partition_count;
+        info.addr         = bytes[layer][block].data_ptr<uint8_t>() + info.size_bytes * partition_id;
         return {info};
     }
     std::vector<std::pair<BlockInfo, size_t>> getAllBuffers() const override {
@@ -119,8 +121,8 @@ public:
         std::unique_lock<std::mutex> lock(mutex_);
         return cv_.wait_for(lock, std::chrono::seconds(5), [&]() { return pending.size() == count; });
     }
-    void begin() {
-        ASSERT_TRUE(waitPending(2));
+    void begin(size_t count = 2) {
+        ASSERT_TRUE(waitPending(count));
         std::lock_guard<std::mutex> lock(mutex_);
         for (const auto& [request, callback] : pending) {
             auto task = target_->tasks.getTask(request.unique_key);
@@ -799,9 +801,10 @@ TEST_F(P2PConnectorWriteWorkerTest, InvalidLastRouteHasNoTransferSideEffects) {
     EXPECT_EQ(sender_->pendingCount(), 0);
 }
 
-TEST_F(P2PConnectorWriteWorkerTest, RejectsPartitionedRoutesAndExpiredRequests) {
+TEST_F(P2PConnectorWriteWorkerTest, RejectsInvalidPartitionsAndExpiredRequests) {
     auto req = request();
     req.mutable_routes(0)->set_partition_count(2);
+    req.mutable_routes(0)->set_partition_id(2);
     FunctionResponsePB response;
     EXPECT_FALSE(executeWrite(*prefill_connector_, req, response));
     EXPECT_TRUE(executeWrite(*decode_connector_, req, response));
@@ -812,6 +815,170 @@ TEST_F(P2PConnectorWriteWorkerTest, RejectsPartitionedRoutesAndExpiredRequests) 
     EXPECT_TRUE(executeWrite(*decode_connector_, req, response));
     EXPECT_NE(response.p2p_response().error_code(), ErrorCodePB::NONE_ERROR);
     EXPECT_EQ(receiver_->registrations, 0);
+}
+
+TEST_F(P2PConnectorWriteWorkerTest, DisjointDestinationPartitionsAreAccepted) {
+    auto request_pb = request();
+    request_pb.set_deadline_ms(currentTimeMs() + 3000);
+    request_pb.mutable_routes(0)->set_partition_count(2);
+    auto* other = request_pb.add_routes();
+    other->CopyFrom(request_pb.routes(0));
+    other->set_route_id(2);
+    other->set_partition_id(1);
+    auto          receive = std::async(std::launch::async, [&]() {
+        FunctionResponsePB response;
+        return executeWrite(*prefill_connector_, request_pb, response);
+    });
+    LeaseSnapshot status;
+    ASSERT_TRUE(awaitWrite([&]() { return queryLease(*prefill_, request_pb.unique_key(), status) && status.sealed; }));
+    auto send = std::async(std::launch::async, [&]() {
+        FunctionResponsePB response;
+        return executeWrite(*decode_connector_, request_pb, response);
+    });
+    sender_->begin(3);
+    sender_->finish();
+    EXPECT_TRUE(receive.get());
+    EXPECT_TRUE(send.get());
+    EXPECT_EQ(receiver_->registrations, 3);
+    EXPECT_EQ(source_->bytes, target_->bytes);
+}
+
+TEST_F(P2PConnectorWriteWorkerTest, PartitionOverlapIsRejectedBeforeAnyRegistration) {
+    auto request_pb = request();
+    request_pb.mutable_routes(0)->set_partition_count(2);
+    auto* other = request_pb.add_routes();
+    other->CopyFrom(request_pb.routes(0));
+    other->set_route_id(2);
+    FunctionResponsePB response;
+    EXPECT_FALSE(executeWrite(*prefill_connector_, request_pb, response));
+    EXPECT_EQ(receiver_->registrations, 0);
+}
+
+TEST_F(P2PConnectorWriteWorkerTest, SourceTpPartitionAndCpSliceCopyIntoWholeSmallerDestination) {
+    target_->block_bytes = 4;
+    for (bool cp_slice : {false, true}) {
+        target_->bytes      = {};
+        auto source_request = request();
+        source_request.set_unique_key(cp_slice ? "cp-scatter" : "tp-scatter");
+        source_request.set_deadline_ms(currentTimeMs() + 3000);
+        auto destination_request = source_request;
+        for (auto& route : *source_request.mutable_routes()) {
+            if (cp_slice) {
+                route.set_slice_mode(static_cast<int>(CpBlockSliceMode::EQUAL_BYTES));
+                route.set_slice_count(2);
+                route.set_slice_index(1);
+            } else {
+                route.set_partition_count(2);
+                route.set_partition_id(1);
+            }
+        }
+        auto receive = std::async(std::launch::async, [&]() {
+            FunctionResponsePB response;
+            return executeWrite(*prefill_connector_, destination_request, response)
+                   && response.p2p_response().error_code() == ErrorCodePB::NONE_ERROR;
+        });
+        LeaseSnapshot status;
+        ASSERT_TRUE(
+            awaitWrite([&]() { return queryLease(*prefill_, source_request.unique_key(), status) && status.sealed; }));
+        auto send = std::async(std::launch::async, [&]() {
+            FunctionResponsePB response;
+            return executeWrite(*decode_connector_, source_request, response)
+                   && response.p2p_response().error_code() == ErrorCodePB::NONE_ERROR;
+        });
+        sender_->begin();
+        sender_->finish();
+        EXPECT_TRUE(receive.get());
+        EXPECT_TRUE(send.get());
+        for (size_t layer = 0; layer < 2; ++layer) {
+            for (size_t block = 1; block <= 2; ++block) {
+                for (size_t offset = 0; offset < 4; ++offset) {
+                    EXPECT_EQ(target_->bytes[layer][block][offset], source_->bytes[layer][block][offset + 4]);
+                    EXPECT_EQ(target_->bytes[layer][block][offset + 4], 0);
+                }
+            }
+        }
+    }
+}
+
+TEST_F(P2PConnectorWriteWorkerTest, TcpCopiesGpuTpScatterMergeAndCpSlicesExactly) {
+    auto source = std::make_shared<WriteCudaBufferConverter>();
+    auto target = std::make_shared<WriteCudaBufferConverter>();
+    source->bytes.copy_(torch::arange(64, source->bytes.options()).reshape({2, 4, 8}));
+    auto receiver = std::make_shared<transfer::tcp::TcpKVCacheReceiver>();
+    auto sender = std::make_shared<transfer::tcp::TcpKVCacheSender>();
+    const auto port = autil::NetUtil::randomPort();
+    ASSERT_TRUE(receiver->init(port, 1, 1));
+    ASSERT_TRUE(sender->init(1));
+    auto source_connector = makeWriteDecodeConnector(config_, source, sender);
+    auto target_connector = makeWritePrefillConnector(config_, target, receiver);
+    ASSERT_TRUE(source_connector->decode_->write_worker_->init());
+    for (int mode = 0; mode < 3; ++mode) {
+        SCOPED_TRACE(mode);
+        const bool merge = mode == 2;
+        source->block_bytes = merge ? 4 : 8;
+        target->block_bytes = merge ? 8 : 4;
+        target->bytes.zero_();
+        c10::cuda::getCurrentCUDAStream().synchronize();
+        auto source_request = request();
+        source_request.set_unique_key("tcp-asymmetric-" + std::to_string(mode));
+        source_request.set_deadline_ms(currentTimeMs() + 10000);
+        source_request.mutable_peer_workers(0)->set_cache_store_port(port);
+        auto target_request = source_request;
+        for (auto& route : *(merge ? target_request.mutable_routes() : source_request.mutable_routes())) {
+            if (mode == 1) {
+                route.set_slice_mode(static_cast<int>(CpBlockSliceMode::EQUAL_BYTES));
+                route.set_slice_count(2);
+                route.set_slice_index(1);
+            } else {
+                route.set_partition_count(2);
+                route.set_partition_id(1);
+            }
+        }
+        auto receive = std::async(std::launch::async, [&]() {
+            FunctionResponsePB response;
+            return executeWrite(*target_connector, target_request, response);
+        });
+        LeaseSnapshot status;
+        ASSERT_TRUE(awaitWrite([&]() {
+            return queryLease(*target_connector->prefill_->write_worker_, source_request.unique_key(), status)
+                   && status.sealed;
+        }));
+        FunctionResponsePB response;
+        EXPECT_TRUE(executeWrite(*source_connector, source_request, response));
+        EXPECT_TRUE(receive.get());
+        const auto actual = target->bytes.cpu();
+        const auto expected = source->bytes.cpu();
+        const auto actual_bytes = actual.accessor<uint8_t, 3>();
+        const auto expected_bytes = expected.accessor<uint8_t, 3>();
+        for (int layer = 0; layer < 2; ++layer) {
+            for (int block = 1; block <= 2; ++block) {
+                for (int offset = 0; offset < 4; ++offset) {
+                    EXPECT_EQ(actual_bytes[layer][block][offset + (merge ? 4 : 0)],
+                              expected_bytes[layer][block][offset + (merge ? 0 : 4)]);
+                    EXPECT_EQ(actual_bytes[layer][block][offset + (merge ? 0 : 4)], 0);
+                }
+            }
+        }
+    }
+}
+
+TEST_F(P2PConnectorWriteWorkerTest, CpSliceSelectsOnlyRequestedSourceBytes) {
+    auto plan = workerPlan();
+    for (auto& route : plan.routes) {
+        route.slice = {CpBlockSliceMode::EQUAL_BYTES, 2, 1};
+    }
+    std::vector<p2p_internal::WriteTransferUnit> units;
+    ASSERT_TRUE(
+        p2p_internal::buildWriteUnits("cp-source-slice", currentTimeMs() + 5000, plan, config_, source_, true, units)
+            .ok());
+    ASSERT_EQ(units.size(), 2u);
+    for (size_t layer = 0; layer < units.size(); ++layer) {
+        for (const auto& [key, info] : units[layer].blocks) {
+            ASSERT_EQ(info->blocks.size(), 1u);
+            EXPECT_EQ(info->blocks.front().size_bytes, 4u);
+            EXPECT_EQ(info->blocks.front().addr, source_->bytes[layer][key - 100].data() + 4);
+        }
+    }
 }
 
 TEST_F(P2PConnectorWriteWorkerTest, SourceCancellationSurvivesLocalPhysicalStop) {

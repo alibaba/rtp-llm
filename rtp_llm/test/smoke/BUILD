@@ -69,6 +69,14 @@ exports_files([
 ])
 
 py_test(
+    name = "v4_cp_writeback_acceptance_test",
+    srcs = [
+        "v4_cp_writeback_acceptance.py",
+        "v4_cp_writeback_acceptance_test.py",
+    ],
+)
+
+py_test(
     name = "writeback_smoke_test",
     srcs = glob(["*.py"], exclude = ["entry.py"]),
     main = "writeback_smoke_test.py",

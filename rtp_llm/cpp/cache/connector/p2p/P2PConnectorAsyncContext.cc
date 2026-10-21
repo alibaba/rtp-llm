@@ -1237,6 +1237,9 @@ void P2PConnectorAsyncWriteContext::finishLocked(const ErrorInfo& error) {
         return;
     if (error_.ok())
         error_ = error;
+    if (!error_.ok()) {
+        RTP_LLM_LOG_WARNING("writeback failed: unique_key=%s error=%s", unique_key_.c_str(), error_.ToString().c_str());
+    }
     done_     = true;
     released_ = true;
     if (on_released_) {

@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PSchedulerPrefillWrite.h"
+#include "rtp_llm/cpp/cache/CPSlotMapper.h"
 
 #include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
@@ -116,10 +117,9 @@ std::shared_ptr<const PlanResult> P2PSchedulerPrefillWrite::planFor(int decode_t
         }
     }
     const auto& pc = config_.parallelism_config;
-    if (pc.tp_size <= 0 || decode_tp_size != pc.tp_size || pc.prefill_cp_config.is_enabled()
-        || pc.prefill_cp_config.kv_cache_sharded) {
+    if (pc.tp_size <= 0 || decode_tp_size <= 0 || (pc.prefill_cp_config.kv_cache_sharded && decode_tp_size != 1)) {
         return std::make_shared<const PlanResult>(
-            PlanResult{{}, ErrorInfo(ErrorCode::INVALID_PARAMS, "writeback requires symmetric TP and disabled CP")});
+            PlanResult{{}, ErrorInfo(ErrorCode::INVALID_PARAMS, "writeback requires D_CP=1 and positive TP sizes")});
     }
     const auto               dst_layout = ShardLayoutFactory::fromTopology(*config_.topology, pc, RoleType::PREFILL, config_.cache_key_tokens_per_block);
     std::vector<std::string> tags;
@@ -128,7 +128,8 @@ std::shared_ptr<const PlanResult> P2PSchedulerPrefillWrite::planFor(int decode_t
             tags.push_back(group.tag);
         }
     }
-    const auto src_layout = ShardLayoutFactory::peerOf(dst_layout, decode_tp_size, false, RoleType::DECODE);
+    const auto src_layout =
+        ShardLayoutFactory::peerOf(dst_layout, decode_tp_size, pc.prefill_cp_config.kv_cache_sharded, RoleType::DECODE);
     auto       result = std::make_shared<const PlanResult>(KVCacheTransferPlanner::plan(src_layout, dst_layout, tags));
     std::lock_guard<std::mutex> lock(plan_cache_mutex_);
     auto [it, inserted] = plan_cache_.emplace(decode_tp_size, result);
@@ -166,14 +167,15 @@ ErrorInfo P2PSchedulerPrefillWrite::buildPrefillRankRoutes(const TransferPlan&  
         if (std::find(tags.begin(), tags.end(), group.tag) == tags.end()) {
             return ErrorInfo(ErrorCode::INVALID_PARAMS, "writeback destination group missing");
         }
-        for (const auto pos : positions) {
-            if (pos >= resource.blocks(group.tag).size() || resource.blocks(group.tag)[pos] <= 0) {
-                return ErrorInfo(ErrorCode::INVALID_PARAMS, "writeback destination block missing");
-            }
-        }
-        const auto buffers =
-            LayerCacheBufferUtil::convertTagForRoute(resource, *config_.topology, group.tag, positions, 0, 1,
-                                                      config_.cache_key_tokens_per_block);
+        const int cp_size =
+            config_.parallelism_config.prefill_cp_config.kv_cache_sharded ? config_.parallelism_config.tp_size : 1;
+        const auto buffers = LayerCacheBufferUtil::convertTagForRoute(resource,
+                                                                      *config_.topology,
+                                                                      group.tag,
+                                                                      positions,
+                                                                      route.dst_rank % cp_size,
+                                                                      cp_size,
+                                                                      config_.cache_key_tokens_per_block);
         if (!buffers.ok()) {
             return buffers.status();
         }
@@ -365,9 +367,15 @@ void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteRequestPB
     }
 
     // step1: validate request and calculate the accepted start_block and block_count
-    const size_t block_size    = config_.topology->groups().front().seqSizePerBlock();
+    const size_t block_size    = config_.cache_key_tokens_per_block;
     const size_t blocks        = request.cache_keys_size();
-    const size_t prompt_blocks = request.input_length() / block_size;
+    const size_t cp_size =
+        config_.parallelism_config.prefill_cp_config.kv_cache_sharded ? config_.parallelism_config.tp_size : 1;
+    if (block_size == 0 || blocks % cp_size != 0 || block_size != coordinator_manager_->seqSizePerBlock()
+        || cp_size != static_cast<size_t>(coordinator_manager_->cpSlotMapper() ? coordinator_manager_->cpSlotMapper()->cpSize() : 1)) {
+        return invalid("writeback allocator layout or canonical key alignment mismatch");
+    }
+    const size_t prompt_blocks = request.input_length() / block_size / cp_size * cp_size;
     if (blocks > request.token_ids().size() / block_size || prompt_blocks > blocks) {
         return invalid("writeback keys exceed the declared complete KV range");
     }

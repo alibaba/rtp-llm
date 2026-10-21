@@ -138,6 +138,40 @@ protected:
 
 bool TcpSenderReceiverTest::device_initialized_ = false;
 
+TEST_F(TcpSenderOnlyTest, StagedGatherFollowsSourceDeviceOnReusedThread) {
+    if (torch::cuda::device_count() < 2) {
+        GTEST_SKIP() << "requires two CUDA devices";
+    }
+    auto copied = std::async(std::launch::async, [&]() {
+        for (const int device_index : {0, 1, 0}) {
+            std::vector<torch::Tensor> buffers;
+            auto blocks = std::make_shared<KeyBlockInfo>();
+            for (int tile = 0; tile < 4; ++tile) {
+                buffers.push_back(torch::full(
+                    {2048},
+                    10 * device_index + tile,
+                    torch::TensorOptions().dtype(torch::kUInt8).device(torch::Device(torch::kCUDA, device_index))));
+                blocks->blocks.push_back(BlockInfo{true, device_index, 0, buffers.back().data_ptr(), 2048});
+            }
+            at::cuda::getCurrentCUDAStream(device_index).synchronize();
+            SendRequest request;
+            request.unique_key = "staged-device-" + std::to_string(device_index);
+            request.block_info[1] = blocks;
+            const auto wire = sender_->makeTransferRequest(request, std::make_shared<TransferClientMetricsCollector>());
+            if (!wire || wire->blocks_size() != 1 || wire->blocks(0).blocks_size() != 4) {
+                return false;
+            }
+            for (int tile = 0; tile < 4; ++tile) {
+                if (wire->blocks(0).blocks(tile).content() != std::string(2048, 10 * device_index + tile)) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    });
+    EXPECT_TRUE(copied.get());
+}
+
 // ===========================================================================
 // F. Build request failures (Sender only, no network)
 // ===========================================================================

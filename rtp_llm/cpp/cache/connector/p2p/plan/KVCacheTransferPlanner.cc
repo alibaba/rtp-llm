@@ -203,16 +203,10 @@ KVCacheTransferPlanner::validateTag(const ShardLayout& src, const ShardLayout& d
         return planError("sub block count mismatch for tag '" + tag + "'");
     }
 
-    // (b0) CP 形态白名单：只允许 dst 不分片（prefill CP N -> decode CP 1）或两侧完全相等
-    // （今天 §2.1 唯一允许的对称形态）。两侧都分片且不相等（如 p cp=2 -> d cp=4）不予支持：
-    // 那需要「模 lcm(src,dst) 的剩余类 + CRT 求 residue」整套机制，而 vLLM
-    // (_validate_remote_parallel_config) 与 SGLang (common/conn.py 的 assert) 同样禁止
-    // 两侧 CP 并存。挡在这里之后 modulus 恒等于 src.cpSize()，residue 恒等于 src_cp。
-    if (dst.cpSize() != 1 && dst.cpSize() != src.cpSize()) {
+    if (src.cpSize() != 1 && dst.cpSize() != 1 && dst.cpSize() != src.cpSize()) {
         std::ostringstream oss;
         oss << "unsupported CP topology for tag '" << tag << "': src cp_size=" << src.cpSize()
-            << " dst cp_size=" << dst.cpSize()
-            << "; dst must be either unsharded (1) or exactly match src";
+            << " dst cp_size=" << dst.cpSize() << "; one side must be unsharded (1), or both sides must match";
         return planError(oss.str());
     }
 
@@ -350,7 +344,7 @@ ErrorInfo KVCacheTransferPlanner::buildCpPairs(const ShardLayout&   src,
     // Transport CP controls ranks/byte slices; state/SWA key spacing follows
     // the physical group's token coverage, including on a single-rank Decode.
     const int  modulus    = is_full_group ?
-                                src_cp_size :
+                                std::max(src_cp_size, dst_cp_size) :
                                 static_cast<int>(src.group(tag).seq_size_per_block / src.cache_key_tokens_per_block);
     const bool src_sliced = src.effectiveSlice(tag) != CpBlockSliceMode::NONE;
     const bool is_compact = !is_full_group && modulus > 1;

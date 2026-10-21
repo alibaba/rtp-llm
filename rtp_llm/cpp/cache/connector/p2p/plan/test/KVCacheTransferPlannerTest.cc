@@ -180,6 +180,28 @@ TEST(PlannerGroupA, A1_SymmetricTpNoCp) {
     expectUniqueRouteIds(result.plan);
 }
 
+TEST(PlannerWriteback, ReverseRoundRobinCpCoversEveryBlockExactlyOnce) {
+    for (int cp_size : {2, 4, 8}) {
+        const auto decode  = mhaLayout(1);
+        const auto prefill = mhaLayout(cp_size, CPRotateMethod::ALL_GATHER, true);
+        const auto result  = KVCacheTransferPlanner::plan(decode, prefill, {kFullTag});
+        ASSERT_TRUE(result.ok()) << result.error.ToString();
+        ASSERT_EQ(result.plan.routes.size(), cp_size);
+        for (size_t count : {1u, 7u, 8u, 33u}) {
+            std::vector<int> owners(count, 0);
+            for (const auto& route : result.plan.routes) {
+                EXPECT_EQ(route.src_bytes, route.dst_bytes);
+                EXPECT_EQ(route.src_rank, 0);
+                for (const auto position : KVCacheTransferPlanner::resolveKeys(route.src_keys, count)) {
+                    EXPECT_EQ(position % cp_size, route.dst_rank);
+                    ++owners[position];
+                }
+            }
+            EXPECT_EQ(owners, std::vector<int>(count, 1));
+        }
+    }
+}
+
 // 用例 A2: RR CP 对称（现状行为的等价基准）
 TEST(PlannerGroupA, A2_SymmetricRrCp) {
     const auto src = mhaLayout(8, CPRotateMethod::ALL_GATHER, /*sharded=*/true);
@@ -1063,6 +1085,23 @@ TEST(PlannerGroupD, FactoryMirrorsCpStatePayloadFromRealSpecs) {
                 for (const auto& route : on_decode.plan.routes) {
                     EXPECT_EQ(route.src_bytes, prefill.group(kFixedTag).kv_block_stride_bytes);
                     EXPECT_EQ(route.dst_bytes, route.src_bytes);
+                }
+                if (decode_tp_size == 1) {
+                    const auto reverse_decode  = KVCacheTransferPlanner::plan(decode, inferred_prefill, {kFixedTag});
+                    const auto reverse_prefill = KVCacheTransferPlanner::plan(inferred_decode, prefill, {kFixedTag});
+                    ASSERT_TRUE(reverse_decode.ok()) << reverse_decode.error.ToString();
+                    ASSERT_TRUE(reverse_prefill.ok()) << reverse_prefill.error.ToString();
+                    EXPECT_EQ(reverse_decode.plan.digest(), reverse_prefill.plan.digest());
+                    ASSERT_EQ(reverse_decode.plan.routes.size(), cp_size);
+                    for (const auto& route : reverse_decode.plan.routes) {
+                        EXPECT_EQ(route.src_slice, (SliceSpec{mode, cp_size, route.dst_rank}));
+                        EXPECT_EQ(route.dst_slice.mode, CpBlockSliceMode::NONE);
+                        EXPECT_EQ(route.src_bytes, route.dst_bytes);
+                        EXPECT_EQ(route.dst_bytes, prefill.group(kFixedTag).kv_block_stride_bytes);
+                        EXPECT_EQ(KVCacheTransferPlanner::resolveKeys(route.src_keys, 4 * cp_size),
+                                  (std::vector<size_t>{static_cast<size_t>(3 * cp_size - 1),
+                                                       static_cast<size_t>(4 * cp_size - 1)}));
+                    }
                 }
             }
         }
