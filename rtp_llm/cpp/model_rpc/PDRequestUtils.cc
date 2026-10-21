@@ -36,7 +36,8 @@ ErrorInfo validatePDHandoff(const GenerateInputPB& request) {
 ErrorInfo preprocessForPD(std::shared_ptr<GenerateInput>& input,
                           MultimodalProcessor*            processor,
                           bool                            is_mtp_eagle,
-                          RoleType                        role) {
+                          RoleType                        role,
+                          grpc::ServerContext*            server_context) {
     input->generate_config->pd_separation        = true;
     input->generate_config->force_disable_sp_run = !is_mtp_eagle;
     if (role == RoleType::DECODE) {
@@ -75,7 +76,7 @@ ErrorInfo preprocessForPD(std::shared_ptr<GenerateInput>& input,
         if (!processor) {
             return {ErrorCode::MM_EMPTY_ENGINE_ERROR, "PD multimodal request requires a multimodal processor"};
         }
-        return processor->updateMultimodalFeatures(input);
+        return processor->updateMultimodalFeatures(input, server_context);
     }
     return ErrorInfo::OkStatus();
 }

@@ -22,6 +22,7 @@ std::string       masterEnqueuedHandoffUniqueKey(int64_t request_id);
 ErrorInfo preprocessForPD(std::shared_ptr<GenerateInput>& input,
                           MultimodalProcessor*            processor,
                           bool                            is_mtp_eagle,
-                          RoleType                        role);
+                          RoleType                        role,
+                          grpc::ServerContext*            server_context);
 
 }  // namespace rtp_llm

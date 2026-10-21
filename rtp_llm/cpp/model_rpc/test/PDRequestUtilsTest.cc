@@ -70,7 +70,7 @@ TEST(PDRequestUtilsTest, TextPreprocessingPreservesRequestAndAppliesSameSpPolicy
     const auto request = makeRequest();
     for (bool is_mtp_eagle : {false, true}) {
         auto input = QueryConverter::transQuery(&request);
-        ASSERT_TRUE(preprocessForPD(input, nullptr, is_mtp_eagle, RoleType::PREFILL).ok());
+        ASSERT_TRUE(preprocessForPD(input, nullptr, is_mtp_eagle, RoleType::PREFILL, nullptr).ok());
         EXPECT_TRUE(input->generate_config->pd_separation);
         EXPECT_EQ(input->generate_config->force_disable_sp_run, !is_mtp_eagle);
         EXPECT_EQ(input->generate_config->unique_key, "pd-test");
@@ -86,11 +86,11 @@ TEST(PDRequestUtilsTest, PrefillExpansionIsDeterministicAcrossWireRoundTrip) {
     auto                    decode  = QueryConverter::transQuery(&request);
     TestMultimodalProcessor decode_processor;
     TestMultimodalProcessor prefill_processor;
-    ASSERT_TRUE(preprocessForPD(decode, &decode_processor, false, RoleType::PREFILL).ok());
+    ASSERT_TRUE(preprocessForPD(decode, &decode_processor, false, RoleType::PREFILL, nullptr).ok());
     GenerateInputPB handoff;
     ASSERT_TRUE(handoff.ParseFromString(request.SerializeAsString()));
     auto prefill = QueryConverter::transQuery(&handoff);
-    ASSERT_TRUE(preprocessForPD(prefill, &prefill_processor, false, RoleType::PREFILL).ok());
+    ASSERT_TRUE(preprocessForPD(prefill, &prefill_processor, false, RoleType::PREFILL, nullptr).ok());
     EXPECT_EQ(decode_processor.calls, 1);
     EXPECT_EQ(prefill_processor.calls, 1);
     EXPECT_EQ(decode->input_ids.numel(), 5);
@@ -125,10 +125,10 @@ TEST(PDRequestUtilsTest, PrefillExpansionIsDeterministicAcrossWireRoundTrip) {
 TEST(PDRequestUtilsTest, MissingProcessorOrProcessingFailureAreRejected) {
     auto request = makeMMRequest();
     auto input   = QueryConverter::transQuery(&request);
-    EXPECT_EQ(preprocessForPD(input, nullptr, false, RoleType::PREFILL).code(), ErrorCode::MM_EMPTY_ENGINE_ERROR);
+    EXPECT_EQ(preprocessForPD(input, nullptr, false, RoleType::PREFILL, nullptr).code(), ErrorCode::MM_EMPTY_ENGINE_ERROR);
     TestMultimodalProcessor processor;
     processor.fail    = true;
-    const auto result = preprocessForPD(input, &processor, false, RoleType::PREFILL);
+    const auto result = preprocessForPD(input, &processor, false, RoleType::PREFILL, nullptr);
     EXPECT_EQ(result.code(), ErrorCode::MM_PROCESS_ERROR);
     EXPECT_EQ(result.ToString(), "test MM failure");
 }
@@ -144,7 +144,7 @@ TEST(PDRequestUtilsTest, DecodeConsumesFrontendExpandedIdsWithoutProcessor) {
     span->set_length(3);
     auto        input        = QueryConverter::transQuery(&request);
     const auto* original_ids = input->input_ids.data_ptr<int32_t>();
-    ASSERT_TRUE(preprocessForPD(input, nullptr, false, RoleType::DECODE).ok());
+    ASSERT_TRUE(preprocessForPD(input, nullptr, false, RoleType::DECODE, nullptr).ok());
     EXPECT_EQ(input->input_ids.data_ptr<int32_t>(), original_ids);
     EXPECT_TRUE(torch::equal(input->input_ids, torch::tensor({10, -101, -102, -103, 20}, torch::kInt32)));
     ASSERT_TRUE(input->text_tokens_mask);
@@ -159,12 +159,12 @@ TEST(PDRequestUtilsTest, DecodeConsumesFrontendExpandedIdsWithoutProcessor) {
 TEST(PDRequestUtilsTest, DecodeRejectsRawOrMalformedMultimodalIds) {
     auto request = makeMMRequest();
     auto input   = QueryConverter::transQuery(&request);
-    EXPECT_EQ(preprocessForPD(input, nullptr, false, RoleType::DECODE).code(), ErrorCode::MM_WRONG_FORMAT_ERROR);
+    EXPECT_EQ(preprocessForPD(input, nullptr, false, RoleType::DECODE, nullptr).code(), ErrorCode::MM_WRONG_FORMAT_ERROR);
     auto* span = request.mutable_multimodal_token_layout()->add_spans();
     span->set_offset(2);
     span->set_length(2);
     input = QueryConverter::transQuery(&request);
-    EXPECT_EQ(preprocessForPD(input, nullptr, false, RoleType::DECODE).code(), ErrorCode::MM_WRONG_FORMAT_ERROR);
+    EXPECT_EQ(preprocessForPD(input, nullptr, false, RoleType::DECODE, nullptr).code(), ErrorCode::MM_WRONG_FORMAT_ERROR);
     EXPECT_FALSE(input->text_tokens_mask);
 }
 

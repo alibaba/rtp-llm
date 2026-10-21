@@ -253,7 +253,7 @@ grpc::Status DecodeRpcServer::preparePDRequest(const GenerateInputPB&          r
     input->request_deadline_ms = deadline_ms;
     // Preserve the configured duration on the wire; D keeps its own deadline.
     input->generate_config->timeout_ms = request.generate_config().timeout_ms();
-    auto status                        = preprocessForPD(input, mm_processor_.get(), engine_->isMTPEagle(), RoleType::DECODE);
+    auto status                        = preprocessForPD(input, mm_processor_.get(), engine_->isMTPEagle(), RoleType::DECODE, nullptr);
     if (!status.ok())
         return serializeErrorMsg(std::to_string(request.request_id()), status);
     prefill_request.CopyFrom(request);

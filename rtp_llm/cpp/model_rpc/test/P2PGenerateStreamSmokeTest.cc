@@ -813,6 +813,7 @@ TEST_F(P2PPayloadWorker, DISABLED_PrefillProcess) {
     {
         PrefillRpcServer prefill;
         prefill.meta_ = std::make_shared<RpcServerRuntimeMeta>();
+        prefill.cancel_registry_ = std::make_unique<PDCancelRegistry>(prefill.meta_);
         PayloadEndpoint endpoint(prefill, &prefill, host);
         const auto      config = test::makeSimpleMhaCacheConfig(
             kLayers, kBlocks, kTokensPerBlock, hello.dtype == 1 ? DataType::TYPE_INT8 : DataType::TYPE_FP16, 2, 16);
@@ -894,6 +895,7 @@ protected:
                   << " request_timeout_ms=" << timeouts_.request_ms << " load_timeout_ms=" << timeouts_.load_ms
                   << std::endl;
         decode_.meta_           = std::make_shared<RpcServerRuntimeMeta>();
+        decode_.cancel_registry_ = std::make_unique<PDCancelRegistry>(decode_.meta_);
         decode_rpc_             = std::make_unique<PayloadEndpoint>(decode_, nullptr, host_);
         const auto cache_config = test::makeSimpleMhaCacheConfig(kLayers, kBlocks, kTokensPerBlock, dtype, 2, 16);
         decode_engine_ =
@@ -1073,7 +1075,13 @@ protected:
         size_t      expected_bytes = 0;
         const auto& cache_config   = decode_engine_->getCacheManager()->cacheConfig();
         if (dtype == DataType::TYPE_INT8) {
-            ASSERT_GT(cache_config.kv_scale_size_bytes, 0u);
+            size_t scale_bytes = 0;
+            for (const auto& group : cache_config.topology().groups()) {
+                for (int layer : cache_config.layerIdsForGroup(group.tag)) {
+                    scale_bytes += cache_config.physicalGroupForLayer(layer, group.tag).kvScaleStrideBytes();
+                }
+            }
+            ASSERT_GT(scale_bytes, 0u);
         }
         for (int prompt_length : {8, 11}) {
             SCOPED_TRACE(prompt_length);
