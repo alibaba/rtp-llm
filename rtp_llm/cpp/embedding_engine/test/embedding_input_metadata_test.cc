@@ -6,51 +6,35 @@
 namespace rtp_llm {
 namespace {
 
-TEST(EmbeddingInputMetadataTest, ExecutorConversionRespectsUqiRegardlessOfTwoPass) {
-#if USING_CUDA
-    // Separate Bazel targets supply separate processes because production
-    // caches its environment decision on the first request.
-    const char* mask = std::getenv("USE_VISION_BERT_UQI_BLOCK_MASK");
-    const char* two_pass = std::getenv("VISION_BERT_UQI_TWO_PASS");
-    ASSERT_NE(mask, nullptr);
-    ASSERT_NE(two_pass, nullptr);
-    ASSERT_EQ(std::string(two_pass), "0");
-    const bool uqi = std::string(mask) == "1";
-    ASSERT_TRUE(torch::cuda::is_available());
-
-    const auto options = torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true);
-    // Includes UQI marker ID 2 and a trailing A token after SEP.
-    auto tokens = torch::tensor({101, 17, 102, 2, 37, 102, 21}, options);
-    auto lengths = torch::tensor({7}, options);
+TEST(EmbeddingInputMetadataTest, PreservesHostPlanningBuffers) {
+    const auto options = torch::TensorOptions().dtype(torch::kInt32);
+    auto tokens = torch::tensor({11, 17, 21, 37}, options);
+    auto lengths = torch::tensor({3, 1}, options);
     auto sequence = torch::empty({0}, options);
-    auto prefix = torch::zeros({1}, options);
+    auto prefix = torch::zeros({2}, options);
     const auto original_tokens = tokens;
     const auto original_lengths = lengths;
-    const auto original_sequence = sequence;
-    const auto original_prefix = prefix;
-
     prepareEmbeddingInputMetadata(tokens, lengths, sequence, prefix);
-
     for (const auto& tensor : {tokens, lengths, sequence, prefix}) {
-        EXPECT_EQ(tensor.is_cuda(), !uqi);
+        EXPECT_FALSE(tensor.is_cuda());
         EXPECT_EQ(tensor.scalar_type(), torch::kInt32);
+        EXPECT_TRUE(tensor.is_contiguous());
     }
-    EXPECT_TRUE(torch::equal(tokens.cpu(), original_tokens));
-    EXPECT_TRUE(torch::equal(lengths.cpu(), original_lengths));
-    EXPECT_TRUE(torch::equal(sequence.cpu(), original_sequence));
-    EXPECT_TRUE(torch::equal(prefix.cpu(), original_prefix));
-    if (uqi) {
-        // Preserve the original host allocations, rather than round-tripping
-        // through a device copy that hides the metadata pipeline regression.
-        EXPECT_EQ(tokens.data_ptr(), original_tokens.data_ptr());
-        EXPECT_EQ(lengths.data_ptr(), original_lengths.data_ptr());
-        EXPECT_EQ(prefix.data_ptr(), original_prefix.data_ptr());
-        EXPECT_TRUE(tokens.is_pinned());
-        EXPECT_TRUE(lengths.is_pinned());
-    }
-#else
-    GTEST_SKIP() << "CUDA model-facing metadata conversion only";
-#endif
+    EXPECT_EQ(tokens.data_ptr(), original_tokens.data_ptr());
+    EXPECT_EQ(lengths.data_ptr(), original_lengths.data_ptr());
+    EXPECT_TRUE(torch::equal(lengths, original_lengths));
+}
+
+TEST(EmbeddingInputMetadataTest, NormalizesIntegerTypeAndStrides) {
+    auto tokens = torch::arange(8, torch::kInt64).slice(0, 0, 8, 2);
+    auto lengths = torch::tensor({4}, torch::kInt64);
+    auto sequence = torch::Tensor();
+    auto prefix = torch::zeros({1}, torch::kInt64);
+    prepareEmbeddingInputMetadata(tokens, lengths, sequence, prefix);
+    EXPECT_TRUE(tokens.is_contiguous());
+    EXPECT_EQ(tokens.scalar_type(), torch::kInt32);
+    EXPECT_TRUE(torch::equal(tokens, torch::tensor({0, 2, 4, 6}, torch::kInt32)));
+    EXPECT_FALSE(sequence.defined());
 }
 
 }  // namespace

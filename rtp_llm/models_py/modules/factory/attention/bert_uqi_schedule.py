@@ -316,3 +316,59 @@ class BertUqiAiterGraphLayout:
             end = min(self.token_capacity, offset + (i + 1) * self.max_seq_len)
             self.split_indptr[2 * self.request_capacity + i + 1] = end
             self.full_indptr[self.request_capacity + i + 1] = end
+
+
+def derive_bert_uqi_bounds(
+    tokens, lengths, text_mask=None, cls_token_id=2, sep_token_id=102
+):
+    """Find the first text CLS..SEP segment per request using host metadata."""
+    if tokens is None or tokens.is_cuda or lengths.is_cuda:
+        raise ValueError("BERT UQI metadata requires host token IDs and lengths")
+    if (
+        lengths.ndim != 1
+        or bool((lengths < 0).any())
+        or int(lengths.sum()) != tokens.numel()
+    ):
+        raise ValueError("BERT UQI token/length metadata mismatch")
+    if text_mask is not None and text_mask.numel():
+        if text_mask.is_cuda or text_mask.numel() != tokens.numel():
+            raise ValueError("BERT UQI text mask must match host token IDs")
+        tokens = tokens.masked_fill(~text_mask.bool(), -1)
+    starts = torch.full_like(lengths, -1, dtype=torch.int32)
+    b_lengths = torch.zeros_like(lengths, dtype=torch.int32)
+    offset = 0
+    for index, length in enumerate(lengths.tolist()):
+        sequence = tokens[offset : offset + length]
+        markers = (sequence == cls_token_id).nonzero().flatten()
+        if markers.numel():
+            start = int(markers[0])
+            endings = (sequence[start:] == sep_token_id).nonzero().flatten()
+            end = start + int(endings[0]) + 1 if endings.numel() else length
+            starts[index], b_lengths[index] = start, end - start
+        offset += length
+    return starts, b_lengths
+
+
+def valid_bert_uqi_bounds(attn_inputs):
+    """Graph eligibility for BERT user segments, without planning or mutation."""
+    lengths = attn_inputs.input_lengths
+    starts, b_lengths = attn_inputs.uqi_b_starts, attn_inputs.uqi_b_lens
+    for bounds in (starts, b_lengths):
+        if (
+            bounds is None
+            or bounds.is_cuda
+            or bounds.dtype != torch.int32
+            or bounds.ndim != 1
+            or not bounds.is_contiguous()
+            or bounds.numel() != lengths.numel()
+        ):
+            return False
+    if bool((b_lengths < 0).any()):
+        return False
+    active = b_lengths > 0
+    return not bool(
+        (
+            active
+            & ((starts < 0) | (starts > lengths) | (b_lengths > lengths - starts))
+        ).any()
+    )

@@ -35,14 +35,6 @@ filegroup(
     visibility = ["//visibility:public"],
 )
 
-filegroup(
-    name = "bert_encoder_graph_source",
-    srcs = [
-        "model_desc/bert.py",
-        "modules/factory/attention/bert_uqi_schedule.py",
-    ],
-    visibility = ["//visibility:public"],
-)
 
 py_library(
     name = "modules",

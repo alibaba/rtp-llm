@@ -77,8 +77,8 @@ class BertMultimodalEmbeddingTest(TestCase):
             raise SkipTest("CUDA is not available")
 
     def test_encoder_graph_replans_layout_and_isolates_padding(self):
-        from rtp_llm.models_py.model_desc.bert import (
-            BertEncoderGraphImpl,
+        from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
+            CacheFreePrefillGraphImpl,
         )
 
         capacity, dim = 8, 64
@@ -92,7 +92,7 @@ class BertMultimodalEmbeddingTest(TestCase):
         inputs = PyAttentionInputs()
         inputs.input_lengths = torch.tensor([8, 0], dtype=torch.int32).pin_memory()
         inputs.prefix_lengths = torch.zeros(2, dtype=torch.int32).pin_memory()
-        impl = BertEncoderGraphImpl(configs, inputs, capacity)
+        impl = CacheFreePrefillGraphImpl(configs, inputs, capacity)
         qkv = torch.randn(capacity, 3 * dim, dtype=torch.bfloat16, device="cuda")
         stream = torch.cuda.Stream()
         stream.wait_stream(torch.cuda.current_stream())

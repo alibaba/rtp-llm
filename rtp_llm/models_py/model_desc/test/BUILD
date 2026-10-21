@@ -62,8 +62,7 @@ py_test(
 py_test(
     name = "bert_encoder_graph_metadata_test",
     srcs = ["bert_encoder_graph_metadata_test.py"],
-    data = ["//rtp_llm/models_py:bert_encoder_graph_source"],
-    deps = ["//rtp_llm:torch"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
 )
 
 py_test(
@@ -89,7 +88,7 @@ py_test(
 py_test(
     name = "bert_uqi_graph_layout_test",
     srcs = ["bert_uqi_graph_layout_test.py"],
-    data = ["//rtp_llm/models_py:bert_encoder_graph_source"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
 )
 
 py_test(

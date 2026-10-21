@@ -9,7 +9,7 @@ if torch.version.hip is not None:
         BertUqiRocmEncoderGraphImpl as GraphImpl,
     )
 else:
-    from rtp_llm.models_py.model_desc.bert import (
+    from rtp_llm.models_py.modules.factory.attention.cuda_impl.bert_uqi_two_pass import (
         BertUqiEncoderGraphImpl as GraphImpl,
     )
 

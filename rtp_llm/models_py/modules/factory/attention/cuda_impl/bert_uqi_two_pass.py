@@ -30,7 +30,10 @@ from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha imp
     get_py_flashinfer_workspace_buffer,
     release_py_flashinfer_workspace_buffer,
 )
-from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
+from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
+    CacheFreePrefillGraphImpl,
+    FMHAImplBase,
+)
 from rtp_llm.ops import AttentionConfigs
 from rtp_llm.ops.compute_ops import (
     LayerKVCache,
@@ -144,3 +147,60 @@ class BertUqiTwoPassImpl(FMHAImplBase):
 
     def support_cuda_graph(self) -> bool:
         return False
+
+
+class BertUqiEncoderGraphImpl(CacheFreePrefillGraphImpl):
+    """CUDA UQI graphs with one FlashInfer masked attention per layer."""
+
+    def __init__(self, configs, attn_inputs, token_capacity, max_sequence_length=None):
+        if configs.is_causal:
+            raise ValueError("BERT user-segment graph requires noncausal attention")
+        if torch.version.hip is not None:
+            raise ValueError("UQI encoder graph currently supports CUDA only")
+        super().__init__(
+            configs, attn_inputs, token_capacity, max_sequence_length, custom_mask=True
+        )
+
+    def _mask_plan_args(self, attn_inputs, for_capture):
+        from rtp_llm.models_py.modules.factory.attention.bert_uqi_schedule import (
+            build_uqi_graph_layout,
+        )
+
+        lengths = self._planned_lengths.tolist()
+        if not for_capture:
+            starts = attn_inputs.uqi_b_starts
+            b_lengths = attn_inputs.uqi_b_lens
+            if (
+                starts is None
+                or b_lengths is None
+                or starts.is_cuda
+                or b_lengths.is_cuda
+            ):
+                raise ValueError("UQI graph requires host segment bounds")
+            if (
+                starts.numel() > self.request_capacity
+                or starts.numel() != b_lengths.numel()
+            ):
+                raise ValueError("invalid UQI graph request metadata")
+            active = starts.numel()
+            if any(lengths[active:]):
+                raise ValueError("missing UQI graph segment bounds")
+            starts = starts.tolist() + [-1] * (len(lengths) - active)
+            b_lengths = b_lengths.tolist() + [0] * (len(lengths) - active)
+        else:
+            # Synthetic startup inputs contain no user segment. Always pass a
+            # mask, even here, so capture never specializes to an unmasked path.
+            starts, b_lengths = [-1] * len(lengths), [0] * len(lengths)
+        layout = build_uqi_graph_layout(lengths, starts, b_lengths, self.token_capacity)
+        padding = layout.pop()[0]
+        limit = self.max_sequence_length or self.token_capacity
+        for i in range(self.padding_slots):
+            size = min(limit, max(0, padding - i * limit))
+            layout.append((size, size, 0))
+        masks = []
+        for n, start, count in layout:
+            pos = torch.arange(n, device="cuda")
+            is_b = (pos >= start) & (pos < start + count)
+            # A -> A; B -> A+B. Separate ragged sequences isolate padding.
+            masks.append((is_b[:, None] | ~is_b[None, :]).reshape(-1))
+        return {"custom_mask": torch.cat(masks)}

@@ -236,22 +236,17 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
         model_input.need_moe_gating = true;
     }
     reportMetrics(batch_size, token_num, max_seq_len);
-#if USING_CUDA
-    // TODO(async): embedding streams are still gathered through CPU pointers,
-    // but the model-facing GptModelInputs metadata should be CUDA resident.
-    // Non-CUDA platforms keep the host pipeline: buildPyAttentionInputs's
-    // device-metadata branch requires the CUDA-only metadata kernel.
+    // Preserve host planning inputs; PyWrappedModel submits the device copies.
     prepareEmbeddingInputMetadata(model_input.combo_tokens,
                                   model_input.input_lengths,
                                   model_input.sequence_lengths,
                                   model_input.prefix_lengths);
-#endif
     return model_input;
 }
 
 ModelRequest EmbeddingExecutor::generateOldModelRequest(GptModelInputs& model_input) {
-    // Python handlers (extend_forward) expect these metadata tensors on CPU,
-    // while gatherModelInput now keeps the model-facing copies CUDA resident.
+    // Python handlers (extend_forward) consume host metadata. Preserve this
+    // contract even when an optional field arrives on the device.
     auto to_cpu = [](const torch::Tensor& tensor) {
         return tensor.defined() && tensor.is_cuda() ? tensor.cpu() : tensor;
     };

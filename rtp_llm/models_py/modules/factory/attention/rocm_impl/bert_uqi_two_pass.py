@@ -1,7 +1,9 @@
 """ROCm facade for BERT profile attention; metadata is request-local."""
 import torch
 
-from rtp_llm.models_py.model_desc.bert import BertEncoderGraphImpl
+from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
+    CacheFreePrefillGraphImpl,
+)
 from rtp_llm.models_py.modules.factory.attention.bert_uqi_schedule import BertUqiAiterGraphLayout
 
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
@@ -64,8 +66,10 @@ class BertUqiTwoPassImpl(FMHAImplBase):
 # Fixed-buffer graph attention; request planning runs outside capture.
 
 
-class BertUqiRocmEncoderGraphImpl(BertEncoderGraphImpl):
+class BertUqiRocmEncoderGraphImpl(CacheFreePrefillGraphImpl):
     def __init__(self, configs, attn_inputs, token_capacity, max_sequence_length=None):
+        if configs.is_causal:
+            raise ValueError("BERT user-segment graph requires noncausal attention")
         # The base constructor invokes _prepare for the startup profile.
         self._host_layout = None
         self._host_metadata = None
@@ -100,14 +104,12 @@ class BertUqiRocmEncoderGraphImpl(BertEncoderGraphImpl):
             raise ValueError("BERT graph token capacity exceeded")
         limit = self.aiter_max_seq_len
         if for_capture:
-            # Startup profiles use one bucket-sized synthetic sequence. Split
-            # it into legal request slots for fixed max_seqlen AITER planning.
+            # Split startup tokens into legal requests; fixed padding slots
+            # cover any remaining aggregate capacity.
             lengths = [
                 min(limit, max(0, self.token_capacity - i * limit))
                 for i in range(self.request_capacity)
             ]
-            if sum(lengths) != self.token_capacity:
-                raise ValueError("UQI bucket exceeds request capacity * max_seq_len")
             starts, b_lengths = [-1] * len(lengths), [0] * len(lengths)
         else:
             starts, b_lengths = attn_inputs.uqi_b_starts, attn_inputs.uqi_b_lens

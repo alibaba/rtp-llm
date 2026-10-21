@@ -4,6 +4,7 @@ from typing import Callable, Dict, List, Optional, Union
 
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
+    CacheFreePrefillGraphImpl,
     FMHAImplBase,
     MlaImplBase,
     PrefillCudaGraphCapability,
@@ -26,6 +27,7 @@ AttentionImplFactory = Callable[..., AttentionImpl]
 class CudaGraphSelectionMode(str, Enum):
     EAGER = "eager"
     DECODE_GRAPH = "decode_graph"
+    EMBEDDING_GRAPH = "embedding_graph"
     FULL_PREFILL_NO_PREFIX_GRAPH = "full_prefill_no_prefix_graph"
 
 
@@ -90,6 +92,9 @@ def get_mla_impl(
     selection_mode = _normalize_cuda_graph_selection_mode(
         is_cuda_graph, cuda_graph_selection_mode
     )
+
+    if selection_mode == CudaGraphSelectionMode.EMBEDDING_GRAPH:
+        raise ValueError("cache-free embedding graph MLA is not implemented")
 
     mla_impls = PREFILL_MLA_IMPS if attn_inputs.is_prefill else DECODE_MLA_IMPS
     for impl in mla_impls:
@@ -219,6 +224,22 @@ def get_fmha_impl(
     selection_mode = _normalize_cuda_graph_selection_mode(
         is_cuda_graph, cuda_graph_selection_mode
     )
+    if selection_mode == CudaGraphSelectionMode.EMBEDDING_GRAPH:
+        reason = CacheFreePrefillGraphImpl.unsupported_reason(attn_configs)
+        if reason:
+            raise ValueError(f"unsupported embedding graph backend: {reason}")
+        if not CacheFreePrefillGraphImpl.support_parallelism_config(parallelism_config):
+            raise ValueError("embedding graph context parallelism requires an adapter")
+        if getattr(attn_inputs, "headwise_config", None) is not None:
+            raise ValueError("embedding graph headwise attention requires an adapter")
+        if not attn_inputs.is_prefill:
+            raise ValueError("embedding graph attention requires a prefill batch")
+        return CacheFreePrefillGraphImpl(
+            attn_configs,
+            attn_inputs,
+            attn_inputs.padding_offset.numel(),
+            max_sequence_length=max_seq_len,
+        )
     # Set is_cuda_graph as dynamic attribute on attn_inputs for base class to read
     attn_inputs.is_cuda_graph = is_cuda_graph
 

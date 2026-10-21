@@ -1,21 +1,11 @@
 """CPU tests of UQI mask semantics, including middle segments and padding."""
-import ast
-import types
-from array import array
-from pathlib import Path
 import random
 import unittest
+from types import SimpleNamespace
 
-path = Path(__file__).resolve().parents[2] / "modules/factory/attention/bert_uqi_schedule.py"
-tree = ast.parse(path.read_text())
-names = {"build_uqi_graph_layout", "build_uqi_aiter_layout", "BertUqiAiterGraphLayout"}
-definitions = ast.Module(
-    body=[node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.ClassDef)) and node.name in names],
-    type_ignores=[],
-)
-module = types.ModuleType("uqi_layout")
-module.array = array
-exec(compile(definitions, str(path), "exec"), module.__dict__)
+import torch
+from rtp_llm.models_py.modules.factory.attention import bert_uqi_schedule as module
+
 build = module.build_uqi_graph_layout
 
 
@@ -153,6 +143,37 @@ class UqiLayoutTest(unittest.TestCase):
         self.assertTrue(all(packed.valid_mask))
         self.assertEqual(list(packed.split_indptr), [0, 2, 5, 5, 10, 12, 12, 12, 12, 12])
         self.assertEqual(list(packed.full_indptr), [0, 5, 10, 12, 12, 12, 12])
+
+
+class UqiHostMetadataTest(unittest.TestCase):
+    def test_scan_matches_dense_segments_with_visual_markers_and_missing_sep(self):
+        tokens = torch.tensor(
+            [101, 2, 9, 102, 7, 2, 10, 101, 2, 8, 102], dtype=torch.int32
+        )
+        lengths = torch.tensor([7, 4], dtype=torch.int32)
+        # The first marker belongs to a visual row and must be ignored.
+        mask = torch.tensor([1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1], dtype=torch.int32)
+        starts, counts = module.derive_bert_uqi_bounds(tokens, lengths, mask)
+        self.assertEqual(starts.tolist(), [5, 1])
+        self.assertEqual(counts.tolist(), [2, 3])
+        attn = SimpleNamespace(
+            input_lengths=lengths, uqi_b_starts=starts, uqi_b_lens=counts
+        )
+        self.assertTrue(module.valid_bert_uqi_bounds(attn))
+        attn.uqi_b_lens[0] = 3
+        self.assertFalse(module.valid_bert_uqi_bounds(attn))
+
+    def test_qi_and_empty_sequences_have_no_user_segment(self):
+        starts, counts = module.derive_bert_uqi_bounds(
+            torch.tensor([101, 9, 102], dtype=torch.int32),
+            torch.tensor([0, 3, 0], dtype=torch.int32),
+        )
+        self.assertEqual(starts.tolist(), [-1, -1, -1])
+        self.assertEqual(counts.tolist(), [0, 0, 0])
+
+    def test_malformed_host_metadata_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "mismatch"):
+            module.derive_bert_uqi_bounds(torch.tensor([1, 2]), torch.tensor([3]))
 
 
 if __name__ == "__main__":

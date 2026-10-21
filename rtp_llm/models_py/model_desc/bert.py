@@ -17,10 +17,18 @@ from rtp_llm.models_py.modules import (
     LayerNorm,
     MultimodalEmbeddingInjector,
 )
+from rtp_llm.models_py.modules.factory.attention.bert_uqi_schedule import (
+    BertUqiTwoPassSchedule,
+    build_bert_uqi_two_pass_schedule,
+    build_bert_uqi_two_pass_schedule_from_bounds,
+    derive_bert_uqi_segment_ids_hostlen,
+)
+from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
+    CacheFreePrefillGraphImpl,
+)
 from rtp_llm.ops import HWKernelConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import (
     LayerKVCache,
-    ParamsBase,
     PyAttentionInputs,
     PyModelInputs,
     PyModelOutputs,
@@ -28,12 +36,6 @@ from rtp_llm.ops.compute_ops import (
 from rtp_llm.utils.bert_user_profile import (
     build_bert_uqi_flashinfer_mask,
     derive_bert_uqi_segment_ids,
-)
-from rtp_llm.models_py.modules.factory.attention.bert_uqi_schedule import (
-    BertUqiTwoPassSchedule,
-    build_bert_uqi_two_pass_schedule,
-    build_bert_uqi_two_pass_schedule_from_bounds,
-    derive_bert_uqi_segment_ids_hostlen,
 )
 from rtp_llm.utils.model_weight import W
 
@@ -186,6 +188,83 @@ class BertModel(GptModelBase):
         self.use_uqi_two_pass = os.environ.get("VISION_BERT_UQI_TWO_PASS", "1") == "1"
         self._uqi_two_pass_op = None
 
+    def validate_embedding_input_features(self, inputs):
+        mm = inputs.multimodal_inputs
+        mask = inputs.embedding_inputs.text_tokens_mask
+        features = bool(mm.multimodal_features)
+        locs = mm.mm_features_locs is not None and mm.mm_features_locs.numel() > 0
+        has_mask = mask is not None and mask.numel() > 0
+        if not (features == locs == has_mask):
+            return False
+        # Metadata-only canRun calls may omit IDs. Actual forward must provide
+        # one position and token-type ID for every token before embedding lookup.
+        input_ids = getattr(inputs, "input_ids", None)
+        tokens = input_ids.numel() if input_ids is not None else 0
+        if tokens:
+            for ids in (
+                inputs.bert_embedding_inputs.combo_position_ids,
+                inputs.bert_embedding_inputs.combo_tokens_type_ids,
+            ):
+                if (
+                    ids is None
+                    or ids.numel() != tokens
+                    or ids.dtype != torch.int32
+                    or not ids.is_contiguous()
+                    or ids.device != inputs.input_ids.device
+                ):
+                    return False
+        return True
+
+    def prepare_embedding_attention_inputs(
+        self, attn_inputs, host_tokens, host_text_mask
+    ):
+        if self.use_user_profile_mask:
+            from rtp_llm.models_py.modules.factory.attention.bert_uqi_schedule import (
+                derive_bert_uqi_bounds,
+            )
+
+            attn_inputs.uqi_b_starts, attn_inputs.uqi_b_lens = derive_bert_uqi_bounds(
+                host_tokens,
+                attn_inputs.input_lengths,
+                host_text_mask,
+                self.cls_uqi_token_id,
+            )
+        return attn_inputs
+
+    def validate_embedding_graph_inputs(self, inputs):
+        if not super().validate_embedding_graph_inputs(inputs):
+            return False
+        if not self.use_user_profile_mask:
+            return True
+        from rtp_llm.models_py.model_desc.block_map import get_attention_inputs_value
+        from rtp_llm.models_py.modules.factory.attention.bert_uqi_schedule import (
+            valid_bert_uqi_bounds,
+        )
+
+        attention = get_attention_inputs_value(inputs)
+        groups = attention.values() if isinstance(attention, dict) else [attention]
+        return all(valid_bert_uqi_bounds(attn) for attn in groups)
+
+    def prepare_embedding_graph_attention(self, inputs, is_cuda_graph=True):
+        return self.prepare_fmha_impl(inputs, is_cuda_graph=True)
+
+    def prepare_embedding_graph_replay(self, attention, graph_inputs, request_inputs):
+        if self.use_user_profile_mask:
+            from rtp_llm.models_py.model_desc.block_map import (
+                get_attention_inputs_value,
+            )
+
+            captured = get_attention_inputs_value(graph_inputs)
+            current = get_attention_inputs_value(request_inputs)
+            captured_groups = (
+                captured if isinstance(captured, dict) else {None: captured}
+            )
+            current_groups = current if isinstance(current, dict) else {None: current}
+            for tag, attn in captured_groups.items():
+                attn.uqi_b_starts = current_groups[tag].uqi_b_starts
+                attn.uqi_b_lens = current_groups[tag].uqi_b_lens
+        super().prepare_embedding_graph_replay(attention, graph_inputs, request_inputs)
+
     def prepare_fmha_impl(
         self, inputs: PyModelInputs, is_cuda_graph: bool = False
     ) -> FMHAImplBase:
@@ -196,7 +275,7 @@ class BertModel(GptModelBase):
                 raise ValueError(
                     "BERT Transformer graph requires an encoder without KV cache"
                 )
-            graph_impl = BertEncoderGraphImpl
+            graph_impl = CacheFreePrefillGraphImpl
             if self.use_user_profile_mask:
                 if torch.version.hip is not None:
                     from rtp_llm.models_py.modules.factory.attention.rocm_impl.bert_uqi_two_pass import (
@@ -205,6 +284,10 @@ class BertModel(GptModelBase):
 
                     graph_impl = BertUqiRocmEncoderGraphImpl
                 else:
+                    from rtp_llm.models_py.modules.factory.attention.cuda_impl.bert_uqi_two_pass import (
+                        BertUqiEncoderGraphImpl,
+                    )
+
                     graph_impl = BertUqiEncoderGraphImpl
             return graph_impl(
                 self.config.getAttentionConfigs(
@@ -281,9 +364,8 @@ class BertModel(GptModelBase):
             lengths = attn_inputs.input_lengths.cpu().to(torch.int32)
             cu_host = torch.zeros(batch_size + 1, dtype=torch.int32)
             cu_host[1:] = lengths.cumsum(0)
-        # 优先走 C++ 全 schedule 路径: PyWrappedModel 已在 host token 上扫出段
-        # 边界并预构建 perm/indptr/b_rows —— Python 侧只剩 flashinfer plan 与
-        # permutation H2D。缺少预构建 metadata 时回退到分段推导。
+        # Consume a supplied schedule for adapter compatibility. Otherwise build
+        # it from model-owned host bounds, or derive segments from text tokens.
         uqi_seg_indptr = getattr(attn_inputs, "uqi_seg_indptr", None)
         uqi_b_lens = getattr(attn_inputs, "uqi_b_lens", None)
         if uqi_seg_indptr is not None and uqi_seg_indptr.numel() == 2 * batch_size + 1:
@@ -424,212 +506,3 @@ class BertModel(GptModelBase):
         if uqi_perm is not None:
             hidden_states = hidden_states.index_select(0, fmha_impl.uqi_inv_perm)
         return PyModelOutputs(hidden_states)
-
-
-class BertEncoderGraphParams(ParamsBase):
-    def check_recycle(self):
-        return True
-
-
-class BertEncoderGraphImpl(FMHAImplBase):
-    def __init__(
-        self,
-        configs,
-        attn_inputs,
-        token_capacity,
-        max_sequence_length=None,
-        custom_mask=False,
-        allocate_indptr=True,
-    ):
-        if configs.is_causal:
-            raise ValueError("BERT encoder graph requires noncausal attention")
-        self.heads = configs.head_num
-        self.kv_heads = configs.kv_head_num
-        self.dim = configs.size_per_head
-        self.dtype = configs.dtype
-        self.token_capacity = token_capacity
-        self.max_sequence_length = max_sequence_length
-        self.request_capacity = attn_inputs.input_lengths.numel()
-        self.fmha_params = BertEncoderGraphParams()
-        self.cu_seqlens_host = None
-        self.cu_seqlens_device = None
-        if allocate_indptr:
-            self.cu_seqlens_host = torch.empty(
-                self.request_capacity + 2, dtype=torch.int32, pin_memory=True
-            )
-            self.cu_seqlens_device = torch.empty_like(
-                self.cu_seqlens_host, device="cuda"
-            )
-        self.wrapper = None
-        if torch.version.hip is None:
-            from flashinfer.prefill import BatchPrefillWithRaggedKVCacheWrapper
-
-            # Each graph owns its planner workspace and indptr storage. Replanning
-            # another bucket must not overwrite this graph's execution plan.
-            self.workspace = torch.empty(
-                128 * 1024 * 1024, dtype=torch.uint8, device="cuda"
-            )
-            self.kv_cu_seqlens_device = torch.empty_like(self.cu_seqlens_device)
-            mask_buffers = {}
-            if custom_mask:
-                # Each sequence is packed separately and may round up one byte.
-                if token_capacity * token_capacity > torch.iinfo(torch.int32).max:
-                    raise ValueError("UQI mask exceeds int32 mask-indptr capacity")
-                mask_bytes = (
-                    (token_capacity * token_capacity + 7) // 8
-                    + self.request_capacity
-                    + 1
-                )
-                self.custom_mask_buffer = torch.empty(
-                    mask_bytes, dtype=torch.uint8, device="cuda"
-                )
-                self.mask_indptr_buffer = torch.empty_like(self.cu_seqlens_device)
-                mask_buffers = dict(
-                    custom_mask_buf=self.custom_mask_buffer,
-                    mask_indptr_buf=self.mask_indptr_buffer,
-                )
-            self.wrapper = BatchPrefillWithRaggedKVCacheWrapper(
-                self.workspace,
-                use_cuda_graph=True,
-                qo_indptr_buf=self.cu_seqlens_device,
-                kv_indptr_buf=self.kv_cu_seqlens_device,
-                backend="fa2",
-                **mask_buffers,
-            )
-        # Capture uses one synthetic sequence as long as the aggregate bucket.
-        # Only real replay sequences are constrained by position-table length.
-        self._prepare(attn_inputs, for_capture=True)
-
-    def prepare_cuda_graph(self, attn_inputs):
-        self._prepare(attn_inputs, for_capture=False)
-
-    def _prepare(self, attn_inputs, for_capture):
-        """Plan synthetic capture inputs or validate and plan a real replay batch."""
-        lengths = attn_inputs.input_lengths
-        if lengths.is_cuda:
-            raise ValueError("BERT graph planning requires host input lengths")
-        if lengths.numel() != self.request_capacity:
-            raise ValueError("BERT graph request capacity changed")
-        prefix = attn_inputs.prefix_lengths
-        if prefix is not None and prefix.numel() and bool(prefix.any()):
-            raise ValueError("BERT encoder graph does not support prefix KV")
-        if bool((lengths < 0).any()):
-            raise ValueError("BERT graph sequence lengths must be nonnegative")
-        if (
-            not for_capture
-            and self.max_sequence_length is not None
-            and bool((lengths > self.max_sequence_length).any())
-        ):
-            raise ValueError("BERT graph sequence exceeds position-table capacity")
-        real_tokens = int(lengths.sum())
-        if real_tokens > self.token_capacity:
-            raise ValueError("BERT graph token capacity exceeded")
-        self.cu_seqlens_host[0] = 0
-        torch.cumsum(lengths, 0, out=self.cu_seqlens_host[1:-1])
-        self.cu_seqlens_host[-1] = self.token_capacity
-        if self.wrapper is None:
-            self.cu_seqlens_device.copy_(self.cu_seqlens_host, non_blocking=True)
-        else:
-            self.wrapper.plan(
-                self.cu_seqlens_host,
-                self.cu_seqlens_host,
-                self.heads,
-                self.kv_heads,
-                self.dim,
-                self.dim,
-                causal=False,
-                q_data_type=self.dtype,
-                kv_data_type=self.dtype,
-                o_data_type=self.dtype,
-                disable_split_kv=True,
-                **self._mask_plan_args(attn_inputs, for_capture),
-            )
-
-    def _mask_plan_args(self, attn_inputs, for_capture):
-        return {}
-
-    def forward(self, qkv, kv_cache, layer_idx=0):
-        if kv_cache is not None:
-            raise ValueError("BERT encoder graph cannot use KV cache")
-        q, k, v = torch.split(
-            qkv.reshape(self.token_capacity, -1),
-            [self.heads * self.dim, self.kv_heads * self.dim, self.kv_heads * self.dim],
-            dim=-1,
-        )
-        q = q.reshape(self.token_capacity, self.heads, self.dim)
-        k = k.reshape(self.token_capacity, self.kv_heads, self.dim)
-        v = v.reshape(self.token_capacity, self.kv_heads, self.dim)
-        if self.wrapper is not None:
-            output = self.wrapper.run(q, k, v)
-        else:
-            from aiter import flash_attn_varlen_func
-
-            output = flash_attn_varlen_func(
-                q,
-                k,
-                v,
-                self.cu_seqlens_device,
-                self.cu_seqlens_device,
-                self.token_capacity,
-                self.token_capacity,
-                dropout_p=0.0,
-                causal=False,
-            )
-        return output.reshape(self.token_capacity, self.heads * self.dim)
-
-    @staticmethod
-    def support(configs, attn_inputs):
-        return attn_inputs.is_prefill and not configs.is_causal
-
-    def support_cuda_graph(self):
-        return True
-
-
-class BertUqiEncoderGraphImpl(BertEncoderGraphImpl):
-    """CUDA UQI graphs with one FlashInfer masked attention per layer."""
-
-    def __init__(self, configs, attn_inputs, token_capacity, max_sequence_length=None):
-        if torch.version.hip is not None:
-            raise ValueError("UQI encoder graph currently supports CUDA only")
-        super().__init__(
-            configs, attn_inputs, token_capacity, max_sequence_length, custom_mask=True
-        )
-
-    def _mask_plan_args(self, attn_inputs, for_capture):
-        from rtp_llm.models_py.modules.factory.attention.bert_uqi_schedule import (
-            build_uqi_graph_layout,
-        )
-
-        lengths = attn_inputs.input_lengths.tolist()
-        if not for_capture:
-            starts = attn_inputs.uqi_b_starts
-            b_lengths = attn_inputs.uqi_b_lens
-            if (
-                starts is None
-                or b_lengths is None
-                or starts.is_cuda
-                or b_lengths.is_cuda
-            ):
-                raise ValueError("UQI graph requires host segment bounds")
-            if (
-                starts.numel() > self.request_capacity
-                or starts.numel() != b_lengths.numel()
-            ):
-                raise ValueError("invalid UQI graph request metadata")
-            active = starts.numel()
-            if any(lengths[active:]):
-                raise ValueError("missing UQI graph segment bounds")
-            starts = starts.tolist() + [-1] * (len(lengths) - active)
-            b_lengths = b_lengths.tolist() + [0] * (len(lengths) - active)
-        else:
-            # Synthetic startup inputs contain no user segment. Always pass a
-            # mask, even here, so capture never specializes to an unmasked path.
-            starts, b_lengths = [-1] * len(lengths), [0] * len(lengths)
-        layout = build_uqi_graph_layout(lengths, starts, b_lengths, self.token_capacity)
-        masks = []
-        for n, start, count in layout:
-            pos = torch.arange(n, device="cuda")
-            is_b = (pos >= start) & (pos < start + count)
-            # A -> A; B -> A+B. Separate ragged sequences isolate padding.
-            masks.append((is_b[:, None] | ~is_b[None, :]).reshape(-1))
-        return {"custom_mask": torch.cat(masks)}

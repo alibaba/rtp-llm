@@ -65,13 +65,12 @@ public:
         is_target_verify_     = role_ == CudaGraphRole::TARGET_VERIFY;
         py_attn_pyobj_method_ = py_instance_.attr("prepare_fmha_impl");
         py_forward_method_    = py_instance_.attr("forward");
-        // The model interface selects capture scope; enable_cuda_graph_ is
-        // the only graph execution switch.
-        if (isEmbeddingStylePrefillCudaGraph()
-            && py::hasattr(py_instance_, "prepare_transformer_inputs")
-            && py::hasattr(py_instance_, "forward_transformer")) {
+        // Embedding graphs always capture only the Transformer backbone.
+        // Capability is checked before constructing this runner.
+        if (isEmbeddingStylePrefillCudaGraph()) {
             py_forward_method_             = py_instance_.attr("forward_transformer");
             py_prepare_transformer_inputs_ = py_instance_.attr("prepare_transformer_inputs");
+            py_attn_pyobj_method_           = py_instance_.attr("prepare_embedding_graph_attention");
         }
         options_cuda_int32_   = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
         options_cpu_int32_    = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).requires_grad(false);
@@ -132,14 +131,6 @@ private:
     bool isEmbeddingStylePrefillCudaGraph() const {
         return role_ == CudaGraphRole::EMBEDDING_PREFILL;
     }
-    bool requiresUqiSegmentBounds() const {
-        if (!py_prepare_transformer_inputs_) {
-            return false;
-        }
-        py::gil_scoped_acquire gil;
-        return py::hasattr(py_instance_, "use_user_profile_mask")
-               && py_instance_.attr("use_user_profile_mask").cast<bool>();
-    }
     bool isMtpDraftPrefillCudaGraph() const {
         return role_ == CudaGraphRole::MTP_DRAFT_PREFILL;
     }
@@ -178,8 +169,7 @@ private:
     void                    initCaptureAttentionInputsPost();
     py::object              py_forward_method_;
     py::object              py_attn_pyobj_method_;
-    // When bound, embeddings are prepared outside capture and the graph runs only
-    // the Transformer stack. Binding this interface does not enable CUDA graphs.
+    // Required by EMBEDDING_PREFILL; invoked outside capture before each replay.
     py::object              py_prepare_transformer_inputs_;
     bool                    enable_cuda_graph_{false};
     bool                    is_prefill_cuda_graph_mode_{false};
