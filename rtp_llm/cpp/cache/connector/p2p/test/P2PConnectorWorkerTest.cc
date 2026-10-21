@@ -121,6 +121,7 @@ public:
         std::string layer_key;
         int         layer_id;  // parsed from layer_key
         int64_t     deadline_ms = 0;
+        int64_t     timeout_ms = 0;
     };
 
     bool regMem(const BlockInfo& /*block_info*/, uint64_t /*aligned_size*/ = 0) override {
@@ -135,6 +136,7 @@ public:
         info.layer_key   = request.unique_key;
         info.layer_id    = parseLayerId(request.unique_key);
         info.deadline_ms = request.deadline_ms;
+        info.timeout_ms = request.timeout_ms;
 
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -720,6 +722,10 @@ TEST_F(P2PConnectorWorkerTest, CancelHandleRead_HoldsStartedSourceAndReleasesQue
 // ==================== sendKVCache 测试 (Prefill 端) ====================
 
 TEST_F(P2PConnectorWorkerTest, SendKVCache_SendRequestDeadline_AlignedWithTransferDeadline) {
+    worker_config_.load_cache_timeout_ms = 0;  // Deliberately asymmetric with Decode's budget.
+    prefill_ = std::make_unique<P2PWorkerPrefillRead>(
+        worker_config_, mock_layer_block_converter_, nullptr, mock_sender_);
+    ASSERT_TRUE(prefill_->init());
     int64_t     request_id  = 2000;
     std::string unique_key  = "test_send_deadline_align";
     int64_t     deadline_ms = currentTimeMs() + 5000;
@@ -737,9 +743,12 @@ TEST_F(P2PConnectorWorkerTest, SendKVCache_SendRequestDeadline_AlignedWithTransf
     ErrorInfo     result = prefill_->sendKVCache(request_id, unique_key, deadline_ms, makeRoutePlan(decode_transfer_servers), deadline_ms);
     EXPECT_TRUE(result.ok());
 
+    ASSERT_FALSE(mock_sender_->getTransferCalls().empty());
     for (const auto& c : mock_sender_->getTransferCalls()) {
         EXPECT_EQ(c.deadline_ms, expected_transfer_deadline)
             << "SendRequest.deadline_ms should match decode recv task deadline D";
+        EXPECT_GT(c.timeout_ms, worker_config_.load_cache_timeout_ms);
+        EXPECT_LE(c.timeout_ms, 5000);
     }
 }
 

@@ -289,6 +289,25 @@ TEST_F(P2PConnectorSchedulerTest, AsyncReadKeepsRequestDeadlineSeparateFromLoadB
     EXPECT_LE(result.context->transfer_deadline_ms_, request_deadline_ms);
 }
 
+TEST_F(P2PConnectorSchedulerTest, InvalidLoadConfigurationUsesBoundedSharedFallback) {
+    for (const int64_t timeout : {int64_t{0}, int64_t{-1}, int64_t{2147483648LL}}) {
+        P2PConnectorSchedulerConfig config;
+        config.worker_grpc_addrs = tp_broadcast_addrs_;
+        config.worker_addrs.push_back("127.0.0.1:12345:" + std::to_string(prefill_server_->listenPort()));
+        config.topology = test::makeTestCacheTopology(2, 2, {{0}, {1}});
+        config.load_cache_timeout_ms = timeout;
+        rebuildSchedulers(config);
+        const int64_t expected = timeout <= 0 ? PDSepConfig{}.load_cache_timeout_ms : 2147483647LL;
+        EXPECT_EQ(decode_scheduler_->config_.load_cache_timeout_ms, expected);
+        auto meta = createMockMeta(9012, "normalized_load_budget", currentTimeMs() + 60000);
+        auto result = decode_scheduler_->asyncRead(createValidKVCacheResource(), meta, {2, 0}, true);
+        ASSERT_TRUE(result.ok());
+        waitAsyncContextDone(result.context);
+        ASSERT_TRUE(result.context->success());
+        EXPECT_EQ(prefill_server_->service()->getLastStartLoadRequest().timeout_ms(), expected);
+    }
+}
+
 TEST(P2PConnectorConfigTest, LoadTimeoutComesFromSharedPDSepConfig) {
     RuntimeConfig runtime;
     CacheStoreConfig cache_store;

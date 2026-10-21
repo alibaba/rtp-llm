@@ -3,6 +3,8 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "aios/network/arpc/arpc/ANetRPCController.h"
+#include <algorithm>
+#include <limits>
 
 namespace {
 inline size_t alignUp(size_t value, size_t alignment) {
@@ -204,6 +206,10 @@ void TcpKVCacheSender::loadToRemote(
     const std::shared_ptr<::tcp_transfer::TcpLayerBlockTransferRequest>& transfer_request,
     std::function<void(TransferErrorCode, const std::string&)>           callback,
     int64_t                                                              deadline_ms) {
+    if (deadline_ms <= currentTimeMs()) {
+        if (callback) callback(TransferErrorCode::TIMEOUT, "transfer deadline expired before TCP submission");
+        return;
+    }
     auto channel = tcp_client_->getChannel(ip, port);
     if (!channel) {
         if (callback) {
@@ -212,10 +218,19 @@ void TcpKVCacheSender::loadToRemote(
         return;
     }
 
+    // Refresh after sender queuing, D2H copy and channel acquisition. The wire
+    // and controller share the remaining per-request budget, without exporting
+    // another process's absolute clock or Prefill's static load timeout.
+    const auto remaining_ms = deadline_ms - currentTimeMs();
+    if (remaining_ms <= 0) {
+        if (callback) callback(TransferErrorCode::TIMEOUT, "transfer deadline expired during TCP preparation");
+        return;
+    }
+    const auto timeout_ms = std::min<int64_t>(remaining_ms, std::numeric_limits<int32_t>::max());
+    transfer_request->set_timeout_ms(timeout_ms);
     auto transfer_response = std::make_shared<::tcp_transfer::TcpLayerBlockTransferResponse>();
     auto controller        = new arpc::ANetRPCController();
-    auto timeout_ms        = deadline_ms - currentTimeMs();
-    controller->SetExpireTime(timeout_ms > 0 ? timeout_ms : 1);
+    controller->SetExpireTime(timeout_ms);
     auto closure = new TcpTransferClosure(ip, port, transfer_request, transfer_response, controller, callback);
     ::tcp_transfer::TcpTransferService_Stub stub((::google::protobuf::RpcChannel*)(channel.get()),
                                                  ::google::protobuf::Service::STUB_DOESNT_OWN_CHANNEL);

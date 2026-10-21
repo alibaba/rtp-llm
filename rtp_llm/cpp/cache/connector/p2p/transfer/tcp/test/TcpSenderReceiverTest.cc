@@ -184,6 +184,36 @@ TEST_F(TcpSenderOnlyTest, D1_ConnectionFailed_ReceiverNotRunning) {
 
 // B1: Receiver is running but has not called recv(); the RPC enters wait_tasks_
 //     and times out after the deadline.
+TEST_F(TcpSenderOnlyTest, ExpiredTransferDoesNotSubmitTcpRpc) {
+    auto request = std::make_shared<::tcp_transfer::TcpLayerBlockTransferRequest>();
+    request->set_unique_key("expired-before-submit");
+    request->set_timeout_ms(60000);
+    int callbacks = 0;
+    sender_->loadToRemote("127.0.0.1", unused_port_, request,
+        [&](TransferErrorCode code, const std::string&) {
+            ++callbacks;
+            EXPECT_EQ(code, TransferErrorCode::TIMEOUT);
+        }, currentTimeMs() - 1);
+    EXPECT_EQ(callbacks, 1);
+}
+
+TEST_F(TcpSenderReceiverTest, WireTimeoutUsesRemainingRequestBudgetInsteadOfPrefillConfiguration) {
+    for (const int64_t static_timeout : {int64_t{0}, int64_t{-1}, int64_t{2147483648LL}}) {
+        auto request = std::make_shared<::tcp_transfer::TcpLayerBlockTransferRequest>();
+        request->set_unique_key("remaining-window-" + std::to_string(static_timeout));
+        request->set_timeout_ms(static_timeout);
+        auto completion = std::make_shared<std::promise<TransferErrorCode>>();
+        auto done = completion->get_future();
+        sender_->loadToRemote("127.0.0.1", test_port_, request,
+            [completion](TransferErrorCode code, const std::string&) { completion->set_value(code); },
+            currentTimeMs() + 250);
+        EXPECT_GT(request->timeout_ms(), 0);
+        EXPECT_LE(request->timeout_ms(), 250);
+        ASSERT_EQ(done.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+        EXPECT_EQ(done.get(), TransferErrorCode::TIMEOUT);
+    }
+}
+
 TEST_F(TcpSenderReceiverTest, B1_SenderTimeout_ReceiverHasNoMatchingTask) {
     if (!device_initialized_) {
         GTEST_SKIP() << "No GPU device";

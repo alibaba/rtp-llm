@@ -39,6 +39,16 @@ P2PSchedulerDecodeRead::~P2PSchedulerDecodeRead() {
 }
 
 bool P2PSchedulerDecodeRead::init(const std::string& process_id) {
+    // Preserve the existing non-positive-value fallback, using the shared
+    // current default. Bound the positive budget to the wire timeout range.
+    const auto configured_timeout = config_.load_cache_timeout_ms;
+    config_.load_cache_timeout_ms = configured_timeout > 0 ?
+        std::min<int64_t>(configured_timeout, std::numeric_limits<int32_t>::max()) :
+        PDSepConfig{}.load_cache_timeout_ms;
+    if (config_.load_cache_timeout_ms != configured_timeout) {
+        RTP_LLM_LOG_WARNING("P2P load timeout normalized: configured=%ld effective=%ld",
+                            configured_timeout, config_.load_cache_timeout_ms);
+    }
     server_caller_ = std::make_shared<DecodeLoadHelper>(config_.worker_addrs);
 
     auto async_read_pool = std::make_shared<autil::LockFreeThreadPool>(
@@ -244,7 +254,7 @@ P2PSchedulerDecodeRead::AsyncReadResult P2PSchedulerDecodeRead::asyncRead(
     const int64_t     request_deadline_ms = routing->deadline_ms;
     const int64_t     now_ms              = currentTimeMs();
     if (request_deadline_ms <= 0 || request_deadline_ms == std::numeric_limits<int64_t>::max()
-        || now_ms >= request_deadline_ms || config_.load_cache_timeout_ms <= 0) {
+        || now_ms >= request_deadline_ms) {
         RTP_LLM_LOG_WARNING("asyncRead: request deadline expired, unique_key: %s", unique_key.c_str());
         return {nullptr, ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "P2P request deadline expired")};
     }
