@@ -742,6 +742,7 @@ TEST_F(P2PConnectorWorkerTest, SendKVCache_SendRequestDeadline_AlignedWithTransf
     prefill_ = std::make_unique<P2PWorkerPrefillRead>(
         worker_config_, mock_layer_block_converter_, nullptr, mock_sender_);
     ASSERT_TRUE(prefill_->init());
+    computed_buffers_ = prefill_->getComputedBuffersStore();
     int64_t     request_id  = 2000;
     std::string unique_key  = "test_send_deadline_align";
     int64_t     deadline_ms = currentTimeMs() + 5000;
