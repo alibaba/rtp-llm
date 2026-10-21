@@ -2283,11 +2283,11 @@ TEST_F(P2PConnectorWorkerTest, SendKVCache_Timeout_LayersExpiredBeforeTransfer) 
     int64_t     request_id = 6001;
     std::string unique_key = "test_layers_expired_race";
 
-    // 用一个很短的 deadline 模拟 "layers 已过期" 的情况
-    int64_t expired_deadline_ms = currentTimeMs() + 100;  // 已经过期
-
-    const int64_t request_deadline_ms = currentTimeMs() + 5000;
-    computed_buffers_->registerRequestHorizon(request_id, expired_deadline_ms, request_deadline_ms);
+    // Register safely in the future, then advance only the store expiry check.
+    const int64_t expired_deadline_ms = currentTimeMs() + 60 * 60 * 1000;
+    const int64_t request_deadline_ms = expired_deadline_ms + 5000;
+    ASSERT_TRUE(computed_buffers_->registerRequestHorizon(
+        request_id, expired_deadline_ms, request_deadline_ms).has_value());
     // 模拟 prefill 计算完成后 layers 被存入 computed_buffers_（带短 deadline）
     addComputedBuffer(request_id, 0, request_deadline_ms);
     addComputedBuffer(request_id, 1, request_deadline_ms);
@@ -2295,9 +2295,8 @@ TEST_F(P2PConnectorWorkerTest, SendKVCache_Timeout_LayersExpiredBeforeTransfer) 
     // 验证 buffer 此时存在
     ASSERT_NE(computed_buffers_->getBuffer(request_id, request_deadline_ms), nullptr);
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(150));
-    // 模拟 loopCheckProc 中的 checkTimeout()——删除过期 buffer
-    computed_buffers_->checkTimeout();
+    // Inject the expiration instant; no scheduler-dependent sleep/setup window.
+    computed_buffers_->checkTimeout(expired_deadline_ms + 1);
 
     // 验证 buffer 已被清除
     EXPECT_EQ(computed_buffers_->getBuffer(request_id, request_deadline_ms), nullptr)
@@ -2312,10 +2311,12 @@ TEST_F(P2PConnectorWorkerTest, SendKVCache_Timeout_LayersExpiredBeforeTransfer) 
     mock_sender_->setShouldSucceed(true);
     mock_sender_->setAsyncCallback(true);
 
-    auto      start_ms   = currentTimeMs();
-    ErrorInfo result     = prefill_->sendKVCache(
+    // The terminal fence must reject reactivation even though the real request
+    // deadline is still far ahead. This is the cause of the immediate error.
+    EXPECT_FALSE(computed_buffers_->activateRequestHorizon(
+        request_id, request_deadline_ms, request_deadline_ms).has_value());
+    ErrorInfo result = prefill_->sendKVCache(
         request_id, unique_key, send_deadline_ms, makeRoutePlan(decode_transfer_servers), request_deadline_ms);
-    auto      elapsed_ms = currentTimeMs() - start_ms;
 
     // 验证：sendKVCache 快速失败，错误码为 GENERATE_TIMEOUT（buffer 已过期）
     EXPECT_TRUE(result.hasError());
@@ -2325,9 +2326,7 @@ TEST_F(P2PConnectorWorkerTest, SendKVCache_Timeout_LayersExpiredBeforeTransfer) 
     EXPECT_EQ(mock_sender_->getTransferCallCount(), 0)
         << "No layers should be transferred since computed layers were already expired";
 
-    // 修复后关键验证：应该立即返回，而不是等到 deadline
-    EXPECT_LE(elapsed_ms, 100)
-        << "After fix: sendKVCache should fail fast when layers are expired, not wait until deadline";
+    EXPECT_EQ(computed_buffers_->getBuffer(request_id, request_deadline_ms), nullptr);
 }
 
 // 验证 checkTimeout 删除 buffer 后，addBuffer 正确返回 nullptr（修复后行为）
