@@ -355,7 +355,10 @@ protected:
             EXPECT_LT(engine->getCacheManager()->freeBlocksNum(), free_before);
             auto store = engine->getCacheManager()->p2p_connector_->streamStore();
             ASSERT_NE(store, nullptr);
-            store->markTerminal(engine->stream->uniqueKey(), engine->stream->deadlineMs());
+            store->markTerminal(engine->stream->uniqueKey(),
+                                engine->stream->deadlineMs(),
+                                action == OutputAction::COMPLETE ? P2PConnectorResourceStore::TerminalReason::COMPLETED :
+                                                                   P2PConnectorResourceStore::TerminalReason::FAILED);
         }
         reap(engine, free_before);
     }
