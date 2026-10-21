@@ -653,6 +653,32 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_DeadlineBroadcastsCancelWhenReadAlre
     }
 }
 
+TEST_F(P2PConnectorSchedulerTest, TransferWakeupUsesLocalSteadyBudgetAndPreservesWireDeadline) {
+    const auto wire_deadline = currentTimeMs() + 60000;
+    const auto before = P2PNotification::nowMs();
+    auto context = std::make_shared<P2PConnectorAsyncReadContext>(
+        createValidKVCacheResource(1, 1), "steady-transfer-budget",
+        std::make_shared<P2PConnectorMetricsCollector>(), 10000, false,
+        wire_deadline + 1000, wire_deadline);
+    const auto wakeup = context->nextWakeupMs(false);
+    EXPECT_EQ(context->transfer_deadline_ms_, wire_deadline);
+    EXPECT_GT(wakeup, before);
+    EXPECT_LE(wakeup, P2PNotification::nowMs() + 60000);
+    EXPECT_FALSE(context->expireTransferDeadlineIfNeeded());
+}
+
+TEST_F(P2PConnectorSchedulerTest, ExpiredWireBudgetAnchorsImmediateLocalDeadline) {
+    const auto wire_deadline = currentTimeMs() - 1;
+    auto context = std::make_shared<P2PConnectorAsyncReadContext>(
+        createValidKVCacheResource(1, 1), "steady-expired-budget",
+        std::make_shared<P2PConnectorMetricsCollector>(), 10000, false,
+        currentTimeMs() + 10000, wire_deadline);
+    EXPECT_EQ(context->transfer_deadline_ms_, wire_deadline);
+    EXPECT_LE(context->nextWakeupMs(false), P2PNotification::nowMs());
+    EXPECT_TRUE(context->expireTransferDeadlineIfNeeded());
+    EXPECT_EQ(context->errorInfo().code(), ErrorCode::GENERATE_TIMEOUT);
+}
+
 TEST_F(P2PConnectorSchedulerTest, AsyncReadPendingContextWaitsForKickoff) {
     auto resource  = createValidKVCacheResource(1, 1);
     auto collector = std::make_shared<P2PConnectorMetricsCollector>();

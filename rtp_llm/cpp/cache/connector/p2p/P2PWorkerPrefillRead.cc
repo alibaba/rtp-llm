@@ -95,6 +95,13 @@ bool P2PWorkerPrefillRead::init() {
                 next = std::min(next, currentTimeMs() + 1);
             }
             if (!store_wait_stopping_.load()) {
+                // Buffer deadlines remain wire/wall timestamps. Convert only
+                // this local wait duration; never compare them to steady epochs.
+                if (next != std::numeric_limits<int64_t>::max()) {
+                    const auto remaining = std::max<int64_t>(0, next - currentTimeMs());
+                    const auto now = P2PNotification::nowMs();
+                    next = now + std::min(remaining, std::numeric_limits<int64_t>::max() - now);
+                }
                 notification->waitUntil(generation, next);
             }
         }

@@ -14,6 +14,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <map>
+#include <limits>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -40,6 +41,7 @@ public:
         no_transfer_(no_transfer),
         request_deadline_ms_(request_deadline_ms),
         transfer_deadline_ms_(transfer_deadline_ms),
+        transfer_stop_at_ms_(localTransferDeadline(transfer_deadline_ms)),
         done_(false),
         success_(false),
         error_code_(ErrorCode::NONE_ERROR) {}
@@ -60,6 +62,7 @@ public:
         no_transfer_(no_transfer),
         request_deadline_ms_(request_deadline_ms),
         transfer_deadline_ms_(transfer_deadline_ms),
+        transfer_stop_at_ms_(localTransferDeadline(transfer_deadline_ms)),
         done_(false),
         success_(false),
         error_code_(ErrorCode::NONE_ERROR),
@@ -92,6 +95,7 @@ public:
     // An exception may follow a partial RPC dispatch: retain KV until workers confirm stop.
     void markKickoffUnconfirmed(const ErrorInfo& error_info);
     void    setNotification(const std::shared_ptr<P2PNotification>& notification);
+    // Local steady-clock deadline for the checker notification.
     int64_t nextWakeupMs(bool allow_control) const;
     bool    needsControl() const;
     void    runControl(const std::shared_ptr<P2PBroadcastClient>& client);
@@ -114,7 +118,7 @@ public:
             return false;
         }
         return !lease_all_ranks_stopped_.load(std::memory_order_acquire)
-               && currentTimeMs() >= lease_poll_next_ms_.load(std::memory_order_relaxed);
+               && P2PNotification::nowMs() >= lease_poll_next_ms_.load(std::memory_order_relaxed);
     }
 
     bool resourceHoldPending() const {
@@ -186,7 +190,17 @@ private:
     const int64_t lease_query_timeout_ms_;
     const bool    no_transfer_;
     const int64_t request_deadline_ms_;
-    const int64_t transfer_deadline_ms_;
+    const int64_t transfer_deadline_ms_;  // original wire deadline/identity
+    const int64_t transfer_stop_at_ms_;   // anchored once in the local steady-clock domain
+
+    static int64_t localTransferDeadline(int64_t wall_deadline_ms) {
+        if (wall_deadline_ms <= 0) {
+            return 0;
+        }
+        const auto remaining = std::max<int64_t>(0, wall_deadline_ms - currentTimeMs());
+        const auto now = P2PNotification::nowMs();
+        return now + std::min(remaining, std::numeric_limits<int64_t>::max() - now);
+    }
 
     std::mutex                                   check_mutex_;
     mutable std::mutex      state_mutex_;
@@ -195,7 +209,7 @@ private:
     bool                    success_{false};
     ErrorCode               error_code_;
     std::string             error_message_;
-    std::atomic<int64_t>                         lease_hold_start_us_{0};
+    std::atomic<int64_t>                         lease_hold_start_us_{0};  // steady clock
     std::atomic<bool>       lease_hold_pending_{false};
     std::atomic<bool>                            tp_cancel_broadcast_triggered_{false};
     std::shared_ptr<P2PBroadcastClient::Result> cancel_result_;  // guarded by state_mutex_
@@ -203,7 +217,7 @@ private:
 
     // Lease polling state (active while lease_hold_pending_ is true).
     std::atomic<bool>    lease_all_ranks_stopped_{false};  // set when poll confirms all ranks stopped
-    std::atomic<int64_t> lease_poll_next_ms_{0};           // rate limit: earliest time for next poll
+    std::atomic<int64_t> lease_poll_next_ms_{0};           // steady-clock earliest next poll
     std::atomic<int64_t> lease_poll_interval_ms_{10};      // backoff interval, starts 10ms, max 100ms
     std::atomic<int>     lease_poll_retry_count_{0};
     std::atomic<bool>    calls_ready_{false};
