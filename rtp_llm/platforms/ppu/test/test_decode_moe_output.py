@@ -27,6 +27,7 @@ class MoeOutputContractTest(unittest.TestCase):
         block = SimpleNamespace(
             layer_id=0, tp_size=1, tp_rank=0, attn_hc=hc, ffn_hc=hc,
             attn_norm=None, ffn_norm=None, ffn=ffn,
+            _mega_csa_adapter=None, _mega_hca_adapter=None,
         )
         with patch(
             "rtp_llm.models_py.modules.dsv4._record_tensor.should_record_layer",

@@ -150,6 +150,7 @@ class HCNormGraphTest(unittest.TestCase):
         block = Block.__new__(Block)
         torch.nn.Module.__init__(block)
         block.layer_id, block.tp_size, block.tp_rank = 0, 1, 0
+        block._mega_csa_adapter = block._mega_hca_adapter = None
         block.attn_hc, block.ffn_hc = self.unit(), self.unit()
         block.attn_norm, block.ffn_norm = self.norm(), self.norm()
         block.attn = SimpleNamespace(forward_decode=lambda x, *args, **kwargs: x)

@@ -24,6 +24,7 @@ class SharedScheduleTest(unittest.TestCase):
         model.dim = 8
         model.layer_id = 5
         model.max_tokens_per_rank = 8
+        model._tp_size, model._tp_rank = 1, 0
         model._is_decode_role = False
         model.chunking_enabled = True
         model._observer_factory = None
