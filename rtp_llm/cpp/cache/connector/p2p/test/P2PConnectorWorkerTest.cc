@@ -2604,4 +2604,24 @@ TEST_F(P2PConnectorWorkerTest, LateLayerUsesInstalledLocalHorizonWithSourceClock
     EXPECT_EQ(computed_buffers_->getBuffer(request_id, source_identity), nullptr);
 }
 
+TEST_F(P2PConnectorWorkerTest, InvalidLayerPublishesErrorUsingInstalledLocalHorizon) {
+    for (const int64_t skew_ms : {-3600000LL, 3600000LL}) {
+        const auto request_id      = 9500 + (skew_ms > 0);
+        const auto source_identity = currentTimeMs() + skew_ms + 60000;
+        const auto local_horizon   = currentTimeMs() + 60000;
+        ASSERT_TRUE(computed_buffers_->activateRequestHorizon(request_id, local_horizon, source_identity));
+        auto invalid_resource = createKVCacheResource(1, 2);
+        invalid_resource->mutableBlockIdsForLayer(1, "group1").assign({0, -1});
+        EXPECT_FALSE(prefill_->writeByLayerTag(1, "group1", invalid_resource, request_id, nullptr, source_identity));
+        auto buffer = computed_buffers_->getBuffer(request_id, source_identity);
+        ASSERT_NE(buffer, nullptr);
+        EXPECT_EQ(buffer->deadlineMs(), local_horizon);
+        EXPECT_EQ(buffer->error().code(), ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED);
+        EXPECT_NE(buffer->error().ToString().find("block_id=-1"), std::string::npos);
+        computed_buffers_->removeBuffer(request_id, source_identity);
+        EXPECT_FALSE(prefill_->writeByLayerTag(1, "group1", invalid_resource, request_id, nullptr, source_identity));
+        EXPECT_EQ(computed_buffers_->getBuffer(request_id, source_identity), nullptr);
+    }
+}
+
 }  // namespace rtp_llm

@@ -206,7 +206,9 @@ bool P2PWorkerPrefillRead::rejectLayer(int64_t request_id, int64_t request_deadl
                       static_cast<int>(error.code()),
                       ErrorCodeToString(error.code()).c_str(),
                       error.ToString().c_str());
-    if (computed_buffers_->registerRequestHorizon(request_id, request_deadline_ms, request_deadline_ms)) {
+    const auto local_horizon_ms =
+        computed_buffers_->requestHorizon(request_id, request_deadline_ms).value_or(request_deadline_ms);
+    if (computed_buffers_->registerRequestHorizon(request_id, local_horizon_ms, request_deadline_ms)) {
         auto buffer = computed_buffers_->addBuffer(request_id, nullptr, request_deadline_ms);
         if (buffer) {
             buffer->setError(error);
