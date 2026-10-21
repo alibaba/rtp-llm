@@ -743,6 +743,61 @@ TEST_F(BlockPoolTest, LayeredPrefillMrSkipsEmptyBuffers) {
     }
 }
 
+TEST_F(BlockPoolTest, LayeredPrefillDefaultOnlyAppliesToPrefillRole) {
+    // Empty/unset env selects the default, not an explicit opt-in.
+    autil::EnvGuard placement("RTP_LLM_DSA_PREFILL_LAYOUT", "");
+    autil::EnvGuard decode_host_cache("RTP_LLM_DSA_MLA_HOST_CACHE_MB", "0");
+    auto model = makeLayeredPrefillModel();
+    auto mtp_model = model;
+    mtp_model.num_layers = 1;
+    mtp_model.enable_glm52_shared_indexer_kv_cache = false;
+    mtp_model.glm52_indexer_kv_slot_mapping.clear();
+    KVCacheConfig options;
+    options.seq_size_per_block = 64;
+    options.kernel_seq_size_per_block = 64;
+    options.test_block_num = 16;
+    options.memory_cache_size_mb = 8;
+    options.enable_remote_cache = false;
+    RuntimeConfig runtime;
+    runtime.fifo_scheduler_config.max_batch_kv_len = 128;
+    SpeculativeExecutionConfig speculative;
+    speculative.type = SP_TYPE_MTP;
+    speculative.gen_num_per_cycle = 1;
+    for (const auto role : {RoleType::PDFUSION, RoleType::DECODE, RoleType::PREFILL}) {
+        for (bool memory_cache : {false, true}) {
+            for (bool mtp : {false, true}) {
+                SCOPED_TRACE(::testing::Message() << "role=" << static_cast<int>(role)
+                                                 << " memory_cache=" << memory_cache << " mtp=" << mtp);
+                ParallelismConfig parallelism;
+                parallelism.role_type = role;
+                options.enable_memory_cache = memory_cache;
+                auto create = [&] {
+                    return mtp ? CacheConfigCreator::createSpConfig(model, mtp_model, parallelism, runtime, options,
+                                                                   speculative, std::nullopt, true, false) :
+                                 CacheConfigCreator::createConfig(model, parallelism, runtime, options, std::nullopt);
+                };
+                const auto config = create();
+                if (role == RoleType::PREFILL) {
+                    EXPECT_GT(config.dsa_prefill_staging_tokens, 0u);
+                    EXPECT_GE(config.dsa_prefill_hbm_layers, 1);
+                } else {
+                    EXPECT_EQ(config.dsa_prefill_staging_tokens, 0u);
+                    EXPECT_EQ(config.dsa_prefill_hbm_layers, -1);
+                    EXPECT_EQ(config.block_num, options.test_block_num);
+                    PDSepConfig pd;
+                    pd.role_type = role;
+                    EXPECT_NO_THROW(KVCacheManager(config, true, nullptr, options, parallelism, runtime, speculative, pd));
+                    // Explicit opt-in retains the existing role validation.
+                    autil::EnvGuard explicit_layout("RTP_LLM_DSA_PREFILL_LAYOUT", "1");
+                    const auto explicit_config = create();
+                    EXPECT_ANY_THROW(KVCacheManager(explicit_config, true, nullptr, options, parallelism, runtime,
+                                                    speculative, pd));
+                }
+            }
+        }
+    }
+}
+
 TEST_F(BlockPoolTest, LayeredPrefillStoresEachLogicalBlockOnce) {
     autil::EnvGuard placement("RTP_LLM_DSA_PREFILL_LAYOUT", "1");
     auto            model = makeLayeredPrefillModel();

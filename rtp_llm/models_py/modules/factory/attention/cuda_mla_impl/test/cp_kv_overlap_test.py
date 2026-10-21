@@ -10,6 +10,7 @@ import torch
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl import (
     flashmla_sparse_cp_impl as cp,
 )
+from rtp_llm.models_py.modules.hybrid.mla_attention import MlaAttention
 
 
 class CpKvOverlapTest(unittest.TestCase):
@@ -118,6 +119,8 @@ class CpKvOverlapTest(unittest.TestCase):
 
     def test_empty_q_rank_uses_prepared_collective_without_resubmission(self):
         op = object.__new__(cp.SparseMlaFp8CPOp)
+        op.write_cache_store_impl = None
+        op.attn_inputs = SimpleNamespace(is_prefill=True, cache_store_inputs=None)
         op.write_kv = Mock()
         op._gather_sharded_kv_cache = Mock()
         op.kv_cache_sharded = True
@@ -131,6 +134,8 @@ class CpKvOverlapTest(unittest.TestCase):
 
     def test_empty_q_serial_rank_still_participates(self):
         op = object.__new__(cp.SparseMlaFp8CPOp)
+        op.write_cache_store_impl = None
+        op.attn_inputs = SimpleNamespace(is_prefill=True, cache_store_inputs=None)
         op.write_kv = Mock()
         op._gather_sharded_kv_cache = Mock()
         op._allocate_fused_kv = Mock(return_value=torch.empty(1, 576))
@@ -139,6 +144,128 @@ class CpKvOverlapTest(unittest.TestCase):
         self.assertIsNone(op.forward(None, None, None, None, None))
         op.write_kv.assert_called_once()
         op._gather_sharded_kv_cache.assert_called_once()
+
+    def run_cache_publication(
+        self,
+        overlap,
+        cross_layer=False,
+        empty_q=False,
+        indexer_fails=False,
+        host_backed=False,
+    ):
+        cache = SimpleNamespace(
+            kv_cache_base=torch.zeros(2, 2),
+            kv_scale_base=torch.full((2,), -7),
+        )
+        published = []
+        writer = Mock(
+            side_effect=lambda kv: published.append(
+                (kv.kv_cache_base.clone(), kv.kv_scale_base.clone())
+            )
+        )
+        wrapper = self.make_wrapper()
+        wrapper.overlap_kv = overlap
+        wrapper._apply_rope.side_effect = lambda _q, k: k
+        wrapper._cross_layer_prefetch = None
+        if cross_layer:
+            wrapper._cross_layer_prefetch = Mock()
+            wrapper._cross_layer_prefetch.prepare.return_value = (
+                torch.empty(2, 4),
+                Mock(),
+            )
+        op = object.__new__(cp.SparseMlaFp8CPOp)
+        op.kv_restore_unpad_indices = torch.arange(2)
+        op.kv_cache_write_op = Mock()
+        op.kv_cache_write_op.forward.side_effect = (
+            lambda *_a, **_kw: cache.kv_cache_base.fill_(11)
+        )
+        op.mla_params = None
+        op.kv_cache_sharded = True
+        op.sharded_slot_mapping = torch.arange(2)
+        # The layered-cache context suppresses the writer on host-backed
+        # layers; only its writeback path may publish their original buffers.
+        op.write_cache_store_impl = None if host_backed else writer
+        op.attn_inputs = SimpleNamespace(
+            is_prefill=True, cache_store_inputs=object()
+        )
+        op._gather = object()
+        op.total_local_ids = torch.arange(0 if empty_q else 2)
+        op.total_local_ids_is_identity = True
+        op._allocate_fused_kv = Mock(return_value=torch.empty(2, 4))
+        op._pack_sharded_kv_cache = Mock(return_value=torch.empty(2, 4))
+        op._gather_sharded_kv_cache = Mock()
+        op.sharded_kv_restore_indices = torch.arange(2)
+        op._attend_gather = Mock(side_effect=lambda q, *_a: q)
+        wrapper.fmha_impl = op
+
+        def indexer(*_args):
+            # Exercise the real MlaAttention -> prepare_kv -> CP forward order.
+            # A decoder consuming immediately at publication must see new KV.
+            writer.assert_not_called()
+            if indexer_fails:
+                raise ValueError("indexer failed")
+            cache.kv_scale_base.fill_(42)
+            return None if empty_q else torch.zeros(2, 1, dtype=torch.int32)
+
+        layer = SimpleNamespace(
+            q_lora_rank=2,
+            kv_lora_rank=2,
+            qk_rope_head_dim=2,
+            num_heads=1,
+            q_head_dim=4,
+            v_head_dim=2,
+            layer_idx=0,
+            _fuse_q_a_norm_mode="off",
+            _fuse_kv_a_norm=False,
+            fused_qkv_a_proj=lambda _: torch.ones(2, 6),
+            q_a_layernorm=lambda x: x,
+            q_b_proj=lambda _: torch.ones(2, 4),
+            kv_a_layernorm=lambda x: x,
+            o_proj=lambda x: x,
+            parallelism_config=SimpleNamespace(get_attn_tp_size=lambda: 1),
+            _run_sparse_indexer=indexer,
+        )
+        with patch.object(
+            torch.cuda, "current_stream", return_value=Mock()
+        ), patch.object(
+            torch.cuda, "stream", side_effect=lambda _: nullcontext()
+        ), patch.object(
+            cp, "all_gather", side_effect=lambda tensor, **_kw: tensor
+        ), patch.object(
+            torch.cuda, "Event"
+        ):
+            if indexer_fails:
+                with self.assertRaisesRegex(ValueError, "indexer failed"):
+                    MlaAttention.forward(layer, torch.ones(2, 4), wrapper, cache)
+            else:
+                MlaAttention.forward(layer, torch.ones(2, 4), wrapper, cache)
+        if indexer_fails or host_backed:
+            writer.assert_not_called()
+        else:
+            writer.assert_called_once_with(cache)
+            torch.testing.assert_close(published[0][0], torch.full((2, 2), 11.0))
+            torch.testing.assert_close(published[0][1], torch.full((2,), 42))
+        op.kv_cache_write_op.forward.assert_called_once()
+        if overlap:
+            op._gather_sharded_kv_cache.assert_not_called()
+
+    def test_cache_store_sees_both_kv_buffers_after_indexer(self):
+        for overlap, cross_layer in ((False, False), (True, False), (True, True)):
+            for empty_q in (False, True):
+                with self.subTest(
+                    overlap=overlap, cross_layer=cross_layer, empty_q=empty_q
+                ):
+                    self.run_cache_publication(overlap, cross_layer, empty_q)
+
+    def test_indexer_failure_does_not_publish_prepared_cache(self):
+        for cross_layer in (False, True):
+            with self.subTest(cross_layer=cross_layer):
+                self.run_cache_publication(True, cross_layer, indexer_fails=True)
+
+    def test_host_backed_cache_publication_remains_deferred(self):
+        for cross_layer in (False, True):
+            with self.subTest(cross_layer=cross_layer):
+                self.run_cache_publication(True, cross_layer, host_backed=True)
 
     def test_padding_and_restore_are_identical_with_independent_gather(self):
         op = object.__new__(cp.SparseMlaFp8CPOp)

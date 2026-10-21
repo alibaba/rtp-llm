@@ -63,6 +63,13 @@ py_test(
 )
 
 py_test(
+    name = "cp_kv_overlap_test",
+    srcs = ["cp_kv_overlap_test.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    tags = ["manual"],
+)
+
+py_test(
     name = "pinned_mla_cache_test",
     srcs = ["pinned_mla_cache_test.py"],
     deps = [
