@@ -243,3 +243,16 @@ def smoke_test(name, task_info, tags=[], envs=[], gpu_type=[], data=[], smoke_ar
         env = test_env,
     )
     return name
+
+
+def shared_smoke_test(name, test):
+    """Reference an identical smoke case without creating another GPU test action.
+
+    Suite expansion selects the canonical test once even when both names appear
+    in a containing suite. The reference is not a distinct inference mode.
+    """
+    native.test_suite(
+        name = name,
+        tests = [test],
+    )
+    return name

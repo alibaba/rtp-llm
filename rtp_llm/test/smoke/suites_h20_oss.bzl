@@ -1,4 +1,4 @@
-load("//rtp_llm/test/smoke:defs.bzl", "smoke_test")
+load("//rtp_llm/test/smoke:defs.bzl", "shared_smoke_test", "smoke_test")
 load("//rtp_llm/test/smoke:suites_remote_cache.bzl", "REMOTE_CACHE_DEVICE_STORE_ARGS")
 
 def h20_oss_suites():
@@ -195,24 +195,9 @@ def h20_oss_suites():
                     "decode": "--warm_up 0 --seq_size_per_block 8 --act_type FP16 --cache_store_rdma_mode 0 --use_local 1 --role_type DECODE --tp_size 2 --load_cache_timeout_ms 120000 --reserver_runtime_mem_mb 8192",
                 },
             ),
-            smoke_test(
+            shared_smoke_test(
                 name="dense_dp_sep_tp2_decode_entrance",
-                task_info="data/model/qwen25/q_r_dp_sep_tp2.json",
-                gpu_type=["H20"],
-                envs={
-                    "prefill": [
-                        "PYTHONUNBUFFERED=TRUE",
-                        "LOG_LEVEL=INFO",
-                    ],
-                    "decode": [
-                        "PYTHONUNBUFFERED=TRUE",
-                        "LOG_LEVEL=INFO",
-                    ],
-                },
-                smoke_args={
-                    "prefill": "--warm_up 0 --seq_size_per_block 8 --act_type FP16 --cache_store_rdma_mode 0 --use_local 1 --role_type PREFILL --tp_size 2 --load_cache_timeout_ms 120000 --reserver_runtime_mem_mb 8192",
-                    "decode": "--warm_up 0 --seq_size_per_block 8 --act_type FP16 --cache_store_rdma_mode 0 --use_local 1 --role_type DECODE --tp_size 2 --load_cache_timeout_ms 120000 --reserver_runtime_mem_mb 8192",
-                },
+                test="dense_dp_sep_tp2",
             ),
             smoke_test(
                 name="dense_dp_sep_tp1_to_tp2",
@@ -233,24 +218,9 @@ def h20_oss_suites():
                     "decode": "--warm_up 0 --seq_size_per_block 8 --act_type FP16 --cache_store_rdma_mode 0 --use_local 1 --role_type DECODE --tp_size 2 --load_cache_timeout_ms 120000 --reserver_runtime_mem_mb 8192",
                 },
             ),
-            smoke_test(
+            shared_smoke_test(
                 name="dense_dp_sep_tp1_to_tp2_decode_entrance",
-                task_info="data/model/qwen25/q_r_dp_sep_tp2.json",
-                gpu_type=["H20"],
-                envs={
-                    "prefill": [
-                        "PYTHONUNBUFFERED=TRUE",
-                        "LOG_LEVEL=INFO",
-                    ],
-                    "decode": [
-                        "PYTHONUNBUFFERED=TRUE",
-                        "LOG_LEVEL=INFO",
-                    ],
-                },
-                smoke_args={
-                    "prefill": "--warm_up 0 --seq_size_per_block 8 --act_type FP16 --cache_store_rdma_mode 0 --use_local 1 --role_type PREFILL --tp_size 1 --load_cache_timeout_ms 120000 --reserver_runtime_mem_mb 8192",
-                    "decode": "--warm_up 0 --seq_size_per_block 8 --act_type FP16 --cache_store_rdma_mode 0 --use_local 1 --role_type DECODE --tp_size 2 --load_cache_timeout_ms 120000 --reserver_runtime_mem_mb 8192",
-                },
+                test="dense_dp_sep_tp1_to_tp2",
             ),
             smoke_test(
                 name="dense_dp_sep_tp2_to_tp1",
@@ -271,24 +241,9 @@ def h20_oss_suites():
                     "decode": "--warm_up 0 --seq_size_per_block 8 --act_type FP16 --cache_store_rdma_mode 0 --use_local 1 --role_type DECODE --tp_size 1 --load_cache_timeout_ms 120000 --reserver_runtime_mem_mb 8192",
                 },
             ),
-            smoke_test(
+            shared_smoke_test(
                 name="dense_dp_sep_tp2_to_tp1_decode_entrance",
-                task_info="data/model/qwen25/q_r_dp_sep_tp2.json",
-                gpu_type=["H20"],
-                envs={
-                    "prefill": [
-                        "PYTHONUNBUFFERED=TRUE",
-                        "LOG_LEVEL=INFO",
-                    ],
-                    "decode": [
-                        "PYTHONUNBUFFERED=TRUE",
-                        "LOG_LEVEL=INFO",
-                    ],
-                },
-                smoke_args={
-                    "prefill": "--warm_up 0 --seq_size_per_block 8 --act_type FP16 --cache_store_rdma_mode 0 --use_local 1 --role_type PREFILL --tp_size 2 --load_cache_timeout_ms 120000 --reserver_runtime_mem_mb 8192",
-                    "decode": "--warm_up 0 --seq_size_per_block 8 --act_type FP16 --cache_store_rdma_mode 0 --use_local 1 --role_type DECODE --tp_size 1 --load_cache_timeout_ms 120000 --reserver_runtime_mem_mb 8192",
-                },
+                test="dense_dp_sep_tp2_to_tp1",
             ),
             smoke_test(
                 name="dense_dp_sep_tp2_to_tp1_decode_entrance_reuse",
