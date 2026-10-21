@@ -2,6 +2,7 @@
 
 import json
 import os
+import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -43,9 +44,7 @@ class PipelineGPUExactTest(unittest.TestCase):
         self.assertTrue(model.packed_forward_stats()["enabled"])
         self.assertIsInstance(model._packed_graph, PackedVisionGraph)
         model._packed_graph = None  # Explicit eager reference; no env toggle.
-        self.assertEqual(
-            (model._packed_max_images, model._packed_max_patches), (126, 1058400)
-        )
+        self.assertEqual(model._packed_max_images, sys.maxsize)
         paths = json.loads(os.environ["DSV41_JPEG_PATHS"])
         images = []
         for path in paths:
@@ -73,9 +72,11 @@ class PipelineGPUExactTest(unittest.TestCase):
 
         def baseline(items):
             graph = model._packed_graph
-            cap = model._packed_max_images, model._packed_max_patches
+            cap = model._packed_max_images
             model._packed_graph = None
-            model._packed_max_images, model._packed_max_patches = 128, 1061888
+            # The original JPEG fixture had 8400 patches/image: the former
+            # 1061888 patch ceiling split this batch at 126, not 128.
+            model._packed_max_images = 126
             try:
                 return [
                     value[0].cpu()
@@ -84,7 +85,7 @@ class PipelineGPUExactTest(unittest.TestCase):
                     )
                 ]
             finally:
-                model._packed_max_images, model._packed_max_patches = cap
+                model._packed_max_images = cap
                 model._packed_graph = graph
 
         def check(got, expected, label):
@@ -109,7 +110,7 @@ class PipelineGPUExactTest(unittest.TestCase):
             self.assertEqual(different, 0, label)
 
         expected = baseline(sequence)
-        model._packed_max_images, model._packed_max_patches = count, count * 8400
+        model._packed_max_images = count
         grouped = [decoded_group] * (count // 2)
         staged = model.prepare_embedding_batch(
             grouped, [MMUrlType.IMAGE] * len(grouped)
@@ -124,13 +125,16 @@ class PipelineGPUExactTest(unittest.TestCase):
         finally:
             staged.close()
         del got, staged
-        model._packed_graph = PackedVisionGraph(count, count * 8400)
+        model._packed_graph = PackedVisionGraph(
+            count, count * 8400, max_bytes=200 * 1024**3
+        )
         self.assertEqual(
             model._packed_graph.effective_batch_images(model._vit_grid(images[0])),
             count,
         )
         got = model.batched_embedding(grouped, [MMUrlType.IMAGE] * len(grouped))
         check(got, expected, "CPU_group2_graph192_vs_old126_chunks")
+        self.assertTrue(model.run_embedding_idle_work())
         changed = list(reversed(sequence))
         changed_expected = baseline(changed)
         changed_groups = [list(reversed(decoded_group))] * (count // 2)
@@ -148,7 +152,7 @@ class PipelineGPUExactTest(unittest.TestCase):
         finally:
             staged.close()
         self.assertEqual(model.packed_graph_stats()["captures"], 1)
-        self.assertEqual(model.packed_graph_stats()["replays"], 2)
+        self.assertEqual(model.packed_graph_stats()["replays"], 1)
         self.assertEqual(model.input_transfer_stats()["budget_fallbacks"], 0)
         with Path(os.environ["DSV41_PIPELINE_GATE_OUTPUT"]).open("x") as stream:
             json.dump(
@@ -182,8 +186,7 @@ class PipelineGPUExactTest(unittest.TestCase):
         self.assertTrue(model.packed_forward_stats()["enabled"])
         self.assertIsInstance(model._packed_graph, PackedVisionGraph)
         model._packed_graph = None  # Start with the unchanged eager reference.
-        self.assertEqual(model._packed_max_images, 126)
-        self.assertEqual(model._packed_max_patches, 1058400)
+        self.assertEqual(model._packed_max_images, sys.maxsize)
         images = []
         for path in json.loads(os.environ["DSV41_JPEG_PATHS"]):
             with Image.open(path) as image:
@@ -248,10 +251,11 @@ class PipelineGPUExactTest(unittest.TestCase):
         expected = reference(batch)
         grids = [model._vit_grid(image) for image in batch]
         self.assertTrue(all(grid == grids[0] for grid in grids))
-        model._packed_graph = PackedVisionGraph(128, 1061888)
+        model._packed_graph = PackedVisionGraph(128, 1061888, max_bytes=200 * 1024**3)
         self.assertEqual(model._packed_graph.effective_batch_images(grids[0]), 126)
         got = model.batched_embedding(batch, [MMUrlType.IMAGE] * len(batch))
         check(got, expected, "graph_patch_limited126")
+        self.assertTrue(model.run_embedding_idle_work())
         retained = [value[0].cpu() for value in got]
         changed = list(reversed(batch))
         # The eager reference remains independently produced, not a new golden.
@@ -278,8 +282,9 @@ class PipelineGPUExactTest(unittest.TestCase):
         check(tail, tail_expected, "graph_tail_eager")
         stats = model.packed_graph_stats()
         self.assertEqual(stats["captures"], 1)
-        self.assertEqual(stats["replays"], 2)
-        self.assertEqual(stats["eager"], 1)
+        self.assertEqual(stats["replays"], 1)
+        self.assertEqual(stats["eager"], 2)
+        self.assertEqual(stats["pending"], 1)
         report = {
             "status": "PASS",
             "cases": rows,

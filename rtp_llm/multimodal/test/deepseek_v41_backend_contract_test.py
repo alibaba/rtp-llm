@@ -6,6 +6,7 @@ does not expose V4.1 layout metadata or submit CUDA work.
 """
 
 import io
+import threading
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -43,7 +44,14 @@ def _make_adapter(hidden=4):
     adapter = object.__new__(DeepSeekV41VisionEmbedding)
     torch.nn.Module.__init__(adapter)
     adapter.processor_config = V41ImageProcessorConfig(vision_min_pixels=1764)
-    adapter._packed_max_patches = 1061888
+    adapter._resource_lock = threading.Lock()
+    adapter._resource_budget = None
+    adapter._batch_max_bytes = 64 * 1024**2
+    adapter._graph_max_bytes = 0
+    adapter._packed_graph = None
+    adapter._packed_max_images = 256
+    adapter._staging_max_bytes = 4 * 1024**3
+    adapter._workspace_per_patch = 4096
     for name, value in (("image_start", -1), ("image_newline", -2), ("image_end", -3)):
         setattr(
             adapter,

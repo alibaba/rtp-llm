@@ -114,11 +114,12 @@ class PackedOptimizationTest(unittest.TestCase):
             actual = spans(forward(parts, grids), batch)
             check(actual, expected, f"layout_{len(order)}")
             if len(order) == 128:
-                graph = PackedVisionGraph(128)
+                graph = PackedVisionGraph(128, max_bytes=200 * 1024**3)
                 actual_graph = graph.run(
                     parts, grids, forward, lambda values: spans(values, batch)
                 )
                 check(actual_graph, expected, "graph_capture_full128")
+                self.assertTrue(graph.build_one(forward))
                 retained = [value.clone() for value in actual_graph]
                 changed = list(reversed(batch))
                 changed_parts = [image.patches for image in changed]
@@ -149,8 +150,9 @@ class PackedOptimizationTest(unittest.TestCase):
                     tail, spans(forward(parts[:2], grids[:2]), batch[:2]), "eager_tail"
                 )
                 self.assertEqual(graph.stats()["captures"], 1)
-                self.assertEqual(graph.stats()["replays"], 2)
-                self.assertEqual(graph.stats()["eager"], 1)
+                self.assertEqual(graph.stats()["replays"], 1)
+                self.assertEqual(graph.stats()["eager"], 2)
+                self.assertEqual(graph.stats()["pending"], 1)
                 print(
                     json.dumps(
                         {
