@@ -2432,6 +2432,77 @@ TEST_F(MtpExecutorTest, testDSparkDraftUsesFlashInferSamplingAndReturnsExactQ) {
     EXPECT_TRUE(sampled_q.gt(0).all().item<bool>());
 }
 
+TEST_F(MtpExecutorTest, testDSparkDraftAppliesRequestTopKAndTopPToSampledQ) {
+    constexpr int32_t     gamma = 2, vocab_size = 4;
+    MtpExecutorTestConfig test_config;
+    test_config.vocab_size           = vocab_size;
+    test_config.gen_num_per_cycle    = gamma;
+    test_config.vocab_size_override  = vocab_size;
+    test_config.sp_type              = SP_TYPE_DSPARK;
+    test_config.dspark_mask_token_id = 0;
+    auto components                  = createMtpExecutorComponents(test_config);
+    auto stream =
+        createContextStream(components.model_config, components.runtime_config, components.resource_context, {0, 1});
+    stream->generateConfig()->do_sample   = true;
+    stream->generateConfig()->temperature = 1.0f;
+    StreamGroups stream_groups({stream});
+
+    auto logits      = torch::tensor({2.0f, 1.0f, 0.0f, -1.0f}, torch::kFloat32).to(torch::kCUDA);
+    auto base_logits = logits.repeat({gamma, 1});
+    auto anchors     = torch::tensor({0}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+    auto full_q      = torch::softmax(logits, -1);
+    auto expected    = full_q.clone();
+    expected.slice(0, 2).zero_();
+    expected.div_(expected.sum());
+
+    for (const auto& [top_k, top_p] : std::vector<std::pair<int, float>>{{0, 0.8f}, {2, 1.0f}, {2, 0.8f}}) {
+        stream->generateConfig()->top_k = top_k;
+        stream->generateConfig()->top_p = top_p;
+        auto output                     = components.executor->sampleDSparkDraft(stream_groups, base_logits, anchors);
+        EXPECT_TRUE(torch::allclose(output.all_probs[0][0], expected, 1e-5, 1e-6));
+        EXPECT_TRUE(torch::allclose(output.all_probs[0][1], expected, 1e-5, 1e-6));
+        EXPECT_TRUE(output.token_ids.lt(2).all().item<bool>());
+    }
+
+    // Joint filtering uses top-p on the original distribution: top-k first
+    // would rescale 0.5 to 0.625 and incorrectly remove the second token.
+    stream->generateConfig()->top_k = 2;
+    stream->generateConfig()->top_p = 0.55f;
+    auto joint_logits =
+        torch::tensor({std::log(0.5f), std::log(0.3f), std::log(0.19f), std::log(0.01f)}, torch::kFloat32)
+            .to(torch::kCUDA)
+            .repeat({gamma, 1});
+    auto joint_output   = components.executor->sampleDSparkDraft(stream_groups, joint_logits, anchors);
+    auto joint_expected = torch::tensor({0.625f, 0.375f, 0.0f, 0.0f}, torch::kFloat32).to(torch::kCUDA);
+    EXPECT_TRUE(torch::allclose(joint_output.all_probs[0][0], joint_expected, 1e-5, 1e-6));
+    EXPECT_TRUE(torch::allclose(joint_output.all_probs[0][1], joint_expected, 1e-5, 1e-6));
+    EXPECT_TRUE(joint_output.token_ids.lt(2).all().item<bool>());
+
+    // A probability tied at the top-k or top-p cutoff remains in the support.
+    auto tied_logits = torch::tensor({std::log(0.4f), std::log(0.3f), std::log(0.3f), std::log(0.01f)}, torch::kFloat32)
+                           .to(torch::kCUDA)
+                           .repeat({gamma, 1});
+    auto tied_expected = torch::tensor({0.4f, 0.3f, 0.3f, 0.0f}, torch::kFloat32).to(torch::kCUDA);
+    for (const auto& [top_k, top_p] : std::vector<std::pair<int, float>>{{2, 1.0f}, {0, 0.68f}}) {
+        stream->generateConfig()->top_k = top_k;
+        stream->generateConfig()->top_p = top_p;
+        auto tied_output                = components.executor->sampleDSparkDraft(stream_groups, tied_logits, anchors);
+        EXPECT_TRUE(torch::allclose(tied_output.all_probs[0][0], tied_expected, 1e-5, 1e-6));
+        EXPECT_TRUE(torch::allclose(tied_output.all_probs[0][1], tied_expected, 1e-5, 1e-6));
+        EXPECT_TRUE(tied_output.token_ids.lt(3).all().item<bool>());
+    }
+
+    stream->generateConfig()->top_k = 0;
+    stream->generateConfig()->top_p = 0.5f;
+    auto boundary_logits            = torch::tensor({0.0f, -std::log(2.0f), -std::log(2.0f), -100.0f}, torch::kFloat32)
+                               .to(torch::kCUDA)
+                               .repeat({gamma, 1});
+    auto boundary_output   = components.executor->sampleDSparkDraft(stream_groups, boundary_logits, anchors);
+    auto boundary_expected = torch::tensor({1.0f, 0.0f, 0.0f, 0.0f}, torch::kFloat32).to(torch::kCUDA);
+    EXPECT_TRUE(torch::allclose(boundary_output.all_probs[0][0], boundary_expected, 1e-5, 1e-6));
+    EXPECT_TRUE(torch::allclose(boundary_output.all_probs[0][1], boundary_expected, 1e-5, 1e-6));
+}
+
 TEST_F(MtpExecutorTest, testDSparkDraftZeroTemperatureUsesClampedFullSoftmaxQ) {
     constexpr int32_t gamma      = 3;
     constexpr int32_t vocab_size = 4;
@@ -2632,7 +2703,7 @@ TEST_F(MtpExecutorTest, testDSparkDraftMixedBatchKeepsDenseQForStochasticRow) {
         output.all_probs.select(0, 1), torch::softmax(base_logits.select(0, 1) / 0.5f, -1), 1e-5, 1e-6));
 }
 
-TEST_F(MtpExecutorTest, testDSparkDraftUsesDenseSequentialMarkovDistribution) {
+TEST_F(MtpExecutorTest, testDSparkDraftUsesSequentialMarkovDistributionWithTopP) {
     constexpr int32_t gamma      = 3;
     constexpr int32_t vocab_size = 4;
     constexpr float   top_p      = 0.7f;
@@ -2679,9 +2750,16 @@ TEST_F(MtpExecutorTest, testDSparkDraftUsesDenseSequentialMarkovDistribution) {
                 torch::mm(markov_w1.index_select(0, anchors.to(torch::kLong)), markov_w2.transpose(0, 1));
             EXPECT_FALSE(torch::allclose(raw_probs, torch::softmax(base_logits.select(1, step) + anchor_bias, -1)));
         }
-        auto actual_q = output.all_probs.select(1, step);
-        EXPECT_TRUE(torch::allclose(actual_q, raw_probs, 1e-5, 1e-6));
-        EXPECT_EQ(actual_q.gt(0).sum().item<int64_t>(), vocab_size);
+        auto actual_q   = output.all_probs.select(1, step);
+        auto sorted     = raw_probs.sort(-1, true);
+        auto values     = std::get<0>(sorted);
+        auto nucleus    = values.cumsum(-1).sub(values).lt(top_p);
+        auto cutoff     = values.masked_fill(~nucleus, std::numeric_limits<float>::infinity()).amin(-1, true);
+        auto keep       = values.ge(cutoff);
+        auto expected_q = torch::zeros_like(raw_probs).scatter_(1, std::get<1>(sorted), values.masked_fill(~keep, 0.0));
+        expected_q.div_(expected_q.sum(-1, true));
+        EXPECT_TRUE(torch::allclose(actual_q, expected_q, 1e-5, 1e-6));
+        EXPECT_EQ(actual_q.gt(0).sum().item<int64_t>(), expected_q.gt(0).sum().item<int64_t>());
         auto sampled_token = output.token_ids.select(1, step).to(torch::kLong);
         EXPECT_TRUE(actual_q.gather(1, sampled_token.unsqueeze(1)).gt(0).all().item<bool>());
         previous_tokens = std::move(sampled_token);
@@ -2708,8 +2786,8 @@ TEST_F(MtpExecutorTest, testDSparkReducedVocabFeedsMappedTargetTokenIntoMarkovCh
     auto markov_w2 =
         torch::tensor({-100.0f, 0.0f, 100.0f}, torch::kFloat32).reshape({draft_vocab_size, 1}).to(torch::kCUDA);
 
-    auto output =
-        sampler.sampleDSparkDraft(base_logits, anchors, temperature, markov_w1, markov_w2, draft_vocab_size, false);
+    auto output = sampler.sampleDSparkDraft(
+        base_logits, anchors, temperature, {}, {}, markov_w1, markov_w2, draft_vocab_size, false);
 
     EXPECT_EQ((std::vector<int32_t>{5, 5}), toVec<int32_t>(output.token_ids.cpu()));
     auto expected_second_q = torch::softmax(torch::tensor({-100.0f, 0.0f, 100.0f}), -1);
@@ -2717,8 +2795,8 @@ TEST_F(MtpExecutorTest, testDSparkReducedVocabFeedsMappedTargetTokenIntoMarkovCh
 
     // The all-greedy point-mass path runs the same d2t-mapped Markov chain
     // without materializing q: identical tokens, no all_probs.
-    auto point_mass_output =
-        sampler.sampleDSparkDraft(base_logits, anchors, temperature, markov_w1, markov_w2, draft_vocab_size, true);
+    auto point_mass_output = sampler.sampleDSparkDraft(
+        base_logits, anchors, temperature, {}, {}, markov_w1, markov_w2, draft_vocab_size, true);
     EXPECT_TRUE(point_mass_output.token_ids_are_point_mass);
     EXPECT_FALSE(point_mass_output.all_probs.defined());
     EXPECT_EQ((std::vector<int32_t>{5, 5}), toVec<int32_t>(point_mass_output.token_ids.cpu()));
