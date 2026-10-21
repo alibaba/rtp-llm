@@ -143,6 +143,54 @@ Omit `router.roles.decode.costEstimator` to balance by KV usage ratio. Set its
 ```
 
 `workerRegistry`, `observability.cacheHit`, and `router.groupSelector` remain available.
+
+Allocator diagnostics are configured under `scheduler.nettyMemoryReporter` in the same
+`FLEXLB_CONFIG` document, for both QUEUE and DIRECT. Both switches default to **false**:
+
+```json
+{
+  "scheduler": {
+    "nettyMemoryReporter": {
+      "enabled": false,
+      "intervalMs": 10000,
+      "autoCapture": {
+        "enabled": false,
+        "thresholdBytes": 5368709120,
+        "cooldownMs": 300000
+      }
+    }
+  }
+}
+```
+
+Merge this fragment into the existing configuration; it is not a complete workload config.
+Changes take effect at process startup. With sampling disabled there is no allocator
+discovery, scan, meter registration, or diagnostic thread. Enabled sampling runs on one
+daemon thread with fixed delay (at least 1000 ms), never on RPC or scrape threads. Netty's
+reserved/pinned getters acquire arena locks and traverse chunks; start at 10 seconds
+and measure impact before increasing the frequency. No message-size traversal is added.
+
+The reporter reads the existing Netty default pool and gRPC 1.65.1's allocator singleton
+without replacing either allocator. Shared instances are counted once. Labels identify
+allocator instances (`netty_default` / `grpc_default`), not exclusive traffic ownership;
+HTTP or forwarding may share these pools. If the gRPC allocator cannot be read or is
+unpooled, startup emits `event=netty_memory_allocator_unavailable`; its memory is not
+silently reported as zero.
+
+Metrics are `app.netty.direct.reserved.bytes`, `app.netty.direct.pinned.bytes`
+(tag `allocator`), `app.netty.memory.sample.duration.ms`, and
+`app.netty.memory.sample.timestamp.ms` (last completed scan, Unix milliseconds).
+Prometheus deployments must
+append `flexlb_app_netty_` to their existing `flexlb.monitor.metric-whitelist` prefixes;
+KMonitor uses the existing FlexMonitor registration path.
+
+`autoCapture.enabled=true` requires sampling to be enabled. When JVM direct memory or
+the sum of monitored allocator reservations reaches `thresholdBytes`, the existing scan
+is written to application logs as `event=netty_memory_capture`, at most once per
+`cooldownMs` (at least 1000 ms). Capture adds no allocator scan and does not start GC,
+thread dumps, JFR, heap dumps, or external commands. It preserves memory-accounting
+evidence, not a buffer ownership graph. The default threshold is 5 GiB; adjust it to
+the deployment's direct-memory limit.
 Only schema 3 is accepted. Write the configuration directly with explicit values for
 `requestLifecycle.request.timeoutMs`, which has no default. A matching Engine request
 status renews this deadline. Once it expires, FlexLB releases the exact local
