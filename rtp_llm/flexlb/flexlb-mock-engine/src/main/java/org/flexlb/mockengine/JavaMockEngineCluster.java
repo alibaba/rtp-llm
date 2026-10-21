@@ -3122,7 +3122,7 @@ public final class JavaMockEngineCluster {
                         // producing outputs.
                         LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> queue =
                                 responseQueues.get(requestId);
-                        if (queue != null) {
+                        if (queue != null && (!LegacyMockTokenOutput.enabled() || shape.outputLen() > 1)) {
                             queue.offer(buildOutput(shape, false));
                         }
                     } else {
@@ -4048,6 +4048,10 @@ public final class JavaMockEngineCluster {
 
         private EngineRpcService.GenerateOutputsPB buildOutput(MockPerformanceModel.RequestShape shape,
                                                                boolean finished) {
+            if (LegacyMockTokenOutput.enabled()) {
+                return LegacyMockTokenOutput.build(shape, finished,
+                        roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE);
+            }
             return EngineRpcService.GenerateOutputsPB.newBuilder()
                     .setRequestId(shape.input().getRequestId())
                     .setFlattenOutput(EngineRpcService.FlattenOutputPB.newBuilder()
