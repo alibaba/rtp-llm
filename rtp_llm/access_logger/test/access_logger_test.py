@@ -20,10 +20,82 @@ from rtp_llm.server.backend_manager import BackendManager
 from rtp_llm.server.server_args.misc_group_args import init_misc_group_args
 from rtp_llm.server.server_args.server_args import EnvArgumentParser
 from rtp_llm.server.server_args.vit_group_args import init_vit_group_args
+from rtp_llm.server.vit_app import VitEndpointApp
 from rtp_llm.structure.request_constants import request_id_field_name
 
 
 class AccessLoggerTest(unittest.TestCase):
+    def test_vit_http_start_preserves_mm_access_logs(self):
+        with tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
+            stack.enter_context(patch.dict(os.environ, {"LOG_PATH": directory}))
+            # Uvicorn used to close both existing async handlers at startup.
+            logger = MMAccessLogger(directory, 1, disable_access_log=False)
+            sinks = (logger.logger, logger.query_logger)
+            for sink in sinks:
+                sink.setLevel(logging.INFO)
+                for handler in sink.handlers[:]:
+                    stack.callback(handler.close)
+                    stack.callback(sink.removeHandler, handler)
+            main_handler = logging.NullHandler()
+            logging.getLogger().addHandler(main_handler)
+            stack.callback(main_handler.close)
+            stack.callback(logging.getLogger().removeHandler, main_handler)
+
+            app = VitEndpointApp.__new__(VitEndpointApp)
+            app.py_env_configs = PyEnvConfigs()
+            app.vit_endpoint_server = MagicMock()
+            app.create_app = MagicMock()
+            app._setup_event_loop = MagicMock(return_value="none")
+            stack.enter_context(patch("rtp_llm.server.vit_app.socket.socket"))
+            server = stack.enter_context(
+                patch("rtp_llm.server.vit_app.GracefulShutdownServer")
+            )
+            # Exercise the real Config constructor, without starting a listener.
+            app._start_http(0)
+            server.return_value.run.assert_called_once()
+            self.assertFalse(main_handler._closed)
+
+            logger.log_query_access([], request_id=101)
+            logger.log_success_access([], "embedding ready", request_id=101)
+            logger.log_query_access([], request_id=102)
+            logger.log_exception_access([], RuntimeError("download failed"), 102)
+            for sink in sinks:
+                for handler in sink.handlers:
+                    handler.flush()
+                    self.assertFalse(handler.get_stats()["closing"])
+                    self.assertEqual(handler.get_stats()["rejected_closing"], 0)
+            query = [
+                json.loads(line)
+                for line in (Path(directory) / "mm_query_access_r0_s0.log")
+                .read_text()
+                .splitlines()
+            ]
+            access = [
+                json.loads(line)
+                for line in (Path(directory) / "mm_access_r0_s0.log")
+                .read_text()
+                .splitlines()
+            ]
+            self.assertEqual([record["id"] for record in query], [101, 102])
+            self.assertEqual([record["id"] for record in access], [101, 102])
+            self.assertEqual(access[0]["response"], "embedding ready")
+            self.assertEqual(access[1]["exception"], "download failed")
+            uvicorn_logger = logging.getLogger("uvicorn.access")
+            for handler in uvicorn_logger.handlers[:]:
+                stack.callback(handler.close)
+                stack.callback(uvicorn_logger.removeHandler, handler)
+            uvicorn_logger.info(
+                '%s - "%s %s HTTP/%s" %d',
+                "127.0.0.1:1234",
+                "GET",
+                "/health",
+                "1.1",
+                200,
+            )
+            self.assertIn(
+                "/health", (Path(directory) / "uvicorn_access.log").read_text()
+            )
+
     def test_disable_access_log(self):
         for logger_type in (AccessLogger, MMAccessLogger):
             for value, disabled in [
