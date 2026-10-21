@@ -1,6 +1,7 @@
 import random
 import unittest
 from typing import Dict, Tuple
+from unittest import mock
 
 import torch
 
@@ -172,6 +173,26 @@ class DeepGemmMaskedExecutorTestBase:
             )
             # print('diff:', diff, combine_payload.fused_expert_output[i, :num_token], ref_output[i, :num_token])
             assert diff < 0.003
+
+    def test_fp8_rejects_wrong_non_e8m0_scale_dimension(self):
+        config = self._generate_config()
+        num_experts, n, k = 2, 256, 256
+        weights = {
+            W.moe_w1: torch.empty((num_experts, n, k), dtype=torch.float8_e4m3fn),
+            W.moe_w2: torch.empty((num_experts, k, n // 2), dtype=torch.float8_e4m3fn),
+            W.moe_s1: torch.empty((num_experts, 3, 2), dtype=torch.float32),
+            W.moe_s2: torch.empty((num_experts, 2, 1), dtype=torch.float32),
+        }
+        quant_config = FusedMoEQuantConfig(
+            quant_dtype=torch.float8_e4m3fn, block_shape=[128, 128]
+        )
+
+        with mock.patch(
+            "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors."
+            "deepgemm_masked_executor.is_deep_gemm_e8m0_used",
+            return_value=False,
+        ), self.assertRaises(AssertionError):
+            DeepGemmMaskedExecutor(config, quant_config, weights)
 
     def test_no_fp8(self):
         self._test_deepgemm_masked_executor(False)

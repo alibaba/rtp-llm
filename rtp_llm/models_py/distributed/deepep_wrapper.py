@@ -4,62 +4,31 @@ This module provides a unified interface for DeepEP initialization and managemen
 combining the functionality of the previous DeepEPInitializer and DeepEPWrapper classes.
 """
 
+from __future__ import annotations
+
 import gc
 import logging
 import os
+import platform
 import threading
 from dataclasses import dataclass
 from enum import IntEnum, auto
-from pathlib import Path
-from typing import Optional, Tuple
+from typing import TYPE_CHECKING, Optional, Tuple
 
 import torch
 from torch.distributed import ProcessGroup
-
-
-def _configure_deepep_nccl_root() -> None:
-    """Pin EP_NCCL_ROOT_DIR to the NCCL library that is actually loaded.
-
-    deep_ep byte-compares the loaded libnccl against find_nccl_root()'s pick
-    and EP_NCCL_ROOT_DIR takes precedence in find_nccl_root, so the env must
-    name the root of the LOADED library (torch's, usually the wheel from the
-    runfiles/venv).  Never guess from installed package metadata: a
-    conda/site-packages copy can differ byte-wise from the loaded wheel.  If
-    no loaded libnccl is mapped yet, leave the env unset and let deep_ep
-    auto-detect with its own sys.path-priority logic.
-    """
-    if "EP_NCCL_ROOT_DIR" in os.environ:
-        return
-    try:
-        loaded_nccl = sorted(
-            {
-                Path(line.rsplit(maxsplit=1)[-1]).resolve()
-                for line in Path("/proc/self/maps").read_text().splitlines()
-                if "/libnccl.so" in line
-            }
-        )
-    except OSError:
-        return
-    for nccl in loaded_nccl:
-        nccl_root = nccl.parent.parent
-        if (nccl_root / "lib").is_dir() and (nccl_root / "include").is_dir():
-            os.environ["EP_NCCL_ROOT_DIR"] = str(nccl_root)
-            logging.info("DeepEP will use NCCL from %s", nccl_root)
-            return
-
-
-# Must run before `from deep_ep import ...`: deep_ep byte-compares the loaded
-# libnccl against find_nccl_root() at import time, and EP_NCCL_ROOT_DIR takes
-# precedence there.  This module is imported after torch.distributed has
-# loaded the runtime NCCL, so the maps scan below sees the right library.
-_configure_deepep_nccl_root()
 
 try:
     from deep_ep import Buffer as DeepEPBuffer
     from deep_ep import Config as DeepEPConfig
 except ImportError as _deep_ep_import_err:
-    # Some CPU and non-NVIDIA builds intentionally omit deep_ep. Keep unrelated
-    # startup paths importable and fail only when a DeepEP path is selected.
+    # deep_ep wheel is omitted from some lock files (e.g. cuda13: no
+    # torch2.11+cu130 build yet, and the cu12.9 prebuilt links libcudart.so.12
+    # which is absent in the cu13 toolchain). Provide stubs so module-level
+    # `from .deepep_wrapper import ...` and type annotations resolve. Any code
+    # path that actually constructs / calls these (init_deepep_wrapper for an
+    # ep>1 MoE config) raises a clear error at the use-site instead of failing
+    # at import time for unrelated startup paths.
     _DEEP_EP_IMPORT_ERROR = _deep_ep_import_err
 
     class _DeepEPUnavailable:
@@ -79,16 +48,26 @@ except ImportError as _deep_ep_import_err:
         def get_low_latency_rdma_size_hint(cls, *args, **kwargs):
             raise NotImplementedError("deep_ep is not available in this build.")
 
+        @classmethod
+        def get_low_latency_rdma_size_hint_m2n(cls, *args, **kwargs):
+            raise NotImplementedError("deep_ep is not available in this build.")
+
     DeepEPBuffer = _DeepEPUnavailable  # type: ignore[assignment,misc]
     DeepEPConfig = _DeepEPUnavailable  # type: ignore[assignment,misc]
 
-from rtp_llm.config.engine_config import EngineConfig
-from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.config.quant_config import QuantizationConfig
-from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
-    MoEConfigAdapter,
+from rtp_llm.models_py.quantization_exclusion import (
+    collect_quantization_exclusions,
+    is_module_ignored,
+    moe_projection_exclusion_states,
 )
-from rtp_llm.ops import SpeculativeType
+
+if TYPE_CHECKING:
+    from rtp_llm.config.engine_config import EngineConfig
+    from rtp_llm.config.model_config import ModelConfig
+    from rtp_llm.config.quant_config import QuantizationConfig
+    from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+        MoEConfigAdapter,
+    )
 
 __all__ = [
     "DeepepWrapperConfig",
@@ -96,8 +75,25 @@ __all__ = [
     "DeepEPBuffer",
     "DeepEPConfig",
     "DeepEPMode",
+    "use_accl_ep",
+    "allow_mnnvl",
     "init_deepep_wrapper",
 ]
+
+
+def use_accl_ep() -> bool:
+    """Check if ACCL EP should be used based on device type."""
+    from rtp_llm.device.device_type import DeviceType, get_device_type
+
+    device_type = get_device_type()
+    return not device_type == DeviceType.ROCm
+
+
+def allow_mnnvl() -> bool:
+    """Check if MNNVL is allowed based on architecture and GPU capability."""
+    from rtp_llm.models_py.utils.arch import is_sm10x
+
+    return "aarch64" in platform.machine() and is_sm10x()
 
 
 class DeepEPMode(IntEnum):
@@ -105,6 +101,7 @@ class DeepEPMode(IntEnum):
 
     NORMAL = auto()
     LOW_LATENCY = auto()
+    LOW_LATENCY_M2N = auto()
 
 
 @dataclass
@@ -135,7 +132,12 @@ class DeepepWrapperConfig:
     # Generation parameters
     ll_num_max_token: int
 
-    # Low-latency generation parameter
+    # FFN disaggregate parameters (optional)
+    enable_ffn_disaggregate: bool = False
+    attention_tp_size: int = 0
+    attention_dp_size: int = 0
+    ffn_tp_size: int = 0
+    ffn_dp_size: int = 0
     ll_num_max_token_per_rank: int = 0
 
     @classmethod
@@ -153,13 +155,7 @@ class DeepepWrapperConfig:
         model_config = config_adapter.model_config
         parallelism_config = config_adapter.parallelism_config
         moe_config = config_adapter.moe_config
-
         ffn_config = parallelism_config.ffn_disaggregate_config
-        if ffn_config is not None and ffn_config.enable_ffn_disaggregate:
-            raise RuntimeError(
-                "enable_ffn_disaggregate needs the ACCL-EP M2N DeepEP buffer and is "
-                "not supported by the official DeepEP provider"
-            )
 
         return cls(
             # Parallelism parameters
@@ -178,6 +174,14 @@ class DeepepWrapperConfig:
             use_deepep_internode=moe_config.use_deepep_internode,
             # Generation parameters
             ll_num_max_token=config_adapter.ll_num_max_token,
+            # FFN disaggregate parameters
+            enable_ffn_disaggregate=(
+                ffn_config.enable_ffn_disaggregate if ffn_config else False
+            ),
+            attention_tp_size=(ffn_config.attention_tp_size if ffn_config else 0),
+            attention_dp_size=(ffn_config.attention_dp_size if ffn_config else 0),
+            ffn_tp_size=(ffn_config.ffn_tp_size if ffn_config else 0),
+            ffn_dp_size=(ffn_config.ffn_dp_size if ffn_config else 0),
             ll_num_max_token_per_rank=ll_num_max_token_per_rank,
         )
 
@@ -203,6 +207,11 @@ class DeepepWrapperConfig:
             and self.use_deepep_low_latency == other.use_deepep_low_latency
             and self.use_deepep_internode == other.use_deepep_internode
             and self.ll_num_max_token == other.ll_num_max_token
+            and self.enable_ffn_disaggregate == other.enable_ffn_disaggregate
+            and self.attention_tp_size == other.attention_tp_size
+            and self.attention_dp_size == other.attention_dp_size
+            and self.ffn_tp_size == other.ffn_tp_size
+            and self.ffn_dp_size == other.ffn_dp_size
             and self.ll_num_max_token_per_rank == other.ll_num_max_token_per_rank
         )
 
@@ -210,26 +219,27 @@ class DeepepWrapperConfig:
     def calc_low_latency_max_token_per_rank(
         ll_num_max_token: int,
         tp_size: int,
-        quant_config: QuantizationConfig,
+        quant_config: Optional[QuantizationConfig],
     ) -> int:
         ll_num_max_token_per_rank = (ll_num_max_token + tp_size - 1) // tp_size
         # deepgemm masked with max_m < 64 get incorrect result, related: https://github.com/deepseek-ai/DeepGEMM/issues/268
         is_quantized = quant_config is not None and quant_config.is_quanted()
-        is_block_quantized = (
-            quant_config is not None and quant_config.get_method() == "FP8_PER_BLOCK"
+        quant_method = (
+            quant_config.get_moe_runtime_method_key()
+            if quant_config is not None
+            else None
         )
-        is_per_act_token = quant_config is not None and quant_config.get_method() in (
+        is_block_quantized = quant_method == "FP8_PER_BLOCK"
+        is_per_act_token = quant_method in (
             "FP8_PER_TENSOR_COMPRESSED",
             "FP8_DYNAMIC_PER_TENSOR",
             "W4A8_INT4_PER_CHANNEL",
             "W4A8_INT4_PER_CHANNEL_COMPRESSED",
             "W8A8_INT8_PER_CHANNEL_COMPRESSED",
         )
-        is_per_group_fp4 = (
-            quant_config is not None and quant_config.get_method() == "modelopt_fp4"
-        )
+        is_per_group_fp4 = quant_method == "modelopt_fp4"
         if not is_quantized or is_block_quantized or is_per_group_fp4:
-            matched_tokens = [64, 128]
+            matched_tokens = [128] if allow_mnnvl() else [64, 128]
         elif is_per_act_token:
             matched_tokens = [
                 16,
@@ -259,9 +269,61 @@ class DeepepWrapperConfig:
                 return ll_num_max_token_per_rank
         return 128
 
+    @staticmethod
+    def calc_model_low_latency_max_token_per_rank(
+        ll_num_max_token: int,
+        tp_size: int,
+        quant_config: Optional[QuantizationConfig],
+        model_config: Optional[ModelConfig] = None,
+    ) -> int:
+        """Size the process-wide DeepEP buffer for every layer in the model.
+
+        DeepEP owns one process-wide low-latency buffer, while NewLoader may
+        disable quantization for individual MoE layers through checkpoint
+        exclusion patterns. In that case the buffer must satisfy both the
+        quantized and unquantized executors; sizing it from a layer's effective
+        quantization would make construction order affect the singleton config.
+        """
+        capacity = DeepepWrapperConfig.calc_low_latency_max_token_per_rank(
+            ll_num_max_token, tp_size, quant_config
+        )
+        exclusion_patterns = collect_quantization_exclusions(quant_config)
+        exclusions_exist = bool(exclusion_patterns)
+        has_unquantized_moe_layer = exclusions_exist and model_config is None
+        if exclusions_exist and model_config is not None:
+            moe_layer_indices = list(getattr(model_config, "moe_layer_index", ()))
+            if not moe_layer_indices and model_config.expert_num > 0:
+                moe_layer_indices = list(range(model_config.num_layers))
+            model_type = str(model_config.model_type)
+            moe_path = "block_sparse_moe" if model_type == "kimi_linear" else "mlp"
+            for layer_idx in moe_layer_indices:
+                prefix = f"layers.{layer_idx}.{moe_path}.experts"
+                root_ignored = is_module_ignored(prefix, exclusion_patterns)
+                projection_ignored = moe_projection_exclusion_states(
+                    prefix,
+                    exclusion_patterns,
+                )
+                if root_ignored or all(projection_ignored):
+                    has_unquantized_moe_layer = True
+                    break
+                if any(projection_ignored):
+                    raise ValueError(
+                        "Quantization exclusions partially match fused MoE layer "
+                        f"{prefix!r}; all expert projections must use the same "
+                        "quantization layout"
+                    )
+        if has_unquantized_moe_layer:
+            capacity = max(
+                capacity,
+                DeepepWrapperConfig.calc_low_latency_max_token_per_rank(
+                    ll_num_max_token, tp_size, None
+                ),
+            )
+        return capacity
+
     def __str__(self) -> str:
         """Return a string representation of the DeepepWrapperConfig."""
-        return f"DeepepWrapperConfig(ep_rank={self.ep_rank}, ep_size={self.ep_size}, tp_size={self.tp_size}, local_rank={self.local_rank}, world_size={self.world_size}, hidden_size={self.hidden_size}, expert_num={self.expert_num}, moe_k={self.moe_k}, deep_ep_num_sm={self.deep_ep_num_sm}, use_deepep_low_latency={self.use_deepep_low_latency}, use_deepep_internode={self.use_deepep_internode}, ll_num_max_token={self.ll_num_max_token}, ll_num_max_token_per_rank={self.ll_num_max_token_per_rank})"
+        return f"DeepepWrapperConfig(ep_rank={self.ep_rank}, ep_size={self.ep_size}, tp_size={self.tp_size}, local_rank={self.local_rank}, world_size={self.world_size}, hidden_size={self.hidden_size}, expert_num={self.expert_num}, moe_k={self.moe_k}, deep_ep_num_sm={self.deep_ep_num_sm}, use_deepep_low_latency={self.use_deepep_low_latency}, use_deepep_internode={self.use_deepep_internode}, ll_num_max_token={self.ll_num_max_token}, enable_ffn_disaggregate={self.enable_ffn_disaggregate}, attention_tp_size={self.attention_tp_size}, attention_dp_size={self.attention_dp_size}, ffn_tp_size={self.ffn_tp_size}, ffn_dp_size={self.ffn_dp_size}, ll_num_max_token_per_rank={self.ll_num_max_token_per_rank})"
 
 
 class DeepEPWrapper:
@@ -285,6 +347,8 @@ class DeepEPWrapper:
             config: DeepepWrapperConfig containing all necessary configuration
         """
         self._config = config
+        self._use_accl_ep = use_accl_ep()
+
         self._mode, self._buffer = self._init_deepep_buffer(group)
 
     @classmethod
@@ -460,6 +524,11 @@ class DeepEPWrapper:
         """Get number of SMs."""
         return self._config.deep_ep_num_sm
 
+    @property
+    def use_accl_ep(self) -> bool:
+        """Check if ACCL EP is used."""
+        return self._use_accl_ep
+
     def _init_deepep_buffer(
         self, group: ProcessGroup
     ) -> Tuple[DeepEPMode, DeepEPBuffer]:
@@ -473,9 +542,28 @@ class DeepEPWrapper:
         """
         config = self._config
 
-        if config.use_deepep_low_latency:
+        if config.use_deepep_low_latency and config.enable_ffn_disaggregate:
+            if self._use_accl_ep:
+                return DeepEPMode.LOW_LATENCY_M2N, self._init_low_latency_m2n_buffer(
+                    group
+                )
+            else:
+                raise RuntimeError(
+                    f"[rank: {config.ep_rank}] init deep_ep buffer failed, "
+                    f"current deep_ep provider does not support "
+                    f"use_deepep_low_latency and enable_ffn_disaggregate"
+                )
+        elif config.use_deepep_low_latency and not config.enable_ffn_disaggregate:
             return DeepEPMode.LOW_LATENCY, self._init_low_latency_buffer(group)
-        return DeepEPMode.NORMAL, self._init_normal_buffer(group)
+        elif not config.use_deepep_low_latency and not config.enable_ffn_disaggregate:
+            return DeepEPMode.NORMAL, self._init_normal_buffer(group)
+        else:
+            raise RuntimeError(
+                f"[rank: {config.ep_rank}] init deep_ep buffer failed, "
+                f"unsupported configuration: "
+                f"use_deepep_low_latency={config.use_deepep_low_latency}, "
+                f"enable_ffn_disaggregate={config.enable_ffn_disaggregate}"
+            )
 
     def _init_normal_buffer(self, group: ProcessGroup) -> DeepEPBuffer:
         """Initialize buffer for normal mode."""
@@ -486,16 +574,18 @@ class DeepEPWrapper:
 
         # Normal-kernel internode
         if config.use_deepep_internode:
-            accl_normal_mode = os.environ.get("ACCL_NORMAL_MODE")
-            if accl_normal_mode:
-                logging.warning(
-                    f"ACCL_NORMAL_MODE={accl_normal_mode} is no longer consulted: "
-                    "the DeepEP provider is the upstream package and "
-                    "num_qps_per_rank now always uses deep_ep_num_sm // 2."
-                )
             num_nvl_bytes = int(2e9)
             num_rdma_bytes = int(1e9)
-            num_qps_per_rank = config.deep_ep_num_sm // 2
+            # Normal IBGDA
+            if os.environ.get("ACCL_NORMAL_MODE", "IBRC") == "IBGDA":
+                os.environ["ACCL_NORMAL_MODE"] = "IBGDA"
+                num_qps_per_rank = max(
+                    config.deep_ep_num_sm // 2, int(config.expert_num / config.ep_size)
+                )
+            # Normal IBRC
+            else:
+                os.environ["ACCL_NORMAL_MODE"] = "IBRC"
+                num_qps_per_rank = config.deep_ep_num_sm // 2
         # Normal-kernel intranode
         else:
             num_nvl_bytes = int(2e9)
@@ -508,6 +598,14 @@ class DeepEPWrapper:
             "low_latency_mode": False,
             "num_qps_per_rank": num_qps_per_rank,
         }
+
+        if self._use_accl_ep:
+            init_kwargs["allow_nvlink_for_low_latency_mode"] = True
+            if allow_mnnvl():
+                init_kwargs["allow_mnnvl"] = True
+                init_kwargs["use_fabric"] = True
+            else:
+                init_kwargs["allow_mnnvl"] = False
 
         return DeepEPBuffer(**init_kwargs)  # type: ignore
 
@@ -539,7 +637,63 @@ class DeepEPWrapper:
             "num_rdma_bytes": num_rdma_bytes,
             "low_latency_mode": True,
             "num_qps_per_rank": num_qps_per_rank,
+            "allow_mnnvl": True,
         }
+
+        if self._use_accl_ep:
+            os.environ["ACCL_LOW_LATENCY_OPTIMIZE"] = "1"
+            init_kwargs["allow_nvlink_for_low_latency_mode"] = True
+            if allow_mnnvl():
+                init_kwargs["allow_mnnvl"] = True
+            else:
+                init_kwargs["allow_mnnvl"] = False
+
+        return DeepEPBuffer(**init_kwargs)  # type: ignore
+
+    def _init_low_latency_m2n_buffer(self, group: ProcessGroup) -> DeepEPBuffer:
+        """Initialize buffer for low-latency M2N mode."""
+        config = self._config
+        num_m = config.attention_dp_size * config.attention_tp_size
+        num_n = config.ffn_dp_size * config.ffn_tp_size
+
+        if not hasattr(DeepEPBuffer, "get_low_latency_rdma_size_hint_m2n"):
+            raise RuntimeError(
+                "current deep_ep provider does not support low-latency m2n"
+            )
+
+        num_rdma_bytes = DeepEPBuffer.get_low_latency_rdma_size_hint_m2n(
+            config.ll_num_max_token_per_rank,
+            config.hidden_size,
+            num_m + num_n,
+            config.expert_num,
+            num_m,
+        )
+
+        if config.local_rank == 0:
+            print(
+                f"Allocating buffer size: {num_rdma_bytes / 1e6} MB, "
+                f"ll_num_max_token_per_rank: {config.ll_num_max_token_per_rank}, "
+                f"hidden_size: {config.hidden_size}, "
+                f"expert_num: {config.expert_num}, "
+                f"num_m: {num_m}, "
+                f"num_n: {num_n}",
+                flush=True,
+            )
+
+        num_qps_per_rank = config.expert_num / num_n
+
+        init_kwargs = {
+            "group": group,
+            "num_nvl_bytes": 0,
+            "num_rdma_bytes": num_rdma_bytes,
+            "low_latency_mode": True,
+            "num_qps_per_rank": num_qps_per_rank,
+        }
+
+        if self._use_accl_ep:
+            init_kwargs["allow_nvlink_for_low_latency_mode"] = True
+            init_kwargs["allow_mnnvl"] = False
+
         return DeepEPBuffer(**init_kwargs)  # type: ignore
 
     def _destroy_buffer(self) -> None:
@@ -568,6 +722,11 @@ def init_deepep_wrapper(
         None
     """
 
+    from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+        MoEConfigAdapter,
+    )
+    from rtp_llm.ops import SpeculativeType
+
     if not DeepEPWrapper.supported():
         logging.warning(
             "DeepEP is not supported on this device, skipping initialization"
@@ -593,12 +752,14 @@ def init_deepep_wrapper(
         ll_num_max_token = engine_config.runtime_config.max_generate_batch_size
         if engine_config.sp_config.type != SpeculativeType.NONE:
             ll_num_max_token *= engine_config.sp_config.gen_num_per_cycle + 1
-        ll_num_max_token_per_rank = (
-            DeepepWrapperConfig.calc_low_latency_max_token_per_rank(
-                ll_num_max_token,
-                engine_config.parallelism_config.tp_size,
-                model_config.quant_config,
-            )
+        ll_num_max_token_per_rank = DeepepWrapperConfig.calc_model_low_latency_max_token_per_rank(
+            ll_num_max_token,
+            # Keep process-wide allocation identical to the router's
+            # prepare() partitioning. Under CP, adapter.tp_size is one and
+            # each rank dispatches its full local token set.
+            deepep_config_adapter.tp_size,
+            model_config.quant_config,
+            model_config,
         )
 
     deepep_config = DeepepWrapperConfig.from_config_adapter(

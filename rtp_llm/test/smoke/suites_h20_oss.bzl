@@ -5,6 +5,41 @@ def h20_oss_suites():
     # H20 (SM9x) — Architecture-grouped suites
     # ============================================================================
 
+    # Newloader production boundaries for Qwen3/Llama dense and GLM MLA/MoE variants.
+    native.test_suite(
+        name = "smoke_h20_newloader",
+        tests = [
+            smoke_test(
+                name="h20_dense_qwen3_8b_newloader_cudagraph_tp2",
+                task_info="data/model/qwen3/q_r_new_model_py.json",
+                smoke_args="--warm_up 0 --seq_size_per_block 16 --act_type BF16 --test_block_num 1000 --reserver_runtime_mem_mb 20000 --enable_cuda_graph 1 --decode_capture_config '1,2,3,4,5,6,7,8' --tp_size 2 --world_size 2",
+                envs=["USE_NEW_LOADER=1", "LOAD_METHOD=scratch"],
+                gpu_type=["H20"],
+            ),
+            smoke_test(
+                name="h20_llama_3b_newloader_tp2",
+                task_info="data/model/llama/q_r_3b_h20.json",
+                smoke_args="--warm_up 1 --seq_size_per_block 64 --act_type BF16 --tp_size 2 --world_size 2",
+                envs=["USE_NEW_LOADER=1", "LOAD_METHOD=scratch"],
+                gpu_type=["H20"],
+            ),
+            smoke_test(
+                name="h20_glm5_newloader_fp8kv",
+                task_info="data/model/glm5/glm_5_fp8_q_r_h20.json",
+                smoke_args="--warm_up 0 --seq_size_per_block 512 --act_type BF16 --enable_cuda_graph 0 --tp_size 1 --world_size 1 --dp_size 1 --fp8_kv_cache 1 --kernel_seq_size_per_block 64",
+                envs=["USE_NEW_LOADER=1", "LOAD_METHOD=scratch", "ACCL_LOW_LATENCY_OPTIMIZE=1"],
+                gpu_type=["H20"],
+            ),
+            smoke_test(
+                name="h20_glm4_moe_lite_newloader",
+                task_info="data/model/glm4_moe_lite/q_r_h20.json",
+                smoke_args="--warm_up 0 --seq_size_per_block 64 --act_type BF16 --enable_cuda_graph 0 --tp_size 1 --world_size 1 --dp_size 1",
+                envs=["USE_NEW_LOADER=1", "LOAD_METHOD=scratch"],
+                gpu_type=["H20"],
+            ),
+        ],
+    )
+
     # H20 MLA (GLM-4.7-Flash, GLM-5)
     #
     # The deleted DeepSeek V2/V3.2 cases were the only MLA carriers of the flags

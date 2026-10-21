@@ -746,6 +746,7 @@ std::vector<EngineScheduleInfo::TaskInfo> FIFOScheduler::waitingTaskList() {
         task_info.prefix_length = stream->prefixLength();
         task_info.input_length  = stream->inputLength();
         task_info.batch_id      = stream->groupId();
+        task_info.priority      = stream->priority();
         waiting_task_list_.push_back(task_info);
     }
     for (const auto& group : waiting_group_queue_) {
@@ -755,6 +756,7 @@ std::vector<EngineScheduleInfo::TaskInfo> FIFOScheduler::waitingTaskList() {
             task_info.prefix_length = stream->prefixLength();
             task_info.input_length  = stream->inputLength();
             task_info.batch_id      = stream->groupId();
+            task_info.priority      = stream->priority();
             waiting_task_list_.push_back(task_info);
         }
     }
