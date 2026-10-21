@@ -563,7 +563,9 @@ final class MockPerformanceModel {
         if (nativeKeys) {
             // HashUtil.h / KVCacheHashUtil.cc: signed rolling Jenkins hash.
             // Publish only complete blocks; partial blocks are not reusable.
-            blockKeys.addAll(MockImageCacheKeys.fullBlocks(input, blockSize, MockImageCacheKeys.seed(input)));
+            String physical = System.getenv("MOCK_HASH_BLOCK_SIZE");
+            int physicalBlockSize = physical == null || physical.isBlank() ? blockSize : Integer.parseInt(physical);
+            blockKeys.addAll(MockImageCacheKeys.routeBlocks(input, physicalBlockSize, blockSize, MockImageCacheKeys.seed(input)));
         }
         // hitBlocks carries the RAW prefix-match run length (key count) — the
         // mock key-level cache-hit counter recorded by the engine at this admission hit

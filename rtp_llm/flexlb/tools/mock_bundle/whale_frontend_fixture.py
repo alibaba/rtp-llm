@@ -1,43 +1,160 @@
-"""CPU synthetic Qwen2-VL fixture for an isolated Whale frontend protocol test.
+"""Start main frontend or CPU ViT with real DSV4.1 checkpoint metadata.
 
-Uses a pinned Python source tree with the container's matching native runtime.
-This entry point generates tokenizer/model metadata, never model weights.
+The historical filename is the CI packaging contract. No synthetic tokenizer,
+model config, native symbol replacement or model weights are generated here.
 """
-import os
-import pathlib
-import sys
-if os.environ.get("RTP_LLM_MOCK_FRONTEND") != "1":
-    raise ValueError("test fixture requires RTP_LLM_MOCK_FRONTEND=1")
-root = pathlib.Path(os.environ.get("HIPPO_PROC_WORKDIR", "/tmp")) / "mock-vit-main-frontend"
-root.mkdir(parents=True, exist_ok=True)
-source = pathlib.Path(os.environ["MOCK_FRONTEND_SOURCE_ROOT"])
-if not (source / "rtp_llm/server/backend_rpc_server_visitor.py").is_file():
-    raise ValueError("MOCK_FRONTEND_SOURCE_ROOT must contain the tested packaged frontend")
-for key in ("DSV41_CED", "DSV41_SWA_BOUNDED_REPLAY", "SP_MODEL_TYPE", "PREFILL_CP_SIZE", "PREFILL_CP_KV_CACHE_SHARDED", "SP_CHECKPOINT_PATH", "SP_TOKENIZER_PATH"):
-    os.environ.pop(key, None)
-os.environ.update(FLEXLB_RUN_DIR=str(root), PYTHONPATH=str(source), TP_SIZE="1", LD_LIBRARY_PATH="/opt/conda310/lib:/opt/conda310/lib/python3.10/site-packages/rtp_llm/libs")
-os.chdir(root)
-sys.path.insert(0, str(source))
+import concurrent.futures
+import hashlib
 import json
 import os
 from pathlib import Path
-from tokenizers import Tokenizer
-from tokenizers.models import WordLevel
-from tokenizers.pre_tokenizers import Whitespace
-from transformers import PreTrainedTokenizerFast
+import sys
 
-root = Path(os.environ['FLEXLB_RUN_DIR'])
-model = root / 'frontend-model'
-model.mkdir(exist_ok=True)
-special = ['[UNK]', '[PAD]', '<|im_start|>', '<|im_end|>', '<|vision_start|>', '<|vision_end|>', '<|image_pad|>', '<|endoftext|>']
-vocab = {(special[i] if i < len(special) else f'tok{i}'): i for i in range(4096)}
-backend = Tokenizer(WordLevel(vocab, unk_token='[UNK]'))
-backend.pre_tokenizer = Whitespace()
-tokenizer = PreTrainedTokenizerFast(tokenizer_object=backend, unk_token='[UNK]', pad_token='[PAD]', eos_token='<|endoftext|>', additional_special_tokens=special[2:7])
-tokenizer.chat_template = "{% for message in messages %}{{ '<|im_start|>' + message['role'] + '\\n' }}{% if message['content'] is string %}{{message['content']}}{% else %}{% for part in message['content'] %}{% if part['type'] == 'image' %}{{ '<|vision_start|><|image_pad|><|vision_end|>' }}{% elif part['type'] == 'text' %}{{part['text']}}{% endif %}{% endfor %}{% endif %}{{ '<|im_end|>\\n' }}{% endfor %}{{ '<|im_start|>assistant\\n' }}"
-tokenizer.save_pretrained(model)
-config = dict(model_type='qwen2_vl', architectures=['Qwen2VLForConditionalGeneration'], vocab_size=4096, num_attention_heads=1, num_key_value_heads=1, hidden_size=128, num_hidden_layers=1, intermediate_size=256, rms_norm_eps=1e-6, rope_theta=1000000, bos_token_id=2, eos_token_id=7, vision_start_token_id=4, vision_end_token_id=5, image_token_id=6, vision_config={'hidden_size':128, 'embed_dim':128, 'patch_size':14, 'spatial_merge_size':2, 'temporal_patch_size':2, 'depth':1, 'num_heads':1})
-(model / 'config.json').write_text(json.dumps(config))
-os.environ.update(MODEL_TYPE='qwen2_vl', CHECKPOINT_PATH=str(model), TOKENIZER_PATH=str(model), ROLE_TYPE='FRONTEND', START_PORT=os.environ.get('VIT_TEST_FRONTEND_PORT', '20550'), FRONTEND_SERVER_COUNT='1', VIT_SEPARATION='2', MAX_SEQ_LEN='16384', SEQ_SIZE_PER_BLOCK='64', REUSE_CACHE='1', LOG_PATH=str(root/'frontend-logs'), HF_HOME=str(root/'home/hf'), TOKENIZERS_PARALLELISM='false')
-from rtp_llm.start_server import main as start_frontend
-start_frontend()
+
+def prepare_assets(source, destination):
+    if not source.startswith('oss://'):
+        path = Path(source)
+        if not (path / 'config.json').is_file():
+            raise ValueError('model path lacks config.json')
+        return path
+    import base64
+    import email.utils
+    import hmac
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+    import xml.etree.ElementTree as ET
+    url = urllib.parse.urlsplit(source)
+    query = dict(urllib.parse.parse_qsl(url.query))
+    # Keep the deployment's regional endpoint. Credentials never enter artifacts/logs.
+    endpoint = query['OSS_ENDPOINT']
+    prefix = url.path.strip('/')
+    destination.mkdir(parents=True, exist_ok=True)
+    def get(key, listing=False):
+        date = email.utils.formatdate(usegmt=True)
+        resource = '/' + url.netloc + '/' + ('' if listing else key)
+        signature = base64.b64encode(hmac.new(query['OSS_ACCESS_KEY'].encode(),
+            ('GET\n\n\n' + date + '\n' + resource).encode(), hashlib.sha1).digest()).decode()
+        path = '/?' + urllib.parse.urlencode({'prefix': key, 'max-keys': 1000}) if listing else '/' + urllib.parse.quote(key, safe='/')
+        request = urllib.request.Request('https://' + url.netloc + '.' + endpoint + path,
+            headers={'Date': date, 'Authorization': 'OSS ' + query['OSS_ACCESS_ID'] + ':' + signature})
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                data = response.read(64 * 1024 * 1024 + 1)
+                if len(data) > 64 * 1024 * 1024:
+                    raise ValueError('model metadata file exceeds byte budget')
+                return data
+        except urllib.error.HTTPError as error:
+            if error.code == 404 and not listing:
+                return None
+            raise RuntimeError('model metadata fetch HTTP ' + str(error.code)) from None
+    files = ['config.json', 'tokenizer.json', 'tokenizer_config.json', 'special_tokens_map.json',
+             'generation_config.json', 'tokenizer.model', 'vocab.json', 'merges.txt', 'chat_template.jinja',
+             'processor_config.json', 'preprocessor_config.json']
+    listing = ET.fromstring(get(prefix + '/encoding/', True))
+    if listing.findtext('IsTruncated', 'false') == 'true':
+        raise ValueError('encoding listing truncated')
+    for item in listing.findall('Contents'):
+        key, size = item.findtext('Key'), int(item.findtext('Size', '0'))
+        if key and 0 < size <= 64 * 1024 * 1024:
+            files.append(key[len(prefix) + 1:])
+    def fetch(name):
+        if Path(name).is_absolute() or '..' in Path(name).parts:
+            raise ValueError('invalid metadata path')
+        data = get(prefix + '/' + name)
+        if data is not None:
+            target = destination / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        list(executor.map(fetch, files))
+    if not (destination / 'config.json').is_file():
+        raise ValueError('checkpoint config missing')
+    manifest = {str(p.relative_to(destination)): hashlib.sha256(p.read_bytes()).hexdigest()
+                for p in destination.rglob('*') if p.is_file() and p.name != 'asset-sha256.json'}
+    (destination / 'asset-sha256.json').write_text(json.dumps(manifest, sort_keys=True, indent=2))
+    return destination
+
+
+def start_mock_vit(model):
+    """One independent Java ViT child; HTTP health checks its actual gRPC status."""
+    import signal
+    import subprocess
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    import grpc
+    from rtp_llm.cpp.model_rpc.proto import model_rpc_service_pb2 as pb
+    from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import MultimodalRpcServiceStub
+    java = str(Path(os.environ.get('JAVA_HOME', '/opt/taobao/java')) / 'bin/java')
+    jar = Path(os.environ.get('MOCK_BUNDLE_JAR_DIR', '/opt/flexlb-mock/tools/mock_bundle/jars')) / 'mock.jar'
+    port = int(os.environ.get('MOCK_VIT_PORT', '22161'))
+    args = [java, '-Xms64m', '-Xmx512m', '-Djava.awt.headless=true', '-cp', str(jar),
+            'org.flexlb.mockengine.MockVitServer', '--port', str(port), '--model-path', str(model),
+            '--concurrency', os.environ.get('VIT_MAX_CONCURRENT_REQUESTS', '32'),
+            '--embedding-cache-bytes', os.environ.get('MOCK_VIT_CACHE_BYTES', '0')]
+    child = subprocess.Popen(args)
+    channel = grpc.insecure_channel('127.0.0.1:' + str(port))
+    stub = MultimodalRpcServiceStub(channel)
+    class Health(BaseHTTPRequestHandler):
+        def do_GET(self):
+            ok = False
+            if self.path in ('/', '/health') and child.poll() is None:
+                try:
+                    status = stub.GetWorkerStatus(pb.StatusVersionPB(), timeout=1)
+                    ok = status.alive and status.role == 'VIT'
+                except grpc.RpcError:
+                    pass
+            self.send_response(200 if ok else 503)
+            self.end_headers()
+            self.wfile.write(b'ok' if ok else b'not ready')
+        def log_message(self, *args):
+            pass
+    http = ThreadingHTTPServer(('0.0.0.0', int(os.environ.get('START_PORT', '22160'))), Health)
+    thread = threading.Thread(target=http.serve_forever, daemon=True)
+    thread.start()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(sig, lambda signum, frame: child.send_signal(signum))
+    try:
+        code = child.wait()
+        if code:
+            raise SystemExit(code)
+    finally:
+        if child.poll() is None:
+            child.terminate()
+            try:
+                child.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait()
+        http.shutdown()
+        http.server_close()
+        thread.join(timeout=3)
+        channel.close()
+
+
+def main():
+    if os.environ.get('RTP_LLM_MOCK_FRONTEND') != '1':
+        raise ValueError('test deployment requires RTP_LLM_MOCK_FRONTEND=1')
+    source = Path(os.environ.get('MOCK_FRONTEND_SOURCE_ROOT', str(Path(__file__).parents[4])))
+    sys.path.insert(0, str(source))
+    runtime = Path(os.environ.get('HIPPO_PROC_WORKDIR', '/tmp')) / 'main-vit-assets'
+    checkpoint = os.environ.get('CHECKPOINT_PATH') or os.environ['TOKENIZER_PATH']
+    model = prepare_assets(checkpoint, runtime)
+    tokenizer = os.environ.get('TOKENIZER_PATH') or checkpoint
+    tokenizer = model if tokenizer == checkpoint else prepare_assets(tokenizer, runtime / 'tokenizer')
+    os.environ.update(CHECKPOINT_PATH=str(model), TOKENIZER_PATH=str(tokenizer))
+    if os.environ.get('MOCK_BUNDLE_ROLE') == 'vit':
+        start_mock_vit(model)
+        return
+    # Keep the native hash implementation from the pinned main runtime.
+    from rtp_llm.ops import cpp_get_block_cache_keys
+    assert cpp_get_block_cache_keys([[1, 2]], 123) == [-8366447758695274051]
+    # Use the real supervisor so FRONTEND_SERVER_COUNT, shared admission,
+    # instance coordination and shutdown behavior are effective at runtime.
+    from rtp_llm.start_server import main as frontend_main
+    sys.argv = [sys.argv[0]]
+    frontend_main()
+
+
+if __name__ == '__main__':
+    main()
