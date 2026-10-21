@@ -34,6 +34,10 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
+#include <future>
+#include <set>
+#include "autil/NetUtil.h"
+#include "rtp_llm/cpp/cache/connector/p2p/transfer/TransferBackendFactory.h"
 
 namespace rtp_llm {
 
@@ -432,6 +436,86 @@ TEST_F(PdSepKVCacheReleaseTest, testInsertIntoCache_CalledDuringRelease_ReuseWor
                             << "reuse_len=" << reuse_len;
 
     stream2->releaseResource();
+}
+
+TEST_F(PdSepKVCacheReleaseTest, Dsv4SevenGroupsTransferEveryLayerRegionThroughTcp) {
+    auto config = makeDsv4Config(/*block_num=*/4);
+    auto manager = std::make_shared<KVCacheManager>(config, false, nullptr);
+    ASSERT_TRUE(manager->init());
+    transfer::TransferBackendConfig backend_config;
+    backend_config.cache_store_listen_port = autil::NetUtil::randomPort();
+    backend_config.messager_io_thread_count = 1;
+    backend_config.messager_worker_thread_count = 1;
+    auto sender = transfer::createTransferBackend(transfer::TransferBackend::kTcp, backend_config,
+                                                   transfer::TransferBackendRole::kSender).sender;
+    auto receiver = transfer::createTransferBackend(transfer::TransferBackend::kTcp, backend_config,
+                                                     transfer::TransferBackendRole::kReceiver).receiver;
+    ASSERT_NE(sender, nullptr);
+    ASSERT_NE(receiver, nullptr);
+    std::set<std::string> covered_groups;
+    size_t region_count = 0;
+    for (const auto& layer : config.topology().layers()) {
+        for (const auto& tag : layer.group_tags) {
+            auto source = manager->convertIndexToBuffer(layer.layer_id, tag, 1);
+            auto target = manager->convertIndexToBuffer(layer.layer_id, tag, 2);
+            ASSERT_FALSE(source.empty()) << tag;
+            ASSERT_EQ(source.size(), target.size()) << tag;
+            std::vector<std::vector<uint8_t>> expected;
+            for (size_t region = 0; region < source.size(); ++region) {
+                ASSERT_EQ(source[region].size_bytes, target[region].size_bytes);
+                std::vector<uint8_t> bytes(source[region].size_bytes);
+                for (size_t offset = 0; offset < bytes.size(); ++offset) {
+                    bytes[offset] = static_cast<uint8_t>((region_count * 37 + offset) % 251);
+                }
+                auto host = torch::from_blob(bytes.data(), {static_cast<int64_t>(bytes.size())}, torch::kUInt8);
+                auto src = torch::from_blob(source[region].addr, {static_cast<int64_t>(bytes.size())},
+                    torch::TensorOptions(torch::kUInt8).device(source[region].is_cuda ? torch::kCUDA : torch::kCPU));
+                auto dst = torch::from_blob(target[region].addr, {static_cast<int64_t>(bytes.size())},
+                    torch::TensorOptions(torch::kUInt8).device(target[region].is_cuda ? torch::kCUDA : torch::kCPU));
+                src.copy_(host);
+                dst.fill_(255);
+                expected.push_back(std::move(bytes));
+                ++region_count;
+            }
+            runtimeSyncAndCheck();
+            auto src_info = std::make_shared<transfer::KeyBlockInfo>();
+            auto dst_info = std::make_shared<transfer::KeyBlockInfo>();
+            src_info->blocks = source;
+            dst_info->blocks = target;
+            const auto key = "dsv4-seven-groups-" + std::to_string(layer.layer_id) + "-" + tag;
+            const auto deadline = currentTimeMs() + 10000;
+            transfer::RecvRequest receive;
+            receive.unique_key = key;
+            receive.deadline_ms = deadline;
+            receive.block_info.emplace(1001, dst_info);
+            auto task = receiver->recv(receive);
+            ASSERT_NE(task, nullptr);
+            transfer::SendRequest send;
+            send.ip = "127.0.0.1";
+            send.port = backend_config.cache_store_listen_port;
+            send.unique_key = key;
+            send.deadline_ms = deadline;
+            send.timeout_ms = 10000;
+            send.block_info.emplace(1001, src_info);
+            auto completion = std::make_shared<std::promise<transfer::TransferErrorCode>>();
+            auto done = completion->get_future();
+            sender->send(send, [completion](auto code, const std::string&) { completion->set_value(code); });
+            ASSERT_EQ(done.wait_for(std::chrono::seconds(15)), std::future_status::ready);
+            ASSERT_EQ(done.get(), transfer::TransferErrorCode::OK) << tag;
+            ASSERT_TRUE(task->success()) << task->errorMessage();
+            runtimeSyncAndCheck();
+            for (size_t region = 0; region < target.size(); ++region) {
+                auto dst = torch::from_blob(target[region].addr, {static_cast<int64_t>(target[region].size_bytes)},
+                    torch::TensorOptions(torch::kUInt8).device(target[region].is_cuda ? torch::kCUDA : torch::kCPU));
+                auto actual = dst.cpu().contiguous();
+                EXPECT_EQ(std::memcmp(actual.data_ptr<uint8_t>(), expected[region].data(), expected[region].size()), 0)
+                    << "layer=" << layer.layer_id << " tag=" << tag << " region=" << region;
+            }
+            covered_groups.insert(tag);
+        }
+    }
+    EXPECT_EQ(covered_groups.size(), kDsv4PoolNum);
+    EXPECT_GT(region_count, covered_groups.size());
 }
 
 TEST_F(PdSepKVCacheReleaseTest, testDsv4PDSepPrefillReleaseInsertsSevenGroupDeviceCache) {
