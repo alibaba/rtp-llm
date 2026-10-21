@@ -80,11 +80,18 @@ def is_supported(attn) -> bool:
         and attn.n_groups * _HEADS_PER_GROUP == attn.n_heads
     ):
         return False
-    qw, qs = linear.weight, linear.weight_scales
+    qw = linear.weight
+    # SM90 uses Humming-packed weights without the SM10x scale layout.
+    # Reject unsupported hardware before reading backend-specific fields.
+    if (
+        not qw.is_cuda
+        or torch.version.hip is not None
+        or _device_capability(qw.device)[0] != 10
+    ):
+        return False
+    qs = linear.weight_scales
     if not (
-        qw.is_cuda
-        and torch.version.hip is None
-        and qw.dtype == weight.dtype == torch.float8_e4m3fn
+        qw.dtype == weight.dtype == torch.float8_e4m3fn
         and qs.dtype == scale.dtype == torch.int32
         and qw.shape == (attn.n_heads * _HEAD_DIM, linear.K)
         and linear.K % 128 == 0
@@ -106,7 +113,7 @@ def is_supported(attn) -> bool:
         and all(not t.requires_grad for t in (qw, qs, weight, scale, table, sink))
     ):
         return False
-    return _device_capability(qw.device)[0] == 10 and _backend() is not None
+    return _backend() is not None
 
 
 class MegaAttention(torch.nn.Module):

@@ -17,6 +17,9 @@ class DeepSeekV41PDContractTest(contract.DeepSeekV41ContractTest):
     compare_generation_logits = True
     prefill_cp_size = 2
     decode_dp_size = 1
+    decode_cuda_graph = True
+    decode_capture_config = "1,2,4"
+    prefill_concurrency_limit = None
     # Decode reuse includes the freshly transferred prefill cache. Only the
     # prefill's initial reuse measures a hit from an earlier request.
     reuse_field = "prefill_total_reuse_len"
@@ -52,13 +55,14 @@ class DeepSeekV41PDContractTest(contract.DeepSeekV41ContractTest):
             "LOAD_PYTHON_MODEL": "1",
             "LOG_LEVEL": "DEBUG",
             "FT_SERVER_TEST": "1",
-            "DSV4_MOE_STRATEGY": "mega",
+            "DSV4_MOE_STRATEGY": self.moe_strategy,
             "DSV4_USE_MEGA_MOE_SE": "0",
             "DSV4_USE_MEGA_MOE_FUSED": "0",
             "DSV41_CED": "1",
             "DSV41_SWA_BOUNDED_REPLAY": "1",
             "WORLD_SIZE": str(role_size),
             "REMOTE_RPC_SERVER_IP": "localhost",
+            **self.extra_server_env,
         }
         # Each role owns half of the cards reserved by the smoke macro.
         common_args = self.server_args().replace(
@@ -77,10 +81,12 @@ class DeepSeekV41PDContractTest(contract.DeepSeekV41ContractTest):
                 decode_port,
                 prefill_port,
                 gpu_ids[role_size : 2 * role_size],
-                "--role_type DECODE --enable_cuda_graph 1 --decode_capture_config 1,2,4 --cp_rotate_method PREFILL_CP"
+                f"--role_type DECODE --enable_cuda_graph {int(self.decode_cuda_graph)} --decode_capture_config {self.decode_capture_config} --cp_rotate_method PREFILL_CP"
                 f" --tp_size {role_size // self.decode_dp_size} --dp_size {self.decode_dp_size}",
             ),
         ):
+            if role == "prefill" and self.prefill_concurrency_limit is not None:
+                args += f" --concurrency_limit {self.prefill_concurrency_limit}"
             manager = MagaServerManager(
                 env_args={
                     **common_env,

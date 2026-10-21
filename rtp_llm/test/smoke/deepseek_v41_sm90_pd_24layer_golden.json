@@ -1,0 +1,49 @@
+{
+  "model": "DeepSeek-V4.1-Flash",
+  "layers": 24,
+  "prefill_cp": 4,
+  "decode_dp": 4,
+  "ep_per_role": 4,
+  "backend": "FlashInfer W4A8 + DeepEP V2",
+  "scope": "reduced-layer uncached P/D determinism; not model accuracy or CED compaction",
+  "prompt": "The capital of France is",
+  "max_new_tokens": 24,
+  "input_ids": [
+    [
+      671,
+      6102,
+      294,
+      8760,
+      344
+    ]
+  ],
+  "output_ids": [
+    [
+      39683,
+      129275,
+      94767,
+      36942,
+      114833,
+      103267,
+      55753,
+      9090,
+      102092,
+      59592,
+      9090,
+      102092,
+      88989,
+      43687,
+      59955,
+      16290,
+      34548,
+      17420,
+      65477,
+      66487,
+      81253,
+      27882,
+      61849,
+      61849
+    ]
+  ],
+  "response": "__________<｜/box｜>答案是正确答案为该句中提到的回答(answer)：回答(answer)&quot;/ˈɡamerazzi Francesco Giuseppe Antonio alias alias"
+}

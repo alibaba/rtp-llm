@@ -109,6 +109,7 @@ def whl_deps():
             "nvidia-cutlass-dsl==4.7.1",
             "nvidia-cutlass-dsl-libs-base==4.7.1",
             "torch-c-dlpack-ext==0.1.5",
+            "humming-kernels==0.1.16",
             "torch@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl",
             "torchvision@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/torchvision-0.26.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl",
             # Keep wheel metadata aligned with the CUDA13 dependency lock.

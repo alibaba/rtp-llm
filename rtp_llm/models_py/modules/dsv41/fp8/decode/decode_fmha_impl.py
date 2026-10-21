@@ -34,6 +34,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
+from rtp_llm.device.device_type import is_cuda
 from rtp_llm.models_py.modules.dsv41.fp8.decode.decode_attn_metadata import (
     DSv4DecodeAttnMetadataFP8,
     allocate_decode_metadata_fp8,
@@ -113,6 +114,20 @@ class DSv4DecodeFmhaImplFP8:
             at: spec[1] for at, spec in config.paged_pool_specs.items()
         }
         self.prepare(attn_inputs, forbid_realloc=True)
+        self._sm90_metadata_updater = None
+        if (
+            config.compress_ratios == [0]
+            and device.type == "cuda"
+            and is_cuda()
+            and torch.cuda.get_device_capability(device) == (9, 0)
+        ):
+            from ._v41_sm90_prepare_meta import Sm90DecodeMetadataUpdater
+
+            self._sm90_metadata_updater = Sm90DecodeMetadataUpdater(
+                self.metadata,
+                self._paged_entries_per_block,
+                self._paged_tokens_per_block,
+            )
 
     def support_cuda_graph(self) -> bool:
         # Always True for this impl class — the legacy ``callable(getattr(...))``
@@ -165,6 +180,14 @@ class DSv4DecodeFmhaImplFP8:
         ``opt_flash_mla/design/01_cuda_graph_sched_meta_freeze.md``.
         """
         paged_block_tables = self._extract_paged_block_tables(attn_inputs)
+        if (
+            self._sm90_metadata_updater is not None
+            and self._sm90_metadata_updater.update(
+                as_tagged_attention_inputs(attn_inputs),
+                paged_block_tables=paged_block_tables,
+            )
+        ):
+            return
         update_decode_metadata_in_place_fp8(
             self.metadata,
             as_tagged_attention_inputs(attn_inputs),

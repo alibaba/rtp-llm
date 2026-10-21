@@ -6,6 +6,7 @@ import torch
 from deep_gemm.utils.layout import get_mn_major_tma_aligned_packed_ue8m0_tensor
 
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
+from rtp_llm.device.device_type import is_cuda
 from rtp_llm.models_py.modules.base.common.embedding import Embedding
 from rtp_llm.models_py.modules.factory.linear import LinearFactory
 
@@ -28,6 +29,16 @@ class V41MXFP8Linear(torch.nn.Module):
         super().__init__()
         self.weight = weight
         self.N, self.K = weight.shape
+        self._sm90_linear = None
+        if (
+            weight.is_cuda
+            and is_cuda()
+            and torch.cuda.get_device_capability(weight.device) == (9, 0)
+        ):
+            from rtp_llm.models_py.modules.dsv41.sm90_dense import Sm90MXFP8Linear
+
+            self._sm90_linear = Sm90MXFP8Linear(weight, scales)
+            return
         self.weight_scales = self.pack_scales(scales)
 
     def pack_scales(self, scales: torch.Tensor) -> torch.Tensor:
@@ -71,6 +82,8 @@ class V41MXFP8Linear(torch.nn.Module):
         remain closed for this linear. The caller owns the BF16 norm tensor.
         Input layout and disjoint BF16 output storage are caller preconditions.
         """
+        if getattr(self, "_sm90_linear", None) is not None:
+            return self._sm90_linear.forward_quantized(x_q, x_s, out=out)
         m = x_q.numel() // self.K
         shape = (*x_q.shape[:-1], self.N)
         output = (
@@ -103,6 +116,14 @@ class V41MXFP8Linear(torch.nn.Module):
     def forward(self, x: torch.Tensor, out=None):
         if x.numel() == 0:
             return out if out is not None else x.new_empty((*x.shape[:-1], self.N))
+        adapter = getattr(self, "_sm90_linear", None)
+        if (
+            adapter is not None
+            and hasattr(adapter, "forward_bf16")
+            and x.dtype == torch.bfloat16
+            and x.numel() // self.K <= 16
+        ):
+            return adapter.forward_bf16(x, out=out)
         return self.forward_quantized(*self._quantize_input(x), out=out)
 
 

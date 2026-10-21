@@ -10,6 +10,7 @@ from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.deepseek_v4 import DeepSeekV4
+from rtp_llm.models.deepseek_v41 import DeepSeekV41
 from rtp_llm.models.dsv4_kv_cache import (
     CSA_KV_TAG,
     CSA_STATE_TAG,
@@ -546,6 +547,105 @@ class Dsv4PostBuildModelConfigTest(TestCase):
             by_tag[HCA_STATE_TAG].capacity.explicit_block_num,
             DSV4_HCA_STATE_POOL_BLOCKS,
         )
+
+
+class Dsv41FactoryCachePolicyTest(TestCase):
+    def _architecture(self):
+        config = ModelConfig()
+        config.num_layers = 5
+        config.hidden_size = HEAD_DIM
+        config.attn_config.head_num = 1
+        config.attn_config.size_per_head = HEAD_DIM
+        config.attn_config.indexer_head_dim = INDEXER_HEAD_DIM
+        config.attn_config.kv_cache_dtype = KvCacheDataType.FP8
+        config.attn_config.layer_compress_ratios = [0, 2, 2, 1, 1]
+        config.attn_config.v41_kv_source_layer_ids = [1, 3]
+        config.attn_config.tokens_per_block = 128
+        config.attn_config.kernel_tokens_per_block = 128
+        return config
+
+    def test_factory_preserves_parsed_fixed_pool_capacity_and_placement(self):
+        # Exercise the real parser -> factory -> runtime hook -> legacy hook
+        # sequence. Only checkpoint IO is replaced with a small architecture.
+        for host in (False, True):
+            with self.subTest(host=host), tempfile.TemporaryDirectory() as ckpt:
+                Path(ckpt, "config.json").write_text(
+                    json.dumps({"torch_dtype": "bfloat16"})
+                )
+                with patch.dict(
+                    os.environ, {"DSV41_SWA_BOUNDED_REPLAY": "1"}, clear=True
+                ):
+                    configs = setup_args(
+                        [
+                            "--model_type",
+                            "deepseek_v41",
+                            "--checkpoint_path",
+                            ckpt,
+                            "--act_type",
+                            "BF16",
+                            "--dsv4_fixed_pool_blocks",
+                            "256",
+                            "--dsv4_fixed_pool_use_memory",
+                            str(int(host)),
+                        ]
+                    )
+                    with (
+                        patch.object(
+                            ModelFactory, "get_model_cls", return_value=DeepSeekV41
+                        ),
+                        patch.object(
+                            DeepSeekV41,
+                            "_create_config",
+                            return_value=self._architecture(),
+                        ),
+                    ):
+                        config = ModelFactory.create_model_config(
+                            model_args=configs.model_args,
+                            lora_config=configs.lora_config,
+                            kv_cache_config=configs.kv_cache_config,
+                            profiling_debug_logging_config=configs.profiling_debug_logging_config,
+                        )
+                by_tag = {
+                    desc.tag: desc
+                    for layer in config.kv_cache_spec_descs
+                    for desc in layer
+                }
+                for tag in ("csa_state", "swa_kv", "decoder_swa_kv"):
+                    desc = by_tag[tag]
+                    self.assertIsNotNone(desc.capacity, tag)
+                    self.assertEqual(desc.capacity.explicit_block_num, 256, tag)
+                    self.assertEqual(
+                        desc.capacity.charge_to_paged_budget, not host, tag
+                    )
+                    if host:
+                        self.assertEqual(
+                            desc.memory.placement, CacheMemoryPlacement.HOST_PINNED
+                        )
+                    else:
+                        self.assertIsNone(desc.memory, tag)
+                for tag in ("global_kv_1", "global_kv_2", "indexer_kv"):
+                    self.assertIsNone(by_tag[tag].capacity, tag)
+                    self.assertIsNone(by_tag[tag].memory, tag)
+
+    def test_direct_post_build_still_constructs_missing_descriptors(self):
+        config = self._architecture()
+        self.assertFalse(config.kv_cache_spec_descs)
+        DeepSeekV41._post_build_model_config(config)
+        self.assertEqual(len(config.kv_cache_spec_descs), 5)
+        self.assertIn("global_kv_2", [d.tag for d in config.kv_cache_spec_descs[1]])
+
+    def test_explicit_runtime_reconfiguration_still_replaces_policy(self):
+        config = self._architecture()
+        cache = KVCacheConfig()
+        cache.dsv4_fixed_pool_blocks = 256
+        DeepSeekV41._apply_kv_cache_config(config, cache)
+        cache.dsv4_fixed_pool_blocks = 512
+        DeepSeekV41._apply_kv_cache_config(config, cache)
+        DeepSeekV41._post_build_model_config(config)
+        for layer in config.kv_cache_spec_descs:
+            for desc in layer:
+                if desc.tag in ("csa_state", "swa_kv", "decoder_swa_kv"):
+                    self.assertEqual(desc.capacity.explicit_block_num, 512)
 
 
 if __name__ == "__main__":

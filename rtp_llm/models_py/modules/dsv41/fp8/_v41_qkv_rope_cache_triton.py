@@ -12,6 +12,10 @@ import triton.language as tl
 from rtp_llm.models_py.modules.dsv41.fp8._trap_utils import (
     trap_invalid_kv_access_enabled,
 )
+from rtp_llm.models_py.modules.dsv41.fp8._v41_sm90_v4_cache import _store_v4_row
+from rtp_llm.models_py.modules.dsv41.fp8._v41_sm90_v4_cache import (
+    is_supported as v4_swa_is_supported,
+)
 from rtp_llm.models_py.modules.dsv41.fp8._v41_swa_triton import (
     is_supported as swa_is_supported,
 )
@@ -53,6 +57,7 @@ def _fused_qkv_rope_cache_kernel(
     APPLY_Q_ROPE: tl.constexpr,
     PADDED_HEADS: tl.constexpr,
     TRAP_INVALID_KV_ACCESS: tl.constexpr,
+    V4_CACHE: tl.constexpr = False,
 ):
     row = tl.program_id(0).to(tl.int64)
     tile = tl.program_id(1).to(tl.int64)
@@ -126,6 +131,9 @@ def _fused_qkv_rope_cache_kernel(
             return
         position = slot % ENTRIES
         page_base = pool + page * block_stride.to(tl.int64)
+        if V4_CACHE:
+            _store_v4_row(rounded, pool, slot, block_stride, ENTRIES)
+            return
         groups = rounded.to(tl.float32).reshape((16, 32))
         maximum = tl.maximum(tl.max(tl.abs(groups), 1), 1e-4)
         exponent = tl.ceil(tl.log2(maximum * (1.0 / 448.0)))
@@ -183,7 +191,7 @@ def is_supported(
         or not freqs_table.is_contiguous()
         or slots.numel() != positions.numel()
         or not slots.is_contiguous()
-        or not swa_is_supported(pool_3d, slots)
+        or not (swa_is_supported(pool_3d, slots) or v4_swa_is_supported(pool_3d, slots))
     ):
         return False
     if freqs_cis is not None and (
@@ -219,7 +227,7 @@ def try_fused_qkv_rope_cache(
     ``pad_query_heads`` pads its chunk-interleaved head layout in this same
     launch, while Wq itself continues to project only local heads.
 
-    Only native V4.1 528-byte cache pages are accepted. Physical slots must be
+    Native V4.1 528-byte or SM90 V4 584-byte pages are accepted. Physical slots must be
     unique within the launch; any negative slot skips its store. Invalid
     positive slots trigger the existing device trap gate. Unsupported shapes
     return None before modifying inputs, and backend errors propagate.
@@ -287,6 +295,7 @@ def try_fused_qkv_rope_cache(
             APPLY_Q_ROPE=apply_q_rope,
             PADDED_HEADS=padded_heads,
             TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
+            V4_CACHE=pool_3d.shape[-1] == 584,
             num_warps=4,
         )
     return FusedQKVRopeCache(q_out, kv_out, freqs_cis)

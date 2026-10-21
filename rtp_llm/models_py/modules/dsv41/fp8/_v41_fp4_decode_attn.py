@@ -1,4 +1,4 @@
-"""Native FlashMLA dual-pool decode for V4.1 SWA FP8 and GLOBAL FP4."""
+"""Native FlashMLA dual-pool decode for architecture-selected V4.1 caches."""
 
 from __future__ import annotations
 
@@ -19,9 +19,9 @@ def fp4_dual_decode_attention(
 ) -> torch.Tensor:
     """Return BF16 ``[B, S, H, 512]`` attention with one joint softmax.
 
-    Upstream FlashMLA accepts a V4.1 528B SWA pool and a 288B FP4 extra
-    pool. Both 3D views contain token-interleaved payload/scale rows;
-    their physical page strides may include padding. Sparse indices address
+    Blackwell uses 528B SWA and 288B FP4 GLOBAL token-interleaved records.
+    Hopper uses 584B V4 page-planar records for both pools. In either format
+    physical page strides may include padding. Sparse indices address
     ``page * entries_per_page + offset`` and use -1 for masked entries.
     """
     return fp8_op.forward(

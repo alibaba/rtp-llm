@@ -53,6 +53,8 @@ class DeepSeekV41Model(DeepSeekV4Model):
         self._image_plan = None
         self._engram_forward_active = False
         self._engram_cpu_runtime = None
+        self._engram_prefetch = None
+        self._engram_prefetch_max_rows = 0
 
     def cuda_graph_engram_window_size(self) -> int:
         return 4
@@ -62,6 +64,7 @@ class DeepSeekV41Model(DeepSeekV4Model):
             Engram,
             EngramLayout,
             NgramHashState,
+            create_engram_prefetch,
         )
 
         if not isinstance(self.v4.embed, _V41ImageEmbedding):
@@ -83,6 +86,10 @@ class DeepSeekV41Model(DeepSeekV4Model):
             )
             modules.append((layer_id, layout.layer_ids.index(layer_id)))
         self._engram_layers = tuple(modules)
+        self._engram_prefetch, self._engram_prefetch_max_rows = create_engram_prefetch(
+            device,
+            ((i, self.v4.layers[i].engram.embed_tokens) for i, _ in modules),
+        )
         logging.info(
             "DeepSeek V4.1 Engram initialized on layers %s",
             [layer_id for layer_id, _ in modules],
@@ -103,6 +110,22 @@ class DeepSeekV41Model(DeepSeekV4Model):
             layer = self.v4.layers[layer_id]
             layer.engram_hashes = hashes[:, hash_index].contiguous()
             layer.engram_token_mask = token_mask
+        attn = as_tagged_attention_inputs(inputs.attention_inputs)
+        if (
+            self._engram_prefetch is not None
+            and not attn.is_prefill
+            and 0 < windows.shape[0] <= self._engram_prefetch_max_rows
+        ):
+            self._engram_prefetch.begin(
+                (
+                    layer_id,
+                    self.v4.layers[layer_id].engram.embed_tokens,
+                    self.v4.layers[layer_id].engram_hashes,
+                )
+                for layer_id, _ in self._engram_layers
+            )
+            for layer_id, _ in self._engram_layers:
+                self.v4.layers[layer_id].engram_prefetch = self._engram_prefetch
 
     def _prepare_image_features(self, inputs) -> None:
         """Stash the gathered ViT features and their batch locations for the
@@ -249,8 +272,12 @@ class DeepSeekV41Model(DeepSeekV4Model):
             return super().forward(inputs, fmha_impl)
         finally:
             try:
-                if prefetch is not None:
-                    prefetch.clear()
+                try:
+                    if prefetch is not None:
+                        prefetch.clear()
+                finally:
+                    if self._engram_prefetch is not None:
+                        self._engram_prefetch.finish()
             finally:
                 self.v4._engram_lookup_prefetch = previous_prefetch
                 self._engram_forward_active = False
@@ -259,6 +286,7 @@ class DeepSeekV41Model(DeepSeekV4Model):
                     layer = self.v4.layers[layer_id]
                     layer.engram_hashes = None
                     layer.engram_token_mask = None
+                    layer.engram_prefetch = None
                 self._image_plan = None
 
 

@@ -836,6 +836,15 @@ rename_wheel(
     src = ":rtp_llm_dash_sc_grpc_whl",
 )
 
+# Include isolated SM90 backend packages in CUDA 13 x86 wheels.
+sm90_backend_wheel_deps = select({
+    "@//:using_cuda13_x86": [
+        "@flashinfer_opensource_sidecar//:wheel_package",
+        "@flash_mla_sm90_sidecar//:wheel_package",
+    ],
+    "//conditions:default": [],
+})
+
 # target for wheel
 py_wheel(
     name = "rtp_llm_whl",
@@ -851,7 +860,8 @@ py_wheel(
     deps = [
         ":rtp_llm_package",
         "@rtp_deps//:extension_package"
-    ],
+    ] + sm90_backend_wheel_deps,
+    strip_path_prefixes = ["site-packages/"],
     requires = whl_reqs,
 )
 
@@ -864,7 +874,8 @@ py_wheel(
     deps = [
         ":rtp_llm_package",
         "@rtp_deps//:extension_package",
-    ],
+    ] + sm90_backend_wheel_deps,
+    strip_path_prefixes = ["site-packages/"],
     requires = whl_reqs + [
         "kserve",
     ] + xft_dep + arch_with_version_dep,

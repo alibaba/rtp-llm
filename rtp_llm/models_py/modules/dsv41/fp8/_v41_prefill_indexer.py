@@ -14,6 +14,7 @@ from typing import Callable
 
 import torch
 
+from rtp_llm.device.device_type import is_cuda
 from rtp_llm.models_py.modules.dsv41.fp8._v41_fp4_triton import (
     FP4_INDEXER_GROUP,
     FP4_INDEXER_HEAD_DIM,
@@ -35,11 +36,14 @@ class PrefillIndexerKeys:
 def is_supported(device: torch.device, num_heads: int, head_dim: int) -> bool:
     """Gate unsupported devices/dependencies, never catch execution failures."""
     if (
-        torch.device(device).type != "cuda"
+        not is_cuda()
+        or torch.device(device).type != "cuda"
         or num_heads not in (32, 64)
         or head_dim != 128
     ):
         return False
+    if is_cuda() and torch.cuda.get_device_capability(device) == (9, 0):
+        return True
     try:
         from ._indexer_score import has_fp8_fp4_mqa_logits
     except ImportError:
@@ -223,8 +227,6 @@ def score_indexer_chunk(
     return_bf16=False,
 ):
     """Fused dot/ReLU/head reduction; keep causal padding at negative infinity."""
-    from ._indexer_score import fp8_fp4_mqa_indexer_score
-
     count = k_payload.shape[0]
     if q_payload.shape[0] == 0 or count == 0:
         return torch.empty(
@@ -240,6 +242,12 @@ def score_indexer_chunk(
         # Forward-local prefill metadata already clamps in int64 before
         # narrowing. Reuse the exact same device bounds for scoring and TopK.
         starts, ends = bounds
+    if is_cuda() and torch.cuda.get_device_capability(q_payload.device) == (9, 0):
+        from ._v41_sm90_indexer import dense_score
+
+        return dense_score(q_payload, q_sf, k_payload, k_sf, weights, starts, ends)
+    from ._indexer_score import fp8_fp4_mqa_indexer_score
+
     # The scheduler skips future K tiles. Its SM100 cleaner writes every
     # logical output element, including rows with no completed ratio-2 pair.
     logits = fp8_fp4_mqa_indexer_score(

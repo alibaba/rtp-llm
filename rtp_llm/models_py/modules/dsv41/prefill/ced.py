@@ -806,7 +806,7 @@ class CEDPlan:
             return None
         group_id = groups[0]
         base = kv_cache.get_layer_cache(21, regions[group_id]).kv_cache_base
-        # V4.1 SWA is a byte-sliced 528-byte entry across CP ranks. The native
+        # SWA is byte-sliced across CP ranks. The native
         # descriptor includes speculative lookahead in the actual ring stride.
         if base is None or base.ndim != 2 or base.numel() == 0:
             return None
@@ -817,12 +817,15 @@ class CEDPlan:
         )
         # Native block strides include up to 511 bytes of TMA padding. Match
         # AttentionV41FP8._swa_entries_per_block, which excludes that padding.
-        if full_stride < 528:
+        from rtp_llm.models_py.modules.dsv41.kv_cache_layout import use_v4_kv_cache
+
+        entry_bytes = 584 if use_v4_kv_cache(base.device) else 528
+        if full_stride < entry_bytes:
             return None
         from rtp_llm.models_py.modules.dsv41.fp8._kv_cache_utils import pool_entry_count
 
         ring_entries = (
-            pool_entry_count(kv_cache, regions[group_id]) or full_stride // 528
+            pool_entry_count(kv_cache, regions[group_id]) or full_stride // entry_bytes
         )
         if bounded_replay:
             # Only live decode state is produced. Native cache policy must

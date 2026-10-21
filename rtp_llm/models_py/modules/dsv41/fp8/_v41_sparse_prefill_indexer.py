@@ -31,6 +31,7 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.device.device_type import is_cuda
 from rtp_llm.models_py.modules.dsv41.fp8._v41_prefill_indexer import PrefillIndexerKeys
 
 MAX_CHUNK_ROWS = 4096
@@ -90,9 +91,9 @@ def _get_deep_gemm():
     return deep_gemm
 
 
-def _plan_supported(candidates, visible, key_count, block_size):
+def _plan_supported(candidates, visible, key_count, block_size, *, sm90=False):
     if not (
-        torch.version.hip is None
+        is_cuda()
         and candidates.is_cuda
         and candidates.ndim == 2
         and candidates.dtype == torch.int32
@@ -110,6 +111,8 @@ def _plan_supported(candidates, visible, key_count, block_size):
         and block_size == 8
     ):
         return False
+    if sm90:
+        return torch.cuda.get_device_capability(candidates.device) == (9, 0)
     return (
         torch.cuda.get_device_capability(candidates.device)[0] == 10
         and _get_deep_gemm() is not None
@@ -169,8 +172,11 @@ def is_supported(
     *,
     row_key_offsets: torch.Tensor | None = None,
     row_key_counts: torch.Tensor | None = None,
+    logical_output: bool = False,
 ) -> bool:
-    """Whole scoring boundary gate; the caller separately gates DeepSelect.
+    """Gate compact sparse (SM100) or logical-width candidate (SM90) scores.
+
+    The caller separately gates DeepSelect for compact sparse output.
 
     The production DeepSelect input stride needs 1024-byte alignment and its
     int32 output row needs 32-byte alignment. Plan-only tests may use smaller
@@ -178,7 +184,9 @@ def is_supported(
     """
     if (
         not isinstance(keys, PrefillIndexerKeys)
-        or not _plan_supported(candidates, visible, len(keys), block_size)
+        or not _plan_supported(
+            candidates, visible, len(keys), block_size, sm90=logical_output
+        )
         or not _row_keys_supported(candidates, row_key_offsets, row_key_counts)
     ):
         return False
@@ -307,6 +315,7 @@ def prepare_plan(
     request_start: int = 0,
     request_stop: int | None = None,
     positions_ratio: int | None = None,
+    sm90: bool | None = None,
 ) -> SparsePrefillPlan | None:
     """Expand/sort/deduplicate one request-local chunk and build its DG schedule.
 
@@ -329,12 +338,18 @@ def prepare_plan(
     With positions_ratio=1 or 2, visible is a positions vector; compute
     (positions + 1) // ratio on-device in its original integer dtype.
     """
+    if sm90 is None:
+        sm90 = (
+            is_cuda()
+            and candidates.is_cuda
+            and torch.cuda.get_device_capability(candidates.device) == (9, 0)
+        )
     if positions_ratio is not None and (
         type(positions_ratio) is not int or positions_ratio not in (1, 2)
     ):
         return None
     if not _plan_supported(
-        candidates, visible, key_count, block_size
+        candidates, visible, key_count, block_size, sm90=sm90
     ) or not _row_keys_supported(candidates, row_key_offsets, row_key_counts):
         return None
     lookup = request_ids is not None or request_key_counts is not None
@@ -370,7 +385,7 @@ def prepare_plan(
     stream = torch.cuda.current_stream(candidates.device)
     stream_key = (stream.device.index, stream.cuda_stream)
     capturing = torch.cuda.is_current_stream_capturing()
-    if capturing and stream_key not in _WARMED_STREAMS:
+    if not sm90 and capturing and stream_key not in _WARMED_STREAMS:
         return None
     rows, count = candidates.shape
     batched = lookup or row_key_offsets is not None
@@ -426,20 +441,37 @@ def prepare_plan(
     # violates its unique-prefix merge-path contract and can assert.
     # See scheduler/sm100_sparse_mqa_logits_metadata.cuh:get_num_kv_blocks.
     # row_ke remains the logical causal boundary for selection/remapping.
-    metadata = _get_deep_gemm().get_sparse_mqa_logits_metadata(
-        row_ks,
-        sparse_end,
-        key_count,
-        indices,
-        torch.int8,
-        block_size,
-        use_unaligned_ks=True,
+    metadata = (
+        # Hopper consumes the compact indices directly and has no DG schedule.
+        torch.empty(0, dtype=torch.uint8, device=candidates.device)
+        if sm90
+        else _get_deep_gemm().get_sparse_mqa_logits_metadata(
+            row_ks,
+            sparse_end,
+            key_count,
+            indices,
+            torch.int8,
+            block_size,
+            use_unaligned_ks=True,
+        )
     )
-    if not capturing:
+    if not sm90 and not capturing:
         _WARMED_STREAMS.add(stream_key)
     return SparsePrefillPlan(
         row_ks, row_ke, indices, sparse_end, metadata, key_count, block_size, offsets
     )
+
+
+def score_logical(q_payload, q_sf, keys, weights, plan):
+    """Score candidate blocks into logical-width FP32 logits on SM90.
+
+    Unlike ``score``'s compact BF16 columns, these logits already use logical
+    key IDs and must go through ordinary TopK, without sparse remapping.
+    The caller first gates the inputs with ``is_supported(logical_output=True)``.
+    """
+    from ._v41_sm90_indexer import candidate_score
+
+    return candidate_score(q_payload, q_sf, keys.quant, keys.scale, weights, plan)
 
 
 def score(
