@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/model_rpc/PDCancelRegistry.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include <chrono>
 
 namespace rtp_llm {
 
@@ -54,6 +55,7 @@ void PDCancelRegistry::trimLocked(int64_t now_ms) {
             }
         }
         pending_cancels_.erase(request_id);
+        local_pending_cancels_.erase(request_id);
         entries_.erase(it);
     }
     if (expired_remote_retries != 0) {
@@ -169,6 +171,11 @@ absl::StatusOr<CancelStatusPB> PDCancelRegistry::cancel(int64_t request_id, cons
     e->canceled.store(true);
     ++canceled_keys_[e->unique_key];
     pending_cancels_.emplace(request_id, e);
+    local_pending_cancels_.emplace(request_id, e);
+    e->next_cancel_retry_ms.store(
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch())
+            .count(),
+        std::memory_order_release);
     meta_->markCancellationPending(e->identity, e->cancel_reason.code() == ErrorCode::PRIORITY_PREEMPTED);
     if (e->stream)
         e->stream->reportError(e->cancel_reason.code(), e->cancel_reason.ToString());
@@ -184,10 +191,31 @@ std::vector<PDCancelRegistry::Handle> PDCancelRegistry::pending() {
     std::lock_guard<std::mutex> lock(mutex_);
     trimLocked(currentTimeMs());
     std::vector<Handle> result;
-    result.reserve(pending_cancels_.size());
-    for (const auto& [id, e] : pending_cancels_) {
-        result.push_back(e);
-    }
+    result.reserve(std::min(pending_cancels_.size(), 2 * kPendingBatchSize));
+    std::set<int64_t> selected;
+    const auto        append_batch = [&](const std::map<int64_t, Handle>& source, int64_t& cursor) {
+        if (source.empty()) {
+            return;
+        }
+        auto it = source.upper_bound(cursor);
+        if (it == source.end()) {
+            it = source.begin();
+        }
+        const auto count = std::min(source.size(), kPendingBatchSize);
+        for (size_t i = 0; i < count; ++i) {
+            cursor = it->first;
+            if (selected.insert(it->first).second) {
+                result.push_back(it->second);
+            }
+            if (++it == source.end()) {
+                it = source.begin();
+            }
+        }
+    };
+    // Local completion gets its own fair batch; retained remote retry history
+    // cannot push a newly canceled request behind the whole retention window.
+    append_batch(local_pending_cancels_, local_pending_cursor_);
+    append_batch(pending_cancels_, retry_pending_cursor_);
     return result;
 }
 
@@ -244,6 +272,7 @@ bool PDCancelRegistry::complete(const Handle& handle) {
                                          stream))
         return false;
     handle->terminal = true;
+    local_pending_cancels_.erase(handle->identity.request_id);
     // Local terminal is independent of remote control-plane availability. Keep
     // the cancellation fence and bounded retry record independently of Prefill
     // availability. Retention expiry only retires bookkeeping after this local proof.

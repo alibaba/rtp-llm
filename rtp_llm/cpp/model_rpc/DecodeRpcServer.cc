@@ -183,8 +183,9 @@ grpc::Status DecodeRpcServer::Cancel(grpc::ServerContext*, const CancelRequestPB
 
 void DecodeRpcServer::cancelCleanupTick() {
     const auto pending = cancel_registry_->pending();
-    // Publish every locally safe terminal before any potentially slow remote
-    // operation. A dead peer must not delay unrelated local cleanup in this batch.
+    // Publish every locally safe terminal in this bounded batch before any
+    // potentially slow remote operation. Local-completion selection has its own
+    // fair cursor, independent of retained remote retry history.
     for (const auto& handle : pending) {
         cancel_registry_->complete(handle);
     }

@@ -105,7 +105,11 @@ private:
     std::unordered_map<int64_t, CancelFence> absent_fences_;
     std::multimap<int64_t, int64_t>         fence_expirations_;
     std::set<std::pair<int64_t, int64_t>>   entry_expirations_;
-    std::unordered_map<int64_t, Handle>     pending_cancels_;
+    static constexpr size_t                  kPendingBatchSize = 128;
+    std::map<int64_t, Handle>                pending_cancels_;
+    std::map<int64_t, Handle>                local_pending_cancels_;
+    int64_t                                  local_pending_cursor_ = 0;
+    int64_t                                  retry_pending_cursor_ = 0;
     std::unordered_map<std::string, size_t> canceled_keys_;
     std::unordered_map<std::string, size_t> active_reads_;
     std::shared_ptr<RpcServerRuntimeMeta>   meta_;

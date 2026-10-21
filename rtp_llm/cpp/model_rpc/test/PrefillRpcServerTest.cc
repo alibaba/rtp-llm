@@ -303,6 +303,79 @@ TEST(PrefillRpcServerTest, CancelCapacityFailureDoesNotAcknowledgeAnUnstoredFenc
     EXPECT_EQ(server.cancel_registry_->absent_fences_.count(131), 0u);
 }
 
+TEST(PDCancelRegistryTest, PendingSnapshotIsBoundedAndRotatesAcrossAllLocalCancellations) {
+    auto             meta = std::make_shared<RpcServerRuntimeMeta>();
+    PDCancelRegistry registry(meta);
+    const auto       count = 3 * registry.kPendingBatchSize + 7;
+    for (size_t id = 1; id <= count; ++id) {
+        GenerateInputPB request;
+        request.set_request_id(id);
+        PDCancelRegistry::Handle handle;
+        ASSERT_TRUE(registry.admit(request, "local-" + std::to_string(id), "", currentTimeMs() + 10000, handle).ok());
+        ASSERT_TRUE(registry.cancel(id, {ErrorCode::CANCELLED, "cancel"}).ok());
+    }
+    std::set<int64_t> seen;
+    for (size_t pass = 0; pass < 4; ++pass) {
+        const auto batch = registry.pending();
+        EXPECT_LE(batch.size(), 2 * registry.kPendingBatchSize);
+        std::set<int64_t> batch_ids;
+        for (const auto& handle : batch) {
+            EXPECT_TRUE(batch_ids.insert(handle->identity.request_id).second);
+            seen.insert(handle->identity.request_id);
+        }
+    }
+    EXPECT_EQ(seen.size(), count);
+    // Removing selected entries must not invalidate a stored map iterator or
+    // keep later local requests behind the already-consumed cursor.
+    for (size_t pass = 0; pass < 4; ++pass) {
+        for (const auto& handle : registry.pending()) {
+            registry.finishLocal(handle);
+            ASSERT_TRUE(registry.complete(handle));
+        }
+    }
+    EXPECT_TRUE(registry.pending().empty());
+    EXPECT_TRUE(registry.local_pending_cancels_.empty());
+    EXPECT_TRUE(meta->getEngineScheduleInfo(0).running_task_info_list.empty());
+}
+
+TEST(PDCancelRegistryTest, RemoteRetryHistoryCannotStarveNewLocalCompletionBatch) {
+    auto             meta = std::make_shared<RpcServerRuntimeMeta>();
+    PDCancelRegistry registry(meta);
+    const auto       count = 3 * registry.kPendingBatchSize + 7;
+    for (size_t id = 1; id <= count; ++id) {
+        GenerateInputPB request;
+        request.set_request_id(id);
+        PDCancelRegistry::Handle handle;
+        ASSERT_TRUE(
+            registry.admit(request, "remote-" + std::to_string(id), "prefill:123", currentTimeMs() + 10000, handle)
+                .ok());
+        ASSERT_TRUE(registry.cancel(id, {ErrorCode::CANCELLED, "cancel"}).ok());
+        registry.finishLocal(handle);
+        ASSERT_TRUE(registry.complete(handle));
+        EXPECT_FALSE(handle->downstream_done);
+    }
+    GenerateInputPB local_request;
+    local_request.set_request_id(99100);
+    PDCancelRegistry::Handle local;
+    ASSERT_TRUE(registry.admit(local_request, "new-local", "", currentTimeMs() + 10000, local).ok());
+    ASSERT_TRUE(registry.cancel(99100, {ErrorCode::CANCELLED, "cancel"}).ok());
+    std::set<int64_t> seen_remote;
+    for (size_t pass = 0; pass < 4; ++pass) {
+        const auto batch = registry.pending();
+        EXPECT_LE(batch.size(), 2 * registry.kPendingBatchSize);
+        EXPECT_NE(std::find(batch.begin(), batch.end(), local), batch.end());
+        for (const auto& handle : batch) {
+            if (handle != local)
+                seen_remote.insert(handle->identity.request_id);
+        }
+    }
+    EXPECT_EQ(seen_remote.size(), count);
+    EXPECT_FALSE(local->terminal);
+    registry.finishLocal(local);
+    ASSERT_TRUE(registry.complete(local));
+    EXPECT_TRUE(registry.local_pending_cancels_.empty());
+}
+
 TEST(PDCancelRegistryTest, CancelBeforeAdmissionFencesRepeatedAndLateEnqueue) {
     auto             meta = std::make_shared<RpcServerRuntimeMeta>();
     PDCancelRegistry registry(meta);
