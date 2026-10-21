@@ -1,4 +1,5 @@
 #include <limits>
+#include <functional>
 #include "rtp_llm/cpp/model_rpc/PDRequestUtils.h"
 #include <memory>
 
@@ -266,10 +267,14 @@ class LocalPrefillCancelService: public RpcService::Service {
 public:
     int          calls{0};
     bool         fail_cancel{false};
+    std::function<void()> on_cancel;
     int64_t      request_id{0};
     int64_t      cancel_error_code{0};
     grpc::Status Cancel(grpc::ServerContext*, const CancelRequestPB* request, CancelResponsePB* response) override {
         ++calls;
+        if (on_cancel) {
+            on_cancel();
+        }
         if (fail_cancel) {
             return grpc::Status(grpc::StatusCode::UNAVAILABLE, "test Prefill unavailable");
         }
@@ -357,6 +362,50 @@ TEST(DecodeRpcServerTest, FailedPrefillCancelBacksOffAfterLocalCompletion) {
     handle->next_cancel_retry_ms.store(0);
     decode.cancelCleanupTick();
     EXPECT_EQ(prefill.calls, 2);
+    rpc_server->Shutdown();
+}
+
+TEST(DecodeRpcServerTest, CleanupPublishesWholeLocalBatchBeforeOneOldestRemoteRetry) {
+    LocalPrefillCancelService prefill;
+    prefill.fail_cancel = true;
+    grpc::ServerBuilder builder;
+    int port = 0;
+    builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &port);
+    builder.RegisterService(&prefill);
+    auto rpc_server = builder.BuildAndStart();
+    ASSERT_TRUE(rpc_server);
+    DecodeRpcServer decode;
+    decode.meta_ = std::make_shared<RpcServerRuntimeMeta>();
+    decode.cancel_registry_ = std::make_unique<PDCancelRegistry>(decode.meta_);
+    std::vector<PDCancelRegistry::Handle> handles;
+    for (int64_t id = 210; id < 213; ++id) {
+        GenerateInputPB input;
+        input.set_request_id(id);
+        PDCancelRegistry::Handle handle;
+        ASSERT_TRUE(decode.cancel_registry_->admit(input, "batch" + std::to_string(id),
+            "127.0.0.1:" + std::to_string(port), currentTimeMs() + 1000, handle).ok());
+        decode.cancel_registry_->finishLocal(handle);
+        ASSERT_EQ(decode.cancel_registry_->cancel(id, {ErrorCode::CANCELLED, "batch canceled"}),
+                  CANCEL_STATUS_ACCEPTED);
+        handle->next_cancel_retry_ms.store(id);
+        handles.push_back(handle);
+    }
+    prefill.on_cancel = [&] {
+        // Causal assertion inside the first remote RPC: no local terminal is
+        // deferred until that RPC returns, regardless of unordered-map order.
+        const auto status = decode.meta_->getEngineScheduleInfo(0);
+        EXPECT_TRUE(status.running_task_info_list.empty());
+        EXPECT_EQ(status.finished_task_info_list.size(), 3u);
+    };
+    for (size_t i = 0; i < handles.size(); ++i) {
+        decode.cancelCleanupTick();
+        EXPECT_EQ(prefill.calls, static_cast<int>(i + 1));
+        EXPECT_GT(handles[i]->next_cancel_retry_ms.load(), 213);
+        if (i + 1 < handles.size()) {
+            EXPECT_EQ(handles[i + 1]->next_cancel_retry_ms.load(), static_cast<int64_t>(211 + i));
+        }
+    }
+    EXPECT_EQ(decode.cancel_registry_->pending().size(), 3u);
     rpc_server->Shutdown();
 }
 

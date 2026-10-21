@@ -178,59 +178,75 @@ grpc::Status DecodeRpcServer::Cancel(grpc::ServerContext*, const CancelRequestPB
 }
 
 void DecodeRpcServer::cancelCleanupTick() {
-    for (const auto& handle : cancel_registry_->pending()) {
-        // This checks scheduler completion and physical P2P resource holds,
-        // even when remote cancellation is backing off or Prefill is unreachable.
+    const auto pending = cancel_registry_->pending();
+    // Publish every locally safe terminal before any potentially slow remote
+    // operation. A dead peer must not delay unrelated local cleanup in this batch.
+    for (const auto& handle : pending) {
         cancel_registry_->complete(handle);
+    }
+    // Retry the oldest due record only. This bounds remote work per tick and
+    // prevents one batch of dead peers from multiplying the RPC deadline.
+    PDCancelRegistry::Handle next;
+    int64_t earliest_retry = std::numeric_limits<int64_t>::max();
+    for (const auto& handle : pending) {
         if (handle->downstream_address.empty()) {
             continue;
         }
-        const auto monotonic_ms = [] {
-            return std::chrono::duration_cast<std::chrono::milliseconds>(
-                       std::chrono::steady_clock::now().time_since_epoch()).count();
-        };
-        auto next_retry = handle->next_cancel_retry_ms.load(std::memory_order_acquire);
-        if (monotonic_ms() < next_retry
-            || !handle->next_cancel_retry_ms.compare_exchange_strong(
-                next_retry, std::numeric_limits<int64_t>::max(), std::memory_order_acq_rel)) {
-            continue;
+        const auto retry = handle->next_cancel_retry_ms.load(std::memory_order_acquire);
+        if (retry < earliest_retry) {
+            earliest_retry = retry;
+            next = handle;
         }
-        autil::ScopeGuard retry_guard([&] {
-            const auto delay = handle->cancel_retry_delay_ms.load();
-            handle->cancel_retry_delay_ms.store(std::min<int64_t>(delay * 2, 1000));
-            handle->next_cancel_retry_ms.store(monotonic_ms() + delay, std::memory_order_release);
-        });
-        auto connection = cancel_pool_.getConnection(handle->downstream_address);
-        if (!connection.ok())
-            continue;
-        CancelRequestPB request;
-        request.set_request_id(handle->identity.request_id);
-        request.set_cancel_error_code(static_cast<int64_t>(handle->cancel_reason.code()));
-        request.set_cancel_error_message(handle->cancel_reason.ToString());
-        CancelResponsePB    response;
-        grpc::ClientContext context;
-        context.set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(200));
-        if (!connection->stub->Cancel(&context, request, &response).ok())
-            continue;
-        if (response.status() == CANCEL_STATUS_TOMBSTONED || response.status() == CANCEL_STATUS_NOT_FOUND) {
-            cancel_registry_->finishDownstream(handle);
-        } else if (response.status() == CANCEL_STATUS_ACCEPTED) {
-            StatusVersionPB version;
-            version.set_latest_finished_version(0);
-            WorkerStatusPB      status;
-            grpc::ClientContext status_context;
-            status_context.set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(200));
-            if (connection->stub->GetWorkerStatus(&status_context, version, &status).ok()) {
-                for (const auto& task : status.finished_task_list()) {
-                    if (task.request_id() == handle->identity.request_id) {
-                        cancel_registry_->finishDownstream(handle);
-                        break;
-                    }
+    }
+    if (!next) {
+        return;
+    }
+    const auto& handle = next;
+    const auto monotonic_ms = [] {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::steady_clock::now().time_since_epoch()).count();
+    };
+    auto next_retry = handle->next_cancel_retry_ms.load(std::memory_order_acquire);
+    if (monotonic_ms() < next_retry
+        || !handle->next_cancel_retry_ms.compare_exchange_strong(
+            next_retry, std::numeric_limits<int64_t>::max(), std::memory_order_acq_rel)) {
+        return;
+    }
+    autil::ScopeGuard retry_guard([&] {
+        const auto delay = handle->cancel_retry_delay_ms.load();
+        handle->cancel_retry_delay_ms.store(std::min<int64_t>(delay * 2, 1000));
+        handle->next_cancel_retry_ms.store(monotonic_ms() + delay, std::memory_order_release);
+    });
+    auto connection = cancel_pool_.getConnection(handle->downstream_address);
+    if (!connection.ok())
+        return;
+    CancelRequestPB request;
+    request.set_request_id(handle->identity.request_id);
+    request.set_cancel_error_code(static_cast<int64_t>(handle->cancel_reason.code()));
+    request.set_cancel_error_message(handle->cancel_reason.ToString());
+    CancelResponsePB    response;
+    grpc::ClientContext context;
+    context.set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(200));
+    if (!connection->stub->Cancel(&context, request, &response).ok())
+        return;
+    if (response.status() == CANCEL_STATUS_TOMBSTONED || response.status() == CANCEL_STATUS_NOT_FOUND) {
+        cancel_registry_->finishDownstream(handle);
+    } else if (response.status() == CANCEL_STATUS_ACCEPTED) {
+        StatusVersionPB version;
+        version.set_latest_finished_version(0);
+        WorkerStatusPB      status;
+        grpc::ClientContext status_context;
+        status_context.set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(200));
+        if (connection->stub->GetWorkerStatus(&status_context, version, &status).ok()) {
+            for (const auto& task : status.finished_task_list()) {
+                if (task.request_id() == handle->identity.request_id) {
+                    cancel_registry_->finishDownstream(handle);
+                    break;
                 }
             }
         }
-        cancel_registry_->complete(handle);
     }
+    cancel_registry_->complete(handle);
 }
 
 grpc::Status DecodeRpcServer::init(const EngineInitParams&                                maga_init_params,
