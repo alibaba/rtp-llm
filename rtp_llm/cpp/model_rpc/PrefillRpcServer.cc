@@ -499,7 +499,6 @@ grpc::Status PrefillRpcServer::EnqueueBatch(grpc::ServerContext*         context
             try {
                 GenerateInputPB item;
                 item.CopyFrom(external_input.input());
-                item.set_group_size(input_count);
                 item.mutable_group_id()->set_value(request->batch_id());
                 auto* config = item.mutable_generate_config();
                 config->set_unique_key(masterEnqueuedHandoffUniqueKey(request_id));
@@ -551,6 +550,11 @@ grpc::Status PrefillRpcServer::EnqueueBatch(grpc::ServerContext*         context
     }
     if (inputs.empty()) {
         return grpc::Status::OK;
+    }
+    // Group membership is the batch submitted to the engine, after per-item
+    // validation/preprocessing. Rejected inputs must not inflate group_size.
+    for (const auto& input : inputs) {
+        input->group_size = static_cast<int>(inputs.size());
     }
 
     std::vector<bool>              enqueue_successes;
