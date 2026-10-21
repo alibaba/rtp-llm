@@ -2,11 +2,13 @@ import unittest
 
 import torch
 
+from rtp_llm.models_py.modules.base.common.zero_centered_rms_norm import (
+    exact_head_rms_norm,
+)
 from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import apply_partial_rope
 from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_norm_rope import (
     try_indexer_norm_rope,
 )
-from rtp_llm.models_py.modules.qwen4_exp.qsa.norm import exact_head_rms_norm
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")

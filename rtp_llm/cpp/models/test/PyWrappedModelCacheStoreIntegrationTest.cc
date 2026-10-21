@@ -660,10 +660,17 @@ Scenario makeMtpScenario() {
 
 Scenario makeScenario(const std::string& name) {
     if (name == "cuda_lengths_host_prefix" || name == "cuda_lengths_host_prefix_micro") {
-        auto config = makeCacheConfig({{"full", 128, 256}});
-        auto layout = makeLayout(config);
-        auto inputs = makeInputs(
-            {1, 3, 4}, {501, 502, 503}, std::vector<int64_t>(24, 0), 8, std::vector<int32_t>(24, 1), {"full"}, 8, 128, 256);
+        auto config           = makeCacheConfig({{"full", 128, 256}});
+        auto layout           = makeLayout(config);
+        auto inputs           = makeInputs({1, 3, 4},
+                                           {501, 502, 503},
+                                           std::vector<int64_t>(24, 0),
+                                           8,
+                                           std::vector<int32_t>(24, 1),
+                                           {"full"},
+                                           8,
+                                           128,
+                                           256);
         inputs.input_lengths  = inputs.input_lengths.cuda();
         inputs.prefix_lengths = pinnedTensor({128, 256, 512}, {3});
         inputs.pd_separation  = false;
@@ -1593,8 +1600,6 @@ runPyWrappedModelSpeculativeCommitBridge(py::object py_model, const std::string&
                               MlaOpsType::AUTO,
                               /*max_seq_len=*/64,
                               /*hidden_size=*/1,
-                              /*tokens_per_block=*/0,
-                              /*kernel_tokens_per_block=*/0,
                               /*cache_manager=*/nullptr,
                               /*mtp_cache_config_index=*/std::nullopt};
     PyWrappedModel     model(params,

@@ -26,7 +26,7 @@ class InjectProjectionContractTest(unittest.TestCase):
             torch.manual_seed(8120 + rows)
             x = torch.randn(rows, 10240, device="cuda", dtype=torch.bfloat16)
             with patch(
-                "rtp_llm.models_py.modules.qwen4_exp.residual.gated_residual_splitk_inject.try_splitk_down_inject",
+                "rtp_llm.models_py.triton_kernels.common.gated_residual_splitk_inject.try_splitk_down_inject",
                 return_value=None,
             ):
                 reference = module(x)

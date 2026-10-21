@@ -196,13 +196,6 @@ class Qwen4Exp(Qwen35Moe):
         )
         if not ple_layer_ids and not indexer_head_dim:
             super()._post_build_model_config(model_config)
-            # The shared hybrid pool cannot represent qwen4's GDN side-state
-            # geometry (the linear block stride exceeds the attention block
-            # stride, which HybridConfigCreator rejects), so the
-            # dense-fallback control must use the independent pools too.
-            model_config.hybrid_attention_config.enable_independent_kv_cache_pools = (
-                True
-            )
             return
         # ple_layer_ids are 1-based (upstream indexes them as layer_idx + 1).
         ple_layer_indices = [layer_id - 1 for layer_id in ple_layer_ids]
@@ -214,10 +207,6 @@ class Qwen4Exp(Qwen35Moe):
             indexer_head_dim,
             getattr(model_config, "_qwen4_indexer_compress_ratio", 0),
         )
-        # More than one region per layer routes cache config through the DSv4
-        # independent-pool path (HybridPoolConfigCreator).
-        hybrid = model_config.hybrid_attention_config
-        hybrid.enable_independent_kv_cache_pools = True
 
     @classmethod
     def _parse_hybrid_attention_config(cls, config_json: dict, config: ModelConfig):

@@ -9,9 +9,9 @@ from dataclasses import dataclass
 
 import torch
 
-from rtp_llm.models.qwen4_exp.full_fp8_weight import FP8_STORAGE_SCALE_SUFFIX
+from rtp_llm.model_loader.fp8_weight import FP8_STORAGE_SCALE_SUFFIX
+from rtp_llm.models_py.modules.base.common.fp8_linear import Fp8Linear
 from rtp_llm.models_py.modules.factory.linear.factory import LinearFactory
-from rtp_llm.models_py.modules.qwen4_exp.fp8_dense import Qwen4Fp8Linear
 
 
 @dataclass(frozen=True)
@@ -146,7 +146,7 @@ class Qwen4LinearFactory:
     ):
         storage_scale = weights.get(weight_key + FP8_STORAGE_SCALE_SUFFIX)
         if storage_scale is not None:
-            module = Qwen4Fp8Linear(
+            module = Fp8Linear(
                 weights[weight_key].t().contiguous(),
                 storage_scale,
                 weights.get(bias_key) if bias_key else None,

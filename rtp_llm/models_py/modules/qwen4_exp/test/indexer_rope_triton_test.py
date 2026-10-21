@@ -113,7 +113,7 @@ class IndexerRoPETritonTest(unittest.TestCase):
                     config,
                     inv_freq=frequency,
                     validate_position_axes=False,
-                    **kwargs
+                    **kwargs,
                 )
             for prefix in (3, 128, 32700):
                 transported.copy_((positions + prefix).repeat_interleave(factor))
@@ -204,8 +204,10 @@ class IndexerRoPETritonTest(unittest.TestCase):
         self.assertIsNone(indexer.rope_inv_freq(self.config(base=10000.0)))
 
     def test_indexer_rmsnorm_matches_native_reduction_and_strides(self):
-        from rtp_llm.models_py.modules.qwen4_exp.qsa.norm import exact_head_rms_norm
-        from rtp_llm.models_py.modules.qwen4_exp.qsa.norm_triton import (
+        from rtp_llm.models_py.modules.base.common.zero_centered_rms_norm import (
+            exact_head_rms_norm,
+        )
+        from rtp_llm.models_py.triton_kernels.common.zero_centered_rms_norm import (
             try_indexer_rmsnorm,
         )
 
@@ -220,7 +222,7 @@ class IndexerRoPETritonTest(unittest.TestCase):
                 ):
                     self.assertIsNotNone(try_indexer_rmsnorm(x, gamma, 1e-6))
                     with patch(
-                        "rtp_llm.models_py.modules.qwen4_exp.qsa.norm_triton.try_indexer_rmsnorm",
+                        "rtp_llm.models_py.triton_kernels.common.zero_centered_rms_norm.try_indexer_rmsnorm",
                         return_value=None,
                     ):
                         expected = exact_head_rms_norm(x, gamma, 1e-6)
@@ -234,7 +236,7 @@ class IndexerRoPETritonTest(unittest.TestCase):
             ].reshape(rows, 4, 128)
             gamma = torch.full((128,), 0.003, device="cuda", dtype=torch.bfloat16)
             with patch(
-                "rtp_llm.models_py.modules.qwen4_exp.qsa.norm_triton.try_indexer_rmsnorm",
+                "rtp_llm.models_py.triton_kernels.common.zero_centered_rms_norm.try_indexer_rmsnorm",
                 return_value=None,
             ):
                 expected = exact_head_rms_norm(x, gamma, 1e-6)
@@ -243,8 +245,10 @@ class IndexerRoPETritonTest(unittest.TestCase):
             )
 
     def test_indexer_norm_graph_uses_fresh_values_and_gains(self):
-        from rtp_llm.models_py.modules.qwen4_exp.qsa.norm import exact_head_rms_norm
-        from rtp_llm.models_py.modules.qwen4_exp.qsa.norm_triton import (
+        from rtp_llm.models_py.modules.base.common.zero_centered_rms_norm import (
+            exact_head_rms_norm,
+        )
+        from rtp_llm.models_py.triton_kernels.common.zero_centered_rms_norm import (
             try_indexer_rmsnorm,
         )
 
@@ -260,7 +264,7 @@ class IndexerRoPETritonTest(unittest.TestCase):
             gamma.normal_(0, 0.1)
             graph.replay()
             with patch(
-                "rtp_llm.models_py.modules.qwen4_exp.qsa.norm_triton.try_indexer_rmsnorm",
+                "rtp_llm.models_py.triton_kernels.common.zero_centered_rms_norm.try_indexer_rmsnorm",
                 return_value=None,
             ):
                 expected = exact_head_rms_norm(x, gamma, 1e-6)
@@ -309,12 +313,14 @@ class IndexerRoPETritonTest(unittest.TestCase):
                 return value
 
             eager, fused = context(), context()
-            with patch(MODULE + ".try_build_text_rope", return_value=None), patch(
-                MODULE + ".try_apply_partial_rope", return_value=None
-            ), patch(
-                "rtp_llm.models_py.modules.qwen4_exp.qsa.target_writer_triton."
-                "try_write_target_window",
-                return_value=None,
+            with (
+                patch(MODULE + ".try_build_text_rope", return_value=None),
+                patch(MODULE + ".try_apply_partial_rope", return_value=None),
+                patch(
+                    "rtp_llm.models_py.modules.qwen4_exp.qsa.target_writer_triton."
+                    "try_write_target_window",
+                    return_value=None,
+                ),
             ):
                 expected = eager.select_target_verify_tokens(
                     q, raw, indexer=indexer, rope_config=config

@@ -364,7 +364,9 @@ def select_draft_graph_tokens(
         prepared = metadata
     else:
         if raw_query:
-            from rtp_llm.models_py.modules.qwen4_exp.qsa.norm import exact_head_rms_norm
+            from rtp_llm.models_py.modules.base.common.zero_centered_rms_norm import (
+                exact_head_rms_norm,
+            )
 
             q = exact_head_rms_norm(q, indexer.q_norm_gamma, indexer.norm_eps)
         sources, inverse, valid, positions, visible = draft_graph_rows(inputs, tokens)

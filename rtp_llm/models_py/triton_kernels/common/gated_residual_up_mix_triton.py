@@ -4,7 +4,7 @@ import torch
 import triton
 import triton.language as tl
 
-from ..fp8_dense_gemv_triton import is_supported
+from rtp_llm.models_py.triton_kernels.common.fp8_gemv import is_supported
 
 
 @triton.jit
@@ -43,7 +43,9 @@ def try_fp8_up_mix(x, weight, scale, normed, branches):
         return None
     rows = x.reshape(-1, x.shape[-1])
     if rows.shape[0] > 4:
-        from .gated_residual_medium_up_mix_triton import try_fp8_hc_medium_up_mix
+        from rtp_llm.models_py.triton_kernels.common.gated_residual_medium_up_mix_triton import (
+            try_fp8_hc_medium_up_mix,
+        )
 
         return try_fp8_hc_medium_up_mix(x, weight, scale, normed, branches)
     if not (

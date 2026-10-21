@@ -4,7 +4,7 @@ from unittest.mock import patch
 import torch
 
 from rtp_llm.models_py.model_desc.qwen4_exp_mtp import Qwen4ExpMTPInputProjection
-from rtp_llm.models_py.modules.qwen4_exp.fp8_dense import Qwen4Fp8Linear
+from rtp_llm.models_py.modules.base.common.fp8_linear import Fp8Linear
 from rtp_llm.models_py.modules.qwen4_exp.mtp_norm_triton import (
     _mtp_embedding_rms_norm,
     try_mtp_embedding_rms_norm,
@@ -74,7 +74,7 @@ class MtpEmbeddingNormTest(unittest.TestCase):
             weight = (torch.randn(2560, 2560, device="cuda") * 0.1).to(
                 torch.float8_e4m3fn
             )
-            return Qwen4Fp8Linear(weight, torch.tensor([0.119713], device="cuda"))
+            return Fp8Linear(weight, torch.tensor([0.119713], device="cuda"))
 
         return Qwen4ExpMTPInputProjection(
             torch.randn(2560, device="cuda", dtype=torch.bfloat16) * 0.07,

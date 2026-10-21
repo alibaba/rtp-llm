@@ -4,15 +4,15 @@ from unittest.mock import patch
 import torch
 
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import scaled_fp8_per_tensor_quant
-from rtp_llm.models_py.modules.qwen4_exp.residual.gated_residual import (
-    Qwen4ExpGatedResidual,
+from rtp_llm.models_py.modules.hybrid.gated_residual import (
+    GatedResidual,
 )
-from rtp_llm.models_py.modules.qwen4_exp.residual.gated_residual_norm_triton import (
+from rtp_llm.models_py.triton_kernels.common.gated_residual_norm_triton import (
     grouped_rms_norm_triton,
     try_grouped_rms_norm_with_fp8_scale,
 )
 
-MODULE = "rtp_llm.models_py.modules.qwen4_exp.residual.gated_residual_norm_triton"
+MODULE = "rtp_llm.models_py.triton_kernels.common.gated_residual_norm_triton"
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
@@ -56,7 +56,7 @@ class ResidualNormFp8Test(unittest.TestCase):
         def weight(shape):
             return (torch.randn(shape, device="cuda") * 0.1).to(torch.float8_e4m3fn)
 
-        return Qwen4ExpGatedResidual(
+        return GatedResidual(
             torch.randn(10240, device="cuda", dtype=torch.bfloat16) * 0.07,
             weight((320, 10240)),
             weight((10240, 320)),

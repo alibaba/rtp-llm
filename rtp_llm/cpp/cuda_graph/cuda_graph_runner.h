@@ -101,7 +101,7 @@ public:
         is_prefill_cuda_graph_mode_ = role_ == CudaGraphRole::EMBEDDING_PREFILL
                                       || role_ == CudaGraphRole::MTP_DRAFT_PREFILL
                                       || role_ == CudaGraphRole::GENERATION_PREFILL;
-        is_target_verify_           = role_ == CudaGraphRole::TARGET_VERIFY;
+        is_target_verify_ = role_ == CudaGraphRole::TARGET_VERIFY;
         if (role_ == CudaGraphRole::GENERATION_PREFILL) {
             RTP_LLM_CHECK_WITH_INFO(generation_prefill_cuda_graph_max_requests_ > 0
                                         && generation_prefill_cuda_graph_max_requests_

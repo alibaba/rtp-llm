@@ -177,7 +177,7 @@ class Qwen4ExpMTP(Qwen4Exp):
             )
         names = (W.embedding, W.lm_head)
         if getattr(target_config, "_qwen4_full_fp8_nvfp4", False) is True:
-            from rtp_llm.models.qwen4_exp.full_fp8_weight import (
+            from rtp_llm.model_loader.fp8_weight import (
                 FP8_STORAGE_SCALE_SUFFIX,
             )
 

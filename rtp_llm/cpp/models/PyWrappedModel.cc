@@ -1216,8 +1216,8 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             && generation_prefill_graph_runner_ != nullptr && !is_generation_prefill_runner) {
             generation_prefill_cuda_graph_status = GenerationPrefillCudaGraphStatus::MIXED_PREFILL_DECODE_NOT_SUPPORTED;
         }
-        const bool graph_candidate =
-            !capture_hidden_states && enable_cuda_graph_ && graph_runner != nullptr && graph_runner->canRun(py_model_inputs, graph_state);
+        const bool graph_candidate = !capture_hidden_states && enable_cuda_graph_ && graph_runner != nullptr
+                                     && graph_runner->canRun(py_model_inputs, graph_state);
         // Decode side-cache writes and the speculative accept_len callback
         // require an exact batch. Draft-prefill graphs validate their packed
         // rows separately and select a token bucket, leaving the decode batch

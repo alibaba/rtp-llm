@@ -7,8 +7,8 @@ import torch
 
 from rtp_llm.models_py.model_desc.generic_moe import GenericMoeLayer
 from rtp_llm.models_py.modules.base import FusedSiluAndMul, SigmoidGateScaleAdd
+from rtp_llm.models_py.modules.base.common.fp8_linear import Fp8Linear
 from rtp_llm.models_py.modules.hybrid.dense_mlp import DenseMLP
-from rtp_llm.models_py.modules.qwen4_exp.fp8_dense import Qwen4Fp8Linear
 from rtp_llm.models_py.modules.qwen4_exp.moe.shared_overlap import (
     Qwen4MoeLayer,
     _shared_stream_for_device,
@@ -27,7 +27,7 @@ def make_layer():
         w = (torch.randn(n, k, device="cuda", dtype=torch.bfloat16) * 0.2).to(
             torch.float8_e4m3fn
         )
-        return Qwen4Fp8Linear(w, torch.tensor([0.05], device="cuda"))
+        return Fp8Linear(w, torch.tensor([0.05], device="cuda"))
 
     shared.is_gated = True
     shared.up_proj = linear(1280, 2560)

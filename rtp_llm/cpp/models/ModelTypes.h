@@ -66,10 +66,7 @@ struct GptModelInitParams {
     // Hyper-connection residual multiplier. Kept separately because model
     // internals can still be hc_mult * hidden_size wide even when the MTP draft
     // consumes a collapsed target hidden state.
-    int64_t hc_mult = 1;
-    // Explicit MTP input_hiddens row width. Zero preserves the legacy fallback
-    // to hidden_size * hc_mult for direct/test construction sites.
-    int64_t                                    mtp_input_hidden_size = 0;
+    int64_t                                    hc_mult = 1;
     std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter;
     // Final CUDA-graph kernel block-table width. Executors compute it from
     // the published model topology, actual reserve, and fake caller bounds.
@@ -77,6 +74,10 @@ struct GptModelInitParams {
 
     std::vector<int64_t>    hidden_state_capture_layer_ids;
     HiddenStateCaptureDtype hidden_state_capture_dtype = HiddenStateCaptureDtype::BF16;
+
+    // Explicit MTP input_hiddens row width. Zero preserves the legacy fallback
+    // to hidden_size * hc_mult for direct/test construction sites.
+    int64_t mtp_input_hidden_size = 0;
 };
 
 enum GptModelInputIndex : size_t {

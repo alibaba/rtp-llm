@@ -181,7 +181,7 @@ def select_target_verify_tokens(
                 q, cosine, sine, indexer.q_norm_gamma, indexer.norm_eps
             )
             if rotated_q is None:
-                from rtp_llm.models_py.modules.qwen4_exp.qsa.norm import (
+                from rtp_llm.models_py.modules.base.common.zero_centered_rms_norm import (
                     exact_head_rms_norm,
                 )
 

@@ -6,7 +6,7 @@ from torch import nn
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 
 
-class Qwen4Fp8VocabEmbedding(nn.Module):
+class Fp8VocabEmbedding(nn.Module):
     def __init__(
         self,
         weight: torch.Tensor,
@@ -107,7 +107,7 @@ class Qwen4Fp8VocabEmbedding(nn.Module):
                 or text_tokens_mask.shape != input.shape
             ):
                 raise ValueError("vocabulary text mask must match packed token ids")
-        from .vocab_embedding_triton import vocab_rows
+        from rtp_llm.models_py.triton_kernels.common.fp8_vocab_lookup import vocab_rows
 
         output = vocab_rows(input, self.weight, self.weight_scale, text_tokens_mask)
         if self.tp_size > 1:
@@ -145,7 +145,10 @@ class Qwen4Fp8VocabEmbedding(nn.Module):
             and self.hidden_size == 1280
             and 1024 <= input.numel() <= 12288
         ):
-            from .vocab_byte_gather import dequant_hyper, raw_rows
+            from rtp_llm.models_py.triton_kernels.common.fp8_vocab_gather import (
+                dequant_hyper,
+                raw_rows,
+            )
 
             local = raw_rows(input, self.weight)
             gathered = all_gather(local, group=Group.TP)
@@ -158,7 +161,10 @@ class Qwen4Fp8VocabEmbedding(nn.Module):
                 branches,
                 text_tokens_mask,
             )
-        from .vocab_embedding_triton import gather_hyper_rows, vocab_rows
+        from rtp_llm.models_py.triton_kernels.common.fp8_vocab_lookup import (
+            gather_hyper_rows,
+            vocab_rows,
+        )
 
         local = vocab_rows(input, self.weight, self.weight_scale, text_tokens_mask)
         gathered = all_gather(local, group=Group.TP) if self.tp_size > 1 else local

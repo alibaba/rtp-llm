@@ -3,16 +3,16 @@ from unittest.mock import patch
 
 import torch
 
-from rtp_llm.models_py.modules.qwen4_exp.fp8_dense_gemv_triton import fp8_hc_gemv
-from rtp_llm.models_py.modules.qwen4_exp.residual.gated_residual_mix_triton import (
+from rtp_llm.models_py.modules.qwen4_exp.test import residual_norm_fp8_test
+from rtp_llm.models_py.triton_kernels.common.fp8_gemv import fp8_hc_gemv
+from rtp_llm.models_py.triton_kernels.common.gated_residual_mix_triton import (
     fused_mix_reduce,
 )
-from rtp_llm.models_py.modules.qwen4_exp.residual.gated_residual_up_mix_triton import (
+from rtp_llm.models_py.triton_kernels.common.gated_residual_up_mix_triton import (
     try_fp8_up_mix,
 )
-from rtp_llm.models_py.modules.qwen4_exp.test import residual_norm_fp8_test
 
-MODULE = "rtp_llm.models_py.modules.qwen4_exp.residual.gated_residual_up_mix_triton"
+MODULE = "rtp_llm.models_py.triton_kernels.common.gated_residual_up_mix_triton"
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")

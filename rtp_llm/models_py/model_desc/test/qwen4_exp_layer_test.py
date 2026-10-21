@@ -1,7 +1,7 @@
 """Qwen4Exp decoder layer construction and residual-stream wiring.
 
 The gated-residual math itself is covered by
-models_py/modules/qwen4_exp/test/gated_residual_test.py (which checks it against
+models_py/modules/hybrid/test/gated_residual_test.py (which checks it against
 an independent transcription of upstream). This test covers the wiring: that the
 layer picks up the right weight tags and threads the wide stream through both
 sublayers in the right order.
@@ -33,13 +33,13 @@ from rtp_llm.models_py.model_desc.qwen4_exp_runtime.ple_state import (
 from rtp_llm.models_py.model_desc.test.ple_page_reference import (
     _apply_ple as reference_apply_ple,
 )
+from rtp_llm.models_py.modules.hybrid.gated_residual import (
+    GatedResidual,
+    inject_into_residual,
+)
 from rtp_llm.models_py.modules.qwen4_exp.ple.ple import (
     Qwen4ExpNGramEmbedding,
     Qwen4ExpPLELayer,
-)
-from rtp_llm.models_py.modules.qwen4_exp.residual.gated_residual import (
-    Qwen4ExpGatedResidual,
-    inject_into_residual,
 )
 from rtp_llm.ops import HybridAttentionType, MoeConfig, ParallelismConfig
 from rtp_llm.utils.model_weight import W
@@ -209,8 +209,8 @@ class Qwen4ExpDecoderLayerTest(TestCase):
     def test_layer_has_gated_residual_units_not_layernorms(self):
         layer, _, _ = self._run(torch.randn(3, self.hc_hidden))
 
-        self.assertIsInstance(layer.attn_hyper_connection, Qwen4ExpGatedResidual)
-        self.assertIsInstance(layer.mlp_hyper_connection, Qwen4ExpGatedResidual)
+        self.assertIsInstance(layer.attn_hyper_connection, GatedResidual)
+        self.assertIsInstance(layer.mlp_hyper_connection, GatedResidual)
         self.assertFalse(hasattr(layer, "input_layernorm"))
         self.assertFalse(hasattr(layer, "post_attention_layernorm"))
 
@@ -233,8 +233,8 @@ class Qwen4ExpDecoderLayerTest(TestCase):
 
         _, attention, output = self._run(hyper_states)
 
-        attn_unit = Qwen4ExpGatedResidual(*self.attn_hc, hc_mult=_HC, norm_eps=_EPS)
-        mlp_unit = Qwen4ExpGatedResidual(*self.mlp_hc, hc_mult=_HC, norm_eps=_EPS)
+        attn_unit = GatedResidual(*self.attn_hc, hc_mult=_HC, norm_eps=_EPS)
+        mlp_unit = GatedResidual(*self.mlp_hc, hc_mult=_HC, norm_eps=_EPS)
         x, hyper, w = attn_unit(hyper_states)
         hyper = inject_into_residual(hyper, x * 3.0, w)
         x, hyper, w = mlp_unit(hyper)

@@ -12,7 +12,7 @@ RegisteredCacheStaging::RegisteredCacheStaging(size_t bytes, std::shared_ptr<Mem
         throw std::invalid_argument("typed TP staging needs a memory registration owner");
     }
     const auto registered_bytes = registeredCacheBytes(bytes);
-    tensor_                     = torch::empty({static_cast<int64_t>(registered_bytes)},
+    tensor_ = torch::empty({static_cast<int64_t>(registered_bytes)},
                            torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU).pinned_memory(true));
     if (memory_->isRdmaMode()) {
         if (!memory_->regUserMr(tensor_.data_ptr(), registered_bytes, false, 64 * 1024)) {

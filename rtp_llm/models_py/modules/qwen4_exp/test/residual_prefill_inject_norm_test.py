@@ -4,16 +4,18 @@ from unittest.mock import patch
 import torch
 
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import scaled_fp8_per_tensor_quant
-from rtp_llm.models_py.modules.qwen4_exp.residual.gated_residual import (
+from rtp_llm.models_py.modules.hybrid.gated_residual import (
     grouped_rms_norm,
     inject_into_residual,
 )
-from rtp_llm.models_py.modules.qwen4_exp.residual.gated_residual_prefill_inject_norm_triton import (
+from rtp_llm.models_py.modules.qwen4_exp.test import residual_norm_fp8_test as oracle
+from rtp_llm.models_py.triton_kernels.common.gated_residual_prefill_inject_norm_triton import (
     try_inject_grouped_norm,
 )
-from rtp_llm.models_py.modules.qwen4_exp.test import residual_norm_fp8_test as oracle
 
-MODULE = "rtp_llm.models_py.modules.qwen4_exp.residual.gated_residual_prefill_inject_norm_triton"
+MODULE = (
+    "rtp_llm.models_py.triton_kernels.common.gated_residual_prefill_inject_norm_triton"
+)
 
 
 class ResidualPrefillInjectNormTest(unittest.TestCase):
