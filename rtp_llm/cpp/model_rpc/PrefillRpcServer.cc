@@ -292,6 +292,7 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
     OnflightScope onflight_scope(this, request_id);
     auto          generate_context =
         GenerateContext(request_id, request->generate_config().timeout_ms(), server_context, metrics_reporter_, meta_);
+    generate_context.onflight_requests = &onflight_requests_;
     const int uncaught_exceptions = std::uncaught_exceptions();
     autil::ScopeGuard rpc_completion_guard([&generate_context, uncaught_exceptions] {
         if (std::uncaught_exceptions() == uncaught_exceptions) {
@@ -300,8 +301,13 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
     });
     auto input                 = QueryConverter::transQuery(request);
     input->request_deadline_ms = local_deadline;
-    if (local_deadline <= currentTimeMs() || server_context->IsCancelled()) {
-        return grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "prefill request expired");
+    const bool request_cancelled = server_context && server_context->IsCancelled();
+    if (local_deadline <= currentTimeMs() || request_cancelled) {
+        generate_context.error_info = request_cancelled
+                                          ? ErrorInfo(ErrorCode::CANCELLED, "prefill request cancelled")
+                                          : ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "prefill request expired");
+        generate_context.error_status = serializeErrorMsg(generate_context.request_key, generate_context.error_info);
+        return generate_context.error_status;
     }
     int64_t mm_cost_us = 0, enqueue_cost_us = 0, poll_cost_us = 0;
     int64_t phase_start = currentTimeUs();

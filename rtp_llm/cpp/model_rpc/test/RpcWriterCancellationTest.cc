@@ -10,6 +10,7 @@
 #include <utility>
 
 #include "rtp_llm/cpp/model_rpc/LocalRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include "rtp_llm/cpp/telemetry/TelemetryRuntime.h"
 #include "rtp_llm/cpp/testing/TestLogCapture.h"
@@ -112,6 +113,36 @@ TEST(RpcWriterCancellationTest, ContextCleanupPreservesExistingStreamError) {
     }
 
     EXPECT_EQ(stream->statusInfo().code(), ErrorCode::GENERATE_TIMEOUT);
+}
+
+TEST(RpcWriterCancellationTest, ContextMetricsPreserveTypedRpcErrorWithoutStream) {
+    for (auto code : {ErrorCode::INVALID_PARAMS, ErrorCode::GENERATE_TIMEOUT, ErrorCode::PRIORITY_PREEMPTED}) {
+        SCOPED_TRACE(static_cast<int>(code));
+        kmonitor::MetricsReporterPtr metrics_reporter;
+        auto meta = std::make_shared<RpcServerRuntimeMeta>();
+        GenerateContext context(52, 0, nullptr, metrics_reporter, meta);
+        context.error_status = grpcStatusFromErrorInfo({code, "early RPC failure"});
+        RpcMetricsCollector collector;
+        context.collectBasicMetrics(collector);
+        EXPECT_TRUE(collector.qps);
+        EXPECT_TRUE(collector.error_qps);
+        EXPECT_EQ(collector.error_code, code);
+        EXPECT_FALSE(collector.cancel_qps);
+        context.markRpcHandlingCompleted();
+    }
+}
+
+TEST(RpcWriterCancellationTest, ContextMetricsKeepExplicitFirstErrorAheadOfGrpcFallback) {
+    kmonitor::MetricsReporterPtr metrics_reporter;
+    auto meta = std::make_shared<RpcServerRuntimeMeta>();
+    GenerateContext context(53, 0, nullptr, metrics_reporter, meta);
+    context.error_info = {ErrorCode::MALLOC_FAILED, "first failure"};
+    context.error_status = grpcStatusFromErrorInfo({ErrorCode::EXECUTION_EXCEPTION, "later failure"});
+    RpcMetricsCollector collector;
+    context.collectBasicMetrics(collector);
+    EXPECT_TRUE(collector.error_qps);
+    EXPECT_EQ(collector.error_code, ErrorCode::MALLOC_FAILED);
+    context.markRpcHandlingCompleted();
 }
 
 TEST(RpcWriterCancellationTest, RequestGaugeSamplesLiveAtomicValue) {

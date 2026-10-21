@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/model_rpc/GenerateContext.h"
+#include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 
 #include <limits>
 
@@ -132,7 +133,7 @@ void GenerateContext::collectBasicMetrics(RpcMetricsCollector& collector) {
     } else if (cancelled()) {
         collector.error_code = ErrorCode::CANCELLED;
     } else if (hasError()) {
-        collector.error_code = ErrorCode::UNKNOWN_ERROR;
+        collector.error_code = errorInfoFromGrpcStatus(error_status).code();
     }
     collector.onflight_request   = onflight_requests ? static_cast<int64_t>(onflight_requests->load()) : 0;
     collector.total_rt_us        = executeTimeMs() * 1000;

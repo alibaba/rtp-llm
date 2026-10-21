@@ -384,6 +384,7 @@ grpc::Status DecodeRpcServer::GenerateStreamCall(grpc::ServerContext*           
     PDCancelRegistry::CallGuard cancel_guard(*cancel_registry_, cancel_handle);
     auto                        generate_context =
         GenerateContext(request_id, normalized_timeout_ms, server_context, metrics_reporter_, meta_);
+    generate_context.onflight_requests = &onflight_requests_;
     const int uncaught_exceptions = std::uncaught_exceptions();
     autil::ScopeGuard rpc_completion_guard([&generate_context, uncaught_exceptions] {
         if (std::uncaught_exceptions() == uncaught_exceptions) {
