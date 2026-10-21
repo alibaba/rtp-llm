@@ -460,6 +460,15 @@ def init_vit_group_args(parser, vit_config):
         help="ViT 异步计算等待队列的最大任务数",
     )
 
+    vit_group.add_argument(
+        "--vit_source_download_concurrency",
+        env_name="VIT_SOURCE_DOWNLOAD_CONCURRENCY",
+        bind_to=(vit_config, "vit_source_download_concurrency"),
+        type=int,
+        default=0,
+        help="Source download threads per ViT process; 0 shares the default I/O pool",
+    )
+
     for name, parser, default, description in (
         (
             "mm_remote_cache_enable",

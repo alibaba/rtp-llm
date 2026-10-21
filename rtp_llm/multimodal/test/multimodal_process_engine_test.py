@@ -1938,6 +1938,31 @@ class _UrlRecordingEmbedding(FakeMultiModalEmbeddingInterface):
 
 
 class MMProcessEngineGreenNetTest(TestCase):
+    def test_source_download_uses_configured_executor(self):
+        engine = self._make_engine(source_download_concurrency=2)
+        engine._greennet_provider = _StubGreenNetProvider(GreenNetVerdict(passed=True))
+        names = []
+
+        def prepare(mm_inputs, vit_config, *, deadline, cancellation_event):
+            names.append(threading.current_thread().name)
+            self.assertGreater(deadline, time.monotonic())
+            self.assertFalse(cancellation_event.is_set())
+            return mm_inputs
+
+        try:
+            with patch.object(
+                engine.mm_part, "prepare_inspection_inputs", prepare, create=True
+            ):
+                inp = self._make_input("fake://original")
+                rewritten, verdict, handle = engine._begin_greennet([inp])
+                self.assertEqual(rewritten, [inp])
+                self.assertTrue(verdict.result(timeout=2).passed)
+                self.assertEqual(len(names), 1)
+                self.assertTrue(names[0].startswith("mm-source-download"))
+                engine._cancel_greennet(handle)
+        finally:
+            engine.stop()
+
     def test_stop_drains_running_compute_before_closing_dependencies(self):
         engine = self._make_engine()
         entered, release, stopping = (
@@ -2100,7 +2125,7 @@ class MMProcessEngineGreenNetTest(TestCase):
         finally:
             engine.stop()
 
-    def _make_engine(self, mm_part=None, device="cpu"):
+    def _make_engine(self, mm_part=None, device="cpu", source_download_concurrency=0):
         model = FakeModel(mm_part or FakeMultiModalEmbeddingInterface())
         vit_config = VitConfig()
         vit_config.use_local_preprocess = True
@@ -2108,6 +2133,7 @@ class MMProcessEngineGreenNetTest(TestCase):
         vit_config.mm_cache_gpu_max_bytes = 0
         vit_config.mm_cache_cpu_max_bytes = 1024 * 1024
         vit_config.mm_hash_key_cache_max_bytes = 1024 * 1024
+        vit_config.vit_source_download_concurrency = source_download_concurrency
         return MMProcessEngine(
             model.mm_part,
             model.model_config,

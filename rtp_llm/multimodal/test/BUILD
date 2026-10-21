@@ -7,6 +7,12 @@ filegroup(
 )
 
 py_test(
+    name = "source_download_executor_test",
+    srcs = ["source_download_executor_test.py"],
+    deps = ["//rtp_llm:multimodal"],
+)
+
+py_test(
     name = "multimodal_image_load_test",
     srcs = [
         "multimodal_image_load_test.py",

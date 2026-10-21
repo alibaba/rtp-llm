@@ -374,6 +374,7 @@ class VitConfig:
         self.mm_preprocess_num_threads: int = 0
         self.vit_concurrency: int = 64
         self.vit_max_queue_size: int = 64
+        self.vit_source_download_concurrency: int = 0
         self.biencoder_preprocess: bool = False
         self.extra_input_in_mm_embedding = ""
         self.mm_timeout_ms: int = VitConfig.DEFAULT_MM_TIMEOUT_MS
@@ -469,6 +470,7 @@ class VitConfig:
             f"mm_preprocess_max_workers: {self.mm_preprocess_max_workers}\n"
             f"vit_concurrency: {self.vit_concurrency}\n"
             f"vit_max_queue_size: {self.vit_max_queue_size}\n"
+            f"vit_source_download_concurrency: {self.vit_source_download_concurrency}\n"
             f"biencoder_preprocess: {self.biencoder_preprocess}\n"
             f"extra_input_in_mm_embedding: {self.extra_input_in_mm_embedding}\n"
             f"mm_timeout_ms: {self.mm_timeout_ms}\n"
