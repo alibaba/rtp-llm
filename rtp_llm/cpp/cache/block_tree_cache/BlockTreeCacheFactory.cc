@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <chrono>
 #include <iterator>
 #include <limits>
@@ -362,6 +363,64 @@ size_t computeHostUsableBlockCount(size_t capacity_bytes, size_t combined_stride
     return physical_blocks > 0 ? physical_blocks - 1 : 0;
 }
 
+std::vector<size_t> computeHostUsableBlockCounts(size_t                             capacity_bytes,
+                                                 const std::vector<size_t>&         strides,
+                                                 const std::vector<CacheGroupType>& types,
+                                                 double                             swa_full_ratio) {
+    RTP_LLM_CHECK_WITH_INFO(std::isfinite(swa_full_ratio) && swa_full_ratio > 0,
+                            "MEMORY_CACHE_SWA_BLOCK_RATIO must be finite and positive, got %f",
+                            swa_full_ratio);
+    RTP_LLM_CHECK_WITH_INFO(strides.size() == types.size(), "HOST stride/type count mismatch");
+    if (strides.empty()) {
+        return {};
+    }
+    const bool split = std::find(types.begin(), types.end(), CacheGroupType::FULL) != types.end()
+                       && std::find(types.begin(), types.end(), CacheGroupType::SWA) != types.end();
+    size_t min_stride = std::numeric_limits<size_t>::max();
+    for (const auto stride : strides) {
+        RTP_LLM_CHECK_WITH_INFO(stride > 0, "HOST pool stride must be positive");
+        min_stride = std::min(min_stride, stride);
+    }
+    const auto max_physical_blocks = static_cast<size_t>(std::numeric_limits<BlockIdxType>::max());
+    auto       fit                 = [&](size_t baseline, std::vector<size_t>* counts) {
+        size_t remaining = capacity_bytes;
+        for (size_t i = 0; i < strides.size(); ++i) {
+            const long double scaled = split && types[i] == CacheGroupType::SWA ?
+                                                                 std::ceil(static_cast<long double>(baseline) * swa_full_ratio) :
+                                                                 static_cast<long double>(baseline);
+            // Leave room for block zero before converting or multiplying.
+            if (scaled >= static_cast<long double>(max_physical_blocks)) {
+                return false;
+            }
+            const auto count = static_cast<size_t>(scaled);
+            if (count + 1 > remaining / strides[i]) {
+                return false;
+            }
+            remaining -= (count + 1) * strides[i];
+            if (counts) {
+                (*counts)[i] = count;
+            }
+        }
+        return true;
+    };
+    size_t low  = 0;
+    size_t high = std::min(capacity_bytes / min_stride, max_physical_blocks - 1);
+    while (low < high) {
+        const size_t distance = high - low;
+        const size_t mid      = low + distance / 2 + distance % 2;
+        if (fit(mid, nullptr)) {
+            low = mid;
+        } else {
+            high = mid - 1;
+        }
+    }
+    std::vector<size_t> result(strides.size(), 0);
+    if (low > 0) {
+        RTP_LLM_CHECK(fit(low, &result));
+    }
+    return result;
+}
+
 std::string resolveDiskMountPath(const std::string& paths_csv, int64_t local_world_size, int64_t local_rank) {
     const auto paths = split(paths_csv, ',');
     RTP_LLM_CHECK_WITH_INFO(paths.size() == static_cast<size_t>(local_world_size),
@@ -473,10 +532,19 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
 
     std::vector<std::shared_ptr<HostBlockPool>> host_pools(group_members.size());
     if (host_enabled && !group_members.empty()) {
-        const size_t bytes  = static_cast<size_t>(kv_cache_config.memory_cache_size_mb) * 1024UL * 1024UL;
-        const size_t usable = computeHostUsableBlockCount(bytes, combined_stride);
-        if (usable == 0) {
-            RTP_LLM_LOG_ERROR("host budget is too small for one complete tree coordinate");
+        const size_t                bytes = static_cast<size_t>(kv_cache_config.memory_cache_size_mb) * 1024UL * 1024UL;
+        std::vector<size_t>         strides;
+        std::vector<CacheGroupType> types;
+        for (size_t i = 0; i < group_members.size(); ++i) {
+            strides.push_back(backing_layouts[i].pool_stride);
+            types.push_back(cache_config.topology().group(group_members[i].front()).policy.group_type);
+        }
+        const auto usable =
+            computeHostUsableBlockCounts(bytes, strides, types, kv_cache_config.memory_cache_swa_block_ratio);
+        if (std::any_of(usable.begin(), usable.end(), [](size_t count) { return count == 0; })) {
+            RTP_LLM_LOG_ERROR("HOST budget %zu bytes cannot hold a usable block per pool with SWA/full ratio %f",
+                              bytes,
+                              kv_cache_config.memory_cache_swa_block_ratio);
             return nullptr;
         }
         for (size_t group_set_id = 0; group_set_id < group_members.size(); ++group_set_id) {
@@ -484,7 +552,17 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
             const GroupBase&                first   = cache_config.topology().group(members.front());
             const std::string               pool_name =
                 "block_tree_host_" + std::string(metricCacheGroupTypeName(first.policy.group_type));
-            host_pools[group_set_id] = createHostPool(pool_name, backing_layouts[group_set_id], usable, pool_alignment);
+            RTP_LLM_LOG_INFO("HOST pool %s: usable_blocks=%zu physical_blocks=%zu stride_bytes=%zu "
+                             "allocated_bytes=%zu total_budget_bytes=%zu configured_swa_full_ratio=%f",
+                             pool_name.c_str(),
+                             usable[group_set_id],
+                             usable[group_set_id] + 1,
+                             strides[group_set_id],
+                             (usable[group_set_id] + 1) * strides[group_set_id],
+                             bytes,
+                             kv_cache_config.memory_cache_swa_block_ratio);
+            host_pools[group_set_id] =
+                createHostPool(pool_name, backing_layouts[group_set_id], usable[group_set_id], pool_alignment);
             if (!host_pools[group_set_id]) {
                 return nullptr;
             }

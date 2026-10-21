@@ -841,7 +841,8 @@ std::unique_ptr<FullSWAEnvironment> FullSWAEnvironment::create(const FullSWAEnvi
     };
     environment->host_pools = {
         makeHostPool(2 * kGroupPayloadBytes, options.usable_host_blocks),
-        makeHostPool(kGroupPayloadBytes, options.usable_host_blocks),
+        makeHostPool(kGroupPayloadBytes,
+                     options.usable_swa_host_blocks ? options.usable_swa_host_blocks : options.usable_host_blocks),
     };
     if (options.enable_disk) {
         environment->disk_pools = {
@@ -1092,7 +1093,9 @@ void FullSWAEnvironment::expectPoolFreeCounts(const std::vector<size_t>& device_
 void FullSWAEnvironment::expectFullyReclaimed() const {
     EXPECT_EQ(cache->getStats().tree_node_count, 0u);
     expectPoolFreeCounts(std::vector<size_t>(device_pools.size(), options_.usable_device_blocks),
-                         std::vector<size_t>(host_pools.size(), options_.usable_host_blocks),
+                         std::vector<size_t>{options_.usable_host_blocks,
+                                             options_.usable_swa_host_blocks ? options_.usable_swa_host_blocks :
+                                                                               options_.usable_host_blocks},
                          std::vector<size_t>(disk_pools.size(), options_.usable_disk_blocks));
 }
 

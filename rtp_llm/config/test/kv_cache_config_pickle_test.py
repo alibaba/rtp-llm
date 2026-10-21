@@ -16,10 +16,10 @@ class KVCacheConfigPickleTest(TestCase):
         for name, value in KV_CACHE_EVENT_FIELD_VALUES.items():
             setattr(config, name, value)
         state = config.__getstate__()
-        self.assertEqual(state[:2], ("KVCacheConfig", 7))
-        self.assertEqual(state[-5:], tuple(KV_CACHE_EVENT_FIELD_VALUES.values()))
+        self.assertEqual(state[:2], ("KVCacheConfig", 8))
+        self.assertEqual(state[-7:-2], tuple(KV_CACHE_EVENT_FIELD_VALUES.values()))
         # setstate must normalize its private slice, not mutate the supplied
-        # version-7 tuple retained by another Python reference.
+        # version-8 tuple retained by another Python reference.
         original_state = tuple(list(state))
         direct = KVCacheConfig.__new__(KVCacheConfig)
         direct.__setstate__(state)
@@ -37,7 +37,7 @@ class KVCacheConfigPickleTest(TestCase):
         source.dsv4_fixed_pool_blocks = 17
         source.block_tree_transfer_worker_count = 7
         state = source.__getstate__()
-        previous = (state[0], 6, *state[2:-5])
+        previous = (state[0], 6, *state[2:-7])
         restored = KVCacheConfig.__new__(KVCacheConfig)
         restored.__setstate__(previous)
         self.assertEqual(restored.dsv4_fixed_pool_blocks, 17)
@@ -45,6 +45,21 @@ class KVCacheConfigPickleTest(TestCase):
         defaults = KVCacheConfig()
         for name in EVENT_PICKLE_FIELDS:
             self.assertEqual(getattr(restored, name), getattr(defaults, name), name)
+
+    def test_pool_settings_round_trip_and_version7_defaults(self):
+        config = KVCacheConfig()
+        config.memory_cache_swa_block_ratio = 0.5
+        config.dsv41_decoder_swa_pool_blocks = 512
+        restored = pickle.loads(pickle.dumps(config))
+        self.assertEqual(restored.memory_cache_swa_block_ratio, 0.5)
+        self.assertEqual(restored.dsv41_decoder_swa_pool_blocks, 512)
+        state = config.__getstate__()
+        previous = (state[0], 7, *state[2:-2])
+        legacy = KVCacheConfig.__new__(KVCacheConfig)
+        legacy.__setstate__(previous)
+        self.assertEqual(legacy.memory_cache_swa_block_ratio, 1.0)
+        self.assertEqual(legacy.dsv41_decoder_swa_pool_blocks, 0)
+        self.assertEqual(previous[1], 7)
 
     def test_malformed_event_states_are_rejected(self):
         state = KVCacheConfig().__getstate__()

@@ -217,6 +217,12 @@ struct KVCacheConfig {
     // linear-step-derived block count.
     uint32_t dsv4_fixed_pool_blocks = 0;
 
+    // Optional V4.1 decoder-only SWA override, including reserved block zero.
+    uint32_t dsv41_decoder_swa_pool_blocks = 0;
+
+    // Usable HOST SWA blocks per FULL block; does not change checkpoint spacing.
+    double memory_cache_swa_block_ratio = 1.0;
+
     // Optional DSV4 HCA_STATE pool block count override. 0 means HCA_STATE
     // follows dsv4_fixed_pool_blocks or the normal linear-step-derived count.
     uint32_t dsv4_hca_state_pool_blocks = 0;

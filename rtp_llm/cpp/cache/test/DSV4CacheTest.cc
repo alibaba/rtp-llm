@@ -2320,6 +2320,46 @@ TEST(CacheConfigTest, DSV4MtpJointBudgetIncludesScoreAndProposeSwaBacking) {
     }
 }
 
+TEST(CacheConfigCreatorTest, ExplicitSwaCapacityIsChargedWithMtpAndPreservedAcrossWarmup) {
+    auto model = makeFlashModelConfig();
+    auto draft = makeFlashMtpModelConfig();
+    setDsv4ExplicitPoolBlocks(model, "swa_kv", 32);
+    setDsv4ExplicitPoolBlocks(draft, "swa_kv", 32);
+    ParallelismConfig parallelism;
+    KVCacheConfig     options;
+    options.linear_step     = 4;
+    options.kv_cache_mem_mb = 4096;
+    SpeculativeExecutionConfig speculative;
+    speculative.type              = SP_TYPE_MTP;
+    speculative.gen_num_per_cycle = 2;
+    const auto warmup             = CacheConfigCreator::createWarmupConfig(model, parallelism, options, 2);
+    EXPECT_EQ(warmup.group("swa_kv").block_num, 32u);
+    EXPECT_EQ(warmup.group("csa_kv").block_num, 2u);
+    auto       config = CacheConfigCreator::createConfig(model, parallelism, options, speculative, &draft, true, false);
+    const auto count  = CacheConfigCreator::computeLocalBlockNum(
+        config, model, RuntimeConfig{}, options, parallelism, std::nullopt, speculative);
+    config = rtp_llm::test::finalizeCacheConfig(config, count);
+    EXPECT_EQ(config.group("swa_kv").block_num, 32u);
+    ASSERT_EQ(config.mtp_sub_configs.size(), 2u);
+    for (const auto& sub : config.mtp_sub_configs) {
+        EXPECT_EQ(sub->group("swa_kv").block_num, 32u);
+    }
+    size_t allocated      = 0;
+    size_t next_increment = 0;
+    for (const auto& group : config.groups()) {
+        allocated += group.block_num * config.blockSizeBytesForGroup(group.tag);
+        if (group.policy.explicit_block_num == 0) {
+            const size_t next_count = group.policy.group_type == CacheGroupType::SWA ? (count + 4u) / 4u : count + 1u;
+            next_increment += (next_count - group.block_num) * config.blockSizeBytesForGroup(group.tag);
+        }
+        const auto physical = DeviceBlockPoolConfigHelper::createConfigForGroup(config, group);
+        EXPECT_EQ(physical.physical_block_count, group.block_num);
+    }
+    const size_t budget = static_cast<size_t>(options.kv_cache_mem_mb) * 1024u * 1024u;
+    EXPECT_LE(allocated, budget);
+    EXPECT_GT(allocated + next_increment, budget);
+}
+
 TEST(CacheConfigCreatorTest, MtpGenNum2RingEntriesMatch) {
     // gen_num_per_cycle=2 -> CSA/INDEXER R=10, HCA R=130, SWA R=130.
     // Formula: R = ceil_even((1 + overlap) * ratio + gen_num_per_cycle).
