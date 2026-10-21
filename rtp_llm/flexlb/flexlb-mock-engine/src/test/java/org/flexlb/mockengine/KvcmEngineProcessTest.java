@@ -100,6 +100,12 @@ class KvcmEngineProcessTest {
             until(() -> owners.containsKey(prefill) && owners.containsKey(decode));
             channel = ManagedChannelBuilder.forAddress("127.0.0.2", base).usePlaintext().build();
             var stub = RpcServiceGrpc.newBlockingStub(channel).withDeadlineAfter(10, TimeUnit.SECONDS);
+            var status = stub.getWorkerStatus(EngineRpcService.StatusVersionPB.getDefaultInstance());
+            assertEquals(1024, status.getBlockSize());
+            assertEquals(EngineRpcService.KvCacheGroupModePB.KV_CACHE_GROUP_MODE_FULL_ATTENTION_ONLY,
+                    status.getKvCacheGroupMode());
+            assertEquals(0, status.getBlockHashLookaheadTokens());
+            assertEquals(0, status.getCacheMatchRollbackBlocks());
             var inputBuilder = MockEngineTestSupport.inputWithDecode(9001, 2049, base + 1, 2).toBuilder();
             inputBuilder.getGenerateConfigBuilder().setReuseCache(true);
             var input = inputBuilder.build();

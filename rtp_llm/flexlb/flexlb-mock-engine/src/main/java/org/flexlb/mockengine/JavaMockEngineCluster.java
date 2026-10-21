@@ -1980,6 +1980,8 @@ public final class JavaMockEngineCluster {
                     .setAlive(!stopped)
                     .setRole("RoleType." + roleName)
                     .setRoleType(roleType)
+                    .setBlockSize(performance.blockSize())
+                    .setKvCacheGroupMode(EngineRpcService.KvCacheGroupModePB.KV_CACHE_GROUP_MODE_FULL_ATTENTION_ONLY)
                     .setAvailableConcurrency(roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL
                             // Python worker_status: max(0, _max_prefill_concurrency - len(_running))
                             ? Math.max(0, maxPrefillConcurrency - activePrefillBatches.get())
