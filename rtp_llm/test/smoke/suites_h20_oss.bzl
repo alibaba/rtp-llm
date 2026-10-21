@@ -510,12 +510,16 @@ def h20_oss_suites():
                 smoke_args = "--act_type BF16 --seq_size_per_block 2048 --tp_size 2 --max_seq_len 12800 --reserver_runtime_mem_mb 10000 --sp_model_type qwen35_moe_mtp --gen_num_per_cycle 4 --sp_type eagle --sp_checkpoint_path /mnt/nas1/hf/Qwen3.5-35B-A3B-FP8 --sp_act_type bf16",
                 gpu_type = ["H20_CU13"],
             ),
-            # Single-service counterpart: decode-entrance flag with speculative decoding.
+            # Exercise the Decode entry with separate Prefill/Decode engines and frontend routing.
             smoke_test(
                 name="next_mtp_basic_decode_entrance",
                 task_info="data/model/qwen3_next/q_r_next_fp8_tp2_mtp_decode_entrance.json",
-                smoke_args="--act_type BF16 --seq_size_per_block 2048 --tp_size 2 --max_seq_len 12800 --reserver_runtime_mem_mb 10000 --sp_model_type qwen35_moe_mtp --gen_num_per_cycle 4 --sp_type eagle --sp_checkpoint_path /mnt/nas1/hf/Qwen3.5-35B-A3B-FP8 --sp_act_type bf16",
-                gpu_type=["H20"],
+                smoke_args = {
+                    "frontend": "--role_type FRONTEND --use_local 1 --warm_up 0",
+                    "prefill": "--act_type BF16 --seq_size_per_block 2048 --tp_size 2 --max_seq_len 12800 --reserver_runtime_mem_mb 10000 --sp_model_type qwen35_moe_mtp --gen_num_per_cycle 4 --sp_type eagle --sp_checkpoint_path /mnt/nas1/hf/Qwen3.5-35B-A3B-FP8 --sp_act_type bf16" + " --role_type PREFILL --cache_store_rdma_mode 0 --warm_up 0",
+                    "decode": "--act_type BF16 --seq_size_per_block 2048 --tp_size 2 --max_seq_len 12800 --reserver_runtime_mem_mb 10000 --sp_model_type qwen35_moe_mtp --gen_num_per_cycle 4 --sp_type eagle --sp_checkpoint_path /mnt/nas1/hf/Qwen3.5-35B-A3B-FP8 --sp_act_type bf16" + " --role_type DECODE --cache_store_rdma_mode 0 --warm_up 0",
+                },
+                gpu_type=["H20_CU13"],
             ),
             smoke_test(
                 name = "next_mtp_reuse",
@@ -795,15 +799,19 @@ def h20_oss_suites():
                 smoke_args = "--warm_up 0 --sp_type eagle --gen_num_per_cycle 4 --sp_model_type qwen_2-mtp --tp_size 2 --sp_checkpoint_path /mnt/nas1/mtp_reg/qwen2_14b_draft/ --act_type FP16 --reuse_cache 1 --seq_size_per_block 8 --max_seq_len 16384 --ft_disable_custom_ar 1 --warm_up 0 --reserver_runtime_mem_mb 21954 --enable_remote_cache true --kvcm_put_timeout_ms 12000 --kvcm_get_timeout_ms 12000 --kvcm_get_broadcast_timeout 15000 --kvcm_put_broadcast_timeout 15000" + REMOTE_CACHE_DEVICE_STORE_ARGS,
                 gpu_type = ["H20_CU13"],
             ),
-            # Single-service counterpart: decode-entrance flag with speculative decoding.
+            # Exercise the Decode entry with separate Prefill/Decode engines and frontend routing.
             smoke_test(
                 name="eagle_remote_cache_tp2_decode_entrance",
                 task_info="data/model/qwen_sp/q_r_remote_cache_sp_tpsize2_decode_entrance.json",
                 data=["//3rdparty/remote_kv_cache_manager:remote_kv_cache_manager_server_bin"],
                 kvcm_envs=["KVCM_LOG_LEVEL=DEBUG"],
                 sleep_time_qr=20,
-                smoke_args="--warm_up 0 --sp_type eagle --gen_num_per_cycle 4 --sp_model_type qwen_2-mtp --tp_size 2 --sp_checkpoint_path /mnt/nas1/mtp_reg/qwen2_14b_draft/ --act_type FP16 --reuse_cache 1 --seq_size_per_block 8 --max_seq_len 16384 --ft_disable_custom_ar 1 --warm_up 0 --reserver_runtime_mem_mb 21954 --enable_remote_cache true --kvcm_put_timeout_ms 12000 --kvcm_get_timeout_ms 12000 --kvcm_get_broadcast_timeout 15000 --kvcm_put_broadcast_timeout 15000" + REMOTE_CACHE_DEVICE_STORE_ARGS,
-                gpu_type=["H20"],
+                smoke_args = {
+                    "frontend": "--role_type FRONTEND --use_local 1 --warm_up 0",
+                    "prefill": "--warm_up 0 --sp_type eagle --gen_num_per_cycle 4 --sp_model_type qwen_2-mtp --tp_size 2 --sp_checkpoint_path /mnt/nas1/mtp_reg/qwen2_14b_draft/ --act_type FP16 --reuse_cache 1 --seq_size_per_block 8 --max_seq_len 16384 --ft_disable_custom_ar 1 --warm_up 0 --reserver_runtime_mem_mb 21954 --enable_remote_cache true --kvcm_put_timeout_ms 12000 --kvcm_get_timeout_ms 12000 --kvcm_get_broadcast_timeout 15000 --kvcm_put_broadcast_timeout 15000" + REMOTE_CACHE_DEVICE_STORE_ARGS + " --role_type PREFILL --cache_store_rdma_mode 0 --warm_up 0",
+                    "decode": "--warm_up 0 --sp_type eagle --gen_num_per_cycle 4 --sp_model_type qwen_2-mtp --tp_size 2 --sp_checkpoint_path /mnt/nas1/mtp_reg/qwen2_14b_draft/ --act_type FP16 --reuse_cache 1 --seq_size_per_block 8 --max_seq_len 16384 --ft_disable_custom_ar 1 --warm_up 0 --reserver_runtime_mem_mb 21954 --enable_remote_cache true --kvcm_put_timeout_ms 12000 --kvcm_get_timeout_ms 12000 --kvcm_get_broadcast_timeout 15000 --kvcm_put_broadcast_timeout 15000" + REMOTE_CACHE_DEVICE_STORE_ARGS + " --role_type DECODE --cache_store_rdma_mode 0 --warm_up 0",
+                },
+                gpu_type=["H20_CU13"],
             ),
         ],
     )
