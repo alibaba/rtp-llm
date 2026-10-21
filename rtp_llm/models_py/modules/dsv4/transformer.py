@@ -10,7 +10,7 @@ mock per-layer KV cache before wiring into RTP-LLM's GptModelBase.
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 import torch
 import torch.nn as nn
@@ -81,6 +81,7 @@ class V4Args:
     n_physical_experts: Optional[int] = None
     n_shared_experts: int = 1
     moe_strategy: str = "auto"
+    model_type: str = "deepseek_v4"
     n_activated_experts: int = 6
     score_func: str = "sqrtsoftplus"
     route_scale: float = 1.5
@@ -112,6 +113,9 @@ class V4Args:
     dp_rank: int = 0
     world_size: int = 1
     world_rank: int = 0
+    parallelism_config: Optional[Any] = None
+    moe_config: Optional[Any] = None
+    enable_cuda_graph: bool = False
     is_decode_role: bool = False
     # Dedicated DSpARK prefill workers only project target features into the
     # draft SWA pools; they do not construct proposal, FFN, or mHC modules.
@@ -165,6 +169,7 @@ def _block_kwargs(
         n_activated_experts=args.n_activated_experts,
         n_shared_experts=args.n_shared_experts,
         moe_strategy=args.moe_strategy,
+        model_type=args.model_type,
         score_func=args.score_func,
         route_scale=args.route_scale,
         swiglu_limit=args.swiglu_limit,
@@ -181,6 +186,9 @@ def _block_kwargs(
         ep_rank=args.ep_rank,
         world_size=args.world_size,
         world_rank=args.world_rank,
+        parallelism_config=args.parallelism_config,
+        moe_config=args.moe_config,
+        enable_cuda_graph=args.enable_cuda_graph,
         max_tokens_per_rank=args.max_tokens_per_rank,
         is_decode_role=args.is_decode_role,
         fp8_kv_cache=args.fp8_kv_cache,

@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
-from typing import Callable, ContextManager, Dict, Iterable, Optional
+from typing import Any, Callable, ContextManager, Dict, Iterable, Optional
 
 import torch
 import torch.distributed as dist
@@ -22,6 +22,14 @@ _FINAL_OUT_CACHE: dict[tuple, torch.Tensor] = {}
 _CHUNKED_MOE_LOGGED = False
 _SYNCHRONIZED_CHUNK_TOKENS: ContextVar[Optional[int]] = ContextVar(
     "moe_synchronized_chunk_tokens", default=None
+)
+_COLLECTIVE_CHUNK_STRATEGIES = frozenset(
+    {
+        "mega_moe",
+        "mega_moe_se",
+        "fp8_per_block_pure_dp",
+        "fp8_per_block_ep_normal",
+    }
 )
 
 
@@ -105,7 +113,7 @@ def synchronized_moe_chunk_plan(
 
     needs_sync = any(
         getattr(getattr(layer, "ffn", layer), "strategy_name", None)
-        in {"mega_moe", "mega_moe_se"}
+        in _COLLECTIVE_CHUNK_STRATEGIES
         and not getattr(getattr(layer, "ffn", layer), "_is_decode_role", False)
         and getattr(getattr(layer, "ffn", layer), "chunking_enabled", False)
         for layer in layers
@@ -144,6 +152,9 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
         ep_rank: int = 0,
         world_size: Optional[int] = None,
         world_rank: Optional[int] = None,
+        parallelism_config: Optional[Any] = None,
+        moe_config: Optional[Any] = None,
+        enable_cuda_graph: bool = False,
         max_tokens_per_rank: int = 8192,
         is_decode_role: bool = False,
         strategy: Optional[str] = None,
@@ -183,6 +194,9 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
             ep_rank=ep_rank,
             world_size=world_size,
             world_rank=world_rank,
+            parallelism_config=parallelism_config,
+            moe_config=moe_config,
+            enable_cuda_graph=enable_cuda_graph,
             max_tokens_per_rank=max_tokens_per_rank,
             strategy=strategy or "auto",
             model_type=model_type,
@@ -234,7 +248,7 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
         is_decode_forward: bool = False,
     ) -> int:
         if (
-            self.strategy_name not in {"mega_moe", "mega_moe_se"}
+            self.strategy_name not in _COLLECTIVE_CHUNK_STRATEGIES
             or self._is_decode_role
             or is_decode_forward
             or not self.chunking_enabled
@@ -285,6 +299,13 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
         if flat_ids is not None and flat_ids.numel() != flat_x.size(0):
             raise ValueError(
                 f"input_ids has {flat_ids.numel()} tokens, expected {flat_x.size(0)}"
+            )
+        if self.strategy_name == "fp8_per_block_ep_low_latency" and not (
+            self._is_decode_role or is_decode_forward
+        ):
+            raise RuntimeError(
+                "FP8-per-block DeepEP low-latency MoE is only supported for "
+                "decode; use fp8_per_block_ep_normal for prefill"
             )
         observer = self._observer(positions)
         synchronized_tokens = self._synchronized_chunk_tokens(

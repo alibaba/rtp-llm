@@ -109,6 +109,9 @@ class TestV4SharedExpertW13Weight(unittest.TestCase):
         load_config = MagicMock(compute_dtype=torch.bfloat16)
 
         with patch(
+            "rtp_llm.models_py.kernels.cuda.deepgemm_wrapper.is_deep_gemm_e8m0_used",
+            return_value=False,
+        ), patch(
             "rtp_llm.model_loader.per_block_fp8_quant_weight.per_block_cast_to_fp8",
             return_value=(quantized, scale),
         ):
@@ -116,6 +119,84 @@ class TestV4SharedExpertW13Weight(unittest.TestCase):
 
         self.assertEqual(tuple(result[W.v4_attn_wq_a_w].shape), (8, 4))
         self.assertEqual(tuple(result[W.v4_attn_wq_a_s].shape), (2, 1))
+
+    def test_online_v4_packed_ue8m0_quantizes_checkpoint_layout(self):
+        src = AttnAtomicWeight(
+            W.v4_attn_wq_a_w,
+            [CkptWeightInfo("layers.{i}.attn.wq_a.weight", identity)],
+            identity,
+        )
+        wrapped = src.create(src, Fp8BlockWiseQuantConfig(is_quanted=False))
+        raw = torch.arange(256 * 1024, dtype=torch.float32).reshape(256, 1024).to(
+            torch.bfloat16
+        )
+        source = FakeTensorSource({"layers.0.attn.wq_a.weight": raw})
+        packed_weight = torch.empty(raw.shape, dtype=torch.float8_e4m3fn)
+        packed_scale = torch.arange(512, dtype=torch.int32).reshape(2, 256).T
+
+        def quantize(weight):
+            self.assertEqual(tuple(weight.shape), (256, 1024))
+            torch.testing.assert_close(weight, raw)
+            return packed_weight, packed_scale
+
+        with patch(
+            "rtp_llm.models_py.kernels.cuda.deepgemm_wrapper.is_deep_gemm_e8m0_used",
+            return_value=True,
+        ), patch(
+            "rtp_llm.models_py.kernels.cuda.fp8_kernel.quant_weight_ue8m0_packed",
+            side_effect=quantize,
+        ) as quant:
+            result = wrapped._load_raw_tensor(
+                source, 0, "cpu", MagicMock(compute_dtype=torch.bfloat16)
+            )
+
+        quant.assert_called_once()
+        self.assertEqual(tuple(result[W.v4_attn_wq_a_w].shape), (256, 1024))
+        self.assertEqual(result[W.v4_attn_wq_a_s].dtype, torch.int32)
+        self.assertEqual(result[W.v4_attn_wq_a_s].stride(), (1, 256))
+        torch.testing.assert_close(result[W.v4_attn_wq_a_s], packed_scale)
+
+    def test_online_v4_wo_a_uses_matching_raw_ue8m0_scales(self):
+        src = AttnAtomicWeight(
+            W.v4_attn_wo_a_w,
+            [CkptWeightInfo("layers.{i}.attn.wo_a.weight", identity)],
+            identity,
+        )
+        wrapped = src.create(src, Fp8BlockWiseQuantConfig(is_quanted=False))
+        block_values = torch.tensor(
+            [[1, 2, 4, 8], [16, 32, 64, 128]], dtype=torch.bfloat16
+        )
+        raw = block_values.repeat_interleave(128, dim=0).repeat_interleave(128, dim=1)
+        source = FakeTensorSource({"layers.0.attn.wo_a.weight": raw})
+        load_config = MagicMock(
+            compute_dtype=torch.bfloat16,
+            merge_lora=False,
+            tp_size=1,
+            dp_size=1,
+            ep_size=1,
+            use_swizzleA=False,
+        )
+        load_config.exported_device.maybe_rewrite_weight_by_key.side_effect = (
+            lambda key, value, **kwargs: value
+        )
+
+        with patch(
+            "rtp_llm.models_py.kernels.cuda.deepgemm_wrapper.is_deep_gemm_e8m0_used",
+            return_value=False,
+        ):
+            result = wrapped.load(source, 0, "cpu", load_config)
+
+        weight = result[W.v4_attn_wo_a_w]
+        scale = result[W.v4_attn_wo_a_s]
+        self.assertEqual(tuple(weight.shape), (256, 512))
+        self.assertEqual(weight.dtype, torch.float8_e4m3fn)
+        self.assertEqual(tuple(scale.shape), (2, 4))
+        self.assertEqual(scale.dtype, torch.float8_e8m0fnu)
+        torch.testing.assert_close(scale.float(), block_values.float() / 256)
+        expanded_scale = scale.float().repeat_interleave(128, dim=0).repeat_interleave(
+            128, dim=1
+        )
+        torch.testing.assert_close(weight.float() * expanded_scale, raw.float())
 
 
 class TestStackSplitTensorSource(unittest.TestCase):

@@ -328,6 +328,50 @@ class ChunkedMoeTest(unittest.TestCase):
 
         all_reduce.assert_called_once()
 
+    def test_collective_fp8_strategies_match_remote_chunk_count(self):
+        for strategy in (
+            "fp8_per_block_pure_dp",
+            "fp8_per_block_ep_normal",
+        ):
+            with self.subTest(strategy=strategy):
+                layer = _fake_layer(capacity=5)
+                layer.strategy_name = strategy
+
+                def set_remote_max(token_count, **_):
+                    token_count.fill_(12)
+
+                with (
+                    mock.patch(
+                        "rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer.dist.is_available",
+                        return_value=True,
+                    ),
+                    mock.patch(
+                        "rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer.dist.is_initialized",
+                        return_value=True,
+                    ),
+                    mock.patch(
+                        "rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer.dist.all_reduce",
+                        side_effect=set_remote_max,
+                    ) as all_reduce,
+                ):
+                    with synchronized_moe_chunk_plan(
+                        [SimpleNamespace(ffn=layer)], 3, torch.device("cpu")
+                    ):
+                        layer(torch.ones(3, 4))
+
+                all_reduce.assert_called_once()
+                self.assertEqual(layer._moe.token_chunks, [3, 0, 0])
+
+    def test_low_latency_strategy_rejects_prefill_before_dispatch(self):
+        layer = _fake_layer()
+        layer.strategy_name = "fp8_per_block_ep_low_latency"
+        with self.assertRaisesRegex(RuntimeError, "only supported for decode"):
+            layer(torch.ones(3, 4))
+        self.assertEqual(layer._moe.token_chunks, [])
+
+        layer(torch.ones(3, 4), is_decode_forward=True)
+        self.assertEqual(layer._moe.token_chunks, [3])
+
     def test_mixed_non_mega_layer_ignores_synchronized_token_count(self):
         mega = _fake_layer()
         local = _fake_layer()

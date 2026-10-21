@@ -45,15 +45,17 @@ def adapt_split_moe_weights(
         weights[W.moe_w2] = weights.pop(weight_names["routed_down"])
         weights[W.moe_s2] = weights.pop(weight_names["routed_down_scale"])
 
-    if weight_names["router"] in weights:
-        weights[W.moe_gate] = weights.pop(weight_names["router"])
+    router_name = weight_names.get("router")
+    if router_name and router_name in weights:
+        weights[W.moe_gate] = weights.pop(router_name)
     if weight_names.get("router_bias") in weights:
         weights[W.moe_gate_bias] = weights.pop(weight_names["router_bias"])
     if weight_names.get("router_tid2eid") in weights:
         weights[W.moe_gate_tid2eid] = weights.pop(weight_names["router_tid2eid"])
 
-    if n_shared_experts > 0 and weight_names["shared_gate_up"] in weights:
-        weights[W.ffn_w13] = weights.pop(weight_names["shared_gate_up"])
+    shared_gate_up_name = weight_names.get("shared_gate_up")
+    if n_shared_experts > 0 and shared_gate_up_name and shared_gate_up_name in weights:
+        weights[W.ffn_w13] = weights.pop(shared_gate_up_name)
         weights[W.ffn_s13] = weights.pop(weight_names["shared_gate_up_scale"])
         weights[W.ffn_w2] = weights.pop(weight_names["shared_down"])
         weights[W.ffn_s2] = weights.pop(weight_names["shared_down_scale"])

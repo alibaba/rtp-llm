@@ -948,6 +948,23 @@ class LoadQuantPerBlockFp8Weight(PerBlockFp8Weight):
         self.kernel = kernel
         self.scale = scale
 
+    def _postprocess(
+        self,
+        tensor: Union[torch.Tensor, Dict[str, torch.Tensor]],
+        device: str,
+        load_config: LoadConfig,
+    ):
+        if (
+            self.kernel.name == W.v4_attn_wo_a_w
+            and self.scale is not None
+            and isinstance(tensor, dict)
+            and tensor[self.scale.name].dtype == torch.float8_e8m0fnu
+        ):
+            # The V4 wo_a einsum consumes checkpoint-layout FP8 and raw UE8M0
+            # block scales; the legacy FP8 linear reshape would corrupt both.
+            return CompositeWeight._postprocess(self, tensor, device, load_config)
+        return super()._postprocess(tensor, device, load_config)
+
     def _split(
         self,
         tensor: Union[torch.Tensor, Dict[str, torch.Tensor]],
@@ -1015,12 +1032,17 @@ class LoadQuantPerBlockFp8Weight(PerBlockFp8Weight):
         )
 
         is_dense_weight = self.kernel.name not in (W.moe_w1, W.moe_w2)
-        direct_ue8m0 = (
-            self.scale is not None and is_dense_weight and is_deep_gemm_e8m0_used()
+        preserve_checkpoint_layout = is_v4_weight(self.kernel)
+        e8m0_used = is_deep_gemm_e8m0_used()
+        direct_ue8m0 = self.scale is not None and is_dense_weight and e8m0_used
+        raw_wo_a_ue8m0 = (
+            self.scale is not None
+            and self.kernel.name == W.v4_attn_wo_a_w
+            and not e8m0_used
         )
-        if direct_ue8m0 and self.group_size != 128:
+        if (direct_ue8m0 or raw_wo_a_ue8m0) and self.group_size != 128:
             raise ValueError(
-                "SM100/SM120 DeepGEMM packed UE8M0 requires group_size=128, "
+                "DeepGEMM UE8M0 requires group_size=128, "
                 f"got {self.group_size} for {self.kernel.name}"
             )
 
@@ -1038,12 +1060,28 @@ class LoadQuantPerBlockFp8Weight(PerBlockFp8Weight):
                     f"2D tensor, got {tuple(source_weight.shape)} for "
                     f"{self.kernel.name}"
                 )
-            # AtomicWeight already merged HF Q/K/V [N_i, K] into [K, N].
-            # Quantization and the head splitters below consume [N, K].
-            source_weight = source_weight.T
+            # Legacy descriptors merge HF weights into [K, N], while V4
+            # descriptors keep the checkpoint's [N, K] layout.
+            if not preserve_checkpoint_layout:
+                source_weight = source_weight.T
             quant_kernel, scale = quant_weight_ue8m0_packed(
                 source_weight.contiguous().to(device)
             )
+        elif raw_wo_a_ue8m0:
+            from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
+                per_block_cast_to_fp8 as per_block_cast_to_fp8_ue8m0,
+            )
+
+            source_weight = kernel.get(self.kernel.name)
+            if source_weight.dim() != 2:
+                raise ValueError(
+                    "V4 wo_a UE8M0 quantization requires a 2D tensor, "
+                    f"got {tuple(source_weight.shape)}"
+                )
+            quant_kernel, scale = per_block_cast_to_fp8_ue8m0(
+                source_weight.contiguous().to(device), use_ue8m0=True
+            )
+            scale = scale.to(torch.float8_e8m0fnu)
         elif self.scale:
             quant_kernel, scale = per_block_cast_to_fp8(
                 kernel.get(self.kernel.name), self.group_size
@@ -1053,7 +1091,6 @@ class LoadQuantPerBlockFp8Weight(PerBlockFp8Weight):
         else:
             quant_kernel = cast_to_fp8(kernel.get(self.kernel.name))
 
-        preserve_checkpoint_layout = is_v4_weight(self.kernel)
         if self.kernel.name == W.moe_w1 or self.kernel.name == W.moe_w2:
             pass
         elif (

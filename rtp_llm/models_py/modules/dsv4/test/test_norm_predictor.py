@@ -100,6 +100,27 @@ class NormPredictorTopPTest(unittest.TestCase):
                 )
         self.assertFalse(module.enabled)
 
+    def test_draft_models_do_not_use_target_predictors(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "RTP_DSV4_NORM_PREDICTOR_DIR": "/missing/target/predictors",
+                "RTP_DSV4_NORM_TOP_P": "0.8",
+            },
+            clear=False,
+        ):
+            for model_type in ("deepseek_v4_mtp", "deepseek_v4_dspark"):
+                with self.subTest(model_type=model_type):
+                    module = Dsv4NormTopP(
+                        layer_id=0,
+                        dim=4096,
+                        n_routed_experts=256,
+                        n_hash_layers=0,
+                        model_type=model_type,
+                    )
+                    self.assertFalse(module.enabled)
+                    self.assertIsNone(module.predictor)
+
     def test_top_p_one_is_an_exact_runtime_bypass(self):
         with tempfile.TemporaryDirectory() as directory:
             with mock.patch.dict(
