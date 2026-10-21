@@ -39,9 +39,13 @@ TEST(RouteCodec, PrefillDirectionCarriesOnlySrcHalf) {
     const auto local = RouteCodec::decode(pb);
     EXPECT_EQ(local.partition, route.src_partition);
     EXPECT_EQ(local.slice, route.src_slice);
-    // 目的端的 partition / slice 不应出现在 prefill 的那份里
-    EXPECT_NE(local.partition, route.dst_partition);
-    EXPECT_NE(local.slice, route.dst_slice);
+    // Changing only the remote half must not change this worker's wire data.
+    auto changed_peer = route;
+    changed_peer.dst_partition = PartitionSpec{16, 15};
+    changed_peer.dst_slice = SliceSpec{CpBlockSliceMode::EQUAL_BYTES, 16, 15};
+    TransferRoutePB changed_pb;
+    RouteCodec::encodeForPrefill(changed_peer, /*peer_index=*/1, &changed_pb);
+    EXPECT_EQ(changed_pb.SerializeAsString(), pb.SerializeAsString());
 }
 
 TEST(RouteCodec, DecodeDirectionCarriesOnlyDstHalf) {
@@ -54,6 +58,13 @@ TEST(RouteCodec, DecodeDirectionCarriesOnlyDstHalf) {
     EXPECT_EQ(local.cache_tag, "full");
     EXPECT_EQ(local.partition, route.dst_partition);
     EXPECT_EQ(local.slice, route.dst_slice);
+
+    auto changed_peer = route;
+    changed_peer.src_partition = PartitionSpec{16, 15};
+    changed_peer.src_slice = SliceSpec{CpBlockSliceMode::EQUAL_BYTES, 16, 15};
+    TransferRoutePB changed_pb;
+    RouteCodec::encodeForDecode(changed_peer, &changed_pb);
+    EXPECT_EQ(changed_pb.SerializeAsString(), pb.SerializeAsString());
 }
 
 // slice_mode 走的是裸 int32，必须能无损往返，非法值保留给 worker 校验。
