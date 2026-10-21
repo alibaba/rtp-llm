@@ -1227,7 +1227,9 @@ class PrefillFusedHCInterfaceTest(unittest.TestCase):
         ) as tp_norm:
             actual = _prefill_fast_norm(norm, x, tp_size=2, tp_rank=1)
         self.assertIs(actual, x)
-        tp_norm.assert_called_once_with(norm, x, tp_size=2, tp_rank=1)
+        tp_norm.assert_called_once_with(
+            norm, x, tp_size=2, tp_rank=1, global_dim=None
+        )
 
     def test_replicated_tp_keeps_fused_attention_norm_quant(self):
         class Attention:
@@ -1255,6 +1257,7 @@ class PrefillFusedHCInterfaceTest(unittest.TestCase):
                 block = SimpleNamespace(
                     tp_size=2,
                     tp_rank=0,
+                    dim=8,
                     attn_hc=object(),
                     ffn_hc=object(),
                     attn_norm=norm,
@@ -1306,7 +1309,7 @@ class PrefillFusedHCInterfaceTest(unittest.TestCase):
                     )
                 )
                 block = SimpleNamespace(
-                    tp_size=tp_size, tp_rank=0,
+                    tp_size=tp_size, tp_rank=0, dim=8,
                     attn_hc=hc, ffn_hc=hc, attn_norm=norm, ffn_norm=norm,
                     attn=Attention(), ffn=lambda h, ids: h * 5,
                     _prefill_fast_hc_impls=lambda: (pre, pre, post, post),

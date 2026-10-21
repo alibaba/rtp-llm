@@ -39,7 +39,10 @@ class HCNormDefaultTest(unittest.TestCase):
         self.assertIs(apply_norm.call_args.args[0], norm)
         self.assertEqual(apply_norm.call_args.args[1].shape, (3, 4))
         self.assertEqual(apply_norm.call_args.args[1].data_ptr(), readout.data_ptr())
-        self.assertEqual(apply_norm.call_args.kwargs, {"tp_size": 8, "tp_rank": 3})
+        self.assertEqual(
+            apply_norm.call_args.kwargs,
+            {"tp_size": 8, "tp_rank": 3, "global_dim": 4},
+        )
         self.assertEqual(actual[0].shape, readout.shape)
         self.assertEqual(actual[0].data_ptr(), normalized.data_ptr())
         self.assertIs(actual[1], post)
