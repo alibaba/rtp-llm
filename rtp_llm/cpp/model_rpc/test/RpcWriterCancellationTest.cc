@@ -205,6 +205,68 @@ TEST(RpcWriterCancellationTest, PdPhaseSynthesisExportsRoleSpecificFailureSpans)
     EXPECT_EQ(decode_count, 1u);
 }
 
+TEST(RpcWriterCancellationTest, KvLoadTraceKeepsCompletedSuccessAndAttributesDependencyFailure) {
+    namespace memory = opentelemetry::exporter::memory;
+    telemetry::TelemetryRuntime::shutdown(5000);
+    std::shared_ptr<memory::InMemorySpanData> span_data;
+    auto exporter = memory::InMemorySpanExporterFactory::Create(span_data);
+    telemetry::TelemetryConfig config;
+    config.enabled = true;
+    config.role = "test";
+    ASSERT_TRUE(telemetry::TelemetryRuntime::initWithExporter(std::move(exporter), config));
+    for (bool load_success : {false, true}) {
+        kmonitor::MetricsReporterPtr reporter;
+        auto meta = std::make_shared<RpcServerRuntimeMeta>();
+        GenerateContext context(55, 0, nullptr, reporter, meta);
+        auto stream = std::make_shared<SingleOutputStream>();
+        stream->loading_cache_start_time_us_ = currentTimeUs() - 3000;
+        if (load_success) {
+            stream->recordLoadingCacheDoneTime();
+            // Failure after transfer completion must not repaint load_cache.
+            stream->reportError(ErrorCode::CANCELLED, "later generation cancellation");
+            context.error_status = grpcStatusFromErrorInfo(stream->statusInfo());
+        } else {
+            FirstError dependency;
+            dependency.record({ErrorCode::CONNECT_TIMEOUT, "Prefill dependency timed out"});
+            context.dependency_failure = dependency.snapshot();
+            stream->reportError(ErrorCode::CONNECT_TIMEOUT, "Prefill dependency timed out");
+            stream->recordLoadingCacheDoneTime();
+            context.error_status = grpcStatusFromErrorInfo(stream->statusInfo());
+        }
+        context.setStream(stream);
+        auto span = telemetry::startRpcServerSpan("kv-load-test", nullptr, true);
+        context.trace_span_guard =
+            std::make_unique<telemetry::GrpcStatusSpanGuard>(span, &context.error_status);
+        context.synthesizeTracePhases(telemetry::PhaseRole::Decode, false);
+        context.markRpcHandlingCompleted();
+    }
+    EXPECT_TRUE(telemetry::TelemetryRuntime::shutdown(5000));
+    auto spans = span_data->GetSpans();
+    size_t successful_loads = 0;
+    size_t failed_loads = 0;
+    for (const auto& span : spans) {
+        if (span->GetName() != "load_cache") {
+            continue;
+        }
+        const auto& attrs = span->GetAttributes();
+        EXPECT_EQ(attrs.count(telemetry::kAttrGenAiPdRole), 0u);
+        if (span->GetStatus() == opentelemetry::trace::StatusCode::kOk) {
+            ++successful_loads;
+            EXPECT_EQ(attrs.count(telemetry::kAttrErrorType), 0u);
+        } else {
+            ++failed_loads;
+            const auto type = attrs.find(telemetry::kAttrErrorType);
+            ASSERT_NE(type, attrs.end());
+            EXPECT_EQ(opentelemetry::nostd::get<std::string>(type->second), "DependencyFailure");
+            const auto code = attrs.find(telemetry::kAttrRtpLlmErrorCode);
+            ASSERT_NE(code, attrs.end());
+            EXPECT_EQ(opentelemetry::nostd::get<int64_t>(code->second), static_cast<int64_t>(ErrorCode::CONNECT_TIMEOUT));
+        }
+    }
+    EXPECT_EQ(successful_loads, 1u);
+    EXPECT_EQ(failed_loads, 1u);
+}
+
 TEST(RpcWriterCancellationTest, RequestGaugeSamplesLiveAtomicValue) {
     std::atomic<size_t>          onflight_requests{3};
     kmonitor::MetricsReporterPtr metrics_reporter;

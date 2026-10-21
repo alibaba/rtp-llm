@@ -73,6 +73,7 @@ public:
     RequestDeadline                       retry_deadline;
     ErrorInfo                             error_info;
     grpc::Status                          error_status = grpc::Status::OK;
+    FirstError::Snapshot                   dependency_failure;
     RequestInfo                           request_info;
     grpc::ServerContext*                  server_context;
     kmonitor::MetricsReporterPtr          metrics_reporter;

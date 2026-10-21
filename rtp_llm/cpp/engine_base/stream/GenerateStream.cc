@@ -175,6 +175,7 @@ void GenerateStream::resetBeginTime(int64_t begin_time_us) {
     can_run_time_us_             = 0;
     loading_cache_start_time_us_ = 0;
     loading_cache_done_time_us_  = 0;
+    loading_cache_succeeded_     = false;
     first_running_time_us_       = 0;
     loading_cache_latency_us_    = 0;
     load_done_to_running_us_     = 0;
@@ -740,6 +741,9 @@ void GenerateStream::recordLoadingCacheStartTime() {
 void GenerateStream::recordLoadingCacheDoneTime() {
     if (loading_cache_done_time_us_ == 0) {
         loading_cache_done_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds();
+        // Stamp the outcome now; later generation failures must not repaint a
+        // successfully completed cache transfer as a failed load.
+        loading_cache_succeeded_ = !hasErrorWithoutLock();
         if (loading_cache_start_time_us_ > 0) {
             loading_cache_latency_us_ = loading_cache_done_time_us_ - loading_cache_start_time_us_;
         }
@@ -1584,6 +1588,9 @@ GenerateStream::TimeInfo GenerateStream::getTimeInfo() {
     time_info.first_token_rt_us       = complete_token_ids_->firstTokenLatencyUs();
     time_info.generation_done         = generation_done_;
     time_info.generation_done_time_us = generation_done_time_us_;
+    time_info.loading_cache_start_time_us = loading_cache_start_time_us_;
+    time_info.loading_cache_done_time_us = loading_cache_done_time_us_;
+    time_info.loading_cache_succeeded = loading_cache_succeeded_;
     return time_info;
 }
 

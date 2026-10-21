@@ -49,11 +49,29 @@ void GenerateContext::synthesizeTracePhases(telemetry::PhaseRole role, bool exce
                                            (int64_t)stream->inputLength(),
                                            (int64_t)(stream->outputTokenLen() * returned_sequence_count));
     }
-    phase_timing.error_type = request_ok ?
-                                  nullptr :
-                                  (!error_status.ok() ?
-                                       telemetry::grpcStatusCodeName(error_status.error_code()) :
-                                       "Exception");
+    const auto local_error = stream->firstError();
+    const auto first_error = FirstError::earlier(local_error, dependency_failure);
+    const bool dependency_selected = dependency_failure.error.hasError()
+                                     && first_error.order == dependency_failure.order;
+    phase_timing.error_type = request_ok ? nullptr :
+                               dependency_selected ? "DependencyFailure" :
+                               !error_status.ok() ? telemetry::grpcStatusCodeName(error_status.error_code()) :
+                                                    "Exception";
+    if (role == telemetry::PhaseRole::Decode && time_info.loading_cache_start_time_us > 0) {
+        const bool load_finished = time_info.loading_cache_done_time_us > 0;
+        if (load_finished || !request_ok) {
+            const bool load_ok = load_finished && time_info.loading_cache_succeeded;
+            const auto error = first_error.error.hasError() ? first_error.error :
+                               error_info.hasError() ? error_info : errorInfoFromGrpcStatus(error_status);
+            const auto reason = error.hasError() ? ErrorCodeToString(error.code()) : std::string{};
+            telemetry::synthesizeKvLoadSpan(
+                trace_span_guard->sharedSpan(), time_info.loading_cache_start_time_us,
+                load_finished ? time_info.loading_cache_done_time_us : phase_timing.synthesis_end_time_us,
+                request_id, load_ok, load_ok ? nullptr : phase_timing.error_type,
+                !load_ok && error.hasError() ? static_cast<int64_t>(error.code()) : -1,
+                !load_ok && !reason.empty() ? reason.c_str() : nullptr);
+        }
+    }
     telemetry::synthesizePhaseSpans(trace_span_guard->sharedSpan(), phase_timing, role, request_ok);
 }
 

@@ -854,6 +854,9 @@ public:
         int64_t first_token_rt_us       = 0;
         bool    generation_done         = false;
         int64_t generation_done_time_us = 0;
+        int64_t loading_cache_start_time_us = 0;
+        int64_t loading_cache_done_time_us = 0;
+        bool loading_cache_succeeded = false;
     };
     TimeInfo getTimeInfo();
     bool     queryPdSep() const;
@@ -902,6 +905,7 @@ protected:
     int64_t                               can_run_time_us_             = 0;
     int64_t                               loading_cache_start_time_us_ = 0;
     int64_t                               loading_cache_done_time_us_  = 0;
+    bool                                  loading_cache_succeeded_     = false;
     int64_t                               first_running_time_us_       = 0;
     int64_t                               loading_cache_latency_us_    = 0;
     int64_t                               load_done_to_running_us_     = 0;

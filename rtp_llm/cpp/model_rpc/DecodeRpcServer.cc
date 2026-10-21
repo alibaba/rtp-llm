@@ -511,7 +511,12 @@ grpc::Status DecodeRpcServer::GenerateStreamCall(grpc::ServerContext*           
                                                          generate_context.getStream(),
                                                          [&](bool& done) {
                                                              done = prefill_caller_ctx->done();
-                                                             return prefill_caller_ctx->firstError();
+                                                             const auto remote = prefill_caller_ctx->firstError();
+                                                             const auto first = FirstError::earlier(stream->firstError(), remote);
+                                                             if (remote.error.hasError() && first.order == remote.order) {
+                                                                 generate_context.dependency_failure = remote;
+                                                             }
+                                                             return remote;
                                                          });
     } else {
         // Prefill was admitted by Master. Decode still enters the normal
