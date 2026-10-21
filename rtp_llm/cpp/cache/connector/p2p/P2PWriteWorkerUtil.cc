@@ -5,8 +5,11 @@
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include <algorithm>
 #include <exception>
+#include <cstdint>
+#include <iterator>
+#include <limits>
+#include <map>
 #include <set>
-#include <tuple>
 
 namespace rtp_llm::p2p_internal {
 
@@ -110,15 +113,10 @@ ErrorInfo buildWriteUnits(const std::string&                          unique_key
     }
     std::set<int>                                         route_ids;
     std::set<std::string>                                 unit_keys;
-    std::set<std::tuple<uint32_t, std::string, uint32_t>> recv_blocks;
+    std::map<uintptr_t, uintptr_t>                        recv_ranges;
     for (const auto& route : worker_plan.routes) {
         if (route.route_id < 0 || !route_ids.insert(route.route_id).second || route.layer_buffers.empty()) {
             return reject("write route has invalid/duplicate id or no layer blocks");
-        }
-        // Phase 1 accepts only whole-block, symmetric routes.
-        if (route.partition.count != 1 || route.partition.id != 0 || route.slice.mode != CpBlockSliceMode::NONE
-            || route.slice.count != 1 || route.slice.index != 0) {
-            return reject("writeback currently requires symmetric whole-block routes");
         }
         if (sending && (route.dst_ip.empty() || route.dst_port == 0 || route.dst_port > 65535)) {
             return reject("write route has invalid peer endpoint");
@@ -142,14 +140,18 @@ ErrorInfo buildWriteUnits(const std::string&                          unique_key
                 if (block_id <= 0) {
                     return reject("write request contains invalid block");
                 }
-                if (!sending && !recv_blocks.emplace(buffer->getLayerId(), buffer->cacheTag(), block_id).second) {
-                    return reject("write routes overlap destination blocks");
-                }
             }
             WriteTransferUnit unit;
             unit.key = key;
             try {
-                auto key_block_infos = LayerCacheBufferUtil::buildKeyBlockInfos(converter, buffer);
+                const auto& spec = config.topology->group(buffer->cacheTag()).spec;
+                auto        key_block_infos =
+                    LayerCacheBufferUtil::buildKeyBlockInfosSliced(converter,
+                                                                   buffer,
+                                                                   route.partition.count,
+                                                                   route.partition.id,
+                                                                   route.slice,
+                                                                   spec ? spec->k_block_payload_bytes() : 0);
                 if (!key_block_infos.ok()) {
                     return key_block_infos.status();
                 }
@@ -164,6 +166,19 @@ ErrorInfo buildWriteUnits(const std::string&                          unique_key
                 for (const auto& block : info->blocks) {
                     if (!block.addr || block.size_bytes == 0) {
                         return reject("write block has an invalid memory range");
+                    }
+                    if (!sending) {
+                        const auto begin = reinterpret_cast<uintptr_t>(block.addr);
+                        if (block.size_bytes > std::numeric_limits<uintptr_t>::max() - begin) {
+                            return reject("write block memory range overflows");
+                        }
+                        const auto end  = begin + block.size_bytes;
+                        const auto next = recv_ranges.lower_bound(begin);
+                        if ((next != recv_ranges.end() && next->first < end)
+                            || (next != recv_ranges.begin() && std::prev(next)->second > begin)) {
+                            return reject("write routes overlap destination byte ranges");
+                        }
+                        recv_ranges.emplace(begin, end);
                     }
                 }
             }
