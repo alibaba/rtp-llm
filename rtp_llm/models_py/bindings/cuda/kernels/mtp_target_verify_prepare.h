@@ -26,6 +26,22 @@ void invokeMtpSpecDecodeTokensMetadataPrepare(const std::vector<torch::Tensor>& 
                                               int32_t                           tokens_per_batch,
                                               cudaStream_t                      stream);
 
+// Pack verify inputs without materializing their first column. Each accepted
+// row is CUDA int32 [width] or [1, width], and its CUDA int32 length is a scalar.
+// Lengths must be in [1, width]. token_columns[0] is ignored; the remaining
+// columns are contiguous CUDA int32 [batch]. Outputs must be preallocated,
+// contiguous CUDA int32 with batch * tokens_per_batch, batch, and
+// batch * tokens_per_batch elements respectively. Unsupported inputs return
+// false before any launch or output modification. Sources must outlive stream use.
+bool tryInvokeMtpSpecDecodeTokensMetadataPrepareFromState(const std::vector<torch::Tensor>& accepted_rows,
+                                                          const std::vector<torch::Tensor>& accepted_length_rows,
+                                                          const std::vector<torch::Tensor>& token_columns,
+                                                          torch::Tensor&                    spec_tokens,
+                                                          torch::Tensor&                    input_lengths,
+                                                          torch::Tensor&                    lm_output_indexes,
+                                                          int32_t                           tokens_per_batch,
+                                                          cudaStream_t                      stream);
+
 // Shift each packed Prefill request left by one token and append the sampled
 // token from its final sample column. All tensors are contiguous CUDA int32.
 void invokeMtpPrefillShiftAppend(const torch::Tensor& combo_tokens_in,

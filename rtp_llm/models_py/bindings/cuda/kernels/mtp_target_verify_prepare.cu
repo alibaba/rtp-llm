@@ -10,6 +10,65 @@ namespace rtp_llm {
 
 namespace {
 
+constexpr int kMtpInputRowsPerLaunch = 128;
+
+struct MtpSpecDecodeStateParams {
+    const int32_t* accepted[kMtpInputRowsPerLaunch];
+    const int32_t* lengths[kMtpInputRowsPerLaunch];
+    int32_t        widths[kMtpInputRowsPerLaunch];
+    const int32_t* columns[8];
+    int32_t*       tokens;
+    int32_t*       input_lengths;
+    int32_t*       lm_indexes;
+    int32_t        row_offset;
+    int32_t        rows;
+    int32_t        tokens_per_batch;
+};
+
+static_assert(sizeof(MtpSpecDecodeStateParams) < 4096, "MTP state parameters exceed the kernel argument budget");
+
+__global__ void mtpSpecDecodeTokensMetadataFromStateKernel(MtpSpecDecodeStateParams params) {
+    const int32_t index = static_cast<int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
+    if (index >= params.rows * params.tokens_per_batch) {
+        return;
+    }
+    const int32_t local_row = index / params.tokens_per_batch;
+    const int32_t column    = index % params.tokens_per_batch;
+    const int32_t row       = params.row_offset + local_row;
+    const int32_t output    = row * params.tokens_per_batch + column;
+    if (column == 0) {
+        const int32_t accepted_index = *params.lengths[local_row] - 1;
+        CUDA_KERNEL_ASSERT(accepted_index >= 0 && accepted_index < params.widths[local_row]);
+        params.tokens[output]     = params.accepted[local_row][accepted_index];
+        params.input_lengths[row] = params.tokens_per_batch;
+    } else {
+        params.tokens[output] = params.columns[column][row];
+    }
+    params.lm_indexes[output] = output;
+}
+
+bool isMtpI32Row(const torch::Tensor& tensor) {
+    return tensor.defined() && tensor.is_cuda() && tensor.layout() == c10::kStrided && tensor.numel() > 0
+           && tensor.scalar_type() == torch::kInt32 && (tensor.dim() == 1 || (tensor.dim() == 2 && tensor.size(0) == 1))
+           && tensor.stride(-1) > 0;
+}
+
+bool isMtpI32Output(const torch::Tensor& tensor, int64_t numel, const torch::Device& device) {
+    return tensor.defined() && tensor.device() == device && tensor.layout() == c10::kStrided
+           && tensor.scalar_type() == torch::kInt32 && tensor.is_contiguous() && tensor.numel() == numel;
+}
+
+bool sharesMtpStorage(const torch::Tensor& first, const torch::Tensor& second) {
+    return first.defined() && second.defined() && first.storage().data_ptr().get() == second.storage().data_ptr().get();
+}
+
+bool aliasesMtpOutputs(const torch::Tensor& source,
+                       const torch::Tensor& first,
+                       const torch::Tensor& second,
+                       const torch::Tensor& third) {
+    return sharesMtpStorage(source, first) || sharesMtpStorage(source, second) || sharesMtpStorage(source, third);
+}
+
 __global__ void mtpTargetVerifyPrepareKernel(const int32_t* __restrict__ sequence_lengths,
                                              int32_t* __restrict__ input_lengths,
                                              int32_t* __restrict__ prefix_lengths,
@@ -240,6 +299,70 @@ void invokeMtpSpecDecodeTokensMetadataPrepare(const std::vector<torch::Tensor>& 
         lm_output_indexes.data_ptr<int32_t>(),
         tokens_per_batch,
         static_cast<int32_t>(batch_size));
+}
+
+bool tryInvokeMtpSpecDecodeTokensMetadataPrepareFromState(const std::vector<torch::Tensor>& accepted_rows,
+                                                          const std::vector<torch::Tensor>& accepted_length_rows,
+                                                          const std::vector<torch::Tensor>& token_columns,
+                                                          torch::Tensor&                    spec_tokens,
+                                                          torch::Tensor&                    input_lengths,
+                                                          torch::Tensor&                    lm_output_indexes,
+                                                          int32_t                           tokens_per_batch,
+                                                          cudaStream_t                      stream) {
+    const int64_t batch = accepted_rows.size();
+    if (batch <= 0 || tokens_per_batch <= 0 || tokens_per_batch > 8 || batch > INT_MAX / tokens_per_batch
+        || accepted_length_rows.size() != accepted_rows.size()
+        || token_columns.size() != static_cast<size_t>(tokens_per_batch) || !isMtpI32Row(accepted_rows.front())) {
+        return false;
+    }
+    const auto device = accepted_rows.front().device();
+    if (!isMtpI32Output(spec_tokens, batch * tokens_per_batch, device) || !isMtpI32Output(input_lengths, batch, device)
+        || !isMtpI32Output(lm_output_indexes, batch * tokens_per_batch, device)
+        || sharesMtpStorage(spec_tokens, input_lengths) || sharesMtpStorage(spec_tokens, lm_output_indexes)
+        || sharesMtpStorage(input_lengths, lm_output_indexes)) {
+        return false;
+    }
+    // Validate every chunk before writing any output, so a bad late row can
+    // fall back to ATen without partially overwriting a previous chunk.
+    for (int64_t row = 0; row < batch; ++row) {
+        const auto& accepted = accepted_rows[row];
+        const auto& length   = accepted_length_rows[row];
+        if (!isMtpI32Row(accepted) || !accepted.is_contiguous() || accepted.device() != device
+            || accepted.numel() > INT_MAX || !length.defined() || length.device() != device
+            || length.layout() != c10::kStrided || length.scalar_type() != torch::kInt32 || length.numel() != 1
+            || aliasesMtpOutputs(accepted, spec_tokens, input_lengths, lm_output_indexes)
+            || aliasesMtpOutputs(length, spec_tokens, input_lengths, lm_output_indexes)) {
+            return false;
+        }
+    }
+    for (int32_t column = 1; column < tokens_per_batch; ++column) {
+        if (!isMtpI32Output(token_columns[column], batch, device)
+            || aliasesMtpOutputs(token_columns[column], spec_tokens, input_lengths, lm_output_indexes)) {
+            return false;
+        }
+    }
+    constexpr int threads = 256;
+    for (int64_t offset = 0; offset < batch; offset += kMtpInputRowsPerLaunch) {
+        MtpSpecDecodeStateParams params;
+        params.row_offset       = static_cast<int32_t>(offset);
+        params.rows             = static_cast<int32_t>(std::min<int64_t>(kMtpInputRowsPerLaunch, batch - offset));
+        params.tokens_per_batch = tokens_per_batch;
+        params.tokens           = spec_tokens.data_ptr<int32_t>();
+        params.input_lengths    = input_lengths.data_ptr<int32_t>();
+        params.lm_indexes       = lm_output_indexes.data_ptr<int32_t>();
+        for (int32_t row = 0; row < params.rows; ++row) {
+            params.accepted[row] = accepted_rows[offset + row].data_ptr<int32_t>();
+            params.lengths[row]  = accepted_length_rows[offset + row].data_ptr<int32_t>();
+            params.widths[row]   = static_cast<int32_t>(accepted_rows[offset + row].numel());
+        }
+        for (int32_t column = 1; column < tokens_per_batch; ++column) {
+            params.columns[column] = token_columns[column].data_ptr<int32_t>();
+        }
+        const int blocks = (params.rows * tokens_per_batch + threads - 1) / threads;
+        mtpSpecDecodeTokensMetadataFromStateKernel<<<blocks, threads, 0, stream>>>(params);
+        C10_CUDA_KERNEL_LAUNCH_CHECK();
+    }
+    return true;
 }
 
 void invokeMtpPrefillShiftAppendImpl(const torch::Tensor& combo_tokens_in,

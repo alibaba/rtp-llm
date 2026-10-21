@@ -1310,7 +1310,7 @@ TEST_F(MtpExecutorTest, LinearReplayAsyncDispatchPreservesAcceptedWindowAndPageT
     accepted.accept_tokens_cpu = accepted.accept_tokens.to(torch::kCPU, true);
     accepted.transfer_done_event->record(cuda_graph::graphGetCurrentStream());
     MergedOutput draft_output;
-    draft_output.sampler_output.token_ids       = torch::tensor({3}, cuda_i32).reshape({1, 1});
+    draft_output.sampler_output.token_ids       = torch::tensor({3}, cuda_i32.dtype(torch::kInt64)).reshape({1, 1});
     draft_output.sampler_output.all_probs       = torch::ones({1, 4}, table.options().dtype(torch::kFloat32));
     draft_output.model_output.all_hidden_states = torch::zeros({4, 2}, draft_output.sampler_output.all_probs.options());
     auto ready                                  = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
@@ -1348,6 +1348,11 @@ TEST_F(MtpExecutorTest, LinearReplayAsyncDispatchPreservesAcceptedWindowAndPageT
                         .ok());
     }
 
+    const auto published_state = stream->getMtpAsyncDeviceState();
+    ASSERT_TRUE(published_state.propose_tokens_gpu.defined());
+    EXPECT_EQ(published_state.propose_tokens_gpu.scalar_type(), torch::kInt32);
+    EXPECT_EQ(toVec<int>(published_state.propose_tokens_gpu), (std::vector<int>{3}));
+    EXPECT_EQ(draft_output.sampler_output.token_ids.scalar_type(), torch::kInt64);
     EXPECT_FALSE(stream->getNextPositionIdsGpu().defined());
     auto next_round = stream->prepareLinearReplayRound();
     ASSERT_TRUE(next_round.ok());
@@ -3311,6 +3316,24 @@ TEST_F(MtpExecutorTest, testDraftModelDecodeExpandsTargetVerifyPositionIds) {
     auto sp_output_buffer2    = std::make_shared<SpeculativeExecutorStreamOutput>();
     sp_output_buffer2->tokens = torch::tensor({20, 21}, torch::kInt32).reshape({1, 2});
     stream2->setSPOutputBuffer(sp_output_buffer2);
+
+#if USING_CUDA
+    if (components.executor->useAsyncDeviceState()) {
+        // Also run this case in a fresh process with async device state enabled.
+        // Conflicting host tokens ensure verify packing consumes the GPU state.
+        const auto accepted = torch::tensor({{99, 10}, {88, 20}}, torch::kInt32).to(torch::kCUDA);
+        const auto lengths  = torch::tensor({2, 2}, torch::kInt32).to(torch::kCUDA);
+        int64_t    row      = 0;
+        for (const auto& stream : {stream1, stream2}) {
+            GenerateStream::MtpAsyncDeviceState state;
+            state.accept_tokens_gpu = accepted.narrow(0, row, 1);
+            state.accept_len_gpu    = lengths.narrow(0, row++, 1);
+            stream->setMtpAsyncDeviceState(std::move(state));
+        }
+        sp_output_buffer1->tokens.fill_(-1);
+        sp_output_buffer2->tokens.fill_(-1);
+    }
+#endif
 
     StreamGroups stream_groups({stream1, stream2});
 

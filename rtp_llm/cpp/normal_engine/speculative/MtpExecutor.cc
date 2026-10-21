@@ -2793,6 +2793,21 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
     const auto all_streams = stream_groups.allStreams();
 
     torch::Tensor pre_target_token_t;
+    std::vector<torch::Tensor> accept_tokens_slices;
+    std::vector<torch::Tensor> accept_len_slices;
+    bool                       deferred_pre_target = false;
+    const auto                 gather_pre_target   = [&]() {
+        for (auto& tokens : accept_tokens_slices) {
+            tokens = tokens.reshape({1, -1});
+        }
+        for (auto& length : accept_len_slices) {
+            length = length.reshape({1});
+        }
+        auto tokens  = torch::cat(accept_tokens_slices, 0);
+        auto lengths = torch::cat(accept_len_slices, 0);
+        auto indices = (lengths.to(torch::kInt64) - 1).reshape({static_cast<int64_t>(batch_size), 1});
+        return tokens.gather(1, indices).reshape({static_cast<int64_t>(batch_size)}).to(torch::kInt32);
+    };
     // Prefer device state published before the bookkeeping worker launches.
     // Batch gather: pre_target_token[i] = accept_tokens[i, accept_len[i]-1]
     {
@@ -2800,8 +2815,6 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
         bool all_device_state = (useStreamAsync() || useAsyncDeviceState()) && !all_streams.empty();
         if (all_device_state) {
             // Check all streams have device state and collect batch tensors
-            std::vector<torch::Tensor> accept_tokens_slices;
-            std::vector<torch::Tensor> accept_len_slices;
             accept_tokens_slices.reserve(batch_size);
             accept_len_slices.reserve(batch_size);
             for (const auto& stream : all_streams) {
@@ -2813,16 +2826,17 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
                     all_device_state = false;
                     break;
                 }
-                accept_tokens_slices.push_back(accept_tokens.reshape({1, -1}));
-                accept_len_slices.push_back(accept_len.reshape({1}));
+                accept_tokens_slices.push_back(accept_tokens);
+                accept_len_slices.push_back(accept_len);
             }
             if (all_device_state) {
-                // Batch gather: [batch, propose_step+1] -> pick column [accept_len-1] per row
-                auto accept_tokens_2d = torch::cat(accept_tokens_slices, 0);  // [batch, cols]
-                auto accept_len_batch = torch::cat(accept_len_slices, 0);     // [batch]
-                auto idx_long         = (accept_len_batch.to(torch::kInt64) - 1).reshape({(int64_t)batch_size, 1});
-                pre_target_token_t =
-                    accept_tokens_2d.gather(1, idx_long).reshape({(int64_t)batch_size}).to(torch::kInt32);
+#if USING_CUDA
+                // Only verify packing consumes this token. Read it in that kernel
+                // instead of materializing it before the first draft forward.
+                deferred_pre_target = true;
+#else
+                pre_target_token_t = gather_pre_target();
+#endif
             }
         }
         if (!all_device_state && all_streams.empty()) {
@@ -2831,7 +2845,7 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
         }
     }
 
-    if (!pre_target_token_t.defined()) {
+    if (!pre_target_token_t.defined() && !deferred_pre_target) {
         // Legacy fallback for streams without MtpAsyncDeviceState, such as old
         // PD-disaggregate init paths. Unsafe while a previous worker is in
         // flight with DROP_BROAD_SYNC=1.
@@ -2846,7 +2860,7 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
         }
         pre_target_token_t = toCudaWithHostHold(pre_target_token, buffer_holder_);
     }
-    draft_token_columns.push_back(to_cuda_i32_flat(pre_target_token_t));
+    draft_token_columns.push_back(deferred_pre_target ? torch::Tensor() : to_cuda_i32_flat(pre_target_token_t));
     draft_token_columns.push_back(pre_propose_token_t_raw);
 
     // n-1 steps draft model decode
@@ -2883,6 +2897,11 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
         }
     }
 
+    const auto materialize_pre_target = [&]() {
+        if (deferred_pre_target && !draft_token_columns[0].defined()) {
+            draft_token_columns[0] = to_cuda_i32_flat(gather_pre_target());
+        }
+    };
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.draft_model_decode(build_spec_decode_input)");
         // prepare spec decode input
@@ -2895,14 +2914,28 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
             input_lengths     = torch::empty({static_cast<int64_t>(batch_size)}, cuda_i32);
             model_input.lm_output_indexes =
                 torch::empty({static_cast<int64_t>(batch_size) * tokens_per_batch}, cuda_i32);
-            invokeMtpSpecDecodeTokensMetadataPrepare(draft_token_columns,
-                                                     draft_token_ids_t,
-                                                     input_lengths,
-                                                     model_input.lm_output_indexes,
-                                                     tokens_per_batch,
-                                                     at::cuda::getCurrentCUDAStream().stream());
+            const bool packed_from_state =
+                deferred_pre_target
+                && tryInvokeMtpSpecDecodeTokensMetadataPrepareFromState(accept_tokens_slices,
+                                                                        accept_len_slices,
+                                                                        draft_token_columns,
+                                                                        draft_token_ids_t,
+                                                                        input_lengths,
+                                                                        model_input.lm_output_indexes,
+                                                                        tokens_per_batch,
+                                                                        at::cuda::getCurrentCUDAStream().stream());
+            if (!packed_from_state) {
+                materialize_pre_target();
+                invokeMtpSpecDecodeTokensMetadataPrepare(draft_token_columns,
+                                                         draft_token_ids_t,
+                                                         input_lengths,
+                                                         model_input.lm_output_indexes,
+                                                         tokens_per_batch,
+                                                         at::cuda::getCurrentCUDAStream().stream());
+            }
         } else {
             RTP_LLM_PROFILE_SCOPE("executor.mtp.draft_model_decode(build_spec_cat_tokens)");
+            materialize_pre_target();
             draft_token_ids_t = torch::stack(draft_token_columns, 1).contiguous();
             {
                 RTP_LLM_PROFILE_SCOPE("executor.mtp.draft_model_decode(build_spec_metadata_fused)");
@@ -2918,6 +2951,7 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
 #else
         {
             RTP_LLM_PROFILE_SCOPE("executor.mtp.draft_model_decode(build_spec_lengths_indexes)");
+            materialize_pre_target();
             draft_token_ids_t = torch::stack(draft_token_columns, 1).contiguous();
             input_lengths     = torch::full({(int64_t)batch_size}, static_cast<int64_t>(propose_step_ + 1), cuda_i32);
             model_input.lm_output_indexes =
@@ -3177,7 +3211,11 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
     // must own this round's accepted length until their log is rebuilt.
     auto accept_len_gpu_all = linear_replay ? spec_decode_output.accept_len.clone() : spec_decode_output.accept_len;
     const auto& accept_tokens_gpu_all  = spec_decode_output.accept_tokens;
-    const auto& propose_tokens_gpu_all = draft_prefill_output.sampler_output.token_ids;
+    // Match sync publication and request initialization. A mixed I64/I32
+    // proposal list makes the next round's cat copy/cast each row separately.
+    const auto  propose_tokens_gpu_all = draft_prefill_output.sampler_output.token_ids.defined() ?
+                                             draft_prefill_output.sampler_output.token_ids.to(torch::kInt32) :
+                                             torch::Tensor();
     const auto& draft_all_hidden_full  = draft_prefill_output.model_output.all_hidden_states;
     const auto& draft_all_probs_full   = draft_prefill_output.sampler_output.all_probs;
 
