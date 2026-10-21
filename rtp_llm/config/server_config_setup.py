@@ -406,6 +406,35 @@ def prepare_kev_model_args(py_env_configs):
     logging.info("Prepared Kev checkpoint: %s", prepared)
 
 
+def validate_jev_model_args(py_env_configs):
+    """Recognize an offline System1 export without downloading/converting weights."""
+    from pathlib import Path
+
+    model_args = py_env_configs.model_args
+    if not model_args.ckpt_path:
+        return
+    path = Path(model_args.ckpt_path)
+    if not (path / "jev_config.json").is_file():
+        if (path / "adapter_vllm" / "decision_head.json").is_file():
+            raise ValueError(
+                "Raw JEV weights require an offline System1 conversion. "
+                "Set checkpoint_path to the converters/JEV export directory."
+            )
+        return
+    if (path / "kev_config.json").exists():
+        raise ValueError("Checkpoint cannot contain both JEV and Kev manifests")
+    if model_args.tokenizer_path not in (None, "", model_args.ckpt_path):
+        raise ValueError("JEV must use the tokenizer from its exported checkpoint")
+    if model_args.model_type not in (None, "", "qwen35_dense"):
+        raise ValueError("JEV-27B-VL requires model_type=qwen35_dense")
+    if model_args.task_type not in (None, "", "LANGUAGE_MODEL"):
+        raise ValueError("JEV checkpoints require the LANGUAGE_MODEL task type")
+    # Leave the Qwen multimodal architecture intact. The manifest selects the
+    # prefill head; frontend/backend validate its full schema when loading it.
+    model_args.model_type = "qwen35_dense"
+    model_args.tokenizer_path = model_args.ckpt_path
+
+
 def setup_default_args(py_env_configs):
     set_parallelism_config(
         py_env_configs.parallelism_config,
@@ -502,6 +531,7 @@ def fetch_model_files_to_local(py_env_configs: PyEnvConfigs):
             model_args.tokenizer_path = model_args.ckpt_path
         # A mounted NAS/FUSE directory may itself contain a raw Kev release.
         prepare_kev_model_args(py_env_configs)
+        validate_jev_model_args(py_env_configs)
 
     # Fetch tokenizer_path from model_args
     tokenizer_path = model_args.tokenizer_path
@@ -693,6 +723,7 @@ def setup_and_configure_server(py_env_configs: PyEnvConfigs):
         py_env_configs: PyEnvConfigs object to configure
     """
     prepare_kev_model_args(py_env_configs)
+    validate_jev_model_args(py_env_configs)
     setup_default_args(py_env_configs)
     fetch_model_files_to_local(py_env_configs)
     ll_num_max_token = py_env_configs.concurrency_config.concurrency_limit

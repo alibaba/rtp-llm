@@ -205,6 +205,17 @@ class BaseModel(object):
             raise Exception("current model can't support cuda graph in py model mode")
 
         self.custom_module = self._init_custom_module()
+        if self.custom_module is not None and getattr(
+            self.custom_module.get_handler(), "prefill_only", False
+        ):
+            if self.model_config.enable_output_vocab_pruning:
+                raise ValueError(
+                    "prefill-only custom output does not use LM-head vocabulary pruning"
+                )
+            # A decision checkpoint can omit the vocabulary projection entirely.
+            # Publish this before loader construction so both ordinary loading
+            # and fastsafetensors collectors skip those checkpoint tensors.
+            self.model_config.has_lm_head = False
         self.model_weights_loader = self.create_model_loader()
         self.py_eplb = self.model_weights_loader._py_eplb
         device_str = self._get_device_str()

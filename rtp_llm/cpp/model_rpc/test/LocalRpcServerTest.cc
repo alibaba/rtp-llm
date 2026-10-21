@@ -152,6 +152,7 @@ public:
 
     std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>>
     enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>& inputs) override {
+        ++batch_enqueue_calls;
         if (mode_ == EngineFailureMode::THROW_STD_EXCEPTION) {
             throw std::runtime_error("injected engine enqueue failure");
         }
@@ -188,6 +189,7 @@ public:
     }
 
     std::vector<GenerateStreamPtr> streams;
+    size_t                        batch_enqueue_calls{0};
 
 private:
     EngineFailureMode mode_;
@@ -588,6 +590,70 @@ TEST(LocalRpcServerTest, BatchGenerateCallSerializesUnexpectedEngineExceptions) 
                                                                                    "unknown exception"));
         }
     }
+}
+
+TEST(LocalRpcServerTest, BatchCancellationAroundPreparationNeverEnqueuesAndPreservesCardinality) {
+    class CancelAtCheckServer: public TestLocalRpcServer {
+    public:
+        explicit CancelAtCheckServer(size_t cancel_at): cancel_at_(cancel_at) {}
+        mutable size_t checks{0};
+
+    protected:
+        bool isCancelled(grpc::ServerContext*) const override {
+            return ++checks >= cancel_at_;
+        }
+
+    private:
+        size_t cancel_at_;
+    };
+
+    // For two inputs, checks 1/3 precede preparation, 2/4 follow it, and
+    // check 5 is the last gate before enqueue. No GPU or media IO is needed
+    // to reproduce cancellation at the synchronous preparation boundary.
+    for (size_t cancel_at = 1; cancel_at <= 5; ++cancel_at) {
+        SCOPED_TRACE(cancel_at);
+        CancelAtCheckServer server(cancel_at);
+        auto                engine = std::make_shared<FailingEngine>(EngineFailureMode::THROW_STD_EXCEPTION);
+        server.setEngineForTest(engine);
+        BatchGenerateInputPB request;
+        request.add_inputs()->add_token_ids(1);
+        request.add_inputs()->add_token_ids(2);
+        BatchGenerateOutputsPB response;
+        response.add_results();
+        grpc::ServerContext context;
+
+        const auto status = server.BatchGenerateCall(&context, &request, &response);
+
+        EXPECT_TRUE(status.ok());
+        EXPECT_EQ(server.checks, cancel_at);
+        EXPECT_EQ(engine->batch_enqueue_calls, 0);
+        ASSERT_EQ(response.results_size(), request.inputs_size());
+        for (const auto& result : response.results()) {
+            ASSERT_TRUE(result.has_error_info());
+            EXPECT_EQ(result.error_info().error_code(), ErrorCodePB::CANCELLED);
+            EXPECT_THAT(result.error_info().error_message(), HasSubstr("cancelled before enqueue"));
+        }
+    }
+}
+
+TEST(LocalRpcServerTest, AlreadyCancelledBatchSkipsInputValidation) {
+    TestLocalRpcServer server;
+    server.cancelled = true;
+    auto engine      = std::make_shared<FailingEngine>(EngineFailureMode::THROW_STD_EXCEPTION);
+    server.setEngineForTest(engine);
+    BatchGenerateInputPB request;
+    auto*                input = request.add_inputs();
+    input->add_token_ids(1);
+    input->mutable_generate_config()->set_max_new_tokens(-1);
+    BatchGenerateOutputsPB response;
+    grpc::ServerContext    context;
+
+    const auto status = server.BatchGenerateCall(&context, &request, &response);
+
+    EXPECT_TRUE(status.ok());
+    EXPECT_EQ(engine->batch_enqueue_calls, 0);
+    ASSERT_EQ(response.results_size(), 1);
+    EXPECT_EQ(response.results(0).error_info().error_code(), ErrorCodePB::CANCELLED);
 }
 
 TEST(LocalRpcServerTest, GenerateHandlersRejectNullRpcArgumentsWithoutDereferencingThem) {

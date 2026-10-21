@@ -911,6 +911,10 @@ class FrontendApp(object):
 
             return await track_business_request(call)
 
+        @app.get("/v1/decide/info")
+        async def decide_info():
+            return self.frontend_server.decide_info()
+
         @app.post("/v1/decide")
         async def decide(raw_request: RawRequest, req: Any = Body(...)):
             async def call():

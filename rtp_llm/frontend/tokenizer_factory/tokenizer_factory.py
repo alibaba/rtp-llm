@@ -31,6 +31,22 @@ class TokenizerFactory:
                 text = reader.read()
                 config_json = json.loads(text)
 
+        jev_config_path = os.path.join(ckpt_path, "jev_config.json")
+        if os.path.isfile(jev_config_path):
+            with open(jev_config_path, "r", encoding="utf-8") as reader:
+                jev_config = json.load(reader)
+            if not isinstance(jev_config, dict) or (
+                jev_config.get("schema_version") != 1
+                or jev_config.get("model_type") != "jev"
+                or jev_config.get("mode") != "system1"
+            ):
+                raise ValueError("Unsupported JEV tokenizer task metadata")
+            from rtp_llm.frontend.tokenizer_factory.tokenizers.jev_tokenizer import (
+                JevTokenizer,
+            )
+
+            return JevTokenizer(tokenizer_path, config_json)
+
         ensure_tokenizer_registered(model_type)
         if _tokenizer_factory.get(model_type) is None:
             logging.info(

@@ -13,6 +13,14 @@ def create_custom_module(
     tokenizer: Optional[BaseTokenizer],
 ):
     task_type = config.task_type
+    if (Path(config.ckpt_path) / "jev_config.json").is_file():
+        if (Path(config.ckpt_path) / "kev_config.json").exists():
+            raise ValueError("Checkpoint cannot contain both JEV and Kev manifests")
+        if task_type != TaskType.LANGUAGE_MODEL:
+            raise ValueError("JEV checkpoints require the LANGUAGE_MODEL task type")
+        from rtp_llm.models.downstream_modules.jev import JevModule
+
+        return JevModule(config, tokenizer)
     if (Path(config.ckpt_path) / "kev_config.json").is_file():
         if task_type != TaskType.LANGUAGE_MODEL:
             raise ValueError("Kev checkpoints require the LANGUAGE_MODEL task type")

@@ -3,6 +3,7 @@ import io
 import os
 import re
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -1281,6 +1282,62 @@ class KevCheckpointStartupTest(TestCase):
                 prepare_kev_model_args(self.config)
         self.assertEqual(self.config.model_args.ckpt_path, self._raw_path)
         self.assertEqual(self.config.model_args.tokenizer_path, "")
+
+
+class JevCheckpointStartupTest(TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.path = Path(self.directory.name)
+        self.args = SimpleNamespace(
+            ckpt_path=str(self.path), tokenizer_path="", model_type="", task_type=None
+        )
+        self.config = SimpleNamespace(model_args=self.args)
+
+    def validate(self):
+        from rtp_llm.config.server_config_setup import validate_jev_model_args
+
+        validate_jev_model_args(self.config)
+
+    def test_export_selects_multimodal_backbone_without_conversion(self):
+        (self.path / "jev_config.json").write_text("{}")
+        with patch(
+            "rtp_llm.config.server_config_setup.fetch_remote_file_to_local"
+        ) as fetch:
+            self.validate()
+        fetch.assert_not_called()
+        self.assertEqual(self.args.model_type, "qwen35_dense")
+        self.assertEqual(self.args.tokenizer_path, str(self.path))
+        self.assertEqual(self.args.ckpt_path, str(self.path))
+
+    def test_raw_release_does_not_silently_load_the_unadapted_base(self):
+        (self.path / "adapter_vllm").mkdir()
+        (self.path / "adapter_vllm/decision_head.json").write_text("{}")
+        with self.assertRaisesRegex(ValueError, "offline System1 conversion"):
+            self.validate()
+
+    def test_explicit_conflicts_are_not_overwritten(self):
+        (self.path / "jev_config.json").write_text("{}")
+        for name, value in (
+            ("model_type", "qwen_3"),
+            ("tokenizer_path", "/another/tokenizer"),
+            ("task_type", "DENSE_EMBEDDING"),
+        ):
+            with self.subTest(name=name):
+                before = getattr(self.args, name)
+                setattr(self.args, name, value)
+                with self.assertRaises(ValueError):
+                    self.validate()
+                self.assertEqual(getattr(self.args, name), value)
+                setattr(self.args, name, before)
+        (self.path / "kev_config.json").write_text("{}")
+        with self.assertRaisesRegex(ValueError, "both JEV and Kev"):
+            self.validate()
+
+    def test_ordinary_model_is_unchanged(self):
+        before = vars(self.args).copy()
+        self.validate()
+        self.assertEqual(vars(self.args), before)
 
 
 if __name__ == "__main__":

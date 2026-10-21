@@ -1,3 +1,10 @@
+py_test(
+    name = "jev_tokenizer_test",
+    srcs = ["jev_tokenizer_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "0"},
+)
+
 filegroup(
     name = "testdata",
     srcs = glob([

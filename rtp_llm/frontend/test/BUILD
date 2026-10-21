@@ -1,6 +1,20 @@
 load("@arch_config//:arch_select.bzl", "telemetry_test_deps")
 
 py_test(
+    name = "jev_test",
+    srcs = ["jev_test.py"],
+    deps = ["//rtp_llm:frontend"],
+    env = {"GPU_COUNT": "0"},
+)
+
+py_test(
+    name = "jev_decide_test",
+    srcs = ["jev_decide_test.py"],
+    deps = ["//rtp_llm:frontend", "//rtp_llm:testlib"] + telemetry_test_deps(),
+    env = {"GPU_COUNT": "0"},
+)
+
+py_test(
     name = "systemone_test",
     srcs = ["systemone_test.py"],
     deps = ["//rtp_llm:frontend"],

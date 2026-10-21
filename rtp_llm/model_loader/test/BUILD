@@ -3,6 +3,20 @@ py_test_deps = [
 ]
 
 py_test(
+    name = "test_fastsafetensor_ownership",
+    srcs = ["test_fastsafetensor_ownership.py"],
+    deps = py_test_deps + ["//rtp_llm/models_py/standalone:auto_model"],
+    env = {"GPU_COUNT": "0"},
+)
+
+py_test(
+    name = "test_prefill_only_weights",
+    srcs = ["test_prefill_only_weights.py"],
+    deps = py_test_deps + ["//rtp_llm/models_py/standalone:auto_model"],
+    env = {"GPU_COUNT": "0"},
+)
+
+py_test(
     name = "test_load_quant_w8a8_int8",
     srcs = ["test_load_quant_w8a8_int8.py"],
     deps = py_test_deps,

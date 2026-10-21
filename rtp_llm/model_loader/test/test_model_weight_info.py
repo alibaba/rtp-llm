@@ -567,6 +567,7 @@ def make_minimal_configs(
         moe_style=None,
         tie_word_embeddings=tie_word_embeddings,
         enable_fp32_lm_head=enable_fp32_lm_head,
+        enable_w4a16_sm120_dense_ffn=False,
         output_vocab_ids=list(output_vocab_ids),
         has_lm_head_bias=has_lm_head_bias,
         vocab_size=5,

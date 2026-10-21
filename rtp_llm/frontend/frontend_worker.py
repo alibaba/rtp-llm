@@ -7,6 +7,7 @@ import sys
 import time
 import traceback
 import uuid
+from contextvars import ContextVar
 from functools import partial
 from typing import Any, AsyncGenerator, Dict, List, Optional, Set, Tuple, Union
 
@@ -133,6 +134,29 @@ class FrontendWorker:
         self.kev_reuse_cache = bool(py_env_configs.kv_cache_config.reuse_cache)
         self.kev_tokens_per_block = model_config.attn_config.tokens_per_block
 
+        from rtp_llm.frontend.jev import JevExecutor, JevHeadSpec
+        from rtp_llm.models.downstream_modules.jev import load_jev_config
+
+        self.jev_config = load_jev_config(model_config.ckpt_path)
+        self.jev_executor = None
+        self._jev_request_context = ContextVar("jev_request_context")
+        if self.jev_config is not None:
+            if self.kev_config is not None:
+                raise ValueError("Checkpoint cannot contain both JEV and Kev manifests")
+            max_rows = int(os.environ.get("JEV_MAX_CONCURRENT_ROWS", "4"))
+            if not 1 <= max_rows <= 64:
+                raise ValueError("JEV_MAX_CONCURRENT_ROWS must be in 1..64")
+            self.jev_executor = JevExecutor(
+                JevHeadSpec.from_config(self.jev_config),
+                self._jev_row,
+                max_concurrency=max_rows,
+                timeout_seconds=(
+                    engine_config.pd_sep_config.max_rpc_timeout_ms / 1000
+                    if engine_config.pd_sep_config.max_rpc_timeout_ms > 0
+                    else 300
+                ),
+            )
+
         logging.info("frontend worker start done.")
 
     async def close(self):
@@ -160,12 +184,16 @@ class FrontendWorker:
     async def decide(
         self, request: dict, *, headers: Optional[Dict[str, str]] = None
     ) -> dict:
+        if getattr(self, "jev_executor", None) is not None:
+            return await self._jev_request("decide", request, headers)
         results, _ = await self._decide(request, headers=headers)
         return {"results": results}
 
     async def systemone(
         self, request: dict, *, headers: Optional[Dict[str, str]] = None
     ) -> dict:
+        if getattr(self, "jev_executor", None) is not None:
+            return await self._jev_request("systemone", request, headers)
         from rtp_llm.frontend.systemone import parse_request, to_answers
 
         started = time.perf_counter()
@@ -193,6 +221,90 @@ class FrontendWorker:
             # Includes frontend processing and RPC queue/execution time.
             "latency_ms": round((time.perf_counter() - started) * 1000, 1),
         }
+
+    def decide_info(self) -> dict:
+        if getattr(self, "jev_executor", None) is None:
+            raise KevRequestError("/v1/decide/info requires an exported JEV checkpoint")
+        return self.jev_executor.info()
+
+    async def _jev_request(self, method: str, request: dict, headers) -> dict:
+        # All rows of one decision route to the same replica. ContextVar keeps
+        # concurrent callers' correlation headers and routing keys independent.
+        token = self._jev_request_context.set(
+            (dict(headers or {}), uuid.uuid4().int & ((1 << 63) - 1))
+        )
+        try:
+            return await getattr(self.jev_executor, method)(request)
+        finally:
+            self._jev_request_context.reset(token)
+
+    async def _jev_row(self, row):
+        import torch
+
+        from rtp_llm.frontend.jev import JevRowResult
+        from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
+        from rtp_llm.utils.base_model_datatypes import GenerateInput, MMUrlType
+
+        text, images = [], []
+        for part in row.content:
+            if part["type"] == "text":
+                text.append(part["text"])
+            else:
+                text.append("<|vision_start|><|image_pad|><|vision_end|>")
+                images.append(
+                    MultimodalInput(
+                        part["image_url"]["url"],
+                        MMUrlType.IMAGE,
+                        torch.empty(0),
+                        MMPreprocessConfig(),
+                    )
+                )
+        tokenizer = self.tokenizer
+        if hasattr(tokenizer, "get_real_tokenizer"):
+            tokenizer = tokenizer.get_real_tokenizer()
+        # System1 uses a bare prompt, without the model's chat template/BOS.
+        ids = tokenizer("".join(text), add_special_tokens=False).input_ids
+        if not ids or len(ids) > self.kev_max_row_tokens:
+            raise KevRequestError("JEV row exceeds the configured context length")
+        headers, routing_key = self._jev_request_context.get()
+        item = GenerateInput(
+            request_id=uuid.uuid4().int & ((1 << 63) - 1),
+            token_ids=torch.tensor(ids, dtype=torch.int32),
+            mm_inputs=images,
+            generate_config=GenerateConfig(max_new_tokens=0, is_streaming=False),
+            tokenizer=self.tokenizer,
+            headers=dict(headers),
+        )
+        outputs = await self.backend_rpc_server_visitor.batch_enqueue(
+            [item], routing_key=routing_key
+        )
+        if len(outputs) != 1 or len(outputs[0].generate_outputs) != 1:
+            raise RuntimeError("JEV backend must return one result per row")
+        result = outputs[0].generate_outputs[0]
+        logits = result.custom_output
+        if (
+            not result.finished
+            or logits is None
+            or logits.shape != (1, self.jev_executor.spec.num_labels)
+            or not torch.isfinite(logits).all().item()
+        ):
+            raise RuntimeError("JEV backend returned invalid decision logits")
+        # AuxInfo.input_len is the expanded multimodal length reported by the
+        # engine. Each image placeholder becomes that many additional tokens.
+        prompt_tokens = result.aux_info.input_len or len(ids)
+        vision_tokens = (
+            result.aux_info.multimodal_lengths.get(
+                int(MMUrlType.IMAGE), max(0, prompt_tokens - len(ids) + len(images))
+            )
+            if images
+            else 0
+        )
+        return JevRowResult(
+            logits=logits[0].tolist(),
+            prompt_tokens=prompt_tokens,
+            vision_tokens=vision_tokens,
+            cache_reuse_tokens=result.aux_info.reuse_len,
+        )
 
     async def _decide(
         self, request: dict, *, headers: Optional[Dict[str, str]] = None

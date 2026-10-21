@@ -527,11 +527,36 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
         }
         response->clear_results();
 
+        // Input preparation can block in synchronous media download/ViT work.
+        // We cannot interrupt that call here, but a cancelled/expired RPC must
+        // not prepare another item or enqueue LLM work after it returns.
+        const auto stop_cancelled_batch = [&]() {
+            const bool deadline_exceeded = context && std::chrono::system_clock::now() >= context->deadline();
+            if (!isCancelled(context) && !deadline_exceeded) {
+                return false;
+            }
+            const std::string message = deadline_exceeded ? "batch request deadline exceeded before enqueue" :
+                                                            "batch request cancelled before enqueue";
+            response->clear_results();
+            for (int i = 0; i < batch_size; ++i) {
+                auto* error_info = response->add_results()->mutable_error_info();
+                error_info->set_error_code(ErrorCodePB::CANCELLED);
+                error_info->set_error_message(message);
+            }
+            return true;
+        };
+
         std::vector<std::shared_ptr<GenerateInput>> inputs;
         inputs.reserve(batch_size);
         for (int i = 0; i < batch_size; i++) {
+            if (stop_cancelled_batch()) {
+                return grpc::Status::OK;
+            }
             std::shared_ptr<GenerateInput> input;
             auto                           err = prepareInput(request->inputs(i), input, {}, context);
+            if (stop_cancelled_batch()) {
+                return grpc::Status::OK;
+            }
             if (!err.ok()) {
                 // Fill error results for all requests (0..batch_size-1) to maintain 1:1 mapping.
                 const bool invalid_params = err.code() == ErrorCode::INVALID_PARAMS;
@@ -565,6 +590,9 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
             return grpc::Status::OK;
         }
 
+        if (stop_cancelled_batch()) {
+            return grpc::Status::OK;
+        }
         const auto  enqueue_result    = engine_->enqueueMultiple(inputs);
         const auto& enqueue_successes = enqueue_result.first;
         streams                       = enqueue_result.second;

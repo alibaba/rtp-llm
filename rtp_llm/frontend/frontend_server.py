@@ -12,6 +12,7 @@ from fastapi.responses import ORJSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from rtp_llm.access_logger.access_logger import AccessLogger
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.log_config import get_log_path
 from rtp_llm.config.model_config import (
     update_stop_words_from_env,
@@ -537,6 +538,13 @@ class FrontendServer(object):
     async def decide(self, req: Any, raw_request: RawRequest | None = None):
         return await self._kev_request(req, raw_request, "decide", 400, "error")
 
+    def decide_info(self):
+        assert self._frontend_worker is not None
+        try:
+            return ORJSONResponse(self._frontend_worker.decide_info())
+        except KevRequestError as error:
+            return ORJSONResponse({"error": str(error)}, status_code=404)
+
     async def systemone(
         self,
         req: Any,
@@ -637,7 +645,13 @@ class FrontendServer(object):
             self._access_logger.log_exception_access(log_request, error)
             raise
         except Exception as error:
-            if isinstance(error, KevRequestError):
+            from rtp_llm.frontend.jev import JevRequestError
+
+            if isinstance(error, (KevRequestError, JevRequestError)) or (
+                isinstance(error, FtRuntimeException)
+                and error.exception_type
+                in (ExceptionType.LONG_PROMPT_ERROR, ExceptionType.MM_LONG_PROMPT_ERROR)
+            ):
                 content = {validation_field: str(error)}
                 status = validation_status
                 error_code = "INVALID_PARAMS"

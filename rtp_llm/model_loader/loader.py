@@ -474,9 +474,17 @@ class ModelLoader:
                     del loaded_tensor, fp8_tensor, scale
                     _inline_count += 1
                 else:
-                    complete = weight_info.collector.store_tensor(key, loaded_tensor)
+                    complete = weight_info.collector.store_tensor(
+                        key, loaded_tensor.clone()
+                    )
             else:
-                complete = weight_info.collector.store_tensor(key, loaded_tensor)
+                # TP1 fastsafetensors can yield a view into its shard buffer,
+                # which is freed when iteration advances past that shard.
+                # Own the storage before retaining it: a collector may wait
+                # for another shard, and identity weights may never copy it.
+                complete = weight_info.collector.store_tensor(
+                    key, loaded_tensor.clone()
+                )
 
             if inline_fp8 and _total_count % 500 == 0 and torch.cuda.is_available():
                 torch.cuda.empty_cache()
@@ -616,6 +624,11 @@ class ModelLoader:
 
     def _maybe_skip_weight(self, weight: WeightModule):
         if weight.name in self._global_weight_aliases:
+            return True
+        if not self.model_config.has_lm_head and weight.name in (
+            W.lm_head,
+            W.lm_head_b,
+        ):
             return True
         if self._task_type == TaskType.LANGUAGE_MODEL:
             return False
@@ -789,7 +802,7 @@ class ModelLoader:
                 f"embedding_size is {self._weights_info.model_config.embedding_size}, vocab size is {self._weights_info.model_config.vocab_size}"
             )
 
-        if self._task_type == TaskType.LANGUAGE_MODEL:
+        if self._task_type == TaskType.LANGUAGE_MODEL and self.model_config.has_lm_head:
             lm_head_w = weight.steal_global_weight(W.lm_head)
             if lm_head_w == None:
                 lm_head_w = weight.global_weights[W.embedding]
@@ -800,8 +813,12 @@ class ModelLoader:
                 lm_head_w = logit_scale * lm_head_w
             weight.set_global_weight(W.lm_head, lm_head_w)
         else:
-            # Some LLM can be used for other tasks, e.g. classification, in which case lm_head is not needed
+            # Classification and prefill-only custom readouts have no vocabulary
+            # head. In particular, do not silently retie a missing head to the
+            # embedding table for a LANGUAGE_MODEL decision checkpoint.
             weight.steal_global_weight(W.lm_head)
+            if not self.model_config.has_lm_head:
+                weight.steal_global_weight(W.lm_head_b)
 
         pos_weight = weight.global_weights.get(W.positional_embedding, None)
         if pos_weight != None:
