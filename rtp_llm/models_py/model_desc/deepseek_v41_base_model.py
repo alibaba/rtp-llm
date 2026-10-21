@@ -201,6 +201,17 @@ class Dsv4SharedRuntimeBufferStore:
         self._sync_subscribers()
         return self._views()
 
+    def ensure_mtp_hidden_capacity(self, rows: int) -> None:
+        """Grow eager Prefill storage to the current rank-local input rows."""
+        if not self._mtp_hidden_enabled or rows <= self._mtp_hidden_token_capacity:
+            return
+        current = self._mtp_hidden_storage
+        self._mtp_hidden_storage = torch.empty(
+            rows, self._mtp_hidden_hc_dim, dtype=current.dtype, device=current.device
+        )
+        self._mtp_hidden_token_capacity = rows
+        self._sync_subscribers()
+
     def _validate_request(self, *, mtp_hidden_token_capacity: int) -> None:
         if mtp_hidden_token_capacity > self._mtp_hidden_token_capacity:
             raise RuntimeError(
@@ -365,6 +376,7 @@ class DeepSeekV4Model(GptModelBase):
         self._prefill_cp_size = int(cp_size)
         self._is_speculative = False
         self._is_decode_role = False
+        self._lazy_mtp_hidden_prefill = False
         self._shared_runtime_buffers: Optional[Dsv4SharedRuntimeBufferStore] = None
         logging.info(
             "[DeepSeekV4Model] V4Args: n_layers=%d n_heads=%d head_dim=%d q_lora=%d o_groups=%d n_experts=%d n_act=%d moe_inter=%d win=%d hc_mult=%d compress_ratios[:8]=%s score=%s route_scale=%g swiglu_limit=%g",
@@ -533,6 +545,15 @@ class DeepSeekV4Model(GptModelBase):
         v4: V4Transformer = self.v4
         mtp_hidden = None
         mtp_last_hidden_capacity = None
+        role_type = getattr(self.parallelism_config, "role_type", None)
+        self._lazy_mtp_hidden_prefill = (
+            self._v4_args.v41_config is not None
+            and not bool(getattr(self.py_hw_kernel_config, "enable_cuda_graph", False))
+            and (
+                role_type == RoleType.PREFILL
+                or str(role_type).upper().rsplit(".", 1)[-1] == "PREFILL"
+            )
+        )
         if Dsv4SharedRuntimeBufferStore.mtp_hidden_requested():
             hc_dim = (
                 len(self._capture_aux_hidden_layer_ids) * int(self._v4_args.dim)
@@ -540,7 +561,12 @@ class DeepSeekV4Model(GptModelBase):
                 else int(self._v4_args.hc_mult) * int(self._v4_args.dim)
             )
             mtp_hidden = Dsv4MtpHiddenBufferSpec(
-                token_capacity=self._resolve_mtp_hidden_token_capacity(), hc_dim=hc_dim
+                token_capacity=(
+                    0
+                    if self._lazy_mtp_hidden_prefill
+                    else self._resolve_mtp_hidden_token_capacity()
+                ),
+                hc_dim=hc_dim,
             )
             if self._is_speculative:
                 mtp_last_hidden_capacity = (
@@ -1210,6 +1236,10 @@ class DeepSeekV4Model(GptModelBase):
                 prepare_hidden_fn=prep_decode,
             )
         elif attn.is_prefill:
+            if self._lazy_mtp_hidden_prefill:
+                self._shared_runtime_buffers.ensure_mtp_hidden_capacity(
+                    inputs.input_ids.numel()
+                )
             return forward_prefill(
                 self.v4,
                 self.kv_cache,
