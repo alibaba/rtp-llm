@@ -114,15 +114,15 @@ cc_library(
         ],
         "//conditions:default": [],
     }),
-    copts = select({
-        "@//:using_cuda13_x86": copts() + cuda_default_copts_without_arch() + [
+    copts = copts() + cuda_default_copts_without_arch() + select({
+        "@//:using_cuda13_x86": [
             "-O3", "-std=c++17", "-DRTP_DSV41_QB_KV_ENABLED",
             "-U__CUDA_NO_HALF_OPERATORS__", "-U__CUDA_NO_HALF_CONVERSIONS__",
             "-U__CUDA_NO_HALF2_OPERATORS__", "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
             "-nvcc_options=expt-relaxed-constexpr", "-nvcc_options=ftz=false",
             "--cuda-include-ptx=sm_103a", "--cuda-gpu-arch=sm_103a",
         ],
-        "//conditions:default": cuda_copts(),
+        "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],
 )
@@ -532,8 +532,8 @@ cc_library(
         ],
         "//conditions:default": [],
     }),
-    copts = select({
-        "@//:using_cuda13_x86": copts() + cuda_default_copts_without_arch() + [
+    copts = copts() + cuda_default_copts_without_arch() + select({
+        "@//:using_cuda13_x86": [
             "-O3", "-std=c++20", "-DNDEBUG", "-DFLASH_MLA_IS_BUILD_ON_CUDA",
             "-DRTP_DSV41_FLASHMLA_PDL_ENABLED",
             "-U__CUDA_NO_HALF_OPERATORS__", "-U__CUDA_NO_HALF_CONVERSIONS__",
@@ -542,7 +542,7 @@ cc_library(
             "-nvcc_options=use_fast_math", "-nvcc_options=ptxas-options=--register-usage-level=10",
             "--cuda-include-ptx=sm_103a", "--cuda-gpu-arch=sm_103a",
         ],
-        "//conditions:default": cuda_copts(),
+        "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],
 )
