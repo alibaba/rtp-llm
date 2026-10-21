@@ -1,3 +1,11 @@
+py_test(
+    name = "deepseek_v41_preprocess_shape_test",
+    srcs = ["deepseek_v41_preprocess_shape_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    size = "small",
+    env = {"CUDA_VISIBLE_DEVICES": "", "GPU_COUNT": "0"},
+)
+
 filegroup(
     name = "testdata",
     srcs = glob([
