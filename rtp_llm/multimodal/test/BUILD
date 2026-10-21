@@ -229,6 +229,33 @@ py_test(
 )
 
 py_test(
+    name = "deepseek_v41_graph_cache_test",
+    srcs = ["deepseek_v41_graph_cache_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    size = "small",
+    env = {"CUDA_VISIBLE_DEVICES": "", "GPU_COUNT": "0"},
+)
+
+py_test(
+    name = "deepseek_v41_graph_cache_gpu_test",
+    srcs = ["deepseek_v41_graph_cache_gpu_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    size = "enormous",
+    tags = ["manual", "local", "exclusive", "L20D_TEST"],
+    exec_properties = {"gpu": "L20D_TEST", "gpu_count": "1"},
+)
+
+py_test(
+    name = "deepseek_v41_residual_rmsnorm_gpu_test",
+    srcs = ["deepseek_v41_residual_rmsnorm_gpu_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    size = "enormous",
+    env = {"GPU_COUNT": "1", "WORLD_SIZE": "1"},
+    tags = ["manual", "local", "exclusive", "SM100_ARM_CU13"],
+    exec_properties = {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
+)
+
+py_test(
     name = "deepseek_v41_backend_contract_test",
     srcs = ["deepseek_v41_backend_contract_test.py"],
     deps = ["//rtp_llm:testlib"],
