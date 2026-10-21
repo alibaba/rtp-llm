@@ -1579,6 +1579,36 @@ TEST(P2PReadNotificationTest, MetricsWaitForAllBroadcastRanksAndKeepStartLoadInd
     }
 }
 
+TEST(P2PReadNotificationTest, FatalBroadcastBeforeRegistrationStillPublishesCallsReady) {
+    using Broadcast = P2PBroadcastClient::TpBroadcastResult;
+    for (bool notification_first : {false, true}) {
+        SCOPED_TRACE(::testing::Message() << "notification_first=" << notification_first);
+        auto worker = std::make_shared<Broadcast::WorkerRpcContext>();
+        auto rpc = std::make_shared<Broadcast>(
+            std::vector<std::shared_ptr<Broadcast::WorkerRpcContext>>{worker});
+        rpc->finishRank(0, false);
+        auto broadcast = std::make_shared<P2PBroadcastClient::Result>("fatal-registration", rpc);
+        auto server = std::make_shared<DecodeLoadHelper::Result>();
+        auto collector = std::make_shared<P2PConnectorMetricsCollector>();
+        auto context = std::make_shared<P2PConnectorAsyncReadContext>(nullptr, "fatal-registration", collector, 0);
+        auto notification = std::make_shared<P2PNotification>();
+        if (notification_first) {
+            EXPECT_NO_THROW(context->setNotification(notification));
+        }
+        ASSERT_TRUE(context->beginKickoff());
+        EXPECT_NO_THROW(context->setCallResults(broadcast, server));
+        if (!notification_first) {
+            EXPECT_NO_THROW(context->setNotification(notification));
+        }
+        EXPECT_TRUE(context->calls_ready_.load());
+        EXPECT_GT(notification->generation(), 0u);
+        EXPECT_NO_THROW(context->checkDone());
+        EXPECT_TRUE(context->done());
+        EXPECT_FALSE(context->success());
+        EXPECT_EQ(context->errorInfo().code(), ErrorCode::RPC_FINISH_FAILED);
+    }
+}
+
 TEST(P2PReadNotificationTest, NoTransferDoesNotEmitReadBroadcastDuration) {
     auto collector = std::make_shared<P2PConnectorMetricsCollector>();
     auto context   = std::make_shared<P2PConnectorAsyncReadContext>(nullptr, "no-transfer", collector, 1000, true);

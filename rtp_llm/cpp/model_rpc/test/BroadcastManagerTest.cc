@@ -2,6 +2,7 @@
 #include <future>
 #include <thread>
 #include <gtest/gtest.h>
+#include <stdexcept>
 #include "grpc++/grpc++.h"
 
 #include "autil/NetUtil.h"
@@ -576,6 +577,58 @@ TEST_F(BroadcastManagerTest, CqFailureStillPublishesCompletionCallback) {
     EXPECT_THROW(result->waitDone(), rtp_llm::RTPException);
     EXPECT_TRUE(result->done());
     EXPECT_FALSE(result->success());
+}
+
+TEST_F(BroadcastManagerTest, ImmediateProgressCallbackExceptionDoesNotEscapeRegistration) {
+    auto ctx = makeIdleContext();
+    auto result = std::make_shared<FunctionBroadcastResult>(
+        std::vector<std::shared_ptr<FunctionBroadcastResult::WorkerRpcContext>>{ctx});
+    int progress_calls = 0;
+    EXPECT_NO_THROW(result->setProgressCallback([&] {
+        ++progress_calls;
+        throw std::runtime_error("progress observer failed");
+    }));
+    EXPECT_EQ(progress_calls, 1);
+    EXPECT_FALSE(result->done());
+    EXPECT_NO_THROW(result->finishRank(0, true));
+    EXPECT_EQ(progress_calls, 2);
+    EXPECT_TRUE(result->done());
+    EXPECT_TRUE(result->success());
+    EXPECT_TRUE(result->firstError().error.ok());
+}
+
+TEST_F(BroadcastManagerTest, LateCompletionCallbackExceptionPreservesFatalRpcError) {
+    auto ctx = makeIdleContext();
+    auto result = std::make_shared<FunctionBroadcastResult>(
+        std::vector<std::shared_ptr<FunctionBroadcastResult::WorkerRpcContext>>{ctx});
+    result->finishRank(0, false);
+    EXPECT_NO_THROW(result->onDone([&] { result->waitDone(); }));
+    EXPECT_TRUE(result->done());
+    EXPECT_FALSE(result->success());
+    EXPECT_THROW(result->waitDone(), rtp_llm::RTPException);
+}
+
+TEST_F(BroadcastManagerTest, ThrowingObserversDoNotSkipLaterCompletionCallbacks) {
+    auto ctx = makeIdleContext();
+    auto result = std::make_shared<FunctionBroadcastResult>(
+        std::vector<std::shared_ptr<FunctionBroadcastResult::WorkerRpcContext>>{ctx});
+    int progress_calls = 0;
+    int completion_calls = 0;
+    result->setProgressCallback([&] {
+        ++progress_calls;
+        throw std::runtime_error("progress observer failed");
+    });
+    result->onDone([&] {
+        ++completion_calls;
+        throw 7;
+    });
+    result->onDone([&] { ++completion_calls; });
+    EXPECT_NO_THROW(result->finishRank(0, false));
+    EXPECT_EQ(progress_calls, 2);
+    EXPECT_EQ(completion_calls, 2);
+    EXPECT_TRUE(result->done());
+    EXPECT_FALSE(result->success());
+    EXPECT_THROW(result->waitDone(), rtp_llm::RTPException);
 }
 
 // ---------------------------- workerNum ----------------------------

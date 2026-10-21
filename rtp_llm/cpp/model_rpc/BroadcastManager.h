@@ -91,7 +91,7 @@ public:
             }
         }
         if (run_now) {
-            callback();
+            invokeCallback(callback, "late completion");
         }
     }
 
@@ -104,9 +104,7 @@ public:
             std::lock_guard<std::mutex> lock(wait_done_mutex_);
             progress_callback_ = callback;
         }
-        if (callback) {
-            callback();
-        }
+        invokeCallback(callback, "progress registration");
     }
 
     std::vector<ResponsePB> responses() const {
@@ -204,16 +202,27 @@ public:
             progress = progress_callback_;
         }
         wait_done_cv_.notify_all();
-        if (progress) {
-            progress();
-        }
-        for (auto& callback : callbacks) {
-            callback();
+        invokeCallback(progress, "progress");
+        for (const auto& callback : callbacks) {
+            invokeCallback(callback, "completion");
         }
     }
 
 private:
     friend class BroadcastManager;
+
+    static void invokeCallback(const DoneCallback& callback, const char* phase) noexcept {
+        if (!callback) {
+            return;
+        }
+        try {
+            callback();
+        } catch (const std::exception& error) {
+            RTP_LLM_LOG_ERROR("BroadcastResult %s callback failed: %s", phase, error.what());
+        } catch (...) {
+            RTP_LLM_LOG_ERROR("BroadcastResult %s callback failed with unknown exception", phase);
+        }
+    }
 
     void finishLocked(std::vector<DoneCallback>& callbacks) {
         finished_count_ = static_cast<int>(worker_contexts_.size());
