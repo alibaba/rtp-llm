@@ -46,5 +46,33 @@ class ReleaseLauncherTest(unittest.TestCase):
                     bundle.command(env)
 
 
+
+class MasterLifecycleTest(unittest.TestCase):
+    def test_online_waits_for_process_then_calls_start_once(self):
+        from unittest.mock import Mock, patch
+        from rtp_llm.flexlb.tools.mock_bundle import master
+        child = Mock()
+        child.poll.return_value = None
+        response = Mock()
+        response.__enter__ = Mock(return_value=response)
+        response.__exit__ = Mock(return_value=False)
+        response.read.return_value = b'success'
+        with patch.object(master, 'get', side_effect=[OSError(), b'ok']) as ready, \
+                patch.object(master.time, 'sleep'), \
+                patch.object(master.urllib.request, 'urlopen', return_value=response) as start:
+            master.online(child, 28080)
+        self.assertEqual(ready.call_count, 2)
+        start.assert_called_once_with('http://127.0.0.1:28080/hook/after_start', timeout=60)
+
+    def test_failed_child_cannot_become_online(self):
+        from unittest.mock import Mock, patch
+        from rtp_llm.flexlb.tools.mock_bundle import master
+        child = Mock()
+        child.poll.return_value = 1
+        with patch.object(master.urllib.request, 'urlopen') as start:
+            with self.assertRaisesRegex(RuntimeError, 'exited'):
+                master.online(child, 28080)
+        start.assert_not_called()
+
 if __name__ == '__main__':
     unittest.main()

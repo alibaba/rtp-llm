@@ -61,6 +61,25 @@ def atomic_write(path, value):
     temporary.replace(path)
 
 
+def online(child, port, timeout=120):
+    """Use the release's local lifecycle hooks before advertising health."""
+    deadline = time.monotonic() + timeout
+    while True:
+        if child.poll() is not None:
+            raise RuntimeError('Master exited before lifecycle startup')
+        try:
+            get(f'http://127.0.0.1:{port}/hook/process_ok')
+            break
+        except Exception:
+            if time.monotonic() >= deadline:
+                raise RuntimeError('Master process readiness timed out') from None
+            time.sleep(.2)
+    # Once only: a timeout is an unknown outcome, never replay online() in place.
+    with urllib.request.urlopen(f'http://127.0.0.1:{port}/hook/after_start', timeout=60) as response:
+        if response.read(1024) != b'success':
+            raise RuntimeError('Master lifecycle startup failed')
+
+
 def main():
     env = os.environ.copy()
     if env.get('RTP_LLM_MOCK_BUNDLE') != '1' or env.get('MOCK_BUNDLE_ROLE') != 'master':
@@ -110,8 +129,16 @@ def main():
     for signum in (signal.SIGTERM, signal.SIGINT):
         signal.signal(signum, terminate)
     try:
+        online(child, int(env.get('START_PORT', '7001')))
         raise SystemExit(child.wait())
     finally:
+        if child.poll() is None:
+            child.terminate()
+            try:
+                child.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait()
         stop.set()
         thread.join(timeout=4)
 
