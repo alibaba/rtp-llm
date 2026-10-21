@@ -96,8 +96,7 @@ static void qb_kv_impl(torch::Tensor x, torch::Tensor xs, torch::Tensor w, torch
                      torch::Tensor slots, torch::Tensor kv_out, double eps, int64_t variant,
                      int64_t clusters, bool wait_pdl, bool trap_invalid,
                      torch::Tensor req, torch::Tensor table, torch::Tensor local,
-                     torch::Tensor global, int64_t logical_entries, int64_t index_entries,
-                     bool trigger_pdl) {
+                     torch::Tensor global, int64_t logical_entries, int64_t index_entries) {
 #if defined(RTP_DSV41_QB_KV_ENABLED) && !defined(USE_ROCM)
     TORCH_CHECK(x.is_cuda(), "QB requires CUDA");
     const c10::cuda::CUDAGuard guard(x.device());
@@ -154,7 +153,6 @@ static void qb_kv_impl(torch::Tensor x, torch::Tensor xs, torch::Tensor w, torch
             TORCH_CHECK(!global.is_alias_of(t), "Slot output aliases QB/KV storage");
     }
     rtp_dsv41_qb::SideArgs side;
-    side.trigger_pdl = trigger_pdl;
     if (global.defined()) {
         side.req = req.data_ptr<int>(); side.block_table = table.data_ptr<int>();
         side.local_indices = local.data_ptr<int>(); side.global_indices = global.data_ptr<int>();
@@ -164,10 +162,7 @@ static void qb_kv_impl(torch::Tensor x, torch::Tensor xs, torch::Tensor w, torch
         if ((index_entries & (index_entries - 1)) == 0) side.entries_shift = __builtin_ctz(unsigned(index_entries));
         side.table_stride = table.stride(0); side.local_stride = local.stride(0);
     }
-    // Enabling outgoing PDL also puts this launch behind a programmatic
-    // incoming edge. Even without an explicit upstream trigger, primary exit
-    // alone does not guarantee global-memory visibility to this grid.
-    side.wait_pdl = wait_pdl || trigger_pdl;
+    side.wait_pdl = wait_pdl;
     side.trap_invalid = trap_invalid;
     side.kv = reinterpret_cast<const __nv_bfloat16*>(kv.data_ptr());
     side.gamma = reinterpret_cast<const __nv_bfloat16*>(gamma.data_ptr());
@@ -197,7 +192,7 @@ void dsv41_qb_kv_out(torch::Tensor x, torch::Tensor xs, torch::Tensor w, torch::
                      torch::Tensor slots, torch::Tensor kv_out, double eps, int64_t variant,
                      int64_t clusters, bool wait_pdl, bool trap_invalid) {
     qb_kv_impl(x,xs,w,ws,out,kv,gamma,positions,frequencies,pool,slots,kv_out,eps,
-               variant,clusters,wait_pdl,trap_invalid,{},{},{},{},0,0,false);
+               variant,clusters,wait_pdl,trap_invalid,{},{},{},{},0,0);
 }
 
 void dsv41_qb_kv_index_out(torch::Tensor x, torch::Tensor xs, torch::Tensor w, torch::Tensor ws,
@@ -206,10 +201,9 @@ void dsv41_qb_kv_index_out(torch::Tensor x, torch::Tensor xs, torch::Tensor w, t
                      torch::Tensor slots, torch::Tensor kv_out, double eps, int64_t variant,
                      int64_t clusters, bool wait_pdl, bool trap_invalid,
                      torch::Tensor req, torch::Tensor table, torch::Tensor local,
-                     torch::Tensor global, int64_t logical_entries, int64_t index_entries,
-                     bool trigger_pdl) {
+                     torch::Tensor global, int64_t logical_entries, int64_t index_entries) {
     qb_kv_impl(x,xs,w,ws,out,kv,gamma,positions,frequencies,pool,slots,kv_out,eps,
                variant,clusters,wait_pdl,trap_invalid,req,table,local,global,
-               logical_entries,index_entries,trigger_pdl);
+               logical_entries,index_entries);
 }
 }  // namespace torch_ext

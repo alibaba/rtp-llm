@@ -105,7 +105,6 @@ def try_project_kv(
     eps,
     wait_pdl=False,
     _ready=None,
-    _trigger_pdl=False,
 ):
     """Return Q/KV (and optional slots), or None before any cache write."""
     flag = "DSV41_FUSED_READY_QKV" if _ready is not None else "DSV41_FUSED_QB_KV"
@@ -202,7 +201,6 @@ def try_project_kv(
             slots_out,
             _ready.logical_entries,
             _ready.entries,
-            _trigger_pdl,
         )
         return output, kv, slots_out
     _ops().dsv41_qb_kv_out(*arguments)
@@ -224,7 +222,6 @@ def try_project_kv_index(
     *,
     eps,
     wait_pdl=False,
-    trigger_pdl=False,
 ):
     """Q-only N32768 + SWA + already-ready TopK mapping, exactly one launch."""
     state = SimpleNamespace(
@@ -246,5 +243,4 @@ def try_project_kv_index(
         eps=eps,
         wait_pdl=wait_pdl,
         _ready=plan,
-        _trigger_pdl=trigger_pdl,
     )

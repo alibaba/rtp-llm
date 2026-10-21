@@ -1,11 +1,11 @@
-"""Forward-local REUSE Q/KV/physical-index producer and FlashMLA PDL edge.
+"""Forward-local REUSE Q/KV/physical-index producer for the FlashMLA wheel.
 
 FULL/REINDEX must score the current Index Q; they cannot use ready indices.
 No device values or cross-forward pointer memoization participate in admission.
 """
 
-from dataclasses import dataclass
 import os
+from dataclasses import dataclass
 
 import torch
 
@@ -19,8 +19,6 @@ class ReadyIndexPlan:
     local: torch.Tensor
     logical_entries: int
     entries: int
-    pdl: bool = False
-    positions: torch.Tensor | None = None
 
     def supports(self, device, rows):
         return (
@@ -89,72 +87,4 @@ def make_ready_plan(attn, mega, metadata, rows, swa_pool, swa_indices):
         getattr(ops, "dsv41_qb_kv_index_out", None)
     ):
         return None
-    # Conversion, if needed, must precede the producer. Inserting a cast after
-    # it would create an ordinary dependency and defeat the direct PDL edge.
-    plan.positions = attn._mega_position_chunks(metadata.position_ids, rows, rows)[0]
-    plan.pdl = (
-        os.environ.get("DSV41_READY_FLASHMLA_PDL", "1") == "1"
-        and getattr(ops, "dsv41_flashmla_pdl_available", lambda: False)()
-        and callable(getattr(ops, "dsv41_flashmla_decode_out", None))
-        and _consumer_supported(mega, plan.positions, rows)
-    )
     return plan
-
-
-def _consumer_supported(mega, positions, rows):
-    return (
-        (mega.heads, mega.padded_heads, mega.groups) == (64, 64, 8)
-        and positions.shape == (rows,)
-        and positions.dtype == torch.int32
-        and positions.is_contiguous()
-        and positions.device == mega.query_weight.device
-        and mega.cos_sin.dtype == torch.float32
-        and mega.cos_sin.ndim == 2
-        and mega.cos_sin.shape[1] == 64
-        and mega.cos_sin.is_contiguous()
-        and mega.sink.dtype == torch.float32
-        and mega.sink.shape == (64,)
-        and mega.sink.is_contiguous()
-        and mega.cos_sin.device == mega.sink.device == positions.device
-    )
-
-
-def flashmla_decode(
-    mega,
-    q,
-    pool,
-    indices,
-    positions,
-    extra,
-    extra_indices,
-    *,
-    swa_lengths=None,
-    extra_lengths=None
-):
-    """Use the source-pinned native consumer; no JIT or global PDL switch."""
-    if swa_lengths is not None or extra_lengths is not None:
-        raise ValueError(
-            "REUSE PDL consumer uses masked physical indices, without length overrides"
-        )
-    rows = q.shape[0]
-    output = torch.empty((rows, 8, 4096), device=q.device, dtype=torch.float8_e4m3fn)
-    scales = torch.empty(
-        (8, 32, (rows + 3) // 4 * 4), device=q.device, dtype=torch.int32
-    ).permute(2, 0, 1)[:rows]
-    lse = torch.empty((rows, 64), device=q.device, dtype=torch.float32)
-    producer._ops().dsv41_flashmla_decode_out(
-        q,
-        pool,
-        indices,
-        extra,
-        extra_indices,
-        positions,
-        mega.cos_sin,
-        mega.sink,
-        output,
-        scales,
-        lse,
-        mega.softmax_scale,
-        True,
-    )
-    return output, scales

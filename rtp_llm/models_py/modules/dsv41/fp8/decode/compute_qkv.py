@@ -47,7 +47,6 @@ class DecodeQKV(NamedTuple):
     head_weights: torch.Tensor | None = None
     index_prepared: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
     global_slots: torch.Tensor | None = None
-    flashmla_pdl: bool = False
 
 
 def _fused_v41_q_rope_supported(q, freqs_cis, rope_dim: int) -> bool:
@@ -103,7 +102,6 @@ def decode_compute_qkv(
         try_project_qkv_to_cache,
         try_project_quantized_qkv,
     )
-
     from rtp_llm.models_py.modules.dsv41.fp8._v41_front_gemm import is_reindex, project
 
     # Restrict our fusions to Reindex, including when FULL overlap is disabled
@@ -172,7 +170,6 @@ def decode_compute_qkv(
             ready_plan,
             eps=attn.eps,
             wait_pdl=qb_pdl,
-            trigger_pdl=ready_plan.pdl,
         )
         if result is not None:
             main_q, kv, slots = result
@@ -184,7 +181,6 @@ def decode_compute_qkv(
                 qr_quantized,
                 True,
                 global_slots=slots,
-                flashmla_pdl=ready_plan.pdl,
             )
     index_q = None
     index_prepared = None

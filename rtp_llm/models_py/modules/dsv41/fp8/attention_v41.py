@@ -3428,11 +3428,7 @@ class AttentionV41FP8(AttentionFP8):
                     .to(dtype=torch.int32)
                     .contiguous()
                 )
-            mega_positions = (
-                ready_plan.positions
-                if getattr(qkv, "flashmla_pdl", False)
-                else self._mega_position_chunks(metadata.position_ids, T, T)[0]
-            )
+            mega_positions = self._mega_position_chunks(metadata.position_ids, T, T)[0]
             with record_function_range("dsv41.decode.mega_attention"):
                 pair = mega.decode(
                     qkv.q,
@@ -3441,7 +3437,6 @@ class AttentionV41FP8(AttentionFP8):
                     mega_positions,
                     extra_pool=mega_global,
                     extra_indices=slots,
-                    **({"wait_pdl": True} if getattr(qkv, "flashmla_pdl", False) else {}),
                 )
             out = mega.project_output(pair, self.wo_b)
             self._prefill_output_all_reduce(out)

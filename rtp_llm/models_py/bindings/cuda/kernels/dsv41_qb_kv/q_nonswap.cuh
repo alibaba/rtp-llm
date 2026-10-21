@@ -50,7 +50,6 @@ __global__ __launch_bounds__(Side?512:256,1) void q_nonswap(
         cutlass::arch::fence_barrier_init();
     }else if(warp==2)ptx::tcgen05_alloc_2sm(static_cast<uint32_t>(__cvta_generic_to_shared(&s.tptr)),C::TMEM);
     ptx::cluster_sync();
-    if(side.trigger_pdl&&threadIdx.x==0)cudaTriggerProgrammaticLaunchCompletion();
     if(warp==0&&ptx::elect_one_sync()) {
         int st=0,ph=0;
         for(int task=cid;task<total;task+=clusters){
@@ -157,7 +156,7 @@ template<int BN,bool MFast,int Prefetch=1,bool Side=false>void launch(torch::Ten
     C10_CUDA_CHECK(cudaFuncSetAttribute(kernel,cudaFuncAttributeMaxDynamicSharedMemorySize,smem));
     cudaLaunchAttribute attr[2]{};attr[0].id=cudaLaunchAttributeClusterDimension;attr[0].val.clusterDim={2,1,1};
     attr[1].id=cudaLaunchAttributeProgrammaticStreamSerialization;attr[1].val.programmaticStreamSerializationAllowed=1;
-    cudaLaunchConfig_t cfg{};cfg.gridDim=dim3(clusters*2);cfg.blockDim=dim3(Side?512:256);cfg.dynamicSmemBytes=smem;cfg.stream=at::cuda::getCurrentCUDAStream();cfg.attrs=attr;cfg.numAttrs=(side.wait_pdl||side.trigger_pdl)?2:1;
+    cudaLaunchConfig_t cfg{};cfg.gridDim=dim3(clusters*2);cfg.blockDim=dim3(Side?512:256);cfg.dynamicSmemBytes=smem;cfg.stream=at::cuda::getCurrentCUDAStream();cfg.attrs=attr;cfg.numAttrs=side.wait_pdl?2:1;
     C10_CUDA_CHECK(cudaLaunchKernelEx(&cfg,kernel,a,b,d,sa,sb,m,(n+BN-1)/BN,clusters,side));
 }
 

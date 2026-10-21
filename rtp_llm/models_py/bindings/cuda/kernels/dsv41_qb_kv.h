@@ -21,6 +21,5 @@ void dsv41_qb_kv_index_out(torch::Tensor x, torch::Tensor xs, torch::Tensor w, t
                      torch::Tensor slots, torch::Tensor kv_out, double eps, int64_t variant,
                      int64_t clusters, bool wait_pdl, bool trap_invalid,
                      torch::Tensor req, torch::Tensor table, torch::Tensor local,
-                     torch::Tensor global, int64_t logical_entries, int64_t index_entries,
-                     bool trigger_pdl);
+                     torch::Tensor global, int64_t logical_entries, int64_t index_entries);
 }  // namespace torch_ext

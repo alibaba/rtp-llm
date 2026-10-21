@@ -4,7 +4,6 @@
 namespace rtp_dsv41_qb {
 struct SideArgs {
     bool wait_pdl=false;
-    bool trigger_pdl=false;
     bool trap_invalid=false;
     const __nv_bfloat16* kv=nullptr;
     const __nv_bfloat16* gamma=nullptr;

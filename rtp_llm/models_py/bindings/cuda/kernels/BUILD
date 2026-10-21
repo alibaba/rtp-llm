@@ -515,34 +515,3 @@ cc_library(
     # Match legacy BF16 quantization, preserving finite subnormal inputs.
     copts = cuda_copts() + ["-nvcc_options=ftz=false"],
 )
-
-
-# Compile the exact source-pinned FlashMLA h64 FP8+FP4 decode consumer with
-# the ready-QKV PDL protocol. Separate from the installed FlashMLA wheel ABI.
-cc_library(
-    name = "dsv41_flashmla_pdl",
-    srcs = ["dsv41_flashmla_pdl.cu"],
-    hdrs = ["dsv41_flashmla_pdl.h"],
-    deps = torch_deps() + select({
-        "@//:using_cuda13_x86": [
-            "@dsv41_flashmla_pdl//:headers",
-            "@local_config_cuda//cuda:cuda_headers",
-            "@local_config_cuda//cuda:cudart",
-            "@local_config_cuda//cuda:cuda_driver",
-        ],
-        "//conditions:default": [],
-    }),
-    copts = copts() + cuda_default_copts_without_arch() + select({
-        "@//:using_cuda13_x86": [
-            "-O3", "-std=c++20", "-DNDEBUG", "-DFLASH_MLA_IS_BUILD_ON_CUDA",
-            "-DRTP_DSV41_FLASHMLA_PDL_ENABLED",
-            "-U__CUDA_NO_HALF_OPERATORS__", "-U__CUDA_NO_HALF_CONVERSIONS__",
-            "-U__CUDA_NO_HALF2_OPERATORS__", "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
-            "-nvcc_options=expt-relaxed-constexpr", "-nvcc_options=expt-extended-lambda",
-            "-nvcc_options=use_fast_math", "-nvcc_options=ptxas-options=--register-usage-level=10",
-            "--cuda-include-ptx=sm_103a", "--cuda-gpu-arch=sm_103a",
-        ],
-        "//conditions:default": [],
-    }),
-    visibility = ["//visibility:public"],
-)

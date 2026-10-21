@@ -85,9 +85,6 @@ __global__ __launch_bounds__(IndexTeams ? 512 : 256, 1) void q_gemm_group32(
     }
     ptx::cluster_sync();
 
-    if(side.trigger_pdl && threadIdx.x==0)cudaTriggerProgrammaticLaunchCompletion();
-
-
     if (warp_id==0 && ptx::elect_one_sync()) {
         uint32_t stage=0,phase=0;
         for (int task=cluster_id;task<num_tiles_total;task+=num_clusters) {
@@ -306,7 +303,7 @@ void launch(torch::Tensor x,torch::Tensor xs,torch::Tensor w,torch::Tensor ws,to
     attrs[1].val.programmaticStreamSerializationAllowed=1;
     cudaLaunchConfig_t cfg{};
     cfg.gridDim=dim3(clusters*2);cfg.blockDim=dim3(Side && side.global_indices ? 512 : 256);cfg.dynamicSmemBytes=smem;
-    cfg.stream=at::cuda::getCurrentCUDAStream();cfg.attrs=attrs;cfg.numAttrs=(side.wait_pdl||side.trigger_pdl)?2:1;
+    cfg.stream=at::cuda::getCurrentCUDAStream();cfg.attrs=attrs;cfg.numAttrs=side.wait_pdl?2:1;
     C10_CUDA_CHECK(cudaLaunchKernelEx(&cfg,kernel,a,b,d,sx,sw,
         reinterpret_cast<const uint32_t*>(xs.data_ptr()),reinterpret_cast<const uint32_t*>(ws.data_ptr()),
         xs.stride(0),xs.stride(1),ws.stride(0),ws.stride(1),m,nt,clusters,side));

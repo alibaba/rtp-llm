@@ -28,15 +28,12 @@
 #include "rtp_llm/models_py/bindings/cuda/kernels/deepselect_bf16.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/deepselect_fp32.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/dsv41_qb_kv.h"
-#include "rtp_llm/models_py/bindings/cuda/kernels/dsv41_flashmla_pdl.h"
 
 using namespace rtp_llm;
 
 namespace torch_ext {
 
 void registerBasicCudaOps(py::module& rtp_ops_m) {
-    rtp_ops_m.def("dsv41_flashmla_pdl_available", &dsv41_flashmla_pdl_available);
-    rtp_ops_m.def("dsv41_flashmla_decode_out", &dsv41_flashmla_decode_out);
     rtp_ops_m.def("dsv41_qb_kv_available", &dsv41_qb_kv_available);
     rtp_ops_m.def("dsv41_qb_out", &dsv41_qb_out);
     rtp_ops_m.def("dsv41_qb_kv_out", &dsv41_qb_kv_out);

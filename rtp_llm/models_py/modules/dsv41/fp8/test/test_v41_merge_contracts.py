@@ -15,7 +15,11 @@ from rtp_llm.models_py.modules.dsv41.fp8 import _v41_front_gemm as front
 from rtp_llm.models_py.modules.dsv41.fp8 import _v41_qb_kv as qb_kv
 from rtp_llm.models_py.modules.dsv41.fp8 import _v41_qkv_rope_cache_triton as cache
 from rtp_llm.models_py.modules.dsv41.fp8.attention_v41 import AttentionV41FP8
-from rtp_llm.models_py.modules.dsv41.fp8.decode import compute_qkv, global_overlap
+from rtp_llm.models_py.modules.dsv41.fp8.decode import (
+    compute_qkv,
+    global_overlap,
+    ready_qkv,
+)
 
 
 class MergeContractsCPU(unittest.TestCase):
@@ -76,7 +80,16 @@ class MergeContractsCPU(unittest.TestCase):
         weights = torch.ones(2, 32, dtype=torch.bfloat16)
         positions = torch.zeros(2, dtype=torch.int64)
         freqs = torch.ones(2, 32, dtype=torch.complex64)
-        for route in ("native", "native_fallback", "reindex", "pdl", "ready", "qb_kv"):
+        slots = torch.ones(2, 128, dtype=torch.int32)
+        for route in (
+            "native",
+            "native_fallback",
+            "reindex",
+            "pdl",
+            "ready",
+            "ready_fused",
+            "qb_kv",
+        ):
             with self.subTest(route=route), contextlib.ExitStack() as stack:
                 stack.enter_context(patch.dict(os.environ, {
                     "DSV41_FUSED_QB_KV": str(int(route == "qb_kv")),
@@ -104,7 +117,15 @@ class MergeContractsCPU(unittest.TestCase):
                 fused_front = stack.enter_context(patch.object(
                     front, "project", return_value=(qr, raw_kv, quantized, weights),
                 ))
-                ready = stack.enter_context(patch.object(qb_kv, "try_project_kv_index", return_value=None))
+                ready = stack.enter_context(
+                    patch.object(
+                        qb_kv,
+                        "try_project_kv_index",
+                        return_value=(
+                            (main_q, cached_kv, slots) if route == "ready_fused" else None
+                        ),
+                    )
+                )
                 fused_qb = stack.enter_context(patch.object(qb_kv, "try_project_kv", return_value=None))
                 rope = stack.enter_context(patch.object(
                     cache, "try_fused_qkv_rope_cache",
@@ -116,7 +137,7 @@ class MergeContractsCPU(unittest.TestCase):
                 result = compute_qkv.decode_compute_qkv(
                     attn, x, positions, freqs_cis=freqs,
                     mega_attention=mega, qb_pdl=route == "pdl",
-                    ready_plan=SimpleNamespace(pdl=False) if route == "ready" else None,
+                    ready_plan=object() if route in ("ready", "ready_fused") else None,
                     swa_pool=object(), swa_slots=object(),
                 )
                 self.assertTrue(result.swa_written)
@@ -137,16 +158,123 @@ class MergeContractsCPU(unittest.TestCase):
                         self.assertIs(result.index_prepared, prepared)
                     else:
                         original.assert_called_once()
-                    self.assertIs(rope.call_args.args[1], raw_kv)
-                if route == "ready":
+                    if route == "ready_fused":
+                        rope.assert_not_called()
+                        self.assertIs(result.global_slots, slots)
+                        self.assertEqual(result.q.shape, (1, 2, 64, 512))
+                        merged.forward_quantized.assert_not_called()
+                    else:
+                        self.assertIs(rope.call_args.args[1], raw_kv)
+                if route in ("ready", "ready_fused"):
                     ready.assert_called_once()
                     self.assertIs(ready.call_args.args[3], raw_kv)
+                    self.assertEqual(
+                        ready.call_args.kwargs, {"eps": attn.eps, "wait_pdl": False}
+                    )
                 if route == "qb_kv":
                     fused_qb.assert_called_once()
                     self.assertIs(fused_qb.call_args.args[3], raw_kv)
                 if route == "pdl":
                     self.assertTrue(original.call_args.kwargs["pdl"])
                     self.assertTrue(merged.forward_quantized.call_args.kwargs["wait_pdl"])
+
+    def test_ready_plan_requires_only_the_qkv_index_producer(self):
+        rows = 128
+        req = torch.zeros(rows, dtype=torch.int32)
+        table = torch.ones(1, 2, dtype=torch.int32)
+        local = torch.zeros(rows, 128, dtype=torch.int32)
+        pool = torch.empty(3, 64, 288, dtype=torch.uint8)
+        attn = SimpleNamespace(
+            compress_ratio=8,
+            is_kv_source=False,
+            is_index_source=False,
+            _cp_ctx=None,
+            index_source_layer_id=20,
+            _shared_attention={"topk": {20: local}},
+            _global_region=lambda: "global",
+            _source_pool=lambda _: pool,
+            _block_tables_by_type={"global": table},
+            _kv_cache=object(),
+        )
+        mega = SimpleNamespace(
+            heads=64,
+            padded_heads=64,
+            groups=8,
+            merged_qb=None,
+            query_weight=torch.empty(0),
+            supports_decode=Mock(return_value=True),
+        )
+        ops = SimpleNamespace(
+            dsv41_qb_kv_available=lambda: True,
+            dsv41_qb_kv_index_out=Mock(),
+        )
+        with patch.dict(
+            os.environ, {"DSV41_FUSED_READY_QKV": "1"}, clear=True
+        ), patch.object(qb_kv, "_device_supported", return_value=True), patch.object(
+            qb_kv, "_ops", return_value=ops
+        ), patch(
+            "rtp_llm.models_py.modules.dsv41.fp8._kv_cache_utils.require_pool_tokens_per_block",
+            return_value=512,
+        ):
+            plan = ready_qkv.make_ready_plan(
+                attn,
+                mega,
+                SimpleNamespace(req_id_per_token=req),
+                rows,
+                object(),
+                object(),
+            )
+        self.assertIsNotNone(plan)
+        self.assertIs(plan.table, table)
+        self.assertIs(plan.local, local)
+        self.assertEqual((plan.logical_entries, plan.entries), (64, 64))
+        ops.dsv41_qb_kv_index_out.assert_not_called()
+
+    def test_ready_producer_binding_has_no_outgoing_pdl_argument(self):
+        rows = 128
+        data = torch.empty(rows, 1280, dtype=torch.float8_e4m3fn)
+        raw = torch.empty(rows, 512, dtype=torch.bfloat16)
+        positions = torch.zeros(rows, dtype=torch.int32)
+        pool = torch.empty(3, 64, 528, dtype=torch.uint8)
+        plan = ready_qkv.ReadyIndexPlan(
+            torch.zeros(rows, dtype=torch.int32),
+            torch.ones(1, 2, dtype=torch.int32),
+            torch.zeros(rows, 128, dtype=torch.int32),
+            64,
+            64,
+        )
+        mega = SimpleNamespace(
+            query_weight=torch.empty(32768, 1280, dtype=torch.float8_e4m3fn),
+            query_scale=torch.empty(10, 32768, dtype=torch.int32).T,
+        )
+        ops = SimpleNamespace(dsv41_qb_kv_index_out=Mock())
+        with patch.dict(
+            os.environ, {"DSV41_FUSED_READY_QKV": "1"}, clear=True
+        ), patch.object(qb_kv, "_config", return_value=(0, 64)), patch.object(
+            qb_kv, "_ops", return_value=ops
+        ):
+            q, kv, slots = qb_kv.try_project_kv_index(
+                mega,
+                data,
+                torch.empty(10, rows, dtype=torch.int32).T,
+                raw,
+                torch.ones(512, dtype=torch.bfloat16),
+                positions,
+                torch.ones(1, 32, dtype=torch.complex64),
+                pool,
+                positions,
+                plan,
+                eps=1e-6,
+            )
+        args = ops.dsv41_qb_kv_index_out.call_args.args
+        self.assertEqual(len(args), 23)
+        self.assertFalse(args[15])  # No incoming PDL on the ordinary REUSE path.
+        self.assertIs(args[17], plan.req)
+        self.assertIs(args[19], plan.local)
+        self.assertIs(args[20], slots)
+        self.assertEqual(args[21:], (64, 64))
+        self.assertEqual(q.shape, (rows, 32768))
+        self.assertEqual(kv.shape, (rows, 512))
 
     def test_compute_stream_cache_isolates_context_host_stream_and_thread(self):
         local = threading.local()
