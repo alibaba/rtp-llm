@@ -15,6 +15,15 @@ CI 定义位于外层仓库 `.aoneci/image.yaml`。`mock-bundle` 使用 Maven pr
 
 ### 寄生 bundle
 
+Master 和 Mock 需要独立版本时，使用外层 `scripts/ci/image-build-contract.json`
+声明的 plan 配方，通过 ci-image-build 的 `--plan` 入口固定两个组件与配方 SHA。
+该配方分别构建 `master.jar`、`mock.jar`，隔离 Maven 仓库并验证 KMonitor
+打包；不提供 `legacy-master.jar`，部署不得设置 `MOCK_BUNDLE_LEGACY_MASTER=1`。
+保存 frozen plan、CI manifest 和组件证明；若显式关闭 CI 内测试，必须另外保存
+所用源码的测试证据，不把打包成功当作全量测试通过。
+
+下面的单 checkout 流程只适用于仍使用原有非 plan CI 配方的分支：
+
 1. 构建 `flexlb-api` 与 `flexlb-mock-engine`，执行 Whale、RemoteDecode、缓存、扩缩容和取消相关测试，并执行 `tools/mock_bundle` Python 测试。
 2. 复制 `master.jar`、`mock.jar`、`tools/mock_bundle`、`flexlb_cfg.py`、`flexlb_profile_data.py`、模式表和性能文件到镜像上下文。
 3. 按 pin 构建 `legacy-master.jar`，并生成 `tools/mock_bundle/bundle-manifest.sha256` 记录完整上下文文件摘要。

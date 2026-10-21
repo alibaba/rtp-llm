@@ -37,7 +37,7 @@ Java Mock 可以连接真实 KVCM，协议依据为 [KVCMPublisher.cc](../../cpp
 
 Mock 专属调节项为 `MOCK_KVCM_QUEUE_CAPACITY=65536`、`MOCK_KVCM_BATCH_SIZE=256`、`MOCK_KVCM_FLUSH_MS=100`、`MOCK_KVCM_HEARTBEAT_MS=5000`、`MOCK_KVCM_SNAPSHOT_MS=60000`、`MOCK_KVCM_TIMEOUT_MS=1500`、`MOCK_KVCM_RETRY_MS=100`、`MOCK_KVCM_MAX_RETRY_MS=5000`。这些是测试 publisher 的默认值，不等同于真实引擎配置。
 
-上报按注册 instance/node、权威快照、增量和心跳执行。缓存锁内仅尝试有界队列入队；网络请求在独立 worker 上发送。队列溢出、请求失败、心跳失败和定时校准触发快照；未确认的快照重试相同 payload，快照版本以前的队列事件不会回放。上报失败不阻断推理或改变缓存容量；配置非法时禁用上报。逻辑 Engine 停止时暂停心跳并尽力 HOST_DOWN，恢复后重新注册和快照；进程退出时也尽力 HOST_DOWN。
+上报按注册 instance/node、权威快照、增量和心跳执行。缓存锁内仅尝试有界队列入队；网络请求在独立 worker 上发送。队列溢出、请求失败、心跳失败和定时校准触发快照；未确认的快照重试相同 payload，快照版本以前的队列事件不会回放。上报失败不阻断推理或改变缓存容量；配置非法时禁用上报。逻辑 Engine 停止时暂停心跳并尽力 HOST_DOWN，恢复后重新注册和快照；进程退出时也尽力 HOST_DOWN。下线清理标记在收到确认后才清除，关闭时中断的下线请求会在退出清理中再尝试一次。
 
 `/snapshot` 各 Engine 的 `kvcm` 字段提供状态、owner endpoint、队列深度、入队丢弃数（容量耗尽或队列竞争）、请求失败数、成功报告数和快照数。合成的 `/cache_fixture` 与该功能互斥，因为 fixture 不代表推理缓存的真实 key 集合。HTTP 200 之外还检查 KVCM 顶层和逐项状态；协议 peer 测试不能替代指定真实 KVCM 版本的快照 fencing、故障恢复或容量验收。大快照需要复制并序列化完整 key 集合，不能据此宣称支持二十亿 key。
 

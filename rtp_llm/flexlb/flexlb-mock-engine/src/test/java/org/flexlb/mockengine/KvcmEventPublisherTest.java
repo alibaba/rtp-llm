@@ -325,4 +325,30 @@ class KvcmEventPublisherTest {
             assertEquals(Set.of(42L), secondPeer.keys);
         }
     }
+
+    @Test void closeRetriesHostDownInterruptedByEngineStop() throws Exception {
+        var peer = new Peer();
+        var available = new AtomicBoolean(true);
+        var entered = new CountDownLatch(1);
+        var attempts = new AtomicInteger();
+        KvcmEventPublisher.Transport transport = (route, body) -> {
+            if (JSON.readTree(body).path("events").path(0).path("event_type").asText().equals("EVENT_HOST_DOWN")
+                    && attempts.incrementAndGet() == 1) {
+                entered.countDown();
+                new CountDownLatch(1).await(3, TimeUnit.SECONDS);
+            }
+            return peer.post(route, body);
+        };
+        try (var publisher = new KvcmEventPublisher(config(16), new MockLruBlockCache(8), "host:1", 128,
+                available::get, transport)) {
+            publisher.start();
+            until(() -> publisher.status().get("state").equals("READY"));
+            available.set(false);
+            assertTrue(entered.await(3, TimeUnit.SECONDS));
+            publisher.close();
+            assertEquals(2, attempts.get());
+            assertEquals(1, peer.events("EVENT_HOST_DOWN").size());
+            assertEquals("CLOSED", publisher.status().get("state"));
+        }
+    }
 }

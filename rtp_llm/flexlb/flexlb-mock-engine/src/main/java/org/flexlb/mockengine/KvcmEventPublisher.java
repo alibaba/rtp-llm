@@ -95,6 +95,7 @@ final class KvcmEventPublisher implements AutoCloseable {
     private volatile boolean closed;
     private Thread worker;
     private boolean registered;
+    private boolean hostDownPending;
     private long cutoff, reconciled;
     private record Pending(String body, long version, long generation) {}
     private Pending pending;
@@ -251,15 +252,24 @@ final class KvcmEventPublisher implements AutoCloseable {
             while (!closed) {
                 try {
                     if (!available.getAsBoolean()) {
-                        if (registered) { registered = false; control("EVENT_HOST_DOWN"); }
+                        if (hostDownPending) {
+                            if (!control("EVENT_HOST_DOWN")) throw new IllegalStateException("host down rejected");
+                            hostDownPending = false;
+                        }
+                        registered = false;
                         pending = null;
                         state = "STOPPED";
                         Thread.sleep(config.flushMs());
                         continue;
                     }
                     if (!registered) {
-                        if (!post("/api/registerInstance", registration().toString()) || !control("EVENT_NODE_REGISTER"))
+                        if (!post("/api/registerInstance", registration().toString()))
                             throw new IllegalStateException("registration rejected");
+                        // An uncertain node-register acknowledgement may still
+                        // have created this owner. Keep cleanup pending until
+                        // HOST_DOWN is acknowledged, including during close.
+                        hostDownPending = true;
+                        if (!control("EVENT_NODE_REGISTER")) throw new IllegalStateException("node registration rejected");
                         registered = true;
                         dirty.incrementAndGet();
                     }
@@ -334,7 +344,7 @@ final class KvcmEventPublisher implements AutoCloseable {
         } finally {
             // Clear interrupt so a bounded best-effort final HTTP request can run.
             Thread.interrupted();
-            if (registered) try { control("EVENT_HOST_DOWN"); } catch (Exception ignored) { }
+            if (hostDownPending) try { control("EVENT_HOST_DOWN"); } catch (Exception ignored) { }
             state = "CLOSED";
         }
     }
