@@ -10,6 +10,15 @@
 
 namespace rtp_llm {
 
+TEST(PrefillRpcServerTest, NullGenerateRequestReturnsInvalidParamsBeforeEngineAccess) {
+    PrefillRpcServer server;
+    const auto status = server.GenerateStreamCall(nullptr, nullptr, nullptr);
+    EXPECT_FALSE(status.ok());
+    ErrorDetailsPB details;
+    ASSERT_TRUE(details.ParseFromString(status.error_details()));
+    EXPECT_EQ(details.error_code(), static_cast<int>(ErrorCode::INVALID_PARAMS));
+}
+
 TEST(PrefillRpcServerTest, GetPeerInfoReturnsOnlySelectedPeerLayoutWithoutWorkerAddresses) {
     PrefillRpcServer server;
     auto&            pc = server.maga_init_params_.parallelism_config;

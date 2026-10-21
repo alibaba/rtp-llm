@@ -46,6 +46,15 @@ GenerateOutputsPB makeOutputsWithDecodeReuse(int total, int local, int remote, i
 
 }  // namespace
 
+TEST(DecodeRpcServerTest, NullGenerateRequestReturnsInvalidParamsBeforeEngineAccess) {
+    DecodeRpcServer server;
+    const auto status = server.GenerateStreamCall(nullptr, nullptr, nullptr);
+    EXPECT_FALSE(status.ok());
+    ErrorDetailsPB details;
+    ASSERT_TRUE(details.ParseFromString(status.error_details()));
+    EXPECT_EQ(details.error_code(), static_cast<int>(ErrorCode::INVALID_PARAMS));
+}
+
 TEST(DecodeRpcServerTest, ShouldUsePDSeparationIgnoresUniqueKeyPresence) {
     GenerateInputPB request;
     auto*           config = request.mutable_generate_config();

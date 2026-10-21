@@ -279,7 +279,10 @@ grpc::Status DecodeRpcServer::preparePDRequest(const GenerateInputPB&          r
 
 grpc::Status DecodeRpcServer::GenerateStreamCall(grpc::ServerContext*                   server_context,
                                                  const GenerateInputPB*                 request,
-                                                 grpc::ServerWriter<GenerateOutputsPB>* response_writer) {
+                                                 grpc::ServerWriter<GenerateOutputsPB>* response_writer) try {
+    if (!request) {
+        return serializeErrorMsg("unknown", ErrorInfo(ErrorCode::INVALID_PARAMS, "null generate request"));
+    }
     struct PrefillContextGuard {
         std::shared_ptr<PrefillServerCallerContext> context;
 
@@ -504,6 +507,15 @@ grpc::Status DecodeRpcServer::GenerateStreamCall(grpc::ServerContext*           
         log_pd_error("stream_output", generate_context.error_status);
     }
     return generate_context.error_status;
+} catch (const std::invalid_argument& error) {
+    const auto key = request ? std::to_string(request->request_id()) : "unknown";
+    return serializeErrorMsg(key, ErrorInfo(ErrorCode::INVALID_PARAMS, error.what()));
+} catch (const std::exception& error) {
+    const auto key = request ? std::to_string(request->request_id()) : "unknown";
+    return serializeErrorMsg(key, ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error.what()));
+} catch (...) {
+    const auto key = request ? std::to_string(request->request_id()) : "unknown";
+    return serializeErrorMsg(key, ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown decode RPC exception"));
 }
 
 void DecodeRpcServer::updateAuxInfo(GenerateOutputsPB& outputs_pb, std::shared_ptr<GenerateStream>& stream) {

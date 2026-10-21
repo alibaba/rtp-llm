@@ -261,6 +261,9 @@ grpc::Status PrefillRpcServer::init(const EngineInitParams&                     
 grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*                   server_context,
                                                   const GenerateInputPB*                 request,
                                                   grpc::ServerWriter<GenerateOutputsPB>* response_writer) try {
+    if (!request) {
+        return serializeErrorMsg("unknown", ErrorInfo(ErrorCode::INVALID_PARAMS, "null generate request"));
+    }
     const bool pd_separation = checkPDSupport(*request).supported;
     if (!pd_separation) {
         RTP_LLM_LOG_INFO("pd separation is disabled, call local rpc server");
