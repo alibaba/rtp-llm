@@ -594,6 +594,22 @@ protected:
 
 // ==================== writeByLayer 测试 (Prefill 端) ====================
 
+TEST_F(P2PConnectorWorkerTest, WriteByLayerAllNullBlocksReturnsRequestErrorWithoutThrowing) {
+    const int64_t request_id = 1003;
+    const int64_t deadline = currentTimeMs() + 10000;
+    auto resource = createKVCacheResource(0, 2);
+    resource->mutableBlockIdsForLayer(0, "group0").assign({NULL_BLOCK_IDX, NULL_BLOCK_IDX});
+    bool accepted = true;
+    ASSERT_NO_THROW(accepted = prefill_->writeByLayer(0, resource, request_id, nullptr, deadline));
+    EXPECT_FALSE(accepted);
+    auto computed = computed_buffers_->getBuffer(request_id, deadline);
+    ASSERT_NE(computed, nullptr);
+    const auto error = computed->error();
+    EXPECT_EQ(error.code(), ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED);
+    EXPECT_NE(error.ToString().find("null/invalid block"), std::string::npos);
+    EXPECT_EQ(mock_sender_->getTransferCallCount(), 0);
+}
+
 TEST_F(P2PConnectorWorkerTest, WriteByLayer_ReturnTrue_WithReadyEvent) {
     int     layer_id   = 0;
     int64_t request_id = 1002;
