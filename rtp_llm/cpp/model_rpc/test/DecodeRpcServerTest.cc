@@ -1,3 +1,4 @@
+#include <limits>
 #include "rtp_llm/cpp/model_rpc/PDRequestUtils.h"
 #include <memory>
 
@@ -241,10 +242,14 @@ namespace {
 class LocalPrefillCancelService: public RpcService::Service {
 public:
     int          calls{0};
+    bool         fail_cancel{false};
     int64_t      request_id{0};
     int64_t      cancel_error_code{0};
     grpc::Status Cancel(grpc::ServerContext*, const CancelRequestPB* request, CancelResponsePB* response) override {
         ++calls;
+        if (fail_cancel) {
+            return grpc::Status(grpc::StatusCode::UNAVAILABLE, "test Prefill unavailable");
+        }
         request_id        = request->request_id();
         cancel_error_code = request->cancel_error_code();
         EXPECT_TRUE(request->prefill_address().empty());
@@ -295,6 +300,39 @@ TEST(DecodeRpcServerTest, CancelBeforeDecodeAdmissionForwardsToSelectedPrefillAn
             code);
         rpc_server->Shutdown();
     }
+}
+
+TEST(DecodeRpcServerTest, FailedPrefillCancelBacksOffWithoutPublishingCompletion) {
+    LocalPrefillCancelService prefill;
+    prefill.fail_cancel = true;
+    grpc::ServerBuilder builder;
+    int port = 0;
+    builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &port);
+    builder.RegisterService(&prefill);
+    auto rpc_server = builder.BuildAndStart();
+    ASSERT_TRUE(rpc_server);
+    DecodeRpcServer decode;
+    decode.meta_ = std::make_shared<RpcServerRuntimeMeta>();
+    decode.cancel_registry_ = std::make_unique<PDCancelRegistry>(decode.meta_);
+    CancelRequestPB request;
+    request.set_request_id(205);
+    request.set_prefill_address("127.0.0.1:" + std::to_string(port));
+    CancelResponsePB response;
+    grpc::ServerContext context;
+    ASSERT_TRUE(decode.Cancel(&context, &request, &response).ok());
+    decode.cancelCleanupTick();
+    EXPECT_EQ(prefill.calls, 1);
+    auto handle = decode.cancel_registry_->find(205);
+    EXPECT_GT(handle->next_cancel_retry_ms.load(), 0);
+    handle->next_cancel_retry_ms.store(std::numeric_limits<int64_t>::max());
+    decode.cancelCleanupTick();
+    EXPECT_EQ(prefill.calls, 1);
+    EXPECT_FALSE(handle->terminal.load());
+    EXPECT_TRUE(decode.meta_->getEngineScheduleInfo(0).finished_task_info_list.empty());
+    handle->next_cancel_retry_ms.store(0);
+    decode.cancelCleanupTick();
+    EXPECT_EQ(prefill.calls, 2);
+    rpc_server->Shutdown();
 }
 
 TEST(DecodeRpcServerTest, UnreachablePrefillDoesNotPublishCancellationComplete) {

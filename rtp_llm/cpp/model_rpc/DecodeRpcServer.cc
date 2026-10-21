@@ -1,3 +1,4 @@
+#include <limits>
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/utils/GrpcAddressUtil.h"
 #include <algorithm>
@@ -181,6 +182,21 @@ void DecodeRpcServer::cancelCleanupTick() {
             cancel_registry_->complete(handle);
             continue;
         }
+        const auto monotonic_ms = [] {
+            return std::chrono::duration_cast<std::chrono::milliseconds>(
+                       std::chrono::steady_clock::now().time_since_epoch()).count();
+        };
+        auto next_retry = handle->next_cancel_retry_ms.load(std::memory_order_acquire);
+        if (monotonic_ms() < next_retry
+            || !handle->next_cancel_retry_ms.compare_exchange_strong(
+                next_retry, std::numeric_limits<int64_t>::max(), std::memory_order_acq_rel)) {
+            continue;
+        }
+        autil::ScopeGuard retry_guard([&] {
+            const auto delay = handle->cancel_retry_delay_ms.load();
+            handle->cancel_retry_delay_ms.store(std::min<int64_t>(delay * 2, 1000));
+            handle->next_cancel_retry_ms.store(monotonic_ms() + delay, std::memory_order_release);
+        });
         auto connection = cancel_pool_.getConnection(handle->downstream_address);
         if (!connection.ok())
             continue;
@@ -384,6 +400,7 @@ grpc::Status DecodeRpcServer::GenerateStreamCall(grpc::ServerContext*           
             if (!reason.hasError())
                 reason = {ErrorCode::CANCELLED, "PD request abandoned before completion"};
             registry.cancel(handle->identity.request_id, reason);
+            completed = true;
         }
         ~PrefillCancelGuard() {
             if (!completed)

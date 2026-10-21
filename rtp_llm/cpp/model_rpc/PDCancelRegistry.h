@@ -32,6 +32,8 @@ public:
         bool              downstream_done = false;
         std::atomic<bool> terminal{false};
         int64_t           retain_until_ms = 0;
+        std::atomic<int64_t> next_cancel_retry_ms{0};
+        std::atomic<int64_t> cancel_retry_delay_ms{50};
     };
     using Handle = std::shared_ptr<Entry>;
 
