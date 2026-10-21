@@ -37,3 +37,23 @@ python3 -m rtp_llm.server.legacy_vit_wire_smoke \
 协议探针执行真实旧 frontend metadata client → Master → Mock P → ViT → Mock D，分别验证 NON_BATCH/GenerateStreamCall 与 BATCH/FetchResponse。普通图片输入 66 token、热前缀 64；prepared V4.1 输入 129 token、完整图片热前缀 128。它不启动 HTTP frontend，也不证明事故已复现。
 
 远端验证曾使用旧容器的 native config 库；该库缺少新 seed 常量。仅测试启动脚本临时提供了 `CacheKeyConfig.h` 中的准确常量，未替换 native KV hash 实现，也未把此脚本写入产品代码。native seeded hash/完整 HTTP frontend 必须在匹配 release 的运行时中重验。跨 134/111 的 Master 连 ViT 使用测试参数 `-Dflexlb.engine-grpc.connect-timeout-ms=1000`；默认 20ms 的跨主机尝试未通过，源码默认值保留。这些差异不能作为线上事故因果证据。
+
+## 独立 Whale 部署
+
+release 分支为 `codex/mock-vit-dsv41-release`。frontend 直接运行
+`/opt/conda310/bin/python3 /opt/mock-frontend/src/rtp_llm/flexlb/tools/mock_bundle/whale_frontend_fixture.py`，
+不通过 `bash -c` 拼接参数。平台 checkpoint 为空时，启动器读取真实 tokenizer
+资源中的模型元数据；只下载配置、tokenizer 和 encoding，不下载权重。
+ViT 使用同一入口，设置 `MOCK_BUNDLE_ROLE=vit`；Java Master 和 P/D Mock
+仍由 `sh /home/admin/whale_start.sh` 按角色启动。四种角色位于独立 Pod。
+
+该 V1 模板会用根镜像覆盖 inference/ViT 的资源模板镜像，因此根镜像必须同时
+包含匹配 release 的 Python/native 库、Java 21 与已验证的 Master/Mock JAR。
+CI 的 `frontend_bundle_image` 参数将指定 bundle 复制进 Python 运行镜像，并
+复核 bundle 清单中的 JAR SHA256；该参数和源码 SHA 一起纳入构建 identity。
+部署后必须读 Carbon 实际镜像与进程，不能只检查模板 `package_infos`。
+
+历史窗口中的 P/D 各有 8 个 KV pool。当前 Mock 的单 pool 配置
+P=45083、D=932802 只是选定的实验容量，不等价于真实多 pool allocator；
+也不代表已复现 RDMA 或 CED 事故。历史拓扑为 2 Master、45 frontend、20 ViT、
+40 P、160 D；先以较小 frontend/ViT 数量验通协议，再独立扩大规模。
