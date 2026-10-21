@@ -1,0 +1,16 @@
+--- a/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/_mlir_libs/__init__.py
++++ b/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/_mlir_libs/__init__.py
+@@ -82,2 +82,12 @@
+-    for entry in this_dir.iterdir():
++    # The toolkit .so and its runtime live in a separate NVIDIA Bazel wheel.
++    import nvidia_cutlass_dsl
++
++    for entry in (
++        item
++        for root in nvidia_cutlass_dsl.__path__
++        for directory in [Path(root) / "dsl_packages/cutlass/_mlir/_mlir_libs"]
++        if directory.is_dir()
++        for item in directory.iterdir()
++    ):
++        nvidia_root = next(p for p in entry.parents if p.name == "nvidia_cutlass_dsl")
+         m = flavor_re.match(entry.name)

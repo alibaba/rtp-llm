@@ -1,5 +1,8 @@
 load("@arch_config//:arch_select.bzl", "requirement")
 
+# Import-only dependency checks reuse the production Python 3.10 adapter.
+exports_files(["modules/dsv41/vision_swiglu.py"])
+
 py_library(
     name = "utils",
     srcs = glob([

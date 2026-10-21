@@ -8,7 +8,7 @@ This deliberately retains FP32 GEMM accumulators through SwiGLU, rather than
 reproducing the old intermediate BF16 rounding boundaries. It is not a
 byte-preserving replacement.
 
-The optional dependency set is pinned in deps/requirements_dsv41_vision_quack.txt.
+The dependency set is pinned in the standard CUDA13 requirements and wheel metadata.
 Resolve/JIT during normal eager warmup before CUDA Graph capture. Missing
 dependencies and supported-launch failures are errors, never silent fallbacks.
 """
@@ -47,7 +47,7 @@ def _linear_gated():
         if quack.__version__ != "0.6.5":
             raise RuntimeError(
                 "DeepSeek V4.1 fused vision FFN requires the screened Quack "
-                "0.6.5 commit pinned in deps/requirements_dsv41_vision_quack.txt; "
+                "0.6.5 commit pinned in the CUDA13 runtime dependencies; "
                 f"found {quack.__version__}"
             )
         from quack.gemm_config import SplitKMode
@@ -65,12 +65,12 @@ def _linear_gated():
     except ImportError as error:
         raise RuntimeError(
             "DeepSeek V4.1 fused vision FFN requires the pinned Quack dependency "
-            "set in deps/requirements_dsv41_vision_quack.txt"
+            "set declared by the CUDA13 RTP-LLM wheel"
         ) from error
     if "concat_layout" not in inspect.signature(linear_gated_func).parameters:
         raise RuntimeError(
             "Installed Quack lacks concat_layout; use the pinned dependency set "
-            "in deps/requirements_dsv41_vision_quack.txt"
+            "declared by the CUDA13 RTP-LLM wheel"
         )
     return linear_gated_func
 
