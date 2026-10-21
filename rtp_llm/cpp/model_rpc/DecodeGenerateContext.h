@@ -2,6 +2,7 @@
 
 #include "grpc++/grpc++.h"
 #include "rtp_llm/cpp/model_rpc/GenerateContext.h"
+#include "rtp_llm/cpp/model_rpc/StagePeerGroups.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 
@@ -67,6 +68,8 @@ public:
 public:
     DecodeRpcContext&        rpc_context;
     std::vector<std::string>  peer_addrs;  // prefill worker addrs
+    /** Own the prefill stage partition; empty groups mean prefill is single-stage, even when decode uses PP. */
+    std::vector<StagePeerGroup> remote_stage_peer_groups;
     GenerateRequestPB         allocate_request;
     DecodeStatInfo            stat_info;
     const std::atomic<size_t>* loading_cache_requests = nullptr;

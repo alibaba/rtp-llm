@@ -89,7 +89,8 @@ class MoeConfigPropagationTest(unittest.TestCase):
                     runtime_config=SimpleNamespace(
                         fifo_scheduler_config=scheduler_config,
                         model_name="",
-                    )
+                    ),
+                    parallelism_config=ParallelismConfig(),
                 )
 
                 ModelFactory.update_engine_config_from_model_config(

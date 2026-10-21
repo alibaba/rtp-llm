@@ -2,7 +2,7 @@ import asyncio
 import json
 import logging
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import grpc
 from google.protobuf.json_format import MessageToDict
@@ -22,6 +22,7 @@ class GrpcClientWrapper:
         server_port: int,
         dp_addresses: Optional[List[str]] = None,
         client_config: Optional[Dict[str, int]] = None,
+        eplb_address_resolver: Optional[Callable[[], List[str]]] = None,
     ):
         self.server_port = server_port
         self.address = f"localhost:{server_port}"
@@ -32,6 +33,7 @@ class GrpcClientWrapper:
         self._dp_channels: Dict[str, Any] = {}
         self._dp_stubs: Dict[str, Any] = {}
         self._client_config = client_config or {}
+        self._eplb_address_resolver = eplb_address_resolver
 
     async def _ensure_connection(self):
         """Ensure gRPC channel and stub are created"""
@@ -261,16 +263,35 @@ class GrpcClientWrapper:
         }
 
     async def update_eplb_config(self, req: Any) -> Dict[str, Any]:
-        """Update EPLB config - this would need to be implemented based on your requirements"""
+        """Update each stage root; the backend synchronizes within its stage."""
         try:
-            await self._ensure_connection()
             if isinstance(req, str):
                 req = json.loads(req)
             epld_req = pb2.UpdateEplbConfigRequestPB(
                 mode=req.get("mode", "NONE"),
                 update_time=int(time.time()),
             )
-            await self.stub.UpdateEplbConfig(epld_req)
+            addresses = (
+                await asyncio.to_thread(self._eplb_address_resolver)
+                if self._eplb_address_resolver is not None
+                else [self.address]
+            )
+
+            async def send_to_address(address: str):
+                await self._ensure_dp_connection(address)
+                await self._dp_stubs[address].UpdateEplbConfig(epld_req, timeout=3)
+
+            results = await asyncio.gather(
+                *(send_to_address(address) for address in addresses),
+                return_exceptions=True,
+            )
+            errors = [
+                f"{address}: {result}"
+                for address, result in zip(addresses, results)
+                if isinstance(result, Exception)
+            ]
+            if errors:
+                return {"error": f"Failed to update EPLB config on stage roots: {errors}"}
             return {"status": "ok"}
         except Exception as e:
             logging.error(f"Update EPLB config failed: {e}")

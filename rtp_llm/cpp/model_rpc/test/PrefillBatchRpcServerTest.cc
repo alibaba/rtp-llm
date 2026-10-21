@@ -35,8 +35,8 @@ public:
         enqueueGroup(const std::vector<GenerateStreamPtr>&) override {
             return {{}, {}};
         }
-        absl::StatusOr<std::list<GenerateStreamPtr>> schedule() override {
-            return std::list<GenerateStreamPtr>();
+        absl::StatusOr<ScheduleOutput> schedule() override {
+            return ScheduleOutput{};
         }
         absl::Status stop() override {
             return absl::OkStatus();

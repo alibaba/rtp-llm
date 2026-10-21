@@ -3,13 +3,13 @@
 #include "rtp_llm/cpp/normal_engine/NormalBatchStreamProcessor.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsVerifyRunner.h"
+#include "rtp_llm/cpp/normal_engine/speculative/MtpCompute.h"
 #include "rtp_llm/cpp/normal_engine/speculative/SpeculativeSampler.h"
 
 namespace rtp_llm {
 
 class MtpBatchStreamProcessor: public NormalBatchStreamProcessor {
 public:
-    static torch::Tensor makeEngramVerifyWindows(const torch::Tensor& anchor, const torch::Tensor& tokens);
     static torch::Tensor
     advanceEngramTokenWindows(const torch::Tensor& anchor, const torch::Tensor& tokens, const torch::Tensor& lengths);
     MtpBatchStreamProcessor(const ModelConfig&                 model_config,
@@ -24,6 +24,12 @@ public:
         is_dspark_(sp_config.type == SP_TYPE_DSPARK),
         dspark_mask_token_id_(static_cast<int32_t>(sp_config.sp_dspark_mask_token_id)),
         dspark_sample_from_anchor_(sp_config.sp_dspark_sample_from_anchor) {}
+
+    size_t positionIdLenFactor() const {
+        return model_input_gatherer_config_.position_id_len_factor;
+    }
+
+    mtp::DraftInputLayout draftInputLayout() const;
 
     absl::Status dispatchPrefill(const StreamGroups& stream_groups,
                                  const MergedOutput& prefill_output,
@@ -87,40 +93,21 @@ public:
                                           const SamplerOutput&   sampler_output,
                                           TensorHolder&          host_holder);
 
-    // DSpARK runs two standard-slot draft calls per round: a commit call
-    // (incremental-prefill shape, normalized target feature rows handed off
-    // through last_hidden_states) and a
-    // fixed-width propose call ([anchor, noise x (gamma - 1)] against the
-    // committed feature KV).
+    /** COMMIT populates draft KV from normalized target features while retaining the target's prefill geometry. */
     void validatePrefillDSparkCommitInput(const GptModelInputs& model_input) const;
 
-    void buildDSparkProposeInput(GptModelInputs&      model_input,
-                                 const torch::Tensor& anchors,
-                                 const torch::Tensor& committed_ends,
-                                 TensorHolder&        host_holder);
+    mtp::DSparkRoundState buildDSparkRoundState(const StreamGroups&   stream_groups,
+                                                const GptModelInputs& model_input,
+                                                TensorHolder&         host_holder) const;
 
-    // Immutable state shared by the proposal and target-verification phases of
-    // one DSpARK round. Position bases contain one MRoPE/default tuple per
-    // request; each phase expands them to its own token width, so batching
-    // cannot shift one request onto another request's positions.
-    struct DSparkRoundState {
-        torch::Tensor anchors;
-        torch::Tensor committed_ends;
-        torch::Tensor position_bases;
-        torch::Tensor engram_windows;
-    };
-    DSparkRoundState buildDSparkRoundState(const StreamGroups&   stream_groups,
-                                           const GptModelInputs& model_input,
-                                           TensorHolder&         host_holder) const;
+    void prepareDSparkProposeModelInput(const mtp::DSparkRoundState& round_state,
+                                        GptModelInputs&              model_input,
+                                        TensorHolder&                host_holder);
 
-    void prepareDSparkProposeModelInput(const DSparkRoundState& round_state,
-                                        GptModelInputs&         model_input,
-                                        TensorHolder&           host_holder);
-
-    void prepareDSparkTargetVerifyModelInput(const DSparkRoundState& round_state,
-                                             GptModelInputs&         model_input,
-                                             const torch::Tensor&    proposals,
-                                             TensorHolder&           host_holder);
+    void prepareDSparkTargetVerifyModelInput(const mtp::DSparkRoundState& round_state,
+                                             GptModelInputs&              model_input,
+                                             const torch::Tensor&         proposals,
+                                             TensorHolder&                host_holder);
 
     // Async target preparation runs before proposal sampling completes. Build
     // its verify-width positions locally from the TP-synchronized proposal
@@ -156,7 +143,6 @@ protected:
                                   TensorHolder&       host_holder) const;
 
     torch::Tensor collectDSparkPositionBases(const StreamGroups& stream_groups, TensorHolder& host_holder) const;
-    torch::Tensor expandDSparkPositionIds(const torch::Tensor& position_bases, int64_t width) const;
 
     void updateProposeTokens(const StreamGroups&                stream_groups,
                              const MergedOutput&                draft_prefill_output,
@@ -174,31 +160,22 @@ protected:
                                      const MergedOutput&                          draft_prefill_output,
                                      std::vector<StreamSpecUpdateInfo>&           spec_update_infos) const;
 
-    torch::Tensor compactAcceptedPositionIds(const torch::Tensor&    combo_position_ids,
-                                             const std::vector<int>& accept_lens,
-                                             size_t                  total_accept_len) const;
-
     void gatherHiddenStates(const StreamGroups& stream_groups, GptModelInputs& model_input) const;
 
 protected:
-    torch::Tensor dsparkComboTokens(int64_t batch_size, const torch::Tensor& anchors);
-    torch::Tensor dsparkDraftInputLengths(int64_t batch_size);
-    torch::Tensor dsparkDraftLmIndexes(int64_t batch_size);
-    int64_t       dsparkQueryWidth() const {
+    int64_t dsparkQueryWidth() const {
         return propose_step_ + static_cast<int64_t>(!dspark_sample_from_anchor_);
     }
 
     int     propose_step_;
-    size_t  vocab_size_                = 0;
-    bool    is_dspark_                 = false;
-    int32_t dspark_mask_token_id_      = -1;
+    size_t  vocab_size_               = 0;
+    bool    is_dspark_                = false;
+    int32_t dspark_mask_token_id_     = -1;
     bool    dspark_sample_from_anchor_ = true;
 
-    // Decode-round constants are grow-only device buffers.  Keeping them on
+    // DSpARK proposal constants are grow-only device buffers. Keeping them on
     // device is required by RTP_LLM_STREAM_ASYNC: no accept-length D2H is
     // introduced on the scheduling thread.
-    torch::Tensor dspark_combo_cache_;
-    torch::Tensor dspark_input_lengths_cache_;
-    torch::Tensor dspark_lm_indexes_cache_;
+    mtp::DSparkProposeInputBuffers dspark_propose_input_buffers_;
 };
 }  // namespace rtp_llm

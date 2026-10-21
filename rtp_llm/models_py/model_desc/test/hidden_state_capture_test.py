@@ -204,6 +204,7 @@ def _make_inputs(
     return SimpleNamespace(
         input_ids=torch.tensor(input_ids, dtype=dtype),
         capture_hidden_states=capture_hidden_states,
+        pp_intermediates={},
     )
 
 
@@ -282,6 +283,7 @@ def _make_qwen_model(layer_ids: list[int]) -> Qwen3Model:
     nn.Module.__init__(model)
     model.config = SimpleNamespace(hidden_state_capture_layer_ids=layer_ids)
     model.layer_num = 3
+    model.pp_layer_ids_list = [0, 1, 2]
     model.kv_cache = None
     model.embed_tokens = _Embedding()
     model.layers = nn.ModuleList([_QwenLayer(1), _QwenLayer(2), _QwenLayer(3)])
@@ -329,9 +331,15 @@ def _make_qwen3_next_model(
     model._mtp_aux_capture_buffer = None
     model._mtp_aux_capture_rows = 0
     model._mtp_aux_capture_index = 0
+    model._mtp_aux_capture_expected_parts = 0
+    model._apply_pp_partition = True
+    model.layer_num = 2
+    model.pp_layer_ids_list = [0, 1]
     model.kv_cache = None
     model.parallelism_config = SimpleNamespace(
-        prefill_cp_config=SimpleNamespace(is_enabled=lambda: False)
+        pp_size=1,
+        pp_rank=0,
+        prefill_cp_config=SimpleNamespace(is_enabled=lambda: False),
     )
     model.embed_tokens = _Embedding()
     model.layers = nn.ModuleList([_Qwen3NextLayer(1, 10), _Qwen3NextLayer(2, 20)])
@@ -817,7 +825,7 @@ class HiddenStateCaptureTest(unittest.TestCase):
 
         self.assertFalse(model.supports_hidden_state_capture)
 
-    def test_target_models_do_not_construct_or_pack_collectors(self) -> None:
+    def test_target_models_do_not_construct_collectors(self) -> None:
         model_desc_dir = Path(__file__).resolve().parents[1]
         target_files = (
             "qwen3.py",
@@ -836,9 +844,10 @@ class HiddenStateCaptureTest(unittest.TestCase):
                 for node in ast.walk(tree)
                 if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
             }
+            # PP stages construct ordinary boundary outputs directly;
+            # forward tests below cover the packed capture values.
             with self.subTest(model=target_file):
                 self.assertNotIn("HiddenStateCaptureCollector", direct_calls)
-                self.assertNotIn("PyModelOutputs", direct_calls)
 
     def test_unsupported_context_finalize_returns_hidden_states_unchanged(self) -> None:
         hidden_states = torch.tensor([[1.0, 2.0]])

@@ -59,6 +59,10 @@ public:
                                                       const SpecBuildContext&      ctx,
                                                       int64_t                      expected_layer_num);
 
+    static ModelConfig stageScopedModelConfig(const ModelConfig&       model_config,
+                                              const ParallelismConfig& parallelism_config,
+                                              bool                     is_draft_model = false);
+
 private:
     static CacheConfig createBasicConfig(const ModelConfig&       model_config,
                                          const ParallelismConfig& parallelism_config,

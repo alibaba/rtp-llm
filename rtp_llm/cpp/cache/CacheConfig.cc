@@ -126,12 +126,7 @@ std::optional<size_t> resolveDefaultMTPGroupAlias(const CacheConfig& target_conf
 }  // namespace
 
 bool CacheConfig::samePolicy(const CacheGroupPolicy& lhs, const CacheGroupPolicy& rhs) {
-    return lhs.group_type == rhs.group_type && lhs.enable_prefix_reuse == rhs.enable_prefix_reuse
-           && lhs.reservable == rhs.reservable && lhs.explicit_block_num == rhs.explicit_block_num
-           && lhs.charge_to_paged_budget == rhs.charge_to_paged_budget && lhs.memory_placement == rhs.memory_placement
-           && lhs.active_tail_blocks == rhs.active_tail_blocks && lhs.validate_tail_blocks == rhs.validate_tail_blocks
-           && lhs.cp_mapping == rhs.cp_mapping && lhs.cp_slice == rhs.cp_slice
-           && lhs.sliding_window_size == rhs.sliding_window_size;
+    return lhs.policyFingerprint() == rhs.policyFingerprint();
 }
 
 void CacheConfig::setTopology(std::vector<GroupBase> new_groups, std::vector<LayerBase> new_layers) {
@@ -232,6 +227,9 @@ CacheConfig::mergeMTPModule(const CacheConfig& propose_config, int module_index,
         any_group = true;
     }
     auto sub_cfg = std::make_shared<CacheConfig>(propose_config);
+    /** Draft groups are rebuilt against target groups below; their wire format must
+     * inherit the target's effective policy, including configs built without a model flag. */
+    sub_cfg->model_has_multiple_cache_groups = usesGroupCacheTransferPolicy();
 
     const auto mtp_layer_num = propose_config.layer_num;
     RTP_LLM_CHECK_WITH_INFO(mtp_layer_num > 0, "CacheConfig::mergeMTPModule requires module layers");
@@ -381,8 +379,7 @@ const GroupBase& CacheConfig::physicalGroupForLayer(int layer_id, const std::str
             sub_config != nullptr, "CacheConfig has null MTP configuration at module=%zu", module_index);
         const auto first_layer_id =
             mtpGlobalLayerId(layer_num, static_cast<int>(module_index), sub_config->layer_num, 0);
-        if (first_layer_id != std::numeric_limits<uint32_t>::max()
-            && static_cast<uint64_t>(layer_id) >= first_layer_id
+        if (first_layer_id != std::numeric_limits<uint32_t>::max() && static_cast<uint64_t>(layer_id) >= first_layer_id
             && static_cast<uint64_t>(layer_id) - first_layer_id < sub_config->layer_num) {
             return sub_config->topology().groupForLayer(layer_id - static_cast<int>(first_layer_id), tag);
         }
@@ -461,13 +458,15 @@ void CacheConfig::fromGroupedSpecs(const std::vector<KVCacheSpecPtr>&   specs,
     setTopology(std::move(new_groups), std::move(new_layers));
 }
 
-void CacheConfig::finalizeBlockNums(uint32_t global_block_num, const RuntimeConfig& runtime_config) {
+void CacheConfig::finalizeBlockNums(uint32_t                   global_block_num,
+                                    const RuntimeConfig&       runtime_config,
+                                    const PPBlockNumOverrides* pp_overrides) {
     RTP_LLM_CHECK_WITH_INFO(global_block_num > 0, "cache configuration requires positive baseline block count");
     // TODO: use RuntimeConfig when group-level block sizing needs runtime parallelism context.
     (void)runtime_config;
     for (auto& sub_cfg : mtp_sub_configs) {
         if (sub_cfg != nullptr) {
-            sub_cfg->finalizeBlockNums(global_block_num, runtime_config);
+            sub_cfg->finalizeBlockNums(global_block_num, runtime_config, pp_overrides);
         }
     }
 
@@ -485,6 +484,13 @@ void CacheConfig::finalizeBlockNums(uint32_t global_block_num, const RuntimeConf
         } else if (group.policy.group_type == CacheGroupType::SWA) {
             rule_blocks = global_block_num / step + (global_block_num % step != 0 ? 1u : 0u);
         }
+        if (pp_overrides != nullptr) {
+            const auto it = pp_overrides->find(group.tag);
+            RTP_LLM_CHECK_WITH_INFO(
+                it != pp_overrides->end(), "cache group [%s] is missing from PP block overrides", group.tag.c_str());
+            rule_blocks = it->second;
+        }
+        RTP_LLM_CHECK_WITH_INFO(rule_blocks > 0, "cache group [%s] requires positive block count", group.tag.c_str());
         group.block_num = rule_blocks;
     }
     // The published topology already owns frozen Specs; changing capacity does
@@ -505,6 +511,7 @@ std::string CacheConfig::debugString(size_t indent) const {
     os << indent1 << "# Model Configuration:\n";
     OUTPUT_FIELD_EXPR("dtype", static_cast<int>(dtype));
     OUTPUT_FIELD(layer_num);
+    OUTPUT_FIELD(global_layer_begin);
     OUTPUT_FIELD_EXPR("layer_all_num", layer_all_num());
     OUTPUT_FIELD_EXPR("use_mla", (use_mla ? "true" : "false"));
     os << "\n";

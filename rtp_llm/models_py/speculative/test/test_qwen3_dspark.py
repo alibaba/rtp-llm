@@ -239,17 +239,17 @@ class Qwen3DSparkRegistrationTest(unittest.TestCase):
             ModelFactory._setup_dspark_configs(sp_config, target_config, draft_config)
 
     @staticmethod
-    def _capture_harness(layer_ids: tuple[int, ...]) -> SimpleNamespace:
-        return SimpleNamespace(
-            _mtp_aux_capture_layer_ids=layer_ids,
-            _mtp_aux_capture_layer_id_set=frozenset(layer_ids),
-            _mtp_target_hidden_states=None,
-            _mtp_target_graph_buffer=None,
-            _mtp_target_prompt_buffer=None,
-            _mtp_aux_capture_buffer=None,
-            _mtp_aux_capture_rows=0,
-            _mtp_aux_capture_index=0,
+    def _capture_harness(layer_ids: tuple[int, ...]) -> GptModelBase:
+        config = SimpleNamespace(
+            num_layers=max(layer_ids, default=0) + 1,
+            vocab_size=1,
+            capture_aux_hidden_layer_ids=layer_ids,
         )
+        parallelism = SimpleNamespace(pp_size=1, pp_rank=0)
+        with patch("rtp_llm.models_py.model_desc.module_base.get_device_type"):
+            return GptModelBase(
+                config, parallelism, SimpleNamespace(), max_generate_batch_size=1
+            )
 
     def test_aux_capture_materializes_fused_residual_boundary(self) -> None:
         capture = self._capture_harness((1,))

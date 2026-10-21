@@ -27,17 +27,18 @@ public:
 
     class LoadKVCacheContext {
     public:
-        LoadKVCacheContext(int64_t                  request_id,
-                           std::string              request_key,
-                           std::vector<std::string> peer_addrs,
-                           CacheKeysType            cache_keys,
-                           GroupBlockIds            group_block_ids,
-                           int64_t                  reuse_block_size,
-                           int64_t                  timeout_ms,
-                           int                      partition_count,
-                           int                      partition_id,
-                           grpc::ServerContext*     server_context,
-                           int32_t                  prefill_cp_size = 1):
+        LoadKVCacheContext(int64_t                     request_id,
+                           std::string                 request_key,
+                           std::vector<std::string>    peer_addrs,
+                           CacheKeysType               cache_keys,
+                           GroupBlockIds               group_block_ids,
+                           int64_t                     reuse_block_size,
+                           int64_t                     timeout_ms,
+                           int                         partition_count,
+                           int                         partition_id,
+                           grpc::ServerContext*        server_context,
+                           int32_t                     prefill_cp_size = 1,
+                           std::vector<StagePeerGroup> remote_stage_peer_groups = {}):
             request_id(request_id),
             request_key(std::move(request_key)),
             peer_addrs(std::move(peer_addrs)),
@@ -48,6 +49,7 @@ public:
             partition_id(partition_id),
             server_context(server_context),
             prefill_cp_size(prefill_cp_size),
+            remote_stage_peer_groups(std::move(remote_stage_peer_groups)),
             group_block_ids_(std::move(group_block_ids)) {
             group_block_ids_.validate();
         }
@@ -71,6 +73,8 @@ public:
 
         grpc::ServerContext* server_context;
         int32_t              prefill_cp_size;
+        /** Own source-stage metadata for asynchronous loads; empty groups mean pp_P=1 with flat peers. */
+        std::vector<StagePeerGroup> remote_stage_peer_groups;
 
     private:
         GroupBlockIds group_block_ids_;
@@ -112,7 +116,10 @@ private:
     BroadcastLoadRequestPB constructRemoteLoadRequestForMla(const LoadKVCacheContext&       load_context,
                                                             int                             index,
                                                             const std::vector<std::string>& peer_ips) const;
-    static GroupBlockIds   decodeGroupBlockIds(const BroadcastLoadRequestPB& request, const CacheTopology& topology);
+    BroadcastLoadRequestPB buildBroadcastLoadRequest(const LoadKVCacheContext& load_context) const;
+    static GroupBlockIds   decodeGroupBlockIds(const BroadcastLoadRequestPB& request,
+                                               const CacheTopology&          topology,
+                                               bool                          allow_extra_tags = false);
     static void            validateGroupTags(const LoadKVCacheContext& context, const CacheTopology& topology);
     static void            appendGroupBlockIds(const LoadKVCacheContext& context,
                                                const CacheTopology&      topology,
@@ -142,7 +149,8 @@ private:
                                        size_t               cache_keys_per_physical_block);
     static size_t    completedHandoffPrefixBlocks(size_t                     already_reused_blocks,
                                                   const std::vector<size_t>& required_cache_key_counts,
-                                                  const std::vector<size_t>& transferred_cache_key_counts);
+                                                  const std::vector<size_t>& transferred_cache_key_counts,
+                                                  bool                      allow_no_local_load = false);
     static size_t    minLoadedCacheBlockCount(const std::vector<size_t>& rank_loaded_cache_block_counts);
     static ErrorInfo validateRemoteLoadTopology(size_t worker_size, size_t peer_size);
     static std::vector<size_t> completionQueueExpectedResponseCounts(size_t worker_size);

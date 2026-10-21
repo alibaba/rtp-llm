@@ -944,6 +944,16 @@ public:
 
     // eplb metrics
     int64_t eplb_step_latency_us = 0;
+
+    /* PP stage-local segments. pp_rank < 0 marks a non-PP report so the legacy
+       untagged series is preserved; >= 0 tags the series with this stage. */
+    int64_t pp_rank            = -1;
+    int64_t plan_wait_us       = 0;
+    int64_t activation_wait_us = 0;
+    int64_t slot_reuse_wait_us = 0;
+    int64_t last_run_wait_us   = 0;
+    int64_t send_activation_us = 0;
+    int64_t send_result_us     = 0;
 };
 
 class RtpLLMExecutorMetrics: public kmonitor::MetricsGroup {
@@ -969,6 +979,14 @@ public:
 
     // eplb metrics
     kmonitor::MutableMetric* eplb_step_latency_us_metric = nullptr;
+
+    // PP stage-local segments
+    kmonitor::MutableMetric* plan_wait_us_metric       = nullptr;
+    kmonitor::MutableMetric* activation_wait_us_metric = nullptr;
+    kmonitor::MutableMetric* slot_reuse_wait_us_metric = nullptr;
+    kmonitor::MutableMetric* last_run_wait_us_metric   = nullptr;
+    kmonitor::MutableMetric* send_activation_us_metric = nullptr;
+    kmonitor::MutableMetric* send_result_us_metric     = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();
@@ -1402,6 +1420,7 @@ public:
     int64_t update_weights_latency_ms;
     bool    update_weights_qps;
 
+    int64_t              layer_begin = 0;  // Global ID of the first reported layer.
     std::vector<int64_t> gpu_loads;
 };
 
