@@ -472,11 +472,18 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
         }
 
         if (param.p2p_layer_write) {
-            RTP_LLM_CHECK_WITH_INFO(!publication_lease_keys.empty() || (cp_size > 1 && block_plan.empty()),
-                                    "P2P layer write has no valid blocks for %ld",
-                                    request_id);
             const int64_t deadline_ms = param.request_deadline_ms.defined() ?
                 param.request_deadline_ms.data_ptr<int64_t>()[batch_id] : std::numeric_limits<int64_t>::max();
+            if (publication_lease_keys.empty() && !block_plan.empty()) {
+                // Report a missing required block through the existing request
+                // error channel; do not abort the model execution thread.
+                const auto& missing = block_plan.front();
+                const auto missing_key =
+                    cache_keys[static_cast<int64_t>(batch_id)][static_cast<int64_t>(missing.key_index)];
+                (void)param.p2p_layer_write(cache_model_id, layer_kv.layer_id, layer_kv.tag,
+                                             {missing_key}, {NULL_BLOCK_IDX}, request_id, event, deadline_ms);
+                continue;
+            }
             if (!param.p2p_layer_write(cache_model_id,
                                        layer_kv.layer_id,
                                        layer_kv.tag,

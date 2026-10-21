@@ -925,14 +925,17 @@ TEST_F(ExecOpsTest, testWriteCacheStorePropagatesP2PLayerDispatchFailure) {
 TEST_F(ExecOpsTest, testWriteCacheStoreRejectsEmptyNonCpP2PLayer) {
     auto inputs = makePyCacheStoreInputs(4, 2);
     inputs.cache_keys      = torch::tensor({{int64_t(100), int64_t(101)}}, torch::kInt64);
-    inputs.p2p_layer_write = [](size_t,
-                                int,
-                                const std::string&,
-                                const std::vector<int64_t>&,
-                                const std::vector<int32_t>&,
-                                int64_t,
-                                const std::shared_ptr<torch::Event>&,
-                                int64_t) { return true; };
+    int calls = 0;
+    inputs.p2p_layer_write = [&](size_t, int layer, const std::string& tag,
+                                 const std::vector<int64_t>& keys, const std::vector<int32_t>& blocks,
+                                 int64_t, const std::shared_ptr<torch::Event>&, int64_t) {
+        ++calls;
+        EXPECT_EQ(layer, 0);
+        EXPECT_EQ(tag, "default");
+        EXPECT_EQ(keys, (std::vector<int64_t>{100}));
+        EXPECT_EQ(blocks, (std::vector<int32_t>{NULL_BLOCK_IDX}));
+        return false;  // Production worker has recorded the request-level error.
+    };
 
     torch_ext::LayerKVCache layer_cache;
     layer_cache.kv_cache_base      = torch::zeros({2, 64}, torch::kUInt8);
@@ -948,8 +951,8 @@ TEST_F(ExecOpsTest, testWriteCacheStoreRejectsEmptyNonCpP2PLayer) {
     inputs.prefix_lengths_host = prefix_lengths;
     inputs.host_kv_cache_offset = block_ids;
     auto config = makeCacheConfig(4, 64, 0, 16, layer_cache.tag);
-    EXPECT_THROW(runtimeWriteCacheStore(inputs, layer_cache, config, nullptr, 0, 0, 1, nullptr),
-                 std::runtime_error);
+    EXPECT_NO_THROW(runtimeWriteCacheStore(inputs, layer_cache, config, nullptr, 0, 0, 1, nullptr));
+    EXPECT_EQ(calls, 1);
 }
 
 TEST_F(ExecOpsTest, testWriteCacheStoreRejectsNonIntegerP2PCacheKeyTensor) {

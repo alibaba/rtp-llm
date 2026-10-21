@@ -1128,6 +1128,13 @@ TEST_F(KVCacheManagerTest, WriteP2PLayer_HoldsAllocatorReferenceUntilLayerCleanu
 
     const int64_t request_id  = 7010;
     const int64_t deadline_ms = currentTimeMs() + 10000;
+    // Missing blocks must publish a request error without touching pool refs.
+    EXPECT_FALSE(manager->writeP2PLayer(0, 0, tag, {7001}, {NULL_BLOCK_IDX},
+                                        request_id + 1, nullptr, deadline_ms));
+    auto rejected = worker->getComputedBuffersStore()->getBuffer(request_id + 1, deadline_ms);
+    ASSERT_NE(rejected, nullptr);
+    EXPECT_EQ(rejected->error().code(), ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED);
+    EXPECT_EQ(pool->refCount(blocks.front()), 1u);
     ASSERT_TRUE(
         manager->writeP2PLayer(0, 0, tag, {7001}, blocks, request_id, nullptr, deadline_ms));
     EXPECT_EQ(pool->refCount(blocks.front()), 2u);

@@ -804,7 +804,10 @@ bool KVCacheManager::writeP2PLayer(size_t                               model_id
                                     tag.c_str(),
                                     cache_keys[i],
                                     block_ids[i]);
-                return false;
+                // Let the worker publish the request error before returning.
+                // Invalid blocks must never reach allocator reference bookkeeping.
+                return p2p_connector_->writeByLayerTag(
+                    static_cast<int>(global_layer_id), tag, layer_resource, request_id, event, deadline_ms);
             }
         }
         layer_resource = coordinator_manager_->incrKVCacheRef(*layer_resource, cache_keys, true);
