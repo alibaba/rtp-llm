@@ -82,7 +82,9 @@ class DecodeQKVIntegrationCPU(unittest.TestCase):
                     self.assertIs(result.index_prepared, prepared)
                 else:
                     merged.try_forward_prepared.assert_not_called()
-                    merged.forward_quantized.assert_called_once_with(*quantized)
+                    merged.forward_quantized.assert_called_once_with(
+                        *quantized, **({"wait_pdl": True} if pdl else {})
+                    )
                     self.assertIsNone(result.index_prepared)
 
     def test_quantized_projection_and_completed_write_are_forwarded(self):

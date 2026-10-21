@@ -3014,12 +3014,12 @@ class AttentionV41FP8(AttentionFP8):
         capacity = keys.capacity if paged else keys.shape[1]
         if prepared_query is None:
             prepared_query = AttentionV41FP8._prepare_indexer_query_decode(
-                self, x, qr, positions, qr_quantized, index_q, head_weights,
-                index_prepared, overlap=overlap,
+                self, x, qr, positions, qr_quantized, index_q,
+                head_weights, index_prepared, overlap=overlap,
             )
         q, weights, prepared = prepared_query
-        if overlap is not None:
-            overlap.wait_indexer()
+        if q is not None:
+            q = q.view(B, S, self.index_n_heads, self.index_head_dim)
         indexer_metadata = None if overlap is None else overlap.metadata
         if (
             overlap is None
@@ -3077,11 +3077,7 @@ class AttentionV41FP8(AttentionFP8):
                     shared["decode_sparse_plan"] = plan
                 with record_function_range("dsv41.decode.sparse_mqa_select"):
                     output = sparse_decode.select_decode(
-                        (
-                            None
-                            if q is None
-                            else q.view(B, S, self.index_n_heads, self.index_head_dim)
-                        ),
+                        q,
                         weights.view(B, S, self.index_n_heads),
                         self.freqs_cis,
                         positions.reshape(T),
@@ -3102,11 +3098,7 @@ class AttentionV41FP8(AttentionFP8):
             if overlap is not None:
                 overlap.wait_global()
             all_logits = decode_indexer.score_decode_indexer(
-                (
-                    None
-                    if q is None
-                    else q.view(B, S, self.index_n_heads, self.index_head_dim)
-                ),
+                q,
                 weights.view(B, S, self.index_n_heads),
                 self.freqs_cis,
                 keys.pool,
@@ -3118,8 +3110,8 @@ class AttentionV41FP8(AttentionFP8):
                 positions=positions.reshape(T),
                 preserve_score_dtype=True,
                 pad_invisible=False,
-                prepared_query=prepared,
                 metadata=indexer_metadata,
+                prepared_query=prepared,
             )
         else:
             weights = (
@@ -3392,7 +3384,9 @@ class AttentionV41FP8(AttentionFP8):
                 self._decode_write_swa_fp8(qkv.kv, B, S, metadata)
             if global_work is not None:
                 prepared_query = self._prepare_indexer_query_decode(
-                    x, qkv.qr, positions, qkv.qr_quantized, qkv.index_q
+                    x, qkv.qr, positions, qkv.qr_quantized, qkv.index_q,
+                    getattr(qkv, "head_weights", None),
+                    getattr(qkv, "index_prepared", None),
                 )
         finally:
             if global_work is not None:

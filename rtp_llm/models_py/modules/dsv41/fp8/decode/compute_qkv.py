@@ -115,19 +115,26 @@ def decode_compute_qkv(
         else None
     )
     head_weights = None if front is None else front[3]
-    native_qkv = None if front is not None else try_project_qkv_to_cache(
-        attn, x, freqs_cis, swa_pool, swa_slots, shared_input_quant
+    # Select the producer before launching it: QB/KV and READY consume raw KV,
+    # whereas the upstream native producer already normalizes/rotates KV and
+    # writes SWA. A PDL consumer also needs the existing norm producer trigger.
+    merged = getattr(mega_attention, "merged_qb", None)
+    needs_raw_kv = (
+        reindex
+        or qb_pdl
+        or ready_plan is not None
+        or (merged is not None and os.environ.get("DSV41_FUSED_QB_KV", "0") == "1")
     )
-    quantized_qkv = (
-        front[:3] if front is not None else native_qkv
-        if front is not None or native_qkv is not None
-        else try_project_quantized_qkv(
-            attn,
-            x,
-            quantized_input=shared_input_quant,
-            pdl=qb_pdl,
+    native_qkv = (
+        None if needs_raw_kv else try_project_qkv_to_cache(
+            attn, x, freqs_cis, swa_pool, swa_slots, shared_input_quant
         )
     )
+    quantized_qkv = front[:3] if front is not None else native_qkv
+    if quantized_qkv is None:
+        quantized_qkv = try_project_quantized_qkv(
+            attn, x, quantized_input=shared_input_quant, pdl=qb_pdl
+        )
     qr_quantized = None if quantized_qkv is None else quantized_qkv[2]
     if quantized_qkv is not None:
         fused_qkv = quantized_qkv[:2]
@@ -145,6 +152,7 @@ def decode_compute_qkv(
         and mega_attention is not None
         and qr_quantized is not None
         and fused_qkv is not None
+        and native_qkv is None
         and not reindex
         and getattr(attn, "skip_post_q_norm", False)
         and rd == 64
@@ -180,13 +188,13 @@ def decode_compute_qkv(
             )
     index_q = None
     index_prepared = None
-    merged = getattr(mega_attention, "merged_qb", None)
     if (
         os.environ.get("DSV41_FUSED_QB_KV", "0") == "1"
         and not reindex
         and merged is not None
         and qr_quantized is not None
         and fused_qkv is not None
+        and native_qkv is None
         and getattr(attn, "skip_post_q_norm", False)
         and rd == 64
         and (attn.n_heads, attn.head_dim, getattr(mega_attention, "padded_heads", None))

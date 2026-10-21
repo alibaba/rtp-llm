@@ -40,6 +40,7 @@ _TESTS = [
     "test_v41_flash_mla_cache_format",
     "test_v41_fp4_transport",
     "test_v41_global_overlap",
+    "test_v41_merge_contracts",
     "test_v41_host_swa_metadata",
     "test_v41_grouped_gemm",
     "test_v41_grouped_prefill_score",
@@ -75,6 +76,7 @@ _TESTS = [
 
 # The selection chain supports both SM100 ARM and SM100/SM103 x86.
 _X86_TESTS = [
+    "test_v41_merge_contracts",
     "test_v41_attention_jit_warmup",
     "test_v41_owned_pool",
     "test_v41_cp_async",

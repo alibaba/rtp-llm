@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import threading
 from dataclasses import dataclass, field
 
 import torch
@@ -14,10 +15,11 @@ from rtp_llm.models_py.modules.dsv41.fp8 import _v41_decode_indexer, _v41_decode
 from rtp_llm.models_py.modules.dsv41.fp8.decode.compute_qkv import decode_compute_qkv
 from rtp_llm.models_py.modules.dsv41.fp8.decode.global_overlap import (
     _GLOBAL_COMPUTE_STREAMS,
+    _get_compute_stream,
     supports_paged_global,
 )
 
-_INDEXER_STREAMS: dict[int, torch.cuda.Stream] = {}
+_INDEXER_STREAMS = threading.local()
 
 
 def _qb_pdl_enabled(mega) -> bool:
@@ -106,21 +108,18 @@ def try_full_decode(
     starts = metadata.start_pos[:batch].long()
     if not is_supported(attn, x, positions, req, starts):
         return None
-    from rtp_llm.models_py.modules.dsv41.fp8.attention import (
-        _cuda_device_index,
-        _get_process_cuda_stream,
-    )
+    from rtp_llm.models_py.modules.dsv41.fp8.attention import _cuda_device_index
 
     device = _cuda_device_index(x.device)
     current = torch.cuda.current_stream(x.device)
     with torch.cuda.device(x.device):
         capturing = torch.cuda.is_current_stream_capturing()
-    streams = (_GLOBAL_COMPUTE_STREAMS, _INDEXER_STREAMS)
-    if capturing and any(device not in cache for cache in streams):
+        global_stream, auxiliary = (
+            _get_compute_stream(cache, x.device, current, capturing=capturing)
+            for cache in (_GLOBAL_COMPUTE_STREAMS, _INDEXER_STREAMS)
+        )
+    if global_stream is None or auxiliary is None:
         return None
-    global_stream, auxiliary = (
-        _get_process_cuda_stream(cache, x.device) for cache in streams
-    )
     warm_key = (
         device,
         tuple(x.shape),

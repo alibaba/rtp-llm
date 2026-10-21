@@ -305,18 +305,24 @@ class FullOverlapCPUTest(unittest.TestCase):
             _produce_global_decode=Mock(),
         )
         main, glob, aux = Mock(), Mock(), Mock()
+        main.cuda_stream = 51
         glob.cuda_stream, aux.cuda_stream = 123, 456
         glob.device = aux.device = torch.device("cuda", 0)
         attn._full_decode_overlap_warmed = {(0, tuple(x.shape), 123, 456)}
         with patch.dict(
             sys.modules, {"deep_gemm": SimpleNamespace(get_pdl=lambda: True)}
         ), patch.object(full_overlap, "is_supported", return_value=True), patch.object(
-            full_overlap, "_GLOBAL_COMPUTE_STREAMS", {0: glob}
+            full_overlap, "_GLOBAL_COMPUTE_STREAMS",
+            SimpleNamespace(streams={(0, 17, 51): glob})
         ), patch.object(
-            full_overlap, "_INDEXER_STREAMS", {0: aux}
+            full_overlap, "_INDEXER_STREAMS",
+            SimpleNamespace(streams={(0, 17, 51): aux})
         ), patch(
             "rtp_llm.models_py.modules.dsv41.fp8.attention._cuda_device_index",
             return_value=0,
+        ), patch(
+            "rtp_llm.models_py.modules.dsv41.fp8._v41_wo_a_quant._context",
+            return_value=17,
         ), patch(
             "torch.cuda.current_stream", return_value=main
         ), patch(
@@ -442,17 +448,23 @@ class FullOverlapCPUTest(unittest.TestCase):
             _produce_global_decode=Mock(side_effect=RuntimeError("producer failed")),
         )
         main, glob, aux = Mock(), Mock(), Mock()
+        main.cuda_stream = 51
         glob.cuda_stream, aux.cuda_stream = 123, 456
         glob.device = aux.device = torch.device("cuda", 0)
         with patch.dict(
             os.environ, {"DSV41_FULL_DECODE_MULTISTREAM": "1"}
         ), patch.object(full_overlap, "is_supported", return_value=True), patch.object(
-            full_overlap, "_GLOBAL_COMPUTE_STREAMS", {0: glob}
+            full_overlap, "_GLOBAL_COMPUTE_STREAMS",
+            SimpleNamespace(streams={(0, 17, 51): glob})
         ), patch.object(
-            full_overlap, "_INDEXER_STREAMS", {0: aux}
+            full_overlap, "_INDEXER_STREAMS",
+            SimpleNamespace(streams={(0, 17, 51): aux})
         ), patch(
             "rtp_llm.models_py.modules.dsv41.fp8.attention._cuda_device_index",
             return_value=0,
+        ), patch(
+            "rtp_llm.models_py.modules.dsv41.fp8._v41_wo_a_quant._context",
+            return_value=17,
         ), patch(
             "torch.cuda.current_stream", return_value=main
         ), patch(
