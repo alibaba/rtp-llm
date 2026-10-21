@@ -6,6 +6,7 @@ import weakref
 from typing import Optional
 
 import torch
+
 from rtp_llm.cpp.cuda_graph.tests.libtest_cuda_graph_runner import (
     CudaGraphRunner,
     DirtyCudaGraphCaptureError,
@@ -794,8 +795,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                     TaggedPhysicalBlockTableModel(),
                     HIDDEN_SIZE,
                     TOKENS_PER_BLOCK,
-                    TOKENS_PER_BLOCK,
-                    TOKENS_PER_BLOCK,
+                    KERNEL_BLOCK_TABLE_WIDTH,
                     [2],
                     GROUP_TAGS,
                     target_verify,
@@ -825,8 +825,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             TaggedPhysicalBlockTableModel(),
             HIDDEN_SIZE,
             TOKENS_PER_BLOCK,
-            TOKENS_PER_BLOCK,
-            TOKENS_PER_BLOCK,
+            KERNEL_BLOCK_TABLE_WIDTH,
             [2],
             GROUP_TAGS,
             True,
@@ -1059,8 +1058,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             model,
             2,
             TOKENS_PER_BLOCK,
-            TOKENS_PER_BLOCK,
-            TOKENS_PER_BLOCK,
+            KERNEL_BLOCK_TABLE_WIDTH,
             [4],
             HIDDEN_SIZE,
             GROUP_TAGS,

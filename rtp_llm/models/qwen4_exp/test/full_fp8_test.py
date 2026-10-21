@@ -4,18 +4,18 @@ from types import SimpleNamespace
 import torch
 import torch.nn.functional as F
 
+from rtp_llm.model_loader.fp8_weight import (
+    FP8_STORAGE_SCALE_SUFFIX,
+    Fp8StorageWeight,
+)
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.model_loader.tensor_source import TensorSource
 from rtp_llm.model_loader.weight_module import AtomicWeight
-from rtp_llm.models.qwen4_exp.full_fp8_weight import (
-    FP8_STORAGE_SCALE_SUFFIX,
-    Qwen4Fp8StorageWeight,
-)
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.weight_views import (
     prepare_compute_weights as compute_weight_view,
 )
-from rtp_llm.models_py.modules.qwen4_exp.fp8_dense import Qwen4Fp8Linear
-from rtp_llm.models_py.modules.qwen4_exp.vocab_embedding import Qwen4Fp8VocabEmbedding
+from rtp_llm.models_py.modules.base.common.fp8_embedding import Fp8VocabEmbedding
+from rtp_llm.models_py.modules.base.common.fp8_linear import Fp8Linear
 from rtp_llm.utils.model_weight import CkptWeightInfo, W
 
 
@@ -61,7 +61,7 @@ class FullFp8StorageTest(unittest.TestCase):
             ),
             use_swizzleA=False,
         )
-        descriptor = Qwen4Fp8StorageWeight(source)
+        descriptor = Fp8StorageWeight(source)
         loaded = descriptor.load(_Source(), None, "cpu", config)
         self.assertEqual(loaded[W.embedding].dtype, torch.float8_e4m3fn)
         self.assertEqual(loaded[W.embedding].element_size(), 1)
@@ -148,7 +148,7 @@ class FullFp8CudaTest(unittest.TestCase):
     def test_dense_gemm_eager_side_stream_and_graph_live_inputs(self):
         torch.manual_seed(873)
         weight, scale = quantized(torch.randn(128, 256, device="cuda"))
-        module = Qwen4Fp8Linear(weight, scale)
+        module = Fp8Linear(weight, scale)
         x = torch.randn(3, 256, device="cuda", dtype=torch.bfloat16)
         stream = torch.cuda.Stream()
         stream.wait_stream(torch.cuda.current_stream())
@@ -212,8 +212,8 @@ class FullFp8CudaTest(unittest.TestCase):
             (value.float() * value_scale).to(torch.bfloat16),
             None,
         )
-        self.assertIsInstance(actual.key_projection, Qwen4Fp8Linear)
-        self.assertIsInstance(actual.value_projection, Qwen4Fp8Linear)
+        self.assertIsInstance(actual.key_projection, Fp8Linear)
+        self.assertIsInstance(actual.value_projection, Fp8Linear)
         self.assertEqual(actual.key_projection.weight.data_ptr(), key.data_ptr())
         torch.testing.assert_close(
             actual.key_projection.scale, key_scale, rtol=0, atol=0
@@ -248,7 +248,7 @@ class FullFp8CudaTest(unittest.TestCase):
 
     def test_dense_quantization_handles_zero_activations(self):
         weight, scale = quantized(torch.randn(32, 256, device="cuda"))
-        module = Qwen4Fp8Linear(weight, scale)
+        module = Fp8Linear(weight, scale)
         result = module(torch.zeros(1, 256, device="cuda", dtype=torch.bfloat16))
         self.assertTrue(torch.isfinite(result).all())
         self.assertEqual(result.count_nonzero().item(), 0)
@@ -315,7 +315,7 @@ class FullFp8CudaTest(unittest.TestCase):
         weight, scale = quantized(torch.randn(257, 320))
         ids = torch.tensor([0, 17, 256, -1], dtype=torch.int32, device="cuda")
         stored = weight.cuda()
-        module = Qwen4Fp8VocabEmbedding(
+        module = Fp8VocabEmbedding(
             stored, 1, torch.device("cuda", 0), weight_scale=scale
         )
         for _ in range(3):

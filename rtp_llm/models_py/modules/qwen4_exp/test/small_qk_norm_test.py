@@ -2,7 +2,9 @@ import unittest
 
 import torch
 
-from rtp_llm.models_py.modules.qwen4_exp.qsa.norm import Qwen4ExpFusedQKRMSNorm
+from rtp_llm.models_py.modules.base.common.zero_centered_rms_norm import (
+    ZeroCenteredFusedQKRMSNorm,
+)
 
 
 class SmallQKNormTest(unittest.TestCase):
@@ -10,7 +12,7 @@ class SmallQKNormTest(unittest.TestCase):
         torch.manual_seed(617)
         self.q = (torch.randn(256, device="cuda") * 0.1).bfloat16()
         self.k = (torch.randn(256, device="cuda") * 0.1).bfloat16()
-        self.model = Qwen4ExpFusedQKRMSNorm(self.q, self.k, 3, 1, 256)
+        self.model = ZeroCenteredFusedQKRMSNorm(self.q, self.k, 3, 1, 256)
 
     def run_norm(self, value, enabled):
         if enabled:

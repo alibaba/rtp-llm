@@ -3,8 +3,8 @@ import unittest
 import torch
 import torch.nn.functional as F
 
-from rtp_llm.models_py.modules.qwen4_exp.residual.gated_residual import (
-    Qwen4ExpGatedResidual,
+from rtp_llm.models_py.modules.hybrid.gated_residual import (
+    GatedResidual,
     grouped_rms_norm,
     inject_into_residual,
 )
@@ -35,7 +35,7 @@ def _reference(hyper_input, gamma_raw, down, up, inject, *, hc, eps):
     return mixed, 2 * torch.sigmoid(F.linear(normed, inject) / hc)
 
 
-class Qwen4ExpGatedResidualTest(unittest.TestCase):
+class GatedResidualTest(unittest.TestCase):
     def setUp(self):
         torch.manual_seed(0)
         self.hc_hidden = _HC * _HIDDEN
@@ -46,7 +46,7 @@ class Qwen4ExpGatedResidualTest(unittest.TestCase):
         self.inject = torch.randn(_HC, self.hc_hidden) * 0.05
 
     def _build(self, inject):
-        return Qwen4ExpGatedResidual(
+        return GatedResidual(
             self.gamma_raw,
             self.down,
             self.up,
@@ -131,7 +131,7 @@ class Qwen4ExpGatedResidualTest(unittest.TestCase):
 
     def test_rejects_mismatched_lowrank(self):
         with self.assertRaisesRegex(ValueError, "mix_down rank .* != mix_up rank"):
-            Qwen4ExpGatedResidual(
+            GatedResidual(
                 self.gamma_raw,
                 self.down,
                 torch.randn(self.hc_hidden, _LOWRANK + 1),
@@ -142,7 +142,7 @@ class Qwen4ExpGatedResidualTest(unittest.TestCase):
 
     def test_rejects_mismatched_inject_shape(self):
         with self.assertRaisesRegex(ValueError, "inject weight"):
-            Qwen4ExpGatedResidual(
+            GatedResidual(
                 self.gamma_raw,
                 self.down,
                 self.up,
@@ -189,7 +189,7 @@ class Qwen4ExpGatedResidualTest(unittest.TestCase):
                         torch.randn(4, 4 * hidden, device="cuda", dtype=torch.bfloat16)
                         * 0.02
                     )
-                    unit = Qwen4ExpGatedResidual(
+                    unit = GatedResidual(
                         gamma, down, up, inject, hc_mult=4, norm_eps=_EPS
                     )
 
@@ -230,7 +230,7 @@ class Qwen4ExpGatedResidualTest(unittest.TestCase):
         down = torch.randn(rank, 4 * hidden, device="cuda", dtype=torch.bfloat16) * 0.02
         up = torch.randn(4 * hidden, rank, device="cuda", dtype=torch.bfloat16) * 0.02
         inject = torch.randn(4, 4 * hidden, device="cuda", dtype=torch.bfloat16) * 0.02
-        unit = Qwen4ExpGatedResidual(gamma, down, up, inject, hc_mult=4, norm_eps=_EPS)
+        unit = GatedResidual(gamma, down, up, inject, hc_mult=4, norm_eps=_EPS)
         hyper = torch.randn(17, 4 * hidden, device="cuda", dtype=torch.bfloat16)
         sublayer = torch.randn(17, hidden, device="cuda", dtype=torch.bfloat16)
         gates = torch.rand(17, 4, device="cuda", dtype=torch.bfloat16)
@@ -257,7 +257,7 @@ class Qwen4ExpGatedResidualTest(unittest.TestCase):
                 (4, 4 * hidden),
             )
         ]
-        unit = Qwen4ExpGatedResidual(*tensors, hc_mult=4, norm_eps=_EPS)
+        unit = GatedResidual(*tensors, hc_mult=4, norm_eps=_EPS)
         hyper = torch.randn(3, 4 * hidden, device="cuda", dtype=torch.bfloat16)
         sublayer = torch.randn(3, hidden, device="cuda", dtype=torch.bfloat16)
         gates = torch.rand(3, 4, device="cuda", dtype=torch.bfloat16)
@@ -285,7 +285,7 @@ class Qwen4ExpGatedResidualTest(unittest.TestCase):
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
     def test_merged_down_epilogue_preserves_bf16_rounding_and_graph_replay(self):
-        from rtp_llm.models_py.modules.qwen4_exp.residual.gated_residual_down_triton import (
+        from rtp_llm.models_py.triton_kernels.common.gated_residual_down_triton import (
             down_inject_epilogue,
         )
 
@@ -319,8 +319,8 @@ class Qwen4ExpGatedResidualTest(unittest.TestCase):
         down = torch.randn(rank, width, device="cuda", dtype=torch.bfloat16) * 0.02
         up = torch.randn(width, rank, device="cuda", dtype=torch.bfloat16) * 0.02
         inject = torch.randn(4, width, device="cuda", dtype=torch.bfloat16) * 0.02
-        old = Qwen4ExpGatedResidual(gamma, down, up, inject, hc_mult=4, norm_eps=_EPS)
-        new = Qwen4ExpGatedResidual(gamma, down, up, inject, hc_mult=4, norm_eps=_EPS)
+        old = GatedResidual(gamma, down, up, inject, hc_mult=4, norm_eps=_EPS)
+        new = GatedResidual(gamma, down, up, inject, hc_mult=4, norm_eps=_EPS)
         old.merged_down_inject = None  # Independent unmerged reference.
         self.assertEqual(new.merged_down_inject.shape, (336, width))
         for rows in (1, 8, 17, 33, 128):
@@ -372,7 +372,7 @@ class Qwen4ExpGatedResidualTest(unittest.TestCase):
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
     def test_fused_mix_reduce_matches_torch_and_replays(self):
-        from rtp_llm.models_py.modules.qwen4_exp.residual.gated_residual_mix_triton import (
+        from rtp_llm.models_py.triton_kernels.common.gated_residual_mix_triton import (
             fused_mix_reduce,
         )
 

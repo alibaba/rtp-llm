@@ -2,11 +2,13 @@ import unittest
 
 import torch
 
-from rtp_llm.models_py.modules.qwen4_exp.qsa.norm import (
-    Qwen4ExpFusedQKRMSNorm,
+from rtp_llm.models_py.modules.base.common.zero_centered_rms_norm import (
+    ZeroCenteredFusedQKRMSNorm,
     exact_head_rms_norm,
 )
-from rtp_llm.models_py.modules.qwen4_exp.qsa.norm_triton import try_prefill_qk_rmsnorm_
+from rtp_llm.models_py.triton_kernels.common.zero_centered_rms_norm import (
+    try_prefill_qk_rmsnorm_,
+)
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
@@ -31,7 +33,7 @@ class PrefillQkNormTest(unittest.TestCase):
                 qg = torch.randn(256, device="cuda", dtype=torch.bfloat16) * 0.07
                 kg = torch.randn_like(qg) * 0.11
                 expected = self.reference(x, qg, kg, heads)
-                actual = Qwen4ExpFusedQKRMSNorm(qg, kg, heads, 1, 256)(x)
+                actual = ZeroCenteredFusedQKRMSNorm(qg, kg, heads, 1, 256)(x)
                 torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
     def test_graph_refreshes_input_and_raw_gains(self):

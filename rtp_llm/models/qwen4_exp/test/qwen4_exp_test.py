@@ -143,9 +143,7 @@ class Qwen4ExpTest(unittest.TestCase):
             parent.assert_called_once_with(skip_python_model=True)
 
     def test_full_checkpoint_owns_all_side_regions(self):
-        self.assertTrue(
-            self.config.hybrid_attention_config.enable_independent_kv_cache_pools
-        )
+        self.assertEqual(len(self.config.kv_cache_spec_descs), self.config.num_layers)
         for idx, regions in enumerate(self.config.kv_cache_spec_descs):
             tags = {r.tag for r in regions}
             self.assertEqual("indexer_kv" in tags, (idx + 1) % 4 == 0)

@@ -1134,38 +1134,41 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
         parts[0].is_cuda    = false;
         return parts;
     };
-    auto stageMhaTpPart = [&](std::vector<BlockInfo> parts, const CacheConfig& cfg, size_t gid, int peer_idx) {
-        const auto& mha = cfg.specForGroup(gid);
-        if (!typed_tp || mha->type != KVCacheSpecType::MultiHeadAttention || cfg.localKvHeadNumForGroup(gid) == 1) {
+    auto stageMhaTpPart =
+        [&](std::vector<BlockInfo> parts, const CacheConfig& cfg, const std::string& tag, int peer_idx) {
+            const auto& mha = cfg.topology().group(tag).spec;
+            if (!typed_tp || mha->type != KVCacheSpecType::MultiHeadAttention
+                || cfg.topology().group(tag).localKvHeadNum() == 1) {
+                return parts;
+            }
+            requireTypedTp(maga_init_params_.parallelism_config.get_attn_tp_size() == 1
+                               && cfg.topology().group(tag).localKvHeadNum() == 2
+                               && (peer_cnt == 2 || peer_cnt == 4 || peer_cnt == 8)
+                               && mhaTpPeerOwnsHead(static_cast<size_t>(peer_cnt), 2, static_cast<size_t>(peer_idx)),
+                           "typed TP QSA two-head handoff requires D1 and a selected P2/4/8 owner");
+            requireTypedTp((parts.size() == 1 || parts.size() == 2)
+                               && parts[0].size_bytes == mha->k_block_size_bytes() + mha->v_block_size_bytes()
+                               && (mha->scale_block_size_bytes() == 0 ? parts.size() == 1 : parts.size() == 2),
+                           "typed TP QSA payload/scale parts do not match the packed MHA layout");
+            const size_t head = static_cast<size_t>(peer_idx) / (static_cast<size_t>(peer_cnt) / 2);
+            for (size_t index = 0; index < parts.size(); ++index) {
+                const auto k_bytes = index == 0 ? mha->k_block_size_bytes() : mha->k_scale_block_size_bytes();
+                const auto v_bytes = index == 0 ? mha->v_block_size_bytes() : mha->v_scale_block_size_bytes();
+                requireTypedTp(parts[index].is_cuda && parts[index].size_bytes == k_bytes + v_bytes,
+                               "typed TP QSA destination is not a CUDA packed payload");
+                auto plan = TpCacheTransferPlan::mha(k_bytes, v_bytes, 2, head);
+                plan.validateSlices();
+                const size_t source_bytes = plan.source_bytes;
+                auto         staging =
+                    std::make_shared<RegisteredCacheStaging>(source_bytes, resource_.cache_store->getMemoryUtil());
+                staging_owners.emplace(staging->tensor().data_ptr(), staging);
+                pending_cache_copies.push_back({staging, parts[index], std::move(plan)});
+                parts[index].addr       = staging->tensor().data_ptr();
+                parts[index].size_bytes = source_bytes;
+                parts[index].is_cuda    = false;
+            }
             return parts;
-        }
-        requireTypedTp(maga_init_params_.parallelism_config.get_attn_tp_size() == 1
-                           && cfg.localKvHeadNumForGroup(gid) == 2 && (peer_cnt == 2 || peer_cnt == 4 || peer_cnt == 8)
-                           && mhaTpPeerOwnsHead(static_cast<size_t>(peer_cnt), 2, static_cast<size_t>(peer_idx)),
-                       "typed TP QSA two-head handoff requires D1 and a selected P2/4/8 owner");
-        requireTypedTp((parts.size() == 1 || parts.size() == 2)
-                           && parts[0].size_bytes == mha->k_block_size_bytes() + mha->v_block_size_bytes()
-                           && (mha->scale_block_size_bytes() == 0 ? parts.size() == 1 : parts.size() == 2),
-                       "typed TP QSA payload/scale parts do not match the packed MHA layout");
-        const size_t head = static_cast<size_t>(peer_idx) / (static_cast<size_t>(peer_cnt) / 2);
-        for (size_t index = 0; index < parts.size(); ++index) {
-            const auto k_bytes = index == 0 ? mha->k_block_size_bytes() : mha->k_scale_block_size_bytes();
-            const auto v_bytes = index == 0 ? mha->v_block_size_bytes() : mha->v_scale_block_size_bytes();
-            requireTypedTp(parts[index].is_cuda && parts[index].size_bytes == k_bytes + v_bytes,
-                           "typed TP QSA destination is not a CUDA packed payload");
-            auto plan = TpCacheTransferPlan::mha(k_bytes, v_bytes, 2, head);
-            plan.validateSlices();
-            const size_t source_bytes = plan.source_bytes;
-            auto         staging =
-                std::make_shared<RegisteredCacheStaging>(source_bytes, resource_.cache_store->getMemoryUtil());
-            staging_owners.emplace(staging->tensor().data_ptr(), staging);
-            pending_cache_copies.push_back({staging, parts[index], std::move(plan)});
-            parts[index].addr       = staging->tensor().data_ptr();
-            parts[index].size_bytes = source_bytes;
-            parts[index].is_cuda    = false;
-        }
-        return parts;
-    };
+        };
     auto blockOwner = [&](const BlockInfo& block) -> std::shared_ptr<void> {
         auto owner = staging_owners.find(block.addr);
         if (owner != staging_owners.end()) {
@@ -1225,15 +1228,16 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
         }
         return cpMapperForGroup(cfg, tag).layoutForGroup(cfg, tag).slice != CpBlockSliceMode::NONE;
     };
-    auto shouldLoadGroupFromPeer = [&](const CacheConfig& cfg, CacheGroupType group_type, const std::string& tag, int peer_idx) {
-        if (typed_tp && cfg.topology().group(tag).spec->type != KVCacheSpecType::LinearAttention) {
-            const bool mha = cfg.topology().group(tag).spec->type == KVCacheSpecType::MultiHeadAttention;
-            return replicatedTpCachePeerOwnsTag(tag,
-                                                mha,
-                                                mha ? cfg.topology().group(tag).localKvHeadNum() : 0,
-                                                transfer_topology,
-                                                static_cast<size_t>(peer_idx));
-        }
+    auto shouldLoadGroupFromPeer =
+        [&](const CacheConfig& cfg, CacheGroupType group_type, const std::string& tag, int peer_idx) {
+            if (typed_tp && cfg.topology().group(tag).spec->type != KVCacheSpecType::LinearAttention) {
+                const bool mha = cfg.topology().group(tag).spec->type == KVCacheSpecType::MultiHeadAttention;
+                return replicatedTpCachePeerOwnsTag(tag,
+                                                    mha,
+                                                    mha ? cfg.topology().group(tag).localKvHeadNum() : 0,
+                                                    transfer_topology,
+                                                    static_cast<size_t>(peer_idx));
+            }
             if (!is_page_level_rr) {
                 return true;
             }
@@ -1326,11 +1330,11 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
 
                     parts            = sliceCpDestinationForPeer(std::move(parts), cache_config, tag, i);
                     parts            = stageLinearTpPart(std::move(parts),
-                                              cache_config,
-                                              tag,
-                                              maga_init_params_.model_config_.linear_attention_config,
-                                              i);
-                    parts            = stageMhaTpPart(std::move(parts), cache_config, gid, i);
+                                                         cache_config,
+                                                         tag,
+                                                         maga_init_params_.model_config_.linear_attention_config,
+                                                         i);
+                    parts            = stageMhaTpPart(std::move(parts), cache_config, tag, i);
                     auto addBufBlock = [&](const std::string& key, const BlockInfo& block) {
                         RTP_LLM_CHECK_WITH_INFO(block.addr != nullptr, "null block addr for key=%s", key.c_str());
                         RTP_LLM_CHECK_WITH_INFO(block.size_bytes > 0, "zero block size for key=%s", key.c_str());
@@ -1468,12 +1472,12 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                                 }
 
                                 parts            = sliceCpDestinationForPeer(std::move(parts), mtp_cache_cfg, tag, i);
-                                parts            = stageLinearTpPart(std::move(parts),
+                                parts = stageLinearTpPart(std::move(parts),
                                                           mtp_cache_cfg,
                                                           tag,
                                                           mtp_engine_init_params->model_config_.linear_attention_config,
                                                           i);
-                                parts            = stageMhaTpPart(std::move(parts), mtp_cache_cfg, gid, i);
+                                parts = stageMhaTpPart(std::move(parts), mtp_cache_cfg, tag, i);
                                 auto addBufBlock = [&](const std::string& key, const BlockInfo& block) {
                                     RTP_LLM_CHECK_WITH_INFO(
                                         block.addr != nullptr, "null block addr for key=%s", key.c_str());

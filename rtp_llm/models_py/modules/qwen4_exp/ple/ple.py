@@ -6,7 +6,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from rtp_llm.models_py.modules.qwen4_exp.residual.gated_residual import grouped_rms_norm
+from rtp_llm.models_py.modules.hybrid.gated_residual import grouped_rms_norm
 
 
 class Qwen4ExpNGramEmbedding(nn.Module):
@@ -568,7 +568,7 @@ class Qwen4ExpPLELayer(nn.Module):
         self.short_conv_state_len = (conv_kernel_size - 1) * self.conv_dilation
         self.key_proj = key_proj
         self.value_proj = value_proj
-        from rtp_llm.models_py.modules.qwen4_exp.fp8_dense import make_projection
+        from rtp_llm.models_py.modules.base.common.fp8_linear import make_projection
 
         scales = projection_scales if projection_scales is not None else (None, None)
         self.key_projection = make_projection(key_proj, scales[0])
@@ -621,7 +621,7 @@ class Qwen4ExpPLELayer(nn.Module):
         if embeddings is None:
             embeddings = self.ple_embedding(token_history, seq_len)
 
-        from rtp_llm.models_py.modules.qwen4_exp.fp8_dense import project_fp8_pair
+        from rtp_llm.models_py.modules.base.common.fp8_linear import project_fp8_pair
 
         paired = project_fp8_pair(
             embeddings, self.key_projection, self.value_projection
@@ -768,7 +768,9 @@ class Qwen4ExpPLELayer(nn.Module):
             and self.key_projection.use_scaled_mm
             and self.value_projection.use_scaled_mm
         ):
-            from rtp_llm.models_py.modules.qwen4_exp.fp8_dense import project_fp8_pair
+            from rtp_llm.models_py.modules.base.common.fp8_linear import (
+                project_fp8_pair,
+            )
 
             from .ple_gate_triton import try_ple_gate
             from .ple_page_projection import project_pages_pair

@@ -7,12 +7,14 @@ from unittest.mock import patch
 
 import torch
 
+from rtp_llm.models_py.modules.base.common.zero_centered_rms_norm import (
+    exact_head_rms_norm,
+)
 from rtp_llm.models_py.modules.qwen4_exp.qsa.draft_metadata_triton import draft_rows
 from rtp_llm.models_py.modules.qwen4_exp.qsa.draft_prepare_triton import (
     try_prepare,
     try_prepare_metadata,
 )
-from rtp_llm.models_py.modules.qwen4_exp.qsa.norm import exact_head_rms_norm
 from rtp_llm.ops import RopeStyle
 
 

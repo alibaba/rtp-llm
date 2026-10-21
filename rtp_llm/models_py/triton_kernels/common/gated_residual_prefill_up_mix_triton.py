@@ -3,7 +3,9 @@
 import torch
 import triton
 
-from .gated_residual_medium_up_mix_triton import _hc_medium_up_mix
+from rtp_llm.models_py.triton_kernels.common.gated_residual_medium_up_mix_triton import (
+    _hc_medium_up_mix,
+)
 
 
 def try_fp8_prefill_up_mix(x, weight, scale, normed, branches):

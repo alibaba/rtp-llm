@@ -111,11 +111,11 @@ def quantize_pages(x, key_scale, value_scale, page_size=128, *, row_scales=False
 
 
 def project_pages_pair(x, first, second, page_size=128):
-    from ..fp8_dense import Qwen4Fp8Linear
+    from rtp_llm.models_py.modules.base.common.fp8_linear import Fp8Linear
 
     if not (
-        isinstance(first, Qwen4Fp8Linear)
-        and isinstance(second, Qwen4Fp8Linear)
+        isinstance(first, Fp8Linear)
+        and isinstance(second, Fp8Linear)
         and first.use_scaled_mm
         and second.use_scaled_mm
         and first.bias is None

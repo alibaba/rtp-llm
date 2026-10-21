@@ -52,18 +52,20 @@ from rtp_llm.models_py.model_desc.qwen4_exp_runtime.weight_views import (
     record_projection_consumer,
 )
 from rtp_llm.models_py.modules import FMHAImplBase
+from rtp_llm.models_py.modules.base.common.zero_centered_rms_norm import (
+    ZeroCenteredFusedQKRMSNorm,
+)
 from rtp_llm.models_py.modules.hybrid.causal_attention import CausalAttention
+from rtp_llm.models_py.modules.hybrid.gated_residual import (
+    GatedResidual,
+    inject_into_residual,
+)
 from rtp_llm.models_py.modules.qwen4_exp.moe.shared_overlap import Qwen4MoeLayer
 from rtp_llm.models_py.modules.qwen4_exp.ple.ple import (
     Qwen4ExpNGramEmbedding,
     Qwen4ExpPLELayer,
 )
 from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import Qwen4ExpQSAIndexer
-from rtp_llm.models_py.modules.qwen4_exp.qsa.norm import Qwen4ExpFusedQKRMSNorm
-from rtp_llm.models_py.modules.qwen4_exp.residual.gated_residual import (
-    Qwen4ExpGatedResidual,
-    inject_into_residual,
-)
 from rtp_llm.ops import (
     AttentionConfigs,
     HWKernelConfig,
@@ -200,7 +202,7 @@ class Qwen4ExpAttention(Qwen3NextAttention):
         else:
             q, raw_keys = projected
             if not raw_query:
-                from rtp_llm.models_py.modules.qwen4_exp.qsa.norm import (
+                from rtp_llm.models_py.modules.base.common.zero_centered_rms_norm import (
                     exact_head_rms_norm,
                 )
 
@@ -379,7 +381,7 @@ class Qwen4ExpAttention(Qwen3NextAttention):
                     device=hidden_states.device,
                 )
             try:
-                from rtp_llm.models_py.modules.qwen4_exp.fp8_dense import (
+                from rtp_llm.models_py.modules.base.common.fp8_linear import (
                     project_fp8_pair,
                 )
 
@@ -555,7 +557,7 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
         # version would silently drop upstream's +1 -- see norm.py.
         fused = getattr(self.self_attn, "qk_fuse_norm", None)
         if fused is not None:
-            self.self_attn.qk_fuse_norm = Qwen4ExpFusedQKRMSNorm.replacing(fused)
+            self.self_attn.qk_fuse_norm = ZeroCenteredFusedQKRMSNorm.replacing(fused)
 
     def _attention_quant_config(self, config, weights):
         if bool(getattr(config, "_qwen4_full_fp8_nvfp4", False)):
@@ -567,7 +569,7 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
     def _build_residual_modules(
         self, config: ModelConfig, weights: Dict[str, torch.Tensor]
     ) -> None:
-        self.attn_hyper_connection = Qwen4ExpGatedResidual(
+        self.attn_hyper_connection = GatedResidual(
             weights[W.qwen4_hc_attn_norm],
             weights[W.qwen4_hc_attn_mix_down],
             weights[W.qwen4_hc_attn_mix_up],
@@ -584,7 +586,7 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
                 )
             ),
         )
-        self.mlp_hyper_connection = Qwen4ExpGatedResidual(
+        self.mlp_hyper_connection = GatedResidual(
             weights[W.qwen4_hc_mlp_norm],
             weights[W.qwen4_hc_mlp_mix_down],
             weights[W.qwen4_hc_mlp_mix_up],
@@ -696,7 +698,7 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
         if qsa_runtime is not None:
             attn_kwargs["qsa_runtime"] = qsa_runtime
         hidden_states = self.self_attn(**attn_kwargs)
-        if isinstance(self.mlp_hyper_connection, Qwen4ExpGatedResidual):
+        if isinstance(self.mlp_hyper_connection, GatedResidual):
             hidden_states, hyper_states, inject_weights = (
                 self.mlp_hyper_connection.forward_with_injection(
                     hyper_states, hidden_states, inject_weights
@@ -741,8 +743,8 @@ class Qwen4ExpModel(Qwen35Model):
         py_hw_kernel_config=None,
         device_resource_config=None,
     ):
-        from rtp_llm.models.qwen4_exp.full_fp8_weight import FP8_STORAGE_SCALE_SUFFIX
-        from rtp_llm.models_py.modules.qwen4_exp.fp8_dense import Qwen4Fp8Linear
+        from rtp_llm.model_loader.fp8_weight import FP8_STORAGE_SCALE_SUFFIX
+        from rtp_llm.models_py.modules.base.common.fp8_linear import Fp8Linear
 
         config = model_config
         compute_weights = (
@@ -761,16 +763,16 @@ class Qwen4ExpModel(Qwen35Model):
             device_resource_config,
         )
         if getattr(config, "_qwen4_full_fp8_nvfp4", False):
-            self._fp8_lm_head = Qwen4Fp8Linear(
+            self._fp8_lm_head = Fp8Linear(
                 weights.global_weights[W.lm_head],
                 weights.global_weights[W.lm_head + FP8_STORAGE_SCALE_SUFFIX],
             )
         if getattr(self.config, "_qwen4_full_fp8_nvfp4", False):
-            from rtp_llm.models_py.modules.qwen4_exp.vocab_embedding import (
-                Qwen4Fp8VocabEmbedding,
+            from rtp_llm.models_py.modules.base.common.fp8_embedding import (
+                Fp8VocabEmbedding,
             )
 
-            self.embed_tokens = Qwen4Fp8VocabEmbedding(
+            self.embed_tokens = Fp8VocabEmbedding(
                 self.embed_tokens.weight,
                 self.embed_tokens.tp_size,
                 torch.device("cuda", torch.cuda.current_device()),
@@ -968,12 +970,12 @@ class Qwen4ExpModel(Qwen35Model):
         # H-wide embedding through their separate input projection.
         if type(self) is not Qwen4ExpModel:
             return None
-        from rtp_llm.models_py.modules.qwen4_exp.vocab_embedding import (
-            Qwen4Fp8VocabEmbedding,
+        from rtp_llm.models_py.modules.base.common.fp8_embedding import (
+            Fp8VocabEmbedding,
         )
 
         embedding = getattr(self, "embed_tokens", None)
-        if not isinstance(embedding, Qwen4Fp8VocabEmbedding) or embedding.tp_size != 2:
+        if not isinstance(embedding, Fp8VocabEmbedding) or embedding.tp_size != 2:
             return None
         if (
             torch.version.hip is not None
@@ -1322,7 +1324,7 @@ class Qwen4ExpModel(Qwen35Model):
         self, model_config: ModelConfig, weights: ModelWeights
     ) -> None:
         self.hc_mult = model_config.hc_mult
-        self.hyper_connection_mixer = Qwen4ExpGatedResidual(
+        self.hyper_connection_mixer = GatedResidual(
             weights.get_global_weight(W.qwen4_hc_mixer_norm),
             weights.get_global_weight(W.qwen4_hc_mixer_mix_down),
             weights.get_global_weight(W.qwen4_hc_mixer_mix_up),

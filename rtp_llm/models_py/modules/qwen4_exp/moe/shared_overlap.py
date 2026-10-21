@@ -27,6 +27,7 @@ class Qwen4MoeLayer(GenericMoeLayer):
         """Allocate streams only for the explicitly qualified Qwen4 layout."""
         if os.environ.get("QWEN4_SHARED_EXPERT_OVERLAP", "0") != "1":
             return
+        from rtp_llm.models_py.modules.base.common.fp8_linear import Fp8Linear
         from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import FusedMoe
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.cutlass_nvfp4_executor import (
             CutlassNvfp4Executor,
@@ -35,7 +36,6 @@ class Qwen4MoeLayer(GenericMoeLayer):
             PureTpRouterNvfp4Cutlass,
         )
         from rtp_llm.models_py.modules.hybrid.dense_mlp import DenseMLP
-        from rtp_llm.models_py.modules.qwen4_exp.fp8_dense import Qwen4Fp8Linear
 
         pc = self.parallelism_config
         role = str(getattr(pc, "role_type", "PDFUSION")).rsplit(".", 1)[-1]
@@ -55,9 +55,9 @@ class Qwen4MoeLayer(GenericMoeLayer):
             and type(self.fused_moe) is FusedMoe
             and type(self.fused_moe.router) is PureTpRouterNvfp4Cutlass
             and type(self.fused_moe.fused_experts) is CutlassNvfp4Executor
-            and type(shared.up_proj) is Qwen4Fp8Linear
-            and type(shared.down_proj) is Qwen4Fp8Linear
-            and type(self.shared_expert_gate) is Qwen4Fp8Linear
+            and type(shared.up_proj) is Fp8Linear
+            and type(shared.down_proj) is Fp8Linear
+            and type(self.shared_expert_gate) is Fp8Linear
             and tuple(shared.up_proj.weight.shape) == (1280, 2560)
             and tuple(shared.down_proj.weight.shape) == (2560, 640)
             and tuple(self.shared_expert_gate.weight.shape) == (1, 2560)

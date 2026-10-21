@@ -155,9 +155,10 @@ def try_main_qk_norm_rope(
     Position IDs follow its nonnegative text/mRoPE contract. Small decode and
     12K retain the original complete consumer; explicit tests may call them.
     """
+    from rtp_llm.models_py.triton_kernels.common.zero_centered_rms_norm import (
+        is_small_qk_supported,
+    )
     from rtp_llm.ops import RopeStyle
-
-    from .norm_triton import is_small_qk_supported
 
     if not (
         qkv.ndim == 2

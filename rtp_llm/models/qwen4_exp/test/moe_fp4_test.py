@@ -13,7 +13,7 @@ from rtp_llm.utils.model_weight import CkptWeightInfo, W
 class Qwen4MoeFp4Test(unittest.TestCase):
 
     def test_full_fp8_wraps_dense_and_router_but_preserves_nvfp4_experts(self):
-        from rtp_llm.models.qwen4_exp.full_fp8_weight import Qwen4Fp8StorageWeight
+        from rtp_llm.model_loader.fp8_weight import Fp8StorageWeight
 
         cfg = MoeConfig(expert_num=1)
         routed = MoeWeight(
@@ -35,10 +35,10 @@ class Qwen4MoeFp4Test(unittest.TestCase):
                 source_fp8_block_size=128,
             )
         )
-        self.assertIsInstance(converted.weights[0], Qwen4Fp8StorageWeight)
-        self.assertIsInstance(converted.layer_weights[0][1], Qwen4Fp8StorageWeight)
+        self.assertIsInstance(converted.weights[0], Fp8StorageWeight)
+        self.assertIsInstance(converted.layer_weights[0][1], Fp8StorageWeight)
         children = converted.layer_weights[0][0].sub_weights
-        self.assertIsInstance(children[W.moe_gate], Qwen4Fp8StorageWeight)
+        self.assertIsInstance(children[W.moe_gate], Fp8StorageWeight)
         for n in (W.moe_w1, W.moe_w2):
             self.assertIsInstance(children[n], OnlineModelOptFp4MoeWeight)
 

@@ -30,7 +30,9 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from rtp_llm.models_py.modules.qwen4_exp.qsa.norm import exact_head_rms_norm
+from rtp_llm.models_py.modules.base.common.zero_centered_rms_norm import (
+    exact_head_rms_norm,
+)
 
 
 def _normalized_rope_style_name(style: Any) -> str:
@@ -426,7 +428,7 @@ class Qwen4ExpQSAIndexer(nn.Module):
                 f"compress_ratio {compress_ratio}"
             )
         self.qk_proj = qk_proj
-        from rtp_llm.models_py.modules.qwen4_exp.fp8_dense import make_projection
+        from rtp_llm.models_py.modules.base.common.fp8_linear import make_projection
 
         self.qk_projection = make_projection(qk_proj, projection_scale)
         self.q_norm_gamma = q_norm_gamma

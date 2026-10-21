@@ -6,12 +6,14 @@ from unittest.mock import Mock, patch
 import torch
 
 from rtp_llm.models_py.model_desc.qwen4_exp import Qwen4ExpAttention
-from rtp_llm.models_py.modules.qwen4_exp.fp8_dense import (
-    Qwen4Fp8Linear,
+from rtp_llm.models_py.modules.base.common.fp8_linear import (
+    Fp8Linear,
     project_fp8_pair,
 )
+from rtp_llm.models_py.modules.base.common.zero_centered_rms_norm import (
+    exact_head_rms_norm,
+)
 from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import Qwen4ExpQSAIndexer
-from rtp_llm.models_py.modules.qwen4_exp.qsa.norm import exact_head_rms_norm
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
@@ -25,9 +27,7 @@ class QsaProjectionPairTest(unittest.TestCase):
         def weight(shape):
             return (torch.randn(shape, device="cuda") * 0.1).to(torch.float8_e4m3fn)
 
-        gate = Qwen4Fp8Linear(
-            weight((3072, 2560)), torch.tensor([0.119713], device="cuda")
-        )
+        gate = Fp8Linear(weight((3072, 2560)), torch.tensor([0.119713], device="cuda"))
         indexer = Qwen4ExpQSAIndexer(
             weight(((heads + 1) * 128, 2560)),
             torch.randn(128, device="cuda", dtype=torch.bfloat16) * 0.07,
@@ -143,11 +143,13 @@ class QsaProjectionPairTest(unittest.TestCase):
             ("1", 3, 1),
         ):
             x = torch.randn(rows, 2560, device="cuda", dtype=torch.bfloat16)
-            with patch.dict(os.environ, {"QWEN4_QSA_SMALL_PAIR": enabled}), patch(
-                "rtp_llm.models_py.modules.qwen4_exp.fp8_dense.project_fp8_pair",
-                wraps=project_fp8_pair,
-            ) as pair, patch.object(
-                attention, "_qsa_selected_indices", return_value=None
+            with (
+                patch.dict(os.environ, {"QWEN4_QSA_SMALL_PAIR": enabled}),
+                patch(
+                    "rtp_llm.models_py.modules.base.common.fp8_linear.project_fp8_pair",
+                    wraps=project_fp8_pair,
+                ) as pair,
+                patch.object(attention, "_qsa_selected_indices", return_value=None),
             ):
                 with self.assertRaises(SelectionComplete):
                     attention(x, fmha, None, inputs, qsa_runtime=runtime)

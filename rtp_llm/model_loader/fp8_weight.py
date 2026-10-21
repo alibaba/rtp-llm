@@ -1,4 +1,4 @@
-"""FP8 storage for the released checkpoint's unquantized dense parameters."""
+"""Per-tensor FP8 storage applied after descriptor layout and TP splitting."""
 
 import torch
 
@@ -7,11 +7,10 @@ from rtp_llm.model_loader.weight_module import (
     QuantWeight,
     WeightModule,
 )
+from rtp_llm.utils.fp8_constants import FP8_STORAGE_SCALE_SUFFIX
 
-FP8_STORAGE_SCALE_SUFFIX = ".qwen4_fp8_storage_scale"
 
-
-class Qwen4Fp8StorageWeight(CompositeWeight, QuantWeight):
+class Fp8StorageWeight(CompositeWeight, QuantWeight):
     """Quantize after the original descriptor's TP split and layout conversion."""
 
     supports_fastsafetensors_iteration = False
@@ -32,7 +31,7 @@ class Qwen4Fp8StorageWeight(CompositeWeight, QuantWeight):
 
     def update(self, *args, **kwargs):
         raise PermissionError(
-            "Qwen full FP8 parameters require a service restart to update"
+            "FP8 storage parameters require a service restart to update"
         )
 
     def _postprocess(self, tensor, device, load_config):

@@ -4,7 +4,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from rtp_llm.models_py.modules.qwen4_exp.fp8_dense import (
+from rtp_llm.models_py.modules.base.common.fp8_linear import (
     dense_projection,
     make_projection,
 )
@@ -23,7 +23,7 @@ def grouped_rms_norm(
     ``plus_one``, unlike the rest of the repo's RMSNorms.
     """
     if x.is_cuda and torch.version.hip is None:
-        from rtp_llm.models_py.modules.qwen4_exp.residual.gated_residual_norm_triton import (
+        from rtp_llm.models_py.triton_kernels.common.gated_residual_norm_triton import (
             grouped_rms_norm_triton,
             is_supported,
         )
@@ -46,7 +46,7 @@ def inject_into_residual(
     ``[..., hidden]`` and ``inject_weights`` is ``[..., hc_mult]``.
     """
     if hyper_input.is_cuda and torch.version.hip is None:
-        from rtp_llm.models_py.modules.qwen4_exp.residual.gated_residual_inject_triton import (
+        from rtp_llm.models_py.triton_kernels.common.gated_residual_inject_triton import (
             fused_inject,
             is_supported,
         )
@@ -57,8 +57,8 @@ def inject_into_residual(
     return hyper_input + injection.flatten(-2)
 
 
-class Qwen4ExpGatedResidual(nn.Module):
-    """Read side of the qwen4_exp gated residual stream.
+class GatedResidual(nn.Module):
+    """Read side of a multi-branch gated residual stream.
 
     Collapses an ``[..., hc_mult * hidden]`` stream down to ``[..., hidden]`` for
     the next sublayer, and produces the per-branch scalar write gate that
@@ -159,7 +159,9 @@ class Qwen4ExpGatedResidual(nn.Module):
             and hyper_input.is_cuda
             and torch.version.hip is None
         ):
-            from .gated_residual_norm_triton import try_grouped_rms_norm_with_fp8_scale
+            from rtp_llm.models_py.triton_kernels.common.gated_residual_norm_triton import (
+                try_grouped_rms_norm_with_fp8_scale,
+            )
 
             fused = try_grouped_rms_norm_with_fp8_scale(
                 hyper_input, self.norm_gamma, self.hidden_size, self.norm_eps
@@ -182,7 +184,7 @@ class Qwen4ExpGatedResidual(nn.Module):
             and self.down_projection.use_scaled_mm
             and tuple(self.down_projection.weight.shape) == (320, 10240)
         ):
-            from .gated_residual_prefill_inject_norm_triton import (
+            from rtp_llm.models_py.triton_kernels.common.gated_residual_prefill_inject_norm_triton import (
                 try_inject_grouped_norm,
             )
 
@@ -211,7 +213,7 @@ class Qwen4ExpGatedResidual(nn.Module):
             and normed.device == merged.device
             and 1 <= normed.numel() // self.hc_hidden_size <= 32
         ):
-            from rtp_llm.models_py.modules.qwen4_exp.residual.gated_residual_down_triton import (
+            from rtp_llm.models_py.triton_kernels.common.gated_residual_down_triton import (
                 down_inject_epilogue,
             )
 
@@ -229,7 +231,9 @@ class Qwen4ExpGatedResidual(nn.Module):
                 self.inject_projection is not None
                 and self.inject_projection.compute_weight is not None
             ):
-                from .gated_residual_splitk_inject import try_splitk_down_inject
+                from rtp_llm.models_py.triton_kernels.common.gated_residual_splitk_inject import (
+                    try_splitk_down_inject,
+                )
 
                 fused = try_splitk_down_inject(
                     normed, self.inject_projection.compute_weight, down
@@ -240,7 +244,9 @@ class Qwen4ExpGatedResidual(nn.Module):
                 and down.is_cuda
                 and torch.version.hip is None
             ):
-                from .gated_residual_down_triton import separate_down_inject_epilogue
+                from rtp_llm.models_py.triton_kernels.common.gated_residual_down_triton import (
+                    separate_down_inject_epilogue,
+                )
 
                 injection = (
                     dense_projection(normed, self.inject, self.inject_projection)
@@ -255,7 +261,9 @@ class Qwen4ExpGatedResidual(nn.Module):
         mixed = None
         up = self.up_projection
         if up is not None and up.bias is None and up.role in ("DECODE", "PDFUSION"):
-            from .gated_residual_up_mix_triton import try_fp8_up_mix
+            from rtp_llm.models_py.triton_kernels.common.gated_residual_up_mix_triton import (
+                try_fp8_up_mix,
+            )
 
             mixed = try_fp8_up_mix(mix, up.weight, up.scale, normed, self.hc_mult)
         if (
@@ -264,7 +272,9 @@ class Qwen4ExpGatedResidual(nn.Module):
             and up.bias is None
             and up.role in ("PREFILL", "DECODE", "PDFUSION")
         ):
-            from .gated_residual_prefill_up_mix_triton import try_fp8_prefill_up_mix
+            from rtp_llm.models_py.triton_kernels.common.gated_residual_prefill_up_mix_triton import (
+                try_fp8_prefill_up_mix,
+            )
 
             mixed = try_fp8_prefill_up_mix(
                 mix, up.weight, up.scale, normed, self.hc_mult
@@ -274,7 +284,7 @@ class Qwen4ExpGatedResidual(nn.Module):
             branches = (self.hc_mult, self.hidden_size)
             fused_mix = False
             if normed.is_cuda and torch.version.hip is None:
-                from rtp_llm.models_py.modules.qwen4_exp.residual.gated_residual_mix_triton import (
+                from rtp_llm.models_py.triton_kernels.common.gated_residual_mix_triton import (
                     fused_mix_reduce,
                     is_supported,
                 )

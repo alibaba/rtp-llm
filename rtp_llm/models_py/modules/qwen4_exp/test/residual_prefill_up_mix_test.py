@@ -3,20 +3,18 @@ from unittest.mock import patch
 
 import torch
 
-from rtp_llm.models_py.modules.qwen4_exp.fp8_dense import Qwen4Fp8Linear
-from rtp_llm.models_py.modules.qwen4_exp.residual.gated_residual_mix_triton import (
-    fused_mix_reduce,
-)
-from rtp_llm.models_py.modules.qwen4_exp.residual.gated_residual_prefill_up_mix_triton import (
-    try_fp8_prefill_up_mix,
-)
+from rtp_llm.models_py.modules.base.common.fp8_linear import Fp8Linear
 from rtp_llm.models_py.modules.qwen4_exp.test.residual_norm_fp8_test import (
     ResidualNormFp8Test,
 )
-
-MODULE = (
-    "rtp_llm.models_py.modules.qwen4_exp.residual.gated_residual_prefill_up_mix_triton"
+from rtp_llm.models_py.triton_kernels.common.gated_residual_mix_triton import (
+    fused_mix_reduce,
 )
+from rtp_llm.models_py.triton_kernels.common.gated_residual_prefill_up_mix_triton import (
+    try_fp8_prefill_up_mix,
+)
+
+MODULE = "rtp_llm.models_py.triton_kernels.common.gated_residual_prefill_up_mix_triton"
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
@@ -39,7 +37,7 @@ class ResidualPrefillUpMixTest(unittest.TestCase):
                 sw = torch.tensor([scale], device="cuda")
                 norm = torch.randn(rows, 10240, device="cuda", dtype=torch.bfloat16)
                 expected = fused_mix_reduce(
-                    Qwen4Fp8Linear(w, sw, role="PREFILL")(x), norm, 4
+                    Fp8Linear(w, sw, role="PREFILL")(x), norm, 4
                 )
                 actual = try_fp8_prefill_up_mix(x, w, sw, norm, 4)
                 self.assertIsNotNone(actual)

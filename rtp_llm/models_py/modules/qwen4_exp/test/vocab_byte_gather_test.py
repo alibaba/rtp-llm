@@ -3,18 +3,18 @@ from unittest.mock import patch
 
 import torch
 
-from rtp_llm.models_py.modules.qwen4_exp.vocab_byte_gather import (
+from rtp_llm.models_py.modules.base.common.fp8_embedding import Fp8VocabEmbedding
+from rtp_llm.models_py.triton_kernels.common.fp8_vocab_gather import (
     dequant_hyper,
     raw_rows,
 )
-from rtp_llm.models_py.modules.qwen4_exp.vocab_embedding import Qwen4Fp8VocabEmbedding
-from rtp_llm.models_py.modules.qwen4_exp.vocab_embedding_triton import (
+from rtp_llm.models_py.triton_kernels.common.fp8_vocab_lookup import (
     gather_hyper_rows,
     vocab_rows,
 )
 from rtp_llm.ops import RoleType
 
-MODULE = "rtp_llm.models_py.modules.qwen4_exp.vocab_embedding"
+MODULE = "rtp_llm.models_py.modules.base.common.fp8_embedding"
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
@@ -89,7 +89,7 @@ class VocabByteGatherTest(unittest.TestCase):
         graph.reset()
 
     def test_module_collects_scales_once_and_uses_byte_tp_consumer(self):
-        module = Qwen4Fp8VocabEmbedding(
+        module = Fp8VocabEmbedding(
             self.weights[0], 2, self.weights[0].device, self.scales[:1]
         )
         calls = []
@@ -116,7 +116,7 @@ class VocabByteGatherTest(unittest.TestCase):
         self.assertEqual(module.weight.data_ptr(), self.weights[0].data_ptr())
 
     def test_small_and_unqualified_branches_keep_bf16_transport(self):
-        module = Qwen4Fp8VocabEmbedding(
+        module = Fp8VocabEmbedding(
             self.weights[0], 2, self.weights[0].device, self.scales[:1]
         )
         module.column_scales = self.scales
@@ -135,7 +135,7 @@ class VocabByteGatherTest(unittest.TestCase):
 
     def test_real_role_enum_prepares_prefill_and_fusion_scales(self):
         for role in (RoleType.PREFILL, RoleType.PDFUSION, "PREFILL", "PDFUSION"):
-            module = Qwen4Fp8VocabEmbedding(
+            module = Fp8VocabEmbedding(
                 self.weights[0], 2, self.weights[0].device, self.scales[:1]
             )
             with patch(MODULE + ".all_gather", return_value=self.scales) as gather:
@@ -146,7 +146,7 @@ class VocabByteGatherTest(unittest.TestCase):
 
     def test_real_decode_role_keeps_initialization_collectives_disabled(self):
         for role in (RoleType.DECODE, "DECODE"):
-            module = Qwen4Fp8VocabEmbedding(
+            module = Fp8VocabEmbedding(
                 self.weights[0], 2, self.weights[0].device, self.scales[:1]
             )
             with patch(
@@ -156,7 +156,7 @@ class VocabByteGatherTest(unittest.TestCase):
             self.assertIsNone(module.column_scales)
 
     def test_prepare_rejects_capture_and_bad_scale_gather(self):
-        module = Qwen4Fp8VocabEmbedding(
+        module = Fp8VocabEmbedding(
             self.weights[0], 2, self.weights[0].device, self.scales[:1]
         )
         with patch("torch.cuda.is_current_stream_capturing", return_value=True):

@@ -29,6 +29,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from rtp_llm.models_py.modules.base.common.zero_centered_rms_norm import (
+    ZeroCenteredFusedQKRMSNorm,
+)
+from rtp_llm.models_py.modules.hybrid.gated_residual import (
+    GatedResidual,
+    inject_into_residual,
+)
 from rtp_llm.models_py.modules.qwen4_exp.ple.ple import (
     Qwen4ExpNGramEmbedding,
     Qwen4ExpPLELayer,
@@ -36,11 +43,6 @@ from rtp_llm.models_py.modules.qwen4_exp.ple.ple import (
 from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import (
     Qwen4ExpQSAIndexer,
     apply_partial_rope,
-)
-from rtp_llm.models_py.modules.qwen4_exp.qsa.norm import Qwen4ExpFusedQKRMSNorm
-from rtp_llm.models_py.modules.qwen4_exp.residual.gated_residual import (
-    Qwen4ExpGatedResidual,
-    inject_into_residual,
 )
 from rtp_llm.models_py.modules.qwen4_exp.test.upstream_fixture import (
     uncovered_fixture,
@@ -132,7 +134,7 @@ class GatedResidualParityTest(unittest.TestCase):
         ref = self.up.Qwen4ExpTextGatedResidual(config, use_combine=use_combine)
         ref = ref.double()
         _randomize(ref)
-        ours = Qwen4ExpGatedResidual(
+        ours = GatedResidual(
             _gamma(ref.hc_norm.weight),
             ref.input_mix_weight_down.weight.detach(),
             ref.input_mix_weight_up.weight.detach(),
@@ -192,7 +194,7 @@ class GatedResidualParityTest(unittest.TestCase):
 
         self.assertEqual((expected - ours(x)[0]).abs().max().item(), 0.0)
 
-        prefolded = Qwen4ExpGatedResidual(
+        prefolded = GatedResidual(
             # Emulate a loader that folded in bf16, then undo the module's own
             # ``1 +`` so only the folding error remains.
             (raw.to(torch.bfloat16) + 1).double() - 1.0,
@@ -339,7 +341,7 @@ class FusedQKRMSNormParityTest(unittest.TestCase):
         q_gamma, k_gamma = self._gammas()
         qkv = self._qkv()
         expected = self._reference(qkv, q_gamma, k_gamma)
-        got = Qwen4ExpFusedQKRMSNorm(
+        got = ZeroCenteredFusedQKRMSNorm(
             q_gamma, k_gamma, self.HEADS, self.KV_HEADS, self.HEAD_DIM, self.EPS
         )(qkv.clone())
         self.assertEqual((expected - got).abs().max().item(), 0.0)
@@ -348,7 +350,7 @@ class FusedQKRMSNormParityTest(unittest.TestCase):
         """Only q and k are normed; v must pass through byte-for-byte."""
         q_gamma, k_gamma = self._gammas()
         qkv = self._qkv()
-        got = Qwen4ExpFusedQKRMSNorm(
+        got = ZeroCenteredFusedQKRMSNorm(
             q_gamma, k_gamma, self.HEADS, self.KV_HEADS, self.HEAD_DIM, self.EPS
         )(qkv.clone())
         v_start = (self.HEADS + self.KV_HEADS) * self.HEAD_DIM
@@ -359,7 +361,7 @@ class FusedQKRMSNormParityTest(unittest.TestCase):
         q_gamma, k_gamma = self._gammas()
         qkv = self._qkv()
         expected = self._reference(qkv, q_gamma, k_gamma)
-        prefolded = Qwen4ExpFusedQKRMSNorm(
+        prefolded = ZeroCenteredFusedQKRMSNorm(
             (q_gamma.to(torch.bfloat16) + 1).double() - 1.0,
             (k_gamma.to(torch.bfloat16) + 1).double() - 1.0,
             self.HEADS,
@@ -379,7 +381,7 @@ class FusedQKRMSNormParityTest(unittest.TestCase):
             size_per_head=self.HEAD_DIM,
             eps=self.EPS,
         )
-        swapped = Qwen4ExpFusedQKRMSNorm.replacing(fused)
+        swapped = ZeroCenteredFusedQKRMSNorm.replacing(fused)
         qkv = self._qkv()
         expected = self._reference(qkv, q_gamma, k_gamma)
         self.assertEqual((expected - swapped(qkv.clone())).abs().max().item(), 0.0)
@@ -442,7 +444,7 @@ class RealWeightGatedResidualParityTest(unittest.TestCase):
             ref.block_inject_weight.weight.copy_(
                 self._get("block_inject_weight.weight")
             )
-        ours = Qwen4ExpGatedResidual(
+        ours = GatedResidual(
             _gamma(self._get("hc_norm.weight")),
             self._get("input_mix_weight_down.weight"),
             self._get("input_mix_weight_up.weight"),
@@ -498,7 +500,7 @@ class RealWeightGatedResidualParityTest(unittest.TestCase):
         expected[:, heads : heads + kv_heads] = upstream(
             packed[:, heads : heads + kv_heads], gammas["k_norm"]
         )
-        got = Qwen4ExpFusedQKRMSNorm(
+        got = ZeroCenteredFusedQKRMSNorm(
             gammas["q_norm"], gammas["k_norm"], heads, kv_heads, head_dim, self.EPS
         )(qkv.clone())
         self.assertEqual(

@@ -219,7 +219,7 @@ class Qwen4ExpWeight(Qwen35MoeWeight):
     ``self_attn.{q,k}_norm``, which the Qwen3.5 base does fold. Upstream applies
     ``1.0 + weight`` in fp32, and folding it into the bf16 checkpoint tensor rounds
     the gain by up to ~4e-3 relative. The consuming modules add the one instead
-    (``grouped_rms_norm`` for the wide stream, ``Qwen4ExpFusedQKRMSNorm`` for q/k),
+    (``grouped_rms_norm`` for the wide stream, ``ZeroCenteredFusedQKRMSNorm`` for q/k),
     which keeps us bit-exact with upstream.
     """
 

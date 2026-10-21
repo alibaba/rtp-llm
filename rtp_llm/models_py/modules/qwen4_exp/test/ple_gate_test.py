@@ -6,14 +6,14 @@ from unittest.mock import patch
 import torch
 import torch.nn.functional as F
 
-from rtp_llm.models_py.modules.qwen4_exp.fp8_dense import (
+from rtp_llm.models_py.modules.base.common.fp8_linear import (
     make_projection,
     project_fp8_pair,
 )
+from rtp_llm.models_py.modules.hybrid.gated_residual import grouped_rms_norm
 from rtp_llm.models_py.modules.qwen4_exp.ple.ple import Qwen4ExpPLELayer
 from rtp_llm.models_py.modules.qwen4_exp.ple.ple_conv_triton import try_ple_conv
 from rtp_llm.models_py.modules.qwen4_exp.ple.ple_gate_triton import try_ple_gate
-from rtp_llm.models_py.modules.qwen4_exp.residual.gated_residual import grouped_rms_norm
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
@@ -179,7 +179,7 @@ class PleGateTest(unittest.TestCase):
             projection_scales=[
                 torch.tensor([0.03], device="cuda"),
                 torch.tensor([0.07], device="cuda"),
-            ]
+            ],
         )
 
     def serial(self, layer, hidden, tokens, embeddings, initial):

@@ -906,7 +906,7 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
             // keep the capture-time max_seq_len values.
             const bool has_live_sequence_lengths = inputs.attention_inputs.sequence_lengths.defined()
                                                    && inputs.attention_inputs.sequence_lengths.numel() > 0;
-            const int  fill_start                = has_live_sequence_lengths ? state.current_batch_size : 0;
+            const int fill_start = has_live_sequence_lengths ? state.current_batch_size : 0;
             if (fill_start < selected_graph_batch_size) {
                 py_model_inputs_.attention_inputs.sequence_lengths.slice(0, fill_start, selected_graph_batch_size)
                     .fill_(0);

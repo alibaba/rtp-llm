@@ -96,11 +96,11 @@ public:
     std::string                waitCacheStorePublication() override;
     HiddenStateCaptureStats    hiddenStateCaptureStats() const;
     std::optional<std::string> takeDeferredHiddenStateCaptureError() override;
-    bool            hasSpeculativeTargetCommitHooks() const override;
-    std::string     prepareSpeculativeTargetCommit(const torch::Tensor& accept_len) override;
-    std::string     finishSpeculativeTargetCommit(bool commit) override;
-    std::string     finalizeSpeculativeTargetCommit() override;
-    std::optional<bool> reduceSpeculativeTargetPrepareStatus(bool local_ok) override;
+    bool                       hasSpeculativeTargetCommitHooks() const override;
+    std::string                prepareSpeculativeTargetCommit(const torch::Tensor& accept_len) override;
+    std::string                finishSpeculativeTargetCommit(bool commit) override;
+    std::string                finalizeSpeculativeTargetCommit() override;
+    std::optional<bool>        reduceSpeculativeTargetPrepareStatus(bool local_ok) override;
 
 private:
     friend struct test::PyWrappedModelTestPeer;

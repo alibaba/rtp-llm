@@ -1,10 +1,10 @@
-"""Graph-compatible consumers for hard-quantized dense Qwen parameters."""
+"""Graph-compatible consumers for per-tensor FP8 parameters."""
 
 import torch
 from torch import nn
 from torch.nn import functional as F
 
-from rtp_llm.models.qwen4_exp.full_fp8_weight import FP8_STORAGE_SCALE_SUFFIX
+from rtp_llm.utils.fp8_constants import FP8_STORAGE_SCALE_SUFFIX
 
 
 def dequantize_parameter(weights, name):
@@ -17,7 +17,9 @@ def dequantize_parameter(weights, name):
 
 def _quantize_projection_input(rows, *, role, scale=None, output=None):
     if scale is None and role in ("DECODE", "PDFUSION"):
-        from .fp8_small_quant_triton import try_small_fp8_quant
+        from rtp_llm.models_py.triton_kernels.common.fp8_small_quant import (
+            try_small_fp8_quant,
+        )
 
         result = try_small_fp8_quant(rows, output=output)
         if result is not None:
@@ -27,7 +29,7 @@ def _quantize_projection_input(rows, *, role, scale=None, output=None):
     return scaled_fp8_per_tensor_quant(rows, scale=scale, output=output)
 
 
-class Qwen4Fp8Linear(nn.Module):
+class Fp8Linear(nn.Module):
     def __init__(self, weight, scale, bias=None, *, role="PDFUSION"):
         super().__init__()
         self.weight = weight
@@ -65,7 +67,10 @@ class Qwen4Fp8Linear(nn.Module):
             and rows.shape[0] <= 4
             and tuple(self.weight.shape) == (10240, 320)
         ):
-            from .fp8_dense_gemv_triton import fp8_hc_gemv, is_supported
+            from rtp_llm.models_py.triton_kernels.common.fp8_gemv import (
+                fp8_hc_gemv,
+                is_supported,
+            )
 
             if is_supported(rows, self.weight, self.scale):
                 out = fp8_hc_gemv(rows, self.weight, self.scale).reshape(
@@ -103,7 +108,7 @@ def dense_projection(x, weight, projection):
 
 
 def make_projection(weight, scale, *, role="PDFUSION"):
-    return None if scale is None else Qwen4Fp8Linear(weight, scale, role=role)
+    return None if scale is None else Fp8Linear(weight, scale, role=role)
 
 
 def project_fp8_pair(x, first, second):
@@ -113,8 +118,8 @@ def project_fp8_pair(x, first, second):
     or either GEMM's row count, weights, accumulation, or BF16 output boundary.
     """
     if not (
-        type(first) is Qwen4Fp8Linear
-        and type(second) is Qwen4Fp8Linear
+        type(first) is Fp8Linear
+        and type(second) is Fp8Linear
         and first.use_scaled_mm
         and second.use_scaled_mm
         and first.bias is None

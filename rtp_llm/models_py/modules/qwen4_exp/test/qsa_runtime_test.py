@@ -18,12 +18,14 @@ from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_context import (
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_selection import (
     select_qsa_paged_tokens,
 )
+from rtp_llm.models_py.modules.base.common.zero_centered_rms_norm import (
+    exact_head_rms_norm,
+)
 from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import (
     apply_partial_rope,
     build_interleaved_mrope,
     build_qsa_rope,
 )
-from rtp_llm.models_py.modules.qwen4_exp.qsa.norm import exact_head_rms_norm
 from rtp_llm.ops import RopeStyle
 from rtp_llm.ops.compute_ops import PyCacheStoreInputs
 

@@ -4,7 +4,9 @@ import unittest
 
 import torch
 
-from rtp_llm.models_py.modules.qwen4_exp.qsa.norm import Qwen4ExpFusedQKRMSNorm
+from rtp_llm.models_py.modules.base.common.zero_centered_rms_norm import (
+    ZeroCenteredFusedQKRMSNorm,
+)
 
 
 class Qwen4FusedQKNormTest(unittest.TestCase):
@@ -16,7 +18,7 @@ class Qwen4FusedQKNormTest(unittest.TestCase):
         torch.manual_seed(21)
         self.q_gamma = (0.1 * torch.randn(self.DIM, device="cuda")).bfloat16()
         self.k_gamma = (0.1 * torch.randn(self.DIM, device="cuda")).bfloat16()
-        self.norm = Qwen4ExpFusedQKRMSNorm(
+        self.norm = ZeroCenteredFusedQKRMSNorm(
             self.q_gamma, self.k_gamma, self.HEADS, self.KV_HEADS, self.DIM
         )
 
