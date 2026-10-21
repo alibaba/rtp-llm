@@ -49,3 +49,7 @@ python3 rtp_llm/flexlb/tools/mock_bundle/vit_frontend_smoke.py \
 目前仅支持 URL IMAGE 与 inline gRPC FP32。尚未模拟视频、音频、预处理 tensor、V4.1 packed patches、模型特定位置编码、GPU 缓存 tier、RDMA 租约或真实内容审查；packed 输入会显式拒绝，不能被当作纯文本成功处理。GreenNet 接口仅代表真实实现的 disabled/noop provider。固定延迟和线程池不代表真实动态 batching 性能。
 
 `develop/dsv41_ced_release` 的 `metadata_only` 与 main 的 `support_rdma` 占用同一字段号，旧版返回逐图 `MultimodalOutputsPB`，不能在同一监听地址自动猜测协议。旧路径适配和线上事故复现应在独立分支、独立进程中验证；现代通用图片链路通过不等于 V4.1 事故已复现。
+
+## Whale bundle
+
+`MOCK_VIT_ENABLED=1` 在 bundle 中启动独立 ViT JVM，并与 Master、P/D 一起监管退出。默认使用最后一个 P/D gRPC 端口的下一个端口；可用 `MOCK_VIT_PORT` 显式设置。其他参数对应 `MOCK_VIT_HIDDEN_SIZE`、`MOCK_VIT_CONCURRENCY`、`MOCK_VIT_QUEUE_CAPACITY`、`MOCK_VIT_EMBEDDING_CACHE_BYTES`、`MOCK_VIT_HASH_CACHE_BYTES`、`MOCK_VIT_COMPUTE_DELAY_MS`。Master 的组合服务发现文件保留 P/D 动态更新并加入 ViT；原始 P/D 文件仍由 Mock 独占写入。`identity.json` 记录 ViT 参数，日志在 `vit.log`。旧 Master 模式拒绝启用现代 ViT。
