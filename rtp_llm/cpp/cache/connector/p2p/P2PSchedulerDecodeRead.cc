@@ -19,13 +19,29 @@ namespace {
 // completion events and deadlines remain isolated on the read context checker.
 constexpr size_t kAsyncReadThreadCount = 4;
 constexpr size_t kAsyncReadQueueSize   = 1024;
+
+P2PConnectorSchedulerConfig normalizedSchedulerConfig(P2PConnectorSchedulerConfig config) {
+    // Preserve the existing non-positive-value fallback, using the shared
+    // current default. Bound the positive budget to the wire timeout range.
+    const auto configured_timeout = config.load_cache_timeout_ms;
+    config.load_cache_timeout_ms  = configured_timeout > 0 ?
+                                        std::min<int64_t>(configured_timeout, std::numeric_limits<int32_t>::max()) :
+                                        PDSepConfig{}.load_cache_timeout_ms;
+    if (config.load_cache_timeout_ms != configured_timeout) {
+        RTP_LLM_LOG_WARNING("P2P load timeout normalized: configured=%ld effective=%ld",
+                            configured_timeout,
+                            config.load_cache_timeout_ms);
+    }
+    return config;
+}
 }  // namespace
 
 P2PSchedulerDecodeRead::P2PSchedulerDecodeRead(
     P2PConnectorSchedulerConfig                config,
     const kmonitor::MetricsReporterPtr&        metrics_reporter,
     const std::shared_ptr<P2PBroadcastClient>& tp_broadcast_client):
-    config_(std::move(config)), metrics_reporter_(metrics_reporter), tp_broadcast_client_(tp_broadcast_client) {}
+    config_(normalizedSchedulerConfig(std::move(config))), metrics_reporter_(metrics_reporter),
+    tp_broadcast_client_(tp_broadcast_client) {}
 
 P2PSchedulerDecodeRead::~P2PSchedulerDecodeRead() {
     if (checker_) {
@@ -44,16 +60,6 @@ P2PSchedulerDecodeRead::~P2PSchedulerDecodeRead() {
 }
 
 bool P2PSchedulerDecodeRead::init(const std::string& process_id) {
-    // Preserve the existing non-positive-value fallback, using the shared
-    // current default. Bound the positive budget to the wire timeout range.
-    const auto configured_timeout = config_.load_cache_timeout_ms;
-    config_.load_cache_timeout_ms = configured_timeout > 0 ?
-        std::min<int64_t>(configured_timeout, std::numeric_limits<int32_t>::max()) :
-        PDSepConfig{}.load_cache_timeout_ms;
-    if (config_.load_cache_timeout_ms != configured_timeout) {
-        RTP_LLM_LOG_WARNING("P2P load timeout normalized: configured=%ld effective=%ld",
-                            configured_timeout, config_.load_cache_timeout_ms);
-    }
     server_caller_ = std::make_shared<DecodeLoadHelper>(config_.worker_addrs);
 
     auto async_read_pool = std::make_shared<autil::LockFreeThreadPool>(
