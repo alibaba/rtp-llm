@@ -6,6 +6,7 @@ reference; no tolerance or regenerated golden is used.
 
 import io
 import unittest
+from unittest import mock
 
 import numpy as np
 import torch
@@ -140,6 +141,46 @@ class DeepSeekV41GpuPreprocessTest(unittest.TestCase):
         rgb = torch.zeros((31, 43, 3), dtype=torch.uint8)
         with self.assertRaisesRegex(ValueError, "explicit CUDA device"):
             processor._preprocess_rgb_on_device(rgb, (42, 56), 14, "cpu")
+
+    def test_unseen_geometry_reuses_warmed_kernels(self):
+        from triton.runtime.jit import JITFunction
+
+        from rtp_llm.models_py.modules.dsv41.vision_preprocess_triton import (
+            warmup_preprocess,
+        )
+
+        warmup_preprocess(self.device)
+        # Reject even a disk-cache load: startup must warm the in-process cache.
+        with mock.patch.object(
+            JITFunction, "_do_compile", side_effect=AssertionError("unexpected JIT")
+        ):
+            for width, height in (
+                (1, 1),
+                (1024, 1),
+                (1, 1024),
+                (333, 221),
+                (221, 333),
+                (560, 560),
+                (1920, 1080),
+                (2049, 1537),
+                (4096, 2048),
+            ):
+                with self.subTest(size=(width, height)):
+                    image = Image.fromarray(pattern(width, height))
+                    expected, vit_h, vit_w, _, _ = processor.preprocess_image(
+                        image, self.config
+                    )
+                    rgb = processor._rgb_tensor(image)
+                    storage = torch.empty(
+                        rgb.numel() + 16, dtype=torch.uint8, device=self.device
+                    )
+                    for offset in (0, 1, 16):
+                        uploaded = storage[offset : offset + rgb.numel()].view_as(rgb)
+                        uploaded.copy_(rgb)
+                        actual = processor._preprocess_rgb_on_device(
+                            uploaded, (vit_h * 14, vit_w * 14), 14, self.device
+                        )
+                        self.assert_bytes_equal(expected, actual, "unseen geometry")
 
 
 if __name__ == "__main__":

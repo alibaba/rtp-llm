@@ -174,7 +174,16 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
         if self._packed_graph is not None:
             self._packed_graph.clear()
         self._resource_budget = None
-        return super().load_state_dict(*args, **kwargs)
+        result = super().load_state_dict(*args, **kwargs)
+        if self._device.type == "cuda":
+            from rtp_llm.models_py.modules.dsv41.vision_preprocess_triton import (
+                warmup_preprocess,
+            )
+
+            warmup_preprocess(
+                self._device, patch_size=self.processor_config.vision_patch_size
+            )
+        return result
 
     def _resolve_resource_budget(self):
         with self._resource_lock:
