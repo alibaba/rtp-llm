@@ -140,9 +140,10 @@ bool TcpKVCacheSender::setBlockBufferInfo(::tcp_transfer::TcpBlockBufferInfo* bl
     content->resize(block_info.size_bytes);
 
     CopyTask task;
-    task.src_ptr = block_info.addr;
-    task.size    = block_info.size_bytes;
-    task.dst_ptr = content->data();
+    task.device_index = block_info.device_index;
+    task.src_ptr      = block_info.addr;
+    task.size         = block_info.size_bytes;
+    task.dst_ptr      = content->data();
     copy_tasks.push_back(task);
     return true;
 }

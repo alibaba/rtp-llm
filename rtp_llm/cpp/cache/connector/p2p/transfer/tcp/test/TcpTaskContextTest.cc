@@ -17,6 +17,8 @@
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include <torch/torch.h>
 #include <c10/cuda/CUDAStream.h>
+#include <c10/cuda/CUDAGuard.h>
+#include <c10/cuda/CUDAFunctions.h>
 
 namespace rtp_llm {
 namespace transfer {
@@ -198,6 +200,31 @@ TEST_F(TcpTaskContextTest, StartTransfer_TaskAlreadyCancelled_ReturnsFalse) {
 // ===========================================================================
 // Group 2: executeCopy() — failure paths (no GPU required)
 // ===========================================================================
+
+TEST_F(TcpTaskContextTest, DirectCopyUsesAllocationDeviceAndRestoresCallerDevice) {
+    if (!device_initialized_) {
+        GTEST_SKIP() << "No GPU device";
+    }
+    CudaCopyUtil copy_util;
+    const int    count = c10::cuda::device_count();
+    for (int device = 0; device < count; ++device) {
+        SCOPED_TRACE(device);
+        const int            caller = count > 1 ? (device + 1) % count : device;
+        c10::cuda::CUDAGuard caller_guard(caller);
+        auto options = torch::TensorOptions().dtype(torch::kUInt8).device(torch::Device(torch::kCUDA, device));
+        auto source  = torch::full({64}, 37, options);
+        auto target  = torch::zeros({64}, options);
+        auto host    = torch::zeros({64}, torch::kUInt8);
+        std::vector<CopyTask> download{{source.data_ptr(), 64, reinterpret_cast<char*>(host.data_ptr()), device}};
+        ASSERT_TRUE(copy_util.batchCopyToHost(download));
+        EXPECT_EQ(c10::cuda::current_device(), caller);
+        EXPECT_TRUE(torch::equal(host, torch::full({64}, 37, torch::kUInt8)));
+        std::vector<CopyTask> upload{{host.data_ptr(), 64, reinterpret_cast<char*>(target.data_ptr()), device}};
+        ASSERT_TRUE(copy_util.batchCopyToDevice(upload));
+        EXPECT_EQ(c10::cuda::current_device(), caller);
+        EXPECT_TRUE(torch::equal(target.cpu(), host));
+    }
+}
 
 TEST_F(TcpTaskContextTest, ExecuteCopy_TaskNull_ReturnsFalse) {
     auto                                          req = makeEmptyRequest("k1", currentTimeMs() + 5000);

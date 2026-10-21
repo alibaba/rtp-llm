@@ -142,9 +142,10 @@ bool TcpTaskContext::executeCopy(CudaCopyUtil& cuda_copy_util) {
                                 + " actual=" + std::to_string(proto_block.content().size()));
             }
             CopyTask task;
-            task.src_ptr = const_cast<char*>(proto_block.content().data());
-            task.size    = proto_block.len();
-            task.dst_ptr = static_cast<char*>(bi.addr);
+            task.device_index = bi.device_index;
+            task.src_ptr      = const_cast<char*>(proto_block.content().data());
+            task.size         = proto_block.len();
+            task.dst_ptr      = static_cast<char*>(bi.addr);
             copy_tasks.push_back(task);
             collector_->total_block_size += proto_block.len();
         }
