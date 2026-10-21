@@ -715,6 +715,8 @@ def forward_layers(
                             host_block_ids=host_block_tables(kv_cache, attn_inputs),
                         )
                         prefill_write_by_region = None
+                if layer_idx in capture_ids:
+                    v4.capture_aux_hidden(layer_idx, h)
                 with layer_forward_range(layer_idx):
                     with (
                         ced_tail.candidate_publication(shared_prefill)
@@ -742,7 +744,7 @@ def forward_layers(
                                     if layer_idx + 1 < len(layer_calls)
                                     else None
                                 )
-                                preserve = layer_idx in capture_ids or (
+                                preserve = layer_idx + 1 in capture_ids or (
                                     ced_tail is not None and layer_idx in (19, 20)
                                 )
                                 defer = (
@@ -771,8 +773,6 @@ def forward_layers(
                             )  # [T, hc, dim]
                     if shared_prefill is not None:
                         release_v41_prefill_shared(shared_prefill, layer_idx)
-                    if layer_idx in capture_ids:
-                        v4.capture_aux_hidden(layer_idx, h)
                     if _rt_on:
                         _rt.record(f"prefill_layer{layer_idx:02d}_out", h)
                     if write_cache_store_impl is not None:

@@ -322,6 +322,8 @@ def forward_layers(
     layer_forward_range = _profiler.make_layer_forward_range()
     for layer_idx, layer in enumerate(v4.layers):
         with layer_forward_range(layer_idx):
+            if layer_idx in capture_ids:
+                v4.capture_aux_hidden(layer_idx, h)
             h = forward_decode_layer(
                 layer,
                 h,
@@ -330,12 +332,10 @@ def forward_layers(
                 next_layer=(
                     v4.layers[layer_idx + 1] if layer_idx + 1 < len(v4.layers) else None
                 ),
-                preserve_output=layer_idx in capture_ids or _rt_on,
+                preserve_output=layer_idx + 1 in capture_ids or _rt_on,
                 kv_cache=kv_cache,
                 routing_metadata=routing_metadata,
             )
-            if layer_idx in capture_ids:
-                v4.capture_aux_hidden(layer_idx, h)
             if _rt_on:
                 _rt.record(f"decode_layer{layer.layer_id:02d}_out", h)
     if v4._mtp_hidden_buffer is not None:
