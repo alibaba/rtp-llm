@@ -152,29 +152,29 @@ void P2PConnectorMetrics::report(const kmonitor::MetricsTags* tags, P2PConnector
             REPORT_MUTABLE_METRIC(decode_schedule_tp_sync_cost_time_us_metric,
                                   collector->decode_schedule_tp_sync_cost_time_us.load());
         }
-        if (collector->decode_schedule_plan_cost_time_us >= 0) {
+        if (collector->decode_schedule_plan_cost_time_us.load(std::memory_order_relaxed) >= 0) {
             REPORT_MUTABLE_METRIC(decode_schedule_plan_cost_time_us_metric,
-                                  collector->decode_schedule_plan_cost_time_us);
+                                  collector->decode_schedule_plan_cost_time_us.load(std::memory_order_relaxed));
         }
-        if (collector->decode_schedule_kickoff_queue_time_us >= 0) {
+        if (collector->decode_schedule_kickoff_queue_time_us.load(std::memory_order_relaxed) >= 0) {
             REPORT_MUTABLE_METRIC(decode_schedule_kickoff_queue_time_us_metric,
-                                  collector->decode_schedule_kickoff_queue_time_us);
+                                  collector->decode_schedule_kickoff_queue_time_us.load(std::memory_order_relaxed));
         }
-        if (collector->decode_schedule_server_submit_time_us >= 0) {
+        if (collector->decode_schedule_server_submit_time_us.load(std::memory_order_relaxed) >= 0) {
             REPORT_MUTABLE_METRIC(decode_schedule_server_submit_time_us_metric,
-                                  collector->decode_schedule_server_submit_time_us);
+                                  collector->decode_schedule_server_submit_time_us.load(std::memory_order_relaxed));
         }
-        if (collector->decode_schedule_broadcast_submit_time_us >= 0) {
+        if (collector->decode_schedule_broadcast_submit_time_us.load(std::memory_order_relaxed) >= 0) {
             REPORT_MUTABLE_METRIC(decode_schedule_broadcast_submit_time_us_metric,
-                                  collector->decode_schedule_broadcast_submit_time_us);
+                                  collector->decode_schedule_broadcast_submit_time_us.load(std::memory_order_relaxed));
         }
-        if (collector->decode_schedule_lease_query_time_us >= 0) {
+        if (collector->decode_schedule_lease_query_time_us.load(std::memory_order_relaxed) >= 0) {
             REPORT_MUTABLE_METRIC(decode_schedule_lease_query_time_us_metric,
-                                  collector->decode_schedule_lease_query_time_us);
+                                  collector->decode_schedule_lease_query_time_us.load(std::memory_order_relaxed));
         }
-        if (collector->decode_schedule_lease_hold_time_us >= 0) {
+        if (collector->decode_schedule_lease_hold_time_us.load(std::memory_order_relaxed) >= 0) {
             REPORT_MUTABLE_METRIC(decode_schedule_lease_hold_time_us_metric,
-                                  collector->decode_schedule_lease_hold_time_us);
+                                  collector->decode_schedule_lease_hold_time_us.load(std::memory_order_relaxed));
         }
         REPORT_MUTABLE_QPS(decode_schedule_qps_metric);
         if (!collector->decode_schedule_success.load()) {

@@ -24,12 +24,12 @@ public:
     std::atomic<int64_t> decode_schedule_server_call_cost_time_us{-1};
     std::atomic<int64_t> decode_schedule_tp_sync_cost_time_us{-1};
     std::atomic<int64_t> decode_schedule_total_cost_time_us{-1};
-    int64_t              decode_schedule_plan_cost_time_us        = -1;
-    int64_t              decode_schedule_kickoff_queue_time_us    = -1;
-    int64_t              decode_schedule_server_submit_time_us    = -1;
-    int64_t              decode_schedule_broadcast_submit_time_us = -1;
-    int64_t              decode_schedule_lease_query_time_us      = -1;
-    int64_t              decode_schedule_lease_hold_time_us       = -1;
+    std::atomic<int64_t> decode_schedule_plan_cost_time_us{-1};
+    std::atomic<int64_t> decode_schedule_kickoff_queue_time_us{-1};
+    std::atomic<int64_t> decode_schedule_server_submit_time_us{-1};
+    std::atomic<int64_t> decode_schedule_broadcast_submit_time_us{-1};
+    std::atomic<int64_t> decode_schedule_lease_query_time_us{-1};
+    std::atomic<int64_t> decode_schedule_lease_hold_time_us{-1};
 
     // ---- decode worker：请求级采样与单 recv task 采样 ----
     bool    decode_worker_success                  = true;

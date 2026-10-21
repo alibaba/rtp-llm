@@ -475,7 +475,7 @@ void P2PConnectorAsyncReadContext::pollLeaseIfNeeded(const std::shared_ptr<P2PBr
     auto          result            = tp_broadcast_client->queryLeaseStatus(unique_key, poll_timeout_ms);
     if (collector_) {
         collector_->decode_schedule_lease_query_time_us =
-            std::max<int64_t>(0, collector_->decode_schedule_lease_query_time_us) + currentTimeUs() - query_start_us;
+            std::max<int64_t>(0, collector_->decode_schedule_lease_query_time_us.load(std::memory_order_relaxed)) + currentTimeUs() - query_start_us;
     }
     const int64_t after_poll_ms     = currentTimeMs();
     if (!result.success) {
