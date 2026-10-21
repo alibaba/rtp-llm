@@ -409,7 +409,7 @@ grpc::Status DecodeRpcServer::GenerateStreamCall(grpc::ServerContext*           
     generate_context.onflight_requests = &onflight_requests_;
     generate_context.request_info = QueryConverter::transRequestInfo(request->request_info());
     if (generate_context.request_info.trace_id.empty()) {
-        generate_context.request_info.trace_id = request->generate_config().trace_id();
+        generate_context.request_info.trace_id = request->generate_config().trace_id().value();
     }
     if (generate_context.request_info.request_id.empty()) {
         generate_context.request_info.request_id = std::to_string(request_id);
