@@ -19,6 +19,13 @@ std::vector<size_t> computeTierBlockCounts(size_t                     capacity_b
                                            const std::vector<size_t>& device_block_counts,
                                            const std::vector<size_t>& pool_strides);
 
+// Ratios apply to usable blocks, while the byte budget also includes each
+// pool's reserved block zero. Without both FULL and SWA, preserve equal counts.
+std::vector<size_t> computeHostUsableBlockCounts(size_t                             capacity_bytes,
+                                                 const std::vector<size_t>&         strides,
+                                                 const std::vector<CacheGroupType>& types,
+                                                 double                             swa_full_ratio);
+
 std::string resolveDiskMountPath(const std::string& disk_paths_csv, int64_t local_world_size, int64_t local_rank);
 
 BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                              cache_config,
