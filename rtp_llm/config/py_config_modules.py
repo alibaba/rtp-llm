@@ -388,6 +388,12 @@ class VitConfig:
         self.gpu_max_batch_size: int = 1
         # Bounded one-batch collect/upload lookahead; never a second forward lane.
         self.gpu_prefetch_batches: int = 1
+        # Model-aware workspace admission, independent of image count. Zero
+        # resolves once after weight loading from free device memory, retaining
+        # graph/prefetch/cache space and headroom; it never means unlimited.
+        self.gpu_batch_max_bytes: int = 0
+        self.gpu_graph_cache_max_entries: int = 4
+        self.gpu_graph_cache_max_bytes: int = 0  # automatic; entries=0 disables
 
     def async_compute_executor_args(self) -> Dict[str, int]:
         """Resolve the existing async admission policy in one place."""
@@ -424,6 +430,13 @@ class VitConfig:
             raise ValueError(
                 f"gpu_max_batch_size must be > 0, got {self.gpu_max_batch_size}"
             )
+        for name in (
+            "gpu_batch_max_bytes",
+            "gpu_graph_cache_max_entries",
+            "gpu_graph_cache_max_bytes",
+        ):
+            if getattr(self, name) < 0:
+                raise ValueError(f"{name} must be >= 0")
         if self.gpu_batch_wait_ms < 0:
             raise ValueError(
                 f"gpu_batch_wait_ms must be >= 0, got {self.gpu_batch_wait_ms}"
@@ -450,6 +463,9 @@ class VitConfig:
         rdma = transport.rdma
         return (
             f"gpu_prefetch_batches: {self.gpu_prefetch_batches}\n"
+            f"gpu_batch_max_bytes: {self.gpu_batch_max_bytes}\n"
+            f"gpu_graph_cache_max_entries: {self.gpu_graph_cache_max_entries}\n"
+            f"gpu_graph_cache_max_bytes: {self.gpu_graph_cache_max_bytes}\n"
             f"vit_separation: {self.vit_separation}\n"
             f"vit_trt: {self.vit_trt}\n"
             f"trt_cache_enabled: {self.trt_cache_enabled}\n"
