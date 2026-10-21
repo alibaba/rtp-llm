@@ -483,6 +483,13 @@ TEST_F(P2PConnectorSchedulerTest, HandleRead_ExitsImmediately_AfterCancelDoneEve
     const auto state = sending.wait_for(std::chrono::seconds(5));
     // Cancellation must finish while every original HANDLE_READ remains blocked.
     EXPECT_EQ(state, std::future_status::ready);
+    // sendKVCache submits best-effort cancellation without waiting for its RPC.
+    // Observe receipt before checking exact counts, with HANDLE_READ still gated.
+    EXPECT_TRUE(waitUntil([&] {
+        return std::all_of(tp_broadcast_servers_.begin(), tp_broadcast_servers_.end(), [](const auto& server) {
+            return server->service()->getBroadcastTpCancelCallCount() == 1;
+        });
+    }));
     EXPECT_EQ(exited->load(), 0);
     cleanup.reset();
     const auto error = sending.get();
