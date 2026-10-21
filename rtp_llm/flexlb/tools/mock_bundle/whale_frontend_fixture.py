@@ -98,14 +98,11 @@ def main():
     from rtp_llm.ops import DSV41_SWA_BOUNDED_REPLAY_CACHE_KEY_SEED, cpp_get_block_cache_keys
     assert DSV41_SWA_BOUNDED_REPLAY_CACHE_KEY_SEED == 0x4453563431525031
     assert cpp_get_block_cache_keys([[1, 2]], 123) == [-8366447758695274051]
-    from rtp_llm.server.server_args.server_args import setup_args
-    from rtp_llm.frontend.frontend_app import FrontendApp
-    from rtp_llm.config.log_config import setup_logging
-    from rtp_llm.utils.concurrency_controller import ConcurrencyController, set_global_controller
-    setup_logging()
-    cfg = setup_args([])
-    set_global_controller(ConcurrencyController(int(os.environ.get('CONCURRENCY_LIMIT', '128'))))
-    FrontendApp(cfg, separated_frontend=True).start()
+    # Use the real supervisor so FRONTEND_SERVER_COUNT, shared admission,
+    # instance coordination and shutdown behavior are effective at runtime.
+    from rtp_llm.start_server import main as frontend_main
+    sys.argv = [sys.argv[0]]
+    frontend_main()
 
 
 if __name__ == '__main__':
