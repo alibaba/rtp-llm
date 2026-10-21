@@ -278,16 +278,21 @@ def _tables_on_device(device, key, factory):
     return tuple(table.to(device) for table in factory())
 
 
-@triton.jit
+# Packed RGB uploads may start at any byte offset; neither geometry nor source
+# alignment should create a new kernel on the request path.
+@triton.jit(
+    do_not_specialize=["IN_H", "IN_W", "RESIZE_W", "TAPS"],
+    do_not_specialize_on_alignment=["RGB"],
+)
 def _horizontal_u8(
     RGB,
     TEMP,
     BOUNDS,
     COEFFICIENTS,
-    IN_H: tl.constexpr,
-    IN_W: tl.constexpr,
-    RESIZE_W: tl.constexpr,
-    TAPS: tl.constexpr,
+    IN_H,
+    IN_W,
+    RESIZE_W,
+    TAPS,
     BLOCK: tl.constexpr,
 ):
     index = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
@@ -309,21 +314,24 @@ def _horizontal_u8(
     tl.store(TEMP + index, rounded, valid)
 
 
-@triton.jit
+@triton.jit(
+    do_not_specialize=["OUT_H", "OUT_W", "RESIZE_H", "RESIZE_W", "TOP", "LEFT", "TAPS"],
+    do_not_specialize_on_alignment=["SOURCE", "BOUNDS", "COEFFICIENTS"],
+)
 def _vertical_pad_patchify(
     SOURCE,
     OUTPUT,
     BOUNDS,
     COEFFICIENTS,
     LUT,
-    OUT_H: tl.constexpr,
-    OUT_W: tl.constexpr,
-    RESIZE_H: tl.constexpr,
-    RESIZE_W: tl.constexpr,
-    TOP: tl.constexpr,
-    LEFT: tl.constexpr,
+    OUT_H,
+    OUT_W,
+    RESIZE_H,
+    RESIZE_W,
+    TOP,
+    LEFT,
     PATCH: tl.constexpr,
-    TAPS: tl.constexpr,
+    TAPS,
     RESAMPLE_Y: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
@@ -434,3 +442,34 @@ def preprocess_rgb_u8(
             num_warps=4,
         )
     return output
+
+
+def warmup_preprocess(device, *, patch_size: int = 14) -> None:
+    """Compile both resize branches before serving, independent of image sizes.
+
+    Dimensions, padding and filter length are runtime values: unseen geometries
+    reuse these kernels, including integer values of 1 and different alignment.
+    Keep the integer coefficient construction and uint8 rounding unchanged.
+    """
+    from rtp_llm.utils.cuda_graph_gate import cuda_graph_gate
+
+    device = torch.device(device)
+    if device.type != "cuda":
+        raise ValueError("preprocess warmup requires a CUDA device")
+    if type(patch_size) is not int or not 1 <= patch_size <= 64:
+        raise ValueError("unsupported preprocess patch size")
+    with cuda_graph_gate.operation(), torch.cuda.device(device):
+        if torch.cuda.is_current_stream_capturing():
+            raise ValueError("preprocess warmup does not support graph capture")
+        # Both axes resized, then the identity vertical branch (different table
+        # pointer types). No model weights or request tensors are needed.
+        for source_hw, target_hw in (
+            (
+                (3 * patch_size + 1, 4 * patch_size + 3),
+                (2 * patch_size, 3 * patch_size),
+            ),
+            ((patch_size, 2 * patch_size), (patch_size, 2 * patch_size)),
+        ):
+            rgb = torch.zeros((*source_hw, 3), dtype=torch.uint8, device=device)
+            preprocess_rgb_u8(rgb, target_hw, patch_size=patch_size)
+        torch.cuda.current_stream(device).synchronize()
