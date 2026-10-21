@@ -13,6 +13,17 @@ fi
 
 x86=$($script x86 --print-command)
 arm=$($script arm --print-command)
+sm120=$($script sm120 --print-command)
+fixture=$(mktemp -d)
+trap 'rm -rf "$fixture"' EXIT
+if BUILD_WORKSPACE_DIRECTORY="$fixture" "$script" sm120-internal --print-command >"$fixture/missing.log" 2>&1; then
+    echo "sm120-internal unexpectedly accepted a missing overlay" >&2
+    exit 1
+fi
+[[ "$(<"$fixture/missing.log")" == *"requires the internal_source dependency overlay"* ]]
+mkdir -p "$fixture/internal_source/deps"
+touch "$fixture/internal_source/deps/requirements_torch_gpu_cuda13_sm120.txt"
+sm120_internal=$(BUILD_WORKSPACE_DIRECTORY="$fixture" "$script" sm120-internal --print-command)
 
 [[ "$x86" == *"requirements_torch_gpu_cuda13.txt"* ]]
 [[ "$x86" == *"requirements_cuda13_overrides.txt"* ]]
@@ -22,3 +33,9 @@ arm=$($script arm --print-command)
 [[ "$arm" == *"requirements_cuda13_overrides.txt"* ]]
 [[ "$arm" == *"aarch64-manylinux_2_28"* ]]
 [[ "$arm" == *"requirements_cuda13_arm.update"* ]]
+[[ "$sm120" == *"requirements_torch_gpu_cuda13_sm120.txt"* ]]
+[[ "$sm120" == *"requirements_cuda13_overrides.txt"* ]]
+[[ "$sm120" == *"x86_64-manylinux_2_28"* ]]
+[[ "$sm120" == *"//deps:requirements_torch_gpu_cuda13_sm120.update"* ]]
+[[ "$sm120_internal" == *"internal_source/deps/requirements_torch_gpu_cuda13_sm120.txt"* ]]
+[[ "$sm120_internal" == *"//internal_source/deps:requirements_torch_gpu_cuda13_sm120.update"* ]]
