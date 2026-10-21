@@ -296,6 +296,12 @@ public final class JavaMockEngineCluster {
                 ? config.prefillTotalKvTokens : config.decodeTotalKvTokens;
         int blocksOverride = roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL
                 ? config.prefillCacheBlocks : config.decodeCacheBlocks;
+        int roleBlockSize = roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL
+                ? config.prefillBlockSize : config.decodeBlockSize;
+        if (roleBlockSize > 0) {
+            performance = MockPerformanceModel.load(config.performanceFile, config.masterConfigFile);
+            performance.setBlockSize(roleBlockSize);
+        }
         int spb = performance.blockSize();
         int totalBlocks = blocksOverride > 0
                 ? blocksOverride
@@ -3357,7 +3363,9 @@ public final class JavaMockEngineCluster {
             // the P-enqueue reservation must be released here — the D-side
             // lease has no lifecycle owner once the hand-off is rejected.
             registerDecodeOwnership(input.getRequestId(), decode);
-            boolean accepted = decode.scheduleDecodeCompletion(shape, batchId, queue);
+            MockPerformanceModel.RequestShape decodeShape = MockPerformanceModel.usesNativeKeys(input)
+                    ? decode.performance.shape(input, decode.cache) : shape;
+            boolean accepted = decode.scheduleDecodeCompletion(decodeShape, batchId, queue);
             if (!accepted) {
                 clearDecodeOwnership(input.getRequestId(), decode);
                 releaseReservedDecode(input.getRequestId());
@@ -4170,6 +4178,9 @@ public final class JavaMockEngineCluster {
          */
         private MockLruBlockCache.AllocationOutcome acquireDecodeBlockLeaseDetailed(
                 long requestId, MockPerformanceModel.RequestShape shape) {
+            if (MockPerformanceModel.usesNativeKeys(shape.input())) {
+                shape = performance.shape(shape.input(), cache);
+            }
             // P-enqueue decode-KV pre-alignment (20260903): a request whose
             // decode blocks were RESERVED on this engine at prefill ENQUEUE
             // time already holds its lease in activeBlockLeases — consume it
@@ -5638,6 +5649,8 @@ public final class JavaMockEngineCluster {
         long prefillTotalKvTokens = DEFAULT_TOTAL_KV_TOKENS;
         long decodeTotalKvTokens = DEFAULT_DECODE_TOTAL_KV_TOKENS;
         int blockSize = 0;
+        int prefillBlockSize = 0;
+        int decodeBlockSize = 0;
         int decodeMaxConcurrency = DEFAULT_DECODE_MAX_CONCURRENCY;
         int statsIntervalMs = 5000;
         /**
@@ -5705,6 +5718,8 @@ public final class JavaMockEngineCluster {
                     case "--prefill-total-kv-tokens" -> config.prefillTotalKvTokens = Long.parseLong(value);
                     case "--decode-total-kv-tokens" -> config.decodeTotalKvTokens = Long.parseLong(value);
                     case "--block-size" -> config.blockSize = Integer.parseInt(value);
+                    case "--prefill-block-size" -> config.prefillBlockSize = positiveBlockSize(value);
+                    case "--decode-block-size" -> config.decodeBlockSize = positiveBlockSize(value);
                     case "--decode-max-concurrency" -> config.decodeMaxConcurrency = Integer.parseInt(value);
                     case "--stats-interval-ms" -> config.statsIntervalMs = Integer.parseInt(value);
                     case "--events-file" -> config.eventsFile = value;
@@ -5740,6 +5755,12 @@ public final class JavaMockEngineCluster {
                 throw new IllegalArgumentException("--stats-interval-ms must be >= 1");
             }
             return config;
+        }
+
+        private static int positiveBlockSize(String raw) {
+            int value = Integer.parseInt(raw);
+            if (value <= 0) throw new IllegalArgumentException("role block size must be positive");
+            return value;
         }
     }
 }

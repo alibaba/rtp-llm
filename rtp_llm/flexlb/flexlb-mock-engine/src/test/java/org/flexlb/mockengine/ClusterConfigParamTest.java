@@ -19,6 +19,16 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class ClusterConfigParamTest {
 
+    @Test
+    void roleBlockSizesAreIndependentAndPositive() {
+        var config = JavaMockEngineCluster.Config.parse(with(baseArgs(),
+                "--prefill-block-size", "512", "--decode-block-size", "128"));
+        assertEquals(512, config.prefillBlockSize);
+        assertEquals(128, config.decodeBlockSize);
+        assertThrows(IllegalArgumentException.class, () -> JavaMockEngineCluster.Config.parse(
+                with(baseArgs(), "--prefill-block-size", "0")));
+    }
+
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     @TempDir

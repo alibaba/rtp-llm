@@ -400,8 +400,15 @@ final class MockPerformanceModel {
                 // Fall back to protobuf lengths when metadata is absent or malformed.
             }
         }
-        boolean nativeImages = LegacyMockVitClient.hasImages(input) && uniqueKey.isBlank();
-        if (nativeImages) blockKeys.addAll(LegacyImageCacheKeys.fullBlocks(input, blockSize, LegacyImageCacheKeys.seed()));
+        boolean nativeImages = usesNativeKeys(input);
+        if (nativeImages) {
+            int physicalBlockSize = Integer.parseInt(System.getenv().getOrDefault("MOCK_HASH_BLOCK_SIZE", Integer.toString(blockSize)));
+            if (physicalBlockSize <= 0 || blockSize % physicalBlockSize != 0)
+                throw new IllegalArgumentException("Mock role block size must be a multiple of MOCK_HASH_BLOCK_SIZE");
+            List<Long> physical = LegacyImageCacheKeys.fullBlocks(input, physicalBlockSize, LegacyImageCacheKeys.seed());
+            int stride = blockSize / physicalBlockSize;
+            for (int i = stride - 1; i < physical.size(); i += stride) blockKeys.add(physical.get(i));
+        }
         // hitBlocks carries the RAW prefix-match run length (key count) — the
         // key-level cache-hit caliber (production recent_cache_key_hit_count /
         // total_count analogue) recorded by the engine at this admission hit
@@ -415,6 +422,11 @@ final class MockPerformanceModel {
         hitTokens = Math.min(hitTokens, inputLen);
         return new RequestShape(input, inputLen, Math.max(1, outputLen), List.copyOf(blockKeys),
                 hitTokens, hitBlocks);
+    }
+
+    static boolean usesNativeKeys(EngineRpcService.GenerateInputPB input) {
+        return input.getGenerateConfig().getUniqueKey().isBlank()
+                && (LegacyMockVitClient.hasImages(input) || "1".equals(System.getenv("RTP_LLM_MOCK_BUNDLE")));
     }
 
     long prefillMs(List<RequestShape> requests) {

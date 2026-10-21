@@ -47,15 +47,24 @@ def cpu_feature_hash(embedding):
 
 class MockLegacyMMEngine:
     def __init__(self, hidden_size=128, max_seq_len=16384, delay_ms=1,
-                 cache_bytes=64 << 20, prepared_v41=False, concurrency=4):
+                 cache_bytes=64 << 20, prepared_v41=False, concurrency=4,
+                 model_path=None, token_cache_items=10000):
         if hidden_size <= 0 or max_seq_len <= 0 or delay_ms < 0 or cache_bytes < 0 or concurrency <= 0:
             raise ValueError('invalid Mock ViT limits')
+        processor = V41ImageProcessorConfig(max_seq_len=max_seq_len)
+        if model_path:
+            from rtp_llm.config.dsv41_config import V41Config
+            config = V41Config.from_path(model_path)
+            processor = V41ImageProcessorConfig.from_model_config(config)
+            hidden_size = int(config.text['hidden_size'])
+            max_seq_len = processor.max_seq_len
+            prepared_v41 = True
         self.model = SimpleNamespace(
             model_config=SimpleNamespace(hidden_size=hidden_size, compute_dtype=torch.bfloat16,
                 max_seq_len=max_seq_len, model_type='deepseek_v41' if prepared_v41 else 'qwen2_vl'),
-            mm_part=SimpleNamespace(processor_config=V41ImageProcessorConfig(max_seq_len=max_seq_len)))
+            mm_part=SimpleNamespace(processor_config=processor))
         self.vit_config = SimpleNamespace(mm_transport_mode='grpc', vit_max_concurrent_requests=concurrency,
-            vit_token_cache_item_num=10000, vit_token_cache_time_window_ms=1800000)
+            vit_token_cache_item_num=token_cache_items, vit_token_cache_time_window_ms=1800000)
         self._scheduler = self  # Retain release's configured concurrent admission path.
         self.delay_ms, self.cache_limit = delay_ms, cache_bytes
         self._cache, self._bytes = OrderedDict(), 0
@@ -136,6 +145,11 @@ class MockLegacyMMEngine:
                                 + image['processor_identity'].encode(), image['types'].numel()) for image in images]
         return MMEmbeddingRes(results, max_batch_size=1, gpu_forwards=len(results))
 
+    def stop(self):
+        with self._lock:
+            self._cache.clear()
+            self._bytes = 0
+
 
 def make_service(**kwargs):
     from rtp_llm.server import vit_rpc_server
@@ -150,21 +164,23 @@ def main():
     parser.add_argument('--concurrency', type=int, default=4)
     parser.add_argument('--prepared-v41', action='store_true')
     parser.add_argument('--delay-ms', type=int, default=1)
+    parser.add_argument('--model-path')
+    parser.add_argument('--health-port', type=int)
+    parser.add_argument('--cache-bytes', type=int, default=64 << 20)
+    parser.add_argument('--token-cache-items', type=int, default=10000)
+    parser.add_argument('--shutdown-timeout', type=float, default=30)
     args = parser.parse_args()
-    from rtp_llm.server.vit_rpc_server import _create_rpc_server
+    from rtp_llm.server.vit_rpc_server import _create_rpc_server, _serve_rpc_server
     service = make_service(hidden_size=args.hidden_size, prepared_v41=args.prepared_v41,
-                           concurrency=args.concurrency, delay_ms=args.delay_ms)
+                           concurrency=args.concurrency, delay_ms=args.delay_ms,
+                           model_path=args.model_path, cache_bytes=args.cache_bytes,
+                           token_cache_items=args.token_cache_items)
     server, executor = _create_rpc_server(service, args.concurrency)
     bound = server.add_insecure_port(f'[::]:{args.port}')
     if not bound:
         raise RuntimeError('failed to bind Mock ViT port')
-    server.start()
     print(f'Legacy Mock ViT ready port={bound} protocol=dsv41_ced_release', flush=True)
-    try:
-        server.wait_for_termination()
-    finally:
-        server.stop(0).wait()
-        executor.shutdown(wait=True)
+    _serve_rpc_server(server, service.engine, executor, args.shutdown_timeout, args.health_port)
 
 
 if __name__ == '__main__':
