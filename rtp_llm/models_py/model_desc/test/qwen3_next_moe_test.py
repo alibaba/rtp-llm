@@ -113,6 +113,92 @@ class Qwen3NextRoutedOnlyTest(TestCase):
                     self.assertIs(result_residual, residual)
 
 
+class Qwen3NextFullAttentionMetadataTest(TestCase):
+    def test_full_attention_preserves_flags_without_linear_metadata(self):
+        # Device-only eager draft inputs have no CPU query partition. Neither
+        # ordinary nor CP full-attention models need a convolution partition.
+        for cp in (False, True):
+            for graph in (False, True):
+                for verify in (False, True):
+                    with self.subTest(cp=cp, graph=graph, verify=verify):
+                        attention = qwen3_next.PyAttentionInputs()
+                        attention.is_prefill = True
+                        attention.is_target_verify = verify
+                        attention.prefix_lengths = torch.zeros(1, dtype=torch.int32)
+                        model = SimpleNamespace(
+                            kv_cache=None,
+                            layers=[
+                                SimpleNamespace(layer_type=HybridAttentionType.NONE)
+                            ],
+                            parallelism_config=SimpleNamespace(
+                                prefill_cp_config=SimpleNamespace(is_enabled=lambda: cp)
+                            ),
+                        )
+                        with (
+                            patch.object(
+                                qwen3_next,
+                                "prepare_causal_conv1d_metadata",
+                                side_effect=AssertionError(
+                                    "full attention has no convolution consumer"
+                                ),
+                            ),
+                            patch.object(
+                                qwen3_next,
+                                "_is_aiter_flydsl_gdn_prefill_enabled",
+                                return_value=False,
+                            ),
+                        ):
+                            metadata = qwen3_next.Qwen3NextModel._build_attn_meta(
+                                model,
+                                SimpleNamespace(attention_inputs=attention),
+                                torch.device("cpu"),
+                                is_cuda_graph=graph,
+                            )
+                        self.assertEqual(metadata.is_cuda_graph, graph)
+                        self.assertEqual(metadata.is_target_verify, verify)
+                        self.assertIsNone(metadata.prefill_conv1d_meta)
+                        self.assertIsNone(metadata.full_prefill_conv1d_meta)
+                        self.assertIsNone(metadata.cp_restore_indices)
+
+    def test_mixed_cp_keeps_linear_partition_and_restore_metadata(self):
+        mha = SimpleNamespace(is_prefill=True, is_target_verify=False)
+        gdn = SimpleNamespace(is_prefill=True, is_target_verify=False)
+        artifacts = tuple(object() for _ in range(5))
+        seen = []
+
+        def cp_metadata(attention, device):
+            seen.append((attention, device))
+            return artifacts
+
+        cache = SimpleNamespace(
+            get_layer_cache_groups=lambda index: [
+                SimpleNamespace(tag="mha" if index == 0 else "gdn")
+            ]
+        )
+        model = SimpleNamespace(
+            kv_cache=cache,
+            layers=[
+                SimpleNamespace(layer_type=HybridAttentionType.NONE),
+                SimpleNamespace(layer_type=HybridAttentionType.LINEAR),
+            ],
+            parallelism_config=SimpleNamespace(
+                prefill_cp_config=SimpleNamespace(is_enabled=lambda: True)
+            ),
+            _build_cp_linear_attn_metadata=cp_metadata,
+        )
+        metadata = qwen3_next.Qwen3NextModel._build_attn_meta(
+            model,
+            SimpleNamespace(attention_inputs={"mha": mha, "gdn": gdn}),
+            torch.device("cpu"),
+        )
+        self.assertEqual(seen, [(gdn, torch.device("cpu"))])
+        self.assertIs(metadata.full_prefill_conv1d_meta, artifacts[0])
+        self.assertIs(metadata.full_prefill_cu_seqlens, artifacts[1])
+        self.assertIs(metadata.cp_restore_indices, artifacts[2])
+        self.assertIs(metadata.cp_local_extract_indices, artifacts[3])
+        self.assertIs(metadata.cp_local_valid_mask, artifacts[4])
+
+
 @skipUnless(torch.cuda.is_available(), "CUDA metadata consumer required")
 class Qwen3NextHostConvMetadataTest(TestCase):
     def inputs(self, lengths):
