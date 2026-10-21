@@ -192,6 +192,8 @@ TEST_F(GenerateStreamTest, generationPrefillCudaGraphReplayStatusIsReturnedInAux
     stream->generateConfig()->num_return_sequences = 1;
     stream->generateConfig()->max_new_tokens       = 4;
     stream->generateConfig()->aux_info             = true;
+    // Both reads assert intermediate updates, so this fixture must stream them.
+    stream->generateConfig()->is_streaming         = true;
     stream->generateConfig()->pd_separation        = true;
     stream->reportEvent(StreamEvents::CanRun);
     ASSERT_EQ(stream->moveToNext(), StreamState::RUNNING);
@@ -210,7 +212,7 @@ TEST_F(GenerateStreamTest, generationPrefillCudaGraphReplayStatusIsReturnedInAux
     update_info.generation_prefill_cuda_graph_status = GenerationPrefillCudaGraphStatus::REPLAYED;
     stream->update(update_info);
 
-    auto output_result = stream->nextOutput();
+    auto output_result = stream->nextOutput(1000);
     ASSERT_TRUE(output_result.ok());
     ASSERT_EQ(output_result.value().generate_outputs.size(), 1);
     EXPECT_EQ(output_result.value().generate_outputs[0].aux_info.generation_prefill_cuda_graph_status, "replayed");
@@ -228,7 +230,7 @@ TEST_F(GenerateStreamTest, generationPrefillCudaGraphReplayStatusIsReturnedInAux
                                    torch::Tensor(),
                                    torch::Tensor()};
     stream->update(decode_update);
-    auto decode_output_result = stream->nextOutput();
+    auto decode_output_result = stream->nextOutput(1000);
     ASSERT_TRUE(decode_output_result.ok());
     ASSERT_EQ(decode_output_result.value().generate_outputs.size(), 1);
     EXPECT_EQ(decode_output_result.value().generate_outputs[0].aux_info.generation_prefill_cuda_graph_status,
