@@ -77,3 +77,11 @@ py_test(
         ":torch",
     ],
 )
+
+
+py_test(
+    name = "device_resource_test",
+    srcs = ["device_resource_test.py"],
+    env = {"GPU_COUNT": "0"},
+    deps = [":device_resource"],
+)

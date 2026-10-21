@@ -19,6 +19,7 @@ cc_library(
     name = "xgrammar_internal_headers",
     hdrs = glob([
         "cpp/*.h",
+        "cpp/converter_ext/*.h",
         "cpp/support/*.h",
         "3rdparty/picojson/picojson.h",
     ]),
@@ -35,6 +36,7 @@ cc_library(
     # matcher/compiled_grammar operator<<.
     srcs = glob([
         "cpp/*.cc",
+        "cpp/converter_ext/*.cc",
         "cpp/support/*.cc",
     ]),
     defines = [

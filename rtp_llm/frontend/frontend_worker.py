@@ -27,7 +27,11 @@ from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactor
 from rtp_llm.ops import ParallelismConfig, SpecialTokens, VitSeparation
 from rtp_llm.pipeline.pipeline import Pipeline
 from rtp_llm.structure.request_extractor import Request, RequestExtractor
-from rtp_llm.utils.base_model_datatypes import CustomOutput, GenerateResponse
+from rtp_llm.utils.base_model_datatypes import (
+    BatchedTerminalOutputs,
+    CustomOutput,
+    GenerateResponse,
+)
 from rtp_llm.utils.complete_response_async_generator import (
     CompleteResponseAsyncGenerator,
 )
@@ -109,6 +113,7 @@ class FrontendWorker:
             mm_related_params=None,  # Frontend doesn't need mm_related_params
             grpc_config=py_env_configs.grpc_config,
             vit_separation=vit_separation,
+            mm_model_config=getattr(model_config, "mm_model_config", None),
             server_config=py_env_configs.server_config,
             master_config=py_env_configs.master_config,
             parallelism_config=engine_config.parallelism_config,
@@ -340,7 +345,9 @@ class FrontendWorker:
         if generate_config.num_return_sequences > 0:
             outputs = gen_responses.generate_outputs.generate_outputs
             custom_outputs = None
-            if any(seq.custom_output is not None for seq in outputs):
+            if not isinstance(outputs, BatchedTerminalOutputs) and any(
+                seq.custom_output is not None for seq in outputs
+            ):
                 custom_outputs = [
                     (
                         seq.custom_output.tolist()
@@ -357,7 +364,11 @@ class FrontendWorker:
                     aux_info.append(info)
             sequences_pipeline_response = MultiSequencesPipelineResponse(
                 response=generate_texts,
-                finished=all(
+                finished=isinstance(
+                    gen_responses.generate_outputs.generate_outputs,
+                    BatchedTerminalOutputs,
+                )
+                or all(
                     [
                         seq.finished
                         for seq in gen_responses.generate_outputs.generate_outputs

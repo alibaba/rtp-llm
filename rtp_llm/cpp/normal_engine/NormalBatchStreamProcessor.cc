@@ -14,6 +14,7 @@ NormalBatchStreamProcessor::NormalBatchStreamProcessor(
     model_input_gatherer_config_.input_vocab_size        = model_config.input_vocab_size;
     model_input_gatherer_config_.has_positional_encoding = model_config.has_positional_encoding;
     model_input_gatherer_config_.is_multimodal           = model_config.mm_model_config.is_multimodal;
+    model_input_gatherer_config_.has_engram              = !model_config.attn_config.v41_kv_source_layer_ids.empty();
     model_input_gatherer_config_.mm_position_ids_style =
         static_cast<PositionIdsStyle>(model_config.mm_model_config.mm_position_ids_style);
     model_input_gatherer_config_.position_id_len_factor     = model_config.attn_config.rope_config.index_factor;
@@ -54,6 +55,29 @@ NormalBatchStreamProcessor::NormalBatchStreamProcessor(
 absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups& stream_groups,
                                                   const MergedOutput& merge_outputs) const {
     return output_dispatcher_->dispatch(stream_groups, merge_outputs);
+}
+
+absl::Status NormalBatchStreamProcessor::dispatchPrefillOnly(
+    const StreamGroups& stream_groups, GenerationPrefillCudaGraphStatus generation_prefill_cuda_graph_status) const {
+    for (const auto& stream : stream_groups.allStreams()) {
+        auto empty_token_ids = torch::empty({stream->currentBatchSize(), 0}, torch::kInt32);
+        stream->update({empty_token_ids,
+                        /*num_new_tokens=*/0,
+                        /*hidden_states=*/torch::Tensor(),
+                        /*logits=*/torch::Tensor(),
+                        /*softmax_probs=*/torch::Tensor(),
+                        /*cum_log_probs=*/torch::Tensor(),
+                        /*all_probs=*/torch::Tensor(),
+                        /*loss=*/torch::Tensor(),
+                        /*src_batch_indices=*/torch::Tensor(),
+                        /*all_hidden_states=*/torch::Tensor(),
+                        /*update_remote_generate=*/false,
+                        /*force_update_info=*/false,
+                        /*prompt_logits=*/std::nullopt,
+                        /*error_info=*/std::nullopt,
+                        generation_prefill_cuda_graph_status});
+    }
+    return absl::OkStatus();
 }
 
 absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(const StreamGroups& stream_groups,

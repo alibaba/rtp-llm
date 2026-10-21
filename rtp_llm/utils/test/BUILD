@@ -46,6 +46,12 @@ py_test(
 )
 
 py_test(
+    name = "jit_cache_deep_gemm_test",
+    srcs = ["jit_cache_deep_gemm_test.py"],
+    deps = ["//rtp_llm:jit_cache_manager_lib"],
+)
+
+py_test(
     name = "jit_cache_manager_test",
     size = "large",
     srcs = [
@@ -194,6 +200,13 @@ py_test(
 )
 
 py_test(
+    name = "process_lifecycle_test",
+    srcs = ["process_lifecycle_test.py"],
+    deps = ["//rtp_llm:utils"],
+    timeout = "short",
+)
+
+py_test(
     name = "grpc_host_channel_pool_test",
     srcs = [
         "grpc_host_channel_pool_test.py",
@@ -213,6 +226,17 @@ py_test(
         "//rtp_llm:utils",
         "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_py_proto",
         "//rtp_llm/metrics",
+    ],
+)
+
+py_test(
+    name = "grpc_util_test",
+    srcs = ["grpc_util_test.py"],
+    deps = [
+        ":protobuf",
+        "//rtp_llm:torch",
+        "//rtp_llm:utils",
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_py_proto",
     ],
 )
 

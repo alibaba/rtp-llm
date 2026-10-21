@@ -557,6 +557,11 @@ class WorkspaceStreamingOutputProjectionTest(unittest.TestCase):
                 "flash_mla": SimpleNamespace(
                     flash_mla_sparse_fwd=fake_flash_mla_sparse_fwd
                 ),
+                # The production shim prefers the isolated legacy wheel;
+                # alias the fake under both names.
+                "flash_mla_legacy": SimpleNamespace(
+                    flash_mla_sparse_fwd=fake_flash_mla_sparse_fwd
+                ),
                 "rtp_llm.models_py.modules.dsv4.fp8._swa_dequant_triton": SimpleNamespace(),
                 "rtp_llm.models_py.modules.dsv4.fp8._swa_ops_triton": SimpleNamespace(
                     combine_topk_swa_indices=fake_combine_topk_swa_indices,
@@ -798,7 +803,12 @@ class SwaStreamingOutputProjectionTest(unittest.TestCase):
             {
                 "flash_mla": SimpleNamespace(
                     flash_mla_sparse_fwd=fake_flash_mla_sparse_fwd
-                )
+                ),
+                # The production shim prefers the isolated legacy wheel;
+                # alias the fake under both names.
+                "flash_mla_legacy": SimpleNamespace(
+                    flash_mla_sparse_fwd=fake_flash_mla_sparse_fwd
+                ),
             },
         ):
             out = layer._attn_fp8_swa_via_kv_full(qkv, common)

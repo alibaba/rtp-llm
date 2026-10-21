@@ -16,6 +16,7 @@ import io.netty.channel.socket.nio.NioSocketChannel;
 import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.context.Context;
 import org.flexlb.config.ConfigService;
+import org.flexlb.constant.GrpcConstants;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.interceptor.GrpcTraceInterceptor;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
@@ -34,11 +35,19 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 @Component
 public class FlexlbGrpcForwarder {
-
     static final int MAX_FORWARD_HOPS = 1;
+
+    /**
+     * Bound serialized payloads retained by follower-to-master RPCs.
+     * Overflow fails before allocating Netty direct buffers. The default is
+     * 4 GiB, configurable with flexlb.forward.max-inflight-bytes.
+     */
+    private final long maxForwardInflightBytes;
+    private final AtomicLong forwardInflightBytes = new AtomicLong(0L);
 
     private final LBStatusConsistencyService lbStatusConsistencyService;
     private final ConfigService configService;
@@ -58,6 +67,13 @@ public class FlexlbGrpcForwarder {
         this.engineHealthReporter = engineHealthReporter;
         this.eventLoopGroup = eventLoopGroup;
         this.executor = executor;
+        this.maxForwardInflightBytes = resolveMaxForwardInflightBytes();
+        Logger.info("FlexLB forwarder in-flight byte budget: {} bytes", maxForwardInflightBytes);
+    }
+
+    private static long resolveMaxForwardInflightBytes() {
+        long configured = Long.getLong("flexlb.forward.max-inflight-bytes", 0L);
+        return configured > 0L ? configured : 4L * 1024 * 1024 * 1024;
     }
 
     public CompletionStage<MasterForwardResult> forwardScheduleToMaster(
@@ -78,6 +94,26 @@ public class FlexlbGrpcForwarder {
             return CompletableFuture.completedFuture(MasterForwardResult.noMaster());
         }
 
+        // Byte-budget admission BEFORE any re-serialization: the forwarded
+        // Schedule re-serializes the full inbound payload into direct buffers.
+        // getSerializedSize is protobuf-cached (O(1)).
+        long forwardBytes = request.getSerializedSize();
+        if (!tryChargeForwardBytes(forwardBytes)) {
+            Logger.warn(
+                    "event=flexlb_forward_budget_exhausted request_id={} bytes={} budget={} inflight={}",
+                    request.getRequestId(), forwardBytes, maxForwardInflightBytes,
+                    forwardInflightBytes.get());
+            reportForwardResult(ipOf(masterHostIpPort), "FORWARD_BUDGET_EXHAUSTED");
+            return CompletableFuture.completedFuture(MasterForwardResult.failed(
+                    "FORWARD_BUDGET_EXHAUSTED", masterHostIpPort));
+        }
+
+        AtomicBoolean forwardBytesSettled = new AtomicBoolean();
+        Runnable settleForwardBytes = () -> {
+            if (forwardBytesSettled.compareAndSet(false, true)) {
+                releaseForwardBytes(forwardBytes);
+            }
+        };
         String masterIp = ipOf(masterHostIpPort);
         FlexlbScheduleProtocol.FlexlbScheduleRequestPB forwardedRequest =
                 request.toBuilder().setForwardHop(guard.nextHop()).build();
@@ -91,6 +127,7 @@ public class FlexlbGrpcForwarder {
                     withTraceHeaders(FlexlbServiceGrpc.newFutureStub(masterChannel(masterHostIpPort)), trace.context);
             rpcFuture = stub.schedule(forwardedRequest);
         } catch (RuntimeException error) {
+            settleForwardBytes.run();
             trace.finish(error);
             return CompletableFuture.completedFuture(forwardFailure(
                     request.getRequestId(), guard, error));
@@ -103,6 +140,7 @@ public class FlexlbGrpcForwarder {
                         @Override
                         public void onSuccess(
                                 FlexlbScheduleProtocol.FlexlbScheduleResponsePB response) {
+                            settleForwardBytes.run();
                             if (response == null) {
                                 trace.finish(Status.UNKNOWN.withDescription("MISSING_RESPONSE").asRuntimeException());
                                 result.complete(MasterForwardResult.failed(
@@ -117,6 +155,7 @@ public class FlexlbGrpcForwarder {
 
                         @Override
                         public void onFailure(Throwable error) {
+                            settleForwardBytes.run();
                             trace.finish(error);
                             result.complete(forwardFailure(
                                     request.getRequestId(), guard, error));
@@ -124,6 +163,7 @@ public class FlexlbGrpcForwarder {
                     },
                     Runnable::run);
         } catch (RuntimeException callbackRegistrationError) {
+            settleForwardBytes.run();
             trace.finish(callbackRegistrationError);
             rpcFuture.cancel(true);
             result.complete(forwardFailure(
@@ -140,6 +180,23 @@ public class FlexlbGrpcForwarder {
             }
         });
         return result;
+    }
+
+    private boolean tryChargeForwardBytes(long bytes) {
+        long current;
+        long next;
+        do {
+            current = forwardInflightBytes.get();
+            next = current + bytes;
+            if (next > maxForwardInflightBytes) {
+                return false;
+            }
+        } while (!forwardInflightBytes.compareAndSet(current, next));
+        return true;
+    }
+
+    private void releaseForwardBytes(long bytes) {
+        forwardInflightBytes.addAndGet(-bytes);
     }
 
     /**
@@ -628,7 +685,7 @@ public class FlexlbGrpcForwarder {
                 .disableRetry()
                 .keepAliveTime(30, TimeUnit.SECONDS)
                 .keepAliveTimeout(10, TimeUnit.SECONDS)
-                .maxInboundMessageSize(16 * 1024 * 1024)
+                .maxInboundMessageSize(GrpcConstants.MAX_MESSAGE_SIZE)
                 .build();
     }
 

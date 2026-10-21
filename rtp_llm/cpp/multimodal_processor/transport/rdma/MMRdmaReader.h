@@ -17,10 +17,10 @@
 namespace rtp_llm {
 
 // Reassembles and validates tensors read from one or more RDMA slots.
-bool assembleMMRdmaOutput(const std::vector<torch::Tensor>&        mm_tensors,
-                          const std::vector<MMRdmaSlotPB::Role>&   roles,
-                          const MultimodalOutputPB*                output_pb,
-                          MultimodalOutput*                        mm_output);
+bool assembleMMRdmaOutput(const std::vector<torch::Tensor>&      mm_tensors,
+                          const std::vector<MMRdmaSlotPB::Role>& roles,
+                          const MultimodalOutputPB*              output_pb,
+                          MultimodalOutput*                      mm_output);
 
 class MMRdmaReader: public MMReceiptReader {
 public:
@@ -34,24 +34,25 @@ public:
         return "rdma";
     }
 
-    bool advertise(const std::string& endpoint, MultimodalInputsPB& request_pb) override;
-    bool matches(const MultimodalOutputPB& receipt) const override;
+    bool          advertise(const std::string& endpoint, MultimodalInputsPB& request_pb) override;
+    bool          matches(const MultimodalOutputPB& receipt) const override;
     ConsumeResult consume(const MultimodalOutputPB& receipt, DeliveryContext& context) override;
     void          discard(const MultimodalOutputPB& receipt, DeliveryContext& context) override;
 
 private:
     static std::vector<std::string> handlesOf(const MultimodalOutputPB& receipt);
 
-    bool readAllSlots(const MultimodalOutputPB&          receipt,
-                      DeliveryContext&                   context,
-                      std::vector<torch::Tensor>*        mm_tensors,
-                      std::vector<MMRdmaSlotPB::Role>*   roles,
-                      bool*                              deadline_exhausted);
+    bool readAllSlots(const MultimodalOutputPB&        receipt,
+                      DeliveryContext&                 context,
+                      std::vector<torch::Tensor>*      mm_tensors,
+                      std::vector<MMRdmaSlotPB::Role>* roles,
+                      bool*                            deadline_exhausted,
+                      bool*                            release_deferred);
 
     std::shared_ptr<rdma_transport::RdmaRead> reader_;
-    std::optional<RdmaConfig>                  rdma_config_;
+    std::optional<RdmaConfig>                 rdma_config_;
     bool                                      validate_descriptors_ = false;
-    std::timed_mutex                           provider_mutex_;
+    std::timed_mutex                          provider_mutex_;
 };
 
 // The receipt reader remains installed without a provider so it can reject and release

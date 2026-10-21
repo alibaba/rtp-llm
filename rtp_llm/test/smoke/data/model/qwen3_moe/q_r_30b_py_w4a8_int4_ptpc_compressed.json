@@ -14,7 +14,7 @@
         "_prompt_source": "chat-template wrapping $prompt:s1"
       },
       "result": {
-        "response": "The **CAP Theorem**, also known as **Brewer's Theorem**, is a fundamental concept in distributed systems that states:\n\n> **In a distributed system, you can only guarantee two out of the following three properties:**\n>\n> 1. **Consistency (C)** – Every read receives the most",
+        "response": "The CAP Theorem, also known as Brewer's Theorem, states that in a distributed data system, you can only guarantee **two out of three** of the following properties:\n\n1. **Consistency (C)**: Every read receives the most recent write or an error. All nodes see the same data at the",
         "response_alternatives": null,
         "hidden_states": null,
         "logits": null,
@@ -62,7 +62,7 @@
       "result": {
         "response_batch": [
           {
-            "response": "The **CAP Theorem**, also known as **Brewer's Theorem**, is a fundamental concept in distributed systems that states:\n\n> **In a distributed system, you can only guarantee two out of the following three properties:**\n>\n> 1. **Consistency (C)** – Every read receives the most",
+            "response": "The CAP Theorem, also known as Brewer's Theorem, states that in a distributed data system, you can only guarantee **two out of three** of the following properties:\n\n1. **Consistency (C)**: Every read receives the most recent write or an error. All nodes see the same data at the",
             "response_alternatives": null,
             "hidden_states": null,
             "logits": null,

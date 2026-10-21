@@ -179,12 +179,50 @@ class PrefillFastPathCudaTest(_PrefillForwardTestBase):
             forwarded, torch.tensor([0, 2, 4], dtype=torch.int32)
         )
 
-    def test_full_forward_prefill_is_cuda_graph_capture_safe(self):
-        for host_mirror_present in (False, True):
-            with self.subTest(host_mirror_present=host_mirror_present):
-                self._check_forward_prefill_graph(host_mirror_present)
+    def test_eager_forward_prefill_moves_cuda_only_mirror_to_host(self):
+        device = torch.device("cuda", torch.cuda.current_device())
+        self.assertFalse(torch.cuda.is_current_stream_capturing())
+        for host_cu_seqlens in (
+            None,
+            torch.empty(0, dtype=torch.int32),
+            torch.tensor([0], dtype=torch.int32),
+        ):
+            with self.subTest(host_cu_seqlens=host_cu_seqlens):
+                attn = SimpleNamespace(
+                    cu_seqlens=host_cu_seqlens,
+                    cu_seqlens_device=torch.tensor(
+                        [0, 2, 4], dtype=torch.int32, device=device
+                    ),
+                    combo_position_ids=torch.tensor(
+                        [0, 1, 0, 1], dtype=torch.long, device=device
+                    ),
+                    input_lengths=None,
+                    input_lengths_device=None,
+                )
+                forwarded = self._forwarded_cu_seqlens(
+                    self._run_forward_prefill_with(attn, device=device)
+                )
+                self.assertEqual(forwarded.device.type, "cpu")
+                self.assertTrue(forwarded.is_contiguous())
+                torch.testing.assert_close(
+                    forwarded, torch.tensor([0, 2, 4], dtype=torch.int32)
+                )
 
-    def _check_forward_prefill_graph(self, host_mirror_present):
+    def test_full_forward_prefill_is_cuda_graph_capture_safe(self):
+        for host_mirror_present, device_mirror_present in (
+            (False, False),
+            (False, True),
+            (True, True),
+        ):
+            with self.subTest(
+                host_mirror_present=host_mirror_present,
+                device_mirror_present=device_mirror_present,
+            ):
+                self._check_forward_prefill_graph(
+                    host_mirror_present, device_mirror_present
+                )
+
+    def _check_forward_prefill_graph(self, host_mirror_present, device_mirror_present):
         device = torch.device("cuda", torch.cuda.current_device())
         v4 = _FakeV4()
         v4.layers = [_MetadataLayer(0, v4.calls)]
@@ -193,7 +231,11 @@ class PrefillFastPathCudaTest(_PrefillForwardTestBase):
             cu_seqlens=torch.tensor(
                 [0, 2, 4] if host_mirror_present else [], dtype=torch.int32
             ),
-            cu_seqlens_device=torch.tensor([0, 2, 4], dtype=torch.int32, device=device),
+            cu_seqlens_device=(
+                torch.tensor([0, 2, 4], dtype=torch.int32, device=device)
+                if device_mirror_present
+                else None
+            ),
             input_lengths=torch.tensor([2, 2], dtype=torch.int32),
             input_lengths_device=torch.tensor([2, 2], dtype=torch.int32, device=device),
             prefix_lengths=torch.tensor([5, 100], dtype=torch.int32),
@@ -237,9 +279,10 @@ class PrefillFastPathCudaTest(_PrefillForwardTestBase):
                 with self.subTest(lengths=lengths):
                     # The host mirrors deliberately retain the capture-time
                     # batch. Replay updates only the existing device tensors.
-                    attn.cu_seqlens_device.copy_(
-                        torch.tensor([0, lengths[0], 4], device=device)
-                    )
+                    if attn.cu_seqlens_device is not None:
+                        attn.cu_seqlens_device.copy_(
+                            torch.tensor([0, lengths[0], 4], device=device)
+                        )
                     attn.input_lengths_device.copy_(
                         torch.tensor(lengths, device=device)
                     )

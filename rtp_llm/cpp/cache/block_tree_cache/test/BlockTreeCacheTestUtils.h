@@ -103,7 +103,7 @@ public:
                                          TransferCopyAction               action,
                                          std::shared_ptr<CallbackBarrier> barrier = nullptr);
 
-    std::shared_ptr<AsyncContext> execute(TransferTask task) override;
+    std::shared_ptr<TransferAsyncContext> execute(TransferTask task) override;
 
     // Reconfigure only after all cache tasks settle and before submitting new work.
     void   setCopyBehavior(TransferCopyAction action, std::shared_ptr<CallbackBarrier> barrier);
@@ -176,7 +176,7 @@ public:
                                                 bool                            perform_successful_transfers = true,
                                                 bool                            enable_disk_cache            = false);
 
-    std::shared_ptr<AsyncContext> execute(TransferTask task) override;
+    std::shared_ptr<TransferAsyncContext> execute(TransferTask task) override;
 
     // Scripts the outcome of upcoming submits. Successful submits delegate to
     // the real engine unless perform_successful_transfers is false.
@@ -198,6 +198,7 @@ private:
 };
 
 struct FullSWAEnvironmentOptions {
+    size_t task_pool_size{8};
     size_t path_length{4};
     size_t usable_device_blocks{16};
     size_t usable_host_blocks{16};

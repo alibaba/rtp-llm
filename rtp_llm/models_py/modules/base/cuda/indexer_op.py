@@ -23,6 +23,18 @@ except Exception as e:
     rope = None
 
 
+from rtp_llm.models_py.triton_kernels.legacy_fp8_indexer_score import (
+    legacy_fp8_mqa_logits,
+    legacy_fp8_paged_mqa_logits,
+)
+
+
+def _fp8_mqa_logits_compat(*args, **kwargs):
+    if deep_gemm is not None and hasattr(deep_gemm, "fp8_mqa_logits"):
+        return deep_gemm.fp8_mqa_logits(*args, **kwargs)
+    return legacy_fp8_mqa_logits(*args, **kwargs)
+
+
 _paged_mqa_context_lens_dim: Optional[int] = None
 
 
@@ -43,6 +55,11 @@ def _fp8_paged_mqa_logits_compat(
     rank only after the complete logits call succeeds, instead of coupling
     RTP-LLM to a vendor package version string.
     """
+    if deep_gemm is None or not hasattr(deep_gemm, "fp8_paged_mqa_logits"):
+        return legacy_fp8_paged_mqa_logits(
+            q, kv_cache, weights, context_lens, block_table, max_context_len
+        )
+
     global _paged_mqa_context_lens_dim
 
     # Keep this call's probing decision stable if another call populates the cache.
@@ -552,7 +569,7 @@ class IndexerOp(nn.Module):
             fmha_params.ks is not None and fmha_params.ke is not None
         ), "ks/ke must be prepared in prefill"
 
-        logits = deep_gemm.fp8_mqa_logits(
+        logits = _fp8_mqa_logits_compat(
             q_fp8,
             kv_fp8,
             weights,
@@ -663,7 +680,7 @@ class IndexerOp(nn.Module):
             lengths: torch.Tensor,
             topk_off: torch.Tensor,
         ) -> torch.Tensor:
-            logits_p = deep_gemm.fp8_mqa_logits(
+            logits_p = _fp8_mqa_logits_compat(
                 q_part,
                 kv_fp8_full,
                 weights_part,

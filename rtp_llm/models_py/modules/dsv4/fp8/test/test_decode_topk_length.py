@@ -69,7 +69,9 @@ class DecodeTopkLengthEagerTest(unittest.TestCase):
                 meta = self._build([start_pos], q_len=1, max_seq_len=max_seq_len)
                 self.assertEqual(int(meta.swa_topk_length[0]), swa_len)
                 # HCA effective length == seq_len // 128, well under capture width.
-                self.assertEqual(int(meta.compressed_topk_length_by_ratio[128][0]), hca_len)
+                self.assertEqual(
+                    int(meta.compressed_topk_length_by_ratio[128][0]), hca_len
+                )
                 self.assertLess(hca_len, _hca_dense_width(max_seq_len))
                 # CSA capped at index_topk for long context.
                 self.assertEqual(
@@ -161,7 +163,9 @@ class DecodeTopkLengthInPlaceTest(unittest.TestCase):
         # so a captured CUDA graph keeps reading from the same storage.
         meta = self._alloc(4, 1, 1024 * 1024)
         ptr_swa = meta.swa_topk_length.data_ptr()
-        ptr_cmp = {r: t.data_ptr() for r, t in meta.compressed_topk_length_by_ratio.items()}
+        ptr_cmp = {
+            r: t.data_ptr() for r, t in meta.compressed_topk_length_by_ratio.items()
+        }
         for sp in ([16 * 1024 - 1, 403], [128 * 1024 - 1, 50]):
             bs = 2
             start_pos = torch.tensor(sp, dtype=torch.int32)
@@ -269,13 +273,16 @@ class DecodeTopkLengthCaptureFullWidthTest(unittest.TestCase):
         _update_topk_lengths_in_place(meta, start_pos, 2, full_width=True)
         self.assertEqual([int(x) for x in meta.swa_topk_length[:2]], [WINDOW, WINDOW])
 
+
 class DecodeTopkLengthParityTest(unittest.TestCase):
     """Eager build vs allocate+update produce identical length values."""
 
     def test_eager_graph_parity(self) -> None:
         max_seq_len = 1024 * 1024
         q_len = 4
-        start_pos = torch.tensor([128 * 1024 - 4, 16 * 1024 - 4, 200, 7], dtype=torch.int32)
+        start_pos = torch.tensor(
+            [128 * 1024 - 4, 16 * 1024 - 4, 200, 7], dtype=torch.int32
+        )
         bs = int(start_pos.shape[0])
 
         eager = build_decode_metadata_fp8(
@@ -303,9 +310,7 @@ class DecodeTopkLengthParityTest(unittest.TestCase):
             graph.compressed_lens[r][:bs].copy_((start_pos + q_len) // r)
         _update_topk_lengths_in_place(graph, start_pos, bs)
 
-        self.assertTrue(
-            torch.equal(eager.swa_topk_length, graph.swa_topk_length[:bs])
-        )
+        self.assertTrue(torch.equal(eager.swa_topk_length, graph.swa_topk_length[:bs]))
         for r in (4, 128):
             self.assertTrue(
                 torch.equal(
@@ -340,7 +345,11 @@ class DecodeTopkLengthPlumbingTest(unittest.TestCase):
 
         fake.flash_mla_with_kvcache = fake_kv
         old = sys.modules.get("flash_mla")
+        old_flash_mla_legacy = sys.modules.get("flash_mla_legacy")
+        # The production shim prefers the isolated legacy wheel; alias the
+        # fake under both names so the mock still intercepts it.
         sys.modules["flash_mla"] = fake
+        sys.modules["flash_mla_legacy"] = fake
         try:
             module = importlib.import_module(
                 "rtp_llm.models_py.modules.dsv4.fp8.decode.fp8_sparse_attn_decode_op"
@@ -355,6 +364,10 @@ class DecodeTopkLengthPlumbingTest(unittest.TestCase):
                 sys.modules.pop("flash_mla", None)
             else:
                 sys.modules["flash_mla"] = old
+        if old_flash_mla_legacy is None:
+            sys.modules.pop("flash_mla_legacy", None)
+        else:
+            sys.modules["flash_mla_legacy"] = old_flash_mla_legacy
         return calls
 
     def test_dual_paged_forwards_both_lengths(self) -> None:

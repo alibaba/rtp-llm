@@ -547,13 +547,21 @@ class OpenaiComparer(BaseComparer):
             )
 
     def _rewrite_query_info(self, query_info: ChatCompletionRequest):
+        # Cache-affinity cases need one stable URL across repeated requests.
+        preserve_path = self.qr_info.get("compare_config", {}).get(
+            "preserve_media_path", False
+        )
         for message in query_info.messages:
             if isinstance(message.content, list):
                 for part in message.content:
                     if part.image_url is not None:
-                        part.image_url.url = create_temporary_copy(part.image_url.url)
+                        part.image_url.url = create_temporary_copy(
+                            part.image_url.url, preserve_path=preserve_path
+                        )
                     if part.video_url is not None:
-                        part.video_url.url = create_temporary_copy(part.video_url.url)
+                        part.video_url.url = create_temporary_copy(
+                            part.video_url.url, preserve_path=preserve_path
+                        )
 
     def _compare_aux_info(
         self,

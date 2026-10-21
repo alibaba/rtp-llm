@@ -54,7 +54,7 @@ struct BlockTreeCacheConfig {
     int    task_pool_size{4};
     size_t business_queue_max_size{10000};
 
-    // ---- Shared per-rank TransferEngine task pool ----
+    // ---- Per-rank TransferEngine task pools, one per direction ----
     size_t transfer_worker_count{4};
     size_t transfer_queue_max_size{10000};
 
@@ -119,8 +119,10 @@ public:
 
     ~BlockTreeCache();
     bool init();
+    // Reject pending loads and wait for allocator callbacks before its members are destroyed.
+    void shutdownLoads();
 
-    BlockTreeMatchResult match(const CacheKeysType& cache_keys);
+    BlockTreeMatchResult match(const CacheKeysType& cache_keys, const std::function<bool(size_t)>& valid_prefix = {});
     void                 insert(const CacheKeysType&                              cache_keys,
                                 const std::vector<std::vector<GroupSetResource>>& resources,
                                 Tier                                              target_tier);
@@ -136,7 +138,7 @@ public:
     CacheStats                                getStats() const;
     std::vector<BlockTreePoolMetricsSnapshot> poolMetricsSnapshots() const;
     void                                      reportMetrics() const;
-    BlockTreeKeySnapshot                      getKeySnapshot() const;
+    BlockTreeKeySnapshot                      getKeySnapshot(int64_t latest_version = -1) const;
     void setEventPublisher(KVCacheEventPublisherPtr publisher, const std::vector<std::string>& required_group_tags);
     KVCacheSnapshot logicalCacheSnapshot() const;
     bool            abortPendingLoad(const std::shared_ptr<AsyncContext>& context);
@@ -144,7 +146,7 @@ public:
     BlockIndicesType matchedBlocksForGroup(std::string_view                      group_tag,
                                            const std::vector<MultiNodeResource>& matched_resources) const;
 
-    bool executeTransfer(TransferTask task);
+    TransferResult executeTransfer(TransferTask task);
 
     // Accessors
     BlockTree* tree() const {
@@ -181,7 +183,7 @@ public:
 private:
     void checkWatermark();
     // Caller holds mutex_.
-    void onWorkflowSettledLocked(bool tree_data_mutated, bool check_watermark);
+    void onWorkflowSettledLocked(bool check_watermark);
 
     BlockTreeCacheConfig                           config_;
     std::unique_ptr<BlockTree>                     tree_;
@@ -192,9 +194,6 @@ private:
     mutable std::mutex                             mutex_;
     BlockTreeEvictor                               evictor_;
     bool                                           initialized_{false};
-    // Preserve the historical empty-cache wire value. The first successful
-    // topology mutation advances the version to zero.
-    int64_t                                     mutation_version_{-1};
     BlockTreeLoader                             loader_;
     BlockTreeStorer                             storer_;
     std::unique_ptr<FullPrefixInvariantScanner> full_prefix_scanner_;

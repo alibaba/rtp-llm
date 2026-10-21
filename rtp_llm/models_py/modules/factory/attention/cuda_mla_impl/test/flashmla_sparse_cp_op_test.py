@@ -45,7 +45,10 @@ def _check_cuda_flashmla():
         major, minor = map(int, torch.version.cuda.split(".")[:2])
         if (major, minor) < (12, 9):
             return False
-        from flash_mla import flash_mla_with_kvcache, get_mla_metadata  # noqa: F401
+        from rtp_llm.models_py.utils.flash_mla_legacy import (  # noqa: F401
+            flash_mla_with_kvcache,
+            get_mla_metadata,
+        )
 
         return True
     except (ImportError, AttributeError, ValueError):

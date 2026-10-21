@@ -201,6 +201,10 @@ def _register_builtin_lazy_models() -> None:
     )
     register_lazy_model("glm_5", "rtp_llm.models.deepseek_v2", ["GlmMoeDsaForCausalLM"])
     register_lazy_model(
+        "deepseek_v41", "rtp_llm.models.deepseek_v41", ["DeepseekV41ForCausalLM"]
+    )
+    register_lazy_model("deepseek_v41_dspark", "rtp_llm.models.deepseek_v41")
+    register_lazy_model(
         "deepseek_v4", "rtp_llm.models.deepseek_v4", ["DeepseekV4ForCausalLM"]
     )
     register_lazy_model(

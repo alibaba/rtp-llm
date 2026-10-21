@@ -10,7 +10,7 @@ inline int64_t hashInt64Func(const std::hash<int32_t>& hasher, int64_t hash, int
     return hash;
 }
 
-inline int64_t hashInt64Array(int64_t hash, int32_t* begin, int32_t* end) {
+inline int64_t hashInt64Array(int64_t hash, const int32_t* begin, const int32_t* end) {
     std::hash<int32_t> hasher;
 
     while (begin != end) {

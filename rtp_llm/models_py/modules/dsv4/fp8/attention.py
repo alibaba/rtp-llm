@@ -3595,10 +3595,11 @@ class AttentionFP8(nn.Module):
         assert (
             qkv.q is not None
         ), "_attn_via_workspace_cp_raw_q_merge: prefill Q not materialized"
-        from flash_mla import flash_mla_sparse_fwd  # type: ignore[import-not-found]
-
         from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
         from rtp_llm.models_py.modules.dsv4.fp8 import _swa_dequant_triton as _swa_dq
+        from rtp_llm.models_py.utils.flash_mla_legacy import (
+            flash_mla_sparse_fwd,  # type: ignore[import-not-found]
+        )
 
         assert common.cp_ctx is not None
         cp_ctx = common.cp_ctx
@@ -5446,7 +5447,9 @@ class AttentionFP8(nn.Module):
             int(freqs_cis.shape[0]) == s_q
         ), f"RoPE rows ({freqs_cis.shape[0]}) != Q rows ({s_q})"
 
-        from flash_mla import flash_mla_sparse_fwd  # type: ignore[import-not-found]
+        from rtp_llm.models_py.utils.flash_mla_legacy import (
+            flash_mla_sparse_fwd,  # type: ignore[import-not-found]
+        )
 
         chunk_rows = min(_FLASH_MLA_SPARSE_Q_CHUNK, s_q)
         if out is None:

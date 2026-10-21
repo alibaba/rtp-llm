@@ -61,6 +61,14 @@ public class ChannelConfiguration {
 
     @Bean
     public EventLoopGroup managedChannelEventLoopGroup() {
+        // No custom taskQueue: grpc-netty's WriteQueue.scheduleFlush marks the
+        // flush scheduled before execute() and never resets that flag if the
+        // event loop rejects the task. A bounded/rejecting queue here would
+        // permanently wedge flush scheduling for the channel (writes and
+        // cancels queue forever), which is a strictly worse retention mode
+        // than the default unbounded MPSC queue. Load is bounded instead at
+        // admission: the dispatch executor's admission permit bounds in-flight
+        // EnqueueBatch payloads (see DefaultBatchDispatcher).
         return new NioEventLoopGroup(
                 config.getInternalRuntime().getGrpcClientEventLoopThreads(),
                 null,

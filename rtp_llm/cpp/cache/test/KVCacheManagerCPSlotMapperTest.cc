@@ -1,11 +1,12 @@
 #include <gtest/gtest.h>
 #include <memory>
+#include <algorithm>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
-#include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
@@ -52,10 +53,76 @@ protected:
     }
 };
 
+TEST_F(KVCacheManagerCPSlotMapperTest, DecodeTpReplicatesFullPagesWhilePrefillCpShardsThem) {
+    ModelConfig model;
+    model.num_layers                          = 1;
+    model.attn_config.tokens_per_block        = 256;
+    model.attn_config.kernel_tokens_per_block = 128;
+    model.attn_config.sliding_window          = 128;
+    KVCacheSpecDesc full;
+    full.tag               = "global_kv_2";
+    full.cache_type        = KVCacheSpecType::OpaqueKV;
+    full.entry_dtype       = DataType::TYPE_UINT8;
+    full.entry_elems       = 288;
+    full.compression_ratio = 2;
+    full.entry_count_mode  = OpaqueBlockEntryCountMode::KERNEL_BLOCK_COMPRESSED;
+    KVCacheSpecDesc swa;
+    swa.tag                          = "swa_kv";
+    swa.cache_type                   = KVCacheSpecType::OpaqueState;
+    swa.is_state_cache               = true;
+    swa.entry_dtype                  = DataType::TYPE_UINT8;
+    swa.entry_elems                  = 528;
+    swa.explicit_entry_count         = 128;
+    swa.block_stride_bytes_alignment = 16896;
+    swa.cp                           = CacheCpPolicyDesc{};
+    swa.cp->scale_seq_size           = true;
+    swa.cp->align_payload            = true;
+    swa.cp->prefill_slice_layout     = CpPrefillSliceLayout::BLOCK_STRIDE;
+    swa.cp->slice                    = CpBlockSliceMode::EQUAL_BYTES;
+    model.kv_cache_spec_descs        = {{full, swa}};
+
+    for (const auto role : {RoleType::PREFILL, RoleType::DECODE}) {
+        for (const size_t rank : {0u, 1u}) {
+            ParallelismConfig par;
+            par.role_type = role;
+            par.tp_size   = 2;
+            par.tp_rank   = rank;
+            par.prefill_cp_config.method =
+                role == RoleType::PREFILL ? CPRotateMethod::ALL_GATHER : CPRotateMethod::PREFILL_CP;
+            par.prefill_cp_config.kv_cache_sharded = true;
+            par.prefill_cp_config.prefill_cp_size  = 2;
+            PDSepConfig pd;
+            pd.role_type = role;
+            auto config  = finalizeCacheConfig(CacheConfigCreator::createConfig(model, par, {}), 20);
+            EXPECT_EQ(config.group(full.tag).seqSizePerBlock(), 256u);
+            EXPECT_EQ(config.group(swa.tag).seqSizePerBlock(), 512u);
+            auto manager = std::make_shared<KVCacheManager>(
+                config, false, nullptr, KVCacheConfig{}, par, RuntimeConfig{}, SpeculativeExecutionConfig{}, pd);
+            ASSERT_TRUE(manager->init());
+            EXPECT_EQ(manager->cpSlotMapper() != nullptr, role == RoleType::PREFILL);
+            auto       resource = makeResource(1, config);
+            auto       tokens   = makeTokenIds(1, 783, 256);
+            const auto result   = manager->malloc(MallocInfo{resource, tokens});
+            ASSERT_TRUE(result.success);
+            const size_t full_blocks = role == RoleType::PREFILL ? 2 : 4;
+            EXPECT_EQ(resource->blocksNum(0, full.tag), full_blocks);
+            EXPECT_EQ(resource->kernelBlocks(0, full.tag).size(), full_blocks * 2);
+            EXPECT_TRUE(std::all_of(resource->kernelBlocks(0, full.tag).begin(),
+                                    resource->kernelBlocks(0, full.tag).end(),
+                                    [](int id) { return id > 0; }));
+            EXPECT_EQ(resource->blocksNum(0, swa.tag), 2u);
+            EXPECT_EQ(resource->kernelBlocks(0, swa.tag).size(), 2u);
+            manager->free(FreeInfo{resource, tokens});
+        }
+    }
+}
+
 // When kv_cache_sharded is false (default), cpSlotMapper() should return nullptr.
 TEST_F(KVCacheManagerCPSlotMapperTest, NoCPSharding_ReturnsNullMapper) {
     auto              config = makeTestConfig();
     ParallelismConfig par;
+    par.role_type                          = RoleType::PREFILL;
+    par.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
     par.tp_rank                            = 0;
     par.tp_size                            = 2;
     par.prefill_cp_config.kv_cache_sharded = false;
@@ -72,6 +139,8 @@ TEST_F(KVCacheManagerCPSlotMapperTest, NoCPSharding_ReturnsNullMapper) {
 TEST_F(KVCacheManagerCPSlotMapperTest, SingleRank_ReturnsNullMapper) {
     auto              config = makeTestConfig();
     ParallelismConfig par;
+    par.role_type                          = RoleType::PREFILL;
+    par.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
     par.tp_rank                            = 0;
     par.tp_size                            = 1;
     par.prefill_cp_config.kv_cache_sharded = true;
@@ -90,6 +159,8 @@ TEST_F(KVCacheManagerCPSlotMapperTest, CPShardingEnabled_ReturnsValidMapper) {
     auto      config             = makeTestConfig(/*block_num=*/20, seq_size_per_block);
 
     ParallelismConfig par;
+    par.role_type                          = RoleType::PREFILL;
+    par.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
     par.tp_rank                            = 1;
     par.tp_size                            = 2;
     par.prefill_cp_config.kv_cache_sharded = true;
@@ -113,6 +184,8 @@ TEST_F(KVCacheManagerCPSlotMapperTest, CPShardingEnabled_CacheInfoReportsVirtual
     auto      config             = makeTestConfig(/*block_num=*/20, seq_size_per_block);
 
     ParallelismConfig par;
+    par.role_type                          = RoleType::PREFILL;
+    par.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
     par.tp_rank                            = 0;
     par.tp_size                            = 4;
     par.prefill_cp_config.kv_cache_sharded = true;
@@ -132,6 +205,8 @@ TEST_F(KVCacheManagerCPSlotMapperTest, CPShardedMallocAllowsPartialTailWithoutCa
     auto      config             = makeTestConfig(/*block_num=*/20, seq_size_per_block);
 
     ParallelismConfig par;
+    par.role_type                = RoleType::PREFILL;
+    par.prefill_cp_config.method = CPRotateMethod::ALL_GATHER;
 
     auto mgr = std::make_shared<KVCacheManager>(config, /*warmup=*/false, nullptr, KVCacheConfig{}, par);
     ASSERT_TRUE(mgr->init());
@@ -164,6 +239,8 @@ TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_MallocAutoInjectReducesBlockCoun
     auto      config             = makeTestConfig(/*block_num=*/20, seq_size_per_block);
 
     ParallelismConfig par;
+    par.role_type                          = RoleType::PREFILL;
+    par.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
     par.tp_rank                            = 0;
     par.tp_size                            = 2;
     par.prefill_cp_config.kv_cache_sharded = true;
@@ -193,6 +270,8 @@ TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_MallocWithoutCPAllocatesFullBloc
     auto      config             = makeTestConfig(/*block_num=*/20, seq_size_per_block);
 
     ParallelismConfig par;
+    par.role_type                          = RoleType::PREFILL;
+    par.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
     par.tp_rank                            = 0;
     par.tp_size                            = 2;
     par.prefill_cp_config.kv_cache_sharded = false;
@@ -221,6 +300,8 @@ TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_AllocatorMapperControlsMalloc) {
     auto      config             = makeTestConfig(/*block_num=*/30, seq_size_per_block);
 
     ParallelismConfig par;
+    par.role_type                          = RoleType::PREFILL;
+    par.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
     par.tp_rank                            = 0;
     par.tp_size                            = 2;
     par.prefill_cp_config.kv_cache_sharded = true;
@@ -254,6 +335,8 @@ TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_InsertAutoInjectsMapper) {
     auto      config             = makeTestConfig(/*block_num=*/20, seq_size_per_block);
 
     ParallelismConfig par;
+    par.role_type                          = RoleType::PREFILL;
+    par.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
     par.tp_rank                            = 0;
     par.tp_size                            = 2;
     par.prefill_cp_config.kv_cache_sharded = true;

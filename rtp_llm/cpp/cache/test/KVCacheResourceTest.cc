@@ -233,6 +233,42 @@ TEST(BatchKVCacheResourceTest, CheckMatchesTagsAcrossMixedResourceOrders) {
     EXPECT_ANY_THROW(batches.check());
 }
 
+TEST(KVCacheResourceTest, CompactBeamTablesPreserveLayerViewsAndKernelMapping) {
+    auto topology = CacheTopology::create(
+        {makeResourceGroup("linear", CacheGroupType::LINEAR), makeResourceGroup("full", CacheGroupType::FULL)},
+        {{0, {"full"}}, {1, {"full", "linear"}}, {2, {"linear"}}});
+    KVCacheResource resource;
+    resource.initGroups(topology, false);
+    topology.reset();  // The compact resource owns the immutable membership.
+    resource.mutableBlockIds("full").assign({2, 3});
+    resource.mutableBlockIds("linear").assign({4});
+    EXPECT_ANY_THROW(resource.blocksForLayer(0, "linear"));
+    EXPECT_EQ(resource.blocksForLayer(1, "full"), (BlockIndicesType{2, 3}));
+    EXPECT_EQ(resource.kernelBlocksForLayer(1, "full"), (BlockIndicesType{8, 9, 10, 11, 12, 13, 14, 15}));
+    EXPECT_EQ(resource.kernelBlocksForLayer(1, "linear"), (BlockIndicesType{4}));
+    EXPECT_EQ(resource.groupTags(), (std::vector<std::string>{"linear", "full"}));
+    EXPECT_ANY_THROW(resource.layerBlocks());
+    auto holder = resource.groupBlockIds("full");
+    auto moved  = std::move(resource);
+    moved.mutableBlockIdsForLayer(1, "full").setAt(1, 5);
+    EXPECT_EQ(holder->blocks(), (BlockIndicesType{2, 5}));
+    EXPECT_EQ(moved.groupTagsForLayer(1), (std::vector<std::string>{"full", "linear"}));
+    EXPECT_EQ(moved.layerNum(), 3);
+    EXPECT_ANY_THROW(moved.groupTagsForLayer(-1));
+    EXPECT_ANY_THROW(moved.groupTagsForLayer(3));
+    for (const bool materialize : {false, true}) {
+        moved.initGroups(
+            CacheTopology::create({makeResourceGroup("full", CacheGroupType::FULL)}, {{0, {"full"}}, {1, {"full"}}}),
+            materialize);
+        EXPECT_EQ(moved.layerNum(), 2);
+        auto layers = moved.layerBlocks();
+        ASSERT_EQ(layers.size(), 2u);
+        EXPECT_EQ(layers[0], moved.groupBlockIds("full"));
+        EXPECT_EQ(layers[0], layers[1]);
+        EXPECT_ANY_THROW(moved.blocks("linear"));
+    }
+}
+
 TEST(BlockIdsTest, Full_ExpandsKernelBlocks) {
     BlockIds ids(/*kernel_blocks_per_kv_block=*/2);
 

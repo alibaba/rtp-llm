@@ -147,6 +147,9 @@ void LoadAsyncContext::onBackendMatch(size_t                                   m
                   && storage_request_.local_matched_blocks_num == local_matched_blocks_
                   && matched_blocks_num >= local_matched_blocks_
                   && matched_blocks_num <= storage_request_.handles.size());
+    while (matched_blocks_num > local_matched_blocks_ && valid_prefix_ && !valid_prefix_(matched_blocks_num)) {
+        --matched_blocks_num;
+    }
     backend_matched_blocks_ = matched_blocks_num;
     if (matched_blocks_num < storage_request_.handles.size()) {
         storage_request_.keys = std::make_shared<CacheKeysType>(storage_request_.keys->begin(),
@@ -299,6 +302,15 @@ bool LoadAsyncContext::completeTransfers(size_t count, bool success) {
     return true;
 }
 
+void LoadAsyncContext::cancelUnsubmittedTransfers() {
+    // Called only before commit, after removing reservations and join registrations.
+    // Already delivered join completions need not be counted a second time.
+    std::lock_guard<std::mutex> lock(mutex_);
+    assert(!committed_);
+    has_failure_              = true;
+    remaining_transfer_count_ = 0;
+}
+
 bool LoadAsyncContext::aggregateSuccess() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return settlement_ready_ && !has_failure_;
@@ -407,6 +419,11 @@ bool LoadAsyncContext::done() const {
 
 bool LoadAsyncContext::success() const {
     return state_.load() == State::SUCCEEDED;
+}
+
+ErrorInfo LoadAsyncContext::errorInfo() const {
+    return state_.load() == State::FAILED ? ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "load async context failed") :
+                                            ErrorInfo::OkStatus();
 }
 
 MallocStatus LoadAsyncContext::mallocStatus() const {

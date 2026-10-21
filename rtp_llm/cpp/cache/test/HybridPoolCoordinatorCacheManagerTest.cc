@@ -649,6 +649,13 @@ static void runStorageRoundTrip(const CacheConfig&                           con
 
     reader->free(FreeInfo{reader_resource, reader_tokens});
     writer->free(FreeInfo{writer_resource, writer_tokens});
+
+    // A completed context may outlive its allocator, including while a
+    // settlement worker still holds the context after publishing completion.
+    std::weak_ptr<CoordinatorCacheManager> reader_owner = reader;
+    reader.reset();
+    EXPECT_TRUE(reader_owner.expired());
+    EXPECT_TRUE(result.async_context->success());
 }
 
 TEST_F(HybridPoolCoordinatorCacheManagerTest, StorageRoundTripUsesSparseFullLinearShape) {
@@ -692,6 +699,40 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, StorageRoundTripMapsCpCanonicalFul
                         cp_mapper,
                         {{"linear", "full"}, {"linear", "full"}, {"linear", "full"}, {"linear", "full"}},
                         {{"full"}, {"full"}, {"full"}, {"linear", "full"}});
+}
+
+TEST_F(HybridPoolCoordinatorCacheManagerTest, DestroyingAllocatorAbortsDeferredBackendMatch) {
+    const auto    config    = makeTinyFullSwaMultiPoolHybridConfig();
+    auto          state     = std::make_shared<MemoryStorageState>();
+    auto          executor  = std::make_shared<ManualStorageBackendExecutor>();
+    auto          backend   = std::make_shared<PolicyMemoryStorageBackend>(state, executor);
+    auto          allocator = makeAllocator(config);
+    KVCacheConfig remote_config;
+    remote_config.enable_remote_cache = true;
+    allocator->setBlockTreeCacheConfigForTest(remote_config);
+    allocator->setStorageBackendForTest(backend);
+    ASSERT_TRUE(allocator->init());
+
+    auto resource = makeBatchResource(/*batch_size=*/1, config);
+    resource->setBatchCacheKeys(0, {7001});
+    auto       token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/8, /*seq_size_per_block=*/4);
+    MallocInfo malloc_info{resource, token_ids};
+    malloc_info.enable_cache_lookup = true;
+    malloc_info.reuse_cache         = true;
+    auto result                     = allocator->malloc(malloc_info);
+    ASSERT_TRUE(result.success);
+    ASSERT_NE(result.async_context, nullptr);
+    ASSERT_FALSE(result.async_context->done());
+    ASSERT_EQ(executor->pendingCount(), 1u);
+
+    std::weak_ptr<CoordinatorCacheManager> owner = allocator;
+    allocator.reset();
+    EXPECT_TRUE(owner.expired());
+    EXPECT_TRUE(result.async_context->done());
+    EXPECT_FALSE(result.async_context->success());
+    EXPECT_EQ(resource->curBlocksNum(), 0u);
+    // Destruction drains the queued match after closing callback admission.
+    EXPECT_EQ(executor->pendingCount(), 0u);
 }
 
 // ---------------------------------------------------------------------------

@@ -35,7 +35,7 @@ public:
     explicit PausableHybridPerRankBlockTransferEngine(const std::vector<GroupSetPtr>& groups):
         PerRankBlockTransferEngine(groups) {}
 
-    std::shared_ptr<AsyncContext> execute(TransferTask task) override {
+    std::shared_ptr<TransferAsyncContext> execute(TransferTask task) override {
         {
             std::lock_guard<std::mutex> lock(mutex_);
             ++submit_count_;
@@ -66,7 +66,7 @@ public:
         for (auto& submit : pending) {
             auto context = PerRankBlockTransferEngine::execute(std::move(submit.task));
             context->waitDone();
-            submit.context->complete(context->errorInfo());
+            submit.context->complete(context->result());
         }
     }
 
@@ -101,6 +101,17 @@ public:
 private:
     std::shared_ptr<PausableHybridPerRankBlockTransferEngine> transfer_engine_;
 };
+
+// Refcount tests also use the real load engine. Seed lower-tier records through
+// the production store path so their footer matches the build's storage format.
+static void initializeHostBlock(BlockTreeCache& cache, GroupSet& group, BlockIdxType host_block) {
+    const auto device_blocks = block_tree_cache_test::allocateDeviceBlocksForTest(group, 1);
+    ASSERT_EQ(device_blocks.size(), 1u);
+    const auto result = cache.executeTransfer(block_transfer_engine_test::makeTransferTask(
+        {TransferDescriptor::deviceToHost(group.groupSetId(), device_blocks.front(), host_block)}));
+    block_tree_cache_test::unreferenceDeviceBlocksForTest(group, device_blocks);
+    ASSERT_TRUE(result.ok()) << result.status.ToString();
+}
 
 static CacheConfig makeTinyHybridConfig() {
     auto config = makeSimpleHybridMhaCacheConfig(/*layer_num=*/4,
@@ -347,18 +358,41 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, CreateHybridConfigAllowsOnlyFullGr
     EXPECT_EQ(cache_config.group("full").tag, "full");
 }
 
-TEST_F(HybridTypeCoordinatorCacheManagerTest, CreateHybridConfigRejectsMultipleFullGroups) {
-    auto cfg = makeTinyModelConfig(/*num_layers=*/2);
-    setHybridLayerDescsWithTags(cfg, {HybridAttentionType::NONE, HybridAttentionType::NONE}, {"full", "full1"});
+TEST_F(HybridTypeCoordinatorCacheManagerTest, MultipleFullGroupsPreserveBudgetAndIndependentCapacity) {
+    auto cfg = makeTinyModelConfig(/*num_layers=*/3);
+    setHybridLayerDescsWithTags(cfg,
+                                {HybridAttentionType::NONE, HybridAttentionType::NONE, HybridAttentionType::NONE},
+                                {"full", "full1", "full1"});
+    KVCacheConfig options;
+    options.kv_cache_mem_mb = 1;
+    const ParallelismConfig parallelism;
+    auto                    config = CacheConfigCreator::createConfig(cfg, parallelism, options);
+    ASSERT_EQ(config.groupNums(), 2);
+    EXPECT_EQ(config.layerIdsForGroup("full"), std::vector<int>({0}));
+    EXPECT_EQ(config.layerIdsForGroup("full1"), std::vector<int>({1, 2}));
+    const size_t bytes_per_coordinate =
+        config.group("full").kvBlockStrideBytes() + 2 * config.group("full1").kvBlockStrideBytes();
+    const auto blocks = CacheConfigCreator::computeLocalBlockNum(config, cfg, {}, options, parallelism);
+    EXPECT_EQ(blocks, 1024u * 1024u / bytes_per_coordinate);
 
-    ParallelismConfig parallelism_cfg;
-    parallelism_cfg.tp_size = 1;
-    try {
-        CacheConfigCreator::createWarmupConfig(cfg, parallelism_cfg, /*gen_num_per_cycle=*/0);
-        FAIL() << "expected multiple full groups to be rejected";
-    } catch (const std::runtime_error& e) {
-        EXPECT_NE(std::string(e.what()).find("multiple FULL MHA/MLA cache groups"), std::string::npos);
-    }
+    config         = finalizeCacheConfig(std::move(config), 8);
+    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator->init());
+    auto first  = poolForTag(*allocator, "full");
+    auto second = poolForTag(*allocator, "full1");
+    ASSERT_NE(first, second);
+    const auto initial = allocator->tokenCapacity(config.seq_size_per_block);
+    EXPECT_EQ(initial.total_tokens,
+              std::min(first->totalBlocksNum(), second->totalBlocksNum()) * config.seq_size_per_block);
+    EXPECT_EQ(initial.available_tokens,
+              std::min(first->availableBlocksNum(), second->availableBlocksNum()) * config.seq_size_per_block);
+    const auto allocated = allocateReferencedBlocks(second, 2);
+    EXPECT_EQ(allocator->tokenCapacity(config.seq_size_per_block).available_tokens,
+              std::min(first->availableBlocksNum(), second->availableBlocksNum()) * config.seq_size_per_block);
+    EXPECT_EQ(allocator->tokenCapacity(config.seq_size_per_block).available_tokens,
+              initial.available_tokens - 2 * config.seq_size_per_block);
+    second->decRef(allocated);
+    EXPECT_EQ(allocator->tokenCapacity(config.seq_size_per_block).available_tokens, initial.available_tokens);
 }
 
 TEST_F(HybridTypeCoordinatorCacheManagerTest, CreateHybridConfigKeepsModelTokensPerBlock) {
@@ -1095,9 +1129,6 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, TieredJoinedLoadMapsTargetsAcrossF
 
     const auto& cache = allocator->blockTreeCacheOwner();
     ASSERT_NE(cache, nullptr);
-    auto transfer_engine = std::make_shared<PausableHybridPerRankBlockTransferEngine>(cache->groupSets());
-    cache->transfer_dispatcher_->per_rank_engine_ = transfer_engine;
-    ScopedHybridTransferRelease transfer_release(transfer_engine);
 
     const CacheKeysType                        cached_keys{100, 101};
     std::vector<std::vector<GroupSetResource>> slots(cached_keys.size(),
@@ -1107,10 +1138,15 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, TieredJoinedLoadMapsTargetsAcrossF
         for (size_t path_index = 0; path_index < cached_keys.size(); ++path_index) {
             const BlockIdxType source_block = group_set->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
             ASSERT_FALSE(isNullBlockIdx(source_block));
+            ASSERT_NO_FATAL_FAILURE(initializeHostBlock(*cache, *group_set, source_block));
             slots[path_index][group_set->groupSetId()].host_block = source_block;
         }
     }
     ASSERT_TRUE(block_tree_cache_test::insertGroupSetResources(*cache, cached_keys, slots));
+
+    auto transfer_engine = std::make_shared<PausableHybridPerRankBlockTransferEngine>(cache->groupSets());
+    cache->transfer_dispatcher_->per_rank_engine_ = transfer_engine;
+    ScopedHybridTransferRelease transfer_release(transfer_engine);
 
     const CacheKeysType request_keys{100, 101, 102};
     auto                first_resource = makeBatchResource(/*batch_size=*/1, config, request_keys);
@@ -1238,9 +1274,6 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, DeviceLoadSourceMatchRefBecomesReq
 
     const auto& cache = allocator->blockTreeCacheOwner();
     ASSERT_NE(cache, nullptr);
-    auto transfer_engine = std::make_shared<PausableHybridPerRankBlockTransferEngine>(cache->groupSets());
-    cache->transfer_dispatcher_->per_rank_engine_ = transfer_engine;
-    ScopedHybridTransferRelease transfer_release(transfer_engine);
 
     const CacheKeysType                                                         cached_keys{100, 101};
     std::vector<std::vector<GroupSetResource>>                                  slots(cached_keys.size(),
@@ -1260,6 +1293,7 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, DeviceLoadSourceMatchRefBecomesReq
             for (size_t path_index = 0; path_index < cached_keys.size(); ++path_index) {
                 const BlockIdxType source_block = group_set->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
                 ASSERT_FALSE(isNullBlockIdx(source_block));
+                ASSERT_NO_FATAL_FAILURE(initializeHostBlock(*cache, *group_set, source_block));
                 slots[path_index][group_set_id].host_block = source_block;
             }
         }
@@ -1269,6 +1303,10 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, DeviceLoadSourceMatchRefBecomesReq
     for (const auto& [group_set, blocks] : device_resources) {
         block_tree_cache_test::unreferenceDeviceBlocksForTest(*group_set, blocks);
     }
+
+    auto transfer_engine = std::make_shared<PausableHybridPerRankBlockTransferEngine>(cache->groupSets());
+    cache->transfer_dispatcher_->per_rank_engine_ = transfer_engine;
+    ScopedHybridTransferRelease transfer_release(transfer_engine);
 
     const CacheKeysType request_keys{100, 101, 102};
     auto                request_resource = makeBatchResource(/*batch_size=*/1, config, request_keys);

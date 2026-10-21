@@ -4,8 +4,6 @@
 #include <algorithm>
 #include <stdexcept>
 #include <chrono>
-#include <cstdlib>
-#include <cstring>
 #include <limits>
 #include <numeric>
 
@@ -174,11 +172,6 @@ GroupedCacheLayerLayout projectLayout(const GroupedCacheLayerLayout&       sourc
     return GroupedCacheLayerLayout(std::move(target_topology), std::move(groups));
 }
 
-bool cacheStatusSnapshotEnabled() {
-    const char* env = std::getenv("RTP_LLM_CACHE_STATUS_SNAPSHOT");
-    return env != nullptr && std::strcmp(env, "1") == 0;
-}
-
 void reportCacheOperation(const kmonitor::MetricsReporterPtr&          metrics_reporter,
                           RtpLLMCacheOperationMetricsCollector::OpType operation_type,
                           int64_t                                      begin_time_us) {
@@ -224,7 +217,11 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
     }
 
     const auto& cp_cfg = parallelism_config_.prefill_cp_config;
-    if (cp_cfg.kv_cache_sharded && parallelism_config_.tp_size > 1) {
+    // Decode retains every received FULL page on each TP rank. Its sharding
+    // flag describes the upstream prefill layout for transport/state sizing,
+    // not local allocation: applying the CP mapper here would underallocate by the CP factor.
+    if (cp_cfg.kv_cache_sharded && cp_cfg.is_enabled() && parallelism_config_.role_type != RoleType::DECODE
+        && parallelism_config_.tp_size > 1) {
         cp_slot_mapper_ = std::make_shared<CPSlotMapper>(static_cast<int>(parallelism_config_.tp_rank),
                                                          static_cast<int>(parallelism_config_.tp_size),
                                                          static_cast<int>(config_.seq_size_per_block));
@@ -394,11 +391,17 @@ MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
     bool       keys_initialized_now     = false;
     if (is_first_malloc) {
         if (!keys_already_initialized) {
-            initCacheKeys(malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids, seq_size_per_block);
+            initCacheKeys(malloc_info.batch_kv_cache_resource,
+                          malloc_info.complete_token_ids,
+                          seq_size_per_block,
+                          config_.cache_key_hash_seed);
             keys_initialized_now = true;
         }
     } else {
-        updateCacheKeys(malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids, seq_size_per_block);
+        updateCacheKeys(malloc_info.batch_kv_cache_resource,
+                        malloc_info.complete_token_ids,
+                        seq_size_per_block,
+                        config_.cache_key_hash_seed);
     }
     reportPrefillCacheHitMetrics(malloc_info, keys_initialized_now);
 
@@ -529,6 +532,11 @@ void KVCacheManager::blockBatchCopyByGroup(const std::vector<TaggedBlockIdPair>&
     return coordinator_manager_->blockBatchCopyByGroup(copy_mapping);
 }
 
+void KVCacheManager::blockBatchCopyForForward(const torch::Tensor&            copy_mapping,
+                                              const std::vector<std::string>& group_tags) {
+    coordinator_manager_->blockBatchCopyForForward(copy_mapping, group_tags);
+}
+
 bool KVCacheManager::updateKVBlock(const BatchKVCacheResourcePtr&  batch_kv_cache_resource,
                                    const std::vector<int>&         block_src_batch,
                                    bool                            copy_last_block,
@@ -632,29 +640,6 @@ size_t KVCacheManager::maxAvailableTokensNum() const {
 }
 
 KVCacheInfo KVCacheManager::getKVCacheInfo(int64_t latest_version, bool need_cache_keys) const {
-    if (need_cache_keys && cacheStatusSnapshotEnabled()) {
-        std::shared_ptr<const KVCacheInfo> snapshot;
-        {
-            std::lock_guard<std::mutex> lock(cache_status_snapshot_mutex_);
-            snapshot = cache_status_snapshot_;
-        }
-        if (snapshot) {
-            return *snapshot;
-        }
-    }
-    return buildKVCacheInfo(latest_version, need_cache_keys);
-}
-
-void KVCacheManager::refreshKVCacheInfoSnapshot() {
-    if (!coordinator_manager_ || !cacheStatusSnapshotEnabled()) {
-        return;
-    }
-    auto snapshot = std::make_shared<KVCacheInfo>(buildKVCacheInfo(/*latest_version=*/-1, /*need_cache_keys=*/true));
-    std::lock_guard<std::mutex> lock(cache_status_snapshot_mutex_);
-    cache_status_snapshot_ = std::move(snapshot);
-}
-
-KVCacheInfo KVCacheManager::buildKVCacheInfo(int64_t latest_version, bool need_cache_keys) const {
     KVCacheInfo info;
     info.version = latest_version;
 
@@ -664,7 +649,7 @@ KVCacheInfo KVCacheManager::buildKVCacheInfo(int64_t latest_version, bool need_c
     }
 
     if (need_cache_keys && block_tree_cache_) {
-        BlockTreeKeySnapshot snapshot = block_tree_cache_->getKeySnapshot();
+        BlockTreeKeySnapshot snapshot = block_tree_cache_->getKeySnapshot(latest_version);
         info.version                  = snapshot.version;
         info.cached_keys              = std::move(snapshot.keys);
     }
@@ -731,7 +716,13 @@ bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionR
     }
 
     MemoryOperationResponsePB* memory_response = response.mutable_mem_response();
-    memory_response->set_code(MemoryOperationResponsePB::FAILED);
+    memory_response->set_code(MemoryOperationResponsePB::INVALID_REQUEST);
+    memory_response->mutable_error_info()->set_error_code(static_cast<int64_t>(ErrorCode::INVALID_PARAMS));
+    memory_response->mutable_error_info()->set_error_message("invalid grouped transfer request");
+    memory_response->clear_block_errors();
+    for (int i = 0; i < request.mem_request().copy_items_size(); ++i) {
+        memory_response->add_block_errors(MemoryOperationResponsePB::INVALID_REQUEST);
+    }
     std::vector<TransferDescriptor> descriptors;
     if (!BlockTransferRequestConverter::decodeTransfer(
             request.mem_request(), descriptors, block_tree_cache_->groupSets())) {
@@ -741,17 +732,18 @@ bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionR
 
     const int64_t timeout_ms = request.mem_request().timeout_ms();
     if (timeout_ms > std::numeric_limits<int>::max()) {
+        memory_response->mutable_error_info()->set_error_message("transfer timeout exceeds supported range");
         RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: transfer timeout exceeds supported range");
         return true;
     }
     const auto timeout =
         timeout_ms > 0 ? std::chrono::milliseconds(timeout_ms) : BlockTreeTaskPool::kDefaultQueueWaitTimeout;
-    const bool transfer_success = block_tree_cache_->executeTransfer(TransferTask(std::move(descriptors), timeout));
-    if (!transfer_success) {
+    const auto status = block_tree_cache_->executeTransfer(TransferTask(descriptors, timeout));
+    BlockTransferRequestConverter::encodeTransferResult(*memory_response, status);
+    if (!status.ok()) {
         RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: grouped transfer failed");
         return true;
     }
-    memory_response->set_code(MemoryOperationResponsePB::OK);
     return true;
 }
 

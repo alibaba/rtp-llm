@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
+#include "rtp_llm/cpp/engine_base/schedulers/SchedulerUtils.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/models/context_parallel/ZigzagTokenLayout.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -79,6 +80,15 @@ void FIFOScheduler::fillExtraMetrics(RtpLLMSchedulerMetricsCollector& collector)
 std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>>
 FIFOScheduler::enqueueGroup(const vector<GenerateStreamPtr>& streams) {
     RTP_LLM_PROFILE_FUNCTION();
+    if (hasMixedExecutionModes(streams)) {
+        for (const auto& stream : streams) {
+            if (!stream->hasError()) {
+                stream->reportError(ErrorCode::INVALID_PARAMS, kMixedForceBatchGroupError);
+            }
+        }
+        return {std::vector<bool>(streams.size(), false), streams};
+    }
+
     std::vector<bool> enqueue_successes;
     enqueue_successes.reserve(streams.size());
     std::vector<GenerateStreamPtr> valid_streams;
@@ -201,8 +211,8 @@ bool FIFOScheduler::fitsPrefillTokenLimits(size_t                   admitted_str
                                            size_t                   admitted_max_seq_len,
                                            size_t                   admitted_sequence_count,
                                            const GenerateStreamPtr& candidate) const {
-    // Preserve the historical singleton boundary; checkInputLength() has already
-    // validated the candidate's standalone token cost.
+    // Preserve the historical singleton fast path for all execution modes,
+    // including when the batch token budget is smaller than the prompt or zero.
     if (admitted_stream_count == 0 && candidate->contextLength() + running_streams_.size() < int(max_seq_len_)) {
         return true;
     }
@@ -214,25 +224,32 @@ bool FIFOScheduler::fitsPrefillTokenLimits(size_t                   admitted_str
     if (running_token_reserve >= max_batch_tokens_size_) {
         return false;
     }
-    const auto available_tokens = max_batch_tokens_size_ - running_token_reserve;
+    // Admission partitions execution modes before reaching this helper. On this
+    // budget path, only prefill-only batches may fill the cap; generation retains its strict reserve.
+    const bool prefill_only     = isPrefillOnly(candidate);
+    const auto available_tokens = max_batch_tokens_size_ - running_token_reserve - (prefill_only ? 0 : 1);
 
-    // Full logical token cost (including reused prefix) must be strictly below
-    // max_batch_tokens_size_. Subtraction avoids overflow in the sum.
-    if (admitted_tokens >= available_tokens) {
+    // Include reused prefixes. Subtraction avoids overflow in the token sum.
+    if (admitted_tokens > available_tokens) {
         return false;
     }
     const auto candidate_tokens = prefillTokenCostWithCache(candidate);
-    if (candidate_tokens >= available_tokens - admitted_tokens) {
+    if (candidate_tokens > available_tokens - admitted_tokens) {
         return false;
     }
 
     // The model executes prefill as a padded rectangle. Use the full logical
     // sequence length (prefix included) and the real sequence width represented
-    // by currentBatchSize(). Division avoids overflow in max_seq_len * width.
+    // by currentBatchSize(). Division and subtraction avoid overflow in both
+    // max_seq_len * width and the combined sequence count.
     const auto candidate_sequence_count = static_cast<size_t>(candidate->currentBatchSize());
-    const auto sequence_count           = admitted_sequence_count + candidate_sequence_count;
     const auto max_seq_len              = std::max(admitted_max_seq_len, prefillSeqLenWithCache(candidate));
-    return max_seq_len == 0 || sequence_count <= (available_tokens - 1) / max_seq_len;
+    if (max_seq_len == 0) {
+        return true;
+    }
+    const auto max_sequence_count = available_tokens / max_seq_len;
+    return admitted_sequence_count <= max_sequence_count
+           && candidate_sequence_count <= max_sequence_count - admitted_sequence_count;
 }
 
 size_t FIFOScheduler::prefillTokenCostWithoutCache(const GenerateStreamPtr& stream) const {
@@ -327,6 +344,23 @@ void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_s
     // queues. group_id/group_size on a stream in waiting_streams are status metadata;
     // they must not delay or isolate ordinary FIFO admission.
 
+    bool       has_execution_mode      = false;
+    bool       scheduling_prefill_only = false;
+    const auto capture_execution_mode  = [&](const list<GenerateStreamPtr>& streams) {
+        if (has_execution_mode) {
+            return;
+        }
+        const auto it = std::find_if(streams.begin(), streams.end(), [](const auto& stream) {
+            return stream && stream->getStatus() == StreamState::RUNNING;
+        });
+        if (it != streams.end()) {
+            has_execution_mode      = true;
+            scheduling_prefill_only = isPrefillOnly(*it);
+        }
+    };
+    capture_execution_mode(running_streams_);
+    capture_execution_mode(already_admitted_streams);
+
     ScheduleRuntime schedule_runtime;
     for (const auto& stream : already_admitted_streams) {
         if (!stream || stream->getStatus() != StreamState::RUNNING) {
@@ -355,6 +389,11 @@ void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_s
                 addStreamToNewState(stream, new_state);
                 waiting_streams.erase(current);
             }
+            continue;
+        }
+
+        const bool prefill_only = isPrefillOnly(stream);
+        if (has_execution_mode && scheduling_prefill_only != prefill_only) {
             continue;
         }
 
@@ -395,6 +434,11 @@ void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_s
                                          || (new_state == StreamState::WAITING && (kv_initialized || load_initiated));
 
         if (scheduling_progress) {
+            // A failed KV allocation owns no work this round and must not pin its execution mode.
+            if (!has_execution_mode) {
+                has_execution_mode      = true;
+                scheduling_prefill_only = prefill_only;
+            }
             // Admission limits cover every stream that made progress in this
             // round, including an async cache load. Otherwise multiple pending
             // loads can oversubscribe max_generate_batch_size before any one of

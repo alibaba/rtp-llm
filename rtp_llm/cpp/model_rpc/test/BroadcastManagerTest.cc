@@ -315,7 +315,6 @@ TEST_F(BroadcastManagerTest, Broadcast_ReturnNotNull_PartialResponseRpcStatusFai
         if (i == 0) {
             EXPECT_EQ(ctx->status.error_code(), grpc::StatusCode::INTERNAL);
             EXPECT_FALSE(responses[i].has_mem_response());
-            EXPECT_EQ(responses[i].mem_response().code(), MemoryOperationResponsePB::CODE_UNSPECIFIED);
         } else {
             EXPECT_EQ(ctx->status.error_code(), grpc::StatusCode::OK);
             EXPECT_TRUE(responses[i].has_mem_response());
@@ -336,7 +335,7 @@ TEST_F(BroadcastManagerTest, Broadcast_ReturnNotNull_ResponseStatusOkButMemRespo
         auto service = std::make_unique<TestRpcService>();
         // set the first request to report a transfer business failure over a gRPC OK response
         if (i == 0) {
-            service->setMemResponseCode(MemoryOperationResponsePB::FAILED);
+            service->setMemResponseCode(MemoryOperationResponsePB::COPY_FAILED);
         }
         auto server = std::make_unique<TestRpcServer>(std::move(service));
         ASSERT_TRUE(server->start());
@@ -366,7 +365,7 @@ TEST_F(BroadcastManagerTest, Broadcast_ReturnNotNull_ResponseStatusOkButMemRespo
         EXPECT_EQ(ctx->status.error_code(), grpc::StatusCode::OK);
         EXPECT_TRUE(responses[i].has_mem_response());
         if (i == 0) {
-            EXPECT_EQ(responses[i].mem_response().code(), MemoryOperationResponsePB::FAILED);
+            EXPECT_EQ(responses[i].mem_response().code(), MemoryOperationResponsePB::COPY_FAILED);
         } else {
             EXPECT_EQ(responses[i].mem_response().code(), MemoryOperationResponsePB::OK);
         }

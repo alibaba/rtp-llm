@@ -65,6 +65,11 @@ class EngineServer:
         assert self._server is not None, "Server not started"
         return self._server.port
 
+    @property
+    def log_file_path(self) -> Optional[str]:
+        """Path to the server's process.log, or None before start."""
+        return self._server.log_file_path if self._server else None
+
     def _build_engine_cli(self, max_seq_len: int, max_concurrency: int) -> str:
         """Assemble CLI args string for the engine server subprocess.
 

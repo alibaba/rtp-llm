@@ -24,3 +24,9 @@ cc_library(
     deps = [":rdma_transport", "//rtp_llm/cpp/utils:core_utils"],
     copts = copts(),
 )
+
+cc_library(
+    name = "deferred_read_queue",
+    hdrs = ["DeferredReadQueue.h"],
+    copts = copts(),
+)

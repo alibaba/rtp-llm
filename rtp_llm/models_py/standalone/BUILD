@@ -24,7 +24,6 @@ flashinfer = [
 
 flashinfer_with_cache = [
     "//rtp_llm:flashinfer-cubin",
-    "//rtp_llm:flashinfer-jit-cache",
     "//rtp_llm:nvidia-cutlass-dsl",
 ]
 
@@ -83,7 +82,7 @@ py_library(
         "//conditions:default": [],
     }) + select({
         "@//:using_cuda13_x86": ["//rtp_llm:flash-mla", "//rtp_llm:fast-hadamard-transform"],
-        "@//:using_cuda13_arm": ["//rtp_llm:flash-mla"],
+        "@//:using_cuda13_arm": ["//rtp_llm:flash-mla", "//rtp_llm:flash-mla-legacy"],
         "@//:using_cuda12_9_x86": flashinfer_with_cache + flashmla,
         "@//:using_cuda12_arm": flashinfer_with_cache,
         "@//:cuda_pre_12_9": flashinfer,
