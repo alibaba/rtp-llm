@@ -269,19 +269,10 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
         RTP_LLM_LOG_INFO("pd separation is disabled, call local rpc server");
         return LocalRpcServer::GenerateStreamCall(server_context, request, response_writer);
     }
-    auto handoff_status = validatePDHandoff(*request);
-    if (!handoff_status.ok()) {
-        return serializeErrorMsg(std::to_string(request->request_id()), handoff_status);
-    }
-
-    const auto local_deadline = engine_->getCacheManager()->prefillRequestDeadline(
-        request->generate_config().unique_key(), request->generate_config().timeout_ms());
     PDCancelRegistry::Handle cancel_handle;
-    auto                     admission =
-        cancel_registry_->admit(*request, request->generate_config().unique_key(), "", local_deadline, cancel_handle);
-    if (!admission.ok())
-        return serializeErrorMsg(std::to_string(request->request_id()), admission);
-    PDCancelRegistry::CallGuard cancel_guard(*cancel_registry_, cancel_handle);
+    // Activated only after successful admission; destruction still follows
+    // GenerateContext cleanup, so local completion cannot precede RPC joins.
+    std::optional<PDCancelRegistry::CallGuard> cancel_guard;
     AtomicGuard                 request_guard(onflight_requests_);
     auto                        request_id = request->request_id();
     // [HANG-DIAG] step 1/4: entry. Coupled with OnflightScope so the watchdog
@@ -310,6 +301,22 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
             generate_context.markRpcHandlingCompleted();
         }
     });
+    auto handoff_status = validatePDHandoff(*request);
+    if (!handoff_status.ok()) {
+        generate_context.error_info = handoff_status;
+        generate_context.error_status = serializeErrorMsg(generate_context.request_key, handoff_status);
+        return generate_context.error_status;
+    }
+    const auto local_deadline = engine_->getCacheManager()->prefillRequestDeadline(
+        request->generate_config().unique_key(), request->generate_config().timeout_ms());
+    const auto admission = cancel_registry_->admit(
+        *request, request->generate_config().unique_key(), "", local_deadline, cancel_handle);
+    if (!admission.ok()) {
+        generate_context.error_info = admission;
+        generate_context.error_status = serializeErrorMsg(generate_context.request_key, admission);
+        return generate_context.error_status;
+    }
+    cancel_guard.emplace(*cancel_registry_, cancel_handle);
     auto input                 = QueryConverter::transQuery(request);
     input->request_deadline_ms = local_deadline;
     const bool request_cancelled = server_context && server_context->IsCancelled();

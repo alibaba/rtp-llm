@@ -374,14 +374,7 @@ grpc::Status DecodeRpcServer::GenerateStreamCall(grpc::ServerContext*           
     auto        request_id = request->request_id();
     RTP_LLM_LOG_DEBUG("receive request %ld", request_id);
     PDCancelRegistry::Handle cancel_handle;
-    auto                     admission = cancel_registry_->admit(*effective_request,
-                                             effective_request->generate_config().unique_key(),
-                                             prefillAddress(*effective_request),
-                                             request_entry_ms + normalized_timeout_ms,
-                                             cancel_handle);
-    if (!admission.ok())
-        return serializeErrorMsg(std::to_string(request_id), admission);
-    PDCancelRegistry::CallGuard cancel_guard(*cancel_registry_, cancel_handle);
+    std::optional<PDCancelRegistry::CallGuard> cancel_guard;
     auto                        generate_context =
         GenerateContext(request_id, normalized_timeout_ms, server_context, metrics_reporter_, meta_);
     generate_context.onflight_requests = &onflight_requests_;
@@ -402,6 +395,17 @@ grpc::Status DecodeRpcServer::GenerateStreamCall(grpc::ServerContext*           
             generate_context.markRpcHandlingCompleted();
         }
     });
+    const auto admission = cancel_registry_->admit(*effective_request,
+                                                  effective_request->generate_config().unique_key(),
+                                                  prefillAddress(*effective_request),
+                                                  request_entry_ms + normalized_timeout_ms,
+                                                  cancel_handle);
+    if (!admission.ok()) {
+        generate_context.error_info = admission;
+        generate_context.error_status = serializeErrorMsg(generate_context.request_key, admission);
+        return generate_context.error_status;
+    }
+    cancel_guard.emplace(*cancel_registry_, cancel_handle);
     struct PrefillCancelGuard {
         PDCancelRegistry&        registry;
         PDCancelRegistry::Handle handle;

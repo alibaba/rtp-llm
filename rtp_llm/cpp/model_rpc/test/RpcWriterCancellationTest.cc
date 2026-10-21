@@ -10,6 +10,8 @@
 #include <utility>
 
 #include "rtp_llm/cpp/model_rpc/LocalRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include "opentelemetry/exporters/memory/in_memory_span_data.h"
@@ -304,6 +306,64 @@ TEST(RpcWriterCancellationTest, StageMetricsSampleLiveLoadingStreamsAndExcludeCa
     EXPECT_EQ(stage.onflight_request, 1);
     EXPECT_EQ(stage.loading_cache_request, 0);
     context.markRpcHandlingCompleted();
+}
+
+TEST(RpcWriterCancellationTest, PdValidationAndAdmissionErrorsEndServerSpanBeforeEngineAccess) {
+    namespace memory = opentelemetry::exporter::memory;
+    telemetry::TelemetryRuntime::shutdown(5000);
+    std::shared_ptr<memory::InMemorySpanData> span_data;
+    auto exporter = memory::InMemorySpanExporterFactory::Create(span_data);
+    telemetry::TelemetryConfig config;
+    config.enabled = true;
+    config.role = "test";
+    ASSERT_TRUE(telemetry::TelemetryRuntime::initWithExporter(std::move(exporter), config));
+    {
+        GenerateInputPB request;
+        request.set_request_id(60);
+        request.add_token_ids(1);
+        auto* generate = request.mutable_generate_config();
+        generate->set_can_use_pd_separation(true);
+        generate->set_max_new_tokens(8);
+        generate->set_timeout_ms(1000);
+        grpc::ServerContext context;
+        PrefillRpcServer server;
+        // Missing handoff key must fail before the uninitialized engine is used.
+        const auto status = server.GenerateStreamCall(&context, &request, nullptr);
+        EXPECT_EQ(errorInfoFromGrpcStatus(status).code(), ErrorCode::INVALID_PARAMS);
+        EXPECT_EQ(server.onflight_requests_.load(), 0u);
+        EXPECT_TRUE(server.onflight_trackers_.empty());
+    }
+    {
+        GenerateInputPB request;
+        request.set_request_id(61);
+        request.set_enqueued_by_master(true);
+        auto* generate = request.mutable_generate_config();
+        generate->set_can_use_pd_separation(true);
+        generate->set_max_new_tokens(8);
+        generate->set_timeout_ms(1000);
+        grpc::ServerContext context;
+        DecodeRpcServer server;
+        server.meta_ = std::make_shared<RpcServerRuntimeMeta>();
+        server.cancel_registry_ = std::make_unique<PDCancelRegistry>(server.meta_);
+        EXPECT_EQ(server.cancel_registry_->cancel(61, {ErrorCode::GENERATE_TIMEOUT, "late admission"}),
+                  CANCEL_STATUS_TOMBSTONED);
+        const auto status = server.GenerateStreamCall(&context, &request, nullptr);
+        EXPECT_EQ(errorInfoFromGrpcStatus(status).code(), ErrorCode::GENERATE_TIMEOUT);
+        EXPECT_EQ(server.onflight_requests_.load(), 0u);
+        EXPECT_TRUE(server.cancel_registry_->pending().empty());
+    }
+    EXPECT_TRUE(telemetry::TelemetryRuntime::shutdown(5000));
+    auto spans = span_data->GetSpans();
+    size_t server_count = 0;
+    for (const auto& span : spans) {
+        if (span->GetName() == "rtp_llm.generate_stream_call") {
+            ++server_count;
+            EXPECT_EQ(span->GetSpanKind(), opentelemetry::trace::SpanKind::kServer);
+            EXPECT_EQ(span->GetStatus(), opentelemetry::trace::StatusCode::kError);
+            EXPECT_EQ(span->GetAttributes().count(telemetry::kAttrErrorType), 1u);
+        }
+    }
+    EXPECT_EQ(server_count, 2u);
 }
 
 TEST(RpcWriterCancellationTest, RequestGaugeSamplesLiveAtomicValue) {
