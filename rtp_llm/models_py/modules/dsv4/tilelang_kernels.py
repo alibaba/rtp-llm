@@ -3,8 +3,8 @@
 Keeps only what dsv4/attention.py uses:
 - ``sparse_attn_kernel`` — top-k sparse attention + per-head learned sink.
 
-The attention equations come from the upstream V4 release at
-``/mnt/nas1/hf/DeepSeek-V4-Flash/inference/kernel.py``. The optional maximum
+The attention equations come from the upstream V4 release's
+``inference/kernel.py``. The optional maximum
 initializer also supports V4.1's finite initial value without changing V4's
 default.
 Wrapped in a lazy-import guard so dsv4 stays importable on hosts without
