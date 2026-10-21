@@ -828,6 +828,117 @@ TEST_F(SingleTypeKVCacheAllocatorTest, ForwardBlockCopyFallsBackForHostStorage) 
     EXPECT_EQ(std::memcmp(src.addr, dst.addr, src.size_bytes), 0);
 }
 
+TEST_F(SingleTypeKVCacheAllocatorTest, ForwardHndTailCopiesAreLayoutGuarded) {
+#if USING_CUDA
+    // BF16/FP16 with explicit HND dimensions are supported. Quantized KV,
+    // inconsistent head metadata and physical/kernel-page aggregation are not.
+    for (int mode = 0; mode < 5; ++mode) {
+        const auto dtype  = mode == 2 ? DataType::TYPE_INT8 : mode == 1 ? DataType::TYPE_FP16 : DataType::TYPE_BF16;
+        auto       config = makeSimpleMhaCacheConfig(3, 10, 16, dtype, 2, 16);
+        auto       groups = config.topology().groups();
+        groups[0].local_kv_head_num = mode == 3 ? 1 : 2;
+        if (mode == 4) {
+            config.kernel_seq_size_per_block    = 8;
+            groups[0].kernel_seq_size_per_block = 8;
+        }
+        config.setTopology(std::move(groups), config.topology().layers());
+        allocator_ = std::make_shared<SingleTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+        ASSERT_TRUE(allocator_->init());
+        ASSERT_NE(allocator_->gpu_block_copy_, nullptr);
+        std::vector<std::pair<torch::Tensor, torch::Tensor>> checks;
+        for (int layer = 0; layer < 3; ++layer) {
+            for (int block = 0; block < 10; ++block) {
+                const auto buffers = allocator_->convertIndexToBuffer(layer, block);
+                for (size_t plane = 0; plane < buffers.size(); ++plane) {
+                    const auto& info  = buffers[plane];
+                    auto        bytes = torch::from_blob(
+                        info.addr,
+                        {static_cast<int64_t>(info.size_bytes)},
+                        torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA, info.device_index));
+                    const int value = block * 17 + layer * 3 + plane;
+                    bytes.fill_(value);
+                    auto expected = torch::full({static_cast<int64_t>(info.size_bytes)}, value, torch::kUInt8);
+                    if (block == 4 || block == 5) {
+                        const int src          = block == 4 ? 0 : 1;
+                        const int source_value = src * 17 + layer * 3 + plane;
+                        if (mode < 2) {
+                            const int valid = block;
+                            for (int head = 0; head < 4; ++head) {
+                                expected.slice(0, head * 16 * 32, head * 16 * 32 + valid * 32).fill_(source_value);
+                            }
+                        } else {
+                            expected.fill_(source_value);
+                        }
+                    }
+                    checks.push_back({bytes, expected});
+                }
+            }
+        }
+        allocator_->blockBatchCopyForForward(torch::tensor({0, 0, 4, 0, 1, 5}, torch::kInt32).reshape({2, 3}),
+                                             torch::tensor({4, 5}, torch::kInt32));
+        for (const auto& check : checks) {
+            EXPECT_TRUE(torch::equal(check.first.cpu(), check.second)) << "mode=" << mode;
+        }
+    }
+#endif
+}
+
+TEST_F(SingleTypeKVCacheAllocatorTest, ForwardHndTailCopiesFallBackForShardedCp) {
+#if USING_CUDA
+    auto config                 = makeSimpleMhaCacheConfig(2, 8, 16, DataType::TYPE_BF16, 2, 16);
+    auto groups                 = config.topology().groups();
+    groups[0].local_kv_head_num = 2;
+    config.setTopology(std::move(groups), config.topology().layers());
+    allocator_ = std::make_shared<SingleTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator_->init());
+    ASSERT_NE(allocator_->gpu_block_copy_, nullptr);
+
+    // The mapper can be changed after allocator initialization. Neither absence
+    // nor CP=1 should disable partial copies; both sharded ranks must copy all.
+    for (int mode = 0; mode < 5; ++mode) {
+        if (mode == 0 || mode == 4) {
+            allocator_->setCPSlotMapper(nullptr);
+        } else {
+            allocator_->setCPSlotMapper(std::make_shared<CPSlotMapper>(
+                /*cp_rank=*/mode == 3 ? 1 : 0, /*cp_size=*/mode == 1 ? 1 : 2, /*block_size=*/16));
+        }
+        const bool                                           expect_full_copy = mode == 2 || mode == 3;
+        std::vector<std::pair<torch::Tensor, torch::Tensor>> checks;
+        for (int layer = 0; layer < 2; ++layer) {
+            for (const int block : {0, 1, 4, 5}) {
+                const auto buffers = allocator_->convertIndexToBuffer(layer, block);
+                for (size_t plane = 0; plane < buffers.size(); ++plane) {
+                    const auto& info  = buffers[plane];
+                    auto        bytes = torch::from_blob(
+                        info.addr,
+                        {static_cast<int64_t>(info.size_bytes)},
+                        torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA, info.device_index));
+                    const int value = block * 17 + layer * 3 + plane;
+                    bytes.fill_(value);
+                    auto expected = torch::full({static_cast<int64_t>(info.size_bytes)}, value, torch::kUInt8);
+                    if (block == 4 || block == 5) {
+                        const int source_value = (block == 4 ? 0 : 17) + layer * 3 + plane;
+                        if (expect_full_copy) {
+                            expected.fill_(source_value);
+                        } else {
+                            for (int head = 0; head < 4; ++head) {
+                                expected.slice(0, head * 16 * 32, head * 16 * 32 + block * 32).fill_(source_value);
+                            }
+                        }
+                    }
+                    checks.push_back({bytes, expected});
+                }
+            }
+        }
+        allocator_->blockBatchCopyForForward(torch::tensor({0, 0, 4, 0, 1, 5}, torch::kInt32).reshape({2, 3}),
+                                             torch::tensor({4, 5}, torch::kInt32));
+        for (const auto& check : checks) {
+            EXPECT_TRUE(torch::equal(check.first.cpu(), check.second)) << "mode=" << mode;
+        }
+    }
+#endif
+}
+
 // Test block copy
 TEST_F(SingleTypeKVCacheAllocatorTest, BlockCopySingle) {
     auto config = createSingleTypeTestConfig();

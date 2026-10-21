@@ -42,9 +42,21 @@ struct GpuBlockCopy::Impl {
             TORCH_CHECK(tensor.size(0) > 0 && plane.copy_bytes > 0
                             && plane.copy_bytes <= static_cast<size_t>(stride),
                         "invalid block copy stride or size");
+            TORCH_CHECK((plane.tokens_per_block == 0) == (plane.token_bytes == 0),
+                        "partial block copy requires both token count and token bytes");
+            if (plane.tokens_per_block) {
+                const uint64_t head_bytes = uint64_t(plane.tokens_per_block) * plane.token_bytes;
+                TORCH_CHECK(plane.copy_bytes <= std::numeric_limits<uint32_t>::max() && head_bytes <= plane.copy_bytes
+                                && plane.copy_bytes % head_bytes == 0,
+                            "invalid HND block copy layout");
+                max_valid_tokens = std::min(max_valid_tokens, plane.tokens_per_block);
+            }
             block_count = std::min(block_count, tensor.size(0));
             descriptors.push_back({static_cast<uint8_t*>(tensor.data_ptr()),
-                                   static_cast<uint64_t>(stride), plane.copy_bytes});
+                                   static_cast<uint64_t>(stride),
+                                   plane.copy_bytes,
+                                   plane.tokens_per_block,
+                                   plane.token_bytes});
         }
         const auto bytes = descriptors.size() * sizeof(kernels::BlockCopyPlane);
         layout = torch::empty({static_cast<int64_t>(bytes)},
@@ -67,12 +79,20 @@ struct GpuBlockCopy::Impl {
         }
     }
 
-    void copy(const torch::Tensor& mappings) {
+    void copy(const torch::Tensor& mappings, const torch::Tensor& valid_token_lengths) {
         TORCH_CHECK(mappings.device().is_cpu() && mappings.scalar_type() == torch::kInt32
                         && mappings.is_contiguous() && mappings.dim() == 2 && mappings.size(1) == 3,
                     "block ID copy expects a contiguous CPU int32 [N,3] matrix");
         const auto count = mappings.size(0);
         TORCH_CHECK(count <= std::numeric_limits<int>::max(), "too many block copy mappings");
+        const int32_t* lengths = nullptr;
+        if (valid_token_lengths.defined()) {
+            TORCH_CHECK(valid_token_lengths.device().is_cpu() && valid_token_lengths.scalar_type() == torch::kInt32
+                            && valid_token_lengths.is_contiguous() && valid_token_lengths.dim() == 1
+                            && valid_token_lengths.numel() == count,
+                        "block copy valid lengths must be a contiguous CPU int32 [N] vector");
+            lengths = valid_token_lengths.data_ptr<int32_t>();
+        }
         if (count == 0) {
             return;
         }
@@ -83,6 +103,9 @@ struct GpuBlockCopy::Impl {
                 TORCH_CHECK(ids[3*i] == 0 && ids[3*i+1] >= 0 && ids[3*i+1] < block_count
                                 && ids[3*i+2] >= 0 && ids[3*i+2] < block_count,
                             "invalid group or block ID in block copy mapping ", i);
+                TORCH_CHECK(!lengths || (lengths[i] >= 0 && uint32_t(lengths[i]) <= max_valid_tokens),
+                            "invalid live token count in block copy mapping ",
+                            i);
             }
         }
         std::lock_guard<std::mutex> lock(mutex);
@@ -105,9 +128,9 @@ struct GpuBlockCopy::Impl {
             while (capacity < static_cast<size_t>(count)) {
                 capacity *= 2;
             }
-            auto host = torch::empty({static_cast<int64_t>(capacity), 3},
+            auto host     = torch::empty({static_cast<int64_t>(capacity), 4},
                                      torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
-            auto device = torch::empty({static_cast<int64_t>(capacity), 3},
+            auto device   = torch::empty({static_cast<int64_t>(capacity), 4},
                                        torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA, device_index));
             slot.host = std::move(host);
             slot.device = std::move(device);
@@ -118,8 +141,14 @@ struct GpuBlockCopy::Impl {
         if (last_slot >= 0 && last_stream != stream.stream()) {
             slots[last_slot].done.block(stream);
         }
-        const auto bytes = static_cast<size_t>(count) * 3 * sizeof(int32_t);
-        std::memcpy(slot.host.data_ptr(), ids, bytes);
+        const auto bytes  = static_cast<size_t>(count) * 4 * sizeof(int32_t);
+        auto*      packed = slot.host.data_ptr<int32_t>();
+        for (int64_t i = 0; i < count; ++i) {
+            packed[4 * i]     = ids[3 * i];
+            packed[4 * i + 1] = ids[3 * i + 1];
+            packed[4 * i + 2] = ids[3 * i + 2];
+            packed[4 * i + 3] = lengths ? lengths[i] : 0;
+        }
         {
             RTP_LLM_PROFILE_SCOPE("kv.block_id_copy.enqueue");
             C10_CUDA_CHECK(cudaMemcpyAsync(slot.device.data_ptr(), slot.host.data_ptr(), bytes,
@@ -141,6 +170,7 @@ struct GpuBlockCopy::Impl {
     std::array<Slot, 2> slots;
     std::mutex mutex;
     int64_t block_count = std::numeric_limits<int64_t>::max();
+    uint32_t                       max_valid_tokens = std::numeric_limits<uint32_t>::max();
     int device_index = 0;
     size_t next_slot = 0;
     int last_slot = -1;
@@ -161,9 +191,9 @@ std::unique_ptr<GpuBlockCopy> GpuBlockCopy::create(std::vector<GpuBlockCopyPlane
 #endif
 }
 
-void GpuBlockCopy::copy(const torch::Tensor& cpu_mappings) {
+void GpuBlockCopy::copy(const torch::Tensor& cpu_mappings, const torch::Tensor& valid_token_lengths) {
 #if USING_CUDA
-    impl_->copy(cpu_mappings);
+    impl_->copy(cpu_mappings, valid_token_lengths);
 #else
     TORCH_CHECK(false, "block ID copy requires CUDA");
 #endif

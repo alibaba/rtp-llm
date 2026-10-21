@@ -11,9 +11,12 @@ struct BlockCopyPlane {
     uint8_t* base;
     uint64_t block_stride;
     uint64_t copy_bytes;
+    uint32_t tokens_per_block;
+    uint32_t token_bytes;
 };
 
-// mappings is a device int32 [count, 3] array: (group=0, src block, dst block).
+// mappings is a device int32 [count, 4]: (group=0, src, dst, valid tokens).
+// A zero valid count or an opaque plane retains whole-block copy semantics.
 // Destinations must be unique and must not overwrite another entry's source.
 void invokeBlockIdCopy(const BlockCopyPlane* planes,
                        int                   plane_count,

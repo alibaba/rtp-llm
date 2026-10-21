@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <unordered_map>
 
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -10,6 +11,8 @@
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
+#include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
+#include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 
 namespace rtp_llm {
@@ -76,8 +79,34 @@ bool SingleTypeKVCacheAllocator::doInit() {
         const auto kv_tensors = full_kv_cache_group_->allLayerCacheBase();
         const auto scale_tensors = full_kv_cache_group_->allLayerScaleCacheBase();
         std::vector<GpuBlockCopyPlane> planes;
+        // Only this dense MHA layout is known to be [K/V, head, token, dim].
+        // Unknown/quantized/scale/physical-page aggregation layouts keep full copies.
+        const auto mha_spec = std::dynamic_pointer_cast<const MHAKVCacheSpec>(spec);
+        const bool hnd_tail_copy =
+            !config_.use_mla && !config_.is_sparse && !config_.use_opaque_kv_cache_store
+            && spec->type == KVCacheSpecType::MultiHeadAttention && mha_spec && mha_spec->localKvHeads() > 0
+            && mha_spec->headDim() > 0 && mha_spec->localKvHeads() == cache_group.local_kv_head_num
+            && (spec->memoryLayoutDType() == DataType::TYPE_BF16 || spec->memoryLayoutDType() == DataType::TYPE_FP16)
+            && cache_group.kv_scale_stride_bytes == 0 && spec->scale_block_size_bytes() == 0
+            && cache_group.seq_size_per_block > 0 && cache_group.local_kv_head_num > 0
+            && (cache_group.kernel_seq_size_per_block == 0
+                || cache_group.kernel_seq_size_per_block == cache_group.seq_size_per_block)
+            && spec->seq_size_per_block == cache_group.seq_size_per_block
+            && cache_group.kv_block_stride_bytes == spec->block_size_bytes()
+            && spec->block_size_bytes() <= std::numeric_limits<uint32_t>::max()
+            && spec->k_block_size_bytes() == spec->v_block_size_bytes()
+            && spec->k_block_size_bytes()
+                   == size_t(mha_spec->localKvHeads()) * mha_spec->headDim() * cache_group.seq_size_per_block * 2;
         for (int layer_id : cache_group.layer_ids) {
-            planes.push_back({kv_tensors.at(layer_id), cache_group.kv_block_stride_bytes});
+            GpuBlockCopyPlane plane{kv_tensors.at(layer_id), cache_group.kv_block_stride_bytes};
+            if (hnd_tail_copy
+                && plane.blocks.scalar_type()
+                       == (spec->memoryLayoutDType() == DataType::TYPE_BF16 ? torch::kBFloat16 : torch::kFloat16)
+                && plane.blocks.stride(0) * plane.blocks.element_size() == plane.copy_bytes) {
+                plane.tokens_per_block = cache_group.seq_size_per_block;
+                plane.token_bytes      = mha_spec->headDim() * 2;
+            }
+            planes.push_back(std::move(plane));
             if (cache_group.kv_scale_stride_bytes > 0) {
                 planes.push_back({scale_tensors.at(layer_id), cache_group.kv_scale_stride_bytes});
             }
@@ -97,10 +126,14 @@ bool SingleTypeKVCacheAllocator::doInit() {
     return true;
 }
 
-void SingleTypeKVCacheAllocator::blockBatchCopyForForward(const torch::Tensor& copy_mapping) {
+void SingleTypeKVCacheAllocator::blockBatchCopyForForward(const torch::Tensor& copy_mapping,
+                                                          const torch::Tensor& valid_token_lengths) {
     if (gpu_block_copy_ && copy_mapping.dim() == 2 && copy_mapping.size(1) == 3) {
         RTP_LLM_PROFILE_SCOPE("kv.block_id_copy");
-        gpu_block_copy_->copy(copy_mapping);
+        // A global tail length does not describe every rank's local tail page
+        // under CP page sharding. Keep the existing full-copy contract there.
+        const bool sharded_cp = cp_slot_mapper_ && cp_slot_mapper_->isSharded();
+        gpu_block_copy_->copy(copy_mapping, sharded_cp ? torch::Tensor() : valid_token_lengths);
     } else {
         KVCacheAllocator::blockBatchCopyForForward(copy_mapping);
     }

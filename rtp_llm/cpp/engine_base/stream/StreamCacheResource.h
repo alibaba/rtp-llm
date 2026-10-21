@@ -58,7 +58,7 @@ public:
     // Rebuild KV block ownership for beam/multiple-return sequences.
     // This records copy mappings; caller must execute them via
     // getKVBlockUpdateMapping/KVCacheManager::blockBatchCopy before reuse.
-    bool updateKVBlock(const std::vector<int>& block_src_batch, bool copy_last_block);
+    bool updateKVBlock(const std::vector<int>& block_src_batch, bool copy_last_block, int valid_tail_tokens = 0);
 
     // clear block copy mapping
     void clearKVBlockUpdateMapping() {

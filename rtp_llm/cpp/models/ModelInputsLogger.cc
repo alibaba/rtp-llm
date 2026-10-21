@@ -37,6 +37,7 @@ std::atomic<uint64_t> g_file_sequence{0};
     X(combo_tokens) X(input_lengths) X(sequence_lengths) X(lm_output_indexes) X(lm_output_lengths) X(prefix_lengths) \
     X(combo_tokens_type_ids) X(combo_position_ids) X(last_hidden_states) X(attention_mask)                           \
     X(kv_cache_block_id) X(kv_cache_kernel_block_id) X(kv_cache_group_types) X(kv_cache_update_mapping)             \
+    X(kv_cache_copy_token_lengths)                                                                                 \
     X(text_tokens_mask) X(mm_features_locs) X(input_embeddings_locs)                                                 \
     X(request_id) X(request_pd_separation) X(cache_keys)
 // clang-format on

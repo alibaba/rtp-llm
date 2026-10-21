@@ -47,6 +47,8 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         inputs.kv_cache_group_types.defined() ? inputs.kv_cache_group_types.numel() : 0;
     shape_hints_ptr[GptModelInputIndex::kvCacheUpdateCopyNum] =
         inputs.kv_cache_update_mapping.defined() ? inputs.kv_cache_update_mapping.size(0) : 0;
+    shape_hints_ptr[GptModelInputIndex::kvCacheCopyTokenLengths] =
+        inputs.kv_cache_copy_token_lengths.defined() ? inputs.kv_cache_copy_token_lengths.numel() : 0;
     shape_hints_ptr[GptModelInputIndex::lmOutputIndexes] =
         inputs.lm_output_indexes.defined() ? inputs.lm_output_indexes.numel() : 0;
     shape_hints_ptr[GptModelInputIndex::comboPositionIds] =
@@ -222,6 +224,11 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
                 pickAlloc(GptModelInputDeviceBit::kDeviceBitKernelBlockId));
             inputs.kv_cache_update_mapping = allocBuf(
                 rtp_llm::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::kvCacheUpdateCopyNum], 3});
+            if (shape_hints_ptr[GptModelInputIndex::kvCacheCopyTokenLengths] > 0) {
+                inputs.kv_cache_copy_token_lengths =
+                    allocBuf(rtp_llm::DataType::TYPE_INT32,
+                             {(size_t)shape_hints_ptr[GptModelInputIndex::kvCacheCopyTokenLengths]});
+            }
         }
         if (max_blocks != 0) {
             inputs.kv_cache_block_id =
@@ -305,6 +312,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
             collect(inputs.cache_keys);
         }
         collect(inputs.kv_cache_update_mapping);
+        collect(inputs.kv_cache_copy_token_lengths);
     }
     collect(inputs.request_id);
     collect(inputs.request_pd_separation);

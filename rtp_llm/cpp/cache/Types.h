@@ -41,6 +41,8 @@ struct TaggedBlockIdPair {
     std::string  tag;
     BlockIdxType src;
     BlockIdxType dst;
+    // Only beam tail COW knows the valid prefix. Zero retains whole-block semantics.
+    int32_t valid_tokens = 0;
 };
 
 // Process-local tensor representation. group_id is resolved from a stable tag
