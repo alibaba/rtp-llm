@@ -8,6 +8,10 @@
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/KVCacheTransferPlanner.h"
+#include "rtp_llm/cpp/cache/connector/p2p/plan/KVCacheTransferPlanner.h"
+#include "rtp_llm/cpp/cache/connector/p2p/plan/ShardLayoutFactory.h"
+#include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBufferUtil.h"
+#include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverterImpl.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/RequestBlockBufferStore.h"
@@ -219,7 +223,8 @@ protected:
 
     CacheConfig makeDsv4Config(uint32_t block_num               = 16,
                                uint32_t seq_size_per_block      = kDsv4TokensPerBlock,
-                               uint32_t kernel_seq_size_per_blk = kDsv4TokensPerBlock) {
+                               uint32_t kernel_seq_size_per_blk = kDsv4TokensPerBlock,
+                               ParallelismConfig pc = ParallelismConfig{}) {
         ModelConfig mc;
         mc.num_layers                   = 43;
         mc.hidden_size                  = 4096;
@@ -248,7 +253,6 @@ protected:
         // pools so the unit test does not reserve hundreds of MB of HBM.
         test::setDsv4ExplicitPoolBlocks(mc, "hca_state", block_num);
 
-        ParallelismConfig pc;
         KVCacheConfig     kv_config;
         kv_config.seq_size_per_block        = seq_size_per_block;
         kv_config.kernel_seq_size_per_block = kernel_seq_size_per_blk;
@@ -520,6 +524,247 @@ void PdSepKVCacheReleaseTest::verifyDsv4TcpRegionTransfer(uint32_t logical_token
     EXPECT_GT(region_count, covered_groups.size());
 }
 
+TEST_F(PdSepKVCacheReleaseTest, Dsv4RealCpPlanTransfersSuffixThroughTcpAndPreservesReusedPrefix) {
+    ParallelismConfig prefill_pc;
+    prefill_pc.role_type                          = RoleType::PREFILL;
+    prefill_pc.tp_size                            = 2;
+    prefill_pc.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
+    prefill_pc.prefill_cp_config.kv_cache_sharded = true;
+    prefill_pc.prefill_cp_config.prefill_cp_size  = 2;
+    auto decode_pc                                = prefill_pc;
+    decode_pc.role_type                           = RoleType::DECODE;
+    decode_pc.tp_size                             = 1;
+    decode_pc.prefill_cp_config.method            = CPRotateMethod::PREFILL_CP;
+    const auto prefill_config                     = makeDsv4Config(8, 256, 128, prefill_pc);
+    const auto decode_config                      = makeDsv4Config(8, 256, 128, decode_pc);
+    const auto source =
+        ShardLayoutFactory::fromTopology(prefill_config.topology(), prefill_pc, RoleType::PREFILL, kDsv4TokensPerBlock);
+    const auto target =
+        ShardLayoutFactory::fromTopology(decode_config.topology(), decode_pc, RoleType::DECODE, kDsv4TokensPerBlock);
+    const auto tags = ShardLayoutFactory::tagsOf(decode_config.topology());
+    ASSERT_EQ(tags.size(), kDsv4PoolNum);
+    const auto planned = KVCacheTransferPlanner::plan(source, target, tags);
+    ASSERT_TRUE(planned.ok()) << planned.error.ToString();
+    // Prefix filtering must happen after resolving the original request's key
+    // geometry. Resolving a shortened suffix would change CP ownership and
+    // compact-tail placement instead of preserving absolute key positions.
+    constexpr size_t      full_key_count = 7;
+    constexpr size_t      reused_keys    = 2;
+    std::set<std::string> covered;
+    std::set<int>         source_ranks;
+    bool                  has_byte_slice      = false;
+    bool                  has_retained_suffix = false;
+    for (const auto& route : planned.plan.routes) {
+        EXPECT_EQ(route.src_bytes, route.dst_bytes) << route.cache_tag;
+        EXPECT_GT(route.src_bytes, 0u) << route.cache_tag;
+        auto       positions = KVCacheTransferPlanner::resolveKeys(route.src_keys, full_key_count);
+        const auto original  = positions;
+        positions.erase(
+            std::remove_if(positions.begin(), positions.end(), [](size_t pos) { return pos < reused_keys; }),
+            positions.end());
+        for (const auto position : positions) {
+            EXPECT_GE(position, reused_keys);
+            EXPECT_LT(position, full_key_count);
+            EXPECT_NE(std::find(original.begin(), original.end(), position), original.end());
+        }
+        has_retained_suffix = has_retained_suffix || !positions.empty();
+        has_byte_slice      = has_byte_slice || route.dst_slice.mode != CpBlockSliceMode::NONE;
+        source_ranks.insert(route.src_rank);
+        covered.insert(route.cache_tag);
+    }
+    EXPECT_EQ(covered.size(), kDsv4PoolNum);
+    EXPECT_EQ(source_ranks, (std::set<int>{0, 1}));
+    EXPECT_TRUE(has_byte_slice);
+    EXPECT_TRUE(has_retained_suffix);
+
+    std::vector<std::shared_ptr<KVCacheManager>>      source_managers;
+    std::vector<std::shared_ptr<LayerBlockConverter>> source_converters;
+    std::vector<KVCacheResource>                      source_resources(2);
+    CacheKeysType                                     keys(full_key_count);
+    std::iota(keys.begin(), keys.end(), 1001);
+    BlockIndicesType physical_ids(full_key_count);
+    std::iota(physical_ids.begin(), physical_ids.end(), 1);
+    for (int rank = 0; rank < 2; ++rank) {
+        auto manager = std::make_shared<KVCacheManager>(prefill_config, false, nullptr);
+        ASSERT_TRUE(manager->init());
+        source_converters.push_back(std::make_shared<LayerBlockConverterImpl>(manager->coordinator_manager_));
+        source_managers.push_back(std::move(manager));
+        source_resources[rank].initGroups(prefill_config.topologyPtr());
+        source_resources[rank].setCacheKeys(keys);
+        for (const auto& tag : tags) {
+            source_resources[rank].mutableBlockIds(tag).assign(physical_ids);
+        }
+    }
+    auto target_manager = std::make_shared<KVCacheManager>(decode_config, false, nullptr);
+    ASSERT_TRUE(target_manager->init());
+    auto            target_converter = std::make_shared<LayerBlockConverterImpl>(target_manager->coordinator_manager_);
+    KVCacheResource target_resource;
+    target_resource.initGroups(decode_config.topologyPtr());
+    target_resource.setCacheKeys(keys);
+    for (const auto& tag : tags) {
+        target_resource.mutableBlockIds(tag).assign(physical_ids);
+    }
+    transfer::TransferBackendConfig backend_config;
+    backend_config.cache_store_listen_port      = autil::NetUtil::randomPort();
+    backend_config.messager_io_thread_count     = 1;
+    backend_config.messager_worker_thread_count = 1;
+    auto sender                                 = transfer::createTransferBackend(
+                      transfer::TransferBackend::kTcp, backend_config, transfer::TransferBackendRole::kSender)
+                      .sender;
+    auto receiver = transfer::createTransferBackend(
+                        transfer::TransferBackend::kTcp, backend_config, transfer::TransferBackendRole::kReceiver)
+                        .receiver;
+    ASSERT_NE(sender, nullptr);
+    ASSERT_NE(receiver, nullptr);
+    auto tensor = [](const BlockInfo& block) {
+        return torch::from_blob(block.addr,
+                                {static_cast<int64_t>(block.size_bytes)},
+                                torch::TensorOptions(torch::kUInt8).device(block.is_cuda ? torch::kCUDA : torch::kCPU));
+    };
+    size_t                transferred_regions = 0;
+    size_t                skipped_prefix_keys = 0;
+    std::set<std::string> transferred_tags;
+    for (const auto& layer : decode_config.topology().layers()) {
+        for (const auto& tag : layer.group_tags) {
+            std::vector<BlockInfo>            target_regions;
+            std::vector<std::vector<uint8_t>> expected;
+            for (const auto block_id : physical_ids) {
+                for (const auto& part : target_manager->convertIndexToBuffer(layer.layer_id, tag, block_id)) {
+                    tensor(part).fill_(255);
+                    target_regions.push_back(part);
+                    expected.emplace_back(part.size_bytes, 255);
+                }
+            }
+            ASSERT_FALSE(target_regions.empty());
+            for (const auto* route : planned.plan.forDecodeRankAndTag(0, tag)) {
+                const auto all_positions = KVCacheTransferPlanner::resolveKeys(route->src_keys, full_key_count);
+                auto       suffix        = all_positions;
+                suffix.erase(std::remove_if(suffix.begin(), suffix.end(), [](size_t pos) { return pos < reused_keys; }),
+                             suffix.end());
+                if (suffix.empty()) {
+                    continue;
+                }
+                auto src_buffers = LayerCacheBufferUtil::convertTagForRoute(source_resources.at(route->src_rank),
+                                                                            prefill_config.topology(),
+                                                                            tag,
+                                                                            all_positions,
+                                                                            source.cpRank(route->src_rank),
+                                                                            source.physicalCpSize(tag),
+                                                                            kDsv4TokensPerBlock);
+                auto dst_buffers = LayerCacheBufferUtil::convertTagForRoute(target_resource,
+                                                                            decode_config.topology(),
+                                                                            tag,
+                                                                            suffix,
+                                                                            0,
+                                                                            target.physicalCpSize(tag),
+                                                                            kDsv4TokensPerBlock);
+                ASSERT_TRUE(src_buffers.ok()) << src_buffers.status().ToString();
+                ASSERT_TRUE(dst_buffers.ok()) << dst_buffers.status().ToString();
+                auto find_layer = [&](const auto& buffers) {
+                    return std::find_if(buffers.begin(), buffers.end(), [&](const auto& buffer) {
+                        return buffer->getLayerId() == layer.layer_id;
+                    });
+                };
+                auto src_layer = find_layer(src_buffers.value());
+                auto dst_layer = find_layer(dst_buffers.value());
+                ASSERT_NE(src_layer, src_buffers.value().end());
+                ASSERT_NE(dst_layer, dst_buffers.value().end());
+                if (source.effectiveMapping(tag) == CpBlockMappingMode::BLOCK_ROUND_ROBIN
+                    && source.groups.at(tag).policy.group_type == CacheGroupType::FULL) {
+                    for (const auto pos : all_positions) {
+                        EXPECT_EQ((*src_layer)->getBlockId(keys[pos]), physical_ids[pos / 2]);
+                    }
+                    for (const auto pos : suffix) {
+                        EXPECT_EQ((*dst_layer)->getBlockId(keys[pos]), physical_ids[pos]);
+                    }
+                }
+
+                auto src_blocks =
+                    LayerCacheBufferUtil::buildKeyBlockInfosSliced(source_converters.at(route->src_rank),
+                                                                   *src_layer,
+                                                                   route->src_partition.count,
+                                                                   route->src_partition.id,
+                                                                   route->src_slice,
+                                                                   source.groups.at(tag).k_block_payload_bytes);
+                auto dst_blocks =
+                    LayerCacheBufferUtil::buildKeyBlockInfosSliced(target_converter,
+                                                                   *dst_layer,
+                                                                   route->dst_partition.count,
+                                                                   route->dst_partition.id,
+                                                                   route->dst_slice,
+                                                                   target.groups.at(tag).k_block_payload_bytes);
+                ASSERT_TRUE(src_blocks.ok()) << src_blocks.status().ToString();
+                ASSERT_TRUE(dst_blocks.ok()) << dst_blocks.status().ToString();
+                skipped_prefix_keys += src_blocks.value().size() - dst_blocks.value().size();
+                transferred_tags.insert(tag);
+                // Prefill publishes the full route key set. Decode receives only
+                // its suffix; prefix bytes and padding must remain untouched.
+                for (const auto& [key, info] : src_blocks.value()) {
+                    for (size_t part_index = 0; part_index < info->blocks.size(); ++part_index) {
+                        tensor(info->blocks[part_index])
+                            .fill_(static_cast<int>((key * 17 + route->src_rank * 31 + part_index) % 251));
+                    }
+                }
+                runtimeSyncAndCheck();
+                for (const auto& [key, info] : dst_blocks.value()) {
+                    const auto& src_parts = src_blocks.value().at(key)->blocks;
+                    ASSERT_EQ(src_parts.size(), info->blocks.size());
+                    for (size_t part_index = 0; part_index < info->blocks.size(); ++part_index) {
+                        const auto& part = info->blocks[part_index];
+                        ASSERT_EQ(part.size_bytes, src_parts[part_index].size_bytes);
+                        auto       bytes   = tensor(src_parts[part_index]).cpu().contiguous();
+                        bool       found   = false;
+                        const auto address = reinterpret_cast<uintptr_t>(part.addr);
+                        for (size_t region = 0; region < target_regions.size(); ++region) {
+                            const auto base = reinterpret_cast<uintptr_t>(target_regions[region].addr);
+                            if (address >= base && address - base <= expected[region].size()
+                                && part.size_bytes <= expected[region].size() - (address - base)) {
+                                std::memcpy(expected[region].data() + address - base,
+                                            bytes.data_ptr<uint8_t>(),
+                                            part.size_bytes);
+                                found = true;
+                                break;
+                            }
+                        }
+                        ASSERT_TRUE(found) << tag << " key=" << key;
+                        ++transferred_regions;
+                    }
+                }
+                const auto unique_key = "dsv4-planned-" + std::to_string(layer.layer_id) + "-" + tag + "-"
+                                        + std::to_string(route->route_id);
+                const auto            deadline = currentTimeMs() + 10000;
+                transfer::RecvRequest receive;
+                receive.unique_key  = unique_key;
+                receive.deadline_ms = deadline;
+                receive.block_info  = dst_blocks.value();
+                auto task           = receiver->recv(receive);
+                ASSERT_NE(task, nullptr);
+                transfer::SendRequest send;
+                send.ip          = "127.0.0.1";
+                send.port        = backend_config.cache_store_listen_port;
+                send.unique_key  = unique_key;
+                send.deadline_ms = deadline;
+                send.timeout_ms  = 10000;
+                send.block_info  = src_blocks.value();
+                auto completion  = std::make_shared<std::promise<transfer::TransferErrorCode>>();
+                auto done        = completion->get_future();
+                sender->send(send, [completion](auto code, const std::string&) { completion->set_value(code); });
+                ASSERT_EQ(done.wait_for(std::chrono::seconds(15)), std::future_status::ready);
+                ASSERT_EQ(done.get(), transfer::TransferErrorCode::OK) << unique_key;
+                ASSERT_TRUE(task->success()) << task->errorMessage();
+            }
+            runtimeSyncAndCheck();
+            for (size_t region = 0; region < target_regions.size(); ++region) {
+                auto actual = tensor(target_regions[region]).cpu().contiguous();
+                EXPECT_EQ(std::memcmp(actual.data_ptr<uint8_t>(), expected[region].data(), expected[region].size()), 0)
+                    << "layer=" << layer.layer_id << " tag=" << tag << " region=" << region;
+            }
+        }
+    }
+    EXPECT_GT(transferred_regions, kDsv4PoolNum);
+    EXPECT_GT(skipped_prefix_keys, 0u);
+    EXPECT_EQ(transferred_tags.size(), kDsv4PoolNum);
+}
 TEST_F(PdSepKVCacheReleaseTest, Dsv4SevenGroupsTransferEveryLayerRegionThroughTcp) {
     ASSERT_NO_FATAL_FAILURE(verifyDsv4TcpRegionTransfer(kDsv4TokensPerBlock, kDsv4TokensPerBlock));
 }

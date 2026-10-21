@@ -94,6 +94,9 @@ cc_test(
     deps = test_deps + [
         "//rtp_llm/cpp/cache",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:backend_factory",
+        "//rtp_llm/cpp/cache/connector/p2p/plan:transfer_plan_glue",
+        "//rtp_llm/cpp/cache/connector/p2p:layer_cache_buffer",
+        "//rtp_llm/cpp/cache/connector/p2p:layer_block_converter",
         "//rtp_llm/cpp/disaggregate/cache_store",
         "//rtp_llm/cpp/model_rpc:model_rpc_server",
         "//rtp_llm/models_py/bindings/common",
