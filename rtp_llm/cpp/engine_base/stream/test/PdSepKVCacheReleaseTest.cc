@@ -258,6 +258,8 @@ protected:
         return config;
     }
 
+    void verifyDsv4TcpRegionTransfer(uint32_t logical_tokens, uint32_t kernel_tokens);
+
     // Build a PREFILL stream with reuse_cache enabled
     void prepareStream(const std::vector<int>& input_tokens) {
         prepareStreamWithConfig(input_tokens, makeConfig(), /*tokens_per_block=*/8, RoleType::PREFILL);
@@ -438,8 +440,8 @@ TEST_F(PdSepKVCacheReleaseTest, testInsertIntoCache_CalledDuringRelease_ReuseWor
     stream2->releaseResource();
 }
 
-TEST_F(PdSepKVCacheReleaseTest, Dsv4SevenGroupsTransferEveryLayerRegionThroughTcp) {
-    auto config = makeDsv4Config(/*block_num=*/4);
+void PdSepKVCacheReleaseTest::verifyDsv4TcpRegionTransfer(uint32_t logical_tokens, uint32_t kernel_tokens) {
+    auto config = makeDsv4Config(/*block_num=*/4, logical_tokens, kernel_tokens);
     auto manager = std::make_shared<KVCacheManager>(config, false, nullptr);
     ASSERT_TRUE(manager->init());
     transfer::TransferBackendConfig backend_config;
@@ -516,6 +518,14 @@ TEST_F(PdSepKVCacheReleaseTest, Dsv4SevenGroupsTransferEveryLayerRegionThroughTc
     }
     EXPECT_EQ(covered_groups.size(), kDsv4PoolNum);
     EXPECT_GT(region_count, covered_groups.size());
+}
+
+TEST_F(PdSepKVCacheReleaseTest, Dsv4SevenGroupsTransferEveryLayerRegionThroughTcp) {
+    ASSERT_NO_FATAL_FAILURE(verifyDsv4TcpRegionTransfer(kDsv4TokensPerBlock, kDsv4TokensPerBlock));
+}
+
+TEST_F(PdSepKVCacheReleaseTest, Dsv4DecoupledKernelBlocksTransferEveryLayerRegionThroughTcp) {
+    ASSERT_NO_FATAL_FAILURE(verifyDsv4TcpRegionTransfer(kDsv4TokensPerBlock, 128));
 }
 
 TEST_F(PdSepKVCacheReleaseTest, testDsv4PDSepPrefillReleaseInsertsSevenGroupDeviceCache) {
