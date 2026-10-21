@@ -266,7 +266,7 @@ def run():
         endpoints = json.loads((runtime / "endpoints.json").read_text())
         env.update(legacy_discovery(endpoints, os.environ.get("MOCK_BUNDLE_FILE_DISCOVERY") == "1") if legacy else endpoints["env"])
         if vit_cfg is not None:
-            vit = start("vit", [java, "-Xmx512m", "-cp", str(jars / "mock.jar"),
+            vit = start("vit", [java, "-Xms64m", "-Xmx512m", "-Djava.awt.headless=true", "-cp", str(jars / "mock.jar"),
                                 "org.flexlb.mockengine.MockVitServer",
                                 *[part for key, value in vit_cfg.items()
                                   for part in ("--" + key.replace("_", "-"), str(value))]], env)
