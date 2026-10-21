@@ -1652,20 +1652,6 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         spec_logits_async_launched = true;
     };
 
-    // Both proposal implementations have now produced the same target-verify
-    // rows. Launch once here so spec-logits D2H/CPU work overlaps target verify.
-    if (spec_logits_processor_present && propose_step_ > 1 && draft_token_ids_t.defined()) {
-        RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(launch_spec_logits_verify_async)");
-        const int64_t expected_verify_tokens =
-            static_cast<int64_t>(batch_size) * static_cast<int64_t>(propose_step_ + 1);
-        const int64_t actual_verify_tokens = draft_token_ids_t.numel();
-        RTP_LLM_CHECK_WITH_INFO(actual_verify_tokens == expected_verify_tokens,
-                                "spec logits verify tokens mismatch: got %ld, expected %ld",
-                                actual_verify_tokens,
-                                expected_verify_tokens);
-        launch_spec_logits_verify_async(draft_token_ids_t, draft_tokens_ready_event);
-    }
-
     // Launch draft-prefill prepare BEFORE target verify forward so it overlaps
     // with target verify GPU work instead of running serially after it. Sync
     // on this prepare happens just before draft_model_forward below.
@@ -1679,6 +1665,21 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         model_output          = runTargetVerifyForward(model_input, stream_groups);
         maybeOverrideLastHiddenWithMtpBuffer(model_output, *model_, model_input.combo_tokens.numel());
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+    }
+
+    // Submit target verify before waiting for previous bookkeeping in the launch
+    // helper. The earlier token-ready event lets spec-logits D2H/CPU work still
+    // overlap target GPU work that remains in flight.
+    if (spec_logits_processor_present && propose_step_ > 1 && draft_token_ids_t.defined()) {
+        RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(launch_spec_logits_verify_async)");
+        const int64_t expected_verify_tokens =
+            static_cast<int64_t>(batch_size) * static_cast<int64_t>(propose_step_ + 1);
+        const int64_t actual_verify_tokens = draft_token_ids_t.numel();
+        RTP_LLM_CHECK_WITH_INFO(actual_verify_tokens == expected_verify_tokens,
+                                "spec logits verify tokens mismatch: got %ld, expected %ld",
+                                actual_verify_tokens,
+                                expected_verify_tokens);
+        launch_spec_logits_verify_async(draft_token_ids_t, draft_tokens_ready_event);
     }
 
     // trick: update draft sampler output after spec decode to avoid kernel launch overhead
