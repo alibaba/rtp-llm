@@ -3131,6 +3131,16 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
                 self.assertEqual(prefill[0].ip, "selected" if selected else "127.0.0.3")
                 self.assertEqual(prefill[0].grpc_port, 7001 if selected else 9003)
 
+        reserved = GenerateInput(
+            request_id=3,
+            token_ids=torch.tensor([1, 2, 3], dtype=torch.int32),
+            mm_inputs=[],
+            generate_config=GenerateConfig(role_addrs=[decode]),
+            enqueued_by_master=True,
+        )
+        with self.assertRaisesRegex(FtRuntimeException, "no backend role addresses found"):
+            await visitor.route_ips(reserved)
+
         missing_decode = GenerateInput(
             request_id=2,
             token_ids=torch.tensor([1, 2, 3], dtype=torch.int32),

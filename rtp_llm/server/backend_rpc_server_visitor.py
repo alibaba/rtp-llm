@@ -786,11 +786,17 @@ class BackendRPCServerVisitor:
 
             kmonitor.report(GaugeMetrics.ROUTE_RT_METRIC, route_timer.cost_ms())
             final_roles = {addr.role for addr in input.generate_config.role_addrs}
-            if RoleType.PREFILL not in final_roles and self._local_prefill_addresses:
+            if (
+                RoleType.PREFILL not in final_roles
+                and self._local_prefill_addresses
+                and not getattr(input, "enqueued_by_master", False)
+            ):
                 # This HTTP entry belongs to a real Prefill backend. Preserve an
                 # externally selected Prefill, otherwise advertise the local DP
                 # serving rank for Decode's handoff rather than requiring self
-                # registration in the external routing source.
+                # registration in the external routing source. A pre-enqueued
+                # Master route cannot change Prefill: that node may already own
+                # the request, so incomplete reserved routes still fail below.
                 local_address = self._local_prefill_addresses[
                     input.request_id % len(self._local_prefill_addresses)
                 ]
