@@ -59,6 +59,16 @@ class StandaloneMockTest(unittest.TestCase):
         args = standalone_mock.command(self.env)
         self.assertEqual(args[args.index("--cache-status-compact-encoding") + 1], "true")
 
+    def test_separate_pods_use_remote_decode_without_local_discovery(self):
+        self.env.update({"MOCK_PREFILL_COUNT": "1", "MOCK_DECODE_COUNT": "0",
+                         "MOCK_REMOTE_DECODE": "1"})
+        args = standalone_mock.command(self.env)
+        self.assertEqual(args[args.index("--whale-bundle") + 1], "false")
+        self.assertNotIn("--discovery-file", args)
+        self.env["MOCK_DECODE_COUNT"] = "1"
+        with self.assertRaises(ValueError):
+            standalone_mock.command(self.env)
+
     def test_invalid_configuration_cannot_exec(self):
         cases = [
             {"RTP_LLM_MOCK_BUNDLE": "0"},

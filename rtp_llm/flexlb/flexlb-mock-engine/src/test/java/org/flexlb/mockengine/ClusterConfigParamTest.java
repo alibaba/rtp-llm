@@ -40,6 +40,18 @@ class ClusterConfigParamTest {
     }
 
     @Test
+    void grpcReceiveLimitDefaultsToRealAndAllowsPositiveOverride() {
+        assertEquals(1024 * 1024 * 1024,
+                JavaMockEngineCluster.Config.parse(baseArgs()).grpcMaxInboundMessageBytes);
+        assertEquals(32 * 1024 * 1024, JavaMockEngineCluster.Config.parse(with(baseArgs(),
+                "--grpc-max-inbound-message-bytes", "33554432")).grpcMaxInboundMessageBytes);
+        for (String invalid : new String[]{"0", "-1", "2147483648", "invalid"}) {
+            assertThrows(IllegalArgumentException.class, () -> JavaMockEngineCluster.Config.parse(
+                    with(baseArgs(), "--grpc-max-inbound-message-bytes", invalid)));
+        }
+    }
+
+    @Test
     void fetchIsRequiredByDefaultAndShortcutIsExplicit() {
         var strict = JavaMockEngineCluster.Config.parse(baseArgs());
         assertEquals(false, strict.autoFetch);

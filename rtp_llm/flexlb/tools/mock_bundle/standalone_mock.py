@@ -43,6 +43,9 @@ def command(env):
     decode = integer(env, "MOCK_DECODE_COUNT", 1, minimum=0)
     if prefill + decode == 0:
         raise ValueError("At least one Mock engine is required")
+    remote_decode = boolean(env, "MOCK_REMOTE_DECODE", "false")
+    if remote_decode and prefill + decode != 1:
+        raise ValueError("MOCK_REMOTE_DECODE requires exactly one engine per Pod")
     port = integer(env, "MOCK_GRPC_BASE_PORT", 29130, minimum=2, maximum=65535)
     if port + prefill + decode - 1 > 65535:
         raise ValueError("Mock engine ports exceed 65535")
@@ -84,7 +87,7 @@ def command(env):
     java = str(Path(env.get("JAVA_HOME", "/opt/taobao/java")) / "bin/java")
     jar = Path(env.get("MOCK_BUNDLE_JAR_DIR", str(ROOT / "jars"))) / "mock.jar"
     args = [java, *shlex.split(env.get("MOCK_JAVA_OPTS", "-Xms512m -Xmx2g")),
-            "-jar", str(jar), "--whale", "true", "--whale-bundle", "true",
+            "-jar", str(jar), "--whale", "true", "--whale-bundle", str(not remote_decode).lower(),
             "--kmonitor", str(kmonitor).lower(), "--host", host,
             "--unique-engine-ips", "false", "--auto-fetch", str(not fetch).lower(),
             "--cache-status-compact-encoding", str(compact).lower()]
@@ -94,6 +97,8 @@ def command(env):
                        ("--discovery-file", "discovery.json"),
                        ("--performance", "performance.json"),
                        ("--master-config", "master-config.json")):
+        if remote_decode and flag == "--discovery-file":
+            continue
         args.extend([flag, str(runtime / name)])
     runtime.mkdir(parents=True, exist_ok=True)
     (runtime / "performance.json").write_text(json.dumps(performance))
