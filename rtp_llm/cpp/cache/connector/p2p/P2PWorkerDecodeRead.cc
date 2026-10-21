@@ -194,18 +194,18 @@ P2PWorkerDecodeRead::waitRecvTasksWithReadDeadlinePolicy(const std::shared_ptr<R
     for (const auto& key : task_group->partition_keys) {
         receiver_->stealTask(key);
     }
-            task_group->lease->seal();
-            for (const auto& task : task_group->tasks) {
-                if (task && !task->done()) {
-                    task->cancel();
-                }
-            }
-            RTP_LLM_LOG_WARNING("read: deadline reached with pending transfers; recv tasks stolen, lease sealed, "
-                                "and unfinished tasks cancelled, request_id=%ld, unique_key=%s, deadline_ms=%ld",
-                                request_id,
-                                unique_key.c_str(),
-                                deadline_ms);
-            return ReadWaitOutcome::ReturnDeadlineIncomplete;
+    task_group->lease->seal();
+    for (const auto& task : task_group->tasks) {
+        if (task && !task->done()) {
+            task->cancel();
+        }
+    }
+    RTP_LLM_LOG_WARNING("read: deadline reached with pending transfers; recv tasks stolen, lease sealed, "
+                        "and unfinished tasks cancelled, request_id=%ld, unique_key=%s, deadline_ms=%ld",
+                        request_id,
+                        unique_key.c_str(),
+                        deadline_ms);
+    return ReadWaitOutcome::ReturnDeadlineIncomplete;
 }
 
 void P2PWorkerDecodeRead::reportReadMetrics(P2PConnectorMetricsCollector&         collector,

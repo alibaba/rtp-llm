@@ -162,51 +162,56 @@ bool P2PConnectorDecode::readPerRank(int64_t                                 req
         worker_route.slice     = local.slice;
 
         for (const auto& layer_block_pb : route_pb.layer_blocks()) {
-        auto layer_id           = layer_block_pb.layer_id();
-        auto cache_keys         = layer_block_pb.cache_keys();
-        auto block_ids          = layer_block_pb.block_ids();
-        if (cache_keys.size() != block_ids.size()) {
-            const std::string error_message = "cache_keys size " + std::to_string(cache_keys.size())
-                                              + " != block_ids size " + std::to_string(block_ids.size())
-                                              + " for unique_key=" + unique_key
-                                              + ", layer_id=" + std::to_string(layer_id);
-            RTP_LLM_LOG_WARNING("executeRead rejected malformed request, request_id=%ld, unique_key=%s, layer_id=%d, "
-                                "cache_keys=%d, block_ids=%d",
-                                request_id,
-                                unique_key.c_str(),
-                                layer_id,
-                                cache_keys.size(),
-                                block_ids.size());
-            return reject_read(error_message);
-        }
-        if (cache_keys.empty() || layer_id < 0 || !config_.worker_config.topology
-            || static_cast<size_t>(layer_id) >= config_.worker_config.topology->layers().size()) {
-            return reject_read("READ request has empty blocks or invalid layer");
-        }
-        const auto& layer = config_.worker_config.topology->layer(layer_id);
-        if (std::find(layer.group_tags.begin(), layer.group_tags.end(), layer_block_pb.cache_tag())
-            == layer.group_tags.end()) {
-            return reject_read("READ request cache tag is not owned by layer");
-        }
-        // route 内的 (layer, tag) 唯一；跨 route 允许重复（同一层不同 route 写不同字节区间）。
-        const std::string layer_tag_key = std::to_string(local.route_id) + "@" + std::to_string(layer_id) + ":"
-                                          + layer_block_pb.cache_tag();
-        if (!route_layer_tag_keys.insert(layer_tag_key).second) {
-            return reject_read("READ request contains duplicate layer/tag within one route");
-        }
-        for (const auto block_id : block_ids) {
-            if (block_id < 0) {
-                return reject_read("READ request contains invalid block id");
+            auto layer_id           = layer_block_pb.layer_id();
+            auto cache_keys         = layer_block_pb.cache_keys();
+            auto block_ids          = layer_block_pb.block_ids();
+            if (cache_keys.size() != block_ids.size()) {
+                const std::string error_message = "cache_keys size " + std::to_string(cache_keys.size())
+                                                  + " != block_ids size " + std::to_string(block_ids.size())
+                                                  + " for unique_key=" + unique_key
+                                                  + ", layer_id=" + std::to_string(layer_id);
+                RTP_LLM_LOG_WARNING("executeRead rejected malformed request, request_id=%ld, unique_key=%s, layer_id=%d, "
+                                    "cache_keys=%d, block_ids=%d",
+                                    request_id,
+                                    unique_key.c_str(),
+                                    layer_id,
+                                    cache_keys.size(),
+                                    block_ids.size());
+                return reject_read(error_message);
             }
-        }
-        const std::set<int64_t> distinct_keys(cache_keys.begin(), cache_keys.end());
-        if (distinct_keys.size() != static_cast<size_t>(cache_keys.size())) {
-            return reject_read("READ request contains duplicate cache key");
-        }
-        auto layer_cache_buffer = std::make_shared<LayerCacheBuffer>(layer_id, layer_block_pb.cache_tag());
-        for (size_t i = 0; i < cache_keys.size(); i++) {
-            layer_cache_buffer->addBlockId(cache_keys[i], block_ids[i]);
-        }
+            if (cache_keys.empty() || layer_id < 0 || !config_.worker_config.topology
+                || static_cast<size_t>(layer_id) >= config_.worker_config.topology->layers().size()) {
+                return reject_read("READ request has empty blocks or invalid layer");
+            }
+            const auto& layer = config_.worker_config.topology->layer(layer_id);
+            if (std::find(layer.group_tags.begin(), layer.group_tags.end(), layer_block_pb.cache_tag())
+                == layer.group_tags.end()) {
+                return reject_read("READ request cache tag is not owned by layer");
+            }
+            // A validated layer tag also establishes route topology membership.
+            // Reject the mismatch before worker code performs a group lookup.
+            if (worker_route.cache_tag != layer_block_pb.cache_tag()) {
+                return reject_read("READ route cache tag does not match layer block cache tag");
+            }
+            // route 内的 (layer, tag) 唯一；跨 route 允许重复（同一层不同 route 写不同字节区间）。
+            const std::string layer_tag_key = std::to_string(local.route_id) + "@" + std::to_string(layer_id) + ":"
+                                              + layer_block_pb.cache_tag();
+            if (!route_layer_tag_keys.insert(layer_tag_key).second) {
+                return reject_read("READ request contains duplicate layer/tag within one route");
+            }
+            for (const auto block_id : block_ids) {
+                if (block_id < 0) {
+                    return reject_read("READ request contains invalid block id");
+                }
+            }
+            const std::set<int64_t> distinct_keys(cache_keys.begin(), cache_keys.end());
+            if (distinct_keys.size() != static_cast<size_t>(cache_keys.size())) {
+                return reject_read("READ request contains duplicate cache key");
+            }
+            auto layer_cache_buffer = std::make_shared<LayerCacheBuffer>(layer_id, layer_block_pb.cache_tag());
+            for (size_t i = 0; i < cache_keys.size(); i++) {
+                layer_cache_buffer->addBlockId(cache_keys[i], block_ids[i]);
+            }
             worker_route.layer_buffers.push_back(layer_cache_buffer);
         }
         if (worker_route.layer_buffers.empty()) {

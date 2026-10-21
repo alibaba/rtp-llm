@@ -8,6 +8,8 @@
 
 #include "autil/NetUtil.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnector.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorDecode.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PWorkerDecodeRead.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PSchedulerPrefillRead.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorResourceStore.h"
@@ -703,6 +705,46 @@ TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsError_WhenReadRequestHasInvalidB
     FunctionResponsePB response;
     EXPECT_FALSE(connector->executeFunction(request, response));
     EXPECT_NE(response.p2p_response().error_code(), ErrorCodePB::NONE_ERROR);
+}
+
+TEST_F(P2PConnectorTest, ExecuteFunction_RejectsMismatchedRouteTagBeforeWorkerLookup) {
+    auto config = createDecodeConfig();
+    std::vector<GroupBase> groups;
+    for (const std::string tag : {"full", "other"}) {
+        GroupBase group;
+        auto spec = std::make_shared<MHAKVCacheSpec>();
+        spec->tag = tag;
+        group.tag = tag;
+        group.spec = std::move(spec);
+        groups.push_back(std::move(group));
+    }
+    config.worker_config.topology = CacheTopology::create(std::move(groups), {{0, {"full", "other"}}});
+    auto connector = std::make_unique<P2PConnector>(config, mock_layer_block_converter_, nullptr);
+    ASSERT_TRUE(connector->init());
+    for (const std::string route_tag : {"other", "missing", ""}) {
+        SCOPED_TRACE(route_tag);
+        FunctionRequestPB request;
+        auto* read = request.mutable_p2p_request();
+        read->set_type(P2PConnectorBroadcastType::READ);
+        read->set_unique_key("mismatched-route-tag");
+        read->set_deadline_ms(currentTimeMs() + 5000);
+        read->set_request_deadline_ms(read->deadline_ms());
+        auto* route = read->add_routes();
+        route->set_route_id(0);
+        route->set_cache_tag(route_tag);
+        auto* layer = route->add_layer_blocks();
+        layer->set_layer_id(0);
+        layer->set_cache_tag("full");
+        layer->add_cache_keys(101);
+        layer->add_block_ids(1);
+        FunctionResponsePB response;
+        EXPECT_FALSE(connector->executeFunction(request, response));
+        EXPECT_NE(response.p2p_response().error_code(), ErrorCodePB::NONE_ERROR);
+        EXPECT_NE(response.p2p_response().error_message().find("route cache tag does not match"), std::string::npos);
+        // Rejection happens before registering read state or a target-write lease.
+        EXPECT_TRUE(connector->decode_->worker_->read_tasks_.empty());
+        EXPECT_TRUE(connector->decode_->worker_->lease_map_.empty());
+    }
 }
 
 TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsError_WhenReadRequestRepeatsLayerTag) {
