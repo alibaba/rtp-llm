@@ -91,3 +91,13 @@ py_test(
         "//rtp_llm:config",
     ],
 )
+
+py_test(
+    name = "uvicorn_config_test",
+    srcs = ["uvicorn_config_test.py"],
+    deps = [
+        "//rtp_llm:config",
+        "//rtp_llm:uvicorn",
+        "//rtp_llm/access_logger:access_logger",
+    ],
+)
