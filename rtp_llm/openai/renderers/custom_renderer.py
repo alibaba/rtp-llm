@@ -3,7 +3,7 @@ import functools
 import json
 import logging
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple, Union
 
@@ -1769,6 +1769,10 @@ class CustomChatRenderer:
         if usage == None:
             logging.warning(f"No usage returned from stream response. use empty value.")
             usage = UsageInfo(prompt_tokens=0, total_tokens=0, completion_tokens=0)
+        if aux_info is not None:
+            # Match the async complete-response contract without mutating streaming aux.
+            aux_info = replace(aux_info, step_output_len=aux_info.output_len)
+
         chat_response = ChatCompletionResponse(
             choices=all_choices,
             usage=usage,
