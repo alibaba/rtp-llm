@@ -157,7 +157,9 @@ __global__ void addCumLogProbsKernel(
     float const diversityRate{diversityRates == nullptr ? kBeamSearchDiversity : diversityRates[slot]};
     T* pLocalLogProbs = pStage1LogProbs + bid * nStage2InputLen;
 
-    for (int i = threadIdx.x; i < nStage2InputLen; i += blockDim.x)
+    // Candidates are independent. Spread each request over several CTAs while
+    // retaining bid/slot addressing and the original per-element arithmetic.
+    for (int i = blockIdx.y * blockDim.x + threadIdx.x; i < nStage2InputLen; i += blockDim.x * gridDim.y)
     {
         int const iBMIn = i / nStage1TopK;
         if (finished && finished[slot * nBMIn + iBMIn].isFinished())
@@ -182,7 +184,12 @@ void launchAddCumLogProbs(
     size_t nStage2InputLen,
     int nThread, cudaStream_t stream)
 {
-    addCumLogProbsKernel<T><<<nBS, nThread, 0, stream>>>(
+    int const threads = std::min(nThread, 256);
+    size_t const candidatesPerBlock = static_cast<size_t>(threads) * 4;
+    size_t const blocksPerRequest = std::min(
+        std::max((nStage2InputLen + candidatesPerBlock - 1) / candidatesPerBlock, size_t{1}), size_t{65535});
+    dim3 const grid(nBS, blocksPerRequest);
+    addCumLogProbsKernel<T><<<grid, threads, 0, stream>>>(
         pStage1LogProbs, cumLogProbs, finished, endIds, diversityRates, batchSlots, nBS, nBMIn, nStage1TopK,
         nStage2InputLen);
     check_cuda_error();

@@ -330,7 +330,19 @@ __launch_bounds__(BLOCK_SIZE) __global__ void beamStage3Kernel(
     }
     __syncthreads();
 
-    if (tid == 0)
+    // V2 already supplies candidates in their final order. Without CBA or
+    // per-token log-prob bookkeeping, selecting the first nBMOut entries is a
+    // parallel copy. Keep the shared input snapshot above and the barrier below
+    // so fixed-width in-place metadata retains the original alias semantics.
+    if (IS_V2 && bh.numBeamsCBA == nullptr && bh.logProbsTiled == nullptr)
+    {
+        for (int i = tid; i < nBMOut; i += BLOCK_SIZE)
+        {
+            bh.outputIdsPtr[slot * nBMOut + i] = pStage2Ids[i];
+            bh.cumLogProbsOut[slot * nBMOut + i] = (float) pStage2LogProbs[i];
+        }
+    }
+    else if (tid == 0)
     {
         int nBeamForNextStep{0};
         size_t const nStage3Candidate{IS_V2 ? nStage2TopK : nBMOut * 2};
