@@ -157,6 +157,121 @@ public:
     using MtpBatchStreamProcessor::preparePrefillSpecUpdateInfo;
 };
 
+TEST_F(MtpBatchStreamProcessorTest, testDecodeForwardDynamicBatchUsesPublishedGpuState) {
+    for (const int propose_step : {1, 3}) {
+        const std::vector<int> accept_counts =
+            propose_step == 1 ? std::vector<int>{1, 2} : std::vector<int>{1, 2, propose_step + 1};
+        for (const int accepted : accept_counts) {
+            ModelConfig model_config;
+            model_config.max_seq_len = 128;
+            model_config.vocab_size = 8;
+            model_config.num_layers = 1;
+            RuntimeConfig runtime_config;
+            ResourceContext resource_context;
+            SpeculativeExecutionConfig sp_config;
+            sp_config.gen_num_per_cycle = propose_step;
+            CacheConfig cache_config;
+            cache_config.seq_size_per_block = 32;
+            cache_config.kernel_seq_size_per_block = 32;
+            cache_config.group_types = {CacheGroupType::FULL};
+            MtpBatchStreamProcessor processor(model_config, PDSepConfig{}, ProfilingDebugLoggingConfig{},
+                                             cache_config, sp_config, false);
+            auto first = createContextStream(model_config, runtime_config, resource_context, {1, 2, 3, 4, 5}, 7);
+            auto second = createContextStream(model_config, runtime_config, resource_context, {1, 2, 3, 4, 5, 6}, 9);
+            first->setIsContextStream(false);
+            second->setIsContextStream(false);
+            StreamGroups groups({first, second});
+            const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+            GptModelInputs raw;
+            raw.combo_tokens = torch::tensor({5, 6}, torch::kInt32).to(torch::kCUDA);
+            raw.input_lengths = torch::tensor({5, 6}, torch::kInt32).to(torch::kCUDA);
+            raw.sequence_lengths = torch::tensor({4, 5}, torch::kInt32).to(torch::kCUDA);
+            raw.kv_cache_kernel_block_id = torch::tensor({7, 9}, torch::kInt32).reshape({1, 2, 1}).to(torch::kCUDA);
+            raw.kv_cache_block_id = torch::tensor({7, 9}, torch::kInt32).reshape({1, 2, 1});
+            raw.kv_block_stride_bytes = 0;
+            raw.kv_scale_stride_bytes = 0;
+            raw.seq_size_per_block = 32;
+
+            int row = 0;
+            for (const auto& stream : groups.allStreams()) {
+                GenerateStream::MtpAsyncDeviceState state;
+                const int row_accepted = row == 0 ? accepted : propose_step + 2 - accepted;
+                state.accept_len_gpu = torch::full({1}, row_accepted, cuda_i32);
+                state.accept_tokens_gpu = torch::arange(propose_step + 1, cuda_i32).reshape({1, propose_step + 1});
+                state.next_seq_len_gpu = torch::full({1}, 5 + row + row_accepted, cuda_i32);
+                state.propose_tokens_gpu = torch::full({1, 1}, 4 + row, cuda_i32);
+                state.draft_all_probs_gpu = torch::full({1, 8}, 0.125, cuda_i32.dtype(torch::kFloat32));
+                state.last_hidden_states_gpu = torch::full({1, 2}, 10.0 + row, cuda_i32.dtype(torch::kFloat32));
+                state.next_real_seq_len = 5 + row + propose_step + 1;
+                stream->setMtpAsyncDeviceState(std::move(state));
+                // Forward must not consult these worker-owned mirrors, even while
+                // CPU seqLength still refers to the previous committed iteration.
+                stream->setSPOutputBuffer(nullptr);
+                ++row;
+            }
+            TensorHolder holder;
+            auto actual = processor.tryGatherDecodeForwardInput({first, second}, holder);
+            ASSERT_TRUE(actual.has_value());
+            EXPECT_EQ(first->seqLength(), 5);
+            EXPECT_EQ(second->seqLength(), 6);
+            EXPECT_TRUE(torch::equal(actual->kv_cache_kernel_block_id, raw.kv_cache_kernel_block_id));
+            ASSERT_TRUE(actual->kv_cache_block_id.device().is_cpu());
+            EXPECT_TRUE(actual->kv_cache_block_id.is_pinned());
+            EXPECT_TRUE(torch::equal(actual->kv_cache_block_id, raw.kv_cache_block_id));
+            auto expected = raw;
+            if (propose_step == 1) {
+                processor.prepareOneStepSpecDecodeModelInput(groups, expected, holder);
+                EXPECT_EQ(toVec<int32_t>(actual->combo_tokens), std::vector<int32_t>({accepted - 1, 4, propose_step + 1 - accepted, 5}));
+                EXPECT_EQ(actual->sequence_lengths.numel(), 0);
+            } else {
+                processor.prepareDecodeDraftModelInput(groups, expected, holder);
+                EXPECT_EQ(toVec<int32_t>(actual->sequence_lengths), std::vector<int32_t>({5 + accepted, 6 + propose_step + 2 - accepted}));
+                EXPECT_EQ(toVec<int32_t>(actual->combo_tokens), std::vector<int32_t>({4, 5}));
+                EXPECT_EQ(toVec<float>(actual->last_hidden_states), std::vector<float>({10, 10, 11, 11}));
+            }
+            EXPECT_TRUE(torch::equal(actual->combo_tokens, expected.combo_tokens));
+            EXPECT_TRUE(torch::equal(actual->sequence_lengths, expected.sequence_lengths));
+            EXPECT_TRUE(torch::equal(actual->prefix_lengths, expected.prefix_lengths));
+            EXPECT_TRUE(torch::equal(actual->input_lengths, expected.input_lengths));
+            EXPECT_TRUE(torch::equal(actual->lm_output_indexes, expected.lm_output_indexes));
+            auto reordered = processor.tryGatherDecodeForwardInput({second, first}, holder);
+            ASSERT_TRUE(reordered.has_value());
+            EXPECT_EQ(toVec<int32_t>(reordered->kv_cache_kernel_block_id), std::vector<int32_t>({9, 7}));
+            auto shrunk = processor.tryGatherDecodeForwardInput({first}, holder);
+            ASSERT_TRUE(shrunk.has_value());
+            EXPECT_EQ(toVec<int32_t>(shrunk->kv_cache_kernel_block_id), std::vector<int32_t>({7}));
+            // A request that never belonged to a previous batch can join directly.
+            auto fresh = createContextStream(model_config, runtime_config, resource_context, {1, 2, 3}, 11);
+            fresh->setIsContextStream(false);
+            fresh->setMtpAsyncDeviceState(second->getMtpAsyncDeviceState());
+            auto mixed = processor.tryGatherDecodeForwardInput({fresh, first}, holder);
+            ASSERT_TRUE(mixed.has_value());
+            EXPECT_EQ(toVec<int32_t>(mixed->kv_cache_kernel_block_id), std::vector<int32_t>({11, 7}));
+            EXPECT_EQ(toVec<int32_t>(mixed->combo_tokens), toVec<int32_t>(reordered->combo_tokens));
+            fresh->generateConfig()->adapter_name = "unsupported";
+            EXPECT_FALSE(processor.tryGatherDecodeForwardInput({fresh, first}, holder).has_value());
+
+            auto state = first->getMtpAsyncDeviceState();
+            state.next_real_seq_len = 32 - propose_step - 1;
+            first->setMtpAsyncDeviceState(state);
+            EXPECT_TRUE(processor.tryGatherDecodeForwardInput({first, second}, holder).has_value());
+            ++state.next_real_seq_len;
+            first->setMtpAsyncDeviceState(state);
+            EXPECT_FALSE(processor.tryGatherDecodeForwardInput({first, second}, holder).has_value());
+            // Current allocation is gathered afresh, so capacity growth is visible.
+            first->kvCacheMutable().setBatchBlocks(0, 0, {7, 8});
+            EXPECT_TRUE(processor.tryGatherDecodeForwardInput({first, second}, holder).has_value());
+            state.next_real_seq_len = 128;
+            first->setMtpAsyncDeviceState(state);
+            EXPECT_FALSE(processor.tryGatherDecodeForwardInput({first, second}, holder).has_value());
+            state.next_real_seq_len = 8;
+            state.next_seq_len_gpu = state.next_seq_len_gpu.cpu();
+            first->setMtpAsyncDeviceState(state);
+            EXPECT_FALSE(processor.tryGatherDecodeForwardInput({first, second}, holder).has_value());
+        }
+    }
+}
+
 TEST_F(MtpBatchStreamProcessorTest, testPrefillTargetLogprobsUseEmittedFirstToken) {
     ModelConfig                 model_config;
     RuntimeConfig               runtime_config;
