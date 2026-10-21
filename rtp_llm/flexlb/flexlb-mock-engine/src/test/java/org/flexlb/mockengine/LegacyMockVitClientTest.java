@@ -13,6 +13,18 @@ import java.util.concurrent.TimeUnit;
 import static org.junit.jupiter.api.Assertions.*;
 
 class LegacyMockVitClientTest {
+    @Test void textOnlyV41MetadataDoesNotFetchVisionFeatures() {
+        var builder = EngineRpcService.GenerateInputPB.newBuilder().addTokenIds(10).addTokenIds(11);
+        builder.getV41InputsBuilder().setSchemaVersion(1)
+                .addTokenTypes(-1).addTokenTypes(-1).addImageMask(false).addImageMask(false);
+        var input = builder.build();
+        assertTrue(input.hasV41Inputs());
+        assertFalse(LegacyMockVitClient.hasImages(input));
+        try (var client = new LegacyMockVitClient(-1)) {
+            assertSame(input, client.prepare(input)); // No ViT address or network is required.
+        }
+    }
+
     @Test void prefillExpandsReleasePlaceholderUsingPerImageFeatures() throws Exception {
         byte[] data = new byte[4 * 8 * 2];
         for (int i = 0; i < data.length; i++) data[i] = (byte)i;

@@ -21,7 +21,8 @@ final class LegacyMockVitClient implements AutoCloseable {
                 Thread thread = new Thread(task, "mock-legacy-vit-fetch"); thread.setDaemon(true); return thread;
             }, new java.util.concurrent.ThreadPoolExecutor.AbortPolicy());
     static boolean hasImages(EngineRpcService.GenerateInputPB input) {
-        return input.getMultimodalInputsCount() > 0 || input.hasV41Inputs();
+        return input.getMultimodalInputsCount() > 0
+                || (input.hasV41Inputs() && input.getV41Inputs().getImagesCount() > 0);
     }
     void execute(Runnable task, io.grpc.stub.StreamObserver<?> observer) {
         Context context = Context.current();
@@ -39,7 +40,7 @@ final class LegacyMockVitClient implements AutoCloseable {
 
     EngineRpcService.GenerateInputPB prepare(EngineRpcService.GenerateInputPB input) {
         boolean packed = input.hasV41Inputs();
-        if (!packed && input.getMultimodalInputsCount() == 0) return input;
+        if (!hasImages(input)) return input;
         var vit = input.getGenerateConfig().getRoleAddrsList().stream()
                 .filter(a -> a.getRoleStr().equals("VIT") || a.getRole() == EngineRpcService.RoleAddrPB.RoleType.VIT)
                 .findFirst().orElseThrow(() -> Status.FAILED_PRECONDITION.withDescription("image input has no selected VIT").asRuntimeException());
