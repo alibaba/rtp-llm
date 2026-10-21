@@ -36,6 +36,18 @@ class RpcErrorCodeProtoTest(unittest.TestCase):
         self.assertEqual(ErrorCodePB.Name(parsed.error_code), "EXECUTION_EXCEPTION")
         self.assertEqual(parsed.error_message, "handler threw")
 
+    def test_existing_wire_error_ids_keep_their_meaning(self):
+        for wire_id, expected in (
+            (26, ErrorCodePB.INVALID_PARAMS),
+            (27, ErrorCodePB.EXECUTION_EXCEPTION),
+        ):
+            with self.subTest(wire_id=wire_id):
+                # These bytes are independent of the generated enum values.
+                encoded = bytes((0x08, wire_id))
+                parsed = RpcErrorPB.FromString(encoded)
+                self.assertEqual(parsed.error_code, expected)
+                self.assertEqual(parsed.SerializeToString(), encoded)
+
     def test_disk_cache_and_prefill_only_keep_independent_wire_fields(self):
         fields = GenerateConfigPB.DESCRIPTOR.fields_by_name
         self.assertEqual(fields["enable_disk_cache"].number, 74)

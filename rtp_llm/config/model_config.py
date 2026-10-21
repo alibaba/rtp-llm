@@ -264,6 +264,16 @@ class ModelConfig(CppModelConfig):
             + self.word_emb_param_count(vocab_size) * 2
         )  # maybe some model donot have lm_head
 
+        if self.model_type == "deepseek_v4" and quant_algo.getWeightBits() == 8:
+            # V4 advertises FP8 for dense weights, while routed experts remain
+            # packed FP4 with one UE8M0 scale byte per 32 parameters. Matching
+            # _build_routed_experts_fp4 avoids a false CPU-loading fallback for
+            # Pro; shared experts and attention retain their existing estimate.
+            routed_param_bytes = 0.5 + 1.0 / 32
+            model_size -= self.moe_weight_param_count() * (
+                layer_param_bytes - routed_param_bytes
+            )
+
         if (
             self.mm_model_config.is_multimodal
             and not getattr(self, "is_mtp", False)

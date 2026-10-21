@@ -1,0 +1,188 @@
+#pragma once
+
+#include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorConfig.h"
+#include <torch/extension.h>
+#include "rtp_llm/cpp/cache/connector/p2p/P2PWorkerRoute.h"
+#include "rtp_llm/cpp/cache/connector/p2p/ComputedLayerCacheBuffer.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorMetrics.h"
+#include "rtp_llm/cpp/cache/connector/p2p/StoreWaitContext.h"
+#include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverter.h"
+#include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBuffer.h"
+#include "rtp_llm/cpp/cache/connector/p2p/transfer/IKVCacheSender.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
+#include <thread>
+#include "autil/ThreadPool.h"
+#include <atomic>
+#include <condition_variable>
+#include <memory>
+#include <mutex>
+#include <set>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+namespace rtp_llm {
+
+class P2PWorkerPrefillRead {
+public:
+    P2PWorkerPrefillRead(P2PConnectorWorkerConfig                    config,
+                              const std::shared_ptr<LayerBlockConverter>& layer_block_converter,
+                              const kmonitor::MetricsReporterPtr&         metrics_reporter,
+                              const transfer::IKVCacheSenderPtr&          sender);
+    ~P2PWorkerPrefillRead();
+
+public:
+    bool init();
+
+    bool writeByLayer(int                           layer_id,
+                      const KVCacheResourcePtr&     resource,
+                      int64_t                       request_id,
+                      std::shared_ptr<torch::Event> event,
+                      int64_t                       deadline_ms);
+
+    bool writeByLayerTag(int                                  layer_id,
+                         const std::string&                   tag,
+                         const KVCacheResourcePtr&            resource,
+                         int64_t                              request_id,
+                         const std::shared_ptr<torch::Event>& event,
+                         int64_t                              deadline_ms);
+
+    /// @brief 按编排层下发的 route 发送。worker 不再自选目标、不再推导 partition。
+    ErrorInfo sendKVCache(int64_t                   request_id,
+                          const std::string&        unique_key,
+                          int64_t                   deadline_ms,
+                          const P2PWorkerRoutePlan& worker_plan,
+                          int64_t                   request_deadline_ms);
+
+    void completeNoTransfer(int64_t request_id, int64_t deadline_ms, int64_t request_deadline_ms);
+
+    bool cancelRequest(int64_t            request_id,
+                       const std::string& unique_key,
+                       int64_t            deadline_ms,
+                       int64_t            request_deadline_ms);
+
+    std::shared_ptr<ComputedLayerCacheBufferStore> getComputedBuffersStore() const {
+        return computed_buffers_;
+    }
+
+
+private:
+    bool rejectLayer(int64_t request_id, int64_t request_deadline_ms, const ErrorInfo& error);
+
+    bool scheduleLayerCacheBuffers(int                                                   layer_id,
+                                   int64_t                                               request_id,
+                                   const std::shared_ptr<torch::Event>&                  event,
+                                   int64_t                                               request_deadline_ms,
+                                   const std::vector<std::shared_ptr<LayerCacheBuffer>>& layer_cache_buffers);
+    void loopCheckProc();
+
+    struct SendTransferResult {
+        // Written by the dispatch thread, sampled after dispatch returns.
+        int64_t                 first_buffer_ready_us = -1;
+        int64_t                 last_buffer_ready_us  = -1;
+        std::atomic<int>        done_count{0};
+        std::atomic<bool>       all_success{true};
+        std::atomic<bool>       dispatch_failed{false};
+        mutable std::mutex      result_mutex;
+        std::condition_variable result_cv;
+        ErrorCode               error_code{ErrorCode::NONE_ERROR};
+        std::string             error_msg;
+    };
+
+    /// transfer_deadline_ms：须在 D 前结束 dispatch 与 send，并与 decode recv task deadline 对齐。
+    int dispatchPendingLayerTransfers(const std::shared_ptr<ComputedLayerCacheBuffer>& computed_buffer,
+                                      const P2PWorkerRoutePlan&                       worker_plan,
+                                      const std::string&                               unique_key,
+                                      int64_t                                          return_deadline_ms,
+                                      const std::shared_ptr<std::atomic<bool>>&        cancel_flag,
+                                      const std::shared_ptr<SendTransferResult>&       transfer_result,
+                                      const std::set<std::string>&                     expected_buffer_keys,
+                                      std::set<std::string>&                           sent_buffer_keys,
+                                      int                                              total_transfers);
+
+    int sendLayerToPartitions(const std::shared_ptr<LayerCacheBuffer>&   layer_cache_buffer,
+                              const P2PWorkerRoutePlan&                 worker_plan,
+                              const std::string&                         unique_key,
+                              int64_t                                    transfer_deadline_ms,
+                              const std::shared_ptr<std::atomic<bool>>&  cancel_flag,
+                              const std::shared_ptr<SendTransferResult>& transfer_result);
+
+    bool waitSendCallbacksWithTimeout(const std::shared_ptr<SendTransferResult>& transfer_result,
+                                      int                                        sent_transfer_count,
+                                      int64_t                                    return_deadline_ms,
+                                      const std::shared_ptr<std::atomic<bool>>&  cancel_flag) const;
+
+    struct SendResultInfo {
+        bool        success = true;
+        ErrorCode   error_code{ErrorCode::NONE_ERROR};
+        std::string error_msg;
+    };
+
+    SendResultInfo determineSendResult(const std::shared_ptr<SendTransferResult>& transfer_result,
+                                       const std::shared_ptr<std::atomic<bool>>&  cancel_flag,
+                                       bool                                       timeout_cancelled_pending_tasks,
+                                       bool                                       all_callbacks_received,
+                                       int                                        sent_transfer_count,
+                                       int                                        total_transfers,
+                                       const P2PWorkerRoutePlan&                  worker_plan,
+                                       const std::string&                         unique_key) const;
+
+    struct AsyncSendTaskState {
+        bool takeForStart(transfer::SendRequestPtr*              send_request_out,
+                          std::shared_ptr<LayerCacheBuffer>*     buffer_keepalive_out);
+        bool releaseIfNotStarted();
+
+        mutable std::mutex               mutex;
+        transfer::SendRequestPtr         send_request;
+        std::shared_ptr<LayerCacheBuffer> buffer_keepalive;
+        bool                             started{false};
+        bool                             released{false};
+    };
+
+    void registerAsyncSendTask(const std::string&                     unique_key,
+                               const std::shared_ptr<AsyncSendTaskState>& task_state);
+    int  releasePendingAsyncSendTasks(const std::string& unique_key,
+                                      std::shared_ptr<SendTransferResult>* transfer_result_out = nullptr);
+    static int releaseNotStartedTaskStates(const std::vector<std::shared_ptr<AsyncSendTaskState>>& task_states);
+
+private:
+    P2PConnectorWorkerConfig                                            config_;
+    std::shared_ptr<LayerBlockConverter>                                layer_block_converter_;
+    kmonitor::MetricsReporterPtr                                        metrics_reporter_;
+    transfer::IKVCacheSenderPtr                                         sender_;
+    std::shared_ptr<ComputedLayerCacheBufferStore>                      computed_buffers_;
+    // CacheTopology 在 worker 生命周期内不变；缓存其派生值，避免每个请求遍历
+    // topology 或解析 "layer:tag" 字符串。
+    std::set<std::string>                                               expected_buffer_keys_;
+    std::vector<std::string>                                            expected_buffer_tags_;
+    std::shared_ptr<StoreWaitContextChecker>                            store_wait_context_checker_;
+    std::thread                                                         store_wait_check_thread_;
+    std::atomic<bool>                                                   store_wait_stopping_{false};
+    // Per in-flight sendKVCache, hold both the cancel signal and a weak handle
+    // to its SendTransferResult. The weak handle lets cancelRequest() wake up the
+    // wait_for loop in waitSendCallbacksWithTimeout via cv.notify_all() instead
+    // of letting cancel_flag sit unchecked for up to the load deadline
+    // (180s by default). Weak ref avoids extending the lifetime of the result.
+    struct HandleCancelEntry {
+        std::shared_ptr<std::atomic<bool>> cancel_flag;
+        std::weak_ptr<SendTransferResult>  transfer_result;
+        std::vector<std::weak_ptr<AsyncSendTaskState>> async_send_tasks;
+    };
+    mutable std::mutex                                  handle_cancel_mutex_;
+    std::unordered_map<std::string, HandleCancelEntry>  handle_cancel_flags_;
+
+    // OPT-A2: offload sender_->send to a dedicated thread pool. The dispatcher
+    // (sendKVCache main thread) used to call sender_->send synchronously, but
+    // that call includes makeTransferRequest -> cudaStreamSynchronize which
+    // blocks the dispatcher on every layer until the GPU->CPU copy completes.
+    // Under cuda runtime contention or GPU hang, dispatch_us balloons to
+    // seconds (max 1993s observed on 5/22). With this pool the dispatcher
+    // only pays the push cost; the cuda sync runs on pool worker threads.
+    // Pool sized at 4 threads: small enough not to oversubscribe cuda runtime,
+    // large enough to overlap with 2 prefill ranks on the same device.
+    // Queue 10000 keeps headroom for the per-layer × per-partition fanout.
+    autil::ThreadPoolBasePtr async_sender_pool_;
+};
+
+}  // namespace rtp_llm

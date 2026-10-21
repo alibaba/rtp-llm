@@ -9,7 +9,6 @@
 // Build the cache-store registry without transport threads, including on HIP
 // toolchains that do not honor the test target's -fno-access-control option.
 #define private public
-#include "rtp_llm/cpp/model_rpc/PrefillGenerateContext.h"
 #undef private
 #include "rtp_llm/cpp/testing/TestLogCapture.h"
 
@@ -188,81 +187,6 @@ TEST(GenerateContextLifecycleTest, RetryReplacementStopsOnlyTheAbandonedAttempt)
     context->markRpcHandlingCompleted();
     ASSERT_TRUE(destroyWithoutSchedulerProgress(std::move(context), new_stream));
     EXPECT_FALSE(new_stream->hasError());
-}
-
-class PrefillContextLifecycleTest: public ::testing::Test {
-protected:
-    void SetUp() override {
-        request_.set_request_id(2001);
-        resource_.workers = {"local"};
-        // Exercise the real request registry and markRequestEnd without starting transport threads.
-        resource_.cache_store                              = std::shared_ptr<NormalCacheStore>(new NormalCacheStore);
-        registry_                                          = std::make_shared<RequestBlockBufferStore>(nullptr);
-        resource_.cache_store->request_block_buffer_store_ = registry_;
-        ASSERT_TRUE(registry_->setRequestBlockBuffer(std::make_shared<RequestBlockBuffer>("2001")));
-        stream_ = std::make_shared<LifecycleTestStream>(2001);
-        stream_->setState(StreamState::RUNNING);
-    }
-
-    std::unique_ptr<PrefillGenerateContext> makePrefillContext(int64_t wait_timeout_ms = 1000) {
-        auto context = std::make_unique<PrefillGenerateContext>(
-            &resource_, rpc_context_, 0, nullptr, metrics_reporter_, meta_, wait_timeout_ms);
-        context->setStream(stream_);
-        context->markRpcHandlingCompleted();
-        return context;
-    }
-
-    GenerateInputPB                          request_;
-    RPCContext                               rpc_context_{&request_, nullptr};
-    RemoteServerResource                     resource_;
-    kmonitor::MetricsReporterPtr             metrics_reporter_;
-    std::shared_ptr<RpcServerRuntimeMeta>    meta_ = std::make_shared<RpcServerRuntimeMeta>();
-    std::shared_ptr<RequestBlockBufferStore> registry_;
-    std::shared_ptr<LifecycleTestStream>     stream_;
-};
-
-TEST_F(PrefillContextLifecycleTest, SuccessDoesNotWaitForScheduler) {
-    auto context = makePrefillContext();
-
-    EXPECT_TRUE(destroyWithoutSchedulerProgress(std::move(context), stream_));
-    EXPECT_FALSE(stream_->hasError());
-    EXPECT_EQ(stream_->getStatus(), StreamState::RUNNING);
-    EXPECT_EQ(registry_->getRequestBlockBuffer("2001"), nullptr);
-}
-
-TEST_F(PrefillContextLifecycleTest, CancellationKeepsPublicationOpenUntilSchedulerFinishes) {
-    auto context = makePrefillContext();
-    context->cancel_state->store(true);
-    auto destroyed = std::async(std::launch::async, [context = std::move(context)]() mutable { context.reset(); });
-
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
-    while (!stream_->hasError() && std::chrono::steady_clock::now() < deadline) {
-        std::this_thread::yield();
-    }
-    const bool waiting = destroyed.wait_for(std::chrono::milliseconds(50)) == std::future_status::timeout;
-    // A later layer can still publish after cancellation while this forward is in flight.
-    const bool publication_open = registry_->setRequestBlockBuffer(std::make_shared<RequestBlockBuffer>("2001"));
-    stream_->setState(StreamState::FINISHED);
-    destroyed.get();
-
-    EXPECT_TRUE(waiting);
-    EXPECT_TRUE(publication_open);
-    EXPECT_EQ(stream_->statusInfo().code(), ErrorCode::CANCELLED);
-    EXPECT_EQ(registry_->getRequestBlockBuffer("2001"), nullptr);
-}
-
-TEST_F(PrefillContextLifecycleTest, FailureRetainsConfiguredWaitTimeout) {
-    TestLogCapture capture("prefill_context_wait_timeout");
-    auto           context = makePrefillContext(/*wait_timeout_ms=*/20);
-    context->error_info    = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "prefill failed");
-    context->error_status  = grpc::Status(grpc::StatusCode::INTERNAL, "prefill failed");
-
-    context.reset();
-
-    EXPECT_NE(capture.content().find("stopStream timeout (20 ms)"), std::string::npos);
-    EXPECT_EQ(stream_->getStatus(), StreamState::RUNNING);
-    EXPECT_EQ(stream_->statusInfo().code(), ErrorCode::EXECUTION_EXCEPTION);
-    EXPECT_EQ(registry_->getRequestBlockBuffer("2001"), nullptr);
 }
 
 }  // namespace

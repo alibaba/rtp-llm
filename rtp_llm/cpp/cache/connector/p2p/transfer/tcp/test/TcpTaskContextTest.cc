@@ -17,6 +17,8 @@
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include <torch/torch.h>
 #include <c10/cuda/CUDAStream.h>
+#include <c10/cuda/CUDAGuard.h>
+#include <c10/cuda/CUDAFunctions.h>
 
 namespace rtp_llm {
 namespace transfer {
@@ -103,7 +105,7 @@ protected:
                                                                           const std::string& content) {
         ::tcp_transfer::TcpLayerBlockTransferRequest req;
         req.set_unique_key(unique_key);
-        req.set_deadline_ms(deadline_ms);
+        req.set_timeout_ms(deadline_ms - currentTimeMs());
         addRequestBlock(req, cache_key, {{len, content}});
         return req;
     }
@@ -113,7 +115,7 @@ protected:
                                                                          int64_t            deadline_ms) {
         ::tcp_transfer::TcpLayerBlockTransferRequest req;
         req.set_unique_key(unique_key);
-        req.set_deadline_ms(deadline_ms);
+        req.set_timeout_ms(deadline_ms - currentTimeMs());
         return req;
     }
 
@@ -199,6 +201,31 @@ TEST_F(TcpTaskContextTest, StartTransfer_TaskAlreadyCancelled_ReturnsFalse) {
 // Group 2: executeCopy() — failure paths (no GPU required)
 // ===========================================================================
 
+TEST_F(TcpTaskContextTest, DirectCopyUsesAllocationDeviceAndRestoresCallerDevice) {
+    if (!device_initialized_) {
+        GTEST_SKIP() << "No GPU device";
+    }
+    CudaCopyUtil copy_util;
+    const int    count = c10::cuda::device_count();
+    for (int device = 0; device < count; ++device) {
+        SCOPED_TRACE(device);
+        const int            caller = count > 1 ? (device + 1) % count : device;
+        c10::cuda::CUDAGuard caller_guard(caller);
+        auto options = torch::TensorOptions().dtype(torch::kUInt8).device(torch::Device(torch::kCUDA, device));
+        auto source  = torch::full({64}, 37, options);
+        auto target  = torch::zeros({64}, options);
+        auto host    = torch::zeros({64}, torch::kUInt8);
+        std::vector<CopyTask> download{{source.data_ptr(), 64, reinterpret_cast<char*>(host.data_ptr()), device}};
+        ASSERT_TRUE(copy_util.batchCopyToHost(download));
+        EXPECT_EQ(c10::cuda::current_device(), caller);
+        EXPECT_TRUE(torch::equal(host, torch::full({64}, 37, torch::kUInt8)));
+        std::vector<CopyTask> upload{{host.data_ptr(), 64, reinterpret_cast<char*>(target.data_ptr()), device}};
+        ASSERT_TRUE(copy_util.batchCopyToDevice(upload));
+        EXPECT_EQ(c10::cuda::current_device(), caller);
+        EXPECT_TRUE(torch::equal(target.cpu(), host));
+    }
+}
+
 TEST_F(TcpTaskContextTest, ExecuteCopy_TaskNull_ReturnsFalse) {
     auto                                          req = makeEmptyRequest("k1", currentTimeMs() + 5000);
     ::tcp_transfer::TcpLayerBlockTransferResponse resp;
@@ -213,7 +240,7 @@ TEST_F(TcpTaskContextTest, ExecuteCopy_CacheKeyMissingInRequest_ReturnsFalse) {
     // Request contains cache_key=99, but task expects cache_key=1.
     ::tcp_transfer::TcpLayerBlockTransferRequest req;
     req.set_unique_key("k1");
-    req.set_deadline_ms(currentTimeMs() + 5000);
+    req.set_timeout_ms(5000);
     addRequestBlock(req, 99, {{64, std::string(64, 'A')}});
 
     ::tcp_transfer::TcpLayerBlockTransferResponse resp;
@@ -235,7 +262,7 @@ TEST_F(TcpTaskContextTest, ExecuteCopy_SubBlockOutOfRange_ReturnsFalse) {
 
     ::tcp_transfer::TcpLayerBlockTransferRequest req;
     req.set_unique_key("k1");
-    req.set_deadline_ms(currentTimeMs() + 5000);
+    req.set_timeout_ms(5000);
     addRequestBlock(req, key, {{size, std::string(size, 'B')}});  // only 1 sub-block
 
     ::tcp_transfer::TcpLayerBlockTransferResponse resp;
@@ -272,13 +299,49 @@ TEST_F(TcpTaskContextTest, ExecuteCopy_SizeMismatch_ReturnsFalse) {
     EXPECT_FALSE(ctx->executeCopy(copy_util));
 }
 
+TEST_F(TcpTaskContextTest, ExecuteCopy_DeclaredLengthExceedsContent_ReturnsFalse) {
+    constexpr int64_t key  = 1;
+    constexpr size_t  size = 64;
+
+    char dummy[size];
+    auto req = makeSimpleRequest("k1", currentTimeMs() + 5000, key, size, std::string(size - 1, 'C'));
+
+    ::tcp_transfer::TcpLayerBlockTransferResponse resp;
+    MockClosure                                   closure;
+    auto                                          ctx = makeContext(&req, &resp, &closure);
+    ctx->setTask(makeTask(key, dummy, size));
+
+    CudaCopyUtil copy_util;
+    EXPECT_FALSE(ctx->executeCopy(copy_util));
+}
+
+TEST_F(TcpTaskContextTest, ExecuteCopy_DuplicateRequestKey_ReturnsFalse) {
+    constexpr int64_t key  = 1;
+    constexpr size_t  size = 64;
+
+    ::tcp_transfer::TcpLayerBlockTransferRequest req;
+    req.set_unique_key("k1");
+    req.set_timeout_ms(5000);
+    addRequestBlock(req, key, {{size, std::string(size, 'A')}});
+    addRequestBlock(req, key, {{size, std::string(size, 'B')}});
+
+    ::tcp_transfer::TcpLayerBlockTransferResponse resp;
+    MockClosure                                   closure;
+    auto                                          ctx = makeContext(&req, &resp, &closure);
+    char                                          dummy[size];
+    ctx->setTask(makeTask(key, dummy, size));
+
+    CudaCopyUtil copy_util;
+    EXPECT_FALSE(ctx->executeCopy(copy_util));
+}
+
 TEST_F(TcpTaskContextTest, ExecuteCopy_AllBlocksEmpty_ReturnsFalse) {
     // All BlockInfo entries have addr==nullptr / size_bytes==0 → copy_tasks stays empty.
     constexpr int64_t key = 1;
 
     ::tcp_transfer::TcpLayerBlockTransferRequest req;
     req.set_unique_key("k1");
-    req.set_deadline_ms(currentTimeMs() + 5000);
+    req.set_timeout_ms(5000);
     addRequestBlock(req, key, {{64, std::string(64, 'D')}});
 
     ::tcp_transfer::TcpLayerBlockTransferResponse resp;
@@ -316,41 +379,35 @@ TEST_F(TcpTaskContextTest, ExecuteCopy_ValidData_DataCopiedToDevice) {
     EXPECT_TRUE(verifyDeviceData(gpu_buf.data_ptr(), content, data_size));
 }
 
-TEST_F(TcpTaskContextTest, ExecuteCopy_MixedBlocks_SkipsNullAddrBlocks) {
-    if (!device_initialized_) {
-        GTEST_SKIP() << "No GPU device available";
-    }
-
+TEST_F(TcpTaskContextTest, ExecuteCopy_MixedBlocks_RejectsNullDecodeBlock) {
     constexpr int64_t key       = 1;
     constexpr size_t  data_size = 32;
     const std::string content(data_size, 'Y');
-
-    auto gpu_buf = allocDeviceBuffer(data_size);
+    char              destination[data_size];
 
     // Request: 2 sub_blocks for cache_key=1.
-    // Index 0: empty (len=0) — skipped by the task-side null check.
+    // Index 0 is invalid on the Decode side and must reject the whole key.
     // Index 1: real data.
     ::tcp_transfer::TcpLayerBlockTransferRequest req;
     req.set_unique_key("k1");
-    req.set_deadline_ms(currentTimeMs() + 5000);
+    req.set_timeout_ms(5000);
     addRequestBlock(req, key, {{0, ""}, {data_size, content}});
 
     ::tcp_transfer::TcpLayerBlockTransferResponse resp;
     MockClosure                                   closure;
     auto                                          ctx = makeContext(&req, &resp, &closure);
 
-    // Task: sub_block[0] has addr==nullptr (skipped), sub_block[1] is valid.
+    // Task: sub_block[0] has addr==nullptr, sub_block[1] is otherwise valid.
     auto kbi = std::make_shared<KeyBlockInfo>();
-    kbi->blocks.push_back(BlockInfo{false, 0, 0, nullptr, 0});  // skipped
-    kbi->blocks.push_back(BlockInfo{false, 0, 0, gpu_buf.data_ptr(), data_size});
+    kbi->blocks.push_back(BlockInfo{false, 0, 0, nullptr, 0});
+    kbi->blocks.push_back(BlockInfo{false, 0, 0, destination, data_size});
     KeyBlockInfoMap block_infos;
     block_infos[key] = kbi;
     auto task        = std::make_shared<TransferTask>(std::move(block_infos), currentTimeMs() + 5000);
     ctx->setTask(task);
 
     CudaCopyUtil copy_util;
-    ASSERT_TRUE(ctx->executeCopy(copy_util));
-    EXPECT_TRUE(verifyDeviceData(gpu_buf.data_ptr(), content, data_size));
+    EXPECT_FALSE(ctx->executeCopy(copy_util));
 }
 
 // ===========================================================================
@@ -446,6 +503,7 @@ TEST_F(TcpTaskContextTest, Run_WithTask_CancelInTransferring_OverridesSuccess) {
     ctx->run(true);
 
     EXPECT_EQ(resp.error_code(), ::tcp_transfer::TCP_TRANSFER_TASK_CANCELLED);
+    EXPECT_EQ(resp.error_message(), "TransferTask cancelled during transfer");
     EXPECT_EQ(closure.run_count(), 1);
 }
 
@@ -466,6 +524,7 @@ TEST_F(TcpTaskContextTest, Run_WithTask_ExpiredDeadline_OverridesSuccess) {
     ctx->run(true);
 
     EXPECT_EQ(resp.error_code(), ::tcp_transfer::TCP_TRANSFER_CONTEXT_TIMEOUT);
+    EXPECT_EQ(resp.error_message(), "TransferTask timed out");
 }
 
 // ===========================================================================
@@ -482,7 +541,7 @@ TEST_F(TcpTaskContextTest, Destructor_WithPendingDone_AutoRunsFailure) {
     }
 
     EXPECT_EQ(closure.run_count(), 1);
-    EXPECT_EQ(resp.error_code(), ::tcp_transfer::TCP_TRANSFER_UNKNOWN_ERROR);
+    EXPECT_EQ(resp.error_code(), ::tcp_transfer::TCP_TRANSFER_CONTEXT_DESTROYED);
 }
 
 TEST_F(TcpTaskContextTest, Destructor_AfterRunCompleted_NoDoubleRun) {

@@ -17,7 +17,7 @@ namespace telemetry {
 // - finish() is exactly-once via atomic flag; we do NOT rely on the SDK
 //   tolerating double End(), which is not a documented guarantee.
 // - Destructor is a noexcept fallback that swallows everything (fail-open):
-//   CHECK_ERROR_STATUS / EXECUTE_STAGE_FUNC early returns and exceptions all
+//   CHECK_ERROR_STATUS early returns and exceptions all
 //   end the span through stack unwinding.
 // - Terminal attributes/status must be written before End(); use span() then
 //   finish(), or the convenience finish(status, description).

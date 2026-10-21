@@ -5,6 +5,9 @@ import unittest
 from smoke.common_def import QueryStatus, SmokeException, Tracer
 from smoke.openai_comparer import OpenaiComparer
 
+from rtp_llm.config.generate_config import RoleAddr
+from rtp_llm.utils.base_model_datatypes import AuxInfo
+
 GRAPH_STATUS = "generation_prefill_cuda_graph_status"
 REPLAYED = "replayed"
 FALLBACK = "input_tokens_exceed_capture_limit"
@@ -114,6 +117,38 @@ class OpenaiComparerGraphStatusTest(unittest.TestCase):
             self._parse(self.golden),
             self._parse(self._response({GRAPH_STATUS: REPLAYED})),
         )
+
+    def test_aux_step_and_address_differences_are_checked_by_default(self):
+        expected = AuxInfo(
+            step_output_len=1,
+            role_addrs=[RoleAddr(role="DECODE", ip="192.0.2.1", http_port=80, grpc_port=81)],
+        )
+        actual = AuxInfo(
+            step_output_len=2,
+            role_addrs=[RoleAddr(role="DECODE", ip="192.0.2.2", http_port=80, grpc_port=81)],
+        )
+        for config in (
+            {},
+            {"ignore_aux_info_fields": ["step_output_len", "role_addrs.ip"]},
+            {},
+        ):
+            with self.subTest(config=config):
+                self.comparer.qr_info["compare_config"] = config
+                diffs = []
+                self.comparer._compare_aux_info(expected, actual, diffs)
+                if config:
+                    self.assertEqual(diffs, [])
+                else:
+                    self.assertTrue(any("step_output_len" in diff for diff in diffs))
+                    self.assertTrue(any("role_addrs" in diff for diff in diffs))
+
+    def test_query_aux_exceptions_do_not_hide_cache_reuse_differences(self):
+        self.comparer.qr_info["compare_config"] = {
+            "ignore_aux_info_fields": ["step_output_len", "role_addrs.ip"]
+        }
+        diffs = []
+        self.comparer._compare_aux_info(AuxInfo(reuse_len=0), AuxInfo(reuse_len=8), diffs)
+        self.assertTrue(any("reuse_len" in diff for diff in diffs))
 
 
 if __name__ == "__main__":
