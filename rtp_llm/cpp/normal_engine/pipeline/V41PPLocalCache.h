@@ -14,6 +14,8 @@
 
 namespace rtp_llm {
 
+inline constexpr int64_t kV41MaxInitialPPPrefillTokens = 32768;
+
 class V41PPLocalCache;
 class V41PPAdmission;
 
@@ -80,7 +82,7 @@ private:
 
 using V41PPCacheBatchPtr = std::shared_ptr<V41PPCacheBatch>;
 
-// Serialized, short eager CEP4PP2 allocation admission. No CUDA writes or
+// Serialized eager CEP4PP2 allocation admission. No CUDA writes or
 // collectives occur here. The executor must coordinate rejection across ranks
 // and commit only after a successful import/forward. This is not a scheduler.
 class V41PPLocalCache final {
@@ -110,7 +112,8 @@ private:
     // Construct every tagged operation before the coordinator agrees to write.
     InitializationOps prepareInitialization(const V41PPCacheBatchPtr& batch) const;
 
-    std::shared_ptr<Allocation> allocate(int64_t request_id, const KVCacheAllocationLeasePtr& root_lease);
+    std::shared_ptr<Allocation>
+    allocate(int64_t request_id, int64_t tokens, const KVCacheAllocationLeasePtr& root_lease);
     void requireLease(const KVCacheAllocationLeasePtr& lease) const;
     void requirePending(const V41PPCacheBatchPtr& batch) const;
 
@@ -120,6 +123,7 @@ private:
     std::map<int64_t, Request>           requests_;
     std::weak_ptr<V41PPCacheBatch>        pending_;
     bool                                borrow_root_;
+    int64_t                             max_initial_tokens_;
     int64_t                             local_generation_ = 0;
     int64_t                             source_high_water_ = 0;
 };

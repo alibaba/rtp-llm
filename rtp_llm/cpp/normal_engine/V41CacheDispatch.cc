@@ -37,8 +37,8 @@ void V41CacheDispatch::prepare(const StreamGroups& streams, GptModelInputs& inpu
         }
         const int64_t start = stream->isContextStream() ? stream->prefixLength() : stream->seqLength() - 1;
         const int64_t count = stream->isContextStream() ? stream->contextLength() : 1;
-        if (start < 0 || count <= 0 || start > 32768 || count > 32768 - start) {
-            throw std::invalid_argument("V4.1 dispatch span exceeds the 32K context bound");
+        if (start < 0 || count <= 0 || start > MAX_CONTEXT_TOKENS || count > MAX_CONTEXT_TOKENS - start) {
+            throw std::invalid_argument("V4.1 dispatch span exceeds the 33024-token context bound");
         }
         auto&      cache       = stream->streamCacheResource();
         const auto incarnation = cache.cacheIncarnation();

@@ -1,7 +1,8 @@
-"""Preserve CP1 router batch arithmetic in short maintained V4.1 CP4 prefills."""
+"""Preserve CP1 router batch arithmetic in maintained V4.1 CP4 prefills."""
 
 import torch
 
+from rtp_llm.config.dsv41_config import V41_MAX_CP_PREFILL_TOKENS
 from rtp_llm.models_py.distributed.collective_torch import Group, _get_group
 from rtp_llm.models_py.modules.dsv4.cp import CPContext, cp_all_gather_full
 
@@ -37,7 +38,10 @@ def canonical_v41_cp_routes(gate, x, cp):
         or not isinstance(prefixes, tuple)
         or len(lengths) != len(prefixes)
         or not lengths
-        or any(n <= 0 or p < 0 or n + p > 512 for n, p in zip(lengths, prefixes))
+        or any(
+            n <= 0 or p < 0 or n + p > (512 if p else V41_MAX_CP_PREFILL_TOKENS)
+            for n, p in zip(lengths, prefixes)
+        )
         or sum(lengths) != cp.seq_len_full
         or cp.padded_seq_len != 4 * cp.chunk_length
     ):

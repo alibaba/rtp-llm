@@ -13,7 +13,7 @@ namespace rtp_llm {
 
 namespace {
 
-constexpr int64_t kTokenLimit = 512;
+constexpr int64_t kTokenLimit = 2 * kV41MaxInitialPPPrefillTokens;
 constexpr int64_t kSpanOffset = 4;
 constexpr int64_t kTokenOffset = kSpanOffset + 12;
 constexpr int64_t kWindowOffset = kTokenOffset + kTokenLimit;
@@ -76,10 +76,11 @@ void validateGlobal(GptModelInputs& inputs, torch::Tensor& packet, int64_t vocab
     int64_t tokens = 0;
     for (int64_t row = 0; row < batch; ++row) {
         const auto* span = inputs.v41_cache_spans.data_ptr<int64_t>() + row * 6;
-        if (span[4] < 0 || span[5] <= 0 || span[4] > 256 || span[5] > 256 - span[4]
+        const auto limit = span[4] == 0 ? kV41MaxInitialPPPrefillTokens : 256;
+        if (span[4] < 0 || span[5] <= 0 || span[4] >= limit || span[5] > limit - span[4]
             || inputs.input_lengths.data_ptr<int32_t>()[row] != span[5]
             || inputs.prefix_lengths.data_ptr<int32_t>()[row] != span[4]) {
-            throw std::invalid_argument("V4.1 global PP request geometry disagrees with short native spans");
+            throw std::invalid_argument("V4.1 global PP request geometry disagrees with bounded native spans");
         }
         tokens += span[5];
     }

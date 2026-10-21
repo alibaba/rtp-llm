@@ -15,6 +15,8 @@ namespace rtp_llm {
 // All access must serialize with stream allocation, mutation and release.
 class V41CacheDispatch {
 public:
+    static constexpr int64_t MAX_CONTEXT_TOKENS = 32768 + 256;
+
     void prepare(const StreamGroups& streams, GptModelInputs& inputs);
 
 private:

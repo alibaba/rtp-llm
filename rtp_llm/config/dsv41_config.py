@@ -7,6 +7,11 @@ from pathlib import Path
 from typing import Any, Mapping, Optional
 
 
+# One additional cache page permits generation after a 32K prompt.
+V41_MAX_CONTEXT_TOKENS = 32768 + 256
+V41_MAX_CP_PREFILL_TOKENS = 32768
+
+
 def v41_rotary_compute_device(text: Mapping[str, Any]) -> Optional[str]:
     """Read a portable arithmetic origin; CUDA ordinals remain worker-local."""
     value = text.get("rotary_compute_device")

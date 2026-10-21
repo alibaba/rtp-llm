@@ -274,6 +274,33 @@ TEST_F(V41CacheDispatchTest, FailedGatherDoesNotConsumeGenerationsOrLeakLeases) 
     EXPECT_EQ(manager_->freeBlocksNum(), initially_free);
 }
 
+TEST_F(V41CacheDispatchTest, DecodeCrosses32KAndRejectsContextOverflow) {
+    V41CacheDispatch dispatch;
+    auto stream = makeStream(41);
+    const auto incarnation = stream->streamCacheResource().cacheIncarnation();
+    // Exercise the cursor independently of token gathering and page allocation.
+    chunk(stream, 0, 32768);
+    stream->max_chunk_len_ = V41CacheDispatch::MAX_CONTEXT_TOKENS + 2;
+    GptModelInputs prefill;
+    dispatch.prepare(StreamGroups({stream}), prefill);
+    EXPECT_EQ(toVec<int64_t>(prefill.v41_cache_spans), (std::vector<int64_t>{41, 1, incarnation, 0, 0, 32768}));
+    stream->setIsContextStream(false);
+    for (int position = 32768; position < V41CacheDispatch::MAX_CONTEXT_TOKENS; ++position) {
+        stream->complete_token_ids_->seq_length_ = position + 1;
+        GptModelInputs decode;
+        dispatch.prepare(StreamGroups({stream}), decode);
+        EXPECT_EQ(toVec<int64_t>(decode.v41_cache_spans),
+                  (std::vector<int64_t>{41, 1, incarnation, position - 32768 + 1, position, 1}));
+    }
+    stream->complete_token_ids_->seq_length_ = V41CacheDispatch::MAX_CONTEXT_TOKENS + 1;
+    GptModelInputs overflow;
+    EXPECT_THROW(dispatch.prepare(StreamGroups({stream}), overflow), std::invalid_argument);
+    auto oversized = makeStream(42);
+    chunk(oversized, 0, V41CacheDispatch::MAX_CONTEXT_TOKENS + 1);
+    oversized->max_chunk_len_ = V41CacheDispatch::MAX_CONTEXT_TOKENS + 2;
+    EXPECT_THROW(dispatch.prepare(StreamGroups({oversized}), overflow), std::invalid_argument);
+}
+
 TEST_F(V41CacheDispatchTest, IdlePhasesHaveNoRequestsAndPreserveLiveGeneration) {
     auto live = makeStream(41);
     chunk(live, 0, 2);
