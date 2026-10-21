@@ -341,6 +341,12 @@ py_test(
     deps = ["//rtp_llm:testlib"],
 )
 
+py_test(
+    name = "mega_moe_common_execution_test",
+    srcs = ["mega_moe_common_execution_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
 cuda13_sm100_py_test(
     name = "mega_moe_input_pack_policy_test",
     srcs = ["mega_moe_input_pack_policy_test.py"],

@@ -1,8 +1,6 @@
-"""Symm-mem buffer cache + capability gates for DeepGEMM FP8xFP8 Mega MoE."""
+"""Symm-mem buffer cache for DeepGEMM FP8xFP8 Mega MoE."""
 
 import logging
-
-import torch
 
 _MEGA_FP8_BUF_CACHE: dict = {}
 
@@ -123,38 +121,3 @@ def get_or_create_mega_buf_fp8(
             )
         _MEGA_FP8_BUF_CACHE[key] = buf
     return buf
-
-
-def _mega_moe_fp8_unavailable_reason() -> str | None:
-    """Return None when FP8xFP8 Mega MoE can run."""
-    try:
-        import deep_gemm
-
-        if not hasattr(deep_gemm, "fp8_fp8_mega_moe"):
-            return "deep_gemm.fp8_fp8_mega_moe is missing"
-        if not hasattr(deep_gemm, "get_symm_buffer_for_mega_moe_fp8"):
-            return "deep_gemm.get_symm_buffer_for_mega_moe_fp8 is missing"
-        if not hasattr(deep_gemm, "transform_weights_for_mega_moe_fp8"):
-            return "deep_gemm.transform_weights_for_mega_moe_fp8 is missing"
-    except Exception as e:
-        return f"failed to import deep_gemm: {e}"
-    try:
-        import torch.distributed as dist
-
-        if not dist.is_initialized():
-            return "torch.distributed is not initialized"
-        if dist.get_world_size() <= 1:
-            return f"distributed world_size={dist.get_world_size()} is not > 1"
-    except Exception as e:
-        return f"failed to query torch.distributed: {e}"
-    if not torch.cuda.is_available():
-        return "CUDA is not available"
-    cap = torch.cuda.get_device_capability()
-    if cap[0] < 10:
-        return f"CUDA device capability sm{cap[0]}{cap[1]} is below SM100"
-    return None
-
-
-def mega_moe_fp8_available() -> bool:
-    """Whether DeepGEMM's fp8_fp8_mega_moe is usable."""
-    return _mega_moe_fp8_unavailable_reason() is None

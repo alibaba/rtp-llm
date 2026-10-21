@@ -151,44 +151,6 @@ def get_or_create_mega_buf_fused(
     return buf
 
 
-def _mega_moe_fused_unavailable_reason() -> str | None:
-    """Return None when fused Mega MoE can run."""
-    try:
-        import deep_gemm
-
-        if not hasattr(deep_gemm, "fp8_fp4_mega_moe_fused"):
-            return "deep_gemm.fp8_fp4_mega_moe_fused is missing"
-        if not hasattr(deep_gemm, "get_symm_buffer_for_mega_moe_fused"):
-            return "deep_gemm.get_symm_buffer_for_mega_moe_fused is missing"
-        if not hasattr(deep_gemm, "transform_shared_expert_weights_for_mega_moe_fused"):
-            return (
-                "deep_gemm.transform_shared_expert_weights_for_mega_moe_fused "
-                "is missing"
-            )
-    except Exception as e:
-        return f"failed to import deep_gemm: {e}"
-    try:
-        import torch.distributed as dist
-
-        if not dist.is_initialized():
-            return "torch.distributed is not initialized"
-        if dist.get_world_size() <= 1:
-            return f"distributed world_size={dist.get_world_size()} is not > 1"
-    except Exception as e:
-        return f"failed to query torch.distributed: {e}"
-    if not torch.cuda.is_available():
-        return "CUDA is not available"
-    cap = torch.cuda.get_device_capability()
-    if cap[0] < 10:
-        return f"CUDA device capability sm{cap[0]}{cap[1]} is below SM100"
-    return None
-
-
-def mega_moe_fused_available() -> bool:
-    """Whether DeepGEMM's fp8_fp4_mega_moe_fused is usable."""
-    return _mega_moe_fused_unavailable_reason() is None
-
-
 # ---------------------------------------------------------------------------
 # FP8 shared-expert weight transform + scratch workspace
 # ---------------------------------------------------------------------------

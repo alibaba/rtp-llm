@@ -69,6 +69,9 @@ class MegaMoeJitWarmupTest(unittest.TestCase):
             moe_strategy="mega_moe",
         )
         executor._input_packer = FusedMegaMoEInputPacker()
+        executor._mega_l1_w = torch.empty(1)
+        executor._mega_group = object()
+        executor._num_shared_experts = 0
         executor.warmup_jit = mock.Mock(side_effect=RuntimeError("compile failed"))
         fake_deep_gemm = types.SimpleNamespace(get_num_sms=lambda: 148)
         with tempfile.TemporaryDirectory() as tmpdir, mock.patch.dict(
@@ -263,7 +266,7 @@ class MegaMoeJitWarmupTest(unittest.TestCase):
             (
                 MegaMoeSEExecutor,
                 "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors."
-                "mega_moe_se.generate_mega_moe_se_jit_token_counts",
+                "mega_moe.generate_mega_moe_jit_token_counts",
             ),
         )
         for executor_type, generator_path in cases:

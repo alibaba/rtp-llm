@@ -283,9 +283,8 @@ def quantize_moe_weight_to_fp4_ue8m0(
     weight: torch.Tensor,
     block_size: int = MEGA_MOE_FP4_BLOCK,
 ):
-    """Quantize a stacked MoE weight ``[E, N, K]`` (BF16/FP16/FP32) to NVFP4
-    + UE8M0 scale, matching the per-expert loop in
-    ``MegaMoeBackend.setup_weights_from_bf16``.
+    """Quantize a stacked MoE weight ``[E, N, K]`` (BF16/FP16/FP32) to FP4
+    + UE8M0 scale at load time for ``MegaMoeExecutor.setup_weights_from_fp4``.
 
     Returns:
         packed: int8 ``[E, N, K // 2]``
@@ -400,11 +399,11 @@ def _mega_moe_scale_name(name: str) -> str:
 
 class OnlineMegaMoeFp4Weight(CompositeWeight, QuantWeight):
     """Load-time FP4+UE8M0 quantizer for mega-MoE stacked MoE weights
-    (``moe_w1`` = gate||up, ``moe_w2`` = down) starting from BF16.
+    (``moe_w1`` preserves its source stacked order, ``moe_w2`` = down)
+    starting from BF16.
 
-    Output layout matches ``MegaMoeBackend.setup_weights_from_bf16`` bit for bit.
-    Doing the work here lets the BF16 tensor be released as soon as it lands
-    on the GPU, instead of staying resident until ``MegaMoeWrapper.__init__``.
+    The common ``MegaMoeExecutor`` consumes the packed weights and scales.
+    Converting during loading releases the BF16 tensor before executor setup.
 
     Wired in by ``apply_mega_moe_fp4_wrappers`` (in ``model_weight_info.py``)
     when a MegaMoE strategy is selected. Inherits ``QuantWeight`` purely so that
@@ -479,7 +478,7 @@ class OnlineMegaMoeFp4Weight(CompositeWeight, QuantWeight):
 
     def _postprocess(self, tensor, device: str, load_config: LoadConfig):
         # No layout transform here: the deepgemm SF layout + mega-moe transform
-        # require the (l1, l2) pair together and run inside MegaMoeWrapper.
+        # require the (l1, l2) pair together and run in MegaMoeExecutor setup.
         return {
             self.kernel.name: tensor[self.kernel.name],
             self.scale.name: tensor[self.scale.name],
@@ -491,7 +490,7 @@ class OnlineMegaMoeFp4FromFp8Weight(CompositeWeight, QuantWeight):
 
     Takes FP8 per-block quantized weights (``float8_e4m3fn`` kernel +
     ``float32`` scale) and produces FP4 packed int8 + fp32 UE8M0 scale at
-    load time, matching ``MegaMoeBackend.setup_weights_from_fp8`` numerically.
+    load time for the common ``MegaMoeExecutor`` to consume directly.
 
     Wired in by ``apply_mega_moe_fp4_wrappers`` when a MegaMoE strategy is selected
     and the original MoE weight was a ``PerBlockFp8Weight``.

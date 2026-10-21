@@ -1,405 +1,117 @@
-"""Drop-in replacement for routed FusedMoe that uses MegaMoeBackend internally.
+"""Checkpoint preparation and chunking for generic MegaMoE model callers.
 
-This wrapper implements the same interface as FusedMoe so it can be used
-directly in GenericMoeLayer without changing the forward() call site.
-
-The mega kernel fuses dispatch + L1 GEMM + SwiGLU + L2 GEMM + combine
-into one kernel, so there's no separate router/executor.
+Execution, graph resources and kernel launches belong to MegaMoeExecutor.
+DeepSeek's chunked model layer and generic models share the same chunk runner.
 """
 
-import logging
-from typing import Any, Dict, Optional
+import copy
 
 import torch
-import torch.nn as nn
 
-from rtp_llm.config.mega_moe import MegaMoeExecutionPolicy
-from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_backend import (
-    MegaMoeBackend,
+from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
+    CombineForwardPayload,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer import (
     moe_decode_forward,
-    planned_moe_tokens,
     resolve_moe_max_tokens_per_rank,
-    synchronize_moe_chunk_tokens,
+    run_moe_chunks,
 )
-
-logger = logging.getLogger(__name__)
-_CHUNKED_GLM5_MOE_LOGGED = False
-
-
-def _split_stacked_moe_w1_up_gate(
-    w1: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Split RTP stacked MoE W1 layout into up/value and gate halves."""
-    if w1.dim() != 3:
-        raise ValueError(
-            f"Expected stacked moe_w1 to be 3D, got shape={tuple(w1.shape)}"
-        )
-    if w1.shape[1] % 2 != 0:
-        raise ValueError(
-            f"Expected even stacked moe_w1 N dimension, got shape={tuple(w1.shape)}"
-        )
-    half_n = w1.shape[1] // 2
-    # RTP's generic MoE kernels use [up/value | gate].  DeepGEMM Mega MoE
-    # follows the DSV4 convention [gate | up], so callers must reorder.
-    w1_up = w1[:, :half_n, :].contiguous()
-    w1_gate = w1[:, half_n:, :].contiguous()
-    return w1_up, w1_gate
+from rtp_llm.ops import RoleType
+from rtp_llm.utils.model_weight import W
 
 
-def _restack_gate_up(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
-    return torch.cat([gate, up], dim=1).contiguous()
+def setup_prepared_mega_moe(executor, weights):
+    """Load a generic model's checkpoint into the common executor lifecycle."""
+    cfg = executor.cfg = copy.copy(executor.cfg)
+    model = cfg.model_config
+    parallelism = cfg.parallelism_config
+    policy = cfg.mega_moe_policy
+    if policy.w1_layout not in ("up_gate", "gate_up"):
+        raise ValueError(f"unsupported W1 layout: {policy.w1_layout}")
+    cfg.moe_w1_layout = policy.w1_layout
+    cfg.activation_clamp = policy.activation_clamp
+    cfg.fast_math = policy.fast_math
+    executor._is_decode_role = parallelism.role_type == RoleType.DECODE
+    cp_size = 1
+    if not executor._is_decode_role and parallelism.prefill_cp_config.is_enabled():
+        cp_size = max(int(parallelism.tp_size), 1)
+    max_seq_len = int(model.max_seq_len or 0)
+    capacity = max(max_seq_len, 128) if max_seq_len > 0 else 8192
+    capacity = max(capacity, int(cfg.moe_config.ll_num_max_token or 0))
+    gen_num_per_cycle = int(model.gen_num_per_cycle or 0)
+    cfg.max_tokens_per_rank = resolve_moe_max_tokens_per_rank(
+        max_seq_len=max_seq_len,
+        current_max_tokens_per_rank=capacity,
+        cp_size=cp_size,
+        max_generate_batch_size=max(int(cfg.max_generate_batch_size), 1),
+        is_decode_role=executor._is_decode_role,
+        is_speculative=gen_num_per_cycle > 0,
+        gen_num_per_cycle=gen_num_per_cycle,
+    )
+    cfg.warmup_include_capacity = True
 
-
-class MegaMoeWrapper(nn.Module):
-    """FusedMoe-compatible wrapper around MegaMoeBackend.
-
-    Usage in GenericMoeLayer:
-        self.fused_moe = MegaMoeWrapper(config, parallelism_config, weights)
-        # then forward as usual:
-        output = self.fused_moe(hidden_states, topk_weights, topk_ids, activation="SiGLU")
-    """
-
-    def _get_mega_moe_cls(self):
-        return MegaMoeBackend
-
-    def __init__(
-        self,
-        config,
-        parallelism_config,
-        weights: Dict[str, torch.Tensor],
-        moe_config=None,
-        layer_idx: int = 0,
-        max_generate_batch_size: int = 0,
-        execution_policy: MegaMoeExecutionPolicy | None = None,
-    ):
-        super().__init__()
-        from rtp_llm.utils.model_weight import W
-
-        ep_size = parallelism_config.ep_size
-        ep_rank = parallelism_config.ep_rank
-
-        dim = config.hidden_size
-        n_routed_experts = config.expert_num
-        n_activated_experts = config.moe_k
-        execution_policy = execution_policy or MegaMoeExecutionPolicy()
-        if execution_policy.w1_layout not in ("up_gate", "gate_up"):
-            raise ValueError(f"unsupported W1 layout: {execution_policy.w1_layout}")
-
-        moe_inter_dim_raw = getattr(config, "moe_inter_size", None) or None
-        if moe_inter_dim_raw is None or moe_inter_dim_raw == 0:
-            w1 = weights.get(W.moe_w1)
-            if w1 is not None:
-                moe_inter_dim_raw = w1.shape[1] // 2
-            else:
-                raise ValueError("Cannot determine moe_intermediate_size")
-
-        max_seq_len = int(getattr(config, "max_seq_len", 0) or 0)
-        max_tokens_per_rank = max(max_seq_len, 128) if max_seq_len > 0 else 8192
-        if moe_config is not None:
-            ll = getattr(moe_config, "ll_num_max_token", 0)
-            if ll and ll > 0:
-                max_tokens_per_rank = max(max_tokens_per_rank, ll)
-
-        # Detect decode role from parallelism_config.role_type
-        is_decode_role = False
-        try:
-            from rtp_llm.ops import RoleType
-
-            role_type = getattr(parallelism_config, "role_type", None)
-            if role_type is not None:
-                is_decode_role = role_type == RoleType.DECODE
-        except Exception:
-            pass
-
-        self._is_decode_role = is_decode_role
-
-        # Resolve CP: when prefill_cp_config is enabled, per-rank tokens
-        # are bounded by max_seq_len / cp_size (same logic as DSv4).
-        cp_size = 1
-        if (
-            not is_decode_role
-            and parallelism_config is not None
-            and getattr(parallelism_config, "prefill_cp_config", None) is not None
-        ):
-            try:
-                if parallelism_config.prefill_cp_config.is_enabled():
-                    cp_size = int(getattr(parallelism_config, "tp_size", 1) or 1)
-            except Exception:
-                pass
-
-        # Resolve max_tokens_per_rank based on role
-        max_generate_batch_size = (
-            int(max_generate_batch_size) if max_generate_batch_size > 0 else 0
-        )
-        gen_num_per_cycle = int(getattr(config, "gen_num_per_cycle", 0) or 0)
-        resolved = resolve_moe_max_tokens_per_rank(
-            max_seq_len=max_seq_len,
-            current_max_tokens_per_rank=max_tokens_per_rank,
-            cp_size=cp_size,
-            max_generate_batch_size=max(max_generate_batch_size, 1),
-            is_decode_role=is_decode_role,
-            is_speculative=gen_num_per_cycle > 0,
-            gen_num_per_cycle=gen_num_per_cycle,
-        )
-        if resolved != max_tokens_per_rank:
-            logger.info(
-                "[GLM5 MegaMoE] max_tokens_per_rank %d -> %d "
-                "(role=%s, cp=%d, max_batch=%d, gen_num_per_cycle=%d)",
-                max_tokens_per_rank,
-                resolved,
-                "DECODE" if is_decode_role else "PREFILL",
-                cp_size,
-                max_generate_batch_size,
-                gen_num_per_cycle,
-            )
-            max_tokens_per_rank = resolved
-
-        self.mega_moe = self._get_mega_moe_cls().from_params(
-            layer_id=layer_idx,
-            dim=dim,
-            moe_inter_dim=moe_inter_dim_raw,
-            n_routed_experts=n_routed_experts,
-            n_activated_experts=n_activated_experts,
-            activation_clamp=execution_policy.activation_clamp,
-            fast_math=execution_policy.fast_math,
-            ep_size=ep_size,
-            ep_rank=ep_rank,
-            max_tokens_per_rank=max_tokens_per_rank,
-        )
-
-        w1 = weights.pop(W.moe_w1, None)
-        w2 = weights.pop(W.moe_w2, None)
-        s1 = weights.pop(W.moe_s1, None)
-        s2 = weights.pop(W.moe_s2, None)
-
-        if w1 is None or w2 is None or s1 is None or s2 is None:
-            raise ValueError(
-                "MegaMoeWrapper requires load-time FP4 or FP8 MoE weights "
-                "(moe_w1, moe_w2, moe_s1, moe_s2). Runtime/module-init "
-                "quantization without checkpoint scales is not supported."
-            )
-
-        if w1.dtype == torch.int8 and w2.dtype == torch.int8:
-            self.mega_moe.setup_weights_from_fp4(
-                w1_w=w1,
-                w1_s=s1,
-                w2_w=w2,
-                w2_s=s2,
-                w1_layout=execution_policy.w1_layout,
-            )
-            del w1, s1, w2, s2
-        elif w1.dtype == torch.float8_e4m3fn and w2.dtype == torch.float8_e4m3fn:
-            w1_up, w1_gate = _split_stacked_moe_w1_up_gate(w1)
-            s1_up, s1_gate = _split_stacked_moe_w1_up_gate(s1)
-            if execution_policy.w1_layout == "gate_up":
-                w1_up, w1_gate = w1_gate, w1_up
-                s1_up, s1_gate = s1_gate, s1_up
-            del w1, s1
-            self.mega_moe.setup_weights_from_fp8(
-                w1_fp8=w1_gate,
-                w1_scale=s1_gate,
-                w2_fp8=w2,
-                w2_scale=s2,
-                w3_fp8=w1_up,
-                w3_scale=s1_up,
-            )
-            del w1_up, w1_gate, s1_up, s1_gate, w2, s2
+    keys = (W.moe_w1, W.moe_s1, W.moe_w2, W.moe_s2)
+    if any(weights.get(key) is None for key in keys):
+        raise ValueError("MegaMoE requires load-time FP4 or FP8 weights and scales")
+    w1, s1, w2, s2 = (weights.pop(key) for key in keys)
+    if w1.dtype == torch.int8 and w2.dtype == torch.int8:
+        executor.setup_weights_from_fp4(w1, s1, w2, s2, w1_layout=policy.w1_layout)
+    elif w1.dtype == torch.float8_e4m3fn and w2.dtype == torch.float8_e4m3fn:
+        first_w, second_w = w1.chunk(2, dim=1)
+        first_s, second_s = s1.chunk(2, dim=1)
+        if policy.w1_layout == "up_gate":
+            up, gate, up_s, gate_s = first_w, second_w, first_s, second_s
         else:
-            raise ValueError(
-                "MegaMoeWrapper only accepts load-time FP4 int8 or FP8 e4m3 "
-                "weights with checkpoint scales. "
-                f"Got moe_w1 dtype={w1.dtype}, moe_w2 dtype={w2.dtype}."
-            )
-        torch.cuda.empty_cache()
-
-        self.expert_num = n_routed_experts
-
-    def _forward_chunked(
-        self,
-        hidden_states: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        forward_fn,
-    ) -> torch.Tensor:
-        capacity = int(
-            getattr(
-                getattr(self.mega_moe, "_mega_buf", None), "num_max_tokens_per_rank", 0
-            )
-            or 0
+            gate, up, gate_s, up_s = first_w, second_w, first_s, second_s
+        executor.setup_weights_from_fp8(
+            w1_fp8=gate,
+            w1_scale=gate_s,
+            w2_fp8=w2,
+            w2_scale=s2,
+            w3_fp8=up,
+            w3_scale=up_s,
         )
-        tokens = int(hidden_states.size(0))
-        if capacity <= 0:
-            raise ValueError("MegaMoE workspace capacity must be positive")
-        fixed_shape = (
-            getattr(self, "_is_decode_role", False)
-            or moe_decode_forward()
-            or (torch.cuda.is_available() and torch.cuda.is_current_stream_capturing())
+    else:
+        raise ValueError(
+            "MegaMoE requires FP4 int8 or FP8 e4m3 checkpoint weights, "
+            f"got {w1.dtype} and {w2.dtype}"
         )
-        if fixed_shape:
-            if tokens > capacity:
-                raise ValueError(
-                    "decode/capture MegaMoE input exceeds workspace capacity"
-                )
-            return forward_fn(hidden_states, topk_weights, topk_ids)
-        chunk_tokens = synchronize_moe_chunk_tokens(tokens, hidden_states.device)
-        if chunk_tokens <= capacity:
-            return forward_fn(hidden_states, topk_weights, topk_ids)
-
-        global _CHUNKED_GLM5_MOE_LOGGED
-        if not _CHUNKED_GLM5_MOE_LOGGED:
-            _CHUNKED_GLM5_MOE_LOGGED = True
-            logger.info(
-                "[GLM5 MegaMoE] chunked forward enabled: tokens=%d "
-                "chunk_tokens=%d chunks=%d hidden=%s device=%s",
-                tokens,
-                capacity,
-                (tokens + capacity - 1) // capacity,
-                tuple(hidden_states.shape),
-                hidden_states.device,
-            )
-
-        output = torch.empty_like(hidden_states)
-        for token_start in range(0, chunk_tokens, capacity):
-            token_end = min(token_start + capacity, tokens)
-            token_start = min(token_start, tokens)
-            output[token_start:token_end].copy_(
-                forward_fn(
-                    hidden_states[token_start:token_end],
-                    topk_weights[token_start:token_end],
-                    topk_ids[token_start:token_end],
-                )
-            )
-        return output
-
-    includes_shared_expert = False
-
-    def clone_for_cuda_graph(self, *, share_mega_buf: bool = False) -> "MegaMoeWrapper":
-        clone = object.__new__(type(self))
-        nn.Module.__init__(clone)
-        clone.mega_moe = self.mega_moe.clone_for_cuda_graph(
-            share_mega_buf=share_mega_buf
-        )
-        clone.expert_num = self.expert_num
-        clone._is_decode_role = getattr(self, "_is_decode_role", False)
-        return clone
-
-    @property
-    def topk_ids_dtype(self) -> torch.dtype:
-        return torch.int64
-
-    def prepacked_input_views(
-        self, tokens: int
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        planned = planned_moe_tokens()
-        if (
-            planned is not None
-            and planned > self.mega_moe._mega_buf.num_max_tokens_per_rank
-        ):
-            raise ValueError("prepacked execution cannot span synchronized MoE chunks")
-        return self.mega_moe.prepacked_input_views(tokens)
-
-    def forward_prepacked(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        return self.mega_moe.forward_prepacked(hidden_states)
-
-    def _mega_forward(self):
-        return self.mega_moe
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        inplace: bool = False,
-        activation: str = "silu",
-        expert_map: Optional[torch.Tensor] = None,
-        a1_scale: Optional[torch.Tensor] = None,
-        a2_scale: Optional[torch.Tensor] = None,
-        apply_router_weight_on_input: bool = False,
-        extra_expert_args: Optional[Dict[str, Any]] = None,
-        extra_finalize_args: Optional[Dict[str, Any]] = None,
-        skip_tp_allreduce: bool = False,
-    ) -> torch.Tensor:
-        if skip_tp_allreduce:
-            raise ValueError(
-                "MegaMoE produces complete EP output; TP all-reduce cannot be deferred"
-            )
-        if activation.lower() not in ("silu", "siglu", "swiglu"):
-            raise ValueError(f"MegaMoE requires SiLU activation, got {activation!r}")
-        if expert_map is not None:
-            raise ValueError("MegaMoE does not support expert_map")
-        if a1_scale is not None or a2_scale is not None:
-            raise ValueError("MegaMoE quantizes activations inside its executor")
-        if apply_router_weight_on_input:
-            raise ValueError("MegaMoE applies router weights during output combine")
-        return self._forward_chunked(
-            hidden_states,
-            topk_weights,
-            topk_ids,
-            self._mega_forward(),
-        )
-
-
-class SharedExpertMegaMoeWrapper(MegaMoeWrapper):
-    """Set up the shared weights; retain each backend's ownership policy."""
-
-    includes_shared_expert = True
-    consume_shared_weights = True
-    require_full_ffn_weights = False
-    validate_shared_dtype = False
-
-    def __init__(
-        self,
-        config,
-        parallelism_config,
-        weights: Dict[str, torch.Tensor],
-        moe_config=None,
-        layer_idx: int = 0,
-        max_generate_batch_size: int = 0,
-        execution_policy: MegaMoeExecutionPolicy | None = None,
-    ):
-        from rtp_llm.utils.model_weight import W
-
-        if self.require_full_ffn_weights and parallelism_config.get_ffn_tp_size() != 1:
-            raise ValueError(
-                "mega_moe_se requires full shared-expert weights on every EP rank "
-                "(ffn_tp_size == 1)"
-            )
-        super().__init__(
-            config,
-            parallelism_config,
-            weights,
-            moe_config=moe_config,
-            layer_idx=layer_idx,
-            max_generate_batch_size=max_generate_batch_size,
-            execution_policy=execution_policy,
-        )
+    del w1, s1, w2, s2
+    if executor.includes_shared_expert:
+        if parallelism.get_ffn_tp_size() != 1:
+            raise ValueError("MegaMoE shared experts require full weights on each rank")
+        if weights.get(W.shared_expert_gate) is not None:
+            raise ValueError("Fused MegaMoE does not support shared_expert_gate")
         keys = (W.ffn_w13, W.ffn_s13, W.ffn_w2, W.ffn_s2)
-        missing = [key for key in keys if weights.get(key) is None]
-        if missing:
+        if any(weights.get(key) is None for key in keys):
             raise ValueError(
-                f"{type(self).__name__} requires FP8 shared-expert weights; missing {missing}"
+                "Fused MegaMoE requires FP8 shared-expert weights and scales"
             )
-        w1, s1, w2, s2 = (weights[key] for key in keys)
-        if self.validate_shared_dtype and (
-            w1.dtype != torch.float8_e4m3fn or w2.dtype != torch.float8_e4m3fn
-        ):
-            raise ValueError(
-                "mega_moe_fused requires load-time FP8 e4m3 shared-expert weights"
-            )
-        if self.consume_shared_weights:
-            for key in keys:
-                del weights[key]
-        self.mega_moe.setup_shared_expert_from_fp8(
-            w1_w=w1,
-            w1_s=s1,
-            w2_w=w2,
-            w2_s=s2,
-        )
+        w1, s1, w2, s2 = (weights.pop(key) for key in keys)
+        executor.setup_shared_expert_from_fp8(w1_w=w1, w1_s=s1, w2_w=w2, w2_s=s2)
         del w1, s1, w2, s2
-        torch.cuda.empty_cache()
-        self.mega_moe.maybe_warmup_fused_shared_jit_once()
+        executor.maybe_warmup_fused_shared_jit_once()
+    torch.cuda.empty_cache()
 
-    def _mega_forward(self):
-        return self.mega_moe.forward
+
+def execute_prepared_mega_moe(executor, payload, execute, *args):
+    """Apply the common EP chunk plan after a generic model has routed tokens."""
+
+    def call_chunk(start, end, out):
+        chunk = copy.copy(payload)
+        chunk.expert_x = payload.expert_x[start:end]
+        if payload.expert_topk_weights is not None:
+            chunk.expert_topk_weights = payload.expert_topk_weights[start:end]
+        if payload.expert_topk_ids is not None:
+            chunk.expert_topk_ids = payload.expert_topk_ids[start:end]
+        if payload.gate_payload is not None:
+            raise ValueError("Prepared MegaMoE requires materialized top-k routing")
+        return execute(chunk, *args).fused_expert_output
+
+    output = run_moe_chunks(
+        payload.expert_x,
+        executor._mega_buf.num_max_tokens_per_rank,
+        call_chunk,
+        is_decode_forward=executor._is_decode_role or moe_decode_forward(),
+    )
+    return CombineForwardPayload(fused_expert_output=output)

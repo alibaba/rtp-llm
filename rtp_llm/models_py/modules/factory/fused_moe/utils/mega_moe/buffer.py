@@ -168,13 +168,17 @@ def _get_or_create_mega_output(
     return cached
 
 
-def _mega_moe_unavailable_reason() -> str | None:
+def _mega_moe_unavailable_reason(
+    *, kernel_name="fp8_fp4_mega_moe", allocator_name=None, allow_single_rank=False
+) -> str | None:
     """Return ``None`` when Mega MoE can run, otherwise a human-readable reason."""
     try:
         import deep_gemm
 
-        if not hasattr(deep_gemm, "fp8_fp4_mega_moe"):
-            return "deep_gemm.fp8_fp4_mega_moe is missing"
+        if not hasattr(deep_gemm, kernel_name):
+            return f"deep_gemm.{kernel_name} is missing"
+        if allocator_name is not None and not hasattr(deep_gemm, allocator_name):
+            return f"deep_gemm.{allocator_name} is missing"
     except Exception as e:
         return f"failed to import deep_gemm: {e}"
     try:
@@ -182,7 +186,7 @@ def _mega_moe_unavailable_reason() -> str | None:
 
         if not dist.is_initialized():
             return "torch.distributed is not initialized"
-        if dist.get_world_size() <= 1:
+        if not allow_single_rank and dist.get_world_size() <= 1:
             return f"distributed world_size={dist.get_world_size()} is not > 1"
     except Exception as e:
         return f"failed to query torch.distributed: {e}"
@@ -194,11 +198,35 @@ def _mega_moe_unavailable_reason() -> str | None:
     return None
 
 
-def _mega_moe_available() -> bool:
+def _mega_moe_available(**kwargs) -> bool:
     """Whether DeepGEMM's ``fp8_fp4_mega_moe`` (symm-mem fused dispatch +
     L1 GEMM + SwiGLU + L2 GEMM + combine, SM100-only) is usable here.
 
     Requires: deep_gemm >= 2.5 (commit 891d57b introduced it), torch >= 2.9
     for ``torch.distributed._symmetric_memory``, CUDA device SM100+, and
     an initialised world-size process group of size > 1."""
-    return _mega_moe_unavailable_reason() is None
+    return _mega_moe_unavailable_reason(**kwargs) is None
+
+
+_MEGA_CLONE_BUF_CACHE: dict[tuple, object] = {}
+
+
+def get_or_create_mega_clone_buffer(src_buf, allocator_name: str, **kwargs):
+    """Allocate a clone arena with the same recipe as the source executor."""
+    if src_buf is None or kwargs.get("group") is None:
+        return src_buf
+    key = (
+        id(src_buf),
+        allocator_name,
+        tuple(
+            (name, id(value) if name == "group" else value)
+            for name, value in sorted(kwargs.items())
+        ),
+    )
+    cached = _MEGA_CLONE_BUF_CACHE.get(key)
+    if cached is None:
+        import deep_gemm
+
+        cached = getattr(deep_gemm, allocator_name)(**kwargs)
+        _MEGA_CLONE_BUF_CACHE[key] = cached
+    return cached

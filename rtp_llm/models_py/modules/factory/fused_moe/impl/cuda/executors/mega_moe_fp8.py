@@ -1,4 +1,4 @@
-"""GLM-5 MegaMoE FP8xFP8: DeepGEMM fp8_fp8_mega_moe strategy."""
+"""FP8-weight recipe for the shared MegaMoE executor."""
 
 from __future__ import annotations
 
@@ -10,83 +10,22 @@ from rtp_llm.models_py.kernels.cuda.quant_layouts import (
     FP4_BLOCK,
     prepare_fp8_weight_scale_for_deepgemm,
 )
-from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_backend import (
-    MegaMoeBackend,
-    MegaMoeBackendConfig,
-    _mega_output_capacity,
-    _sync_cuda_graph_warmup_ranks,
-)
-from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.backend_input_packer import (
-    get_mega_moe_input_packer,
-)
-from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.buffer import (
-    _get_or_create_mega_output as get_or_create_mega_output,
-)
 from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.fp8_buffer import (
     get_or_create_mega_buf_fp8,
 )
-from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.topology import (
-    validated_world_ep_group,
-)
+
+from .mega_moe import MegaMoeExecutor
 
 logger = logging.getLogger(__name__)
 
-_CUDA_GRAPH_CLONE_FP8_BUF_CACHE: dict[tuple, object] = {}
 
+class MegaMoeFp8Backend(MegaMoeExecutor):
+    _fp8_routed = True
+    _kernel_name = "fp8_fp8_mega_moe"
+    _buffer_factory = "get_symm_buffer_for_mega_moe_fp8"
 
-def _get_or_create_cuda_graph_clone_buf_fp8(
-    src_buf,
-    group,
-    cfg: MegaMoeBackendConfig,
-    num_shared_experts: int = 0,
-):
-    if src_buf is None or group is None:
-        return src_buf
-    key = (
-        id(src_buf),
-        id(group),
-        cfg.n_routed_experts,
-        cfg.max_tokens_per_rank,
-        cfg.n_activated_experts,
-        cfg.dim,
-        cfg.moe_inter_dim,
-        num_shared_experts,
-    )
-    cached = _CUDA_GRAPH_CLONE_FP8_BUF_CACHE.get(key)
-    if cached is not None:
-        return cached
-
-    import deep_gemm
-
-    cached = deep_gemm.get_symm_buffer_for_mega_moe_fp8(
-        group=group,
-        num_experts=cfg.n_routed_experts,
-        num_max_tokens_per_rank=max(cfg.max_tokens_per_rank, 1),
-        num_topk=cfg.n_activated_experts,
-        hidden=cfg.dim,
-        intermediate_hidden=cfg.moe_inter_dim,
-        num_shared_experts=num_shared_experts,
-        use_fp8_dispatch=True,
-        activation="swiglu",
-    )
-    _CUDA_GRAPH_CLONE_FP8_BUF_CACHE[key] = cached
-    logging.info(
-        "[GLM5 MegaMoE FP8] allocated CUDA graph clone symm buffer: layer=%d "
-        "max_tokens_per_rank=%d hidden=%d",
-        cfg.layer_id,
-        cfg.max_tokens_per_rank,
-        cfg.dim,
-    )
-    return cached
-
-
-class MegaMoeFp8Backend(MegaMoeBackend):
-    """GLM-5 MegaMoE wrapper for DeepGEMM ``fp8_fp8_mega_moe``."""
-
-    def _clone_mega_buffer(self):
-        return _get_or_create_cuda_graph_clone_buf_fp8(
-            self._mega_buf, self._mega_group, self.cfg, self._num_shared_experts
-        )
+    def _allocate_mega_buffer(self):
+        return get_or_create_mega_buf_fp8(**self._buffer_kwargs())
 
     def setup_weights_from_fp8(
         self,
@@ -129,7 +68,14 @@ class MegaMoeFp8Backend(MegaMoeBackend):
         )
 
         w13_fp8 = torch.cat([w1_fp8, w3_fp8], dim=1).contiguous()
-        s13 = torch.cat([w1_scale, w3_scale], dim=1).contiguous()
+        if w1_scale.dtype == torch.float8_e8m0fnu:
+            # The loader may hand us strided gate/up views. E8M0 has no
+            # generic cat kernel; concatenate its bytes without conversion.
+            s13 = torch.cat(
+                [w1_scale.view(torch.uint8), w3_scale.view(torch.uint8)], dim=1
+            ).view(w1_scale.dtype)
+        else:
+            s13 = torch.cat([w1_scale, w3_scale], dim=1).contiguous()
         del w1_fp8, w1_scale, w3_fp8, w3_scale
 
         if s13.dtype == torch.float32 or w2_scale.dtype == torch.float32:
@@ -174,94 +120,17 @@ class MegaMoeFp8Backend(MegaMoeBackend):
     def setup_weights_from_fp4(self, *args, **kwargs) -> None:
         raise ValueError("moe_strategy=mega_moe_fp8 only accepts FP8 per-block weights")
 
-    def setup_weights_from_bf16(self, *args, **kwargs) -> None:
-        raise ValueError("moe_strategy=mega_moe_fp8 only accepts FP8 per-block weights")
-
-    def _setup_buffer_and_warmup(self) -> None:
-        import torch.distributed as dist
-
-        cfg = self.cfg
-        device = self._mega_l1_w.device
-
-        assert (
-            dist.is_initialized()
-        ), "GLM5 MegaMoE FP8 requires torch.distributed initialised"
-        group = validated_world_ep_group(self.cfg, dist)
-        self._mega_group = group
-
-        self._mega_buf = get_or_create_mega_buf_fp8(
-            group=group,
-            num_experts=cfg.n_routed_experts,
-            num_max_tokens_per_rank=max(cfg.max_tokens_per_rank, 1),
-            num_topk=cfg.n_activated_experts,
-            hidden=cfg.dim,
-            intermediate_hidden=cfg.moe_inter_dim,
-            use_fp8_dispatch=True,
-            activation="swiglu",
-        )
-        self._mega_y = get_or_create_mega_output(
-            _mega_output_capacity(self._mega_buf, cfg.max_tokens_per_rank),
-            cfg.dim,
-            torch.bfloat16,
-            device,
-        )
-        self._input_packer = get_mega_moe_input_packer()
-        self._maybe_warmup_jit_once()
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        weights: torch.Tensor,
-        indices: torch.Tensor,
-    ) -> torch.Tensor:
-        return self._forward_impl(x, weights, indices, inputs_prepacked=False)
-
-    def forward_prepacked(self, x: torch.Tensor) -> torch.Tensor:
-        return self._forward_impl(x, None, None, inputs_prepacked=True)
-
-    def _forward_impl(
-        self,
-        x: torch.Tensor,
-        weights: torch.Tensor | None,
-        indices: torch.Tensor | None,
-        *,
-        inputs_prepacked: bool,
-    ) -> torch.Tensor:
+    def _run_kernel(self, y, tokens):
         import deep_gemm
 
-        T = x.size(0)
-        buf = self._mega_buf
-        if T > buf.num_max_tokens_per_rank:
-            raise RuntimeError(
-                f"GLM5 MegaMoE FP8 input tokens={T} exceeds "
-                f"num_max_tokens_per_rank={buf.num_max_tokens_per_rank}. "
-                "Raise the budget at startup."
-            )
-        if T > self._mega_y.size(0):
-            raise RuntimeError(
-                f"GLM5 MegaMoE FP8 output buffer rows={self._mega_y.size(0)} is "
-                f"smaller than input tokens={T}."
-            )
-
-        if not inputs_prepacked:
-            if weights is None or indices is None:
-                raise ValueError("weights and indices are required before packing")
-            self._input_packer.pack(x, weights, indices, buf, T)
-        _sync_cuda_graph_warmup_ranks(
-            f"glm5.mega_moe_fp8.layer{self.cfg.layer_id}.before_deepgemm",
-            x.device,
-        )
-
-        y = self._mega_y[:T]
         deep_gemm.fp8_fp8_mega_moe(
             y,
             (self._mega_l1_w, self._mega_l1_sf),
             (self._mega_l2_w, self._mega_l2_sf),
-            buf,
+            self._mega_buf,
             recipe=(1, 1, FP4_BLOCK),
             activation="swiglu",
-            activation_clamp=self.cfg.activation_clamp,
-            fast_math=self.cfg.fast_math,
+            activation_clamp=self._activation_clamp,
+            fast_math=self._fast_math,
             assume_all_topk_valid=True,
         )
-        return y

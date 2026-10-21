@@ -10,6 +10,7 @@ from typing import Any
 
 import torch
 
+from rtp_llm.ops import KvCacheDataType
 from rtp_llm.utils.model_weight import W
 
 _ENABLE_ENV = "RTP_LLM_GLM5_CMP"
@@ -160,6 +161,8 @@ class Glm5Cmp:
         attn = self.config.attn_config
         if not bool(getattr(attn, "use_mla", False)):
             return "attention is not MLA"
+        if getattr(attn, "kv_cache_dtype", None) != KvCacheDataType.FP8:
+            return "GLM5 CMP requires FP8 KV cache"
         if int(getattr(attn, "kernel_tokens_per_block", 0)) != 64:
             return "GLM5 CMP requires 64-token KV pages"
         if not self.is_moe_layer:

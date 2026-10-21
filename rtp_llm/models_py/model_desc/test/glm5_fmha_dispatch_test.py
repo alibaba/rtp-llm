@@ -6,6 +6,7 @@ from unittest.mock import Mock, patch
 import torch
 from torch import nn
 
+from rtp_llm.config.mega_moe import MegaMoeExecutionPolicy
 from rtp_llm.models_py.model_desc.generic_moe import GenericMoeLayer, GenericMoeModel
 from rtp_llm.models_py.model_desc.generic_moe_mtp import GenericMoeMTPModel
 from rtp_llm.models_py.model_desc.glm5 import (
@@ -20,21 +21,23 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import FusedMoe
 from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
     FusedMoEQuantConfig,
 )
-from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_runtime import (
-    MegaMoeWrapper,
-    SharedExpertMegaMoeWrapper,
+from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe import (
+    MegaMoeExecutor,
 )
-from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.prepared_mega_moe import (
-    PreparedMegaMoeExecutor,
-)
-from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.strategy.prepared_mega_moe import (
-    PreparedMegaMoeRouter,
+from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.fp8_fp4_router import (
+    MegaMoeRouter,
 )
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_gemm_linear import (
     CudaFp8GEMMLinear,
 )
-from rtp_llm.models_py.modules.hybrid.glm5_cmp import Glm5Cmp
-from rtp_llm.ops import ActivationType, HWKernelConfig, ParallelismConfig, RoleType
+from rtp_llm.models_py.modules.hybrid.glm5_cmp import Glm5Cmp, should_enable_glm5_cmp
+from rtp_llm.ops import (
+    ActivationType,
+    HWKernelConfig,
+    KvCacheDataType,
+    ParallelismConfig,
+    RoleType,
+)
 from rtp_llm.utils.model_weight import W
 
 
@@ -57,6 +60,71 @@ class RecordingLayer(nn.Module):
 
 
 class Glm5FmhaDispatchTest(unittest.TestCase):
+    def test_cmp_requires_fp8_kv_cache_before_loading_operators(self):
+        for cache_type, torch_dtype, cache_width, enabled in (
+            (KvCacheDataType.BASE, torch.bfloat16, 576, False),
+            (KvCacheDataType.FP8, torch.uint8, 656, True),
+        ):
+            for reuse_topk in (False, True):
+                with self.subTest(cache_type=cache_type, reuse_topk=reuse_topk):
+                    cmp = Glm5Cmp(
+                        layer_idx=0,
+                        config=SimpleNamespace(
+                            model_type="glm_5",
+                            moe_layer_index=[0],
+                            attn_config=SimpleNamespace(
+                                use_mla=True,
+                                kernel_tokens_per_block=64,
+                                kv_cache_dtype=cache_type,
+                            ),
+                        ),
+                        parallelism_config=SimpleNamespace(
+                            tp_size=1, get_attn_tp_size=lambda: 1
+                        ),
+                        self_attn=SimpleNamespace(has_indexer=True),
+                        input_layernorm=None,
+                        mlp=None,
+                        post_attention_layernorm=None,
+                    )
+                    cache = SimpleNamespace(
+                        kv_cache_base=torch.empty(2, 64, cache_width, dtype=torch_dtype)
+                    )
+                    fmha = SimpleNamespace(
+                        weights=object(),
+                        fmha_params=SimpleNamespace(
+                            expanded_seq_lens=torch.ones(2, dtype=torch.int32)
+                        ),
+                        attn_inputs=SimpleNamespace(
+                            is_prefill=False,
+                            kv_cache_kernel_block_id_device=torch.zeros(
+                                2, 1, dtype=torch.int32
+                            ),
+                        ),
+                    )
+                    with (
+                        patch(
+                            "rtp_llm.models_py.modules.hybrid.glm5_cmp._load_ops"
+                        ) as load_ops,
+                        patch.object(cmp, "_initialize_for_cmp") as initialize,
+                    ):
+                        selected = should_enable_glm5_cmp(
+                            [SimpleNamespace(cmp=cmp)],
+                            1,
+                            torch.empty(2, 6144, dtype=torch.bfloat16),
+                            fmha,
+                            SimpleNamespace(get_layer_cache=lambda *_: cache),
+                            force_reuse_topk_indices=reuse_topk,
+                        )
+                    self.assertEqual(selected, enabled)
+                    if enabled:
+                        self.assertIsNone(cmp._disabled_reason)
+                        load_ops.assert_called_once()
+                        initialize.assert_called_once_with(load_ops.return_value)
+                    else:
+                        self.assertIn("FP8 KV cache", cmp._disabled_reason)
+                        load_ops.assert_not_called()
+                        initialize.assert_not_called()
+
     def make_capture_model(self, layer_ids):
         class FinalNorm(nn.Module):
             def __init__(self):
@@ -293,20 +361,16 @@ class Glm5FmhaDispatchTest(unittest.TestCase):
             get_ffn_tp_size=lambda: ffn_tp_size,
             ep_size=2,
         )
-        backend_type = SharedExpertMegaMoeWrapper if fused_shared else MegaMoeWrapper
-        backend = backend_type.__new__(backend_type)
-        nn.Module.__init__(backend)
-        kernel = Mock(return_value=torch.full((3, 4), 2.0))
-        kernel._mega_buf = SimpleNamespace(num_max_tokens_per_rank=8)
-        kernel.forward = Mock(return_value=torch.full((3, 4), 2.0))
-        kernel.forward_prepacked = Mock(return_value=torch.full((3, 4), 2.0))
-        backend.mega_moe = kernel
-        backend.expert_num = 256
-        executor = object.__new__(PreparedMegaMoeExecutor)
-        executor.runtime = backend
+        executor = MegaMoeExecutor.__new__(MegaMoeExecutor)
+        nn.Module.__init__(executor)
+        executor.cfg = SimpleNamespace(mega_moe_policy=MegaMoeExecutionPolicy())
+        executor._is_decode_role = not cp_prefill
+        executor._mega_buf = SimpleNamespace(num_max_tokens_per_rank=8)
+        executor.forward = Mock(return_value=torch.full((3, 4), 2.0))
+        executor.forward_prepacked = Mock(return_value=torch.full((3, 4), 2.0))
         executor.includes_shared_expert = fused_shared
         backend = FusedMoe(
-            PreparedMegaMoeRouter(SimpleNamespace(tp_size=1), FusedMoEQuantConfig()),
+            MegaMoeRouter(SimpleNamespace(tp_size=1), FusedMoEQuantConfig()),
             executor,
             256,
             "mega_moe",
@@ -391,7 +455,8 @@ class Glm5FmhaDispatchTest(unittest.TestCase):
             torch.zeros(3, 4), torch.zeros(3, 8), torch.ones(3, 8)
         )
         torch.testing.assert_close(result, torch.full((3, 4), 2.0))
-        layer.fused_moe.fused_experts.runtime.mega_moe.forward_prepacked.assert_called_once()
+        layer.fused_moe.fused_experts.forward_prepacked.assert_called_once()
+        layer.fused_moe.fused_experts.forward.assert_not_called()
 
     def test_graph_clone_preserves_common_routing_and_collective_state(self):
         layer = self.make_moe_layer(ffn_tp_size=2)

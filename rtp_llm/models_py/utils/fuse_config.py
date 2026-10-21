@@ -7,12 +7,6 @@ unfused baseline path (useful for debugging or precision verification
 against the pre-fuse implementation).
 
 Covered fuse paths:
-  - Qwen3.5 / Qwen3-Next decoder layer fuses
-    (``_fuse_input_norm_quant{,_linear}``, ``_fuse_post_norm_quant{,_moe}``,
-    ``_fuse_norm_quant`` for ``Qwen3NextGatedDeltaNet``)
-  - ``CausalAttention._fuse_sigmoid_mul_quant`` (F8) AND the bf16
-    ``sigmoid_mul_inplace_triton`` path — switch off restores the original
-    ``attn_output * torch.sigmoid(gate)`` PyTorch baseline.
   - ``DenseMLP._fuse_silu_quant`` (F2)
   - ``MlaAttention._fuse_kv_a_norm`` / ``_fuse_q_a_norm_mode``
     (DSA-F1a / F1b)

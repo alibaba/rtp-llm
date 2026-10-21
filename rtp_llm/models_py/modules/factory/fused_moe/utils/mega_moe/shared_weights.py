@@ -7,9 +7,6 @@ import torch
 from rtp_llm.models_py.kernels.cuda.quant_layouts import (
     prepare_fp8_weight_scale_for_deepgemm,
 )
-from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_backend import (
-    MegaMoeBackendConfig,
-)
 
 
 class SharedExpertWeights(NamedTuple):
@@ -19,13 +16,15 @@ class SharedExpertWeights(NamedTuple):
 
 
 def prepare_shared_expert_weights(
-    cfg: MegaMoeBackendConfig,
+    cfg,
     w1: torch.Tensor,
     s1: torch.Tensor,
     w2: torch.Tensor,
     s2: torch.Tensor,
     *,
     fp8_routed: bool,
+    allow_requant: bool = True,
+    expected_num_experts: int | None = None,
 ) -> SharedExpertWeights:
     import deep_gemm
 
@@ -41,6 +40,20 @@ def prepare_shared_expert_weights(
             "shared intermediate size must be a positive multiple of routed "
             f"intermediate size, got {intermediate} and {cfg.moe_inter_dim}"
         )
+    if (
+        expected_num_experts is not None
+        and intermediate != cfg.moe_inter_dim * expected_num_experts
+    ):
+        raise RuntimeError(
+            "MegaMoE shared intermediate size does not match configured expert count: "
+            f"got {intermediate}, expected {cfg.moe_inter_dim * expected_num_experts}"
+        )
+    if not allow_requant:
+        for scale in (s1, s2):
+            if scale.dtype not in (torch.int32, torch.float8_e8m0fnu):
+                raise TypeError(
+                    f"MegaMoESE expected shared UE8M0 scale, got {scale.dtype}"
+                )
     expected_w1, expected_w2 = (2 * intermediate, cfg.dim), (cfg.dim, intermediate)
     if tuple(w1.shape) != expected_w1 or tuple(w2.shape) != expected_w2:
         raise ValueError(

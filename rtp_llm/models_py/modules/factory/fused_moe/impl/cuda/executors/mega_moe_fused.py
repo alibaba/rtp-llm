@@ -1,164 +1,27 @@
-"""GLM-5 MegaMoE: fused routed experts plus FP8 shared expert.
-
-``deep_gemm.fp8_fp4_mega_moe_fused`` keeps the routed experts in FP4
-(per-group, gran_k=32) but consumes the shared expert as **FP8 e4m3 weights
-with 128×128 per-block UE8M0 scale factors**. The FP8 shared-expert weight
-transform + scratch workspace live in :mod:`.mega_fused_buf`.
-"""
+"""Legacy fused routed-FP4/shared-FP8 MegaMoE kernel recipe."""
 
 from __future__ import annotations
-
-import logging
-from typing import Optional
 
 import torch
 
 from rtp_llm.models_py.kernels.cuda.quant_layouts import FP4_BLOCK
-from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_backend import (
-    MegaMoeBackend,
-    MegaMoeBackendConfig,
-    _mega_output_capacity,
-    _sync_cuda_graph_warmup_ranks,
-)
-from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.backend_input_packer import (
-    get_mega_moe_input_packer,
-)
-from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.buffer import (
-    _get_or_create_mega_output as get_or_create_mega_output,
-)
 from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.fused_buffer import (
     get_or_create_mega_buf_fused,
     make_shared_mid_workspace,
     transform_shared_expert_fp8_for_fused,
 )
-from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.jit_warmup import (
-    format_token_counts,
-)
-from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.topology import (
-    validated_world_ep_group,
-)
 
-logger = logging.getLogger(__name__)
-
-_MEGA_MOE_FUSED_JIT_WARMED_KEYS: set[tuple] = set()
-_CUDA_GRAPH_CLONE_FUSED_BUF_CACHE: dict[tuple, object] = {}
+from .mega_moe import MegaMoeExecutor, _mega_output_capacity
 
 
-def _get_or_create_cuda_graph_clone_buf_fused(
-    src_buf, group, cfg: MegaMoeBackendConfig
-):
-    if src_buf is None or group is None:
-        return src_buf
-    key = (
-        id(src_buf),
-        id(group),
-        cfg.n_routed_experts,
-        cfg.max_tokens_per_rank,
-        cfg.n_activated_experts,
-        cfg.dim,
-        cfg.moe_inter_dim,
-    )
-    cached = _CUDA_GRAPH_CLONE_FUSED_BUF_CACHE.get(key)
-    if cached is not None:
-        return cached
+class MegaMoeFusedBackend(MegaMoeExecutor):
+    includes_shared_expert = True
+    _defer_jit_until_shared_weights = True
+    _kernel_name = "fp8_fp4_mega_moe_fused"
+    _buffer_factory = "get_symm_buffer_for_mega_moe_fused"
 
-    import deep_gemm
-
-    cached = deep_gemm.get_symm_buffer_for_mega_moe_fused(
-        group=group,
-        num_experts=cfg.n_routed_experts,
-        num_max_tokens_per_rank=max(cfg.max_tokens_per_rank, 1),
-        num_topk=cfg.n_activated_experts,
-        hidden=cfg.dim,
-        intermediate_hidden=cfg.moe_inter_dim,
-        use_fp8_dispatch=True,
-        activation="swiglu",
-    )
-    _CUDA_GRAPH_CLONE_FUSED_BUF_CACHE[key] = cached
-    logger.info(
-        "[GLM5 MegaMoE Fused] allocated CUDA graph clone symm buffer: layer=%d "
-        "max_tokens_per_rank=%d hidden=%d",
-        cfg.layer_id,
-        cfg.max_tokens_per_rank,
-        cfg.dim,
-    )
-    return cached
-
-
-class MegaMoeFusedBackend(MegaMoeBackend):
-    """GLM-5 MegaMoE wrapper for ``fp8_fp4_mega_moe_fused``."""
-
-    def __init__(self, cfg: MegaMoeBackendConfig):
-        super().__init__(cfg)
-        self._shared_l1_w: Optional[torch.Tensor] = None
-        self._shared_l1_sf: Optional[torch.Tensor] = None
-        self._shared_l2_w: Optional[torch.Tensor] = None
-        self._shared_l2_sf: Optional[torch.Tensor] = None
-        self._shared_mid_fp8: Optional[torch.Tensor] = None
-        self._shared_mid_sf: Optional[torch.Tensor] = None
-
-    def _setup_buffer_and_warmup(self) -> None:
-        """Allocate the fused symmetric-memory buffer (``SymmBufferFused``).
-
-        ``fp8_fp4_mega_moe_fused`` needs its own buffer type, distinct from the
-        routed ``fp8_fp4_mega_moe`` buffer the base class allocates. The JIT
-        warmup is deferred to :meth:`maybe_warmup_fused_shared_jit_once` (it must
-        run after the shared-expert weights are set up, since the fused kernel
-        consumes both routed and shared weights together).
-        """
-        import torch.distributed as dist
-
-        cfg = self.cfg
-        device = self._mega_l1_w.device
-
-        assert (
-            dist.is_initialized()
-        ), "GLM5 MegaMoE Fused requires torch.distributed initialised"
-        group = validated_world_ep_group(self.cfg, dist)
-        self._mega_group = group
-
-        self._mega_buf = get_or_create_mega_buf_fused(
-            group=group,
-            num_experts=cfg.n_routed_experts,
-            num_max_tokens_per_rank=max(cfg.max_tokens_per_rank, 1),
-            num_topk=cfg.n_activated_experts,
-            hidden=cfg.dim,
-            intermediate_hidden=cfg.moe_inter_dim,
-            use_fp8_dispatch=True,
-            activation="swiglu",
-        )
-        self._mega_y = get_or_create_mega_output(
-            _mega_output_capacity(self._mega_buf, cfg.max_tokens_per_rank),
-            cfg.dim,
-            torch.bfloat16,
-            device,
-        )
-        self._input_packer = get_mega_moe_input_packer()
-
-    def _clone_mega_buffer(self):
-        return _get_or_create_cuda_graph_clone_buf_fused(
-            self._mega_buf, self._mega_group, self.cfg
-        )
-
-    def clone_for_cuda_graph(
-        self, *, share_mega_buf: bool = False
-    ) -> "MegaMoeFusedBackend":
-        clone = super().clone_for_cuda_graph(share_mega_buf=share_mega_buf)
-        clone._shared_l1_w = self._shared_l1_w
-        clone._shared_l1_sf = self._shared_l1_sf
-        clone._shared_l2_w = self._shared_l2_w
-        clone._shared_l2_sf = self._shared_l2_sf
-        clone._shared_mid_fp8 = (
-            torch.empty_like(self._shared_mid_fp8)
-            if self._shared_mid_fp8 is not None
-            else None
-        )
-        clone._shared_mid_sf = (
-            torch.empty_like(self._shared_mid_sf)
-            if self._shared_mid_sf is not None
-            else None
-        )
-        return clone
+    def _allocate_mega_buffer(self):
+        return get_or_create_mega_buf_fused(**self._buffer_kwargs())
 
     def setup_shared_expert_from_fp8(
         self,
@@ -208,148 +71,17 @@ class MegaMoeFusedBackend(MegaMoeBackend):
         ):
             raise RuntimeError("shared expert FP8 weights/workspace are not set up")
 
-    def maybe_warmup_fused_shared_jit_once(self) -> None:
-        """Compile fused routed+shared MegaMoE JIT buckets once per shape."""
-        if torch.cuda.is_current_stream_capturing():
+    def _validate_capacity(self, tokens):
+        super()._validate_capacity(tokens)
+        if tokens > self._shared_mid_fp8.size(0):
             raise RuntimeError(
-                "MegaMoE fused JIT warmup must not run inside CUDA graph capture"
-            )
-        self._check_shared_expert_ready()
-
-        import deep_gemm
-        import torch.distributed as dist
-
-        cfg = self.cfg
-        num_sms = int(deep_gemm.get_num_sms())
-        token_counts = self._resolve_jit_warmup_token_counts(num_sms)
-        if not token_counts:
-            return
-
-        warmup_key = (
-            type(self).__name__,
-            id(self._mega_group),
-            self._num_shared_experts,
-            str(self._mega_l1_w.device),
-            "fused_shared",
-            cfg.ep_size,
-            cfg.n_routed_experts,
-            cfg.n_local_experts,
-            cfg.n_activated_experts,
-            cfg.dim,
-            cfg.moe_inter_dim,
-            int(cfg.max_tokens_per_rank),
-            cfg.activation_clamp,
-            cfg.fast_math,
-            num_sms,
-            tuple(token_counts),
-        )
-        if warmup_key in _MEGA_MOE_FUSED_JIT_WARMED_KEYS:
-            return
-
-        rank = dist.get_rank() if dist.is_initialized() else 0
-        if rank == 0:
-            logger.info(
-                "[GLM5 MegaMoE] fused JIT warmup start: layer=%d tokens=[%s] "
-                "max_tokens_per_rank=%d ep=%d experts=%d topk=%d hidden=%d "
-                "intermediate=%d num_sms=%d",
-                cfg.layer_id,
-                format_token_counts(token_counts),
-                cfg.max_tokens_per_rank,
-                cfg.ep_size,
-                cfg.n_routed_experts,
-                cfg.n_activated_experts,
-                cfg.dim,
-                cfg.moe_inter_dim,
-                num_sms,
-            )
-        self._warmup_fused_shared_jit(token_counts)
-        _MEGA_MOE_FUSED_JIT_WARMED_KEYS.add(warmup_key)
-        if rank == 0:
-            logger.info(
-                "[GLM5 MegaMoE] fused JIT warmup done: layer=%d tokens=[%s]",
-                cfg.layer_id,
-                format_token_counts(token_counts),
+                f"MegaMoE shared workspace rows={self._shared_mid_fp8.size(0)} "
+                f"is smaller than input tokens={tokens}"
             )
 
-    @torch.inference_mode()
-    def _warmup_fused_shared_jit(self, token_counts: list[int]) -> None:
-        """Compile fused routed+shared MegaMoE JIT buckets with synthetic tokens."""
-        import torch.distributed as dist
-
-        cfg = self.cfg
-        device = self._mega_l1_w.device
-        max_tokens = max(token_counts)
-        x = torch.zeros((max_tokens, cfg.dim), dtype=torch.bfloat16, device=device)
-        weights = torch.zeros(
-            (max_tokens, cfg.n_activated_experts),
-            dtype=torch.float32,
-            device=device,
-        )
-        local_expert_ids = cfg.local_expert_start + torch.arange(
-            cfg.n_activated_experts, dtype=torch.long, device=device
-        ) % max(cfg.n_local_experts, 1)
-        indices = local_expert_ids.view(1, -1).expand(max_tokens, -1).contiguous()
-
-        for token_count in token_counts:
-            dist.barrier()
-            self.forward_with_shared_expert(
-                x[:token_count],
-                weights[:token_count],
-                indices[:token_count],
-            )
-            torch.cuda.synchronize(device)
-        dist.barrier()
-
-    def forward_with_shared_expert(
-        self,
-        x: torch.Tensor,  # [T, D] BF16 local-rank tokens
-        weights: torch.Tensor,  # [T, topk] FP32 router weights
-        indices: torch.Tensor,  # [T, topk] int64 GLOBAL expert IDs
-    ) -> torch.Tensor:
-        """Run fused routed MegaMoE plus the FP8 shared expert in one kernel."""
-        return self._forward_impl(x, weights, indices, inputs_prepacked=False)
-
-    def _forward_impl(
-        self,
-        x: torch.Tensor,
-        weights: torch.Tensor | None,
-        indices: torch.Tensor | None,
-        *,
-        inputs_prepacked: bool,
-    ) -> torch.Tensor:
+    def _run_kernel(self, y, tokens):
         import deep_gemm
 
-        self._check_shared_expert_ready()
-
-        T = x.size(0)
-        buf = self._mega_buf
-        if T > buf.num_max_tokens_per_rank:
-            raise RuntimeError(
-                f"GLM5 MegaMoE input tokens={T} exceeds num_max_tokens_per_rank="
-                f"{buf.num_max_tokens_per_rank}. Raise the budget at startup."
-            )
-        if T > self._mega_y.size(0):
-            raise RuntimeError(
-                f"GLM5 MegaMoE output buffer rows={self._mega_y.size(0)} is smaller "
-                f"than input tokens={T}. This indicates inconsistent aligned "
-                "MegaMoE buffer sizing."
-            )
-        if T > self._shared_mid_fp8.size(0):
-            raise RuntimeError(
-                f"GLM5 MegaMoE shared workspace rows={self._shared_mid_fp8.size(0)} "
-                f"is smaller than input tokens={T}."
-            )
-
-        if not inputs_prepacked:
-            if weights is None or indices is None:
-                raise ValueError("weights and indices are required before packing")
-            self._input_packer.pack(x, weights, indices, buf, T)
-        _sync_cuda_graph_warmup_ranks(
-            f"glm5.mega_moe_fused.layer{self.cfg.layer_id}.before_deepgemm",
-            x.device,
-        )
-
-        y = self._mega_y[:T]
         deep_gemm.fp8_fp4_mega_moe_fused(
             y,
             self._shared_l1_w,
@@ -360,10 +92,9 @@ class MegaMoeFusedBackend(MegaMoeBackend):
             self._shared_mid_sf,
             (self._mega_l1_w, self._mega_l1_sf),
             (self._mega_l2_w, self._mega_l2_sf),
-            buf,
+            self._mega_buf,
             recipe=(1, 1, FP4_BLOCK),
             activation="swiglu",
-            activation_clamp=self.cfg.activation_clamp,
-            fast_math=self.cfg.fast_math,
+            activation_clamp=self._activation_clamp,
+            fast_math=self._fast_math,
         )
-        return y

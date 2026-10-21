@@ -52,21 +52,51 @@ class _CudaFp8Fp4Strategy(MoeStrategy):
         )
 
 
-class CudaMegaMoeSEStrategy(_CudaFp8Fp4Strategy):
-    strategy_name = "mega_moe_se"
+class CudaMegaMoeStrategy(_CudaFp8Fp4Strategy):
+    """One routed executor for native FP4 and prepared GLM5 checkpoints."""
+
+    supported_moe_quant_method = (None, "FP8_FP4", "FP8_PER_BLOCK", "modelopt_fp4")
+    strategy_name = "mega_moe"
     requires_ep = True
+    requires_policy = False
+
+    @classmethod
+    def check_conditions(cls, checker, config):
+        policy = getattr(config, "mega_moe_policy", None)
+        if policy is None:
+            if not checker.check(not cls.requires_policy):
+                return
+            super().check_conditions(checker, config)
+            return
+        checker.check(config.moe_strategy == cls.strategy_name)
+        checker.check(not config.has_redundant_experts)
+        checker.check(config.ep_size >= 1)
+        if cls.requires_shared:
+            checker.check(config.n_shared_experts > 0)
+            checker.check(not config.has_shared_expert_gate)
+            checker.check(config.parallelism_config.get_ffn_tp_size() == 1)
+
+    @classmethod
+    def get_executor_class(cls) -> Type:
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe import (
+            MegaMoeExecutor,
+        )
+
+        return MegaMoeExecutor
+
+
+class CudaMegaMoeSEStrategy(CudaMegaMoeStrategy):
+    strategy_name = "mega_moe_se"
     requires_shared = True
 
     @classmethod
-    def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
+    def check_conditions(cls, checker, config):
         super().check_conditions(checker, config)
         if config.moe_strategy == "auto":
             from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_se import (
                 _mega_moe_se_available,
             )
 
-            # Preserve automatic selection: without fused shared experts,
-            # the ordinary Mega strategy owns routed + separate shared work.
             checker.check(_mega_moe_se_available())
 
     @classmethod
@@ -77,29 +107,50 @@ class CudaMegaMoeSEStrategy(_CudaFp8Fp4Strategy):
         )
 
         if not _mega_moe_se_available():
-            from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe import (
-                MegaMoeExecutor,
-            )
-
-            # Current upstream Mega removed the legacy shared_recipe API.
-            # Keep explicit mega_moe_se configurations usable with the same
-            # shared weights/quantization: includes_shared_expert=False makes
-            # Fp8Fp4MoELayer build its existing standalone shared executor.
-            return MegaMoeExecutor
+            # Preserve main's fallback when DeepGEMM has no shared_recipe API:
+            # the model layer evaluates the shared expert independently.
+            return CudaMegaMoeStrategy.get_executor_class()
         return MegaMoeSEExecutor
 
 
-class CudaMegaMoeStrategy(_CudaFp8Fp4Strategy):
-    strategy_name = "mega_moe"
-    requires_ep = True
+class CudaMegaMoeFp8Strategy(CudaMegaMoeStrategy):
+    strategy_name = "mega_moe_fp8"
+    requires_policy = True
 
     @classmethod
     def get_executor_class(cls) -> Type:
-        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe import (
-            MegaMoeExecutor,
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_fp8 import (
+            MegaMoeFp8Backend,
         )
 
-        return MegaMoeExecutor
+        return MegaMoeFp8Backend
+
+
+class CudaMegaMoeFp8SEStrategy(CudaMegaMoeFp8Strategy):
+    strategy_name = "mega_moe_fp8_se"
+    requires_shared = True
+
+    @classmethod
+    def get_executor_class(cls) -> Type:
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_fp8_se import (
+            MegaMoeFp8SharedBackend,
+        )
+
+        return MegaMoeFp8SharedBackend
+
+
+class CudaMegaMoeFusedStrategy(CudaMegaMoeStrategy):
+    strategy_name = "mega_moe_fused"
+    requires_policy = True
+    requires_shared = True
+
+    @classmethod
+    def get_executor_class(cls) -> Type:
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_fused import (
+            MegaMoeFusedBackend,
+        )
+
+        return MegaMoeFusedBackend
 
 
 class CudaGroupedFp4Strategy(_CudaFp8Fp4Strategy):

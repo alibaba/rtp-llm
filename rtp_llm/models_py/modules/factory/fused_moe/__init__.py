@@ -85,6 +85,9 @@ else:
         CudaFp8PerTensorNoDPStrategy,
         CudaGroupedFp4Strategy,
         CudaLocalLoopStrategy,
+        CudaMegaMoeFp8SEStrategy,
+        CudaMegaMoeFp8Strategy,
+        CudaMegaMoeFusedStrategy,
         CudaMegaMoeSEStrategy,
         CudaMegaMoeStrategy,
         CudaNoQuantCppStrategy,
@@ -98,14 +101,11 @@ else:
     registry = StrategyRegistry()
     # Registration order is the public ``auto`` preference for eligible
     # FP8/FP4 EP models. ``mega_moe`` remains an explicit rollback path.
-    from rtp_llm.config.mega_moe import MEGA_MOE_STRATEGIES
-
-    from .impl.cuda.strategy.prepared_mega_moe import CudaPreparedMegaMoeStrategy
-
-    for strategy_name in sorted(MEGA_MOE_STRATEGIES):
-        registry.register(CudaPreparedMegaMoeStrategy(strategy_name))
     registry.register(CudaMegaMoeSEStrategy())
     registry.register(CudaMegaMoeStrategy())
+    registry.register(CudaMegaMoeFp8Strategy())
+    registry.register(CudaMegaMoeFp8SEStrategy())
+    registry.register(CudaMegaMoeFusedStrategy())
     registry.register(CudaGroupedFp4Strategy())
     registry.register(CudaLocalLoopStrategy())
     registry.register(CudaFp8PerTensorEpLowLatencyStrategy())

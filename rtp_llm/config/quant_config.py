@@ -409,7 +409,6 @@ class QuantizationConfig(ABC):
                     }
                 )
 
-
         result = cls.from_config(
             {
                 "bits": bits,
@@ -1083,10 +1082,6 @@ DEFAULT_MODELOPT_FP4_HYBRID_FP8_PER_BLOCK_QUANT_CONFIG = ModelOptFp4Config(
 
 DEFAULT_W4A8_INT4_PER_CHANNEL_QUANT_CONFIG = W4a8Int4PerChannelQuantConfig(
     bits=4, group_size=128, is_quanted=False
-)
-
-DEFAULT_COMPRESSED_W4A8_INT4_PER_CHANNEL_QUANT_CONFIG = (
-    CompressedW4A8Int4PerChannelQuantConfig(bits=4, group_size=32, is_quanted=True)
 )
 
 DEFAULT_COMPRESSED_W4A8_INT4_PER_CHANNEL_QUANT_CONFIG = (
