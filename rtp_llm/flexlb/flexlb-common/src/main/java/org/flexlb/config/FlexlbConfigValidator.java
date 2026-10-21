@@ -25,7 +25,7 @@ public final class FlexlbConfigValidator {
         if (scheduler.isObject()) {
             String type = effectiveDocument.path("scheduler").path("type").asText("QUEUE");
             if ("DIRECT".equals(type)) {
-                rejectFieldsExcept(scheduler, "scheduler", "type");
+                rejectFieldsExcept(scheduler, "scheduler", "type", "nettyMemoryReporter");
             } else if ("QUEUE".equals(type)) {
                 validateOrderingShape(scheduler.path("ordering"),
                         effectiveDocument.path("scheduler").path("ordering"));
@@ -128,6 +128,7 @@ public final class FlexlbConfigValidator {
                 "schemaVersion", "must equal " + FlexlbConfig.CURRENT_SCHEMA_VERSION);
         require(config.getScheduler() != null, "scheduler", "is required");
         require(config.getScheduler().getType() != null, "scheduler.type", "is required");
+        validateNettyMemoryReporter(config.getScheduler().getNettyMemoryReporter());
         require(config.getDispatcher() != null, "dispatcher", "is required");
         require(config.getRouter() != null, "router", "is required");
         require(config.getWorkerRegistry() != null, "workerRegistry", "is required");
@@ -162,6 +163,19 @@ public final class FlexlbConfigValidator {
         positive(grpc.getShutdownQuietPeriodMs(), "grpcServer.shutdownQuietPeriodMs");
         require(grpc.getExecutorMaxSize() >= grpc.getExecutorCoreSize(),
                 "grpcServer.executorMaxSize", "must be at least executorCoreSize");
+    }
+
+    private static void validateNettyMemoryReporter(NettyMemoryReporterConfig memory) {
+        String path = "scheduler.nettyMemoryReporter";
+        require(memory != null, path, "is required");
+        require(memory.getIntervalMs() >= 1_000L, path + ".intervalMs", "must be at least 1000 ms");
+        var capture = memory.getAutoCapture();
+        require(capture != null, path + ".autoCapture", "is required");
+        positive(capture.getThresholdBytes(), path + ".autoCapture.thresholdBytes");
+        require(capture.getCooldownMs() >= 1_000L,
+                path + ".autoCapture.cooldownMs", "must be at least 1000 ms");
+        require(!capture.isEnabled() || memory.isEnabled(),
+                path + ".autoCapture.enabled", "requires nettyMemoryReporter.enabled=true");
     }
 
     private static void validateQueue(SchedulerConfig queue) {
