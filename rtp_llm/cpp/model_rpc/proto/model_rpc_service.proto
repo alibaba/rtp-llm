@@ -881,6 +881,10 @@ message P2PConnectorBroadcastTpRequestPB {
     // plans diverged (config drift) fail as "no matching recv task within deadline" rather
     // than silently copying into the wrong byte range.
     uint64 plan_digest = 12;
+    // READ execution budget at broadcast submission. The receiver reanchors this
+    // duration to its own clock; the two source deadlines remain identity/validation
+    // fields and must not be compared to the receiver's wall clock.
+    int64 read_timeout_ms = 13;
 }
 
 // GetPeerInfo: Decode queries the selected Prefill for its TP/CP layout before recv registration.

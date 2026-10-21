@@ -610,6 +610,7 @@ TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsError_WhenReadRequestHasMismatch
     p2p_request->set_request_id(6001);
     p2p_request->set_unique_key("malformed-read");
     p2p_request->set_deadline_ms(currentTimeMs() + 5000);
+    p2p_request->set_read_timeout_ms(5000);
     p2p_request->set_request_deadline_ms(p2p_request->deadline_ms());
 
     auto* route = p2p_request->add_routes();
@@ -638,6 +639,7 @@ TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsError_WhenReadRouteHasNoLayerBlo
     p2p_request->set_type(P2PConnectorBroadcastType::READ);
     p2p_request->set_unique_key("empty-route-read");
     p2p_request->set_deadline_ms(currentTimeMs() + 5000);
+    p2p_request->set_read_timeout_ms(5000);
     p2p_request->set_request_deadline_ms(p2p_request->deadline_ms());
     // 「routes 为空」是权威的"本 worker 无任务"信号（见
     // ExecuteFunction_ReturnsOk_WhenCpEmptyProjectionIsExplicit）；但声明了 route 却不带
@@ -663,6 +665,7 @@ TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsOk_WhenCpEmptyProjectionIsExplic
     p2p_request->set_type(P2PConnectorBroadcastType::READ);
     p2p_request->set_unique_key("explicit-empty-read");
     p2p_request->set_deadline_ms(currentTimeMs() + 5000);
+    p2p_request->set_read_timeout_ms(5000);
     p2p_request->set_request_deadline_ms(p2p_request->deadline_ms());
 
     FunctionResponsePB response;
@@ -670,7 +673,7 @@ TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsOk_WhenCpEmptyProjectionIsExplic
     EXPECT_EQ(response.p2p_response().error_code(), ErrorCodePB::NONE_ERROR);
 }
 
-TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsError_WhenCpEmptyProjectionIsExpired) {
+TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsError_WhenCpEmptyProjectionHasNoBudget) {
     auto cp_config                  = createDecodeConfig();
     cp_config.worker_config.cp_size = 2;
     auto cp_connector = std::make_unique<P2PConnector>(cp_config, mock_layer_block_converter_, nullptr);
@@ -680,6 +683,7 @@ TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsError_WhenCpEmptyProjectionIsExp
     auto*             p2p_request = request.mutable_p2p_request();
     p2p_request->set_type(P2PConnectorBroadcastType::READ);
     p2p_request->set_unique_key("expired-empty-read");
+    p2p_request->set_read_timeout_ms(0);
     p2p_request->set_deadline_ms(currentTimeMs() - 1);
     p2p_request->set_request_deadline_ms(p2p_request->deadline_ms());
 
@@ -705,6 +709,7 @@ TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsError_WhenReadRequestHasInvalidB
     p2p_request->set_type(P2PConnectorBroadcastType::READ);
     p2p_request->set_unique_key("invalid-block-read");
     p2p_request->set_deadline_ms(currentTimeMs() + 5000);
+    p2p_request->set_read_timeout_ms(5000);
     p2p_request->set_request_deadline_ms(p2p_request->deadline_ms());
     auto* route = p2p_request->add_routes();
     route->set_route_id(0);
@@ -741,6 +746,7 @@ TEST_F(P2PConnectorTest, ExecuteFunction_RejectsMismatchedRouteTagBeforeWorkerLo
         read->set_type(P2PConnectorBroadcastType::READ);
         read->set_unique_key("mismatched-route-tag");
         read->set_deadline_ms(currentTimeMs() + 5000);
+        read->set_read_timeout_ms(5000);
         read->set_request_deadline_ms(read->deadline_ms());
         auto* route = read->add_routes();
         route->set_route_id(0);
@@ -777,6 +783,7 @@ TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsError_WhenReadRequestRepeatsLaye
     p2p_request->set_type(P2PConnectorBroadcastType::READ);
     p2p_request->set_unique_key("duplicate-layer-tag-read");
     p2p_request->set_deadline_ms(currentTimeMs() + 5000);
+    p2p_request->set_read_timeout_ms(5000);
     p2p_request->set_request_deadline_ms(p2p_request->deadline_ms());
     auto* route = p2p_request->add_routes();
     route->set_route_id(0);
@@ -1123,4 +1130,46 @@ TEST_F(P2PConnectorTest, HandleRead_PreservesZeroFirstToken) {
     EXPECT_EQ(response.payload().first_generate_token_id(), 0);
 }
 
+}  // namespace rtp_llm
+
+namespace rtp_llm {
+TEST_F(P2PConnectorTest, ReadBroadcastUsesBudgetDespiteSourceClockSkew) {
+    auto connector = std::make_unique<P2PConnector>(createDecodeConfig(), mock_layer_block_converter_, nullptr);
+    ASSERT_TRUE(connector->init());
+    for (const int64_t skew_ms : {-3600000LL, 3600000LL}) {
+        FunctionRequestPB request;
+        auto* read = request.mutable_p2p_request();
+        read->set_type(P2PConnectorBroadcastType::READ);
+        read->set_unique_key("clock-skew-empty-projection");
+        read->set_deadline_ms(currentTimeMs() + skew_ms + 5000);
+        read->set_request_deadline_ms(read->deadline_ms() + 1000);
+        read->set_read_timeout_ms(5000);
+        FunctionResponsePB response;
+        EXPECT_TRUE(connector->executeFunction(request, response));
+        EXPECT_EQ(response.p2p_response().error_code(), ErrorCodePB::NONE_ERROR);
+        // The source request identity remains unchanged by execution.
+        EXPECT_EQ(read->request_deadline_ms(), read->deadline_ms() + 1000);
+    }
+}
+
+TEST_F(P2PConnectorTest, ReadBroadcastRejectsInvalidBudgetAndSourceOrdering) {
+    auto connector = std::make_unique<P2PConnector>(createDecodeConfig(), mock_layer_block_converter_, nullptr);
+    ASSERT_TRUE(connector->init());
+    FunctionRequestPB request;
+    auto* read = request.mutable_p2p_request();
+    read->set_type(P2PConnectorBroadcastType::READ);
+    read->set_unique_key("invalid-read-budget");
+    read->set_deadline_ms(currentTimeMs() + 5000);
+    read->set_request_deadline_ms(read->deadline_ms());
+    for (const int64_t budget : {0LL, -1LL, 2147483648LL}) {
+        read->set_read_timeout_ms(budget);
+        FunctionResponsePB response;
+        EXPECT_FALSE(connector->executeFunction(request, response));
+        EXPECT_NE(response.p2p_response().error_code(), ErrorCodePB::NONE_ERROR);
+    }
+    read->set_read_timeout_ms(5000);
+    read->set_request_deadline_ms(read->deadline_ms() - 1);
+    FunctionResponsePB response;
+    EXPECT_FALSE(connector->executeFunction(request, response));
+}
 }  // namespace rtp_llm

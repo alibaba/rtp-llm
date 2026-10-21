@@ -100,6 +100,9 @@ TEST_F(P2PBroadcastClientTest, Broadcast_ReturnNotNull_AllRequestsSuccess) {
         EXPECT_EQ(servers_[i]->service()->getBroadcastTpCallCount(), 1);
         EXPECT_EQ(servers_[i]->service()->getBroadcastTpCancelCallCount(), 0);
         EXPECT_EQ(servers_[i]->service()->getLastBroadcastTpRequest().deadline_ms(), deadline_ms);
+        const auto budget_ms = servers_[i]->service()->getLastBroadcastTpRequest().read_timeout_ms();
+        EXPECT_GT(budget_ms, 0);
+        EXPECT_LE(budget_ms, 5000);
         EXPECT_EQ(servers_[i]->service()->getLastBroadcastTpRequest().request_deadline_ms(), request_deadline_ms);
         EXPECT_EQ(servers_[i]->service()->getLastBroadcastTpRequest().peer_workers_size(), 2);
     }

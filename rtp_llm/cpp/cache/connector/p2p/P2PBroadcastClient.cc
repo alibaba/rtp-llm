@@ -74,6 +74,16 @@ P2PBroadcastClient::broadcastRequests(std::vector<FunctionRequestPB> requests,
         return nullptr;
     }
 
+    // Stamp the remaining budget immediately before submission, after route construction.
+    // The gRPC deadline bounds the call on this machine; workers must not interpret
+    // this machine's absolute timestamp using their own wall clock.
+    for (auto& request : requests) {
+        auto* p2p_request = request.mutable_p2p_request();
+        if (p2p_request->type() == P2PConnectorBroadcastType::READ) {
+            p2p_request->set_read_timeout_ms(timeout_ms);
+        }
+    }
+
     // Define the RPC call lambda for ExecuteFunction
     auto rpc_call = [deadline_ms](std::shared_ptr<RpcService::Stub>&    stub,
                        std::shared_ptr<grpc::ClientContext>& client_context,
