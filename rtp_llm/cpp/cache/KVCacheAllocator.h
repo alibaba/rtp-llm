@@ -93,7 +93,8 @@ public:
 
     // Forward consumes the copied KV on the current device stream. Implementations
     // may enqueue asynchronously; the legacy blockBatchCopy APIs keep their semantics.
-    virtual void blockBatchCopyForForward(const torch::Tensor& copy_mapping) {
+    virtual void blockBatchCopyForForward(const torch::Tensor& copy_mapping,
+                                          const torch::Tensor& valid_token_lengths = torch::Tensor()) {
         blockBatchCopy(copy_mapping);
     }
 

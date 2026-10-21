@@ -49,6 +49,8 @@ struct MHAKVCacheSpec: public KVCacheSpec {
         const uint32_t local_kv_heads = (kv % tp == 0) ? kv / tp : kv / std::gcd(kv, tp);
 
         spec->per_token_k_elems       = static_cast<size_t>(local_kv_heads) * attn.size_per_head;
+        spec->local_kv_heads_         = local_kv_heads;
+        spec->head_dim_               = attn.size_per_head;
         if (spec->dtype_ == DataType::TYPE_INT8 || spec->dtype_ == DataType::TYPE_FP8_E4M3) {
             spec->per_token_k_scale_bytes = static_cast<size_t>(local_kv_heads) * sizeof(float);
         }
@@ -57,6 +59,15 @@ struct MHAKVCacheSpec: public KVCacheSpec {
 
     size_t block_size() const override {
         return k_block_size() + v_block_size();
+    }
+
+    // Zero denotes an unspecified layout (for example a default-constructed
+    // test spec), which cannot safely support token-range KV copies.
+    uint32_t localKvHeads() const {
+        return local_kv_heads_;
+    }
+    uint32_t headDim() const {
+        return head_dim_;
     }
 
     size_t k_block_size() const override {
@@ -112,6 +123,8 @@ private:
 
     size_t per_token_k_elems       = 0;
     size_t per_token_k_scale_bytes = 0;
+    uint32_t local_kv_heads_         = 0;
+    uint32_t head_dim_               = 0;
 };
 
 }  // namespace rtp_llm

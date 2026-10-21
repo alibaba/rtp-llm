@@ -59,6 +59,7 @@ struct GptModelInputs {
 
     torch::Tensor kv_cache_group_types;     // [group_num], int32, Convention: 0 -> LINEAR, 1 -> FULL.
     torch::Tensor kv_cache_update_mapping;  // [block_copy_num, 3]: group_id, src block, dst block
+    torch::Tensor kv_cache_copy_token_lengths;  // optional CPU int32 [block_copy_num]; 0 means whole block
 
     std::optional<std::vector<torch::Tensor>> multimodal_features;  // all features in gathered stream stored here
     torch::Tensor text_tokens_mask;  // text part in multimodal input tokens [cumulated_seq_len]

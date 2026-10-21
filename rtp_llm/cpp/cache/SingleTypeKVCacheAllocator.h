@@ -27,7 +27,8 @@ public:
                                                     const CacheKeysType&   cache_keys,
                                                     bool                   is_connector = false) override;
     GroupedCacheLayerLayout          allLayerCacheBase() const override;
-    void blockBatchCopyForForward(const torch::Tensor& copy_mapping) override;
+    void                             blockBatchCopyForForward(const torch::Tensor& copy_mapping,
+                                                              const torch::Tensor& valid_token_lengths = torch::Tensor()) override;
 
     bool updateKVBlock(const BatchKVCacheResourcePtr&  batch_kv_cache_resource,
                        const std::vector<int>&         block_src_batch,

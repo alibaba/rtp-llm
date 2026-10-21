@@ -138,6 +138,68 @@ TEST_F(StreamCacheResourceTest, testWarmUpFakeInitUsesTaggedTopology) {
     EXPECT_EQ(resource.kvCache().blocks(0, "__warmup__").size(), 2);
 }
 
+TEST_F(StreamCacheResourceTest, BeamForkCapturesWrittenKvLengthBeforeNextDecode) {
+    auto cache     = test::makeSimpleMhaCacheConfig(1, 96, 16, DataType::TYPE_FP16, 2, 8);
+    cache_manager_ = std::make_shared<KVCacheManager>(cache);
+    ASSERT_TRUE(cache_manager_->init());
+    ResourceContext resources;
+    resources.cache_manager = cache_manager_;
+    resources.reuse_cache   = false;
+    ModelConfig model;
+    model.max_seq_len = 1024;
+    model.vocab_size = model.input_vocab_size  = 32;
+    model.num_layers                           = 1;
+    model.attn_config.tokens_per_block         = 16;
+    auto query                                 = std::make_shared<GenerateInput>();
+    query->input_ids                           = torch::ones({500}, torch::kInt32);
+    query->generate_config                     = std::make_shared<GenerateConfig>();
+    query->generate_config->variable_num_beams = {2, 4, 4};
+    query->generate_config->max_new_tokens     = 20;
+    auto stream = std::make_shared<NormalGenerateStream>(query, model, RuntimeConfig{}, resources, nullptr);
+    ASSERT_FALSE(stream->hasError());
+    stream->generate_status_->status = StreamState::RUNNING;
+    ASSERT_TRUE(stream->initKVBlock().ok());
+    auto&      resource      = stream->streamCacheResource();
+    const auto original_tail = resource.kvCache().blocks(0, 0).back();
+
+    // updateOutput has appended the first selected token. Its KV is not written
+    // yet: a 501-token sequence owns exactly 500 cached tokens at this point.
+    stream->setSeqLength(501);
+    ASSERT_EQ(stream->seqLength() - 1, 500);
+    ASSERT_EQ(stream->currentBatchSize(), 2);
+    ASSERT_TRUE(stream->updateKvCacheBlocks(torch::tensor({0, 0}, torch::kInt32)));
+    ASSERT_EQ(resource.getKVBlockUpdateMapping().size(), 1);
+    EXPECT_EQ(resource.getKVBlockUpdateMapping()[0].src, original_tail);
+    EXPECT_EQ(resource.getKVBlockUpdateMapping()[0].valid_tokens, 4);
+    const auto parent0 = resource.kvCache().blocks(0, 0).back();
+    const auto parent1 = resource.kvCache().blocks(1, 0).back();
+
+    // Decode writes token 500, sampling appends token 501, then forks parents in
+    // a different order. Each copy remains bound to its source's five live tokens.
+    stream->setSeqLength(502);
+    ASSERT_EQ(stream->seqLength() - 1, 501);
+    ASSERT_EQ(stream->currentBatchSize(), 4);
+    ASSERT_TRUE(stream->updateKvCacheBlocks(torch::tensor({1, 0, 1, 0}, torch::kInt32)));
+    const auto& copies = resource.getKVBlockUpdateMapping();
+    ASSERT_EQ(copies.size(), 2);
+    EXPECT_EQ(copies[0].src, parent1);
+    EXPECT_EQ(copies[1].src, parent0);
+    EXPECT_EQ(copies[0].valid_tokens, 5);
+    EXPECT_EQ(copies[1].valid_tokens, 5);
+    EXPECT_EQ(copies[0].dst, resource.kvCache().blocks(0, 0).back());
+    EXPECT_EQ(copies[1].dst, resource.kvCache().blocks(1, 0).back());
+    auto frozen = copies;
+
+    // At an exact page boundary the historical last page stays shared. The next
+    // writable page is allocated separately; do not encode "zero live" as a copy.
+    stream->setSeqLength(513);
+    ASSERT_EQ(stream->seqLength() - 1, 512);
+    ASSERT_TRUE(stream->updateKvCacheBlocks(torch::tensor({0, 0, 1, 1}, torch::kInt32)));
+    EXPECT_TRUE(resource.getKVBlockUpdateMapping().empty());
+    EXPECT_EQ(frozen[0].valid_tokens, 5);
+    EXPECT_EQ(frozen[1].valid_tokens, 5);
+}
+
 TEST_F(StreamCacheResourceTest, testAllocateResource) {
     prepareResource();
 

@@ -97,6 +97,7 @@ enum GptModelInputIndex : size_t {
     // letting non-root proceed would either deadlock the next collective or produce
     // silently-wrong output.
     inputEmbeddingsRejected,
+    kvCacheCopyTokenLengths,
     gptModelInputLength,
 };
 

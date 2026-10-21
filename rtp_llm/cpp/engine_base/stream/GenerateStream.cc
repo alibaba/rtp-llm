@@ -1182,9 +1182,11 @@ bool GenerateStream::updateKvCacheBlocks(const torch::Tensor& src_batch_indices)
 
     // NOTE: `1` is used here as updateKvCacheBlocks is called after updateOutput,
     // in which the seqLength has already increased
-    bool is_seq_len_misaligned = seqLength() % seqSizePerBlock() != 1;
+    const int  cached_seq_len        = seqLength() - 1;
+    const int  valid_tail_tokens     = cached_seq_len % seqSizePerBlock();
+    const bool is_seq_len_misaligned = valid_tail_tokens != 0;
 
-    return stream_cache_resource_->updateKVBlock(block_src_batch, is_seq_len_misaligned);
+    return stream_cache_resource_->updateKVBlock(block_src_batch, is_seq_len_misaligned, valid_tail_tokens);
 }
 
 std::optional<ErrorInfo> GenerateStream::updateNormalLogitProcessorStatus(const StreamUpdateInfo& update_info) {

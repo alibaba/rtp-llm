@@ -37,6 +37,7 @@ struct GatherModelInputContext {
     int*              lm_output_indexes;
     int*              combo_position_ids;
     GroupBlockIdPair* kv_cache_update_mapping;
+    int32_t*          kv_cache_copy_token_lengths;
     int               batch_idx;
     int*              sequence_lengths;
     bool              has_multimodal_input;
@@ -98,6 +99,10 @@ GatherModelInputContext createGatherContext(const NormalModelInputGathererConfig
         model_input.kv_cache_update_mapping.defined() ?
             reinterpret_cast<GroupBlockIdPair*>(model_input.kv_cache_update_mapping.data_ptr())
                 + kv_cache_mapping_offset :
+            nullptr;
+    ctx.kv_cache_copy_token_lengths =
+        model_input.kv_cache_copy_token_lengths.defined() ?
+            model_input.kv_cache_copy_token_lengths.data_ptr<int32_t>() + kv_cache_mapping_offset :
             nullptr;
 
     if (ctx.merged_text_mask) {
@@ -310,7 +315,8 @@ absl::Status gatherInputEmbeddingsForContextBatch(const GenerateStreamPtr&      
 
 void addCacheUpdateCopy(GatherModelInputContext&              ctx,
                         const std::vector<TaggedBlockIdPair>& update_mapping,
-                        const std::vector<std::string>&       group_tags) {
+                        const std::vector<std::string>&       group_tags,
+                        bool                                  use_live_lengths = false) {
     if (!ctx.kv_cache_update_mapping) {
         return;
     }
@@ -320,6 +326,9 @@ void addCacheUpdateCopy(GatherModelInputContext&              ctx,
             it != group_tags.end(), "cache update mapping references unknown tag=%s", mapping.tag.c_str());
         *ctx.kv_cache_update_mapping++ =
             GroupBlockIdPair{static_cast<GroupIdType>(std::distance(group_tags.begin(), it)), mapping.src, mapping.dst};
+        if (ctx.kv_cache_copy_token_lengths) {
+            *ctx.kv_cache_copy_token_lengths++ = use_live_lengths ? mapping.valid_tokens : 0;
+        }
     }
 }
 
@@ -445,6 +454,7 @@ GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamG
             {(int64_t)config_.kv_cache_group_nums, (int64_t)total_batch_size, (int64_t)max_blocks_num}, pinned_i32);
         model_input.kv_cache_group_types    = torch::empty({(int64_t)config_.kv_cache_group_nums}, pinned_i32);
         model_input.kv_cache_update_mapping = torch::empty({(int64_t)total_block_copy_num, 3}, pinned_i32);
+        model_input.kv_cache_copy_token_lengths = torch::empty({(int64_t)total_block_copy_num}, pinned_i32);
         // CP-sharded group block tables can be narrower than the global cache-key
         // namespace. Keep cache_keys independently sized so PD writer and reader
         // derive identical keys from the complete token sequence.
@@ -554,7 +564,10 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
                 model_input, kv_cache, i, ctx.batch_idx, ctx.max_blocks_num, config_.kernel_blocks_per_kv_block);
             ctx.batch_idx += 1;
         }
-        addCacheUpdateCopy(ctx, stream->streamCacheResource().getKVBlockUpdateMapping(), config_.kv_cache_group_tags);
+        addCacheUpdateCopy(ctx,
+                           stream->streamCacheResource().getKVBlockUpdateMapping(),
+                           config_.kv_cache_group_tags,
+                           /*use_live_lengths=*/true);
         stream->step();
     }
 

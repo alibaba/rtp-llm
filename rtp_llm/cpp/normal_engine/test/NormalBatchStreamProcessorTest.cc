@@ -307,6 +307,55 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     }
 }
 
+TEST_F(NormalBatchStreamProcessorTest, testGatherPreservesPerMappingTailLengthsAndContextFallback) {
+    ModelConfig model;
+    model.max_seq_len = 1024;
+    model.vocab_size = model.input_vocab_size = 4096;
+    model.num_layers                          = 1;
+    ResourceContext resources;
+    RuntimeConfig   runtime;
+    CacheConfig     cache;
+    initFullCacheConfig(cache, 1);
+    cache.seq_size_per_block = cache.kernel_seq_size_per_block = 16;
+
+    auto make_stream = [&](int seq_len, bool context) {
+        auto query                             = make_shared<GenerateInput>();
+        query->input_ids                       = torch::ones({500}, torch::kInt32);
+        query->generate_config                 = make_shared<GenerateConfig>();
+        query->generate_config->max_new_tokens = 3;
+        auto stream = make_shared<NormalGenerateStream>(query, model, runtime, resources, nullptr);
+        stream->setSeqLength(seq_len);
+        for (int token = 500; token < seq_len; ++token) {
+            stream->complete_token_ids_->data(0)[token] = 2;
+        }
+        stream->setIsContextStream(context);
+        stream->generate_status_->status = StreamState::RUNNING;
+        BatchKVCacheResource pages;
+        pages.resetBatchSize(1);
+        pages.initGroups(cache.topologyPtr());
+        std::vector<int> ids(32);
+        std::iota(ids.begin(), ids.end(), 1);
+        pages.setBatchBlocks(0, 0, ids);
+        stream->setKVCache(pages);
+        return stream;
+    };
+    auto first                                           = make_stream(501, false);
+    auto second                                          = make_stream(502, false);
+    auto context                                         = make_stream(500, true);
+    first->streamCacheResource().block_update_mapping_   = {{"default", 7, 41, 4}, {"default", 3, 42, 4}};
+    second->streamCacheResource().block_update_mapping_  = {{"default", 9, 43, 5}};
+    context->streamCacheResource().block_update_mapping_ = {{"default", 2, 44, 9}};
+    NormalBatchStreamProcessor processor(model, PDSepConfig{}, ProfilingDebugLoggingConfig{}, cache, false);
+    TensorHolder               holder;
+    auto                       gathered = processor.gatherModelInput(StreamGroups({first, second, context}), holder);
+    ASSERT_TRUE(gathered.ok()) << gathered.status();
+    const auto& inputs = gathered.value();
+    EXPECT_EQ(toVec<int32_t>(inputs.sequence_lengths), (std::vector<int32_t>{500, 501}));
+    EXPECT_EQ(toVec<int32_t>(inputs.kv_cache_copy_token_lengths), (std::vector<int32_t>{4, 4, 5, 0}));
+    EXPECT_EQ(toVec<int32_t>(inputs.kv_cache_update_mapping),
+              (std::vector<int32_t>{0, 7, 41, 0, 3, 42, 0, 9, 43, 0, 2, 44}));
+}
+
 TEST_F(NormalBatchStreamProcessorTest, testDeviceStateFastPathWaitsForBlockingLogitsProcessorState) {
     ResourceContext resource_context;
     ModelConfig     model_config;
@@ -888,8 +937,10 @@ TEST_F(NormalBatchStreamProcessorTest, testDynamicBeamDispatchReordersAndPlacesT
 
     // Advance one beam step so currentBatchSize == nextBatchSize == 2 and the
     // stream uses the beam token layout (seqLength 1 -> 2).
+    // The next step selects parents [1, 0], so its full token rows must inherit
+    // [5, 1] and [5, 2] from these opposite parent rows.
     int  error_token_id = -1;
-    auto first_tokens   = torch::tensor({5, 1, 5, 2}, torch::kInt32).reshape({2, 2});
+    auto first_tokens   = torch::tensor({5, 2, 5, 1}, torch::kInt32).reshape({2, 2});
     ASSERT_TRUE(
         stream->complete_token_ids_->update(first_tokens, 0, 1, 1, 8, 10, true, stream->streamId(), error_token_id));
     stream->generate_status_->status = StreamState::RUNNING;
@@ -915,6 +966,8 @@ TEST_F(NormalBatchStreamProcessorTest, testDynamicBeamDispatchReordersAndPlacesT
     merge_outputs.model_output.logits =
         torch::tensor({0.0f, 1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f}).reshape({2, 4}).to(torch::kCUDA);
 
+    ASSERT_EQ(stream->completeTokenIdsVec(0), (std::vector<int>{5, 2}));
+    ASSERT_EQ(stream->completeTokenIdsVec(1), (std::vector<int>{5, 1}));
     ASSERT_TRUE(processor.dispatch(stream_groups, merge_outputs).ok());
     ASSERT_FALSE(stream->hasError()) << "code=" << static_cast<int>(stream->statusInfo().code())
                                      << " msg=" << stream->statusInfo().ToString();
