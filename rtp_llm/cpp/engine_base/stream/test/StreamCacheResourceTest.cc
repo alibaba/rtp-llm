@@ -251,7 +251,8 @@ protected:
         pd_config.cache_store_rdma_mode = false;
         const auto cache_config =
             hybrid ? test::makeSimpleHybridMhaCacheConfig(4, 9, 2, DataType::TYPE_FP16, 2) : init_config();
-        prepareResourceWithCacheConfig(cache_config, {1, 2, 3, 4, 5, 6}, true, RoleType::PREFILL, {}, pd_config);
+        ASSERT_NO_FATAL_FAILURE(
+            prepareResourceWithCacheConfig(cache_config, {1, 2, 3, 4, 5, 6}, true, RoleType::PREFILL, {}, pd_config));
         stream_->generateConfig()->pd_separation      = query_pd;
         stream_->generateConfig()->unique_key         = key;
         stream_->generateInput()->request_deadline_ms = currentTimeMs() + 30000;
@@ -946,7 +947,7 @@ TEST_F(StreamCacheResourceTest, testAsyncLoadCache_WithoutAllocatorContext_Retur
 TEST_F(StreamCacheResourceTest, NonPDRequestSkipsRegistrationWithEmptyOrBusinessKey) {
     for (const std::string key : {std::string{}, std::string{"business-key"}}) {
         SCOPED_TRACE(key);
-        prepareP2PRegistrationResource(/*query_pd=*/false, key);
+        ASSERT_NO_FATAL_FAILURE(prepareP2PRegistrationResource(/*query_pd=*/false, key));
         auto& resource = stream_->streamCacheResource();
         ASSERT_FALSE(stream_->queryPdSep());
         EXPECT_FALSE(resource.asyncLoadCache());
@@ -959,7 +960,7 @@ TEST_F(StreamCacheResourceTest, NonPDRequestSkipsRegistrationWithEmptyOrBusiness
 }
 
 TEST_F(StreamCacheResourceTest, NonPDRequestStillWaitsForAllocatorLoadWithP2PConnector) {
-    prepareP2PRegistrationResource(/*query_pd=*/false, "business-key");
+    ASSERT_NO_FATAL_FAILURE(prepareP2PRegistrationResource(/*query_pd=*/false, "business-key"));
     auto& resource                   = stream_->streamCacheResource();
     auto  load_context               = makeAllocatorLoadContext(/*matched_blocks=*/1, {Tier::HOST});
     resource.allocator_load_context_ = load_context;
@@ -975,7 +976,7 @@ TEST_F(StreamCacheResourceTest, NonPDRequestStillWaitsForAllocatorLoadWithP2PCon
 }
 
 TEST_F(StreamCacheResourceTest, PDRequestStillRegistersPrefillResource) {
-    prepareP2PRegistrationResource(/*query_pd=*/true, "handoff-key");
+    ASSERT_NO_FATAL_FAILURE(prepareP2PRegistrationResource(/*query_pd=*/true, "handoff-key"));
     auto& resource = stream_->streamCacheResource();
     ASSERT_TRUE(resource.asyncLoadCache());
     ASSERT_NE(resource.p2p_load_context_, nullptr);
@@ -986,7 +987,7 @@ TEST_F(StreamCacheResourceTest, PDRequestStillRegistersPrefillResource) {
 }
 
 TEST_F(StreamCacheResourceTest, P2PRegistrationWaitsForAllocatorMaterialization) {
-    prepareP2PRegistrationResource(/*query_pd=*/true, "materialized-handoff");
+    ASSERT_NO_FATAL_FAILURE(prepareP2PRegistrationResource(/*query_pd=*/true, "materialized-handoff"));
     auto& resource = stream_->streamCacheResource();
     ASSERT_TRUE(resource.waitForAllocatorLoad().ok());
     ASSERT_GT(resource.curBlocksNum(), 0u);
@@ -2001,7 +2002,7 @@ TEST_F(StreamCacheResourceTest, testP2PFirstTokenOutputsRoundTripThroughStartLoa
         for (bool eos : {false, true}) {
             SCOPED_TRACE(::testing::Message() << "requested=" << requested << ", hybrid=" << hybrid << ", eos=" << eos);
             const std::string key = "first-token-outputs";
-            prepareP2PRegistrationResource(true, key, hybrid);
+            ASSERT_NO_FATAL_FAILURE(prepareP2PRegistrationResource(true, key, hybrid));
             auto&      prefill_connector = *cache_manager_->p2p_connector_->prefill_;
             const auto deadline_ms       = stream_->generateInput()->request_deadline_ms;
             const auto make_stream       = [&](RoleType role) {
