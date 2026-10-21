@@ -1,3 +1,4 @@
+import pickle
 from types import SimpleNamespace
 from unittest import TestCase, main
 
@@ -198,10 +199,7 @@ class EngineConfigTest(TestCase):
         config.max_rpc_timeout_ms = 67890
         state = config.__getstate__()
         self.assertEqual(len(state), 10)
-        restored = PDSepConfig()
-        maybe_restored = restored.__setstate__(state)
-        if maybe_restored is not None:
-            restored = maybe_restored
+        restored = pickle.loads(pickle.dumps(config))
         self.assertEqual(restored.__getstate__(), state)
         self.assertEqual(restored.role_type, RoleType.DECODE)
         self.assertEqual(restored.load_cache_timeout_ms, 12345)
@@ -231,10 +229,7 @@ class EngineConfigTest(TestCase):
         config.p2p_kv_leak_exit_threshold_percent = 45
         state = config.__getstate__()
         self.assertEqual(len(state), 27)
-        restored = CacheStoreConfig()
-        maybe_restored = restored.__setstate__(state)
-        if maybe_restored is not None:
-            restored = maybe_restored
+        restored = pickle.loads(pickle.dumps(config))
         self.assertEqual(restored.__getstate__(), state)
         self.assertEqual(restored.p2p_prefill_sender_thread_count, 8)
         self.assertEqual(restored.p2p_prefill_sender_queue_size, 20000)
@@ -248,10 +243,7 @@ class EngineConfigTest(TestCase):
         config.p2p_rdma_enable_h2d_copy = True
         config.p2p_rdma_staging_total_bytes = 32 * 1024 * 1024
 
-        restored = CacheStoreConfig()
-        maybe_restored = restored.__setstate__(config.__getstate__())
-        if maybe_restored is not None:
-            restored = maybe_restored
+        restored = pickle.loads(pickle.dumps(config))
 
         self.assertTrue(restored.p2p_rdma_enable_h2d_copy)
         self.assertEqual(restored.p2p_rdma_staging_total_bytes, 32 * 1024 * 1024)

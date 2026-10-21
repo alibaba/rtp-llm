@@ -63,7 +63,8 @@ public:
         std::string       error_msg;
 
         if (controller_->Failed()) {
-            error_code = TransferErrorCode::RPC_FAILED;
+            error_code = controller_->GetErrorCode() == arpc::ARPC_ERROR_TIMEOUT ? TransferErrorCode::TIMEOUT
+                                                                               : TransferErrorCode::RPC_FAILED;
             error_msg  = "tcp transfer failed: rpc_code=" + std::to_string(controller_->GetErrorCode())
                         + " " + controller_->ErrorText() + " peer [" + peer_ip_ + ":"
                         + std::to_string(peer_port_) + "]";
