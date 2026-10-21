@@ -1,31 +1,3 @@
-from unittest.mock import MagicMock
-
-from types import SimpleNamespace
-
-from unittest.mock import patch
-
-from rtp_llm.config.generate_config import GenerateConfig, RoleAddr, RoleType
-
-from rtp_llm.cpp.model_rpc.model_rpc_client import (
-    ModelRpcClient,
-    _selected_pd_separation,
-    StreamState,
-    trans_input,
-    trans_output,
-)
-
-from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
-    BatchGenerateOutputsPB,
-    ErrorCodePB,
-    ErrorDetailsPB,
-    GenerateInputPB,
-    GenerateOutputsPB,
-    TensorPB,
-)
-
-from rtp_llm.utils.base_model_datatypes import GenerateInput, GenerateOutputs
-
-
 import asyncio
 import gc
 import importlib
@@ -33,6 +5,7 @@ import json
 import struct
 import sys
 from enum import Enum
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 # Mock the ops module to avoid CUDA dependency in this unit test
@@ -82,6 +55,7 @@ from rtp_llm.config.response_format_compiler import ReasoningFormat
 from rtp_llm.cpp.model_rpc.model_rpc_client import (
     ModelRpcClient,
     StreamState,
+    _selected_pd_separation,
     _engine_reported_finished,
     _record_client_span_latency,
     _record_client_span_usage,

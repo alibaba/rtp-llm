@@ -126,7 +126,7 @@ void TransferTask::notifyDone(bool success, TransferErrorCode error_code, const 
             error_code_ = TransferErrorCode::CANCELLED;
             error_msg_  = "TransferTask cancelled during transfer";
         } else {
-            error_code_ = success ? TransferErrorCode::OK : error_code;
+            error_code_ = TransferErrorCode::OK;
             error_msg_  = error_msg;
         }
         total_cost_time_us_ = currentTimeUs() - start_time_us_;

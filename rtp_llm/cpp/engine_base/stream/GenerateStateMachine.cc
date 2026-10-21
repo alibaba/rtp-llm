@@ -71,7 +71,7 @@ void GenerateStateMachine::handleWaiting() {
                 stream_cache_resource_->reportMallocRetry();
                 return;
             }
-            error_info = ErrorInfo(ErrorCode::MALLOC_FAILED, "LACK MEM");
+            reportEvent(StreamEvents::Error, ErrorCode::MALLOC_FAILED, "LACK MEM");
             status.store(StreamState::FINISHED, std::memory_order_release);
             releaseResource();
             return;
@@ -107,7 +107,7 @@ void GenerateStateMachine::handleWaiting() {
     // cache block tables aligned with the growing sequence length.
     auto result = stream_cache_resource_->incrKVBlock();
     if (!result.ok()) {
-        error_info = ErrorInfo(ErrorCode::MALLOC_FAILED, "LACK MEM");
+        reportEvent(StreamEvents::Error, ErrorCode::MALLOC_FAILED, "LACK MEM");
         status.store(StreamState::FINISHED, std::memory_order_release);
         releaseResource();
         return;

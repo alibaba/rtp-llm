@@ -156,8 +156,10 @@ void P2PConnectorPrefill::processRead(const P2PConnectorStartLoadRequestPB& requ
     const std::string& unique_key = request.unique_key();
     const int64_t      now_ms     = currentTimeMs();
     if (unique_key.empty() || request.timeout_ms() <= 0 || request.timeout_ms() > std::numeric_limits<int32_t>::max()) {
-        stream_store_->markTerminal(unique_key, 0);
-        stream_store_->clearPrefillPayload(unique_key);
+        if (!unique_key.empty()) {
+            stream_store_->markTerminal(unique_key, 0);
+            stream_store_->clearPrefillPayload(unique_key);
+        }
         response.set_error_code(transErrorCodeToRPC(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED));
         response.set_error_message("invalid StartLoad unique_key or load timeout");
         report_process_metrics();

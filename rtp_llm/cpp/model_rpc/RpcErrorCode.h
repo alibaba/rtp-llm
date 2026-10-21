@@ -264,7 +264,8 @@ inline ErrorInfo errorInfoFromGrpcStatus(const grpc::Status& status, const std::
                                                 + std::to_string(static_cast<int>(status.error_code())) + "]");
     }
     return ErrorInfo(transGrpcStatusToErrorCode(status.error_code()),
-                     location + " grpc_code=" + std::to_string(static_cast<int>(status.error_code())) + ": "
+                     (location.empty() ? "grpc_code=" : location + " grpc_code=")
+                         + std::to_string(static_cast<int>(status.error_code())) + ": "
                          + status.error_message());
 }
 
