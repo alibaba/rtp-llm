@@ -68,7 +68,7 @@ public:
         // Embedding graphs always capture only the Transformer backbone.
         // Capability is checked before constructing this runner.
         if (isEmbeddingStylePrefillCudaGraph()) {
-            py_forward_method_             = py_instance_.attr("forward_transformer");
+            py_forward_method_             = py_instance_.attr("forward_embedding_graph");
             py_prepare_transformer_inputs_ = py_instance_.attr("prepare_transformer_inputs");
             py_attn_pyobj_method_           = py_instance_.attr("prepare_embedding_graph_attention");
         }
@@ -128,6 +128,7 @@ private:
     // Common replay and sync check logic
     void replayAndSyncCheck(int key, const char* key_type);
 
+    // Embedding graphs currently use the cache-free EMBEDDING_PREFILL role.
     bool isEmbeddingStylePrefillCudaGraph() const {
         return role_ == CudaGraphRole::EMBEDDING_PREFILL;
     }
@@ -217,7 +218,7 @@ private:
     mutable std::atomic<uint64_t> bert_replay_id_fallback_log_count_{0};
     mutable std::atomic<uint64_t> multimodal_input_fallback_log_count_{0};
     mutable std::atomic<uint64_t> full_prefill_fallback_log_count_{0};
-    mutable std::atomic<uint64_t> prefill_replay_log_count_{0};
+    mutable std::atomic<uint64_t> full_prefill_replay_log_count_{0};
 
     // event to record forward done
     torch::Event forward_event_ = cuda_graph::makeGraphEvent();

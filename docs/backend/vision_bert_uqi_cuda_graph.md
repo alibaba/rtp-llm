@@ -1,9 +1,9 @@
 # Embedding CUDA/HIP Graph
 
-Embedding graphs capture the Transformer backbone. Token embedding, request-owned
-visual/input-embedding preparation, pooling, classifier heads and response
-processing execute outside capture. BERT/UQI is a model adaptation, not the
-execution contract for all embedding models. This file retains its historical
+Embedding graphs capture the Transformer backbone. Token embedding, model-supported
+visual preparation, pooling, classifier heads and response processing execute
+outside capture. BERT/UQI is a model adaptation, not the execution contract for
+all embedding models. This file retains its historical
 name to preserve existing links.
 
 ## Configuration and support boundaries
@@ -17,11 +17,14 @@ This is the only embedding Graph enable switch. The executor selects
 optional Python method selects capture scope. Decode, MTP and generative
 full-prefill retain their separate existing execution paths.
 
-At startup, `embedding_cuda_graph_unsupported_reason()` checks the model's split
-interface and backend requirements. An unsupported model/configuration uses
-eager with a diagnostic before Graph allocation/capture. This capability query
-is not another configuration switch. Unexpected capture/kernel failures are
-not swallowed as capability failures.
+`BaseModel.load()` retains the existing `support_cuda_graph()` precheck for
+language-model tasks. For embedding, `PyWrappedModel` checks
+`embedding_cuda_graph_unsupported_reason()` after Python model initialization,
+before constructing the Graph runner. This check validates the split interface
+and backend requirements for embedding prefill, excluding MTP. An unsupported
+model/configuration uses eager with a diagnostic before Graph allocation/capture.
+This capability query is not another configuration switch. Unexpected
+capture/kernel failures are not swallowed as capability failures.
 
 The common cache-free backend supports FP16/BF16 activations, MHA/GQA, configured
 causal or noncausal attention, and either no RoPE or base RoPE with zero offset
@@ -29,6 +32,15 @@ and a finite scale of at least one.
 MLA, sparse/logn attention, custom attention scaling, other RoPE styles, context
 parallelism and headwise attention require additional adaptations. A model-level
 `support_cuda_graph()` flag alone does not establish embedding backend support.
+
+The CUDA ragged Graph path uses `attn_configs.dtype` for Q/K/V. Eager dtype
+selection can instead select FP8 based on KV-cache settings; enabling Graph does
+not preserve that eager FP8 selection. Validate numerical behavior with the
+actual precision used by each path.
+
+Non-empty request `input_embeddings` overrides are ineligible for embedding
+Graph replay. Eager support remains model-specific; BERT rejects these overrides.
+Model-owned visual injection is a separate supported BERT adaptation.
 
 | Model | Preparation outside capture | Captured backbone |
 | --- | --- | --- |
@@ -48,7 +60,8 @@ The interfaces are defined on `GptModelBase` and implemented/overridden by model
 | --- | --- |
 | `prepare_transformer_inputs(inputs)` | Return real-token hidden states `[tokens, hidden_size]` outside capture |
 | `forward_transformer(hidden_states, attention)` | Execute the backbone, including model final normalization; return token hidden states in original order |
-| `prepare_embedding_attention_inputs(attention_inputs, host_tokens, host_text_mask)` | Derive optional model metadata from host views, without reading deferred H2D storage |
+| `forward_embedding_graph(inputs, attention)` | Base-class adapter: pass fixed `inputs.input_hiddens` to `forward_transformer` without recomputing embeddings |
+| `prepare_embedding_attention_inputs(attention_inputs, host_tokens, host_text_mask)` | Reuse supplied metadata or derive missing model metadata from host views, without reading deferred H2D storage |
 | `validate_embedding_graph_inputs(inputs)` | Side-effect-free eligibility check before replay planning |
 | `prepare_embedding_graph_attention(inputs, is_cuda_graph)` | Create bucket-owned Attention buffers and its startup plan |
 | `prepare_embedding_graph_replay(attention, graph_inputs, request_inputs)` | Replan outside capture using request metadata and fixed Graph storage |
@@ -57,19 +70,33 @@ The Runner binds the split interface for every `EMBEDDING_PREFILL` model. A mode
 without that contract never silently falls back to capturing its entire forward.
 `CudaGraphRunner` does not inspect user-profile settings, segment token IDs or
 UQI bounds. BERT validates and passes its own segment metadata through these
-hooks. Only model/backend code understands its meaning.
+hooks. UQI-specific Graph masks and layouts remain in the backend adapters;
+the retained C++ host metadata producer is described below.
 
 Replay follows this sequence:
 
-1. Gather host int32 tokens and lengths. Model-specific host planning is independent
-   of Graph enablement, so eager fallback sees the same metadata.
+1. Gather host int32 tokens and lengths. On CUDA, preserve the existing device
+   conversion unless BERT UQI two-pass is enabled. For enabled cache-free embedding
+   graphs, `PyWrappedModel` obtains host planning views without changing the
+   model-facing inputs; eager fallback can reuse the resulting metadata.
 2. Submit queued metadata H2D copies before the Runner reads device buffers.
 3. Validate the request and select a token bucket. Ineligible requests use eager.
 4. Wait for prior replay before reusing bucket-owned input/metadata buffers.
 5. Prepare real-token embeddings outside capture, copy into the fixed hidden-state
    buffer and clear the unused token tail. Prepare the bucket's Attention plan.
-6. Replay `forward_transformer`, return only real-token rows, then run the existing
-   pooling or classifier. CLS, last-token and mean pooling are model/head choices.
+6. Replay the captured Transformer backbone, return only real-token rows, then
+   run the existing pooling or classifier. CLS, last-token and mean pooling are model/head choices.
+
+Warmup and capture use the common call `py_forward_method_(inputs, attn_pyobj)`.
+For embedding, the Runner binds `forward_embedding_graph` and aliases the local
+capture inputs' `input_hiddens` to the existing bucket-owned `transformer_input_`
+buffer. Request preparation continues writing into that buffer before replay;
+its address and ownership remain unchanged.
+
+Embedding attention replanning currently goes through the model's
+`prepare_embedding_graph_replay` hook. BERT first updates request segment bounds,
+then the base implementation calls each attention implementation's
+`prepare_cuda_graph()`. Other Graph roles use C++ `callPrepareCudaGraph()`.
 
 Planning and input preparation are both outside capture; their relative order
 can differ when the caller pre-plans Attention. Repeated eligibility checks must
@@ -86,9 +113,12 @@ Each bucket owns a fixed hidden-state buffer, output hold, Attention workspace
 and cumulative-length buffers. Real sequences and padding are distinct ragged
 sequences, preventing padding from participating in real-token attention.
 
-`CacheFreePrefillGraphImpl` lives in the existing Attention module and uses a
-Graph-enabled FlashInfer ragged wrapper on CUDA or AITER varlen attention on HIP.
-It preserves the model's causal setting. For base RoPE, fixed position buffers
+Embedding Graph support extends the existing device Attention implementations:
+`PyFlashinferPrefillImpl` and its ragged op on CUDA, and
+`AiterPrefillImplNonAsm` and its varlen op on HIP. The factory selects their
+Graph capability from the registered backends. Shared host-length and RoPE
+helpers live in `common.py`; `fmha_impl_base.py` only defines interfaces.
+The device implementations preserve the model's causal setting. For base RoPE, fixed position buffers
 reset at each real sequence; padding positions are zero. Requests with explicit
 position IDs fall back to eager unless the model provides a position adapter.
 Each backend owns a RoPE table generated by the engine's canonical implementation,
@@ -114,8 +144,12 @@ Only a BERT service using user-profile semantics should set:
 export USE_VISION_BERT_UQI_BLOCK_MASK=1
 ```
 
-The model's host hook scans the first text `CLS_UQI` (default token 2) through the
-first following `SEP` (102), inclusive, ignoring visual positions. Without SEP,
+The legacy host scan in `PyWrappedModel` requires block mask enabled,
+`VISION_BERT_UQI_TWO_PASS` unset or `1`, contiguous CPU int32
+`inputs.combo_tokens`, and a CPU text-token mask when supplied. It finds the first
+text `CLS_UQI` (default token 2) through the first following `SEP` (102), inclusive,
+ignoring visual positions. The model hook reuses native bounds and derives them
+only when usable host bounds were not supplied. Without SEP,
 the segment extends to sequence end. `VISION_BERT_CLS_UQI_TOKEN_ID` overrides the
 start marker. Tokens outside that segment form A; user-profile tokens form B.
 
@@ -127,8 +161,13 @@ start marker. Tokens outside that segment form A; user-profile tokens form B.
 Pure QI has no B tokens and reduces to full bidirectional attention. Different
 requests never attend to one another. The BERT validator checks contiguous CPU
 int32 bounds, batch cardinality, nonnegative lengths and valid sequence ranges
-before Graph planning. Eager two-pass builds its schedule from the same bounds;
-no common C++ wrapper decides which business schedule to allocate.
+before Graph planning. Whenever the legacy scan runs, C++ also precomputes the
+permutation, inverse permutation, B rows and indptr arrays, including when Graph
+is enabled. Pure-QI batches still get indptr metadata but no token permutation arrays.
+Graph mode prepares its own mask/layout from the bounds; precomputing the eager
+schedule does not select the Graph execution algorithm. An eager fallback reuses
+the native schedule, or builds a missing schedule from bounds in Python. This
+retained optimization is a BERT-specific exception in the shared wrapper; it does not select Graph capture scope or add a Graph enable switch.
 
 CUDA uses `BertUqiEncoderGraphImpl` in the existing CUDA BERT Attention module:
 one FlashInfer custom-mask call per layer, without token permutation. Every
@@ -144,17 +183,26 @@ token order after the backbone. Padding sequences are bounded by the model's
 sequence profile.
 Pure QI still executes both Attention calls on this UQI path.
 
-`VISION_BERT_UQI_TWO_PASS` selects eager BERT Attention only. Disabling it selects
-the CUDA custom-mask eager path; that eager configuration is unsupported on HIP.
-It does not enable Graph or select the Graph backend.
+`VISION_BERT_UQI_TWO_PASS` selects eager BERT Attention and gates the legacy C++
+scan/schedule producer. Disabling it selects the CUDA custom-mask eager path;
+that eager configuration is unsupported on HIP. When native bounds are absent,
+the model metadata hook derives Graph bounds from host planning views. This
+variable does not enable Graph or select the Graph backend.
 
 ## Tests and validation
 
 Existing test files cover host layouts/bounds, common causal planning and RoPE,
 model-owned eligibility, and fixed-buffer Runner
 replay. Tests import actual modules instead of extracting AST definitions.
-GPU tests cover BERT backbone replay and model-specific user-segment attention,
+GPU tests cover causal/noncausal replay through the existing device prefill
+implementations, BERT backbone replay and model-specific user-segment attention,
 including GQA and FP16/BF16, compared against dense or eager oracles.
+
+The standalone Runner test models must also expose `forward_embedding_graph`
+because they do not inherit `GptModelBase`. Currently `EmbeddingGraphTestModel`
+in `cuda_graph_tagged_cache_test.py` does not provide this adapter; those test
+doubles need updating before that target can validate the current Runner entry.
+The target list describes test coverage, not a successful native GPU test run.
 
 Relevant targets:
 
@@ -173,5 +221,7 @@ Operator tests and code-level adaptation do not establish checkpoint score
 accuracy or a performance gain. Previously observed score differences and the
 reported NVIDIA illegal access have not been diagnosed by this refactor.
 
-Mainse CLS pre-upload, HTTP profile parsing and RPC field compatibility are
-independent features; their semantics are not part of the Graph contract.
+Pooling and classification remain in postprocessing. First-token indices are
+computed there from input lengths; the executor does not pre-upload CLS indices.
+HTTP profile parsing and RPC field compatibility are independent features;
+their semantics are not part of the Graph contract.

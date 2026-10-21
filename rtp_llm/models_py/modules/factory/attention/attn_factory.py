@@ -4,7 +4,6 @@ from typing import Callable, Dict, List, Optional, Union
 
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
-    CacheFreePrefillGraphImpl,
     FMHAImplBase,
     MlaImplBase,
     PrefillCudaGraphCapability,
@@ -210,6 +209,27 @@ def _is_fmha_impl_disabled(
     return False
 
 
+def _select_embedding_graph_impl(attn_configs, fmha_config=None):
+    """Select Graph support from the existing device backend registry."""
+    reasons = []
+    for impl in PREFILL_MHA_IMPS:
+        capability = getattr(impl, "embedding_cuda_graph_unsupported_reason", None)
+        if capability is None:
+            continue
+        if _is_fmha_impl_disabled(impl.__name__, fmha_config):
+            reasons.append(f"{impl.__name__} is disabled")
+            continue
+        reason = capability(attn_configs)
+        if not reason:
+            return impl, ""
+        reasons.append(reason)
+    return (
+        None,
+        "; ".join(reasons)
+        or "no registered device prefill backend supports embedding graphs",
+    )
+
+
 def get_fmha_impl(
     attn_configs: AttentionConfigs,
     weight: ModelWeights,
@@ -225,20 +245,22 @@ def get_fmha_impl(
         is_cuda_graph, cuda_graph_selection_mode
     )
     if selection_mode == CudaGraphSelectionMode.EMBEDDING_GRAPH:
-        reason = CacheFreePrefillGraphImpl.unsupported_reason(attn_configs)
-        if reason:
+        impl, reason = _select_embedding_graph_impl(attn_configs, fmha_config)
+        if impl is None:
             raise ValueError(f"unsupported embedding graph backend: {reason}")
-        if not CacheFreePrefillGraphImpl.support_parallelism_config(parallelism_config):
+        if not impl.support_parallelism_config(parallelism_config):
             raise ValueError("embedding graph context parallelism requires an adapter")
         if getattr(attn_inputs, "headwise_config", None) is not None:
             raise ValueError("embedding graph headwise attention requires an adapter")
         if not attn_inputs.is_prefill:
             raise ValueError("embedding graph attention requires a prefill batch")
-        return CacheFreePrefillGraphImpl(
+        return impl(
             attn_configs,
             attn_inputs,
-            attn_inputs.padding_offset.numel(),
-            max_sequence_length=max_seq_len,
+            parallelism_config,
+            is_cuda_graph=True,
+            token_capacity=attn_inputs.padding_offset.numel(),
+            max_seq_len=max_seq_len,
         )
     # Set is_cuda_graph as dynamic attribute on attn_inputs for base class to read
     attn_inputs.is_cuda_graph = is_cuda_graph
@@ -306,6 +328,10 @@ class AttnImplFactory(object):
         "mha": get_fmha_impl,
         "mla": get_mla_impl,
     }
+
+    @staticmethod
+    def embedding_cuda_graph_unsupported_reason(attn_configs, fmha_config=None):
+        return _select_embedding_graph_impl(attn_configs, fmha_config)[1]
 
     @classmethod
     def get_fmha_impl(

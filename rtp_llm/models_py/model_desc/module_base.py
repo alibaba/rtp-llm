@@ -92,14 +92,12 @@ class GptModelBase(nn.Module):
             return "embedding graph headwise attention requires an adapter"
         if self.parallelism_config.prefill_cp_config.is_enabled():
             return "embedding graph context parallelism is not implemented"
-        from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
-            CacheFreePrefillGraphImpl,
-        )
-
         configs = self.config.getAttentionConfigs(
             self.parallelism_config.get_attn_tp_size()
         )
-        return CacheFreePrefillGraphImpl.unsupported_reason(configs)
+        return AttnImplFactory.embedding_cuda_graph_unsupported_reason(
+            configs, self.fmha_config
+        )
 
     def prepare_transformer_inputs(self, inputs: PyModelInputs) -> Tensor:
         """Compute embeddings outside capture. Return [real_tokens, hidden_size]."""
@@ -110,6 +108,12 @@ class GptModelBase(nn.Module):
     ) -> PyModelOutputs:
         """Run the backbone, including model final norm, without pooling/heads."""
         raise NotImplementedError("model must implement Transformer-only forward")
+
+    def forward_embedding_graph(
+        self, inputs: PyModelInputs, fmha_impl: Any
+    ) -> PyModelOutputs:
+        """Forward prepared hidden states without recomputing embeddings during capture."""
+        return self.forward_transformer(inputs.input_hiddens, fmha_impl)
 
     def prepare_embedding_attention_inputs(
         self, attn_inputs, host_tokens, host_text_mask

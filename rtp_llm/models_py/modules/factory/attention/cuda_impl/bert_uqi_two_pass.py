@@ -26,14 +26,12 @@ from rtp_llm.models_py.modules.factory.attention.cuda_impl.bert_uqi_two_pass_cor
     run_two_pass,
 )
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
+    PyFlashinferPrefillImpl,
     _host_i32,
     get_py_flashinfer_workspace_buffer,
     release_py_flashinfer_workspace_buffer,
 )
-from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
-    CacheFreePrefillGraphImpl,
-    FMHAImplBase,
-)
+from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
 from rtp_llm.ops import AttentionConfigs
 from rtp_llm.ops.compute_ops import (
     LayerKVCache,
@@ -149,7 +147,7 @@ class BertUqiTwoPassImpl(FMHAImplBase):
         return False
 
 
-class BertUqiEncoderGraphImpl(CacheFreePrefillGraphImpl):
+class BertUqiEncoderGraphImpl(PyFlashinferPrefillImpl):
     """CUDA UQI graphs with one FlashInfer masked attention per layer."""
 
     def __init__(self, configs, attn_inputs, token_capacity, max_sequence_length=None):
@@ -157,16 +155,24 @@ class BertUqiEncoderGraphImpl(CacheFreePrefillGraphImpl):
             raise ValueError("BERT user-segment graph requires noncausal attention")
         if torch.version.hip is not None:
             raise ValueError("UQI encoder graph currently supports CUDA only")
+        self.token_capacity = token_capacity
+        self.max_sequence_length = max_sequence_length or token_capacity
+        self.request_capacity = attn_inputs.input_lengths.numel()
         super().__init__(
-            configs, attn_inputs, token_capacity, max_sequence_length, custom_mask=True
+            configs,
+            attn_inputs,
+            is_cuda_graph=True,
+            token_capacity=token_capacity,
+            max_seq_len=self.max_sequence_length,
+            mask_builder=self._mask_plan_args,
         )
 
-    def _mask_plan_args(self, attn_inputs, for_capture):
+    def _mask_plan_args(self, attn_inputs, lengths, padding_slots, for_capture):
         from rtp_llm.models_py.modules.factory.attention.bert_uqi_schedule import (
             build_uqi_graph_layout,
         )
 
-        lengths = self._planned_lengths.tolist()
+        lengths = lengths.tolist()
         if not for_capture:
             starts = attn_inputs.uqi_b_starts
             b_lengths = attn_inputs.uqi_b_lens
@@ -194,7 +200,7 @@ class BertUqiEncoderGraphImpl(CacheFreePrefillGraphImpl):
         layout = build_uqi_graph_layout(lengths, starts, b_lengths, self.token_capacity)
         padding = layout.pop()[0]
         limit = self.max_sequence_length or self.token_capacity
-        for i in range(self.padding_slots):
+        for i in range(padding_slots):
             size = min(limit, max(0, padding - i * limit))
             layout.append((size, size, 0))
         masks = []

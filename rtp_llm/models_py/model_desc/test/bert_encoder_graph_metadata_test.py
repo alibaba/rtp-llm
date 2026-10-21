@@ -8,28 +8,27 @@ import torch
 
 from rtp_llm.models_py.model_desc.bert import BertModel
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
-from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
-    CacheFreePrefillGraphImpl,
-)
+from rtp_llm.models_py.modules.factory.attention import common
+from rtp_llm.models_py.modules.factory.attention.attn_factory import AttnImplFactory
 
 
 class BertEncoderGraphMetadataTest(unittest.TestCase):
     def setUp(self):
-        cls = CacheFreePrefillGraphImpl
-        self.impl = cls.__new__(cls)
-        self.impl.request_capacity = 3
-        self.impl.token_capacity = 8
-        self.impl.max_sequence_length = None
-        self.impl.heads = self.impl.kv_heads = 1
-        self.impl.dim = 64
-        self.impl.dtype = torch.bfloat16
-        self.impl.is_causal = False
-        self.impl.rope_cache = None
-        self.impl.positions_host = None
-        self.impl.positions_device = None
-        self.impl.padding_slots = 1
-        self.impl.cu_seqlens_host = torch.empty(5, dtype=torch.int32)
-        self.impl.wrapper = Mock()
+        self.metadata = SimpleNamespace()
+        self.metadata.request_capacity = 3
+        self.metadata.token_capacity = 8
+        self.metadata.max_sequence_length = None
+        self.metadata.cu_seqlens_host = torch.empty(5, dtype=torch.int32)
+
+    def _prepare(self, inputs, for_capture=False):
+        return common.prepare_embedding_graph_lengths(
+            inputs,
+            self.metadata.token_capacity,
+            self.metadata.request_capacity,
+            self.metadata.max_sequence_length,
+            self.metadata.cu_seqlens_host,
+            for_capture,
+        )
 
     @staticmethod
     def _inputs(lengths, prefix=None):
@@ -41,7 +40,7 @@ class BertEncoderGraphMetadataTest(unittest.TestCase):
         )
 
     def test_layout_changes_keep_storage_and_isolate_padding(self):
-        pointer = self.impl.cu_seqlens_host.data_ptr()
+        pointer = self.metadata.cu_seqlens_host.data_ptr()
         cases = [
             ([8, 0, 0], [0, 8, 8, 8, 8]),
             ([2, 3, 0], [0, 2, 5, 5, 8]),
@@ -51,12 +50,9 @@ class BertEncoderGraphMetadataTest(unittest.TestCase):
         ]
         for lengths, expected in cases:
             with self.subTest(lengths=lengths):
-                self.impl.prepare_cuda_graph(self._inputs(lengths))
-                self.assertEqual(self.impl.cu_seqlens_host.tolist(), expected)
-                self.assertEqual(self.impl.cu_seqlens_host.data_ptr(), pointer)
-                kwargs = self.impl.wrapper.plan.call_args.kwargs
-                self.assertFalse(kwargs["causal"])
-                self.assertTrue(kwargs["disable_split_kv"])
+                self._prepare(self._inputs(lengths))
+                self.assertEqual(self.metadata.cu_seqlens_host.tolist(), expected)
+                self.assertEqual(self.metadata.cu_seqlens_host.data_ptr(), pointer)
 
     def test_incompatible_profiles_are_rejected(self):
         for lengths, prefix in [
@@ -67,14 +63,13 @@ class BertEncoderGraphMetadataTest(unittest.TestCase):
         ]:
             with self.subTest(lengths=lengths, prefix=prefix):
                 with self.assertRaises(ValueError):
-                    self.impl.prepare_cuda_graph(self._inputs(lengths, prefix))
+                    self._prepare(self._inputs(lengths, prefix))
 
     def test_32_item_batch_uses_aggregate_bucket(self):
-        self.impl.request_capacity = 32
-        self.impl.token_capacity = 6144
-        self.impl.max_sequence_length = 512
-        self.impl.padding_slots = 12
-        self.impl.cu_seqlens_host = torch.empty(45, dtype=torch.int32)
+        self.metadata.request_capacity = 32
+        self.metadata.token_capacity = 6144
+        self.metadata.max_sequence_length = 512
+        self.metadata.cu_seqlens_host = torch.empty(45, dtype=torch.int32)
         # Same item text lengths as mock_request/bert/request.json, plus four
         # visual rows and a seven-token query per item.
         item_lengths = [
@@ -112,32 +107,31 @@ class BertEncoderGraphMetadataTest(unittest.TestCase):
             124,
         ]
         lengths = [length + 4 + 7 for length in item_lengths]
-        self.impl.prepare_cuda_graph(self._inputs(lengths))
-        self.assertEqual(int(self.impl.cu_seqlens_host[32]), 5402)
-        self.assertEqual(int(self.impl.cu_seqlens_host[-1]), 6144)
-        self.assertEqual(self.impl.cu_seqlens_host.numel(), 45)
+        self._prepare(self._inputs(lengths))
+        self.assertEqual(int(self.metadata.cu_seqlens_host[32]), 5402)
+        self.assertEqual(int(self.metadata.cu_seqlens_host[-1]), 6144)
+        self.assertEqual(self.metadata.cu_seqlens_host.numel(), 45)
 
     def test_single_sequence_limit_is_independent_of_total_capacity(self):
-        self.impl.token_capacity = 6144
-        self.impl.max_sequence_length = 512
+        self.metadata.token_capacity = 6144
+        self.metadata.max_sequence_length = 512
         with self.assertRaisesRegex(ValueError, "position-table"):
-            self.impl.prepare_cuda_graph(self._inputs([513, 0, 0]))
+            self._prepare(self._inputs([513, 0, 0]))
         # Aggregate capture profiles are split across legal request slots.
-        self.impl.request_capacity, self.impl.padding_slots = 16, 12
-        self.impl.cu_seqlens_host = torch.empty(29, dtype=torch.int32)
+        self.metadata.request_capacity = 16
+        self.metadata.cu_seqlens_host = torch.empty(29, dtype=torch.int32)
         inputs = self._inputs([6144] + [0] * 15)
-        self.impl._prepare(inputs, for_capture=True)
-        self.assertEqual(int(self.impl.cu_seqlens_host[-1]), 6144)
-        self.assertTrue(bool((self.impl.cu_seqlens_host.diff() <= 512).all()))
+        self._prepare(inputs, for_capture=True)
+        self.assertEqual(int(self.metadata.cu_seqlens_host[-1]), 6144)
+        self.assertTrue(bool((self.metadata.cu_seqlens_host.diff() <= 512).all()))
 
     def test_capture_fills_remaining_capacity_with_bounded_padding(self):
-        self.impl.token_capacity = 16
-        self.impl.max_sequence_length = 4
-        self.impl.padding_slots = 4
-        self.impl.cu_seqlens_host = torch.empty(8, dtype=torch.int32)
-        self.impl._prepare(self._inputs([16, 0, 0]), for_capture=True)
+        self.metadata.token_capacity = 16
+        self.metadata.max_sequence_length = 4
+        self.metadata.cu_seqlens_host = torch.empty(8, dtype=torch.int32)
+        self._prepare(self._inputs([16, 0, 0]), for_capture=True)
         self.assertEqual(
-            self.impl.cu_seqlens_host.tolist(), [0, 4, 8, 12, 16, 16, 16, 16]
+            self.metadata.cu_seqlens_host.tolist(), [0, 4, 8, 12, 16, 16, 16, 16]
         )
 
 
@@ -156,16 +150,20 @@ class EmbeddingGraphContractTest(unittest.TestCase):
             ),
         )
         with patch("importlib.util.find_spec", return_value=object()):
-            self.assertEqual(CacheFreePrefillGraphImpl.unsupported_reason(config), "")
+            self.assertEqual(
+                common.embedding_graph_unsupported_reason(config, "flashinfer"), ""
+            )
             for scale in (0.0, 0.5, float("nan"), float("inf")):
                 config.rope_config.scale = scale
                 self.assertIn(
-                    "scale", CacheFreePrefillGraphImpl.unsupported_reason(config)
+                    "scale",
+                    common.embedding_graph_unsupported_reason(config, "flashinfer"),
                 )
         config.rope_config.scale = 1.0
         with patch("importlib.util.find_spec", return_value=None):
             self.assertIn(
-                "not installed", CacheFreePrefillGraphImpl.unsupported_reason(config)
+                "not installed",
+                common.embedding_graph_unsupported_reason(config, "flashinfer"),
             )
 
     def test_bert_accepts_metadata_only_inputs_with_undefined_token_tensor(self):
@@ -179,6 +177,47 @@ class EmbeddingGraphContractTest(unittest.TestCase):
             embedding_inputs=SimpleNamespace(text_tokens_mask=None),
         )
         self.assertTrue(model.validate_embedding_input_features(inputs))
+
+    def test_bert_host_hook_reuses_native_bounds_and_schedule(self):
+        model = BertModel.__new__(BertModel)
+        torch.nn.Module.__init__(model)
+        model.use_user_profile_mask = True
+        attention = SimpleNamespace(
+            input_lengths=torch.tensor([5, 2], dtype=torch.int32),
+            uqi_b_starts=torch.tensor([1, -1], dtype=torch.int32),
+            uqi_b_lens=torch.tensor([3, 0], dtype=torch.int32),
+            uqi_seg_indptr=torch.tensor([0, 2, 5, 7, 7], dtype=torch.int32),
+        )
+        starts, counts, schedule = (
+            attention.uqi_b_starts,
+            attention.uqi_b_lens,
+            attention.uqi_seg_indptr,
+        )
+        with patch(
+            "rtp_llm.models_py.modules.factory.attention.bert_uqi_schedule.derive_bert_uqi_bounds",
+            side_effect=AssertionError("native bounds must not be scanned again"),
+        ):
+            result = model.prepare_embedding_attention_inputs(attention, None, None)
+        self.assertIs(result, attention)
+        self.assertIs(attention.uqi_b_starts, starts)
+        self.assertIs(attention.uqi_b_lens, counts)
+        self.assertIs(attention.uqi_seg_indptr, schedule)
+
+    def test_bert_host_hook_derives_bounds_when_native_metadata_is_missing(self):
+        model = BertModel.__new__(BertModel)
+        torch.nn.Module.__init__(model)
+        model.use_user_profile_mask = True
+        model.cls_uqi_token_id = 2
+        attention = SimpleNamespace(
+            input_lengths=torch.tensor([5, 2], dtype=torch.int32),
+            uqi_b_starts=None,
+            uqi_b_lens=None,
+        )
+        tokens = torch.tensor([1, 2, 7, 102, 8, 5, 6], dtype=torch.int32)
+        result = model.prepare_embedding_attention_inputs(attention, tokens, None)
+        self.assertIs(result, attention)
+        self.assertEqual(attention.uqi_b_starts.tolist(), [1, -1])
+        self.assertEqual(attention.uqi_b_lens.tolist(), [3, 0])
 
     def test_default_adapter_rejects_explicit_positions_before_graph_planning(self):
         model = GptModelBase.__new__(GptModelBase)
@@ -248,12 +287,14 @@ class EmbeddingGraphContractTest(unittest.TestCase):
             model.prepare_transformer_inputs(None)
 
     def test_rotary_positions_reset_per_sequence_and_preserve_unrotated_tail(self):
-        impl = CacheFreePrefillGraphImpl.__new__(CacheFreePrefillGraphImpl)
+        impl = SimpleNamespace()
         angles = torch.tensor([[0.0, 0.0], [0.3, 0.7], [0.6, 1.4]])
         impl.rope_cache = torch.cat((angles.cos(), angles.sin()), dim=-1)
         impl.positions_device = torch.tensor([0, 1, 0, 1, 2, 0])
         q, k = torch.randn(6, 4, 6), torch.randn(6, 2, 6)
-        actual_q, actual_k = impl._apply_rotary(q, k)
+        actual_q, actual_k = common.apply_embedding_graph_rotary(
+            q, k, impl.rope_cache, impl.positions_device
+        )
         for actual, original in ((actual_q, q), (actual_k, k)):
             expected = original.clone()
             for token, position in enumerate(impl.positions_device.tolist()):
@@ -272,24 +313,43 @@ class EmbeddingGraphContractTest(unittest.TestCase):
                         )
             torch.testing.assert_close(actual, expected)
 
-    def test_planning_honors_causal_configuration(self):
-        impl = CacheFreePrefillGraphImpl.__new__(CacheFreePrefillGraphImpl)
-        impl.request_capacity, impl.token_capacity = 2, 8
-        impl.max_sequence_length = 8
-        impl.padding_slots = 1
-        impl.cu_seqlens_host = torch.empty(4, dtype=torch.int32)
-        impl.positions_host = None
-        impl.heads, impl.kv_heads, impl.dim, impl.dtype = 4, 2, 64, torch.float16
-        impl.wrapper = Mock()
-        attn = SimpleNamespace(
-            input_lengths=torch.tensor([3, 2], dtype=torch.int32),
-            prefix_lengths=torch.zeros(2, dtype=torch.int32),
-        )
-        for causal in (True, False):
-            impl.is_causal = causal
-            impl.prepare_cuda_graph(attn)
-            self.assertEqual(impl.wrapper.plan.call_args.kwargs["causal"], causal)
-            self.assertEqual(impl.cu_seqlens_host.tolist(), [0, 3, 5, 8])
+    def test_factory_uses_registered_device_backend_for_embedding_graph(self):
+        from rtp_llm.models_py.modules.factory.attention import attn_factory
+        from rtp_llm.ops.compute_ops import PyAttentionInputs
+
+        class DevicePrefillBackend:
+            embedding_cuda_graph_unsupported_reason = Mock(return_value="")
+            support_parallelism_config = Mock(return_value=True)
+
+            def __init__(self, *args, **kwargs):
+                self.arguments = kwargs
+
+        attn = PyAttentionInputs()
+        attn.is_prefill = True
+        attn.padding_offset = torch.empty(8, dtype=torch.int32)
+        config = SimpleNamespace(use_mla=False)
+        with patch.object(attn_factory, "PREFILL_MHA_IMPS", [DevicePrefillBackend]):
+            self.assertEqual(
+                AttnImplFactory.embedding_cuda_graph_unsupported_reason(config), ""
+            )
+            impl = attn_factory.get_fmha_impl(
+                config,
+                None,
+                attn,
+                max_seq_len=4,
+                is_cuda_graph=True,
+                cuda_graph_selection_mode="embedding_graph",
+            )
+            self.assertIsInstance(impl, DevicePrefillBackend)
+            self.assertEqual(
+                impl.arguments,
+                dict(is_cuda_graph=True, token_capacity=8, max_seq_len=4),
+            )
+        with patch.object(attn_factory, "PREFILL_MHA_IMPS", []):
+            self.assertIn(
+                "no registered",
+                AttnImplFactory.embedding_cuda_graph_unsupported_reason(config),
+            )
 
 
 if __name__ == "__main__":

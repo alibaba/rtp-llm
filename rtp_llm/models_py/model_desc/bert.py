@@ -17,15 +17,6 @@ from rtp_llm.models_py.modules import (
     LayerNorm,
     MultimodalEmbeddingInjector,
 )
-from rtp_llm.models_py.modules.factory.attention.bert_uqi_schedule import (
-    BertUqiTwoPassSchedule,
-    build_bert_uqi_two_pass_schedule,
-    build_bert_uqi_two_pass_schedule_from_bounds,
-    derive_bert_uqi_segment_ids_hostlen,
-)
-from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
-    CacheFreePrefillGraphImpl,
-)
 from rtp_llm.ops import HWKernelConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import (
     LayerKVCache,
@@ -36,6 +27,12 @@ from rtp_llm.ops.compute_ops import (
 from rtp_llm.utils.bert_user_profile import (
     build_bert_uqi_flashinfer_mask,
     derive_bert_uqi_segment_ids,
+)
+from rtp_llm.models_py.modules.factory.attention.bert_uqi_schedule import (
+    BertUqiTwoPassSchedule,
+    build_bert_uqi_two_pass_schedule,
+    build_bert_uqi_two_pass_schedule_from_bounds,
+    derive_bert_uqi_segment_ids_hostlen,
 )
 from rtp_llm.utils.model_weight import W
 
@@ -221,8 +218,17 @@ class BertModel(GptModelBase):
         if self.use_user_profile_mask:
             from rtp_llm.models_py.modules.factory.attention.bert_uqi_schedule import (
                 derive_bert_uqi_bounds,
+                valid_bert_uqi_bounds,
             )
 
+            # Preserve the native scan and eager schedule. Derive bounds only
+            # when the caller did not supply usable host metadata.
+            if (
+                getattr(attn_inputs, "uqi_b_starts", None) is not None
+                and getattr(attn_inputs, "uqi_b_lens", None) is not None
+                and valid_bert_uqi_bounds(attn_inputs)
+            ):
+                return attn_inputs
             attn_inputs.uqi_b_starts, attn_inputs.uqi_b_lens = derive_bert_uqi_bounds(
                 host_tokens,
                 attn_inputs.input_lengths,
@@ -275,20 +281,20 @@ class BertModel(GptModelBase):
                 raise ValueError(
                     "BERT Transformer graph requires an encoder without KV cache"
                 )
-            graph_impl = CacheFreePrefillGraphImpl
-            if self.use_user_profile_mask:
-                if torch.version.hip is not None:
-                    from rtp_llm.models_py.modules.factory.attention.rocm_impl.bert_uqi_two_pass import (
-                        BertUqiRocmEncoderGraphImpl,
-                    )
+            if not self.use_user_profile_mask:
+                return super().prepare_fmha_impl(inputs, True, "embedding_graph")
+            if torch.version.hip is not None:
+                from rtp_llm.models_py.modules.factory.attention.rocm_impl.bert_uqi_two_pass import (
+                    BertUqiRocmEncoderGraphImpl,
+                )
 
-                    graph_impl = BertUqiRocmEncoderGraphImpl
-                else:
-                    from rtp_llm.models_py.modules.factory.attention.cuda_impl.bert_uqi_two_pass import (
-                        BertUqiEncoderGraphImpl,
-                    )
+                graph_impl = BertUqiRocmEncoderGraphImpl
+            else:
+                from rtp_llm.models_py.modules.factory.attention.cuda_impl.bert_uqi_two_pass import (
+                    BertUqiEncoderGraphImpl,
+                )
 
-                    graph_impl = BertUqiEncoderGraphImpl
+                graph_impl = BertUqiEncoderGraphImpl
             return graph_impl(
                 self.config.getAttentionConfigs(
                     self.parallelism_config.get_attn_tp_size()
@@ -364,8 +370,8 @@ class BertModel(GptModelBase):
             lengths = attn_inputs.input_lengths.cpu().to(torch.int32)
             cu_host = torch.zeros(batch_size + 1, dtype=torch.int32)
             cu_host[1:] = lengths.cumsum(0)
-        # Consume a supplied schedule for adapter compatibility. Otherwise build
-        # it from model-owned host bounds, or derive segments from text tokens.
+        # Prefer the C++ precomputed schedule. Graph-mode eager fallback and
+        # callers without a native schedule build it from bounds or text tokens.
         uqi_seg_indptr = getattr(attn_inputs, "uqi_seg_indptr", None)
         uqi_b_lens = getattr(attn_inputs, "uqi_b_lens", None)
         if uqi_seg_indptr is not None and uqi_seg_indptr.numel() == 2 * batch_size + 1:

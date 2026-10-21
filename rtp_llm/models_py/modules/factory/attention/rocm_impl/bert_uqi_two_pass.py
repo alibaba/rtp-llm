@@ -1,11 +1,9 @@
 """ROCm facade for BERT profile attention; metadata is request-local."""
 import torch
 
-from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
-    CacheFreePrefillGraphImpl,
+from rtp_llm.models_py.modules.factory.attention.bert_uqi_schedule import (
+    BertUqiAiterGraphLayout,
 )
-from rtp_llm.models_py.modules.factory.attention.bert_uqi_schedule import BertUqiAiterGraphLayout
-
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
 from rtp_llm.models_py.modules.factory.attention.rocm_impl.bert_uqi_two_pass_core import (
     prepare_two_pass, run_two_pass,
@@ -66,11 +64,18 @@ class BertUqiTwoPassImpl(FMHAImplBase):
 # Fixed-buffer graph attention; request planning runs outside capture.
 
 
-class BertUqiRocmEncoderGraphImpl(CacheFreePrefillGraphImpl):
+class BertUqiRocmEncoderGraphImpl(FMHAImplBase):
     def __init__(self, configs, attn_inputs, token_capacity, max_sequence_length=None):
         if configs.is_causal:
             raise ValueError("BERT user-segment graph requires noncausal attention")
-        # The base constructor invokes _prepare for the startup profile.
+        self.heads, self.kv_heads, self.dim = (
+            configs.head_num,
+            configs.kv_head_num,
+            configs.size_per_head,
+        )
+        self.token_capacity = token_capacity
+        self.request_capacity = attn_inputs.input_lengths.numel()
+        self.fmha_params = BertUqiParams(None)
         self._host_layout = None
         self._host_metadata = None
         self._device_metadata = None
@@ -81,13 +86,17 @@ class BertUqiRocmEncoderGraphImpl(CacheFreePrefillGraphImpl):
         self.b_mask = None
         self.valid_mask = None
         self.aiter_max_seq_len = max_sequence_length or token_capacity
-        super().__init__(
-            configs,
-            attn_inputs,
-            token_capacity,
-            max_sequence_length,
-            allocate_indptr=False,
-        )
+        self._prepare(attn_inputs, for_capture=True)
+
+    def prepare_cuda_graph(self, attn_inputs):
+        self._prepare(attn_inputs, for_capture=False)
+
+    def support_cuda_graph(self):
+        return True
+
+    @staticmethod
+    def support(configs, attn_inputs):
+        return attn_inputs.is_prefill
 
     def _prepare(self, attn_inputs, for_capture):
         # Validate here and upload only the metadata used by this adapter.

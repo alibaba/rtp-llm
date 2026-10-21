@@ -5,9 +5,8 @@
 
 namespace rtp_llm {
 
-// Embedding gathers host int32 metadata for model/attention planning. Keep it
-// independent of model-specific environment variables. PyWrappedModel owns the
-// device copies used by embedding lookup and GPU attention kernels.
+// Normalize gathered host metadata before model-facing device conversion.
+// Graph planning obtains its host views separately in PyWrappedModel.
 inline void prepareEmbeddingInputMetadata(torch::Tensor& tokens,
                                           torch::Tensor& input_lengths,
                                           torch::Tensor& sequence_lengths,

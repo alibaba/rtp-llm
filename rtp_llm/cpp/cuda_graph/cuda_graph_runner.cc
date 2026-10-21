@@ -624,8 +624,22 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                                state.graph_token_capacity * sizeof(int32_t));
             captured_attn.context_total_kv_length = state.graph_token_capacity;
         } else if (isEmbeddingStylePrefillCudaGraph()) {
-            // Cache-free embedding attention plans its own ragged metadata
-            // and does not consume the legacy padded-sequence offsets.
+            // Preserve the legacy padded-layout offsets. Ragged attention still
+            // plans its own sequence boundaries independently of these values.
+            const auto input_lengths_host = inputs.attention_inputs.input_lengths.cpu().contiguous();
+            const auto* input_lengths     = input_lengths_host.data_ptr<int32_t>();
+            auto& captured_padding_offset = py_model_inputs_.attention_inputs.padding_offset;
+            RTP_LLM_CHECK_WITH_INFO(!captured_padding_offset.is_cuda(),
+                                    "embedding padding offsets must use the captured host buffer");
+            auto* padding_offset     = captured_padding_offset.data_ptr<int32_t>();
+            int   cumulative_padding = 0;
+            int   token_idx          = 0;
+            for (int batch_idx = 0; batch_idx < state.current_batch_size; ++batch_idx) {
+                const int input_length = input_lengths[batch_idx];
+                std::fill_n(padding_offset + token_idx, input_length, cumulative_padding);
+                token_idx += input_length;
+                cumulative_padding += state.current_real_graph_seq_len - input_length;
+            }
         } else {
             copyToHostMirror(inputs.attention_inputs.padding_offset,
                              py_model_inputs_.attention_inputs.padding_offset,
@@ -786,7 +800,7 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
             replayPrefill(state.current_real_graph_seq_len);
         }
         if (isEmbeddingStylePrefillCudaGraph()) {
-            const uint64_t count = prefill_replay_log_count_.fetch_add(1, std::memory_order_relaxed) + 1;
+            const uint64_t count = full_prefill_replay_log_count_.fetch_add(1, std::memory_order_relaxed) + 1;
             if ((count & (count - 1)) == 0) {
                 RTP_LLM_LOG_INFO("embedding Transformer graph replay: requests=%d capacity=%zu tokens=%d "
                                  "bucket=%d replay_count=%llu",
@@ -798,7 +812,7 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
             }
         }
         if (isGenerativePrefillCudaGraph()) {
-            const uint64_t replay_count = prefill_replay_log_count_.fetch_add(1, std::memory_order_relaxed) + 1;
+            const uint64_t replay_count = full_prefill_replay_log_count_.fetch_add(1, std::memory_order_relaxed) + 1;
             if ((replay_count & (replay_count - 1)) == 0) {
                 RTP_LLM_LOG_INFO("full prefill CUDA graph replay: requests=%d tokens=%d bucket=%d "
                                  "padding_tokens=%d replay_count=%llu",
@@ -1196,9 +1210,9 @@ bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state)
         return false;
     }
 
-    // Embedding models validate and consume request-owned features outside
-    // capture. Other roles still need to reject fields that are not copied
-    // into fixed graph inputs.
+    // Multimodal injection depends on request-owned tensors that are not copied
+    // into captured graph inputs. This is unsafe for every model using the
+    // shared injector, so gate on the data contract rather than model identity.
     const bool has_multimodal_features = !inputs.multimodal_inputs.multimodal_features.empty();
     const bool has_multimodal_locs =
         inputs.multimodal_inputs.mm_features_locs.defined() && inputs.multimodal_inputs.mm_features_locs.numel() > 0;
@@ -1567,6 +1581,8 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
     auto& mem_hold = graph_instances_[key].mem_hold_;
     if (isEmbeddingStylePrefillCudaGraph()) {
         mem_hold.transformer_input_ = torch::zeros({key, hidden_size_}, options_cuda_float_);
+        // Reuse the fixed backbone buffer through the common forward input contract.
+        inputs.input_hiddens = mem_hold.transformer_input_;
     }
 
     size_t pre_capture_reserved = cuda_graph::graphReservedBytes();
@@ -1574,13 +1590,9 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
     // WarmUp twice (params already prepared in attn impl __init__/create_params when instance was created)
     RTP_LLM_LOG_INFO("WarmUp for %s %d start.", key_type, key);
     auto attn_pyobj = graph_instances_[key].mem_hold_.attn_pyobj_;
-    auto run_forward = [&]() {
-        return isEmbeddingStylePrefillCudaGraph() ? py_forward_method_(mem_hold.transformer_input_, attn_pyobj) :
-                                   py_forward_method_(inputs, attn_pyobj);
-    };
     try {
-        run_forward();
-        run_forward();
+        py_forward_method_(inputs, attn_pyobj);
+        py_forward_method_(inputs, attn_pyobj);
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_ERROR("WarmUp forward failed for %s %d: %s", key_type, key, e.what());
         throw;
@@ -1609,7 +1621,7 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
             cuda_graph::GraphNcclCaptureContext capture_ctx;
             CudaGraphCaptureGuard               capture_guard(&capture_ctx);
             try {
-                auto py_outputs_obj = run_forward();
+                auto py_outputs_obj = py_forward_method_(inputs, attn_pyobj);
                 outputs             = py_outputs_obj.cast<PyModelOutputs>();
             } catch (const py::error_already_set& e) {
                 RTP_LLM_LOG_ERROR("Capture forward failed for %s %d: %s", key_type, key, e.what());

@@ -193,6 +193,10 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     py_model_                 = py_instance;
     auto py_initialize_method = py_model_.attr("initialize");
     py_init_result            = py_initialize_method(init_resources);
+    // BaseModel.load defers embedding Graph capability checks until Python model initialization.
+    // Validate the split Transformer interface and attention backend before constructing the runner.
+    // This check applies to embedding prefill, excluding MTP; unsupported models/configurations
+    // use eager execution even when the service enables CUDA Graph.
     if (enable_cuda_graph_ && is_prefill_cuda_graph_mode && params.sp_config.type == SP_TYPE_NONE) {
         const std::string reason =
             py::hasattr(py_model_, "embedding_cuda_graph_unsupported_reason") ?

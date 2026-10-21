@@ -47,7 +47,8 @@ class Bert(BaseModel):
         return config
 
     def support_cuda_graph(self) -> bool:
-        return True
+        if os.environ.get("USE_VISION_BERT_UQI_BLOCK_MASK", "0") == "1":
+            return False
 
     def _create_python_model(self):
         from rtp_llm.models_py.model_desc.bert import BertModel

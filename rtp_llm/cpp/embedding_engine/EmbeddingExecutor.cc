@@ -31,7 +31,6 @@ static const char* names[] = {
     "input_ids",
     "attention_mask",
     "moe_gating",
-    "cls_indices",
 };
 static_assert(sizeof(names) / sizeof(names[0]) <= NUM_INPUT_TYPES, "redundant handler arg name");
 static_assert(sizeof(names) / sizeof(names[0]) >= NUM_INPUT_TYPES, "missing handler arg name");
@@ -70,12 +69,9 @@ EmbeddingExecutor::EmbeddingExecutor(const EngineInitParams& params, py::object 
         0,
         parallelism_config,
     });
-    // Embedding uses the same Python wrapper as generation. Forward the engine
-    // configuration explicitly; aggregate defaults otherwise leave graphs off
-    // and their shape/block capacities at zero even when the server enables them.
+    // Forward the Graph switch, capture capacities and device execution settings
+    // explicitly; the shared Python wrapper otherwise uses default initialization values.
     model_init_params.hw_kernel_config             = params.hw_kernel_config;
-    model_init_params.profile_debug_logging_config = params.profiling_debug_logging_config;
-    model_init_params.runtime_config               = params.runtime_config;
     model_init_params.concurrency_config           = params.concurrency_config;
     model_init_params.device_resource_config       = params.device_resource_config;
     model_init_params.max_seq_len                  = model_config_.max_seq_len;
@@ -84,8 +80,6 @@ EmbeddingExecutor::EmbeddingExecutor(const EngineInitParams& params, py::object 
     model_init_params.kernel_tokens_per_block      = model_config_.attn_config.kernel_tokens_per_block > 0 ?
                                                          model_config_.attn_config.kernel_tokens_per_block :
                                                          model_init_params.tokens_per_block;
-    model_init_params.hc_mult                      = model_config_.hc_mult;
-    model_init_params.moe_config                   = params.moe_config;
 
     RTP_LLM_CHECK_WITH_INFO(!params.py_model.is_none(), "py_model must be provided, legacy C++ GptModel path removed");
     RTP_LLM_LOG_INFO("init executor with python model");
@@ -111,6 +105,24 @@ EmbeddingExecutor::EmbeddingExecutor(const EngineInitParams& params, py::object 
 void EmbeddingExecutor::init_position_ids(int max_seq_len) {
     max_position_ids_tensor_ = torch::arange(max_seq_len, torch::kInt32);
 }
+
+namespace {
+#if USING_CUDA
+torch::Tensor toCudaInt32ModelInput(const torch::Tensor& tensor) {
+    if (!tensor.defined()) {
+        return tensor;
+    }
+    auto options = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    if (tensor.is_cuda() && tensor.scalar_type() == torch::kInt32) {
+        return tensor;
+    }
+    if (tensor.numel() == 0) {
+        return torch::empty(tensor.sizes(), options);
+    }
+    return tensor.to(options, /*non_blocking=*/true);
+}
+#endif
+}  // namespace
 
 absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::list<EmbeddingStreamPtr>& streams) const {
     int64_t token_num  = 0;
@@ -236,17 +248,37 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
         model_input.need_moe_gating = true;
     }
     reportMetrics(batch_size, token_num, max_seq_len);
-    // Preserve host planning inputs; PyWrappedModel submits the device copies.
+    // Normalize gathered host metadata before the model-facing device conversion.
     prepareEmbeddingInputMetadata(model_input.combo_tokens,
                                   model_input.input_lengths,
                                   model_input.sequence_lengths,
                                   model_input.prefix_lengths);
+#if USING_CUDA
+    // TODO(async): embedding streams are still gathered through CPU pointers,
+    // but the model-facing GptModelInputs metadata should be CUDA resident.
+    // Non-CUDA platforms keep the host pipeline: buildPyAttentionInputs's
+    // device-metadata branch requires the CUDA-only metadata kernel.
+    // BERT two-pass plans ragged attention from host lengths and scans host tokens.
+    // Keep the already gathered metadata on CPU rather than copying it back from CUDA.
+    static const bool use_uqi_two_pass = []() {
+        const char* mask = std::getenv("USE_VISION_BERT_UQI_BLOCK_MASK");
+        const char* two_pass = std::getenv("VISION_BERT_UQI_TWO_PASS");
+        return mask && std::string(mask) == "1"
+               && (!two_pass || std::string(two_pass) == "1");
+    }();
+    if (!use_uqi_two_pass) {
+        model_input.combo_tokens     = toCudaInt32ModelInput(model_input.combo_tokens);
+        model_input.input_lengths    = toCudaInt32ModelInput(model_input.input_lengths);
+        model_input.sequence_lengths = toCudaInt32ModelInput(model_input.sequence_lengths);
+        model_input.prefix_lengths   = toCudaInt32ModelInput(model_input.prefix_lengths);
+    }
+#endif
     return model_input;
 }
 
 ModelRequest EmbeddingExecutor::generateOldModelRequest(GptModelInputs& model_input) {
-    // Python handlers (extend_forward) consume host metadata. Preserve this
-    // contract even when an optional field arrives on the device.
+    // Python handlers (extend_forward) expect these metadata tensors on CPU,
+    // while gatherModelInput now keeps the model-facing copies CUDA resident.
     auto to_cpu = [](const torch::Tensor& tensor) {
         return tensor.defined() && tensor.is_cuda() ? tensor.cpu() : tensor;
     };
@@ -260,20 +292,6 @@ ModelRequest EmbeddingExecutor::generateOldModelRequest(GptModelInputs& model_in
     model_request.sequence_lengths     = to_cpu(model_input.sequence_lengths);
     model_request.prefix_lengths       = to_cpu(model_input.prefix_lengths);
     model_request.attention_mask       = model_input.attention_mask;
-    if (HandlerArgs::has_arg(handler_args_, HandlerArgs::Arg::CLS_INDICES)) {
-        // CLS offsets depend only on lengths. Upload before model forward so
-        // the classifier never submits a blocking index upload after replay.
-        model_request.cls_indices_host = torch::empty(
-            {model_request.context_batch_size}, torch::TensorOptions().dtype(torch::kInt64).pinned_memory(true));
-        const auto* lengths = model_request.input_lengths.data_ptr<int32_t>();
-        auto*       indices = model_request.cls_indices_host.data_ptr<int64_t>();
-        int64_t     offset  = 0;
-        for (int i = 0; i < model_request.context_batch_size; ++i) {
-            indices[i] = offset;
-            offset += lengths[i];
-        }
-        model_request.cls_indices = model_request.cls_indices_host.to(torch::kCUDA, /*non_blocking=*/true);
-    }
     return model_request;
 }
 
@@ -369,9 +387,6 @@ absl::StatusOr<py::object> EmbeddingExecutor::postProcess(const ModelRequest&   
         py::dict kwargs;
         if (has_arg(handler_args_, Arg::INPUT_LENGTHS)) {
             kwargs[get_name(Arg::INPUT_LENGTHS)] = model_request.input_lengths;
-        }
-        if (has_arg(handler_args_, Arg::CLS_INDICES)) {
-            kwargs[get_name(Arg::CLS_INDICES)] = model_request.cls_indices;
         }
         if (has_arg(handler_args_, Arg::HIDDEN_STATES)) {
             kwargs[get_name(Arg::HIDDEN_STATES)] = gpu_outputs.all_hidden_states;
