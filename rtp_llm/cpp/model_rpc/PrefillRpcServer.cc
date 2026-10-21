@@ -194,6 +194,14 @@ std::unique_ptr<GenerateContext> PrefillRpcServer::makeBatchRequestContext(
             span, &context->error_status, telemetry::SpanStatusSemantics::Logical);
         context->trace_span_guard->setAttribute(telemetry::kAttrRequestId, std::to_string(request.request_id()));
         context->trace_span_guard->setAttribute(telemetry::kAttrGenAiPdRole, telemetry::kValPdRoleProducer);
+        context->trace_span_guard->setAttribute(telemetry::kAttrRtpLlmPdSep, true);
+        // FE wall-clock stamp to Prefill receipt, including routing/coalescing.
+        // An unset stamp or negative cross-machine clock delta is not a sample.
+        const auto received_time_us = currentTimeUs();
+        if (request.start_time() > 0 && request.start_time() <= received_time_us) {
+            context->trace_span_guard->setAttribute(
+                telemetry::kAttrRtpLlmPrefillHandoffDelayUs, received_time_us - request.start_time());
+        }
     }
     return context;
 }

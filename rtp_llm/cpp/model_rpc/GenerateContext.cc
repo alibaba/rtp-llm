@@ -39,11 +39,13 @@ void GenerateContext::synthesizeTracePhases(telemetry::PhaseRole role, bool exce
     phase_timing.synthesis_end_time_us   = currentTimeUs();
     phase_timing.request_id              = request_id;
     const bool request_ok                = error_status.ok() && !exception_unwinding;
-    if (role == telemetry::PhaseRole::Fusion && request_ok && time_info.generation_done) {
+    if (request_ok && time_info.generation_done) {
         // Beam rows are an internal search width; Fusion exposes one primary
         // sequence (the remaining candidates live in beam_responses). Only
-        // ordinary multi-return requests aggregate all active rows.
+        // ordinary multi-return Fusion requests aggregate all active rows. PD
+        // retains its existing per-sequence, per-hop usage contract.
         const auto returned_sequence_count =
+            role != telemetry::PhaseRole::Fusion ? 1 :
             stream->hasNumBeams() ? std::max(stream->numReturnSequences(), 1) : stream->currentBatchSize();
         telemetry::setUsageTokenAttributes(*trace_span_guard,
                                            (int64_t)stream->inputLength(),
@@ -53,7 +55,10 @@ void GenerateContext::synthesizeTracePhases(telemetry::PhaseRole role, bool exce
     const auto first_error = FirstError::earlier(local_error, dependency_failure);
     const bool dependency_selected = dependency_failure.error.hasError()
                                      && first_error.order == dependency_failure.order;
+    const bool priority_preempted = first_error.error.code() == ErrorCode::PRIORITY_PREEMPTED
+                                    || error_info.code() == ErrorCode::PRIORITY_PREEMPTED;
     phase_timing.error_type = request_ok ? nullptr :
+                               priority_preempted ? "PRIORITY_PREEMPTED" :
                                dependency_selected ? "DependencyFailure" :
                                !error_status.ok() ? telemetry::grpcStatusCodeName(error_status.error_code()) :
                                                     "Exception";

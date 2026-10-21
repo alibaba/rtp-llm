@@ -207,6 +207,55 @@ TEST(RpcWriterCancellationTest, PdPhaseSynthesisExportsRoleSpecificFailureSpans)
     EXPECT_EQ(decode_count, 1u);
 }
 
+TEST(RpcWriterCancellationTest, PdUsageRequiresSuccessfulCompletedGeneration) {
+    namespace memory = opentelemetry::exporter::memory;
+    telemetry::TelemetryRuntime::shutdown(5000);
+    std::shared_ptr<memory::InMemorySpanData> span_data;
+    auto exporter = memory::InMemorySpanExporterFactory::Create(span_data);
+    telemetry::TelemetryConfig config;
+    config.enabled = true;
+    config.role = "test";
+    ASSERT_TRUE(telemetry::TelemetryRuntime::initWithExporter(std::move(exporter), config));
+    for (auto role : {telemetry::PhaseRole::Prefill, telemetry::PhaseRole::Decode}) {
+        for (int outcome = 0; outcome < 3; ++outcome) {
+            kmonitor::MetricsReporterPtr reporter;
+            GenerateContext context(65, 0, nullptr, reporter, std::make_shared<RpcServerRuntimeMeta>());
+            auto stream = std::make_shared<SingleOutputStream>();
+            stream->setSeqLength(3);  // One prompt token, two generated tokens.
+            if (outcome != 2) {
+                stream->reportEvent(StreamEvents::GenerateDone);
+            }
+            if (outcome == 1) {
+                context.recordRpcFailure({ErrorCode::CANCELLED, "cancelled after generation"});
+            }
+            context.setStream(stream);
+            auto span = telemetry::startRpcServerSpan(outcome == 0 ? "pd-usage-ok" : "pd-usage-incomplete",
+                                                      nullptr, true);
+            context.trace_span_guard = std::make_unique<telemetry::GrpcStatusSpanGuard>(span, &context.error_status);
+            context.synthesizeTracePhases(role, false);
+            context.markRpcHandlingCompleted();
+        }
+    }
+    EXPECT_TRUE(telemetry::TelemetryRuntime::shutdown(5000));
+    size_t successful = 0;
+    size_t incomplete = 0;
+    for (const auto& span : span_data->GetSpans()) {
+        const auto& attrs = span->GetAttributes();
+        if (span->GetName() == "pd-usage-ok") {
+            ++successful;
+            ASSERT_NE(attrs.find(telemetry::kAttrGenAiUsageTotalTokens), attrs.end());
+            EXPECT_EQ(opentelemetry::nostd::get<int64_t>(attrs.at(telemetry::kAttrGenAiUsageInputTokens)), 1);
+            EXPECT_EQ(opentelemetry::nostd::get<int64_t>(attrs.at(telemetry::kAttrGenAiUsageOutputTokens)), 2);
+            EXPECT_EQ(opentelemetry::nostd::get<int64_t>(attrs.at(telemetry::kAttrGenAiUsageTotalTokens)), 3);
+        } else if (span->GetName() == "pd-usage-incomplete") {
+            ++incomplete;
+            EXPECT_EQ(attrs.count(telemetry::kAttrGenAiUsageTotalTokens), 0u);
+        }
+    }
+    EXPECT_EQ(successful, 2u);
+    EXPECT_EQ(incomplete, 4u);
+}
+
 TEST(RpcWriterCancellationTest, KvLoadTraceKeepsCompletedSuccessAndAttributesDependencyFailure) {
     namespace memory = opentelemetry::exporter::memory;
     telemetry::TelemetryRuntime::shutdown(5000);
@@ -411,6 +460,7 @@ TEST(RpcWriterCancellationTest, BatchItemTraceUsesItsRemoteContextAndEndsOnPreem
         server.cancel_registry_ = std::make_unique<PDCancelRegistry>(server.meta_);
         GenerateInputPB request;
         request.set_request_id(64);
+        request.set_start_time(currentTimeUs() - 1000);
         request.mutable_generate_config()->set_timeout_ms(1000);
         request.mutable_request_info()->mutable_trace_context()->set_traceparent(
             "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01");
@@ -434,6 +484,9 @@ TEST(RpcWriterCancellationTest, BatchItemTraceUsesItsRemoteContextAndEndsOnPreem
     for (const auto& span : spans) {
         if (span->GetName() == "prefill") {
             ++prefill_phases;
+            const auto& attrs = span->GetAttributes();
+            ASSERT_NE(attrs.find(telemetry::kAttrErrorType), attrs.end());
+            EXPECT_EQ(opentelemetry::nostd::get<std::string>(attrs.at(telemetry::kAttrErrorType)), "PRIORITY_PREEMPTED");
         }
         if (span->GetName() != "rtp_llm.prefill_batch_request") {
             continue;
@@ -443,6 +496,10 @@ TEST(RpcWriterCancellationTest, BatchItemTraceUsesItsRemoteContextAndEndsOnPreem
         span->GetParentSpanId().ToLowerBase16(source_id);
         EXPECT_EQ(std::string(source_id, sizeof(source_id)), "00f067aa0ba902b7");
         EXPECT_EQ(span->GetSpanKind(), opentelemetry::trace::SpanKind::kInternal);
+        const auto& handoff_attrs = span->GetAttributes();
+        ASSERT_NE(handoff_attrs.find(telemetry::kAttrRtpLlmPrefillHandoffDelayUs), handoff_attrs.end());
+        EXPECT_GE(opentelemetry::nostd::get<int64_t>(handoff_attrs.at(telemetry::kAttrRtpLlmPrefillHandoffDelayUs)), 1000);
+        EXPECT_EQ(handoff_attrs.count(telemetry::kAttrGenAiUsageTotalTokens), 0u);
         EXPECT_EQ(span->GetStatus(), opentelemetry::trace::StatusCode::kError);
         const auto& attrs = span->GetAttributes();
         ASSERT_NE(attrs.find(telemetry::kAttrErrorType), attrs.end());
