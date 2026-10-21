@@ -1,4 +1,5 @@
 import os
+from types import SimpleNamespace
 from unittest import SkipTest, TestCase, main, mock
 
 import torch
@@ -36,6 +37,32 @@ class BertMultimodalEmbeddingTest(TestCase):
     def setUp(self) -> None:
         if not torch.cuda.is_available():
             raise SkipTest("CUDA is not available")
+
+    def test_split_forward_preserves_visual_injection(self):
+        model = self._build_one_layer_model()
+        inputs = _build_inputs(hidden_size=_ONE_LAYER_HIDDEN_SIZE)
+        inputs.multimodal_inputs.multimodal_features = [
+            torch.randn(1, _ONE_LAYER_HIDDEN_SIZE, dtype=torch.float16, device="cuda")
+        ]
+        inputs.multimodal_inputs.mm_features_locs = torch.tensor([1], dtype=torch.int32)
+        inputs.embedding_inputs.text_tokens_mask = torch.tensor(
+            [1, 0, 1, 1], device="cuda", dtype=torch.int32
+        )
+
+        # A simple independent attention function keeps this focused on the
+        # split boundary, including the one-layer residual/MLP path.
+        class IdentityAttention:
+            def forward(self, qkv, kv_cache, layer_idx=0):
+                return qkv[:, :_ONE_LAYER_HIDDEN_SIZE]
+
+        attention = IdentityAttention()
+        expected = model.forward(inputs, attention).hidden_states
+        prepared = model.prepare_transformer_inputs(inputs)
+        torch.testing.assert_close(
+            prepared[1], inputs.multimodal_inputs.multimodal_features[0][0]
+        )
+        actual = model.forward(inputs, attention, input_hiddens=prepared).hidden_states
+        torch.testing.assert_close(actual, expected)
 
     def test_user_mask_routes_only_text_markers_to_flashinfer(self):
         with mock.patch.dict(os.environ, {"USE_VISION_BERT_UQI_BLOCK_MASK": "1"}):

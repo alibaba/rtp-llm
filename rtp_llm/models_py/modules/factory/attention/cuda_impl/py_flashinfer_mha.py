@@ -638,11 +638,15 @@ class PyFlashinferPrefillPagedAttnOp(object):
 
 
 class PyFlashinferPrefillAttnOp(object):
+
     def __init__(
         self,
         attn_configs: AttentionConfigs,
         backend: str = "auto",
         custom_mask: Optional[torch.Tensor] = None,
+        token_capacity: Optional[int] = None,
+        max_seq_len: int = 0,
+        mask_builder=None,
     ) -> None:
         self.g_workspace_buffer = get_py_flashinfer_workspace_buffer()
         # attn_configs.head_num and kv_head_num are already divided by tp_size in ModelConfig::getAttentionConfigs
@@ -652,16 +656,106 @@ class PyFlashinferPrefillAttnOp(object):
         self.page_size = attn_configs.kernel_tokens_per_block
         # TODO: maybe use v_head_dim
         self.head_dim_vo = attn_configs.size_per_head
-        self.prefill_wrapper = BatchPrefillWithRaggedKVCacheWrapper(
-            self.g_workspace_buffer,
-            backend=backend,
-        )
         self.dtype = attn_configs.dtype
-        self.q_dtype = attn_q_dtype(attn_configs)
-        self.kv_dtype = attn_kv_dtype(attn_configs)
+        self.q_dtype = (
+            attn_configs.dtype
+            if token_capacity is not None
+            else attn_q_dtype(attn_configs)
+        )
+        self.kv_dtype = (
+            attn_configs.dtype
+            if token_capacity is not None
+            else attn_kv_dtype(attn_configs)
+        )
         self.is_causal = attn_configs.is_causal
         self.custom_mask = custom_mask
         self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
+
+        self.token_capacity = token_capacity
+        self.max_sequence_length = max_seq_len or token_capacity
+        self.mask_builder = mask_builder
+        self.is_cuda_graph = token_capacity is not None
+        if not self.is_cuda_graph:
+            self.prefill_wrapper = BatchPrefillWithRaggedKVCacheWrapper(
+                self.g_workspace_buffer, backend=backend
+            )
+
+    def initialize_cuda_graph(self, configs, attn_inputs):
+        """Allocate bucket-owned storage once, before warmup and capture."""
+        self.request_capacity = attn_inputs.input_lengths.numel()
+        self.padding_slots = (
+            self.token_capacity + self.max_sequence_length - 1
+        ) // self.max_sequence_length
+        self.cu_seqlens_host = torch.empty(
+            self.request_capacity + self.padding_slots + 1,
+            dtype=torch.int32,
+            pin_memory=True,
+        )
+        self.cu_seqlens_device = torch.empty_like(self.cu_seqlens_host, device="cuda")
+        self.kv_cu_seqlens_device = torch.empty_like(self.cu_seqlens_device)
+        self.rope_cache, self.positions_host, self.positions_device = (
+            common.create_embedding_graph_rope(
+                configs, self.token_capacity, self.max_sequence_length
+            )
+        )
+        mask_buffers = {}
+        if self.mask_builder is not None:
+            if self.token_capacity * self.token_capacity > torch.iinfo(torch.int32).max:
+                raise ValueError("custom mask exceeds int32 mask-indptr capacity")
+            self.custom_mask_buffer = torch.empty(
+                (self.token_capacity * self.token_capacity + 7) // 8
+                + self.request_capacity
+                + self.padding_slots,
+                dtype=torch.uint8,
+                device="cuda",
+            )
+            self.mask_indptr_buffer = torch.empty_like(self.cu_seqlens_device)
+            mask_buffers = dict(
+                custom_mask_buf=self.custom_mask_buffer,
+                mask_indptr_buf=self.mask_indptr_buffer,
+            )
+        self.prefill_wrapper = BatchPrefillWithRaggedKVCacheWrapper(
+            self.g_workspace_buffer,
+            backend="fa2",
+            use_cuda_graph=True,
+            qo_indptr_buf=self.cu_seqlens_device,
+            kv_indptr_buf=self.kv_cu_seqlens_device,
+            **mask_buffers,
+        )
+        self.prepare_cuda_graph(attn_inputs, for_capture=True)
+
+    def prepare_cuda_graph(self, attn_inputs, for_capture=False):
+        lengths = common.prepare_embedding_graph_lengths(
+            attn_inputs,
+            self.token_capacity,
+            self.request_capacity,
+            self.max_sequence_length,
+            self.cu_seqlens_host,
+            for_capture,
+        )
+        common.prepare_embedding_graph_positions(
+            attn_inputs, lengths, self.positions_host, self.positions_device
+        )
+        mask_args = (
+            self.mask_builder(attn_inputs, lengths, self.padding_slots, for_capture)
+            if self.mask_builder
+            else {}
+        )
+        self.prefill_wrapper.plan(
+            self.cu_seqlens_host,
+            self.cu_seqlens_host,
+            self.local_head_num,
+            self.local_kv_head_num,
+            self.head_dim_qk,
+            self.head_dim_vo,
+            causal=self.is_causal,
+            q_data_type=self.dtype,
+            kv_data_type=self.dtype,
+            o_data_type=self.dtype,
+            disable_split_kv=True,
+            **mask_args,
+        )
+        return self.fmha_params
 
     def __del__(self):
         release_py_flashinfer_workspace_buffer(self.g_workspace_buffer)
@@ -677,6 +771,8 @@ class PyFlashinferPrefillAttnOp(object):
         Args:
             attn_inputs: Attention inputs containing sequence information
         """
+        if getattr(self, "is_cuda_graph", False):
+            return self.prepare_cuda_graph(attn_inputs)
         batch_size = attn_inputs.input_lengths.size(0)
         cu_seqlens = attn_inputs.cu_seqlens_device[: batch_size + 1]
 
@@ -725,6 +821,12 @@ class PyFlashinferPrefillAttnOp(object):
         v: torch.Tensor,
         kv_cache: Optional[LayerKVCache] = None,
     ) -> torch.Tensor:
+        if getattr(self, "is_cuda_graph", False):
+            if kv_cache is not None:
+                raise ValueError("embedding graph cannot use KV cache")
+            q, k = common.apply_embedding_graph_rotary(
+                q, k, self.rope_cache, self.positions_device
+            )
         q = quantize_to_fp8_if_needed(q, self.q_dtype)
         k = quantize_to_fp8_if_needed(k, self.kv_dtype)
         v = quantize_to_fp8_if_needed(v, self.kv_dtype)
@@ -1170,9 +1272,46 @@ class PyFlashinferPrefillImpl(PyFlashinferPrefillImplBase):
         attn_inputs: PyAttentionInputs,
         parallelism_config: Optional[ParallelismConfig] = None,
         custom_mask: Optional[torch.Tensor] = None,
+        is_cuda_graph: bool = False,
+        token_capacity: Optional[int] = None,
+        max_seq_len: int = 0,
+        mask_builder=None,
     ) -> None:
         self.custom_mask = custom_mask
-        super().__init__(attn_configs, attn_inputs, parallelism_config)
+        self.is_cuda_graph = is_cuda_graph
+        if is_cuda_graph:
+            if token_capacity is None or token_capacity <= 0:
+                raise ValueError("embedding graph requires a positive token capacity")
+            self.attn_configs, self.attn_inputs = attn_configs, attn_inputs
+            self.fmha_impl = PyFlashinferPrefillAttnOp(
+                attn_configs,
+                token_capacity=token_capacity,
+                max_seq_len=max_seq_len,
+                mask_builder=mask_builder,
+            )
+            self.fmha_impl.initialize_cuda_graph(attn_configs, attn_inputs)
+            self.fmha_params = self.fmha_impl.fmha_params
+        else:
+            super().__init__(attn_configs, attn_inputs, parallelism_config)
+
+    @staticmethod
+    def embedding_cuda_graph_unsupported_reason(configs):
+        return common.embedding_graph_unsupported_reason(configs, "flashinfer")
+
+    def prepare_cuda_graph(self, attn_inputs):
+        if not self.is_cuda_graph:
+            raise ValueError("ragged prefill instance was not initialized for a Graph")
+        self.fmha_impl.prepare_cuda_graph(attn_inputs)
+
+    def forward(self, qkv, kv_cache, layer_idx=0):
+        if not self.is_cuda_graph:
+            return super().forward(qkv, kv_cache, layer_idx)
+        if qkv.size(0) != self.fmha_impl.token_capacity:
+            raise ValueError("embedding graph QKV token capacity changed")
+        query, key, value = self._split_qkv(qkv)
+        return self.fmha_impl.forward(query, key, value, kv_cache).reshape(
+            qkv.size(0), -1
+        )
 
     def _create_fmha_impl(
         self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
@@ -1193,7 +1332,7 @@ class PyFlashinferPrefillImpl(PyFlashinferPrefillImplBase):
         return query, key, value
 
     def support_cuda_graph(self) -> bool:
-        return False
+        return self.is_cuda_graph
 
     @staticmethod
     def support(attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs) -> bool:

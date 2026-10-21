@@ -20,6 +20,7 @@ from rtp_llm.ops.compute_ops import (
     PyModelInputs,
     PyModelOutputs,
     get_typemeta,
+    rtp_llm_ops,
 )
 
 GROUP_TAGS = ["full", "aux"]
@@ -28,7 +29,116 @@ TOKENS_PER_BLOCK = 8
 KERNEL_BLOCK_TABLE_WIDTH = 8
 
 
-class TaggedBlockTableModel:
+class EmbeddingGraphTestModel:
+    def prepare_embedding_graph_attention(self, inputs, is_cuda_graph=True):
+        return self.prepare_fmha_impl(inputs, is_cuda_graph)
+
+    def prepare_embedding_graph_replay(self, attention, graph_inputs, request_inputs):
+        pass  # These signature-only models have no attention plan.
+
+    def validate_embedding_graph_inputs(self, inputs):
+        mm = inputs.multimodal_inputs
+        mask = inputs.embedding_inputs.text_tokens_mask
+        return (
+            not mm.multimodal_features
+            and (mm.mm_features_locs is None or mm.mm_features_locs.numel() == 0)
+            and (mask is None or mask.numel() == 0)
+        )
+
+    def prepare_transformer_inputs(self, inputs):
+        return inputs.input_hiddens
+
+    def forward_embedding_graph(self, inputs, fmha_impl=None):
+        return self.forward(inputs, fmha_impl)
+
+
+class BertEmbeddingModel(EmbeddingGraphTestModel):
+    """Prepare real BERT embeddings outside capture with model-owned weights."""
+
+    def __init__(self, word_embedding, position_encoding, token_type_embedding, scalar):
+        self.word_embedding = word_embedding
+        self.position_encoding = position_encoding
+        self.token_type_embedding = token_type_embedding
+        self.scalar = scalar
+
+    def prepare_fmha_impl(self, inputs, is_cuda_graph=False):
+        return None
+
+    def validate_embedding_graph_inputs(self, inputs):
+        if not super().validate_embedding_graph_inputs(inputs):
+            return False
+        count = inputs.input_ids.numel()
+        return all(
+            tensor is not None
+            and tensor.numel() >= count
+            and tensor.dtype == torch.int32
+            and tensor.is_cuda
+            and tensor.is_contiguous()
+            for tensor in (
+                inputs.bert_embedding_inputs.combo_position_ids,
+                inputs.bert_embedding_inputs.combo_tokens_type_ids,
+            )
+        )
+
+    def prepare_transformer_inputs(self, inputs):
+        bert = inputs.bert_embedding_inputs
+        output = torch.empty(
+            (inputs.input_ids.numel(), HIDDEN_SIZE),
+            dtype=self.word_embedding.dtype,
+            device=inputs.input_ids.device,
+        )
+        rtp_llm_ops.embedding_bert(
+            output,
+            inputs.input_ids,
+            self.word_embedding,
+            bert.combo_position_ids,
+            self.position_encoding,
+            bert.combo_tokens_type_ids,
+            self.token_type_embedding,
+            self.scalar,
+            None,
+        )
+        return output
+
+    def forward(self, inputs, fmha_impl=None):
+        return PyModelOutputs(inputs.input_hiddens)
+
+
+class TransformerOnlyCudaGraphEmbeddingModel(EmbeddingGraphTestModel):
+
+    def __init__(self):
+        self.prepare_calls = 0
+
+    def prepare_fmha_impl(self, inputs, is_cuda_graph=False):
+        return None
+
+    def validate_embedding_graph_inputs(self, inputs):
+        return True  # This mock explicitly supports visual input preparation.
+
+    def prepare_transformer_inputs(self, inputs):
+        assert not torch.cuda.is_current_stream_capturing()
+        self.prepare_calls += 1
+        hidden = (
+            inputs.input_ids.to(torch.bfloat16)
+            .unsqueeze(1)
+            .expand(-1, HIDDEN_SIZE)
+            .clone()
+        )
+        locs = inputs.multimodal_inputs.mm_features_locs
+        if locs is not None:
+            for feature, loc in zip(
+                inputs.multimodal_inputs.multimodal_features, locs.tolist()
+            ):
+                hidden[loc : loc + feature.size(0)].copy_(feature)
+        return hidden
+
+    def forward(self, inputs, fmha_impl=None):
+        hidden = inputs.input_hiddens
+        # Including the tail in this reduction detects stale bucket padding.
+        return PyModelOutputs(hidden * 2 + hidden.sum(dim=0))
+
+
+class TaggedBlockTableModel(EmbeddingGraphTestModel):
     """Small graph-safe model whose output exposes both tag-local block tables."""
 
     def prepare_fmha_impl(
@@ -47,7 +157,7 @@ class TaggedBlockTableModel:
         return PyModelOutputs(inputs.input_hiddens + signature)
 
 
-class TaggedSequenceLengthModel:
+class TaggedSequenceLengthModel(EmbeddingGraphTestModel):
     """Expose the cumulative lengths used by a tagged captured graph."""
 
     def prepare_fmha_impl(
@@ -151,7 +261,7 @@ class RetryableGraphPrepareModel(TaggedBlockTableModel):
         return self.graph_prepare
 
 
-class CapturedHostLengthModel:
+class CapturedHostLengthModel(EmbeddingGraphTestModel):
     """Model a HIP Graph kernel that directly consumes mapped host metadata."""
 
     def prepare_fmha_impl(
@@ -173,11 +283,17 @@ class CapturedHostLengthModel:
         return PyModelOutputs(inputs.input_hiddens + first_length)
 
 
-class TextOnlyMultimodalCapableModel:
+class TextOnlyMultimodalCapableModel(EmbeddingGraphTestModel):
     """Qwen3-VL-like graph model used without request-side multimodal payload."""
 
     input_hiddens_numel = -1
     cuda_graph_selection_mode = None
+
+    def prepare_transformer_inputs(self, inputs):
+        return self.forward(inputs).hidden_states
+
+    def forward_embedding_graph(self, inputs, fmha_impl=None):
+        return PyModelOutputs(inputs.input_hiddens)
 
     def __init__(self) -> None:
         self.bert_buffer_shapes: list[tuple[int, int]] = []
@@ -1181,84 +1297,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
         runner.make_input_ids_scalar(scalar_input_ids)
         self.assertFalse(runner.canRun(scalar_input_ids))
 
-    def test_legacy_embedding_keeps_capture_buffers_and_eligibility(self) -> None:
-        weights = torch.ones((2, 1), dtype=torch.bfloat16, device="cuda")
-        for has_positions, has_token_types in (
-            (False, False),
-            (True, False),
-            (False, True),
-            (True, True),
-        ):
-            with self.subTest(positions=has_positions, token_types=has_token_types):
-                runner = CudaGraphRunner()
-                model = TextOnlyMultimodalCapableModel()
-                runner.init_prefill(
-                    model,
-                    2,
-                    TOKENS_PER_BLOCK,
-                    KERNEL_BLOCK_TABLE_WIDTH,
-                    [4],
-                    HIDDEN_SIZE,
-                    GROUP_TAGS,
-                    weights if has_positions else None,
-                    weights if has_token_types else None,
-                )
-                # Main always allocates both max_seq_len * max_batch buffers;
-                # both are sliced per bucket only when position weights exist.
-                full_capacity = 2 * TOKENS_PER_BLOCK
-                expected_shapes = {(full_capacity, full_capacity)}
-                if has_positions:
-                    expected_shapes.add((4, 4))
-                self.assertEqual(set(model.bert_buffer_shapes), expected_shapes)
 
-                inputs = _build_prefill_inputs(
-                    GROUP_TAGS, {"full": 1, "aux": 2}, seq_len=[2, 2]
-                )
-                # Request-owned BERT IDs are not a legacy graph eligibility
-                # requirement. The generation-only validation must not leak in.
-                self.assertTrue(runner.canPrepare(inputs))
-                self.assertTrue(runner.canRun(inputs))
-
-    def test_legacy_embedding_refreshes_bert_ids_during_prepare(self) -> None:
-        runner = CudaGraphRunner()
-        position_encoding = torch.tensor(
-            [[3], [7]], dtype=torch.bfloat16, device="cuda"
-        )
-        token_type_embedding = torch.tensor(
-            [[5], [11]], dtype=torch.bfloat16, device="cuda"
-        )
-        runner.init_prefill(
-            BertWeightAwareModel(),
-            1,
-            TOKENS_PER_BLOCK,
-            KERNEL_BLOCK_TABLE_WIDTH,
-            [TOKENS_PER_BLOCK],
-            HIDDEN_SIZE,
-            GROUP_TAGS,
-            position_encoding,
-            token_type_embedding,
-        )
-        for ids in ([0, 1, 0, 1], [1, 0, 1, 0]):
-            inputs = _build_prefill_inputs(GROUP_TAGS, {"full": 1, "aux": 2})
-            positions = torch.tensor(ids, dtype=torch.int32, device="cuda")
-            token_types = 1 - positions
-            inputs.bert_embedding_inputs = BertEmbeddingInputs(
-                positions, position_encoding, token_types, token_type_embedding, 1.0
-            )
-            self.assertTrue(runner.canRun(inputs))
-            # No separate metadata-only prepare: forward calls prepareInputs(),
-            # including the legacy attention-stage BERT ID copies.
-            output = runner.forward(inputs)
-            torch.cuda.synchronize()
-            expected = (
-                inputs.input_ids.to(torch.bfloat16).unsqueeze(1) * 10
-                + torch.arange(
-                    HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda"
-                ).unsqueeze(0)
-                + position_encoding.index_select(0, positions.to(torch.int64))
-                + token_type_embedding.index_select(0, token_types.to(torch.int64))
-            )
-            torch.testing.assert_close(output.hidden_states, expected)
 
     def test_generation_prefill_installs_embedding_weights_before_capture(self) -> None:
         runner = CudaGraphRunner()
@@ -1686,6 +1725,410 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                     tuple(output.mtp_target_hidden_states.shape),
                 )
                 torch.testing.assert_close(output.mtp_target_hidden_states, expected)
+    def test_embedding_runner_does_not_interpret_business_flags(self):
+        model = TransformerOnlyCudaGraphEmbeddingModel()
+        model.use_user_profile_mask = (
+            True  # Only the model's validator defines its input contract.
+        )
+        runner = CudaGraphRunner()
+        runner.init_prefill(model, 2, 8, 8, [8], HIDDEN_SIZE, GROUP_TAGS)
+        inputs = _build_prefill_inputs(GROUP_TAGS, {"full": 1, "aux": 2}, 4)
+        self.assertTrue(
+            runner.canRun(inputs)
+        )  # No user-segment bounds are required by this model.
+        result = runner.forward(inputs).hidden_states.clone()
+        hidden = (
+            inputs.input_ids.to(torch.bfloat16).unsqueeze(1).expand(-1, HIDDEN_SIZE)
+        )
+        torch.testing.assert_close(result, hidden * 2 + hidden.sum(dim=0))
+
+
+    def test_uqi_graph_requires_valid_host_segment_bounds(self):
+        class SegmentValidatedModel(TransformerOnlyCudaGraphEmbeddingModel):
+            def validate_embedding_graph_inputs(self, inputs):
+                from rtp_llm.models_py.modules.factory.attention.bert_uqi_schedule import (
+                    valid_bert_uqi_bounds,
+                )
+
+                return all(
+                    valid_bert_uqi_bounds(attn)
+                    for attn in inputs.attention_inputs.values()
+                )
+
+        model = SegmentValidatedModel()
+        runner = CudaGraphRunner()
+        runner.init_prefill(model, 2, 8, 8, [8], HIDDEN_SIZE, GROUP_TAGS)
+        inputs = _build_prefill_inputs(GROUP_TAGS, {"full": 1, "aux": 2}, 4)
+        self.assertFalse(runner.canRun(inputs))
+
+        self.assertIsInstance(inputs.attention_inputs, dict)
+        self.assertEqual(set(inputs.attention_inputs), set(GROUP_TAGS))
+
+        def set_bounds(starts, counts, device="cpu"):
+            # Each getter exposes references into the current C++ map. Fetch
+            # fresh references after every assignment replaces that map.
+            tagged = inputs.attention_inputs
+            for attention in tagged.values():
+                attention.uqi_b_starts = torch.tensor(starts, dtype=torch.int32, device=device)
+                attention.uqi_b_lens = torch.tensor(counts, dtype=torch.int32, device=device)
+            # The binding copies the primary input when assigning the mapping.
+            # Reassign it so both the primary input and every tag are refreshed.
+            inputs.attention_inputs = tagged
+
+        set_bounds([1], [2])
+        self.assertTrue(runner.canRun(inputs))
+        for starts, counts in (([1], [5]), ([1], [-1]), ([], [])):
+            with self.subTest(starts=starts, counts=counts):
+                set_bounds(starts, counts)
+                self.assertFalse(runner.canRun(inputs))
+        set_bounds([1], [2], device="cuda")
+        self.assertFalse(runner.canRun(inputs))
+        # A rejected request must not prevent a later valid request replaying.
+        set_bounds([1], [2])
+        self.assertTrue(runner.canRun(inputs))
+        runner.prepareAttentionInputs(inputs)
+        actual = runner.forward(inputs).hidden_states.clone()
+        torch.cuda.synchronize()
+        hidden = inputs.input_ids.to(torch.bfloat16).unsqueeze(1).expand(-1, HIDDEN_SIZE)
+        torch.testing.assert_close(actual, hidden * 2 + hidden.sum(dim=0))
+
+
+    def test_transformer_only_32_sequences_exceed_single_sequence_capacity(self):
+        runner = CudaGraphRunner()
+        model = TransformerOnlyCudaGraphEmbeddingModel()
+        runner.init_prefill(model, 32, 512, 8, [6144], HIDDEN_SIZE, GROUP_TAGS)
+        self.assertEqual(model.prepare_calls, 0)
+        # Alternate a packed 32-item batch and a short batch in the same graph.
+        # Every real sequence fits 512; the aggregate batch is much larger.
+        for lengths in ([170] * 32, [12], [180] * 32):
+            attention = PyAttentionInputs()
+            attention.is_prefill = True
+            attention.input_lengths = torch.tensor(
+                lengths, dtype=torch.int32
+            ).pin_memory()
+            attention.prefix_lengths = torch.zeros(
+                len(lengths), dtype=torch.int32
+            ).pin_memory()
+            attention.cu_seqlens = torch.tensor(
+                [0] + list(torch.tensor(lengths).cumsum(0).tolist()),
+                dtype=torch.int32,
+            ).pin_memory()
+            attention.cu_seqlens_device = attention.cu_seqlens.cuda()
+            attention.cu_kv_seqlens_device = attention.cu_seqlens_device.clone()
+            attention.context_total_kv_length = sum(lengths)
+            inputs = _build_common_inputs(
+                attention,
+                GROUP_TAGS,
+                {"full": 1, "aux": 2},
+                len(lengths),
+                sum(lengths),
+                1,
+            )
+            # Match EmbeddingExecutor's CUDA metadata path, including an empty
+            # host cu_seqlens. Reading input_lengths through a CPU pointer here
+            # used to SIGSEGV before the graph could replay.
+            attn_inputs = attention
+            attn_inputs.input_lengths = attn_inputs.input_lengths.cuda()
+            attn_inputs.prefix_lengths = attn_inputs.prefix_lengths.cuda()
+            attn_inputs.cu_seqlens = torch.empty(0, dtype=torch.int32).pin_memory()
+            inputs.attention_inputs = _tag_attention_inputs(
+                attn_inputs, GROUP_TAGS, {"full": 1, "aux": 2}
+            )
+            self.assertTrue(runner.canRun(inputs))
+            runner.prepareAttentionInputs(inputs)
+            result = runner.forward(inputs).hidden_states.clone()
+            torch.cuda.synchronize()
+            hidden = (
+                inputs.input_ids.to(torch.bfloat16).unsqueeze(1).expand(-1, HIDDEN_SIZE)
+            )
+            torch.testing.assert_close(result, hidden * 2 + hidden.sum(dim=0))
+
+        over_capacity = _build_prefill_inputs(GROUP_TAGS, {"full": 1, "aux": 2}, 6145)
+        self.assertFalse(runner.canRun(over_capacity))
+
+
+    def test_transformer_only_replays_request_owned_visual_inputs(self):
+        model = TransformerOnlyCudaGraphEmbeddingModel()
+        runner = CudaGraphRunner()
+        runner.init_prefill(
+            model,
+            2,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            [4, 8],
+            HIDDEN_SIZE,
+            GROUP_TAGS,
+        )
+        self.assertEqual(model.prepare_calls, 0)
+        for seq_len, loc, value in [
+            (4, 0, 9),
+            (6, 3, -2),
+            (1, 0, 5),
+            (3, 1, 7),
+            (4, 2, 1),
+        ]:
+            with self.subTest(seq_len=seq_len, loc=loc, value=value):
+                inputs = _build_prefill_inputs(
+                    GROUP_TAGS, {"full": 1, "aux": 2}, seq_len
+                )
+                inputs.multimodal_inputs.multimodal_features = [
+                    torch.full(
+                        (1, HIDDEN_SIZE), value, dtype=torch.bfloat16, device="cuda"
+                    )
+                ]
+                inputs.multimodal_inputs.mm_features_locs = torch.tensor(
+                    [loc], dtype=torch.int32
+                )
+                inputs.embedding_inputs.text_tokens_mask = torch.ones(
+                    seq_len, dtype=torch.int32, device="cuda"
+                )
+                self.assertTrue(runner.canRun(inputs))
+                # Also exercise the production path that plans before forward.
+                runner.prepareAttentionInputs(inputs)
+                before = model.prepare_calls
+                result = runner.forward(inputs).hidden_states.clone()
+                torch.cuda.synchronize()
+                self.assertEqual(model.prepare_calls, before + 1)
+                hidden = (
+                    inputs.input_ids.to(torch.bfloat16)
+                    .unsqueeze(1)
+                    .expand(-1, HIDDEN_SIZE)
+                    .clone()
+                )
+                hidden[loc] = value
+                torch.testing.assert_close(result, hidden * 2 + hidden.sum(dim=0))
+
+
+    def test_prefill_prepares_bert_embeddings_outside_graph_with_model_parameters(
+        self,
+    ) -> None:
+        capture_scalar = 0.5
+        word_embedding = torch.arange(
+            16 * HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda"
+        ).reshape(16, HIDDEN_SIZE)
+        position_encoding = (
+            (torch.arange(16, dtype=torch.bfloat16, device="cuda").unsqueeze(1) * 100)
+            .expand(-1, HIDDEN_SIZE)
+            .contiguous()
+        )
+        token_type_embedding = (
+            (torch.arange(8, dtype=torch.bfloat16, device="cuda").unsqueeze(1) * 10)
+            .expand(-1, HIDDEN_SIZE)
+            .contiguous()
+        )
+        runner = CudaGraphRunner()
+        runner.init_prefill(
+            BertEmbeddingModel(
+                word_embedding, position_encoding, token_type_embedding, capture_scalar
+            ),
+            2,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            [4],
+            HIDDEN_SIZE,
+            GROUP_TAGS,
+            position_encoding,
+            token_type_embedding,
+        )
+
+        def build_inputs(
+            input_ids: list[int],
+            position_ids: list[int],
+            token_type_ids: list[int],
+            *,
+            provide_position_table: bool = True,
+        ) -> PyModelInputs:
+            inputs = _build_prefill_inputs(
+                GROUP_TAGS, {"full": 1, "aux": 2}, seq_len=len(input_ids)
+            )
+            inputs.input_ids = torch.tensor(input_ids, dtype=torch.int32, device="cuda")
+            # EmbeddingExecutor always populates this generic field. Bert uses
+            # the request's bert_embedding_inputs IDs outside capture, so the
+            # generic field must not disable graph replay.
+            inputs.embedding_inputs.combo_tokens_type_ids = torch.tensor(
+                token_type_ids, dtype=torch.int32, device="cuda"
+            )
+            inputs.bert_embedding_inputs.combo_position_ids = torch.tensor(
+                position_ids, dtype=torch.int32, device="cuda"
+            )
+            if provide_position_table:
+                # Request-owned tables and scalar are deliberately different:
+                # the producer must use its own model parameters.
+                inputs.bert_embedding_inputs.position_encoding = (
+                    position_encoding + 1000
+                )
+            else:
+                inputs.bert_embedding_inputs.position_encoding = torch.empty(
+                    0, dtype=torch.bfloat16, device="cuda"
+                )
+            inputs.bert_embedding_inputs.combo_tokens_type_ids = torch.tensor(
+                token_type_ids, dtype=torch.int32, device="cuda"
+            )
+            inputs.bert_embedding_inputs.token_type_embedding = (
+                token_type_embedding + 1000
+            )
+            inputs.bert_embedding_inputs.input_embedding_scalar = 9.0
+            return inputs
+
+        replay_cases = (
+            ([1, 2, 3, 4], [1, 2, 3, 4], [4, 3, 2, 1]),
+            ([4, 3, 2, 1], [8, 7, 6, 5], [1, 2, 3, 4]),
+        )
+        for input_ids, position_ids, token_type_ids in replay_cases:
+            with self.subTest(input_ids=input_ids):
+                inputs = build_inputs(input_ids, position_ids, token_type_ids)
+                self.assertTrue(runner.canRun(inputs))
+                output = runner.forward(inputs)
+                torch.cuda.synchronize()
+                expected = (
+                    word_embedding[torch.tensor(input_ids, device="cuda")]
+                    * capture_scalar
+                    + position_encoding[torch.tensor(position_ids, device="cuda")]
+                    + token_type_embedding[torch.tensor(token_type_ids, device="cuda")]
+                )
+                torch.testing.assert_close(output.hidden_states, expected)
+
+        with self.subTest(contract="prepared_attention_inputs_copy_bert_ids"):
+            prepared_inputs = build_inputs([5, 6, 7, 8], [4, 3, 2, 1], [1, 2, 3, 4])
+            self.assertTrue(runner.canRun(prepared_inputs))
+            runner.prepareAttentionInputs(prepared_inputs)
+            prepared_output = runner.forward(prepared_inputs)
+            torch.cuda.synchronize()
+            prepared_expected = (
+                word_embedding[torch.tensor([5, 6, 7, 8], device="cuda")]
+                * capture_scalar
+                + position_encoding[torch.tensor([4, 3, 2, 1], device="cuda")]
+                + token_type_embedding[torch.tensor([1, 2, 3, 4], device="cuda")]
+            )
+            torch.testing.assert_close(prepared_output.hidden_states, prepared_expected)
+
+        with self.subTest(contract="failed_eligibility_clears_prepared_state"):
+            stale_inputs = build_inputs([1, 2, 3, 4], [1, 1, 1, 1], [1, 1, 1, 1])
+            self.assertTrue(runner.canRun(stale_inputs))
+            runner.prepareAttentionInputs(stale_inputs)
+
+            invalid_after_prepare = build_inputs(
+                [1, 2, 3, 4], [1, 2, 3, 4], [1, 2, 3, 4]
+            )
+            invalid_after_prepare.bert_embedding_inputs.combo_position_ids = (
+                torch.empty(0, dtype=torch.int32, device="cuda")
+            )
+            self.assertFalse(runner.canRun(invalid_after_prepare))
+
+            fresh_inputs = build_inputs([8, 7, 6, 5], [8, 7, 6, 5], [4, 3, 2, 1])
+            self.assertTrue(runner.canRun(fresh_inputs))
+            fresh_output = runner.forward(fresh_inputs)
+            torch.cuda.synchronize()
+            fresh_expected = (
+                word_embedding[torch.tensor([8, 7, 6, 5], device="cuda")]
+                * capture_scalar
+                + position_encoding[torch.tensor([8, 7, 6, 5], device="cuda")]
+                + token_type_embedding[torch.tensor([4, 3, 2, 1], device="cuda")]
+            )
+            torch.testing.assert_close(fresh_output.hidden_states, fresh_expected)
+
+        # A shorter request prepares only its real embeddings, including after
+        # a full-bucket request; the Runner clears the fixed buffer's unused tail.
+        with self.subTest(contract="short_request_bucket"):
+            short_inputs = build_inputs([6, 7], [9, 10], [2, 3])
+            self.assertTrue(runner.canRun(short_inputs))
+            short_output = runner.forward(short_inputs)
+            torch.cuda.synchronize()
+            short_expected = (
+                word_embedding[torch.tensor([6, 7], device="cuda")] * capture_scalar
+                + position_encoding[torch.tensor([9, 10], device="cuda")]
+                + token_type_embedding[torch.tensor([2, 3], device="cuda")]
+            )
+            torch.testing.assert_close(short_output.hidden_states, short_expected)
+
+        # Model parameters are owned by the graph-external embedding producer.
+        with self.subTest(contract="embedding_producer_owns_parameters"):
+            inputs_without_position_table = build_inputs(
+                [2, 3, 4, 5],
+                [5, 6, 7, 8],
+                [1, 2, 3, 4],
+                provide_position_table=False,
+            )
+            self.assertTrue(runner.canRun(inputs_without_position_table))
+            output = runner.forward(inputs_without_position_table)
+            torch.cuda.synchronize()
+            expected = (
+                word_embedding[torch.tensor([2, 3, 4, 5], device="cuda")]
+                * capture_scalar
+                + position_encoding[torch.tensor([5, 6, 7, 8], device="cuda")]
+                + token_type_embedding[torch.tensor([1, 2, 3, 4], device="cuda")]
+            )
+            torch.testing.assert_close(output.hidden_states, expected)
+
+        invalid_inputs = []
+
+        missing_bert_ids = build_inputs([1, 2, 3, 4], [1, 2, 3, 4], [1, 2, 3, 4])
+        missing_bert_ids.bert_embedding_inputs.combo_position_ids = torch.empty(
+            0, dtype=torch.int32, device="cuda"
+        )
+        missing_bert_ids.bert_embedding_inputs.combo_tokens_type_ids = torch.empty(
+            0, dtype=torch.int32, device="cuda"
+        )
+        invalid_inputs.append(("missing_bert_ids", missing_bert_ids))
+
+        short_position_ids = build_inputs([1, 2, 3, 4], [1, 2, 3], [1, 2, 3, 4])
+        invalid_inputs.append(("short_position_ids", short_position_ids))
+
+        short_token_type_ids = build_inputs([1, 2, 3, 4], [1, 2, 3, 4], [1, 2, 3])
+        invalid_inputs.append(("short_token_type_ids", short_token_type_ids))
+
+        int64_position_ids = build_inputs([1, 2, 3, 4], [1, 2, 3, 4], [1, 2, 3, 4])
+        int64_position_ids.bert_embedding_inputs.combo_position_ids = (
+            int64_position_ids.bert_embedding_inputs.combo_position_ids.to(torch.int64)
+        )
+        invalid_inputs.append(("int64_position_ids", int64_position_ids))
+
+        cpu_token_type_ids = build_inputs([1, 2, 3, 4], [1, 2, 3, 4], [1, 2, 3, 4])
+        cpu_token_type_ids.bert_embedding_inputs.combo_tokens_type_ids = (
+            cpu_token_type_ids.bert_embedding_inputs.combo_tokens_type_ids.cpu()
+        )
+        invalid_inputs.append(("cpu_token_type_ids", cpu_token_type_ids))
+
+        noncontiguous_position_ids = build_inputs(
+            [1, 2, 3, 4], [1, 2, 3, 4], [1, 2, 3, 4]
+        )
+        noncontiguous_position_ids.bert_embedding_inputs.combo_position_ids = (
+            torch.arange(8, dtype=torch.int32, device="cuda")[::2]
+        )
+        invalid_inputs.append(
+            ("noncontiguous_position_ids", noncontiguous_position_ids)
+        )
+
+        for name, invalid in invalid_inputs:
+            with self.subTest(name=name):
+                self.assertFalse(runner.canRun(invalid))
+
+        # Establish a valid graph selection, then mutate the request without
+        # another canRun call. prepareInputs must still reject the malformed
+        # buffer before scheduling a D2D copy.
+        with self.subTest(contract="direct_forward_rejects_mutated_ids"):
+            direct_invalid = build_inputs([1, 2, 3, 4], [1, 2, 3, 4], [1, 2, 3, 4])
+            self.assertTrue(runner.canRun(direct_invalid))
+            direct_invalid.bert_embedding_inputs.combo_position_ids = torch.tensor(
+                [1, 2, 3], dtype=torch.int32, device="cuda"
+            )
+            with self.assertRaisesRegex(RuntimeError, "Bert position/type IDs"):
+                runner.forward(direct_invalid)
+
+        with self.subTest(contract="recovery_after_rejected_replay"):
+            recovery_inputs = build_inputs([4, 3, 2, 1], [5, 6, 7, 8], [1, 2, 3, 4])
+            self.assertTrue(runner.canRun(recovery_inputs))
+            recovery_output = runner.forward(recovery_inputs)
+            torch.cuda.synchronize()
+            recovery_expected = (
+                word_embedding[torch.tensor([4, 3, 2, 1], device="cuda")]
+                * capture_scalar
+                + position_encoding[torch.tensor([5, 6, 7, 8], device="cuda")]
+                + token_type_embedding[torch.tensor([1, 2, 3, 4], device="cuda")]
+            )
+            torch.testing.assert_close(recovery_output.hidden_states, recovery_expected)
+
+
 
 
 if __name__ == "__main__":

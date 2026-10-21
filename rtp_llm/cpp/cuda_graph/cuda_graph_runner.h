@@ -116,6 +116,13 @@ public:
         }
         py_attn_pyobj_method_ = py_instance_.attr("prepare_fmha_impl");
         py_forward_method_    = py_instance_.attr(forward_method_name);
+        // Embedding graphs always capture only the Transformer backbone.
+        // Capability is checked before constructing this runner.
+        if (isEmbeddingStylePrefillCudaGraph()) {
+            py_forward_method_             = py_instance_.attr("forward_embedding_graph");
+            py_prepare_transformer_inputs_ = py_instance_.attr("prepare_transformer_inputs");
+            py_attn_pyobj_method_           = py_instance_.attr("prepare_embedding_graph_attention");
+        }
         options_cuda_int32_   = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
         options_cpu_int32_    = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).requires_grad(false);
         options_cuda_float_ = torch::TensorOptions().dtype(model_data_type_).device(torch::kCUDA).requires_grad(false);
@@ -189,6 +196,7 @@ private:
     // Common replay and sync check logic
     void replayAndSyncCheck(int key, const char* key_type);
 
+    // Embedding graphs currently use the cache-free EMBEDDING_PREFILL role.
     bool isEmbeddingStylePrefillCudaGraph() const {
         return role_ == CudaGraphRole::EMBEDDING_PREFILL;
     }
@@ -235,6 +243,8 @@ private:
     void                    initCaptureAttentionInputsPost();
     py::object              py_forward_method_;
     py::object              py_attn_pyobj_method_;
+    // Required by EMBEDDING_PREFILL; invoked outside capture before each replay.
+    py::object              py_prepare_transformer_inputs_;
     bool                    enable_cuda_graph_{false};
     bool                    is_prefill_cuda_graph_mode_{false};
     bool                    is_target_verify_{false};
@@ -278,6 +288,7 @@ private:
     mutable std::array<std::atomic<uint64_t>, kGenerationPrefillCudaGraphStatusCount>
                                   generation_prefill_cuda_graph_fallback_log_counts_;
     mutable std::atomic<uint64_t> generation_prefill_cuda_graph_replay_log_count_{0};
+    mutable std::atomic<uint64_t> embedding_prefill_replay_log_count_{0};
 
     // event to record forward done
     torch::Event forward_event_ = cuda_graph::makeGraphEvent();

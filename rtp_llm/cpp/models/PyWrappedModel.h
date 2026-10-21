@@ -359,6 +359,16 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         RTP_LLM_LOG_ERROR("Python model initialize failed:\n%s", e.what());
         throw;
     }
+    if (enable_cuda_graph_ && is_prefill_cuda_graph_mode && params.sp_config.type == SP_TYPE_NONE) {
+        const std::string reason =
+            py::hasattr(py_model_, "embedding_cuda_graph_unsupported_reason") ?
+                py_model_.attr("embedding_cuda_graph_unsupported_reason")().cast<std::string>() :
+                "model does not implement the embedding Transformer graph contract";
+        if (!reason.empty()) {
+            RTP_LLM_LOG_WARNING("embedding CUDA graph unavailable, using eager: %s", reason.c_str());
+            enable_cuda_graph_ = false;
+        }
+    }
     // Registration enables the handler; only batches with selected prefill rows invoke it.
     if (py::hasattr(py_model_, "custom_output_handler")) {
         initializeCustomOutput();

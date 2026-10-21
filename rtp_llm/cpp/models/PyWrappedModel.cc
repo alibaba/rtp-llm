@@ -252,6 +252,23 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     py_attn_inputs.prefix_lengths   = normalize_i32(inputs.prefix_lengths);
     py_attn_inputs.sequence_lengths = normalize_i32(inputs.sequence_lengths);
     py_attn_inputs.input_lengths    = normalize_i32(inputs.input_lengths);
+    // Cache-free embedding graphs plan ragged attention on the host. Keep
+    // model-facing inputs on their original device and obtain host views here;
+    // cached generation/MTP retain their existing device metadata pipeline.
+    const bool needs_host_graph_inputs =
+        enable_cuda_graph_ && is_prefill_cuda_graph_mode_ && !kv_cache_layer_layout_.has_value();
+    auto planning_tokens = inputs.combo_tokens;
+    if (needs_host_graph_inputs) {
+        for (auto* tensor :
+             {&py_attn_inputs.prefix_lengths, &py_attn_inputs.sequence_lengths, &py_attn_inputs.input_lengths}) {
+            if (tensor->defined() && tensor->is_cuda()) {
+                *tensor = normalize_i32(tensor->cpu());
+            }
+        }
+        if (planning_tokens.defined() && planning_tokens.is_cuda()) {
+            planning_tokens = normalize_i32(planning_tokens.cpu());
+        }
+    }
 #if !USING_CUDA
     // Non-CUDA platforms only support the host metadata pipeline (the device
     // branch below needs the CUDA-only metadata kernel), so lift any
@@ -500,6 +517,19 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
         py_attn_inputs.host_model_metadata = host_input_metadata_builder_->build(
             inputs.combo_tokens, py_attn_inputs.input_lengths, inputs.text_tokens_mask, py_attn_inputs.cu_seqlens);
     }
+    // Let the model complete attention metadata before Graph eligibility checks.
+    // Use host views because device mirrors may still be waiting for fusedCopy().
+    // BERT reuses native segment bounds/schedules and derives bounds only if missing.
+    // The default model hook leaves the attention inputs unchanged.
+    if (is_prefill_cuda_graph_mode_ && py_attn_inputs.is_prefill && !py_attn_inputs.input_lengths.is_cuda()
+        && (!planning_tokens.defined() || !planning_tokens.is_cuda())) {
+        py::gil_scoped_acquire gil;
+        if (py::hasattr(py_model_, "prepare_embedding_attention_inputs")) {
+            py_attn_inputs = py_model_.attr("prepare_embedding_attention_inputs")(
+                py_attn_inputs, planning_tokens, inputs.text_tokens_mask).cast<torch_ext::PyAttentionInputs>();
+        }
+    }
+
     return py_attn_inputs;
 }
 

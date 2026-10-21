@@ -392,6 +392,14 @@ class ServerArgsPyEnvConfigsTest(TestCase):
 
 
 class ServerArgsSetTest(TestCase):
+    def test_prefill_graph_capture_lengths_survive_pickle(self):
+        from rtp_llm.ops import HWKernelConfig
+
+        config = HWKernelConfig()
+        config.prefill_capture_seq_lens = [6144, 8192]
+        restored = pickle.loads(pickle.dumps(config))
+        self.assertEqual(restored.prefill_capture_seq_lens, [6144, 8192])
+
     def setUp(self):
         self._environ_backup = os.environ.copy()
         self._argv_backup = sys.argv.copy()
@@ -535,6 +543,7 @@ class ServerArgsSetTest(TestCase):
         os.environ["GENERATION_PREFILL_CUDA_GRAPH_MAX_REQUESTS"] = "4"
         os.environ["GENERATION_PREFILL_CAPTURE_CONFIG"] = "64,128,256"
         os.environ["OUTPUT_DISPATCHER_WORKER_COUNT"] = "3"
+        os.environ["PREFILL_CAPTURE_CONFIG"] = "6144"
 
         sys.argv = ["prog"]
 
@@ -543,6 +552,10 @@ class ServerArgsSetTest(TestCase):
 
         importlib.reload(rtp_llm.server.server_args.server_args)
         py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+
+        self.assertEqual(
+            py_env_configs.py_hw_kernel_config.prefill_capture_seq_lens, [6144]
+        )
 
         # Verify model_args
         self.assertEqual(py_env_configs.model_args.model_type, "qwen")

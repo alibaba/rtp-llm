@@ -1,5 +1,5 @@
 load("//:def.bzl", "copts")
-load("@arch_config//:arch_select.bzl", "requirement", "whl_deps")
+load("@arch_config//:arch_select.bzl", "requirement", "whl_deps", "torch_deps")
 
 cc_library(
     name = "embedding_engine",
@@ -60,4 +60,11 @@ cc_library(
         "//rtp_llm/cpp/multimodal_processor:multimodal_processor",
     ],
     visibility = ["//visibility:public"]
+)
+
+cc_library(
+    name = "embedding_input_metadata",
+    hdrs = ["EmbeddingInputMetadata.h"],
+    deps = torch_deps(),
+    visibility = ["//visibility:public"],
 )

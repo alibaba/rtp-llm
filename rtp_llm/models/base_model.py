@@ -39,6 +39,7 @@ from rtp_llm.ops import (
     MlaOpsType,
     MoeConfig,
     ParallelismConfig,
+    TaskType,
 )
 from rtp_llm.utils.database import CkptDatabase
 from rtp_llm.utils.model_weight import sp_0_pad8_size
@@ -180,6 +181,9 @@ class BaseModel(object):
     def load(self, skip_python_model: bool = False):
         if (
             self.hw_kernel_config.enable_cuda_graph
+            # Embedding support is checked against the split model/backend
+            # contract after Python model initialization in PyWrappedModel.
+            and self.model_config.task_type == TaskType.LANGUAGE_MODEL
             and self.support_cuda_graph() is False
         ):
             raise Exception("current model can't support cuda graph in py model mode")

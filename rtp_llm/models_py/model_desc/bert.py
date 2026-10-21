@@ -212,12 +212,124 @@ class BertModel(GptModelBase):
         self.use_uqi_two_pass = os.environ.get("VISION_BERT_UQI_TWO_PASS", "1") == "1"
         self._uqi_two_pass_op = None
 
+    def validate_embedding_input_features(self, inputs):
+        mm = inputs.multimodal_inputs
+        mask = inputs.embedding_inputs.text_tokens_mask
+        features = bool(mm.multimodal_features)
+        locs = mm.mm_features_locs is not None and mm.mm_features_locs.numel() > 0
+        has_mask = mask is not None and mask.numel() > 0
+        if not (features == locs == has_mask):
+            return False
+        # Metadata-only canRun calls may omit IDs. Actual forward must provide
+        # one position and token-type ID for every token before embedding lookup.
+        input_ids = getattr(inputs, "input_ids", None)
+        tokens = input_ids.numel() if input_ids is not None else 0
+        if tokens:
+            for ids in (
+                inputs.bert_embedding_inputs.combo_position_ids,
+                inputs.bert_embedding_inputs.combo_tokens_type_ids,
+            ):
+                if (
+                    ids is None
+                    or ids.numel() != tokens
+                    or ids.dtype != torch.int32
+                    or not ids.is_contiguous()
+                    or ids.device != inputs.input_ids.device
+                ):
+                    return False
+        return True
+
+    def prepare_embedding_attention_inputs(
+        self, attn_inputs, host_tokens, host_text_mask
+    ):
+        if self.use_user_profile_mask:
+            from rtp_llm.models_py.modules.factory.attention.bert_uqi_schedule import (
+                derive_bert_uqi_bounds,
+                valid_bert_uqi_bounds,
+            )
+
+            # Preserve the native scan and eager schedule. Derive bounds only
+            # when the caller did not supply usable host metadata.
+            if (
+                getattr(attn_inputs, "uqi_b_starts", None) is not None
+                and getattr(attn_inputs, "uqi_b_lens", None) is not None
+                and valid_bert_uqi_bounds(attn_inputs)
+            ):
+                return attn_inputs
+            attn_inputs.uqi_b_starts, attn_inputs.uqi_b_lens = derive_bert_uqi_bounds(
+                host_tokens,
+                attn_inputs.input_lengths,
+                host_text_mask,
+                self.cls_uqi_token_id,
+            )
+        return attn_inputs
+
+    def validate_embedding_graph_inputs(self, inputs):
+        if not super().validate_embedding_graph_inputs(inputs):
+            return False
+        if not self.use_user_profile_mask:
+            return True
+        from rtp_llm.models_py.model_desc.block_map import get_attention_inputs_value
+        from rtp_llm.models_py.modules.factory.attention.bert_uqi_schedule import (
+            valid_bert_uqi_bounds,
+        )
+
+        attention = get_attention_inputs_value(inputs)
+        groups = attention.values() if isinstance(attention, dict) else [attention]
+        return all(valid_bert_uqi_bounds(attn) for attn in groups)
+
+    def prepare_embedding_graph_attention(self, inputs, is_cuda_graph=True):
+        return self.prepare_fmha_impl(inputs, is_cuda_graph=True)
+
+    def prepare_embedding_graph_replay(self, attention, graph_inputs, request_inputs):
+        if self.use_user_profile_mask:
+            from rtp_llm.models_py.model_desc.block_map import (
+                get_attention_inputs_value,
+            )
+
+            captured = get_attention_inputs_value(graph_inputs)
+            current = get_attention_inputs_value(request_inputs)
+            captured_groups = (
+                captured if isinstance(captured, dict) else {None: captured}
+            )
+            current_groups = current if isinstance(current, dict) else {None: current}
+            for tag, attn in captured_groups.items():
+                attn.uqi_b_starts = current_groups[tag].uqi_b_starts
+                attn.uqi_b_lens = current_groups[tag].uqi_b_lens
+        super().prepare_embedding_graph_replay(attention, graph_inputs, request_inputs)
+
     def prepare_fmha_impl(
         self, inputs: PyModelInputs, is_cuda_graph: bool = False
     ) -> FMHAImplBase:
-        # Use device-specific two-pass attention for the user-profile block mask.
-        if self.use_user_profile_mask and is_cuda_graph:
-            raise ValueError("BERT user-profile attention does not support CUDA graphs")
+        # Graphs use the device-specific graph attention implementation; eager
+        # retains its configured two-pass/custom-mask implementation.
+        if is_cuda_graph:
+            if self.kv_cache is not None:
+                raise ValueError(
+                    "BERT Transformer graph requires an encoder without KV cache"
+                )
+            if not self.use_user_profile_mask:
+                return super().prepare_fmha_impl(inputs, True, "embedding_graph")
+            if torch.version.hip is not None:
+                from rtp_llm.models_py.modules.factory.attention.rocm_impl.bert_uqi_two_pass import (
+                    BertUqiRocmEncoderGraphImpl,
+                )
+
+                graph_impl = BertUqiRocmEncoderGraphImpl
+            else:
+                from rtp_llm.models_py.modules.factory.attention.cuda_impl.bert_uqi_two_pass import (
+                    BertUqiEncoderGraphImpl,
+                )
+
+                graph_impl = BertUqiEncoderGraphImpl
+            return graph_impl(
+                self.config.getAttentionConfigs(
+                    self.parallelism_config.get_attn_tp_size()
+                ),
+                inputs.attention_inputs,
+                inputs.input_ids.size(0),
+                max_sequence_length=self.config.max_seq_len,
+            )
         if self.use_user_profile_mask:
             attn_inputs = inputs.attention_inputs
             if attn_inputs.is_prefill:
@@ -285,16 +397,20 @@ class BertModel(GptModelBase):
             lengths = attn_inputs.input_lengths.cpu().to(torch.int32)
             cu_host = torch.zeros(batch_size + 1, dtype=torch.int32)
             cu_host[1:] = lengths.cumsum(0)
-        # 优先走 C++ 全 schedule 路径: PyWrappedModel 已在 host token 上扫出段
-        # 边界并预构建 perm/indptr/b_rows —— Python 侧只剩 flashinfer plan 与
-        # permutation H2D。缺少预构建 metadata 时回退到分段推导。
+        # Prefer the C++ precomputed schedule. Graph-mode eager fallback and
+        # callers without a native schedule build it from bounds or text tokens.
         uqi_seg_indptr = getattr(attn_inputs, "uqi_seg_indptr", None)
         uqi_b_lens = getattr(attn_inputs, "uqi_b_lens", None)
         if uqi_seg_indptr is not None and uqi_seg_indptr.numel() == 2 * batch_size + 1:
             if int(attn_inputs.uqi_b_indptr[batch_size]) == 0:
                 schedule = BertUqiTwoPassSchedule(
-                    has_b=False, perm=None, inv_perm=None, b_rows=None,
-                    qo_indptr_p1=cu_host, qo_indptr_p2=None, kv_indptr_p2=None,
+                    has_b=False,
+                    perm=None,
+                    inv_perm=None,
+                    b_rows=None,
+                    qo_indptr_p1=cu_host,
+                    qo_indptr_p2=None,
+                    kv_indptr_p2=None,
                 )
             else:
                 dev = inputs.input_ids.device
@@ -319,7 +435,12 @@ class BertModel(GptModelBase):
             input_ids = inputs.input_ids[: int(cu_host[-1])]
             text_mask = inputs.embedding_inputs.text_tokens_mask
             if text_mask is not None and text_mask.numel():
-                input_ids = input_ids.masked_fill(~text_mask[:input_ids.numel()].to(device=input_ids.device, dtype=torch.bool), -1)
+                input_ids = input_ids.masked_fill(
+                    ~text_mask[: input_ids.numel()].to(
+                        device=input_ids.device, dtype=torch.bool
+                    ),
+                    -1,
+                )
             seg_ids = derive_bert_uqi_segment_ids_hostlen(
                 input_ids, cu_dev, cu_host, self.cls_uqi_token_id
             )
@@ -333,36 +454,17 @@ class BertModel(GptModelBase):
         return impl
 
     def forward(
-        self, inputs: PyModelInputs, fmha_impl: FMHAImplBase = None
+        self,
+        inputs: PyModelInputs,
+        fmha_impl: FMHAImplBase = None,
+        *,
+        input_hiddens: Optional[torch.Tensor] = None,
     ) -> PyModelOutputs:
-        input_ids: torch.Tensor = inputs.input_ids
-        bert_embedding_inputs = inputs.bert_embedding_inputs
-        # Image slots contain cache hashes, not word-table IDs. Validate the
-        # producer contract before the lookup, then skip those word-table rows.
-        multimodal_features = inputs.multimodal_inputs.multimodal_features
-        multimodal_locs = inputs.multimodal_inputs.mm_features_locs
-        text_tokens_mask = inputs.embedding_inputs.text_tokens_mask
-        has_mask = text_tokens_mask is not None and text_tokens_mask.numel() != 0
-        has_locs = multimodal_locs is not None and multimodal_locs.numel() != 0
-        if not (bool(multimodal_features) == has_locs == has_mask):
-            raise ValueError(
-                "multimodal features, locations, and text_tokens_mask must be "
-                "provided together"
-            )
-        inputs_embeds = self.embed_tokens(
-            input_ids,
-            bert_embedding_inputs.combo_position_ids,
-            bert_embedding_inputs.position_encoding,
-            bert_embedding_inputs.combo_tokens_type_ids,
-            bert_embedding_inputs.token_type_embedding,
-            bert_embedding_inputs.input_embedding_scalar,
-            text_tokens_mask if has_mask else None,
-        )
-        hidden_states = self.pre_decoder_layernorm(inputs_embeds)
-        # Projected image features are already normalized in decoder input
-        # space; never add text position/type embeddings or normalize them twice.
-        hidden_states = self.multimodal_embedding_injector(
-            hidden_states, multimodal_features, multimodal_locs
+        # Graph replay supplies the fixed buffer prepared outside capture.
+        hidden_states = (
+            self.prepare_transformer_inputs(inputs)
+            if input_hiddens is None
+            else input_hiddens
         )
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
@@ -394,3 +496,42 @@ class BertModel(GptModelBase):
         if uqi_perm is not None:
             hidden_states = hidden_states.index_select(0, fmha_impl.uqi_inv_perm)
         return PyModelOutputs(hidden_states)
+
+    def forward_embedding_graph(
+        self, inputs: PyModelInputs, fmha_impl: FMHAImplBase
+    ) -> PyModelOutputs:
+        return self.forward(inputs, fmha_impl, input_hiddens=inputs.input_hiddens)
+
+    def prepare_transformer_inputs(self, inputs: PyModelInputs) -> torch.Tensor:
+        """Request-owned embedding and visual injection, always outside graphs."""
+        input_ids: torch.Tensor = inputs.input_ids
+        bert_embedding_inputs = inputs.bert_embedding_inputs
+        # Image slots contain cache hashes, not word-table IDs. Validate the
+        # producer contract before the lookup, then skip those word-table rows.
+        multimodal_features = inputs.multimodal_inputs.multimodal_features
+        multimodal_locs = inputs.multimodal_inputs.mm_features_locs
+        text_tokens_mask = inputs.embedding_inputs.text_tokens_mask
+        has_mask = text_tokens_mask is not None and text_tokens_mask.numel() != 0
+        has_locs = multimodal_locs is not None and multimodal_locs.numel() != 0
+        if not (bool(multimodal_features) == has_locs == has_mask):
+            raise ValueError(
+                "multimodal features, locations, and text_tokens_mask must be "
+                "provided together"
+            )
+        inputs_embeds = self.embed_tokens(
+            input_ids,
+            bert_embedding_inputs.combo_position_ids,
+            bert_embedding_inputs.position_encoding,
+            bert_embedding_inputs.combo_tokens_type_ids,
+            bert_embedding_inputs.token_type_embedding,
+            bert_embedding_inputs.input_embedding_scalar,
+            text_tokens_mask if has_mask else None,
+        )
+        hidden_states = self.pre_decoder_layernorm(inputs_embeds)
+        # Projected image features are already normalized in decoder input
+        # space; never add text position/type embeddings or normalize them twice.
+        hidden_states = self.multimodal_embedding_injector(
+            hidden_states, multimodal_features, multimodal_locs
+        )
+
+        return hidden_states

@@ -6,6 +6,7 @@ This module contains helper functions for FMHA implementations including:
 - KV cache offset management
 """
 
+from math import isfinite
 from typing import Any, Optional
 
 import torch
@@ -138,3 +139,147 @@ def update_attention_params(
     old_offset = rope_params.kv_cache_offset
     copy_kv_cache_offset(old_offset, new_offset)
     rope_params.sequence_lengths = new_rope_params.sequence_lengths
+
+
+def embedding_graph_unsupported_reason(configs, backend) -> str:
+    from importlib.util import find_spec
+
+    from rtp_llm.ops import RopeStyle
+
+    if configs.use_mla:
+        return "cache-free embedding graph MLA is not implemented"
+    if (
+        getattr(configs, "is_sparse", False)
+        or getattr(configs, "use_logn_attn", False)
+        or getattr(configs, "q_scaling", 1.0) != 1.0
+        or getattr(configs, "softmax_extra_scale", 1.0) != 1.0
+    ):
+        return (
+            "embedding graph sparse/logn/custom attention scaling requires an adapter"
+        )
+    if configs.dtype not in (torch.float16, torch.bfloat16):
+        return "embedding graph attention requires FP16 or BF16 activations"
+    if configs.rope_config.style not in (RopeStyle.No, RopeStyle.Base):
+        return "embedding graph supports no RoPE or base RoPE; other styles require an adapter"
+    if configs.rope_config.style != RopeStyle.No and (
+        configs.rope_config.dim <= 0
+        or configs.rope_config.dim % 2
+        or configs.rope_config.dim > configs.size_per_head
+    ):
+        return "invalid embedding graph rotary dimension"
+    if configs.rope_config.offset != 0:
+        return "embedding graph RoPE offsets require an adapter"
+    if configs.rope_config.style == RopeStyle.Base and (
+        not isfinite(configs.rope_config.scale) or configs.rope_config.scale < 1.0
+    ):
+        return "embedding graph base RoPE requires a finite scale >= 1"
+    if (
+        configs.head_num <= 0
+        or configs.kv_head_num <= 0
+        or configs.size_per_head <= 0
+        or configs.head_num % configs.kv_head_num
+    ):
+        return "invalid embedding graph query/KV head counts"
+    if find_spec(backend) is None:
+        return f"embedding graph attention backend {backend} is not installed"
+    return ""
+
+
+def prepare_embedding_graph_lengths(
+    attn_inputs,
+    token_capacity,
+    request_capacity,
+    max_sequence_length,
+    cu_seqlens_host,
+    for_capture=False,
+):
+    """Update fixed host ragged boundaries, keeping padding in separate sequences."""
+    lengths = attn_inputs.input_lengths
+    if (
+        lengths is None
+        or lengths.is_cuda
+        or lengths.dtype != torch.int32
+        or lengths.ndim != 1
+        or not lengths.is_contiguous()
+    ):
+        raise ValueError(
+            "embedding graph planning requires contiguous host int32 input lengths"
+        )
+    if lengths.numel() != request_capacity:
+        raise ValueError("embedding graph request capacity changed")
+    prefix = attn_inputs.prefix_lengths
+    if prefix is not None and prefix.numel() and bool(prefix.any()):
+        raise ValueError("embedding graph does not support prefix KV")
+    if bool((lengths < 0).any()):
+        raise ValueError("embedding graph sequence lengths must be nonnegative")
+    limit = max_sequence_length or token_capacity
+    if not for_capture and bool((lengths > limit).any()):
+        raise ValueError("embedding graph sequence exceeds position-table capacity")
+    if int(lengths.sum()) > token_capacity:
+        raise ValueError("embedding graph token capacity exceeded")
+    if for_capture:
+        lengths = torch.tensor(
+            [
+                min(limit, max(0, token_capacity - i * limit))
+                for i in range(request_capacity)
+            ],
+            dtype=torch.int32,
+        )
+    real_tokens = int(lengths.sum())
+    cu_seqlens_host[0] = 0
+    torch.cumsum(lengths, 0, out=cu_seqlens_host[1 : request_capacity + 1])
+    padding_slots = (token_capacity + limit - 1) // limit
+    for index in range(padding_slots):
+        cu_seqlens_host[request_capacity + index + 1] = min(
+            token_capacity, real_tokens + (index + 1) * limit
+        )
+    return lengths
+
+
+def create_embedding_graph_rope(configs, token_capacity, max_sequence_length):
+    """Own each bucket's canonical RoPE table and fixed position storage."""
+    rope = getattr(configs, "rope_config", None)
+    if rope is None or int(rope.style) == 0:
+        return None, None, None
+    from rtp_llm.ops import get_rope_cache
+
+    cache = get_rope_cache(
+        rope, max_sequence_length or token_capacity, interleave=False
+    )
+    host = torch.zeros(token_capacity, dtype=torch.int64, pin_memory=True)
+    return cache, host, torch.empty_like(host, device="cuda")
+
+
+def prepare_embedding_graph_positions(attn_inputs, lengths, host, device):
+    if host is None:
+        return
+    positions = getattr(attn_inputs, "combo_position_ids", None)
+    if positions is not None and positions.numel():
+        raise ValueError("explicit embedding graph positions require a model adapter")
+    host.zero_()
+    offset = 0
+    for length in lengths.tolist():
+        host[offset : offset + length].copy_(torch.arange(length, dtype=torch.int64))
+        offset += length
+    # Planning completes before reuse of the pinned source or Graph capture.
+    device.copy_(host)
+
+
+def apply_embedding_graph_rotary(q, k, rope_cache, positions):
+    if rope_cache is None:
+        return q, k
+    # Canonical cache has non-interleaved [cos, sin] rows, matching the
+    # existing ragged eager RoPE path. QK normalization remains in the layer.
+    cache = rope_cache.index_select(0, positions).float()
+    cos, sin = cache.chunk(2, dim=-1)
+    cos, sin = cos.unsqueeze(1), sin.unsqueeze(1)
+    rotary_dim = cache.size(-1)
+
+    def rotate(tensor):
+        left, right = tensor[..., :rotary_dim].float().chunk(2, dim=-1)
+        rotated = torch.cat(
+            (left * cos - right * sin, right * cos + left * sin), dim=-1
+        )
+        return torch.cat((rotated.to(tensor.dtype), tensor[..., rotary_dim:]), dim=-1)
+
+    return rotate(q), rotate(k)

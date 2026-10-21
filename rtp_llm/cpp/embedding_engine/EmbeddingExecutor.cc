@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/engine_base/EmbeddingIdRange.h"
 #include "rtp_llm/cpp/embedding_engine/EmbeddingExecutor.h"
+#include "rtp_llm/cpp/embedding_engine/EmbeddingInputMetadata.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/pybind/PyUtils.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
@@ -70,6 +71,19 @@ EmbeddingExecutor::EmbeddingExecutor(const EngineInitParams& params, py::object 
         parallelism_config,
     });
     model_init_params.metrics_reporter = metrics_reporter_;
+    // Embedding uses the same Python wrapper as generation. Forward the engine
+    // configuration explicitly; aggregate defaults otherwise leave graphs off
+    // and their shape/block capacities at zero even when the server enables them.
+    model_init_params.hw_kernel_config             = params.hw_kernel_config;
+    model_init_params.concurrency_config           = params.concurrency_config;
+    model_init_params.device_resource_config       = params.device_resource_config;
+    model_init_params.max_seq_len                  = model_config_.max_seq_len;
+    model_init_params.hidden_size                  = model_config_.hidden_size;
+    model_init_params.tokens_per_block             = model_config_.attn_config.tokens_per_block;
+    model_init_params.kernel_tokens_per_block      = model_config_.attn_config.kernel_tokens_per_block > 0 ?
+                                                         model_config_.attn_config.kernel_tokens_per_block :
+                                                         model_init_params.tokens_per_block;
+
 
     RTP_LLM_CHECK_WITH_INFO(!params.py_model.is_none(), "py_model must be provided, legacy C++ GptModel path removed");
     RTP_LLM_LOG_INFO("init executor with python model");
@@ -248,6 +262,11 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
         model_input.need_moe_gating = true;
     }
     reportMetrics(batch_size, token_num, max_seq_len);
+    // Normalize gathered host metadata before the model-facing device conversion.
+    prepareEmbeddingInputMetadata(model_input.combo_tokens,
+                                  model_input.input_lengths,
+                                  model_input.sequence_lengths,
+                                  model_input.prefix_lengths);
 #if USING_CUDA
     // TODO(async): embedding streams are still gathered through CPU pointers,
     // but the model-facing GptModelInputs metadata should be CUDA resident.
