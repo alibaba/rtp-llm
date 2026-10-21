@@ -53,3 +53,11 @@ python3 rtp_llm/flexlb/tools/mock_bundle/vit_frontend_smoke.py \
 ## Whale bundle
 
 `MOCK_VIT_ENABLED=1` 在 bundle 中启动独立 ViT JVM，并与 Master、P/D 一起监管退出。默认使用最后一个 P/D gRPC 端口的下一个端口；可用 `MOCK_VIT_PORT` 显式设置。其他参数对应 `MOCK_VIT_HIDDEN_SIZE`、`MOCK_VIT_CONCURRENCY`、`MOCK_VIT_QUEUE_CAPACITY`、`MOCK_VIT_EMBEDDING_CACHE_BYTES`、`MOCK_VIT_HASH_CACHE_BYTES`、`MOCK_VIT_COMPUTE_DELAY_MS`。Master 的组合服务发现文件保留 P/D 动态更新并加入 ViT；原始 P/D 文件仍由 Mock 独占写入。`identity.json` 记录 ViT 参数，日志在 `vit.log`。旧 Master 模式拒绝启用现代 ViT。
+
+### 隔离 frontend 测试镜像
+
+`whale_frontend_fixture.py` 是通用图片协议的 CPU 验收入口，要求显式设置 `RTP_LLM_MOCK_FRONTEND=1`。设置 `MOCK_FRONTEND_SOURCE_ROOT` 时直接使用镜像中打包的 Python 源码和 protobuf，不下载代码；未设置时使用文件中固定版本及 SHA256 校验的调试源码归档。原生 `libth_transformer_config.so` 必须与这份源码兼容，镜像构建需要实际导入 `FrontendApp` 和 server args 验证兼容性。
+
+该入口在运行目录生成小型 Qwen2-VL 模型配置和确定性 tokenizer，默认 HTTP 端口 20550、KV block size 64，继承部署的 `MODEL_SERVICE_CONFIG` 连接真实 Master。它只生成模型元数据，不加载真实权重。配套 Master/P/D 必须同样使用 block size 64；此配置用于协议和缓存正确性验证，不能沿用原部署的容量或性能结论。
+
+多 worker 验收应先自然预热，再检查热前缀；大量空闲 P 的轮转可能使少量重复请求仍落到冷 worker。应同时核对 `prefix_len`、P 的 `cache_key_hits`、D 的 `decode_reuse_blocks` 和完成后的请求/响应缓冲清理，不能只以 HTTP 200 代表缓存验收通过。
