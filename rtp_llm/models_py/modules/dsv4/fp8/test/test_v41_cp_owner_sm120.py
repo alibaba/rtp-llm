@@ -25,6 +25,7 @@ from rtp_llm.models_py.modules.dsv4.fp8.attention import bind_attn_cache
 from rtp_llm.models_py.modules.dsv4.fp8.test.test_v41_attention_owner_sm120 import (
     NativeTaggedCache,
     make_layer,
+    paged_tables,
     prepare,
 )
 from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
@@ -102,14 +103,14 @@ def page_tables(cache):
 
 def prepare_cp(layer, x, cache, tables, cp, chunks):
     lens = torch.tensor(chunks, device=x.device, dtype=torch.int32)
-    cu = torch.tensor([0, chunks[0], sum(chunks)], device=x.device, dtype=torch.int32)
+    cu = torch.cat((lens.new_zeros(1), lens.cumsum(0).int()))
     with bind_attn_cache(layer, cache, tables, cp_ctx=cp):
         meta = layer._build_shared_prefill_meta(
             x,
             cp.global_positions,
             sp_per_req=cp.prefix_lengths,
             cu_seqlens=cu,
-            batch_size=2,
+            batch_size=len(chunks),
             input_lengths=lens,
             prefix_lengths=cp.prefix_lengths,
             position_ids=cp.global_positions,
@@ -248,7 +249,117 @@ def run_family(rank, pp_rank, group, source_id, ratio):
         )
 
 
-def run_rank(rank, port):
+def run_long_family(rank, pp_rank, group, source_id, ratio):
+    config = (
+        {
+            "kv_source_layer_ids": [20],
+            "index_source_layer_ids": [20, 24],
+            "candidate_source_layer_id": 20,
+            "candidate_topk_blocks": 2048,
+            "candidate_block_size": 8,
+        }
+        if source_id == 20
+        else None
+    )
+
+    def owners(shared):
+        result = [
+            make_layer(
+                source_id,
+                ratio,
+                shared,
+                gen=0,
+                max_seq_len=33024,
+                v41_config=config,
+            )
+        ]
+        if source_id == 20:
+            result.append(
+                make_layer(
+                    24,
+                    ratio,
+                    shared,
+                    source=20,
+                    gen=0,
+                    max_seq_len=33024,
+                    v41_config=config,
+                )
+            )
+        return result
+
+    seed = 41470 + pp_rank * 100 + source_id
+    torch.manual_seed(seed)
+    reference_shared = {}
+    reference = owners(reference_shared)
+    torch.manual_seed(seed)
+    shared = {}
+    actual_layers = owners(shared)
+    for lengths in ([32768], [16385, 255]):
+        columns = (max(lengths) + 255) // 256
+        pages = columns * len(lengths) + 2
+        cache = NativeTaggedCache(actual_layers, gen=0, pages=pages)
+        oracle = NativeTaggedCache(reference, gen=0, pages=pages)
+        tables = paged_tables(cache, columns, batch=len(lengths))
+        generator = torch.Generator().manual_seed(seed + sum(lengths))
+        full = (
+            (torch.randn(sum(lengths), 512, generator=generator) * 0.025)
+            .bfloat16()
+            .cuda()
+        )
+        prefixes = [0] * len(lengths)
+        cp, indices, chunks = zigzag(lengths, prefixes, rank % 4, full.device)
+        local = full.index_select(0, indices)
+        local[~cp.local_is_real] = (rank + 1) / 32
+        with ExitStack() as bindings:
+            for layer in actual_layers:
+                bindings.enter_context(bind_attn_cache(layer, cache, tables, cp_ctx=cp))
+            for layer, control in zip(actual_layers, reference):
+                positions, _, _ = prepare(control, full, oracle, lengths, tables=tables)
+                with bind_attn_cache(control, oracle, tables, cp_ctx=None):
+                    expected = control._forward_prefill(full, positions).clone()
+                prepare_cp(layer, local, cache, tables, cp, chunks)
+                actual = layer._forward_prefill(local, cp.global_positions).clone()
+                restored = restore(actual, cp, group)
+                torch.testing.assert_close(restored, expected, rtol=0, atol=0)
+                assert bool(torch.isfinite(restored).all())
+                if ratio:
+                    selected = restore(shared["topk"][layer.layer_id], cp, group)
+                    torch.testing.assert_close(
+                        selected,
+                        reference_shared["topk"][layer.layer_id],
+                        rtol=0,
+                        atol=0,
+                    )
+                if source_id == 20:
+                    candidates = restore(shared["candidates"], cp, group)
+                    torch.testing.assert_close(
+                        candidates, reference_shared["candidates"], rtol=0, atol=0
+                    )
+                for key, value in cache.storage.items():
+                    torch.testing.assert_close(
+                        value, oracle.storage[key], rtol=0, atol=0
+                    )
+        for layer in (*actual_layers, *reference):
+            layer._set_prefill_meta_shared(None)
+            assert layer._cp_ctx is None
+        print(
+            "DSV41_CP_LONG_OWNER "
+            + json.dumps(
+                dict(
+                    rank=rank,
+                    stage=pp_rank,
+                    source=source_id,
+                    ratio=ratio,
+                    lengths=lengths,
+                    outputs_exact=True,
+                    bytes_exact=True,
+                )
+            ),
+            flush=True,
+        )
+
+
+def run_rank(rank, port, long_context=False):
     torch.cuda.set_device(rank)
     torch.set_num_threads(1)
     torch.backends.cuda.matmul.allow_tf32 = False
@@ -258,7 +369,7 @@ def run_rank(rank, port):
         init_method=f"tcp://127.0.0.1:{port}",
         rank=rank,
         world_size=8,
-        timeout=timedelta(seconds=120),
+        timeout=timedelta(seconds=900 if long_context else 120),
     )
     cfg = ParallelismConfig()
     cfg.world_size = cfg.local_world_size = 8
@@ -274,13 +385,25 @@ def run_rank(rank, port):
         assert dist.get_rank(group) == rank % 4
         with torch.inference_mode():
             for source, ratio in ((0, 0), (2, 2), (20, 1)):
-                run_family(rank, pp_rank, group, source, ratio)
+                family = run_long_family if long_context else run_family
+                family(rank, pp_rank, group, source, ratio)
         dist.barrier()
     finally:
         destroy_distributed_environment()
 
 
 class V41CPOwnerSM120Test(unittest.TestCase):
+    @unittest.skipUnless(
+        os.environ.get("DSV41_TEST_32K_CP") == "1",
+        "long CP requires eight-GPU admission",
+    )
+    def test_32k_cp4_matches_cp1_owners_candidates_and_native_bytes(self):
+        self.assertEqual(torch.cuda.device_count(), 8)
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        mp.spawn(run_rank, args=(port, True), nprocs=8, join=True)
+
     def test_two_pp_local_cp4_groups_match_cp1_owners_and_native_bytes(self):
         self.assertGreaterEqual(torch.cuda.device_count(), 8)
         for rank in range(8):

@@ -170,6 +170,7 @@ def run_rank(
     maintained_collapse=False,
     maintained_post=False,
     maintained_prenorm=False,
+    world_size=8,
 ):
     torch.set_num_threads(1)
     torch.cuda.set_device(rank)
@@ -182,7 +183,7 @@ def run_rank(
             "DSV41_ENGRAM_CACHE_DIR": directory,
             "DSV4_MOE_STRATEGY": "auto",
             "DSV4_MOE_CHUNK_PREFILL": "1",
-            "DSV4_MOE_CHUNK_TOKENS": "32",
+            "DSV4_MOE_CHUNK_TOKENS": "512" if context > 512 else "32",
             "DSV4_MOE_EXTENT_COUNT_FUSE": "1",
             "FAKE_BALANCE_EXPERT": "0",
             "RTP_LLM_STREAM_ASYNC": "0",
@@ -190,12 +191,12 @@ def run_rank(
             "MOEDBG": "0",
         }
     )
-    timeout = timedelta(seconds=3600 if full else 180)
+    timeout = timedelta(seconds=3600 if full or context > 512 else 180)
     dist.init_process_group(
         "nccl",
         init_method=f"tcp://127.0.0.1:{port}",
         rank=rank,
-        world_size=8,
+        world_size=world_size,
         timeout=timeout,
     )
     control = dist.new_group(backend="gloo", timeout=timeout)
@@ -509,7 +510,7 @@ def run_rank(
                 config.deepseek_v41_config["mhc_post_mode"] = "ordered_fp32"
             if maintained_prenorm:
                 config.deepseek_v41_config["mhc_prenorm_mode"] = "fp32"
-            parallelism, loader = make_loader(config, kv_config, 8, rank)
+            parallelism, loader = make_loader(config, kv_config, world_size, rank)
             started = time.monotonic()
             weights = loader.load_weights(f"cuda:{rank}")
             head = weights.global_weights[W.lm_head]
@@ -1089,20 +1090,22 @@ def run_rank(
                 identities = [
                     (t._path.stat().st_dev, t._path.stat().st_ino) for t in tables
                 ]
-                peers = [None] * 8
+                peers = [None] * world_size
                 dist.all_gather_object(peers, identities, group=control)
                 assert all(peer == identities for peer in peers)
                 for iteration in range(4 * len(profiles)):
                     phase = iteration % 4
                     profile = profiles[iteration // 4]
                     current_profile[0] = profile
-                    active = phase in (1, 2) or rank == (0 if phase == 0 else 7)
+                    active = phase in (1, 2) or rank == (
+                        0 if phase == 0 else world_size - 1
+                    )
                     requests = [prompts[phase % 2]] if active else []
                     completed.clear()
                     engine.enqueue(requests, new_tokens)
                     if active:
                         assert completed.wait(
-                            300
+                            1800 if context > 512 else 300
                         ), "generation forwards did not complete"
                     result = engine.outputs()
                     assert result["steps"] == [new_tokens] * len(requests)
@@ -1172,21 +1175,28 @@ def run_rank(
                         for prompt in range(len(prompts))
                     }
                     assert post_trace_steps == expected_traces, post_trace_steps
-                peers = [None] * 8
+                peers = [None] * world_size
                 dist.all_gather_object(peers, outputs_by_prompt, group=control)
                 for profile in profiles:
                     for prompt in prompts:
                         key = (profile, tuple(prompt))
                         results = [peer[key] for peer in peers if key in peer]
-                        assert len(results) == 8
+                        assert len(results) == world_size
                         assert all(value == results[0] for value in results)
-                stop_requested.set()
-                assert stopped.wait(60), "engine missed coordinated stop"
+                if world_size == 1:
+                    engine.request_stop()
+                else:
+                    stop_requested.set()
+                    assert stopped.wait(60), "engine missed coordinated stop"
                 result = engine.stop()
                 engine = None
                 assert result["free_before"] == result["free_after"], result
-                assert result["cache_blocks"] == 8, result
-            assert calls["active"] >= 2 and calls["idle"] >= 1, calls
+                expected_blocks = (
+                    8 if context <= 512 else 2 * ((context + 255) // 256) + 2
+                )
+                assert result["cache_blocks"] == expected_blocks, result
+            assert calls["active"] >= 2, calls
+            assert world_size == 1 or calls["idle"] >= 1, calls
             model.close()
             dist.barrier(group=control)
             if rank == 0:
@@ -1195,7 +1205,7 @@ def run_rank(
                 assert not list(Path(directory).glob("*.json"))
                 print(
                     f"checkpoint-to-native-engine full_nas={full} new_tokens={new_tokens} "
-                    f"context={context} precision={profiles} generation liveness PASS",
+                    f"context={context} world_size={world_size} precision={profiles} generation liveness PASS",
                     flush=True,
                 )
     except BaseException:
@@ -1227,8 +1237,10 @@ class V41CheckpointEngineSM120Test(unittest.TestCase):
         maintained_collapse=False,
         maintained_post=False,
         maintained_prenorm=False,
+        world_size=8,
     ):
-        self.assertEqual(torch.cuda.device_count(), 8)
+        self.assertIn(world_size, (1, 8))
+        self.assertEqual(torch.cuda.device_count(), world_size)
         with socket.socket() as sock:
             sock.bind(("127.0.0.1", 0))
             port = sock.getsockname()[1]
@@ -1246,8 +1258,9 @@ class V41CheckpointEngineSM120Test(unittest.TestCase):
                 maintained_collapse,
                 maintained_post,
                 maintained_prenorm,
+                world_size,
             ),
-            nprocs=8,
+            nprocs=world_size,
             join=True,
         )
 
@@ -1256,6 +1269,7 @@ class V41CheckpointEngineSM120Test(unittest.TestCase):
         new_tokens,
         context=256,
         *,
+        world_size=8,
         maintained_attention=False,
         maintained_collapse=False,
         maintained_post=False,
@@ -1275,14 +1289,17 @@ class V41CheckpointEngineSM120Test(unittest.TestCase):
             torch.cuda.empty_cache()
             directory = root / "cache"
             directory.mkdir()
-            prompts = (
-                [
+            if context > 32768:
+                prompts = [
+                    [(start + i) % 127 for i in range(32768)] for start in (3, 6)
+                ]
+            elif context > 256:
+                prompts = [
                     [(start + i) % 127 for i in range(count)]
                     for start, count in ((3, 253), (6, 503))
                 ]
-                if context > 256
-                else [[3, 4, 5], [6, 7]]
-            )
+            else:
+                prompts = [[3, 4, 5], [6, 7]]
             self.run_checkpoint(
                 root,
                 directory,
@@ -1290,6 +1307,7 @@ class V41CheckpointEngineSM120Test(unittest.TestCase):
                 full=False,
                 new_tokens=new_tokens,
                 context=context,
+                world_size=world_size,
                 maintained_attention=maintained_attention,
                 maintained_collapse=maintained_collapse,
                 maintained_post=maintained_post,
@@ -1350,6 +1368,29 @@ class V41CheckpointEngineSM120Test(unittest.TestCase):
         self.run_bounded_checkpoint(9, context=512)
 
     @unittest.skipUnless(
+        os.environ.get("DSV41_TEST_32K_ENGINE") == "1",
+        "32K checkpoint engine requires explicit admission",
+    )
+    def test_32k_bounded_checkpoint_cold_decode(self):
+        self.run_bounded_checkpoint(9, context=32768 + 256)
+
+    @unittest.skipUnless(
+        os.environ.get("DSV41_TEST_32K_ENGINE") == "1"
+        and torch.cuda.device_count() == 1,
+        "single-rank 32K checkpoint engine requires admission and one visible GPU",
+    )
+    def test_32k_single_rank_checkpoint_cold_decode(self):
+        self.run_bounded_checkpoint(9, context=32768 + 256, world_size=1)
+
+    @unittest.skipUnless(
+        os.environ.get("DSV41_TEST_FULL_ENGINE") == "1"
+        and os.environ.get("DSV41_TEST_32K_ENGINE") == "1",
+        "full 32K checkpoint engine requires explicit admission",
+    )
+    def test_full_nas_checkpoint_32k_decode_liveness(self):
+        self.run_full_checkpoint(9, context=32768 + 256, prompt_tokens=32768)
+
+    @unittest.skipUnless(
         os.environ.get("DSV41_TEST_FULL_ENGINE") == "1",
         "full checkpoint execution requires explicit host/device admission",
     )
@@ -1404,6 +1445,8 @@ class V41CheckpointEngineSM120Test(unittest.TestCase):
         self,
         new_tokens,
         *,
+        context=256,
+        prompt_tokens=None,
         maintained_attention=False,
         maintained_collapse=False,
         maintained_post=False,
@@ -1494,10 +1537,27 @@ class V41CheckpointEngineSM120Test(unittest.TestCase):
             for text in ("The capital of France is", "2 + 2 =")
         ]
         self.assertTrue(all(0 < len(prompt) <= 32 for prompt in prompts))
+        if prompt_tokens is not None:
+            self.assertGreaterEqual(prompt_tokens, max(map(len, prompts)))
+            self.assertLessEqual(prompt_tokens + new_tokens, context)
+            self.assertFalse(maintained_attention)
+            filler = tokenizer.encode(
+                "This document records an inference context validation. ",
+                add_special_tokens=False,
+            )
+            self.assertTrue(filler)
+            prompts = [
+                (filler * ((prompt_tokens + len(filler) - 1) // len(filler)))[
+                    : prompt_tokens - len(prompt)
+                ]
+                + prompt
+                for prompt in prompts
+            ]
+            self.assertTrue(all(len(prompt) == prompt_tokens for prompt in prompts))
         print(
             f"full-engine admission bytes={total} available_ram={memory['MemAvailable']} "
             f"free_storage={free_storage} reserve_gib={reserve_gib} "
-            f"reuse_tables={bool(reuse)} prompts={prompts}"
+            f"reuse_tables={bool(reuse)} prompt_lengths={list(map(len, prompts))}"
             + (f" output_budget_bytes={output_budget}" if output_budget else ""),
             flush=True,
         )
@@ -1512,6 +1572,7 @@ class V41CheckpointEngineSM120Test(unittest.TestCase):
                 prompts,
                 full=True,
                 new_tokens=new_tokens,
+                context=context,
                 maintained_attention=maintained_attention,
                 maintained_collapse=maintained_collapse,
                 maintained_post=maintained_post,

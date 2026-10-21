@@ -18,7 +18,9 @@ from rtp_llm.models_py.modules.dsv4.fp8.test.test_v41_attention_owner_sm120 impo
     NativeTaggedCache,
     make_layer,
     output_composition,
+    paged_tables,
     prepare,
+    dense_oracle,
 )
 from rtp_llm.models_py.modules.dsv4.fp8.test.test_v41_decode_attention_sm120 import (
     oracle,
@@ -55,6 +57,114 @@ class DecodeOwnerSM120Test(unittest.TestCase):
     def setUp(self):
         self.assertEqual(torch.cuda.get_device_capability(), (12, 0))
         torch.manual_seed(41221)
+
+    @torch.inference_mode()
+    def test_32k_prefill_and_decode_cross_page_with_cache_and_attention_oracles(self):
+        for ratio, source in ((0, 0), (1, 20), (2, 2)):
+            with self.subTest(ratio=ratio):
+                config = {
+                    "candidate_source_layer_id": 20,
+                    "candidate_topk_blocks": 2048,
+                    "candidate_block_size": 8,
+                }
+                torch.manual_seed(41327)
+                layer = make_layer(
+                    source, ratio, gen=0, max_seq_len=33024, v41_config=config
+                )
+                torch.manual_seed(41327)
+                reference = make_layer(
+                    source, ratio, gen=0, max_seq_len=33024, v41_config=config
+                )
+                cache = NativeTaggedCache([layer], gen=0, pages=130)
+                ref_cache = NativeTaggedCache([reference], gen=0, pages=130)
+                tables = paged_tables(cache, 129)
+                prompt = torch.randn(32768, 512, device="cuda", dtype=torch.bfloat16)
+                from rtp_llm.models_py.modules.dsv4.fp8._v41_prefill_attention_sm120 import (
+                    sparse_prefill_attention,
+                )
+
+                sampled = []
+
+                def check_prefill(q, kv, indices, lengths, sink, **kwargs):
+                    actual = sparse_prefill_attention(
+                        q, kv, indices, lengths, sink, **kwargs
+                    )
+                    rows = torch.tensor(
+                        [0, len(q) // 2, len(q) - 1], device=q.device
+                    ).unique()
+                    expected = dense_oracle(
+                        q[rows], kv, indices[rows], lengths[rows], sink
+                    )
+                    torch.testing.assert_close(
+                        actual[rows].cpu(), expected, rtol=0.01, atol=0.004
+                    )
+                    sampled.append(len(rows))
+                    return actual
+
+                with patch(
+                    "rtp_llm.models_py.modules.dsv4.fp8._v41_prefill_attention_sm120.sparse_prefill_attention",
+                    side_effect=check_prefill,
+                ):
+                    prefill(layer, cache, prompt, [32768], tables=tables)
+                self.assertTrue(sampled)
+                for key, raw in cache.storage.items():
+                    ref_cache.storage[key].copy_(raw)
+                    self.assertTrue(
+                        bool(
+                            (raw[:, cache.layouts[key[1]].stride_bytes :] == 173).all()
+                        )
+                    )
+                for step in range(8):
+                    start = 32768 + step
+                    x = torch.randn(1, 1, 512, device="cuda", dtype=torch.bfloat16)
+                    metadata = decode_metadata(layer, cache, [start], tables)
+
+                    def check_decode(q, sp, ss, sink, gp=None, gs=None):
+                        actual = sparse_decode_attention(q, sp, ss, sink, gp, gs)
+                        sources = [
+                            (
+                                V41PagedCache(
+                                    cache.groups[0, "swa_kv"].kv_cache_base, "swa_kv", 0
+                                ),
+                                ss,
+                            )
+                        ]
+                        if ratio:
+                            tag = layer._global_region()
+                            sources.append(
+                                (
+                                    V41PagedCache(
+                                        cache.groups[0, tag].kv_cache_base, tag, 0
+                                    ),
+                                    gs,
+                                )
+                            )
+                        torch.testing.assert_close(
+                            actual.cpu(),
+                            oracle(q, sink, sources),
+                            rtol=0.01,
+                            atol=0.004,
+                        )
+                        return actual
+
+                    with patch(
+                        "rtp_llm.models_py.modules.dsv4.fp8._v41_decode_attention_sm120.sparse_decode_attention",
+                        side_effect=check_decode,
+                    ):
+                        output = layer.forward_decode(x, metadata, cache)
+                    self.assertTrue(bool(torch.isfinite(output).all()))
+                    prefill(reference, ref_cache, x[:, 0], [1], [start], tables)
+                    if ratio:
+                        torch.testing.assert_close(
+                            layer._shared_attention["topk"][source],
+                            reference._shared_attention["topk"][source],
+                            rtol=0,
+                            atol=0,
+                        )
+                    for key, raw in cache.storage.items():
+                        torch.testing.assert_close(
+                            raw, ref_cache.storage[key], rtol=0, atol=0
+                        )
 
     @torch.inference_mode()
     def test_query_normalization_contract_and_v4_default(self):
@@ -225,6 +335,48 @@ class DecodeOwnerSM120Test(unittest.TestCase):
                 torch.testing.assert_close(cache.storage[key], raw, rtol=0, atol=0)
             self.assertIsNone(layer._kv_cache)
             self.assertIsNone(layer._block_tables_by_type)
+
+    @torch.inference_mode()
+    def test_singleton_slot_views_are_revalidated_without_writes(self):
+        from rtp_llm.models_py.modules.dsv4.fp8.attention import bind_attn_cache
+
+        for source, ratio in ((0, 0), (20, 1), (2, 2)):
+            layer = make_layer(source, ratio, gen=0)
+            cache = NativeTaggedCache([layer], gen=0)
+            tables = paged_tables(cache, 2)
+            metadata = decode_metadata(layer, cache, [3], tables)
+            x = torch.zeros(1, 1, layer.dim, device="cuda", dtype=torch.bfloat16)
+            before_cache = {key: raw.clone() for key, raw in cache.storage.items()}
+            for stride in (0, 1, 2, 17):
+                for offset in (0, 3):
+                    with self.subTest(ratio=ratio, stride=stride, offset=offset):
+                        backing = torch.full(
+                            (32,), -701, dtype=torch.int64, device=x.device
+                        )
+                        slot = torch.as_strided(backing, (1,), (stride,), offset)
+                        slot.copy_(metadata.pool_write_slot_mappings["swa_kv"])
+                        changed = replace(
+                            metadata,
+                            pool_write_slot_mappings={
+                                **metadata.pool_write_slot_mappings,
+                                "swa_kv": slot,
+                            },
+                        )
+                        before = backing.clone()
+                        self.assertTrue(slot.is_contiguous())
+                        with bind_attn_cache(layer, cache, tables):
+                            layer._require_qualified_decode(x, changed)
+                            self.assertTrue(torch.equal(backing, before))
+                            slot.add_(1)
+                            with self.assertRaisesRegex(ValueError, "SWA slots"):
+                                layer._require_qualified_decode(x, changed)
+                            slot.sub_(1)
+                            layer._require_qualified_decode(x, changed)
+                        self.assertTrue(torch.equal(backing, before))
+                        self.assertEqual(slot.stride(), (stride,))
+                        self.assertEqual(slot.storage_offset(), offset)
+            for key, raw in cache.storage.items():
+                self.assertTrue(torch.equal(raw, before_cache[key]))
 
 
 if __name__ == "__main__":

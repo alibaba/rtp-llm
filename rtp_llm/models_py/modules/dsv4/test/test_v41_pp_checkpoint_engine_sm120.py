@@ -10,6 +10,7 @@ import tempfile
 import traceback
 import unittest
 from contextlib import ExitStack, contextmanager
+from dataclasses import asdict
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,6 +21,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 
 from rtp_llm.cpp.normal_engine.test import libth_v41_native_engine_test as ops
+from rtp_llm.models.dsv41_kv_cache import dsv41_cache_bindings, dsv41_page_layouts
 from rtp_llm.models_py.distributed import collective_torch as collective
 from rtp_llm.models_py.model_desc.deepseek_v4_model import Dsv4SharedRuntimeBufferStore
 from rtp_llm.models_py.model_desc.deepseek_v41_model import DeepSeekV41Model
@@ -147,6 +149,7 @@ def run_rank(
     diagnostic_mhc=False,
     artifact_directory=None,
     max_seq_len=256,
+    saved_handoff=None,
 ):
     torch.cuda.set_device(rank)
     torch.set_num_threads(1)
@@ -193,9 +196,11 @@ def run_rank(
         return new_group(*args, **kwargs)
 
     worker = engine = None
-    with pp_mhc_equations(mhc_choices, diagnostic_mhc), patch.dict(
-        sys.modules, {"librtp_compute_ops": ops}
-    ), patch.object(dist, "new_group", side_effect=bounded_group):
+    with (
+        pp_mhc_equations(mhc_choices, diagnostic_mhc),
+        patch.dict(sys.modules, {"librtp_compute_ops": ops}),
+        patch.object(dist, "new_group", side_effect=bounded_group),
+    ):
         try:
             collective.init_distributed_environment(
                 parallelism_for(rank), NcclCommConfig(nccl_ip="127.0.0.1"), 0
@@ -209,6 +214,24 @@ def run_rank(
                 config.deepseek_v41_config.update(owner_choices)
                 parallelism, hw, loader = make_pp_loader(config, kv_config, rank)
                 loaded = loader.load_weights(f"cuda:{rank}")
+                if saved_handoff is not None:
+                    signature = loader_signature(loaded)
+                    assert signature == saved_handoff["source_loader"][str(rank)]
+                    print(
+                        "DSV41_HANDOFF_LOADER "
+                        + json.dumps(
+                            {
+                                "rank": rank,
+                                "role": "producer",
+                                "ep_size": 4,
+                                "expert_begin": rank % 4 * 4,
+                                "expert_count": 4,
+                                "entries_exact": len(signature),
+                                "label": saved_handoff["label"],
+                            }
+                        ),
+                        flush=True,
+                    )
                 head = loaded.global_weights[W.lm_head] if rank >= 4 else torch.empty(0)
                 if rank >= 4:
                     assert head.size(0) * 4 == config.vocab_size
@@ -338,6 +361,44 @@ def run_rank(
                             }
                             if rank >= 4:
                                 snapshot["logits"] = logits.cpu().clone()
+                            if saved_handoff is not None:
+                                assert dispatch.worker_owner is worker
+                                leases = worker.kv_cache.native_allocation_tables(
+                                    dispatch.native_inputs
+                                )
+                                tables = {
+                                    tag: table.cpu().clone()
+                                    for tag, table in dispatch.tables.items()
+                                }
+                                for tag, table in tables.items():
+                                    assert table.tolist() == [
+                                        list(row[tag]) for row in leases
+                                    ]
+                                snapshot["ownership"] = {
+                                    "tables": tables,
+                                    "leases": [
+                                        {tag: list(pages) for tag, pages in row.items()}
+                                        for row in leases
+                                    ],
+                                    "bindings": [
+                                        asdict(binding)
+                                        for binding in dsv41_cache_bindings(
+                                            worker._v4_args.v41_config, 2, rank // 4
+                                        )
+                                    ],
+                                    "layouts": {
+                                        tag: asdict(layout)
+                                        for tag, layout in dsv41_page_layouts(0).items()
+                                    },
+                                    "identities": identities,
+                                    "config": worker._v4_args.v41_config,
+                                    "choices": mhc_choices,
+                                    "input_ids": dispatch.input_ids.cpu().clone(),
+                                    "token_windows": dispatch.token_windows.cpu().clone(),
+                                    "live_native_leases": True,
+                                    "worker_owner_exact": True,
+                                    "loader": signature,
+                                }
                             save_tensors(
                                 artifact_directory / f"rank{rank}-phase{phase[0]}.pt",
                                 snapshot,
@@ -546,6 +607,7 @@ class V41PPCheckpointEngineSM120Test(unittest.TestCase):
         diagnostic_mhc=False,
         artifact_directory=None,
         max_seq_len=256,
+        saved_handoff=None,
     ):
         self.assertEqual(torch.cuda.device_count(), 8)
         rendezvous = Path(directory).resolve() / "world.rendezvous"
@@ -563,6 +625,7 @@ class V41PPCheckpointEngineSM120Test(unittest.TestCase):
                 diagnostic_mhc,
                 str(artifact_directory) if artifact_directory is not None else None,
                 max_seq_len,
+                saved_handoff,
             ),
             nprocs=8,
             join=True,

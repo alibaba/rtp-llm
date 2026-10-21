@@ -21,6 +21,7 @@ from rtp_llm.models_py.model_desc.deepseek_v41_model import DeepSeekV41Model
 from rtp_llm.models_py.modules.dsv4.engram import make_token_windows
 from rtp_llm.models_py.modules.dsv4.fp8.test.test_v41_attention_owner_sm120 import (
     NativeTaggedCache,
+    paged_tables,
 )
 from rtp_llm.models_py.modules.dsv4.fp8.test.test_v41_transformer_sm120 import fixture
 from rtp_llm.models_py.modules.dsv4.v41_engram_host import _PinnedSharedTable
@@ -550,7 +551,7 @@ class V41WorkerSM120Test(unittest.TestCase):
             torch.testing.assert_close(raw, results[1][1][key], rtol=0, atol=0)
 
     def test_two_page_invalid_later_pages_and_limit_reject_before_writes(self):
-        model = self.worker(max_seq_len=1024)
+        model = self.worker(max_seq_len=512)
         model.kv_cache = tagged_cache(model, pages=8)
         tables = context_tables(model.kv_cache)
         saved = {key: raw.clone() for key, raw in model.kv_cache.storage.items()}
@@ -588,6 +589,60 @@ class V41WorkerSM120Test(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "512-token"):
             model.forward(
                 decode_inputs(model.kv_cache, [3], [512], [[3, 2, 1]], tables=tables)
+            )
+        for key, raw in saved.items():
+            torch.testing.assert_close(raw, model.kv_cache.storage[key], rtol=0, atol=0)
+
+    def test_32k_prefill_decode_history_and_late_page_rejection(self):
+        model = self.worker(max_seq_len=33024)
+        model.kv_cache = tagged_cache(model, pages=130)
+        tables = paged_tables(model.kv_cache, 129)
+        prompt = [(3 + i) % 127 for i in range(32768)]
+        output = model.forward(
+            inputs(model.kv_cache, prompt, [len(prompt)], tables=tables)
+        )
+        self.assertEqual(output.hidden_states.shape, (32768, 512))
+        self.assertTrue(bool(torch.isfinite(output.hidden_states).all()))
+        self.assert_released(model)
+        history = prompt[-3:][::-1]
+        for step in range(8):
+            token, position = 17 + step, 32768 + step
+            output = model.forward(
+                decode_inputs(
+                    model.kv_cache,
+                    [token],
+                    [position],
+                    [history],
+                    prompt_lengths=[32768],
+                    tables=tables,
+                )
+            )
+            self.assertEqual(output.hidden_states.shape, (1, 512))
+            self.assertTrue(bool(torch.isfinite(output.hidden_states).all()))
+            self.assert_released(model)
+            history = [token, *history[:2]]
+        saved = {key: raw.clone() for key, raw in model.kv_cache.storage.items()}
+        for tag in ("csa_kv", "hca_kv", "indexer_kv"):
+            original = int(tables[tag][0, 128])
+            tables[tag][0, 128] = tables[tag][0, 0]
+            with self.assertRaisesRegex(ValueError, "Aliased"):
+                model.forward(
+                    decode_inputs(
+                        model.kv_cache,
+                        [25],
+                        [32776],
+                        [history],
+                        prompt_lengths=[32768],
+                        tables=tables,
+                    )
+                )
+            tables[tag][0, 128] = original
+            self.assert_released(model)
+        with self.assertRaisesRegex(NotImplementedError, "33024-token"):
+            model.forward(inputs(model.kv_cache, [3] * 33025, [33025], tables=tables))
+        with self.assertRaisesRegex(ValueError, "33024-token"):
+            model.forward(
+                decode_inputs(model.kv_cache, [3], [33024], [history], tables=tables)
             )
         for key, raw in saved.items():
             torch.testing.assert_close(raw, model.kv_cache.storage[key], rtol=0, atol=0)

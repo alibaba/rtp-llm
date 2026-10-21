@@ -9,6 +9,7 @@ from unittest.mock import patch
 import torch
 import torch.nn.functional as F
 
+from rtp_llm.config.dsv41_config import V41_MAX_CONTEXT_TOKENS
 from rtp_llm.models.dsv41_kv_cache import dsv41_page_layouts
 from rtp_llm.models_py.modules.dsv4.fp8._v41_prefill_attention_sm120 import (
     sparse_prefill_attention,
@@ -16,6 +17,8 @@ from rtp_llm.models_py.modules.dsv4.fp8._v41_prefill_attention_sm120 import (
 from rtp_llm.models_py.modules.dsv4.fp8.attention import bind_attn_cache
 from rtp_llm.models_py.modules.dsv4.fp8.attention_v41 import (
     AttentionV41FP8,
+    fp4_roundtrip,
+    fp8_roundtrip,
     rms_norm,
     rope_only,
 )
@@ -67,7 +70,15 @@ class NativeTaggedCache:
 
 
 def make_layer(
-    layer_id=0, ratio=0, shared=None, source=None, gen=1, *, dim=512, v41_config=None
+    layer_id=0,
+    ratio=0,
+    shared=None,
+    source=None,
+    gen=1,
+    *,
+    dim=512,
+    v41_config=None,
+    max_seq_len=512,
 ):
     shared = {} if shared is None else shared
     source = layer_id if source is None else source
@@ -111,6 +122,20 @@ def make_layer(
         weights[W.v4_indexer_weights_proj_w] = torch.ones(
             32, dim, device="cuda", dtype=torch.bfloat16
         )
+    if (
+        ratio
+        and layer_id != source
+        and layer_id in (v41_config or {}).get("index_source_layer_ids", [])
+    ):
+        weights[W.v4_indexer_wq_b_w] = torch.randn(4096, 256, device="cuda").to(
+            torch.float8_e4m3fn
+        )
+        weights[W.v4_indexer_wq_b_s] = torch.ones(128, 8, device="cuda").to(
+            torch.float8_e8m0fnu
+        )
+        weights[W.v4_indexer_weights_proj_w] = torch.ones(
+            32, dim, device="cuda", dtype=torch.bfloat16
+        )
     layer = AttentionV41FP8(
         layer_id=layer_id,
         cache_layer_id=layer_id - source,
@@ -130,7 +155,7 @@ def make_layer(
         beta_slow=1,
         original_seq_len=65536,
         max_batch_size=2,
-        max_seq_len=512,
+        max_seq_len=max_seq_len,
         index_n_heads=32,
         index_head_dim=128,
         index_topk=512,
@@ -192,6 +217,20 @@ def prepare(layer, x, cache, lengths, prefixes=None, tables=None):
     meta = meta._replace(workspace=workspace)
     layer._set_prefill_meta_shared(meta)
     return positions, tables, meta
+
+
+def paged_tables(cache, columns, batch=1):
+    pages = (
+        (torch.randperm(columns * batch, device="cuda") + 1).int().view(batch, columns)
+    )
+    return {
+        tag: (
+            torch.arange(1, batch + 1, device="cuda", dtype=torch.int32)[:, None]
+            if tag in ("swa_kv", "csa_state")
+            else pages.clone()
+        )
+        for tag in cache.layouts
+    }
 
 
 def dense_oracle(q, kv, indices, lengths, sinks):
@@ -477,6 +516,13 @@ class AttentionOwnerSM120Test(unittest.TestCase):
 
     @torch.no_grad()
     def test_nas_owner_prefill(self):
+        self.run_nas_owner_prefill(5)
+
+    @torch.no_grad()
+    def test_nas_owner_32k_prefill_and_decode(self):
+        self.run_nas_owner_prefill(32768, decode_steps=8)
+
+    def run_nas_owner_prefill(self, tokens, decode_steps=0):
         from safetensors import safe_open
 
         root = Path(os.environ["DSV41_TEST_CHECKPOINT"])
@@ -540,7 +586,7 @@ class AttentionOwnerSM120Test(unittest.TestCase):
                 beta_slow=1,
                 original_seq_len=65536,
                 max_batch_size=2,
-                max_seq_len=512,
+                max_seq_len=512 if tokens <= 512 else V41_MAX_CONTEXT_TOKENS,
                 index_n_heads=32,
                 index_head_dim=128,
                 index_topk=512,
@@ -550,18 +596,29 @@ class AttentionOwnerSM120Test(unittest.TestCase):
                 shared_attention={},
             )
             layer.reset_rope_cache(torch.device("cuda"))
-            cache = NativeTaggedCache([layer])
-            x = torch.randn(5, layer.dim, device="cuda", dtype=torch.bfloat16)
-            positions, tables, meta = prepare(layer, x, cache, [5])
+            columns = (tokens + decode_steps + 255) // 256
+            cache = NativeTaggedCache([layer], pages=max(4, columns + 1))
+            tables = paged_tables(cache, columns)
+            x = torch.randn(tokens, layer.dim, device="cuda", dtype=torch.bfloat16)
+            positions, tables, meta = prepare(layer, x, cache, [tokens], tables=tables)
             recorded = []
 
-            def checked_attention(*args):
-                value = sparse_prefill_attention(*args)
+            def checked_attention(q, kv, indices, lengths, sinks):
+                value = sparse_prefill_attention(q, kv, indices, lengths, sinks)
+                rows = (
+                    torch.arange(len(q), device=q.device)
+                    if len(q) <= 5
+                    else torch.tensor([0, len(q) // 2, len(q) - 1], device=q.device)
+                )
+                samples = (q[rows], kv, indices[rows], lengths[rows], sinks)
                 torch.testing.assert_close(
-                    value.cpu(), dense_oracle(*args), rtol=0.01, atol=0.004
+                    value[rows].cpu(), dense_oracle(*samples), rtol=0.01, atol=0.004
                 )
                 torch.testing.assert_close(
-                    value.cpu(), contraction_oracle(*args), rtol=0.01, atol=0.004
+                    value[rows].cpu(),
+                    contraction_oracle(*samples),
+                    rtol=0.01,
+                    atol=0.004,
                 )
                 recorded.append(value.clone())
                 return value
@@ -579,6 +636,72 @@ class AttentionOwnerSM120Test(unittest.TestCase):
             expected = output_composition(layer, torch.cat(recorded), meta.freqs_cis)
             with self.subTest(layer=layer_id):
                 torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+            recorded.clear()
+            del actual, expected, x
+            if decode_steps:
+                from rtp_llm.models_py.modules.dsv4.fp8.test.test_v41_decode_owner_sm120 import (
+                    decode_metadata,
+                    prefill,
+                )
+                from rtp_llm.models_py.modules.dsv4.fp8._v41_decode_attention_sm120 import (
+                    sparse_decode_attention,
+                )
+                from rtp_llm.models_py.modules.dsv4.fp8.test.test_v41_decode_attention_sm120 import (
+                    oracle,
+                )
+
+                for step in range(decode_steps):
+                    start = tokens + step
+                    x = torch.randn(
+                        1, 1, layer.dim, device="cuda", dtype=torch.bfloat16
+                    )
+                    before = {key: raw.clone() for key, raw in cache.storage.items()}
+
+                    def checked_decode(q, sp, ss, sink, gp=None, gs=None):
+                        value = sparse_decode_attention(q, sp, ss, sink, gp, gs)
+                        sources = [
+                            (
+                                V41PagedCache(
+                                    cache.groups[0, "swa_kv"].kv_cache_base, "swa_kv"
+                                ),
+                                ss,
+                            )
+                        ]
+                        if ratio:
+                            tag = layer._global_region()
+                            sources.append(
+                                (
+                                    V41PagedCache(
+                                        cache.groups[0, tag].kv_cache_base, tag
+                                    ),
+                                    gs,
+                                )
+                            )
+                        torch.testing.assert_close(
+                            value.cpu(), oracle(q, sink, sources), rtol=0.01, atol=0.004
+                        )
+                        return value
+
+                    with patch(
+                        "rtp_llm.models_py.modules.dsv4.fp8._v41_decode_attention_sm120.sparse_decode_attention",
+                        side_effect=checked_decode,
+                    ):
+                        output = layer.forward_decode(
+                            x, decode_metadata(layer, cache, [start], tables), cache
+                        )
+                    self.assertTrue(bool(torch.isfinite(output).all()))
+                    after = {key: raw.clone() for key, raw in cache.storage.items()}
+                    for key, raw in before.items():
+                        cache.storage[key].copy_(raw)
+                    prefill(layer, cache, x[:, 0], [1], [start], tables)
+                    for key, raw in after.items():
+                        torch.testing.assert_close(
+                            cache.storage[key], raw, rtol=0, atol=0
+                        )
+                print(
+                    f"NAS attention layer={layer_id} prompt={tokens} decode_steps={decode_steps} passed",
+                    flush=True,
+                )
 
     @torch.no_grad()
     def test_source_views_rebind_and_preserve_physical_stride(self):
@@ -665,6 +788,187 @@ class AttentionOwnerSM120Test(unittest.TestCase):
             )
             with self.assertRaisesRegex(ValueError, "checkpoint geometry"):
                 layer._source_pool("csa_state")
+
+    @torch.no_grad()
+    def test_page_admission_checks_live_columns_and_current_values(self):
+        for ratio, source in ((0, 0), (1, 20), (2, 2)):
+            with self.subTest(ratio=ratio):
+                layer = make_layer(source, ratio)
+                cache = NativeTaggedCache([layer], pages=8)
+                tables = {
+                    tag: torch.tensor(
+                        (
+                            [[1], [2]]
+                            if tag in ("swa_kv", "csa_state")
+                            else [[1, 0, 8], [2, 3, -1]]
+                        ),
+                        device="cuda",
+                        dtype=torch.int32,
+                    )
+                    for _, tag in cache.groups
+                }
+                lengths = torch.ones(2, device="cuda", dtype=torch.int32)
+                prefixes = torch.tensor([255, 256], device="cuda", dtype=torch.int32)
+                saved = {key: raw.clone() for key, raw in cache.storage.items()}
+
+                def admit():
+                    with bind_attn_cache(layer, cache, tables):
+                        layer._require_qualified_prefill(
+                            lengths, prefixes, cp_on=False, is_decode=True
+                        )
+
+                admit()
+                with torch.device("cuda"):
+                    admit()
+                for tag, table in list(tables.items()):
+                    index = (1, 0 if tag in ("swa_kv", "csa_state") else 1)
+                    original = int(table[index])
+                    for value, error in ((0, "page"), (8, "page"), (1, "Aliased")):
+                        table[index] = value
+                        with self.assertRaisesRegex(ValueError, error):
+                            admit()
+                    table[index] = original
+                    admit()
+                    tables[tag] = (
+                        torch.cat((table, table), dim=1)
+                        if tag in ("swa_kv", "csa_state")
+                        else table[:, :1].contiguous()
+                    )
+                    with self.assertRaisesRegex(ValueError, "coverage"):
+                        admit()
+                    tables[tag] = table
+                if ratio:
+                    # A formerly unused zero page becomes live at the boundary.
+                    prefixes[0] = 256
+                    with self.assertRaisesRegex(ValueError, "page"):
+                        admit()
+                    prefixes[0] = 255
+                    admit()
+                for key, raw in cache.storage.items():
+                    torch.testing.assert_close(raw, saved[key], rtol=0, atol=0)
+
+    @torch.no_grad()
+    def test_long_context_page_admission_checks_late_live_columns(self):
+        for ratio, source in ((0, 0), (1, 20), (2, 2)):
+            with self.subTest(ratio=ratio):
+                layer = make_layer(source, ratio, max_seq_len=V41_MAX_CONTEXT_TOKENS)
+                cache = NativeTaggedCache([layer], pages=260)
+                tables = paged_tables(cache, 129, batch=2)
+                lengths = torch.ones(2, device="cuda", dtype=torch.int32)
+                prefixes = torch.tensor([511, 32767], device="cuda", dtype=torch.int32)
+                saved = {key: raw.clone() for key, raw in cache.storage.items()}
+
+                def admit():
+                    with bind_attn_cache(layer, cache, tables):
+                        layer._require_qualified_prefill(
+                            lengths, prefixes, cp_on=False, is_decode=True
+                        )
+
+                for tag, table in tables.items():
+                    if tag not in ("swa_kv", "csa_state"):
+                        table[0, 2:] = -1
+                        table[1, 128] = 0
+                admit()
+                for tag in (layer._global_region(), "indexer_kv") if ratio else ():
+                    table = tables[tag]
+                    old = int(table[1, 127])
+                    for value, error in (
+                        (0, "page"),
+                        (260, "page"),
+                        (int(table[0, 0]), "Aliased"),
+                        (int(table[1, 2]), "Aliased"),
+                    ):
+                        table[1, 127] = value
+                        with self.assertRaisesRegex(ValueError, error):
+                            admit()
+                    table[1, 127] = old
+                    tables[tag] = table[:, :127].contiguous()
+                    with self.assertRaisesRegex(ValueError, "coverage"):
+                        admit()
+                    tables[tag] = table
+                if ratio:
+                    prefixes[1] = 32768
+                    with self.assertRaisesRegex(ValueError, "page"):
+                        admit()
+                    prefixes[1] = 32767
+                prefixes[1] = V41_MAX_CONTEXT_TOKENS
+                with self.assertRaisesRegex(NotImplementedError, "33024-token"):
+                    admit()
+                for key, raw in cache.storage.items():
+                    torch.testing.assert_close(raw, saved[key], rtol=0, atol=0)
+
+    @torch.no_grad()
+    def test_long_context_indexer_fp4_candidates_and_decode_agree(self):
+        config = {
+            "kv_source_layer_ids": [20],
+            "index_source_layer_ids": [20, 24],
+            "candidate_source_layer_id": 20,
+            "candidate_topk_blocks": 2048,
+            "candidate_block_size": 8,
+        }
+        shared = {}
+        source = make_layer(20, 1, shared, max_seq_len=33024, v41_config=config)
+        consumer = make_layer(24, 1, shared, max_seq_len=33024, v41_config=config)
+        positions = torch.tensor([0, 510, 511, 512, 16383, 16384, 32767], device="cuda")
+        rows = len(positions)
+        x = torch.randn(rows, 512, device="cuda", dtype=torch.bfloat16)
+        qr = torch.randn(rows, 256, device="cuda", dtype=torch.bfloat16)
+        keys = fp4_roundtrip(torch.randn(32768, 128, device="cuda"))
+        shared["global"] = {20: [(None, keys)]}
+        visible = positions + 1
+        columns = torch.arange(len(keys), device="cuda")
+        candidate_mask = None
+        outputs = []
+        old_precision_differs = False
+        for layer in (source, consumer):
+            selected = layer._select_indices(
+                x, qr, positions, torch.zeros(rows, device="cuda", dtype=torch.int32)
+            )
+            query = rope_only(
+                layer.index_wq(qr).view(rows, 32, 128), layer.freqs_cis[positions], 64
+            )
+            weights = F.linear(x, layer.index_weights).float() / (128 * 32) ** 0.5
+
+            def scores(quantize):
+                value = torch.einsum("thd,kd->thk", quantize(query), keys).relu()
+                value = (value * weights[:, :, None]).sum(1)
+                return value.masked_fill(columns[None] >= visible[:, None], -torch.inf)
+
+            logits = scores(fp4_roundtrip)
+            if layer is source:
+                blocks = logits.view(rows, -1, 8).amax(-1)
+                blocks.scatter_(1, ((visible - 1) // 8)[:, None], torch.inf)
+                values, block_ids = blocks.topk(2048, dim=-1)
+                block_mask = torch.zeros_like(blocks, dtype=torch.bool)
+                block_mask.scatter_(1, block_ids, values.isfinite() | values.isposinf())
+                candidate_mask = block_mask.repeat_interleave(8, dim=-1)
+            logits = logits.masked_fill(~candidate_mask, -torch.inf)
+            values, ids = logits.topk(512, dim=-1)
+            expected = torch.where(values.isfinite(), ids, len(keys)).sort(-1).values
+            expected = torch.where(expected < len(keys), expected, -1).int()
+            torch.testing.assert_close(selected, expected, rtol=0, atol=0)
+            self.assertTrue(
+                bool(((selected < visible[:, None]) | (selected == -1)).all())
+            )
+            if layer is source:
+                old_values, old_ids = (
+                    scores(fp8_roundtrip)
+                    .masked_fill(~candidate_mask, -torch.inf)
+                    .topk(512, dim=-1)
+                )
+                old_ids = (
+                    torch.where(old_values.isfinite(), old_ids, len(keys))
+                    .sort(-1)
+                    .values
+                )
+                old_precision_differs = bool((old_ids[-1] != expected[-1]).any())
+            outputs.append(selected.clone())
+        self.assertTrue(old_precision_differs)
+        shared["global"] = {20: keys[None]}
+        shared.pop("candidates", None)
+        for layer, expected in zip((source, consumer), outputs):
+            selected = layer._select_indices_decode(x[None], qr[None], positions)
+            torch.testing.assert_close(selected, expected, rtol=0, atol=0)
 
     @torch.no_grad()
     def test_preflight_rejects_unqualified_work_before_writes(self):
