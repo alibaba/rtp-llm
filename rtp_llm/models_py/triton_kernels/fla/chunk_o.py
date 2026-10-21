@@ -12,7 +12,6 @@ from rtp_llm.models_py.triton_kernels.fla.utils import (
     is_amd_cdna3,
     is_nvidia_hopper,
 )
-from rtp_llm.models_py.utils.prefill_input_log import trace_triton
 
 # Adapted from https://github.com/fla-org/flash-linear-attention/blob/main/fla/ops/common/chunk_o.py
 # -*- coding: utf-8 -*-
@@ -182,10 +181,7 @@ def chunk_fwd_o(
     def grid(meta):
         return (triton.cdiv(V, meta["BV"]), NT, B * H)
 
-    trace_triton(
-        "chunk_o:chunk_fwd_kernel_o[grid]",
-        chunk_fwd_kernel_o,
-        grid,
+    chunk_fwd_kernel_o[grid](
         q,
         k,
         v,

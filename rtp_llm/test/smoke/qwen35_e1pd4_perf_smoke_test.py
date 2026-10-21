@@ -42,7 +42,10 @@ class PerformancePresetTest(unittest.TestCase):
         self.assertEqual(len(old_env), 6)
         # Portable package/cache paths may change; all other historical envs match.
         for value in old_env:
-            if not any(k in value for k in ("PATH=", "CACHE_DIR=")):
+            if not any(
+                k in value
+                for k in ("PATH=", "CACHE_DIR=", "DG_MEGA_MOE_FP8_GRID_SYNC_DIAG=")
+            ):
                 self.assertIn(value, new.bazel_option)
         self.assertIn("--jobs=32", new.bazel_option)
 
@@ -87,6 +90,8 @@ class PerformancePresetTest(unittest.TestCase):
         )
         for actual, expected in zip(configs, REFERENCE["configs"]):
             actual["env"].pop("CUDA_COREDUMP_FILE", None)
+            expected = dict(expected, env=dict(expected["env"]))
+            expected["env"].pop("DG_MEGA_MOE_FP8_IMPL", None)
             self.assertEqual(actual, expected)
         self.assertEqual(len(configs), 2)
 

@@ -10,7 +10,6 @@ from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplB
 from rtp_llm.models_py.triton_kernels.qwen35_decode_fusion.env import (
     quantized_linear_for,
 )
-from rtp_llm.models_py.utils.prefill_input_log import trace_call
 from rtp_llm.ops import AttentionConfigs, HWKernelConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache
 from rtp_llm.utils.model_weight import W
@@ -100,11 +99,7 @@ class CausalAttention(nn.Module):
         input_shape = hidden_states.shape[:-1]
         qkv_linear = quantized_linear_for(self.qkv_proj)
         if quantized_input is not None and qkv_linear is not None:
-            qkv = trace_call(
-                "causal_attention:qkv_linear.forward_quantized",
-                qkv_linear.forward_quantized,
-                *quantized_input
-            )
+            qkv = qkv_linear.forward_quantized(*quantized_input)
         else:
             qkv = self.qkv_proj(hidden_states)
         attn_output = None
@@ -116,9 +111,7 @@ class CausalAttention(nn.Module):
         if attn_output is None:
             if self.qk_fuse_norm is not None:
                 qkv = self.qk_fuse_norm(qkv)
-            attn_output = trace_call(
-                "causal_attention:fmha_impl.forward",
-                fmha_impl.forward,
+            attn_output = fmha_impl.forward(
                 qkv,
                 kv_cache,
                 self.layer_idx,
@@ -157,11 +150,7 @@ class CausalAttention(nn.Module):
                 )
             )
             if fused is not None:
-                output = trace_call(
-                    "causal_attention:output_linear.forward_quantized",
-                    output_linear.forward_quantized,
-                    *fused
-                )
+                output = output_linear.forward_quantized(*fused)
             else:
                 attn_output = (attn_output.float() * torch.sigmoid(gate.float())).to(
                     attn_output.dtype

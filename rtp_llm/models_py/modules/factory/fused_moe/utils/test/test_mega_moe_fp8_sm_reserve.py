@@ -104,8 +104,6 @@ class MegaMoeFp8SmReserveTest(unittest.TestCase):
                             major=10, multi_processor_count=148
                         ),
                     ), patch.object(
-                        executor_module, "mega_moe_snapshot_active", return_value=False
-                    ), patch.object(
                         executor_module,
                         "sync_cuda_graph_warmup_ranks",
                         side_effect=lambda *args: self.assertEqual(state.num_sms, 148),

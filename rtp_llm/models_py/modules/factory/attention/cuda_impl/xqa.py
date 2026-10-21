@@ -7,7 +7,6 @@ import torch
 from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
 from rtp_llm.models_py.utils.arch import get_num_device_sms, get_sm, is_sm12x
-from rtp_llm.models_py.utils.prefill_input_log import trace_call
 from rtp_llm.ops import AttentionConfigs, FMHAConfig, FMHAType, ParallelismConfig
 from rtp_llm.ops.compute_ops import (
     FusedRopeKVCacheDecodeOp,
@@ -68,12 +67,8 @@ class XQAImpl(FMHAImplBase):
 
         self.attn_inputs = attn_inputs
 
-        self.fmha_params = trace_call(
-            "xqa:self.fmha_impl.prepare", self.fmha_impl.prepare, attn_inputs
-        )
-        self.rope_params = trace_call(
-            "xqa:self.rope_kvcache_impl.prepare",
-            self.rope_kvcache_impl.prepare,
+        self.fmha_params = self.fmha_impl.prepare(attn_inputs)
+        self.rope_params = self.rope_kvcache_impl.prepare(
             attn_inputs,
         )
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
@@ -102,9 +97,7 @@ class XQAImpl(FMHAImplBase):
         layer_idx: int = 0,
     ) -> torch.Tensor:
         if self.need_rope_kv_cache:
-            fmha_input = trace_call(
-                "xqa:self.rope_kvcache_impl.forward",
-                self.rope_kvcache_impl.forward,
+            fmha_input = self.rope_kvcache_impl.forward(
                 qkv,
                 kv_cache,
                 self.rope_params,
@@ -116,9 +109,7 @@ class XQAImpl(FMHAImplBase):
             self.write_cache_store_impl, self.attn_inputs, kv_cache
         )
 
-        return trace_call(
-            "xqa:self.fmha_impl.forward",
-            self.fmha_impl.forward,
+        return self.fmha_impl.forward(
             fmha_input,
             kv_cache,
             self.fmha_params,
@@ -153,9 +144,7 @@ class XQAImpl(FMHAImplBase):
                     attn_inputs.kv_cache_kernel_block_id_device,
                 )
             else:
-                new_rope_params = trace_call(
-                    "xqa:self.rope_kvcache_impl.prepare",
-                    self.rope_kvcache_impl.prepare,
+                new_rope_params = self.rope_kvcache_impl.prepare(
                     attn_inputs,
                 )
                 common.copy_kv_cache_offset(
@@ -185,12 +174,8 @@ class XQADecodeImpl(FMHAImplBase):
 
         self.attn_inputs = attn_inputs
 
-        self.fmha_params = trace_call(
-            "xqa:self.fmha_impl.prepare", self.fmha_impl.prepare, attn_inputs
-        )
-        self.rope_params = trace_call(
-            "xqa:self.rope_kvcache_impl.prepare",
-            self.rope_kvcache_impl.prepare,
+        self.fmha_params = self.fmha_impl.prepare(attn_inputs)
+        self.rope_params = self.rope_kvcache_impl.prepare(
             attn_inputs,
         )
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
@@ -225,9 +210,7 @@ class XQADecodeImpl(FMHAImplBase):
         layer_idx: int = 0,
     ) -> torch.Tensor:
         if self.need_rope_kv_cache:
-            fmha_input = trace_call(
-                "xqa:self.rope_kvcache_impl.forward",
-                self.rope_kvcache_impl.forward,
+            fmha_input = self.rope_kvcache_impl.forward(
                 qkv,
                 kv_cache,
                 self.rope_params,
@@ -239,9 +222,7 @@ class XQADecodeImpl(FMHAImplBase):
             self.write_cache_store_impl, self.attn_inputs, kv_cache
         )
 
-        return trace_call(
-            "xqa:self.fmha_impl.forward",
-            self.fmha_impl.forward,
+        return self.fmha_impl.forward(
             fmha_input,
             kv_cache,
             self.fmha_params,
@@ -259,9 +240,7 @@ class XQADecodeImpl(FMHAImplBase):
         self.fmha_params.batch_size = new_fmha_params.batch_size
         self.fmha_params.max_seq_len = new_fmha_params.max_seq_len
 
-        new_rope_params = trace_call(
-            "xqa:self.rope_kvcache_impl.prepare",
-            self.rope_kvcache_impl.prepare,
+        new_rope_params = self.rope_kvcache_impl.prepare(
             attn_inputs,
         )
         new_offset = new_rope_params.kv_cache_offset

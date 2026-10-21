@@ -6,7 +6,6 @@ from torch.nn import functional as F
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
-from rtp_llm.models_py.utils.prefill_input_log import trace_call
 from rtp_llm.ops import ParallelismConfig
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
@@ -45,9 +44,7 @@ class Embedding(nn.Module):
         output = torch.empty(
             (tokens, hidden_size), dtype=self.weight.dtype, device=input.device
         )
-        trace_call(
-            "embedding:rtp_llm_ops.embedding",
-            rtp_llm_ops.embedding,
+        rtp_llm_ops.embedding(
             output,
             input,
             self.weight.data,
@@ -95,9 +92,7 @@ class EmbeddingBert(nn.Module):
             (tokens, hidden_size), dtype=self.weight.dtype, device=input.device
         )
 
-        trace_call(
-            "embedding:rtp_llm_ops.embedding_bert",
-            rtp_llm_ops.embedding_bert,
+        rtp_llm_ops.embedding_bert(
             output,
             input,
             self.weight.data,

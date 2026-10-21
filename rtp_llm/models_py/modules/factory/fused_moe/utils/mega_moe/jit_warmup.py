@@ -18,10 +18,10 @@ def mega_moe_jit_warmup_enabled() -> bool:
     return model_warm_up_enabled()
 
 
-# Audited against DeepGEMM 83961ec (the version pinned by RTP's CUDA 13 wheels).
+# Audited against DeepGEMM ae715cd (the version pinned by RTP's CUDA 13 wheels).
 # Re-audit this contract when updating the dependency: get_block_m alone does
 # not describe FP8's store/epilogue and single-pass dispatch specializations.
-DEEP_GEMM_WARMUP_REVISION = "83961ec"
+DEEP_GEMM_WARMUP_REVISION = "ae715cd"
 
 
 def mega_moe_config_signature(
@@ -32,7 +32,7 @@ def mega_moe_config_signature(
     num_tokens: int,
     block_m: int,
     fp8_weights: bool = False,
-) -> tuple[int, int, int, bool]:
+) -> tuple[int, int, int, int, bool]:
     """Token-varying JIT determinants for the pinned FP4/FP8 C++ launchers.
 
     BLOCK_M comes from the installed backend. At fixed model/buffer/SM settings,
@@ -42,11 +42,17 @@ def mega_moe_config_signature(
     single-pass dispatch can change while BLOCK_M stays the same.
     """
     store_block_m = (
-        8 if block_m <= 16 else 16 if block_m <= 64 else 32 if block_m <= 192 else 40
+        8 if block_m <= 16 else 16 if block_m <= 64 else 32 if block_m <= 192 else 24
     )
+    store_block_m_l2 = 8 if block_m == 240 else store_block_m
     epilogue_threads = 256
     single_pass = False
     if fp8_weights:
+        store_block_m = (
+            8
+            if block_m <= 16
+            else 16 if block_m <= 64 else 32 if block_m <= 192 else 40
+        )
         # Match the float arithmetic in get_block_config_for_mega_moe_fp8.
         expected = c_float(num_tokens).value
         expected = c_float(expected * num_ranks).value
@@ -57,8 +63,9 @@ def mega_moe_config_signature(
             epilogue_threads = 128
         elif expected <= 64.5:
             store_block_m = 16
+        store_block_m_l2 = store_block_m
         single_pass = num_tokens * num_topk <= 32768
-    return block_m, store_block_m, epilogue_threads, single_pass
+    return block_m, store_block_m, store_block_m_l2, epilogue_threads, single_pass
 
 
 def generate_mega_moe_jit_token_counts(

@@ -10,8 +10,6 @@ import torch
 import triton
 import triton.language as tl
 
-from rtp_llm.models_py.utils.prefill_input_log import trace_triton
-
 
 @triton.jit
 def fused_moe_kernel(
@@ -153,10 +151,7 @@ def invoke_fused_moe_kernel(
     K = B.shape[2]
     even_Ks = K % config["BLOCK_SIZE_K"] == 0
 
-    trace_triton(
-        "fused_moe_kernel:fused_moe_kernel[grid]",
-        fused_moe_kernel,
-        grid,
+    fused_moe_kernel[grid](
         A,
         B,
         C,

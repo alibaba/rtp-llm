@@ -14,7 +14,6 @@ import triton
 import triton.language as tl
 
 from rtp_llm.models_py.triton_kernels.fla.op import exp
-from rtp_llm.models_py.utils.prefill_input_log import trace_triton
 
 
 # assume x always greater than 1
@@ -252,10 +251,7 @@ def fused_recurrent_gated_delta_rule_fwd(
         max_block_size = block_map.shape[1]
 
     grid = (NK, NV, N * HV)
-    trace_triton(
-        "fused_recurrent:fused_recurrent_gated_delta_rule_fwd_kernel[grid]",
-        fused_recurrent_gated_delta_rule_fwd_kernel,
-        grid,
+    fused_recurrent_gated_delta_rule_fwd_kernel[grid](
         q=q,
         k=k,
         v=v,

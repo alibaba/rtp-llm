@@ -3,8 +3,6 @@ from typing import Any, Dict, Optional
 
 import torch
 
-from rtp_llm.models_py.utils.prefill_input_log import trace_call
-
 logger = logging.getLogger(__name__)
 
 from flashinfer import scaled_fp4_grouped_quantize
@@ -220,9 +218,7 @@ class CutedslFp4Executor(FusedMoeExpertExecutor):
         ), f"w2 last dim should be N//2={N//2}, got {self._w2.size(2)}"
 
         if payload.expert_x.dtype is torch.bfloat16:
-            hidden_states, hidden_states_scale = trace_call(
-                "cutedsl_fp4_executor:scaled_fp4_grouped_quantize",
-                scaled_fp4_grouped_quantize,
+            hidden_states, hidden_states_scale = scaled_fp4_grouped_quantize(
                 payload.expert_x,
                 expert_num_tokens,
                 self.input_global_scale,

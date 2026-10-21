@@ -7,7 +7,6 @@ import triton.language as tl
 from rtp_llm.models_py.triton_kernels.fla.index import prepare_chunk_indices
 from rtp_llm.models_py.triton_kernels.fla.op import exp, exp2
 from rtp_llm.models_py.triton_kernels.fla.utils import is_amd
-from rtp_llm.models_py.utils.prefill_input_log import trace_triton
 
 # Adapt from https://github.com/fla-org/flash-linear-attention/blob/main/fla/ops/gated_delta_rule/wy_fast.py
 # -*- coding: utf-8 -*-
@@ -139,10 +138,7 @@ def recompute_w_u_fwd(
     BV = min(128, V) if is_amd else 64
     u = torch.empty_like(v)
     w = k.new_empty(B, T, H, K)
-    trace_triton(
-        "wy_fast:recompute_w_u_fwd_kernel[NT, B * H]",
-        recompute_w_u_fwd_kernel,
-        (NT, B * H),
+    recompute_w_u_fwd_kernel[(NT, B * H)](
         k=k,
         v=v,
         beta=beta,

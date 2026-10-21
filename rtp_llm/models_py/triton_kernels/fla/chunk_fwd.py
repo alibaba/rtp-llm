@@ -7,7 +7,6 @@ import triton.language as tl
 from rtp_llm.models_py.triton_kernels.fla.index import prepare_chunk_indices
 from rtp_llm.models_py.triton_kernels.fla.op import exp2
 from rtp_llm.models_py.triton_kernels.fla.wy_fast import recompute_w_u_fwd
-from rtp_llm.models_py.utils.prefill_input_log import trace_triton
 
 # Adapted from https://github.com/fla-org/flash-linear-attention/blob/main/fla/ops/gated_delta_rule/chunk_fwd.py
 # -*- coding: utf-8 -*-
@@ -323,10 +322,7 @@ def chunk_gated_delta_rule_fwd_intra_a_only(
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
     A = torch.zeros(B, T, H, BT, device=k.device, dtype=k.dtype)
-    trace_triton(
-        "chunk_fwd:chunk_gated_delta_rule_fwd_kkt_solve_kernel[NT, B * H]",
-        chunk_gated_delta_rule_fwd_kkt_solve_kernel,
-        (NT, B * H),
+    chunk_gated_delta_rule_fwd_kkt_solve_kernel[(NT, B * H)](
         k=k,
         g=g,
         beta=beta,

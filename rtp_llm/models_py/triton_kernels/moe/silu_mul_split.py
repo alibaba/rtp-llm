@@ -29,8 +29,6 @@ import torch
 import triton
 import triton.language as tl
 
-from rtp_llm.models_py.utils.prefill_input_log import trace_triton
-
 
 @triton.jit
 def _silu_mul_split_kernel(
@@ -113,10 +111,7 @@ def silu_mul_split(
     BLOCK_D = 1024 if D >= 1024 else triton.next_power_of_2(D)
     grid = (N, triton.cdiv(D, BLOCK_D))
 
-    trace_triton(
-        "silu_mul_split:_silu_mul_split_kernel[grid]",
-        _silu_mul_split_kernel,
-        grid,
+    _silu_mul_split_kernel[grid](
         g_flat,
         u_flat,
         o_flat,

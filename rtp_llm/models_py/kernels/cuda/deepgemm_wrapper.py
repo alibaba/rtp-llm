@@ -6,7 +6,6 @@ import torch
 import triton
 import triton.language as tl
 
-from rtp_llm.models_py.utils.prefill_input_log import trace_call, trace_triton
 from rtp_llm.utils.module_util import has_module, resolve_symbol
 
 __all__ = [
@@ -102,18 +101,14 @@ def configure_deep_gemm_num_sms(num_sms: int) -> Generator[None, None, None]:
     import deep_gemm
 
     # get original num sms
-    original_num_sms = trace_call(
-        "deepgemm_wrapper:deep_gemm.get_num_sms", deep_gemm.get_num_sms
-    )
+    original_num_sms = deep_gemm.get_num_sms()
     # set num sms
-    trace_call("deepgemm_wrapper:deep_gemm.set_num_sms", deep_gemm.set_num_sms, num_sms)
+    deep_gemm.set_num_sms(num_sms)
     try:
         yield
     finally:
         # restore original num sms
-        trace_call(
-            "deepgemm_wrapper:deep_gemm.set_num_sms",
-            deep_gemm.set_num_sms,
+        deep_gemm.set_num_sms(
             original_num_sms,
         )
 
@@ -343,9 +338,7 @@ def pack_ue8m0_kernel_launcher(scale: torch.Tensor, gran_mn: int):
     M = M_scale * gran_mn
 
     # Calculate aligned dimensions
-    aligned_mn = trace_call(
-        "deepgemm_wrapper:deep_gemm.get_tma_aligned_size",
-        deep_gemm.get_tma_aligned_size,
+    aligned_mn = deep_gemm.get_tma_aligned_size(
         M,
         4,
     )
@@ -376,10 +369,7 @@ def pack_ue8m0_kernel_launcher(scale: torch.Tensor, gran_mn: int):
     )
 
     if gran_mn == 1:
-        trace_triton(
-            "deepgemm_wrapper:pack_ue8m0_kernel_gran1[grid]",
-            pack_ue8m0_kernel_gran1,
-            grid,
+        pack_ue8m0_kernel_gran1[grid](
             scale,
             packed,
             M,
@@ -398,10 +388,7 @@ def pack_ue8m0_kernel_launcher(scale: torch.Tensor, gran_mn: int):
         )
     else:
         # Use vectorized kernel for general case
-        trace_triton(
-            "deepgemm_wrapper:pack_ue8m0_kernel_vectorized[grid]",
-            pack_ue8m0_kernel_vectorized,
-            grid,
+        pack_ue8m0_kernel_vectorized[grid](
             scale,
             packed,
             M,
@@ -451,9 +438,7 @@ def fp8_gemm_nt(
     global _fp8_gemm_nt_impl
     if _fp8_gemm_nt_impl is None:
         return _missing_deep_gemm()
-    trace_call(
-        "deepgemm_wrapper:_fp8_gemm_nt_impl",
-        _fp8_gemm_nt_impl,
+    _fp8_gemm_nt_impl(
         a,
         b,
         output,
@@ -490,9 +475,7 @@ def m_grouped_fp8_gemm_nt_contiguous(
     global _m_grouped_fp8_gemm_nt_contiguous_impl
     if _m_grouped_fp8_gemm_nt_contiguous_impl is None:
         return _missing_deep_gemm()
-    trace_call(
-        "deepgemm_wrapper:_m_grouped_fp8_gemm_nt_contiguous_impl",
-        _m_grouped_fp8_gemm_nt_contiguous_impl,
+    _m_grouped_fp8_gemm_nt_contiguous_impl(
         a,
         b,
         output,
@@ -565,9 +548,7 @@ def m_grouped_fp8_gemm_nt_masked(
     a = (a[0], maybe_pack_ue8m0_scale(a[0], a[1], disable_ue8m0_cast))
     b = (b[0], maybe_pack_ue8m0_scale(b[0], b[1], disable_ue8m0_cast))
 
-    trace_call(
-        "deepgemm_wrapper:_m_grouped_fp8_gemm_nt_masked_impl",
-        _m_grouped_fp8_gemm_nt_masked_impl,
+    _m_grouped_fp8_gemm_nt_masked_impl(
         a,
         b,
         output,
@@ -597,9 +578,7 @@ def bf16_gemm_nt(
     global _bf16_gemm_nt_impl
     if _bf16_gemm_nt_impl is None:
         return _missing_deep_gemm()
-    trace_call(
-        "deepgemm_wrapper:_bf16_gemm_nt_impl",
-        _bf16_gemm_nt_impl,
+    _bf16_gemm_nt_impl(
         a,
         b,
         output,
@@ -628,9 +607,7 @@ def m_grouped_bf16_gemm_nt_contiguous(
     global _m_grouped_bf16_gemm_nt_contiguous_impl
     if _m_grouped_bf16_gemm_nt_contiguous_impl is None:
         return _missing_deep_gemm()
-    trace_call(
-        "deepgemm_wrapper:_m_grouped_bf16_gemm_nt_contiguous_impl",
-        _m_grouped_bf16_gemm_nt_contiguous_impl,
+    _m_grouped_bf16_gemm_nt_contiguous_impl(
         a,
         b,
         output,
@@ -660,9 +637,7 @@ def m_grouped_bf16_gemm_nt_masked(
     global _m_grouped_bf16_gemm_nt_masked_impl
     if _m_grouped_bf16_gemm_nt_masked_impl is None:
         return _missing_deep_gemm()
-    trace_call(
-        "deepgemm_wrapper:_m_grouped_bf16_gemm_nt_masked_impl",
-        _m_grouped_bf16_gemm_nt_masked_impl,
+    _m_grouped_bf16_gemm_nt_masked_impl(
         a,
         b,
         output,
@@ -712,9 +687,7 @@ def fp8_fp4_gemm_nt(
     if _fp8_fp4_gemm_nt_impl is None:
         return _missing_deep_gemm()
     _require_sm100_packed_scale_for_fp8_fp4(a, b)
-    trace_call(
-        "deepgemm_wrapper:_fp8_fp4_gemm_nt_impl",
-        _fp8_fp4_gemm_nt_impl,
+    _fp8_fp4_gemm_nt_impl(
         a,
         b,
         output,
@@ -754,9 +727,7 @@ def m_grouped_fp8_fp4_gemm_nt_contiguous(
     if _m_grouped_fp8_fp4_gemm_nt_contiguous_impl is None:
         return _missing_deep_gemm()
     _require_sm100_packed_scale_for_fp8_fp4(a, b)
-    trace_call(
-        "deepgemm_wrapper:_m_grouped_fp8_fp4_gemm_nt_contiguous_impl",
-        _m_grouped_fp8_fp4_gemm_nt_contiguous_impl,
+    _m_grouped_fp8_fp4_gemm_nt_contiguous_impl(
         a,
         b,
         output,
@@ -793,9 +764,7 @@ def m_grouped_fp8_fp4_gemm_nt_masked(
     if _m_grouped_fp8_fp4_gemm_nt_masked_impl is None:
         return _missing_deep_gemm()
     _require_sm100_packed_scale_for_fp8_fp4(a, b)
-    trace_call(
-        "deepgemm_wrapper:_m_grouped_fp8_fp4_gemm_nt_masked_impl",
-        _m_grouped_fp8_fp4_gemm_nt_masked_impl,
+    _m_grouped_fp8_fp4_gemm_nt_masked_impl(
         a,
         b,
         output,
@@ -829,9 +798,7 @@ def fp8_fp4_paged_mqa_logits(
     global _fp8_fp4_paged_mqa_logits_impl
     if _fp8_fp4_paged_mqa_logits_impl is None:
         return _missing_deep_gemm()
-    return trace_call(
-        "deepgemm_wrapper:_fp8_fp4_paged_mqa_logits_impl",
-        _fp8_fp4_paged_mqa_logits_impl,
+    return _fp8_fp4_paged_mqa_logits_impl(
         q,
         kv_cache,
         weights,
@@ -850,9 +817,7 @@ def per_token_cast_to_fp4(*args: Any, **kwargs: Any) -> Any:
     global _per_token_cast_to_fp4_impl
     if _per_token_cast_to_fp4_impl is None:
         return _missing_deep_gemm()
-    return trace_call(
-        "deepgemm_wrapper:_per_token_cast_to_fp4_impl",
-        _per_token_cast_to_fp4_impl,
+    return _per_token_cast_to_fp4_impl(
         *args,
         **kwargs,
     )
@@ -863,9 +828,7 @@ def cast_back_from_fp4(*args: Any, **kwargs: Any) -> Any:
     global _cast_back_from_fp4_impl
     if _cast_back_from_fp4_impl is None:
         return _missing_deep_gemm()
-    return trace_call(
-        "deepgemm_wrapper:_cast_back_from_fp4_impl",
-        _cast_back_from_fp4_impl,
+    return _cast_back_from_fp4_impl(
         *args,
         **kwargs,
     )
@@ -877,9 +840,7 @@ def transpose_packed_fp4(*args: Any, **kwargs: Any) -> Any:
     global _transpose_packed_fp4_impl
     if _transpose_packed_fp4_impl is None:
         return _missing_deep_gemm()
-    return trace_call(
-        "deepgemm_wrapper:_transpose_packed_fp4_impl",
-        _transpose_packed_fp4_impl,
+    return _transpose_packed_fp4_impl(
         *args,
         **kwargs,
     )
@@ -902,9 +863,7 @@ def tf32_hc_prenorm_gemm(
         _lazy_init_deep_gemm(["tf32_hc_prenorm_gemm"])
     if _tf32_hc_prenorm_gemm_impl is None:
         return _missing_deep_gemm()
-    return trace_call(
-        "deepgemm_wrapper:_tf32_hc_prenorm_gemm_impl",
-        _tf32_hc_prenorm_gemm_impl,
+    return _tf32_hc_prenorm_gemm_impl(
         x,
         fn,
         out,

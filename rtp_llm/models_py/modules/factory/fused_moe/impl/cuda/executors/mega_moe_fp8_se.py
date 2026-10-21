@@ -20,9 +20,6 @@ from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_fp
     MegaMoeFp8Executor,
     mega_moe_fp8_available,
 )
-from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.fp8_impl import (
-    mega_moe_fp8_impl,
-)
 from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.fp8_weights import (
     expand_fp8_scale,
     prepare_mega_moe_fp8_weights,
@@ -40,7 +37,6 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.se_input_packer 
 from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.shared_inputs import (
     ensure_shared_gate_capacity,
 )
-from rtp_llm.models_py.utils.prefill_input_log import trace_call
 from rtp_llm.utils.model_weight import W
 
 
@@ -53,11 +49,12 @@ def mega_moe_fp8_se_available():
         return False
     return (
         "shared_expert_gates" in inspect.signature(mega_fp8.fp8_fp8_mega_moe).parameters
-        and getattr(mega_fp8, "RTP_GATED_SHARED_EXPERT_SEMANTICS", 0) == 1
     )
 
 
 class MegaMoeFp8SEExecutor(MegaMoeFp8Executor):
+    # Use the pinned backend's quantization/combine order; fused output need
+    # not be bitwise equal to separately materialized BF16 shared experts.
     gated_shared_expert_requested = True
     _num_shared_experts = 1
 
@@ -72,7 +69,6 @@ class MegaMoeFp8SEExecutor(MegaMoeFp8Executor):
         checker.check(mega_moe_fp8_se_available())
 
     def __init__(self, config, quant_config, weights):
-        mega_moe_fp8_impl(shared_expert_gates=True)
         from deep_gemm import mega_fp8
 
         if (
@@ -82,14 +78,9 @@ class MegaMoeFp8SEExecutor(MegaMoeFp8Executor):
             raise RuntimeError(
                 "Gated MegaMoE requires a DeepGEMM build with shared_expert_gates"
             )
-        if getattr(mega_fp8, "RTP_GATED_SHARED_EXPERT_SEMANTICS", 0) != 1:
-            raise RuntimeError(
-                "Gated MegaMoE requires RTP BF16/group-128 shared-expert semantics v1"
-            )
         super().__init__(config, quant_config, weights)
 
     def setup_weights(self, weights: Dict[str, torch.Tensor]) -> None:
-        impl = mega_moe_fp8_impl(shared_expert_gates=True)
         if not mega_moe_fp8_available():
             raise RuntimeError(
                 "mega_moe_fp8_se requires SM10x and DeepGEMM mega_fp8 support"
@@ -131,9 +122,8 @@ class MegaMoeFp8SEExecutor(MegaMoeFp8Executor):
         self._input_packer = get_mega_moe_se_input_packer()
         self._maybe_warmup_jit_once()
         logging.info(
-            "MegaMoE FP8-SE weights prepared during model construction: impl=%s, experts=%d, "
+            "MegaMoE FP8-SE weights prepared during model construction: experts=%d, "
             "hidden=%d, intermediate=%d, max_tokens_per_rank=%d, shared=%d",
-            impl,
             config.n_local_experts,
             config.hidden_size,
             config.moe_inter_dim,
@@ -168,9 +158,7 @@ class MegaMoeFp8SEExecutor(MegaMoeFp8Executor):
             raise ValueError(
                 "Gated MegaMoE requires one shared expert with matching intermediate width"
             )
-        self.shared_l1, self.shared_l2 = trace_call(
-            "mega_moe_fp8_se:mega_fp8.transform_weights_for_mega_moe_fp8",
-            mega_fp8.transform_weights_for_mega_moe_fp8,
+        self.shared_l1, self.shared_l2 = mega_fp8.transform_weights_for_mega_moe_fp8(
             (up.weight, expand_fp8_scale(up.weight_scales, 2 * inter, hidden)),
             (down.weight, expand_fp8_scale(down.weight_scales, hidden, inter)),
         )
@@ -192,9 +180,7 @@ class MegaMoeFp8SEExecutor(MegaMoeFp8Executor):
 
         buf = self._mega_buf
         return int(
-            trace_call(
-                "mega_moe_fp8_se:mega_fp8.get_block_m_for_mega_moe_fp8",
-                mega_fp8.get_block_m_for_mega_moe_fp8,
+            mega_fp8.get_block_m_for_mega_moe_fp8(
                 self.config.ep_size,
                 self.config.expert_num,
                 buf.num_max_tokens_per_rank,
@@ -259,7 +245,6 @@ class MegaMoeFp8SEExecutor(MegaMoeFp8Executor):
             y,
             tokens,
             x.device,
-            diagnostic_inputs={"x": x, "weights": weights, "indices": indices},
             **self._shared_kwargs(extra_expert_args, tokens, x.device),
         )
         return y
@@ -310,17 +295,6 @@ class MegaMoeFp8SEExecutor(MegaMoeFp8Executor):
             y,
             tokens,
             x.device,
-            diagnostic_inputs={
-                "x": x,
-                "scores": gate_payload.scores,
-                "topk": gate_payload.topk,
-                "score_func": gate_payload.score_func,
-                "route_scale": gate_payload.route_scale,
-                "norm_eps": gate_payload.norm_eps,
-                "bias": gate_payload.bias,
-                "input_ids": gate_payload.input_ids,
-                "tid2eid": gate_payload.tid2eid,
-            },
             **self._shared_kwargs(extra_expert_args, tokens, x.device),
         )
         return y, buf.topk_weights[:tokens], buf.topk_idx[:tokens]
@@ -360,9 +334,7 @@ class MegaMoeFp8SEExecutor(MegaMoeFp8Executor):
         return CombineForwardPayload(
             fused_expert_output=self._restore_output_dtype(
                 payload,
-                trace_call(
-                    "mega_moe_fp8_se:self.forward",
-                    self.forward,
+                self.forward(
                     payload.expert_x,
                     topk_weights,
                     topk_ids,

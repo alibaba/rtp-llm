@@ -5,7 +5,6 @@ import triton
 import triton.language as tl
 
 from rtp_llm.models_py.utils.math import ceil_div
-from rtp_llm.models_py.utils.prefill_input_log import trace_triton
 
 # Adapt from https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/layers/moe/ep_moe/kernels.py
 # Licensed under the Apache License, Version 2.0
@@ -142,10 +141,7 @@ def ep_scatter(
     assert m_indices.shape[0] % BLOCK_E == 0
     assert recv_x_scale.dtype == output_tensor_scale.dtype
     assert recv_x_scale.shape[1] == output_tensor_scale.shape[1] == scale_hidden_size
-    trace_triton(
-        "ep_kernels:_fwd_kernel_ep_scatter_1[grid,]",
-        _fwd_kernel_ep_scatter_1,
-        (grid,),
+    _fwd_kernel_ep_scatter_1[(grid,)](
         num_recv_tokens_per_expert,
         expert_start_loc,
         m_indices,
@@ -155,10 +151,7 @@ def ep_scatter(
         BLOCK_EXPERT_NUM=triton.next_power_of_2(num_experts),
     )
     grid = min(recv_topk.shape[0], 1024 * 8)
-    trace_triton(
-        "ep_kernels:_fwd_kernel_ep_scatter_2[grid,]",
-        _fwd_kernel_ep_scatter_2,
-        (grid,),
+    _fwd_kernel_ep_scatter_2[(grid,)](
         recv_topk.shape[0],
         expert_start_loc,
         recv_x,
@@ -300,10 +293,7 @@ def ep_scatter_v2(
 
     assert recv_x_scale.dtype == output_tensor_scale.dtype
     assert recv_x_scale.shape[1] == output_tensor_scale.shape[2] == scale_hidden_size
-    trace_triton(
-        "ep_kernels:_fwd_kernel_ep_scatter_1_v2[1,]",
-        _fwd_kernel_ep_scatter_1_v2,
-        (1,),
+    _fwd_kernel_ep_scatter_1_v2[(1,)](
         alignment,
         expert_start_loc,
         num_experts=num_experts,
@@ -311,10 +301,7 @@ def ep_scatter_v2(
         BLOCK_EXPERT_NUM=triton.next_power_of_2(num_experts),
     )
     grid = min(recv_topk.shape[0], 1024 * 8)
-    trace_triton(
-        "ep_kernels:_fwd_kernel_ep_scatter_2_v2[grid,]",
-        _fwd_kernel_ep_scatter_2_v2,
-        (grid,),
+    _fwd_kernel_ep_scatter_2_v2[(grid,)](
         recv_topk.shape[0],
         expert_start_loc,
         recv_x,
@@ -423,10 +410,7 @@ def ep_gather(
     hidden_size = input_tensor.shape[1]
     assert hidden_size % BLOCK_D == 0
     grid = (triton.cdiv(hidden_size, BLOCK_D), min(num_tokens, 1024))
-    trace_triton(
-        "ep_kernels:_fwd_kernel_ep_gather[grid]",
-        _fwd_kernel_ep_gather,
-        grid,
+    _fwd_kernel_ep_gather[grid](
         num_tokens,
         input_tensor.shape[0],
         input_tensor,
@@ -525,10 +509,7 @@ def tma_align_input_scale(input_scale: torch.Tensor):
     )
     grid_m = min(m, 8192)
     BLOCK_SIZE_K = triton.next_power_of_2(k_div_block_size)
-    trace_triton(
-        "ep_kernels:_tma_align_input_scale_kernel[grid_m, g]",
-        _tma_align_input_scale_kernel,
-        (grid_m, g),
+    _tma_align_input_scale_kernel[(grid_m, g)](
         input_scale_ptr=input_view,
         output_ptr=output,
         g=g,
@@ -616,10 +597,7 @@ def recompute_topk_ids_sum_expert_count(
 
     # Launch recompute kernel
     grid_recompute = (triton.cdiv(num_total, BLOCK_SIZE),)
-    trace_triton(
-        "ep_kernels:recompute_topk_ids_triton_kernel[grid_recompute]",
-        recompute_topk_ids_triton_kernel,
-        grid_recompute,
+    recompute_topk_ids_triton_kernel[grid_recompute](
         topk_ids,
         adjusted_topk_ids,
         expert_count,
@@ -713,10 +691,7 @@ def cutlass_moe_pre_reorder(
     # 1. get src to dst map
     grid = (triton.cdiv(topk_ids.numel(), 512),)
     src2dst = torch.empty(topk_ids.numel(), device=device, dtype=torch.int32)
-    trace_triton(
-        "ep_kernels:compute_src2dst_triton_kernel[grid]",
-        compute_src2dst_triton_kernel,
-        grid,
+    compute_src2dst_triton_kernel[grid](
         reorder_ids,
         src2dst,
         topk_ids.numel(),
@@ -742,10 +717,7 @@ def cutlass_moe_pre_reorder(
 
     grid = (grid_dim_y, grid_dim_x)
 
-    trace_triton(
-        "ep_kernels:pre_reorder_moe_tokenwise_fp8_triton_kernel[grid]",
-        pre_reorder_moe_tokenwise_fp8_triton_kernel,
-        grid,
+    pre_reorder_moe_tokenwise_fp8_triton_kernel[grid](
         input_ptr=input,
         permuted_input_ptr=permuted_input,
         input_scale_ptr=input_scale,
@@ -881,10 +853,7 @@ def get_cutlass_moe_mm_without_permute_info(
     topk_length = topk_ids.numel()
     BLOCK_SIZE = min(1024, triton.next_power_of_2(topk_length))
 
-    trace_triton(
-        "ep_kernels:_compute_problem_sizes_kernel[num_experts,]",
-        _compute_problem_sizes_kernel,
-        (num_experts,),
+    _compute_problem_sizes_kernel[(num_experts,)](
         topk_ids,
         problem_sizes1,
         problem_sizes2,
@@ -897,10 +866,7 @@ def get_cutlass_moe_mm_without_permute_info(
     )
 
     BLOCK_E = triton.next_power_of_2(num_experts)
-    trace_triton(
-        "ep_kernels:_compute_expert_offsets_kernel[1,]",
-        _compute_expert_offsets_kernel,
-        (1,),
+    _compute_expert_offsets_kernel[(1,)](
         problem_sizes1,
         expert_offsets,
         num_experts,

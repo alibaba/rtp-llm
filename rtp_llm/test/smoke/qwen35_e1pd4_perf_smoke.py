@@ -55,20 +55,17 @@ DEFAULTS = dict(
 ENV = {
     "RTP_STEP_MEASUREMENT": "1",
     "RTP_FRONTEND_MEASUREMENT": "1",
-    "DG_MEGA_MOE_FP8_GRID_SYNC_DIAG": "0",
     "MM_RDMA_READ_TIMEOUT_MS": "30000",
-    # Added upstream after the reference run; keep expensive input dumps off.
-    "MEGA_MOE_LOG_INPUTS": "0",
 }
-# Published epoch-fixed wheels, selected through the normal Bazel dependencies.
+# Published graph-safe wheels, selected through the normal Bazel dependencies.
 # Check the resolved worker package: gpu_lock stages packages without dist-info.
-DEEP_GEMM_VERSION = "2.8.0+58a6d07.cu132"
+DEEP_GEMM_VERSION = "2.8.2+ae715cd.cu132"
 DEEP_GEMM_SHA256 = {
-    "include/deep_gemm/impls/sm100_fp8_fp8_mega_moe.cuh": "d16ae49f102a0fe382ee235600ad59e2201e4dbe40094fb34fc6b6c67a7fff3f",
+    "include/deep_gemm/impls/sm100_fp8_fp8_mega_moe.cuh": "66b2cbbe964aefd723dd2bb8c6186d2390909e550e76b9601de42577062b0ec7",
 }
 DEEP_GEMM_BINARY_SHA256 = {
-    "x86_64": "d5a151a88c046a154290292a482e1d2905e126f5b83e488aa65157ea71565a31",
-    "aarch64": "c3b0d44b36f4c8590a05c90ed2a1a9e9738d5a7f23b89766d0bba2f708a0ffb7",
+    "x86_64": "65143245c65658a231e9fd9296e39a6e19c162f4083f8f7a802660b177451f8f",
+    "aarch64": "a70a612bad10386c217389897fcd75e2bbc1d59d38cfeda887cead68da8fa446",
 }
 SNAPSHOT_FILES = (
     "rtp_llm/test/smoke/qwen35_e1pd4_perf_smoke.py",

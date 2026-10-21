@@ -53,5 +53,5 @@ Historical single-Encoder short runs used five GPUs and produced throughput clos
 ## Frozen single-Encoder performance preset
 
 For the complete measured C512/N7 configuration (Encoder 1 GPU + PD Fusion 4 GPUs),
-use [qwen35_e1pd4_perf_smoke](qwen35_e1pd4_perf_smoke.md). It includes the
+use [qwen35_e1pd4_perf_smoke](qwen35_e1pd4_perf_smoke.py). It includes the
 required environment, the pinned DeepGEMM wheel and dependency checks.

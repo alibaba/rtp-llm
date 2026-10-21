@@ -5,7 +5,6 @@ import torch
 
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 from rtp_llm.models_py.distributed.user_buffers import get_user_buffers_communicator
-from rtp_llm.models_py.utils.prefill_input_log import trace_call
 from rtp_llm.ops import AttentionConfigs, ParallelismConfig
 from rtp_llm.ops.compute_ops import (
     KVCache,
@@ -129,9 +128,7 @@ class PCPAllGatherOverlapAttnOp:
         self.kv0_idx = kv_restore_indices[kv0_idx]
         self.kv1_idx = kv_restore_indices[kv1_idx]
 
-        params = trace_call(
-            "allgather_overlap_impl:fill_mla_params",
-            fill_mla_params,
+        params = fill_mla_params(
             self.attn_inputs.prefix_lengths,
             self.attn_inputs.sequence_lengths,
             cp_info.prefill_actual_input_lengths_cpu,
@@ -189,11 +186,8 @@ class PCPAllGatherOverlapAttnOp:
         ]
         for config in configs:
             wrapper_name = config.pop("wrapper_name")
-            trace_call(
-                "allgather_overlap_impl:self.prefill_wrappers['ragged'][wrapper_name].plan",
-                self.prefill_wrappers["ragged"][wrapper_name].plan,
-                **config,
-                **common_params
+            self.prefill_wrappers["ragged"][wrapper_name].plan(
+                **config, **common_params
             )
 
     def _all_gather_kv(self, k: torch.Tensor, v: torch.Tensor):
@@ -222,9 +216,7 @@ class PCPAllGatherOverlapAttnOp:
         kv_cache_tensor = kv_cache.kv_cache_base.view(
             -1, 2, self.num_kv_heads, self.seq_size_per_block, self.head_dim
         )
-        trace_call(
-            "allgather_overlap_impl:append_paged_kv_cache",
-            append_paged_kv_cache,
+        append_paged_kv_cache(
             append_key=restore_k,
             append_value=restore_v,
             batch_indices=params.batch_indice_d,
@@ -265,9 +257,7 @@ class PCPAllGatherOverlapAttnOp:
         q_reshaped = q.reshape(-1, self.num_qo_heads, self.head_dim)
 
         # Local causal attention (overlaps with all-gather)
-        output, lse = trace_call(
-            "allgather_overlap_impl:self.prefill_wrappers['ragged']['causal'].run",
-            self.prefill_wrappers["ragged"]["causal"].run,
+        output, lse = self.prefill_wrappers["ragged"]["causal"].run(
             q_reshaped,
             k.reshape(-1, self.num_kv_heads, self.head_dim),
             v.reshape(-1, self.num_kv_heads, self.head_dim),
@@ -279,16 +269,12 @@ class PCPAllGatherOverlapAttnOp:
             kv_cache_tensor = kv_cache.kv_cache_base.view(
                 -1, 2, self.num_kv_heads, self.seq_size_per_block, self.head_dim
             )
-            prefix_out, prefix_lse = trace_call(
-                "allgather_overlap_impl:self.prefill_wrappers['paged']['prefix'].run",
-                self.prefill_wrappers["paged"]["prefix"].run,
+            prefix_out, prefix_lse = self.prefill_wrappers["paged"]["prefix"].run(
                 q_reshaped,
                 kv_cache_tensor,
                 return_lse=True,
             )
-            output, lse = trace_call(
-                "allgather_overlap_impl:merge_state",
-                merge_state,
+            output, lse = merge_state(
                 v_a=output,
                 s_a=lse,
                 v_b=prefix_out,
@@ -321,9 +307,7 @@ class PCPAllGatherOverlapAttnOp:
             (
                 out_buffer[self.q0_idx, :, :],
                 lse_buffer[self.q0_idx, :],
-            ) = trace_call(
-                "allgather_overlap_impl:self.prefill_wrappers['ragged']['non_causal_part_0'].run",
-                self.prefill_wrappers["ragged"]["non_causal_part_0"].run,
+            ) = self.prefill_wrappers["ragged"]["non_causal_part_0"].run(
                 q=q0,
                 k=k0,
                 v=v0,
@@ -333,17 +317,13 @@ class PCPAllGatherOverlapAttnOp:
             (
                 out_buffer[self.q1_idx, :, :],
                 lse_buffer[self.q1_idx, :],
-            ) = trace_call(
-                "allgather_overlap_impl:self.prefill_wrappers['ragged']['non_causal_part_1'].run",
-                self.prefill_wrappers["ragged"]["non_causal_part_1"].run,
+            ) = self.prefill_wrappers["ragged"]["non_causal_part_1"].run(
                 q=q1,
                 k=k1,
                 v=v1,
                 return_lse=True,
             )
-        merged_output, merged_lse = trace_call(
-            "allgather_overlap_impl:merge_state",
-            merge_state,
+        merged_output, merged_lse = merge_state(
             v_a=output,
             s_a=lse,
             v_b=out_buffer,

@@ -12,7 +12,6 @@ from rtp_llm.models_py.kernels.cuda.fp8_kernel.get_best_config import (
 )
 from rtp_llm.models_py.utils.arch import is_cuda
 from rtp_llm.models_py.utils.math import align
-from rtp_llm.models_py.utils.prefill_input_log import trace_call
 
 if is_cuda():
     from rtp_kernel.fp8_group_gemm import fp8_grouped_gemm_ptpc
@@ -60,9 +59,7 @@ def _transform_scale_ue8m0(sf, mn):
     if not sf.is_cuda:
         sf = sf.cuda()
     sf = sf.index_select(-2, torch.arange(mn, device=sf.device) // 128)
-    sf = trace_call(
-        "fp8_kernel:deep_gemm.utils.layout.get_mn_major_tma_aligned_packed_ue8m0_tensor",
-        deep_gemm.utils.layout.get_mn_major_tma_aligned_packed_ue8m0_tensor,
+    sf = deep_gemm.utils.layout.get_mn_major_tma_aligned_packed_ue8m0_tensor(
         sf,
     )
     return sf
@@ -157,9 +154,7 @@ def sgl_per_token_group_quant_fp8(
             return x.numel() >= 4 * 1024 * 1024
 
         if quant_kernel == "legacy":
-            trace_call(
-                "fp8_kernel:per_token_group_quant_fp8",
-                per_token_group_quant_fp8,
+            per_token_group_quant_fp8(
                 x,
                 x_q,
                 x_s,
@@ -170,9 +165,7 @@ def sgl_per_token_group_quant_fp8(
                 scale_ue8m0,
             )
         elif quant_kernel == "v2":
-            trace_call(
-                "fp8_kernel:per_token_group_quant_fp8_v2",
-                per_token_group_quant_fp8_v2,
+            per_token_group_quant_fp8_v2(
                 x,
                 x_q,
                 x_s,
@@ -190,9 +183,7 @@ def sgl_per_token_group_quant_fp8(
                 f"got {quant_kernel!r}"
             )
         elif should_auto_use_v2():
-            trace_call(
-                "fp8_kernel:per_token_group_quant_fp8_v2",
-                per_token_group_quant_fp8_v2,
+            per_token_group_quant_fp8_v2(
                 x,
                 x_q,
                 x_s,
@@ -205,9 +196,7 @@ def sgl_per_token_group_quant_fp8(
                 masked_m,
             )
         elif masked_m is not None:
-            trace_call(
-                "fp8_kernel:per_token_group_quant_fp8_v2",
-                per_token_group_quant_fp8_v2,
+            per_token_group_quant_fp8_v2(
                 x,
                 x_q,
                 x_s,
@@ -220,9 +209,7 @@ def sgl_per_token_group_quant_fp8(
                 masked_m,
             )
         else:
-            trace_call(
-                "fp8_kernel:per_token_group_quant_fp8",
-                per_token_group_quant_fp8,
+            per_token_group_quant_fp8(
                 x,
                 x_q,
                 x_s,
@@ -254,9 +241,7 @@ def scaled_fp8_per_tensor_quant(
     if scale is None:
         # dynamic quant
         scale = torch.zeros(1, device=input.device, dtype=torch.float32)
-        trace_call(
-            "fp8_kernel:per_tensor_quant_fp8",
-            per_tensor_quant_fp8,
+        per_tensor_quant_fp8(
             input,
             output,
             scale,
@@ -265,9 +250,7 @@ def scaled_fp8_per_tensor_quant(
     else:
         # static quant
         assert scale.numel() == 1, f"{scale.shape}"
-        trace_call(
-            "fp8_kernel:per_tensor_quant_fp8",
-            per_tensor_quant_fp8,
+        per_tensor_quant_fp8(
             input,
             output,
             scale,
@@ -289,9 +272,7 @@ def scaled_fp8_per_token_quant(
             input.shape, device=input.device, dtype=torch.float8_e4m3fn
         )
 
-    trace_call(
-        "fp8_kernel:per_token_quant_fp8", per_token_quant_fp8, input, output, scale
-    )
+    per_token_quant_fp8(input, output, scale)
     scale = scale.reshape(-1, 1)
     return output, scale
 
@@ -333,9 +314,7 @@ def cutlass_moe_mm_fp8_scaled(
             logging.warning(
                 "Using mismatched gemm config swap_ab, potentially causing cutlass groupgemm performance loss."
             )
-        trace_call(
-            "fp8_kernel:fp8_grouped_gemm_ptpc",
-            fp8_grouped_gemm_ptpc,
+        fp8_grouped_gemm_ptpc(
             output,
             aq,
             w,
@@ -361,9 +340,7 @@ def cutlass_moe_mm_fp8_scaled(
             profile=True,
         )
     else:
-        trace_call(
-            "fp8_kernel:fp8_grouped_gemm_ptpc",
-            fp8_grouped_gemm_ptpc,
+        fp8_grouped_gemm_ptpc(
             output,
             aq,
             w,

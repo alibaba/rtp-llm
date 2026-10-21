@@ -160,7 +160,6 @@ def server_config(
     env["RTP_CUDA_GRAPH_EXECUTION_LOG"] = "1"
     if moe_strategy == "mega_moe_fp8":
         env.update(
-            DG_MEGA_MOE_FP8_IMPL="optimized",
             USE_DEEPEP_MOE="0",
             MEGA_MOE_PRE_KERNEL_BARRIER="0",
         )

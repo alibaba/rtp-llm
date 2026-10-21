@@ -5,7 +5,6 @@ import triton
 import triton.language as tl
 
 from rtp_llm.models_py.triton_kernels.common.prefill_fusion import in_prefill
-from rtp_llm.models_py.utils.prefill_input_log import trace_triton
 
 # Adapted from https://github.com/state-spaces/mamba/blob/v2.2.4/mamba_ssm/ops/triton/layernorm_gated.py
 # Copyright (c) 2024, Tri Dao.
@@ -138,10 +137,7 @@ def layer_norm_fwd(
     num_warps = min(max(BLOCK_N // 256, 1), 8)
     grid = (M, ngroups)
     with torch.cuda.device(x.device.index):
-        trace_triton(
-            "layernorm_gated:_layer_norm_fwd_1pass_kernel[grid]",
-            _layer_norm_fwd_1pass_kernel,
-            grid,
+        _layer_norm_fwd_1pass_kernel[grid](
             x,
             out,
             weight,

@@ -5,7 +5,6 @@ from torch import nn
 
 import rtp_llm.ops.compute_ops as compute_ops
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.models_py.utils.prefill_input_log import trace_call
 
 
 class SelectTopk(nn.Module):
@@ -44,17 +43,13 @@ class SelectTopk(nn.Module):
             and router_logits.dtype == torch.bfloat16
             and router_logits.is_contiguous()
         ):
-            trace_call(
-                "select_topk:self.select_topk_op.forward",
-                self.select_topk_op.forward,
+            self.select_topk_op.forward(
                 router_logits,
                 topk_ids,
                 topk_weights,
             )
         else:
-            trace_call(
-                "select_topk:self.select_topk_op.forward",
-                self.select_topk_op.forward,
+            self.select_topk_op.forward(
                 router_logits.float(),
                 topk_ids,
                 topk_weights,
@@ -80,9 +75,7 @@ class GroupTopK(nn.Module):
     ):
         scores = scores.float().sigmoid()
         scores_with_bias = scores + correction_bias.unsqueeze(0)
-        trace_call(
-            "select_topk:self.group_topk_op.forward",
-            self.group_topk_op.forward,
+        self.group_topk_op.forward(
             topk_weights,
             topk_ids,
             scores,
@@ -114,9 +107,7 @@ class FakeBalanceExpert(nn.Module):
         topk_ids: torch.Tensor,
         topk_weights: torch.Tensor,
     ):
-        trace_call(
-            "select_topk:self.fake_balance_expert_op.forward",
-            self.fake_balance_expert_op.forward,
+        self.fake_balance_expert_op.forward(
             topk_ids,
             topk_weights,
         )

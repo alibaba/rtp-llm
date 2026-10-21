@@ -14,8 +14,9 @@ import tempfile
 from pathlib import Path
 
 import deep_gemm
+import torch
 from deep_gemm import mega_fp8
-from torch.utils.cpp_extension import CUDA_HOME, include_paths
+from torch.utils.cpp_extension import CUDA_HOME, include_paths, library_paths
 
 from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.jit_warmup import (
     DEEP_GEMM_WARMUP_REVISION,
@@ -47,8 +48,8 @@ def main():
         ],
         check=True,
     )
-    # This template argument is outside the heuristic config in BOTH launchers.
-    for impl in ("sm100_fp8_fp8_mega_moe.hpp", "sm100_fp8_fp8_mega_moe_legacy.hpp"):
+    # This template argument is outside the FP8 heuristic config.
+    for impl in ("sm100_fp8_fp8_mega_moe.hpp",):
         code = (source / "csrc/jit_kernels/impls" / impl).read_text()
         assert "kSinglePassDispatchMaxRoutedTokens = 32768;" in code
         assert "num_tokens * num_topk <= kSinglePassDispatchMaxRoutedTokens" in code
@@ -69,12 +70,22 @@ def main():
                 os.environ.get("CXX", "g++"),
                 "-std=c++20",
                 "-O2",
+                f"-D_GLIBCXX_USE_CXX11_ABI={int(torch._C._GLIBCXX_USE_CXX11_ABI)}",
                 str(Path(__file__).with_name("mega_moe_config_probe.cc")),
                 *[f"-I{p}" for p in includes],
                 f"-L{CUDA_HOME}/lib64/stubs",
                 "-lcuda",
                 f"-L{CUDA_HOME}/lib64",
                 "-lcudart",
+                "-lcublas",
+                "-lcublasLt",
+                *[
+                    flag
+                    for path in library_paths()
+                    for flag in (f"-L{path}", f"-Wl,-rpath,{path}")
+                ],
+                "-lc10",
+                "-ltorch_cpu",
                 str(
                     Path(sysconfig.get_config_var("LIBDIR"))
                     / f"libpython{sysconfig.get_python_version()}.so"

@@ -8,8 +8,6 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
-from rtp_llm.models_py.utils.prefill_input_log import trace_triton
-
 
 @triton.jit
 def _scalar_linear(
@@ -58,10 +56,7 @@ def maybe_bf16_scalar_linear(x, weight, bias=None) -> Optional[torch.Tensor]:
         return None
     output = torch.empty((x.shape[0], 1), device=x.device, dtype=x.dtype)
     if x.shape[0]:
-        trace_triton(
-            "scalar_linear:fixed_row_reduction",
-            _scalar_linear,
-            (x.shape[0],),
+        _scalar_linear[(x.shape[0],)](
             x,
             weight,
             bias,

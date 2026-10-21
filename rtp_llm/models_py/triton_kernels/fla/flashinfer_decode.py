@@ -13,8 +13,6 @@ import torch
 import triton
 import triton.language as tl
 
-from rtp_llm.models_py.utils.prefill_input_log import trace_call, trace_triton
-
 GDN_DECODE_BACKEND_ENV = "RTP_QWEN35_GDN_DECODE_BACKEND"
 _VALID_BACKENDS = ("native", "flashinfer")
 
@@ -130,10 +128,7 @@ def fill_paged_decode_indices(
         alog_out = A_log
         hv = A_log.numel()
         alog_stride = A_log.stride(-1)
-    trace_triton(
-        "flashinfer_decode:_fill_paged_decode_indices_kernel[triton.cdiv(max(batch, hv), 256),]",
-        _fill_paged_decode_indices_kernel,
-        (triton.cdiv(max(batch, hv), 256),),
+    _fill_paged_decode_indices_kernel[(triton.cdiv(max(batch, hv), 256),)](
         sequence_lengths_plus_1,
         block_map,
         read_idx,
@@ -212,9 +207,7 @@ def flashinfer_gdn_decode(
     read_idx, write_idx, alog = fill_paged_decode_indices(
         block_map, sequence_lengths_plus_1, seq_size_per_block, A_log=A_log
     )
-    output, _ = trace_call(
-        "flashinfer_decode:gated_delta_rule_decode_pretranspose",
-        gated_delta_rule_decode_pretranspose,
+    output, _ = gated_delta_rule_decode_pretranspose(
         q=q,
         k=k,
         v=v,

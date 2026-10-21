@@ -22,7 +22,6 @@ import triton.language as tl
 from rtp_llm.models_py.triton_kernels.qwen35_decode_fusion.env import (
     is_decode_fusion_enabled,
 )
-from rtp_llm.models_py.utils.prefill_input_log import trace_triton
 
 _MAX_HEAD_DIM = 4096
 _SUPPORTED_DTYPES = (torch.bfloat16, torch.float16)
@@ -149,10 +148,7 @@ def fused_qk_rmsnorm(
         )
     if num_stages is None:
         num_stages = 2
-    trace_triton(
-        "fused_qk_rmsnorm:_fused_qk_rmsnorm_kernel[m, n_qk_heads]",
-        _fused_qk_rmsnorm_kernel,
-        (m, n_qk_heads),
+    _fused_qk_rmsnorm_kernel[(m, n_qk_heads)](
         hidden,
         q_weight,
         k_weight,
@@ -271,10 +267,7 @@ def vllm_style_zero_centered_rmsnorm(
         return output
     if residual is not None:
         raise ValueError("Width256 policy is the QK norm without residual-add")
-    trace_triton(
-        "rmsnorm:_vllm_style_qk_zero_centered_rmsnorm",
-        _vllm_style_qk_zero_centered_rmsnorm,
-        (m,),
+    _vllm_style_qk_zero_centered_rmsnorm[(m,)](
         hidden,
         weight,
         output,

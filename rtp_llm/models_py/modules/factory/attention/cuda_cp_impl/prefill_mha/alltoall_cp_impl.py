@@ -19,7 +19,6 @@ from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_uti
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
     get_py_flashinfer_workspace_buffer,
 )
-from rtp_llm.models_py.utils.prefill_input_log import trace_call
 from rtp_llm.ops import AttentionConfigs, ParallelismConfig
 from rtp_llm.ops.compute_ops import (
     KVCache,
@@ -137,21 +136,14 @@ class PCPAll2AllAttnOp:
         ]
         for config in configs:
             wrapper_name = config.pop("wrapper_name")
-            trace_call(
-                "alltoall_cp_impl:self.prefill_wrappers[wrapper_name].plan",
-                self.prefill_wrappers[wrapper_name].plan,
-                **config,
-                **common_params
-            )
+            self.prefill_wrappers[wrapper_name].plan(**config, **common_params)
 
         half_q_indices = generate_half_q_indices(prefill_cp_chunk_lengths)
         half_kv_indices = generate_half_kv_indices(prefill_cp_chunk_lengths)
         self.half_q_idx = torch.tensor(half_q_indices, device=self.device)
         self.half_kv_idx = torch.tensor(half_kv_indices, device=self.device)
 
-        params = trace_call(
-            "alltoall_cp_impl:fill_mla_params",
-            fill_mla_params,
+        params = fill_mla_params(
             self.attn_inputs.prefix_lengths,
             self.attn_inputs.sequence_lengths,
             self.cp_info.prefill_actual_input_lengths_cpu,
@@ -255,9 +247,7 @@ class PCPAll2AllAttnOp:
                 k = k.reshape(-1, self.num_kv_heads, self.head_dim)
                 v = v.reshape(-1, self.num_kv_heads, self.head_dim)
 
-                trace_call(
-                    "alltoall_cp_impl:append_paged_kv_cache",
-                    append_paged_kv_cache,
+                append_paged_kv_cache(
                     append_key=k,
                     append_value=v,
                     batch_indices=self.append_batch_indice,
@@ -270,9 +260,7 @@ class PCPAll2AllAttnOp:
                 )
 
                 q_reshaped = q.reshape(-1, self.num_qo_heads, self.head_dim)
-                merged_out, merged_lse = trace_call(
-                    "alltoall_cp_impl:self.prefill_wrappers['causal'].run",
-                    self.prefill_wrappers["causal"].run,
+                merged_out, merged_lse = self.prefill_wrappers["causal"].run(
                     q_reshaped,
                     k,
                     v,
@@ -280,16 +268,12 @@ class PCPAll2AllAttnOp:
                 )
 
                 if self.has_prefix:
-                    prefix_out, prefix_lse = trace_call(
-                        "alltoall_cp_impl:self.prefix_paged_wrapper.run",
-                        self.prefix_paged_wrapper.run,
+                    prefix_out, prefix_lse = self.prefix_paged_wrapper.run(
                         q_reshaped,
                         kv_cache_tensor,
                         return_lse=True,
                     )
-                    merged_out, merged_lse = trace_call(
-                        "alltoall_cp_impl:merge_state",
-                        merge_state,
+                    merged_out, merged_lse = merge_state(
                         v_a=merged_out,
                         s_a=merged_lse,
                         v_b=prefix_out,
@@ -310,9 +294,7 @@ class PCPAll2AllAttnOp:
                 )
                 # TODO: make write local kvcache async
                 src_rank = (self.prefill_cp_rank - round_id) % self.prefill_cp_size
-                trace_call(
-                    "alltoall_cp_impl:append_paged_kv_cache",
-                    append_paged_kv_cache,
+                append_paged_kv_cache(
                     append_key=remote_k,
                     append_value=remote_v,
                     batch_indices=self.append_batch_indice,
@@ -334,17 +316,13 @@ class PCPAll2AllAttnOp:
                     (
                         out_buffer[self.half_q_idx, :, :],
                         lse_buffer[self.half_q_idx, :],
-                    ) = trace_call(
-                        "alltoall_cp_impl:self.prefill_wrappers['non_causal_pattern_1'].run",
-                        self.prefill_wrappers["non_causal_pattern_1"].run,
+                    ) = self.prefill_wrappers["non_causal_pattern_1"].run(
                         q=q_split,
                         k=k_split,
                         v=v_split,
                         return_lse=True,
                     )
-                    merged_out, merged_lse = trace_call(
-                        "alltoall_cp_impl:merge_state",
-                        merge_state,
+                    merged_out, merged_lse = merge_state(
                         v_a=merged_out,
                         s_a=merged_lse,
                         v_b=out_buffer,
@@ -360,17 +338,15 @@ class PCPAll2AllAttnOp:
                     q_split = q.contiguous().reshape(
                         -1, self.num_qo_heads, self.head_dim
                     )
-                    out_buffer, lse_buffer = trace_call(
-                        "alltoall_cp_impl:self.prefill_wrappers['non_causal_pattern_0'].run",
-                        self.prefill_wrappers["non_causal_pattern_0"].run,
+                    out_buffer, lse_buffer = self.prefill_wrappers[
+                        "non_causal_pattern_0"
+                    ].run(
                         q=q_split,
                         k=k_split,
                         v=v_split,
                         return_lse=True,
                     )
-                    merged_out, merged_lse = trace_call(
-                        "alltoall_cp_impl:merge_state",
-                        merge_state,
+                    merged_out, merged_lse = merge_state(
                         v_a=merged_out,
                         s_a=merged_lse,
                         v_b=out_buffer,

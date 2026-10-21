@@ -12,8 +12,6 @@ import torch
 import triton
 import triton.language as tl
 
-from rtp_llm.models_py.utils.prefill_input_log import trace_triton
-
 
 @triton.jit(do_not_specialize=["M"])
 def _bf16_gate_gemm(
@@ -105,10 +103,7 @@ def maybe_bf16_gate_linear(x, weight, bias=None) -> Optional[torch.Tensor]:
     if m:
         bm = 16
         bn, bk, sk = (32, 128, 2) if n == 512 else (16, 256, 4)
-        trace_triton(
-            "bf16_gate_linear:fixed_geometry",
-            _bf16_gate_gemm,
-            (triton.cdiv(m, bm), triton.cdiv(n, bn)),
+        _bf16_gate_gemm[(triton.cdiv(m, bm), triton.cdiv(n, bn))](
             x,
             weight,
             bias if bias is not None else output,

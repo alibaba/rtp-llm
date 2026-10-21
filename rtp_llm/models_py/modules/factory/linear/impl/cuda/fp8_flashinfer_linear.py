@@ -7,7 +7,6 @@ import torch
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
 from rtp_llm.models_py.modules.factory.linear import LinearBase
 from rtp_llm.models_py.utils.arch import is_sm90
-from rtp_llm.models_py.utils.prefill_input_log import trace_call
 from rtp_llm.ops import HWKernelConfig
 
 
@@ -136,9 +135,7 @@ class CudaFp8FlashinferLinear(LinearBase):
             input_scales = self.input_scales
 
         output = torch.empty(M, self.N, dtype=torch.bfloat16, device=input.device)
-        trace_call(
-            "fp8_flashinfer_linear:self._fi_gemm",
-            self._fi_gemm,
+        self._fi_gemm(
             input_fp8,
             self.weight,
             input_scales,

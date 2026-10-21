@@ -31,7 +31,6 @@ from rtp_llm.models_py.triton_kernels.qwen35_decode_fusion.env import (
 from rtp_llm.models_py.triton_kernels.qwen35_decode_fusion.fp8_scale import (
     make_ue8m0_scale_like,
 )
-from rtp_llm.models_py.utils.prefill_input_log import trace_call, trace_triton
 
 _DEFAULT_GROUP = 128
 _DEFAULT_EPS = 1.0e-6
@@ -231,17 +230,13 @@ def fused_add_rmsnorm_fp8_quant(
         # Keep FlashInfer reduction/rsqrt ordering; results may differ from
         # vLLM. Gemma norm computes raw gamma + 1 in FP32 before BF16 output.
         norm_for_quant = hidden if write_norm else hidden.clone()
-        trace_call(
-            "fused_add_rmsnorm_fp8_quant:flashinfer.norm.gemma_fused_add_rmsnorm",
-            flashinfer.norm.gemma_fused_add_rmsnorm,
+        flashinfer.norm.gemma_fused_add_rmsnorm(
             norm_for_quant,
             residual,
             weight,
             eps=eps,
         )
-        trace_call(
-            "fused_add_rmsnorm_fp8_quant:flashinfer_norm_existing_quant",
-            per_token_group_quant_fp8,
+        per_token_group_quant_fp8(
             norm_for_quant,
             out_q,
             out_scale,
@@ -262,10 +257,7 @@ def fused_add_rmsnorm_fp8_quant(
         num_stages = default_stages
 
     block_n = triton.next_power_of_2(n)
-    trace_triton(
-        "fused_add_rmsnorm_fp8_quant:_fused_add_rmsnorm_fp8_quant_kernel[m,]",
-        _fused_add_rmsnorm_fp8_quant_kernel,
-        (m,),
+    _fused_add_rmsnorm_fp8_quant_kernel[(m,)](
         hidden,
         residual,
         weight,

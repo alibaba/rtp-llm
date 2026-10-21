@@ -16,7 +16,6 @@ from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
     sgl_per_token_group_quant_fp8,
 )
 from rtp_llm.models_py.modules.factory.linear import LinearBase
-from rtp_llm.models_py.utils.prefill_input_log import trace_call
 from rtp_llm.ops import HWKernelConfig
 
 logger = logging.getLogger(__name__)
@@ -294,9 +293,7 @@ class CudaFp8DeepGEMMLinear(LinearBase):
         input_fp8, input_scales = self.quantize_input(input)
 
         # Prepare output tensor
-        return trace_call(
-            "fp8_deepgemm_linear:self.forward_quantized",
-            self.forward_quantized,
+        return self.forward_quantized(
             input_fp8,
             input_scales,
             out=out,

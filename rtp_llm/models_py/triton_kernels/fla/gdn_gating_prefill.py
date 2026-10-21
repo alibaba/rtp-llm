@@ -4,8 +4,6 @@ import torch
 import triton
 import triton.language as tl
 
-from rtp_llm.models_py.utils.prefill_input_log import trace_triton
-
 
 @triton.jit
 def _gdn_gating_flat(
@@ -82,10 +80,7 @@ def gdn_gating_prefill(
         dtype=torch.float32 if flashinfer or beta_fp32 else b.dtype,
     )
     if n:
-        trace_triton(
-            "gdn_gating_prefill:_gdn_gating_flat[triton.cdiv(n * h, block),]",
-            _gdn_gating_flat,
-            (triton.cdiv(n * h, block),),
+        _gdn_gating_flat[(triton.cdiv(n * h, block),)](
             a,
             b,
             alog,

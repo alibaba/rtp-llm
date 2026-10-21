@@ -15,8 +15,6 @@ import torch
 import triton
 import triton.language as tl
 
-from rtp_llm.models_py.utils.prefill_input_log import trace_triton
-
 
 @triton.jit
 def _qk_norm_rope_cache(
@@ -313,10 +311,7 @@ def fused_qk_norm_rope_cache(
     if out.untyped_storage().data_ptr() == qkv.untyped_storage().data_ptr():
         raise ValueError("query output must not alias QKV input")
     if qkv.shape[0]:
-        trace_triton(
-            "qk_norm_rope_cache:_qk_norm_rope_cache",
-            _qk_norm_rope_cache,
-            (qkv.shape[0], qh + 2 * kh),
+        _qk_norm_rope_cache[(qkv.shape[0], qh + 2 * kh)](
             qkv,
             q_weight,
             k_weight,

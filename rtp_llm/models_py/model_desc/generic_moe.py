@@ -32,7 +32,6 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import ExpertGat
 from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.chunking import (
     MegaMoeChunker,
 )
-from rtp_llm.models_py.utils.prefill_input_log import trace_call
 from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
@@ -216,14 +215,10 @@ class GenericMoeLayer(nn.Module):
     ) -> torch.Tensor:
         if self.shared_expert_gate is not None:
             if gate_output is None:
-                gate_output = trace_call(
-                    "generic_moe:self.shared_expert_gate",
-                    self.shared_expert_gate,
+                gate_output = self.shared_expert_gate(
                     hidden_states,
                 )  # [T, 1]
-            trace_call(
-                "generic_moe:self.sigmoid_gate_scale_add",
-                self.sigmoid_gate_scale_add,
+            self.sigmoid_gate_scale_add(
                 gate_output,
                 shared_expert_output,
                 experts_output,
@@ -239,9 +234,7 @@ class GenericMoeLayer(nn.Module):
     ) -> torch.Tensor:
         if self.shared_expert_gate is not None:
             if gate_output is None:
-                gate_output = trace_call(
-                    "generic_moe:self.shared_expert_gate",
-                    self.shared_expert_gate,
+                gate_output = self.shared_expert_gate(
                     hidden_states,
                 )  # [T, 1]
             return torch.sigmoid(gate_output) * shared_expert_output
@@ -262,9 +255,7 @@ class GenericMoeLayer(nn.Module):
     def _build_mega_moe_gate_payload(
         self, router_logits: torch.Tensor
     ) -> ExpertGatePayload:
-        score_func = trace_call(
-            "generic_moe:self._gate_pack_score_func", self._gate_pack_score_func
-        )
+        score_func = self._gate_pack_score_func()
         if score_func == "softmax" and self.correction_bias is not None:
             raise RuntimeError(
                 "MegaMoE softmax gate-pack does not accept e_score_correction_b"
@@ -280,10 +271,7 @@ class GenericMoeLayer(nn.Module):
             bias=(
                 None
                 if score_func == "softmax" or self.correction_bias is None
-                else trace_call(
-                    "generic_moe:self.correction_bias.contiguous",
-                    self.correction_bias.contiguous,
-                )
+                else self.correction_bias.contiguous()
             ),
         )
 
@@ -319,9 +307,7 @@ class GenericMoeLayer(nn.Module):
             self.topk_group = self.config.moe_topk_group
             self.n_routed_experts = self.config.expert_num
             self.routed_scaling_factor = self.config.routed_scaling_factor
-            trace_call(
-                "generic_moe:self.group_topk",
-                self.group_topk,
+            self.group_topk(
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
                 scores=router_logits,
@@ -333,18 +319,14 @@ class GenericMoeLayer(nn.Module):
                 routed_scaling_factor=self.routed_scaling_factor,
             )
         else:
-            trace_call(
-                "generic_moe:self.select_topk",
-                self.select_topk,
+            self.select_topk(
                 router_logits,
                 topk_ids,
                 topk_weights,
             )
 
         if self.fake_balance_expert is not None:
-            trace_call(
-                "generic_moe:self.fake_balance_expert",
-                self.fake_balance_expert,
+            self.fake_balance_expert(
                 topk_ids,
                 topk_weights,
             )
@@ -355,7 +337,7 @@ class GenericMoeLayer(nn.Module):
         """Compute routing and shared gates once, before bounded expert launches."""
         tokens = hidden_states.shape[0]
         router_logits = (
-            trace_call("generic_moe:self.gate", self.gate, hidden_states)
+            self.gate(hidden_states)
             if tokens
             else hidden_states.new_empty((0, self.num_experts))
         )
@@ -371,9 +353,7 @@ class GenericMoeLayer(nn.Module):
             fused_shared or self.shared_expert is not None
         ):
             gate_logits = (
-                trace_call(
-                    "generic_moe:self.shared_expert_gate",
-                    self.shared_expert_gate,
+                self.shared_expert_gate(
                     hidden_states,
                 )
                 if tokens
@@ -412,11 +392,7 @@ class GenericMoeLayer(nn.Module):
         shared_gate_logits=None,
     ) -> torch.Tensor:
         num_tokens, _ = hidden_states.shape
-        router_logits = (
-            trace_call("generic_moe:self.gate", self.gate, hidden_states)
-            if routing is None
-            else None
-        )
+        router_logits = self.gate(hidden_states) if routing is None else None
 
         # In pure-TP mode both the routed experts and the shared expert produce
         # TP-partial outputs.  Reduce their sum once instead of reducing each
@@ -430,9 +406,7 @@ class GenericMoeLayer(nn.Module):
                 shared_expert_sigmoid,
             )
 
-            gate_logits = trace_call(
-                "generic_moe:self.shared_expert_gate",
-                self.shared_expert_gate,
+            gate_logits = self.shared_expert_gate(
                 hidden_states,
             )
             expert_args = {"shared_expert_gates": shared_expert_sigmoid(gate_logits)}
@@ -448,13 +422,9 @@ class GenericMoeLayer(nn.Module):
                 )
             )
         ):
-            experts_output = trace_call(
-                "generic_moe:self.fused_moe.forward_gate_pack",
-                self.fused_moe.forward_gate_pack,
+            experts_output = self.fused_moe.forward_gate_pack(
                 hidden_states=hidden_states,
-                gate_payload=trace_call(
-                    "generic_moe:self._build_mega_moe_gate_payload",
-                    self._build_mega_moe_gate_payload,
+                gate_payload=self._build_mega_moe_gate_payload(
                     router_logits,
                 ),
                 activation="SiGLU",
@@ -467,9 +437,7 @@ class GenericMoeLayer(nn.Module):
             else:
                 topk_weights, topk_ids = routing
 
-            experts_output = trace_call(
-                "generic_moe:self.fused_moe",
-                self.fused_moe,
+            experts_output = self.fused_moe(
                 hidden_states=hidden_states,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
@@ -486,9 +454,7 @@ class GenericMoeLayer(nn.Module):
             # no work and some quantized backends do not accept zero rows.
             return experts_output
         if self.shared_expert is not None:
-            shared_expert_output = trace_call(
-                "generic_moe:self.shared_expert",
-                self.shared_expert,
+            shared_expert_output = self.shared_expert(
                 hidden_states,
                 skip_allreduce=(
                     self.use_ep_shared_allreduce or self.use_unified_tp_allreduce
@@ -502,9 +468,7 @@ class GenericMoeLayer(nn.Module):
                 if self.shared_expert_gate is not None:
                     gate_output = shared_gate_logits
                     if gate_output is None:
-                        gate_output = trace_call(
-                            "generic_moe:self.shared_expert_gate",
-                            self.shared_expert_gate,
+                        gate_output = self.shared_expert_gate(
                             hidden_states,
                         )
                     # Materialize each BF16 elementwise step before the local
@@ -521,9 +485,7 @@ class GenericMoeLayer(nn.Module):
                 # EP mode: routed expert output is already complete
                 # (EP combine via all_to_all / all_gather aggregated across ranks).
                 # Only the shared expert output is TP-partial and needs all_reduce.
-                shared_expert_output = trace_call(
-                    "generic_moe:self._gate_shared_expert_output",
-                    self._gate_shared_expert_output,
+                shared_expert_output = self._gate_shared_expert_output(
                     hidden_states,
                     shared_expert_output,
                     shared_gate_logits,
@@ -534,9 +496,7 @@ class GenericMoeLayer(nn.Module):
                 # Fallback path: each path is already complete independently.
                 # This includes ffn_tp_size == 1 and routers that retain their
                 # own finalize reduction, so only local merging remains.
-                experts_output = trace_call(
-                    "generic_moe:self._merge_shared_expert_output",
-                    self._merge_shared_expert_output,
+                experts_output = self._merge_shared_expert_output(
                     hidden_states,
                     experts_output,
                     shared_expert_output,
@@ -632,29 +592,23 @@ class GenericMoeDecoderLayer(nn.Module):
         fmha_impl: FMHAImplBase,
         kv_cache: Optional[LayerKVCache] = None,
     ) -> DecodeLayerOutput:
-        hidden_states, residual = trace_call(
-            "generic_moe:self.input_layernorm",
-            self.input_layernorm,
+        hidden_states, residual = self.input_layernorm(
             hidden_states,
             residual,
         )
 
-        hidden_states = trace_call(
-            "generic_moe:self.self_attn",
-            self.self_attn,
+        hidden_states = self.self_attn(
             hidden_states=hidden_states,
             fmha_impl=fmha_impl,
             kv_cache=kv_cache,
         )
 
-        hidden_states, residual = trace_call(
-            "generic_moe:self.post_attention_layernorm",
-            self.post_attention_layernorm,
+        hidden_states, residual = self.post_attention_layernorm(
             hidden_states,
             residual,
         )
 
-        hidden_states = trace_call("generic_moe:self.mlp", self.mlp, hidden_states)
+        hidden_states = self.mlp(hidden_states)
 
         return DecodeLayerOutput(hidden_states, residual)
 
@@ -714,12 +668,10 @@ class GenericMoeModel(GptModelBase):
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
-        hidden_states = trace_call(
-            "generic_moe:self.embed_tokens", self.embed_tokens, input_ids
-        )
+        hidden_states = self.embed_tokens(input_ids)
         if fmha_impl is None:
-            fmha_impl = trace_call(
-                "generic_moe:self.prepare_fmha_impl", self.prepare_fmha_impl, inputs
+            fmha_impl = self.prepare_fmha_impl(
+                inputs
             )  # pyright: ignore[reportUnreachable]
         residual = torch.zeros_like(hidden_states)
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
@@ -733,9 +685,7 @@ class GenericMoeModel(GptModelBase):
             hidden_states = output.hidden_states
             residual = output.residual
 
-        hidden_states, _ = trace_call(
-            "generic_moe:self.norm", self.norm, hidden_states, residual
-        )
+        hidden_states, _ = self.norm(hidden_states, residual)
 
         return PyModelOutputs(hidden_states)
 

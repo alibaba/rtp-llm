@@ -23,7 +23,6 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.weight_layout import (
     normalize_moe_w13_gate_up,
     split_moe_w13_gate_up,
 )
-from rtp_llm.models_py.utils.prefill_input_log import trace_call
 
 
 class Fp8Fp4ExecutorBase(FusedMoeExpertExecutor, torch.nn.Module):
@@ -117,9 +116,7 @@ class Fp8Fp4ExecutorBase(FusedMoeExpertExecutor, torch.nn.Module):
         return CombineForwardPayload(
             fused_expert_output=self._restore_output_dtype(
                 payload,
-                trace_call(
-                    "fp8_fp4_base:self.forward",
-                    self.forward,
+                self.forward(
                     payload.expert_x,
                     topk_weights,
                     topk_ids,

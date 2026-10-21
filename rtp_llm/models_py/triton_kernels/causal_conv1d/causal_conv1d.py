@@ -6,8 +6,6 @@ import torch
 import triton
 import triton.language as tl
 
-from rtp_llm.models_py.utils.prefill_input_log import trace_triton
-
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
@@ -661,11 +659,7 @@ def causal_conv1d_fn(
 
     block_n = 512 if fused_qkv_heads is not None and hq % 4 == hv % 4 == 0 else BLOCK_N
     grid = (grid_x, triton.cdiv(dim, block_n))
-    trace_triton(
-        "causal_conv1d:_causal_conv1d_fwd_kernel[grid]",
-        _causal_conv1d_fwd_kernel,
-        grid,
-        # Pointers to matrices
+    _causal_conv1d_fwd_kernel[grid](
         x,
         weight,
         bias,
@@ -1152,11 +1146,7 @@ def causal_conv1d_update(
             triton.cdiv(dim, META["BLOCK_N"]),
         )
 
-    trace_triton(
-        "causal_conv1d:_causal_conv1d_update_kernel[grid]",
-        _causal_conv1d_update_kernel,
-        grid,
-        # Pointers to matrices
+    _causal_conv1d_update_kernel[grid](
         x,
         weight,
         bias,

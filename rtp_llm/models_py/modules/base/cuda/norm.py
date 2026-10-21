@@ -9,7 +9,6 @@ from rtp_llm.models_py.modules.base.common.norm import (
     BaseNorm,
     BaseResNorm,
 )
-from rtp_llm.models_py.utils.prefill_input_log import trace_call
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 
@@ -34,9 +33,7 @@ class RMSNorm(BaseNorm):
             if hidden_states.dim() != 2 or hidden_states.shape[-1] != 256:
                 # Keep FlashInfer reduction/rsqrt ordering; results may differ
                 # from vLLM while raw gamma + 1 is still computed in FP32.
-                return trace_call(
-                    "norm:flashinfer.norm.gemma_rmsnorm",
-                    flashinfer.norm.gemma_rmsnorm,
+                return flashinfer.norm.gemma_rmsnorm(
                     hidden_states,
                     self.weight,
                     eps=self.variance_epsilon,
@@ -46,18 +43,14 @@ class RMSNorm(BaseNorm):
                 vllm_style_zero_centered_rmsnorm,
             )
 
-            return trace_call(
-                "norm:vllm_style_zero_centered_rmsnorm",
-                vllm_style_zero_centered_rmsnorm,
+            return vllm_style_zero_centered_rmsnorm(
                 hidden_states,
                 self.weight,
                 eps=self.variance_epsilon,
                 output=output,
             )
         stream_id = torch.cuda.current_stream().cuda_stream
-        trace_call(
-            "norm:rtp_llm_ops.rmsnorm",
-            rtp_llm_ops.rmsnorm,
+        rtp_llm_ops.rmsnorm(
             output,
             hidden_states,
             self.weight.data,
@@ -82,9 +75,7 @@ class RMSResNorm(BaseResNorm):
                 return hidden_states, residual
             # Keep FlashInfer reduction/rsqrt ordering; results may differ
             # from vLLM while raw gamma + 1 is still computed in FP32.
-            trace_call(
-                "norm:flashinfer.norm.gemma_fused_add_rmsnorm",
-                flashinfer.norm.gemma_fused_add_rmsnorm,
+            flashinfer.norm.gemma_fused_add_rmsnorm(
                 hidden_states,
                 residual,
                 self.weight,
@@ -92,9 +83,7 @@ class RMSResNorm(BaseResNorm):
             )
             return hidden_states, residual
         stream_id = torch.cuda.current_stream().cuda_stream
-        trace_call(
-            "norm:rtp_llm_ops.fused_add_rmsnorm",
-            rtp_llm_ops.fused_add_rmsnorm,
+        rtp_llm_ops.fused_add_rmsnorm(
             hidden_states,
             residual,
             self.weight.data,
@@ -201,9 +190,7 @@ class FusedQKRMSNorm(nn.Module):
             for values, weight in ((q, self.q_weight), (k, self.k_weight)):
                 flat = values.reshape(-1, self.size_per_head)
                 if self.size_per_head != 256:
-                    normed = trace_call(
-                        "norm:flashinfer.norm.gemma_rmsnorm",
-                        flashinfer.norm.gemma_rmsnorm,
+                    normed = flashinfer.norm.gemma_rmsnorm(
                         flat,
                         weight,
                         eps=self.eps,
@@ -215,27 +202,21 @@ class FusedQKRMSNorm(nn.Module):
                     vllm_style_zero_centered_rmsnorm,
                 )
 
-                normed = trace_call(
-                    "norm:vllm_style_zero_centered_rmsnorm:qk",
-                    vllm_style_zero_centered_rmsnorm,
+                normed = vllm_style_zero_centered_rmsnorm(
                     flat,
                     weight,
                     eps=self.eps,
                 )
                 values.copy_(normed.reshape(values.shape))
             return qkv.reshape(m, n)
-        trace_call(
-            "norm:flashinfer.norm.rmsnorm",
-            flashinfer.norm.rmsnorm,
+        flashinfer.norm.rmsnorm(
             q,
             self.q_weight,
             eps=self.eps,
             out=q,
             enable_pdl=self.enable_pdl,
         )
-        trace_call(
-            "norm:flashinfer.norm.rmsnorm",
-            flashinfer.norm.rmsnorm,
+        flashinfer.norm.rmsnorm(
             k,
             self.k_weight,
             eps=self.eps,
@@ -252,9 +233,7 @@ class AddBiasResLayerNorm(BaseAddBiasResLayerNorm):
     def forward(
         self, hidden_states: torch.Tensor, residual: torch.Tensor, bias: torch.Tensor
     ):
-        trace_call(
-            "norm:rtp_llm_ops.fused_add_layernorm",
-            rtp_llm_ops.fused_add_layernorm,
+        rtp_llm_ops.fused_add_layernorm(
             hidden_states,
             residual,
             bias,

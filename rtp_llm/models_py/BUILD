@@ -178,13 +178,3 @@ py_library(
     }),
     visibility = ["//visibility:public"],
 )
-
-filegroup(
-    name = "prefill_input_log_test_sources",
-    srcs = [
-        "//rtp_llm/models_py/triton_kernels:prefill_input_log_test_sources",
-        "utils/prefill_input_log.py",
-        "model_desc/qwen3_next.py",
-    ],
-    visibility = ["//visibility:public"],
-)

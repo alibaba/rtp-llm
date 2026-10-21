@@ -132,10 +132,20 @@ class MegaMoeJitWarmupTest(unittest.TestCase):
         signature = lambda t, bm, fp8: mega_moe_config_signature(
             **params, num_tokens=t, block_m=bm, fp8_weights=fp8
         )
-        self.assertEqual(signature(1500, 192, True), (192, 32, 256, True))
-        self.assertEqual(signature(3277, 192, True), (192, 32, 256, False))
-        self.assertEqual(signature(212, 64, True), (64, 32, 128, True))
-        self.assertEqual(signature(417, 64, False), (64, 16, 256, False))
+        self.assertEqual(signature(1500, 192, True), (192, 32, 32, 256, True))
+        self.assertEqual(signature(3277, 192, True), (192, 32, 32, 256, False))
+        self.assertEqual(signature(212, 64, True), (64, 32, 32, 128, True))
+        self.assertEqual(signature(417, 64, False), (64, 16, 16, 256, False))
+
+    def test_fp4_prefill_uses_asymmetric_store_tiles(self):
+        params = dict(
+            num_ranks=4, num_experts=512, num_topk=10, num_tokens=8192, block_m=240
+        )
+        self.assertEqual(mega_moe_config_signature(**params), (240, 24, 8, 256, False))
+        self.assertEqual(
+            mega_moe_config_signature(**params, fp8_weights=True),
+            (240, 40, 40, 256, False),
+        )
 
     def test_fp8_packers_warm_before_deepgemm_execution(self):
         executor = MegaMoeFp8Executor.__new__(MegaMoeFp8Executor)

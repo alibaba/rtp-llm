@@ -120,3 +120,18 @@ py_test(
     deps = ["//rtp_llm/models_py:modules", "//rtp_llm:testlib"],
     target_compatible_with = _CUDA13_ONLY,
 )
+
+cuda13_sm100_py_test(
+    name = "mega_moe_fp8_upgrade_test",
+    srcs = ["mega_moe_fp8_upgrade_test.py"],
+    gpu_count = 2,
+    tags = ["manual"],
+    env = {
+        "RTP_RUN_MEGA_MOE_FP8_UPGRADE_TEST": "1",
+        "DG_MEGA_MOE_FP8_NVLINK_BARRIER_TIMEOUT_SECS": "30",
+    },
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+)

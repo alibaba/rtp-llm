@@ -10,7 +10,6 @@ from triton.experimental.gluon import language as gl
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
     create_per_token_group_quant_fp8_output_scale,
 )
-from rtp_llm.models_py.utils.prefill_input_log import trace_triton
 
 
 @gluon.jit
@@ -258,10 +257,9 @@ def gated_rmsnorm_fp8(
         rows = m * (n // 128) if shared else m
         sm_count = torch.cuda.get_device_properties(x.device).multi_processor_count
         rows_per_block = min(triton.next_power_of_2(triton.cdiv(rows, 2 * sm_count)), 4)
-        trace_triton(
-            "gated_rmsnorm_fp8:_gated_rmsnorm_fp8_rows_vllm[grid]",
-            _gated_rmsnorm_fp8_rows_vllm,
-            (triton.cdiv(rows, rows_per_block), 1 if shared else n // 128),
+        _gated_rmsnorm_fp8_rows_vllm[
+            (triton.cdiv(rows, rows_per_block), 1 if shared else n // 128)
+        ](
             x,
             gate,
             weight,
@@ -287,10 +285,7 @@ def gated_rmsnorm_fp8(
             num_warps=1,
         )
     elif m:
-        trace_triton(
-            "gated_rmsnorm_fp8:_gated_rmsnorm_fp8_rows[triton.cdiv(m * (n // 128), tile_rows),]",
-            _gated_rmsnorm_fp8_rows,
-            (triton.cdiv(m * (n // 128), tile_rows),),
+        _gated_rmsnorm_fp8_rows[(triton.cdiv(m * (n // 128), tile_rows),)](
             x,
             gate,
             weight,

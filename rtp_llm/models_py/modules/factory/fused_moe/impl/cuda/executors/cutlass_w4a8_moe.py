@@ -29,7 +29,6 @@ from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
     get_cutlass_moe_mm_without_permute_info,
     post_reorder_triton_kernel,
 )
-from rtp_llm.models_py.utils.prefill_input_log import trace_call, trace_triton
 from rtp_llm.utils.model_weight import W
 
 
@@ -90,9 +89,7 @@ class CutlassExpertsW4a8Int4PerChannel(FusedMoeExpertExecutor):
         self.a_strides1 = torch.full(
             (self.E,), self.K, device=device, dtype=torch.int64
         )
-        self.b_strides1 = trace_call(
-            "cutlass_w4a8_moe:compute_reorder_stride",
-            compute_reorder_stride,
+        self.b_strides1 = compute_reorder_stride(
             self.E,
             2 * self.N,
             self.K,
@@ -108,9 +105,7 @@ class CutlassExpertsW4a8Int4PerChannel(FusedMoeExpertExecutor):
         self.a_strides2 = torch.full(
             (self.E,), self.N, device=device, dtype=torch.int64
         )
-        self.b_strides2 = trace_call(
-            "cutlass_w4a8_moe:compute_reorder_stride",
-            compute_reorder_stride,
+        self.b_strides2 = compute_reorder_stride(
             self.E,
             self.K,
             self.N,
@@ -254,9 +249,7 @@ class CutlassExpertsW4a8Int4PerChannel(FusedMoeExpertExecutor):
         if not per_act_token and expert_map is not None:
             c1.fill_(0)
 
-        trace_call(
-            "cutlass_w4a8_moe:w4a8_group_gemm_ptpc",
-            w4a8_group_gemm_ptpc,
+        w4a8_group_gemm_ptpc(
             c1,
             a1q_permute,
             self.w1,
@@ -279,9 +272,7 @@ class CutlassExpertsW4a8Int4PerChannel(FusedMoeExpertExecutor):
         if expert_map is not None:
             c3.fill_(0)
 
-        trace_call(
-            "cutlass_w4a8_moe:w4a8_group_gemm_ptpc",
-            w4a8_group_gemm_ptpc,
+        w4a8_group_gemm_ptpc(
             c3,
             a2q,
             self.w2,
@@ -297,10 +288,7 @@ class CutlassExpertsW4a8Int4PerChannel(FusedMoeExpertExecutor):
         )
         del a2q
 
-        trace_triton(
-            "cutlass_w4a8_moe:post_reorder_triton_kernel[M,]",
-            post_reorder_triton_kernel,
-            (M,),
+        post_reorder_triton_kernel[(M,)](
             down_output_ptr=c3,
             output_ptr=output,
             src2dst_ptr=src_2_dst,
@@ -372,9 +360,7 @@ class CutlassBatchedExpertsW4a8Int4PerChannel(FusedMoeExpertExecutor):
         self.a_strides1 = torch.full(
             (self.E,), self.K, device=device, dtype=torch.int64
         )
-        self.b_strides1 = trace_call(
-            "cutlass_w4a8_moe:compute_reorder_stride",
-            compute_reorder_stride,
+        self.b_strides1 = compute_reorder_stride(
             self.E,
             2 * self.N,
             self.K,
@@ -390,9 +376,7 @@ class CutlassBatchedExpertsW4a8Int4PerChannel(FusedMoeExpertExecutor):
         self.a_strides2 = torch.full(
             (self.E,), self.N, device=device, dtype=torch.int64
         )
-        self.b_strides2 = trace_call(
-            "cutlass_w4a8_moe:compute_reorder_stride",
-            compute_reorder_stride,
+        self.b_strides2 = compute_reorder_stride(
             self.E,
             self.K,
             self.N,
@@ -453,9 +437,7 @@ class CutlassBatchedExpertsW4a8Int4PerChannel(FusedMoeExpertExecutor):
             (self.E, 3), dtype=torch.int32, device=expert_x.device
         )
 
-        trace_call(
-            "cutlass_w4a8_moe:get_cutlass_batched_moe_mm_data",
-            get_cutlass_batched_moe_mm_data,
+        get_cutlass_batched_moe_mm_data(
             expert_offsets,
             problem_sizes1,
             problem_sizes2,
@@ -471,9 +453,7 @@ class CutlassBatchedExpertsW4a8Int4PerChannel(FusedMoeExpertExecutor):
         expert_x = expert_x.reshape(-1, expert_x.size(2))
         expert_x_scale = expert_x_scale.reshape(-1, expert_x_scale.size(2)).contiguous()
 
-        trace_call(
-            "cutlass_w4a8_moe:w4a8_group_gemm_ptpc",
-            w4a8_group_gemm_ptpc,
+        w4a8_group_gemm_ptpc(
             c1,
             expert_x,
             self.w1,
@@ -493,9 +473,7 @@ class CutlassBatchedExpertsW4a8Int4PerChannel(FusedMoeExpertExecutor):
         if expert_map is not None:
             output.fill_(0)
 
-        trace_call(
-            "cutlass_w4a8_moe:w4a8_group_gemm_ptpc",
-            w4a8_group_gemm_ptpc,
+        w4a8_group_gemm_ptpc(
             output.reshape(-1, self.K),
             a2q,
             self.w2,

@@ -35,7 +35,6 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.se_jit_warmup im
 from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.warmup_sync import (
     sync_cuda_graph_warmup_ranks,
 )
-from rtp_llm.models_py.utils.prefill_input_log import trace_call
 
 from .fp8_fp4_base import Fp8Fp4ExecutorBase, normalize_moe_w13_gate_up
 from .mega_moe import (
@@ -97,9 +96,7 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
         del s2_raw
         torch.cuda.empty_cache()
 
-        (l1_w, l1_sf), (l2_w, l2_sf) = trace_call(
-            "mega_moe_se:deep_gemm.transform_weights_for_mega_moe",
-            deep_gemm.transform_weights_for_mega_moe,
+        (l1_w, l1_sf), (l2_w, l2_sf) = deep_gemm.transform_weights_for_mega_moe(
             (w13, s13_int),
             (w2, s2_int),
         )
@@ -163,11 +160,11 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
         )
         w2_sf_int = self._shared_expert_sf_to_int(deep_gemm, w2_scale, D, shared_inter)
         del w13_scale, w2_scale
-        (se_l1_w, se_l1_sf), (se_l2_w, se_l2_sf) = trace_call(
-            "mega_moe_se:deep_gemm.transform_weights_for_mega_moe",
-            deep_gemm.transform_weights_for_mega_moe,
-            (w13_fp8.contiguous(), w13_sf_int),
-            (w2_fp8.contiguous(), w2_sf_int),
+        (se_l1_w, se_l1_sf), (se_l2_w, se_l2_sf) = (
+            deep_gemm.transform_weights_for_mega_moe(
+                (w13_fp8.contiguous(), w13_sf_int),
+                (w2_fp8.contiguous(), w2_sf_int),
+            )
         )
         del w13_fp8, w13_sf_int, w2_fp8, w2_sf_int
         torch.cuda.empty_cache()
@@ -184,9 +181,7 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
             raise TypeError(
                 "MegaMoESE expected shared UE8M0 scale, " f"got {scale.dtype}"
             )
-        return trace_call(
-            "mega_moe_se:deep_gemm.transform_sf_into_required_layout",
-            deep_gemm.transform_sf_into_required_layout,
+        return deep_gemm.transform_sf_into_required_layout(
             scale.float(),
             mn,
             k,
@@ -198,9 +193,7 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
         import deep_gemm
 
         return int(
-            trace_call(
-                "mega_moe_se:deep_gemm.get_block_m_for_mega_moe",
-                deep_gemm.get_block_m_for_mega_moe,
+            deep_gemm.get_block_m_for_mega_moe(
                 self.cfg.ep_size,
                 self.cfg.n_routed_experts,
                 self._mega_buf.num_max_tokens_per_rank,
@@ -240,9 +233,7 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
         import torch.distributed as dist
 
         cfg = self.cfg
-        num_sms = int(
-            trace_call("mega_moe_se:deep_gemm.get_num_sms", deep_gemm.get_num_sms)
-        )
+        num_sms = int(deep_gemm.get_num_sms())
         token_counts = self._resolve_jit_warmup_token_counts(num_sms)
         if not token_counts:
             return
@@ -325,9 +316,7 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
             f"moe.mega_moe_se.layer{self.cfg.layer_id}.before_deepgemm",
             device,
         )
-        trace_call(
-            "mega_moe_se:deep_gemm.fp8_fp4_mega_moe",
-            deep_gemm.fp8_fp4_mega_moe,
+        deep_gemm.fp8_fp4_mega_moe(
             y,
             (self._mega_l1_w, self._mega_l1_sf),
             (self._mega_l2_w, self._mega_l2_sf),

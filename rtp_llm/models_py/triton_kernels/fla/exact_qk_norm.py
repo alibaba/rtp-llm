@@ -11,8 +11,6 @@ import torch
 import triton
 import triton.language as tl
 
-from rtp_llm.models_py.utils.prefill_input_log import trace_triton
-
 
 @triton.jit
 def _segment_scale(x0, x1, x2, x3, eps):
@@ -98,10 +96,7 @@ def fused_l2norm_qk_exact(q, k, *, tile_rows=4):
     _, t, h, d = q.shape
     qo = torch.empty(q.shape, device=q.device, dtype=q.dtype)
     ko = torch.empty_like(qo)
-    trace_triton(
-        "exact_qk_norm:_fused_qk_norm_kernel[triton.cdiv(t * h, bt),]",
-        _fused_qk_norm_kernel,
-        (triton.cdiv(t * h, bt),),
+    _fused_qk_norm_kernel[(triton.cdiv(t * h, bt),)](
         q,
         k,
         qo,

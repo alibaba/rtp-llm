@@ -4,8 +4,6 @@ import torch
 import triton
 import triton.language as tl
 
-from rtp_llm.models_py.utils.prefill_input_log import trace_triton
-
 from .prefill_fusion import MROPE, enabled, in_prefill
 
 
@@ -277,10 +275,7 @@ def maybe_prefill_mrope_cache(qkv, kv_cache, params, config, *, qout, qkvout):
         else qkv
     )
     if qkv.shape[0]:
-        trace_triton(
-            "prefill_mrope_cache:_prefill_mrope_cache[triton.cdiv(qkv.shape[0], 8), qh + 2 * kh]",
-            _prefill_mrope_cache,
-            (triton.cdiv(qkv.shape[0], 8), qh + 2 * kh),
+        _prefill_mrope_cache[(triton.cdiv(qkv.shape[0], 8), qh + 2 * kh)](
             qkv,
             out,
             pos,

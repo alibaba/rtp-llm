@@ -26,9 +26,6 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.buffer import (
     _get_or_create_mega_fp8_buf,
     _get_or_create_mega_output,
 )
-from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.fp8_impl import (
-    mega_moe_fp8_impl,
-)
 from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.fp8_sm_reserve import (
     configure_mega_moe_fp8_num_sms,
 )
@@ -46,21 +43,10 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.jit_warmup impor
     generate_mega_moe_jit_token_counts,
     parse_mega_moe_jit_warmup_tokens_override,
 )
-from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.snapshot import (
-    mega_moe_snapshot_active,
-    record_mega_moe_launch,
-)
 from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.warmup_sync import (
     sync_cuda_graph_warmup_ranks,
 )
-from rtp_llm.models_py.utils.prefill_input_log import trace_call
 from rtp_llm.utils.model_weight import W
-
-
-def _input_metadata(value):
-    from rtp_llm.models_py.utils.prefill_input_log import describe_inputs
-
-    return describe_inputs(value, typed_scalars=False)
 
 
 def mega_moe_fp8_available():
@@ -110,7 +96,6 @@ class MegaMoeFp8Executor(MegaMoeExecutor):
 
         return (
             "fp8",
-            mega_moe_fp8_impl(),
             self._num_shared_experts,
             self.uses_shared_expert_gates,
             self._input_packer.name,
@@ -124,9 +109,7 @@ class MegaMoeFp8Executor(MegaMoeExecutor):
         from deep_gemm import mega_fp8
 
         return int(
-            trace_call(
-                "mega_moe_fp8:mega_fp8.get_block_m_for_mega_moe_fp8",
-                mega_fp8.get_block_m_for_mega_moe_fp8,
+            mega_fp8.get_block_m_for_mega_moe_fp8(
                 self.cfg.ep_size,
                 self.cfg.n_routed_experts,
                 self._mega_buf.num_max_tokens_per_rank,
@@ -154,7 +137,6 @@ class MegaMoeFp8Executor(MegaMoeExecutor):
         )
 
     def setup_weights(self, weights: Dict[str, torch.Tensor]) -> None:
-        impl = mega_moe_fp8_impl()
         if not mega_moe_fp8_available():
             raise RuntimeError(
                 "mega_moe_fp8 requires SM10x and DeepGEMM mega_fp8 support"
@@ -197,9 +179,8 @@ class MegaMoeFp8Executor(MegaMoeExecutor):
         self._input_packer = get_mega_moe_input_packer()
         self._maybe_warmup_jit_once()
         logging.info(
-            "MegaMoE FP8 weights prepared during model construction: impl=%s, experts=%d, "
+            "MegaMoE FP8 weights prepared during model construction: experts=%d, "
             "hidden=%d, intermediate=%d, max_tokens_per_rank=%d, shared=%d",
-            impl,
             config.n_local_experts,
             config.hidden_size,
             config.moe_inter_dim,
@@ -244,53 +225,12 @@ class MegaMoeFp8Executor(MegaMoeExecutor):
         y: torch.Tensor,
         tokens: int,
         device: torch.device,
-        diagnostic_inputs=None,
         **kwargs,
     ):
         if getattr(self, "_jit_pack_only", False):
             return
         import deep_gemm
         from deep_gemm import mega_fp8
-
-        # DeepGEMM reads the same variable on each call and selects the kernel.
-        mega_moe_fp8_impl(
-            shared_expert_gates=kwargs.get("shared_expert_gates") is not None
-        )
-
-        # Keep a bounded snapshot of the current prefill on each rank.
-        # The DeepGEMM sync-id=1 diagnostic reports per-SM progress on timeout.
-        if mega_moe_snapshot_active():
-            cfg = self.config
-            buf = self._mega_buf
-            record_mega_moe_launch(
-                _input_metadata(
-                    {
-                        "layer_id": getattr(cfg, "layer_id", -1),
-                        "world_rank": cfg.world_rank,
-                        "ep_rank": cfg.ep_rank,
-                        "ep_size": cfg.ep_size,
-                        "expert_num": cfg.expert_num,
-                        "moe_k": cfg.moe_k,
-                        "hidden_size": cfg.hidden_size,
-                        "moe_inter_dim": cfg.moe_inter_dim,
-                        "max_tokens_per_rank": buf.num_max_tokens_per_rank,
-                        "tokens": tokens,
-                        "recipe": (1, 1, 32),
-                        "weight_recipe": (1, 32),
-                        "activation": "swiglu",
-                        "fast_math": False,
-                        "source": diagnostic_inputs,
-                        "y": y,
-                        "l1": self.l1,
-                        "l2": self.l2,
-                        "buffer_x": buf.x,
-                        "buffer_x_sf": buf.x_sf,
-                        "buffer_topk_idx": buf.topk_idx,
-                        "buffer_topk_weights": buf.topk_weights,
-                        "shared": kwargs,
-                    }
-                ),
-            )
 
         self._maybe_pre_kernel_barrier(tokens)
         sync_cuda_graph_warmup_ranks(
@@ -300,17 +240,13 @@ class MegaMoeFp8Executor(MegaMoeExecutor):
         )
         with configure_mega_moe_fp8_num_sms(deep_gemm, device):
             buffer_num_sms = getattr(self._mega_buf, "_rtp_fp8_num_sms", None)
-            if buffer_num_sms is not None and buffer_num_sms != trace_call(
-                "mega_moe_fp8:deep_gemm.get_num_sms", deep_gemm.get_num_sms
-            ):
+            if buffer_num_sms is not None and buffer_num_sms != deep_gemm.get_num_sms():
                 raise RuntimeError(
                     "MegaMoE FP8 SM budget changed after buffer allocation; "
                     "restart with a consistent MEGA_MOE_FP8_RESERVE_SM setting "
                     "and DeepGEMM SM budget"
                 )
-            trace_call(
-                "mega_moe_fp8:mega_fp8.fp8_fp8_mega_moe",
-                mega_fp8.fp8_fp8_mega_moe,
+            mega_fp8.fp8_fp8_mega_moe(
                 y,
                 self.l1,
                 self.l2,
@@ -354,17 +290,6 @@ class MegaMoeFp8Executor(MegaMoeExecutor):
             y,
             tokens,
             x.device,
-            diagnostic_inputs={
-                "x": x,
-                "scores": gate_payload.scores,
-                "topk": gate_payload.topk,
-                "score_func": gate_payload.score_func,
-                "route_scale": gate_payload.route_scale,
-                "norm_eps": gate_payload.norm_eps,
-                "bias": gate_payload.bias,
-                "input_ids": gate_payload.input_ids,
-                "tid2eid": gate_payload.tid2eid,
-            },
         )
         return y, buf.topk_weights[:tokens], buf.topk_idx[:tokens]
 
@@ -379,6 +304,5 @@ class MegaMoeFp8Executor(MegaMoeExecutor):
             y,
             tokens,
             x.device,
-            diagnostic_inputs={"x": x, "weights": weights, "indices": indices},
         )
         return y

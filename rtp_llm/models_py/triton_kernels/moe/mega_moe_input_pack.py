@@ -12,8 +12,6 @@ import os
 
 import torch
 
-from rtp_llm.models_py.utils.prefill_input_log import trace_triton
-
 try:
     import triton
     import triton.language as tl
@@ -603,10 +601,7 @@ def fused_pack_mega_moe_inputs_legacy(
         return
     fp8_max = torch.finfo(torch.float8_e4m3fn).max
     grid_x = (T, triton.cdiv(D, 128))
-    trace_triton(
-        "mega_moe_input_pack:_pack_x_kernel[grid_x]",
-        _pack_x_kernel,
-        grid_x,
+    _pack_x_kernel[grid_x](
         x,
         out_fp8,
         out_sf,
@@ -620,10 +615,7 @@ def fused_pack_mega_moe_inputs_legacy(
         num_warps=4,
     )
     block_k = triton.next_power_of_2(topk)
-    trace_triton(
-        "mega_moe_input_pack:_pack_router_kernel[T,]",
-        _pack_router_kernel,
-        (T,),
+    _pack_router_kernel[(T,)](
         weights,
         indices,
         out_weights,
@@ -669,10 +661,7 @@ def fused_pack_mega_moe_inputs_optimized(
     block_k = triton.next_power_of_2(topk)
     block_m = _ordinary_pack_block_m(T)
     grid = (triton.cdiv(T, block_m), triton.cdiv(D, 128))
-    trace_triton(
-        "mega_moe_input_pack:_pack_mega_moe_inputs_optimized_kernel[grid]",
-        _pack_mega_moe_inputs_optimized_kernel,
-        grid,
+    _pack_mega_moe_inputs_optimized_kernel[grid](
         x,
         weights,
         indices,
@@ -819,10 +808,7 @@ def fused_pack_mega_moe_softmax_gate_inputs(
     block_k = triton.next_power_of_2(int(topk))
     fp8_max = torch.finfo(torch.float8_e4m3fn).max
     grid = (triton.cdiv(tokens, block_m), triton.cdiv(dim, 128))
-    trace_triton(
-        "mega_moe_input_pack:_mega_moe_gate_pack_softmax_kernel[grid]",
-        _mega_moe_gate_pack_softmax_kernel,
-        grid,
+    _mega_moe_gate_pack_softmax_kernel[grid](
         x,
         scores,
         out_fp8,
@@ -927,10 +913,7 @@ def fused_pack_mega_moe_gate_inputs(
         block_k = triton.next_power_of_2(int(topk))
         fp8_max = torch.finfo(torch.float8_e4m3fn).max
         grid = (triton.cdiv(tokens, block_m), triton.cdiv(dim, 128))
-        trace_triton(
-            "mega_moe_input_pack:_mega_moe_gate_pack_hash_kernel[grid]",
-            _mega_moe_gate_pack_hash_kernel,
-            grid,
+        _mega_moe_gate_pack_hash_kernel[grid](
             x,
             scores,
             input_ids,
@@ -977,10 +960,7 @@ def fused_pack_mega_moe_gate_inputs(
     block_k = triton.next_power_of_2(int(topk))
     fp8_max = torch.finfo(torch.float8_e4m3fn).max
     grid = (triton.cdiv(tokens, block_m), triton.cdiv(dim, 128))
-    trace_triton(
-        "mega_moe_input_pack:_mega_moe_gate_pack_nonhash_kernel[grid]",
-        _mega_moe_gate_pack_nonhash_kernel,
-        grid,
+    _mega_moe_gate_pack_nonhash_kernel[grid](
         x,
         scores,
         bias,

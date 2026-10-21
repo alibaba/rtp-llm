@@ -37,7 +37,6 @@ from rtp_llm.models_py.triton_kernels.qwen35_decode_fusion.env import (
 from rtp_llm.models_py.triton_kernels.qwen35_decode_fusion.fp8_scale import (
     make_ue8m0_scale_like,
 )
-from rtp_llm.models_py.utils.prefill_input_log import trace_triton
 
 _GROUP_SIZE = 128
 _NORM_EPS = 1.0e-6
@@ -411,10 +410,7 @@ def rmsnorm_gated_fp8_quant(
         out_scale.stride(1),
     )
     if variant == "tile":
-        trace_triton(
-            "rmsnorm_gated_fp8_quant:_rmsnorm_gated_fp8_quant_tile_kernel[m,]",
-            _rmsnorm_gated_fp8_quant_tile_kernel,
-            (m,),
+        _rmsnorm_gated_fp8_quant_tile_kernel[(m,)](
             x,
             z,
             weight,
@@ -437,10 +433,7 @@ def rmsnorm_gated_fp8_quant(
             **common,
         )
     else:
-        trace_triton(
-            "rmsnorm_gated_fp8_quant:_rmsnorm_gated_fp8_quant_kernel[num_packed, triton.cdiv(m, block_m)]",
-            _rmsnorm_gated_fp8_quant_kernel,
-            (num_packed, triton.cdiv(m, block_m)),
+        _rmsnorm_gated_fp8_quant_kernel[(num_packed, triton.cdiv(m, block_m))](
             *args,
             N=n,
             NUM_GROUPS=num_groups,

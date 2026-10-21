@@ -7,7 +7,6 @@ from typing import Optional
 import torch
 
 from rtp_llm.models_py.modules.factory.linear import LinearBase
-from rtp_llm.models_py.utils.prefill_input_log import trace_call
 
 logger = logging.getLogger(__name__)
 
@@ -93,9 +92,7 @@ class CudaFp4GEMMLinear(LinearBase):
             raise ValueError(error_msg)
 
         # Quantize BF16 or FP16 input to (FP4 and interleaved block scale)
-        input_fp4, input_scale_interleaved = trace_call(
-            "fp4_linear:fp4_quantize", fp4_quantize, input, self.input_scale_inv
-        )
+        input_fp4, input_scale_interleaved = fp4_quantize(input, self.input_scale_inv)
         assert input_fp4.dtype == torch.uint8
 
         if self.backend == "sgl_cutlass":
@@ -108,9 +105,7 @@ class CudaFp4GEMMLinear(LinearBase):
                 output_dtype,
             ).view(*output_shape)
         else:
-            output = trace_call(
-                "fp4_linear:mm_fp4",
-                mm_fp4,
+            output = mm_fp4(
                 input_fp4,
                 self.weight.T,
                 input_scale_interleaved,
