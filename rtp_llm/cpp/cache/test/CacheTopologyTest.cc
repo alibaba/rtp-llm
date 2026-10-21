@@ -229,5 +229,62 @@ TEST(CacheTopologyTest, DerivesReverseMembershipFromLayers) {
     EXPECT_ANY_THROW(CacheTopology::create({makeGroup("full"), makeGroup("full")}, {{0, {"full"}}}));
 }
 
+TEST(CacheTopologyTest, ActiveModelTopologyWithoutDraftPreservesAllocation) {
+    CacheConfig config;
+    config.layer_num = 2;
+    config.setTopology({makeGroup("full")}, {{0, {"full"}}, {1, {"full"}}});
+    EXPECT_EQ(config.activeModelTopologyPtr(), config.topologyPtr());
+}
+
+TEST(CacheTopologyTest, ActiveModelTopologyExcludesUnusedMtpModules) {
+    CacheConfig config;
+    config.layer_num     = 2;
+    auto full_group = makeGroup("full");
+    auto swa_group  = makeGroup("swa", CacheGroupType::SWA);
+    swa_group.policy.cp_slice      = CpBlockSliceMode::EQUAL_BYTES;
+    config.setTopology({full_group, swa_group},
+                       {{0, {"full", "swa"}}, {1, {"full", "swa"}}, {2, {"swa"}}, {3, {"swa"}}, {4, {"swa"}}});
+    for (size_t module_index = 0; module_index < 3; ++module_index) {
+        auto module_config       = std::make_shared<CacheConfig>();
+        module_config->layer_num = 1;
+        config.mtp_sub_configs.push_back(std::move(module_config));
+    }
+
+    const auto active = config.activeModelTopologyPtr();
+    ASSERT_EQ(active->layers().size(), 3u);
+    EXPECT_EQ(active->layerIdsForGroup("full"), (std::vector<int>{0, 1}));
+    EXPECT_EQ(active->layerIdsForGroup("swa"), (std::vector<int>{0, 1, 2}));
+    EXPECT_EQ(active->groupTags(), config.topology().groupTags());
+    EXPECT_EQ(active->group("swa").spec, config.group("swa").spec);
+    EXPECT_EQ(active->group("swa").kvBlockStrideBytes(), config.group("swa").kvBlockStrideBytes());
+    EXPECT_EQ(active->group("swa").policy.cp_slice, CpBlockSliceMode::EQUAL_BYTES);
+    EXPECT_EQ(active->groupForLayer(2, "swa").tag, "swa");
+    EXPECT_EQ(config.topology().layers().size(), 5u);
+    EXPECT_EQ(config.topology().layerIdsForGroup("swa"), (std::vector<int>{0, 1, 2, 3, 4}));
+}
+
+TEST(CacheTopologyTest, ActiveModelTopologyPreservesMultiLayerDraftModule) {
+    CacheConfig config;
+    config.layer_num     = 2;
+    config.setTopology({makeGroup("full")},
+                       {{0, {"full"}}, {1, {"full"}}, {2, {"full"}}, {3, {"full"}}, {4, {"full"}}});
+    auto module_config       = std::make_shared<CacheConfig>();
+    module_config->layer_num = 3;
+    config.mtp_sub_configs.push_back(std::move(module_config));
+    EXPECT_EQ(config.activeModelTopologyPtr(), config.topologyPtr());
+}
+
+TEST(CacheTopologyTest, ActiveModelTopologyRejectsInvalidDraftConfig) {
+    CacheConfig config;
+    config.layer_num = 1;
+    config.setTopology({makeGroup("full", {0})}, {{0, {"full"}}});
+    config.mtp_sub_configs.push_back(nullptr);
+    EXPECT_ANY_THROW(config.activeModelTopologyPtr());
+    config.mtp_sub_configs.front() = std::make_shared<CacheConfig>();
+    EXPECT_ANY_THROW(config.activeModelTopologyPtr());
+    config.mtp_sub_configs.front()->layer_num = 1;
+    EXPECT_ANY_THROW(config.activeModelTopologyPtr());
+}
+
 }  // namespace
 }  // namespace rtp_llm

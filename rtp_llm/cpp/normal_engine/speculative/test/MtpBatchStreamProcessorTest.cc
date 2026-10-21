@@ -735,6 +735,8 @@ TEST_F(MtpBatchStreamProcessorTest, testPrepareOneStepSpecDecodeModelInputFromDe
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testprepareDecodeDraftModelInput) {
+    autil::EnvGuard              stream_async("RTP_LLM_STREAM_ASYNC", "0");
+    autil::EnvGuard              device_state("RTP_LLM_MTP_ASYNC_DEVICE_STATE", "0");
     ModelConfig                 model_config;
     RuntimeConfig               runtime_config;
     SpeculativeExecutionConfig  sp_config;
@@ -843,6 +845,7 @@ TEST_F(MtpBatchStreamProcessorTest, testprepareDecodeDraftModelInput) {
 
     // Device state includes the carried target token. Draft KV and target
     // verification both start one slot before that committed length.
+    autil::EnvGuard enabled_device_state("RTP_LLM_MTP_ASYNC_DEVICE_STATE", "1");
     GenerateStream::MtpAsyncDeviceState state1;
     state1.propose_tokens_gpu = torch::tensor({{3}}, torch::kInt32).to(torch::kCUDA);
     state1.next_seq_len_gpu   = torch::tensor({7}, torch::kInt32).to(torch::kCUDA);
@@ -859,9 +862,66 @@ TEST_F(MtpBatchStreamProcessorTest, testprepareDecodeDraftModelInput) {
     expect_positions(model_input, {6, 3}, {6, 3});
 }
 
+TEST_F(MtpBatchStreamProcessorTest, SyncDraftPreparationIgnoresStaleGrpcDeviceState) {
+    autil::EnvGuard             stream_async("RTP_LLM_STREAM_ASYNC", "0");
+    autil::EnvGuard             device_state("RTP_LLM_MTP_ASYNC_DEVICE_STATE", "0");
+    ModelConfig                 model_config;
+    RuntimeConfig               runtime_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig logging_config;
+    SpeculativeExecutionConfig  sp_config;
+    model_config.max_seq_len             = 4096;
+    model_config.vocab_size              = 16;
+    model_config.num_layers              = 1;
+    sp_config.gen_num_per_cycle          = 3;
+    auto                    cache_config = test::makeSimpleMhaCacheConfig(1, 4, 2048, rtp_llm::TYPE_FP16);
+    MtpBatchStreamProcessor processor(model_config, pd_sep_config, logging_config, cache_config, sp_config, false);
+    ResourceContext         resource_context;
+    auto                    stream      = createContextStream(model_config, runtime_config, resource_context, {1}, 1);
+    stream->getSPOutputBuffer()->tokens = torch::tensor({{2, 7}}, torch::kInt32);
+    stream->getSPOutputBuffer()->hidden_states = torch::tensor({{1.0f, 2.0f}}).to(torch::kCUDA);
+    GenerateStream::MtpAsyncDeviceState stale_state;
+    stale_state.propose_tokens_gpu     = torch::tensor({{3}}, torch::kInt32).to(torch::kCUDA);
+    stale_state.next_seq_len_gpu       = torch::tensor({2017}, torch::kInt32).to(torch::kCUDA);
+    stale_state.last_hidden_states_gpu = torch::tensor({{9.0f, 10.0f}}).to(torch::kCUDA);
+    stream->setMtpAsyncDeviceState(std::move(stale_state));
+    StreamGroups groups({stream});
+    TensorHolder holder;
+
+    for (bool legacy_gpu_proposal : {false, true}) {
+        SCOPED_TRACE(legacy_gpu_proposal);
+        stream->getSPOutputBuffer()->propose_tokens_gpu =
+            legacy_gpu_proposal ? torch::tensor({{7}}, torch::kInt32).to(torch::kCUDA) : torch::Tensor();
+        for (int position : {2016, 2018, 2047, 2048}) {
+            SCOPED_TRACE(position);
+            GptModelInputs input;
+            input.input_lengths    = torch::tensor({2016}, torch::kInt32);
+            input.sequence_lengths = torch::tensor({position}, torch::kInt32);
+            processor.prepareDecodeDraftModelInput(groups, input, holder);
+            EXPECT_EQ((vector<int>{7}), toVec<int>(input.combo_tokens));
+            EXPECT_EQ((vector<int>{position}), toVec<int>(input.sequence_lengths));
+            EXPECT_EQ((vector<int>{position}), toVec<int>(input.prefix_lengths));
+            processor.gatherHiddenStates(groups, input);
+            EXPECT_EQ((vector<float>{1.0f, 2.0f}), toVec<float>(input.last_hidden_states));
+        }
+    }
+    for (bool asynchronous : {false, true}) {
+        SCOPED_TRACE(asynchronous);
+        autil::EnvGuard enabled_stream_async("RTP_LLM_STREAM_ASYNC", asynchronous ? "1" : "0");
+        autil::EnvGuard enabled_device_state("RTP_LLM_MTP_ASYNC_DEVICE_STATE", asynchronous ? "0" : "1");
+        GptModelInputs  input;
+        input.input_lengths    = torch::tensor({2016}, torch::kInt32);
+        input.sequence_lengths = torch::tensor({99}, torch::kInt32);
+        processor.prepareDecodeDraftModelInput(groups, input, holder);
+        EXPECT_EQ((vector<int>{3}), toVec<int>(input.combo_tokens));
+        EXPECT_EQ((vector<int>{2016}), toVec<int>(input.sequence_lengths));
+        EXPECT_EQ((vector<int>{2016}), toVec<int>(input.prefix_lengths));
+        processor.gatherHiddenStates(groups, input);
+        EXPECT_EQ((vector<float>{9.0f, 10.0f}), toVec<float>(input.last_hidden_states));
+    }
+}
+
 TEST_F(MtpBatchStreamProcessorTest, DraftCacheWritesRemainContiguousAcrossPreparationPaths) {
-    // This test exercises the legacy compact post-rejection path; device-state
-    // preparation below is selected by explicitly supplied stream state.
     autil::EnvGuard             stream_async("RTP_LLM_STREAM_ASYNC", "0");
     autil::EnvGuard             device_state("RTP_LLM_MTP_ASYNC_DEVICE_STATE", "0");
     ModelConfig                 model_config;
@@ -905,6 +965,7 @@ TEST_F(MtpBatchStreamProcessorTest, DraftCacheWritesRemainContiguousAcrossPrepar
         // and explicit positional coordinates must not be rewritten.
         for (int path = 0; path < 4; ++path) {
             SCOPED_TRACE(path);
+            autil::EnvGuard active_device_state("RTP_LLM_MTP_ASYNC_DEVICE_STATE", path >= 2 ? "1" : "0");
             stream->setMtpAsyncDeviceState({});
             stream->getSPOutputBuffer()->propose_tokens_gpu = torch::Tensor();
             GptModelInputs input;
@@ -969,7 +1030,10 @@ TEST_F(MtpBatchStreamProcessorTest, DraftCacheWritesRemainContiguousAcrossPrepar
             state.next_seq_len_gpu   = torch::tensor({next_slot + 1}, torch::kInt32).to(torch::kCUDA);
             stream->setMtpAsyncDeviceState(std::move(state));
             next.sequence_lengths = torch::tensor({99}, torch::kInt32);
-            processor.prepareDecodeDraftModelInput(groups, next, holder);
+            {
+                autil::EnvGuard enabled_device_state("RTP_LLM_MTP_ASYNC_DEVICE_STATE", "1");
+                processor.prepareDecodeDraftModelInput(groups, next, holder);
+            }
             EXPECT_EQ((vector<int>{next_slot}), toVec<int>(next.sequence_lengths));
             EXPECT_EQ((vector<int>{next_slot}), toVec<int>(next.prefix_lengths));
             stream->setMtpAsyncDeviceState({});

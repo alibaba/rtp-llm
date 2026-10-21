@@ -12,9 +12,11 @@
 
 #include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
+#include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PSchedulerDecodeWrite.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PWorkerDecodeWrite.h"
+#include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBufferUtil.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PSchedulerPrefillWrite.h"
 #include "rtp_llm/cpp/cache/connector/p2p/plan/KVCacheTransferPlanner.h"
 #include "rtp_llm/cpp/cache/connector/p2p/plan/ShardLayoutFactory.h"
@@ -317,7 +319,7 @@ protected:
     P2PConnectorSchedulerConfig schedulerConfig(RoleType role, const std::vector<std::string>& addresses) {
         P2PConnectorSchedulerConfig config;
         config.topology                                     = config_.topologyPtr();
-        config.cache_key_tokens_per_block                   = config_.seq_size_per_block;
+        config.cache_key_tokens_per_block                   = config_.cache_key_tokens_per_block;
         config.parallelism_config.tp_size                   = 2;
         config.parallelism_config.role_type                 = role;
         config.role_type                                    = role;
@@ -1063,11 +1065,11 @@ TEST_F(P2PConnectorWriteSchedulerTest, WritebackPlanPreservesConfiguredActiveTai
     }
 }
 
-TEST_F(P2PConnectorWriteSchedulerTest, UnsupportedCpAndAsymmetricTpAreRejectedBeforeHandshake) {
+TEST_F(P2PConnectorWriteSchedulerTest, AsymmetricTpIsSupportedButDecodeCpRemainsOne) {
     auto cp                               = decode_config_.parallelism_config;
     cp.prefill_cp_config.kv_cache_sharded = true;
-    EXPECT_FALSE(decode_->planFor(1)->ok());
-    EXPECT_FALSE(prefill_->planFor(1)->ok());
+    EXPECT_TRUE(decode_->planFor(1)->ok());
+    EXPECT_TRUE(prefill_->planFor(1)->ok());
     auto cp_config               = prefill_config_;
     cp_config.parallelism_config = cp;
     P2PSchedulerPrefillWrite cp_scheduler(cp_config, allocator_, nullptr, prefill_client_);
@@ -1079,6 +1081,82 @@ TEST_F(P2PConnectorWriteSchedulerTest, UnsupportedCpAndAsymmetricTpAreRejectedBe
     ASSERT_TRUE(await([&]() { return context->done(); }));
     EXPECT_FALSE(context->success());
     EXPECT_EQ(prefill_workers_[0].handshakes, 0);
+}
+
+TEST_F(P2PConnectorWriteSchedulerTest, CpWritebackIncludesPromptBoundaryAndPublishesCanonicalKeys) {
+    decode_.reset();
+    prefill_.reset();
+    token_ids_.clear();
+    for (int token = 1; token <= 19; ++token) {
+        token_ids_.push_back(token);
+    }
+    input_length_            = 12;
+    kv_ready_token_count_    = 19;
+    keys_                    = calculateCacheKeys(token_ids_.data(), 16, 4);
+    routing_.prefill_cp_size = 2;
+    allocator_               = std::make_shared<Allocator>(config_);
+    ASSERT_TRUE(allocator_->init());
+    allocator_->setCPSlotMapper(std::make_shared<CPSlotMapper>(0, 2, 4));
+    ASSERT_TRUE(test::seedCompleteBlockTreePath(allocator_, {keys_[1]}).success);
+    prefill_config_.parallelism_config.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
+    prefill_config_.parallelism_config.prefill_cp_config.kv_cache_sharded = true;
+    prefill_ = std::make_unique<P2PSchedulerPrefillWrite>(prefill_config_, allocator_, nullptr, prefill_client_);
+    ASSERT_TRUE(prefill_->init());
+    decode_config_.parallelism_config.tp_size                            = 1;
+    decode_config_.parallelism_config.prefill_cp_config.method           = CPRotateMethod::PREFILL_CP;
+    decode_config_.parallelism_config.prefill_cp_config.kv_cache_sharded = true;
+    decode_config_.parallelism_config.prefill_cp_config.prefill_cp_size  = 2;
+    decode_config_.worker_grpc_addrs.resize(1);
+    decode_client_ = std::make_shared<P2PBroadcastClient>(decode_config_.worker_grpc_addrs, 100);
+    ASSERT_TRUE(decode_client_->init());
+    createDecode();
+    ASSERT_TRUE(decode_->planFor(2)->ok());
+    ASSERT_TRUE(prefill_->planFor(1)->ok());
+    EXPECT_EQ(decode_->planFor(2)->plan.digest(), prefill_->planFor(1)->plan.digest());
+    auto context = asyncWrite(source());
+    ASSERT_NE(context, nullptr);
+    ASSERT_TRUE(await([&]() { return decode_workers_[0].starts == 1 || context->done(); }));
+    ASSERT_EQ(decode_workers_[0].starts, 1) << context->errorInfo().ToString();
+    EXPECT_EQ(decode_workers_[1].starts, 0);
+    const auto handshake = prefill_workers_[0].lastHandshake();
+    EXPECT_EQ(handshake.cache_keys_size(), 4);
+    const auto sent = decode_workers_[0].lastStart();
+    ASSERT_EQ(sent.routes_size(), 2);
+    for (int rank = 0; rank < 2; ++rank) {
+        const auto received = prefill_workers_[rank].lastStart();
+        ASSERT_EQ(received.routes_size(), 1);
+        for (const auto& layer : received.routes(0).layer_blocks()) {
+            ASSERT_EQ(layer.cache_keys_size(), 1);
+            EXPECT_EQ(layer.cache_keys(0), keys_[2 + rank]);
+        }
+        for (const auto& layer : sent.routes(rank).layer_blocks()) {
+            ASSERT_EQ(layer.cache_keys_size(), 1);
+            EXPECT_EQ(layer.cache_keys(0), keys_[2 + rank]);
+            EXPECT_EQ(layer.block_ids(0), 9 + rank);
+        }
+    }
+    completeAll();
+    ASSERT_TRUE(await([&]() { return context->done() && prefill_->inflightContextCount() == 0; }));
+    EXPECT_TRUE(context->success()) << context->errorInfo().ToString();
+    EXPECT_EQ(allocator_->devicePrefixBlocksForTest({keys_[1], keys_[3]}), 2u);
+}
+
+TEST_F(P2PConnectorWriteSchedulerTest, CompactStateProjectsGlobalKeysToGroupLocalBlocks) {
+    auto group               = config_.topology().groups().front();
+    group.policy             = defaultCacheGroupPolicy(CacheGroupType::SWA);
+    group.spec = test::makeMhaSpec(group.tag, 8, DataType::TYPE_FP16, 1, 2);
+    KVCacheResource resource;
+    resource.initGroups(config_.topologyPtr());
+    resource.setCacheKeys({11, 22, 33, 44, 55, 66});
+    resource.mutableBlockIds(group.tag).assign({7, 8, 9});
+    const std::vector<size_t> positions{3, 5};
+    const auto decode  = LayerCacheBufferUtil::convertLayerTagForRoute(resource, group, 0, positions, 0, 1, 4);
+    const auto prefill = LayerCacheBufferUtil::convertLayerTagForRoute(resource, group, 0, positions, 1, 2, 4);
+    ASSERT_TRUE(decode.ok()) << decode.status().ToString();
+    ASSERT_TRUE(prefill.ok()) << prefill.status().ToString();
+    EXPECT_EQ(decode.value()->blockIdMap(), prefill.value()->blockIdMap());
+    EXPECT_EQ(decode.value()->getBlockId(44), 8);
+    EXPECT_EQ(decode.value()->getBlockId(66), 9);
 }
 
 TEST_F(P2PConnectorWriteSchedulerTest, LastSampleAndMtpAcceptanceDoNotOverstateReadyKv) {

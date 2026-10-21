@@ -171,7 +171,6 @@ protected:
     ErrorInfo populateMatchedBlocks(const BlockTreeMatchResult& match_result, KVCacheResource& resource) const;
     void      releaseMatchedBlockReferences(const BlockTreeMatchResult& match_result) const;
     ErrorInfo mallocAndBindLoadTargets(KVCacheResource&  resource,
-                                       int               target_seq_len,
                                        bool              enable_reuse_cache,
                                        LoadAsyncContext* load_context) const;
     // Which capacity snapshots evaluateInitCapacity() is allowed to consult.

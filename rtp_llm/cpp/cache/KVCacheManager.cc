@@ -1142,15 +1142,16 @@ bool KVCacheManager::initP2PConnector() {
                      cache_store_config_.cache_store_rdma_mode ? 1 : 0,
                      pd_sep_config_.cache_store_listen_port);
 
+    const auto active_topology = config_.activeModelTopologyPtr();
     auto p2p_config = P2PConnectorConfig::create(runtime_config_,
                                                  cache_store_config_,
                                                  parallelism_config_,
                                                  pd_sep_config_,
-                                                 static_cast<uint32_t>(config_.layer_all_num()),
+                                                 static_cast<uint32_t>(active_topology->layers().size()),
                                                  config_.use_mla || config_.is_sparse,
                                                  config_.totalGroupBlockSizeBytes());
-    p2p_config.scheduler_config.topology = config_.topologyPtr();
-    p2p_config.worker_config.topology    = config_.topologyPtr();
+    p2p_config.scheduler_config.topology = active_topology;
+    p2p_config.worker_config.topology    = active_topology;
     p2p_config.scheduler_config.cache_key_tokens_per_block = config_.seq_size_per_block;
     p2p_config.worker_config.cache_key_tokens_per_block    = config_.seq_size_per_block;
     const int cp_size = parallelism_config_.prefill_cp_config.kv_cache_sharded ?
@@ -1223,8 +1224,7 @@ void KVCacheManager::handleRead(const P2PConnectorStartLoadRequestPB& request,
 
 bool KVCacheManager::writebackEnabled() const {
     return cache_store_config_.p2p_writeback_enable && pd_sep_config_.role_type == RoleType::DECODE && p2p_connector_
-           && !parallelism_config_.prefill_cp_config.is_enabled()
-           && !parallelism_config_.prefill_cp_config.kv_cache_sharded;
+           && (!parallelism_config_.prefill_cp_config.kv_cache_sharded || parallelism_config_.tp_size == 1);
 }
 
 std::shared_ptr<AsyncContext> KVCacheManager::asyncWriteBack(const BatchKVCacheResourcePtr& resource,
@@ -1233,7 +1233,11 @@ std::shared_ptr<AsyncContext> KVCacheManager::asyncWriteBack(const BatchKVCacheR
                                                            int kv_ready_token_count,
                                                            const Meta& meta) noexcept {
     try {
-        const auto skip = [this](const char* reason) -> std::shared_ptr<AsyncContext> {
+        const auto skip = [this, input_length, kv_ready_token_count](const char* reason) -> std::shared_ptr<AsyncContext> {
+            RTP_LLM_LOG_DEBUG("writeback skipped: reason=%s input_length=%d kv_ready_token_count=%d",
+                              reason,
+                              input_length,
+                              kv_ready_token_count);
             if (metrics_reporter_) {
                 WriteSchedulerMetricsCollector metrics;
                 metrics.skip_reason = reason;
@@ -1246,8 +1250,7 @@ std::shared_ptr<AsyncContext> KVCacheManager::asyncWriteBack(const BatchKVCacheR
         }
         const auto routing = meta.p2pRouting();
         if (!routing || routing->unique_key.empty() || routing->prefill_addr.first.empty()
-            || routing->prefill_addr.second == 0 || routing->prefill_tp_size != parallelism_config_.tp_size
-            || routing->prefill_cp_size != 1) {
+            || routing->prefill_addr.second == 0 || routing->prefill_tp_size <= 0 || routing->prefill_cp_size <= 0) {
             return skip("invalid_routing");
         }
         if (!resource || !tokens || resource->batchSize() != 1 || kv_ready_token_count < input_length
@@ -1255,12 +1258,11 @@ std::shared_ptr<AsyncContext> KVCacheManager::asyncWriteBack(const BatchKVCacheR
             return skip("invalid_snapshot");
         }
         const auto& source = resource->cacheResource(0);
-        const size_t blocks = std::min(source.cacheKeys().size(),
-                                       static_cast<size_t>(kv_ready_token_count / config_.seq_size_per_block));
+        const size_t blocks = kv_ready_token_count / config_.seq_size_per_block;
         if (blocks <= static_cast<size_t>(input_length / config_.seq_size_per_block)) {
             return skip("no_complete_suffix");
         }
-        CacheKeysType keys(source.cacheKeys().begin(), source.cacheKeys().begin() + blocks);
+        auto keys = calculateCacheKeys(tokens->data(0), blocks * config_.seq_size_per_block, config_.seq_size_per_block);
         // Preserve logical positions, including sparse holes, while holding only physical blocks.
         const auto         groups = coordinator_manager_->cacheGroups();
         KVCacheResourcePtr hold(new KVCacheResource, [groups](KVCacheResource* resource) {
@@ -1273,7 +1275,8 @@ std::shared_ptr<AsyncContext> KVCacheManager::asyncWriteBack(const BatchKVCacheR
         hold->setCacheKeys(keys);
         for (const auto& group : groups) {
             auto block_ids = source.blocks(group->tag());
-            block_ids.resize(blocks, NULL_BLOCK_IDX);
+            const size_t group_blocks = blocks * config_.seq_size_per_block / group->seqSizePerBlock();
+            block_ids.resize(group_blocks, NULL_BLOCK_IDX);
             group->reference(hold->mutableBlockIds(group->tag()), block_ids);
         }
         hold->setLastBlockAligned(true);

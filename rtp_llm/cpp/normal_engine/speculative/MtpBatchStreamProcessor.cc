@@ -1054,7 +1054,7 @@ void MtpBatchStreamProcessor::prepareDecodeDraftModelInput(const StreamGroups& s
         std::vector<torch::Tensor> sequence_lengths_gpu;
         propose_slices_gpu.reserve(batch_size);
         sequence_lengths_gpu.reserve(batch_size);
-        if (!all_streams.empty()
+        if (useMtpDeviceState() && !all_streams.empty()
             && collectMtpStateProposeSlices(all_streams, propose_slices_gpu, &sequence_lengths_gpu)) {
             auto combo_tokens_gpu         = torch::cat(propose_slices_gpu, 0).to(torch::kInt32);
             model_input.combo_tokens      = std::move(combo_tokens_gpu);
@@ -1799,7 +1799,7 @@ void MtpBatchStreamProcessor::gatherHiddenStates(const StreamGroups& stream_grou
     // or first-step streams without published device state.
     auto pick_hidden_states = [](const GenerateStreamPtr& stream) -> torch::Tensor {
         auto dev = stream->getLastHiddenStatesGpu();
-        if (dev.defined()) {
+        if (useMtpDeviceState() && dev.defined()) {
             return dev;
         }
         return stream->getSPOutputBuffer()->hidden_states;
