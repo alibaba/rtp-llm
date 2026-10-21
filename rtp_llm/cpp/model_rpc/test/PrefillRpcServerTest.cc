@@ -7,6 +7,7 @@
 
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/RemoteRpcServiceImpl.h"
+#include "rtp_llm/cpp/model_rpc/PDRequestUtils.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 
 namespace rtp_llm {
@@ -87,6 +88,54 @@ TEST(PrefillRpcServerTest, StartLoadRejectsMissingEngine) {
     EXPECT_EQ(error.code(), ErrorCode::P2P_CONNECTOR_TRANSFER_NOT_INITIALIZED);
     EXPECT_NE(error.ToString().find("stage=StartLoad"), std::string::npos);
     EXPECT_NE(error.ToString().find("engine is null"), std::string::npos);
+}
+
+TEST(PrefillRpcServerTest, BatchDuplicateIdsRejectEveryItemWithoutChangingExistingAdmission) {
+    PrefillRpcServer server;
+    const auto active_key = masterEnqueuedHandoffUniqueKey(987);
+    server.batch_entries_[active_key].reserved = true;
+    EnqueueBatchRequestPB request;
+    request.set_batch_id(123);
+    auto* slot = request.add_dp_slots();
+    slot->set_dp_rank(0);
+    for (const int64_t id : {987, 988, 987}) {
+        slot->add_requests()->mutable_input()->set_request_id(id);
+    }
+    grpc::ServerContext context;
+    EnqueueBatchResponsePB response;
+    ASSERT_TRUE(server.EnqueueBatch(&context, &request, &response).ok());
+    EXPECT_EQ(response.batch_id(), 123);
+    EXPECT_EQ(response.successes_size(), 0);
+    ASSERT_EQ(response.errors_size(), 3);
+    for (int i = 0; i < response.errors_size(); ++i) {
+        EXPECT_EQ(response.errors(i).request_id(), slot->requests(i).input().request_id());
+        EXPECT_EQ(response.errors(i).error_info().error_code(), static_cast<int64_t>(ErrorCode::INVALID_PARAMS));
+    }
+    ASSERT_EQ(server.batch_entries_.size(), 1u);
+    EXPECT_TRUE(server.batch_entries_.at(active_key).reserved);
+    EXPECT_EQ(server.onflight_requests_.load(), 0u);
+}
+
+TEST(PrefillRpcServerTest, BatchMissingInputAndWrongDpRankReturnPerItemErrorsBeforeEngineAccess) {
+    PrefillRpcServer server;
+    EnqueueBatchRequestPB request;
+    request.set_batch_id(124);
+    auto* slot = request.add_dp_slots();
+    slot->set_dp_rank(1);
+    slot->add_requests();
+    slot->add_requests()->mutable_input()->set_request_id(989);
+    grpc::ServerContext context;
+    EnqueueBatchResponsePB response;
+    ASSERT_TRUE(server.EnqueueBatch(&context, &request, &response).ok());
+    EXPECT_EQ(response.successes_size(), 0);
+    ASSERT_EQ(response.errors_size(), 2);
+    EXPECT_EQ(response.errors(0).request_id(), 0);
+    EXPECT_EQ(response.errors(1).request_id(), 989);
+    for (const auto& error : response.errors()) {
+        EXPECT_EQ(error.error_info().error_code(), static_cast<int64_t>(ErrorCode::INVALID_PARAMS));
+    }
+    EXPECT_TRUE(server.batch_entries_.empty());
+    EXPECT_EQ(server.onflight_requests_.load(), 0u);
 }
 
 TEST(PrefillRpcServerTest, BatchConversionExceptionReleasesReservationForRetry) {
