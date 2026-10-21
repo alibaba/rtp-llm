@@ -54,7 +54,7 @@ class EngineSyncRunnerTest {
         EngineSyncRunner runner = new EngineSyncRunner(modelName, directory, workerAddressService,
                 health, cache, health, engineHealthReporter, engineGrpcService, RoleType.PREFILL,
                 localKvCacheAwareManager, syncRequestTimeoutMs, syncCount.longValue(),
-                syncEngineStatusInterval, false, STATUS_STALE_AFTER_US, 60_000_000L);
+                syncEngineStatusInterval, false);
         runner.run();
         verify(health).submit(any(GrpcWorkerStatusRunner.class));
         verify(health, never()).submit(any(GrpcCacheStatusCheckRunner.class));
@@ -112,9 +112,7 @@ class EngineSyncRunnerTest {
                 syncRequestTimeoutMs,
                 syncCount.longValue(),
                 syncEngineStatusInterval,
-                false,
-                STATUS_STALE_AFTER_US, 60_000_000L
-        );
+                false);
     }
 
     @Test
@@ -140,9 +138,7 @@ class EngineSyncRunnerTest {
                 syncRequestTimeoutMs,
                 syncCount.longValue(),
                 syncEngineStatusInterval,
-                false,
-                STATUS_STALE_AFTER_US, 60_000_000L
-        );
+                false);
 
         // Execute
         runnerWithEmptyDirectory.run();
@@ -152,7 +148,7 @@ class EngineSyncRunnerTest {
     }
 
     @Test
-    void should_start_new_worker_expiration_window_at_discovery_time() {
+    void discoveryDoesNotInventASuccessfulWorkerResponse() {
         String ipPort = "127.0.0.1:8080";
         Mockito.when(workerAddressService.getEngineWorkerList(modelName, RoleType.VIT))
                 .thenReturn(List.of(WorkerHost.of("127.0.0.1", 8080)));
@@ -162,12 +158,12 @@ class EngineSyncRunnerTest {
                 localKvCacheAwareManager,
 
                 syncRequestTimeoutMs, syncCount.longValue(),
-                syncEngineStatusInterval, false, STATUS_STALE_AFTER_US, 60_000_000L);
+                syncEngineStatusInterval, false);
 
         runner.run();
 
-        assertTrue(workerDirectory.statusSnapshot(RoleType.VIT).get(ipPort)
-                .pollHealth().lastSuccessfulPollUs() > 0);
+        assertEquals(0L, workerDirectory.statusSnapshot(RoleType.VIT).get(ipPort)
+                .pollHealth().lastSuccessfulPollUs());
     }
 
     @Test
@@ -178,7 +174,7 @@ class EngineSyncRunnerTest {
                 modelName, workerDirectory, workerAddressService, statusCheckExecutor, statusCheckExecutor, statusCheckExecutor,
                 engineHealthReporter, engineGrpcService, roleType, localKvCacheAwareManager,
                 syncRequestTimeoutMs, cycles.longValue(),
-                syncEngineStatusInterval, false, STATUS_STALE_AFTER_US, 60_000_000L);
+                syncEngineStatusInterval, false);
         cycles.increment();
         when(workerAddressService.getEngineWorkerList(modelName, roleType))
                 .thenReturn(List.of(WorkerHost.of("127.0.0.1", 8080)));
@@ -215,7 +211,7 @@ class EngineSyncRunnerTest {
                 statusCheckExecutor, statusCheckExecutor, statusCheckExecutor, engineHealthReporter, engineGrpcService,
                 RoleType.PREFILL, localKvCacheAwareManager,
                 syncRequestTimeoutMs, syncCount.longValue(),
-                syncEngineStatusInterval, false, STATUS_STALE_AFTER_US, 60_000_000L);
+                syncEngineStatusInterval, false);
 
         runner.run();
 
@@ -242,8 +238,6 @@ class EngineSyncRunnerTest {
         discover(directory, status);
         RunnerTestSupport.publishEndpoint(
                 registry, RoleType.PREFILL, ipPort, status);
-        Object progress = org.springframework.test.util.ReflectionTestUtils.getField(status, "statusProgress");
-        org.springframework.test.util.ReflectionTestUtils.setField(progress, "health", new WorkerStatus.PollHealth(System.nanoTime()/1000-2_000_000L, 20_000L, 0L, true));
         Mockito.when(workerAddressService.getEngineWorkerList(modelName, RoleType.PREFILL))
                 .thenReturn(List.of());
 
@@ -253,8 +247,7 @@ class EngineSyncRunnerTest {
                 localKvCacheAwareManager,
 
                 syncRequestTimeoutMs, syncCount.longValue(),
-                syncEngineStatusInterval, false,
-                1_000_000L, 60_000_000L);
+                syncEngineStatusInterval, false);
         runner.run();
 
         assertFalse(status.isActiveGeneration());
@@ -286,9 +279,7 @@ class EngineSyncRunnerTest {
                 syncRequestTimeoutMs,
                 syncCount.longValue(),
                 syncEngineStatusInterval,
-                false,
-                STATUS_STALE_AFTER_US, 60_000_000L
-        );
+                false);
         when(workerAddressService.getEngineWorkerList(modelName, RoleType.PREFILL))
                 .thenReturn(List.of(new WorkerHost("127.0.0.1", 61000)));
 
@@ -385,7 +376,7 @@ class EngineSyncRunnerTest {
                 RoleType.PREFILL, localKvCacheAwareManager,
 
                 syncRequestTimeoutMs, syncCount.longValue(), syncEngineStatusInterval,
-                false, STATUS_STALE_AFTER_US, 60_000_000L);
+                false);
     }
 
     private void assertTopologyReplacement(
@@ -399,10 +390,10 @@ class EngineSyncRunnerTest {
         WorkerStatus oldStatus = RunnerTestSupport.discovered(
                 RoleType.PREFILL, oldGroup, "127.0.0.1",
                 61000, 61001, "site-a");
-        assertNotNull(oldStatus.tryBeginStatusPoll(1L));
         discover(directory, oldStatus);
         RunnerTestSupport.publishEndpoint(registry,
                 RoleType.PREFILL, ipPort, oldStatus);
+        assertNotNull(oldStatus.tryBeginStatusPoll(1L));
         WorkerHost replacement = new WorkerHost(
                 "127.0.0.1",
                 61000,
@@ -426,7 +417,7 @@ class EngineSyncRunnerTest {
                 syncRequestTimeoutMs,
                 syncCount.longValue(),
                 syncEngineStatusInterval,
-                false, STATUS_STALE_AFTER_US, 60_000_000L);
+                false);
         try {
             // First discovery pass retires the old topology generation: it
             // detaches the endpoint, marks the status RETIRING, and removes the

@@ -22,6 +22,7 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskPhase;
+import org.flexlb.service.monitor.StatusFailureReporter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
@@ -84,7 +85,7 @@ class PdfusionSchedulingTest {
                         }), new AtomicLong()::incrementAndGet,
                         lifecycle, new DeliveryMetrics(reporter))
                 : new RouteDeliveryStrategy(lifecycle, new DeliveryMetrics(reporter));
-        EndpointRegistry endpoints = new EndpointRegistry(service, new EndpointEventProjector(lifecycle), reporter,
+        EndpointRegistry endpoints = new EndpointRegistry(service, new EndpointEventProjector(lifecycle, mock(StatusFailureReporter.class)), reporter,
                 delivery, availability);
         WorkerStatus worker = org.flexlb.balance.endpoint.WorkerStatusTestFixtures.readyForScheduling(WorkerStatus.createDiscovered(RoleType.PDFUSION, "g1", "127.0.0.1", 8080, 8081, "test"));
         WorkerStatusResponse status = new WorkerStatusResponse();
@@ -99,7 +100,7 @@ class PdfusionSchedulingTest {
         worker.lock.lock();
         try {
             endpoints.publishPreparedEndpoint(worker.getIpPort(), worker,
-                    worker.prepareNewStatus(worker.freezeStatusResponse(status), null));
+                    org.flexlb.testfixture.BranchWorkerStatusTestFixtures.prepare(worker, org.flexlb.testfixture.BranchWorkerStatusTestFixtures.observation(worker, status)));
         } finally {
             worker.lock.unlock();
         }
@@ -140,7 +141,7 @@ class PdfusionSchedulingTest {
             worker.lock.lock();
             try {
                 projection = endpoint.applyPreparedStatus(worker,
-                        worker.prepareNewStatus(worker.freezeStatusResponse(status), null));
+                        org.flexlb.testfixture.BranchWorkerStatusTestFixtures.prepare(worker, org.flexlb.testfixture.BranchWorkerStatusTestFixtures.observation(worker, status)));
             } finally {
                 worker.lock.unlock();
             }

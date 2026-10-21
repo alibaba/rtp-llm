@@ -11,6 +11,7 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.service.monitor.StatusFailureReporter;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
@@ -90,7 +91,7 @@ class DeliverySettlementTest {
     @ValueSource(booleans = {false, true})
     void realDecodeReservationSurvivesRejectionUntilItsOwnFinished(boolean observed) throws Exception {
         var decode = spy(new DecodeEndpoint(WorkerStatus.createDiscovered(
-                RoleType.DECODE, null, "127.0.0.1", 8080, 8081, null), new EndpointEventProjector(registry)));
+                RoleType.DECODE, null, "127.0.0.1", 8080, 8081, null), new EndpointEventProjector(registry, mock(StatusFailureReporter.class))));
         DecodeEndpoint.ReservationHandle reservation;
         try (var pin = decode.tryPinGeneration()) {
             reservation = decode.reserveUnqueued(pin, 2L, 1L, 1L, 50);
@@ -147,11 +148,11 @@ class DeliverySettlementTest {
             Member member = members.get(i);
             member.claim().complete(DeliveryResult.delivered());
             assertTrue(member.item().future().get(5, TimeUnit.SECONDS).isSuccess());
-            new EndpointEventProjector(registry).onPrefillStatus(prefill, RoleType.PREFILL,
+            new EndpointEventProjector(registry, mock(StatusFailureReporter.class)).onPrefillStatus(prefill, RoleType.PREFILL,
                     ledger.finish(20L, member.item()));
             assertOccupancy(i == 15 ? 0 : 1, 15 - i);
         }
-        assertTrue(ledger.prefill.batchAvailability(2).isAvailable());
+        assertTrue(ledger.prefill.batchAvailability(2, org.flexlb.testfixture.BranchWorkerStatusTestFixtures.healthyPrefill()).isAvailable());
     }
 
     @Test
@@ -163,7 +164,7 @@ class DeliverySettlementTest {
             reject(rejected);
             ledger.finish(30L + i, successful.item());
             assertOccupancy(0, 0);
-            assertTrue(ledger.prefill.batchAvailability(1).isAvailable());
+            assertTrue(ledger.prefill.batchAvailability(1, org.flexlb.testfixture.BranchWorkerStatusTestFixtures.healthyPrefill()).isAvailable());
         }
     }
 
@@ -469,7 +470,7 @@ class DeliverySettlementTest {
             claim = member.slot().tryInstallPreemption(110L, 111L, "priority victim");
         }
         assertTrue(claim.applyPhase(PreemptionCancelPhase.CANCEL_IN_FLIGHT));
-        new EndpointEventProjector(registry).onPrefillStatus(prefill, RoleType.PDFUSION,
+        new EndpointEventProjector(registry, mock(StatusFailureReporter.class)).onPrefillStatus(prefill, RoleType.PDFUSION,
                 ledger.finish(110L, member.item()));
         assertFalse(member.item().future().isDone());
         assertTrue(claim.applyPhase(PreemptionCancelPhase.CANCEL_UNKNOWN));

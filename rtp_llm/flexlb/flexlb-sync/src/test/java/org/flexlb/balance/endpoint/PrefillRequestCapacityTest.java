@@ -39,25 +39,25 @@ class PrefillRequestCapacityTest {
         assertNotNull(immediateLease);
         var queuedLease = state.reserveRoute(queued, 10L, 2L).reservation();
         assertNotNull(queuedLease);
-        assertFalse(state.routeAvailability(2L).isAvailable());
+        assertFalse(state.routeAvailability(2L, org.flexlb.testfixture.BranchWorkerStatusTestFixtures.healthyPrefill()).isAvailable());
         assertEquals(PrefillState.CapacityStatus.CAPACITY_FULL, state.reserveRoute(next, 10L, 2L).status());
         assertEquals(PrefillState.CapacityStatus.CAPACITY_FULL, reserve(item(4), 2L).status());
         try (var handoff = commit(immediate, immediateLease)) { }
         immediateLease.close();
-        assertFalse(state.routeAvailability(2L).isAvailable(), "handoff/ACK cannot release inflight work");
+        assertFalse(state.routeAvailability(2L, org.flexlb.testfixture.BranchWorkerStatusTestFixtures.healthyPrefill()).isAvailable(), "handoff/ACK cannot release inflight work");
         assertTrue(state.terminalizeCommittedItem(immediate));
         assertFalse(state.terminalizeCommittedItem(immediate));
-        assertTrue(state.routeAvailability(2L).isAvailable());
+        assertTrue(state.routeAvailability(2L, org.flexlb.testfixture.BranchWorkerStatusTestFixtures.healthyPrefill()).isAvailable());
         var nextLease = state.reserveRoute(next, 10L, 2L).reservation();
         assertNotNull(nextLease);
         queuedLease.close();
         queuedLease.close();
-        assertTrue(state.routeAvailability(2L).isAvailable());
+        assertTrue(state.routeAvailability(2L, org.flexlb.testfixture.BranchWorkerStatusTestFixtures.healthyPrefill()).isAvailable());
         assertEquals(2L, state.observedRequestCount(), "rollback preserves queued ownership");
         try (var retry = state.reserveRoute(queued, 10L, 2L).reservation()) {
             assertNotNull(retry);
             queuedLease.close();
-            assertFalse(state.routeAvailability(2L).isAvailable(), "stale lease cannot release the retry");
+            assertFalse(state.routeAvailability(2L, org.flexlb.testfixture.BranchWorkerStatusTestFixtures.healthyPrefill()).isAvailable(), "stale lease cannot release the retry");
         }
         nextLease.close();
     }
@@ -87,7 +87,7 @@ class PrefillRequestCapacityTest {
             assertEquals(1, leases.size());
             assertEquals(32L, state.observedRequestCount());
             leases.forEach(PrefillState.RouteReservation::close);
-            assertTrue(state.routeAvailability(1L).isAvailable());
+            assertTrue(state.routeAvailability(1L, org.flexlb.testfixture.BranchWorkerStatusTestFixtures.healthyPrefill()).isAvailable());
         } finally {
             leases.forEach(PrefillState.RouteReservation::close);
         }
@@ -144,14 +144,14 @@ class PrefillRequestCapacityTest {
         var generation = new EndpointGenerationLifecycle(() -> { });
         var reservation = state.reserveBatch(first, 10L, 1, generation.tryAcquireHandoff()).reservation();
         try (var handoff = reservation.commit(List.of(first, second), 0L)) { }
-        assertFalse(state.batchAvailability(1).isAvailable());
+        assertFalse(state.batchAvailability(1, org.flexlb.testfixture.BranchWorkerStatusTestFixtures.healthyPrefill()).isAvailable());
         assertTrue(enqueue(item(3), 0L));
         assertTrue(state.terminalizeCommittedItem(first));
         assertEquals(2L, state.observedRequestCount());
-        assertFalse(state.batchAvailability(1).isAvailable());
+        assertFalse(state.batchAvailability(1, org.flexlb.testfixture.BranchWorkerStatusTestFixtures.healthyPrefill()).isAvailable());
         assertTrue(state.terminalizeCommittedItem(second));
         assertEquals(1L, state.observedRequestCount());
-        assertTrue(state.batchAvailability(1).isAvailable());
+        assertTrue(state.batchAvailability(1, org.flexlb.testfixture.BranchWorkerStatusTestFixtures.healthyPrefill()).isAvailable());
     }
 
     @Test

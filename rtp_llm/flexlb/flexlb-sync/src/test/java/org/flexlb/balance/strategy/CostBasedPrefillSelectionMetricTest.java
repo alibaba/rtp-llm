@@ -487,7 +487,7 @@ class CostBasedPrefillSelectionMetricTest {
         response.setRunningTaskInfo(Map.of("1", task));
         status.lock.lock();
         try {
-            endpoint.applyPreparedStatus(status, status.prepareNewStatus(status.freezeStatusResponse(response), null)).run();
+            endpoint.applyPreparedStatus(status, org.flexlb.testfixture.BranchWorkerStatusTestFixtures.prepare(status, org.flexlb.testfixture.BranchWorkerStatusTestFixtures.observation(status, response))).run();
         } finally {
             status.lock.unlock();
         }

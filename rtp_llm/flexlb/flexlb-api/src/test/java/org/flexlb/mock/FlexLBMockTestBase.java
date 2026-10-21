@@ -551,11 +551,11 @@ public abstract class FlexLBMockTestBase {
                 role, dpRank, availableKv, totalKv, 1L);
         status.lock.lock();
         try {
-            WorkerStatus.PreparedStatus prepared = status.prepareNewStatus(
-                    status.freezeStatusResponse(initial), null);
+            WorkerStatus.PreparedStatus prepared = org.flexlb.testfixture.BranchWorkerStatusTestFixtures.prepare(status,
+                    org.flexlb.testfixture.BranchWorkerStatusTestFixtures.observation(status, initial));
             WorkerEndpoint endpoint = endpointRegistry.publishPreparedEndpoint(
                     status.getIpPort(), status, prepared).endpoint();
-            status.recordSuccessfulPoll(true, null);
+            org.flexlb.testfixture.BranchWorkerStatusTestFixtures.receive(status, true, null);
             return endpoint;
         } finally {
             status.lock.unlock();

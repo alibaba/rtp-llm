@@ -1405,7 +1405,7 @@ class PrefillEndpointTest {
         status.lock.lock();
         try {
             response.setStatusVersion(status.appliedStatusCursor().statusVersion());
-            projection = endpoint.observeStatusHeartbeat(status, status.freezeStatusResponse(response));
+            projection = endpoint.observeStatusHeartbeat(status, org.flexlb.testfixture.BranchWorkerStatusTestFixtures.observation(status, response));
         } finally {
             status.lock.unlock();
         }

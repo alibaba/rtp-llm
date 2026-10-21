@@ -20,6 +20,7 @@ import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.service.monitor.StatusFailureReporter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 
@@ -57,7 +58,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
             RequestSchedulerReporter requestReporter) {
         this.lifecycle = new RequestRegistry(
                 configService, batchReporter, requestReporter);
-        this.endpointEvents = new EndpointEventProjector(lifecycle);
+        this.endpointEvents = new EndpointEventProjector(lifecycle, org.mockito.Mockito.mock(StatusFailureReporter.class));
         DispatcherConfig dispatcher = Objects.requireNonNull(
                 configService.loadBalanceConfig().getDispatcher(),
                 "dispatcher");
@@ -146,7 +147,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
             WorkerStatus status, WorkerStatusResponse response) {
         Objects.requireNonNull(status, "status");
         Objects.requireNonNull(response, "response");
-        applyStatus(status, status.freezeStatusResponse(response));
+        applyStatus(status, org.flexlb.testfixture.BranchWorkerStatusTestFixtures.observation(status, response));
     }
 
     /** Apply an immutable protocol observation without a mutable DTO hop. */
@@ -180,7 +181,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                         status, observation);
             } else {
                 WorkerStatus.PreparedStatus prepared =
-                        status.prepareNewStatus(observation, null);
+                        org.flexlb.testfixture.BranchWorkerStatusTestFixtures.prepare(status, observation);
                 projection = endpoint.applyPreparedStatus(status, prepared);
             }
         } finally {

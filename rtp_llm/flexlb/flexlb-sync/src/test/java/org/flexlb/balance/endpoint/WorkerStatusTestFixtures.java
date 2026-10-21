@@ -9,7 +9,7 @@ public final class WorkerStatusTestFixtures {
     public static WorkerStatus readyForScheduling(WorkerStatus worker) {
         worker.lock.lock();
         try {
-            worker.recordSuccessfulPoll(true, null);
+            org.flexlb.testfixture.BranchWorkerStatusTestFixtures.receive(worker, true, null);
             return worker;
         } finally { worker.lock.unlock(); }
     }

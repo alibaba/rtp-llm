@@ -87,10 +87,10 @@ final class StrategyTestSupport {
             WorkerStatus status, WorkerStatusResponse response) {
         status.lock.lock();
         try {
-            WorkerStatus.PreparedStatus prepared = status.prepareNewStatus(
-                    status.freezeStatusResponse(response), null);
+            WorkerStatus.PreparedStatus prepared = org.flexlb.testfixture.BranchWorkerStatusTestFixtures.prepare(status,
+                    org.flexlb.testfixture.BranchWorkerStatusTestFixtures.observation(status, response));
             status.publishPreparedStatus(prepared);
-            status.recordSuccessfulPoll(response.isAlive(), null);
+            org.flexlb.testfixture.BranchWorkerStatusTestFixtures.receive(status, response.isAlive(), null);
         } finally {
             status.lock.unlock();
         }
@@ -118,10 +118,10 @@ final class StrategyTestSupport {
         status.lock.lock();
         try {
             WorkerStatus.PreparedStatus prepared =
-                    status.prepareNewStatus(observation, null);
+                    org.flexlb.testfixture.BranchWorkerStatusTestFixtures.prepare(status, observation);
             WorkerEndpoint endpoint = registry.publishPreparedEndpoint(
                     address, status, prepared).endpoint();
-            status.recordSuccessfulPoll(true, null);
+            org.flexlb.testfixture.BranchWorkerStatusTestFixtures.receive(status, true, null);
             return endpoint;
         } finally {
             status.lock.unlock();

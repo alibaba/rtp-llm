@@ -334,9 +334,9 @@ final class AutoTpmE2EHarness implements AutoCloseable {
         WorkerStatusResponse initial = statusResponse(role, workerStatus(svc, 0L));
         status.lock.lock();
         try {
-            status.recordSuccessfulPoll(initial.isAlive(), null);
-            WorkerStatus.PreparedStatus prepared = status.prepareNewStatus(
-                    status.freezeStatusResponse(initial), null);
+            org.flexlb.testfixture.BranchWorkerStatusTestFixtures.receive(status, initial.isAlive(), null);
+            WorkerStatus.PreparedStatus prepared = org.flexlb.testfixture.BranchWorkerStatusTestFixtures.prepare(status,
+                    org.flexlb.testfixture.BranchWorkerStatusTestFixtures.observation(status, initial));
             endpointRegistry.publishPreparedEndpoint(
                     status.getIpPort(), status, prepared);
         } finally {

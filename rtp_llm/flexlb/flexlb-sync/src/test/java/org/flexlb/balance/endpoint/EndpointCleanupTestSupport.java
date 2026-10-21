@@ -100,8 +100,8 @@ public final class EndpointCleanupTestSupport {
                 assertEquals(((PrefillState.BatchReservation) owner.reservation()).batchId(),
                         work.batches().getFirst().batchId());
                 // Check the actual admission gate, not just the derived batch count.
-                assertFalse(state.batchAvailability(1).isAvailable());
-                assertTrue(state.batchAvailability(2).isAvailable());
+                assertFalse(state.batchAvailability(1, org.flexlb.testfixture.BranchWorkerStatusTestFixtures.healthyPrefill()).isAvailable());
+                assertTrue(state.batchAvailability(2, org.flexlb.testfixture.BranchWorkerStatusTestFixtures.healthyPrefill()).isAvailable());
             } else {
                 assertTrue(work.batches().isEmpty());
                 assertEquals(List.of(owner.item().requestId()), work.requests().stream()
@@ -121,7 +121,7 @@ public final class EndpointCleanupTestSupport {
             assertTrue(state.committedSnapshot().requests().isEmpty());
             assertTrue(state.committedSnapshot().batches().isEmpty());
             assertEquals(0L, state.committedSnapshot().totalRemainingWorkMs().orElseThrow());
-            assertTrue(state.batchAvailability(1).isAvailable());
+            assertTrue(state.batchAvailability(1, org.flexlb.testfixture.BranchWorkerStatusTestFixtures.healthyPrefill()).isAvailable());
         }
     }
 }

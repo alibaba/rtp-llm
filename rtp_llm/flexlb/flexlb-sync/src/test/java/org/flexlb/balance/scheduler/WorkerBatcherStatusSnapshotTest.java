@@ -85,8 +85,8 @@ class WorkerBatcherStatusSnapshotTest {
             WorkerStatus status, WorkerStatusResponse response) {
         status.lock.lock();
         try {
-            status.publishPreparedStatus(status.prepareNewStatus(
-                    status.freezeStatusResponse(response), null));
+            status.publishPreparedStatus(org.flexlb.testfixture.BranchWorkerStatusTestFixtures.prepare(status,
+                    org.flexlb.testfixture.BranchWorkerStatusTestFixtures.observation(status, response)));
         } finally {
             status.lock.unlock();
         }

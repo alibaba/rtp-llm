@@ -238,8 +238,8 @@ class WorkerEndpointTest {
         WorkerStatus.PreparedStatus prepared;
         status.lock.lock();
         try {
-            prepared = status.prepareNewStatus(
-                    status.freezeStatusResponse(resp), null);
+            prepared = org.flexlb.testfixture.BranchWorkerStatusTestFixtures.prepare(status,
+                    org.flexlb.testfixture.BranchWorkerStatusTestFixtures.observation(status, resp));
         } finally {
             status.lock.unlock();
         }
@@ -252,7 +252,7 @@ class WorkerEndpointTest {
         status.lock.lock();
         try {
             status.publishPreparedStatus(prepared);
-            status.recordSuccessfulPoll(true, null);
+            org.flexlb.testfixture.BranchWorkerStatusTestFixtures.receive(status, true, null);
         } finally {
             status.lock.unlock();
         }
@@ -277,7 +277,7 @@ class WorkerEndpointTest {
         WorkerStatus.CommittedWorkerStatus before =
                 status.committedWorkerStatus();
         assertThrows(NullPointerException.class,
-                () -> status.freezeStatusResponse(null));
+                () -> org.flexlb.testfixture.BranchWorkerStatusTestFixtures.observation(status, null));
         assertSame(before, status.committedWorkerStatus());
     }
 
@@ -294,8 +294,8 @@ class WorkerEndpointTest {
                 8082, 8083, "site-a");
         newStatus.lock.lock();
         try {
-            WorkerStatus.PreparedStatus prepared = newStatus.prepareNewStatus(
-                    newStatus.freezeStatusResponse(resp), null);
+            WorkerStatus.PreparedStatus prepared = org.flexlb.testfixture.BranchWorkerStatusTestFixtures.prepare(newStatus,
+                    org.flexlb.testfixture.BranchWorkerStatusTestFixtures.observation(newStatus, resp));
             assertThrows(IllegalArgumentException.class,
                     () -> endpoint.applyPreparedStatus(newStatus, prepared));
         } finally {

@@ -352,8 +352,7 @@ class PrefillStateSnapshotTest {
         response.setRole(RoleType.PREFILL);
         response.setFinishedTaskInfo(finished);
         response.setRunningTaskInfo(active);
-        var observation = EndpointTestSupport.workerStatus(RoleType.PREFILL, "127.0.0.1", 8080, 8090)
-                .freezeStatusResponse(response);
+        var observation = org.flexlb.testfixture.BranchWorkerStatusTestFixtures.observation(EndpointTestSupport.workerStatus(RoleType.PREFILL, "127.0.0.1", 8080, 8090), response);
         var outcome = state.reconcileWorkerStatus(observation,
                 repredictor, () -> { }, () -> { });
         assertNull(outcome.publicationFailure());

@@ -21,6 +21,13 @@
         <dependency>
             <groupId>org.flexlb</groupId>
             <artifactId>flexlb-common</artifactId>
+            <version>${project.version}</version>
+            <type>test-jar</type>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.flexlb</groupId>
+            <artifactId>flexlb-common</artifactId>
         </dependency>
         <dependency>
             <groupId>org.flexlb</groupId>
@@ -29,6 +36,10 @@
         <dependency>
             <groupId>org.flexlb</groupId>
             <artifactId>flexlb-grpc</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.grpc</groupId>
+            <artifactId>grpc-api</artifactId>
         </dependency>
         <dependency>
             <groupId>com.github.ben-manes.caffeine</groupId>

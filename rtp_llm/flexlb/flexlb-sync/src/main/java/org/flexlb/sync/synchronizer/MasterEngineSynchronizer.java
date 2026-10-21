@@ -177,9 +177,7 @@ public final class MasterEngineSynchronizer {
 
                         syncRequestTimeoutMs, syncCycleId, syncEngineStatusInterval,
                         flexlbConfig.getWorkerRegistry().getCacheStatus()
-                                .isFullSnapshotDebugMode(),
-                        statusStaleAfterUs,
-                        flexlbConfig.getWorkerRegistry().getHealth().getStatusCommitGraceMs() * 1000L
+                                .isFullSnapshotDebugMode()
                 );
                 engineSyncExecutor.submit(() -> {
                     activeSyncs.put(runner.trace(), roleType);

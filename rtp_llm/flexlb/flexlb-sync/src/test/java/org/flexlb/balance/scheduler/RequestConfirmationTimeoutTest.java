@@ -16,6 +16,7 @@ import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.service.monitor.StatusFailureReporter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -53,7 +54,7 @@ class RequestConfirmationTimeoutTest {
         var reporter = mock(BatchSchedulerReporter.class);
         var requestReporter = mock(RequestSchedulerReporter.class);
         var requests = new RequestRegistry(service, reporter, requestReporter);
-        var projector = new EndpointEventProjector(requests);
+        var projector = new EndpointEventProjector(requests, mock(StatusFailureReporter.class));
         var endpoints = new EndpointRegistry(service, projector, reporter,
                 new RouteDeliveryStrategy(requests, new DeliveryMetrics(reporter)), new PlacementAvailability());
         var runtime = new SchedulerRuntime(requests, endpoints, reporter, requestReporter);
@@ -64,8 +65,8 @@ class RequestConfirmationTimeoutTest {
             prefillWorker.lock.lock();
             try {
                 prefill = (PrefillEndpoint) endpoints.publishPreparedEndpoint(prefillWorker.getIpPort(),
-                        prefillWorker, prefillWorker.prepareNewStatus(
-                                prefillWorker.freezeStatusResponse(status(RoleType.PREFILL)), null)).endpoint();
+                        prefillWorker, org.flexlb.testfixture.BranchWorkerStatusTestFixtures.prepare(prefillWorker,
+                                org.flexlb.testfixture.BranchWorkerStatusTestFixtures.observation(prefillWorker, status(RoleType.PREFILL)))).endpoint();
             } finally {
                 prefillWorker.lock.unlock();
             }
@@ -197,7 +198,7 @@ class RequestConfirmationTimeoutTest {
         worker.lock.lock();
         try {
             projection = endpoint.applyPreparedStatus(worker,
-                    worker.prepareNewStatus(worker.freezeStatusResponse(response), null));
+                    org.flexlb.testfixture.BranchWorkerStatusTestFixtures.prepare(worker, org.flexlb.testfixture.BranchWorkerStatusTestFixtures.observation(worker, response)));
         } finally {
             worker.lock.unlock();
         }

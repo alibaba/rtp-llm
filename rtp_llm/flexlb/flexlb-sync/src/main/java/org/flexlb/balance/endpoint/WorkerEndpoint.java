@@ -131,7 +131,7 @@ public class WorkerEndpoint {
      */
     /** New scheduling admissions require a fresh applied snapshot. */
     public final GenerationPin tryPinSchedulingGeneration() {
-        return hasFreshSchedulingStatus() ? tryPinGeneration() : null;
+        return hasAvailableSchedulingStatus() ? tryPinGeneration() : null;
     }
 
     public final GenerationPin tryPinGeneration() {
@@ -145,8 +145,8 @@ public class WorkerEndpoint {
                         permit);
     }
 
-    protected final boolean hasFreshSchedulingStatus() {
-        return status.isSchedulingStatusFresh(System.nanoTime()/1000);
+    protected final boolean hasAvailableSchedulingStatus() {
+        return status.isAvailableForScheduling();
     }
 
     /** Validate an exact, still-open pin before consuming its admission right. */

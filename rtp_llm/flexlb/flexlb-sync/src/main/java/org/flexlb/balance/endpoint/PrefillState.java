@@ -867,14 +867,14 @@ public final class PrefillState {
         }
     }
 
-    public CapacityBoundary.Availability batchAvailability(int maximum) {
+    public CapacityBoundary.Availability batchAvailability(int maximum, WorkerStatus workerStatus) {
         requirePositiveBatchLimit(maximum);
-        return new CapacityAvailability(maximum, false);
+        return new CapacityAvailability(maximum, workerStatus, false);
     }
 
-    public CapacityBoundary.Availability routeAvailability(long maximum) {
+    public CapacityBoundary.Availability routeAvailability(long maximum, WorkerStatus workerStatus) {
         requireNonNegativeRouteLimit(maximum);
-        return new CapacityAvailability(maximum, true);
+        return new CapacityAvailability(maximum, workerStatus, true);
     }
 
     private static void requireNonNegativeRouteLimit(long maximum) {
@@ -904,16 +904,19 @@ public final class PrefillState {
             implements CapacityBoundary.Availability {
         private final long maximum;
         private final boolean route;
+        private final WorkerStatus workerStatus;
         private Runnable subscribed;
 
-        private CapacityAvailability(long maximum, boolean route) {
+        private CapacityAvailability(long maximum, WorkerStatus workerStatus, boolean route) {
             this.maximum = maximum;
             this.route = route;
+            this.workerStatus = Objects.requireNonNull(workerStatus, "workerStatus");
         }
 
         @Override
         public boolean isAvailable() {
-            return route ? canDispatchRoute(maximum) : batchCapacityAvailable((int) maximum);
+            return workerStatus.isAvailableForScheduling()
+                    && (route ? canDispatchRoute(maximum) : batchCapacityAvailable((int) maximum));
         }
 
         @Override

@@ -21,6 +21,7 @@ import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.service.monitor.StatusFailureReporter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 
@@ -55,7 +56,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                 prepareBatchSubmission, "prepareBatchSubmission");
         this.lifecycle = new RequestRegistry(
                 configService, batchReporter, requestReporter);
-        this.endpointEvents = new EndpointEventProjector(lifecycle);
+        this.endpointEvents = new EndpointEventProjector(lifecycle, org.mockito.Mockito.mock(StatusFailureReporter.class));
         AtomicLong batchIds = new AtomicLong();
         DeliveryMetrics deliveryMetrics = new DeliveryMetrics(batchReporter);
         DeliveryStrategy delivery = configService.loadBalanceConfig().getDispatcher().requiresGenerateInput()
@@ -171,13 +172,13 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                                 + committedVersion + ", response=" + responseVersion);
             }
             WorkerStatus.StatusObservation observation =
-                    status.freezeStatusResponse(response);
-            status.recordSuccessfulPoll(response.isAlive(), null);
+                    org.flexlb.testfixture.BranchWorkerStatusTestFixtures.observation(status, response);
+            org.flexlb.testfixture.BranchWorkerStatusTestFixtures.receive(status, response.isAlive(), null);
             if (responseVersion == committedVersion) {
                 projection = endpoint.observeStatusHeartbeat(status, observation);
             } else {
                 WorkerStatus.PreparedStatus prepared =
-                        status.prepareNewStatus(observation, null);
+                        org.flexlb.testfixture.BranchWorkerStatusTestFixtures.prepare(status, observation);
                 projection = endpoint.applyPreparedStatus(status, prepared);
             }
         } finally {

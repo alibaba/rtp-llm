@@ -184,7 +184,7 @@ class DecodeStateTest {
         response.setLatestFinishedVersion(status.appliedStatusCursor().latestFinishedTaskVersion() + 1);
         status.lock.lock();
         try {
-            return state.calibrate(status.prepareNewStatus(status.freezeStatusResponse(response), null));
+            return state.calibrate(org.flexlb.testfixture.BranchWorkerStatusTestFixtures.prepare(status, org.flexlb.testfixture.BranchWorkerStatusTestFixtures.observation(status, response)));
         } finally {
             status.lock.unlock();
         }

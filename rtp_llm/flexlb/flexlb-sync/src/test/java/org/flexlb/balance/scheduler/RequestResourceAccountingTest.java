@@ -16,6 +16,7 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskPhase;
+import org.flexlb.service.monitor.StatusFailureReporter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.Test;
@@ -261,7 +262,7 @@ class RequestResourceAccountingTest {
             var reporter = mock(BatchSchedulerReporter.class);
             var requestReporter = mock(RequestSchedulerReporter.class);
             requests = new RequestRegistry(service, reporter, requestReporter);
-            var projector = new EndpointEventProjector(requests);
+            var projector = new EndpointEventProjector(requests, mock(StatusFailureReporter.class));
             var endpoints = new EndpointRegistry(service, projector, reporter,
                     new RouteDeliveryStrategy(requests, new DeliveryMetrics(reporter)), new PlacementAvailability());
             runtime = new SchedulerRuntime(requests, endpoints, reporter, requestReporter);
@@ -269,7 +270,7 @@ class RequestResourceAccountingTest {
             worker.lock.lock();
             try {
                 prefill = (PrefillEndpoint) endpoints.publishPreparedEndpoint(worker.getIpPort(), worker,
-                        worker.prepareNewStatus(worker.freezeStatusResponse(status(RoleType.PREFILL, 1, Map.of(), Map.of(), TOTAL_KV)), null)).endpoint();
+                        org.flexlb.testfixture.BranchWorkerStatusTestFixtures.prepare(worker, org.flexlb.testfixture.BranchWorkerStatusTestFixtures.observation(worker, status(RoleType.PREFILL, 1, Map.of(), Map.of(), TOTAL_KV)))).endpoint();
             } finally { worker.lock.unlock(); }
             decode = new DecodeEndpoint(org.flexlb.balance.endpoint.WorkerStatusTestFixtures.readyForScheduling(WorkerStatus.createDiscovered(RoleType.DECODE, "g", "127.0.0.2", 8080, 8081, "test")), projector);
             decodeStatus(Map.of(), Map.of(), TOTAL_KV);
@@ -409,7 +410,7 @@ class RequestResourceAccountingTest {
         var worker = endpoint.getStatus();
         Runnable projection;
         worker.lock.lock();
-        try { projection = endpoint.applyPreparedStatus(worker, worker.prepareNewStatus(worker.freezeStatusResponse(response), null)); }
+        try { projection = endpoint.applyPreparedStatus(worker, org.flexlb.testfixture.BranchWorkerStatusTestFixtures.prepare(worker, org.flexlb.testfixture.BranchWorkerStatusTestFixtures.observation(worker, response))); }
         finally { worker.lock.unlock(); }
         projection.run();
     }
