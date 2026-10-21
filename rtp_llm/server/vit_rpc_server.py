@@ -78,7 +78,7 @@ def trans_input(mutlimodal_inputs_pb: MultimodalInputsPB):
 
 
 def trans_output(
-    res: MMEmbeddingRes, metadata_only=False, rdma_encoder=None, require_rdma=False
+    res: MMEmbeddingRes, metadata_only=False, rdma_encoder=None, require_rdma=False, feature_hash_fn=None
 ):
     output_pb = MultimodalOutputsPB()
     handles = []
@@ -88,7 +88,7 @@ def trans_output(
         for i, embedding in enumerate(res.embeddings):
             if metadata_only:
                 output_pb.multimodal_outputs.add(
-                    token_ids=get_multimodal_feature_hash(embedding).tolist()
+                    token_ids=(feature_hash_fn or get_multimodal_feature_hash)(embedding).tolist()
                 )
                 continue
             output = output_pb.multimodal_outputs.add()
@@ -116,8 +116,9 @@ def trans_output(
 
 
 class MultimodalRpcServer(MultimodalRpcServiceServicer):
-    def __init__(self, mm_process_engine: MMProcessEngine, rdma_encoder=None):
+    def __init__(self, mm_process_engine: MMProcessEngine, rdma_encoder=None, feature_hash_fn=None):
         self.engine = mm_process_engine
+        self._feature_hash_fn = feature_hash_fn
         self._status_lock = threading.Lock()
         self._active = 0
         self._active_bytes = 0
@@ -222,7 +223,7 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
                 cancelled,
             )
             self.engine._check_request(deadline, cancelled)
-            computed = trans_output(res, metadata_only=True)
+            computed = trans_output(res, metadata_only=True, feature_hash_fn=self._feature_hash_fn)
             self.engine._check_request(deadline, cancelled)
             for i, item in zip(missing, computed.multimodal_outputs):
                 # A compact CPU copy owns no embedding or RDMA slot references.

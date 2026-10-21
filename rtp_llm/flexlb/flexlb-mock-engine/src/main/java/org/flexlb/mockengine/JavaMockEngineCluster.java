@@ -559,6 +559,7 @@ public final class JavaMockEngineCluster {
     }
 
     static final class FastRpcService extends RpcServiceGrpc.RpcServiceImplBase {
+        private final LegacyMockVitClient vitClient = new LegacyMockVitClient();
         /** Bound for the per-engine request_lifecycle map (Python _prune_lifecycle cap). */
         private static final int LIFECYCLE_CAP = 10_000;
         /** Bound for the cancelled_rids history exposed in the Python snapshot schema. */
@@ -1039,6 +1040,15 @@ public final class JavaMockEngineCluster {
         @Override
         public void enqueueBatch(EngineRpcService.EnqueueBatchRequestPB request,
                                  StreamObserver<EngineRpcService.EnqueueBatchResponsePB> observer) {
+            if (roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL
+                    && request.getDpSlotsList().stream().flatMap(slot -> slot.getRequestsList().stream())
+                    .anyMatch(item -> LegacyMockVitClient.hasImages(item.getInput()))) {
+                vitClient.execute(() -> enqueueBatchWithVit(request, observer), observer);
+            } else enqueueBatchWithVit(request, observer);
+        }
+
+        private void enqueueBatchWithVit(EngineRpcService.EnqueueBatchRequestPB request,
+                                 StreamObserver<EngineRpcService.EnqueueBatchResponsePB> observer) {
             stats.enqueueRpcs.increment();
             rpcEnqueueBatch.incrementAndGet();
             EngineRpcService.EnqueueBatchResponsePB.Builder response =
@@ -1177,7 +1187,17 @@ public final class JavaMockEngineCluster {
                             requestStates.put(requestId, "rejected");
                             continue;
                         }
-                        MockPerformanceModel.RequestShape shape = performance.shape(input.getInput(), cache);
+                        EngineRpcService.GenerateInputPB prepared = input.getInput();
+                        if (roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL) {
+                            try { prepared = vitClient.prepare(prepared); }
+                            catch (RuntimeException error) {
+                                response.addErrorsBuilder().setRequestId(requestId).setErrorInfo(
+                                        EngineRpcService.ErrorDetailsPB.newBuilder().setErrorCode(io.grpc.Status.fromThrowable(error).getCode().value()).setErrorMessage(error.getMessage()));
+                                requestStates.put(requestId, "rejected");
+                                continue;
+                            }
+                        }
+                        MockPerformanceModel.RequestShape shape = performance.shape(prepared, cache);
                         // Key-level cache-hit accounting at the admission hit
                         // computation point (recorded whether or not the request
                         // later admits — a rejected request still observed the
@@ -1533,6 +1553,13 @@ public final class JavaMockEngineCluster {
         @Override
         public void generateStreamCall(EngineRpcService.GenerateInputPB request,
                 StreamObserver<EngineRpcService.GenerateOutputsPB> observer) {
+            if (roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL && LegacyMockVitClient.hasImages(request)) {
+                vitClient.execute(() -> generateStreamWithVit(request, observer), observer);
+            } else generateStreamWithVit(request, observer);
+        }
+
+        private void generateStreamWithVit(EngineRpcService.GenerateInputPB request,
+                StreamObserver<EngineRpcService.GenerateOutputsPB> observer) {
             stats.generateStreamRpcs.increment();
             rpcGenerateStream.incrementAndGet();
             // Per-RPC gRPC context, captured on the handler thread (the only
@@ -1563,7 +1590,12 @@ public final class JavaMockEngineCluster {
             }
 
             long requestId = request.getRequestId();
-            MockPerformanceModel.RequestShape shape = performance.shape(request, cache);
+            EngineRpcService.GenerateInputPB prepared = request;
+            if (roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL) {
+                try { prepared = vitClient.prepare(request); }
+                catch (RuntimeException error) { observer.onError(error); return; }
+            }
+            MockPerformanceModel.RequestShape shape = performance.shape(prepared, cache);
             // Key-level cache-hit accounting (direct path, same admission hit
             // computation point as the enqueue-batch path above).
             cacheKeyHits.add(shape.hitBlocks());
@@ -4732,6 +4764,7 @@ public final class JavaMockEngineCluster {
          * Shut down the dedicated response-polling executor.
          */
         void shutdown() {
+            vitClient.close();
             responseExecutor.shutdownNow();
         }
 

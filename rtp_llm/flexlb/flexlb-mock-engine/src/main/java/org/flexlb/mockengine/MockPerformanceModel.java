@@ -400,6 +400,8 @@ final class MockPerformanceModel {
                 // Fall back to protobuf lengths when metadata is absent or malformed.
             }
         }
+        boolean nativeImages = LegacyMockVitClient.hasImages(input) && uniqueKey.isBlank();
+        if (nativeImages) blockKeys.addAll(LegacyImageCacheKeys.fullBlocks(input, blockSize, LegacyImageCacheKeys.seed()));
         // hitBlocks carries the RAW prefix-match run length (key count) — the
         // key-level cache-hit caliber (production recent_cache_key_hit_count /
         // total_count analogue) recorded by the engine at this admission hit
@@ -407,6 +409,8 @@ final class MockPerformanceModel {
         // a trace whose bh keys exceed the request's own block count keeps an
         // honest requested/hit key pair.
         int hitBlocks = cache.prefixHitBlocks(blockKeys);
+        if (nativeImages) hitBlocks = input.getGenerateConfig().getReuseCache()
+                ? LegacyImageCacheKeys.validHitBlocks(input, hitBlocks, blockSize) : 0;
         long hitTokens = (long) hitBlocks * blockSize;
         hitTokens = Math.min(hitTokens, inputLen);
         return new RequestShape(input, inputLen, Math.max(1, outputLen), List.copyOf(blockKeys),
