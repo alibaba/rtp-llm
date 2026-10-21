@@ -375,7 +375,7 @@ grpc::Status DecodeRpcServer::GenerateStreamCall(grpc::ServerContext*           
     const auto log_pd_error = [&](const char* stage, const grpc::Status& status) {
         const auto error = errorInfoFromGrpcStatus(status);
         const auto& trace_id = request->request_info().trace_id().empty()
-                                   ? request->generate_config().trace_id()
+                                   ? request->generate_config().trace_id().value()
                                    : request->request_info().trace_id();
         if (status.error_code() == grpc::StatusCode::CANCELLED && error.code() == ErrorCode::CANCELLED) {
             RTP_LLM_LOG_INFO("P2P Decode request cancelled, stage=%s request_id=%ld unique_key=%s trace_id=%s error=%s",
