@@ -15,6 +15,7 @@ import torch
 import torch.nn.functional as F
 
 from rtp_llm.config.dsv41_config import (
+    V41_MAX_CONTEXT_TOKENS,
     v41_rotary_compute_device,
     v41_sparse_attention_mode,
 )
@@ -34,6 +35,9 @@ from rtp_llm.models_py.modules.dsv4.fp8 import (
     _v41_prefill_index_plan as prefill_index_plan,
 )
 from rtp_llm.models_py.modules.dsv4.fp8 import _v41_prefill_indexer as prefill_indexer
+from rtp_llm.models_py.modules.dsv4.fp8 import (
+    _v41_prefill_indexer_post as prefill_indexer_post,
+)
 from rtp_llm.models_py.modules.dsv4.fp8 import (
     _v41_prefill_kv_workspace as prefill_kv_workspace,
 )
@@ -1883,7 +1887,7 @@ class AttentionV41FP8(AttentionFP8):
                         *prefill_indexer.quantize_indexer_k_reference(index_keys[mask])
                     )
                     if fused_indexer
-                    else fp8_roundtrip(index_keys[mask])
+                    else fp4_roundtrip(index_keys[mask])
                 )
             else:
                 if fused_indexer:
@@ -2054,7 +2058,7 @@ class AttentionV41FP8(AttentionFP8):
                 if fused_indexer:
                     q_fp4, q_sf = prefill_indexer.quantize_indexer_q(q)
                 else:
-                    q = fp8_roundtrip(q)
+                    q = fp4_roundtrip(q)
             if fused_indexer and len(globals_by_req) > 1:
                 from ._v41_batched_prefill_select import try_select_batched
 
@@ -2220,12 +2224,20 @@ class AttentionV41FP8(AttentionFP8):
                                 **({"bounds": bounds} if bounds is not None else {}),
                             )
                     else:
-                        logits = torch.einsum(
-                            "thd,kd->thk", q[chunk], keys.float()
-                        ).relu_()
-                        logits = (logits * weights[chunk, :, None]).sum(1)
-                        ids = torch.arange(key_count, device=x.device)
-                        logits.masked_fill_(ids[None] >= visible[:, None], -torch.inf)
+                        logits = torch.einsum("thd,kd->thk", q[chunk], keys.float())
+                        fused_logits = prefill_indexer_post.try_postprocess(
+                            logits, weights[chunk], visible
+                        )
+                        if fused_logits is None:
+                            logits.relu_()
+                            logits = (logits * weights[chunk, :, None]).sum(1)
+                            ids = torch.arange(key_count, device=x.device)
+                            logits.masked_fill_(
+                                ids[None] >= visible[:, None], -torch.inf
+                            )
+                        else:
+                            logits = fused_logits
+                        del fused_logits
                     candidates = shared.get("candidates")
                     if candidates is not None:
                         if publish_candidates or (
@@ -2254,6 +2266,16 @@ class AttentionV41FP8(AttentionFP8):
                         selected = torch.where(scores.isfinite(), selected, -1).int()
                     if selected is not target:
                         out[output_rows, :k] = selected
+                    if not fused_indexer:
+                        selected = out[output_rows, :k]
+                        ordered = (
+                            torch.where(selected >= 0, selected, key_count)
+                            .sort(-1)
+                            .values
+                        )
+                        out[output_rows, :k] = torch.where(
+                            ordered < key_count, ordered, -1
+                        )
         shared["topk"] = {self.layer_id: out}
         return out
 
@@ -2509,7 +2531,13 @@ class AttentionV41FP8(AttentionFP8):
             or input_lengths.device != prefix_lengths.device
         ):
             raise ValueError("V4.1 prefill requires per-request integer lengths")
-        if bool(((input_lengths <= 0) | (prefix_lengths < 0)).any()):
+        if is_decode and not cp_on:
+            checked_input_lengths, checked_prefix_lengths = (
+                torch.stack((input_lengths, prefix_lengths)).detach().cpu().long().unbind(0)
+            )
+        else:
+            checked_input_lengths, checked_prefix_lengths = input_lengths, prefix_lengths
+        if bool(((checked_input_lengths <= 0) | (checked_prefix_lengths < 0)).any()):
             raise ValueError(
                 "V4.1 prefill requires nonempty requests and valid prefixes"
             )
@@ -2519,13 +2547,13 @@ class AttentionV41FP8(AttentionFP8):
             or (
                 bool(
                     (
-                        (input_lengths != 1)
-                        | (prefix_lengths < 1)
-                        | (prefix_lengths >= 128)
+                        (checked_input_lengths != 1)
+                        | (checked_prefix_lengths < 1)
+                        | (checked_prefix_lengths >= 128)
                     ).any()
                 )
                 if is_decode
-                else bool(((input_lengths > 128) | (prefix_lengths != 0)).any())
+                else bool(((checked_input_lengths > 128) | (checked_prefix_lengths != 0)).any())
             )
         ):
             raise NotImplementedError(
@@ -2536,10 +2564,24 @@ class AttentionV41FP8(AttentionFP8):
             if cp_on
             else input_lengths
         )
-        ends = prefix_lengths.long() + lengths.long()
-        if bool((ends > min(512, self._rope_max_seq_len)).any()):
+        # Validate all live columns on the host without per-region GPU
+        # selection, sorting and scalar reads. Long CP is qualified for an
+        # initial prefill; continuations retain the existing short bound.
+        if is_decode and not cp_on:
+            ends = checked_prefix_lengths + checked_input_lengths
+        else:
+            ends = (prefix_lengths.long() + lengths.long()).cpu()
+        context_limit = V41_MAX_CONTEXT_TOKENS
+        if cp_on:
+            from rtp_llm.config.dsv41_config import V41_MAX_CP_PREFILL_TOKENS
+
+            context_limit = (
+                512 if bool((prefix_lengths > 0).any()) else V41_MAX_CP_PREFILL_TOKENS
+            )
+        limit = min(context_limit, self._rope_max_seq_len)
+        if bool((ends > limit).any()):
             raise NotImplementedError(
-                "V4.1 attention beyond the qualified two-page context is not integrated"
+                f"V4.1 attention beyond the {limit}-token context is not integrated"
             )
         if (
             self.compress_ratio
@@ -2587,15 +2629,16 @@ class AttentionV41FP8(AttentionFP8):
                     (required > table.shape[1]).any()
                 ):
                     raise ValueError(f"Invalid V4.1 {region} block table coverage")
-                columns = torch.arange(table.shape[1], device=table.device)
-                pages = table[columns[None] < required[:, None]]
+                table_host = table[:, : int(required.max())].cpu()
+                columns = torch.arange(table_host.shape[1], device=table_host.device)
+                pages = table_host[columns[None] < required[:, None]]
                 if bool(((pages <= 0) | (pages >= base.shape[0])).any()):
                     raise ValueError(f"Invalid V4.1 {region} block table page")
                 if pages.unique().numel() != pages.numel():
                     raise ValueError(f"Aliased V4.1 {region} block table pages")
 
     def _require_qualified_cp_prefill(self, input_lengths, prefix_lengths):
-        """Admit short, bound SM120 CP4 against the current stage-local group."""
+        """Admit bound SM120 CP4 against the current stage-local group."""
         from rtp_llm.models_py.distributed.collective_torch import Group, _get_group
         from rtp_llm.models_py.modules.dsv4.cp import CPContext
 
@@ -2708,14 +2751,17 @@ class AttentionV41FP8(AttentionFP8):
             ):
                 raise ValueError(f"Invalid V4.1 decode {name}")
         starts = metadata.start_pos
+        host_starts, host_positions, host_requests = torch.stack((
+            starts, metadata.position_ids, metadata.req_id_per_token
+        )).detach().cpu().unbind(0)
         if (
-            not torch.equal(metadata.position_ids, starts)
+            not torch.equal(host_positions, host_starts)
             or not torch.equal(
-                metadata.req_id_per_token,
-                torch.arange(batch, dtype=torch.int32, device=x.device),
+                host_requests,
+                torch.arange(batch, dtype=torch.int32, device=host_starts.device),
             )
-            or bool((starts < 1).any())
-            or bool((starts >= self._rope_max_seq_len).any())
+            or bool((host_starts < 1).any())
+            or bool((host_starts >= self._rope_max_seq_len).any())
         ):
             raise ValueError(
                 "V4.1 decode requires consistent nonempty prompt positions"
@@ -2731,35 +2777,60 @@ class AttentionV41FP8(AttentionFP8):
             regions += [self._global_region(), INDEXER_KV]
             if self.compress_ratio == 2:
                 regions += [CSA_STATE]
+        host_pages = {}
         for region in regions:
             if metadata.paged_pool_tokens_per_block.get(region) != 256:
                 raise ValueError("V4.1 decode requires native 256-token coverage")
-            if bool((metadata.pool_block_tables[region][:, 0] <= 0).any()):
+            host_pages[region] = metadata.pool_block_tables[region][:, 0].detach().cpu()
+            if bool((host_pages[region] <= 0).any()):
                 raise ValueError("V4.1 decode requires allocated prompt pages")
 
         # Validate the base metadata's SWA mapping before either cache writer.
         # GLOBAL/state slots are computed by the V4.1 owner, not V4 metadata.
         entries = self._cache_layouts[SWA_KV].entries
-        pages = metadata.pool_block_tables[SWA_KV][:, 0].long()
-        write = pages * entries + starts.long().remainder(entries)
-        first = (starts.long() - self.window_size + 1).clamp_min(0)
-        positions = first[:, None] + torch.arange(self.window_size, device=x.device)
+        pages = host_pages[SWA_KV].long()
+        write = pages * entries + host_starts.long().remainder(entries)
+        first = (host_starts.long() - self.window_size + 1).clamp_min(0)
+        positions = first[:, None] + torch.arange(self.window_size, device=host_starts.device)
         read = torch.where(
-            positions <= starts[:, None],
+            positions <= host_starts[:, None],
             pages[:, None] * entries + positions.remainder(entries),
             -1,
         ).int()
-        for actual, expected in (
+        slot_pairs = (
             (metadata.pool_write_slot_mappings.get(SWA_KV), write),
             (metadata.swa_global_slots, read),
-        ):
+        )
+        if all(isinstance(actual, torch.Tensor) for actual, _ in slot_pairs):
+            for actual, expected in slot_pairs:
+                if (
+                    actual.device != x.device
+                    or actual.dtype != expected.dtype
+                    or actual.shape != expected.shape
+                    or not actual.is_contiguous()
+                ):
+                    raise ValueError("V4.1 decode SWA slots do not match native pages")
+            host_slots = torch.cat(tuple(
+                (actual if actual.stride(-1) == 1 else actual.clone(
+                    memory_format=torch.contiguous_format
+                )).view(torch.uint8).reshape(-1) for actual, _ in slot_pairs
+            )).detach().cpu()
+            offset = 0
+            for actual, expected in slot_pairs:
+                size = actual.numel() * actual.element_size()
+                observed = host_slots[offset:offset + size].view(actual.dtype).reshape(actual.shape)
+                if not torch.equal(observed, expected):
+                    raise ValueError("V4.1 decode SWA slots do not match native pages")
+                offset += size
+            return
+        for actual, expected in slot_pairs:
             if (
                 actual is None
                 or actual.device != x.device
                 or actual.dtype != expected.dtype
                 or actual.shape != expected.shape
                 or not actual.is_contiguous()
-                or not torch.equal(actual, expected)
+                or not torch.equal(actual.detach().cpu(), expected)
             ):
                 raise ValueError("V4.1 decode SWA slots do not match native pages")
 
@@ -3318,6 +3389,14 @@ class AttentionV41FP8(AttentionFP8):
                     dense,
                     output[start:end, :count],
                 )
+                if not paged:
+                    selected = output[start:end, :count]
+                    ordered = (
+                        torch.where(selected >= 0, selected, capacity).sort(-1).values
+                    )
+                    output[start:end, :count] = torch.where(
+                        ordered < capacity, ordered, -1
+                    )
         shared["topk"] = {self.layer_id: output}
         return output
 
