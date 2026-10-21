@@ -549,7 +549,7 @@ TEST_F(PdSepKVCacheReleaseTest, Dsv4RealCpPlanTransfersSuffixThroughTcpAndPreser
     // geometry. Resolving a shortened suffix would change CP ownership and
     // compact-tail placement instead of preserving absolute key positions.
     constexpr size_t      full_key_count = 7;
-    constexpr size_t      reused_keys    = 2;
+    constexpr size_t      reused_keys    = 3;  // Odd prefix shifts CP ownership if incorrectly rebased.
     std::set<std::string> covered;
     std::set<int>         source_ranks;
     bool                  has_byte_slice      = false;
