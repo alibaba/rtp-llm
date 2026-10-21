@@ -149,6 +149,13 @@ KVCacheTransferPlanner::validateTag(const ShardLayout& src, const ShardLayout& d
                          + " dst=" + KVCacheSpecTypeToString(dg.spec_type));
     }
 
+    // Linear state is [ssm][conv], not equally sized K/V regions. The
+    // execution converter cannot repartition it across unequal head shards.
+    if (sg.spec_type == KVCacheSpecType::LinearAttention
+        && src.headShardCount(tag) != dst.headShardCount(tag)) {
+        return planError("LinearAttention asymmetric head sharding is unsupported for tag '" + tag + "'");
+    }
+
     // (a) 字节维度：还原出的全局尺寸必须一致。**守恒量取决于 slice 模式**：
     //   PAYLOAD_BYTES -> sliceBlockForPeer 以 k_block_payload_bytes 为分母，守恒量是 payload
     //   其它（含 EQUAL_BYTES / NONE） -> 守恒量是 block stride

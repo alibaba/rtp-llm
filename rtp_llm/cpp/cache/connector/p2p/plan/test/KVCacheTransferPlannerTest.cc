@@ -627,6 +627,27 @@ TEST(PlannerGroupB, StateKeySpanDoesNotFollowDecodeCpSize) {
     }
 }
 
+TEST(PlannerGroupB, LinearStateRejectsUnsupportedAsymmetricHeadSharding) {
+    auto group      = makeMhaFullGroup();
+    group.spec_type = KVCacheSpecType::LinearAttention;
+    group.policy    = defaultCacheGroupPolicy(CacheGroupType::LINEAR);
+    group.policy.cp_slice = CpBlockSliceMode::NONE;
+    for (const auto& sizes : {std::pair<int, int>{2, 1}, {1, 2}}) {
+        const auto src = makeLayout(sizes.first, CPRotateMethod::ALL_GATHER, false, {{kFixedTag, group}});
+        const auto dst = makeLayout(sizes.second, CPRotateMethod::ALL_GATHER, false, {{kFixedTag, group}});
+        const auto result = KVCacheTransferPlanner::plan(src, dst, {kFixedTag});
+        ASSERT_FALSE(result.ok());
+        EXPECT_NE(result.error.ToString().find("LinearAttention asymmetric head sharding"), std::string::npos);
+    }
+    const auto symmetric = makeLayout(2, CPRotateMethod::ALL_GATHER, false, {{kFixedTag, group}});
+    const auto result = KVCacheTransferPlanner::plan(symmetric, symmetric, {kFixedTag});
+    ASSERT_TRUE(result.ok()) << result.error.ToString();
+    for (const auto& route : result.plan.routes) {
+        EXPECT_EQ(route.src_partition.count, 1);
+        EXPECT_EQ(route.dst_partition.count, 1);
+    }
+}
+
 TEST(PlannerGroupB, UnscaledStateGroupDoesNotCompactKeysByTransportCp) {
     auto group               = makeSwaGroup();
     group.seq_size_per_block = kSeqSizePerBlock;
