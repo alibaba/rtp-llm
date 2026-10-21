@@ -13,8 +13,8 @@
 
 `mock-bundle` 镜像固定入口 `sh /home/admin/whale_start.sh` 支持三个模式，
 均要求 `RTP_LLM_MOCK_BUNDLE=1`。只有 `embedded` 启动 Master JVM。
-独立 Master 必须使用包含 VipServer adapter 的正式 Master 镜像；bundle 内的
-`master.jar` 和 `legacy-master.jar` 是文件发现测试产物，不用于独立 Master。
+独立 Master 必须使用包含 VipServer adapter 的正式 Master 镜像；bundle 配方打包的
+`master.jar` 使用文件发现，含 `legacy-master.jar` 的配方也用于寄生测试，不用于独立 Master。
 
 `mock-engine` 精简 Java 镜像的入口 `sh /opt/flexlb/start.sh` 只支持
 `per_engine`，要求 `FLEXLB_MOCK_WHALE=1`。它支持下面列出的挂载文件配置，
@@ -23,6 +23,18 @@
 启动输出并写入运行目录的 `deployment.json` 记录解析后的模式、发现方式与
 接续方式；bundle 镜像还记录 P/D 数量，独立 Mock 记录待注册的 gRPC 地址。
 这是启动配置记录，不能作为平台注册成功或运行健康的证明。
+
+### 模式维度与版本支持
+
+`MOCK_DEPLOYMENT_MODE` 描述 Pod/JVM 放置和发现方式。
+`master_mode=sb/sn/wb/wn` 描述 Master 的决策与 dispatcher，不描述部署。
+`mode_profiles` 中的 `whale_embedded` / `whale_independent` 是底层地址与观测
+预设；`--whale` / `--whale-bundle` 是 launcher 使用的 Java 兼容参数。
+它们不构成第四种部署模式，平台配置不再手工组合这些内部参数。
+
+支持本契约的 bundle 启动脚本调用 `deployment.py`。既有镜像须根据实际打包
+源码与脚本核对能力；环境变量出现在模板中，不证明旧镜像识别它。
+legacy JAR 是否存在取决于 CI 配方，见[构建与产物](README.md#ci-构建与产物)。
 
 ### 兼容变量与冲突
 
@@ -145,7 +157,7 @@ Whale 启动命令应为 `sh /opt/flexlb/start.sh`。配置 JSON 放在环境变
 
 ## Whale 模板字段
 
-- P 与 D 使用独立角色、资源模板、VIP 域和副本数。
+- `per_engine` 的 P/D 使用独立角色、资源模板、VIP 域和副本数；`single_pod` 在一个 Mock 角色内声明多个逻辑 P/D 地址；`embedded` 不注册独立 P/D VIP。
 - `resource_plan.meta_tag_list` 必须初始化为空列表。
 - 最终镜像由顶层 `image_infos` 选择；资源槽位里的 package 信息可能被覆盖。
 - 健康检查、容忍配置和资源池必须与目标池匹配，即使 Mock 不申请 GPU。

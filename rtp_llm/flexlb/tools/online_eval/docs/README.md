@@ -9,6 +9,6 @@
 | 收取报告、判断结果和对照 | [结果与指标](development/results.md) |
 | 新增或调整 case | [新增 case](development/adding-cases.md) |
 | 调整播放、核对输入 | [播放与复现](development/playback-controls.md) · [合成保真度](development/synthetic-fidelity.md) |
-| 在 Whale 部署与验收 | [Whale 部署](whale/README.md) · [配置](whale/configuration.md) · [生产对齐](whale/production-alignment.md) |
+| 选择 Whale Mock 模式、构建与验收 | [Whale 部署](whale/README.md) · [模式与配置](whale/configuration.md) · [生产对齐](whale/production-alignment.md) |
 
 理解实现时阅读[框架结构](architecture/framework.md)、[Master 观测契约](architecture/master-diagnostics.md)、[case 插件结构](architecture/case-plugins.md)、[请求生命周期](architecture/request-lifecycle.md)、[流量模型](architecture/traffic.md)和[报告契约](architecture/reporting.md)。固定输入及配置分别见[数据规则](../data/README.md)和[配置目录](../config/README.md)。
