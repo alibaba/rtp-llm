@@ -628,6 +628,12 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
     auto ctx                = createGatherContext(config_, model_input, stream_groups, GatherContextMode::CONTEXT);
     ctx.prefix_lengths_host = prefix_lengths_host.data_ptr<int32_t>();
     int custom_output_count = 0;
+    if (config_.enable_model_inputs_log && context_batch_size > 0 && !model_input.is_fake_stream) {
+        model_input.all_input_token_ids.emplace();
+        model_input.all_input_token_ids->reserve(context_batch_size);
+        model_input.request_is_multimodal.emplace();
+        model_input.request_is_multimodal->reserve(context_batch_size);
+    }
 
     for (const auto& stream : stream_groups.contextStreams()) {
         model_input.need_all_logits =
@@ -662,6 +668,16 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
                                        stream->prefixLength(),
                                        input_tokens.size(),
                                        model_input.engram_token_windows.data_ptr<int32_t>() + ctx.token_idx * 4);
+            }
+            if (model_input.all_input_token_ids) {
+                const auto full_length = std::max(stream->inputLength(), stream->seqLength());
+                model_input.all_input_token_ids->push_back(
+                    stream->completeTokenIds().select(0, i).narrow(0, 0, full_length).clone());
+                const auto& original = *stream->generateInput();
+                model_input.request_is_multimodal->push_back(
+                    (original.multimodal_inputs && !original.multimodal_inputs->empty())
+                    || (original.multimodal_features && !original.multimodal_features->empty())
+                    || (original.mm_extra_input && !original.mm_extra_input->empty()));
             }
 
             for (int index = 0; index < (int)input_tokens.size(); ++index) {
