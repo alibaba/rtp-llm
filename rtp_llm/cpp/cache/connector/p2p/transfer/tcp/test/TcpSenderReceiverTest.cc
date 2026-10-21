@@ -191,7 +191,7 @@ TEST_F(TcpSenderOnlyTest, BusyStagedScratchSelectsDirectCopyWithoutWaitingForIts
     std::vector<CopyTask> tasks(4);
     for (size_t i = 0; i < tasks.size(); ++i) {
         tasks[i].src_ptr = source.data_ptr<uint8_t>() + 16 * i;
-        tasks[i].dst_ptr = target.data_ptr<uint8_t>() + 16 * i;
+        tasks[i].dst_ptr = reinterpret_cast<char*>(target.data_ptr<uint8_t>()) + 16 * i;
         tasks[i].size = 16;
     }
     auto attempt = std::async(std::launch::async, [&] {
