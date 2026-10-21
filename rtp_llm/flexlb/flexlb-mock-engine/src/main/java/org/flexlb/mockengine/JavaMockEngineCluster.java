@@ -363,7 +363,7 @@ public final class JavaMockEngineCluster {
                     .executor(runtime.controlExecutor())
                     .callExecutor(rpcEngine)
                     .intercept(rpcEngine)
-                    .maxInboundMessageSize(16 * 1024 * 1024)
+                    .maxInboundMessageSize(config.grpcMaxInboundMessageBytes)
                     .addService(CacheFixtureWire.bind(service))
                     .build()
                     .start();
@@ -7161,6 +7161,8 @@ public final class JavaMockEngineCluster {
         int rpcThreads = 2;
         int rpcMaxCalls = 32768;
         int completionThreads = 8;
+        // Match RtpLLMOp.cc's default receive limit; this does not reserve memory.
+        int grpcMaxInboundMessageBytes = 1024 * 1024 * 1024;
         /**
          * Block-count pool overrides (capacity model v2): 0 = derive the pool
          * from the per-role token capacity (ceil(totalKvTokens/spb)). CLI
@@ -7250,6 +7252,7 @@ public final class JavaMockEngineCluster {
                     case "--rpc-threads" -> config.rpcThreads = Integer.parseInt(value);
                     case "--rpc-max-calls" -> config.rpcMaxCalls = Integer.parseInt(value);
                     case "--completion-threads" -> config.completionThreads = Integer.parseInt(value);
+                    case "--grpc-max-inbound-message-bytes" -> config.grpcMaxInboundMessageBytes = Integer.parseInt(value);
                     case "--auto-fetch" -> config.autoFetch = parseBooleanFlag(value, key);
                     case "--fetch-attach-timeout-ms" -> config.fetchAttachTimeoutMs = Long.parseLong(value);
                     case "--prefill-kv-pool-blocks" -> config.prefillCacheBlocks = Integer.parseInt(value);
@@ -7321,6 +7324,9 @@ public final class JavaMockEngineCluster {
             }
             if (config.eventLoopThreads < 1 || config.completionThreads < 1 || config.rpcThreads < 1 || config.rpcMaxCalls < 1) {
                 throw new IllegalArgumentException("thread counts must be positive");
+            }
+            if (config.grpcMaxInboundMessageBytes < 1) {
+                throw new IllegalArgumentException("--grpc-max-inbound-message-bytes must be >= 1");
             }
             if (config.fetchAttachTimeoutMs < 1) {
                 throw new IllegalArgumentException("--fetch-attach-timeout-ms must be >= 1");
