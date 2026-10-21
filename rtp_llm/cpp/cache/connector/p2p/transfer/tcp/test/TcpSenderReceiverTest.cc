@@ -157,8 +157,8 @@ TEST_F(TcpSenderOnlyTest, F1_EmptyBlockInfo_ImmediateBuildFailed) {
 // D. Connection errors
 // ===========================================================================
 
-// D1/D3: Receiver is not running; arpc returns a channel object regardless, so
-//        the RPC is sent but times out → RPC_FAILED (controller->Failed()=true).
+// D1/D3: Receiver is not running; arpc still returns a channel object.
+// The queued request expires with ARPC_ERROR_TIMEOUT, which maps to TIMEOUT.
 TEST_F(TcpSenderOnlyTest, D1_ConnectionFailed_ReceiverNotRunning) {
     if (!device_initialized_) {
         GTEST_SKIP() << "No GPU device";
@@ -173,9 +173,8 @@ TEST_F(TcpSenderOnlyTest, D1_ConnectionFailed_ReceiverNotRunning) {
     req.timeout_ms = 1000;  // 1s deadline to keep the test fast
 
     auto code = syncSend(*sender_, req, std::chrono::seconds(5));
-    // anet always returns a channel object; connect failure surfaces as RPC_FAILED
-    // after the controller expire time elapses.
-    EXPECT_EQ(code, TransferErrorCode::RPC_FAILED);
+    // Preserve the typed deadline failure even when connection refusal preceded it.
+    EXPECT_EQ(code, TransferErrorCode::TIMEOUT);
 }
 
 // ===========================================================================
