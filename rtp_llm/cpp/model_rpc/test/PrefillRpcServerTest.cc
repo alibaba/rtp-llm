@@ -380,6 +380,122 @@ TEST(PDCancelRegistryTest, OrdinaryCleanupRetainsCauseAndDoesNotPublishPriorityP
         EXPECT_EQ(info.finished_task_info_list.front().priority_preemption_progress, PriorityPreemptionProgress::NONE);
     }
 }
+TEST(PDCancelRegistryTest, CompletedRequestsExpireFromCompletionRatherThanBusinessDeadline) {
+    auto meta = std::make_shared<RpcServerRuntimeMeta>();
+    PDCancelRegistry registry(meta);
+    GenerateInputPB request;
+    request.set_request_id(110);
+    const auto deadline = currentTimeMs() + 2 * 60 * 60 * 1000;
+    PDCancelRegistry::Handle handle;
+    ASSERT_TRUE(registry.admit(request, "done110", "prefill:123", deadline, handle).ok());
+    registry.finishDownstream(handle);
+    registry.finishLocal(handle);
+    EXPECT_LT(handle->retain_until_ms, deadline);
+    {
+        std::lock_guard<std::mutex> lock(registry.mutex_);
+        registry.trimLocked(handle->retain_until_ms - 1);
+        EXPECT_EQ(registry.entries_.count(110), 1u);
+        registry.trimLocked(handle->retain_until_ms);
+        EXPECT_EQ(registry.entries_.count(110), 0u);
+        EXPECT_TRUE(registry.entry_expirations_.empty());
+    }
+}
+
+TEST(PDCancelRegistryTest, DownstreamCompletionReplacesEarlierExpirationWithoutStaleIndex) {
+    auto meta = std::make_shared<RpcServerRuntimeMeta>();
+    PDCancelRegistry registry(meta);
+    GenerateInputPB request;
+    request.set_request_id(115);
+    PDCancelRegistry::Handle handle;
+    const auto deadline = currentTimeMs() + 2 * 60 * 60 * 1000;
+    ASSERT_TRUE(registry.admit(request, "done115", "prefill:123", deadline, handle).ok());
+    registry.finishLocal(handle);
+    EXPECT_GT(handle->retain_until_ms, deadline);
+    registry.finishDownstream(handle);
+    EXPECT_LT(handle->retain_until_ms, deadline);
+    {
+        std::lock_guard<std::mutex> lock(registry.mutex_);
+        ASSERT_EQ(registry.entry_expirations_.size(), 1u);
+        registry.trimLocked(handle->retain_until_ms);
+        EXPECT_TRUE(registry.entries_.empty());
+        EXPECT_TRUE(registry.entry_expirations_.empty());
+    }
+}
+
+TEST(PDCancelRegistryTest, UnconfirmedCanceledRequestSurvivesExpirationAndRemainsPending) {
+    auto meta = std::make_shared<RpcServerRuntimeMeta>();
+    PDCancelRegistry registry(meta);
+    GenerateInputPB request;
+    request.set_request_id(111);
+    PDCancelRegistry::Handle handle;
+    ASSERT_TRUE(registry.admit(request, "pending111", "prefill:123", currentTimeMs() + 1000, handle).ok());
+    ASSERT_EQ(registry.cancel(111, {ErrorCode::GENERATE_TIMEOUT, "timeout"}), CANCEL_STATUS_ACCEPTED);
+    registry.finishLocal(handle);
+    {
+        std::lock_guard<std::mutex> lock(registry.mutex_);
+        registry.trimLocked(handle->retain_until_ms);
+        EXPECT_EQ(registry.entries_.count(111), 1u);
+    }
+    EXPECT_TRUE(registry.isCanceled("pending111"));
+    EXPECT_EQ(registry.pending().size(), 1u);
+    EXPECT_FALSE(registry.complete(handle));
+    registry.finishDownstream(handle);
+    ASSERT_TRUE(registry.complete(handle));
+    EXPECT_TRUE(registry.pending().empty());
+    {
+        std::lock_guard<std::mutex> lock(registry.mutex_);
+        registry.trimLocked(handle->retain_until_ms);
+    }
+    EXPECT_FALSE(registry.find(111));
+    EXPECT_FALSE(registry.isCanceled("pending111"));
+}
+
+TEST(PDCancelRegistryTest, CancelKeyIndexKeepsOtherCanceledRequestWithSameKey) {
+    auto meta = std::make_shared<RpcServerRuntimeMeta>();
+    PDCancelRegistry registry(meta);
+    GenerateInputPB first_request;
+    first_request.set_request_id(112);
+    GenerateInputPB second_request;
+    second_request.set_request_id(113);
+    PDCancelRegistry::Handle first;
+    PDCancelRegistry::Handle second;
+    ASSERT_TRUE(registry.admit(first_request, "shared-key", "", currentTimeMs() + 1000, first).ok());
+    ASSERT_TRUE(registry.admit(second_request, "shared-key", "", currentTimeMs() + 1000, second).ok());
+    ASSERT_EQ(registry.cancel(112, {ErrorCode::CANCELLED, "cancel"}), CANCEL_STATUS_ACCEPTED);
+    ASSERT_EQ(registry.cancel(113, {ErrorCode::CANCELLED, "cancel"}), CANCEL_STATUS_ACCEPTED);
+    registry.finishLocal(first);
+    ASSERT_TRUE(registry.complete(first));
+    {
+        std::lock_guard<std::mutex> lock(registry.mutex_);
+        registry.trimLocked(first->retain_until_ms);
+    }
+    EXPECT_TRUE(registry.isCanceled("shared-key"));
+    EXPECT_EQ(registry.pending().size(), 1u);
+    registry.finishLocal(second);
+    ASSERT_TRUE(registry.complete(second));
+    {
+        std::lock_guard<std::mutex> lock(registry.mutex_);
+        registry.trimLocked(second->retain_until_ms);
+    }
+    EXPECT_FALSE(registry.isCanceled("shared-key"));
+}
+
+TEST(PDCancelRegistryTest, RepeatedAbsentCancelHasSingleExpiryAndPreservesFirstReason) {
+    auto meta = std::make_shared<RpcServerRuntimeMeta>();
+    PDCancelRegistry registry(meta);
+    EXPECT_EQ(registry.cancel(114, {ErrorCode::GENERATE_TIMEOUT, "first"}), CANCEL_STATUS_TOMBSTONED);
+    EXPECT_EQ(registry.cancel(114, {ErrorCode::CANCELLED, "second"}), CANCEL_STATUS_TOMBSTONED);
+    {
+        std::lock_guard<std::mutex> lock(registry.mutex_);
+        ASSERT_EQ(registry.fence_expirations_.size(), 1u);
+        const auto expiry = registry.absent_fences_.at(114).expires_at_ms;
+        EXPECT_EQ(registry.absent_fences_.at(114).reason.code(), ErrorCode::GENERATE_TIMEOUT);
+        registry.trimLocked(expiry);
+        EXPECT_TRUE(registry.absent_fences_.empty());
+        EXPECT_TRUE(registry.fence_expirations_.empty());
+    }
+}
+
 TEST(PDCancelRegistryTest, LateAdmissionRetainsOrdinaryCancellationCause) {
     auto             meta = std::make_shared<RpcServerRuntimeMeta>();
     PDCancelRegistry registry(meta);

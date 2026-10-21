@@ -2,19 +2,42 @@
 
 namespace rtp_llm {
 
+void PDCancelRegistry::scheduleExpirationLocked(const Handle& handle, int64_t expires_at_ms) {
+    // Keep one scheduled expiration per record, even when downstream completion
+    // shortens an earlier deadline-based retention period.
+    entry_expirations_.erase({handle->retain_until_ms, handle->identity.request_id});
+    handle->retain_until_ms = expires_at_ms;
+    entry_expirations_.emplace(expires_at_ms, handle->identity.request_id);
+}
+
 void PDCancelRegistry::trimLocked(int64_t now_ms) {
-    for (auto it = absent_fences_.begin(); it != absent_fences_.end();) {
-        if (it->second.expires_at_ms <= now_ms)
-            it = absent_fences_.erase(it);
-        else
-            ++it;
+    while (!fence_expirations_.empty() && fence_expirations_.begin()->first <= now_ms) {
+        const auto [expires_at_ms, request_id] = *fence_expirations_.begin();
+        fence_expirations_.erase(fence_expirations_.begin());
+        auto it = absent_fences_.find(request_id);
+        if (it != absent_fences_.end() && it->second.expires_at_ms == expires_at_ms) {
+            absent_fences_.erase(it);
+        }
     }
-    for (auto it = entries_.begin(); it != entries_.end();) {
+    while (!entry_expirations_.empty() && entry_expirations_.begin()->first <= now_ms) {
+        const auto [expires_at_ms, request_id] = *entry_expirations_.begin();
+        entry_expirations_.erase(entry_expirations_.begin());
+        auto it = entries_.find(request_id);
+        if (it == entries_.end()) {
+            continue;
+        }
         const auto& e = it->second;
-        if (e->local_done && (!e->canceled.load() || e->terminal) && e->retain_until_ms <= now_ms)
-            it = entries_.erase(it);
-        else
-            ++it;
+        if (!e->local_done || (e->canceled.load() && !e->terminal) || e->retain_until_ms != expires_at_ms) {
+            continue;
+        }
+        if (e->canceled.load()) {
+            auto key = canceled_keys_.find(e->unique_key);
+            if (key != canceled_keys_.end() && --key->second == 0) {
+                canceled_keys_.erase(key);
+            }
+        }
+        pending_cancels_.erase(request_id);
+        entries_.erase(it);
     }
 }
 
@@ -71,7 +94,9 @@ void PDCancelRegistry::finishLocal(const Handle& handle) {
     }
     std::lock_guard<std::mutex> lock(mutex_);
     handle->local_done      = true;
-    handle->retain_until_ms = std::max(currentTimeMs(), handle->deadline_ms) + kRetentionMs;
+    const auto now_ms = currentTimeMs();
+    scheduleExpirationLocked(handle,
+                             (handle->downstream_done ? now_ms : std::max(now_ms, handle->deadline_ms)) + kRetentionMs);
     if (!handle->canceled.load() && stream && stream->getStatus() == StreamState::FINISHED
         && !stream->isDeferredReleasePending() && !stream->hasPendingP2PResourceHold())
         handle->stream.reset();
@@ -82,7 +107,11 @@ CancelStatusPB PDCancelRegistry::cancel(int64_t request_id, const ErrorInfo& rea
     trimLocked(currentTimeMs());
     auto found = entries_.find(request_id);
     if (found == entries_.end()) {
-        absent_fences_.emplace(request_id, CancelFence{currentTimeMs() + kRetentionMs, reason});
+        const auto expires_at_ms = currentTimeMs() + kRetentionMs;
+        const bool inserted = absent_fences_.emplace(request_id, CancelFence{expires_at_ms, reason}).second;
+        if (inserted) {
+            fence_expirations_.emplace(expires_at_ms, request_id);
+        }
         return CANCEL_STATUS_TOMBSTONED;
     }
     const auto& e = found->second;
@@ -98,6 +127,8 @@ CancelStatusPB PDCancelRegistry::cancel(int64_t request_id, const ErrorInfo& rea
     if (e->stream && e->stream->firstError().error.hasError())
         e->cancel_reason = e->stream->firstError().error;
     e->canceled.store(true);
+    ++canceled_keys_[e->unique_key];
+    pending_cancels_.emplace(request_id, e);
     meta_->markCancellationPending(e->identity, e->cancel_reason.code() == ErrorCode::PRIORITY_PREEMPTED);
     if (e->stream)
         e->stream->reportError(e->cancel_reason.code(), e->cancel_reason.ToString());
@@ -106,27 +137,29 @@ CancelStatusPB PDCancelRegistry::cancel(int64_t request_id, const ErrorInfo& rea
 
 bool PDCancelRegistry::isCanceled(const std::string& unique_key) {
     std::lock_guard<std::mutex> lock(mutex_);
-    for (const auto& [id, e] : entries_) {
-        if (e->unique_key == unique_key)
-            return e->canceled.load();
-    }
-    return false;
+    return canceled_keys_.count(unique_key) != 0;
 }
 
 std::vector<PDCancelRegistry::Handle> PDCancelRegistry::pending() {
     std::lock_guard<std::mutex> lock(mutex_);
     trimLocked(currentTimeMs());
     std::vector<Handle> result;
-    for (const auto& [id, e] : entries_) {
-        if (e->canceled.load() && !e->terminal)
-            result.push_back(e);
+    result.reserve(pending_cancels_.size());
+    for (const auto& [id, e] : pending_cancels_) {
+        result.push_back(e);
     }
     return result;
 }
 
 void PDCancelRegistry::finishDownstream(const Handle& handle) {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (handle->downstream_done) {
+        return;
+    }
     handle->downstream_done = true;
+    if (handle->local_done) {
+        scheduleExpirationLocked(handle, currentTimeMs() + kRetentionMs);
+    }
 }
 
 void PDCancelRegistry::beginRead(const std::string& key) {
@@ -167,8 +200,9 @@ bool PDCancelRegistry::complete(const Handle& handle) {
                                          stream))
         return false;
     handle->terminal = true;
+    pending_cancels_.erase(handle->identity.request_id);
     handle->stream.reset();
-    handle->retain_until_ms = currentTimeMs() + kRetentionMs;
+    scheduleExpirationLocked(handle, currentTimeMs() + kRetentionMs);
     return true;
 }
 

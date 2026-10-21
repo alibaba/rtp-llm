@@ -7,6 +7,8 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <map>
+#include <set>
 #include <mutex>
 #include <string>
 #include <utility>
@@ -85,6 +87,7 @@ public:
 
 private:
     void                                    trimLocked(int64_t now_ms);
+    void                                    scheduleExpirationLocked(const Handle& handle, int64_t expires_at_ms);
     static constexpr int64_t                kRetentionMs = 10 * 60 * 1000;
     std::mutex                              mutex_;
     std::unordered_map<int64_t, Handle>     entries_;
@@ -93,6 +96,10 @@ private:
         ErrorInfo reason;
     };
     std::unordered_map<int64_t, CancelFence> absent_fences_;
+    std::multimap<int64_t, int64_t>         fence_expirations_;
+    std::set<std::pair<int64_t, int64_t>>   entry_expirations_;
+    std::unordered_map<int64_t, Handle>     pending_cancels_;
+    std::unordered_map<std::string, size_t> canceled_keys_;
     std::unordered_map<std::string, size_t> active_reads_;
     std::shared_ptr<RpcServerRuntimeMeta>   meta_;
 };
