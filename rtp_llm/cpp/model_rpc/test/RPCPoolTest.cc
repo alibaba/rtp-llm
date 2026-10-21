@@ -7,6 +7,7 @@
 #include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <future>
 #include <memory>
 #include <string>
 #include <thread>
@@ -176,6 +177,92 @@ TEST(RPCPoolTest, ReadyPreflightReusesReadyChannel) {
     auto second = pool.getReadyConnection(server.address(), 2s);
     ASSERT_TRUE(second.ok()) << second.status();
     EXPECT_EQ(second->channel, first->channel);
+}
+
+TEST(RPCPoolTest, PeerMutexIsReclaimedAfterNewAndCachedConnectionLookups) {
+    TestGrpcServer server;
+    RPCPool        pool;
+    auto first = pool.getReadyConnection(server.address(), 2s);
+    ASSERT_TRUE(first.ok()) << first.status();
+    EXPECT_TRUE(pool.peer_mutexes_.empty());
+
+    auto second = pool.getConnection(server.address());
+    ASSERT_TRUE(second.ok()) << second.status();
+    EXPECT_EQ(first->channel, second->channel);
+    EXPECT_TRUE(pool.peer_mutexes_.empty());
+}
+
+TEST(RPCPoolTest, PeerMutexRemainsSharedUntilLastConcurrentHolderExits) {
+    RPCPool pool;
+    const std::string peer = "127.0.0.1:12345";
+    std::shared_ptr<std::mutex> first;
+    std::shared_ptr<std::mutex> second;
+    {
+        std::lock_guard<std::mutex> guard(pool.mutex_);
+        first = pool.getPeerMutexLocked(peer);
+        second = pool.getPeerMutexLocked(peer);
+    }
+    ASSERT_EQ(first, second);
+    pool.releasePeerMutex(peer, first);
+    EXPECT_EQ(first, nullptr);
+    ASSERT_EQ(pool.peer_mutexes_.size(), 1u);
+
+    std::shared_ptr<std::mutex> third;
+    {
+        std::lock_guard<std::mutex> guard(pool.mutex_);
+        third = pool.getPeerMutexLocked(peer);
+    }
+    EXPECT_EQ(second, third);
+    pool.releasePeerMutex(peer, second);
+    EXPECT_EQ(second, nullptr);
+    EXPECT_EQ(pool.peer_mutexes_.size(), 1u);
+    pool.releasePeerMutex(peer, third);
+    EXPECT_EQ(third, nullptr);
+    EXPECT_TRUE(pool.peer_mutexes_.empty());
+}
+
+TEST(RPCPoolTest, SimultaneousExitsReclaimPeerMutexRegistryEntry) {
+    RPCPool pool;
+    const std::string peer = "127.0.0.1:12345";
+    std::vector<std::shared_ptr<std::mutex>> holders(8);
+    {
+        std::lock_guard<std::mutex> guard(pool.mutex_);
+        for (auto& holder : holders) {
+            holder = pool.getPeerMutexLocked(peer);
+        }
+    }
+    std::promise<void> release;
+    auto ready = release.get_future().share();
+    std::vector<std::thread> threads;
+    for (size_t i = 0; i < holders.size(); ++i) {
+        threads.emplace_back([&, i, ready] {
+            ready.wait();
+            pool.releasePeerMutex(peer, holders[i]);
+        });
+    }
+    release.set_value();
+    for (auto& thread : threads) {
+        thread.join();
+    }
+    EXPECT_TRUE(pool.peer_mutexes_.empty());
+    for (const auto& holder : holders) {
+        EXPECT_EQ(holder, nullptr);
+    }
+}
+
+struct FailingStubService {
+    struct Stub {};
+    static std::unique_ptr<Stub> NewStub(const std::shared_ptr<grpc::Channel>&) {
+        return nullptr;
+    }
+};
+
+TEST(RPCPoolTest, FailedStubCreationReclaimsPeerMutex) {
+    Pool<FailingStubService> pool;
+    auto result = pool.getConnection("127.0.0.1:12345");
+    EXPECT_FALSE(result.ok());
+    EXPECT_TRUE(pool.connection_pool_.empty());
+    EXPECT_TRUE(pool.peer_mutexes_.empty());
 }
 
 TEST(RPCPoolTest, OldGenerationCannotEraseReadyReplacement) {

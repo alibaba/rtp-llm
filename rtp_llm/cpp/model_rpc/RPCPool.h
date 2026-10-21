@@ -32,6 +32,16 @@ public:
 
         Connection<T>               cached_connection;
         std::shared_ptr<std::mutex> peer_mutex;
+        // This guard is declared before peer_guard, so the per-peer lock is
+        // unlocked before its last registry reference can be removed.
+        struct PeerMutexRelease {
+            Pool&                             pool;
+            const std::string&                peer;
+            std::shared_ptr<std::mutex>&       mutex;
+            ~PeerMutexRelease() {
+                pool.releasePeerMutex(peer, mutex);
+            }
+        } peer_mutex_release{*this, peer, peer_mutex};
         {
             std::lock_guard<std::mutex> guard(mutex_);
             t_locked                = std::chrono::steady_clock::now();
@@ -194,11 +204,30 @@ public:
 
 private:
     std::shared_ptr<std::mutex> getPeerMutexLocked(const std::string& peer) {
-        auto [it, inserted] = peer_mutexes_.try_emplace(peer, nullptr);
-        if (!it->second) {
-            it->second = std::make_shared<std::mutex>();
+        auto it = peer_mutexes_.find(peer);
+        if (it != peer_mutexes_.end()) {
+            return it->second;
         }
-        return it->second;
+        auto peer_mutex = std::make_shared<std::mutex>();
+        peer_mutexes_.emplace(peer, peer_mutex);
+        return peer_mutex;
+    }
+
+    void releasePeerMutex(const std::string& peer, std::shared_ptr<std::mutex>& peer_mutex) {
+        if (!peer_mutex) {
+            return;
+        }
+        std::lock_guard<std::mutex> guard(mutex_);
+        auto it = peer_mutexes_.find(peer);
+        const bool same_mutex = it != peer_mutexes_.end() && it->second == peer_mutex;
+        // Drop this caller's reference under mutex_ as well: simultaneous exits
+        // must not both observe the other's reference and leave an orphan entry.
+        peer_mutex.reset();
+        // Acquisition and removal share mutex_, so no waiter can receive a new
+        // mutex while another caller still holds the old one.
+        if (same_mutex && it->second.use_count() == 1) {
+            peer_mutexes_.erase(it);
+        }
     }
 
     static const char* channelStateName(grpc_connectivity_state s) {
