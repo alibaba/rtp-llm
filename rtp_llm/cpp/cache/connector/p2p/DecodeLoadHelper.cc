@@ -7,6 +7,7 @@
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include <grpc++/grpc++.h>
+#include <arpa/inet.h>
 #include <cerrno>
 #include <chrono>
 #include <cstdlib>
@@ -73,7 +74,12 @@ bool parseWorkerAddr(const std::string& worker_addr, WorkerAddrParts* parts) {
         cache_store_port_text = worker_addr.substr(cache_col + 1, grpc_col - cache_col - 1);
         grpc_port_text        = worker_addr.substr(grpc_col + 1);
         if (host.find(':') != std::string::npos && host.find('.') != std::string::npos) {
-            return false;
+            // Dotted IPv4 tails are valid in IPv4-mapped IPv6 literals. Validate
+            // the literal instead of rejecting all mixed ':'/'.' host strings.
+            in6_addr ipv6_address{};
+            if (inet_pton(AF_INET6, host.c_str(), &ipv6_address) != 1) {
+                return false;
+            }
         }
     }
 

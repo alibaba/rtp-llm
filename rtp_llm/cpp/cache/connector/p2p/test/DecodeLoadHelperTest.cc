@@ -56,9 +56,11 @@ TEST(DecodeLoadHelperWorkerAddrTest, ConstructorParsesHostIpv4AndIpv6WorkerAddrs
         "prefill-decode.local:12346:23457",
         "[::1]:12347:23458",
         "fe80::1:12348:23459",
+        "::ffff:10.0.0.1:12349:23460",
+        "[::ffff:10.0.0.2]:12350:23461",
     });
 
-    ASSERT_EQ(caller.tp_worker_infos_.size(), 4);
+    ASSERT_EQ(caller.tp_worker_infos_.size(), 6);
     EXPECT_EQ(caller.tp_worker_infos_[0].ip(), "127.0.0.1");
     EXPECT_EQ(caller.tp_worker_infos_[0].cache_store_port(), 12345);
     EXPECT_EQ(caller.tp_worker_infos_[1].ip(), "prefill-decode.local");
@@ -67,6 +69,10 @@ TEST(DecodeLoadHelperWorkerAddrTest, ConstructorParsesHostIpv4AndIpv6WorkerAddrs
     EXPECT_EQ(caller.tp_worker_infos_[2].cache_store_port(), 12347);
     EXPECT_EQ(caller.tp_worker_infos_[3].ip(), "fe80::1");
     EXPECT_EQ(caller.tp_worker_infos_[3].cache_store_port(), 12348);
+    EXPECT_EQ(caller.tp_worker_infos_[4].ip(), "::ffff:10.0.0.1");
+    EXPECT_EQ(caller.tp_worker_infos_[4].cache_store_port(), 12349);
+    EXPECT_EQ(caller.tp_worker_infos_[5].ip(), "::ffff:10.0.0.2");
+    EXPECT_EQ(caller.tp_worker_infos_[5].cache_store_port(), 12350);
 }
 
 TEST(DecodeLoadHelperWorkerAddrTest, ConstructorRejectsMalformedWorkerAddrOrInvalidPorts) {
@@ -75,6 +81,8 @@ TEST(DecodeLoadHelperWorkerAddrTest, ConstructorRejectsMalformedWorkerAddrOrInva
     EXPECT_THROW(DecodeLoadHelper({"127.0.0.1:12345:not-a-port"}), rtp_llm::RTPException);
     EXPECT_THROW(DecodeLoadHelper({"[::1]12345:23456"}), rtp_llm::RTPException);
     EXPECT_THROW(DecodeLoadHelper({"fe80::1"}), rtp_llm::RTPException);
+    EXPECT_THROW(DecodeLoadHelper({"127.0.0.1:12345:23456:34567"}), rtp_llm::RTPException);
+    EXPECT_THROW(DecodeLoadHelper({"::ffff:999.0.0.1:12345:23456"}), rtp_llm::RTPException);
 }
 
 // ---------------------------- load ----------------------------
