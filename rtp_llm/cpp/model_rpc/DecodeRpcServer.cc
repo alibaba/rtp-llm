@@ -504,26 +504,29 @@ grpc::Status DecodeRpcServer::GenerateStreamCall(grpc::ServerContext*           
 
     // Keep the async prefill RPC alive for the handoff lifecycle only. StartLoad applies the first token to the
     // decode stream, so client output must come exclusively from pollStreamOutput().
-    if (prefill_caller_ctx) {
-        generate_context.error_status = pollStreamOutput(server_context,
-                                                         generate_context.request_key,
-                                                         response_writer,
-                                                         generate_context.getStream(),
-                                                         [&](bool& done) {
-                                                             done = prefill_caller_ctx->done();
-                                                             const auto remote = prefill_caller_ctx->firstError();
-                                                             const auto first = FirstError::earlier(stream->firstError(), remote);
-                                                             if (remote.error.hasError() && first.order == remote.order) {
-                                                                 generate_context.dependency_failure = remote;
-                                                             }
-                                                             return remote;
-                                                         });
-    } else {
-        // Prefill was admitted by Master. Decode still enters the normal
-        // engine path, which starts StartLoad/asyncRead for this handoff key.
-        generate_context.error_status = pollStreamOutput(
-            server_context, generate_context.request_key, response_writer, generate_context.getStream());
-    }
+    std::optional<StreamState> observed_state;
+    const auto check_progress = [&](bool& remote_done) {
+        const auto state = stream->getStatus();
+        if (!observed_state || state != *observed_state) {
+            observed_state = state;
+            RpcMetricsCollector collector;
+            generate_context.reportMetrics(collector);
+        }
+        if (!prefill_caller_ctx) {
+            remote_done = true;
+            return FirstError::Snapshot{};
+        }
+        remote_done = prefill_caller_ctx->done();
+        const auto remote = prefill_caller_ctx->firstError();
+        const auto first = FirstError::earlier(stream->firstError(), remote);
+        if (remote.error.hasError() && first.order == remote.order) {
+            generate_context.dependency_failure = remote;
+        }
+        return remote;
+    };
+    // Also sample the Master-enqueued path, which has no Prefill RPC to poll.
+    generate_context.error_status = pollStreamOutput(
+        server_context, generate_context.request_key, response_writer, generate_context.getStream(), check_progress);
     prefill_cancel_guard.completed = generate_context.error_status.ok() && !server_context->IsCancelled()
                                      && !stream->hasError()
                                      && (stream->getStatus() == StreamState::FINISHED

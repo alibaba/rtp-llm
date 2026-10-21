@@ -38,6 +38,19 @@ public:
         return TaskPhase::RECEIVED;
     }
 
+    int loadingCacheRequestCount() {
+        std::shared_lock<std::shared_mutex> lock(read_write_lock_);
+        int count = 0;
+        // Only live RPC streams count. Cancellation overlays may outlive the
+        // RPC while physical transfer cleanup is pending and are not load.
+        for (const auto& [id, entry] : running_streams_) {
+            if (entry.stream && entry.stream->getStatus() == StreamState::LOADING_CACHE) {
+                ++count;
+            }
+        }
+        return count;
+    }
+
     EngineScheduleInfo getEngineScheduleInfo(int64_t latest_finished_version) {
         std::shared_lock<std::shared_mutex> lock(read_write_lock_);
         EngineScheduleInfo                  info;

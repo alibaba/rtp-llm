@@ -267,6 +267,45 @@ TEST(RpcWriterCancellationTest, KvLoadTraceKeepsCompletedSuccessAndAttributesDep
     EXPECT_EQ(failed_loads, 1u);
 }
 
+class ObservedLoadingStream: public SingleOutputStream {
+public:
+    std::atomic<StreamState> observed{StreamState::LOADING_CACHE};
+    StreamState getStatus() const override {
+        return observed.load();
+    }
+};
+
+TEST(RpcWriterCancellationTest, StageMetricsSampleLiveLoadingStreamsAndExcludeCancelOverlays) {
+    kmonitor::MetricsReporterPtr reporter;
+    auto meta = std::make_shared<RpcServerRuntimeMeta>();
+    auto first = std::make_shared<ObservedLoadingStream>();
+    auto second = std::make_shared<ObservedLoadingStream>();
+    meta->enqueue(56, first);
+    meta->enqueue(57, second);
+    meta->markCancellationPending(TaskIdentity{58, -1}, false);
+    std::atomic<size_t> onflight{2};
+    GenerateContext context(56, 0, nullptr, reporter, meta);
+    context.onflight_requests = &onflight;
+    RpcMetricsCollector stage;
+    stage.onflight_request = 999;
+    stage.loading_cache_request = 999;
+    context.reportMetrics(stage);
+    EXPECT_EQ(stage.onflight_request, 2);
+    EXPECT_EQ(stage.loading_cache_request, 2);
+
+    first->observed.store(StreamState::RUNNING);
+    RpcMetricsCollector basic;
+    context.collectBasicMetrics(basic);
+    EXPECT_EQ(basic.loading_cache_request, 1);
+    second->observed.store(StreamState::FINISHED);
+    meta->dequeue(57, second);
+    onflight.store(1);
+    context.reportMetrics(stage);
+    EXPECT_EQ(stage.onflight_request, 1);
+    EXPECT_EQ(stage.loading_cache_request, 0);
+    context.markRpcHandlingCompleted();
+}
+
 TEST(RpcWriterCancellationTest, RequestGaugeSamplesLiveAtomicValue) {
     std::atomic<size_t>          onflight_requests{3};
     kmonitor::MetricsReporterPtr metrics_reporter;

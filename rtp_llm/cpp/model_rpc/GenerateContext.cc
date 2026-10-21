@@ -192,12 +192,17 @@ void GenerateContext::collectBasicMetrics(RpcMetricsCollector& collector) {
         collector.error_code = errorInfoFromGrpcStatus(error_status).code();
     }
     collector.onflight_request   = onflight_requests ? static_cast<int64_t>(onflight_requests->load()) : 0;
+    collector.loading_cache_request = meta ? meta->loadingCacheRequestCount() : 0;
     collector.total_rt_us        = executeTimeMs() * 1000;
     collector.retry_times        = retry_times;
     collector.retry_cost_time_ms = retry_cost_time_ms;
 }
 
 void GenerateContext::reportMetrics(RpcMetricsCollector& collector) {
+    // Stage collectors also carry gauges; refresh them instead of publishing
+    // their default zero over other active requests.
+    collector.onflight_request = onflight_requests ? static_cast<int64_t>(onflight_requests->load()) : 0;
+    collector.loading_cache_request = meta ? meta->loadingCacheRequestCount() : 0;
     if (metrics_reporter) {
         metrics_reporter->report<RpcMetrics, RpcMetricsCollector>(nullptr, &collector);
     }
