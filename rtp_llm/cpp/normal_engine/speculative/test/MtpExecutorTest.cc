@@ -576,17 +576,17 @@ private:
     std::function<void(const GptModelInputs&)> input_observer_;
     std::shared_ptr<std::vector<std::string>>  event_log_;
     std::string                                event_name_;
-    size_t prepare_attention_count_ = 0;
-    bool                                      speculative_target_commit_enabled_  = false;
-    bool                                      speculative_target_prepare_throws_  = false;
-    bool                                      speculative_target_commit_throws_   = false;
-    bool                                      speculative_target_state_committed_ = false;
-    bool                                      speculative_target_undo_retained_   = false;
-    std::string                               speculative_target_prepare_error_;
-    torch::Tensor                             prepared_accept_len_;
-    size_t                                    speculative_target_commit_count_   = 0;
-    size_t                                    speculative_target_abort_count_    = 0;
-    size_t                                    speculative_target_finalize_count_ = 0;
+    size_t                                     prepare_attention_count_            = 0;
+    bool                                       speculative_target_commit_enabled_  = false;
+    bool                                       speculative_target_prepare_throws_  = false;
+    bool                                       speculative_target_commit_throws_   = false;
+    bool                                       speculative_target_state_committed_ = false;
+    bool                                       speculative_target_undo_retained_   = false;
+    std::string                                speculative_target_prepare_error_;
+    torch::Tensor                              prepared_accept_len_;
+    size_t                                     speculative_target_commit_count_   = 0;
+    size_t                                     speculative_target_abort_count_    = 0;
+    size_t                                     speculative_target_finalize_count_ = 0;
 };
 
 class FakeFastTopKSampler: public spec::FastTopKSampler {
@@ -1391,8 +1391,8 @@ void MtpExecutorTest::runSingleBatchPrefillScenario(bool simulate_cp_mutation, b
     if (simulate_cp_mutation) {
         components.executor->parallelism_config_.prefill_cp_config.method = CPRotateMethod::ALL_GATHER;
     }
-    int  profile_starts           = 0;
-    int  profile_finishes         = 0;
+    int profile_starts   = 0;
+    int profile_finishes = 0;
     components.executor->setModelForwardCallbacks([&]() { ++profile_starts; }, [&]() { ++profile_finishes; });
     ASSERT_TRUE(components.executor->process({}).ok());
     EXPECT_EQ(profile_starts, 0);
@@ -1507,7 +1507,10 @@ void MtpExecutorTest::runSingleBatchPrefillScenario(bool simulate_cp_mutation, b
     EXPECT_EQ(profile_finishes, 1);
 
     // check stream result
-    checkOutput(stream1, {0, 1, 2, 3, 1}, {1, 2}, {0.0, 0.0, 1.0, 0.0},
+    checkOutput(stream1,
+                {0, 1, 2, 3, 1},
+                {1, 2},
+                {0.0, 0.0, 1.0, 0.0},
                 simulate_cp_mutation ? std::vector<float>{0.17, 0.18} : std::vector<float>{0.27, 0.28});
     if (simulate_cp_mutation) {
         EXPECT_EQ(target_model->forwardCount(), 1);
@@ -2742,7 +2745,7 @@ TEST_F(MtpExecutorTest, testDSparkDraftZeroTemperatureUsesClampedFullSoftmaxQ) {
     auto base_logits = torch::tensor({0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.4f, 0.3f, 0.2f, 0.1f, 0.2f, 0.4f, 0.3f})
                            .reshape({1, gamma, vocab_size})
                            .to(torch::kCUDA);
-    auto anchors     = torch::tensor({1}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+    auto anchors = torch::tensor({1}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
 
     auto output =
         components.executor->sampleDSparkDraft(stream_groups, base_logits.reshape({gamma, vocab_size}), anchors);
@@ -2771,8 +2774,8 @@ TEST_F(MtpExecutorTest, testDSparkDraftGreedyRequestsCollapseQToArgmaxOneHot) {
     auto base_logits = torch::tensor({0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.4f, 0.3f, 0.2f, 0.1f, 0.2f, 0.4f, 0.3f})
                            .reshape({1, gamma, vocab_size})
                            .to(torch::kCUDA);
-    auto anchors     = torch::tensor({1}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
-    auto expected_q  = torch::softmax(base_logits / 1.0e-6f, -1);
+    auto anchors    = torch::tensor({1}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+    auto expected_q = torch::softmax(base_logits / 1.0e-6f, -1);
 
     // do_sample=false is greedy even with a hot request temperature: the target
     // takes its argmax and acceptance requires an exact token match.
@@ -2836,7 +2839,7 @@ TEST_F(MtpExecutorTest, testDSparkDraftUsesDenseSequentialMarkovDistribution) {
     auto base_logits = torch::tensor({-10.0f, -10.0f, -10.0f, 10.0f, 0.1f, 0.4f, 0.3f, 0.2f, 0.2f, 0.1f, 0.4f, 0.3f})
                            .reshape({1, gamma, vocab_size})
                            .to(cuda_options);
-    auto anchors     = torch::tensor({1}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+    auto anchors = torch::tensor({1}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
 
     auto output =
         components.executor->sampleDSparkDraft(stream_groups, base_logits.reshape({gamma, vocab_size}), anchors);

@@ -12,7 +12,9 @@ def exact_head_rms_norm(
     checkpoint tensor and is broadcast across heads.
     """
     if x.is_cuda and torch.version.hip is None:
-        from .norm_triton import try_indexer_rmsnorm
+        from rtp_llm.models_py.triton_kernels.common.zero_centered_rms_norm import (
+            try_indexer_rmsnorm,
+        )
 
         result = try_indexer_rmsnorm(x, gamma, eps)
         if result is not None:
@@ -22,7 +24,7 @@ def exact_head_rms_norm(
     return (out * (1.0 + gamma.float())).type_as(x)
 
 
-class Qwen4ExpFusedQKRMSNorm(nn.Module):
+class ZeroCenteredFusedQKRMSNorm(nn.Module):
     """Exact-parity replacement for ``FusedQKRMSNorm`` on the fused qkv tensor.
 
     Interface and in-place contract match the fused version so it can be dropped
@@ -56,7 +58,7 @@ class Qwen4ExpFusedQKRMSNorm(nn.Module):
         self.kv_size = kv_head_num * size_per_head
 
     @classmethod
-    def replacing(cls, fused: nn.Module) -> "Qwen4ExpFusedQKRMSNorm":
+    def replacing(cls, fused: nn.Module) -> "ZeroCenteredFusedQKRMSNorm":
         """Build from an already-constructed ``FusedQKRMSNorm``.
 
         Both the CUDA and ROCm variants expose the same fields, so this stays
@@ -75,7 +77,7 @@ class Qwen4ExpFusedQKRMSNorm(nn.Module):
         assert hidden_states.dim() == 2
         rows, width = hidden_states.shape
         if hidden_states.is_cuda and torch.version.hip is None:
-            from rtp_llm.models_py.modules.qwen4_exp.qsa.norm_triton import (
+            from rtp_llm.models_py.triton_kernels.common.zero_centered_rms_norm import (
                 is_small_qk_supported,
                 small_qk_rmsnorm_,
             )
@@ -97,7 +99,9 @@ class Qwen4ExpFusedQKRMSNorm(nn.Module):
                     self.size_per_head,
                     self.eps,
                 )
-            from .norm_triton import try_prefill_qk_rmsnorm_
+            from rtp_llm.models_py.triton_kernels.common.zero_centered_rms_norm import (
+                try_prefill_qk_rmsnorm_,
+            )
 
             normalized = try_prefill_qk_rmsnorm_(
                 hidden_states,

@@ -4,16 +4,16 @@ from unittest.mock import patch
 import torch
 
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import scaled_fp8_per_tensor_quant
-from rtp_llm.models_py.modules.qwen4_exp.fp8_dense import (
-    Qwen4Fp8Linear,
+from rtp_llm.models_py.modules.base.common.fp8_linear import (
+    Fp8Linear,
     _quantize_projection_input,
     project_fp8_pair,
 )
-from rtp_llm.models_py.modules.qwen4_exp.fp8_small_quant_triton import (
+from rtp_llm.models_py.triton_kernels.common.fp8_small_quant import (
     try_small_fp8_quant,
 )
 
-MODULE = "rtp_llm.models_py.modules.qwen4_exp.fp8_small_quant_triton"
+MODULE = "rtp_llm.models_py.triton_kernels.common.fp8_small_quant"
 
 
 class Fp8SmallQuantTest(unittest.TestCase):
@@ -182,7 +182,7 @@ class Fp8SmallQuantTest(unittest.TestCase):
         for rows in (1, 3, 4, 8, 16, 32):
             x = torch.randn(rows, 2560, device="cuda", dtype=torch.bfloat16)
             layers = [
-                Qwen4Fp8Linear(
+                Fp8Linear(
                     (torch.randn(512, 2560, device="cuda") * 0.1).to(
                         torch.float8_e4m3fn
                     ),
@@ -220,7 +220,7 @@ class Fp8SmallQuantTest(unittest.TestCase):
             self.assertTrue(torch.equal(before, output.view(torch.uint8)))
 
     def test_shared_down_full_projection_dynamic_graph_matches_native(self):
-        layer = Qwen4Fp8Linear(
+        layer = Fp8Linear(
             (torch.randn(2560, 640, device="cuda") * 0.1).to(torch.float8_e4m3fn),
             torch.tensor([0.11743], device="cuda"),
             role="PDFUSION",

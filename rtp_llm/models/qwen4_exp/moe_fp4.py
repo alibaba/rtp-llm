@@ -27,7 +27,7 @@ class Qwen4MoeFp4WeightInfo(ModelWeightInfo):
             raise ValueError(
                 "Qwen4 requires the complete FP8/NVFP4 recipe from official FP8 source"
             )
-        from rtp_llm.models.qwen4_exp.full_fp8_weight import Qwen4Fp8StorageWeight
+        from rtp_llm.model_loader.fp8_weight import Fp8StorageWeight
 
         layers = []
         for weights in self.layer_weights:
@@ -38,7 +38,7 @@ class Qwen4MoeFp4WeightInfo(ModelWeightInfo):
                         (
                             child.create(child, quant_config)
                             if child.name in (W.moe_w1, W.moe_w2)
-                            else Qwen4Fp8StorageWeight(child)
+                            else Fp8StorageWeight(child)
                         )
                         for child in weight.sub_weights.values()
                     ]
@@ -48,7 +48,7 @@ class Qwen4MoeFp4WeightInfo(ModelWeightInfo):
                         weight, Fp8BlockWiseQuantConfig(is_quanted=False)
                     )
                 elif weight.name != W.qwen4_ple_ngram_shards:
-                    weight = Qwen4Fp8StorageWeight(weight)
+                    weight = Fp8StorageWeight(weight)
                 layer.append(weight)
             layers.append(layer)
-        return ModelWeightInfo([Qwen4Fp8StorageWeight(w) for w in self.weights], layers)
+        return ModelWeightInfo([Fp8StorageWeight(w) for w in self.weights], layers)

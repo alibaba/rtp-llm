@@ -3,7 +3,7 @@ from unittest.mock import patch
 
 import torch
 
-from rtp_llm.models_py.modules.qwen4_exp.fp8_dense import Qwen4Fp8Linear
+from rtp_llm.models_py.modules.base.common.fp8_linear import Fp8Linear
 from rtp_llm.models_py.modules.qwen4_exp.gdn_prefill_norm_triton import (
     Qwen4PrefillGatedNorm,
 )
@@ -50,7 +50,7 @@ class GdnPrefillNormTest(unittest.TestCase):
                 self.assertTrue(
                     torch.equal(actual.view(torch.int16), expected.view(torch.int16))
                 )
-                projection = Qwen4Fp8Linear(
+                projection = Fp8Linear(
                     (torch.randn(2560, width, device="cuda") * 0.1).to(
                         torch.float8_e4m3fn
                     ),

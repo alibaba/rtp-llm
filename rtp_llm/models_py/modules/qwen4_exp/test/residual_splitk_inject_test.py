@@ -4,14 +4,14 @@ from unittest.mock import patch
 import torch
 import torch.nn.functional as F
 
-from rtp_llm.models_py.modules.qwen4_exp.residual.gated_residual_splitk_inject import (
-    try_splitk_down_inject,
-)
 from rtp_llm.models_py.modules.qwen4_exp.test.residual_norm_fp8_test import (
     ResidualNormFp8Test,
 )
+from rtp_llm.models_py.triton_kernels.common.gated_residual_splitk_inject import (
+    try_splitk_down_inject,
+)
 
-MODULE = "rtp_llm.models_py.modules.qwen4_exp.residual.gated_residual_splitk_inject"
+MODULE = "rtp_llm.models_py.triton_kernels.common.gated_residual_splitk_inject"
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
@@ -63,7 +63,7 @@ class ResidualSplitKInjectTest(unittest.TestCase):
     def test_prefill_mix_tiles_preserve_complete_consumer_and_live_graph(self):
         import triton
 
-        from rtp_llm.models_py.modules.qwen4_exp.residual import (
+        from rtp_llm.models_py.triton_kernels.common import (
             gated_residual_mix_triton as kernels,
         )
 

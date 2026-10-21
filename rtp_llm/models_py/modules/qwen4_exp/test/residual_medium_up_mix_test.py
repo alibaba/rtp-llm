@@ -5,18 +5,16 @@ from unittest.mock import patch
 
 import torch
 
-from rtp_llm.models_py.modules.qwen4_exp.fp8_dense import Qwen4Fp8Linear
-from rtp_llm.models_py.modules.qwen4_exp.residual.gated_residual_medium_up_mix_triton import (
+from rtp_llm.models_py.modules.base.common.fp8_linear import Fp8Linear
+from rtp_llm.models_py.modules.qwen4_exp.test import residual_norm_fp8_test as oracle
+from rtp_llm.models_py.triton_kernels.common.gated_residual_medium_up_mix_triton import (
     try_fp8_hc_medium_up_mix,
 )
-from rtp_llm.models_py.modules.qwen4_exp.residual.gated_residual_mix_triton import (
+from rtp_llm.models_py.triton_kernels.common.gated_residual_mix_triton import (
     fused_mix_reduce,
 )
-from rtp_llm.models_py.modules.qwen4_exp.test import residual_norm_fp8_test as oracle
 
-MODULE = (
-    "rtp_llm.models_py.modules.qwen4_exp.residual.gated_residual_medium_up_mix_triton"
-)
+MODULE = "rtp_llm.models_py.triton_kernels.common.gated_residual_medium_up_mix_triton"
 
 
 class MediumHCConsumerTest(unittest.TestCase):
@@ -35,7 +33,7 @@ class MediumHCConsumerTest(unittest.TestCase):
                     sw = torch.tensor([scale], device="cuda")
                     norm = torch.randn(rows, 10240, device="cuda", dtype=torch.bfloat16)
                     expected = fused_mix_reduce(
-                        Qwen4Fp8Linear(w, sw, role="DECODE")(x), norm, 4
+                        Fp8Linear(w, sw, role="DECODE")(x), norm, 4
                     )
                     actual = try_fp8_hc_medium_up_mix(x, w, sw, norm, 4)
                     self.assertIsNotNone(actual)

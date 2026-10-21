@@ -4,8 +4,12 @@ import unittest
 
 import torch
 
-from rtp_llm.models_py.modules.qwen4_exp.qsa.norm import Qwen4ExpFusedQKRMSNorm
-from rtp_llm.models_py.modules.qwen4_exp.qsa.norm_triton import is_small_qk_supported
+from rtp_llm.models_py.modules.base.common.zero_centered_rms_norm import (
+    ZeroCenteredFusedQKRMSNorm,
+)
+from rtp_llm.models_py.triton_kernels.common.zero_centered_rms_norm import (
+    is_small_qk_supported,
+)
 
 
 class GroupedQKNormTest(unittest.TestCase):
@@ -25,7 +29,7 @@ class GroupedQKNormTest(unittest.TestCase):
             for dtype in (torch.bfloat16, torch.float32):
                 q = torch.randn(256, device="cuda", dtype=dtype) * 0.1
                 k = torch.randn_like(q) * 0.1
-                module = Qwen4ExpFusedQKRMSNorm(q, k, heads, 1, 256)
+                module = ZeroCenteredFusedQKRMSNorm(q, k, heads, 1, 256)
                 for rows in (1, 3, 4, 8, 16, 20, 24, 28, 31, 32):
                     with self.subTest(heads=heads, gamma=dtype, rows=rows):
                         x = torch.randn(
@@ -54,7 +58,7 @@ class GroupedQKNormTest(unittest.TestCase):
                 )
                 q = torch.full((256,), 0.003, device="cuda", dtype=torch.bfloat16)
                 k = q.clone()
-                module = Qwen4ExpFusedQKRMSNorm(q, k, heads, 1, 256)
+                module = ZeroCenteredFusedQKRMSNorm(q, k, heads, 1, 256)
                 for _ in range(3):
                     module(x)
                 graph = torch.cuda.CUDAGraph()
@@ -76,7 +80,7 @@ class GroupedQKNormTest(unittest.TestCase):
         for heads in (6, 12):
             q = torch.randn(256, device="cuda", dtype=torch.bfloat16)
             k = q.clone()
-            module = Qwen4ExpFusedQKRMSNorm(q, k, heads, 1, 256)
+            module = ZeroCenteredFusedQKRMSNorm(q, k, heads, 1, 256)
             for rows in (33, 4093):
                 x = torch.randn(
                     rows, (heads + 2) * 256, device="cuda", dtype=torch.bfloat16

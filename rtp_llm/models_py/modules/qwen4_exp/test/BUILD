@@ -11,13 +11,6 @@ py_test(
 )
 
 py_test(
-    name = "gated_residual_test",
-    srcs = ["gated_residual_test.py"],
-    deps = ["//rtp_llm:testlib", ":math_references"],
-    exec_properties = {'gpu':'A10'},
-)
-
-py_test(
     name = "residual_stream_test",
     srcs = ["residual_stream_test.py"],
     deps = ["//rtp_llm:testlib", ":math_references"],
@@ -207,13 +200,6 @@ py_test(
 py_test(
     name = "sparse_fmha_test",
     srcs = ["sparse_fmha_test.py", "reference/sparse_fmha.py", "reference/sparse_attention.py"],
-    deps = ["//rtp_llm:testlib", ":math_references"],
-    exec_properties = {'gpu':'A10'},
-)
-
-py_test(
-    name = "norm_triton_test",
-    srcs = ["norm_triton_test.py"],
     deps = ["//rtp_llm:testlib", ":math_references"],
     exec_properties = {'gpu':'A10'},
 )

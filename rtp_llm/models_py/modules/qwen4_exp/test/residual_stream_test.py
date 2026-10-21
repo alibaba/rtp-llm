@@ -2,8 +2,8 @@ import unittest
 
 import torch
 
-from rtp_llm.models_py.modules.qwen4_exp.residual.gated_residual import (
-    Qwen4ExpGatedResidual,
+from rtp_llm.models_py.modules.hybrid.gated_residual import (
+    GatedResidual,
     inject_into_residual,
 )
 
@@ -17,7 +17,7 @@ def _make_unit(seed, with_inject=True):
     torch.manual_seed(seed)
     hc_hidden = _HC * _HIDDEN
     inject = torch.randn(_HC, hc_hidden) * 0.05 if with_inject else None
-    return Qwen4ExpGatedResidual(
+    return GatedResidual(
         torch.randn(hc_hidden) * 0.1,
         torch.randn(_LOWRANK, hc_hidden) * 0.05,
         torch.randn(hc_hidden, _LOWRANK) * 0.05,

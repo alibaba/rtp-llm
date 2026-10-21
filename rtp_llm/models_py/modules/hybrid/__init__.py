@@ -1,14 +1,18 @@
-"""
-Hybrid modules - assembly of base/factory modules for reuse across different models.
-These modules are architecture-agnostic at this level and compose base/factory modules.
-"""
+"""Reusable assemblies of base and factory modules, loaded on first use."""
 
-from rtp_llm.models_py.modules.hybrid.causal_attention import CausalAttention
-from rtp_llm.models_py.modules.hybrid.dense_mlp import DenseMLP
-from rtp_llm.models_py.modules.hybrid.mla_attention import MlaAttention
+from importlib import import_module
 
-__all__ = [
-    "CausalAttention",
-    "DenseMLP",
-    "MlaAttention",
-]
+_MODULES = {
+    "CausalAttention": "causal_attention",
+    "DenseMLP": "dense_mlp",
+    "MlaAttention": "mla_attention",
+}
+__all__ = list(_MODULES)
+
+
+def __getattr__(name: str):
+    if name not in _MODULES:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    value = getattr(import_module(f"{__name__}.{_MODULES[name]}"), name)
+    globals()[name] = value
+    return value

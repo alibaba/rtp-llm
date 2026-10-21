@@ -5,13 +5,13 @@ import torch
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.draft_head_graph import (
     DraftHeadGraph,
 )
-from rtp_llm.models_py.modules.qwen4_exp.fp8_dense import Qwen4Fp8Linear
+from rtp_llm.models_py.modules.base.common.fp8_linear import Fp8Linear
 
 
 class DraftHeadGraphTest(unittest.TestCase):
     def test_dynamic_graph_and_alternating_batch_keys_consume_once(self):
         torch.manual_seed(20261019)
-        head = Qwen4Fp8Linear(
+        head = Fp8Linear(
             (torch.randn(4096, 2560, device="cuda") * 0.1).to(torch.float8_e4m3fn),
             torch.tensor([0.019713], device="cuda"),
             role="DECODE",

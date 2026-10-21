@@ -6,7 +6,7 @@ import torch
 import triton
 import triton.language as tl
 
-from rtp_llm.models_py.modules.qwen4_exp.residual.gated_residual_norm_triton import (
+from rtp_llm.models_py.triton_kernels.common.gated_residual_norm_triton import (
     _norm_fp8_scale,
 )
 

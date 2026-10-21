@@ -3,7 +3,7 @@ import unittest
 import torch
 import torch.nn.functional as F
 
-from rtp_llm.models_py.modules.qwen4_exp.residual.gated_residual_down_triton import (
+from rtp_llm.models_py.triton_kernels.common.gated_residual_down_triton import (
     separate_down_inject_epilogue,
 )
 

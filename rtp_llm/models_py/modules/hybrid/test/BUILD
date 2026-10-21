@@ -168,3 +168,10 @@ py_test (
     ],
     exec_properties = {"gpu": "H20_CU13"},
 )
+
+py_test(
+    name = "gated_residual_test",
+    srcs = ["gated_residual_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    exec_properties = {"gpu": "A10"},
+)

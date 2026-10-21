@@ -14,7 +14,8 @@ from unittest.mock import patch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
-from rtp_llm.models_py.modules.qwen4_exp import cpu_target_status as status
+from rtp_llm.models_py.distributed import cpu_status as status
+from rtp_llm.models_py.modules.qwen4_exp import cpu_target_status as policy
 from rtp_llm.ops.compute_ops import rtp_llm_ops as ops
 
 
@@ -30,7 +31,7 @@ def _startup_worker(rank, store):
     # This uses the actual native bindings and shared-file bootstrap. Recreated
     # mappings must restart at generation one; close must not poison a peer.
     for cycle in range(2):
-        owner = status.create_cpu_target_status(group, ops, timeout_ms=10000)
+        owner = status.create_cpu_tp_status(group, ops, timeout_ms=10000)
         for generation in range(1, 10001):
             if cycle and generation % 137 == rank:
                 time.sleep(0.0001)
@@ -52,7 +53,7 @@ def _startup_worker(rank, store):
 
     with patch.object(status, "_open_mapping", fail_open):
         try:
-            status.create_cpu_target_status(group, ops)
+            status.create_cpu_tp_status(group, ops)
         except RuntimeError as exc:
             assert "injected rank1 mapping failure" in str(exc)
         else:
@@ -75,11 +76,9 @@ class CpuTargetStatusTest(unittest.TestCase):
         pc = SimpleNamespace(
             role_type="DECODE", tp_size=2, dp_size=1, local_world_size=2
         )
-        with patch.object(
-            status, "create_cpu_target_status", side_effect=AssertionError
-        ):
+        with patch.object(policy, "create_cpu_tp_status", side_effect=AssertionError):
             with patch.dict(os.environ, {"QWEN4_CPU_TARGET_STATUS": "0"}):
-                self.assertIsNone(status.prepare_cpu_target_status(config, pc))
+                self.assertIsNone(policy.prepare_cpu_target_status(config, pc))
             with patch.dict(os.environ, {"QWEN4_CPU_TARGET_STATUS": "1"}):
                 for key, value in [
                     ("role_type", "PREFILL"),
@@ -88,9 +87,9 @@ class CpuTargetStatusTest(unittest.TestCase):
                     ("local_world_size", 4),
                 ]:
                     altered = SimpleNamespace(**{**vars(pc), key: value})
-                    self.assertIsNone(status.prepare_cpu_target_status(config, altered))
+                    self.assertIsNone(policy.prepare_cpu_target_status(config, altered))
                 self.assertIsNone(
-                    status.prepare_cpu_target_status(SimpleNamespace(is_mtp=True), pc)
+                    policy.prepare_cpu_target_status(SimpleNamespace(is_mtp=True), pc)
                 )
 
     def test_native_wait_releases_gil_and_preserves_false(self):
@@ -120,7 +119,7 @@ class CpuTargetStatusTest(unittest.TestCase):
         mapping, pointer = self.mapping()
         self.assertEqual(ops.cpu_status_reduce(pointer, 0, 1, 1, 20), -errno.ETIMEDOUT)
         self.assertEqual(ops.cpu_status_reduce(pointer, 1, 1, 1, 20), -errno.ECANCELED)
-        owner = status.CpuTargetStatus(ops, mapping, 1, timeout_ms=20)
+        owner = status.CpuTpStatus(ops, mapping, 1, timeout_ms=20)
         with self.assertRaisesRegex(RuntimeError, "TP2 CPU status failed"):
             owner.reduce(True)
 

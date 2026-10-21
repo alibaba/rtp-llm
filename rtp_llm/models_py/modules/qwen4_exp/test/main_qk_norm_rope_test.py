@@ -4,10 +4,12 @@ from types import SimpleNamespace
 import torch
 from libth_transformer_config import AttentionConfigs
 
+from rtp_llm.models_py.modules.base.common.zero_centered_rms_norm import (
+    ZeroCenteredFusedQKRMSNorm,
+)
 from rtp_llm.models_py.modules.qwen4_exp.qsa.main_qk_norm_rope import (
     try_main_qk_norm_rope,
 )
-from rtp_llm.models_py.modules.qwen4_exp.qsa.norm import Qwen4ExpFusedQKRMSNorm
 from rtp_llm.ops import RopeStyle
 from rtp_llm.ops.fused_rope_kvcache_op import (
     FusedRopeAttnParams,
@@ -72,7 +74,7 @@ class MainQkNormRopeTest(unittest.TestCase):
             False,
             torch.bfloat16,
         )
-        norm = Qwen4ExpFusedQKRMSNorm(
+        norm = ZeroCenteredFusedQKRMSNorm(
             torch.randn(256, device="cuda") * 0.07,
             torch.randn(256, device="cuda") * 0.07,
             heads,
