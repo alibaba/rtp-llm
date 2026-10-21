@@ -11,20 +11,32 @@ KVCM（外部 KV Cache Manager）、LOCAL_STANDBY（KVCM 的本地兜底）。
 
 ### 请求 ID 协议
 
-Worker Status 的共享 PB 协议定义为 `string TaskInfoPB.request_id = 1`，
-Java、C++ 和 Python 使用同一字段定义生成代码。
-对 Worker Status 和客户端请求中的字符串 ID，`RequestId.parse` 优先保留原始字符串；
-字符串缺失时，从同字段编号的 unknown fields 中读取旧 int64 编码并转换成字符串；两者都缺失时会报错。
+Worker Status 的共享 PB 协议使用 `int64 TaskInfoPB.request_id = 1` 与
+`string TaskInfoPB.request_id_str = 34`。RTP Engine 在 `request_id` 中发送数字请求 ID；
+DashLLM 在 `request_id_str` 中发送原始业务字符串 ID，数字字段保持默认值 0。
+Java、C++ 和 Python 使用同一字段定义生成代码。`RequestId.parse` 优先读取非空白的
+`request_id_str`；该字段为空时将 `request_id` 转为字符串。proto3 的 int64
+默认值为 0，因此两个字段均未提供时解析得到字符串 `"0"`。
 Running 和 Finished 任务表均以解析后的 ID 为键，缓存反馈与调度请求使用同一 ID 关联。
 Master 的请求模型、调度、取消、状态查询、资源预留和 tracing 接口均只接收字符串 ID。
-客户端的 Schedule、Cancel、GetRequestState gRPC 请求使用相同的边界兼容读取；HTTP JSON 的数字 ID 在反序列化请求模型时转换成字符串。
+Schedule、Cancel、GetRequestState 请求 PB 均使用编号 1 的 int64 `request_id`，
+并提供 `request_id_str` 传输字符串 ID。当前前端的 Schedule 和 Cancel 只填写 int64 字段；
+Rust MasterClient 的 Schedule 和 Cancel 填写业务字符串字段，数字字段保持默认值 0。
+Schedule 的 session-affinity ID、bucket ID、type 分别使用字段编号 22、23、24，
+与编号 21 的字符串请求 ID 独立；Follower 转发保留这些字段。
+FlexLB 收到请求后优先读取非空白的 `request_id_str`，否则读取 int64 字段。
+生命周期记录保存 Schedule 请求中的 int64 字段值；字段未填写时该值为 0。生命周期响应
+填写解析后的 `request_id_str` 和原始 int64 `request_id`。
+例如请求带 `request_id=7, request_id_str="007"` 时，响应分别返回 `7` 和 `"007"`；
+只带 `request_id_str="007"` 时，响应填写字符串字段，int64 字段保持默认值 0。
+HTTP JSON 的数字 ID 在反序列化请求模型时转换成字符串。
 Engine 的生成、取消、结果拉取和 KV 传输协议仍使用现有 int64 字段；
 相关转换仅发生在对接这些 Engine RPC 的边界，不用于 Master 内部请求标识。
 `GenerateInputPB`、`EnqueueBatchSuccessPB` 和 `EnqueueBatchErrorPB` 的 ID 仍是 int64，
 对应的读取重载直接转换该字段；字段未设置时按 PB 默认值返回字符串 `"0"`。
 BATCH Generation 的 Schedule 入口在入队前检查 `generate_input` 是有效的 GenerateInputPB，
 并要求字符串 request_id 与该 PB 的 int64 ID 的规范十进制写法完全一致；`"007"`、非数字、
-越界或不一致的 ID 返回 INVALID_REQUEST。整数兼容读取仍保留，大于 JS 精确整数范围的 ID
+越界或不一致的 ID 返回 INVALID_REQUEST。大于 JS 精确整数范围的 ID
 通过字符串与支持 int64 的 protobuf 编码传输，不转换为浮点数。
 NON_BATCH 的仅路由请求和 ENCODER 请求仍保留原始字符串，不需要 Engine 生成 payload。
 对当前 Engine 的取消 RPC 单独要求规范 int64 字符串，拒绝 `"007"` 被归一化后误取消 ID `"7"`。

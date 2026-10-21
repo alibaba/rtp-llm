@@ -306,9 +306,11 @@ logger group `flexlb` 包含 `org.flexlb`、`flexlbLogger`、`syncLogger`、
 
 ### 请求 PV 与回放
 
-gRPC Schedule 在校验请求 ID 前创建基础上下文，记录入口时间、请求大小和 arrival。
-请求 ID 在入口解析一次，业务请求、调度回调和转发补偿复用解析结果。缺少 ID 的请求返回
-`INVALID_ARGUMENT`，不获取活跃请求计数 token；拒绝分支记录 completion 和 `ENTRY_ERROR` PV，
+gRPC Schedule 在读取请求 ID 前创建基础上下文，记录入口时间、请求大小和 arrival。
+请求 ID 优先从非空白的 `request_id_str` 读取，否则将 int64 `request_id` 转为字符串；
+两个字段均未提供时使用 int64 的 proto3 默认值 0，解析结果为 `"0"`。
+业务请求、调度回调和转发补偿复用解析结果。
+入口拒绝分支记录 completion 和 `ENTRY_ERROR` PV，
 即使响应 observer 抛出异常也执行收尾。业务请求初始化失败时，基础上下文仍用于完成统计与 PV。
 同一业务请求先调度 Encoder、再调度 Generation 时，Schedule PV 的 `phase` 区分两次决策，
 `server_status.role` 保留实际选中的角色。Encoder 选点失败和 WorkerStatus 生命周期异常

@@ -1,7 +1,10 @@
 package org.flexlb.engine.grpc;
 
 import com.google.protobuf.CodedOutputStream;
+import com.google.protobuf.DescriptorProtos;
 import com.google.protobuf.Descriptors;
+import com.google.protobuf.DynamicMessage;
+import com.google.protobuf.Message;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.junit.jupiter.api.Test;
 
@@ -13,25 +16,50 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class RequestIdTest {
     @Test
-    void scheduleContractsHaveOneStringIdAtOriginalTag() {
+    void sessionAffinityUsesSeparateTagsFromRequestIdentity() throws Exception {
+        var request = FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                .setRequestId(7).setRequestIdStr("007")
+                .setSessionAffinityId("session-uuid").setSessionAffinityBucketId(5)
+                .setSessionAffinityType("unknown").build();
+        var forwarded = FlexlbScheduleProtocol.FlexlbScheduleRequestPB.parseFrom(
+                request.toBuilder().setForwardHop(1).build().toByteArray());
+        assertEquals("007", RequestId.parse(forwarded));
+        assertEquals(7L, forwarded.getRequestId());
+        assertEquals("session-uuid", forwarded.getSessionAffinityId());
+        assertEquals(5, forwarded.getSessionAffinityBucketId());
+        assertEquals("unknown", forwarded.getSessionAffinityType());
+        var descriptor = forwarded.getDescriptorForType();
+        assertEquals(21, descriptor.findFieldByName("request_id_str").getNumber());
+        assertEquals(22, descriptor.findFieldByName("session_affinity_id").getNumber());
+        assertEquals(23, descriptor.findFieldByName("session_affinity_bucket_id").getNumber());
+        assertEquals(24, descriptor.findFieldByName("session_affinity_type").getNumber());
+    }
+
+    @Test
+    void originalIdTagsRemainInt64AndNewTagsCarryStrings() {
         for (var descriptor : List.of(
                 FlexlbScheduleProtocol.FlexlbScheduleRequestPB.getDescriptor(),
                 FlexlbScheduleProtocol.FlexlbCancelRequestPB.getDescriptor(),
                 FlexlbScheduleProtocol.GetRequestStateRequestPB.getDescriptor(),
                 FlexlbScheduleProtocol.RequestLifecyclePB.getDescriptor())) {
             assertEquals("request_id", descriptor.findFieldByNumber(1).getName());
-            assertEquals(Descriptors.FieldDescriptor.Type.STRING, descriptor.findFieldByNumber(1).getType());
-            assertEquals(1, descriptor.getFields().stream().filter(field -> field.getName().startsWith("request_id")).count());
+            assertEquals(Descriptors.FieldDescriptor.Type.INT64, descriptor.findFieldByNumber(1).getType());
+            assertEquals(2, descriptor.getFields().stream().filter(field -> field.getName().startsWith("request_id")).count());
         }
-        assertEquals(Descriptors.FieldDescriptor.Type.STRING,
+        assertEquals(21, FlexlbScheduleProtocol.FlexlbScheduleRequestPB.getDescriptor().findFieldByName("request_id_str").getNumber());
+        assertEquals(6, FlexlbScheduleProtocol.FlexlbCancelRequestPB.getDescriptor().findFieldByName("request_id_str").getNumber());
+        assertEquals(5, FlexlbScheduleProtocol.GetRequestStateRequestPB.getDescriptor().findFieldByName("request_id_str").getNumber());
+        assertEquals(4, FlexlbScheduleProtocol.RequestLifecyclePB.getDescriptor().findFieldByName("request_id_str").getNumber());
+        assertEquals(Descriptors.FieldDescriptor.Type.INT64,
                 EngineRpcService.TaskInfoPB.getDescriptor()
                         .findFieldByNumber(1).getType());
+        assertEquals(34, EngineRpcService.TaskInfoPB.getDescriptor().findFieldByName("request_id_str").getNumber());
     }
 
     @Test
     void preservesOriginalStrings() {
         for (String id : new String[]{"req-abc-001", "00123", "123", "0", "9223372036854775808"}) {
-            assertEquals(id, RequestId.parse(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder().setRequestId(id)));
+            assertEquals(id, RequestId.parse(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder().setRequestIdStr(id)));
         }
     }
 
@@ -56,15 +84,13 @@ class RequestIdTest {
     }
 
     @Test
-    void oldProto3DefaultZeroCannotBeDistinguishedFromMissingStringId() throws Exception {
+    void proto3DefaultNumericIdIsReadAsZero() throws Exception {
         byte[] wire = EngineRpcService.GenerateInputPB.newBuilder().setRequestId(0).build().toByteArray();
         assertEquals(0, wire.length);
-        assertThrows(IllegalArgumentException.class,
-                () -> RequestId.parse(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.parseFrom(wire)));
-        assertThrows(IllegalArgumentException.class,
-                () -> RequestId.parse(FlexlbScheduleProtocol.FlexlbCancelRequestPB.parseFrom(wire)));
-        assertThrows(IllegalArgumentException.class,
-                () -> RequestId.parse(FlexlbScheduleProtocol.GetRequestStateRequestPB.parseFrom(wire)));
+        assertEquals("0", RequestId.parse(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.parseFrom(wire)));
+        assertEquals("0", RequestId.parse(FlexlbScheduleProtocol.FlexlbCancelRequestPB.parseFrom(wire)));
+        assertEquals("0", RequestId.parse(FlexlbScheduleProtocol.GetRequestStateRequestPB.parseFrom(wire)));
+        assertEquals("0", RequestId.parse(EngineRpcService.TaskInfoPB.parseFrom(wire)));
         assertEquals("0", RequestId.parse(EngineRpcService.GenerateInputPB.parseFrom(wire)));
     }
 
@@ -73,19 +99,27 @@ class RequestIdTest {
         var request = FlexlbScheduleProtocol.FlexlbScheduleRequestPB.parseFrom(oldIntegerId(123));
         var forwarded = FlexlbScheduleProtocol.FlexlbScheduleRequestPB.parseFrom(request.toBuilder().setForwardHop(1).build().toByteArray());
         assertEquals("123", RequestId.parse(forwarded));
-        assertEquals("req-abc", RequestId.parse(forwarded.toBuilder().setRequestId("req-abc")));
+        assertEquals("req-abc", RequestId.parse(forwarded.toBuilder().setRequestIdStr("req-abc")));
+        assertEquals("req-abc", RequestId.parse(FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder()
+                .setRequestId(123).setRequestIdStr("req-abc")));
+        assertEquals("req-abc", RequestId.parse(FlexlbScheduleProtocol.GetRequestStateRequestPB.newBuilder()
+                .setRequestId(123).setRequestIdStr("req-abc")));
+        assertEquals("req-abc", RequestId.parse(EngineRpcService.TaskInfoPB.newBuilder()
+                .setRequestId(123).setRequestIdStr("req-abc")));
     }
 
     @Test
-    void rejectsMissingAndBlankIdsWithoutDefaultingToZero() {
-        assertThrows(IllegalArgumentException.class, () -> RequestId.parse(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.getDefaultInstance()));
+    void usesNumericFieldWhenStringIsBlank() {
+        assertEquals("7", RequestId.parse(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                .setRequestId(7).setRequestIdStr(" ")));
+        assertEquals("0", RequestId.parse(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.getDefaultInstance()));
     }
 
     @Test
     void preservesWorkerStatusFieldsWithoutRemappingTaskLayout() throws Exception {
-        var oldTask = EngineRpcService.TaskInfoPB.newBuilder().setRequestId("123")
+        var oldTask = EngineRpcService.TaskInfoPB.newBuilder().setRequestId(123).setRequestIdStr("123")
                 .setBatchId(99).setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING).setWaitingEnteredTimeMs(1700000000123L).build();
-        var current = EngineRpcService.TaskInfoPB.newBuilder().setRequestId("456").setBatchId(42).build();
+        var current = EngineRpcService.TaskInfoPB.newBuilder().setRequestId(456).setBatchId(42).build();
         var status = EngineRpcService.WorkerStatusPB.parseFrom(EngineRpcService.WorkerStatusPB.newBuilder()
                 .addRunningTaskInfo(oldTask).addFinishedTaskList(current).build().toByteArray());
         assertEquals("123", RequestId.parse(status.getRunningTaskInfo(0)));
@@ -111,10 +145,10 @@ class RequestIdTest {
         for (String id : List.of("req-abc-p-123", "00123", "0", "9223372036854775808")) {
             var bytes = new ByteArrayOutputStream();
             var wire = CodedOutputStream.newInstance(bytes);
-            wire.writeString(1, id);
+            wire.writeString(34, id);
             wire.flush();
             var task = EngineRpcService.TaskInfoPB.parseFrom(bytes.toByteArray());
-            assertEquals(id, task.getRequestId());
+            assertEquals(id, task.getRequestIdStr());
             assertEquals(id, RequestId.parse(task));
             assertEquals(id, RequestId.parse(task.toBuilder()));
         }
@@ -123,12 +157,38 @@ class RequestIdTest {
             assertEquals(Long.toString(id), RequestId.parse(task));
             var forwarded = EngineRpcService.TaskInfoPB.parseFrom(task.toByteArray());
             assertEquals(Long.toString(id), RequestId.parse(forwarded));
-            assertEquals("req-original", RequestId.parse(task.toBuilder().setRequestId("req-original")));
+            assertEquals("req-original", RequestId.parse(task.toBuilder().setRequestIdStr("req-original")));
         }
-        assertThrows(IllegalArgumentException.class,
-                () -> RequestId.parse(EngineRpcService.TaskInfoPB.getDefaultInstance()));
-        assertThrows(IllegalArgumentException.class,
-                () -> RequestId.parse(EngineRpcService.TaskInfoPB.newBuilder().setRequestId(" ")));
+        assertEquals("0", RequestId.parse(EngineRpcService.TaskInfoPB.getDefaultInstance()));
+    }
+
+    @Test
+    void numericOnlyReaderCanReadEveryDualEncodedRequestId() throws Exception {
+        var oldMessage = DescriptorProtos.DescriptorProto.newBuilder().setName("NumericRequest")
+                .addField(DescriptorProtos.FieldDescriptorProto.newBuilder()
+                        .setName("request_id").setNumber(1)
+                        .setLabel(DescriptorProtos.FieldDescriptorProto.Label.LABEL_OPTIONAL)
+                        .setType(DescriptorProtos.FieldDescriptorProto.Type.TYPE_INT64))
+                .build();
+        var descriptor = Descriptors.FileDescriptor.buildFrom(
+                DescriptorProtos.FileDescriptorProto.newBuilder().setName("numeric_request.proto")
+                        .setSyntax("proto3").addMessageType(oldMessage).build(),
+                new Descriptors.FileDescriptor[0]).findMessageTypeByName("NumericRequest");
+        long id = 9007199254740993L;
+        for (Message message : List.of(
+                FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                        .setRequestId(id).setRequestIdStr(Long.toString(id)).build(),
+                FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder()
+                        .setRequestId(id).setRequestIdStr(Long.toString(id)).build(),
+                FlexlbScheduleProtocol.GetRequestStateRequestPB.newBuilder()
+                        .setRequestId(id).setRequestIdStr(Long.toString(id)).build(),
+                FlexlbScheduleProtocol.RequestLifecyclePB.newBuilder()
+                        .setRequestId(id).setRequestIdStr(Long.toString(id)).build(),
+                EngineRpcService.TaskInfoPB.newBuilder()
+                        .setRequestId(id).setRequestIdStr(Long.toString(id)).build())) {
+            var parsedByOldReader = DynamicMessage.parseFrom(descriptor, message.toByteArray());
+            assertEquals(id, parsedByOldReader.getField(descriptor.findFieldByNumber(1)));
+        }
     }
 
     private static byte[] oldIntegerId(long id) throws Exception {

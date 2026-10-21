@@ -626,7 +626,7 @@ def cancel_unknown_rid(ctx: CaseContext):
             )
             ack = stub.Cancel(
                 ops.schedule_pb2.FlexlbCancelRequestPB(
-                    request_id=str(fake_rid),
+                    request_id=fake_rid,
                     reason=ops.schedule_pb2.CANCEL_REASON_CLIENT_CANCELLED,
                 ),
                 timeout=10.0,

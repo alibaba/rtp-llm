@@ -84,7 +84,7 @@ class FlexlbServiceImplTest {
         StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
 
         service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setRequestId(requestId)
+                .setRequestIdStr(requestId)
                 .setGenerateInput(EngineRpcService.GenerateInputPB.newBuilder().setRequestId(7L)
                         .build().toByteString())
                 .build(), observer);
@@ -108,7 +108,7 @@ class FlexlbServiceImplTest {
         for (ByteString input : List.of(ByteString.EMPTY, ByteString.copyFrom(new byte[]{(byte) 0x80}))) {
             StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
             service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                    .setRequestId("7").setGenerateInput(input).build(), observer);
+                    .setRequestIdStr("7").setGenerateInput(input).build(), observer);
 
             ArgumentCaptor<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> response =
                     ArgumentCaptor.forClass(FlexlbScheduleProtocol.FlexlbScheduleResponsePB.class);
@@ -132,7 +132,8 @@ class FlexlbServiceImplTest {
                 Response.buildErrorResponse(StrategyErrorType.NO_PREFILL_WORKER, null)));
 
         service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setRequestId(Long.toString(requestId))
+                .setRequestId(requestId)
+                .setRequestIdStr(Long.toString(requestId))
                 .setGenerateInput(EngineRpcService.GenerateInputPB.newBuilder().setRequestId(requestId)
                         .build().toByteString())
                 .build(), mock(StreamObserver.class));
@@ -140,6 +141,7 @@ class FlexlbServiceImplTest {
         ArgumentCaptor<BalanceContext> context = ArgumentCaptor.forClass(BalanceContext.class);
         verify(routeService).route(context.capture());
         assertEquals(Long.toString(requestId), context.getValue().getRequestId());
+        assertEquals(requestId, context.getValue().getNumericRequestId());
     }
 
     @Test
@@ -152,35 +154,51 @@ class FlexlbServiceImplTest {
                 Response.buildErrorResponse(StrategyErrorType.NO_ENCODER_WORKER, null)));
 
         service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setRequestId("encoder-request")
+                .setRequestIdStr("encoder-request")
                 .addScheduleRoles(FlexlbScheduleProtocol.ScheduleRolePB.SCHEDULE_ROLE_ENCODER)
                 .build(), mock(StreamObserver.class));
 
         ArgumentCaptor<BalanceContext> context = ArgumentCaptor.forClass(BalanceContext.class);
         verify(routeService).route(context.capture());
         assertEquals(RequestPhase.ENCODER, context.getValue().getRequestPhase());
+        assertEquals(0L, context.getValue().getNumericRequestId());
+    }
+
+    @Test
+    void scheduleKeepsOriginalNumericIdWhenStringIdDiffers() {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
+        when(routeService.route(any())).thenReturn(CompletableFuture.completedFuture(
+                Response.buildErrorResponse(StrategyErrorType.NO_ENCODER_WORKER, null)));
+
+        service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                .setRequestId(123).setRequestIdStr("007")
+                .addScheduleRoles(FlexlbScheduleProtocol.ScheduleRolePB.SCHEDULE_ROLE_ENCODER)
+                .build(), mock(StreamObserver.class));
+
+        ArgumentCaptor<BalanceContext> context = ArgumentCaptor.forClass(BalanceContext.class);
+        verify(routeService).route(context.capture());
+        assertEquals("007", context.getValue().getRequestId());
+        assertEquals(123L, context.getValue().getNumericRequestId());
     }
 
     @ParameterizedTest
     @ValueSource(strings = {"", " ", "\t"})
-    void stateAndCancelRejectMissingIdsWithoutRoutingOrForwarding(String requestId) {
+    void stateAndCancelUseDefaultNumericIdWhenStringIsBlank(String requestId) {
         StreamObserver<FlexlbScheduleProtocol.GetRequestStateResponsePB> stateObserver = mock(StreamObserver.class);
         StreamObserver<FlexlbScheduleProtocol.FlexlbCancelResponsePB> cancelObserver = mock(StreamObserver.class);
 
         service.getRequestState(FlexlbScheduleProtocol.GetRequestStateRequestPB.newBuilder()
-                .setRequestId(requestId).build(), stateObserver);
+                .setRequestIdStr(requestId).build(), stateObserver);
         service.cancel(FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder()
-                .setRequestId(requestId).build(), cancelObserver);
+                .setRequestIdStr(requestId).build(), cancelObserver);
 
-        ArgumentCaptor<Throwable> stateError = ArgumentCaptor.forClass(Throwable.class);
-        ArgumentCaptor<Throwable> cancelError = ArgumentCaptor.forClass(Throwable.class);
-        verify(stateObserver).onError(stateError.capture());
-        verify(cancelObserver).onError(cancelError.capture());
-        assertEquals(Status.Code.INVALID_ARGUMENT, Status.fromThrowable(stateError.getValue()).getCode());
-        assertEquals(Status.Code.INVALID_ARGUMENT, Status.fromThrowable(cancelError.getValue()).getCode());
-        verify(stateObserver, never()).onNext(any());
-        verify(cancelObserver, never()).onNext(any());
-        verifyNoInteractions(routeService, grpcForwarder);
+        verify(routeService).getRequestState("0", 0L);
+        verify(routeService).cancelRequest("0", 0L, CancelReason.CLIENT_CANCELLED);
+        verify(stateObserver).onNext(FlexlbScheduleProtocol.GetRequestStateResponsePB.getDefaultInstance());
+        verify(cancelObserver).onNext(FlexlbScheduleProtocol.FlexlbCancelResponsePB.getDefaultInstance());
+        verify(stateObserver).onCompleted();
+        verify(cancelObserver).onCompleted();
+        verifyNoInteractions(grpcForwarder);
     }
 
     @Test
@@ -190,7 +208,7 @@ class FlexlbServiceImplTest {
         StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
 
         service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setRequestId("missing-route-response").build(), observer);
+                .setRequestIdStr("missing-route-response").build(), observer);
 
         ArgumentCaptor<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> response =
                 ArgumentCaptor.forClass(FlexlbScheduleProtocol.FlexlbScheduleResponsePB.class);
@@ -215,7 +233,7 @@ class FlexlbServiceImplTest {
         StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
 
         service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setRequestId("empty-preemption-ids").build(), observer);
+                .setRequestIdStr("empty-preemption-ids").build(), observer);
 
         ArgumentCaptor<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> response =
                 ArgumentCaptor.forClass(FlexlbScheduleProtocol.FlexlbScheduleResponsePB.class);
@@ -233,7 +251,7 @@ class FlexlbServiceImplTest {
                 Response.buildErrorResponse(StrategyErrorType.NO_ENCODER_WORKER, null)));
 
         service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setRequestId("encoder-request")
+                .setRequestIdStr("encoder-request")
                 .addScheduleRoles(FlexlbScheduleProtocol.ScheduleRolePB.SCHEDULE_ROLE_ENCODER)
                 .addScheduleRoles(FlexlbScheduleProtocol.ScheduleRolePB.SCHEDULE_ROLE_ENCODER)
                 .build(), mock(StreamObserver.class));
@@ -251,7 +269,7 @@ class FlexlbServiceImplTest {
                 Response.buildErrorResponse(StrategyErrorType.NO_ENCODER_WORKER, null)));
 
         service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setRequestId("partial-hit")
+                .setRequestIdStr("partial-hit")
                 .setSeqLen(1000)
                 .setEncoderCacheHitLen(200)
                 .addScheduleRoles(FlexlbScheduleProtocol.ScheduleRolePB.SCHEDULE_ROLE_ENCODER)
@@ -268,7 +286,7 @@ class FlexlbServiceImplTest {
         for (long invalidHitLength : List.of(-1L, 1001L)) {
             StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
             service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                    .setRequestId("invalid-encoder-hit-" + invalidHitLength)
+                    .setRequestIdStr("invalid-encoder-hit-" + invalidHitLength)
                     .setSeqLen(1000)
                     .setEncoderCacheHitLen(invalidHitLength)
                     .addScheduleRoles(FlexlbScheduleProtocol.ScheduleRolePB.SCHEDULE_ROLE_ENCODER)
@@ -292,7 +310,7 @@ class FlexlbServiceImplTest {
                 Response.buildErrorResponse(StrategyErrorType.NO_ENCODER_WORKER, null)));
 
         service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setRequestId("encoder-only-model")
+                .setRequestIdStr("encoder-only-model")
                 .build(), mock(StreamObserver.class));
 
         ArgumentCaptor<BalanceContext> context = ArgumentCaptor.forClass(BalanceContext.class);
@@ -306,7 +324,7 @@ class FlexlbServiceImplTest {
         for (int roleNumber : List.of(0, 99)) {
             StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
             service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                    .setRequestId("invalid-role-" + roleNumber)
+                    .setRequestIdStr("invalid-role-" + roleNumber)
                     .addScheduleRolesValue(roleNumber)
                     .build(), observer);
 
@@ -321,11 +339,11 @@ class FlexlbServiceImplTest {
     @Test
     void encoderRoleStateAndCancelUseEncoderLifecycleKey() {
         service.getRequestState(FlexlbScheduleProtocol.GetRequestStateRequestPB.newBuilder()
-                .setRequestId("two-stage-request")
+                .setRequestIdStr("two-stage-request")
                 .setRole(FlexlbScheduleProtocol.ScheduleRolePB.SCHEDULE_ROLE_ENCODER)
                 .build(), mock(StreamObserver.class));
         service.cancel(FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder()
-                .setRequestId("two-stage-request")
+                .setRequestIdStr("two-stage-request")
                 .setRole(FlexlbScheduleProtocol.ScheduleRolePB.SCHEDULE_ROLE_ENCODER)
                 .build(), mock(StreamObserver.class));
 
@@ -343,9 +361,9 @@ class FlexlbServiceImplTest {
                 FlexlbScheduleProtocol.ScheduleRolePB.SCHEDULE_ROLE_PDFUSION)) {
             String requestId = "generation-" + role.name();
             service.getRequestState(FlexlbScheduleProtocol.GetRequestStateRequestPB.newBuilder()
-                    .setRequestId(requestId).setRole(role).build(), mock(StreamObserver.class));
-            service.cancel(FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder()
-                    .setRequestId(requestId).setRole(role).build(), mock(StreamObserver.class));
+                    .setRequestIdStr(requestId).setRole(role).build(), mock(StreamObserver.class));
+        service.cancel(FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder()
+                    .setRequestIdStr(requestId).setRole(role).build(), mock(StreamObserver.class));
 
             verify(routeService).getRequestState(requestId, 0L);
             verify(routeService).cancelRequest(requestId, 0L, CancelReason.CLIENT_CANCELLED);
@@ -358,9 +376,9 @@ class FlexlbServiceImplTest {
         StreamObserver<FlexlbScheduleProtocol.FlexlbCancelResponsePB> cancelObserver = mock(StreamObserver.class);
 
         service.getRequestState(FlexlbScheduleProtocol.GetRequestStateRequestPB.newBuilder()
-                .setRequestId("two-stage-request").setRoleValue(99).build(), stateObserver);
+                .setRequestIdStr("two-stage-request").setRoleValue(99).build(), stateObserver);
         service.cancel(FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder()
-                .setRequestId("two-stage-request").setRoleValue(99).build(), cancelObserver);
+                .setRequestIdStr("two-stage-request").setRoleValue(99).build(), cancelObserver);
 
         ArgumentCaptor<Throwable> stateError = ArgumentCaptor.forClass(Throwable.class);
         ArgumentCaptor<Throwable> cancelError = ArgumentCaptor.forClass(Throwable.class);
@@ -386,7 +404,7 @@ class FlexlbServiceImplTest {
         when(routeService.route(any())).thenReturn(CompletableFuture.completedFuture(response));
         when(routeService.getRequestState("encoder-response", 0L, RequestPhase.ENCODER))
                 .thenReturn(new RequestState("encoder-response",
-                        RequestState.Phase.ACKNOWLEDGED, DeliveryClaimKind.ROUTE_DECISION,
+                        0L, RequestState.Phase.ACKNOWLEDGED, DeliveryClaimKind.ROUTE_DECISION,
                         0L, 10L, 20L, "route delivered"));
         StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
         ch.qos.logback.classic.Logger scheduleLogger =
@@ -399,7 +417,7 @@ class FlexlbServiceImplTest {
 
         try {
             service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                    .setRequestId("encoder-response")
+                    .setRequestIdStr("encoder-response")
                     .addScheduleRoles(FlexlbScheduleProtocol.ScheduleRolePB.SCHEDULE_ROLE_ENCODER)
                     .build(), observer);
         } finally {
@@ -484,7 +502,7 @@ class FlexlbServiceImplTest {
         CompletableFuture<Response> pending = new CompletableFuture<>();
         when(routeService.route(any())).thenReturn(pending);
         var request = FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setRequestId("12345")
+                .setRequestIdStr("12345")
                 .addCacheAffinityKeys("image")
                 .setVitRouteOnly(true)
                 .build();
@@ -526,7 +544,7 @@ class FlexlbServiceImplTest {
         }).when(engineHealthReporter).reportBalancingService(any());
 
         service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setRequestId("metric-response-1").build(), mock(StreamObserver.class));
+                .setRequestIdStr("metric-response-1").build(), mock(StreamObserver.class));
         Response response = new Response();
         response.setSuccess(true);
         response.setCode(200);
@@ -555,7 +573,7 @@ class FlexlbServiceImplTest {
         when(routeService.route(any())).thenReturn(CompletableFuture.completedFuture(response));
         StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
 
-        service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder().setRequestId("incoming-2002").build(),
+        service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder().setRequestIdStr("incoming-2002").build(),
                 observer);
 
         ArgumentCaptor<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> captor =
@@ -620,7 +638,7 @@ class FlexlbServiceImplTest {
         when(routeService.route(any(BalanceContext.class))).thenReturn(CompletableFuture.completedFuture(response));
 
         FlexlbScheduleProtocol.FlexlbScheduleRequestPB request = FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setRequestId("12345")
+                .setRequestIdStr("12345")
                 .setSeqLen(100)
                 .setCacheKeyBlockSize(1024L)
                 .build();
@@ -660,7 +678,7 @@ class FlexlbServiceImplTest {
                 mock(StreamObserver.class);
         FlexlbScheduleProtocol.FlexlbScheduleRequestPB request =
                 FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                        .setRequestId("12356")
+                        .setRequestIdStr("12356")
                         .build();
         Context.CancellableContext inbound = Context.current().withCancellation();
 
@@ -691,7 +709,7 @@ class FlexlbServiceImplTest {
 
         inbound.run(() -> service.schedule(
                 FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                        .setRequestId("12357")
+                        .setRequestIdStr("12357")
                         .build(), observer));
 
         var inOrder = inOrder(routeService);
@@ -716,7 +734,7 @@ class FlexlbServiceImplTest {
             StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer =
                     mock(StreamObserver.class);
             service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                    .setRequestId(expected ? "12351" : "12350")
+                    .setRequestIdStr(expected ? "12351" : "12350")
                     .build(), observer);
 
             ArgumentCaptor<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> captor =
@@ -739,7 +757,7 @@ class FlexlbServiceImplTest {
 
         FlexlbScheduleProtocol.FlexlbScheduleRequestPB request =
                 FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                        .setRequestId("54321")
+                        .setRequestIdStr("54321")
                         .build();
         StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer =
                 mock(StreamObserver.class);
@@ -778,7 +796,7 @@ class FlexlbServiceImplTest {
         });
         StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
         service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setRequestId("54322").build(), observer);
+                .setRequestIdStr("54322").build(), observer);
         assertEquals(1, pvAppender.list.size());
         com.fasterxml.jackson.databind.JsonNode pv = new com.fasterxml.jackson.databind.ObjectMapper()
                 .readTree(pvAppender.list.get(0).getFormattedMessage());
@@ -813,7 +831,7 @@ class FlexlbServiceImplTest {
                                 masterResponse, "10.0.0.2:7001")));
 
         FlexlbScheduleProtocol.FlexlbScheduleRequestPB request = FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setRequestId("12345")
+                .setRequestIdStr("12345")
                 .build();
 
         StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
@@ -846,7 +864,7 @@ class FlexlbServiceImplTest {
         when(grpcForwarder.forwardScheduleToMaster(any())).thenReturn(pending);
         StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
         var request = FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setRequestId("12352").setSeqLen(42).addBlockCacheKeys(71L).setCacheKeyBlockSize(16)
+                .setRequestIdStr("12352").setSeqLen(42).addBlockCacheKeys(71L).setCacheKeyBlockSize(16)
                 .setGenerateInput(ByteString.copyFromUtf8("engine-input")).build();
 
         service.schedule(request, observer);
@@ -890,7 +908,7 @@ class FlexlbServiceImplTest {
                 mock(StreamObserver.class);
         FlexlbScheduleProtocol.FlexlbScheduleRequestPB request =
                 FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                        .setRequestId("12352")
+                        .setRequestIdStr("12352")
                         .build();
 
         assertTimeoutPreemptively(Duration.ofSeconds(1),
@@ -942,7 +960,7 @@ class FlexlbServiceImplTest {
                 mock(StreamObserver.class);
 
         service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setRequestId("12354")
+                .setRequestIdStr("12354")
                 .build(), observer);
 
         verify(observer, times(1)).onNext(response);
@@ -961,7 +979,7 @@ class FlexlbServiceImplTest {
                 mock(StreamObserver.class);
 
         service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setRequestId("12353")
+                .setRequestIdStr("12353")
                 .build(), observer);
         pendingForward.completeExceptionally(Status.UNAVAILABLE.asRuntimeException());
 
@@ -976,8 +994,9 @@ class FlexlbServiceImplTest {
         verify(routeService, never()).route(any());
     }
 
-    @Test
-    void testSchedule_forwardObserverFailureDoesNotSendSecondResponse() {
+    @ParameterizedTest
+    @ValueSource(strings = {"12346", "007", "req-abc"})
+    void testSchedule_forwardObserverFailureDoesNotSendSecondResponse(String requestId) {
         when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(true);
         when(lbStatusConsistencyService.isMaster()).thenReturn(false);
         FlexlbScheduleProtocol.FlexlbScheduleResponsePB masterResponse =
@@ -1003,10 +1022,15 @@ class FlexlbServiceImplTest {
                 mock(StreamObserver.class);
         doThrow(new RuntimeException("client disconnected"))
                 .when(observer).onNext(any());
-        FlexlbScheduleProtocol.FlexlbScheduleRequestPB request =
+        FlexlbScheduleProtocol.FlexlbScheduleRequestPB.Builder requestBuilder =
                 FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                        .setRequestId("12346")
-                        .build();
+                        .setRequestIdStr(requestId);
+        if ("12346".equals(requestId)) {
+            requestBuilder.setRequestId(12346);
+        } else if ("007".equals(requestId)) {
+            requestBuilder.setRequestId(7);
+        }
+        FlexlbScheduleProtocol.FlexlbScheduleRequestPB request = requestBuilder.build();
 
         var parent = io.opentelemetry.api.trace.SpanContext.createFromRemoteParent(
                 "11111111111111111111111111111111", "2222222222222222",
@@ -1030,6 +1054,7 @@ class FlexlbServiceImplTest {
                     return parent.getTraceId().equals(actual.getTraceId())
                             && parent.getSpanId().equals(actual.getSpanId());
                 }));
+        assertEquals(request.getRequestIdStr(), cancel.getValue().getRequestIdStr());
         assertEquals(request.getRequestId(), cancel.getValue().getRequestId());
         assertEquals(
                 FlexlbScheduleProtocol.CancelReasonPB.CANCEL_REASON_CLIENT_CANCELLED,
@@ -1054,7 +1079,7 @@ class FlexlbServiceImplTest {
         when(routeService.route(any(BalanceContext.class))).thenReturn(CompletableFuture.completedFuture(localResponse));
 
         FlexlbScheduleProtocol.FlexlbScheduleRequestPB request = FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setRequestId("12345")
+                .setRequestIdStr("12345")
                 .build();
 
         StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
@@ -1113,7 +1138,7 @@ class FlexlbServiceImplTest {
         when(grpcForwarder.forwardScheduleToMaster(any())).thenReturn(result);
         StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
 
-        service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder().setRequestId("90001").build(), observer);
+        service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder().setRequestIdStr("90001").build(), observer);
 
         ArgumentCaptor<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> response =
                 ArgumentCaptor.forClass(FlexlbScheduleProtocol.FlexlbScheduleResponsePB.class);
@@ -1135,7 +1160,7 @@ class FlexlbServiceImplTest {
 
         FlexlbScheduleProtocol.FlexlbScheduleRequestPB request =
                 FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                        .setRequestId("12348")
+                        .setRequestIdStr("12348")
                         .setGenerateTimeout(12_345L)
                         .build();
         StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer =
@@ -1179,7 +1204,7 @@ class FlexlbServiceImplTest {
         when(routeService.route(any())).thenReturn(CompletableFuture.completedFuture(response));
 
         service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setRequestId("12349")
+                .setRequestIdStr("12349")
                 .build(), mock(StreamObserver.class));
 
         verify(grpcForwarder, never()).forwardCancelToMaster(any());
@@ -1204,7 +1229,7 @@ class FlexlbServiceImplTest {
         });
         try {
             inbound.run(() -> service.schedule(
-                    FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder().setRequestId("81").build(),
+                    FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder().setRequestIdStr("81").build(),
                     mock(StreamObserver.class)));
             pending.complete(FlexlbGrpcForwarder.MasterForwardResult.forwarded(
                     nodeRejected(), "old:7001")); // Complete outside the original Context.
@@ -1226,7 +1251,7 @@ class FlexlbServiceImplTest {
         when(grpcForwarder.forwardScheduleToMaster(any())).thenReturn(pending);
         var inbound = Context.current().withCancellation();
         inbound.run(() -> service.schedule(
-                FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder().setRequestId("82").build(),
+                FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder().setRequestIdStr("82").build(),
                 mock(StreamObserver.class)));
         inbound.cancel(null);
         pending.complete(FlexlbGrpcForwarder.MasterForwardResult.forwarded(nodeRejected(), "old:7001"));
@@ -1242,7 +1267,7 @@ class FlexlbServiceImplTest {
                     FlexlbGrpcForwarder.MasterForwardResult.failed(status.asRuntimeException(), "old:7001")));
             StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
             assertTimeoutPreemptively(Duration.ofSeconds(1), () -> service.schedule(
-                    FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder().setRequestId("83").build(), observer));
+                    FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder().setRequestIdStr("83").build(), observer));
             ArgumentCaptor<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> response =
                     ArgumentCaptor.forClass(FlexlbScheduleProtocol.FlexlbScheduleResponsePB.class);
             verify(observer).onNext(response.capture());
@@ -1265,7 +1290,7 @@ class FlexlbServiceImplTest {
         CompletableFuture<Response> local = new CompletableFuture<>();
         when(routeService.route(any())).thenReturn(local);
         StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
-        service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder().setRequestId("91").build(), observer);
+        service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder().setRequestIdStr("91").build(), observer);
 
         var rejection = FlexlbGrpcForwarder.MasterForwardResult.forwarded(nodeRejected(), "old:7001");
         assertTrue(stage.complete(rejection));
@@ -1287,11 +1312,11 @@ class FlexlbServiceImplTest {
         when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(true);
         when(lbStatusConsistencyService.isMaster()).thenReturn(false);
         when(routeService.getRequestState("88", 0L)).thenReturn(new RequestState("88",
-                RequestState.Phase.ACKNOWLEDGED, DeliveryClaimKind.BATCH_ENQUEUE,
+                0L, RequestState.Phase.ACKNOWLEDGED, DeliveryClaimKind.BATCH_ENQUEUE,
                 1001L, 10L, 20L, "already dispatched"));
         StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
         service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setRequestId("88").setForwardHop(1).build(), observer);
+                .setRequestIdStr("88").setForwardHop(1).build(), observer);
         ArgumentCaptor<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> result =
                 ArgumentCaptor.forClass(FlexlbScheduleProtocol.FlexlbScheduleResponsePB.class);
         verify(observer).onNext(result.capture());
@@ -1305,16 +1330,51 @@ class FlexlbServiceImplTest {
     void followerQueriesAndCancelsItsLocalOwnerBeforeConsultingTheLeader() {
         when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(true);
         when(lbStatusConsistencyService.isMaster()).thenReturn(false);
-        RequestState owned = new RequestState("86", RequestState.Phase.ACKNOWLEDGED,
+        RequestState owned = new RequestState("86", 0L, RequestState.Phase.ACKNOWLEDGED,
                 DeliveryClaimKind.BATCH_ENQUEUE, 1001L, 10L, 20L, "owned here");
         when(routeService.getRequestState("86", 1001L)).thenReturn(owned);
         when(routeService.cancelRequest("86", 1001L, CancelReason.CLIENT_CANCELLED)).thenReturn(owned);
         service.getRequestState(FlexlbScheduleProtocol.GetRequestStateRequestPB.newBuilder()
-                .setRequestId("86").setBatchId(1001).build(), mock(StreamObserver.class));
+                .setRequestIdStr("86").setBatchId(1001).build(), mock(StreamObserver.class));
         service.cancel(FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder()
-                .setRequestId("86").setBatchId(1001).build(), mock(StreamObserver.class));
+                .setRequestIdStr("86").setBatchId(1001).build(), mock(StreamObserver.class));
         verify(routeService).cancelRequest("86", 1001L, CancelReason.CLIENT_CANCELLED);
         verifyNoInteractions(grpcForwarder);
+    }
+
+    @Test
+    void lifecycleReturnsNumericIdFromScheduleRecord() {
+        RequestState state = new RequestState("007", 123L, RequestState.Phase.ACKNOWLEDGED,
+                DeliveryClaimKind.BATCH_ENQUEUE, 1001L, 10L, 20L, "routed");
+        when(routeService.getRequestState("007", 0L)).thenReturn(state);
+        StreamObserver<FlexlbScheduleProtocol.GetRequestStateResponsePB> observer = mock(StreamObserver.class);
+
+        service.getRequestState(FlexlbScheduleProtocol.GetRequestStateRequestPB.newBuilder()
+                .setRequestId(999).setRequestIdStr("007").build(), observer);
+
+        ArgumentCaptor<FlexlbScheduleProtocol.GetRequestStateResponsePB> response =
+                ArgumentCaptor.forClass(FlexlbScheduleProtocol.GetRequestStateResponsePB.class);
+        verify(observer).onNext(response.capture());
+        assertTrue(response.getValue().getFound());
+        assertEquals("007", response.getValue().getLifecycle().getRequestIdStr());
+        assertEquals(123L, response.getValue().getLifecycle().getRequestId());
+    }
+
+    @Test
+    void lifecycleKeepsDefaultNumericIdForStringOnlyRequest() {
+        RequestState state = new RequestState("007", 0L, RequestState.Phase.ACKNOWLEDGED,
+                DeliveryClaimKind.BATCH_ENQUEUE, 1001L, 10L, 20L, "routed");
+        when(routeService.getRequestState("007", 0L)).thenReturn(state);
+        StreamObserver<FlexlbScheduleProtocol.GetRequestStateResponsePB> observer = mock(StreamObserver.class);
+
+        service.getRequestState(FlexlbScheduleProtocol.GetRequestStateRequestPB.newBuilder()
+                .setRequestIdStr("007").build(), observer);
+
+        ArgumentCaptor<FlexlbScheduleProtocol.GetRequestStateResponsePB> response =
+                ArgumentCaptor.forClass(FlexlbScheduleProtocol.GetRequestStateResponsePB.class);
+        verify(observer).onNext(response.capture());
+        assertEquals("007", response.getValue().getLifecycle().getRequestIdStr());
+        assertEquals(0L, response.getValue().getLifecycle().getRequestId());
     }
 
     @Test
@@ -1327,7 +1387,7 @@ class FlexlbServiceImplTest {
         StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
         try {
             inbound.run(() -> service.schedule(
-                    FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder().setRequestId("87").build(), observer));
+                    FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder().setRequestIdStr("87").build(), observer));
             verify(routeService, never()).route(any());
             ArgumentCaptor<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> result =
                     ArgumentCaptor.forClass(FlexlbScheduleProtocol.FlexlbScheduleResponsePB.class);
@@ -1480,7 +1540,7 @@ class FlexlbServiceImplTest {
         when(routeService.route(any(BalanceContext.class))).thenReturn(CompletableFuture.failedFuture(new RuntimeException("test error")));
 
         FlexlbScheduleProtocol.FlexlbScheduleRequestPB request = FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setRequestId("12345")
+                .setRequestIdStr("12345")
                 .build();
 
         StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
@@ -1510,7 +1570,7 @@ class FlexlbServiceImplTest {
         StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
 
         service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setRequestId("internal-error").build(), observer);
+                .setRequestIdStr("internal-error").build(), observer);
 
         var response = ArgumentCaptor.forClass(FlexlbScheduleProtocol.FlexlbScheduleResponsePB.class);
         verify(observer).onNext(response.capture());
@@ -1537,7 +1597,7 @@ class FlexlbServiceImplTest {
         scheduleLogger.addAppender(scheduleAppender);
         try {
             service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                    .setRequestId("metrics-failure").build(), observer);
+                    .setRequestIdStr("metrics-failure").build(), observer);
 
             verify(observer).onNext(any());
             verify(observer, never()).onCompleted();
@@ -1580,7 +1640,7 @@ class FlexlbServiceImplTest {
 
             FlexlbScheduleProtocol.FlexlbScheduleRequestPB request =
                     FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                            .setRequestId("778899")
+                            .setRequestIdStr("778899")
                             .build();
             StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer =
                     mock(StreamObserver.class);
@@ -1637,7 +1697,7 @@ class FlexlbServiceImplTest {
                     FlexlbGrpcForwarder.MasterForwardResult.failed("FORWARD_HOP_LIMIT", "10.0.0.2:7001")));
             Context.current().withValue(org.flexlb.interceptor.GrpcTraceInterceptor.OTEL_CONTEXT_KEY,
                     io.opentelemetry.context.Context.root().with(span)).run(() -> service.schedule(
-                            FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder().setRequestId("779900").build(),
+                            FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder().setRequestIdStr("779900").build(),
                             mock(StreamObserver.class)));
             org.flexlb.telemetry.FlexlbTrace.finishWithGrpcStatus(span, "OK", 0, true);
             assertEquals(1, exporter.spans.size());
@@ -1720,7 +1780,7 @@ class FlexlbServiceImplTest {
             };
             Context.current().withValue(org.flexlb.interceptor.GrpcTraceInterceptor.OTEL_CONTEXT_KEY, traceContext)
                     .run(() -> service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                            .setRequestId("991").build(), observer));
+                            .setRequestIdStr("991").build(), observer));
             CompletableFuture.runAsync(() -> {
                 if (forwarded) {
                     org.junit.jupiter.api.Assertions.assertNull(captured.get().getResponse());
@@ -1798,7 +1858,7 @@ class FlexlbServiceImplTest {
                 .when(observer).onNext(any());
 
         service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setRequestId("88001")
+                .setRequestIdStr("88001")
                 .build(), observer);
 
         verify(observer, times(1)).onNext(any());
@@ -1822,7 +1882,7 @@ class FlexlbServiceImplTest {
         when(routeService.route(ctxCaptor.capture())).thenReturn(CompletableFuture.completedFuture(response));
 
         FlexlbScheduleProtocol.FlexlbScheduleRequestPB request = FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setRequestId("99999")
+                .setRequestIdStr("99999")
                 .setSeqLen(2048)
                 .setCacheKeyBlockSize(1024L)
                 .addBlockCacheKeys(100L)
@@ -1853,7 +1913,7 @@ class FlexlbServiceImplTest {
     void scheduleRejectsClientKeysWithoutBlockSize() {
         when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
         var request = FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setRequestId("missing-block-size")
+                .setRequestIdStr("missing-block-size")
                 .addBlockCacheKeys(100L)
                 .build();
         StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
@@ -1875,7 +1935,7 @@ class FlexlbServiceImplTest {
                 Response.buildErrorResponse(StrategyErrorType.NO_PREFILL_WORKER, null)));
 
         service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setRequestId("no-client-keys").setSeqLen(4096).build(), mock(StreamObserver.class));
+                .setRequestIdStr("no-client-keys").setSeqLen(4096).build(), mock(StreamObserver.class));
 
         ArgumentCaptor<BalanceContext> context = ArgumentCaptor.forClass(BalanceContext.class);
         verify(routeService).route(context.capture());
@@ -1903,7 +1963,7 @@ class FlexlbServiceImplTest {
                 CompletableFuture.completedFuture(response));
 
         service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setRequestId("100001")
+                .setRequestIdStr("100001")
                 .setGenerateTimeout(1L)
                 .setRequestTimeMs(1L)
                 .build(), mock(StreamObserver.class));
@@ -1931,7 +1991,7 @@ class FlexlbServiceImplTest {
                 CompletableFuture.completedFuture(response));
 
         service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setRequestId("100002")
+                .setRequestIdStr("100002")
                 .setGenerateTimeout(1L)
                 .setRequestTimeMs(1L)
                 .build(), mock(StreamObserver.class));
@@ -1947,13 +2007,13 @@ class FlexlbServiceImplTest {
         response.setCode(200);
         when(routeService.route(any())).thenReturn(CompletableFuture.completedFuture(response));
         when(routeService.getRequestState("700", 0)).thenReturn(
-                new RequestState("700", RequestState.Phase.ACKNOWLEDGED,
+                new RequestState("700", 0L, RequestState.Phase.ACKNOWLEDGED,
                         DeliveryClaimKind.BATCH_ENQUEUE, 1001L, 10L, 20L,
                         "engine acknowledged batch"));
         StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
 
         service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setRequestId("700")
+                .setRequestIdStr("700")
                 .build(), observer);
 
         ArgumentCaptor<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> captor =
@@ -1970,7 +2030,7 @@ class FlexlbServiceImplTest {
         StreamObserver<FlexlbScheduleProtocol.GetRequestStateResponsePB> observer = mock(StreamObserver.class);
 
         service.getRequestState(FlexlbScheduleProtocol.GetRequestStateRequestPB.newBuilder()
-                .setRequestId("702")
+                .setRequestIdStr("702")
                 .setBatchId(1002L)
                 .build(), observer);
 

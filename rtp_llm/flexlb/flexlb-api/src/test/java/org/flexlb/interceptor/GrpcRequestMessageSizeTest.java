@@ -30,7 +30,7 @@ class GrpcRequestMessageSizeTest {
             @Override
             public void schedule(FlexlbScheduleRequestPB request,
                                  StreamObserver<FlexlbScheduleResponsePB> observer) {
-                measuredSizes.put(request.getRequestId(), GrpcServerTimingInterceptor.getRequestMessageBytes());
+                measuredSizes.put(request.getRequestIdStr(), GrpcServerTimingInterceptor.getRequestMessageBytes());
                 assertNotNull(GrpcServerTimingInterceptor.getNanos());
                 observer.onNext(FlexlbScheduleResponsePB.newBuilder().setSuccess(true).build());
                 observer.onCompleted();
@@ -46,7 +46,7 @@ class GrpcRequestMessageSizeTest {
             var requests = new ArrayList<FlexlbScheduleRequestPB>();
             for (int i = 0; i < 20; i++) {
                 var request = FlexlbScheduleRequestPB.newBuilder()
-                        .setRequestId("request-" + i + "-" + "x".repeat(i * 300))
+                        .setRequestIdStr("request-" + i + "-" + "x".repeat(i * 300))
                         .build();
                 requests.add(request);
                 pending.add((i % 2 == 0 ? stub : stub.withCompression("gzip")).schedule(request));
@@ -55,7 +55,7 @@ class GrpcRequestMessageSizeTest {
                 future.get(5, TimeUnit.SECONDS);
             }
             for (var request : requests) {
-                assertEquals((long) request.getSerializedSize(), measuredSizes.get(request.getRequestId()));
+                assertEquals((long) request.getSerializedSize(), measuredSizes.get(request.getRequestIdStr()));
             }
             var empty = FlexlbScheduleRequestPB.getDefaultInstance();
             stub.schedule(empty).get(5, TimeUnit.SECONDS);

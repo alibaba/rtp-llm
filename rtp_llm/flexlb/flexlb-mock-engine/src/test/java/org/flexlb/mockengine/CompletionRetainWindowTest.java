@@ -98,7 +98,7 @@ class CompletionRetainWindowTest {
         var runningField = JavaMockEngineCluster.FastRpcService.class.getDeclaredField("runningTasks");
         runningField.setAccessible(true);
         var running = (Map<Long, EngineRpcService.TaskInfoPB>) runningField.get(prefill);
-        var task = EngineRpcService.TaskInfoPB.newBuilder().setRequestId("42")
+        var task = EngineRpcService.TaskInfoPB.newBuilder().setRequestId(42)
                 .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING).build();
         running.put(42L, task);
         var claim = JavaMockEngineCluster.FastRpcService.class.getDeclaredMethod("claimTaskCompletion", long.class);
@@ -313,7 +313,7 @@ class CompletionRetainWindowTest {
 
     private static List<String> finishedRids(EngineRpcService.WorkerStatusPB status) {
         return status.getFinishedTaskListList().stream()
-                .map(EngineRpcService.TaskInfoPB::getRequestId)
+                .map(task -> Long.toString(task.getRequestId()))
                 .collect(Collectors.toList());
     }
 }

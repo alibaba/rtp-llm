@@ -125,6 +125,7 @@ public final class RequestSlot {
     /** Used while active to capture PV evidence; released with the terminal record. */
     private BalanceContext context;
     private final String requestId;
+    private final long numericRequestId;
     private final RequestPhase requestPhase;
     private EncoderEndpoint encoderEndpoint;
     private final long createdAtMs;
@@ -218,9 +219,13 @@ public final class RequestSlot {
         this(completionPublisher, context, expirationTimer, terminalCleanup, admissionFinished, false, null);
     }
 
-    RequestSlot(RequestCompletionPublisher completionPublisher, BalanceContext context, ExpirationTimer expirationTimer,
-                RequestTerminalCleanup terminalCleanup, Runnable admissionFinished,
-                boolean queueScheduling, GlobalQueueCoordinator globalQueue) {
+    RequestSlot(RequestCompletionPublisher completionPublisher,
+                BalanceContext context,
+                ExpirationTimer expirationTimer,
+                RequestTerminalCleanup terminalCleanup,
+                Runnable admissionFinished,
+                boolean queueScheduling,
+                GlobalQueueCoordinator globalQueue) {
         this.queueScheduling = queueScheduling;
         this.globalQueue = globalQueue;
         this.expirationTimer = expirationTimer;
@@ -230,6 +235,7 @@ public final class RequestSlot {
                 completionPublisher, "completionPublisher");
         this.context = Objects.requireNonNull(context, "context");
         this.requestId = context.getRequestId();
+        this.numericRequestId = context.getNumericRequestId();
         this.requestPhase = context.getRequestPhase();
         this.createdAtMs = System.currentTimeMillis();
         this.updatedAtMs = createdAtMs;
@@ -343,7 +349,7 @@ public final class RequestSlot {
 
     synchronized RequestState snapshot() {
         return new RequestState(
-                requestId, state, deliveryClaimKind, batchId,
+                requestId, numericRequestId, state, deliveryClaimKind, batchId,
                 createdAtMs, updatedAtMs, detail);
     }
 

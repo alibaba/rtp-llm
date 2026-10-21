@@ -319,7 +319,7 @@ class FollowerAsyncForwardingNettyTest {
 
     private static FlexlbScheduleProtocol.FlexlbScheduleRequestPB request(String requestId) {
         return FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setRequestId(requestId)
+                .setRequestIdStr(requestId)
                 .setSeqLen(1024)
                 .setGenerateTimeout(TimeUnit.SECONDS.toMillis(10))
                 .build();
@@ -344,14 +344,14 @@ class FollowerAsyncForwardingNettyTest {
                                 FlexlbScheduleProtocol.FlexlbScheduleRequestPB request,
                                 StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB>
                                         responseObserver) {
-                            if (request.getRequestId().equals(Long.toString(WARMUP_REQUEST_ID))) {
+                            if (request.getRequestIdStr().equals(Long.toString(WARMUP_REQUEST_ID))) {
                                 respond(responseObserver);
                                 return;
                             }
                             requestCounts.computeIfAbsent(
-                                    request.getRequestId(), ignored -> new AtomicInteger())
+                                    request.getRequestIdStr(), ignored -> new AtomicInteger())
                                     .incrementAndGet();
-                            forwardHops.put(request.getRequestId(), request.getForwardHop());
+                            forwardHops.put(request.getRequestIdStr(), request.getForwardHop());
                             pendingResponses.add(new PendingResponse(responseObserver));
                             slowRequests.countDown();
                             if (responsesReleased.get()) {
@@ -452,12 +452,12 @@ class FollowerAsyncForwardingNettyTest {
                                 FlexlbScheduleProtocol.FlexlbScheduleRequestPB request,
                                 StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB>
                                         responseObserver) {
-                            if (request.getRequestId().equals(Long.toString(WARMUP_REQUEST_ID))) {
+                            if (request.getRequestIdStr().equals(Long.toString(WARMUP_REQUEST_ID))) {
                                 SlowMaster.respond(responseObserver);
                                 return;
                             }
                             int occurrences = requestCounts.computeIfAbsent(
-                                            request.getRequestId(),
+                                            request.getRequestIdStr(),
                                             ignored -> new AtomicInteger())
                                     .incrementAndGet();
                             receivedRequests.incrementAndGet();

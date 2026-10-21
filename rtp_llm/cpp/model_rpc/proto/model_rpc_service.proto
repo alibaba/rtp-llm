@@ -597,7 +597,8 @@ enum PriorityPreemptionProgressPB {
 }
 
 message TaskInfoPB {
-    string request_id = 1;
+    // Numeric-only readers use request_id; readers of both fields prefer request_id_str.
+    int64 request_id = 1;
     reserved 2;
     reserved "inter_request_id";
     int64 prefix_length = 3;
@@ -649,6 +650,7 @@ message TaskInfoPB {
     oneof last_completed_prefill_step_id_presence {
         int64 last_completed_prefill_step_id = 33;
     }
+    string request_id_str = 34;
 }
 
 message UpdateWeightsRequestPB {

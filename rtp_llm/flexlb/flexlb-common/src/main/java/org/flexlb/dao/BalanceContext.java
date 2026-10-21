@@ -36,6 +36,11 @@ public class BalanceContext {
 
     private Request request;
 
+    /**
+     * Numeric request ID received on the Schedule RPC; zero when omitted.
+     */
+    private long numericRequestId;
+
     private Response response;
 
     @ToString.Exclude

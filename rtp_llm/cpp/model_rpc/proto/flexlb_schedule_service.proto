@@ -6,6 +6,9 @@ option java_outer_classname = "FlexlbScheduleProtocol";
 // FlexLB scheduling control plane. Engine payloads are opaque bytes so this
 // contract can evolve independently from model_rpc_service.proto. Existing
 // field numbers and the FlexlbService method path remain wire-compatible.
+// Clients that only read numeric IDs use request_id. FlexLB uses request_id_str
+// if it is not blank; otherwise it converts request_id to a string.
+// Clients may send either field or both.
 
 enum RequestStatePB {
     REQUEST_STATE_UNSPECIFIED = 0;
@@ -49,13 +52,14 @@ enum ScheduleRolePB {
 }
 
 message RequestLifecyclePB {
-    string request_id = 1;
+    int64 request_id = 1;
     RequestStatePB state = 2;
     int64 batch_id = 3;
+    string request_id_str = 4;
 }
 
 message FlexlbScheduleRequestPB {
-    string request_id = 1;
+    int64 request_id = 1;
     // Wire-compatible with the historical GenerateInputPB message field:
     // message and bytes are both length-delimited on the wire.
     bytes generate_input = 2;
@@ -93,6 +97,10 @@ message FlexlbScheduleRequestPB {
     oneof encoder_cache_hit_len_presence {
         int64 encoder_cache_hit_len = 20;
     }
+    string request_id_str = 21;
+    string session_affinity_id = 22;
+    int32 session_affinity_bucket_id = 23;
+    string session_affinity_type = 24;
 }
 
 message FlexlbServerStatusPB {
@@ -137,13 +145,14 @@ message FlexlbScheduleResponsePB {
 }
 
 message FlexlbCancelRequestPB {
-    string request_id = 1;
+    int64 request_id = 1;
     int64 batch_id = 2;
     CancelReasonPB reason = 3;
     // Single-hop guard only. Every receiver checks local lifecycle ownership;
     // only a hop-zero miss on a follower may be forwarded to the current master.
     int32 forward_hop = 4;
     ScheduleRolePB role = 5;
+    string request_id_str = 6;
 }
 
 message FlexlbCancelResponsePB {
@@ -152,12 +161,13 @@ message FlexlbCancelResponsePB {
 }
 
 message GetRequestStateRequestPB {
-    string request_id = 1;
+    int64 request_id = 1;
     int64 batch_id = 2;
     // Same single-hop guard as Schedule. Clients leave this at zero and a
     // FlexLB follower sets it to one before forwarding.
     uint32 forward_hop = 3;
     ScheduleRolePB role = 4;
+    string request_id_str = 5;
 }
 
 message GetRequestStateResponsePB {

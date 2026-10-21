@@ -101,6 +101,18 @@ class RequestRegistryTest {
     }
 
     @Test
+    void lifecycleRetainsOriginalNumericIdAcrossStateAndCancellation() {
+        BalanceContext context = RequestLifecycleTestSupport.context(config, "007");
+        context.setNumericRequestId(123L);
+        lifecycle.register(context);
+
+        assertEquals(123L, lifecycle.getRequestState("007", 0L).numericRequestId());
+        RequestState cancelled = lifecycle.cancelRequest("007", 0L, CancelReason.CLIENT_CANCELLED);
+        assertEquals("007", cancelled.requestId());
+        assertEquals(123L, cancelled.numericRequestId());
+    }
+
+    @Test
     void reportsUnexpectedRegistrationFailureWithoutRegisteringTheRequest() {
         BalanceContext context = context(101L);
         config.getRequestLifecycle().setRequest(null);

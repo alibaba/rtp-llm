@@ -66,7 +66,7 @@ class FlexlbGrpcForwarderTest {
         FlexlbScheduleProtocol.GetRequestStateResponsePB result =
                 forwarder.forwardGetRequestStateToMaster(
                         FlexlbScheduleProtocol.GetRequestStateRequestPB.newBuilder()
-                                .setRequestId(String.valueOf(2L))
+                                .setRequestIdStr(String.valueOf(2L))
                                 .build());
 
         assertNull(result);
@@ -129,10 +129,10 @@ class FlexlbGrpcForwarderTest {
         try {
             assertEquals("UNKNOWN", await(forwarder.forwardScheduleToMaster(
                     FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                            .setRequestId("41\r\n{}").build())).failure());
+                             .setRequestIdStr("41\r\n{}").build())).failure());
             assertEquals("UNKNOWN", forwarder.forwardCancelToMaster(
                     FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder()
-                            .setRequestId("42").build()).toCompletableFuture().join().failure());
+                             .setRequestIdStr("42").build()).toCompletableFuture().join().failure());
 
             List<ILoggingEvent> failures = appender.list.stream()
                     .filter(event -> event.getFormattedMessage().contains("event=flexlb_forward_failed"))
@@ -172,7 +172,7 @@ class FlexlbGrpcForwarderTest {
         FlexlbGrpcForwarder.MasterForwardResult result = await(
                 forwarder.forwardScheduleToMaster(
                 FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                        .setRequestId(String.valueOf(5L))
+                        .setRequestIdStr(String.valueOf(5L))
                         .setForwardHop(1)
                         .build()));
 
@@ -192,7 +192,7 @@ class FlexlbGrpcForwarderTest {
         FlexlbGrpcForwarder.CancelForwardResult result =
                 forwarder.forwardCancelToMaster(
                                 FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder()
-                                        .setRequestId(String.valueOf(15L))
+                                        .setRequestIdStr(String.valueOf(15L))
                                         .setForwardHop(1)
                                         .build())
                         .toCompletableFuture()
@@ -266,7 +266,7 @@ class FlexlbGrpcForwarderTest {
         FlexlbScheduleProtocol.GetRequestStateResponsePB result =
                 forwarder.forwardGetRequestStateToMaster(
                         FlexlbScheduleProtocol.GetRequestStateRequestPB.newBuilder()
-                                .setRequestId(String.valueOf(8L))
+                                .setRequestIdStr(String.valueOf(8L))
                                 .setForwardHop(1)
                                 .build());
 
@@ -285,7 +285,7 @@ class FlexlbGrpcForwarderTest {
         FlexlbScheduleProtocol.GetRequestStateResponsePB result =
                 forwarder.forwardGetRequestStateToMaster(
                         FlexlbScheduleProtocol.GetRequestStateRequestPB.newBuilder()
-                                .setRequestId(String.valueOf(9L))
+                                .setRequestIdStr(String.valueOf(9L))
                                 .build());
 
         assertNull(result);
@@ -303,13 +303,13 @@ class FlexlbGrpcForwarderTest {
         FlexlbGrpcForwarder.MasterForwardResult scheduleResult =
                 await(forwarder.forwardScheduleToMaster(
                         FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                                .setRequestId(String.valueOf(12L))
+                                .setRequestIdStr(String.valueOf(12L))
                                 .setForwardHop(1)
                                 .build()));
         FlexlbScheduleProtocol.GetRequestStateResponsePB stateResult =
                 forwarder.forwardGetRequestStateToMaster(
                         FlexlbScheduleProtocol.GetRequestStateRequestPB.newBuilder()
-                                .setRequestId(String.valueOf(13L))
+                                .setRequestIdStr(String.valueOf(13L))
                                 .setForwardHop(1)
                                 .build());
 
@@ -328,7 +328,7 @@ class FlexlbGrpcForwarderTest {
     void forwardHopSurvivesRelayByAnOlderProtobufSchema() throws Exception {
         FlexlbScheduleProtocol.FlexlbScheduleRequestPB newRequest =
                 FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                        .setRequestId(String.valueOf(10L))
+                        .setRequestIdStr(String.valueOf(10L))
                         .setSeqLen(4096)
                         .setForwardHop(1)
                         .build();
@@ -365,7 +365,7 @@ class FlexlbGrpcForwarderTest {
         FlexlbScheduleProtocol.FlexlbScheduleRequestPB reparsed =
                 FlexlbScheduleProtocol.FlexlbScheduleRequestPB.parseFrom(
                         oldRelay.toByteArray());
-        assertEquals("10", reparsed.getRequestId());
+        assertEquals("10", reparsed.getRequestIdStr());
         assertEquals(4096L, reparsed.getSeqLen());
         assertEquals(1, reparsed.getForwardHop());
     }
@@ -374,7 +374,7 @@ class FlexlbGrpcForwarderTest {
     void stateQueryForwardHopSurvivesOlderProtobufRelay() throws Exception {
         FlexlbScheduleProtocol.GetRequestStateRequestPB newRequest =
                 FlexlbScheduleProtocol.GetRequestStateRequestPB.newBuilder()
-                        .setRequestId(String.valueOf(11L))
+                        .setRequestIdStr(String.valueOf(11L))
                         .setBatchId(12L)
                         .setForwardHop(1)
                         .build();
@@ -407,7 +407,7 @@ class FlexlbGrpcForwarderTest {
         FlexlbScheduleProtocol.GetRequestStateRequestPB reparsed =
                 FlexlbScheduleProtocol.GetRequestStateRequestPB.parseFrom(
                         oldRelay.toByteArray());
-        assertEquals("11", reparsed.getRequestId());
+        assertEquals("11", reparsed.getRequestIdStr());
         assertEquals(12L, reparsed.getBatchId());
         assertEquals(1, reparsed.getForwardHop());
     }
@@ -416,7 +416,7 @@ class FlexlbGrpcForwarderTest {
     void cancelForwardHopSurvivesOlderProtobufRelay() throws Exception {
         FlexlbScheduleProtocol.FlexlbCancelRequestPB newRequest =
                 FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder()
-                        .setRequestId(String.valueOf(16L))
+                        .setRequestIdStr(String.valueOf(16L))
                         .setBatchId(17L)
                         .setReason(FlexlbScheduleProtocol.CancelReasonPB
                                 .CANCEL_REASON_CLIENT_CANCELLED)
@@ -469,7 +469,7 @@ class FlexlbGrpcForwarderTest {
         FlexlbScheduleProtocol.FlexlbCancelRequestPB reparsed =
                 FlexlbScheduleProtocol.FlexlbCancelRequestPB.parseFrom(
                         oldRelay.toByteArray());
-        assertEquals("16", reparsed.getRequestId());
+        assertEquals("16", reparsed.getRequestIdStr());
         assertEquals(17L, reparsed.getBatchId());
         assertEquals(1, reparsed.getForwardHop());
     }
@@ -489,7 +489,7 @@ class FlexlbGrpcForwarderTest {
 
     private static FlexlbScheduleProtocol.FlexlbScheduleRequestPB request(long id) {
         return FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setRequestId(String.valueOf(id))
+                .setRequestIdStr(String.valueOf(id))
                 .build();
     }
 

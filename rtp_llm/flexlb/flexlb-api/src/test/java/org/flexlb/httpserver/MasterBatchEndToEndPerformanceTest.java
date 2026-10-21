@@ -1243,7 +1243,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                         .build())
                 .build();
         return FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setRequestId(Long.toString(requestId))
+                .setRequestId(requestId)
                 .setGenerateInput(ByteString.copyFrom(generateInput.toByteArray()))
                 .addAllBlockCacheKeys(template.blockCacheKeys())
                 .setSeqLen(template.seqLen())

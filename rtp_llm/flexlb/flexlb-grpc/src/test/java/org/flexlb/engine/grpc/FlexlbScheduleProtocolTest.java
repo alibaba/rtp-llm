@@ -26,7 +26,8 @@ class FlexlbScheduleProtocolTest {
 
         ByteArrayOutputStream output = new ByteArrayOutputStream();
         CodedOutputStream coded = CodedOutputStream.newInstance(output);
-        coded.writeString(1, "client-keys");
+        coded.writeInt64(1, 123);
+        coded.writeString(21, "client-keys");
         coded.writeInt64(3, 123L);
         coded.writeInt64(13, 4096L);
         coded.writeString(16, "image");
@@ -36,6 +37,8 @@ class FlexlbScheduleProtocolTest {
         assertEquals(java.util.List.of(123L), request.getBlockCacheKeysList());
         assertEquals(4096L, request.getCacheKeyBlockSize());
         assertEquals(java.util.List.of("image"), request.getCacheAffinityKeysList());
+        assertEquals(123L, request.getRequestId());
+        assertEquals("client-keys", RequestId.parse(request));
         assertEquals(request, FlexlbScheduleProtocol.FlexlbScheduleRequestPB
                 .parseFrom(request.toByteArray()));
     }
@@ -126,7 +129,7 @@ class FlexlbScheduleProtocolTest {
         assertEquals(3, FlexlbScheduleProtocol.ScheduleRolePB.SCHEDULE_ROLE_DECODE.getNumber());
         assertEquals(4, FlexlbScheduleProtocol.ScheduleRolePB.SCHEDULE_ROLE_PDFUSION.getNumber());
         var schedule = FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setRequestId("request-1")
+                .setRequestIdStr("request-1")
                 .addScheduleRoles(FlexlbScheduleProtocol.ScheduleRolePB.SCHEDULE_ROLE_ENCODER)
                 .addScheduleRoles(FlexlbScheduleProtocol.ScheduleRolePB.SCHEDULE_ROLE_PREFILL)
                 .build();

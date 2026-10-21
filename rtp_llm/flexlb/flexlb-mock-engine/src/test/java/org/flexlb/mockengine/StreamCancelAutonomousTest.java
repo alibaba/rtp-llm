@@ -471,7 +471,7 @@ class StreamCancelAutonomousTest {
     private static long countCancelTerminals(JavaMockEngineCluster.FastRpcService service, long rid) {
         return MockEngineTestSupport.workerStatus(service, 0)
                 .getFinishedTaskListList().stream()
-                .filter(task -> task.getRequestId().equals(Long.toString(rid)))
+                .filter(task -> task.getRequestId() == rid)
                 .filter(task -> task.hasErrorInfo()
                         && task.getErrorInfo().getErrorCode()
                                 == EngineRpcService.ErrorCodePB.CANCELLED.getNumber())

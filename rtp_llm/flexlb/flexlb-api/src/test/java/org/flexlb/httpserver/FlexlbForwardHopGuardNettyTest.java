@@ -241,7 +241,7 @@ class FlexlbForwardHopGuardNettyTest {
             FlexlbScheduleProtocol.GetRequestStateResponsePB state =
                     client.stub.getRequestState(
                             FlexlbScheduleProtocol.GetRequestStateRequestPB.newBuilder()
-                                    .setRequestId(Long.toString(requestId))
+                                    .setRequestId(requestId)
                                     .build());
             assertTrue(state.getFound());
             assertEquals(
@@ -253,7 +253,7 @@ class FlexlbForwardHopGuardNettyTest {
             FlexlbScheduleProtocol.FlexlbCancelResponsePB response =
                     client.stub.cancel(
                             FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder()
-                                    .setRequestId(Long.toString(requestId))
+                                    .setRequestId(requestId)
                                     .setReason(FlexlbScheduleProtocol.CancelReasonPB
                                             .CANCEL_REASON_CLIENT_CANCELLED)
                                     .build());
@@ -291,7 +291,7 @@ class FlexlbForwardHopGuardNettyTest {
             FlexlbScheduleProtocol.FlexlbCancelResponsePB response =
                     client.stub.cancel(
                             FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder()
-                                    .setRequestId(Long.toString(requestedId))
+                                    .setRequestId(requestedId)
                                     .setReason(FlexlbScheduleProtocol.CancelReasonPB
                                             .CANCEL_REASON_CLIENT_CANCELLED)
                                     .setForwardHop(1)
@@ -314,15 +314,15 @@ class FlexlbForwardHopGuardNettyTest {
 
     private static FlexlbScheduleProtocol.FlexlbScheduleRequestPB request(long requestId) {
         return FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setRequestId(Long.toString(requestId))
+                .setRequestId(requestId)
                 .setSeqLen(1024)
                 .build();
     }
 
-    private static RequestState requestState(
-            long requestId, RequestState.Phase phase) {
+    private static RequestState requestState(long requestId, RequestState.Phase phase) {
         return new RequestState(
                 Long.toString(requestId),
+                requestId,
                 phase,
                 DeliveryClaimKind.NONE,
                 0L,

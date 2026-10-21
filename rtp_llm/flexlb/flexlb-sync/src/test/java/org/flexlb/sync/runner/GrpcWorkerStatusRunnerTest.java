@@ -37,7 +37,7 @@ class GrpcWorkerStatusRunnerTest {
     @ParameterizedTest
     @CsvSource({"DECODE,false,false", "PREFILL,true,false", "PDFUSION,true,false", "PREFILL,true,true"})
     void repeatedStatusCheckFailuresRetireWorkerAndOnlyClearDetailedCacheIndexes(
-            RoleType role, boolean needsCacheKeys, boolean malformedTaskId) {
+            RoleType role, boolean needsCacheKeys, boolean invalidRole) {
         ConfigService config = mock(ConfigService.class);
         when(config.loadBalanceConfig()).thenReturn(
                 org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
@@ -51,12 +51,12 @@ class GrpcWorkerStatusRunnerTest {
         EngineGrpcService grpc = mock(EngineGrpcService.class);
         when(grpc.getWorkerStatusAsync(
                 anyString(), anyInt(), anyLong(), anyLong(), any()))
-                .thenReturn(malformedTaskId
+                .thenReturn(invalidRole
                         ? CompletableFuture.completedFuture(EngineRpcService.WorkerStatusPB.newBuilder()
-                                .setRoleType(EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL)
-                                .setStatusVersion(1L).setAlive(true)
-                                .addRunningTaskInfo(EngineRpcService.TaskInfoPB.newBuilder().setRequestId(" "))
-                                .build())
+                                 .setRoleType(EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL)
+                                 .setRole("DECODE")
+                                 .setStatusVersion(1L).setAlive(true)
+                                 .build())
                         : CompletableFuture.failedFuture(io.grpc.Status.UNAVAILABLE.asRuntimeException()));
 
         for (int failure = 1; failure <= 3; failure++) {
@@ -227,7 +227,7 @@ class GrpcWorkerStatusRunnerTest {
                 .thenReturn(activity);
 
         EngineRpcService.TaskInfoPB task = EngineRpcService.TaskInfoPB.newBuilder()
-                .setRequestId("123")
+                .setRequestId(123)
                 .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING)
                 .build();
         EngineRpcService.WorkerStatusPB response =

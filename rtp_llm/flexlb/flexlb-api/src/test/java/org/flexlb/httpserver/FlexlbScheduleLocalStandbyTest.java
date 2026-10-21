@@ -131,7 +131,7 @@ class FlexlbScheduleLocalStandbyTest {
 
     private FlexlbScheduleProtocol.FlexlbScheduleRequestPB request() {
         return FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setRequestId("warmup").setSeqLen(12288)
+                .setRequestIdStr("warmup").setSeqLen(12288)
                 .setCacheKeyBlockSize(4096).addAllBlockCacheKeys(List.of(11L, 22L, 33L)).build();
     }
 
