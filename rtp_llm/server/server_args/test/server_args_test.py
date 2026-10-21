@@ -266,6 +266,27 @@ class CacheConfigArgumentsTest(TestCase):
 class ServerArgsPyEnvConfigsTest(TestCase):
     """Test that environment variables and command line arguments are correctly set to py_env_configs structure."""
 
+    def test_vit_source_download_concurrency_from_env_and_cli(self):
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(
+                server_args.setup_args([]).vit_config.vit_source_download_concurrency, 0
+            )
+        with patch.dict(
+            os.environ, {"VIT_SOURCE_DOWNLOAD_CONCURRENCY": "32"}, clear=True
+        ):
+            self.assertEqual(
+                server_args.setup_args([]).vit_config.vit_source_download_concurrency,
+                32,
+            )
+            self.assertEqual(
+                server_args.setup_args(
+                    ["--vit_source_download_concurrency", "8"]
+                ).vit_config.vit_source_download_concurrency,
+                8,
+            )
+
     def test_dsv4_mega_moe_public_choices(self):
         from rtp_llm.server.server_args import server_args
 

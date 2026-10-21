@@ -44,6 +44,7 @@ from rtp_llm.multimodal.multimodal_util import (
     url_data_cache_,
     vit_emb_cache_,
 )
+from rtp_llm.multimodal.source_download_executor import SourceDownloadExecutor
 from rtp_llm.multimodal.vit_metrics import (
     VitMetricSample,
     collect_vit_preprocess_metrics,
@@ -939,6 +940,13 @@ class MMProcessEngine:
         self._greennet_timeout_s = (
             float(getattr(self.vit_config, "mm_timeout_ms", 120000) or 120000) / 1000.0
         )
+        self._source_download_executor = SourceDownloadExecutor(
+            vit_config.vit_source_download_concurrency
+        )
+        logging.info(
+            "MMProcessEngine: source download concurrency=%d (0=shared I/O pool)",
+            vit_config.vit_source_download_concurrency,
+        )
 
     def inc_query_num(self) -> None:
         """Increment the query counter."""
@@ -1105,7 +1113,7 @@ class MMProcessEngine:
             source_inputs = None
             prepare_sources = getattr(self.mm_part, "prepare_inspection_inputs", None)
             if callable(prepare_sources):
-                source_inputs = await asyncio.to_thread(
+                source_inputs = await self._source_download_executor.run(
                     prepare_sources,
                     mm_inputs,
                     self.vit_config,
@@ -2427,6 +2435,7 @@ class MMProcessEngine:
         self.preprocess_executor.shutdown()
         self._scheduler.close()
         self._shutdown_greennet_loop()
+        self._source_download_executor.shutdown()
         self._embedding_cache.clear(RuntimeError("MMProcessEngine stopped"))
         self._hash_key_cache.clear()
         if self._remote_embedding_cache is not None:
