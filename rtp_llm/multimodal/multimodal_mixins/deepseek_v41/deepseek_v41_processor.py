@@ -307,7 +307,7 @@ def _preprocess_rgb_on_device(rgb, target_hw, patch_size, device):
     if device.type != "cuda":
         raise ValueError("V4.1 GPU preprocessing requires an explicit CUDA device")
     if not is_supported_shape(tuple(rgb.shape[:2]), target_hw, patch_size=patch_size):
-        raise ValueError("unsupported shape/Pillow version for V4.1 GPU preprocessing")
+        raise ValueError("unsupported shape for V4.1 GPU preprocessing")
     # Coordinate with any concurrent ViT graph capture. The low-level processor
     # is eager and performs both uint8 resize passes before BF16 patch folding.
     with torch.cuda.device(device), cuda_graph_gate.operation():
