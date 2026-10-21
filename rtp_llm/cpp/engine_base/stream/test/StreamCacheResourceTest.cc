@@ -990,11 +990,16 @@ TEST_F(StreamCacheResourceTest, P2PRegistrationWaitsForAllocatorMaterialization)
     auto& resource = stream_->streamCacheResource();
     ASSERT_TRUE(resource.waitForAllocatorLoad().ok());
     ASSERT_GT(resource.curBlocksNum(), 0u);
-    const auto allocated = *resource.batch_kv_cache_resource_;
+    ASSERT_EQ(resource.batch_kv_cache_resource_->batchSize(), 1);
+    const auto                    tags = resource.batch_kv_cache_resource_->cacheResource(0).groupTags();
+    std::vector<BlockIndicesType> allocated_blocks;
+    for (const auto& tag : tags) {
+        allocated_blocks.push_back(resource.batch_kv_cache_resource_->blocks(0, tag));
+    }
     resource.batch_kv_cache_resource_->clearBlocks();
-    auto context = makeAllocatorLoadContext(1, {Tier::HOST});
+    auto context                     = makeAllocatorLoadContext(1, {Tier::HOST});
     resource.allocator_load_context_ = context;
-    auto store = cache_manager_->p2p_connector_->streamStore();
+    auto store                       = cache_manager_->p2p_connector_->streamStore();
 
     ASSERT_TRUE(resource.asyncLoadCache());
     EXPECT_EQ(resource.p2p_load_context_, nullptr);
@@ -1002,7 +1007,11 @@ TEST_F(StreamCacheResourceTest, P2PRegistrationWaitsForAllocatorMaterialization)
     EXPECT_FALSE(resource.loadCacheDone());
 
     // Model the allocator callback publishing its physical targets before completion.
-    *resource.batch_kv_cache_resource_ = allocated;
+    // KVCacheResource copies share BlockIds; preserve the physical IDs by value.
+    for (size_t i = 0; i < tags.size(); ++i) {
+        resource.batch_kv_cache_resource_->setBatchBlocks(0, tags[i], allocated_blocks[i]);
+    }
+    ASSERT_GT(resource.curBlocksNum(), 0u);
     ASSERT_TRUE(context->completeTransfers(1, true));
     ASSERT_TRUE(resource.loadCacheDone());
     EXPECT_EQ(store->resource_map_.count("materialized-handoff"), 1u);
