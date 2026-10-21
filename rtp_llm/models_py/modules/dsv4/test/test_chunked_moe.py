@@ -90,6 +90,20 @@ class _FakeSharedExecutor:
         return out
 
 
+class _FakeCPGate(_FakeGate):
+    def __init__(self, tokens: int) -> None:
+        super().__init__()
+        self._v41_cp_ctx = SimpleNamespace(chunk_length=tokens)
+
+    def forward(self, x, input_ids):
+        if x.size(0) != self._v41_cp_ctx.chunk_length:
+            raise RuntimeError("CP routing needs the complete local batch")
+        super().forward(x, input_ids)
+        weights = (x[:, :1] + x.sum()).float()
+        indices = input_ids.view(-1, 1).long() + 10 * x.size(0)
+        return weights, indices
+
+
 class _FakeStrategy(nn.Module):
     name = "mega"
     requires_synchronized_chunk_schedule = False
@@ -98,6 +112,7 @@ class _FakeStrategy(nn.Module):
         super().__init__()
         self.cap = cap
         self.token_chunks: list[int] = []
+        self.routes: list[tuple[torch.Tensor, torch.Tensor]] = []
 
     def prepare_dispatch(self, x, weights, indices):
         # Match the production strategy default: no separately prepared dispatch.
@@ -110,6 +125,7 @@ class _FakeStrategy(nn.Module):
         indices: torch.Tensor,
     ) -> torch.Tensor:
         self.token_chunks.append(x.size(0))
+        self.routes.append((weights.clone(), indices.clone()))
         if x.size(0) > self.cap:
             raise RuntimeError(f"chunk overflow: {x.size(0)} > {self.cap}")
         return x.float() * 2.0
@@ -364,6 +380,49 @@ class ChunkedMoETest(unittest.TestCase):
         moe(x, input_ids)
 
         self.assertLessEqual(max(moe._strategy.token_chunks), 8)
+
+    def test_cp_routes_are_computed_before_expert_chunks(self):
+        for gate_pack in (False, True):
+            with self.subTest(gate_pack=gate_pack):
+                moe = _fake_moe(dim=2, cap=4)
+                moe.gate = _FakeCPGate(tokens=11)
+                if gate_pack:
+                    moe._strategy = _FakeGatePackStrategy(cap=4)
+                    moe._gate_pack_static = True
+                x = torch.arange(22, dtype=torch.float32).view(11, 2)
+                input_ids = torch.arange(200, 211, dtype=torch.long)
+
+                out = moe(x, input_ids)
+
+                self.assertEqual(moe.gate.token_chunks, [11])
+                self.assertTrue(torch.equal(moe.gate.input_id_chunks[0], input_ids))
+                self.assertEqual(moe._strategy.token_chunks, [4, 4, 3])
+                self.assertEqual(moe._shared_executor.token_chunks, [4, 4, 3])
+                weights, indices = zip(*moe._strategy.routes)
+                self.assertTrue(torch.equal(torch.cat(weights), x[:, :1] + x.sum()))
+                self.assertTrue(
+                    torch.equal(torch.cat(indices), input_ids[:, None] + 110)
+                )
+                if gate_pack:
+                    self.assertEqual(moe._strategy.gate_pack_token_chunks, [])
+                self.assertTrue(torch.equal(out, x * 3.0 + 1.0))
+
+    def test_cp_route_slices_keep_empty_collective_chunks(self):
+        moe = _fake_moe(dim=2, cap=4)
+        moe.gate = _FakeCPGate(tokens=3)
+        moe._strategy = _FakeSynchronizedStrategy(cap=4, schedule_tokens=9)
+        x = torch.arange(6, dtype=torch.float32).view(3, 2)
+        input_ids = torch.arange(3, dtype=torch.long)
+
+        out = moe(x, input_ids)
+
+        self.assertEqual(moe.gate.token_chunks, [3])
+        self.assertEqual(moe._strategy.token_chunks, [3, 0, 0])
+        weights, indices = zip(*moe._strategy.routes)
+        self.assertTrue(torch.equal(torch.cat(weights), x[:, :1] + x.sum()))
+        self.assertTrue(torch.equal(torch.cat(indices), input_ids[:, None] + 30))
+        self.assertEqual(moe._shared_executor.token_chunks, [3])
+        self.assertTrue(torch.equal(out, x * 3.0 + 1.0))
 
     def test_collective_chunk_schedule_keeps_short_rank_in_every_round(self):
         moe = _fake_moe(dim=2, cap=4)

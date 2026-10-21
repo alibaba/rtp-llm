@@ -336,13 +336,17 @@ class MoE(nn.Module):
         x: torch.Tensor,
         input_ids: torch.Tensor,
         out: torch.Tensor,
+        routes: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> None:
         if x.size(0) == 0 and self._strategy.requires_synchronized_chunk_schedule:
             # A shorter rank still has to enter the routed-expert collective
             # for every globally scheduled chunk.  Gate is explicitly
             # empty-safe; shared experts have no local rows and can be skipped.
-            with record_function_range("dsv4.moe.gate"):
-                weights, indices = self.gate(x, input_ids)
+            if routes is None:
+                with record_function_range("dsv4.moe.gate"):
+                    weights, indices = self.gate(x, input_ids)
+            else:
+                weights, indices = routes
             with record_function_range("dsv4.moe.routed_experts"):
                 routed = self._strategy(x, weights, indices)
             if routed.numel() != 0:
@@ -351,7 +355,7 @@ class MoE(nn.Module):
                 )
             return
 
-        if self._gate_pack_static:
+        if self._gate_pack_static and routes is None:
             if self._routed_includes_shared:
                 with record_function_range("dsv4.moe.routed_experts"):
                     routed = self._strategy.forward_with_gate_pack(
@@ -380,8 +384,11 @@ class MoE(nn.Module):
                     out.copy_(combined)
             return
 
-        with record_function_range("dsv4.moe.gate"):
-            weights, indices = self.gate(x, input_ids)
+        if routes is None:
+            with record_function_range("dsv4.moe.gate"):
+                weights, indices = self.gate(x, input_ids)
+        else:
+            weights, indices = routes
 
         if self._routed_includes_shared:
             # Fused strategy returns ``routed + shared`` directly.
@@ -445,15 +452,31 @@ class MoE(nn.Module):
                 self.dim,
                 x.device,
             )
+        routes = None
+        if getattr(self.gate, "_v41_cp_ctx", None) is not None:
+            # CP routing restores the full batch before computing logits.
+            # Expert chunks must reuse those routes rather than gather slices
+            # against metadata describing the complete CP input.
+            with record_function_range("dsv4.moe.gate"):
+                routes = self.gate(x, input_ids_flat)
         out = _get_or_create_final_out(T, self.dim, x.dtype, x.device)[:T]
         for token_start in range(0, schedule_tokens, chunk_tokens):
             token_end = min(token_start + chunk_tokens, T)
+            chunk_routes = (
+                None
+                if routes is None
+                else (
+                    routes[0][token_start:token_end],
+                    routes[1][token_start:token_end],
+                )
+            )
             subchunk_scope = getattr(self._strategy, "forward_subchunk_scope", None)
             if subchunk_scope is None:
                 self._run_chunk(
                     x[token_start:token_end],
                     input_ids_flat[token_start:token_end],
                     out[token_start:token_end],
+                    chunk_routes,
                 )
             else:
                 with subchunk_scope(token_start, chunk_tokens, T):
@@ -461,6 +484,7 @@ class MoE(nn.Module):
                         x[token_start:token_end],
                         input_ids_flat[token_start:token_end],
                         out[token_start:token_end],
+                        chunk_routes,
                     )
         return out.view(shape)
 
