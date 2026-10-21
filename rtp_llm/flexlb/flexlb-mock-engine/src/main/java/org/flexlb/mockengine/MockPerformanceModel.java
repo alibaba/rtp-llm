@@ -403,11 +403,7 @@ final class MockPerformanceModel {
         boolean nativeImages = usesNativeKeys(input);
         if (nativeImages) {
             int physicalBlockSize = Integer.parseInt(System.getenv().getOrDefault("MOCK_HASH_BLOCK_SIZE", Integer.toString(blockSize)));
-            if (physicalBlockSize <= 0 || blockSize % physicalBlockSize != 0)
-                throw new IllegalArgumentException("Mock role block size must be a multiple of MOCK_HASH_BLOCK_SIZE");
-            List<Long> physical = LegacyImageCacheKeys.fullBlocks(input, physicalBlockSize, LegacyImageCacheKeys.seed());
-            int stride = blockSize / physicalBlockSize;
-            for (int i = stride - 1; i < physical.size(); i += stride) blockKeys.add(physical.get(i));
+            blockKeys.addAll(LegacyImageCacheKeys.routeBlocks(input, physicalBlockSize, blockSize, LegacyImageCacheKeys.seed()));
         }
         // hitBlocks carries the RAW prefix-match run length (key count) — the
         // key-level cache-hit caliber (production recent_cache_key_hit_count /

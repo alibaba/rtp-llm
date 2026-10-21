@@ -88,7 +88,7 @@ def main():
     os.environ.update(CHECKPOINT_PATH=str(model), TOKENIZER_PATH=str(tokenizer))
     if os.environ.get('MOCK_BUNDLE_ROLE') == 'vit':
         from rtp_llm.server.mock_vit_engine import main as vit_main
-        sys.argv = [sys.argv[0], '--port', os.environ.get('MOCK_VIT_PORT', '22162'),
+        sys.argv = [sys.argv[0], '--port', os.environ.get('MOCK_VIT_PORT', '22161'),
                     '--health-port', os.environ.get('START_PORT', '22160'), '--prepared-v41',
                     '--model-path', str(model), '--concurrency', os.environ.get('VIT_MAX_CONCURRENT_REQUESTS', '32'),
                     '--cache-bytes', os.environ.get('MOCK_VIT_CACHE_BYTES', '0')]

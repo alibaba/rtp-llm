@@ -19,6 +19,16 @@ final class LegacyImageCacheKeys {
     private static boolean enabled(String value) {
         return value != null && List.of("1", "true", "yes", "on").contains(value.toLowerCase(java.util.Locale.ROOT));
     }
+    static List<Long> routeBlocks(EngineRpcService.GenerateInputPB input, int physicalBlockSize,
+                                 int routeBlockSize, long initialHash) {
+        if (physicalBlockSize <= 0 || routeBlockSize <= 0 || routeBlockSize % physicalBlockSize != 0)
+            throw new IllegalArgumentException("role block size must be a multiple of physical hash block size");
+        List<Long> physical = fullBlocks(input, physicalBlockSize, initialHash);
+        int stride = routeBlockSize / physicalBlockSize;
+        List<Long> result = new ArrayList<>();
+        for (int i = stride - 1; i < physical.size(); i += stride) result.add(physical.get(i));
+        return List.copyOf(result);
+    }
     static List<Long> fullBlocks(EngineRpcService.GenerateInputPB input, int blockSize, long initialHash) {
         List<Long> keys = new ArrayList<>();
         long hash = initialHash;

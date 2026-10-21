@@ -338,7 +338,7 @@ public final class JavaMockEngineCluster {
                     // SO_REUSEADDR on accepted (child) sockets — defense in depth.
                     .withChildOption(ChannelOption.SO_REUSEADDR, true)
                     .directExecutor()
-                    .maxInboundMessageSize(16 * 1024 * 1024)
+                    .maxInboundMessageSize(64 * 1024 * 1024)
                     .addService(service)
                     .build()
                     .start();
