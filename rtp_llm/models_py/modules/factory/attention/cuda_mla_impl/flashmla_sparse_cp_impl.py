@@ -834,6 +834,14 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         if prepared_kv is None:
             self.write_kv(compressed_kv, k_pe, kv_cache)
 
+        # prepare_kv writes MLA KV before the Indexer runs. Publish only here,
+        # after Indexer KV writes have been enqueued on the compute stream, so
+        # CacheStore's event covers both buffers, including on empty-Q ranks.
+        # Host-backed layers suppress this writer until their D2H completes.
+        common.apply_write_cache_store(
+            self.write_cache_store_impl, self.attn_inputs, kv_cache
+        )
+
         no_q_work = (
             topk is None
             or topk.numel() == 0
@@ -905,9 +913,6 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             slot_mapping_override=(
                 self.sharded_slot_mapping if self.kv_cache_sharded else None
             ),
-        )
-        common.apply_write_cache_store(
-            self.write_cache_store_impl, self.attn_inputs, kv_cache
         )
 
     def _allocate_fused_kv(self) -> torch.Tensor:
