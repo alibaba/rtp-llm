@@ -404,4 +404,20 @@ TEST_F(P2PCancelLifetimeTest, CancelReadReleasesKeepaliveAfterRpcTimeout) {
     checkLifetime(P2PConnectorBroadcastType::CANCEL_READ, true);
 }
 
+TEST_F(P2PBroadcastClientTest, CancelReadSendsRetentionBudgetAndPreservesSourceIdentity) {
+    const auto source_deadline_ms = currentTimeMs() + 5000;
+    auto       result             = client_->cancel(
+        "cancel-budget", P2PConnectorBroadcastType::CANCEL_READ, source_deadline_ms, 9012, source_deadline_ms);
+    ASSERT_NE(result, nullptr);
+    waitDone(result);
+    ASSERT_TRUE(result->done());
+    ASSERT_TRUE(result->success());
+    for (auto& server : servers_) {
+        const auto request = server->service()->getLastBroadcastTpRequest();
+        EXPECT_EQ(request.request_deadline_ms(), source_deadline_ms);
+        EXPECT_GT(request.cancel_retention_ms(), 0);
+        EXPECT_LE(request.cancel_retention_ms(), 5000);
+    }
+}
+
 }  // namespace rtp_llm

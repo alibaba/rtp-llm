@@ -885,6 +885,9 @@ message P2PConnectorBroadcastTpRequestPB {
     // duration to its own clock; the two source deadlines remain identity/validation
     // fields and must not be compared to the receiver's wall clock.
     int64 read_timeout_ms = 13;
+    // CANCEL_READ only: remaining request lifetime for an early-cancel fence.
+    // This is a retention budget, never evidence that a physical read has stopped.
+    int64 cancel_retention_ms = 14;
 }
 
 // GetPeerInfo: Decode queries the selected Prefill for its TP/CP layout before recv registration.

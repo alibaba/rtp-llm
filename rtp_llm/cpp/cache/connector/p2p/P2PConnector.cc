@@ -179,9 +179,14 @@ bool P2PConnector::executeFunction(const FunctionRequestPB& request, FunctionRes
         case P2PConnectorBroadcastType::READ:
             return decode_ ? decode_->readPerRank(request_id, unique_key, deadline_ms, p2p_request, response) :
                              reject_role();
-        case P2PConnectorBroadcastType::CANCEL_READ:
-            return decode_ ? decode_->cancelReadPerRank(unique_key, p2p_request.request_deadline_ms(), response) :
-                             reject_role();
+        case P2PConnectorBroadcastType::CANCEL_READ: {
+            // Retention is local bookkeeping, never proof that physical reads stopped.
+            const auto now_ms    = currentTimeMs();
+            const auto budget_ms = p2p_request.cancel_retention_ms();
+            const auto local_deadline_ms =
+                budget_ms > 0 && budget_ms < std::numeric_limits<int64_t>::max() - now_ms ? now_ms + budget_ms : 0;
+            return decode_ ? decode_->cancelReadPerRank(unique_key, local_deadline_ms, response) : reject_role();
+        }
         case P2PConnectorBroadcastType::CANCEL_HANDLE_READ:
             return prefill_ ?
                        prefill_->cancelProcessReadPerRank(request_id,

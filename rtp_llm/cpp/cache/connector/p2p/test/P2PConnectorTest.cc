@@ -1172,4 +1172,59 @@ TEST_F(P2PConnectorTest, ReadBroadcastRejectsInvalidBudgetAndSourceOrdering) {
     FunctionResponsePB response;
     EXPECT_FALSE(connector->executeFunction(request, response));
 }
+TEST_F(P2PConnectorTest, EarlyCancelRetentionUsesReceiverClockAndKeepsReadStateIndependent) {
+    auto config                                    = createDecodeConfig();
+    config.worker_config.p2p_cancelled_keys_ttl_ms = 1000;
+    auto connector = std::make_unique<P2PConnector>(config, mock_layer_block_converter_, nullptr);
+    ASSERT_TRUE(connector->init());
+    for (const int64_t skew_ms : {-3600000LL, 3600000LL}) {
+        FunctionRequestPB request;
+        auto*             cancel = request.mutable_p2p_request();
+        cancel->set_type(P2PConnectorBroadcastType::CANCEL_READ);
+        const auto key = "cancel-clock-skew-" + std::to_string(skew_ms);
+        cancel->set_unique_key(key);
+        cancel->set_request_deadline_ms(currentTimeMs() + skew_ms + 5000);
+        cancel->set_cancel_retention_ms(5000);
+        const auto         before_ms = currentTimeMs();
+        FunctionResponsePB response;
+        EXPECT_TRUE(connector->executeFunction(request, response));
+        EXPECT_EQ(response.p2p_response().error_code(), ErrorCodePB::NONE_ERROR);
+        const auto                  after_ms = currentTimeMs();
+        auto*                       worker   = connector->decode_->worker_.get();
+        std::lock_guard<std::mutex> lock(worker->read_tasks_mutex_);
+        const auto                  it = worker->pending_cancel_keys_.find(key);
+        ASSERT_NE(it, worker->pending_cancel_keys_.end());
+        EXPECT_GE(it->second, before_ms + 5000);
+        EXPECT_LE(it->second, after_ms + 5000);
+        EXPECT_TRUE(worker->read_tasks_.empty());
+        EXPECT_TRUE(worker->lease_map_.empty());
+    }
+}
+
+TEST_F(P2PConnectorTest, InvalidCancelRetentionStillRegistersBoundedLocalFence) {
+    auto config                                    = createDecodeConfig();
+    config.worker_config.p2p_cancelled_keys_ttl_ms = 1000;
+    auto connector = std::make_unique<P2PConnector>(config, mock_layer_block_converter_, nullptr);
+    ASSERT_TRUE(connector->init());
+    for (const auto budget_ms : {int64_t{0}, int64_t{-1}, std::numeric_limits<int64_t>::max()}) {
+        FunctionRequestPB request;
+        auto*             cancel = request.mutable_p2p_request();
+        cancel->set_type(P2PConnectorBroadcastType::CANCEL_READ);
+        const auto key = "invalid-cancel-budget-" + std::to_string(budget_ms);
+        cancel->set_unique_key(key);
+        cancel->set_request_deadline_ms(std::numeric_limits<int64_t>::max());
+        cancel->set_cancel_retention_ms(budget_ms);
+        const auto         before_ms = currentTimeMs();
+        FunctionResponsePB response;
+        EXPECT_TRUE(connector->executeFunction(request, response));
+        const auto                  after_ms = currentTimeMs();
+        auto*                       worker   = connector->decode_->worker_.get();
+        std::lock_guard<std::mutex> lock(worker->read_tasks_mutex_);
+        const auto                  it = worker->pending_cancel_keys_.find(key);
+        ASSERT_NE(it, worker->pending_cancel_keys_.end());
+        EXPECT_GE(it->second, before_ms + 1000);
+        EXPECT_LE(it->second, after_ms + 1000);
+    }
+}
+
 }  // namespace rtp_llm

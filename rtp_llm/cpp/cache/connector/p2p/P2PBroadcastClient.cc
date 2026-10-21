@@ -153,6 +153,11 @@ std::shared_ptr<P2PBroadcastClient::Result> P2PBroadcastClient::cancel(const std
     size_t                         worker_num = tp_broadcast_manager_->workerNum();
     requests.reserve(worker_num);
 
+    const auto now_ms = currentTimeMs();
+    const auto retention_ms =
+        request_deadline_ms > now_ms && request_deadline_ms != std::numeric_limits<int64_t>::max() ?
+            request_deadline_ms - now_ms :
+            0;
     for (size_t i = 0; i < worker_num; ++i) {
         FunctionRequestPB request;
         auto              p2p_request = request.mutable_p2p_request();
@@ -161,6 +166,9 @@ std::shared_ptr<P2PBroadcastClient::Result> P2PBroadcastClient::cancel(const std
         p2p_request->set_deadline_ms(deadline_ms);
         p2p_request->set_type(type);
         p2p_request->set_request_deadline_ms(request_deadline_ms);
+        if (type == P2PConnectorBroadcastType::CANCEL_READ) {
+            p2p_request->set_cancel_retention_ms(retention_ms);
+        }
         requests.push_back(std::move(request));
     }
 
