@@ -1384,7 +1384,9 @@ TEST_P(BlockTreeCacheDemotionFailureTest, Evictor_DemotionFailure_RestoresSource
         GTEST_SKIP() << "CUDA not available";
     }
 
-    auto environment = FullSWAEnvironment::create();
+    FullSWAEnvironmentOptions options;
+    options.usable_swa_host_blocks = 8;
+    auto environment               = FullSWAEnvironment::create(options);
     environment->insertRequestPath();
     environment->releaseRequestRefs();
 
@@ -1427,10 +1429,10 @@ TEST_P(BlockTreeCacheDemotionFailureTest, Evictor_DemotionFailure_RestoresSource
     }
     environment->expectPayloads();
     if (source_tier == Tier::DEVICE) {
-        environment->expectPoolFreeCounts({12, 12, 12}, {16, 16}, {16, 16});
+        environment->expectPoolFreeCounts({12, 12, 12}, {16, 8}, {16, 16});
         EXPECT_GT(environment->cache->getStats().device_heap_total_size, 0u);
     } else {
-        environment->expectPoolFreeCounts({16, 16, 16}, {12, 12}, {16, 16});
+        environment->expectPoolFreeCounts({16, 16, 16}, {12, 4}, {16, 16});
         EXPECT_GT(environment->cache->getStats().host_heap_total_size, 0u);
     }
 
@@ -1456,9 +1458,9 @@ TEST_P(BlockTreeCacheDemotionFailureTest, Evictor_DemotionFailure_RestoresSource
               retry_descriptors.end());
     environment->expectPayloads();
     if (target_tier == Tier::HOST) {
-        environment->expectPoolFreeCounts({16, 16, 16}, {12, 12}, {16, 16});
+        environment->expectPoolFreeCounts({16, 16, 16}, {12, 4}, {16, 16});
     } else {
-        environment->expectPoolFreeCounts({16, 16, 16}, {16, 16}, {12, 12});
+        environment->expectPoolFreeCounts({16, 16, 16}, {16, 8}, {12, 12});
     }
     environment->reclaimAll();
     environment->expectFullyReclaimed();
@@ -1819,9 +1821,10 @@ TEST_F(BlockTreeCacheIntegrationTest, ReverseEvictionTieredEndToEnd) {
     }
 
     FullSWAEnvironmentOptions options;
-    options.path_length = 1;
-    options.enable_disk = true;
-    auto environment    = FullSWAEnvironment::create(options);
+    options.path_length            = 1;
+    options.usable_swa_host_blocks = 32;
+    options.enable_disk            = true;
+    auto environment               = FullSWAEnvironment::create(options);
     ASSERT_NE(environment, nullptr);
     environment->insertRequestPath();
     environment->releaseRequestRefs();
