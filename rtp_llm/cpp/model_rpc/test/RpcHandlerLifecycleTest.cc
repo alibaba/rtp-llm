@@ -157,6 +157,30 @@ private:
     OutputAction action_;
 };
 
+class BatchAdmissionEngine: public SteppedEngine {
+public:
+    BatchAdmissionEngine(): SteppedEngine(OutputAction::WAIT) {}
+    std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>>
+    enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>& inputs) override {
+        admitted_inputs = inputs;
+        if (throw_on_enqueue) throw std::runtime_error("injected batch enqueue exception");
+        if (mismatch_results) return {{true}, {}};
+        std::vector<bool> accepted;
+        std::vector<GenerateStreamPtr> streams;
+        for (size_t i = 0; i < inputs.size(); ++i) {
+            auto value = makeStream(inputs[i]);
+            const bool ok = i == 0;
+            if (!ok) value->reportError(ErrorCode::PRIORITY_PREEMPTED, "injected admission rejection");
+            accepted.push_back(ok);
+            streams.push_back(std::move(value));
+        }
+        return {accepted, streams};
+    }
+    bool throw_on_enqueue = false;
+    bool mismatch_results = false;
+    std::vector<std::shared_ptr<GenerateInput>> admitted_inputs;
+};
+
 class LifecycleService: public RpcService::Service {
 public:
     explicit LifecycleService(LocalRpcServer& handler): handler_(handler) {}
@@ -347,6 +371,91 @@ TEST_F(RpcHandlerLifecycleTest, PrefillEarlyFailurePreservesPriorityPreemption) 
 }
 TEST_F(RpcHandlerLifecycleTest, PrefillExceptionUnwindsAndDiagnosesOnce) {
     runSynchronousHandler(Handler::PREFILL, OutputAction::THROW);
+}
+
+TEST_F(RpcHandlerLifecycleTest, ProductionBatchCombinesValidationAndEngineAdmissionResults) {
+    auto engine = std::make_shared<BatchAdmissionEngine>();
+    auto meta = std::make_shared<RpcServerRuntimeMeta>();
+    PrefillRpcServer server;
+    server.engine_ = engine;
+    server.meta_ = meta;
+    server.cancel_registry_ = std::make_unique<PDCancelRegistry>(meta);
+    P2PConnectorConfig config;
+    config.role_type = RoleType::PREFILL;
+    auto connector = std::make_shared<P2PConnector>(config, nullptr, nullptr);
+    connector->prefill_ = std::make_unique<P2PConnectorPrefill>(config, nullptr, nullptr);
+    connector->prefill_->stream_store_ = std::make_shared<P2PConnectorResourceStore>(nullptr);
+    engine->getCacheManager()->p2p_connector_ = connector;
+
+    EnqueueBatchRequestPB request;
+    request.set_batch_id(kBatchId);
+    auto* slot = request.add_dp_slots();
+    slot->set_dp_rank(0);
+    for (int i = 0; i < 3; ++i) {
+        auto* item = slot->add_requests()->mutable_input();
+        *item = lifecycleRequest();
+        item->set_request_id(kRequestId + i);
+        if (i == 0) item->mutable_generate_config()->set_max_new_tokens(-1);
+    }
+    grpc::ServerContext context;
+    EnqueueBatchResponsePB response;
+    ASSERT_TRUE(server.EnqueueBatch(&context, &request, &response).ok());
+    ASSERT_EQ(engine->admitted_inputs.size(), 2u);
+    for (const auto& input : engine->admitted_inputs) EXPECT_EQ(input->group_size, 2);
+    ASSERT_EQ(response.successes_size(), 1);
+    EXPECT_EQ(response.successes(0).request_id(), kRequestId + 1);
+    ASSERT_EQ(response.errors_size(), 2);
+    EXPECT_EQ(response.errors(0).request_id(), kRequestId);
+    EXPECT_EQ(response.errors(0).error_info().error_code(), static_cast<int64_t>(ErrorCode::INVALID_PARAMS));
+    EXPECT_EQ(response.errors(1).request_id(), kRequestId + 2);
+    EXPECT_EQ(response.errors(1).error_info().error_code(), static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED));
+    ASSERT_EQ(server.batch_entries_.size(), 1u);
+    EXPECT_EQ(server.onflightRequestNum(), 1u);
+    auto& entry = server.batch_entries_.begin()->second;
+    ASSERT_NE(entry.context, nullptr);
+    entry.context->markRpcHandlingCompleted();
+    server.batch_entries_.clear();
+    EXPECT_EQ(server.onflightRequestNum(), 0u);
+}
+
+TEST_F(RpcHandlerLifecycleTest, ProductionBatchEnqueueFailuresReleaseAllReservations) {
+    for (const bool throw_error : {true, false}) {
+        auto engine = std::make_shared<BatchAdmissionEngine>();
+        engine->throw_on_enqueue = throw_error;
+        engine->mismatch_results = !throw_error;
+        auto meta = std::make_shared<RpcServerRuntimeMeta>();
+        PrefillRpcServer server;
+        server.engine_ = engine;
+        server.meta_ = meta;
+        server.cancel_registry_ = std::make_unique<PDCancelRegistry>(meta);
+        P2PConnectorConfig config;
+        config.role_type = RoleType::PREFILL;
+        auto connector = std::make_shared<P2PConnector>(config, nullptr, nullptr);
+        connector->prefill_ = std::make_unique<P2PConnectorPrefill>(config, nullptr, nullptr);
+        connector->prefill_->stream_store_ = std::make_shared<P2PConnectorResourceStore>(nullptr);
+        engine->getCacheManager()->p2p_connector_ = connector;
+        EnqueueBatchRequestPB request;
+        request.set_batch_id(kBatchId);
+        auto* slot = request.add_dp_slots();
+        slot->set_dp_rank(0);
+        for (int i = 0; i < 2; ++i) {
+            auto* item = slot->add_requests()->mutable_input();
+            *item = lifecycleRequest();
+            item->set_request_id(kRequestId + i);
+        }
+        grpc::ServerContext context;
+        EnqueueBatchResponsePB response;
+        EXPECT_EQ(server.EnqueueBatch(&context, &request, &response).error_code(), grpc::StatusCode::INTERNAL);
+        EXPECT_EQ(response.successes_size(), 0);
+        EXPECT_TRUE(server.batch_entries_.empty());
+        EXPECT_EQ(server.onflightRequestNum(), 0u);
+        ASSERT_EQ(engine->admitted_inputs.size(), 2u);
+        for (int i = 0; i < 2; ++i) {
+            auto handle = server.cancel_registry_->find(kRequestId + i);
+            ASSERT_NE(handle, nullptr);
+            EXPECT_TRUE(handle->local_done.load());
+        }
+    }
 }
 
 TEST_F(RpcHandlerLifecycleTest, PrefillBatchTerminalCleanupMarksHandlingCompleted) {
