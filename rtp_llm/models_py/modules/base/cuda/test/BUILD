@@ -24,6 +24,17 @@ py_test (
     exec_properties = {'gpu':'H20'},
 )
 
+py_test(
+    name = "fusedqkrmsnorm_sm120_test",
+    srcs = ["fusedqkrmsnorm_test.py"],
+    main = "fusedqkrmsnorm_test.py",
+    args = ["FusedQKRMSNormCudaVec8ExactTest"],
+    env = {"FLASHINFER_USE_CUDA_NORM": "1"},
+    deps = py_test_deps,
+    tags = ["RTX_5000_PRO"],
+    exec_properties = {"gpu": "RTX_5000_PRO"},
+)
+
 py_test (
     name = "layernorm_test",
     srcs = ["layernorm_test.py"],
