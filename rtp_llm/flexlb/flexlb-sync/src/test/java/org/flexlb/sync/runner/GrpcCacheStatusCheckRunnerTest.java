@@ -1,5 +1,6 @@
 package org.flexlb.sync.runner;
 
+import io.grpc.Status;
 import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.cache.domain.WorkerCacheUpdateResult;
@@ -9,13 +10,24 @@ import org.flexlb.dao.master.EndpointTrace;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.engine.grpc.GrpcFailure;
+import org.flexlb.enums.BalanceStatusEnum;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.WorkerDirectory;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
+import java.io.EOFException;
+import java.net.BindException;
+import java.net.ConnectException;
+import java.net.NoRouteToHostException;
+import java.net.SocketException;
+import java.nio.channels.AsynchronousCloseException;
+import java.nio.channels.ClosedByInterruptException;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.RejectedExecutionException;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
@@ -39,6 +51,190 @@ class GrpcCacheStatusCheckRunnerTest {
 
     private final DynamicCacheIntervalService cacheIntervalService =
             Mockito.mock(DynamicCacheIntervalService.class);
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.MethodSource("rpcFailures")
+    void classifiesRpcCauseWithoutChangingHealthOrCache(
+            Throwable cause, GrpcFailure.Kind kind, Status.Code grpcCode, BalanceStatusEnum coarseStatus) {
+        var status = workerStatus();
+        try (var alive = status.tryBeginStatusPoll(1L)) {
+            status.recordStatusRpcResult(alive, true, true, null);
+        }
+        try (var notAlive = status.tryBeginStatusPoll(2L)) {
+            status.recordStatusRpcResult(notAlive, true, false, null);
+        }
+        var directory = directory(status);
+        var first = EngineRpcService.CacheStatusPB.newBuilder().setVersion(7).putCacheKeys(11L, true).build();
+        var next = first.toBuilder().setVersion(8).putCacheKeys(22L, true).build();
+        when(engineGrpcService.getCacheStatusAsync(anyString(), anyInt(), eq(status),
+                anyLong(), anyLong(), eq(RoleType.PREFILL)))
+                .thenReturn(CompletableFuture.completedFuture(first),
+                        CompletableFuture.failedFuture(cause), CompletableFuture.completedFuture(next));
+        when(localKvCacheAwareManager.updateEngineBlockCache(eq(status), any()))
+                .thenReturn(WorkerCacheUpdateResult.builder().success(true).build());
+        try {
+            runCachePoll(status.getIpPort(), status, directory, false);
+            var cache = status.cacheIndexSnapshot();
+            var health = status.pollHealth();
+            assertEquals(1L, health.consecutiveWorkerFailures());
+
+            runCachePoll(status.getIpPort(), status, directory, false);
+
+            var detail = org.mockito.ArgumentCaptor.forClass(GrpcFailure.Analysis.class);
+            verify(engineHealthReporter).reportCacheStatusCheckerFail(
+                    eq("test-model"), eq(coarseStatus), eq(RoleType.PREFILL),
+                    eq(EndpointTrace.Stage.RPC_COMPLETED), eq(kind.name()), detail.capture());
+            assertEquals(kind, detail.getValue().kind());
+            assertEquals(grpcCode, detail.getValue().grpcCode());
+            assertEquals(kind == GrpcFailure.Kind.LOCAL_MEMORY_EXHAUSTED
+                    || kind == GrpcFailure.Kind.LOCAL_EXECUTOR_REJECTED
+                    || kind == GrpcFailure.Kind.LOCAL_BIND_FAILED,
+                    detail.getValue().confirmedLocalFailure());
+            verify(engineHealthReporter, times(1)).reportCacheStatusCheckerFail(
+                    anyString(), any(), any(), any(), anyString(), any());
+            org.junit.jupiter.api.Assertions.assertSame(cache, status.cacheIndexSnapshot());
+            org.junit.jupiter.api.Assertions.assertSame(health, status.pollHealth());
+            org.junit.jupiter.api.Assertions.assertTrue(status.isActiveGeneration());
+            org.junit.jupiter.api.Assertions.assertSame(status,
+                    directory.currentOrDiscover(RoleType.PREFILL, status.getIpPort(), () -> {
+                        throw new AssertionError("cache RPC failure must keep the generation");
+                    }));
+            org.junit.jupiter.api.Assertions.assertTrue(status.trace().snapshot().cachePoll().leaseReleased());
+
+            runCachePoll(status.getIpPort(), status, directory, false);
+            assertEquals(8, status.cacheIndexSnapshot().indexedVersion(), "the next poll must still publish");
+        } finally {
+            directory.close();
+        }
+    }
+
+    private static java.util.stream.Stream<org.junit.jupiter.params.provider.Arguments> rpcFailures() {
+        return java.util.stream.Stream.of(
+                org.junit.jupiter.params.provider.Arguments.of(new IllegalStateException("DEADLINE_EXCEEDED"),
+                        GrpcFailure.Kind.RPC_FAILURE, Status.Code.UNKNOWN, BalanceStatusEnum.CACHE_SERVICE_UNAVAILABLE),
+                org.junit.jupiter.params.provider.Arguments.of(new CompletionException(Status.DEADLINE_EXCEEDED
+                                .withDescription("deadline reached").asRuntimeException()),
+                        GrpcFailure.Kind.DEADLINE_EXCEEDED, Status.Code.DEADLINE_EXCEEDED,
+                        BalanceStatusEnum.CACHE_GRPC_TIMEOUT),
+                org.junit.jupiter.params.provider.Arguments.of(Status.UNAVAILABLE
+                                .withCause(new OutOfMemoryError("direct buffer memory")).asRuntimeException(),
+                        GrpcFailure.Kind.LOCAL_MEMORY_EXHAUSTED, Status.Code.UNAVAILABLE,
+                        BalanceStatusEnum.CACHE_SERVICE_UNAVAILABLE),
+                org.junit.jupiter.params.provider.Arguments.of(Status.UNAVAILABLE
+                                .withCause(new RejectedExecutionException("pool full")).asRuntimeException(),
+                        GrpcFailure.Kind.LOCAL_EXECUTOR_REJECTED, Status.Code.UNAVAILABLE,
+                        BalanceStatusEnum.CACHE_SERVICE_UNAVAILABLE),
+                org.junit.jupiter.params.provider.Arguments.of(Status.UNAVAILABLE
+                                .withCause(new BindException()).asRuntimeException(),
+                        GrpcFailure.Kind.LOCAL_BIND_FAILED, Status.Code.UNAVAILABLE,
+                        BalanceStatusEnum.CACHE_SERVICE_UNAVAILABLE),
+                org.junit.jupiter.params.provider.Arguments.of(Status.RESOURCE_EXHAUSTED.asRuntimeException(),
+                        GrpcFailure.Kind.RPC_FAILURE, Status.Code.RESOURCE_EXHAUSTED,
+                        BalanceStatusEnum.CACHE_SERVICE_UNAVAILABLE),
+                org.junit.jupiter.params.provider.Arguments.of(new CompletionException(new java.net.ConnectException()),
+                        GrpcFailure.Kind.CONNECT_FAILED, Status.Code.UNKNOWN,
+                        BalanceStatusEnum.CACHE_GRPC_CONNECTION_FAILED),
+                org.junit.jupiter.params.provider.Arguments.of(new java.nio.channels.ClosedChannelException(),
+                        GrpcFailure.Kind.CHANNEL_CLOSED, Status.Code.UNKNOWN,
+                        BalanceStatusEnum.CACHE_GRPC_CONNECTION_FAILED),
+                org.junit.jupiter.params.provider.Arguments.of(new EOFException(),
+                        GrpcFailure.Kind.UNEXPECTED_EOF, Status.Code.UNKNOWN,
+                        BalanceStatusEnum.CACHE_GRPC_CONNECTION_FAILED),
+                org.junit.jupiter.params.provider.Arguments.of(new ConnectException("Connection refused"),
+                        GrpcFailure.Kind.CONNECT_REFUSED, Status.Code.UNKNOWN,
+                        BalanceStatusEnum.CACHE_GRPC_CONNECTION_FAILED),
+                org.junit.jupiter.params.provider.Arguments.of(new NoRouteToHostException(),
+                        GrpcFailure.Kind.NO_ROUTE, Status.Code.UNKNOWN,
+                        BalanceStatusEnum.CACHE_GRPC_CONNECTION_FAILED),
+                org.junit.jupiter.params.provider.Arguments.of(new SocketException("Connection reset"),
+                        GrpcFailure.Kind.CONNECTION_RESET, Status.Code.UNKNOWN,
+                        BalanceStatusEnum.CACHE_GRPC_CONNECTION_FAILED),
+                org.junit.jupiter.params.provider.Arguments.of(new SocketException("Connection reset by peer"),
+                        GrpcFailure.Kind.CONNECTION_RESET, Status.Code.UNKNOWN,
+                        BalanceStatusEnum.CACHE_GRPC_CONNECTION_FAILED),
+                org.junit.jupiter.params.provider.Arguments.of(new SocketException("Broken pipe"),
+                        GrpcFailure.Kind.BROKEN_PIPE, Status.Code.UNKNOWN,
+                        BalanceStatusEnum.CACHE_GRPC_CONNECTION_FAILED),
+                org.junit.jupiter.params.provider.Arguments.of(new ClosedByInterruptException(),
+                        GrpcFailure.Kind.IO_INTERRUPTED, Status.Code.UNKNOWN,
+                        BalanceStatusEnum.CACHE_GRPC_CONNECTION_FAILED),
+                org.junit.jupiter.params.provider.Arguments.of(new AsynchronousCloseException(),
+                        GrpcFailure.Kind.ASYNC_CHANNEL_CLOSED, Status.Code.UNKNOWN,
+                        BalanceStatusEnum.CACHE_GRPC_CONNECTION_FAILED));
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"NULL_RESULT", "REJECTED", "THREW"})
+    void cacheUpdateFailureReportsOnce(String failurePoint) {
+        var status = workerStatus();
+        var directory = directory(status);
+        when(engineGrpcService.getCacheStatusAsync(anyString(), anyInt(), eq(status),
+                anyLong(), anyLong(), eq(RoleType.PREFILL)))
+                .thenReturn(CompletableFuture.completedFuture(
+                        EngineRpcService.CacheStatusPB.newBuilder().setVersion(7).build()));
+        var update = when(localKvCacheAwareManager.updateEngineBlockCache(eq(status), any()));
+        if (failurePoint.equals("THREW")) {
+            update.thenThrow(new IllegalStateException("index unavailable"));
+        } else {
+            update.thenReturn(failurePoint.equals("NULL_RESULT") ? null : WorkerCacheUpdateResult.builder()
+                    .success(false).errorMessage("index rejected").build());
+        }
+        try {
+            var health = status.pollHealth();
+            runCachePoll(status.getIpPort(), status, directory, false);
+
+            String reason = switch (failurePoint) {
+                case "NULL_RESULT" -> "NULL_RESULT";
+                case "REJECTED" -> "CACHE_UPDATE_FAILED";
+                default -> "CACHE_INDEX_UPDATE_FAILED";
+            };
+            var detail = org.mockito.ArgumentCaptor.forClass(GrpcFailure.Analysis.class);
+            verify(engineHealthReporter).reportCacheStatusCheckerFail(
+                    eq("test-model"), eq(BalanceStatusEnum.CACHE_UPDATE_FAILED), eq(RoleType.PREFILL),
+                    eq(EndpointTrace.Stage.CACHE_INDEX_UPDATE_FAILED),
+                    eq(reason), detail.capture());
+            if (failurePoint.equals("THREW")) {
+                assertEquals(GrpcFailure.Kind.RPC_FAILURE, detail.getValue().kind());
+            } else {
+                org.junit.jupiter.api.Assertions.assertNull(detail.getValue());
+            }
+            verify(engineHealthReporter, times(1)).reportCacheStatusCheckerFail(
+                    anyString(), any(), any(), any(), anyString(), any());
+            assertEquals(health, status.pollHealth());
+            assertEquals(-1, status.cacheIndexSnapshot().indexedVersion());
+            org.junit.jupiter.api.Assertions.assertTrue(status.isActiveGeneration());
+            org.junit.jupiter.api.Assertions.assertTrue(status.trace().snapshot().cachePoll().leaseReleased());
+        } finally {
+            directory.close();
+        }
+    }
+
+    @Test
+    void callbackDiagnosticFailureIsNotReportedAsSubmissionFailure() {
+        var status = workerStatus();
+        var directory = directory(status);
+        when(engineGrpcService.getCacheStatusAsync(anyString(), anyInt(), eq(status),
+                anyLong(), anyLong(), eq(RoleType.PREFILL)))
+                .thenReturn(CompletableFuture.completedFuture(null));
+        Mockito.doThrow(new IllegalStateException("diagnostic failed"))
+                .when(engineHealthReporter).reportCacheStatusCheckerFail(
+                        anyString(), any(), any(), any(), anyString(), any());
+        try {
+            runCachePoll(status.getIpPort(), status, directory, false);
+
+            verify(engineHealthReporter, times(1)).reportCacheStatusCheckerFail(
+                    eq("test-model"), eq(BalanceStatusEnum.CACHE_SERVICE_UNAVAILABLE),
+                    eq(RoleType.PREFILL), eq(EndpointTrace.Stage.CONVERSION_FAILED),
+                    eq("CONVERSION_FAILED"), any());
+            verify(engineHealthReporter, never()).reportCacheStatusCheckerFail(
+                    anyString(), any(), any(), eq(EndpointTrace.Stage.CALLBACK_SUBMISSION_FAILED), anyString(), any());
+            var poll = status.trace().snapshot().cachePoll();
+            assertEquals("CONVERSION_FAILED", poll.failureStage());
+            org.junit.jupiter.api.Assertions.assertTrue(poll.leaseReleased());
+        } finally {
+            directory.close();
+        }
+    }
 
     @Test
     void cachePollAndPublicationProceedWhileStatusLockIsHeld() throws Exception {
@@ -210,7 +406,8 @@ class GrpcCacheStatusCheckRunnerTest {
             stub.thenReturn(CompletableFuture.failedFuture(new java.util.concurrent.CompletionException(failure)));
         }
         if (failurePoint.equals("CALLBACK_FAILED")) {
-            Mockito.doThrow(failure).when(engineHealthReporter).reportCacheStatusCheckerFail(anyString(), any(), any());
+            Mockito.doThrow(failure).when(engineHealthReporter).reportCacheStatusCheckerFail(
+                    anyString(), any(), any(), any(), anyString(), any());
         }
         java.util.concurrent.Executor executor = failurePoint.equals("CALLBACK_REJECTED")
                 ? task -> { throw new java.util.concurrent.RejectedExecutionException("pool full"); }
@@ -228,7 +425,7 @@ class GrpcCacheStatusCheckRunnerTest {
         String expectedFailure = switch (failurePoint) {
             case "RPC_THROW" -> "RPC_INITIATION_FAILED";
             case "CONVERSION_FAILED" -> "CONVERSION_FAILED";
-            case "CALLBACK_REJECTED" -> "CALLBACK_FAILED";
+            case "CALLBACK_REJECTED" -> "CALLBACK_SUBMISSION_FAILED";
             default -> "RPC_COMPLETED";
         };
         assertEquals(expectedFailure, snapshot.failureStage());
@@ -237,9 +434,15 @@ class GrpcCacheStatusCheckRunnerTest {
         if (failurePoint.equals("CONVERSION_FAILED")) {
             assertEquals("OK", snapshot.rpcResult());
             org.junit.jupiter.api.Assertions.assertTrue(snapshot.times().convertStartMs() >= 0);
+            verify(engineHealthReporter).reportCacheStatusCheckerFail(
+                    eq("test-model"), eq(BalanceStatusEnum.CACHE_SERVICE_UNAVAILABLE), eq(RoleType.PREFILL),
+                    eq(EndpointTrace.Stage.CONVERSION_FAILED), eq("CONVERSION_FAILED"), any());
         }
         if (failurePoint.equals("CALLBACK_REJECTED")) {
             assertEquals(-1, snapshot.times().callbackStartMs());
+            verify(engineHealthReporter).reportCacheStatusCheckerFail(
+                    eq("test-model"), eq(BalanceStatusEnum.CACHE_SERVICE_UNAVAILABLE), eq(RoleType.PREFILL),
+                    eq(EndpointTrace.Stage.CALLBACK_SUBMISSION_FAILED), eq("LOCAL_EXECUTOR_REJECTED"), any());
         }
         verifyNoInteractions(localKvCacheAwareManager);
         try (var next = status.tryBeginCachePoll(1L)) {

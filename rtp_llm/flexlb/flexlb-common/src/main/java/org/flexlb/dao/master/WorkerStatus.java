@@ -22,8 +22,8 @@ import java.util.concurrent.locks.ReentrantLock;
  *   <li>{@link TopologySnapshot}: discovery-owned address and placement data;</li>
  *   <li>{@link CommittedWorkerStatus}: stable Engine fields and both cursors
  *       from one successfully reduced, strictly newer status response;</li>
- *   <li>{@link PollHealth}: transport health from status polling, independent
- *       from Engine state and endpoint routability;</li>
+ *   <li>{@link PollHealth}: worker health and RPC timing, updated independently
+ *       of local Engine-state application;</li>
  *   <li>cache status and poll coordination, which have independent writers.</li>
  * </ul>
  *
@@ -130,20 +130,24 @@ public class WorkerStatus {
     }
 
     /**
-     * Status-poll transport health, updated independently of local status application.
+     * Worker health and successful-poll timing, independent of local status application.
      * Successful timestamps are used for diagnostics, never worker expiration.
      * A zero timestamp means no RPC has succeeded in this generation.
+     * reportedAlive retains the last valid worker report. Once established,
+     * healthy is retained until three confirmed worker failures. Unattributed
+     * failures do not change it or reset that worker-failure sequence.
      */
     public record PollHealth(
             long lastSuccessfulPollUs,
             long successfulPollIntervalUs,
-            long consecutiveTransportFailures,
-            boolean reportedAlive) {
+            long consecutiveWorkerFailures,
+            boolean reportedAlive,
+            boolean healthy) {
 
         public PollHealth {
             if (lastSuccessfulPollUs < 0L
                     || successfulPollIntervalUs < 0L
-                    || consecutiveTransportFailures < 0L) {
+                    || consecutiveWorkerFailures < 0L) {
                 throw new IllegalArgumentException(
                         "poll health counters must be non-negative");
             }
@@ -257,13 +261,13 @@ public class WorkerStatus {
             new AtomicReference<>(new CacheIndexSnapshot(null, false, -1L));
     private final AtomicLong cacheLastUpdateTime = new AtomicLong(-1L);
 
-    private static final long MAX_CONSECUTIVE_STATUS_FAILURES = 3L;
+    private static final long MAX_CONSECUTIVE_WORKER_FAILURES = 3L;
     private final WorkerHealth workerHealth = new WorkerHealth();
 
     /** Only short state transitions use this monitor; never hold it while waiting for Worker locks. */
     private final class WorkerHealth {
         private volatile PollHealth health =
-                new PollHealth(0L, 0L, 0L, false);
+                new PollHealth(0L, 0L, 0L, false, false);
         private volatile RetirementReason unavailableReason;
         private volatile boolean retiring;
 
@@ -273,32 +277,43 @@ public class WorkerStatus {
             return true;
         }
 
-        private synchronized Stage rpcResult(PollLease lease, boolean valid, boolean alive, Throwable failure) {
-            if (statusPollLease.get() != lease || retiring || unavailableReason != null) { return null; }
+        private synchronized boolean rpcResult(PollLease lease, boolean valid, boolean alive, Throwable failure) {
+            if (lease == null || statusPollLease.get() != lease || lease.statusRpcResultRecorded
+                    || retiring || unavailableReason != null) {
+                return false;
+            }
+            lease.statusRpcResultRecorded = true;
             if (failure != null) {
-                long failures = health.consecutiveTransportFailures() + 1L;
-                health = new PollHealth(health.lastSuccessfulPollUs(), health.successfulPollIntervalUs(),
-                        failures, health.reportedAlive());
-                if (failures >= MAX_CONSECUTIVE_STATUS_FAILURES) {
-                    unavailableReason = RetirementReason.CONSECUTIVE_STATUS_FAILURES;
+                return false;
+            }
+
+            long workerFailures = health.consecutiveWorkerFailures();
+            boolean reportedAlive = health.reportedAlive();
+            boolean healthy = health.healthy();
+            if (valid) {
+                reportedAlive = alive;
+                if (alive) {
+                    workerFailures = 0L;
+                    healthy = true;
+                } else {
+                    workerFailures++;
                 }
-                return Stage.TRANSPORT_FAILURE_RECORDED;
             }
+            if (workerFailures >= MAX_CONSECUTIVE_WORKER_FAILURES) {
+                healthy = false;
+                unavailableReason = RetirementReason.CONSECUTIVE_WORKER_FAILURES;
+            }
+
+            long lastSuccessUs = health.lastSuccessfulPollUs();
             long nowUs = System.nanoTime() / 1000;
-            boolean reportedAlive = valid ? alive : health.reportedAlive();
-            long intervalUs = health.lastSuccessfulPollUs() == 0L
-                    ? 0L : Math.max(0L, nowUs - health.lastSuccessfulPollUs());
-            health = new PollHealth(nowUs, intervalUs, 0L, reportedAlive);
-            if (valid && !alive) {
-                unavailableReason = RetirementReason.WORKER_REPORTED_NOT_ALIVE;
-            }
-            return Stage.STATUS_HEALTH_UPDATED;
+            long intervalUs = lastSuccessUs == 0L ? 0L : Math.max(0L, nowUs - lastSuccessUs);
+            health = new PollHealth(nowUs, intervalUs, workerFailures, reportedAlive, healthy);
+            return true;
         }
     }
 
     public enum RetirementReason {
-        CONSECUTIVE_STATUS_FAILURES,
-        WORKER_REPORTED_NOT_ALIVE,
+        CONSECUTIVE_WORKER_FAILURES,
         DISCOVERY_REMOVED
     }
 
@@ -316,16 +331,20 @@ public class WorkerStatus {
         }
     }
 
-    /** Keep using committed capacity while newer status is waiting for local application. */
+    /** Unknown or local transport failures preserve a worker's established health. */
     public boolean isAvailableForScheduling() {
         return !workerHealth.retiring && workerHealth.unavailableReason == null
-                && workerHealth.health.reportedAlive();
+                && workerHealth.health.healthy();
     }
 
-    /** Record transport outcome without taking the Worker lock or waiting for local application. */
+    /**
+     * Record a status RPC result without taking the Worker lock or waiting for local application.
+     * Each current lease contributes at most once; only confirmed worker failures affect health.
+     */
     public void recordStatusRpcResult(PollLease lease, boolean validResponse, boolean alive, Throwable failure) {
-        Stage stage = workerHealth.rpcResult(lease, validResponse, alive, failure);
-        if (stage != null) { lease.pollTrace().record(stage); }
+        if (workerHealth.rpcResult(lease, validResponse, alive, failure)) {
+            lease.pollTrace().record(Stage.STATUS_HEALTH_UPDATED);
+        }
     }
 
     private final AtomicReference<PollLease> statusPollLease =
@@ -349,6 +368,8 @@ public class WorkerStatus {
         private final PollKind kind;
         private final AtomicReference<PollLease> slot;
         private final EndpointTrace.Poll pollTrace;
+        /** Guarded by owner.workerHealth; one RPC result cannot count as several failures. */
+        private boolean statusRpcResultRecorded;
 
         private PollLease(
                 WorkerStatus owner,

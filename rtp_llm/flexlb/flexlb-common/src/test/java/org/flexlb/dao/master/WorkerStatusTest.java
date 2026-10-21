@@ -463,28 +463,28 @@ class WorkerStatusTest {
             try {
                 WorkerStatus.PollHealth health = WorkerStatusTestFixtures.receive(status, true, null);
                 assertTrue(health.reportedAlive());
-                assertEquals(0L, health.consecutiveTransportFailures());
+                assertEquals(0L, health.consecutiveWorkerFailures());
             } finally {
                 status.lock.unlock();
             }
         }
 
         @Test
-        @DisplayName("Transport failures accumulate without rewriting liveness")
-        void transportFailuresAccumulate() {
+        @DisplayName("Unconfirmed transport failures retain the existing health snapshot")
+        void transportFailuresDoNotRewriteHealth() {
             WorkerStatus status = discovered();
             status.lock.lock();
             try {
-                WorkerStatusTestFixtures.receive(status, true, null);
+                WorkerStatus.PollHealth healthy = WorkerStatusTestFixtures.receive(status, true, null);
                 WorkerStatus.PollHealth afterFirst = WorkerStatusTestFixtures.receive(status, false, new IllegalStateException("RPC failed"));
                 WorkerStatus.PollHealth afterSecond = WorkerStatusTestFixtures.receive(status, false, new IllegalStateException("RPC failed"));
-                assertEquals(1L, afterFirst.consecutiveTransportFailures());
-                assertEquals(2L, afterSecond.consecutiveTransportFailures());
+                assertSame(healthy, afterFirst);
+                assertSame(healthy, afterSecond);
+                assertEquals(0L, afterSecond.consecutiveWorkerFailures());
                 assertTrue(afterSecond.reportedAlive());
             } finally {
                 status.lock.unlock();
             }
-            assertSame(status.pollHealth(), status.pollHealth());
         }
     }
 }

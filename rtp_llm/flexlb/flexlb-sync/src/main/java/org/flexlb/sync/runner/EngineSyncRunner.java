@@ -178,7 +178,7 @@ public class EngineSyncRunner implements Runnable {
                     try {
                         logger.debug("Submitting GrpcWorkerStatusRunner for worker: {}, site: {}", workerIpPort, site);
                         GrpcWorkerStatusRunner grpcWorkerStatusRunner
-                                = new GrpcWorkerStatusRunner(modelName, workerIpPort, site, roleType,
+                                = new GrpcWorkerStatusRunner(modelName, workerIpPort, roleType,
                                 workerStatus, statusPollLease, workerDirectory,
                                 engineHealthReporter, engineGrpcService,
                                 syncRequestTimeoutMs,

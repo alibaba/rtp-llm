@@ -10,6 +10,7 @@ import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.enums.BalanceStatusEnum;
 import org.flexlb.service.address.WorkerAddressService;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.monitor.EngineHealthReporter;
@@ -33,13 +34,15 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 class MasterEngineSynchronizerTest {
     @Test
     @Timeout(20)
-    void fullApplicationPoolDoesNotBlockHeartbeatsOrFailureDetection() throws Exception {
+    void fullApplicationPoolAndRpcTimeoutsPreserveWorkerHealth() throws Exception {
         ConfigService config = mock(ConfigService.class);
         when(config.loadBalanceConfig()).thenReturn(SchedulingTestConfig.newConfig());
         ModelMetaConfig model = mock(ModelMetaConfig.class);
@@ -52,6 +55,14 @@ class MasterEngineSynchronizerTest {
         EngineGrpcService grpc = mock(EngineGrpcService.class);
         AtomicBoolean transportFailed = new AtomicBoolean();
         CountDownLatch successfulPolls = new CountDownLatch(3);
+        CountDownLatch failedPolls = new CountDownLatch(3);
+        var reporter = mock(EngineHealthReporter.class);
+        doAnswer(call -> {
+            failedPolls.countDown();
+            return null;
+        }).when(reporter).reportStatusCheckerFail(
+                eq("model"), eq(BalanceStatusEnum.WORKER_STATUS_GRPC_TIMEOUT), eq(RoleType.DECODE),
+                any(), eq("DEADLINE_EXCEEDED"), any());
         var response = EngineRpcService.WorkerStatusPB.newBuilder()
                 .setRole("DECODE").setStatusVersion(1L).setAlive(true).build();
         when(grpc.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(), any()))
@@ -69,7 +80,7 @@ class MasterEngineSynchronizerTest {
         var registry = RunnerTestSupport.endpointRegistry(config);
         try {
             var directory = new WorkerDirectory(registry);
-            var synchronizer = new MasterEngineSynchronizer(addresses, mock(EngineHealthReporter.class),
+            var synchronizer = new MasterEngineSynchronizer(addresses, reporter,
                     directory, grpc, model, mock(CacheAwareService.class),
                     mock(DynamicCacheIntervalService.class), config);
             var field = MasterEngineSynchronizer.class.getDeclaredField("statusApplicationExecutor");
@@ -95,17 +106,18 @@ class MasterEngineSynchronizerTest {
                 assertEquals(1, applications.getQueue().size(), "only one response per generation may wait");
                 assertEquals(-1L, status.appliedStatusCursor().statusVersion());
                 transportFailed.set(true);
-                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-                while (status.retirementReason() == null && System.nanoTime() < deadline) {
-                    Thread.sleep(5);
-                }
-                assertEquals(WorkerStatus.RetirementReason.CONSECUTIVE_STATUS_FAILURES, status.retirementReason());
+                assertTrue(failedPolls.await(5, TimeUnit.SECONDS), "three failed polls finish despite the application backlog");
+                assertNull(status.retirementReason(), "timeouts cannot prove worker failure");
+                assertTrue(status.isActiveGeneration());
+                assertTrue(status.isAvailableForScheduling());
+                assertEquals(0L, status.pollHealth().consecutiveWorkerFailures());
                 assertEquals(1, applications.getQueue().size());
                 releaseApplications.countDown();
                 applications.shutdown();
                 assertTrue(applications.awaitTermination(5, TimeUnit.SECONDS));
-                assertEquals(-1L, status.appliedStatusCursor().statusVersion(), "old queued success cannot revive a failed generation");
-                assertNull(registry.get(RoleType.DECODE, status.getIpPort()));
+                assertEquals(1L, status.appliedStatusCursor().statusVersion(), "known resource state may still finish applying");
+                assertNotNull(registry.get(RoleType.DECODE, status.getIpPort()));
+                assertTrue(status.isAvailableForScheduling(), "neither local backlog nor a timeout proves worker failure");
             } finally {
                 releaseApplications.countDown();
                 synchronizer.destroy();
