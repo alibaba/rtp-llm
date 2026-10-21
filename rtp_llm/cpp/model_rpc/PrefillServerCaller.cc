@@ -91,7 +91,8 @@ PrefillServerCaller::callPrefill(const GenerateInputPB* request,
                                  const std::string&     ip,
                                  uint32_t               port,
                                  const std::string&     unique_key,
-                                 int64_t                request_deadline_ms) {
+                                 int64_t                request_deadline_ms,
+                                 const opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>& request_span) {
     if (request_deadline_ms <= currentTimeMs()) {
         return ErrorInfo(ErrorCode::GENERATE_TIMEOUT,
                          "Prefill GenerateStreamCall request deadline exceeded key=" + unique_key);
@@ -106,11 +107,20 @@ PrefillServerCaller::callPrefill(const GenerateInputPB* request,
                          "Prefill GenerateStreamCall invalid peer=" + ip + ":" + std::to_string(port)
                              + " key=" + unique_key);
     }
+    auto context = std::make_shared<PrefillServerCallerContext>(prefill_addr, unique_key);
+    auto client_span = telemetry::startChildClientSpan("rtp_llm.call_prefill", request_span,
+        ip, port, request->request_id(), 0, "RpcService/GenerateStreamCall");
+    if (client_span) {
+        context->async_state_->trace_guard = std::make_unique<telemetry::GrpcStatusSpanGuard>(
+            client_span, &context->async_state_->trace_status);
+    }
+    telemetry::injectSpanToClientContext(context->async_state_->client_context.get(), client_span);
     auto        connect_status = rpc_pool_->getConnection(prefill_addr);
     if (!connect_status.ok()) {
         RTP_LLM_LOG_WARNING("request [%lld] get grpc connection to prefill failed, addr: %s",
                             request->request_id(),
                             prefill_addr.c_str());
+        context->async_state_->trace_status = grpcStatusFromErrorInfo(connect_status.status());
         return ErrorInfo(ErrorCode::GET_CONNECTION_FAILED,
                          "Prefill GenerateStreamCall getConnection peer=" + prefill_addr + " key=" + unique_key + ": "
                              + connect_status.status().ToString());
@@ -118,7 +128,6 @@ PrefillServerCaller::callPrefill(const GenerateInputPB* request,
 
     auto stub = connect_status.value().stub;
 
-    auto context   = std::make_shared<PrefillServerCallerContext>(prefill_addr, unique_key);
     context->async_state_->stub = stub;
 
     // Preserve the original request shape for PD handoff so the
@@ -139,6 +148,7 @@ PrefillServerCaller::callPrefill(const GenerateInputPB* request,
         RTP_LLM_LOG_WARNING("request [%lld] create async prefill reader failed, addr: %s",
                             request->request_id(),
                             prefill_addr.c_str());
+        context->async_state_->trace_status = grpc::Status(grpc::StatusCode::INTERNAL, "async reader creation failed");
         return ErrorInfo(ErrorCode::RPC_FINISH_FAILED,
                          "Prefill GenerateStreamCall async reader creation failed peer=" + prefill_addr
                              + " key=" + unique_key);

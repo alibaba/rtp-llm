@@ -3,6 +3,7 @@
 #include "grpc++/grpc++.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
+#include "rtp_llm/cpp/telemetry/RpcTraceHelper.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include <cstdint>
 #include <memory>
@@ -22,6 +23,9 @@ struct PrefillServerCallerAsyncState {
     GenerateInputPB                                             request;
     GenerateOutputsPB                                           read_response;
     grpc::Status                                                status;
+    grpc::Status                                                trace_status;
+    // Travels with the CQ state when shutdown must be drained asynchronously.
+    std::unique_ptr<telemetry::GrpcStatusSpanGuard>               trace_guard;
     bool                                                        completion_queue_shutdown_drained_{false};
 };
 

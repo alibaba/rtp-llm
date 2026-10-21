@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/utils/DeferredCompletionQueueDrainer.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
+#include "autil/Scope.h"
 #include <chrono>
 #include <thread>
 
@@ -24,6 +25,7 @@ struct PrefillServerCallerAsyncStateDrainTraits {
     static void markDrained(const std::shared_ptr<PrefillServerCallerAsyncState>& async_state) {
         if (async_state) {
             async_state->completion_queue_shutdown_drained_ = true;
+            if (async_state->trace_guard) async_state->trace_guard->finish();
         }
     }
 };
@@ -49,6 +51,16 @@ PrefillServerCallerContext::~PrefillServerCallerContext() {
     }
     cancel();
     wait();
+    try {
+        std::unique_lock<std::shared_mutex> lock(state_mutex_);
+        if (async_state_ && async_state_->trace_status.ok()) {
+            async_state_->trace_status = error_info_.hasError() ? grpcStatusFromErrorInfo(error_info_) :
+                !finished_ ? grpc::Status(grpc::StatusCode::CANCELLED, "RPC owner released before completion") :
+                             async_state_->status;
+        }
+    } catch (...) {
+        // Telemetry must not interrupt CQ cleanup.
+    }
     shutdownAndDrainCompletionQueue();
 }
 
@@ -118,6 +130,22 @@ void PrefillServerCallerContext::handleReadChunkLocked(const GenerateOutputsPB& 
 }
 
 void PrefillServerCallerContext::checkDone() {
+    autil::ScopeGuard finish_trace([this] {
+        try {
+            std::unique_lock<std::shared_mutex> lock(state_mutex_);
+            if (finished_ && async_state_ && async_state_->trace_guard) {
+                if (async_state_->trace_status.ok()) {
+                    async_state_->trace_status = error_info_.hasError() ? grpcStatusFromErrorInfo(error_info_) :
+                        cancel_requested_ && async_state_->status.ok() ?
+                            grpc::Status(grpc::StatusCode::CANCELLED, "prefill request cancelled") :
+                            async_state_->status;
+                }
+                async_state_->trace_guard->finish();
+            }
+        } catch (...) {
+            // Observability does not change polling or terminal outcomes.
+        }
+    });
     std::shared_ptr<PrefillServerCallerAsyncState> async_state;
     {
         std::unique_lock<std::shared_mutex> lock(state_mutex_);

@@ -16,6 +16,9 @@
 #include "rtp_llm/cpp/model_rpc/PrefillServerCaller.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include "rtp_llm/cpp/utils/GrpcAddressUtil.h"
+#include "opentelemetry/exporters/memory/in_memory_span_data.h"
+#include "opentelemetry/exporters/memory/in_memory_span_exporter_factory.h"
+#include "rtp_llm/cpp/telemetry/TelemetryRuntime.h"
 
 namespace rtp_llm::test {
 
@@ -86,6 +89,10 @@ public:
         started_.store(true);
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            const auto trace = context->client_metadata().find("traceparent");
+            if (trace != context->client_metadata().end()) {
+                captured_traceparent_.assign(trace->second.data(), trace->second.size());
+            }
             started_cv_.notify_all();
         }
 
@@ -241,6 +248,11 @@ public:
         return cancel_cv_.wait_for(lock, timeout, [this]() { return cancelled_.load(); });
     }
 
+    std::string capturedTraceparent() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return captured_traceparent_;
+    }
+
     GenerateInputPB capturedRequest() {
         std::lock_guard<std::mutex> lock(mutex_);
         return captured_request_;
@@ -254,6 +266,7 @@ private:
     std::condition_variable started_cv_;
     std::condition_variable cancel_cv_;
     GenerateInputPB         captured_request_;
+    std::string             captured_traceparent_;
     int                     peer_info_call_count_{0};
     bool                                  peer_info_fail_{false};
     std::vector<PrefillPeerInfo> peer_info_responses_;
@@ -320,7 +333,7 @@ protected:
         request.add_token_ids(1);
         request.mutable_generate_config()->set_timeout_ms(5000);
         const auto request_deadline_ms = currentTimeMs() + deadline_us / 1000;
-        return caller_.callPrefill(&request, "127.0.0.1", server.port(), unique_key, request_deadline_ms)
+        return caller_.callPrefill(&request, "127.0.0.1", server.port(), unique_key, request_deadline_ms, {})
             .value();
     }
 
@@ -339,6 +352,75 @@ protected:
 protected:
     PrefillServerCaller caller_;
 };
+
+TEST_F(PrefillServerCallerTest, AsyncClientTracePropagatesAndWaitsForRpcTerminalState) {
+    namespace memory = opentelemetry::exporter::memory;
+    telemetry::TelemetryRuntime::shutdown(5000);
+    std::shared_ptr<memory::InMemorySpanData> span_data;
+    auto exporter = memory::InMemorySpanExporterFactory::Create(span_data);
+    telemetry::TelemetryConfig config;
+    config.enabled = true;
+    config.role = "test";
+    ASSERT_TRUE(telemetry::TelemetryRuntime::initWithExporter(std::move(exporter), config));
+    std::vector<std::string> received_contexts;
+    for (auto mode : {FakePrefillRpcService::Mode::kCaptureForwardedRequest,
+                      FakePrefillRpcService::Mode::kWaitForCancel,
+                      FakePrefillRpcService::Mode::kErrorChunkThenWaitForCancel}) {
+        FakePrefillRpcServer server(std::make_unique<FakePrefillRpcService>(mode));
+        ASSERT_TRUE(server.start());
+        auto request = makeSyncRequest(server, 1020, 5000);
+        auto request_span = telemetry::TelemetryRuntime::tracer()->StartSpan("decode-client-trace-test");
+        auto result = caller_.callPrefill(&request, "127.0.0.1", server.port(), "trace-test",
+                                          currentTimeMs() + 5000, request_span);
+        ASSERT_TRUE(result.ok());
+        auto context = result.value();
+        ASSERT_TRUE(server.service()->waitStarted(std::chrono::seconds(3)));
+        if (mode == FakePrefillRpcService::Mode::kWaitForCancel) {
+            // Receipt alone does not end the streaming CLIENT span.
+            EXPECT_FALSE(context->done());
+            const auto spans = span_data->GetSpans();
+            size_t completed_calls = 0;
+            for (const auto& span : spans) completed_calls += span->GetName() == "rtp_llm.call_prefill";
+            EXPECT_EQ(completed_calls, 1u);  // Only the preceding successful call.
+            context->cancel();
+        }
+        ASSERT_TRUE(waitDone(context));
+        EXPECT_EQ(context->success(), mode == FakePrefillRpcService::Mode::kCaptureForwardedRequest);
+        received_contexts.push_back(server.service()->capturedTraceparent());
+        request_span->End();
+    }
+    EXPECT_TRUE(telemetry::TelemetryRuntime::shutdown(5000));
+    const auto spans = span_data->GetSpans();
+    size_t calls = 0;
+    size_t errors = 0;
+    for (const auto& span : spans) {
+        if (span->GetName() != "rtp_llm.call_prefill") continue;
+        ++calls;
+        errors += span->GetStatus() == opentelemetry::trace::StatusCode::kError;
+        EXPECT_EQ(span->GetSpanKind(), opentelemetry::trace::SpanKind::kClient);
+        EXPECT_TRUE(span->GetParentSpanId().IsValid());
+        char trace_id[32];
+        char span_id[16];
+        span->GetTraceId().ToLowerBase16(trace_id);
+        span->GetSpanId().ToLowerBase16(span_id);
+        const auto propagated_prefix = "00-" + std::string(trace_id, 32) + "-" + std::string(span_id, 16) + "-";
+        EXPECT_EQ(std::count_if(received_contexts.begin(), received_contexts.end(), [&](const std::string& value) {
+            return value.find(propagated_prefix) == 0;
+        }), 1);
+        bool source_found = false;
+        for (const auto& source : spans) {
+            if (source->GetName() != "decode-client-trace-test") continue;
+            char source_id[16];
+            char actual_source_id[16];
+            source->GetSpanId().ToLowerBase16(source_id);
+            span->GetParentSpanId().ToLowerBase16(actual_source_id);
+            source_found |= std::string(source_id, 16) == std::string(actual_source_id, 16);
+        }
+        EXPECT_TRUE(source_found);
+    }
+    EXPECT_EQ(calls, 3u);
+    EXPECT_EQ(errors, 2u);
+}
 
 TEST_F(PrefillServerCallerTest, ErrorChunkMarksContextFailed) {
     FakePrefillRpcServer server(
@@ -418,7 +500,7 @@ TEST_F(PrefillServerCallerTest, AsyncDecodeEntrancePrefillPreservesPdSeparationR
 
     const auto request_deadline_ms = currentTimeMs() + 1000;
     auto context =
-        caller_.callPrefill(&request, "127.0.0.1", server.port(), "decode-entrance-key", request_deadline_ms)
+        caller_.callPrefill(&request, "127.0.0.1", server.port(), "decode-entrance-key", request_deadline_ms, {})
             .value();
     ASSERT_NE(context, nullptr);
     ASSERT_TRUE(waitDone(context));
@@ -467,7 +549,7 @@ TEST_F(PrefillServerCallerTest, AsyncReaderCreationFailurePreservesCause) {
     request.mutable_generate_config()->set_timeout_ms(5000);
 
     const auto request_deadline_ms = currentTimeMs() + 5000;
-    auto result = caller_.callPrefill(&request, "127.0.0.1", 1, "null-reader", request_deadline_ms);
+    auto result = caller_.callPrefill(&request, "127.0.0.1", 1, "null-reader", request_deadline_ms, {});
     ASSERT_FALSE(result.ok());
     EXPECT_EQ(result.status().code(), ErrorCode::RPC_FINISH_FAILED);
     EXPECT_NE(result.status().ToString().find("null-reader"), std::string::npos);
@@ -481,7 +563,7 @@ TEST_F(PrefillServerCallerTest, AsyncPrefillNormalizesRawIpv6TargetAddress) {
     request.mutable_generate_config()->set_timeout_ms(1);
 
     const auto request_deadline_ms = currentTimeMs() + 5000;
-    auto context = caller_.callPrefill(&request, "::1", 65535, "ipv6-target", request_deadline_ms).value();
+    auto context = caller_.callPrefill(&request, "::1", 65535, "ipv6-target", request_deadline_ms, {}).value();
     ASSERT_NE(context, nullptr);
     EXPECT_EQ(context->prefill_addr_, "[::1]:65535");
     context->cancel();
@@ -494,7 +576,7 @@ TEST_F(PrefillServerCallerTest, AsyncPrefillRejectsInvalidTargetPort) {
     request.mutable_generate_config()->set_timeout_ms(1);
 
     const auto request_deadline_ms = currentTimeMs() + 5000;
-    auto result = caller_.callPrefill(&request, "::1", 0, "bad-port", request_deadline_ms);
+    auto result = caller_.callPrefill(&request, "::1", 0, "bad-port", request_deadline_ms, {});
     ASSERT_FALSE(result.ok());
     EXPECT_EQ(result.status().code(), ErrorCode::INVALID_PARAMS);
     EXPECT_NE(result.status().ToString().find("bad-port"), std::string::npos);

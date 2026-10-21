@@ -502,7 +502,9 @@ grpc::Status DecodeRpcServer::GenerateStreamCall(grpc::ServerContext*           
             }
             const auto prefill_call_start_us = currentTimeUs();
             auto       started               = prefill_server_caller_->callPrefill(
-                &prefill_request, target_ip, target_port, unique_key, request_deadline_ms);
+                &prefill_request, target_ip, target_port, unique_key, request_deadline_ms,
+                generate_context.trace_span_guard ? generate_context.trace_span_guard->sharedSpan() :
+                    opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>{});
             {
                 RpcMetricsCollector collector;
                 collector.min_response_done_time_us = 0;

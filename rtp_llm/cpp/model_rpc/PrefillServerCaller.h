@@ -29,7 +29,8 @@ public:
                                                                          const std::string&     ip,
                                                                          uint32_t               port,
                                                                          const std::string&     unique_key,
-                                                                         int64_t                request_deadline_ms);
+                                                                         int64_t                request_deadline_ms,
+                                                                         const opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>& request_span);
 
     grpc::Status callPrefill(grpc::ServerContext*                   server_context,
                              const GenerateInputPB*                 request,
