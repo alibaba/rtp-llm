@@ -286,6 +286,86 @@ class GateRoutingMetadataTest(unittest.TestCase):
                     seen[0].image_mask, torch.tensor([False, True, False])
                 )
 
+    def test_dspark_aux_capture_uses_target_layer_input(self):
+        from rtp_llm.models_py.modules.dsv41.decode import forward as decode
+        from rtp_llm.models_py.modules.dsv41.prefill import forward as prefill
+
+        class Layer:
+            def __init__(self, layer_id):
+                self.layer_id = layer_id
+
+            def __call__(self, hidden, *args, **kwargs):
+                return hidden + self.layer_id + 1
+
+            forward_decode = __call__
+
+        ids = torch.tensor([2, 3], dtype=torch.int32)
+        for mode in ("prefill", "prefill_fast", "decode"):
+            with self.subTest(mode=mode), ExitStack() as stack:
+                model = _FakeV4()
+                model.args = SimpleNamespace(vocab_size=8, n_hash_layers=0)
+                model._has_visual_tokens = False
+                model.layers = [Layer(i) for i in range(3)]
+                model.capture_aux_hidden_layer_ids = (1, 2)
+                captures = []
+                model.capture_aux_hidden = lambda i, hidden: captures.append(
+                    (i, hidden.clone())
+                )
+
+                stack.enter_context(patch.object(prefill._rt, "ENABLED", False))
+                stack.enter_context(
+                    patch.object(prefill._fwd_dbg, "enabled", return_value=False)
+                )
+                stack.enter_context(patch.dict(os.environ, {"DSV41_CED": "0"}))
+                if mode.startswith("prefill"):
+                    calls = tuple(layer.__call__ for layer in model.layers)
+                    stack.enter_context(
+                        patch.object(
+                            prefill,
+                            "_prefill_fast_path_layer_calls",
+                            return_value=calls,
+                        )
+                    )
+                    stack.enter_context(
+                        patch.object(
+                            prefill,
+                            "_prefill_fast_path_enabled",
+                            return_value=mode == "prefill_fast",
+                        )
+                    )
+                    prefill.forward_layers(
+                        model, None, ids, torch.arange(2), torch.tensor([0, 2]), None
+                    )
+                    initial = model.embed(ids).unsqueeze(-2)
+                else:
+                    wrapped = stack.enter_context(
+                        patch.object(
+                            decode,
+                            "forward_decode_layer",
+                            wraps=decode.forward_decode_layer,
+                        )
+                    )
+                    decode.forward_layers(
+                        model,
+                        None,
+                        ids,
+                        SimpleNamespace(
+                            batch_size=1, q_len_per_req=2, is_cuda_graph=False
+                        ),
+                    )
+                    self.assertEqual(
+                        [
+                            call.kwargs["preserve_output"]
+                            for call in wrapped.call_args_list
+                        ],
+                        [True, True, False],
+                    )
+                    initial = model.embed(ids).view(1, 2, 1, -1)
+
+                self.assertEqual([i for i, _ in captures], [1, 2])
+                torch.testing.assert_close(captures[0][1], initial + 1)
+                torch.testing.assert_close(captures[1][1], initial + 3)
+
     def test_standalone_transformer_shares_prefill_and_decode_metadata(self):
         from rtp_llm.models_py.modules.dsv41.transformer import V4Transformer
 
