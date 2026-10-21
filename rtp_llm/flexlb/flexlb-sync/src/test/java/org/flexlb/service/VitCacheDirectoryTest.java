@@ -97,6 +97,15 @@ class VitCacheDirectoryTest {
         return context;
     }
 
+    @Test
+    void preparedImagesCanSelectWithoutUrlAffinityWhileKeepingGroupAndHealthRules() {
+        var result = selector.select(context(), "one");
+        assertTrue(result.isSuccess());
+        assertEquals(a.getIp(), result.getServerIp());
+        live.remove(a.getIpPort());
+        assertFalse(selector.select(context(), "one").isSuccess());
+    }
+
     private void snapshot(WorkerStatus worker, String epoch, String... keys) {
         directory.replace(worker, MultimodalCacheStatusPB.newBuilder()
                 .setWorkerInstance(epoch).addAllKeys(List.of(keys)).build());
