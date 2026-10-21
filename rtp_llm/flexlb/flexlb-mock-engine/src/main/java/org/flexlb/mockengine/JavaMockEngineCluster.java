@@ -363,7 +363,7 @@ public final class JavaMockEngineCluster {
                     .executor(runtime.controlExecutor())
                     .callExecutor(rpcEngine)
                     .intercept(rpcEngine)
-                    .maxInboundMessageSize(16 * 1024 * 1024)
+                    .maxInboundMessageSize(64 * 1024 * 1024)
                     .addService(CacheFixtureWire.bind(service))
                     .build()
                     .start();
@@ -609,6 +609,7 @@ public final class JavaMockEngineCluster {
 
     static final class FastRpcService extends RpcServiceGrpc.RpcServiceImplBase {
         volatile MockCacheDiagnostics cacheDiagnostics;
+        private final MockVitClient vitClient = new MockVitClient();
 
         boolean isDiagnosticPrefill() { return roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL; }
 
@@ -616,6 +617,19 @@ public final class JavaMockEngineCluster {
             Set<Long> keys = new HashSet<>(cache.snapshotKeys());
             if (memoryCache != null) keys.addAll(memoryCache.keys());
             return keys;
+        }
+
+        private static Map<Integer, Integer> multimodalLengths(EngineRpcService.GenerateInputPB input) {
+            Map<Integer, Integer> lengths = new java.util.HashMap<>();
+            if (input.hasV41Inputs()) {
+                int rows = input.getV41Inputs().getImagesList().stream().mapToInt(EngineRpcService.V41ImageInputPB::getTypesCount).sum();
+                if (rows > 0) lengths.put(1, rows);
+                return lengths;
+            }
+            int count = Math.min(input.getMultimodalInputsCount(), input.getMultimodalTokenLayout().getSpansCount());
+            for (int i = 0; i < count; i++) lengths.merge(input.getMultimodalInputs(i).getMultimodalType(),
+                    input.getMultimodalTokenLayout().getSpans(i).getLength(), Integer::sum);
+            return lengths;
         }
 
         private void observeCacheDiagnostics(MockPerformanceModel.RequestShape shape) {
@@ -1762,7 +1776,17 @@ public final class JavaMockEngineCluster {
                                 requestStates.put(requestId, "rejected");
                                 continue;
                             }
-                            MockPerformanceModel.RequestShape shape = matchPrefillMemory(performance.shape(input.getInput(), cache));
+                            EngineRpcService.GenerateInputPB preparedInput = input.getInput();
+                            if (isDiagnosticPrefill() && (preparedInput.getMultimodalInputsCount() > 0 || preparedInput.hasV41Inputs())) {
+                                try {
+                                    preparedInput = vitClient.prepare(preparedInput, beginRequest(preparedInput).remainingMs());
+                                } catch (RuntimeException error) {
+                                    response.addErrorsBuilder().setRequestId(requestId).setErrorInfo(MockRpcErrors.downstream(error));
+                                    requestStates.put(requestId, "rejected");
+                                    continue;
+                                }
+                            }
+                            MockPerformanceModel.RequestShape shape = matchPrefillMemory(performance.shape(preparedInput, cache));
                             observeCacheDiagnostics(shape);
                             // Key-level cache-hit accounting at the admission hit
                             // computation point (recorded whether or not the request
@@ -2202,6 +2226,10 @@ public final class JavaMockEngineCluster {
 
             long requestId = request.getRequestId();
             beginRequest(request);
+            if (isDiagnosticPrefill() && (request.getMultimodalInputsCount() > 0 || request.hasV41Inputs())) {
+                try { vitClient.prepare(request, beginRequest(request).remainingMs()); }
+                catch (RuntimeException error) { finishRequest(request.getRequestId()); observer.onError(error); return; }
+            }
             MockPerformanceModel.RequestShape shape = matchPrefillMemory(performance.shape(request, cache));
             observeCacheDiagnostics(shape);
             // Key-level cache-hit accounting (direct path, same admission hit
@@ -5283,6 +5311,7 @@ public final class JavaMockEngineCluster {
                     .addFinished(finished)
                     .addAuxInfo(EngineRpcService.AuxInfoPB.newBuilder()
                             .setInputLen(shape.inputLen())
+                            .putAllMultimodalLengths(multimodalLengths(shape.input()))
                             .setPrefixLen((int) shape.hitTokens())
                             .setOutputLen(outputLen)
                             .setIterCount(1)
@@ -6127,6 +6156,7 @@ public final class JavaMockEngineCluster {
          * Shut down the dedicated response-polling executor.
          */
         void shutdown() {
+            vitClient.close();
             long expires = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
             requestDeadlines.values().forEach(MockRequestDeadline::close);
             requestDeadlines.clear();

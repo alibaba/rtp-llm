@@ -33,6 +33,42 @@ def normalize_heap(value, name):
     raise ValueError(f"{name} must be a positive byte count or JVM heap size")
 
 
+def vit_configuration(cfg, env, mock_port, legacy):
+    enabled = env.get("MOCK_VIT_ENABLED", "0")
+    if enabled not in {"0", "1"}:
+        raise ValueError("MOCK_VIT_ENABLED must be 0 or 1")
+    if enabled == "0":
+        return None
+    if legacy:
+        raise ValueError("modern Mock ViT requires the modern Master protocol")
+    values = {}
+    for name, default in {"port": mock_port + cfg["prefill"] + cfg["decode"],
+                          "hidden_size": 128, "concurrency": 4, "queue_capacity": 64,
+                          "embedding_cache_bytes": 67108864, "hash_cache_bytes": 8388608,
+                          "compute_delay_ms": 1}.items():
+        raw = env.get("MOCK_VIT_" + name.upper(), str(default))
+        if not raw.isdecimal():
+            raise ValueError("invalid MOCK_VIT_" + name.upper())
+        values[name] = int(raw)
+        if values[name] < (0 if name.endswith("bytes") or name == "compute_delay_ms" else 1):
+            raise ValueError("invalid MOCK_VIT_" + name.upper())
+    if not mock_port + cfg["prefill"] + cfg["decode"] <= values["port"] <= 65535:
+        raise ValueError("Mock ViT port overlaps P/D or exceeds 65535")
+    return values
+
+
+def publish_vit_discovery(source, destination, vit_address):
+    # P/D owns the source file and can rewrite it during dynamic scale changes.
+    # Publish a separate atomic combined view rather than racing its writer.
+    hosts = json.loads(source.read_text())
+    hosts["mock.vit.hosts.address"] = [vit_address]
+    payload = json.dumps(hosts, sort_keys=True)
+    if not destination.exists() or destination.read_text() != payload:
+        temporary = destination.with_suffix(".tmp")
+        temporary.write_text(payload)
+        temporary.replace(destination)
+
+
 def run():
     if os.environ.get("RTP_LLM_MOCK_BUNDLE") != "1":
         raise ValueError("test-only bundle requires RTP_LLM_MOCK_BUNDLE=1")
@@ -84,6 +120,7 @@ def run():
     jars = Path(os.environ.get("MOCK_BUNDLE_JAR_DIR", ROOT / "jars"))
     raw = os.environ.get("FLEXLB_CONFIG") or render_env(profile)
     legacy = os.environ.get("MOCK_BUNDLE_LEGACY_MASTER") == "1"
+    vit_cfg = vit_configuration(cfg, os.environ, mock_port, legacy)
     mock_raw = mock_formula_config(raw, legacy,
                                    os.environ.get("MOCK_PREFILL_EXECUTION_FORMULA"))
     (runtime / "master-source-config.json").write_text(raw)
@@ -228,6 +265,24 @@ def run():
         ready(mock_port - 1, mock, pod_ip)
         endpoints = json.loads((runtime / "endpoints.json").read_text())
         env.update(legacy_discovery(endpoints, os.environ.get("MOCK_BUNDLE_FILE_DISCOVERY") == "1") if legacy else endpoints["env"])
+        if vit_cfg is not None:
+            vit = start("vit", [java, "-Xms64m", "-Xmx512m", "-Djava.awt.headless=true", "-cp", str(jars / "mock.jar"),
+                                "org.flexlb.mockengine.MockVitServer",
+                                *[part for key, value in vit_cfg.items()
+                                  for part in ("--" + key.replace("_", "-"), str(value))],
+                                *(["--model-path", os.environ["MOCK_VIT_MODEL_PATH"]]
+                                  if os.environ.get("MOCK_VIT_MODEL_PATH") else [])], env)
+            ready(vit_cfg["port"], vit, pod_ip)
+            service = json.loads(env["MODEL_SERVICE_CONFIG"])
+            pd_discovery = Path(service["discovery_file"])
+            combined_discovery = runtime / "vit-discovery.json"
+            vit_address = f"{pod_ip}:{vit_cfg['port'] - 1}"
+            publish_vit_discovery(pd_discovery, combined_discovery, vit_address)
+            service["discovery_file"] = str(combined_discovery)
+            for group in service["role_endpoints"]:
+                group["vit_endpoint"] = {"address": "mock.vit.hosts.address", "protocol": "http", "path": "/"}
+            env["MODEL_SERVICE_CONFIG"] = json.dumps(service)
+            (runtime / "model-service.json").write_text(env["MODEL_SERVICE_CONFIG"])
         env.update(
             FLEXLB_CONFIG=raw,
             SERVER_PORT=str(http_port),
@@ -285,6 +340,7 @@ def run():
                     "fetch_output_stream": fetch_output_stream == "1",
                     "master_pid": master.pid,
                     "mock_pid": mock.pid,
+                    "vit": vit_cfg,
                     "master_http_port": http_port,
                     "mock_http_port": mock_port - 1,
                     "configuration": cfg,
@@ -296,6 +352,8 @@ def run():
             )
         )
         while not stopping:
+            if vit_cfg is not None:
+                publish_vit_discovery(pd_discovery, combined_discovery, vit_address)
             if any(p.poll() is not None for p in children):
                 raise RuntimeError("bundle child exited; terminate its peer")
             time.sleep(0.2)
