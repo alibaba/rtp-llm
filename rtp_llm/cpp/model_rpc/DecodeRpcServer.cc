@@ -385,6 +385,17 @@ grpc::Status DecodeRpcServer::GenerateStreamCall(grpc::ServerContext*           
     auto                        generate_context =
         GenerateContext(request_id, normalized_timeout_ms, server_context, metrics_reporter_, meta_);
     generate_context.onflight_requests = &onflight_requests_;
+    if (telemetry::TelemetryRuntime::isActive()) {
+        auto span = telemetry::startRpcServerSpan(
+            "rtp_llm.generate_stream_call", server_context, true, "RpcService/GenerateStreamCall");
+        generate_context.trace_span_guard =
+            std::make_unique<telemetry::GrpcStatusSpanGuard>(span, &generate_context.error_status);
+        generate_context.trace_span_guard->setAttribute(telemetry::kAttrRequestId, std::to_string(request_id));
+        generate_context.trace_span_guard->setAttribute(telemetry::kAttrGenAiPdRole, telemetry::kValPdRoleConsumer);
+    }
+    telemetry::PhaseSpanSynthesisScope phase_span_scope([&generate_context](bool exception_unwinding) {
+        generate_context.synthesizeTracePhases(telemetry::PhaseRole::Decode, exception_unwinding);
+    });
     const int uncaught_exceptions = std::uncaught_exceptions();
     autil::ScopeGuard rpc_completion_guard([&generate_context, uncaught_exceptions] {
         if (std::uncaught_exceptions() == uncaught_exceptions) {

@@ -12,6 +12,8 @@
 #include "rtp_llm/cpp/model_rpc/LocalRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
+#include "opentelemetry/exporters/memory/in_memory_span_data.h"
+#include "opentelemetry/exporters/memory/in_memory_span_exporter_factory.h"
 #include "rtp_llm/cpp/telemetry/TelemetryRuntime.h"
 #include "rtp_llm/cpp/testing/TestLogCapture.h"
 
@@ -143,6 +145,64 @@ TEST(RpcWriterCancellationTest, ContextMetricsKeepExplicitFirstErrorAheadOfGrpcF
     EXPECT_TRUE(collector.error_qps);
     EXPECT_EQ(collector.error_code, ErrorCode::MALLOC_FAILED);
     context.markRpcHandlingCompleted();
+}
+
+TEST(RpcWriterCancellationTest, PdPhaseSynthesisExportsRoleSpecificFailureSpans) {
+    namespace memory = opentelemetry::exporter::memory;
+    telemetry::TelemetryRuntime::shutdown(5000);
+    std::shared_ptr<memory::InMemorySpanData> span_data;
+    auto exporter = memory::InMemorySpanExporterFactory::Create(span_data);
+    telemetry::TelemetryConfig config;
+    config.enabled = true;
+    config.role = "test";
+    ASSERT_TRUE(telemetry::TelemetryRuntime::initWithExporter(std::move(exporter), config));
+    for (auto role : {telemetry::PhaseRole::Prefill, telemetry::PhaseRole::Decode}) {
+        kmonitor::MetricsReporterPtr reporter;
+        auto meta = std::make_shared<RpcServerRuntimeMeta>();
+        GenerateContext context(54, 0, nullptr, reporter, meta);
+        auto stream = std::make_shared<SingleOutputStream>();
+        const auto now = currentTimeUs();
+        stream->begin_time_us_ = now - 3000;
+        stream->running_started_ = true;
+        stream->running_started_time_us_ = now - 2000;
+        context.setStream(stream);
+        context.error_status = grpcStatusFromErrorInfo({ErrorCode::GENERATE_TIMEOUT, "phase timeout"});
+        auto span = telemetry::startRpcServerSpan("pd-test-request", nullptr, true, "RpcService/GenerateStreamCall");
+        context.trace_span_guard =
+            std::make_unique<telemetry::GrpcStatusSpanGuard>(span, &context.error_status);
+        context.synthesizeTracePhases(role, false);
+        context.markRpcHandlingCompleted();
+    }
+    EXPECT_TRUE(telemetry::TelemetryRuntime::shutdown(5000));
+    auto spans = span_data->GetSpans();
+    size_t prefill_count = 0;
+    size_t decode_count = 0;
+    size_t server_count = 0;
+    for (const auto& span : spans) {
+        const auto name = span->GetName();
+        if (name == "pd-test-request") {
+            ++server_count;
+            EXPECT_EQ(span->GetSpanKind(), opentelemetry::trace::SpanKind::kServer);
+            EXPECT_EQ(span->GetStatus(), opentelemetry::trace::StatusCode::kError);
+        } else if (name == "prefill" || name == "decode") {
+            prefill_count += name == "prefill";
+            decode_count += name == "decode";
+            EXPECT_EQ(span->GetStatus(), opentelemetry::trace::StatusCode::kError);
+            const auto& attributes = span->GetAttributes();
+            const auto found = attributes.find(telemetry::kAttrGenAiPdRole);
+            EXPECT_NE(found, attributes.end());
+            if (found != attributes.end()) {
+                const auto* role = opentelemetry::nostd::get_if<std::string>(&found->second);
+                EXPECT_NE(role, nullptr);
+                if (role) {
+                    EXPECT_EQ(*role, name == "prefill" ? "producer" : "consumer");
+                }
+            }
+        }
+    }
+    EXPECT_EQ(server_count, 2u);
+    EXPECT_EQ(prefill_count, 1u);
+    EXPECT_EQ(decode_count, 1u);
 }
 
 TEST(RpcWriterCancellationTest, RequestGaugeSamplesLiveAtomicValue) {

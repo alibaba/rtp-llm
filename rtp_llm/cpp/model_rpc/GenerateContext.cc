@@ -19,6 +19,44 @@ GenerateContext::~GenerateContext() {
     reportTime();
 }
 
+void GenerateContext::synthesizeTracePhases(telemetry::PhaseRole role, bool exception_unwinding) {
+    if (!trace_span_guard || !trace_span_guard->valid()) {
+        return;
+    }
+    auto& stream = getStream();
+    if (!stream) {
+        return;
+    }
+    const auto             time_info = stream->getTimeInfo();
+    telemetry::PhaseTiming phase_timing;
+    phase_timing.begin_time_us           = time_info.begin_time_us;
+    phase_timing.running_started         = time_info.running_started;
+    phase_timing.running_started_time_us = time_info.running_started_time_us;
+    phase_timing.first_token_committed   = time_info.first_token_committed;
+    phase_timing.first_token_time_us     = time_info.first_token_time_us;
+    phase_timing.generation_done         = time_info.generation_done;
+    phase_timing.generation_done_time_us = time_info.generation_done_time_us;
+    phase_timing.synthesis_end_time_us   = currentTimeUs();
+    phase_timing.request_id              = request_id;
+    const bool request_ok                = error_status.ok() && !exception_unwinding;
+    if (role == telemetry::PhaseRole::Fusion && request_ok && time_info.generation_done) {
+        // Beam rows are an internal search width; Fusion exposes one primary
+        // sequence (the remaining candidates live in beam_responses). Only
+        // ordinary multi-return requests aggregate all active rows.
+        const auto returned_sequence_count =
+            stream->hasNumBeams() ? std::max(stream->numReturnSequences(), 1) : stream->currentBatchSize();
+        telemetry::setUsageTokenAttributes(*trace_span_guard,
+                                           (int64_t)stream->inputLength(),
+                                           (int64_t)(stream->outputTokenLen() * returned_sequence_count));
+    }
+    phase_timing.error_type = request_ok ?
+                                  nullptr :
+                                  (!error_status.ok() ?
+                                       telemetry::grpcStatusCodeName(error_status.error_code()) :
+                                       "Exception");
+    telemetry::synthesizePhaseSpans(trace_span_guard->sharedSpan(), phase_timing, role, request_ok);
+}
+
 void GenerateContext::reset() {
     error_info   = ErrorInfo::OkStatus();
     error_status = grpc::Status::OK;
