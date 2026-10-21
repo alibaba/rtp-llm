@@ -35,7 +35,8 @@ enum class OutputAction {
 };
 enum class Handler {
     LOCAL,
-    PREFILL
+    PREFILL,
+    PREFILL_LOCAL
 };
 
 // Only model output is controlled. Stream state transitions, cache ownership,
@@ -363,6 +364,15 @@ TEST_F(RpcHandlerLifecycleTest, LocalFailurePreservesPriorityPreemption) {
 }
 TEST_F(RpcHandlerLifecycleTest, LocalExceptionUnwindsAndDiagnosesOnce) {
     runSynchronousHandler(Handler::LOCAL, OutputAction::THROW);
+}
+TEST_F(RpcHandlerLifecycleTest, PrefillNonPdFallbackCompletesThroughLocalHandler) {
+    runSynchronousHandler(Handler::PREFILL_LOCAL, OutputAction::COMPLETE);
+}
+TEST_F(RpcHandlerLifecycleTest, PrefillNonPdFallbackPreservesExecutionFailure) {
+    runSynchronousHandler(Handler::PREFILL_LOCAL, OutputAction::FAIL);
+}
+TEST_F(RpcHandlerLifecycleTest, PrefillNonPdFallbackCleansUpAfterException) {
+    runSynchronousHandler(Handler::PREFILL_LOCAL, OutputAction::THROW);
 }
 TEST_F(RpcHandlerLifecycleTest, PrefillSuccessReturnsBeforeSchedulerWithoutCanceling) {
     runSynchronousHandler(Handler::PREFILL, OutputAction::COMPLETE);
