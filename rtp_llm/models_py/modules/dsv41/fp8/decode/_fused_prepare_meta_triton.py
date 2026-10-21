@@ -24,7 +24,6 @@ import torch
 import triton
 import triton.language as tl
 
-
 @triton.jit
 def _fused_prepare_meta_kernel(
     # inputs
@@ -154,13 +153,11 @@ def _fused_prepare_meta_kernel(
                 mask=mask_h,
             )
 
-
 def _next_pow2(n: int) -> int:
     p = 1
     while p < n:
         p <<= 1
     return p
-
 
 def fused_update_decode_meta_pure(
     meta: Any,
@@ -242,7 +239,6 @@ def fused_update_decode_meta_pure(
         HAS_CMP_128=has_128,
     )
 
-
 # ---------------------------------------------------------------------------
 # Phase 2b: fused pool_write_slot_mapping.
 # ---------------------------------------------------------------------------
@@ -263,7 +259,6 @@ def fused_update_decode_meta_pure(
 # Ratio constants are hard-coded to V4-Flash values (CSA/INDEXER=4,
 # HCA=128). Pool existence is controlled by HAS_SWA/HAS_CSA/HAS_IDX/HAS_HCA.
 # ---------------------------------------------------------------------------
-
 
 @triton.jit
 def _fused_phase2b_pool_slot_mapping_kernel(
@@ -360,7 +355,6 @@ def _fused_phase2b_pool_slot_mapping_kernel(
         skip_hca = skip_128 | (bid_hca <= 0)
         slot_hca = tl.where(skip_hca, -1, bid_hca * HCA_E + in_blk_hca)
         tl.store(slot_hca_ptr + out_idx, slot_hca)
-
 
 def fused_phase2b_pool_slot_mapping(
     meta: Any,
@@ -466,3 +460,519 @@ def fused_phase2b_pool_slot_mapping(
         HAS_IDX=has_idx,
         HAS_HCA=has_hca,
     )
+
+# ---------------------------------------------------------------------------
+# Phase 2c: fused paged-read/state/length prepare for the in-place update path.
+# ---------------------------------------------------------------------------
+# Before this kernel, each ``update_decode_metadata_in_place_fp8`` call with
+# paged pools expanded to a serial aten chain (~25 launches at B<=4):
+#   * per-pool block-table snapshot: ``dst[bs:].zero_()`` +
+#     ``dst[:n, :m].copy_(src[:n, :m])`` (+ column-tail zero) — one cudaMemcpy2D
+#     and two fill kernels per pool;
+#   * ``_update_compressor_state_slot_mappings`` — arange/to/index/mul/where per
+#     STATE pool (``_compute_state_pool_slot_mapping``'s gather chain);
+#   * ``translate_local_to_global_slots`` for SWA + DECODER_SWA — a Triton
+#     launch each, reading ``swa_abs_idx`` and the request-major block tables;
+#   * ``_update_topk_lengths_in_place`` swa branch — clamp + copy.
+# The chain ran ~1.9ms CPU per target-verify prepare and left 20-35us GPU
+# stalls between its tiny kernels whenever the replay queue drained (traces:
+# 31.6us before ``_fused_phase2b``, 34-35us before the arange kernels).
+#
+# This kernel replaces all of it with ONE launch per prepare. Program (r, q)
+# covers one (request, token) row; it also carries the per-request scalar work
+# (block-table row copy for every pool, swa_topk_length) so no second kernel is
+# needed. int32 slot arithmetic matches the reference aten implementations
+# exactly (including the -1 sentinel and block<=0 normalization); STATE pools
+# store int64 slots like ``_compute_state_pool_slot_mapping``.
+# ---------------------------------------------------------------------------
+@triton.jit
+def _fused_prepare_paged_meta_kernel(
+    start_pos_ptr,  # [bs] i32 — clamped first-token positions (source of truth)
+    # ---- per-pool source block tables (framework, [>=bs, SRC_COLS_*]) ----
+    src_bt_swa_ptr,
+    src_bt_csa_ptr,
+    src_bt_idx_ptr,
+    src_bt_hca_ptr,
+    src_bt_dswa_ptr,
+    src_bt_cstate_ptr,
+    src_bt_istate_ptr,
+    src_bt_hstate_ptr,
+    # ---- persistent metadata block-table snapshots ([B_max, DST_COLS_*]) ----
+    dst_bt_swa_ptr,
+    dst_bt_csa_ptr,
+    dst_bt_idx_ptr,
+    dst_bt_hca_ptr,
+    dst_bt_dswa_ptr,
+    dst_bt_cstate_ptr,
+    dst_bt_istate_ptr,
+    dst_bt_hstate_ptr,
+    # ---- persistent outputs ----
+    position_ids_ptr,  # i32 [B_max * q_len]
+    position_ids_long_ptr,  # i64 [B_max * q_len]
+    swa_topk_len_ptr,  # i32 [B_max] — FlashMLA SWA effective length
+    state_slot_csa_ptr,  # i64 [B_max * q_len] — CSA_STATE compressor slots
+    state_slot_idx_ptr,  # i64 [B_max * q_len] — INDEXER_STATE compressor slots
+    state_slot_hca_ptr,  # i64 [B_max * q_len] — HCA_STATE compressor slots
+    swa_global_ptr,  # i32 [B_max * q_len * WINDOW] — SWA read slots
+    dswa_global_ptr,  # i32 [B_max * q_len * WINDOW] — DECODER_SWA read slots
+    decode_seq_start_ptr,  # i64 [B_max] — per-request first-token position
+    # ---- runtime ----
+    bs,
+    # ---- compile-time geometry ----
+    Q_LEN: tl.constexpr,
+    WINDOW: tl.constexpr,
+    BLOCK_W: tl.constexpr,  # >= WINDOW, power of 2
+    BLOCK_BT: tl.constexpr,  # block-table row tile (power of 2, >= max cols)
+    # per-pool: destination row stride and source row stride (elements)
+    DST_COLS_SWA: tl.constexpr,
+    SRC_COLS_SWA: tl.constexpr,
+    DST_COLS_CSA: tl.constexpr,
+    SRC_COLS_CSA: tl.constexpr,
+    DST_COLS_IDX: tl.constexpr,
+    SRC_COLS_IDX: tl.constexpr,
+    DST_COLS_HCA: tl.constexpr,
+    SRC_COLS_HCA: tl.constexpr,
+    DST_COLS_DSWA: tl.constexpr,
+    SRC_COLS_DSWA: tl.constexpr,
+    DST_COLS_CSTATE: tl.constexpr,
+    SRC_COLS_CSTATE: tl.constexpr,
+    DST_COLS_ISTATE: tl.constexpr,
+    SRC_COLS_ISTATE: tl.constexpr,
+    DST_COLS_HSTATE: tl.constexpr,
+    SRC_COLS_HSTATE: tl.constexpr,
+    # per-pool entries per block (E) and block-table token coverage
+    SWA_E: tl.constexpr,
+    SWA_TOKENS_PER_BLOCK: tl.constexpr,
+    CSA_E: tl.constexpr,
+    CSA_TOKENS_PER_BLOCK: tl.constexpr,
+    IDX_E: tl.constexpr,
+    IDX_TOKENS_PER_BLOCK: tl.constexpr,
+    HCA_E: tl.constexpr,
+    HCA_TOKENS_PER_BLOCK: tl.constexpr,
+    DSWA_E: tl.constexpr,
+    DSWA_TOKENS_PER_BLOCK: tl.constexpr,
+    # state pools: entries per block (E) and tokens per block
+    CSTATE_E: tl.constexpr,
+    CSTATE_TOKENS_PER_BLOCK: tl.constexpr,
+    ISTATE_E: tl.constexpr,
+    ISTATE_TOKENS_PER_BLOCK: tl.constexpr,
+    HSTATE_E: tl.constexpr,
+    HSTATE_TOKENS_PER_BLOCK: tl.constexpr,
+    # pool existence flags
+    HAS_SWA: tl.constexpr,
+    HAS_CSA: tl.constexpr,
+    HAS_IDX: tl.constexpr,
+    HAS_HCA: tl.constexpr,
+    HAS_DSWA: tl.constexpr,
+    HAS_CSTATE: tl.constexpr,
+    HAS_ISTATE: tl.constexpr,
+    HAS_HSTATE: tl.constexpr,
+):
+    r = tl.program_id(0)
+    q = tl.program_id(1)
+    if r >= bs:
+        return
+
+    sp = tl.load(start_pos_ptr + r)  # i32
+    out_rq = r * Q_LEN + q
+
+    # ===================== per-request row work (q == 0) =====================
+    if q == 0:
+        # Block-table snapshot for every present pool, replacing the aten loop
+        # ``dst[:n, :m].copy_(src[:n, :m]); dst[:n, m:].zero_()`` for the live
+        # rows: copy min(src_cols, dst_cols) columns and zero the destination
+        # tail of the row (load ``other=0`` + store mask). The aten loop's
+        # defensive ``dst[bs:].zero_()`` tail is intentionally not reproduced
+        # here: the captured graph reads only ``[:bs]`` rows, and the capture
+        # path (``capture_full_width_lengths=True``) keeps the eager loop.
+        k = tl.arange(0, BLOCK_BT)
+
+        if HAS_SWA:
+            keep = k < SRC_COLS_SWA
+            val = tl.load(src_bt_swa_ptr + r * SRC_COLS_SWA + k, mask=keep, other=0)
+            tl.store(dst_bt_swa_ptr + r * DST_COLS_SWA + k, val, mask=k < DST_COLS_SWA)
+        if HAS_CSA:
+            keep = k < SRC_COLS_CSA
+            val = tl.load(src_bt_csa_ptr + r * SRC_COLS_CSA + k, mask=keep, other=0)
+            tl.store(dst_bt_csa_ptr + r * DST_COLS_CSA + k, val, mask=k < DST_COLS_CSA)
+        if HAS_IDX:
+            keep = k < SRC_COLS_IDX
+            val = tl.load(src_bt_idx_ptr + r * SRC_COLS_IDX + k, mask=keep, other=0)
+            tl.store(dst_bt_idx_ptr + r * DST_COLS_IDX + k, val, mask=k < DST_COLS_IDX)
+        if HAS_HCA:
+            keep = k < SRC_COLS_HCA
+            val = tl.load(src_bt_hca_ptr + r * SRC_COLS_HCA + k, mask=keep, other=0)
+            tl.store(dst_bt_hca_ptr + r * DST_COLS_HCA + k, val, mask=k < DST_COLS_HCA)
+        if HAS_DSWA:
+            keep = k < SRC_COLS_DSWA
+            val = tl.load(src_bt_dswa_ptr + r * SRC_COLS_DSWA + k, mask=keep, other=0)
+            tl.store(
+                dst_bt_dswa_ptr + r * DST_COLS_DSWA + k, val, mask=k < DST_COLS_DSWA
+            )
+        if HAS_CSTATE:
+            keep = k < SRC_COLS_CSTATE
+            val = tl.load(
+                src_bt_cstate_ptr + r * SRC_COLS_CSTATE + k, mask=keep, other=0
+            )
+            tl.store(
+                dst_bt_cstate_ptr + r * DST_COLS_CSTATE + k,
+                val,
+                mask=k < DST_COLS_CSTATE,
+            )
+        if HAS_ISTATE:
+            keep = k < SRC_COLS_ISTATE
+            val = tl.load(
+                src_bt_istate_ptr + r * SRC_COLS_ISTATE + k, mask=keep, other=0
+            )
+            tl.store(
+                dst_bt_istate_ptr + r * DST_COLS_ISTATE + k,
+                val,
+                mask=k < DST_COLS_ISTATE,
+            )
+        if HAS_HSTATE:
+            keep = k < SRC_COLS_HSTATE
+            val = tl.load(
+                src_bt_hstate_ptr + r * SRC_COLS_HSTATE + k, mask=keep, other=0
+            )
+            tl.store(
+                dst_bt_hstate_ptr + r * DST_COLS_HSTATE + k,
+                val,
+                mask=k < DST_COLS_HSTATE,
+            )
+
+        # FlashMLA SWA effective length: clamp(start_pos + q_len, 0, WINDOW).
+        swa_len = sp + Q_LEN
+        swa_len = tl.minimum(tl.maximum(swa_len, 0), WINDOW)
+        tl.store(swa_topk_len_ptr + r, swa_len)
+        tl.store(decode_seq_start_ptr + r, sp.to(tl.int64))
+
+    # ===================== per-token work (every (r, q)) =====================
+    abs_pos = sp + q
+
+    # position_ids / position_ids_long: flat [B * q_len] request-major stream.
+    tl.store(position_ids_ptr + out_rq, abs_pos)
+    tl.store(position_ids_long_ptr + out_rq, abs_pos.to(tl.int64))
+
+    w = tl.arange(0, BLOCK_W)
+    w_i32 = w.to(tl.int32)
+    mask_w = w < WINDOW
+
+    # ---- SWA read slots: replaces translate_local_to_global_slots over
+    #      swa_abs_idx (tok = win_start + w, valid iff tok <= abs_pos;
+    #      slot = bt[r, tok // TPB] * E + tok % E; -1 otherwise/unallocated). ----
+    if HAS_SWA:
+        win_start = tl.maximum(abs_pos - WINDOW + 1, 0)
+        cand = win_start + w_i32
+        valid = (cand <= abs_pos) & mask_w
+        tok = tl.where(valid, cand, 0)
+        block = tok // SWA_TOKENS_PER_BLOCK
+        in_block = tok % SWA_E
+        block_ok = (block >= 0) & (block < SRC_COLS_SWA)
+        bid = tl.load(
+            src_bt_swa_ptr + r * SRC_COLS_SWA + block,
+            mask=mask_w & block_ok,
+            other=0,
+        )
+        slot = bid * SWA_E + in_block
+        slot = tl.where(valid & block_ok & (bid > 0), slot, -1).to(tl.int32)
+        tl.store(swa_global_ptr + out_rq * WINDOW + w, slot, mask=mask_w)
+
+    if HAS_DSWA:
+        win_start = tl.maximum(abs_pos - WINDOW + 1, 0)
+        cand = win_start + w_i32
+        valid = (cand <= abs_pos) & mask_w
+        tok = tl.where(valid, cand, 0)
+        block = tok // DSWA_TOKENS_PER_BLOCK
+        in_block = tok % DSWA_E
+        block_ok = (block >= 0) & (block < SRC_COLS_DSWA)
+        bid = tl.load(
+            src_bt_dswa_ptr + r * SRC_COLS_DSWA + block,
+            mask=mask_w & block_ok,
+            other=0,
+        )
+        slot = bid * DSWA_E + in_block
+        slot = tl.where(valid & block_ok & (bid > 0), slot, -1).to(tl.int32)
+        tl.store(dswa_global_ptr + out_rq * WINDOW + w, slot, mask=mask_w)
+
+    # ---- compressor STATE slots (int64), ``_compute_state_pool_slot_mapping``:
+    #      bis = (pos // tpb) % cols; slot = bt[r, bis] * E + pos % E,
+    #      -1 when the block id is unallocated (block<=0). Source tables for
+    #      the same cross-program visibility reason as the read slots. ----
+    if HAS_CSTATE:
+        bis = (abs_pos // CSTATE_TOKENS_PER_BLOCK) % SRC_COLS_CSTATE
+        in_blk = abs_pos % CSTATE_E
+        bid = tl.load(src_bt_cstate_ptr + r * SRC_COLS_CSTATE + bis)
+        slot = bid.to(tl.int64) * CSTATE_E + in_blk
+        slot = tl.where(bid > 0, slot, -1)
+        tl.store(state_slot_csa_ptr + out_rq, slot)
+    if HAS_ISTATE:
+        bis = (abs_pos // ISTATE_TOKENS_PER_BLOCK) % SRC_COLS_ISTATE
+        in_blk = abs_pos % ISTATE_E
+        bid = tl.load(src_bt_istate_ptr + r * SRC_COLS_ISTATE + bis)
+        slot = bid.to(tl.int64) * ISTATE_E + in_blk
+        slot = tl.where(bid > 0, slot, -1)
+        tl.store(state_slot_idx_ptr + out_rq, slot)
+    if HAS_HSTATE:
+        bis = (abs_pos // HSTATE_TOKENS_PER_BLOCK) % SRC_COLS_HSTATE
+        in_blk = abs_pos % HSTATE_E
+        bid = tl.load(src_bt_hstate_ptr + r * SRC_COLS_HSTATE + bis)
+        slot = bid.to(tl.int64) * HSTATE_E + in_blk
+        slot = tl.where(bid > 0, slot, -1)
+        tl.store(state_slot_hca_ptr + out_rq, slot)
+
+
+def fused_prepare_paged_metadata(
+    meta: Any,
+    start_pos: torch.Tensor,
+    bs: int,
+    paged_block_tables: Any,
+    paged_pool_entries_per_block: Any,
+    paged_pool_tokens_per_block: Any,
+) -> None:
+    """Fuse the paged-side in-place metadata update into ONE Triton launch.
+
+    Covers, with bit-identical index arithmetic to the replaced aten chain:
+      * per-pool block-table snapshot ``dst[:bs, :m] = src[:n, :m]`` with
+        destination column-tail zeroing (rows beyond ``bs`` are NOT written
+        here — the captured graph reads only ``[:bs]``; the eager fallback
+        keeps the aten loop's defensive row zeroing);
+      * ``position_ids`` / ``position_ids_long`` prefix fill;
+      * ``swa_topk_length`` (FlashMLA effective SWA length);
+      * compressor STATE slot mappings (int64) for CSA/INDEXER/HCA state pools;
+      * ``swa_global_slots`` and DECODER_SWA ``swa_global_slots`` translation
+        (the ``translate_local_to_global_slots`` over ``swa_abs_idx``).
+
+    Pool existence is controlled by HAS_* constexpr flags; absent pools are
+    compile-time eliminated. Requires all tensors on CUDA and contiguous
+    block-table rows (the framework mirrors are contiguous).
+    """
+    from rtp_llm.models_py.modules.dsv41.attn_type import (
+        CSA_KV,
+        CSA_STATE,
+        DECODER_SWA_KV,
+        HCA_KV,
+        HCA_STATE,
+        INDEXER_KV,
+        INDEXER_STATE,
+        SWA_KV,
+    )
+
+    pools = ("swa", "csa", "idx", "hca", "dswa", "cstate", "istate", "hstate")
+    tag_by_pool = {
+        "swa": SWA_KV,
+        "csa": CSA_KV,
+        "idx": INDEXER_KV,
+        "hca": HCA_KV,
+        "dswa": DECODER_SWA_KV,
+        "cstate": CSA_STATE,
+        "istate": INDEXER_STATE,
+        "hstate": HCA_STATE,
+    }
+
+    q_len = int(meta.q_len_per_req)
+    window_size = int(meta.window_size)
+
+    def _src(tag):
+        bt = paged_block_tables.get(tag) if paged_block_tables else None
+        return bt
+
+    def _dst(tag):
+        bt = meta.pool_block_tables.get(tag) if meta.pool_block_tables else None
+        return bt
+
+    def _usable(pool):
+        tag = tag_by_pool[pool]
+        src = _src(tag)
+        dst = _dst(tag)
+        if src is None or dst is None:
+            return False
+        return (
+            src.numel() > 0
+            and dst.numel() > 0
+            and src.dtype == torch.int32
+            and dst.dtype == torch.int32
+            and src.is_contiguous()
+            and dst.is_contiguous()
+            and int(src.shape[0]) >= int(bs)
+        )
+
+    # A pool participates when the metadata owns a destination buffer AND the
+    # framework supplied a source block table for it.
+    present = {pool: _usable(pool) for pool in pools}
+
+    # STATE slot outputs only exist for state pools that the metadata owns.
+    state_slot_by_pool = {
+        "cstate": meta.compressor_state_slot_mappings.get(CSA_STATE),
+        "istate": meta.compressor_state_slot_mappings.get(INDEXER_STATE),
+        "hstate": meta.compressor_state_slot_mappings.get(HCA_STATE),
+    }
+    for pool, slot in state_slot_by_pool.items():
+        if slot is None:
+            present[pool] = False
+
+    # Read-slot outputs (SWA / DECODER_SWA global slots) may be absent on
+    # warmup/SWA-only configurations; drop those pools to keep the eager
+    # fallback path semantics.
+    if meta.swa_global_slots is None or not meta.swa_global_slots.is_contiguous():
+        present["swa"] = False
+    decoder_meta = getattr(meta, "decoder_swa_metadata", None)
+    if decoder_meta is None or not decoder_meta.swa_global_slots.is_contiguous():
+        present["dswa"] = False
+    if meta.swa_topk_length is None:
+        # No FlashMLA length buffer: leave the whole update to the caller's
+        # aten path (never happens for the production FP8 graph path).
+        return False
+    for pool, slot in state_slot_by_pool.items():
+        if present[pool] and not slot.is_contiguous():
+            present[pool] = False
+    if not (
+        meta.position_ids.is_contiguous()
+        and meta.position_ids_long.is_contiguous()
+        and meta.swa_topk_length.is_contiguous()
+        and start_pos.is_contiguous()
+        and start_pos.dtype == torch.int32
+    ):
+        return False
+    if meta.decode_seq_start_per_req is not None and (
+        not meta.decode_seq_start_per_req.is_contiguous()
+    ):
+        return False
+
+    if not any(present.values()):
+        return False
+
+    def _cols(pool, side):
+        tag = tag_by_pool[pool]
+        t = _src(tag) if side == "src" else _dst(tag)
+        return int(t.shape[1])
+
+    def _dummy():
+        # Absent pools need a valid pointer; reuse the first present table.
+        for pool in pools:
+            if present[pool]:
+                return _dst(tag_by_pool[pool])
+        return None
+
+    dummy = _dummy()
+
+    def _bt(pool, side):
+        tag = tag_by_pool[pool]
+        if present[pool]:
+            return _src(tag) if side == "src" else _dst(tag)
+        return dummy
+
+    def _e(pool):
+        tag = tag_by_pool[pool]
+        if tag in paged_pool_entries_per_block:
+            return int(paged_pool_entries_per_block[tag])
+        return 1
+
+    def _tpb(pool):
+        tag = tag_by_pool[pool]
+        if paged_pool_tokens_per_block and tag in paged_pool_tokens_per_block:
+            return int(paged_pool_tokens_per_block[tag])
+        # Fall back to entries (E) — physical pools index at E granularity.
+        return _e(pool)
+
+    max_cols = 1
+    for pool in pools:
+        if present[pool]:
+            max_cols = max(max_cols, _cols(pool, "dst"), _cols(pool, "src"))
+    BLOCK_BT = _next_pow2(max_cols)
+    BLOCK_W = _next_pow2(window_size)
+
+    decoder_slots = (
+        decoder_meta.swa_global_slots
+        if present["dswa"]
+        else _int32_slots_dummy(meta)
+    )
+    swa_slots = meta.swa_global_slots if present["swa"] else _int32_slots_dummy(meta)
+
+    grid = (bs, q_len)
+    _fused_prepare_paged_meta_kernel[grid](
+        start_pos,
+        *(_bt(p, "src") for p in pools),
+        *(_bt(p, "dst") for p in pools),
+        meta.position_ids,
+        meta.position_ids_long,
+        meta.swa_topk_length,
+        state_slot_by_pool["cstate"] if present["cstate"] else _int64_dummy(meta),
+        state_slot_by_pool["istate"] if present["istate"] else _int64_dummy(meta),
+        state_slot_by_pool["hstate"] if present["hstate"] else _int64_dummy(meta),
+        swa_slots,
+        decoder_slots,
+        (
+            meta.decode_seq_start_per_req
+            if meta.decode_seq_start_per_req is not None
+            else _int64_dummy(meta)
+        ),
+        bs,
+        Q_LEN=q_len,
+        WINDOW=window_size,
+        BLOCK_W=BLOCK_W,
+        BLOCK_BT=BLOCK_BT,
+        DST_COLS_SWA=(_cols("swa", "dst") if present["swa"] else 1),
+        SRC_COLS_SWA=(_cols("swa", "src") if present["swa"] else 1),
+        DST_COLS_CSA=(_cols("csa", "dst") if present["csa"] else 1),
+        SRC_COLS_CSA=(_cols("csa", "src") if present["csa"] else 1),
+        DST_COLS_IDX=(_cols("idx", "dst") if present["idx"] else 1),
+        SRC_COLS_IDX=(_cols("idx", "src") if present["idx"] else 1),
+        DST_COLS_HCA=(_cols("hca", "dst") if present["hca"] else 1),
+        SRC_COLS_HCA=(_cols("hca", "src") if present["hca"] else 1),
+        DST_COLS_DSWA=(_cols("dswa", "dst") if present["dswa"] else 1),
+        SRC_COLS_DSWA=(_cols("dswa", "src") if present["dswa"] else 1),
+        DST_COLS_CSTATE=(_cols("cstate", "dst") if present["cstate"] else 1),
+        SRC_COLS_CSTATE=(_cols("cstate", "src") if present["cstate"] else 1),
+        DST_COLS_ISTATE=(_cols("istate", "dst") if present["istate"] else 1),
+        SRC_COLS_ISTATE=(_cols("istate", "src") if present["istate"] else 1),
+        DST_COLS_HSTATE=(_cols("hstate", "dst") if present["hstate"] else 1),
+        SRC_COLS_HSTATE=(_cols("hstate", "src") if present["hstate"] else 1),
+        SWA_E=_e("swa"),
+        SWA_TOKENS_PER_BLOCK=_tpb("swa"),
+        CSA_E=_e("csa"),
+        CSA_TOKENS_PER_BLOCK=_tpb("csa"),
+        IDX_E=_e("idx"),
+        IDX_TOKENS_PER_BLOCK=_tpb("idx"),
+        HCA_E=_e("hca"),
+        HCA_TOKENS_PER_BLOCK=_tpb("hca"),
+        DSWA_E=_e("dswa"),
+        DSWA_TOKENS_PER_BLOCK=_tpb("dswa"),
+        CSTATE_E=_e("cstate"),
+        CSTATE_TOKENS_PER_BLOCK=_tpb("cstate"),
+        ISTATE_E=_e("istate"),
+        ISTATE_TOKENS_PER_BLOCK=_tpb("istate"),
+        HSTATE_E=_e("hstate"),
+        HSTATE_TOKENS_PER_BLOCK=_tpb("hstate"),
+        HAS_SWA=present["swa"],
+        HAS_CSA=present["csa"],
+        HAS_IDX=present["idx"],
+        HAS_HCA=present["hca"],
+        HAS_DSWA=present["dswa"],
+        HAS_CSTATE=present["cstate"],
+        HAS_ISTATE=present["istate"],
+        HAS_HSTATE=present["hstate"],
+    )
+    return True
+
+def _int64_dummy(meta: Any) -> torch.Tensor:
+    """Stable int64 buffer used as a no-op sink for absent STATE pools."""
+    dummy = getattr(meta, "_fused_paged_int64_dummy", None)
+    if dummy is None or dummy.device != meta.start_pos.device:
+        dummy = torch.zeros(
+            int(meta.start_pos.shape[0]) * int(meta.q_len_per_req) + 1,
+            dtype=torch.int64,
+            device=meta.start_pos.device,
+        )
+        meta._fused_paged_int64_dummy = dummy
+    return dummy
+
+def _int32_slots_dummy(meta: Any) -> torch.Tensor:
+    """Stable int32 [T_max, WINDOW] buffer used as a no-op read-slot sink."""
+    dummy = getattr(meta, "_fused_paged_int32_dummy", None)
+    want = (
+        int(meta.start_pos.shape[0]) * int(meta.q_len_per_req) * int(meta.window_size)
+        + 1
+    )
+    if dummy is None or dummy.device != meta.start_pos.device or dummy.numel() < want:
+        dummy = torch.zeros(want, dtype=torch.int32, device=meta.start_pos.device)
+        meta._fused_paged_int32_dummy = dummy
