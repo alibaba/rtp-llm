@@ -3,12 +3,12 @@
 # CUDA 13.2 / torch 2.11+cu130 / triton 3.6.0 dep set.
 # Includes official DeepEP main@a56d6156 built against NCCL 2.30.4 and
 # NVSHMEM 3.5.19, plus the RTP FlashInfer 0.6.9 CUDA 13.2 wheels.
-# FlashAttention 3 and nvidia_cutlass_dsl remain deferred.
+# FlashAttention 3 remains deferred.
 
 # Core torch stack — wheels mirrored to OSS by us; upstream is
 # https://download.pytorch.org/whl/cu130/.
-https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl
-https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/torchvision-0.26.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl
+https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/miji/0430/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl
+https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/miji/0430/torchvision-0.26.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl
 nvidia-nccl-cu13==2.30.4
 nvidia-nvshmem-cu13==3.5.19
 nvidia-cuda-cccl==13.2.86
@@ -50,8 +50,8 @@ http://artlab.alibaba-inc.com/1/pypi/rtp_llm/rtp-kernel/rtp_kernel-0.1.0%2B94fd2
 # (originals were torch 2.1.2 + cu121).  Project name is `fast-safetensors`
 # on PyPI but the import is `fast_safetensors`; both wheels installed.
 # Required by --load_method fastsafetensors smoke targets.
-https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/0507/fast_safetensors-0.7.3%2Btorch2.11.cu130-cp310-cp310-linux_x86_64.whl
-https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/0502/fastsafetensors-0.1.20%2Bali-cp310-cp310-linux_x86_64.whl
+https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/0507/fast_safetensors-0.7.3%2Btorch2.11.cu130-cp310-cp310-linux_x86_64.whl
+https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/0502/fastsafetensors-0.1.20%2Bali-cp310-cp310-linux_x86_64.whl
 # fast_safetensors rebuilt against torch 2.11+cu130.
 
 # Pin safetensors and tabulate for parity with cu12_9 lock.
@@ -69,3 +69,10 @@ tabulate==0.9.0
 
 # TileLang 0.1.15 TVM FFI ABI.
 apache-tvm-ffi==0.1.12
+
+# CUDA13 runtime kernels; keep these aligned with whl_deps().
+quack-kernels @ https://github.com/Dao-AILab/quack/archive/77a750c0d9548d4a6e23c0f64062d61b3ea420ff.tar.gz#sha256=ebc940da966e88a05be318c3dc3f650a7359a281642f8f2f77c28ba4e9affa05
+flash-attn-4 @ https://files.pythonhosted.org/packages/44/1c/7ee1a5949e9b275eb62017d6fcc70e385db161b5341b686a29beb94ea181/flash_attn_4-4.0.0b21-py3-none-any.whl#sha256=8ad0cdd22b279ef2ca8b4e43a4fb33b7dc78936d36c41788bad9d67372056949
+nvidia-cutlass-dsl==4.7.1
+nvidia-cutlass-dsl-libs-base==4.7.1
+torch-c-dlpack-ext==0.1.5

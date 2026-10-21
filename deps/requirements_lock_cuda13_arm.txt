@@ -199,7 +199,9 @@ apache-tvm-ffi==0.1.12 \
     --hash=sha256:f69d28a95648c4e864a53f1bfe099b7547dfbc60d520180fc0eb0ec72245151f
     # via
     #   -r deps/requirements_cuda13_arm.txt
+    #   flash-attn-4
     #   flashinfer-python
+    #   quack-kernels
     #   tilelang
     #   xgrammar
 async-timeout==5.0.1 \
@@ -220,7 +222,11 @@ audioread==3.1.0 \
 backports-strenum==1.3.1 \
     --hash=sha256:77c52407342898497714f0596e86188bb7084f89063226f4ba66863482f42414 \
     --hash=sha256:cdcfe36dc897e2615dc793b7d3097f54d359918fc448754a517e6f23044ccf83
-    # via cuda-core
+    # via
+    #   cuda-core
+    #   nvidia-cutlass-dsl-libs-base
+    #   nvidia-cutlass-dsl-libs-core
+    #   nvidia-cutlass-dsl-libs-cu12
 bitsandbytes==0.49.2 \
     --hash=sha256:2e0ddd09cd778155388023cbe81f00afbb7c000c214caef3ce83386e7144df7d \
     --hash=sha256:2fc0830c5f7169be36e60e11f2be067c8f812dfcb829801a8703735842450750 \
@@ -605,7 +611,10 @@ cuda-pathfinder==1.6.0 \
     #   cuda-python
 cuda-python==13.3.1 \
     --hash=sha256:280b014139ab447b6dd70a377db1596f310d6e887d9d342e6651b919ec145fb3
-    # via nvidia-cutlass-dsl-libs-base
+    # via
+    #   nvidia-cutlass-dsl-libs-base
+    #   nvidia-cutlass-dsl-libs-core
+    #   nvidia-cutlass-dsl-libs-cu12
 cuda-tile==1.5.0 \
     --hash=sha256:1088a3ebb5622c24ec32034d0d451bab9c1b85ae67fcdc647464951ec1d1b6ad \
     --hash=sha256:16d97a60ed1d33388abbca85ea08cdae6325cc700476b3135f190d0fb50329f4 \
@@ -659,7 +668,9 @@ einops==0.8.2 \
     --hash=sha256:609da665570e5e265e27283aab09e7f279ade90c4f01bcfca111f3d3e13f2827
     # via
     #   -r deps/requirements_base.txt
+    #   flash-attn-4
     #   flashinfer-python
+    #   quack-kernels
 exceptiongroup==1.3.1 \
     --hash=sha256:8b412432c6055b0b7d14c310000ae93352ed6754f70fa8f7c34141f91c4e3219 \
     --hash=sha256:a7a39a3bd276781e98394987d3a5701d0c4edffb633bb7a5144577f82c773598
@@ -682,6 +693,9 @@ filelock==3.32.0 \
     #   blobfile
     #   huggingface-hub
     #   torch
+flash-attn-4 @ https://files.pythonhosted.org/packages/44/1c/7ee1a5949e9b275eb62017d6fcc70e385db161b5341b686a29beb94ea181/flash_attn_4-4.0.0b21-py3-none-any.whl#sha256=8ad0cdd22b279ef2ca8b4e43a4fb33b7dc78936d36c41788bad9d67372056949 \
+    --hash=sha256:8ad0cdd22b279ef2ca8b4e43a4fb33b7dc78936d36c41788bad9d67372056949
+    # via -r deps/requirements_cuda13_arm.txt
 flash-mla @ https://search-ad.oss-cn-hangzhou-zmf-internal.aliyuncs.com/rtp-llm-deps/dsv41/20261009/flash_mla-1.0.0%2B2e5429f-cp310-cp310-linux_aarch64.whl \
     --hash=sha256:4e729f23823e02ef95e5c94a1d41b9031e8e4b00682f0c44392f480fed15899e
     # via -r deps/requirements_cuda13_arm.txt
@@ -2130,6 +2144,8 @@ numpy==1.26.4 \
     #   ml-dtypes
     #   numba
     #   nvidia-cutlass-dsl-libs-base
+    #   nvidia-cutlass-dsl-libs-core
+    #   nvidia-cutlass-dsl-libs-cu12
     #   onnx
     #   scikit-learn
     #   scipy
@@ -2158,6 +2174,15 @@ nvidia-cuda-cupti==13.0.85 \
     --hash=sha256:683f58d301548deeefcb8f6fac1b8d907691b9d8b18eccab417f51e362102f00 \
     --hash=sha256:796bd679890ee55fb14a94629b698b6db54bcfd833d391d5e94017dd9d7d3151
     # via cuda-toolkit
+nvidia-cuda-nvdisasm==13.4.92 \
+    --hash=sha256:600c43bde6b323be4d950e33a248aa97ff9cdea28a4b7dae083680f092bdd230 \
+    --hash=sha256:624a3406572a983079edce35284cc5b6b1a3f23b02a62057b49a79be33d76252 \
+    --hash=sha256:b007c08c8248b29281ed9a174b478d557b58ea8a921ab78369a2843f0718f77d \
+    --hash=sha256:f35a5b6ddb64b6758c22c0b078c5b6ff6d54f7c240cd74bf131ab5bf13b6c3fe
+    # via
+    #   nvidia-cutlass-dsl-libs-base
+    #   nvidia-cutlass-dsl-libs-core
+    #   nvidia-cutlass-dsl-libs-cu12
 nvidia-cuda-nvrtc==13.0.88 \
     --hash=sha256:6bcd4e7f8e205cbe644f5a98f2f799bef9556fefc89dd786e79a16312ce49872 \
     --hash=sha256:ad9b6d2ead2435f11cbb6868809d2adeeee302e9bb94bcf0539c7a40d80e8575 \
@@ -2227,22 +2252,47 @@ nvidia-cusparselt-cu13==0.8.0 \
     --hash=sha256:400c6ed1cf6780fc6efedd64ec9f1345871767e6a1a0a552a1ea0578117ea77c \
     --hash=sha256:e80212ed7b1afc97102fbb2b5c82487aa73f6a0edfa6d26c5a152593e520bb8f
     # via torch
-nvidia-cutlass-dsl==4.5.3 \
-    --hash=sha256:c14ca121c2a4ce53ca4d5ee5d939e4181b97054b55ea7bb84aa9f99b98960060
-    # via flashinfer-python
-nvidia-cutlass-dsl-libs-base==4.5.3 \
-    --hash=sha256:1bea2f2e5312a97a850be4bfe73ab0689861fa6f81888ad2abe47172f96afd1d \
-    --hash=sha256:224ceed6db71b632b318c19bea52f1d0efdafc321dbe4159a7508f93abe8c694 \
-    --hash=sha256:5516d76454f04f381111187b180bfa8651b4829e169b8283eeac8e794285d529 \
-    --hash=sha256:5d29ff10d723f4525da8777ba668b107a0879b895fe2a11f1d60b555ec0a1c7c \
-    --hash=sha256:83070630bd0bab18a2fd4ef3c57632e11628c0e930fbf2aa070a3509a32a1079 \
-    --hash=sha256:acf61f778e1c26326407bb5aa2e92a236e0abe9a41abf2ae71222d90593f4b1d \
-    --hash=sha256:b36ba3ae4d5d9b0b1dc55f47d1939d2d4262d8eaad188aa675e366d4c58011cc \
-    --hash=sha256:b5b5229c4ac9508b5f5554de62f35cfa162dadbd806a3dad4affb34775eb2a89 \
-    --hash=sha256:d0e524fc5fe8901479571af6d4b8fcf14277cc2c61b791b287a7762e6c9f7a90 \
-    --hash=sha256:ef820069ee6fa79832a30efd3ba99f6bf289cf48a942f78119361710f3c0e0d1 \
-    --hash=sha256:f788a83c4c6f62bca9ba01fced55b8899663cdd61eac0fea09e8aa8e1a5b4294 \
-    --hash=sha256:feab418814e6973c57ca64b021e9147002d4fb13c9c745d390d232435991d8de
+nvidia-cutlass-dsl==4.7.1 \
+    --hash=sha256:765850c74868a0b5a02fefbfc1b380842b64e5f7a1c8b1655e322a3b14c01726
+    # via
+    #   --override deps/requirements_cuda13_overrides.txt
+    #   -r deps/requirements_cuda13_arm.txt
+    #   flash-attn-4
+    #   flashinfer-python
+    #   quack-kernels
+nvidia-cutlass-dsl-libs-base==4.7.1 \
+    --hash=sha256:06658e691eb1047c83be48ba501bf73f2ea7ecdd8c1ee5f9f26db587908e43ed \
+    --hash=sha256:0776506f666e1c6834a8a9195ef20299733ae013d234726829565be5d8509942 \
+    --hash=sha256:094579fb7700336a8d7e532c154777e99f1bbd5f54ec82cb9537a3584add9fe8 \
+    --hash=sha256:115608a7a514309e5a8448c6421a8597217c58760a3cadf2b781b37dd7c4d821 \
+    --hash=sha256:298e73ad0f1b0484e4b8438e9daae38732a6cadc9f4023475e5b0c2868985aba \
+    --hash=sha256:36192b4d0f72c4f47b39def20f4fda71058005617b7204395570768827524982 \
+    --hash=sha256:431e3648b84ad4a81a8d3b1fa7e445326cb5a524e64f6c22b4d191a76455bdf9 \
+    --hash=sha256:61097c5c355e1e42f8531efd4e8ead0ba61ae1ab6b0b9acfcbf2ca665b3dae5a \
+    --hash=sha256:93880e666f17513d5878f3b2ee76e9177a0acd59673dd27cb2c34dbdf5fe89f0 \
+    --hash=sha256:c2b67dacabfc905e4d132784fe4848647f40b0b97b1cdde3ce4a482642536b84 \
+    --hash=sha256:d01420777ac1ff22ee0c7842b6779fa58271b37c9a57cbd0bfff3eea932d35c7 \
+    --hash=sha256:e86c55a5010a7edfc067648a75cb29d0c5bd67d75210168cf507b0d0e4d15ba7
+    # via
+    #   -r deps/requirements_cuda13_arm.txt
+    #   nvidia-cutlass-dsl
+    #   nvidia-cutlass-dsl-libs-cu12
+nvidia-cutlass-dsl-libs-core==4.7.1 \
+    --hash=sha256:c65662abc9ab18fd997c57547895736928e559f4624bbe2aa1aa91418ea014ca
+    # via nvidia-cutlass-dsl-libs-base
+nvidia-cutlass-dsl-libs-cu12==4.7.1 \
+    --hash=sha256:06f53df4ada14043b459993a6dc469d0505ad9a144d101b5f40461a58a8e80e3 \
+    --hash=sha256:10f98e415188e582a0159ed1bb375f4f18e5652bac286621e4362c0ad51ee845 \
+    --hash=sha256:49d556f2be188d75810fa8c547ad15dba40685138ac27d5441844182ac4955a9 \
+    --hash=sha256:5c1087e1d514b4afcaea9296e5f19c8e678aba93ee485e56f681fa7169e7a861 \
+    --hash=sha256:77684a86191195b2d6eb5f7088bb9bf25e45db58ceb44a9c02ffb0787bb95fb9 \
+    --hash=sha256:94e6da2629a3182f5b5810af22021d0e36d1ccf323bb8c93e71f1267ca7f82a4 \
+    --hash=sha256:b34a933cde1e5cf2df1f3cfd78efbd5484ea33dd0c97be201c057e168af79c10 \
+    --hash=sha256:c8a0f93a1cde41404696b3194dd1f589c6f3a7b426bcabe97845f8fe96f949f5 \
+    --hash=sha256:d3708b78b9b70dc1b29c9a48a7030d14a1a8c17b52f3f2d088db3d73c603bec8 \
+    --hash=sha256:f37fcbd94aad66b016dcea483db50ddb0fcaab7130c538df20ef29ddeeb8ba85 \
+    --hash=sha256:f57a3955c17b7dcd5472aa47c46513e5f3914e1325fc308afca1b9063a8f897b \
+    --hash=sha256:f5ab528aeb4548261fab7f393f2d119909f792c7165c986e98479ce2345a125d
     # via nvidia-cutlass-dsl
 nvidia-ml-py==13.610.43 \
     --hash=sha256:65437eb73d68d0c62c931ca4d45038472faff03bd0b8729abba4b899f70d60f2 \
@@ -2789,6 +2839,9 @@ protobuf==4.25.0 \
     # via
     #   -r deps/requirements_base.txt
     #   grpcio-tools
+    #   nvidia-cutlass-dsl-libs-base
+    #   nvidia-cutlass-dsl-libs-core
+    #   nvidia-cutlass-dsl-libs-cu12
     #   onnx
 psutil==7.2.2 \
     --hash=sha256:0746f5f8d406af344fd547f1c8daa5f5c33dbc293bb8d6a16d80b4bb88f59372 \
@@ -3248,6 +3301,11 @@ pyyaml==6.0.3 \
     #   huggingface-hub
     #   timm
     #   transformers
+quack-kernels @ https://github.com/Dao-AILab/quack/archive/77a750c0d9548d4a6e23c0f64062d61b3ea420ff.tar.gz#sha256=ebc940da966e88a05be318c3dc3f650a7359a281642f8f2f77c28ba4e9affa05 \
+    --hash=sha256:ebc940da966e88a05be318c3dc3f650a7359a281642f8f2f77c28ba4e9affa05
+    # via
+    #   -r deps/requirements_cuda13_arm.txt
+    #   flash-attn-4
 referencing==0.37.0 \
     --hash=sha256:381329a9f99628c9069361716891d34ad94af76e461dcb0335825aecc7692231 \
     --hash=sha256:44aefc3142c5b842538163acb373e24cce6632bd54bdb01b21ad5863489f50d8
@@ -3983,7 +4041,9 @@ torch @ https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/rtp_llm/arm_pkg/torch-2
     #   -r deps/requirements_cuda13_arm.txt
     #   bitsandbytes
     #   fast-safetensors
+    #   flash-attn-4
     #   flashinfer-python
+    #   quack-kernels
     #   rtp-kernel
     #   sentence-transformers
     #   tile-kernels
@@ -4018,7 +4078,10 @@ torch-c-dlpack-ext==0.1.5 \
     --hash=sha256:e0f6c197d5293884898b9ebf13d07501de39cb94799b374ed43f91731087d557 \
     --hash=sha256:e6f9da4bb9af70e27facc777458be62e10dbbbddda7672d16138db0553c5a524 \
     --hash=sha256:fba674110e1fab0b176bb5a28223e157db65c90767d4ba74abdbee9f537b0e9d
-    # via tilelang
+    # via
+    #   -r deps/requirements_cuda13_arm.txt
+    #   flash-attn-4
+    #   tilelang
 torchvision @ https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/rtp_llm/arm_pkg/torchvision-0.26.0%2Bcu130-cp310-cp310-manylinux_2_28_aarch64.whl \
     --hash=sha256:3094bed175eee817f9fc61d1c8bdecb1d807c25f49517fbfe60f15d24135fcde
     # via
@@ -4081,10 +4144,13 @@ typing-extensions==4.16.0 \
     #   cuda-tile
     #   exceptiongroup
     #   fastapi
+    #   flash-attn-4
     #   huggingface-hub
     #   librosa
     #   multidict
     #   nvidia-cutlass-dsl-libs-base
+    #   nvidia-cutlass-dsl-libs-core
+    #   nvidia-cutlass-dsl-libs-cu12
     #   openai
     #   pydantic
     #   pydantic-core

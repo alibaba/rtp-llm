@@ -26,6 +26,17 @@ _DSV4_PLATFORM_ONLY = ["xgrammar"]
 
 def requirement(names):
     for name in names:
+        if name in ("quack-kernels", "flash-attn-4"):
+            native.py_library(
+                name = name,
+                deps = select({
+                    "@rtp_llm//:using_cuda13_x86": [requirement_gpu_cuda13(name)],
+                    "@rtp_llm//:using_cuda13_arm": [requirement_cuda13_arm(name)],
+                    "//conditions:default": [],
+                }),
+                visibility = ["//visibility:public"],
+            )
+            continue
         if name == "flash-mla-legacy":
             native.py_library(
                 name = name,
@@ -93,6 +104,11 @@ def subscribe_deps():
 def whl_deps():
     return select({
         "@rtp_llm//:using_cuda13_x86": [
+            "quack-kernels @ https://github.com/Dao-AILab/quack/archive/77a750c0d9548d4a6e23c0f64062d61b3ea420ff.tar.gz#sha256=ebc940da966e88a05be318c3dc3f650a7359a281642f8f2f77c28ba4e9affa05",
+            "flash-attn-4 @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/rtp_kernel_260612/flash_attn_4-4.0.0b21-py3-none-any.whl#sha256=8ad0cdd22b279ef2ca8b4e43a4fb33b7dc78936d36c41788bad9d67372056949",
+            "nvidia-cutlass-dsl==4.7.1",
+            "nvidia-cutlass-dsl-libs-base==4.7.1",
+            "torch-c-dlpack-ext==0.1.5",
             "torch@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl",
             "torchvision@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/torchvision-0.26.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl",
             # Keep wheel metadata aligned with the CUDA13 dependency lock.
@@ -110,6 +126,11 @@ def whl_deps():
             "apache-tvm-ffi==0.1.12",
         ],
         "@rtp_llm//:using_cuda13_arm": [
+            "quack-kernels @ https://github.com/Dao-AILab/quack/archive/77a750c0d9548d4a6e23c0f64062d61b3ea420ff.tar.gz#sha256=ebc940da966e88a05be318c3dc3f650a7359a281642f8f2f77c28ba4e9affa05",
+            "flash-attn-4 @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/rtp_kernel_260612/flash_attn_4-4.0.0b21-py3-none-any.whl#sha256=8ad0cdd22b279ef2ca8b4e43a4fb33b7dc78936d36c41788bad9d67372056949",
+            "nvidia-cutlass-dsl==4.7.1",
+            "nvidia-cutlass-dsl-libs-base==4.7.1",
+            "torch-c-dlpack-ext==0.1.5",
             "torch@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/arm_pkg/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_aarch64.whl",
             "torchvision@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/arm_pkg/torchvision-0.26.0%2Bcu130-cp310-cp310-manylinux_2_28_aarch64.whl",
             "deep_gemm@http://artlab.alibaba-inc.com/1/pypi/rtp_llm/deep_gemm/deep_gemm-2.8.2%2Bad62a90.cu132-cp310-cp310-linux_aarch64.whl",

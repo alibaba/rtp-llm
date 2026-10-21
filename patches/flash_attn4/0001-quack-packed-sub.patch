@@ -1,0 +1,21 @@
+diff --git a/flash_attn/cute/utils.py b/flash_attn/cute/utils.py
+--- a/flash_attn/cute/utils.py
++++ b/flash_attn/cute/utils.py
+@@ -770,7 +770,7 @@
+-    xy_rounded_back = quack.activation.sub_packed_f32x2(
++    xy_rounded_back = cute.arch.sub_packed_f32x2(
+         xy_rounded, (fp32_round_int, fp32_round_int)
+     )
+-    xy_frac = quack.activation.sub_packed_f32x2(xy_clamped, xy_rounded_back)
++    xy_frac = cute.arch.sub_packed_f32x2(xy_clamped, xy_rounded_back)
+     xy_frac_ex2 = evaluate_polynomial_2(*xy_frac, POLY_EX2[poly_degree], loc=loc, ip=ip)
+     x_out = combine_int_frac_ex2(xy_rounded[0], xy_frac_ex2[0], loc=loc, ip=ip)
+     y_out = combine_int_frac_ex2(xy_rounded[1], xy_frac_ex2[1], loc=loc, ip=ip)
+diff --git a/flash_attn/cute/flash_bwd_sm100.py b/flash_attn/cute/flash_bwd_sm100.py
+--- a/flash_attn/cute/flash_bwd_sm100.py
++++ b/flash_attn/cute/flash_bwd_sm100.py
+@@ -3190,3 +3190,3 @@
+-                            quack.activation.sub_packed_f32x2(
++                            cute.arch.sub_packed_f32x2(
+                                 (tdPrdP_cur[2 * v], tdPrdP_cur[2 * v + 1]), dPsum_pair
+                             )
