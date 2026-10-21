@@ -13,6 +13,11 @@ from rtp_llm.models_py.modules.dsv4.v41_mxfp8 import quantize_group32
 
 
 def _validate_routes(weights, indices, valid_rows, experts):
+    if weights.device.type == "cuda":
+        from ._v41_routes_triton import can_validate_routes, validate_routes
+
+        if can_validate_routes(weights, indices, valid_rows, experts):
+            return validate_routes(weights, indices, valid_rows, experts)
     legal_weights = (
         ~valid_rows[:, None] | (torch.isfinite(weights) & (weights >= 0))
     ).all()

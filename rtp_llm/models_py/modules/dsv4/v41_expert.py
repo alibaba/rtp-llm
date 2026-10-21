@@ -145,6 +145,14 @@ def quantize_swiglu(
         raise ValueError(
             "V4.1 SwiGLU quantization requires explicit CPU eager or CUDA Triton"
         )
+    if gate.device.type == "cuda":
+        from ._v41_expert_activation_triton import can_quantize_swiglu, quantize_swiglu_rows
+
+        if can_quantize_swiglu(gate, up, valid_rows, route_weights, clamp_limit, backend):
+            return quantize_swiglu_rows(
+                gate, up, valid_rows, route_weights=route_weights,
+                clamp_limit=clamp_limit, backend=backend,
+            )
     intermediate = swiglu_bf16(
         gate, up, valid_rows, route_weights=route_weights, clamp_limit=clamp_limit
     )

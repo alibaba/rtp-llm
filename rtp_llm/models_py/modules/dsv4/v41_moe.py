@@ -275,16 +275,33 @@ class V41LocalMoE(nn.Module):
                 routed_x[:allocated].view(x.dtype).view(experts, capacity, dim),
                 counts[:experts].to(torch.int32),
                 routed_weights[:allocated].view(experts, capacity),
+                expected_m=min(
+                    capacity, max(1, (rows * topk + experts - 1) // experts)
+                ),
                 input_scales=routed_scales,
+                # The ordered gather reads only nonzero routes in owned prefixes.
+                _mask_result=not (
+                    x.is_cuda
+                    and torch.cuda.get_device_capability(x.device) == (12, 0)
+                    and 0 < rows <= 128
+                    and 0 < topk <= 32
+                    and self.experts.backend == "deepgemm"
+                ),
             ).reshape(allocated, dim)
         # The expert already applied weights before its BF16/down-input rounding.
         # Accumulate in expert-ID order and FP32, as the checkpoint loop does.
+        route_map = route_map.reshape(rows, topk)
+        route_map = route_map.gather(1, keys.argsort(dim=-1, stable=True))
+        if layout == "masked" and x.is_cuda:
+            from ._v41_moe_combine_triton import combine_ordered_rows
+
+            combined = combine_ordered_rows(down, route_map)
+            if combined is not None:
+                return combined
         output = torch.zeros((rows, dim), device=x.device, dtype=torch.float32)
         down = torch.cat(
             (down, torch.zeros((1, dim), device=x.device, dtype=down.dtype))
         )
-        route_map = route_map.reshape(rows, topk)
-        route_map = route_map.gather(1, keys.argsort(dim=-1, stable=True))
         for slot in range(topk):
             destination = torch.where(
                 route_map[:, slot] >= 0, route_map[:, slot], allocated

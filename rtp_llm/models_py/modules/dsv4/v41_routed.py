@@ -198,7 +198,18 @@ class V41RoutedExperts(nn.Module):
                     "V4.1 routed output must not share input or weight storage"
                 )
 
-    def _run(self, x, valid, route_weights, key, gemm, *, out, input_scales):
+    def _run(
+        self,
+        x,
+        valid,
+        route_weights,
+        key,
+        gemm,
+        *,
+        out,
+        input_scales,
+        _mask_result=True
+    ):
         active = _check_rows(valid.shape, self.device, valid, route_weights)
         key = (*key, "bf16" if input_scales is None else "received_fp8")
         context = (
@@ -239,13 +250,22 @@ class V41RoutedExperts(nn.Module):
             )
             scales = scales.reshape(*valid.shape, self.inter_dim // 32)
             result = gemm(values, scales, self.w2, self.s2, self._packed_s2)
-            result = torch.where(active[..., None], result, 0)
+            if _mask_result:
+                result = torch.where(active[..., None], result, 0)
             if not capturing:
                 self._warmed.add(key)
             return result if out is None else out.copy_(result)
 
     def forward_masked(
-        self, x, counts, route_weights, *, expected_m=None, out=None, input_scales=None
+        self,
+        x,
+        counts,
+        route_weights,
+        *,
+        expected_m=None,
+        out=None,
+        input_scales=None,
+        _mask_result=True
     ):
         """Execute [E,M,D] with active prefixes ``counts[E]`` and route weights.
 
@@ -255,6 +275,10 @@ class V41RoutedExperts(nn.Module):
         Explicit ``input_scales`` selects received E4M3 input with linear uint8
         UE8M0 bytes; those inputs are never dequantized or requantized.
         """
+        if type(_mask_result) is not bool or (
+            not _mask_result and (self.backend != "deepgemm" or out is not None)
+        ):
+            raise ValueError("V4.1 bounded expert results require the masked consumer")
         if x.ndim != 3 or x.shape[0] != self.experts:
             raise ValueError("V4.1 masked experts require [E,M,D]")
         capacity = x.shape[1]
@@ -320,6 +344,7 @@ class V41RoutedExperts(nn.Module):
             gemm,
             out=out,
             input_scales=input_scales,
+            _mask_result=_mask_result,
         )
 
     def forward_contiguous(
