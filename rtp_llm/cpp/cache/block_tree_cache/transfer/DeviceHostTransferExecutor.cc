@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <cstring>
 #include <limits>
 #include <map>
 #include <string_view>
@@ -95,6 +96,13 @@ TransferResult DeviceHostTransferExecutor::executeBatch(const std::vector<HostBu
                 return TransferStatus::INVALID_ARGS;
             }
         }
+        if (device_index < 0) {
+            // A logical DEVICE pool can have HOST_PINNED physical backing.
+            // Its tiles are ordinary host copies and have no CUDA stream.
+            contexts.push_back(
+                {nullptr, plan.device_to_host ? DeviceHostCopyDirection::D2H : DeviceHostCopyDirection::H2D});
+            continue;
+        }
         std::call_once(copy_streams_once_,
                        [this, device_index] { copy_streams_ = acquireDeviceHostCopyStreams(device_index); });
         if (copy_streams_->device_index != device_index) {
@@ -111,6 +119,14 @@ TransferResult DeviceHostTransferExecutor::executeBatch(const std::vector<HostBu
     for (size_t plan_index = 0; plan_index < plans.size(); ++plan_index) {
         const auto& plan    = plans[plan_index];
         const auto& context = contexts[plan_index];
+        if (plan.copy_tiles.front().device_index < 0) {
+            for (const auto& tile : plan.copy_tiles) {
+                std::memcpy(plan.device_to_host ? tile.host_addr : tile.device_addr,
+                            plan.device_to_host ? tile.device_addr : tile.host_addr,
+                            tile.bytes);
+            }
+            continue;
+        }
         bool        handled = false;
         for (auto& strategy : strategies_) {
             auto result = strategy->tryExecute(plan, options_, context);
