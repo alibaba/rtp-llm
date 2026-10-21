@@ -13,6 +13,8 @@ import io.netty.channel.epoll.EpollSocketChannel;
 import io.netty.channel.socket.nio.NioSocketChannel;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
+import org.flexlb.engine.grpc.GrpcCallTrace;
+import org.flexlb.engine.grpc.GrpcTransportObserver;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
@@ -41,8 +43,8 @@ public class GrpcChannelFactory {
     public GrpcChannelFactory(
             @Qualifier("managedChannelThreadPoolExecutor") ThreadPoolExecutor executor,
             @Qualifier("managedChannelEventLoopGroup") EventLoopGroup eventLoopGroup,
-            @Value("${" + CONNECT_TIMEOUT_PROPERTY + ":"
-                    + DEFAULT_CONNECT_TIMEOUT_MILLIS + "}") int connectTimeoutMillis) {
+            @Value("${" + CONNECT_TIMEOUT_PROPERTY + ":" + DEFAULT_CONNECT_TIMEOUT_MILLIS + "}")
+                    int connectTimeoutMillis) {
         if (connectTimeoutMillis <= 0) {
             throw new IllegalArgumentException("connectTimeoutMillis must be positive");
         }
@@ -51,33 +53,45 @@ public class GrpcChannelFactory {
         this.connectTimeoutMillis = connectTimeoutMillis;
     }
 
-    public GrpcChannelFactory(
-            ThreadPoolExecutor executor,
-            EventLoopGroup eventLoopGroup) {
+    public GrpcChannelFactory(ThreadPoolExecutor executor, EventLoopGroup eventLoopGroup) {
         this(executor, eventLoopGroup, DEFAULT_CONNECT_TIMEOUT_MILLIS);
     }
 
     public ManagedChannel create(GrpcTarget target) {
+        return create(target, null);
+    }
+
+    public ManagedChannel create(GrpcTarget target, GrpcTransportObserver observer) {
         log.info("Creating gRPC channel: {}", target);
-        return NettyChannelBuilder.forAddress(target.host(), target.port())
-                .channelType(channelType(eventLoopGroup))
+        NettyChannelBuilder builder = NettyChannelBuilder.forAddress(target.host(), target.port());
+        if (observer == null) {
+            builder.channelType(channelType(eventLoopGroup));
+        } else if (eventLoopGroup instanceof EpollEventLoopGroup) {
+            builder.channelFactory(observer::newEpollChannel);
+        } else {
+            builder.channelFactory(observer::newChannel);
+        }
+        return builder.intercept(GrpcCallTrace.INTERCEPTOR)
                 .withOption(ChannelOption.TCP_NODELAY, true)
                 .withOption(ChannelOption.SO_KEEPALIVE, true)
                 .withOption(ChannelOption.ALLOCATOR, PooledByteBufAllocator.DEFAULT)
                 // Connection timeout in milliseconds
                 .withOption(ChannelOption.CONNECT_TIMEOUT_MILLIS, connectTimeoutMillis)
                 // Write buffer water mark: prevents memory accumulation and pendingTasks buildup
-                .withOption(ChannelOption.WRITE_BUFFER_WATER_MARK,
+                .withOption(
+                        ChannelOption.WRITE_BUFFER_WATER_MARK,
                         new WriteBufferWaterMark(64 * 1024, 128 * 1024))
                 // Receive/send buffer size
                 .withOption(ChannelOption.SO_RCVBUF, 512 * 1024)
                 .withOption(ChannelOption.SO_SNDBUF, 512 * 1024)
                 .maxInboundMessageSize(DEFAULT_MAX_INBOUND_MESSAGE_BYTES)
-                // HTTP/2 initial flow control window: prevents transmission issues due to flow control
+                // HTTP/2 initial flow control window: prevents transmission issues due to flow
+                // control
                 .initialFlowControlWindow(2 * 1024 * 1024)
                 // Send an HTTP/2 PING after this interval without read activity
                 .keepAliveTime(2, TimeUnit.SECONDS)
-                // Close the connection if no read activity is observed within this timeout after a PING
+                // Close the connection if no read activity is observed within this timeout after a
+                // PING
                 .keepAliveTimeout(10, TimeUnit.SECONDS)
                 // Keep probing even when there are no active RPC calls
                 .keepAliveWithoutCalls(true)

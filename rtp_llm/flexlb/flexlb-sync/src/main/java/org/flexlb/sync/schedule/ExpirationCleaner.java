@@ -18,8 +18,8 @@ import java.util.Map;
 import java.util.Objects;
 
 /**
- * Completes pending retirement after confirmed discovery removal, consecutive RPC
- * failures or an explicit not-alive response. Slow local application alone never evicts workers.
+ * Completes pending retirement after confirmed discovery removal or three valid not-alive
+ * responses. RPC failures and elapsed time alone never evict workers.
  *
  * <p>Runs at {@code workerRegistry.health.cleanupIntervalMs} (default 3 seconds)
  * via Spring {@link Scheduled}.

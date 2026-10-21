@@ -184,7 +184,7 @@ public final class WorkerDirectory implements WorkerStatusProvider {
 
         WorkerStatus.PollHealth health = status.pollHealth();
         status.trace().recordUnavailable(reason, health.lastSuccessfulPollUs(),
-                health.consecutiveTransportFailures());
+                health.consecutiveWorkerFailures());
 
         WorkerEndpoint expected = endpointRegistry.get(
                 role, address, status);

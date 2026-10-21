@@ -13,6 +13,7 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.service.monitor.StatusFailureReporter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.Test;
@@ -365,7 +366,7 @@ class RequestLifetimeTest {
                 assertFalse(future.isDone());
             }
 
-            EndpointEventProjector projector = new EndpointEventProjector(registry);
+            EndpointEventProjector projector = new EndpointEventProjector(registry, mock(StatusFailureReporter.class));
             if (evidenceSource == RoleType.PREFILL) {
                 projector.onPrefillStatus(prefill, RoleType.PREFILL,
                         List.of(PrefillState.WorkerStatusFact.active(item.execution())));

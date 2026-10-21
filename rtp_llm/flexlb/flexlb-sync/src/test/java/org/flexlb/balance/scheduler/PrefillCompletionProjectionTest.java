@@ -13,6 +13,7 @@ import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskPhase;
+import org.flexlb.service.monitor.StatusFailureReporter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.flexlb.testfixture.TaskInfo;
@@ -46,7 +47,7 @@ class PrefillCompletionProjectionTest {
         var reporter = mock(BatchSchedulerReporter.class);
         var requestReporter = mock(RequestSchedulerReporter.class);
         var requests = new RequestRegistry(service, reporter, requestReporter);
-        var projector = new EndpointEventProjector(requests);
+        var projector = new EndpointEventProjector(requests, mock(StatusFailureReporter.class));
         var endpoints = new EndpointRegistry(service, projector, reporter,
                 new RouteDeliveryStrategy(requests, new DeliveryMetrics(reporter)), new PlacementAvailability());
         var runtime = new SchedulerRuntime(requests, endpoints, reporter, requestReporter);

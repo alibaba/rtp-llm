@@ -433,7 +433,8 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 constructorOnlyCacheMetricsReporter,
                 grpcClient,
                 constructorOnlyLoopResources,
-                engineWorkerStatus);
+                engineWorkerStatus,
+                new org.flexlb.service.monitor.StatusFailureReporter(new NoOpFlexMonitor()));
     }
 
     @AfterEach

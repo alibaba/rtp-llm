@@ -16,6 +16,7 @@ import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.engine.grpc.client.EngineGrpcClient;
 import org.flexlb.metric.NoOpFlexMonitor;
+import org.flexlb.service.monitor.StatusFailureReporter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
@@ -100,7 +101,7 @@ class QueuedBatchDeliveryTest {
         doAnswer(call -> { prefill.releaseCommittedItem(call.getArgument(0)); return null; })
                 .when(prefill).settleFailedRequest(any());
         decode = new DecodeEndpoint(WorkerStatus.createDiscovered(RoleType.DECODE, null,
-                "127.0.0.1", 8080, 8081, null), new EndpointEventProjector(registry));
+                "127.0.0.1", 8080, 8081, null), new EndpointEventProjector(registry, mock(StatusFailureReporter.class)));
         CountDownLatch entered = new CountDownLatch(1);
         dispatcher.tryPrepareSubmission().value().submit(sender -> {
             entered.countDown();

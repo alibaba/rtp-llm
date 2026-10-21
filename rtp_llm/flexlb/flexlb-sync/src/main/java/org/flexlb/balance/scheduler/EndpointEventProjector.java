@@ -6,6 +6,9 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.dao.master.EndpointTrace.Stage;
+import org.flexlb.engine.grpc.GrpcFailure;
+import org.flexlb.service.monitor.StatusFailureReporter;
 import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
 
@@ -21,9 +24,11 @@ import java.util.Objects;
 public final class EndpointEventProjector {
 
     private final RequestRegistry scheduler;
+    private final StatusFailureReporter failureReporter;
 
-    public EndpointEventProjector(RequestRegistry scheduler) {
+    public EndpointEventProjector(RequestRegistry scheduler, StatusFailureReporter failureReporter) {
         this.scheduler = Objects.requireNonNull(scheduler, "scheduler");
+        this.failureReporter = Objects.requireNonNull(failureReporter, "failureReporter");
     }
 
     public void onPrefillStatus(
@@ -130,6 +135,7 @@ public final class EndpointEventProjector {
             try {
                 scheduler.processPrefillStatus(source, role, fact);
             } catch (Throwable failure) {
+                reportStatusFailure(role, failure);
                 logErrorNoFail(
                         "Prefill status fact projection isolated: request_id={} engine={}",
                         fact.item().requestId(), source.getIp(),
@@ -145,11 +151,23 @@ public final class EndpointEventProjector {
             try {
                 scheduler.processDecodeStatus(source, fact);
             } catch (Throwable failure) {
+                reportStatusFailure(RoleType.DECODE, failure);
                 logErrorNoFail(
                         "Decode status fact projection isolated: request_id={} engine={}",
                         fact.reservation().requestId(),
                         source.getIp(), failure);
             }
+        }
+    }
+
+    private void reportStatusFailure(RoleType role, Throwable failure) {
+        try {
+            GrpcFailure.Analysis analysis = GrpcFailure.analyze(failure);
+            failureReporter.report(role, "worker_status", Stage.STATUS_PROJECTION_FAILED,
+                    analysis.confirmedLocalFailure() ? analysis.kind().name() : "STATUS_PROJECTION_FAILED",
+                    analysis);
+        } catch (RuntimeException | Error ignoredDiagnosticFailure) {
+            // Continue projecting the remaining exact facts.
         }
     }
 
