@@ -17,6 +17,7 @@ LinearFactory.register(CudaF16Linear)
 if is_cuda():
     from .fp8_gemm_linear import CudaFp8GEMMLinear
     from .fp8_per_tensor_linear import CudaFp8PerTensorLinear
+    from .modelopt_fp8_linear import CudaModelOptFp8Linear
 
     major, minor = get_sm()
     if major >= 10:
@@ -25,4 +26,5 @@ if is_cuda():
         LinearFactory.register(CudaFp4GEMMLinear)
 
     LinearFactory.register(CudaFp8PerTensorLinear)
+    LinearFactory.register(CudaModelOptFp8Linear)
     LinearFactory.register(CudaFp8GEMMLinear)

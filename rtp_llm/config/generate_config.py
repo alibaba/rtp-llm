@@ -1,8 +1,10 @@
 import copy
 import hashlib
+import json
 import logging
 import time
 from enum import IntEnum
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
 from pydantic import (
@@ -503,6 +505,14 @@ class GenerateConfig(BaseModel):
                     f"response_format must be valid: {str(e)}",
                 ) from e
         return value
+
+    @classmethod
+    def from_generation_config_path(cls, config_dir: Optional[str]):
+        config = cls()
+        if config_dir:
+            with (Path(config_dir) / "generation_config.json").open() as stream:
+                config.update(json.load(stream))
+        return config
 
     def update(self, new: Dict[str, Any]):
         """批量更新字段。

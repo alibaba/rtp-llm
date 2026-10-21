@@ -5,7 +5,10 @@ from typing import Any, Dict, List
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.base_model import BaseModel
-from rtp_llm.models.hybrid_kv_cache import build_hybrid_kv_cache_spec_descs
+from rtp_llm.models.hybrid_kv_cache import (
+    build_hybrid_kv_cache_spec_descs,
+    configure_recurrent_cache_capacity,
+)
 from rtp_llm.models.mrope_utils import apply_mrope_section
 from rtp_llm.models.qwen3_next.qwen3_next_weight import (
     Qwen3NextWeight,
@@ -16,6 +19,14 @@ from rtp_llm.ops import HybridAttentionType, KVCacheSpecType
 
 
 class Qwen3NextBase(BaseModel):
+    def load(self, *args, **kwargs):
+        quant_config = self.model_config.quant_config
+        if quant_config is not None and quant_config.get_method() == "modelopt_mixed":
+            configure_recurrent_cache_capacity(
+                self.model_config, self.max_generate_batch_size
+            )
+        return super().load(*args, **kwargs)
+
     def _create_python_model(self):
         model_config = self.model_config
         parallelism_config = self.parallelism_config

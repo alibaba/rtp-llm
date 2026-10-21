@@ -1,5 +1,8 @@
 import copy
+import json
 import os
+import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Union
 from unittest import TestCase, main
@@ -438,6 +441,54 @@ class OpenaiGenerateConfigTest(TestCase):
         return openai_endpoint._extract_generation_config(
             request, input_ids=input_ids, renderer=renderer
         )
+
+    def test_service_generation_defaults_and_request_precedence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, "generation_config.json").write_text(
+                json.dumps({"presence_penalty": 1.5, "max_new_tokens": 16384})
+            )
+            model_config = self._make_default_model_config()
+            model_config.generate_env_config.generation_config_path = directory
+            endpoint = self._make_openai_endpoint(model_config)
+        extra = GenerateConfig(top_k=7)
+        request = ChatCompletionRequest(messages=[], extra_configs=extra)
+        config = endpoint._extract_generation_config(request)
+        self.assertEqual(config.presence_penalty, 1.5)
+        self.assertEqual(config.max_new_tokens, 16384)
+        self.assertEqual(config.top_k, 7)
+        self.assertEqual(extra.max_new_tokens, 32000)
+        request = ChatCompletionRequest(
+            messages=[],
+            presence_penalty=0.0,
+            max_tokens=73,
+            extra_configs=GenerateConfig(presence_penalty=2.0, max_new_tokens=81),
+        )
+        overridden = endpoint._extract_generation_config(request)
+        self.assertEqual(overridden.presence_penalty, 0.0)
+        self.assertEqual(overridden.max_new_tokens, 73)
+        self.assertEqual(endpoint.default_generate_config.presence_penalty, 1.5)
+        self.assertEqual(endpoint.default_generate_config.max_new_tokens, 16384)
+
+    def test_raw_requests_share_defaults_without_sharing_mutable_state(self):
+        from rtp_llm.structure.request_extractor import RequestExtractor
+
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, "generation_config.json").write_text(
+                json.dumps({"presence_penalty": 1.5, "max_new_tokens": 16384})
+            )
+            defaults = GenerateConfig.from_generation_config_path(directory)
+        extractor = RequestExtractor(defaults)
+        config, _ = extractor._format_generate_config({"generate_config": {"top_k": 7}})
+        self.assertEqual(config.presence_penalty, 1.5)
+        self.assertEqual(config.max_new_tokens, 16384)
+        config.stop_words_list.append([42])
+        overridden, _ = extractor._format_generate_config(
+            {"generate_config": {"presence_penalty": 0.0}, "max_new_tokens": 73}
+        )
+        self.assertEqual(overridden.presence_penalty, 0.0)
+        self.assertEqual(overridden.max_new_tokens, 73)
+        self.assertEqual(defaults.stop_words_list, [])
+        self.assertEqual(overridden.stop_words_list, [])
 
     def _assert_reasoning_envelope_wraps_json_object(self, config: GenerateConfig):
         """in_think_mode moves the final constraint inside the reasoning tag."""

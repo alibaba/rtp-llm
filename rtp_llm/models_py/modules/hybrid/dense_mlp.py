@@ -42,6 +42,9 @@ class DenseMLP(nn.Module):
         self.activation_type = activation_type
         self.parallelism_config = parallelism_config
         self.enable_w4a16_sm120 = enable_w4a16_sm120
+        self.memory_bounded_prefill = (
+            quant_config is not None and quant_config.get_method() == "modelopt_mixed"
+        )
         if self.activation_type not in _ACTIVATION_FUNC_MAP:
             raise ValueError(f"Unsupported activation type: {activation_type}")
         self.act_fn = _ACTIVATION_FUNC_MAP[activation_type]()
@@ -106,7 +109,7 @@ class DenseMLP(nn.Module):
                     "W4A16 FFN unavailable, falling back to the default path"
                 )
 
-    def forward(self, x: torch.Tensor, skip_allreduce: bool = False) -> torch.Tensor:
+    def _forward_block(self, x: torch.Tensor) -> torch.Tensor:
         if self.w4a16 is not None and 0 < x.shape[0] < 64:
             output = self.w4a16(x, self.act_fn)
         elif not self.is_gated and self.activation_type == ActivationType.Gelu:
@@ -115,8 +118,30 @@ class DenseMLP(nn.Module):
         else:
             up = self.up_proj(x)
             activated = self.act_fn(up)
+            del up
             output = self.down_proj(activated)
+        return output
 
+    def forward(self, x: torch.Tensor, skip_allreduce: bool = False) -> torch.Tensor:
+        if (
+            self.memory_bounded_prefill
+            and x.is_cuda
+            and x.ndim == 2
+            and x.shape[0] > 65536
+            and torch.cuda.get_device_capability(x.device) == (12, 0)
+        ):
+            output = None
+            for start in range(0, x.shape[0], 65536):
+                stop = min(start + 65536, x.shape[0])
+                block = self._forward_block(x[start:stop])
+                if output is None:
+                    output = block.new_empty((x.shape[0], block.shape[1]))
+                output[start:stop].copy_(block)
+                del block
+        else:
+            output = self._forward_block(x)
+
+        # Preserve a single full-output collective after local FFN execution.
         ffn_tp_size = self.parallelism_config.get_ffn_tp_size()
         if not skip_allreduce and ffn_tp_size > 1:
             output = all_reduce(output, group=Group.TP)

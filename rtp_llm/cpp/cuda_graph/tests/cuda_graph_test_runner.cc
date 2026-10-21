@@ -23,7 +23,8 @@ public:
                       int64_t                  hidden_size,
                       std::vector<std::string> group_tags,
                       int64_t                  num_tokens_per_bs,
-                      int64_t                  sp_steps) {
+                      int64_t                  sp_steps,
+                      std::vector<int>         decode_capture_batch_sizes) {
         reset_runner();
         GraphParams params;
         params.enable_cuda_graph_debug_mode = true;
@@ -38,6 +39,7 @@ public:
         params.input_hidden_size            = static_cast<size_t>(hidden_size);
         params.model_data_type              = c10::ScalarType::BFloat16;
         params.prefill_capture_seq_lens     = std::move(prefill_capture_seq_lens);
+        params.decode_capture_batch_sizes   = std::move(decode_capture_batch_sizes);
         params.kv_cache_group_tags          = std::move(group_tags);
 
         runner_ = CudaGraphRunner::createForPrefill(std::move(py_instance), std::move(params));
@@ -89,6 +91,10 @@ public:
         return runner_ != nullptr ? runner_->getCurrentRealGraphBs(state_) : 0;
     }
 
+    int getCurrentRealGraphSeqLen() {
+        return state_.current_real_graph_seq_len;
+    }
+
     ~CudaGraphTestRunner() {
         reset_runner();
     }
@@ -120,9 +126,10 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("kernel_tokens_per_block"),
              py::arg("prefill_capture_seq_lens"),
              py::arg("hidden_size"),
-             py::arg("group_tags")        = std::vector<std::string>{},
-             py::arg("num_tokens_per_bs") = 0,
-             py::arg("sp_steps")          = 0)
+             py::arg("group_tags")                 = std::vector<std::string>{},
+             py::arg("num_tokens_per_bs")          = 0,
+             py::arg("sp_steps")                   = 0,
+             py::arg("decode_capture_batch_sizes") = std::vector<int>{})
         .def("init_decode",
              &CudaGraphTestRunner::init_decode,
              py::arg("py_instance"),
@@ -136,5 +143,6 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("num_tokens_per_bs") = 1)
         .def("canRun", &CudaGraphTestRunner::canRun)
         .def("forward", &CudaGraphTestRunner::forward)
-        .def("getCurrentRealGraphSize", &CudaGraphTestRunner::getCurrentRealGraphSize);
+        .def("getCurrentRealGraphSize", &CudaGraphTestRunner::getCurrentRealGraphSize)
+        .def("getCurrentRealGraphSeqLen", &CudaGraphTestRunner::getCurrentRealGraphSeqLen);
 }

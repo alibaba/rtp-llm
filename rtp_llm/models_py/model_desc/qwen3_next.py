@@ -45,6 +45,9 @@ from rtp_llm.models_py.triton_kernels.fla.chunk import (
     is_flydsl_chunk_gdn_enabled,
     is_flydsl_chunk_gdn_shape_supported,
 )
+from rtp_llm.models_py.triton_kernels.fla.chunk_cache_store import (
+    chunk_gated_delta_rule_with_cache_store,
+)
 from rtp_llm.models_py.triton_kernels.fla.fused_recurrent import (
     fused_recurrent_gated_delta_rule,
 )
@@ -217,8 +220,10 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         linear_attn_config: LinearAttentionConfig,
         parallelism_config: ParallelismConfig,
         weights: Dict[str, torch.Tensor],
+        memory_bounded_prefill: bool = False,
     ):
         super().__init__(linear_attn_config, parallelism_config, weights)
+        self.memory_bounded_prefill = memory_bounded_prefill
 
     def _conv1d(
         self,
@@ -314,6 +319,28 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
             value = value.view(
                 1, value.shape[0], self.local_num_v_heads, self.head_v_dim
             )
+        if (
+            self.memory_bounded_prefill
+            and query.is_cuda
+            and torch.cuda.get_device_capability(query.device) == (12, 0)
+            and query.shape[1] > 65536
+            and ssm_states is not None
+            and 65536 % seq_size_per_block == 0
+        ):
+            return chunk_gated_delta_rule_with_cache_store(
+                query,
+                key,
+                value,
+                g,
+                beta,
+                initial_states,
+                cu_seqlens_without_padding,
+                attn_inputs.prefix_lengths_device,
+                attn_inputs.kv_cache_kernel_block_id_device,
+                ssm_states,
+                seq_size_per_block,
+            ).squeeze_(0)
+
         use_flydsl_chunk_gdn = (
             is_flydsl_chunk_gdn_enabled()
             and is_flydsl_chunk_gdn_shape_supported(query, key, value, beta)
@@ -926,7 +953,13 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             self.in_proj_fused = None
 
         self.prefill_gdn = Qwen3NextGatedDeltaNetPrefill(
-            linear_attn_config, parallelism_config, weights
+            linear_attn_config,
+            parallelism_config,
+            weights,
+            memory_bounded_prefill=(
+                quant_config is not None
+                and quant_config.get_method() == "modelopt_mixed"
+            ),
         )
         self.decode_gdn = Qwen3NextGatedDeltaNetDecode(
             linear_attn_config, parallelism_config, weights

@@ -107,6 +107,9 @@ class Qwen3NextMTPModel(GptModelBase):
         h_norm = self.pre_fc_norm_hidden(last_hidden_states)
         cat_hidden_states = torch.cat([e_norm, h_norm], -1)
         hidden_states = self.fc(cat_hidden_states)
+        # Full-context MTP prefill must release FC inputs before Attention/FFN
+        # allocate their workspaces. At 262K these temporaries occupy many GiB.
+        del cat_hidden_states, e_norm, h_norm, inputs_embeds
 
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)

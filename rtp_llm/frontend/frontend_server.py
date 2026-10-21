@@ -205,7 +205,9 @@ class FrontendServer(object):
             model_config.special_tokens = special_tokens
             model_config.generate_env_config = self.py_env_configs.generate_env_config
             model_config.render_config = self.py_env_configs.render_config
-            model_config.model_name = self.py_env_configs.model_args.model_type
+            model_config.model_name = (
+                model_config.model_name or self.py_env_configs.model_args.model_type
+            )
             model_config.template_type = None
 
             self._openai_endpoint = OpenaiEndpoint(

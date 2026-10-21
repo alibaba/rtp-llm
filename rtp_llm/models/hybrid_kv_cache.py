@@ -1,3 +1,4 @@
+import logging
 from math import gcd
 from typing import Sequence
 
@@ -52,3 +53,44 @@ def build_hybrid_kv_cache_spec_descs(
         else:
             layer_descs.append([full_desc])
     return layer_descs
+
+
+def configure_recurrent_cache_capacity(model_config, max_active_requests: int) -> None:
+    """Bound recurrent pools by active requests instead of the paged KV count.
+
+    Each request needs the retained state tail, speculative reserve slots and
+    room to replace a tail at a block boundary. Keep another request-sized
+    allowance for reusable prefixes. FULL pools retain their token-based budget.
+    """
+    from rtp_llm.ops import CacheCapacityPolicyDesc
+
+    if max_active_requests <= 0:
+        raise ValueError("max_active_requests must be positive")
+    proposals = max(0, int(model_config.gen_num_per_cycle))
+    block_count = max_active_requests * (proposals + 5)
+    descs = model_config.kv_cache_spec_descs
+    changed = False
+    for layer_descs in descs:
+        for desc in layer_descs:
+            if desc.cache_type != KVCacheSpecType.LINEAR:
+                continue
+            capacity = desc.capacity
+            if capacity is not None and capacity.explicit_block_num:
+                continue
+            if capacity is None:
+                capacity = CacheCapacityPolicyDesc()
+            capacity.explicit_block_num = block_count
+            capacity.reservable = False
+            capacity.charge_to_paged_budget = True
+            desc.capacity = capacity
+            changed = True
+    if changed:
+        # pybind vector/optional properties return copies: assign the complete
+        # descriptor tree back after updating its policy objects.
+        model_config.kv_cache_spec_descs = descs
+        logging.info(
+            "Recurrent cache capacity: %d blocks per tag, %d active requests, %d proposals",
+            block_count,
+            max_active_requests,
+            proposals,
+        )

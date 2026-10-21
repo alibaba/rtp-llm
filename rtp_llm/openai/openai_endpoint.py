@@ -150,6 +150,11 @@ class OpenaiEndpoint(object):
     ):
         # Get values from model_config
         self.generate_env_config = model_config.generate_env_config
+        self.default_generate_config = GenerateConfig.from_generation_config_path(
+            self.generate_env_config.generation_config_path
+            if self.generate_env_config is not None
+            else None
+        )
         self.max_seq_len = model_config.max_seq_len
         self.model_name = model_config.model_name
         self.special_tokens = model_config.special_tokens
@@ -562,7 +567,10 @@ class OpenaiEndpoint(object):
     ) -> GenerateConfig:
         # TODO(wangyin): implement this
         renderer = renderer or self.chat_renderer
-        config = request.extra_configs or GenerateConfig()
+        defaults = getattr(self, "default_generate_config", None) or GenerateConfig()
+        config = defaults.model_copy(deep=True)
+        if request.extra_configs is not None:
+            config.update(request.extra_configs.model_dump(exclude_unset=True))
         if request.extra_configs is not None and (
             config.response_format is not None
             or GrammarConstraint.collect_from_config(config)
@@ -812,6 +820,7 @@ class OpenaiEndpoint(object):
         choice_generator: Optional[AsyncGenerator[StreamResponseObject, None]],
         debug_info: Optional[DebugInfo],
         tokenizer: Optional[Any] = None,
+        model_name: str = "",
     ) -> ChatCompletionResponse:
         all_choices = []
         usage = None
@@ -905,7 +914,7 @@ class OpenaiEndpoint(object):
             choices=all_choices,
             usage=usage,
             aux_info=aux_info,
-            model="",
+            model=model_name,
             debug_info=debug_info,
             extra_outputs=extra_outputs,
         )
@@ -915,6 +924,7 @@ class OpenaiEndpoint(object):
         choice_generator: AsyncGenerator[StreamResponseObject, None],
         debug_info: Optional[DebugInfo],
         tokenizer: Optional[Any] = None,
+        model_name: str = "",
     ) -> CompleteResponseAsyncGenerator:
         # prompt_logits is attached by renderer.generate_choice on the last StreamResponseObject;
         # capture it here so collect_with_prompt_logits can attach it to the final ChatCompletionResponse.
@@ -941,6 +951,7 @@ class OpenaiEndpoint(object):
                     captured_prompt_logits["data"] = response.prompt_logits
 
                 yield ChatCompletionStreamResponse(
+                    model=model_name,
                     choices=response.choices,
                     usage=response.usage,
                     aux_info=response.aux_info,
@@ -951,7 +962,10 @@ class OpenaiEndpoint(object):
 
         async def collect_with_prompt_logits(generator):
             resp = await OpenaiEndpoint._collect_complete_response(
-                generator, debug_info=debug_info, tokenizer=tokenizer
+                generator,
+                debug_info=debug_info,
+                tokenizer=tokenizer,
+                model_name=model_name,
             )
             if "data" in captured_prompt_logits:
                 resp.prompt_logprobs = captured_prompt_logits["data"]
@@ -1095,7 +1109,7 @@ class OpenaiEndpoint(object):
         )
 
         return self._complete_stream_response(
-            choice_generator, debug_info, self.tokenizer
+            choice_generator, debug_info, self.tokenizer, self.model_name
         )
 
     def _prepare_chat_input(self, request_id: int, chat_request):
@@ -1158,7 +1172,7 @@ class OpenaiEndpoint(object):
             merged_gen, chat_request, generate_config
         )
         resp = await self._collect_complete_response(
-            choice_generator, None, self.tokenizer
+            choice_generator, None, self.tokenizer, self.model_name
         )
         if prompt_logits_data is not None:
             resp.prompt_logprobs = prompt_logits_data

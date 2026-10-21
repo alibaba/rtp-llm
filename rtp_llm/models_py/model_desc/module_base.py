@@ -2,6 +2,7 @@ import logging
 from collections.abc import Mapping
 from typing import Any, Optional
 
+import torch
 from torch import nn
 
 from rtp_llm.config.model_config import ModelConfig
@@ -53,6 +54,27 @@ class GptModelBase(nn.Module):
 
         self.kv_cache: Optional[KVCache] = None
         self.device_type: DeviceType = get_device_type()
+        self.nvfp4_lm_head = None
+        quant_config = getattr(config, "quant_config", None)
+        if quant_config is not None and quant_config.get_method() == "modelopt_mixed":
+            from rtp_llm.models_py.modules.factory.linear import LinearFactory
+
+            head = weight.get_global_weight_or_none(W.lm_head)
+            if head is not None and head.dtype == torch.uint8:
+                self.nvfp4_lm_head = LinearFactory.create_linear(
+                    head,
+                    None,
+                    weight.get_global_weight(W.lm_head_s),
+                    quant_config,
+                    py_hw_kernel_config,
+                    weight_scale_2=weight.get_global_weight(W.lm_head_s2),
+                    input_scale=weight.get_global_weight(W.lm_head_i_s),
+                )
+
+    def compute_quantized_logits(self, hidden):
+        if self.nvfp4_lm_head is None:
+            raise ValueError("No quantized LM head was initialized")
+        return self.nvfp4_lm_head(hidden.to(torch.bfloat16)).float()
 
     def initialize(self, init_resource: PyModelInitResources) -> bool:
         self.kv_cache = init_resource.kv_cache

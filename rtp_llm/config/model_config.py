@@ -587,6 +587,11 @@ class ModelConfig(CppModelConfig):
         """
         model_override_args = json.loads(json_model_override_args)
         if model_override_args:
+            if "model_name" in model_override_args:
+                model_name = model_override_args["model_name"]
+                if not isinstance(model_name, str) or not model_name.strip():
+                    raise ValueError("model_name must be a non-empty string")
+                self.model_name = model_name
             # Apply rope_scaling override via model_config
             self.apply_rope_scaling_override(model_override_args)
 

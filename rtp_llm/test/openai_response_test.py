@@ -450,6 +450,26 @@ class QwenTestTokenizer(BaseTokenizer):
         self.im_end_id = self.tokenizer.im_end_id
 
 
+class ServedModelNameTest(IsolatedAsyncioTestCase):
+    async def test_streaming_and_collected_responses_use_served_name(self):
+        async def choices():
+            yield custom_renderer.StreamResponseObject(choices=[])
+            yield custom_renderer.StreamResponseObject(choices=[])
+
+        generate = OpenaiEndpoint._complete_stream_response(
+            choices(), None, model_name="qwen-preview"
+        )
+        chunks = [chunk async for chunk in generate]
+        self.assertEqual([chunk.model for chunk in chunks], ["qwen-preview"] * 2)
+        response = await generate.gen_complete_response_once()
+        self.assertEqual(response.model, "qwen-preview")
+
+        response = await OpenaiEndpoint._collect_complete_response(
+            choices(), None, model_name="qwen-preview"
+        )
+        self.assertEqual(response.model, "qwen-preview")
+
+
 class OpenaiResponseTest(IsolatedAsyncioTestCase):
     def __init__(self, *args: Any, **kwargs: Any):
         super().__init__(*args, **kwargs)

@@ -72,6 +72,9 @@ class FrontendWorker:
     ) -> None:
         logging.info("starting frontend worker")
 
+        self.default_generate_config = GenerateConfig.from_generation_config_path(
+            py_env_configs.generate_env_config.generation_config_path
+        )
         self.tokenizer = TokenizerFactory.create(
             model_config.ckpt_path, model_config.tokenizer_path, model_config.model_type
         )
@@ -198,8 +201,7 @@ class FrontendWorker:
         return BatchPipelineResponse(response_batch=pipeline_responses)
 
     def inference(self, **kwargs: Any) -> CompleteResponseAsyncGenerator:
-        default_generate_config = GenerateConfig()
-        request_extractor = RequestExtractor(default_generate_config)
+        request_extractor = RequestExtractor(self.default_generate_config)
         request, kwargs = request_extractor.extract_request(kwargs)
 
         if request.is_streaming is False and request.incremental:
