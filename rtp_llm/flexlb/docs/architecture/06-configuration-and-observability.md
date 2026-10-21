@@ -609,3 +609,9 @@ GAUGE + SUMMARY 聚合实际采样值；Micrometer provider 只暴露最近上�
 读取 Grafana 导出的 JSON，保留现有指标名称与已正确的查询，仅修正失效标签筛选、
 累计 Counter 查询与展示口径，并补充缺失面板和独立告警规则；不会写入线上 Grafana。
 在对应版本代码发布时使用生成的配置；保留导出原件以便整体回退。
+# 容器启动超时
+
+`FLEXLB_START_TIMEOUT_SECONDS` 设置 Java 启动到 `/hook/process_ok` 健康检查成功的等待上限，
+默认 300 秒，必须为正整数。健康检查使用剩余启动时间作为请求超时。
+到期后启动脚本发送 SIGTERM，等待最多 30 秒，进程仍存活则发送 SIGKILL；
+清理 Java 进程和 PID 文件后以状态码 4 退出。容器重新拉起由部署平台的重启策略决定。

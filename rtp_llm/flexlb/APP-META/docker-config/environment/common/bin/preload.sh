@@ -63,7 +63,7 @@ health_check() {
     echo "$CURL_BIN" "${HTTP_IP}${URL}"
     
     # Check HTTP status code
-    HTTP_STATUS=`$CURL_BIN --silent --write-out '%{http_code}' --output /dev/null -m 120 "${HTTP_IP}${URL}" 2>&1`
+    HTTP_STATUS=`$CURL_BIN --silent --write-out '%{http_code}' --output /dev/null -m "${FLEXLB_HEALTH_CHECK_TIMEOUT_SECONDS:-120}" "${HTTP_IP}${URL}" 2>&1`
     echo ""
     echo "$CURL_BIN" "${HTTP_IP}${URL}" " HTTP status: $HTTP_STATUS"
     

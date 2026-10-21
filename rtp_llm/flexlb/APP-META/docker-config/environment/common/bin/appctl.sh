@@ -223,6 +223,16 @@ start_spring_boot() {
         fi
     fi
 
+    local startup_timeout=${FLEXLB_START_TIMEOUT_SECONDS:-300}
+    case "$startup_timeout" in
+        ''|*[!0-9]*) echo "ERROR: invalid startup timeout: $startup_timeout"; exit4 ;;
+    esac
+    if [ "$startup_timeout" -eq 0 ]; then
+        echo "ERROR: startup timeout must be positive"
+        exit4
+    fi
+    local startup_started_at=$SECONDS
+
     # make sure work_dir is ${APP_HOME}
     cd ${APP_HOME}
     # Check if we should use jar file directly or classpath
@@ -249,22 +259,36 @@ start_spring_boot() {
         echo $! > "$SERVICE_PID"
     fi
 
-    local exptime=0
+    local startup_pid=$!
+    local startup_deadline=$((startup_started_at + startup_timeout))
+    local FLEXLB_HEALTH_CHECK_TIMEOUT_SECONDS
     echo "INFO: Waiting for service to start..."
     while true
     do
+        if [ "$SECONDS" -ge "$startup_deadline" ]; then
+            echo "ERROR: Service failed to become healthy within ${startup_timeout}s; stopping Java pid=$startup_pid."
+            kill -TERM "$startup_pid" 2>/dev/null
+            local cleanup_deadline=$((SECONDS + 30))
+            while kill -0 "$startup_pid" 2>/dev/null; do
+                if [ "$SECONDS" -ge "$cleanup_deadline" ]; then
+                    kill -KILL "$startup_pid" 2>/dev/null
+                    break
+                fi
+                sleep 1
+            done
+            wait "$startup_pid" 2>/dev/null
+            rm -f "$SERVICE_PID"
+            exit4
+        fi
+        FLEXLB_HEALTH_CHECK_TIMEOUT_SECONDS=$((startup_deadline - SECONDS))
         . "$APP_HOME/bin/preload.sh" $TOMCAT_PORT
         if [ $? -gt 0 ]; then
             sleep 1
-            ((exptime++))
-            echo -n -e "\rINFO: Service startup progress: ${exptime}s elapsed..."
-            if [ `expr $exptime \% 10` -eq 0 ]; then
-                ps -p `cat "$SERVICE_PID"` >/dev/null 2>&1
-                if [ $? -gt 0 ] ; then
-                    echo
-                    echo "ERROR: Service process exited unexpectedly, startup failed."
-                    exit4 # service start failed
-                fi
+            echo -n -e "\rINFO: Service startup progress: $((SECONDS - startup_started_at))s elapsed..."
+            if ! kill -0 "$startup_pid" 2>/dev/null; then
+                echo
+                echo "ERROR: Service process exited unexpectedly, startup failed."
+                exit4
             fi
         else
             echo
