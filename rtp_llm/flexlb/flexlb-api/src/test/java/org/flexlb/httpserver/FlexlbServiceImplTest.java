@@ -1885,6 +1885,9 @@ class FlexlbServiceImplTest {
                 .setRequestIdStr("99999")
                 .setSeqLen(2048)
                 .setCacheKeyBlockSize(1024L)
+                .setSessionAffinityId("session-99999")
+                .setSessionAffinityBucketId(7)
+                .setSessionAffinityType("user")
                 .addBlockCacheKeys(100L)
                 .addBlockCacheKeys(200L)
                 .build();
@@ -1898,6 +1901,9 @@ class FlexlbServiceImplTest {
         BalanceContext capturedCtx = ctxCaptor.getValue();
         Request capturedRequest = capturedCtx.getRequest();
         assertEquals(1024L, capturedRequest.getCacheKeyBlockSize());
+        assertEquals("session-99999", capturedRequest.getSessionAffinityId());
+        assertEquals(7, capturedRequest.getSessionAffinityBucketId());
+        assertEquals("user", capturedRequest.getSessionAffinityType());
         assertEquals(1024L, capturedRequest.getBlockSize());
         assertEquals(2, capturedRequest.getBlockCacheKeys().size());
         assertEquals(100L, capturedRequest.getBlockCacheKeys().get(0));

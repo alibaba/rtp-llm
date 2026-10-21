@@ -51,6 +51,15 @@ public class Request {
     @JsonProperty("request_id")
     private String requestId;
 
+    @JsonProperty("session_affinity_id")
+    private String sessionAffinityId = "";
+
+    @JsonProperty("session_affinity_bucket_id")
+    private int sessionAffinityBucketId = -1;
+
+    @JsonProperty("session_affinity_type")
+    private String sessionAffinityType = "";
+
     public void setRequestId(String requestId) {
         this.requestId = requestId;
     }

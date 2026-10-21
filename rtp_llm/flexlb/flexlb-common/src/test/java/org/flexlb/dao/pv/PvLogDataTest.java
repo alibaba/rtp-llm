@@ -23,6 +23,25 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class PvLogDataTest {
 
     @Test
+    void includesAffinityOnRejectedRequestsAndIncludesAbsentDefaults() {
+        Request request = new Request();
+        request.setSessionAffinityId("session");
+        request.setSessionAffinityBucketId(7);
+        request.setSessionAffinityType("user");
+        BalanceContext context = new BalanceContext();
+        context.setRequest(request);
+        context.setResponse(Response.error(org.flexlb.dao.loadbalance.StrategyErrorType.QUEUE_FULL));
+        String json = JsonUtils.toStringOrEmpty(new PvLogData(context));
+        assertTrue(json.contains("\"sessionAffinityId\":\"session\""));
+        assertTrue(json.contains("\"sessionAffinityBucketId\":7"));
+        assertTrue(json.contains("\"sessionAffinityType\":\"user\""));
+        String absent = JsonUtils.toStringOrEmpty(new PvLogData(new BalanceContext()));
+        assertTrue(absent.contains("\"sessionAffinityId\":\"\""));
+        assertTrue(absent.contains("\"sessionAffinityBucketId\":-1"));
+        assertTrue(absent.contains("\"sessionAffinityType\":\"\""));
+    }
+
+    @Test
     void keepsCacheSelectionWhenSelectedCandidateHasNoEndpoint() {
         BalanceContext context = new BalanceContext();
         context.recordCacheSelection(RoleType.PREFILL, "10.0.0.2", 512L);

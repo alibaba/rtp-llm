@@ -21,6 +21,9 @@ public class PvLogData {
     // Identifiers may be absent when entry parsing fails.
     @JsonInclude(JsonInclude.Include.NON_NULL)
     private String requestId;
+    private String sessionAffinityId = "";
+    private int sessionAffinityBucketId = -1;
+    private String sessionAffinityType = "";
     private RequestPhase phase;
     @JsonInclude(JsonInclude.Include.NON_NULL)
     private Long seqLen;
@@ -118,6 +121,9 @@ public class PvLogData {
         Request request = ctx.getRequest();
         if (request != null) {
             this.requestId = request.getRequestId();
+            this.sessionAffinityId = request.getSessionAffinityId();
+            this.sessionAffinityBucketId = request.getSessionAffinityBucketId();
+            this.sessionAffinityType = request.getSessionAffinityType();
             this.seqLen = request.getSeqLen();
             this.encoderCacheHitLen = request.getEncoderCacheHitLen();
             this.requestTimeMs = request.getRequestTimeMs();

@@ -956,6 +956,9 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
 
         Request request = new Request();
         request.setRequestId(requestId);
+        request.setSessionAffinityId(pb.getSessionAffinityId());
+        request.setSessionAffinityBucketId(pb.getSessionAffinityBucketId());
+        request.setSessionAffinityType(pb.getSessionAffinityType());
         request.setBlockCacheKeys(pb.getBlockCacheKeysList());
         request.setCacheAffinityKeys(pb.getCacheAffinityKeysList());
         request.setVitRouteOnly(pb.getVitRouteOnly());
