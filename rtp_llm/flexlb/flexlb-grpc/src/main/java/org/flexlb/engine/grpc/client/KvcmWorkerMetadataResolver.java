@@ -3,6 +3,7 @@ package org.flexlb.engine.grpc.client;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.flexlb.config.CacheMatchConfiguration;
+import org.flexlb.config.KvcmCacheMatchingConfig;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusProvider;
 import org.flexlb.dao.route.Endpoint;
@@ -29,6 +30,7 @@ public class KvcmWorkerMetadataResolver {
 
     private final ServiceRoute serviceRoute;
     private final String configuredNamespace;
+    private final CacheMatchConfiguration configuration;
     private final WorkerStatusProvider workerStatusProvider;
     private final ConcurrentMap<String, ConcurrentMap<RoleType, String>> namespaceByGroupAndRole =
             new ConcurrentHashMap<>();
@@ -45,6 +47,7 @@ public class KvcmWorkerMetadataResolver {
         this.configuredNamespace = configuration.isKvcmEnabled()
                 ? StringUtils.trimToNull(config.getNamespace())
                 : null;
+        this.configuration = configuration;
         this.workerStatusProvider = workerStatusProvider;
     }
 
@@ -59,6 +62,10 @@ public class KvcmWorkerMetadataResolver {
     }
 
     public QueryType resolveQueryType(RoleType roleType, String group) {
+        KvcmCacheMatchingConfig runtimeConfig = configuration.getKvcmRuntimeConfig();
+        if (runtimeConfig != null && runtimeConfig.getQueryType() != null) {
+            return QueryType.valueOf(runtimeConfig.getQueryType().name());
+        }
         if (StringUtils.isBlank(group)) {
             return queryTypeByRoleForCrossGroupRouting.get(roleType);
         }

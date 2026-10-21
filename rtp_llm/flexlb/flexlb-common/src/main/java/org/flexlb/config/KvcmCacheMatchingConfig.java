@@ -18,6 +18,17 @@ public final class KvcmCacheMatchingConfig implements CacheMatchingConfig {
     public static final int DEFAULT_GLOBAL_KVS_HOST_COUNT = 3;
 
     /**
+     * Explicit query semantics for engines that do not report their cache group mode.
+     * When absent, the client obtains the query type from worker status.
+     */
+    private CacheQueryType queryType;
+
+    public enum CacheQueryType {
+        QT_PREFIX_MATCH,
+        QT_PREFIX_MATCH_WITH_MAMBA
+    }
+
+    /**
      * Total cache-query budget, including retries; also bounds each cluster-info RPC.
      */
     private long requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS;

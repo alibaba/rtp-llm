@@ -210,6 +210,9 @@ UniConfig / Nacos 的 v3 部分更新示例：
   持续空结果保留已有地址，不按空结果次数或持续时间撤销 worker。
 - `cacheMatching`：`LOCAL_SYNC` / `KVCM` tagged union；KVCM 分支拥有查询、健康、远端命中
   （`medium` / `globalKvsHostCount` / `enableP2p`）和 Local Standby 参数。
+  引擎未上报 cache group mode 时，可在 `cacheMatching.queryType` 显式配置
+  `QT_PREFIX_MATCH` 或 `QT_PREFIX_MATCH_WITH_MAMBA`，值应与 KVCM 注册实例的查询语义一致。
+  未配置时仍从 WorkerStatus 推导，未知模式不自动猜测。
 - `optimizer`：启用开关和服务发现轮询间隔。
 - `consistency`：`NONE` / `ZOOKEEPER` tagged union；ZooKeeper 分支拥有连接和 master
   刷新参数。

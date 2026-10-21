@@ -22,8 +22,40 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 
 class KvcmWorkerMetadataResolverTest {
+
+    @Test
+    void explicitQueryTypeSupportsWorkersWithoutCacheGroupMode() {
+        WorkerStatus worker = workerStatus("prefill", KvCacheGroupMode.UNSPECIFIED);
+        ModelMetaConfig model = modelMetaConfig("configured");
+        FlexlbConfig flexlb = new FlexlbConfig();
+        KvcmCacheMatchingConfig matching = new KvcmCacheMatchingConfig();
+        matching.setQueryType(KvcmCacheMatchingConfig.CacheQueryType.QT_PREFIX_MATCH);
+        flexlb.setCacheMatching(matching);
+        KvcmWorkerMetadataResolver resolver = new KvcmWorkerMetadataResolver(
+                new CacheMatchConfiguration(model, flexlb), provider(List.of(worker)));
+
+        resolver.refreshNamespacesAndQueryTypes();
+
+        assertEquals(QueryType.QT_PREFIX_MATCH, resolver.resolveQueryType(RoleType.PREFILL, "default"));
+        assertEquals(QueryType.QT_PREFIX_MATCH, resolver.resolveQueryType(RoleType.PREFILL, null));
+        assertEquals("configured_512", resolver.resolveNamespace(RoleType.PREFILL, null, 512));
+
+        matching.setQueryType(KvcmCacheMatchingConfig.CacheQueryType.QT_PREFIX_MATCH_WITH_MAMBA);
+        assertEquals(QueryType.QT_PREFIX_MATCH_WITH_MAMBA, resolver.resolveQueryType(RoleType.PREFILL, null));
+    }
+
+    @Test
+    void unspecifiedWorkerModeRemainsUnavailableWithoutExplicitQueryType() {
+        KvcmWorkerMetadataResolver resolver = new KvcmWorkerMetadataResolver(
+                configuration("configured"), provider(List.of(workerStatus("prefill", KvCacheGroupMode.UNSPECIFIED))));
+
+        resolver.refreshNamespacesAndQueryTypes();
+
+        assertNull(resolver.resolveQueryType(RoleType.PREFILL, null));
+    }
 
     @Test
     void resolvesNamespaceAndQueryTypeFromOneWorkerStatusRefresh() {
