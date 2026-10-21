@@ -56,7 +56,7 @@
           "step_output_len": 100,
           "first_token_cost_time": 264.576,
           "wait_time": 0.0,
-          "pd_sep": false,
+          "pd_sep": true,
           "cum_log_probs": [],
           "beam_responses": [],
           "softmax_probs": [],
@@ -145,7 +145,7 @@
           "step_output_len": 20,
           "first_token_cost_time": 243.41,
           "wait_time": 0.0,
-          "pd_sep": false,
+          "pd_sep": true,
           "cum_log_probs": [],
           "beam_responses": [],
           "softmax_probs": [],
@@ -223,7 +223,7 @@
           "iter_count": 6,
           "cum_log_probs": [],
           "beam_responses": [],
-          "pd_sep": false,
+          "pd_sep": true,
           "softmax_probs": []
         }
       }
