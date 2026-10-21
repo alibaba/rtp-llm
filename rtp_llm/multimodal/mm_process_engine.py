@@ -49,7 +49,12 @@ from rtp_llm.multimodal.vit_metrics import (
     VitMetricSample,
     collect_vit_preprocess_metrics,
 )
-from rtp_llm.ops import MMPreprocessConfig, MultimodalInput, get_multimodal_feature_hash
+from rtp_llm.ops import (
+    MMPreprocessConfig,
+    MultimodalInput,
+    VitSeparation,
+    get_multimodal_feature_hash,
+)
 from rtp_llm.utils.base_model_datatypes import MMUrlType
 from rtp_llm.utils.cuda_graph_gate import cuda_graph_gate
 from rtp_llm.utils.time_util import Timer, timer_wrapper
@@ -858,6 +863,11 @@ class MMProcessEngine:
                 mm_part=mm_part,
                 device=self.device,
                 forward_profiler=self.profiler.profile_forward,
+                # LOCAL shares a process with uncoordinated LLM CUDA launches.
+                # Runtime graph capture is only safe in the dedicated ViT role.
+                allow_idle_work=(
+                    vit_config.vit_separation == VitSeparation.VIT_SEPARATION_ROLE
+                ),
                 # Fill the existing bounded lookahead whenever it is provisioned.
                 prefetch_fill_batch=bool(scheduler_args.get("prefetch_batches", 0)),
                 **scheduler_args,

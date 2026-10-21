@@ -16,9 +16,6 @@ from collections import OrderedDict
 import torch
 import torch.nn.functional as F
 
-from rtp_llm.models_py.modules.dsv41.vision_residual_add import (
-    apply_vision_ffn_residual_add,
-)
 from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_vision import (
     _vision_cos_sin,
 )
@@ -132,7 +129,7 @@ def _packed_fa4_attention(q, k, v, grids, lengths):
     return torch.cat(outputs, dim=0)
 
 
-def forward_packed(vision, aligner, patches, grids, *, rope_bhsd=True):
+def forward_packed(vision, aligner, patches, grids, *, rope_bhsd=True, rotary=None):
     """Return aligned tensors in original image order, without token assembly.
 
     Concatenated rows share patch projection, QKV/WO, norms, and MLP GEMMs.
@@ -165,10 +162,11 @@ def forward_packed(vision, aligner, patches, grids, *, rope_bhsd=True):
             apply_packed_vision_qk_rope_bhsd,
         )
     x = vision.patch_embed(torch.cat([part.flatten(1) for part in patches], dim=0))
-    rotary = [
-        _vision_cos_sin(h, w, vision.rope_dim, vision.rope_theta, str(x.device))
-        for h, w in grids
-    ]
+    if rotary is None:
+        rotary = [
+            _vision_cos_sin(h, w, vision.rope_dim, vision.rope_theta, str(x.device))
+            for h, w in grids
+        ]
     cos = torch.cat([item[0] for item in rotary], dim=0)
     sin = torch.cat([item[1] for item in rotary], dim=0)
     # Retain the selected FlashInfer path's residual lifetime/order: an MLP
@@ -196,13 +194,7 @@ def forward_packed(vision, aligner, patches, grids, *, rope_bhsd=True):
         else:
             attention = _packed_attention(q, k, v, grids, lengths, qk_bhsd=qk_bhsd)
         attention_output = block.attn.wo(attention)
-        # Above the 2 GiB offset boundary, consolidate ATen's split residual
-        # add into one launch. Preserve its BF16 sum before the separate norm.
-        summed = apply_vision_ffn_residual_add(x, attention_output)
-        if summed is None:
-            x, normed = block.norm2.forward_with_residual(x, attention_output)
-        else:
-            x, normed = summed, block.norm2(summed)
+        x, normed = block.norm2.forward_with_residual(x, attention_output)
         pending_mlp = block.mlp(normed)
     if pending_mlp is None:
         x = vision.norm(x)

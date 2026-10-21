@@ -10,6 +10,7 @@ from rtp_llm.multimodal.multimodal_mixins.base_multimodal_mixin import (
     BaseMultiModalMixin,
     BaseVitWeights,
 )
+from rtp_llm.ops import VitSeparation
 
 from .deepseek_v41_vision import DeepSeekV41VisionEmbedding
 
@@ -47,6 +48,16 @@ class DeepSeekV41Mixin(BaseMultiModalMixin):
         return DeepSeekV41VisionEmbedding(
             config,
             max_batch_images=vit_config.embedding_scheduler_args()["max_batch_images"],
+            batch_max_bytes=vit_config.gpu_batch_max_bytes,
+            # Integrated LLM producers do not yet participate in this gate.
+            # Do not reserve otherwise unusable graph memory in that topology.
+            graph_max_entries=(
+                vit_config.gpu_graph_cache_max_entries
+                if vit_config.vit_separation == VitSeparation.VIT_SEPARATION_ROLE
+                else 0
+            ),
+            graph_max_bytes=vit_config.gpu_graph_cache_max_bytes,
+            cache_reserved_bytes=vit_config.mm_cache_gpu_max_bytes,
         )
 
     def _init_multimodal(self):

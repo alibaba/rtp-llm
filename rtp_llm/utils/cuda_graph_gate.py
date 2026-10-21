@@ -44,6 +44,34 @@ class CudaGraphGate:
                     self._condition.notify_all()
 
     @contextmanager
+    def try_capture(self):
+        """Reserve an idle capture window without queuing ahead of readers.
+
+        This only coordinates cooperating host threads. The owner must drain
+        their already submitted GPU work and exclude uncoordinated producers.
+        A miss must be deferred, not retried in a spin loop.
+        """
+        if getattr(self._local, "depth", 0):
+            raise RuntimeError("CUDA capture cannot upgrade an operation scope")
+        if self._capturing_thread == threading.get_ident():
+            raise RuntimeError("Nested CUDA capture is not supported")
+        with self._condition:
+            acquired = not (
+                self._readers
+                or self._waiting_captures
+                or self._capturing_thread is not None
+            )
+            if acquired:
+                self._capturing_thread = threading.get_ident()
+        try:
+            yield acquired
+        finally:
+            if acquired:
+                with self._condition:
+                    self._capturing_thread = None
+                    self._condition.notify_all()
+
+    @contextmanager
     def capture(self):
         if getattr(self._local, "depth", 0):
             raise RuntimeError("CUDA capture cannot upgrade an operation scope")

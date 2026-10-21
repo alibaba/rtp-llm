@@ -2,10 +2,13 @@
 
 import base64
 import json
+import logging
 import os
+import sys
 import threading
 import time
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 
 import torch
@@ -28,6 +31,7 @@ from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_vision import (
     Attention,
     RMSNorm,
     ViT,
+    _vision_cos_sin,
 )
 from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.gpu_input_transfer import (
     RGBBatchUploader,
@@ -93,27 +97,60 @@ class V41VisionAttention(Attention):
 
 
 class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
+    strict_work_budget = True
 
-    def __init__(self, config, *, device=None, max_batch_images=126):
+    def __init__(
+        self,
+        config,
+        *,
+        device=None,
+        max_batch_images=sys.maxsize,
+        batch_max_bytes=0,
+        graph_max_entries=4,
+        graph_max_bytes=0,
+        cache_reserved_bytes=2 * 1024**3,
+    ):
         super().__init__()
         self.processor_config = V41ImageProcessorConfig.from_model_config(config)
         # CPU workers decode RGB; the GPU owner transforms and packs images.
         # Existing MMScheduler owns cross-request admission and cancellation.
         self._rgb_uploader = None
-        # Retain the qualified 126-image/1,058,400-patch safety ceilings.
-        # The common VitConfig may request a smaller media batch.
         if max_batch_images < 1:
             raise ValueError("V4.1 packed image budget must be positive")
-        self._packed_max_images = min(max_batch_images, 126)
-        self._packed_max_patches = 1058400
+        if (
+            min(
+                batch_max_bytes,
+                graph_max_entries,
+                graph_max_bytes,
+                cache_reserved_bytes,
+            )
+            < 0
+        ):
+            raise ValueError("V4.1 resource budgets must be nonnegative")
+        self._packed_max_images = max_batch_images
+        self._batch_max_bytes = batch_max_bytes
+        self._graph_max_bytes = graph_max_bytes
+        self._cache_reserved_bytes = cache_reserved_bytes
+        self._resource_budget = None
+        self._resource_lock = threading.Lock()
+        self._staging_max_bytes = 4 * 1024**3
+        params = config.vision_parameters()
+        # Conservative live intermediates for packed projection, QKV/rotary,
+        # residuals and FFN, plus input patches. Backend scratch varies; this is
+        # admission estimation, not a promise that CUDA allocations cannot fail.
+        self._workspace_per_patch = 2 * (
+            3 * params["vision_patch_size"] ** 2
+            + 16 * params["vision_dim"]
+            + 6 * params["vision_inter_dim"]
+        )
         self._packed_stats_lock = threading.Lock()
         self._packed_batch_histogram = {}
         from .packed_graph import PackedVisionGraph
 
-        # The graph itself checks CUDA, full-batch shape and inference mode;
-        # unsupported shapes and CPU execution retain the eager path.
         self._packed_graph = PackedVisionGraph(
-            self._packed_max_images, self._packed_max_patches
+            self._packed_max_images,
+            max_entries=graph_max_entries,
+            max_bytes=graph_max_bytes,
         )
         self.vision = ViT(config.vision_parameters(), attention_cls=V41VisionAttention)
         self.aligner = Aligner(config.vision_parameters())
@@ -122,6 +159,103 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
         self.image_newline = nn.Parameter(torch.empty(hidden_size))
         self.image_end = nn.Parameter(torch.empty(hidden_size))
         self.to(device=device, dtype=torch.bfloat16)
+
+    def _apply(self, fn, recurse=True):
+        graph = getattr(self, "_packed_graph", None)
+        if graph is not None:
+            graph.clear()
+        self._resource_budget = None
+        self._rgb_uploader = None
+        return super()._apply(fn, recurse=recurse)
+
+    def load_state_dict(self, *args, **kwargs):
+        # Weight reload requires the same quiescent model lifecycle as before.
+        # No old-address graph or pending job may survive replacement weights.
+        if self._packed_graph is not None:
+            self._packed_graph.clear()
+        self._resource_budget = None
+        return super().load_state_dict(*args, **kwargs)
+
+    def _resolve_resource_budget(self):
+        with self._resource_lock:
+            if self._resource_budget is not None:
+                return self._resource_budget
+            if self._device.type == "cuda":
+                from rtp_llm.utils.cuda_graph_gate import cuda_graph_gate
+
+                with cuda_graph_gate.operation():
+                    free, _ = torch.cuda.mem_get_info(self._device)
+                self._staging_max_bytes = min(
+                    4 * 1024**3, max(16 * 1024**2, free // 16)
+                )
+                # Resolve once AFTER weights are loaded. Reserve both current
+                # and prefetched RGB, result cache, and 10% free-memory headroom.
+                available = free - max(free // 10, 1024**3)
+                available -= 2 * self._staging_max_bytes + self._cache_reserved_bytes
+                if available <= 0:
+                    raise RuntimeError(
+                        "insufficient free memory for ViT resource budgets"
+                    )
+            else:
+                # CPU/meta inspection does not initialize a CUDA context.
+                available = 64 * 1024**3
+            graph_bytes = self._graph_max_bytes or available // 2
+            if self._packed_graph is None or not self._packed_graph.max_entries:
+                graph_bytes = 0
+            batch_bytes = self._batch_max_bytes or (available - graph_bytes)
+            if batch_bytes <= 0 or batch_bytes + graph_bytes > available:
+                raise ValueError("ViT batch and graph budgets exceed available memory")
+            if self._packed_graph is not None:
+                self._packed_graph.max_bytes = graph_bytes
+            self._resource_budget = MMWorkEstimate(
+                estimated_workspace_bytes=batch_bytes
+            )
+            logging.info(
+                "V4.1 resources: image_cap=%d workspace_bytes=%d graph_bytes=%d "
+                "graph_entries=%d staging_bytes_per_batch=%d",
+                self._packed_max_images,
+                batch_bytes,
+                graph_bytes,
+                self._packed_graph.max_entries if self._packed_graph else 0,
+                self._staging_max_bytes,
+            )
+            return self._resource_budget
+
+    def _graph_context(self):
+        return tuple(
+            getattr(block.attn, "_attention_backend", "sdpa")
+            for block in self.vision.blocks
+        ) + (self.training, "residual_rmsnorm_r4_bf16", "quack_concat")
+
+    def _forward_packed(self, patches, grids, *, rotary=None):
+        from .packed_vision import forward_packed
+
+        return forward_packed(self.vision, self.aligner, patches, grids, rotary=rotary)
+
+    def _prepare_graph_forward(self, grids):
+        # Own each table, including when >32 distinct geometries evict the
+        # global rotary LRU. Replay must never reference an evicted allocation.
+        rotary = [
+            _vision_cos_sin(
+                h, w, self.vision.rope_dim, self.vision.rope_theta, str(self._device)
+            )
+            for h, w in grids
+        ]
+        forward = partial(self._forward_packed, rotary=rotary)
+        # Conservative per-entry charge even for tables shared with other keys.
+        forward.graph_owned_bytes = sum(
+            tensor.numel() * tensor.element_size() for pair in rotary for tensor in pair
+        )
+        return forward
+
+    def run_embedding_idle_work(self):
+        if self._packed_graph is None or self.training or self._device.type != "cuda":
+            return False
+        return self._packed_graph.build_one(
+            self._forward_packed,
+            context=self._graph_context(),
+            prepare_forward=self._prepare_graph_forward,
+        )
 
     @property
     def _device(self):
@@ -207,21 +341,29 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
         grids = [self._vit_grid(image) for image in data]
         sizes = [height * width for height, width in grids]
         ratio = self.processor_config.vision_downsample_ratio
+        output_tokens = sum(
+            num_image_tokens((h + ratio - 1) // ratio, (w + ratio - 1) // ratio)
+            for h, w in grids
+        )
+        rgb_bytes = sum(
+            image.rgb.numel() * image.rgb.element_size()
+            for image in data
+            if isinstance(image, (_DecodedImage, UploadedImage))
+        )
         return MMWorkEstimate(
             input_patches=sum(sizes),
-            output_tokens=sum(
-                num_image_tokens(
-                    (height + ratio - 1) // ratio,
-                    (width + ratio - 1) // ratio,
-                )
-                for height, width in grids
+            output_tokens=output_tokens,
+            estimated_workspace_bytes=(
+                sum(sizes) * self._workspace_per_patch
+                + rgb_bytes
+                + output_tokens * self.image_start.numel() * 2 * 4
             ),
             max_attention_segment=max(sizes, default=0),
             attention_work=sum(size * size for size in sizes),
         )
 
     def get_batch_work_budget(self, max_batch_media):
-        return MMWorkEstimate(input_patches=self._packed_max_patches)
+        return self._resolve_resource_budget()
 
     def packed_forward_stats(self):
         with self._packed_stats_lock:
@@ -234,7 +376,10 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
     def packed_graph_stats(self):
         if self._packed_graph is None:
             return {"enabled": False, "captures": 0, "replays": 0, "eager": 0}
-        return {"enabled": True, **self._packed_graph.stats()}
+        return {
+            "enabled": self._packed_graph.max_entries > 0,
+            **self._packed_graph.stats(),
+        }
 
     def input_transfer_stats(self):
         if self._rgb_uploader is None:
@@ -253,9 +398,9 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
             isinstance(image, _DecodedImage) for group in groups for image in group
         ):
             return None
+        self._resolve_resource_budget()
         if self._rgb_uploader is None:
-            # Bounded pinned staging as in the qualified 126-image path.
-            self._rgb_uploader = RGBBatchUploader(self._device, 4 * 1024**3)
+            self._rgb_uploader = RGBBatchUploader(self._device, self._staging_max_bytes)
         return self._rgb_uploader.upload(
             [[image.rgb for image in group] for group in groups],
             [isinstance(data, _DecodedImage) for data in data_list],
@@ -269,33 +414,27 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
         Each bounded chunk uses the production packed ViT/aligner path and owns
         independent assembled outputs for its callers.
         """
-        from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.packed_vision import (
-            forward_packed,
-        )
         from rtp_llm.utils.cuda_graph_gate import cuda_graph_gate
 
         images = list(images)
-        # Keep the capacity guard: an image that cannot fit must not leave
-        # the chunking loop at the same offset forever.
-        if any(
-            image.n_vit_h * image.n_vit_w > self._packed_max_patches for image in images
-        ):
-            raise ValueError("V4.1 image exceeds packed patch budget")
+        if not images:
+            return []
+        budget = self._resolve_resource_budget()
+        estimates = [self.estimate_work(image) for image in images]
+        if any(not estimate.fits_within(budget) for estimate in estimates):
+            raise ValueError("V4.1 image exceeds packed workspace budget")
         outputs = []
         offset = 0
         while offset < len(images):
-            end, patch_count = offset, 0
+            end, work = offset, MMWorkEstimate()
             while end < len(images) and end - offset < self._packed_max_images:
-                count = images[end].n_vit_h * images[end].n_vit_w
-                if patch_count + count > self._packed_max_patches:
+                candidate = work + estimates[end]
+                if not candidate.fits_within(budget):
                     break
-                patch_count += count
+                work = candidate
                 end += 1
             chunk = images[offset:end]
             grids = [(image.n_vit_h, image.n_vit_w) for image in chunk]
-
-            def forward(patches, grids):
-                return forward_packed(self.vision, self.aligner, patches, grids)
 
             def consume(aligned):
                 if len(aligned) != len(chunk):
@@ -311,9 +450,18 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
                     for image in chunk
                 ]
                 if self._packed_graph is None:
-                    outputs.extend(consume(forward(patches, grids)))
+                    outputs.extend(consume(self._forward_packed(patches, grids)))
             if self._packed_graph is not None:
-                outputs.extend(self._packed_graph.run(patches, grids, forward, consume))
+                outputs.extend(
+                    self._packed_graph.run(
+                        patches,
+                        grids,
+                        self._forward_packed,
+                        consume,
+                        context=self._graph_context(),
+                        estimated_bytes=work.estimated_workspace_bytes,
+                    )
+                )
             with self._packed_stats_lock:
                 count = len(chunk)
                 self._packed_batch_histogram[count] = (
@@ -427,8 +575,8 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
         if not isinstance(image, (_DecodedImage, UploadedImage)):
             return image
         n_vit_h, n_vit_w = self._vit_grid(image)
-        if n_vit_h * n_vit_w > self._packed_max_patches:
-            raise ValueError("V4.1 decoded image exceeds packed patch budget")
+        if not self.estimate_work(image).fits_within(self._resolve_resource_budget()):
+            raise ValueError("V4.1 decoded image exceeds packed workspace budget")
         patch = self.processor_config.vision_patch_size
         with torch.profiler.record_function("v41_gpu_preprocess"):
             patches = _preprocess_rgb_on_device(
