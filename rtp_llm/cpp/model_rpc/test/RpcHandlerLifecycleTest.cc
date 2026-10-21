@@ -14,6 +14,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorResourceStore.h"
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
+#include "rtp_llm/cpp/model_rpc/PDRequestUtils.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/testing/TestLogCapture.h"
@@ -454,6 +455,54 @@ TEST_F(RpcHandlerLifecycleTest, ProductionBatchEnqueueFailuresReleaseAllReservat
             auto handle = server.cancel_registry_->find(kRequestId + i);
             ASSERT_NE(handle, nullptr);
             EXPECT_TRUE(handle->local_done.load());
+        }
+    }
+}
+
+TEST_F(RpcHandlerLifecycleTest, ProductionBatchDeadlineAndPreprocessRejectionsNeverReachEngine) {
+    for (const bool terminal_deadline : {true, false}) {
+        auto engine = std::make_shared<BatchAdmissionEngine>();
+        auto meta = std::make_shared<RpcServerRuntimeMeta>();
+        PrefillRpcServer server;
+        server.engine_ = engine;
+        server.meta_ = meta;
+        server.cancel_registry_ = std::make_unique<PDCancelRegistry>(meta);
+        P2PConnectorConfig config;
+        config.role_type = RoleType::PREFILL;
+        auto connector = std::make_shared<P2PConnector>(config, nullptr, nullptr);
+        connector->prefill_ = std::make_unique<P2PConnectorPrefill>(config, nullptr, nullptr);
+        auto store = std::make_shared<P2PConnectorResourceStore>(nullptr);
+        connector->prefill_->stream_store_ = store;
+        engine->getCacheManager()->p2p_connector_ = connector;
+        EnqueueBatchRequestPB request;
+        request.set_batch_id(kBatchId);
+        auto* slot = request.add_dp_slots();
+        slot->set_dp_rank(0);
+        auto* item = slot->add_requests()->mutable_input();
+        *item = lifecycleRequest();
+        if (terminal_deadline) {
+            const auto key = masterEnqueuedHandoffUniqueKey(kRequestId);
+            const auto deadline = store->requestDeadline(key, 10000);
+            store->markCancelled(key, deadline);
+        } else {
+            item->add_multimodal_inputs()->set_multimodal_url("missing-processor-image");
+        }
+        grpc::ServerContext context;
+        EnqueueBatchResponsePB response;
+        ASSERT_TRUE(server.EnqueueBatch(&context, &request, &response).ok());
+        EXPECT_EQ(response.successes_size(), 0);
+        ASSERT_EQ(response.errors_size(), 1);
+        EXPECT_EQ(response.errors(0).request_id(), kRequestId);
+        EXPECT_EQ(response.errors(0).error_info().error_code(), static_cast<int64_t>(
+            terminal_deadline ? ErrorCode::GENERATE_TIMEOUT : ErrorCode::MM_NOT_SUPPORTED_ERROR));
+        EXPECT_TRUE(engine->admitted_inputs.empty());
+        EXPECT_TRUE(server.batch_entries_.empty());
+        EXPECT_EQ(server.onflightRequestNum(), 0u);
+        if (!terminal_deadline) {
+            auto handle = server.cancel_registry_->find(kRequestId);
+            ASSERT_NE(handle, nullptr);
+            EXPECT_TRUE(handle->local_done.load());
+            EXPECT_TRUE(handle->downstream_done);
         }
     }
 }

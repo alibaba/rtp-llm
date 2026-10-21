@@ -138,6 +138,36 @@ TEST(PrefillRpcServerTest, BatchMissingInputAndWrongDpRankReturnPerItemErrorsBef
     EXPECT_EQ(server.onflight_requests_.load(), 0u);
 }
 
+TEST(PrefillRpcServerTest, BatchActiveIdRejectionPreservesTheOriginalReservation) {
+    PrefillRpcServer server;
+    const auto key = masterEnqueuedHandoffUniqueKey(990);
+    server.batch_entries_[key].reserved = true;
+    EnqueueBatchRequestPB request;
+    auto* slot = request.add_dp_slots();
+    slot->set_dp_rank(0);
+    slot->add_requests()->mutable_input()->set_request_id(990);
+    grpc::ServerContext context;
+    EnqueueBatchResponsePB response;
+    ASSERT_TRUE(server.EnqueueBatch(&context, &request, &response).ok());
+    ASSERT_EQ(response.errors_size(), 1);
+    EXPECT_EQ(response.errors(0).request_id(), 990);
+    EXPECT_EQ(response.errors(0).error_info().error_code(), static_cast<int64_t>(ErrorCode::INVALID_PARAMS));
+    EXPECT_EQ(response.successes_size(), 0);
+    ASSERT_EQ(server.batch_entries_.size(), 1u);
+    EXPECT_TRUE(server.batch_entries_.at(key).reserved);
+}
+
+TEST(PrefillRpcServerTest, BatchRejectsUnsupportedMultipleDpBeforeEngineAccess) {
+    PrefillRpcServer server;
+    server.maga_init_params_.parallelism_config.dp_size = 2;
+    grpc::ServerContext context;
+    EnqueueBatchRequestPB request;
+    EnqueueBatchResponsePB response;
+    EXPECT_ANY_THROW(server.EnqueueBatch(&context, &request, &response));
+    EXPECT_TRUE(server.batch_entries_.empty());
+    EXPECT_EQ(server.onflightRequestNum(), 0u);
+}
+
 TEST(PrefillRpcServerTest, BatchConversionExceptionReleasesReservationForRetry) {
     PrefillRpcServer server;
     EnqueueBatchRequestPB request;
