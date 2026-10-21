@@ -14,6 +14,7 @@
 #include "rtp_llm/cpp/utils/TorchCudaOom.h"
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
 #include "rtp_llm/cpp/model_rpc/LocalRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/PDRequestUtils.h"
 #include "rtp_llm/cpp/multimodal_processor/MMProcessorConfig.h"
 #include "rtp_llm/cpp/model_rpc/BatchStreamOutputCollector.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
@@ -412,41 +413,6 @@ grpc::Status LocalRpcServer::pollBatchStreamOutput(grpc::ServerContext*         
     return grpc::Status::OK;
 }
 
-ErrorInfo LocalRpcServer::updateMultimodalFeaturesWithTrace(
-    std::shared_ptr<GenerateInput>&                                     input,
-    const opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>& parent_span,
-    grpc::ServerContext*                                                server_context) {
-    if (!telemetry::TelemetryRuntime::isActive() || parent_span == nullptr || !input->multimodal_inputs
-        || input->multimodal_inputs->empty()) {
-        return mm_processor_->updateMultimodalFeatures(input, server_context);
-    }
-
-    opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span> span;
-    try {
-        opentelemetry::trace::StartSpanOptions options;
-        options.parent = parent_span->GetContext();
-        options.kind   = opentelemetry::trace::SpanKind::kInternal;
-        span           = telemetry::TelemetryRuntime::tracer()->StartSpan("rtp_llm.vit", options);
-    } catch (...) {}
-    grpc::Status                   status;
-    telemetry::GrpcStatusSpanGuard guard(span, &status, telemetry::SpanStatusSemantics::Logical);
-    try {
-        guard.setAttribute(telemetry::kAttrRequestId, std::to_string(input->request_id));
-    } catch (...) {}
-
-    // Include preprocessing, embedding transport and token expansion in one operation.
-    auto result = mm_processor_->updateMultimodalFeatures(input, server_context);
-    if (!result.ok()) {
-        status = grpc::Status(grpc::StatusCode::INTERNAL, "");
-        try {
-            const auto reason = ErrorCodeToString(result.code());
-            guard.setLogicalErrorType(reason);
-            guard.setAttribute(telemetry::kAttrRtpLlmErrorCode, static_cast<int64_t>(result.code()));
-            guard.setAttribute(telemetry::kAttrRtpLlmErrorReason, reason);
-        } catch (...) {}
-    }
-    return result;
-}
 
 ErrorInfo LocalRpcServer::prepareInput(const GenerateInputPB&                                              input_pb,
                                        std::shared_ptr<GenerateInput>&                                     output,
@@ -457,7 +423,7 @@ ErrorInfo LocalRpcServer::prepareInput(const GenerateInputPB&                   
         output = QueryConverter::transQuery(&input_pb);
         if (mm_processor_ != nullptr && (output->multimodal_inputs || output->v41_inputs)) {
             RTP_LLM_PROFILE_SCOPE("rpc.mm_update_features");
-            auto mm_res = updateMultimodalFeaturesWithTrace(output, parent_span, server_context);
+            auto mm_res = updateMultimodalFeaturesWithTrace(*mm_processor_, output, parent_span, server_context);
             if (!mm_res.ok()) {
                 return mm_res;
             }

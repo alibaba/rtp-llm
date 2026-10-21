@@ -323,7 +323,10 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
     int64_t mm_cost_us = 0, enqueue_cost_us = 0, poll_cost_us = 0;
     int64_t phase_start = currentTimeUs();
 
-    auto preprocess_status = preprocessForPD(input, mm_processor_.get(), engine_->isMTPEagle(), RoleType::PREFILL, server_context);
+    auto preprocess_status = preprocessForPD(
+        input, mm_processor_.get(), engine_->isMTPEagle(), RoleType::PREFILL, server_context,
+        generate_context.trace_span_guard ? generate_context.trace_span_guard->sharedSpan() :
+                                           opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>{});
     mm_cost_us             = currentTimeUs() - phase_start;
     if (!preprocess_status.ok()) {
         generate_context.error_status = serializeErrorMsg(generate_context.request_key, preprocess_status);
@@ -421,6 +424,11 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
 grpc::Status PrefillRpcServer::EnqueueBatch(grpc::ServerContext*         context,
                                             const EnqueueBatchRequestPB* request,
                                             EnqueueBatchResponsePB*      response) {
+    grpc::Status trace_status;
+    auto batch_span = telemetry::startRpcServerSpan(
+        "rtp_llm.enqueue_batch", context, true, "RpcService/EnqueueBatch");
+    telemetry::GrpcStatusSpanGuard batch_trace(batch_span, &trace_status);
+    batch_trace.setAttribute(telemetry::kAttrGenAiPdRole, telemetry::kValPdRoleProducer);
     c10::InferenceMode inference_guard(true);
     RTP_LLM_PROFILE_FUNCTION();
     AtomicGuard request_guard(onflight_requests_);
@@ -489,7 +497,8 @@ grpc::Status PrefillRpcServer::EnqueueBatch(grpc::ServerContext*         context
             }
             if (context && context->IsCancelled()) {
                 release_admitted_request_ids();
-                return grpc::Status(grpc::StatusCode::CANCELLED, "P2P EnqueueBatch cancelled before admission");
+                trace_status = grpc::Status(grpc::StatusCode::CANCELLED, "P2P EnqueueBatch cancelled before admission");
+                return trace_status;
             }
             {
                 std::lock_guard<std::mutex> lock(batch_mutex_);
@@ -539,7 +548,7 @@ grpc::Status PrefillRpcServer::EnqueueBatch(grpc::ServerContext*         context
                     addBatchError(response, request_id, admission.code(), admission.ToString());
                     continue;
                 }
-                const auto preprocess_status = preprocessForPD(input, mm_processor_.get(), engine_->isMTPEagle(), RoleType::PREFILL, context);
+                const auto preprocess_status = preprocessForPD(input, mm_processor_.get(), engine_->isMTPEagle(), RoleType::PREFILL, context, batch_span);
                 if (!preprocess_status.ok()) {
                     cancel_registry_->finishLocal(cancel_handle);
                     cancel_registry_->finishDownstream(cancel_handle);
@@ -580,15 +589,18 @@ grpc::Status PrefillRpcServer::EnqueueBatch(grpc::ServerContext*         context
         std::tie(enqueue_successes, streams) = engine_->enqueueMultiple(inputs);
     } catch (const std::exception& e) {
         release_admitted_request_ids();
-        return grpc::Status(grpc::StatusCode::INTERNAL,
+        trace_status = grpc::Status(grpc::StatusCode::INTERNAL,
                             "P2P EnqueueBatch enqueueMultiple exception: " + std::string(e.what()));
+        return trace_status;
     } catch (...) {
         release_admitted_request_ids();
-        return grpc::Status(grpc::StatusCode::INTERNAL, "P2P EnqueueBatch enqueueMultiple unknown exception");
+        trace_status = grpc::Status(grpc::StatusCode::INTERNAL, "P2P EnqueueBatch enqueueMultiple unknown exception");
+        return trace_status;
     }
     if (enqueue_successes.size() != inputs.size() || streams.size() != inputs.size()) {
         release_admitted_request_ids();
-        return grpc::Status(grpc::StatusCode::INTERNAL, "P2P EnqueueBatch result size mismatch");
+        trace_status = grpc::Status(grpc::StatusCode::INTERNAL, "P2P EnqueueBatch result size mismatch");
+        return trace_status;
     }
     for (size_t i = 0; i < inputs.size(); ++i) {
         if (enqueue_successes[i]) {

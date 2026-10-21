@@ -211,6 +211,7 @@ cc_test(
         "//rtp_llm/cpp/engine_base/schedulers",
         "//rtp_llm/cpp/engine_base/stream:stream",
         "@havenask//aios/autil:net",
+        "@io_opentelemetry_cpp//exporters/memory:in_memory_span_exporter",
     ],
     env = {
         "TEST_USING_DEVICE": "CUDA",

@@ -1,6 +1,44 @@
 #include "rtp_llm/cpp/model_rpc/PDRequestUtils.h"
+#include "rtp_llm/cpp/telemetry/RpcTraceHelper.h"
 
 namespace rtp_llm {
+
+ErrorInfo updateMultimodalFeaturesWithTrace(
+    MultimodalProcessor& processor,
+    std::shared_ptr<GenerateInput>& input,
+    const opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>& parent_span,
+    grpc::ServerContext* server_context) {
+    if (!telemetry::TelemetryRuntime::isActive() || parent_span == nullptr || !input->multimodal_inputs
+        || input->multimodal_inputs->empty()) {
+        return processor.updateMultimodalFeatures(input, server_context);
+    }
+
+    opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span> span;
+    try {
+        opentelemetry::trace::StartSpanOptions options;
+        options.parent = parent_span->GetContext();
+        options.kind   = opentelemetry::trace::SpanKind::kInternal;
+        span           = telemetry::TelemetryRuntime::tracer()->StartSpan("rtp_llm.vit", options);
+    } catch (...) {}
+    grpc::Status                   status;
+    telemetry::GrpcStatusSpanGuard guard(span, &status, telemetry::SpanStatusSemantics::Logical);
+    try {
+        guard.setAttribute(telemetry::kAttrRequestId, std::to_string(input->request_id));
+    } catch (...) {}
+
+    // Include preprocessing, embedding transport and token expansion in one operation.
+    auto result = processor.updateMultimodalFeatures(input, server_context);
+    if (!result.ok()) {
+        status = grpc::Status(grpc::StatusCode::INTERNAL, "");
+        try {
+            const auto reason = ErrorCodeToString(result.code());
+            guard.setLogicalErrorType(reason);
+            guard.setAttribute(telemetry::kAttrRtpLlmErrorCode, static_cast<int64_t>(result.code()));
+            guard.setAttribute(telemetry::kAttrRtpLlmErrorReason, reason);
+        } catch (...) {}
+    }
+    return result;
+}
 
 std::string masterEnqueuedHandoffUniqueKey(int64_t request_id) {
     return "master_enqueued_" + std::to_string(request_id);
@@ -37,7 +75,8 @@ ErrorInfo preprocessForPD(std::shared_ptr<GenerateInput>& input,
                           MultimodalProcessor*            processor,
                           bool                            is_mtp_eagle,
                           RoleType                        role,
-                          grpc::ServerContext*            server_context) {
+                          grpc::ServerContext*            server_context,
+                          const opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>& span) {
     input->generate_config->pd_separation        = true;
     input->generate_config->force_disable_sp_run = !is_mtp_eagle;
     if (role == RoleType::DECODE) {
@@ -74,9 +113,9 @@ ErrorInfo preprocessForPD(std::shared_ptr<GenerateInput>& input,
     }
     if (input->multimodal_inputs) {
         if (!processor) {
-            return {ErrorCode::MM_EMPTY_ENGINE_ERROR, "PD multimodal request requires a multimodal processor"};
+            return {ErrorCode::MM_NOT_SUPPORTED_ERROR, "PD multimodal request requires a multimodal processor"};
         }
-        return processor->updateMultimodalFeatures(input, server_context);
+        return updateMultimodalFeaturesWithTrace(*processor, input, span, server_context);
     }
     return ErrorInfo::OkStatus();
 }
