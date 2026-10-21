@@ -31,5 +31,4 @@ cc_test(
         "//rtp_llm/cpp/cache/connector/test/mock:connector_mock_files_lib",
     ],
     env = {},
-    exec_properties = {'gpu':'H20'},
 )
