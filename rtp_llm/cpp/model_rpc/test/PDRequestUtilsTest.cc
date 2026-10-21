@@ -1,4 +1,7 @@
 #include <gtest/gtest.h>
+#include <functional>
+#include <chrono>
+#include <thread>
 #include "opentelemetry/exporters/memory/in_memory_span_data.h"
 #include "opentelemetry/exporters/memory/in_memory_span_exporter_factory.h"
 #include "rtp_llm/cpp/telemetry/RpcTraceHelper.h"
@@ -32,6 +35,9 @@ public:
     int  calls            = 0;
     int  embedding_length = 3;
     bool fail             = false;
+    int                      failures_remaining = 0;
+    ErrorCode                failure_code       = ErrorCode::MM_PROCESS_ERROR;
+    std::function<void(int)> on_call;
     grpc::ServerContext* seen_context = nullptr;
 
 private:
@@ -39,8 +45,12 @@ private:
     MultimodalEmbedding(const std::vector<MultimodalInput>, std::string, int64_t, grpc::ServerContext* context) override {
         ++calls;
         seen_context = context;
-        if (fail) {
-            return {ErrorCode::MM_PROCESS_ERROR, "test MM failure"};
+        if (on_call)
+            on_call(calls);
+        if (fail || failures_remaining > 0) {
+            if (failures_remaining > 0)
+                --failures_remaining;
+            return {failure_code, "test MM failure"};
         }
         MultimodalOutput output;
         output.mm_features     = {torch::zeros({embedding_length, 2})};
@@ -234,6 +244,102 @@ TEST(PDRequestUtilsTest, DecodeRejectsRawOrMalformedMultimodalIds) {
     input = QueryConverter::transQuery(&request);
     EXPECT_EQ(preprocessForPD(input, nullptr, false, RoleType::DECODE, nullptr, {}).code(), ErrorCode::MM_WRONG_FORMAT_ERROR);
     EXPECT_FALSE(input->text_tokens_mask);
+}
+
+TEST(PDRequestUtilsTest, PrefillRetryRebuildsPartialInputWithoutRenewingRequestBudget) {
+    const auto request         = makeMMRequest();
+    auto       input           = QueryConverter::transQuery(&request);
+    const auto deadline        = currentTimeMs() + 60000;
+    const auto begin_time      = input->begin_time_us;
+    input->request_deadline_ms = deadline;
+    PDSepConfig config;
+    config.prefill_retry_times      = 1;
+    config.prefill_retry_timeout_ms = 0;
+    TestMultimodalProcessor processor;
+    processor.failures_remaining = 1;
+    processor.on_call            = [&](int attempt) {
+        if (attempt == 1) {
+            input->input_ids.fill_(777);
+            input->generate_config->unique_key = "partial";
+            input->begin_time_us               = 0;
+            input->request_deadline_ms         = deadline + 10000;
+        } else {
+            EXPECT_TRUE(torch::equal(input->input_ids, torch::tensor({10, 1, 20}, torch::kInt32)));
+            EXPECT_EQ(input->generate_config->unique_key, "pd-test");
+            EXPECT_EQ(input->begin_time_us, begin_time);
+            EXPECT_EQ(input->request_deadline_ms, deadline);
+        }
+    };
+    ASSERT_TRUE(preprocessPrefillWithRetry(request, input, &processor, false, config, nullptr, {}, {}).ok());
+    EXPECT_EQ(processor.calls, 2);
+    auto                    expected = QueryConverter::transQuery(&request);
+    TestMultimodalProcessor successful;
+    ASSERT_TRUE(preprocessForPD(expected, &successful, false, RoleType::PREFILL, nullptr, {}).ok());
+    EXPECT_TRUE(torch::equal(input->input_ids, expected->input_ids));
+    EXPECT_EQ(request.token_ids(0), 10);
+    EXPECT_EQ(input->request_deadline_ms, deadline);
+    EXPECT_EQ(input->begin_time_us, begin_time);
+}
+
+TEST(PDRequestUtilsTest, PrefillRetryCountIsBoundedAndPermanentErrorsDoNotRetry) {
+    const auto  request = makeMMRequest();
+    PDSepConfig config;
+    config.prefill_retry_times      = 2;
+    config.prefill_retry_timeout_ms = 0;
+    for (const auto error : {ErrorCode::MM_REMOTE_RPC_FAILED, ErrorCode::MM_WRONG_FORMAT_ERROR}) {
+        auto                    input = QueryConverter::transQuery(&request);
+        TestMultimodalProcessor processor;
+        processor.fail         = true;
+        processor.failure_code = error;
+        const auto status      = preprocessPrefillWithRetry(request, input, &processor, false, config, nullptr, {}, {});
+        EXPECT_EQ(status.code(), error);
+        EXPECT_EQ(status.ToString(), "test MM failure");
+        EXPECT_EQ(processor.calls, error == ErrorCode::MM_REMOTE_RPC_FAILED ? 3 : 1);
+    }
+    auto                    input = QueryConverter::transQuery(&request);
+    TestMultimodalProcessor disabled;
+    disabled.fail              = true;
+    config.prefill_retry_times = 0;
+    EXPECT_EQ(preprocessPrefillWithRetry(request, input, &disabled, false, config, nullptr, {}, {}).code(),
+              ErrorCode::MM_PROCESS_ERROR);
+    EXPECT_EQ(disabled.calls, 1);
+}
+
+TEST(PDRequestUtilsTest, PrefillRetryBudgetStopsFurtherAttemptsAndPreservesLastError) {
+    const auto  request = makeMMRequest();
+    auto        input   = QueryConverter::transQuery(&request);
+    PDSepConfig config;
+    config.prefill_retry_times      = 5;
+    config.prefill_retry_timeout_ms = 1;
+    TestMultimodalProcessor processor;
+    processor.fail    = true;
+    processor.on_call = [](int) { std::this_thread::sleep_for(std::chrono::milliseconds(5)); };
+    const auto result = preprocessPrefillWithRetry(request, input, &processor, false, config, nullptr, {}, {});
+    EXPECT_EQ(result.code(), ErrorCode::MM_PROCESS_ERROR);
+    EXPECT_EQ(processor.calls, 1);
+}
+
+TEST(PDRequestUtilsTest, PrefillRetryHonorsCancellationCauseAndExpiredRequest) {
+    const auto  request = makeMMRequest();
+    auto        input   = QueryConverter::transQuery(&request);
+    PDSepConfig config;
+    config.prefill_retry_times      = 5;
+    config.prefill_retry_timeout_ms = 0;
+    TestMultimodalProcessor processor;
+    processor.fail    = true;
+    bool canceled     = false;
+    processor.on_call = [&](int) { canceled = true; };
+    const auto result = preprocessPrefillWithRetry(request, input, &processor, false, config, nullptr, {}, [&] {
+        return canceled ? ErrorInfo(ErrorCode::PRIORITY_PREEMPTED, "preempted") : ErrorInfo::OkStatus();
+    });
+    EXPECT_EQ(result.code(), ErrorCode::PRIORITY_PREEMPTED);
+    EXPECT_EQ(processor.calls, 1);
+    input                      = QueryConverter::transQuery(&request);
+    input->request_deadline_ms = currentTimeMs() - 1;
+    TestMultimodalProcessor expired;
+    EXPECT_EQ(preprocessPrefillWithRetry(request, input, &expired, false, config, nullptr, {}, {}).code(),
+              ErrorCode::GENERATE_TIMEOUT);
+    EXPECT_EQ(expired.calls, 0);
 }
 
 }  // namespace rtp_llm

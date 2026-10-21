@@ -1,6 +1,8 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
+#include "rtp_llm/cpp/config/ConfigModules.h"
 #include <string>
 #include "opentelemetry/nostd/shared_ptr.h"
 #include "opentelemetry/trace/span.h"
@@ -33,5 +35,16 @@ ErrorInfo preprocessForPD(std::shared_ptr<GenerateInput>& input,
                           RoleType                        role,
                           grpc::ServerContext*            server_context,
                           const opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>& span);
+
+// Rebuild a failed Prefill MM attempt from immutable wire input, preserving the
+// original local request deadline and start time. Decode never calls this path.
+ErrorInfo preprocessPrefillWithRetry(const GenerateInputPB&                                              request,
+                                     std::shared_ptr<GenerateInput>&                                     input,
+                                     MultimodalProcessor*                                                processor,
+                                     bool                                                                is_mtp_eagle,
+                                     const PDSepConfig&                                                  config,
+                                     grpc::ServerContext*                                                server_context,
+                                     const opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>& span,
+                                     const std::function<ErrorInfo()>&                                   cancellation);
 
 }  // namespace rtp_llm

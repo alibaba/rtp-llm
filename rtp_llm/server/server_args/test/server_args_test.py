@@ -37,6 +37,32 @@ class CustomAllReduceArgumentsTest(TestCase):
         self.assertIs(configs.ft_disable_custom_ar_override, True)
 
 
+class PrefillMultimodalRetryArgumentsTest(TestCase):
+    def test_retry_environment_and_cli_precedence(self):
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(
+            os.environ,
+            {"PREFILL_RETRY_TIMES": "2", "PREFILL_RETRY_TIMEOUT_MS": "75"},
+            clear=True,
+        ):
+            environment = server_args.setup_args([]).pd_separation_config
+            explicit = server_args.setup_args(
+                ["--prefill_retry_times", "3", "--prefill_retry_timeout_ms", "100"]
+            ).pd_separation_config
+        self.assertEqual(environment.prefill_retry_times, 2)
+        self.assertEqual(environment.prefill_retry_timeout_ms, 75)
+        self.assertEqual(explicit.prefill_retry_times, 3)
+        self.assertEqual(explicit.prefill_retry_timeout_ms, 100)
+
+    def test_retry_is_disabled_by_default(self):
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(os.environ, {}, clear=True):
+            config = server_args.setup_args([]).pd_separation_config
+        self.assertEqual(config.prefill_retry_times, 0)
+
+
 class CacheConfigArgumentsTest(TestCase):
     # Keep the supported startup fields explicit, independently of parser registration.
     samples = {

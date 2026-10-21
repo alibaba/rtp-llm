@@ -617,6 +617,8 @@ std::string PDSepConfig::to_string() const {
         << "cache_store_rdma_listen_port: " << cache_store_rdma_listen_port << "\n"
         << "cache_store_rdma_connect_port: " << cache_store_rdma_connect_port << "\n"
         << "remote_rpc_server_port: " << remote_rpc_server_port << "\n"
+        << "prefill_retry_times: " << prefill_retry_times << "\n"
+        << "prefill_retry_timeout_ms: " << prefill_retry_timeout_ms << "\n"
         << "load_cache_timeout_ms: " << load_cache_timeout_ms << "\n"
         << "max_rpc_timeout_ms: " << max_rpc_timeout_ms << "\n"
         << "worker_port_offset: " << worker_port_offset << "\n";

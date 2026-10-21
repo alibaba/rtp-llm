@@ -4,6 +4,23 @@ def init_pd_separation_group_args(parser, pd_separation_config):
     ##############################################################################################################
     pd_separation_group = parser.add_argument_group("pd_separation")
     pd_separation_group.add_argument(
+        "--prefill_retry_times",
+        env_name="PREFILL_RETRY_TIMES",
+        bind_to=(pd_separation_config, "prefill_retry_times"),
+        type=int,
+        default=0,
+        help="Prefill 多模态瞬时错误的额外重试次数，0 表示不重试。",
+    )
+    pd_separation_group.add_argument(
+        "--prefill_retry_timeout_ms",
+        env_name="PREFILL_RETRY_TIMEOUT_MS",
+        bind_to=(pd_separation_config, "prefill_retry_timeout_ms"),
+        type=int,
+        default=0,
+        help="Prefill 多模态重试预算（毫秒），0 表示不另设预算；不会延长请求 deadline。",
+    )
+
+    pd_separation_group.add_argument(
         "--load_cache_timeout_ms",
         env_name="LOAD_CACHE_TIMEOUT_MS",
         bind_to=(pd_separation_config, "load_cache_timeout_ms"),

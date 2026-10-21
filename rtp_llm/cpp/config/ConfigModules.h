@@ -527,6 +527,8 @@ struct PDSepConfig {
     int64_t     cache_store_rdma_listen_port  = 0;
     int64_t     cache_store_rdma_connect_port = 0;
     int64_t     remote_rpc_server_port        = 0;
+    int64_t     prefill_retry_times           = 0;
+    int64_t     prefill_retry_timeout_ms      = 20;
     int64_t     load_cache_timeout_ms         = 60000;
     int64_t     max_rpc_timeout_ms            = 2 * 3600 * 1000;  // 2h default
     int64_t     worker_port_offset            = 0;

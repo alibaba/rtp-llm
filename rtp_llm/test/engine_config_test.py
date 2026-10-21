@@ -197,16 +197,18 @@ class EngineConfigTest(TestCase):
         config.cache_store_rdma_mode = False
         config.load_cache_timeout_ms = 12345
         config.max_rpc_timeout_ms = 67890
+        config.prefill_retry_times = 3
+        config.prefill_retry_timeout_ms = 75
         state = config.__getstate__()
-        self.assertEqual(len(state), 10)
+        self.assertEqual(len(state), 12)
         restored = pickle.loads(pickle.dumps(config))
         self.assertEqual(restored.__getstate__(), state)
         self.assertEqual(restored.role_type, RoleType.DECODE)
         self.assertEqual(restored.load_cache_timeout_ms, 12345)
+        self.assertEqual(restored.prefill_retry_times, 3)
+        self.assertEqual(restored.prefill_retry_timeout_ms, 75)
         for removed in (
             "decode_entrance",
-            "prefill_retry_times",
-            "prefill_retry_timeout_ms",
             "prefill_max_wait_timeout_ms",
             "decode_retry_times",
             "decode_retry_timeout_ms",

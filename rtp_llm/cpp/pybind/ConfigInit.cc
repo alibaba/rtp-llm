@@ -2197,6 +2197,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("cache_store_rdma_listen_port", &PDSepConfig::cache_store_rdma_listen_port)
         .def_readwrite("cache_store_rdma_connect_port", &PDSepConfig::cache_store_rdma_connect_port)
         .def_readwrite("remote_rpc_server_port", &PDSepConfig::remote_rpc_server_port)
+        .def_readwrite("prefill_retry_times", &PDSepConfig::prefill_retry_times)
+        .def_readwrite("prefill_retry_timeout_ms", &PDSepConfig::prefill_retry_timeout_ms)
         .def_readwrite("load_cache_timeout_ms", &PDSepConfig::load_cache_timeout_ms)
         .def_readwrite("max_rpc_timeout_ms", &PDSepConfig::max_rpc_timeout_ms)
         .def_readwrite("worker_port_offset", &PDSepConfig::worker_port_offset)
@@ -2212,11 +2214,13 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.remote_rpc_server_port,
                                       self.load_cache_timeout_ms,
                                       self.max_rpc_timeout_ms,
-                                      self.worker_port_offset);
+                                      self.worker_port_offset,
+                                      self.prefill_retry_times,
+                                      self.prefill_retry_timeout_ms);
             },
             [](py::tuple t) {
-                if (t.size() != 10)
-                    throw std::runtime_error("Invalid PDSepConfig state: expected 10 fields, got "
+                if (t.size() != 12)
+                    throw std::runtime_error("Invalid PDSepConfig state: expected 12 fields, got "
                                              + std::to_string(t.size()));
                 PDSepConfig c;
                 try {
@@ -2230,6 +2234,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.load_cache_timeout_ms         = t[7].cast<int64_t>();
                     c.max_rpc_timeout_ms            = t[8].cast<int64_t>();
                     c.worker_port_offset            = t[9].cast<int64_t>();
+                    c.prefill_retry_times           = t[10].cast<int64_t>();
+                    c.prefill_retry_timeout_ms      = t[11].cast<int64_t>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("PDSepConfig unpickle error: ") + e.what());
                 }

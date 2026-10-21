@@ -2,6 +2,11 @@
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/telemetry/RpcTraceHelper.h"
 #include <stdexcept>
+#include <algorithm>
+#include <chrono>
+#include <thread>
+#include "rtp_llm/cpp/multimodal_processor/MultimodalError.h"
+#include "rtp_llm/cpp/utils/TimeUtil.h"
 
 namespace rtp_llm {
 
@@ -126,6 +131,67 @@ ErrorInfo preprocessForPD(std::shared_ptr<GenerateInput>& input,
         return updateMultimodalFeaturesWithTrace(*processor, input, span, server_context);
     }
     return ErrorInfo::OkStatus();
+}
+
+ErrorInfo preprocessPrefillWithRetry(const GenerateInputPB&                                              request,
+                                     std::shared_ptr<GenerateInput>&                                     input,
+                                     MultimodalProcessor*                                                processor,
+                                     bool                                                                is_mtp_eagle,
+                                     const PDSepConfig&                                                  config,
+                                     grpc::ServerContext*                                                server_context,
+                                     const opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>& span,
+                                     const std::function<ErrorInfo()>&                                   cancellation) {
+    if (!input || !input->generate_config) {
+        return {ErrorCode::INVALID_PARAMS, "Prefill preprocessing requires input and generate config"};
+    }
+    const auto request_deadline_ms = input->request_deadline_ms;
+    const auto begin_time_us       = input->begin_time_us;
+    const auto retry_start         = std::chrono::steady_clock::now();
+    const auto retries             = std::max<int64_t>(0, config.prefill_retry_times);
+    const auto stopped             = [&]() -> ErrorInfo {
+        if (cancellation) {
+            auto status = cancellation();
+            if (!status.ok())
+                return status;
+        }
+        if (request_deadline_ms > 0 && currentTimeMs() >= request_deadline_ms) {
+            return {ErrorCode::GENERATE_TIMEOUT, "Prefill preprocessing request deadline exceeded"};
+        }
+        if (server_context && server_context->IsCancelled()) {
+            return {ErrorCode::CANCELLED, "Prefill preprocessing canceled"};
+        }
+        return ErrorInfo::OkStatus();
+    };
+    const auto retry_budget_exhausted = [&]() {
+        return config.prefill_retry_timeout_ms > 0
+               && std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - retry_start)
+                          .count()
+                      >= config.prefill_retry_timeout_ms;
+    };
+    auto last_error = ErrorInfo::OkStatus();
+    for (int64_t attempt = 0;; ++attempt) {
+        auto stop = stopped();
+        if (!stop.ok())
+            return stop;
+        if (attempt > 0) {
+            if (retry_budget_exhausted())
+                return last_error;
+            input                      = QueryConverter::transQuery(&request);
+            input->request_deadline_ms = request_deadline_ms;
+            input->begin_time_us       = begin_time_us;
+        }
+        last_error = preprocessForPD(input, processor, is_mtp_eagle, RoleType::PREFILL, server_context, span);
+        stop       = stopped();
+        if (!stop.ok())
+            return stop;
+        if (last_error.ok() || !isRetryableMultimodalError(last_error.code()) || attempt >= retries
+            || retry_budget_exhausted()) {
+            return last_error;
+        }
+        // Match the existing Prefill retry pacing; the next attempt rechecks
+        // cancellation, request expiry and the monotonic retry budget.
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
 }
 
 }  // namespace rtp_llm

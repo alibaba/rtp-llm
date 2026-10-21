@@ -421,10 +421,18 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
         int64_t mm_cost_us = 0, enqueue_cost_us = 0, poll_cost_us = 0;
         int64_t phase_start = currentTimeUs();
 
-        auto preprocess_status = preprocessForPD(
-            input, mm_processor_.get(), engine_->isMTPEagle(), RoleType::PREFILL, server_context,
+        auto preprocess_status = preprocessPrefillWithRetry(
+            *request,
+            input,
+            mm_processor_.get(),
+            engine_->isMTPEagle(),
+            maga_init_params_.pd_sep_config,
+            server_context,
             generate_context.trace_span_guard ? generate_context.trace_span_guard->sharedSpan() :
-                                               opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>{});
+                                                opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>{},
+            [cancel_handle] {
+                return cancel_handle->canceled.load() ? cancel_handle->cancel_reason : ErrorInfo::OkStatus();
+            });
         mm_cost_us             = currentTimeUs() - phase_start;
         if (!preprocess_status.ok()) {
             generate_context.error_status = serializeErrorMsg(generate_context.request_key, generate_context.request_info, preprocess_status);
@@ -695,8 +703,18 @@ grpc::Status PrefillRpcServer::EnqueueBatch(grpc::ServerContext*         context
                 const auto item_span = item_context->trace_span_guard ?
                     item_context->trace_span_guard->sharedSpan() :
                     opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>{};
-                const auto preprocess_status = preprocessForPD(
-                    input, mm_processor_.get(), engine_->isMTPEagle(), RoleType::PREFILL, context, item_span);
+                const auto preprocess_status = preprocessPrefillWithRetry(item,
+                                                                          input,
+                                                                          mm_processor_.get(),
+                                                                          engine_->isMTPEagle(),
+                                                                          maga_init_params_.pd_sep_config,
+                                                                          context,
+                                                                          item_span,
+                                                                          [cancel_handle] {
+                                                                              return cancel_handle->canceled.load() ?
+                                                                                         cancel_handle->cancel_reason :
+                                                                                         ErrorInfo::OkStatus();
+                                                                          });
                 if (!preprocess_status.ok()) {
                     reject_item(preprocess_status.code(), preprocess_status.ToString());
                     continue;
