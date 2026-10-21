@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <functional>
+#include <list>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -47,7 +48,8 @@ public:
             t_locked                = std::chrono::steady_clock::now();
             auto iter               = connection_pool_.find(peer);
             if (iter != connection_pool_.end()) {
-                cached_connection = iter->second;
+                cached_connection = iter->second.connection;
+                connection_lru_.splice(connection_lru_.begin(), connection_lru_, iter->second.position);
             }
             peer_mutex = getPeerMutexLocked(peer);
         }
@@ -76,11 +78,13 @@ public:
         }
 
         std::lock_guard<std::mutex> peer_guard(*peer_mutex);
+        Connection<T> previous_connection = std::move(cached_connection);
         {
             std::lock_guard<std::mutex> guard(mutex_);
             auto                        iter = connection_pool_.find(peer);
             if (iter != connection_pool_.end()) {
-                cached_connection = iter->second;
+                cached_connection = iter->second.connection;
+                connection_lru_.splice(connection_lru_.begin(), connection_lru_, iter->second.position);
             } else {
                 cached_connection = Connection<T>();
             }
@@ -132,10 +136,13 @@ public:
         }
 
         Connection<T> connection = {grpc_channel, std::move(grpc_stub)};
+        Connection<T> evicted_connection;
         {
             std::lock_guard<std::mutex> guard(mutex_);
-            connection_pool_[peer] = connection;
+            evicted_connection = cacheConnectionLocked(peer, connection);
         }
+        // Destroy an evicted channel outside mutex_: gRPC teardown must not
+        // serialize unrelated peers behind the pool-wide lock.
         logSlowGetConnection(peer,
                              channel_state,
                              true,
@@ -193,9 +200,12 @@ public:
     }
 
     void removeConnection(const std::string& peer, const std::shared_ptr<grpc::Channel>& expected_channel) {
+        Connection<T> removed_connection;
         std::lock_guard<std::mutex> guard(mutex_);
         auto                        iter = connection_pool_.find(peer);
-        if (iter != connection_pool_.end() && iter->second.channel == expected_channel) {
+        if (iter != connection_pool_.end() && iter->second.connection.channel == expected_channel) {
+            removed_connection = std::move(iter->second.connection);
+            connection_lru_.erase(iter->second.position);
             connection_pool_.erase(iter);
         }
     }
@@ -203,6 +213,40 @@ public:
     // TODO(xinfei.sxf) add watch for grpc channel state changed to closed
 
 private:
+    // Cache ownership is bounded even when routing visits continuously changing
+    // peers. Eviction drops only the cache reference; active RPCs keep their
+    // shared channel/stub and are never cancelled by cache maintenance.
+    static constexpr size_t kMaxCachedConnections = 1024;
+    struct CachedConnection {
+        Connection<T> connection;
+        std::list<std::string>::iterator position;
+    };
+
+    Connection<T> cacheConnectionLocked(const std::string& peer, const Connection<T>& connection) {
+        Connection<T> evicted;
+        auto it = connection_pool_.find(peer);
+        if (it != connection_pool_.end()) {
+            evicted = it->second.connection;
+            it->second.connection = connection;
+            connection_lru_.splice(connection_lru_.begin(), connection_lru_, it->second.position);
+            return evicted;
+        }
+        connection_lru_.push_front(peer);
+        try {
+            connection_pool_.emplace(peer, CachedConnection{connection, connection_lru_.begin()});
+        } catch (...) {
+            connection_lru_.pop_front();
+            throw;
+        }
+        if (connection_pool_.size() > kMaxCachedConnections) {
+            auto oldest = connection_pool_.find(connection_lru_.back());
+            evicted = std::move(oldest->second.connection);
+            connection_pool_.erase(oldest);
+            connection_lru_.pop_back();
+        }
+        return evicted;
+    }
+
     std::shared_ptr<std::mutex> getPeerMutexLocked(const std::string& peer) {
         auto it = peer_mutexes_.find(peer);
         if (it != peer_mutexes_.end()) {
@@ -279,7 +323,8 @@ private:
     }
 
     std::mutex                                     mutex_;
-    std::unordered_map<std::string, Connection<T>> connection_pool_;
+    std::unordered_map<std::string, CachedConnection> connection_pool_;
+    std::list<std::string> connection_lru_;
     std::unordered_map<std::string, std::shared_ptr<std::mutex>> peer_mutexes_;
 };
 
