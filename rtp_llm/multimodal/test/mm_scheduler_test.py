@@ -221,6 +221,70 @@ def _submit_concurrently(
 
 
 class MMSchedulerTest(TestCase):
+    def test_idle_maintenance_runs_after_completion_in_both_modes(self):
+        for prefetch in (0, 1):
+            with self.subTest(prefetch=prefetch):
+                fake = _FakeMMPart()
+                entered, release, delivered = (threading.Event() for _ in range(3))
+                item = _FakeWorkItem()
+
+                def maintain():
+                    if item.embedding_result is not None:
+                        entered.set()
+                        self.assertTrue(release.wait(5))
+
+                fake.run_embedding_idle_work = maintain
+                fake.prepare_embedding_batch = lambda *args: None
+                sched = MMScheduler(
+                    fake,
+                    batch_wait_ms=0,
+                    max_batch_size=1,
+                    prefetch_batches=prefetch,
+                    allow_idle_work=True,
+                )
+
+                def submit():
+                    sched.submit_and_wait([item])
+                    delivered.set()
+
+                caller = threading.Thread(target=submit)
+                try:
+                    caller.start()
+                    self.assertTrue(entered.wait(5))
+                    self.assertTrue(
+                        delivered.wait(1), "first request waited for capture"
+                    )
+                finally:
+                    release.set()
+                    caller.join(5)
+                    self.assertTrue(sched.close())
+
+    def test_integrated_owner_does_not_run_idle_gpu_maintenance(self):
+        fake = _FakeMMPart()
+        fake.run_embedding_idle_work = mock.Mock()
+        sched = MMScheduler(fake, batch_wait_ms=0, max_batch_size=1)
+        try:
+            sched.submit_and_wait([_FakeWorkItem()])
+            sched._run_idle_work()
+            fake.run_embedding_idle_work.assert_not_called()
+        finally:
+            sched.close()
+
+    def test_strict_work_budget_rejects_oversized_indivisible_item(self):
+        fake = _FakeMMPart(work_budget=MMWorkEstimate(input_patches=10))
+        fake.strict_work_budget = True
+        sched = MMScheduler(fake, batch_wait_ms=0)
+        try:
+            with self.assertRaisesRegex(ValueError, "exceeds model resource budget"):
+                sched.submit_and_wait([_FakeWorkItem(input_patches=11)])
+            with self.assertRaisesRegex(ValueError, "exceeds model resource budget"):
+                sched.submit_and_wait(
+                    [_FakeWorkItem(input_patches=1), _FakeWorkItem(input_patches=11)]
+                )
+            self.assertEqual(fake.calls, [])
+        finally:
+            sched.close()
+
     def test_queue_metrics_report_depth_and_wait(self):
         """Queue gauges expose backlog depth and time before a forward starts."""
         release_forward = threading.Event()
@@ -899,8 +963,8 @@ class MMSchedulerTest(TestCase):
         release = threading.Event()
         orig_collect = MMScheduler._collect_batch
 
-        def slow_collect(scheduler):
-            batch = orig_collect(scheduler)
+        def slow_collect(scheduler, **kwargs):
+            batch = orig_collect(scheduler, **kwargs)
             if batch is not None:
                 # Park AFTER collecting, BEFORE the loop's stopped-check, so the
                 # test can force close() into exactly that window.

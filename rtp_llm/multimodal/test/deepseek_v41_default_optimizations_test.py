@@ -3,6 +3,7 @@
 import ast
 import inspect
 import os
+import sys
 import textwrap
 import unittest
 from unittest.mock import Mock, PropertyMock, patch
@@ -13,6 +14,7 @@ import torch.nn.functional as F
 from rtp_llm.config.dsv41_config import V41Config
 from rtp_llm.multimodal import mm_process_engine as process
 from rtp_llm.multimodal.multimodal_mixins.deepseek_v41 import packed_vision
+from rtp_llm.multimodal.multimodal_mixins.deepseek_v41 import deepseek_vision
 from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_vision import (
     DeepSeekV41VisionEmbedding,
 )
@@ -88,9 +90,11 @@ class DefaultOptimizationsTest(unittest.TestCase):
         self.assertTrue(self.model.packed_forward_stats()["enabled"])
         self.assertTrue(self.model.packed_forward_stats()["stats_enabled"])
         self.assertIsInstance(self.model._packed_graph, PackedVisionGraph)
-        self.assertEqual(self.model._packed_graph.full_batch_images, 126)
-        self.assertEqual(self.model._packed_max_images, 126)
-        self.assertEqual(self.model.get_batch_work_budget(126).input_patches, 1058400)
+        self.assertEqual(self.model._packed_graph.max_batch_images, sys.maxsize)
+        self.assertEqual(self.model._packed_max_images, sys.maxsize)
+        budget = self.model.get_batch_work_budget(126)
+        self.assertEqual(budget.input_patches, 0)
+        self.assertGreater(budget.estimated_workspace_bytes, 0)
         self.assertNotIn("_packed_forward_enabled", vars(self.model))
 
     def test_gpu_preprocess_follows_device_without_touching_cuda(self):
@@ -238,15 +242,92 @@ class DefaultOptimizationsTest(unittest.TestCase):
         )
 
     def test_common_media_limit_bounds_model_chunks_and_graph(self):
-        for limit, expected in ((1, 1), (8, 8), (126, 126), (192, 126)):
+        for limit, expected in ((1, 1), (8, 8), (126, 126), (192, 192), (256, 256)):
             with self.subTest(limit=limit):
                 model = DeepSeekV41VisionEmbedding(
                     tiny_config(), device="cpu", max_batch_images=limit
                 )
                 self.assertEqual(model._packed_max_images, expected)
-                self.assertEqual(model._packed_graph.full_batch_images, expected)
+                self.assertEqual(model._packed_graph.max_batch_images, expected)
         with self.assertRaisesRegex(ValueError, "budget must be positive"):
             DeepSeekV41VisionEmbedding(tiny_config(), device="cpu", max_batch_images=0)
+
+    def test_workspace_is_actual_geometry_not_reference_image_count(self):
+        from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_vision import (
+            _RuntimeImage,
+        )
+
+        small = _RuntimeImage(torch.zeros(6, 588), 2, 3)
+        large = _RuntimeImage(torch.zeros(60, 588), 6, 10)
+        a, b = (self.model.estimate_work(x) for x in (small, large))
+        self.assertLess(a.estimated_workspace_bytes, b.estimated_workspace_bytes)
+        self.assertEqual(self.model.estimate_work([small, large]), a + b)
+        self.assertTrue(self.model.strict_work_budget)
+
+    def test_192_images_reach_one_forward_without_hidden_126_ceiling(self):
+        from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_vision import (
+            _RuntimeImage,
+        )
+
+        image = _RuntimeImage(torch.zeros(9, 588), 3, 3)
+        with patch.object(self.model, "_forward_packed") as forward:
+            forward.return_value = [torch.zeros(1, 8)] * 192
+            values = self.model.encode_images_packed([image] * 192)
+        self.assertEqual(len(values), 192)
+        self.assertEqual(len(forward.call_args.args[0]), 192)
+        self.assertEqual(forward.call_count, 1)
+
+    def test_byte_budget_splits_actual_work_and_rejects_oversized_image(self):
+        from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_vision import (
+            _RuntimeImage,
+        )
+
+        image = _RuntimeImage(torch.zeros(9, 588), 3, 3)
+        cost = self.model.estimate_work(image).estimated_workspace_bytes
+        self.model._batch_max_bytes = cost * 2
+        batches = []
+
+        def forward(parts, grids, **kwargs):
+            batches.append(len(parts))
+            return [torch.zeros(1, 8)] * len(parts)
+
+        with patch.object(self.model, "_forward_packed", side_effect=forward):
+            self.model.encode_images_packed([image] * 3)
+        self.assertEqual(batches, [2, 1])
+        self.model._batch_max_bytes = cost - 1
+        self.model._resource_budget = None
+        with self.assertRaisesRegex(ValueError, "workspace budget"):
+            self.model.encode_images_packed([image])
+
+    def test_mixin_role_controls_graph_reservation_not_image_cap(self):
+        from types import SimpleNamespace
+
+        from rtp_llm.config.py_config_modules import VitConfig
+        from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_mixin import (
+            DeepSeekV41Mixin,
+        )
+        from rtp_llm.ops import VitSeparation
+
+        cfg = VitConfig()
+        cfg.gpu_max_batch_size = 256
+        related = SimpleNamespace(config={"v41_config": tiny_config()})
+        local = DeepSeekV41Mixin._get_mm_module(related, cfg)
+        self.assertEqual(local._packed_max_images, 256)
+        self.assertEqual(local._packed_graph.max_entries, 0)
+        cfg.vit_separation = VitSeparation.VIT_SEPARATION_ROLE
+        role = DeepSeekV41Mixin._get_mm_module(related, cfg)
+        self.assertEqual(role._packed_max_images, 256)
+        self.assertEqual(
+            role._packed_graph.max_entries, cfg.gpu_graph_cache_max_entries
+        )
+
+    def test_weight_reload_invalidates_pending_shape_generation(self):
+        graph = self.model._packed_graph
+        generation = graph._generation
+        graph._pending["stale"] = 1
+        self.model.load_state_dict(self.model.state_dict())
+        self.assertFalse(graph._pending)
+        self.assertGreater(graph._generation, generation)
 
     def test_norm_cpu_and_autograd_keep_regular_expression(self):
         norm = RMSNorm(8).eval()
@@ -281,6 +362,42 @@ class DefaultOptimizationsTest(unittest.TestCase):
         ):
             with self.assertRaisesRegex(RuntimeError, "norm launch failed"):
                 norm(torch.zeros(1, 8))
+
+    def test_residual_norm_fusion_dispatch_fallback_and_failure(self):
+        norm = RMSNorm(1024).eval()
+        value = torch.ones(2, 1024, dtype=torch.bfloat16)
+        residual = torch.full_like(value, 2)
+        fused = (torch.full_like(value, 3), torch.full_like(value, 4))
+        with torch.inference_mode(), patch.object(
+            norm, "_uses_flashinfer", return_value=True
+        ), patch.object(
+            deepseek_vision, "apply_vision_residual_rmsnorm", return_value=fused
+        ) as helper:
+            self.assertIs(norm.forward_with_residual(value, residual), fused)
+        helper.assert_called_once_with(value, residual, norm.weight, norm.eps)
+
+        normalized = torch.full_like(value, 5)
+        with torch.inference_mode(), patch.object(
+            norm, "_uses_flashinfer", return_value=True
+        ), patch.object(
+            deepseek_vision, "apply_vision_residual_rmsnorm", return_value=None
+        ), patch.object(
+            norm, "_flashinfer_rmsnorm", return_value=normalized
+        ) as fallback:
+            summed, actual = norm.forward_with_residual(value, residual)
+        torch.testing.assert_close(summed, value + residual, rtol=0, atol=0)
+        self.assertIs(actual, normalized)
+        fallback.assert_called_once_with(summed)
+
+        with torch.inference_mode(), patch.object(
+            norm, "_uses_flashinfer", return_value=True
+        ), patch.object(
+            deepseek_vision,
+            "apply_vision_residual_rmsnorm",
+            side_effect=RuntimeError("fused residual norm failed"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "fused residual norm failed"):
+                norm.forward_with_residual(value, residual)
 
     def test_only_attention_reads_model_specific_environment(self):
         from rtp_llm.multimodal.multimodal_mixins.deepseek_v41 import (
