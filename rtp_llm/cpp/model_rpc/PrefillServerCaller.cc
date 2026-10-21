@@ -8,6 +8,9 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <mutex>
+#include <vector>
 #include <thread>
 
 namespace rtp_llm {
@@ -17,13 +20,100 @@ constexpr int32_t kPeerInfoProbeMaxMs     = 1000;
 
 namespace {
 
+struct SyncPrefillRpcCancelEntry {
+    std::mutex mutex;
+    std::function<bool()> is_cancelled;
+    grpc::ClientContext* client_context = nullptr;
+    std::chrono::system_clock::time_point deadline;
+    std::atomic<bool> timed_out{false};
+    std::atomic<bool> client_cancelled{false};
+};
+
+class SyncPrefillRpcCancelMonitor {
+public:
+    static SyncPrefillRpcCancelMonitor& instance() {
+        static SyncPrefillRpcCancelMonitor monitor;
+        return monitor;
+    }
+
+    void add(const std::shared_ptr<SyncPrefillRpcCancelEntry>& entry) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            entries_.push_back(entry);
+        }
+        cv_.notify_one();
+    }
+
+    ~SyncPrefillRpcCancelMonitor() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stopping_ = true;
+        }
+        cv_.notify_one();
+        watcher_.join();
+    }
+
+private:
+    SyncPrefillRpcCancelMonitor(): watcher_([this] { watch(); }) {}
+
+    void watch() {
+        std::vector<std::weak_ptr<SyncPrefillRpcCancelEntry>> active;
+        std::unique_lock<std::mutex> lock(mutex_);
+        while (!stopping_) {
+            if (active.empty() && entries_.empty()) {
+                cv_.wait(lock, [this] { return stopping_ || !entries_.empty(); });
+                continue;
+            }
+            // Only registration uses the shared lock. Probe and compact the
+            // active set outside it so request admission does not wait on scans.
+            active.insert(active.end(), entries_.begin(), entries_.end());
+            entries_.clear();
+            lock.unlock();
+            active.erase(std::remove_if(active.begin(), active.end(), [](const auto& weak) {
+                auto entry = weak.lock();
+                if (!entry) {
+                    return true;
+                }
+                // stop() takes the same per-request lock before invalidating
+                // the stack-owned context and its ServerContext callback.
+                std::lock_guard<std::mutex> entry_lock(entry->mutex);
+                if (!entry->client_context) {
+                    return true;
+                }
+                if (entry->is_cancelled()) {
+                    entry->client_cancelled.store(true);
+                } else if (std::chrono::system_clock::now() >= entry->deadline) {
+                    entry->timed_out.store(true);
+                } else {
+                    return false;
+                }
+                entry->client_context->TryCancel();
+                entry->client_context = nullptr;
+                entry->is_cancelled = {};
+                return true;
+            }), active.end());
+            lock.lock();
+            cv_.wait_for(lock, std::chrono::milliseconds(1));
+        }
+    }
+
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    std::vector<std::weak_ptr<SyncPrefillRpcCancelEntry>> entries_;
+    bool stopping_ = false;
+    std::thread watcher_;
+};
+
 class SyncPrefillRpcCancelGuard {
 public:
-    SyncPrefillRpcCancelGuard(const std::function<bool()>&          is_cancelled,
-                              grpc::ClientContext*                  client_context,
+    SyncPrefillRpcCancelGuard(const std::function<bool()>& is_cancelled,
+                              grpc::ClientContext* client_context,
                               std::chrono::system_clock::time_point deadline):
-        is_cancelled_(is_cancelled), client_context_(client_context), deadline_(deadline) {
-        watcher_ = std::thread([this]() { watch(); });
+        entry_(std::make_shared<SyncPrefillRpcCancelEntry>()) {
+        entry_->is_cancelled = is_cancelled;
+        entry_->client_context = client_context;
+        entry_->deadline = deadline;
+        SyncPrefillRpcCancelMonitor::instance().add(entry_);
     }
 
     ~SyncPrefillRpcCancelGuard() {
@@ -31,45 +121,21 @@ public:
     }
 
     void stop() {
-        stop_.store(true);
-        if (watcher_.joinable()) {
-            watcher_.join();
-        }
+        std::lock_guard<std::mutex> lock(entry_->mutex);
+        entry_->client_context = nullptr;
+        entry_->is_cancelled = {};
     }
 
     bool timedOut() const {
-        return timed_out_.load();
+        return entry_->timed_out.load();
     }
 
     bool clientCancelled() const {
-        return client_cancelled_.load();
+        return entry_->client_cancelled.load();
     }
 
 private:
-    void watch() {
-        while (!stop_.load()) {
-            if (is_cancelled_()) {
-                client_cancelled_.store(true);
-                client_context_->TryCancel();
-                break;
-            }
-            if (std::chrono::system_clock::now() >= deadline_) {
-                timed_out_.store(true);
-                client_context_->TryCancel();
-                break;
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
-    }
-
-private:
-    std::function<bool()>                 is_cancelled_;
-    grpc::ClientContext*                  client_context_;
-    std::chrono::system_clock::time_point deadline_;
-    std::atomic<bool>                     stop_{false};
-    std::atomic<bool>                     timed_out_{false};
-    std::atomic<bool>                     client_cancelled_{false};
-    std::thread                           watcher_;
+    std::shared_ptr<SyncPrefillRpcCancelEntry> entry_;
 };
 
 }  // namespace

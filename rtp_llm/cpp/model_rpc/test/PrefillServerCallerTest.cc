@@ -1,3 +1,4 @@
+#include <future>
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include <atomic>
 #include <algorithm>
@@ -662,6 +663,37 @@ TEST_F(PrefillServerCallerTest, SyncFallbackTimeoutCancelsPrefillRpc) {
 
     EXPECT_EQ(status.error_code(), grpc::StatusCode::DEADLINE_EXCEEDED);
     EXPECT_TRUE(server.service()->waitCancelled(std::chrono::seconds(1)));
+}
+
+TEST_F(PrefillServerCallerTest, ConcurrentSyncCancellationKeepsOtherRequestAndRetiresCallback) {
+    FakePrefillRpcServer first(std::make_unique<FakePrefillRpcService>(FakePrefillRpcService::Mode::kWaitForCancel));
+    FakePrefillRpcServer second(std::make_unique<FakePrefillRpcService>(FakePrefillRpcService::Mode::kWaitForCancel));
+    ASSERT_TRUE(first.start());
+    ASSERT_TRUE(second.start());
+    auto first_request = makeSyncRequest(first, 1030, 5000);
+    auto second_request = makeSyncRequest(second, 1031, 5000);
+    std::atomic<bool> cancel_first{false};
+    std::atomic<bool> cancel_second{false};
+    std::atomic<int> first_callback_count{0};
+    auto first_call = std::async(std::launch::async, [&] {
+        return caller_.callPrefill(nullptr, &first_request, nullptr, [&] {
+            first_callback_count.fetch_add(1);
+            return cancel_first.load();
+        });
+    });
+    auto second_call = std::async(std::launch::async, [&] {
+        return caller_.callPrefill(nullptr, &second_request, nullptr, [&] { return cancel_second.load(); });
+    });
+    EXPECT_TRUE(first.service()->waitStarted(std::chrono::seconds(1)));
+    EXPECT_TRUE(second.service()->waitStarted(std::chrono::seconds(1)));
+    cancel_first.store(true);
+    EXPECT_EQ(first_call.get().error_code(), grpc::StatusCode::CANCELLED);
+    const auto retired_count = first_callback_count.load();
+    EXPECT_EQ(second_call.wait_for(std::chrono::milliseconds(0)), std::future_status::timeout);
+    EXPECT_FALSE(second.service()->waitCancelled(std::chrono::milliseconds(0)));
+    cancel_second.store(true);
+    EXPECT_EQ(second_call.get().error_code(), grpc::StatusCode::CANCELLED);
+    EXPECT_EQ(first_callback_count.load(), retired_count);
 }
 
 TEST_F(PrefillServerCallerTest, SyncFallbackClientCancelCancelsPrefillRpc) {
