@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <utility>
 #include <stdexcept>
 
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/tcp/TcpKVCacheSender.h"
@@ -14,40 +15,46 @@ namespace transfer {
 namespace {
 
 TransferBackendPair createTcpBackend(const TransferBackendConfig&        config,
+                                     TransferBackendRole                 role,
                                      const kmonitor::MetricsReporterPtr& metrics_reporter) {
-    auto       sender  = std::make_shared<tcp::TcpKVCacheSender>(metrics_reporter);
-    const auto idle_ms = config.tcp_channel_idle_ttl_ms > 0 ? config.tcp_channel_idle_ttl_ms : int64_t{0};
-    const auto sweep_n = config.tcp_channel_sweep_interval_calls > 0 ?
-                             static_cast<std::uint64_t>(config.tcp_channel_sweep_interval_calls) :
-                             std::uint64_t{0};
-    if (!sender->init(config.messager_io_thread_count, std::chrono::milliseconds(idle_ms), sweep_n)) {
-        RTP_LLM_LOG_ERROR("createTcpBackend: TcpKVCacheSender init failed");
-        return {};
+    TransferBackendPair result;
+    if (role == TransferBackendRole::kSender) {
+        auto       sender  = std::make_shared<tcp::TcpKVCacheSender>(metrics_reporter);
+        const auto idle_ms = config.tcp_channel_idle_ttl_ms > 0 ? config.tcp_channel_idle_ttl_ms : int64_t{0};
+        const auto sweep_n = config.tcp_channel_sweep_interval_calls > 0 ?
+                                 static_cast<std::uint64_t>(config.tcp_channel_sweep_interval_calls) :
+                                 std::uint64_t{0};
+        if (!sender->init(config.messager_io_thread_count, std::chrono::milliseconds(idle_ms), sweep_n)) {
+            RTP_LLM_LOG_ERROR("createTcpBackend: TcpKVCacheSender init failed");
+            return {};
+        }
+        result.sender = std::move(sender);
+    } else {
+        auto receiver = std::make_shared<tcp::TcpKVCacheReceiver>(metrics_reporter);
+        if (!receiver->init(config.cache_store_listen_port,
+                            config.messager_io_thread_count,
+                            config.messager_worker_thread_count,
+                            static_cast<uint32_t>(config.cache_store_tcp_anet_rpc_thread_num),
+                            static_cast<uint32_t>(config.cache_store_tcp_anet_rpc_queue_num),
+                            config.transfer_wait_check_interval_us,
+                            static_cast<uint32_t>(config.cache_store_tcp_worker_queue_size))) {
+            RTP_LLM_LOG_ERROR("createTcpBackend: TcpKVCacheReceiver init failed");
+            return {};
+        }
+        result.receiver = std::move(receiver);
     }
-
-    auto receiver = std::make_shared<tcp::TcpKVCacheReceiver>(metrics_reporter);
-    if (!receiver->init(config.cache_store_listen_port,
-                        config.messager_io_thread_count,
-                        config.messager_worker_thread_count,
-                        static_cast<uint32_t>(config.cache_store_tcp_anet_rpc_thread_num),
-                        static_cast<uint32_t>(config.cache_store_tcp_anet_rpc_queue_num),
-                        config.transfer_wait_check_interval_us,
-                        static_cast<uint32_t>(config.cache_store_tcp_worker_queue_size))) {
-        RTP_LLM_LOG_ERROR("createTcpBackend: TcpKVCacheReceiver init failed");
-        return {};
-    }
-
-    return {sender, receiver};
+    return result;
 }
 
 }  // anonymous namespace
 
 TransferBackendPair createTransferBackend(TransferBackend                     backend,
                                           const TransferBackendConfig&        config,
+                                          TransferBackendRole                 role,
                                           const kmonitor::MetricsReporterPtr& metrics_reporter) {
     switch (backend) {
         case TransferBackend::kTcp:
-            return createTcpBackend(config, metrics_reporter);
+            return createTcpBackend(config, role, metrics_reporter);
         case TransferBackend::kBarexRdma:
             throw std::runtime_error("BarexRdma backend not supported in this build");
         default:

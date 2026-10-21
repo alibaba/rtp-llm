@@ -43,9 +43,9 @@ bool P2PConnectorPrefill::init() {
             config_.scheduler_config, metrics_reporter_, tp_broadcast_client_);
     }
 
-    auto [sender, receiver] =
-        p2p_internal::createAndRegisterTransferBackend(config_.worker_config, layer_block_converter_, metrics_reporter_);
-    if (!sender || !receiver) {
+    auto sender = p2p_internal::createAndRegisterTransferBackend(
+        config_.worker_config, layer_block_converter_, transfer::TransferBackendRole::kSender, metrics_reporter_).sender;
+    if (!sender) {
         RTP_LLM_LOG_ERROR("prefill connector init failed: transfer backend init failed");
         return false;
     }

@@ -11,6 +11,7 @@ namespace rtp_llm::p2p_internal {
 transfer::TransferBackendPair createAndRegisterTransferBackend(
     const P2PConnectorWorkerConfig&             config,
     const std::shared_ptr<LayerBlockConverter>& layer_block_converter,
+    transfer::TransferBackendRole               role,
     const kmonitor::MetricsReporterPtr&         metrics_reporter);
 
 }  // namespace rtp_llm::p2p_internal

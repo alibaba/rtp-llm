@@ -9,6 +9,7 @@ namespace rtp_llm::p2p_internal {
 transfer::TransferBackendPair createAndRegisterTransferBackend(
     const P2PConnectorWorkerConfig&             config,
     const std::shared_ptr<LayerBlockConverter>& layer_block_converter,
+    transfer::TransferBackendRole               role,
     const kmonitor::MetricsReporterPtr&         metrics_reporter) {
     if (!layer_block_converter) {
         RTP_LLM_LOG_ERROR("init failed: layer_block_converter is null");
@@ -27,7 +28,7 @@ transfer::TransferBackendPair createAndRegisterTransferBackend(
 
     transfer::TransferBackendPair backend_pair;
     try {
-        backend_pair = transfer::createTransferBackend(backend, config.transfer_backend_config, metrics_reporter);
+        backend_pair = transfer::createTransferBackend(backend, config.transfer_backend_config, role, metrics_reporter);
     } catch (const std::exception& e) {
         RTP_LLM_LOG_ERROR("init failed: createTransferBackend threw for backend=%s, error=%s",
                           rdma_mode ? "kBarexRdma" : "kTcp",
@@ -40,7 +41,8 @@ transfer::TransferBackendPair createAndRegisterTransferBackend(
     }
 
     auto& [sender, receiver] = backend_pair;
-    if (!sender || !receiver) {
+    if ((role == transfer::TransferBackendRole::kSender && !sender)
+        || (role == transfer::TransferBackendRole::kReceiver && !receiver)) {
         RTP_LLM_LOG_ERROR("init failed: createTransferBackend failed for backend=%s",
                           rdma_mode ? "kBarexRdma" : "kTcp");
         return {};
@@ -48,11 +50,11 @@ transfer::TransferBackendPair createAndRegisterTransferBackend(
 
     auto buffers = layer_block_converter->getAllBuffers();
     for (auto& [block_info, size] : buffers) {
-        if (!sender->regMem(block_info, size)) {
+        if (sender && !sender->regMem(block_info, size)) {
             RTP_LLM_LOG_ERROR("init failed: sender regMem failed, addr: %p, size: %ld", block_info.addr, size);
             return {};
         }
-        if (!receiver->regMem(block_info, size)) {
+        if (receiver && !receiver->regMem(block_info, size)) {
             if (rdma_mode) {
                 RTP_LLM_LOG_ERROR("init failed: receiver regMem failed in RDMA mode, addr: %p, size: %ld",
                                   block_info.addr,

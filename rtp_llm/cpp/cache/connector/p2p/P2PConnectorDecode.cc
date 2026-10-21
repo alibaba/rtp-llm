@@ -46,9 +46,9 @@ bool P2PConnectorDecode::init() {
         }
     }
 
-    auto [sender, receiver] =
-        p2p_internal::createAndRegisterTransferBackend(config_.worker_config, layer_block_converter_, metrics_reporter_);
-    if (!sender || !receiver) {
+    auto receiver = p2p_internal::createAndRegisterTransferBackend(
+        config_.worker_config, layer_block_converter_, transfer::TransferBackendRole::kReceiver, metrics_reporter_).receiver;
+    if (!receiver) {
         RTP_LLM_LOG_ERROR("decode connector init failed: transfer backend init failed");
         return false;
     }

@@ -8,6 +8,7 @@
 
 #include "autil/NetUtil.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnector.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorBackend.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorDecode.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PWorkerDecodeRead.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PSchedulerPrefillRead.h"
@@ -227,6 +228,18 @@ TEST(P2PConnectorConfigValidationTest, RejectsInvalidTimeoutBeforeStartingBacken
     config.scheduler_config.p2p_lease_query_timeout_ms = 0;
     P2PConnector connector(config, std::make_shared<MockLayerBlockConverter>(), nullptr);
     EXPECT_FALSE(connector.init());
+}
+
+TEST_F(P2PConnectorTest, TransferBackendCreatesOnlyTheRequestedEndpoint) {
+    auto sender = p2p_internal::createAndRegisterTransferBackend(
+        config_.worker_config, mock_layer_block_converter_, transfer::TransferBackendRole::kSender, nullptr);
+    ASSERT_NE(sender.sender, nullptr);
+    EXPECT_EQ(sender.receiver, nullptr);
+
+    auto receiver = p2p_internal::createAndRegisterTransferBackend(
+        config_.worker_config, mock_layer_block_converter_, transfer::TransferBackendRole::kReceiver, nullptr);
+    ASSERT_NE(receiver.receiver, nullptr);
+    EXPECT_EQ(receiver.sender, nullptr);
 }
 
 TEST_F(P2PConnectorTest, AsyncWriteByLayer_ReturnsNullWhenWorkerRejectsDispatch) {
