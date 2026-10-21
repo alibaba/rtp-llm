@@ -93,7 +93,6 @@ class V41VisionAttention(Attention):
 
 
 class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
-    inspection_verdict_is_request_scoped = True
 
     def __init__(self, config, *, device=None, max_batch_images=126):
         super().__init__()
