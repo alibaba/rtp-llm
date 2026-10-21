@@ -515,6 +515,19 @@ def init_all_group_args(
     init_model_grpc_group_args(parser, py_env_configs.grpc_config)
     init_dash_sc_grpc_group_args(parser, py_env_configs.dash_sc_grpc_config)
 
+    _init_optional_internal_group_args(parser, py_env_configs)
+
+
+def _init_optional_internal_group_args(parser, py_env_configs):
+    # Optional extension boundary: internal fields and defaults are owned by
+    # internal_source, while a standalone open-source installation skips it.
+    from rtp_llm.utils.import_util import import_optional_internal_source_entrypoint
+
+    if import_optional_internal_source_entrypoint("config_args"):
+        from internal_source.rtp_llm.config_args import init_internal_group_args
+
+        init_internal_group_args(parser, py_env_configs)
+
 
 def setup_args(args: Optional[Sequence[str]] = None) -> PyEnvConfigs:
     """Parse engine arguments into the canonical ``PyEnvConfigs`` object.
