@@ -9,12 +9,19 @@ def setup_cutlass_import_path() -> None:
     except ImportError:
         return
 
+    # Bazel does not execute wheel .pth files. CUTLASS 4.7 renamed the
+    # directory and split it across namespace packages; keep every root.
+    paths = []
     for package_root in nvidia_cutlass_dsl.__path__:
-        python_packages = Path(package_root) / "python_packages"
-        if not python_packages.is_dir():
-            continue
+        for directory in ("dsl_packages", "python_packages"):
+            python_packages = Path(package_root) / directory
+            if not python_packages.is_dir():
+                continue
+            paths.append(python_packages)
 
-        python_packages_path = str(python_packages)
-        if python_packages_path not in sys.path:
-            sys.path.insert(0, python_packages_path)
-        return
+    # rules_python creates namespace __init__.py files in the base/toolkit
+    # wheels. The real core package must precede those namespace stubs.
+    paths.sort(key=lambda path: not (path / "cutlass/impl_utils.py").is_file())
+    for path in reversed(paths):
+        if str(path) not in sys.path:
+            sys.path.insert(0, str(path))

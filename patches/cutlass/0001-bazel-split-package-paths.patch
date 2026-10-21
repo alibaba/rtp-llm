@@ -1,0 +1,14 @@
+--- a/nvidia_cutlass_dsl/dsl_packages/cutlass/__init__.py
++++ b/nvidia_cutlass_dsl/dsl_packages/cutlass/__init__.py
+@@ -12,1 +12,11 @@
++# Bazel keeps the NVIDIA core/base/toolkit wheels in separate runfiles roots.
++from pathlib import Path as _Path
++import nvidia_cutlass_dsl as _nvidia_cutlass_dsl
++
++for _root in _nvidia_cutlass_dsl.__path__:
++    _part = str(_Path(_root) / "dsl_packages" / "cutlass")
++    if _Path(_part).is_dir() and _part not in __path__:
++        __path__.append(_part)
++del _root, _part, _Path, _nvidia_cutlass_dsl
++
+ from ._mlir._mlir_libs import _cutlass_ir
