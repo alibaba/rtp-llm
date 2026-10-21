@@ -284,15 +284,9 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
     // but the model-facing GptModelInputs metadata should be CUDA resident.
     // Non-CUDA platforms keep the host pipeline: buildPyAttentionInputs's
     // device-metadata branch requires the CUDA-only metadata kernel.
-    // BERT two-pass plans ragged attention from host lengths and scans host tokens.
-    // Keep the already gathered metadata on CPU rather than copying it back from CUDA.
-    static const bool use_uqi_two_pass = []() {
-        const char* mask = std::getenv("USE_VISION_BERT_UQI_BLOCK_MASK");
-        const char* two_pass = std::getenv("VISION_BERT_UQI_TWO_PASS");
-        return mask && std::string(mask) == "1"
-               && (!two_pass || std::string(two_pass) == "1");
-    }();
-    if (!requires_host_input_metadata_ && !use_uqi_two_pass) {
+    // Models opt in to host metadata through their generic capability flag.
+    // Keep gathered tensors on CPU for their request-preparation hooks.
+    if (!requires_host_input_metadata_) {
         model_input.combo_tokens     = toCudaInt32ModelInput(model_input.combo_tokens);
         model_input.input_lengths    = toCudaInt32ModelInput(model_input.input_lengths);
         model_input.sequence_lengths = toCudaInt32ModelInput(model_input.sequence_lengths);

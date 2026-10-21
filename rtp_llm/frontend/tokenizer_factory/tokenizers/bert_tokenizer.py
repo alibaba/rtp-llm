@@ -18,7 +18,6 @@ class BertTokenizer(BaseTokenizer):
 
             normalizer = tokenizer_obj.normalizer
             if isinstance(normalizer, normalizers.BertNormalizer):
-                # tokenizer_object otherwise overrides the config's lowercase setting.
                 state = json.loads(normalizer.__getstate__())
                 state.pop("type")
                 state["lowercase"] = tokenizer_config["do_lower_case"]

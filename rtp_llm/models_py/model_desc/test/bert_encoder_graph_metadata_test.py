@@ -146,20 +146,19 @@ class EmbeddingGraphContractTest(unittest.TestCase):
             kv_head_num=2,
             size_per_head=64,
             rope_config=SimpleNamespace(
-                style=RopeStyle.Base, dim=64, offset=0, scale=1.0
+                style=RopeStyle.No, dim=0, offset=0, scale=1.0
             ),
         )
         with patch("importlib.util.find_spec", return_value=object()):
             self.assertEqual(
                 common.embedding_graph_unsupported_reason(config, "flashinfer"), ""
             )
-            for scale in (0.0, 0.5, float("nan"), float("inf")):
-                config.rope_config.scale = scale
-                self.assertIn(
-                    "scale",
-                    common.embedding_graph_unsupported_reason(config, "flashinfer"),
-                )
-        config.rope_config.scale = 1.0
+            config.rope_config.style = RopeStyle.Base
+            self.assertIn(
+                "RoPE",
+                common.embedding_graph_unsupported_reason(config, "flashinfer"),
+            )
+        config.rope_config.style = RopeStyle.No
         with patch("importlib.util.find_spec", return_value=None):
             self.assertIn(
                 "not installed",
@@ -178,46 +177,7 @@ class EmbeddingGraphContractTest(unittest.TestCase):
         )
         self.assertTrue(model.validate_embedding_input_features(inputs))
 
-    def test_bert_host_hook_reuses_native_bounds_and_schedule(self):
-        model = BertModel.__new__(BertModel)
-        torch.nn.Module.__init__(model)
-        model.use_user_profile_mask = True
-        attention = SimpleNamespace(
-            input_lengths=torch.tensor([5, 2], dtype=torch.int32),
-            uqi_b_starts=torch.tensor([1, -1], dtype=torch.int32),
-            uqi_b_lens=torch.tensor([3, 0], dtype=torch.int32),
-            uqi_seg_indptr=torch.tensor([0, 2, 5, 7, 7], dtype=torch.int32),
-        )
-        starts, counts, schedule = (
-            attention.uqi_b_starts,
-            attention.uqi_b_lens,
-            attention.uqi_seg_indptr,
-        )
-        with patch(
-            "rtp_llm.models_py.modules.factory.attention.bert_uqi_schedule.derive_bert_uqi_bounds",
-            side_effect=AssertionError("native bounds must not be scanned again"),
-        ):
-            result = model.prepare_embedding_attention_inputs(attention, None, None)
-        self.assertIs(result, attention)
-        self.assertIs(attention.uqi_b_starts, starts)
-        self.assertIs(attention.uqi_b_lens, counts)
-        self.assertIs(attention.uqi_seg_indptr, schedule)
 
-    def test_bert_host_hook_derives_bounds_when_native_metadata_is_missing(self):
-        model = BertModel.__new__(BertModel)
-        torch.nn.Module.__init__(model)
-        model.use_user_profile_mask = True
-        model.cls_uqi_token_id = 2
-        attention = SimpleNamespace(
-            input_lengths=torch.tensor([5, 2], dtype=torch.int32),
-            uqi_b_starts=None,
-            uqi_b_lens=None,
-        )
-        tokens = torch.tensor([1, 2, 7, 102, 8, 5, 6], dtype=torch.int32)
-        result = model.prepare_embedding_attention_inputs(attention, tokens, None)
-        self.assertIs(result, attention)
-        self.assertEqual(attention.uqi_b_starts.tolist(), [1, -1])
-        self.assertEqual(attention.uqi_b_lens.tolist(), [3, 0])
 
     def test_default_adapter_rejects_explicit_positions_before_graph_planning(self):
         model = GptModelBase.__new__(GptModelBase)
@@ -314,32 +274,6 @@ class EmbeddingGraphContractTest(unittest.TestCase):
             replay = model.forward(inputs, attention).hidden_states
         torch.testing.assert_close(replay, eager)
 
-    def test_rotary_positions_reset_per_sequence_and_preserve_unrotated_tail(self):
-        impl = SimpleNamespace()
-        angles = torch.tensor([[0.0, 0.0], [0.3, 0.7], [0.6, 1.4]])
-        impl.rope_cache = torch.cat((angles.cos(), angles.sin()), dim=-1)
-        impl.positions_device = torch.tensor([0, 1, 0, 1, 2, 0])
-        q, k = torch.randn(6, 4, 6), torch.randn(6, 2, 6)
-        actual_q, actual_k = common.apply_embedding_graph_rotary(
-            q, k, impl.rope_cache, impl.positions_device
-        )
-        for actual, original in ((actual_q, q), (actual_k, k)):
-            expected = original.clone()
-            for token, position in enumerate(impl.positions_device.tolist()):
-                for head in range(original.size(1)):
-                    for pair in range(2):
-                        left, right = (
-                            original[token, head, pair],
-                            original[token, head, pair + 2],
-                        )
-                        angle = angles[position, pair]
-                        expected[token, head, pair] = (
-                            left * angle.cos() - right * angle.sin()
-                        )
-                        expected[token, head, pair + 2] = (
-                            right * angle.cos() + left * angle.sin()
-                        )
-            torch.testing.assert_close(actual, expected)
 
     def test_factory_uses_registered_device_backend_for_embedding_graph(self):
         from rtp_llm.models_py.modules.factory.attention import attn_factory

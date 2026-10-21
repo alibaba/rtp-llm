@@ -6,7 +6,6 @@ This module contains helper functions for FMHA implementations including:
 - KV cache offset management
 """
 
-from math import isfinite
 from typing import Any, Optional
 
 import torch
@@ -159,20 +158,8 @@ def embedding_graph_unsupported_reason(configs, backend) -> str:
         )
     if configs.dtype not in (torch.float16, torch.bfloat16):
         return "embedding graph attention requires FP16 or BF16 activations"
-    if configs.rope_config.style not in (RopeStyle.No, RopeStyle.Base):
-        return "embedding graph supports no RoPE or base RoPE; other styles require an adapter"
-    if configs.rope_config.style != RopeStyle.No and (
-        configs.rope_config.dim <= 0
-        or configs.rope_config.dim % 2
-        or configs.rope_config.dim > configs.size_per_head
-    ):
-        return "invalid embedding graph rotary dimension"
-    if configs.rope_config.offset != 0:
-        return "embedding graph RoPE offsets require an adapter"
-    if configs.rope_config.style == RopeStyle.Base and (
-        not isfinite(configs.rope_config.scale) or configs.rope_config.scale < 1.0
-    ):
-        return "embedding graph base RoPE requires a finite scale >= 1"
+    if configs.rope_config.style != RopeStyle.No:
+        return "embedding graph RoPE requires a model adapter"
     if (
         configs.head_num <= 0
         or configs.kv_head_num <= 0
@@ -234,52 +221,3 @@ def prepare_embedding_graph_lengths(
             token_capacity, real_tokens + (index + 1) * limit
         )
     return lengths
-
-
-def create_embedding_graph_rope(configs, token_capacity, max_sequence_length):
-    """Own each bucket's canonical RoPE table and fixed position storage."""
-    rope = getattr(configs, "rope_config", None)
-    if rope is None or int(rope.style) == 0:
-        return None, None, None
-    from rtp_llm.ops import get_rope_cache
-
-    cache = get_rope_cache(
-        rope, max_sequence_length or token_capacity, interleave=False
-    )
-    host = torch.zeros(token_capacity, dtype=torch.int64, pin_memory=True)
-    return cache, host, torch.empty_like(host, device="cuda")
-
-
-def prepare_embedding_graph_positions(attn_inputs, lengths, host, device):
-    if host is None:
-        return
-    positions = getattr(attn_inputs, "combo_position_ids", None)
-    if positions is not None and positions.numel():
-        raise ValueError("explicit embedding graph positions require a model adapter")
-    host.zero_()
-    offset = 0
-    for length in lengths.tolist():
-        host[offset : offset + length].copy_(torch.arange(length, dtype=torch.int64))
-        offset += length
-    # Planning completes before reuse of the pinned source or Graph capture.
-    device.copy_(host)
-
-
-def apply_embedding_graph_rotary(q, k, rope_cache, positions):
-    if rope_cache is None:
-        return q, k
-    # Canonical cache has non-interleaved [cos, sin] rows, matching the
-    # existing ragged eager RoPE path. QK normalization remains in the layer.
-    cache = rope_cache.index_select(0, positions).float()
-    cos, sin = cache.chunk(2, dim=-1)
-    cos, sin = cos.unsqueeze(1), sin.unsqueeze(1)
-    rotary_dim = cache.size(-1)
-
-    def rotate(tensor):
-        left, right = tensor[..., :rotary_dim].float().chunk(2, dim=-1)
-        rotated = torch.cat(
-            (left * cos - right * sin, right * cos + left * sin), dim=-1
-        )
-        return torch.cat((rotated.to(tensor.dtype), tensor[..., rotary_dim:]), dim=-1)
-
-    return rotate(q), rotate(k)

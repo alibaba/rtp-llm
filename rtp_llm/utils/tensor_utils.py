@@ -1,4 +1,3 @@
-import numpy as np
 import torch
 
 
@@ -22,19 +21,19 @@ def get_token_at_first_id_from_combo_tokens(
     lengths: torch.Tensor,
     token_id: int,
 ) -> torch.Tensor:
-    """取每条序列内首个值为 `token_id` 的 token 处的 hidden (用于 CLS_UQI=2 个性化头)。
+    """取每条序列内首个值为 `token_id` 的 token 处的 hidden 。
 
     Args:
         tensor:    [total_tokens, hidden] 拼接的 combo hidden。
         input_ids: [total_tokens] 拼接的 combo token ids。
         lengths:   [batch] 各序列长度。
-        token_id:  目标标记 token id (CLS_UQI 默认 2)。
+        token_id:  目标标记 token id 。
     Returns:
         [batch, hidden] 各序列对应位置的 hidden。
     """
     # 全向量化: 无 Python 循环 / 无 per-seq D2H 同步 (老路每条 nonzero+int(hits[0]) 是线性
     # 开销, 大 batch 下随候选数放大)。ragged "每条首个 token_id 位置" 用 scatter_reduce(amin)
-    # 表达, 与老循环逐位等价 (tensor_utils_cls_uqi_test 逐位对拍); 找不到时回退 offset 0。
+    # 表达, 与老循环逐位等价 (first-marker pooling tests 逐位对拍); 找不到时回退 offset 0。
     device = tensor.device
     num_seq = int(lengths.shape[0])
     lengths_l = lengths.to(device=device, dtype=torch.long)
@@ -55,39 +54,3 @@ def get_token_at_first_id_from_combo_tokens(
         first_local < BIG, first_local, torch.zeros_like(first_local)
     )
     return tensor[start + first_local]
-
-
-def bert_dual_head_scores(
-    hidden_states: torch.Tensor,
-    input_ids: torch.Tensor,
-    input_lengths: torch.Tensor,
-    w_qi: torch.nn.Linear,
-    w_uqi: torch.nn.Linear,
-    cls_uqi_token_id: int = 2,
-) -> torch.Tensor:
-    """Return independent QI/UQI distributions; missing UQI marker pools CLS_QI."""
-    if input_ids.device.type == "cpu" and input_lengths.device.type == "cpu":
-        # Embedding requests already retain host IDs. Build both pooling indices
-        # together instead of copying every token to CUDA and reducing on GPU.
-        lengths = input_lengths.numpy()
-        starts = np.cumsum(lengths, dtype=np.int64) - lengths
-        hits = np.flatnonzero(input_ids.numpy() == cls_uqi_token_id)
-        uqi = np.full(len(lengths), len(input_ids), dtype=np.int64)
-        np.minimum.at(uqi, np.searchsorted(starts, hits, side="right") - 1, hits)
-        uqi = np.where(uqi < len(input_ids), uqi, starts)
-        indices = torch.from_numpy(np.concatenate((starts, uqi))).to(
-            hidden_states.device
-        )
-        qi_hidden, uqi_hidden = hidden_states[indices].chunk(2)
-    else:
-        qi_hidden = get_first_token_from_combo_tokens(hidden_states, input_lengths)
-        uqi_hidden = get_token_at_first_id_from_combo_tokens(
-            hidden_states, input_ids, input_lengths, cls_uqi_token_id
-        )
-    return torch.cat(
-        (
-            torch.softmax(w_qi(qi_hidden), dim=-1),
-            torch.softmax(w_uqi(uqi_hidden), dim=-1),
-        ),
-        dim=-1,
-    )

@@ -41,8 +41,6 @@ public:
     absl::Status process(const std::list<EmbeddingStreamPtr>& streams);
 
 private:
-    friend class EmbeddingInputMetadataTest;
-
     static void prepareEmbeddingInputMetadata(torch::Tensor& tokens,
                                              torch::Tensor& input_lengths,
                                              torch::Tensor& sequence_lengths,

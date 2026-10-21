@@ -323,16 +323,12 @@ class AiterPrefillAttnOp:
         )
         self.cu_seqlens_host = self.fmha_params.cu_seqlens_host
         self.cu_seqlens_device = self.fmha_params.cu_seqlens_q
-        self.rope_cache, self.positions_host, self.positions_device = (
-            common.create_embedding_graph_rope(
-                configs, token_capacity, self.max_sequence_length
-            )
-        )
+
         self.prepare_cuda_graph(attn_inputs, for_capture=True)
         return self.fmha_params
 
     def prepare_cuda_graph(self, attn_inputs, for_capture=False):
-        lengths = common.prepare_embedding_graph_lengths(
+        common.prepare_embedding_graph_lengths(
             attn_inputs,
             self.token_capacity,
             self.request_capacity,
@@ -340,9 +336,7 @@ class AiterPrefillAttnOp:
             self.cu_seqlens_host,
             for_capture,
         )
-        common.prepare_embedding_graph_positions(
-            attn_inputs, lengths, self.positions_host, self.positions_device
-        )
+
         self.cu_seqlens_device.copy_(self.cu_seqlens_host)
         return self.fmha_params
 
@@ -734,9 +728,7 @@ class AiterPrefillAttnOp:
             query, key, value = self._split_raw_qkv(
                 qkv, self.token_capacity, self.token_capacity
             )
-            query, key = common.apply_embedding_graph_rotary(
-                query, key, self.rope_cache, self.positions_device
-            )
+
             return self._forward_varlen((query, key, value), fmha_params)
         q_tensor = qkv[0] if isinstance(qkv, (tuple, list)) else qkv
 
@@ -1852,7 +1844,7 @@ class AiterPrefillImplNonAsm(FMHAImplBase):
             if token_capacity is None or token_capacity <= 0:
                 raise ValueError("embedding graph requires a positive token capacity")
             self.attn_inputs = attn_inputs
-            self.fmha_impl = AiterPrefillAttnOp(attn_configs, v1_kv_layout=True)
+            self.fmha_impl = AiterPrefillAttnOp(attn_configs, linear_v=True)
             self.fmha_params = self.fmha_impl.initialize_cuda_graph(
                 attn_configs, attn_inputs, token_capacity, max_seq_len
             )

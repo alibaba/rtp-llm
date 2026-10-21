@@ -693,11 +693,7 @@ class PyFlashinferPrefillAttnOp(object):
         )
         self.cu_seqlens_device = torch.empty_like(self.cu_seqlens_host, device="cuda")
         self.kv_cu_seqlens_device = torch.empty_like(self.cu_seqlens_device)
-        self.rope_cache, self.positions_host, self.positions_device = (
-            common.create_embedding_graph_rope(
-                configs, self.token_capacity, self.max_sequence_length
-            )
-        )
+
         mask_buffers = {}
         if self.mask_builder is not None:
             if self.token_capacity * self.token_capacity > torch.iinfo(torch.int32).max:
@@ -733,9 +729,7 @@ class PyFlashinferPrefillAttnOp(object):
             self.cu_seqlens_host,
             for_capture,
         )
-        common.prepare_embedding_graph_positions(
-            attn_inputs, lengths, self.positions_host, self.positions_device
-        )
+
         mask_args = (
             self.mask_builder(attn_inputs, lengths, self.padding_slots, for_capture)
             if self.mask_builder
@@ -824,9 +818,7 @@ class PyFlashinferPrefillAttnOp(object):
         if getattr(self, "is_cuda_graph", False):
             if kv_cache is not None:
                 raise ValueError("embedding graph cannot use KV cache")
-            q, k = common.apply_embedding_graph_rotary(
-                q, k, self.rope_cache, self.positions_device
-            )
+
         q = quantize_to_fp8_if_needed(q, self.q_dtype)
         k = quantize_to_fp8_if_needed(k, self.kv_dtype)
         v = quantize_to_fp8_if_needed(v, self.kv_dtype)

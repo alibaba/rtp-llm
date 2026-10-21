@@ -278,9 +278,3 @@ py_test(
         "//rtp_llm:utils",
     ],
 )
-
-py_test(
-    name = "bert_user_profile_test",
-    srcs = ["bert_user_profile_test.py"],
-    deps = ["//rtp_llm:utils", "//rtp_llm:torch"],
-)
