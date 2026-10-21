@@ -2375,6 +2375,16 @@ TEST_F(P2PConnectorWorkerTest, WriteByLayerRejectsMissingOrInfiniteDeadline) {
     }
 }
 
+TEST_F(P2PConnectorWorkerTest, ExpiredLayerIsDroppedWithoutExecutorDispatchFailure) {
+    const auto resource = createKVCacheResource(0, 2);
+    const auto deadline = currentTimeMs() - 1;
+    EXPECT_TRUE(prefill_->writeByLayer(0, resource, 6010, nullptr, deadline));
+    EXPECT_EQ(computed_buffers_->getBuffer(6010, deadline), nullptr);
+    EXPECT_FALSE(computed_buffers_->requestHorizon(6010, deadline).has_value());
+    EXPECT_FALSE(prefill_->writeByLayer(0, resource, 6011, nullptr, 0));
+    EXPECT_FALSE(prefill_->writeByLayer(0, resource, 6011, nullptr, std::numeric_limits<int64_t>::max()));
+}
+
 TEST_F(P2PConnectorWorkerTest, WriteByLayer_BufferDeadlineFollowsRequestDeadline) {
     // 重建 worker，验证等待期间不生成新的资源期限。
     prefill_.reset();

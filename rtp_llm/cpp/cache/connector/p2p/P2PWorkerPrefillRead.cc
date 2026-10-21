@@ -298,7 +298,9 @@ bool P2PWorkerPrefillRead::scheduleLayerCacheBuffers(
                             request_id,
                             layer_id,
                             request_deadline_ms);
-        return false;
+        // Expiration is a request outcome, not an executor dispatch failure.
+        // Invalid/missing deadlines still reject the call.
+        return request_deadline_ms > 0 && request_deadline_ms != std::numeric_limits<int64_t>::max();
     }
     const auto request_horizon =
         computed_buffers_->registerRequestHorizon(request_id, request_deadline_ms, request_deadline_ms);
