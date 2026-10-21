@@ -7,6 +7,7 @@ _DSV4_CUDA13_ONLY = select({
 py_test(
     name = "dsv4_kv_cache_test",
     srcs = ["dsv4_kv_cache_test.py"],
+    data = ["//:th_transformer_config"],
     deps = ["//rtp_llm:testlib"],
     exec_properties = {"gpu": "L20_CU13"},
     tags = ["L20_CU13"],
@@ -46,4 +47,17 @@ py_test(
     name = "glm5_kv_cache_test",
     srcs = ["glm5_kv_cache_test.py"],
     deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "dsv41_kv_cache_test",
+    srcs = ["dsv41_kv_cache_test.py"],
+    data = ["//:th_transformer_config"],
+    deps = ["//rtp_llm:testlib"],
+    target_compatible_with = _DSV4_CUDA13_ONLY,
+    exec_properties = select({
+        "@//:using_cuda13_x86": {"gpu": "L20_CU13", "gpu_count": "1"},
+        "@//:using_cuda13_arm": {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
+        "//conditions:default": {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
+    }),
 )
