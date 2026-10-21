@@ -644,6 +644,13 @@ py_package(
     }),
 )
 
+# Match the CUDA13 dependency locks without upgrading legacy platforms.
+xgrammar_whl_reqs = select({
+    "@//:using_cuda13_x86": ["xgrammar==0.2.8"],
+    "@//:using_cuda13_arm": ["xgrammar==0.2.8"],
+    "//conditions:default": ["xgrammar==0.2.5"],
+})
+
 whl_reqs = [
     "filelock>=3.20.0",
     "jinja2",
@@ -701,11 +708,10 @@ whl_reqs = [
     "portalocker",
     "concurrent_log_handler",
     "apache-tvm-ffi",
-    "xgrammar==0.2.5",
     # OTel trace runtime; keep the pinned protobuf compatibility constraint.
     "opentelemetry-sdk==1.44.0",
     "opentelemetry-exporter-otlp-proto-http==1.15.0",
-] + whl_deps() + platform_deps() + xft_dep
+] + xgrammar_whl_reqs + whl_deps() + platform_deps() + xft_dep
 
 # Frontend-only requirement set: the frontend lane is CPU serving (HTTP + gRPC
 # client + tokenizer), so the engine's platform CUDA tree (whl_deps: torch-cuda,
@@ -756,11 +762,10 @@ whl_reqs_frontend = [
     "portalocker",
     "concurrent_log_handler",
     "apache-tvm-ffi",
-    "xgrammar==0.2.5",
     # OTel trace runtime; keep the pinned protobuf compatibility constraint.
     "opentelemetry-sdk==1.44.0",
     "opentelemetry-exporter-otlp-proto-http==1.15.0",
-]
+] + xgrammar_whl_reqs
 
 py_wheel(
     name = "rtp_llm_frontend_whl",
@@ -802,8 +807,7 @@ whl_reqs_dash_sc_grpc = [
     "grpcio>=1.57.0",
     "jsonschema==4.26.0",
     "protobuf>=4.25",
-    "xgrammar==0.2.5",
-]
+] + xgrammar_whl_reqs
 
 py_wheel(
     name = "rtp_llm_dash_sc_grpc_whl",
