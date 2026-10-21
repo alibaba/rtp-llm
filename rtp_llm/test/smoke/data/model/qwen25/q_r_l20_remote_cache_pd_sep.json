@@ -70,6 +70,12 @@
                             "ip": "127.0.0.1",
                             "http_port": 10613,
                             "grpc_port": 10614
+                        },
+                        {
+                            "role": "PREFILL",
+                            "ip": "127.0.0.1",
+                            "http_port": 0,
+                            "grpc_port": 0
                         }
                     ],
                     "aux_string": ""
@@ -157,6 +163,12 @@
                             "ip": "127.0.0.1",
                             "http_port": 10613,
                             "grpc_port": 10614
+                        },
+                        {
+                            "role": "PREFILL",
+                            "ip": "127.0.0.1",
+                            "http_port": 0,
+                            "grpc_port": 0
                         }
                     ],
                     "aux_string": ""

@@ -73,6 +73,12 @@
           "decode_memory_reuse_len": 0,
           "role_addrs": [
             {
+              "role": "PREFILL",
+              "ip": "127.0.0.1",
+              "http_port": 0,
+              "grpc_port": 0
+            },
+            {
               "role": "DECODE",
               "ip": "",
               "http_port": 0,
