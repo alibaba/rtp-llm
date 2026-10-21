@@ -2109,7 +2109,7 @@ TEST_F(StreamCacheResourceTest, testP2PFirstTokenOutputsRoundTripThroughStartLoa
                 EXPECT_EQ(output.aux_info.multimodal_lengths, published.multimodal_lengths);
             }
             EXPECT_EQ(output.finished, eos);
-            EXPECT_EQ(decode->prefillUsesIndependentBlockPools(), requested);
+            EXPECT_EQ(decode->prefillUsesIndependentBlockPools(), hybrid);
             EXPECT_EQ(decode->generationPrefillCudaGraphStatus(), graph_status);
             if (requested) {
                 EXPECT_EQ(output.aux_info.generation_prefill_cuda_graph_status,
@@ -2140,7 +2140,9 @@ TEST_F(StreamCacheResourceTest, testP2PFirstTokenOutputsRoundTripThroughStartLoa
             if (!eos) {
                 // Later Decode updates default to NOT_REQUESTED and must retain Prefill's status.
                 decode->step();
-                decode->update({.new_tokens = torch::tensor({8}, torch::kInt32).reshape({1, 1}), .num_new_tokens = 1});
+                decode->update({.new_tokens     = torch::tensor({8}, torch::kInt32).reshape({1, 1}),
+                                .num_new_tokens = 1,
+                                .all_probs      = requested ? torch::full({1, 16}, 0.0625f) : torch::Tensor{}});
                 ASSERT_FALSE(decode->hasError());
                 EXPECT_EQ(decode->generationPrefillCudaGraphStatus(), graph_status);
                 auto next_result = decode->nextOutput();
