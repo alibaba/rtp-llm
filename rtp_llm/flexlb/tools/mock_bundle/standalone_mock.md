@@ -45,7 +45,3 @@ FETCH_OUTPUT_STREAM=1
 
 每引擎容量为 `1024 × 113282 = 116000768` token。模拟 KV 容量与 JVM
 实际 heap 分别配置；Pod 资源由 Whale 的 mock role resource plan 配置。
-
-逐 engine KV 容量可用 `MOCK_PREFILL_ENGINE_KV_POOL_BLOCKS`、`MOCK_DECODE_ENGINE_KV_POOL_BLOCKS` 覆盖：JSON 正整数数组，长度必须等于相应初始 engine 数，按该 role 的端口顺序排列。未设置沿用原 role 默认容量；动态新增 engine 使用 role 默认值。数组实际构建每个 engine 的物理池，CacheStatus/WorkerStatus 使用同一池容量，不伪造上报。
-
-real 对齐依据：`KVCacheManager::buildKVCacheInfo` 使用 coordinator 的实际 tokenCapacity；`GetKVCacheInfo_UsesSmallestFullGroupTokenCapacity` 测试验证 FULL group 最小容量。Mock 不模拟 DSV4 多池内部结构，仅按已核对的逻辑容量构建单池，保留实际准入和状态上报一致性。

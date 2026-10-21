@@ -40,19 +40,6 @@ class ClusterConfigParamTest {
     }
 
     @Test
-    void heterogeneousPoolListsRejectAmbiguousAndInvalidCapacity() {
-        var config = JavaMockEngineCluster.Config.parse(with(baseArgs(), "--n-prefill", "2",
-                "--n-decode", "1", "--prefill-engine-kv-pool-blocks", "7,11",
-                "--decode-engine-kv-pool-blocks", "19"));
-        assertEquals(11, config.prefillEngineCacheBlocks[1]);
-        assertEquals(19, config.decodeEngineCacheBlocks[0]);
-        for (String value : new String[]{"7", "7,0", "7,-1", "7,", "7,2147483648"}) {
-            assertThrows(IllegalArgumentException.class, () -> JavaMockEngineCluster.Config.parse(
-                    with(baseArgs(), "--n-prefill", "2", "--prefill-engine-kv-pool-blocks", value)));
-        }
-    }
-
-    @Test
     void fetchIsRequiredByDefaultAndShortcutIsExplicit() {
         var strict = JavaMockEngineCluster.Config.parse(baseArgs());
         assertEquals(false, strict.autoFetch);

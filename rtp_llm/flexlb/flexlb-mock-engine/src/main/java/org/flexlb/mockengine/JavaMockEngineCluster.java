@@ -306,13 +306,6 @@ public final class JavaMockEngineCluster {
                 ? config.prefillTotalKvTokens : config.decodeTotalKvTokens;
         int blocksOverride = roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL
                 ? config.prefillCacheBlocks : config.decodeCacheBlocks;
-        int[] engineBlocks = roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL
-                ? config.prefillEngineCacheBlocks : config.decodeEngineCacheBlocks;
-        int roleIndex = roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL
-                ? engineIndex : engineIndex - config.nPrefill;
-        // Initial engines use the explicit per-role index; later dynamic engines
-        // retain the uniform role default rather than reusing another engine's slot.
-        if (roleIndex >= 0 && roleIndex < engineBlocks.length) blocksOverride = engineBlocks[roleIndex];
         int roleBlockSize = roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL
                 ? config.prefillBlockSize : config.decodeBlockSize;
         if (roleBlockSize > 0) {
@@ -7176,18 +7169,6 @@ public final class JavaMockEngineCluster {
          */
         int prefillCacheBlocks = 0;
         int decodeCacheBlocks = 0;
-        int[] prefillEngineCacheBlocks = new int[0];
-        int[] decodeEngineCacheBlocks = new int[0];
-
-        private static int[] parseEngineBlocks(String value) {
-            String[] parts = value.split(",", -1);
-            int[] blocks = new int[parts.length];
-            for (int i = 0; i < parts.length; i++) {
-                blocks[i] = Integer.parseInt(parts[i].trim());
-                if (blocks[i] <= 0) throw new IllegalArgumentException("engine KV blocks must be positive");
-            }
-            return blocks;
-        }
         String host = "127.0.0.1";
         String bindHost = "0.0.0.0";
         String prefillDomain = "mock.prefill.hosts.address";
@@ -7273,8 +7254,6 @@ public final class JavaMockEngineCluster {
                     case "--fetch-attach-timeout-ms" -> config.fetchAttachTimeoutMs = Long.parseLong(value);
                     case "--prefill-kv-pool-blocks" -> config.prefillCacheBlocks = Integer.parseInt(value);
                     case "--decode-kv-pool-blocks" -> config.decodeCacheBlocks = Integer.parseInt(value);
-                    case "--prefill-engine-kv-pool-blocks" -> config.prefillEngineCacheBlocks = parseEngineBlocks(value);
-                    case "--decode-engine-kv-pool-blocks" -> config.decodeEngineCacheBlocks = parseEngineBlocks(value);
                     case "--host" -> config.host = value;
                     case "--bind-host" -> config.bindHost = value;
                     case "--whale" -> config.whale = parseBooleanFlag(value, key);
@@ -7307,10 +7286,6 @@ public final class JavaMockEngineCluster {
                             parseBooleanFlag(value, UNIQUE_ENGINE_IPS_FLAG);
                     default -> throw new IllegalArgumentException("Unknown argument: " + key);
                 }
-            }
-            if ((config.prefillEngineCacheBlocks.length != 0 && config.prefillEngineCacheBlocks.length != config.nPrefill)
-                    || (config.decodeEngineCacheBlocks.length != 0 && config.decodeEngineCacheBlocks.length != config.nDecode)) {
-                throw new IllegalArgumentException("engine KV block list must match initial role count");
             }
             if (config.endpointFile == null || config.performanceFile == null
                     || config.masterConfigFile == null) {

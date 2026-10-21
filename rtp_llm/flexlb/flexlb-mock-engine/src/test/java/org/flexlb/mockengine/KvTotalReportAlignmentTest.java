@@ -85,30 +85,6 @@ class KvTotalReportAlignmentTest {
         workerGroup.shutdownGracefully(0, 2, TimeUnit.SECONDS);
     }
 
-    @Test
-    void heterogeneousEnginesBuildAndReportTheirOwnPools() throws Exception {
-        var config = new JavaMockEngineCluster.Config();
-        config.nPrefill = 2;
-        config.nDecode = 1;
-        config.prefillCacheBlocks = 99;
-        config.decodeCacheBlocks = 99;
-        config.prefillEngineCacheBlocks = new int[]{7, 11};
-        config.decodeEngineCacheBlocks = new int[]{19};
-        config.prefillBlockSize = 512;
-        config.decodeBlockSize = 128;
-        for (int i = 0; i < 3; i++) {
-            String role = i < 2 ? "prefill" : "decode";
-            var service = JavaMockEngineCluster.startEngine(config, model, serversByPort,
-                    bossGroup, workerGroup, services, scheduler, new JavaMockEngineCluster.ClusterStats(),
-                    role, role + i, BASE_PORT + i, i);
-            long expected = (i == 0 ? 7L * 512 : i == 1 ? 11L * 512 : 19L * 128);
-            assertEquals(expected, service.getTotalKvTokens());
-            EngineRpcService.CacheStatusPB reply = unary(observer -> service.getCacheStatus(EngineRpcService.CacheVersionPB.newBuilder()
-                    .setLatestCacheVersion(-1).setNeedCacheKeys(false).build(), observer));
-            assertEquals(expected, reply.getTotalKvCache());
-        }
-    }
-
     /**
      * Start ONE engine through the production construction path
      * ({@code JavaMockEngineCluster.startEngine}) with a per-role
