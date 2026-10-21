@@ -53,7 +53,7 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         bind_to=(kv_cache_config, "kv_cache_event_manager_endpoint"),
         type=str,
         default="",
-        help="KVCM Meta HTTP endpoint，例如 http://127.0.0.1:56020。",
+        help="KVCM Meta HTTP endpoint；为空时复用 RECO_* 发现 leader，非空时覆盖自动发现。",
     )
     kv_cache_group.add_argument(
         "--kv_cache_event_instance_group",
@@ -329,6 +329,22 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         type=str,
         default="default",
         help="instance_group名称",
+    )
+    kv_cache_group.add_argument(
+        "--kvcm_read_backend_type",
+        env_name="KVCM_READ_BACKEND_TYPE",
+        bind_to=(kv_cache_config, "kvcm_read_backend_type"),
+        type=int,
+        default=0,
+        help="Single KVCM backend: 0=normal match, 1=3fs, 2=mooncake, 3=pace, 4=file, 5=vcns3fs",
+    )
+    kv_cache_group.add_argument(
+        "--kvcm_min_replica_count",
+        env_name="KVCM_MIN_REPLICA_COUNT",
+        bind_to=(kv_cache_config, "kvcm_min_replica_count"),
+        type=int,
+        default=0,
+        help="Minimum readable replicas before StartWrite skips a key; 0 means 1",
     )
     kv_cache_group.add_argument(
         "--kvcm_meta_channel_retry_time",

@@ -156,13 +156,10 @@ inline CacheGroupPolicy defaultCacheGroupPolicy(CacheGroupType group_type) {
     return policy;
 }
 
-// A group belongs to the KV cache event publication completeness set only when
-// it participates in prefix reuse AND materializes every block position.
-// Tail-sparse groups (active_tail_blocks > 0, i.e. LINEAR/SWA keep only their
-// tail blocks) never hold full block chains, so counting them as required
-// would suppress publication for almost every key.
-inline bool cacheGroupPublishesPrefixChain(const CacheGroupPolicy& policy) {
-    return policy.enable_prefix_reuse && policy.active_tail_blocks == 0;
+// Reusable FULL/SWA groups report their own resident components. LINEAR groups
+// are excluded; memory placement is validated before attaching to the cache tree.
+inline bool cacheGroupPublishesEvents(const CacheGroupPolicy& policy) {
+    return policy.enable_prefix_reuse && policy.group_type != CacheGroupType::LINEAR;
 }
 
 }  // namespace rtp_llm
