@@ -112,7 +112,6 @@ class WorkerDirectoryTest {
                                     new org.flexlb.sync.runner.GrpcWorkerStatusRunner(
                                                     "model",
                                                     survivor.getIpPort(),
-                                                    "test",
                                                     RoleType.DECODE,
                                                     survivor,
                                                     survivor.tryBeginStatusPoll(1L),
@@ -399,7 +398,8 @@ class WorkerDirectoryTest {
         RunnerTestSupport.publishEndpoint(
                 registry, RoleType.DECODE, filtered.getLogicalIpPort(), filtered);
 
-        assertEquals(List.of(matching.getLogicalIpPort()), capturedAddresses(RoleType.DECODE, "group1"));
+        assertEquals(
+                List.of(matching.getLogicalIpPort()), capturedAddresses(RoleType.DECODE, "group1"));
         assertEquals(2, workerDirectory.routingCapacity(RoleType.DECODE));
     }
 

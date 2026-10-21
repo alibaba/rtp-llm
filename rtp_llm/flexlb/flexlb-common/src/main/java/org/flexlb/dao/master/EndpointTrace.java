@@ -1,6 +1,8 @@
 package org.flexlb.dao.master;
 
+import java.util.IdentityHashMap;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
@@ -11,6 +13,9 @@ import java.util.concurrent.atomic.AtomicReference;
  */
 public final class EndpointTrace {
     private static final int MAX_ERROR_MESSAGE_CHARS = 192;
+    private static final int MAX_ERROR_TYPE_CHARS = 128;
+    private static final int MAX_CAUSE_DEPTH = 16;
+    private static final int MAX_SUPPRESSED_ERRORS = 4;
     private static final int MAX_REASON_CHARS = 128;
 
     public enum Stage {
@@ -32,6 +37,7 @@ public final class EndpointTrace {
         CALLBACK_FAILED,
         CALLBACK_READY,
         CALLBACK_STARTED,
+        CALLBACK_SUBMISSION_FAILED,
         CONVERSION_STARTED,
         CONVERSION_COMPLETED,
         CONVERSION_FAILED,
@@ -71,7 +77,6 @@ public final class EndpointTrace {
         STATUS_RECONCILIATION_FAILED,
         STATUS_REMOVED(true),
         STATUS_RESPONSE_FAILED,
-        TRANSPORT_FAILURE_RECORDED,
         UNAVAILABLE_DECISION(true);
 
         private final boolean retirement;
@@ -258,6 +263,8 @@ public final class EndpointTrace {
         record(Stage.UNAVAILABLE_DECISION);
     }
 
+    public String unavailableReason() {return unavailableReason;}
+
     public void recordCleanupCounts(long scanned, long removed) {
         scannedKeys = scanned;
         removedMappings = removed;
@@ -321,6 +328,10 @@ public final class EndpointTrace {
         }
 
         public void record(Stage point) {record(point, (Throwable) null);}
+
+        public Stage failureStage() {return firstFailureStage.get();}
+
+        public boolean hasCallbackStarted() {return callbackStartedNanos != 0L;}
 
         public void record(Stage point, Throwable failure) {
             long now = System.nanoTime();
@@ -435,18 +446,65 @@ public final class EndpointTrace {
 
     private static String errorSummary(Throwable failure) {
         if (failure == null) {return null;}
-        String type = failure.getClass().getSimpleName();
+        var text = new StringBuilder();
         try {
-            failure = unwrap(failure);
-            type = failure.getClass().getSimpleName();
-            String message = failure.getMessage();
-            return message == null ? type : type + ":" + bounded(message, MAX_ERROR_MESSAGE_CHARS);
-        } catch (RuntimeException | LinkageError ignored) {return type;}
+            Throwable unwrapped = unwrap(failure);
+            // Preserve types before the bounded message: an outer description must not hide the root cause.
+            appendCauseTypes(text, unwrapped);
+            appendSuppressedTypes(text, failure);
+            String message = unwrapped.getMessage();
+            if (message != null) {text.append(':').append(bounded(message, MAX_ERROR_MESSAGE_CHARS));}
+        } catch (RuntimeException | LinkageError ignored) {
+            if (text.isEmpty()) {text.append(bounded(failure.getClass().getName(), MAX_ERROR_TYPE_CHARS));}
+        }
+        return text.toString();
+    }
+
+    private static void appendCauseTypes(StringBuilder text, Throwable failure) {
+        var seen = new IdentityHashMap<Throwable, Boolean>();
+        int depth = 0;
+        while (failure != null && depth < MAX_CAUSE_DEPTH) {
+            if (depth != 0) {text.append("->");}
+            if (seen.put(failure, Boolean.TRUE) != null) {
+                text.append("[cycle]");
+                return;
+            }
+            String type = failure.getClass().getSimpleName();
+            text.append(bounded(type.isEmpty() ? failure.getClass().getName() : type, MAX_ERROR_TYPE_CHARS));
+            failure = failure.getCause();
+            depth++;
+        }
+        if (failure != null) {text.append("->[truncated]");}
+    }
+
+    private static void appendSuppressedTypes(StringBuilder text, Throwable failure) {
+        var seen = new IdentityHashMap<Throwable, Boolean>();
+        int count = 0;
+        for (int depth = 0; failure != null && depth < MAX_CAUSE_DEPTH
+                && seen.put(failure, Boolean.TRUE) == null; depth++, failure = failure.getCause()) {
+            for (Throwable suppressed : failure.getSuppressed()) {
+                // Suppressed attempts are diagnostic history, not the final failure's causal chain.
+                if (count == 0) {text.append(" suppressed=[");} else {text.append(';');}
+                if (count == MAX_SUPPRESSED_ERRORS) {
+                    text.append("[truncated]]");
+                    return;
+                }
+                appendCauseTypes(text, suppressed);
+                count++;
+            }
+        }
+        if (count != 0) {text.append(']');}
     }
 
     public static Throwable unwrap(Throwable failure) {
-        while (failure instanceof CompletionException && failure.getCause() != null) {
-            failure = failure.getCause();
+        if (!(failure instanceof CompletionException || failure instanceof ExecutionException)) {return failure;}
+        var seen = new IdentityHashMap<Throwable, Boolean>();
+        for (int depth = 0; depth < MAX_CAUSE_DEPTH
+                && (failure instanceof CompletionException || failure instanceof ExecutionException)
+                && seen.put(failure, Boolean.TRUE) == null; depth++) {
+            Throwable cause = failure.getCause();
+            if (cause == null) {break;}
+            failure = cause;
         }
         return failure;
     }

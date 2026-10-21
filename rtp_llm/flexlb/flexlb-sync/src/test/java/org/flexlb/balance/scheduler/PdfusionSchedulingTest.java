@@ -32,6 +32,7 @@ import org.flexlb.enums.TaskPhase;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
+import org.flexlb.service.monitor.StatusFailureReporter;
 import org.flexlb.sync.status.WorkerDirectory;
 import org.flexlb.testfixture.TaskInfo;
 import org.flexlb.testfixture.WorkerStatusResponse;
@@ -113,7 +114,7 @@ class PdfusionSchedulingTest {
         EndpointRegistry endpoints =
                 new EndpointRegistry(
                         service,
-                        new EndpointEventProjector(lifecycle),
+                        new EndpointEventProjector(lifecycle, mock(StatusFailureReporter.class)),
                         reporter,
                         delivery,
                         availability);

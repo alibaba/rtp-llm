@@ -4,7 +4,6 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.cache.match.localsync.DynamicCacheIntervalService;
-import org.flexlb.dao.master.EndpointTrace;
 import org.flexlb.dao.master.EndpointTrace.Stage;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.master.WorkerStatus;
@@ -164,7 +163,7 @@ public class EngineSyncRunner implements Runnable {
                                 .toList();
                 logger.warn(
                         "Service discovery failed; polling cached workers, model={}, role={},"
-                            + " workers={}, error={}",
+                                + " workers={}, error={}",
                         modelName,
                         roleType,
                         latestEngineWorkerList.size(),
@@ -238,16 +237,18 @@ public class EngineSyncRunner implements Runnable {
                 String site = host.getSite();
 
                 WorkerStatus workerStatus =
-                        discoverySucceeded ? getOrCreateWorkerStatus(
-                                workerIpPort,
-                                site,
-                                host.getGroup(),
-                                host.getDeploymentName(),
-                                host.getIp(),
-                                host.getHttpPort(),
-                                host.getGrpcPort(),
-                                host.getEngineIndex(),
-                                host.getMultiEngineNum()) : cachedWorkerStatuses.get(workerIpPort);
+                        discoverySucceeded
+                                ? getOrCreateWorkerStatus(
+                                        workerIpPort,
+                                        site,
+                                        host.getGroup(),
+                                        host.getDeploymentName(),
+                                        host.getIp(),
+                                        host.getHttpPort(),
+                                        host.getGrpcPort(),
+                                        host.getEngineIndex(),
+                                        host.getMultiEngineNum())
+                                : cachedWorkerStatuses.get(workerIpPort);
 
                 if (workerStatus == null) {
                     continue;
@@ -274,8 +275,6 @@ public class EngineSyncRunner implements Runnable {
                                 new GrpcWorkerStatusRunner(
                                         modelName,
                                         workerIpPort,
-                                        host.getWorkerStatusPort(),
-                                        site,
                                         roleType,
                                         workerStatus,
                                         statusPollLease,
@@ -304,7 +303,9 @@ public class EngineSyncRunner implements Runnable {
                             workerIpPort);
                 }
 
-                if (!pollCacheThisCycle) { continue; }
+                if (!pollCacheThisCycle) {
+                    continue;
+                }
                 WorkerStatus.PollLease cachePollLease =
                         kvcmEnabled ? null : workerStatus.tryBeginCachePoll(syncCycleId);
                 if (cachePollLease != null) {

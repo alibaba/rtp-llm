@@ -38,7 +38,7 @@ import java.util.concurrent.atomic.AtomicReference;
 class ExpirationCleanerTest {
 
     @Test
-    void onlyConsecutiveRpcFailuresTriggerRetirement() {
+    void rpcFailuresDoNotTriggerRetirementUntilWorkerReportsNotAlive() {
         EndpointRegistry registry = mock(EndpointRegistry.class);
         CacheAwareService cache = mock(CacheAwareService.class);
         WorkerStatus status = status("127.0.0.1", 8080);
@@ -53,13 +53,22 @@ class ExpirationCleanerTest {
                     lease, false, false, new IllegalStateException("RPC failed"));
             lease.close();
             cleaner.retireUnavailableWorkers();
-            assertEquals(failures < 3, status.isActiveGeneration());
+            assertTrue(status.isActiveGeneration());
+            org.junit.jupiter.api.Assertions.assertNull(status.retirementReason());
+            org.mockito.Mockito.verifyNoInteractions(cache);
         }
-        verify(cache).removeEngineBlockCache(status, status.trace());
         assertEquals(
-                -1L,
-                status.trace().snapshot().lastSuccessAgeUs(),
+                0L,
+                status.pollHealth().lastSuccessfulPollUs(),
                 "a worker that never replied must not report discovery time as a successful RPC");
+        for (int count = 1; count <= 3; count++) {
+            try (var lease = status.tryBeginStatusPoll(3L + count)) {
+                status.recordStatusRpcResult(lease, true, false, null);
+            }
+        }
+        cleaner.retireUnavailableWorkers();
+        assertFalse(status.isActiveGeneration());
+        verify(cache).removeEngineBlockCache(status, status.trace());
     }
 
     @Test
@@ -140,9 +149,11 @@ class ExpirationCleanerTest {
         WorkerStatus first = status("127.0.0.1", 8080);
         WorkerStatus second = status("127.0.0.2", 8080);
         for (WorkerStatus status : new WorkerStatus[] {first, second}) {
-            WorkerStatus.PollLease lease = status.tryBeginStatusPoll(1L);
-            status.recordStatusRpcResult(lease, true, false, null);
-            lease.close();
+            for (int count = 1; count <= 3; count++) {
+                try (var lease = status.tryBeginStatusPoll(count)) {
+                    status.recordStatusRpcResult(lease, true, false, null);
+                }
+            }
         }
         WorkerDirectory directory = new WorkerDirectory(registry);
         directory.currentOrDiscover(RoleType.PREFILL, first.getLogicalIpPort(), () -> first);

@@ -33,6 +33,7 @@ import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
+import org.flexlb.service.monitor.StatusFailureReporter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -450,7 +451,7 @@ class RequestLifecycleDeliveryLockContractTest {
         assertNotNull(claim);
         RequestSlot original = lifecycle.requestSlot("207");
 
-        new EndpointEventProjector(lifecycle)
+        new EndpointEventProjector(lifecycle, mock(StatusFailureReporter.class))
                 .onPrefillStatus(
                         endpoint,
                         RoleType.PDFUSION,

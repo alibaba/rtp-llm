@@ -27,6 +27,7 @@ import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskPhase;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
+import org.flexlb.service.monitor.StatusFailureReporter;
 import org.flexlb.testfixture.TaskInfo;
 import org.flexlb.testfixture.WorkerStatusResponse;
 import org.flexlb.testfixture.WorkerStatusTestFixtures;
@@ -435,7 +436,7 @@ class RequestResourceAccountingTest {
             var reporter = mock(BatchSchedulerReporter.class);
             var requestReporter = mock(RequestSchedulerReporter.class);
             requests = new RequestRegistry(service, reporter, requestReporter);
-            var projector = new EndpointEventProjector(requests);
+            var projector = new EndpointEventProjector(requests, mock(StatusFailureReporter.class));
             var endpoints =
                     new EndpointRegistry(
                             service,

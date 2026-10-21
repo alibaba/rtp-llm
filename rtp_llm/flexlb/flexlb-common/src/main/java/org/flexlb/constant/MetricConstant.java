@@ -15,6 +15,7 @@ public class MetricConstant {
      * Sum of GC notification pause durations in milliseconds, with the same tags as the count.
      */
     public static final String JVM_GC_PAUSE_TOTAL_MS = "app.jvm.gc.pause.total.ms";
+
     public static final String NETTY_DIRECT_RESERVED_BYTES = "app.netty.direct.reserved.bytes";
     public static final String NETTY_DIRECT_PINNED_BYTES = "app.netty.direct.pinned.bytes";
     public static final String NETTY_MEMORY_SAMPLE_DURATION_MS =
@@ -58,6 +59,7 @@ public class MetricConstant {
 
     /** Failed WorkerStatus gRPC check latency in microseconds. */
     public static final String ENGINE_STATUS_CHECK_FAIL_RT = "app.engine.health.check.fail.rt";
+    public static final String STATUS_FAILURE_DETAIL = "app.status.failure.detail";
 
     /**
      * Master load balancing service total QPS
@@ -556,6 +558,9 @@ public class MetricConstant {
      * gRPC call count
      */
     public static final String GRPC_CALL_COUNT = "app.grpc.call.count";
+
+    public static final String GRPC_CALL_FAILURE = "app.grpc.call.failure";
+    public static final String GRPC_DELIVERY_DELAY = "app.grpc.delivery.delay_ms";
 
     /**
      * gRPC connection duration in microseconds

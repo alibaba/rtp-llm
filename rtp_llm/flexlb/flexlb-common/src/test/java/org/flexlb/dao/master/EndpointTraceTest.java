@@ -5,11 +5,14 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.net.SocketException;
+import java.time.Duration;
 import java.util.ArrayDeque;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.RejectedExecutionException;
@@ -20,9 +23,98 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class EndpointTraceTest {
+    @Test
+    void nestedOutOfMemoryCauseSurvivesFutureWrappers() {
+        var trace = new EndpointTrace();
+        var poll = trace.beginPoll("STATUS", 1L);
+        var transportFailure = new IllegalStateException("UNKNOWN", new OutOfMemoryError("direct buffer memory"));
+        var failure = new CompletionException(new ExecutionException(transportFailure));
+
+        assertSame(transportFailure, EndpointTrace.unwrap(failure));
+        poll.record(Stage.RPC_COMPLETED, failure);
+
+        assertEquals("IllegalStateException->OutOfMemoryError:UNKNOWN", trace.snapshot().statusPoll().error());
+    }
+
+    @Test
+    void longOuterMessageCannotHideRootCauseType() {
+        var trace = new EndpointTrace();
+        var failure = new IllegalStateException("x".repeat(2000), new OutOfMemoryError("direct buffer memory"));
+
+        trace.record(Stage.CACHE_CLEANUP_FAILED, failure);
+
+        String summary = trace.snapshot().error();
+        assertTrue(summary.startsWith("IllegalStateException->OutOfMemoryError:"));
+        assertTrue(summary.length() < 300);
+    }
+
+    @Test
+    void cyclicCauseChainCannotHangRecordingOrUnwrapping() {
+        var first = new IllegalStateException("first");
+        var second = new IllegalArgumentException("second");
+        first.initCause(second);
+        second.initCause(first);
+        var trace = new EndpointTrace();
+        var poll = trace.beginPoll("STATUS", 1L);
+
+        assertTimeoutPreemptively(Duration.ofSeconds(1), () -> poll.record(Stage.RPC_COMPLETED, first));
+        assertEquals("IllegalStateException->IllegalArgumentException->[cycle]:first",
+                trace.snapshot().statusPoll().error());
+        poll.record(Stage.LEASE_RELEASED);
+        assertTrue(trace.snapshot().statusPoll().leaseReleased());
+
+        class CyclicCompletionException extends CompletionException {
+            private Throwable next;
+            CyclicCompletionException() {super((Throwable) null);}
+            @Override public synchronized Throwable getCause() {return next;}
+        }
+        var wrapper1 = new CyclicCompletionException();
+        var wrapper2 = new CyclicCompletionException();
+        wrapper1.next = wrapper2;
+        wrapper2.next = wrapper1;
+        assertSame(wrapper1, assertTimeoutPreemptively(Duration.ofSeconds(1),
+                () -> EndpointTrace.unwrap(wrapper1)));
+    }
+
+    @Test
+    void suppressedRetryFailuresRemainSeparateFromFinalCauseChain() {
+        var trace = new EndpointTrace();
+        var poll = trace.beginPoll("STATUS", 1L);
+        var finalFailure = new IllegalStateException("deadline");
+        finalFailure.addSuppressed(new SocketException("connection reset"));
+        var wrapped = new ExecutionException(finalFailure);
+        wrapped.addSuppressed(new IllegalArgumentException("previous attempt", new OutOfMemoryError("direct")));
+
+        poll.record(Stage.RPC_COMPLETED, wrapped);
+        poll.record(Stage.CALLBACK_FAILED, new RejectedExecutionException("later failure"));
+
+        assertEquals("IllegalStateException suppressed=[IllegalArgumentException->OutOfMemoryError;SocketException]:deadline",
+                trace.snapshot().statusPoll().error());
+        assertEquals("RPC_COMPLETED", trace.snapshot().statusPoll().failureStage());
+    }
+
+    @Test
+    void longCauseAndSuppressedChainsHaveBoundedSummaries() {
+        Throwable failure = new OutOfMemoryError("root");
+        for (int depth = 0; depth < 100; depth++) {failure = new IllegalStateException("outer", failure);}
+        for (int attempt = 0; attempt < 100; attempt++) {
+            failure.addSuppressed(new SocketException("attempt " + attempt));
+        }
+        var trace = new EndpointTrace();
+
+        trace.record(Stage.CACHE_CLEANUP_FAILED, failure);
+
+        String summary = trace.snapshot().error();
+        assertTrue(summary.contains("->[truncated]"));
+        assertTrue(summary.contains("suppressed=[SocketException;SocketException;SocketException;SocketException;[truncated]]"));
+        assertTrue(summary.length() < 1000);
+    }
+
     @ParameterizedTest
     @ValueSource(booleans = {true, false})
     void readingExceptionDetailsDoesNotBlockProgress(boolean pollFailure) throws Exception {
@@ -213,12 +305,12 @@ class EndpointTraceTest {
         poll.record(Stage.CACHE_INDEX_LOCK_ACQUIRED);
         poll.record(Stage.CACHE_INDEX_LOCK_RELEASED);
         trace.record(Stage.GENERATION_RETIRING);
-        trace.recordUnavailable("CONSECUTIVE_STATUS_FAILURES", System.nanoTime() / 1000, 3L);
+        trace.recordUnavailable("CONSECUTIVE_WORKER_FAILURES", System.nanoTime() / 1000, 3L);
         trace.record(EndpointTrace.Stage.ENDPOINT_GATE_CLOSED);
         var snapshot = trace.snapshot();
         assertTrue(snapshot.cachePoll().indexWait().totalWaitUs() >= 0);
         assertTrue(snapshot.cachePoll().indexWait().contendedHoldUs() >= 0);
-        assertEquals("CONSECUTIVE_STATUS_FAILURES", snapshot.unavailableReason());
+        assertEquals("CONSECUTIVE_WORKER_FAILURES", snapshot.unavailableReason());
         assertTrue(snapshot.gateClosedAtMs() >= snapshot.decidedAtMs());
         assertEquals(3L, snapshot.consecutiveFailures());
         assertTrue(snapshot.compact().contains("gTotalUs:"));

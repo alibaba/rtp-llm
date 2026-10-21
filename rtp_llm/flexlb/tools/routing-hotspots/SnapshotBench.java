@@ -1,4 +1,5 @@
 import com.sun.management.ThreadMXBean;
+
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.endpoint.PrefillActiveIndex;
@@ -15,8 +16,10 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
+import org.flexlb.metric.NoOpFlexMonitor;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
+import org.flexlb.service.monitor.StatusFailureReporter;
 
 import java.lang.management.ManagementFactory;
 import java.lang.reflect.Field;
@@ -90,7 +93,8 @@ public class SnapshotBench {
                         null,
                         config,
                         strategy,
-                        new EndpointEventProjector(registry));
+                        new EndpointEventProjector(
+                                registry, new StatusFailureReporter(new NoOpFlexMonitor())));
         Field lockField = WorkerBatcher.class.getDeclaredField("queueLock");
         lockField.setAccessible(true);
         var lock = (ReentrantLock) lockField.get(runtime);
@@ -224,7 +228,8 @@ public class SnapshotBench {
             if (round >= 2)
                 System.out.printf(
                         Locale.ROOT,
-                        "index_remove_add_depth%d round=%d ns/op=%.2f cpu_ns/op=%.2f bytes/op=%.2f%n",
+                        "index_remove_add_depth%d round=%d ns/op=%.2f cpu_ns/op=%.2f"
+                            + " bytes/op=%.2f%n",
                         depth,
                         round,
                         (double) elapsed / operations,

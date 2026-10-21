@@ -194,9 +194,7 @@ public final class WorkerDirectory implements WorkerStatusProvider {
         WorkerStatus.PollHealth health = status.pollHealth();
         status.trace()
                 .recordUnavailable(
-                        reason,
-                        health.lastSuccessfulPollUs(),
-                        health.consecutiveTransportFailures());
+                        reason, health.lastSuccessfulPollUs(), health.consecutiveWorkerFailures());
 
         WorkerEndpoint expected = endpointRegistry.get(role, address, status);
         EndpointRegistry.DetachedGeneration detached =

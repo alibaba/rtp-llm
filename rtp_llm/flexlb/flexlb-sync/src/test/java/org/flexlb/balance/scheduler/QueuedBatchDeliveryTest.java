@@ -38,6 +38,7 @@ import org.flexlb.engine.grpc.client.EngineGrpcClient;
 import org.flexlb.metric.NoOpFlexMonitor;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
+import org.flexlb.service.monitor.StatusFailureReporter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -122,7 +123,7 @@ class QueuedBatchDeliveryTest {
                 new DecodeEndpoint(
                         WorkerStatus.createDiscovered(
                                 RoleType.DECODE, null, "127.0.0.1", 8080, 8081, null),
-                        new EndpointEventProjector(registry));
+                        new EndpointEventProjector(registry, mock(StatusFailureReporter.class)));
         CountDownLatch entered = new CountDownLatch(1);
         dispatcher
                 .tryPrepareSubmission()

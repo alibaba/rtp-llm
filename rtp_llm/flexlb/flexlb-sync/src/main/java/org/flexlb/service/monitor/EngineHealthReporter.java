@@ -1,41 +1,5 @@
 package org.flexlb.service.monitor;
 
-import io.netty.channel.EventLoopGroup;
-import io.netty.util.concurrent.EventExecutor;
-import io.netty.util.concurrent.SingleThreadEventExecutor;
-import org.apache.commons.collections4.CollectionUtils;
-import org.flexlb.balance.endpoint.EncoderEndpoint;
-import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.cache.domain.CacheHitComparisonResult;
-import org.flexlb.cache.telemetry.CacheMetricsReporter;
-import org.flexlb.constant.MetricConstant;
-import org.flexlb.constant.ZkMasterEvent;
-import org.flexlb.dao.BalanceContext;
-import org.flexlb.dao.loadbalance.ServerStatus;
-import org.flexlb.dao.master.CacheStatus;
-import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.route.RoleType;
-import org.flexlb.engine.grpc.client.EngineGrpcClient;
-import org.flexlb.enums.BalanceStatusEnum;
-import org.flexlb.enums.FlexMetricType;
-import org.flexlb.enums.FlexPriorityType;
-import org.flexlb.metric.FlexMetricTags;
-import org.flexlb.metric.FlexMonitor;
-import org.flexlb.metric.FlexStatisticsType;
-import org.flexlb.sync.status.WorkerDirectory;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.scheduling.annotation.Scheduled;
-import org.springframework.stereotype.Component;
-import reactor.netty.resources.LoopResources;
-
-import javax.annotation.PostConstruct;
-import java.util.HashMap;
-import java.util.Map;
-import java.util.Objects;
-import java.util.concurrent.ThreadPoolExecutor;
-
 import static org.flexlb.constant.MetricConstant.CACHE_AVAILABLE_KV_CACHE_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_BLOCK_SIZE;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_ACTUAL_RATIO;
@@ -105,6 +69,47 @@ import static org.flexlb.constant.MetricConstant.REQUEST_SEQ_LEN;
 import static org.flexlb.constant.MetricConstant.ZK_MASTER_EVENT;
 import static org.flexlb.constant.MetricConstant.ZK_MASTER_NODE;
 
+import io.netty.channel.EventLoopGroup;
+import io.netty.util.concurrent.EventExecutor;
+import io.netty.util.concurrent.SingleThreadEventExecutor;
+
+import org.apache.commons.collections4.CollectionUtils;
+import org.flexlb.balance.endpoint.EncoderEndpoint;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
+import org.flexlb.cache.domain.CacheHitComparisonResult;
+import org.flexlb.cache.telemetry.CacheMetricsReporter;
+import org.flexlb.constant.MetricConstant;
+import org.flexlb.constant.ZkMasterEvent;
+import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.loadbalance.ServerStatus;
+import org.flexlb.dao.master.CacheStatus;
+import org.flexlb.dao.master.EndpointTrace;
+import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.route.RoleType;
+import org.flexlb.engine.grpc.client.EngineGrpcClient;
+import org.flexlb.engine.grpc.GrpcFailure;
+import org.flexlb.enums.BalanceStatusEnum;
+import org.flexlb.enums.FlexMetricType;
+import org.flexlb.enums.FlexPriorityType;
+import org.flexlb.metric.FlexMetricTags;
+import org.flexlb.metric.FlexMonitor;
+import org.flexlb.metric.FlexStatisticsType;
+import org.flexlb.sync.status.WorkerDirectory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.stereotype.Component;
+
+import reactor.netty.resources.LoopResources;
+
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Objects;
+import java.util.concurrent.ThreadPoolExecutor;
+
+import javax.annotation.PostConstruct;
+
 /**
  * Engine health reporter for monitoring engine status and metrics
  */
@@ -121,6 +126,8 @@ public class EngineHealthReporter {
 
     private final WorkerDirectory workerDirectory;
 
+    private final StatusFailureReporter statusFailureReporter;
+
     private final Map<String, EventLoopGroup> eventLoopGroupMap;
 
     @Autowired
@@ -129,11 +136,13 @@ public class EngineHealthReporter {
             CacheMetricsReporter cacheMetricsReporter,
             EngineGrpcClient engineGrpcClient,
             LoopResources serverLoopResources,
-            WorkerDirectory workerDirectory) {
+            WorkerDirectory workerDirectory,
+            StatusFailureReporter statusFailureReporter) {
         this.monitor = monitor;
         this.cacheMetricsReporter = cacheMetricsReporter;
         this.engineGrpcClient = engineGrpcClient;
         this.workerDirectory = workerDirectory;
+        this.statusFailureReporter = statusFailureReporter;
         this.eventLoopGroupMap =
                 Map.of(
                         "serverWorker", serverLoopResources.onServer(true),
@@ -550,6 +559,34 @@ public class EngineHealthReporter {
         monitor.report(ENGINE_WORKER_STEP_PREFILL_TOKENS, tags, step.prefillTokens());
         monitor.report(ENGINE_WORKER_STEP_TOKEN_BUDGET, tags, step.tokenBudget());
         monitor.report(ENGINE_WORKER_STEP_BUDGET_FILL_RATIO, tags, step.budgetFillRatio());
+    }
+
+    public void reportStatusCheckerFail(
+            String modelName,
+            BalanceStatusEnum errorEnum,
+            RoleType role,
+            EndpointTrace.Stage stage,
+            String reason,
+            GrpcFailure.Analysis failure) {
+        try {
+            reportStatusCheckerFail(modelName, errorEnum, role);
+        } finally {
+            statusFailureReporter.report(role, "worker_status", stage, reason, failure);
+        }
+    }
+
+    public void reportCacheStatusCheckerFail(
+            String modelName,
+            BalanceStatusEnum errorEnum,
+            RoleType role,
+            EndpointTrace.Stage stage,
+            String reason,
+            GrpcFailure.Analysis failure) {
+        try {
+            reportCacheStatusCheckerFail(modelName, errorEnum, role);
+        } finally {
+            statusFailureReporter.report(role, "cache_status", stage, reason, failure);
+        }
     }
 
     public void reportStatusCheckerSuccess(
