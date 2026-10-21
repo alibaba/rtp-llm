@@ -1,6 +1,9 @@
+import logging
+from logging.handlers import RotatingFileHandler
+from typing import Any, Dict, Optional
 
-from typing import Dict, Any
 from rtp_llm.config.log_config import get_log_path
+
 
 def get_uvicorn_logging_config(log_path: str = get_log_path()) -> Dict[str, Any]:
     return {
@@ -23,6 +26,41 @@ def get_uvicorn_logging_config(log_path: str = get_log_path()) -> Dict[str, Any]
             },
         },
         "loggers": {
-            "uvicorn.access": {"handlers": ["access"], "level": "INFO", "propagate": False},
+            "uvicorn.access": {
+                "handlers": ["access"],
+                "level": "INFO",
+                "propagate": False,
+            },
         },
     }
+
+
+def configure_uvicorn_access_logger(log_path: Optional[str] = None) -> None:
+    """Configure HTTP access logging without closing other service handlers."""
+    from uvicorn.logging import AccessFormatter
+
+    config = get_uvicorn_logging_config(
+        get_log_path() if log_path is None else log_path
+    )
+    handler_config = config["handlers"]["access"]
+    formatter_config = config["formatters"]["access"]
+    handler = RotatingFileHandler(
+        filename=handler_config["filename"],
+        maxBytes=handler_config["maxBytes"],
+        backupCount=handler_config["backupCount"],
+    )
+    handler.setFormatter(
+        AccessFormatter(
+            fmt=formatter_config["fmt"], datefmt=formatter_config["datefmt"]
+        )
+    )
+    # dictConfig closes every registered handler, including the MM async
+    # handlers created before HTTP startup. Only replace Uvicorn's handler.
+    logger = logging.getLogger("uvicorn.access")
+    for old_handler in logger.handlers[:]:
+        logger.removeHandler(old_handler)
+        old_handler.close()
+    logger.addHandler(handler)
+    logger.setLevel(config["loggers"]["uvicorn.access"]["level"])
+    logger.propagate = False
+    logger.disabled = False
