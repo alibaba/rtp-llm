@@ -18,6 +18,16 @@ P2PConnector::P2PConnector(P2PConnectorConfig                          config,
 P2PConnector::~P2PConnector() = default;
 
 bool P2PConnector::init() {
+    const auto& scheduler = config_.scheduler_config;
+    if (scheduler.load_cache_timeout_ms <= 0
+        || scheduler.load_cache_timeout_ms > std::numeric_limits<int32_t>::max()) {
+        RTP_LLM_LOG_ERROR("init failed: load_cache_timeout_ms must be in (0, INT32_MAX]");
+        return false;
+    }
+    if (config_.role_type == RoleType::DECODE && scheduler.p2p_lease_query_timeout_ms <= 0) {
+        RTP_LLM_LOG_ERROR("init failed: p2p_lease_query_timeout_ms must be positive on Decode");
+        return false;
+    }
     if (config_.role_type == RoleType::PREFILL) {
         prefill_ = std::make_unique<P2PConnectorPrefill>(config_, layer_block_converter_, metrics_reporter_);
         if (!prefill_->init()) {

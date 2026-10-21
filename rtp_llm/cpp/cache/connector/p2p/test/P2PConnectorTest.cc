@@ -1,5 +1,6 @@
 #include <atomic>
 #include <future>
+#include <limits>
 #include <string>
 #include <thread>
 #include <gtest/gtest.h>
@@ -208,6 +209,23 @@ protected:
 };
 
 // ==================== handleRead 测试 ====================
+
+TEST(P2PConnectorConfigValidationTest, RejectsInvalidTimeoutBeforeStartingBackends) {
+    for (auto role : {RoleType::PREFILL, RoleType::DECODE}) {
+        for (int64_t timeout : {int64_t{0}, int64_t{-1}, int64_t{std::numeric_limits<int32_t>::max()} + 1}) {
+            P2PConnectorConfig config;
+            config.role_type = role;
+            config.scheduler_config.load_cache_timeout_ms = timeout;
+            P2PConnector connector(config, std::make_shared<MockLayerBlockConverter>(), nullptr);
+            EXPECT_FALSE(connector.init());
+        }
+    }
+    P2PConnectorConfig config;
+    config.role_type = RoleType::DECODE;
+    config.scheduler_config.p2p_lease_query_timeout_ms = 0;
+    P2PConnector connector(config, std::make_shared<MockLayerBlockConverter>(), nullptr);
+    EXPECT_FALSE(connector.init());
+}
 
 TEST_F(P2PConnectorTest, AsyncWriteByLayer_ReturnsNullWhenWorkerRejectsDispatch) {
     auto resource = createValidKVCacheResource();
