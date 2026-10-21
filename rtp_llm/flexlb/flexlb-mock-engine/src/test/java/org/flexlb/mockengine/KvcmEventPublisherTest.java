@@ -189,15 +189,15 @@ class KvcmEventPublisherTest {
         } finally { peer.snapshotRelease.countDown(); }
     }
 
-    @Test void lostSnapshotAckRetriesIdenticalPayloadBeforeTakingNewSnapshot() throws Exception {
+    @Test void lostSnapshotAckReregistersAndReconcilesCurrentState() throws Exception {
         var cache = new MockLruBlockCache(16);
         cache.admit(List.of(1L));
         var peer = new Peer();
         peer.loseSnapshotAck.set(true);
         try (var publisher = new KvcmEventPublisher(config(64), cache, "host:1", 128, () -> true, peer)) {
             publisher.start();
-            until(() -> peer.snapshots().size() >= 3 && publisher.status().get("state").equals("READY"));
-            assertEquals(peer.snapshots().get(0), peer.snapshots().get(1));
+            until(() -> peer.snapshots().size() >= 2 && publisher.status().get("state").equals("READY"));
+            assertTrue(peer.requests.stream().filter(root -> root.has("instance_group")).count() >= 2);
             assertTrue((long) publisher.status().get("failures") >= 1);
             assertEquals(Set.of(1L), peer.keys);
         }
@@ -241,14 +241,9 @@ class KvcmEventPublisherTest {
         var peer = new Peer();
         var entered = new CountDownLatch(1);
         var release = new CountDownLatch(1);
-        var firstHeartbeat = new AtomicBoolean(true);
-        KvcmEventPublisher.Transport transport = (route, body) -> {
-            if (body.contains("EVENT_HEARTBEAT") && firstHeartbeat.getAndSet(false)) {
-                entered.countDown();
-                assertTrue(release.await(3, TimeUnit.SECONDS));
-            }
-            return peer.post(route, body);
-        };
+        peer.snapshotEntered = entered;
+        peer.snapshotRelease = release;
+        KvcmEventPublisher.Transport transport = peer;
         try (var publisher = new KvcmEventPublisher(config(64), cache, "host:1", 128, () -> true, transport)) {
             publisher.start();
             assertTrue(entered.await(3, TimeUnit.SECONDS));
@@ -291,12 +286,12 @@ class KvcmEventPublisherTest {
         server.start();
         var cfg = config(URI.create("http://127.0.0.1:" + server.getAddress().getPort()), 64);
         try (var first = new KvcmEventPublisher(cfg, new MockLruBlockCache(8), "host:1", 128, () -> true, null);
-             var second = new KvcmEventPublisher(cfg, new MockLruBlockCache(8), "host:2", 16, () -> true, null)) {
+             var second = new KvcmEventPublisher(cfg, new MockLruBlockCache(8), "host:2", 128, () -> true, null)) {
             first.start(); second.start();
             until(() -> first.status().get("state").equals("READY") && second.status().get("state").equals("READY"));
             Set<String> instances = new HashSet<>();
             requests.stream().filter(root -> root.has("instance_group")).forEach(root -> instances.add(root.path("instance_id").asText()));
-            assertEquals(Set.of("test-deployment_128", "test-deployment_16"), instances);
+            assertEquals(Set.of("test-deployment"), instances);
             assertEquals(1L, (long) first.status().get("failures") + (long) second.status().get("failures"));
         } finally { server.stop(0); }
     }
@@ -315,7 +310,7 @@ class KvcmEventPublisherTest {
             until(() -> !firstPeer.snapshots().isEmpty() && !secondPeer.snapshots().isEmpty());
             for (var peer : List.of(firstPeer, secondPeer)) {
                 JsonNode snapshot = peer.snapshots().getFirst();
-                assertEquals("model-deployment_128", snapshot.path("instance_id").asText());
+                assertEquals("model-deployment", snapshot.path("instance_id").asText());
                 assertEquals("ST_EVENT_REPORT_L1P5", snapshot.path("storage_type").asText());
             }
             assertEquals("host:1", firstPeer.snapshots().getFirst().path("host_ip_port").asText());

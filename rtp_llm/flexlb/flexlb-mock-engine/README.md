@@ -20,26 +20,65 @@ Java Mock 模拟 Prefill / Decode 的调度、KV 容量、执行耗时、请求�
 
 ## KVCM 事件上报
 
-Java Mock 可以连接真实 KVCM，协议依据为 [KVCMPublisher.cc](../../cpp/cache/events/KVCMPublisher.cc) 和[引擎事件契约](../../../docs/backend/kv_cache_event_publisher.md)。它从 `MockLruBlockCache` 已可复用的 key 集合产生事件，不从请求完成数或日志推测缓存变化。新 key 产生 ADD，实际驱逐产生 DELETE；重复写入、命中和引用释放不产生事件。Host DRAM cache 不上报。
+Java Mock 的 KVCM 协议与恢复状态机按真实引擎
+[`969cb846ea34c3845e65842b32c9ba375fd54a8a`](https://github.com/GrayXu/rtp-llm/blob/969cb846ea34c3845e65842b32c9ba375fd54a8a/rtp_llm/cpp/cache/events/KVCMPublisher.cc)
+移植，缓存组件发布依据同一提交的 `BlockTree.cc:367–448`、`KVCacheManager.cc:773–862`。
+保留当前 Mock 的推理、容量和独立 Pod 启动能力，不回退到该提交较旧的 Mock。
 
-默认关闭，不创建上报线程或 HTTP client。设置以下环境变量启用，bundle 和独立 Engine 入口均继承这些变量：
+默认关闭。`KV_CACHE_EVENT_PUBLISHER_TYPE=kvcm` 启用上报，`none` 不创建线程或连接。
+配置非法时入口禁用上报，网络错误不阻断推理。Host DRAM 与 LINEAR 不发布；可复用的 FULL/SWA 发布自身驻留组件。
 
 | 环境变量 | 含义 |
 |---|---|
-| `KV_CACHE_EVENT_PUBLISHER_TYPE=kvcm` | 启用 Meta HTTP 事件上报；默认 `none` |
-| `KV_CACHE_EVENT_MANAGER_ENDPOINT` | 已解析的 HTTP/HTTPS endpoint；不负责 VIPServer 解析或 leader 切换 |
-| `KV_CACHE_EVENT_INSTANCE_GROUP` | 实例组；未设置时使用 `RECO_INSTANCE_GROUP` |
-| `KV_CACHE_EVENT_INSTANCE_ID` | Master 查询 namespace 的基础名；最终 instance ID 为 `<基础名>_<block_size>`，禁止用 PID |
-| `MOCK_KVCM_STORAGE_TYPE` | 默认 `ST_EVENT_REPORT`；指定旧包可选 `ST_EVENT_REPORT_L1P5`，必须与服务端 storage 配置一致 |
-| `MODEL_TYPE` | 注册的模型名；默认 `mock` |
+| `KV_CACHE_EVENT_MANAGER_ENDPOINT` | 显式 Meta HTTP endpoint；设置后跳过发现 |
+| `RECO_ENABLE_VIPSERVER=1`、`RECO_VIPSERVER_DOMAIN` | 未设置 HTTP endpoint 时，从内部 VIPClient 获取候选 RPC 地址，再调用 GetClusterInfo 获取 Leader Meta HTTP 地址；失败后失效缓存并重新发现 |
+| `RECO_SERVER_ADDRESS` | 未设置 HTTP endpoint、未启用 VipServer 时的直接 gRPC bootstrap 地址 |
+| `KV_CACHE_EVENT_INSTANCE_GROUP` | 实例组；缺省读取 `RECO_INSTANCE_GROUP` |
+| `KV_CACHE_EVENT_INSTANCE_ID` | 与真实引擎一样原样使用的稳定实例 ID，按部署和 block size 分配 |
+| `MOCK_KVCM_APPEND_BLOCK_SIZE=true` | 仅用于兼容旧 Mock 基础名配置，显式追加 `_<block_size>`；默认 false |
+| `MOCK_KVCM_STORAGE_TYPE` | 默认 `ST_EVENT_REPORT_L1P5`；旧协议兼容值 `ST_EVENT_REPORT` 需服务端支持 |
+| `MOCK_KVCM_GROUPS_JSON` | 分组 descriptor 数组，字段 `tag`、`type`（FULL/SWA/LINEAR）、`reuse`、`size_bytes`；缺省一个 FULL group，4096 bytes |
+| `MODEL_TYPE` | 注册模型名，默认 mock |
+| `MOCK_KVCM_DTYPE/USE_MLA/TP_SIZE/DP_SIZE/PP_SIZE/DP_RANK` | 注册 descriptor 与心跳 rank；默认 fp16/false/1/1/1/0；PP 必须为 1。只模拟描述符，不产生真实 TP/DP 张量分配 |
 
-同一 namespace、同一 block size 的逻辑 Engine 共用 instance ID，每个逻辑 Engine 用自己的 advertised `host:HTTP-port` 区分 owner；与 `feature/flexlb-mu-dev` 的 `KvcmWorkerMetadataResolver` 查询规则一致。不同 block size 注册不同实例。不能为整个 bundle 设置一个共享的 `KV_CACHE_EVENT_HOST_IP_PORT`。注册 descriptor 使用单个模拟 HBM spec，URI 为 `mock://host:port`；这只验证聚合后的逻辑前缀 key 元数据事件，不模拟三组 FULL 的独立物理分配，也不提供真实 KV tensor 的读取或搬运能力。
+例如模拟三个 FULL group 和一个排除的 LINEAR group：
 
-Mock 专属调节项为 `MOCK_KVCM_QUEUE_CAPACITY=65536`、`MOCK_KVCM_BATCH_SIZE=256`、`MOCK_KVCM_FLUSH_MS=100`、`MOCK_KVCM_HEARTBEAT_MS=5000`、`MOCK_KVCM_SNAPSHOT_MS=60000`、`MOCK_KVCM_TIMEOUT_MS=1500`、`MOCK_KVCM_RETRY_MS=100`、`MOCK_KVCM_MAX_RETRY_MS=5000`。这些是测试 publisher 的默认值，不等同于真实引擎配置。
+```json
+[{"tag":"full0","type":"FULL","size_bytes":4096},
+ {"tag":"full1","type":"FULL","size_bytes":8192},
+ {"tag":"full2","type":"FULL","size_bytes":4096},
+ {"tag":"linear","type":"LINEAR","size_bytes":1024}]
+```
 
-上报按注册 instance/node、权威快照、增量和心跳执行。缓存锁内仅尝试有界队列入队；网络请求在独立 worker 上发送。队列溢出、请求失败、心跳失败和定时校准触发快照；未确认的快照重试相同 payload，快照版本以前的队列事件不会回放。上报失败不阻断推理或改变缓存容量；配置非法时禁用上报。逻辑 Engine 停止时暂停心跳并尽力 HOST_DOWN，恢复后重新注册和快照；进程退出时也尽力 HOST_DOWN。下线清理标记在收到确认后才清除，关闭时中断的下线请求会在退出清理中再尝试一次。
+旧 Mock 部署升级前需把 instance ID 改为完整值（例如 `kvcm_mock_wzy_1024`），或显式设置兼容开关，避免与 Master 查询 namespace 不一致。
 
-`/snapshot` 各 Engine 的 `kvcm` 字段提供状态、owner endpoint、队列深度、入队丢弃数（容量耗尽或队列竞争）、请求失败数、成功报告数和快照数。合成的 `/cache_fixture` 与该功能互斥，因为 fixture 不代表推理缓存的真实 key 集合。HTTP 200 之外还检查 KVCM 顶层和逐项状态；协议 peer 测试不能替代指定真实 KVCM 版本的快照 fencing、故障恢复或容量验收。大快照需要复制并序列化完整 key 集合，不能据此宣称支持二十亿 key。
+注册声明 `QT_PREFIX_MATCH` 和 default spec group。每个逻辑 Engine 使用独立 advertised
+`host:HTTP-port` 作为 owner，不允许共享 `KV_CACHE_EVENT_HOST_IP_PORT`。
+规格名为 `rtp_llm_hbm_<block_size>_<tag>`，URI 为 `event_report://host:port/hbm?size=...`。
+增量按 `(key, group)` 合并最终状态；快照对同一 key 携带当前实际驻留的多个 spec。
+重复写入、LRU touch 和引用释放不产生重复 ADD，实际驱逐产生对应组件 DELETE。
+
+正常模拟计算同时完成各 group。要验证缺组/恢复，调用 Mock 专属控制接口
+`POST /cache_group_residency`，例如
+`{"engine":"prefill-0","key":"42","group":"full1","resident":false}`。
+这改变模拟 device group 的驻留状态，随后经正常 publisher 产生 DELETE；缺组的 key
+不参与本地前缀命中，恢复后重新 ADD。LINEAR/禁用复用的 group 不允许控制为发布组件。
+这些 group 共享现有物理容量模型，**没有**实现独立 group allocator、CP 分片物理搬运或真实 KV tensor 读写。
+CP 的 canonical key/token stride 由已有输入 key 和 `MOCK_BLOCK_SIZE` 提供，不能把此模拟称为真实 CP 差分验证。
+
+真实默认时序：queue=100000、batch=1000、flush=20ms、heartbeat=1000ms、snapshot=300000ms、
+request timeout=1500ms、snapshot timeout=30000ms、retry=500ms、max retry=16000ms、max retry-after=300000ms。
+用 `MOCK_KVCM_QUEUE_CAPACITY/BATCH_SIZE/FLUSH_MS/HEARTBEAT_MS/SNAPSHOT_MS/TIMEOUT_MS/`
+`SNAPSHOT_TIMEOUT_MS/RETRY_MS/MAX_RETRY_MS/MAX_RETRY_AFTER_MS` 覆盖。
+
+生命周期为 instance 注册、NODE_REGISTER、权威 SNAPSHOT、ADD/DELETE、HEARTBEAT、退出 HOST_DOWN。
+缓存锁内只做有界非阻塞入队。心跳独立于快照/增量 worker，慢快照与服务端退避不抑制心跳。
+解析整体及逐项业务码、成功响应中的 `snapshot_required` 和 `retry_after_ms`，按上限退避并补快照；
+队列溢出和定时校准也触发恢复。停止时先终止心跳，再尽力 HOST_DOWN，不在 HOST_DOWN 后刷新存活。
+VipServer 依赖内部 client jar。包构建启用 `whale-kvcm-discovery` Maven profile（固定 client 4.9.7）；
+Mock bundle 配方检测到该 profile 时自动启用，并检查打包的 `VIPClient.class`、记录 `vipserver_packaged`。
+opensource UT 使用注入地址源与真实 gRPC 协议 peer，不伪称测通线上 VipServer。
+
 
 ## FIFO 与 Master 派发
 

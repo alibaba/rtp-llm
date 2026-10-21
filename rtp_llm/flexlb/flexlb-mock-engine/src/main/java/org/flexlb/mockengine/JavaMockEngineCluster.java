@@ -1120,6 +1120,12 @@ public final class JavaMockEngineCluster {
                     seqSizePerBlock, () -> !stopped, null);
             kvcmPublisher.start();
         }
+        boolean setKvcmGroupResident(long key, String group, boolean resident) {
+            if (kvcmPublisher == null) throw new IllegalArgumentException("KVCM publisher is disabled");
+            boolean changed = kvcmPublisher.setGroupResident(key, group, resident);
+            if (changed) cacheVersion.incrementAndGet();
+            return changed;
+        }
         private final ClusterStats stats;
         /** Reported token capacity (per-role; pool is ceil(total/spb) blocks). */
         private final long totalKvTokens;

@@ -93,6 +93,17 @@ final class MockControlServer {
         httpServer.createContext("/set_queue_depth", this::handleSetQueueDepth);
         httpServer.createContext("/cache_fixture", this::handleCacheFixture);
         httpServer.createContext("/cache_evict", this::handleCacheEvict);
+        httpServer.createContext("/cache_group_residency", exchange -> handleServicePost(exchange, (body, service) -> {
+            if (!body.path("resident").isBoolean() || !body.path("group").isTextual() || !body.has("key"))
+                throw new ApiException(400, "key, group and boolean resident are required");
+            try {
+                boolean changed = service.setKvcmGroupResident(parseBlockKey(body.get("key")),
+                        body.path("group").asText(), body.path("resident").asBoolean());
+                Map<String, Object> response = successResponse(service);
+                response.put("changed", changed);
+                return response;
+            } catch (IllegalArgumentException error) { throw new ApiException(400, error.getMessage()); }
+        }));
         httpServer.createContext("/stop_engine", this::handleStopEngine);
         httpServer.createContext("/start_engine", this::handleStartEngine);
         httpServer.createContext("/cancel_request", this::handleCancelRequest);

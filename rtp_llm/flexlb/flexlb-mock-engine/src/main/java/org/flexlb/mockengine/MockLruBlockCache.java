@@ -79,7 +79,47 @@ final class MockLruBlockCache {
     private Consumer<EvictionEvent> evictionListener = event -> {};
     // Mirrors SharedBlockCache's logical key transitions. The callback only
     // enqueues; it must never perform network I/O while holding this monitor.
-    record Mutation(long version, Long key, boolean added) {}
+    record Mutation(long version, Long key, boolean added, int groupIndex) {
+        Mutation(long version, Long key, boolean added) { this(version, key, added, 0); }
+    }
+    record ComponentSnapshot(long version, Map<Long, List<Integer>> groups) {}
+    private int publicationGroups = 1;
+    // Only incomplete keys need overrides; normal inference completes all simulated groups together.
+    private final Map<Long, Set<Integer>> absentPublicationGroups = new HashMap<>();
+    synchronized void configurePublicationGroups(int count) {
+        if (mutationListener != null || count < 1) throw new IllegalStateException("configure groups before attaching publisher");
+        publicationGroups = count;
+        absentPublicationGroups.clear();
+    }
+    synchronized ComponentSnapshot componentSnapshot() {
+        Map<Long, List<Integer>> groups = new LinkedHashMap<>();
+        for (Long key : blocks.keySet()) {
+            List<Integer> present = new ArrayList<>();
+            for (int i = 0; i < publicationGroups; i++)
+                if (!absentPublicationGroups.getOrDefault(key, Set.of()).contains(i)) present.add(i);
+            if (!present.isEmpty()) groups.put(key, List.copyOf(present));
+        }
+        return new ComponentSnapshot(mutationVersion, Map.copyOf(groups));
+    }
+    /** Simulated device residency, not a fabricated publisher event. Missing groups prevent prefix reuse. */
+    synchronized boolean setGroupResident(long key, int group, boolean resident) {
+        if (group < 0 || group >= publicationGroups) throw new IllegalArgumentException("unknown publication group");
+        if (!blocks.containsKey(key)) throw new IllegalArgumentException("cache key is not resident");
+        Set<Integer> absent = absentPublicationGroups.computeIfAbsent(key, ignored -> new HashSet<>());
+        boolean changed = resident ? absent.remove(group) : absent.add(group);
+        if (absent.isEmpty()) absentPublicationGroups.remove(key);
+        if (changed && mutationListener != null)
+            mutationListener.accept(new Mutation(++mutationVersion, key, resident, group));
+        return changed;
+    }
+    private boolean complete(Long key) { return !absentPublicationGroups.containsKey(key); }
+    private boolean restorePublicationGroups(Long key) {
+        Set<Integer> absent = absentPublicationGroups.remove(key);
+        if (absent == null) return false;
+        for (int group : absent) if (mutationListener != null)
+            mutationListener.accept(new Mutation(++mutationVersion, key, true, group));
+        return true;
+    }
     record KeySnapshot(long version, Set<Long> keys) {}
     private Consumer<Mutation> mutationListener;
     private long mutationVersion;
@@ -87,7 +127,16 @@ final class MockLruBlockCache {
     synchronized void setMutationListener(Consumer<Mutation> listener) { mutationListener = listener; }
     synchronized KeySnapshot keySnapshot() { return new KeySnapshot(mutationVersion, Set.copyOf(blocks.keySet())); }
     private void mutation(Long key, boolean added) {
-        if (mutationListener != null) mutationListener.accept(new Mutation(++mutationVersion, key, added));
+        if (key == null) {
+            absentPublicationGroups.clear();
+            if (mutationListener != null) mutationListener.accept(new Mutation(++mutationVersion, null, false));
+            return;
+        }
+        Set<Integer> absent = absentPublicationGroups.getOrDefault(key, Set.of());
+        for (int i = 0; i < publicationGroups; i++)
+            if ((added || !absent.contains(i)) && mutationListener != null)
+                mutationListener.accept(new Mutation(++mutationVersion, key, added, i));
+        if (!added) absentPublicationGroups.remove(key);
     }
     /** Blocks held by in-flight requests that carry no cache key (growth/empty-bh). */
     private int heldBlocks;
@@ -148,7 +197,7 @@ final class MockLruBlockCache {
     private List<Long> matchPrefix(List<Long> keys) {
         List<Long> hits = new ArrayList<>();
         for (Long key : keys) {
-            if (blocks.get(key) == null) {
+            if (blocks.get(key) == null || !complete(key)) {
                 break;
             }
             touch(key);
@@ -353,6 +402,7 @@ final class MockLruBlockCache {
                 changed = true;
             } else {
                 blocks.put(key, ref); // already indexed — refresh LRU order only
+                changed |= restorePublicationGroups(key);
             }
         }
         // Capacity conservation: the LRU (pure + referenced) may not crowd
@@ -392,6 +442,7 @@ final class MockLruBlockCache {
                 mutation(key, true);
             } else {
                 blocks.put(key, references + 1);
+                restorePublicationGroups(key);
             }
             // Another request may already have published this key. Its shared
             // physical block replaces our reserved keyless block as well.
@@ -430,7 +481,7 @@ final class MockLruBlockCache {
                 blocks.put(key, 0);
                 mutation(key, true);
                 changed = true;
-            }
+            } else { changed |= restorePublicationGroups(key); }
         }
         indexSequence(keys);
         evictChains(blocks.size() + heldBlocks - totalBlocks, "insertion");
@@ -508,7 +559,7 @@ final class MockLruBlockCache {
 
     /** Extra connector reference to already computed GPU source blocks. */
     synchronized BlockLease pinExisting(List<Long> keys) {
-        for (Long key : keys) if (!blocks.containsKey(key)) return null;
+        for (Long key : keys) if (!blocks.containsKey(key) || !complete(key)) return null;
         List<Long> held = new ArrayList<>(new LinkedHashSet<>(keys));
         for (Long key : held) {
             int refs = blocks.get(key);
@@ -521,12 +572,13 @@ final class MockLruBlockCache {
 
     synchronized int peekPrefixHitBlocks(List<Long> keys) {
         int count = 0;
-        while (count < keys.size() && blocks.containsKey(keys.get(count))) count++;
+        while (count < keys.size() && blocks.containsKey(keys.get(count)) && complete(keys.get(count))) count++;
         return count;
     }
 
     synchronized Set<Long> snapshotKeys() {
-        return Set.copyOf(blocks.keySet());
+        if (absentPublicationGroups.isEmpty()) return Set.copyOf(blocks.keySet());
+        return blocks.keySet().stream().filter(this::complete).collect(java.util.stream.Collectors.toUnmodifiableSet());
     }
 
     /** Pool size in blocks (== ceil(totalKvTokens / spb)). */

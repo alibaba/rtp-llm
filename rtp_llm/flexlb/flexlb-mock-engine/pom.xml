@@ -28,6 +28,16 @@
     </dependencies>
 
     <profiles>
+        <profile>
+            <id>whale-kvcm-discovery</id>
+            <dependencies>
+                <dependency>
+                    <groupId>com.taobao.vipserver</groupId>
+                    <artifactId>vipserver-client</artifactId>
+                    <version>4.9.7</version>
+                </dependency>
+            </dependencies>
+        </profile>
         <!-- Test-only bundle: local engine discovery plus real monitoring. -->
         <profile>
             <id>whale-bundle</id>
