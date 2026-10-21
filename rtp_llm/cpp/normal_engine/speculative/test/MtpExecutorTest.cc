@@ -1521,10 +1521,7 @@ TEST_P(MtpCacheStrideTest, ForwardAndPrepareUseSingleGroupStrideOnly) {
     draft_prefill_model->setInputObserver([&](const GptModelInputs& forwarded) {
         saw_update = true;
         EXPECT_FALSE(forwarded.is_target_verify);
-        EXPECT_EQ(forwarded.is_mtp_draft_update,
-                  !executor->is_dspark_
-                      && (executor->useStreamAsync()
-                          || executor->useAsyncDeviceState()));
+        EXPECT_EQ(forwarded.is_mtp_draft_update, !executor->is_dspark_);
     });
     draft_prefill_model->setInputs({input});
     draft_prefill_model->setOutputs({GptModelOutputs{}});

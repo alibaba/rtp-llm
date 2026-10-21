@@ -789,13 +789,12 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherDecodeModelInputKeepsEmptyTpFollow
     const StreamGroups empty_stream_groups({});
     for (const bool device_input : {false, true}) {
         autil::EnvGuard device_input_env("RTP_LLM_DEVICE_INPUT", device_input ? "1" : "0");
-        for (int position_mode = 0; position_mode < 4; ++position_mode) {
+        for (int position_mode = 0; position_mode < 3; ++position_mode) {
             ModelConfig model_config;
             model_config.num_layers                            = 1;
             model_config.has_positional_encoding               = position_mode == 1;
-            model_config.requires_token_position_ids           = position_mode == 2;
-            model_config.mm_model_config.mm_position_ids_style = position_mode == 3 ? MROPE : DEFAULT;
-            model_config.attn_config.rope_config.index_factor  = position_mode == 3 ? 3 : 1;
+            model_config.mm_model_config.mm_position_ids_style = position_mode == 2 ? MROPE : DEFAULT;
+            model_config.attn_config.rope_config.index_factor  = position_mode == 2 ? 3 : 1;
             for (const auto spec_type : {SP_TYPE_MTP, SP_TYPE_DSPARK}) {
                 for (const int propose_step : {1, 3}) {
                     SCOPED_TRACE(testing::Message()
@@ -846,8 +845,7 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherDecodeModelInputUsesHostMtpAndDevi
                     model_config.max_seq_len                           = 2048;
                     model_config.vocab_size                            = 256;
                     model_config.num_layers                            = 1;
-                    model_config.has_positional_encoding               = false;
-                    model_config.requires_token_position_ids           = !mrope;
+                    model_config.has_positional_encoding               = !mrope;
                     model_config.mm_model_config.mm_position_ids_style = mrope ? MROPE : DEFAULT;
                     model_config.attn_config.rope_config.index_factor  = mrope ? 3 : 1;
                     RuntimeConfig              runtime_config;
