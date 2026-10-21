@@ -56,12 +56,14 @@ class RealisticTimingTest {
             List<JavaMockEngineCluster.FastRpcService> decodeServices = cluster.decodes();
 
             // ── Enqueue 5 requests with outputLen = 10 ──
-            long enqueueStartMs = System.currentTimeMillis();
             EngineRpcService.GenerateInputPB[] inputs = new EngineRpcService.GenerateInputPB[nRequests];
             for (int i = 0; i < nRequests; i++) {
                 int decodePort = decodeServices.get(i % nDecode).getGrpcPort();
                 inputs[i] = inputWithDecode(i + 1, 10, decodePort, 10);
             }
+            // Fixture construction can trigger cold protobuf class loading;
+            // measure admission and execution, not preparation of test inputs.
+            long enqueueStartMs = System.currentTimeMillis();
             EngineRpcService.EnqueueBatchResponsePB response = enqueueAndFetch(
                     prefillServices.get(0), batch(1000, slot(0, inputs)));
 
