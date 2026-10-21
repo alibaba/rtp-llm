@@ -72,7 +72,7 @@ private:
                                                      const std::shared_ptr<GenerateConfig>& generate_config);
 
     std::string doneResponse();
-    std::string sseResponse(const std::string& response);
+    std::string inferenceSseFrame(const std::string& response);
     std::string streamingResponse(const std::any& response);
     std::string completeResponse(const std::any& response);
     std::any    formatResponse(std::vector<MultiSeqsResponse> batch_state, bool batch_infer);

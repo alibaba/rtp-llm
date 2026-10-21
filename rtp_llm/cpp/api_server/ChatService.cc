@@ -161,7 +161,7 @@ void ChatService::generateStreamingResponse(const std::shared_ptr<GenerateConfig
     ctx->init(num_return_sequences, body, chat_render);
 
     auto write_sse_response = [&](std::string json_response) {
-        std::string sse_response = sseResponse(json_response);
+        std::string sse_response = chatSseFrame(json_response);
         writer->AddHeader("Content-Type", "text/event-stream");
         writer->Write(sse_response);
         index += 1;

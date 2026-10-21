@@ -288,7 +288,7 @@ TEST_F(ChatServiceTest, ChatCompletions) {
             return json_response;
         }));
     EXPECT_CALL(*mock_writer_, Write).WillRepeatedly(Invoke([json_response](const std::string& data) {
-        EXPECT_EQ(data, ChatService::sseResponse(json_response));
+        EXPECT_EQ(data, ChatService::chatSseFrame(json_response));
         return true;
     }));
 
@@ -427,9 +427,9 @@ TEST_F(ChatServiceTest, StreamingStreamErrorsUseSseErrorPath) {
         EXPECT_CALL(*mock_metric_reporter_, reportErrorQpsMetric("test_source", expected_type, _)).Times(1);
         {
             InSequence sequence;
-            EXPECT_CALL(*mock_writer_, Write(ChatService::sseResponse(first_response))).WillOnce(Return(true));
-            EXPECT_CALL(*mock_writer_, Write(ChatService::sseResponse(token_response))).WillOnce(Return(true));
-            EXPECT_CALL(*mock_writer_, Write(ChatService::sseResponse(formatException(expected_error))))
+            EXPECT_CALL(*mock_writer_, Write(ChatService::chatSseFrame(first_response))).WillOnce(Return(true));
+            EXPECT_CALL(*mock_writer_, Write(ChatService::chatSseFrame(token_response))).WillOnce(Return(true));
+            EXPECT_CALL(*mock_writer_, Write(ChatService::chatSseFrame(formatException(expected_error))))
                 .WillOnce(Return(true));
             EXPECT_CALL(*mock_writer_, WriteDone).WillOnce(Return(true));
         }

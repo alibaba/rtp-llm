@@ -224,7 +224,7 @@ void InferenceService::inferResponse(int64_t                                    
         if (req.is_streaming && response_started) {
             writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Stream);
             writer->AddHeader("Content-Type", "text/event-stream");
-            writer->Write(sseResponse(formatException(e)));
+            writer->Write(inferenceSseFrame(formatException(e)));
             writer->WriteDone();
             if (metric_reporter_) {
                 int error_code = HttpApiServerException::UNKNOWN_ERROR;
@@ -338,7 +338,7 @@ InferenceService::iterateStreams(std::vector<std::shared_ptr<GenerateStreamWrapp
     return std::make_pair(iterate_counter, complete_response);
 }
 
-std::string InferenceService::sseResponse(const std::string& response) {
+std::string InferenceService::inferenceSseFrame(const std::string& response) {
     return "data:" + response + "\n\n";
 }
 
