@@ -8,6 +8,7 @@ def current_discovery(endpoints, static=False, kvcm_json=None):
     service = json.loads(env["MODEL_SERVICE_CONFIG"])
     if static:
         service.pop("discovery_file", None)
+        service.pop("load_balance", None)
         for group in service["role_endpoints"]:
             for role in ("prefill", "decode"):
                 endpoint = group.get(role + "_endpoint")

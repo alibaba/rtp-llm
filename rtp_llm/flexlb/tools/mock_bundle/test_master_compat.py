@@ -5,7 +5,7 @@ from master_compat import legacy_discovery, mock_formula_config, current_discove
 
 class MasterCompatibilityTest(unittest.TestCase):
     def test_current_master_gets_static_engine_ports_and_separate_kvcm_route(self):
-        endpoints = {"env": {"MODEL_SERVICE_CONFIG": json.dumps({"service_id": "mock", "discovery_file": "f",
+        endpoints = {"env": {"MODEL_SERVICE_CONFIG": json.dumps({"service_id": "mock", "discovery_file": "f", "load_balance": True,
             "role_endpoints": [{"group": "mock", "prefill_endpoint": {"address": "p"},
                                 "decode_endpoint": {"address": "d"}}]})}, "engines": [
             {"role": "prefill", "http_addr": "10.0.0.1:7050"},
@@ -17,6 +17,7 @@ class MasterCompatibilityTest(unittest.TestCase):
         self.assertEqual(["10.0.0.1:7050"], service["role_endpoints"][0]["prefill_endpoint"]["discovery"]["hosts"])
         self.assertEqual(["10.0.0.1:7051"], service["role_endpoints"][0]["decode_endpoint"]["discovery"]["hosts"])
         self.assertNotIn("discovery_file", service)
+        self.assertNotIn("load_balance", service)
         self.assertIn("discovery_file", json.loads(endpoints["env"]["MODEL_SERVICE_CONFIG"]))
         self.assertNotIn("kvcm", json.loads(current_discovery(endpoints)["MODEL_SERVICE_CONFIG"]))
         with self.assertRaises(ValueError): current_discovery(endpoints, kvcm_json="[]")
