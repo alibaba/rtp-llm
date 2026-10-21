@@ -298,8 +298,13 @@ bool P2PWorkerPrefillRead::scheduleLayerCacheBuffers(
         collector->prefill_worker_store_total_block_count += layer_cache_buffer->blockIdMap().size();
     }
 
-    const int64_t now_ms            = currentTimeMs();
-    if (request_deadline_ms <= now_ms || request_deadline_ms == std::numeric_limits<int64_t>::max()) {
+    const int64_t now_ms = currentTimeMs();
+    // StartLoad may already have installed a receiver-local transfer horizon.
+    // Late layer callbacks carry the unchanged source identity, not a new clock.
+    const auto local_horizon_ms =
+        computed_buffers_->requestHorizon(request_id, request_deadline_ms).value_or(request_deadline_ms);
+    if (request_deadline_ms <= 0 || request_deadline_ms == std::numeric_limits<int64_t>::max()
+        || local_horizon_ms <= now_ms) {
         RTP_LLM_LOG_WARNING("writeByLayer [P2P Prefill]: drop layer after request deadline, "
                             "request_id=%ld, layer_id=%d, request_deadline_ms=%ld",
                             request_id,
@@ -310,7 +315,7 @@ bool P2PWorkerPrefillRead::scheduleLayerCacheBuffers(
         return request_deadline_ms > 0 && request_deadline_ms != std::numeric_limits<int64_t>::max();
     }
     const auto request_horizon =
-        computed_buffers_->registerRequestHorizon(request_id, request_deadline_ms, request_deadline_ms);
+        computed_buffers_->registerRequestHorizon(request_id, local_horizon_ms, request_deadline_ms);
     if (!request_horizon.has_value()) {
         RTP_LLM_LOG_DEBUG("writeByLayer [P2P Prefill]: ignore layer after transfer completed, "
                           "request_id=%ld, layer_id=%d",
@@ -747,7 +752,7 @@ P2PWorkerPrefillRead::sendKVCache(int64_t                   request_id,
                                        const P2PWorkerRoutePlan& worker_plan,
                                        int64_t                   request_deadline_ms) {
     if (request_deadline_ms <= 0 || request_deadline_ms == std::numeric_limits<int64_t>::max()
-        || deadline_ms <= currentTimeMs() || deadline_ms > request_deadline_ms) {
+        || deadline_ms <= currentTimeMs() || deadline_ms == std::numeric_limits<int64_t>::max()) {
         return ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "sendKVCache: invalid or expired deadlines");
     }
     // Register lifecycle even if StartLoad reaches this worker before the

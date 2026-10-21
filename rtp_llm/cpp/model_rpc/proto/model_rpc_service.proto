@@ -881,10 +881,10 @@ message P2PConnectorBroadcastTpRequestPB {
     // plans diverged (config drift) fail as "no matching recv task within deadline" rather
     // than silently copying into the wrong byte range.
     uint64 plan_digest = 12;
-    // READ execution budget at broadcast submission. The receiver reanchors this
+    // READ/HANDLE_READ/HANDLE_READ_NO_TRANSFER budget at submission. The receiver reanchors this
     // duration to its own clock; the two source deadlines remain identity/validation
     // fields and must not be compared to the receiver's wall clock.
-    int64 read_timeout_ms = 13;
+    int64 transfer_timeout_ms = 13;
     // CANCEL_READ only: remaining request lifetime for an early-cancel fence.
     // This is a retention budget, never evidence that a physical read has stopped.
     int64 cancel_retention_ms = 14;

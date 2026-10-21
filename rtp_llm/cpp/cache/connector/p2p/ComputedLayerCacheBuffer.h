@@ -68,6 +68,8 @@ public:
     std::shared_ptr<ComputedLayerCacheBuffer> getBuffer(int64_t request_id, int64_t request_deadline_ms) const;
     // Register the fixed late-layer acceptance horizon for a request. The
     // first value wins so callbacks from later layers cannot roll the horizon.
+    // horizon_ms is receiver-local time; request_deadline_ms is an opaque source
+    // identity. Their numerical order is not meaningful across machines.
     std::optional<int64_t> registerRequestHorizon(int64_t request_id, int64_t horizon_ms, int64_t request_deadline_ms);
     // StartLoad has consumed the whole-request resource. Tighten the fixed
     // layer acceptance horizon to this physical transfer's deadline.

@@ -150,7 +150,7 @@ std::optional<int64_t> ComputedLayerCacheBufferStore::registerRequestHorizon(int
     const RequestKey            request_key{request_id, request_deadline_ms};
     std::lock_guard<std::mutex> lock(computed_buffers_mutex_);
     if (removed_requests_.count(request_key) || !hasFiniteDeadline(request_deadline_ms)
-        || !hasFiniteDeadline(horizon_ms) || horizon_ms > request_deadline_ms || currentTimeMs() >= horizon_ms) {
+        || !hasFiniteDeadline(horizon_ms) || currentTimeMs() >= horizon_ms) {
         return std::nullopt;
     }
     auto result = request_horizons_.emplace(request_key, RequestHorizon{horizon_ms, request_deadline_ms});
@@ -170,7 +170,7 @@ std::optional<int64_t> ComputedLayerCacheBufferStore::activateRequestHorizon(int
     const RequestKey            request_key{request_id, request_deadline_ms};
     std::lock_guard<std::mutex> lock(computed_buffers_mutex_);
     if (removed_requests_.count(request_key) || !hasFiniteDeadline(request_deadline_ms)
-        || !hasFiniteDeadline(horizon_ms) || horizon_ms > request_deadline_ms || currentTimeMs() >= horizon_ms) {
+        || !hasFiniteDeadline(horizon_ms) || currentTimeMs() >= horizon_ms) {
         return std::nullopt;
     }
     auto [it, inserted] = request_horizons_.emplace(request_key, RequestHorizon{horizon_ms, request_deadline_ms});

@@ -150,8 +150,9 @@ bool P2PConnector::executeFunction(const FunctionRequestPB& request, FunctionRes
         }
     }
 
-    if (type == P2PConnectorBroadcastType::READ) {
-        const auto timeout_ms = p2p_request.read_timeout_ms();
+    if (type == P2PConnectorBroadcastType::READ || type == P2PConnectorBroadcastType::HANDLE_READ
+        || type == P2PConnectorBroadcastType::HANDLE_READ_NO_TRANSFER) {
+        const auto timeout_ms = p2p_request.transfer_timeout_ms();
         const auto now_ms     = currentTimeMs();
         if (timeout_ms <= 0 || timeout_ms > std::numeric_limits<int32_t>::max()
             || now_ms >= std::numeric_limits<int64_t>::max() - timeout_ms) {
@@ -159,11 +160,6 @@ bool P2PConnector::executeFunction(const FunctionRequestPB& request, FunctionRes
             return false;
         }
         deadline_ms = now_ms + timeout_ms;
-    } else if ((type == P2PConnectorBroadcastType::HANDLE_READ
-                || type == P2PConnectorBroadcastType::HANDLE_READ_NO_TRANSFER)
-               && deadline_ms <= currentTimeMs()) {
-        setP2PResponse(response, ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "invalid or expired P2P deadlines"));
-        return false;
     }
 
     switch (p2p_request.type()) {

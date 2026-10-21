@@ -100,7 +100,7 @@ TEST_F(P2PBroadcastClientTest, Broadcast_ReturnNotNull_AllRequestsSuccess) {
         EXPECT_EQ(servers_[i]->service()->getBroadcastTpCallCount(), 1);
         EXPECT_EQ(servers_[i]->service()->getBroadcastTpCancelCallCount(), 0);
         EXPECT_EQ(servers_[i]->service()->getLastBroadcastTpRequest().deadline_ms(), deadline_ms);
-        const auto budget_ms = servers_[i]->service()->getLastBroadcastTpRequest().read_timeout_ms();
+        const auto budget_ms = servers_[i]->service()->getLastBroadcastTpRequest().transfer_timeout_ms();
         EXPECT_GT(budget_ms, 0);
         EXPECT_LE(budget_ms, 5000);
         EXPECT_EQ(servers_[i]->service()->getLastBroadcastTpRequest().request_deadline_ms(), request_deadline_ms);
@@ -417,6 +417,26 @@ TEST_F(P2PBroadcastClientTest, CancelReadSendsRetentionBudgetAndPreservesSourceI
         EXPECT_EQ(request.request_deadline_ms(), source_deadline_ms);
         EXPECT_GT(request.cancel_retention_ms(), 0);
         EXPECT_LE(request.cancel_retention_ms(), 5000);
+    }
+}
+
+TEST_F(P2PBroadcastClientTest, PrefillBroadcastSendsRemainingTransferBudget) {
+    for (const auto type :
+         {P2PConnectorBroadcastType::HANDLE_READ, P2PConnectorBroadcastType::HANDLE_READ_NO_TRANSFER}) {
+        const auto deadline_ms = currentTimeMs() + 5000;
+        auto params = createParams(9400 + static_cast<int>(type), "prefill-budget", deadline_ms, deadline_ms + 1000);
+        params.type = type;
+        auto result = client_->broadcast(std::move(params));
+        ASSERT_NE(result, nullptr);
+        waitDone(result);
+        ASSERT_TRUE(result->done());
+        ASSERT_TRUE(result->success());
+        for (auto& server : servers_) {
+            const auto request = server->service()->getLastBroadcastTpRequest();
+            EXPECT_EQ(request.request_deadline_ms(), deadline_ms + 1000);
+            EXPECT_GT(request.transfer_timeout_ms(), 0);
+            EXPECT_LE(request.transfer_timeout_ms(), 5000);
+        }
     }
 }
 

@@ -2584,4 +2584,24 @@ TEST_F(P2PConnectorWorkerTest, RecvFirstCallbackWinsOverTaskOrderAndLaterCancel)
 }
 
 }  // namespace test
+TEST_F(P2PConnectorWorkerTest, LateLayerUsesInstalledLocalHorizonWithSourceClockBehind) {
+    const int64_t request_id      = 9300;
+    const auto    source_identity = currentTimeMs() - 3600000;
+    const auto    local_horizon   = currentTimeMs() + 60000;
+    ASSERT_TRUE(computed_buffers_->activateRequestHorizon(request_id, local_horizon, source_identity));
+    auto resource = createKVCacheResource(0, 2);
+    ASSERT_TRUE(prefill_->writeByLayerTag(0, "group0", resource, request_id, nullptr, source_identity));
+    const auto                                wait_end = currentTimeMs() + 5000;
+    std::shared_ptr<ComputedLayerCacheBuffer> buffer;
+    while (!(buffer = computed_buffers_->getBuffer(request_id, source_identity)) && currentTimeMs() < wait_end) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_NE(buffer, nullptr);
+    EXPECT_EQ(buffer->deadlineMs(), local_horizon);
+    EXPECT_EQ(buffer->getBuffers({"0:group0"}).second.size(), 1u);
+    computed_buffers_->removeBuffer(request_id, source_identity);
+    ASSERT_TRUE(prefill_->writeByLayerTag(0, "group0", resource, request_id, nullptr, source_identity));
+    EXPECT_EQ(computed_buffers_->getBuffer(request_id, source_identity), nullptr);
+}
+
 }  // namespace rtp_llm

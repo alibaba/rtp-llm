@@ -413,4 +413,22 @@ TEST_F(ComputedLayerCacheBufferTest, SameRequestIdUsesOriginalDeadlineForAllStat
     EXPECT_EQ(store_->removed_requests_.count({request_id, deadline_b}), 1u);
 }
 
+TEST_F(ComputedLayerCacheBufferTest, LocalHorizonAndSourceIdentityUseIndependentClocks) {
+    for (const int64_t skew_ms : {-3600000LL, 3600000LL}) {
+        const auto request_id      = 9200 + (skew_ms > 0);
+        const auto source_identity = currentTimeMs() + skew_ms + 60000;
+        const auto local_horizon   = currentTimeMs() + 5000;
+        ASSERT_EQ(store_->activateRequestHorizon(request_id, local_horizon, source_identity), local_horizon);
+        ASSERT_EQ(store_->registerRequestHorizon(request_id, local_horizon + 1000, source_identity), local_horizon);
+        auto buffer = store_->addBuffer(request_id, createLayerCacheBuffer(0), source_identity);
+        ASSERT_NE(buffer, nullptr);
+        EXPECT_EQ(buffer->deadlineMs(), local_horizon);
+        // A different source identity cannot attach to this request's layers.
+        EXPECT_EQ(store_->getBuffer(request_id, source_identity + 1), nullptr);
+        store_->removeBuffer(request_id, source_identity);
+        EXPECT_EQ(store_->addBuffer(request_id, createLayerCacheBuffer(1), source_identity), nullptr);
+        EXPECT_FALSE(store_->activateRequestHorizon(request_id, local_horizon + 2000, source_identity));
+    }
+}
+
 }  // namespace rtp_llm
