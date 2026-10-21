@@ -106,7 +106,8 @@ public:
     void pollLeaseIfNeeded(const std::shared_ptr<P2PBroadcastClient>& tp_broadcast_client);
 
     bool needLeasePoll() const {
-        if (!lease_hold_pending_.load(std::memory_order_acquire)) {
+        if (!calls_ready_.load(std::memory_order_acquire)
+            || !lease_hold_pending_.load(std::memory_order_acquire)) {
             return false;
         }
         if (!cancel_confirmed_.load(std::memory_order_acquire)) {

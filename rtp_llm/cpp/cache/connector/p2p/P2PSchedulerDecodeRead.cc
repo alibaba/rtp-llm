@@ -487,11 +487,10 @@ P2PSchedulerDecodeRead::startAsyncReadCalls(int64_t            request_id,
                      prefill_port,
                      entry_us);
 
-    // [PD-DIAG] Sub-stage timing. server_caller_->load eventually hits
-    // RpcPool::getConnection (a pool-wide mutex + potentially synchronous
-    // gRPC channel reconnection). tp_broadcast_client_->broadcast does
-    // per-worker gRPC AsyncExecuteFunction. Either can be the source of
-    // 18-22s asyncReadAfterMatch stalls observed in production.
+    // Measure dynamic Prefill RPC submission separately from fixed-peer READ
+    // dispatch. Fixed worker channels are pinned at init; a first Prefill
+    // channel creation can still delay kickoff publication. Cancellation must
+    // progress on the independent control pool during that delay.
     const int64_t server_load_start_us = currentTimeUs();
     auto server_call_result = server_caller_->load(request_id,
                                                    prefill_ip,

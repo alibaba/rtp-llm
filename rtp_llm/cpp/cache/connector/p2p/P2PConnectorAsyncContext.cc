@@ -314,7 +314,10 @@ ErrorInfo P2PConnectorAsyncReadContext::errorInfo() const {
 
 bool P2PConnectorAsyncReadContext::needCancel() const {
     if (!calls_ready_.load(std::memory_order_acquire)) {
-        return false;
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        return kickoff_state_ == KickoffState::STARTING
+               && cancel_requested_.load(std::memory_order_acquire)
+               && !cancel_confirmed_.load(std::memory_order_acquire);
     }
     if (lease_hold_pending_.load()) {
         return !cancel_confirmed_.load(std::memory_order_acquire);
@@ -345,6 +348,8 @@ void P2PConnectorAsyncReadContext::cancel(const std::shared_ptr<P2PBroadcastClie
     checkDone();
     cancel_requested_.store(true, std::memory_order_release);
 
+    std::shared_ptr<DecodeLoadHelper::Result> server_call;
+    std::shared_ptr<P2PBroadcastClient::Result> read_call;
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
         if (done_ && !lease_hold_pending_.load(std::memory_order_acquire)) {
@@ -368,24 +373,23 @@ void P2PConnectorAsyncReadContext::cancel(const std::shared_ptr<P2PBroadcastClie
             notify();
             return;
         }
-        if (kickoff_state_ == KickoffState::STARTING) {
-            // The task may already be creating StartLoad/READ calls. It owns
-            // the context until setCallResults()/markStartFailed(); completing
-            // here would allow Decode target blocks to be released too early.
-            return;
-        }
+        // STARTING may be blocked while creating RPCs. Install the worker
+        // cancellation fence independently, but keep local completion/lease
+        // release gated by kickoff publication and physical stop confirmation.
+        server_call = server_call_result_;
+        read_call = tp_sync_result_;
     }
 
     std::string unique_key = uniqueKey();
 
-    if (server_call_result_ && !server_call_result_->done()) {
-        server_call_result_->cancel();
+    if (server_call && !server_call->done()) {
+        server_call->cancel();
     }
 
     // A failed client-side READ result does not prove that every worker handler
     // has stopped. A D-timeout lease hold always broadcasts CANCEL_READ, even
     // if READ itself completed, so the cancel-done barrier cannot be skipped.
-    const bool read_confirmed_success = tp_sync_result_ && tp_sync_result_->done() && tp_sync_result_->success();
+    const bool read_confirmed_success = read_call && read_call->done() && read_call->success();
     const bool lease_stop_confirmation_required = lease_hold_pending_.load(std::memory_order_acquire);
     if ((lease_stop_confirmation_required || !read_confirmed_success) && tp_broadcast_client
         && !cancel_confirmed_.load(std::memory_order_acquire)) {
@@ -580,7 +584,7 @@ int64_t P2PConnectorAsyncReadContext::nextWakeupMs(bool allow_control) const {
     if (resourceHoldPending()) {
         // Resource accounting must keep running even while a control job is blocked.
         next = std::min(next, currentTimeMs() + 1000);
-        if (allow_control && cancel_confirmed_.load()) {
+        if (allow_control && calls_ready_.load(std::memory_order_acquire) && cancel_confirmed_.load()) {
             next = std::min(next, lease_poll_next_ms_.load());
         }
     }

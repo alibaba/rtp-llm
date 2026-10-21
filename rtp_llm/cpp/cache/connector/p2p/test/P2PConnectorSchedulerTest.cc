@@ -692,6 +692,45 @@ TEST_F(P2PConnectorSchedulerTest, KickoffExceptionRetainsLeaseAndCanCancelWithou
     }
 }
 
+TEST_F(P2PConnectorSchedulerTest, StartingKickoffCancelsRanksButCannotReleaseBeforeCallsArePublished) {
+    auto resource = createValidKVCacheResource(1, 1);
+    std::weak_ptr<KVCacheResource> weak_resource = resource;
+    auto context = std::make_shared<P2PConnectorAsyncReadContext>(
+        resource, "cancel-starting-before-publication",
+        std::make_shared<P2PConnectorMetricsCollector>(), 10000, false,
+        currentTimeMs() + 10000, currentTimeMs() - 1);
+    resource.reset();
+    ASSERT_TRUE(context->beginKickoff());
+    ASSERT_TRUE(context->expireTransferDeadlineIfNeeded());
+    ASSERT_TRUE(context->needCancel());
+    context->cancel(tp_broadcast_client_);
+    ASSERT_TRUE(waitUntil([&] {
+        context->checkCancelDone();
+        return !context->needCancel();
+    }));
+    for (const auto& server : tp_broadcast_servers_) {
+        EXPECT_EQ(server->service()->getBroadcastTpCancelCallCount(), 1);
+        server->service()->setLeaseStatus(true, 1, 1, true);
+    }
+    // Even an all-stopped response cannot release the target while a kickoff
+    // operation may still publish a READ call.
+    EXPECT_FALSE(context->needLeasePoll());
+    context->pollLeaseIfNeeded(tp_broadcast_client_);
+    EXPECT_TRUE(context->resourceHoldPending());
+    EXPECT_FALSE(weak_resource.expired());
+
+    auto read_result = std::make_shared<P2PBroadcastClient::Result>(context->uniqueKey());
+    auto server_result = std::make_shared<DecodeLoadHelper::Result>();
+    server_result->done_ = true;
+    EXPECT_TRUE(context->setCallResults(read_result, server_result));
+    context->cancel(tp_broadcast_client_);
+    ASSERT_TRUE(waitUntil([&] {
+        context->pollLeaseIfNeeded(tp_broadcast_client_);
+        return !context->resourceHoldPending();
+    }));
+    EXPECT_TRUE(weak_resource.expired());
+}
+
 TEST_F(P2PConnectorSchedulerTest, AsyncReadPendingContextCanBeCancelledBeforeKickoff) {
     auto resource  = createValidKVCacheResource(1, 1);
     auto collector = std::make_shared<P2PConnectorMetricsCollector>();
