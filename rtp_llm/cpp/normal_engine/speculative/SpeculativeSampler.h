@@ -64,6 +64,8 @@ public:
     SamplerOutput sampleDSparkDraft(const torch::Tensor& base_logits,
                                     const torch::Tensor& anchors,
                                     const torch::Tensor& temperature,
+                                    const torch::Tensor& top_k,
+                                    const torch::Tensor& top_p,
                                     const torch::Tensor& markov_w1,
                                     const torch::Tensor& markov_w2,
                                     size_t               draft_vocab_size,
