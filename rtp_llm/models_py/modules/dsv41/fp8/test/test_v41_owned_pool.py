@@ -1,6 +1,5 @@
 """Logical ownership, bounded scratch, and byte-exact owned-row transport."""
 
-import functools
 import random
 import unittest
 from types import SimpleNamespace
@@ -18,6 +17,43 @@ from rtp_llm.models_py.modules.dsv41.fp8 import _v41_prefill_pools as pools
 
 
 class OwnedPoolHostTest(unittest.TestCase):
+    def test_adaptive_scratch_uses_smallest_tier_for_fewest_groups(self):
+        with patch.object(owned, "_MAX_SCRATCH_MB", 1024):
+            for cp, ratio, batch, count, groups, max_mb in (
+                (4, 1, 16, 32768, 1, 256),
+                (4, 1, 32, 32768, 1, 512),
+                (4, 1, 64, 32768, 1, 1024),
+                (4, 2, 64, 16384, 1, 512),
+                (2, 1, 32, 32768, 1, 1024),
+                (1, 1, 64, 32768, 1, 1024),
+            ):
+                with self.subTest(cp=cp, ratio=ratio, batch=batch):
+                    plan = owned.adaptive_plan_groups(
+                        (count,) * batch, cp_size=cp, owner_rows=256 // ratio
+                    )
+                    self.assertEqual(len(plan.groups), groups)
+                    self.assertLessEqual(plan.temporary_bytes, max_mb * 1024**2)
+                    if max_mb > 256:
+                        previous = owned.plan_groups(
+                            (count,) * batch,
+                            cp_size=cp,
+                            owner_rows=256 // ratio,
+                            limit=max_mb // 2 * 1024**2,
+                        )
+                        self.assertGreater(len(previous.groups), groups)
+            self.assertIsNone(
+                owned.adaptive_plan_groups((1_048_576,), cp_size=4, owner_rows=256)
+            )
+            with patch.object(owned, "_MAX_SCRATCH_MB", 256):
+                self.assertEqual(
+                    len(
+                        owned.adaptive_plan_groups(
+                            (32768,) * 64, cp_size=4, owner_rows=256
+                        ).groups
+                    ),
+                    4,
+                )
+
     def test_unsupported_plan_does_not_allocate_consumer_output(self):
         from rtp_llm.models_py.modules.dsv41.fp8 import _v41_prefill_kv_workspace
 
@@ -417,7 +453,16 @@ class OwnedPoolCudaTest(unittest.TestCase):
         ranks, host, ends = self.fixture(
             counts, cp, ratio, dtypes, token_blocks, main_storage
         )
-        plan_fn = functools.partial(owned.plan_groups, limit=limit or owned._LIMIT)
+        original_plan_groups = owned.plan_groups
+
+        def plan_fn(counts, *, cp_size, owner_rows, **_kwargs):
+            return original_plan_groups(
+                counts,
+                cp_size=cp_size,
+                owner_rows=owner_rows,
+                limit=limit or owned._LIMIT,
+            )
+
         plan = plan_fn(counts, cp_size=cp, owner_rows=256 // ratio)
         self.assertIsNotNone(plan)
         expected_packets = [
@@ -582,7 +627,7 @@ class OwnedPoolCudaTest(unittest.TestCase):
                     (rows + 2,), -777, dtype=torch.int32, device="cuda"
                 )
                 oq, os = q_backing[4:-4].view(rows, 64), s_backing[1:-1]
-                owned._owned_pool_restore[(triton.cdiv(rows, codec.FP4_ROWS_PER_CTA),)](
+                owned._owned_pool_restore[(rows,)](
                     packet, inverse, out, oq, os, rows, local, direct, num_warps=4
                 )
                 self.assert_bits(backing, expected)

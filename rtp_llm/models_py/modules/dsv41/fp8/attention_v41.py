@@ -83,6 +83,11 @@ _PRODUCE_GLOBAL_TILE_ROWS = 32768
 _SMALL_CP_X_GATHER_MAX_ROWS = int(
     os.environ.get("DSV41_SMALL_CP_X_GATHER_MAX_ROWS", "131072")
 )
+# Fixed-shape engine A/B: 96-128 MiB saved at B16 did not help, while
+# 192-256 MiB at B32 did. Apply that crossover to actual transfer bytes.
+_LOCAL_PROJECT_MIN_SAVED_BYTES = (
+    int(os.environ.get("DSV41_LOCAL_PROJECT_MIN_SAVED_MB", "160")) * 1024**2
+)
 # Serial groups retain at most one BF16 gather + restore (1280 MiB for
 # hidden=5120), plus three group-sized int64 index temporaries (1.5 MiB).
 _CP_X_GROUP_MAX_ROWS = 65536
@@ -96,6 +101,30 @@ def _use_small_cp_x_gather(cp_ctx) -> bool:
     if lengths is None or len(lengths) <= 1:
         limit = min(limit, 65536)
     return cp_ctx.padded_seq_len <= limit
+
+
+def _project_before_small_cp_gather(x, cp_ctx, output_width) -> bool:
+    """Select local projection when it saves enough collective traffic.
+
+    The same projection also replaces a global-row GEMM with a local-row GEMM.
+    A small transfer saving does not repay the extra pre-gather launch and its
+    lost overlap with SWA work, so retain raw gather below that crossover.
+    """
+    if (
+        cp_ctx.cp_size <= 1
+        or x.ndim != 2
+        or x.dtype != torch.bfloat16
+        or not x.is_contiguous()
+        or x.shape[0] != cp_ctx.chunk_length
+        or cp_ctx.padded_seq_len != cp_ctx.cp_size * x.shape[0]
+    ):
+        return False
+    rows = cp_ctx.padded_seq_len
+    raw_bytes = rows * x.shape[1] * x.element_size()
+    projected_bytes = rows * output_width * torch.float32.itemsize
+    return projected_bytes < raw_bytes and (
+        raw_bytes - projected_bytes >= _LOCAL_PROJECT_MIN_SAVED_BYTES
+    )
 
 
 def _prefill_x_group_plan(x, cp_ctx):
@@ -1261,6 +1290,7 @@ class AttentionV41FP8(AttentionFP8):
         *,
         prefill,
         projected_tiles=None,
+        projected_full=False,
         raw_tiles=None,
         grouped_projection=False,
         batched_groups=False,
@@ -1463,14 +1493,14 @@ class AttentionV41FP8(AttentionFP8):
             req_tile = req_ids[t0:t1]
             values = (
                 x_tile[:, : self.head_dim]
-                if projected_tiles is not None
+                if projected_tiles is not None or projected_full
                 else _linear_bf16_bf16_fp32(x_tile, owner.global_wkv)
             )
             scores = None
             if ratio == 2:
                 scores = (
                     x_tile[:, self.head_dim :]
-                    if projected_tiles is not None
+                    if projected_tiles is not None or projected_full
                     else _linear_bf16_bf16_fp32(x_tile, owner.global_wgate)
                 )
             group_plan = None
@@ -2461,6 +2491,7 @@ class AttentionV41FP8(AttentionFP8):
         # It overlaps SWA work; subsequent transfers overlap global projection.
         x_gather = None
         small_cp = common.cp_on and _use_small_cp_x_gather(common.cp_ctx)
+        projected_small_cp = False
         x_groups = (
             _prefill_x_group_plan(x, common.cp_ctx)
             if self.is_kv_source and common.cp_on and not small_cp
@@ -2471,6 +2502,25 @@ class AttentionV41FP8(AttentionFP8):
                 # One bounded all-gather avoids per-half launches on short requests.
                 first_tile = (None, 0, common.cp_ctx.padded_seq_len)
                 weights = ()
+                projected_small_cp = self.compress_ratio in (
+                    1,
+                    2,
+                ) and _project_before_small_cp_gather(
+                    x, common.cp_ctx, self.compress_ratio * self.head_dim
+                )
+                if projected_small_cp:
+                    from rtp_llm.models_py.modules.dsv41.fp8.compressor import (
+                        _linear_bf16_bf16_fp32,
+                    )
+
+                    owner = self._owner()
+                    weight = (
+                        torch.cat((owner.global_wkv, owner.global_wgate), dim=0)
+                        if self.compress_ratio == 2
+                        else owner.global_wkv
+                    )
+                    with record_function_range("dsv41.prefill.project_local_before_ag"):
+                        x = _linear_bf16_bf16_fp32(x, weight)
                 x_buffers = [x.new_empty((first_tile[2], x.shape[-1]))]
             else:
                 owner = self._owner()
@@ -2599,6 +2649,7 @@ class AttentionV41FP8(AttentionFP8):
                     lengths,
                     prefill=True,
                     projected_tiles=projected_tiles,
+                    projected_full=projected_small_cp,
                     raw_tiles=raw_tiles,
                     grouped_projection=x_groups is not None,
                     batched_groups=batched_groups,

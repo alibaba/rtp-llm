@@ -428,6 +428,48 @@ class V41IndexerQFusionCUDA(unittest.TestCase):
         self.assertIn("_fused_indexer_q_rope_fp4_kernel", kernels[0].name)
 
     @torch.no_grad()
+    def test_grouped_prefill_rows_preserve_outputs_and_selection(self):
+        for tokens in (2048, 16384):
+            with self.subTest(tokens=tokens):
+                case = make_case(tokens, 1)
+                selection = torch.full(
+                    (tokens, 512), 7, dtype=torch.int32, device="cuda"
+                )
+                candidates = torch.full(
+                    (tokens, 2048), 9, dtype=torch.int32, device="cuda"
+                )
+                actual = fused.try_fused_indexer_q(
+                    **case,
+                    weights_out_dtype=torch.bfloat16,
+                    selection_out=selection,
+                    candidates_out=candidates,
+                )
+                assert_identical(
+                    actual, baseline(case, weights_out_dtype=torch.bfloat16)
+                )
+                self.assertTrue(bool((selection == -1).all()))
+                self.assertTrue(bool((candidates == -1).all()))
+                if tokens == 2048:
+                    graph = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(graph):
+                        captured = fused.try_fused_indexer_q(
+                            **case,
+                            weights_out_dtype=torch.bfloat16,
+                            selection_out=selection,
+                            candidates_out=candidates,
+                        )
+                    case["q"].mul_(2)
+                    case["positions"].add_(1).remainder_(4096)
+                    selection.fill_(7)
+                    candidates.fill_(9)
+                    graph.replay()
+                    assert_identical(
+                        captured, baseline(case, weights_out_dtype=torch.bfloat16)
+                    )
+                    self.assertTrue(bool((selection == -1).all()))
+                    self.assertTrue(bool((candidates == -1).all()))
+
+    @torch.no_grad()
     def test_real_shapes_and_input_immutability(self):
         for batch, span in (
             (1, 1),
@@ -511,7 +553,7 @@ class V41IndexerQFusionCUDA(unittest.TestCase):
         )
         kernels = [e for e in events if e.device_type == torch.autograd.DeviceType.CUDA]
         self.assertEqual(len(kernels), 1, [e.name for e in kernels])
-        self.assertIn("_fused_indexer_q_rope_fp4_kernel", kernels[0].name)
+        self.assertIn("_fused_indexer_q_rope_fp4_rows_kernel", kernels[0].name)
 
     def test_fp4_midpoints_scale_boundaries_and_signed_zero(self):
         case = make_case(1, 6)

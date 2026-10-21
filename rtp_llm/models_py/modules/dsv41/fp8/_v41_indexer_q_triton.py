@@ -98,12 +98,94 @@ def _fused_indexer_q_rope_fp4_kernel(
 
 
 @triton.jit
+def _fused_indexer_q_rope_fp4_rows_kernel(
+    q_ptr,
+    weights_ptr,
+    frequencies_ptr,
+    positions_ptr,
+    payload_ptr,
+    sf_ptr,
+    weights_out_ptr,
+    selection_ptr,
+    candidates_ptr,
+    q_token_stride,
+    MAX_POSITION: tl.constexpr,
+    SELECTION_WIDTH: tl.constexpr,
+    CANDIDATE_WIDTH: tl.constexpr,
+):
+    # Four adjacent heads share one CTA and one position read. The caller's
+    # 32-head contract makes the row count divisible by four.
+    row = tl.program_id(0) * 4 + tl.arange(0, 4)
+    token = row // 32
+    head = row % 32
+    position = tl.load(positions_ptr + token).to(tl.int64)
+    position = tl.where(position < 0, position + MAX_POSITION, position)
+    if tl.sum((position < 0) | (position >= MAX_POSITION), 0) > 0:
+        tl.inline_asm_elementwise(
+            "trap; // dummy $0", "=r", [], dtype=tl.int32, is_pure=False, pack=1
+        )
+        return
+    column = tl.arange(0, 128)
+    q = tl.load(
+        q_ptr + token[:, None] * q_token_stride + head[:, None] * 128 + column[None, :]
+    ).to(tl.float32)
+    real = tl.gather(q, tl.broadcast_to((column & ~1)[None, :], (4, 128)), axis=1)
+    imag = tl.gather(q, tl.broadcast_to((column | 1)[None, :], (4, 128)), axis=1)
+    rotary = column >= 64
+    angle = tl.maximum((column - 64) // 2, 0)
+    cosine = tl.load(
+        frequencies_ptr + position[:, None] * 64 + angle[None, :] * 2,
+        rotary[None, :],
+        other=1,
+    )
+    sine = tl.load(
+        frequencies_ptr + position[:, None] * 64 + angle[None, :] * 2 + 1,
+        rotary[None, :],
+        other=0,
+    )
+    even = column % 2 == 0
+    product = tl.where(even[None, :], imag, real) * sine
+    product_bits = product.to(tl.uint32, bitcast=True)
+    signed_product = (product_bits ^ tl.where(even[None, :], 0x80000000, 0)).to(
+        tl.float32, bitcast=True
+    )
+    rotated = tl.fma(tl.where(even[None, :], real, imag), cosine, signed_product)
+    rotated = tl.where(rotary[None, :], rotated, q).to(tl.bfloat16).to(tl.float32)
+    groups = rotated.reshape((4, 4, 32))
+    maximum = tl.maximum(tl.max(tl.abs(groups), axis=2), 6.0 * (2.0**-126))
+    scale, scale_bytes = _round_power_of_two_scale(maximum, 1.0 / 6.0)
+    normalized = tl.minimum(tl.maximum(tl.div_rn(groups, scale[:, :, None]), -6.0), 6.0)
+    payload = _pack_e2m1_payload(normalized.reshape((512,)), 512).reshape((4, 64))
+    tl.store(payload_ptr + row[:, None] * 64 + tl.arange(0, 64)[None, :], payload)
+    sf_bytes = (sf_ptr + row[:, None]).to(tl.pointer_type(tl.uint8))
+    tl.store(sf_bytes + tl.arange(0, 4)[None, :], scale_bytes)
+    weight = tl.load(weights_ptr + row).to(tl.float32)
+    tl.store(weights_out_ptr + row, weight * (1.0 / 64.0))
+    if SELECTION_WIDTH:
+        _initialize_selection_rows(selection_ptr, token, head, SELECTION_WIDTH)
+    if CANDIDATE_WIDTH:
+        _initialize_selection_rows(candidates_ptr, token, head, CANDIDATE_WIDTH)
+
+
+@triton.jit
 def _initialize_selection_row(output, token, head, WIDTH: tl.constexpr):
     CHUNK: tl.constexpr = triton.cdiv(WIDTH, 32)
     offsets = tl.arange(0, triton.next_power_of_2(CHUNK))
     columns = head * CHUNK + offsets
     tl.store(
         output + token * WIDTH + columns, -1, (offsets < CHUNK) & (columns < WIDTH)
+    )
+
+
+@triton.jit
+def _initialize_selection_rows(output, token, head, WIDTH: tl.constexpr):
+    CHUNK: tl.constexpr = triton.cdiv(WIDTH, 32)
+    offsets = tl.arange(0, triton.next_power_of_2(CHUNK))
+    columns = head[:, None] * CHUNK + offsets[None, :]
+    tl.store(
+        output + token[:, None] * WIDTH + columns,
+        -1,
+        (offsets[None, :] < CHUNK) & (columns < WIDTH),
     )
 
 
@@ -209,7 +291,14 @@ def try_fused_indexer_q(
     payload = torch.empty(*q.shape[:-1], 64, dtype=torch.int8, device=q.device)
     sf = torch.empty(q.shape[:-1], dtype=torch.int32, device=q.device)
     scaled_weights = torch.empty(q.shape[:-1], dtype=weights_out_dtype, device=q.device)
-    _fused_indexer_q_rope_fp4_kernel[(q.numel() // 128,)](
+    rows = q.numel() // 128
+    grouped = q.shape[1] == 1 and rows >= 65536
+    kernel = (
+        _fused_indexer_q_rope_fp4_rows_kernel
+        if grouped
+        else _fused_indexer_q_rope_fp4_kernel
+    )
+    kernel[(rows // 4 if grouped else rows,)](
         q,
         weights,
         torch.view_as_real(freqs_cis),
@@ -223,7 +312,7 @@ def try_fused_indexer_q(
         freqs_cis.shape[0],
         selection_out.shape[1] if selection_out is not None else 0,
         candidates_out.shape[1] if candidates_out is not None else 0,
-        num_warps=4,
+        num_warps=1 if grouped else 4,
         enable_fp_fusion=False,
     )
     return payload, sf, scaled_weights

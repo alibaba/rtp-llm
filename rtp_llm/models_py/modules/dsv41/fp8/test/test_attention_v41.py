@@ -23,6 +23,29 @@ from rtp_llm.models_py.modules.dsv41.fp8.attention_v41 import (
 
 
 class AttentionV41Test(unittest.TestCase):
+    def test_small_cp_projection_uses_actual_transfer_width_and_geometry(self):
+        select = attention_v41_module._project_before_small_cp_gather
+        for cp, local_rows, output_width, expected in (
+            (4, 1024, 1024, False),
+            (4, 2048, 1024, False),
+            (4, 4096, 512, False),
+            (4, 4096, 1024, False),
+            (4, 8192, 1024, True),
+            (2, 4096, 1024, False),
+            (2, 16384, 1024, True),
+            (1, 8192, 1024, False),
+            (4, 8192, 5120, False),
+        ):
+            with self.subTest(cp=cp, rows=local_rows, width=output_width):
+                x = torch.empty((local_rows, 5120), dtype=torch.bfloat16, device="meta")
+                ctx = SimpleNamespace(
+                    cp_size=cp,
+                    chunk_length=local_rows,
+                    padded_seq_len=cp * local_rows,
+                )
+                self.assertEqual(select(x, ctx, output_width), expected)
+        self.assertFalse(select(x[:, ::2], ctx, 1024))
+
     def test_raw_pool_identity_keeps_reinterpret_and_strided_layout(self):
         attn = AttentionV41FP8.__new__(AttentionV41FP8)
         torch.nn.Module.__init__(attn)
@@ -848,10 +871,13 @@ class AttentionV41Test(unittest.TestCase):
         starts = torch.tensor([3, 7], dtype=torch.long)
         lengths = torch.tensor([4, 5], dtype=torch.long)
 
-        def run(tile_rows, streamed=False):
+        def run(tile_rows, streamed=False, full_projected=False):
             state_writes = []
             attn = self._kv_source_fixture(state_writes)
             projected = torch.cat((x_full.float(), x_full.float() * 0.125), -1)
+            source = (
+                projected if full_projected else (x_full[:1] if streamed else x_full)
+            )
             with patch(
                 "rtp_llm.models_py.modules.dsv41.fp8.compressor._linear_bf16_bf16_fp32",
                 side_effect=lambda x, w: torch.nn.functional.linear(
@@ -861,12 +887,13 @@ class AttentionV41Test(unittest.TestCase):
                 attention_v41_module, "_PRODUCE_GLOBAL_TILE_ROWS", tile_rows
             ):
                 attn._produce_global(
-                    x_full[:1] if streamed else x_full,
+                    source,
                     positions,
                     req_ids,
                     starts,
                     lengths,
                     prefill=True,
+                    projected_full=full_projected,
                     projected_tiles=(
                         (
                             (start, projected[start : start + tile_rows])
@@ -880,6 +907,13 @@ class AttentionV41Test(unittest.TestCase):
 
         reference_globals, reference_writes = run(4096)
         self.assertEqual(len(reference_writes), 1)
+        projected_globals, projected_writes = run(4096, full_projected=True)
+        for pair, reference in zip(projected_globals, reference_globals):
+            for result, expected in zip(pair, reference):
+                torch.testing.assert_close(result, expected, rtol=0, atol=0)
+        for actual, expected in zip(projected_writes, reference_writes):
+            for a, b in zip(actual, expected):
+                torch.testing.assert_close(a, b, rtol=0, atol=0)
         for tile_rows, streamed in [
             (n, streamed) for n in (1, 2, 3, 4, 5, 8) for streamed in (False, True)
         ]:
