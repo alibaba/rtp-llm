@@ -9,6 +9,7 @@ from typing import Any
 
 import torch
 
+from rtp_llm.config.dsv41_config import V41_MAX_CP_PREFILL_TOKENS
 from rtp_llm.models.dsv41_kv_cache import dsv41_page_layouts
 from rtp_llm.models_py.modules.dsv4.fp8.attention_v41 import AttentionV41FP8
 from rtp_llm.models_py.modules.dsv4.hc.delayed import DelayedHCUnit
@@ -22,7 +23,7 @@ def snapshot_native_l20_frame(
     spans: Sequence[V41L20Span],
     expected_rows: torch.Tensor,
 ) -> V41PPFrame:
-    """Clone the current short eager L20 frame, with explicit causal candidates."""
+    """Clone the current eager L20 frame and its causal candidate selections."""
     attention = getattr(block, "attn", None)
     unit = getattr(block, "ffn_hc", None)
     if (
@@ -52,10 +53,9 @@ def snapshot_native_l20_frame(
         or config.get("candidate_block_size") != 8
         or shared.get("global", {}).get(20) is None
         or "candidates" not in shared
-        or shared["candidates"] is not None
     ):
         raise NotImplementedError(
-            "Native L20 export requires current all-causal stage state"
+            "Native L20 export requires current stage-zero selection state"
         )
     if not isinstance(hidden, torch.Tensor) or not hidden.is_cuda:
         raise NotImplementedError("Native L20 export requires SM120 CUDA residuals")
@@ -72,10 +72,17 @@ def snapshot_native_l20_frame(
         not 1 <= len(spans) <= 2
         or any(not isinstance(span, V41L20Span) for span in spans)
         or len({span.identity.request_id for span in spans}) != len(spans)
-        or any(span.start + span.count > 256 for span in spans)
+        or any(
+            span.start + span.count
+            > min(
+                attention._rope_max_seq_len,
+                256 if span.start else V41_MAX_CP_PREFILL_TOKENS,
+            )
+            for span in spans
+        )
     ):
         raise NotImplementedError(
-            "Native L20 export requires distinct short request spans"
+            "Native L20 export requires distinct bounded request spans"
         )
     common = attention._prefill_meta_shared
     if common is None or not common.use_varlen or common.batch_size != len(spans):
@@ -150,10 +157,28 @@ def snapshot_native_l20_frame(
         device,
     )
     blocks = torch.arange(2048, dtype=torch.int32, device=device)
-    counts = torch.where(real, common.position_ids // 8 + 1, 0).to(torch.int32)
-    candidates = torch.where(
-        blocks[None] < counts[:, None], blocks[None], -1
-    ).contiguous()
+    counts = torch.where(real, (common.position_ids // 8 + 1).clamp_max(2048), 0).to(
+        torch.int32
+    )
+    selected_candidates = shared["candidates"]
+    requires_candidates = any(span.start + span.count > 2048 * 8 for span in spans)
+    if selected_candidates is None:
+        if requires_candidates:
+            raise ValueError(
+                "Native L20 export is missing long-context candidate selections"
+            )
+        candidates = torch.where(
+            blocks[None] < counts[:, None], blocks[None], -1
+        ).contiguous()
+    else:
+        if not requires_candidates:
+            raise ValueError(
+                "Native L20 export has unexpected short-context candidates"
+            )
+        candidates = _tensor(
+            selected_candidates, "export candidates", (count, 2048), torch.int32, device
+        ).clone()
+        candidates[~real] = -1
     selections = topk.clone()
     selections[~real] = -1
     frame = V41PPFrame(

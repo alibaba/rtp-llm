@@ -7,6 +7,7 @@ from typing import Any
 
 import torch
 
+from rtp_llm.config.dsv41_config import V41_MAX_CP_PREFILL_TOKENS
 from rtp_llm.models.dsv41_kv_cache import dsv41_cache_bindings, dsv41_page_layouts
 from rtp_llm.models_py.modules.dsv4.cp import build_cp_context_for_forward
 from rtp_llm.models_py.modules.dsv4.fp8.attention import bind_attn_cache
@@ -161,9 +162,14 @@ def prepare_native_pp_prefill_dispatch(
     if (
         len({s.identity.request_id for s in spans}) != len(spans)
         or len({s.identity.generation for s in spans}) != len(spans)
-        or any(s.count <= 0 or s.start + s.count > 256 for s in spans)
+        or any(
+            s.count <= 0
+            or s.start + s.count
+            > min(args.max_seq_len, 256 if s.start else V41_MAX_CP_PREFILL_TOKENS)
+            for s in spans
+        )
     ):
-        raise ValueError("V4.1 PP preflight requires distinct short request spans")
+        raise ValueError("V4.1 PP preflight requires distinct bounded request spans")
     # The C++ API compares leases with allocator provenance rather than the
     # projected cache topology; Python receives copies, never lease constructors.
     leased = cache.native_allocation_tables(inputs)
@@ -263,13 +269,20 @@ def prepare_native_pp_prefill_dispatch(
     if set(tables) != expected_tags:
         raise ValueError("V4.1 PP block tables have the wrong native tag roster")
     for tag, table in tables.items():
-        expected = [list(row[tag]) for row in leased]
+        pages = [list(row[tag]) for row in leased]
+        width = max(map(len, pages))
+        expected = [row + [0] * (width - len(row)) for row in pages]
+        single_block = tag in ("swa_kv", "csa_state")
+        required = [
+            1 if single_block else (s.start + s.count + 255) // 256 for s in spans
+        ]
         if (
             table.dtype != torch.int32
             or table.device != device
-            or table.shape != (len(spans), 1)
+            or table.shape != (len(spans), width)
             or not table.is_contiguous()
-            or any(len(row[tag]) != 1 for row in leased)
+            or any(len(row) < need for row, need in zip(pages, required))
+            or (single_block and width != 1)
             or table.tolist() != expected
         ):
             raise ValueError(

@@ -6,6 +6,7 @@ the C++ allocator or the model's pipeline execution loop.
 
 import json
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -26,6 +27,7 @@ from rtp_llm.models_py.modules.dsv4.v41_cache_transfer import (
 )
 from rtp_llm.models_py.modules.dsv4.v41_pp import (
     V41PPFrame,
+    _validate_frame,
     import_v41_pp_frame,
     pack_v41_pp_frame,
 )
@@ -101,6 +103,89 @@ def frame_for(rows):
 
 
 class NativeL20TransferTest(unittest.TestCase):
+    def test_frame_rejects_first_row_before_later_error_categories(self):
+        rows = torch.tensor(
+            [[0, 32, 1], [1, 63, 1], [-1, -1, 0], [0, 33, 1], [1, 62, 1]],
+            dtype=torch.int64,
+        )
+        spans = [
+            V41L20Span(V41CacheIdentity(41, 1, 0), 0, 32, 2),
+            V41L20Span(V41CacheIdentity(42, 1, 0), 0, 0, 64),
+        ]
+        frame = frame_for(rows)
+        _validate_frame(frame, spans, rows)
+        counts, topk = frame.candidate_counts.clone(), frame.topk.clone()
+        counts[0] = 3
+        topk[1, 0] = 64
+        with self.assertRaisesRegex(ValueError, "candidate count"):
+            _validate_frame(
+                replace(frame, candidate_counts=counts, topk=topk), spans, rows
+            )
+        topk[0, 0] = 1
+        with self.assertRaisesRegex(ValueError, "invalid, duplicate or missing"):
+            _validate_frame(
+                replace(frame, candidate_counts=counts, topk=topk), spans, rows
+            )
+        bad_rows = rows.clone()
+        bad_rows[3, 2] = 2
+        topk = frame.topk.clone()
+        topk[2, 0] = 0
+        with self.assertRaisesRegex(ValueError, "padding rows"):
+            _validate_frame(
+                replace(frame, row_map=bad_rows, topk=topk), spans, bad_rows
+            )
+        _validate_frame(frame, spans, rows)
+
+    def test_frame_rejects_nonadjacent_repeated_queries(self):
+        rows = torch.tensor(
+            [[0, 4, 1], [-1, -1, 0], [1, 4, 1], [0, 5, 1], [0, 4, 1]],
+            dtype=torch.int64,
+        )
+        spans = [
+            V41L20Span(V41CacheIdentity(41, 1, 0), 0, 0, 8),
+            V41L20Span(V41CacheIdentity(42, 1, 0), 0, 0, 8),
+        ]
+        with self.assertRaisesRegex(ValueError, "repeats a query"):
+            _validate_frame(frame_for(rows), spans, rows)
+        distinct = rows[:-1].contiguous()
+        _validate_frame(frame_for(distinct), spans, distinct)
+
+    def test_32k_sparse_frame_preserves_causal_newest_and_padding_checks(self):
+        rows = torch.tensor(
+            [[0, 16383, 1], [0, 16384, 1], [0, 32767, 1], [-1, -1, 0]],
+            dtype=torch.int64,
+        )
+        spans = [V41L20Span(V41CacheIdentity(41, 1, 0), 0, 0, 32768)]
+        topk = torch.full((4, 512), -1, dtype=torch.int32)
+        candidates = torch.full((4, 2048), -1, dtype=torch.int32)
+        for row, start in enumerate((0, 1, 2048)):
+            candidates[row] = torch.arange(start, start + 2048, dtype=torch.int32)
+            topk[row] = torch.arange(start * 8, start * 8 + 512, dtype=torch.int32)
+        frame = V41PPFrame(
+            torch.zeros(4, 4, 5120, dtype=torch.bfloat16),
+            torch.ones(4, 4),
+            rows.clone(),
+            topk,
+            candidates,
+            torch.tensor([2048, 2048, 2048, 0], dtype=torch.int32),
+        )
+        _validate_frame(frame, spans, rows)
+        for field, row, column, value, error in (
+            ("candidate_blocks", 2, 2047, 2047, "newest visible block"),
+            ("candidate_blocks", 2, 2047, 4096, "invalid or duplicate blocks"),
+            ("candidate_blocks", 2, 1, 2048, "invalid or duplicate blocks"),
+            ("candidate_blocks", 3, 0, 0, "padding rows"),
+            ("topk", 2, 0, 32768, "invalid, duplicate or missing positions"),
+            ("topk", 3, 0, 0, "padding rows"),
+            ("candidate_counts", 2, None, 2047, "candidate count"),
+        ):
+            with self.subTest(field=field, row=row, column=column, value=value):
+                corrupted = getattr(frame, field).clone()
+                corrupted[row if column is None else (row, column)] = value
+                with self.assertRaisesRegex(ValueError, error):
+                    _validate_frame(replace(frame, **{field: corrupted}), spans, rows)
+        _validate_frame(frame, spans, rows)
+
     def test_views_preserve_native_storage_and_reject_wrong_stage_metadata(self):
         for rank in (0, 1):
             native, backing = native_fixture(rank)

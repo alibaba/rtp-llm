@@ -1,8 +1,8 @@
 """Forward-local source publication through the maintained L21 attention owner.
 
 The caller owns the native allocation lease and forward serialization. This
-adapter admits short eager CP1/CP4 maintained-stage controls; it does not admit
-production PP execution.
+adapter publishes bounded eager CP1/CP4 maintained-stage sources after native
+admission.
 """
 
 from contextlib import contextmanager
@@ -12,6 +12,7 @@ from typing import Any, Sequence
 
 import torch
 
+from rtp_llm.config.dsv41_config import V41_MAX_CP_PREFILL_TOKENS
 from rtp_llm.models_py.modules.dsv4.native_l20_transfer import (
     NativeL20ReplicaReceiver,
     _require_eager,
@@ -101,6 +102,7 @@ class NativeL20PrefillSource:
     topk: torch.Tensor
     globals_by_req: tuple[tuple[torch.Tensor, torch.Tensor], ...]
     cp: _CPDispatch | None = None
+    candidate_blocks: torch.Tensor | None = None
 
     def _ready(self) -> None:
         for span in self.spans:
@@ -235,8 +237,7 @@ class NativeL20PrefillSource:
                 raise ValueError(f"Native L20 current dispatch disagrees with {name}")
         shared["global"] = {20: list(self.globals_by_req)}
         shared["topk"] = {20: self.topk}
-        # Every admitted context has fewer than 2048 candidate blocks.
-        shared["candidates"] = None
+        shared["candidates"] = self.candidate_blocks
 
 
 def prepare_native_l20_prefill_source(
@@ -247,7 +248,7 @@ def prepare_native_l20_prefill_source(
     *,
     cp_ctx: Any = None,
 ) -> NativeL20PrefillSource:
-    """Snapshot current native source bytes and cloned short-forward selections."""
+    """Snapshot current native source bytes and cloned forward selections."""
     if not isinstance(receiver, NativeL20ReplicaReceiver):
         raise ValueError("Native L20 publication requires an admitted native receiver")
     _require_eager(receiver.caches["hca_kv"].raw)
@@ -256,10 +257,17 @@ def prepare_native_l20_prefill_source(
     if (
         not spans
         or not expected_rows.numel()
-        or any(s.start + s.count > 256 for s in spans)
+        or any(
+            s.start + s.count
+            > min(
+                receiver.contract.max_sequence_length,
+                256 if s.start else V41_MAX_CP_PREFILL_TOKENS,
+            )
+            for s in spans
+        )
     ):
         raise NotImplementedError(
-            "Native L20 publication requires short nonempty request spans"
+            "Native L20 publication requires bounded nonempty request spans"
         )
     cp = _cp_dispatch(cp_ctx, receiver, spans) if cp_ctx is not None else None
     records = (
@@ -310,7 +318,17 @@ def prepare_native_l20_prefill_source(
             values.append(value)
         globals_by_req.append(tuple(values))
     return NativeL20PrefillSource(
-        receiver, spans, rows, frame.topk.clone(), tuple(globals_by_req), cp
+        receiver,
+        spans,
+        rows,
+        frame.topk.clone(),
+        tuple(globals_by_req),
+        cp,
+        (
+            frame.candidate_blocks.clone()
+            if any(s.start + s.count > 2048 * 8 for s in spans)
+            else None
+        ),
     )
 
 
@@ -340,3 +358,10 @@ def imported_native_l20_prefill(attention: Any, source: NativeL20PrefillSource):
         topk_map = shared.get("topk", {})
         if topk_map.get(20) is source.topk:
             topk_map.pop(20)
+        if (
+            source.candidate_blocks is not None
+            and shared.get("candidates") is source.candidate_blocks
+        ):
+            shared["candidates"] = None
+            shared.pop("prefill_candidate_mask", None)
+            shared.pop("prefill_sparse_plans", None)

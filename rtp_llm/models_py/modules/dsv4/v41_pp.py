@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Mapping, Sequence
 
+import numpy as np
 import torch
 
 if TYPE_CHECKING:
@@ -50,6 +51,92 @@ def _tensor(value, name, shape, dtype, device) -> torch.Tensor:
     return value
 
 
+def _validate_selection_rows(topk, candidates, counts, rows, spans) -> None:
+    """Check fresh host snapshots together, preserving row-first error order."""
+    count = rows.shape[0]
+    if not count:
+        return
+    requests, positions, validity = rows.numpy().T
+    indices = topk.numpy()
+    blocks = candidates.numpy()
+    block_counts = counts.numpy()
+    real = validity == 1
+    errors = np.zeros(count, dtype=np.uint8)
+
+    def reject(mask, code):
+        errors[mask & (errors == 0)] = code
+
+    reject((validity != 0) & ~real, 1)
+    reject(
+        (validity == 0)
+        & (
+            (requests != -1)
+            | (positions != -1)
+            | (block_counts != 0)
+            | (indices != -1).any(axis=1)
+            | (blocks != -1).any(axis=1)
+        ),
+        2,
+    )
+    present = (requests >= 0) & (requests < len(spans))
+    reject(real & ~present, 3)
+    in_span = np.zeros(count, dtype=np.bool_)
+    for request in np.unique(requests[real & present]):
+        span = spans[int(request)]
+        in_span |= (
+            (requests == request)
+            & (positions >= span.start)
+            & (positions < span.start + span.count)
+        )
+    reject(real & ~in_span, 4)
+
+    sorted_indices = np.sort(indices, axis=1)
+    duplicates = (
+        (sorted_indices[:, 1:] == sorted_indices[:, :-1]) & (sorted_indices[:, 1:] >= 0)
+    ).any(axis=1)
+    expected_positions = np.where(positions >= 511, 512, positions + 1)
+    reject(
+        real
+        & (
+            ((indices < -1) | (indices > positions[:, None])).any(axis=1)
+            | duplicates
+            | ((indices >= 0).sum(axis=1) != expected_positions)
+        ),
+        5,
+    )
+    newest = positions // 8
+    reject(real & (block_counts != np.minimum(2048, newest + 1)), 6)
+    active = np.arange(2048)[None] < block_counts[:, None]
+    sorted_blocks = np.sort(blocks, axis=1)
+    duplicates = (
+        (sorted_blocks[:, 1:] == sorted_blocks[:, :-1]) & (sorted_blocks[:, 1:] >= 0)
+    ).any(axis=1)
+    reject(
+        real
+        & (
+            (active & ((blocks < 0) | (blocks > newest[:, None]))).any(axis=1)
+            | duplicates
+            | (~active & (blocks != -1)).any(axis=1)
+        ),
+        7,
+    )
+    reject(real & ~(active & (blocks == newest[:, None])).any(axis=1), 8)
+    failed = np.flatnonzero(errors)
+    if failed.size:
+        messages = (
+            "",
+            "V4.1 PP row validity must be binary",
+            "V4.1 PP padding rows must have masked selections",
+            "V4.1 PP row refers to an absent request",
+            "V4.1 PP query position lies outside its delta span",
+            "V4.1 PP top-k contains invalid, duplicate or missing positions",
+            "V4.1 PP candidate count is invalid",
+            "V4.1 PP candidates contain invalid or duplicate blocks",
+            "V4.1 PP candidates omit the newest visible block",
+        )
+        raise ValueError(messages[int(errors[failed[0]])])
+
+
 def _validate_frame(
     frame: V41PPFrame, spans: Sequence[V41L20Span], expected_rows: torch.Tensor
 ) -> None:
@@ -83,52 +170,14 @@ def _validate_frame(
     topk = frame.topk.cpu()
     candidates = frame.candidate_blocks.cpu()
     counts = frame.candidate_counts.cpu()
-    for row, (request, position, valid) in enumerate(expected_rows.tolist()):
-        if valid not in (0, 1):
-            raise ValueError("V4.1 PP row validity must be binary")
-        if not valid:
-            if (
-                (request, position) != (-1, -1)
-                or int(counts[row]) != 0
-                or bool((topk[row] != -1).any())
-                or bool((candidates[row] != -1).any())
-            ):
-                raise ValueError("V4.1 PP padding rows must have masked selections")
-            continue
-        if not 0 <= request < len(spans):
-            raise ValueError("V4.1 PP row refers to an absent request")
-        span = spans[request]
-        if not span.start <= position < span.start + span.count:
-            raise ValueError("V4.1 PP query position lies outside its delta span")
-        indices = topk[row]
-        active = indices[indices >= 0]
-        if (
-            bool(((indices < -1) | (indices > position)).any())
-            or active.unique().numel() != active.numel()
-            or active.numel() != min(512, position + 1)
-        ):
-            raise ValueError(
-                "V4.1 PP top-k contains invalid, duplicate or missing positions"
-            )
-        block_count = int(counts[row])
-        if block_count != min(2048, position // 8 + 1):
-            raise ValueError("V4.1 PP candidate count is invalid")
-        blocks = candidates[row, :block_count]
-        if (
-            bool(((blocks < 0) | (blocks > position // 8)).any())
-            or blocks.unique().numel() != block_count
-            or bool((candidates[row, block_count:] != -1).any())
-        ):
-            raise ValueError("V4.1 PP candidates contain invalid or duplicate blocks")
-        if not bool((blocks == position // 8).any()):
-            raise ValueError("V4.1 PP candidates omit the newest visible block")
+    _validate_selection_rows(topk, candidates, counts, expected_rows, spans)
     active_rows = expected_rows[:, 2].bool().to(device)
     if not bool(torch.isfinite(frame.hidden_states[active_rows]).all()) or not bool(
         torch.isfinite(frame.prev_pre_mix[active_rows]).all()
     ):
         raise ValueError("V4.1 PP active residual and pre-mix must be finite")
     active_map = expected_rows[expected_rows[:, 2] == 1, :2]
-    if active_map.unique(dim=0).shape[0] != active_map.shape[0]:
+    if np.unique(active_map.numpy(), axis=0).shape[0] != active_map.shape[0]:
         raise ValueError("V4.1 PP CP row map repeats a query")
 
 
