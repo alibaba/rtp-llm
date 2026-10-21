@@ -296,14 +296,14 @@ class V4Transformer(nn.Module):
         self._prefill_ws_idx_w = 0
 
         # DSpARK target-feature export. The target model config fills this
-        # with 0-based layer ids (V4-Flash uses 40/41/42); the empty tuple is
+        # with 0-based layer ids (current V4-Flash uses 37/38/39); the empty tuple is
         # the no-auxiliary-tensor default for ordinary inference and MTP.
         self.capture_aux_hidden_layer_ids: tuple[int, ...] = ()
 
     def set_aux_hidden_capture_layer_ids(self, layer_ids: Sequence[int]) -> None:
         """Configure target residual-stream layers exported to DSpARK.
 
-        Each selected layer is reduced over the mHC axis *after* that layer,
+        Each selected layer's attention input is reduced over the mHC axis,
         matching the reference model's ``h.mean(dim=-2)`` semantics. Capture
         order follows ``layer_ids`` rather than model traversal order.
         """
@@ -326,7 +326,7 @@ class V4Transformer(nn.Module):
         self.capture_aux_hidden_layer_ids = capture_ids
 
     def capture_aux_hidden(self, layer_id: int, hidden: torch.Tensor) -> None:
-        """Write one selected layer's mean-pooled hidden into the shared
+        """Write one selected layer's mean-pooled attention input into the shared
         runtime buffer.
 
         In DSpARK mode the buffer rows are ``[T, len(capture_ids)*dim]``;
