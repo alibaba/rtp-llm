@@ -3,13 +3,15 @@
 All collective sizes come from common host lengths. Scratch is allocated once
 and reused in stream order, including when an outer caller uses a side stream.
 Only the request outputs survive the next group; no packet aliases escape.
-The 256 MiB bound covers send/receive, slots and inverse row metadata. All BF16
-keys and index outputs are separately reported required model outputs; their
-lifetime is independent of transport grouping and they never alias scratch.
+The 256 MiB eligibility plan and configurable scratch cap cover send/receive,
+slots and inverse row metadata.
+All BF16 keys and index outputs are separately reported required model outputs;
+their lifetime is independent of transport grouping and they never alias scratch.
 """
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from functools import lru_cache
 
@@ -24,6 +26,9 @@ _BYTES = 356
 _INDEX_BYTES = 68
 _INVERSE_BYTES = 16
 _LIMIT = 256 * 1024**2
+_MAX_SCRATCH_MB = int(os.environ.get("DSV41_OWNED_POOL_MAX_SCRATCH_MB", "1024"))
+if _MAX_SCRATCH_MB not in (256, 512, 1024):
+    raise ValueError("DSV41_OWNED_POOL_MAX_SCRATCH_MB must be 256, 512 or 1024")
 _TILE = tl.constexpr(codec.FP4_ROWS_PER_CTA)
 
 
@@ -71,6 +76,28 @@ def plan_groups(counts, *, cp_size, owner_rows, limit=_LIMIT):
         else _plan_groups_cached.__wrapped__
     )
     return build(tuple(counts), cp_size, owner_rows, limit)
+
+
+def adaptive_plan_groups(counts, *, cp_size, owner_rows):
+    """Use the least scratch tier that reaches the fewest transport groups.
+
+    The 256 MiB plan is also the eligibility gate: a larger tier must not
+    switch a long request from the bounded fallback into owned-pool transport.
+    """
+    best = plan_groups(counts, cp_size=cp_size, owner_rows=owner_rows)
+    if best is None or len(best.groups) == 1 or _MAX_SCRATCH_MB == 256:
+        return best
+    for mb in (512, 1024):
+        if mb > _MAX_SCRATCH_MB:
+            break
+        candidate = plan_groups(
+            counts, cp_size=cp_size, owner_rows=owner_rows, limit=mb * 1024**2
+        )
+        if candidate is not None and len(candidate.groups) < len(best.groups):
+            best = candidate
+            if len(best.groups) == 1:
+                break
+    return best
 
 
 @lru_cache(maxsize=128, typed=True)
@@ -255,47 +282,42 @@ def _owned_pool_restore(
     LOCAL,
     DIRECT: tl.constexpr,
 ):
-    row = tl.program_id(0).to(tl.int64) * _TILE + tl.arange(0, _TILE)
-    in_bounds = row < ROWS
-    encoded = tl.load(inverse + row, in_bounds, other=-1)
-    valid = in_bounds & (encoded >= 0)
+    row = tl.program_id(0).to(tl.int64)
+    encoded = tl.load(inverse + row)
+    valid = encoded >= 0
     address = tl.maximum(encoded, 0)
     rank = address & 3
     source = address >> 2
     base = packet + rank * LOCAL * 356
-    columns = tl.arange(0, 16)
-    q = tl.load(
-        base[:, None].to(tl.pointer_type(tl.int32))
-        + source[:, None] * 16
-        + columns[None, :],
-        valid[:, None],
-        other=0,
-    )
+    columns = tl.arange(0, 64)
+    q = tl.load(base + source * 64 + columns, valid, other=0)
     s = tl.load(
         (base + LOCAL * 64).to(tl.pointer_type(tl.int32)) + source, valid, other=0
     )
-    tl.store(
-        oq.to(tl.pointer_type(tl.int32)) + row[:, None] * 16 + columns[None, :],
-        q,
-        in_bounds[:, None],
-    )
-    tl.store(os + row, s, in_bounds)
-    if DIRECT:
-        destination = tl.load(inverse + ROWS + row, in_bounds, other=-1)
-        keep = valid & (destination >= 0)
-    else:
-        destination = row
-        keep = in_bounds
-    # Packet planes and rank strides are multiples of four even for ragged
-    # LOCAL. Invalid inverse rows decode zero; direct output skips them.
-    values = codec._fp4_global_dequant_words(
-        base + LOCAL * 68 + source * 288, valid & keep, _TILE
-    )
-    tl.store(
-        out + tl.maximum(destination, 0)[:, None] * 512 + tl.arange(0, 512)[None, :],
-        values.to(tl.bfloat16),
-        keep[:, None],
-    )
+    tl.store(oq + row * 64 + columns, q.to(tl.int8, bitcast=True))
+    tl.store(os + row, s)
+    if valid:
+        destination = tl.load(inverse + ROWS + row) if DIRECT else row
+        if destination >= 0:
+            raw = base + LOCAL * 68 + (source - row) * 288
+            stride = tl.full((), 288, tl.int64)
+            codec._fp4_global_dequant_kernel(
+                raw,
+                raw,
+                out + (destination - row) * 512,
+                ROWS,
+                512,
+                16,
+                288,
+                1,
+                stride,
+                ROWS,
+                tl.bfloat16,
+                True,
+            )
+    elif not DIRECT:
+        channels = tl.arange(0, 512)
+        tl.store(out + row * 512 + channels, 0)
 
 
 def _metadata_args(
@@ -408,9 +430,8 @@ def warmup(layout, device, gather_fn):
             256,
             direct,
         )
-        grid = (triton.cdiv(256, codec.FP4_ROWS_PER_CTA), 1, 1)
-        kernel = _owned_pool_restore.warmup(*args, grid=grid, num_warps=4)
-        kernel[grid](*args)
+        kernel = _owned_pool_restore.warmup(*args, grid=(1,), num_warps=1)
+        kernel[(256, 1, 1)](*args)
         compiled.append(kernel)
     compiled.append(direct_meta)
     # Keep the byte packer at index 1; aligned owned packets use index 5.
@@ -418,8 +439,9 @@ def warmup(layout, device, gather_fn):
         1, meb, 288
     )
     word_args = (slots, main_words, *gather_args[2:])
-    pack = _owned_pool_pack.warmup(*word_args, grid=grid, num_warps=4)
-    pack[grid](*word_args)
+    pack_grid = (triton.cdiv(256, codec.FP4_ROWS_PER_CTA), 1, 1)
+    pack = _owned_pool_pack.warmup(*word_args, grid=pack_grid, num_warps=4)
+    pack[pack_grid](*word_args)
     compiled.append(pack)
     return tuple(compiled)
 
@@ -492,7 +514,7 @@ def try_gather(
 
     ratio, owner, _, _, rank, _, _, _, _, cp = layout
     counts = tuple(end // ratio for end in ends)
-    plan = plan_groups(counts, cp_size=cp, owner_rows=owner // ratio)
+    plan = adaptive_plan_groups(counts, cp_size=cp, owner_rows=owner // ratio)
     if plan is None:
         return None
     if kernels is None:
@@ -575,9 +597,7 @@ def try_gather(
         os = torch.empty(rows, dtype=torch.int32, device=device)
         if rows:
             with record_function_range("dsv41.prefill.pool.owned.restore"):
-                kernels[3 if workspace is not None else 2][
-                    (triton.cdiv(rows, codec.FP4_ROWS_PER_CTA), 1, 1)
-                ](
+                kernels[3 if workspace is not None else 2][(rows, 1, 1)](
                     receive,
                     inverse,
                     out,
