@@ -32,6 +32,16 @@ class BundleConfigurationTest(unittest.TestCase):
                 json.loads(performance.read_text()) if performance.exists() else None
             )
 
+    def test_common_counts_override_bundle_defaults(self):
+        command, _ = self.launch_to_process_boundary({"MOCK_DEPLOYMENT_MODE": "embedded",
+                                                     "MOCK_PREFILL_COUNT": "2", "MOCK_DECODE_COUNT": "3"})
+        self.assertEqual(command[command.index("--n-prefill") + 1], "2")
+        self.assertEqual(command[command.index("--n-decode") + 1], "3")
+        for override in ({"MOCK_PREFILL_COUNT": "0"},
+                         {"MOCK_PREFILL_COUNT": "2", "MOCK_BUNDLE_OVERRIDES_YAML": "{prefill: 3}"}):
+            with self.subTest(override=override), self.assertRaises(ValueError):
+                self.launch_to_process_boundary(override)
+
     def test_integer_heap_override_reaches_jvm_as_bytes(self):
         command, _ = self.launch_to_process_boundary({
             "MOCK_BUNDLE_OVERRIDES_YAML": "{mock_heap: 536870912, master_heap: 536870912}"

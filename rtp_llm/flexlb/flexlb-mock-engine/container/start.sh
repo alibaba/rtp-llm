@@ -11,6 +11,24 @@ set -eu
     echo "This entry point requires FLEXLB_MOCK_WHALE=1" >&2
     exit 2
 }
+# This minimal Java image supports only the per-engine placement contract.
+[ "${MOCK_DEPLOYMENT_MODE:-per_engine}" = per_engine ] || {
+    echo "This image only supports MOCK_DEPLOYMENT_MODE=per_engine" >&2; exit 2
+}
+[ "${MOCK_BUNDLE_ROLE:-mock}" = mock ] && \
+[ "${MOCK_REMOTE_DECODE:-1}" = 1 -o "${MOCK_REMOTE_DECODE:-1}" = true ] && \
+[ "${MOCK_BUNDLE_FILE_DISCOVERY:-0}" = 0 ] || {
+    echo "Legacy placement flags conflict with per_engine" >&2; exit 2
+}
+[ -z "${MOCK_PREFILL_COUNT+x}${MOCK_DECODE_COUNT+x}${MOCK_BUNDLE_OVERRIDES_YAML+x}${MOCK_BUNDLE_CONFIG_PATH+x}${MOCK_BUNDLE_LEGACY_MASTER+x}" ] || {
+    echo "This image uses ROLE_TYPE; bundle configuration and count overrides are unsupported" >&2; exit 2
+}
+for argument in "$@"; do
+    case "$argument" in
+        --whale|--whale-bundle|--n-prefill|--n-decode|--host|--unique-engine-ips|--base-grpc-port|--discovery-file|--endpoint-file)
+            echo "Placement argument $argument is owned by MOCK_DEPLOYMENT_MODE and ROLE_TYPE" >&2; exit 2;;
+    esac
+done
 run_dir=${MOCK_RUN_DIR:-/tmp/flexlb-mock}
 mkdir -p "$run_dir"
 # Whale splits cmd on whitespace; keep bootstrap logic in this file, not sh -c.
@@ -52,6 +70,8 @@ if ! command -v java >/dev/null 2>&1 && [ -x /opt/taobao/java/bin/java ]; then
     PATH="/opt/taobao/java/bin:$PATH"
     export PATH
 fi
+printf '{"mode":"per_engine","entrypoint":"mock","master_discovery":"vipserver","remote_decode":true,"colocated_master":false,"role":"%s"}\n' "$ROLE_TYPE" > "$run_dir/deployment.json"
+cat "$run_dir/deployment.json"
 # exec preserves SIGTERM ownership: one engine JVM, no bundled master process.
 exec java -jar "${MOCK_ENGINE_JAR:-/opt/flexlb/mock-engine.jar}" \
     --whale true --n-prefill "$prefill" --n-decode "$decode" \

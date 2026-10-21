@@ -6,8 +6,9 @@ Whale 运行不复用开发机 runner。代码通过 CI 生成镜像，Whale 负
 
 | 目的 | CI `pre-jobs` | 镜像 | Whale 拓扑 |
 |---|---|---|---|
-| 构建或更新寄生部署 | `mock-bundle` | `rtp_llm_mock_bundle` | 一个 CPU Pod 内运行 Master 和多个逻辑 P/D |
-| P/D 分成独立 Pod | `mock-engine` | `flexlb-mock-engine` | 每 Pod 一个 PREFILL 或 DECODE JVM；Master/frontend 使用各自镜像 |
+| 寄生 Master Pod | `mock-bundle` | `rtp_llm_mock_bundle` | `embedded`：Master 和 Mock JVM 同 Pod；文件发现 |
+| 单独一个 Mock Pod | `mock-bundle` | `rtp_llm_mock_bundle` | `single_pod`：全部 P/D 同 JVM；Master 通过 VipServer 发现 |
+| 每个 P/D 独占 Pod | `mock-bundle` 或 `mock-engine` | `rtp_llm_mock_bundle` 或 `flexlb-mock-engine` | `per_engine`：每 Pod 一个 P 或 D；VipServer 发现 |
 
 CI 定义位于外层仓库 `.aoneci/image.yaml`。`mock-bundle` 使用 Maven profile `opensource,!internal,whale-bundle`，先安装公共模块与内部 KMonitor，再构建测试 JAR。`mock-engine` 使用 internal profile，并校验产物确实含 KMonitor 类。
 
@@ -42,7 +43,7 @@ CI 成功后记录源码 commit、job 类型、完整镜像地址和 digest。�
 
 ## Whale 配置与发布
 
-1. 选择与拓扑对应的镜像，不要把独立 engine 镜像放进 Master 角色，也不要把 bundle 镜像放进 P/D 独立角色。
+1. 选择与模式对应的镜像和固定入口；bundle 镜像按 `MOCK_DEPLOYMENT_MODE` 决定是否启动 Master。独立 Master 使用含 VipServer adapter 的正式 Master 镜像。
 2. 按[配置与环境变量](configuration.md)填写必需变量、资源、端口、健康检查和角色数量。
 3. 生成新模板版本并发布到目标部署。模板版本、biz version 和最终部署引用必须来自同一次变更。
 4. 等待所有目标角色 ready；发布状态仍在进行或 frontend 未 ready 时不能进入验收。
@@ -58,10 +59,12 @@ CI 成功后记录源码 commit、job 类型、完整镜像地址和 digest。�
 - no-Fetch 模式确认 Fetch RPC 为 0；Fetch 模式确认完整输出链路。
 - 停流后队列、running 和应释放 KV 回到预期稳态。
 
-### 独立 P/D Pod
+### 独立 Mock Pod
+
+- `single_pod` 核对全部 P/D 逻辑端点的 VIP 成员，不能只检查 Pod 数。
 
 - Whale 健康检查访问每 Pod `START_PORT` 的 `/health`。
-- Master 通过平台注册发现 P/D，并按 HTTP 端口加一访问 gRPC。
+- Master 通过 VipServer 发现 P/D，注册地址和端口与路由的 protocol 配套。
 - P/D Pod 数、角色、注册地址和 KMonitor `hippo_role` 与部署配置一致。
 - frontend → Master → P → D → frontend 完成真实请求。
 

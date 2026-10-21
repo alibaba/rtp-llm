@@ -39,6 +39,8 @@ def legacy_discovery(endpoints, file_discovery=False):
             raise ValueError("file discovery requires the mock discovery path")
         env["MOCK_DISCOVERY_FILE"] = discovery_file
     env["MODEL_SERVICE_CONFIG"] = json.dumps(service)
+    if file_discovery:
+        return env
     for role in ("prefill", "decode"):
         addresses = [e["http_addr"] for e in endpoints["engines"] if e["role"] == role]
         if not addresses:

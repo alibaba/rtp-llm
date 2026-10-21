@@ -1,6 +1,6 @@
-# Master 与 Mock Engine 组合运行
+# Whale Mock 部署入口
 
-本目录实现同一容器内 Master + 多个逻辑 Mock Engine 的 test-only bundle。组件代码、Dockerfile、默认配置和测试保留在此；CI、Whale 配置、环境变量和验收流程统一见[Mock 测试 Whale runbook](../online_eval/docs/whale/README.md)。
+本目录提供 `embedded`、`single_pod`、`per_engine` 三种 test-only 部署模式，使用 `MOCK_DEPLOYMENT_MODE` 统一选择。固定入口通过 `deployment.py` 分派到 Master＋Mock supervisor 或独立 Mock launcher。组件代码、Dockerfile、默认配置和测试保留在此；CI、Whale 配置、环境变量和验收流程统一见[Mock 测试 Whale runbook](../online_eval/docs/whale/README.md)。
 
 ## Mock 控制端口 API
 

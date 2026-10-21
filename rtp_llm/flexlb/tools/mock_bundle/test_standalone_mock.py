@@ -59,6 +59,16 @@ class StandaloneMockTest(unittest.TestCase):
         args = standalone_mock.command(self.env)
         self.assertEqual(args[args.index("--cache-status-compact-encoding") + 1], "true")
 
+    def test_fetch_is_independent_of_placement(self):
+        for mode, counts in (("single_pod", {"MOCK_PREFILL_COUNT": "2", "MOCK_DECODE_COUNT": "3"}),
+                             ("per_engine", {"MOCK_PREFILL_COUNT": "1", "MOCK_DECODE_COUNT": "0"})):
+            for fetch in ("0", "1"):
+                with self.subTest(mode=mode, fetch=fetch):
+                    args = standalone_mock.command({**self.env, **counts,
+                                                    "MOCK_DEPLOYMENT_MODE": mode, "FETCH_OUTPUT_STREAM": fetch})
+                    self.assertEqual(args[args.index("--auto-fetch") + 1], str(fetch == "0").lower())
+                    self.assertEqual(args[args.index("--whale-bundle") + 1], str(mode == "single_pod").lower())
+
     def test_separate_pods_use_remote_decode_without_local_discovery(self):
         self.env.update({"MOCK_PREFILL_COUNT": "1", "MOCK_DECODE_COUNT": "0",
                          "MOCK_REMOTE_DECODE": "1"})

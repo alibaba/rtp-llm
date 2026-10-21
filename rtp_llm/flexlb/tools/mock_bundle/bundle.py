@@ -3,6 +3,7 @@
 import json
 import re
 
+from deployment import resolve
 from master_compat import mock_formula_config, legacy_discovery
 import os
 import shutil
@@ -33,9 +34,15 @@ def normalize_heap(value, name):
     raise ValueError(f"{name} must be a positive byte count or JVM heap size")
 
 
+def master_discovery_environment(endpoints, legacy):
+    """Embedded masters always consume the changing file, never a static snapshot."""
+    return legacy_discovery(endpoints, file_discovery=True) if legacy else endpoints["env"]
+
+
 def run():
     if os.environ.get("RTP_LLM_MOCK_BUNDLE") != "1":
         raise ValueError("test-only bundle requires RTP_LLM_MOCK_BUNDLE=1")
+    plan = resolve(os.environ, "bundle")
     cfg_path = Path(os.environ.get("MOCK_BUNDLE_CONFIG_PATH", ROOT / "bundle.yaml"))
     cfg = yaml.safe_load(cfg_path.read_text())
     overrides = yaml.safe_load(os.environ.get("MOCK_BUNDLE_OVERRIDES_YAML", "{}"))
@@ -59,6 +66,15 @@ def run():
             type(overrides[role]) is not int or overrides[role] <= 0
         ):
             raise ValueError(f"{role} must be a positive integer")
+    for role in ("prefill", "decode"):
+        key = "MOCK_" + role.upper() + "_COUNT"
+        if key in os.environ:
+            value = int(os.environ[key])
+            if value <= 0:
+                raise ValueError(f"{key} must be positive for embedded deployment")
+            if role in overrides and overrides[role] != value:
+                raise ValueError(f"{key} conflicts with MOCK_BUNDLE_OVERRIDES_YAML")
+            overrides[role] = value
     cfg.update(overrides)
     for name in ("mock_heap", "master_heap"):
         cfg[name] = normalize_heap(cfg[name], name)
@@ -81,6 +97,7 @@ def run():
     mock_port = http_port + cfg["mock_port_offset"]
     runtime = Path(os.environ.get("MOCK_BUNDLE_RUN_DIR", "/home/admin/ai-whale/mock"))
     runtime.mkdir(parents=True, exist_ok=False)
+    plan.record(runtime, prefill=cfg["prefill"], decode=cfg["decode"])
     jars = Path(os.environ.get("MOCK_BUNDLE_JAR_DIR", ROOT / "jars"))
     raw = os.environ.get("FLEXLB_CONFIG") or render_env(profile)
     legacy = os.environ.get("MOCK_BUNDLE_LEGACY_MASTER") == "1"
@@ -227,7 +244,7 @@ def run():
         )
         ready(mock_port - 1, mock, pod_ip)
         endpoints = json.loads((runtime / "endpoints.json").read_text())
-        env.update(legacy_discovery(endpoints, os.environ.get("MOCK_BUNDLE_FILE_DISCOVERY") == "1") if legacy else endpoints["env"])
+        env.update(master_discovery_environment(endpoints, legacy))
         env.update(
             FLEXLB_CONFIG=raw,
             SERVER_PORT=str(http_port),
@@ -282,6 +299,8 @@ def run():
                         if fetch_output_stream == "1"
                         else "WHALE_BUNDLE_SCHEDULE_ONLY"
                     ),
+                    "deployment": plan.mode,
+                    "master_discovery": plan.master_discovery,
                     "fetch_output_stream": fetch_output_stream == "1",
                     "master_pid": master.pid,
                     "mock_pid": mock.pid,
