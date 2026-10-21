@@ -141,6 +141,29 @@ TEST(DecodeRpcServerTest, ShouldUsePDSeparationRejectsNonPdRequests) {
     EXPECT_FALSE(checkPDSupport(request).supported);
 }
 
+TEST(DecodeRpcServerTest, PDSupportUsesTheSameTokenRulesAsQueryConversion) {
+    GenerateInputPB request;
+    auto*           config = request.mutable_generate_config();
+    config->set_can_use_pd_separation(true);
+    config->set_max_new_tokens(8);
+    config->set_num_beams(1);
+    config->set_num_return_sequences(1);
+    ASSERT_TRUE(checkPDSupport(request).supported);
+
+    config->set_return_prompt_logits(true);
+    EXPECT_FALSE(checkPDSupport(request).supported);
+    config->set_return_prompt_logits(false);
+    config->set_prefill_only(true);
+    EXPECT_FALSE(checkPDSupport(request).supported);
+    EXPECT_STREQ(checkPDSupport(request).reason, "invalid token generation configuration");
+    config->set_prefill_only(false);
+    config->set_max_new_tokens(-1);
+    EXPECT_FALSE(checkPDSupport(request).supported);
+    config->set_max_new_tokens(0);
+    config->set_prefill_only(true);
+    EXPECT_FALSE(checkPDSupport(request).supported);
+}
+
 TEST(DecodeRpcServerTest, UpdateAuxInfoUsesPrefillReuseAsTopLevelAndPreservesDecodeReuse) {
     DecodeRpcServer server;
     auto            stream = makeStream({11, 12, 13});
