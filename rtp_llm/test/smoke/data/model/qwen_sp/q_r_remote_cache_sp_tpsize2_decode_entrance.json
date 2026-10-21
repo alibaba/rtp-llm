@@ -51,6 +51,12 @@
                             "ip": "",
                             "http_port": 0,
                             "grpc_port": 0
+                        },
+                        {
+                            "role": "PREFILL",
+                            "ip": "",
+                            "http_port": 0,
+                            "grpc_port": 0
                         }
                     ]
                 }
@@ -139,6 +145,12 @@
                     "role_addrs": [
                         {
                             "role": "DECODE",
+                            "ip": "",
+                            "http_port": 0,
+                            "grpc_port": 0
+                        },
+                        {
+                            "role": "PREFILL",
                             "ip": "",
                             "http_port": 0,
                             "grpc_port": 0
