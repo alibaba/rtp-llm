@@ -12,6 +12,7 @@ from rtp_llm.config.generate_config import RoleAddr, RoleType
 from rtp_llm.config.model_config import ModelConfig as PyModelConfig
 from rtp_llm.cpp.model_rpc.model_rpc_client import (
     ModelRpcClient,
+    _split_host_port,
     multimodal_cache_keys,
     trans_input,
 )
@@ -122,6 +123,9 @@ class BackendRPCServerVisitor:
         self.max_seq_len = max_seq_len
         self.seq_size_per_block = seq_size_per_block
         self.pd_sep_config = pd_sep_config
+        self._local_prefill_addresses = (
+            list(addresses) if pd_sep_config.role_type == RoleType.PREFILL else []
+        )
         self.sp_config = sp_config
         self.source_role = source_role
         self.mm_model_config = mm_model_config
@@ -782,6 +786,25 @@ class BackendRPCServerVisitor:
 
             kmonitor.report(GaugeMetrics.ROUTE_RT_METRIC, route_timer.cost_ms())
             final_roles = {addr.role for addr in input.generate_config.role_addrs}
+            if RoleType.PREFILL not in final_roles and self._local_prefill_addresses:
+                # This HTTP entry belongs to a real Prefill backend. Preserve an
+                # externally selected Prefill, otherwise advertise the local DP
+                # serving rank for Decode's handoff rather than requiring self
+                # registration in the external routing source.
+                local_address = self._local_prefill_addresses[
+                    input.request_id % len(self._local_prefill_addresses)
+                ]
+                local_ip, local_port = _split_host_port(local_address)
+                if local_ip and local_port > 0:
+                    input.generate_config.role_addrs.append(
+                        RoleAddr(
+                            role=RoleType.PREFILL,
+                            ip=local_ip,
+                            http_port=local_port - 1,
+                            grpc_port=local_port,
+                        )
+                    )
+                    final_roles.add(RoleType.PREFILL)
             missing_roles = [role for role in self.backend_role_list if role not in final_roles]
             if not input.generate_config.role_addrs or missing_roles:
                 route_error = FtRuntimeException(

@@ -3093,6 +3093,53 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(Exception, "no backend role addresses found"):
             await visitor.route_ips(input_obj)
 
+    async def test_prefill_http_entry_supplies_local_handoff_without_overriding_route(self):
+        config = PDSepConfig()
+        config.role_type = RoleType.PREFILL
+        visitor = BackendRPCServerVisitor(
+            max_seq_len=self.model_config.max_seq_len,
+            seq_size_per_block=64,
+            pd_sep_config=config,
+            addresses=["127.0.0.2:9001", "127.0.0.3:9003"],
+        )
+        visitor.backend_role_list = [RoleType.DECODE, RoleType.PREFILL]
+        visitor.host_service.get_master_addr = lambda: ""
+        visitor.host_service.get_queue_length = lambda: 0
+        visitor.host_service.get_backend_role_addrs = lambda roles, refresh=False: []
+        decode = RoleAddr(
+            role=RoleType.DECODE, ip="decode", http_port=8000, grpc_port=8001
+        )
+        explicit = RoleAddr(
+            role=RoleType.PREFILL, ip="selected", http_port=7000, grpc_port=7001
+        )
+        for selected in (None, explicit):
+            with self.subTest(explicit=selected is not None):
+                input_obj = GenerateInput(
+                    request_id=1,
+                    token_ids=torch.tensor([1, 2, 3], dtype=torch.int32),
+                    mm_inputs=[],
+                    generate_config=GenerateConfig(
+                        role_addrs=[decode] + ([selected] if selected else [])
+                    ),
+                )
+                await visitor.route_ips(input_obj)
+                prefill = [
+                    a for a in input_obj.generate_config.role_addrs
+                    if a.role == RoleType.PREFILL
+                ]
+                self.assertEqual(len(prefill), 1)
+                self.assertEqual(prefill[0].ip, "selected" if selected else "127.0.0.3")
+                self.assertEqual(prefill[0].grpc_port, 7001 if selected else 9003)
+
+        missing_decode = GenerateInput(
+            request_id=2,
+            token_ids=torch.tensor([1, 2, 3], dtype=torch.int32),
+            mm_inputs=[],
+            generate_config=GenerateConfig(),
+        )
+        with self.assertRaisesRegex(FtRuntimeException, "no backend role addresses found"):
+            await visitor.route_ips(missing_decode)
+
     async def test_master_only_frontend_rejects_empty_route_and_preserves_error(self):
         from unittest.mock import AsyncMock
 

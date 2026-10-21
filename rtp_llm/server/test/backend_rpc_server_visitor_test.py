@@ -186,6 +186,7 @@ class BackendRPCServerVisitorRouteCacheKeysTest(unittest.TestCase):
 
     def test_cache_key_block_size_tracks_routed_key_granularity(self):
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor._local_prefill_addresses = []
         visitor.seq_size_per_block = 256
         visitor._page_rr_route_cache_keys = False
         visitor._page_rr_cp_size = 4
@@ -198,6 +199,7 @@ class BackendRPCServerVisitorRouteCacheKeysTest(unittest.TestCase):
 class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
     async def test_get_master_route_addrs_passes_pb_and_marks_master_enqueue(self):
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor._local_prefill_addresses = []
         visitor.seq_size_per_block = 16
         visitor.cache_key_seed = 0
         visitor.remote_vit = False
@@ -232,6 +234,7 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_route_ips_preserves_master_route_error_code_on_route_error(self):
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor._local_prefill_addresses = []
         visitor.master_config = None
         visitor.host_service = _FakeHostService()
         visitor.backend_role_list = [RoleType.PREFILL]
@@ -255,6 +258,7 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_route_ips_falls_back_on_master_connection_failure(self):
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor._local_prefill_addresses = []
         visitor._mm_cache_routing = False
         visitor.master_config = None
         visitor.host_service = _FakeHostService()
@@ -282,6 +286,7 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_route_ips_records_master_success_when_domain_completes_roles(self):
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor._local_prefill_addresses = []
         visitor._mm_cache_routing = False
         visitor.master_config = None
         visitor.host_service = _FakeHostService()
@@ -315,6 +320,7 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_route_ips_preserves_request_source_when_domain_completes_roles(self):
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor._local_prefill_addresses = []
         visitor._mm_cache_routing = False
         visitor.master_config = None
         visitor.host_service = _FakeHostService()
@@ -345,6 +351,7 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_route_failure_uses_stable_error_type_and_code(self):
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor._local_prefill_addresses = []
         visitor.master_config = None
         visitor.host_service = _FakeHostService()
         visitor.backend_role_list = [RoleType.PREFILL]
@@ -373,6 +380,7 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
 class TestBackendRouteTrace(unittest.TestCase):
     def test_proactive_rejection_finishes_after_all_attributes(self):
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor._local_prefill_addresses = []
         visitor.master_config = SimpleNamespace(master_queue_reject_threshold=-1)
         visitor.host_service = MagicMock()
         visitor.host_service.get_queue_length.return_value = 0
@@ -414,6 +422,7 @@ class TestBackendRouteTrace(unittest.TestCase):
 
     def test_route_cancellation_uses_stable_span_error_type(self):
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor._local_prefill_addresses = []
         visitor.master_config = None
         visitor.host_service = MagicMock()
         visitor.host_service.get_master_addr.return_value = "master:9000"
@@ -544,6 +553,7 @@ class _CapacityThenBatchSloExpiredModelRpcClient:
 class BackendRPCServerVisitorRetryTest(unittest.IsolatedAsyncioTestCase):
     def _visitor(self, model_rpc_client) -> BackendRPCServerVisitor:
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor._local_prefill_addresses = []
         visitor.max_seq_len = 1024
         visitor.model_rpc_client = model_rpc_client
         visitor.host_service = _FakeHostService()
@@ -822,6 +832,7 @@ class BackendRPCServerVisitorRetryTest(unittest.IsolatedAsyncioTestCase):
 class MixedFrontendBatchTest(unittest.IsolatedAsyncioTestCase):
     def make_visitor(self):
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor._local_prefill_addresses = []
         visitor.pd_sep_config = SimpleNamespace(role_type=RoleType.FRONTEND)
         visitor.backend_role_list = [RoleType.PREFILL, RoleType.DECODE, RoleType.PDFUSION]
         visitor.fill_request_info = Mock()
