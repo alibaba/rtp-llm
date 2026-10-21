@@ -11,7 +11,6 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "autil/EnvUtil.h"
-#include <absl/status/status.h>
 
 using namespace std;
 namespace rtp_llm {
