@@ -88,6 +88,14 @@ def command(env):
             "--kmonitor", str(kmonitor).lower(), "--host", host,
             "--unique-engine-ips", "false", "--auto-fetch", str(not fetch).lower(),
             "--cache-status-compact-encoding", str(compact).lower()]
+    for role, count in (("PREFILL", prefill), ("DECODE", decode)):
+        key = f"MOCK_{role}_ENGINE_KV_POOL_BLOCKS"
+        if key in env:
+            values = json.loads(env[key])
+            if (not isinstance(values, list) or len(values) != count
+                    or any(type(value) is not int or not 0 < value <= 2147483647 for value in values)):
+                raise ValueError(f"{key} must contain one positive block count per initial engine")
+            args.extend([f"--{role.lower()}-engine-kv-pool-blocks", ",".join(map(str, values))])
     for flag, value in numeric.items():
         args.extend([flag, str(value)])
     for flag, name in (("--endpoint-file", "endpoints.json"),

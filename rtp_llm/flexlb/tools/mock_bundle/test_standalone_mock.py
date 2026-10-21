@@ -59,6 +59,14 @@ class StandaloneMockTest(unittest.TestCase):
         args = standalone_mock.command(self.env)
         self.assertEqual(args[args.index("--cache-status-compact-encoding") + 1], "true")
 
+    def test_per_engine_capacity_lists(self):
+        self.env["MOCK_PREFILL_ENGINE_KV_POOL_BLOCKS"] = "[7,11]"
+        args = standalone_mock.command(self.env)
+        self.assertEqual(args[args.index("--prefill-engine-kv-pool-blocks") + 1], "7,11")
+        for value in ("[]", "[7]", "[7,0]", "[7,true]", "[7,2147483648]", "{}"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                standalone_mock.command(dict(self.env, MOCK_PREFILL_ENGINE_KV_POOL_BLOCKS=value))
+
     def test_invalid_configuration_cannot_exec(self):
         cases = [
             {"RTP_LLM_MOCK_BUNDLE": "0"},
