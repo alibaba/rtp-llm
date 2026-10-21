@@ -10,33 +10,35 @@ sha = "76e538acf61653b0a80a6162110a31eed0439d66"
 expected = "0ae9a6c936deaf1792028cbaa52a21bab7c9e7992fa064d2fa4f94d2c85cad71"
 root = pathlib.Path(os.environ.get("HIPPO_PROC_WORKDIR", "/tmp")) / ("codex-vit-" + sha[:10])
 root.mkdir(parents=True, exist_ok=True)
-archive = root / "source.tar.gz"
-if not archive.exists() or hashlib.sha256(archive.read_bytes()).hexdigest() != expected:
-    with urllib.request.urlopen("https://github.com/alibaba/rtp-llm/archive/" + sha + ".tar.gz", timeout=90) as response:
-        archive.write_bytes(response.read())
-assert hashlib.sha256(archive.read_bytes()).hexdigest() == expected, "frontend source archive mismatch"
-with tarfile.open(archive) as tar:
-    for member in tar:
-        parts = pathlib.PurePosixPath(member.name).parts
-        if len(parts) < 3 or parts[1] != "rtp_llm" or ".." in parts or not member.isfile():
-            continue
-        if not member.name.endswith((".py", ".json", ".proto", ".jinja", ".j2")):
-            continue
-        target = root.joinpath(*parts[1:])
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(tar.extractfile(member).read())
-libs = root / "rtp_llm/libs"
-libs.mkdir(exist_ok=True)
-link = libs / "libth_transformer_config.so"
-if not link.exists():
-    link.symlink_to("/opt/conda310/lib/python3.10/site-packages/rtp_llm/libs/libth_transformer_config.so")
-subprocess.run([sys.executable, "-m", "grpc_tools.protoc", "-I", ".", "--python_out=.", "--grpc_python_out=.",
-                "rtp_llm/cpp/model_rpc/proto/model_rpc_service.proto", "rtp_llm/cpp/model_rpc/proto/flexlb_schedule_service.proto"], cwd=root, check=True)
+source = pathlib.Path(os.environ.get("MOCK_FRONTEND_SOURCE_ROOT", str(root)))
+if not os.environ.get("MOCK_FRONTEND_SOURCE_ROOT"):
+    archive = root / "source.tar.gz"
+    if not archive.exists() or hashlib.sha256(archive.read_bytes()).hexdigest() != expected:
+        with urllib.request.urlopen("https://github.com/alibaba/rtp-llm/archive/" + sha + ".tar.gz", timeout=90) as response:
+            archive.write_bytes(response.read())
+    assert hashlib.sha256(archive.read_bytes()).hexdigest() == expected, "frontend source archive mismatch"
+    with tarfile.open(archive) as tar:
+        for member in tar:
+            parts = pathlib.PurePosixPath(member.name).parts
+            if len(parts) < 3 or parts[1] != "rtp_llm" or ".." in parts or not member.isfile():
+                continue
+            if not member.name.endswith((".py", ".json", ".proto", ".jinja", ".j2")):
+                continue
+            target = root.joinpath(*parts[1:])
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(tar.extractfile(member).read())
+    libs = source / "rtp_llm/libs"
+    libs.mkdir(exist_ok=True)
+    link = libs / "libth_transformer_config.so"
+    if not link.exists():
+        link.symlink_to("/opt/conda310/lib/python3.10/site-packages/rtp_llm/libs/libth_transformer_config.so")
+    subprocess.run([sys.executable, "-m", "grpc_tools.protoc", "-I", ".", "--python_out=.", "--grpc_python_out=.",
+                    "rtp_llm/cpp/model_rpc/proto/model_rpc_service.proto", "rtp_llm/cpp/model_rpc/proto/flexlb_schedule_service.proto"], cwd=source, check=True)
 for key in ("DSV41_CED", "DSV41_SWA_BOUNDED_REPLAY", "SP_MODEL_TYPE", "PREFILL_CP_SIZE", "PREFILL_CP_KV_CACHE_SHARDED", "SP_CHECKPOINT_PATH", "SP_TOKENIZER_PATH"):
     os.environ.pop(key, None)
-os.environ.update(FLEXLB_RUN_DIR=str(root), PYTHONPATH=str(root), TP_SIZE="1", LD_LIBRARY_PATH="/opt/conda310/lib:/opt/conda310/lib/python3.10/site-packages/rtp_llm/libs")
+os.environ.update(FLEXLB_RUN_DIR=str(root), PYTHONPATH=str(source), TP_SIZE="1", LD_LIBRARY_PATH="/opt/conda310/lib:/opt/conda310/lib/python3.10/site-packages/rtp_llm/libs")
 os.chdir(root)
-sys.path.insert(0, str(root))
+sys.path.insert(0, str(source))
 import json
 import os
 from pathlib import Path
