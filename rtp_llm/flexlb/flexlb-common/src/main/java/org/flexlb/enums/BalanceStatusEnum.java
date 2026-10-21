@@ -18,8 +18,14 @@ public enum BalanceStatusEnum {
     CACHE_GRPC_TIMEOUT(3004, "Cache gRPC timeout!"),
 
     // Worker Status related errors (3100-3199)
-    WORKER_SERVICE_UNAVAILABLE(3102, "Worker service unavailable!"),
-    WORKER_STATUS_GRPC_TIMEOUT(3104, "Worker gRPC timeout!")
+    WORKER_STATUS_GRPC_TIMEOUT(3104, "Worker gRPC timeout!"),
+    MASTER_STATUS_MEMORY_EXHAUSTED(3105, "Master status polling memory exhausted!"),
+    MASTER_STATUS_EXECUTOR_REJECTED(3106, "Master status executor rejected work!"),
+    MASTER_STATUS_PROCESSING_FAILED(3107, "Master status processing failed!"),
+    WORKER_STATUS_GRPC_FAILED(3108, "Worker status RPC failed; fault origin unconfirmed!"),
+    WORKER_STATUS_CONNECTION_FAILED(3109, "Worker status connection failed!"),
+    WORKER_STATUS_SERVER_FAILED(3110, "Worker status reported alive=false!"),
+    MASTER_STATUS_BIND_FAILED(3111, "Master socket binding failed!")
 
     ;
     private final int code;

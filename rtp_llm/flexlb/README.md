@@ -84,8 +84,9 @@ The online loader accepts schema 3 only. Duplicate keys, unknown or inactive fie
 | `dispatcher.fetchAttachTimeoutMs` | Positive integer, default 3000 ms. BATCH sends this as Engine `fetch_attach_timeout_ms`, limiting the wait for `FetchResponse` attachment. Engine caps it by the remaining request timeout when present. Once attached, this timer does not limit generation duration. |
 | Prefill ownership | Work remains tracked until authoritative completion, safe rollback or retirement. PDFUSION has no distinct Prefill-completion signal, so its ownership lasts through request termination. |
 | `requestLifecycle.request.timeoutMs` | Required positive integer; maximum request inactivity in milliseconds, renewed by matching Engine request status. No default. |
-| `workerRegistry.health.cleanupIntervalMs` | Positive integer, default 3000 ms; scan interval for retiring workers after 3 consecutive status RPC failures, a valid not-alive response or confirmed discovery removal. |
-| Worker status polling | One poll per worker generation covers the RPC, callback queue and status application. The next RPC waits for completion; scheduling continues with the last committed state. Local processing delays do not expire the worker or its snapshot. |
+| `workerRegistry.health.cleanupIntervalMs` | Positive integer, default 3000 ms; interval for completing confirmed worker retirements. |
+| Worker health | Three valid not-alive responses mark a worker unavailable. RPC failures preserve established health and neither increment nor reset the count; a valid healthy response resets it before retirement. Confirmed discovery removal retires the worker immediately. Status age does not determine health. Exceptions alone cannot confirm a crashed worker while discovery still lists it; no engine-specific error metadata is required. |
+| Worker status polling | Each worker generation has at most one RPC in flight and one response queued or applying locally. RPC polling continues during local application; scheduling uses the last committed state. |
 | Discovery failures | Timeout, query failure or executor rejection preserves existing workers and continues status polling. Only a successful discovery result confirms removed addresses. |
 | `requestLifecycle.decision.lifetime` | Finite number ≥ 1, default 2.0. At delivery, remaining Prefill time (including waiting) × lifetime + 10000 ms sets the deadline. Only observed running predecessors consume elapsed time; unstarted work keeps its full estimate. Independent of request age. |
 | `scheduler.queueTimeoutMs` | QUEUE only, positive, default 3600000 ms; actual queue TTL. DIRECT has no queue timer and rejects this field. |
@@ -193,6 +194,66 @@ is written to application logs as `event=netty_memory_capture`, at most once per
 thread dumps, JFR, heap dumps, or external commands. It preserves memory-accounting
 evidence, not a buffer ownership graph. The default threshold is 5 GiB; adjust it to
 the deployment's direct-memory limit.
+
+Status failures are counted by `app.status.failure.detail`, with fixed labels
+`role`, `operation`, `stage`, `reason`, `origin`, and `grpc_code`.
+Only confirmed local memory, executor, or socket-binding failures use `origin=MASTER`; other failures
+remain `UNCONFIRMED`. `grpc_code=NONE` means an unsuccessful application result
+without a gRPC exception. Existing health counters and generation cleanup remain
+independent of these diagnostics. Prometheus deployments must append
+`flexlb_app_status_failure_detail` to their existing metric-whitelist prefixes.
+
+Outbound `EngineGrpcClient` failures are counted once per logical RPC by
+`app.grpc.call.failure` (QPS, PRECISE), only after the final failure. A successful
+read-only retry reports success only; its first failure produces no failure metric
+or exception log. If the retry also fails, the first cause is preserved as a suppressed
+exception on the final failure. Fixed labels are `service` (the channel's service
+suffix), `retry` (whether a retry was attempted), `phase`, `reason`, `origin`,
+`grpc_code`, `transport_stage`, `transport_event`, and `transport_cause`.
+Phases identify local boundaries: `CHANNEL_SETUP`, `CALL_START`,
+`CALLBACK_REGISTRATION`, or asynchronous `CALL_RESULT`; they do not prove that the
+worker received the request. This metric and final status-failure metrics overlap and
+must not be added together. Add `flexlb_app_grpc_call_failure` to the Prometheus
+metric whitelist.
+
+Typed causes distinguish connection timeout/failure, no route, EOF, channel already
+closed, local interrupt, and asynchronous local close. With the current NIO transport,
+refused/reset/broken-pipe observations additionally require exact known text on the
+matching socket exception; unknown text stays generic. These are transport observations,
+not proof of worker failure. `CONNECT_REFUSED` establishes that the target endpoint did
+not accept the connection, rather than a response timeout. It does not distinguish an
+absent listener from a stale endpoint or an active network rejection.
+Bare gRPC status descriptions are never parsed as evidence.
+
+The NIO observer retains the first event on the exact physical connection used by a
+stream. `PEER_EOF` means a socket read returned EOF without local input shutdown;
+`READ_RESET`, `WRITE_RESET`, and `WRITE_BROKEN_PIPE` identify the failing operation.
+A later broken pipe/channel-close error can therefore be correlated with an earlier
+peer EOF. A bare `EOFException` is not sufficient to assert TCP peer closure.
+Read-allocation failures before the socket read are also observed: a local OOM followed
+by a generic channel-close error reports `origin=MASTER` and
+`transport_cause=LOCAL_MEMORY_EXHAUSTED`, and does not trigger a channel retry.
+Events after response trailers or stream termination cannot change that call's attribution.
+
+`transport_stage` records progress at termination: `WAITING_TRANSPORT`,
+`WAITING_HEADERS_WRITE`, `WAITING_RESPONSE`, `RECEIVING_RESPONSE`, or
+`RESPONSE_TRAILERS_RECEIVED`. Headers written do not prove the entire request reached
+the worker. `WAITING_RESPONSE` alone cannot separate network delay, worker queue/execution,
+and Master event-loop delay; that requires correlated worker-side receive/handler/send
+evidence. No message size calculation or payload traversal is performed.
+
+`app.grpc.delivery.delay_ms` (GAUGE, PRECISE) reports `STREAM_CLOSED_TO_CALLBACK`
+and `TRAILERS_TO_CALLBACK` under the `stage` label, plus `service` and `retry`.
+These measure local delivery/processing delay, not just executor queue wait; unknown
+intervals are omitted. Delayed successful callbacks remain successful. Add
+`flexlb_app_grpc_delivery_delay_ms` to the Prometheus metric whitelist.
+Local channel closes log `event=engine_grpc_channel_close` with `DISCOVERY_REMOVED`,
+`REPLACED`, `CLIENT_SHUTDOWN`, or `DUPLICATE_DISCARDED`; final-failure debug logs use
+the same channel key and creation time, transport timings and `localCloseForced` for
+correlation. A graceful close request does not cancel existing RPCs. A local close may follow a
+remote failure and does not by itself change attribution. `app.grpc.channel.pool.size`
+counts pooled objects, not live TCP connections; remote disconnects do not remove entries.
+
 Only schema 3 is accepted. Write the configuration directly with explicit values for
 `requestLifecycle.request.timeoutMs`, which has no default. A matching Engine request
 status renews this deadline. Once it expires, FlexLB releases the exact local
