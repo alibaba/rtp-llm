@@ -129,6 +129,29 @@ TEST_F(BroadcastManagerTest, Init_ReturnTrue_ValidWorkerAddrs) {
 
 // ---------------------------- broadcast ----------------------------
 
+TEST_F(BroadcastManagerTest, RuntimeBroadcastUsesPinnedStubsWithoutEnteringTheConnectionPool) {
+    ASSERT_EQ(manager_->worker_connections_.size(), manager_->workerNum());
+    std::unique_lock<std::mutex> blocked_pool(manager_->rpc_pool_->mutex_);
+    auto dispatched = std::async(std::launch::async, [&] {
+        std::vector<FunctionRequestPB> requests(manager_->workerNum());
+        return manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(requests, 200,
+            [](const std::shared_ptr<RpcService::Stub>& stub,
+               const std::shared_ptr<grpc::ClientContext>& context,
+               const FunctionRequestPB& request, grpc::CompletionQueue* cq) {
+                return stub->AsyncExecuteFunction(context.get(), request, cq);
+            });
+    });
+    const auto ready = dispatched.wait_for(std::chrono::seconds(5));
+    EXPECT_EQ(ready, std::future_status::ready);
+    blocked_pool.unlock();
+    auto result = dispatched.get();
+    ASSERT_NE(result, nullptr);
+    for (size_t i = 0; i < manager_->workerNum(); ++i) {
+        EXPECT_EQ(result->worker_contexts_[i]->stub, manager_->worker_connections_[i].stub);
+    }
+    result->waitDone();
+}
+
 TEST_F(BroadcastManagerTest, Broadcast_ReturnNull_RequestsSizeMismatch) {
     std::vector<FunctionRequestPB> requests(1);
     auto                           rpc_call = [](const std::shared_ptr<RpcService::Stub>&    stub,

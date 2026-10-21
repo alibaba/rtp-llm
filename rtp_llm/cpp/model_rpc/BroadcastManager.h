@@ -267,6 +267,19 @@ public:
         }
 
         rpc_pool_ = std::make_shared<RPCPool>();
+        std::vector<GrpcConnection> connections;
+        connections.reserve(worker_addrs_.size());
+        for (const auto& peer : worker_addrs_) {
+            auto connection = rpc_pool_->getConnection(peer);
+            if (!connection.ok()) {
+                RTP_LLM_LOG_ERROR("broadcast init: cannot create channel for %s", peer.c_str());
+                return false;
+            }
+            connections.push_back(std::move(connection.value()));
+        }
+        // Fixed TP membership: pin each stub before admitting runtime work.
+        // Cancel/lease broadcasts must not create channels or wait on pool locks.
+        worker_connections_ = std::move(connections);
         completion_queue_ = std::make_unique<grpc::CompletionQueue>();
         completion_thread_ = std::thread([this] { pollCompletions(); });
         return true;
@@ -281,7 +294,7 @@ public:
                 "broadcast failed, requests size mismatch, req: %zu, worker size: %zu", requests.size(), worker_size);
             return nullptr;
         }
-        if (!rpc_pool_ || !completion_queue_) {
+        if (!completion_queue_ || worker_connections_.size() != worker_size) {
             RTP_LLM_LOG_WARNING("broadcast failed, manager is not initialized");
             return nullptr;
         }
@@ -293,15 +306,9 @@ public:
 
         for (int rank = 0; rank < worker_size; ++rank) {
             const auto& addr        = worker_addrs_[rank];
-            auto        conn_status = rpc_pool_->getConnection(addr);
-            if (!conn_status.ok()) {
-                RTP_LLM_LOG_WARNING("broadcast: getConnection failed rank=%d addr=%s", rank, addr.c_str());
-                return nullptr;
-            }
-
             contexts[rank]      = std::make_shared<CtxT>();
             auto& ctx           = contexts.at(rank);
-            ctx->stub           = conn_status.value().stub;
+            ctx->stub           = worker_connections_[rank].stub;
             ctx->request        = requests.at(rank);
             ctx->server_addr    = addr;
             ctx->timeout_ms     = timeout_ms;
@@ -366,6 +373,7 @@ private:
     }
 
     std::vector<std::string> worker_addrs_;
+    std::vector<GrpcConnection> worker_connections_;
     std::shared_ptr<RPCPool>                  rpc_pool_;
     std::unique_ptr<grpc::CompletionQueue>    completion_queue_;
     std::thread                               completion_thread_;
