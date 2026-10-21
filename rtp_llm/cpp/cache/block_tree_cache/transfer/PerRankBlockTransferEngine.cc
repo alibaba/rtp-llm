@@ -4,6 +4,7 @@
 #include <algorithm>
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/CrcTransferService.h"
 #include <utility>
+#include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"

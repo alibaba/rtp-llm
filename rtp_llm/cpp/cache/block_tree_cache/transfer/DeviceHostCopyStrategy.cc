@@ -3,16 +3,30 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
+#include <exception>
+#include <limits>
 
 #include <torch/torch.h>
 
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/models_py/bindings/NoBlockCopy.h"
 
 namespace rtp_llm {
 
 StrategyResult GenericMultiCopyDeviceHostCopyStrategy::tryExecute(const DeviceHostCopyPlan& plan,
-                                                                  const DeviceHostCopyOptions& /*options*/) {
+                                                                  const DeviceHostCopyOptions& /*options*/,
+                                                                  const DeviceHostCopyExecutionContext& context) {
+    if (!plan.copy_tiles.empty() && plan.copy_tiles.front().device_index < 0) {
+        // Host-resident pools use CPU addresses and do not need CUDA streams.
+        for (const auto& tile : plan.copy_tiles) {
+            std::memcpy(plan.device_to_host ? tile.host_addr : tile.device_addr,
+                        plan.device_to_host ? tile.device_addr : tile.host_addr,
+                        tile.bytes);
+        }
+        return StrategyResult::done();
+    }
     std::vector<torch::Tensor> dst_buffers;
     std::vector<torch::Tensor> src_buffers;
 
@@ -35,12 +49,23 @@ StrategyResult GenericMultiCopyDeviceHostCopyStrategy::tryExecute(const DeviceHo
     }
 
     MultiCopyParams mc{dst_buffers, src_buffers};
-    execNoBlockCopy(mc);
+    try {
+        execNoBlockCopy(mc, context);
+    } catch (const std::exception& error) {
+        RTP_LLM_LOG_WARNING("generic copy failed group_set=%zu device=%d direction=%s stream=%p: %s",
+                            plan.group_set_id,
+                            context.deviceIndex(),
+                            plan.device_to_host ? "D2H" : "H2D",
+                            reinterpret_cast<void*>(context.stream()),
+                            error.what());
+        return StrategyResult::failed(TransferStatus::DEVICE_IO_ERROR);
+    }
     return StrategyResult::done();
 }
 
-StrategyResult CudaBatchDeviceHostCopyStrategy::tryExecute(const DeviceHostCopyPlan&    plan,
-                                                           const DeviceHostCopyOptions& options) {
+StrategyResult CudaBatchDeviceHostCopyStrategy::tryExecute(const DeviceHostCopyPlan&             plan,
+                                                           const DeviceHostCopyOptions&          options,
+                                                           const DeviceHostCopyExecutionContext& context) {
     if (!options.cuda_batch_copy_enabled) {
         return StrategyResult::notApplicable();
     }
@@ -52,6 +77,7 @@ StrategyResult CudaBatchDeviceHostCopyStrategy::tryExecute(const DeviceHostCopyP
 
     BatchedMemoryCopyParams params;
     params.device_index = device_index;
+    params.direction    = plan.device_to_host ? DeviceHostCopyDirection::D2H : DeviceHostCopyDirection::H2D;
     params.tiles.reserve(plan.copy_tiles.size());
 
     for (const auto& tile : plan.copy_tiles) {
@@ -67,11 +93,16 @@ StrategyResult CudaBatchDeviceHostCopyStrategy::tryExecute(const DeviceHostCopyP
         params.tiles.push_back(batch_tile);
     }
 
-    const auto status = execBatchedMemoryCopy(params);
+    const auto status = execBatchedMemoryCopy(params, context);
     if (status == BatchedMemoryCopyStatus::NOT_SUPPORTED) {
         return StrategyResult::notApplicable();
     }
     if (status == BatchedMemoryCopyStatus::EXECUTION_FAILED) {
+        RTP_LLM_LOG_WARNING("batch copy failed group_set=%zu device=%d direction=%s stream=%p",
+                            plan.group_set_id,
+                            context.deviceIndex(),
+                            plan.device_to_host ? "D2H" : "H2D",
+                            reinterpret_cast<void*>(context.stream()));
         return StrategyResult::failed(TransferStatus::DEVICE_IO_ERROR);
     }
     return StrategyResult::done();
@@ -92,7 +123,8 @@ StagedSmDeviceHostCopyStrategy::~StagedSmDeviceHostCopyStrategy() {
 }
 
 StrategyResult StagedSmDeviceHostCopyStrategy::tryExecute(const DeviceHostCopyPlan&    plan,
-                                                          const DeviceHostCopyOptions& options) {
+                                                          const DeviceHostCopyOptions& options,
+                                                          const DeviceHostCopyExecutionContext& /*context*/) {
     if (!options.staged_sm_copy_enabled) {
         return StrategyResult::notApplicable();
     }
@@ -126,6 +158,8 @@ StrategyResult StagedSmDeviceHostCopyStrategy::tryExecute(const DeviceHostCopyPl
     staged_params.host_segments.reserve(plan.copy_tiles.size());
 
     for (const auto& tile : plan.copy_tiles) {
+        RTP_LLM_CHECK_WITH_INFO(current_staging_offset <= std::numeric_limits<size_t>::max() - (kStagedAlignment - 1),
+                                "staged copy alignment overflow");
         size_t staging_offset = alignUp(current_staging_offset, kStagedAlignment);
 
         StagedMemoryCopyTile staged_tile;

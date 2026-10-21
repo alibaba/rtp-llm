@@ -237,11 +237,11 @@ void StreamCacheResource::clearCacheReuseState() {
 }
 
 void StreamCacheResource::recordCacheReuseMallocResult(const MallocResult& result) {
-    cache_reuse_metrics_.block_aligned_input_length = result.block_aligned_input_length;
-    cache_reuse_metrics_.match_latency_us           = result.match_cost_time_us;
-    cache_reuse_metrics_.report_match_latency       = result.match_end_time_us > 0;
-    malloc_begin_time_us_                           = result.malloc_begin_time_us;
-    cache_reuse_metrics_.load_attempted             = result.load_attempted;
+    cache_reuse_metrics_.device_input_length    = result.device_input_length;
+    cache_reuse_metrics_.match_cost_time_us     = result.match_cost_time_us;
+    cache_reuse_metrics_.report_match_cost_time = result.match_end_time_us > 0;
+    malloc_begin_time_us_                       = result.malloc_begin_time_us;
+    cache_reuse_metrics_.load_attempted         = result.load_attempted;
     if (!result.load_attempted) {
         if (result.match_end_time_us > 0) {
             cache_reuse_metrics_.match_to_ready_latency_us =
@@ -274,7 +274,7 @@ absl::Status StreamCacheResource::finalizeAllocatorLoad() {
     const bool load_success  = allocator_load_context_->success();
     const auto error         = allocator_load_context_->errorInfo();
     const auto load_context  = std::dynamic_pointer_cast<LoadAsyncContext>(allocator_load_context_);
-    const auto malloc_status = load_context == nullptr ? MallocStatus::NONE : load_context->mallocStatus();
+    auto       malloc_status = load_context == nullptr ? MallocStatus::NONE : load_context->mallocStatus();
     if (load_success) {
         RTP_LLM_CHECK(load_context != nullptr);
         const size_t total = load_context->matchedBlocks();
@@ -302,6 +302,14 @@ absl::Status StreamCacheResource::finalizeAllocatorLoad() {
     } else if (resource_context_.role_type == RoleType::PREFILL && malloc_status == MallocStatus::NONE) {
         stream_->setHostReuseLength(0);
         stream_->setDiskReuseLength(0);
+        if (!resource_context_.cache_manager->detachSharedBlocksForRecompute(batch_kv_cache_resource_,
+                                                                             stream_->reuseLength())) {
+            // Re-enter admission with no request refs if detaching the writable
+            // suffix cannot fit. Never compute into cache/other-request blocks.
+            resource_context_.cache_manager->free({batch_kv_cache_resource_, stream_->completeTokenIdsPtr()});
+            clearCacheReuseState();
+            malloc_status = MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED;
+        }
     } else {
         clearCacheReuseState();
     }
@@ -336,18 +344,15 @@ absl::Status StreamCacheResource::finalizeAllocatorLoad() {
 }
 
 void StreamCacheResource::reportCacheReuseMetrics() {
-    if (resource_context_.cache_manager == nullptr || stream_->metrics_reporter_ == nullptr || !reuseCache()) {
+    if (stream_->metrics_reporter_ == nullptr || !reuseCache()) {
         return;
     }
-    const int64_t input_length                 = stream_->inputLength();
-    const int64_t total_reuse_length           = stream_->initialReuseLength();
-    cache_reuse_metrics_.kv_cache_reuse_length = total_reuse_length;
-    cache_reuse_metrics_.device_reuse_length   = stream_->deviceReuseLength();
-    cache_reuse_metrics_.host_reuse_length     = stream_->hostReuseLength();
-    cache_reuse_metrics_.disk_reuse_length     = stream_->diskReuseLength();
-    cache_reuse_metrics_.remote_reuse_length   = stream_->remoteReuseLength();
-    resource_context_.cache_manager->recordCacheHitTokens(input_length, cache_reuse_metrics_);
-    cache_reuse_metrics_.report_reuse_metrics = true;
+    cache_reuse_metrics_.kv_cache_reuse_length            = stream_->initialReuseLength();
+    cache_reuse_metrics_.stream_cache_device_reuse_length = stream_->deviceReuseLength();
+    cache_reuse_metrics_.stream_cache_memory_reuse_length = stream_->hostReuseLength();
+    cache_reuse_metrics_.stream_cache_disk_reuse_length   = stream_->diskReuseLength();
+    cache_reuse_metrics_.stream_cache_remote_reuse_length = stream_->remoteReuseLength();
+    cache_reuse_metrics_.report_reuse_metrics             = true;
     kmonitor::MetricsTags tags;
     stream_->metrics_reporter_->report<RtpLLMCacheReuseMetrics, RtpLLMCacheReuseMetricsCollector>(
         &tags, &cache_reuse_metrics_);
