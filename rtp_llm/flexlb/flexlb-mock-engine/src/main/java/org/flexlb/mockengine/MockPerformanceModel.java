@@ -501,6 +501,16 @@ final class MockPerformanceModel {
     private static String loadPrefillExpression(String masterConfigFile,
                                                String defaultExpression) throws IOException {
         JsonNode root = MAPPER.readTree(Path.of(masterConfigFile).toFile());
+        // The standalone launcher writes the schema-v3 configuration directly;
+        // bundle deployments retain the historical zone/env envelope.
+        if (root.has("schemaVersion")) {
+            var estimator = ConfigService.parse(root.toString()).getRouter().getRoles()
+                    .getPrefill().getExecutionTimeEstimator();
+            if (estimator != null && estimator.getType() == EstimatorType.FORMULA) {
+                return estimator.getExpression();
+            }
+            return defaultExpression;
+        }
         JsonNode envs = root.path("zone_process_setting").path("process_info").path("envs");
         for (JsonNode item : envs) {
             if (item.isArray() && item.size() >= 2

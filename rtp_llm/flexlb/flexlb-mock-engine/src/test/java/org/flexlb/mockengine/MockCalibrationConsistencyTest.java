@@ -18,6 +18,23 @@ class MockCalibrationConsistencyTest {
     @TempDir Path directory;
 
     @Test
+    void standaloneFlatConfigUsesSameFormulaAsLegacyEnvelope() throws Exception {
+        Path master = directory.resolve("master.json");
+        Path performance = directory.resolve("performance.json");
+        Files.writeString(performance, "{}");
+        String expression = "max(170, 0.0045 * sum(computeTokens))";
+        MockMasterConfig.writeWithPrefillExpression(master, expression);
+        var mapper = new ObjectMapper();
+        var envelope = mapper.readTree(master.toFile());
+        var legacy = MockPerformanceModel.load(performance.toString(), master.toString());
+        String flat = envelope.path("zone_process_setting").path("process_info")
+                .path("envs").get(0).get(1).asText();
+        Files.writeString(master, flat);
+        var standalone = MockPerformanceModel.load(performance.toString(), master.toString());
+        assertEquals(legacy.prefillExpressionState(), standalone.prefillExpressionState());
+    }
+
+    @Test
     void packagedCalibrationMustMatchMaterializedRun() throws Exception {
         byte[] resource;
         try (var stream = getClass().getClassLoader()
