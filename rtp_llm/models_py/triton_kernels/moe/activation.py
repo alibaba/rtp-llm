@@ -7,10 +7,20 @@ from triton.language.extra.cuda import libdevice
 
 
 @triton.jit(do_not_specialize=["N"])
-def _situ_and_mul_kernel(G, U, O, N, W: tl.constexpr,
-          G0: tl.constexpr, G1: tl.constexpr, U0: tl.constexpr, U1: tl.constexpr,
-          BETA: tl.constexpr, UP_BETA: tl.constexpr,
-          BLOCK: tl.constexpr):
+def _situ_and_mul_kernel(
+    G,
+    U,
+    O,
+    N,
+    W: tl.constexpr,
+    G0: tl.constexpr,
+    G1: tl.constexpr,
+    U0: tl.constexpr,
+    U1: tl.constexpr,
+    BETA: tl.constexpr,
+    UP_BETA: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
     # Full prefill projections can exceed 2**31 elements, even in BF16.
     i = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
     row, col = i // W, i % W
