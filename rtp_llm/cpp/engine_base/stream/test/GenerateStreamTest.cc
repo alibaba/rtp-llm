@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
+#include "rtp_llm/cpp/engine_base/stream/StreamGroups.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -188,6 +189,27 @@ TEST_F(GenerateStreamTest, testMtpIgnoresUpdateAfterFinalOutputBeforeStateTransi
         EXPECT_FALSE(stream->hasOutput());
         EXPECT_FALSE(stream->hasError());
     }
+}
+
+TEST_F(GenerateStreamTest, testMtpForwardGroupsDeferHostTimelineEligibility) {
+    auto stream = GenerateStreamBuilder().createDecoderStream({1, 2}, {3});
+    stream->generateConfig()->profile_step = 2;
+    stream->setGenTimeline(true);
+    GenerateStream::MtpAsyncDeviceState state;
+    state.next_real_seq_len = 7;
+    stream->setMtpAsyncDeviceState(std::move(state));
+
+    // The worker may still be updating the host length during forward gather.
+    // Profiling eligibility is only read when rebuilding after bookkeeping.
+    StreamGroups forward_groups({stream}, /*mtp_forward_only=*/true);
+    EXPECT_EQ(forward_groups.maxSeqLen(), 7);
+    EXPECT_FALSE(forward_groups.genTimeline());
+    StreamGroups ready_groups({stream});
+    EXPECT_EQ(ready_groups.maxSeqLen(), 3);
+    EXPECT_TRUE(ready_groups.genTimeline());
+    stream->setSeqLength(4);
+    StreamGroups after_profile_window({stream});
+    EXPECT_FALSE(after_profile_window.genTimeline());
 }
 
 TEST_F(GenerateStreamTest, testMtpForwardClaimRejectsUnavailableStreams) {

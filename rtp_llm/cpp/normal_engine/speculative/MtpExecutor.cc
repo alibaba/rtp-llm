@@ -2142,13 +2142,16 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     std::optional<StreamGroups> forward_groups;
     bool overlapped_forward = false;
     if (useForwardOverlap() && !streams.empty()) {
-        // Fresh PD requests have no previous worker. Initialize only those;
-        // steady requests must never fall back to worker-owned host mirrors.
+        // RPC may publish GPU state before its initial host payload is consumed.
+        // Consume that payload once before forward; never inspect host mirrors
+        // while bookkeeping owns them, or retain empty steady rows in this list.
         std::list<GenerateStreamPtr> fresh_streams;
         for (const auto& stream : streams) {
-            if (!stream->hasPendingAsyncBookkeeping()
-                && !stream->getNextSeqLenGpu().defined()) {
-                fresh_streams.push_back(stream);
+            if (!stream->hasPendingAsyncBookkeeping()) {
+                const auto sp_output = stream->getSPOutputBuffer();
+                if (sp_output && !sp_output->tensors_holder.empty()) {
+                    fresh_streams.push_back(stream);
+                }
             }
         }
         prepareGrpcMtpDeviceState(fresh_streams, buffer_holder_);

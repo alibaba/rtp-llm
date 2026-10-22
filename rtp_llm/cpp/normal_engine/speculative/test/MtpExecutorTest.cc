@@ -522,6 +522,94 @@ TEST_F(MtpExecutorTest, testDeterministicDraftSamplerReportsPointMassProposal) {
     checkTensorEqual(output.all_probs, torch::tensor({{0.0f, 0.0f, 1.0f, 0.0f}}).to(torch::kCUDA));
 }
 
+TEST_F(MtpExecutorTest, testForwardOverlapConsumesGrpcPayloadBeforeFirstForwardAndFallback) {
+    MtpExecutorTestConfig config;
+    config.gen_num_per_cycle = 1;
+    auto components = createMtpExecutorComponents(config);
+    auto& executor = *components.executor;
+    // Exercise the real decodeStep gate with a probe model instead of weights.
+    executor.forward_overlap_supported_ = true;
+    executor.role_type_ = RoleType::DECODE;
+    // The legacy mock cache omits the explicit FULL group metadata.
+    executor.batch_stream_processor_->model_input_gatherer_config_.kv_cache_group_types = {CacheGroupType::FULL};
+    if (!executor.useForwardOverlap()) {
+        GTEST_SKIP() << "Requires RTP_LLM_MTP_FORWARD_OVERLAP=1, RTP_LLM_STREAM_ASYNC=1, "
+                       "RTP_LLM_DEVICE_INPUT=1 and RTP_LLM_MTP_ASYNC_PREPARE=0";
+    }
+    auto context = components.resource_context;
+    context.cache_manager = executor.cache_manager_;
+    auto stream = createContextStream(components.model_config, components.runtime_config, context, {1, 2, 3});
+    stream->setReserveStep(4);
+    ASSERT_TRUE(stream->initKVBlock().ok());
+    stream->setIsContextStream(false);
+    stream->setScoreLen(2);
+    stream->setReturnAllProbs(true);
+    stream->generate_status_->status = StreamState::RUNNING;
+
+    const auto pinned_f32 = torch::TensorOptions().dtype(torch::kFloat32).pinned_memory(true);
+    const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    auto sp = std::make_shared<SpeculativeExecutorStreamOutput>();
+    sp->tokens = torch::tensor({1, 2}, torch::kInt32).reshape({1, 2});
+    sp->tensors_holder = {torch::full({1, 4}, 0.25, pinned_f32), torch::full({1, 2}, 10.0, pinned_f32)};
+    sp->all_probs = sp->tensors_holder[0].to(torch::kCUDA);
+    sp->hidden_states = sp->tensors_holder[1].to(torch::kCUDA);
+    stream->setSPOutputBuffer(sp);
+    GenerateStream::MtpAsyncDeviceState state;
+    state.accept_len_gpu = torch::ones({1}, cuda_i32);
+    state.accept_tokens_gpu = torch::tensor({1, 0}, torch::kInt32).reshape({1, 2}).to(torch::kCUDA);
+    state.next_seq_len_gpu = torch::full({1}, stream->seqLength(), cuda_i32);
+    state.propose_tokens_gpu = torch::full({1}, 2, cuda_i32);
+    state.last_hidden_states_gpu = sp->hidden_states;
+    state.draft_all_probs_gpu = sp->all_probs;
+    state.next_real_seq_len = stream->seqLength();
+    stream->setMtpAsyncDeviceState(state);
+    ASSERT_TRUE(stream->tryAcquireMtpForwardClaim());
+    stream->decPendingAsyncBookkeepingAndMaybeRelease();
+    ASSERT_TRUE(executor.batch_stream_processor_->tryGatherDecodeForwardInput({stream}, executor.buffer_holder_)
+                    .has_value());
+
+    struct ForwardReached {};
+    struct ProbeModel final: ModelBase {
+        std::function<void()> probe;
+        GptModelOutputs forward(const GptModelInputs&) override {
+            probe();
+            throw ForwardReached{};  // Stop before sampling; no fabricated model outputs.
+        }
+    };
+    int forwards = 0;
+    auto expected_probs = state.draft_all_probs_gpu;
+    auto expected_hidden = state.last_hidden_states_gpu;
+    auto model = std::make_unique<ProbeModel>();
+    model->probe = [&] {
+        ++forwards;
+        EXPECT_EQ(stream->hasPendingAsyncBookkeeping(), forwards == 1);  // Early forward owns a KV claim.
+        EXPECT_TRUE(sp->tensors_holder.empty());
+        EXPECT_TRUE(torch::equal(stream->getMtpAsyncDeviceState().draft_all_probs_gpu, expected_probs));
+        EXPECT_TRUE(torch::equal(stream->getMtpAsyncDeviceState().last_hidden_states_gpu, expected_hidden));
+    };
+    executor.setTargetModel(std::move(model));
+    executor.setDraftModel(std::move(components.fake_draft_model));
+    MtpMetricsCollector metrics;
+    EXPECT_THROW(executor.decodeStep({stream}, metrics), ForwardReached);
+    ASSERT_EQ(forwards, 1);
+    EXPECT_FALSE(stream->hasPendingAsyncBookkeeping());
+
+    // A later ordinary/fallback round must not restore the initial RPC payload
+    // over the new GPU state produced by decode bookkeeping.
+    state = stream->getMtpAsyncDeviceState();
+    expected_probs = torch::full_like(state.draft_all_probs_gpu, 0.5);
+    expected_hidden = torch::full_like(state.last_hidden_states_gpu, 20.0);
+    state.draft_all_probs_gpu = expected_probs;
+    state.last_hidden_states_gpu = expected_hidden;
+    stream->setMtpAsyncDeviceState(std::move(state));
+    sp->all_probs = expected_probs;
+    sp->hidden_states = expected_hidden;
+    executor.forward_overlap_supported_ = false;
+    EXPECT_THROW(executor.decodeStep({stream}, metrics), ForwardReached);
+    EXPECT_EQ(forwards, 2);
+    EXPECT_FALSE(stream->hasPendingAsyncBookkeeping());
+}
+
 TEST_F(MtpExecutorTest, testFakeDecodeStreamGetsReusableIndexerSeedBeforeColdCheck) {
     MtpExecutorTestConfig test_config;
     auto                  components                = createMtpExecutorComponents(test_config);

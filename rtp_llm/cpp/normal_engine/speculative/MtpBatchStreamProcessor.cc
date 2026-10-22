@@ -664,8 +664,12 @@ MtpBatchStreamProcessor::tryGatherDecodeForwardInput(
             || !valid(state.next_seq_len_gpu) || state.next_seq_len_gpu.numel() != 1
             || !valid(state.accept_tokens_gpu) || state.accept_tokens_gpu.dim() != 2
             || state.accept_tokens_gpu.size(0) != 1 || state.accept_tokens_gpu.size(1) < propose_step_ + 1
-            || !valid(state.propose_tokens_gpu) || state.propose_tokens_gpu.dim() != 2
-            || state.propose_tokens_gpu.size(0) != 1 || !valid(state.draft_all_probs_gpu)
+            // RPC initialization publishes [1]; decode dispatch publishes [1, N].
+            // Both represent one request and lastColumnAsFlat handles either.
+            || !valid(state.propose_tokens_gpu)
+            || !((state.propose_tokens_gpu.dim() == 1 && state.propose_tokens_gpu.numel() == 1)
+                 || (state.propose_tokens_gpu.dim() == 2 && state.propose_tokens_gpu.size(0) == 1))
+            || !valid(state.draft_all_probs_gpu)
             || (propose_step_ > 1 && (!valid(state.last_hidden_states_gpu)
                 || state.last_hidden_states_gpu.dim() != 2 || state.last_hidden_states_gpu.size(0) != 1))) {
             return std::nullopt;

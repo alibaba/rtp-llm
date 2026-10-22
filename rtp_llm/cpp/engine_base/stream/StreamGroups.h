@@ -36,7 +36,8 @@ public:
                     static_cast<size_t>(stream->getMtpAsyncDeviceState().next_real_seq_len));
                 total_score_batch_size_ += stream->scoreLen();
                 adapter_names.push_back(stream->adapterName());
-                gen_timeline_ |= stream->genTimeline();
+                // genTimeline() reads worker-owned CPU seqLength. Gather its
+                // eligibility in the normal groups rebuilt after bookkeeping.
                 continue;
             }
             auto cur_batch_size  = stream->currentBatchSize();

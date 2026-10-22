@@ -158,7 +158,7 @@ public:
 };
 
 TEST_F(MtpBatchStreamProcessorTest, testDecodeForwardDynamicBatchUsesPublishedGpuState) {
-    for (const int propose_step : {1, 3}) {
+    for (const int propose_step : {1, 3, 5}) {
         const std::vector<int> accept_counts =
             propose_step == 1 ? std::vector<int>{1, 2} : std::vector<int>{1, 2, propose_step + 1};
         for (const int accepted : accept_counts) {
@@ -240,14 +240,53 @@ TEST_F(MtpBatchStreamProcessorTest, testDecodeForwardDynamicBatchUsesPublishedGp
             auto shrunk = processor.tryGatherDecodeForwardInput({first}, holder);
             ASSERT_TRUE(shrunk.has_value());
             EXPECT_EQ(toVec<int32_t>(shrunk->kv_cache_kernel_block_id), std::vector<int32_t>({7}));
-            // A request that never belonged to a previous batch can join directly.
+            // Match the first RPC decode: one accepted target token, one draft
+            // token in a 1-D tensor, and no previous decode bookkeeping.
             auto fresh = createContextStream(model_config, runtime_config, resource_context, {1, 2, 3}, 11);
             fresh->setIsContextStream(false);
-            fresh->setMtpAsyncDeviceState(second->getMtpAsyncDeviceState());
-            auto mixed = processor.tryGatherDecodeForwardInput({fresh, first}, holder);
-            ASSERT_TRUE(mixed.has_value());
-            EXPECT_EQ(toVec<int32_t>(mixed->kv_cache_kernel_block_id), std::vector<int32_t>({11, 7}));
-            EXPECT_EQ(toVec<int32_t>(mixed->combo_tokens), toVec<int32_t>(reordered->combo_tokens));
+            auto fresh_state = second->getMtpAsyncDeviceState();
+            fresh_state.accept_len_gpu = torch::ones({1}, cuda_i32);
+            fresh_state.accept_tokens_gpu = torch::zeros({1, propose_step + 1}, cuda_i32);
+            fresh_state.accept_tokens_gpu[0][0] = 3;
+            fresh_state.next_seq_len_gpu = torch::full({1}, fresh->seqLength(), cuda_i32);
+            fresh_state.propose_tokens_gpu = torch::full({1}, 5, cuda_i32);
+            fresh_state.last_real_seq_len = fresh->seqLength();
+            fresh_state.next_real_seq_len = fresh->seqLength();
+            fresh->setMtpAsyncDeviceState(fresh_state);
+            EXPECT_FALSE(fresh->hasPendingAsyncBookkeeping());
+            for (const auto& order : std::vector<std::list<GenerateStreamPtr>>{
+                     {fresh, first}, {first, fresh}, {fresh}}) {
+                auto mixed = processor.tryGatherDecodeForwardInput(order, holder);
+                ASSERT_TRUE(mixed.has_value());
+                // Compare the actual GPU inputs with the ordinary decode path,
+                // including a warm request whose host sequence length is stale.
+                StreamGroups mixed_groups(order);
+                auto reference_status = processor.gatherDecodeModelInput(mixed_groups, holder);
+                ASSERT_TRUE(reference_status.ok());
+                auto reference = std::move(reference_status.value());
+                if (propose_step == 1) {
+                    processor.prepareOneStepSpecDecodeModelInput(mixed_groups, reference, holder);
+                } else {
+                    processor.prepareDecodeDraftModelInput(mixed_groups, reference, holder);
+                    EXPECT_TRUE(torch::equal(mixed->last_hidden_states, reference.last_hidden_states));
+                }
+                EXPECT_TRUE(torch::equal(mixed->combo_tokens, reference.combo_tokens));
+                EXPECT_TRUE(torch::equal(mixed->sequence_lengths, reference.sequence_lengths));
+                EXPECT_TRUE(torch::equal(mixed->prefix_lengths, reference.prefix_lengths));
+                EXPECT_TRUE(torch::equal(mixed->input_lengths, reference.input_lengths));
+                EXPECT_TRUE(torch::equal(mixed->lm_output_indexes, reference.lm_output_indexes));
+                EXPECT_TRUE(torch::equal(mixed->kv_cache_kernel_block_id, reference.kv_cache_kernel_block_id));
+            }
+            // Accept the RPC scalar vector without accepting an ambiguous row
+            // layout, a scalar tensor, or an empty token payload.
+            for (const auto& invalid_shape : std::vector<std::vector<int64_t>>{
+                     {}, {0}, {2}, {2, 1}, {1, 0}, {1, 1, 1}}) {
+                auto invalid_state = fresh_state;
+                invalid_state.propose_tokens_gpu = torch::zeros(invalid_shape, cuda_i32);
+                fresh->setMtpAsyncDeviceState(std::move(invalid_state));
+                EXPECT_FALSE(processor.tryGatherDecodeForwardInput({fresh, first}, holder).has_value());
+            }
+            fresh->setMtpAsyncDeviceState(std::move(fresh_state));
             fresh->generateConfig()->adapter_name = "unsupported";
             EXPECT_FALSE(processor.tryGatherDecodeForwardInput({fresh, first}, holder).has_value());
 
