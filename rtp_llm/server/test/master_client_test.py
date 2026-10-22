@@ -1,5 +1,6 @@
 import unittest
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 from rtp_llm.config.exceptions import (
     AdmissionRejectReason,
@@ -175,6 +176,76 @@ class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request_pb.generate_input, b"serialized-input")
         self.assertEqual(request_pb.cache_key_block_size, 1024)
         self.assertEqual(request_pb.priority, 50)
+
+    async def test_selected_vit_preserves_optional_logical_engine_index(self):
+        for engine_index in (None, 0, 1):
+            with self.subTest(engine_index=engine_index):
+                client = _CaptureMasterClient()
+                await client.get_backend_role_addrs(
+                    block_cache_keys=[],
+                    cache_key_block_size=1024,
+                    input=_FakeInput(),
+                    request_id=99,
+                    selected_vit={
+                        "role": "vit",
+                        "server_ip": "10.0.0.1",
+                        "http_port": 8000,
+                        "grpc_port": 8001,
+                        "worker_generation": 42,
+                        "engine_index": engine_index,
+                    },
+                )
+                selected = client.calls[0]["request_pb"].selected_vit
+                self.assertEqual(
+                    selected.HasField("engine_index"), engine_index is not None
+                )
+                if engine_index is not None:
+                    self.assertEqual(selected.engine_index, engine_index)
+                self.assertEqual(selected.worker_generation, 42)
+
+    async def test_vit_response_keeps_engine_index_for_subsequent_route(self):
+        for engine_index in (None, 0, 1):
+            with self.subTest(engine_index=engine_index):
+                client = _CaptureMasterClient()
+                status = FlexlbServerStatusPB(
+                    role="VIT",
+                    server_ip="10.0.0.1",
+                    http_port=8000,
+                    grpc_port=8001,
+                    worker_generation=42,
+                )
+                if engine_index is not None:
+                    status.engine_index = engine_index
+                client._send_schedule_request = AsyncMock(
+                    return_value=FlexlbScheduleResponsePB(
+                        success=True,
+                        code=200,
+                        server_status=[status],
+                    )
+                )
+                response = await client.get_backend_role_addrs(
+                    block_cache_keys=[],
+                    cache_key_block_size=1024,
+                    input=_FakeInput(),
+                    request_id=99,
+                    vit_only=True,
+                )
+                selected = response.result["server_status"][0]
+                self.assertEqual(selected["engine_index"], engine_index)
+                await client.get_backend_role_addrs(
+                    block_cache_keys=[],
+                    cache_key_block_size=1024,
+                    input=_FakeInput(),
+                    request_id=99,
+                    selected_vit=selected,
+                )
+                request = client._send_schedule_request.call_args.args[1]
+                self.assertEqual(
+                    request.selected_vit.HasField("engine_index"),
+                    engine_index is not None,
+                )
+                if engine_index is not None:
+                    self.assertEqual(request.selected_vit.engine_index, engine_index)
 
     async def test_schedule_payload_priority_from_qos_header(self):
         client = _CaptureMasterClient()

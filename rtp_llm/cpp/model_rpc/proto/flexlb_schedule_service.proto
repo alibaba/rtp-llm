@@ -82,6 +82,10 @@ message FlexlbServerStatusPB {
     string group = 6;
     // FlexLB endpoint generation: reject a pin after worker replacement at the same address.
     int64 worker_generation = 8;
+    // Preserve the selected logical ViT identity across the frontend round trip.
+    oneof engine_index_presence {
+        int32 engine_index = 9;
+    }
 }
 
 // Why an incoming request was rejected by the admission decision.  This is

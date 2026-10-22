@@ -405,6 +405,7 @@ class MasterClient:
                 "grpc_port",
                 "group",
                 "worker_generation",
+                "engine_index",
             ):
                 value = selected_vit.get(name)
                 if value is not None:
@@ -490,6 +491,9 @@ class MasterClient:
                     "grpc_port": s.grpc_port,
                     "group": s.group or None,
                     "worker_generation": s.worker_generation,
+                    "engine_index": (
+                        s.engine_index if s.HasField("engine_index") else None
+                    ),
                 }
                 for s in response.server_status
             ]
