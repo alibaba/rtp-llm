@@ -260,7 +260,6 @@ class RecognitionTest(unittest.TestCase):
         with patch.object(prepare, "_dependencies", side_effect=AssertionError):
             for value in (
                 "Qwen/Qwen3.5-4B",
-                "jaredpalmer/kev-27b",
                 "https://example.org/jaredpalmer/kev-4b",
             ):
                 self.assertIsNone(prepare.prepare_kev_checkpoint(value))
@@ -275,11 +274,47 @@ class RecognitionTest(unittest.TestCase):
                 prepare._recognize(directory)
             for name in prepare.reference.SOURCE_FILES:
                 (path / name).touch()
+            (path / "adapter_config.json").write_text(
+                json.dumps(
+                    {
+                        "base_model_name_or_path": prepare.reference.BASE_MODEL,
+                    }
+                ),
+                encoding="utf-8",
+            )
             self.assertEqual(prepare._recognize(directory), ("raw", path.resolve()))
+
+    def test_local_family_raw_directory_is_recognized(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            (path / "head.pt").write_bytes(b"synthetic")
+            (path / "config.json").write_text("{}", encoding="utf-8")
+            self.assertEqual(prepare._recognize(directory), ("family", path.resolve()))
+
+    def test_family_repos_route_to_the_generic_preparer(self):
+        repo = "jaredpalmer/kev-27b"
+        self.assertEqual(prepare._recognize(repo), ("family_remote", (repo, None)))
+        with patch.object(
+            prepare.family, "prepare_cached", return_value="/cache/kev-27b"
+        ) as prepare_family:
+            self.assertEqual(
+                prepare.prepare_kev_checkpoint(repo, cache_root="/cache"),
+                "/cache/kev-27b",
+            )
+            prepare_family.assert_called_once_with(
+                repo, cache_root="/cache", base=None
+            )
 
     def test_legacy_export_keeps_original_path_and_needs_no_sidecar(self):
         with tempfile.TemporaryDirectory() as directory:
-            (Path(directory) / "kev_config.json").write_text("{}")
+            (Path(directory) / "kev_config.json").write_text(
+                json.dumps(
+                    {
+                        "base_model": prepare.reference.BASE_MODEL,
+                        "hidden_size": 2560,
+                    }
+                )
+            )
             original = directory + "/."
             deps = SimpleNamespace(snapshot_download=Mock())
             with patch.object(

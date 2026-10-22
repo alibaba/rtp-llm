@@ -5,6 +5,7 @@ py_library(
     srcs = ["prepare_kev_checkpoint.py"],
     deps = [
         ":convert_kev_checkpoint",
+        ":kev_family_checkpoint",
         "//rtp_llm:safetensors",
         "//rtp_llm:torch",
         "//rtp_llm:transformers",
@@ -20,6 +21,23 @@ py_test(
 py_library(
     name = "convert_kev_checkpoint",
     srcs = ["convert_kev_checkpoint.py"],
+)
+
+py_library(
+    name = "kev_family_checkpoint",
+    srcs = ["kev_family_checkpoint.py"],
+)
+
+# Standalone CPU tests: synthetic checkpoints, no accelerator or downloads.
+py_test(
+    name = "kev_family_checkpoint_test",
+    srcs = ["kev_family_checkpoint_test.py"],
+    deps = [
+        ":kev_family_checkpoint",
+        "//rtp_llm:safetensors",
+        "//rtp_llm:torch",
+        "//rtp_llm:transformers",
+    ],
 )
 
 # Standalone CPU mocks: no accelerator, RTP ops, or model downloads.

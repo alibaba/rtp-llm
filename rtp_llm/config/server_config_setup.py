@@ -397,8 +397,8 @@ def prepare_kev_model_args(py_env_configs):
         return
     if model_args.tokenizer_path not in (None, "", original, prepared):
         raise ValueError("Kev must use the tokenizer from its prepared checkpoint")
-    if model_args.model_type not in (None, "", "qwen35_dense"):
-        raise ValueError("Kev-4B requires model_type=qwen35_dense")
+    if model_args.model_type not in (None, "", "qwen35_dense", "qwen_2", "qwen_3"):
+        raise ValueError("Kev checkpoints require qwen35_dense, qwen_2 or qwen_3")
     if model_args.task_type not in (None, "", "LANGUAGE_MODEL"):
         raise ValueError("Kev checkpoints require the LANGUAGE_MODEL task type")
     model_args.ckpt_path = prepared

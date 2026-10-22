@@ -18,6 +18,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from rtp_llm.tools import convert_kev_checkpoint as reference
+from rtp_llm.tools import kev_family_checkpoint as family
 
 PREPARER_VERSION = 4
 TEXT_PREFIX = "model.language_model."
@@ -71,12 +72,23 @@ def _recognize(checkpoint: str):
         if (path / "kev_config.json").is_file():
             return "export", path.resolve()
         if (path / "head.pt").is_file():
-            if not all((path / name).is_file() for name in reference.SOURCE_FILES):
-                raise ValueError("Incomplete raw Kev checkpoint")
-            return "raw", path.resolve()
+            adapter = path / "adapter_config.json"
+            if all((path / name).is_file() for name in reference.SOURCE_FILES):
+                try:
+                    adapter_base = _json(adapter).get("base_model_name_or_path")
+                except (OSError, ValueError):
+                    adapter_base = None
+                if adapter_base in (None, reference.BASE_MODEL):
+                    return "raw", path.resolve()
+            if (path / "config.json").is_file() or adapter.is_file():
+                return "family", path.resolve()
+            raise ValueError("Incomplete raw Kev checkpoint")
         return None
     parsed = reference._parse_source(checkpoint)
-    return ("remote", parsed) if parsed is not None else None
+    if parsed is not None:
+        return "remote", parsed
+    parsed = family.parse_source(checkpoint)
+    return ("family_remote", parsed) if parsed is not None else None
 
 
 def _load_source(source: Path, deps) -> tuple[dict, dict]:
@@ -665,11 +677,20 @@ def prepare_kev_checkpoint(
     if recognized is None:
         return None
     kind, location = recognized
+    if kind in ("family", "family_remote"):
+        return family.prepare_cached(checkpoint, cache_root=cache_root, base=base)
     deps = _dependencies()
     if kind == "export":
-        # Legacy converter outputs have no integrity sidecar; validate their
-        # manifest, all tensor headers/payload sizes, and tokenizer directly.
-        _validate_export(location, deps)
+        # Converter outputs have no integrity sidecar; validate their manifest,
+        # all tensor headers/payload sizes, and tokenizer directly.
+        manifest = _json(location / "kev_config.json")
+        if (
+            manifest.get("base_model") == reference.BASE_MODEL
+            and manifest.get("hidden_size") == 2560
+        ):
+            _validate_export(location, deps)
+        else:
+            family.validate_export(location)
         return checkpoint
     if kind == "remote":
         repo, revision = location
