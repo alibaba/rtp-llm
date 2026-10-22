@@ -1,6 +1,7 @@
 package org.flexlb.httpserver;
 
 import io.grpc.Context;
+import io.grpc.ConnectivityState;
 import io.grpc.ManagedChannel;
 import io.grpc.Server;
 import io.grpc.Status;
@@ -17,6 +18,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
 import java.lang.reflect.Field;
+import java.net.InetSocketAddress;
 import java.time.Duration;
 import java.util.Map;
 import java.util.concurrent.CompletionStage;
@@ -238,6 +240,47 @@ class FlexlbGrpcForwarderAsyncTest {
         }
     }
 
+    @Test
+    @Timeout(value = 10, unit = TimeUnit.SECONDS)
+    void compensatingCancelTargetsOriginalMasterAfterElectionChanges() throws Exception {
+        var originalCalls = new java.util.concurrent.atomic.AtomicInteger();
+        var newLeaderCalls = new java.util.concurrent.atomic.AtomicInteger();
+        AtomicReference<FlexlbScheduleProtocol.FlexlbCancelRequestPB> observed = new AtomicReference<>();
+        try (RpcFixture original = RpcFixture.startCancel((request, observer) -> {
+            originalCalls.incrementAndGet();
+            observed.set(request);
+            observer.onNext(FlexlbScheduleProtocol.FlexlbCancelResponsePB.newBuilder().setFound(true).build());
+            observer.onCompleted();
+        }); RpcFixture elected = RpcFixture.startCancel((request, observer) -> {
+            newLeaderCalls.incrementAndGet();
+            observer.onNext(FlexlbScheduleProtocol.FlexlbCancelResponsePB.newBuilder().build());
+            observer.onCompleted();
+        })) {
+            LBStatusConsistencyService consistency = mock(LBStatusConsistencyService.class);
+            when(consistency.getMasterHostIpPort()).thenReturn("10.0.0.9:7001");
+            when(consistency.getLocalHostIp()).thenReturn("10.0.0.3");
+            ConfigService config = mock(ConfigService.class);
+            when(config.loadBalanceConfig()).thenReturn(org.flexlb.mock.TestFlexlbConfigs.create());
+            FlexlbGrpcForwarder forwarder = new FlexlbGrpcForwarder(consistency, config,
+                    mock(EngineHealthReporter.class), mock(EventLoopGroup.class), Runnable::run);
+            channels(forwarder).put(MASTER_CHANNEL_KEY, original.channel);
+            channels(forwarder).put("10.0.0.9:7003", elected.channel);
+            try {
+                var result = forwarder.forwardCompensatingCancelToMaster(
+                        FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder().setRequestId(9917L)
+                                .setReason(FlexlbScheduleProtocol.CancelReasonPB.CANCEL_REASON_CLIENT_CANCELLED).build(),
+                        MASTER_HTTP_ADDRESS, io.opentelemetry.context.Context.root())
+                        .toCompletableFuture().get(3, TimeUnit.SECONDS);
+                assertTrue(result.response().getFound());
+                assertEquals(1, originalCalls.get());
+                assertEquals(0, newLeaderCalls.get());
+                assertEquals(9917L, observed.get().getRequestId());
+                assertEquals(1, observed.get().getForwardHop());
+                verify(consistency, org.mockito.Mockito.never()).getMasterHostIpPort();
+            } finally { forwarder.shutdown(); }
+        }
+    }
+
     private static FlexlbGrpcForwarder forwarder(
             ManagedChannel channel,
             EngineHealthReporter reporter) throws Exception {
@@ -320,7 +363,7 @@ class FlexlbGrpcForwarderAsyncTest {
 
         private static RpcFixture startService(
                 FlexlbServiceGrpc.FlexlbServiceImplBase service) throws Exception {
-            Server server = NettyServerBuilder.forPort(0)
+            Server server = NettyServerBuilder.forAddress(new InetSocketAddress("127.0.0.1", 0))
                     .directExecutor()
                     .addService(service)
                     .build()
@@ -330,7 +373,31 @@ class FlexlbGrpcForwarderAsyncTest {
                     .directExecutor()
                     .usePlaintext()
                     .build();
-            return new RpcFixture(server, channel);
+            RpcFixture fixture = new RpcFixture(server, channel);
+            try {
+                fixture.awaitTransportReady();
+                return fixture;
+            } catch (Exception | Error startupFailure) {
+                try { fixture.close(); }
+                catch (Exception cleanupFailure) { startupFailure.addSuppressed(cleanupFailure); }
+                throw startupFailure;
+            }
+        }
+
+        private void awaitTransportReady() throws InterruptedException {
+            // Channel creation is lazy. Business deadlines must start after the
+            // loopback TCP/HTTP2 handshake, rather than measuring fixture startup.
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            ConnectivityState state = channel.getState(true);
+            while (state != ConnectivityState.READY) {
+                long remaining = deadline - System.nanoTime();
+                assertTrue(remaining > 0, "loopback gRPC transport did not become READY: " + state);
+                CountDownLatch changed = new CountDownLatch(1);
+                channel.notifyWhenStateChanged(state, changed::countDown);
+                assertTrue(changed.await(remaining, TimeUnit.NANOSECONDS),
+                        "loopback gRPC transport readiness timed out: " + state);
+                state = channel.getState(true);
+            }
         }
 
         @Override
