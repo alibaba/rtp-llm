@@ -206,6 +206,44 @@ def restore_padded_indexer_cache(undo: IndexerCacheUndo) -> None:
             _restore_slots[(slots.numel(),)](pool, slots, original, num_warps=4)
 
 
+def _check_host_mirrors(lengths, cu, tables, device_tables, pool_sizes):
+    """Validate C++'s CPU sources of the device metadata without a GPU readback.
+
+    None means that a device-only path must use the GPU preflight below. C++
+    constructs each device tensor with tensorHoldHostAndToCuda from this CPU
+    tensor in the ordinary eager prefill path.
+    """
+    batch = len(lengths)
+    mirrors = (cu, *tables)
+    if not all(
+        isinstance(t, torch.Tensor)
+        and t.device.type == "cpu"
+        and t.dtype == torch.int32
+        for t in mirrors
+    ):
+        return None
+    if cu.shape != (batch + 1,) or any(
+        host.shape != device.shape for host, device in zip(tables, device_tables)
+    ):
+        return None
+    if cu.tolist() != [0, *itertools.accumulate(lengths)]:
+        raise ValueError("QSA prefill has invalid cu_seqlens or physical block ids")
+    aliased = False
+    for table, pool_size, ratio in zip(tables, pool_sizes, (1, 4)):
+        seen = set()
+        for row, length in zip(table.tolist(), lengths):
+            required = triton.cdiv(length // ratio * ratio, 128)
+            for block in row[:required]:
+                if block <= 0 or block >= pool_size:
+                    raise ValueError(
+                        "QSA prefill has invalid cu_seqlens or physical block ids"
+                    )
+                if block in seen:
+                    aliased = True
+                seen.add(block)
+    return aliased
+
+
 def write_zero_prefix_prefill(
     raw_keys,
     cu_seqlens,
@@ -221,6 +259,9 @@ def write_zero_prefix_prefill(
     page_size,
     norm_eps,
     emit_dense_keys=False,
+    host_cu_seqlens=None,
+    host_kv_table=None,
+    host_state_table=None,
 ) -> dict | None:
     """Return None for unsupported geometry or aliased pages, before any write.
 
@@ -273,46 +314,54 @@ def write_zero_prefix_prefill(
         groups * 4, page_size
     ):
         raise ValueError("QSA prefill block table does not cover required pages")
-    # Pack host-owned metadata into one pinned transfer. Creating CUDA tensors
-    # directly from Python lists otherwise blocks this stream three times per
-    # layer. PyTorch retains the pinned allocation until the copy completes.
-    counts = (
-        [triton.cdiv(n, page_size) for n in lengths],
-        [triton.cdiv(n // 4 * 4, page_size) for n in lengths],
+    host_alias = _check_host_mirrors(
+        lengths,
+        host_cu_seqlens,
+        (host_state_table, host_kv_table),
+        (state_table, kv_table),
+        (state_pool.shape[0], kv_pool.shape[0]),
     )
-    metadata = torch.tensor(
-        [0, *itertools.accumulate(lengths), *counts[0], *counts[1]],
-        dtype=torch.int32,
-        device="cpu",
-        pin_memory=True,
-    ).to(device=device, non_blocking=True)
-    invalid = torch.any(cu_seqlens != metadata[: batch + 1])
-    aliases = torch.zeros((), dtype=torch.bool, device=device)
-    for index, (table, pool) in enumerate(
-        ((state_table, state_pool), (kv_table, kv_pool))
-    ):
-        offset = batch + 1 + index * batch
-        required = (
-            torch.arange(table.shape[1], device=device)[None, :]
-            < metadata[offset : offset + batch, None]
+    if host_alias is None:
+        # Device-only metadata (including MTP and CUDA graph paths) retains the
+        # strict GPU preflight before any side-cache mutation.
+        counts = (
+            [triton.cdiv(n, page_size) for n in lengths],
+            [triton.cdiv(n // 4 * 4, page_size) for n in lengths],
         )
-        invalid = invalid | torch.any(
-            required & ((table <= 0) | (table >= pool.shape[0]))
-        )
-        ids = (
-            torch.where(required, table, torch.iinfo(torch.int32).max)
-            .flatten()
-            .sort()
-            .values
-        )
-        aliases = aliases | torch.any(
-            (ids[1:] == ids[:-1]) & (ids[1:] != torch.iinfo(torch.int32).max)
-        )
-    # One verdict synchronizes only metadata, before launches that mutate pools.
-    verdict = int((invalid.to(torch.int32) + 2 * aliases.to(torch.int32)).item())
-    if verdict & 1:
-        raise ValueError("QSA prefill has invalid cu_seqlens or physical block ids")
-    if verdict & 2:
+        metadata = torch.tensor(
+            [0, *itertools.accumulate(lengths), *counts[0], *counts[1]],
+            dtype=torch.int32,
+            device="cpu",
+            pin_memory=True,
+        ).to(device=device, non_blocking=True)
+        invalid = torch.any(cu_seqlens != metadata[: batch + 1])
+        aliases = torch.zeros((), dtype=torch.bool, device=device)
+        for index, (table, pool) in enumerate(
+            ((state_table, state_pool), (kv_table, kv_pool))
+        ):
+            offset = batch + 1 + index * batch
+            required = (
+                torch.arange(table.shape[1], device=device)[None, :]
+                < metadata[offset : offset + batch, None]
+            )
+            invalid = invalid | torch.any(
+                required & ((table <= 0) | (table >= pool.shape[0]))
+            )
+            ids = (
+                torch.where(required, table, torch.iinfo(torch.int32).max)
+                .flatten()
+                .sort()
+                .values
+            )
+            aliases = aliases | torch.any(
+                (ids[1:] == ids[:-1]) & (ids[1:] != torch.iinfo(torch.int32).max)
+            )
+        verdict = int((invalid.to(torch.int32) + 2 * aliases.to(torch.int32)).item())
+        if verdict & 1:
+            raise ValueError("QSA prefill has invalid cu_seqlens or physical block ids")
+        if verdict & 2:
+            return None
+    elif host_alias:
         return None
 
     # index_qk_proj exposes K as a strided slice of the joint Q/K output.

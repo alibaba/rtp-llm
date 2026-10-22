@@ -194,6 +194,20 @@ class SparseFmhaTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "outside KV sequence length"):
             sparse_prefill_attn(q, k, v, selected)
 
+    def test_internal_bounded_selection_avoids_scalar_readback(self):
+        q = torch.randn(1, 3, 7, _D, device=_DEV).to(torch.bfloat16)
+        k = torch.randn(1, 1, 16, _D, device=_DEV).to(torch.bfloat16)
+        v = torch.randn_like(k)
+        selected = torch.arange(16, device=_DEV, dtype=torch.int32)[
+            None, None, :
+        ].expand(1, 7, 16)
+        expected = sparse_prefill_attn(q, k, v, selected)
+        with patch.object(torch.Tensor, "item", side_effect=AssertionError("GPU readback")):
+            actual = sparse_prefill_attn(
+                q, k, v, selected, validate_selected=False
+            )
+        torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+
     def test_matches_torch_on_larger_shape(self):
         torch.manual_seed(1)
         B, S, T, K = 2, 16, 128, 32

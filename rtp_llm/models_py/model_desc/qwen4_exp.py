@@ -417,7 +417,28 @@ class Qwen4ExpAttention(Qwen3NextAttention):
                         qsa_runtime,
                         projected=self.qsa_indexer.split_projected(projected_qk),
                     )
-                set_selected(selected)
+                from rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_gqa_impl import (
+                    SparseGqaFmhaImpl,
+                )
+
+                trusted_setter = getattr(
+                    fmha_impl, "set_trusted_selected_indices", None
+                )
+                if (
+                    type(self) is Qwen4ExpAttention
+                    and type(self.qsa_indexer) is Qwen4ExpQSAIndexer
+                    and type(fmha_impl) is SparseGqaFmhaImpl
+                    and bool(qsa_runtime.main_inputs.is_prefill)
+                    and not bool(qsa_runtime.main_inputs.is_target_verify)
+                    and not bool(qsa_runtime.main_inputs.is_cuda_graph)
+                    and "_qsa_selected_indices" not in self.__dict__
+                    and "forward_causal_from_projected"
+                    not in self.qsa_indexer.__dict__
+                    and callable(trusted_setter)
+                ):
+                    trusted_setter(selected)
+                else:
+                    set_selected(selected)
                 fused_gate_forward = getattr(
                     fmha_impl, "forward_with_output_gate", None
                 )
