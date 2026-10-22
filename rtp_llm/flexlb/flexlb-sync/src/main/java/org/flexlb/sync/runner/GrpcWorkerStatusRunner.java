@@ -65,6 +65,8 @@ public class GrpcWorkerStatusRunner implements Runnable {
         this.callbackExecutor = callbackExecutor;
     }
 
+    private record ReceivedStatus(WorkerStatus.StatusObservation observation, long receivedAtUs) { }
+
     @Override
     public void run() {
         boolean asyncInitiated = false;
@@ -79,8 +81,11 @@ public class GrpcWorkerStatusRunner implements Runnable {
                     workerStatusRpcClient.getWorkerStatusAsync(
                             workerStatus.getIp(), workerStatus.getGrpcPort(), latestFinishedTaskVersion,
                             syncRequestTimeoutMs, roleType)
-                    .thenApply(response -> EngineStatusConverter
-                            .convertToStatusObservation(workerStatus, response)), (observation, failure) -> {
+                    .thenApply(response -> {
+                        long receivedAtUs = TimeUnit.NANOSECONDS.toMicros(System.nanoTime());
+                        return new ReceivedStatus(EngineStatusConverter.convertToStatusObservation(workerStatus, response),
+                                receivedAtUs);
+                    }), (received, failure) -> {
                         if (failure != null) {
                             try { recordStatusCheckFailure(failure); }
                             finally {
@@ -88,7 +93,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
                                 catch (Throwable telemetryFailure) { Failures.run(null, () -> logger.warn("Worker status failure telemetry failed for {}", ipPort, telemetryFailure)); }
                             }
                         } else {
-                            handleStatusResponse(observation, startTime);
+                            handleStatusResponse(received.observation(), startTime, received.receivedAtUs());
                         }
                     });
             asyncInitiated = true;
@@ -100,7 +105,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
     }
 
     /** The complete status workflow: one generation transaction, followed by lock-free publication. */
-    private void handleStatusResponse(WorkerStatus.StatusObservation observation, long startTime) {
+    private void handleStatusResponse(WorkerStatus.StatusObservation observation, long startTime, long receivedAtUs) {
         try {
             if (observation == null) {
                 engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.RESPONSE_NULL, roleType);
@@ -113,7 +118,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
                 if (!endpointRegistry.isCurrentStatus(roleType, ipPort, workerStatus)
                         || !workerStatus.isActiveGeneration()) { return; }
                 try {
-                    applied = applyStatusLocked(observation);
+                    applied = applyStatusLocked(observation, receivedAtUs);
                     retirement = applied.retirement();
                 } catch (Throwable failure) {
                     if (workerStatus.isActiveGeneration()) {
@@ -144,7 +149,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
                                      WorkerEndpoint.StatusChange change, EndpointRegistry.Retirement retirement) { }
 
     /** Validate the frame once and commit one exact generation; external effects are returned as data. */
-    private StatusApplication applyStatusLocked(WorkerStatus.StatusObservation observation) {
+    private StatusApplication applyStatusLocked(WorkerStatus.StatusObservation observation, long receivedAtUs) {
         Long version = observation.statusVersion();
         if (version == null || version <= 0L) {
             throw new IllegalArgumentException("Worker status version must be positive: " + version);
@@ -175,6 +180,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
             // Same-version running_tasks is still a full liveness snapshot; never replay versioned mutations.
             change = endpoint.applyStatusHeartbeat(workerStatus, observation);
         }
+        workerStatus.recordAppliedObservation(observation, receivedAtUs);
         EndpointRegistry.Retirement retirement = observation.alive() ? null
                 : endpointRegistry.beginRetirement(roleType, ipPort, workerStatus);
         return new StatusApplication(retirement != null ? StatusOutcome.RETIRED

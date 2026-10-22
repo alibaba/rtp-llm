@@ -168,6 +168,17 @@ public class EndpointRegistry {
                 placementAvailability, "placementAvailability");
     }
 
+    public record DiagnosticDirectory(List<PrefillRoutingEntry> prefill,
+                                      List<Map.Entry<String, DecodeEndpoint>> decode) { }
+
+    public DiagnosticDirectory diagnosticDirectory() {
+        return new DiagnosticDirectory(prefillDirectory, decodeDirectory);
+    }
+
+    public boolean diagnosticDirectoryUnchanged(DiagnosticDirectory captured) {
+        return captured.prefill() == prefillDirectory && captured.decode() == decodeDirectory;
+    }
+
     public WorkerEndpoint get(RoleType roleType, String ipPort) {
         Map<String, WorkerEndpoint> endpoints = endpointsByRole.get(roleType);
         return endpoints == null ? null : endpoints.get(ipPort);

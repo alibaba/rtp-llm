@@ -8,6 +8,7 @@ import com.google.protobuf.UnknownFieldSet;
 import org.flexlb.engine.grpc.EngineRpcService.GenerateInputPB;
 
 import java.io.IOException;
+import java.nio.ByteOrder;
 
 /** Validated delivery input with encoded tokens, rather than a decoded token array. */
 final class GenerateInputPayload {
@@ -80,11 +81,44 @@ final class GenerateInputPayload {
             int length = input.readRawVarint32();
             int previousLimit = input.pushLimit(length);
             int start = input.getTotalBytesRead();
-            while (input.getBytesUntilLimit() > 0) { input.readInt32(); }
+            input.skipRawBytes(length);
             input.popLimit(previousLimit);
             ByteString chunk = bytes.substring(start, input.getTotalBytesRead());
+            validatePacked(chunk);
             if (packed == null && writer == null) { packed = chunk; }
             else { writer().writeRawBytes(chunk); }
+        }
+
+        /** Validate varint termination without decoding token values. */
+        private static void validatePacked(ByteString chunk) throws InvalidProtocolBufferException {
+            int continuationBytes = 0;
+            for (var buffer : chunk.asReadOnlyByteBufferList()) {
+                buffer.order(ByteOrder.LITTLE_ENDIAN);
+                while (buffer.remaining() >= Long.BYTES) {
+                    long terminators = ~buffer.getLong() & 0x8080808080808080L;
+                    if (terminators == 0L) {
+                        continuationBytes += Long.BYTES;
+                        if (continuationBytes >= 10) {
+                            throw new InvalidProtocolBufferException("Malformed packed token varint");
+                        }
+                    } else {
+                        if (continuationBytes + Long.numberOfTrailingZeros(terminators) / Byte.SIZE >= 10) {
+                            throw new InvalidProtocolBufferException("Malformed packed token varint");
+                        }
+                        continuationBytes = Long.numberOfLeadingZeros(terminators) / Byte.SIZE;
+                    }
+                }
+                while (buffer.hasRemaining()) {
+                    if (buffer.get() >= 0) {
+                        continuationBytes = 0;
+                    } else if (++continuationBytes >= 10) {
+                        throw new InvalidProtocolBufferException("Malformed packed token varint");
+                    }
+                }
+            }
+            if (continuationBytes != 0) {
+                throw new InvalidProtocolBufferException("Truncated packed token varint");
+            }
         }
 
         private CodedOutputStream writer() throws IOException {

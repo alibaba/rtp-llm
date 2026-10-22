@@ -38,6 +38,20 @@ public final class RequestRoute implements GroupPlanner.Input, AutoCloseable {
     private ServerStatus decode;
     private ServerStatus vit;
     private long prefillWorkMs;
+    private org.flexlb.balance.strategy.PrefillTokenWorkload.Reservation tokenPlan;
+
+    public void reserveTokenPlan(org.flexlb.balance.strategy.PrefillTokenWorkload.Reservation plan) {
+        if (constructionState != BUILDING || tokenPlan != null) {
+            if (plan != null) { plan.close(); }
+            throw new IllegalStateException("token plan requires a new route selection");
+        }
+        tokenPlan = plan;
+    }
+
+    /** Idempotent across selected/canonical route copies and failed admission cleanup. */
+    public void releaseTokenPlan() {
+        if (tokenPlan != null) { tokenPlan.close(); }
+    }
     private long prefillVersion;
     private long decodeVersion;
     private final DecodeResources.ReservationHandle decodeReservation;
@@ -60,6 +74,7 @@ public final class RequestRoute implements GroupPlanner.Input, AutoCloseable {
             prefill = selected.prefill;
             decode = selected.decode;
             prefillWorkMs = selected.prefillWorkMs;
+            tokenPlan = selected.tokenPlan;
             prefillVersion = selected.prefillVersion;
             decodeVersion = selected.decodeVersion;
         }
@@ -228,6 +243,7 @@ public final class RequestRoute implements GroupPlanner.Input, AutoCloseable {
 
     @Override
     public void close() {
+        releaseTokenPlan();
         if (constructionState == BUILDING) { constructionState = ABORTED; }
         if (pins == null) { return; }
         Throwable failure = null;

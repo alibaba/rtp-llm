@@ -276,7 +276,7 @@ public final class PrefillState {
         }
     }
 
-    record TerminalObservation(RequestEntry owner, long executionTimeMs, long errorCode,
+    record TerminalObservation(RequestEntry owner, long executionTimeMs, long errorCode, long computeTokens,
             PriorityPreemptionProgress preemptionProgress) { }
 
     public final ReentrantLock lock;
@@ -285,6 +285,40 @@ public final class PrefillState {
     /** Canonical request ownership, changed only under the endpoint lock. */
     final Map<Long, RequestEntry> requests = new HashMap<>();
     final LongSupplier clock;
+    private org.flexlb.balance.strategy.PrefillTokenWorkload tokenWorkload;
+    private long pendingTokenLimit;
+
+    /** Installed before this endpoint generation is published. */
+    void enableTokenWorkload(long windowMs, long pendingTokenLimit) {
+        this.pendingTokenLimit = pendingTokenLimit;
+        tokenWorkload = new org.flexlb.balance.strategy.PrefillTokenWorkload(windowMs);
+    }
+
+    public org.flexlb.balance.strategy.PrefillTokenWorkload.Snapshot tokenWorkload(long nowMs) {
+        lock.lock();
+        try {
+            return tokenWorkload == null
+                    ? new org.flexlb.balance.strategy.PrefillTokenWorkload.Snapshot(0L, 0L)
+                    : tokenWorkload.snapshot(nowMs);
+        } finally { lock.unlock(); }
+    }
+
+    private static long computeTokens(RequestRoute route) {
+        return Math.max(0L, route.seqLen() - Math.clamp(route.hitCache(), 0L, Math.max(0L, route.seqLen())));
+    }
+
+    private boolean tokenCapacityAvailable() {
+        return tokenWorkload == null || tokenWorkload.snapshot(System.nanoTime() / 1_000_000L).pendingTokens() < pendingTokenLimit;
+    }
+
+    public org.flexlb.balance.strategy.PrefillTokenWorkload.Reservation planTokenWork(long tokens) {
+        return tokenWorkload == null ? null : tokenWorkload.plan(tokens);
+    }
+
+    private void acceptTokenWork(RequestRoute route) {
+        route.releaseTokenPlan();
+        if (tokenWorkload != null) { tokenWorkload.accept(computeTokens(route)); }
+    }
     /** Monotonic ownership/work revision used by projection snapshots. */
     private volatile long mutationVersion;
     private volatile long schedulingInputVersion;
@@ -381,7 +415,9 @@ public final class PrefillState {
             if (batch.members.isEmpty()) { batches.remove(batch.batchId, batch); committedBatchCount--; }
         }
         if (entry.ownership == OwnershipStage.COMMITTED || entry.ownership == OwnershipStage.DIRECT_RESERVED) { committedWorkCapture = null; }
-        return requests.remove(entry.route.requestId(), entry);
+        boolean removed = requests.remove(entry.route.requestId(), entry);
+        if (removed && tokenWorkload != null) { tokenWorkload.release(computeTokens(entry.route)); }
+        return removed;
     }
 
     public enum QueueChange { ENQUEUE, REMOVE, REMOVE_UNEXPIRED, STOP, ACK_STOP }
@@ -394,11 +430,12 @@ public final class PrefillState {
             if (route == null) { return null; }
             var entry = requests.get(route.requestId());
             if (change == QueueChange.ENQUEUE) {
-                if (entry != null || requestLimit > 0L && outstandingRequestCount >= requestLimit) { return null; }
+                if (entry != null || !tokenCapacityAvailable() || requestLimit > 0L && outstandingRequestCount >= requestLimit) { return null; }
                 entry = new RequestEntry(route, OwnershipStage.QUEUED);
                 requests.put(route.requestId(), entry);
                 try { activeIndex.add(route); }
                 catch (RuntimeException | Error failed) { requests.remove(route.requestId(), entry); throw failed; }
+                acceptTokenWork(route);
             } else if (change == QueueChange.ACK_STOP) {
                 if (entry == null) { return route; }
                 if (entry.route != route || entry.ownership != OwnershipStage.STOP_PENDING || activeIndex.contains(route)) { return null; }
@@ -671,7 +708,7 @@ public final class PrefillState {
             if (requests.containsKey(item.requestId())) {
                 return new ReservationResult<>(CapacityStatus.REQUEST_ALREADY_RESERVED, null);
             }
-            if (maxOutstandingRequests > 0L && outstandingRequestCount >= maxOutstandingRequests) {
+            if (!tokenCapacityAvailable() || maxOutstandingRequests > 0L && outstandingRequestCount >= maxOutstandingRequests) {
                 return new ReservationResult<>(CapacityStatus.CAPACITY_FULL, null);
             }
             RequestEntry entry = new RequestEntry(item, OwnershipStage.DIRECT_RESERVED);
@@ -679,6 +716,7 @@ public final class PrefillState {
             ReservationResult<RouteReservation> result = new ReservationResult<>(CapacityStatus.ACQUIRED, reservation);
             entry.reservation = reservation;
             requests.put(item.requestId(), entry);
+            acceptTokenWork(item);
             committedWorkCapture = null;
             recordMutationLocked();
             return result;
@@ -807,7 +845,12 @@ public final class PrefillState {
             batch.outcome = change.getValue();
             batch.lastObservedAtMs = Math.max(batch.lastObservedAtMs, reduction.nowMs);
         }
-        for (TerminalObservation terminal : reduction.terminals.values()) { removeEntry(terminal.owner); }
+        for (TerminalObservation terminal : reduction.terminals.values()) {
+            if (removeEntry(terminal.owner) && tokenWorkload != null && terminal.errorCode() == 0L
+                    && terminal.preemptionProgress() != PriorityPreemptionProgress.CANCELED) {
+                tokenWorkload.complete(terminal.computeTokens(), System.nanoTime() / 1_000_000L);
+            }
+        }
         for (var phase : reduction.individualPhases.entrySet()) {
             var entry = phase.getKey();
             entry.remainingWorkMs = remainingWorkAt(entry.individualPhase, entry.remainingWorkMs, entry.phaseBaseMs, reduction.nowMs);
@@ -870,6 +913,7 @@ public final class PrefillState {
             var retiredProgress = new Progress(activeIndex.version() + (activeIndex.isEmpty() ? 0L : 1L),
                     schedulingInputVersion, mutationVersion + 1L, 0, 0, 0L);
             for (RequestEntry entry : requests.values()) {
+                if (tokenWorkload != null) { tokenWorkload.release(computeTokens(entry.route)); }
                 if (entry.reservation != null) { entry.reservation.originalOwner = null; }
                 entry.reservation = null;
             }
