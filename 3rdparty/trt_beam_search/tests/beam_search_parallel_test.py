@@ -27,7 +27,8 @@ class BeamSearchParallelTest(unittest.TestCase):
         source = sample_inputs(1, 1, vocab=8192)
         for width in (4097, 5000):
             with self.subTest(width=width), self.assertRaisesRegex(
-                RuntimeError, "compiled kernel support"
+                RuntimeError,
+                f"beam widths must be between 1 and 4096, got input=1 output={width}",
             ):
                 self.ops.sample(*clones(source), width, False)
 
