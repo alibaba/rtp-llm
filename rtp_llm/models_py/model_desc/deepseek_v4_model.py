@@ -525,6 +525,13 @@ class DeepSeekV4Model(GptModelBase):
         # Prefill forward owns HC reduction and final normalization.
         return hidden_states
 
+    def get_eplb_layers(self):
+        return [
+            layer.ffn.fused_moe.eplb_layer
+            for layer in self.v4.layers
+            if layer.ffn is not None
+        ]
+
     def initialize(self, init_resource: PyModelInitResources) -> bool:
         try:
             return self._initialize_impl(init_resource)
@@ -675,6 +682,36 @@ class DeepSeekV4Model(GptModelBase):
                 device,
                 mtp_last_hidden_capacity,
             )
+
+    def _warmup_mega_moe(self, device_str: str) -> None:
+        import torch.distributed as dist
+
+        moe_layer = self.v4.layers[0].ffn
+        if getattr(moe_layer, "strategy_name", None) not in ("mega_moe", "mega_moe_se"):
+            return
+        executor = moe_layer.fused_moe.fused_experts
+        if dist.is_available() and dist.is_initialized():
+            dist.barrier()
+        cfg = executor.cfg
+        x = torch.zeros((1, int(cfg.dim)), dtype=torch.bfloat16, device=device_str)
+        weights = torch.zeros(
+            (1, int(cfg.n_activated_experts)), dtype=torch.float32, device=device_str
+        )
+        weights[:, 0] = 1.0
+        start = int(cfg.local_expert_start)
+        end = max(int(cfg.local_expert_end), start + 1)
+        # The direct executor consumes physical IDs, bypassing logical mapping.
+        indices = (
+            torch.arange(
+                int(cfg.n_activated_experts), dtype=torch.int64, device=device_str
+            )
+            % (end - start)
+        ) + start
+        executor(x, weights, indices.unsqueeze(0).contiguous(), expert_load=None)
+        torch.cuda.synchronize()
+        if dist.is_available() and dist.is_initialized():
+            dist.barrier()
+        logging.info("[DeepSeekV4Model] MegaMoE prewarm done")
 
     def _initialize_impl(self, init_resource: PyModelInitResources) -> bool:
         # Called by the engine after construction and before forward.
@@ -912,42 +949,7 @@ class DeepSeekV4Model(GptModelBase):
                 raise
 
             try:
-                import torch.distributed as _dist
-
-                _moe_layer = self.v4.layers[0].ffn
-                if getattr(_moe_layer, "strategy_name", None) in (
-                    "mega_moe",
-                    "mega_moe_se",
-                ):
-                    _executor = _moe_layer.fused_moe.fused_experts
-                    if _dist.is_available() and _dist.is_initialized():
-                        _dist.barrier()
-                    _cfg = _executor.cfg
-                    _x_moe = _torch.zeros(
-                        (1, int(_cfg.dim)), dtype=_torch.bfloat16, device=device_str
-                    )
-                    _w_moe = _torch.zeros(
-                        (1, int(_cfg.n_activated_experts)),
-                        dtype=_torch.float32,
-                        device=device_str,
-                    )
-                    _w_moe[:, 0] = 1.0
-                    _start = int(_cfg.local_expert_start)
-                    _end = max(int(_cfg.local_expert_end), _start + 1)
-                    _idx_vals = (
-                        _torch.arange(
-                            int(_cfg.n_activated_experts),
-                            dtype=_torch.int64,
-                            device=device_str,
-                        )
-                        % (_end - _start)
-                    ) + _start
-                    _idx_moe = _idx_vals.unsqueeze(0).contiguous()
-                    _executor(_x_moe, _w_moe, _idx_moe)
-                    _torch.cuda.synchronize()
-                    if _dist.is_available() and _dist.is_initialized():
-                        _dist.barrier()
-                    logging.info("[DeepSeekV4Model] MegaMoE prewarm done")
+                self._warmup_mega_moe(device_str)
             except Exception:
                 logging.exception("[DeepSeekV4Model] MegaMoE prewarm failed")
                 raise

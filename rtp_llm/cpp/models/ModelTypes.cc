@@ -176,6 +176,7 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
     encode_flag(inputs.need_all_hidden_states, GptModelInputControlFlag::kControlNeedAllHiddenStates);
     encode_flag(inputs.need_moe_gating, GptModelInputControlFlag::kControlNeedMoeGating);
     encode_flag(inputs.warmup, GptModelInputControlFlag::kControlWarmup);
+    encode_flag(inputs.is_draft_commit, GptModelInputControlFlag::kControlDraftCommit);
     encode_flag(inputs.skip_run, GptModelInputControlFlag::kControlSkipRun);
     encode_flag(inputs.is_fake_stream, GptModelInputControlFlag::kControlFakeStream);
     encode_flag(inputs.is_target_verify, GptModelInputControlFlag::kControlTargetVerify);
@@ -328,6 +329,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     inputs.capture_hidden_states     = shape_hints_ptr[GptModelInputIndex::captureHiddenStates];
     inputs.need_moe_gating           = has_flag(GptModelInputControlFlag::kControlNeedMoeGating);
     inputs.warmup                    = has_flag(GptModelInputControlFlag::kControlWarmup);
+    inputs.is_draft_commit           = has_flag(GptModelInputControlFlag::kControlDraftCommit);
     inputs.skip_run                  = has_flag(GptModelInputControlFlag::kControlSkipRun);
     inputs.is_fake_stream            = has_flag(GptModelInputControlFlag::kControlFakeStream);
     inputs.is_target_verify          = has_flag(GptModelInputControlFlag::kControlTargetVerify);

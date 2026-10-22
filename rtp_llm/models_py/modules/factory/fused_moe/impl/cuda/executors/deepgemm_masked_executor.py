@@ -146,6 +146,11 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
         # Initialize number of SMs for DeepGEMM
         self._num_gemm_sms = get_num_device_sms()
 
+    def get_eplb_weights(self) -> tuple[torch.Tensor, ...]:
+        if self._use_fp8:
+            return self._w1, self._w1_scale, self._w2, self._w2_scale
+        return self._w1, self._w2
+
     def _forward_masked_grouped_ffn(
         self,
         start_idx: int,

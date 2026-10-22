@@ -54,6 +54,14 @@ py_test(
     ],
 )
 
+py_test(
+    name = "eplb_smoke_checks_test",
+    srcs = [
+        "eplb_smoke_checks.py",
+        "eplb_smoke_checks_test.py",
+    ],
+)
+
 exports_files([
     "entry.py",
     "data/prompt_candidates.json",

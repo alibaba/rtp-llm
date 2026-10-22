@@ -284,6 +284,16 @@ public:
         return forward_count_;
     }
 
+    bool updateEplbConfig(const EPLBConfig& config) override {
+        last_eplb_config = config;
+        ++eplb_update_count;
+        return accept_eplb_update;
+    }
+
+    EPLBConfig last_eplb_config;
+    size_t     eplb_update_count  = 0;
+    bool       accept_eplb_update = true;
+
     std::string waitCacheStorePublication() override {
         recordEvent("wait_publication");
         if (publication_observer_) {
@@ -1252,6 +1262,48 @@ TEST_F(MtpExecutorTest, testMtpConstructorRejectsZeroProposalWidth) {
     } catch (const std::exception& e) {
         EXPECT_NE(std::string(e.what()).find("proposal width/gen_num_per_cycle must be positive"), std::string::npos);
     }
+}
+
+TEST_F(MtpExecutorTest, testCommitExcludesEplbForEagerAndDedicatedDraft) {
+    for (auto type : {SP_TYPE_MTP, SP_TYPE_DSPARK}) {
+        for (bool dedicated_commit : {false, true}) {
+            MtpExecutorTestConfig config;
+            config.sp_type              = type;
+            config.dspark_mask_token_id = 0;
+            auto  components            = createMtpExecutorComponents(config);
+            auto* commit_model =
+                dedicated_commit ? components.fake_draft_prefill_model.get() : components.fake_draft_model.get();
+            GptModelInputs input;
+            commit_model->setInputs({input});
+            commit_model->setOutputs({GptModelOutputs{}});
+            commit_model->setInputObserver(
+                [](const GptModelInputs& observed) { EXPECT_TRUE(observed.is_draft_commit); });
+            components.executor->setDraftModel(std::move(components.fake_draft_model));
+            if (dedicated_commit) {
+                components.executor->setDraftPrefillModel(std::move(components.fake_draft_prefill_model));
+            }
+            components.executor->runDraftPrefillForward(input);
+            EXPECT_EQ(commit_model->forwardCount(), 1);
+            EXPECT_FALSE(input.is_draft_commit);
+        }
+    }
+}
+
+TEST_F(MtpExecutorTest, testEplbUpdateReachesTargetAndDraftWhenTargetRejects) {
+    auto  components           = createMtpExecutorComponents(MtpExecutorTestConfig{});
+    auto* target               = components.fake_target_model.get();
+    auto* draft                = components.fake_draft_model.get();
+    target->accept_eplb_update = false;
+    components.executor->setTargetModel(std::move(components.fake_target_model));
+    components.executor->setDraftModel(std::move(components.fake_draft_model));
+    EPLBConfig config;
+    config.eplb_mode        = EplbMode::ALL;
+    config.eplb_update_time = 17;
+    EXPECT_FALSE(components.executor->updateEplbConfig(config));
+    EXPECT_EQ(target->eplb_update_count, 1);
+    EXPECT_EQ(draft->eplb_update_count, 1);
+    EXPECT_EQ(draft->last_eplb_config.eplb_mode, EplbMode::ALL);
+    EXPECT_EQ(draft->last_eplb_config.eplb_update_time, 17);
 }
 
 void MtpExecutorTest::runSingleBatchPrefillScenario(bool simulate_cp_mutation, bool with_cp_hidden_buffers) {

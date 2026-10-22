@@ -1016,7 +1016,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             GenerationPrefillCudaGraphStatus::NOT_REQUESTED;
     const auto finalize_outputs = [&](GptModelOutputs outputs) {
         outputs.generation_prefill_cuda_graph_status = generation_prefill_cuda_graph_status;
-        expert_balancer_.step(inputs.warmup);
+        expert_balancer_.step(inputs.warmup || inputs.is_draft_commit);
         return outputs;
     };
 

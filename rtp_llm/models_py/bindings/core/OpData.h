@@ -97,8 +97,11 @@ struct GptModelInputs {
     bool capture_hidden_states  = false;
     bool need_moe_gating        = false;
     bool warmup                 = false;
-    bool skip_run               = false;
-    bool is_fake_stream         = false;
+    // Post-verify draft cache commit must not sample or rebalance experts, even
+    // when ordinary MTP uses the same eager wrapper as proposal forwards.
+    bool is_draft_commit = false;
+    bool skip_run        = false;
+    bool is_fake_stream  = false;
 
     // Linear attention target verify should write draft tokens mamba states
     // to extra kv_cache blocks when normal inference only write last token mamba state.

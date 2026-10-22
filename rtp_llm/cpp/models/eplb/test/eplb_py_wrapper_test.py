@@ -1,155 +1,69 @@
-import os
-import random
-import sys
 import unittest
-from dataclasses import dataclass
+from unittest.mock import patch
 
 import torch
+from eplb_runtime_test_utils import FakeModel, FakeRuntime, fake_runtime_module
 
 from rtp_llm.cpp.models.eplb.test.libth_eplb_py_wrapper_test import EplbPyWrapperOP
 
 
-@dataclass
-class TestMoeConfig:
-    layer_num: int = 61
-    log_exp_num: int = 256
-    phy_exp_num: int = 288
-    ep_rank: int = 0
-    ep_size: int = 144
-    moe_inter_size: int = 2048
-    hidden_size: int = 7168
-    use_fp8: bool = False
-    quant_group_size: int = 64
-
-
-class FakeResult:
-    def __init__(self, config: TestMoeConfig):
-        self.layer_id: int = random.randint(0, config.layer_num - 1)
-        self.layer_id_buf = torch.tensor([self.layer_id], dtype=torch.int32)
-        self.logic_expert_cnt = torch.randint(
-            0, config.layer_num, (config.log_exp_num,), dtype=torch.int32
-        )
-        max_exp_num = config.phy_exp_num - config.log_exp_num + 1
-        exp_per_ep = config.phy_exp_num // config.ep_size
-        self.log2phy = torch.randint(
-            0, config.phy_exp_num, (config.log_exp_num, max_exp_num), dtype=torch.int32
-        )
-        self.phy2log = torch.randint(
-            0, config.log_exp_num, (config.phy_exp_num,), dtype=torch.int32
-        )
-
-        if config.use_fp8:
-            self.moe_w1 = torch.randn(
-                (exp_per_ep, config.moe_inter_size * 2, config.hidden_size),
-            ).to(dtype=torch.float8_e4m3fn)
-            self.moe_w2 = torch.randn(
-                (exp_per_ep, config.hidden_size, config.moe_inter_size),
-            ).to(dtype=torch.float8_e4m3fn)
-            self.moe_w1_s = torch.randn(
-                (
-                    exp_per_ep,
-                    config.moe_inter_size * 2 // config.quant_group_size,
-                    config.hidden_size // config.quant_group_size,
-                ),
-                dtype=torch.float32,
-            )
-            self.moe_w2_s = torch.randn(
-                (
-                    exp_per_ep,
-                    config.hidden_size // config.quant_group_size,
-                    config.moe_inter_size // config.quant_group_size,
-                ),
-                dtype=torch.float32,
-            )
-        else:
-            self.moe_w1 = torch.randn(
-                (exp_per_ep, config.moe_inter_size * 2, config.hidden_size),
-                dtype=torch.bfloat16,
-            )
-            self.moe_w2 = torch.randn(
-                (exp_per_ep, config.hidden_size, config.moe_inter_size),
-                dtype=torch.bfloat16,
-            )
-            self.moe_w1_s = torch.empty([0])
-            self.moe_w2_s = torch.empty([0])
-
-
-class FakeExpertBalancer:
-    def __init__(self, res: FakeResult):
-        self.res = res
-
-    def create_balance_plan(self, log_stats: torch.Tensor, gpu_loads: torch.Tensor):
-        return (
-            self.res.layer_id_buf,
-            self.res.logic_expert_cnt,
-            self.res.log2phy,
-            self.res.phy2log,
-        )
-
-    def load_moe_weight(
-        self,
-        layer_id_tensor: torch.Tensor,
-        ep_rank: int,
-        ep_size: int,
-        phy2log: torch.Tensor,
-    ):
-        layer_id = layer_id_tensor.item()
-        return (
-            layer_id,
-            self.res.moe_w1,
-            self.res.moe_w2,
-            self.res.moe_w1_s,
-            self.res.moe_w2_s,
-        )
-
-
 class TestEplbPyWrapper(unittest.TestCase):
-    def __init__(self, methodName: str = "runTest") -> None:
-        super().__init__(methodName)
-        sys.path.append(os.environ["TEST_SRCDIR"] + "/rtp_llm/rtp_llm/cpp/eplb/test")
 
-    def _single_test(self, config: TestMoeConfig):
-        eplb_op = EplbPyWrapperOP()
-        res = FakeResult(config)
-        expert_balancer = FakeExpertBalancer(res)
-        eplb_op.init(expert_balancer)
-        logic_expert_counts = torch.tensor([[1, 2, 3, 4]])
-        physic_expert_counts = torch.tensor([[1, 0, -3, 4]])
-        eplb_op.create_balance_plan(logic_expert_counts, physic_expert_counts)
-        eplb_op.load_moe_weight(config.ep_rank, config.ep_size)
+    def setUp(self):
+        runtime_module = fake_runtime_module()
+        runtime_module.start()
+        self.addCleanup(runtime_module.stop)
+        self.model = FakeModel()
+        self.wrapper = EplbPyWrapperOP()
+        self.addCleanup(self.wrapper.destroy)
+        # All bridge entry points release the GIL in the test DSO.
+        self.wrapper.initialize(self.model, ep_rank=1, ep_size=2, model_id=1)
 
-        (
-            layer_id,
-            layer_id_buf,
-            logic_expert_cnt,
-            log2phy,
-            phy2log,
-            moe_weight_1,
-            moe_weight_2,
-            moe_w1_s,
-            moe_w2_s,
-        ) = eplb_op.get_result()
+    def test_constructor_passes_explicit_layers_options_and_identity(self):
+        self.assertEqual(self.model.state.calls, ["get_layers"])
+        self.assertEqual(self.model.state.identity, (1, 2, 1))
+        self.assertEqual(
+            self.model.state.options,
+            {
+                "eplb_mode": 3,
+                "eplb_update_time": 7,
+                "eplb_stats_window_size": 3,
+                "eplb_balance_layer_per_step": 2,
+                "balance_method": "round",
+            },
+        )
 
-        assert layer_id == res.layer_id
-        torch.testing.assert_close(layer_id_buf, res.layer_id_buf)
-        torch.testing.assert_close(logic_expert_cnt, res.logic_expert_cnt)
-        torch.testing.assert_close(log2phy, res.log2phy)
-        torch.testing.assert_close(phy2log, res.phy2log)
-        torch.testing.assert_close(moe_weight_1, res.moe_w1)
-        torch.testing.assert_close(moe_weight_2, res.moe_w2)
+    def test_tensor_is_forwarded_with_original_storage_and_stride(self):
+        counts = torch.arange(12, dtype=torch.int32).reshape(3, 4).t()
+        self.wrapper.record_step(counts)
+        runtime = self.model.state.runtime()
+        self.assertEqual(runtime.counts.data_ptr(), counts.data_ptr())
+        self.assertEqual(runtime.counts.stride(), counts.stride())
+        torch.testing.assert_close(runtime.counts, counts)
 
-        if config.use_fp8:
-            torch.testing.assert_close(moe_w1_s, res.moe_w1_s)
-            torch.testing.assert_close(moe_w2_s, res.moe_w2_s)
+    def test_balance_result_and_config_update_are_forwarded(self):
+        self.model.state.apply_on_calls = {2, 3}
+        self.wrapper.record_step(torch.tensor([[2, 3]], dtype=torch.int32))
+        self.assertFalse(self.wrapper.balance())
+        self.assertTrue(self.wrapper.balance())
+        self.wrapper.update_config(mode=0, update_time=13)
+        self.assertFalse(self.wrapper.balance())
+        self.assertIn(("update", 0, 13), self.model.state.calls)
+        self.assertEqual(self.model.state.applied, 1)
 
-    def test_create_balance_plan_bf16(self):
-        config = TestMoeConfig()
-        self._single_test(config)
+    def test_python_failure_propagates_to_caller(self):
+        with patch.object(
+            FakeRuntime, "record_step", side_effect=RuntimeError("record failed")
+        ):
+            with self.assertRaisesRegex(RuntimeError, "record failed"):
+                self.wrapper.record_step(torch.zeros((1, 2), dtype=torch.int32))
 
-    def test_create_balance_plan_fp8(self):
-        config = TestMoeConfig()
-        config.use_fp8 = True
-        self._single_test(config)
+    def test_runtime_is_released_with_gil_when_destroyed(self):
+        reference = self.model.state.runtime
+        self.assertIsNotNone(reference())
+        self.wrapper.destroy()
+        self.assertIsNone(reference())
+        self.assertTrue(self.model.state.destroyed)
 
 
 if __name__ == "__main__":

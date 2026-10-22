@@ -72,6 +72,12 @@ dsv4_sm100_py_test(
     deps = _MODEL_TEST_DEPS + ["//rtp_llm/models_py:models"],
 )
 
+dsv4_py_test(
+    name = "test_moe_warmup",
+    gpu_count = 0,
+    deps = _MODEL_TEST_DEPS + ["//rtp_llm/models_py:models"],
+)
+
 _PERF_TESTS = [
     "test_fused_inv_rope_fp8_quant_perf",
     "test_fused_rmsnorm_rope_perf",
@@ -137,7 +143,7 @@ _PAIRED_GPU_TESTS = [
 
 test_suite(
     name = "dsv4_cuda13_unit",
-    tests = [":" + name for name in _CP_HELPER_TESTS + _MODEL_CONTRACT_TESTS + _GPU_TESTS] + _MOVED_CONTRACT_TESTS + _PAIRED_GPU_TESTS,
+    tests = [":" + name for name in _CP_HELPER_TESTS + _MODEL_CONTRACT_TESTS + _GPU_TESTS] + _MOVED_CONTRACT_TESTS + _PAIRED_GPU_TESTS + [":test_moe_warmup"],
 )
 
 # The ARM lane covers every runnable ordinary target. x86 additionally checks
@@ -148,6 +154,7 @@ test_suite(
         ":test_dsv4_kernel_jit_warmup_x86",
         ":test_hc_impl_x86",
         ":test_layer_profiler_ranges_x86",
+        ":test_moe_warmup_x86",
     ] + [name + "_x86" for name in _PAIRED_GPU_TESTS],
 )
 

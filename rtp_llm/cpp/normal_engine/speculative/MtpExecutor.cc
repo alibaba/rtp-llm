@@ -918,8 +918,6 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
             // instantiate a PROPOSE wrapper for that graph.
             if (!dspark_prefill_commit_only_) {
                 model_params.eplb_config = params.eplb_config;
-                // Draft reports load; legacy expert rearrangement remains target-only.
-                model_params.eplb_config.eplb_mode = EplbMode::NONE;
                 draft_model_.reset(new PyWrappedModel(model_params,
                                                       params.py_sp_model,
                                                       false,
@@ -2278,7 +2276,9 @@ GptModelOutputs MtpExecutor::runDraftPrefillForward(GptModelInputs& model_input)
     // Use sp_prefill_draft_model_ if CUDA graph is enabled, otherwise use draft_model_.
     auto* draft_prefill_model = sp_prefill_draft_model_ ? sp_prefill_draft_model_.get() : draft_model_.get();
     RTP_LLM_CHECK_WITH_INFO(draft_prefill_model != nullptr, "commit model is null before forward");
-    auto draft_prefill_model_output = draft_prefill_model->forward(model_input);
+    auto commit_input               = model_input;
+    commit_input.is_draft_commit    = true;
+    auto draft_prefill_model_output = draft_prefill_model->forward(commit_input);
     // Ordinary MTP chains this output into the next autoregressive draft step.
     maybeOverrideLastHiddenWithMtpBuffer(draft_prefill_model_output, *draft_prefill_model);
     return draft_prefill_model_output;
@@ -2530,7 +2530,9 @@ absl::Status MtpExecutor::process(const std::list<GenerateStreamPtr>& streams, i
 }
 
 bool MtpExecutor::updateEplbConfig(const EPLBConfig& config) {
-    return model_ ? model_->updateEplbConfig(config) : true;
+    const bool target_updated = !model_ || model_->updateEplbConfig(config);
+    const bool draft_updated  = !draft_model_ || draft_model_->updateEplbConfig(config);
+    return target_updated && draft_updated;
 }
 
 void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,

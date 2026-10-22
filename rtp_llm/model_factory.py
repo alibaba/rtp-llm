@@ -489,6 +489,9 @@ class ModelFactory:
         # Ensure max_seq_len matches main model
         propose_model_config.max_seq_len = model_config.max_seq_len
         propose_model_config.quantization = sp_config.quantization
+        # Draft weights and routing must use the same physical expert capacity
+        # as the C++ draft balancer. Each model still owns its runtime state.
+        propose_model_config.eplb_config = copy.deepcopy(model_config.eplb_config)
 
         logging.info(
             f"load propose model from tokenizer_path: {propose_model_config.tokenizer_path}, "

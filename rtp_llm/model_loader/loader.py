@@ -20,8 +20,8 @@ from rtp_llm.model_loader.model_weight_info import (
 )
 from rtp_llm.model_loader.tensor_source import DatabaseTensorSource, TensorCollector
 from rtp_llm.model_loader.weight_module import CustomAtomicWeight, WeightModule
-from rtp_llm.ops import TaskType, VitSeparation
-from rtp_llm.utils.database import BaseDatabase, CkptDatabase
+from rtp_llm.ops import EplbMode, TaskType, VitSeparation
+from rtp_llm.utils.database import BaseDatabase
 from rtp_llm.utils.model_weight import W, WeightStyle, identity
 from rtp_llm.utils.module_util import has_module
 from rtp_llm.utils.time_util import timer_wrapper
@@ -800,23 +800,9 @@ class ModelLoader:
             phy2log_path=phy2log_path,
         )
 
-        # dynamic expert balancer
-        from rtp_llm.eplb.ep_balancer import ExpertBalancer
-
-        model_path = self.model_config.ckpt_path
-        ep_lb_database = CkptDatabase(model_path)
-        compute_dtype = self.model_config.compute_dtype
-
-        py_eplb = None
-        if weights_info.enable_eplb_:
-            py_eplb = ExpertBalancer(
-                weights_info=weights_info,
-                compute_dtype=compute_dtype,
-                phy2log=phy2log,
-                database=ep_lb_database,
-                model_config=self.model_config,
-            )
-        return py_eplb, phy2log
+        # Runtime balancing is created after the Python executor has materialized
+        # its packed weights. No checkpoint reader is retained for migrations.
+        return None, phy2log
 
     def _init_eplb_weight(self, weight: ModelWeights, device: str):
         expert_num = self._load_config.expert_num
@@ -824,9 +810,8 @@ class ModelLoader:
         layer_num = self._load_config.num_layers
         phy2log = self._load_config.phy2log
 
-        if expert_num == 0 or (
-            not self._weights_info.enable_eplb_ and redundant_expert == 0
-        ):
+        balance_enabled = self.model_config.eplb_config.eplb_mode != EplbMode.NONE
+        if expert_num == 0 or (not balance_enabled and redundant_expert == 0):
             logging.info("don't need to init eplb weight, skip...")
             return
 

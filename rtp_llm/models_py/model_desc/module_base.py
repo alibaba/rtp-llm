@@ -97,6 +97,10 @@ class GptModelBase(nn.Module):
     def capture_context(self, requested: bool) -> CaptureContext:
         return self._capture_context.for_forward(requested)
 
+    def get_eplb_layers(self):
+        """Return the model's initialized, layer-indexed EPLB descriptors."""
+        raise NotImplementedError(f"{type(self).__name__} does not support EPLB")
+
     def initialize(self, init_resource: PyModelInitResources) -> bool:
         self.kv_cache = init_resource.kv_cache
         if self.kv_cache is not None:

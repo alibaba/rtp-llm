@@ -11,7 +11,7 @@ Three forward variants:
     ``_forward_topk_bsN``    — graph-capture top-K dispatch: iterates only
     the K = ``cfg.n_activated_experts`` active slots per token (via
     ``torch.index_select`` on stacked routed weights), instead of all
-    ``cfg.n_routed_experts``. Used when ``ep_size==1`` and the captured
+    ``cfg.physical_expert_num``. Used when ``ep_size==1`` and the captured
     batch size N ≤ ``MOE_LOCAL_LOOP_TOPK_MAX_N`` (default 32). Replaces a
     256-expert × 3-GEMM unconditional loop with N×K×3 GEMMs per layer
     (e.g. bs=1: 768→18, bs=8: 768→144).
@@ -200,7 +200,20 @@ class LocalLoopExecutor(Fp8Fp4ExecutorBase):
             )
 
         self.experts = nn.ModuleList(
-            [_expert_at(i) for i in range(cfg.n_routed_experts)]
+            [_expert_at(i) for i in range(cfg.physical_expert_num)]
+        )
+
+    def get_eplb_weights(self) -> tuple[torch.Tensor, ...]:
+        return (
+            self._W1_w,
+            self._W1_s,
+            self._W1_s_gemm,
+            self._W2_w,
+            self._W2_s,
+            self._W2_s_gemm,
+            self._W3_w,
+            self._W3_s,
+            self._W3_s_gemm,
         )
 
     def dense_gemm_warmup_weights(self):
@@ -372,7 +385,7 @@ class LocalLoopExecutor(Fp8Fp4ExecutorBase):
               ≈40× less wasted compute on inactive experts)
             * input quant runs ONCE per layer (vs. once per expert call → 256x)
         """
-        _validate_topk_indices(indices, self.cfg.n_routed_experts)
+        _validate_topk_indices(indices, self.cfg.physical_expert_num)
         from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import fp8_fp4_gemm_nt
         from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
             sgl_per_token_group_quant_fp8,
@@ -506,7 +519,7 @@ class LocalLoopExecutor(Fp8Fp4ExecutorBase):
               layer per slot k = 576 per layer total. Capture overhead grows
               proportionally. The dispatch caps at `_topk_dispatch_max_n()`.
         """
-        _validate_topk_indices(indices, self.cfg.n_routed_experts)
+        _validate_topk_indices(indices, self.cfg.physical_expert_num)
         from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import fp8_fp4_gemm_nt
         from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
             sgl_per_token_group_quant_fp8,

@@ -1146,7 +1146,9 @@ grpc::Status LocalRpcServer::UpdateEplbConfig(grpc::ServerContext*             c
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "Invalid eplb mode");
     }
     config.eplb_update_time = request->update_time();
-    engine_->updateEplbConfig(config);
+    if (!engine_->updateEplbConfig(config)) {
+        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "Engine rejected EPLB configuration update");
+    }
     return grpc::Status::OK;
 }
 

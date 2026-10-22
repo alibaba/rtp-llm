@@ -220,6 +220,7 @@ TEST_F(ModelDataTest, testShapeHintsCarryTpControlPlaneAndCacheGeometry) {
     inputs.need_all_hidden_states    = true;
     inputs.need_moe_gating           = true;
     inputs.warmup                    = true;
+    inputs.is_draft_commit           = true;
     inputs.skip_run                  = true;
     inputs.is_fake_stream            = true;
     inputs.is_target_verify          = true;
@@ -239,6 +240,7 @@ TEST_F(ModelDataTest, testShapeHintsCarryTpControlPlaneAndCacheGeometry) {
     EXPECT_TRUE(has(GptModelInputControlFlag::kControlNeedAllHiddenStates));
     EXPECT_TRUE(has(GptModelInputControlFlag::kControlNeedMoeGating));
     EXPECT_TRUE(has(GptModelInputControlFlag::kControlWarmup));
+    EXPECT_TRUE(has(GptModelInputControlFlag::kControlDraftCommit));
     EXPECT_TRUE(has(GptModelInputControlFlag::kControlSkipRun));
     EXPECT_TRUE(has(GptModelInputControlFlag::kControlFakeStream));
     EXPECT_TRUE(has(GptModelInputControlFlag::kControlTargetVerify));
