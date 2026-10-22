@@ -98,10 +98,13 @@ class GrpcExecutorOverloadTest {
 
     private static void awaitNoPinned(PooledByteBufAllocator allocator) throws InterruptedException {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-        while (allocator.pinnedDirectMemory() != 0 && System.nanoTime() < deadline) {
+        while (System.nanoTime() < deadline) {
+            // Observe one actual zero. A later HTTP/2 PING may legitimately allocate another
+            // small buffer between this read and a repeated assert; that is not retained payload.
+            if (allocator.pinnedDirectMemory() == 0) return;
             Thread.sleep(10);
         }
-        assertEquals(0, allocator.pinnedDirectMemory(), "retained direct buffers after RPC cleanup");
+        fail("retained direct buffers after RPC cleanup: " + allocator.pinnedDirectMemory());
     }
 
     private static class BytesMarshaller implements MethodDescriptor.Marshaller<byte[]> {
@@ -123,7 +126,7 @@ class GrpcExecutorOverloadTest {
         final Server server;
         final ManagedChannel channel;
 
-        Fixture() throws IOException {
+        Fixture() throws Exception {
             var service = ServerServiceDefinition.builder("overload.Test").addMethod(METHOD,
                     (ServerCall<byte[], byte[]> call, Metadata headers) -> {
                         calls.incrementAndGet();
@@ -142,6 +145,7 @@ class GrpcExecutorOverloadTest {
                     .withChildOption(ChannelOption.ALLOCATOR, allocator)
                     .intercept(new GrpcOverloadInterceptor(executor)).addService(service).build().start();
             channel = NettyChannelBuilder.forAddress("127.0.0.1", server.getPort()).usePlaintext().build();
+            GrpcReceivingGuardRepro.awaitReady(channel);
         }
 
         ClientCall<byte[], byte[]> newCall() {
