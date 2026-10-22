@@ -43,7 +43,14 @@ genrule(
         "predict_v2_pb2_grpc.py",
         "__init__.py",
     ],
-    cmd = "$(location :create_grpc_proto) $(@D)",
+    # Use the configured execution Python for the real py_binary launcher.
+    cmd = """set -eu
+: "$${PYTHON_BIN_PATH:?PYTHON_BIN_PATH must identify the configured execution Python}"
+case "$${PYTHON_BIN_PATH}" in
+    */*) export PATH="$${PYTHON_BIN_PATH%/*}:$${PATH:-/usr/bin:/bin}" ;;
+esac
+exec "$${PYTHON_BIN_PATH}" "$(execpath :create_grpc_proto)" "$(@D)"
+""",
     tools = [":create_grpc_proto"],
 )
 
