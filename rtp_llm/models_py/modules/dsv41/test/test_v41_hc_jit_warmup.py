@@ -1,9 +1,10 @@
 """CPU contracts for V4.1 delayed-HC startup compilation; no GPU launches."""
 
 import contextlib
+import os
 import sys
 import unittest
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock, patch
 
 import torch
@@ -12,6 +13,10 @@ from rtp_llm.models_py.modules.base.cuda.norm import RMSNorm
 from rtp_llm.models_py.modules.dsv41.hc import v41_jit_warmup as warmup
 from rtp_llm.models_py.modules.dsv41.hc.delayed import DelayedHCUnit
 from rtp_llm.models_py.modules.dsv41.test import test_mhc_lazy_backward as _mhc_tests
+
+_FUSED_PRE_MODULE = (
+    "rtp_llm.models_py.3rdparty.tile_kernels.modeling.mhc.ops.pre_big_fuse"
+)
 
 
 def unit(*, eps=1e-6, cls=DelayedHCUnit):
@@ -45,17 +50,30 @@ class V41HCJitWarmupCPU(unittest.TestCase):
     def setUp(self):
         warmup._WARMED_KEYS.clear()
         self.addCleanup(warmup._WARMED_KEYS.clear)
+        backend = patch.dict(
+            os.environ, {"DSV4_MHC_PRE_GEMM_BACKEND": "tilelang_single"}
+        )
+        backend.start()
+        self.addCleanup(backend.stop)
 
     def _mock_device(self, stack):
         def run(_label, _description, launch, *, device):
             return launch()
 
         norm = _mhc_tests.MHCLazyBackwardTest().load_norm()
+        norm_kernel = ModuleType("_test_tile.mhc.norm_fn_kernel")
+        norm_kernel.round_to_tf32 = lambda value: value
+        norm_kernel._mhc_pre_norm_fn_fwd_mul = Mock()
+        with patch.dict(sys.modules, {norm_kernel.__name__: norm_kernel}):
+            fused_pre = _mhc_tests.MHCLazyBackwardTest().load_kernels(
+                "pre_big_fuse", {"_mhc_pre_big_fuse": Mock()}
+            )
         stack.enter_context(
             patch.dict(
                 sys.modules,
                 {
                     "rtp_llm.models_py.3rdparty.tile_kernels.modeling.mhc.ops.norm_fn": norm,
+                    _FUSED_PRE_MODULE: fused_pre,
                 },
             )
         )
@@ -120,6 +138,113 @@ class V41HCJitWarmupCPU(unittest.TestCase):
             )
         )
 
+    def _runtime_fused_split(self, tokens):
+        # Execute the real wrapper on CPU tensors; only native launches are
+        # replaced. This observes its dispatch, not a copied planner formula.
+        op = sys.modules[_FUSED_PRE_MODULE]
+        with patch.object(op, "_run_deepgemm_splitk_gemm") as gemm:
+            op.mhc_pre_big_fuse(
+                torch.empty(1, tokens, 4, 5120, dtype=torch.bfloat16),
+                torch.empty(24, 20480),
+                torch.empty(3),
+                torch.empty(24),
+                1e-6,
+                1e-6,
+                1e-6,
+                2.0,
+                20,
+                previous_pre_mix=torch.empty(1, tokens, 4),
+                gemm_backend="deepgemm",
+            )
+        return gemm.call_args.args[-1]
+
+    def test_fused_prewarm_covers_runtime_splits_under_sm_budgets(self):
+        owner = block()
+        for budget in (1, 16, 80, 148):
+            for maximum in (65, 1, 64, 128, 384, 512, 4096):
+                for has_pairs in (False, True):
+                    with self.subTest(
+                        budget=budget, maximum=maximum, pairs=has_pairs
+                    ), contextlib.ExitStack() as stack:
+                        warmup._WARMED_KEYS.clear()
+                        self._mock_device(stack)
+                        stack.enter_context(
+                            patch.dict(
+                                os.environ, {"DSV4_MHC_PRE_GEMM_BACKEND": "deepgemm"}
+                            )
+                        )
+                        sms = stack.enter_context(
+                            patch.object(
+                                warmup.common,
+                                "_get_deep_gemm_num_sms",
+                                return_value=budget,
+                            )
+                        )
+                        stack.enter_context(
+                            patch.object(warmup, "can_fuse_big_pre", return_value=True)
+                        )
+                        for name in (
+                            "_launch_small_prenorm",
+                            "_launch_tilelang_chain",
+                            "_launch_tilelang_norm",
+                        ):
+                            stack.enter_context(patch.object(warmup, name))
+                        fused = stack.enter_context(
+                            patch.object(warmup, "_launch_fused_pre")
+                        )
+                        mega = stack.enter_context(patch.object(warmup, "_launch_mega"))
+                        root = model(owner if has_pairs else owner.attn_hc)
+                        warmup.warmup_v41_hc_jit(root, max_m=maximum, device="cpu")
+                        covered = {
+                            self._runtime_fused_split(c.args[1])
+                            for c in fused.call_args_list
+                        }
+                        reachable = {
+                            self._runtime_fused_split(m)
+                            for m in range(1, maximum + 1, 64)
+                        }
+                        self.assertEqual(covered, reachable)
+                        if has_pairs:
+                            self.assertEqual(
+                                [c.args[1] for c in mega.call_args_list],
+                                list(warmup._mega_representative_ms(maximum, budget)),
+                            )
+                        else:
+                            sms.assert_not_called()
+                            mega.assert_not_called()
+                        count = fused.call_count
+                        warmup.warmup_v41_hc_jit(root, max_m=maximum, device="cpu")
+                        self.assertEqual(fused.call_count, count)
+
+    def test_changed_runtime_split_specs_invalidate_warmup(self):
+        root = model(unit())
+        with contextlib.ExitStack() as stack:
+            self._mock_device(stack)
+            stack.enter_context(
+                patch.dict(os.environ, {"DSV4_MHC_PRE_GEMM_BACKEND": "deepgemm"})
+            )
+            stack.enter_context(
+                patch.object(warmup, "can_fuse_big_pre", return_value=True)
+            )
+            for name in (
+                "_launch_small_prenorm",
+                "_launch_tilelang_chain",
+                "_launch_tilelang_norm",
+            ):
+                stack.enter_context(patch.object(warmup, name))
+            fused = stack.enter_context(patch.object(warmup, "_launch_fused_pre"))
+            warmup.warmup_v41_hc_jit(root, max_m=65, device="cpu")
+            count = fused.call_count
+            with patch.object(
+                sys.modules[_FUSED_PRE_MODULE],
+                "_compute_num_split",
+                side_effect=lambda block_k, k, grid: grid + 1,
+            ):
+                warmup.warmup_v41_hc_jit(root, max_m=65, device="cpu")
+                self.assertEqual(fused.call_count, count + 2)
+                warmup.warmup_v41_hc_jit(root, max_m=65, device="cpu")
+                self.assertEqual(fused.call_count, count + 2)
+
     def test_fp8_warmup_requests_both_output_modes(self):
         source = block()
         pair = (source.attn_hc, source.ffn_hc, source.ffn_norm)
@@ -156,9 +281,38 @@ class V41HCJitWarmupCPU(unittest.TestCase):
         self.assertIsNone(warmup._unit_key(owner))
 
     def test_small_prenorm_covers_every_reduction_constexpr(self):
-        self.assertEqual(warmup._small_prenorm_ms(0), ())
-        self.assertEqual(warmup._small_prenorm_ms(3), (1, 2, 3))
-        self.assertEqual(warmup._small_prenorm_ms(131072), tuple(range(1, 65)))
+        for backend, maximum in (("tilelang_single", 64), ("deepgemm", 512)):
+            with patch.dict(os.environ, {"DSV4_MHC_PRE_GEMM_BACKEND": backend}):
+                self.assertEqual(warmup._small_prenorm_ms(0), ())
+                self.assertEqual(warmup._small_prenorm_ms(3), (1, 2, 3))
+                self.assertEqual(
+                    warmup._small_prenorm_ms(131072), tuple(range(1, maximum + 1))
+                )
+
+    def test_fused_prewarm_covers_all_decode_split_variants(self):
+        with contextlib.ExitStack() as stack:
+            self._mock_device(stack)
+            stack.enter_context(
+                patch.dict(os.environ, {"DSV4_MHC_PRE_GEMM_BACKEND": "deepgemm"})
+            )
+            standalone = stack.enter_context(
+                patch.object(warmup, "_launch_small_prenorm")
+            )
+            stack.enter_context(patch.object(warmup, "_launch_mega"))
+            stack.enter_context(patch.object(warmup, "_launch_tilelang_chain"))
+            stack.enter_context(patch.object(warmup, "_launch_tilelang_norm"))
+            stack.enter_context(
+                patch.object(warmup, "can_fuse_big_pre", return_value=True)
+            )
+            fused = stack.enter_context(patch.object(warmup, "_launch_fused_pre"))
+            warmup.warmup_v41_hc_jit(model(block()), max_m=512, device="cpu")
+        self.assertEqual(
+            {call.args[1] for call in standalone.call_args_list}, set(range(1, 513))
+        )
+        covered = {
+            min(80, 148 // ((call.args[1] + 63) // 64)) for call in fused.call_args_list
+        }
+        self.assertEqual(covered, {80, 74, 49, 37, 29, 24, 21, 18})
 
     def test_mega_representatives_cover_pinned_dg_heuristic_with_bounded_memory(self):
         for sms in (1, 16, 132, 148):
@@ -408,6 +562,22 @@ class V41HCJitWarmupCPU(unittest.TestCase):
                 )
         ops.mhc_pre_norm_fn.assert_not_called()
         ops.mhc_pre_split_mixes.assert_not_called()
+
+    def test_fused_decode_prewarm_uses_prepared_tf32_weights(self):
+        source = unit()
+        prepared = torch.ones_like(source.fn)
+        ops = Mock()
+        with patch.dict(
+            os.environ, {"DSV4_MHC_PRE_GEMM_BACKEND": "deepgemm"}
+        ), patch.object(warmup, "_tile_ops", return_value=ops), patch.object(
+            warmup.v41_prenorm, "prepare_tf32_weight", return_value=prepared
+        ):
+            for tokens in (1, 65, 384, 512):
+                warmup._launch_fused_pre(source, tokens, "cpu")
+                self.assertIs(ops.mhc_pre_big_fuse.call_args.args[1], prepared)
+                self.assertEqual(
+                    ops.mhc_pre_big_fuse.call_args.kwargs["gemm_backend"], "deepgemm"
+                )
 
     def test_failure_is_not_marked_warm_and_same_configuration_can_retry(self):
         root = model(block())

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from typing import NamedTuple
+from typing import Callable, NamedTuple
 
 import torch
 
@@ -76,8 +76,9 @@ def forward_decode_layer(
     kv_cache=None,
     attn_fn=None,
     routing_metadata=None,
+    capture_input: Callable[[torch.Tensor], None] | None = None,
 ) -> torch.Tensor | PendingDecodePost:
-    """Fuse only an unobserved layer boundary; retain the old call otherwise.
+    """Resolve the layer entry, optionally capture it, then run the block.
 
     Pending tensors live in this invocation's layer loop. Graph capture records
     their producer and consumer on the current stream; replay does not reuse a
@@ -97,6 +98,10 @@ def forward_decode_layer(
                 output_fp8=_can_quantize_attention_input(layer, hidden.output, attn_fn),
             )
         hidden = hidden.materialize() if prepared is None else prepared[0]
+    # MegaMHC already produces the same layer-entry residual needed by aux
+    # capture. Observe it before forward_decode can inject Engram or reuse it.
+    if capture_input is not None:
+        capture_input(hidden)
     defer_post = can_defer_decode_post(layer, next_layer, preserve_output)
     kwargs = {"kv_cache": kv_cache}
     if routing_metadata is not None:
