@@ -156,8 +156,11 @@ class GrpcReceivingWireBudgetTest {
 
   @Test
   void queuedCompleteProducerRetainsChargedBytesUntilActualCleanup() throws Exception {
+    // Isolate this ownership fence from shared loops closing sockets in prior raw-frame tests.
+    var transport = new io.netty.channel.nio.NioEventLoopGroup(1);
     var pool = new ThreadPoolExecutor(1, 1, 0, TimeUnit.SECONDS, new LinkedBlockingQueue<>());
     var release = new CountDownLatch(1);
+    var handlerReady = new CountDownLatch(1);
     var guard = new GrpcReceivingGuard(8, 1, 5000, pool, pool, 128L << 10, 64L << 10, 64L << 10);
     var alloc = new PooledByteBufAllocator(true);
     var service =
@@ -167,10 +170,21 @@ class GrpcReceivingWireBudgetTest {
                 ServerCalls.asyncUnaryCall((byte[] b, StreamObserver<byte[]> o) -> {}))
             .build();
     var server =
-        NettyServerBuilder.forPort(0)
+        NettyServerBuilder.forAddress(new java.net.InetSocketAddress("127.0.0.1", 0))
+            .channelType(io.netty.channel.socket.nio.NioServerSocketChannel.class)
+            .bossEventLoopGroup(transport)
+            .workerEventLoopGroup(transport)
             .directExecutor()
             .callExecutor(guard)
             .addStreamTracerFactory(guard)
+            .intercept(new ServerInterceptor() {
+              @Override public <ReqT, RespT> ServerCall.Listener<ReqT> interceptCall(
+                  ServerCall<ReqT, RespT> call, Metadata headers, ServerCallHandler<ReqT, RespT> next) {
+                var listener = next.startCall(call, headers);
+                handlerReady.countDown(); // Unary handler has installed request(2).
+                return listener;
+              }
+            })
             .intercept(guard)
             .addService(service)
             .withChildOption(ChannelOption.ALLOCATOR, alloc)
@@ -178,8 +192,7 @@ class GrpcReceivingWireBudgetTest {
             .build()
             .start();
     try (var a = new GrpcReceivingGuardMatrix.Raw(server.getPort(), null)) {
-      GrpcReceivingGuardRepro.until(
-          () -> pool.getCompletedTaskCount() > 0, "handler requested before blocking");
+      assertTrue(handlerReady.await(5, TimeUnit.SECONDS), "handler requested before blocking");
       var blocked = new CountDownLatch(1);
       pool.execute(
           () -> {
@@ -219,6 +232,7 @@ class GrpcReceivingWireBudgetTest {
       guard.close();
       pool.shutdownNow();
       pool.awaitTermination(3, TimeUnit.SECONDS);
+      transport.shutdownGracefully(0, 1, TimeUnit.SECONDS).sync();
     }
   }
 
