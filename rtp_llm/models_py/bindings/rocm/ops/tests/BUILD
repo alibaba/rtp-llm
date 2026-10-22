@@ -45,6 +45,7 @@ cc_test(
         "//rtp_llm/models_py/bindings/rocm/kernels/sampling:sampling",
     ],
     tags = ["rocm"],
+    env = {"GPU_COUNT": "2"},
     exec_properties = {'gpu':'MI308X-ROCM7', 'gpu_count':'2'},
 )
 
