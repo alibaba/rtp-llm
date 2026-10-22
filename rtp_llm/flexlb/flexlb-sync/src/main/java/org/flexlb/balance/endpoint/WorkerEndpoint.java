@@ -132,6 +132,7 @@ public class WorkerEndpoint {
      * every selected, rejected, and exceptional path.</p>
      */
     public final GenerationPin tryPinGeneration() {
+        if (!status.isAvailableForScheduling()) { return null; }
         EndpointGenerationLifecycle.HandoffPermit permit =
                 generationLifecycle.tryAcquireHandoff();
         return permit == null ? null : new GenerationPin(this, permit);
@@ -150,6 +151,7 @@ public class WorkerEndpoint {
      */
     final EndpointGenerationLifecycle.HandoffPermit
             tryAcquireGenerationHandoff() {
+        if (!status.isAvailableForScheduling()) { return null; }
         return generationLifecycle.tryAcquireHandoff();
     }
 
@@ -228,6 +230,10 @@ public class WorkerEndpoint {
             generationLifecycle.completeRetirement(retirementFailure);
         }
         Failures.rethrow(retirementFailure, "Endpoint generation retirement failed");
+    }
+
+    static void executeRetirement(Runnable cleanup) {
+        RETIREMENT_EXECUTOR.execute(cleanup);
     }
 
     private void continueRetirementAfterHandoff() {

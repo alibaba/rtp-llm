@@ -13,7 +13,6 @@ import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.atomic.LongAdder;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -55,7 +54,7 @@ class GrpcCacheStatusCheckRunnerTest {
                 "test-model",
                 status, status.tryBeginCachePoll(), directory(status),
                 engineHealthReporter, workerStatusRpcClient, localKvCacheAwareManager, cacheIntervalService,
-                20, new LongAdder(), 50L, true, Runnable::run).run();
+                20, true, Runnable::run).run();
 
         assertEquals(1000, status.getCacheStatus().getAvailableKvCache());
         assertEquals(2000, status.getCacheStatus().getTotalKvCache());
@@ -91,7 +90,7 @@ class GrpcCacheStatusCheckRunnerTest {
                 directory,
                 engineHealthReporter, workerStatusRpcClient,
                 localKvCacheAwareManager, cacheIntervalService,
-                20, new LongAdder(), 50L, true, Runnable::run);
+                20, true, Runnable::run);
         runner.run();
 
         // Give some time for async execution
@@ -177,7 +176,7 @@ class GrpcCacheStatusCheckRunnerTest {
                 oldStatus, oldStatus.tryBeginCachePoll(), directory,
                 engineHealthReporter, workerStatusRpcClient,
                 localKvCacheAwareManager, cacheIntervalService,
-                20, new LongAdder(), 50L, true, Runnable::run);
+                20, true, Runnable::run);
         runner.run();
 
         response.complete(EngineRpcService.CacheStatusPB.newBuilder()
@@ -201,7 +200,7 @@ class GrpcCacheStatusCheckRunnerTest {
                 workerStatus, workerStatus.tryBeginCachePoll(), directory,
                 engineHealthReporter, workerStatusRpcClient,
                 localKvCacheAwareManager, cacheIntervalService,
-                20, new LongAdder(), 50L, debug, Runnable::run).run();
+                20, debug, Runnable::run).run();
     }
 
     private static WorkerStatus workerStatus() {

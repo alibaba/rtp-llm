@@ -478,7 +478,7 @@ final class LinearDeliveryFixture implements AutoCloseable {
         context.bindPlacement(placement, route, PublicationResult.PREPARED);
         context.bindPlacement(placement, route, PublicationResult.PUBLISHED);
         context.completePlacement(placement, PublicationResult.PUBLISHED, now);
-        assertSame(route, queueOwnership.updateQueue(PrefillState.QueueChange.ENQUEUE, route, 0L, now),
+        assertSame(route, queueOwnership.updateQueue(PrefillState.QueueChange.ENQUEUE, route, now),
                 "the selected route has a real exact queue owner before preparation");
         return route;
     }

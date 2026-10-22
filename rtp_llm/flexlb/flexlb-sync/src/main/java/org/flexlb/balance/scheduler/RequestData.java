@@ -120,8 +120,16 @@ public final class RequestData {
         }
     }
 
-    /** Terminal requests no longer need their cached input; in-progress readers keep a local reference. */
+    /** Confirmed delivery or archival releases cached input; in-progress readers keep a local reference. */
     synchronized void discardGenerateInput() { generateInput = null; }
+
+    /** Routing is final after confirmed delivery; execution retains only scalar request metadata. */
+    synchronized void releaseSchedulingInput() {
+        generateInput = null;
+        if (request != null && (!request.getBlockCacheKeys().isEmpty() || !request.getCacheAffinityKeys().isEmpty())) {
+            request = request.toBuilder().blockCacheKeys(java.util.List.of()).cacheAffinityKeys(java.util.List.of()).build();
+        }
+    }
 
     synchronized void initializeWorkerQueue(long nowMs, long sequence) {
         if (workerEnqueueSequence == 0L) {

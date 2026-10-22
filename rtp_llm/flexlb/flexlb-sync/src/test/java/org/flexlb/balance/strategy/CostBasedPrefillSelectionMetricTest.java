@@ -1,7 +1,5 @@
 package org.flexlb.balance.strategy;
 
-import org.flexlb.balance.scheduler.RequestRoute;
-
 import org.flexlb.dao.master.WorkerStatusTestSupport;
 
 import org.flexlb.config.ConfigTestSupport;
@@ -45,6 +43,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doThrow;
@@ -109,9 +108,9 @@ class CostBasedPrefillSelectionMetricTest {
     }
 
     @ParameterizedTest
-    @CsvSource({"5,1,false,BLOCKED", "50,1,false,BLOCKED", "5,2,false,SUCCESS",
-            "50,1,true,SUCCESS", "10,1,true,BLOCKED", "5,1,true,BLOCKED"})
-    void fullRequestCapacityIsSelectableOnlyWithEligibleQueuedPreemption(
+    @CsvSource({"5,1,false,SUCCESS", "50,1,false,SUCCESS", "5,2,false,SUCCESS",
+            "50,1,true,SUCCESS", "10,1,true,SUCCESS", "5,1,true,SUCCESS"})
+    void waitingOwnersDoNotConsumeDeliveryCapacityOrRequirePreemption(
             int incomingPriority, int requestLimit, boolean preemptQueued, PlacementResult.Status expectedStatus) {
         registry.close();
         config.queueScheduler().getDecision().setMaxRequests(2);
@@ -147,12 +146,10 @@ class CostBasedPrefillSelectionMetricTest {
         context.data().setSchedulingMetadata(SchedulingMetadata.explicit(
                 incomingPriority, System.currentTimeMillis() + 120_000L));
 
-        PlacementResult<RequestRoute, RoleType> result = StrategyTestSupport.select(strategy, context.data().getRequest(), context.data().getSchedulingMetadata(), RoleType.PREFILL, null);
+        PlacementResult<RequestRoute, org.flexlb.balance.scheduler.PlacementKey> result = StrategyTestSupport.select(strategy, context.data().getRequest(), context.data().getSchedulingMetadata(), RoleType.PREFILL, null);
 
         assertEquals(expectedStatus, result.status());
-        if (expectedStatus == PlacementResult.Status.BLOCKED) {
-            verify(cache, Mockito.never()).findMatchingEngines(any(), any(), any());
-        }
+        verify(cache).findMatchingEngines(any(), any(), any());
         if (result.status() == PlacementResult.Status.SUCCESS) {
             try (RequestRoute selected = result.value()) {
                 assertEquals("10.0.0.1", selected.prefill().getServerIp());
@@ -231,6 +228,64 @@ class CostBasedPrefillSelectionMetricTest {
             verify(cacheReporter).reportCacheAffinityDecision(
                     RoleType.PREFILL, "10.0.0.2", "CACHE_LEADER");
         }
+    }
+
+    @Test
+    void fullKvCacheDoesNotHideTheBestPrefixOwner() {
+        configureAffinity(600L, 5.0);
+        var leader = (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0.2:8080");
+        var status = leader.getStatus();
+        var response = StrategyTestSupport.response(RoleType.PREFILL, true,
+                0L, 1_000_000L, status.appliedStatusCursor().statusVersion() + 1L);
+        status.lock.lock();
+        try {
+            leader.publishStatus(leader.applyPreparedStatus(status,
+                    status.prepareNewStatus(WorkerStatusTestSupport.freezeStatusResponse(status, response))));
+        } finally { status.lock.unlock(); }
+        var settings = org.flexlb.balance.scheduler.QueueExecutionSettings.capture(config);
+        leader.enableQueueRuntime(settings);
+        ((PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0.1:8080")).enableQueueRuntime(settings);
+        assertEquals(0L, leader.captureRouteProjectionInputs().queue().constraints().batchKvCapacity());
+        try (RequestRoute selected = select()) {
+            assertEquals("10.0.0.2", selected.prefill().getServerIp());
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void busyCacheLeaderIsRankedBeforeDeliveryCapacity(boolean direct) {
+        if (direct) {
+            config.setScheduler(ConfigTestSupport.direct());
+        }
+        config.getDispatcher().setMaxInflightPerPrefillWorker(1);
+        configureAffinity(600L, 5.0);
+        PrefillEndpoint leader = (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0.2:8080");
+        WorkerStatus status = leader.getStatus();
+        var response = StrategyTestSupport.response(RoleType.PREFILL, true,
+                1_000_000L, 1_000_000L, status.appliedStatusCursor().statusVersion() + 1L);
+        response.setRunningQueryLen(1L);
+        status.lock.lock();
+        try {
+            leader.publishStatus(leader.applyPreparedStatus(status,
+                    status.prepareNewStatus(WorkerStatusTestSupport.freezeStatusResponse(status, response))));
+        } finally {
+            status.lock.unlock();
+        }
+        assertFalse(leader.ownership.requestCapacityAvailable(leader.requestLimit, 1));
+
+        var result = StrategyTestSupport.select(strategy, context.data().getRequest(),
+                context.data().getSchedulingMetadata(), RoleType.PREFILL, null);
+        if (direct) {
+            assertEquals(PlacementResult.Status.BLOCKED, result.status());
+            assertEquals(org.flexlb.balance.scheduler.PlacementKey.exact(
+                    RoleType.PREFILL, null, "10.0.0.2:8080"), result.blocker());
+        } else {
+            assertEquals(PlacementResult.Status.SUCCESS, result.status());
+            try (RequestRoute selected = result.value()) {
+                assertEquals("10.0.0.2", selected.prefill().getServerIp());
+            }
+        }
+        verify(cacheReporter).reportCacheAffinityDecision(RoleType.PREFILL, "10.0.0.2", "CACHE_LEADER");
     }
 
     @Test
@@ -397,7 +452,7 @@ class CostBasedPrefillSelectionMetricTest {
     }
 
     private RequestRoute select() {
-        PlacementResult<RequestRoute, RoleType> result =
+        PlacementResult<RequestRoute, org.flexlb.balance.scheduler.PlacementKey> result =
                 StrategyTestSupport.select(strategy, context.data().getRequest(), context.data().getSchedulingMetadata(), RoleType.PREFILL, null);
         assertEquals(PlacementResult.Status.SUCCESS, result.status());
         return result.value();

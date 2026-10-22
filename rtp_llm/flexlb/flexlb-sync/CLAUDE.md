@@ -124,7 +124,7 @@ This module depends on:
 External dependencies:
 - Spring Boot 2.7.18 (WebFlux for reactive programming)
 - Apache Curator 5.4.0 (ZooKeeper client)
-- gRPC 1.65.0
+- gRPC 1.65.1
 - Caffeine (local caching)
 - OpenTelemetry (distributed tracing)
 
@@ -146,10 +146,20 @@ winner rather than invoke another selector.
 Worker status is updated asynchronously by scheduled runners. `EndpointRegistry`
 owns discovered worker identities and generation-fenced endpoint publication,
 and exposes immutable routing snapshots and exact captures to strategies.
+RPC completion records validated heartbeat evidence independently of status
+application. Each generation permits one status RPC and one pending application;
+application backlog must not delay subsequent heartbeats or acknowledge unapplied
+finished-task cursors. Discovery errors retain the last known workers. Successful
+discovery removal or three validated `alive=false` responses close admission and
+request retirement; transport errors and elapsed local time do not prove death.
 
 ### Cache Integration
 The module calls `CacheAwareService` from flexlb-cache to update cache information
 received from workers. See `GrpcCacheStatusCheckRunner`.
+Cache mutation and retirement cleanup share the generation's cache lock, separate
+from status application. Replacement waits for exact endpoint drain and successful
+cache cleanup. Same-version replies reuse indexed keys while refreshing capacity;
+failed indexing leaves the acknowledged cursor unchanged so the payload is retried.
 
 ## Configuration
 

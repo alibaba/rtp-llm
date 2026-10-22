@@ -7,7 +7,6 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.eviction.DecodeCapacityAcquirer.PreemptionResult;
 import org.flexlb.balance.eviction.DecodeCapacityAcquirer;
-import org.flexlb.balance.scheduler.AdmissionHandle;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.VictimStage;
@@ -92,7 +91,7 @@ class RequestSchedulerTest {
 
             RequestContext missingPayload = context(config, 918L);
             missingPayload.data().setGenerateInputPb(null);
-            assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(), scheduler.submit(missingPayload).join().getCode());
+            assertEquals(StrategyErrorType.GENERATE_INPUT_REQUIRED.getErrorCode(), scheduler.submit(missingPayload).join().getCode());
             assertEquals(0, owner.requests.liveRequestCount());
 
             RequestContext pd = context(config, 918L);

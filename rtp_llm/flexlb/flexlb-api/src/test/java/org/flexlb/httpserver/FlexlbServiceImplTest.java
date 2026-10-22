@@ -213,6 +213,59 @@ class FlexlbServiceImplTest {
         verifyNoInteractions(observer);
     }
 
+    @ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void transportCancelAfterResponseClaimSettlesExactOwnerOnce(boolean observerThrows) {
+        CompletableFuture<Response> pending = new CompletableFuture<>();
+        when(requestScheduler.submit(any(RequestContext.class))).thenAnswer(call -> {
+            org.flexlb.balance.scheduler.SchedulerTestSupport.bindOwner(call.getArgument(0, RequestContext.class), requestState);
+            return pending;
+        });
+        var observer = mock(io.grpc.stub.ServerCallStreamObserver.class);
+        var handler = new java.util.concurrent.atomic.AtomicReference<Runnable>();
+        org.mockito.Mockito.doAnswer(call -> { handler.set(call.getArgument(0)); return null; })
+                .when(observer).setOnCancelHandler(any());
+        org.mockito.Mockito.doAnswer(call -> {
+            handler.get().run();
+            if (observerThrows) { throw new IllegalStateException("response delivery failed"); }
+            return null;
+        }).when(observer).onNext(any());
+        service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                .setRequestId(12358L).build(), observer);
+        var response = new Response();
+        response.setSuccess(true);
+        pending.complete(response);
+        handler.get().run();
+        verify(requestState, times(1)).cancel(any(RequestContext.class),
+                org.mockito.ArgumentMatchers.eq(0L), org.mockito.ArgumentMatchers.eq(CancelReason.CLIENT_CANCELLED));
+        verify(observer, times(1)).onNext(any());
+    }
+
+    @Test
+    void cancellationBeforeForwardResultReconcilesOriginalMasterOnce() {
+        when(masterStatusService.isNeedConsistency()).thenReturn(true);
+        when(masterStatusService.isMaster()).thenReturn(false);
+        var pending = new CompletableFuture<FlexlbGrpcForwarder.MasterForwardResult>();
+        when(grpcForwarder.forwardScheduleToMaster(any())).thenReturn(pending);
+        when(grpcForwarder.forwardCompensatingCancelToMaster(any(), any(), any())).thenReturn(
+                CompletableFuture.completedFuture(FlexlbGrpcForwarder.CancelForwardResult.forwarded(
+                        FlexlbScheduleProtocol.FlexlbCancelResponsePB.getDefaultInstance(), "master:7001")));
+        var observer = mock(io.grpc.stub.ServerCallStreamObserver.class);
+        var handler = new java.util.concurrent.atomic.AtomicReference<Runnable>();
+        org.mockito.Mockito.doAnswer(call -> { handler.set(call.getArgument(0)); return null; })
+                .when(observer).setOnCancelHandler(any());
+        service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                .setRequestId(12359L).build(), observer);
+        handler.get().run();
+        pending.complete(FlexlbGrpcForwarder.MasterForwardResult.forwarded(
+                FlexlbScheduleProtocol.FlexlbScheduleResponsePB.newBuilder().setSuccess(true).build(), "master:7001"));
+        handler.get().run();
+        verify(grpcForwarder, times(1)).forwardCompensatingCancelToMaster(any(),
+                org.mockito.ArgumentMatchers.eq("master:7001"), any());
+        verify(observer, never()).onNext(any());
+        verify(requestScheduler, never()).submit(any());
+    }
+
     @Test
     void testSchedule_alreadyCancelledContextCannotRaceAheadOfRegistration() {
         when(masterStatusService.isNeedConsistency()).thenReturn(false);

@@ -155,7 +155,8 @@ public class EngineLocalView {
     }
 
     /**
-     * Get all cache block IDs of an engine
+     * Get all cache block IDs of an engine. The returned set is borrowed;
+     * callers hold the generation's cacheMutationLock while iterating it.
      *
      * @param engineIPort Engine IP
      * @return Cache block ID set

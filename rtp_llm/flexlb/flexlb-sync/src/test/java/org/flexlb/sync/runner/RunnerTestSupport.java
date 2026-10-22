@@ -18,6 +18,15 @@ import java.util.Map;
 
 /** Package-local fixtures for the frozen status/endpoint composition boundary. */
 public final class RunnerTestSupport {
+    public static void awaitCondition(java.util.function.BooleanSupplier condition) {
+        long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(5);
+        while (!condition.getAsBoolean()) {
+            org.junit.jupiter.api.Assertions.assertTrue(System.nanoTime() < deadline, "condition did not become true within 5 seconds");
+            java.util.concurrent.locks.LockSupport.parkNanos(java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(1));
+            org.junit.jupiter.api.Assertions.assertFalse(Thread.currentThread().isInterrupted(), "wait interrupted");
+        }
+    }
+
 
     private RunnerTestSupport() {
     }

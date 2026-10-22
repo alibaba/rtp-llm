@@ -10,7 +10,6 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.VictimStage;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.ServerStatus;
-import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.master.WorkerStatusTestSupport;
@@ -20,83 +19,19 @@ import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.List;
-import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
-/** Real queue replacement cannot revoke the incoming publication after a victim callback fails. */
+/** Waiting ownership is independent of delivery slots; failed publication rolls back only its owner. */
 @Timeout(15)
 class QueuedPublicationNotificationFailureTest {
-    @ParameterizedTest
-    @ValueSource(booleans = {true, false})
-    void actualReplacementKeepsIncomingAndSettlesOrRetainsVictim(boolean metricsFail) throws Exception {
-        try (var fixture = new Fixture()) {
-            var low = fixture.context(9301L, 20);
-            var oldRoute = fixture.publish(low);
-            assertEquals(1L, fixture.prefill.ownership.progress().queueDepth());
-            var failure = new IllegalStateException(metricsFail ? "victim metrics failed" : "victim release failed");
-            if (metricsFail) {
-                fixture.metricsFailure = failure;
-            } else {
-                fixture.failedReservation = oldRoute.decodeReservation();
-                fixture.releaseFailure = failure;
-            }
-            var incoming = fixture.context(9302L, 80);
-            var selected = fixture.select(incoming);
-            var handle = fixture.queue.claimAdmissionHandle(9302L, incoming.data().getFuture());
-            assertNotNull(handle);
-            try (var plan = RequestProtocolTestSupport.plan(incoming, selected)) {
-                var published = fixture.queue.enqueueRoute(plan);
-                assertEquals(PlacementResult.Status.SUCCESS, published.status());
-                var exact = published.value();
-                assertSame(exact, incoming.snapshot().route());
-                assertTrue(incoming.snapshot().placement().published());
-                assertNull(incoming.snapshot().delivery());
-                assertFalse(incoming.data().getFuture().isDone());
-                assertTrue(fixture.decode.ownership(exact.decodeReservation()).owned());
-                assertEquals(List.of(exact), WorkerBatcherTestSupport.capture(EndpointTestSupport.batcher(fixture.prefill)).items());
-                plan.close();
-                assertSame(exact, incoming.snapshot().route());
-                assertTrue(fixture.decode.ownership(exact.decodeReservation()).owned());
-                verify(fixture.decode, never()).release(eq(exact.decodeReservation()),
-                        eq(DecodeResources.ReleaseReason.LOCAL_ROLLBACK));
-            } finally { handle.finish(); }
-            assertEquals(StrategyErrorType.PRIORITY_PREEMPTED.getErrorCode(),
-                    low.data().getFuture().get(2L, TimeUnit.SECONDS).getCode());
-            assertEquals(1L, fixture.prefill.ownership.progress().queueDepth());
-            assertFalse(fixture.prefill.control(oldRoute, org.flexlb.balance.scheduler.WorkerBatcher.Control.REMOVE));
-            assertNotNull(SchedulerTestSupport.failure(fixture.queue));
-            if (metricsFail) {
-                assertEquals(ContextResult.Phase.CLOSED, low.snapshot().phase());
-                assertFalse(fixture.decode.ownership(oldRoute.decodeReservation()).owned());
-                assertNull(fixture.queue.requests.findActive(9301L));
-            } else {
-                assertEquals(ContextResult.Phase.ENDING, low.snapshot().phase());
-                assertFalse(low.snapshot().close().decodeSettled());
-                assertTrue(fixture.decode.ownership(oldRoute.decodeReservation()).owned());
-                assertSame(low, fixture.queue.requests.findActive(9301L));
-                fixture.releaseFailure = null;
-                fixture.queue.requestCleanup(low);
-                assertEquals(ContextResult.Phase.CLOSED, low.snapshot().phase());
-                assertFalse(fixture.decode.ownership(oldRoute.decodeReservation()).owned());
-            }
-            assertTrue(incoming.snapshot().preparedDelivery());
-            assertTrue(fixture.decode.ownership(incoming.snapshot().route().decodeReservation()).owned());
-            assertEquals(1, fixture.decode.resourceSnapshot().queuedCount());
-            assertEquals(0, fixture.decode.resourceSnapshot().activeDispatchPermits());
-            assertEquals(0, fixture.decode.resourceSnapshot().confirmedCount());
-        }
-    }
-
     @Test
-    void firstVictimFailureDoesNotSkipSecondPhysicallyReplacedVictim() throws Exception {
-        try (var fixture = new Fixture(2)) {
+    void waitingOwnersAreNotVictimsOfDeliveryCapacity() throws Exception {
+        try (var fixture = new Fixture(1)) {
             var first = fixture.context(9321L, 20);
             var firstRoute = fixture.publish(first);
             var second = fixture.context(9322L, 30);
@@ -106,26 +41,23 @@ class QueuedPublicationNotificationFailureTest {
             observation.setRunningQueryLen(1L);
             fixture.prefill.publishStatus(fixture.prefill.applyStatusHeartbeat(fixture.prefill.getStatus(),
                     WorkerStatusTestSupport.freezeStatusResponse(fixture.prefill.getStatus(), observation)));
-            assertEquals(3L, fixture.prefill.ownership.admissionSummary(80, fixture.prefill.requestLimit).occupiedRequests());
-            fixture.metricsFailure = new IllegalStateException("first victim metrics failed");
+            assertFalse(fixture.prefill.ownership.requestCapacityAvailable(fixture.prefill.requestLimit, 1));
+            fixture.metricsFailure = new IllegalStateException("unused victim metric");
             var incoming = fixture.context(9323L, 80);
             var actual = fixture.publish(incoming);
-            assertEquals(List.of(actual), WorkerBatcherTestSupport.capture(EndpointTestSupport.batcher(fixture.prefill)).items());
-            for (var victim : List.of(first, second)) {
-                assertEquals(StrategyErrorType.PRIORITY_PREEMPTED.getErrorCode(),
-                        victim.data().getFuture().get(2L, TimeUnit.SECONDS).getCode());
-                assertEquals(ContextResult.Phase.CLOSED, victim.snapshot().phase());
+
+            var items = WorkerBatcherTestSupport.capture(EndpointTestSupport.batcher(fixture.prefill)).items();
+            assertEquals(3, items.size());
+            assertTrue(items.containsAll(List.of(firstRoute, secondRoute, actual)));
+            for (var owner : List.of(first, second, incoming)) {
+                assertFalse(owner.data().getFuture().isDone());
+                assertTrue(owner.snapshot().preparedDelivery());
+                assertNull(owner.snapshot().delivery());
+                assertTrue(fixture.decode.ownership(owner.snapshot().route().decodeReservation()).owned());
             }
-            verify(fixture.reporter).reportVictim(30, 80, "prefill_queued", "prefill_inflight_requests");
-            assertFalse(fixture.decode.ownership(firstRoute.decodeReservation()).owned());
-            assertFalse(fixture.decode.ownership(secondRoute.decodeReservation()).owned());
-            assertTrue(fixture.decode.ownership(actual.decodeReservation()).owned());
-            assertTrue(incoming.snapshot().preparedDelivery());
-            assertNull(incoming.snapshot().delivery());
-            assertEquals(1, fixture.decode.resourceSnapshot().queuedCount());
+            verify(fixture.reporter, never()).reportVictim(anyInt(), anyInt(), anyString(), anyString());
+            assertEquals(3, fixture.decode.resourceSnapshot().queuedCount());
             assertEquals(0, fixture.decode.resourceSnapshot().activeDispatchPermits());
-            assertEquals(0, fixture.decode.resourceSnapshot().confirmedCount());
-            assertNotNull(SchedulerTestSupport.failure(fixture.queue));
         }
     }
 

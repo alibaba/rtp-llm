@@ -111,7 +111,7 @@ class RequestDeliveryLockContractTest {
                 org.flexlb.balance.endpoint.PrefillActiveIndex.ordered(1, WorkerBatcher.PRIORITY_QUEUE_ORDER),
                 System::currentTimeMillis);
         assertSame(registered.item(), state.updateQueue(PrefillState.QueueChange.ENQUEUE,
-                registered.item(), 0L, System.currentTimeMillis()));
+                registered.item(), System.currentTimeMillis()));
         var worker = org.mockito.Mockito.spy(new WorkerBatcher("atomic-prepare", endpoint,
                 QueueExecutionSettings.capture(config), strategy, state));
         // Stop at the queue commit edge so the test can inspect preparation/cancellation atomicity.
@@ -348,7 +348,7 @@ class RequestDeliveryLockContractTest {
                                     state.lock.lock();
                                     try {
                                         assertSame(registered.item(), state.updateQueue(PrefillState.QueueChange.ENQUEUE,
-                                                registered.item(), 0L, System.currentTimeMillis()));
+                                                registered.item(), System.currentTimeMillis()));
                                     } finally { state.lock.unlock(); }
                                     queuePublished.countDown();
                                     await(returnFromPublication);

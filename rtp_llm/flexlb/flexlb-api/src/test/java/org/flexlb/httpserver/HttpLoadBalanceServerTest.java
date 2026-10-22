@@ -23,13 +23,17 @@ import static org.mockito.Mockito.when;
 
 class HttpLoadBalanceServerTest {
 
-    @Test
-    void masterInfoUsesCanonicalSchedulerQueueDepth() {
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void masterInfoUsesCanonicalSchedulerQueueDepthAndDispatcherCapability(boolean batch) {
         MasterStatusService consistency = mock(MasterStatusService.class);
         ConfigService configService = mock(ConfigService.class);
         RequestRepository requests = mock(RequestRepository.class);
         EndpointRegistry endpointRegistry = mock(EndpointRegistry.class);
         WorkerStatusSynchronizer synchronizer = mock(WorkerStatusSynchronizer.class);
+        var config = new FlexlbConfig();
+        if (!batch) { config.setDispatcher(org.flexlb.config.ConfigTestSupport.nonBatch()); }
+        when(configService.loadBalanceConfig()).thenReturn(config);
         when(consistency.getMasterHostIpPort()).thenReturn("127.0.0.1:7001");
         when(requests.pendingDeliveryRequestCount()).thenReturn(7);
         when(synchronizer.isReady()).thenReturn(true);
@@ -48,6 +52,7 @@ class HttpLoadBalanceServerTest {
                 .expectStatus().isOk()
                 .expectBody()
                 .jsonPath("$.queue_length").isEqualTo(7)
+                .jsonPath("$.requires_generate_input").isEqualTo(batch)
                 .jsonPath("$.real_master_host").isEqualTo("127.0.0.1:7001")
                 .jsonPath("$.ready").isEqualTo(true);
 

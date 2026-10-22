@@ -24,7 +24,7 @@ public final class DeliverySettlementTestSupport {
     public void enqueue(RequestRoute item) {
         lock.lock();
         try {
-            assertSame(item, prefill.updateQueue(PrefillState.QueueChange.ENQUEUE, item, Long.MAX_VALUE, System.currentTimeMillis()));
+            assertSame(item, prefill.updateQueue(PrefillState.QueueChange.ENQUEUE, item, System.currentTimeMillis()));
         } finally {
             lock.unlock();
         }
@@ -39,7 +39,7 @@ public final class DeliverySettlementTestSupport {
         lock.lock();
         try {
             for (RequestRoute item : items) {
-                assertSame(item, prefill.updateQueue(PrefillState.QueueChange.ENQUEUE, item, Long.MAX_VALUE, System.currentTimeMillis()));
+                assertSame(item, prefill.updateQueue(PrefillState.QueueChange.ENQUEUE, item, System.currentTimeMillis()));
             }
         } finally {
             lock.unlock();

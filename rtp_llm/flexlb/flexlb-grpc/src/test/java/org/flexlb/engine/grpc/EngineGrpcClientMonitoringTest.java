@@ -27,7 +27,6 @@ import java.util.concurrent.atomic.AtomicReference;
 import static org.flexlb.constant.MetricConstant.GRPC_CALL_COUNT;
 import static org.flexlb.constant.MetricConstant.GRPC_CALL_DURATION;
 import static org.flexlb.constant.MetricConstant.GRPC_CONNECTION_DURATION;
-import static org.flexlb.constant.MetricConstant.GRPC_RESPONSE_SIZE;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -119,7 +118,7 @@ class EngineGrpcClientMonitoringTest {
         GrpcReporter reporter = new GrpcReporter(monitor);
         assertDoesNotThrow(reporter::init);
         verify(monitor, times(2)).register(anyString(), any(FlexMetricType.class));
-        verify(monitor, times(3)).register(anyString(), any(FlexMetricType.class), any(FlexPriorityType.class));
+        verify(monitor, times(4)).register(anyString(), any(FlexMetricType.class), any(FlexPriorityType.class));
         assertDoesNotThrow(() -> reporter.reportChannelPoolSize(3));
     }
 
@@ -128,8 +127,7 @@ class EngineGrpcClientMonitoringTest {
         FlexMonitor monitor = mock(FlexMonitor.class);
         doThrow(new IllegalStateException("metric backend unavailable")).when(monitor)
                 .report(eq(GRPC_CALL_DURATION), any(FlexMetricTags.class), anyDouble());
-        assertDoesNotThrow(() -> new GrpcReporter(monitor).reportCallMetrics("EnqueueBatch", 10L, 20, false));
-        verify(monitor).report(eq(GRPC_RESPONSE_SIZE), any(FlexMetricTags.class), eq(20.0));
+        assertDoesNotThrow(() -> new GrpcReporter(monitor).reportCallMetrics("EnqueueBatch", 10L, false));
         verify(monitor).report(eq(GRPC_CALL_COUNT), any(FlexMetricTags.class), eq(1.0));
     }
 
@@ -151,7 +149,7 @@ class EngineGrpcClientMonitoringTest {
             public void getWorkerStatus(EngineRpcService.StatusVersionPB request,
                                         StreamObserver<EngineRpcService.WorkerStatusPB> observer) {
                 if (attempts.incrementAndGet() == 1) {
-                    observer.onError(Status.UNAVAILABLE.withDescription("Connection reset").asRuntimeException());
+                    observer.onError(Status.UNAVAILABLE.withCause(new java.net.SocketException("Connection reset")).asRuntimeException());
                 } else if (retryFailure != null) {
                     observer.onError(retryFailure.asRuntimeException());
                 } else {
@@ -173,7 +171,7 @@ class EngineGrpcClientMonitoringTest {
                     mock(EventLoopGroup.class), new GrpcReporter(monitor), 20, 5000L) {
                 @Override
                 protected ManagedChannel createChannel(String channelKey) {
-                    return InProcessChannelBuilder.forName(serverName).directExecutor().build();
+                    return InProcessChannelBuilder.forName(serverName).propagateCauseWithStatus(true).directExecutor().build();
                 }
             };
         }

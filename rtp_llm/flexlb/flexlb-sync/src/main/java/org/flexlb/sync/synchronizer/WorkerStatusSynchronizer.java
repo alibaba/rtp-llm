@@ -20,12 +20,11 @@ import javax.annotation.PreDestroy;
 import java.util.EnumMap;
 import java.util.List;
 import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.LongAdder;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_THREAD_POOL_INFO;
 
@@ -47,13 +46,14 @@ public final class WorkerStatusSynchronizer {
     private final CacheAwareService cacheAwareService;
     private final DynamicCacheIntervalService cacheIntervalService;
     private final long syncRequestTimeoutMs;
-    private final LongAdder syncCount = new LongAdder();
+    private final AtomicLong syncCount = new AtomicLong();
     private final EnumMap<RoleType, AtomicBoolean> pendingCycles = new EnumMap<>(RoleType.class);
     private final AtomicBoolean closed = new AtomicBoolean();
     private final Long syncEngineStatusInterval;
-    private final long statusStaleAfterUs;
     private final ScheduledThreadPoolExecutor scheduler;
     private final ThreadPoolExecutor statusCheckExecutor;
+    private final ThreadPoolExecutor cacheStatusExecutor;
+    private final ThreadPoolExecutor statusApplicationExecutor;
     private final ThreadPoolExecutor engineSyncExecutor;
 
     public WorkerStatusSynchronizer(WorkerAddressService workerAddressService,
@@ -82,15 +82,14 @@ public final class WorkerStatusSynchronizer {
                 .getStatusPollIntervalMs();
         this.syncRequestTimeoutMs = flexlbConfig.getWorkerRegistry().getHealth()
                 .getStatusRpcTimeoutMs();
-        this.statusStaleAfterUs = flexlbConfig.getWorkerRegistry().getHealth()
-                .getStatusStaleAfterMs() * 1000L;
         int engineThreads = flexlbConfig.getInternalRuntime()
                 .getEngineSyncExecutorThreads();
         engineSyncExecutor = executor(engineThreads, "engine-sync-executor");
-        engineSyncExecutor.setRejectedExecutionHandler(new ThreadPoolExecutor.AbortPolicy());
         int statusThreads = flexlbConfig.getInternalRuntime()
                 .getStatusCheckExecutorThreads();
         statusCheckExecutor = executor(statusThreads, "status-checker-executor");
+        statusApplicationExecutor = executor(statusThreads, "status-application-executor");
+        cacheStatusExecutor = executor(statusThreads, "cache-status-executor");
         this.scheduler = new ScheduledThreadPoolExecutor(5, new NamedThreadFactory("sync-status-scheduler"),
                 new ThreadPoolExecutor.AbortPolicy());
         this.scheduler.scheduleAtFixedRate(
@@ -107,12 +106,7 @@ public final class WorkerStatusSynchronizer {
                 threads, threads, 60L, TimeUnit.SECONDS,
                 new LinkedBlockingQueue<>(15_000),
                 new NamedThreadFactory(name),
-                (task, executor) -> {
-                    if (executor.isShutdown()) {
-                        throw new RejectedExecutionException("Worker sync executor is shut down");
-                    }
-                    task.run();
-                });
+                new ThreadPoolExecutor.AbortPolicy());
     }
 
     private void reportExecutorMetrics() {
@@ -123,6 +117,10 @@ public final class WorkerStatusSynchronizer {
             engineHealthReporter.reportThreadPoolInfo(
                     ENGINE_BALANCING_THREAD_POOL_INFO,
                     "statusCheckExecutor", statusCheckExecutor);
+            engineHealthReporter.reportThreadPoolInfo(
+                    ENGINE_BALANCING_THREAD_POOL_INFO, "statusApplicationExecutor", statusApplicationExecutor);
+            engineHealthReporter.reportThreadPoolInfo(
+                    ENGINE_BALANCING_THREAD_POOL_INFO, "cacheStatusExecutor", cacheStatusExecutor);
         } catch (Throwable failure) {
             logger.warn("Failed to report worker sync executor metrics", failure);
         }
@@ -132,9 +130,9 @@ public final class WorkerStatusSynchronizer {
         if (closed.get()) {
             return;
         }
-        syncCount.increment();
+        long syncCycleId = syncCount.incrementAndGet();
         logger.debug("sync engine status start, times:{}, modelName:{}",
-                syncCount.longValue(), modelName);
+                syncCycleId, modelName);
         try {
             for (RoleType roleType : requiredRoles) {
                 AtomicBoolean pending = pendingCycles.get(roleType);
@@ -152,10 +150,10 @@ public final class WorkerStatusSynchronizer {
                                     workerAddressService, statusCheckExecutor, engineHealthReporter,
                                     workerStatusRpcClient, roleType, cacheAwareService,
                                     cacheIntervalService,
-                                    syncRequestTimeoutMs, syncCount, syncEngineStatusInterval,
+                                    syncRequestTimeoutMs, syncCycleId, syncEngineStatusInterval,
                                     flexlbConfig.getWorkerRegistry().getCacheStatus()
                                             .isFullSnapshotDebugMode(),
-                                    statusStaleAfterUs).run();
+                                    cacheStatusExecutor, statusApplicationExecutor).run();
                         } finally {
                             pending.set(false);
                         }
@@ -181,6 +179,8 @@ public final class WorkerStatusSynchronizer {
         scheduler.shutdown();
         engineSyncExecutor.shutdown();
         statusCheckExecutor.shutdown();
+        cacheStatusExecutor.shutdown();
+        statusApplicationExecutor.shutdown();
     }
 
 }

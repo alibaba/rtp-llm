@@ -48,6 +48,8 @@ public class PrefillEndpoint extends WorkerEndpoint {
     public PrefillState.CommittedHandoff commitLocked(PrefillState.CommitPlan plan) {
         checkState(ownership.lock.isHeldByCurrentThread(), "commit requires Prefill ownership lock");
         if (plan.kind() != PrefillState.CommitKind.DIRECT && !ownership.ownsSelectionLocked(plan.items(), plan.selectionTimeMs())) { return null; }
+        if (plan.kind() == PrefillState.CommitKind.QUEUED
+                && !ownership.requestCapacityAvailable(requestLimit, plan.items().size())) { return null; }
         if (plan.batchReservation() != null) { return ownership.commitLocked(plan, null); }
         var handoff = tryAcquireGenerationHandoff();
         if (handoff == null) { return null; }

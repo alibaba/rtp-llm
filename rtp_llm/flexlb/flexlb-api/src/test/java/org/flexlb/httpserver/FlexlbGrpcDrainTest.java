@@ -76,7 +76,7 @@ class FlexlbGrpcDrainTest {
                 };
             }
         };
-        var server = NettyServerBuilder.forPort(0).addService(ServerInterceptors.intercept(
+        var server = NettyServerBuilder.forAddress(new java.net.InetSocketAddress("127.0.0.1", 0)).addService(ServerInterceptors.intercept(
                 service, pauseBeforeSchedule, timing)).build().start();
         var grpc = new FlexlbGrpcServer(service, config, new MockEnvironment(), null, null, timing, null);
         ReflectionTestUtils.setField(grpc, "server", server);
@@ -177,7 +177,7 @@ class FlexlbGrpcDrainTest {
                     """.formatted(quietMs)));
             grpc = new FlexlbGrpcServer(null, configService, new MockEnvironment(),
                     null, null, timing, null);
-            server = NettyServerBuilder.forPort(0).addService(ServerInterceptors.intercept(
+            server = NettyServerBuilder.forAddress(new java.net.InetSocketAddress("127.0.0.1", 0)).addService(ServerInterceptors.intercept(
                     new FlexlbServiceGrpc.FlexlbServiceImplBase() {
                         @Override
                         public void schedule(FlexlbScheduleRequestPB request,

@@ -60,7 +60,7 @@ class WorkerAddressServiceTest {
     }
 
     @Test
-    void discoveryFailureReturnsNoWorkers() {
+    void discoveryFailureRemainsDistinctFromAnEmptySuccessfulSnapshot() {
         String modelName = "TestModel";
         String address = "TestAddress";
         when(modelMetaConfig.endpointsWithGroup(modelName, RoleType.PREFILL))
@@ -68,10 +68,8 @@ class WorkerAddressServiceTest {
         when(serviceDiscovery.getHosts(anyString()))
                 .thenThrow(new IllegalStateException("discovery unavailable"));
 
-        List<WorkerHost> actualHosts = workerAddressService.getEngineWorkerList(
-                modelName, RoleType.PREFILL);
-
-        Assertions.assertTrue(actualHosts.isEmpty());
+        Assertions.assertThrows(IllegalStateException.class, () ->
+                workerAddressService.getEngineWorkerList(modelName, RoleType.PREFILL));
     }
 
     @Test
@@ -112,7 +110,7 @@ class WorkerAddressServiceTest {
             Assertions.assertTrue(occupied.await(2, TimeUnit.SECONDS));
             while (executor.getQueue().offer(blocker)) { }
             Assertions.assertTimeoutPreemptively(Duration.ofSeconds(2), () ->
-                    Assertions.assertTrue(workerAddressService.getEngineWorkerList("model", RoleType.PREFILL).isEmpty()));
+                    Assertions.assertThrows(IllegalStateException.class, () -> workerAddressService.getEngineWorkerList("model", RoleType.PREFILL)));
             Mockito.verify(serviceDiscovery, Mockito.never()).getHosts("address");
         } finally {
             executor.getQueue().clear();
@@ -149,7 +147,8 @@ class WorkerAddressServiceTest {
             caller.join(2000);
             Assertions.assertFalse(caller.isAlive());
             Assertions.assertAll(
-                    () -> Assertions.assertSame(telemetryFailure, result.get()),
+                    () -> Assertions.assertInstanceOf(InterruptedException.class, result.get().getCause()),
+                    () -> Assertions.assertSame(telemetryFailure, result.get().getCause().getSuppressed()[0]),
                     () -> Assertions.assertTrue(interrupted.get()),
                     () -> Assertions.assertTrue(exited.await(2, TimeUnit.SECONDS),
                             "discovery must receive cancellation"));

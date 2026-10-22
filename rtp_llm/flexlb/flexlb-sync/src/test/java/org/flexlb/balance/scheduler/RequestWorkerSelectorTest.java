@@ -6,7 +6,6 @@ import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.scheduler.AdmissionHandle;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
 import org.flexlb.balance.strategy.VitWorkerSelector;
@@ -610,7 +609,7 @@ class RequestWorkerSelectorTest {
         RequestWorkerSelector router = router();
         RequestContext context = context(111L);
         when(prefillSelector.select(org.mockito.ArgumentMatchers.eq(context.data().getRequest()), org.mockito.ArgumentMatchers.eq(context.data().getSchedulingMetadata()), org.mockito.ArgumentMatchers.eq(RoleType.PREFILL), org.mockito.ArgumentMatchers.eq(null), org.mockito.ArgumentMatchers.any(RequestRoute.class)))
-                .thenReturn(PlacementResult.blocked(RoleType.DECODE));
+                .thenReturn(PlacementResult.blocked(PlacementKey.anyGroup(RoleType.DECODE)));
 
         PlacementResult<RequestRoute, PlacementKey> blocked = router.select(context, router.resolvePolicyGroup(context));
         assertEquals(PlacementResult.Status.BLOCKED, blocked.status());
@@ -867,7 +866,7 @@ class RequestWorkerSelectorTest {
             String group,
             PlacementResult<ServerStatus, RoleType> result) {
         switch (role) {
-            case PREFILL, PDFUSION -> when(prefillSelector.select(org.mockito.ArgumentMatchers.eq(context.data().getRequest()), org.mockito.ArgumentMatchers.eq(context.data().getSchedulingMetadata()), org.mockito.ArgumentMatchers.eq(role), org.mockito.ArgumentMatchers.eq(group), org.mockito.ArgumentMatchers.any(RequestRoute.class))).thenReturn(result);
+            case PREFILL, PDFUSION -> when(prefillSelector.select(org.mockito.ArgumentMatchers.eq(context.data().getRequest()), org.mockito.ArgumentMatchers.eq(context.data().getSchedulingMetadata()), org.mockito.ArgumentMatchers.eq(role), org.mockito.ArgumentMatchers.eq(group), org.mockito.ArgumentMatchers.any(RequestRoute.class))).thenReturn(new PlacementResult<>(result.status(), result.value(), result.failure(), result.blocker() == null ? null : new PlacementKey(result.blocker(), group, null), result.diagnostics()));
             case DECODE -> when(decodeSelector.select(org.mockito.ArgumentMatchers.eq(context.data().getRequest()), org.mockito.ArgumentMatchers.eq(context.data().getSchedulingMetadata()), org.mockito.ArgumentMatchers.eq(group), org.mockito.ArgumentMatchers.any(RequestRoute.class))).thenReturn(result);
             case VIT -> when(vitSelector.select(org.mockito.ArgumentMatchers.eq(context.data().getRequestId()), org.mockito.ArgumentMatchers.eq(role), org.mockito.ArgumentMatchers.eq(group), org.mockito.ArgumentMatchers.any(RequestRoute.class)))
                     .thenReturn(result.value());

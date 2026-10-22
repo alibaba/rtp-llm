@@ -38,14 +38,12 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.after;
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.anyLong;
 import static org.mockito.Mockito.doAnswer;
-import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -432,6 +430,7 @@ class DeliverySettlementTest {
     @ValueSource(booleans = {true, false})
     void uncertainDeliveryIsAcknowledgedRegardlessOfDecodeStatusOrder(boolean decodeStatusFirst) {
         Member member = dispatchedMember(122L);
+        assertTrue(member.requestContext().data().hasGenerateInput());
         DeliveryResult unknown = DeliveryResult.uncertain(new IllegalStateException("reply lost"));
         try {
             if (decodeStatusFirst) {
@@ -442,6 +441,7 @@ class DeliverySettlementTest {
             SchedulerTestSupport.awaitRequestWork(registry.runtime);
             assertFalse(member.item().future().isDone(),
                     "neither Decode acceptance alone nor UNKNOWN alone may acknowledge delivery");
+            assertTrue(member.requestContext().data().hasGenerateInput());
 
             if (decodeStatusFirst) {
                 registry.onDeliveryEvidence(member.claim(), new ContextResult.TransportResult(member.claim(), unknown, System.currentTimeMillis()));
@@ -456,6 +456,8 @@ class DeliverySettlementTest {
             Response response = assertDoesNotThrow(() -> member.item().future().get(2, TimeUnit.SECONDS),
                     "UNKNOWN plus exact Decode ACTIVE must acknowledge delivery in either event order");
             assertTrue(response.isSuccess());
+            assertFalse(member.requestContext().data().hasGenerateInput(),
+                    "confirmed delivery must release payload before execution reconciliation finishes");
             assertFalse(registry.runtime.signals().delivery(member.claim()).toCompletableFuture().isDone(),
                     "acknowledgement must retain execution ownership until Worker terminal");
             assertOccupancy(1, 1);
@@ -657,6 +659,8 @@ class DeliverySettlementTest {
     private Member member(long id, long batchId, DecodeEndpoint decode, DecodeResources.ReservationHandle reservation,
             DeliveryClaimKind kind) {
         var context = RequestProtocolTestSupport.context(config, id);
+        context.data().setGenerateInputPb(org.flexlb.engine.grpc.EngineRpcService.GenerateInputPB.newBuilder()
+                .setRequestId(id).addTokenIds(7).build().toByteString());
         var future = RequestProtocolTestSupport.register(registry, context);
         context.data().setFuture(future);
         var prefillServer = new org.flexlb.dao.loadbalance.ServerStatus();

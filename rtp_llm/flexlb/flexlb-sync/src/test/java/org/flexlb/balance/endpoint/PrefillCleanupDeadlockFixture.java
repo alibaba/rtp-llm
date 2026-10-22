@@ -68,7 +68,7 @@ public final class PrefillCleanupDeadlockFixture {
 
     private void enqueue(RequestRoute item) {
         lock.lock();
-        try { assertSame(item, state.updateQueue(PrefillState.QueueChange.ENQUEUE, item, Long.MAX_VALUE, System.currentTimeMillis())); }
+        try { assertSame(item, state.updateQueue(PrefillState.QueueChange.ENQUEUE, item, System.currentTimeMillis())); }
         finally { lock.unlock(); }
     }
 

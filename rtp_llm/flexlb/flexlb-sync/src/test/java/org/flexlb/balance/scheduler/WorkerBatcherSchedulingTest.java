@@ -5,7 +5,6 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.RouteProjection;
-import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.config.DecisionPolicyConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.SchedulingMetadata;
@@ -32,19 +31,16 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -165,7 +161,7 @@ class WorkerBatcherSchedulingTest {
         org.mockito.Mockito.doReturn(observation).when(route).ctx();
         var queue = WorkerBatcherTestSupport.state(worker);
         queue.lock.lock();
-        try { assertSame(route, queue.updateQueue(PrefillState.QueueChange.ENQUEUE, route, 16L, System.currentTimeMillis())); }
+        try { assertSame(route, queue.updateQueue(PrefillState.QueueChange.ENQUEUE, route, System.currentTimeMillis())); }
         finally { queue.lock.unlock(); }
         try (var executor = java.util.concurrent.Executors.newSingleThreadExecutor()) {
             var completion = executor.submit(() -> {
@@ -184,7 +180,7 @@ class WorkerBatcherSchedulingTest {
         } finally {
             committed.countDown();
             queue.lock.lock();
-            try { assertSame(route, queue.updateQueue(PrefillState.QueueChange.REMOVE, route, 0L, System.currentTimeMillis())); }
+            try { assertSame(route, queue.updateQueue(PrefillState.QueueChange.REMOVE, route, System.currentTimeMillis())); }
             finally { queue.lock.unlock(); }
         }
     }
@@ -295,7 +291,7 @@ class WorkerBatcherSchedulingTest {
         SchedulerTestSupport.bindOwner(request.ctx(), events);
         var state = WorkerBatcherTestSupport.state(runtime);
         state.lock.lock();
-        try { assertSame(request, state.updateQueue(PrefillState.QueueChange.ENQUEUE, request, 0L, System.currentTimeMillis())); }
+        try { assertSame(request, state.updateQueue(PrefillState.QueueChange.ENQUEUE, request, System.currentTimeMillis())); }
         finally { state.lock.unlock(); }
         var failure = new IllegalStateException("capacity notification failed");
         doThrow(failure).when(endpoint).signal(PrefillEndpoint.Signal.PLACEMENT);
@@ -320,7 +316,7 @@ class WorkerBatcherSchedulingTest {
         var state = WorkerBatcherTestSupport.state(runtime);
         state.lock.lock();
         try {
-            assertSame(request, state.updateQueue(PrefillState.QueueChange.ENQUEUE, request, 0L, System.currentTimeMillis()));
+            assertSame(request, state.updateQueue(PrefillState.QueueChange.ENQUEUE, request, System.currentTimeMillis()));
         } finally {
             state.lock.unlock();
         }
@@ -367,7 +363,7 @@ class WorkerBatcherSchedulingTest {
         SchedulerTestSupport.bindOwner(request.ctx(), events);
         var state = WorkerBatcherTestSupport.state(runtime);
         state.lock.lock();
-        try { assertSame(request, state.updateQueue(PrefillState.QueueChange.ENQUEUE, request, 0L, System.currentTimeMillis())); }
+        try { assertSame(request, state.updateQueue(PrefillState.QueueChange.ENQUEUE, request, System.currentTimeMillis())); }
         finally { state.lock.unlock(); }
         try {
             org.springframework.test.util.ReflectionTestUtils.invokeMethod(runtime, "processQueue");
@@ -421,6 +417,42 @@ class WorkerBatcherSchedulingTest {
             delivery.allowFirstPrepare.countDown();
             delivery.allowSecondPrepare.countDown();
         }
+    }
+
+    @Test
+    @Timeout(10)
+    void nonBatchSlotReleaseWakesTheWaitingHeadWithoutPolling() throws Exception {
+        FlexlbConfig config = singleConfig();
+        config.setDispatcher(org.flexlb.config.ConfigTestSupport.nonBatch());
+        config.getDispatcher().setMaxInflightPerPrefillWorker(1);
+        var endpoint = org.flexlb.balance.endpoint.EndpointTestSupport.unstartedPrefill(config,
+                WorkerStatus.createDiscovered(RoleType.PREFILL, null, "127.0.0.1", 8080, 9090, null),
+                SchedulerTestSupport.dispatcher(), mock(AbstractRequestScheduler.class));
+        WorkerBatcher worker = org.flexlb.balance.endpoint.EndpointTestSupport.batcher(endpoint);
+        runtimes.add(worker);
+        var occupied = item(config, endpoint, 31L, 50, System.currentTimeMillis());
+        var reservation = endpoint.ownership.reserveUnqueuedRoute(occupied, 1L, 1L).reservation();
+        assertNotNull(reservation);
+        var waiting = new CountDownLatch(1);
+        var resumed = new CountDownLatch(1);
+        var attempts = new AtomicInteger();
+        doAnswer(call -> {
+            attempts.incrementAndGet();
+            if (!endpoint.ownership.requestCapacityAvailable(1, 1)) {
+                waiting.countDown();
+                return CapacityBoundary.deliveryUnavailable(CapacityBoundary.Resource.PREFILL_REQUEST);
+            }
+            resumed.countDown();
+            return CapacityBoundary.OWNERSHIP_LOST;
+        }).when(worker).processSelection(any(), anyString(), any(), any());
+        worker.start();
+        assertTrue(worker.offer(item(config, endpoint, 32L, 50, System.currentTimeMillis())));
+        await(waiting);
+        assertTrue(worker.offer(item(config, endpoint, 33L, 50, System.currentTimeMillis())));
+        TimeUnit.MILLISECONDS.sleep(100L);
+        assertEquals(1, attempts.get(), "backlog publication must not poll a full delivery slot");
+        assertTrue(endpoint.release(reservation, null));
+        await(resumed);
     }
 
     @Test

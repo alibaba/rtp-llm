@@ -334,10 +334,12 @@ public final class SchedulerRuntime implements RequestTaskScheduler {
         this.timer = new ExpirationTimer(requests);
     }
 
+    private static final long TERMINAL_RETENTION_MS = 10_000L;
+
     @Scheduled(fixedRate = EXPIRATION_MAINTENANCE_INTERVAL_MS)
     void maintainExpiration() {
         if (requests.isClosed()) { return; }
-        long ttlMs = config.loadBalanceConfig().getWorkerRegistry().getHealth().getStatusStaleAfterMs();
+        long ttlMs = TERMINAL_RETENTION_MS;
         long nowMs = clock.getAsLong();
         Throwable failure = Failures.run(null,
                 () -> requests.expireTerminalRecords(com.google.common.math.LongMath.saturatedSubtract(nowMs, ttlMs)));

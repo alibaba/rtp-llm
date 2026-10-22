@@ -6,6 +6,11 @@ package org.flexlb.constant;
  */
 public class MetricConstant {
 
+    public static final String NETTY_DIRECT_RESERVED_BYTES = "app.netty.direct.reserved.bytes";
+    public static final String NETTY_DIRECT_PINNED_BYTES = "app.netty.direct.pinned.bytes";
+    public static final String NETTY_MEMORY_SAMPLE_DURATION_MS = "app.netty.memory.sample.duration.ms";
+    public static final String NETTY_MEMORY_SAMPLE_TIMESTAMP_MS = "app.netty.memory.sample.timestamp.ms";
+
     /* ------------------------ Engine Status Metrics -------------------------- */
 
     /**
@@ -40,6 +45,8 @@ public class MetricConstant {
      * Engine status check failure information
      */
     public static final String ENGINE_STATUS_CHECK_FAIL = "app.engine.health.check.fail";
+
+    public static final String STATUS_FAILURE_DETAIL = "app.status.failure.detail";
 
     /**
      * Master load balancing service total QPS
@@ -386,14 +393,11 @@ public class MetricConstant {
     public static final String GRPC_CALL_DURATION = "app.grpc.call.duration";
 
     /**
-     * gRPC response body size in bytes
-     */
-    public static final String GRPC_RESPONSE_SIZE = "app.grpc.response.size";
-
-    /**
      * gRPC call count
      */
     public static final String GRPC_CALL_COUNT = "app.grpc.call.count";
+    public static final String GRPC_CALL_FAILURE = "app.grpc.call.failure";
+    public static final String GRPC_DELIVERY_DELAY = "app.grpc.delivery.delay_ms";
 
     /**
      * gRPC connection duration in microseconds

@@ -97,7 +97,7 @@ class PrefillEndpointTest {
         try {
             state.lock.lock();
             try {
-                assertSame(queued, state.updateQueue(PrefillState.QueueChange.ENQUEUE, queued, 0L, System.currentTimeMillis()));
+                assertSame(queued, state.updateQueue(PrefillState.QueueChange.ENQUEUE, queued, System.currentTimeMillis()));
                 assertNull(local.commitLocked(new PrefillState.CommitPlan(PrefillState.CommitKind.QUEUED, List.of(selected), List.of(), null, new long[]{10L}, null, nowMs)));
                 assertEquals(List.of(queued), state.captureQueue(2).items());
                 WorkSnapshot committed = state.committedSnapshot();

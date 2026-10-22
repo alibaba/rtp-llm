@@ -51,7 +51,7 @@ public final class EndpointCleanupTestSupport {
             if (batch) {
                 lock.lock();
                 try {
-                    assertSame(item, state.updateQueue(PrefillState.QueueChange.ENQUEUE, item, Long.MAX_VALUE, System.currentTimeMillis()));
+                    assertSame(item, state.updateQueue(PrefillState.QueueChange.ENQUEUE, item, System.currentTimeMillis()));
                 } finally {
                     lock.unlock();
                 }

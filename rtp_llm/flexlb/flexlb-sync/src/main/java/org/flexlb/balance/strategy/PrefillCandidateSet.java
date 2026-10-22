@@ -18,6 +18,7 @@ final class PrefillCandidateSet {
     private long[] cacheHitTokens = new long[0];
     private long[] routingCacheMatchTokens = new long[0];
     private long[] ownershipVersions = new long[0];
+    private String[] admissionBlocks = new String[0];
     private int size;
     boolean inUse;
     long minimumTtftRank;
@@ -28,6 +29,7 @@ final class PrefillCandidateSet {
     void reset(int expectedCapacity) {
         Arrays.fill(endpointAddresses, 0, size, null);
         Arrays.fill(endpoints, 0, size, null);
+        Arrays.fill(admissionBlocks, 0, size, null);
         ensureCapacity(expectedCapacity);
         size = 0;
         minimumTtftRank = Long.MAX_VALUE;
@@ -57,6 +59,9 @@ final class PrefillCandidateSet {
         size++;
     }
 
+    void admissionBlock(String detail) { admissionBlocks[size - 1] = detail; }
+    String admissionBlock(int index) { return admissionBlocks[index]; }
+
     PrefillEndpoint endpoint(int index) { return endpoints[index]; }
     String endpointAddress(int index) { return endpointAddresses[index]; }
     long cacheHit(int index) { return cacheHitTokens[index]; }
@@ -75,6 +80,7 @@ final class PrefillCandidateSet {
                 Math.max(INITIAL_CAPACITY, endpoints.length << 1));
         endpointAddresses = Arrays.copyOf(endpointAddresses, capacity);
         endpoints = Arrays.copyOf(endpoints, capacity);
+        admissionBlocks = Arrays.copyOf(admissionBlocks, capacity);
         projectedTtftMs = Arrays.copyOf(projectedTtftMs, capacity);
         incomingPrefillMs = Arrays.copyOf(incomingPrefillMs, capacity);
         cacheHitTokens = Arrays.copyOf(cacheHitTokens, capacity);

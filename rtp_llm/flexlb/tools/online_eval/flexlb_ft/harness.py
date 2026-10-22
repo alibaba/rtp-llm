@@ -1121,7 +1121,6 @@ def build_flexlb_config(
         "workerRegistry": {"health": {
             "statusPollIntervalMs": 20,
             "statusRpcTimeoutMs": status_rpc_ms,
-            "statusStaleAfterMs": max(10_000, status_rpc_ms * 2),
         }},
     }, separators=(",", ":"))
 

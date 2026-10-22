@@ -240,7 +240,7 @@ class RequestInflightRecoveryTest {
                         RequestProtocolTestSupport.publication(() -> {
                             prefillState.lock.lock();
                             try { return prefillState.updateQueue(PrefillState.QueueChange.ENQUEUE,
-                                    route, Long.MAX_VALUE, System.currentTimeMillis()) == route; }
+                                    route, System.currentTimeMillis()) == route; }
                             finally { prefillState.lock.unlock(); }
                         })));
             }
@@ -270,7 +270,7 @@ class RequestInflightRecoveryTest {
                         RequestProtocolTestSupport.publication(() -> {
                             prefillState.lock.lock();
                             try { return prefillState.updateQueue(PrefillState.QueueChange.ENQUEUE,
-                                    item, Long.MAX_VALUE, System.currentTimeMillis()) == item; }
+                                    item, System.currentTimeMillis()) == item; }
                             finally { prefillState.lock.unlock(); }
                         })));
             }

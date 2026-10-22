@@ -175,7 +175,7 @@ public final class RouteProjection {
     }
 
     /** Apply one observed worker admission wait without inventing a release duration. */
-    static CandidateView applyAdmissionPolicy(
+    public static CandidateView applyAdmissionPolicy(
             QueueSnapshot queue,
             CandidateView candidate) {
         QueueSnapshot.AdmissionBlock observation = queue.admissionBlock();

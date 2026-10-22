@@ -6,6 +6,7 @@ import org.flexlb.balance.scheduler.RequestRepository;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.master.EndpointTrace.Stage;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.util.Failures;
@@ -74,14 +75,28 @@ public class EndpointRegistry {
             return status;
         }
 
+        /** The registry close barrier retains ownership until this cleanup finishes. */
+        public void completeAsync(CacheAwareService cacheAwareService, org.slf4j.Logger logger) {
+            try {
+                WorkerEndpoint.executeRetirement(() -> complete(cacheAwareService, logger, false));
+            } catch (java.util.concurrent.RejectedExecutionException rejected) {
+                complete(cacheAwareService, logger, false);
+            }
+        }
+
         /** Drain outside the generation lock, then clear cache and remove this exact status. */
         public void complete(CacheAwareService cacheAwareService, org.slf4j.Logger logger) {
+            complete(cacheAwareService, logger, true);
+        }
+
+        private void complete(CacheAwareService cacheAwareService, org.slf4j.Logger logger, boolean awaitDrain) {
             Objects.requireNonNull(cacheAwareService, "cacheAwareService");
             Objects.requireNonNull(logger, "logger");
             if (!claimed.compareAndSet(false, true)) {
                 throw new IllegalStateException("Worker retirement was already claimed: "
                         + address + "#" + status.getGenerationId());
             }
+            status.trace().record(Stage.RETIREMENT_CLEANUP_BEGIN);
             Runnable finalizeExact = () -> finalizeExact(cacheAwareService, logger);
             if (endpoint == null) {
                 finalizeExact.run();
@@ -93,7 +108,11 @@ public class EndpointRegistry {
             Throwable failure = Failures.run(null, () -> placementAvailability.changed(
                     role, status.topologySnapshot().group(), address));
             failure = Failures.run(failure, endpoint::close);
-            failure = Failures.run(failure, () -> endpoint.awaitRetirement(retirementTimeoutMs));
+            // Pin release queues cleanup on this same pool. Its workers must return
+            // rather than wait for their own queued cleanup; onRetired owns completion.
+            if (awaitDrain) {
+                failure = Failures.run(failure, () -> endpoint.awaitRetirement(retirementTimeoutMs));
+            }
             if (failure != null) {
                 logger.error("Endpoint cleanup failed after retiring generation {} for {}",
                         status.getGenerationId(), address, failure);
@@ -336,6 +355,7 @@ public class EndpointRegistry {
             candidate = createEndpoint(status, role, observation.engine());
             candidate.initializeFromPreparedStatus(status, observation);
             status.publishPreparedStatus(prepared);
+            status.trace().record(Stage.ENDPOINT_PUBLISHED);
             WorkerEndpoint exact = candidate;
             publicationAttempted = true;
             mutateEndpointMap(role, endpointsByRole.get(role), address, (ignored, current) -> {
@@ -463,13 +483,11 @@ public class EndpointRegistry {
         return List.copyOf(updated);
     }
 
-    /** Revalidate the exact generation and close its routing gate only after its heartbeat expires. */
-    public Retirement beginRetirementIfStale(RoleType role, String address, WorkerStatus status, long staleAfterUs) {
-        status.lock.lock();
+    /** Detach confirmed unavailable generations without waiting for local status application. */
+    public Retirement beginRequestedRetirement(RoleType role, String address, WorkerStatus status) {
+        if (status.retirementReason() == null || !status.lock.tryLock()) { return null; }
         try {
-            if (!isCurrentStatus(role, address, status) || !status.isActiveGeneration()
-                    || TimeUnit.NANOSECONDS.toMicros(System.nanoTime()) - status.pollHealth().lastSuccessfulPollUs()
-                    <= staleAfterUs) {
+            if (!isCurrentStatus(role, address, status) || !status.isActiveGeneration()) {
                 return null;
             }
             return beginRetirement(role, address, status);
@@ -778,9 +796,11 @@ public class EndpointRegistry {
             CacheAwareService cacheAwareService,
             org.slf4j.Logger logger) {
         Map<String, WorkerStatus> statuses = statusesByRole.get(role);
-        status.lock.lock();
+        status.trace().record(Stage.RETIREMENT_CACHE_LOCK_ATTEMPT);
+        status.cacheMutationLock.lock();
+        status.trace().record(Stage.RETIREMENT_CACHE_LOCK_ACQUIRED);
         try {
-            status.requireRetiringGeneration();
+            checkState(!status.isActiveGeneration(), "Cache cleanup requires a retiring generation");
             if (statuses.get(address) != status) {
                 logger.error(
                         "Status identity changed before retirement finalized for {}#{}",
@@ -789,19 +809,24 @@ public class EndpointRegistry {
             }
             try {
                 if (role.requiresCacheKeys()) {
+                    status.trace().record(Stage.CACHE_CLEANUP_BEGIN);
                     cacheAwareService.removeEngineBlockCache(address);
+                    status.trace().record(Stage.CACHE_CLEANUP_END);
                 }
             } catch (Throwable cacheCleanupFailure) {
+                status.trace().record(Stage.CACHE_CLEANUP_FAILED, cacheCleanupFailure);
                 logger.error(
                         "Cache cleanup failed while retiring generation {} for {}",
                         status.getGenerationId(), address, cacheCleanupFailure);
                 return false;
             }
+            status.trace().record(Stage.RETIREMENT_CLEANUP_END);
             if (!statuses.remove(address, status)) {
                 logger.error(
-                        "Exact status removal failed while its generation lock was held for {}#{}",
+                        "Exact status removal failed while its cache lock was held for {}#{}",
                         address, status.getGenerationId());
             }
+            status.trace().record(Stage.STATUS_REMOVED);
             return true;
         } catch (Throwable finalizationFailure) {
             logger.error(
@@ -809,7 +834,8 @@ public class EndpointRegistry {
                     address, status.getGenerationId(), finalizationFailure);
             return false;
         } finally {
-            status.lock.unlock();
+            status.cacheMutationLock.unlock();
+            status.trace().record(Stage.RETIREMENT_CACHE_LOCK_RELEASED);
         }
     }
 

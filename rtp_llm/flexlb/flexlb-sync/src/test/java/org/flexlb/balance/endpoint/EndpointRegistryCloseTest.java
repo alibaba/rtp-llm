@@ -47,6 +47,43 @@ import static org.mockito.ArgumentMatchers.anyString;
 
 class EndpointRegistryCloseTest {
     @Test
+    void asynchronousRetirementsDoNotOccupyThreadsNeededToDrainTheirPins() throws Exception {
+        PlacementAvailability availability = mock(PlacementAvailability.class);
+        EndpointRegistry registry = registry(availability);
+        CacheAwareService cache = mock(CacheAwareService.class);
+        var pins = new java.util.ArrayList<WorkerEndpoint.GenerationPin>();
+        var statuses = new java.util.ArrayList<org.flexlb.dao.master.WorkerStatus>();
+        CountDownLatch retirementStarted = new CountDownLatch(4);
+        try {
+            // Fill the shared retirement pool while each endpoint still has an accepted handoff.
+            for (int i = 0; i < 4; i++) {
+                var status = EndpointTestSupport.workerStatus(RoleType.DECODE, "127.0.0.1", 8600 + i, 8700 + i);
+                registry.currentOrDiscover(RoleType.DECODE, status.getIpPort(), () -> status);
+                var endpoint = EndpointTestSupport.publishEndpoint(registry, RoleType.DECODE, status.getIpPort(), status);
+                pins.add(endpoint.tryPinGeneration());
+                statuses.add(status);
+            }
+            doAnswer(call -> { retirementStarted.countDown(); return null; })
+                    .when(availability).changed(any(), any(), any());
+            for (var status : statuses) {
+                status.markRemovedFromDiscovery();
+                var retirement = registry.beginRequestedRetirement(RoleType.DECODE, status.getIpPort(), status);
+                assertNotNull(retirement);
+                retirement.completeAsync(cache, LoggerFactory.getLogger(getClass()));
+            }
+            assertTrue(retirementStarted.await(5, TimeUnit.SECONDS));
+            pins.forEach(WorkerEndpoint.GenerationPin::close);
+            assertTimeoutPreemptively(java.time.Duration.ofSeconds(5), () -> {
+                while (pendingRetirements(registry) != 0) { Thread.sleep(1L); }
+            });
+            assertEquals(0, registry.discoveredCount());
+        } finally {
+            pins.forEach(WorkerEndpoint.GenerationPin::close);
+            registry.close();
+        }
+    }
+
+    @Test
     void closeWaitsForAcceptedPublicationAndRejectsNewPublications() throws Exception {
         PlacementAvailability availability = mock(PlacementAvailability.class);
         EndpointRegistry registry = registry(availability);
@@ -349,20 +386,17 @@ class EndpointRegistryCloseTest {
     }
 
     @Test
-    void transportFailureLoggingCannotLoseRetirementCapability() {
+    void discoveryRemovalLoggingCannotLoseRetirementCapability() {
         EndpointRegistry registry = registry();
         var status = EndpointTestSupport.workerStatus(RoleType.DECODE, "127.0.0.1", 9100, 9101);
         registry.currentOrDiscover(RoleType.DECODE, status.getIpPort(), () -> status);
         WorkerEndpoint endpoint = EndpointTestSupport.publishEndpoint(registry, RoleType.DECODE, status.getIpPort(), status);
-        WorkerStatusRpcClient rpc = mock(WorkerStatusRpcClient.class);
-        when(rpc.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(), any()))
-                .thenReturn(CompletableFuture.failedFuture(new IllegalStateException("transport unavailable")));
         var loggingFailed = new java.util.concurrent.atomic.AtomicBoolean();
         ch.qos.logback.classic.Logger syncLogger =
                 (ch.qos.logback.classic.Logger) LoggerFactory.getLogger("syncLogger");
         var appender = new ch.qos.logback.core.AppenderBase<ch.qos.logback.classic.spi.ILoggingEvent>() {
             @Override protected void append(ch.qos.logback.classic.spi.ILoggingEvent event) {
-                if (event.getMessage().startsWith("worker {} marked dead")
+                if (event.getMessage().startsWith("Retiring unavailable worker")
                         && status.getIpPort().equals(event.getArgumentArray()[0])) {
                     loggingFailed.set(true);
                     throw new AssertionError("logging boundary failed after exact detach");
@@ -372,12 +406,10 @@ class EndpointRegistryCloseTest {
         appender.start();
         syncLogger.addAppender(appender);
         try {
-            for (int failure = 0; failure < 3; failure++) {
-                var lease = status.tryBeginStatusPoll();
-                assertNotNull(lease);
-                new GrpcWorkerStatusRunner("test-model", status, lease, registry,
-                        mock(EngineHealthReporter.class), rpc, 5000L, mock(CacheAwareService.class), Runnable::run).run();
-            }
+            status.markRemovedFromDiscovery();
+            var cleaner = new org.flexlb.sync.schedule.WorkerRetirementCleaner(mock(CacheAwareService.class), registry);
+            assertThrows(AssertionError.class, cleaner::retireUnavailableWorkers);
+            org.flexlb.sync.runner.RunnerTestSupport.awaitCondition(() -> pendingRetirements(registry) == 0);
             assertTrue(loggingFailed.get());
             assertTrue(endpoint.isGenerationRetiringOrRetired());
             assertTrue(registry.statusSnapshot(RoleType.DECODE).isEmpty());

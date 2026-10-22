@@ -3,7 +3,7 @@ package org.flexlb.service.monitor;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
-import org.flexlb.sync.schedule.StaleWorkerCleaner;
+import org.flexlb.sync.schedule.WorkerRetirementCleaner;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.context.annotation.AnnotationConfigApplicationContext;
@@ -48,7 +48,7 @@ class ScheduledTaskConfigurationTest {
             context.registerBean("configService", ConfigService.class, () -> service);
             context.registerBean(EndpointRegistry.class, () -> registry);
             context.registerBean(CacheAwareService.class, () -> mock(CacheAwareService.class));
-            context.registerBean(StaleWorkerCleaner.class);
+            context.registerBean(WorkerRetirementCleaner.class);
             if (legacyMetricBean) {
                 context.registerBean("taskMetricScheduler", ScheduledThreadPoolExecutor.class,
                         () -> new ScheduledThreadPoolExecutor(1));

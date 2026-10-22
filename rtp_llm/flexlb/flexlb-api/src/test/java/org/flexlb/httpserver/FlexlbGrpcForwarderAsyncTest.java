@@ -532,10 +532,12 @@ class FlexlbGrpcForwarderAsyncTest {
     private static final class RpcFixture implements AutoCloseable {
         private final Server server;
         private final ManagedChannel channel;
+        private final io.netty.channel.nio.NioEventLoopGroup transport;
 
-        private RpcFixture(Server server, ManagedChannel channel) {
+        private RpcFixture(Server server, ManagedChannel channel, io.netty.channel.nio.NioEventLoopGroup transport) {
             this.server = server;
             this.channel = channel;
+            this.transport = transport;
         }
 
         static RpcFixture start(ScheduleHandler handler) throws Exception {
@@ -562,7 +564,11 @@ class FlexlbGrpcForwarderAsyncTest {
 
         private static RpcFixture startService(
                 FlexlbServiceGrpc.FlexlbServiceImplBase service) throws Exception {
-            Server server = NettyServerBuilder.forPort(0)
+            var transport = new io.netty.channel.nio.NioEventLoopGroup(1);
+            Server server = NettyServerBuilder.forAddress(new java.net.InetSocketAddress("127.0.0.1", 0))
+                    .channelType(io.netty.channel.socket.nio.NioServerSocketChannel.class)
+                    .bossEventLoopGroup(transport)
+                    .workerEventLoopGroup(transport)
                     .directExecutor()
                     .intercept(new GrpcTraceInterceptor())
                     .addService(service)
@@ -570,10 +576,19 @@ class FlexlbGrpcForwarderAsyncTest {
                     .start();
             ManagedChannel channel = NettyChannelBuilder
                     .forAddress("127.0.0.1", server.getPort())
+                    .channelType(io.netty.channel.socket.nio.NioSocketChannel.class)
+                    .eventLoopGroup(transport)
                     .directExecutor()
                     .usePlaintext()
                     .build();
-            return new RpcFixture(server, channel);
+            var fixture = new RpcFixture(server, channel, transport);
+            try {
+                GrpcReceivingGuardRepro.awaitReady(channel);
+                return fixture;
+            } catch (Exception | Error failure) {
+                fixture.close();
+                throw failure;
+            }
         }
 
         @Override
@@ -582,6 +597,7 @@ class FlexlbGrpcForwarderAsyncTest {
             channel.awaitTermination(5, TimeUnit.SECONDS);
             server.shutdownNow();
             server.awaitTermination(5, TimeUnit.SECONDS);
+            transport.shutdownGracefully(0, 1, TimeUnit.SECONDS).sync();
         }
     }
 }

@@ -23,7 +23,6 @@ import java.util.Map;
 import java.util.OptionalLong;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.RejectedExecutionException;
-import java.util.concurrent.atomic.LongAdder;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -65,11 +64,9 @@ class EngineSyncRunnerTest {
 
     private final long syncRequestTimeoutMs = 5000L;
 
-    @Mock
-    private LongAdder syncCount;
+    private final long syncCount = 0L;
 
     private final long syncEngineStatusInterval = 20L;
-    private static final long STATUS_STALE_AFTER_US = 10_000_000L;
 
     private EngineSyncRunner engineSyncRunner;
 
@@ -90,7 +87,7 @@ class EngineSyncRunnerTest {
                 syncCount,
                 syncEngineStatusInterval,
                 false,
-                STATUS_STALE_AFTER_US
+                statusCheckExecutor, statusCheckExecutor
         );
     }
 
@@ -119,7 +116,7 @@ class EngineSyncRunnerTest {
                 syncCount,
                 syncEngineStatusInterval,
                 false,
-                STATUS_STALE_AFTER_US
+                statusCheckExecutor, statusCheckExecutor
         );
 
         // Execute
@@ -130,7 +127,7 @@ class EngineSyncRunnerTest {
     }
 
     @Test
-    void should_start_new_worker_expiration_window_at_discovery_time() {
+    void should_initialize_poll_health_at_discovery_time() {
         String ipPort = "127.0.0.1:8080";
         Mockito.when(workerAddressService.getEngineWorkerList(modelName, RoleType.VIT))
                 .thenReturn(List.of(WorkerHost.of("127.0.0.1", 8080)));
@@ -140,12 +137,23 @@ class EngineSyncRunnerTest {
                 localKvCacheAwareManager,
                 cacheIntervalService,
                 syncRequestTimeoutMs, syncCount,
-                syncEngineStatusInterval, false, STATUS_STALE_AFTER_US);
+                syncEngineStatusInterval, false, statusCheckExecutor, statusCheckExecutor);
 
         runner.run();
 
         assertTrue(endpointRegistry.statusSnapshot(RoleType.VIT).get(ipPort)
                 .pollHealth().lastSuccessfulPollUs() > 0);
+    }
+
+    @Test
+    void malformedDiscoveryAddressDoesNotStarveLaterWorkers() {
+        when(workerAddressService.getEngineWorkerList(modelName, roleType))
+                .thenReturn(List.of(WorkerHost.of("", 8080), WorkerHost.of("127.0.0.1", 8080)));
+
+        engineSyncRunner.run();
+
+        assertNotNull(endpointRegistry.statusSnapshot(roleType).get("127.0.0.1:8080"));
+        verify(statusCheckExecutor, times(2)).submit(any(Runnable.class));
     }
 
     @Test
@@ -161,7 +169,7 @@ class EngineSyncRunnerTest {
                 statusCheckExecutor, engineHealthReporter, workerStatusRpcClient,
                 RoleType.PREFILL, localKvCacheAwareManager,
                 cacheIntervalService, syncRequestTimeoutMs, syncCount,
-                syncEngineStatusInterval, false, STATUS_STALE_AFTER_US);
+                syncEngineStatusInterval, false, statusCheckExecutor, statusCheckExecutor);
 
         runner.run();
 
@@ -185,9 +193,6 @@ class EngineSyncRunnerTest {
         WorkerStatus status = Mockito.spy(RunnerTestSupport.discovered(
                 RoleType.PREFILL, null, "127.0.0.1",
                 8080, 8081, "test-site"));
-        when(status.pollHealth()).thenReturn(new WorkerStatus.PollHealth(
-                System.nanoTime() / 1_000 - 2_000_000L,
-                20_000L, 0L, true));
         discover(directory, status);
         RunnerTestSupport.publishEndpoint(
                 registry, RoleType.PREFILL, ipPort, status);
@@ -201,12 +206,11 @@ class EngineSyncRunnerTest {
                 cacheIntervalService,
                 syncRequestTimeoutMs, syncCount,
                 syncEngineStatusInterval, false,
-                1_000_000L);
+                statusCheckExecutor, statusCheckExecutor);
         runner.run();
 
         assertFalse(status.isActiveGeneration());
-        assertFalse(directory.statusSnapshot(RoleType.PREFILL)
-                .containsKey(ipPort));
+        RunnerTestSupport.awaitCondition(() -> !directory.statusSnapshot(RoleType.PREFILL).containsKey(ipPort));
         assertNull(registry.get(RoleType.PREFILL, ipPort));
         registry.close();
     }
@@ -235,7 +239,7 @@ class EngineSyncRunnerTest {
                 syncCount,
                 syncEngineStatusInterval,
                 false,
-                STATUS_STALE_AFTER_US
+                statusCheckExecutor, statusCheckExecutor
         );
         when(workerAddressService.getEngineWorkerList(modelName, RoleType.PREFILL))
                 .thenReturn(List.of(new WorkerHost("127.0.0.1", 61000)));
@@ -344,7 +348,7 @@ class EngineSyncRunnerTest {
                 RoleType.PREFILL, localKvCacheAwareManager,
                 cacheIntervalService,
                 syncRequestTimeoutMs, syncCount, syncEngineStatusInterval,
-                false, STATUS_STALE_AFTER_US);
+                false, statusCheckExecutor, statusCheckExecutor);
     }
 
     private void assertTopologyReplacement(
@@ -386,7 +390,7 @@ class EngineSyncRunnerTest {
                 syncRequestTimeoutMs,
                 syncCount,
                 syncEngineStatusInterval,
-                false, STATUS_STALE_AFTER_US);
+                false, statusCheckExecutor, statusCheckExecutor);
         try {
             // First discovery pass retires the old topology generation: it
             // detaches the endpoint, marks the status RETIRING, and removes the
@@ -395,9 +399,7 @@ class EngineSyncRunnerTest {
             // the RETIRING holder, so no routable identity exists yet.
             runner.run();
 
-            assertFalse(directory.statusSnapshot(RoleType.PREFILL)
-                            .containsKey(ipPort),
-                    "old generation is retired and removed; replacement is deferred");
+            RunnerTestSupport.awaitCondition(() -> !directory.statusSnapshot(RoleType.PREFILL).containsKey(ipPort));
             assertNull(registry.get(RoleType.PREFILL, ipPort),
                     "old endpoint is detached immediately and replacement is unpublished");
             // A subsequent discovery pass publishes the replacement generation

@@ -37,6 +37,7 @@ public final class RouteTimelineProjector implements RouteProjection.CandidateVi
     private long incomingPrefillMs;
     private RouteProjection.Candidate.InitialHeadDisposition headDisposition;
     private String detail;
+    private GroupPlanner.Constraints rankingConstraints;
 
     private RouteTimelineProjector() {
     }
@@ -59,6 +60,37 @@ public final class RouteTimelineProjector implements RouteProjection.CandidateVi
             PrefillTimePredictor.Evaluator evaluator,
             RouteProjection.DeliveryProjection deliveryProjection,
             long planningAtMs) {
+        return projectView(inputs, requestId, priority, enqueuedAtMs, expiresAtMs, seqLen, hitCache, routingCacheMatchTokens, evaluator, deliveryProjection, planningAtMs, false);
+    }
+
+    /** Rank known serial work without converting a transient KV wait into a cache miss. */
+    public RouteProjection.CandidateView projectRankingView(
+            RouteProjection.Inputs inputs,
+            long requestId,
+            int priority,
+            long enqueuedAtMs,
+            long expiresAtMs,
+            long seqLen,
+            long hitCache,
+            long routingCacheMatchTokens,
+            PrefillTimePredictor.Evaluator evaluator,
+            RouteProjection.DeliveryProjection deliveryProjection,
+            long planningAtMs) {
+        return projectView(inputs, requestId, priority, enqueuedAtMs, expiresAtMs, seqLen, hitCache, routingCacheMatchTokens, evaluator, deliveryProjection, planningAtMs, true);
+    }
+
+    private RouteProjection.CandidateView projectView(
+            RouteProjection.Inputs inputs,
+            long requestId,
+            int priority,
+            long enqueuedAtMs,
+            long expiresAtMs,
+            long seqLen,
+            long hitCache,
+            long routingCacheMatchTokens,
+            PrefillTimePredictor.Evaluator evaluator,
+            RouteProjection.DeliveryProjection deliveryProjection,
+            long planningAtMs, boolean rankOnly) {
         this.requestId = requestId;
         this.priority = priority;
         this.enqueuedAtMs = enqueuedAtMs;
@@ -66,8 +98,9 @@ public final class RouteTimelineProjector implements RouteProjection.CandidateVi
         this.seqLen = seqLen;
         this.hitCache = hitCache;
         this.routingCacheMatchTokens = routingCacheMatchTokens;
-        return RouteProjection.applyAdmissionPolicy(inputs.queue(), project(
-                inputs.queue(), inputs.work(), evaluator, deliveryProjection, planningAtMs));
+        QueueSnapshot queue = inputs.queue();
+        var projected = project(queue, inputs.work(), evaluator, deliveryProjection, planningAtMs, rankOnly);
+        return rankOnly ? projected : RouteProjection.applyAdmissionPolicy(queue, projected);
     }
 
     /**
@@ -82,7 +115,7 @@ public final class RouteTimelineProjector implements RouteProjection.CandidateVi
             WorkSnapshot committed,
             PrefillTimePredictor.Evaluator evaluator,
             RouteProjection.DeliveryProjection deliveryProjection,
-            long planningAtMs) {
+            long planningAtMs, boolean rankOnly) {
         long projectionAtMs = Math.max(queue.capturedAtMs(), planningAtMs);
         if (evaluator == null) {
             return unavailable("PREDICTOR_MISSING");
@@ -95,7 +128,7 @@ public final class RouteTimelineProjector implements RouteProjection.CandidateVi
         try {
             return projectWithPredictions(
                     queue, committed, deliveryProjection,
-                    projectionAtMs, predictions);
+                    projectionAtMs, predictions, rankOnly);
         } catch (PredictionFailure predictionFailure) {
             return unavailable(predictionFailure.detail("PREDICTION_FAILED"));
         } finally {
@@ -108,7 +141,8 @@ public final class RouteTimelineProjector implements RouteProjection.CandidateVi
             WorkSnapshot committed,
             RouteProjection.DeliveryProjection deliveryProjection,
             long projectionAtMs,
-            PredictionBoundary predictions) {
+            PredictionBoundary predictions, boolean rankOnly) {
+        var constraints = rankOnly ? rankingConstraints(queue.constraints()) : queue.constraints();
         if (committed.containsRequest(requestId)) {
             return unavailable("INCOMING_ALREADY_COMMITTED");
         }
@@ -122,11 +156,11 @@ public final class RouteTimelineProjector implements RouteProjection.CandidateVi
                     predictionFailure.detail("SINGLE_PREDICTION_FAILED"));
         }
 
-        if (committed.hasUnknownWork()) {
+        if (!rankOnly && committed.hasUnknownWork()) {
             if (containsActiveRequest(queue, requestId)) {
                 return unavailable("INCOMING_ALREADY_ACTIVE");
             }
-            if (queue.queueScheduling() && seqLen > queue.constraints().batchKvCapacity()) {
+            if (queue.queueScheduling() && seqLen > constraints.batchKvCapacity()) {
                 return blocked(incomingPrefillMs, RouteProjection.Candidate.InitialHeadDisposition.NONE,
                         "PREFILL_KV_CAPACITY");
             }
@@ -146,13 +180,28 @@ public final class RouteTimelineProjector implements RouteProjection.CandidateVi
         }
         // An empty queue has no membership to merge or decision group to build.
         // Invalid SINGLE constraints still go through the grouping policy's validation.
-        if (queue.activeItems().isEmpty() && queue.constraints().predictedExecutionBudgetMs() <= 0L
+        if (queue.activeItems().isEmpty() && constraints.predictedExecutionBudgetMs() <= 0L
                 && (queue.grouping() == GroupingPolicy.FIXED_WINDOW
-                    || queue.constraints().maxRequests() == 1 && queue.constraints().collectionWindowMs() == 0L
-                        && queue.constraints().predictedExecutionBudgetMs() == 0L)) {
-            return projectSingleton(queue.constraints(), deliveryProjection, projectionAtMs, committedMs, incomingPrefillMs);
+                    || constraints.maxRequests() == 1 && constraints.collectionWindowMs() == 0L
+                        && constraints.predictedExecutionBudgetMs() == 0L)) {
+            return projectSingleton(constraints, deliveryProjection, projectionAtMs, committedMs, incomingPrefillMs);
         }
-        return projectQueue(queue, deliveryProjection, projectionAtMs, committedMs, incomingPrefillMs);
+        return projectQueue(queue, constraints, deliveryProjection, projectionAtMs, committedMs, incomingPrefillMs);
+    }
+
+    private GroupPlanner.Constraints rankingConstraints(GroupPlanner.Constraints source) {
+        var cached = rankingConstraints;
+        if (cached == null || cached.maxRequests() != source.maxRequests()
+                || cached.batchTokenCapacity() != source.batchTokenCapacity()
+                || cached.predictedExecutionBudgetMs() != source.predictedExecutionBudgetMs()
+                || cached.collectionWindowMs() != source.collectionWindowMs()) {
+            // Fleet nodes usually share these immutable policy values. Do not allocate
+            // a second queue snapshot and constraint record for every worker/request.
+            cached = new GroupPlanner.Constraints(source.maxRequests(), source.batchTokenCapacity(), Long.MAX_VALUE,
+                    source.predictedExecutionBudgetMs(), source.collectionWindowMs());
+            rankingConstraints = cached;
+        }
+        return cached;
     }
 
     private RouteProjection.CandidateView projectSingleton(
@@ -181,7 +230,8 @@ public final class RouteTimelineProjector implements RouteProjection.CandidateVi
     }
 
     private RouteProjection.CandidateView projectQueue(
-            QueueSnapshot queue, RouteProjection.DeliveryProjection deliveryProjection,
+            QueueSnapshot queue, GroupPlanner.Constraints constraints,
+            RouteProjection.DeliveryProjection deliveryProjection,
             long projectionAtMs, long committedMs, long incomingPrefillMs) {
         GroupPlanner.Item probe = new GroupPlanner.Item(
                 requestId, priority, Long.MAX_VALUE, enqueuedAtMs,
@@ -203,7 +253,7 @@ public final class RouteTimelineProjector implements RouteProjection.CandidateVi
                     ordered.initialHeadDisposition();
 
             GroupPlanner.Item head = ordered.head();
-            if (head.seqLen() > queue.constraints().batchKvCapacity()) {
+            if (head.seqLen() > constraints.batchKvCapacity()) {
                 return blocked(
                         incomingPrefillMs,
                         initialHeadDisposition,
@@ -214,12 +264,12 @@ public final class RouteTimelineProjector implements RouteProjection.CandidateVi
             final RouteProjection.GroupPlanning planning;
             try {
                 // An idle singleton needs no readiness prediction when already full or due.
-                boolean needsPrediction = queue.constraints().predictedExecutionBudgetMs() > 0L
-                        && (!singleton || queue.constraints().maxRequests() > 1
+                boolean needsPrediction = constraints.predictedExecutionBudgetMs() > 0L
+                        && (!singleton || constraints.maxRequests() > 1
                             && !GroupPlanner.windowElapsed(enqueuedAtMs, decisionNowMs,
-                                    queue.constraints().collectionWindowMs()));
+                                    constraints.collectionWindowMs()));
                 planning = needsPrediction ? deliveryProjection.planning(predictions) : null;
-                selection = queue.grouping().select(ordered, queue.constraints(),
+                selection = queue.grouping().select(ordered, constraints,
                         planning == null ? null : (added, items) -> planning.durationMs(
                                 items, Math.min(ordered.probePosition, items.size() - 1)));
             } catch (PredictionFailure predictionFailure) {
@@ -229,10 +279,10 @@ public final class RouteTimelineProjector implements RouteProjection.CandidateVi
             int probePosition = ordered.probePosition;
             checkState(!selection.items().isEmpty(), "non-empty projected queue produced an empty group");
 
-            if (queue.grouping().dispatchReason(selection, queue.constraints(), decisionNowMs) == null) {
+            if (queue.grouping().dispatchReason(selection, constraints, decisionNowMs) == null) {
                 decisionNowMs = Math.min(
                         GroupPlanner.collectionDeadlineMs(selection.windowOpenedAtMs(),
-                                queue.constraints().collectionWindowMs()), head.expiresAtMs());
+                                constraints.collectionWindowMs()), head.expiresAtMs());
                 // Only visited members (including a rejected tail) can change this frozen prefix.
                 // Consumed prefixes and unvisited suffixes cannot change the pending group.
                 if (decisionNowMs >= ordered.earliestExpiryMs) {

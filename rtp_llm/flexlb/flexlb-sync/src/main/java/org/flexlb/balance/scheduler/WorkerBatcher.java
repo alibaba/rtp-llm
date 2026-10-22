@@ -218,35 +218,12 @@ public final class WorkerBatcher {
             return false;
         }
         boolean accepted;
-        List<RequestRoute> victims = List.of();
         queueLock.lock();
         try {
-            if (drainClaimed || settings.dispatcherType() == DispatcherConfig.Type.NON_BATCH && prefillEndpoint.isGenerationRetiringOrRetired()) {
-                return false;
-            }
-            accepted = prefillState.updateQueue(PrefillState.QueueChange.ENQUEUE, item, settings.maxOutstandingRequests(), System.currentTimeMillis()) != null;
-            if (!accepted && !drainClaimed
-                    && settings.preemptQueued()) {
-                victims = prefillEndpoint.ownership.replaceQueuedRoutesLocked(item, settings.maxOutstandingRequests());
-                accepted = !victims.isEmpty();
-            }
-            if (accepted) {
-                stateChanged.signal();
-            }
-        } finally {
-            queueLock.unlock();
-        }
-        if (accepted) {
-            for (RequestRoute victim : victims) {
-                var owner = victim.ctx().data().getScheduler();
-                try { owner.onQueueEvent(victim, AbstractRequestScheduler.QueueKind.PREEMPTED, item, null); }
-                catch (Throwable failure) {
-                    owner.runtime.recordFailure(failure);
-                    try { Logger.error("Queued victim notification failed after replacement: request_id={}", victim.requestId(), failure); }
-                    catch (Throwable ignored) { }
-                }
-            }
-        }
+            if (drainClaimed || prefillEndpoint.isGenerationRetiringOrRetired()) { return false; }
+            accepted = prefillState.updateQueue(PrefillState.QueueChange.ENQUEUE, item, System.currentTimeMillis()) != null;
+            if (accepted) { stateChanged.signal(); }
+        } finally { queueLock.unlock(); }
         return accepted;
     }
 
@@ -338,7 +315,7 @@ public final class WorkerBatcher {
             while (true) {
                 RequestRoute item;
                 try {
-                    item = prefillState.updateQueue(PrefillState.QueueChange.STOP, null, 0L, System.currentTimeMillis());
+                    item = prefillState.updateQueue(PrefillState.QueueChange.STOP, null, System.currentTimeMillis());
                 } catch (Throwable claimFailure) {
                     cleanupFailure = Failures.append(cleanupFailure, claimFailure);
                     break;
@@ -349,7 +326,7 @@ public final class WorkerBatcher {
                 cleanupFailure = Failures.run(cleanupFailure, capacityAvailableSignal);
                 try {
                     item.ctx().data().getScheduler().onQueueEvent(item, AbstractRequestScheduler.QueueKind.REJECTED, null, terminalFailure);
-                    boolean acknowledged = prefillState.updateQueue(PrefillState.QueueChange.ACK_STOP, item, 0L, System.currentTimeMillis()) != null;
+                    boolean acknowledged = prefillState.updateQueue(PrefillState.QueueChange.ACK_STOP, item, System.currentTimeMillis()) != null;
                     if (!acknowledged) {
                         cleanupFailure = Failures.append(cleanupFailure, stopAcknowledgementFailure);
                     }
@@ -385,7 +362,7 @@ public final class WorkerBatcher {
         try {
             if (drainClaimed || runtimeState != RuntimeState.RUNNING) { return false; }
             if (command == Control.WAKE) { controlInbox.addLast(item); accepted = true; }
-            else { accepted = prefillState.updateQueue(PrefillState.QueueChange.REMOVE, item, 0L, System.currentTimeMillis()) != null; }
+            else { accepted = prefillState.updateQueue(PrefillState.QueueChange.REMOVE, item, System.currentTimeMillis()) != null; }
             if (accepted) { stateChanged.signal(); }
         } finally { queueLock.unlock(); }
         if (accepted && command == Control.REMOVE) { capacityAvailableSignal.run(); }
@@ -463,7 +440,10 @@ public final class WorkerBatcher {
                         ? prep.predictions : Arrays.copyOf(prep.predictions, items.size());
                 prep.committed = commitSelection(now -> prefillEndpoint.commitLocked(new PrefillState.CommitPlan(
                         prep.batch ? PrefillState.CommitKind.BATCH : PrefillState.CommitKind.QUEUED, items, List.of(), prep.reservation, predictions, failed, now)));
-                if (prep.committed == null) { return null; }
+                if (prep.committed == null) {
+                    return !prep.batch && !prefillState.requestCapacityAvailable(prefillEndpoint.requestLimit, 1)
+                            ? CapacityBoundary.deliveryUnavailable(CapacityBoundary.Resource.PREFILL_REQUEST) : null;
+                }
                 prep.reservation = null;
                 boolean removedFailedMember = prep.committed.removedFailedMember();
                 if (removedFailedMember) { removeAndNotify(blocked, boundary, true); }
@@ -540,6 +520,7 @@ public final class WorkerBatcher {
         var runtime = item.ctx().data().getScheduler().runtime;
         return switch (boundary.resource()) {
             case DISPATCH_EXECUTOR -> runtime.deliveries().deliveryCapacityAvailable();
+            case PREFILL_REQUEST -> prefillState.requestCapacityAvailable(prefillEndpoint.requestLimit, 1);
             case PREFILL_BATCH -> prefillEndpoint.ownership.batchCapacityAvailable(runtime.deliveries().maxInflightBatches);
             case DECODE_ENGINE -> item.decodeEp().shouldRetryDispatch(item.decodeReservation(), runtime.deliveries().decodeDeliveryCapacity);
         };
@@ -551,7 +532,7 @@ public final class WorkerBatcher {
             case DECODE_ENGINE -> {
                 yield item.decodeEp().watchEngineDispatchCapacity(wake);
             }
-            case PREFILL_BATCH -> () -> { };
+            case PREFILL_BATCH, PREFILL_REQUEST -> () -> { };
         };
     }
 
@@ -578,7 +559,7 @@ public final class WorkerBatcher {
                     return BatcherCycleResult.NO_ACTION;
                 }
             } else if (failed) {
-                removed = prefillState.updateQueue(PrefillState.QueueChange.REMOVE_UNEXPIRED, blockedItem, 0L, nowMs) != null;
+                removed = prefillState.updateQueue(PrefillState.QueueChange.REMOVE_UNEXPIRED, blockedItem, nowMs) != null;
             }
         } finally {
             queueLock.unlock();
@@ -590,7 +571,7 @@ public final class WorkerBatcher {
 
     /** Once removed, the request must be notified even if a capacity listener fails. */
     private void removeAndNotify(RequestRoute item, CapacityBoundary failure, boolean alreadyRemoved) {
-        if (!alreadyRemoved && prefillState.updateQueue(PrefillState.QueueChange.REMOVE, item, 0L, System.currentTimeMillis()) == null) { return; }
+        if (!alreadyRemoved && prefillState.updateQueue(PrefillState.QueueChange.REMOVE, item, System.currentTimeMillis()) == null) { return; }
         Throwable problem = Failures.run(null, capacityAvailableSignal);
         try {
             if (failure == null) {
@@ -812,6 +793,9 @@ public final class WorkerBatcher {
         }
 
         CapacityBoundary acquire(RequestRoute item, PrefillTimePredictor.Evaluator evaluator) {
+            if (!batch && !prefillState.requestCapacityAvailable(prefillEndpoint.requestLimit, members.size() + 1)) {
+                return CapacityBoundary.deliveryUnavailable(CapacityBoundary.Resource.PREFILL_REQUEST);
+            }
             if (batch && members.isEmpty()) {
                 try {
                     var execution = runtime.deliveries().tryReserveDelivery();

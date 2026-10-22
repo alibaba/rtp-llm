@@ -5,7 +5,6 @@ import org.flexlb.balance.endpoint.DecodeResources.CapacityDeficit;
 import org.flexlb.balance.endpoint.DecodeResources.CapacityRelease;
 import org.flexlb.balance.endpoint.DecodeResources.DecodeRequestView;
 import org.flexlb.balance.endpoint.DecodeResources.ResourceSnapshot;
-import org.flexlb.balance.scheduler.RequestRoute;
 import org.flexlb.config.PreemptionConfig;
 import org.flexlb.config.VictimStage;
 import org.flexlb.dao.loadbalance.Request;
@@ -28,20 +27,6 @@ public final class EvictionPlanner {
         return PriorityNormalizer.hasPriority(incomingPriority)
                 && PriorityNormalizer.hasPriority(candidatePriority)
                 && candidatePriority < incomingPriority;
-    }
-
-    /**
-     * Consumes a caller-owned mutable candidate buffer. State checks resource
-     * ownership under its queue lock before supplying these candidates.
-     */
-    public static List<RequestRoute> selectPrefillVictims(
-            List<RequestRoute> uncommitted, int incomingPriority, long required) {
-        if (!PriorityNormalizer.hasPriority(incomingPriority) || required <= 0L) { return List.of(); }
-        uncommitted.removeIf(route -> !isLowerPriority(incomingPriority, route.priority()));
-        if (uncommitted.size() < required) { return List.of(); }
-        uncommitted.sort(Comparator.comparingInt(RequestRoute::priority)
-                .thenComparing(Comparator.comparingLong(RequestRoute::enqueueSeq).reversed()));
-        return uncommitted.subList(0, (int) required);
     }
 
     /** A decode plan never mixes Master-local removal with Engine Cancel. */

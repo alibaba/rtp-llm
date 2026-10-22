@@ -162,8 +162,7 @@ class DeliverySettlementSignalContractTest {
                 assertNotNull(admission);
                 assertEquals(org.flexlb.balance.PlacementResult.Status.SUCCESS,
                         scheduler.commitRoute(route, RequestProtocolTestSupport.publication(() ->
-                                state.updateQueue(PrefillState.QueueChange.ENQUEUE, route,
-                                        Long.MAX_VALUE, System.currentTimeMillis()) == route)));
+                                state.updateQueue(PrefillState.QueueChange.ENQUEUE, route, System.currentTimeMillis()) == route)));
                 admission.finish();
             }
             var prepared = prefill.reserveBatch(route, BATCH, 2);

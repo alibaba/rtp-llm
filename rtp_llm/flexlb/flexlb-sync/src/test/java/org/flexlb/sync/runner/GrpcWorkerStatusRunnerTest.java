@@ -11,11 +11,9 @@ import org.flexlb.service.grpc.WorkerStatusRpcClient;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
-import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -38,63 +36,35 @@ import static org.mockito.Mockito.when;
 class GrpcWorkerStatusRunnerTest {
 
     @ParameterizedTest
-    @CsvSource({"DECODE,false,false", "DECODE,false,true", "PREFILL,true,false",
-            "PREFILL,true,true", "PDFUSION,true,false", "PDFUSION,true,true"})
-    void repeatedRpcFailuresRetireWorkerAndOnlyClearDetailedCacheIndexes(
-            RoleType role, boolean needsCacheKeys, boolean telemetryFails) {
+    @ValueSource(booleans = {false, true})
+    void transportFailureNeverRetiresWorkerEvenWhenTelemetryFails(boolean telemetryFails) {
         ConfigService config = mock(ConfigService.class);
         when(config.loadBalanceConfig()).thenReturn(
                 org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
         EndpointRegistry registry = RunnerTestSupport.endpointRegistry(config);
         WorkerStatus status = RunnerTestSupport.discovered(
-                role, null, "127.0.0.1", 8080, 8081, "test-site");
-        EndpointRegistry directory = directory(registry, status);
-        WorkerEndpoint endpoint = RunnerTestSupport.publishEndpoint(
-                registry, role, status.getIpPort(), status);
+                RoleType.DECODE, null, "127.0.0.1", 8080, 8081, "site");
+        directory(registry, status);
+        WorkerEndpoint endpoint = RunnerTestSupport.publishEndpoint(registry, status.getRole(), status.getIpPort(), status);
         CacheAwareService cache = mock(CacheAwareService.class);
         WorkerStatusRpcClient grpc = mock(WorkerStatusRpcClient.class);
         EngineHealthReporter reporter = mock(EngineHealthReporter.class);
-        var failuresAtReport = new ArrayList<Long>();
-        var lockHeldAtReport = new ArrayList<Boolean>();
-        org.mockito.Mockito.doAnswer(invocation -> {
-            failuresAtReport.add(status.pollHealth().consecutiveTransportFailures());
-            lockHeldAtReport.add(status.lock.isHeldByCurrentThread());
-            if (telemetryFails) { throw new IllegalStateException("monitor unavailable"); }
-            return null;
-        }).when(reporter).reportStatusCheckerFail(anyString(), any(), any());
-        when(grpc.getWorkerStatusAsync(
-                anyString(), anyInt(), anyLong(), anyLong(), any()))
-                .thenReturn(CompletableFuture.failedFuture(
-                        io.grpc.Status.UNAVAILABLE.asRuntimeException()));
-
-        for (int failure = 1; failure <= 3; failure++) {
-            WorkerStatus.PollLease lease = status.tryBeginStatusPoll();
-            assertNotNull(lease);
-            new GrpcWorkerStatusRunner(
-                    "test-model",
-                    status, lease, directory, reporter,
-                    grpc, 5_000L, cache, Runnable::run).run();
-            assertEquals(failure, status.pollHealth().consecutiveTransportFailures(),
-                    "failed telemetry must not suppress the transport failure fact");
-            if (failure < 3) {
-                assertSame(status, directory.statusSnapshot(role).get(status.getIpPort()));
-                assertSame(endpoint, registry.get(role, status.getIpPort()));
-                verifyNoInteractions(cache);
+        if (telemetryFails) {
+            org.mockito.Mockito.doThrow(new IllegalStateException("monitor unavailable"))
+                    .when(reporter).reportStatusCheckerFail(anyString(), any(), any());
+        }
+        when(grpc.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(), any()))
+                .thenReturn(CompletableFuture.failedFuture(io.grpc.Status.UNAVAILABLE.asRuntimeException()));
+        try {
+            for (int i = 0; i < 5; i++) {
+                new GrpcWorkerStatusRunner("model", status, status.tryBeginStatusPoll(), registry,
+                        reporter, grpc, 500L, cache, Runnable::run).run();
             }
-        }
-
-        assertNull(registry.get(role, status.getIpPort()));
-        assertTrue(directory.statusSnapshot(role).isEmpty());
-        assertNull(status.tryBeginStatusPoll(), "retired generation cannot poll again");
-        assertEquals(List.of(1L, 2L, 3L), failuresAtReport, "business facts precede telemetry");
-        assertEquals(List.of(false, false, false), lockHeldAtReport, "telemetry must run outside the generation lock");
-        verify(reporter, org.mockito.Mockito.times(3)).reportStatusCheckerFail(
-                "test-model", org.flexlb.enums.BalanceStatusEnum.WORKER_SERVICE_UNAVAILABLE, role);
-        if (needsCacheKeys) {
-            verify(cache).removeEngineBlockCache(status.getIpPort());
-        } else {
+            assertSame(endpoint, registry.get(status.getRole(), status.getIpPort()));
+            assertEquals(0L, status.pollHealth().consecutiveWorkerFailures());
+            assertNull(status.retirementReason());
             verifyNoInteractions(cache);
-        }
+        } finally { registry.close(); }
     }
 
     @Test
@@ -260,7 +230,7 @@ class GrpcWorkerStatusRunnerTest {
                 mock(EngineHealthReporter.class), grpc, 5_000L,
                 mock(CacheAwareService.class), Runnable::run).run();
 
-        assertTrue(registry.statusSnapshot(role).isEmpty());
+        org.flexlb.sync.runner.RunnerTestSupport.awaitCondition(() -> registry.statusSnapshot(role).isEmpty());
         assertNull(status.tryBeginStatusPoll(), "a missing committed endpoint retires its status generation");
         assertNull(registry.get(role, status.getIpPort()));
         verify(registry, org.mockito.Mockito.never()).publishPreparedEndpoint(
@@ -302,7 +272,7 @@ class GrpcWorkerStatusRunnerTest {
         assertEquals(RoleType.PREFILL, status.getRole());
         assertFalse(status.isActiveGeneration());
         assertNull(status.tryBeginStatusPoll(), "retired generation cannot poll again");
-        assertTrue(registry.statusSnapshot(RoleType.PREFILL).isEmpty());
+        org.flexlb.sync.runner.RunnerTestSupport.awaitCondition(() -> registry.statusSnapshot(RoleType.PREFILL).isEmpty());
         assertTrue(registry.statusSnapshot(RoleType.DECODE).isEmpty());
         assertNull(registry.get(RoleType.PREFILL, status.getIpPort()));
         assertNull(registry.get(RoleType.DECODE, status.getIpPort()));

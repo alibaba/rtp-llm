@@ -1,7 +1,6 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.PlacementResult;
-import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.preemption.CancelTarget;
@@ -56,10 +55,6 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             return CompletableFuture.completedFuture(Response.buildErrorResponse(StrategyErrorType.DISPATCH_FAILED,
                     "request scheduler is not accepting this request configuration"));
         }
-        if (config.getDispatcher().requiresGenerateInput() && !data.hasGenerateInput()) {
-            return CompletableFuture.completedFuture(Response.buildErrorResponse(StrategyErrorType.INVALID_REQUEST,
-                    "missing serialized generate_input for batch dispatch"));
-        }
         long expires = data.getRequestExpiresAtMs();
         if (expires <= 0L || System.currentTimeMillis() >= expires) {
             var rejected = CompletableFuture.completedFuture(Response.buildErrorResponse(expiredError,
@@ -69,6 +64,10 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         }
         var future = new RequestFuture((kind, response, failure) -> completeExternal(ctx, kind, response, failure));
         var result = requests.register(ctx, this, future);
+        if (result == RequestRepository.RegistrationResult.INPUT_REQUIRED) {
+            return CompletableFuture.completedFuture(Response.buildErrorResponse(StrategyErrorType.GENERATE_INPUT_REQUIRED,
+                    "missing serialized generate_input for batch dispatch"));
+        }
         if (result != RequestRepository.RegistrationResult.REGISTERED) {
             return CompletableFuture.completedFuture(Response.buildErrorResponse(
                     result == RequestRepository.RegistrationResult.CLOSED ? StrategyErrorType.DISPATCH_FAILED
@@ -79,9 +78,14 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         FlexlbTrace.setScheduleAttribute(data.getTraceContext(), FlexlbTrace.SCHEDULE_MODE,
                 config.getDispatcher().requiresGenerateInput() ? "BATCH" : config.getScheduler().getType().name());
         future.whenComplete((response, failure) -> {
-            if (failure == null && response != null && response.isSuccess()) {
-                try { cacheTrace.report(ctx); }
-                catch (RuntimeException error) { Logger.warn("Route tracing failed", error); }
+            try {
+                if (failure == null && response != null && response.isSuccess()) {
+                    cacheTrace.report(ctx);
+                }
+            } catch (RuntimeException error) {
+                Logger.warn("Route tracing failed", error);
+            } finally {
+                ctx.data().releaseSchedulingInput();
             }
         });
         runtime.deadlines().update(ctx, ctx.snapshot().deadlines());
@@ -470,6 +474,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                     publication = new ResponsePublication(runtime, ctx, true);
                     var acknowledged = ctx.selectResponse(new ResponseCandidate(ctx, ResponseKind.CONFIRMATION, null, System.currentTimeMillis()));
                     if (acknowledged.kind() != ClaimKind.GRANTED) { publication.close(); return; }
+                    ctx.data().discardGenerateInput();
                     candidate = new ResponseCandidate(ctx, ResponseKind.ACK, null, System.currentTimeMillis());
                     if (delivery.identity().kind() == DeliveryClaimKind.BATCH_ENQUEUE && delivery.send() == SendState.DELIVERED) {
                         ctx.data().acknowledge(System.currentTimeMillis(), System.nanoTime());

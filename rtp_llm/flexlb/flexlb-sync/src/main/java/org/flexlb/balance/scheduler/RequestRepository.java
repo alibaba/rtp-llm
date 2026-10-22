@@ -16,7 +16,7 @@ public final class RequestRepository {
     private volatile boolean closed;
     private volatile boolean stopping;
 
-    enum RegistrationResult { REGISTERED, DUPLICATE_ID, CONTEXT_BOUND, CLOSED }
+    enum RegistrationResult { REGISTERED, DUPLICATE_ID, CONTEXT_BOUND, INPUT_REQUIRED, CLOSED }
     public record TerminalRecord(RequestState state, AbstractRequestScheduler owner) { }
 
     RegistrationResult register(RequestContext context, AbstractRequestScheduler scheduler, RequestFuture response) {
@@ -34,6 +34,9 @@ public final class RequestRepository {
                     }
                     if (data.getScheduler() != null || context.snapshot().key() != null) {
                         return RegistrationResult.CONTEXT_BOUND;
+                    }
+                    if (data.getConfig().getDispatcher().requiresGenerateInput() && !data.hasGenerateInput()) {
+                        return RegistrationResult.INPUT_REQUIRED;
                     }
                     long timeout = data.getConfig().getRequestLifecycle().getRequest().getTimeoutMs();
                     if (timeout <= 0L) { throw new IllegalArgumentException("positive request inactivity timeout required"); }
@@ -79,7 +82,7 @@ public final class RequestRepository {
             if (activeRequests.get(exact.data().getRequestId()) != exact) { return; }
             terminalRecords.put(exact.data().getRequestId(), new TerminalRecord(terminal, exact.data().getScheduler()));
             activeRequests.remove(exact.data().getRequestId(), exact);
-            exact.data().discardGenerateInput();
+            exact.data().releaseSchedulingInput();
         }
     }
     boolean removeExactTerminal(TerminalRecord exact, long before) {
