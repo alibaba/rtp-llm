@@ -267,3 +267,78 @@ def test_cached_cases_cannot_mask_missing_worker_report(tmp_path, xml):
     controller = _controller(tmp_path)
     controller._session_cached_entries = {"cached": SimpleNamespace(junit_testcase_xml='<testcase name="cached" time="0.1"/>')}
     assert controller._parse_remote_output(_result(xml, exit_code=5), None) != 0
+
+@pytest.mark.parametrize("real_failure", [False, True])
+def test_session_integrity_error_preserves_failure_without_inflating_profile(tmp_path, real_failure):
+    from rtp_llm.test.remote_tests.junit_merge import merge_reports
+
+    controller = _controller(tmp_path)
+    controller.ci_profile = "fixture_profile"
+    controller.config._rtp_ci_minimum_count = 1
+    controller.config._rtp_ci_expected_count = 1
+    controller.config.getoption = lambda name, default=None: False
+    source = tmp_path / "worker.xml"
+    source.write_text(_xml("pkg/test.py::test_func", "failure" if real_failure else "passed"))
+    merged = tmp_path / "input-merged.xml"
+    with pytest.raises(ValueError):
+        merge_reports([source, tmp_path / "missing.xml"], merged, required=[source])
+    # Matching execution denominator prevents a misleading profile UsageError;
+    # the explicit integrity error and every original failure still fail the run.
+    assert controller._parse_remote_output(_result(merged.read_text()), None) == 1
+    physical = ET.parse(tmp_path / "bazel-testlogs/pytest/test.xml").getroot()
+    assert physical.get("tests") == "2"
+    assert physical.get("errors") == "1"
+    assert physical.get("failures") == str(int(real_failure))
+    assert len(list(physical.iter("testcase"))) == 2
+
+
+def test_session_integrity_only_report_cannot_satisfy_minimum_or_expected(tmp_path):
+    from rtp_llm.test.remote_tests.junit_merge import merge_reports
+
+    controller = _controller(tmp_path)
+    controller.ci_profile = "fixture_profile"
+    controller.config._rtp_ci_minimum_count = 1
+    controller.config._rtp_ci_expected_count = 1
+    controller.config.getoption = lambda name, default=None: False
+    merged = tmp_path / "empty-merged.xml"
+    with pytest.raises(ValueError):
+        merge_reports([], merged)
+    assert controller._parse_remote_output(_result(merged.read_text()), None) == 4
+    physical = ET.parse(tmp_path / "bazel-testlogs/pytest/test.xml").getroot()
+    assert physical.get("tests") == "1"
+    assert physical.get("errors") == "1"
+
+
+def test_session_legacy_or_real_same_name_is_still_an_executed_instance(tmp_path):
+    controller = _controller(tmp_path)
+    controller.ci_profile = "fixture_profile"
+    controller.config._rtp_ci_minimum_count = 1
+    controller.config._rtp_ci_expected_count = 1
+    controller.config.getoption = lambda name, default=None: False
+    legacy = (
+        '<testsuite name="report-integrity">'
+        '<testcase name="complete_execution_reports">'
+        '<error message="incomplete remote execution"/>'
+        '</testcase></testsuite>'
+    )
+    assert controller._parse_remote_output(_result(legacy), None) == 1
+    physical = ET.parse(tmp_path / "bazel-testlogs/pytest/test.xml").getroot()
+    assert physical.get("tests") == "1"
+    assert physical.get("errors") == "1"
+
+
+def test_session_integrity_error_does_not_hide_true_count_drift(tmp_path):
+    from rtp_llm.test.remote_tests.junit_merge import merge_reports
+
+    controller = _controller(tmp_path)
+    controller.ci_profile = "fixture_profile"
+    controller.config._rtp_ci_minimum_count = 1
+    controller.config._rtp_ci_expected_count = 2
+    controller.config.getoption = lambda name, default=None: False
+    source = tmp_path / "worker.xml"
+    source.write_text(_xml("pkg/test.py::test_func"))
+    merged = tmp_path / "input-merged.xml"
+    with pytest.raises(ValueError):
+        merge_reports([source, tmp_path / "missing.xml"], merged)
+    # Physical XML has two records, but only one actual test: expected2 must fail.
+    assert controller._parse_remote_output(_result(merged.read_text()), None) == 4

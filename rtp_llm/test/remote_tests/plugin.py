@@ -21,6 +21,7 @@ import pytest
 from rtp_llm.test.ci_profile_plugin import validate_ci_profile_count
 
 from .endpoint_info import extract_remote_worker_ip
+from .junit_merge import count_report_integrity_errors
 from .remote_exec_rtp import (
     GPURequest,
     RemoteRuntimeConfig,
@@ -1948,12 +1949,19 @@ class RemoteREAPIPlugin:
             xml_content
         )
         merged_failures = merged_errors = merged_skipped = 0
+        reported_execution_tests = merged_tests
         merged_nodeids = []
         if merged_xml:
             junit_path = self.rootdir / "bazel-testlogs" / "pytest" / "test.xml"
             junit_path.parent.mkdir(parents=True, exist_ok=True)
             junit_path.write_text(merged_xml)
             merged_root = ET.fromstring(merged_xml)
+            integrity_errors = count_report_integrity_errors(merged_root)
+            reported_execution_tests = merged_tests - integrity_errors
+            log.info(
+                "Remote report instances: executed=%d synthetic_integrity_errors=%d physical=%d",
+                reported_execution_tests, integrity_errors, merged_tests,
+            )
             _, merged_failures, merged_errors, merged_skipped, _ = _count_junit(merged_root)
             merged_nodeids = [
                 nodeid
@@ -1995,18 +2003,18 @@ class RemoteREAPIPlugin:
         if (
             exit_code == int(pytest.ExitCode.NO_TESTS_COLLECTED)
             and result.response_status_code in (None, 0)
-            and merged_tests > 0
+            and reported_execution_tests > 0
             and replayed_cached > 0
         ):
             log.info("Remote pytest selected no fresh tests; validating replayed cache evidence")
             exit_code = 0
 
         profile_error = _validate_session_profile_result(
-            self.config, self.ci_profile, tests=merged_tests,
+            self.config, self.ci_profile, tests=reported_execution_tests,
             skipped=merged_skipped, nodeids=merged_nodeids,
         )
         profile_error = profile_error or worker_report_error
-        if not merged_xml or merged_tests <= 0:
+        if not merged_xml or reported_execution_tests <= 0:
             profile_error = profile_error or "Missing or empty remote JUnit execution report"
         if profile_error:
             log.error("Remote session profile validation failed: %s", profile_error)
