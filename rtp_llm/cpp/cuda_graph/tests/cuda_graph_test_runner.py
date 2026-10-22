@@ -30,5 +30,11 @@ class CudaGraphRunner:
     def __new__(cls, *args, **kwargs):
         return load_cuda_graph_test_binding().CudaGraphRunner(*args, **kwargs)
 
+    @staticmethod
+    def topologyWidths(*args, **kwargs):
+        return load_cuda_graph_test_binding().CudaGraphRunner.topologyWidths(
+            *args, **kwargs
+        )
+
 
 __all__ = ["CudaGraphRunner", "load_cuda_graph_test_binding"]
