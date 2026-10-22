@@ -62,6 +62,19 @@ std::string resolveKVCacheEventInstanceGroup(const std::string& event_group, con
     return event_group.empty() ? reco_group : event_group;
 }
 
+std::string cacheEventSpecName(int32_t block_size_tokens, const std::string& tag) {
+    if (tag == "global_kv_1") {
+        return "F0";
+    }
+    if (tag == "global_kv_2") {
+        return "F1";
+    }
+    if (tag == "indexer_kv") {
+        return "F2";
+    }
+    return "rtp_llm_hbm_" + std::to_string(block_size_tokens) + "_" + tag;
+}
+
 RtpLLMCacheMetricsCollector collectGlobalCacheMetrics(const CoordinatorCacheManagerPtr& coordinator_manager) {
     RtpLLMCacheMetricsCollector collector;
     const BlockTreeCachePtr     block_tree_cache = coordinator_manager->blockTreeCache();
@@ -867,13 +880,8 @@ void KVCacheManager::initCacheEventPublisher(std::shared_ptr<KVCacheEventReporte
         // Pipeline parallelism is rejected above because a unique PP owner is
         // not represented in ParallelismConfig yet.
         for (const auto& tag : reuse_group_tags) {
-            // CP specs already describe the local shard: count one physical block per TP rank.
-            const auto size_bytes = static_cast<int64_t>(config_.blockSizeBytesForGroup(tag))
-                                    * std::max<int64_t>(parallelism_config_.tp_size, 1);
-            publisher_context.specs.push_back(
-                {"rtp_llm_hbm_" + std::to_string(publisher_context.block_size_tokens) + "_" + tag,
-                 "event_report://" + publisher_context.host_ip_port + "/hbm?size=" + std::to_string(size_bytes),
-                 size_bytes});
+            publisher_context.specs.push_back({cacheEventSpecName(publisher_context.block_size_tokens, tag),
+                                               "event_report://" + publisher_context.host_ip_port + "/hbm"});
         }
         publisher_context.tp_size = static_cast<int32_t>(parallelism_config_.tp_size);
         publisher_context.dp_size = static_cast<int32_t>(parallelism_config_.dp_size);

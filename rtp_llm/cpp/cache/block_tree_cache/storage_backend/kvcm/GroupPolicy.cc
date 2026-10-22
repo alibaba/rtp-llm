@@ -21,6 +21,21 @@ std::string getBitHashStr(uint64_t bithash, size_t width = 64) {
 }  // namespace
 
 std::string genLocationSpecName(int tp_rank, const std::string& group_name) {
+    if (group_name == "Fglobal_kv_1") {
+        return "F0_TP" + std::to_string(tp_rank);
+    }
+    if (group_name == "Fglobal_kv_2") {
+        return "F1_TP" + std::to_string(tp_rank);
+    }
+    if (group_name == "Findexer_kv") {
+        return "F2_TP" + std::to_string(tp_rank);
+    }
+    if (group_name == "Lcsa_state") {
+        return "S3_TP" + std::to_string(tp_rank);
+    }
+    if (group_name == "Lswa_kv") {
+        return "S4_TP" + std::to_string(tp_rank);
+    }
     return "tp" + std::to_string(tp_rank) + "_" + group_name;
 }
 
