@@ -555,10 +555,10 @@ TEST_F(KVCacheManagerTest, EventPublisherFiltersHostGroupsWithoutChangingDeviceS
                 const auto index = static_cast<rapidjson::SizeType>(i);
                 const auto name = "rtp_llm_hbm_1_" + expected_tags[i];
                 EXPECT_STREQ(registration["location_spec_infos"][index]["name"].GetString(), name.c_str());
-                EXPECT_EQ(registration["location_spec_infos"][index]["size"].GetInt64(),
-                          config.blockSizeBytesForGroup(expected_tags[i]));
+                EXPECT_FALSE(registration["location_spec_infos"][index].HasMember("size"));
                 EXPECT_STREQ(registration["location_spec_groups"][0]["spec_names"][index].GetString(), name.c_str());
                 EXPECT_STREQ(blocks[0]["specs"][index]["name"].GetString(), name.c_str());
+                EXPECT_STREQ(blocks[0]["specs"][index]["uri"].GetString(), "event_report://127.0.0.1:19000/hbm");
             }
             EXPECT_EQ(cache->logicalCacheSnapshot().block_groups,
                       (std::map<int64_t, std::vector<size_t>>{{100, {0, 1}}}));
@@ -629,15 +629,10 @@ TEST_F(KVCacheManagerTest, EventPublisherUsesCanonicalCpKeysAndKeepsDecodeOwners
             const int block_tokens = role == RoleType::PREFILL ? 512 : 128;
             EXPECT_EQ(registration["block_size"].GetInt(), block_tokens);
             EXPECT_EQ(registration["model_deployment"]["tp_size"].GetInt(), 4);
-            ASSERT_EQ(registration["location_spec_infos"].Size(), 2u);
-            for (size_t i = 0; i < config.groupTags().size(); ++i) {
-                const auto& tag = config.groupTags()[i];
-                const auto index = static_cast<rapidjson::SizeType>(i);
-                const auto name = "rtp_llm_hbm_" + std::to_string(block_tokens) + "_" + tag;
-                EXPECT_STREQ(registration["location_spec_infos"][index]["name"].GetString(), name.c_str());
-                EXPECT_EQ(registration["location_spec_infos"][index]["size"].GetInt64(),
-                          config.blockSizeBytesForGroup(tag) * 4);
-            }
+            ASSERT_EQ(registration["location_spec_infos"].Size(), 1u);
+            EXPECT_STREQ(registration["location_spec_infos"][0]["name"].GetString(), "F0");
+            EXPECT_FALSE(registration["location_spec_infos"][0].HasMember("size"));
+            EXPECT_STREQ(registration["location_spec_groups"][0]["spec_names"][0].GetString(), "F0");
             if (role == RoleType::DECODE) {
                 continue;
             }
@@ -658,12 +653,10 @@ TEST_F(KVCacheManagerTest, EventPublisherUsesCanonicalCpKeysAndKeepsDecodeOwners
             manager.insertIntoCache({resource, tokens, false}, resident_prefix);
             manager.free({resource, tokens});
             const std::map<int64_t, std::vector<size_t>> expected_groups{
-                {expected_keys[0], {0, 1}}, {expected_keys[1], {0, 1}}};
+                {expected_keys[0], {0}}, {expected_keys[1], {0}}};
             EXPECT_EQ(manager.block_tree_cache_->logicalCacheSnapshot().block_groups, expected_groups);
-            EXPECT_EQ(manager.cache_event_publisher_->status().accepted_count, 4u);
-            for (const auto& tag : config.groupTags()) {
-                EXPECT_FALSE(reporter->waitForRequest("EVENT_BLOCK_ADD", "rtp_llm_hbm_512_" + tag).empty());
-            }
+            EXPECT_EQ(manager.cache_event_publisher_->status().accepted_count, 2u);
+            EXPECT_FALSE(reporter->waitForRequest("EVENT_BLOCK_ADD", "F0").empty());
             // Reattaching reconciles the same canonical keys and component ordering through SNAPSHOT.
             manager.stopCacheEventPublisher();
             reporter = std::make_shared<EventPublicationReporter>();
@@ -679,11 +672,9 @@ TEST_F(KVCacheManagerTest, EventPublisherUsesCanonicalCpKeysAndKeepsDecodeOwners
             for (const auto& [key, groups] : expected_groups) {
                 const auto& block = blocks[static_cast<rapidjson::SizeType>(i++)];
                 EXPECT_STREQ(block["block_key"].GetString(), std::to_string(key).c_str());
-                ASSERT_EQ(block["specs"].Size(), 2u);
-                for (size_t g = 0; g < config.groupTags().size(); ++g) {
-                    EXPECT_STREQ(block["specs"][static_cast<rapidjson::SizeType>(g)]["name"].GetString(),
-                                 ("rtp_llm_hbm_512_" + config.groupTags()[g]).c_str());
-                }
+                ASSERT_EQ(block["specs"].Size(), 1u);
+                EXPECT_STREQ(block["specs"][0]["name"].GetString(), "F0");
+                EXPECT_STREQ(block["specs"][0]["uri"].GetString(), "event_report://127.0.0.1:19000/hbm");
             }
         }
     }
