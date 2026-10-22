@@ -305,15 +305,18 @@ class PLETransactionCoordinator:
             raise RuntimeError(
                 "qwen4_exp PLE target commit requires device-local int32 accept_len [B]"
             )
-        fused = None
+        resolution = None
         if os.environ.get("QWEN4_PLE_COMMIT_METADATA_FUSED", "0") == "1":
             from rtp_llm.models_py.modules.qwen4_exp.ple.ple_commit_metadata_triton import (
-                resolve_accepted_pair,
+                begin_accepted_pair_resolution,
             )
 
-            fused = resolve_accepted_pair(transaction, accept_len)
-        if fused is not None:
-            accepted, pending = fused
+            resolution = begin_accepted_pair_resolution(transaction, accept_len)
+        if resolution is not None:
+            # The verdict read is deferred: the gather launches below run while
+            # the device computes it, and verify() re-checks before publishing.
+            accepted = resolution.accepted
+            pending = resolution.pending
         else:
             if bool(
                 torch.any(
@@ -407,6 +410,8 @@ class PLETransactionCoordinator:
         # Gather/clone launches above are part of prepare, not commit.  Complete
         # them before publishing the plan so the C++ prepare consensus observes
         # any asynchronous failure on this rank before persistent writes begin.
+        if resolution is not None:
+            resolution.verify()
         self._synchronize_ple_transaction(transaction)
         transaction.prepared_writes = prepared_writes
 

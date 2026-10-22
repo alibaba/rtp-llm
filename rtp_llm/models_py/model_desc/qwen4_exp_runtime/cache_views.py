@@ -224,6 +224,8 @@ class PLECacheViews:
         pages: torch.Tensor,
         pool_rows: int,
         device: torch.device,
+        *,
+        trusted_host_table: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Resolve (batch row, logical page) pairs, used for per-page writes.
 
@@ -231,7 +233,9 @@ class PLECacheViews:
         The allocator keeps the pages it plans to reuse (the request's tail page
         is always among them) and leaves the rest unallocated, so a checkpoint
         may legitimately have no home -- GDN's store_ssm_state_to_block_map
-        kernel skips those positions the same way.
+        kernel skips those positions the same way. The trusted host table is
+        valid only when C++ populated the device table from that same CPU
+        source for ordinary eager prefill; all other callers check the GPU.
         """
         table = cls._resolve_block_table(attention_inputs, tag)
         if (
@@ -246,6 +250,18 @@ class PLECacheViews:
             and table.is_cuda
             and torch.version.hip is None
         )
+        host_table = getattr(attention_inputs, "kv_cache_block_id", None)
+        use_host_table = (
+            trusted_host_table
+            and type(attention_inputs) is PyAttentionInputs
+            and bool(attention_inputs.is_prefill)
+            and not bool(attention_inputs.is_cuda_graph)
+            and host_pairs
+            and isinstance(host_table, torch.Tensor)
+            and host_table.device.type == "cpu"
+            and host_table.dtype == torch.int32
+            and host_table.shape == table.shape
+        )
         check_device = rows.device if host_pairs else table.device
         rows_l = rows.to(device=check_device, dtype=torch.long)
         pages_l = pages.to(device=check_device, dtype=torch.long)
@@ -259,9 +275,13 @@ class PLECacheViews:
             raise RuntimeError(
                 f"PLE cache {tag!r} logical page exceeds its block table"
             )
+        if use_host_table and bool(
+            (host_table[rows_l, pages_l] >= pool_rows).any().item()
+        ):
+            raise RuntimeError(f"PLE cache {tag!r} physical block id exceeds its pool")
         if host_pairs:
             # These indices originate on the host. Validate their bounds there,
-            # then upload together; the device table still gets its own check.
+            # then upload together. Untrusted callers also check device blocks.
             host_indices = torch.empty(
                 (2, rows_l.numel()), dtype=torch.long, device="cpu", pin_memory=True
             )
@@ -270,7 +290,7 @@ class PLECacheViews:
             device_indices = host_indices.to(device=table.device, non_blocking=True)
             rows_l, pages_l = device_indices.unbind(0)
         blocks = table[rows_l, pages_l]
-        if bool((blocks >= pool_rows).any().item()):
+        if not use_host_table and bool((blocks >= pool_rows).any().item()):
             raise RuntimeError(f"PLE cache {tag!r} physical block id exceeds its pool")
         return blocks.to(device=device, dtype=torch.long), (blocks > 0).to(
             device=device

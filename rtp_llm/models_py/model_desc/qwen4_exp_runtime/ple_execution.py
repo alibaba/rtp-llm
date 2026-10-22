@@ -309,6 +309,32 @@ class PLEExecution:
             raise RuntimeError("qwen4_exp PLE cache page size must be positive")
 
         graph_capture = bool(state_inputs.is_cuda_graph)
+        host_block_tables = (
+            getattr(state_inputs, "kv_cache_block_id", None),
+            getattr(ctx_inputs, "kv_cache_block_id", None),
+        )
+        device_block_tables = (
+            getattr(state_inputs, "kv_cache_block_id_device", None),
+            getattr(ctx_inputs, "kv_cache_block_id_device", None),
+        )
+        trusted_host_tables = (
+            type(state_inputs) is PyAttentionInputs
+            and type(ctx_inputs) is PyAttentionInputs
+            and bool(state_inputs.is_prefill)
+            and not is_target_verify
+            and not graph_capture
+            and all(
+                isinstance(host, torch.Tensor)
+                and isinstance(device_table, torch.Tensor)
+                and host.device.type == "cpu"
+                and host.dtype == torch.int32
+                and host.ndim == 2
+                and device_table.is_cuda
+                and device_table.shape == host.shape
+                for host, device_table in zip(host_block_tables, device_block_tables)
+            )
+        )
+        pair_kwargs = {"trusted_host_table": True} if trusted_host_tables else {}
         # Eager fallback must never reuse rows prepared for a captured graph.
         with ple.ple_embedding.lookup_context(graph_capture):
             local_rows = (
@@ -490,8 +516,12 @@ class PLEExecution:
                         start = end
                     outputs.append(torch.cat(chunk_outputs, dim=0))
                     offset += length
-                write_rows_t = torch.tensor(write_rows, dtype=torch.long)
-                write_pages_t = torch.tensor(write_pages, dtype=torch.long)
+                write_rows_t = torch.tensor(
+                    write_rows, dtype=torch.long, device="cpu"
+                )
+                write_pages_t = torch.tensor(
+                    write_pages, dtype=torch.long, device="cpu"
+                )
                 write_state_blocks, state_writable = self._physical_blocks_for_pairs(
                     state_inputs,
                     PLE_STATE_TAG,
@@ -499,6 +529,7 @@ class PLEExecution:
                     write_pages_t,
                     int(state_pool.shape[0]),
                     state_pool.device,
+                    **pair_kwargs,
                 )
                 write_ctx_blocks, ctx_writable = self._physical_blocks_for_pairs(
                     ctx_inputs,
@@ -507,6 +538,7 @@ class PLEExecution:
                     write_pages_t,
                     int(ctx_pool.shape[0]),
                     ctx_pool.device,
+                    **pair_kwargs,
                 )
                 # Decode resumes from the page holding each request's last token, so
                 # that page must exist even when the allocator dropped the rest of
@@ -516,26 +548,80 @@ class PLEExecution:
                 for length in lengths:
                     placed += (length + page_size - 1) // page_size
                     terminal_indices.append(placed - 1)
-                terminal_t = torch.tensor(
-                    terminal_indices, dtype=torch.long, device=state_writable.device
-                )
-                if not bool(
-                    (state_writable[terminal_t] & ctx_writable[terminal_t]).all().item()
-                ):
+                if trusted_host_tables:
+                    terminal_t = torch.tensor(
+                        terminal_indices, dtype=torch.long, device="cpu"
+                    )
+                    terminal_rows = write_rows_t[terminal_t]
+                    terminal_pages = write_pages_t[terminal_t]
+                    terminal_writable = bool(
+                        (
+                            (host_block_tables[0][terminal_rows, terminal_pages] > 0)
+                            & (host_block_tables[1][terminal_rows, terminal_pages] > 0)
+                        )
+                        .all()
+                        .item()
+                    )
+                else:
+                    terminal_t = torch.tensor(
+                        terminal_indices,
+                        dtype=torch.long,
+                        device=state_writable.device,
+                    )
+                    terminal_writable = bool(
+                        (state_writable[terminal_t] & ctx_writable[terminal_t])
+                        .all()
+                        .item()
+                    )
+                if not terminal_writable:
                     raise RuntimeError(
                         "qwen4_exp PLE terminal page is unallocated: decode resumes "
                         "from its checkpoint"
                     )
-                writable = state_writable & ctx_writable
+                if trusted_host_tables:
+                    # GPU boolean indexing calls nonzero to size its output and
+                    # synchronizes the stream. The same C++-copied host tables
+                    # already establish which checkpoint pages have storage.
+                    writable_positions = [
+                        index
+                        for index, (row, page) in enumerate(zip(write_rows, write_pages))
+                        if host_block_tables[0][row, page] > 0
+                        and host_block_tables[1][row, page] > 0
+                    ]
+                    host_positions = torch.tensor(
+                        writable_positions, dtype=torch.long, device="cpu", pin_memory=True
+                    )
+                    writable = host_positions.to(
+                        device=state_pool.device, non_blocking=True
+                    )
+                    ctx_writable_positions = (
+                        writable
+                        if ctx_pool.device == state_pool.device
+                        else host_positions.to(device=ctx_pool.device, non_blocking=True)
+                    )
+                    state_blocks_to_write = write_state_blocks.index_select(0, writable)
+                    ctx_blocks_to_write = write_ctx_blocks.index_select(
+                        0, ctx_writable_positions
+                    )
+                    states_to_write = torch.stack(write_states).index_select(0, writable)
+                    contexts_to_write = torch.stack(write_contexts).index_select(
+                        0, ctx_writable_positions
+                    )
+                else:
+                    writable = state_writable & ctx_writable
+                    state_blocks_to_write = write_state_blocks[writable]
+                    ctx_blocks_to_write = write_ctx_blocks[writable]
+                    states_to_write = torch.stack(write_states)[writable]
+                    contexts_to_write = torch.stack(write_contexts)[writable]
                 state_pool.index_copy_(
                     0,
-                    write_state_blocks[writable],
-                    torch.stack(write_states)[writable].to(state_pool.dtype),
+                    state_blocks_to_write,
+                    states_to_write.to(state_pool.dtype),
                 )
                 ctx_pool.index_copy_(
                     0,
-                    write_ctx_blocks[writable],
-                    torch.stack(write_contexts)[writable].to(ctx_pool.dtype),
+                    ctx_blocks_to_write,
+                    contexts_to_write.to(ctx_pool.dtype),
                 )
                 return outputs[0] if len(outputs) == 1 else torch.cat(outputs, dim=0)
 
