@@ -87,7 +87,7 @@ public class RouteService {
                     balanceContext.getConfig().getDispatcher().typeName(),
                     balanceContext.getRequestId());
             return CompletableFuture.completedFuture(
-                    Response.buildErrorResponse(StrategyErrorType.INVALID_REQUEST,
+                    Response.buildErrorResponse(StrategyErrorType.GENERATE_INPUT_REQUIRED,
                             "missing serialized generate_input for batch dispatch"));
         }
         return submitScheduled(balanceContext);

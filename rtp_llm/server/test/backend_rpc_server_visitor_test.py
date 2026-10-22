@@ -135,8 +135,9 @@ class _FakeInputPB:
 
 
 class _FakeMasterClient:
-    def __init__(self):
+    def __init__(self, requires_generate_input=True):
         self.calls = []
+        self.requires_generate_input = requires_generate_input
 
     async def get_backend_role_addrs(
         self,
@@ -144,17 +145,21 @@ class _FakeMasterClient:
         cache_key_block_size,
         input,
         request_id,
-        input_pb=None,
+        input_pb_factory=None,
     ):
         self.calls.append(
             {
                 "block_cache_keys": block_cache_keys,
                 "input": input,
                 "request_id": request_id,
-                "input_pb": input_pb,
+                "input_pb": (
+                    input_pb_factory() if self.requires_generate_input else None
+                ),
             }
         )
-        return FlexlbResponse.ok(["prefill-role"], enqueued_by_master=True)
+        return FlexlbResponse.ok(
+            ["prefill-role"], enqueued_by_master=self.requires_generate_input
+        )
 
 
 class BackendRPCServerVisitorRouteCacheKeysTest(unittest.TestCase):
@@ -281,6 +286,33 @@ class BackendRPCServerVisitorRouteCacheKeysTest(unittest.TestCase):
 
 
 class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
+    async def test_non_batch_route_does_not_build_generate_input(self):
+        visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor.seq_size_per_block = 16
+        visitor.cache_key_seed = 0
+        visitor.remote_vit = False
+        visitor.master_client = _FakeMasterClient(requires_generate_input=False)
+        visitor._route_cache_keys = lambda keys: keys
+        visitor._report_recent_cache_key_metrics = lambda keys: None
+        visitor._page_rr_route_cache_keys = False
+        visitor._page_rr_cp_size = 1
+        input = _FakeRouteInput()
+
+        with patch(
+            "rtp_llm.server.backend_rpc_server_visitor.get_block_cache_keys",
+            return_value=[11, 22],
+        ), patch(
+            "rtp_llm.server.backend_rpc_server_visitor.trans_input"
+        ) as build_input, patch(
+            "rtp_llm.server.backend_rpc_server_visitor.kmonitor"
+        ):
+            result = await visitor.get_master_route_addrs(input)
+
+        self.assertIsNone(result)
+        self.assertEqual(input.generate_config.role_addrs, ["prefill-role"])
+        self.assertFalse(input.enqueued_by_master)
+        build_input.assert_not_called()
+
     async def test_get_master_route_addrs_passes_pb_and_marks_master_enqueue(self):
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
         visitor.seq_size_per_block = 16

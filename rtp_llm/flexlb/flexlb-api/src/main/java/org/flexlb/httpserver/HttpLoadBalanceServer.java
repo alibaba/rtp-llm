@@ -154,6 +154,8 @@ public class HttpLoadBalanceServer {
                     Response result = new Response();
                     result.setRealMasterHost(lbStatusConsistencyService.getMasterHostIpPort());
                     result.setQueueLength(requestScheduler.getQueuedRequestCount());
+                    result.setRequiresGenerateInput(
+                            configService.loadBalanceConfig().getDispatcher().requiresGenerateInput());
                     result.setCode(200);
                     result.setSuccess(true);
                     result.setWorkerSummary(buildWorkerSummary());

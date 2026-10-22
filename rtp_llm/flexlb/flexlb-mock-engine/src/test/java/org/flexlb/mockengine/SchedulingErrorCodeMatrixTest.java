@@ -200,13 +200,13 @@ class SchedulingErrorCodeMatrixTest {
         }
     }
 
-    @ParameterizedTest(name = "{0}: missing input -> 8406; malformed protobuf -> 8510")
+    @ParameterizedTest(name = "{0}: missing input -> 8409; malformed protobuf -> 8510")
     @MethodSource("batchModes")
     void invalidBatchInputNeverReachesEngine(String mode) throws Exception {
         try (Fixture fixture = new Fixture(mode)) {
             BalanceContext missing = fixture.context();
             missing.setGenerateInputPb(ByteString.EMPTY);
-            assertFailure(fixture.route(missing), 8406, UNSPECIFIED, "missing serialized generate_input");
+            assertFailure(fixture.route(missing), 8409, UNSPECIFIED, "missing serialized generate_input");
             BalanceContext malformed = fixture.context();
             malformed.setGenerateInputPb(ByteString.copyFrom(new byte[]{(byte) 0xff}));
             assertFailure(fixture.route(malformed), 8510, UNSPECIFIED, "build");
