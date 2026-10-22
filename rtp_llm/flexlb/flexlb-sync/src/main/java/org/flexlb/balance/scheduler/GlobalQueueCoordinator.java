@@ -400,7 +400,10 @@ final class GlobalQueueCoordinator implements AutoCloseable {
 
     /** Caller holds lock; every examined entry counts against the scan budget. */
     private List<GlobalQueueEntry> planningCandidates(int slots) {
-        waitingRequests.resumeReady(slots, orderedQueue::markRequestReadyForRetry);
+        waitingRequests.resumeReady(slots, entry -> {
+            entry.context.setWakeCount(entry.context.getWakeCount() + 1);
+            orderedQueue.markRequestReadyForRetry(entry);
+        });
         return orderedQueue.scanForPlanningCandidates(
                 slots, calculateScanBudget(slots), entry -> {
                     if (entry.future.isDone()) {
@@ -539,6 +542,9 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         try {
             if (!isQueued(plan.entry)) { return true; }
             parked = waitingRequests.park(plan.entry, plan.waitKey(), plan.availabilitySequence);
+            if (parked) {
+                plan.entry.context.setParkCount(plan.entry.context.getParkCount() + 1);
+            }
             depth = orderedQueue.size();
             counts = orderedQueue.priorityCounts();
         } finally {
@@ -594,6 +600,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         }
         long durationMs = TimeUnit.NANOSECONDS.toMillis(
                 Math.max(0L, System.nanoTime() - entry.enteredQueueAtNanos));
+        entry.context.setGlobalQueueMs(entry.context.getGlobalQueueMs() + durationMs);
         try {
             reporter.reportGlobalQueueResidenceMs(durationMs);
         } catch (Throwable failure) {

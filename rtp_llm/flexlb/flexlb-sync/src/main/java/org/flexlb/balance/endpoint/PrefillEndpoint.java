@@ -589,6 +589,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
         if (durationMs < 0L) {
             return;
         }
+        item.ctx().setSubQueueMs(item.ctx().getSubQueueMs() + durationMs);
         reportQueueMetricSafely("endpoint queue residence time", () ->
             reporter.reportEngineSubQueueResidenceMs(
                     getStatus().getRole().name(), getStatus().getMetricIpPort(), durationMs));

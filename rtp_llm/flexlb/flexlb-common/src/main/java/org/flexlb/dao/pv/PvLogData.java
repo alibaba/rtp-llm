@@ -45,6 +45,10 @@ public class PvLogData {
     private int priority;
     private long requestExpiresAtMs;
     private long latencyMs;
+    private long globalQueueMs;
+    private long subQueueMs;
+    private int parkCount;
+    private int wakeCount;
     private long batchId;
     private String requestState;
     private String realMasterHost;
@@ -147,6 +151,10 @@ public class PvLogData {
         }
         this.enqueueTime = ctx.getEnqueueTime();
         this.startTime = ctx.getStartTime();
+        this.globalQueueMs = ctx.getGlobalQueueMs();
+        this.subQueueMs = ctx.getSubQueueMs();
+        this.parkCount = ctx.getParkCount();
+        this.wakeCount = ctx.getWakeCount();
         this.totalUs = ctx.getTotalTimeUs();
         this.arrivalMs = ctx.getRequestArrivalDelayMs();
         this.reqParseUs = ctx.getRequestBodyReadAndDeserializeTimeUs();

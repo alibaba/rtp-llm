@@ -42,6 +42,23 @@ class PvLogDataTest {
     }
 
     @Test
+    void includesQueueWaitAndParkWakeCounts() {
+        BalanceContext context = new BalanceContext();
+        context.setGlobalQueueMs(1200L);
+        context.setSubQueueMs(300L);
+        context.setParkCount(2);
+        context.setWakeCount(1);
+
+        PvLogData data = new PvLogData(context);
+
+        assertEquals(1200L, data.getGlobalQueueMs());
+        assertEquals(300L, data.getSubQueueMs());
+        String json = JsonUtils.toStringOrEmpty(data);
+        assertTrue(json.contains("\"parkCount\":2"));
+        assertTrue(json.contains("\"wakeCount\":1"));
+    }
+
+    @Test
     void keepsCacheSelectionWhenSelectedCandidateHasNoEndpoint() {
         BalanceContext context = new BalanceContext();
         context.recordCacheSelection(RoleType.PREFILL, "10.0.0.2", 512L);

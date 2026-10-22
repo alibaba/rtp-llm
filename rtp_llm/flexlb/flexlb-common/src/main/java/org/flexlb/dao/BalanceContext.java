@@ -93,6 +93,12 @@ public class BalanceContext {
 
     private long enqueueTime;
 
+    /** Queue diagnostics for pv.log; written by scheduler threads, read after completion. */
+    private volatile long globalQueueMs;
+    private volatile long subQueueMs;
+    private volatile int parkCount;
+    private volatile int wakeCount;
+
     /** Stable worker-queue age and tie-breaker across local route withdrawals. */
     private long firstWorkerEnqueueTime;
     private long workerEnqueueSequence;
