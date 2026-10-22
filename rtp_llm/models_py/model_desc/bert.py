@@ -238,13 +238,7 @@ class BertModel(GptModelBase):
         inputs: PyModelInputs,
         fmha_impl: FMHAImplBase = None,
     ) -> PyModelOutputs:
-        # Graph replay supplies the fixed buffer prepared outside capture.
-        input_hiddens = getattr(inputs, "input_hiddens", None)
-        hidden_states = (
-            self.prepare_transformer_inputs(inputs)
-            if input_hiddens is None or input_hiddens.numel() == 0
-            else input_hiddens
-        )
+        hidden_states = inputs.input_hiddens
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
         if self.config.model_type == "vision_bert" and self.device_type == DeviceType.Cuda:
@@ -270,6 +264,10 @@ class BertModel(GptModelBase):
                 quantize_output=next_layer_uses_quantized_input,
             )
         return PyModelOutputs(hidden_states)
+
+    def prepare_forward_inputs(self, inputs: PyModelInputs) -> None:
+        """Prepare request-owned embeddings before the eager Transformer call."""
+        inputs.input_hiddens = self.prepare_transformer_inputs(inputs)
 
     def prepare_transformer_inputs(self, inputs: PyModelInputs) -> torch.Tensor:
         """Request-owned embedding and visual injection, always outside graphs."""

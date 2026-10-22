@@ -140,7 +140,15 @@ def update_attention_params(
     rope_params.sequence_lengths = new_rope_params.sequence_lengths
 
 
-def embedding_graph_unsupported_reason(configs, backend) -> str:
+def embedding_graph_attention_unsupported_reason(configs, backend) -> str:
+    """Check the current cache-free embedding graph attention adapters.
+
+    These are adapter/backend limits, not inherent CUDA Graph restrictions.
+    Unsupported attention semantics (MLA, RoPE, sparse/logn/scaling) must fall
+    back to eager until an adapter implements them without changing results.
+    Also validate the supported dtype, head layout, and backend availability.
+    Return an empty string when supported, otherwise the eager fallback reason.
+    """
     from importlib.util import find_spec
 
     from rtp_llm.ops import RopeStyle

@@ -1865,7 +1865,7 @@ class AiterPrefillImplNonAsm(FMHAImplBase):
 
     @staticmethod
     def embedding_cuda_graph_unsupported_reason(configs):
-        return common.embedding_graph_unsupported_reason(configs, "aiter")
+        return common.embedding_graph_attention_unsupported_reason(configs, "aiter")
 
     def support_cuda_graph(self):
         return self.is_cuda_graph

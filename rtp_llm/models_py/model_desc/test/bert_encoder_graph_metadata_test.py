@@ -151,18 +151,18 @@ class EmbeddingGraphContractTest(unittest.TestCase):
         )
         with patch("importlib.util.find_spec", return_value=object()):
             self.assertEqual(
-                common.embedding_graph_unsupported_reason(config, "flashinfer"), ""
+                common.embedding_graph_attention_unsupported_reason(config, "flashinfer"), ""
             )
             config.rope_config.style = RopeStyle.Base
             self.assertIn(
                 "RoPE",
-                common.embedding_graph_unsupported_reason(config, "flashinfer"),
+                common.embedding_graph_attention_unsupported_reason(config, "flashinfer"),
             )
         config.rope_config.style = RopeStyle.No
         with patch("importlib.util.find_spec", return_value=None):
             self.assertIn(
                 "not installed",
-                common.embedding_graph_unsupported_reason(config, "flashinfer"),
+                common.embedding_graph_attention_unsupported_reason(config, "flashinfer"),
             )
 
     def test_bert_accepts_metadata_only_inputs_with_undefined_token_tensor(self):
@@ -262,6 +262,7 @@ class EmbeddingGraphContractTest(unittest.TestCase):
             with self.subTest(inputs=inputs), patch.object(
                 model, "prepare_transformer_inputs", return_value=hidden
             ) as prepare:
+                model.prepare_forward_inputs(inputs)
                 eager = model.forward(inputs, attention).hidden_states
                 prepare.assert_called_once_with(inputs)
                 torch.testing.assert_close(eager, hidden)

@@ -1288,7 +1288,7 @@ class PyFlashinferPrefillImpl(PyFlashinferPrefillImplBase):
 
     @staticmethod
     def embedding_cuda_graph_unsupported_reason(configs):
-        return common.embedding_graph_unsupported_reason(configs, "flashinfer")
+        return common.embedding_graph_attention_unsupported_reason(configs, "flashinfer")
 
     def prepare_cuda_graph(self, attn_inputs):
         if not self.is_cuda_graph:
