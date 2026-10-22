@@ -730,7 +730,7 @@ class GlobalQueueProgressTest {
     }
 
     @Test
-    void freeSlotGoesToHighestPriorityThenFifoWithoutInterruptingRunningPlans() throws Exception {
+    void freeSlotGoesToTheOldestQueuedRequestRegardlessOfPriorityWithoutInterruptingRunningPlans() throws Exception {
         try (Fixture f = new Fixture(RoleType.PREFILL, true)) {
             CountDownLatch started = new CountDownLatch(2);
             CountDownLatch finishFirst = new CountDownLatch(1);
@@ -750,7 +750,7 @@ class GlobalQueueProgressTest {
                 f.submit(5, "b", 90);
                 finishFirst.countDown();
                 awaitCondition(() -> f.admitted.size() == 4);
-                assertEquals(List.of(1L, 4L, 5L, 3L), f.admissionOrder);
+                assertEquals(List.of(1L, 3L, 4L, 5L), f.admissionOrder);
                 assertFalse(f.admitted.contains(2L));
             } finally {
                 finishFirst.countDown();

@@ -154,14 +154,18 @@ stable prediction cap is required for `FIXED_WINDOW + NON_BATCH`.
 
 ## Ordering and expiration
 
-FIFO orders by enqueue sequence. PRIORITY orders by normalized priority
-(1–100, higher first) and then by enqueue sequence. `defaultPriority` is used
-only when the caller did not supply a priority.
+FIFO and PRIORITY both dispatch the global queue and each Prefill sub-queue in
+enqueue order; a later higher-priority request never jumps ahead of an earlier
+lower-priority one while the queue has room. `defaultPriority` is used only
+when the caller did not supply a priority. Normalized priority (1–100, higher
+first) is consulted only when the global queue or a Prefill sub-queue's shared
+slots are full and a new request needs admission: PRIORITY looks for a
+lower-priority queued victim to evict so the new request can be admitted,
+while FIFO rejects the new request outright.
 
 Ordering is global to one model's `GlobalQueueCoordinator`. Its rolling
-planning frontier is an implementation pipeline, not a decision group. Before
-each commit, PRIORITY revalidates that no newer higher-priority request is
-eligible, so planner count cannot change ordering semantics. An exact-capacity
+planning frontier is an implementation pipeline, not a decision group; planner
+concurrency does not change dispatch order. An exact-capacity
 conflict is replanned only when the selected endpoint's placement version proves
 that the captured generation is stale; an unchanged capacity miss parks on that
 endpoint immediately. Delivery callbacks are
@@ -469,10 +473,14 @@ any of these valid modes. Role algorithms themselves are fixed.
 | `QUEUE` | `FIFO` | `SINGLE` | `BATCH` | FIFO singleton `EnqueueBatch`; Master sends |
 | `QUEUE` | `FIFO` | `FIXED_WINDOW` | `NON_BATCH` | FIFO-ordered independent route decisions; frontend sends each request |
 | `QUEUE` | `FIFO` | `FIXED_WINDOW` | `BATCH` | FIFO-ordered independent route decisions; each selected endpoint batches locally |
-| `QUEUE` | `PRIORITY` | `SINGLE` | `NON_BATCH` | Priority singleton route response; frontend sends |
-| `QUEUE` | `PRIORITY` | `SINGLE` | `BATCH` | Priority singleton `EnqueueBatch`; Master sends |
-| `QUEUE` | `PRIORITY` | `FIXED_WINDOW` | `NON_BATCH` | Priority-ordered independent route decisions; frontend sends each request |
-| `QUEUE` | `PRIORITY` | `FIXED_WINDOW` | `BATCH` | Priority-ordered independent route decisions; each selected endpoint batches locally |
+| `QUEUE` | `PRIORITY` | `SINGLE` | `NON_BATCH` | FIFO singleton route response; frontend sends |
+| `QUEUE` | `PRIORITY` | `SINGLE` | `BATCH` | FIFO singleton `EnqueueBatch`; Master sends |
+| `QUEUE` | `PRIORITY` | `FIXED_WINDOW` | `NON_BATCH` | FIFO-ordered independent route decisions; frontend sends each request |
+| `QUEUE` | `PRIORITY` | `FIXED_WINDOW` | `BATCH` | FIFO-ordered independent route decisions; each selected endpoint batches locally |
+
+`PRIORITY` dispatches in the same enqueue order as `FIFO`; it only changes
+behavior when the queue is full, admitting a new request by evicting a
+lower-priority queued victim instead of rejecting the new request.
 
 `DIRECT + BATCH` and `DIRECT + decision` are rejected during strict
 configuration parsing/validation.
