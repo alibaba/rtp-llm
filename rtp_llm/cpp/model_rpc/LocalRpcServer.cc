@@ -18,6 +18,7 @@
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/config/EplbConfig.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
+#include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/telemetry/PhaseSpanSynthesizer.h"
 
@@ -740,6 +741,24 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
     auto kv_info = engine_->getCacheStatusInfo(-1, false);
     response->set_available_kv_cache(kv_info.available_kv_cache);
     response->set_total_kv_cache(kv_info.total_kv_cache);
+    auto       group_mode    = KV_CACHE_GROUP_MODE_UNSPECIFIED;
+    const auto cache_manager = engine_->getCacheManager();
+    if (cache_manager && cache_manager->cacheConfig().groupNums() > 0) {
+        for (const auto& group : cache_manager->cacheConfig().topology().groups()) {
+            // Match the HBM publisher's eligibility, including its exact tag exclusions.
+            if (!cacheGroupPublishesEvents(group.policy)
+                || group.policy.memory_placement != CacheMemoryPlacement::DEVICE
+                || group.tag == "csa_state" || group.tag == "swa_kv") {
+                continue;
+            }
+            if (group.policy.group_type == CacheGroupType::LINEAR) {
+                group_mode = KV_CACHE_GROUP_MODE_WITH_MAMBA;
+                break;
+            }
+            group_mode = KV_CACHE_GROUP_MODE_FULL_ATTENTION_ONLY;
+        }
+    }
+    response->set_kv_cache_group_mode(group_mode);
     reportWorkerStatusTime(request_begin_time_us, request_after_ws_time_us);
     return grpc::Status::OK;
 }

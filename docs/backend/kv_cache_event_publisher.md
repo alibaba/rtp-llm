@@ -5,10 +5,15 @@ queue, worker, or connection; `kvcm` enables publishing.
 
 ## Semantics
 
-Events describe logical cache keys, not physical block indices. Reusable components are reported independently;
+Events describe logical cache keys, not physical block indices. Reusable components are normally reported independently;
 `csa_state`, `swa_kv`, and reuse-disabled groups are excluded, without filtering by cache group type.
 Each component requires a complete, IDLE, non-detached DEVICE GroupSet.
 Deleting a component preserves the others. Duplicate puts and LRU touches do not produce events.
+
+For DeepSeek V4.1, `global_kv_1`, `global_kv_2`, and `indexer_kv` share one HBM spec `F` only when all three are eligible
+for publication and belong to the same FULL GroupSet. `global_kv_1` represents that GroupSet for registration, ADD/DELETE,
+and snapshots; BTC still checks every member, so an incomplete or evicted GroupSet withdraws `F`. Otherwise these tags
+retain their individual `F0`/`F1`/`F2` specs. Other components keep their existing publication behavior.
 
 Cache mutations only attempt a bounded non-blocking enqueue; network I/O runs on the publisher worker. Queue overflow,
 request failure, heartbeat failure, periodic reconciliation, and the server's `snapshot_required` feedback trigger an
@@ -33,11 +38,15 @@ commit semantics.
 `snapshot_required` requests a fresh snapshot. `retry_after_ms` delays data-event reports while heartbeats continue.
 Registration is preserved during throttling; missing instances/nodes and leader errors trigger re-registration.
 
-Events use `ST_EVENT_REPORT_L1P5`, medium `hbm`, and one spec `rtp_llm_hbm_<block_tokens>_<tag>` per eligible group.
-Its `event_report://host/hbm?size=...` URI records that group's byte size summed over TP ranks. Configure the L1P5
-event storage on the server and add it to the Instance Group's `event_report_storage_candidates`.
+Events use `ST_EVENT_REPORT_L1P5`, medium `hbm`, and `event_report://host/hbm` URIs without size parameters; HBM spec
+registrations omit `size`. Spec names are `F` for the shared DeepSeek V4.1 FULL GroupSet, `F0`/`F1`/`F2` for its
+unmerged tags, and `rtp_llm_hbm_<block_tokens>_<tag>` for other eligible groups. Configure the L1P5 event storage on the
+server and add it to the Instance Group's `event_report_storage_candidates`.
 
-Instance registrations must match the per-tag schema and token stride. Consumers must check FULL history and SWA windows before reuse.
+Instance registrations must match the published schema and token stride. The `F0`/`F1`/`F2` to `F` change is a schema
+change: rollout requires a new HBM Instance ID or an explicit migration of the existing registration and metadata.
+Remote payload specs (`F0_TP<n>`/`F1_TP<n>`/`F2_TP<n>`) and the remote-cache Instance ID are unchanged.
+Consumers must check FULL history and SWA windows before reuse.
 
 ## Configuration
 
@@ -60,5 +69,15 @@ through its existing retry/reconciliation loop. Discovery runs on the publisher 
 Invalid configuration disables publishing without disabling inference. VIPServer requires an internal build, as it
 does for remote-cache storage. Direct RPC discovery requires the server's `GetClusterInfo` API and a leader endpoint;
 standalone servers without leader election can continue to use the explicit HTTP endpoint.
+
+## FlexLB worker metadata
+
+`GetWorkerStatus` reports `kv_cache_group_mode` at protobuf field 25, matching FlexLB's protocol. It uses the same
+DEVICE, prefix-reuse, and exact tag filters as HBM publishing. Eligible LINEAR groups report `WITH_MAMBA` (2);
+other eligible groups report `FULL_ATTENTION_ONLY` (1). An unavailable cache topology or no eligible groups reports
+`UNSPECIFIED` (0). DeepSeek V4.1's excluded `csa_state` and `swa_kv` do not change its FULL-only reporting mode.
+
+FlexLB maps these modes to `QT_PREFIX_MATCH_WITH_MAMBA` and `QT_PREFIX_MATCH`, respectively, without an explicit
+query-type override. Its query Instance ID and cache-key block size must still match the publisher's registration.
 
 See [KVCM remote cache configuration](reuse_kv_cache.md#kvcm-remote-cache) for the shared backend settings.
