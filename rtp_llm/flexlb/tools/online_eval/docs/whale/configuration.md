@@ -155,6 +155,26 @@ HTTP 健康监听。single_pod 产生的本地 discovery.json 仅供诊断，不
 
 Whale 启动命令应为 `sh /opt/flexlb/start.sh`。配置 JSON 放在环境变量或挂载文件中，不要把带引号的多段 shell 填入平台 `cmd`。
 
+## 独立 ViT 与 Master
+
+P/D 的 `per_engine` 模式不负责启动 Master 或 ViT。每个 ViT Pod 通过
+`python3 /opt/flexlb-mock/tools/mock_bundle/vit.py` 启动一个 Java Mock ViT，
+要求 `RTP_LLM_MOCK_BUNDLE=1`、`ROLE_TYPE=VIT`，并提供真实模型的
+`CHECKPOINT_PATH` 或 `TOKENIZER_PATH`。`START_PORT` 是 HTTP 健康口，
+gRPC 是其加一；ViT 并发由 `VIT_MAX_CONCURRENT_REQUESTS` 控制，
+缓存预算由 `MOCK_VIT_CACHE_BYTES` 控制。该入口不加载 Torch，也不生成模型 metadata。
+
+独立 Master 使用包含真实 VipServer adapter/client 的 JAR。CI 配方支持时，
+构建参数 `master_vipserver=true` 打包并证明该能力；运行入口为
+`python3 /opt/flexlb-mock/tools/mock_bundle/master_vip.py`，要求显式 Mock 开关，
+并验证镜像构建清单。`MODEL_SERVICE_CONFIG` 分别引用 P、D、V 的 VIP 域，
+一条成员对应一个 worker，不使用逻辑端口展开或本地 discovery 文件。
+Master 的生命周期 hook 在进程准备后执行一次。
+
+V 的健康检查、VIP 成员和真实 embedding RPC 分别验收。图片请求携带已选择的
+V 地址到 P；P 向该 V 取 feature，D 只负责 Decode 接续。每 Pod 的缓存、并发、
+取消和资源释放独立，Pod 副本数不能替代模型的图片 token 数。
+
 ## Whale 模板字段
 
 - `per_engine` 的 P/D 使用独立角色、资源模板、VIP 域和副本数；`single_pod` 在一个 Mock 角色内声明多个逻辑 P/D 地址；`embedded` 不注册独立 P/D VIP。
