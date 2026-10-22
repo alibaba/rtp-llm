@@ -197,6 +197,21 @@ def parse_args() -> argparse.Namespace:
         required=True,
     )
     parser.add_argument("--timeout", type=int, default=900)
+    parser.add_argument(
+        "--check-jit-publication",
+        action="store_true",
+        help="Require a new JIT snapshot from this startup in the 93-layer smoke (default: skip)",
+    )
+    parser.add_argument(
+        "--jit-snapshot-root",
+        type=pathlib.Path,
+        help="Prefill snapshot destination used by this single service startup",
+    )
+    parser.add_argument(
+        "--jit-publish-since-ns",
+        type=int,
+        help="Prefill service startup timestamp, including pre-readiness publication",
+    )
     args = parser.parse_args()
     # The checkpoint chooses one of two fixed runs; phases and MTP cannot be
     # disabled from the command line.
@@ -207,6 +222,20 @@ def parse_args() -> argparse.Namespace:
         parser.error("smoke requires a four-layer or 93-layer checkpoint")
     args.suite = "orthogonal-flow" if layers == 4 else "main-text-64k-capped"
     args.run_kind = "four-layer" if layers == 4 else "full-93"
+    if args.check_jit_publication:
+        if layers != 93:
+            parser.error("--check-jit-publication requires a 93-layer checkpoint")
+        if args.jit_snapshot_root is None or not args.jit_snapshot_root.is_dir():
+            parser.error(
+                "--check-jit-publication needs an existing --jit-snapshot-root"
+            )
+        if (
+            args.jit_publish_since_ns is None
+            or not 0 < args.jit_publish_since_ns <= time.time_ns()
+        ):
+            parser.error(
+                "--check-jit-publication needs a valid --jit-publish-since-ns"
+            )
     args.require_mtp = True
     args.orthogonal_phases = ("cache", "cancel", "page", "chunk", "decode")
     if args.prefill_event_dir is None or not args.prefill_event_dir.is_dir():
@@ -419,6 +448,8 @@ class Runner:
             ),
             "runtime_evidence_gate": "separate all-rank audit required; HTTP results alone do not certify runtime paths",
             "formal_request_retries": 0,
+            "protocol_requests": getattr(self, "protocol_results", []),
+            "jit_publication": getattr(self, "jit_publication", None),
             "namespace": self.args.namespace,
             "passed": passed,
             "error": error,
@@ -2916,6 +2947,32 @@ def main() -> int:
                 runner._orthogonal_decode_batches,
             ):
                 phase()
+            from request_smoke import (
+                SmokeRequests,
+                run_request_cases,
+            )
+
+            protocol = SmokeRequests(args)
+            try:
+                run_request_cases(protocol)
+                from grammar_smoke import run_grammar_cases
+
+                run_grammar_cases(protocol)
+                from logprobs_smoke import (
+                    run_logprobs_cases,
+                    run_tail_health,
+                )
+
+                run_logprobs_cases(protocol)
+                run_tail_health(protocol)
+            finally:
+                runner.protocol_results = protocol.records
+            if args.check_jit_publication:
+                from jit_smoke import check_publication
+
+                runner.jit_publication = check_publication(
+                    args.jit_snapshot_root, args.jit_publish_since_ns
+                )
         else:
             runner.run_flow()
             runner.run_orthogonal_boundaries()
