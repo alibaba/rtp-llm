@@ -3313,9 +3313,13 @@ class AttentionV41FP8(AttentionFP8):
                 candidate_size > 0
                 and cached_mask is not None
                 and cached_mask[0] is candidates
-                and cached_mask[1].shape
-                == (T, (capacity + candidate_size - 1) // candidate_size)
                 and cached_mask[2] == candidate_size
+                and (
+                    (cached_mask[1] is None and len(cached_mask) == 4
+                     and cached_mask[3] == "sorted_prefix" and candidates.shape[0] == T)
+                    or (cached_mask[1] is not None and cached_mask[1].shape
+                        == (T, (capacity + candidate_size - 1) // candidate_size))
+                )
             )
             if decode_topk.is_supported(all_logits, visible_i32, self.index_topk) and (
                 candidates is None or publish or compatible_mask
@@ -3334,7 +3338,7 @@ class AttentionV41FP8(AttentionFP8):
                         )
                         candidates, flags = select_candidates(
                             all_logits, visible_i32, candidate_size, candidate_blocks,
-                            **({"complete": True} if complete_prefix else {}),
+                            **({"complete": True, "build_flags": False} if complete_prefix else {}),
                         )
                         shared["candidates"] = candidates
                         shared["candidate_mask"] = (
@@ -3351,6 +3355,13 @@ class AttentionV41FP8(AttentionFP8):
                             producer_stream=None if overlap is None else overlap.auxiliary,
                         )
                     elif candidate_source >= 0 and self.layer_id > candidate_source:
+                        if cached_mask[1] is None:
+                            # Sparse consumers never need a bitmap. A dense
+                            # fallback builds it once per forward, after the
+                            # FULL producer's stream join; replay reruns writes.
+                            flags = decode_topk.build_candidate_flags(candidates, capacity, candidate_size)
+                            cached_mask = (candidates, flags, candidate_size, "sorted_prefix")
+                            shared["candidate_mask"] = cached_mask
                         decode_topk.mask_candidates(
                             all_logits, cached_mask[1], candidate_size
                         )

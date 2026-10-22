@@ -215,7 +215,8 @@ def _plan_candidate_flags(candidates, block_table, candidate_mask):
         return None
     flags = candidate_mask[1]
     if (
-        flags.ndim != 2
+        flags is None
+        or flags.ndim != 2
         or flags.shape[0] != candidates.shape[0]
         or not 0 < flags.shape[1] <= min(
             4224, block_table.shape[1] * (PAGE_SIZE // BLOCK_SIZE)

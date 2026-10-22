@@ -30,6 +30,7 @@ _TESTS = [
     "test_attention_v41_sparse_selection",
     "test_v41_attention_jit_warmup",
     "test_v41_batched_producer",
+    "test_v41_candidate_deepselect",
     "test_v41_decode_attention_fusion",
     "test_v41_decode_device_metadata",
     "test_v41_decode_global",
@@ -76,6 +77,7 @@ _TESTS = [
 
 # The selection chain supports both SM100 ARM and SM100/SM103 x86.
 _X86_TESTS = [
+    "test_v41_candidate_deepselect",
     "test_v41_merge_contracts",
     "test_v41_attention_jit_warmup",
     "test_v41_owned_pool",
