@@ -1718,6 +1718,8 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
         inputs.attention_inputs.combo_position_ids = inputs.combo_position_ids;
     }
 
+    // The kernel table width is also a conservative bound for physical block
+    // tables: each physical block expands to at least one kernel block.
     const int64_t max_blocks = max_kernel_block_table_width_;
     // kv_cache_kernel_block_id_device [batch_size, block_num]
     inputs.attention_inputs.kv_cache_kernel_block_id_device =
@@ -1728,7 +1730,7 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     // buffers; replay updates both maps before Qwen4 PLE/QSA reads the pools.
     if (kv_cache_group_tags_.size() > 1) {
         inputs.attention_inputs.kv_cache_block_id_device =
-            torch::zeros({int(max_bs_), max_kv_blocks}, options_cuda_int32_);
+            torch::zeros({int(max_bs_), max_blocks}, options_cuda_int32_);
     }
 
     inputs.attention_inputs.kv_cache_kernel_block_id =
@@ -1789,7 +1791,7 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
                 tagged_inputs.kv_cache_kernel_block_id =
                     torch::zeros({int(max_bs_), max_blocks}, options_cpu_int32_).pin_memory();
                 tagged_inputs.kv_cache_block_id_device =
-                    torch::zeros({int(max_bs_), max_kv_blocks}, options_cuda_int32_);
+                    torch::zeros({int(max_bs_), max_blocks}, options_cuda_int32_);
             }
             const auto [it, inserted] =
                 inputs.attention_inputs_by_tag.emplace(kv_cache_group_tags_[group_id], std::move(tagged_inputs));
