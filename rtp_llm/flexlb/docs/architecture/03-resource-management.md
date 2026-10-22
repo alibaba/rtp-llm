@@ -28,6 +28,10 @@ finished、取消或失活后按请求 ID 清除本地记录。
 
 ## Prefill 可用性与队列
 
+Prefill 选择先排除缺失可路由 rank 的 DP 组，DP 组识别方式与 Decode 相同：用
+WorkerStatus 的 `dp_master_address` 分组，没有该地址的 worker 独立参与选择。排除
+在缓存匹配之前完成，保证缓存匹配结果只覆盖 DP 组完整的合法 P 集合。
+
 `PrefillResourceMeasure` 要求 endpoint 存活，且引擎观测到的有效待处理请求低于
 `router.roles.prefill.availability.maxPendingRequests`（默认 64）。上下线切换使用
 `router.availabilityHysteresisPercent`（默认 15）做滞回，避免在阈值附近抖动。

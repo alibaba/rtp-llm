@@ -243,12 +243,35 @@ public final class WorkerDirectory implements WorkerStatusProvider {
     }
 
     /**
-     * Immutable, non-owning Prefill generations for one routing traversal.
+     * Prefill candidates whose reported DP group has every rank available for routing.
      * The winning address must still be captured and identity-checked.
      */
-    public List<EndpointRegistry.PrefillRoutingEntry> prefillRoutingSnapshot(
-            RoleType role) {
-        return endpointRegistry.prefillRoutingSnapshot(role);
+    public List<EndpointRegistry.PrefillRoutingEntry> prefillRoutingSnapshot(RoleType role) {
+        List<EndpointRegistry.PrefillRoutingEntry> directory = endpointRegistry.prefillRoutingSnapshot(role);
+        if (directory.isEmpty()) {
+            return directory;
+        }
+        Map<String, DpGroupMembers> dpGroups = new HashMap<>();
+        for (EndpointRegistry.PrefillRoutingEntry entry : directory) {
+            WorkerStatus.EngineObservation engine =
+                    entry.endpoint().getStatus().committedEngineObservation();
+            if (engine.dpMasterAddress() != null) {
+                dpGroups.computeIfAbsent(engine.dpMasterAddress(), ignored -> new DpGroupMembers())
+                        .add(engine.dpSize(), engine.dpRank());
+            }
+        }
+        if (dpGroups.isEmpty()) {
+            return directory;
+        }
+        ArrayList<EndpointRegistry.PrefillRoutingEntry> matching = new ArrayList<>(directory.size());
+        for (EndpointRegistry.PrefillRoutingEntry entry : directory) {
+            String masterAddress = entry.endpoint().getStatus()
+                    .committedEngineObservation().dpMasterAddress();
+            if (masterAddress == null || dpGroups.get(masterAddress).hasAllRanks()) {
+                matching.add(entry);
+            }
+        }
+        return List.copyOf(matching);
     }
 
     /** Capture one exact currently published endpoint generation by address. */

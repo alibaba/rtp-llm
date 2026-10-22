@@ -2,6 +2,7 @@ package org.flexlb.sync.status;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusProvider;
@@ -11,6 +12,7 @@ import org.flexlb.sync.runner.RunnerTestSupport;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
+import org.slf4j.LoggerFactory;
 
 import java.util.List;
 import java.util.Map;
@@ -28,6 +30,9 @@ class WorkerDirectoryTest {
     private EndpointRegistry registry;
 
     private record DecodeMember(WorkerStatus status, WorkerStatusResponse response) {
+    }
+
+    private record PrefillMember(WorkerStatus status, WorkerStatusResponse response) {
     }
 
     @BeforeEach
@@ -283,6 +288,92 @@ class WorkerDirectoryTest {
         publishDecode(decodeMember("routing-a", "10.0.0.1", 2, 3, 8442));
 
         assertTrue(workerDirectory.decodeRoutingSnapshot("routing-a").isEmpty());
+    }
+
+    @Test
+    void prefillGroupIsRoutableOnlyWhenEveryRankHasAnEndpoint() {
+        PrefillMember rankZero = prefillMember("routing-a", "10.0.1.1", 0, 2, 8500);
+        PrefillMember rankOne = prefillMember("routing-a", "10.0.1.1", 1, 2, 8501);
+        publishPrefill(rankZero);
+
+        assertTrue(workerDirectory.prefillRoutingSnapshot(RoleType.PREFILL).isEmpty());
+        assertEquals(2, workerDirectory.getWorkerStatuses(RoleType.PREFILL, "routing-a").size());
+
+        publishPrefill(rankOne);
+
+        assertEquals(2, workerDirectory.prefillRoutingSnapshot(RoleType.PREFILL).size());
+    }
+
+    @Test
+    void retiringOnePrefillRankHidesItsGroupUntilTheRankIsRepublished() {
+        PrefillMember rankZero = prefillMember("routing-a", "10.0.1.2", 0, 2, 8510);
+        PrefillMember rankOne = prefillMember("routing-a", "10.0.1.2", 1, 2, 8511);
+        PrefillMember independent = prefillMember("routing-a", null, 0, 1, 8512);
+        publishPrefill(rankZero);
+        publishPrefill(rankOne);
+        publishPrefill(independent);
+
+        assertEquals(3, workerDirectory.prefillRoutingSnapshot(RoleType.PREFILL).size());
+
+        EndpointRegistry.DetachedGeneration detached;
+        rankOne.status().lock.lock();
+        try {
+            detached = workerDirectory.beginRetirement(
+                    RoleType.PREFILL, rankOne.status().getLogicalIpPort(), rankOne.status());
+        } finally {
+            rankOne.status().lock.unlock();
+        }
+        assertNotNull(detached);
+        workerDirectory.completeRetirement(
+                RoleType.PREFILL, rankOne.status().getLogicalIpPort(), rankOne.status(),
+                detached, Mockito.mock(CacheAwareService.class),
+                LoggerFactory.getLogger(WorkerDirectoryTest.class));
+
+        assertEquals(List.of(independent.status().getLogicalIpPort()),
+                workerDirectory.prefillRoutingSnapshot(RoleType.PREFILL).stream()
+                        .map(EndpointRegistry.PrefillRoutingEntry::address).toList());
+
+        publishPrefill(prefillMember("routing-a", "10.0.1.2", 1, 2, 8511));
+
+        assertEquals(3, workerDirectory.prefillRoutingSnapshot(RoleType.PREFILL).size());
+    }
+
+    @Test
+    void prefillGroupsWithTheSameRanksAreSeparatedByMasterAddress() {
+        PrefillMember incomplete = prefillMember("routing-a", "10.0.1.3", 0, 2, 8520);
+        PrefillMember completeZero = prefillMember("routing-a", "10.0.1.4", 0, 2, 8521);
+        PrefillMember completeOne = prefillMember("routing-a", "10.0.1.4", 1, 2, 8522);
+        publishPrefill(incomplete);
+        publishPrefill(completeZero);
+        publishPrefill(completeOne);
+
+        List<String> routableAddresses = workerDirectory.prefillRoutingSnapshot(RoleType.PREFILL)
+                .stream().map(EndpointRegistry.PrefillRoutingEntry::address).sorted().toList();
+        assertEquals(List.of(completeZero.status().getLogicalIpPort(), completeOne.status().getLogicalIpPort())
+                .stream().sorted().toList(), routableAddresses);
+    }
+
+    private PrefillMember prefillMember(String group, String masterAddress, long rank, long size, int port) {
+        WorkerStatus status = status(RoleType.PREFILL, group, port);
+        discover(status);
+        WorkerStatusResponse response = RunnerTestSupport.response(status, true, 1L);
+        response.setDpMasterAddress(masterAddress);
+        response.setDpSize(size);
+        response.setDpRank(rank);
+        return new PrefillMember(status, response);
+    }
+
+    private void publishPrefill(PrefillMember member) {
+        WorkerStatus status = member.status();
+        status.lock.lock();
+        try {
+            WorkerStatus.PreparedStatus prepared = status.prepareNewStatus(
+                    status.freezeStatusResponse(member.response()));
+            registry.publishPreparedEndpoint(status.getLogicalIpPort(), status, prepared);
+            status.recordSuccessfulPoll(true);
+        } finally {
+            status.lock.unlock();
+        }
     }
 
     private DecodeMember decodeMember(String group, String masterAddress, long rank, long size, int port) {
