@@ -94,12 +94,19 @@ class WorkerOfflineTest extends FlexLBMockTestBase {
         mockPrefillWorker.stop();
         Thread.sleep(500);
 
+        long releaseDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
         Response rejected = submitRequest(20012).get(5, TimeUnit.SECONDS);
 
         assertFalse(rejected.isSuccess());
         assertEquals(StrategyErrorType.BATCH_DISPATCH_FAILED.getErrorCode(), rejected.getCode());
         String errMsg = rejected.getErrorMessage();
         assertTrue(errMsg != null && !errMsg.isEmpty(), "Error message should not be empty");
+        // Failure publication precedes exact endpoint settlement on the completion thread.
+        // The response future is not a cleanup barrier; keep both within the original deadline.
+        while (getPrefillEndpoint().getInflightBatchCount() != existingBatches
+                && System.nanoTime() < releaseDeadline) {
+            Thread.sleep(10);
+        }
         assertEquals(existingBatches, getPrefillEndpoint().getInflightBatchCount());
         assertEquals(1, mockPrefillWorker.getEnqueueCount(), "Unsent request must never reach the worker");
         assertEquals(0, mockDecodeWorker.getEnqueueCount());
