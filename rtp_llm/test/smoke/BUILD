@@ -63,6 +63,15 @@ py_test(
     ],
 )
 
+py_test(
+    name = "asymmetric_tp_writeback_acceptance_test",
+    srcs = [
+        "asymmetric_tp_writeback_acceptance.py",
+        "asymmetric_tp_writeback_acceptance_test.py",
+        "v4_cp_writeback_acceptance.py",
+    ],
+)
+
 exports_files([
     "entry.py",
     "data/prompt_candidates.json",

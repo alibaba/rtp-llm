@@ -104,7 +104,13 @@ class PCPAll2AllAttnOp:
         ]
         prefill_cp_chunk_lengths = self.cp_info.prefill_cp_chunk_lengths
         shuffle_indices = self.cp_info.prefill_shuffle_indices
-        self.all_shuffle_indices = all_gather(shuffle_indices, group=Group.TP).reshape(
+        prefix_offsets = torch.repeat_interleave(
+            attention_inputs.prefix_lengths.to(device=shuffle_indices.device),
+            prefill_cp_chunk_lengths.to(device=shuffle_indices.device),
+            output_size=shuffle_indices.numel(),
+        )
+        cache_positions = shuffle_indices + prefix_offsets
+        self.all_shuffle_indices = all_gather(cache_positions, group=Group.TP).reshape(
             -1, shuffle_indices.shape[0]
         )
 

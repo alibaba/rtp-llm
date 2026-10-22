@@ -148,6 +148,9 @@ KVCacheTransferPlanner::validateTag(const ShardLayout& src, const ShardLayout& d
                          + "': src=" + KVCacheSpecTypeToString(sg.spec_type)
                          + " dst=" + KVCacheSpecTypeToString(dg.spec_type));
     }
+    if (sg.global_kv_head_num != dg.global_kv_head_num) {
+        return planError("global KV head count mismatch for tag '" + tag + "'");
+    }
 
     // Linear state is [ssm][conv], not equally sized K/V regions. The
     // execution converter cannot repartition it across unequal head shards.
