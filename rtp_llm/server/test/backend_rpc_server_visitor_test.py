@@ -154,7 +154,9 @@ class _FakeMasterClient:
                 "input_pb": input_pb,
             }
         )
-        return FlexlbResponse.ok(["prefill-role"], enqueued_by_master=True)
+        return FlexlbResponse.ok(
+            ["prefill-role"], enqueued_by_master=input_pb is not None
+        )
 
 
 class BackendRPCServerVisitorRouteCacheKeysTest(unittest.TestCase):
@@ -281,39 +283,48 @@ class BackendRPCServerVisitorRouteCacheKeysTest(unittest.TestCase):
 
 
 class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
-    async def test_get_master_route_addrs_passes_pb_and_marks_master_enqueue(self):
-        visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
-        visitor.seq_size_per_block = 16
-        visitor.cache_key_seed = 0
-        visitor.remote_vit = False
-        visitor.master_client = _FakeMasterClient()
-        visitor._route_cache_keys = lambda keys: keys
-        visitor._report_recent_cache_key_metrics = lambda keys: None
-        visitor._page_rr_route_cache_keys = False
-        visitor._page_rr_cp_size = 1
+    async def test_master_route_builds_input_only_when_required(self):
+        for required in (True, False):
+            visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+            visitor.seq_size_per_block = 16
+            visitor.cache_key_seed = 0
+            visitor.remote_vit = False
+            visitor.master_client = _FakeMasterClient()
+            visitor.host_service = Mock()
+            visitor.host_service.requires_generate_input.return_value = required
+            visitor._route_cache_keys = lambda keys: keys
+            visitor._report_recent_cache_key_metrics = lambda keys: None
+            visitor._page_rr_route_cache_keys = False
+            visitor._page_rr_cp_size = 1
 
-        input = _FakeRouteInput()
+            input = _FakeRouteInput()
 
-        with patch(
-            "rtp_llm.server.backend_rpc_server_visitor.get_block_cache_keys",
-            return_value=[11, 22],
-        ), patch(
-            "rtp_llm.server.backend_rpc_server_visitor.trans_input",
-            return_value=_FakeInputPB(),
-        ), patch(
-            "rtp_llm.server.backend_rpc_server_visitor.kmonitor"
-        ):
-            result = await visitor.get_master_route_addrs(input)
+            with patch(
+                "rtp_llm.server.backend_rpc_server_visitor.get_block_cache_keys",
+                return_value=[11, 22],
+            ), patch(
+                "rtp_llm.server.backend_rpc_server_visitor.trans_input",
+                return_value=_FakeInputPB(),
+            ) as build, patch(
+                "rtp_llm.server.backend_rpc_server_visitor.kmonitor"
+            ):
+                result = await visitor.get_master_route_addrs(input)
 
-        self.assertIsNone(result)
-        self.assertEqual(input.generate_config.role_addrs, ["prefill-role"])
-        self.assertTrue(input.enqueued_by_master)
-        self.assertEqual(visitor.master_client.calls[0]["block_cache_keys"], [11, 22])
-        self.assertEqual(visitor.master_client.calls[0]["request_id"], 456)
-        self.assertEqual(
-            visitor.master_client.calls[0]["input_pb"].SerializeToString(),
-            b"serialized-input",
-        )
+            self.assertIsNone(result)
+            self.assertEqual(input.generate_config.role_addrs, ["prefill-role"])
+            self.assertEqual(input.enqueued_by_master, required)
+            self.assertEqual(
+                visitor.master_client.calls[0]["block_cache_keys"], [11, 22]
+            )
+            self.assertEqual(visitor.master_client.calls[0]["request_id"], 456)
+            if required:
+                build.assert_called_once_with(input)
+                self.assertIs(
+                    visitor.master_client.calls[0]["input_pb"], build.return_value
+                )
+            else:
+                build.assert_not_called()
+                self.assertIsNone(visitor.master_client.calls[0]["input_pb"])
 
     async def test_route_ips_preserves_master_route_error_code_on_route_error(self):
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
