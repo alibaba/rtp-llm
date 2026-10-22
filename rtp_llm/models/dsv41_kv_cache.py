@@ -89,11 +89,6 @@ def build_v41_kv_cache_spec_descs(
 def configure_v41_kv_cache(model_config, kv_cache_config=None):
     from rtp_llm.models_py.modules.dsv41.bounded_replay import enabled
 
-    # ModelFactory applies parsed settings before the inherited legacy hook.
-    # That fallback must preserve the configured pool sizes and residency.
-    if kv_cache_config is None and model_config.kv_cache_spec_descs:
-        return
-
     attn = model_config.attn_config
     promoted = resolve_dsv4_tokens_per_block(int(attn.tokens_per_block))
     if promoted is not None:

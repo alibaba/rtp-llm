@@ -9,8 +9,7 @@ from unittest.mock import patch
 
 
 class Descriptor:
-    capacity = None
-    memory = None
+    pass
 
 
 def _load_specs():
@@ -31,7 +30,7 @@ def _load_specs():
     ):
         setattr(ops, name, Descriptor)
     for name, members in {
-        "CacheMemoryPlacement": ("DEVICE", "HOST_PINNED"),
+        "CacheMemoryPlacement": ("HOST_PINNED",),
         "CpBlockSliceMode": ("PAYLOAD_BYTES", "EQUAL_BYTES"),
         "CpPrefillSliceLayout": ("PAYLOAD", "BLOCK_STRIDE"),
         "DataType": ("TYPE_UINT8", "TYPE_FP32"),
@@ -103,7 +102,6 @@ class CacheSpecsTest(unittest.TestCase):
                 is_mtp=False,
                 num_layers=2,
                 hybrid_attention_config=SimpleNamespace(),
-                kv_cache_spec_descs=[],
             )
             with patch.dict(sys.modules, {bounded.__name__: bounded}):
                 SPECS.configure_v41_kv_cache(config)
@@ -111,52 +109,6 @@ class CacheSpecsTest(unittest.TestCase):
             self.assertNotIn(config.cache_key_hash_seed, (0, 0x4453563431525031))
             self.assertEqual(config.cache_min_replay_tokens, 128 if enabled else 1)
         self.assertNotEqual(*seeds)
-
-    def test_legacy_fallback_preserves_parsed_pool_sizes_and_residency(self):
-        bounded = ModuleType("rtp_llm.models_py.modules.dsv41.bounded_replay")
-        bounded.enabled = lambda: True
-        for draft in (False, True):
-            with self.subTest(draft=draft):
-                config = SimpleNamespace(
-                    attn_config=SimpleNamespace(
-                        tokens_per_block=128,
-                        kernel_tokens_per_block=128,
-                        layer_compress_ratios=[0, 2, 0, 1, 0],
-                        v41_kv_source_layer_ids=[1, 3],
-                        size_per_head=512,
-                    ),
-                    is_mtp=draft,
-                    num_layers=5,
-                    hybrid_attention_config=SimpleNamespace(),
-                    kv_cache_spec_descs=[],
-                )
-                settings = SimpleNamespace(
-                    dsv4_fixed_pool_blocks=64, dsv4_fixed_pool_use_memory=True
-                )
-                with patch.dict(sys.modules, {bounded.__name__: bounded}):
-                    # The same call order as ModelFactory: explicit settings,
-                    # then the inherited _post_build_model_config fallback.
-                    SPECS.configure_v41_kv_cache(config, settings)
-                    for _ in range(2):
-                        SPECS.configure_v41_kv_cache(config)
-                    descs = {
-                        desc.tag: desc
-                        for layer in config.kv_cache_spec_descs
-                        for desc in layer
-                    }
-                    for tag in ("csa_state", "swa_kv", "decoder_swa_kv"):
-                        if tag in descs:
-                            self.assertEqual(descs[tag].capacity.explicit_block_num, 64)
-                            self.assertEqual(descs[tag].memory.placement, "HOST_PINNED")
-                            self.assertFalse(descs[tag].capacity.charge_to_paged_budget)
-                    # A later explicit application must still be able to rebuild
-                    # a configuration created by the legacy fallback.
-                    settings.dsv4_fixed_pool_blocks = 32
-                    SPECS.configure_v41_kv_cache(config, settings)
-                    for layer in config.kv_cache_spec_descs:
-                        for desc in layer:
-                            if desc.tag in ("csa_state", "swa_kv", "decoder_swa_kv"):
-                                self.assertEqual(desc.capacity.explicit_block_num, 32)
 
     def test_all_draft_layers_share_nonreusable_swa_spec(self):
         descs = SPECS.build_v41_kv_cache_spec_descs(
