@@ -1,5 +1,8 @@
 #include "rtp_llm/cpp/normal_engine/speculative/SpeculativeSampler.h"
 #include <algorithm>
+#include <cmath>
+#include <cstdlib>
+#include <string>
 #include <vector>
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
@@ -248,6 +251,71 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
                 torch::where(force_mask,
                              torch::full_like(output_accepted_token_num_d, (int32_t)(propose_step_ + 1)),
                              output_accepted_token_num_d);
+        }
+    }
+
+    // DSV4_SP_FORCE_ACCEPT_LEN (float, default 0=off): perf-simulation override of
+    // verify results. FORCED ACCEPT (perf simulation, outputs invalid). When >0,
+    // every stream commits a deterministic per-round accept length whose mean
+    // equals the env value (golden included); the fractional part is spread
+    // Bresenham-style over rounds (mode "cycle", default) or Bernoulli-sampled
+    // per row (DSV4_SP_FORCE_ACCEPT_MODE=rand). Committed tokens are the draft
+    // proposals themselves, so generated content is invalid by construction.
+    {
+        const char* env_s        = getenv("DSV4_SP_FORCE_ACCEPT_LEN");
+        const float force_target = env_s ? (float)atof(env_s) : 0.0f;
+        if (force_target > 0.0f) {
+            RTP_LLM_PROFILE_SCOPE("speculative_sampler.batchSample.forced_accept_perf_sim");
+            static bool force_accept_logged = false;
+            if (!force_accept_logged) {
+                RTP_LLM_LOG_WARNING(
+                    "FORCED ACCEPT (perf simulation, outputs invalid): DSV4_SP_FORCE_ACCEPT_LEN=%f",
+                    force_target);
+                force_accept_logged = true;
+            }
+            const int   max_len = (int)propose_step_ + 1;
+            const float v       = std::min(force_target, (float)max_len);
+            const int   base    = (int)floorf(v);
+            const float frac    = v - (float)base;
+            const char* mode_s  = getenv("DSV4_SP_FORCE_ACCEPT_MODE");
+            const bool  rand_mode = mode_s && std::string(mode_s) == "rand";
+
+            static uint64_t force_round = 0;
+            const uint64_t  r = force_round++;
+            int             cycle_len = -1;
+            if (!rand_mode) {
+                cycle_len = base
+                            + ((int)floorf((float)(r + 1) * frac) - (int)floorf((float)r * frac) > 0 ? 1 : 0);
+                cycle_len = std::max(1, std::min(cycle_len, max_len));
+            }
+            auto forced_len_host = torch::empty(
+                {(long)batch_size}, torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
+            auto* forced_len_ptr = forced_len_host.data_ptr<int32_t>();
+            for (int i = 0; i < batch_size; ++i) {
+                int l = cycle_len;
+                if (rand_mode) {
+                    l = base + (((float)rand() / (float)RAND_MAX) < frac ? 1 : 0);
+                    l = std::max(1, std::min(l, max_len));
+                }
+                forced_len_ptr[i] = l;
+            }
+            buffer_holder_.hold_host(forced_len_host);
+            auto forced_len_d = forced_len_host.to(target_device, true);
+
+            // committed rows: first forced_len entries from [draft proposals..., target bonus]
+            int64_t token_stride_f = target_token_ids_d_t.size(1);
+            auto    target_bonus_f =
+                target_token_ids_d_t.reshape({(long)batch_size, (long)(propose_step_ + 1), token_stride_f})
+                    .select(1, propose_step_)
+                    .select(1, token_stride_f - 1)
+                    .unsqueeze(1);
+            auto forced_tokens_f = torch::cat({draft_token_ids_d_t, target_bonus_f}, 1);
+            auto col_idx_f       = torch::arange((long)propose_step_ + 1,
+                                                 torch::TensorOptions().dtype(torch::kInt32).device(target_device))
+                                       .unsqueeze(0);
+            auto take_mask_f = col_idx_f < forced_len_d.unsqueeze(1);
+            output_token_ids_d          = torch::where(take_mask_f, forced_tokens_f, output_token_ids_d);
+            output_accepted_token_num_d = forced_len_d;
         }
     }
 
