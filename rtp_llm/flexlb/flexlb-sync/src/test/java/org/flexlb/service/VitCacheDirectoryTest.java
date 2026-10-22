@@ -284,6 +284,15 @@ class VitCacheDirectoryTest {
     }
 
     @Test
+    void preparedInputsWithoutUrlAffinityStillSelectWithinPolicyGroup() {
+        var ctx = context();
+        assertEquals(a.getIp(), selector.select(ctx, "one").getServerIp());
+        ctx.getRequest().setCacheAffinityKeys(null);
+        assertEquals(b.getIp(), selector.select(ctx, "two").getServerIp());
+        assertFalse(selector.select(context(""), null).isSuccess());
+    }
+
+    @Test
     void prefersMostHitsAndReplacesEvictedKeys() {
         snapshot(a, "a1", "image1", "image2");
         snapshot(b, "b1", "image1");

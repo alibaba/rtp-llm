@@ -59,7 +59,9 @@ public class VitCacheSelector {
 
     public synchronized ServerStatus select(BalanceContext ctx, String group) {
         var keys = ctx.getRequest().getCacheAffinityKeys();
-        if (keys == null || keys.isEmpty() || keys.size() > 256
+        // Prepared V4.1 inputs already carry canonical IDs and select ViT without URL affinity.
+        if (keys == null) keys = List.of();
+        if (keys.size() > 256
                 || keys.stream().anyMatch(k -> k == null || k.isEmpty() || k.length() > 4096)) {
             return errorStatus(StrategyErrorType.INVALID_REQUEST);
         }
