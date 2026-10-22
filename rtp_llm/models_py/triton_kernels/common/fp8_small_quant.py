@@ -34,6 +34,93 @@ def _small_fp8_quant(
     tl.store(q + rows, tl.where(rows < N, values, 0).to(tl.float8e4nv), rows < OUT)
 
 
+@tr.jit
+def _silu_mul_fp8_quant(
+    gate_up,
+    q,
+    scale,
+    N: tl.constexpr,
+    D: tl.constexpr,
+    OUT: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    offsets = tl.arange(0, BLOCK)
+    row = offsets // D
+    col = offsets % D
+    gate = tl.load(gate_up + row * (2 * D) + col, offsets < N, other=0).to(tl.float32)
+    up = tl.load(gate_up + row * (2 * D) + D + col, offsets < N, other=0).to(tl.float32)
+    activated = ((gate * tl.sigmoid(gate)) * up).to(tl.bfloat16).to(tl.float32)
+    absolute = tl.abs(activated)
+    maximum = tl.max(tl.where(absolute == absolute, absolute, 0), 0)
+    output_scale = maximum * (1.0 / 448.0)
+    output_scale = tl.where(output_scale < 1.1754943508222875e-38, 0, output_scale)
+    if tl.program_id(0) == 0:
+        tl.store(scale, output_scale)
+    inverse = tl.div_rn(1.0, tl.maximum(output_scale, 1.0e-9))
+
+    positions = tl.program_id(0) * 4096 + tl.arange(0, 4096)
+    row = positions // D
+    col = positions % D
+    gate = tl.load(gate_up + row * (2 * D) + col, positions < N, other=0).to(tl.float32)
+    up = tl.load(gate_up + row * (2 * D) + D + col, positions < N, other=0).to(
+        tl.float32
+    )
+    activated = ((gate * tl.sigmoid(gate)) * up).to(tl.bfloat16).to(tl.float32)
+    values = activated * inverse
+    values = tl.where(values == values, values, 448.0)
+    values = tl.maximum(-448.0, tl.minimum(448.0, values))
+    tl.store(
+        q + positions,
+        tl.where(positions < N, values, 0).to(tl.float8e4nv),
+        positions < OUT,
+    )
+
+
+def try_silu_mul_fp8_quant(gate_up, *, output=None):
+    """Fuse BF16 SiLU×Mul and dynamic FP8 quant for the small shared FFN."""
+    if not (
+        isinstance(gate_up, torch.Tensor)
+        and gate_up.is_cuda
+        and torch.version.hip is None
+        and gate_up.dtype == torch.bfloat16
+        and gate_up.ndim == 2
+        and gate_up.is_contiguous()
+        and gate_up.shape[0] in (4, 8, 12, 16)
+        and gate_up.shape[1] == 1280
+        and os.environ.get("QWEN4_FP8_SHARED_DOWN_QUANT", "0") == "1"
+        and torch.cuda.get_device_capability(gate_up.device) == (12, 0)
+    ):
+        return None
+    rows, width = gate_up.shape[0], 640
+    if output is not None and not (
+        isinstance(output, torch.Tensor)
+        and output.device == gate_up.device
+        and output.dtype == torch.float8_e4m3fn
+        and output.is_contiguous()
+        and output.untyped_storage().data_ptr() != gate_up.untyped_storage().data_ptr()
+        and tuple(output.shape) in ((rows, width), (tr.cdiv(rows, 16) * 16, width))
+    ):
+        return None
+    if output is None:
+        output = torch.empty(
+            (rows, width), device=gate_up.device, dtype=torch.float8_e4m3fn
+        )
+    scale = torch.empty((1,), device=gate_up.device, dtype=torch.float32)
+    block = tr.next_power_of_2(rows * width)
+    _silu_mul_fp8_quant[(tr.cdiv(output.numel(), 4096),)](
+        gate_up,
+        output,
+        scale,
+        rows * width,
+        width,
+        output.numel(),
+        block,
+        num_warps=4 if block <= 8192 else 16,
+        enable_fp_fusion=False,
+    )
+    return output, scale
+
+
 def is_supported(x, output=None):
     if not (
         isinstance(x, torch.Tensor)
