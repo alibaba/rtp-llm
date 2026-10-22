@@ -1,6 +1,7 @@
 package org.flexlb.engine.grpc;
 
 import io.grpc.ManagedChannel;
+import io.grpc.Deadline;
 import lombok.Getter;
 import org.flexlb.engine.grpc.monitor.GrpcReporter;
 import org.flexlb.engine.grpc.nameresolver.CustomNameResolver;
@@ -225,9 +226,13 @@ public abstract class AbstractGrpcClient implements CustomNameResolver.Listener 
         }
 
         public GrpcFutureStubWrapper withDeadlineAfter(long timeout, TimeUnit unit) {
+            return withDeadline(Deadline.after(timeout, unit));
+        }
+
+        public GrpcFutureStubWrapper withDeadline(Deadline deadline) {
             return new GrpcFutureStubWrapper(
-                    rpcServiceFutureStub.withDeadlineAfter(timeout, unit),
-                    multimodalFutureStub.withDeadlineAfter(timeout, unit)
+                    rpcServiceFutureStub.withDeadline(deadline),
+                    multimodalFutureStub.withDeadline(deadline)
             );
         }
 
@@ -285,6 +290,14 @@ public abstract class AbstractGrpcClient implements CustomNameResolver.Listener 
             logCloseSafely(reason, false, "requested", null);
             try {
                 channel.shutdown();
+                if (reason == CloseReason.REPLACED || reason == CloseReason.DUPLICATE_DISCARDED) {
+                    // These paths can run from a saturated gRPC callback on its Netty eventloop.
+                    // Waiting here stalls the same loop needed to finish channel termination.
+                    if (!channel.isTerminated()) {
+                        forceShutdown(reason);
+                    }
+                    return;
+                }
                 if (!channel.awaitTermination(1000, TimeUnit.MILLISECONDS)) {
                     logCloseSafely(reason, true, "graceful_timeout", null);
                     forceShutdown(reason);
