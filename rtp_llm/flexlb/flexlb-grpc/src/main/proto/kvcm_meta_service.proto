@@ -71,6 +71,20 @@ enum QueryType {
   QT_PREFIX_MATCH_WITH_MAMBA = 4;
 }
 
+// Values pinned to the KVCM server StorageType wire contract.
+enum StorageType {
+  ST_UNSPECIFIED = 0;
+  ST_3FS = 1;
+  ST_MOONCAKE = 2;
+  ST_TAIRMEMPOOL = 3;
+  ST_NFS = 4;
+  ST_VCNS_3FS = 5;
+  ST_DUMMY = 6;
+  ST_EVENT_REPORT_L1P5 = 7;
+  ST_EVENT_REPORT_L2 = 8;
+  ST_TAIRMEMPOOL_SSD = 9;
+}
+
 message GetHostCacheStateRequest {
   string trace_id = 1;
   string instance_id = 2;
@@ -81,8 +95,8 @@ message GetHostCacheStateRequest {
   reserved "p2p_host_count";
   // Number of logical engines with the longest local match to compute remote hits for.
   // Zero computes local matches only.
-  int32 global_kvs_host_count = 7;
-  bool enable_p2p = 8;
+  int32 top_k_host_count = 7;
+  repeated StorageType backend_types = 8;
 }
 
 message HostCacheMatch {

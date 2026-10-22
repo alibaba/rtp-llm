@@ -189,15 +189,22 @@ public class KvcmGrpcClient {
             throw new KvcmQueryException("KVCM leader is unavailable");
         }
 
-        GetHostCacheStateRequest request = GetHostCacheStateRequest.newBuilder()
+        GetHostCacheStateRequest.Builder requestBuilder = GetHostCacheStateRequest.newBuilder()
                 .setTraceId(requestId)
                 .setInstanceId(namespace)
                 .setQueryType(queryType)
                 .addAllBlockCacheKeys(blockCacheKeys)
                 .addAllMedium(config.getMedium())
-                .setGlobalKvsHostCount(Math.max(0, config.getGlobalKvsHostCount()))
-                .setEnableP2P(config.isEnableP2p())
-                .build();
+                .setTopKHostCount(Math.max(0, config.getGlobalKvsHostCount()));
+        // Preserve the existing remote/P2P configuration with the current enum wire field.
+        // A local-only request has no backend types and never emits the old bool field 8.
+        if (config.getGlobalKvsHostCount() > 0) {
+            requestBuilder.addBackendTypes(org.flexlb.kvcm.grpc.StorageType.ST_TAIRMEMPOOL);
+            if (config.isEnableP2p()) {
+                requestBuilder.addBackendTypes(org.flexlb.kvcm.grpc.StorageType.ST_EVENT_REPORT_L2);
+            }
+        }
+        GetHostCacheStateRequest request = requestBuilder.build();
 
         long startTimeNanos = System.nanoTime();
         GetHostCacheStateResponse response;

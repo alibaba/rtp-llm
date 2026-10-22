@@ -209,6 +209,19 @@ class KvcmGrpcClientTest {
     }
 
     @Test
+    void backendSelectionUsesTheCurrentRepeatedEnumWireField() {
+        var request = GetHostCacheStateRequest.newBuilder()
+                .setTopKHostCount(2)
+                .addBackendTypes(org.flexlb.kvcm.grpc.StorageType.ST_TAIRMEMPOOL)
+                .addBackendTypes(org.flexlb.kvcm.grpc.StorageType.ST_EVENT_REPORT_L2).build();
+        var field = request.getDescriptorForType().findFieldByNumber(8);
+        assertTrue(field.isRepeated());
+        assertEquals(com.google.protobuf.Descriptors.FieldDescriptor.Type.ENUM, field.getType());
+        assertEquals(List.of(3, 8), request.getBackendTypesValueList());
+        assertEquals(0, GetHostCacheStateRequest.getDefaultInstance().getBackendTypesCount());
+    }
+
+    @Test
     void reportsLogicalWorkerMatchesAndMillisecondCallMetrics() throws Exception {
         CacheMatchConfiguration configuration = mock(CacheMatchConfiguration.class);
         KvcmConfig config = new KvcmConfig();
@@ -267,11 +280,13 @@ class KvcmGrpcClientTest {
                 ArgumentCaptor.forClass(GetHostCacheStateRequest.class);
         verify(metaServiceClient).getHostCacheState(any(), sentRequest.capture(), any(Deadline.class));
         assertEquals(List.of("hbm", "kvs"), sentRequest.getValue().getMediumList());
-        assertEquals(5, sentRequest.getValue().getGlobalKvsHostCount());
-        assertTrue(sentRequest.getValue().getEnableP2P());
+        assertEquals(5, sentRequest.getValue().getTopKHostCount());
+        assertTrue(sentRequest.getValue().getBackendTypesList().contains(org.flexlb.kvcm.grpc.StorageType.ST_EVENT_REPORT_L2));
         UnknownFieldSet wireFields = UnknownFieldSet.parseFrom(sentRequest.getValue().toByteArray());
         assertEquals(List.of(5L), wireFields.getField(7).getVarintList());
-        assertEquals(List.of(1L), wireFields.getField(8).getVarintList());
+        assertEquals(List.of(com.google.protobuf.ByteString.copyFrom(new byte[]{3, 8})),
+                wireFields.getField(8).getLengthDelimitedList());
+        assertTrue(wireFields.getField(8).getVarintList().isEmpty());
         assertTrue(wireFields.getField(8).getLengthDelimitedList().isEmpty());
 
         assertEquals(2, result.get("10.0.0.1:8601@1").localMatchBlocks());
@@ -314,8 +329,8 @@ class KvcmGrpcClientTest {
         ArgumentCaptor<GetHostCacheStateRequest> sentRequest =
                 ArgumentCaptor.forClass(GetHostCacheStateRequest.class);
         verify(metaServiceClient).getHostCacheState(any(), sentRequest.capture(), any(Deadline.class));
-        assertEquals(3, sentRequest.getValue().getGlobalKvsHostCount());
-        assertFalse(sentRequest.getValue().getEnableP2P());
+        assertEquals(3, sentRequest.getValue().getTopKHostCount());
+        assertFalse(sentRequest.getValue().getBackendTypesList().contains(org.flexlb.kvcm.grpc.StorageType.ST_EVENT_REPORT_L2));
         assertTrue(sentRequest.getValue().getMediumList().isEmpty());
     }
 
@@ -436,10 +451,10 @@ class KvcmGrpcClientTest {
         ArgumentCaptor<Deadline> deadline = ArgumentCaptor.forClass(Deadline.class);
         verify(metaServiceClient, times(2))
                 .getHostCacheState(any(), sentRequest.capture(), deadline.capture());
-        assertEquals(3, sentRequest.getAllValues().get(0).getGlobalKvsHostCount());
-        assertEquals(9, sentRequest.getAllValues().get(1).getGlobalKvsHostCount());
-        assertFalse(sentRequest.getAllValues().get(0).getEnableP2P());
-        assertTrue(sentRequest.getAllValues().get(1).getEnableP2P());
+        assertEquals(3, sentRequest.getAllValues().get(0).getTopKHostCount());
+        assertEquals(9, sentRequest.getAllValues().get(1).getTopKHostCount());
+        assertFalse(sentRequest.getAllValues().get(0).getBackendTypesList().contains(org.flexlb.kvcm.grpc.StorageType.ST_EVENT_REPORT_L2));
+        assertTrue(sentRequest.getAllValues().get(1).getBackendTypesList().contains(org.flexlb.kvcm.grpc.StorageType.ST_EVENT_REPORT_L2));
         assertEquals(List.of("kvs"), sentRequest.getAllValues().get(1).getMediumList());
         assertTrue(deadline.getAllValues().get(1).timeRemaining(TimeUnit.MILLISECONDS) <= 900L);
         assertTrue(deadline.getAllValues().get(1).timeRemaining(TimeUnit.MILLISECONDS) > 0L);
@@ -504,8 +519,8 @@ class KvcmGrpcClientTest {
         verify(metaServiceClient, times(2))
                 .getHostCacheState(any(), sentRequest.capture(), deadline.capture());
         for (GetHostCacheStateRequest request : sentRequest.getAllValues()) {
-            assertEquals(4, request.getGlobalKvsHostCount());
-            assertTrue(request.getEnableP2P());
+            assertEquals(4, request.getTopKHostCount());
+            assertTrue(request.getBackendTypesList().contains(org.flexlb.kvcm.grpc.StorageType.ST_EVENT_REPORT_L2));
             assertEquals(List.of("hbm"), request.getMediumList());
         }
         assertSame(deadline.getAllValues().get(0), deadline.getAllValues().get(1),
