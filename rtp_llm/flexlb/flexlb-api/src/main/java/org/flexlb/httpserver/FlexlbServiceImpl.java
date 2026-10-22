@@ -318,7 +318,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             try {
                 completeOnce(requestId, context,
                         routeError == null ? response : buildErrorResponse(routeError),
-                        responseObserver, origin, completionClaimed, () -> { });
+                        responseObserver, origin, completionClaimed);
             } finally {
                 removeCancellationListener.run();
             }
@@ -333,7 +333,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             ScheduleOrigin origin,
             ScheduleCompletion completionClaimed) {
         completeOnce(requestId, context, response, responseObserver, origin,
-                completionClaimed, () -> { }, "");
+                completionClaimed, "");
     }
 
     private void completeOnce(
@@ -342,44 +342,16 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             FlexlbScheduleProtocol.FlexlbScheduleResponsePB response,
             StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> responseObserver,
             ScheduleOrigin origin,
-            ScheduleCompletion completionClaimed,
+            ScheduleCompletion completion,
             String masterHost) {
-        completeOnce(requestId, context, response, responseObserver, origin,
-                completionClaimed, () -> { }, masterHost);
-    }
-
-    private void completeOnce(
-            long requestId,
-            BalanceContext context,
-            FlexlbScheduleProtocol.FlexlbScheduleResponsePB response,
-            StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> responseObserver,
-            ScheduleOrigin origin,
-            ScheduleCompletion completionClaimed,
-            Runnable completionCleanup) {
-        completeOnce(requestId, context, response, responseObserver, origin,
-                completionClaimed, completionCleanup, "");
-    }
-
-    private void completeOnce(
-            long requestId,
-            BalanceContext context,
-            FlexlbScheduleProtocol.FlexlbScheduleResponsePB response,
-            StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> responseObserver,
-            ScheduleOrigin origin,
-            ScheduleCompletion completionClaimed,
-            Runnable completionCleanup,
-            String masterHost) {
-        if (!completionClaimed.compareAndSet(false, true)) {
-            completionCleanup.run();
+        if (!completion.tryRespond()) {
             return;
         }
         try {
-            completeSchedule(context, response, responseObserver, origin, masterHost, completionClaimed);
+            completeSchedule(context, response, responseObserver, origin, masterHost, completion);
         } catch (Exception error) {
             Logger.warn("FlexlbService.schedule response completion error, request_id={}",
                     requestId, error);
-        } finally {
-            completionCleanup.run();
         }
     }
 
@@ -401,8 +373,8 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             }
         }
 
-        boolean compareAndSet(boolean expected, boolean updated) {
-            return responseClaimed.compareAndSet(expected, updated);
+        boolean tryRespond() {
+            return responseClaimed.compareAndSet(false, true);
         }
 
         void bindCancellation(Runnable action) {
