@@ -38,7 +38,7 @@ runfiles_alias(
 
 cc_library(
     name = "remote_kv_cache_manager_client_headers",
-    hdrs = [":remote_kv_cache_manager_client_hdrs_fg"],
+    hdrs = [":remote_kv_cache_manager_client_hdrs_fg", "include/HostCacheStateCompat.h"],
     include_prefix = "kvcm_client",
     strip_include_prefix = "include",
     visibility = ["//visibility:public"],
