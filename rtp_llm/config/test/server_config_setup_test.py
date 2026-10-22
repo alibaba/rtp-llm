@@ -60,24 +60,96 @@ class Qwen35FP32SSMCacheTest(TestCase):
                 self.assertEqual(config.kv_cache_config.ssm_state_dtype, "bf16")
                 self.assertEqual(config.kv_cache_config.seq_size_per_block, 64)
 
-    def test_fp32_promotes_small_block_and_retains_safe_explicit_geometry(self):
-        for physical, kernel, expected in ((4096, 64, 8192), (16384, 64, 16384)):
-            with self.subTest(physical=physical):
+    def test_fp32_retains_explicit_cli_and_env_block_geometry(self):
+        for physical, kernel in (
+            (2112, 64),
+            (2112, 16),
+            (4096, 64),
+            (4224, 64),
+            (16384, 64),
+        ):
+            for source in ("cli", "env"):
+                with self.subTest(physical=physical, kernel=kernel, source=source):
+                    args = ["--model_type", "qwen35_moe"]
+                    env = {}
+                    if source == "cli":
+                        args += [
+                            "--seq_size_per_block",
+                            str(physical),
+                            "--kernel_seq_size_per_block",
+                            str(kernel),
+                        ]
+                    else:
+                        env = {
+                            "SEQ_SIZE_PER_BLOCK": str(physical),
+                            "KERNEL_SEQ_SIZE_PER_BLOCK": str(kernel),
+                        }
+                    config = self._config(args, env)
+                    setup_default_args(config)
+                    self.assertEqual(
+                        config.kv_cache_config.seq_size_per_block, physical
+                    )
+                    self.assertEqual(
+                        config.kv_cache_config.kernel_seq_size_per_block, kernel
+                    )
+                    self.assertEqual(config.kv_cache_config.ssm_state_dtype, "fp32")
+
+    def test_fp32_cli_block_overrides_env_and_defaults_kernel(self):
+        config = self._config(
+            ["--model_type", "qwen35_moe", "--seq_size_per_block", "2112"],
+            {"SEQ_SIZE_PER_BLOCK": "2096"},
+        )
+        setup_default_args(config)
+        self.assertEqual(config.kv_cache_config.seq_size_per_block, 2112)
+        self.assertEqual(config.kv_cache_config.kernel_seq_size_per_block, 64)
+
+    def test_fp32_zero_block_keeps_auto_preset(self):
+        for args, env in (
+            (["--seq_size_per_block", "0"], {}),
+            ([], {"SEQ_SIZE_PER_BLOCK": "0"}),
+        ):
+            with self.subTest(args=args, env=env):
+                config = self._config(["--model_type", "qwen35_moe", *args], env)
+                setup_default_args(config)
+                self.assertEqual(config.kv_cache_config.seq_size_per_block, 8192)
+                self.assertEqual(config.kv_cache_config.kernel_seq_size_per_block, 64)
+
+    def test_fp32_rejects_invalid_checkpoint_geometry(self):
+        for physical in (-64, 64, 2096, 2113):
+            for source in ("cli", "env"):
+                with self.subTest(physical=physical, source=source):
+                    args = [
+                        "--model_type",
+                        "qwen35_moe",
+                        "--kernel_seq_size_per_block",
+                        "16",
+                    ]
+                    env = {}
+                    if source == "cli":
+                        args += ["--seq_size_per_block", str(physical)]
+                    else:
+                        env = {"SEQ_SIZE_PER_BLOCK": str(physical)}
+                    config = self._config(args, env)
+                    with self.assertRaisesRegex(
+                        ValueError, "SEQ_SIZE_PER_BLOCK.*multiple of 64.*at least 128"
+                    ):
+                        setup_default_args(config)
+
+    def test_fp32_rejects_invalid_kernel_geometry(self):
+        for kernel in (-1, 128):
+            with self.subTest(kernel=kernel):
                 config = self._config(
                     [
                         "--model_type",
                         "qwen35_moe",
                         "--seq_size_per_block",
-                        str(physical),
+                        "2112",
                         "--kernel_seq_size_per_block",
                         str(kernel),
                     ]
                 )
-                setup_default_args(config)
-                self.assertEqual(config.kv_cache_config.seq_size_per_block, expected)
-                self.assertEqual(
-                    config.kv_cache_config.kernel_seq_size_per_block, kernel
-                )
+                with self.assertRaisesRegex(ValueError, "KERNEL_SEQ_SIZE_PER_BLOCK"):
+                    setup_default_args(config)
 
     def test_unrelated_model_defaults_remain_bf16(self):
         for model_type in ("qwen3_next", "fake_model"):

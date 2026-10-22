@@ -83,7 +83,9 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         bind_to=(kv_cache_config, "seq_size_per_block"),
         type=int,
         default=0,
-        help="单独一个KV_CACHE的Block里面token的数量, 0表示使用平台默认值(CUDA:64, PPU:256, ROCm:16)",
+        help="单独一个KV_CACHE的Block里面token的数量。0表示使用默认值"
+        "(CUDA:64, Qwen3.5 CUDA FP32 SSM:8192, PPU:256, ROCm:16)。"
+        "Qwen3.5 FP32 SSM的显式值须为64的倍数且至少128，并能容纳state；不合法时报错。",
     )
     kv_cache_group.add_argument(
         "--kernel_seq_size_per_block",

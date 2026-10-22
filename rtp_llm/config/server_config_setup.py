@@ -464,12 +464,30 @@ def _configure_qwen35_fp32_ssm_cache(py_env_configs: PyEnvConfigs) -> None:
         cache.ssm_state_dtype = "fp32"
     if cache.ssm_state_dtype != "fp32":
         return
-    # The mixed cache row must contain both FP32 SSM and BF16 convolution state.
-    if cache.seq_size_per_block < 8192:
+    # Keep the preset only for auto sizing; preserve explicit CLI/env values.
+    # The cache layout builder validates state capacity against the actual
+    # model dimensions, attention TP and KV dtype.
+    if cache.seq_size_per_block == 0:
         logging.info("Qwen3.5 FP32 SSM cache: using SEQ_SIZE_PER_BLOCK=8192")
         cache.seq_size_per_block = 8192
+    if cache.seq_size_per_block < 128 or cache.seq_size_per_block % 64:
+        raise ValueError(
+            "Qwen3.5 FP32 SSM cache requires SEQ_SIZE_PER_BLOCK to be a "
+            "multiple of 64 and at least 128 tokens for GDN checkpoints; "
+            f"got {cache.seq_size_per_block}"
+        )
     if cache.kernel_seq_size_per_block == 0:
         cache.kernel_seq_size_per_block = 64
+    if (
+        cache.kernel_seq_size_per_block < 0
+        or cache.seq_size_per_block % cache.kernel_seq_size_per_block
+    ):
+        raise ValueError(
+            "Qwen3.5 FP32 SSM cache requires a positive "
+            "KERNEL_SEQ_SIZE_PER_BLOCK that divides SEQ_SIZE_PER_BLOCK; "
+            f"got KERNEL_SEQ_SIZE_PER_BLOCK={cache.kernel_seq_size_per_block}, "
+            f"SEQ_SIZE_PER_BLOCK={cache.seq_size_per_block}"
+        )
 
 
 def setup_default_args(py_env_configs):
