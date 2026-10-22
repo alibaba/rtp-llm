@@ -71,7 +71,9 @@ TEST_F(MultimodalProcessorTest, V41PreparedMetadataPreservesImagesAndTextOnlyReq
     input->v41_inputs = text;
     ASSERT_TRUE(processor.updateMultimodalFeatures(input).ok());
     EXPECT_EQ(processor.calls, 1);
-    EXPECT_TRUE(input->multimodal_features->empty());
+    EXPECT_FALSE(input->multimodal_features.has_value());
+    EXPECT_FALSE(input->mm_locs.has_value());
+    EXPECT_FALSE(input->text_tokens_mask.has_value());
 }
 
 TEST_F(MultimodalProcessorTest, V41MalformedMetadataNeverReachesEmbedding) {

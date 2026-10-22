@@ -342,6 +342,13 @@ ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm:
         if (features.size() != prepared.images.size()) {
             return ErrorInfo(ErrorCode::MM_PROCESS_ERROR, "V4.1 ViT returned an unexpected image count");
         }
+        if (prepared.images.empty()) {
+            input->multimodal_features.reset();
+            input->text_tokens_mask.reset();
+            input->mm_locs.reset();
+            input->mm_position_ids.reset();
+            return ErrorInfo::OkStatus();
+        }
         auto locs = torch::empty({static_cast<int64_t>(features.size())}, torch::kInt32);
         for (size_t index = 0; index < features.size(); ++index) {
             if (features[index].dim() != 2 || features[index].size(0) != prepared.images[index].types.numel()) {
