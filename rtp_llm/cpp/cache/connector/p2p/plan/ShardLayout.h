@@ -5,7 +5,9 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <map>
+#include <numeric>
 #include <string>
 #include <vector>
 
@@ -22,10 +24,11 @@ struct ShardLayout {
         CacheGroupPolicy policy;
         KVCacheSpecType  spec_type = KVCacheSpecType::MultiHeadAttention;
 
-        size_t kv_block_stride_bytes = 0;
-        size_t kv_scale_stride_bytes = 0;
-        size_t k_block_payload_bytes = 0;
-        size_t seq_size_per_block    = 0;
+        size_t   kv_block_stride_bytes = 0;
+        size_t   kv_scale_stride_bytes = 0;
+        size_t   k_block_payload_bytes = 0;
+        size_t   seq_size_per_block    = 0;
+        uint32_t global_kv_head_num    = 0;
 
         /// spec 自身已按 CP 切成 1/cp_size（仅 Prefill 角色的 cp_slice group），
         /// 见 OpaqueKVCacheSpec::isPrefillCpSliced。
@@ -63,7 +66,7 @@ struct ShardLayout {
 
     int headShard(int rank, const std::string& tag) const {
         const int n = headShardCount(tag);
-        return n > 1 ? rank % n : 0;
+        return n > 1 ? rank / (rankCount() / n) : 0;
     }
 
     bool hasGroup(const std::string& tag) const {
@@ -117,6 +120,9 @@ struct ShardLayout {
         for (auto& [tag, g] : groups) {
             (void)tag;
             g.head_shard_count = specShardsHeads(g.spec_type) ? attn_tp : 1;
+            if (g.spec_type == KVCacheSpecType::MultiHeadAttention && g.global_kv_head_num > 0) {
+                g.head_shard_count = static_cast<int>(std::gcd(g.global_kv_head_num, static_cast<uint32_t>(attn_tp)));
+            }
         }
     }
 

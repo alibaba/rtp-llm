@@ -2,6 +2,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/plan/ShardLayoutFactory.h"
 
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
+#include "rtp_llm/cpp/cache/LinearKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/OpaqueKVCacheSpec.h"
 
 #include <gtest/gtest.h>
@@ -144,6 +145,21 @@ void expectNoHeadPartitioning(const TransferPlan& plan) {
         EXPECT_EQ(r.src_partition, (PartitionSpec{1, 0})) << "route " << r.route_id;
         EXPECT_EQ(r.dst_partition, (PartitionSpec{1, 0})) << "route " << r.route_id;
     }
+}
+
+ShardLayout layoutFromSpec(const KVCacheSpecPtr& spec, const ParallelismConfig& pc, CacheGroupType type) {
+    GroupBase group;
+    group.tag                       = spec->tag;
+    group.spec                      = spec;
+    group.policy                    = defaultCacheGroupPolicy(type);
+    group.layer_ids                 = {0};
+    group.block_num                 = 8;
+    group.seq_size_per_block        = spec->seq_size_per_block;
+    group.kernel_seq_size_per_block = spec->seq_size_per_block;
+    group.kv_block_stride_bytes     = spec->block_size_bytes();
+    group.kv_scale_stride_bytes     = spec->scale_block_size_bytes();
+    const auto topology             = CacheTopology::create({group}, {{0, {spec->tag}}});
+    return ShardLayoutFactory::fromTopology(*topology, pc, pc.role_type);
 }
 
 }  // namespace
@@ -899,6 +915,152 @@ TEST(PlannerGroupD, DigestDistinguishesTailKeySelection) {
     EXPECT_NE(last_one.digest(), last_two.digest());
     EXPECT_NE(result.plan.digest(), last_one.digest());
     EXPECT_NE(result.plan.digest(), last_two.digest());
+}
+
+TEST(PlannerGroupD, ReplicatedKvHeadsMatchRealSpecsAndWeightRankMapping) {
+    for (int global_heads : {1, 2, 3, 6, 8}) {
+        for (int prefill_tp : {1, 2, 4, 8}) {
+            for (int decode_tp : {1, 2, 4, 8}) {
+                for (const auto dtype : {DataType::TYPE_FP16, DataType::TYPE_FP8_E4M3}) {
+                    SCOPED_TRACE(::testing::Message() << "heads=" << global_heads << " P=" << prefill_tp
+                                                      << " D=" << decode_tp << " dtype=" << dtype);
+                    const auto make_layout = [&](int tp, RoleType role) {
+                        auto pc      = makePc(tp, CPRotateMethod::DISABLED, false);
+                        pc.role_type = role;
+                        AttentionConfigs attention;
+                        attention.kv_head_num   = global_heads;
+                        attention.size_per_head = 2;
+                        KVCacheSpecDesc desc;
+                        desc.tag   = kFullTag;
+                        desc.dtype = dtype;
+                        SpecBuildContext context;
+                        context.seq_size_per_block = 4;
+                        context.attn_config        = &attention;
+                        context.parallelism_config = &pc;
+                        return layoutFromSpec(MHAKVCacheSpec::build(desc, context), pc, CacheGroupType::FULL);
+                    };
+                    const auto prefill = make_layout(prefill_tp, RoleType::PREFILL);
+                    const auto decode  = make_layout(decode_tp, RoleType::DECODE);
+                    for (bool reverse : {false, true}) {
+                        const auto& source = reverse ? decode : prefill;
+                        const auto& target = reverse ? prefill : decode;
+                        const auto  inferred_target =
+                            ShardLayoutFactory::peerOf(source, target.rankCount(), false, target.pc.role_type);
+                        const auto inferred_source =
+                            ShardLayoutFactory::peerOf(target, source.rankCount(), false, source.pc.role_type);
+                        EXPECT_EQ(inferred_target.group(kFullTag).kv_block_stride_bytes,
+                                  target.group(kFullTag).kv_block_stride_bytes);
+                        EXPECT_EQ(inferred_source.group(kFullTag).kv_scale_stride_bytes,
+                                  source.group(kFullTag).kv_scale_stride_bytes);
+                        const auto on_source = KVCacheTransferPlanner::plan(source, inferred_target, {kFullTag});
+                        const auto on_target = KVCacheTransferPlanner::plan(inferred_source, target, {kFullTag});
+                        ASSERT_TRUE(on_source.ok()) << on_source.error.ToString();
+                        ASSERT_TRUE(on_target.ok()) << on_target.error.ToString();
+                        EXPECT_EQ(on_source.plan.digest(), on_target.plan.digest());
+                        const int source_shards = std::gcd(global_heads, source.rankCount());
+                        const int target_shards = std::gcd(global_heads, target.rankCount());
+                        EXPECT_EQ(source.headShardCount(kFullTag), source_shards);
+                        EXPECT_EQ(target.headShardCount(kFullTag), target_shards);
+                        for (bool scales : {false, true}) {
+                            const auto source_bytes = scales ? source.group(kFullTag).kv_scale_stride_bytes :
+                                                               source.group(kFullTag).kv_block_stride_bytes;
+                            const auto target_bytes = scales ? target.group(kFullTag).kv_scale_stride_bytes :
+                                                               target.group(kFullTag).kv_block_stride_bytes;
+                            if (source_bytes == 0) {
+                                continue;
+                            }
+                            const size_t global_half = source_bytes / 2 * source_shards;
+                            for (int rank = 0; rank < target.rankCount(); ++rank) {
+                                std::vector<size_t> actual(target_bytes, global_half * 2);
+                                std::vector<int>    writes(target_bytes, 0);
+                                for (const auto& route : on_source.plan.routes) {
+                                    if (route.dst_rank != rank) {
+                                        continue;
+                                    }
+                                    const auto   source_parts = splitKVPartitionBytes(source_bytes,
+                                                                                    source_bytes / 2,
+                                                                                    source_bytes / 2,
+                                                                                    global_heads / source_shards,
+                                                                                    route.src_partition.count,
+                                                                                    route.src_partition.id,
+                                                                                    "test source");
+                                    const auto   target_parts = splitKVPartitionBytes(target_bytes,
+                                                                                    target_bytes / 2,
+                                                                                    target_bytes / 2,
+                                                                                    global_heads / target_shards,
+                                                                                    route.dst_partition.count,
+                                                                                    route.dst_partition.id,
+                                                                                    "test target");
+                                    const size_t source_head_offset =
+                                        route.src_rank / (source.rankCount() / source_shards) * (source_bytes / 2);
+                                    ASSERT_EQ(source_parts.k_sz, target_parts.k_sz);
+                                    ASSERT_EQ(source_parts.v_sz, target_parts.v_sz);
+                                    for (size_t offset = 0; offset < source_parts.k_sz; ++offset) {
+                                        actual[target_parts.k_off + offset] =
+                                            source_head_offset + source_parts.k_off + offset;
+                                        ++writes[target_parts.k_off + offset];
+                                    }
+                                    for (size_t offset = 0; offset < source_parts.v_sz; ++offset) {
+                                        actual[target_parts.v_off + offset] = global_half + source_head_offset
+                                                                              + source_parts.v_off - source_bytes / 2
+                                                                              + offset;
+                                        ++writes[target_parts.v_off + offset];
+                                    }
+                                }
+                                const size_t target_head_offset =
+                                    rank / (target.rankCount() / target_shards) * (target_bytes / 2);
+                                for (size_t offset = 0; offset < target_bytes / 2; ++offset) {
+                                    EXPECT_EQ(actual[offset], target_head_offset + offset);
+                                    EXPECT_EQ(actual[target_bytes / 2 + offset],
+                                              global_half + target_head_offset + offset);
+                                }
+                                EXPECT_EQ(writes, std::vector<int>(target_bytes, 1));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST(PlannerGroupD, RejectsAsymmetricLinearStateButPreservesSymmetricTransfers) {
+    LinearAttentionConfig linear;
+    linear.linear_num_key_heads   = 2;
+    linear.linear_num_value_heads = 2;
+    linear.linear_key_head_dim    = 2;
+    linear.linear_value_head_dim  = 2;
+    linear.linear_conv_kernel_dim = 2;
+    linear.ssm_state_dtype        = DataType::TYPE_FP32;
+    linear.conv_state_dtype       = DataType::TYPE_FP16;
+    const auto make_layout        = [&](int tp) {
+        auto            pc = makePc(tp, CPRotateMethod::DISABLED, false);
+        KVCacheSpecDesc desc;
+        desc.tag        = "linear";
+        desc.cache_type = KVCacheSpecType::LinearAttention;
+        desc.dtype      = DataType::TYPE_FP16;
+        SpecBuildContext context;
+        context.seq_size_per_block      = 4;
+        context.linear_attention_config = &linear;
+        context.parallelism_config      = &pc;
+        return layoutFromSpec(LinearKVCacheSpec::build(desc, context), pc, CacheGroupType::LINEAR);
+    };
+    const auto whole = make_layout(1);
+    const auto split = make_layout(2);
+    EXPECT_EQ(whole.group("linear").kv_block_stride_bytes, 56u);
+    EXPECT_EQ(whole.group("linear").k_block_payload_bytes, 32u);
+    for (const auto& source : {whole, split}) {
+        for (const auto& target : {whole, split}) {
+            const auto result = KVCacheTransferPlanner::plan(source, target, {"linear"});
+            if (source.rankCount() == target.rankCount()) {
+                EXPECT_TRUE(result.ok()) << result.error.ToString();
+            } else {
+                EXPECT_FALSE(result.ok());
+                EXPECT_NE(result.error.ToString().find("LINEAR asymmetric TP"), std::string::npos);
+                EXPECT_TRUE(result.plan.routes.empty());
+            }
+        }
+    }
 }
 
 // 从真实状态缓存 spec 构造两端，避免手工填写 payload 掩盖 factory 的推导错误。

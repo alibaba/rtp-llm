@@ -145,7 +145,10 @@ ErrorInfo buildWriteUnits(const std::string&                          unique_key
             unit.key = key;
             try {
                 const auto& spec = config.topology->group(buffer->cacheTag()).spec;
-                auto        key_block_infos =
+                if (spec && spec->type == KVCacheSpecType::LinearAttention && route.partition.count != 1) {
+                    return reject("LINEAR asymmetric TP requires a state-aware partition layout");
+                }
+                auto key_block_infos =
                     LayerCacheBufferUtil::buildKeyBlockInfosSliced(converter,
                                                                    buffer,
                                                                    route.partition.count,

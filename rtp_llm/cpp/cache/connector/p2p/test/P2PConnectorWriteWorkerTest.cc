@@ -24,6 +24,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/tcp/TcpKVCacheReceiver.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/tcp/TcpKVCacheSender.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
+#include "rtp_llm/cpp/cache/LinearKVCacheSpec.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/model_rpc/LocalRpcServer.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
@@ -818,6 +819,44 @@ TEST_F(P2PConnectorWriteWorkerTest, RejectsInvalidPartitionsAndExpiredRequests) 
     EXPECT_TRUE(executeWrite(*decode_connector_, req, response));
     EXPECT_NE(response.p2p_response().error_code(), ErrorCodePB::NONE_ERROR);
     EXPECT_EQ(receiver_->registrations, 0);
+}
+
+TEST_F(P2PConnectorWriteWorkerTest, LinearPartitionsAreRejectedBeforeTransfer) {
+    LinearAttentionConfig linear;
+    linear.linear_num_key_heads   = 2;
+    linear.linear_num_value_heads = 2;
+    linear.linear_key_head_dim    = 2;
+    linear.linear_value_head_dim  = 2;
+    linear.linear_conv_kernel_dim = 2;
+    linear.ssm_state_dtype        = DataType::TYPE_FP32;
+    linear.conv_state_dtype       = DataType::TYPE_FP16;
+    ParallelismConfig parallelism;
+    parallelism.tp_size = 1;
+    KVCacheSpecDesc desc;
+    desc.tag        = "group0";
+    desc.cache_type = KVCacheSpecType::LinearAttention;
+    desc.dtype      = DataType::TYPE_FP16;
+    SpecBuildContext context;
+    context.seq_size_per_block      = 4;
+    context.linear_attention_config = &linear;
+    context.parallelism_config      = &parallelism;
+    auto groups                     = config_.topology->groups();
+    groups[0].spec                  = LinearKVCacheSpec::build(desc, context);
+    groups[0].policy                = defaultCacheGroupPolicy(CacheGroupType::LINEAR);
+    groups[0].kv_block_stride_bytes = groups[0].spec->block_size_bytes();
+    config_.topology                = CacheTopology::create(std::move(groups), config_.topology->layers());
+    auto source                     = makeWriteDecodeConnector(config_, source_, sender_);
+    auto target                     = makeWritePrefillConnector(config_, target_, receiver_);
+    ASSERT_TRUE(source->decode_->write_worker_->init());
+    auto request_pb = request();
+    request_pb.mutable_routes(0)->set_partition_count(2);
+    FunctionResponsePB response;
+    EXPECT_FALSE(executeWrite(*target, request_pb, response));
+    EXPECT_NE(response.p2p_response().error_message().find("LINEAR asymmetric TP"), std::string::npos);
+    EXPECT_TRUE(executeWrite(*source, request_pb, response));
+    EXPECT_NE(response.p2p_response().error_code(), ErrorCodePB::NONE_ERROR);
+    EXPECT_EQ(receiver_->registrations, 0);
+    EXPECT_EQ(sender_->pendingCount(), 0u);
 }
 
 TEST_F(P2PConnectorWriteWorkerTest, DisjointDestinationPartitionsAreAccepted) {

@@ -127,6 +127,12 @@ KVCacheTransferPlanner::validateTag(const ShardLayout& src, const ShardLayout& d
                          + "': src=" + KVCacheSpecTypeToString(sg.spec_type)
                          + " dst=" + KVCacheSpecTypeToString(dg.spec_type));
     }
+    if (sg.spec_type == KVCacheSpecType::LinearAttention && src.headShardCount(tag) != dst.headShardCount(tag)) {
+        return planError("LINEAR asymmetric TP requires a state-aware partition layout for tag '" + tag + "'");
+    }
+    if (sg.global_kv_head_num != dg.global_kv_head_num) {
+        return planError("global KV head count mismatch for tag '" + tag + "'");
+    }
 
     // (a) 字节维度：还原出的全局尺寸必须一致。**守恒量取决于 slice 模式**：
     //   PAYLOAD_BYTES -> sliceBlockForPeer 以 k_block_payload_bytes 为分母，守恒量是 payload
