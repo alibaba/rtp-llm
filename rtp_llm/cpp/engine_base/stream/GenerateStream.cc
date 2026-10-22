@@ -9,6 +9,7 @@
 #include <ATen/cuda/CUDAGeneratorImpl.h>
 #endif
 #include "autil/EnvUtil.h"
+#include "3rdparty/trt_beam_search/beamSearchLimits.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -131,7 +132,20 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     dtype_(model_config.data_type),
     hidden_size_(model_config.hidden_size) {
     RTP_LLM_PROFILE_FUNCTION();
-    stream_async_reserve_ = useStreamAsyncReserveTokens();
+    stream_async_reserve_      = useStreamAsyncReserveTokens();
+    const auto& request_config = *generate_input_->generate_config;
+    const bool  invalid_beams =
+        !tensorrt_llm::kernels::isSupportedBeamWidth(request_config.num_beams)
+        || std::any_of(request_config.variable_num_beams.begin(),
+                       request_config.variable_num_beams.end(),
+                       [](int width) { return !tensorrt_llm::kernels::isSupportedBeamWidth(width); });
+    if (invalid_beams) {
+        // Build a safe error stream without allocating from invalid beam dimensions.
+        generate_input_                             = std::make_shared<GenerateInput>(*input);
+        generate_input_->generate_config            = std::make_shared<GenerateConfig>(request_config);
+        generate_input_->generate_config->num_beams = 1;
+        generate_input_->generate_config->variable_num_beams.clear();
+    }
     generate_input_->generate_config->validatePrefillOnly();
     if (!updatePrefix(resource_context.system_prompt)) {
         return;
@@ -172,6 +186,13 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     stream_cache_resource_->init(init_batch_size);
 
     setReturnAllProbs(generate_input_->generate_config->return_all_probs);
+
+    if (invalid_beams) {
+        reportError(ErrorCode::INVALID_PARAMS,
+                    "num_beams and every variable_num_beams entry must be between 1 and "
+                        + std::to_string(tensorrt_llm::kernels::kMaxSupportedBeamWidth));
+        return;
+    }
 
     // TorchSpec target hidden-state capture publishes one result per request and cannot be split across chunks.
     const auto chunk_size = runtime_config.fifo_scheduler_config.prefill_chunk_size;

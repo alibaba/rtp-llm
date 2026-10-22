@@ -54,7 +54,7 @@ cc_test(
     ],
     data = [],
     copts = test_copts,
-    deps = test_deps,
+    deps = test_deps + ["//3rdparty/trt_beam_search:beam_search_limits"],
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },

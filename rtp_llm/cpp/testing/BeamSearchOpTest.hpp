@@ -4,6 +4,7 @@
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include <torch/torch.h>
 #include <limits>
+#include "3rdparty/trt_beam_search/beamSearchLimits.h"
 
 using namespace rtp_llm;
 
@@ -93,6 +94,22 @@ public:
                 ASSERT_TRUE(torch::equal(result.token_ids, ref.token_ids));
                 ASSERT_TRUE(torch::equal(result.beam_indices, ref.beam_indices));
                 assertTensorClose(result.cum_log_probs, ref.cum_log_probs);
+            }
+        }
+    }
+
+    void runUnsupportedBeamWidthTests() {
+        const int unsupported = tensorrt_llm::kernels::kMaxSupportedBeamWidth + 1;
+        for (const bool oversized_input : {false, true}) {
+            const int beam_in  = oversized_input ? unsupported : 1;
+            const int beam_out = oversized_input ? 1 : unsupported;
+            // Tiny vocabulary keeps the rejection test independent of large workspaces.
+            auto input = prepareInput(1, beam_in, beam_out, oversized_input ? 3 : unsupported, 4);
+            try {
+                opRun(input, true);
+                FAIL() << "unsupported beam width was accepted";
+            } catch (const std::exception& error) {
+                EXPECT_NE(std::string(error.what()).find("beam widths must be between"), std::string::npos);
             }
         }
     }

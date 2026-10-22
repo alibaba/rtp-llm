@@ -107,6 +107,11 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     generate_config->max_new_tokens                 = resolved_max_new_tokens;
     generate_config->min_new_tokens                 = config_proto->min_new_tokens();
     generate_config->num_beams                      = config_proto->num_beams();
+    // Prefill-only skips sampling, so preserve its legacy proto3 zero beam default.
+    // Prompt scoring still samples one token; preserve its beam width for stream admission to validate.
+    if (resolved_max_new_tokens == 0 && generate_config->num_beams == 0) {
+        generate_config->num_beams = 1;
+    }
     generate_config->variable_num_beams.resize(config_proto->variable_num_beams_size());
     memcpy(generate_config->variable_num_beams.data(),
            config_proto->variable_num_beams().data(),

@@ -62,7 +62,73 @@ TEST_F(QueryConverterTest, BareProtoAbsentOrZeroMaxNewTokensPreservesInternalZer
     }
 }
 
-TEST_F(QueryConverterTest, RawGrpcPromptScoringAlwaysNormalizesGenerationSettings) {
+TEST_F(QueryConverterTest, PrefillOnlyNormalizesZeroBeamWidth) {
+    for (const bool explicit_prefill_only : {false, true}) {
+        for (const std::optional<int> wire_beams :
+             {std::optional<int>{}, std::optional<int>{0}, std::optional<int>{1}}) {
+            SCOPED_TRACE(explicit_prefill_only);
+            SCOPED_TRACE(wire_beams.has_value() ? std::to_string(*wire_beams) : "absent");
+            GenerateInputPB input;
+            input.add_token_ids(0);
+            auto* config_pb = input.mutable_generate_config();
+            config_pb->set_max_new_tokens(0);
+            config_pb->set_prefill_only(explicit_prefill_only);
+            if (wire_beams.has_value()) {
+                config_pb->set_num_beams(*wire_beams);
+            }
+
+            const auto config = QueryConverter::transQuery(&input)->generate_config;
+
+            EXPECT_TRUE(config->isPrefillOnly());
+            EXPECT_EQ(config->max_new_tokens, 0);
+            EXPECT_EQ(config->num_beams, 1);
+            EXPECT_EQ(config_pb->num_beams(), wire_beams.value_or(0));
+        }
+    }
+}
+
+TEST_F(QueryConverterTest, BeamNormalizationPreservesOtherRequests) {
+    for (const int max_new_tokens : {0, 2}) {
+        for (const int num_beams : {-1, 0, 1, 2}) {
+            if (max_new_tokens == 0 && num_beams >= 0) {
+                continue;  // Valid prefill-only defaults and its multi-beam rejection are covered separately.
+            }
+            SCOPED_TRACE(max_new_tokens);
+            SCOPED_TRACE(num_beams);
+            GenerateConfigPB wire_config;
+            wire_config.set_max_new_tokens(max_new_tokens);
+            wire_config.set_num_beams(num_beams);
+            if (max_new_tokens > 0) {
+                wire_config.add_variable_num_beams(2);
+                wire_config.add_variable_num_beams(0);
+            }
+
+            const auto config = QueryConverter::transGenerateConfig(&wire_config);
+
+            EXPECT_EQ(config->num_beams, num_beams);
+            EXPECT_EQ(config->max_new_tokens, max_new_tokens);
+            if (max_new_tokens > 0) {
+                EXPECT_EQ(config->variable_num_beams, (std::vector<int>{2, 0}));
+            }
+        }
+    }
+}
+
+TEST_F(QueryConverterTest, PrefillOnlyZeroBeamStillRejectsVariableBeams) {
+    for (const bool explicit_prefill_only : {false, true}) {
+        for (const int width : {0, 1}) {
+            SCOPED_TRACE(explicit_prefill_only);
+            SCOPED_TRACE(width);
+            GenerateConfigPB wire_config;
+            wire_config.set_max_new_tokens(0);
+            wire_config.set_prefill_only(explicit_prefill_only);
+            wire_config.add_variable_num_beams(width);
+            EXPECT_THROW(QueryConverter::transGenerateConfig(&wire_config), std::invalid_argument);
+        }
+    }
+}
+
+TEST_F(QueryConverterTest, RawGrpcPromptScoringNormalizesTokenLimitAndExecutionOptions) {
     for (const int wire_max_new_tokens : {0, 7}) {
         SCOPED_TRACE(wire_max_new_tokens);
         GenerateInputPB input;
@@ -71,6 +137,7 @@ TEST_F(QueryConverterTest, RawGrpcPromptScoringAlwaysNormalizesGenerationSetting
         config_pb->set_max_new_tokens(wire_max_new_tokens);
         ASSERT_FALSE(config_pb->prefill_only());
         config_pb->set_return_prompt_logits(true);
+        config_pb->set_num_beams(1);
         config_pb->set_is_streaming(true);
         config_pb->set_reuse_cache(true);
         config_pb->set_can_use_pd_separation(true);
@@ -84,6 +151,49 @@ TEST_F(QueryConverterTest, RawGrpcPromptScoringAlwaysNormalizesGenerationSetting
         EXPECT_FALSE(config->is_streaming);
         EXPECT_FALSE(config->reuse_cache);
         EXPECT_FALSE(config->can_use_pd_separation);
+    }
+}
+
+TEST_F(QueryConverterTest, RawGrpcPromptScoringValidatesBeamWidthAtStreamAdmission) {
+    for (const int wire_max_new_tokens : {0, 7}) {
+        for (const std::optional<int> wire_beams :
+             {std::optional<int>{}, std::optional<int>{0}, std::optional<int>{1}}) {
+            SCOPED_TRACE(wire_max_new_tokens);
+            SCOPED_TRACE(wire_beams.has_value() ? std::to_string(*wire_beams) : "absent");
+            GenerateInputPB request;
+            request.add_token_ids(1);
+            request.add_token_ids(2);
+            auto* config_pb = request.mutable_generate_config();
+            config_pb->set_max_new_tokens(wire_max_new_tokens);
+            config_pb->set_return_prompt_logits(true);
+            if (wire_beams.has_value()) {
+                config_pb->set_num_beams(*wire_beams);
+            }
+            GenerateInputPB received;
+            ASSERT_TRUE(received.ParseFromString(request.SerializeAsString()));
+            const auto input = QueryConverter::transQuery(&received);
+            ASSERT_TRUE(input->generate_config->return_prompt_logits);
+            ASSERT_EQ(input->generate_config->max_new_tokens, 1);
+            ASSERT_FALSE(input->generate_config->isPrefillOnly());
+            ASSERT_EQ(input->generate_config->num_beams, wire_beams.value_or(0));
+
+            ModelConfig model;
+            model.max_seq_len = 32;
+            model.vocab_size  = 128;
+            const auto stream =
+                std::make_shared<NormalGenerateStream>(input, model, RuntimeConfig{}, ResourceContext{}, nullptr);
+            // Exercise admission instead of manually injecting tokens, which bypasses sampling.
+            if (wire_beams.value_or(0) == 0) {
+                ASSERT_TRUE(stream->hasError());
+                EXPECT_EQ(stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+                EXPECT_NE(stream->statusInfo().ToString().find("num_beams"), std::string::npos);
+            } else {
+                ASSERT_FALSE(stream->hasError()) << stream->statusInfo().ToString();
+                EXPECT_EQ(stream->currentNumBeams(), 1);
+                EXPECT_EQ(stream->nextNumBeams(), 1);
+            }
+            EXPECT_EQ(input->generate_config->num_beams, wire_beams.value_or(0));
+        }
     }
 }
 
@@ -301,6 +411,7 @@ TEST_F(QueryConverterTest, AuxInfoRpcRoundTripPreservesOutputsAndLegacyDefault) 
                 auto* config = request.mutable_generate_config();
                 config->set_max_new_tokens(2);
                 config->set_min_new_tokens(2);
+                config->set_num_beams(1);
                 config->set_num_return_sequences(2);
                 config->set_is_streaming(streaming);
                 if (aux_mode >= 0) {
@@ -319,6 +430,7 @@ TEST_F(QueryConverterTest, AuxInfoRpcRoundTripPreservesOutputsAndLegacyDefault) 
                 model.vocab_size  = 128;
                 auto stream =
                     std::make_shared<NormalGenerateStream>(input, model, RuntimeConfig{}, ResourceContext{}, nullptr);
+                ASSERT_FALSE(stream->hasError()) << stream->statusInfo().ToString();
                 stream->generate_status_->status.store(StreamState::RUNNING);
                 stream->step();
                 const auto tokens = torch::tensor({11, 12, 21, 22}, torch::kInt32).reshape({2, 2});

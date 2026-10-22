@@ -5,6 +5,10 @@ using namespace rtp_llm;
 
 class CudaBeamSearchOpTest: public BeamSearchOpTest {};
 
+TEST_F(CudaBeamSearchOpTest, rejectsUnsupportedBeamWidths) {
+    runUnsupportedBeamWidthTests();
+}
+
 TEST_F(CudaBeamSearchOpTest, simpleTest) {
     runSimpleTests();
 }
