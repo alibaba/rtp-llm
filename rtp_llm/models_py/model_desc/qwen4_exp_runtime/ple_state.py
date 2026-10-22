@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, Optional
 
 import torch
@@ -22,6 +22,25 @@ class _PLETargetLayerStage:
 
 
 @dataclass
+class _PLEBoundaryWrite:
+    """One page-boundary checkpoint refresh staged by a speculative commit.
+
+    An accepted window that crosses a page boundary completes that page, and
+    the page's checkpoint must then hold the window ending at its last token
+    so a later prefix-cache hit on that boundary resumes from a fresh state.
+    Slots whose boundary was not crossed alias the final destination; the
+    final write runs after every slot and therefore always wins.
+    """
+
+    state_blocks: torch.Tensor
+    state_values: torch.Tensor
+    original_state: torch.Tensor
+    ctx_blocks: torch.Tensor
+    ctx_values: torch.Tensor
+    original_context: torch.Tensor
+
+
+@dataclass
 class _PLEPreparedWrite:
     state_pool: torch.Tensor
     state_blocks: torch.Tensor
@@ -31,6 +50,7 @@ class _PLEPreparedWrite:
     ctx_blocks: torch.Tensor
     ctx_values: torch.Tensor
     original_context: torch.Tensor
+    boundary_slots: list[_PLEBoundaryWrite] = field(default_factory=list)
 
 
 @dataclass
