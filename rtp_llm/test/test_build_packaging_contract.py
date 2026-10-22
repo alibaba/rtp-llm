@@ -126,6 +126,132 @@ class BuildPackagingContractTest(TestCase):
             "Starlark rejects duplicate top-level function definitions",
         )
 
+    def test_oss_cuda_graph_arch_load_and_native_pool_contract(self):
+        source = (PROJECT_ROOT / "arch_config" / "arch_select.bzl").read_text()
+        functions = {
+            node.name: node
+            for node in ast.parse(source).body
+            if isinstance(node, ast.FunctionDef)
+        }
+        graph_build = (PROJECT_ROOT / "rtp_llm/cpp/cuda_graph/tests/BUILD").read_text()
+        arch_load = next(
+            node.value
+            for node in ast.parse(graph_build).body
+            if isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Call)
+            and isinstance(node.value.func, ast.Name)
+            and node.value.func.id == "load"
+            and ast.literal_eval(node.value.args[0]) == "@arch_config//:arch_select.bzl"
+        )
+        for symbol in arch_load.args[1:]:
+            with self.subTest(export=ast.literal_eval(symbol)):
+                self.assertIn(ast.literal_eval(symbol), functions)
+
+        namespace = {"select": lambda branches: branches}
+        exports = ast.Module(
+            body=[
+                functions["cuda13_test_exec_properties"],
+                functions["cuda13_x86_test_gpu"],
+            ],
+            type_ignores=[],
+        )
+        exec(compile(exports, "arch_select.bzl", "exec"), namespace)
+        expected_pools = {
+            "@rtp_llm//:using_cuda13_arm": "SM100_ARM",
+            "@rtp_llm//:using_cuda13_x86": "SM100_X86",
+            "@rtp_llm//:using_cuda12_arm": "SM100_ARM",
+            "//conditions:default": "A10",
+        }
+        for gpu_count in (1, 2):
+            branches = namespace["cuda13_test_exec_properties"](gpu_count)
+            self.assertEqual(set(branches), set(expected_pools))
+            for config, pool in expected_pools.items():
+                with self.subTest(config=config, gpu_count=gpu_count):
+                    self.assertEqual(
+                        branches[config], {"gpu": pool, "gpu_count": str(gpu_count)}
+                    )
+        self.assertEqual(
+            namespace["cuda13_test_exec_properties"](),
+            namespace["cuda13_test_exec_properties"](1),
+        )
+        self.assertEqual(namespace["cuda13_x86_test_gpu"](), "SM103_TEST")
+
+    def test_oss_cuda12_arm_uses_registered_arm_requirements(self):
+        source = (PROJECT_ROOT / "arch_config/arch_select.bzl").read_text()
+        module = ast.parse(source)
+        requirement_function = next(
+            node
+            for node in module.body
+            if isinstance(node, ast.FunctionDef) and node.name == "requirement"
+        )
+        loads = {
+            keyword.arg: ast.literal_eval(node.value.args[0])
+            for node in module.body
+            if isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Call)
+            and isinstance(node.value.func, ast.Name)
+            and node.value.func.id == "load"
+            for keyword in node.value.keywords
+        }
+        self.assertEqual(
+            loads["requirement_cuda12_arm"],
+            "@pip_cuda12_arm_torch//:requirements.bzl",
+        )
+        libraries = []
+        namespace = {
+            "select": lambda branches: branches,
+            "native": SimpleNamespace(py_library=lambda **rule: libraries.append(rule)),
+            "_CUDA13_X86_DEFERRED": ["flash-attn-3"],
+            "_CUDA13_ARM_DEFERRED": ["flash_attn", "flash-attn-3"],
+            "_DSV4_PLATFORM_ONLY": ["xgrammar"],
+        }
+        for alias, repository in loads.items():
+            if alias.startswith("requirement_"):
+                namespace[alias] = lambda name, repo=repository: (
+                    repo.split("//:")[0] + "//:" + name
+                )
+        exec(
+            compile(
+                ast.Module(body=[requirement_function], type_ignores=[]),
+                "arch_select.bzl",
+                "exec",
+            ),
+            namespace,
+        )
+        namespace["requirement"](["protobuf"])
+        deps = libraries[0]["deps"]
+        self.assertEqual(
+            deps["@rtp_llm//:using_cuda12_arm"], ["@pip_cuda12_arm_torch//:protobuf"]
+        )
+        self.assertEqual(
+            deps["@rtp_llm//:using_cuda13_arm"], ["@pip_cuda13_arm_torch//:protobuf"]
+        )
+        self.assertEqual(deps["//conditions:default"], ["@pip_cpu_torch//:protobuf"])
+
+        settings = {}
+        for node in ast.parse((PROJECT_ROOT / "BUILD").read_text()).body:
+            if not (
+                isinstance(node, ast.Expr)
+                and isinstance(node.value, ast.Call)
+                and isinstance(node.value.func, ast.Name)
+                and node.value.func.id == "config_setting"
+            ):
+                continue
+            fields = {
+                field.arg: ast.literal_eval(field.value)
+                for field in node.value.keywords
+            }
+            definitions = dict(fields.get("define_values", {}))
+            if "define" in fields.get("values", {}):
+                key, value = fields["values"]["define"].split("=", 1)
+                definitions[key] = value
+            settings[fields["name"]] = definitions
+        self.assertLess(
+            settings["using_cuda12_arm"].items(), settings["using_cuda13_arm"].items()
+        )
+        self.assertEqual(settings["cuda_pre_12_9"]["using_cuda12_arm"], "false")
+        self.assertEqual(settings["using_cuda12_arm"]["using_cuda12_arm"], "true")
+
     def test_rpc_writer_cancellation_declares_memory_exporter(self):
         build_text = (
             PROJECT_ROOT / "rtp_llm" / "cpp" / "model_rpc" / "test" / "BUILD"
