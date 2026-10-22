@@ -358,7 +358,7 @@ class GateRoutingMetadataTest(unittest.TestCase):
                             call.kwargs["preserve_output"]
                             for call in wrapped.call_args_list
                         ],
-                        [True, True, False],
+                        [False, False, False],
                     )
                     initial = model.embed(ids).view(1, 2, 1, -1)
 
