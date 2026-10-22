@@ -1,4 +1,10 @@
-from rtp_llm.server.server_args.util import str2bool
+from rtp_llm.ops import DecodeCPMLABackend, DecodeCPMLAFusionMode, DecodeCPMLAA2ABackend
+from rtp_llm.server.server_args.util import (
+    str2_decode_cp_mla_backend,
+    str2_decode_cp_mla_fusion_mode,
+    str2_decode_cp_mla_a2a_backend,
+    str2bool,
+)
 
 
 def init_fmha_group_args(parser, fmha_config):
@@ -6,6 +12,33 @@ def init_fmha_group_args(parser, fmha_config):
     # FMHA
     ##############################################################################################################
     fmha_group = parser.add_argument_group("FMHA")
+    fmha_group.add_argument(
+        "--decode_cp_mla_backend",
+        env_name="DECODE_CP_MLA_BACKEND",
+        bind_to=(fmha_config, "decode_cp_mla_backend"),
+        type=str2_decode_cp_mla_backend,
+        metavar="{TOKENSPEED,FIA2A}",
+        default=DecodeCPMLABackend.TOKENSPEED,
+        help="PageRR MLA DCP 后端；FIA2A 需要开启 Decode KV DCP。",
+    )
+    fmha_group.add_argument(
+        "--decode_cp_mla_fusion_mode",
+        env_name="DECODE_CP_MLA_FUSION_MODE",
+        bind_to=(fmha_config, "decode_cp_mla_fusion_mode"),
+        type=str2_decode_cp_mla_fusion_mode,
+        metavar="{AUTO,FUSED,UNFUSED}",
+        default=DecodeCPMLAFusionMode.AUTO,
+        help="FIA2A 融合模式；AUTO 按 split 数选择，强制模式不改变 split 数。",
+    )
+    fmha_group.add_argument(
+        "--decode_cp_mla_a2a_backend",
+        env_name="DECODE_CP_MLA_A2A_BACKEND",
+        bind_to=(fmha_config, "decode_cp_mla_a2a_backend"),
+        type=str2_decode_cp_mla_a2a_backend,
+        metavar="{AUTO,NCCL,CUSTOM}",
+        default=DecodeCPMLAA2ABackend.AUTO,
+        help="FIA2A 非融合通路的 all-to-all；AUTO 按载荷选择，NCCL/CUSTOM 强制指定。",
+    )
     fmha_group.add_argument(
         "--enable_fmha",
         env_name="ENABLE_FMHA",

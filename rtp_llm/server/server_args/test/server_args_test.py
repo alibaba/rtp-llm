@@ -37,6 +37,88 @@ class CustomAllReduceArgumentsTest(TestCase):
         self.assertIs(configs.ft_disable_custom_ar_override, True)
 
 
+class DecodeKvDcpArgumentsTest(TestCase):
+    def test_default_and_explicit_cli_modes(self):
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertIs(server_args.setup_args([]).parallelism_config.decode_kv_dcp, True)
+            for value, expected in (("0", False), ("1", True)):
+                config = server_args.setup_args(["--decode_kv_dcp", value]).parallelism_config
+                self.assertIs(config.decode_kv_dcp, expected)
+                self.assertIs(pickle.loads(pickle.dumps(config)).decode_kv_dcp, expected)
+
+    def test_environment_and_cli_override(self):
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(os.environ, {"DECODE_KV_DCP": "0"}, clear=True):
+            disabled = server_args.setup_args([]).parallelism_config
+            enabled = server_args.setup_args(["--decode_kv_dcp", "1"]).parallelism_config
+        self.assertIs(disabled.decode_kv_dcp, False)
+        self.assertIs(enabled.decode_kv_dcp, True)
+
+    def test_old_parallelism_pickles_keep_dcp_enabled(self):
+        from rtp_llm.ops import ParallelismConfig
+
+        config = ParallelismConfig()
+        config.role_type = RoleType.DECODE
+        config.decode_kv_dcp = False
+        state = config.__getstate__()
+        self.assertEqual(len(state), 19)
+        for old_size in (17, 18):
+            restored = ParallelismConfig.__new__(ParallelismConfig)
+            restored.__setstate__(state[:old_size])
+            self.assertIs(restored.decode_kv_dcp, True)
+
+
+class DecodeCpMlaArgumentsTest(TestCase):
+    def test_default_keeps_fia2a_disabled(self):
+        from rtp_llm.ops import DecodeCPMLABackend, DecodeCPMLAFusionMode, DecodeCPMLAA2ABackend
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        with patch.dict(os.environ, {}, clear=True):
+            config = setup_args([]).fmha_config
+        self.assertEqual(config.decode_cp_mla_backend, DecodeCPMLABackend.TOKENSPEED)
+        self.assertEqual(config.decode_cp_mla_fusion_mode, DecodeCPMLAFusionMode.AUTO)
+        self.assertEqual(config.decode_cp_mla_a2a_backend, DecodeCPMLAA2ABackend.AUTO)
+
+    def test_selectors_reach_spawn_and_cli_overrides_environment(self):
+        from itertools import product
+
+        from rtp_llm.ops import DecodeCPMLABackend, DecodeCPMLAFusionMode, DecodeCPMLAA2ABackend
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        fields = (("decode_cp_mla_backend", DecodeCPMLABackend),
+                  ("decode_cp_mla_fusion_mode", DecodeCPMLAFusionMode),
+                  ("decode_cp_mla_a2a_backend", DecodeCPMLAA2ABackend))
+        for values in product(("TOKENSPEED", "FIA2A"), ("AUTO", "FUSED", "UNFUSED"),
+                              ("AUTO", "NCCL", "CUSTOM")):
+            for cli in (False, True):
+                with self.subTest(values=values, cli=cli):
+                    env = {field.upper(): "invalid_overridden_by_cli" if cli else value
+                           for (field, _), value in zip(fields, values)}
+                    argv = [arg for (field, _), value in zip(fields, values)
+                            for arg in ("--" + field, value)] if cli else []
+                    with patch.dict(os.environ, env, clear=True):
+                        config = setup_args(argv).fmha_config
+                    restored = pickle.loads(pickle.dumps(config))
+                    for (field, enum), value in zip(fields, values):
+                        self.assertEqual(getattr(restored, field), enum.__members__[value])
+                        self.assertIn(field + ": " + value, restored.to_string())
+
+    def test_invalid_selectors_are_rejected(self):
+        import argparse
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        for field in ("decode_cp_mla_backend", "decode_cp_mla_fusion_mode", "decode_cp_mla_a2a_backend"):
+            for cli in (False, True):
+                with self.subTest(field=field, cli=cli), patch.dict(
+                    os.environ, {} if cli else {field.upper(): "invalid"}, clear=True
+                ), patch("sys.stderr", new_callable=io.StringIO):
+                    with self.assertRaises((SystemExit, argparse.ArgumentTypeError)):
+                        setup_args(["--" + field, "invalid"] if cli else [])
+
+
 class CacheConfigArgumentsTest(TestCase):
     # Keep the supported startup fields explicit, independently of parser registration.
     samples = {

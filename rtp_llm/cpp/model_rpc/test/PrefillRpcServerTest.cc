@@ -127,7 +127,12 @@ private:
 
 class TestEngineBase final: public EngineBase {
 public:
-    explicit TestEngineBase(bool is_mtp_eagle): EngineBase(EngineInitParams()), is_mtp_eagle_(is_mtp_eagle) {}
+    explicit TestEngineBase(bool is_mtp_eagle): EngineBase(EngineInitParams()), is_mtp_eagle_(is_mtp_eagle) {
+        // Allocate publishes the engine's cache geometry even before the first
+        // request. Use a real topology instead of leaving the test resource null.
+        resource_context_.cache_manager = std::make_shared<KVCacheManager>(
+            test::makeSimpleMhaCacheConfig(1, 8, 64, DataType::TYPE_FP16));
+    }
 
     std::shared_ptr<GenerateStream> enqueue(const std::shared_ptr<GenerateInput>&) override {
         return nullptr;
@@ -152,6 +157,11 @@ private:
 
 class TestPrefillRpcServer: public PrefillRpcServer {
 public:
+    TestPrefillRpcServer() {
+        setEngineForTest(false);
+        maga_init_params_.parallelism_config.prefill_cp_config.prefill_cp_size = 1;
+    }
+
     grpc::Status runWithRetry(PrefillGenerateContext&                             context,
                               const std::function<void(PrefillGenerateContext&)>& operation,
                               int                                                 max_retries       = 3,
@@ -201,6 +211,15 @@ public:
     void setPrefillMaxWaitTimeoutForTest(int64_t timeout_ms) {
         maga_init_params_.pd_sep_config.prefill_max_wait_timeout_ms = timeout_ms;
     }
+    void setPrefillKvShardsForTest(int64_t tp_size,
+                                   int64_t prefill_cp_size,
+                                   CPRotateMethod method = CPRotateMethod::DISABLED) {
+        maga_init_params_.parallelism_config.tp_size = tp_size;
+        maga_init_params_.parallelism_config.prefill_cp_config.kv_cache_sharded = true;
+        maga_init_params_.parallelism_config.prefill_cp_config.prefill_cp_size = prefill_cp_size;
+        maga_init_params_.parallelism_config.prefill_cp_config.method = method;
+    }
+
 };
 
 class PrefillRpcServerTest: public DeviceTestBase {
@@ -1087,7 +1106,7 @@ TEST_F(PrefillRpcServerTest, textOnlyProcessIsRetainedAcrossRetryReset) {
     context->generate_input->input_ids = torch::tensor({10, 20}, torch::kInt32);
     auto original_input                = context->generate_input;
 
-    PrefillRpcServer server;
+    TestPrefillRpcServer server;
     server.multimodalProcess(*context);
 
     EXPECT_TRUE(context->multimodalProcessed());
@@ -1295,7 +1314,7 @@ TEST_F(PrefillRpcServerTest, allocateRequestUsesExpandedTokenIds) {
     auto context            = makeContext(&request);
     context->generate_input = makeMultimodalInput();
 
-    PrefillRpcServer server;
+    TestPrefillRpcServer server;
     server.mm_processor_ = std::make_shared<TestMultimodalProcessor>(ErrorCode::NONE_ERROR);
     server.multimodalProcess(*context);
 
@@ -1334,6 +1353,79 @@ TEST_F(PrefillRpcServerTest, allocateRequestKeepsOriginalIdsWithoutExpansion) {
     ASSERT_EQ(alloc_request.peer_addrs_size(), 2);
     EXPECT_EQ(alloc_request.peer_addrs(0), "a:1");
     EXPECT_EQ(alloc_request.peer_addrs(1), "b:2");
+    EXPECT_EQ(alloc_request.prefill_seq_size_per_block(), 64);
+    EXPECT_EQ(alloc_request.prefill_cache_dtype(), static_cast<int32_t>(DataType::TYPE_FP16));
+    EXPECT_EQ(alloc_request.prefill_attention_tp_size(), 1);
+    EXPECT_EQ(alloc_request.prefill_mla_fp8_format(), 0);
+}
+
+TEST_F(PrefillRpcServerTest, allocateRequestCarriesKvShardCountWithoutQueryCP) {
+    GenerateInputPB request;
+    request.set_request_id(1);
+    request.add_token_ids(10);
+    auto context = makeContext(&request);
+    context->prefill_worker_cache_store_addrs = {"rank0:1", "rank1:1"};
+
+    TestPrefillRpcServer server;
+    server.setPrefillKvShardsForTest(2, 2);
+    auto alloc_request = server.buildAllocateRequest(*context);
+
+    EXPECT_EQ(alloc_request.prefill_cp_size(), 2);
+    EXPECT_EQ(alloc_request.peer_addrs_size(), 2);
+}
+
+TEST_F(PrefillRpcServerTest, allocateRequestCarriesExplicitSingleKvShard) {
+    GenerateInputPB request;
+    request.set_request_id(1);
+    request.add_token_ids(10);
+    auto context = makeContext(&request);
+    context->prefill_worker_cache_store_addrs = {"rank0:1"};
+
+    TestPrefillRpcServer server;
+    server.setPrefillKvShardsForTest(1, 1);
+    auto alloc_request = server.buildAllocateRequest(*context);
+
+    EXPECT_EQ(alloc_request.prefill_cp_size(), 1);
+    ASSERT_EQ(alloc_request.peer_addrs_size(), 1);
+    EXPECT_EQ(alloc_request.peer_addrs(0), "rank0:1");
+    EXPECT_EQ(alloc_request.prefill_seq_size_per_block(), 64);
+}
+
+TEST_F(PrefillRpcServerTest, allocateRequestSeparatesAttentionTpFromKvShardCount) {
+    GenerateInputPB request;
+    request.set_request_id(1);
+    auto context = makeContext(&request);
+    context->prefill_worker_cache_store_addrs = {"rank0:1", "rank1:1"};
+
+    TestPrefillRpcServer server;
+    server.setPrefillKvShardsForTest(2, 2, CPRotateMethod::ALL_GATHER);
+    auto alloc_request = server.buildAllocateRequest(*context);
+
+    EXPECT_EQ(alloc_request.prefill_tp_size(), 1);
+    EXPECT_EQ(alloc_request.prefill_cp_size(), 2);
+}
+
+TEST_F(PrefillRpcServerTest, allocateRequestRejectsMissingSourcePeer) {
+    GenerateInputPB request;
+    request.set_request_id(1);
+    auto context = makeContext(&request);
+    context->prefill_worker_cache_store_addrs = {"rank0:1"};
+
+    TestPrefillRpcServer server;
+    server.setPrefillKvShardsForTest(2, 2);
+    EXPECT_THROW(server.buildAllocateRequest(*context), std::runtime_error);
+}
+
+TEST_F(PrefillRpcServerTest, initRejectsMissingInvalidOrOverflowingKvShardCount) {
+    for (const int64_t cp_size : {int64_t{0}, int64_t{-1},
+                                 int64_t{std::numeric_limits<int32_t>::max()} + 1}) {
+        EngineInitParams params;
+        params.pd_sep_config.role_type = RoleType::PREFILL;
+        params.parallelism_config.prefill_cp_config.prefill_cp_size = cp_size;
+
+        TestPrefillRpcServer server;
+        EXPECT_THROW(server.init(params, nullptr, py::none()), std::runtime_error);
+    }
 }
 
 }  // namespace rtp_llm

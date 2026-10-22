@@ -479,3 +479,26 @@ py_test(
     tags = ["SM100_ARM_CU13"],
     exec_properties = {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
 )
+
+py_test(
+    name = "kimi_k3_cache_config_test",
+    srcs = ["kimi_k3_cache_config_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
+py_test(
+    name = "kimi_k3_fp8_weight_test",
+    srcs = ["kimi_k3_fp8_weight_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
+py_test(
+    name = "kimi_k3_decode_dcp_test",
+    srcs = ["kimi_k3_decode_dcp_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    exec_properties = {'gpu':'A10'},
+)

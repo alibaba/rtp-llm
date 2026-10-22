@@ -649,6 +649,7 @@ class GenerateConfigTest(TestCase):
         py_env_configs = PyEnvConfigs()
         py_env_configs.prefill_cp_config.kv_cache_sharded = True
         py_env_configs.prefill_cp_config.prefill_cp_size = 4
+        py_env_configs.parallelism_config.decode_kv_dcp = False
 
         set_parallelism_config(
             py_env_configs.parallelism_config,
@@ -661,6 +662,7 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(
             py_env_configs.parallelism_config.prefill_cp_config.prefill_cp_size, 4
         )
+        self.assertFalse(py_env_configs.parallelism_config.decode_kv_dcp)
 
     @patch.dict(
         "os.environ",

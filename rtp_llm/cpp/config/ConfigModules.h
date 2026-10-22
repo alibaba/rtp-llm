@@ -41,7 +41,9 @@ struct PrefillCPConfig {
     // across the CP (== TP) group. Each rank physically holds only owned blocks
     // (block_idx % cp_size == cp_rank); see rtp_llm/cpp/cache/CPSlotMapper.h.
     bool kv_cache_sharded = false;
-    // Explicit prefill CP size for decode-side fixed/SWA ring sizing; 0 = unset.
+    // Physical Prefill KV shard count, independent of Query CP and attention TP.
+    // Required on Prefill (1 if unsharded); Decode uses the upstream count for cache sizing.
+    // 0 = unset, not a valid Prefill startup configuration.
     int64_t prefill_cp_size = 0;
     bool    is_enabled() const {
         return method != CPRotateMethod::DISABLED && method != CPRotateMethod::UNKNOWN
@@ -82,6 +84,8 @@ struct ParallelismConfig {
     int64_t ffn_tp_rank      = 0;
     bool    enable_sp        = false;
     bool    use_ub_comm      = false;
+    // Native MLA Decode: page-sharded KV with DCP; false selects full KV per TP rank.
+    bool    decode_kv_dcp    = true;
 
     // Mirror of py_env_configs.role_config.role_type, plumbed in
     // engine_config.setup_engine_config so model construction (e.g.
@@ -140,6 +144,10 @@ enum class FMHAType {
     HEADWISE,
 };
 
+enum class DecodeCPMLABackend { TOKENSPEED, FIA2A };
+enum class DecodeCPMLAFusionMode { AUTO, FUSED, UNFUSED };
+enum class DecodeCPMLAA2ABackend { AUTO, NCCL, CUSTOM };
+
 struct FMHAConfig {
     bool enable_fmha                         = true;
     bool enable_flashinfer_trtllm_gen        = true;
@@ -157,6 +165,9 @@ struct FMHAConfig {
     // the latter is the ROCm generation-prefill graph-capable backend.
     bool        use_triton_pa  = false;
     int64_t     absorb_opt_len = 1024;
+    DecodeCPMLABackend decode_cp_mla_backend = DecodeCPMLABackend::TOKENSPEED;
+    DecodeCPMLAFusionMode decode_cp_mla_fusion_mode = DecodeCPMLAFusionMode::AUTO;
+    DecodeCPMLAA2ABackend decode_cp_mla_a2a_backend = DecodeCPMLAA2ABackend::AUTO;
     std::string to_string() const;
 };
 

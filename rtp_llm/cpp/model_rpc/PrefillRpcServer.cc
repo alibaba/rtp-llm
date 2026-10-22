@@ -1,6 +1,8 @@
 #include "autil/TimeUtility.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
+#include "rtp_llm/cpp/cache/CPSlotMapper.h"
+#include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include <exception>
 #include "autil/Scope.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
@@ -15,6 +17,7 @@
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -197,10 +200,21 @@ grpc::Status PrefillRpcServer::init(const EngineInitParams&                     
                                     py::object                                             mm_process_engine) {
     RTP_LLM_CHECK_WITH_INFO(maga_init_params.pd_sep_config.role_type == RoleType::PREFILL,
                             "prefill's role_type must be PREFILL");
+    const auto prefill_cp_size = maga_init_params.parallelism_config.prefill_cp_config.prefill_cp_size;
+    RTP_LLM_CHECK_WITH_INFO(prefill_cp_size > 0 && prefill_cp_size <= std::numeric_limits<int32_t>::max(),
+                            "Prefill requires explicit PREFILL_CP_SIZE: set it to the source KV shard count "
+                            "(1 for unsharded KV), got %ld",
+                            prefill_cp_size);
     auto ret = RemoteRpcServer::init(maga_init_params, std::move(propose_params), mm_process_engine);
     if (!ret.ok()) {
         return ret;
     }
+    const auto cp_mapper = engine_->getCacheManager()->cpSlotMapper();
+    const auto actual_kv_shards = cp_mapper ? cp_mapper->cpSize() : 1;
+    RTP_LLM_CHECK_WITH_INFO(prefill_cp_size == actual_kv_shards,
+                            "PREFILL_CP_SIZE=%ld does not match the source KV cache layout: shards=%d",
+                            prefill_cp_size,
+                            actual_kv_shards);
     return grpc::Status::OK;
 }
 
@@ -394,6 +408,19 @@ GenerateRequestPB PrefillRpcServer::buildAllocateRequest(PrefillGenerateContext&
     for (const auto& address : prefill_context.prefill_worker_cache_store_addrs) {
         alloc_request.add_peer_addrs(address);
     }
+    alloc_request.set_prefill_tp_size(
+        static_cast<int32_t>(maga_init_params_.parallelism_config.get_attn_tp_size()));
+    // Startup validates this explicit source shard count against the cache mapper.
+    // Query CP and attention-head TP do not determine the RPC field's value.
+    const auto prefill_cp_size = maga_init_params_.parallelism_config.prefill_cp_config.prefill_cp_size;
+    if (prefill_cp_size > 1) {
+        RTP_LLM_CHECK_WITH_INFO(alloc_request.peer_addrs_size() == prefill_cp_size,
+                                "sharded Prefill KV requires one rank-ordered cache-store peer per source shard, "
+                                "got peers=%d PREFILL_CP_SIZE=%ld",
+                                alloc_request.peer_addrs_size(),
+                                prefill_cp_size);
+    }
+    alloc_request.set_prefill_cp_size(static_cast<int32_t>(prefill_cp_size));
     return alloc_request;
 }
 

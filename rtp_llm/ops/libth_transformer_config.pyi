@@ -435,8 +435,40 @@ class GrammarConfig:
         ...
 
 
+class DecodeCPMLABackend:
+    TOKENSPEED: typing.ClassVar[DecodeCPMLABackend]
+    FIA2A: typing.ClassVar[DecodeCPMLABackend]
+    __members__: typing.ClassVar[dict[str, DecodeCPMLABackend]]
+
+    @property
+    def name(self) -> str: ...
+
+
+class DecodeCPMLAFusionMode:
+    AUTO: typing.ClassVar[DecodeCPMLAFusionMode]
+    FUSED: typing.ClassVar[DecodeCPMLAFusionMode]
+    UNFUSED: typing.ClassVar[DecodeCPMLAFusionMode]
+    __members__: typing.ClassVar[dict[str, DecodeCPMLAFusionMode]]
+
+    @property
+    def name(self) -> str: ...
+
+
+class DecodeCPMLAA2ABackend:
+    AUTO: typing.ClassVar[DecodeCPMLAA2ABackend]
+    NCCL: typing.ClassVar[DecodeCPMLAA2ABackend]
+    CUSTOM: typing.ClassVar[DecodeCPMLAA2ABackend]
+    __members__: typing.ClassVar[dict[str, DecodeCPMLAA2ABackend]]
+
+    @property
+    def name(self) -> str: ...
+
+
 class FMHAConfig:
     absorb_opt_len: int
+    decode_cp_mla_backend: DecodeCPMLABackend
+    decode_cp_mla_fusion_mode: DecodeCPMLAFusionMode
+    decode_cp_mla_a2a_backend: DecodeCPMLAA2ABackend
     disable_flashinfer_hybrid_prefill: bool
     disable_flashinfer_native: bool
     enable_flashinfer_trtllm_gen: bool
@@ -1071,6 +1103,7 @@ class KVCacheSpecDesc:
     cache_type: KVCacheSpecType
     dtype: DataType
     is_state_cache: bool
+    head_sharded_transfer: bool
     entry_elems: int
     entry_dtype: DataType
     entry_count_mode: OpaqueBlockEntryCountMode
@@ -1099,6 +1132,7 @@ class ModelConfig:
     embedding_size: int
     eplb_config: EPLBConfig
     kv_cache_spec_descs: list[list[KVCacheSpecDesc]]
+    local_kv_cache_sharded: typing.Optional[bool]
     cache_min_replay_tokens: int
     cache_key_hash_seed: int
     expert_num: int
@@ -1337,6 +1371,7 @@ class PDSepConfig:
     def to_string(self) -> str:
         ...
 class ParallelismConfig:
+    decode_kv_dcp: bool
     dp_rank: int
     dp_size: int
     enable_sp: bool

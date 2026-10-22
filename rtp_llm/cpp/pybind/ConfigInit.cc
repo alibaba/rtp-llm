@@ -414,6 +414,18 @@ PYBIND11_MODULE(libth_transformer_config, m) {
             }));
 
     // Register FMHAConfig
+    py::enum_<DecodeCPMLABackend>(m, "DecodeCPMLABackend")
+        .value("TOKENSPEED", DecodeCPMLABackend::TOKENSPEED)
+        .value("FIA2A", DecodeCPMLABackend::FIA2A);
+    py::enum_<DecodeCPMLAFusionMode>(m, "DecodeCPMLAFusionMode")
+        .value("AUTO", DecodeCPMLAFusionMode::AUTO)
+        .value("FUSED", DecodeCPMLAFusionMode::FUSED)
+        .value("UNFUSED", DecodeCPMLAFusionMode::UNFUSED);
+    py::enum_<DecodeCPMLAA2ABackend>(m, "DecodeCPMLAA2ABackend")
+        .value("AUTO", DecodeCPMLAA2ABackend::AUTO)
+        .value("NCCL", DecodeCPMLAA2ABackend::NCCL)
+        .value("CUSTOM", DecodeCPMLAA2ABackend::CUSTOM);
+
     py::class_<FMHAConfig>(m, "FMHAConfig")
         .def(py::init<>())
         .def_readwrite("enable_fmha", &FMHAConfig::enable_fmha)
@@ -429,6 +441,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("use_asm_pa", &FMHAConfig::use_asm_pa)
         .def_readwrite("use_triton_pa", &FMHAConfig::use_triton_pa)
         .def_readwrite("absorb_opt_len", &FMHAConfig::absorb_opt_len)
+        .def_readwrite("decode_cp_mla_backend", &FMHAConfig::decode_cp_mla_backend)
+        .def_readwrite("decode_cp_mla_fusion_mode", &FMHAConfig::decode_cp_mla_fusion_mode)
+        .def_readwrite("decode_cp_mla_a2a_backend", &FMHAConfig::decode_cp_mla_a2a_backend)
         .def("to_string", &FMHAConfig::to_string)
         .def(py::pickle(
             [](const FMHAConfig& self) {
@@ -444,11 +459,14 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.use_triton_pa,
                                       self.absorb_opt_len,
                                       self.enable_flashinfer_trtllm_gen,
-                                      self.disable_flashinfer_hybrid_prefill);
+                                      self.disable_flashinfer_hybrid_prefill,
+                                      self.decode_cp_mla_backend,
+                                      self.decode_cp_mla_fusion_mode,
+                                      self.decode_cp_mla_a2a_backend);
             },
             [](py::tuple t) {
-                if (t.size() != 13)
-                    throw std::runtime_error("FMHAConfig: expected 13-element state, got " + std::to_string(t.size()));
+                if (t.size() != 16)
+                    throw std::runtime_error("FMHAConfig: expected 16-element state, got " + std::to_string(t.size()));
                 FMHAConfig c;
                 try {
                     c.enable_fmha                         = t[0].cast<bool>();
@@ -464,6 +482,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.absorb_opt_len                      = t[10].cast<int64_t>();
                     c.enable_flashinfer_trtllm_gen        = t[11].cast<bool>();
                     c.disable_flashinfer_hybrid_prefill   = t[12].cast<bool>();
+                    c.decode_cp_mla_backend               = t[13].cast<DecodeCPMLABackend>();
+                    c.decode_cp_mla_fusion_mode           = t[14].cast<DecodeCPMLAFusionMode>();
+                    c.decode_cp_mla_a2a_backend           = t[15].cast<DecodeCPMLAA2ABackend>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("FMHAConfig unpickle error: ") + e.what());
                 }
@@ -1355,6 +1376,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("ffn_tp_rank", &ParallelismConfig::ffn_tp_rank)
         .def_readwrite("enable_sp", &ParallelismConfig::enable_sp)
         .def_readwrite("use_ub_comm", &ParallelismConfig::use_ub_comm)
+        .def_readwrite("decode_kv_dcp", &ParallelismConfig::decode_kv_dcp)
         .def_readwrite("role_type", &ParallelismConfig::role_type)
         .def_readwrite("ffn_disaggregate_config", &ParallelismConfig::ffn_disaggregate_config)
         .def_readwrite("prefill_cp_config", &ParallelismConfig::prefill_cp_config)
@@ -1382,10 +1404,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.ffn_disaggregate_config,
                                       self.prefill_cp_config,
                                       self.use_ub_comm,
-                                      self.role_type);
+                                      self.role_type,
+                                      self.decode_kv_dcp);
             },
             [](py::tuple t) {
-                if (t.size() != 17 && t.size() != 18)
+                if (t.size() != 17 && t.size() != 18 && t.size() != 19)
                     throw std::runtime_error("Invalid state!");
                 ParallelismConfig c;
                 try {
@@ -1408,6 +1431,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.use_ub_comm             = t[16].cast<bool>();
                     if (t.size() >= 18) {
                         c.role_type = t[17].cast<RoleType>();
+                    }
+                    if (t.size() >= 19) {
+                        c.decode_kv_dcp = t[18].cast<bool>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("ParallelismConfig unpickle error: ") + e.what());
@@ -1801,6 +1827,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("v_head_dim", &AttentionConfigs::v_head_dim)
         .def_readwrite("softmax_extra_scale", &AttentionConfigs::softmax_extra_scale)
         .def_readwrite("kv_cache_dtype", &AttentionConfigs::kv_cache_dtype)
+        .def_readwrite("mla_fp8_compute", &AttentionConfigs::mla_fp8_compute)
         .def_readwrite("need_rope_kv_cache", &AttentionConfigs::need_rope_kv_cache)
         .def_readwrite("is_sparse", &AttentionConfigs::is_sparse)
         .def_readwrite("indexer_head_dim", &AttentionConfigs::indexer_head_dim)
@@ -1976,6 +2003,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("cache_type", &KVCacheSpecDesc::cache_type)
         .def_readwrite("dtype", &KVCacheSpecDesc::dtype)
         .def_readwrite("is_state_cache", &KVCacheSpecDesc::is_state_cache)
+        .def_readwrite("head_sharded_transfer", &KVCacheSpecDesc::head_sharded_transfer)
         .def_readwrite("entry_elems", &KVCacheSpecDesc::entry_elems)
         .def_readwrite("entry_dtype", &KVCacheSpecDesc::entry_dtype)
         .def_readwrite("entry_count_mode", &KVCacheSpecDesc::entry_count_mode)
@@ -2013,11 +2041,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.capacity,
                                       self.memory,
                                       self.tail,
-                                      self.cp);
+                                      self.cp,
+                                      self.head_sharded_transfer);
             },
             [](py::tuple t) {
                 KVCacheSpecDesc c;
-                if (t.size() != 20)
+                if (t.size() != 20 && t.size() != 21)
                     throw std::runtime_error("Invalid KVCacheSpecDesc state!");
                 c.tag                                  = t[0].cast<std::string>();
                 c.cache_type                           = t[1].cast<KVCacheSpecType>();
@@ -2039,6 +2068,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 c.memory                               = t[17].cast<std::optional<CacheMemoryPolicyDesc>>();
                 c.tail                                 = t[18].cast<std::optional<CacheTailPolicyDesc>>();
                 c.cp                                   = t[19].cast<std::optional<CacheCpPolicyDesc>>();
+                if (t.size() == 21)
+                    c.head_sharded_transfer = t[20].cast<bool>();
                 return c;
             }));
 
@@ -2063,6 +2094,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("cache_min_replay_tokens", &ModelConfig::cache_min_replay_tokens)
         .def_readwrite("cache_key_hash_seed", &ModelConfig::cache_key_hash_seed)
         .def_readwrite("kv_cache_spec_descs", &ModelConfig::kv_cache_spec_descs)
+        .def_readwrite("local_kv_cache_sharded", &ModelConfig::local_kv_cache_sharded)
         // task_type is defined as property below
         .def_readwrite("ckpt_path", &ModelConfig::ckpt_path)
         .def_readwrite("tokenizer_path", &ModelConfig::tokenizer_path)

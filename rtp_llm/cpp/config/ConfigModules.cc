@@ -8,6 +8,7 @@
 #include <string>
 #include <cctype>
 #include <regex>
+#include <unordered_map>
 
 namespace rtp_llm {
 
@@ -69,6 +70,7 @@ std::string ParallelismConfig::to_string() const {
         << "ffn_tp_size: " << ffn_tp_size << "\n"
         << "ffn_tp_rank: " << ffn_tp_rank << "\n"
         << "enable_sp: " << enable_sp << "\n"
+        << "decode_kv_dcp: " << decode_kv_dcp << "\n"
         << "role_type: " << roleTypeToString(role_type) << "\n"
         << "ffn_disaggregate_config: {\n"
         << ffn_disaggregate_config.to_string() << "\n}\n"
@@ -87,6 +89,23 @@ std::string ConcurrencyConfig::to_string() const {
 
 // FMHAConfig
 std::string FMHAConfig::to_string() const {
+    static const std::unordered_map<DecodeCPMLABackend, const char*> backend_names = {
+        {DecodeCPMLABackend::TOKENSPEED, "TOKENSPEED"},
+        {DecodeCPMLABackend::FIA2A, "FIA2A"},
+    };
+    static const std::unordered_map<DecodeCPMLAFusionMode, const char*> fusion_names = {
+        {DecodeCPMLAFusionMode::AUTO, "AUTO"},
+        {DecodeCPMLAFusionMode::FUSED, "FUSED"},
+        {DecodeCPMLAFusionMode::UNFUSED, "UNFUSED"},
+    };
+    static const std::unordered_map<DecodeCPMLAA2ABackend, const char*> a2a_names = {
+        {DecodeCPMLAA2ABackend::AUTO, "AUTO"},
+        {DecodeCPMLAA2ABackend::NCCL, "NCCL"},
+        {DecodeCPMLAA2ABackend::CUSTOM, "CUSTOM"},
+    };
+    const auto backend = backend_names.find(decode_cp_mla_backend);
+    const auto fusion = fusion_names.find(decode_cp_mla_fusion_mode);
+    const auto a2a = a2a_names.find(decode_cp_mla_a2a_backend);
     std::ostringstream oss;
     oss << "enable_fmha: " << enable_fmha << "\n"
         << "enable_flashinfer_trtllm_gen: " << enable_flashinfer_trtllm_gen << "\n"
@@ -100,7 +119,10 @@ std::string FMHAConfig::to_string() const {
         << "use_aiter_pa: " << use_aiter_pa << "\n"
         << "use_asm_pa: " << use_asm_pa << "\n"
         << "use_triton_pa: " << use_triton_pa << "\n"
-        << "absorb_opt_len: " << absorb_opt_len << "\n";
+        << "absorb_opt_len: " << absorb_opt_len << "\n"
+        << "decode_cp_mla_backend: " << (backend == backend_names.end() ? "UNKNOWN" : backend->second) << "\n"
+        << "decode_cp_mla_fusion_mode: " << (fusion == fusion_names.end() ? "UNKNOWN" : fusion->second) << "\n"
+        << "decode_cp_mla_a2a_backend: " << (a2a == a2a_names.end() ? "UNKNOWN" : a2a->second) << "\n";
     return oss.str();
 }
 

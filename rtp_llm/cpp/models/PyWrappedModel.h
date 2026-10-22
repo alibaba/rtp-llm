@@ -103,6 +103,9 @@ private:
     std::optional<PyCacheStoreInputs> prepareWriteCacheParams(const GptModelInputs& inputs);
 
 private:
+    bool sequence_parallel_padding_enabled_ = false;
+    GptModelInputs padSequenceParallelInputs(const GptModelInputs& inputs);
+
     // Helper functions to reduce code duplication
     torch_ext::PyAttentionInputs    buildPyAttentionInputs(const GptModelInputs& inputs);
     torch_ext::PyEmbeddingInputs    buildPyEmbeddingInputs(const GptModelInputs& inputs);
@@ -350,6 +353,11 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     // Always initialize py_model_ so it can be used as fallback when CUDA graph cannot run
     py_model_                 = py_instance;
     supports_micro_batch_     = py::hasattr(py_model_, "forward_micro_batch");
+    sequence_parallel_padding_enabled_ = py::hasattr(py_instance, "requires_sequence_parallel_padding")
+        && py_instance.attr("requires_sequence_parallel_padding").cast<bool>();
+    RTP_LLM_CHECK_WITH_INFO(!sequence_parallel_padding_enabled_
+                                || device_props_.enable_layer_micro_batch == MicroBatchType::NONE,
+                            "K3 SP requires ENABLE_LAYER_MICRO_BATCH=0");
     auto py_initialize_method = py_model_.attr("initialize");
     try {
         py_init_result = py_initialize_method(init_resources);
@@ -468,6 +476,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         RTP_LLM_CHECK_WITH_INFO(graph_params.kernel_block_table_width > 0,
                                 "CUDA graph requires Executor to provide a positive kernel block table width");
 
+        graph_params.sequence_parallel_size = sequence_parallel_padding_enabled_ ? params.parallelism_config.tp_size : 1;
         auto graph_runner =
             std::make_unique<CudaGraphRunner>(graph_params, py_instance, forward_method, params.metrics_reporter);
         {

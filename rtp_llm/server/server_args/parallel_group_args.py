@@ -111,7 +111,16 @@ def init_parallel_group_args(
         bind_to=prefill_cp_size_bind_to,
         type=int,
         default=0,
-        help="显式指定 prefill CP size，供 decode 侧 fixed/SWA cache ring sizing 使用。",
+        help="Prefill 实际 KV 分片数，与 Query CP 开关独立。Prefill 必须显式指定，未分片填 1；Decode 填上游 Prefill 的分片数，用于缓存 sizing。",
+    )
+    parallel_group.add_argument(
+        "--decode_kv_dcp",
+        env_name="DECODE_KV_DCP",
+        bind_to=(parallelism_config, "decode_kv_dcp"),
+        type=str2bool,
+        default=True,
+        help="K3 MLA Decode KV 分片与 DCP；关闭后每个 Decode TP rank 保存完整 KV、按 head 分片计算。"
+        "不改变 Prefill PageRR、Query CP 或 KDA head 分片；必须在启动前设置。",
     )
     parallel_group.add_argument(
         "--use_ub_comm",
