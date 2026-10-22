@@ -97,6 +97,28 @@ build:cuda12_9 --config=cuda12_9_base
 build:cuda12_9 --define=using_cuda12_9_x86=true
 
 
+# CUDA 12.9 on ARM/GB200 remains a separate SDK/ABI from CUDA 13 ARM.
+# Inherit the shared base, not the x86 selector.  The original SM100 target is
+# explicit here: sm10x is no longer a defined config in the current rc files.
+build:cuda12_9_arm --config=cuda12_9_base
+build:cuda12_9_arm --cpu=aarch64
+build:cuda12_9_arm --host_cpu=aarch64
+build:cuda12_9_arm --copt=-Wno-tautological-compare
+build:cuda12_9_arm --copt=-Wno-array-bounds
+build:cuda12_9_arm --copt=-Wno-unused-result
+build:cuda12_9_arm --copt=-Wno-array-parameter
+build:cuda12_9_arm --copt=-Wno-narrowing
+build:cuda12_9_arm --define=using_cuda12_arm=true
+build:cuda12_9_arm --define=using_cuda12_9_x86=false
+build:cuda12_9_arm --define=using_cuda12_x86=false
+build:cuda12_9_arm --repo_env=TF_CUDA_VERSION=12.9
+build:cuda12_9_arm --repo_env=TF_CUDA_COMPUTE_CAPABILITIES=10.0
+build:cuda12_9_arm --action_env TF_CUDA_COMPUTE_CAPABILITIES="10.0"
+build:cuda12_9_arm --host_action_env TF_CUDA_COMPUTE_CAPABILITIES="10.0"
+build:cuda12_9_arm --copt -DUSE_CUDA_ARM=0
+build:cuda12_9_arm --define=use_remote_kv_cache=false
+build:cuda12_9_arm --copt="-DENABLE_FP4=1"
+
 # cuda13_base reuses the generic NVIDIA selections from cuda12 while targeting
 # the CUDA 13.2 toolchain. Keep the Bazel using_cuda12 define as a compatibility
 # selector, but expose USING_CUDA13 instead of USING_CUDA12 to C++ sources.
@@ -109,7 +131,7 @@ build:cuda13_base --repo_env=TF_CUDA_VERSION=13.2
 build:cuda13_base --copt="-D_GLIBCXX_USE_CXX11_ABI=1"
 build:cuda13_base --copt="-DENABLE_FP4=1"
 
-# cuda13_arm: replaces the former cuda12_9_arm config.  Build one SBSA
+# cuda13_arm: CUDA 13.2 on ARM, independent of cuda12_9_arm. Build one SBSA
 # ARM image/config for GB200 (10.0) and GB300 (SM103, 10.3) instead of
 # splitting separate sm100/sm103 configs.  The ARM CUDA 13 test pools are
 # GB200 (SM100_ARM_CU13, sm_100); the sm_103 code path is compiled ahead of
