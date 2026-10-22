@@ -208,7 +208,7 @@ class PyncclCPUnitTest(unittest.TestCase):
             process_group,
         )
 
-    def test_symmetric_output_rejects_oversized_or_unlisted_roles(self):
+    def test_symmetric_output_rejects_empty_oversized_or_unlisted_roles(self):
         process_group = object()
         device = torch.device("cuda", 1)
         base = torch.empty(16, dtype=torch.bfloat16)
@@ -234,6 +234,9 @@ class PyncclCPUnitTest(unittest.TestCase):
             oversized = pynccl_cp._symm_output(
                 "mla_ckv", (5, 4), torch.bfloat16, device, process_group
             )
+            empty = pynccl_cp._symm_output(
+                "mla_ckv", (0, 4), torch.bfloat16, device, process_group
+            )
             unlisted = pynccl_cp._symm_output(
                 "indexer_k_packed",
                 (4, 4),
@@ -243,6 +246,7 @@ class PyncclCPUnitTest(unittest.TestCase):
             )
 
         self.assertEqual(tuple(view.shape), (4, 4))
+        self.assertIsNone(empty)
         self.assertIsNone(oversized)
         self.assertIsNone(unlisted)
 

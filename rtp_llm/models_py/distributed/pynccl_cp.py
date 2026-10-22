@@ -459,7 +459,8 @@ def _symm_output(
         numel *= int(dim)
     ptr_key = (*group_key, int(base.data_ptr()))
     capacity_nbytes = _SYMM_CAPACITY_NBYTES.get(ptr_key, 0)
-    if numel * base.element_size() > capacity_nbytes:
+    # Empty views have a null data_ptr even when their base is registered.
+    if numel == 0 or numel * base.element_size() > capacity_nbytes:
         return None
 
     view_key = (*group_key, role, dtype, shape)

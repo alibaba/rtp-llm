@@ -185,3 +185,16 @@ py_test(
     srcs = ["pynccl_cp_unit_test.py"],
     deps = ["//rtp_llm:testlib", "//rtp_llm/models_py/distributed:collective_torch"],
 )
+
+py_test(
+    name = "pynccl_cp_integration_test",
+    srcs = ["pynccl_cp_integration_test.py"],
+    deps = ["//rtp_llm:testlib", "//rtp_llm/models_py/distributed:collective_torch"],
+    env = {"GLM5_CP_OPT": "1", "GPU_COUNT": "2"},
+    exec_properties = {
+        "gpu": "H20_CU13",
+        "gpu_count": "2",
+    },
+    tags = ["H20_CU13", "open_skip"],
+    timeout = "moderate",
+)
