@@ -1,0 +1,59 @@
+{
+    "model_type": "atom_qwen4_exp",
+    "model_path": "/mnt/nas1/hf/Qwen3.8-Flash-Next-PTPC-FP8",
+    "endpoint": "/v1/chat/completions",
+    "query_result": [
+        {
+            "query": {
+                "model": "Qwen3.8-Flash-Next-PTPC-FP8",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "Image 1:"},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+"url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAOAAAADgCAIAAACVT/22AAABqklEQVR42u3SAQ0AAAjDMMC/52MDklbCsk7BXSMBBgWDYlAwKBgUg4JBMSgYFAyKQcGgGBQMCgbFoGBQDAoGBYNiUDAoBgWDgkExKBgUDIpBwaAYFAwKBsWgYFAMCgYFg2JQMCgGBYOCQTEoGBSDgkHBoBgUDAoGxaBgUAwKBgWDYlAwKAYFg4JBMSgYFIOCQcGgGBQMikHBoGBQDAoGBYNiUDAoBgWDgkExKBgUg4JBwaAYFAyKQcGgYFAMCgbFoGBQMCgGBYOCQTEoGBSDgkHBoBgUDIpBwaBgUAwKBsWgYFAwKAYFg2JQMCgYFIOCQcGgGBQMikHBoGBQDAoGxaBgUDAoBgWDYlAwKBgUg4JBMSgYFAyKQcGgYFAMCgbFoGBQMCgGBYNiUDAoGBSDgkExKBgUDIpBwaAYFAwKBsWgYFAwKAYFg2JQMCgYFIOCQTEoGBQMikHBoBgUDAoGxaBgUAwKBgWDYlAwKBgUg4JBMSgYFAyKQcGgGBQMCgbFoGBQDAoGBYNiUDAoBgWDgkExKBgUDIpBwaAYFAwKBsWgYFAMCgYFg/LRAmOxAr/sMqC/AAAAAElFTkSuQmCC"
+                                }
+                            },
+                            {"type": "text", "text": "Image 2:"},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAOAAAADgCAIAAACVT/22AAABqklEQVR42u3SAQ0AAAjDsIN/z2ADklbCskomcFVLgEHBoBgUDAoGxaBgUAwKBgWDYlAwKAYFg4JBMSgYFIOCQcGgGBQMikHBoGBQDAoGBYNiUDAoBgWDgkExKBgUg4JBwaAYFAyKQcGgYFAMCgbFoGBQMCgGBYOCQTEoGBSDgkHBoBgUDIpBwaBgUAwKBsWgYFAwKAYFg2JQMCgYFIOCQcGgGBQMikHBoGBQDAoGxaBgUDAoBgWDYlAwKBgUg4JBMSgYFAyKQcGgYFAMCgbFoGBQMCgGBYNiUDAoGBSDgkExKBgUDIpBwaAYFAwKBsWgYFAwKAYFg2JQMCgYFIOCQTEoGBQMikHBoBgUDAoGxaBgUAwKBgWDYlAwKBgUg4JBMSgYFAyKQcGgGBQMCgbFoGBQDAoGBYNiUDAoBgWDgkExKBgUDIpBwaAYFAwKBsWgYFAMCgYFg2JQMCgGBYOCQTEoGBSDgkHBoBgUDAoGxaBgUAwKBgWDYlAwKAYFg4JBMSgYFIOCQcGgGBQMikHBoGBQDAoGBYNiUDAoBgWDgkExKBgUg4JBwaB8tGGzAr8lklgtAAAAAElFTkSuQmCC"
+                                }
+                            },
+                            {
+                                "type": "text",
+                                "text": "What color is Image 1 and what color is Image 2? Answer as two color words in order."
+                            }
+                        ]
+                    }
+                ],
+                "max_tokens": 24,
+                "temperature": 0,
+                "chat_template_kwargs": {"enable_thinking": false}
+            },
+            "result": {
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "Red, Blue",
+                            "partial": false
+                        },
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 184,
+                    "completion_tokens": 4,
+                    "total_tokens": 188,
+                    "prompt_tokens_details": {"image_tokens": 128}
+                }
+            }
+        }
+    ]
+}
