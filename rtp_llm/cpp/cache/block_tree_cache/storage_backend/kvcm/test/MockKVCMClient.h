@@ -56,7 +56,14 @@ public:
     MOCK_METHOD((std::pair<ClientErrorCode, std::vector<HostCacheMatch>>),
                 GetHostCacheState,
                 (const std::string&, QueryType, const std::vector<int64_t>&, const std::vector<std::string>&, int32_t),
-                (override));
+                ());
+    // The selected SDK exposes either the legacy five-argument API or the new
+    // backend-aware API. Its matching overload implements the pure virtual.
+    MOCK_METHOD((std::pair<ClientErrorCode, std::vector<HostCacheMatch>>),
+                GetHostCacheState,
+                (const std::string&, QueryType, const std::vector<int64_t>&, const std::vector<std::string>&, int32_t,
+                 const std::vector<StorageType>&),
+                ());
     MOCK_METHOD(ClientErrorCode,
                 RemoveCache,
                 (const std::string&, const std::vector<int64_t>&, const std::vector<int64_t>&, const BlockMask&),

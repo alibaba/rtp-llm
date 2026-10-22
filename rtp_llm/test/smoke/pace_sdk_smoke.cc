@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "kvcm_client/meta_client.h"
+#include "kvcm_client/HostCacheStateCompat.h"
 #include "kvcm_client/transfer_client.h"
 
 namespace {
@@ -208,7 +209,8 @@ int main(int argc, char** argv) {
                 require(location.type == backend && present(location.location_specs), "Wrong backend identity");
             }
         }
-        auto [host_code, hosts] = meta->GetHostCacheState(trace, QueryType::QT_PREFIX_MATCH, keys, {"hbm"}, 0);
+        auto [host_code, hosts] =
+            rtp_llm::kvcm::getSdkHostCacheState(*meta, trace, QueryType::QT_PREFIX_MATCH, keys, {"hbm"}, 0);
         check(host_code, "GetHostCacheState");
         require(hosts.empty(), "Payload writes unexpectedly announced an HBM host");
 
