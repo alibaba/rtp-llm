@@ -2472,6 +2472,10 @@ propcache==0.4.1 \
     # via
     #   aiohttp
     #   yarl
+prometheus-client==0.21.1 \
+    --hash=sha256:252505a722ac04b0456be05c05f75f45d760c2911ffc45f2a06bcaed9f3ae3fb \
+    --hash=sha256:594b45c410d6f4f8888940fe80b5cc2521b305a1fafe1c58609ef715a001f301
+    # via -r requirements_base.txt
 protobuf==4.25.0 \
     --hash=sha256:1a3ba712877e6d37013cdc3476040ea1e313a6c2e1580836a94f76b3c176d575 \
     --hash=sha256:1a53d6f64b00eecf53b65ff4a8c23dc95df1fa1e97bb06b8122e5a64f49fc90a \

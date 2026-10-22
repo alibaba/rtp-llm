@@ -92,6 +92,7 @@ The core features include:
       :maxdepth: 1
       :caption: References
 
+      references/serving_metrics
       references/general
       references/developer
       references/cli/Guide.md

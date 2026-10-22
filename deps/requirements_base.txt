@@ -33,6 +33,7 @@ pillow-avif-plugin==1.5.2
 pillow-heif
 portalocker
 prettytable
+prometheus-client==0.21.1
 protobuf==4.25
 psutil
 py-spy

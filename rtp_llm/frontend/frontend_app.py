@@ -22,7 +22,7 @@ from fastapi import Request as RawRequest
 from fastapi import status
 from fastapi.middleware import Middleware
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import ORJSONResponse, StreamingResponse
+from fastapi.responses import ORJSONResponse, Response, StreamingResponse
 from typing_extensions import override
 from uvicorn import Config, Server
 from uvicorn.loops.auto import auto_loop_setup
@@ -36,6 +36,10 @@ from rtp_llm.distribute.distributed_server import (
 )
 from rtp_llm.embedding.embedding_type import TYPE_STR, EmbeddingType
 from rtp_llm.frontend.frontend_server import FrontendServer
+from rtp_llm.frontend.serving_metrics import (
+    ServingMetricsMiddleware,
+    create_serving_metrics,
+)
 from rtp_llm.frontend.shutdown_manager import FrontendShutdownManager
 from rtp_llm.openai.api_datatype import (
     BatchChatCompletionRequest,
@@ -549,6 +553,19 @@ class FrontendApp(object):
             )
         ]
         app = FastAPI(middleware=middleware)
+        serving_metrics = create_serving_metrics()
+        if serving_metrics is not None:
+            app.add_middleware(ServingMetricsMiddleware, metrics=serving_metrics)
+
+            @app.get("/metrics", include_in_schema=False)
+            def metrics():
+                from prometheus_client import CONTENT_TYPE_LATEST
+
+                return Response(
+                    serving_metrics.render(),
+                    headers={"Content-Type": CONTENT_TYPE_LATEST},
+                )
+
         allocator_dump_enabled = bool(
             getattr(self.server_config, "enable_torch_allocator_dump", False)
         )
