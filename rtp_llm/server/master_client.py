@@ -5,7 +5,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import grpc
 import grpc.aio
@@ -344,7 +344,7 @@ class MasterClient:
         cache_key_block_size: int,
         input: GenerateInput,
         request_id: int,
-        input_pb_factory: Optional[Callable[[], GenerateInputPB]] = None,
+        input_pb: Optional["GenerateInputPB"] = None,
         *,
         cache_affinity_keys: Optional[List[str]] = None,
         selected_vit: Optional[Dict[str, Any]] = None,
@@ -357,7 +357,7 @@ class MasterClient:
 
         request_id is frontend-generated and only used for logging.
         Only connection_failed triggers slave retry and domain fallback.
-        Build generate_input lazily, only when the target requires it.
+        Serialize generate_input only when the target requires it.
         """
         master_addr = self.host_service.get_master_addr() if self.host_service else None
         if not master_addr:
@@ -414,13 +414,13 @@ class MasterClient:
         if vit_only:
             timeout_s = min(timeout_s, 0.5) if timeout_s is not None else 0.5
         serialized_input = None
-        can_attach = input_pb_factory is not None and not vit_only
+        can_attach = input_pb is not None and not vit_only
 
         def attach_generate_input():
             nonlocal serialized_input
-            assert input_pb_factory is not None
+            assert input_pb is not None
             if serialized_input is None:
-                serialized_input = input_pb_factory().SerializeToString()
+                serialized_input = input_pb.SerializeToString()
             request_pb.generate_input = serialized_input
 
         async def send_to(addr):
