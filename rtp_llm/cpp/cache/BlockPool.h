@@ -31,9 +31,6 @@ public:
 
     bool init();
 
-    // REBASE CONFLICT CONTEXT(2413e8e03): source branch exposed the per-pool BlockCache
-    // while the new base routes prefix reuse through SharedBlockCache at allocator scope.
-    // Keep this accessor for compatibility with the source branch's RDMA/cache-pool plumbing.
     BlockCachePtr blockCache();
 
     MemoryType                 where() const;

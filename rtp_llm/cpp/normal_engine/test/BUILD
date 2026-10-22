@@ -71,7 +71,9 @@ cc_test(
     data = [],
     copts = test_copts,
     deps = [
+        "//rtp_llm/cpp/engine_base/schedulers:schedulers",
         "//rtp_llm/cpp/observability:execution_recorder",
+        "//rtp_llm/cpp/config:static_config",
         "//rtp_llm/cpp/testing:device_test_utils",
         "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
         "//rtp_llm/cpp/normal_engine:normal_engine",
@@ -88,6 +90,40 @@ cc_test(
 )
 
 cc_test(
+    name = "normal_engine_terminal_stop_test",
+    srcs = ["NormalEngineTerminalStopTest.cc"],
+    copts = test_copts,
+    deps = [
+        ":mock_engine",
+        "//rtp_llm/cpp/engine_base/schedulers:schedulers",
+    ] + cuda13_torch_link_deps,
+    env = {"TEST_USING_DEVICE": "CUDA"},
+    timeout = "short",
+)
+
+cc_test(
+    name = "normal_engine_publisher_shutdown_test",
+    srcs = ["NormalEngineTerminalStopTest.cc"],
+    copts = test_copts + ["-DRTP_LLM_TEST_PUBLISHER_SHUTDOWN"],
+    deps = [
+        ":mock_engine",
+        "//rtp_llm/cpp/engine_base/schedulers:schedulers",
+        "//rtp_llm/cpp/model_rpc:model_rpc_server",
+        "//rtp_llm/cpp/models:models",
+        "//rtp_llm/cpp/pybind:th_transformer_lib",
+        "@havenask//aios/autil:base64",
+        "@havenask//aios/autil:zlib",
+        "@local_config_python//:python_lib",
+    ] + torch_deps() + cuda13_torch_link_deps,
+    # Reuse MockStore/MockConfig without building/loading the wrapper extension.
+    data = ["//rtp_llm/cpp/models/test:pywrapped_model_cache_store_integration_test.py"],
+    args = ["--gtest_filter=NormalEnginePublisherShutdownTest.*"],
+    env = {"TEST_USING_DEVICE": "CUDA"},
+    tags = ["manual"],
+    timeout = "moderate",
+)
+
+cc_test(
     name = "engine_test",
     srcs = glob([
         "EngineTest.cc",
@@ -95,6 +131,7 @@ cc_test(
     data = [],
     copts = test_copts,
     deps =  [
+        "//rtp_llm/cpp/engine_base/schedulers:schedulers",
         ":mock_engine",
     ] + cuda13_torch_link_deps,
     env = {

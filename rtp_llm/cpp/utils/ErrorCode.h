@@ -35,6 +35,8 @@ enum class ErrorCode {
     // master's 8431 RESOURCE_EXHAUSTED: that code is only valid paired with an AdmissionRejectReason the
     // engine has no way to set, and unpaired it is reported as a protocol violation upstream.
     GRAMMAR_COMPILE_OVERLOADED = 8105,
+    // Transient strict capture rejection before any reservation or publication.
+    HIDDEN_STATE_CAPTURE_BACKPRESSURE = 8107,
 
     // rpc error
     GET_HOST_FAILED                       = 8200,
@@ -120,6 +122,8 @@ inline std::string ErrorCodeToString(ErrorCode code) {
             return "OUTPUT_QUEUE_IS_EMPTY";
         case ErrorCode::FINISHED:
             return "FINISHED";
+        case ErrorCode::HIDDEN_STATE_CAPTURE_BACKPRESSURE:
+            return "HIDDEN_STATE_CAPTURE_BACKPRESSURE";
         case ErrorCode::EXCEEDS_KV_CACHE_MAX_LEN:
             return "EXCEEDS_KV_CACHE_MAX_LEN";
         case ErrorCode::GET_HOST_FAILED:

@@ -17,6 +17,20 @@ public:
     Executor() {};
     virtual absl::Status process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us = 0) = 0;
     virtual void         notifyStop() {}
+    virtual HiddenStateCaptureAdmissionResult tryReserveHiddenStateCapture(int64_t /*request_id*/,
+                                                                           int64_t /*valid_tokens*/) {
+        return {ErrorCode::EXECUTION_EXCEPTION, "executor does not support hidden-state capture"};
+    }
+
+    // Engine-loop-only control: root requests a terminal input, peers observe it
+    // through the same TP broadcast as ordinary inputs, never a local stop flag.
+    virtual bool supportsTerminalStop() const {
+        return false;
+    }
+    virtual void requestTerminalStop() {}
+    virtual bool terminalStopObserved() const {
+        return false;
+    }
 
     static GptModelDescription genModelDescription(const ModelConfig&       model_config,
                                                    const ParallelismConfig& parallelism_config,
@@ -84,7 +98,20 @@ public:
         return false;
     }
 
-public:
+protected:
+    static void reportHiddenStateCaptureError(const std::list<GenerateStreamPtr>& streams, const ErrorInfo& error) {
+        if (error.ok()) {
+            return;
+        }
+        // Attribute only after model/collective work; never remove packed lanes or
+        // infer explicit opt-in from the batch-level capture/skip-lm-head flags.
+        for (const auto& stream : streams) {
+            if (stream->generateConfig()->requiresHiddenStateCaptureAdmission() && !stream->hasError()) {
+                stream->cancelHiddenStateCapture();
+                stream->reportError(error.code(), error.ToString());
+            }
+        }
+    }
 };
 
 }  // namespace rtp_llm

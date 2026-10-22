@@ -1,6 +1,10 @@
 #include "rtp_llm/cpp/testing/TestBase.h"
+#include "rtp_llm/cpp/config/StaticConfig.h"
+#include <array>
+#include <limits>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 
 #include "rtp_llm/cpp/engine_base/stream/FrontendSpTpotSamples.h"
 
@@ -18,6 +22,28 @@ namespace rtp_llm {
 
 class QueryConverterTest: public DeviceTestBase {};
 
+TEST(QueryConverterCaptureTest, CaptureIntentDoesNotChangeGenerationOrRejectReuseConflict) {
+    EXPECT_FALSE(GenerateConfig().capture_hidden_states);
+    EXPECT_EQ(GenerateConfigPB::kCaptureHiddenStatesFieldNumber, 77);
+    GenerateConfigPB omitted;
+    omitted.set_max_new_tokens(4);
+    EXPECT_FALSE(QueryConverter::transGenerateConfig(&omitted)->capture_hidden_states);
+    for (int tokens : {0, 4}) {
+        for (bool reuse : {false, true}) {
+            for (bool capture : {false, true}) {
+                GenerateConfigPB wire;
+                wire.set_max_new_tokens(tokens);
+                wire.set_reuse_cache(reuse);
+                wire.set_capture_hidden_states(capture);
+                const auto config = QueryConverter::transGenerateConfig(&wire);
+                EXPECT_EQ(config->capture_hidden_states, capture);
+                EXPECT_EQ(config->reuse_cache, reuse);
+                EXPECT_EQ(config->max_new_tokens, tokens);
+            }
+        }
+    }
+}
+
 TEST(PrefillRpcServerTest, ThinkModeBudgetUsesPdSeparationWhenMaxNewTokensIsOne) {
     GenerateConfigPB generate_config;
     generate_config.set_max_new_tokens(1);
@@ -29,11 +55,10 @@ TEST(PrefillRpcServerTest, ThinkModeBudgetUsesPdSeparationWhenMaxNewTokensIsOne)
     generate_config.add_end_think_token_ids(8);
     generate_config.add_end_think_token_ids(9);
 
-    EXPECT_EQ(PrefillRpcServer::effectiveOutputTokenBudget(generate_config), 131075);
     EXPECT_TRUE(PrefillRpcServer::shouldUsePdSeparation(generate_config));
 }
 
-TEST(PrefillRpcServerTest, SingleTokenRequestWithoutPositiveThinkBudgetBypassesPdSeparation) {
+TEST(PrefillRpcServerTest, SingleTokenRequestPreservesBasePdRouting) {
     GenerateConfigPB generate_config;
     generate_config.set_max_new_tokens(1);
     generate_config.set_num_beams(1);
@@ -42,8 +67,130 @@ TEST(PrefillRpcServerTest, SingleTokenRequestWithoutPositiveThinkBudgetBypassesP
     generate_config.set_in_think_mode(true);
     generate_config.set_max_thinking_tokens(-1);
 
-    EXPECT_EQ(PrefillRpcServer::effectiveOutputTokenBudget(generate_config), 1);
-    EXPECT_FALSE(PrefillRpcServer::shouldUsePdSeparation(generate_config));
+    EXPECT_TRUE(PrefillRpcServer::shouldUsePdSeparation(generate_config));
+}
+
+TEST(QueryConverterPrefillTest, ZeroAndPositiveBudgetsPreserveWireSemantics) {
+    for (const int tokens : {0, 1, 7, std::numeric_limits<int>::max()}) {
+        for (const bool explicit_prefill : {false, true}) {
+            SCOPED_TRACE(tokens);
+            SCOPED_TRACE(explicit_prefill);
+            GenerateConfigPB wire;
+            wire.set_max_new_tokens(tokens);
+            wire.set_prefill_only(explicit_prefill);
+            wire.set_reuse_cache(true);
+            wire.set_can_use_pd_separation(true);
+            if (explicit_prefill && tokens != 0) {
+                EXPECT_THROW(QueryConverter::resolveMaxNewTokens(wire), std::invalid_argument);
+                EXPECT_THROW(QueryConverter::transGenerateConfig(&wire), std::invalid_argument);
+                EXPECT_THROW(PrefillRpcServer::shouldUsePdSeparation(wire), std::invalid_argument);
+                continue;
+            }
+            const auto config = QueryConverter::transGenerateConfig(&wire);
+            EXPECT_EQ(QueryConverter::resolveMaxNewTokens(wire), tokens);
+            EXPECT_EQ(config->max_new_tokens, tokens);
+            EXPECT_EQ(config->isPrefillOnly(), tokens == 0);
+            EXPECT_TRUE(config->reuse_cache);
+            EXPECT_EQ(PrefillRpcServer::shouldUsePdSeparation(wire), tokens > 0);
+        }
+    }
+    GenerateConfigPB omitted;
+    EXPECT_EQ(QueryConverter::resolveMaxNewTokens(omitted), 0);
+    EXPECT_TRUE(QueryConverter::transGenerateConfig(&omitted)->isPrefillOnly());
+}
+
+TEST(QueryConverterPrefillTest, NegativeBudgetsCannotBypassValidation) {
+    for (const int tokens : {-1, std::numeric_limits<int>::min()}) {
+        for (const bool explicit_prefill : {false, true}) {
+            GenerateConfigPB wire;
+            wire.set_max_new_tokens(tokens);
+            wire.set_prefill_only(explicit_prefill);
+            wire.set_can_use_pd_separation(false);
+            EXPECT_THROW(QueryConverter::resolveMaxNewTokens(wire), std::invalid_argument);
+            EXPECT_THROW(QueryConverter::transGenerateConfig(&wire), std::invalid_argument);
+            EXPECT_THROW(PrefillRpcServer::shouldUsePdSeparation(wire), std::invalid_argument);
+        }
+    }
+}
+
+TEST(QueryConverterPrefillTest, UnsupportedPrefillOutputsAndSamplingAreRejected) {
+    struct InvalidConfigCase {
+        const char* name;
+        void (*configure)(GenerateConfigPB*);
+    };
+    const std::array<InvalidConfigCase, 12> cases{{
+        {"min_new_tokens", [](GenerateConfigPB* c) { c->set_min_new_tokens(1); }},
+        {"num_beams", [](GenerateConfigPB* c) { c->set_num_beams(2); }},
+        {"variable_num_beams", [](GenerateConfigPB* c) { c->add_variable_num_beams(1); }},
+        {"num_return_sequences", [](GenerateConfigPB* c) { c->set_num_return_sequences(2); }},
+        {"return_logits", [](GenerateConfigPB* c) { c->set_return_logits(true); }},
+        {"calculate_loss", [](GenerateConfigPB* c) { c->set_calculate_loss(1); }},
+        {"return_softmax_probs", [](GenerateConfigPB* c) { c->set_return_softmax_probs(true); }},
+        {"return_all_probs", [](GenerateConfigPB* c) { c->set_return_all_probs(true); }},
+        {"return_cum_log_probs", [](GenerateConfigPB* c) { c->set_return_cum_log_probs(true); }},
+        {"return_logprobs", [](GenerateConfigPB* c) { c->set_return_logprobs(true); }},
+        {"return_hidden_states", [](GenerateConfigPB* c) { c->set_return_hidden_states(true); }},
+        {"return_all_hidden_states", [](GenerateConfigPB* c) { c->set_return_all_hidden_states(true); }},
+    }};
+    for (const auto& test_case : cases) {
+        for (const bool explicit_prefill : {false, true}) {
+            SCOPED_TRACE(test_case.name);
+            GenerateConfigPB wire;
+            wire.set_prefill_only(explicit_prefill);
+            test_case.configure(&wire);
+            try {
+                QueryConverter::transGenerateConfig(&wire);
+                FAIL() << "unsupported prefill-only configuration accepted";
+            } catch (const std::invalid_argument& e) {
+                EXPECT_NE(std::string(e.what()).find(test_case.name), std::string::npos);
+            }
+        }
+    }
+}
+
+TEST(QueryConverterPrefillTest, ZeroBudgetBypassesPdEvenWithThinkingBudget) {
+    GenerateConfigPB wire;
+    wire.set_can_use_pd_separation(true);
+    wire.set_in_think_mode(true);
+    wire.set_max_thinking_tokens(131072);
+    for (const bool explicit_prefill : {false, true}) {
+        wire.set_prefill_only(explicit_prefill);
+        EXPECT_FALSE(PrefillRpcServer::shouldUsePdSeparation(wire));
+    }
+}
+
+TEST(QueryConverterPrefillTest, MainAuxField75DoesNotAliasPrefillField76) {
+    EXPECT_EQ(GenerateConfigPB::kPrefillOnlyFieldNumber, 76);
+    // Main's optional BoolValue aux_info is unknown on this branch. Both wrapper
+    // values must be skipped without changing field 76 or the base aux default.
+    const std::array<std::string, 3> payloads{{
+        std::string("\xda\x04\x00\xe0\x04\x01", 6),
+        std::string("\xda\x04\x02\x08\x01\xe0\x04\x01", 8),
+        std::string("\xe0\x04\x01", 3),
+    }};
+    for (const auto& payload : payloads) {
+        GenerateConfigPB wire;
+        ASSERT_TRUE(wire.ParseFromString(payload));
+        EXPECT_EQ(wire.max_new_tokens(), 0);
+        EXPECT_TRUE(wire.prefill_only());
+        const auto config = QueryConverter::transGenerateConfig(&wire);
+        EXPECT_TRUE(config->isPrefillOnly());
+        EXPECT_TRUE(config->aux_info);
+        GenerateConfigPB round_trip;
+        ASSERT_TRUE(round_trip.ParseFromString(wire.SerializeAsString()));
+        EXPECT_TRUE(round_trip.prefill_only());
+    }
+}
+
+TEST(QueryConverterPrefillTest, ErrorCodesUseExplicitWireMappings) {
+    EXPECT_EQ(static_cast<int>(ErrorCodePB::INVALID_PARAMS), 26);
+    EXPECT_EQ(static_cast<int>(ErrorCodePB::EXECUTION_EXCEPTION), 27);
+    EXPECT_EQ(transErrorCodeToRPC(ErrorCode::INVALID_PARAMS), ErrorCodePB::INVALID_PARAMS);
+    EXPECT_EQ(transRPCErrorCode(ErrorCodePB::INVALID_PARAMS), ErrorCode::INVALID_PARAMS);
+    EXPECT_EQ(transErrorCodeToRPC(ErrorCode::EXECUTION_EXCEPTION), ErrorCodePB::EXECUTION_EXCEPTION);
+    EXPECT_EQ(transRPCErrorCode(ErrorCodePB::EXECUTION_EXCEPTION), ErrorCode::EXECUTION_EXCEPTION);
+    EXPECT_EQ(transErrorCodeToGrpc(ErrorCode::INVALID_PARAMS), grpc::StatusCode::INVALID_ARGUMENT);
+    EXPECT_EQ(transErrorCodeToGrpc(ErrorCode::EXECUTION_EXCEPTION), grpc::StatusCode::INTERNAL);
 }
 
 TEST_F(QueryConverterTest, testTransInput) {
@@ -145,7 +292,10 @@ TEST_F(QueryConverterTest, RoleAddrPreservesPdfusionDefaultAndRejectsConflicts) 
     auto*            conflicting = conflict.add_role_addrs();
     conflicting->set_role(RoleAddrPB::PREFILL);
     conflicting->set_role_str("DECODE");
+    const bool core_dump_on_exception            = StaticConfig::user_ft_core_dump_on_exception;
+    StaticConfig::user_ft_core_dump_on_exception = false;
     EXPECT_THROW(QueryConverter::getRoleAddrs(&conflict), std::runtime_error);
+    StaticConfig::user_ft_core_dump_on_exception = core_dump_on_exception;
 
     GenerateConfigPB omitted_legacy_default;
     omitted_legacy_default.add_role_addrs();

@@ -61,6 +61,15 @@ public:
         return local_server_->GenerateStreamCall(context, request, writer);
     }
 
+    grpc::Status BatchGenerateCall(grpc::ServerContext*        context,
+                                   const BatchGenerateInputPB* request,
+                                   BatchGenerateOutputsPB*     response) override {
+        if (!readyForRegularRpc()) {
+            return notReadyStatus("BatchGenerateCall");
+        }
+        return local_server_->BatchGenerateCall(context, request, response);
+    }
+
     grpc::Status EnqueueBatch(grpc::ServerContext*         context,
                               const EnqueueBatchRequestPB* request,
                               EnqueueBatchResponsePB*      response) override {

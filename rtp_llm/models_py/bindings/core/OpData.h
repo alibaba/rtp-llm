@@ -1,5 +1,6 @@
 #pragma once
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/models/models_weight/Weights.h"
 #include "rtp_llm/models_py/bindings/core/CommonDefines.h"
@@ -91,6 +92,8 @@ struct GptModelInputs {
     // CP prefill exit must materialize the full [seq, hidden] all_hidden_states
     // (true) or may gather only the last-token rows lm_head needs (false).
     bool need_all_hidden_states = false;
+    bool skip_lm_head           = false;
+    bool capture_hidden_states  = false;
     bool need_moe_gating        = false;
     bool warmup                 = false;
     bool skip_run               = false;
@@ -110,6 +113,10 @@ struct GptModelInputs {
     // not sync to other tp rank
     std::vector<std::string> trace_ids;
 
+    // Root-owned control message, serialized as the appended terminalStop shape hint.
+    // Unlike skip_run, this parks the normal engine at a collective-safe boundary.
+    bool terminal_stop = false;
+
 public:
     std::string debugString(bool force = false) const;
 };
@@ -125,6 +132,8 @@ struct GptModelOutputs {
     torch::Tensor mtp_indexer_topk;
 
     std::vector<torch::Tensor> moe_gating;
+    // Capture-only failure, interpreted per request after model collectives complete.
+    ErrorInfo hidden_state_capture_error;
 };
 
 struct CopyParams {

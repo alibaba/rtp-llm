@@ -137,9 +137,6 @@ void invokeMtpSelectedRowLogProbs(const torch::Tensor& logits,
                                   int64_t              top_k,
                                   cudaStream_t         stream);
 
-// REBASE CONFLICT CONTEXT(518707c73): keep new base dispatch-state publishing
-// kernel and add source branch prefill shift/append kernel to avoid sync-heavy
-// CPU token manipulation.
 // For each batch b with input_lengths_d[b] tokens packed at offset cumsum(input_lengths_d)[b-1]
 // in combo_tokens_in:
 //   * shift combo_tokens_in[offset .. offset+input_length-1] left by 1 (drop first token)

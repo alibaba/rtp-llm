@@ -132,6 +132,7 @@ try:
         FMHAType,
         GrammarConfig,
         GrpcConfig,
+        HiddenStateCaptureDtype,
         HWKernelConfig,
         HybridAttentionConfig,
         HybridAttentionType,

@@ -2,6 +2,7 @@
 #include <atomic>
 #include <mutex>
 #include <memory>
+#include <stdexcept>
 #include <unistd.h>
 #include <limits.h>
 #include <condition_variable>
@@ -140,6 +141,9 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
     RTP_LLM_LOG_DEBUG("request [%s] start to allocate resource", decode_context.request_key.c_str());
     auto input                  = QueryConverter::transQuery(&decode_context.allocate_request.input());
     decode_context.request_info = input->request_info;
+    if (input->generate_config->isPrefillOnly()) {
+        throw std::invalid_argument("prefill-only request cannot enter decode resource allocation");
+    }
     if (applyTimelineGate(decode_context.request_key,
                           input->generate_config->gen_timeline,
                           input->generate_config->profile_step,
@@ -251,6 +255,13 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
                       generate_request.stage() == RemoteStage::GENERATE,
                       grpc::StatusCode::INTERNAL,
                       "message first status != RemoteStage::GENERATE");
+    if (generate_stream->generateConfig()->isPrefillOnly()) {
+        decode_context.error_info =
+            ErrorInfo(ErrorCode::INVALID_PARAMS, "prefill-only request cannot enter decode generation");
+        decode_context.error_status =
+            serializeErrorMsg(decode_context.request_key, decode_context.request_info, decode_context.error_info);
+        return;
+    }
     decode_context.time_info.updateGenerateBeginTime();
     generate_stream->setIsContextStream(false);
     generate_stream->step();
@@ -313,9 +324,6 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
                                                 torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
         memcpy(sp_output_buffer->tokens.data_ptr<int>(), propose_tokens.data(), propose_tokens.size() * sizeof(int));
 
-        // REBASE CONFLICT CONTEXT(b08feda05): new base pins grpc tensors for
-        // safe non-blocking host lifetime; source branch also publishes GPU
-        // speculative state for MTP graft prefill cudagraph. Keep both.
         auto propose_probs_t  = pinGrpcTensor(QueryConverter::transTensor(generate_request.propose_probs()));
         auto propose_hidden_t = pinGrpcTensor(QueryConverter::transTensor(generate_request.propose_hidden()));
 
@@ -1460,6 +1468,13 @@ grpc::Status DecodeRpcServer::RemoteGenerate(grpc::ServerContext* server_context
         EXECUTE_STAGE_FUNC(loadCacheFromPrefill, decode_context);
         EXECUTE_STAGE_FUNC(localGenerate, decode_context);
         decode_context.stat_info.nextStage();
+    } catch (const std::invalid_argument& e) {
+        auto error_msg = "request [" + decode_context.request_key + "] catch invalid argument [" + e.what() + "]";
+        decode_context.error_info = ErrorInfo(ErrorCode::INVALID_PARAMS, error_msg);
+        decode_context.error_status =
+            serializeErrorMsg(decode_context.request_key, decode_context.request_info, decode_context.error_info);
+        reportEarlyFinishTask(decode_context, static_cast<int64_t>(ErrorCode::INVALID_PARAMS), error_msg);
+        return decode_context.error_status;
     } catch (const std::exception& e) {
         auto error_msg              = "request [" + decode_context.request_key + "] catch exception [" + e.what() + "]";
         decode_context.error_status = grpc::Status(grpc::StatusCode::INTERNAL, error_msg);

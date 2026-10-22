@@ -68,6 +68,8 @@ class ExceptionType(IntEnum):
     # is only valid paired with an AdmissionRejectReason, which the engine
     # cannot set. This one takes the generic capacity mapping.
     GRAMMAR_COMPILE_OVERLOADED = 8105, ExceptionCategory.CAPACITY
+    # Strict capture was rejected before any reservation or publication.
+    HIDDEN_STATE_CAPTURE_BACKPRESSURE = 8107, ExceptionCategory.CAPACITY
 
     # rpc error
     GET_HOST_FAILED = 8200

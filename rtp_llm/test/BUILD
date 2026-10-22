@@ -24,6 +24,19 @@ py_test(
 )
 
 py_test(
+    name = "generate_config_validators_test",
+    size = "small",
+    srcs = ["test_generate_config_validators.py"],
+    main = "test_generate_config_validators.py",
+    data = ["//:th_transformer_config"],
+    deps = [
+        "//rtp_llm:config_ops",
+        "//rtp_llm:pydantic",
+        "//rtp_llm:utils",
+    ],
+)
+
+py_test(
     name = "model_factory_glm_mtp_weight_share_test",
     srcs = ["model_factory_glm_mtp_weight_share_test.py"],
     deps = ["//rtp_llm:testlib"],

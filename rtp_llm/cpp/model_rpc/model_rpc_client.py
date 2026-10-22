@@ -4,6 +4,7 @@ import json
 import logging
 import time
 from contextlib import AsyncExitStack
+from dataclasses import replace
 from typing import AsyncGenerator
 
 import grpc
@@ -13,6 +14,8 @@ from grpc import StatusCode
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import RoleType
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
+    BatchGenerateInputPB,
+    ErrorCodePB,
     ErrorDetailsPB,
     FetchRequestPB,
     GenerateInputPB,
@@ -36,15 +39,116 @@ from rtp_llm.utils.base_model_datatypes import (
 from rtp_llm.utils.grpc_host_channel_pool import GrpcHostChannelPool
 from rtp_llm.utils.grpc_util import trans_option, trans_option_cast, trans_tensor
 
+logger = logging.getLogger(__name__)
+
 
 class StreamState:
     def __init__(self):
         self.cached_logits_dict = {}
+        self.prefill_aux_info_observed = False
 
 
 def _is_finished_response(outputs_pb: GenerateOutputsPB) -> bool:
     finished = outputs_pb.flatten_output.finished
     return bool(finished) and all(finished)
+
+
+def _validate_prefill_only_response(
+    input_py: GenerateInput, outputs_pb: GenerateOutputsPB, stream_state: StreamState
+) -> None:
+    if not input_py.generate_config.is_prefill_only():
+        return
+
+    output_pb = outputs_pb.flatten_output
+    if output_pb.HasField("output_ids"):
+        # Validate even frames without finished/aux_info: neither can hide tokens.
+        # Use the existing decoder so scalar, empty and malformed tensors retain
+        # the same shape/payload semantics as normal output conversion.
+        violation = None
+        try:
+            token_count = trans_tensor(output_pb.output_ids).numel()
+        except ValueError as error:
+            violation = f"invalid output_ids: {error}"
+        else:
+            if token_count != 0:
+                violation = f"output_ids contains {token_count} tokens"
+        if violation is not None:
+            logger.error(
+                "prefill-only response contract violation: request_id=%s, %s",
+                input_py.request_id,
+                violation,
+            )
+            raise FtRuntimeException(
+                ExceptionType.EXECUTION_EXCEPTION,
+                f"prefill-only request [{input_py.request_id}] received {violation}",
+            )
+
+    aux_infos = output_pb.aux_info
+    if not aux_infos:
+        return
+
+    stream_state.prefill_aux_info_observed = True
+    for index, aux_info in enumerate(aux_infos):
+        if aux_info.output_len != 0:
+            logger.error(
+                "prefill-only response contract violation: request_id=%s, "
+                "aux_info[%s].output_len=%s; backend generated tokens",
+                input_py.request_id,
+                index,
+                aux_info.output_len,
+            )
+            raise FtRuntimeException(
+                ExceptionType.EXECUTION_EXCEPTION,
+                f"prefill-only request [{input_py.request_id}] received "
+                f"aux_info[{index}].output_len={aux_info.output_len}; the backend "
+                "generated tokens and may not support GenerateConfigPB.prefill_only",
+            )
+
+
+def _validate_prefill_only_completed(
+    input_py: GenerateInput, stream_state: StreamState
+) -> None:
+    if (
+        input_py.generate_config.is_prefill_only()
+        and input_py.generate_config.aux_info
+        and not stream_state.prefill_aux_info_observed
+    ):
+        logger.error(
+            "prefill-only capability verification failed: request_id=%s "
+            "completed without aux_info",
+            input_py.request_id,
+        )
+        raise FtRuntimeException(
+            ExceptionType.EXECUTION_EXCEPTION,
+            f"prefill-only request [{input_py.request_id}] completed without "
+            "aux_info; the backend capability cannot be verified and it may not "
+            "support GenerateConfigPB.prefill_only",
+        )
+
+
+_RPC_ERROR_CODE_OVERRIDES = {
+    ErrorCodePB.CANCELLED: ExceptionType.CANCELLED_ERROR,
+    # The wire enum uses single-L CANCELED, unlike the native/Python code.
+    ErrorCodePB.P2P_CONNECTOR_WORKER_READ_CANCELED: (
+        ExceptionType.P2P_CONNECTOR_WORKER_READ_CANCELLED
+    ),
+}
+
+
+def _rpc_error_code_name(error_code: int) -> str:
+    try:
+        return ErrorCodePB.Name(error_code)
+    except ValueError:
+        return f"UNRECOGNIZED_ERROR_CODE_{error_code}"
+
+
+def _trans_rpc_error_code(error_code: int) -> ExceptionType:
+    if error_code in _RPC_ERROR_CODE_OVERRIDES:
+        return _RPC_ERROR_CODE_OVERRIDES[error_code]
+    try:
+        return ExceptionType[_rpc_error_code_name(error_code)]
+    except KeyError:
+        return ExceptionType.UNKNOWN_ERROR
 
 
 def trans_role_type(role_type: RoleType) -> RoleAddrPB.RoleType:
@@ -117,6 +221,7 @@ def trans_input(input_py: GenerateInput):
 
     generate_config_pb = input_pb.generate_config
     generate_config_pb.max_new_tokens = input_py.generate_config.max_new_tokens
+    generate_config_pb.prefill_only = input_py.generate_config.is_prefill_only()
     generate_config_pb.max_thinking_tokens = (
         input_py.generate_config.max_thinking_tokens
     )
@@ -213,6 +318,9 @@ def trans_input(input_py: GenerateInput):
     generate_config_pb.global_request_id = input_py.generate_config.global_request_id
     generate_config_pb.ignore_eos = input_py.generate_config.ignore_eos
     generate_config_pb.reuse_cache = input_py.generate_config.reuse_cache
+    generate_config_pb.capture_hidden_states = (
+        input_py.generate_config.capture_hidden_states
+    )
     generate_config_pb.enable_memory_cache = (
         input_py.generate_config.enable_memory_cache
     )
@@ -284,6 +392,7 @@ def trans_multimodal_input(
 def trans_output(
     input_py: GenerateInput, outputs_pb: GenerateOutputsPB, stream_state: StreamState
 ) -> GenerateOutputs:
+    _validate_prefill_only_response(input_py, outputs_pb, stream_state)
     logging.debug("outputs_pb = %s", outputs_pb)
     output_pb = outputs_pb.flatten_output
     num_outputs = len(output_pb.finished)
@@ -594,6 +703,193 @@ class ModelRpcClient(object):
     async def close(self):
         await self._channel_pool.close()
 
+    async def batch_generate(
+        self,
+        inputs: list[GenerateInput],
+        *,
+        preserve_capture_backpressure: bool = False,
+    ) -> list[GenerateOutputs | FtRuntimeException]:
+        """Run one native BatchGenerateCall, with atomic failure by default.
+
+        Complete non-streaming outputs are requested on copied configs. The
+        legacy per-enqueue max_concurrency option is not supported by this API.
+
+        Opt-in requires every input to be strict zero-token capture without
+        cache reuse. Only exact capture backpressure is retained at its input
+        position, alongside later successes. It certifies non-admission before
+        reservation/publication; other item, transport, cardinality and
+        conversion failures raise for the whole call, with no partial results.
+        """
+        if not inputs:
+            return []
+
+        batch_inputs = []
+        effective_timeouts_ms = []
+        for inp in inputs:
+            config = inp.generate_config.model_copy(deep=True)
+            # Unary batch returns only the terminal output, not token deltas.
+            config.is_streaming = False
+            request_timeout_ms = config.timeout_ms
+            effective_ms = (
+                request_timeout_ms
+                if request_timeout_ms is not None and request_timeout_ms > 0
+                else self._max_rpc_timeout_ms
+            )
+            if effective_ms > 0:
+                config.timeout_ms = int(effective_ms)
+                effective_timeouts_ms.append(int(effective_ms))
+            elif config.timeout_ms is None:
+                config.timeout_ms = 0
+            batch_inputs.append(replace(inp, generate_config=config))
+
+        # A finite sibling must not impose its deadline on an unlimited item.
+        has_unlimited_request = self._max_rpc_timeout_ms <= 0 and any(
+            timeout_ms is None or timeout_ms <= 0
+            for timeout_ms in (inp.generate_config.timeout_ms for inp in inputs)
+        )
+        grpc_timeout_seconds = (
+            max(effective_timeouts_ms) / 1000.0
+            if effective_timeouts_ms and not has_unlimited_request
+            else None
+        )
+        batch_input_pb = BatchGenerateInputPB()
+        for i, inp in enumerate(batch_inputs):
+            input_pb = trans_input(inp)
+            if preserve_capture_backpressure:
+                config_pb = input_pb.generate_config
+                if not (
+                    config_pb.max_new_tokens == 0
+                    and config_pb.prefill_only
+                    and config_pb.capture_hidden_states
+                    and not config_pb.reuse_cache
+                ):
+                    raise FtRuntimeException(
+                        ExceptionType.INVALID_PARAMS,
+                        "preserve_capture_backpressure requires every input to "
+                        "use effective max_new_tokens == 0, "
+                        "capture_hidden_states=True, and reuse_cache=False "
+                        f"(invalid batch item {i})",
+                    )
+            batch_input_pb.inputs.append(input_pb)
+
+        target_address = self._addresses[inputs[0].request_id % len(self._addresses)]
+        response_call = None
+        completed = False
+        acquire_start = time.monotonic()
+        try:
+            # Keep GLM's leased pool lifecycle rather than borrowing the main
+            # tree's unleased pool API. Acquisition consumes the same deadline.
+            async with self._channel_pool.acquire(
+                target_address, timeout=grpc_timeout_seconds
+            ) as channel:
+                stub = RpcServiceStub(channel)
+                grpc_kwargs = (
+                    {
+                        "timeout": max(
+                            0.0,
+                            grpc_timeout_seconds - (time.monotonic() - acquire_start),
+                        )
+                    }
+                    if grpc_timeout_seconds is not None
+                    else {}
+                )
+                try:
+                    response_call = stub.BatchGenerateCall(
+                        batch_input_pb, **grpc_kwargs
+                    )
+                    response = await response_call
+                    completed = True
+                    if len(response.results) != len(inputs):
+                        raise FtRuntimeException(
+                            ExceptionType.EXECUTION_EXCEPTION,
+                            "batch RPC returned an invalid result cardinality: "
+                            f"received {len(response.results)} results for {len(inputs)} requests",
+                        )
+                    results = []
+                    for i, result_pb in enumerate(response.results):
+                        legacy_error = result_pb.HasField("error_info") and (
+                            result_pb.error_info.error_code != ErrorCodePB.NONE_ERROR
+                            or result_pb.error_info.error_message
+                        )
+                        has_error = legacy_error
+                        if result_pb.HasField("error_details"):
+                            code = result_pb.error_details.error_code
+                            message = result_pb.error_details.error_message
+                            try:
+                                exception_type = ExceptionType(code)
+                                code_name = exception_type.name
+                            except ValueError:
+                                exception_type = ExceptionType.UNKNOWN_ERROR
+                                code_name = f"UNKNOWN({code})"
+                            capture_backpressure = (
+                                code == ExceptionType.HIDDEN_STATE_CAPTURE_BACKPRESSURE
+                            )
+                            # Never reinterpret an execution failure as admission rejection.
+                            # Conflicting BP envelopes are not safe to retry, even opt-in.
+                            if (code == 0 and legacy_error) or (
+                                capture_backpressure
+                                and (
+                                    result_pb.HasField("final_output")
+                                    or (
+                                        result_pb.HasField("error_info")
+                                        and result_pb.error_info.error_code
+                                        != ErrorCodePB.HIDDEN_STATE_CAPTURE_BACKPRESSURE
+                                    )
+                                )
+                            ):
+                                raise FtRuntimeException(
+                                    ExceptionType.EXECUTION_EXCEPTION,
+                                    f"batch item {i} request [{inputs[i].request_id}] "
+                                    f"has conflicting error fields: native={code}, "
+                                    f"legacy={result_pb.error_info.error_code}, "
+                                    f"final_output={result_pb.HasField('final_output')}; "
+                                    f"{message}",
+                                )
+                            has_error = code != 0 or bool(message)
+                            message = f"{code_name}: {message}" if message else code_name
+                        elif legacy_error:
+                            code = result_pb.error_info.error_code
+                            exception_type = _trans_rpc_error_code(code)
+                            message = (
+                                result_pb.error_info.error_message
+                                or _rpc_error_code_name(code)
+                            )
+                            capture_backpressure = (
+                                code == ErrorCodePB.HIDDEN_STATE_CAPTURE_BACKPRESSURE
+                            )
+                        if has_error:
+                            error = FtRuntimeException(
+                                exception_type,
+                                f"batch item {i} request [{inputs[i].request_id}] failed: {message}",
+                            )
+                            if preserve_capture_backpressure and capture_backpressure:
+                                results.append(error)
+                                continue
+                            raise error
+                        stream_state = StreamState()
+                        output = trans_output(
+                            batch_inputs[i], result_pb.final_output, stream_state
+                        )
+                        _validate_prefill_only_completed(batch_inputs[i], stream_state)
+                        results.append(output)
+                    return results
+                finally:
+                    if response_call is not None and not completed:
+                        response_call.cancel()
+        except asyncio.TimeoutError as error:
+            raise FtRuntimeException(
+                ExceptionType.GENERATE_TIMEOUT,
+                "timed out waiting for RPC channel capacity",
+            ) from error
+        except grpc.RpcError as error:
+            self._handle_grpc_error(
+                error, f"batch request: [{len(inputs)} items]", target_address
+            )
+
+    async def batch_enqueue(self, inputs: list[GenerateInput]) -> list[GenerateOutputs]:
+        """Compatibility alias retaining atomic batch failure semantics."""
+        return await self.batch_generate(inputs)
+
     async def enqueue(
         self, input_py: GenerateInput
     ) -> AsyncGenerator[GenerateOutputs, None]:
@@ -675,6 +971,7 @@ class ModelRpcClient(object):
                     terminal_seen = True
                 yield output
             stream_done = True
+            _validate_prefill_only_completed(input_py, stream_state)
         except asyncio.TimeoutError as e:
             raise FtRuntimeException(
                 ExceptionType.GENERATE_TIMEOUT,
@@ -684,45 +981,9 @@ class ModelRpcClient(object):
             # TODO(xinfei.sxf) 非流式的请求无法取消了
             if response_iterator:
                 response_iterator.cancel()
-            error_details = ErrorDetailsPB()
-            metadata = e.trailing_metadata()
-            if "grpc-status-details-bin" in metadata and error_details.ParseFromString(
-                metadata["grpc-status-details-bin"]
-            ):
-                logging.error(
-                    f"request: [{input_pb.request_id}] RPC failed: "
-                    f"{e.code()}, {e.details()}, detail error code is "
-                    f"{ExceptionType.from_value(error_details.error_code)}"
-                )
-                raise FtRuntimeException(
-                    ExceptionType(error_details.error_code), error_details.error_message
-                )
-            else:
-                logging.error(
-                    f"request: [{input_pb.request_id}] RPC failed: "
-                    f"error code is {e.code()}, detail is {e.details()}"
-                )
-                if e.code() == StatusCode.DEADLINE_EXCEEDED:
-                    raise FtRuntimeException(
-                        ExceptionType.GENERATE_TIMEOUT, e.details()
-                    )
-                elif e.code() == StatusCode.CANCELLED:
-                    raise FtRuntimeException(ExceptionType.CANCELLED_ERROR, e.details())
-                elif e.code() == StatusCode.UNAVAILABLE:
-                    details = e.details() or ""
-                    lower_details = details.lower()
-                    if (
-                        "socket closed" in lower_details
-                        or "connection reset" in lower_details
-                    ):
-                        exception_type = ExceptionType.CONNECTION_RESET_BY_PEER
-                    elif "timed out" in lower_details or "timeout" in lower_details:
-                        exception_type = ExceptionType.CONNECT_TIMEOUT
-                    else:
-                        exception_type = ExceptionType.CONNECT_FAILED
-                    raise FtRuntimeException(exception_type, details)
-                else:
-                    raise FtRuntimeException(ExceptionType.UNKNOWN_ERROR, e.details())
+            self._handle_grpc_error(
+                e, f"request: [{input_pb.request_id}]", target_address
+            )
         except Exception as e:
             logging.error(f"rpc unknown error:{str(e)}")
             raise e
@@ -733,3 +994,56 @@ class ModelRpcClient(object):
             if response_iterator and should_cancel:
                 response_iterator.cancel()
             await resources.aclose()
+
+    def _handle_grpc_error(
+        self, e: grpc.RpcError, request_desc: str, target_address: str = ""
+    ) -> None:
+        # NOTE: keep the backend peer (target_address) in the log lines ONLY.
+        # Do NOT append it to the FtRuntimeException message, which is
+        # serialized into the client-facing error response and would leak
+        # internal cluster topology (worker ip:port) to callers.
+        peer_desc = f" to [{target_address}]" if target_address else ""
+        error_details = ErrorDetailsPB()
+        metadata = dict(e.trailing_metadata() or ())
+        if "grpc-status-details-bin" in metadata and error_details.ParseFromString(
+            metadata["grpc-status-details-bin"]
+        ):
+            raw_error_code = error_details.error_code
+            try:
+                exception_type = ExceptionType(raw_error_code)
+                error_code_name = exception_type.name
+            except ValueError:
+                exception_type = ExceptionType.UNKNOWN_ERROR
+                error_code_name = f"UNKNOWN({raw_error_code})"
+            logging.error(
+                f"{request_desc} RPC{peer_desc} failed: "
+                f"{e.code()}, {e.details()}, detail error code is "
+                f"{error_code_name}"
+            )
+            raise FtRuntimeException(exception_type, error_details.error_message)
+        else:
+            logging.error(
+                f"{request_desc} RPC{peer_desc} failed: "
+                f"error code is {e.code()}, detail is {e.details()}"
+            )
+            if e.code() == StatusCode.DEADLINE_EXCEEDED:
+                raise FtRuntimeException(
+                    ExceptionType.GENERATE_TIMEOUT, e.details()
+                )
+            elif e.code() == StatusCode.CANCELLED:
+                raise FtRuntimeException(ExceptionType.CANCELLED_ERROR, e.details())
+            elif e.code() == StatusCode.UNAVAILABLE:
+                details = e.details() or ""
+                lower_details = details.lower()
+                if (
+                    "socket closed" in lower_details
+                    or "connection reset" in lower_details
+                ):
+                    exception_type = ExceptionType.CONNECTION_RESET_BY_PEER
+                elif "timed out" in lower_details or "timeout" in lower_details:
+                    exception_type = ExceptionType.CONNECT_TIMEOUT
+                else:
+                    exception_type = ExceptionType.CONNECT_FAILED
+                raise FtRuntimeException(exception_type, details)
+            else:
+                raise FtRuntimeException(ExceptionType.UNKNOWN_ERROR, e.details())

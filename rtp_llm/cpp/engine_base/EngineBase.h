@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <utility>
 
 #include "absl/status/status.h"
@@ -43,11 +44,11 @@ public:
     void initRuntime(const EngineInitParams& params);
 
     void pause() {
-        pause_ = true;
+        pause_.store(true, std::memory_order_release);
     }
 
     void restart() {
-        pause_ = false;
+        pause_.store(false, std::memory_order_release);
     }
 
     virtual std::shared_ptr<GenerateStream> enqueue(const std::shared_ptr<GenerateInput>& input) = 0;
@@ -72,6 +73,11 @@ public:
 
     virtual void requestForceStop() {}
 
+    // Wire values shared with DistributedServer.choose_backend_stop_step.
+    static constexpr int64_t kTerminalStopCapability = -2;
+    static constexpr int64_t kTerminalStopTarget     = 0;
+
+    // >=0: MTP step snapshot; -1: unsupported; -2: terminal protocol (arm validates topology).
     virtual int64_t completedSteps() const {
         return -1;
     }
@@ -133,7 +139,7 @@ protected:
     int32_t                        kv_cache_group_num_ = 1;
     std::vector<int32_t>           kv_cache_layer_to_group_;
     std::unique_ptr<SchedulerBase> scheduler_ = nullptr;
-    bool                           pause_     = false;
+    std::atomic<bool>              pause_{false};
 };
 
 }  // namespace rtp_llm

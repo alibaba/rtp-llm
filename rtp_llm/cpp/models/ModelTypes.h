@@ -9,10 +9,20 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
 #include "rtp_llm/models_py/bindings/core/TensorHolder.h"
+#include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
+#include <atomic>
+#include <exception>
+#include <functional>
+#include <optional>
 #include <string>
 #include <cstdint>
 #include <utility>
 #include <memory>
+
+namespace kmonitor {
+class MetricsReporter;
+}
 
 namespace rtp_llm {
 
@@ -66,6 +76,14 @@ struct GptModelInitParams {
     // is the contract between target and draft for MTP — see
     // MtpExecutor::makeFakeSPOutputBuffer and CudaGraphRunner input_hiddens.
     int64_t hc_mult = 1;
+    std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter;
+    std::vector<int64_t>                       hidden_state_capture_layer_ids;
+    HiddenStateCaptureDtype                    hidden_state_capture_dtype = HiddenStateCaptureDtype::BF16;
+    int64_t                                    hidden_state_capture_max_inflight_samples = 64;
+    int64_t                                    hidden_state_capture_max_inflight_bytes   = 1073741824;
+    int64_t                                    hidden_state_capture_max_inflight_tokens  = 131072;
+    int64_t                                    hidden_state_capture_max_pending_batches  = 8;
+    int64_t                                    hidden_state_capture_poll_interval_ms     = 1000;
 };
 
 enum GptModelInputIndex : size_t {
@@ -99,6 +117,11 @@ enum GptModelInputIndex : size_t {
     // matching GPU buffers and keep tpSync broadcast lanes consistent.
     tensorDeviceMap,
     recordExecutionId,
+    // Append root-owned capture controls without changing existing hint indices.
+    skipLmHead,
+    captureHiddenStates,
+    // Append before the length sentinel; all existing field indices stay fixed.
+    terminalStop,
     gptModelInputLength,
 };
 
@@ -129,12 +152,60 @@ struct TokenSliceInfo {
     size_t count  = 0;
 };
 
+// The publisher binds cancellation to one reservation generation. Tokens never
+// own the publisher/model, and cancellation failures must not escape serving.
+class HiddenStateCaptureReservation final {
+public:
+    explicit HiddenStateCaptureReservation(std::function<void()> cancel_callback):
+        cancel_callback_(std::move(cancel_callback)) {}
+
+    ~HiddenStateCaptureReservation() {
+        cancel();
+    }
+
+    bool active() const {
+        return active_.load(std::memory_order_acquire);
+    }
+
+    void cancel() noexcept {
+        if (!active_.exchange(false, std::memory_order_acq_rel)) {
+            return;
+        }
+        try {
+            cancel_callback_();
+        } catch (const std::exception& error) {
+            try {
+                RTP_LLM_LOG_WARNING("hidden-state capture reservation cancellation failed: %s", error.what());
+            } catch (...) {
+                // Diagnostics may also allocate; cancellation must remain noexcept.
+            }
+        } catch (...) {
+            try {
+                RTP_LLM_LOG_WARNING("hidden-state capture reservation cancellation failed with unknown exception");
+            } catch (...) {
+            }
+        }
+    }
+
+private:
+    std::atomic<bool>           active_{true};
+    const std::function<void()> cancel_callback_;
+};
+
+using HiddenStateCaptureReservationPtr = std::shared_ptr<HiddenStateCaptureReservation>;
+// Success carries an active reservation; rejection never admits a request.
+using HiddenStateCaptureAdmissionResult = ErrorResult<HiddenStateCaptureReservationPtr>;
+
 class ModelBase {
 public:
     virtual ~ModelBase()                                          = default;
     virtual GptModelOutputs forward(const GptModelInputs& inputs) = 0;
     virtual void            releaseBuffers() {}
     virtual void            prepareAttentionInputs(const GptModelInputs& inputs) {}
+    virtual HiddenStateCaptureAdmissionResult tryReserveHiddenStateCapture(int64_t /*request_id*/,
+                                                                          int64_t /*valid_tokens*/) {
+        return {ErrorCode::EXECUTION_EXCEPTION, "model does not support hidden-state capture"};
+    }
     virtual bool            cudaGraphEnabled() const {
         return false;
     }

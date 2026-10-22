@@ -1312,9 +1312,7 @@ void invokeMtpSpecSamplerTokenMatrix(const torch::Tensor& history,
                             cudaGetErrorString(status));
 }
 
-// REBASE CONFLICT CONTEXT(518707c73): source branch added this fused
-// shift/append launcher to eliminate sync-heavy CPU token manipulation. Keep it
-// with the new base dispatch-state prepare launcher above.
+
 void invokeMtpPrefillShiftAppend(const torch::Tensor& combo_tokens_in,
                                  const torch::Tensor& input_lengths,
                                  const torch::Tensor& batch_offsets,

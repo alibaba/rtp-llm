@@ -1,5 +1,8 @@
+import threading
 import unittest
 from unittest.mock import patch
+
+from torch.distributed import HashStore
 
 import rtp_llm.distribute.distributed_server as ds
 
@@ -166,6 +169,152 @@ class BackendShutdownRendezvousTest(unittest.TestCase):
             server.store.get(server.BACKEND_SHUTDOWN_STEP_DECISION_KEY), b"success"
         )
 
+    def test_terminal_engine_cannot_fall_back_to_single_rank_force_stop(self):
+        server = self._server(rank=0, world_size=1)
+        with self.assertRaisesRegex(
+            ds.BackendStopConsensusError, "matching multi-rank"
+        ):
+            self._choose(server, 1, -2)
+        self.assertEqual(self._choose(server, 1, -1), -1)
+
+    def test_terminal_capability_selects_boundary_not_future_steps(self):
+        server = self._server(rank=1, world_size=8)
+        for rank in range(8):
+            if rank != server.rank:
+                server.store.set(server.BACKEND_SHUTDOWN_STEP_KEY + str(rank), "-2")
+                server.store.set(server.BACKEND_SHUTDOWN_STEP_ACK_KEY + str(rank), "0")
+        armed = []
+        self.assertEqual(self._choose(server, 1, -2, armed=armed), 0)
+        self.assertEqual(armed, [0])
+        self.assertEqual(server.store.get(server.BACKEND_SHUTDOWN_TARGET_KEY), b"0")
+
+    def test_terminal_capability_mismatch_aborts_without_force_stop_target(self):
+        for peer_step in (-1, 64):
+            with self.subTest(peer_step=peer_step):
+                server = self._server()
+                server.store.set(server.BACKEND_SHUTDOWN_STEP_KEY + "0", str(peer_step))
+                server.store.set(server.BACKEND_SHUTDOWN_STEP_CANCEL_KEY + "0", "ready")
+                armed = []
+                with self.assertRaisesRegex(
+                    ds.BackendStopConsensusError, "incompatible.*terminal"
+                ):
+                    self._choose(server, 1, -2, armed=armed)
+                self.assertEqual(armed, [])
+                self.assertNotIn(server.BACKEND_SHUTDOWN_TARGET_KEY, server.store.data)
+
+    def test_terminal_topology_rejection_never_acknowledges_cancellation(self):
+        server = self._server()
+        server.store.set(server.BACKEND_SHUTDOWN_STEP_KEY + "0", "-2")
+        server.store.set(server.BACKEND_SHUTDOWN_STEP_CANCEL_KEY + "0", "ready")
+        cancelled = []
+
+        def reject_topology(target):
+            self.assertEqual(target, 0)
+            raise RuntimeError("terminal stop requires one TP world")
+
+        with self.assertRaisesRegex(
+            ds.BackendStopConsensusError, "boundary not established"
+        ):
+            server.choose_backend_stop_step(
+                1, -2, reject_topology, lambda: cancelled.append(True)
+            )
+        self.assertEqual(cancelled, [])
+        self.assertNotIn(
+            server.BACKEND_SHUTDOWN_STEP_CANCEL_KEY + "1", server.store.data
+        )
+        self.assertEqual(
+            server.store.get(server.BACKEND_SHUTDOWN_STEP_DECISION_KEY), b"abort:1"
+        )
+
+    def test_late_root_drives_terminal_after_follower_arm_timeout(self):
+        servers = [self._server(rank=rank) for rank in range(2)]
+        store = HashStore()
+        for server in servers:
+            server.store = store
+            store.set(server.BACKEND_SHUTDOWN_STEP_KEY + str(server.rank), "-2")
+        recovery_waiting = threading.Event()
+        boundary = threading.Event()
+        calls = [0, 0]
+        cancelled = [False, False]
+        errors = [None, None]
+
+        def arm(rank):
+            calls[rank] += 1
+            if rank == 0:
+                boundary.set()
+            elif calls[rank] == 1:
+                raise TimeoutError("follower arm timed out before root arrived")
+            else:
+                recovery_waiting.set()
+                if not boundary.wait(2):
+                    raise TimeoutError("root never drove the terminal boundary")
+
+        def cancel(rank):
+            if not boundary.is_set():
+                raise RuntimeError("cancel before terminal boundary")
+            cancelled[rank] = True
+
+        def choose(rank):
+            try:
+                servers[rank].choose_backend_stop_step(
+                    2, -2, lambda target: arm(rank), lambda: cancel(rank)
+                )
+            except Exception as error:
+                errors[rank] = error
+
+        follower = threading.Thread(target=choose, args=(1,))
+        follower.start()
+        try:
+            self.assertTrue(recovery_waiting.wait(2))
+            self.assertEqual(
+                store.get(servers[0].BACKEND_SHUTDOWN_STEP_DECISION_KEY), b"abort:1"
+            )
+            choose(0)  # root sees abort before ever entering its normal arm path
+        finally:
+            follower.join(5)
+        self.assertFalse(follower.is_alive())
+        self.assertEqual(calls, [1, 2])
+        self.assertEqual(cancelled, [True, True])
+        for rank, error in enumerate(errors):
+            self.assertIs(type(error), TimeoutError)  # safe, not the park-only subclass
+            self.assertEqual(
+                store.get(servers[0].BACKEND_SHUTDOWN_STEP_CANCEL_KEY + str(rank)),
+                b"terminal_ready",
+            )
+
+    def test_terminal_abort_rejects_legacy_unarmed_cancel_ack(self):
+        server = self._server()
+        server.store.set(server.BACKEND_SHUTDOWN_STEP_KEY + "0", "-2")
+        server.store.set(server.BACKEND_SHUTDOWN_STEP_DECISION_KEY, "abort:0")
+        server.store.set(server.BACKEND_SHUTDOWN_STEP_CANCEL_KEY + "0", "ready")
+        with self.assertRaisesRegex(
+            ds.BackendStopConsensusError, "peer did not acknowledge"
+        ):
+            self._choose(server, 1, -2)
+
+    def test_terminal_cancel_failure_cannot_authorize_local_force_stop(self):
+        server = self._server()
+        server.store.set(server.BACKEND_SHUTDOWN_STEP_KEY + "0", "-2")
+        server.store.set(server.BACKEND_SHUTDOWN_STEP_CANCEL_KEY + "0", "ready")
+
+        arm_calls = []
+
+        def fail_arm(target):
+            arm_calls.append(target)
+            if len(arm_calls) == 1:
+                raise RuntimeError("arm timed out")
+
+        def fail_cancel():
+            raise RuntimeError("terminal boundary not reached")
+
+        with patch.object(ds.time, "monotonic", side_effect=[0, 2]), self.assertRaises(
+            ds.BackendStopConsensusError
+        ):
+            server.choose_backend_stop_step(1, -2, fail_arm, fail_cancel)
+        self.assertNotIn(
+            server.BACKEND_SHUTDOWN_STEP_CANCEL_KEY + "1", server.store.data
+        )
+
     def test_choose_stop_step_disables_coordination_job_wide(self):
         server = self._server(rank=1, world_size=2)
         server.store.set(server.BACKEND_SHUTDOWN_STEP_KEY + "0", "-1")
@@ -182,8 +331,10 @@ class BackendShutdownRendezvousTest(unittest.TestCase):
         server = self._server(rank=1, world_size=2)
         server.store.set(server.BACKEND_SHUTDOWN_STEP_CANCEL_KEY + "0", "ready")
 
-        with patch.object(ds.time, "monotonic", side_effect=[10.0, 11.0, 11.0]):
-            with self.assertRaisesRegex(TimeoutError, "consensus timed out"):
+        with patch.object(ds.time, "monotonic", side_effect=[10.0, 11.0]):
+            with self.assertRaisesRegex(
+                ds.BackendStopConsensusError, "incomplete backend stop capabilities"
+            ):
                 self._choose(server, 0.5, 64)
 
         self.assertEqual(
@@ -192,6 +343,7 @@ class BackendShutdownRendezvousTest(unittest.TestCase):
 
     def test_choose_stop_step_observes_peer_abort(self):
         server = self._server(rank=1, world_size=2)
+        server.store.set(server.BACKEND_SHUTDOWN_STEP_KEY + "0", "64")
         server.store.set(server.BACKEND_SHUTDOWN_STEP_DECISION_KEY, "abort:0")
         server.store.set(server.BACKEND_SHUTDOWN_STEP_CANCEL_KEY + "0", "ready")
 
@@ -264,6 +416,7 @@ class BackendShutdownRendezvousTest(unittest.TestCase):
 
     def test_choose_stop_step_abort_waits_for_peer_cancellation(self):
         server = self._server(rank=1, world_size=2)
+        server.store.set(server.BACKEND_SHUTDOWN_STEP_KEY + "0", "64")
         server.store.set(server.BACKEND_SHUTDOWN_STEP_DECISION_KEY, "abort:0")
 
         with patch.object(ds.time, "monotonic", side_effect=[10.0, 10.0, 11.0]):
