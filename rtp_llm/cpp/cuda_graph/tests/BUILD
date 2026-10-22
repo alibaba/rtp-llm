@@ -222,7 +222,7 @@ py_test(
         ":cuda_graph_test_utils",
         "//rtp_llm/models_py:modules",
         "//rtp_llm/test/model_test/test_util",
-    ],
+    ] + [":cuda_graph_test_runner"],
     env = {
         "ENABLE_CUDA_GRAPH_DEBUG_MODE": "1",
         "NOT_USE_DEFAULT_STREAM": "1",
@@ -269,7 +269,7 @@ py_test(
         ":cuda_graph_test_utils",
         "//rtp_llm/models_py:modules",
         "//rtp_llm/test/model_test/test_util",
-    ],
+    ] + [":cuda_graph_test_runner"],
     env = {
         "ENABLE_CUDA_GRAPH_DEBUG_MODE": "1",
         "NOT_USE_DEFAULT_STREAM": "1",
@@ -366,4 +366,13 @@ py_test(
     },
     tags = ["manual", "rocm"],  # Collected automatically by py_ut_amd.
     exec_properties = {"gpu": "MI308X-ROCM7"},
+)
+
+# Supply the existing lazy facade and its actual shared library in Bazel runfiles.
+py_library(
+    name = "cuda_graph_test_runner",
+    srcs = ["cuda_graph_test_runner.py"],
+    data = [":test_cuda_graph_runner"],
+    imports = ["."],
+    visibility = ["//visibility:public"],
 )

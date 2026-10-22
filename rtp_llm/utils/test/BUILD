@@ -1,3 +1,4 @@
+load("@pip_gpu_rocm_torch//:requirements.bzl", requirement_gpu_rocm = "requirement")
 load("@arch_config//:arch_select.bzl", "requirement")
 load("//rtp_llm/test/smoke:defs.bzl", "custom_smoke_test")
 
@@ -141,7 +142,7 @@ py_test(
         "//rtp_llm:config",
         "//rtp_llm:lora",
         "//rtp_llm:utils",
-    ],
+    ] + [requirement_gpu_rocm("pytest")],
     data = ["//rtp_llm/utils/test:testdata"],
     env = {"RTP_LLM_REQUIRE_ACCELERATOR": "1"},
     tags = ["rocm"],

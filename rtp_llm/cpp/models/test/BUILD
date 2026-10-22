@@ -1,3 +1,4 @@
+load("@pip_gpu_rocm_torch//:requirements.bzl", requirement_gpu_rocm = "requirement")
 load("//:def.bzl", "cc_test_wrapper", "copts")
 load("@arch_config//:arch_select.bzl", "torch_deps")
 
@@ -123,7 +124,7 @@ py_test(
     main = "pywrapped_model_cache_store_integration_test.py",
     srcs = ["pywrapped_model_cache_store_integration_test.py"],
     data = [":th_pywrapped_model_cache_store_integration_test"],
-    deps = pywrapped_model_test_deps,
+    deps = pywrapped_model_test_deps + [requirement_gpu_rocm("pytest")],
     env = {"TEST_USING_DEVICE": "ROCM"},
     tags = ["rocm"],
     exec_properties = {"gpu": "MI308X-ROCM7"},
@@ -160,7 +161,7 @@ py_test(
     data = [":th_pywrapped_model_cache_store_integration_test"],
     deps = pywrapped_model_test_deps + [
         "//rtp_llm/models_py:modules",
-    ],
+    ] + [requirement_gpu_rocm("pytest")],
     env = {
         "ENABLE_CUDA_GRAPH_DEBUG_MODE": "1",
         "NOT_USE_DEFAULT_STREAM": "1",

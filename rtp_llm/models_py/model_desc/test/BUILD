@@ -1,3 +1,4 @@
+load("@pip_gpu_rocm_torch//:requirements.bzl", requirement_gpu_rocm = "requirement")
 py_test_deps = [
     "//rtp_llm/models_py/standalone:py_standalone_testlib",
 ]
@@ -7,7 +8,7 @@ py_test(
     srcs = ["qwen_gdn_graph_replay_test.py"],
     main = "qwen_gdn_graph_replay_test.py",
     data = ["//rtp_llm/cpp/cuda_graph/tests:test_cuda_graph_runner"],
-    deps = py_test_deps,
+    deps = py_test_deps + [requirement_gpu_rocm("pytest"), "//rtp_llm/cpp/cuda_graph/tests:cuda_graph_test_runner"],
     env = {"GPU_COUNT": "1"},
     tags = ["rocm"],
     exec_properties = {
@@ -138,7 +139,7 @@ py_test(
     main = "qwen3_next_qkvz_ba_fusion_test.py",
     deps = [
         "//rtp_llm/models_py/standalone:py_standalone_testlib",
-    ],
+    ] + [requirement_gpu_rocm("pytest")],
     env = {"GPU_COUNT": "1"},
     tags = ["rocm"],
     exec_properties = {
