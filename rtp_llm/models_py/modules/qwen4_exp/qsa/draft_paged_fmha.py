@@ -1,6 +1,4 @@
-"""Opt-in SM120 draft attention over packed inputs and HND main cache."""
-
-import os
+"""SM120 draft attention over packed inputs and HND main cache."""
 
 import torch
 import triton
@@ -77,7 +75,6 @@ def try_draft_paged_attention(
     """
     if not (
         _enabled(qkv)
-        and os.environ.get("QWEN4_DRAFT_QSA_DIRECT", "0") == "1"
         and (heads, kv_heads, head_dim, page_size) == (12, 1, 256, 128)
         and qkv.ndim == 2
         and qkv.shape[1] >= 3072

@@ -1,7 +1,5 @@
 """Exact native dynamic FP8 quantization for measured small SM120 projections."""
 
-import os
-
 import torch
 import triton as tr
 import triton.language as tl
@@ -87,7 +85,6 @@ def try_silu_mul_fp8_quant(gate_up, *, output=None):
         and gate_up.is_contiguous()
         and gate_up.shape[0] in (4, 8, 12, 16)
         and gate_up.shape[1] == 1280
-        and os.environ.get("QWEN4_FP8_SHARED_DOWN_QUANT", "0") == "1"
         and torch.cuda.get_device_capability(gate_up.device) == (12, 0)
     ):
         return None
@@ -135,7 +132,6 @@ def is_supported(x, output=None):
             or (
                 x.shape[1] == 640
                 and x.shape[0] in (4, 8, 12, 16)
-                and os.environ.get("QWEN4_FP8_SHARED_DOWN_QUANT", "0") == "1"
             )
         )
         and x.numel() <= 65536

@@ -22,9 +22,6 @@ class Fp8SmallQuantTest(unittest.TestCase):
         self.assertTrue(torch.cuda.is_available(), "This target requires SM120")
         self.assertEqual(torch.cuda.get_device_capability(), (12, 0))
         torch.manual_seed(20261019)
-        flags = patch.dict("os.environ", {"QWEN4_FP8_SHARED_DOWN_QUANT": "1"})
-        flags.start()
-        self.addCleanup(flags.stop)
 
     def compare(self, x, padded=True):
         shape = (((x.shape[0] + 15) // 16) * 16, x.shape[1]) if padded else x.shape
@@ -233,7 +230,7 @@ class Fp8SmallQuantTest(unittest.TestCase):
             for a, b in zip(project_fp8_pair(x, *layers), pair):
                 self.assertTrue(torch.equal(a.view(torch.uint8), b.view(torch.uint8)))
 
-    def test_shared_down_quant_opt_in_and_all_bf16_patterns(self):
+    def test_shared_down_quant_all_bf16_patterns(self):
         bits = (
             torch.arange(65536, device="cuda", dtype=torch.int32)
             .to(torch.int16)
@@ -244,14 +241,13 @@ class Fp8SmallQuantTest(unittest.TestCase):
             part = bits[start : start + 2560]
             x.flatten()[: part.numel()].copy_(part)
             self.compare(x)
-        x = torch.randn(4, 640, device="cuda", dtype=torch.bfloat16)
+        x = torch.randn(3, 640, device="cuda", dtype=torch.bfloat16)
         output = torch.full(
             (16, 640), float("nan"), device="cuda", dtype=torch.float8_e4m3fn
         )
         before = output.view(torch.uint8).clone()
-        with patch.dict("os.environ", {"QWEN4_FP8_SHARED_DOWN_QUANT": "0"}):
-            self.assertIsNone(try_small_fp8_quant(x, output=output))
-            self.assertTrue(torch.equal(before, output.view(torch.uint8)))
+        self.assertIsNone(try_small_fp8_quant(x, output=output))
+        self.assertTrue(torch.equal(before, output.view(torch.uint8)))
 
     def test_shared_down_full_projection_dynamic_graph_matches_native(self):
         layer = Fp8Linear(
@@ -261,7 +257,7 @@ class Fp8SmallQuantTest(unittest.TestCase):
         )
         for rows in (1, 3, 4, 8, 12, 16, 20, 24, 28, 32):
             x = torch.randn(rows, 640, device="cuda", dtype=torch.bfloat16)
-            with patch.dict("os.environ", {"QWEN4_FP8_SHARED_DOWN_QUANT": "0"}):
+            with patch(MODULE + ".try_small_fp8_quant", return_value=None):
                 expected = layer(x)
             self.assertTrue(
                 torch.equal(layer(x).view(torch.uint8), expected.view(torch.uint8))
@@ -274,7 +270,7 @@ class Fp8SmallQuantTest(unittest.TestCase):
             pointer = actual.data_ptr()
             for generation in range(32):
                 x.normal_().mul_((0.0, 1.0e-12, 0.01, 1.0, 1.0e4)[generation % 5])
-                with patch.dict("os.environ", {"QWEN4_FP8_SHARED_DOWN_QUANT": "0"}):
+                with patch(MODULE + ".try_small_fp8_quant", return_value=None):
                     expected = layer(x)
                 graph.replay()
                 self.assertEqual(actual.data_ptr(), pointer)

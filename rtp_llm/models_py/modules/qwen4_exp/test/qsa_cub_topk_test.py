@@ -1,4 +1,3 @@
-import os
 import unittest
 from unittest.mock import patch
 
@@ -15,11 +14,6 @@ class QsaCubTopkTest(unittest.TestCase):
     def setUp(self):
         if torch.cuda.get_device_capability() != (12, 0):
             self.skipTest("SM120 pinned Torch ordering")
-        self.env = patch.dict(
-            os.environ, {"QWEN4_QSA_CUB_TOPK": "1", "QWEN4_QSA_MERGE_TOPK": "0"}
-        )
-        self.env.start()
-        self.addCleanup(self.env.stop)
         torch.manual_seed(143201)
 
     @staticmethod
@@ -138,8 +132,6 @@ class QsaCubTopkTest(unittest.TestCase):
         self.assertIsNone(cub.try_cub_qsa_tokens(scores.double(), lengths))
         self.assertIsNone(cub.try_cub_qsa_tokens(scores.requires_grad_(), lengths))
         self.assertIsNone(cub.try_cub_qsa_tokens(scores.detach().cpu(), lengths.cpu()))
-        with patch.dict(os.environ, {"QWEN4_QSA_CUB_TOPK": "0"}):
-            self.assertIsNone(cub.try_cub_qsa_tokens(scores.detach(), lengths))
 
     def test_unprimed_capture_or_failed_build_keeps_original_selector(self):
         scores = torch.randn(4, 2048, device="cuda")
@@ -163,29 +155,11 @@ class QsaCubTopkTest(unittest.TestCase):
         )
 
 
-class QsaCubMergeTopkTest(QsaCubTopkTest):
-    def setUp(self):
-        super().setUp()
-        env = patch.dict(os.environ, {"QWEN4_QSA_MERGE_TOPK": "1"})
-        env.start()
-        self.addCleanup(env.stop)
-
-
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
 class QsaCubPackedDraftTopkTest(unittest.TestCase):
     def setUp(self):
         if torch.cuda.get_device_capability() != (12, 0):
             self.skipTest("SM120 pinned Torch ordering")
-        env = patch.dict(
-            os.environ,
-            {
-                "QWEN4_QSA_CUB_TOPK": "1",
-                "QWEN4_QSA_MERGE_TOPK": "1",
-                "QWEN4_DRAFT_QSA_DIRECT": "1",
-            },
-        )
-        env.start()
-        self.addCleanup(env.stop)
         torch.manual_seed(20261020)
 
     def test_live_ragged_maps_ties_nonfinite_signed_zero(self):
@@ -253,15 +227,6 @@ class QsaCubPackedDraftTopkTest(unittest.TestCase):
             (scores[:, :2048].contiguous(), visible, lengths, cu),
         ):
             self.assertIsNone(cub.try_cub_draft_qsa_tokens(*args))
-        for flag in (
-            "QWEN4_QSA_CUB_TOPK",
-            "QWEN4_QSA_MERGE_TOPK",
-            "QWEN4_DRAFT_QSA_DIRECT",
-        ):
-            with patch.dict(os.environ, {flag: "0"}):
-                self.assertIsNone(
-                    cub.try_cub_draft_qsa_tokens(scores, visible, lengths, cu)
-                )
         with patch.object(cub, "_MODULE", None), patch.object(
             cub, "_BUILD_FAILED", False
         ), patch("torch.cuda.is_current_stream_capturing", return_value=True):

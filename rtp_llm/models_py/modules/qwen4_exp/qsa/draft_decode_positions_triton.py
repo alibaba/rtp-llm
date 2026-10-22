@@ -5,7 +5,6 @@ positions. This experiment keeps the qualified libdevice/cast math unchanged.
 """
 
 import math
-import os
 
 import torch
 import triton
@@ -56,8 +55,7 @@ def try_prepare_decode_positions(sequence, positions, frequency, config):
     from .indexer import is_qsa_rope_style
 
     if not (
-        os.environ.get("QWEN4_DRAFT_QSA_FUSED", "0") == "1"
-        and sequence.is_cuda
+        sequence.is_cuda
         and torch.version.hip is None
         and torch.cuda.get_device_capability(sequence.device) == (12, 0)
         and sequence.ndim == 1

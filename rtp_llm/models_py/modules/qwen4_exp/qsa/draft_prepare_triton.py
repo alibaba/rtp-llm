@@ -6,7 +6,6 @@ the separately validated writer still owns side-cache mutation and undo.
 """
 
 import math
-import os
 
 import torch
 import triton
@@ -124,8 +123,7 @@ def try_prepare(q, positions, sources, visible, frequency, *, rope_config):
     scale = float(getattr(rope_config, "scale", 1.0))
     # The caller retains graph metadata/ownership validation before mutation.
     if not (
-        os.environ.get("QWEN4_DRAFT_QSA_FUSED", "0") == "1"
-        and q.is_cuda
+        q.is_cuda
         and torch.version.hip is None
         and torch.cuda.get_device_capability(q.device) == (12, 0)
         and q.dtype == torch.bfloat16
@@ -196,9 +194,7 @@ def try_prepare_metadata(
 
     scale = float(getattr(rope_config, "scale", 1.0))
     if not (
-        os.environ.get("QWEN4_DRAFT_QSA_METADATA", "0") == "1"
-        and os.environ.get("QWEN4_DRAFT_QSA_FUSED", "0") == "1"
-        and q.is_cuda
+        q.is_cuda
         and torch.version.hip is None
         and torch.cuda.get_device_capability(q.device) == (12, 0)
         and q.dtype == torch.bfloat16

@@ -1,8 +1,6 @@
 """Exercise the native HC draft graph with variable request and packed lengths."""
 
-import os
 import unittest
-from unittest import mock
 
 import torch
 
@@ -35,20 +33,11 @@ class DraftCapacityModel:
 
 
 class MtpGraphCapacityTest(unittest.TestCase):
-    def test_disabled_capacity_preserves_existing_capture_shapes(self):
-        torch.cuda.set_device(0)
-        model = DraftCapacityModel()
-        runner = CudaGraphRunner()
-        with mock.patch.dict(os.environ, {"QWEN4_MTP_REQUEST_GRAPH_CAPACITY": "0"}):
-            runner.init_mtp_draft_prefill(model, 8, 4)
-        self.assertEqual(model.shapes, {(32, 8)})
-
     def test_request_capacity_shrink_and_grow_with_variable_acceptance(self):
         torch.cuda.set_device(0)
         model = DraftCapacityModel()
         runner = CudaGraphRunner()
-        with mock.patch.dict(os.environ, {"QWEN4_MTP_REQUEST_GRAPH_CAPACITY": "1"}):
-            runner.init_mtp_draft_prefill(model, 8, 4)
+        runner.init_mtp_draft_prefill(model, 8, 4)
         self.assertEqual(model.shapes, {(4 * batch, batch) for batch in range(1, 9)})
 
         # The same graph keys are revisited after both larger and smaller
