@@ -11,6 +11,7 @@ from rtp_llm.models_py.modules.base.common.fp8_linear import (
 )
 from rtp_llm.models_py.triton_kernels.common.fp8_small_quant import (
     try_small_fp8_quant,
+    try_silu_mul_fp8_quant,
 )
 
 MODULE = "rtp_llm.models_py.triton_kernels.common.fp8_small_quant"
@@ -139,6 +140,39 @@ class Fp8SmallQuantTest(unittest.TestCase):
                     )
                 )
             graph.reset()
+
+    def test_shared_silu_mul_quant_matches_two_kernel_contract(self):
+        import flashinfer
+
+        for rows in (4, 8, 12, 16):
+            for magnitude in (0.0, 0.01, 0.5, 5.0, 100.0):
+                gate_up = (
+                    torch.randn(rows, 1280, device="cuda", dtype=torch.bfloat16)
+                    * magnitude
+                )
+                activated = flashinfer.activation.silu_and_mul(gate_up)
+                expected = try_small_fp8_quant(activated)
+                actual = try_silu_mul_fp8_quant(gate_up)
+                self.assertIsNotNone(actual)
+                for a, b in zip(actual, expected):
+                    self.assertTrue(
+                        torch.equal(a.view(torch.uint8), b.view(torch.uint8))
+                    )
+        bits = (
+            torch.arange(65536, device="cuda", dtype=torch.int32)
+            .to(torch.int16)
+            .view(torch.bfloat16)
+        )
+        for offset in range(0, bits.numel(), 4 * 640):
+            gate_up = torch.zeros(4, 1280, device="cuda", dtype=torch.bfloat16)
+            chunk = bits[offset : offset + 4 * 640]
+            gate_up[:, :640].flatten()[: chunk.numel()].copy_(chunk)
+            gate_up[:, 640:].fill_(0.75)
+            activated = flashinfer.activation.silu_and_mul(gate_up)
+            expected = try_small_fp8_quant(activated)
+            actual = try_silu_mul_fp8_quant(gate_up)
+            for a, b in zip(actual, expected):
+                self.assertTrue(torch.equal(a.view(torch.uint8), b.view(torch.uint8)))
 
     def test_unsupported_domains_return_without_writing(self):
         good = torch.ones(4, 2560, device="cuda", dtype=torch.bfloat16)

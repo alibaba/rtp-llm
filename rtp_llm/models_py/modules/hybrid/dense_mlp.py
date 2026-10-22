@@ -104,6 +104,21 @@ class DenseMLP(nn.Module):
                 self.down_proj, "supports_fused_silu_quant", False
             ):
                 output = self.down_proj.forward_silu_and_mul_quantized(up)
+            if output is None and self.is_gated and type(self.act_fn) is FusedSiluAndMul:
+                from rtp_llm.models_py.modules.base.common.fp8_linear import Fp8Linear
+
+                if (
+                    type(self.down_proj) is Fp8Linear
+                    and "forward" not in self.down_proj.__dict__
+                    and "forward" not in self.act_fn.__dict__
+                    and not self.down_proj._forward_pre_hooks
+                    and not self.down_proj._forward_hooks
+                    and not self.act_fn._forward_pre_hooks
+                    and not self.act_fn._forward_hooks
+                    and not torch.nn.modules.module._global_forward_pre_hooks
+                    and not torch.nn.modules.module._global_forward_hooks
+                ):
+                    output = self.down_proj.forward_silu_and_mul(up)
             if output is None:
                 activated = self.act_fn(up)
 

@@ -1,5 +1,7 @@
 """Graph-compatible consumers for per-tensor FP8 parameters."""
 
+import os
+
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -54,6 +56,51 @@ class Fp8Linear(nn.Module):
     def forward_with_bias_gelu(self, x):
         return F.gelu(self.forward(x))
 
+    def _run_quantized(self, quantized, scale, shape, rows):
+        out = torch._scaled_mm(
+            quantized,
+            self.weight.t(),
+            scale_a=scale,
+            scale_b=self.scale,
+            out_dtype=torch.bfloat16,
+        )
+        if isinstance(out, tuple):
+            out = out[0]
+        out = out[:rows].reshape(*shape, self.weight.shape[0])
+        if self.bias is not None:
+            out = out + self.bias
+        return out
+
+    def forward_silu_and_mul(self, gate_up):
+        """Consume a gated projection with one activation/FP8 quant launch."""
+        if not (
+            self.compute_weight is None
+            and self.role in ("DECODE", "PDFUSION")
+            and os.environ.get("QWEN4_FP8_SHARED_DOWN_QUANT", "0") == "1"
+            and gate_up.ndim == 2
+            and gate_up.shape[0] in (4, 8, 12, 16)
+            and gate_up.shape[1] == 1280
+            and self.weight.shape[1] == 640
+            and gate_up.dtype == torch.bfloat16
+            and gate_up.is_cuda
+            and gate_up.is_contiguous()
+        ):
+            return None
+        from rtp_llm.models_py.triton_kernels.common.fp8_small_quant import (
+            try_silu_mul_fp8_quant,
+        )
+
+        rows, width = gate_up.shape[0], self.weight.shape[1]
+        padded = torch.empty(
+            ((rows + 15) // 16 * 16, width),
+            device=gate_up.device,
+            dtype=torch.float8_e4m3fn,
+        )
+        result = try_silu_mul_fp8_quant(gate_up, output=padded)
+        if result is None:
+            return None
+        return self._run_quantized(*result, gate_up.shape[:-1], rows).to(gate_up.dtype)
+
     def forward(self, x, *, input_scale=None):
         if self.compute_weight is not None:
             return F.linear(x, self.compute_weight, self.bias)
@@ -88,19 +135,9 @@ class Fp8Linear(nn.Module):
         quantized, scale = _quantize_projection_input(
             rows.contiguous(), role=self.role, scale=input_scale, output=padded_output
         )
-        out = torch._scaled_mm(
-            quantized,
-            self.weight.t(),
-            scale_a=scale,
-            scale_b=self.scale,
-            out_dtype=torch.bfloat16,
+        return self._run_quantized(quantized, scale, x.shape[:-1], rows.shape[0]).to(
+            x.dtype
         )
-        if isinstance(out, tuple):
-            out = out[0]
-        out = out[: rows.shape[0]].reshape(*x.shape[:-1], self.weight.shape[0])
-        if self.bias is not None:
-            out = out + self.bias
-        return out.to(x.dtype)
 
 
 def dense_projection(x, weight, projection):

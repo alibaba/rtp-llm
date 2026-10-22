@@ -48,6 +48,41 @@ def make_layer():
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class SharedExpertOverlapTest(unittest.TestCase):
+    def test_shared_dense_mlp_fuses_activation_and_quant_before_down_gemm(self):
+        import flashinfer
+
+        shared = make_layer().shared_expert
+        with patch.dict(os.environ, {"QWEN4_FP8_SHARED_DOWN_QUANT": "1"}):
+            for rows in (4, 8, 12, 16):
+                x = torch.randn(rows, 2560, device="cuda", dtype=torch.bfloat16)
+
+                def legacy():
+                    return shared.down_proj(shared.act_fn(shared.up_proj(x)))
+
+                expected = legacy()
+                with patch.object(
+                    flashinfer.activation,
+                    "silu_and_mul",
+                    side_effect=AssertionError("separate activation kernel"),
+                ):
+                    actual = shared(x, skip_allreduce=True)
+                self.assertTrue(
+                    torch.equal(actual.view(torch.uint8), expected.view(torch.uint8))
+                )
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    captured = shared(x, skip_allreduce=True)
+                for gain in (0.01, 0.5, 2.0):
+                    x.normal_(0, gain)
+                    expected = legacy()
+                    graph.replay()
+                    self.assertTrue(
+                        torch.equal(
+                            captured.view(torch.uint8), expected.view(torch.uint8)
+                        )
+                    )
+                graph.reset()
+
     def test_dynamic_graph_exact_fused_merge_and_live_weights(self):
         layer = make_layer()
         for rows in (1, 4, 16, 32):
