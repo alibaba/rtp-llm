@@ -81,9 +81,11 @@ KV key 使用 main C++ 的长度前缀字节身份及模型 namespace：默认 f
 
 Mock 复用生产 frontend、Master 和 protobuf 协议，仅替代 ViT 模型计算及 P/D 引擎执行。
 图片 BATCH 要求 dispatcher 保留已选 ViT 地址；V4.1 图片 cache key 要求 frontend 与 C++ 使用相同身份编码。
-prepared V4.1 的 ViT-only 查询不携带 URL affinity keys，Master 需要支持无亲和信息的 ViT-only 选择。
-这些条件属于生产协议正确性，修复应与 Mock 功能分开提交和验证。
+图片 ViT-only 查询必须携带非空、合法的图片 affinity keys，Master 保留 main 的严格校验。
+main 的 prepared V4.1 frontend 路径目前漏传这些 keys；本分支不通过放宽 Master 校验规避调用方缺口。
+BATCH 地址和 frontend/C++ 身份编码修复与 Mock 功能分开提交和验证。
 
 协议集成 smoke 使用 `vit_protocol_smoke.py --master host:grpc-port --control http://host:mock-control-port --processor-identity <sha256> --output result.json`。
 它使用生成的 protobuf，对真实 Master 调度、Mock ViT、P/D 执行及排空做检查；必须分别启动 NON_BATCH/BATCH 环境。
 覆盖 URL 图片、V4.1 prepared 图片、text-only prepared metadata。此客户端不覆盖真实 frontend 的 HTTP 入口、原生扩展加载或真实图片预处理。
+当前脚本保留 prepared V4.1 的空 keys 调用，以暴露上述调用方缺口；该 case 会被 Master 拒绝，不能宣称整套协议验收通过。
