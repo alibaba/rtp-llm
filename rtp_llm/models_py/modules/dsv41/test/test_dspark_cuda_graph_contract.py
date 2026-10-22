@@ -28,6 +28,30 @@ def _dspark_harness(gamma: int = 5) -> DeepSeekV4DSparkModel:
 
 
 class DSparkCudaGraphContractTest(unittest.TestCase):
+    def test_cp_swa_uses_logical_entries_without_byte_padding(self) -> None:
+        model = _dspark_harness()
+        model.kv_cache = SimpleNamespace(get_entries_per_block=lambda _tag: 136)
+        attn = SimpleNamespace(
+            _ensure_freqs_cis_bound=lambda: None,
+            _swa_entries_per_block=lambda: 160,
+            _pool_view_3d_fp8=lambda _region: None,
+        )
+        model.v4 = SimpleNamespace(layers=[SimpleNamespace(attn=attn)])
+        with (
+            patch.object(
+                dspark_model_module, "cached_swa_region", return_value="swa_kv"
+            ),
+            patch.object(
+                dspark_model_module, "bind_attn_cache", return_value=nullcontext()
+            ),
+        ):
+            with model._swa_cache_bound(0, torch.tensor([[1]], dtype=torch.int32)) as (
+                _,
+                entries,
+                _,
+            ):
+                self.assertEqual(entries, 136)
+
     def test_prefill_host_plan_keeps_gathered_rows_and_is_shared_only_in_forward(self):
         host = torch.tensor([[2, 7], [9, 2]], dtype=torch.int32)
         table = host.clone()

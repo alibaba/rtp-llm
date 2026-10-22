@@ -50,6 +50,7 @@ from rtp_llm.models_py.modules.dsv41._fused_rmsnorm_rope_triton import (
 from rtp_llm.models_py.modules.dsv41.attn_type import SWA_KV
 from rtp_llm.models_py.modules.dsv41.cp import build_cp_context_for_forward
 from rtp_llm.models_py.modules.dsv41.fp8._kv_cache_utils import (
+    pool_entry_count,
     require_pool_tokens_per_block,
 )
 from rtp_llm.models_py.modules.dsv41.fp8._swa_ops_triton import (
@@ -563,14 +564,16 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         write through the raw per-rank pool selected by
         ``attn._swa_cp_byte_sliced()``."""
         attn = self.v4.layers[layer_idx].attn
+        region = cached_swa_region(self, self.kv_cache, layer_idx)
         with bind_attn_cache(
             attn,
             self.kv_cache,
-            {cached_swa_region(self, self.kv_cache, layer_idx): block_table},
+            {region: block_table},
             cp_ctx=cp_ctx if cp_ctx is not None else BIND_KEEP,
         ):
             attn._ensure_freqs_cis_bound()
-            entries_per_block = int(attn._swa_entries_per_block())
+            logical_entries = pool_entry_count(self.kv_cache, region)
+            entries_per_block = int(logical_entries or attn._swa_entries_per_block())
             pool = attn._pool_view_3d_fp8(SWA_KV)
             yield attn, entries_per_block, pool
 
