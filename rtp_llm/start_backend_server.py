@@ -52,6 +52,7 @@ from rtp_llm.utils.scr_template_utils import (
     register_for_scr,
     resolve_scr_worker_mapping,
 )
+from rtp_llm.utils.signal_guard import ignore_sigpipe
 
 setup_logging()
 
@@ -306,6 +307,9 @@ def local_rank_start(
         # ProcessManager signals still reach BackendManager.stop().
         signal.signal(signal.SIGTERM, signal_handler)
         signal.signal(signal.SIGINT, signal_handler)
+        # The same runtimes may restore the default SIGPIPE disposition; one
+        # broken helper pipe during a checkpoint would kill the rank.
+        ignore_sigpipe(f"at {stage}")
         logging.info("Installed local rank signal handlers at %s", stage)
 
     install_signal_handlers("process start")
