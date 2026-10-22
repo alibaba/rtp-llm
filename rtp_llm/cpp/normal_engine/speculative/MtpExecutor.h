@@ -153,7 +153,10 @@ protected:
     // preserves the original PROFILE_SCOPE labels.
     void            waitPreviousBookkeepingBeforeStreamPreparation(const std::list<GenerateStreamPtr>& streams);
     void            launchTargetVerifyPrepareAsync(const GptModelInputs& model_input, size_t batch_size);
-    void            launchDraftPrefillPrepareAsync(const GptModelInputs& model_input);
+    // post_rejection=true forks with the final post-commit input, which is
+    // safe under speculative target hooks; the default pre-rejection fork
+    // keeps its historical useAsyncPrepare() gate.
+    void            launchDraftPrefillPrepareAsync(const GptModelInputs& model_input, bool post_rejection = false);
     GptModelOutputs runTargetVerifyForward(GptModelInputs& model_input, const StreamGroups& stream_groups);
     absl::Status    runDecodeAlignmentOnly(GptModelInputs& model_input);
     void            debugCheckLinearBlockMapAtKernelRead(const GptModelInputs& model_input,
@@ -219,6 +222,12 @@ protected:
     bool useAsyncDeviceState() const;
 
     bool useAsyncPrepare() const;
+
+    // Default-on gate for the post-rejection draft-prefill prepare fork. The
+    // forked input is final (post-commit), so the hooks-mode restriction of
+    // useAsyncPrepare() does not apply; disable with
+    // RTP_LLM_MTP_ASYNC_DRAFT_PREPARE_POST_REJECTION=0.
+    bool useAsyncDraftPreparePostRejection() const;
 
     // Opt-in gate to skip the broad sync at decodeStep start.
     // Device state, epoch-guarded clears, and single-slotted workers preserve
@@ -327,6 +336,10 @@ private:
 
     AsyncRunner target_verify_prepare_runner_;
     AsyncRunner draft_prefill_prepare_runner_;
+    // True between the post-rejection prepare fork and runDraftPrefillForward:
+    // the forked worker already prepared the final input, so the hooks-mode
+    // synchronous rebuild inside the forward is skipped for that call only.
+    bool draft_prefill_prepare_forked_ = false;
     // Declare the worker after its target so destruction joins the worker first.
     std::unique_ptr<SpecLogitsVerifyRunner> spec_logits_verify_runner_;
     AsyncRunner                             spec_logits_verify_async_runner_;
