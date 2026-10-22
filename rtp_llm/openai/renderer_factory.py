@@ -9,14 +9,47 @@ from rtp_llm.openai.renderer_factory_register import (
     ensure_renderer_registered,
 )
 from rtp_llm.openai.renderers.basic_renderer import BasicRenderer
-from rtp_llm.openai.renderers.custom_renderer import CustomChatRenderer, RendererParams
+from rtp_llm.openai.renderers.custom_renderer import (
+    EMITS_REASONING_STREAM_BY_MODEL_TYPE,
+    CustomChatRenderer,
+    RendererParams,
+)
 from rtp_llm.openai.renderers.fast_chat_renderer import FastChatRenderer
 from rtp_llm.openai.renderers.llama_template_renderer import LlamaTemplateRenderer
+
+# Shared renderers cover multiple model generations. Keep checkpoint-family
+# declarations separate from renderer-wide streaming behavior.
+_SUPPORTS_THINKING_BY_MODEL_TYPE = {
+    "qwen": False,
+    "qwen_7b": False,
+    "qwen_13b": False,
+    "qwen_1b8": False,
+    "qwen2_vl": False,
+    "qwen2_5_vl": False,
+    "qwen_agent": False,
+    "qwen_agent_tool": False,
+    "qwen_2-mtp": False,
+}
 
 
 class ChatRendererFactory:
     def __init__(self):
         pass
+
+    @staticmethod
+    def model_supports_thinking(model_type: Optional[str]) -> Optional[bool]:
+        """Return a declared capability, or None for unknown/mixed checkpoints."""
+        if not model_type:
+            return None
+        if model_type in _SUPPORTS_THINKING_BY_MODEL_TYPE:
+            return _SUPPORTS_THINKING_BY_MODEL_TYPE[model_type]
+        ensure_renderer_registered(model_type)
+        renderer_type = _renderer_factory.get(model_type, CustomChatRenderer)
+        if model_type in EMITS_REASONING_STREAM_BY_MODEL_TYPE:
+            return EMITS_REASONING_STREAM_BY_MODEL_TYPE[model_type]
+        if renderer_type.emits_reasoning_stream:
+            return True
+        return renderer_type.supports_thinking
 
     @staticmethod
     def try_get_imported_renderer(

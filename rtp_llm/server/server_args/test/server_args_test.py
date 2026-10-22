@@ -66,6 +66,17 @@ class ServerArgsPyEnvConfigsTest(TestCase):
 
 
 class ServerArgsSetTest(TestCase):
+    def test_dash_sc_capability_defaults_to_unknown_and_accepts_boolean_overrides(self):
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        for value, expected in ((None, None), ("0", False), ("1", True)):
+            with self.subTest(value=value), patch.dict(os.environ, {}, clear=True):
+                args = [] if value is None else ["--dash_sc_supports_thinking", value]
+                config = setup_args(args)
+                self.assertIs(
+                    config.generate_env_config.dash_sc_supports_thinking, expected
+                )
+
     def setUp(self):
         self._environ_backup = os.environ.copy()
         self._argv_backup = sys.argv.copy()
@@ -100,6 +111,7 @@ class ServerArgsSetTest(TestCase):
         os.environ["MM_IMAGE_MAX_FILE_SIZE_KB"] = "2048"
         os.environ["MM_VIDEO_MAX_FILE_SIZE_KB"] = "4096"
         os.environ["THINK_MODE"] = "adaptive"
+        os.environ["DASH_SC_SUPPORTS_THINKING"] = "0"
         os.environ["ENFORCE_NO_THINK_ON_DISABLED"] = "0"
         os.environ["DISABLE_FLASHINFER_HYBRID_PREFILL"] = "1"
         os.environ["ENABLE_FA4_SPEC_DECODE"] = "0"
@@ -184,6 +196,9 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(py_env_configs.vit_config.mm_image_max_file_size_kb, 2048)
         self.assertEqual(py_env_configs.vit_config.mm_video_max_file_size_kb, 4096)
         self.assertEqual(py_env_configs.generate_env_config.think_mode, "adaptive")
+        self.assertIs(
+            py_env_configs.generate_env_config.dash_sc_supports_thinking, False
+        )
         # ENFORCE_NO_THINK_ON_DISABLED=0 is the deployment rollback for the
         # DISABLED no-think grammar; it must reach GenerateEnvConfig.
         self.assertFalse(

@@ -1,5 +1,5 @@
 import copy
-from typing import Any, List
+from typing import Any, List, Optional
 
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.api_datatype import (
@@ -79,6 +79,9 @@ class QwenVLRenderer(QwenRenderer):
 
 
 class Qwen2VLRenderer(QwenRenderer):
+    # This renderer also serves Qwen3-VL Instruct and Thinking checkpoints.
+    supports_thinking: Optional[bool] = None
+
     def __init__(
         self,
         tokenizer: BaseTokenizer,

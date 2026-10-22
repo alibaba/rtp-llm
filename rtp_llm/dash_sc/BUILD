@@ -17,6 +17,12 @@ filegroup(
 )
 
 py_library(
+    name = "thinking_helpers",
+    srcs = ["think.py"],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
     name = "dash_sc_grpc_server",
     srcs = [
         "__init__.py",
@@ -39,7 +45,6 @@ py_library(
         "server.py",
         "status.py",
         "structural_tag.py",
-        "think.py",
     ],
     data = [
         ":grpc_client_scripts",
@@ -47,6 +52,7 @@ py_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
+        ":thinking_helpers",
         "//rtp_llm:telemetry",
         "//rtp_llm/server:server",
         ":grpcio",

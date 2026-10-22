@@ -1,4 +1,17 @@
 load("@arch_config//:arch_select.bzl", "telemetry_test_deps")
+load("//bazel:arch_select.bzl", "requirement")
+
+requirement(["tokenizers"])
+
+py_test(
+    name = "think_anchor_test",
+    srcs = ["think_anchor_test.py"],
+    data = ["//rtp_llm/test/tokenizer_test:testdata"],
+    deps = [
+        "//rtp_llm/dash_sc:thinking_helpers",
+        ":tokenizers",
+    ],
+)
 
 py_test(
     name = "codec_test",

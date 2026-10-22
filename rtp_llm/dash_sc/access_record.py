@@ -455,6 +455,7 @@ class GrpcAccessRecord:
     # forwarder does not call the generated-id writer.
     generated_ids: list[int] = dataclasses.field(default_factory=list)
     generate_config: Optional[dict[str, Any]] = None
+    thinking_clamped: bool = False
     generate_config_role_addrs: Optional[dict[str, list[dict[str, Any]]]] = None
     aux_info: Any = None
     output_len: int = 0
@@ -573,6 +574,7 @@ class GrpcAccessRecord:
         if aux_info is None or (not overwrite and self.aux_info is not None):
             return
         self.aux_info = aux_info
+
     def check_repetition(self) -> None:
         self._repetition_monitor.check_generated_ids(self.generated_ids or ())
 
@@ -977,6 +979,7 @@ class GrpcAccessRecord:
                 "multi_token_frame_count": self.multi_token_frame_count,
                 "max_tokens_per_frame": self.max_tokens_per_frame,
                 "generate_config": self.generate_config,
+                "thinking_clamped": self.thinking_clamped,
                 "aux_info": dump_aux_info(self.aux_info),
                 "input_ids": self.input_ids,
                 "generated_ids": self.generated_ids or None,

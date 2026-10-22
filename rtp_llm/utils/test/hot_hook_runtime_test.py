@@ -7,6 +7,8 @@ import textwrap
 import time
 import unittest
 from pathlib import Path
+from types import ModuleType
+from unittest.mock import patch
 
 from rtp_llm.utils import hot_hook_runtime
 from rtp_llm.utils.test import hot_hook_target
@@ -62,6 +64,47 @@ class HotHookRuntimeTest(unittest.TestCase):
         )
         self.assertFalse(hot_hook_runtime.install_if_enabled())
         self.assertEqual(3, hot_hook_target.add(1, b=2))
+
+    def test_lazy_module_exports_support_function_and_method_hooks(self):
+        lazy = ModuleType("rtp_llm.utils.test.lazy_hook_target")
+        exports = {"add": hot_hook_target.add, "Sample": hot_hook_target.Sample}
+
+        def resolve(name):
+            if name not in exports:
+                raise AttributeError(name)
+            value = exports[name]
+            vars(lazy)[name] = value
+            return value
+
+        lazy.__getattr__ = resolve
+        with patch.dict("sys.modules", {lazy.__name__: lazy}):
+            self._install(
+                {
+                    "function_hooks": [
+                        {"target": lazy.__name__ + ".add", "replace": "replace"},
+                        {
+                            "target": lazy.__name__ + ".Sample.static",
+                            "replace": "replace",
+                        },
+                    ]
+                },
+                "def replace(ctx): return 99\n",
+            )
+            self.assertEqual(lazy.add(1, b=2), 99)
+            self.assertEqual(lazy.Sample.static(1), 99)
+            hot_hook_runtime.reset_for_test()
+            self.assertEqual(lazy.add(1, b=2), 3)
+            self.assertIsInstance(
+                inspect.getattr_static(lazy.Sample, "static"), staticmethod
+            )
+
+    def test_instance_lookup_does_not_invoke_fallback_magic(self):
+        class Target:
+            def __getattr__(self, name):
+                raise AssertionError("instance fallback must remain untouched")
+
+        with self.assertRaises(AttributeError):
+            hot_hook_runtime._read_member(Target(), "missing")
 
     def test_function_hooks_cover_before_after_replace_exception_and_methods(self):
         self._install(

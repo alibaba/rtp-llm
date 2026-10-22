@@ -70,6 +70,7 @@ class AccMetrics(Enum):
     # One increment per request — guarded by ``phase2_triggered`` so the
     # rate matches "requests with a think-abort", not "abort tokens seen".
     DASH_SC_DSV4_PHASE2_QPS_METRIC = "py_rtp_dash_sc_dsv4_phase2_qps"
+    DASH_SC_THINKING_CLAMPED_QPS_METRIC = "py_rtp_dash_sc_thinking_clamped_qps"
 
     # Tool-call output fell into a repeated span. Reported once per request by the
     # frontend gRPC access-log interceptor; tags intentionally avoid request_id.

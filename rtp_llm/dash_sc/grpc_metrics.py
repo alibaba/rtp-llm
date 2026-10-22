@@ -157,6 +157,8 @@ def _report_frontend_structured_metrics(
     tags = _metric_tags(rank_id, server_id)
     if record.input_len is not None:
         kmonitor.report(GaugeMetrics.INPUT_TOKEN_SIZE_METRIC, record.input_len, tags)
+    if record.thinking_clamped:
+        kmonitor.report(AccMetrics.DASH_SC_THINKING_CLAMPED_QPS_METRIC, 1, tags)
     kmonitor.report(GaugeMetrics.OUTPUT_TOKEN_SIZE_METRIC, record.output_len, tags)
     monitor = record.repetition_monitor
     if monitor.tool_call_loop_check_ms is not None:

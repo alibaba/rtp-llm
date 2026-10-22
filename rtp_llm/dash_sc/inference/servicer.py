@@ -17,9 +17,19 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, AsyncIterator, Callable, Iterable, Optional, Protocol
+from typing import (
+    TYPE_CHECKING,
+    AsyncIterator,
+    Callable,
+    Iterable,
+    Optional,
+    Protocol,
+    Sequence,
+)
 
 import torch
 
@@ -85,6 +95,10 @@ from rtp_llm.dash_sc.inference.grammar_validator import (
 )
 from rtp_llm.dash_sc.proto import predict_v2_pb2, predict_v2_pb2_grpc
 from rtp_llm.dash_sc.repetition_monitor import RequestRepetitionMonitorConfig
+from rtp_llm.dash_sc.think import (
+    build_empty_think_phase2_input_ids as _build_empty_think_phase2_input_ids,
+)
+from rtp_llm.dash_sc.think import match_think_anchor
 from rtp_llm.frontend.request_id_generator import generate_request_id
 from rtp_llm.metrics import AccMetrics, kmonitor
 from rtp_llm.server.request_headers import (
@@ -122,6 +136,12 @@ _DEFAULT_TERMINATE_TOKEN_ID = 1
 # Model types whose dash_sc protocol uses the empty-think second pass.
 _EMPTY_THINK_PHASE2_MODEL_TYPES = {"deepseek_v4"}
 _INT32_MAX = 2_147_483_647
+_LOGGER = logging.getLogger(__name__)
+_THINK_CLAMP_WARN_LOCK = threading.Lock()
+_THINK_CLAMP_WARN_CACHE_SIZE = 128
+_THINK_CLAMP_WARNED: OrderedDict[
+    tuple[Optional[str], Optional[str], ThinkingMode], None
+] = OrderedDict()
 _PARTIAL_RESPONSE_METADATA = (("x-dashscope-partialresponse", "true"),)
 GrpcMetadata = Iterable[tuple[object, object]]
 _DASH_RPC_METHOD = "GRPCInferenceService/ModelStreamInfer"
@@ -495,18 +515,41 @@ def _uses_dash_sc_empty_think_phase2(model_type: Optional[str]) -> bool:
 
 
 def _matched_echo_prefix_ids(
-    input_ids_list: list[int], echo_prefix_ids: Optional[list[int]]
+    input_ids_list: list[int], echo_prefix_ids: Optional[Sequence[int]]
 ) -> list[int]:
-    """Return the exact think-BOS ids already present at the input tail."""
+    """Return a complete think-BOS suffix; a partial tag token is not an anchor."""
     prefix_ids = list(echo_prefix_ids) if echo_prefix_ids else []
     if not prefix_ids:
         return []
     if input_ids_list[-len(prefix_ids) :] == prefix_ids:
         return prefix_ids
-    # Some tokenizers collapse the think-BOS prefix to its first token.
-    if len(prefix_ids) > 1 and input_ids_list[-1:] == prefix_ids[:1]:
-        return prefix_ids[:1]
     return []
+
+
+def _match_think_anchor(
+    input_ids_list: list[int],
+    runtime: _ThinkRuntime,
+    tokenizer: BaseTokenizer | None,
+    generate_env_config: GenerateEnvConfig | None,
+) -> tuple[bool, list[int]]:
+    try:
+        return match_think_anchor(
+            input_ids_list,
+            bos_tokens=runtime.bos_tokens,
+            bare_bos_tokens=runtime.bare_bos_tokens,
+            anchor=(
+                _decode_env_tag(generate_env_config.think_start_tag)
+                if generate_env_config is not None
+                else ""
+            ),
+            decode=getattr(_hf_tokenizer(tokenizer), "decode", None),
+            max_token_id=runtime.max_token_id,
+        )
+    except (ValueError, OverflowError) as error:
+        raise DashScParameterError(
+            "input_ids cannot be decoded to determine the thinking boundary: "
+            f"{error}"
+        ) from error
 
 
 def _dash_sc_reasoning_format(
@@ -550,8 +593,11 @@ class _ThinkRuntime:
 
     Fields:
       ``bos_tokens``         encode(think_start_tag), e.g. ``<think>\\n``
+      ``bare_bos_tokens``    encode(think_start_tag.rstrip("\\n")); its encoding
+                             need not be a prefix of ``bos_tokens``
       ``eos_tokens``         encode(think_end_tag),   e.g. ``</think>\\n\\n``
       ``empty_tokens``       encode(start + body + end); used as phase-2 prompt body
+      ``empty_suffix_tokens`` encode(body + end); closes context-merged anchors
       ``close_token_id``     first id of ``eos_tokens`` (the ``</think>`` token);
                              ``None`` when ``eos_tokens`` is empty
       ``terminate_token_id`` token id that signals "stop thinking immediately" mid-
@@ -561,6 +607,11 @@ class _ThinkRuntime:
                              and ``empty_tokens`` is available. ``terminate_token_id``
                              is a separate request-path gate for actually entering
                              phase-2.
+      ``supports_thinking`` declared model capability; None preserves the previous
+                             request behavior for unknown/mixed checkpoints;
+                             DASH_SC_SUPPORTS_THINKING overrides model metadata
+      ``model_type``         actual model type; controls the phase-2 policy
+      ``renderer_model_type`` template capability hint; cannot revoke model support
       ``eos_token_id``       tokenizer.eos_token_id; written to dashllm
                              ``stop_token_id`` response param
       ``max_token_id``       ``len(tokenizer) - 1``; written to dashllm
@@ -568,11 +619,16 @@ class _ThinkRuntime:
     """
 
     bos_tokens: tuple[int, ...] = ()
+    bare_bos_tokens: tuple[int, ...] = ()
     eos_tokens: tuple[int, ...] = ()
     empty_tokens: tuple[int, ...] = ()
+    empty_suffix_tokens: tuple[int, ...] = ()
     close_token_id: Optional[int] = None
     terminate_token_id: Optional[int] = None
     phase2_enabled: bool = False
+    supports_thinking: Optional[bool] = None
+    model_type: Optional[str] = None
+    renderer_model_type: Optional[str] = None
     eos_token_id: Optional[int] = None
     max_token_id: Optional[int] = None
 
@@ -585,6 +641,7 @@ def build_think_runtime(
     terminate_token_id: Optional[int] = _DEFAULT_TERMINATE_TOKEN_ID,
     eos_token_id: Optional[int] = None,
     max_token_id: Optional[int] = None,
+    renderer_model_type: Optional[str] = None,
 ) -> _ThinkRuntime:
     """Pre-compute the per-startup think/dashllm snapshot.
 
@@ -595,10 +652,48 @@ def build_think_runtime(
     ``eos_token_id`` / ``max_token_id`` of ``None`` fall back to tokenizer-derived
     values; explicit values from the caller win.
 
+    ``renderer_model_type`` can add a capability declaration for a known
+    non-reasoning model. It cannot revoke the actual model's capability: DashSC
+    receives already-tokenized prompts and does not render them with this template.
+
     Returns a safe-empty runtime (``phase2_enabled=False``, all token tuples
     empty) when ``tokenizer`` or ``generate_env_config`` is ``None``, matching
     the "missing tokenizer" fallback shape the previous derive helpers produced.
     """
+    supports_thinking = getattr(generate_env_config, "dash_sc_supports_thinking", None)
+    if supports_thinking is None:
+        try:
+            # Defer renderer dependencies and preserve DashSC's startup fallback.
+            from rtp_llm.openai.renderer_factory import ChatRendererFactory
+
+            supports_thinking = ChatRendererFactory.model_supports_thinking(model_type)
+        except Exception:
+            # Unknown capability must preserve the previous request behavior.
+            supports_thinking = None
+            _LOGGER.warning(
+                "[DashScGrpc] Failed to resolve reasoning capability for model %s; "
+                "preserving request-forced thinking",
+                model_type,
+                exc_info=True,
+            )
+        if supports_thinking is not True and renderer_model_type:
+            try:
+                # A template may add support, but only deployment configuration
+                # may explicitly deny it for an unknown/mixed checkpoint family.
+                if (
+                    ChatRendererFactory.model_supports_thinking(renderer_model_type)
+                    is True
+                ):
+                    supports_thinking = True
+            except Exception:
+                _LOGGER.warning(
+                    "[DashScGrpc] Failed to resolve template capability for %s; "
+                    "retaining model capability %s for %s",
+                    renderer_model_type,
+                    supports_thinking,
+                    model_type,
+                    exc_info=True,
+                )
     eos_tid = (
         eos_token_id if eos_token_id is not None else _tokenizer_eos_token_id(tokenizer)
     )
@@ -612,6 +707,9 @@ def build_think_runtime(
     )
     if tokenizer is None or generate_env_config is None:
         return _ThinkRuntime(
+            supports_thinking=supports_thinking,
+            model_type=model_type,
+            renderer_model_type=renderer_model_type or model_type,
             terminate_token_id=term_id,
             eos_token_id=eos_tid,
             max_token_id=max_tid,
@@ -619,33 +717,62 @@ def build_think_runtime(
     think_start_tag = _decode_env_tag(generate_env_config.think_start_tag)
     think_end_tag = _decode_env_tag(generate_env_config.think_end_tag)
     bos_tokens = tuple(_encode_tag(tokenizer, think_start_tag))
+    # Match the same raw/bare tag forms as the OpenAI token-level fallback.
+    # Encode the bare tag separately: BPE may merge '>' with the following LF.
+    bare_bos_tokens = (
+        tuple(_encode_tag(tokenizer, think_start_tag.rstrip("\n")))
+        if think_start_tag.endswith("\n")
+        else bos_tokens
+    )
     eos_tokens = tuple(_encode_tag(tokenizer, think_end_tag))
     empty_tokens = tuple(
         _encode_tag(tokenizer, think_start_tag + _EMPTY_THINK_BODY + think_end_tag)
     )
     close_token_id = int(eos_tokens[0]) if eos_tokens else None
     phase2_enabled = _uses_dash_sc_empty_think_phase2(model_type) and bool(empty_tokens)
+    empty_suffix_tokens = (
+        tuple(_encode_tag(tokenizer, _EMPTY_THINK_BODY + think_end_tag))
+        if phase2_enabled
+        else ()
+    )
     return _ThinkRuntime(
         bos_tokens=bos_tokens,
+        bare_bos_tokens=bare_bos_tokens,
         eos_tokens=eos_tokens,
         empty_tokens=empty_tokens,
+        empty_suffix_tokens=empty_suffix_tokens,
         close_token_id=close_token_id,
         terminate_token_id=term_id,
         phase2_enabled=phase2_enabled,
+        supports_thinking=supports_thinking,
+        model_type=model_type,
+        renderer_model_type=renderer_model_type or model_type,
         eos_token_id=eos_tid,
         max_token_id=max_tid,
     )
 
 
-def _build_empty_think_phase2_input_ids(
-    input_ids_list: list[int],
-    matched_bos_ids: list[int],
-    empty_think_tokens: list[int],
-) -> list[int]:
-    base = list(input_ids_list)
-    if matched_bos_ids and base[-len(matched_bos_ids) :] == matched_bos_ids:
-        base = base[: -len(matched_bos_ids)]
-    return base + list(empty_think_tokens)
+def _warn_forced_thinking_clamped(
+    runtime: _ThinkRuntime, default_thinking_mode: ThinkingMode
+) -> None:
+    # Clients may force thinking on every request. Bound process-wide deduplication
+    # by deployment configuration, and only record it after a request is clamped.
+    key = (runtime.model_type, runtime.renderer_model_type, default_thinking_mode)
+    with _THINK_CLAMP_WARN_LOCK:
+        if key in _THINK_CLAMP_WARNED:
+            _THINK_CLAMP_WARNED.move_to_end(key)
+            return
+        _THINK_CLAMP_WARNED[key] = None
+        if len(_THINK_CLAMP_WARNED) > _THINK_CLAMP_WARN_CACHE_SIZE:
+            _THINK_CLAMP_WARNED.popitem(last=False)
+    _LOGGER.warning(
+        "[DashScGrpc] Thinking was clamped to DISABLED: "
+        "model_type=%s renderer_model_type=%s default_thinking_mode=%s; "
+        "the deployment does not support thinking",
+        runtime.model_type,
+        runtime.renderer_model_type,
+        default_thinking_mode.name,
+    )
 
 
 def _make_generate_input(
@@ -835,8 +962,13 @@ async def iter_real_model_stream_infer(
 
     ``echo_prefix_ids`` is the auto-derived "thinking prefill" token id sequence. When
     non-empty and ``input_ids_list`` ends with it, the first non-empty ``generated_ids``
-    chunk gets ``echo_prefix_ids`` prepended so downstream consumers that rely on the
-    prefill-echo contract (dashllm-style) see the expected first token.
+    chunk echoes the matched suffix. For the runtime's BOS, the bare tag and
+    trailing-LF variants also match. Exact matches retain their token IDs;
+    decoded variants echo only the configured BOS, without extra prompt newlines.
+    Tokens shared with preceding prompt text are never echoed or removed. Echoed
+    prefill tokens participate in the existing DashLLM thinking-token accounting.
+    Unknown-capability ADAPTIVE deployments retain exact matches only; expanded
+    anchor forms require a declared capability or a request that forces ENABLED.
 
     ``extra_stop_word_ids`` is the per-startup snapshot of model-specific stop tokens
     (renderer-injected extras + env-supplied) the dash-sc path otherwise misses because
@@ -866,6 +998,14 @@ async def iter_real_model_stream_infer(
         sampling,
     )
     matched_echo_ids = _matched_echo_prefix_ids(input_ids_list, echo_prefix_ids)
+    if (
+        not matched_echo_ids
+        and echo_prefix_ids
+        and tuple(echo_prefix_ids) == runtime.bos_tokens
+    ):
+        matched_echo_ids = _matched_echo_prefix_ids(
+            input_ids_list, runtime.bare_bos_tokens
+        )
     should_echo = bool(matched_echo_ids)
     echoed = False
     stream: object | None = None
@@ -887,10 +1027,73 @@ async def iter_real_model_stream_infer(
             default_thinking_mode,
         )
         configured_thinking_mode = generate_config.thinking_mode
-        matched_think_bos_ids = matched_echo_ids or _matched_echo_prefix_ids(
-            input_ids_list, begin_think_tokens
+        unsupported_thinking = runtime.supports_thinking is False and (
+            default_thinking_mode != ThinkingMode.ENABLED
+            or getattr(generate_env_config, "dash_sc_supports_thinking", None) is False
         )
-        if configured_thinking_mode == ThinkingMode.ADAPTIVE and matched_think_bos_ids:
+        if unsupported_thinking:
+            matched_echo_ids = []
+            should_echo = False
+        if unsupported_thinking and configured_thinking_mode in (
+            ThinkingMode.ENABLED,
+            ThinkingMode.ADAPTIVE,
+        ):
+            # An upstream/client-supplied anchor cannot establish model support.
+            # Clamp before scanning or upgrading ADAPTIVE to fixed thinking.
+            _warn_forced_thinking_clamped(runtime, default_thinking_mode)
+            if access_agg is not None:
+                access_agg.thinking_clamped = True
+            generate_config.thinking_mode = ThinkingMode.DISABLED
+            generate_config.in_think_mode = False
+            generate_config.max_thinking_tokens = 0
+            configured_thinking_mode = ThinkingMode.DISABLED
+        # Preserve legacy exact-match promotion for unknown checkpoints. New
+        # bare/decoded anchors require a declared capability before they can
+        # turn ADAPTIVE into a fixed envelope that suppresses EOS.
+        allow_anchor_variants = (
+            configured_thinking_mode != ThinkingMode.ADAPTIVE
+            or runtime.supports_thinking is True
+        )
+        if not allow_anchor_variants:
+            matched_echo_ids = _matched_echo_prefix_ids(input_ids_list, echo_prefix_ids)
+            should_echo = bool(matched_echo_ids)
+        matched_think_bos_ids = (
+            matched_echo_ids
+            or _matched_echo_prefix_ids(input_ids_list, begin_think_tokens)
+            or (
+                _matched_echo_prefix_ids(input_ids_list, runtime.bare_bos_tokens)
+                if allow_anchor_variants
+                else []
+            )
+        )
+        prompt_has_think_anchor = bool(matched_think_bos_ids)
+        if (
+            allow_anchor_variants
+            and not prompt_has_think_anchor
+            and configured_thinking_mode
+            in (
+                ThinkingMode.ENABLED,
+                ThinkingMode.ADAPTIVE,
+            )
+        ):
+            prompt_has_think_anchor, matched_think_bos_ids = await asyncio.to_thread(
+                _match_think_anchor,
+                input_ids_list,
+                runtime,
+                tokenizer,
+                generate_env_config,
+            )
+            if echo_prefix_ids and tuple(echo_prefix_ids) == runtime.bos_tokens:
+                # Keep the complete removable suffix for phase 2, but bound
+                # prefill echo/accounting to the configured tag, not prompt LF.
+                matched_echo_ids = (
+                    list(runtime.bos_tokens) if matched_think_bos_ids else []
+                )
+                should_echo = bool(matched_echo_ids)
+        if (
+            configured_thinking_mode == ThinkingMode.ADAPTIVE
+            and prompt_has_think_anchor
+        ):
             generate_config.thinking_mode = ThinkingMode.ENABLED
             generate_config.in_think_mode = True
             configured_thinking_mode = ThinkingMode.ENABLED
@@ -905,7 +1108,7 @@ async def iter_real_model_stream_infer(
         ):
             reasoning_format = _dash_sc_reasoning_format(
                 generate_env_config,
-                prompt_end_with_think=bool(matched_think_bos_ids),
+                prompt_end_with_think=prompt_has_think_anchor,
             )
         if extra_stop_word_ids:
             existing = generate_config.stop_words_list
@@ -1240,7 +1443,11 @@ async def iter_real_model_stream_infer(
             # the response infer.id (client-facing).
             phase2_config.trace_id = trace_str
             phase2_input_ids = _build_empty_think_phase2_input_ids(
-                input_ids_list, matched_think_bos_ids, list(runtime.empty_tokens)
+                input_ids_list,
+                matched_think_bos_ids,
+                list(runtime.empty_tokens),
+                prompt_has_think_anchor=prompt_has_think_anchor,
+                empty_think_suffix_tokens=runtime.empty_suffix_tokens,
             )
             phase2_request_id = (
                 phase2_request_id_factory()
@@ -1372,6 +1579,17 @@ async def iter_real_model_stream_infer(
             request.model_name,
             error_spec=error_spec,
             status_message=status_message,
+        )
+        stats = (0, True, error_spec.finish_reason, len(input_ids_list), 0, ())
+        yield (response, stats) if yield_access_stats else response
+    except DashScParameterError as e:
+        logging.warning("[DashScGrpc] [%s] invalid request: %s", tag, e)
+        error_spec = DASH_ERROR_BAD_REQUEST
+        response = build_dash_error_response(
+            str(request.id),
+            request.model_name,
+            error_spec=error_spec,
+            status_message=str(e),
         )
         stats = (0, True, error_spec.finish_reason, len(input_ids_list), 0, ())
         yield (response, stats) if yield_access_stats else response

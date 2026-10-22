@@ -85,8 +85,13 @@ def _copy_to_cpu(value: Any) -> Any:
 
 
 def _read_member(owner: Any, name: str) -> Any:
-    """Read a hook target without invoking descriptors or fallback magic."""
-    return _read_static_member(owner, name)
+    """Resolve lazy module exports while preserving class/instance descriptors."""
+    try:
+        return _read_static_member(owner, name)
+    except AttributeError:
+        if isinstance(owner, ModuleType):
+            return getattr(owner, name)
+        raise
 
 
 def _write_member(owner: Any, name: str, value: Any) -> None:
