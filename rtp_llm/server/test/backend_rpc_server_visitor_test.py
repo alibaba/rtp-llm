@@ -48,6 +48,9 @@ class _FakeGenerateConfig:
     def validate(self):
         return None
 
+    def is_prefill_only(self):
+        return self.max_new_tokens == 0
+
     def model_copy(self, update=None):
         copied = _FakeGenerateConfig(
             self.is_streaming,
@@ -55,6 +58,7 @@ class _FakeGenerateConfig:
             self.return_hidden_states,
             self.return_all_hidden_states,
         )
+        copied.max_new_tokens = self.max_new_tokens
         copied.role_addrs = list(self.role_addrs)
         for key, value in (update or {}).items():
             setattr(copied, key, value)
@@ -693,6 +697,26 @@ class BackendRPCServerVisitorRetryTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(outputs, ["successful-output"])
 
+    async def test_prefill_only_retry_preserves_legal_config(self):
+        client = _RetryingModelRpcClient()
+        visitor = self._visitor(client)
+        generate_config = _FakeGenerateConfig(is_streaming=False)
+        generate_config.max_new_tokens = 0
+        input = _FakeInput(generate_config)
+        visitor.set_request_id_factory(lambda: 456)
+
+        stream = await visitor.enqueue(input)
+        outputs = [output async for output in stream]
+
+        self.assertEqual(outputs, ["successful-output"])
+        self.assertEqual(client.attempts, 2)
+        retried_config = client.inputs[1].generate_config
+        self.assertTrue(retried_config.is_prefill_only())
+        self.assertEqual(retried_config.calculate_loss, 0)
+        self.assertFalse(retried_config.return_hidden_states)
+        self.assertFalse(retried_config.return_all_hidden_states)
+        self.assertEqual(retried_config.role_addrs, [])
+
     async def test_non_streaming_replays_successful_outputs_in_order(self):
         client = _SuccessfulModelRpcClient(["first-output", "second-output"])
         visitor = self._visitor(client)
@@ -755,6 +779,44 @@ class BackendRPCServerVisitorRetryTest(unittest.IsolatedAsyncioTestCase):
             [output async for output in stream]
 
         self.assertEqual(client.attempts, 1)
+
+    async def test_typed_execution_and_cancellation_errors_are_not_retried(self):
+        for exception_type in (
+            ExceptionType.INVALID_PARAMS,
+            ExceptionType.EXECUTION_EXCEPTION,
+            ExceptionType.CANCELLED,
+            ExceptionType.CANCELLED_ERROR,
+            ExceptionType.REMOTE_GENERATE_FAILED,
+        ):
+            with self.subTest(exception_type=exception_type):
+                error = FtRuntimeException(exception_type, "StatusCode.UNAVAILABLE")
+                client = _AlwaysFailingModelRpcClient(error)
+                visitor = self._visitor(client)
+                visitor.set_request_id_factory(lambda: 456)
+                stream = await visitor.enqueue(_FakeInput(is_streaming=False))
+                with self.assertRaises(FtRuntimeException) as ctx:
+                    [output async for output in stream]
+                self.assertIs(ctx.exception, error)
+                self.assertEqual(client.attempts, 1)
+
+    async def test_task_cancellation_is_not_replaced_by_an_earlier_route_error(self):
+        class CancellingClient:
+            attempts = 0
+
+            async def enqueue(self, input):
+                self.attempts += 1
+                if self.attempts == 1:
+                    raise FtRuntimeException(ExceptionType.CONNECT_FAILED, "retry")
+                raise asyncio.CancelledError()
+                yield  # Make this the same async-generator API as the real client.
+
+        client = CancellingClient()
+        visitor = self._visitor(client)
+        visitor.set_request_id_factory(lambda: 456)
+        stream = await visitor.enqueue(_FakeInput(is_streaming=False))
+        with self.assertRaises(asyncio.CancelledError):
+            [output async for output in stream]
+        self.assertEqual(client.attempts, 2)
 
     async def test_non_streaming_non_retryable_error_does_not_retry(self):
         client = _AlwaysFailingModelRpcClient(ValueError("bad output"))

@@ -50,6 +50,17 @@ static std::string mlaOpsTypeToString(MlaOpsType mla_ops_type) {
     }
 }
 
+static std::string hiddenStateCaptureDtypeToString(HiddenStateCaptureDtype capture_dtype) {
+    switch (capture_dtype) {
+        case HiddenStateCaptureDtype::BF16:
+            return "bf16";
+        case HiddenStateCaptureDtype::FP8_E4M3:
+            return "fp8_e4m3";
+        default:
+            return "UNKNOWN(" + std::to_string(static_cast<int>(capture_dtype)) + ")";
+    }
+}
+
 static std::string quantMethodToString(QuantMethod quant_method) {
     switch (quant_method) {
         case QuantMethod::None:
@@ -156,7 +167,7 @@ AttentionConfigs ModelConfig::getAttentionConfigs(int64_t tp_size) const {
     AttentionConfigs config = attn_config;
 
     if (tp_size > 1) {
-        /* 
+        /*
         KV head partitioning logic for tensor parallelism:
         Case 1: If kv_head_num % tp_size == 0,
             then each rank gets kv_head_num / tp_size KV heads.
@@ -167,17 +178,17 @@ AttentionConfigs ModelConfig::getAttentionConfigs(int64_t tp_size) const {
             and each rank gets kv_head_num / gcd KV heads.
         */
         if (config.head_num % config.kv_head_num != 0) {
-        throw std::runtime_error("head_num must be divisible by kv_head_num for attention config");
+            throw std::runtime_error("head_num must be divisible by kv_head_num for attention config");
         }
         if (config.kv_head_num % tp_size == 0) {
             config.kv_head_num = config.kv_head_num / tp_size;
         } else {
-            int64_t gcd = std::gcd(config.kv_head_num, tp_size);
+            int64_t gcd        = std::gcd(config.kv_head_num, tp_size);
             config.kv_head_num = config.kv_head_num / gcd;
         }
         config.head_num = config.head_num / tp_size;
     }
-    
+
     if (config.kernel_tokens_per_block == 0) {
         config.kernel_tokens_per_block = config.tokens_per_block;
     }
@@ -203,6 +214,20 @@ std::string ModelConfig::to_string() const {
     // Model variant params
     oss << "num_layers: " << num_layers << "\n"
         << "hidden_size: " << hidden_size << "\n"
+        << "hidden_state_capture_layer_ids: [";
+    for (size_t i = 0; i < hidden_state_capture_layer_ids.size(); ++i) {
+        if (i > 0) {
+            oss << ", ";
+        }
+        oss << hidden_state_capture_layer_ids[i];
+    }
+    oss << "]\n"
+        << "hidden_state_capture_dtype: " << hiddenStateCaptureDtypeToString(hidden_state_capture_dtype) << "\n"
+        << "hidden_state_capture_max_inflight_samples: " << hidden_state_capture_max_inflight_samples << "\n"
+        << "hidden_state_capture_max_inflight_bytes: " << hidden_state_capture_max_inflight_bytes << "\n"
+        << "hidden_state_capture_max_inflight_tokens: " << hidden_state_capture_max_inflight_tokens << "\n"
+        << "hidden_state_capture_max_pending_batches: " << hidden_state_capture_max_pending_batches << "\n"
+        << "hidden_state_capture_poll_interval_ms: " << hidden_state_capture_poll_interval_ms << "\n"
         << "attn_config: {\n"
         << attn_config.DebugAttentionConfigStr() << "\n}\n"
         << "mla_ops_type: " << mlaOpsTypeToString(mla_ops_type) << "\n"

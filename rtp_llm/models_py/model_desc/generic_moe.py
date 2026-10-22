@@ -899,6 +899,24 @@ class GenericMoeModel(GptModelBase):
         self.norm = RMSResNorm(
             weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
         )
+        self._init_capture_context(
+            self._capture_canonical_layer,
+            self._capture_canonical_final,
+        )
+
+    def _capture_canonical_layer(
+        self, hidden_states: torch.Tensor, residual: torch.Tensor | None
+    ) -> torch.Tensor:
+        if residual is None:
+            raise ValueError("residual capture requires a residual tensor")
+        return hidden_states + residual
+
+    def _capture_canonical_final(
+        self, hidden_states: torch.Tensor, residual: torch.Tensor | None
+    ) -> torch.Tensor:
+        if residual is None:
+            raise ValueError("residual finalization requires a residual tensor")
+        return self.norm(hidden_states, residual)[0]
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         failed = True
@@ -929,6 +947,7 @@ class GenericMoeModel(GptModelBase):
             fmha_impl = self.prepare_fmha_impl(
                 inputs
             )  # pyright: ignore[reportUnreachable]
+        capture = self.capture_context(inputs.capture_hidden_states)
 
         from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 
@@ -986,6 +1005,7 @@ class GenericMoeModel(GptModelBase):
             )
             hidden_states = output.hidden_states
             residual = output.residual
+            capture.capture_layer(i, hidden_states, residual)
             if diagnostics is not None and getattr(
                 decoder_layer.self_attn, "has_indexer", False
             ):
@@ -996,16 +1016,16 @@ class GenericMoeModel(GptModelBase):
                 _rt.record(f"layer{i:02d}_residual", residual)
                 _rt.record(f"layer{i:02d}_combined", hidden_states + residual)
 
-        hidden_states, _ = self.norm(hidden_states, residual)
+        outputs = capture.finalize(hidden_states, residual, fmha_impl.fmha_params)
         if _rt_on:
-            _rt.record("final_norm", hidden_states)
+            _rt.record("final_norm", outputs.hidden_states)
             extra: dict = {
                 "input_ids_shape": tuple(input_ids.shape),
                 "input_ids": input_ids.detach().cpu(),
             }
             _rt.dump(step=getattr(self, "_dbg_step", 0), extra=extra)
             self._dbg_step = getattr(self, "_dbg_step", 0) + 1
-        return PyModelOutputs(hidden_states, fmha_impl.fmha_params)
+        return outputs
 
 
 __all__ = [

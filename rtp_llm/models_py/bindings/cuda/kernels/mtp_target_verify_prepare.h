@@ -10,26 +10,26 @@ namespace rtp_llm {
 // Publish MTP next sequence length, selected token and BF16 hidden row without
 // materializing int64 gather indices. Undefined previous_lengths keeps an
 // already prepared next_lengths tensor unchanged.
-bool tryMtpPublishState(const torch::Tensor& accept_lengths,
-                        const torch::Tensor& accepted_tokens,
-                        const torch::Tensor& previous_lengths,
-                        const torch::Tensor& hidden_states,
-                        int32_t              tokens_per_batch,
-                        torch::Tensor&       next_lengths,
-                        torch::Tensor&       selected_tokens,
-                        torch::Tensor&       selected_hidden,
-                        cudaStream_t         stream,
+bool tryMtpPublishState(const torch::Tensor&               accept_lengths,
+                        const torch::Tensor&               accepted_tokens,
+                        const torch::Tensor&               previous_lengths,
+                        const torch::Tensor&               hidden_states,
+                        int32_t                            tokens_per_batch,
+                        torch::Tensor&                     next_lengths,
+                        torch::Tensor&                     selected_tokens,
+                        torch::Tensor&                     selected_hidden,
+                        cudaStream_t                       stream,
                         const std::vector<const int32_t*>& previous_rows = {});
 
 // Keep asynchronous metric snapshots independent of mutable acceptance storage.
 // Greedy point-mass MTP only. Returns false without launching for unsupported layouts.
 bool tryMtpGreedyFinalize(const torch::Tensor& draft,
                           const torch::Tensor& target,
-                          torch::Tensor& tokens,
-                          torch::Tensor& lengths,
-                          torch::Tensor& rows,
-                          torch::Tensor& total,
-                          cudaStream_t stream);
+                          torch::Tensor&       tokens,
+                          torch::Tensor&       lengths,
+                          torch::Tensor&       rows,
+                          torch::Tensor&       total,
+                          cudaStream_t         stream);
 
 bool tryMtpAcceptMetrics(const torch::Tensor& lengths, torch::Tensor& rows, torch::Tensor& total, cudaStream_t stream);
 
@@ -128,9 +128,6 @@ void invokeMtpSelectedRowLogProbs(const torch::Tensor& logits,
                                   int64_t              top_k,
                                   cudaStream_t         stream);
 
-// REBASE CONFLICT CONTEXT(518707c73): keep new base dispatch-state publishing
-// kernel and add source branch prefill shift/append kernel to avoid sync-heavy
-// CPU token manipulation.
 // For each batch b with input_lengths_d[b] tokens packed at offset cumsum(input_lengths_d)[b-1]
 // in combo_tokens_in:
 //   * shift combo_tokens_in[offset .. offset+input_length-1] left by 1 (drop first token)

@@ -23,6 +23,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     registerCommon(m);
 
     // Register enums
+    py::enum_<HiddenStateCaptureDtype>(m, "HiddenStateCaptureDtype")
+        .value("BF16", HiddenStateCaptureDtype::BF16)
+        .value("FP8_E4M3", HiddenStateCaptureDtype::FP8_E4M3);
+
     py::enum_<RoleType>(m, "RoleType")
         .value("PDFUSION", RoleType::PDFUSION)
         .value("PREFILL", RoleType::PREFILL)
@@ -758,10 +762,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.masked_max_token_num,
                                       self.use_all_gather,
                                       self.ll_num_max_token,
-                                      self.moe_strategy);
+                                      self.moe_strategy,
+                                      self.fp4_moe_op);
             },
             [](py::tuple t) {
-                if (t.size() != 11)
+                if (t.size() != 11 && t.size() != 12)
                     throw std::runtime_error("Invalid state!");
                 MoeConfig c;
                 try {
@@ -776,6 +781,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.use_all_gather             = t[8].cast<bool>();
                     c.ll_num_max_token           = t[9].cast<int>();
                     c.moe_strategy               = t[10].cast<std::string>();
+                    if (t.size() == 12)
+                        c.fp4_moe_op = t[11].cast<std::string>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("MoeConfig unpickle error: ") + e.what());
                 }
@@ -1603,6 +1610,16 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("gen_num_per_cycle", &ModelConfig::gen_num_per_cycle)
         .def_readwrite("vocab_size", &ModelConfig::vocab_size)
         .def_readwrite("hidden_size", &ModelConfig::hidden_size)
+        .def_readwrite("hidden_state_capture_layer_ids", &ModelConfig::hidden_state_capture_layer_ids)
+        .def_readwrite("hidden_state_capture_dtype", &ModelConfig::hidden_state_capture_dtype)
+        .def_readwrite("hidden_state_capture_max_inflight_samples",
+                       &ModelConfig::hidden_state_capture_max_inflight_samples)
+        .def_readwrite("hidden_state_capture_max_inflight_bytes", &ModelConfig::hidden_state_capture_max_inflight_bytes)
+        .def_readwrite("hidden_state_capture_max_inflight_tokens",
+                       &ModelConfig::hidden_state_capture_max_inflight_tokens)
+        .def_readwrite("hidden_state_capture_max_pending_batches",
+                       &ModelConfig::hidden_state_capture_max_pending_batches)
+        .def_readwrite("hidden_state_capture_poll_interval_ms", &ModelConfig::hidden_state_capture_poll_interval_ms)
         .def_readwrite("attn_config", &ModelConfig::attn_config)
         .def_readwrite("linear_attention_config", &ModelConfig::linear_attention_config)
         .def_readwrite("hybrid_attention_config", &ModelConfig::hybrid_attention_config)

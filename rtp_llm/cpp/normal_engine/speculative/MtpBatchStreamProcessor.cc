@@ -2,8 +2,6 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
-// REBASE CONFLICT CONTEXT(518707c73): keep new base logits-processor state
-// support and add the source branch fused prefill shift/append CUDA helper.
 #include "rtp_llm/models_py/bindings/cuda/kernels/mtp_target_verify_prepare.h"
 #include "rtp_llm/cpp/utils/TensorDebugUtils.h"
 #include "rtp_llm/cpp/utils/StringUtil.h"
@@ -773,7 +771,7 @@ void MtpBatchStreamProcessor::prepareDecodeDraftModelInput(const StreamGroups& s
         std::vector<MtpNextInputRow> rows;
         rows.reserve(batch_size);
         torch::TensorOptions options;
-        bool supported = true;
+        bool                 supported = true;
         for (const auto& stream : stream_groups.allStreams()) {
             const auto& state = stream->getMtpAsyncDeviceState();
             const auto& batch = state.batch;
@@ -781,15 +779,13 @@ void MtpBatchStreamProcessor::prepareDecodeDraftModelInput(const StreamGroups& s
                 supported = false;
                 break;
             }
-            const auto& lengths = batch->next_lengths;
+            const auto& lengths   = batch->next_lengths;
             const auto& proposals = batch->propose_tokens;
-            if (!lengths.defined() || !proposals.defined() || !lengths.is_cuda()
-                || !proposals.is_cuda() || lengths.scalar_type() != torch::kInt32
-                || proposals.scalar_type() != torch::kInt32 || !lengths.is_contiguous()
-                || !proposals.is_contiguous() || lengths.dim() != 1 || proposals.dim() != 2
-                || proposals.size(1) <= 0 || state.batch_row >= lengths.size(0)
-                || state.batch_row >= proposals.size(0) || proposals.device() != lengths.device()
-                || (!rows.empty() && lengths.device() != options.device())) {
+            if (!lengths.defined() || !proposals.defined() || !lengths.is_cuda() || !proposals.is_cuda()
+                || lengths.scalar_type() != torch::kInt32 || proposals.scalar_type() != torch::kInt32
+                || !lengths.is_contiguous() || !proposals.is_contiguous() || lengths.dim() != 1 || proposals.dim() != 2
+                || proposals.size(1) <= 0 || state.batch_row >= lengths.size(0) || state.batch_row >= proposals.size(0)
+                || proposals.device() != lengths.device() || (!rows.empty() && lengths.device() != options.device())) {
                 supported = false;
                 break;
             }
@@ -798,11 +794,10 @@ void MtpBatchStreamProcessor::prepareDecodeDraftModelInput(const StreamGroups& s
                             lengths.data_ptr<int32_t>() + state.batch_row});
         }
         torch::Tensor packed;
-        if (supported && tryMtpPrepareNextInputs(rows, options, packed,
-                                                 cuda_graph::graphGetCurrentStream().stream())) {
-            model_input.combo_tokens = packed.select(0, 0);
-            model_input.sequence_lengths = packed.select(0, 1);
-            model_input.prefix_lengths = packed.select(0, 2);
+        if (supported && tryMtpPrepareNextInputs(rows, options, packed, cuda_graph::graphGetCurrentStream().stream())) {
+            model_input.combo_tokens      = packed.select(0, 0);
+            model_input.sequence_lengths  = packed.select(0, 1);
+            model_input.prefix_lengths    = packed.select(0, 2);
             model_input.lm_output_indexes = packed.select(0, 3);
             // Preserve input_lengths from the scheduler; do not assume every
             // caller uses the same empty/decode convention.

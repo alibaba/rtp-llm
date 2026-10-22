@@ -52,3 +52,15 @@ py_test(
     ],
     tags = ["manual"],
 )
+
+py_test(
+    name = "backend_rpc_server_visitor_validate_input_test",
+    size = "small",
+    srcs = ["backend_rpc_server_visitor_validate_input_test.py"],
+    deps = [
+        "//rtp_llm:pydantic",
+        "//rtp_llm:testlib",
+        "//rtp_llm:torch",
+        "//rtp_llm/server:server",
+    ],
+)

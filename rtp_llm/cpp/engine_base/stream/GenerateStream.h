@@ -16,6 +16,7 @@
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include <atomic>
 #include <condition_variable>
+#include <functional>
 #include <iterator>
 #include <memory>
 #include <mutex>
@@ -168,6 +169,12 @@ public:
         return stream_magic_ == STREAM_MAGIC;
     }
 
+    bool requiresFullContextForHiddenStateCapture() const;
+    bool isHiddenStateCaptureCandidate() const;
+    bool hasHiddenStateCaptureReservation() const;
+    void setHiddenStateCaptureReservation(std::function<void()> cancel_callback);
+    void cancelHiddenStateCapture() const;
+
 public:
     void setIsFakeStream(bool is_fake) {
         is_fake_stream_ = is_fake;
@@ -297,6 +304,7 @@ public:
     torch::Tensor              multimodalLocations() const;
 
     int64_t getTimeoutMs() const;
+    bool    checkTimeoutAndHasError();
     void    checkTimeout();
 
     void reportEvent(StreamEvents::EventType event,
@@ -582,9 +590,6 @@ public:
         return sp_output_buffer_;
     }
 
-    // REBASE CONFLICT CONTEXT(518707c73): source branch added an opaque CUDA
-    // event for linear-attention KV swaps; keep accessors with the new base
-    // async device-state fields so MtpExecutor can order the next target verify.
     void setPendingSwapDoneEvent(std::shared_ptr<void> event) {
         std::lock_guard<std::mutex> lk(*pending_swap_done_event_mutex_);
         pending_swap_done_event_ = std::move(event);
@@ -623,12 +628,12 @@ public:
 
     struct MtpAsyncDeviceState {
         std::shared_ptr<const MtpBatchDeviceState> batch;
-        int64_t batch_row = -1;
-        uint64_t      epoch = 0;
-        torch::Tensor accept_len_gpu;
-        torch::Tensor accept_tokens_gpu;
-        torch::Tensor next_seq_len_gpu;
-        torch::Tensor propose_tokens_gpu;
+        int64_t                                    batch_row = -1;
+        uint64_t                                   epoch     = 0;
+        torch::Tensor                              accept_len_gpu;
+        torch::Tensor                              accept_tokens_gpu;
+        torch::Tensor                              next_seq_len_gpu;
+        torch::Tensor                              propose_tokens_gpu;
         // Main-thread mirrors used when DROP_BROAD_SYNC lets the next step run
         // before worker-side specUpdate has written sp_output_buffer fields.
         torch::Tensor last_hidden_states_gpu;
@@ -760,7 +765,8 @@ public:
     }
 
     bool reuseCache() const {
-        return generate_input_->generate_config->reuse_cache;
+        const auto& config = *generate_input_->generate_config;
+        return config.reuse_cache && !config.isPrefillOnly();
     }
 
     bool enableDeviceCache() const {
@@ -821,6 +827,9 @@ protected:
     void reportCacheReuseMetrics() const;
 
 protected:
+    struct HiddenStateCaptureReservation;
+    std::shared_ptr<HiddenStateCaptureReservation> hidden_state_capture_reservation_;
+
     uint64_t                              stream_magic_ = STREAM_MAGIC;
     std::shared_ptr<GenerateInput>        generate_input_;
     std::shared_ptr<GenerateStateMachine> generate_status_;

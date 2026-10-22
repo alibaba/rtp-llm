@@ -168,8 +168,10 @@ class TestHandleInputsWithHidden(unittest.TestCase):
             dtype=torch.float32,
         )
 
-        tokens0, lengths0, hidden0, shuffle0, output0 = cp_test.handle_inputs_with_hidden(
-            total_tokens, input_lengths, sequence_lengths, hidden_states, 0, 2
+        tokens0, lengths0, hidden0, shuffle0, output0 = (
+            cp_test.handle_inputs_with_hidden(
+                total_tokens, input_lengths, sequence_lengths, hidden_states, 0, 2
+            )
         )
         self.assertTrue(
             torch.equal(tokens0, torch.tensor([10, 11, 0, 0], dtype=torch.int32))
@@ -191,8 +193,10 @@ class TestHandleInputsWithHidden(unittest.TestCase):
             )
         )
 
-        tokens1, lengths1, hidden1, shuffle1, output1 = cp_test.handle_inputs_with_hidden(
-            total_tokens, input_lengths, sequence_lengths, hidden_states, 1, 2
+        tokens1, lengths1, hidden1, shuffle1, output1 = (
+            cp_test.handle_inputs_with_hidden(
+                total_tokens, input_lengths, sequence_lengths, hidden_states, 1, 2
+            )
         )
         self.assertTrue(
             torch.equal(tokens1, torch.tensor([12, 13, 14, 15], dtype=torch.int32))
@@ -227,6 +231,174 @@ class TestHandleInputsWithHidden(unittest.TestCase):
                 tokens, input_lengths, sequence_lengths, hidden, rank, 2
             )
             self.assertTrue(torch.equal(output_indices, expected))
+
+
+class TestHandleOutputsRoundTrip(unittest.TestCase):
+    """Real CUDA split/restore; only cross-rank transport is simulated."""
+
+    def setUp(self):
+        self.addCleanup(cp_test.clear_comm_ops)
+
+    def _run_case(self, lengths, cp_size, dtype, auxiliary_layers):
+        device = torch.device("cuda", torch.cuda.current_device())
+        input_lengths = torch.tensor(lengths, dtype=torch.int32)
+        tokens = torch.arange(1, sum(lengths) + 1, dtype=torch.int32)
+        width = (auxiliary_layers + 1) * 3
+        # Exact in BF16 too: distinguish token rows and every packed layer/column.
+        hidden = (
+            tokens.to(torch.float32)[:, None]
+            + torch.arange(width, dtype=torch.float32)[None, :] * 16
+        ).to(device=device, dtype=dtype)
+        lm_output_indexes = (input_lengths.cumsum(0) - 1).to(device=device)
+        expected_last = hidden.index_select(0, lm_output_indexes)
+        chunks, indices = [], []
+        padding_rows = 0
+        for rank in range(cp_size):
+            local_tokens, local_lengths, local_hidden, _, output_indices = (
+                cp_test.handle_inputs_with_hidden(
+                    tokens,
+                    input_lengths,
+                    torch.empty(0, dtype=torch.int32),
+                    hidden,
+                    rank,
+                    cp_size,
+                )
+            )
+            self.assertEqual(local_lengths.sum().item(), local_tokens.numel())
+            self.assertEqual(local_hidden.shape, (local_tokens.numel(), width))
+            self.assertEqual(local_hidden.dtype, dtype)
+            valid = local_tokens != 0
+            torch.testing.assert_close(
+                local_hidden[valid],
+                hidden.cpu()[local_tokens[valid].long() - 1],
+                rtol=0,
+                atol=0,
+            )
+            self.assertEqual(torch.count_nonzero(local_hidden[~valid]).item(), 0)
+            padding_rows += (~valid).sum().item()
+            # Padding must be removed, not just happen to contain harmless zeros.
+            local_hidden[~valid] = float("nan")
+            chunks.append(local_hidden.to(device))
+            indices.append(output_indices.to(device))
+
+        self.assertEqual(
+            sum(chunk.size(0) for chunk in chunks), sum(lengths) + padding_rows
+        )
+        self.assertEqual(
+            padding_rows > 0, any(length % (2 * cp_size) for length in lengths)
+        )
+        self.assertTrue(
+            torch.equal(input_lengths, torch.tensor(lengths, dtype=torch.int32))
+        )
+        rank_major = torch.cat(chunks, dim=0)
+        active_rank = 0
+        gather_calls, reduce_calls = [], []
+
+        def unexpected_broadcast(*args):
+            self.fail("restore must not broadcast")
+
+        def allgather(receive, mode, send, inplace):
+            gather_calls.append(active_rank)
+            # Match the production single-rank no-op. The processor must bypass it.
+            if cp_size == 1:
+                return
+            self.assertEqual(mode, 0)  # ParallelMode::TP
+            self.assertFalse(inplace)
+            self.assertEqual(len(receive), 1)
+            self.assertEqual(len(send), 1)
+            torch.testing.assert_close(
+                send[0], chunks[active_rank], rtol=0, atol=0, equal_nan=True
+            )
+            self.assertEqual(receive[0].shape, rank_major.shape)
+            self.assertEqual(receive[0].dtype, dtype)
+            self.assertEqual(receive[0].device, device)
+            receive[0].copy_(rank_major)
+
+        # Use the real per-rank selection on actual split tensors, not an inverse
+        # restore-index construction; only the all-reduce transport is simulated.
+        contributions = [
+            cp_test.compute_local_last_hidden(
+                chunk, indices[rank], lm_output_indexes, rank, cp_size
+            ).to(device)
+            for rank, chunk in enumerate(chunks)
+        ]
+        summed = torch.stack(contributions).sum(dim=0, dtype=dtype)
+        torch.testing.assert_close(summed, expected_last, rtol=0, atol=0)
+        owners = torch.stack([part.ne(0).any(dim=1) for part in contributions]).sum(0)
+        self.assertTrue(torch.equal(owners, torch.ones_like(owners)))
+
+        def allreduce(tensor, op, mode, dest):
+            reduce_calls.append(active_rank)
+            self.assertEqual(op, 0)  # ReduceOp::Sum
+            self.assertEqual(mode, 0)  # ParallelMode::TP
+            self.assertIsNone(dest)
+            torch.testing.assert_close(
+                tensor, contributions[active_rank], rtol=0, atol=0
+            )
+            return tensor if cp_size == 1 else summed.clone()
+
+        cp_test.register_comm_ops(unexpected_broadcast, allreduce, allgather)
+        for rank, chunk in enumerate(chunks):
+            active_rank = rank
+            torch.testing.assert_close(indices[rank], indices[0], rtol=0, atol=0)
+            restored, count = cp_test.handle_outputs(
+                chunk, indices[rank], lm_output_indexes, rank, cp_size
+            )
+            self.assertEqual(
+                gather_calls, [] if cp_size == 1 else list(range(rank + 1))
+            )
+            self.assertEqual(count, sum(lengths))
+            self.assertEqual(restored.dtype, dtype)
+            self.assertEqual(restored.device, device)
+            self.assertTrue(torch.isfinite(restored).all().item())
+            torch.testing.assert_close(restored, hidden, rtol=0, atol=0)
+            self.assertEqual(restored[:, 0].tolist(), tokens.tolist())
+            torch.testing.assert_close(
+                restored.index_select(0, lm_output_indexes),
+                expected_last,
+                rtol=0,
+                atol=0,
+            )
+
+            last_hidden, count = cp_test.handle_outputs(
+                chunk,
+                indices[rank],
+                lm_output_indexes,
+                rank,
+                cp_size,
+                last_hidden_only=True,
+            )
+            self.assertEqual(count, len(lengths))
+            self.assertEqual(last_hidden.dtype, dtype)
+            self.assertEqual(last_hidden.device, device)
+            torch.testing.assert_close(last_hidden, expected_last, rtol=0, atol=0)
+            self.assertEqual(reduce_calls, list(range(rank + 1)))
+            self.assertEqual(
+                gather_calls, [] if cp_size == 1 else list(range(rank + 1))
+            )
+        cp_test.clear_comm_ops()
+
+    def test_single_rank_restores_without_allgather(self):
+        for lengths in ([3], [1, 3], [6, 9], [4, 8]):
+            for dtype in (torch.float32, torch.float16, torch.bfloat16):
+                for auxiliary_layers in (2, 3):
+                    with self.subTest(
+                        lengths=lengths, dtype=dtype, layers=auxiliary_layers
+                    ):
+                        self._run_case(lengths, 1, dtype, auxiliary_layers)
+
+    def test_multi_rank_restores_real_split_packed_hidden(self):
+        for cp_size in (2, 4):
+            for lengths in ([6, 9], [10, 20, 7], [1, 3], [8, 16], [8, 9]):
+                for dtype in (torch.float32, torch.float16, torch.bfloat16):
+                    for auxiliary_layers in (2, 3):
+                        with self.subTest(
+                            cp_size=cp_size,
+                            lengths=lengths,
+                            dtype=dtype,
+                            layers=auxiliary_layers,
+                        ):
+                            self._run_case(lengths, cp_size, dtype, auxiliary_layers)
 
 
 class TestGenerateQKVRestoreIndices(unittest.TestCase):

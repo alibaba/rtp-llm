@@ -17,6 +17,7 @@
 #include <ctime>
 #include <cstring>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 #include <strings.h>
@@ -431,9 +432,6 @@ void fillPrefillTheoryHitMetricsCollector(PrefillRecentCacheKeyMetricsCollector&
     collector.theory_15m_hit_ratio   = snapshot.window_15m.hit_ratio;
 }
 
-// REBASE CONFLICT CONTEXT(cdc1b18b6): keep the new base prefill cache-hit
-// metric helpers above and also retain the source branch remote-RPC role check
-// used by GLM5 MTP prefill.
 const bool kHasRemoteRpcServerIp = []() {
     const char* env = std::getenv("REMOTE_RPC_SERVER_IP");
     return env != nullptr && std::strlen(env) > 0;
@@ -543,6 +541,10 @@ void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context)
     RTP_LLM_LOG_DEBUG("request [%ld] trans query", prefill_context.request_id);
     auto input                   = QueryConverter::transQuery(prefill_context.rpc_context.request);
     prefill_context.request_info = input->request_info;
+    // The explicit batch PD endpoint cannot serve a local-only prefill request.
+    if (input->generate_config->isPrefillOnly()) {
+        throw std::invalid_argument("prefill-only request cannot enter PD resource allocation");
+    }
     if (applyTimelineGate(prefill_context.request_key,
                           input->generate_config->gen_timeline,
                           input->generate_config->profile_step,
@@ -1000,8 +1002,12 @@ grpc::Status PrefillRpcServer::preferPriorityPreemption(PrefillGenerateContext& 
 
 grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*                   server_context,
                                                   const GenerateInputPB*                 request,
-                                                  grpc::ServerWriter<GenerateOutputsPB>* writer) {
+                                                  grpc::ServerWriter<GenerateOutputsPB>* writer) try {
     RTP_LLM_PROFILE_FUNCTION();
+    if (request == nullptr) {
+        return serializeErrorMsg("unknown",
+                                 ErrorInfo(ErrorCode::INVALID_PARAMS, "prefill generate request must not be null"));
+    }
     RTP_LLM_LOG_DEBUG("request [%ld] start generate stream call", request->request_id());
     const auto& generate_config = request->generate_config();
     auto        pd_separation   = shouldUsePdSeparation(generate_config);
@@ -1050,6 +1056,14 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
         if (!status.ok()) {
             return status;
         }
+    } catch (const std::invalid_argument& e) {
+        auto error_msg  = "request [" + prefill_context.request_key + "] catch invalid argument [" + e.what() + "]";
+        auto error_info = ErrorInfo(ErrorCode::INVALID_PARAMS, error_msg);
+        prefill_context.error_info = error_info;
+        prefill_context.error_status =
+            serializeErrorMsg(prefill_context.request_key, prefill_context.request_info, error_info);
+        logPrefillFailureTrace("catch_invalid_argument", prefill_context);
+        return prefill_context.error_status;
     } catch (const std::exception& e) {
         auto error_msg = "request [" + prefill_context.request_key + "] catch exception [" + e.what() + "]";
         prefill_context.error_status = grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
@@ -1065,11 +1079,30 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
     RTP_LLM_LOG_DEBUG("request [%ld] all done", prefill_context.request_id);
 
     return grpc::Status::OK;
+} catch (const std::invalid_argument& e) {
+    const auto request_key = request ? std::to_string(request->request_id()) : "unknown";
+    const auto error_info =
+        ErrorInfo(ErrorCode::INVALID_PARAMS, "request [" + request_key + "] catch invalid argument [" + e.what() + "]");
+    return serializeErrorMsg(request_key, RequestInfo(), error_info);
+} catch (const std::exception& e) {
+    const auto request_key = request ? std::to_string(request->request_id()) : "unknown";
+    return serializeErrorMsg(
+        request_key,
+        ErrorInfo(ErrorCode::EXECUTION_EXCEPTION,
+                  "request [" + request_key + "] catch exception [" + std::string(e.what()) + "]"));
+} catch (...) {
+    const auto request_key = request ? std::to_string(request->request_id()) : "unknown";
+    return serializeErrorMsg(
+        request_key,
+        ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "request [" + request_key + "] catch unknown exception"));
 }
 
 bool PrefillRpcServer::shouldUsePdSeparation(const GenerateConfigPB& generate_config) {
-    return generate_config.num_beams() <= 1 && generate_config.variable_num_beams().size() == 0
-           && generate_config.num_return_sequences() <= 1 && generate_config.can_use_pd_separation();
+    // Preserve the GLM branch's positive-token routing (including thinking requests).
+    // Resolve before routing so negative/conflicting requests cannot bypass validation.
+    return QueryConverter::resolveMaxNewTokens(generate_config) > 0 && generate_config.num_beams() <= 1
+           && generate_config.variable_num_beams().size() == 0 && generate_config.num_return_sequences() <= 1
+           && generate_config.can_use_pd_separation();
 }
 
 grpc::Status

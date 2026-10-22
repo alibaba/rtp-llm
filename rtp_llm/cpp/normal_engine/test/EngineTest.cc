@@ -7,6 +7,7 @@
 #include "rtp_llm/cpp/models/models_weight/W.h"
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
+#include "rtp_llm/cpp/engine_base/schedulers/SchedulerUtils.h"
 #include "rtp_llm/cpp/normal_engine/test/MockEngine.h"
 #include "gmock/gmock-actions.h"
 #include "gmock/gmock-function-mocker.h"
@@ -22,6 +23,19 @@ namespace rtp_llm {
 class NormalEngineTest: public DeviceTestBase {
 public:
 };
+
+TEST_F(NormalEngineTest, NormalExecutorTerminalInputDoesNotRunModel) {
+    auto engine = createMockEngine(CustomConfig{});
+    ASSERT_TRUE(engine->stop().ok());
+    auto& executor = *engine->executor_;
+    ASSERT_TRUE(executor.supportsTerminalStop());
+    EXPECT_FALSE(executor.terminalStopObserved());
+    ASSERT_TRUE(executor.process({}).ok());
+    EXPECT_FALSE(executor.terminalStopObserved());
+    executor.requestTerminalStop();
+    ASSERT_TRUE(executor.process({}).ok());
+    EXPECT_TRUE(executor.terminalStopObserved());
+}
 
 TEST_F(NormalEngineTest, ScrTemplatePrefillRunsBeforeLoopAndReleasesCache) {
     autil::EnvGuard shapes("RTP_LLM_STARTUP_REAL_WARMUP_TOKEN_LENS", "2,8");
@@ -475,6 +489,296 @@ TEST_F(NormalEngineTest, testQueryReuseCacheWhenSwitchIsOff) {
         auto output2 = stream->nextOutput();
         ASSERT_TRUE(!output2.ok());
     }
+}
+
+TEST_F(NormalEngineTest, CaptureAdmissionUsesNormalizedInputBeforeCacheAndCancelsSafely) {
+    class CaptureExecutor: public Executor {
+    public:
+        absl::Status process(const std::list<GenerateStreamPtr>&, int64_t = 0) override {
+            return absl::OkStatus();
+        }
+        bool tryReserveHiddenStateCapture(int64_t request_id, int64_t valid_tokens) override {
+            reservations.emplace_back(request_id, valid_tokens);
+            if (fail_reserve) {
+                throw std::runtime_error("capture reservation unavailable");
+            }
+            return grant;
+        }
+        void cancelHiddenStateCapture(int64_t request_id) override {
+            cancellations.push_back(request_id);
+        }
+        bool                                     grant        = true;
+        bool                                     fail_reserve = false;
+        std::vector<std::pair<int64_t, int64_t>> reservations;
+        std::vector<int64_t>                     cancellations;
+    };
+    CustomConfig config;
+    config.reuse_cache              = true;
+    config.multi_task_prompt_tokens = {{"capture", {4, 5, 6}}};
+    auto engine                     = createMockEngine(config);
+    ASSERT_TRUE(engine->stop().ok());
+    auto owner             = std::make_shared<CaptureExecutor>();
+    engine->executor_      = owner;
+    const auto free_blocks = engine->resourceContext().cache_manager->freeBlocksNum();
+    auto       make_query  = [](int64_t id, bool capture, bool reuse, int tokens) {
+        auto query                                    = std::make_shared<GenerateInput>();
+        query->request_id                             = id;
+        query->input_ids                              = torch::tensor({1, 2}, torch::kInt32);
+        query->generate_config                        = std::make_shared<GenerateConfig>();
+        query->generate_config->task_id               = "capture";
+        query->generate_config->capture_hidden_states = capture;
+        query->generate_config->reuse_cache           = reuse;
+        query->generate_config->max_new_tokens        = tokens;
+        return query;
+    };
+    auto captured = engine->makeStream(make_query(100, true, false, 4));
+    ASSERT_EQ(owner->reservations, (std::vector<std::pair<int64_t, int64_t>>{{100, 5}}));
+    EXPECT_EQ(captured->inputLength(), 5);
+    EXPECT_EQ(captured->curBlocksNum(), 0);
+    EXPECT_TRUE(captured->hasHiddenStateCaptureReservation());
+    EXPECT_TRUE(engine->resourceContext().reuse_cache);
+    EXPECT_EQ(engine->resourceContext().cache_manager->freeBlocksNum(), free_blocks);
+    captured->releaseResource();
+    captured->cancelHiddenStateCapture();
+    EXPECT_EQ(owner->cancellations, (std::vector<int64_t>{100}));
+
+    for (const auto& query :
+         {make_query(101, false, false, 4), make_query(102, false, true, 4), make_query(103, true, true, 4)}) {
+        auto stream = engine->makeStream(query);
+        EXPECT_FALSE(stream->hasHiddenStateCaptureReservation());
+        EXPECT_FALSE(stream->hasError());
+        EXPECT_EQ(stream->generateConfig()->reuse_cache, query->generate_config->reuse_cache);
+    }
+    EXPECT_EQ(owner->reservations.size(), 1u);
+    auto legacy = engine->makeStream(make_query(104, false, true, 0));
+    EXPECT_TRUE(legacy->hasHiddenStateCaptureReservation());
+    legacy.reset();
+    EXPECT_EQ(owner->cancellations, (std::vector<int64_t>{100, 104}));
+    auto rejected_group = engine->enqueueMultiple({make_query(111, true, false, 4), make_query(112, false, true, 0)});
+    EXPECT_EQ(rejected_group.first, (std::vector<bool>{false, false}));
+    for (const auto& stream : rejected_group.second) {
+        EXPECT_FALSE(stream->hasHiddenStateCaptureReservation());
+        EXPECT_EQ(stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+    }
+    EXPECT_EQ(owner->cancellations, (std::vector<int64_t>{100, 104, 111, 112}));
+    owner->grant = false;
+    auto denied  = engine->makeStream(make_query(105, true, false, 4));
+    EXPECT_FALSE(denied->hasError());
+    EXPECT_FALSE(denied->hasHiddenStateCaptureReservation());
+    EXPECT_FALSE(denied->generateConfig()->reuse_cache);
+    EXPECT_EQ(owner->reservations.back(), (std::pair<int64_t, int64_t>{105, 5}));
+    owner->grant        = true;
+    owner->fail_reserve = true;
+    auto reserve_error  = engine->makeStream(make_query(110, true, false, 4));
+    EXPECT_FALSE(reserve_error->hasError());
+    EXPECT_FALSE(reserve_error->hasHiddenStateCaptureReservation());
+    owner->fail_reserve                    = false;
+    auto beam_query                        = make_query(106, true, false, 4);
+    beam_query->generate_config->num_beams = 2;
+    auto beam                              = engine->makeStream(beam_query);
+    EXPECT_FALSE(beam->hasError());
+    EXPECT_FALSE(beam->hasHiddenStateCaptureReservation());
+    const auto attempts                = owner->reservations.size();
+    engine->parallelism_config.tp_rank = 1;
+    auto peer                          = engine->makeStream(make_query(107, true, false, 4));
+    EXPECT_FALSE(peer->hasHiddenStateCaptureReservation());
+    engine->parallelism_config.tp_rank  = 0;
+    engine->pd_sep_config.role_type     = RoleType::DECODE;
+    engine->resource_context_.role_type = RoleType::DECODE;
+    auto decode                         = engine->makeStream(make_query(108, true, false, 4));
+    EXPECT_FALSE(decode->hasHiddenStateCaptureReservation());
+    EXPECT_FALSE(decode->requiresFullContextForHiddenStateCapture());
+    EXPECT_FALSE(decode->hasError());
+    EXPECT_EQ(owner->reservations.size(), attempts);
+    engine->pd_sep_config.role_type     = RoleType::PDFUSION;
+    engine->resource_context_.role_type = RoleType::PDFUSION;
+    auto unexecuted                     = engine->makeStream(make_query(109, true, false, 4));
+    EXPECT_TRUE(unexecuted->hasHiddenStateCaptureReservation());
+    const std::weak_ptr<Executor> weak_owner = owner;
+    owner.reset();
+    engine->executor_.reset();
+    EXPECT_TRUE(weak_owner.expired());
+    EXPECT_NO_THROW(unexecuted->cancelHiddenStateCapture());
+    EXPECT_FALSE(unexecuted->hasHiddenStateCaptureReservation());
+}
+
+TEST_F(NormalEngineTest, testPrefillOnlyReturnsOneEmptyOutput) {
+    CustomConfig config;
+    auto         engine = createMockEngine(config);
+
+    auto query                             = make_shared<GenerateInput>();
+    query->input_ids                       = torch::tensor({1, 2, 3, 4}, torch::kInt32);
+    query->generate_config                 = make_shared<GenerateConfig>();
+    query->generate_config->max_new_tokens = 0;
+
+    auto       stream       = engine->enqueue(query);
+    const auto input_length = stream->seqLength();
+    auto       output       = stream->nextOutput();
+
+    ASSERT_TRUE(output.ok());
+    ASSERT_EQ(output.value().generate_outputs.size(), 1);
+    EXPECT_TRUE(output.value().generate_outputs[0].finished);
+    EXPECT_EQ(output.value().generate_outputs[0].output_ids.sizes(), (torch::IntArrayRef{1, 0}));
+    EXPECT_EQ(stream->seqLength(), input_length);
+    EXPECT_EQ(stream->outputTokenLen(), 0);
+    EXPECT_TRUE(stream->hasEvent(StreamEvents::GenerateDone));
+}
+
+TEST_F(NormalEngineTest, testDecodeRoleRejectsPrefillOnlyBeforeScheduling) {
+    CustomConfig config;
+    config.role_type = RoleType::DECODE;
+    auto engine      = createMockEngine(config);
+
+    auto zero_query                             = make_shared<GenerateInput>();
+    zero_query->input_ids                       = torch::tensor({1, 2, 3, 4}, torch::kInt32);
+    zero_query->generate_config                 = make_shared<GenerateConfig>();
+    zero_query->generate_config->max_new_tokens = 0;
+
+    auto zero_stream = engine->enqueue(zero_query);
+    ASSERT_NE(zero_stream, nullptr);
+    EXPECT_TRUE(zero_stream->hasError());
+    EXPECT_EQ(zero_stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+    EXPECT_EQ(zero_stream->curBlocksNum(), 0);
+    EXPECT_EQ(engine->getScheduler().onflightStreams(), 0);
+
+    auto positive_query                             = make_shared<GenerateInput>();
+    positive_query->input_ids                       = torch::tensor({1, 2, 3, 4}, torch::kInt32);
+    positive_query->generate_config                 = make_shared<GenerateConfig>();
+    positive_query->generate_config->max_new_tokens = 1;
+
+    auto positive_stream = engine->makeStream(positive_query);
+    ASSERT_NE(positive_stream, nullptr);
+    EXPECT_FALSE(positive_stream->hasError());
+    EXPECT_EQ(positive_stream->curBlocksNum(), 0);
+}
+
+TEST_F(NormalEngineTest, testDirectEngineEntriesConvertPrefillValidationErrorsToStreamErrors) {
+    CustomConfig config;
+    auto         engine = createMockEngine(config);
+
+    auto make_invalid_query = [] {
+        auto query                             = make_shared<GenerateInput>();
+        query->input_ids                       = torch::tensor({1, 2, 3, 4}, torch::kInt32);
+        query->generate_config                 = make_shared<GenerateConfig>();
+        query->generate_config->max_new_tokens = 0;
+        query->generate_config->min_new_tokens = 1;
+        return query;
+    };
+
+    std::shared_ptr<GenerateStream> stream;
+    EXPECT_NO_THROW(stream = engine->enqueue(make_invalid_query()));
+    ASSERT_NE(stream, nullptr);
+    EXPECT_TRUE(stream->hasError());
+    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+    EXPECT_EQ(engine->getScheduler().onflightStreams(), 0);
+
+    auto make_stream_query = make_invalid_query();
+    EXPECT_NO_THROW(stream = engine->makeStream(make_stream_query));
+    ASSERT_NE(stream, nullptr);
+    EXPECT_TRUE(stream->hasError());
+    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+
+    std::vector<std::shared_ptr<GenerateInput>>                  inputs{make_invalid_query(), make_invalid_query()};
+    std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>> result;
+    EXPECT_NO_THROW(result = engine->enqueueMultiple(inputs));
+    EXPECT_EQ(result.first, std::vector<bool>({false, false}));
+    ASSERT_EQ(result.second.size(), 2);
+    for (const auto& invalid_stream : result.second) {
+        ASSERT_NE(invalid_stream, nullptr);
+        EXPECT_TRUE(invalid_stream->hasError());
+        EXPECT_EQ(invalid_stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+    }
+    EXPECT_EQ(engine->getScheduler().onflightStreams(), 0);
+}
+
+TEST_F(NormalEngineTest, testEnqueueMultipleRejectsMixedModesBeforeRoleFiltering) {
+    CustomConfig config;
+    config.role_type = RoleType::DECODE;
+    auto engine      = createMockEngine(config);
+
+    auto make_query = [](int64_t request_id, int64_t group_id, int max_new_tokens) {
+        auto query                             = make_shared<GenerateInput>();
+        query->request_id                      = request_id;
+        query->input_ids                       = torch::tensor({1, 2, 3, 4}, torch::kInt32);
+        query->generate_config                 = make_shared<GenerateConfig>();
+        query->generate_config->max_new_tokens = max_new_tokens;
+        query->group_id                        = group_id;
+        query->group_size                      = 2;
+        return query;
+    };
+
+    for (bool generation_first : {false, true}) {
+        const int64_t group_id = 100 + generation_first;
+        auto          prefill  = make_query(10 + generation_first, group_id, 0);
+        auto          generate = make_query(20 + generation_first, group_id, 1);
+        auto          inputs   = generation_first ? std::vector<std::shared_ptr<GenerateInput>>{generate, prefill} :
+                                                    std::vector<std::shared_ptr<GenerateInput>>{prefill, generate};
+
+        auto [enqueue_successes, streams] = engine->enqueueMultiple(inputs);
+
+        EXPECT_EQ(enqueue_successes, std::vector<bool>({false, false}));
+        ASSERT_EQ(streams.size(), 2);
+        for (const auto& stream : streams) {
+            EXPECT_TRUE(stream->hasError());
+            EXPECT_FALSE(stream->hasEvent(StreamEvents::CanRun));
+            EXPECT_EQ(stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+            EXPECT_EQ(stream->stopReason(), kMixedForceBatchGroupError);
+        }
+        EXPECT_EQ(engine->getScheduler().onflightStreams(), 0);
+    }
+}
+
+TEST_F(NormalEngineTest, testEnqueueMultipleIgnoresInvalidStreamForModeCheck) {
+    CustomConfig config;
+    auto         engine = createMockEngine(config);
+
+    auto make_query = [](int max_new_tokens, int min_new_tokens) {
+        auto query                             = make_shared<GenerateInput>();
+        query->input_ids                       = torch::tensor({1, 2, 3, 4}, torch::kInt32);
+        query->generate_config                 = make_shared<GenerateConfig>();
+        query->generate_config->max_new_tokens = max_new_tokens;
+        query->generate_config->min_new_tokens = min_new_tokens;
+        return query;
+    };
+
+    auto [enqueue_successes, streams] = engine->enqueueMultiple({make_query(0, 1), make_query(1, 0)});
+
+    ASSERT_EQ(streams.size(), 2);
+    EXPECT_EQ(enqueue_successes, std::vector<bool>({false, true}));
+    EXPECT_TRUE(streams[0]->hasError());
+    EXPECT_EQ(streams[0]->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+    EXPECT_FALSE(streams[1]->hasError());
+    auto output = streams[1]->nextOutput();
+    ASSERT_TRUE(output.ok());
+    EXPECT_TRUE(output.value().generate_outputs[0].finished);
+}
+
+TEST(NormalEnginePolicyTest, testPrefillOnlyStreamDoesNotReserveSpeculativeSteps) {
+    EXPECT_EQ(NormalEngine::reserveStepForStream(/*configured_reserve_step=*/4, /*is_prefill_only=*/true), 0);
+    EXPECT_EQ(NormalEngine::reserveStepForStream(/*configured_reserve_step=*/4, /*is_prefill_only=*/false), 4);
+    EXPECT_EQ(NormalEngine::reserveStepForStream(/*configured_reserve_step=*/0, /*is_prefill_only=*/true), 0);
+}
+
+TEST(NormalEnginePolicyTest, testEmptyBatchEarlyReturnPreservesRequiredAlignment) {
+    EXPECT_TRUE(NormalEngine::shouldEarlyReturnEmptyBatch(
+        /*streams_empty=*/true, /*tp_size=*/1, /*enable_ffn_disaggregate=*/false));
+    EXPECT_FALSE(NormalEngine::shouldEarlyReturnEmptyBatch(
+        /*streams_empty=*/true, /*tp_size=*/1, /*enable_ffn_disaggregate=*/true));
+    EXPECT_FALSE(NormalEngine::shouldEarlyReturnEmptyBatch(
+        /*streams_empty=*/true, /*tp_size=*/2, /*enable_ffn_disaggregate=*/false));
+    EXPECT_FALSE(NormalEngine::shouldEarlyReturnEmptyBatch(
+        /*streams_empty=*/false, /*tp_size=*/1, /*enable_ffn_disaggregate=*/false));
+}
+
+TEST(NormalEnginePolicyTest, testBatchDecodeSchedulerCannotSuppressMultiDpMtpFakePrefill) {
+    EXPECT_FALSE(NormalEngine::shouldAddMtpFakePrefill(
+        /*has_prefill=*/true, /*use_batch_decode_scheduler=*/true, /*dp_size=*/2));
+    EXPECT_FALSE(NormalEngine::shouldAddMtpFakePrefill(
+        /*has_prefill=*/false, /*use_batch_decode_scheduler=*/true, /*dp_size=*/1));
+    EXPECT_TRUE(NormalEngine::shouldAddMtpFakePrefill(
+        /*has_prefill=*/false, /*use_batch_decode_scheduler=*/true, /*dp_size=*/2));
+    EXPECT_TRUE(NormalEngine::shouldAddMtpFakePrefill(
+        /*has_prefill=*/false, /*use_batch_decode_scheduler=*/false, /*dp_size=*/1));
 }
 
 }  // namespace rtp_llm
