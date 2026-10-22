@@ -325,7 +325,7 @@ class CostBasedPrefillSelectionMetricTest {
             assertEquals(PlacementResult.Status.BLOCKED, result.status(), "do not fall back to the colder idle P");
             assertEquals("10.0.0.2:8080", result.diagnostics().get("selectedEndpoint"));
         } finally {
-            occupants.forEach(endpoint::releaseCommittedItem);
+            occupants.forEach(item -> endpoint.releaseCommittedItem(item.execution()));
             reservations.forEach(org.flexlb.balance.endpoint.PrefillState.RouteReservation::close);
         }
         try (SelectedRole recovered = select()) {
