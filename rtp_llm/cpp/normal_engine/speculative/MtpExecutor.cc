@@ -1979,6 +1979,15 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     if (!is_dspark_ && !model_output.mtp_target_hidden_states.defined()) {
         maybeOverrideLastHiddenWithMtpBuffer(model_input, *model_);
     }
+    // The post-rejection input is final here: fork the draft-prefill prepare so
+    // its host work and mirror D2H waits overlap the post-rejection broadcast
+    // and the commit's GPU tail instead of serializing the step boundary. The
+    // runner joins below before runDraftPrefillForward; a worker failure
+    // surfaces at that sync, before the forward consumes the prepared state.
+    // The prepare reads only lengths/tables/metadata, all final at this point;
+    // the tensors the broadcast overwrites in place on non-root ranks are
+    // consumed inside the forward, after the join.
+    launchDraftPrefillPrepareAsync(model_input, /*post_rejection=*/true);
     broadcastPostRejectionInputs(model_input);
 
     draft_prefill_prepare_runner_.sync(cuda_graph::graphGetCurrentStream());
@@ -2165,8 +2174,22 @@ void MtpExecutor::launchTargetVerifyPrepareAsync(const GptModelInputs& model_inp
         });
 }
 
-void MtpExecutor::launchDraftPrefillPrepareAsync(const GptModelInputs& model_input) {
-    if (!useAsyncPrepare()) {
+void MtpExecutor::launchDraftPrefillPrepareAsync(const GptModelInputs& model_input, bool post_rejection) {
+    if (post_rejection) {
+        // The pre-rejection fork (non-hooks mode) already prepared this step;
+        // AsyncRunner is single-slot, so a second launch would serialize on it.
+        if (!useAsyncDraftPreparePostRejection() || useAsyncPrepare()) {
+            return;
+        }
+        // The host pipeline's tpSyncModelInputs rewrites non-root input
+        // metadata (lengths, tables) inside the broadcast step, so only the
+        // device-state pipeline — which broadcasts value tensors only — may
+        // fork the prepare before it. The host pipeline keeps the sync
+        // rebuild inside runDraftPrefillForward.
+        if (!(useStreamAsync() || useAsyncDeviceState())) {
+            return;
+        }
+    } else if (!useAsyncPrepare()) {
         return;
     }
     const auto& mtp_cache_cfg = cache_manager_->getMTPModuleCacheConfig(0);
@@ -2185,6 +2208,9 @@ void MtpExecutor::launchDraftPrefillPrepareAsync(const GptModelInputs& model_inp
             checkModelInputsOnCuda(model_input_copy, "decode.draft_prefill_prepare.forwarded");
             draft_prefill_model->prepareAttentionInputs(model_input_copy);
         });
+    if (post_rejection) {
+        draft_prefill_prepare_forked_ = true;
+    }
 }
 
 GptModelOutputs MtpExecutor::runTargetVerifyForward(GptModelInputs& model_input, const StreamGroups& stream_groups) {
@@ -2613,10 +2639,11 @@ void MtpExecutor::broadcastPostRejectionInputs(GptModelInputs& model_input) {
             // every rank, so only the rejection-updated tensors need a
             // broadcast. They are all device-resident, so this stays NCCL-only
             // and rank 0's rejection-sampled view replaces non-root local
-            // target-verify outputs.
-            execBroadcast({{model_input.combo_tokens}, 0});
-            execBroadcast({{model_input.last_hidden_states}, 0});
-            execBroadcast({{model_input.lm_output_indexes}, 0});
+            // target-verify outputs. One execBroadcast call keeps a single
+            // GIL+pybind round trip on the per-step critical path; the python
+            // callback fans the list out to NCCL.
+            execBroadcast(
+                {{model_input.combo_tokens, model_input.last_hidden_states, model_input.lm_output_indexes}, 0});
         } else {
             // Default host pipeline: updateDecodePostDraftModelInput compacts
             // combo_tokens/input_lengths/hidden states down to accept_len on
@@ -2706,8 +2733,14 @@ GptModelOutputs MtpExecutor::runDraftPrefillForward(GptModelInputs& model_input)
         // Hooks mode disables the speculative early prepare. Rebuild draft
         // prefill metadata from the post-rejection input immediately before
         // the forward so no predicted lengths or late worker errors leak
-        // across the target transaction boundary.
-        draft_prefill_model->prepareAttentionInputs(model_input);
+        // across the target transaction boundary. When the post-rejection
+        // fork already prepared this exact input on the runner, the rebuild
+        // would duplicate that work; the forked flag is consumed here so a
+        // throw between fork and forward falls back to the sync rebuild.
+        const bool prepare_forked = std::exchange(draft_prefill_prepare_forked_, false);
+        if (!prepare_forked) {
+            draft_prefill_model->prepareAttentionInputs(model_input);
+        }
     }
     auto draft_prefill_model_output = draft_prefill_model->forward(model_input);
     // Ordinary MTP chains this output into the next autoregressive draft step.
@@ -3234,6 +3267,19 @@ bool MtpExecutor::useAsyncPrepare() const {
         return readEnvFlagOnce("RTP_LLM_MTP_ASYNC_PREPARE", "async-prepare", "enabled");
     }();
     return asyncPrepareAllowed(enabled, speculativeTargetTransactionsEnabled());
+}
+
+bool MtpExecutor::useAsyncDraftPreparePostRejection() const {
+    static const bool enabled = []() {
+        const char* env = std::getenv("RTP_LLM_MTP_ASYNC_DRAFT_PREPARE_POST_REJECTION");
+        const bool  on  = !(env != nullptr && std::string(env) == "0");
+        RTP_LLM_LOG_INFO("[async-prepare] RTP_LLM_MTP_ASYNC_DRAFT_PREPARE_POST_REJECTION=%s -> "
+                         "post_rejection_draft_prepare=%d",
+                         env ? env : "(unset)",
+                         static_cast<int>(on));
+        return on;
+    }();
+    return enabled;
 }
 
 torch::Tensor MtpExecutor::advanceDSparkPositionIds(const torch::Tensor& verify_position_ids,
