@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Union
 import requests
 from pydantic import BaseModel
 
+from rtp_llm.test.smoke.artifact_path import smoke_actual_path
 from rtp_llm.test.smoke.common_def import QueryStatus, SmokeException, Tracer
 from rtp_llm.test.smoke.utils import no_compare, save_response
 from rtp_llm.test.utils.maga_server_manager import MagaServerManager
@@ -116,14 +117,12 @@ class BaseComparer(object):
         if taskinfo_rel_path is None or query_idx is None:
             return
         out_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", os.getcwd())
-        # smoke_actual/data/model/.../file.json -> smoke_actual/data/model/.../file.query_0.json
-        base = os.path.splitext(taskinfo_rel_path)[0]
-        rel_dir = os.path.dirname(base)
-        name = os.path.basename(base)
-        dest_dir = os.path.join(out_dir, "smoke_actual", rel_dir)
-        os.makedirs(dest_dir, exist_ok=True)
-        out_path = os.path.join(dest_dir, f"{name}.query_{query_idx}.json")
+        out_path = taskinfo_rel_path
         try:
+            out_path = smoke_actual_path(
+                taskinfo_rel_path, query_idx, out_dir, os.path.dirname(__file__)
+            )
+            out_path.parent.mkdir(parents=True, exist_ok=True)
             data = _actual_to_json_serializable(actual_result)
             with open(out_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
