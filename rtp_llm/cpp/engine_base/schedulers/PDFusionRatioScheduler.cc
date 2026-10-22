@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -15,6 +17,17 @@ namespace rtp_llm {
 
 namespace {
 constexpr auto kNoProgressScheduleGap = std::chrono::milliseconds(1);
+
+bool currentKVAdmissionFromEnv() {
+    const auto* mode = std::getenv("PDFUSION_KV_ADMISSION_MODE");
+    if (!mode || std::string(mode) == "lifetime") {
+        return false;
+    }
+    if (std::string(mode) == "current") {
+        return true;
+    }
+    throw std::invalid_argument("PDFUSION_KV_ADMISSION_MODE must be lifetime or current");
+}
 
 int remainingKVAllocationSteps(const GenerateStreamPtr& stream) {
     // The final generated token is never used as input to another forward, so it does not get a KV entry.
@@ -148,10 +161,12 @@ PDFusionRatioScheduler::PDFusionRatioScheduler(const RuntimeConfig&             
                       model_specific_config,
                       cache_manager,
                       metrics_reporter),
+    current_kv_admission_(currentKVAdmissionFromEnv()),
     trace_enabled_(runtime_config.fifo_scheduler_config.pdfusion_schedule_trace),
     decode_prefill_step_(parseDecodePrefillRatio(runtime_config.fifo_scheduler_config.decode_prefill_ratio)),
     decode_since_prefill_(0),
     prefill_since_decode_(0) {
+    RTP_LLM_LOG_INFO("PDFUSION_KV_ADMISSION mode=%s", current_kv_admission_ ? "current" : "lifetime");
     RTP_LLM_LOG_INFO("max_generate_batch_size is [%zu], max_batch_tokens_size is [%zu]",
                      max_generate_batch_size_,
                      max_batch_tokens_size_);
@@ -313,7 +328,7 @@ void PDFusionRatioScheduler::buildAdmissionPeakState() {
     state->streams.reserve(loading_cache_streams_.size() + running_streams_.size() + pending_decode_streams_.size()
                            + waiting_streams_.size());
     auto append_stream = [&](const GenerateStreamPtr& s) {
-        state->streams.push_back({s, remainingKVAllocationSteps(s)});
+        state->streams.push_back({s, current_kv_admission_ ? 0 : remainingKVAllocationSteps(s)});
         state->initial_need_blocks += estimateInitialNeedBlocks(s);
     };
     for (const auto& s : loading_cache_streams_) {
@@ -330,8 +345,10 @@ void PDFusionRatioScheduler::buildAdmissionPeakState() {
             append_stream(s);
         }
     }
-    std::sort(state->streams.begin(), state->streams.end(), longerLifetimeFirst);
-    state->peak           = estimateApproximatePeak(state->streams);
+    if (!current_kv_admission_) {
+        std::sort(state->streams.begin(), state->streams.end(), longerLifetimeFirst);
+        state->peak = estimateApproximatePeak(state->streams);
+    }
     admission_peak_state_ = std::move(state);
 }
 
@@ -339,7 +356,7 @@ bool PDFusionRatioScheduler::tryAddToAdmissionPeakState(const GenerateStreamPtr&
                                                         int64_t                  initial_capacity,
                                                         int64_t                  lifecycle_capacity) {
     auto&     state              = *admission_peak_state_;
-    const int remaining_kv_steps = remainingKVAllocationSteps(new_stream);
+    const int remaining_kv_steps = current_kv_admission_ ? 0 : remainingKVAllocationSteps(new_stream);
     // Preserve the idle fast path, where the allocator reports an impossible standalone request.
     const bool enforce_capacity = !state.streams.empty();
     // Device KV-cache matching happens later in the allocator. At scheduler admission time the actual prefix hit is
@@ -348,8 +365,17 @@ bool PDFusionRatioScheduler::tryAddToAdmissionPeakState(const GenerateStreamPtr&
 
     if (enforce_capacity
         && (state.initial_need_blocks + initial_delta > initial_capacity
-            || state.peak.need_blocks > lifecycle_capacity)) {
+            || (!current_kv_admission_ && state.peak.need_blocks > lifecycle_capacity))) {
         return false;
+    }
+
+    if (current_kv_admission_) {
+        // Retain current allocation/reserve checks and in-flight accounting, but do not
+        // budget to max_new_tokens. Decode grows KV through the existing allocator;
+        // incremental allocation failure retains its existing MALLOC_FAILED behavior.
+        state.streams.push_back({new_stream, 0});
+        state.initial_need_blocks += initial_delta;
+        return true;
     }
 
     const auto insert_it      = std::lower_bound(state.streams.begin(),

@@ -60,6 +60,7 @@ protected:
 
     void                admitWaitingForCoordination();
     void                observeCommitted(const std::list<GenerateStreamPtr>& streams, bool prefill);
+    const bool          current_kv_admission_;
     const bool          trace_enabled_;
     ScheduleObservation observation_;
 

@@ -4,6 +4,7 @@
 #include <chrono>
 #include <iostream>
 #include <limits>
+#include <stdexcept>
 #include <algorithm>
 #include <memory>
 #include <numeric>
@@ -871,6 +872,197 @@ static std::shared_ptr<GenerateStream> makeStream(const std::vector<int>& ids,
     query->generate_config->num_return_sequences = num_return_sequences;
     query->generate_config->variable_num_beams   = variable_num_beams;
     return std::make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+}
+
+namespace {
+class KVAdmissionEnvScope {
+public:
+    explicit KVAdmissionEnvScope(const char* mode):
+        had_value_(std::getenv("PDFUSION_KV_ADMISSION_MODE") != nullptr),
+        value_(had_value_ ? std::getenv("PDFUSION_KV_ADMISSION_MODE") : "") {
+        if (mode) {
+            ::setenv("PDFUSION_KV_ADMISSION_MODE", mode, 1);
+        } else {
+            ::unsetenv("PDFUSION_KV_ADMISSION_MODE");
+        }
+    }
+    ~KVAdmissionEnvScope() {
+        if (had_value_) {
+            ::setenv("PDFUSION_KV_ADMISSION_MODE", value_.c_str(), 1);
+        } else {
+            ::unsetenv("PDFUSION_KV_ADMISSION_MODE");
+        }
+    }
+
+private:
+    bool        had_value_;
+    std::string value_;
+};
+}  // namespace
+
+TEST_F(FIFOSchedulerTest, testCurrentKVAdmissionBatchesLongOutputsAndPreservesInFlightCap) {
+    for (const char* mode : {"lifetime", "current"}) {
+        KVAdmissionEnvScope env(mode);
+        auto cache = std::make_shared<KVCacheManager>(makeMhaCacheConfig(1, 9, 1, 4, 2, DataType::TYPE_FP16));
+        ASSERT_TRUE(cache->init());
+        ResourceContext resource;
+        resource.cache_manager = cache;
+        ModelConfig model;
+        model.max_seq_len = 8192;
+        RuntimeConfig runtime;
+        runtime.max_generate_batch_size                       = 3;
+        runtime.fifo_scheduler_config.max_batch_tokens_size   = 8192;
+        runtime.fifo_scheduler_config.decode_prefill_ratio    = "0";
+        runtime.fifo_scheduler_config.pdfusion_schedule_trace = true;
+        PDFusionRatioScheduler         scheduler(runtime, model, makePDFusionPDSepConfig(), {}, {}, cache);
+        std::vector<GenerateStreamPtr> streams;
+        for (int i = 0; i < 4; ++i) {
+            streams.push_back(makeStream({1, 2, 3, 4}, model, runtime, resource, 64));
+            ASSERT_TRUE(scheduler.enqueue(streams.back()).ok());
+        }
+        auto batch = scheduler.schedule();
+        ASSERT_TRUE(batch.ok());
+        const bool current = std::string(mode) == "current";
+        EXPECT_EQ(batch.value().size(), current ? 3 : 1);
+        EXPECT_EQ(scheduler.waitingStreamsSize(), current ? 1 : 3);
+        for (const auto& stream : streams) {
+            EXPECT_EQ(stream->maxTokenNum(), 68);
+            EXPECT_FALSE(stream->hasError());
+        }
+        if (current) {
+            // The next round must count the three pending streams, not just running_.
+            auto next = scheduler.schedule();
+            ASSERT_TRUE(next.ok());
+            EXPECT_EQ(scheduler.waitingStreamsSize(), 1);
+            EXPECT_GT(scheduler.lastScheduleObservation().rejected_batch, 0);
+        } else {
+            EXPECT_GT(scheduler.lastScheduleObservation().rejected_kv, 0);
+        }
+    }
+}
+
+TEST_F(FIFOSchedulerTest, testCurrentKVAdmissionPreservesInitialReserveAcrossCandidates) {
+    KVAdmissionEnvScope env("current");
+    KVCacheConfig       kv_config;
+    kv_config.reserve_block_ratio = 20;
+    auto cache                    = std::make_shared<KVCacheManager>(
+        makeMhaCacheConfig(1, 11, 1, 4, 1, DataType::TYPE_FP16), false, nullptr, kv_config);
+    ASSERT_TRUE(cache->init());
+    ASSERT_EQ(cache->availableBlocksNum(), 10);
+    ASSERT_EQ(cache->reserveBlocksNum(), 2);
+    ResourceContext resource;
+    resource.cache_manager = cache;
+    ModelConfig model;
+    model.max_seq_len = 8192;
+    RuntimeConfig runtime;
+    runtime.max_generate_batch_size                     = 100;
+    runtime.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    runtime.fifo_scheduler_config.decode_prefill_ratio  = "0";
+    PDFusionRatioScheduler scheduler(runtime, model, makePDFusionPDSepConfig(), {}, {}, cache);
+    for (int i = 0; i < 3; ++i) {
+        ASSERT_TRUE(scheduler.enqueue(makeStream({1, 2, 3, 4}, model, runtime, resource, 64)).ok());
+    }
+    auto batch = scheduler.schedule();
+    ASSERT_TRUE(batch.ok());
+    EXPECT_EQ(batch.value().size(), 2);
+    EXPECT_EQ(scheduler.waitingStreamsSize(), 1);
+    EXPECT_EQ(cache->availableBlocksNum(), 2);
+}
+
+TEST_F(FIFOSchedulerTest, testCurrentKVAdmissionKeepsIncrementalFailureSemantics) {
+    KVAdmissionEnvScope env("current");
+    auto cache = std::make_shared<KVCacheManager>(makeMhaCacheConfig(1, 4, 1, 4, 2, DataType::TYPE_FP16));
+    ASSERT_TRUE(cache->init());
+    ResourceContext resource;
+    resource.cache_manager = cache;
+    ModelConfig model;
+    model.max_seq_len = 8192;
+    RuntimeConfig runtime;
+    runtime.max_generate_batch_size                     = 100;
+    runtime.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    runtime.fifo_scheduler_config.decode_prefill_ratio  = "0";
+    PDFusionRatioScheduler scheduler(runtime, model, makePDFusionPDSepConfig(), {}, {}, cache);
+    auto                   stream = makeStream({1, 2}, model, runtime, resource, 64);
+    ASSERT_TRUE(scheduler.enqueue(stream).ok());
+    ASSERT_TRUE(scheduler.schedule().ok());
+    stream->setSeqLength(16);
+    auto batch = scheduler.schedule();
+    ASSERT_TRUE(batch.ok());
+    EXPECT_TRUE(batch.value().empty());
+    EXPECT_TRUE(stream->hasError());
+    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::MALLOC_FAILED);
+    EXPECT_EQ(cache->availableBlocksNum(), 3);
+}
+
+TEST_F(FIFOSchedulerTest, testCurrentKVAdmissionInCoordinatedScheduler) {
+    for (const char* mode : {"lifetime", "current"}) {
+        KVAdmissionEnvScope env(mode);
+        auto cache = std::make_shared<KVCacheManager>(makeMhaCacheConfig(1, 9, 1, 4, 2, DataType::TYPE_FP16));
+        ASSERT_TRUE(cache->init());
+        ResourceContext resource;
+        resource.cache_manager = cache;
+        ModelConfig model;
+        model.max_seq_len = 8192;
+        RuntimeConfig runtime;
+        runtime.max_generate_batch_size                       = 3;
+        runtime.fifo_scheduler_config.max_batch_tokens_size   = 8192;
+        runtime.fifo_scheduler_config.max_context_batch_size  = 1;
+        runtime.fifo_scheduler_config.pdfusion_schedule_trace = true;
+        PDFusionCoordinatedScheduler scheduler(runtime, model, makePDFusionPDSepConfig(), {}, {}, cache);
+        auto                         first = makeStream({1, 2, 3, 4}, model, runtime, resource, 64);
+        ASSERT_TRUE(scheduler.enqueue(first).ok());
+        EXPECT_EQ(scheduler.prepareLocal(1).ready_prefill, 1);
+        EXPECT_EQ(scheduler.commitLocal(1, PDFusionPlan::PREFILL).size(), 1);
+        first->setSeqLength(5);
+        first->setIsContextStream(false);
+        scheduler.completeModelStep();
+        auto second = makeStream({1, 2, 3, 4}, model, runtime, resource, 64);
+        ASSERT_TRUE(scheduler.enqueue(second).ok());
+        const auto state   = scheduler.prepareLocal(2);
+        const bool current = std::string(mode) == "current";
+        EXPECT_EQ(state.ready_decode, 1);
+        EXPECT_EQ(state.ready_prefill, current ? 1 : 0);
+        EXPECT_EQ(scheduler.commitLocal(2, current ? PDFusionPlan::PREFILL : PDFusionPlan::DECODE).size(), 1);
+        scheduler.completeModelStep();
+        EXPECT_FALSE(first->hasError());
+        EXPECT_FALSE(second->hasError());
+    }
+}
+
+TEST_F(FIFOSchedulerTest, testCurrentKVAdmissionPreservesPrefillTokenLimit) {
+    KVAdmissionEnvScope env("current");
+    auto cache = std::make_shared<KVCacheManager>(makeMhaCacheConfig(1, 64, 1, 4, 2, DataType::TYPE_FP16));
+    ASSERT_TRUE(cache->init());
+    ResourceContext resource;
+    resource.cache_manager = cache;
+    ModelConfig model;
+    model.max_seq_len = 8192;
+    RuntimeConfig runtime;
+    runtime.max_generate_batch_size                       = 100;
+    runtime.fifo_scheduler_config.max_batch_tokens_size   = 8;
+    runtime.fifo_scheduler_config.decode_prefill_ratio    = "0";
+    runtime.fifo_scheduler_config.pdfusion_schedule_trace = true;
+    PDFusionRatioScheduler scheduler(runtime, model, makePDFusionPDSepConfig(), {}, {}, cache);
+    ASSERT_TRUE(scheduler.enqueue(makeStream({1, 2, 3, 4}, model, runtime, resource, 64)).ok());
+    ASSERT_TRUE(scheduler.enqueue(makeStream({1, 2, 3, 4}, model, runtime, resource, 64)).ok());
+    auto batch = scheduler.schedule();
+    ASSERT_TRUE(batch.ok());
+    EXPECT_EQ(batch.value().size(), 1);
+    EXPECT_EQ(scheduler.waitingStreamsSize(), 1);
+    EXPECT_EQ(scheduler.lastScheduleObservation().rejected_tokens, 1);
+}
+
+TEST_F(FIFOSchedulerTest, testKVAdmissionEnvironmentDefaultsAndRejectsUnknownMode) {
+    KVAdmissionEnvScope env(nullptr);
+    auto cache = std::make_shared<KVCacheManager>(makeMhaCacheConfig(1, 9, 1, 4, 2, DataType::TYPE_FP16));
+    ASSERT_TRUE(cache->init());
+    RuntimeConfig          runtime;
+    ModelConfig            model;
+    PDFusionRatioScheduler scheduler(runtime, model, makePDFusionPDSepConfig(), {}, {}, cache);
+    EXPECT_FALSE(scheduler.current_kv_admission_);
+    ::setenv("PDFUSION_KV_ADMISSION_MODE", "curent", 1);
+    EXPECT_THROW((PDFusionRatioScheduler(runtime, model, makePDFusionPDSepConfig(), {}, {}, cache)),
+                 std::invalid_argument);
 }
 
 // ---------------------------------------------------------------------------
