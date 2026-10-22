@@ -86,15 +86,18 @@ class BuildPackagingContractTest(TestCase):
         command.test_target = (
             "//rtp_llm/cpp/utils/test:oom //rtp_llm/cpp/cuda_graph/tests:retry"
         )
-        with patch.object(setup_module, "rewrite_torch_root"), patch.object(
-            setup_module, "detect_build_config", return_value="cuda13"
-        ), patch.object(
-            setup_module, "_get_bazel_cmd_prefix", return_value=(["bazel"], [])
-        ), patch.object(
-            setup_module,
-            "_run_bazel_with_retry",
-            return_value=SimpleNamespace(returncode=0),
-        ) as run:
+        with (
+            patch.object(setup_module, "rewrite_torch_root"),
+            patch.object(setup_module, "detect_build_config", return_value="cuda13"),
+            patch.object(
+                setup_module, "_get_bazel_cmd_prefix", return_value=(["bazel"], [])
+            ),
+            patch.object(
+                setup_module,
+                "_run_bazel_with_retry",
+                return_value=SimpleNamespace(returncode=0),
+            ) as run,
+        ):
             command.run()
         self.assertEqual(
             run.call_args.args[0][1:4],
@@ -486,7 +489,9 @@ class BuildPackagingContractTest(TestCase):
             re.S,
         )
         self.assertIsNotNone(target_block)
-        self.assertIn('tags = ["manual"]', target_block.group(0))
+        # Keep the retained main Bazel counterpart alongside Native pytest.
+        self.assertIn('tags = ["L20_CU13"]', target_block.group(0))
+        self.assertIn('exec_properties = {"gpu": "L20_CU13"}', target_block.group(0))
 
         test_file = (
             PROJECT_ROOT
@@ -499,15 +504,44 @@ class BuildPackagingContractTest(TestCase):
             if isinstance(node, ast.ClassDef)
             and node.name == "PyWrappedModelCacheStoreIntegrationTest"
         )
-        decorators = {ast.unparse(node) for node in test_class.decorator_list}
-        self.assertIn(
-            "pytest.mark.gpu(type='MI308X' if torch.version.hip else 'H20')",
-            decorators,
-        )
+        # The original nine Native methods retain explicit per-method routes;
+        # a class marker would incorrectly route the new main-only methods too.
+        native_methods = {
+            "test_successful_generation_prefill_capture_does_not_reserve_request_blocks": "_isolated_graph_test",
+            "test_clean_generation_prefill_capture_failure_fails_init_without_cache_allocation": "_isolated_graph_test",
+            "test_unsupported_generation_prefill_backend_fails_init_without_cache_allocation": "_isolated_graph_test",
+            "test_late_constructor_failure_destroys_clean_graphs_without_cache_allocation": "_isolated_graph_test",
+            "test_dirty_generation_prefill_capture_does_not_retain_cache_manager": "_isolated_graph_test",
+            "test_multi_tag_uses_each_tag_local_physical_block_table": "_isolated_native_test",
+            "test_micro_batch_slices_request_metadata_with_block_rows": "_isolated_native_test",
+            "test_context_parallel_publishes_original_lengths_not_local_chunk": "_isolated_native_test",
+            "test_mtp_writer_uses_selected_sub_config_for_real_write": "_isolated_native_test",
+        }
+        methods = {
+            node.name: node
+            for node in test_class.body
+            if isinstance(node, ast.FunctionDef)
+        }
+        for name, isolation in native_methods.items():
+            self.assertIn(name, methods)
+            decorators = {ast.unparse(node) for node in methods[name].decorator_list}
+            gpu_marker = (
+                "pytest.mark.gpu(type='H20')"
+                if name
+                == "test_context_parallel_publishes_original_lengths_not_local_chunk"
+                else "pytest.mark.gpu(type='MI308X' if torch.version.hip else 'H20')"
+            )
+            self.assertIn(gpu_marker, decorators, name)
+            self.assertIn(isolation, decorators, name)
         test_text = test_file.read_text(encoding="utf-8")
         self.assertIn("subprocess.run(", test_text)
-        self.assertIn('"--native-scenario"', test_text)
-        self.assertIn("_run_native_scenario_isolated", test_text)
+        self.assertIn('"--native-test"', test_text)
+        self.assertIn("def _isolated_native_test(", test_text)
+        self.assertIn(
+            "return _isolated_native_test(method, graph_capture=True)", test_text
+        )
+        self.assertIn("_load_native_test_binding()", test_text)
+        self.assertIn("result.testsRun == 1 and not result.skipped", test_text)
         self.assertNotIn("ensure_compute_ops_loaded()", test_text)
 
         binding_file = (
@@ -662,7 +696,9 @@ class BuildPackagingContractTest(TestCase):
             entries = setup_module._selected_bazel_staged_outputs(
                 config, [f"--config={config}"]
             )
-            selected = [entry for entry in entries if "@flashinfer_cpp_cu13//:" in entry[1]]
+            selected = [
+                entry for entry in entries if "@flashinfer_cpp_cu13//:" in entry[1]
+            ]
             self.assertEqual({entry[1].split(":")[-1] for entry in selected}, names)
             with tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
@@ -677,33 +713,37 @@ class BuildPackagingContractTest(TestCase):
                         name.encode(),
                     )
                 (outputs / "libflashinfer_single_decode.so").unlink()
-                with self.assertRaisesRegex(RuntimeError, "libflashinfer_single_decode.so"):
+                with self.assertRaisesRegex(
+                    RuntimeError, "libflashinfer_single_decode.so"
+                ):
                     setup_module.stage_bazel_outputs(root, selected)
         for config in ("cuda12_9", "rocm", "cuda13_ppu"):
             entries = setup_module._selected_bazel_staged_outputs(
                 config, [f"--config={config}"]
             )
-            self.assertFalse(any("@flashinfer_cpp_cu13//:" in entry[1] for entry in entries))
+            self.assertFalse(
+                any("@flashinfer_cpp_cu13//:" in entry[1] for entry in entries)
+            )
 
     def test_mainline_python_and_sm120_methods_have_native_routes(self):
         with open(PROJECT_ROOT / "pyproject.toml", "rb") as stream:
             config = tomllib.load(stream)
         profiles = config["tool"]["rtp_llm"]["pytest_ci"]["profiles"]
         restored = {
-            'rtp_llm/model_loader/test/test_stacked_moe_weight.py',
-            'rtp_llm/model_loader/test/test_pure_tp_preshard.py',
-            'rtp_llm/model_loader/test/test_compressed_w4a8_int4_per_channel.py',
-            'rtp_llm/model_loader/test/test_per_channel_fp8_helpers.py',
-            'rtp_llm/model_loader/test/test_compressed_w8a8_int8_per_channel.py',
-            'rtp_llm/model_loader/test/test_swizzle_load_config.py',
-            'rtp_llm/model_loader/test/test_model_weight_info.py',
-            'rtp_llm/models/qwen3_next/test/qwen3_next_mtp_test.py',
-            'rtp_llm/models/test/dsv4_kv_cache_test.py',
-            'rtp_llm/models/test/deepseek_v4_dspark_commit_only_test.py',
-            'rtp_llm/models/test/moe_config_propagation_test.py',
-            'rtp_llm/tools/convert/weights_convert_test.py',
-            'rtp_llm/cpp/models/context_parallel/test/context_parallel_py_wrapper_test.py',
-            'rtp_llm/cpp/models/eplb/test/eplb_py_wrapper_test.py',
+            "rtp_llm/model_loader/test/test_stacked_moe_weight.py",
+            "rtp_llm/model_loader/test/test_pure_tp_preshard.py",
+            "rtp_llm/model_loader/test/test_compressed_w4a8_int4_per_channel.py",
+            "rtp_llm/model_loader/test/test_per_channel_fp8_helpers.py",
+            "rtp_llm/model_loader/test/test_compressed_w8a8_int8_per_channel.py",
+            "rtp_llm/model_loader/test/test_swizzle_load_config.py",
+            "rtp_llm/model_loader/test/test_model_weight_info.py",
+            "rtp_llm/models/qwen3_next/test/qwen3_next_mtp_test.py",
+            "rtp_llm/models/test/dsv4_kv_cache_test.py",
+            "rtp_llm/models/test/deepseek_v4_dspark_commit_only_test.py",
+            "rtp_llm/models/test/moe_config_propagation_test.py",
+            "rtp_llm/tools/convert/weights_convert_test.py",
+            "rtp_llm/cpp/models/context_parallel/test/context_parallel_py_wrapper_test.py",
+            "rtp_llm/cpp/models/eplb/test/eplb_py_wrapper_test.py",
         }
         for name in ("py_ut_sm8x", "py_ut_oss_sm8x"):
             profile = profiles[name]
@@ -711,19 +751,31 @@ class BuildPackagingContractTest(TestCase):
             self.assertFalse(restored & set(profile.get("ignore_paths", [])))
             for path in restored:
                 self.assertTrue((PROJECT_ROOT / path).is_file())
-                self.assertTrue(any(path == root or path.startswith(root.rstrip("/") + "/")
-                                    for root in profile["paths"]))
-                self.assertFalse(any(path.startswith(arg.split("=", 1)[1])
-                                     for arg in config["tool"]["pytest"]["ini_options"]["addopts"]
-                                     if arg.startswith("--ignore=")))
+                self.assertTrue(
+                    any(
+                        path == root or path.startswith(root.rstrip("/") + "/")
+                        for root in profile["paths"]
+                    )
+                )
+                self.assertFalse(
+                    any(
+                        path.startswith(arg.split("=", 1)[1])
+                        for arg in config["tool"]["pytest"]["ini_options"]["addopts"]
+                        if arg.startswith("--ignore=")
+                    )
+                )
         from rtp_llm.test.remote_tests.plugin import RemoteREAPIPlugin
         from rtp_llm.test.remote_tests.remote_exec_rtp import RemoteRuntimeConfig
-        from rtp_llm.test.remote_tests.remote_timeout_policy import select_remote_timeout_policy
+        from rtp_llm.test.remote_tests.remote_timeout_policy import (
+            select_remote_timeout_policy,
+        )
 
         cpu_path = "rtp_llm/model_loader/test/test_pure_tp_preshard.py"
         for name in ("py_ut_sm8x", "py_ut_oss_sm8x"):
             profile = profiles[name]
-            self.assertEqual(profile["isolated_env"], {cpu_path: {"CUDA_VISIBLE_DEVICES": ""}})
+            self.assertEqual(
+                profile["isolated_env"], {cpu_path: {"CUDA_VISIBLE_DEVICES": ""}}
+            )
             plugin = object.__new__(RemoteREAPIPlugin)
             plugin.workers = 4
             plugin._collect_outputs = False
@@ -732,16 +784,24 @@ class BuildPackagingContractTest(TestCase):
                 rootpath=PROJECT_ROOT,
             )
             plugin.timeout_policy = select_remote_timeout_policy(name, per_test=False)
-            runtime = RemoteRuntimeConfig(ignore_args=[], env_vars={},
-                                          platform_properties={"gpu": "A10", "gpu_count": "4"},
-                                          remote_setup_prefix="")
+            runtime = RemoteRuntimeConfig(
+                ignore_args=[],
+                env_vars={},
+                platform_properties={"gpu": "A10", "gpu_count": "4"},
+                remote_setup_prefix="",
+            )
             shell = plugin._build_session_command("", runtime, ci_profile=name)[2]
             cpu_start = shell.index(f"--- Isolated file: {cpu_path} ---")
             next_start = shell.index("--- Isolated file:", cpu_start + 20)
-            self.assertIn("device_resource.py env CUDA_VISIBLE_DEVICES= python -m pytest",
-                          shell[cpu_start:next_start])
+            self.assertIn(
+                "device_resource.py env CUDA_VISIBLE_DEVICES= python -m pytest",
+                shell[cpu_start:next_start],
+            )
             self.assertEqual(shell.count("env CUDA_VISIBLE_DEVICES="), 1)
-        loader_source = (PROJECT_ROOT / "rtp_llm/model_loader/test/test_compressed_w8a8_int8_per_channel.py").read_text()
+        loader_source = (
+            PROJECT_ROOT
+            / "rtp_llm/model_loader/test/test_compressed_w8a8_int8_per_channel.py"
+        ).read_text()
         self.assertIn('pytest.mark.gpu(type="A10")', loader_source)
         self.assertNotIn('pytest.mark.gpu(type="H20")', loader_source)
         sm120 = profiles["py_ut_sm120"]
@@ -758,15 +818,21 @@ class BuildPackagingContractTest(TestCase):
     def test_cuda_wrapper_bindings_are_required_staged_test_inputs(self):
         setup_module = _load_setup_module()
         expected = {
-            f"//rtp_llm/cpp/models/{name}/test:th_{name}_py_wrapper_test":
-            f"libth_{name}_py_wrapper_test.so"
+            f"//rtp_llm/cpp/models/{name}/test:th_{name}_py_wrapper_test": f"libth_{name}_py_wrapper_test.so"
             for name in ("context_parallel", "eplb")
         }
-        expected["//rtp_llm/cpp/cache/test:cache_config_creator_py_test"] = "libcache_config_creator_py_test.so"
+        expected["//rtp_llm/cpp/cache/test:cache_config_creator_py_test"] = (
+            "libcache_config_creator_py_test.so"
+        )
         for name in ("context_parallel", "eplb"):
-            source = (PROJECT_ROOT / f"rtp_llm/cpp/models/{name}/test/{name}_py_wrapper_test.py").read_text()
+            source = (
+                PROJECT_ROOT
+                / f"rtp_llm/cpp/models/{name}/test/{name}_py_wrapper_test.py"
+            ).read_text()
             self.assertNotIn("TEST_SRCDIR", source)
-        entries = setup_module._selected_bazel_staged_outputs("cuda12_9", ["--config=cuda12_9"])
+        entries = setup_module._selected_bazel_staged_outputs(
+            "cuda12_9", ["--config=cuda12_9"]
+        )
         selected = [entry for entry in entries if entry[1] in expected]
         self.assertEqual({entry[1] for entry in selected}, set(expected))
         with tempfile.TemporaryDirectory() as tmp:
@@ -777,13 +843,18 @@ class BuildPackagingContractTest(TestCase):
                 (directory / library).write_bytes(library.encode())
             setup_module.stage_bazel_outputs(root, selected)
             for library in expected.values():
-                self.assertEqual((root / "rtp_llm/libs/test" / library).read_bytes(), library.encode())
+                self.assertEqual(
+                    (root / "rtp_llm/libs/test" / library).read_bytes(),
+                    library.encode(),
+                )
             target, library = next(iter(expected.items()))
             (root / "bazel-bin" / target[2:].split(":")[0] / library).unlink()
             with self.assertRaisesRegex(RuntimeError, library):
                 setup_module.stage_bazel_outputs(root, selected)
         for config in ("rocm", "cuda12_9_arm", "cuda13", "cuda13_arm", "cuda13_ppu"):
-            entries = setup_module._selected_bazel_staged_outputs(config, [f"--config={config}"])
+            entries = setup_module._selected_bazel_staged_outputs(
+                config, [f"--config={config}"]
+            )
             self.assertFalse(any(entry[1] in expected for entry in entries))
 
     def test_dynamic_version_uses_release_version(self):
@@ -798,7 +869,11 @@ class BuildPackagingContractTest(TestCase):
         expected = match.group(1)
 
         self.assertEqual(setup_module.get_release_version(), expected)
-        self.assertEqual(setup_module.get_version_with_platform(), f"{expected}+cu129")
+        # Target selection must cover the call, not just setup module import.
+        with patch.dict(os.environ, {"RTP_BAZEL_CONFIG": "--config=cuda12_9"}):
+            self.assertEqual(
+                setup_module.get_version_with_platform(), f"{expected}+cu129"
+            )
 
     def test_public_platform_extras_have_no_internal_only_wheel_pins(self):
         """Publicly published wheels must not carry internal-only wheel sources in their metadata.
@@ -991,13 +1066,16 @@ class BuildPackagingContractTest(TestCase):
         self.assertEqual(l20["gpu_type"], "L20")
         self.assertTrue(l20["isolate_all_paths"])
         self.assertTrue(l20["require_isolated_tests"])
-        self.assertEqual(l20["paths"], [
-            "rtp_llm/models_py/modules/factory/attention/cuda_impl/test/test_py_flashinfer_mha_decode.py",
-            "rtp_llm/models_py/modules/factory/attention/cuda_impl/test/test_flashinfer_prefill/test_py_flashinfer_paged_mha_prefill.py",
-            "rtp_llm/models_py/modules/factory/attention/cuda_impl/test/test_flashinfer_prefill/test_py_flashinfer_ragged_mha_prefill.py",
-            "rtp_llm/models_py/triton_kernels/common/test/silu_mul_masked_test.py",
-            "rtp_llm/models_py/kernels/cuda/test/per_token_group_quant_8bit_test.py",
-        ])
+        self.assertEqual(
+            l20["paths"],
+            [
+                "rtp_llm/models_py/modules/factory/attention/cuda_impl/test/test_py_flashinfer_mha_decode.py",
+                "rtp_llm/models_py/modules/factory/attention/cuda_impl/test/test_flashinfer_prefill/test_py_flashinfer_paged_mha_prefill.py",
+                "rtp_llm/models_py/modules/factory/attention/cuda_impl/test/test_flashinfer_prefill/test_py_flashinfer_ragged_mha_prefill.py",
+                "rtp_llm/models_py/triton_kernels/common/test/silu_mul_masked_test.py",
+                "rtp_llm/models_py/kernels/cuda/test/per_token_group_quant_8bit_test.py",
+            ],
+        )
         oss_l20 = profiles["py_ut_oss_l20"]
         self.assertEqual(oss_l20["paths"], l20["paths"][:-1])
         self.assertEqual(oss_l20["gpu_type"], "L20")
@@ -1452,14 +1530,17 @@ class BuildPackagingContractTest(TestCase):
             "DISABLED_MallocWithoutCPAllocatesFullBlocks",
             "DISABLED_AllocatorMapperControlsMalloc",
             "DISABLED_InsertAutoInjectsMapper",
-            "DISABLED_FlatFallbackLargeLru",
-            "DISABLED_PrefixTreeLongSessionChains",
             "DISABLED_DeepSeekFlashDecodeB35P3",
             "DISABLED_benchmarkScoreTokenIdsTorchCopyVsMemcpy",
             "DISABLED_benchmarkLatestFlashinferSamplingVsCurrentRtp",
             "DISABLED_compareLatestFlashinferSamplingAccuracyVsCurrentRtp",
             "DISABLED_RunRank",
         }
+        # Main retired SharedBlockCacheTest.cc and its two disabled perf cases;
+        # their historical identities are not counted as executed or retained.
+        self.assertFalse(
+            (PROJECT_ROOT / "rtp_llm/cpp/cache/test/SharedBlockCacheTest.cc").exists()
+        )
         actual = set()
         pattern = re.compile(r"TEST(?:_F|_P)?\([^,]+,\s*(DISABLED_[A-Za-z0-9_]+)")
         for source_path in (PROJECT_ROOT / "rtp_llm").rglob("*"):
@@ -1478,31 +1559,67 @@ class BuildPackagingContractTest(TestCase):
             )
 
     def test_cpp_device_pin_targets_request_the_resources_they_assert(self):
-        def target_block(relative_path, target_name):
+        def target_attributes(relative_path, target_name):
             build_text = (PROJECT_ROOT / relative_path).read_text()
-            marker_pos = build_text.index(f'name = "{target_name}"')
-            block_start = build_text.rfind("cc_test(", 0, marker_pos)
-            block_end = build_text.index("\n)", marker_pos) + 2
-            return build_text[block_start:block_end]
+            target = next(
+                node.value
+                for node in ast.parse(build_text).body
+                if isinstance(node, ast.Expr)
+                and isinstance(node.value, ast.Call)
+                and isinstance(node.value.func, ast.Name)
+                and node.value.func.id == "cc_test"
+                and any(
+                    keyword.arg == "name"
+                    and isinstance(keyword.value, ast.Constant)
+                    and keyword.value.value == target_name
+                    for keyword in node.value.keywords
+                )
+            )
+            attributes = {}
+            for keyword in target.keywords:
+                if keyword.arg not in {"env", "exec_properties"}:
+                    continue
+                value = keyword.value
+                if isinstance(value, ast.Call):
+                    self.assertIsInstance(value.func, ast.Name)
+                    self.assertEqual(value.func.id, "select")
+                    self.assertEqual(len(value.args), 1)
+                    self.assertEqual(value.keywords, [])
+                    value = value.args[0]
+                attributes[keyword.arg] = ast.literal_eval(value)
+            return attributes
 
-        device_pin = target_block("rtp_llm/cpp/utils/test/BUILD", "device_pin_test")
-        self.assertIn('"GPU_COUNT": "1"', device_pin)
-        self.assertIn('"gpu_count": "1"', device_pin)
-        self.assertIn('"gpu": "A10"', device_pin)
-
-        cache_store = target_block(
-            "rtp_llm/cpp/disaggregate/cache_store/test/BUILD",
-            "cache_store_gtest",
+        device_pin = target_attributes(
+            "rtp_llm/cpp/utils/test/BUILD", "device_pin_test"
         )
-        self.assertIn('"GPU_COUNT": "2"', cache_store)
-        self.assertIn('"gpu_count": "2"', cache_store)
-        self.assertIn('"gpu": "A10"', cache_store)
+        self.assertEqual(device_pin["env"]["GPU_COUNT"], "1")
+        self.assertEqual(device_pin["exec_properties"]["gpu_count"], "1")
+        self.assertEqual(device_pin["exec_properties"]["gpu"], "A10")
 
-        block_pool = target_block(
+        # Preserve both main's H20_CU13 route and the original Native A10 route.
+        for name, gpu in (
+            ("cache_store_gtest", "H20_CU13"),
+            ("cache_store_gtest_native_a10", "A10"),
+        ):
+            cache_store = target_attributes(
+                "rtp_llm/cpp/disaggregate/cache_store/test/BUILD", name
+            )
+            self.assertEqual(cache_store["env"]["GPU_COUNT"], "2")
+            self.assertEqual(cache_store["exec_properties"]["gpu_count"], "2")
+            self.assertEqual(cache_store["exec_properties"]["gpu"], gpu)
+
+        block_pool = target_attributes(
             "rtp_llm/cpp/cache/test/BUILD", "block_pool_device_malloc_test"
         )
-        self.assertIn('"GPU_COUNT": "2"', block_pool)
-        self.assertIn('"gpu_count": "2"', block_pool)
+        self.assertEqual(block_pool["env"]["GPU_COUNT"], "2")
+        self.assertEqual(
+            block_pool["exec_properties"],
+            {
+                "@//:using_cuda": {"gpu": "H20_CU13", "gpu_count": "2"},
+                "@//:using_rocm": {"gpu": "MI308X-ROCM7", "gpu_count": "2"},
+                "//conditions:default": {},
+            },
+        )
 
     def test_non_sm100_py_ut_profiles_ignore_dsv4(self):
         with open(PROJECT_ROOT / "pyproject.toml", "rb") as f:
@@ -1512,10 +1629,13 @@ class BuildPackagingContractTest(TestCase):
         dsv4_paths = ["rtp_llm/test/dsv4", "rtp_llm/models_py/modules/dsv4"]
         self.assertEqual(profiles["py_ut_sm8x"]["ignore_paths"], dsv4_paths)
         self.assertEqual(profiles["py_ut_sm9x"]["ignore_paths"], dsv4_paths)
-        self.assertEqual(profiles["py_ut_sm100_arm"]["ignore_paths"], [
-            "rtp_llm/cpp/models/context_parallel/test/context_parallel_py_wrapper_test.py",
-            "rtp_llm/cpp/models/eplb/test/eplb_py_wrapper_test.py",
-        ])
+        self.assertEqual(
+            profiles["py_ut_sm100_arm"]["ignore_paths"],
+            [
+                "rtp_llm/cpp/models/context_parallel/test/context_parallel_py_wrapper_test.py",
+                "rtp_llm/cpp/models/eplb/test/eplb_py_wrapper_test.py",
+            ],
+        )
 
     def test_dsv4_decode_bazel_targets_are_routed_to_sm100_pytest(self):
         from rtp_llm.test.ci_profile_plugin import _get_profile
@@ -1577,8 +1697,17 @@ class BuildPackagingContractTest(TestCase):
                 None,
             )
             self.assertIsNotNone(target, filename)
-            self.assertIn('"SM100_ARM"', target, filename)
-            self.assertIn('"gpu": "SM100_ARM"', target, filename)
+            # The fixed main BUILD separates two CPU helpers from five GPU
+            # counterparts; Native pytest retains its original SM100_ARM route.
+            if filename in {"decode_attn_metadata_test.py", "kv_write_decode_test.py"}:
+                self.assertIn(
+                    'deps = ["//rtp_llm/models_py:dsv4_decode_cpu"]', target, filename
+                )
+                self.assertNotIn("exec_properties", target, filename)
+            else:
+                self.assertIn('"SM100_ARM_CU13"', target, filename)
+                self.assertIn('"gpu": "SM100_ARM_CU13"', target, filename)
+                self.assertIn('"gpu_count": "1"', target, filename)
 
             unconditional_skips = [
                 decorator
@@ -1698,7 +1827,10 @@ class BuildPackagingContractTest(TestCase):
         self.assertIn("--remote-concurrency=1", source)
 
         main_source = (PROJECT_ROOT.parent / ".aoneci" / "main.yaml").read_text()
-        self.assertIn('PYTEST_PROFILE: "perf_ppu_internal"', main_source)
+        self.assertRegex(
+            main_source,
+            r"\bPYTEST_PROFILE:\s*(?:\"perf_ppu_internal\"|'perf_ppu_internal'|perf_ppu_internal)(?=[,\s}])",
+        )
         self.assertIn("--remote-concurrency=1", main_source)
 
     def test_non_model_smokes_use_python_native_entrypoints(self):
@@ -1720,8 +1852,51 @@ class BuildPackagingContractTest(TestCase):
         utils_test_build = (PROJECT_ROOT / "rtp_llm/utils/test/BUILD").read_text()
         self.assertNotIn('name = "json_format_e2e_smoke"', dash_build)
         self.assertNotIn('name = "grammar_validation_smoke"', dash_build)
-        self.assertNotIn('name = "mrcr_smoke_test"', dash_test_build)
-        self.assertNotIn("custom_smoke_test(", utils_test_build)
+        mrcr_target = re.search(
+            r'py_test\(\s*name = "mrcr_smoke_test",.*?\n\)',
+            dash_test_build,
+            re.S,
+        )
+        self.assertIsNotNone(mrcr_target)
+        self.assertIn('srcs = ["inference/mrcr_smoke_test.py"]', mrcr_target.group(0))
+        self.assertIn('exec_properties = {"gpu": "L20_CU13"}', mrcr_target.group(0))
+        self.assertIn('tags = ["L20_CU13"]', mrcr_target.group(0))
+        # Keep the two original main Bazel smoke routes, without treating
+        # their presence as a substitute for the Native pytest adapters below.
+        main_jit_routes = {
+            "jit_cache_deepseek_v2_lite": {
+                "args": ["JitCacheSmokeTest.test_deepseek_v2_lite"],
+                "gpu_type": ["H20_CU13"],
+                "smoke_args": "--warm_up 0 --hack_layer_num 2 --load_method scratch --test_block_num 100 --act_type BF16 --quantization FP8_PER_BLOCK --seq_size_per_block 64 --tp_size 2 --reuse_cache 1",
+            },
+            "jit_cache_qwen3_rocm": {
+                "args": ["JitCacheSmokeTest.test_qwen3_rocm"],
+                "gpu_type": ["MI308X-ROCM7"],
+                "smoke_args": "--warm_up 0 --use_swizzleA 1 --use_asm_pa 1 --disable_flashinfer_native 1 --use_aiter_pa 1 --seq_size_per_block 16 --act_type BF16 --test_block_num 1000 --reserver_runtime_mem_mb 70000",
+            },
+        }
+        smoke_calls = {
+            next(
+                keyword.value.value
+                for keyword in node.value.keywords
+                if keyword.arg == "name"
+            ): node.value
+            for node in ast.parse(utils_test_build).body
+            if isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Call)
+            and isinstance(node.value.func, ast.Name)
+            and node.value.func.id == "custom_smoke_test"
+        }
+        self.assertEqual(set(smoke_calls), set(main_jit_routes))
+        for name, expected in main_jit_routes.items():
+            values = {
+                keyword.arg: keyword.value for keyword in smoke_calls[name].keywords
+            }
+            self.assertEqual(
+                ast.literal_eval(values["main"]), "jit_cache_smoke_test.py"
+            )
+            for key, value in expected.items():
+                self.assertEqual(ast.literal_eval(values[key]), value, f"{name}.{key}")
         self.assertNotIn(
             "bazel",
             (PROJECT_ROOT / "rtp_llm/dash_sc/grammar_validation_smoke.py")
