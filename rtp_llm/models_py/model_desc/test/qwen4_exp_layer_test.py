@@ -1964,6 +1964,60 @@ class Qwen4ExpPLERuntimeTest(TestCase):
             expected_next_state,
         )
 
+    def test_target_commit_refreshes_the_page_an_accepted_window_crosses(self):
+        prefixes = (self._PAGE - 2, 2 * self._PAGE + 2)
+        query_len = 5
+        accepted = torch.tensor([4, 2], dtype=torch.int32)
+        initial_state, initial_context = self._seed_target_history(prefixes)
+        ids = torch.tensor([[4, 5, 6, 8, 9], [3, 4, 5, 6, 8]], dtype=torch.long)
+        hyper = torch.randn(2, query_len, _HC * _HIDDEN, dtype=torch.bfloat16)
+        _, states, contexts = self._target_baseline(
+            hyper, ids, initial_state, initial_context
+        )
+        inputs = self._target_inputs(prefixes, query_len)
+
+        self.model._apply_ple(
+            1, hyper.reshape(-1, _HC * _HIDDEN), ids.reshape(-1), inputs
+        )
+        self.model.prepare_speculative_target_commit(accepted)
+        self.model.finish_speculative_target_commit(True)
+
+        # Request 0 starts at prefix 6 and accepts 4 tokens, crossing page
+        # boundary 8: the page it completes must now hold the checkpoint that
+        # ends at that boundary (the window after query token 1), not the one
+        # this step originally read.
+        crossed_state_row = int(self.state_blocks[0, 0])
+        crossed_ctx_row = int(self.ctx_blocks[0, 0])
+        torch.testing.assert_close(
+            self.state_base[crossed_state_row].view_as(states[1][0]), states[1][0]
+        )
+        torch.testing.assert_close(self.ctx_base[crossed_ctx_row], contexts[1][0])
+
+        # The final destinations keep the windows ending at the last accepted
+        # token; request 1 never crosses a boundary and stays unaffected.
+        final_positions = torch.tensor(prefixes) + accepted.to(torch.long) - 1
+        final_pages = torch.div(final_positions, self._PAGE, rounding_mode="floor")
+        state_destinations = self.state_blocks.gather(
+            1, final_pages.unsqueeze(1).to(torch.long)
+        ).squeeze(1)
+        ctx_destinations = self.ctx_blocks.gather(
+            1, final_pages.unsqueeze(1).to(torch.long)
+        ).squeeze(1)
+        expected_state = torch.stack(
+            [states[int(accepted[b]) - 1][b] for b in range(2)]
+        )
+        expected_context = torch.stack(
+            [contexts[int(accepted[b]) - 1][b] for b in range(2)]
+        )
+        torch.testing.assert_close(
+            self.state_base.index_select(0, state_destinations).view_as(expected_state),
+            expected_state,
+        )
+        torch.testing.assert_close(
+            self.ctx_base.index_select(0, ctx_destinations), expected_context
+        )
+        self.model.finalize_speculative_target_commit()
+
     def test_target_verify_tentative_commit_can_be_rolled_back_idempotently(self):
         prefixes = (self._PAGE - 1, self._PAGE)
         query_len = 3
