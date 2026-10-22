@@ -1,6 +1,17 @@
 package org.flexlb.mockengine;
 
+import static org.flexlb.dao.loadbalance.AdmissionRejectReason.HIGHER_PRIORITY_AHEAD;
+import static org.flexlb.dao.loadbalance.AdmissionRejectReason.RESOURCE_EXHAUSTED;
+import static org.flexlb.dao.loadbalance.AdmissionRejectReason.SAME_PRIORITY_AHEAD;
+import static org.flexlb.dao.loadbalance.AdmissionRejectReason.UNSPECIFIED;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+
 import com.google.protobuf.ByteString;
+
 import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.config.DecisionPolicyConfig;
 import org.flexlb.config.DispatcherConfig;
@@ -22,16 +33,6 @@ import org.junit.jupiter.params.provider.MethodSource;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
-
-import static org.flexlb.dao.loadbalance.AdmissionRejectReason.HIGHER_PRIORITY_AHEAD;
-import static org.flexlb.dao.loadbalance.AdmissionRejectReason.RESOURCE_EXHAUSTED;
-import static org.flexlb.dao.loadbalance.AdmissionRejectReason.SAME_PRIORITY_AHEAD;
-import static org.flexlb.dao.loadbalance.AdmissionRejectReason.UNSPECIFIED;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.Mockito.mock;
 
 /**
  * Real RouteService, selection, admission, queue, delivery and in-process Mock Engine.
@@ -263,14 +264,14 @@ class SchedulingErrorCodeMatrixTest {
         }
     }
 
-    @ParameterizedTest(name = "{0}: missing input -> 8406; malformed protobuf -> 8510")
+    @ParameterizedTest(name = "{0}: missing input -> 8409; malformed protobuf -> 8510")
     @MethodSource("batchModes")
     void invalidBatchInputNeverReachesEngine(String mode) throws Exception {
         try (Fixture fixture = new Fixture(mode)) {
             BalanceContext missing = fixture.context();
             missing.setGenerateInputPb(ByteString.EMPTY);
             assertFailure(
-                    fixture.route(missing), 8406, UNSPECIFIED, "missing serialized generate_input");
+                    fixture.route(missing), 8409, UNSPECIFIED, "missing serialized generate_input");
             BalanceContext malformed = fixture.context();
             malformed.setGenerateInputPb(ByteString.copyFrom(new byte[] {(byte) 0xff}));
             assertFailure(fixture.route(malformed), 8510, UNSPECIFIED, "build");

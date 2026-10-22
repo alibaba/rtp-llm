@@ -1,9 +1,15 @@
 package org.flexlb.httpserver;
 
+import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.scheduler.RequestScheduler;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.master.CacheStatus;
@@ -12,15 +18,12 @@ import org.flexlb.domain.consistency.MasterChangeNotifyResp;
 import org.flexlb.sync.status.WorkerDirectory;
 import org.flexlb.sync.synchronizer.MasterEngineSynchronizer;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.reactive.server.WebTestClient;
 
 import java.util.Map;
-
-import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
 
 class HttpLoadBalanceServerTest {
 
@@ -58,10 +61,15 @@ class HttpLoadBalanceServerTest {
         verify(scheduler).getBlockedRequestCount();
     }
 
-    @Test
-    void masterInfoUsesCanonicalSchedulerQueueDepth() {
+    @ParameterizedTest
+    @EnumSource(DispatcherConfig.Type.class)
+    void masterInfoAdvertisesPayloadRequirementAndCanonicalQueueDepth(
+            DispatcherConfig.Type dispatcher) {
         LBStatusConsistencyService consistency = mock(LBStatusConsistencyService.class);
         ConfigService configService = mock(ConfigService.class);
+        FlexlbConfig config = new FlexlbConfig();
+        config.getDispatcher().setType(dispatcher);
+        when(configService.loadBalanceConfig()).thenReturn(config);
         RequestScheduler scheduler = mock(RequestScheduler.class);
         EndpointRegistry endpointRegistry = mock(EndpointRegistry.class);
         MasterEngineSynchronizer synchronizer = mock(MasterEngineSynchronizer.class);
@@ -94,6 +102,10 @@ class HttpLoadBalanceServerTest {
                 .isEqualTo(7)
                 .jsonPath("$.real_master_host")
                 .isEqualTo("127.0.0.1:7001")
+                .jsonPath("$.requires_generate_input")
+                .isEqualTo(dispatcher == DispatcherConfig.Type.BATCH)
+                .jsonPath("$.requiresGenerateInput")
+                .doesNotExist()
                 .jsonPath("$.ready")
                 .isEqualTo(true);
 

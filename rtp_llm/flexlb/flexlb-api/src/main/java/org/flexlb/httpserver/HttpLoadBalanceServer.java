@@ -1,5 +1,8 @@
 package org.flexlb.httpserver;
 
+import static org.springframework.web.reactive.function.server.RequestPredicates.accept;
+import static org.springframework.web.reactive.function.server.RouterFunctions.route;
+
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
@@ -29,6 +32,7 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.server.RouterFunction;
 import org.springframework.web.reactive.function.server.ServerRequest;
 import org.springframework.web.reactive.function.server.ServerResponse;
+
 import reactor.core.publisher.Mono;
 
 import java.io.IOException;
@@ -41,9 +45,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
 import java.util.stream.Stream;
-
-import static org.springframework.web.reactive.function.server.RequestPredicates.accept;
-import static org.springframework.web.reactive.function.server.RouterFunctions.route;
 
 @Component
 public class HttpLoadBalanceServer {
@@ -182,6 +183,11 @@ public class HttpLoadBalanceServer {
                                     result.setRealMasterHost(
                                             lbStatusConsistencyService.getMasterHostIpPort());
                                     result.setQueueLength(requestScheduler.getQueuedRequestCount());
+                                    result.setRequiresGenerateInput(
+                                            configService
+                                                    .loadBalanceConfig()
+                                                    .getDispatcher()
+                                                    .requiresGenerateInput());
                                     result.setCode(200);
                                     result.setSuccess(true);
                                     result.setWorkerSummary(buildWorkerSummary());
