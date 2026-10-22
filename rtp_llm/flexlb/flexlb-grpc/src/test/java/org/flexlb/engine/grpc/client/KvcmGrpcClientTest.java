@@ -287,7 +287,6 @@ class KvcmGrpcClientTest {
         assertEquals(List.of(com.google.protobuf.ByteString.copyFrom(new byte[]{3, 8})),
                 wireFields.getField(8).getLengthDelimitedList());
         assertTrue(wireFields.getField(8).getVarintList().isEmpty());
-        assertTrue(wireFields.getField(8).getLengthDelimitedList().isEmpty());
 
         assertEquals(2, result.get("10.0.0.1:8601@1").localMatchBlocks());
         assertEquals(10, result.get("10.0.0.1:8601@1").globalMatchBlocks());
