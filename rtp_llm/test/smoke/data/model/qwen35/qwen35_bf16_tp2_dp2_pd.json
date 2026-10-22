@@ -42,7 +42,7 @@
                     "prefix_len": 0,
                     "input_len": 11,
                     "output_len": 100,
-                    "step_output_len": 99,
+                    "step_output_len": 100,
                     "first_token_cost_time": 303.282,
                     "wait_time": 0.0,
                     "pd_sep": true,
