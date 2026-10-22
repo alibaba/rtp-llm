@@ -127,21 +127,22 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     const bool short_multimodal_context = multimodalFeaturesLength() != 0 && seqLength() <= chunk_size;
     if (!input->fake_query && chunk_size > 0 && !short_multimodal_context
         && (resource_context.role_type == RoleType::PREFILL || resource_context.role_type == RoleType::PDFUSION)) {
+        // Non-causal multimodal attention needs future tokens unavailable in earlier chunks.
         const auto& config = *generateConfig();
-        const char* reason = isGroup()                                       ? "force_batch" :
-                             hasNumBeams()                                   ? "num_beams" :
-                             returnLogits()                                  ? "return_logits" :
-                             returnPromptLogits()                            ? "return_prompt_logits" :
-                             calculateLoss()                                 ? "calculate_loss" :
-                             config.return_hidden_states                     ? "return_hidden_states" :
-                             config.return_all_hidden_states                 ? "return_all_hidden_states" :
-                             getReturnAllProbs() != ReturnAllProbsMode::NONE ? "return_all_probs" :
-                             input->custom_output_token_position >= 0       ? "custom_output" :
-                                                                               nullptr;
+        const char* reason = isGroup()                                ? "force_batch" :
+                             hasNumBeams()                            ? "num_beams" :
+                             returnLogits()                           ? "return_logits" :
+                             returnPromptLogits()                     ? "return_prompt_logits" :
+                             calculateLoss()                          ? "calculate_loss" :
+                             config.return_hidden_states              ? "return_hidden_states" :
+                             config.return_all_hidden_states          ? "return_all_hidden_states" :
+                             input->custom_output_token_position >= 0 ? "custom_output" :
+                             multimodalFeaturesLength() != 0 && !model_config.attn_config.is_causal ?
+                                                                        "non_causal_multimodal" :
+                                                                        nullptr;
         if (reason != nullptr) {
-            reportEvent(StreamEvents::Error,
-                        ErrorCode::INVALID_PARAMS,
-                        "chunked prefill incompatible: " + std::string(reason));
+            reportEvent(
+                StreamEvents::Error, ErrorCode::INVALID_PARAMS, "chunked prefill incompatible: " + std::string(reason));
             return;
         }
         setChunkSize(static_cast<int>(chunk_size));

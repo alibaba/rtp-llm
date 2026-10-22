@@ -7,6 +7,7 @@ cuda13_sm100_py_test(
     srcs = ["native_kda_checkpoint_test.py"],
     deps = [
         "//rtp_llm/models_py/standalone:py_standalone_testlib",
+        "//rtp_llm:nvidia-cutlass-dsl",
     ] + select({
         "@//:using_cuda13_x86": [cuda13_requirement("cuda-linear-attention")],
         "@//:using_cuda13_arm": [cuda13_arm_requirement("cuda-linear-attention")],

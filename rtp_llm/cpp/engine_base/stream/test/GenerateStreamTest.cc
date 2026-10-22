@@ -1510,6 +1510,122 @@ TEST_F(GenerateStreamTest, testMultimodalContextPrefillWindows) {
     }
 }
 
+TEST_F(GenerateStreamTest, testLongMultimodalContextAdvancesWithoutPublishingIntermediateTokens) {
+    GenerateStreamBuilder builder;
+    for (const auto role : {RoleType::PREFILL, RoleType::PDFUSION}) {
+        auto stream = builder.createChunkedContextStream(
+            makeInputIds(18), role, /*chunk_size=*/8, [](GenerateInput& input, GenerateConfig& config) {
+                input.multimodal_features = std::vector<torch::Tensor>{torch::arange(28).reshape({14, 2})};
+                input.mm_locs             = torch::tensor({2}, torch::kInt32);
+                input.text_tokens_mask =
+                    torch::tensor({1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1}, torch::kInt32);
+                config.is_streaming   = true;
+                config.max_new_tokens = 2;
+            });
+        ASSERT_FALSE(stream->hasError()) << stream->stopReason();
+        ASSERT_TRUE(stream->chunkedPrefillEnabled());
+        const auto full_image = stream->multimodalFeatures()[0].clone();
+        markRunning(stream);
+        for (int chunk = 0; chunk < 2; ++chunk) {
+            expectChunkWindow(stream, chunk * 8, 8, false);
+            updateOneToken(stream, 101);
+            EXPECT_EQ(stream->seqLength(), 18);
+            EXPECT_FALSE(stream->hasOutput());
+            EXPECT_TRUE(torch::equal(stream->multimodalFeatures()[0], full_image));
+        }
+        expectChunkWindow(stream, 16, 2, true);
+        EXPECT_EQ(stream->textTokensMask(), (std::vector<int>{1, 1}));
+        updateOneToken(stream, 101);
+        EXPECT_FALSE(stream->isContextStream());
+        auto output = stream->nextOutput(100);
+        ASSERT_TRUE(output.ok());
+        EXPECT_EQ(output.value().generate_outputs[0].output_ids.item<int32_t>(), 101);
+        EXPECT_FALSE(output.value().generate_outputs[0].finished);
+        updateOneToken(stream, 102);
+        output = stream->nextOutput(100);
+        ASSERT_TRUE(output.ok());
+        EXPECT_EQ(output.value().generate_outputs[0].output_ids.item<int32_t>(), 102);
+        EXPECT_TRUE(output.value().generate_outputs[0].finished);
+    }
+}
+
+TEST_F(GenerateStreamTest, testBidirectionalMultimodalContextRequiresUnchunkedPrefill) {
+    for (const int input_length : {7, 9}) {
+        auto input                 = std::make_shared<GenerateInput>();
+        input->input_ids           = torch::arange(input_length, torch::kInt32);
+        input->generate_config     = std::make_shared<GenerateConfig>();
+        input->multimodal_features = std::vector<torch::Tensor>{torch::zeros({2, 4})};
+        ModelConfig model;
+        model.max_seq_len           = 64;
+        model.vocab_size            = 64;
+        model.attn_config.is_causal = false;
+        RuntimeConfig runtime;
+        runtime.fifo_scheduler_config.prefill_chunk_size = 8;
+        ResourceContext resource;
+        resource.role_type = RoleType::PDFUSION;
+        auto stream        = std::make_shared<NormalGenerateStream>(input, model, runtime, resource, nullptr);
+        EXPECT_FALSE(stream->chunkedPrefillEnabled());
+        EXPECT_EQ(stream->hasError(), input_length > 8);
+        if (input_length > 8) {
+            EXPECT_EQ(stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+            EXPECT_EQ(stream->stopReason(), "chunked prefill incompatible: non_causal_multimodal");
+        }
+    }
+}
+
+TEST_F(GenerateStreamTest, testChunkedPrefillReturnsOnlyCommittedTokenProbabilities) {
+    GenerateStreamBuilder builder;
+    const ChunkedInputConfigurer modes[] = {
+        [](GenerateInput&, GenerateConfig& config) { config.return_all_probs = ReturnAllProbsMode::DEFAULT; },
+        [](GenerateInput&, GenerateConfig& config) { config.return_all_probs = ReturnAllProbsMode::ORIGINAL; },
+    };
+    for (const auto configure : modes) {
+        for (const auto role : {RoleType::PREFILL, RoleType::PDFUSION}) {
+            auto stream = builder.createChunkedContextStream(makeInputIds(18), role, 8, configure);
+            ASSERT_FALSE(stream->hasError()) << stream->stopReason();
+            ASSERT_TRUE(stream->chunkedPrefillEnabled());
+            stream->generateConfig()->is_streaming = true;
+            stream->generateConfig()->max_new_tokens = 2;
+            markRunning(stream);
+
+            // Neither intermediate chunk may publish a token or its probabilities.
+            for (int chunk = 0; chunk < 2; ++chunk) {
+                ASSERT_TRUE(stream->isMiddleChunk());
+                updateOneToken(stream, 100);
+                EXPECT_EQ(stream->seqLength(), 18);
+                EXPECT_FALSE(stream->hasOutput());
+            }
+            ASSERT_TRUE(stream->isLastChunk());
+            for (int step = 0; step < 2; ++step) {
+                auto probs = torch::zeros({1, 1024}, torch::kFloat32);
+                probs[0][101 + step] = 0.75f;
+                probs[0][99] = 0.25f;
+                StreamUpdateInfo update{torch::full({1, 1}, 101 + step, torch::kInt32),
+                                        1,
+                                        torch::Tensor(),
+                                        torch::Tensor(),
+                                        torch::Tensor(),
+                                        torch::Tensor(),
+                                        probs,
+                                        torch::Tensor(),
+                                        torch::Tensor(),
+                                        torch::Tensor()};
+                stream->update(update);
+                ASSERT_TRUE(stream->hasOutput());
+                auto result = stream->nextOutput(100);
+                ASSERT_TRUE(result.ok()) << result.status().ToString();
+                ASSERT_EQ(result.value().generate_outputs.size(), 1);
+                const auto& output = result.value().generate_outputs[0];
+                EXPECT_EQ(output.output_ids.item<int32_t>(), 101 + step);
+                ASSERT_TRUE(output.aux_info.all_probs.has_value());
+                EXPECT_TRUE(torch::equal(*output.aux_info.all_probs, update.all_probs));
+                EXPECT_EQ(output.finished, step == 1);
+                EXPECT_FALSE(stream->hasOutput());
+            }
+        }
+    }
+}
+
 TEST_F(GenerateStreamTest, testChunkedPrefillActivationGates) {
     GenerateStreamBuilder builder;
     const auto            input_ids = makeInputIds(9);
@@ -1546,8 +1662,6 @@ TEST_F(GenerateStreamTest, testChunkedPrefillActivationGates) {
         {"return_hidden_states", [](GenerateInput&, GenerateConfig& config) { config.return_hidden_states = true; }},
         {"return_all_hidden_states",
          [](GenerateInput&, GenerateConfig& config) { config.return_all_hidden_states = true; }},
-        {"return_all_probs",
-         [](GenerateInput&, GenerateConfig& config) { config.return_all_probs = ReturnAllProbsMode::DEFAULT; }},
         {"custom_output",
          [](GenerateInput& input, GenerateConfig&) { input.custom_output_token_position = 3; }},
     };

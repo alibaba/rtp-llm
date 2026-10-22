@@ -2658,4 +2658,215 @@ TEST_F(MtpBatchStreamProcessorTest, testPrefillShiftsMultimodalMaskAndPackedLoca
     }
 }
 
+TEST_F(MtpBatchStreamProcessorTest, testChunkedPrefillDraftCarriesTheNextImageRow) {
+    // The draft sees prompt[start + 1 : end + 1]. The appended prompt token
+    // can be an image row even when the target chunk contains no image yet.
+    constexpr int prompt_length = 12;
+    constexpr int chunk_length  = 4;
+    constexpr int image_end     = 9;
+    constexpr int hidden_size   = 4;
+    for (const bool device_input : {false, true}) {
+        autil::EnvGuard device_input_env("RTP_LLM_DEVICE_INPUT", device_input ? "1" : "0");
+        for (const bool mrope : {false, true}) {
+            for (const int image_start : {2, 4}) {
+                SCOPED_TRACE(testing::Message() << "device_input=" << device_input << " mrope=" << mrope
+                                                << " image_start=" << image_start);
+                const int   image_length = image_end - image_start;
+                const int   factor       = mrope ? 3 : 1;
+                ModelConfig model;
+                model.max_seq_len                           = 64;
+                model.vocab_size                            = 64;
+                model.num_layers                            = 1;
+                model.has_positional_encoding               = true;
+                model.mm_model_config.is_multimodal         = true;
+                model.mm_model_config.mm_position_ids_style = mrope ? MROPE : DEFAULT;
+                model.attn_config.rope_config.index_factor  = factor;
+                RuntimeConfig runtime;
+                runtime.fifo_scheduler_config.prefill_chunk_size = chunk_length;
+                ResourceContext resources;
+                resources.role_type = RoleType::PDFUSION;
+
+                auto query             = std::make_shared<GenerateInput>();
+                query->generate_config = std::make_shared<GenerateConfig>();
+                query->input_ids       = torch::arange(prompt_length, torch::kInt32);
+                // Image tokens deliberately exceed the vocabulary. A lost
+                // vision mask would send the draft to an invalid lookup.
+                query->input_ids.slice(0, image_start, image_end).fill_(1000);
+                query->text_tokens_mask = torch::ones({prompt_length}, torch::kInt32);
+                query->text_tokens_mask->slice(0, image_start, image_end).zero_();
+                query->mm_locs = torch::tensor({image_start}, torch::kInt32);
+                auto full_feature =
+                    torch::arange(image_length * hidden_size, torch::kFloat32).reshape({image_length, hidden_size});
+                auto full_extra = torch::arange(2 * image_length * hidden_size, torch::kFloat32)
+                                      .reshape({2, image_length, hidden_size});
+                query->multimodal_features = std::vector<torch::Tensor>{full_feature};
+                query->mm_extra_input      = std::vector<torch::Tensor>{full_extra.flatten()};
+                auto stream = std::make_shared<NormalGenerateStream>(query, model, runtime, resources, nullptr);
+                ASSERT_FALSE(stream->hasError()) << stream->stopReason();
+                ASSERT_TRUE(stream->chunkedPrefillEnabled());
+                stream->generate_status_->status = StreamState::RUNNING;
+                stream->setNeedReleaseResource(false);
+                // Use distinct full-prompt coordinates to catch a chunk-local
+                // reset as well as an incorrect sampled-token tail position.
+                auto full_positions = mrope ? (torch::arange(prompt_length, torch::kInt32).unsqueeze(1) * 10
+                                               + torch::arange(3, torch::kInt32)) :
+                                              torch::arange(prompt_length, torch::kInt32);
+                stream->setContextPositionIds(full_positions.flatten());
+
+                SpeculativeExecutionConfig speculative;
+                speculative.type              = SP_TYPE_MTP;
+                speculative.gen_num_per_cycle = 1;
+                MtpBatchStreamProcessor processor(model,
+                                                  PDSepConfig{},
+                                                  ProfilingDebugLoggingConfig{},
+                                                  makeProcessorCacheConfig(),
+                                                  speculative,
+                                                  false);
+                for (int chunk_start = 0; chunk_start < prompt_length; chunk_start += chunk_length) {
+                    SCOPED_TRACE(testing::Message() << "chunk_start=" << chunk_start);
+                    ASSERT_EQ(stream->reuseLength(), chunk_start);
+                    ASSERT_EQ(stream->contextLength(), chunk_length);
+                    const bool middle = chunk_start + chunk_length < prompt_length;
+                    ASSERT_EQ(stream->isMiddleChunk(), middle);
+                    StreamGroups groups({stream});
+                    TensorHolder holder;
+                    auto         gathered = processor.gatherModelInput(groups, holder);
+                    ASSERT_TRUE(gathered.ok()) << gathered.status();
+                    auto input = std::move(gathered.value());
+                    if (chunk_start == 0 && image_start == chunk_length) {
+                        EXPECT_FALSE(input.multimodal_features.has_value() && !input.multimodal_features->empty());
+                    }
+                    GptModelOutputs output;
+                    output.all_hidden_states = torch::zeros({chunk_length, hidden_size});
+                    SamplerOutput sampled;
+                    sampled.token_ids =
+                        torch::tensor({{63}}, torch::kInt32).to(device_input ? torch::kCUDA : torch::kCPU);
+                    processor.updatePrefillPostDraftModelInput(groups, input, output, sampled, holder);
+
+                    const int shifted_start   = chunk_start + 1;
+                    const int shifted_end     = std::min(chunk_start + chunk_length + 1, prompt_length);
+                    auto      expected_tokens = query->input_ids.slice(0, shifted_start, shifted_end).clone();
+                    auto      expected_mask   = query->text_tokens_mask->slice(0, shifted_start, shifted_end).clone();
+                    if (!middle) {
+                        expected_tokens = torch::cat({expected_tokens, torch::tensor({63}, torch::kInt32)});
+                        expected_mask   = torch::cat({expected_mask, torch::ones({1}, torch::kInt32)});
+                    }
+                    EXPECT_EQ(toVec<int>(input.combo_tokens), toVec<int>(expected_tokens));
+                    EXPECT_EQ(toVec<int>(input.text_tokens_mask), toVec<int>(expected_mask));
+                    auto expected_positions =
+                        full_positions.reshape({prompt_length, factor}).slice(0, shifted_start, shifted_end).clone();
+                    if (!middle) {
+                        auto tail =
+                            mrope ? torch::full({1, factor}, 112, torch::kInt32) : torch::tensor({{11}}, torch::kInt32);
+                        expected_positions = torch::cat({expected_positions, tail}, 0);
+                    }
+                    EXPECT_EQ(toVec<int>(input.combo_position_ids), toVec<int>(expected_positions));
+
+                    const int overlap_start = std::max(shifted_start, image_start);
+                    const int overlap_end   = std::min(shifted_end, image_end);
+                    if (overlap_start < overlap_end) {
+                        ASSERT_TRUE(input.multimodal_features.has_value());
+                        ASSERT_EQ(input.multimodal_features->size(), 1);
+                        EXPECT_TRUE(torch::equal(
+                            input.multimodal_features->at(0).cpu(),
+                            full_feature.slice(0, overlap_start - image_start, overlap_end - image_start)));
+                        ASSERT_TRUE(input.mm_extra_input.has_value());
+                        ASSERT_EQ(input.mm_extra_input->size(), 1);
+                        EXPECT_TRUE(
+                            torch::equal(input.mm_extra_input->at(0).cpu(),
+                                         full_extra.slice(1, overlap_start - image_start, overlap_end - image_start)
+                                             .contiguous()
+                                             .flatten()));
+                        EXPECT_EQ(toVec<int>(input.mm_features_locs), (vector<int>{overlap_start - shifted_start}));
+                        EXPECT_EQ(toVec<int64_t>(input.mm_features_spans),
+                                  (vector<int64_t>{0, overlap_start, overlap_end}));
+                    } else {
+                        EXPECT_TRUE(!input.multimodal_features.has_value() || input.multimodal_features->empty());
+                        EXPECT_TRUE(!input.mm_extra_input.has_value() || input.mm_extra_input->empty());
+                        EXPECT_EQ(input.mm_features_locs.numel(), 0);
+                        EXPECT_EQ(input.mm_features_spans.numel(), 0);
+                    }
+                    EXPECT_EQ(toVec<int>(sampled.token_ids), (vector<int>{63}));
+                    EXPECT_EQ(stream->reuseLength(), chunk_start);
+                    EXPECT_TRUE(torch::equal(query->multimodal_features->at(0), full_feature));
+                    if (middle) {
+                        stream->advanceChunk();
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testChunkedPrefillDraftKeepsMixedImageRowsInRequestOrder) {
+    ModelConfig model;
+    model.max_seq_len                   = 64;
+    model.vocab_size                    = 64;
+    model.num_layers                    = 1;
+    model.mm_model_config.is_multimodal = true;
+    RuntimeConfig runtime;
+    runtime.fifo_scheduler_config.prefill_chunk_size = 2;
+    ResourceContext resources;
+    resources.role_type = RoleType::PDFUSION;
+    auto make_stream    = [&](const vector<int>& tokens, int image_start, int image_length, int feature_base) {
+        auto query             = std::make_shared<GenerateInput>();
+        query->input_ids       = torch::tensor(tokens, torch::kInt32);
+        query->generate_config = std::make_shared<GenerateConfig>();
+        if (image_length > 0) {
+            query->mm_locs          = torch::tensor({image_start}, torch::kInt32);
+            query->text_tokens_mask = torch::ones({static_cast<int64_t>(tokens.size())}, torch::kInt32);
+            query->text_tokens_mask->slice(0, image_start, image_start + image_length).zero_();
+            query->multimodal_features = std::vector<torch::Tensor>{
+                (torch::arange(image_length * 2, torch::kFloat32) + feature_base).reshape({image_length, 2})};
+            query->mm_extra_input =
+                std::vector<torch::Tensor>{torch::arange(2 * image_length * 2, torch::kFloat32) + feature_base + 1000};
+        }
+        auto stream = std::make_shared<NormalGenerateStream>(query, model, runtime, resources, nullptr);
+        stream->generate_status_->status = StreamState::RUNNING;
+        stream->setNeedReleaseResource(false);
+        return stream;
+    };
+    auto before_image = make_stream({1, 2, 1000, 1000, 1000, 1000}, 2, 4, 10);
+    auto inside_image = make_stream({1000, 1000, 1000, 1000, 3, 4}, 0, 4, 20);
+    auto final_text   = make_stream({5, 6}, 0, 0, 0);
+    for (const auto& stream : {before_image, inside_image, final_text}) {
+        ASSERT_FALSE(stream->hasError()) << stream->stopReason();
+        ASSERT_TRUE(stream->chunkedPrefillEnabled());
+    }
+    ASSERT_TRUE(before_image->isMiddleChunk());
+    ASSERT_TRUE(inside_image->isMiddleChunk());
+    ASSERT_FALSE(final_text->isMiddleChunk());
+    SpeculativeExecutionConfig speculative;
+    speculative.type              = SP_TYPE_MTP;
+    speculative.gen_num_per_cycle = 1;
+    MtpBatchStreamProcessor processor(
+        model, PDSepConfig{}, ProfilingDebugLoggingConfig{}, makeProcessorCacheConfig(), speculative, false);
+    StreamGroups groups({before_image, inside_image, final_text});
+    TensorHolder holder;
+    auto         gathered = processor.gatherModelInput(groups, holder);
+    ASSERT_TRUE(gathered.ok()) << gathered.status();
+    auto input = std::move(gathered.value());
+    // Only request B has image rows in the target input. Request A's image
+    // enters at the appended draft token, before B in packed input order.
+    EXPECT_EQ(toVec<int>(input.mm_features_locs), (vector<int>{2}));
+    GptModelOutputs output;
+    output.all_hidden_states = torch::zeros({6, 2});
+    SamplerOutput sampled;
+    sampled.token_ids = torch::tensor({{63}, {63}, {63}}, torch::kInt32);
+    processor.updatePrefillPostDraftModelInput(groups, input, output, sampled, holder);
+    EXPECT_EQ(toVec<int>(input.combo_tokens), (vector<int>{2, 1000, 1000, 1000, 6, 63}));
+    EXPECT_EQ(toVec<int>(input.text_tokens_mask), (vector<int>{1, 0, 0, 0, 1, 1}));
+    EXPECT_EQ(toVec<int>(input.mm_features_locs), (vector<int>{1, 2}));
+    EXPECT_EQ(toVec<int64_t>(input.mm_features_spans), (vector<int64_t>{0, 2, 3, 1, 1, 3}));
+    ASSERT_TRUE(input.multimodal_features.has_value());
+    ASSERT_EQ(input.multimodal_features->size(), 2);
+    EXPECT_EQ(toVec<float>(input.multimodal_features->at(0)), (vector<float>{10, 11}));
+    EXPECT_EQ(toVec<float>(input.multimodal_features->at(1)), (vector<float>{22, 23, 24, 25}));
+    ASSERT_TRUE(input.mm_extra_input.has_value());
+    ASSERT_EQ(input.mm_extra_input->size(), 2);
+    EXPECT_EQ(toVec<float>(input.mm_extra_input->at(0)), (vector<float>{1010, 1011, 1018, 1019}));
+    EXPECT_EQ(toVec<float>(input.mm_extra_input->at(1)),
+              (vector<float>{1022, 1023, 1024, 1025, 1030, 1031, 1032, 1033}));
+}
+
 }  // namespace rtp_llm

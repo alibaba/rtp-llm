@@ -1,4 +1,33 @@
 load(":defs.bzl", "custom_smoke_test", "smoke_test")
+
+# Requires explicit K3_CKPT_PATH and K3_MTP_CKPT_PATH on an eight-GPU host.
+custom_smoke_test(
+    name = "chunked_kimi_k3",
+    main = "chunked_kimi_k3_test.py",
+    smoke_args = "--world_size 8",
+    gpu_type = ["SM103_CU13"],
+    data = ["//rtp_llm:sdk"],
+)
+
+custom_smoke_test(
+    name = "chunked_kimi_k3_4layer",
+    main = "chunked_kimi_k3_test.py",
+    smoke_args = "--world_size 4",
+    gpu_type = ["SM103_CU13"],
+    data = ["//rtp_llm:sdk"],
+)
+
+custom_smoke_test(
+    name = "chunked_multimodal",
+    main = "chunked_multimodal_test.py",
+    smoke_args = "--world_size 1",
+    gpu_type = ["L20_CU13"],
+    data = [
+        "//rtp_llm:sdk",
+        "data/model/qwen_vl/q_r_3.json",
+        "data/model/qwen_vl/1.jpeg",
+    ],
+)
 package(default_visibility = ["//visibility:public"])
 
 # Framework source files for cross-package smoke tests.
