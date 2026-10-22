@@ -432,7 +432,7 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("selected_vit", route_calls[1].kwargs)
             self.assertNotIn("seq_len", route_calls[1].kwargs)
             self.assertEqual(
-                list(route_calls[1].kwargs["input_pb_factory"]().token_ids), [1, 99, 2]
+                list(route_calls[1].kwargs["input_pb"].token_ids), [1, 99, 2]
             )
             self.assertEqual(
                 route_calls[1].kwargs["input_pb"].multimodal_inputs[0].multimodal_url,
@@ -594,7 +594,7 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
         model_keys = get_block_cache_keys(expanded_model_tokens, 2)
         self.assertEqual(len(hints), 2)
         self.assertEqual(hints, model_keys[:2])
-        wire = route["input_pb_factory"]()
+        wire = route["input_pb"]
         self.assertEqual(list(wire.token_ids), original)
         self.assertEqual(len(wire.multimodal_inputs), 1)
         self.assertEqual(self.request.token_ids.tolist(), original)
@@ -636,28 +636,17 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.visitor.mm_model_config.semantic_mm_token_id = 129264
         new_vit = self.vit.model_copy(update={"ip": "127.0.0.3"})
         new_status = {**self.status, "server_ip": new_vit.ip}
-        responses = iter(
-            [
-                FlexlbResponse(
-                    role_addrs=[self.vit], result={"server_status": [self.status]}
-                ),
-                FlexlbResponse.error_response(VIT_ROUTE_STALE_CODE),
-                FlexlbResponse(
-                    role_addrs=[self.prefill, new_vit],
-                    result={"server_status": [new_status]},
-                ),
-                FlexlbResponse.ok([self.prefill, new_vit]),
-            ]
-        )
-        routed_inputs = []
-
-        async def route(**kwargs):
-            factory = kwargs.get("input_pb_factory")
-            if factory is not None:
-                routed_inputs.append(factory())
-            return next(responses)
-
-        self.visitor.master_client.get_backend_role_addrs.side_effect = route
+        self.visitor.master_client.get_backend_role_addrs.side_effect = [
+            FlexlbResponse(
+                role_addrs=[self.vit], result={"server_status": [self.status]}
+            ),
+            FlexlbResponse.error_response(VIT_ROUTE_STALE_CODE),
+            FlexlbResponse(
+                role_addrs=[self.prefill, new_vit],
+                result={"server_status": [new_status]},
+            ),
+            FlexlbResponse.ok([self.prefill, new_vit]),
+        ]
         keys = multimodal_cache_keys(self.request)
         self.visitor.master_client.get_vit_cache_metadata.side_effect = [
             metadata(keys, [[-10, 11]]),
@@ -688,12 +677,8 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
             self.request.generate_config.role_addrs, [self.prefill, new_vit]
         )
         self.assertEqual(self.request.token_ids.tolist(), [1, 99, 2])
-        self.assertEqual(
-            [list(wire.token_ids) for wire in routed_inputs],
-            [[1, -10, 11, 2], [1, 31, 32, 33, 34, 2]],
-        )
-        wire = trans_input(self.request)
-        self.assertEqual(list(wire.token_ids), [1, 31, 32, 33, 34, 2])
+        wire = last["input_pb"]
+        self.assertEqual(list(wire.token_ids), [1, 99, 2])
         self.assertEqual(len(wire.multimodal_inputs), 1)
         self.assertEqual(
             wire.multimodal_inputs[0].multimodal_url,

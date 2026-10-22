@@ -411,7 +411,7 @@ class BackendRPCServerVisitor:
                 cache_key_block_size=self._cache_key_block_size(),
                 input=input,
                 request_id=input.request_id,
-                input_pb_factory=lambda: trans_input(input),
+                input_pb=trans_input(input),
                 **route_args,
             )
             if (
@@ -505,7 +505,7 @@ class BackendRPCServerVisitor:
                     cache_key_block_size=self._cache_key_block_size(),
                     input=input,
                     request_id=input.request_id,
-                    input_pb_factory=lambda: trans_input(input),
+                    input_pb=trans_input(input),
                     **route_args,
                 )
         except BaseException as e:

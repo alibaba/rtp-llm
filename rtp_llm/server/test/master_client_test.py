@@ -167,7 +167,7 @@ class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
             cache_key_block_size=1024,
             input=_FakeInput(),
             request_id=99,
-            input_pb_factory=_FakeInputPB,
+            input_pb=_FakeInputPB(),
         )
 
         self.assertTrue(response.is_ok)
@@ -198,7 +198,7 @@ class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
             cache_key_block_size=1024,
             input=_FakeInput(headers={"x-dashscope-inner-qos-level": "70"}),
             request_id=101,
-            input_pb_factory=_FakeInputPB,
+            input_pb=_FakeInputPB(),
         )
 
         self.assertEqual(client.calls[0]["request_pb"].priority, 70)
@@ -211,7 +211,7 @@ class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
             cache_key_block_size=1024,
             input=_FakeInput(headers={}),
             request_id=102,
-            input_pb_factory=_FakeInputPB,
+            input_pb=_FakeInputPB(),
         )
 
         self.assertEqual(client.calls[0]["request_pb"].priority, 50)
@@ -224,7 +224,7 @@ class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
             cache_key_block_size=1024,
             input=_FakeInput(headers={"x-dashscope-inner-qos-level": "high"}),
             request_id=103,
-            input_pb_factory=_FakeInputPB,
+            input_pb=_FakeInputPB(),
         )
 
         self.assertTrue(response.is_ok)
@@ -239,7 +239,7 @@ class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
                 cache_key_block_size=1024,
                 input=_FakeInput(),
                 request_id=100,
-                input_pb_factory=_FakeInputPB,
+                input_pb=_FakeInputPB(),
             )
 
         self.assertEqual(
@@ -275,7 +275,7 @@ class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
                         cache_key_block_size=1024,
                         input=_FakeInput(),
                         request_id=104,
-                        input_pb_factory=_FakeInputPB,
+                        input_pb=_FakeInputPB(),
                     )
 
                 self.assertEqual(exception_type, raised.exception.exception_type)
@@ -301,7 +301,7 @@ class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
                 cache_key_block_size=1024,
                 input=_FakeInput(),
                 request_id=105,
-                input_pb_factory=_FakeInputPB,
+                input_pb=_FakeInputPB(),
             )
 
         self.assertEqual(
@@ -321,7 +321,7 @@ class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
                 cache_key_block_size=1024,
                 input=_FakeInput(),
                 request_id=106,
-                input_pb_factory=_FakeInputPB,
+                input_pb=_FakeInputPB(),
             )
 
         self.assertEqual(
@@ -329,12 +329,12 @@ class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
             raised.exception.admission_reject_reason,
         )
 
-    async def test_non_batch_omits_input_without_constructing_it(self):
+    async def test_non_batch_omits_input_without_serializing_it(self):
         client = _CaptureMasterClient(
             _FakeHostService({"master:1234": False}),
             [FlexlbScheduleResponsePB(success=True, code=200)],
         )
-        factory = Mock(side_effect=AssertionError("NON_BATCH built the payload"))
+        payload = Mock(wraps=_FakeInputPB())
         selected_vit = {"role": "VIT", "server_ip": "10.0.0.8", "grpc_port": 9000}
 
         response = await client.get_backend_role_addrs(
@@ -342,13 +342,13 @@ class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
             cache_key_block_size=1024,
             input=_FakeInput(headers={"x-dashscope-inner-qos-level": "70"}),
             request_id=99,
-            input_pb_factory=factory,
+            input_pb=payload,
             cache_affinity_keys=["image-key"],
             selected_vit=selected_vit,
             seq_len=42,
         )
 
-        factory.assert_not_called()
+        payload.SerializeToString.assert_not_called()
         self.assertTrue(response.is_ok)
         self.assertFalse(response.enqueued_by_master)
         request = client.calls[0]["request_pb"]
@@ -364,34 +364,32 @@ class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(list(request.cache_affinity_keys), ["image-key"])
         self.assertEqual(request.selected_vit.server_ip, "10.0.0.8")
 
-    async def test_batch_and_unknown_capabilities_build_payload_once(self):
+    async def test_batch_and_unknown_capabilities_serialize_payload_once(self):
         for required in (True, None):
             with self.subTest(required=required):
                 client = _CaptureMasterClient(
                     _FakeHostService({"master:1234": required})
                 )
                 payload = Mock(wraps=_FakeInputPB())
-                factory = Mock(return_value=payload)
 
                 await client.get_backend_role_addrs(
-                    [1], 1024, _FakeInput(), 99, input_pb_factory=factory
+                    [1], 1024, _FakeInput(), 99, input_pb=payload
                 )
 
-                factory.assert_called_once_with()
                 payload.SerializeToString.assert_called_once_with()
                 self.assertEqual(
                     client.calls[0]["request_pb"].generate_input, b"serialized-input"
                 )
 
-    async def test_vit_only_never_constructs_payload(self):
+    async def test_vit_only_never_serializes_payload(self):
         client = _CaptureMasterClient(_FakeHostService({"master:1234": True}))
-        factory = Mock(side_effect=AssertionError("ViT route built the payload"))
+        payload = Mock(wraps=_FakeInputPB())
 
         await client.get_backend_role_addrs(
-            [1], 1024, _FakeInput(), 99, input_pb_factory=factory, vit_only=True
+            [1], 1024, _FakeInput(), 99, input_pb=payload, vit_only=True
         )
 
-        factory.assert_not_called()
+        payload.SerializeToString.assert_not_called()
         self.assertEqual(client.calls[0]["request_pb"].generate_input, b"")
         self.assertTrue(client.calls[0]["request_pb"].vit_route_only)
 
@@ -412,10 +410,9 @@ class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
                     [None, FlexlbScheduleResponsePB(success=True, code=200)],
                 )
                 payload = Mock(wraps=_FakeInputPB())
-                factory = Mock(return_value=payload)
 
                 response = await client.get_backend_role_addrs(
-                    [1], 1024, _FakeInput(), 99, input_pb_factory=factory
+                    [1], 1024, _FakeInput(), 99, input_pb=payload
                 )
 
                 self.assertTrue(response.is_ok)
@@ -430,7 +427,6 @@ class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
                         b"serialized-input" if slave_required else b"",
                     ],
                 )
-                factory.assert_called_once_with()
                 payload.SerializeToString.assert_called_once_with()
 
     async def test_missing_payload_rejection_resends_once_without_failure_reporting(
@@ -451,18 +447,16 @@ class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
                     ],
                 )
                 payload = Mock(wraps=_FakeInputPB())
-                factory = Mock(return_value=payload)
                 with (
                     patch("rtp_llm.server.master_client.kmonitor.report") as report,
                     patch("rtp_llm.server.master_client.route_logger.error") as error,
                 ):
                     response = await client.get_backend_role_addrs(
-                        [1], 1024, _FakeInput(), 99, input_pb_factory=factory
+                        [1], 1024, _FakeInput(), 99, input_pb=payload
                     )
 
                 self.assertTrue(response.is_ok)
                 self.assertTrue(response.enqueued_by_master)
-                factory.assert_called_once_with()
                 payload.SerializeToString.assert_called_once_with()
                 report.assert_not_called()
                 error.assert_not_called()
@@ -490,7 +484,7 @@ class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
             ],
         )
         await client.get_backend_role_addrs(
-            [1], 1024, _FakeInput(), 99, input_pb_factory=_FakeInputPB
+            [1], 1024, _FakeInput(), 99, input_pb=_FakeInputPB()
         )
 
         self.assertEqual(len(client.calls), 2)
@@ -511,7 +505,7 @@ class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
         with patch("rtp_llm.server.master_client.time", clock):
             with self.assertRaises(FtRuntimeException) as raised:
                 await client.get_backend_role_addrs(
-                    [1], 1024, _FakeInput(), 99, input_pb_factory=_FakeInputPB
+                    [1], 1024, _FakeInput(), 99, input_pb=_FakeInputPB()
                 )
 
         self.assertEqual(
@@ -540,14 +534,14 @@ class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
                 client = _CaptureMasterClient(
                     _FakeHostService({"master:1234": False}), [rejected]
                 )
-                factory = Mock(return_value=_FakeInputPB())
+                payload = Mock(wraps=_FakeInputPB())
                 with self.assertRaises(FtRuntimeException):
                     await client.get_backend_role_addrs(
-                        [1], 1024, _FakeInput(), 99, input_pb_factory=factory
+                        [1], 1024, _FakeInput(), 99, input_pb=payload
                     )
 
                 self.assertEqual(len(client.calls), 1)
-                factory.assert_not_called()
+                payload.SerializeToString.assert_not_called()
 
     async def test_missing_payload_rejection_with_payload_already_sent_does_not_retry(
         self,
@@ -556,17 +550,17 @@ class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
             _FakeHostService({"master:1234": True}),
             [FlexlbScheduleResponsePB(code=8409)],
         )
-        factory = Mock(return_value=_FakeInputPB())
+        payload = Mock(wraps=_FakeInputPB())
 
         with self.assertRaises(FtRuntimeException):
             await client.get_backend_role_addrs(
-                [1], 1024, _FakeInput(), 99, input_pb_factory=factory
+                [1], 1024, _FakeInput(), 99, input_pb=payload
             )
 
         self.assertEqual(len(client.calls), 1)
-        factory.assert_called_once_with()
+        payload.SerializeToString.assert_called_once_with()
 
-    async def test_missing_payload_rejection_without_factory_does_not_retry(self):
+    async def test_missing_payload_rejection_without_input_does_not_retry(self):
         client = _CaptureMasterClient(
             _FakeHostService({"master:1234": False}),
             [FlexlbScheduleResponsePB(code=8409)],
@@ -586,15 +580,15 @@ class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
             _FakeHostService({"master:1234": False}),
             [FlexlbScheduleResponsePB(code=8409)] * 2,
         )
-        factory = Mock(return_value=_FakeInputPB())
+        payload = Mock(wraps=_FakeInputPB())
 
         with self.assertRaises(FtRuntimeException):
             await client.get_backend_role_addrs(
-                [1], 1024, _FakeInput(), 99, input_pb_factory=factory
+                [1], 1024, _FakeInput(), 99, input_pb=payload
             )
 
         self.assertEqual(len(client.calls), 2)
-        factory.assert_called_once_with()
+        payload.SerializeToString.assert_called_once_with()
 
 
 if __name__ == "__main__":
