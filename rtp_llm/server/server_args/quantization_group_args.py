@@ -23,6 +23,23 @@ def init_quantization_group_args(parser, quantization_config):
         help="",
     )
     quantization_group.add_argument(
+        "--enable_int8_allreduce_fp16_scale",
+        env_name="ENABLE_INT8_ALLREDUCE_FP16_SCALE",
+        bind_to=(quantization_config, "enable_int8_allreduce_fp16_scale"),
+        type=str2bool,
+        default=False,
+        help=(
+            "Use FP16 scales in the supported INT8 all-reduce path; otherwise use "
+            "BF16. This does not enable INT8 communication. Configure consistently "
+            "on every rank in a TP group. FP16 scales clamp to [2^-24, 65504]; "
+            "group absmax > 127*65504 = 8319008 causes saturation, and tiny groups "
+            "may lose precision or quantize to zero. There is no range check, "
+            "warning or automatic BF16 fallback. Enable only after validating "
+            "activation ranges and accuracy for the actual weights and both "
+            "prefill and decode workloads."
+        ),
+    )
+    quantization_group.add_argument(
         "--enable_w4a16_sm120_dense_ffn",
         env_name="ENABLE_W4A16_SM120_DENSE_FFN",
         bind_to=(quantization_config, "enable_w4a16_sm120_dense_ffn"),

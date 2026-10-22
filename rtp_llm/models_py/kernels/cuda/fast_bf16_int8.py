@@ -1,4 +1,4 @@
-"""BF16x2 INT8 quantization and dequantization with per-group BF16 scales (SM90+).
+"""BF16x2 INT8 quantization and dequantization with per-group FP16/BF16 scales (SM90+).
 
 Inputs must be finite; decode scales must be nonnegative and finite. Output
 storage must not overlap inputs. Extreme magnitudes may overflow on decode or
@@ -24,11 +24,18 @@ def support(x: torch.Tensor, group_size: int = 16) -> bool:
 
 
 def quantize(x, q, scales, *, group_size=16):
-    """Write INT8 q[M,K] and BF16 scales[M,K/G] from BF16 x[M,K].
+    """Write INT8 q[M,K] and FP16/BF16 scales[M,K/G] from BF16 x[M,K].
 
     G is group_size, one of 16, 32, 64 or 128, and must divide K.
-    Scale and reciprocal round to BF16; codes round to nearest-even and clamp
-    to [-127,127]. All tensors are contiguous and allocated by the caller.
+    Scale follows the supplied tensor dtype. FP16 scales clamp absmax/127 to
+    [2**-24,65504] before nearest-even rounding. Codes saturate to [-127,127],
+    so each source's abs(q*scale) is at most 127*65504 = 8319008 before BF16
+    rounding; larger inputs can saturate. Tiny groups lose precision or quantize
+    to zero. There is no range check, warning or automatic BF16 fallback. Validate
+    activation ranges and accuracy for the actual weights and prefill/decode
+    workloads before selecting FP16 scales.
+    The reciprocal still rounds to BF16; codes round to nearest-even. All tensors
+    are contiguous and allocated by the caller.
     """
     if not support(x, group_size):
         raise ValueError("Unsupported BF16 input or group_size")
@@ -38,7 +45,7 @@ def quantize(x, q, scales, *, group_size=16):
 
 
 def dequantize(q, scales, out, *, group_size=16):
-    """Decode INT8 q[M,K] with BF16 scales[M,K/G] into BF16 out[M,K], G=group_size."""
+    """Decode INT8 q[M,K] with FP16/BF16 scales[M,K/G] into BF16 out[M,K], G=group_size."""
     dequantize_reduce(q.unsqueeze(0), scales.unsqueeze(0), out, group_size=group_size)
 
 

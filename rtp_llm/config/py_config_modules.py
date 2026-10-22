@@ -426,12 +426,14 @@ class QuantizationConfig:
         self.int8_mode: int = 0
         self.quantization: str = ""
         self.enable_w4a16_sm120_dense_ffn: bool = False
+        self.enable_int8_allreduce_fp16_scale: bool = False
 
     def to_string(self):
         return (
             f"int8_mode: {self.int8_mode}\n"
             f"quantization: {self.quantization}\n"
-            f"enable_w4a16_sm120_dense_ffn: {self.enable_w4a16_sm120_dense_ffn}"
+            f"enable_w4a16_sm120_dense_ffn: {self.enable_w4a16_sm120_dense_ffn}\n"
+            f"enable_int8_allreduce_fp16_scale: {self.enable_int8_allreduce_fp16_scale}"
         )
 
     def get_quantization(self):
