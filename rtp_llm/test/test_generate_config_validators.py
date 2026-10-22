@@ -36,6 +36,24 @@ from rtp_llm.config.generate_config import (
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.response_format import ResponseFormat
 from rtp_llm.structure.request_extractor import RequestExtractor
+from rtp_llm.config.exceptions import FtRuntimeException
+
+
+class TestBeamWidths(unittest.TestCase):
+    def test_reject_nonpositive_widths(self):
+        cases = [{"num_beams": 0}, {"num_beams": -1}]
+        cases += [
+            {"variable_num_beams": widths}
+            for widths in ([0], [2, 0], [0, 2], [2, -1], [2, 2, 0])
+        ]
+        for fields in cases:
+            with self.subTest(fields=fields), self.assertRaises(FtRuntimeException):
+                GenerateConfig(**fields).validate()
+
+    def test_positive_and_default_widths(self):
+        for widths in ([], [1], [2], [2, 2], [2, 4, 2]):
+            with self.subTest(widths=widths):
+                GenerateConfig(variable_num_beams=widths).validate()
 
 
 class TestRawGenerateConfigParsing(unittest.TestCase):

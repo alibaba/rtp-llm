@@ -66,6 +66,7 @@ cc_library(
         "*.cc",
     ], exclude = ["CompleteTokenIds.cc", "InputEmbeddingsUtils.cc"]),
     deps = [
+        "//3rdparty/trt_beam_search:beam_search_limits",
         ":generate_types",
         ":generate_config",
         ":complete_token_ids",

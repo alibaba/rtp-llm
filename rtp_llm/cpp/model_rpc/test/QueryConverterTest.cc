@@ -153,6 +153,7 @@ TEST_F(QueryConverterTest, AuxInfoRpcRoundTripPreservesOutputsAndLegacyDefault) 
                 auto* config = request.mutable_generate_config();
                 config->set_max_new_tokens(2);
                 config->set_min_new_tokens(2);
+                config->set_num_beams(1);
                 config->set_num_return_sequences(2);
                 config->set_is_streaming(streaming);
                 if (aux_mode >= 0) {

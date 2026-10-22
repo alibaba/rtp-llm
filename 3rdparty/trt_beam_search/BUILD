@@ -3,6 +3,11 @@ load("@arch_config//:arch_select.bzl", "torch_deps")
 package(default_visibility = ["//visibility:public"])
 
 cc_library(
+    name = "beam_search_limits",
+    hdrs = ["beamSearchLimits.h"],
+)
+
+cc_library(
     name = "trt_beam_search_impl",
     srcs = glob([
         "*.cu",

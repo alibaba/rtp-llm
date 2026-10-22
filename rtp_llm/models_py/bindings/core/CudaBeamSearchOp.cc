@@ -35,6 +35,12 @@ BeamSearchOutput sampleBeamSearch(BeamSearchParams params) {
     const int beam_width_out = params.num_beams_out != 0 ? params.num_beams_out : beam_width_in;
     const int vocab_size     = params.logits.size(2);
     const int max_seq_len    = params.token_ids.size(2);
+    RTP_LLM_CHECK_WITH_INFO(tensorrt_llm::kernels::isSupportedBeamWidth(beam_width_in)
+                                && tensorrt_llm::kernels::isSupportedBeamWidth(beam_width_out),
+                            "beam widths must be between 1 and %d, got input=%d output=%d",
+                            tensorrt_llm::kernels::kMaxSupportedBeamWidth,
+                            beam_width_in,
+                            beam_width_out);
     // TODO(zhangjianning.zjn): check the shape of params
     const bool use_v2 = params.force_v2 || beam_width_in != beam_width_out
                         || beam_width_in > static_cast<int>(tensorrt_llm::kernels::kMaxBeamWidthForV1);

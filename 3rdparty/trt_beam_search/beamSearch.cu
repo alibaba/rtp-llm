@@ -71,6 +71,10 @@ BeamSearchConfig configureBeamSearch(runtime::SizeType32 batchSize,
 
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
 
+    RTP_LLM_CHECK_WITH_INFO(isSupportedBeamWidth(beamWidthIn) && isSupportedBeamWidth(beamWidthOut),
+        "beam widths must be between 1 and %d, got input=%d output=%d",
+        kMaxSupportedBeamWidth, beamWidthIn, beamWidthOut);
+
     BeamSearchConfig config;
 
     config.mVBWS = beamWidthIn != beamWidthOut;
@@ -188,6 +192,7 @@ BeamSearchConfig configureBeamSearch(runtime::SizeType32 batchSize,
         case 1024: GET_INFO_STAGE3(1024, true);
         case 2048: GET_INFO_STAGE3(2048, true);
         case 4096: GET_INFO_STAGE3(4096, true);
+        default: RTP_LLM_CHECK_WITH_INFO(false, "unsupported V2 beam width");
         }
         config.mByteSharedMemoryStage3 = attr.sharedSizeBytes; // Only static shared memory
 

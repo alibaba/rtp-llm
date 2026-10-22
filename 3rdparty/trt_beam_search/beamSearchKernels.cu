@@ -43,6 +43,9 @@ template <typename T, bool IS_V2>
 void invokeTopkBeamSearch(T const* logProbs, T const* bias, void* workspace, BeamHypotheses& bh, cudaStream_t stream)
 {
     int maxBeamWidth = max(bh.nBeamWidthIn, bh.nBeamWidthOut);
+    RTP_LLM_CHECK_WITH_INFO(bh.nBeamWidthIn > 0 && bh.nBeamWidthOut > 0
+        && bh.nBeamWidthIn <= kMaxSupportedBeamWidth && bh.nBeamWidthOut <= kMaxSupportedBeamWidth,
+        "beam widths must be between 1 and %d", kMaxSupportedBeamWidth);
     int const nPadBeamWidth{padToNextPowerOfTwo(maxBeamWidth)};
 
     // case X means X/2 < max_beam_width <= X
@@ -65,6 +68,7 @@ void invokeTopkBeamSearch(T const* logProbs, T const* bias, void* workspace, Bea
         case 2048: CASE_K(2048)
         case 4096: CASE_K(4096)
 #endif // FAST_BUILD
+        default: RTP_LLM_CHECK_WITH_INFO(false, "unsupported V2 beam width");
         }
     }
     else // V1, only use kernels of `beam_width <= kMaxBeamWidthForV1`

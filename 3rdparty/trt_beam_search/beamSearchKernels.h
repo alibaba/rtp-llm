@@ -24,6 +24,7 @@
 #include "common.h"
 #include "decodingCommon.h"
 #include "topkLastDim.h" // Air TopK
+#include "beamSearchLimits.h"
 
 #define BEAM_SEARCH_DEBUG 0
 
@@ -31,7 +32,7 @@ namespace tensorrt_llm
 {
 namespace kernels
 {
-static size_t constexpr kMaxBeamWidth = 1024;           // Max beam width supported in TRT-LLM now
+static size_t constexpr kMaxBeamWidth = kMaxSupportedBeamWidth;
 static size_t constexpr kMaxBeamWidthForV1 = 8;         // Max beam width for V1 workflow (V2 for larger)
 static size_t constexpr kMaxBeamWidthArrayLength = 8;   // Max length of beam width array of a request
 static size_t constexpr kThreadForSmallBeamWidth = 256; // Max count of thread for stage 1 in V1 workflow
