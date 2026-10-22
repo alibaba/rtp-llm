@@ -356,7 +356,8 @@ torch::Tensor publishInt32ToCuda(const torch::Tensor& tensor, TensorHolder& host
     return tensor.to(cuda_i32, /*non_blocking=*/true);
 }
 
-void publishModelInputCoreTensorsToCuda(GptModelInputs& model_input, TensorHolder& host_holder) {
+void publishModelInputCoreTensorsToCuda(GptModelInputs& model_input, TensorHolder& host_holder,
+                                      bool publish_page_tables) {
     // TODO(async): stream state is still gathered through CPU pointers above.
     // Publish only device tensors at the model boundary.
     RTP_LLM_PROFILE_SCOPE("normal_engine.model_input_gatherer.publish_core_tensors_to_cuda");
@@ -368,8 +369,10 @@ void publishModelInputCoreTensorsToCuda(GptModelInputs& model_input, TensorHolde
     // consume both views, and the speculative async path snapshots the pair
     // atomically for the next round. This also replaces the former per-group
     // tensorHoldHostAndToCuda copies in PyWrappedModel.
-    model_input.kv_cache_block_id        = publishInt32ToCuda(model_input.kv_cache_block_id, host_holder);
-    model_input.kv_cache_kernel_block_id = publishInt32ToCuda(model_input.kv_cache_kernel_block_id, host_holder);
+    if (publish_page_tables) {
+        model_input.kv_cache_block_id        = publishInt32ToCuda(model_input.kv_cache_block_id, host_holder);
+        model_input.kv_cache_kernel_block_id = publishInt32ToCuda(model_input.kv_cache_kernel_block_id, host_holder);
+    }
 }
 
 }  // anonymous namespace
@@ -829,7 +832,8 @@ absl::StatusOr<torch::Tensor> NormalModelInputGatherer::gatherKvCacheKernelBlock
 }
 
 absl::StatusOr<GptModelInputs> NormalModelInputGatherer::gather(const StreamGroups& stream_groups,
-                                                                TensorHolder&       host_holder) const {
+                                                                TensorHolder&       host_holder,
+                                                                bool                defer_page_tables) const {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     RTP_LLM_LOG_DEBUG("context_streams size = %d, decode_streams size = %d",
                       stream_groups.contextStreams().size(),
@@ -886,7 +890,7 @@ absl::StatusOr<GptModelInputs> NormalModelInputGatherer::gather(const StreamGrou
     // publishes the device views asynchronously immediately before use. Decode
     // keeps its device-state contract, including mixed-batch compatibility.
     if (deviceInputEnabled() && stream_groups.totalDecodeBatchSize() > 0) {
-        publishModelInputCoreTensorsToCuda(model_input, host_holder);
+        publishModelInputCoreTensorsToCuda(model_input, host_holder, !defer_page_tables);
         model_input.lm_output_indexes = buildLmOutputIndexesOnCuda(model_input, stream_groups);
     } else {
         model_input.lm_output_indexes = buildLmOutputIndexesOnHost(model_input, stream_groups);

@@ -11,6 +11,7 @@ keeps ``attention.py`` thin.
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING, NamedTuple
 
 import torch
@@ -43,6 +44,9 @@ class DecodeQKV(NamedTuple):
     swa_written: bool = False
     # Strided view into the same GEMM output as Main Q.
     index_q: torch.Tensor | None = None
+    head_weights: torch.Tensor | None = None
+    index_prepared: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
+    global_slots: torch.Tensor | None = None
 
 
 def _fused_v41_q_rope_supported(q, freqs_cis, rope_dim: int) -> bool:
@@ -79,6 +83,8 @@ def decode_compute_qkv(
     swa_slots: torch.Tensor | None = None,
     mega_attention=None,
     shared_input_quant=None,
+    qb_pdl: bool = False,
+    ready_plan=None,
 ) -> DecodeQKV:
     """Decode Q/KV path — RMSNorm + LoRA Q + KV linear + fused RMSNorm-RoPE.
 
@@ -96,19 +102,37 @@ def decode_compute_qkv(
         try_project_qkv_to_cache,
         try_project_quantized_qkv,
     )
+    from rtp_llm.models_py.modules.dsv41.fp8._v41_front_gemm import is_reindex, project
 
-    native_qkv = try_project_qkv_to_cache(
-        attn, x, freqs_cis, swa_pool, swa_slots, shared_input_quant
+    # Restrict our fusions to Reindex, including when FULL overlap is disabled
+    # or falls back. FULL keeps its original projection and PDL consumer.
+    reindex = is_reindex(attn)
+    front = (
+        project(attn, x, quantized_input=shared_input_quant, pdl=qb_pdl)
+        if reindex
+        else None
     )
-    quantized_qkv = (
-        native_qkv
-        if native_qkv is not None
-        else try_project_quantized_qkv(
-            attn,
-            x,
-            quantized_input=shared_input_quant,
+    head_weights = None if front is None else front[3]
+    # Select the producer before launching it: QB/KV and READY consume raw KV,
+    # whereas the upstream native producer already normalizes/rotates KV and
+    # writes SWA. A PDL consumer also needs the existing norm producer trigger.
+    merged = getattr(mega_attention, "merged_qb", None)
+    needs_raw_kv = (
+        reindex
+        or qb_pdl
+        or ready_plan is not None
+        or (merged is not None and os.environ.get("DSV41_FUSED_QB_KV", "0") == "1")
+    )
+    native_qkv = (
+        None if needs_raw_kv else try_project_qkv_to_cache(
+            attn, x, freqs_cis, swa_pool, swa_slots, shared_input_quant
         )
     )
+    quantized_qkv = front[:3] if front is not None else native_qkv
+    if quantized_qkv is None:
+        quantized_qkv = try_project_quantized_qkv(
+            attn, x, quantized_input=shared_input_quant, pdl=qb_pdl
+        )
     qr_quantized = None if quantized_qkv is None else quantized_qkv[2]
     if quantized_qkv is not None:
         fused_qkv = quantized_qkv[:2]
@@ -121,13 +145,100 @@ def decode_compute_qkv(
         qr = attn._rmsnorm_weighted(attn._lin(attn.wq_a, x), attn.q_norm)
     else:
         qr = fused_qkv[0]
+    if (
+        ready_plan is not None
+        and mega_attention is not None
+        and qr_quantized is not None
+        and fused_qkv is not None
+        and native_qkv is None
+        and not reindex
+        and getattr(attn, "skip_post_q_norm", False)
+        and rd == 64
+        and (attn.n_heads, attn.head_dim, mega_attention.padded_heads) == (64, 512, 64)
+    ):
+        from rtp_llm.models_py.modules.dsv41.fp8._v41_qb_kv import try_project_kv_index
+
+        result = try_project_kv_index(
+            mega_attention,
+            *qr_quantized,
+            fused_qkv[1],
+            attn.kv_norm,
+            position_ids,
+            attn.freqs_cis,
+            swa_pool,
+            swa_slots,
+            ready_plan,
+            eps=attn.eps,
+            wait_pdl=qb_pdl,
+        )
+        if result is not None:
+            main_q, kv, slots = result
+            return DecodeQKV(
+                qr,
+                main_q.unflatten(-1, (64, 512)),
+                kv,
+                freqs_cis,
+                qr_quantized,
+                True,
+                global_slots=slots,
+            )
     index_q = None
-    merged = getattr(mega_attention, "merged_qb", None)
+    index_prepared = None
+    if (
+        os.environ.get("DSV41_FUSED_QB_KV", "0") == "1"
+        and not reindex
+        and merged is not None
+        and qr_quantized is not None
+        and fused_qkv is not None
+        and native_qkv is None
+        and getattr(attn, "skip_post_q_norm", False)
+        and rd == 64
+        and (attn.n_heads, attn.head_dim, getattr(mega_attention, "padded_heads", None))
+        == (64, 512, 64)
+    ):
+        from rtp_llm.models_py.modules.dsv41.fp8._v41_qb_kv import try_project_kv
+
+        result = try_project_kv(
+            merged,
+            *qr_quantized,
+            fused_qkv[1],
+            attn.kv_norm,
+            position_ids,
+            attn.freqs_cis,
+            swa_pool,
+            swa_slots,
+            eps=attn.eps,
+            wait_pdl=qb_pdl,
+        )
+        if result is not None:
+            main_q, index_q, kv = result
+            return DecodeQKV(
+                qr,
+                main_q.unflatten(-1, (attn.n_heads, attn.head_dim)),
+                kv,
+                freqs_cis,
+                qr_quantized,
+                True,
+                index_q,
+            )
     if merged is not None and qr_quantized is not None:
         from rtp_llm.models_py.modules.dsv41._profiler import record_function_range
 
         with record_function_range("dsv41.decode.qb.merged"):
-            q, index_q = merged.forward_quantized(*qr_quantized)
+            prepared = (
+                merged.try_forward_prepared(
+                    *qr_quantized, head_weights, attn.freqs_cis, position_ids
+                )
+                # The custom consumer does not opt into PDL. Preserve the
+                # official wait-enabled DeepGEMM consumer for a PDL producer.
+                if reindex and rd == 64 and not qb_pdl else None
+            )
+            if prepared is None:
+                q, index_q = merged.forward_quantized(
+                    *qr_quantized, **({"wait_pdl": True} if qb_pdl else {})
+                )
+            else:
+                q, index_prepared = prepared
         q = q.unflatten(-1, (attn.n_heads, attn.head_dim))
     elif mega_attention is not None:
         # The caller selected the complete mega path before preparing Q.
@@ -175,7 +286,8 @@ def decode_compute_qkv(
         )
         if fused is not None:
             return DecodeQKV(
-                qr, fused.q, fused.kv, fused.freqs_cis, qr_quantized, True, index_q
+                qr, fused.q, fused.kv, fused.freqs_cis, qr_quantized, True, index_q, head_weights,
+                index_prepared
             )
     if mega_attention is None:
         if getattr(attn, "skip_post_q_norm", False):
@@ -199,4 +311,6 @@ def decode_compute_qkv(
         freqs_cis=freqs_cis,
         qr_quantized=qr_quantized,
         index_q=index_q,
+        head_weights=head_weights,
+        index_prepared=index_prepared,
     )

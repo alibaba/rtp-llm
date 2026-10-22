@@ -84,6 +84,26 @@ def assert_equivalent(case, actual, expected, logits, ends):
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class DecodeTopKTest(unittest.TestCase):
+    def test_complete_candidates_are_sorted_and_only_pad_after_visible_prefix(self):
+        for k in (512, 1024, 2048):
+            source = torch.randn(6, 32768, device="cuda")
+            lengths = torch.tensor([0, 1, 513, 4096, 32761, 32768], device="cuda", dtype=torch.int32)
+            source[3].fill_(-torch.inf)
+            source[4, :8192] = torch.nan
+            source[5].fill_(-torch.inf)
+            candidates, flags = selector.select_candidates(source, lengths, 8, k, complete=True)
+            for row, length in enumerate(lengths.tolist()):
+                visible = (length + 7) // 8
+                count = min(visible, k)
+                selected = candidates[row, :count]
+                self.assertTrue(bool(((selected >= 0) & (selected < visible)).all()))
+                self.assertTrue(bool((selected[1:] > selected[:-1]).all()))
+                self.assertTrue(bool((candidates[row, count:] == -1).all()))
+                self.assertEqual(int(flags[row].sum()), count)
+                if count:
+                    self.assertEqual(int(selected[-1]), visible - 1)
+                    self.assertTrue(bool((flags[row, selected.long()] == 1).all()))
+
     def setUp(self):
         if torch.cuda.get_device_capability() not in ((10, 0), (10, 3)):
             self.skipTest("DeepSelect requires SM100/SM103")

@@ -164,7 +164,19 @@ def _query_norm_quant_kernel(
     D: tl.constexpr,
     EPS: tl.constexpr,
     BLOCK: tl.constexpr,
+    PDL: tl.constexpr = False,
 ):
+    if PDL:
+        # Producer only: QA completion still orders this kernel. The following
+        # QB may initialize early but must GDC-wait before reading Q/scales.
+        tl.inline_asm_elementwise(
+            "griddepcontrol.launch_dependents; // $0",
+            "=r",
+            [],
+            dtype=tl.int32,
+            is_pure=False,
+            pack=1,
+        )
     row = tl.program_id(0).to(tl.int64)
     cols = tl.arange(0, BLOCK)
     x = tl.load(X + row * stride_x + cols, cols < D, 0).to(tl.float32)
@@ -193,7 +205,9 @@ def _query_norm_quant_kernel(
     tl.store(SF + packs * stride_sf + row, packed, packs < triton.cdiv(D, 128))
 
 
-def query_norm_quant(x: torch.Tensor, weight: torch.Tensor, eps: float):
+def query_norm_quant(
+    x: torch.Tensor, weight: torch.Tensor, eps: float, *, pdl: bool = False
+):
     """Return BF16 Q plus FP8 Q and packed MN-major UE8M0 scales."""
     flat = x.view(-1, x.shape[-1])
     rows, width = flat.shape
@@ -216,13 +230,14 @@ def query_norm_quant(x: torch.Tensor, weight: torch.Tensor, eps: float):
             width,
             eps,
             triton.next_power_of_2(width),
+            PDL=pdl,
             num_warps=8 if width > 1024 else 4,
             enable_fp_fusion=False,
         )
     return normalized, (quantized, scales)
 
 
-def try_project_quantized_qkv(attn, x, quantized_input=None):
+def try_project_quantized_qkv(attn, x, quantized_input=None, *, pdl: bool = False):
     """Decode-only projection with an explicit, forward-local quantized Q."""
     if os.environ.get("DSV41_FUSED_QUERY_QUANT", "1") != "1":
         return None
@@ -248,6 +263,6 @@ def try_project_quantized_qkv(attn, x, quantized_input=None):
         else linear.forward_quantized(*quantized_input).view(*x.shape[:-1], linear.N)
     )
     qr, quantized = query_norm_quant(
-        projected[..., : attn.q_lora_rank], attn.q_norm, attn.eps
+        projected[..., : attn.q_lora_rank], attn.q_norm, attn.eps, pdl=pdl
     )
     return qr, projected[..., attn.q_lora_rank :], quantized

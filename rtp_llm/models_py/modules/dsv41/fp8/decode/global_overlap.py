@@ -21,7 +21,15 @@ _GLOBAL_COMPUTE_STREAMS = threading.local()
 def is_supported(attn, x, positions, req_ids, starts) -> bool:
     if (
         os.environ.get("DSV41_OVERLAP_GLOBAL_QKV", "1") != "1"
-        or os.environ.get("MOEDBG", "0") != "0"
+    ):
+        return False
+    return supports_paged_global(attn, x, positions, req_ids, starts)
+
+
+def supports_paged_global(attn, x, positions, req_ids, starts) -> bool:
+    """Native producer/layout contract, independent of the scheduling policy."""
+    if (
+        os.environ.get("MOEDBG", "0") != "0"
         or not attn.is_kv_source
         or attn.compress_ratio not in (1, 2)
         or not x.is_cuda
@@ -64,25 +72,39 @@ class GlobalDecodeWork:
             self.joined = True
 
 
+def _get_compute_stream(cache, device, current, *, capturing):
+    """Lookup under the caller's device guard; never create a stream in capture."""
+    from rtp_llm.models_py.modules.dsv41.fp8._v41_wo_a_quant import _context
+    from rtp_llm.models_py.modules.dsv41.fp8.attention import _cuda_device_index
+
+    stream_key = (_cuda_device_index(device), _context(), current.cuda_stream)
+    streams = getattr(cache, "streams", None)
+    if streams is None:
+        if capturing:
+            return None
+        streams = cache.streams = {}
+    stream = streams.get(stream_key)
+    if stream is None:
+        if capturing:
+            return None
+        stream = streams[stream_key] = torch.cuda.Stream(device=device)
+    return stream
+
+
 def start_global_decode(attn, x, positions, req_ids, starts) -> GlobalDecodeWork | None:
     if not is_supported(attn, x, positions, req_ids, starts):
         return None
-    from rtp_llm.models_py.modules.dsv41.fp8._v41_wo_a_quant import _context
     from rtp_llm.models_py.modules.dsv41.fp8.attention import _cuda_device_index
 
     device_index = _cuda_device_index(x.device)
     current = torch.cuda.current_stream(x.device)
     with torch.cuda.device(x.device):
         capturing = torch.cuda.is_current_stream_capturing()
-        stream_key = (device_index, _context(), current.cuda_stream)
-    streams = getattr(_GLOBAL_COMPUTE_STREAMS, "streams", None)
-    if streams is None:
-        streams = _GLOBAL_COMPUTE_STREAMS.streams = {}
-    stream = streams.get(stream_key)
+        stream = _get_compute_stream(
+            _GLOBAL_COMPUTE_STREAMS, x.device, current, capturing=capturing
+        )
     if stream is None:
-        if capturing:
-            return None
-        stream = streams[stream_key] = torch.cuda.Stream(device=x.device)
+        return None
     warm_key = (device_index, tuple(x.shape), stream.cuda_stream)
     warmed = getattr(attn, "_global_decode_overlap_warmed", None)
     if capturing and (warmed is None or warm_key not in warmed):

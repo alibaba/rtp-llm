@@ -728,6 +728,10 @@ class AttentionV41FP8(AttentionFP8):
                 if merged is not None:
                     self._qb_weight_owner = None
 
+        from ._v41_front_gemm import prepare as prepare_front
+
+        prepare_front(self)
+
     def _mega_position_chunks(self, positions, rows, chunk):
         # All layers consume the same absolute query positions. Keep conversion
         # and chunk views within this forward, including during graph capture.
@@ -1095,7 +1099,9 @@ class AttentionV41FP8(AttentionFP8):
 
     def _begin_forward(self):
         if self.layer_id == min(self._shared_attention["layers"]):
-            for key in ("prefill_pool_ready", "prefill_state_ready"):
+            for key in (
+                "prefill_pool_ready", "prefill_state_ready", "decode_sparse_plan_ready"
+            ):
                 pending = self._shared_attention.pop(key, None)
                 if pending is not None:
                     # Direct callers also order a new forward after an
@@ -1106,6 +1112,8 @@ class AttentionV41FP8(AttentionFP8):
             self._shared_attention["candidates"] = None
             self._shared_attention.pop("candidate_mask", None)
             self._shared_attention.pop("decode_sparse_plan", None)
+            self._shared_attention.pop("decode_valid_requests", None)
+            self._shared_attention.pop("decode_indexer_metadata", None)
             self._shared_attention.pop("prefill_candidate_mask", None)
             self._shared_attention.pop("prefill_sparse_candidates", None)
             self._shared_attention.pop("prefill_sparse_plans", None)
@@ -2879,7 +2887,16 @@ class AttentionV41FP8(AttentionFP8):
         self._shared_attention["global"] = {self.layer_id: keys}
 
     def _prepare_indexer_query_decode(
-        self, x, qr, positions, qr_quantized=None, index_q=None
+        self,
+        x,
+        qr,
+        positions,
+        qr_quantized=None,
+        index_q=None,
+        head_weights=None,
+        index_prepared=None,
+        *,
+        overlap=None,
     ):
         """Prepare query-only work before waiting for the current layer's keys."""
         if not self.is_index_source:
@@ -2897,7 +2914,19 @@ class AttentionV41FP8(AttentionFP8):
                 x.device, keys.pool.shape[1], self.index_n_heads, self.index_head_dim
             )
         )
-        if index_q is None and paged and self.rope_head_dim == 64:
+        if index_prepared is not None and paged:
+            # Our QB epilogue already produced RoPE/FP4 and scaled weights.
+            # Keep the upstream query contract without repeating those kernels.
+            if overlap is not None:
+                overlap.wait_indexer()
+                weights = overlap.weights
+            else:
+                weights = (
+                    F.linear(x.reshape(T, -1), self.index_weights)
+                    if head_weights is None else head_weights
+                )
+            return None, weights, index_prepared
+        if index_q is None and paged and self.rope_head_dim == 64 and overlap is None:
             from rtp_llm.models_py.modules.dsv41._v41_query_quant import (
                 try_project_indexer_q,
             )
@@ -2906,7 +2935,10 @@ class AttentionV41FP8(AttentionFP8):
                 self.index_wq, qr, self.freqs_cis, positions, qr_quantized
             )
             if pair is not None:
-                weights = F.linear(x.reshape(T, -1), self.index_weights)
+                weights = (
+                    F.linear(x.reshape(T, -1), self.index_weights)
+                    if head_weights is None else head_weights
+                )
                 scaled = torch.empty_like(weights, dtype=torch.bfloat16)
                 torch.mul(
                     weights,
@@ -2933,7 +2965,14 @@ class AttentionV41FP8(AttentionFP8):
                 else self._lin(self.index_wq, qr.reshape(T, -1))
             )
         q = index_q.view(T, self.index_n_heads, self.index_head_dim)
-        weights = F.linear(x.reshape(T, -1), self.index_weights)
+        if overlap is not None:
+            overlap.wait_indexer()
+            weights = overlap.weights
+        else:
+            weights = (
+                F.linear(x.reshape(T, -1), self.index_weights)
+                if head_weights is None else head_weights
+            )
         prepared = None
         if paged:
             prepared = decode_indexer.prepare_indexer_q_and_weights(
@@ -2953,8 +2992,12 @@ class AttentionV41FP8(AttentionFP8):
         positions,
         qr_quantized=None,
         index_q=None,
+        head_weights=None,
+        index_prepared=None,
         *,
         prepared_query=None,
+        overlap=None,
+        slot_plan=None,
     ):
         """Capture-static index scoring with device-side causal/candidate masks."""
         shared = self._shared_attention
@@ -2972,10 +3015,27 @@ class AttentionV41FP8(AttentionFP8):
         capacity = keys.capacity if paged else keys.shape[1]
         if prepared_query is None:
             prepared_query = AttentionV41FP8._prepare_indexer_query_decode(
-                self, x, qr, positions, qr_quantized, index_q
+                self, x, qr, positions, qr_quantized, index_q,
+                head_weights, index_prepared, overlap=overlap,
             )
         q, weights, prepared = prepared_query
-        visible_per_token = (positions + 1) // self.compress_ratio
+        if q is not None:
+            q = q.view(B, S, self.index_n_heads, self.index_head_dim)
+        indexer_metadata = None if overlap is None else overlap.metadata
+        if (
+            overlap is None
+            and paged
+            and self.layer_id == self.kv_source_layer_id
+            and (self.index_n_heads, self.index_head_dim) == (32, 128)
+        ):
+            indexer_metadata = decode_indexer.get_decode_metadata(
+                shared,
+                keys,
+                positions,
+                batch_size=B,
+                query_len=S,
+                compress_ratio=self.compress_ratio,
+            )
         config = self.v41_config
         candidate_source = int(config.get("candidate_source_layer_id", -1))
         candidate_blocks = int(config.get("candidate_topk_blocks", 0))
@@ -3000,23 +3060,26 @@ class AttentionV41FP8(AttentionFP8):
                 and keys.logical_entries_per_block == 128
                 and sparse_decode.is_supported(candidates)
             ):
+                from .decode.sparse_plan_overlap import wait_plan
+
+                wait_plan(shared)
                 plan = shared.get("decode_sparse_plan")
                 if plan is None:
                     with record_function_range("dsv41.decode.sparse_mqa_plan"):
                         plan = sparse_decode.make_plan(
                             candidates,
-                            visible_per_token,
+                            # This branch requires ratio=1. Reused plans already
+                            # own the lengths; do not launch per-layer add/div.
+                            positions + 1,
                             keys.block_table,
                             query_len=S,
+                            candidate_mask=shared.get("candidate_mask"),
+                            valid_requests=shared.get("decode_valid_requests"),
                         )
                     shared["decode_sparse_plan"] = plan
                 with record_function_range("dsv41.decode.sparse_mqa_select"):
                     output = sparse_decode.select_decode(
-                        (
-                            None
-                            if q is None
-                            else q.view(B, S, self.index_n_heads, self.index_head_dim)
-                        ),
+                        q,
                         weights.view(B, S, self.index_n_heads),
                         self.freqs_cis,
                         positions.reshape(T),
@@ -3027,13 +3090,17 @@ class AttentionV41FP8(AttentionFP8):
                     )
                 shared["topk"] = {self.layer_id: output}
                 return output
+        # The general scorer still needs causal lengths in compressed units.
+        visible_per_token = (
+            indexer_metadata.lengths
+            if indexer_metadata is not None
+            else (positions + 1) // self.compress_ratio
+        )
         if paged:
+            if overlap is not None:
+                overlap.wait_global()
             all_logits = decode_indexer.score_decode_indexer(
-                (
-                    None
-                    if q is None
-                    else q.view(B, S, self.index_n_heads, self.index_head_dim)
-                ),
+                q,
                 weights.view(B, S, self.index_n_heads),
                 self.freqs_cis,
                 keys.pool,
@@ -3045,6 +3112,7 @@ class AttentionV41FP8(AttentionFP8):
                 positions=positions.reshape(T),
                 preserve_score_dtype=True,
                 pad_invisible=False,
+                metadata=indexer_metadata,
                 prepared_query=prepared,
             )
         else:
@@ -3052,7 +3120,7 @@ class AttentionV41FP8(AttentionFP8):
                 weights.float() * (self.index_head_dim * self.index_n_heads) ** -0.5
             )
             freqs = self.freqs_cis[positions]
-            q = fp4_roundtrip(rope_only(q, freqs, self.rope_head_dim))
+            q = fp4_roundtrip(rope_only(q.view(T, self.index_n_heads, self.index_head_dim), freqs, self.rope_head_dim))
         publish = (
             self.layer_id == candidate_source
             and candidate_blocks > 0
@@ -3092,17 +3160,41 @@ class AttentionV41FP8(AttentionFP8):
                 # selection batched instead of launching once per request.
                 if candidates is not None:
                     if publish:
-                        candidates, flags = decode_topk.select_candidates(
-                            all_logits, visible_i32, candidate_size, candidate_blocks
+                        select_candidates = (
+                            decode_topk.select_candidates
+                            if overlap is None
+                            else overlap.select_candidates
+                        )
+                        complete_prefix = (
+                            candidate_size == 8 and candidate_blocks in (512, 1024, 2048)
+                        )
+                        candidates, flags = select_candidates(
+                            all_logits, visible_i32, candidate_size, candidate_blocks,
+                            **({"complete": True} if complete_prefix else {}),
                         )
                         shared["candidates"] = candidates
-                        shared["candidate_mask"] = (candidates, flags, candidate_size)
+                        shared["candidate_mask"] = (
+                            (candidates, flags, candidate_size, "sorted_prefix")
+                            if complete_prefix
+                            else (candidates, flags, candidate_size)
+                        )
+                        from .decode.sparse_plan_overlap import start_plan
+
+                        # Reuse the source's int32 lengths; plan/metadata need
+                        # no data produced by the later reindex layer.
+                        start_plan(
+                            self, keys, visible_i32, query_len=S,
+                            producer_stream=None if overlap is None else overlap.auxiliary,
+                        )
                     elif candidate_source >= 0 and self.layer_id > candidate_source:
                         decode_topk.mask_candidates(
                             all_logits, cached_mask[1], candidate_size
                         )
                 output = decode_topk.select_tokens(
-                    all_logits, visible_i32, self.index_topk
+                    all_logits,
+                    visible_i32,
+                    self.index_topk,
+                    **({"slot_plan": slot_plan} if slot_plan is not None else {}),
                 )
                 shared["topk"] = {self.layer_id: output}
                 return output
@@ -3173,6 +3265,10 @@ class AttentionV41FP8(AttentionFP8):
                     dense,
                     output[start:end, :count],
                 )
+        if paged and publish:
+            from .decode.sparse_plan_overlap import start_plan
+
+            start_plan(self, keys, visible_i32, query_len=S)
         shared["topk"] = {self.layer_id: output}
         return output
 
@@ -3224,6 +3320,13 @@ class AttentionV41FP8(AttentionFP8):
 
         self._begin_forward()
         B, S, _ = x.shape
+        # Stable GPU contents are refreshed by prepare_cuda_graph each replay.
+        # The mask affects selection only, not query/KV-write geometry.
+        valid_requests = getattr(metadata, "valid_requests", None)
+        if valid_requests is None:
+            self._shared_attention.pop("decode_valid_requests", None)
+        else:
+            self._shared_attention["decode_valid_requests"] = valid_requests[:B]
         T = B * S
         positions, freqs = decode_rope_metadata(
             self._shared_attention, self.freqs_cis, metadata.position_ids[:T]
@@ -3249,6 +3352,28 @@ class AttentionV41FP8(AttentionFP8):
             )
         ):
             mega = None
+        if mega is not None:
+            from rtp_llm.models_py.modules.dsv41.fp8.decode.full_overlap import (
+                try_full_decode,
+            )
+
+            output = try_full_decode(
+                self,
+                x,
+                metadata,
+                positions,
+                freqs,
+                mega,
+                swa_pool,
+                shared_input_quant=shared_input_quant,
+            )
+            if output is not None:
+                return output
+        # REUSE has no current-layer index scoring. Its local TopK is already
+        # published on this stream by the source layer; preserve that tensor.
+        from .decode.ready_qkv import make_ready_plan
+
+        ready_plan = make_ready_plan(self, mega, metadata, T, swa_pool, mega_swa)
         swa_slots = metadata.pool_write_slot_mappings.get(SWA_KV)
         global_work = None
         prepared_query = None
@@ -3270,19 +3395,22 @@ class AttentionV41FP8(AttentionFP8):
                 swa_pool=swa_pool,
                 swa_slots=None if swa_slots is None else swa_slots[:T],
                 **({"mega_attention": mega} if mega is not None else {}),
+                **({"ready_plan": ready_plan} if ready_plan is not None else {}),
             )
             if not qkv.swa_written:
                 self._decode_write_swa_fp8(qkv.kv, B, S, metadata)
             if global_work is not None:
                 prepared_query = self._prepare_indexer_query_decode(
-                    x, qkv.qr, positions, qkv.qr_quantized, qkv.index_q
+                    x, qkv.qr, positions, qkv.qr_quantized, qkv.index_q,
+                    getattr(qkv, "head_weights", None),
+                    getattr(qkv, "index_prepared", None),
                 )
         finally:
             if global_work is not None:
                 global_work.finish()
         if mega is not None:
-            slots = None
-            if self.compress_ratio:
+            slots = getattr(qkv, "global_slots", None)
+            if self.compress_ratio and slots is None:
                 if self.is_kv_source and global_work is None:
                     self._produce_global_decode(x, positions, req, starts)
                 selected = self._select_indices_decode(
@@ -3291,6 +3419,8 @@ class AttentionV41FP8(AttentionFP8):
                     positions,
                     qkv.qr_quantized,
                     qkv.index_q,
+                    head_weights=qkv.head_weights,
+                    index_prepared=qkv.index_prepared,
                     prepared_query=prepared_query,
                 )
                 slots = (
@@ -3321,6 +3451,7 @@ class AttentionV41FP8(AttentionFP8):
                 qkv.qr,
                 positions,
                 qkv.qr_quantized,
+                head_weights=qkv.head_weights,
                 prepared_query=prepared_query,
             )
             from rtp_llm.models_py.modules.dsv41.fp8._v41_fp4_decode_attn import (

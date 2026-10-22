@@ -1,0 +1,94 @@
+--- a/deep_gemm/include/deep_gemm/impls/sm100_fp8_fp4_gemm_1d1d.cuh
++++ b/deep_gemm/include/deep_gemm/impls/sm100_fp8_fp4_gemm_1d1d.cuh
+@@ -35,6 +35,17 @@
+           GemmType kGemmType, bool kWithAccumulation,
+           typename a_dtype_t, typename b_dtype_t, typename cd_dtype_t,
+           typename epilogue_operator_t>
++#ifdef DG_GEMM_DEVICE_ENTRY
++__device__ __forceinline__ void
++sm100_fp8_fp4_gemm_1d1d_impl(int* grouped_layout,
++                             uint32_t shape_m, uint32_t shape_n, uint32_t shape_k,
++                             const EpilogueOperatorArgs& epilogue_args,
++                             const cute::TmaDescriptor& tensor_map_a,
++                             const cute::TmaDescriptor& tensor_map_b,
++                             const cute::TmaDescriptor& tensor_map_sfa,
++                             const cute::TmaDescriptor& tensor_map_sfb,
++                             const cute::TmaDescriptor& tensor_map_cd) {
++#else
+ CUTLASS_GLOBAL void __launch_bounds__(kNumNonEpilogueThreads + kNumEpilogueThreads, 1)
+ sm100_fp8_fp4_gemm_1d1d_impl(int* grouped_layout,
+                              uint32_t shape_m, uint32_t shape_n, uint32_t shape_k,
+@@ -44,6 +55,7 @@
+                              const __grid_constant__ cute::TmaDescriptor tensor_map_sfa,
+                              const __grid_constant__ cute::TmaDescriptor tensor_map_sfb,
+                              const __grid_constant__ cute::TmaDescriptor tensor_map_cd) {
++#endif
+ #if (defined(__CUDA_ARCH__) and (__CUDA_ARCH__ >= 1000)) or defined(__CLION_IDE__)
+     using Barrier = cutlass::arch::ClusterTransactionBarrier;
+     using Allocator = cute::conditional_t<kNumMulticast == 1, cute::TMEM::Allocator1Sm, cute::TMEM::Allocator2Sm>;
+--- a/deep_gemm/include/deep_gemm/impls/sm100_bf16_gemm.cuh
++++ b/deep_gemm/include/deep_gemm/impls/sm100_bf16_gemm.cuh
+@@ -32,7 +32,16 @@
+           bool kSwapAB, bool kEnsureZeroPadding,
+           GemmType kGemmType, bool kWithAccumulation,
+           typename cd_dtype_t, typename epilogue_operator_t,
++          uint64_t kTensorCoreUtilControl, uint32_t kCTABase = 0>
++#ifdef DG_GEMM_DEVICE_ENTRY
++__device__ __forceinline__ void
++sm100_bf16_gemm_impl(int* grouped_layout,
++                     uint32_t shape_m, uint32_t shape_n, uint32_t shape_k,
++                     const EpilogueOperatorArgs& epilogue_args,
++                     const cute::TmaDescriptor& tensor_map_a,
++                     const cute::TmaDescriptor& tensor_map_b,
++                     const cute::TmaDescriptor& tensor_map_cd) {
++#else
+-          uint64_t kTensorCoreUtilControl>
+ CUTLASS_GLOBAL void __launch_bounds__(kNumNonEpilogueThreads + kNumEpilogueThreads, 1)
+ sm100_bf16_gemm_impl(int* grouped_layout,
+                      uint32_t shape_m, uint32_t shape_n, uint32_t shape_k,
+@@ -40,6 +49,7 @@
+                      const __grid_constant__ cute::TmaDescriptor tensor_map_a,
+                      const __grid_constant__ cute::TmaDescriptor tensor_map_b,
+                      const __grid_constant__ cute::TmaDescriptor tensor_map_cd) {
++#endif
+ #if (defined(__CUDA_ARCH__) and (__CUDA_ARCH__ >= 1000)) or defined(__CLION_IDE__)
+     // Enlarge `BLOCK_K` for some cases
+     // NOTES: this is for reducing the `umma_arrive()` overhead
+@@ -153,7 +163,7 @@
+     uint32_t m_block_idx, n_block_idx;
+     // NOTES: BF16 has no SF, so `kSFKSpan` is unused here; pass `kKAlignment` explicitly to avoid relying on the default.
+     auto scheduler = sched::Scheduler<kGemmType, BLOCK_M, BLOCK_N, kNumGroups, kNumMulticast, kIsMulticastOnA, kNumSMs, kEnsureZeroPadding, kKAlignment, kKAlignment>(
++        shape_m, shape_n, shape_k, grouped_layout, blockIdx.x - kCTABase);
+-        shape_m, shape_n, shape_k, grouped_layout);
+     epilogue_operator_t epilogue_operator(epilogue_args);
+ 
+     // Pipeline and TMA phases
+--- a/deep_gemm/include/deep_gemm/scheduler/gemm.cuh
++++ b/deep_gemm/include/deep_gemm/scheduler/gemm.cuh
+@@ -43,6 +43,7 @@
+                      "K alignment must be a multiple of BLOCK_K (128)");
+ 
+     int current_iter = -1;
++    uint32_t local_block_id;
+ 
+     // Block configs
+     uint32_t num_blocks;
+@@ -83,7 +84,8 @@
+ 
+     // ReSharper disable once CppPossiblyUninitializedMember
+     CUTLASS_DEVICE explicit Scheduler(const uint32_t& shape_m, const uint32_t& shape_n,
++                                       const uint32_t& shape_k, int* grouped_layout = nullptr, uint32_t local_id = blockIdx.x) {
++        local_block_id = local_id;
+-                                       const uint32_t& shape_k, int* grouped_layout = nullptr) {
+         num_m_blocks = math::ceil_div(shape_m, BLOCK_M);
+         num_n_blocks = math::ceil_div(shape_n, BLOCK_N);
+         current_shape_k = is_k_grouped_contiguous(kGemmType) ? 0 : shape_k;
+@@ -183,7 +185,7 @@
+     }
+ 
+     CUTLASS_DEVICE bool get_next_block(uint32_t& m_block_idx, uint32_t& n_block_idx) {
++        const auto next_block_idx = (++ current_iter) * kNumSMs + local_block_id;
+-        const auto next_block_idx = (++ current_iter) * kNumSMs + blockIdx.x;
+ 
+         if constexpr (kGemmType == GemmType::MGroupedMasked) {
+             while (true) {

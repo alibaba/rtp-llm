@@ -3,6 +3,8 @@
 """Batched V4.1 decode selection and fused candidate metadata.
 
 Candidate pooling/flags follow vLLM's attention/dsa/candidate_blocks.py.
+The L20 source can publish DeepInfer-style complete, sorted visible prefixes;
+other callers retain the historical score-filtered candidate contract.
 Supported candidate-block selections reuse RTP's exact radix-select kernel;
 other candidate counts retain torch.topk. Candidate scores remain FP32.
 Output order and cutoff-tie choices are unspecified; the newest block is pinned.
@@ -12,6 +14,7 @@ Token K512 uses native DeepSelect when supported, with radix-select fallback.
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 
 import torch
 import triton
@@ -21,6 +24,39 @@ from rtp_llm.models_py.modules.dsv41.fp8 import _v41_prefill_deepselect as deeps
 from rtp_llm.models_py.modules.dsv41.fp8 import _v41_candidate_topk_v3 as candidate_topk
 from rtp_llm.models_py.modules.dsv41.fp8.indexer import _TOPK_V3_OK, _get_topk_workspace
 from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+
+@dataclass
+class DecodeSlotPlan:
+    """Forward-local slot output; shared TopK always remains in local coordinates."""
+
+    request_ids: torch.Tensor
+    block_table: torch.Tensor
+    entries: int
+    logical_entries: int
+    slots: torch.Tensor | None = None
+
+
+def make_slot_plan(request_ids, block_table, *, entries, logical_entries):
+    if os.environ.get("DSV41_FUSED_TOPK_SLOTS", "0") != "1":
+        return None
+    if not (
+        request_ids.is_cuda
+        and request_ids.ndim == 1
+        and request_ids.is_contiguous()
+        and request_ids.dtype == torch.int32
+        and block_table.device == request_ids.device
+        and block_table.dtype == torch.int32
+        and block_table.ndim == 2
+        and block_table.shape[0] > 0
+        and block_table.shape[1] > 0
+        and block_table.stride(1) == 1
+        and block_table.stride(0) >= block_table.shape[1]
+        and entries == logical_entries
+        and entries > 0
+    ):
+        return None
+    return DecodeSlotPlan(request_ids, block_table, entries, logical_entries)
 
 
 def is_supported(logits: torch.Tensor, lengths: torch.Tensor, topk: int) -> bool:
@@ -173,6 +209,52 @@ def _candidate_store_flags_kernel(
 
 
 @triton.jit
+def _candidate_store_prefix_kernel(
+    candidates, flags, block_lengths,
+    K: tl.constexpr, NBLOCKS: tl.constexpr, SEARCH_STEPS: tl.constexpr,
+):
+    """Publish sorted visible IDs, not score-filtered holes (decode only)."""
+    row = tl.program_id(0).to(tl.int64)
+    offsets = tl.arange(0, 1024)
+    for tile in range(tl.cdiv(NBLOCKS, 1024)):
+        blocks = tile * 1024 + offsets
+        tl.store(flags + row * NBLOCKS + blocks, 0, blocks < NBLOCKS)
+    lanes = tl.arange(0, K)
+    visible = tl.maximum(tl.minimum(tl.load(block_lengths + row), NBLOCKS), 0)
+    expected = tl.minimum(visible, K)
+    if NBLOCKS <= K:
+        ids = lanes
+    else:
+        ids = tl.load(candidates + row * K + lanes)
+    values = tl.sort(tl.where((ids >= 0) & (ids < visible), ids, 2147483647))
+    count = tl.sum((values != 2147483647).to(tl.int32), 0)
+    if count < expected:
+        # A full-width torch.topk fallback can choose padding on all--inf ties.
+        # Complete it with distinct visible IDs, rather than inventing inactive
+        # metadata fillers. Finite, length-bounded TopK skips this branch.
+        lo = tl.full((K,), 0, tl.int32)
+        hi = tl.full((K,), K, tl.int32)
+        for _ in range(SEARCH_STEPS):
+            mid = (lo + hi) // 2
+            value = tl.gather(values, tl.minimum(mid, K - 1), 0)
+            right = (mid < K) & (value < lanes)
+            lo = tl.where(right, mid + 1, lo)
+            hi = tl.where(right, hi, mid)
+        present = tl.gather(values, tl.minimum(lo, K - 1), 0) == lanes
+        fillers = tl.sort(tl.where((lanes < expected) & ~present, lanes, 2147483647))
+        filler = tl.gather(fillers, tl.maximum(lanes - count, 0), 0)
+        values = tl.sort(tl.where(lanes < expected, tl.where(lanes < count, values, filler), 2147483647))
+    # Preserve the partial context tail even if NaN scores displaced its +inf
+    # pin. It is the largest logical ID, so replacing the last slot stays sorted.
+    has_last = tl.sum(((lanes < expected) & (values == visible - 1)).to(tl.int32), 0) != 0
+    values = tl.where((expected > 0) & ~has_last & (lanes == expected - 1), visible - 1, values)
+    valid = lanes < expected
+    tl.store(candidates + row * K + lanes, tl.where(valid, values, -1))
+    tl.debug_barrier()
+    tl.store(flags + row * NBLOCKS + values, 1, valid)
+
+
+@triton.jit
 def _candidate_mask_kernel(
     logits,
     flags,
@@ -219,15 +301,73 @@ def _finite_topk_kernel(
     tl.store(output + row * K + columns, tl.where(keep, index, -1), columns < K)
 
 
+@triton.jit
+def _finite_topk_slots_kernel(
+    logits,
+    lengths,
+    output,
+    requests,
+    table,
+    slots,
+    WIDTH: tl.constexpr,
+    STRIDE: tl.constexpr,
+    K: tl.constexpr,
+    TABLE_ROWS: tl.constexpr,
+    TABLE_COLS: tl.constexpr,
+    TABLE_STRIDE: tl.constexpr,
+    ENTRIES: tl.constexpr,
+    LOGICAL: tl.constexpr,
+    TILE: tl.constexpr,
+):
+    row = tl.program_id(0).to(tl.int64)
+    columns = tl.program_id(1) * TILE + tl.arange(0, TILE)
+    length = tl.load(lengths + row)
+    index = tl.load(output + row * K + columns, columns < K, other=-1)
+    value = tl.load(
+        logits + row * STRIDE + index,
+        (columns < K) & (index >= 0) & (index < WIDTH),
+        other=-float("inf"),
+    )
+    keep = (length <= K) | (tl.abs(value) < float("inf"))
+    local = tl.where(keep, index, -1)
+    tl.store(output + row * K + columns, local, columns < K)
+    request = tl.load(requests + row).to(tl.int64)
+    block = local // LOGICAL
+    valid = (
+        (columns < K)
+        & (local >= 0)
+        & (block >= 0)
+        & (block < TABLE_COLS)
+        & (request >= 0)
+        & (request < TABLE_ROWS)
+    )
+    base = tl.load(table + request * TABLE_STRIDE + block, valid, other=0)
+    physical = base * ENTRIES + local % ENTRIES
+    tl.store(
+        slots + row * K + columns,
+        tl.where(valid & (base > 0), physical, -1),
+        columns < K,
+    )
+
+
 def select_candidates(
     logits: torch.Tensor,
     lengths: torch.Tensor,
     block_size: int,
     topk_blocks: int,
+    *, complete: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """``complete`` publishes sorted valid-prefix IDs for the decode source.
+
+    It keeps selected NaN/-inf-score blocks (unlike legacy publication), pins
+    the last visible block and pads only after min(visible_blocks, K). Callers
+    must publish the matching prefix contract together with these tensors.
+    """
     rows, width = logits.shape
     nblocks = triton.cdiv(width, block_size)
     count = min(topk_blocks, nblocks)
+    if complete and count not in (512, 1024, 2048):
+        raise ValueError("Complete decode candidates require K512/K1024/K2048")
     # Keep score rows aligned for topk_v3's vectorized loads, without widening
     # its logical selection domain or reading uninitialized padding.
     score_stride = triton.cdiv(nblocks, 256) * 256
@@ -296,9 +436,14 @@ def select_candidates(
         else:
             candidates.copy_(scores.topk(count, dim=-1, sorted=False).indices)
     flags = torch.empty((rows, nblocks), dtype=torch.uint8, device=logits.device)
-    _candidate_store_flags_kernel[(rows,)](
-        scores, candidates, flags, count, nblocks, score_stride
-    )
+    if complete:
+        _candidate_store_prefix_kernel[(rows,)](
+            candidates, flags, block_lengths, count, nblocks, count.bit_length(), num_warps=8,
+        )
+    else:
+        _candidate_store_flags_kernel[(rows,)](
+            scores, candidates, flags, count, nblocks, score_stride
+        )
     return candidates, flags
 
 
@@ -310,9 +455,16 @@ def mask_candidates(logits: torch.Tensor, flags: torch.Tensor, block_size: int) 
 
 
 def select_tokens(
-    logits: torch.Tensor, lengths: torch.Tensor, topk: int
+    logits: torch.Tensor, lengths: torch.Tensor, topk: int, *, slot_plan=None
 ) -> torch.Tensor:
     rows, width = logits.shape
+    if slot_plan is not None:
+        if (
+            slot_plan.request_ids.numel() != rows
+            or slot_plan.request_ids.device != logits.device
+        ):
+            raise ValueError("Slot mapping does not match selected query rows")
+        slot_plan.slots = None
     output = torch.empty((rows, topk), dtype=torch.int32, device=logits.device)
     selected = None
     if topk == 512:
@@ -329,7 +481,29 @@ def select_tokens(
         )
     # Decode retains all visible indices on short rows, even candidate-mask holes.
     # Native selection must not filter them before this shared publication step.
-    _finite_topk_kernel[(rows, triton.cdiv(topk, 256))](
-        logits, lengths, output, width, logits.stride(0), topk, 256
-    )
+    if slot_plan is None:
+        _finite_topk_kernel[(rows, triton.cdiv(topk, 256))](
+            logits, lengths, output, width, logits.stride(0), topk, 256
+        )
+    else:
+        slots = torch.empty_like(output)
+        table = slot_plan.block_table
+        _finite_topk_slots_kernel[(rows, triton.cdiv(topk, 256))](
+            logits,
+            lengths,
+            output,
+            slot_plan.request_ids,
+            table,
+            slots,
+            width,
+            logits.stride(0),
+            topk,
+            table.shape[0],
+            table.shape[1],
+            table.stride(0),
+            slot_plan.entries,
+            slot_plan.logical_entries,
+            256,
+        )
+        slot_plan.slots = slots
     return output

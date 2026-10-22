@@ -94,12 +94,23 @@ class AttentionV41CudaGraphTest(unittest.TestCase):
             captured_positions = meta.position_ids.clone()
             captured_slots = meta.swa_global_slots.clone()
             captured_decoder_slots = meta.decoder_swa_metadata.swa_global_slots.clone()
-        for starts in ([3, 129], [250, 245]):
+            captured_valid = meta.valid_requests.clone()
+        validity_ptr = meta.valid_requests.data_ptr()
+        self.assertIs(meta.decoder_swa_metadata.valid_requests, meta.valid_requests)
+        original_input_lengths = inputs.input_lengths.clone()
+        for starts, live_requests in (([3, 129], 2), ([250, 245], 1), ([7, 130], 0), ([9, 128], 2)):
             inputs.prefix_lengths_device.copy_(
                 torch.tensor(starts, dtype=torch.int32, device=device)
             )
-            impl.prepare_cuda_graph(inputs)
+            impl.prepare_cuda_graph(inputs, valid_request_count=live_requests)
             graph.replay()
+            self.assertEqual(meta.valid_requests.data_ptr(), validity_ptr)
+            torch.testing.assert_close(
+                captured_valid, torch.arange(2, device=device) < live_requests,
+            )
+            # Selection validity must not shorten the six-query MTP span or
+            # change positions/slots for either live or padded requests.
+            torch.testing.assert_close(inputs.input_lengths, original_input_lengths)
             eager = build_metadata_eager(
                 args,
                 inputs,
