@@ -2749,6 +2749,49 @@ class Qwen4ExpSharedHCStorageTest(TestCase):
 
 @skipUnless(torch.cuda.is_available(), "CUDA page-table validation is required")
 class PLEHostPagePairsTest(TestCase):
+    def test_trusted_prefill_host_table_avoids_gpu_scalar_read(self):
+        from rtp_llm.ops.compute_ops import PyAttentionInputs
+
+        host_table = torch.tensor(
+            [[1, 2], [3, 4]], device="cpu", dtype=torch.int32
+        ).pin_memory()
+        inputs = PyAttentionInputs()
+        inputs.is_prefill = True
+        inputs.kv_cache_block_id = host_table
+        inputs.kv_cache_block_id_device = host_table.to("cuda")
+        rows = torch.tensor([0, 1], dtype=torch.long)
+        pages = torch.tensor([1, 0], dtype=torch.long)
+        original_item = torch.Tensor.item
+
+        def no_gpu_item(tensor, *args, **kwargs):
+            if tensor.is_cuda:
+                raise AssertionError("trusted prefill performed a GPU scalar read")
+            return original_item(tensor, *args, **kwargs)
+
+        with patch.object(torch.Tensor, "item", no_gpu_item):
+            blocks, writable = PLECacheViews._physical_blocks_for_pairs(
+                inputs,
+                PLE_STATE_TAG,
+                rows,
+                pages,
+                5,
+                torch.device("cuda"),
+                trusted_host_table=True,
+            )
+            host_table[0, 1] = 5
+            with self.assertRaisesRegex(RuntimeError, "physical block id exceeds"):
+                PLECacheViews._physical_blocks_for_pairs(
+                    inputs,
+                    PLE_STATE_TAG,
+                    rows,
+                    pages,
+                    5,
+                    torch.device("cuda"),
+                    trusted_host_table=True,
+                )
+        self.assertEqual(blocks.tolist(), [2, 3])
+        self.assertEqual(writable.tolist(), [True, True])
+
     def test_host_staging_with_cuda_as_default_device(self):
         from rtp_llm.models_py.triton_kernels.causal_conv1d.causal_conv1d import (
             prepare_causal_conv1d_metadata,
