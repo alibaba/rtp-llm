@@ -60,7 +60,6 @@ class MtpEmbeddingNormTest(unittest.TestCase):
                     gamma,
                     actual,
                     observed,
-                    M=rows,
                     L=lanes,
                     EPS=1e-6,
                     WRITE_VARIANCE=True,

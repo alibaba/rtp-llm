@@ -5,13 +5,13 @@ import triton
 import triton.language as tl
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["TOTAL"])
 def _inject_kernel(
     hyper_ptr,
     sublayer_ptr,
     gate_ptr,
     output_ptr,
-    TOTAL: tl.constexpr,
+    TOTAL,
     HIDDEN: tl.constexpr,
     BRANCHES: tl.constexpr,
     BLOCK: tl.constexpr,

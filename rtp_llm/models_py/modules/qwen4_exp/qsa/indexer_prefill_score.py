@@ -5,20 +5,20 @@ import triton
 import triton.language as tl
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["S", "N", "QB", "QS", "QH", "KB", "KN"])
 def _prefill_score(
     q,
     k,
     o,
-    S: tl.constexpr,
-    N: tl.constexpr,
+    S,
+    N,
     D: tl.constexpr,
     H: tl.constexpr,
-    QB: tl.constexpr,
-    QS: tl.constexpr,
-    QH: tl.constexpr,
-    KB: tl.constexpr,
-    KN: tl.constexpr,
+    QB,
+    QS,
+    QH,
+    KB,
+    KN,
     BM: tl.constexpr,
     BN: tl.constexpr,
 ):
