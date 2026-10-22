@@ -743,6 +743,58 @@ TEST_F(BlockPoolTest, LayeredPrefillMrSkipsEmptyBuffers) {
     }
 }
 
+// The layered-prefill host suffix is a pinned CPU arena: the SCR template
+// checkpoint has to discard it, exactly like the decode working set.
+TEST_F(BlockPoolTest, LayeredPrefillCheckpointDiscardsHostPages) {
+#if USING_CUDA
+    autil::EnvGuard numa("RTP_LLM_HOST_BLOCK_POOL_NUMA_POLICY", "none");
+    autil::EnvGuard prefault("RTP_LLM_HOST_BLOCK_POOL_PREFAULT_THREADS", "2");
+    autil::EnvGuard placement("RTP_LLM_DSA_PREFILL_LAYOUT", "1");
+    auto            model = makeLayeredPrefillModel();
+    KVCacheConfig   options;
+    options.seq_size_per_block        = 64;
+    options.kernel_seq_size_per_block = 64;
+    options.test_block_num            = 16;
+    options.enable_memory_cache       = true;
+    options.memory_cache_size_mb      = 8;
+    options.enable_remote_cache       = false;
+    RuntimeConfig runtime;
+    runtime.fifo_scheduler_config.max_batch_kv_len = 128;
+    const auto cache_config =
+        CacheConfigCreator::createConfig(model, ParallelismConfig{}, runtime, options, std::nullopt);
+    ASSERT_GT(cache_config.dsa_prefill_staging_tokens, 0u);
+    // The prefill host suffix shares the pool, but there is no decode working set.
+    ASSERT_EQ(cache_config.dsa_mla_resident_tokens, 0u);
+
+    BlockPool pool(BlockPoolConfigHelper::createConfig(cache_config), AllocationType::DEVICE);
+    ASSERT_TRUE(pool.init());
+    void* const  ptr   = pool.getBaseAddress();
+    const size_t bytes = pool.getTotalSizeBytes();
+    // Layers below the split point stay in HBM; the host suffix starts there.
+    const auto layer_base = pool.allLayerCacheBase();
+    ASSERT_GT(cache_config.dsa_prefill_hbm_layers, 0);
+    ASSERT_LT(static_cast<size_t>(cache_config.dsa_prefill_hbm_layers), layer_base.size());
+    ASSERT_FALSE(layer_base.front().is_pinned());
+    const auto host_view = layer_base[static_cast<size_t>(cache_config.dsa_prefill_hbm_layers)];
+    ASSERT_TRUE(host_view.is_pinned());
+
+    std::memset(ptr, 0x5a, bytes);
+    pool.releaseMlaHostCacheForCheckpoint();
+    EXPECT_EQ(pool.getBaseAddress(), ptr);
+    const size_t               page_size = sysconf(_SC_PAGESIZE);
+    std::vector<unsigned char> resident((bytes + page_size - 1) / page_size);
+    ASSERT_EQ(mincore(ptr, bytes, resident.data()), 0);
+    EXPECT_TRUE(std::all_of(resident.begin(), resident.end(), [](auto flags) { return !(flags & 1); }));
+
+    pool.restoreMlaHostCacheAfterCheckpoint();
+    EXPECT_EQ(pool.getBaseAddress(), ptr);
+    EXPECT_TRUE(pool.allLayerCacheBase()[static_cast<size_t>(cache_config.dsa_prefill_hbm_layers)].is_pinned());
+    EXPECT_TRUE(torch::all(host_view.view(torch::kUInt8) == 0).item<bool>());
+#else
+    GTEST_SKIP() << "CUDA host registration required";
+#endif
+}
+
 TEST_F(BlockPoolTest, LayeredPrefillDefaultOnlyAppliesToPrefillRole) {
     // Empty/unset env selects the default, not an explicit opt-in.
     autil::EnvGuard placement("RTP_LLM_DSA_PREFILL_LAYOUT", "");
