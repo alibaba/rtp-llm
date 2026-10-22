@@ -7,6 +7,7 @@ import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
 import io.netty.util.concurrent.DefaultThreadFactory;
+
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.constant.MetricConstant;
@@ -22,14 +23,15 @@ import org.springframework.core.env.Environment;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
-import javax.annotation.PostConstruct;
-import javax.annotation.PreDestroy;
 import java.io.IOException;
 import java.util.Objects;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionHandler;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+
+import javax.annotation.PostConstruct;
+import javax.annotation.PreDestroy;
 
 @Component
 public class FlexlbGrpcServer {
@@ -55,7 +57,7 @@ public class FlexlbGrpcServer {
     private Server server;
     private NioEventLoopGroup bossGroup;
     private volatile ThreadPoolExecutor grpcExecutor;
-    private final RejectedExecutionHandler rejectionHandler;
+    private CountingCallerRunsHandler countingCallerRunsHandler;
 
     public FlexlbGrpcServer(
             FlexlbServiceImpl flexlbServiceImpl,
@@ -76,7 +78,6 @@ public class FlexlbGrpcServer {
                                 .getShutdownQuietPeriodMs());
         this.grpcServerEventLoopGroup = grpcServerEventLoopGroup;
         this.monitor = Objects.requireNonNull(monitor, "monitor");
-        this.rejectionHandler = new ReportingAbortHandler(this.monitor);
         this.grpcServerTimingInterceptor = grpcServerTimingInterceptor;
         this.grpcQosHeaderInterceptor = grpcQosHeaderInterceptor;
     }
@@ -103,6 +104,7 @@ public class FlexlbGrpcServer {
 
         this.bossGroup =
                 new NioEventLoopGroup(1, new DefaultThreadFactory("flexlb-grpc-server-boss"));
+        this.countingCallerRunsHandler = new CountingCallerRunsHandler();
         this.grpcExecutor =
                 new ThreadPoolExecutor(
                         executorConfig.getExecutorCoreSize(),
@@ -111,7 +113,7 @@ public class FlexlbGrpcServer {
                         TimeUnit.SECONDS,
                         new LinkedBlockingQueue<>(executorConfig.getExecutorQueueSize()),
                         new DefaultThreadFactory("flexlb-grpc-executor"),
-                        rejectionHandler);
+                        countingCallerRunsHandler);
 
         // Register monitoring metrics for the gRPC server executor
         registerMetrics();
@@ -125,6 +127,7 @@ public class FlexlbGrpcServer {
                         .executor(grpcExecutor)
                         .addStreamTracerFactory(
                                 grpcServerTimingInterceptor.requestSizeTracerFactory())
+                        .intercept(new GrpcOverloadInterceptor(grpcExecutor))
                         .addService(
                                 ServerInterceptors.intercept(
                                         flexlbServiceImpl,
@@ -157,7 +160,7 @@ public class FlexlbGrpcServer {
                 FlexMetricType.GAUGE,
                 FlexPriorityType.PRECISE);
         monitor.register(
-                MetricConstant.GRPC_SERVER_EXECUTOR_REJECTED_TASKS,
+                MetricConstant.GRPC_SERVER_EXECUTOR_CALLER_RUNS,
                 FlexMetricType.COUNTER,
                 FlexPriorityType.PRECISE);
     }
@@ -174,7 +177,7 @@ public class FlexlbGrpcServer {
         monitor.report(MetricConstant.GRPC_SERVER_EXECUTOR_POOL_SIZE, executor.getPoolSize());
         monitor.report(
                 MetricConstant.GRPC_SERVER_EXECUTOR_MAX_POOL_SIZE, executor.getMaximumPoolSize());
-        monitor.report(MetricConstant.GRPC_SERVER_EXECUTOR_REJECTED_TASKS, 0.0);
+        monitor.report(MetricConstant.GRPC_SERVER_EXECUTOR_CALLER_RUNS, 0.0);
     }
 
     /**
@@ -198,7 +201,8 @@ public class FlexlbGrpcServer {
                 long remaining = quietPeriodNanos - (System.nanoTime() - lastArrival);
                 if (remaining <= 0) {
                     Logger.info(
-                            "Schedule quiet period elapsed; shutting down gRPC and waiting for accepted RPCs");
+                            "Schedule quiet period elapsed; shutting down gRPC and waiting for"
+                                + " accepted RPCs");
                     server.shutdown();
                     break;
                 }
@@ -245,25 +249,25 @@ public class FlexlbGrpcServer {
     }
 
     /**
-     * Reports each task rejected because the pool is saturated or shutting down.
-     * AbortPolicy throws instead of running tasks on the calling Netty event loop.
+     * gRPC executor tasks include message ownership transfers and terminal callbacks.
+     * Throwing here can lose a MessageProducer without closing its retained buffers
+     * (grpc-java 1.65.1 ServerImpl.messagesAvailable). Never discard these tasks.
+     * New RPCs are shed separately by GrpcOverloadInterceptor; already accepted
+     * callbacks apply synchronous backpressure when the bounded queue is full.
      */
-    private static class ReportingAbortHandler implements RejectedExecutionHandler {
-        private final FlexMonitor monitor;
-        private final ThreadPoolExecutor.AbortPolicy delegate =
-                new ThreadPoolExecutor.AbortPolicy();
-
-        ReportingAbortHandler(FlexMonitor monitor) {
-            this.monitor = monitor;
-        }
+    static class CountingCallerRunsHandler implements RejectedExecutionHandler {
+        private final AtomicLong callerRunsCount = new AtomicLong();
 
         @Override
-        public void rejectedExecution(Runnable r, ThreadPoolExecutor executor) {
-            try {
-                monitor.report(MetricConstant.GRPC_SERVER_EXECUTOR_REJECTED_TASKS, 1.0);
-            } finally {
-                delegate.rejectedExecution(r, executor);
-            }
+        public void rejectedExecution(Runnable task, ThreadPoolExecutor executor) {
+            callerRunsCount.incrementAndGet();
+            // Unlike JDK CallerRunsPolicy, do not silently drop terminal callbacks
+            // racing executor shutdown. The server is drained before shutdown.
+            task.run();
+        }
+
+        public AtomicLong getCallerRunsCount() {
+            return callerRunsCount;
         }
     }
 }
