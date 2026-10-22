@@ -68,8 +68,12 @@ def _main_qk_norm_rope_cache(
     variance = tl.sum(tl.where(wide, sum_wide, sum_narrow), 0) / 256
     scale = tl.rsqrt(variance + EPS)
     logical_position = tl.load(LENS + row) - 1
-    physical = tl.load(TABLE + (row // QUERY) * TW + logical_position // 128)
-    valid_page = (physical >= 0) & (physical < PAGES)
+    page = logical_position // 128
+    # The table lookup itself must stay inside the block table; a stale or
+    # truncated LENS value must not turn into an out-of-bounds TABLE read.
+    page_in_table = (page >= 0) & (page < TW)
+    physical = tl.load(TABLE + (row // QUERY) * TW + page, page_in_table, other=0)
+    valid_page = page_in_table & (physical >= 0) & (physical < PAGES)
     frequency = lane
     axis = tl.where(
         (frequency % 3 == 1) & (frequency < H_SECTION * 3),

@@ -5601,6 +5601,16 @@ def cp_delta_rule_dsl_sm120(
     """
     import cuda.bindings.driver as cuda_driver
 
+    # The kernel reads initial_state while writing state; fully aliased inputs
+    # (no index indirection) would race and silently corrupt both.
+    if (
+        initial_state is not None
+        and state is not None
+        and state_indices is None
+        and initial_state.data_ptr() == state.data_ptr()
+    ):
+        raise RuntimeError("initial_state and state must not be the same tensor")
+
     device = q.device
     device_name = get_device_name(device)
     device_capability = get_compute_capability(device)
