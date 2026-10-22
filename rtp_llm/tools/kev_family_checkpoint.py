@@ -567,6 +567,43 @@ def _write_tokenizer(base: Path, output: Path, meta: dict, deps) -> None:
     _tokenizer_ids(output, deps)
 
 
+def _rewrite_prefixed_shards(source: Path, output: Path, wanted: dict, deps) -> tuple[int, dict]:
+    """Copy tensors while adding the ``model.`` prefix RTP's loader expects."""
+    weight_map = {}
+    pending, pending_bytes, total, shard = {}, 0, 0, 0
+    handles = {}
+    try:
+        for key in sorted(wanted):
+            shard_name = wanted[key]
+            handle = handles.get(shard_name)
+            if handle is None:
+                handle = deps.safe_open(
+                    str(source / shard_name), framework="pt", device="cpu"
+                )
+                handles[shard_name] = handle
+            tensor = handle.get_tensor(key).contiguous()
+            new_key = "model." + key
+            size = tensor.numel() * tensor.element_size()
+            if pending_bytes + size > 6 * 1024**3:
+                shard += 1
+                name = f"model-{shard:05d}.safetensors"
+                deps.save_file(pending, str(output / name), metadata={"format": "pt"})
+                weight_map.update({k: name for k in pending})
+                pending, pending_bytes = {}, 0
+            pending[new_key] = tensor
+            pending_bytes += size
+            total += size
+    finally:
+        for handle in handles.values():
+            handle.__exit__(None, None, None)
+    if pending:
+        shard += 1
+        name = f"model-{shard:05d}.safetensors"
+        deps.save_file(pending, str(output / name), metadata={"format": "pt"})
+        weight_map.update({k: name for k in pending})
+    return total, weight_map
+
+
 def _export_full(source: Path, output: Path, meta: dict, deps) -> dict:
     config = _json(source / "config.json")
     if "text_config" in config:
@@ -575,27 +612,48 @@ def _export_full(source: Path, output: Path, meta: dict, deps) -> dict:
     hidden = text_config["hidden_size"]
     _validate_meta(meta, hidden, deps)
     locations = _inventory(source, deps)
-    prefix = _text_prefix(locations)
+    keys = [
+        key
+        for key in locations
+        if key not in EXCLUDED_NAMES and not key.startswith(EXCLUDED_PREFIXES)
+    ]
+    if not keys:
+        raise ValueError("Full-weight checkpoint has no text tensors")
+    if all(key.startswith("model.") for key in keys):
+        prefix, rewrite = "model.", False
+    elif all(
+        key.startswith(("embed_tokens.", "layers.", "norm.")) for key in keys
+    ):
+        # Qwen3.5/3.8 text checkpoints saved through the text model class have
+        # no ``model.`` prefix; RTP's weight loader requires one.
+        prefix, rewrite = "", True
+    else:
+        raise ValueError("Unsupported backbone tensor prefix")
     wanted = _wanted_keys(locations, prefix)
-    if set(wanted) != set(locations):
+    if set(wanted) != set(keys):
         raise ValueError("Full-weight checkpoint contains non-text tensors")
-    index = _json(source / "model.safetensors.index.json")
-    weight_map = index.get("weight_map")
-    if not isinstance(weight_map, dict):
-        raise ValueError("Invalid safetensors index")
-    if set(weight_map) != set(wanted):
-        raise ValueError("Safetensors index does not match the text tensors")
     _write_json(output / "config.json", text_config)
-    for shard in _shard_files(source):
-        destination = output / shard.name
-        try:
-            os.link(shard, destination)
-        except OSError:
-            shutil.copy2(shard, destination)
-    shutil.copyfile(
-        source / "model.safetensors.index.json",
-        output / "model.safetensors.index.json",
-    )
+    if rewrite:
+        total, weight_map = _rewrite_prefixed_shards(source, output, wanted, deps)
+        _write_json(
+            output / "model.safetensors.index.json",
+            {"metadata": {"total_size": total}, "weight_map": weight_map},
+        )
+    else:
+        index = _json(source / "model.safetensors.index.json")
+        weight_map = index.get("weight_map")
+        if not isinstance(weight_map, dict) or set(weight_map) != set(wanted):
+            raise ValueError("Safetensors index does not match the text tensors")
+        for shard in _shard_files(source):
+            destination = output / shard.name
+            try:
+                os.link(shard, destination)
+            except OSError:
+                shutil.copy2(shard, destination)
+        shutil.copyfile(
+            source / "model.safetensors.index.json",
+            output / "model.safetensors.index.json",
+        )
     if not (source / "tokenizer.json").is_file():
         raise ValueError("Full-weight checkpoint is missing tokenizer.json")
     _write_tokenizer(source, output, meta, deps)
@@ -604,42 +662,6 @@ def _export_full(source: Path, output: Path, meta: dict, deps) -> dict:
         "hidden_size": hidden,
         "max_position_embeddings": text_config.get("max_position_embeddings"),
     }
-
-
-def validate_export(path: Path) -> None:
-    """Validate a prepared family export without loading model weights."""
-    manifest = _json(path / "kev_config.json")
-    required = {
-        "format_version": 1,
-        "backbone_dtype": "bfloat16",
-        "head_dtype": "float32",
-        "add_special_tokens": False,
-    }
-    if not isinstance(manifest, dict) or any(
-        manifest.get(key) != value for key, value in required.items()
-    ):
-        raise ValueError("Exported Kev manifest differs from the supported contract")
-    for key in ("hidden_size", "head_dim", "temperature"):
-        value = manifest.get(key)
-        if value is None or (isinstance(value, bool)) or not isinstance(
-            value, (int, float)
-        ):
-            raise ValueError(f"Invalid Kev manifest {key}")
-    if not isinstance(manifest.get("base_model"), str) or not manifest["base_model"]:
-        raise ValueError("Kev manifest needs base_model")
-    if not (path / "config.json").is_file():
-        raise ValueError("Exported checkpoint is missing config.json")
-    config = _json(path / "config.json")
-    if config.get("hidden_size") != manifest["hidden_size"]:
-        raise ValueError("Kev manifest hidden_size differs from the config")
-    if not (path / "kev_head.safetensors").is_file():
-        raise ValueError("Exported checkpoint is missing kev_head.safetensors")
-    ids = _tokenizer_ids(path, _dependencies())
-    if ids != manifest.get("special_token_ids"):
-        raise ValueError("Kev delimiter IDs differ from the manifest")
-    locations = _inventory(path, _dependencies())
-    if not locations:
-        raise ValueError("Exported checkpoint has no tensors")
 
 
 def _limits(info: dict) -> tuple[int, int]:

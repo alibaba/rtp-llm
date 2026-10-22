@@ -226,7 +226,7 @@ class LoraExportTest(unittest.TestCase):
                 family.export(source, root / "out", base=base)
 
 
-def _full_source(path: Path) -> None:
+def _full_source(path: Path, prefix: str = "model.") -> None:
     path.mkdir(parents=True)
     torch.save(
         _meta("Qwen/Qwen3.8-27B", 8, 4, lora=0, weights="full", weights_dtype="bf16"),
@@ -251,14 +251,16 @@ def _full_source(path: Path) -> None:
     )
     generator = torch.Generator().manual_seed(17)
     first = {
-        "model.embed_tokens.weight": torch.randn(
+        prefix + "embed_tokens.weight": torch.randn(
             16, 8, generator=generator, dtype=torch.bfloat16
         ),
-        "model.norm.weight": torch.ones(8, dtype=torch.bfloat16),
+        prefix + "norm.weight": torch.ones(8, dtype=torch.bfloat16),
     }
     second = {
-        "model.layers.0.input_layernorm.weight": torch.ones(8, dtype=torch.bfloat16),
-        "model.layers.0.mlp.gate_proj.weight": torch.randn(
+        prefix + "layers.0.input_layernorm.weight": torch.ones(
+            8, dtype=torch.bfloat16
+        ),
+        prefix + "layers.0.mlp.gate_proj.weight": torch.randn(
             16, 8, generator=generator, dtype=torch.bfloat16
         ),
     }
@@ -294,6 +296,28 @@ class FullExportTest(unittest.TestCase):
                 self.assertEqual(
                     os.stat(output / name).st_ino, os.stat(source / name).st_ino
                 )
+
+    def test_adds_model_prefix_for_text_checkpoint_saved_without_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            _full_source(source, prefix="")
+            output = root / "output"
+            family.export(source, output)
+            index = json.loads(
+                (output / "model.safetensors.index.json").read_text()
+            )
+            self.assertTrue(
+                all(name.startswith("model.") for name in index["weight_map"])
+            )
+            shard = index["weight_map"]["model.embed_tokens.weight"]
+            exported = load_file(str(output / shard))
+            source_tensor = load_file(
+                str(source / "model-00001-of-00002.safetensors")
+            )["embed_tokens.weight"]
+            self.assertTrue(
+                torch.equal(exported["model.embed_tokens.weight"], source_tensor)
+            )
 
     def test_rejects_composite_or_lm_head_full_checkpoint(self):
         with tempfile.TemporaryDirectory() as directory:
