@@ -30,6 +30,7 @@ class ResponseCopyTest {
                   "success": true, "code": 202, "error_message": "detail",
                   "real_master_host": "master:9000", "queue_length": 11,
                   "enqueued_by_master": true, "ready": false,
+                  "requires_generate_input": false,
                   "admission_reject_reason": "RESOURCE_EXHAUSTED",
                   "worker_summary": {
                     "PREFILL": {"discovered": 12, "alive": 13, "maxQueueTokens": 14},
@@ -94,6 +95,8 @@ class ResponseCopyTest {
         Response copy = Response.copyOf(new Response());
         assertNull(copy.getServerStatus());
         assertNull(copy.getWorkerSummary());
+        assertNull(copy.getRequiresGenerateInput());
+        assertFalse(mapper.valueToTree(copy).has("requires_generate_input"));
         assertNull(ServerStatus.copyOf(new ServerStatus()).getDebugInfo());
         assertTrue(copy.isReady());
     }
