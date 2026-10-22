@@ -97,6 +97,30 @@ class VitCacheDirectoryTest {
         return context;
     }
 
+    @Test
+    void vitOnlyCanSelectWithoutAffinityWhileKeepingGroupAndHealthRules() {
+        BalanceContext request = context();
+        request.getRequest().setVitRouteOnly(true);
+        var result = selector.select(request, "one");
+        assertTrue(result.isSuccess());
+        assertEquals(a.getIp(), result.getServerIp());
+        live.remove(a.getIpPort());
+        assertFalse(selector.select(request, "one").isSuccess());
+    }
+
+    @Test
+    void emptyAffinityRemainsInvalidForOrdinarySelection() {
+        assertFalse(selector.select(context(), "one").isSuccess());
+        BalanceContext request = context();
+        request.getRequest().setVitRouteOnly(true);
+        request.getRequest().setCacheAffinityKeys(null);
+        assertTrue(selector.select(request, "one").isSuccess());
+        request.getRequest().setCacheAffinityKeys(List.of(""));
+        assertFalse(selector.select(request, "one").isSuccess());
+        request.getRequest().setCacheAffinityKeys(List.of("x".repeat(4097)));
+        assertFalse(selector.select(request, "one").isSuccess());
+    }
+
     private void snapshot(WorkerStatus worker, String epoch, String... keys) {
         directory.replace(worker, MultimodalCacheStatusPB.newBuilder()
                 .setWorkerInstance(epoch).addAllKeys(List.of(keys)).build());

@@ -59,7 +59,12 @@ public class VitCacheSelector {
 
     public synchronized ServerStatus select(BalanceContext ctx, String group) {
         var keys = ctx.getRequest().getCacheAffinityKeys();
-        if (keys == null || keys.isEmpty() || keys.size() > 256
+        // A ViT-only probe may precede URL affinity metadata (prepared images).
+        // Ordinary selection keeps the existing nonempty-affinity requirement.
+        if (keys == null) {
+            keys = List.of();
+        }
+        if ((!ctx.getRequest().isVitRouteOnly() && keys.isEmpty()) || keys.size() > 256
                 || keys.stream().anyMatch(k -> k == null || k.isEmpty() || k.length() > 4096)) {
             return errorStatus(StrategyErrorType.INVALID_REQUEST);
         }
