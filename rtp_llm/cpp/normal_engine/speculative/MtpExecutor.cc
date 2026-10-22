@@ -730,14 +730,14 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     spec_logits_verify_async_runner_(cuda_graph::graphGetStreamFromPool(true)),
     spec_bookkeeping_runner_(cuda_graph::graphGetStreamFromPool(true)),
     dspark_cache_store_sync_stream_(cuda_graph::graphGetStreamFromPool(true)) {
-    data_type_                  = params.model_config_.data_type;
-    hidden_size_                = params.model_config_.hidden_size * params.model_config_.hc_mult;
-    propose_step_               = propose_params->gen_num_per_circle;
+    data_type_    = params.model_config_.data_type;
+    hidden_size_  = params.model_config_.hidden_size * params.model_config_.hc_mult;
+    propose_step_ = propose_params->gen_num_per_circle;
     RTP_LLM_CHECK_WITH_INFO(
         propose_step_ > 0, "speculative proposal width/gen_num_per_cycle must be positive, got %zu", propose_step_);
-    vocab_size_                 = params.model_config_.vocab_size;
-    draft_vocab_size_           = propose_params->getEngineInitParams().model_config_.vocab_size;
-    is_dspark_                  = propose_params->sp_type == SP_TYPE_DSPARK;
+    vocab_size_                = params.model_config_.vocab_size;
+    draft_vocab_size_          = propose_params->getEngineInitParams().model_config_.vocab_size;
+    is_dspark_                 = propose_params->sp_type == SP_TYPE_DSPARK;
     const auto& draft_config   = propose_params->getEngineInitParams().model_config_;
     const auto& draft_parallel = propose_params->getEngineInitParams().parallelism_config;
     mtp_indexer_share_enabled_ =
@@ -856,10 +856,10 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
          cache_manager,
          std::nullopt,
          params.model_config_.hc_mult});
-    model_init_params.metrics_reporter = metrics_reporter_;
+    model_init_params.metrics_reporter               = metrics_reporter_;
     model_init_params.hidden_state_capture_layer_ids = selectHiddenStateCaptureLayerIds(
         HiddenStateCaptureModelRole::TARGET, role_type_, warm_up_, params.model_config_.hidden_state_capture_layer_ids);
-    model_init_params.hidden_state_capture_dtype     = params.model_config_.hidden_state_capture_dtype;
+    model_init_params.hidden_state_capture_dtype = params.model_config_.hidden_state_capture_dtype;
 #if USING_CUDA || USING_ROCM
     const size_t max_reserved_step = params.sp_config.speculativeReserveStep();
     if (params.hw_kernel_config.enable_cuda_graph && model_init_params.kv_cache_layer_layout.has_value()) {
@@ -939,7 +939,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                              role_type_,
                                              warm_up_,
                                              mtp_params->model_config_.hidden_state_capture_layer_ids);
-        model_params.hidden_state_capture_dtype     = mtp_params->model_config_.hidden_state_capture_dtype;
+        model_params.hidden_state_capture_dtype = mtp_params->model_config_.hidden_state_capture_dtype;
 #if USING_CUDA || USING_ROCM
         if (params.hw_kernel_config.enable_cuda_graph && model_params.kv_cache_layer_layout.has_value()) {
             const auto& topology = model_params.kv_cache_layer_layout->topology();
@@ -2446,6 +2446,16 @@ absl::Status MtpExecutor::dispatchDecodeOutput(const StreamGroups&              
         if (result.ok() && useAsyncDeviceState()) {
             publishSyncMtpDeviceState(
                 stream_groups, speculative_sampler_output, verify_position_ids, draft_prefill_output);
+        } else if (result.ok() && mtp_indexer_share_enabled_) {
+            // Indexer reuse is independent of asynchronous device bookkeeping.
+            const auto& topk = draft_prefill_output.model_output.mtp_indexer_topk;
+            int64_t     row  = 0;
+            for (const auto& stream : stream_groups.allStreams()) {
+                auto state                 = stream->getMtpAsyncDeviceState();
+                state.mtp_indexer_topk_gpu = topk.defined() ? topk.narrow(0, row, 1) : torch::Tensor();
+                stream->setMtpAsyncDeviceState(std::move(state));
+                ++row;
+            }
         }
     }
     return result;

@@ -284,5 +284,5 @@ def fused_prefill_rope_hadamard_qk(
     # Q's Hadamard via cuBLAS bf16 GEMM (Q.view(-1, D) @ H_scaled)
     # This is the only Q output — Q's in-place RoPE state in `q` is the input here.
     H_scaled = _get_h_scaled_bf16(D, q.device)
-    q_out = (q.view(-1, D) @ H_scaled).view(T, H, D)
+    q_out = (q.reshape(-1, D) @ H_scaled).view(T, H, D)
     return q_out, k_out

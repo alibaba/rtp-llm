@@ -17,6 +17,9 @@ from rtp_llm.models_py.model_desc.glm5 import (
 )
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import MlaAttention
+from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.glm53_prefill_workspace import (
+    Glm53PrefillWorkspace,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import FusedMoe
 from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
     FusedMoEQuantConfig,
@@ -548,6 +551,109 @@ class Glm5FmhaDispatchTest(unittest.TestCase):
         self.assertTrue(call["force_reuse_topk_indices"])
         self.assertIsNone(call["kv_cache"])
         self.assertTrue(select_cmp.call_args.kwargs["force_reuse_topk_indices"])
+
+
+class Glm53PrefillWorkspaceTest(unittest.TestCase):
+    def test_scatter_reuses_compact_storage_and_release_allows_new_shape(self):
+        workspace = Glm53PrefillWorkspace()
+        q = workspace.q_transformed(
+            3, 2, 8, dtype=torch.bfloat16, device=torch.device("cpu")
+        )
+        scatter = workspace.scatter_output(3, 2, 4)
+        self.assertEqual(q.data_ptr(), scatter.data_ptr())
+        self.assertTrue(scatter.is_contiguous())
+        scatter.fill_(7)
+        torch.testing.assert_close(
+            q.flatten()[:24], torch.full((24,), 7, dtype=q.dtype)
+        )
+        with self.assertRaises(RuntimeError):
+            workspace.scatter_output(3, 2, 9)
+        with self.assertRaises(RuntimeError):
+            workspace.q_transformed(4, 2, 8, dtype=q.dtype, device=q.device)
+        workspace.release()
+        with self.assertRaises(RuntimeError):
+            workspace.scatter_output(3, 2, 4)
+        fresh = workspace.q_transformed(4, 1, 8, dtype=torch.float32, device=q.device)
+        self.assertEqual(fresh.shape, (4, 1, 8))
+        self.assertEqual(fresh.dtype, torch.float32)
+
+
+class Glm5CmpCallContractTest(unittest.TestCase):
+    def setUp(self):
+        self.cmp = Glm5Cmp(
+            layer_idx=0,
+            config=SimpleNamespace(
+                model_type="glm_5_mtp",
+                moe_layer_index=[0],
+                gen_num_per_cycle=3,
+                attn_config=SimpleNamespace(
+                    use_mla=True,
+                    kernel_tokens_per_block=64,
+                    kv_cache_dtype=KvCacheDataType.FP8,
+                ),
+            ),
+            parallelism_config=SimpleNamespace(tp_size=1, get_attn_tp_size=lambda: 1),
+            self_attn=SimpleNamespace(has_indexer=True),
+            input_layernorm=None,
+            mlp=object(),
+            post_attention_layernorm=None,
+        )
+
+    def inputs(self, rows, requests=None, prefill=False):
+        return SimpleNamespace(
+            weights=object(),
+            fmha_params=SimpleNamespace(
+                expanded_seq_lens=torch.ones(rows, dtype=torch.int32)
+            ),
+            attn_inputs=SimpleNamespace(
+                is_prefill=prefill,
+                is_target_verify=False,
+                kv_cache_kernel_block_id_device=torch.ones(
+                    (requests or rows, 2), dtype=torch.int32
+                ),
+            ),
+        )
+
+    def test_decode_row_boundary_and_prefill_fallback(self):
+        for rows in (0, 1, 256, 257):
+            with self.subTest(rows=rows):
+                reason = self.cmp._unsupported_call_reason(
+                    torch.empty(rows, 6144), self.inputs(rows), object()
+                )
+                self.assertEqual(reason is None, rows in (1, 256))
+        reason = self.cmp._unsupported_call_reason(
+            torch.empty(4, 6144), self.inputs(4, prefill=True), object()
+        )
+        self.assertIn("ordinary prefill", reason)
+
+    def test_reuse_does_not_require_indexer_metadata(self):
+        fmha = self.inputs(2)
+        fmha.fmha_params.expanded_seq_lens = None
+        hidden = torch.empty(2, 6144)
+        self.assertIn(
+            "Indexer", self.cmp._unsupported_call_reason(hidden, fmha, object())
+        )
+        self.assertIsNone(
+            self.cmp._unsupported_reuse_call_reason(hidden, fmha, object())
+        )
+
+    def test_clone_shares_weights_but_resets_events_and_checks_draft_width(self):
+        self.cmp._router_weight = torch.ones(1)
+        self.cmp._events = object()
+        self.cmp._moe_prepack_abi_validated = True
+        clone = self.cmp.clone_for_cuda_graph(mlp=object(), draft_prefill=True)
+        self.assertIs(clone._router_weight, self.cmp._router_weight)
+        self.assertIs(clone.self_attn, self.cmp.self_attn)
+        self.assertIsNone(clone._events)
+        self.assertFalse(clone._moe_prepack_abi_validated)
+        self.assertIsNotNone(self.cmp._events)
+        for rows in (6, 8):
+            reason = clone._unsupported_call_reason(
+                torch.empty(rows, 6144),
+                self.inputs(rows, requests=2, prefill=True),
+                object(),
+            )
+            self.assertEqual(reason is None, rows == 8)
 
 
 if __name__ == "__main__":

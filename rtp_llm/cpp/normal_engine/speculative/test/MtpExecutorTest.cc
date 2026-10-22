@@ -265,6 +265,17 @@ public:
         return output_holder.get();
     }
 
+    void loadMtpIndexerTopk(const torch::Tensor& topk) override {
+        loaded_indexer_seed_ = topk.clone();
+    }
+
+    torch::Tensor snapshotMtpIndexerTopk(int64_t batch_size) override {
+        return indexer_snapshot_.narrow(0, 0, batch_size);
+    }
+
+    torch::Tensor loaded_indexer_seed_;
+    torch::Tensor indexer_snapshot_;
+
     size_t forwardCount() const {
         return forward_count_;
     }
@@ -771,12 +782,12 @@ public:
         test_kv_cache_config.kernel_seq_size_per_block = 2;
 
         auto configure_cache_model = [](ModelConfig& cache_model_config) {
-            cache_model_config.data_type                    = rtp_llm::TYPE_INT8;
-            cache_model_config.attn_config.kv_head_num      = 128;
-            cache_model_config.attn_config.size_per_head    = 256;
+            cache_model_config.data_type                           = rtp_llm::TYPE_INT8;
+            cache_model_config.attn_config.kv_head_num             = 128;
+            cache_model_config.attn_config.size_per_head           = 256;
             cache_model_config.attn_config.tokens_per_block        = 2;
             cache_model_config.attn_config.kernel_tokens_per_block = 2;
-            cache_model_config.attn_config.kv_cache_dtype   = KvCacheDataType::BASE;
+            cache_model_config.attn_config.kv_cache_dtype          = KvCacheDataType::BASE;
         };
         configure_cache_model(score_cache_model_config);
         configure_cache_model(propose_cache_model_config);
@@ -1023,6 +1034,7 @@ public:
 
     void runSingleBatchPrefillScenario(bool simulate_cp_mutation, bool with_cp_hidden_buffers = true);
     void runSingleBatchDecodeScenario(bool with_prefill_only);
+    void runMultiBatchDecodeScenario(int seed_mode);
 
     void setupAlignmentModel(FakeModel*          model,
                              vector<string>&     forward_trace,
@@ -1128,9 +1140,9 @@ TEST_P(MtpCacheStrideTest, ForwardAndPrepareUseSingleGroupStrideOnly) {
         if (with_linear) {
             config.layer_num = single_layer ? 1 : 2;
             config.fromGroupedSpecs({test::makeLinearSpec("linear", 4, TYPE_FP16, 1, 1), full},
-                                    {{0}, {single_layer ? 0 : 1}},
-                                    {CacheGroupType::LINEAR, CacheGroupType::FULL},
-                                    {"linear", "full"});
+                                               {{0}, {single_layer ? 0 : 1}},
+                                               {CacheGroupType::LINEAR, CacheGroupType::FULL},
+                                               {"linear", "full"});
         }
         auto groups = config.topology().groups();
         for (auto& group : groups) {
@@ -2662,7 +2674,7 @@ TEST_F(MtpExecutorTest, testDecodeOneStepSpecLogitsCapReplacesInvalidDraftWithTa
     checkOutput(stream, {0, 1, 2, 1}, {1, 2}, {0.0, 0.0, 1.0, 0.0}, {});
 }
 
-TEST_F(MtpExecutorTest, testMultiBatchDecode) {
+void MtpExecutorTest::runMultiBatchDecodeScenario(int seed_mode) {
     // test multi batch decode not accept & accept all
     // input s1:[0, 1, 2, 3] + [2] s2:[3, 2, 1] + [3]
     // darft s1:[2]+[1,2,3] s2:[3]+[0,2,2]
@@ -2760,8 +2772,36 @@ TEST_F(MtpExecutorTest, testMultiBatchDecode) {
     next_draft_input.last_hidden_states =
         torch::cat({target_output.all_hidden_states.narrow(0, 0, 1), target_output.all_hidden_states.narrow(0, 5, 5)});
 
-    components.fake_draft_model->setInputs({draft_input_1, draft_input_2, draft_input_3, next_draft_input});
-    components.fake_draft_model->setOutputs({draft_output_1, draft_output_2, draft_output_3, next_draft_output});
+    auto*      draft_model    = components.fake_draft_model.get();
+    FakeModel* seed_model     = nullptr;
+    auto       snapshot       = torch::tensor({{11, 12}, {21, 22}}, torch::kInt32).to(torch::kCUDA);
+    auto       previous_seeds = torch::tensor({{31, 32}, {41, 42}}, torch::kInt32).to(torch::kCUDA);
+    if (seed_mode >= 0) {
+        components.executor->mtp_indexer_share_enabled_ = true;
+        components.executor->mtp_indexer_topk_          = 2;
+        draft_model->indexer_snapshot_                  = snapshot;
+        // Request order differs from the previous batch's seed row order.
+        auto state1                 = stream1->getMtpAsyncDeviceState();
+        state1.mtp_indexer_topk_gpu = previous_seeds.narrow(0, 1, 1);
+        stream1->setMtpAsyncDeviceState(state1);
+        if (seed_mode == 1) {
+            auto state2                 = stream2->getMtpAsyncDeviceState();
+            state2.mtp_indexer_topk_gpu = previous_seeds.narrow(0, 0, 1);
+            stream2->setMtpAsyncDeviceState(state2);
+        }
+    }
+    if (seed_mode == 0) {
+        auto seed  = std::make_unique<FakeModel>();
+        seed_model = seed.get();
+        seed->setInputs({draft_input_1});
+        seed->setOutputs({draft_output_1});
+        components.executor->seed_decode_draft_model_ = std::move(seed);
+        draft_model->setInputs({draft_input_2, draft_input_3, next_draft_input});
+        draft_model->setOutputs({draft_output_2, draft_output_3, next_draft_output});
+    } else {
+        draft_model->setInputs({draft_input_1, draft_input_2, draft_input_3, next_draft_input});
+        draft_model->setOutputs({draft_output_1, draft_output_2, draft_output_3, next_draft_output});
+    }
 
     components.fake_target_model->setInputs({target_input});
     components.fake_target_model->setOutputs({target_output});
@@ -2837,10 +2877,35 @@ TEST_F(MtpExecutorTest, testMultiBatchDecode) {
     // Verify executor was created successfully
     auto status = components.executor->process({stream1, stream2});
     ASSERT_TRUE(status.ok());
+    if (seed_mode >= 0) {
+        if (seed_mode == 1) {
+            EXPECT_TRUE(torch::equal(draft_model->loaded_indexer_seed_, previous_seeds.flip({0})));
+            EXPECT_EQ(draft_model->forwardCount(), 4);
+        } else {
+            EXPECT_FALSE(draft_model->loaded_indexer_seed_.defined());
+            EXPECT_EQ(seed_model->forwardCount(), 1);
+            EXPECT_EQ(draft_model->forwardCount(), 3);
+        }
+        snapshot.zero_();
+        EXPECT_EQ(toVec<int>(stream1->getMtpAsyncDeviceState().mtp_indexer_topk_gpu.cpu()), (vector<int>{11, 12}));
+        EXPECT_EQ(toVec<int>(stream2->getMtpAsyncDeviceState().mtp_indexer_topk_gpu.cpu()), (vector<int>{21, 22}));
+    }
 
     // check stream result
     checkOutput(stream1, {0, 1, 2, 3, 3}, {3, 1}, {0, 1, 0, 0}, {0.1, 0.11});
     checkOutput(stream2, {3, 2, 1, 3, 0, 2, 2, 1}, {1, 2}, {0.0, 1.0, 0.0, 0.0}, {1.5, 1.55});
+}
+
+TEST_F(MtpExecutorTest, testMultiBatchDecode) {
+    runMultiBatchDecodeScenario(-1);
+}
+
+TEST_F(MtpExecutorTest, testIndexerSeedsFollowRequestOrderAndSnapshotIsIsolated) {
+    runMultiBatchDecodeScenario(1);
+}
+
+TEST_F(MtpExecutorTest, testMissingIndexerSeedUsesSeedGraphOnlyForFirstProposal) {
+    runMultiBatchDecodeScenario(0);
 }
 
 TEST_F(MtpExecutorTest, testDraftModelDecodeExpandsTargetVerifyPositionIds) {

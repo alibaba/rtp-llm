@@ -10,6 +10,7 @@ import torch
 from rtp_llm.cpp.cuda_graph.tests.libtest_cuda_graph_runner import (
     CudaGraphRunner,
     DirtyCudaGraphCaptureError,
+    cuda_graph_warmup_forward_enabled,
 )
 from rtp_llm.models_py.modules.factory.attention.attn_factory import (
     CudaGraphSelectionMode,
@@ -516,6 +517,54 @@ def _build_target_verify_inputs(
 
 
 class TestCudaGraphTaggedCache(unittest.TestCase):
+    def test_graph_phase_flags_are_scoped_to_forward(self):
+        phases = []
+
+        class PhaseModel(TaggedBlockTableModel):
+            def forward(self, inputs, fmha_impl=None):
+                phases.append(
+                    (
+                        cuda_graph_warmup_forward_enabled(),
+                        torch.cuda.is_current_stream_capturing(),
+                    )
+                )
+                return super().forward(inputs, fmha_impl)
+
+        runner = CudaGraphRunner()
+        runner.init_decode(
+            PhaseModel(),
+            HIDDEN_SIZE,
+            TOKENS_PER_BLOCK,
+            KERNEL_BLOCK_TABLE_WIDTH,
+            [2],
+            GROUP_TAGS,
+        )
+        self.assertIn((True, False), phases)
+        self.assertIn((False, True), phases)
+        self.assertNotIn((True, True), phases)
+        self.assertFalse(cuda_graph_warmup_forward_enabled())
+        self.assertFalse(torch.cuda.is_current_stream_capturing())
+
+    def test_warmup_exception_restores_phase_flags(self):
+        class FailingWarmupModel(TaggedBlockTableModel):
+            def forward(self, inputs, fmha_impl=None):
+                if cuda_graph_warmup_forward_enabled():
+                    raise RuntimeError("injected warmup failure")
+                return super().forward(inputs, fmha_impl)
+
+        runner = CudaGraphRunner()
+        with self.assertRaisesRegex(RuntimeError, "injected warmup failure"):
+            runner.init_decode(
+                FailingWarmupModel(),
+                HIDDEN_SIZE,
+                TOKENS_PER_BLOCK,
+                KERNEL_BLOCK_TABLE_WIDTH,
+                [2],
+                GROUP_TAGS,
+            )
+        self.assertFalse(cuda_graph_warmup_forward_enabled())
+        self.assertFalse(torch.cuda.is_current_stream_capturing())
+
     def test_draft_placeholder_map_preserves_eager_graph_contract(self):
         tags = ["unused", "draft", "other"]
         model = DraftBlockTableModel()

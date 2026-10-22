@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import torch
 from torch import nn
@@ -15,6 +15,25 @@ class GeluProjection(nn.Identity):
 
 
 class DenseMLPParallelismTest(unittest.TestCase):
+    def test_fused_activation_passes_supplied_scales_to_down_projection(self):
+        mlp = self.make_mlp(ActivationType.Swiglu, 1)
+        mlp._fuse_silu_quant = True
+        mlp.down_proj = nn.Identity()
+        mlp.down_proj.scale_ue8m0 = True
+        output = torch.ones(1, 2)
+        mlp.down_proj.forward = Mock(return_value=output)
+        quant = torch.zeros(1, 2).to(torch.float8_e4m3fn)
+        scales = torch.ones(1, 1, dtype=torch.int32)
+        with patch(
+            "rtp_llm.models_py.modules.hybrid.dense_mlp.silu_and_mul_per_token_group_fp8_quant_dense_packed_fwd",
+            return_value=(quant, scales),
+            create=True,
+        ):
+            self.assertIs(mlp(torch.ones(1, 4)), output)
+        args, kwargs = mlp.down_proj.forward.call_args
+        self.assertIs(args[0], quant)
+        self.assertIs(kwargs["input_scales"], scales)
+
     def make_mlp(self, activation, tp_size):
         # Exercise the actual forward with CPU projections: only the collective
         # is mocked, so no process group or GPU is needed for this contract.

@@ -68,10 +68,6 @@ void pushCudaGraphWarmupForwardFlag();
 void popCudaGraphWarmupForwardFlag();
 bool cudaGraphWarmupForwardEnabled();
 
-void pushCudaGraphCaptureForwardFlag();
-void popCudaGraphCaptureForwardFlag();
-bool cudaGraphCaptureForwardEnabled();
-
 // ===================================================================
 // Profiling
 // ===================================================================

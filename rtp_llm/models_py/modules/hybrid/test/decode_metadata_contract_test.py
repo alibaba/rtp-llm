@@ -3,14 +3,92 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import torch
+
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_impl import (
     SparseMlaFp8Op,
     SparseMlaImpl,
 )
-from rtp_llm.ops.compute_ops import rtp_llm_ops
+from rtp_llm.ops.compute_ops import PyAttentionInputs, rtp_llm_ops
 
 
 class DecodeMetadataContractTest(unittest.TestCase):
+    def test_multi_token_ragged_metadata_and_graph_replay(self):
+        for batch in (3, 257):
+            with self.subTest(batch=batch):
+                query = torch.tensor(
+                    [1 + row % 3 for row in range(batch)], dtype=torch.int32
+                )
+                prefix = torch.tensor(
+                    [63 + row % 3 for row in range(batch)], dtype=torch.int32
+                )
+                table = torch.arange(1, batch * 3 + 1, dtype=torch.int32).reshape(
+                    batch, 3
+                )
+                inputs = PyAttentionInputs()
+                inputs.is_prefill = True
+                inputs.is_target_verify = True
+                inputs.input_lengths = query
+                inputs.prefix_lengths = prefix
+                inputs.sequence_lengths = torch.empty(0, dtype=torch.int32)
+                inputs.kv_cache_block_id = table
+                inputs.kv_cache_kernel_block_id = table
+                params = rtp_llm_ops.SparseMlaParams()
+                params.fill_params(inputs, 64)
+                query_d, prefix_d, table_d = query.cuda(), prefix.cuda(), table.cuda()
+
+                def fill():
+                    params.fill_multi_token_decode_cuda_graph_params(
+                        query_d, prefix_d, table_d, 64
+                    )
+
+                fill()
+                pointers = (
+                    params.positions_d.data_ptr(),
+                    params.slot_mapping.data_ptr(),
+                )
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    fill()
+                for step in (0, 1):
+                    prefix_d.copy_(prefix + step)
+                    graph.replay()
+                    positions, slots, batches, ks, ke = [], [], [], [], []
+                    qptr, kptr, pageptr, pages = [0], [0], [0], []
+                    for row, (q, p) in enumerate(
+                        zip(query.tolist(), (prefix + step).tolist())
+                    ):
+                        positions.extend(range(p, p + q))
+                        batches.extend([row] * q)
+                        slots.extend(
+                            int(table[row, pos // 64]) * 64 + pos % 64
+                            for pos in range(p, p + q)
+                        )
+                        ks.extend([kptr[-1]] * q)
+                        ke.extend(kptr[-1] + pos + 1 for pos in range(p, p + q))
+                        qptr.append(qptr[-1] + q)
+                        kptr.append(kptr[-1] + p + q)
+                        count = (p + q + 63) // 64
+                        pageptr.append(pageptr[-1] + count)
+                        pages.extend(table[row, :count].tolist())
+                    for tensor, expected in (
+                        (params.positions_d, positions),
+                        (params.slot_mapping, slots),
+                        (params.batch_indice_d, batches),
+                        (params.expanded_seq_lens, [p + 1 for p in positions]),
+                        (params.ks, ks),
+                        (params.ke, ke),
+                        (params.topk_indices_offset, [0] * len(positions)),
+                        (params.qo_indptr_d, qptr),
+                        (params.prefill_ragged_kv_len_indptr_d, kptr),
+                        (params.decode_page_indptr_d, pageptr),
+                        (params.page_indice_d[: len(pages)], pages),
+                    ):
+                        self.assertEqual(tensor.cpu().tolist(), expected)
+                    self.assertEqual(
+                        (params.positions_d.data_ptr(), params.slot_mapping.data_ptr()),
+                        pointers,
+                    )
+
     def test_graph_prepare_passes_device_lengths_for_each_multi_token_phase(self):
         for phase in ("verify", "draft_extend", "prefill"):
             with self.subTest(phase=phase):

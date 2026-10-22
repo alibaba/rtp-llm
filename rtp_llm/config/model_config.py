@@ -1076,4 +1076,3 @@ def build_model_config(
     # JSON model overrides are applied first; the dedicated operational switch
     # is the final override when it was explicitly supplied by CLI or env.
     _apply_model_override_args(model_config, model_args)
-

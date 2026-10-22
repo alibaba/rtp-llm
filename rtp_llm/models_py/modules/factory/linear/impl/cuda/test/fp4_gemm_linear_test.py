@@ -77,6 +77,11 @@ class CudaFp4GEMMLinearTest(unittest.TestCase):
 
     def setUp(self):
         """Setup test environment"""
+        backend_env = mock.patch.dict(
+            os.environ, {"RTP_LLM_FP4_GEMM_BACKEND": "cute-dsl"}
+        )
+        backend_env.start()
+        self.addCleanup(backend_env.stop)
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         if self.device == "cpu":
             self.skipTest("FP4 tests require CUDA")
@@ -326,6 +331,7 @@ class CudaFp4GEMMLinearTest(unittest.TestCase):
 
     def test_fp4_vs_bf16_accuracy(self):
         """Test accuracy comparison between FP4 linear and BF16 linear"""
+        self._test_fp4_vs_bf16_accuracy_backend("cute-dsl")
         # Create FP4 linear layer, cutlass backend
         self._test_fp4_vs_bf16_accuracy_backend("cutlass")
         self._test_fp4_vs_bf16_accuracy_backend("trtllm")
@@ -375,6 +381,7 @@ class CudaFp4GEMMLinearTest(unittest.TestCase):
 
     def test_fp4_vs_fp16_accuracy(self):
         """Test accuracy comparison between FP4 linear and BF16 linear"""
+        self._test_fp4_vs_fp16_accuracy_backend("cute-dsl")
         self._test_fp4_vs_fp16_accuracy_backend("cutlass")
         self._test_fp4_vs_fp16_accuracy_backend("sgl_cutlass")
 

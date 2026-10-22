@@ -1,4 +1,12 @@
+load("//rtp_llm/test/utils:cuda13_sm100_test.bzl", "cuda13_sm100_py_test")
+
 test_envs = {}
+
+cuda13_sm100_py_test(
+    name = "stable_topk_test",
+    srcs = ["stable_topk_test.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+)
 
 py_test(
     name = "dense_mlp_parallelism_test",

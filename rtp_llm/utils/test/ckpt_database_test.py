@@ -1,7 +1,10 @@
+import json
 import os
+import sys
 import tempfile
+import types
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import torch
 from safetensors.torch import save_file
@@ -289,6 +292,109 @@ class HandleRecyclingTest(unittest.TestCase):
         # No layer number anywhere means recycling stays off for that checkpoint.
         for name in ("model.embed_tokens.weight", "model.sublayers.3.w"):
             self.assertIsNone(_LAYER_RE.search(name), name)
+
+
+class FastSafeTensorsIteratorTest(unittest.TestCase):
+    def setUp(self):
+        self.database = CkptDatabase(None)
+        self.database.pretrain_file_list = [
+            types.SimpleNamespace(file_name=name)
+            for name in ("b.safetensors", "a.safetensors")
+        ]
+        self.loader = Mock()
+        self.tensor = torch.ones(2)
+        self.loader.iterate_weights.side_effect = lambda: iter(
+            [("weight", self.tensor)]
+        )
+        self.module = types.ModuleType("fastsafetensors")
+        self.module.AutoLoader = Mock(return_value=self.loader)
+        self.module.SingleGroup = Mock(return_value=Mock(rank=Mock(return_value=2)))
+        for patcher in (
+            patch.dict(sys.modules, {"fastsafetensors": self.module}),
+            patch("torch.distributed.is_initialized", return_value=False),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_auto_loader_arguments_and_close(self):
+        predicate = lambda name: name == "weight"
+        stacked = {"expert": "stacked"}
+        result = list(
+            self.database.fastsafetensors_weights_iterator(
+                "cuda", True, stacked, predicate
+            )
+        )
+        self.module.AutoLoader.assert_called_once_with(
+            self.module.SingleGroup.return_value,
+            ["a.safetensors", "b.safetensors"],
+            device="cuda:2",
+            local_copyout_filter=predicate,
+            stacked_moe_tensors=stacked,
+        )
+        self.assertIs(result[0][1], self.tensor)
+        self.loader.close.assert_called_once_with()
+
+    def test_old_wheel_falls_back_to_legacy_loader(self):
+        del self.module.AutoLoader
+        with patch.object(
+            self.database,
+            "_legacy_fastsafetensors_weights_iterator",
+            return_value=iter([]),
+        ) as legacy:
+            self.assertEqual(
+                list(
+                    self.database.fastsafetensors_weights_iterator(
+                        "cpu", False, {"a": "b"}
+                    )
+                ),
+                [],
+            )
+        legacy.assert_called_once_with("cpu", False, {"a": "b"})
+
+    def test_iteration_error_survives_close_error(self):
+        failure = ValueError("read failed")
+        self.loader.iterate_weights.side_effect = failure
+        self.loader.close.side_effect = RuntimeError("close failed")
+        with self.assertRaises(ValueError) as raised:
+            list(self.database.fastsafetensors_weights_iterator("cpu", False))
+        self.assertIs(raised.exception, failure)
+        self.loader.close.assert_called_once_with()
+
+    def test_early_generator_close_releases_loader(self):
+        iterator = self.database.fastsafetensors_weights_iterator("cpu", False)
+        next(iterator)
+        iterator.close()
+        self.loader.close.assert_called_once_with()
+
+    def test_two_shard_index_preserves_dtype_and_ft_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            save_file(
+                {"first": torch.ones(2, dtype=torch.float32)},
+                os.path.join(directory, "a.safetensors"),
+            )
+            save_file(
+                {"second": torch.ones(3, dtype=torch.bfloat16)},
+                os.path.join(directory, "b.safetensors"),
+            )
+            with open(
+                os.path.join(directory, "model.safetensors.index.json"), "w"
+            ) as stream:
+                json.dump(
+                    {
+                        "weight_map": {
+                            "first": "a.safetensors",
+                            "second": "b.safetensors",
+                        },
+                        "is_ft_style_weight": True,
+                        "__env__params__": {"TP_SIZE": 2},
+                    },
+                    stream,
+                )
+            database = CkptDatabase(directory)
+            self.assertEqual(database.get_tensor_type("first"), torch.float32)
+            self.assertEqual(database.get_tensor_type("second"), torch.bfloat16)
+            self.assertTrue(database._is_ft_style)
+            self.assertEqual(database._ft_weight_params, {"TP_SIZE": 2})
 
 
 if __name__ == "__main__":

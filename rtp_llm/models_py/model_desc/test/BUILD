@@ -159,3 +159,9 @@ py_test(
     srcs = ["glm5_fmha_dispatch_test.py"],
     deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:modules"],
 )
+
+py_test(
+    name = "glm5_mtp_indexer_state_test",
+    srcs = ["glm5_mtp_indexer_state_test.py"],
+    deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:modules"],
+)

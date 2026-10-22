@@ -1,12 +1,19 @@
 """CPU coverage for loading per-expert FP8 checkpoint weights and scales."""
 
+import json
+import tempfile
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
 
 import torch
 
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.model_loader.ffn_weight import MoeAtomicWeight, MoeConfig
 from rtp_llm.model_loader.load_config import LoadConfig
+from rtp_llm.model_loader.offline_modelopt_fp4_quant_weight import (
+    is_offline_mega_moe_fp4_ckpt,
+)
 from rtp_llm.model_loader.per_block_fp8_quant_weight import PerBlockFp8Weight
 from rtp_llm.model_loader.tensor_source import TensorSource
 from rtp_llm.utils.model_weight import CkptWeightInfo, W
@@ -27,6 +34,27 @@ class InMemoryTensorSource(TensorSource):
 
 
 class PerBlockFp8MoeWeightTest(unittest.TestCase):
+    def test_fp4_checkpoint_detection_does_not_confuse_fp8_scales(self):
+        prefix = "model.layers.0.mlp.experts.0.gate_proj"
+        for config, suffix, expected in (
+            ({"quantization_config": {"expert_dtype": "fp4"}}, ".scale", True),
+            ({"quantization_config": {"expert_dtype": "fp8"}}, ".scale", False),
+            ({}, ".weight_scale", True),
+            ({}, ".weight_scale_inv", False),
+            (None, ".weight_scale", True),
+            (None, ".scale", False),
+        ):
+            with self.subTest(
+                config=config, suffix=suffix
+            ), tempfile.TemporaryDirectory() as directory:
+                Path(directory, "config.json").write_text(
+                    json.dumps(config) if config is not None else "invalid json"
+                )
+                database = SimpleNamespace(
+                    path=directory, get_pretrain_tensor_names=lambda: [prefix + suffix]
+                )
+                self.assertEqual(is_offline_mega_moe_fp4_ckpt(database), expected)
+
     def _check_checkpoint_load(self, weight_name, scale_fmt, suffix, scale_dtype):
         layer_id = 3
         # Exercise expert remapping as well as the gate/up projection ordering.

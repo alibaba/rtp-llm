@@ -254,13 +254,14 @@ def fused_strided_rmsnorm(
     assert weight.dim() == 1 and weight.shape[0] == x.shape[1]
     T, H = x.shape
 
+    if T == 0:
+        return torch.empty((T, H), dtype=x.dtype, device=x.device)
+
     block_n = triton.next_power_of_2(H)
     if x.dtype != torch.bfloat16 or block_n > MAX_INREG_H or x.stride(-1) != 1:
         return _baseline_strided_rmsnorm(x, weight, eps)
 
     bf16_out = torch.empty((T, H), dtype=torch.bfloat16, device=x.device)
-    if T == 0:
-        return bf16_out
 
     finfo = torch.finfo(torch.float8_e4m3fn)
     fp8_max = finfo.max
@@ -313,7 +314,7 @@ def fused_strided_rmsnorm_per_token_fp8_quant_with_bf16_output(
         assert (H // group_size) % 4 == 0, "UE8M0 requires num_groups divisible by 4"
 
     block_n = triton.next_power_of_2(H)
-    if block_n > MAX_INREG_H or x.stride(-1) != 1:
+    if T > 0 and (block_n > MAX_INREG_H or x.stride(-1) != 1):
         return _baseline_strided_rmsnorm_fp8_quant_with_bf16_output(
             x, weight, eps, group_size, scale_ue8m0
         )

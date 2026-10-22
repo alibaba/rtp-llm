@@ -1,6 +1,20 @@
+load("//rtp_llm/test/utils:cuda13_sm100_test.bzl", "cuda13_sm100_py_test")
+
 py_test_deps = [
     "//rtp_llm/models_py/standalone:py_standalone_testlib",
 ]
+
+cuda13_sm100_py_test(
+    name = "glm5_fused_quant_test",
+    srcs = ["glm5_fused_quant_test.py"],
+    deps = py_test_deps,
+)
+
+cuda13_sm100_py_test(
+    name = "glm5_indexer_fusion_test",
+    srcs = ["glm5_indexer_fusion_test.py"],
+    deps = py_test_deps,
+)
 
 py_test (
     name = "norm_test",

@@ -1,5 +1,10 @@
 load("@arch_config//:arch_select.bzl", "requirement")
 
+exports_files(
+    ["modules/factory/linear/fixed_m_linear.py"],
+    visibility = ["//rtp_llm/models_py/modules/factory/linear/test:__pkg__"],
+)
+
 py_library(
     name = "utils",
     srcs = glob([

@@ -23,31 +23,14 @@ using namespace torch_ext;
 namespace rtp_llm {
 
 namespace {
-class ScopedCudaGraphForwardFlag {
+class ScopedCudaGraphWarmupForwardFlag {
 public:
-    enum class Type {
-        Warmup,
-        Capture,
-    };
-
-    explicit ScopedCudaGraphForwardFlag(Type type): type_(type) {
-        if (type_ == Type::Warmup) {
-            pushCudaGraphWarmupForwardFlag();
-        } else {
-            pushCudaGraphCaptureForwardFlag();
-        }
+    ScopedCudaGraphWarmupForwardFlag() {
+        pushCudaGraphWarmupForwardFlag();
     }
-
-    ~ScopedCudaGraphForwardFlag() {
-        if (type_ == Type::Warmup) {
-            popCudaGraphWarmupForwardFlag();
-        } else {
-            popCudaGraphCaptureForwardFlag();
-        }
+    ~ScopedCudaGraphWarmupForwardFlag() {
+        popCudaGraphWarmupForwardFlag();
     }
-
-private:
-    Type type_;
 };
 int64_t expandedCaptureBlockTableWidth(const GroupBase& group, size_t physical) {
     const size_t expansion =
@@ -1956,8 +1939,8 @@ void CudaGraphRunner::initCapture() {
             // Distributed model implementations may rendezvous during this
             // eager warmup forward. The flag is scoped so real graph capture
             // and replay never contain that synchronization.
-            ScopedEnvFlag              cuda_graph_warmup("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD", "1");
-            ScopedCudaGraphForwardFlag forward_phase(ScopedCudaGraphForwardFlag::Type::Warmup);
+            ScopedEnvFlag                    cuda_graph_warmup("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD", "1");
+            ScopedCudaGraphWarmupForwardFlag forward_phase;
             initial_outputs = py_forward_method_(capture_mem_hold_.py_model_inputs_, attn_pyobj).cast<PyModelOutputs>();
         } catch (const py::error_already_set& e) {
             RTP_LLM_LOG_ERROR("initCapture forward for output datatype failed with Python exception: %s", e.what());
@@ -2042,8 +2025,8 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
         // Run the same backend that will be captured for this exact key.  In
         // particular, static torch.compile/Triton specializations must be
         // materialized before graphCaptureBegin rather than during capture.
-        ScopedEnvFlag              cuda_graph_warmup("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD", "1");
-        ScopedCudaGraphForwardFlag forward_phase(ScopedCudaGraphForwardFlag::Type::Warmup);
+        ScopedEnvFlag                    cuda_graph_warmup("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD", "1");
+        ScopedCudaGraphWarmupForwardFlag forward_phase;
         py_forward_method_(inputs, attn_pyobj);
         py_forward_method_(inputs, attn_pyobj);
     } catch (const py::error_already_set& e) {
@@ -2056,10 +2039,9 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
         // sync before capture
         cuda_graph::graphDeviceSynchronize();
 
-        ScopedCudaGraphForwardFlag capture_phase(ScopedCudaGraphForwardFlag::Type::Capture);
-        CudaGraphStreamLife        stream_life(capture_stream_);
-        auto&                      graph               = graph_instances_[key].graph_;
-        std::string                output_dot_filename = "";
+        CudaGraphStreamLife stream_life(capture_stream_);
+        auto&               graph               = graph_instances_[key].graph_;
+        std::string         output_dot_filename = "";
         if (enable_cuda_graph_debug_mode_) {
             graph.enable_debug_mode();
             std::string key_type_str = std::string(key_type);
