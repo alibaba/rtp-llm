@@ -106,4 +106,9 @@ public class WorkerHost {
         return new WorkerHost(ip, port);
     }
 
+    /** Create a discovered host while preserving the site reported by the discovery service. */
+    public static WorkerHost of(String ip, int port, String site) {
+        return new WorkerHost(ip, port, site);
+    }
+
 }
