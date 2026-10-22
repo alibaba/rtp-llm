@@ -124,12 +124,16 @@ class MultimodalEmbeddingTest(TestCase):
         feature = torch.tensor([[1.0, 2.0], [3.0, 4.0]], dtype=torch.half)
         locations = torch.tensor([-1], dtype=torch.int32)
 
-        output = MultimodalEmbeddingInjector()(embeddings.clone(), [feature], locations)
+        with self.assertRaisesRegex(ValueError, "loc must be non-negative"):
+            MultimodalEmbeddingInjector()(embeddings.clone(), [feature], locations)
+
+        injector = MultimodalEmbeddingInjector(allow_reused_prefix=True)
+        output = injector(embeddings.clone(), [feature], locations)
         expected = embeddings.clone()
         expected[0] = feature[1]
         torch.testing.assert_close(output, expected)
 
-        output = MultimodalEmbeddingInjector()(
+        output = injector(
             embeddings.clone(), [feature], torch.tensor([-2], dtype=torch.int32)
         )
         torch.testing.assert_close(output, embeddings)

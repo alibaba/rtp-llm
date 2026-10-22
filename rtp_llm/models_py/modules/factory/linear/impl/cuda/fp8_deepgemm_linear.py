@@ -293,12 +293,7 @@ class CudaFp8DeepGEMMLinear(LinearBase):
             disable_ue8m0_cast=not self.scale_ue8m0,
         )
         if apply_bias and self.bias is not None:
-            if output.is_cuda:
-                from rtp_llm.ops.compute_ops import rtp_llm_ops
-
-                rtp_llm_ops.fused_bias_add(output, self.bias.to(output.dtype))
-            else:
-                output.add_(self.bias.to(output.dtype))
+            output.add_(self.bias.to(output.dtype))
         return output
 
     def forward(

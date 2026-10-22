@@ -282,6 +282,7 @@ class TRTLLMFMHAv2PrefillOp:
     """Non-paged prefill op via TRT-LLM FMHA v2 packed or contiguous QKV."""
 
     def __init__(self, attn_configs: AttentionConfigs) -> None:
+        self.enable_sm120_bert_specialization = False
         self.attn_configs = attn_configs
         self.head_dim = attn_configs.size_per_head
         self.head_num = attn_configs.head_num
@@ -378,7 +379,8 @@ class TRTLLMFMHAv2PrefillOp:
             input_layout = "CONTIGUOUS_Q_KV"
 
         use_sm120_bert_specialization = (
-            self.attention_type == "mha"
+            self.enable_sm120_bert_specialization
+            and self.attention_type == "mha"
             and is_sm120(qkv.device)
             and compute_dtype == torch.bfloat16
             and self.head_dim == 64

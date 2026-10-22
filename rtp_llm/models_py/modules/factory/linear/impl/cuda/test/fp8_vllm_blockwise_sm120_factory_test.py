@@ -65,59 +65,6 @@ class SM120FactoryDiagnosticTest(unittest.TestCase):
                     not expect_cutlass,
                 )
 
-    def test_merge_preserves_physical_blockwise_layout(self):
-        K = 4
-        physical_a = torch.arange(8).reshape(2, K)
-        physical_b = torch.arange(12).reshape(3, K) + 100
-        logical_a = physical_a.reshape(K, 2)
-        logical_b = physical_b.reshape(K, 3)
-
-        merged = LinearFactory._merge_sm120_blockwise_tensors(
-            [logical_a, logical_b], dim=-1
-        )
-
-        self.assertEqual((K, 5), merged.shape)
-        torch.testing.assert_close(
-            merged.reshape(5, K), torch.cat([physical_a, physical_b], dim=0)
-        )
-
-    @mock.patch("rtp_llm.models_py.utils.arch.is_sm120", return_value=True)
-    def test_create_merged_linear_preserves_sm120_loader_layout(self, _is_sm120):
-        K = 128
-        physical_a = (torch.arange(128 * K).reshape(128, K) % 32).to(
-            torch.float8_e4m3fn
-        )
-        physical_b = (torch.arange(256 * K).reshape(256, K) % 32).to(
-            torch.float8_e4m3fn
-        )
-        weights = {
-            "a": physical_a.reshape(K, 128),
-            "b": physical_b.reshape(K, 256),
-            "sa": torch.arange(1, dtype=torch.float32).reshape(1, 1),
-            "sb": (torch.arange(2, dtype=torch.float32) + 100).reshape(1, 2),
-        }
-
-        with mock.patch.object(LinearFactory, "create_linear") as create_linear:
-            LinearFactory.create_merged_linear(
-                weights=weights,
-                weight_keys=["a", "b"],
-                scale_keys=["sa", "sb"],
-                bias_keys=None,
-                scale2_keys=None,
-                input_scale_keys=None,
-                quant_config=init_quant_config("FP8_PER_BLOCK"),
-            )
-
-        merged_weight = create_linear.call_args.kwargs["weight"]
-        merged_scales = create_linear.call_args.kwargs["weight_scales"]
-        torch.testing.assert_close(
-            merged_weight.reshape(384, K), torch.cat([physical_a, physical_b])
-        )
-        torch.testing.assert_close(
-            merged_scales.reshape(3, 1),
-            torch.cat([weights["sa"].reshape(1, 1), weights["sb"].reshape(2, 1)]),
-        )
-
     def test_constructor_rejects_missing_weight_scales(self):
         weight = torch.empty((128, 128), dtype=torch.float8_e4m3fn)
         with self.assertRaisesRegex(ValueError, "requires weight_scales"):

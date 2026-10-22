@@ -6,7 +6,7 @@ from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 
 class EmbeddingLookupOpTest(TestCase):
-    """CUDA contract tests for the shared embedding bindings."""
+    """BERT validation and valid-input regressions for embedding bindings."""
 
     def setUp(self) -> None:
         if not torch.cuda.is_available():
@@ -41,7 +41,28 @@ class EmbeddingLookupOpTest(TestCase):
         )
         return output
 
-    def test_generic_embedding_rejects_malformed_mask(self):
+    def _bert_embedding(self, mask=None, *, input_dtype=torch.int32, output_dtype=None):
+        input_ids = torch.tensor([1, 2, 3, 4], dtype=input_dtype, device=self.device)
+        metadata_ids = torch.zeros(4, dtype=torch.int32, device=self.device)
+        output = torch.empty(
+            (4, 32),
+            dtype=self.weight.dtype if output_dtype is None else output_dtype,
+            device=self.device,
+        )
+        rtp_llm_ops.embedding_bert(
+            output,
+            input_ids,
+            self.weight,
+            metadata_ids,
+            self.weight,
+            metadata_ids,
+            self.weight,
+            1.0,
+            mask,
+        )
+        return output
+
+    def test_bert_embedding_rejects_malformed_mask(self):
         cases = (
             (
                 "short_mask",
@@ -58,16 +79,17 @@ class EmbeddingLookupOpTest(TestCase):
         for name, kwargs, message in cases:
             with self.subTest(name=name):
                 with self.assertRaisesRegex(RuntimeError, message):
-                    self._generic_embedding(**kwargs)
+                    self._bert_embedding(**kwargs)
 
     def test_generic_embedding_ignores_position_and_token_type_ids(self):
         expected = self._generic_embedding()
-        position_ids = torch.zeros((2, 2), dtype=torch.int64)
-        token_type_ids = torch.zeros(1, dtype=torch.bool)
+        position_ids = torch.zeros(4, dtype=torch.int32, device=self.device)
+        token_type_ids = torch.ones(4, dtype=torch.int32, device=self.device)
 
         actual = self._generic_embedding(position_ids, token_type_ids)
 
         torch.testing.assert_close(actual, expected)
+        torch.testing.assert_close(actual, self.weight[[1, 2, 3, 4]])
 
     def test_generic_embedding_applies_exact_mask(self):
         mask = torch.tensor([1, 0, 1, 0], dtype=torch.int32, device=self.device)
@@ -77,15 +99,15 @@ class EmbeddingLookupOpTest(TestCase):
         torch.testing.assert_close(actual[[0, 2]], self.weight[[1, 3]])
         torch.testing.assert_close(actual[[1, 3]], torch.zeros_like(actual[[1, 3]]))
 
-    def test_generic_embedding_rejects_int64_input_ids(self):
+    def test_bert_embedding_rejects_int64_input_ids(self):
         with self.assertRaisesRegex(RuntimeError, "input_ids must be int32"):
-            self._generic_embedding(input_dtype=torch.int64)
+            self._bert_embedding(input_dtype=torch.int64)
 
-    def test_generic_embedding_rejects_output_dtype_mismatch(self):
+    def test_bert_embedding_rejects_output_dtype_mismatch(self):
         with self.assertRaisesRegex(
             RuntimeError, "output dtype must match embedding weight dtype"
         ):
-            self._generic_embedding(output_dtype=torch.float16)
+            self._bert_embedding(output_dtype=torch.float16)
 
     def test_embedding_bert_bf16_multiwarp_rows_remain_distinct(self):
         token_count = 65

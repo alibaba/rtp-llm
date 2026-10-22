@@ -2469,8 +2469,47 @@ TEST_F(NormalBatchStreamProcessorTest, testFullyReusedMultimodalPrefixProducesPl
     auto         gathered = processor.gatherModelInput(stream_groups, holder);
     ASSERT_TRUE(gathered.ok()) << gathered.status();
     EXPECT_EQ(vector<int>({2}), toVec<int>(gathered->combo_tokens));
+    EXPECT_EQ(toVec<int>(gathered->text_tokens_mask), (vector<int>{1}));
+    EXPECT_EQ(gathered->mm_features_locs.numel(), 0);
+    EXPECT_EQ(gathered->mm_features_spans.size(0), 0);
+    EXPECT_FALSE(gathered->multimodal_features.has_value());
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testVisionBertFullyReusedPrefixClearsMultimodalInputs) {
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len                   = 2048;
+    model_config.vocab_size                    = 2048;
+    model_config.num_layers                    = 2;
+    model_config.model_type                    = "vision_bert";
+    model_config.mm_model_config.is_multimodal = true;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    initFullCacheConfig(cache_config, model_config.num_layers);
+    RuntimeConfig              runtime_config;
+    NormalBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+
+    auto query                 = make_shared<GenerateInput>();
+    query->input_ids           = hostIntBuffer({1, -1, -1, -1, 2});
+    query->generate_config     = make_shared<GenerateConfig>();
+    query->mm_locs             = torch::tensor({1}, torch::kInt32);
+    query->text_tokens_mask    = torch::tensor({1, 0, 0, 0, 1}, torch::kInt32);
+    query->multimodal_features = {torch::rand({3, 10}, torch::kFloat16)};
+    auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+    stream->setIsContextStream(true);
+    stream->setReuseLength(4);
+    stream->generate_status_->status = StreamState::RUNNING;
+
+    StreamGroups stream_groups({stream});
+    TensorHolder holder;
+    auto         gathered = processor.gatherModelInput(stream_groups, holder);
+    ASSERT_TRUE(gathered.ok()) << gathered.status();
+    EXPECT_EQ(vector<int>({2}), toVec<int>(gathered->combo_tokens));
     EXPECT_FALSE(gathered->text_tokens_mask.defined());
     EXPECT_FALSE(gathered->mm_features_locs.defined());
+    EXPECT_FALSE(gathered->mm_features_spans.defined());
     EXPECT_FALSE(gathered->multimodal_features.has_value());
 }
 

@@ -166,6 +166,7 @@ private:
     py::object                 py_forward_method_;
     py::object                 held_attn_pyobj_;
     std::shared_ptr<torch_ext::HostInputMetadataBuilder> host_input_metadata_builder_;
+    bool                       requires_host_input_metadata_{false};
     // Per-wrapper ownership, not the process-wide configuration request. Only
     // the normal main-generation wrapper can own this secondary runner.
     const bool                       owns_generation_prefill_cuda_graph_{false};
@@ -366,6 +367,9 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                  dspark_model_role_ == DSparkModelRole::COMMIT  ? "forward_commit" :
                                                                                   "forward";
     py_forward_method_         = py_model_.attr(forward_method);
+    if (py::hasattr(py_model_, "requires_host_input_metadata")) {
+        requires_host_input_metadata_ = py_model_.attr("requires_host_input_metadata").cast<bool>();
+    }
     if (py::hasattr(py_model_, "host_input_metadata_builder")) {
         host_input_metadata_builder_ =
             py_model_.attr("host_input_metadata_builder").cast<std::shared_ptr<torch_ext::HostInputMetadataBuilder>>();

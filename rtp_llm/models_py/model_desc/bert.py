@@ -4,6 +4,7 @@ import torch
 from torch import nn
 
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.device.device_type import DeviceType
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import (
@@ -173,7 +174,10 @@ class BertModel(GptModelBase):
             beta=weights.get_global_weight(W.pre_decoder_ln_beta),
             eps=config.layernorm_eps,
         )
-        self.multimodal_embedding_injector = MultimodalEmbeddingInjector()
+        vision_bert = config.model_type in ("vision_bert", "vision_bert_uqi")
+        self.multimodal_embedding_injector = MultimodalEmbeddingInjector(
+            allow_reused_prefix=vision_bert, enable_fused_copy=vision_bert
+        )
         self.layers = nn.ModuleList(
             [
                 BertDecoderLayer(
@@ -221,6 +225,13 @@ class BertModel(GptModelBase):
         )
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
+        if self.config.model_type == "vision_bert" and self.device_type == DeviceType.Cuda:
+            from rtp_llm.models_py.modules.factory.attention.cuda_impl.trt import (
+                FlashInferTRTLLMFMHAv2PrefillImpl,
+            )
+
+            if isinstance(fmha_impl, FlashInferTRTLLMFMHAv2PrefillImpl):
+                fmha_impl.fmha_impl.enable_sm120_bert_specialization = True
         quantized_hidden_states = None
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
             next_layer_uses_quantized_input = (

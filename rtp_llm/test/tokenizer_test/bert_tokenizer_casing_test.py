@@ -32,6 +32,13 @@ class BertTokenizerCasingTest(unittest.TestCase):
         kwargs = BertTokenizer._transformers_v5_kwargs({"do_lower_case": True})
         self.assertNotIn("tokenizer_object", kwargs)
 
+    def test_non_bert_normalizer_is_not_rewritten(self):
+        tokenizer = self.tokenizer(False)
+        tokenizer.normalizer = normalizers.Lowercase()
+        original = tokenizer.normalizer.__getstate__()
+        BertTokenizer._transformers_v5_kwargs({"do_lower_case": False}, tokenizer)
+        self.assertEqual(tokenizer.normalizer.__getstate__(), original)
+
 
 if __name__ == "__main__":
     unittest.main()

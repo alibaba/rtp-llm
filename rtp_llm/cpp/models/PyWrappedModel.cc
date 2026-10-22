@@ -937,12 +937,6 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool s
 
     graph_state_                         = CudaGraphState();
     generation_prefill_cuda_graph_state_ = CudaGraphState();
-    // Non-graph execution consumes attention_inputs_ directly in forward().
-    // Avoid copying it into a temporary graph-only wrapper after the H2D flush.
-    if (!enable_cuda_graph_) {
-        prepared_guard.commit();
-        return;
-    }
     auto empty                           = torch::Tensor();
     // buildPyAttentionInputs() has already copied combo_position_ids to the
     // device.  Keep the top-level PyModelInputs field consistent with the
@@ -1105,10 +1099,12 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             buffer_holder_.hold_host(inputs.engram_token_windows);
             py_model_inputs.engram_token_windows = inputs.engram_token_windows.to(torch::kCUDA, /*non_blocking=*/true);
         }
-        if (inputs.combo_tokens.defined() && inputs.combo_tokens.device().is_cpu()) {
+        if (requires_host_input_metadata_ && inputs.combo_tokens.defined()
+            && inputs.combo_tokens.device().is_cpu()) {
             py_model_inputs.input_ids_host = inputs.combo_tokens;
         }
-        if (inputs.text_tokens_mask.defined() && inputs.text_tokens_mask.device().is_cpu()) {
+        if (requires_host_input_metadata_ && inputs.text_tokens_mask.defined()
+            && inputs.text_tokens_mask.device().is_cpu()) {
             py_model_inputs.text_tokens_mask_host = inputs.text_tokens_mask;
         }
         PyModelOutputs py_model_outputs;

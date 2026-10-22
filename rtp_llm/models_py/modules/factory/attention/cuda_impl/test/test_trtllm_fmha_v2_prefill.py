@@ -50,14 +50,15 @@ class TestSM120EncoderSpecialization(TRTLLMFMHAv2TestBase):
 
         torch.manual_seed(20260929)
         # Two hit cases plus shape/mask misses; do not mock the GPU compute.
-        for lengths, causal, exact_sm120 in (
-            ([128], False, True),
-            ([128, 128], False, True),
-            ([64, 128], False, True),
-            ([128], True, True),
-            ([128], False, False),
+        for lengths, causal, exact_sm120, enabled in (
+            ([128], False, True, True),
+            ([128, 128], False, True, True),
+            ([64, 128], False, True, True),
+            ([128], True, True, True),
+            ([128], False, False, True),
+            ([128], False, True, False),
         ):
-            with self.subTest(lengths=lengths, causal=causal, exact_sm120=exact_sm120):
+            with self.subTest(lengths=lengths, causal=causal, exact_sm120=exact_sm120, enabled=enabled):
                 config = self._create_config(
                     head_num=4,
                     head_num_kv=4,
@@ -70,6 +71,7 @@ class TestSM120EncoderSpecialization(TRTLLMFMHAv2TestBase):
                     len(lengths), lengths, 64, prefix_lengths=None
                 )
                 op = TRTLLMFMHAv2PrefillOp(config)
+                op.enable_sm120_bert_specialization = enabled
                 params = op.prepare(inputs)
                 qkv = torch.randn(
                     sum(lengths), 3 * 4 * 64, device=self.device, dtype=torch.bfloat16
@@ -83,7 +85,7 @@ class TestSM120EncoderSpecialization(TRTLLMFMHAv2TestBase):
                         actual = op.forward(qkv, None, params)
                 self.assertEqual(
                     specialized.call_count,
-                    int(exact_sm120 and not causal and all(n == 128 for n in lengths)),
+                    int(enabled and exact_sm120 and not causal and all(n == 128 for n in lengths)),
                 )
                 expected = compute_pytorch_prefill_reference(
                     qkv.float(), lengths, 4, 4, 64, is_causal=causal

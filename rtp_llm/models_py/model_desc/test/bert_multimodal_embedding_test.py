@@ -43,6 +43,7 @@ class BertMultimodalEmbeddingTest(TestCase):
         hidden_size: int = _ZERO_LAYER_HIDDEN_SIZE,
     ) -> BertModel:
         config = ModelConfig()
+        config.model_type = "vision_bert"
         config.num_layers = 0
         config.hidden_size = hidden_size
         config.vocab_size = _VOCAB_SIZE
@@ -67,6 +68,7 @@ class BertMultimodalEmbeddingTest(TestCase):
     def _build_one_layer_model(self) -> BertModel:
         hidden_size = _ONE_LAYER_HIDDEN_SIZE
         config = ModelConfig()
+        config.model_type = "vision_bert"
         config.num_layers = 1
         config.hidden_size = hidden_size
         config.vocab_size = _VOCAB_SIZE

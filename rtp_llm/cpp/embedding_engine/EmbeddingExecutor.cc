@@ -147,6 +147,8 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
     std::vector<torch::Tensor> gathered_input_embeddings;
     std::vector<int>           gathered_input_embeddings_locs;
     merged_text_mask.resize(token_num, 1);
+    const bool is_vision_bert =
+        model_config_.model_type == "vision_bert" || model_config_.model_type == "vision_bert_uqi";
     const int input_vocab_size = model_config_.input_vocab_size ? static_cast<int>(model_config_.input_vocab_size) :
                                                                   static_cast<int>(model_config_.vocab_size);
     const int type_vocab_size  = static_cast<int>(model_config_.type_vocab_size);
@@ -164,10 +166,12 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
                 new_locs.push_back(mm_locs_data[i] + token_idx);
             }
             const auto text_token_mask = mm_feature.value().text_tokens_mask;
-            RETURN_IF_STATUS_ERROR(validateTextTokensMaskLength(stream->streamId(),
-                                                                text_token_mask.data_ptr<int>(),
-                                                                static_cast<int>(text_token_mask.numel()),
-                                                                length));
+            if (is_vision_bert) {
+                RETURN_IF_STATUS_ERROR(validateTextTokensMaskLength(stream->streamId(),
+                                                                    text_token_mask.data_ptr<int>(),
+                                                                    static_cast<int>(text_token_mask.numel()),
+                                                                    length));
+            }
             memcpy(merged_text_mask.data() + token_idx,
                    text_token_mask.data_ptr<int>(),
                    text_token_mask.numel() * sizeof(int));
@@ -186,16 +190,18 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
         // kernel still reads the token-type table for masked rows before those
         // rows are replaced by projected features, so normalize only masked
         // rows to a safe table index and preserve all text-row validation.
-        normalizeMaskedTokenTypeIds(
-            merged_token_type_ids + token_idx, merged_text_mask.data() + token_idx, length, length);
-        RETURN_IF_STATUS_ERROR(validateEmbeddingIdRanges(stream->streamId(),
-                                                         merged_tokens + token_idx,
-                                                         merged_token_type_ids + token_idx,
-                                                         merged_text_mask.data() + token_idx,
-                                                         length,
-                                                         length,
-                                                         input_vocab_size,
-                                                         type_vocab_size));
+        if (is_vision_bert) {
+            normalizeMaskedTokenTypeIds(
+                merged_token_type_ids + token_idx, merged_text_mask.data() + token_idx, length, length);
+            RETURN_IF_STATUS_ERROR(validateEmbeddingIdRanges(stream->streamId(),
+                                                             merged_tokens + token_idx,
+                                                             merged_token_type_ids + token_idx,
+                                                             merged_text_mask.data() + token_idx,
+                                                             length,
+                                                             length,
+                                                             input_vocab_size,
+                                                             type_vocab_size));
+        }
         memcpy(input_lengths + (int)batch_idx,
                stream->embeddingInput()->input_lengths.data_ptr(),
                stream->batchSize() * sizeof(int32_t));
@@ -411,13 +417,16 @@ absl::Status EmbeddingExecutor::process(const std::list<EmbeddingStreamPtr>& str
     auto            total_batch_size = model_request.context_batch_size;
     model_->releaseBuffers();
     model_output = std::move(model_->forward(model_input));
-    const auto result_process_start = std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point result_process_start;
+    if (requires_host_input_metadata_ && metrics_reporter_) {
+        result_process_start = std::chrono::steady_clock::now();
+    }
     py::gil_scoped_acquire acquire;
     // for py::list, handler should ensure object to cpu in the python impl,
     // for torch::Tensor, we manually move it to cpu during updateStreams()
     CHECK_AND_RETURN_REF(post, postProcess(model_request, model_output, model_input.text_tokens_mask));
     auto res = updateStreams(post, streams, total_batch_size);
-    if (metrics_reporter_) {
+    if (requires_host_input_metadata_ && metrics_reporter_) {
         RtpEmbeddingStageMetricsCollector collector;
         collector.result_process_latency_us =
             std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - result_process_start).count();
