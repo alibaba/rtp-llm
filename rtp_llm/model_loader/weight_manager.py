@@ -226,7 +226,7 @@ class WeightManager:
                         f"Invalid layer weight name format: '{name}'. "
                         "Could not extract layer number. Expected format like 'model.layers.<id>...'"
                     )
-                if not self._weights_loader.owns_pp_weight(name, layer_id):
+                if layer_id not in config.layer_range:
                     return
                 name: str = rename_function(name)
                 fail: bool = True
@@ -266,7 +266,7 @@ class WeightManager:
                     raise PermissionError(
                         f"global weight {name!r} is a non-owning alias; update its owner instead"
                     )
-                if not self._weights_loader.owns_pp_weight(name, None):
+                if not self._weights_loader.is_global_weight_local(name):
                     return
                 fail: bool = True
                 for weight in self._weight_module.weights:

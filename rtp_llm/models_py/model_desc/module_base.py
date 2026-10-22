@@ -5,12 +5,8 @@ from typing import Any, Optional
 import torch
 from torch import nn
 
+from rtp_llm.config.layer_partition import local_layer_range
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.config.pp_layout import (
-    stage_has_embedding,
-    stage_has_lm_head,
-    stage_layer_range,
-)
 from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.block_map import (
@@ -45,12 +41,10 @@ class GptModelBase(nn.Module):
         device_resource_config: Optional[
             DeviceResourceConfig
         ] = None,  # Optional DeviceResourceConfig
-        apply_pp_partition: bool = True,
     ) -> None:
         super().__init__()
         self.config = config
         self.parallelism_config = parallelism_config
-        self._apply_pp_partition = apply_pp_partition
         self.weight = weight
         self.fmha_config = fmha_config
         self.py_hw_kernel_config = py_hw_kernel_config
@@ -105,44 +99,9 @@ class GptModelBase(nn.Module):
     def capture_context(self, requested: bool) -> CaptureContext:
         return self._capture_context.for_forward(requested)
 
-    # Pipeline-parallel stage view; layout delegates to config/pp_layout.py.
-    @property
-    def pp_size(self) -> int:
-        return self.parallelism_config.pp_size
-
-    @property
-    def pp_rank(self) -> int:
-        return self.parallelism_config.pp_rank
-
-    @property
-    def pp_has_embedding(self) -> bool:
-        """The first target stage or a complete draft owns its embedding."""
-        return not self._apply_pp_partition or stage_has_embedding(self.pp_rank)
-
-    @property
-    def pp_has_lm_head(self) -> bool:
-        """Only the last stage owns lm_head and final layernorm.
-
-        Draft placement is already restricted to the last stage, so model
-        construction scope does not change output-module ownership.
-        """
-        return stage_has_lm_head(self.pp_rank, self.pp_size)
-
-    def pp_layer_ids(self) -> list[int]:
-        """Global layer ids owned by this stage.
-
-        Lookup over the materialized partition on ParallelismConfig
-        (decided once at startup), so model construction stays in sync
-        with weight loading; pp_size=1 is trivially all layers.
-        A draft uses all of its own layers while retaining the physical
-        ParallelismConfig for TP/EP communication on its owning stage.
-        """
-        if not self._apply_pp_partition:
-            return list(range(self.layer_num))
-        counts = getattr(self.parallelism_config, "pp_stage_layer_counts", None)
-        return list(
-            stage_layer_range(self.layer_num, self.pp_size, self.pp_rank, counts)
-        )
+    def layer_ids(self) -> range:
+        """Global layer IDs constructed and executed by this model instance."""
+        return local_layer_range(self.config, self.parallelism_config)
 
     def make_empty_intermediate_tensors(self, hidden_template: Any) -> dict[str, Any]:
         """Build this model's stage-boundary inputs for stage-local PP warmup."""
@@ -215,7 +174,7 @@ class GptModelBase(nn.Module):
         """Count configured boundaries before and through this model's layers."""
         if not self._mtp_aux_capture_layer_ids:
             return 0, 0
-        layer_ids = self.pp_layer_ids()
+        layer_ids = self.layer_ids()
         previous_parts = sum(
             layer_id < layer_ids[0] for layer_id in self._mtp_aux_capture_layer_ids
         )
@@ -313,7 +272,7 @@ class GptModelBase(nn.Module):
             )
         if self._mtp_aux_capture_buffer is None:
             raise RuntimeError("auxiliary hidden capture buffer is unavailable")
-        if not self._apply_pp_partition or self.pp_has_lm_head:
+        if self.layer_num - 1 in self.layer_ids():
             self._mtp_target_hidden_states = self._mtp_aux_capture_buffer
 
     def get_mtp_target_hidden_states(

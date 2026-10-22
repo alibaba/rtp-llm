@@ -281,9 +281,11 @@ def _run_disaggregate_final_output(
 def _make_qwen_model(layer_ids: list[int]) -> Qwen3Model:
     model = Qwen3Model.__new__(Qwen3Model)
     nn.Module.__init__(model)
-    model.config = SimpleNamespace(hidden_state_capture_layer_ids=layer_ids)
+    model.config = SimpleNamespace(
+        hidden_state_capture_layer_ids=layer_ids, num_layers=3, is_mtp=False
+    )
     model.layer_num = 3
-    model.pp_layer_ids_list = [0, 1, 2]
+    model.parallelism_config = SimpleNamespace(pp_size=1)
     model.kv_cache = None
     model.embed_tokens = _Embedding()
     model.layers = nn.ModuleList([_QwenLayer(1), _QwenLayer(2), _QwenLayer(3)])
@@ -322,6 +324,8 @@ def _make_qwen3_next_model(
     model.config = SimpleNamespace(
         hidden_state_capture_layer_ids=layer_ids,
         capture_aux_hidden_layer_ids=aux_layer_ids,
+        num_layers=2,
+        is_mtp=False,
     )
     model._mtp_aux_capture_layer_ids = aux_layer_ids
     model._mtp_aux_capture_layer_id_set = frozenset(aux_layer_ids)
@@ -332,9 +336,7 @@ def _make_qwen3_next_model(
     model._mtp_aux_capture_rows = 0
     model._mtp_aux_capture_index = 0
     model._mtp_aux_capture_expected_parts = 0
-    model._apply_pp_partition = True
     model.layer_num = 2
-    model.pp_layer_ids_list = [0, 1]
     model.kv_cache = None
     model.parallelism_config = SimpleNamespace(
         pp_size=1,

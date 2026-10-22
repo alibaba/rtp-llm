@@ -9,7 +9,6 @@ import torch
 import torch.nn.functional as F
 
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.config.pp_layout import stage_layer_range
 from rtp_llm.config.quant_config import Fp8PerChannelCompressedQuantConfig
 from rtp_llm.lora.lora_weights import LoRAWeights
 from rtp_llm.model_loader.ffn_weight import iter_stacked_moe_weights
@@ -48,7 +47,6 @@ class ModelLoader:
         load_method: LoadMethod = LoadMethod.AUTO,
         force_cpu_load_weights: bool = False,
         moe_pure_tp_preshard: bool = False,
-        apply_pp_partition: bool = True,
     ):
         self.model_config = model_config
         self._task_type = model_config.task_type
@@ -73,18 +71,7 @@ class ModelLoader:
 
         # Get is_attn_model flag from weights_info (calculated in ModelDeployWeightInfo constructor)
         self._is_attn_model = weights_info.is_attn_model
-        # Initial expert placement is needed by LoadConfig and weight loading.
-        # Resolve ownership first without depending on either of them.
-        self._layer_ids = (
-            stage_layer_range(
-                model_config.num_layers,
-                weights_info.pp_size,
-                weights_info.pp_rank,
-                weights_info.pp_stage_layer_counts,
-            )
-            if apply_pp_partition
-            else range(model_config.num_layers)
-        )
+        # Initial expert placement is needed to construct LoadConfig.
         self._py_eplb, self._phy2log = self.create_eplb()
         self._load_config: LoadConfig = self._weights_info.create_load_config(
             compute_dtype=compute_dtype,
@@ -94,11 +81,6 @@ class ModelLoader:
             force_cpu_load_weights=force_cpu_load_weights,
             moe_pure_tp_preshard=moe_pure_tp_preshard,
         )
-        # Resolve layer and global-weight ownership once for both loading paths.
-        self._load_embedding = (
-            not apply_pp_partition or self._load_config.has_pp_embedding
-        )
-        self._load_lm_head = self._load_config.has_pp_lm_head
 
     def get_load_config(self) -> LoadConfig:
         return self._load_config
@@ -152,7 +134,7 @@ class ModelLoader:
         if self._weights_info.weight_style == WeightStyle.RTP_LLM_STYLE:
             raise ValueError("load_lora_weights only support non-ft-style weight")
 
-        for id in range(self._load_config.num_layers):
+        for id in self._load_config.layer_range:
             result = self._load_layer_lora_weights(adapter_name, id, device)
             for name, tensor in result.items():
                 lora_weights.set_layer_weight(False, id, name, tensor)
@@ -250,12 +232,14 @@ class ModelLoader:
         global_weights = dict(self._global_weight_aliases)
         # 重新构建权重
         prefixes = tuple(
-            f"{layer_weight_prefix}{layer_id}." for layer_id in self._layer_ids
+            f"{layer_weight_prefix}{layer_id}."
+            for layer_id in self._load_config.layer_range
         ) + tuple(
             name
             for name in self._load_config.database.get_pretrain_tensor_names()
             if name.startswith(global_weight_prefix)
-            and not self._skip_pp_global_weight(name[len(global_weight_prefix) :])
+            and name[len(global_weight_prefix) :] not in self._global_weight_aliases
+            and self.is_global_weight_local(name[len(global_weight_prefix) :])
         )
         all_tensors = self._load_config.database.load_tensors_by_prefix(
             prefixes, device, direct_io=direct_io
@@ -271,8 +255,9 @@ class ModelLoader:
                 weights[layer_id][name] = tensor[0].to(device)
             elif key.startswith(global_weight_prefix):
                 name = key[len(global_weight_prefix) :]
-                if name in self._global_weight_aliases or self._skip_pp_global_weight(
-                    name
+                if (
+                    name in self._global_weight_aliases
+                    or not self.is_global_weight_local(name)
                 ):
                     continue
                 check_with_info(len(tensor) == 1, f"{name} have {len(tensor)} tensor)")
@@ -527,7 +512,7 @@ class ModelLoader:
 
     def prepare_weights(self, device: str):
         if not self._is_attn_model:
-            for id in self._layer_ids:
+            for id in self._load_config.layer_range:
                 results = self._load_layer_weights(id, device)
                 for name, tensor in results.items():
                     yield (id, name, tensor)
@@ -560,7 +545,7 @@ class ModelLoader:
         tensor_to_weight_map: Dict[str, WeightInfo] = {}
         weight_info_list: List[WeightInfo] = []
         if self._model_weights_info.layer_weights != []:
-            for layer_id in self._layer_ids:
+            for layer_id in self._load_config.layer_range:
                 layer_weights = self._model_weights_info.layer_weights[layer_id]
                 if isinstance(layer_weights, WeightModule):
                     # For CompositeWeight (e.g. MoeWithSharedWeight), split into
@@ -610,25 +595,15 @@ class ModelLoader:
             return True
         if self._task_type != TaskType.LANGUAGE_MODEL and weight.name in [W.lm_head]:
             return True
-        return self._skip_pp_global_weight(weight.name or "")
+        return not self.is_global_weight_local(weight.name)
 
-    def _skip_pp_global_weight(self, name: str) -> bool:
-        """Share target/draft module ownership across raw and FT checkpoints."""
+    def is_global_weight_local(self, name: str) -> bool:
+        """Place boundary globals by layer range so full-range drafts keep both ends."""
         if name in (W.embedding, W.positional_embedding):
-            return not self._load_embedding
-        if name == W.lm_head or name.startswith("final_layernorm."):
-            return not self._load_lm_head
-        # TODO(PP+MTP): restrict multi_tokens_predict_* (MTP head) weights to the last stage.
-        return False
-
-    def owns_pp_weight(self, name: str, layer_id: int | None) -> bool:
-        """Whether the PP loading partition placed this weight on the current rank.
-
-        Online weight sync broadcasts to all ranks; a non-owner skips, its owner updates.
-        """
-        if layer_id is not None:
-            return layer_id in self._layer_ids
-        return not self._skip_pp_global_weight(name)
+            return 0 in self._load_config.layer_range
+        if name in (W.lm_head, W.lm_head_b) or name.startswith("final_layernorm."):
+            return self._load_config.num_layers - 1 in self._load_config.layer_range
+        return True
 
     @staticmethod
     def force_clean_cuda_memory():
@@ -791,8 +766,7 @@ class ModelLoader:
             )
 
         if self._task_type == TaskType.LANGUAGE_MODEL:
-            # Only a model that owns lm_head may fall back to embedding.
-            if self._load_lm_head:
+            if self.is_global_weight_local(W.lm_head):
                 lm_head_w = weight.steal_global_weight(W.lm_head)
                 if lm_head_w == None:
                     lm_head_w = weight.global_weights[W.embedding]
@@ -859,7 +833,7 @@ class ModelLoader:
         moe_layer_index = [
             layer_id
             for layer_id in weights_info.moe_layer_index_
-            if layer_id in self._layer_ids
+            if layer_id in weights_info.layer_range
         ]
         py_eplb = None
         if (
@@ -873,7 +847,6 @@ class ModelLoader:
                 phy2log=phy2log,
                 database=ep_lb_database,
                 model_config=self.model_config,
-                layer_ids=self._layer_ids,
             )
         return py_eplb, phy2log
 
@@ -894,7 +867,7 @@ class ModelLoader:
         moe_layer_index = [
             layer_id
             for layer_id in weights_info.moe_layer_index_
-            if layer_id in self._layer_ids
+            if layer_id in self._load_config.layer_range
         ]
         # init logic_expert_cnt and log2phy
         for layer_id in moe_layer_index:
@@ -923,7 +896,6 @@ def get_model_loader(
     load_method: LoadMethod = LoadMethod.AUTO,
     force_cpu_load_weights: bool = False,
     moe_pure_tp_preshard: bool = False,
-    apply_pp_partition: bool = True,
 ) -> ModelLoader:
     if weights_info._head_num % weights_info.tp_size != 0:
         raise Exception(
@@ -938,5 +910,4 @@ def get_model_loader(
         load_method=load_method,
         force_cpu_load_weights=force_cpu_load_weights,
         moe_pure_tp_preshard=moe_pure_tp_preshard,
-        apply_pp_partition=apply_pp_partition,
     )

@@ -1489,7 +1489,6 @@ class Qwen3NextModel(GptModelBase):
         fmha_config=None,
         py_hw_kernel_config=None,
         device_resource_config=None,
-        apply_pp_partition: bool = True,
     ):
         super().__init__(
             model_config,
@@ -1499,14 +1498,13 @@ class Qwen3NextModel(GptModelBase):
             fmha_config=fmha_config,
             py_hw_kernel_config=py_hw_kernel_config,
             device_resource_config=device_resource_config,
-            apply_pp_partition=apply_pp_partition,
         )
-        # First stage owns the embedding; pp_size=1 keeps today's behavior.
+        layer_ids = self.layer_ids()
         self.embed_tokens = (
             Embedding(
                 model_config, parallelism_config, weights.get_global_weight(W.embedding)
             )
-            if self.pp_has_embedding
+            if 0 in layer_ids
             else None
         )
         # Get enable_cuda_graph from py_hw_kernel_config
@@ -1515,7 +1513,6 @@ class Qwen3NextModel(GptModelBase):
             if py_hw_kernel_config is not None
             else False
         )
-        self.pp_layer_ids_list = self.pp_layer_ids()
         self.layers = nn.ModuleList(
             [
                 Qwen3NextDecoderLayer(
@@ -1528,7 +1525,7 @@ class Qwen3NextModel(GptModelBase):
                     enable_cuda_graph,
                     hw_kernel_config=py_hw_kernel_config,
                 )
-                for idx in self.pp_layer_ids_list
+                for idx in layer_ids
             ]
         )
         self.norm = (
@@ -1536,7 +1533,7 @@ class Qwen3NextModel(GptModelBase):
                 weights.get_global_weight(W.final_ln_gamma),
                 eps=model_config.layernorm_eps,
             )
-            if self.pp_has_lm_head
+            if self.layer_num - 1 in layer_ids
             else None
         )
         self._init_capture_context(
@@ -1825,6 +1822,7 @@ class Qwen3NextModel(GptModelBase):
                 upstream_hidden=inputs.pp_intermediates.get("mtp_aux_hidden_states"),
             )
 
+        layer_ids = self.layer_ids()
         for local_idx, decoder_layer in enumerate(self.layers):
             layer_attention_inputs = select_attention_inputs_for_layer(
                 inputs, self.kv_cache, local_idx
@@ -1844,7 +1842,7 @@ class Qwen3NextModel(GptModelBase):
                 attention_inputs=layer_attention_inputs,
                 attn_meta=attn_meta,
             )
-            global_layer_id = self.pp_layer_ids_list[local_idx]
+            global_layer_id = layer_ids[local_idx]
             if global_layer_id in self._mtp_aux_capture_layer_id_set:
                 self.capture_aux_hidden(global_layer_id, hidden_states, residual)
             capture.capture_layer(global_layer_id, hidden_states, residual)
@@ -1880,7 +1878,6 @@ class Qwen35Model(Qwen3NextModel):
         fmha_config=None,
         py_hw_kernel_config=None,
         device_resource_config=None,
-        apply_pp_partition: bool = True,
     ):
         super().__init__(
             model_config,
@@ -1891,7 +1888,6 @@ class Qwen35Model(Qwen3NextModel):
             fmha_config,
             py_hw_kernel_config,
             device_resource_config,
-            apply_pp_partition=apply_pp_partition,
         )
         self.multimodal_embedding_injector = MultimodalEmbeddingInjector()
 

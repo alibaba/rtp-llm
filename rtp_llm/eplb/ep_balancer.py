@@ -57,7 +57,6 @@ class ExpertBalancer:
         compute_dtype: torch.dtype,
         phy2log: Any,
         database: BaseDatabase,
-        layer_ids: Sequence[int],
         model_config: Optional[ModelConfig] = None,
     ):
         """
@@ -68,7 +67,6 @@ class ExpertBalancer:
             compute_dtype: Compute data type
             phy2log: Physical to logical expert mapping
             database: Database for loading weights
-            layer_ids: Global layer IDs selected by the model loader
             model_config: Optional ModelConfig (used to get eplb_config)
         """
         self.database: BaseDatabase = database
@@ -92,7 +90,7 @@ class ExpertBalancer:
         self.moe_layer_index = [
             layer_id
             for layer_id in self._load_config.moe_layer_index
-            if layer_id in layer_ids
+            if layer_id in self._load_config.layer_range
         ]
         self.num_experts = self._load_config.expert_num
 

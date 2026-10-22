@@ -2,6 +2,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from rtp_llm.config.layer_partition import local_layer_range
+from rtp_llm.config.model_args import ModelArgs
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.ops import SpeculativeType, TaskType
@@ -23,7 +25,10 @@ def make_engine_config(sp_type, pp_size, pp_rank):
             warm_up=False, model_warm_up=False, max_generate_batch_size=8
         ),
         load_config=SimpleNamespace(
-            load_method="auto", loader_recycle_handles=False, moe_pure_tp_preshard=False
+            load_method="auto",
+            loader_recycle_handles=False,
+            moe_pure_tp_preshard=False,
+            force_cpu_load_weights=False,
         ),
         hw_kernel_config=MagicMock(),
         kv_cache_config=MagicMock(),
@@ -34,53 +39,131 @@ def make_engine_config(sp_type, pp_size, pp_rank):
 
 
 class DraftModelLoadingTest(unittest.TestCase):
-    def test_dspark_load_scope_reaches_python_construction(self):
-        from rtp_llm.models.qwen_3_dspark import Qwen3DSpark
+    def test_engine_config_finalizes_partition_from_completed_model_config(self):
+        for pp_size, counts, expected in (
+            (3, [], [3, 2, 2]),
+            (3, [2, 3, 2], [2, 3, 2]),
+            (1, [], []),
+            (1, [2, 5], [2, 5]),
+        ):
+            with self.subTest(pp_size=pp_size, counts=counts):
+                engine = make_engine_config(SpeculativeType.MTP, pp_size, 0)
+                engine.parallelism_config.pp_stage_layer_counts = counts
+                engine.runtime_config.fifo_scheduler_config = SimpleNamespace(
+                    max_context_batch_size=1, max_batch_tokens_size=0
+                )
+                model = SimpleNamespace(
+                    num_layers=12, max_seq_len=128, to_string=lambda: "target"
+                )
+                model_cls = MagicMock(__name__="TestTarget")
+                model_cls._create_config.return_value = model
 
-        model = object.__new__(Qwen3DSpark)
-        model.parallelism_config = make_engine_config(
-            SpeculativeType.DSPARK, 3, 2
-        ).parallelism_config
-        model.model_config = SimpleNamespace(ckpt_path="draft", quant_config=None)
-        model.hw_kernel_config = SimpleNamespace(enable_cuda_graph=False)
-        model.max_generate_batch_size = 1
-        model.fmha_config = None
-        model.device_resource_config = None
-        model.device = "cpu"
-        model.weight = object()
-        model._weight_alias_names = ()
-        with patch.object(
-            model, "_init_custom_module", return_value=None
-        ), patch.object(model, "create_model_loader") as loader, patch.object(
-            model, "_load"
-        ), patch.object(
-            model, "_get_device_str", return_value="cpu"
-        ), patch(
-            "rtp_llm.model_loader.weight_manager.WeightManager"
-        ), patch(
-            "rtp_llm.models_py.model_desc.qwen3_dspark_model.Qwen3DSparkModel"
-        ) as constructor:
-            model.load(apply_pp_partition=False)
-        loader.assert_called_once_with(apply_pp_partition=False)
-        self.assertFalse(constructor.call_args.kwargs["apply_pp_partition"])
-        self.assertIs(constructor.call_args.args[1], model.parallelism_config)
-        self.assertEqual(model.parallelism_config.pp_stage_layer_counts, [2, 3, 2])
+                def apply_overrides(**kwargs):
+                    kwargs["model_config"].num_layers = 9
 
-    def test_all_draft_types_load_only_on_last_stage_including_pp1(self):
+                def post_build_model_config(config):
+                    config.num_layers = 7
+
+                model_cls._post_build_model_config.side_effect = post_build_model_config
+                with patch.object(
+                    ModelFactory, "get_model_cls", return_value=model_cls
+                ), patch(
+                    "rtp_llm.model_factory.build_model_config",
+                    side_effect=apply_overrides,
+                ):
+                    result = ModelFactory.create_model_config(
+                        model_args=SimpleNamespace(
+                            model_type="test_target", ckpt_path="target"
+                        ),
+                        lora_config=SimpleNamespace(lora_info=""),
+                        kv_cache_config=engine.kv_cache_config,
+                        profiling_debug_logging_config=MagicMock(),
+                    )
+                self.assertIs(result, model)
+                self.assertEqual(model.num_layers, 7)
+                self.assertEqual(
+                    engine.parallelism_config.pp_stage_layer_counts, counts
+                )
+                ModelFactory.update_engine_config_from_model_config(engine, model)
+                self.assertEqual(
+                    engine.parallelism_config.pp_stage_layer_counts, expected
+                )
+
+    def test_factory_sets_draft_role_before_building_config(self):
         for sp_type in (
-            SpeculativeType.VANILLA,
             SpeculativeType.MTP,
             SpeculativeType.EAGLE,
-            SpeculativeType.EAGLE3,
             SpeculativeType.DSPARK,
         ):
-            for pp_size, pp_rank in ((1, 0), (3, 0), (3, 2)):
+            with self.subTest(sp_type=sp_type):
+                engine = make_engine_config(sp_type, 3, 2)
+                engine.sp_config.checkpoint_path = "draft"
+                engine.sp_config.model_type = "test_draft"
+                engine.sp_config.quantization = None
+                engine.profiling_debug_logging_config = MagicMock()
+                draft = SimpleNamespace(
+                    num_layers=2,
+                    is_mtp=False,
+                    ckpt_path="draft",
+                    tokenizer_path="",
+                )
+                model_cls = MagicMock()
+                model_cls._create_config.return_value = draft
+
+                def check_draft_role(model_config, *_args, **_kwargs):
+                    self.assertTrue(model_config.is_mtp)
+                    self.assertEqual(
+                        local_layer_range(model_config, engine.parallelism_config),
+                        range(2),
+                    )
+
+                model_cls._apply_kv_cache_config.side_effect = check_draft_role
+                model_cls._post_build_model_config.side_effect = check_draft_role
+                with patch.object(
+                    ModelFactory, "get_model_cls", return_value=model_cls
+                ), patch(
+                    "rtp_llm.model_factory.build_model_config",
+                    side_effect=check_draft_role,
+                ) as build_config, patch.object(
+                    ModelFactory, "_setup_dspark_configs"
+                ):
+                    result = ModelFactory.create_propose_model_config(
+                        engine,
+                        SimpleNamespace(num_layers=7, max_seq_len=128),
+                        ModelArgs(),
+                    )
+
+                self.assertIs(result, draft)
+                check_draft_role(result)
+                build_config.assert_called_once()
+                model_cls._apply_kv_cache_config.assert_called_once()
+                model_cls._post_build_model_config.assert_called_once()
+                self.assertEqual(
+                    engine.parallelism_config.pp_stage_layer_counts, [2, 3, 2]
+                )
+                self.assertEqual(
+                    (
+                        engine.parallelism_config.pp_size,
+                        engine.parallelism_config.pp_rank,
+                    ),
+                    (3, 2),
+                )
+
+    def test_draft_is_created_only_on_last_stage(self):
+        for sp_type in (
+            SpeculativeType.MTP,
+            SpeculativeType.EAGLE,
+            SpeculativeType.DSPARK,
+        ):
+            for pp_size, pp_rank in ((1, 0), (3, 0), (3, 1), (3, 2)):
                 with self.subTest(sp_type=sp_type, pp_size=pp_size, pp_rank=pp_rank):
                     engine_config = make_engine_config(sp_type, pp_size, pp_rank)
                     target_config = SimpleNamespace(
                         max_seq_len=128, gen_num_per_cycle=2
                     )
-                    draft_config = SimpleNamespace(model_type="test_draft")
+                    draft_config = SimpleNamespace(
+                        model_type="test_draft", num_layers=2, is_mtp=True
+                    )
                     model_cls = MagicMock()
                     with patch.object(
                         ModelFactory, "get_model_cls", return_value=model_cls
@@ -98,7 +181,15 @@ class DraftModelLoadingTest(unittest.TestCase):
                     self.assertEqual(propose.sp_type, sp_type)
                     self.assertEqual(propose.gen_num_per_circle, 2)
                     args = model_cls.from_config.call_args.kwargs
-                    self.assertFalse(args["apply_pp_partition"])
+                    self.assertIs(args["model_config"], draft_config)
+                    self.assertEqual(
+                        local_layer_range(draft_config, args["parallelism_config"]),
+                        range(2),
+                    )
+                    self.assertEqual(
+                        engine_config.parallelism_config.pp_stage_layer_counts,
+                        [2, 3, 2] if pp_size > 1 else [],
+                    )
                     self.assertIs(
                         args["parallelism_config"], engine_config.parallelism_config
                     )
@@ -110,13 +201,13 @@ class DraftModelLoadingTest(unittest.TestCase):
                         (pp_size, pp_rank),
                     )
 
-    def test_non_last_stage_still_normalizes_speculative_type(self):
+    def test_non_last_stage_normalizes_speculative_type(self):
         for model_type, expected in (
             ("deepseek-v3-mtp", SpeculativeType.MTP),
             ("qwen_3_moe-mtp", SpeculativeType.EAGLE3),
         ):
             with self.subTest(model_type=model_type):
-                engine_config = make_engine_config(SpeculativeType.VANILLA, 3, 0)
+                engine_config = make_engine_config(SpeculativeType.EAGLE, 3, 0)
                 with patch.object(ModelFactory, "get_model_cls") as factory, patch(
                     "rtp_llm.model_factory.configure_warmup"
                 ):
@@ -129,7 +220,7 @@ class DraftModelLoadingTest(unittest.TestCase):
                 factory.assert_not_called()
                 self.assertEqual(engine_config.sp_config.type, expected)
 
-    def test_pp_load_rejects_unsupported_targets(self):
+    def test_pp_load_requires_explicit_model_support_including_mtp(self):
         from rtp_llm.models.qwen3_next.qwen3_next import (
             Qwen3Next,
             Qwen35Dense,
@@ -155,19 +246,22 @@ class DraftModelLoadingTest(unittest.TestCase):
             (Qwen35Moe, True),
             (Qwen35Dense, True),
         ):
-            for pp_size, apply_pp_partition in ((2, True), (2, False), (1, True)):
+            for pp_size, is_mtp in ((2, False), (2, True), (1, False), (1, True)):
                 with self.subTest(
                     model=model_cls.__name__,
                     pp_size=pp_size,
-                    apply_pp_partition=apply_pp_partition,
+                    is_mtp=is_mtp,
                 ):
                     model = object.__new__(model_cls)
                     model.model_config = SimpleNamespace(
-                        task_type=TaskType.LANGUAGE_MODEL
+                        task_type=TaskType.LANGUAGE_MODEL,
+                        num_layers=2,
+                        is_mtp=is_mtp,
                     )
                     model.parallelism_config = SimpleNamespace(pp_size=pp_size)
                     model.hw_kernel_config = SimpleNamespace(enable_cuda_graph=False)
-                    reject = pp_size > 1 and apply_pp_partition and not supports_pp
+                    self.assertEqual(model.support_pp(), supports_pp)
+                    reject = pp_size > 1 and not supports_pp
                     with patch.object(
                         model, "_init_custom_module", return_value=None
                     ), patch.object(
@@ -181,45 +275,11 @@ class DraftModelLoadingTest(unittest.TestCase):
                             else "reached loader"
                         )
                         with self.assertRaisesRegex(Exception, expected):
-                            model.load(apply_pp_partition=apply_pp_partition)
+                            model.load()
                         if reject:
                             loader.assert_not_called()
                         else:
-                            loader.assert_called_once_with(
-                                apply_pp_partition=apply_pp_partition
-                            )
-
-    def test_model_loader_receives_load_scope_without_changing_parallelism(self):
-        model = object.__new__(BaseModel)
-        model.model_config = SimpleNamespace(
-            ckpt_path="", ptuning_path="", lora_infos={}
-        )
-        model.parallelism_config = make_engine_config(
-            SpeculativeType.MTP, 3, 2
-        ).parallelism_config
-        model.hw_kernel_config = MagicMock()
-        model.kv_cache_config = MagicMock()
-        model.merge_lora = False
-        model.load_method = "auto"
-        model.loader_recycle_handles = False
-        model.force_cpu_load_weights = False
-        model.moe_pure_tp_preshard = False
-        model.custom_module = None
-        loader = MagicMock()
-        weight_cls = MagicMock()
-        with patch.object(model, "get_weight_cls", return_value=weight_cls), patch(
-            "rtp_llm.models.base_model.CkptDatabase"
-        ), patch(
-            "rtp_llm.models.base_model.get_model_loader", return_value=loader
-        ) as factory:
-            self.assertIs(model.create_model_loader(apply_pp_partition=False), loader)
-        self.assertFalse(factory.call_args.kwargs["apply_pp_partition"])
-        self.assertIs(
-            weight_cls.call_args.kwargs["parallelism_config"], model.parallelism_config
-        )
-        self.assertEqual(
-            (model.parallelism_config.pp_size, model.parallelism_config.pp_rank), (3, 2)
-        )
+                            loader.assert_called_once_with()
 
 
 if __name__ == "__main__":

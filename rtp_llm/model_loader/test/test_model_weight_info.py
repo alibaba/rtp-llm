@@ -561,6 +561,7 @@ def make_minimal_configs(
         attn_config=attn_config,
         quant_config=None,
         num_layers=1,
+        is_mtp=False,
         src_quantization_bit=0,
         isGatedActivation=lambda: False,
         expert_num=0,
@@ -599,6 +600,33 @@ def make_minimal_configs(
     return model_config, parallelism_config, hw_kernel_config
 
 
+class ModelDeployLayerRangeTest(unittest.TestCase):
+    def test_load_config_uses_local_model_scope(self):
+        for is_mtp, layers, pp_size, pp_rank, counts, expected in (
+            (False, 7, 3, 0, [2, 3, 2], range(2)),
+            (False, 7, 3, 1, [2, 3, 2], range(2, 5)),
+            (False, 7, 3, 2, [2, 3, 2], range(5, 7)),
+            (True, 2, 3, 2, [2, 3, 2], range(2)),
+            (False, 7, 1, 0, [], range(7)),
+            (False, 7, 1, 0, [2, 5], range(7)),
+        ):
+            with self.subTest(is_mtp=is_mtp, pp_size=pp_size, pp_rank=pp_rank):
+                model, parallel, hw = make_minimal_configs()
+                model.num_layers = layers
+                model.is_mtp = is_mtp
+                parallel.pp_size = pp_size
+                parallel.pp_rank = pp_rank
+                parallel.pp_stage_layer_counts = counts
+                parallel.world_size = pp_size
+                parallel.world_rank = pp_rank
+                weights_info = ModelDeployWeightInfo(model, parallel, hw, object())
+                load_config = weights_info.create_load_config(
+                    torch.float16, make_database([])
+                )
+                self.assertEqual(weights_info.layer_range, expected)
+                self.assertEqual(load_config.layer_range, expected)
+
+
 class EplbNodeCountTest(unittest.TestCase):
     def test_pp_node_count_belongs_to_the_ep_group_and_pp1_keeps_main(self):
         # (PP, PP rank, TP, DP, EP, local world size, nodes per EP group)
@@ -626,7 +654,8 @@ class EplbNodeCountTest(unittest.TestCase):
                 weights_info = ModelDeployWeightInfo(model, parallel, hw, object())
                 self.assertEqual(weights_info.num_nodes, expected)
                 load_config = weights_info.create_load_config(
-                    torch.float16, make_database([])
+                    torch.float16,
+                    make_database([]),
                 )
                 self.assertEqual(load_config.num_nodes, expected)
 

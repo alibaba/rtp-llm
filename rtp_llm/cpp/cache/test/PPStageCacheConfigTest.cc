@@ -107,7 +107,7 @@ TEST(PPStageCacheConfigTest, PpOneKeepsWholeModel) {
     EXPECT_EQ(staged.hybrid_attention_config.hybrid_attention_types.size(), 8u);
 }
 
-TEST(PPStageCacheConfigTest, StageScopeFollowsRankLayout) {
+TEST(PPStageCacheConfigTest, StageScopeUsesConfiguredPartition) {
     const auto                                     model    = makeHybridModelConfig(65);
     const std::vector<std::pair<int64_t, int64_t>> expected = {{0, 17}, {17, 33}, {33, 49}, {49, 65}};
     for (int64_t rank = 0; rank < 4; ++rank) {
@@ -122,14 +122,6 @@ TEST(PPStageCacheConfigTest, StageScopeFollowsRankLayout) {
                       model.kv_cache_spec_descs[static_cast<size_t>(begin + local)][0].tag);
         }
     }
-}
-
-TEST(PPStageCacheConfigTest, StageScopeRejectsInvalidOrEmptyStage) {
-    const auto model = makeHybridModelConfig(8);
-    EXPECT_THROW(CacheConfigCreator::stageScopedModelConfig(model, makePpConfig(8, 2, 2)), std::exception);
-    EXPECT_THROW(CacheConfigCreator::stageScopedModelConfig(model, makePpConfig(8, 2, -1)), std::exception);
-    const auto tiny = makeHybridModelConfig(2);
-    EXPECT_THROW(CacheConfigCreator::stageScopedModelConfig(tiny, makePpConfig(2, 4, 2)), std::exception);
 }
 
 TEST(PPStageCacheConfigTest, IndependentPoolsUseStageLocalGeometry) {

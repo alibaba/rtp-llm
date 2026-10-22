@@ -43,6 +43,7 @@ cc_library(
         "//rtp_llm/cpp/cache/block_tree_cache",
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/config:rank_layout",
+        "//rtp_llm/cpp/config:stage_layer_range",
         "//rtp_llm/cpp/config:role_types",
         "//rtp_llm/cpp/cuda_graph:cuda_graph_hdrs_lib",
         "//rtp_llm/cpp/engine_base:executor",

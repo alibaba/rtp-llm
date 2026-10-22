@@ -1,6 +1,6 @@
 #include "rtp_llm/cpp/models/eplb/ExpertBalancer.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
-#include "rtp_llm/cpp/config/RankLayout.h"
+#include "rtp_llm/cpp/config/StageLayerRange.h"
 
 namespace rtp_llm {
 void registerExecCtxOps(pybind11::module& m);
@@ -22,12 +22,21 @@ py::dict exerciseStage(const ParallelismConfig& config,
                        py::object               python_balancer,
                        torch::Tensor            log_stats,
                        torch::Tensor            gpu_loads) {
-    const auto layout = RankLayout::fromParallelismConfig(config);
-    const auto range  = layout.myLayerRange(4);
+    const auto range = stageLayerRange(config, config.pp_rank, 4);
     EPLBConfig initial;
     initial.eplb_control_step = 1;
-    ExpertBalancer balancer(2, 4, 4, 8, 8, config, range, python_balancer,
-                            DataType::TYPE_FP16, QuantAlgo(), nullptr, initial);
+    ExpertBalancer balancer(2,
+                            4,
+                            4,
+                            8,
+                            8,
+                            config,
+                            {range.begin, range.end()},
+                            python_balancer,
+                            DataType::TYPE_FP16,
+                            QuantAlgo(),
+                            nullptr,
+                            initial);
     StatsOnlyModel model;
     model.overall_expert_stats_.stats_buf.log_stats_buf = log_stats;
     model.overall_expert_stats_.stats_buf.gpu_loads_buf = gpu_loads;

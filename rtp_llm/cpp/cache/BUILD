@@ -338,6 +338,7 @@ cc_library(
         ":prefill_cache_hit_metrics_reporter",
         "//rtp_llm/cpp/config:model_config",
         "//rtp_llm/cpp/config:rank_layout",
+        "//rtp_llm/cpp/config:stage_layer_range",
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/models_py/bindings/core:type_convert",

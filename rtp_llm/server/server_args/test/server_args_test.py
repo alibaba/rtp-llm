@@ -37,6 +37,24 @@ class CustomAllReduceArgumentsTest(TestCase):
         self.assertIs(configs.ft_disable_custom_ar_override, True)
 
 
+class PipelinePartitionArgumentsTest(TestCase):
+    def test_partition_binds_to_parallel_config(self):
+        from rtp_llm.server.server_args import server_args
+
+        for args, env, expected in (
+            ([], {}, []),
+            (["--pp_stage_layer_counts", "[2, 3, 2]"], {}, [2, 3, 2]),
+            ([], {"PP_STAGE_LAYER_COUNTS": "[3, 4]"}, [3, 4]),
+        ):
+            with self.subTest(args=args, env=env), patch.dict(
+                os.environ, env, clear=True
+            ):
+                configs = server_args.setup_args(args)
+                self.assertEqual(
+                    configs.parallelism_config.pp_stage_layer_counts, expected
+                )
+
+
 class CacheConfigArgumentsTest(TestCase):
     # Keep the supported startup fields explicit, independently of parser registration.
     samples = {

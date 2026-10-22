@@ -1,7 +1,5 @@
 
 #include <cstdint>
-#include <utility>
-#include <vector>
 
 #include "gtest/gtest.h"
 
@@ -46,15 +44,6 @@ RankLayout makePp(int64_t pp_size, int64_t pp_rank) {
     return layout;
 }
 
-RankLayout makeMaterialized(std::vector<int64_t> counts, int64_t pp_rank) {
-    RankLayout layout;
-    layout.pp_size      = static_cast<int64_t>(counts.size());
-    layout.world_size   = layout.pp_size;
-    layout.pp_rank      = pp_rank;
-    layout.layer_counts = std::move(counts);
-    return layout;
-}
-
 }  // namespace
 
 TEST(RankLayoutTest, ComposeSliceMatchesOracleExhaustive) {
@@ -85,16 +74,15 @@ TEST(RankLayoutTest, WorldRankOfStageZeroIsStageRank) {
 
 TEST(RankLayoutTest, SingleStageDegenerate) {
     auto layout = makePp(/*pp_size=*/1, /*pp_rank=*/0);
-    EXPECT_TRUE(layout.hasEmbedding());
-    EXPECT_TRUE(layout.hasLmHead());
-    EXPECT_EQ(layout.myLayerRange(/*total_layers=*/64), (std::pair<int64_t, int64_t>{0, 64}));
+    EXPECT_TRUE(layout.isFirstStage());
+    EXPECT_TRUE(layout.isLastStage());
 }
 
-TEST(RankLayoutTest, CapabilityFlagsAcrossStages) {
+TEST(RankLayoutTest, StageEndpoints) {
     for (int64_t rank = 0; rank < 4; ++rank) {
         auto layout = makePp(4, rank);
-        EXPECT_EQ(layout.hasEmbedding(), rank == 0) << "rank " << rank;
-        EXPECT_EQ(layout.hasLmHead(), rank == 3) << "rank " << rank;
+        EXPECT_EQ(layout.isFirstStage(), rank == 0) << "rank " << rank;
+        EXPECT_EQ(layout.isLastStage(), rank == 3) << "rank " << rank;
     }
 }
 
@@ -139,50 +127,16 @@ TEST(RankLayoutTest, RingNeighborRanks) {
     EXPECT_EQ(single.nextRank(), 0);
 }
 
-TEST(RankLayoutTest, MaterializedShapeSpecializedCounts) {
-    auto layout = makeMaterialized({4, 12, 12}, 1);
-    EXPECT_EQ(layout.myLayerRange(/*total_layers=*/28), (std::pair<int64_t, int64_t>{4, 16}));
-    EXPECT_EQ(layout.layerRangeOf(2, /*total_layers=*/28), (std::pair<int64_t, int64_t>{16, 28}));
-}
-
-TEST(RankLayoutTest, MaterializedSingleStage) {
-    auto layout = makeMaterialized({64}, 0);
-    EXPECT_EQ(layout.myLayerRange(/*total_layers=*/64), (std::pair<int64_t, int64_t>{0, 64}));
-}
-
-TEST(RankLayoutTest, FirstMoeLayerUsesStageOwnership) {
-    /**
-     * Stage 0 [0,2) is dense; layers on either side of the boundaries must
-     * remain global IDs, including the first MoE on the last stage.
-     */
-    const std::vector<int64_t> moe_layers{2, 4, 5, 7};
-    EXPECT_EQ(makeMaterialized({2, 3, 3}, 0).firstMoeLayer(8, moe_layers), -1);
-    EXPECT_EQ(makeMaterialized({2, 3, 3}, 1).firstMoeLayer(8, moe_layers), 2);
-    EXPECT_EQ(makeMaterialized({2, 3, 3}, 2).firstMoeLayer(8, moe_layers), 5);
-    EXPECT_EQ(makeMaterialized({8}, 0).firstMoeLayer(8, moe_layers), 2);
-    EXPECT_EQ(makeMaterialized({8}, 0).firstMoeLayer(8, {}), -1);
-}
-
-TEST(RankLayoutTest, MaterializedRejectsInconsistentCounts) {
-    auto layout    = makeMaterialized({8, 8}, 0);
-    layout.pp_size = 3; /** size/pp_size mismatch */
-    EXPECT_THROW(layout.layerRangeOf(0, /*total_layers=*/16), std::exception);
-    auto ok = makeMaterialized({8, 8}, 0);
-    EXPECT_THROW(ok.layerRangeOf(2, /*total_layers=*/16), std::exception);
-    EXPECT_THROW(ok.layerRangeOf(-1, /*total_layers=*/16), std::exception);
-}
-
 TEST(RankLayoutTest, FromParallelismConfig) {
     ParallelismConfig pc;
-    pc.world_size            = 24;
-    pc.pp_size               = 3;
-    pc.pp_rank               = 2;
-    pc.dp_size               = 2;
-    pc.tp_size               = 4;
-    pc.dp_rank               = 1;
-    pc.tp_rank               = 3;
-    pc.pp_stage_layer_counts = {5, 4, 4};
-    const auto layout        = RankLayout::fromParallelismConfig(pc);
+    pc.world_size     = 24;
+    pc.pp_size        = 3;
+    pc.pp_rank        = 2;
+    pc.dp_size        = 2;
+    pc.tp_size        = 4;
+    pc.dp_rank        = 1;
+    pc.tp_rank        = 3;
+    const auto layout = RankLayout::fromParallelismConfig(pc);
     EXPECT_EQ(layout.world_size, 24);
     EXPECT_EQ(layout.pp_size, 3);
     EXPECT_EQ(layout.pp_rank, 2);
@@ -193,15 +147,6 @@ TEST(RankLayoutTest, FromParallelismConfig) {
     EXPECT_EQ(layout.laneStride(), 8);
     EXPECT_EQ(layout.stageRank(), 7);
     EXPECT_EQ(layout.worldRankOf(2), 2 * 8 + 7);
-    EXPECT_EQ(layout.myLayerRange(/*total_layers=*/13), (std::pair<int64_t, int64_t>{9, 13}));
-
-    /** Multi-stage layouts must consume the partition materialized by Python. */
-    ParallelismConfig bare;
-    bare.world_size        = 4;
-    bare.pp_size           = 4;
-    bare.pp_rank           = 0;
-    const auto bare_layout = RankLayout::fromParallelismConfig(bare);
-    EXPECT_THROW(bare_layout.layerRangeOf(0, /*total_layers=*/65), std::exception);
 }
 
 TEST(RankLayoutTest, ExplicitWorldSizeDefinesStageStride) {

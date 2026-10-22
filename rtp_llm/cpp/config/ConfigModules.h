@@ -90,7 +90,7 @@ struct ParallelismConfig {
     // os.environ["ROLE_TYPE"] anymore.
     RoleType role_type = RoleType::PDFUSION;
 
-    /** Materialized PP layer partition. Empty retains the C++ even-split compatibility fallback. */
+    /** Main-model layer counts per stage; ignored by drafts and single-stage models. */
     std::vector<int64_t> pp_stage_layer_counts;
 
     FfnDisAggregateConfig ffn_disaggregate_config;  // FFN disaggregate configuration

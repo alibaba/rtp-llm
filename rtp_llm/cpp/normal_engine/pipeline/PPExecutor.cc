@@ -10,6 +10,7 @@
 #include <utility>
 
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/config/StageLayerRange.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
@@ -316,6 +317,16 @@ void PPExecutor::validateConfig(const EngineInitParams& params) {
                             "pipeline parallelism does not support enable_remote_cache");
 }
 
+int64_t PPExecutor::firstLocalMoeLayer(const ModelConfig& model_config) const {
+    const auto range = stageLayerRange(parallelism_config_, parallelism_config_.pp_rank, model_config.num_layers);
+    for (const auto layer_id : model_config.moe_layer_index) {
+        if (layer_id >= range.begin && layer_id < range.end()) {
+            return layer_id;
+        }
+    }
+    return -1;
+}
+
 PPExecutor::PPExecutor(const EngineInitParams&                params,
                        const std::shared_ptr<KVCacheManager>& cache_manager,
                        bool                                   warm_up,
@@ -364,9 +375,10 @@ PPExecutor::PPExecutor(const EngineInitParams&                params,
     }
 
     if (params.eplb_config.enable_eplb() && params.model_config_.moe_style != 0) {
-        const auto first_moe_layer =
-            pp_layout_.firstMoeLayer(params.model_config_.num_layers, params.model_config_.moe_layer_index);
+        const auto first_moe_layer = firstLocalMoeLayer(params.model_config_);
         if (first_moe_layer >= 0) {
+            const auto range =
+                stageLayerRange(parallelism_config_, parallelism_config_.pp_rank, params.model_config_.num_layers);
             const auto& moe_kernel = params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel;
             auto        moe_weight_type     = torchDTypeToDataType(moe_kernel.dtype());
             bool        is_gated_activation = params.model_config_.isGatedActivation();
@@ -379,7 +391,7 @@ PPExecutor::PPExecutor(const EngineInitParams&                params,
                                                  moe_inter_size,
                                                  params.model_config_.hidden_size,
                                                  params.parallelism_config,
-                                                 pp_layout_.myLayerRange(params.model_config_.num_layers),
+                                                 std::pair<int64_t, int64_t>{range.begin, range.end()},
                                                  params.py_eplb,
                                                  moe_weight_type,
                                                  params.model_config_.quant_algo,

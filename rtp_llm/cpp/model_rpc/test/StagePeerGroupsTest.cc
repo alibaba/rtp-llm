@@ -48,10 +48,6 @@ TEST(StagePeerGroups, MismatchedWorkerCountThrows) {
     EXPECT_THROW(buildStagePeerGroups(makePpConfig(4, 2, {2, 2, 2, 2}), makeWorkers(7)), std::exception);
 }
 
-TEST(StagePeerGroups, MissingLayerPartitionThrows) {
-    EXPECT_THROW(buildStagePeerGroups(makePpConfig(2, 1, {}), makeWorkers(2)), std::exception);
-}
-
 TEST(StagePeerGroups, ValidateAcceptsTilingGroups) {
     const auto groups = buildStagePeerGroups(makePpConfig(4, 2, {3, 3, 2, 2}), makeWorkers(8));
     EXPECT_NO_THROW(validateStagePeerGroups(groups, 10));

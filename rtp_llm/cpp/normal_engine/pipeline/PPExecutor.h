@@ -98,6 +98,8 @@ public:
 private:
     static void validateConfig(const EngineInitParams& params);
 
+    int64_t firstLocalMoeLayer(const ModelConfig& model_config) const;
+
     struct InflightBatch {
         bool                           result_pending = false;
         StreamGroups                   stream_groups;
@@ -183,11 +185,11 @@ private:
     void reapCompletedActivationSends();
 
     bool isFirstStage() const {
-        return pp_layout_.hasEmbedding();
+        return pp_layout_.isFirstStage();
     }
 
     bool isLastStage() const {
-        return pp_layout_.hasLmHead();
+        return pp_layout_.isLastStage();
     }
 
     bool isStageRoot() const {

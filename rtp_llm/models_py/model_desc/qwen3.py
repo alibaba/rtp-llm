@@ -90,7 +90,6 @@ class Qwen3Model(GptModelBase):
         fmha_config=None,
         py_hw_kernel_config=None,
         device_resource_config=None,
-        apply_pp_partition: bool = True,
     ):
         """Build owned decoder layers with global weight IDs and local cache IDs."""
         super().__init__(
@@ -101,17 +100,16 @@ class Qwen3Model(GptModelBase):
             fmha_config=fmha_config,
             py_hw_kernel_config=py_hw_kernel_config,
             device_resource_config=device_resource_config,
-            apply_pp_partition=apply_pp_partition,
         )
 
+        layer_ids = self.layer_ids()
         self.embed_tokens = (
             Embedding(
                 config, parallelism_config, weights.get_global_weight(W.embedding)
             )
-            if self.pp_has_embedding
+            if 0 in layer_ids
             else None
         )
-        self.pp_layer_ids_list = self.pp_layer_ids()
         self.layers = nn.ModuleList(
             [
                 Qwen3DecoderLayer(
@@ -122,14 +120,14 @@ class Qwen3Model(GptModelBase):
                     quant_config,
                     py_hw_kernel_config,
                 )
-                for idx in self.pp_layer_ids_list
+                for idx in layer_ids
             ]
         )
         self.norm = (
             RMSNorm(
                 weights.get_global_weight(W.final_ln_gamma), eps=config.layernorm_eps
             )
-            if self.pp_has_lm_head
+            if self.layer_num - 1 in layer_ids
             else None
         )
         self._init_capture_context(
@@ -161,6 +159,7 @@ class Qwen3Model(GptModelBase):
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
         capture = self.capture_context(inputs.capture_hidden_states)
+        layer_ids = self.layer_ids()
         # Cache surfaces are indexed by model-local layer ids (the C++ layout is projected to this stage).
         for local_idx, decoder_layer in enumerate(self.layers):
             layer_fmha_impl = select_fmha_impl_for_layer(
@@ -173,7 +172,7 @@ class Qwen3Model(GptModelBase):
                     self.kv_cache.get_layer_cache(local_idx) if self.kv_cache else None
                 ),
             )
-            capture.capture_layer(self.pp_layer_ids_list[local_idx], hidden_states)
+            capture.capture_layer(layer_ids[local_idx], hidden_states)
         if self.norm is not None:
             return capture.finalize(hidden_states)
         # Non-last stage: emit the single boundary tensor (fused-residual models emit two, see qwen3_next).

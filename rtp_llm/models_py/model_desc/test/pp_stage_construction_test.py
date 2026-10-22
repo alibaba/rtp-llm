@@ -5,53 +5,20 @@ from unittest.mock import Mock, patch
 import torch
 from torch import nn
 
-from rtp_llm.config.pp_layout import even_split_counts
-from rtp_llm.models_py.model_desc.module_base import GptModelBase
+from rtp_llm.config.layer_partition import even_split_counts
 
 
-def make_base(
-    pp_size=1,
-    pp_rank=0,
-    layer_num=32,
-):
-    """GptModelBase without running __init__ (needs full model config)."""
-    model = object.__new__(GptModelBase)
-    cfg = SimpleNamespace(pp_size=pp_size, pp_rank=pp_rank)
-    if pp_size > 1:
-        cfg.pp_stage_layer_counts = even_split_counts(layer_num, pp_size)
-    model.parallelism_config = cfg
-    model.layer_num = layer_num
-    model._apply_pp_partition = True
-    return model
-
-
-class PPStageViewTest(unittest.TestCase):
-    def test_pp_size_1_keeps_today_behavior(self):
-        model = make_base(pp_size=1, pp_rank=0, layer_num=36)
-        self.assertEqual(model.pp_layer_ids(), list(range(36)))
-        # pp_size=1 is both first and last stage.
-        self.assertTrue(model.pp_has_embedding)
-        self.assertTrue(model.pp_has_lm_head)
-
-    def test_even_split_two_stages(self):
-        stage0 = make_base(pp_size=2, pp_rank=0, layer_num=32)
-        stage1 = make_base(pp_size=2, pp_rank=1, layer_num=32)
-        self.assertEqual(stage0.pp_layer_ids(), list(range(0, 16)))
-        self.assertEqual(stage1.pp_layer_ids(), list(range(16, 32)))
-        self.assertTrue(stage0.pp_has_embedding)
-        self.assertFalse(stage0.pp_has_lm_head)
-        self.assertFalse(stage1.pp_has_embedding)
-        self.assertTrue(stage1.pp_has_lm_head)
-
-
-def make_qwen3(pp_size, pp_rank, num_layers=8, counts=None, apply_pp_partition=True):
+def make_qwen3(pp_size, pp_rank, num_layers=8, counts=None, is_mtp=False):
     """Construct Qwen3Model with heavy building blocks mocked out."""
     from rtp_llm.models_py.model_desc import qwen3
 
     config = SimpleNamespace(
-        num_layers=num_layers, vocab_size=100, layernorm_eps=1e-6,
+        num_layers=num_layers,
+        vocab_size=100,
+        layernorm_eps=1e-6,
         capture_aux_hidden_layer_ids=None,
         hidden_state_capture_layer_ids=[],
+        is_mtp=is_mtp,
     )
     parallelism_config = SimpleNamespace(
         pp_size=pp_size,
@@ -59,11 +26,10 @@ def make_qwen3(pp_size, pp_rank, num_layers=8, counts=None, apply_pp_partition=T
         tp_size=1,
         dp_size=1,
         world_rank=pp_rank,
-    )
-    if pp_size > 1:
-        parallelism_config.pp_stage_layer_counts = (
+        pp_stage_layer_counts=(
             counts if counts is not None else even_split_counts(num_layers, pp_size)
-        )
+        ),
+    )
     weights = SimpleNamespace(
         weights={idx: f"layer_{idx}" for idx in range(num_layers)},
         get_global_weight=lambda name: f"global_{name}",
@@ -79,8 +45,10 @@ def make_qwen3(pp_size, pp_rank, num_layers=8, counts=None, apply_pp_partition=T
         "rtp_llm.models_py.model_desc.module_base.get_device_type"
     ):
         model = qwen3.Qwen3Model(
-            config, parallelism_config, weights, max_generate_batch_size=1,
-            apply_pp_partition=apply_pp_partition,
+            config,
+            parallelism_config,
+            weights,
+            max_generate_batch_size=1,
         )
     return model, mock_emb, mock_layer, mock_norm
 
@@ -88,14 +56,20 @@ def make_qwen3(pp_size, pp_rank, num_layers=8, counts=None, apply_pp_partition=T
 class Qwen3StageConstructionTest(unittest.TestCase):
     def test_tail_draft_builds_all_its_layers_with_target_partition_unchanged(self):
         model, mock_emb, mock_layer, mock_norm = make_qwen3(
-            pp_size=2, pp_rank=1, num_layers=2, counts=[16, 16],
-            apply_pp_partition=False,
+            pp_size=2,
+            pp_rank=1,
+            num_layers=2,
+            counts=[16, 16],
+            is_mtp=True,
         )
-        self.assertEqual(model.pp_layer_ids_list, [0, 1])
+        self.assertEqual(list(model.layer_ids()), [0, 1])
         self.assertEqual([call.args[2] for call in mock_layer.call_args_list], [0, 1])
         mock_emb.assert_called_once()
         mock_norm.assert_called_once()
-        self.assertEqual((model.pp_size, model.pp_rank), (2, 1))
+        self.assertEqual(
+            (model.parallelism_config.pp_size, model.parallelism_config.pp_rank),
+            (2, 1),
+        )
         self.assertEqual(model.parallelism_config.pp_stage_layer_counts, [16, 16])
 
     def test_pp_size_1_builds_everything(self):
@@ -103,7 +77,7 @@ class Qwen3StageConstructionTest(unittest.TestCase):
         self.assertIsNotNone(model.embed_tokens)
         self.assertIsNotNone(model.norm)
         self.assertEqual(len(model.layers), 8)
-        self.assertEqual(model.pp_layer_ids_list, list(range(8)))
+        self.assertEqual(list(model.layer_ids()), list(range(8)))
         mock_emb.assert_called_once()
         mock_norm.assert_called_once()
         self.assertEqual(mock_layer.call_count, 8)
@@ -112,7 +86,7 @@ class Qwen3StageConstructionTest(unittest.TestCase):
         model, mock_emb, mock_layer, mock_norm = make_qwen3(pp_size=2, pp_rank=0)
         self.assertIsNotNone(model.embed_tokens)
         self.assertIsNone(model.norm)  # final norm belongs to the last stage
-        self.assertEqual(model.pp_layer_ids_list, [0, 1, 2, 3])
+        self.assertEqual(list(model.layer_ids()), [0, 1, 2, 3])
         self.assertEqual(len(model.layers), 4)
         mock_emb.assert_called_once()
         mock_norm.assert_not_called()
@@ -124,7 +98,7 @@ class Qwen3StageConstructionTest(unittest.TestCase):
         model, mock_emb, mock_layer, mock_norm = make_qwen3(pp_size=2, pp_rank=1)
         self.assertIsNone(model.embed_tokens)  # embedding on first stage only
         self.assertIsNotNone(model.norm)
-        self.assertEqual(model.pp_layer_ids_list, [4, 5, 6, 7])
+        self.assertEqual(list(model.layer_ids()), [4, 5, 6, 7])
         self.assertEqual(len(model.layers), 4)
         mock_emb.assert_not_called()
         mock_norm.assert_called_once()
@@ -136,7 +110,7 @@ class Qwen3StageConstructionTest(unittest.TestCase):
         self.assertIsNone(model.embed_tokens)
         self.assertIsNone(model.norm)
         # 8 layers / 3 stages -> 3/3/2; middle stage owns [3, 6).
-        self.assertEqual(model.pp_layer_ids_list, [3, 4, 5])
+        self.assertEqual(list(model.layer_ids()), [3, 4, 5])
         mock_emb.assert_not_called()
         mock_norm.assert_not_called()
 
@@ -154,13 +128,13 @@ class Qwen3NextPPBoundaryTest(unittest.TestCase):
         nn.Module.__init__(model)
         model.embed_tokens = None  # exercise the non-first-stage entry
         model.kv_cache = None
-        model._apply_pp_partition = True
         model._mtp_aux_capture_layer_ids = ()
         model._mtp_aux_capture_layer_id_set = frozenset()
-        model.pp_layer_ids_list = [pp_rank]
         model.parallelism_config = SimpleNamespace(
-            pp_size=3, pp_rank=pp_rank, pp_stage_layer_counts=[1, 1, 1],
-            prefill_cp_config=SimpleNamespace(is_enabled=lambda: False)
+            pp_size=3,
+            pp_rank=pp_rank,
+            pp_stage_layer_counts=[1, 1, 1],
+            prefill_cp_config=SimpleNamespace(is_enabled=lambda: False),
         )
         layer = Mock()
         layer.layer_type = qn.HybridAttentionType.LINEAR
@@ -170,7 +144,10 @@ class Qwen3NextPPBoundaryTest(unittest.TestCase):
         model.norm = (
             Mock(side_effect=lambda h, r: (h + r, h + r)) if pp_rank == 2 else None
         )
-        model.config = SimpleNamespace(hidden_state_capture_layer_ids=[])
+        model.layer_num = 3
+        model.config = SimpleNamespace(
+            hidden_state_capture_layer_ids=[], num_layers=3, is_mtp=False
+        )
         model._init_capture_context(
             model._capture_canonical_layer, model._capture_canonical_final
         )
@@ -196,15 +173,15 @@ class Qwen3NextPPBoundaryTest(unittest.TestCase):
             qn, "get_primary_attention_inputs", return_value=attn
         ), patch.object(
             qn, "select_attention_inputs_for_layer", return_value=attn
-        ), patch.object(qn, "prepare_causal_conv1d_metadata", return_value=None):
+        ), patch.object(
+            qn, "prepare_causal_conv1d_metadata", return_value=None
+        ):
             return model.forward(inputs)
 
     def test_non_last_stage_warmup_emits_hidden_and_residual(self):
         model, qn = self._make_model(pp_rank=1)
         intermediates = model.make_empty_intermediate_tensors(torch.zeros(2, 4))
-        outputs = self._run_forward(
-            model, qn, self._make_inputs(torch, intermediates)
-        )
+        outputs = self._run_forward(model, qn, self._make_inputs(torch, intermediates))
         self.assertEqual(set(outputs.pp_intermediates), {"hidden_states", "residual"})
         torch.testing.assert_close(
             outputs.pp_intermediates["hidden_states"], torch.zeros(2, 4)
@@ -282,24 +259,36 @@ class Qwen3NextPPAuxCaptureTest(unittest.TestCase):
                 return hidden + residual, residual
 
         config = SimpleNamespace(
-            num_layers=sum(counts), vocab_size=100, layernorm_eps=1e-6,
+            num_layers=sum(counts),
+            vocab_size=100,
+            layernorm_eps=1e-6,
             capture_aux_hidden_layer_ids=list(capture_ids),
             hidden_state_capture_layer_ids=[],
+            is_mtp=False,
         )
         parallelism = SimpleNamespace(
-            pp_size=len(counts), pp_rank=rank, pp_stage_layer_counts=counts,
+            pp_size=len(counts),
+            pp_rank=rank,
+            pp_stage_layer_counts=counts,
             prefill_cp_config=SimpleNamespace(is_enabled=lambda: False),
         )
         weights = SimpleNamespace(
             weights=[{} for _ in range(sum(counts))],
             get_global_weight=lambda name: torch.ones(4),
         )
-        with patch.object(qn, "Embedding", side_effect=lambda *args: Embedding()), patch.object(
+        with patch.object(
+            qn, "Embedding", side_effect=lambda *args: Embedding()
+        ), patch.object(
             qn, "RMSResNorm", side_effect=lambda *args, **kwargs: Norm()
         ), patch.object(
-            qn, "Qwen3NextDecoderLayer",
-            side_effect=lambda config, parallelism, weights, idx, *args, **kwargs: Decoder(idx),
-        ), patch("rtp_llm.models_py.model_desc.module_base.get_device_type"):
+            qn,
+            "Qwen3NextDecoderLayer",
+            side_effect=lambda config, parallelism, weights, idx, *args, **kwargs: Decoder(
+                idx
+            ),
+        ), patch(
+            "rtp_llm.models_py.model_desc.module_base.get_device_type"
+        ):
             return qn.Qwen3NextModel(config, parallelism, weights, None, 1)
 
     @staticmethod
@@ -312,10 +301,14 @@ class Qwen3NextPPAuxCaptureTest(unittest.TestCase):
         attention.is_target_verify = verify
         attention.is_cuda_graph = False
         attention.prefix_lengths = torch.zeros(1, dtype=torch.int32)
-        attention.cu_seqlens_device = torch.tensor([0, token_ids.numel()], dtype=torch.int32)
+        attention.cu_seqlens_device = torch.tensor(
+            [0, token_ids.numel()], dtype=torch.int32
+        )
         inputs = SimpleNamespace(
-            input_ids=token_ids, input_hiddens=None,
-            pp_intermediates=intermediates or {}, attention_inputs=attention,
+            input_ids=token_ids,
+            input_hiddens=None,
+            pp_intermediates=intermediates or {},
+            attention_inputs=attention,
             capture_hidden_states=False,
         )
         with patch.object(model, "prepare_fmha_impl", return_value=None), patch.object(
@@ -337,13 +330,16 @@ class Qwen3NextPPAuxCaptureTest(unittest.TestCase):
                     if rank != len(counts) - 1:
                         self.assertIsNone(model.get_mtp_target_hidden_states(-1))
                         intermediates = output.pp_intermediates
-                        reached = sum(layer < sum(counts[: rank + 1]) for layer in capture_ids)
+                        reached = sum(
+                            layer < sum(counts[: rank + 1]) for layer in capture_ids
+                        )
                         if reached:
                             prefix = intermediates["mtp_aux_hidden_states"]
                             self.assertEqual(tuple(prefix.shape), (3, reached * 4))
                             self.assertTrue(prefix.is_contiguous())
                             torch.testing.assert_close(
-                                prefix, expected.mtp_target_hidden_states[:, : reached * 4]
+                                prefix,
+                                expected.mtp_target_hidden_states[:, : reached * 4],
                             )
                         else:
                             self.assertNotIn("mtp_aux_hidden_states", intermediates)
@@ -351,10 +347,12 @@ class Qwen3NextPPAuxCaptureTest(unittest.TestCase):
                 torch.testing.assert_close(output.hidden_states, expected.hidden_states)
                 if capture_ids:
                     torch.testing.assert_close(
-                        output.mtp_target_hidden_states, expected.mtp_target_hidden_states
+                        output.mtp_target_hidden_states,
+                        expected.mtp_target_hidden_states,
                     )
                     torch.testing.assert_close(
-                        model.get_mtp_target_hidden_states(-1), expected.mtp_target_hidden_states
+                        model.get_mtp_target_hidden_states(-1),
+                        expected.mtp_target_hidden_states,
                     )
 
     def test_capture_reuses_capacity_and_exposes_only_current_rows(self):
@@ -400,7 +398,9 @@ class Qwen3NextPPAuxCaptureTest(unittest.TestCase):
             model = self._make_stage([2, 3, 1, 2], rank, (0, 4, 7))
             inputs = model.make_empty_intermediate_tensors(torch.zeros(5, 4))
             if parts:
-                self.assertEqual(tuple(inputs["mtp_aux_hidden_states"].shape), (5, parts * 4))
+                self.assertEqual(
+                    tuple(inputs["mtp_aux_hidden_states"].shape), (5, parts * 4)
+                )
             else:
                 self.assertNotIn("mtp_aux_hidden_states", inputs)
             self.assertEqual(tuple(inputs["residual"].shape), (5, 4))
@@ -418,15 +418,16 @@ class Qwen3PPBoundaryTest(unittest.TestCase):
         nn.Module.__init__(model)
         model.embed_tokens = None  # non-first-stage entry
         model.kv_cache = None
-        model._apply_pp_partition = True
         model.parallelism_config = SimpleNamespace(
             pp_size=3, pp_rank=pp_rank, pp_stage_layer_counts=[1, 1, 1]
         )
         layer = Mock(side_effect=lambda h, *a, **k: h)  # echo layer
         model.layers = [layer]
-        model.pp_layer_ids_list = [pp_rank]
         model.norm = Mock(side_effect=lambda h: h + 1.0) if pp_rank == 2 else None
-        model.config = SimpleNamespace(hidden_state_capture_layer_ids=[])
+        model.layer_num = 3
+        model.config = SimpleNamespace(
+            hidden_state_capture_layer_ids=[], num_layers=3, is_mtp=False
+        )
         model._init_capture_context(
             model._capture_canonical_layer, model._capture_canonical_final
         )

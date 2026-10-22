@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 import torch
 
+from rtp_llm.config.layer_partition import local_layer_range
 from rtp_llm.config.quant_config import (
     Fp8PerTensorQuantConfig,
     ModelOptFp4Config,
@@ -196,6 +197,7 @@ class ModelDeployWeightInfo:
     ):
         """Initialize ModelDeployWeightInfo with independent configuration objects."""
         self.model_config = model_config
+        self.layer_range = local_layer_range(model_config, parallelism_config)
         self.merge_lora = merge_lora
         # Model-specific descriptor builders may use the serving role to retain
         # only tensors reachable by a role-specialized execution graph.
@@ -218,9 +220,6 @@ class ModelDeployWeightInfo:
         self.dp_rank = parallelism_config.dp_rank
         self.pp_size = parallelism_config.pp_size
         self.pp_rank = parallelism_config.pp_rank
-        # Materialized layer partition from startup; absent only at pp_size=1 or in test mocks.
-        pp_counts = getattr(parallelism_config, "pp_stage_layer_counts", None)
-        self.pp_stage_layer_counts = list(pp_counts) if pp_counts else None
         local_world_size = parallelism_config.local_world_size
         if self.pp_size > 1:
             # An EP group is ep_size contiguous world ranks starting at
@@ -810,9 +809,7 @@ class ModelDeployWeightInfo:
             ep_rank=self.ep_rank,
             dp_size=self.dp_size,
             dp_rank=self.dp_rank,
-            pp_size=getattr(self, "pp_size", 1),
-            pp_rank=getattr(self, "pp_rank", 0),
-            pp_stage_layer_counts=getattr(self, "pp_stage_layer_counts", None),
+            layer_range=self.layer_range,
             lm_head_tp_rank=self.lm_head_tp_rank,
             lm_head_tp_size=self.lm_head_tp_size,
             num_nodes=self.num_nodes,

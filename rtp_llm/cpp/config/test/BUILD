@@ -17,3 +17,15 @@ cc_test(
     ],
     env = {},
 )
+
+cc_test(
+    name = "stage_layer_range_test",
+    srcs = ["StageLayerRangeTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/config:stage_layer_range",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+    env = {},
+)

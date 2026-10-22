@@ -49,12 +49,14 @@ cc_library(
 cc_library(
     name = "stage_layer_range",
     hdrs = ["StageLayerRange.h"],
+    copts = copts(),
     visibility = ["//visibility:public"],
+    deps = [
+        ":config_modules",
+    ],
 )
 
-# C++ parallel rank/stage layout: rank lattice (mirrors
-# rtp_llm/models_py/distributed/rank_layout.py) + PP ring peers + PP layer
-# partition (mirrors rtp_llm/config/pp_layout.py).
+# Rank topology mirrors rtp_llm/models_py/distributed/rank_layout.py.
 cc_library(
     name = "rank_layout",
     hdrs = ["RankLayout.h"],
@@ -62,7 +64,6 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":config_modules",
-        "//rtp_llm/cpp/utils:core_utils",
     ],
 )
 

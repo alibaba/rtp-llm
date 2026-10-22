@@ -12,9 +12,9 @@ sys.path.append(os.path.join(str(CUR_PATH), ".."))
 
 from rtp_llm.config.engine_config import EngineConfig, finalize_scheduler_config
 from rtp_llm.config.kv_cache_config import KVCacheConfig
+from rtp_llm.config.layer_partition import finalize_pp_partition, is_last_stage
 from rtp_llm.config.model_args import ModelArgs
 from rtp_llm.config.model_config import ModelConfig, build_model_config
-from rtp_llm.config.pp_layout import resolve_pp_partition, stage_has_lm_head
 from rtp_llm.config.py_config_modules import (
     EmbeddingConfig,
     GenerateEnvConfig,
@@ -168,7 +168,7 @@ class ModelFactory:
                 sp_type = SpeculativeType.EAGLE3
 
             parallelism_config = engine_config.parallelism_config
-            if not stage_has_lm_head(
+            if not is_last_stage(
                 parallelism_config.pp_rank, parallelism_config.pp_size
             ):
                 return None
@@ -223,7 +223,6 @@ class ModelFactory:
                 moe_pure_tp_preshard=engine_config.load_config.moe_pure_tp_preshard,
                 weight_alias_owner=target_model if alias_names else None,
                 weight_alias_names=alias_names,
-                apply_pp_partition=False,
             )
             aliased_local_bytes = 0
             for name in alias_names:
@@ -412,14 +411,16 @@ class ModelFactory:
         engine_config: EngineConfig,
         model_config: ModelConfig,
     ) -> None:
-        """Update EngineConfig based on ModelConfig.
+        """Resolve model-dependent engine settings.
 
-        This method finalizes scheduler config and sets model_name in engine_config.
+        PP partitioning and scheduler limits must use the final model configuration.
 
         Args:
             engine_config: EngineConfig to update
             model_config: ModelConfig containing model information
         """
+        finalize_pp_partition(engine_config.parallelism_config, model_config.num_layers)
+
         # Finalize scheduler config based on ModelConfig (only once, for main model)
         finalize_scheduler_config(
             fifo_scheduler_config=engine_config.runtime_config.fifo_scheduler_config,
@@ -439,35 +440,13 @@ class ModelFactory:
         # Set model_name to engine_config.runtime_config.model_name (for backward compatibility)
         engine_config.runtime_config.model_name = model_config.model_name
 
-        # Materialize the PP layer partition once; downstream consumers (loading, construction, cache) read the counts.
-        parallelism_config = engine_config.parallelism_config
-        if (
-            parallelism_config.pp_size > 1
-            and not parallelism_config.pp_stage_layer_counts
-        ):
-            counts = resolve_pp_partition(
-                model_config.num_layers,
-                parallelism_config.pp_size,
-                model_config,
-            )
-            parallelism_config.pp_stage_layer_counts = counts
-            logging.info(
-                "PP layer partition materialized: num_layers=%d pp_size=%d counts=%s",
-                model_config.num_layers,
-                parallelism_config.pp_size,
-                counts,
-            )
-
     @staticmethod
     def create_propose_model_config(
         engine_config: EngineConfig,
         model_config: ModelConfig,
         model_args: ModelArgs,
     ) -> Optional[ModelConfig]:
-        """Create propose ModelConfig from configuration objects.
-
-        This method handles ModelConfig construction and initialization logic for the propose model.
-        The main model_config must be created first, as propose model's max_seq_len must match main model.
+        """Create draft ModelConfig aligned with the main model.
 
         Args:
             engine_config: Already built EngineConfig
@@ -513,6 +492,9 @@ class ModelFactory:
         propose_model_config = propose_model_cls._create_config(
             sp_config.checkpoint_path
         )
+        # Drafts share the target's PP topology but must load all their own layers.
+        # is_mtp marks this role for MTP, EAGLE and DSpARK.
+        propose_model_config.is_mtp = True
         # Ensure max_seq_len matches main model
         propose_model_config.max_seq_len = model_config.max_seq_len
         propose_model_config.quantization = sp_config.quantization

@@ -21,6 +21,7 @@
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/StagePeerGroups.h"
 #include "rtp_llm/cpp/config/RankLayout.h"
+#include "rtp_llm/cpp/config/StageLayerRange.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/telemetry/PhaseSpanSynthesizer.h"
@@ -1170,13 +1171,15 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCacheAsyncForTp(DecodeGene
 DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     RTP_LLM_PROFILE_FUNCTION();
     AtomicGuard request_guard(onflight_load_cache_requests_);
-    const auto& request_key   = load_context.request_key;
-    auto        cache_manager = engine_->resourceContext().cache_manager;
-    const auto& cache_config  = cache_manager->cacheConfig();
-    const auto& pc            = maga_init_params_.parallelism_config;
-    const auto  layout        = RankLayout::fromParallelismConfig(pc);
-    const auto [global_begin, global_end] = layout.myLayerRange(maga_init_params_.model_config_.num_layers);
-    const bool use_stage_routing = pc.pp_size > 1 || !load_context.remote_stage_peer_groups.empty();
+    const auto& request_key       = load_context.request_key;
+    auto        cache_manager     = engine_->resourceContext().cache_manager;
+    const auto& cache_config      = cache_manager->cacheConfig();
+    const auto& pc                = maga_init_params_.parallelism_config;
+    const auto  layout            = RankLayout::fromParallelismConfig(pc);
+    const auto  layer_range       = stageLayerRange(pc, pc.pp_rank, maga_init_params_.model_config_.num_layers);
+    const auto  global_begin      = layer_range.begin;
+    const auto  global_end        = layer_range.end();
+    const bool  use_stage_routing = pc.pp_size > 1 || !load_context.remote_stage_peer_groups.empty();
     validateGroupTags(load_context, cache_config.topology());
 
     const int peer_cnt = static_cast<int>(load_context.peer_addrs.size());
@@ -1387,7 +1390,7 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
             }
         }
 
-        if (include_mtp && engine_->isMTPEagle() && layout.hasLmHead()) {
+        if (include_mtp && engine_->isMTPEagle() && layout.isLastStage()) {
             if (propose_maga_init_params_ && propose_maga_init_params_->mtp_model_params_
                 && !propose_maga_init_params_->mtp_model_params_->empty()) {
                 const auto mtp_load_plan = makeMTPModuleLoadPlan(propose_maga_init_params_);

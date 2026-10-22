@@ -7,7 +7,7 @@ cc_library(
     deps = torch_deps() + [
         "//rtp_llm/cpp/models:eplb",
         "//rtp_llm/cpp/models:models",
-        "//rtp_llm/cpp/config:rank_layout",
+        "//rtp_llm/cpp/config:stage_layer_range",
         "//rtp_llm/cpp/pybind:th_utils",
         "//rtp_llm/cpp/pybind:th_compute_lib",
     ],

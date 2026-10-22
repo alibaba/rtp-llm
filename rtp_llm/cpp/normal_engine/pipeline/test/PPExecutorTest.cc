@@ -931,6 +931,33 @@ private:
 };
 
 /** Common construction/configuration contracts. */
+TEST_F(PPExecutorTest, FirstLocalMoeLayerUsesStageRange) {
+    const int64_t expected[] = {-1, 2, 5};
+    for (int stage : {0, 1, 2}) {
+        SCOPED_TRACE(stage);
+        auto params                                     = makeStageParams(stage);
+        params.model_config_.num_layers                 = 8;
+        params.model_config_.moe_layer_index            = {2, 4, 5, 7};
+        params.parallelism_config.pp_stage_layer_counts = {2, 3, 3};
+        PPExecutor executor(params, nullptr, true);
+        EXPECT_EQ(executor.firstLocalMoeLayer(params.model_config_), expected[stage]);
+        params.model_config_.moe_layer_index.clear();
+        EXPECT_EQ(executor.firstLocalMoeLayer(params.model_config_), -1);
+    }
+}
+
+TEST_F(PPExecutorTest, CommonDenseStageDoesNotStartExpertBalancer) {
+    auto params                                     = makeStageParams(0);
+    params.model_config_.num_layers                 = 8;
+    params.model_config_.moe_style                  = 1;
+    params.model_config_.expert_num                 = 2;
+    params.model_config_.moe_layer_index            = {2, 4, 5, 7};
+    params.parallelism_config.pp_stage_layer_counts = {2, 3, 3};
+    params.eplb_config.eplb_mode                    = EplbMode::ALL;
+    PPExecutor executor(params, nullptr, true);
+    EXPECT_EQ(executor.expert_balancer_, nullptr);
+}
+
 TEST_F(PPExecutorTpTest, CommonPythonTargetIgnoresGenerationPrefillGraphBuckets) {
     /** The embedded test reaches initialize without loading the production extension's type registry. */
     py::class_<torch_ext::PyModelInitResources>(py::module_::import("__main__"), "PyModelInitResources");
