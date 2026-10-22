@@ -246,7 +246,7 @@ cc_library(
         ":cuda_attn_bindings_base",
     ] + select({
         # sm_120 consumer Blackwell (RTX 5090 / RTX PRO 5000) is x86-only;
-        # GB200 (cuda12_9_arm) is sm_10x and would trap on this kernel.
+        # ARM/GB200 builds must not register this x86 SM120 backend.
         # local_defines above and this dependency share this same select so
         # registration and linking cannot drift apart.
         "@//:using_cuda12_9_x86": [

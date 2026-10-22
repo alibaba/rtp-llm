@@ -868,7 +868,9 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         convert_device = torch.device(device)
         layout_device = convert_device if convert_device.type == "cuda" else None
         use_cutlass = (
-            is_sm120(layout_device) and resolve_sm120_fp8_backend() == "cutlass"
+            self.kernel.name not in (W.moe_w1, W.moe_w2)
+            and is_sm120(layout_device)
+            and resolve_sm120_fp8_backend() == "cutlass"
         )
         use_e8m0 = is_deep_gemm_e8m0_used() and not use_cutlass
 

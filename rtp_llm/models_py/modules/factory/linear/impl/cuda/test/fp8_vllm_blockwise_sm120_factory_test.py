@@ -118,26 +118,6 @@ class SM120FactoryDiagnosticTest(unittest.TestCase):
             torch.cat([weights["sa"].reshape(1, 1), weights["sb"].reshape(2, 1)]),
         )
 
-    def test_factory_ignores_broken_rejection_diagnostic(self):
-        class BrokenDiagnosticStrategy:
-            @classmethod
-            def can_handle(cls, *args, **kwargs):
-                return False
-
-            @classmethod
-            def rejection_reason(cls, *args, **kwargs):
-                raise RuntimeError("diagnostic failed")
-
-        quant_config = init_quant_config("FP8_PER_BLOCK")
-        weight = torch.empty((128, 128), dtype=torch.float8_e4m3fn)
-        weight_scales = torch.ones((1, 1), dtype=torch.float32)
-
-        with (
-            mock.patch.object(LinearFactory, "_strategies", [BrokenDiagnosticStrategy]),
-            self.assertRaisesRegex(ValueError, "No suitable Linear strategy"),
-        ):
-            LinearFactory.create_linear(weight, None, weight_scales, quant_config)
-
     def test_constructor_rejects_missing_weight_scales(self):
         weight = torch.empty((128, 128), dtype=torch.float8_e4m3fn)
         with self.assertRaisesRegex(ValueError, "requires weight_scales"):

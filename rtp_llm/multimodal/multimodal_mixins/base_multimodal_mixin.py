@@ -110,9 +110,7 @@ class BaseMultiModalMixin:
             return
 
         self.mm_mixin_loader = self.create_mm_mixin_loader()
-        self.weights = self.mm_mixin_loader.load_weights(
-            device=device, data_type=compute_dtype
-        )
+        self.weights = self.mm_mixin_loader.load_weights(device=device)
 
         self.load_mm_weight(
             ctype=compute_dtype,

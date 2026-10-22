@@ -2,6 +2,7 @@
 #include "rtp_llm/models_py/bindings/common/RtpNorm.h"
 #include "rtp_llm/models_py/bindings/common/kernels/activation_kernels.h"
 #include <cstdint>
+#include <c10/core/DeviceGuard.h>
 #include <iostream>
 #include <type_traits>
 #include <vector>
@@ -18,7 +19,8 @@ void fused_bias_add(at::Tensor& input, at::Tensor& bias) {
     CHECK_EQ(input.device(), bias.device());
     CHECK_EQ(input.scalar_type(), bias.scalar_type());
     CHECK_EQ(input.size(1), bias.numel());
-    StreamType stream = GET_CURRENT_STREAM();
+    const c10::DeviceGuard device_guard(input.device());
+    StreamType             stream = GET_CURRENT_STREAM();
     DISPATCH_PYTORCH_DTYPE_TO_CTYPE_FP16(input.scalar_type(), c_type, [&] {
         invokeAddBias(static_cast<c_type*>(input.data_ptr()),
                       static_cast<c_type*>(bias.data_ptr()),
@@ -38,7 +40,8 @@ void fused_bias_gelu(at::Tensor& input, at::Tensor& bias) {
     CHECK_EQ(input.device(), bias.device());
     CHECK_EQ(input.scalar_type(), bias.scalar_type());
     CHECK_EQ(input.size(1), bias.numel());
-    StreamType stream = GET_CURRENT_STREAM();
+    const c10::DeviceGuard device_guard(input.device());
+    StreamType             stream = GET_CURRENT_STREAM();
     DISPATCH_PYTORCH_DTYPE_TO_CTYPE_FP16(input.scalar_type(), c_type, [&] {
         invokeAddBiasGelu(static_cast<c_type*>(input.data_ptr()),
                           static_cast<c_type*>(bias.data_ptr()),
@@ -49,8 +52,7 @@ void fused_bias_gelu(at::Tensor& input, at::Tensor& bias) {
     });
 }
 
-void fused_bias_gelu_quant_fp8(
-    at::Tensor& input, at::Tensor& bias, at::Tensor& output, at::Tensor& scales, bool add_bias) {
+void fused_bias_gelu_quant_fp8(at::Tensor& input, at::Tensor& bias, at::Tensor& output, at::Tensor& scales) {
 #if USING_CUDA
     CHECK_INPUT(input);
     CHECK_INPUT(bias);
@@ -70,39 +72,22 @@ void fused_bias_gelu_quant_fp8(
     TORCH_CHECK(input.size(1) > 0, "hidden size must be positive");
     TORCH_CHECK(input.size(1) % 128 == 0, "hidden size must be divisible by 128");
     TORCH_CHECK(output.scalar_type() == at::ScalarType::Float8_e4m3fn, "output must be float8_e4m3fn");
-    TORCH_CHECK(scales.scalar_type() == at::ScalarType::Int || scales.scalar_type() == at::ScalarType::Float,
-                "scales must be int32 UE8M0 packs or float32 CUTLASS scales");
+    TORCH_CHECK(scales.scalar_type() == at::ScalarType::Int, "scales must be int32 UE8M0 packs");
     TORCH_CHECK(scales.stride(0) == 1, "scales must use column-major TMA layout");
+    TORCH_CHECK(scales.stride(1) >= input.size(0), "scale columns must not overlap");
     TORCH_CHECK(scales.size(0) == input.size(0), "scale row count mismatch");
-    if (scales.scalar_type() == at::ScalarType::Int) {
-        TORCH_CHECK(add_bias, "add_bias=false is only supported with float32 CUTLASS scales");
-        TORCH_CHECK(scales.size(1) * 4 >= input.size(1) / 128, "packed scale column count mismatch");
-    } else {
-        TORCH_CHECK(scales.size(1) == input.size(1) / 128, "float scale column count mismatch");
-        TORCH_CHECK(scales.stride(1) == input.size(0), "float scales must have stride (1, M)");
-    }
-    StreamType stream = GET_CURRENT_STREAM();
+    TORCH_CHECK(scales.size(1) * 4 >= input.size(1) / 128, "packed scale column count mismatch");
+    const c10::DeviceGuard device_guard(input.device());
+    StreamType             stream = GET_CURRENT_STREAM();
     DISPATCH_PYTORCH_DTYPE_TO_CTYPE_FP16(input.scalar_type(), c_type, [&] {
-        if (scales.scalar_type() == at::ScalarType::Int) {
-            invokeAddBiasGeluQuantFp8(static_cast<c_type*>(input.data_ptr()),
-                                      static_cast<c_type*>(bias.data_ptr()),
-                                      output.data_ptr(),
-                                      static_cast<uint32_t*>(scales.data_ptr()),
-                                      input.size(0),
-                                      input.size(1),
-                                      scales.stride(1),
-                                      stream);
-        } else {
-            invokeAddBiasGeluQuantFp8FloatScale(static_cast<c_type*>(input.data_ptr()),
-                                                static_cast<c_type*>(bias.data_ptr()),
-                                                output.data_ptr(),
-                                                static_cast<float*>(scales.data_ptr()),
-                                                input.size(0),
-                                                input.size(1),
-                                                scales.stride(1),
-                                                add_bias,
-                                                stream);
-        }
+        invokeAddBiasGeluQuantFp8(static_cast<c_type*>(input.data_ptr()),
+                                  static_cast<c_type*>(bias.data_ptr()),
+                                  output.data_ptr(),
+                                  static_cast<uint32_t*>(scales.data_ptr()),
+                                  input.size(0),
+                                  input.size(1),
+                                  scales.stride(1),
+                                  stream);
         return true;
     });
 #else
@@ -236,6 +221,7 @@ void fused_add_layernorm_quant_fp8(at::Tensor& input,
     TORCH_CHECK(output.scalar_type() == at::ScalarType::Float8_e4m3fn, "output must be float8_e4m3fn");
     TORCH_CHECK(scales.scalar_type() == at::ScalarType::Int, "scales must be int32 UE8M0 packs");
     TORCH_CHECK(scales.stride(0) == 1, "scales must use column-major TMA layout");
+    TORCH_CHECK(scales.stride(1) >= input.size(0), "scale columns must not overlap");
     TORCH_CHECK(scales.size(0) == input.size(0), "scale row count mismatch");
     TORCH_CHECK(scales.size(1) * 4 >= input.size(1) / 128, "scale column count mismatch");
     if (bias.numel() != 0) {
@@ -248,7 +234,8 @@ void fused_add_layernorm_quant_fp8(at::Tensor& input,
         return;
     }
 
-    StreamType stream = GET_CURRENT_STREAM();
+    const c10::DeviceGuard device_guard(input.device());
+    StreamType             stream = GET_CURRENT_STREAM();
     DISPATCH_PYTORCH_DTYPE_TO_CTYPE_FP16(input.scalar_type(), c_type, [&] {
         const c_type* bias_ptr = bias.numel() == 0 ? nullptr : static_cast<const c_type*>(bias.data_ptr());
         invokeGeneralAddBiasResidualLayerNormQuantFp8(static_cast<c_type*>(residual.data_ptr()),

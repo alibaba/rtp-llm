@@ -35,7 +35,6 @@ class CudaFp8VllmBlockwiseLinearNumericalTest(unittest.TestCase):
     #   M<=64 or M%4!=0 -> swap_ab
     #   64<M<=256 + M%4==0 -> pingpong
     #   M>256 + M%4==0 -> default
-    test_batch_sizes = [1, 7, 31, 32, 64, 65, 128, 256, 257, 512]
 
     @classmethod
     def setUpClass(cls):
@@ -78,7 +77,10 @@ class CudaFp8VllmBlockwiseLinearNumericalTest(unittest.TestCase):
             quant_config=self.quant_config,
         )
         x = torch.randn(M, K, dtype=torch.bfloat16, device=self.device) * 0.1
-        out = linear.forward_with_bias_gelu(x) if use_gelu else linear(x)
+        with mock.patch.object(linear, "_gemm_op", wraps=linear._gemm_op) as gemm:
+            out = linear.forward_with_bias_gelu(x) if use_gelu else linear(x)
+        gemm.assert_called_once()
+        self.assertEqual(gemm.call_args.args[-1], use_gelu)
         ref = x.float() @ self.weight_bf16.float().t()
         if bias is not None:
             ref = ref + bias.float()
@@ -96,7 +98,7 @@ class CudaFp8VllmBlockwiseLinearNumericalTest(unittest.TestCase):
         self.assertFalse(torch.isnan(out).any())
         self.assertFalse(torch.isinf(out).any())
 
-    def test_square_blocks_all_dispatch_tiers(self):
+    def test_wrapper_all_dispatch_tiers(self):
         for K, N in self.test_shapes:
             for M in [1, 64, 65, 128, 256, 257, 512]:
                 for with_bias, use_gelu in [
@@ -107,6 +109,16 @@ class CudaFp8VllmBlockwiseLinearNumericalTest(unittest.TestCase):
                 ]:
                     with self.subTest(M=M, K=K, N=N, bias=with_bias, gelu=use_gelu):
                         self._run(M, K, N, with_bias, use_gelu)
+
+    def test_wrapper_small_row_boundaries(self):
+        # Only cases not already exercised by the dispatch-tier matrix.
+        for K, N in self.test_shapes[:2]:
+            for M in (7, 31, 32):
+                with self.subTest(M=M, K=K, N=N, bias=False):
+                    self._run(M, K, N, with_bias=False)
+        for K, N in (self.test_shapes[0], self.test_shapes[2]):
+            with self.subTest(M=33, K=K, N=N, bias=True):
+                self._run(33, K, N, with_bias=True)
 
     def test_large_inputs_preserve_legacy_quantization(self):
         K, N = 512, 128
@@ -121,34 +133,56 @@ class CudaFp8VllmBlockwiseLinearNumericalTest(unittest.TestCase):
             with self.subTest(M=M):
                 x = torch.randn(M, K, dtype=torch.bfloat16, device=self.device)
                 q, scales = sgl_per_token_group_quant_fp8(
-                    x, 128, eps=1e-4, column_major_scales=True,
+                    x,
+                    128,
+                    eps=1e-4,
+                    column_major_scales=True,
                     quant_kernel="legacy",
                 )
                 expected = torch.empty(M, N, dtype=torch.bfloat16, device=self.device)
                 linear._gemm_op(
-                    expected, q, linear.weight, scales, linear.weight_scales,
-                    None, False,
+                    expected,
+                    q,
+                    linear.weight,
+                    scales,
+                    linear.weight_scales,
+                    None,
+                    False,
                 )
                 for mode in ("auto", "v2"):
                     with mock.patch.dict(os.environ, {"DSV4_FP8_QUANT_KERNEL": mode}):
                         torch.testing.assert_close(linear(x), expected, rtol=0, atol=0)
 
-    def test_no_bias_all_dispatch_tiers(self):
-        for K, N in self.test_shapes[:2]:
-            for M in self.test_batch_sizes:
-                with self.subTest(M=M, K=K, N=N):
-                    self._run(M, K=K, N=N, with_bias=False)
-
-    def test_with_fused_bias(self):
-        for K, N in (self.test_shapes[0], self.test_shapes[2]):
-            for M in [1, 33, 128, 257, 512]:
-                with self.subTest(M=M, K=K, N=N):
-                    self._run(M, K=K, N=N, with_bias=True)
-
-    def test_with_fused_bias_gelu(self):
-        for M in [1, 65, 257]:
-            with self.subTest(M=M):
-                self._run(M, K=256, N=256, with_bias=True, use_gelu=True)
+    @torch.inference_mode()
+    def test_direct_gemm_exact_gelu_epilogue_with_and_without_bias(self):
+        # Isolate the exact erf epilogue from activation quantization by
+        # comparing the binding with a dequantized FP32 reference.
+        op = _get_cutlass_scaled_mm_blockwise_sm120_fp8()
+        self.assertIsNotNone(op)
+        for rows in (1, 65, 128, 512):
+            for with_bias in (False, True):
+                with self.subTest(rows=rows, bias=with_bias):
+                    out, a, b, a_scale, b_scale = make_blockwise_op_inputs(
+                        rows, 256, 256
+                    )
+                    bias = (
+                        torch.randn(256, device="cuda", dtype=torch.bfloat16) * 0.1
+                        if with_bias
+                        else None
+                    )
+                    op(out, a, b, a_scale, b_scale, bias, True)
+                    a_ref = a.float() * a_scale.repeat_interleave(128, dim=1)
+                    b_ref = b.float() * b_scale.repeat_interleave(
+                        128, dim=0
+                    ).repeat_interleave(128, dim=1)
+                    preactivation = a_ref @ b_ref.T
+                    if bias is not None:
+                        preactivation += bias.float()
+                    expected = F.gelu(preactivation, approximate="none").to(
+                        torch.bfloat16
+                    )
+                    self.assertTrue(torch.isfinite(out).all())
+                    self.assertLess(calc_diff(out, expected), 0.0011)
 
     def test_gemm_gelu_output_is_quantized_separately(self):
         M, K, N = 17, 256, 256
