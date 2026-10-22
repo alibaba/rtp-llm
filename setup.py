@@ -1380,8 +1380,8 @@ def generate_pyi_stubs(project_root: Path) -> None:
                     f"{preload}"
                     f"sys.argv = ['pybind11_stubgen', {module!r}, '-o', {str(ops_dir)!r}]; "
                     "runpy.run_module('pybind11_stubgen', run_name='__main__'); "
-                    "from _build.stubgen import validate_generated_stub; "
-                    f"validate_generated_stub({str(ops_dir / (module + '.pyi'))!r}, {module!r})",
+                    "from _build.stubgen import validate_generated_module; "
+                    f"validate_generated_module({str(ops_dir)!r}, {module!r})",
                 ],
                 cwd=str(project_root),
                 env=stubgen_env,

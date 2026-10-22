@@ -1,5 +1,6 @@
 import ast
 import importlib.util
+import inspect
 import os
 import re
 import sys
@@ -421,6 +422,19 @@ class BuildPackagingContractTest(TestCase):
             setup_module._pybind_stubgen_preload("libth_transformer_config"),
             "",
         )
+
+    def test_stubgen_validates_complete_module_layout_after_real_cli(self):
+        setup_module = _load_setup_module()
+        source = inspect.getsource(setup_module.generate_pyi_stubs)
+        self.assertIn(
+            "runpy.run_module('pybind11_stubgen', run_name='__main__')", source
+        )
+        self.assertIn("from _build.stubgen import validate_generated_module", source)
+        self.assertIn("validate_generated_module({str(ops_dir)!r}, {module!r})", source)
+        self.assertLess(
+            source.index("runpy.run_module"), source.index("validate_generated_module")
+        )
+        self.assertIn("timeout=60", source)
 
     def _bazel_cmd_prefix(self, setup_module, scope=None):
         env = {"XDG_CACHE_HOME": "/tmp/rtp-llm-test-cache"}
