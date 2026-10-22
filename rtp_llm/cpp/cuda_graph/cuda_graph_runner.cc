@@ -545,7 +545,13 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     // async strided D2H copy that the pre-callPrepareCudaGraph synchronize below
     // waits for; host sources keep main's synchronous row-by-row memcpy.
     bool pending_host_mirror_d2h = false;
-    auto stridedCopyHost         = [&pending_host_mirror_d2h](const torch::Tensor& src, torch::Tensor& dst) {
+    // Records the stream position right after each async mirror D2H enqueue.
+    // The consumer wait below synchronizes this event instead of the whole
+    // stream, so it never blocks on kernels enqueued after the copies (fills,
+    // dummy-row installs) that do not feed the host mirrors.
+    torch::Event host_mirror_copy_event = cuda_graph::makeGraphEvent();
+    auto stridedCopyHost = [&pending_host_mirror_d2h, &host_mirror_copy_event](
+        const torch::Tensor& src, torch::Tensor& dst) {
         if (!dst.defined() || dst.is_cuda()) {
             return;
         }
@@ -584,6 +590,7 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                     .narrow(1, 0, geometry.cols)
                     .copy_(src.narrow(0, 0, geometry.rows).narrow(1, 0, geometry.cols), /*non_blocking=*/true);
             }
+            host_mirror_copy_event.record(cuda_graph::graphGetCurrentStream());
             pending_host_mirror_d2h = true;
             return;
         }
@@ -861,9 +868,11 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
         // mirrors synchronously on the CPU (host fill_params / fa2 replan), so the
         // copies must land first. Main's host pipeline used synchronous host
         // memcpy here and never observed stale values.
-        auto copyToHostMirror = [&pending_host_mirror_d2h](const torch::Tensor& src, torch::Tensor& dst, size_t size) {
+        auto copyToHostMirror = [&pending_host_mirror_d2h, &host_mirror_copy_event](
+                                    const torch::Tensor& src, torch::Tensor& dst, size_t size) {
             optimizedCopyAsync(src, dst, size);
             if (src.defined() && src.numel() > 0 && src.is_cuda() && dst.defined() && !dst.is_cuda()) {
+                host_mirror_copy_event.record(cuda_graph::graphGetCurrentStream());
                 pending_host_mirror_d2h = true;
             }
         };
@@ -954,7 +963,7 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                     const bool live_input_lengths_on_cuda = inputs.attention_inputs.input_lengths.is_cuda();
                     if (live_input_lengths_on_cuda && pending_host_mirror_d2h) {
                         RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareAttentionInputs(wait_input_lengths_d2h)");
-                        cuda_graph::graphGetCurrentStream().synchronize();
+                        host_mirror_copy_event.synchronize();
                         pending_host_mirror_d2h = false;
                     }
                     const auto& input_lengths_host = live_input_lengths_on_cuda ?
@@ -1093,9 +1102,11 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
         if (pending_host_mirror_d2h) {
             // Wait for the async D2H metadata copies above so the CPU-side
             // fill/plan paths inside prepare_cuda_graph read this step's
-            // values instead of the previous step's.
+            // values instead of the previous step's. The event was recorded
+            // at the last mirror copy enqueue, so this never blocks on the
+            // fill kernels enqueued after those copies.
             RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareAttentionInputs(wait_host_mirror_d2h)");
-            cuda_graph::graphGetCurrentStream().synchronize();
+            host_mirror_copy_event.synchronize();
         }
         py::gil_scoped_acquire gil;
         callPrepareCudaGraph(attn_pyobj, py_model_inputs_);
