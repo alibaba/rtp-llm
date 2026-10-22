@@ -265,6 +265,41 @@ class ChunkedMoeTest(unittest.TestCase):
             )
         self.assertEqual(layer._moe.token_chunks, [])
 
+    def test_planned_decode_emits_empty_chunks_for_collective_alignment(self):
+        layer = _fake_layer(capacity=4)
+        layer.strategy_name = "fp8_per_block_pure_dp"
+
+        def set_remote_max(token_count, **_):
+            token_count[0] = 9
+            token_count[1] = 3
+
+        with (
+            mock.patch(
+                "rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer.dist.is_available",
+                return_value=True,
+            ),
+            mock.patch(
+                "rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer.dist.is_initialized",
+                return_value=True,
+            ),
+            mock.patch(
+                "rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer.dist.all_reduce",
+                side_effect=set_remote_max,
+            ) as all_reduce,
+        ):
+            with synchronized_moe_chunk_plan(
+                [SimpleNamespace(ffn=layer)], 3, torch.device("cpu")
+            ):
+                output = layer(
+                    torch.ones(3, 4),
+                    torch.arange(3),
+                    is_decode_forward=True,
+                )
+
+        all_reduce.assert_called_once()
+        self.assertEqual(layer._moe.token_chunks, [3, 0, 0])
+        self.assertTrue(torch.equal(output, torch.full((3, 4), 3.0)))
+
     def test_input_ids_are_optional(self):
         layer = _fake_layer(dim=3, capacity=5)
         x = torch.arange(7 * 3, dtype=torch.float32).view(7, 3)
@@ -302,7 +337,8 @@ class ChunkedMoeTest(unittest.TestCase):
         layers = [SimpleNamespace(ffn=first), SimpleNamespace(ffn=second)]
 
         def set_remote_max(token_count, **_):
-            token_count.fill_(9)
+            token_count[0] = 9
+            token_count[1] = 3
 
         with (
             mock.patch(
@@ -338,7 +374,8 @@ class ChunkedMoeTest(unittest.TestCase):
                 layer.strategy_name = strategy
 
                 def set_remote_max(token_count, **_):
-                    token_count.fill_(12)
+                    token_count[0] = 12
+                    token_count[1] = 3
 
                 with (
                     mock.patch(
@@ -380,7 +417,8 @@ class ChunkedMoeTest(unittest.TestCase):
         layers = [SimpleNamespace(ffn=mega), SimpleNamespace(ffn=local)]
 
         def set_remote_max(token_count, **_):
-            token_count.fill_(9)
+            token_count[0] = 9
+            token_count[1] = 2
 
         with (
             mock.patch(

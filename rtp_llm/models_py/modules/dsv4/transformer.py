@@ -568,11 +568,14 @@ class V4Transformer(nn.Module):
         if begin_decode is not None:
             begin_decode(attn_metadata)
         layer_forward_range = _profiler.make_layer_forward_range()
-        for layer_idx, layer in enumerate(self.layers):
-            with layer_forward_range(layer_idx):
-                h = layer.forward_decode(
-                    h, attn_metadata, input_ids_2d, kv_cache=kv_cache
-                )
+        with synchronized_moe_chunk_plan(
+            self.layers, input_ids_2d.numel(), input_ids_2d.device
+        ):
+            for layer_idx, layer in enumerate(self.layers):
+                with layer_forward_range(layer_idx):
+                    h = layer.forward_decode(
+                        h, attn_metadata, input_ids_2d, kv_cache=kv_cache
+                    )
         h = self._hc_head_reduce(h)  # [B, q_len, dim]
         # Framework RMSNorm wants 2D — flatten to [T_total, dim] and
         # return that directly (the next reshape would no-op anyway).
