@@ -16,6 +16,15 @@
 namespace rtp_llm::kvcm {
 namespace {
 
+TEST(KVCMInternalTest, Dsv41LocationSpecsUseCompactNamesPerTpRank) {
+    EXPECT_EQ(genLocationSpecName(0, "Fglobal_kv_1"), "F0_TP0");
+    EXPECT_EQ(genLocationSpecName(3, "Fglobal_kv_2"), "F1_TP3");
+    EXPECT_EQ(genLocationSpecName(2, "Findexer_kv"), "F2_TP2");
+    EXPECT_EQ(genLocationSpecName(1, "Lcsa_state"), "S3_TP1");
+    EXPECT_EQ(genLocationSpecName(0, "Lswa_kv"), "S4_TP0");
+    EXPECT_EQ(genLocationSpecName(0, "Fdefault"), "tp0_Fdefault");
+}
+
 GroupBase makeGroup(std::string tag, int layer_id, CacheGroupType type, size_t kv_block_stride_bytes = 16) {
     (void)layer_id;
     auto base_spec                       = test::makeResolvedMhaSpec(DataType::TYPE_UINT8, 1, 1, 8, tag);
