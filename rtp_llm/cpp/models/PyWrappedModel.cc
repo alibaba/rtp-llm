@@ -1089,6 +1089,15 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         py_model_inputs.capture_hidden_states  = capture_hidden_states;
         py_model_inputs.need_all_logits        = inputs.need_all_logits;
         py_model_inputs.need_all_hidden_states = inputs.need_all_hidden_states;
+        // Plugin-owned cache planes are not part of RTP's KV block copy. Give
+        // plugins the same tagged copy mapping before either eager forward or
+        // graph replay, so their side state follows a relocated prefix block.
+        if (inputs.kv_cache_update_mapping.defined() && inputs.kv_cache_update_mapping.numel() > 0) {
+            py::gil_scoped_acquire gil;
+            if (py::hasattr(py_model_, "copy_plugin_cache_blocks")) {
+                py_model_.attr("copy_plugin_cache_blocks")(inputs.kv_cache_update_mapping, inputs.kv_cache_group_tags);
+            }
+        }
         if (inputs.engram_token_windows.defined()) {
             buffer_holder_.hold_host(inputs.engram_token_windows);
             py_model_inputs.engram_token_windows = inputs.engram_token_windows.to(torch::kCUDA, /*non_blocking=*/true);
