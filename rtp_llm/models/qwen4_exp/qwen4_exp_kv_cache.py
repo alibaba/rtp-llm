@@ -11,8 +11,8 @@ not otherwise retained, so it must be cached.
 The state rides on the generic ``OPAQUE_STATE`` region (``FixedStateCacheSpec``
 in C++), exactly as DeepSeek-V4's indexer/CSA states do in ``dsv4_kv_cache.py``;
 no new C++ spec type is needed. Emitting a multi-region per-layer desc list also
-follows the DSv4 precedent and requires
-``hybrid_attention_config.enable_independent_kv_cache_pools``.
+follows the DSv4 precedent. Each region gets its own pool through the spec
+descriptors.
 
 The n-gram hash additionally needs the previous ``ngram_size - 1`` token ids,
 which cannot be recovered at decode: ``PyModelInputs.input_ids`` then carries
