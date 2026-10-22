@@ -4,6 +4,9 @@ fetch:downloader --experimental_remote_downloader=grpc://com.taobao.search.bazel
 
 build --spawn_strategy=local # avoid nvcc conflicts
 build --action_env PYTHON_BIN_PATH="/opt/conda310/bin/python3"
+# Repository discovery inherits caller overrides without replacing Native venvs.
+build --repo_env=PYTHON_BIN_PATH
+build --repo_env=VIRTUAL_ENV
 build --cxxopt="-std=c++17" --copt="-DGTEST_USE_OWN_TR1_TUPLE=0" --copt="-DEIGEN_MAX_CPP_VER=11"
 build -c opt
 build --copt -O2

@@ -294,16 +294,31 @@ read_release_version = repository_rule(
 def _torch_repo_impl(ctx):
     torch_path = ctx.os.environ.get("TORCH_ROOT")
     if not torch_path:
-        # Fallback: auto-detect the installed torch path via python3 so a direct
-        # `bazel build` works even without setup.py's generated .torch_bazelrc.
-        result = ctx.execute(["python3", "-c", "import torch; print(torch.__path__[0])"])
+        # Explicit environment and active Native venvs take priority over the
+        # default image interpreter configured by .bazelrc.
+        python_bin = ctx.os.environ.get("PYTHON_BIN_PATH")
+        if not python_bin:
+            virtual_env = ctx.os.environ.get("VIRTUAL_ENV")
+            if virtual_env:
+                python_bin = virtual_env + "/bin/python3"
+        if not python_bin:
+            active_python = ctx.which("python3")
+            if active_python and ctx.path(str(active_python.dirname.dirname) + "/pyvenv.cfg").exists:
+                python_bin = str(active_python)
+        if not python_bin:
+            python_bin = "/opt/conda310/bin/python3"
+            if not ctx.path(python_bin).exists:
+                python_bin = "python3"
+        result = ctx.execute([python_bin, "-c", "import torch; print(torch.__path__[0])"])
         if result.return_code == 0:
             torch_path = result.stdout.strip()
-    if not torch_path:
-        fail("TORCH_ROOT environment variable is not set and torch could not be " +
-             "auto-detected via python3. " +
-             "Run 'pip install --compile -e .' first (setup.py generates .torch_bazelrc), " +
-             "or set TORCH_ROOT manually to your torch installation path.")
+        if not torch_path:
+            fail("TORCH_ROOT environment variable is not set and torch could not be " +
+                 "auto-detected via " + python_bin + ". " +
+                 "Run 'pip install --compile -e .' first (setup.py generates .torch_bazelrc), " +
+                 "or set TORCH_ROOT manually to your torch installation path.\n" +
+                 "Interpreter exit code: " + str(result.return_code) +
+                 "\nstdout:\n" + result.stdout + "\nstderr:\n" + result.stderr)
 
     if not ctx.path(torch_path).exists:
         fail("TORCH_ROOT path does not exist: " + torch_path)
@@ -323,5 +338,5 @@ torch_local_repository = repository_rule(
     attrs = {
         "build_file": attr.label(mandatory = True, allow_single_file = True),
     },
-    environ = ["TORCH_ROOT"],
+    environ = ["TORCH_ROOT", "PYTHON_BIN_PATH", "VIRTUAL_ENV", "PATH"],
 )
