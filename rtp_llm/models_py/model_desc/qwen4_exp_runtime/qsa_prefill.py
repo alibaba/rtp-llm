@@ -204,6 +204,21 @@ def write_prefill_indexer_cache(
                 page_size=kv_tokens_per_block,
                 norm_eps=float(indexer.norm_eps),
                 emit_dense_keys=True,
+                host_cu_seqlens=(
+                    getattr(self.main_inputs, "cu_seqlens", None)
+                    if not self.main_inputs.is_cuda_graph
+                    else None
+                ),
+                host_kv_table=(
+                    getattr(self.indexer_kv_inputs, "kv_cache_kernel_block_id", None)
+                    if not self.main_inputs.is_cuda_graph
+                    else None
+                ),
+                host_state_table=(
+                    getattr(self.indexer_state_inputs, "kv_cache_block_id", None)
+                    if not self.main_inputs.is_cuda_graph
+                    else None
+                ),
             )
         except ValueError:
             # Preserve the runtime's CU diagnostic; error-only checking

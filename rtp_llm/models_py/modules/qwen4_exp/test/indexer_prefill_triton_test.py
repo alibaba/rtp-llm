@@ -98,6 +98,28 @@ class IndexerPrefillTritonTest(unittest.TestCase):
             torch.testing.assert_close(kv, before[0], atol=0, rtol=0)
             torch.testing.assert_close(state, before[1], atol=0, rtol=0)
 
+    def test_runtime_uses_cpp_host_metadata_mirrors(self):
+        context, raw, indexer, rope, _, _ = self.runtime_inputs([129, 7])
+        context.main_inputs.cu_seqlens = context.main_inputs.cu_seqlens_device.cpu()
+        context.indexer_kv_inputs.kv_cache_kernel_block_id = (
+            context.indexer_kv_inputs.kv_cache_kernel_block_id_device.cpu()
+        )
+        context.indexer_state_inputs.kv_cache_block_id = (
+            context.indexer_state_inputs.kv_cache_block_id_device.cpu()
+        )
+        from rtp_llm.models_py.modules.qwen4_exp.qsa import indexer_prefill_triton
+
+        with patch.object(
+            indexer_prefill_triton,
+            "_check_host_mirrors",
+            wraps=indexer_prefill_triton._check_host_mirrors,
+        ) as check:
+            context.write_prefill_indexer_cache(
+                raw, indexer=indexer, rope_config=rope
+            )
+        self.assertEqual(check.call_count, 1)
+        self.assertIs(check.call_args.args[1], context.main_inputs.cu_seqlens)
+
     def test_runtime_metadata_fusion_keeps_all_write_preflights(self):
         for case in (
             "cu",
@@ -207,6 +229,28 @@ class IndexerPrefillTritonTest(unittest.TestCase):
 
     def fused(self, args):
         return write_zero_prefix_prefill(*args, page_size=128, norm_eps=1e-6)
+
+    def test_cpu_metadata_mirrors_avoid_scalar_gpu_readback(self):
+        args = self.inputs([129, 7])
+        host = dict(
+            host_cu_seqlens=args[1].cpu(),
+            host_kv_table=args[7].cpu(),
+            host_state_table=args[9].cpu(),
+        )
+        with patch.object(torch.Tensor, "item", side_effect=AssertionError("GPU readback")):
+            result = write_zero_prefix_prefill(
+                *args, page_size=128, norm_eps=1e-6, **host
+            )
+        self.assertIsNotNone(result)
+        restore_indexer_cache(result["undo"])
+
+        host["host_state_table"][0, 0] = 0
+        with self.assertRaises(ValueError):
+            write_zero_prefix_prefill(*args, page_size=128, norm_eps=1e-6, **host)
+        host["host_state_table"][0, 0] = host["host_state_table"][1, 0]
+        self.assertIsNone(
+            write_zero_prefix_prefill(*args, page_size=128, norm_eps=1e-6, **host)
+        )
 
     def test_host_staging_with_cuda_as_default_device(self):
         args = self.inputs([129, 17])
